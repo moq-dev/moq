@@ -20,6 +20,7 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Catalog track identity](/quest/m2/catalog-tracks.md) - compare immutable track definitions with explicit catalog-to-group binding
 - [Archive recovery listing](/quest/m2/archive-recovery-listing.md) - a resumed DVR lists what changed since its checkpoint, not every stored group
 - [Archive backward timestamps](/quest/m2/archive-backward-timestamps.md) - a resumed recording refuses a track whose timestamps go backward
+- [IETF drain before close](/quest/m2/ietf-drain-before-close.md) - moq-transport sessions deliver finished tracks before a graceful close, as moq-lite does
 - [moq play drain tail](/quest/m2/play-drain-tail.md) - retired renditions and finite tracks play their last 10 ms of audio
 - [Relay io_uring packages](/quest/m2/relay-io-uring-package.md) - Linux relay packages ship io_uring once the ring is on par with tokio
 - [Mobile ownership](/quest/m2/mobile-ownership.md) - decide whether Rust or platform code owns mobile capture, codecs, and rendering
@@ -31,6 +32,7 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Audio loss recovery](/quest/m2/audio-loss-recovery.md) - prove a useful Opus recovery policy before exposing another option
 - [Opus implementation](/quest/m2/audio-opus-backend.md) - compare current codec quality, CPU, and optional build costs
 - [Latency ledger](/quest/m2/latency-ledger.md) - a session reports where its end-to-end audio delay went, stage by stage
+- [JS LOC duration marker](/quest/m2/js-loc-duration-marker.md) - `@moq/loc`'s producer ends each video group with the empty duration frame, as moq-mux does
 - [JS discontinuity](/quest/m2/js-discontinuity.md) - on dev, JS `discontinuity()` without an end writes no cadence-estimated end, like Rust
 - [Synced data playback](/quest/m2/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
 - [Media Foundation decode](/quest/m2/audio-decode-mediafoundation.md) - Windows decodes HE-AAC, multichannel AAC, and what else the MFTs offer
@@ -73,7 +75,10 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Send buffer pools](/quest/m2/quic-buffer-pool.md) - whether pooled send buffers beat Bytes in the stream send path
 - [AF_XDP UDP path](/quest/m2/af-xdp.md) - the kernel-bypass verdict on today's virtio hosts that gates DPDK
 - [GOP overhead](/quest/m2/gop-overhead.md) - price the I-frames a short GOP pays for, deciding whether a long GOP plus a keyframe request is worth designing
-- [#1838](/quest/m2/1838-tr-101-290-monitoring-requirements-broadcast-contribution.md) - plan TR 101 290 stream-health monitoring into implementation quests
+- [Per-program SI](/quest/m2/ts-program-si.md) - a selected TS program's broadcast carries only its own service's SDT and EIT
+- [TS import health](/quest/m2/ts-import-health.md) - `moq import ts` counts the TR 101 290 errors of the feed it receives, PCR and PTS graded on its own values
+- [TS export liveness](/quest/m2/ts-export-liveness.md) - `moq export ts` reports each elementary stream's access units and quiet time, catching a per-track stall
+- [TS health stats](/quest/m2/ts-health-stats.md) - the TS counters ride the stats plumbing beside the media counters
 - [Teleoperation](/quest/m2/teleop/README.md) - MoQ carries robot video down and control up on one session as a library capability
 - [SIP media stack](/quest/m2/sip-stack.md) - terminate one inbound SIP audio call leg and expose it as Opus frames
 - [Carrier voice](/quest/m2/carrier-voice/README.md) - determine whether MoQ should be the call fabric for programmable carrier voice
@@ -82,9 +87,11 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - run exact source snapshots on accessible Linux and device hosts with retrievable debug evidence
 - [Media QA on other engines](/quest/m2/browser-media-qa-engines.md) - the media harness measures a Firefox or WebKit player over the fallback and names what each engine lacks
 - [Firefox 155 WebTransport](/quest/m2/firefox-155-webtransport.md) - Firefox negotiates the version by subprotocol, and the other new WebTransport features stay unused on purpose
-- [Windows capture parity](/quest/m2/capture-windows.md) - system audio and screen cursor capture with a settled app-capture policy
+- [Windows.Graphics.Capture](/quest/m2/capture-wgc.md) - one WGC backend for display and window capture with the cursor, replacing Desktop Duplication and GDI
+- [Windows capture parity](/quest/m2/capture-windows.md) - system audio and a settled app-capture policy
 - [Linux capture parity](/quest/m2/capture-linux.md) - Wayland window/system-audio capture with explicit display-selection and app-capture limits
 - [Plan capture ergonomics](/quest/m2/capture-ergonomics.md) - scope independent crop and audio mixing quests
 - [Audio capture time](/quest/m2/audio-capture-time.md) - native audio stamps a buffer's capture instant, not when the driver reads it
 - [X11 capture transport](/quest/m2/x11-capture-shm.md) - move X11 capture to shared memory and RandR events instead of a per-frame socket copy
-- [Capture frame buffers](/quest/m2/capture-frame-buffers.md) - stop rebuilding a full-frame buffer every tick in the X11 and Windows backends
+- [Capture frame buffers](/quest/m2/capture-frame-buffers.md) - stop rebuilding a full-frame buffer every tick in the X11 backend
+- [Demo serve-hls renditions](/quest/m2/serve-hls-renditions.md) - `just pub serve-hls` serves 720p and 144p instead of two 256-wide copies

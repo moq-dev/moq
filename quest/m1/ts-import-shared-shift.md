@@ -47,5 +47,4 @@ Guidance:
 
 ## Related
 
-- [#3489](/quest/m1/3489-ts-import-stream-liveness.md) - per-PID liveness in the same importer; touches `Stream` but not the shift
 - [Remove live()](/quest/m1/remove-live.md) - deletes the restart anchor; a wrap shift stays input-derived

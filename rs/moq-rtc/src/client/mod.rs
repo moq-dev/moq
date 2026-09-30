@@ -87,3 +87,32 @@ impl Client {
 		whip::dial(self, url, origin, path).await
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn http_error_redacts_url() {
+		// A freed port refuses the connection, so reqwest fails with the dialed URL attached.
+		let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+		let address = listener.local_addr().expect("local address");
+		drop(listener);
+
+		let origin = moq_tokio::origin::spawn();
+		let broadcast = origin.create_broadcast("test").expect("create broadcast");
+		let url = format!("http://user:pass@{address}/whep/test?jwt=secret")
+			.parse()
+			.expect("WHEP URL");
+		let err = Client::new(Config::default())
+			.subscribe(url, broadcast)
+			.await
+			.expect_err("dial a closed port");
+
+		assert!(matches!(err, crate::Error::Http(_)), "unexpected error: {err}");
+		let printed = format!("{err} {err:?}");
+		for secret in ["jwt", "secret", "user:pass"] {
+			assert!(!printed.contains(secret), "error leaked {secret}: {printed}");
+		}
+	}
+}

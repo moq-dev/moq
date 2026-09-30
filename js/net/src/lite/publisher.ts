@@ -2,7 +2,7 @@ import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import type * as broadcast from "../broadcast.ts";
 import { error, NotFound, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
-import { type Hop, type Route, routesEqual } from "../hop.ts";
+import { Cost, type Hop, type Route, routesEqual } from "../hop.ts";
 import { hiddenBelow, hooks, presented } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import type * as Path from "../path.ts";
@@ -32,6 +32,7 @@ import {
 	hasAnnounceOk,
 	hasDatagrams,
 	hasProbeRtt,
+	hasRouteCost,
 	hasStreamCount,
 	resolvesStart,
 	Version,
@@ -400,6 +401,10 @@ export class Publisher {
 			return [...route.hops, this.hop];
 		};
 
+		// What the peer decodes for a route: pre-lite-06 wires carry no cost, so a re-price
+		// there must not restart.
+		const onWire = (route: Route): Route => (hasRouteCost(this.version) ? route : { ...route, cost: Cost.zero });
+
 		const announce = async (suffix: Path.Valid, route: Route) => {
 			console.debug(`announce: broadcast=${suffix} active=true`);
 			if (hasAnnounceId(this.version)) announceIds.set(suffix, nextAnnounceId++);
@@ -518,7 +523,7 @@ export class Publisher {
 					const prev = active.get(suffix);
 					if (!prev || prev.identity !== snap.identity) {
 						await announce(suffix, snap.route);
-					} else if (!routesEqual(prev.route, snap.route)) {
+					} else if (!routesEqual(onWire(prev.route), onWire(snap.route))) {
 						await restart(suffix, snap.route);
 					}
 				}

@@ -234,6 +234,8 @@ async fn portal_negotiate(cursor: bool) -> Result<(u32, OwnedFd, SessionGuard), 
 		.create_session(Default::default())
 		.await
 		.map_err(|e| err("portal session", e))?;
+	let session = Arc::new(session);
+	let guard = SessionGuard::new(session.clone());
 
 	let restore = RESTORE_TOKEN.lock().unwrap().clone();
 	proxy
@@ -273,7 +275,7 @@ async fn portal_negotiate(cursor: bool) -> Result<(u32, OwnedFd, SessionGuard), 
 		.open_pipe_wire_remote(&session, Default::default())
 		.await
 		.map_err(|e| err("portal pipewire remote", e))?;
-	Ok((node_id, fd, SessionGuard::new(session)))
+	Ok((node_id, fd, guard))
 }
 
 /// Closes the portal session when dropped, so the compositor's "screen is being
@@ -285,7 +287,7 @@ struct SessionGuard {
 }
 
 impl SessionGuard {
-	fn new(session: ashpd::desktop::Session<Screencast>) -> Self {
+	fn new(session: Arc<ashpd::desktop::Session<Screencast>>) -> Self {
 		let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 		tokio::spawn(async move {
 			// Resolves with `Err` once the guard (the sender) drops.

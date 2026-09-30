@@ -147,6 +147,7 @@ export class Connection implements Established {
 			session: this.#session,
 			publish,
 			requiresSolicitation: solicit ?? false,
+			hidden,
 			cluster,
 		});
 		this.#solicit = solicit;

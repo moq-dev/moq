@@ -3,9 +3,10 @@
 ## Goal
 
 Every predicate over a MoQ broadcast path uses one matcher. Tokens,
-origin scopes, announce interests, public access rules, and wildcard
-advertisements can express `pid/*/chat` and `**/transcode.pro` without
-maintaining competing glob dialects.
+origin scopes, announce interests, and public access rules can express
+`pid/*/chat` and `**/*.hang` without maintaining competing glob dialects.
+Routing is not a predicate here: advertisements stay prefixes, and
+[announcement shapes](/quest/m3/announce-shapes.md) owns non-prefix routing.
 
 Literal paths remain coordinates, not sets. Roots, joins, exact broadcast
 names, URL paths, filesystem paths, and object-store keys keep their own
@@ -80,7 +81,9 @@ AUTH grants on moq-lite-06 carry the shared pattern semantics, without
 changing older protocol versions. Interest stays a prefix: [#3770](https://github.com/moq-dev/moq/pull/3770)
 keeps patterns off the announce wire, so ANNOUNCE_REQUEST and
 SUBSCRIBE_NAMESPACE carry the prefix the caller asked for and a wildcard is
-an optional filter on the consume side.
+an optional filter on the consume side. [Announcement shapes](/quest/m3/announce-shapes.md)
+later adds only exact, suffix, and prefix+suffix to moq-lite's ANNOUNCE_REQUEST;
+any other pattern stays a consume-side filter.
 
 Replace lite-06 AUTH grant prefixes with patterns in Rust and JavaScript in
 the same change. Update the lite draft and version-gated fixtures together.
@@ -98,5 +101,5 @@ matches, containment refusal, and old-version behavior.
 
 ## Related
 
-- [Wildcard advertisements](/quest/m0/wildcard/README.md) - routing adopts the
-  matcher while retaining its own cost, pool, refusal, and resolution work
+- [Wildcard advertisements](/quest/m0/wildcard/README.md) - routes on prefix
+  claims; the matcher only filters them against consume-side interest

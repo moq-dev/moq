@@ -38,7 +38,7 @@ impl<T: Message> Decode<Version> for T {
 			}
 			let raw = buf.copy_to_bytes(size);
 			let mut slice = &raw[..];
-			match Self::decode_msg(&mut slice, version) {
+			match Self::decode_msg(&mut slice, version).map_err(DecodeError::complete) {
 				Ok(result) => {
 					if slice.remaining() > 0 {
 						return Err(DecodeError::Long);
@@ -56,7 +56,7 @@ impl<T: Message> Decode<Version> for T {
 				return Err(DecodeError::Short);
 			}
 			let mut limited = buf.take(size);
-			match Self::decode_msg(&mut limited, version) {
+			match Self::decode_msg(&mut limited, version).map_err(DecodeError::complete) {
 				Ok(result) => {
 					if limited.remaining() > 0 {
 						return Err(DecodeError::Long);

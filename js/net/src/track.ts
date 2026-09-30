@@ -243,6 +243,14 @@ export class Request {
 export interface FetchGroupOptions {
 	/** Delivery priority for the fetch stream. Defaults to `0`. */
 	priority?: number;
+
+	/**
+	 * Abandons this fetch, rejecting with the signal's reason. Concurrent fetches of the same
+	 * group share one stream, cancelled only once every caller has left. An already-aborted
+	 * signal rejects before anything is sent, and aborting after the group resolves has no
+	 * effect; close the group instead.
+	 */
+	signal?: AbortSignal;
 }
 
 /**
@@ -426,6 +434,10 @@ export class Producer {
 	// read mirrored sinks, never this state directly.
 	#state = new TrackState();
 	#sequence: TrackSequence = { next: 0 };
+	// One past the highest group or datagram this producer received, like the Rust
+	// `max_sequence`. The shared counter above can run ahead of it: sibling producers of
+	// the same track advance it too.
+	#received = 0;
 
 	// Recently written source groups, retained for replay to late subscribers and
 	// pruned once idle for longer than the cache window. Each entry tracks the mirror
@@ -565,6 +577,15 @@ export class Producer {
 				forward();
 				this.#sinks.delete(sink);
 				this.#updateSubscription();
+				// Update demand: once the last subscriber leaves, the consumer wire (watching
+				// {@link unused}) tears the upstream down instead of downloading to nobody.
+				this.#used.set(this.#sinks.size > 0);
+				// The producer closing every sink keeps its mirrors tracked, so what the sink
+				// still buffers ages out with the cache instead of staying pinned.
+				if (this.#state.closed.peek() !== undefined) {
+					dispose();
+					return;
+				}
 				for (const entry of this.#cache) {
 					const mirror = entry.mirrors.get(sink);
 					if (mirror) {
@@ -574,10 +595,6 @@ export class Producer {
 				}
 				for (const group of sink.groups.peek()) group.close(abort);
 				dispose();
-
-				// Update demand: once the last subscriber leaves, the consumer wire (watching
-				// {@link unused}) tears the upstream down instead of downloading to nobody.
-				this.#used.set(this.#sinks.size > 0);
 			});
 		}
 
@@ -619,17 +636,30 @@ export class Producer {
 		// drained it. The usual case, an already-closed group aging out, keeps its own
 		// terminal state.
 		if (!entry.group.isClosed) entry.group.close(new TooFarBehind());
+		const mirrors = [...entry.mirrors.values()];
+		for (const mirror of mirrors) hooks.evictGroup(mirror);
+		this.#unlink(entry);
+		for (const mirror of mirrors) mirror.close();
+	}
+
+	// Take a cached group's mirrors out of every sink, so a subscriber can no longer
+	// receive them. A reader already holding one keeps it as is.
+	#unlink(entry: CachedGroup): void {
 		for (const [sink, mirror] of entry.mirrors) {
-			hooks.evictGroup(mirror);
 			sink.groups.mutate((groups) => {
 				const i = groups.indexOf(mirror);
 				if (i >= 0) groups.splice(i, 1);
 			});
 			const index = timelineIndex(sink.timeline, mirror.sequence);
 			if (sink.timeline[index] === mirror) sink.timeline.splice(index, 1);
-			mirror.close();
 		}
 		entry.mirrors.clear();
+	}
+
+	// Take a cached group out of the cache lookups.
+	#uncache(entry: CachedGroup): void {
+		this.#cache.splice(this.#cache.indexOf(entry), 1);
+		this.#cached.delete(entry.group.sequence);
 	}
 
 	// The one group retention never takes: the newest, while it is still open. That is
@@ -685,9 +715,9 @@ export class Producer {
 		if (oldest !== undefined) this.#wake(Math.max(oldest + maxAgeMs, now + slice));
 	}
 
-	// Arm the prune wakeup for `at`, unless one is already armed sooner.
+	// Arm the prune wakeup for `at`, unless one is already armed sooner. Kept after a close,
+	// until the cache empties, so what the track left behind still ages out.
 	#wake(at: number): void {
-		if (this.#state.closed.peek() !== undefined) return;
 		if (this.#pruneTimer !== undefined && this.#pruneTimerAt <= at) return;
 		clearTimeout(this.#pruneTimer);
 
@@ -710,6 +740,7 @@ export class Producer {
 		const entry: CachedGroup = { group, mirrors: new Map<TrackState, GroupConsumer>() };
 		this.#cache.push(entry);
 		this.#cached.set(group.sequence, entry);
+		this.#received = Math.max(this.#received, group.sequence + 1);
 		for (const sink of this.#sinks) this.#mirror(entry, sink);
 		// Give held mirrors the new live edge before pruning their timeline entry,
 		// so their latency guard can preserve a terminal expiry verdict.
@@ -753,8 +784,7 @@ export class Producer {
 				throw new Error(`duplicate group: sequence=${group.sequence}`);
 			}
 			this.#evict(existing);
-			this.#cache.splice(this.#cache.indexOf(existing), 1);
-			this.#cached.delete(group.sequence);
+			this.#uncache(existing);
 		}
 
 		// Only advance the shared counter upward (for appendGroup auto-increment).
@@ -769,6 +799,7 @@ export class Producer {
 	// Fan a datagram out to every live subscriber, dropping the oldest once the ring is full.
 	// Late subscribers do NOT replay old datagrams (best-effort, unlike the group cache).
 	#publishDatagram(datagram: Datagram): void {
+		this.#received = Math.max(this.#received, datagram.sequence + 1);
 		for (const sink of this.#sinks) {
 			sink.datagrams.mutate((list) => {
 				if (list.length === MAX_DATAGRAMS) list.shift();
@@ -833,8 +864,8 @@ export class Producer {
 		if (!Number.isSafeInteger(final) || final < 0) throw new RangeError(`invalid track end: ${final}`);
 		const declared = this.#state.final.peek();
 		if (declared !== undefined) throw new Error(`track already ends at ${declared}`);
-		if (final < this.#sequence.next) {
-			throw new Error(`track end ${final} is below the next sequence ${this.#sequence.next}`);
+		if (final < this.#received) {
+			throw new Error(`track end ${final} is below the next sequence ${this.#received}`);
 		}
 		this.#declareFinal(final);
 	}
@@ -848,21 +879,41 @@ export class Producer {
 	 * Close the track and every subscriber, mirroring the abort to their groups. Idempotent.
 	 *
 	 * A clean close keeps the end {@link finishAt} declared, or declares one past the highest
-	 * sequence produced; an abort ends without one.
+	 * sequence produced; an abort ends without one. Subscribers still draining get the
+	 * finished groups first, then the end or the abort. An abort after the declared end
+	 * settled (reached, with every group below it finished) is a clean close. The groups
+	 * left behind still age out after the track's `maxAge`, so a stale subscriber can't pin
+	 * them.
 	 */
 	close(abort?: Error) {
-		if (abort === undefined && this.#state.closed.peek() === undefined && this.#state.final.peek() === undefined) {
-			this.#declareFinal(this.#sequence.next);
+		if (this.#state.closed.peek() !== undefined) return;
+		if (abort && this.#settled()) abort = undefined;
+		if (abort === undefined && this.#state.final.peek() === undefined) {
+			this.#declareFinal(this.#received);
 		}
+		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
+		// Not evicted: a reader already holding one keeps its frames and sees the abort.
+		const open = abort ? this.#cache.filter((entry) => entry.group.closed.peek() === undefined) : [];
 		closeTrackState(this.#state, abort);
-		clearTimeout(this.#pruneTimer);
-		this.#pruneTimer = undefined;
 		for (const { group } of this.#cache) group.close(abort);
+		for (const entry of open) {
+			this.#unlink(entry);
+			this.#uncache(entry);
+		}
 		for (const sink of this.#sinks) {
 			for (const group of sink.groups.peek()) group.close(abort);
 			closeTrackState(sink, abort);
 		}
 		this.#sinks.clear();
+		this.#prune();
+	}
+
+	// Whether the declared end was reached and every cached group below it finished, so
+	// the track already holds everything it promised. Mirrors the Rust `is_settled`.
+	#settled(): boolean {
+		const final = this.#state.final.peek();
+		if (final === undefined || this.#received < final) return false;
+		return this.#cache.every(({ group }) => group.sequence >= final || group.closed.peek() === null);
 	}
 
 	/** Append a frame as its own single-frame group. */

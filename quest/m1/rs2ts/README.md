@@ -30,21 +30,21 @@ Decided in planning (2026-09-27), with the spike data in
   and bytes out, no runtime. The async helper methods move behind an `async`
   cargo feature; rs2ts reads the crate without it and JS reimplements the
   helpers with Promises. No second crate.
-- Varints stay 62-bit on the wire; the spec is not bounded to 2^53. Rust's
-  `VarInt` newtype carries Encode/Decode and JS gets a matching `VarInt` type
-  with checked conversion to and from `number`.
+- Varints are not bounded to 2^53 on the wire: 62 bits in QUIC form, 64 in
+  leading-ones form. JS holds any `u64` as a `U64` with checked conversion to
+  and from `number`; varints are only its wire encoding.
 - The generated TypeScript is committed and a CI lane regenerates it and
   fails on drift, so JS contributors and npm publishing never need the
   nightly toolchain Charon pins. It lives inside js/net and `@moq/net` stays
   the package.
-- The `@moq/net` API may change (disposable handles, `VarInt`) as long as it
+- The `@moq/net` API may change (disposable handles, `U64`) as long as it
   is no worse to use; watch, publish, hang, and the demos update in the same
   change.
 - Parity: `just test interop --all`, plus moq-net's own tests translated with
   the code once they run on a mock clock instead of tokio.
 - The line lands on `dev`: the Rust refactors break moq-net's published API,
   and the translator and generated code build on them. Only the additive
-  [JS VarInt](/quest/m1/rs2ts/js-varint.md) lands on `main`.
+  JS `U64` (`js/net/src/util/u64.ts`) is on `main`, package-internal.
 - Hand-written js/net fixes keep landing until the generated path replaces
   them; it is months out.
 
@@ -55,7 +55,6 @@ js/net it replaces, measured with the [browser benchmarks](/quest/m1/browser-ben
 ## Required
 
 - [VarInt codec](/quest/m1/rs2ts/varint-codec.md) - moq-net encodes through a `VarInt` newtype and a concrete slice-based codec, not generic traits on primitives
-- [JS VarInt](/quest/m1/rs2ts/js-varint.md) - js/net has a 62-bit `VarInt` type with checked `number` conversion and no BigInt on the hot path
 - [rs2ts](/quest/m1/rs2ts/translator.md) - a Charon-based translator emits readable TypeScript for moq-net's lite codec, committed and checked for drift in CI
 - [Sans-IO moq-net](/quest/m1/rs2ts/sans-io/README.md) - moq-net builds and runs without a runtime; async helpers sit behind an `async` feature
 - [Mock-clock tests](/quest/m1/rs2ts/mock-clock.md) - moq-net's tests run on the sans-IO clock instead of tokio, so they translate with the code

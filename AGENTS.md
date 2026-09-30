@@ -60,6 +60,7 @@ A bad shape costs a breaking change in every language, and the surface is huge.
 - Keep things private until a consumer needs them. Scrutinize every new exported item.
 - Never add `foo_with_x`, `foo_checked`, or a compatibility shim. Make the breaking change to `foo` on `dev` instead. Additive changes stay on `main`.
 - Let the type system make misuse unrepresentable
+- A broadcast, track, or group name always means the same content. MoQ has no ETag-style invalidation, so a publisher that reuses a name for different content (such as restarting group numbers) is a bug; publish a new broadcast instead of working around it.
 - Avoid callback parameters. Return a handle, an event, or a Producer/Consumer split.
 - Avoid 4+ args; use a struct or object.
 - Name by role, not today's implementation.
@@ -79,6 +80,7 @@ Wire changes should be backwards compatible for any *published* drafts/versions.
 
 Before starting, `git fetch origin` and set the upstream to the base branch.
 If a published API break requires `dev`, retarget the PR to `dev`, set the upstream to `origin/dev`, then rebase onto it.
+Write scratch files (PR bodies, logs, notes) to the worktree's gitignored `.scratch/`, never a directory other agents share.
 
 Use the Nix dev shell so tooling matches CI.
 direnv loads it automatically, but if not: `nix develop --command ...`.

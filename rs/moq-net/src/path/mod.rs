@@ -4,9 +4,9 @@
 //! segment-aware prefix operations. [`Pattern`] describes a set of paths with
 //! wildcards, and [`Patterns`] is a union of them reduced by containment. The
 //! grammar and algebra live in [`moq-pattern`](moq_pattern); this module
-//! re-exports them beside [`Path`] so grants, origin scopes, announce interests,
-//! and wildcard advertisements can share one dialect. Literal path construction
-//! and wire decoding retain their existing behavior.
+//! re-exports them beside [`Path`] so grants, origin scopes, and announce
+//! interests can share one dialect. Literal path construction and wire
+//! decoding retain their existing behavior.
 
 pub use moq_pattern::{InvalidPattern, Pattern, Patterns, Segment, Specificity};
 

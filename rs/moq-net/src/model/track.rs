@@ -19,6 +19,7 @@ use crate::{broadcast, cache, group, stats};
 use super::{Datagram, Requests};
 
 use super::Cap;
+use super::resume::Successor;
 pub use super::subscription::{Position, Subscription};
 
 use std::{
@@ -555,40 +556,20 @@ impl TrackState {
 	/// and `beyond` is where it starts when another track serves it (a splice's next
 	/// segment; see [`Anchor::successor`]).
 	fn reach(&self, sequence: u64, cap: Option<u64>, beyond: Option<Timestamp>) -> Option<Timestamp> {
-		match self.first_start(sequence.saturating_add(1), cap) {
-			Some(start) => start,
+		match self.first_servable(sequence.saturating_add(1), cap) {
+			Some(group) => group.timestamp(),
 			None => beyond,
 		}
 	}
 
-	/// Where the first servable group in `from..cap` starts presenting: `None` when no
-	/// such group is cached, `Some(None)` while it has no frame yet.
-	fn first_start(&self, from: u64, cap: Option<u64>) -> Option<Option<Timestamp>> {
-		let slot = self
-			.lookup
+	/// The first servable group in `from..cap`, stamped or not.
+	fn first_servable(&self, from: u64, cap: Option<u64>) -> Option<&group::Producer> {
+		self.lookup
 			.range(from..)
 			.map(|(_, slot)| slot)
 			.take_while(|slot| super::subscription::before_end(slot.group.sequence, cap))
-			.find(|slot| slot.visible && !slot.group.is_aborted())?;
-		Some(slot.group.timestamp())
-	}
-
-	/// The first servable group's start in `from..cap`, with the slot identity a later
-	/// judgment needs to tell that group from whatever replaces it. `None` when no such
-	/// group is cached or it has no frame yet: an unstamped successor leaves reach
-	/// unbounded, and this does not skip past it to a later group.
-	fn served_start(&self, from: u64, cap: Option<u64>) -> Option<ServedStart> {
-		let slot = self
-			.lookup
-			.range(from..)
-			.map(|(_, slot)| slot)
-			.take_while(|slot| super::subscription::before_end(slot.group.sequence, cap))
-			.find(|slot| slot.visible && !slot.group.is_aborted())?;
-		Some(ServedStart {
-			sequence: slot.group.sequence,
-			stamp: slot.stamp,
-			timestamp: slot.group.timestamp()?,
-		})
+			.find(|slot| slot.visible && !slot.group.is_aborted())
+			.map(|slot| &slot.group)
 	}
 
 	/// Whether the group at `sequence` has drifted further behind `edge` than `budget`
@@ -629,9 +610,9 @@ impl TrackState {
 			.presentation
 			.filter(|live| self.holds(live.sequence, live.stamp))
 			.map(|live| (live.sequence, live.timestamp));
-		// `outer` and `successor` were revalidated on their own tracks before this lock
-		// was taken ([`LiveEdge::is_live`], [`Successor::start`]). There is no slot for
-		// them here, and taking their locks here would nest.
+		// `outer` was revalidated and `successor` resolved on their own tracks before this
+		// lock was taken ([`LiveEdge::is_live`], [`Successor::poll_start`]). There is no
+		// slot for them here, and taking their locks here would nest.
 		let Some((_, timestamp)) = local
 			.into_iter()
 			.chain(edge.outer)
@@ -2490,18 +2471,20 @@ impl Consumer {
 	/// whatever it last declared, since nothing will resolve it anymore.
 	pub(crate) fn poll_start(&self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		match &self.inner {
-			ConsumerKind::Plain(state) => {
-				let res = state.poll(waiter, |state| match state.start_pending && state.abort.is_none() {
-					true => Poll::Pending,
-					false => Poll::Ready(state.start_sequence),
-				});
-				match res {
-					Poll::Ready(Ok(start)) => Poll::Ready(start),
-					Poll::Ready(Err(state)) => Poll::Ready(state.start_sequence),
-					Poll::Pending => Poll::Pending,
-				}
-			}
+			ConsumerKind::Plain(state) => Self::poll_state_start(state, waiter),
 			ConsumerKind::Spliced(_) => Poll::Ready(None),
+		}
+	}
+
+	/// [`Self::poll_start`] over one track's state, shared with [`Subscriber::poll_start`].
+	fn poll_state_start(state: &kio::Consumer<TrackState>, waiter: &kio::Waiter) -> Poll<Option<u64>> {
+		let res = state.poll(waiter, |state| match state.start_pending && state.abort.is_none() {
+			true => Poll::Pending,
+			false => Poll::Ready(state.start_sequence),
+		});
+		match ready!(res) {
+			Ok(start) => Poll::Ready(start),
+			Err(state) => Poll::Ready(state.start_sequence),
 		}
 	}
 
@@ -2535,20 +2518,29 @@ impl Consumer {
 		}
 	}
 
-	/// Where the first servable group in `from..cap` starts, with enough identity to
-	/// revalidate it later. A splice answers from the first segment holding one.
-	pub(crate) fn served_start(&self, from: u64, cap: Option<u64>) -> Option<Successor> {
+	/// Where the first servable group in `from..cap` starts presenting: `None` while no
+	/// such group is cached, `Some(None)` while it has no frame yet. Registers `waiter`
+	/// for whatever could move that answer: a group arriving or leaving, or the unstamped
+	/// one's first frame. A splice answers from the first segment holding one.
+	pub(crate) fn poll_first_start(
+		&self,
+		waiter: &kio::Waiter,
+		from: u64,
+		cap: Option<u64>,
+	) -> Option<Option<Timestamp>> {
 		match &self.inner {
 			ConsumerKind::Plain(state) => {
-				let served = state.read().served_start(from, cap)?;
-				Some(Successor {
-					sequence: served.sequence,
-					timestamp: served.timestamp,
-					stamp: served.stamp,
-					track: state.weak(),
-				})
+				let mut start = None;
+				let _ = state.poll(waiter, |state| {
+					start = state.first_servable(from, cap).map(|group| {
+						let _ = group.poll_timestamp(waiter);
+						group.timestamp()
+					});
+					Poll::<()>::Pending
+				});
+				start
 			}
-			ConsumerKind::Spliced(resume) => resume.served_start(from, cap),
+			ConsumerKind::Spliced(resume) => resume.poll_first_start(waiter, from, cap),
 		}
 	}
 
@@ -3162,8 +3154,8 @@ enum SubscriberKind {
 
 /// One poll's view of how far this subscription may drift: the clamped budget and the
 /// live edge to measure a candidate group against. Resolved once, then applied to every
-/// group that poll considers. `outer` and `successor` are revalidated per candidate,
-/// outside this track's lock.
+/// group that poll considers. `outer` is revalidated and `successor` resolved per
+/// candidate, outside this track's lock.
 #[derive(Clone)]
 struct Drift {
 	budget: Duration,
@@ -3206,7 +3198,10 @@ impl group::Expiry for GroupExpiry {
 			.edge
 			.filter(LiveEdge::is_live)
 			.map(|live| (live.sequence, live.timestamp));
-		let successor = anchor.successor.as_ref().and_then(Successor::start);
+		let successor = anchor
+			.successor
+			.as_ref()
+			.and_then(|successor| successor.poll_start(waiter));
 
 		let mut expired = false;
 		let _ = self.state.poll(waiter, |state| {
@@ -3295,8 +3290,8 @@ pub(crate) struct Anchor {
 	/// Where the reader's next group past `cap` starts presenting, when another track
 	/// serves it (a splice's next segment). The last group below the cap has no
 	/// successor in its own track, so without this nothing bounds its reach and it is
-	/// never judged stale. `None` while unknown or unstamped. Revalidated like `edge`:
-	/// a cached start must not convict once that group is gone.
+	/// never judged stale. Resolved afresh on every judgment rather than cached, so a
+	/// group that goes away hands the bound to whichever group serves there next.
 	pub successor: Option<Successor>,
 }
 
@@ -3334,48 +3329,6 @@ impl LiveEdge {
 }
 
 impl PartialEq for LiveEdge {
-	fn eq(&self, other: &Self) -> bool {
-		self.sequence == other.sequence
-			&& self.timestamp == other.timestamp
-			&& self.stamp == other.stamp
-			&& self.track.same_channel(&other.track)
-	}
-}
-
-/// The first servable group past a segment boundary: where it starts, and which slot
-/// that start was read from.
-struct ServedStart {
-	sequence: u64,
-	stamp: u32,
-	timestamp: Timestamp,
-}
-
-/// A successor pushed onto another track's cursor. The timestamp alone is not enough:
-/// once the group is evicted, a later group can keep the outer edge valid while this
-/// start is no longer where the track continues.
-#[derive(Clone)]
-pub(crate) struct Successor {
-	sequence: u64,
-	timestamp: Timestamp,
-	stamp: u32,
-	track: kio::ConsumerWeak<TrackState>,
-}
-
-impl Successor {
-	/// The start this still names, re-read from its own track, or `None` once that
-	/// group is gone or no longer stamped. Takes that track's lock, so never call it
-	/// under another's.
-	fn start(&self) -> Option<Timestamp> {
-		let state = self.track.read();
-		let slot = state.lookup.get(&self.sequence)?;
-		if slot.stamp != self.stamp || slot.group.is_aborted() {
-			return None;
-		}
-		slot.group.timestamp()
-	}
-}
-
-impl PartialEq for Successor {
 	fn eq(&self, other: &Self) -> bool {
 		self.sequence == other.sequence
 			&& self.timestamp == other.timestamp
@@ -3523,7 +3476,10 @@ impl PlainSubscriber {
 			.as_ref()
 			.filter(|live| live.is_live())
 			.map(|live| (live.sequence, live.timestamp));
-		let successor = drift.successor.as_ref().and_then(Successor::start);
+		let successor = drift
+			.successor
+			.as_ref()
+			.and_then(|successor| successor.poll_start(waiter));
 		let presentation = drift.edge.presentation;
 		let cap = drift.edge.cap;
 		let budget = drift.budget;
@@ -4003,6 +3959,19 @@ impl Subscriber {
 			(SubscriberKind::Plain(a), SubscriberKind::Plain(b)) => a.state.same_channel(&b.state),
 			(SubscriberKind::Spliced(a), SubscriberKind::Spliced(b)) => a.is_clone(b),
 			_ => false,
+		}
+	}
+
+	/// Poll for where the source's feed starts, raised to this cursor's floor, once
+	/// resolved; see [`Consumer::poll_start`]. A feed starting below the floor serves the
+	/// floor's group too. `None` when the source declares none.
+	pub(crate) fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
+		match &mut self.inner {
+			SubscriberKind::Plain(plain) => {
+				let start = ready!(Consumer::poll_state_start(&plain.state, waiter));
+				Poll::Ready(start.map(|start| start.max(plain.min_sequence)))
+			}
+			SubscriberKind::Spliced(spliced) => spliced.poll_start(waiter),
 		}
 	}
 
@@ -6423,47 +6392,6 @@ mod test {
 		assert!(
 			group.read_frame().now_or_never().is_none(),
 			"a vanished outer edge is no reason to drop what is left"
-		);
-		assert!(!group.latency_expired());
-		open.finish().unwrap();
-	}
-
-	/// A pushed successor is the same kind of cached fact. Evicting it must not keep
-	/// bounding the previous segment's last group while a later group still anchors the
-	/// outer edge.
-	#[tokio::test]
-	async fn an_evicted_successor_convicts_nothing() {
-		let producer = track_producer("a", None);
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(1)));
-		let mut open = producer.append_group().unwrap();
-		open.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"a"))
-			.unwrap();
-		let mut group = subscriber.recv_group().await.unwrap().expect("group");
-		assert!(group.read_frame().await.unwrap().is_some());
-
-		let mut next = track_producer("b", None);
-		// Early enough that group 0 is already past the budget, and not itself the edge.
-		let successor = append_at(&mut next, 10);
-		append_at(&mut next, 30_000);
-		let consumer = next.consume();
-		subscriber.set_anchor(Anchor {
-			cap: None,
-			edge: consumer.live_edge(None),
-			successor: consumer.served_start(successor, None),
-		});
-
-		let mut control = group.clone();
-		assert!(
-			matches!(control.read_frame().now_or_never(), Some(Ok(None))),
-			"the open group ends against the successor"
-		);
-
-		let slot = next.modify().unwrap().lookup.remove(&successor).unwrap();
-		let _ = slot.group.abort(Error::Evicted);
-
-		assert!(
-			group.read_frame().now_or_never().is_none(),
-			"a vanished successor is no reason to drop what is left"
 		);
 		assert!(!group.latency_expired());
 		open.finish().unwrap();

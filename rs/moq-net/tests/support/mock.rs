@@ -366,6 +366,10 @@ struct SessionSide {
 	conn: Arc<ConnectionState>,
 	/// Uni streams this side opened that the peer has not accepted yet, while held.
 	held: Mutex<Option<Vec<MockRecvStream>>>,
+	/// Whether the peer has withheld uni stream credit, parking every open.
+	withheld: Mutex<bool>,
+	/// Whether the datagrams this side sends are lost.
+	lossy: Mutex<bool>,
 }
 
 /// An in-memory mock WebTransport session.
@@ -382,6 +386,7 @@ pub struct MockSession {
 	accept_bi: kio::Park,
 	datagram: kio::Park,
 	closed: kio::Park,
+	open_uni: kio::Park,
 }
 
 impl poll::Session for MockSession {
@@ -439,7 +444,15 @@ impl poll::Session for MockSession {
 		}
 	}
 
-	fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+		if *self.side.withheld.lock().unwrap() {
+			self.side.conn.waiters.register(self.open_uni.hold(cx));
+			return match self.side.conn.error() {
+				Some(err) => Poll::Ready(Err(err)),
+				None => Poll::Pending,
+			};
+		}
+
 		let (mut our_send, peer_recv) = new_stream_pair(&self.side.conn);
 
 		if let Some(held) = self.side.held.lock().unwrap().as_mut() {
@@ -456,6 +469,9 @@ impl poll::Session for MockSession {
 	}
 
 	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+		if *self.side.lossy.lock().unwrap() {
+			return Poll::Ready(Ok(()));
+		}
 		match self.side.peer_datagrams.try_push(Bytes::copy_from_slice(payload)) {
 			Ok(()) => Poll::Ready(Ok(())),
 			Err(_) => Poll::Ready(Err(self.close_error())),
@@ -532,10 +548,37 @@ impl MockSession {
 		}
 	}
 
+	/// Deliver the held uni streams newest first, and stop holding.
+	pub fn release_unis_reversed(&self) {
+		for stream in self
+			.side
+			.held
+			.lock()
+			.unwrap()
+			.take()
+			.unwrap_or_default()
+			.into_iter()
+			.rev()
+		{
+			let _ = self.side.peer_uni.try_push(stream);
+		}
+	}
+
 	/// Lose the held uni streams, as if each were reset before its header arrived, and
 	/// stop holding.
 	pub fn drop_unis(&self) {
 		self.side.held.lock().unwrap().take();
+	}
+
+	/// Park every uni stream this side opens from now on, like a peer that has granted
+	/// no more stream credit.
+	pub fn withhold_unis(&self) {
+		*self.side.withheld.lock().unwrap() = true;
+	}
+
+	/// Lose every datagram this side sends from now on.
+	pub fn lose_datagrams(&self) {
+		*self.side.lossy.lock().unwrap() = true;
 	}
 }
 
@@ -574,6 +617,8 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		protocol,
 		conn: conn.clone(),
 		held: Mutex::default(),
+		withheld: Mutex::default(),
+		lossy: Mutex::default(),
 	});
 
 	let server_side = Arc::new(SessionSide {
@@ -586,6 +631,8 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		protocol,
 		conn,
 		held: Mutex::default(),
+		withheld: Mutex::default(),
+		lossy: Mutex::default(),
 	});
 
 	let new = |side| MockSession {
@@ -594,6 +641,7 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		accept_bi: kio::Park::default(),
 		datagram: kio::Park::default(),
 		closed: kio::Park::default(),
+		open_uni: kio::Park::default(),
 	};
 
 	(new(client_side), new(server_side))

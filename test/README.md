@@ -20,6 +20,8 @@ Every run owns three things and touches nothing else.
 
 **A private run directory.** `mktemp -d` under `$TMPDIR/moq-test-<uid>`, mode 700,
 holding every log, generated config, and capture. `MOQ_TEST_RUNS` moves the root.
+Client builds go here too (the Python venv, the staged Go modules, the browser
+page), so two runs from one checkout never rebuild a client the other is running.
 
 **Reserved ports.** A port is claimed by creating a directory under
 `/tmp/moq-test-ports-<uid>` (`MOQ_TEST_PORTS`), held for the whole run, and

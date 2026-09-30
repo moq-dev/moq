@@ -544,18 +544,7 @@ impl Key {
 
 		let token = jsonwebtoken::decode::<Claims>(token, decode, &validation)?;
 
-		let now = std::time::SystemTime::now();
-		if let Some(exp) = token.claims.expires
-			&& exp < now
-		{
-			return Err(crate::Error::TokenExpired);
-		}
-		if let Some(nbf) = token.claims.not_before
-			&& nbf > now
-		{
-			return Err(crate::Error::TokenNotYetValid);
-		}
-
+		validate_times(&token.claims, std::time::SystemTime::now())?;
 		token.claims.validate()?;
 		self.validate_scope(&token.claims)?;
 
@@ -609,6 +598,17 @@ impl Key {
 		}
 		Ok(())
 	}
+}
+
+/// Refuse claims expired at `now` (`exp <= now`) or not yet valid (`nbf > now`), as `jose` does.
+fn validate_times(claims: &Claims, now: std::time::SystemTime) -> crate::Result<()> {
+	if claims.expires.is_some_and(|exp| exp <= now) {
+		return Err(crate::Error::TokenExpired);
+	}
+	if claims.not_before.is_some_and(|nbf| nbf > now) {
+		return Err(crate::Error::TokenNotYetValid);
+	}
+	Ok(())
 }
 
 /// Serialize bytes as base64url without padding
@@ -1032,6 +1032,31 @@ mod tests {
 		};
 		assert!(key.verify(&at(-60)).is_ok());
 		assert!(matches!(key.verify(&at(3600)), Err(crate::Error::TokenNotYetValid)));
+	}
+
+	/// `exp` is refused at the instant itself and `nbf` accepted at it, matching `jose`.
+	#[test]
+	fn validate_times_at_the_boundary() {
+		let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+		let second = Duration::from_secs(1);
+
+		let at = |expires: Option<SystemTime>, not_before: Option<SystemTime>| {
+			let mut claims = create_test_claims();
+			claims.expires = expires;
+			claims.not_before = not_before;
+			validate_times(&claims, now)
+		};
+
+		assert!(at(Some(now + second), None).is_ok());
+		assert!(matches!(at(Some(now), None), Err(crate::Error::TokenExpired)));
+		assert!(matches!(at(Some(now - second), None), Err(crate::Error::TokenExpired)));
+
+		assert!(at(None, Some(now)).is_ok());
+		assert!(at(None, Some(now - second)).is_ok());
+		assert!(matches!(
+			at(None, Some(now + second)),
+			Err(crate::Error::TokenNotYetValid)
+		));
 	}
 
 	#[test]
