@@ -52,13 +52,13 @@ Decisions:
 - The prefix node keys its watches by what they qualify for: `Any` and
   `routed_broadcast` waiters in one set, `Publisher` by hop, `Local` in its
   own set. `Route` fronts hang off their route only. A front moves its
-  entries when it selects, and drops them when it closes. A route gaining
-  standing (join, cheaper re-price, restale to live) wakes the `Any` set,
-  its first hop's `Publisher` set, and the `Local` set if local, so an
-  unrelated publisher joining wakes no serving pool front. A route losing
-  standing (leave, dearer re-price, going stale) wakes only the fronts it
-  serves or is requesting for; a withdrawal takes that set before dropping
-  the record. Fronts sit at paths below the changed prefix, so the lookup
+  entries when it selects, and drops them when it closes. Any change to a
+  route wakes the `Any` set, its first hop's `Publisher` set, the `Local`
+  set if local, and the fronts it serves or is requesting for, so an
+  unrelated publisher joining or leaving wakes no serving pool front. The
+  pin sets wake on a loss too: withdrawing a deeper claim can unshadow a
+  broader route for a parked waiter it never served. A withdrawal takes
+  the served set before dropping the record. Fronts sit at paths below the changed prefix, so the lookup
   walks descendants but skips subtrees whose matching set is empty, keeping
   cost in woken fronts rather than served paths. (2026-09-30)
 - A same-publisher join still wakes that hop's whole `Publisher` set, even
@@ -76,7 +76,8 @@ Decisions:
 Verification: `origin/pool_churn` flat in served paths at every pool width
 it already sweeps, and a unit test that counts `select` calls per route
 change and asserts only affected fronts re-select, with zero for an
-unrelated publisher's join and leave. Keep `pool_resolve` unchanged.
+unrelated publisher's join and leave, and a parked waiter retrying when a
+deeper advertise-only claim over a served root is withdrawn. Keep `pool_resolve` unchanged.
 
 Public API: none. Wire: none.
 
