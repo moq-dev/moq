@@ -18,7 +18,7 @@ use super::{
 };
 use crate::{
 	AsPath, Error, InvalidPattern, Path, PathOwned, Pattern, Patterns,
-	coding::{BoundsExceeded, Decode, DecodeError, Encode, EncodeError},
+	coding::{BoundsExceeded, Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
 	path::Segment,
 	runtime::{Instant, Timers},
 	time::Clock,
@@ -156,21 +156,16 @@ impl fmt::Display for Hop {
 	}
 }
 
-impl<V: Copy> Encode<V> for Hop
-where
-	u64: Encode<V>,
-{
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
-		self.id.encode(w, version)
+impl<V> Encode<V> for Hop {
+	fn encode(&self, w: &mut Encoder<'_>, _: V) -> Result<(), EncodeError> {
+		w.varint(self.id)?;
+		Ok(())
 	}
 }
 
-impl<V: Copy> Decode<V> for Hop
-where
-	u64: Decode<V>,
-{
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		Self::from_wire(u64::decode(r, version)?)
+impl<V> Decode<V> for Hop {
+	fn decode(r: &mut Decoder<'_>, _: V) -> Result<Self, DecodeError> {
+		Self::from_wire(r.varint()?)
 	}
 }
 
@@ -304,13 +299,9 @@ impl<'a> IntoIterator for &'a Hops {
 	}
 }
 
-impl<V: Copy> Encode<V> for Hops
-where
-	u64: Encode<V>,
-	Hop: Encode<V>,
-{
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
-		(self.0.len() as u64).encode(w, version)?;
+impl<V: Copy> Encode<V> for Hops {
+	fn encode(&self, w: &mut Encoder<'_>, version: V) -> Result<(), EncodeError> {
+		w.varint(self.0.len() as u64)?;
 		for origin in &self.0 {
 			origin.encode(w, version)?;
 		}
@@ -318,13 +309,9 @@ where
 	}
 }
 
-impl<V: Copy> Decode<V> for Hops
-where
-	u64: Decode<V>,
-	Hop: Decode<V>,
-{
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		let count = u64::decode(r, version)? as usize;
+impl<V: Copy> Decode<V> for Hops {
+	fn decode(r: &mut Decoder<'_>, version: V) -> Result<Self, DecodeError> {
+		let count = r.varint()? as usize;
 		if count > MAX_HOPS {
 			return Err(DecodeError::BoundsExceeded);
 		}
@@ -8047,9 +8034,8 @@ mod tests {
 	fn drain_cost_is_encodable() {
 		use crate::coding::Encode;
 
-		let mut buf = Vec::new();
 		Cost::DRAIN
-			.encode(&mut buf, crate::lite::Version::Lite06)
+			.encode_bytes(crate::lite::Version::Lite06)
 			.expect("a draining route is still forwarded, so its cost must encode");
 	}
 }

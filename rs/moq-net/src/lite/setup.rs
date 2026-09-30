@@ -185,7 +185,7 @@ pub struct Setup {
 }
 
 impl Message for Setup {
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_setup_stream() {
 			return Err(DecodeError::Version);
 		}
@@ -218,7 +218,7 @@ impl Message for Setup {
 		})
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		if !version.has_setup_stream() {
 			return Err(EncodeError::Version);
 		}
@@ -300,10 +300,11 @@ mod tests {
 	use super::*;
 
 	fn round_trip(msg: &Setup) -> Setup {
-		let mut buf = bytes::BytesMut::new();
-		msg.encode(&mut buf, Version::Lite05).unwrap();
+		let mut buf = Vec::new();
+		msg.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
+			.unwrap();
 		let mut slice = &buf[..];
-		let got = Setup::decode(&mut slice, Version::Lite05).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, Setup::decode).unwrap();
 		assert!(bytes::Buf::remaining(&slice) == 0, "trailing bytes after decode");
 		got
 	}
@@ -391,14 +392,18 @@ mod tests {
 		let version = Version::Lite05;
 		let mut params = Parameters::default();
 		params.set_varint(super::PARAM_HOP, 0);
-		let mut body = bytes::BytesMut::new();
-		params.encode(&mut body, version).unwrap();
+		let mut body = Vec::new();
+		params
+			.encode(&mut Encoder::new(&mut body, version.into()), version)
+			.unwrap();
 		// Frame the body with the Message Length prefix `Setup::decode` expects.
-		let mut buf = bytes::BytesMut::new();
-		(body.len() as u64).encode(&mut buf, version).unwrap();
+		let mut buf = Vec::new();
+		Encoder::new(&mut buf, version.into())
+			.varint(body.len() as u64)
+			.unwrap();
 		buf.extend_from_slice(&body);
 		let mut slice = &buf[..];
-		let got = Setup::decode(&mut slice, version).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, version, Setup::decode).unwrap();
 		assert_eq!(got.hop, None);
 	}
 
@@ -432,14 +437,18 @@ mod tests {
 		let mut params = Parameters::default();
 		params.set_varint(PARAM_PROBE, 99);
 		let mut body = Vec::new();
-		params.encode(&mut body, Version::Lite05).unwrap();
+		params
+			.encode(&mut Encoder::new(&mut body, Version::Lite05.into()), Version::Lite05)
+			.unwrap();
 
-		let mut buf = bytes::BytesMut::new();
-		body.len().encode(&mut buf, Version::Lite05).unwrap();
+		let mut buf = Vec::new();
+		Encoder::new(&mut buf, Version::Lite05.into())
+			.varint(body.len() as u64)
+			.unwrap();
 		buf.extend_from_slice(&body);
 
 		let mut slice = &buf[..];
-		let got = Setup::decode(&mut slice, Version::Lite05).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, Setup::decode).unwrap();
 		assert_eq!(got.probe, ProbeLevel::Increase);
 	}
 
@@ -462,14 +471,18 @@ mod tests {
 			let mut params = Parameters::default();
 			params.set_varint(PARAM_ROLE, code);
 			let mut body = Vec::new();
-			params.encode(&mut body, Version::Lite05).unwrap();
+			params
+				.encode(&mut Encoder::new(&mut body, Version::Lite05.into()), Version::Lite05)
+				.unwrap();
 
-			let mut buf = bytes::BytesMut::new();
-			body.len().encode(&mut buf, Version::Lite05).unwrap();
+			let mut buf = Vec::new();
+			Encoder::new(&mut buf, Version::Lite05.into())
+				.varint(body.len() as u64)
+				.unwrap();
 			buf.extend_from_slice(&body);
 
 			let mut slice = &buf[..];
-			let got = Setup::decode(&mut slice, Version::Lite05).unwrap();
+			let got = crate::coding::decode_buf(&mut slice, Version::Lite05, Setup::decode).unwrap();
 			assert_eq!(got.role, None, "role code {code} should decode as bidirectional");
 		}
 	}
@@ -477,9 +490,9 @@ mod tests {
 	#[test]
 	fn rejects_before_lite05() {
 		let msg = Setup::default();
-		let mut buf = bytes::BytesMut::new();
+		let mut buf = Vec::new();
 		assert!(matches!(
-			msg.encode(&mut buf, Version::Lite04),
+			msg.encode(&mut Encoder::new(&mut buf, Version::Lite04.into()), Version::Lite04),
 			Err(EncodeError::Version)
 		));
 	}
@@ -492,15 +505,19 @@ mod tests {
 		params.set_bytes(0xbeef, b"whatever".to_vec());
 
 		let mut body = Vec::new();
-		params.encode(&mut body, Version::Lite05).unwrap();
+		params
+			.encode(&mut Encoder::new(&mut body, Version::Lite05.into()), Version::Lite05)
+			.unwrap();
 
 		// Wrap with the message size prefix the Message impl expects.
-		let mut buf = bytes::BytesMut::new();
-		body.len().encode(&mut buf, Version::Lite05).unwrap();
+		let mut buf = Vec::new();
+		Encoder::new(&mut buf, Version::Lite05.into())
+			.varint(body.len() as u64)
+			.unwrap();
 		buf.extend_from_slice(&body);
 
 		let mut slice = &buf[..];
-		let got = Setup::decode(&mut slice, Version::Lite05).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, Setup::decode).unwrap();
 		assert_eq!(got.path.as_deref(), Some("/foo"));
 	}
 }

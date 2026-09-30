@@ -6,7 +6,7 @@
 
 use crate::{
 	Error, SessionError,
-	coding::{Decode, Encode, EncodeError},
+	coding::{Decoder, EncodeError, Encoder},
 	setup::Token,
 };
 
@@ -36,39 +36,42 @@ pub fn from_setup(params: &Parameters, version: Version) -> Result<Option<Token>
 #[cfg_attr(not(test), expect(dead_code))]
 pub fn into_setup(params: &mut Parameters, token: &Token, version: Version) -> Result<(), EncodeError> {
 	let mut value = Vec::new();
-	USE_VALUE.encode(&mut value, version)?;
-	token.kind.encode(&mut value, version)?;
-	value.extend_from_slice(&token.value);
+	let mut w = Encoder::new(&mut value, version.into());
+	w.varint(USE_VALUE)?;
+	w.varint(token.kind)?;
+	w.slice(&token.value);
 	params.set_bytes(ParameterBytes::AuthorizationToken, value);
 	Ok(())
 }
 
 /// Decode a Token structure, refusing what a SETUP cannot carry.
-fn decode(mut buf: &[u8], version: Version) -> Result<Token, Error> {
+fn decode(buf: &[u8], version: Version) -> Result<Token, Error> {
 	// Section 8.9: a structure that cannot be decoded closes with KEY_VALUE_FORMATTING_ERROR.
 	let malformed = |_| Error::Session(SessionError::KeyValueFormatting);
+	let mut r = Decoder::new(buf, version.into());
 
-	match u64::decode(&mut buf, version).map_err(malformed)? {
+	match r.varint().map_err(malformed)? {
 		USE_VALUE => {}
 		// With no cache, section 9.1.4 treats a registration as a value; the alias is unused.
 		REGISTER => {
-			u64::decode(&mut buf, version).map_err(malformed)?;
+			r.varint().map_err(malformed)?;
 		}
 		// Section 9.1.4: nothing can have been registered before SETUP.
 		DELETE | USE_ALIAS => return Err(Error::ProtocolViolation),
 		_ => return Err(Error::Session(SessionError::KeyValueFormatting)),
 	}
 
-	let kind = u64::decode(&mut buf, version).map_err(malformed)?;
+	let kind = r.varint().map_err(malformed)?;
 	Ok(Token {
 		kind,
-		value: buf.to_vec(),
+		value: r.rest().to_vec(),
 	})
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::coding::{Decode, Encode};
 
 	const VERSIONS: [Version; 9] = [
 		Version::Draft14,
@@ -93,15 +96,16 @@ mod tests {
 
 	/// The option as it arrives, after a trip through the SETUP parameter block.
 	fn received(params: &Parameters, version: Version) -> Parameters {
-		let mut bytes = params.encode_bytes(version).unwrap();
-		Parameters::decode(&mut bytes, version).unwrap()
+		let bytes = params.encode_bytes(version).unwrap();
+		Parameters::decode_slice(&bytes, version).unwrap().0
 	}
 
 	/// A raw Token structure: the alias type then its varint fields then a value.
 	fn structure(version: Version, fields: &[u64], value: &[u8]) -> Parameters {
 		let mut raw = Vec::new();
+		let mut w = Encoder::new(&mut raw, version.into());
 		for field in fields {
-			field.encode(&mut raw, version).unwrap();
+			w.varint(*field).unwrap();
 		}
 		raw.extend_from_slice(value);
 		let mut params = Parameters::default();
@@ -173,8 +177,10 @@ mod tests {
 	fn two_tokens_are_refused() {
 		for version in VERSIONS {
 			let mut value = Vec::new();
-			USE_VALUE.encode(&mut value, version).unwrap();
-			Token::OUT_OF_BAND.encode(&mut value, version).unwrap();
+			Encoder::new(&mut value, version.into()).varint(USE_VALUE).unwrap();
+			Encoder::new(&mut value, version.into())
+				.varint(Token::OUT_OF_BAND)
+				.unwrap();
 
 			let key = u64::from(ParameterBytes::AuthorizationToken);
 			let (count, keys): (Option<u64>, [u64; 2]) = match version {
@@ -185,14 +191,14 @@ mod tests {
 			};
 			let mut raw = Vec::new();
 			if let Some(count) = count {
-				count.encode(&mut raw, version).unwrap();
+				Encoder::new(&mut raw, version.into()).varint(count).unwrap();
 			}
 			for key in keys {
-				key.encode(&mut raw, version).unwrap();
-				value.encode(&mut raw, version).unwrap();
+				Encoder::new(&mut raw, version.into()).varint(key).unwrap();
+				Encoder::new(&mut raw, version.into()).bytes(&value).unwrap();
 			}
 
-			let err = Parameters::decode(&mut raw.as_slice(), version).unwrap_err();
+			let err = Parameters::decode_slice(&raw, version).unwrap_err();
 			assert!(matches!(err, crate::DecodeError::Duplicate), "{version:?}: {err:?}");
 		}
 	}

@@ -1735,7 +1735,7 @@ mod announce_test {
 		fn take_ok(&mut self) -> lite::AnnounceOk {
 			let buf = self.pending();
 			let mut slice = &buf[..];
-			let ok = lite::AnnounceOk::decode(&mut slice, VERSION).expect("announce ok");
+			let ok = crate::coding::decode_buf(&mut slice, VERSION, lite::AnnounceOk::decode).expect("announce ok");
 			self.cursor += buf.len() - slice.len();
 			ok
 		}
@@ -1747,7 +1747,7 @@ mod announce_test {
 			let mut msgs = Vec::new();
 			while !slice.is_empty() {
 				msgs.push(
-					lite::AnnounceBroadcast::decode(&mut slice, VERSION)
+					crate::coding::decode_buf(&mut slice, VERSION, lite::AnnounceBroadcast::decode)
 						.expect("announce message")
 						.into_owned(),
 				);
@@ -2017,7 +2017,7 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	if timescale.is_some() {
 		buffer_zigzag_delta(writer, timestamp.value(), prev_ts)?;
 	}
-	writer.buffer(&size)?;
+	writer.buffer_varint(size)?;
 	Ok(())
 }
 
@@ -2031,8 +2031,7 @@ fn buffer_zigzag_delta<W: crate::transport::poll::SendStream>(
 	let delta: i64 = (curr as i128 - *prev as i128)
 		.try_into()
 		.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
-	let zz = crate::coding::VarInt::from_zigzag(delta).map_err(crate::coding::EncodeError::from)?;
-	writer.buffer(&zz)?;
+	writer.buffer_varint(crate::coding::varint::zigzag(delta))?;
 	*prev = curr;
 	Ok(())
 }
@@ -3583,7 +3582,7 @@ mod tests {
 		let mut slice = bytes;
 		let mut out = Vec::new();
 		while bytes::Buf::remaining(&slice) > 0 {
-			out.push(lite::Probe::decode(&mut slice, version).unwrap());
+			out.push(crate::coding::decode_buf(&mut slice, version, lite::Probe::decode).unwrap());
 		}
 		out
 	}

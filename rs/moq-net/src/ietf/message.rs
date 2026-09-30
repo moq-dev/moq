@@ -1,6 +1,4 @@
-use bytes::{Buf, BufMut};
-
-use crate::coding::{Decode, DecodeError, Encode, EncodeError, Sizer};
+use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder};
 
 use super::Version;
 
@@ -11,63 +9,55 @@ pub trait Message: Sized + std::fmt::Debug {
 	const ID: u64;
 
 	/// Encode this message body (without size prefix).
-	fn encode_msg<W: BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError>;
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError>;
 
 	/// Decode a message body (without size prefix).
-	fn decode_msg<B: Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError>;
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError>;
 }
 
 impl<T: Message> Encode<Version> for T {
-	fn encode<W: BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		tracing::trace!(?self, "encoding");
-		let mut sizer = Sizer::default();
-		self.encode_msg(&mut sizer, version)?;
-		let size: u16 = sizer.size.try_into().map_err(|_| EncodeError::TooLarge)?;
-		size.encode(w, version)?;
-		self.encode_msg(w, version)
+		let prefix = w.prefix_u16();
+		self.encode_msg(w, version)?;
+		w.fill(prefix)
+	}
+}
+
+/// A control message body not decoded yet: a `u16` length, then that many bytes.
+///
+/// Read after the message type, when the type decides how to decode the rest.
+#[derive(Debug)]
+pub struct Body(pub bytes::Bytes);
+
+impl Decode<Version> for Body {
+	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+		let size = r.u16()? as usize;
+		Ok(Self(bytes::Bytes::copy_from_slice(r.slice(size)?)))
+	}
+}
+
+impl Body {
+	/// A decoder over the body, with `version`'s varints.
+	pub fn decoder(&self, version: Version) -> Decoder<'_> {
+		Decoder::new(&self.0, version.into())
 	}
 }
 
 impl<T: Message> Decode<Version> for T {
-	fn decode<B: Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
-		let size = u16::decode(buf, version)? as usize;
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		let size = r.u16()? as usize;
+		let mut body = r.sub(size)?;
 
-		if tracing::enabled!(tracing::Level::TRACE) {
-			if buf.remaining() < size {
-				return Err(DecodeError::Short);
-			}
-			let raw = buf.copy_to_bytes(size);
-			let mut slice = &raw[..];
-			match Self::decode_msg(&mut slice, version) {
-				Ok(result) => {
-					if slice.remaining() > 0 {
-						return Err(DecodeError::Long);
-					}
-					tracing::trace!(?result, "decoded");
-					Ok(result)
-				}
-				Err(e) => {
-					tracing::warn!(%e, ?raw, "decode failed");
-					Err(e)
-				}
-			}
-		} else {
-			if buf.remaining() < size {
-				return Err(DecodeError::Short);
-			}
-			let mut limited = buf.take(size);
-			match Self::decode_msg(&mut limited, version) {
-				Ok(result) => {
-					if limited.remaining() > 0 {
-						return Err(DecodeError::Long);
-					}
-					Ok(result)
-				}
-				Err(e) => {
-					tracing::warn!(%e, "decode failed");
-					Err(e)
-				}
-			}
+		let result = Self::decode_msg(&mut body, version).and_then(|msg| match body.is_empty() {
+			true => Ok(msg),
+			false => Err(DecodeError::Long),
+		});
+
+		match &result {
+			Ok(msg) => tracing::trace!(?msg, "decoded"),
+			Err(err) => tracing::warn!(%err, "decode failed"),
 		}
+		result
 	}
 }

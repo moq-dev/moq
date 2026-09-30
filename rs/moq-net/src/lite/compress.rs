@@ -13,7 +13,10 @@ use std::{
 	hash::Hash,
 };
 
-use crate::{Error, Hop, Hops, Path, PathOwned, coding::Encode, coding::Sizer};
+use crate::{
+	Error, Hop, Hops, Path, PathOwned,
+	coding::{Form, varint},
+};
 
 use super::{HopsRef, PathRef, Version};
 
@@ -287,14 +290,6 @@ impl AnnounceEncoder {
 		self.tails.remove(reversed(&entry.hops), id);
 	}
 
-	fn size<T: Encode<Version>>(&self, value: &T) -> usize {
-		let mut sizer = Sizer::default();
-		value
-			.encode(&mut sizer, self.version)
-			.expect("sizing an encodable value");
-		sizer.size
-	}
-
 	/// The wire form of `suffix`, sized from its parts so only the winner is built.
 	fn path_ref(&self, suffix: &PathOwned, next: u64) -> PathRef<'static> {
 		let literal = || PathRef::literal(suffix.clone());
@@ -308,8 +303,8 @@ impl AnnounceEncoder {
 
 		let base = next - id;
 		let keep = keep as u64;
-		let size = self.size(&base) + self.size(&keep) + self.size(&rest);
-		match size < self.size(&0u64) * 2 + self.size(suffix) {
+		let size = varint_size(base) + varint_size(keep) + string_size(&rest);
+		match size < varint_size(0) * 2 + string_size(suffix) {
 			true => PathRef { base, keep, rest },
 			false => literal(),
 		}
@@ -326,9 +321,9 @@ impl AnnounceEncoder {
 		let base = next - id;
 		let keep = keep as u64;
 		let chain =
-			|hops: &[Hop]| self.size(&(hops.len() as u64)) + hops.iter().map(|hop| self.size(hop)).sum::<usize>();
-		let size = self.size(&base) + chain(head) + self.size(&keep);
-		match size < self.size(&0u64) * 2 + chain(hops.as_slice()) {
+			|hops: &[Hop]| varint_size(hops.len() as u64) + hops.iter().map(|hop| varint_size(hop.id())).sum::<usize>();
+		let size = varint_size(base) + chain(head) + varint_size(keep);
+		match size < varint_size(0) * 2 + chain(hops.as_slice()) {
 			true => HopsRef {
 				base,
 				literal: Hops::try_from(head.to_vec()).expect("a prefix of a valid chain is valid"),
@@ -339,9 +334,21 @@ impl AnnounceEncoder {
 	}
 }
 
+/// The bytes `value` takes as a moq-lite varint.
+fn varint_size(value: u64) -> usize {
+	varint::size(value, Form::Quic).expect("sizing a value in varint range")
+}
+
+/// The bytes `path` takes on the wire: a varint length, then the string.
+fn string_size(path: &Path<'_>) -> usize {
+	let len = path.as_str().len();
+	varint_size(len as u64) + len
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::coding::Encode;
 
 	const VERSION: Version = Version::Lite07;
 
@@ -498,7 +505,7 @@ mod tests {
 	/// resolved values match the input.
 	fn start(encoder: &mut AnnounceEncoder, decoder: &mut AnnounceDecoder, suffix: &str, ids: &[u64]) -> (u64, usize) {
 		let (id, wire_path, wire_hops) = encoder.start(Path::new(suffix).to_owned(), hops(ids));
-		let size = encoder.size(&wire_path) + encoder.size(&wire_hops);
+		let size = wire_path.encode_bytes(VERSION).unwrap().len() + wire_hops.encode_bytes(VERSION).unwrap().len();
 		let (got_path, got_hops) = decoder.start(wire_path, wire_hops).unwrap();
 		assert_eq!(got_path.as_str(), suffix);
 		assert_eq!(got_hops, hops(ids));

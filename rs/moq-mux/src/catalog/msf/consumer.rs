@@ -166,7 +166,7 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>) -> Result<Catal
 /// segment, and silently skipping it would mask a publisher bug.
 fn container_from_msf(track: &moq_msf::Track) -> Result<Option<Container>> {
 	match &track.packaging {
-		// Neither is ISO-BMFF boxed, but they frame differently: a LOC property block against a VarInt
+		// Neither is ISO-BMFF boxed, but they frame differently: a LOC property block against a varint
 		// timestamp prefix. Reading one as the other misparses the head of every frame.
 		moq_msf::Packaging::Loc => Ok(Some(Container::Loc)),
 		moq_msf::Packaging::Legacy => Ok(Some(Container::Legacy)),

@@ -474,15 +474,14 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 		let recv = session.accept_uni().await.map_err(Error::from_transport)?;
 		let mut reader: Reader<S::RecvStream, crate::Version> = Reader::new(recv, outer_version);
 
-		if reader.decode_peek::<u64>().await? != setup::SETUP_V17 {
+		if reader.varint_peek().await? != setup::SETUP_V17 {
 			// Not the SETUP (group data this early is unexpected). Reject and keep waiting.
 			reader.abort(&Error::UnexpectedStream);
 			continue;
 		}
 
 		let setup: setup::Setup = reader.decode().await?;
-		let mut bytes = setup.parameters.clone();
-		let params = ietf::Parameters::decode(&mut bytes, version)?;
+		let (params, _) = ietf::Parameters::decode_slice(&setup.parameters, version)?;
 		let path = match params.get_bytes(ietf::ParameterBytes::Path) {
 			Some(bytes) => Some(
 				std::str::from_utf8(bytes)
@@ -505,8 +504,7 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 
 /// Parse the Setup Options we act on out of a raw SETUP parameter block.
 fn decode_peer_setup(parameters: bytes::Bytes, version: Version) -> Result<peer::Peer, crate::DecodeError> {
-	let mut bytes = parameters;
-	let params = ietf::Parameters::decode(&mut bytes, version)?;
+	let (params, _) = ietf::Parameters::decode_slice(&parameters, version)?;
 	peer_from_params(&params, version)
 }
 
@@ -577,17 +575,8 @@ async fn run_setup<S: crate::transport::poll::Session>(
 
 		// Frame as [type_id varint][size u16][body], the same shape as the
 		// control-stream messages this channel otherwise carries.
-		let mut body = bytes::BytesMut::new();
-		msg.encode_msg(&mut body, version)?;
-		let size: u16 = body
-			.len()
-			.try_into()
-			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
-
 		let mut writer = writer.with_version(version);
-		writer.encode(&ietf::GoAway::ID).await?;
-		writer.encode(&size).await?;
-		writer.write_all(&mut std::io::Cursor::new(body)).await?;
+		writer.encode_message(&msg).await?;
 
 		crate::goaway::enforce(&runtime, &mut session, payload.timeout).await;
 		session.closed().await;
@@ -638,10 +627,10 @@ where
 		// the peer wrote to. Failing the loop here would tear down the whole session
 		// over a single stream the peer had already given up on. Only death is
 		// tolerated: bytes that arrive and do not parse stay session-fatal.
-		let kind: u64 = match tasks
+		let kind = match tasks
 			.drive(|waiter| {
 				let mut cx = waiter.context();
-				reader.poll_decode_peek(&mut cx)
+				reader.poll_varint_peek(&mut cx)
 			})
 			.await
 		{
@@ -726,7 +715,7 @@ async fn run_uni_group<S>(
 where
 	S: crate::transport::poll::Boxable,
 {
-	let kind: u64 = stream.decode_peek().await?;
+	let kind = stream.varint_peek().await?;
 
 	// SUBGROUP_HEADER type bytes match the form 0b0XX1XXXX (spec §11.4.2):
 	// draft-14-17 use 0x10-0x1D and 0x30-0x3D, draft-18 adds 0x40 (FIRST_OBJECT)
@@ -778,20 +767,15 @@ where
 		// The intermediate results live outside the poll closure, so a Pending
 		// mid-header resumes where it left off.
 		let mut hdr_id: Option<u64> = None;
-		let mut hdr_size: Option<u16> = None;
 		let header = tasks
 			.drive(|waiter| {
 				let mut cx = waiter.context();
 				let id = match hdr_id {
 					Some(id) => id,
-					None => *hdr_id.insert(std::task::ready!(stream.reader.poll_decode(&mut cx))?),
+					None => *hdr_id.insert(std::task::ready!(stream.reader.poll_varint(&mut cx))?),
 				};
-				let size = match hdr_size {
-					Some(size) => size,
-					None => *hdr_size.insert(std::task::ready!(stream.reader.poll_decode(&mut cx))?),
-				};
-				let data = std::task::ready!(stream.reader.poll_read_exact(&mut cx, size as usize))?;
-				std::task::Poll::Ready(Ok::<_, Error>((id, data)))
+				let body = std::task::ready!(stream.reader.poll_decode::<ietf::Body>(&mut cx))?;
+				std::task::Poll::Ready(Ok::<_, Error>((id, body)))
 			})
 			.await;
 		// Same tolerance as `run_unis`: a request stream that dies before its header
@@ -835,13 +819,13 @@ async fn run_goaway<R: crate::transport::poll::RecvStream>(
 	version: Version,
 	goaway: crate::goaway::Protocol,
 ) -> Result<(), Error> {
-	let id: u64 = match reader.decode_maybe().await? {
+	let id = match reader.varint_maybe().await? {
 		Some(id) => id,
 		None => return Ok(()),
 	};
 
-	let size: u16 = reader.decode::<u16>().await?;
-	let mut data = reader.read_exact(size as usize).await?;
+	let body: ietf::Body = reader.decode().await?;
+	let mut data = body.decoder(version);
 
 	if id != ietf::GoAway::ID {
 		return Err(Error::UnexpectedMessage);
@@ -868,12 +852,12 @@ async fn run_goaway<R: crate::transport::poll::RecvStream>(
 	// control stream enforces, so close over it here too rather than logging;
 	// anything else is merely unexpected and discarded.
 	loop {
-		let id: u64 = match reader.decode_maybe().await? {
+		let id = match reader.varint_maybe().await? {
 			Some(id) => id,
 			None => return Ok(()),
 		};
-		let size: u16 = reader.decode::<u16>().await?;
-		let mut data = reader.read_exact(size as usize).await?;
+		let body: ietf::Body = reader.decode().await?;
+		let mut data = body.decoder(version);
 
 		if id == ietf::GoAway::ID {
 			let msg = ietf::GoAway::decode_msg(&mut data, version)?;
@@ -906,7 +890,7 @@ mod tests {
 		let log = crate::lite::test_transport::Log::default();
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
 
-		writer.encode(&ietf::RequestOk::ID).await.unwrap();
+		writer.varint(ietf::RequestOk::ID).await.unwrap();
 		writer
 			.encode(&ietf::RequestOk {
 				request_id: None,
@@ -914,7 +898,7 @@ mod tests {
 			})
 			.await
 			.unwrap();
-		writer.encode(&ietf::Namespace::ID).await.unwrap();
+		writer.varint(ietf::Namespace::ID).await.unwrap();
 		writer
 			.encode(&ietf::Namespace {
 				suffix: crate::Path::new("cam"),
@@ -1292,7 +1276,7 @@ mod tests {
 		let log = crate::lite::test_transport::Log::default();
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
 
-		writer.encode(&ietf::PublishNamespace::ID).await.unwrap();
+		writer.varint(ietf::PublishNamespace::ID).await.unwrap();
 		writer
 			.encode(&ietf::PublishNamespace {
 				request_id: RequestId(1),
@@ -1303,7 +1287,7 @@ mod tests {
 			.unwrap();
 
 		for _ in 0..2 {
-			writer.encode(&ietf::PublishNamespaceDone::ID).await.unwrap();
+			writer.varint(ietf::PublishNamespaceDone::ID).await.unwrap();
 			writer
 				.encode(&ietf::PublishNamespaceDone {
 					track_namespace: crate::Path::new("room/host"),
@@ -1326,7 +1310,7 @@ mod tests {
 			Version::Draft14,
 		);
 
-		writer.encode(&ietf::PublishNamespaceOk::ID).await.unwrap();
+		writer.varint(ietf::PublishNamespaceOk::ID).await.unwrap();
 		writer.encode(&ietf::PublishNamespaceOk { request_id }).await.unwrap();
 
 		let writes = log.writes.lock().unwrap();

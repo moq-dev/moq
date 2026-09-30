@@ -1,8 +1,18 @@
 use std::num::NonZero;
 
-use crate::coding::VarInt;
+use crate::coding::varint::MAX_QUIC;
 
-/// Returned when a [`Timestamp`] operation would exceed the QUIC VarInt range
+/// `value`, or `None` past the QUIC varint limit (`2^62 - 1`), so every timestamp stays
+/// encodable on moq-lite.
+const fn quic(value: u128) -> Option<u64> {
+	if value <= MAX_QUIC as u128 {
+		Some(value as u64)
+	} else {
+		None
+	}
+}
+
+/// Returned when a [`Timestamp`] operation would exceed the QUIC varint range
 /// (`2^62 - 1`), overflow during scale conversion or arithmetic, or attempt
 /// arithmetic between timestamps with mismatched scales.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -51,7 +61,7 @@ impl Timescale {
 	pub const fn new(units_per_second: u64) -> Result<Self, TimeOverflow> {
 		// Reject values that wouldn't fit in a QUIC varint, keeping the constraint
 		// symmetric with Timestamp's raw value.
-		if VarInt::from_u64(units_per_second).is_none() {
+		if quic(units_per_second as u128).is_none() {
 			return Err(TimeOverflow);
 		}
 		match NonZero::new(units_per_second) {
@@ -126,7 +136,7 @@ impl std::fmt::Display for Timescale {
 /// A timestamp in a track's timescale (units per second).
 ///
 /// All timestamps within a track are relative, so zero for one track is not zero for another.
-/// The underlying value is constrained to fit within a QUIC VarInt (`2^62 - 1`) so it can be
+/// The underlying value is constrained to fit within a QUIC varint (`2^62 - 1`) so it can be
 /// encoded and decoded easily; the scale is carried alongside so frames from different
 /// sources can be compared and converted without lossy detours through a single fixed scale.
 ///
@@ -157,7 +167,7 @@ impl std::fmt::Display for Timescale {
 /// want "same instant regardless of encoding", compare after a [`Self::convert`] to a common scale.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Timestamp {
-	value: VarInt,
+	value: u64,
 	scale: Timescale,
 }
 
@@ -174,7 +184,7 @@ impl Timestamp {
 	/// Construct a timestamp directly from a raw value at the given scale.
 	/// Returns [`TimeOverflow`] if `value` exceeds `2^62 - 1`.
 	pub const fn new(value: u64, scale: Timescale) -> Result<Self, TimeOverflow> {
-		match VarInt::from_u64(value) {
+		match quic(value as u128) {
 			Some(value) => Ok(Self { value, scale }),
 			None => Err(TimeOverflow),
 		}
@@ -216,7 +226,7 @@ impl Timestamp {
 
 	/// The raw value in the timestamp's own scale.
 	pub const fn value(self) -> u64 {
-		self.value.into_inner()
+		self.value
 	}
 
 	/// The scale (units per second) attached to this timestamp.
@@ -226,7 +236,7 @@ impl Timestamp {
 
 	/// Whether the raw value is zero. Does not consider scale.
 	pub const fn is_zero(self) -> bool {
-		self.value.into_inner() == 0
+		self.value == 0
 	}
 
 	/// Re-express this timestamp at a new scale. Returns [`TimeOverflow`] if the new
@@ -235,8 +245,8 @@ impl Timestamp {
 		if self.scale.0.get() == new_scale.0.get() {
 			return Ok(self);
 		}
-		match (self.value.into_inner() as u128).checked_mul(new_scale.0.get() as u128) {
-			Some(scaled) => match VarInt::from_u128(scaled / self.scale.0.get() as u128) {
+		match (self.value as u128).checked_mul(new_scale.0.get() as u128) {
+			Some(scaled) => match quic(scaled / self.scale.0.get() as u128) {
 				Some(value) => Ok(Self {
 					value,
 					scale: new_scale,
@@ -249,12 +259,12 @@ impl Timestamp {
 
 	/// The value re-expressed at `target` as a `u128`.
 	pub const fn as_scale(self, target: Timescale) -> u128 {
-		self.value.into_inner() as u128 * target.0.get() as u128 / self.scale.0.get() as u128
+		self.value as u128 * target.0.get() as u128 / self.scale.0.get() as u128
 	}
 
 	/// The value re-expressed in seconds.
 	pub const fn as_secs(self) -> u64 {
-		self.value.into_inner() / self.scale.0.get()
+		self.value / self.scale.0.get()
 	}
 
 	/// The value re-expressed in milliseconds.
@@ -278,7 +288,7 @@ impl Timestamp {
 		if self.scale.0.get() != rhs.scale.0.get() {
 			return Err(TimeOverflow);
 		}
-		match self.value.into_inner().checked_add(rhs.value.into_inner()) {
+		match self.value.checked_add(rhs.value) {
 			Some(result) => Self::new(result, self.scale),
 			None => Err(TimeOverflow),
 		}
@@ -290,7 +300,7 @@ impl Timestamp {
 		if self.scale.0.get() != rhs.scale.0.get() {
 			return Err(TimeOverflow);
 		}
-		match self.value.into_inner().checked_sub(rhs.value.into_inner()) {
+		match self.value.checked_sub(rhs.value) {
 			Some(result) => Self::new(result, self.scale),
 			None => Err(TimeOverflow),
 		}
@@ -314,7 +324,7 @@ impl TryFrom<std::time::Duration> for Timestamp {
 
 	/// Convert a [`std::time::Duration`] into a nanosecond-scale timestamp.
 	fn try_from(duration: std::time::Duration) -> Result<Self, Self::Error> {
-		match VarInt::from_u128(duration.as_nanos()) {
+		match quic(duration.as_nanos()) {
 			Some(value) => Ok(Self {
 				value,
 				scale: Timescale::NANO,
@@ -367,8 +377,8 @@ impl Ord for Timestamp {
 		if self.scale.0.get() == other.scale.0.get() {
 			return self.value.cmp(&other.value);
 		}
-		let lhs = self.value.into_inner() as u128 * other.scale.0.get() as u128;
-		let rhs = other.value.into_inner() as u128 * self.scale.0.get() as u128;
+		let lhs = self.value as u128 * other.scale.0.get() as u128;
+		let rhs = other.value as u128 * self.scale.0.get() as u128;
 		lhs.cmp(&rhs)
 			.then_with(|| self.scale.0.get().cmp(&other.scale.0.get()))
 			.then_with(|| self.value.cmp(&other.value))

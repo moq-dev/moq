@@ -1,570 +1,311 @@
-// Based on quinn-proto
-// https://github.com/quinn-rs/quinn/blob/main/quinn-proto/src/varint.rs
-// Licensed via Apache 2.0 and MIT
-
-use std::convert::{TryFrom, TryInto};
-use std::fmt;
+//! Variable-length integers: QUIC's two-bit length tag, and moq-transport's leading ones.
+//!
+//! A varint is a wire encoding of a plain `u64`, not a type. The codec works on the two
+//! `u32` halves so it never needs 64-bit bitwise math, which a JavaScript `number`
+//! cannot do.
 
 use thiserror::Error;
 
-use super::{Decode, DecodeError, Encode, EncodeError};
+use super::{DecodeError, EncodeError};
+use crate::{Version, ietf, lite};
 
-/// The number is too large to fit in a VarInt (62 bits).
+/// The number does not fit the target: a varint wire form or a narrower integer.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
 #[error("value out of range")]
 pub struct BoundsExceeded;
 
-/// An integer less than 2^62
+/// The largest value the QUIC form can carry: `2^62 - 1`.
+pub const MAX_QUIC: u64 = (1 << 62) - 1;
+
+/// How a protocol version lays out a varint on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Form {
+	/// QUIC's two-bit length tag, up to [`MAX_QUIC`].
+	Quic,
+	/// Leading one bits count the length, up to `u64::MAX`.
+	LeadingOnes {
+		/// Whether the 7-byte form (`1111110x`) is accepted on decode, which draft-17 forbids.
+		seven: bool,
+	},
+}
+
+impl From<lite::Version> for Form {
+	fn from(version: lite::Version) -> Self {
+		match version {
+			lite::Version::Lite01
+			| lite::Version::Lite02
+			| lite::Version::Lite03
+			| lite::Version::Lite04
+			| lite::Version::Lite05
+			| lite::Version::Lite06
+			| lite::Version::Lite07 => Self::Quic,
+		}
+	}
+}
+
+impl From<ietf::Version> for Form {
+	fn from(version: ietf::Version) -> Self {
+		match version {
+			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16 => Self::Quic,
+			ietf::Version::Draft17 => Self::LeadingOnes { seven: false },
+			_ => Self::LeadingOnes { seven: true },
+		}
+	}
+}
+
+impl From<Version> for Form {
+	fn from(version: Version) -> Self {
+		match version {
+			Version::Lite(v) => v.into(),
+			Version::Ietf(v) => v.into(),
+		}
+	}
+}
+
+/// The high and low 32 bits: the only place the codec splits a `u64`.
+const fn to_halves(value: u64) -> (u32, u32) {
+	((value >> 32) as u32, value as u32)
+}
+
+/// The inverse of [`to_halves`].
+const fn from_halves(hi: u32, lo: u32) -> u64 {
+	((hi as u64) << 32) | lo as u64
+}
+
+/// The bytes `value` takes on the wire in `form`, or [`BoundsExceeded`] if it does not fit.
+pub(crate) fn size(value: u64, form: Form) -> Result<usize, BoundsExceeded> {
+	let (hi, lo) = to_halves(value);
+	Ok(match form {
+		Form::Quic if hi == 0 && lo < 1 << 6 => 1,
+		Form::Quic if hi == 0 && lo < 1 << 14 => 2,
+		Form::Quic if hi == 0 && lo < 1 << 30 => 4,
+		Form::Quic if hi < 1 << 30 => 8,
+		Form::Quic => return Err(BoundsExceeded),
+		Form::LeadingOnes { .. } if hi == 0 && lo < 1 << 7 => 1,
+		Form::LeadingOnes { .. } if hi == 0 && lo < 1 << 14 => 2,
+		Form::LeadingOnes { .. } if hi == 0 && lo < 1 << 21 => 3,
+		Form::LeadingOnes { .. } if hi == 0 && lo < 1 << 28 => 4,
+		Form::LeadingOnes { .. } if hi < 1 << 3 => 5,
+		Form::LeadingOnes { .. } if hi < 1 << 10 => 6,
+		// The 7-byte form is skipped: one byte longer, but legal on every draft.
+		Form::LeadingOnes { .. } if hi < 1 << 24 => 8,
+		Form::LeadingOnes { .. } => 9,
+	})
+}
+
+/// Append the minimal encoding of `value` in `form`.
 ///
-/// Values of this type are suitable for encoding as QUIC variable-length integer.
-/// It would be neat if we could express to Rust that the top two bits are available for use as enum
-/// discriminants
-#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct VarInt(u64);
-
-impl VarInt {
-	/// The largest possible value.
-	pub const MAX: Self = Self((1 << 62) - 1);
-
-	/// The smallest possible value.
-	pub const ZERO: Self = Self(0);
-
-	/// Construct a `VarInt` infallibly using the largest available type.
-	/// Larger values need to use `try_from` instead.
-	pub const fn from_u32(x: u32) -> Self {
-		Self(x as u64)
-	}
-
-	/// Construct from a `u64`, or `None` if it exceeds [`Self::MAX`].
-	pub const fn from_u64(x: u64) -> Option<Self> {
-		if x <= Self::MAX.0 { Some(Self(x)) } else { None }
-	}
-
-	/// Construct from a `u128`, or `None` if it exceeds [`Self::MAX`].
-	pub const fn from_u128(x: u128) -> Option<Self> {
-		if x <= Self::MAX.0 as u128 {
-			Some(Self(x as u64))
-		} else {
-			None
-		}
-	}
-
-	/// Extract the integer value
-	pub const fn into_inner(self) -> u64 {
-		self.0
-	}
-
-	/// Encode a signed `i64` as a zigzag-then-unsigned varint: `(n << 1) ^ (n >> 63)`.
-	///
-	/// Small negative numbers map to small unsigneds (-1 -> 1, 1 -> 2, -2 -> 3, ...).
-	/// Returns [`BoundsExceeded`] if `signed` is outside `[-2^61, 2^61 - 1]`, since the
-	/// zigzag-encoded result must fit in a 62-bit varint.
-	pub const fn from_zigzag(signed: i64) -> Result<Self, BoundsExceeded> {
-		const RANGE: i64 = 1 << 61;
-		if signed < -RANGE || signed >= RANGE {
-			return Err(BoundsExceeded);
-		}
-		Ok(Self(((signed << 1) ^ (signed >> 63)) as u64))
-	}
-
-	/// Decode this varint as a signed `i64` via the inverse zigzag transform.
-	pub const fn to_zigzag(self) -> i64 {
-		let v = self.0;
-		((v >> 1) as i64) ^ -((v & 1) as i64)
-	}
-}
-
-impl From<VarInt> for u64 {
-	fn from(x: VarInt) -> Self {
-		x.0
-	}
-}
-
-impl From<VarInt> for usize {
-	fn from(x: VarInt) -> Self {
-		x.0 as usize
-	}
-}
-
-impl From<VarInt> for u128 {
-	fn from(x: VarInt) -> Self {
-		x.0 as u128
-	}
-}
-
-impl From<u8> for VarInt {
-	fn from(x: u8) -> Self {
-		Self(x.into())
-	}
-}
-
-impl From<u16> for VarInt {
-	fn from(x: u16) -> Self {
-		Self(x.into())
-	}
-}
-
-impl From<u32> for VarInt {
-	fn from(x: u32) -> Self {
-		Self(x.into())
-	}
-}
-
-impl TryFrom<u64> for VarInt {
-	type Error = BoundsExceeded;
-
-	/// Succeeds iff `x` < 2^62
-	fn try_from(x: u64) -> Result<Self, BoundsExceeded> {
-		let x = Self(x);
-		if x <= Self::MAX { Ok(x) } else { Err(BoundsExceeded) }
-	}
-}
-
-impl TryFrom<u128> for VarInt {
-	type Error = BoundsExceeded;
-
-	/// Succeeds iff `x` < 2^62
-	fn try_from(x: u128) -> Result<Self, BoundsExceeded> {
-		if x <= Self::MAX.into() {
-			Ok(Self(x as u64))
-		} else {
-			Err(BoundsExceeded)
+/// Fails past [`MAX_QUIC`] in the QUIC form, writing nothing.
+#[cfg_attr(target_arch = "wasm32", inline)]
+#[cfg_attr(not(target_arch = "wasm32"), inline(always))]
+pub(super) fn write(value: u64, form: Form, out: &mut Vec<u8>) -> Result<(), BoundsExceeded> {
+	match form {
+		Form::Quic => write_quic(value, out),
+		Form::LeadingOnes { .. } => {
+			write_leading_ones(value, out);
+			Ok(())
 		}
 	}
 }
 
-impl TryFrom<usize> for VarInt {
-	type Error = BoundsExceeded;
+// Each arm below is a fixed-size write or read, which is what keeps the codec as fast as
+// a hand-rolled `put_u16`/`get_u32`. Natively the varint path is `inline(always)` from
+// `Encoder::varint`/`Decoder::varint` down: left to LLVM's heuristics it stays a call
+// whose `Result<u64, DecodeError>` goes through memory, which doubles the cost of a varint
+// in a tight loop. wasm32 builds optimize for size, where forcing it grew moq-wasm ~10%
+// gzipped, so they keep the heuristics. The QUIC read is an if-chain rather than a `match`
+// on the tag: the jump table measured ~35% slower on a mixed-length stream.
 
-	/// Succeeds iff `x` < 2^62
-	fn try_from(x: usize) -> Result<Self, BoundsExceeded> {
-		Self::try_from(x as u64)
+#[cfg_attr(target_arch = "wasm32", inline)]
+#[cfg_attr(not(target_arch = "wasm32"), inline(always))]
+fn write_quic(value: u64, out: &mut Vec<u8>) -> Result<(), BoundsExceeded> {
+	let (hi, lo) = to_halves(value);
+	if hi == 0 && lo < 1 << 6 {
+		out.push(lo as u8);
+	} else if hi == 0 && lo < 1 << 14 {
+		out.extend_from_slice(&(0x4000 | lo as u16).to_be_bytes());
+	} else if hi == 0 && lo < 1 << 30 {
+		out.extend_from_slice(&(0x8000_0000 | lo).to_be_bytes());
+	} else if hi < 1 << 30 {
+		let [a, b, c, d] = (0xc000_0000 | hi).to_be_bytes();
+		let [e, f, g, h] = lo.to_be_bytes();
+		out.extend_from_slice(&[a, b, c, d, e, f, g, h]);
+	} else {
+		return Err(BoundsExceeded);
+	}
+	Ok(())
+}
+
+#[cfg_attr(target_arch = "wasm32", inline)]
+#[cfg_attr(not(target_arch = "wasm32"), inline(always))]
+fn write_leading_ones(value: u64, out: &mut Vec<u8>) {
+	let (hi, lo) = to_halves(value);
+	let [a, b, c, d] = lo.to_be_bytes();
+	if hi == 0 && lo < 1 << 7 {
+		out.push(d);
+	} else if hi == 0 && lo < 1 << 14 {
+		out.extend_from_slice(&[0x80 | c, d]);
+	} else if hi == 0 && lo < 1 << 21 {
+		out.extend_from_slice(&[0xc0 | b, c, d]);
+	} else if hi == 0 && lo < 1 << 28 {
+		out.extend_from_slice(&[0xe0 | a, b, c, d]);
+	} else if hi < 1 << 3 {
+		out.extend_from_slice(&[0xf0 | hi as u8, a, b, c, d]);
+	} else if hi < 1 << 10 {
+		out.extend_from_slice(&[0xf8 | (hi >> 8) as u8, hi as u8, a, b, c, d]);
+	} else if hi < 1 << 24 {
+		// The 7-byte form is skipped: one byte longer, but legal on every draft.
+		let [_, f, g, h] = hi.to_be_bytes();
+		out.extend_from_slice(&[0xfe, f, g, h, a, b, c, d]);
+	} else {
+		let [e, f, g, h] = hi.to_be_bytes();
+		out.extend_from_slice(&[0xff, e, f, g, h, a, b, c, d]);
 	}
 }
 
-impl TryFrom<VarInt> for u32 {
-	type Error = BoundsExceeded;
+/// Decode a varint in `form` from the front of `buf`, returning it and the rest of `buf`.
+#[cfg_attr(target_arch = "wasm32", inline)]
+#[cfg_attr(not(target_arch = "wasm32"), inline(always))]
+pub(super) fn read(buf: &[u8], form: Form) -> Result<(u64, &[u8]), DecodeError> {
+	match form {
+		Form::Quic => read_quic(buf),
+		Form::LeadingOnes { seven } => read_leading_ones(buf, seven),
+	}
+}
 
-	/// Succeeds iff `x` < 2^32
-	fn try_from(x: VarInt) -> Result<Self, BoundsExceeded> {
-		if x.0 <= u32::MAX.into() {
-			Ok(x.0 as u32)
-		} else {
-			Err(BoundsExceeded)
+#[cfg_attr(target_arch = "wasm32", inline)]
+#[cfg_attr(not(target_arch = "wasm32"), inline(always))]
+fn read_quic(buf: &[u8]) -> Result<(u64, &[u8]), DecodeError> {
+	let Some((&first, rest)) = buf.split_first() else {
+		return Err(DecodeError::Short);
+	};
+
+	let be = u32::from_be_bytes;
+	if first < 0x40 {
+		Ok((first as u64, rest))
+	} else if first < 0x80 {
+		let ([a, b], rest) = buf.split_first_chunk().ok_or(DecodeError::Short)?;
+		Ok((be([0, 0, a & 0x3f, *b]) as u64, rest))
+	} else if first < 0xc0 {
+		let ([a, b, c, d], rest) = buf.split_first_chunk().ok_or(DecodeError::Short)?;
+		Ok((be([a & 0x3f, *b, *c, *d]) as u64, rest))
+	} else {
+		let ([a, b, c, d, lo @ ..], rest) = buf.split_first_chunk::<8>().ok_or(DecodeError::Short)?;
+		Ok((from_halves(be([a & 0x3f, *b, *c, *d]), be(*lo)), rest))
+	}
+}
+
+#[cfg_attr(target_arch = "wasm32", inline)]
+#[cfg_attr(not(target_arch = "wasm32"), inline(always))]
+fn read_leading_ones(buf: &[u8], seven: bool) -> Result<(u64, &[u8]), DecodeError> {
+	let Some((&first, rest)) = buf.split_first() else {
+		return Err(DecodeError::Short);
+	};
+
+	let be = u32::from_be_bytes;
+	Ok(match first.leading_ones() {
+		0 => (first as u64, rest),
+		1 => {
+			let ([a, b], rest) = buf.split_first_chunk().ok_or(DecodeError::Short)?;
+			(be([0, 0, a & 0x3f, *b]) as u64, rest)
+		}
+		2 => {
+			let ([a, b, c], rest) = buf.split_first_chunk().ok_or(DecodeError::Short)?;
+			(be([0, a & 0x1f, *b, *c]) as u64, rest)
+		}
+		3 => {
+			let ([a, b, c, d], rest) = buf.split_first_chunk().ok_or(DecodeError::Short)?;
+			(be([a & 0x0f, *b, *c, *d]) as u64, rest)
+		}
+		4 => {
+			let ([a, lo @ ..], rest) = buf.split_first_chunk::<5>().ok_or(DecodeError::Short)?;
+			(from_halves((a & 0x07) as u32, be(*lo)), rest)
+		}
+		5 => {
+			let ([a, b, lo @ ..], rest) = buf.split_first_chunk::<6>().ok_or(DecodeError::Short)?;
+			(from_halves(be([0, 0, a & 0x03, *b]), be(*lo)), rest)
+		}
+		// 1111110x: the 7-byte form, which draft-17 forbids.
+		6 if !seven => return Err(DecodeError::InvalidValue),
+		6 => {
+			let ([a, b, c, lo @ ..], rest) = buf.split_first_chunk::<7>().ok_or(DecodeError::Short)?;
+			(from_halves(be([0, a & 0x01, *b, *c]), be(*lo)), rest)
+		}
+		7 => {
+			let ([_, b, c, d, lo @ ..], rest) = buf.split_first_chunk::<8>().ok_or(DecodeError::Short)?;
+			(from_halves(be([0, *b, *c, *d]), be(*lo)), rest)
+		}
+		_ => {
+			let ([_, hi @ .., e, f, g, h], rest) = buf.split_first_chunk::<9>().ok_or(DecodeError::Short)?;
+			(from_halves(be(*hi), be([*e, *f, *g, *h])), rest)
+		}
+	})
+}
+
+/// Decode a QUIC varint (two-bit length tag) from the front of `r`.
+pub fn decode_quic<R: bytes::Buf>(r: &mut R) -> Result<u64, DecodeError> {
+	let Some(&first) = r.chunk().first() else {
+		return Err(DecodeError::Short);
+	};
+
+	// Copy out so a varint split across chunks still decodes.
+	let len = 1usize << (first >> 6);
+	if r.remaining() < len {
+		return Err(DecodeError::Short);
+	}
+	let mut buf = [0u8; 8];
+	r.copy_to_slice(&mut buf[..len]);
+
+	Ok(read_quic(&buf[..len])?.0)
+}
+
+/// Encode `value` as a QUIC varint (two-bit length tag).
+///
+/// Fails with [`EncodeError::BoundsExceeded`] past [`MAX_QUIC`], writing nothing.
+pub fn encode_quic<W: bytes::BufMut>(value: u64, w: &mut W) -> Result<(), EncodeError> {
+	let len = size(value, Form::Quic)?;
+	if w.remaining_mut() < len {
+		return Err(EncodeError::Short);
+	}
+
+	let (hi, lo) = to_halves(value);
+	match len {
+		1 => w.put_u8(lo as u8),
+		2 => w.put_u16(0x4000 | lo as u16),
+		4 => w.put_u32(0x8000_0000 | lo),
+		_ => {
+			w.put_u32(0xc000_0000 | hi);
+			w.put_u32(lo);
 		}
 	}
+	Ok(())
 }
 
-impl TryFrom<VarInt> for u16 {
-	type Error = BoundsExceeded;
-
-	/// Succeeds iff `x` < 2^16
-	fn try_from(x: VarInt) -> Result<Self, BoundsExceeded> {
-		if x.0 <= u16::MAX.into() {
-			Ok(x.0 as u16)
-		} else {
-			Err(BoundsExceeded)
-		}
-	}
+/// Map a signed value onto the unsigned range: `(n << 1) ^ (n >> 63)`.
+///
+/// Small magnitudes stay small (-1 -> 1, 1 -> 2, -2 -> 3, ...), and all of `i64` fits.
+pub(crate) const fn zigzag(signed: i64) -> u64 {
+	((signed << 1) ^ (signed >> 63)) as u64
 }
 
-impl TryFrom<VarInt> for u8 {
-	type Error = BoundsExceeded;
-
-	/// Succeeds iff `x` < 2^8
-	fn try_from(x: VarInt) -> Result<Self, BoundsExceeded> {
-		if x.0 <= u8::MAX.into() {
-			Ok(x.0 as u8)
-		} else {
-			Err(BoundsExceeded)
-		}
-	}
-}
-
-impl fmt::Display for VarInt {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		self.0.fmt(f)
-	}
-}
-
-impl VarInt {
-	/// Decode a QUIC-style varint (2-bit length tag in top bits).
-	pub fn decode_quic<R: bytes::Buf>(r: &mut R) -> Result<Self, DecodeError> {
-		if !r.has_remaining() {
-			return Err(DecodeError::Short);
-		}
-
-		let b = r.get_u8();
-		let tag = b >> 6;
-
-		let mut buf = [0u8; 8];
-		buf[0] = b & 0b0011_1111;
-
-		let x = match tag {
-			0b00 => u64::from(buf[0]),
-			0b01 => {
-				if !r.has_remaining() {
-					return Err(DecodeError::Short);
-				}
-				r.copy_to_slice(buf[1..2].as_mut());
-				u64::from(u16::from_be_bytes(buf[..2].try_into().unwrap()))
-			}
-			0b10 => {
-				if r.remaining() < 3 {
-					return Err(DecodeError::Short);
-				}
-				r.copy_to_slice(buf[1..4].as_mut());
-				u64::from(u32::from_be_bytes(buf[..4].try_into().unwrap()))
-			}
-			0b11 => {
-				if r.remaining() < 7 {
-					return Err(DecodeError::Short);
-				}
-				r.copy_to_slice(buf[1..8].as_mut());
-				u64::from_be_bytes(buf)
-			}
-			_ => unreachable!(),
-		};
-
-		Ok(Self(x))
-	}
-
-	/// Encode a QUIC-style varint (2-bit length tag in top bits).
-	pub fn encode_quic<W: bytes::BufMut>(&self, w: &mut W) -> Result<(), EncodeError> {
-		let remaining = w.remaining_mut();
-		if self.0 < (1u64 << 6) {
-			if remaining < 1 {
-				return Err(EncodeError::Short);
-			}
-			w.put_u8(self.0 as u8);
-		} else if self.0 < (1u64 << 14) {
-			if remaining < 2 {
-				return Err(EncodeError::Short);
-			}
-			w.put_u16((0b01 << 14) | self.0 as u16);
-		} else if self.0 < (1u64 << 30) {
-			if remaining < 4 {
-				return Err(EncodeError::Short);
-			}
-			w.put_u32((0b10 << 30) | self.0 as u32);
-		} else if self.0 < (1u64 << 62) {
-			if remaining < 8 {
-				return Err(EncodeError::Short);
-			}
-			w.put_u64((0b11 << 62) | self.0);
-		} else {
-			return Err(BoundsExceeded.into());
-		}
-		Ok(())
-	}
-
-	/// Decode a leading-1-bits varint (draft-17+ Section 1.4.1).
-	///
-	/// The number of leading 1-bits determines the byte length:
-	/// - `0xxxxxxx` → 1 byte, 7 usable bits
-	/// - `10xxxxxx` → 2 bytes, 14 usable bits
-	/// - `110xxxxx` → 3 bytes, 21 usable bits
-	/// - `1110xxxx` → 4 bytes, 28 usable bits
-	/// - `11110xxx` → 5 bytes, 35 usable bits
-	/// - `111110xx` → 6 bytes, 42 usable bits
-	/// - `1111110x` → 7 bytes, 49 usable bits (draft-18+, INVALID in draft-17 per #1595)
-	/// - `11111110` → 8 bytes, 56 usable bits
-	/// - `11111111` → 9 bytes, 64 usable bits
-	fn decode_leading_ones<R: bytes::Buf>(r: &mut R, version: ietf::Version) -> Result<Self, DecodeError> {
-		if !r.has_remaining() {
-			return Err(DecodeError::Short);
-		}
-
-		let b = r.get_u8();
-		let ones = b.leading_ones() as usize;
-
-		match ones {
-			0 => {
-				// 0xxxxxxx: 7 bits
-				Ok(Self(u64::from(b)))
-			}
-			1 => {
-				// 10xxxxxx + 1 byte: 14 bits
-				if !r.has_remaining() {
-					return Err(DecodeError::Short);
-				}
-				let hi = u64::from(b & 0x3F);
-				let lo = u64::from(r.get_u8());
-				Ok(Self((hi << 8) | lo))
-			}
-			2 => {
-				// 110xxxxx + 2 bytes: 21 bits
-				if r.remaining() < 2 {
-					return Err(DecodeError::Short);
-				}
-				let hi = u64::from(b & 0x1F);
-				let mut buf = [0u8; 2];
-				r.copy_to_slice(&mut buf);
-				Ok(Self((hi << 16) | u64::from(u16::from_be_bytes(buf))))
-			}
-			3 => {
-				// 1110xxxx + 3 bytes: 28 bits
-				if r.remaining() < 3 {
-					return Err(DecodeError::Short);
-				}
-				let hi = u64::from(b & 0x0F);
-				let mut buf = [0u8; 3];
-				r.copy_to_slice(&mut buf);
-				Ok(Self(
-					(hi << 24) | u64::from(buf[0]) << 16 | u64::from(buf[1]) << 8 | u64::from(buf[2]),
-				))
-			}
-			4 => {
-				// 11110xxx + 4 bytes: 35 bits
-				if r.remaining() < 4 {
-					return Err(DecodeError::Short);
-				}
-				let hi = u64::from(b & 0x07);
-				let mut buf = [0u8; 4];
-				r.copy_to_slice(&mut buf);
-				Ok(Self((hi << 32) | u64::from(u32::from_be_bytes(buf))))
-			}
-			5 => {
-				// 111110xx + 5 bytes: 42 bits
-				if r.remaining() < 5 {
-					return Err(DecodeError::Short);
-				}
-				let hi = u64::from(b & 0x03);
-				let mut buf = [0u8; 5];
-				r.copy_to_slice(&mut buf);
-				let lo = u64::from(buf[0]) << 32
-					| u64::from(buf[1]) << 24
-					| u64::from(buf[2]) << 16
-					| u64::from(buf[3]) << 8
-					| u64::from(buf[4]);
-				Ok(Self((hi << 40) | lo))
-			}
-			6 => {
-				// 1111110x + 6 bytes, 49 bits (draft-18+, INVALID in draft-17 per #1595)
-				if matches!(version, ietf::Version::Draft17) {
-					return Err(DecodeError::InvalidValue);
-				}
-				if r.remaining() < 6 {
-					return Err(DecodeError::Short);
-				}
-				let hi = u64::from(b & 0x01);
-				let mut buf = [0u8; 8];
-				r.copy_to_slice(&mut buf[2..]);
-				Ok(Self((hi << 48) | u64::from_be_bytes(buf)))
-			}
-			7 => {
-				// 11111110 + 7 bytes: 56 bits
-				if r.remaining() < 7 {
-					return Err(DecodeError::Short);
-				}
-				let mut buf = [0u8; 8];
-				buf[0] = 0;
-				r.copy_to_slice(&mut buf[1..]);
-				Ok(Self(u64::from_be_bytes(buf)))
-			}
-			8 => {
-				// 11111111 + 8 bytes: 64 bits
-				if r.remaining() < 8 {
-					return Err(DecodeError::Short);
-				}
-				let mut buf = [0u8; 8];
-				r.copy_to_slice(&mut buf);
-				Ok(Self(u64::from_be_bytes(buf)))
-			}
-			_ => unreachable!(),
-		}
-	}
-
-	/// Encode a leading-1-bits varint (draft-17+ Section 1.4.1).
-	///
-	/// Always emits the minimal canonical form. Draft-18 also accepts 7-byte form
-	/// (`1111110x`) on decode but we never emit it because the 8-byte form is one byte
-	/// larger but simpler and is universally valid.
-	fn encode_leading_ones<W: bytes::BufMut>(&self, w: &mut W, _version: ietf::Version) -> Result<(), EncodeError> {
-		let x = self.0;
-		let remaining = w.remaining_mut();
-
-		if x < (1 << 7) {
-			// 0xxxxxxx: 1 byte
-			if remaining < 1 {
-				return Err(EncodeError::Short);
-			}
-			w.put_u8(x as u8);
-		} else if x < (1 << 14) {
-			// 10xxxxxx: 2 bytes
-			if remaining < 2 {
-				return Err(EncodeError::Short);
-			}
-			w.put_u8(0x80 | (x >> 8) as u8);
-			w.put_u8(x as u8);
-		} else if x < (1 << 21) {
-			// 110xxxxx: 3 bytes
-			if remaining < 3 {
-				return Err(EncodeError::Short);
-			}
-			w.put_u8(0xC0 | (x >> 16) as u8);
-			w.put_u16(x as u16);
-		} else if x < (1 << 28) {
-			// 1110xxxx: 4 bytes
-			if remaining < 4 {
-				return Err(EncodeError::Short);
-			}
-			w.put_u8(0xE0 | (x >> 24) as u8);
-			w.put_u8((x >> 16) as u8);
-			w.put_u16(x as u16);
-		} else if x < (1 << 35) {
-			// 11110xxx: 5 bytes
-			if remaining < 5 {
-				return Err(EncodeError::Short);
-			}
-			w.put_u8(0xF0 | (x >> 32) as u8);
-			w.put_u32(x as u32);
-		} else if x < (1 << 42) {
-			// 111110xx: 6 bytes
-			if remaining < 6 {
-				return Err(EncodeError::Short);
-			}
-			w.put_u8(0xF8 | (x >> 40) as u8);
-			w.put_u8((x >> 32) as u8);
-			w.put_u32(x as u32);
-		} else if x < (1 << 56) {
-			// 11111110: 8 bytes (skips 7)
-			if remaining < 8 {
-				return Err(EncodeError::Short);
-			}
-			w.put_u8(0xFE);
-			// Write 7 bytes: high byte then low 6 bytes
-			w.put_u8((x >> 48) as u8);
-			w.put_u16((x >> 32) as u16);
-			w.put_u32(x as u32);
-		} else {
-			// 11111111: 9 bytes
-			if remaining < 9 {
-				return Err(EncodeError::Short);
-			}
-			w.put_u8(0xFF);
-			w.put_u64(x);
-		}
-
-		Ok(())
-	}
-}
-
-use crate::{Version, ietf, lite};
-
-// All lite versions use QUIC-style varint encoding.
-impl Encode<lite::Version> for VarInt {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, _: lite::Version) -> Result<(), EncodeError> {
-		self.encode_quic(w)
-	}
-}
-
-impl Decode<lite::Version> for VarInt {
-	fn decode<R: bytes::Buf>(r: &mut R, _: lite::Version) -> Result<Self, DecodeError> {
-		Self::decode_quic(r)
-	}
-}
-
-// Draft14-16 use QUIC-style varints; draft-17+ uses leading-ones.
-impl Encode<ietf::Version> for VarInt {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: ietf::Version) -> Result<(), EncodeError> {
-		match version {
-			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16 => self.encode_quic(w),
-			_ => self.encode_leading_ones(w, version),
-		}
-	}
-}
-
-impl Decode<ietf::Version> for VarInt {
-	fn decode<R: bytes::Buf>(r: &mut R, version: ietf::Version) -> Result<Self, DecodeError> {
-		match version {
-			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16 => Self::decode_quic(r),
-			_ => Self::decode_leading_ones(r, version),
-		}
-	}
-}
-
-// The top-level Version delegates to the sub-version impls.
-impl Encode<Version> for VarInt {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		match version {
-			Version::Lite(v) => self.encode(w, v),
-			Version::Ietf(v) => self.encode(w, v),
-		}
-	}
-}
-
-impl Decode<Version> for VarInt {
-	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		match version {
-			Version::Lite(v) => Self::decode(r, v),
-			Version::Ietf(v) => Self::decode(r, v),
-		}
-	}
-}
-
-// Blanket impls for integer types that delegate to VarInt.
-impl<V: Copy> Encode<V> for u64
-where
-	VarInt: Encode<V>,
-{
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
-		VarInt::try_from(*self)?.encode(w, version)
-	}
-}
-
-impl<V: Copy> Decode<V> for u64
-where
-	VarInt: Decode<V>,
-{
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		VarInt::decode(r, version).map(|v| v.into_inner())
-	}
-}
-
-impl<V: Copy> Encode<V> for usize
-where
-	VarInt: Encode<V>,
-{
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
-		VarInt::try_from(*self)?.encode(w, version)
-	}
-}
-
-impl<V: Copy> Decode<V> for usize
-where
-	VarInt: Decode<V>,
-{
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		VarInt::decode(r, version).map(|v| v.into_inner() as usize)
-	}
-}
-
-impl<V: Copy> Encode<V> for u32
-where
-	VarInt: Encode<V>,
-{
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
-		VarInt::from(*self).encode(w, version)
-	}
-}
-
-impl<V: Copy> Decode<V> for u32
-where
-	VarInt: Decode<V>,
-{
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		let v = VarInt::decode(r, version)?;
-		let v = v.try_into().map_err(|_| DecodeError::BoundsExceeded)?;
-		Ok(v)
-	}
+/// The inverse of [`zigzag`].
+pub(crate) const fn unzigzag(value: u64) -> i64 {
+	((value >> 1) as i64) ^ -((value & 1) as i64)
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::{ietf, lite};
-	use bytes::Bytes;
+
+	const DRAFT17: Form = Form::LeadingOnes { seven: false };
+	const DRAFT18: Form = Form::LeadingOnes { seven: true };
+
+	fn encode(value: u64, form: Form) -> Result<Vec<u8>, BoundsExceeded> {
+		let mut buf = Vec::new();
+		write(value, form, &mut buf)?;
+		assert_eq!(buf.len(), size(value, form)?, "size disagrees with the encoding");
+		Ok(buf)
+	}
 
 	/// Test vectors from the draft-17 spec (Table 2: Example Integer Encodings),
 	/// excluding the known-buggy example 4 (0xdd7f3e7d).
@@ -588,26 +329,13 @@ mod tests {
 		];
 
 		for (bytes, expected) in cases {
-			// Test decoding
-			let mut buf = Bytes::from(bytes.to_vec());
-			let decoded = VarInt::decode_leading_ones(&mut buf, ietf::Version::Draft17).expect("decode should succeed");
-			assert_eq!(
-				decoded.into_inner(),
-				*expected,
-				"decode mismatch for bytes {bytes:02x?}"
-			);
-			assert_eq!(buf.len(), 0, "all bytes should be consumed for {bytes:02x?}");
+			let (decoded, rest) = read(bytes, DRAFT17).expect("decode should succeed");
+			assert_eq!(decoded, *expected, "decode mismatch for bytes {bytes:02x?}");
+			assert!(rest.is_empty(), "all bytes should be consumed for {bytes:02x?}");
 
-			// Test round-trip encode:
-			// - Skip non-minimal encoding (0x8025 for 37)
-			// - Skip u64::MAX which exceeds VarInt::MAX (2^62-1) but is decodable
-			if let Some(varint) = VarInt::from_u64(*expected)
-				&& (bytes.len() == 1 || *expected != 37)
-			{
-				let mut encoded = Vec::new();
-				varint
-					.encode_leading_ones(&mut encoded, ietf::Version::Draft17)
-					.expect("encode should succeed");
+			// Skip the non-minimal encoding (0x8025 for 37); we only emit the minimal one.
+			if bytes.len() == 1 || *expected != 37 {
+				let encoded = encode(*expected, DRAFT17).unwrap();
 				assert_eq!(&encoded, bytes, "encode mismatch for value {expected}");
 			}
 		}
@@ -616,12 +344,8 @@ mod tests {
 	/// 11111100 (0xFC) is an invalid code point on draft-17 (allowed as 7-byte form on draft-18+).
 	#[test]
 	fn leading_ones_invalid_0xfc() {
-		let mut buf = Bytes::from_static(&[0xFC]);
 		assert!(
-			matches!(
-				VarInt::decode_leading_ones(&mut buf, ietf::Version::Draft17),
-				Err(DecodeError::InvalidValue)
-			),
+			matches!(read(&[0xFC], DRAFT17), Err(DecodeError::InvalidValue)),
 			"0xFC should be rejected as invalid on draft-17"
 		);
 	}
@@ -638,84 +362,99 @@ mod tests {
 		];
 
 		for (value, expected_len) in cases {
-			let varint = VarInt::from_u64(value).expect("value should be representable as VarInt");
-			let mut encoded = Vec::new();
-			varint
-				.encode_leading_ones(&mut encoded, ietf::Version::Draft17)
-				.expect("leading-ones encode should succeed");
+			let encoded = encode(value, DRAFT17).unwrap();
 			assert_eq!(
 				encoded.len(),
 				expected_len,
 				"unexpected encoded length for value {value}"
 			);
 
-			let mut bytes = Bytes::from(encoded);
-			let decoded = VarInt::decode_leading_ones(&mut bytes, ietf::Version::Draft17)
-				.expect("leading-ones decode should succeed");
-			assert_eq!(decoded.into_inner(), value, "round-trip mismatch for value {value}");
+			let (decoded, _) = read(&encoded, DRAFT17).expect("leading-ones decode should succeed");
+			assert_eq!(decoded, value, "round-trip mismatch for value {value}");
+		}
+	}
+
+	/// Every length class of both forms survives a round trip, including the boundaries
+	/// of each class.
+	#[test]
+	fn every_length_round_trips() {
+		for bits in 0..64 {
+			for value in [1u64 << bits, (1u64 << bits) - 1, (1u64 << bits) + 1] {
+				for form in [Form::Quic, DRAFT17, DRAFT18] {
+					let Ok(encoded) = encode(value, form) else {
+						assert_eq!(form, Form::Quic);
+						assert!(value > MAX_QUIC);
+						continue;
+					};
+					let (decoded, rest) = read(&encoded, form).unwrap();
+					assert_eq!((decoded, rest), (value, &[][..]), "{form:?} {value}");
+				}
+			}
+		}
+	}
+
+	/// The QUIC form stops at 2^62 - 1 and refuses anything past it rather than
+	/// truncating, while the leading-ones form carries the whole u64.
+	#[test]
+	fn quic_refuses_past_62_bits() {
+		assert_eq!(encode(MAX_QUIC, Form::Quic).unwrap(), [0xff; 8]);
+
+		for value in [1u64 << 62, u64::MAX] {
+			assert_eq!(encode(value, Form::Quic), Err(BoundsExceeded));
+			assert!(matches!(
+				encode_quic(value, &mut Vec::new()),
+				Err(EncodeError::BoundsExceeded)
+			));
+		}
+
+		for value in [MAX_QUIC, 1u64 << 62, u64::MAX] {
+			let encoded = encode(value, DRAFT18).unwrap();
+			assert_eq!(encoded.len(), 9);
+			assert_eq!(read(&encoded, DRAFT18).unwrap().0, value);
 		}
 	}
 
 	#[test]
 	fn draft17_rejects_7_byte_varint() {
 		// 1111110x prefix: invalid on draft-17.
-		let bytes = Bytes::from(vec![0xFC, 0, 0, 0, 0, 0, 0]);
-		let mut buf = bytes.clone();
-		let err = VarInt::decode_leading_ones(&mut buf, ietf::Version::Draft17).unwrap_err();
+		let err = read(&[0xFC, 0, 0, 0, 0, 0, 0], DRAFT17).unwrap_err();
 		assert!(matches!(err, DecodeError::InvalidValue));
 	}
 
 	#[test]
 	fn zigzag_roundtrip_small() {
 		for n in [-3i64, -2, -1, 0, 1, 2, 3, 100, -100] {
-			let v = VarInt::from_zigzag(n).unwrap();
-			assert_eq!(v.to_zigzag(), n, "roundtrip failed for {}", n);
+			assert_eq!(unzigzag(zigzag(n)), n, "roundtrip failed for {}", n);
 		}
 	}
 
 	#[test]
 	fn zigzag_small_values_compact() {
 		// First few values should fit in 1 byte (varint range 0..=63 = top-2-bits tag 00).
-		assert_eq!(VarInt::from_zigzag(0).unwrap().into_inner(), 0);
-		assert_eq!(VarInt::from_zigzag(-1).unwrap().into_inner(), 1);
-		assert_eq!(VarInt::from_zigzag(1).unwrap().into_inner(), 2);
-		assert_eq!(VarInt::from_zigzag(-2).unwrap().into_inner(), 3);
-		assert_eq!(VarInt::from_zigzag(2).unwrap().into_inner(), 4);
+		assert_eq!([0, -1, 1, -2, 2].map(zigzag), [0, 1, 2, 3, 4]);
 	}
 
+	/// Zigzag covers the whole i64 range; only the QUIC form bounds what goes on the wire.
 	#[test]
 	fn zigzag_roundtrip_boundary() {
-		// Boundary values in the valid input range [-2^61, 2^61 - 1].
-		let max = (1i64 << 61) - 1;
-		let min = -(1i64 << 61);
 		let mid = (1i64 << 30) + 17;
 
-		for n in [max, min, mid, -mid] {
-			let v = VarInt::from_zigzag(n).unwrap();
-			assert_eq!(v.to_zigzag(), n);
+		for n in [i64::MAX, i64::MIN, (1i64 << 61) - 1, -(1i64 << 61), mid, -mid] {
+			assert_eq!(unzigzag(zigzag(n)), n);
 		}
-	}
 
-	#[test]
-	fn zigzag_out_of_range_rejected() {
-		// Values past the i61 boundary are out of varint range.
-		assert!(VarInt::from_zigzag(1i64 << 61).is_err());
-		assert!(VarInt::from_zigzag(-(1i64 << 61) - 1).is_err());
-		assert!(VarInt::from_zigzag(i64::MAX).is_err());
-		assert!(VarInt::from_zigzag(i64::MIN).is_err());
+		assert_eq!(zigzag(i64::MIN), u64::MAX);
+		assert!(zigzag(1i64 << 61) > MAX_QUIC);
+		assert_eq!(zigzag(-(1i64 << 61)), MAX_QUIC);
 	}
 
 	#[test]
 	fn zigzag_quic_varint_roundtrip() {
 		// Encode a zigzag value through the QUIC varint wire format.
 		for n in [-5000i64, 0, 100, -1, 1_000_000, -1_000_000] {
-			let v = VarInt::from_zigzag(n).unwrap();
-
-			let mut buf = bytes::BytesMut::new();
-			v.encode(&mut buf, lite::Version::Lite01).unwrap();
-			let mut bytes = buf.freeze();
-			let decoded = VarInt::decode(&mut bytes, lite::Version::Lite01).unwrap();
-			assert_eq!(decoded.to_zigzag(), n);
+			let bytes = encode(zigzag(n), Form::Quic).unwrap();
+			let (decoded, _) = read(&bytes, Form::Quic).unwrap();
+			assert_eq!(unzigzag(decoded), n);
 		}
 	}
 
@@ -731,8 +470,23 @@ mod tests {
 		for shift in (0..48).step_by(8).rev() {
 			bytes.push(((value >> shift) & 0xFF) as u8);
 		}
-		let mut buf = Bytes::from(bytes);
-		let decoded = VarInt::decode_leading_ones(&mut buf, ietf::Version::Draft18).unwrap();
-		assert_eq!(decoded.into_inner(), value);
+		let (decoded, _) = read(&bytes, DRAFT18).unwrap();
+		assert_eq!(decoded, value);
+	}
+
+	/// The Buf-based helpers other crates use read and write the same bytes, even when
+	/// the varint straddles two chunks.
+	#[test]
+	fn quic_helpers_match_the_codec() {
+		use bytes::Buf;
+
+		let value = 0x1234_5678u64;
+		let mut out = Vec::new();
+		encode_quic(value, &mut out).unwrap();
+		assert_eq!(out, encode(value, Form::Quic).unwrap());
+
+		let mut split = (&out[..2]).chain(&out[2..]);
+		assert_eq!(decode_quic(&mut split).unwrap(), value);
+		assert!(!split.has_remaining());
 	}
 }

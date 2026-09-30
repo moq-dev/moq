@@ -1,7 +1,7 @@
 use std::ops::RangeInclusive;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use moq_net::VarInt;
+use moq_net::varint;
 
 use crate::path::{check_id, check_range};
 use crate::{Error, Result, VERSION};
@@ -203,12 +203,11 @@ fn validate(groups: &[Group]) -> Result<()> {
 }
 
 fn write_varint(buf: &mut impl BufMut, value: u64) -> Result<()> {
-	let value = VarInt::try_from(value).map_err(|_| Error::Overflow)?;
-	value.encode_quic(buf).map_err(|_| Error::Overflow)
+	varint::encode_quic(value, buf).map_err(|_| Error::Overflow)
 }
 
 fn read_varint(buf: &mut impl Buf) -> Result<u64> {
-	Ok(VarInt::decode_quic(buf).map_err(|_| Error::Table)?.into_inner())
+	varint::decode_quic(buf).map_err(|_| Error::Table)
 }
 
 fn read_count(buf: &mut impl Buf, min_entry: usize) -> Result<usize> {

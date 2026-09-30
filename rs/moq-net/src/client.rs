@@ -353,7 +353,7 @@ impl Client {
 
 		stream.writer.encode(&client).await?;
 
-		let mut server: setup::Server = stream.reader.decode().await?;
+		let server: setup::Server = stream.reader.decode().await?;
 
 		let version = supported
 			.iter()
@@ -387,7 +387,7 @@ impl Client {
 			Version::Ietf(v) => {
 				// Decode the parameters to get the initial request ID and what the server
 				// requires of us.
-				let parameters = ietf::Parameters::decode(&mut server.parameters, v)?;
+				let (parameters, _) = ietf::Parameters::decode_slice(&server.parameters, v)?;
 				let request_id_max = parameters
 					.get_varint(ietf::ParameterVarInt::MaxRequestId)
 					.map(ietf::RequestId);
@@ -652,13 +652,17 @@ mod tests {
 			parameters: Bytes::new(),
 		};
 		server
-			.encode(&mut encoded, Version::Ietf(ietf::Version::Draft14))
+			.encode(
+				&mut crate::coding::Encoder::new(&mut encoded, (Version::Ietf(ietf::Version::Draft14)).into()),
+				Version::Ietf(ietf::Version::Draft14),
+			)
 			.unwrap();
 
 		// Add a setup-stream SessionInfo frame using the negotiated Lite version.
 		let info = lite::SessionInfo { bitrate: Some(1) };
 		let lite_v = lite::Version::try_from(negotiated).unwrap();
-		info.encode(&mut encoded, lite_v).unwrap();
+		info.encode(&mut crate::coding::Encoder::new(&mut encoded, lite_v.into()), lite_v)
+			.unwrap();
 
 		encoded
 	}
@@ -684,7 +688,12 @@ mod tests {
 
 		// Verify the client setup was encoded using Draft14 framing (ALPN_LITE fallback path).
 		let mut setup_bytes = Bytes::from(fake.control_writes());
-		let setup = setup::Client::decode(&mut setup_bytes, Version::Ietf(ietf::Version::Draft14)).unwrap();
+		let setup = crate::coding::decode_buf(
+			&mut setup_bytes,
+			Version::Ietf(ietf::Version::Draft14),
+			setup::Client::decode,
+		)
+		.unwrap();
 		let advertised: Vec<Version> = setup.versions.iter().map(|v| Version::try_from(*v).unwrap()).collect();
 		assert_eq!(
 			advertised,

@@ -334,7 +334,7 @@ impl Server {
 		// Legacy bidi SETUP exchange (IETF 14-16, lite 01/02). Read the client's
 		// SETUP to choose the version; `ok()` sends the server SETUP and starts.
 		let mut stream = Stream::accept(&mut session, encoding).await?;
-		let mut client: setup::Client = stream.reader.decode().await?;
+		let client: setup::Client = stream.reader.decode().await?;
 
 		let version = client
 			.versions
@@ -348,7 +348,7 @@ impl Server {
 		// in its SETUP just like lite-05.
 		let (path, token, request_id_max, peer_declared) = match version {
 			Version::Ietf(v) => {
-				let params = ietf::Parameters::decode(&mut client.parameters, v)?;
+				let (params, _) = ietf::Parameters::decode_slice(&client.parameters, v)?;
 				let path = match params.get_bytes(ietf::ParameterBytes::Path) {
 					Some(bytes) => Some(
 						std::str::from_utf8(bytes)
@@ -979,7 +979,9 @@ mod tests {
 	fn lite05_setup(path: Option<&str>, role: Option<Role>, hop: Option<Hop>) -> Vec<u8> {
 		let v = lite::Version::Lite05;
 		let mut buf = Vec::new();
-		lite::DataType::Setup.encode(&mut buf, v).unwrap();
+		lite::DataType::Setup
+			.encode(&mut crate::coding::Encoder::new(&mut buf, v.into()), v)
+			.unwrap();
 		lite::Setup {
 			probe: lite::ProbeLevel::None,
 			path: path.map(str::to_string),
@@ -987,7 +989,7 @@ mod tests {
 			cost: None,
 			hop,
 		}
-		.encode(&mut buf, v)
+		.encode(&mut crate::coding::Encoder::new(&mut buf, v.into()), v)
 		.unwrap();
 		buf
 	}
@@ -1007,7 +1009,10 @@ mod tests {
 
 		let mut buf = Vec::new();
 		setup::Setup { parameters }
-			.encode(&mut buf, crate::Version::Ietf(version))
+			.encode(
+				&mut crate::coding::Encoder::new(&mut buf, (crate::Version::Ietf(version)).into()),
+				crate::Version::Ietf(version),
+			)
 			.unwrap();
 		buf
 	}
@@ -1019,7 +1024,10 @@ mod tests {
 			versions: crate::coding::Versions::from([crate::Version::Ietf(version).into()]),
 			parameters: params.encode_bytes(version).unwrap(),
 		}
-		.encode(&mut buf, crate::Version::Ietf(version))
+		.encode(
+			&mut crate::coding::Encoder::new(&mut buf, (crate::Version::Ietf(version)).into()),
+			crate::Version::Ietf(version),
+		)
 		.unwrap();
 		buf
 	}
@@ -1138,7 +1146,12 @@ mod tests {
 	/// Encode a lite-05 GROUP uni stream header (just the `DataType::Group` tag).
 	fn lite05_group() -> Vec<u8> {
 		let mut buf = Vec::new();
-		lite::DataType::Group.encode(&mut buf, lite::Version::Lite05).unwrap();
+		lite::DataType::Group
+			.encode(
+				&mut crate::coding::Encoder::new(&mut buf, lite::Version::Lite05.into()),
+				lite::Version::Lite05,
+			)
+			.unwrap();
 		buf
 	}
 

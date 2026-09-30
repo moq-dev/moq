@@ -30,9 +30,12 @@ Decided in planning (2026-09-27), with the spike data in
   and bytes out, no runtime. The async helper methods move behind an `async`
   cargo feature; rs2ts reads the crate without it and JS reimplements the
   helpers with Promises. No second crate.
-- Varints are not bounded to 2^53 on the wire: 62 bits in QUIC form, 64 in
-  leading-ones form. JS holds any `u64` as a `U64` with checked conversion to
-  and from `number`; varints are only its wire encoding.
+- Values are plain `u64` in Rust, and varint is a wire encoding in the codec,
+  not a type. The spec is not bounded to 2^53: the leading-ones form
+  (moq-transport draft-17+) carries all 64 bits, and the QUIC form (moq-lite,
+  drafts 14-16) refuses anything past 2^62 - 1 rather than truncating. Rust
+  `u64` maps to a TypeScript `U64` (two `u32` halves), generically, with
+  checked conversion to and from `number`.
 - The generated TypeScript is committed and a CI lane regenerates it and
   fails on drift, so JS contributors and npm publishing never need the
   nightly toolchain Charon pins. It lives inside js/net and `@moq/net` stays
@@ -54,23 +57,20 @@ js/net it replaces, measured with the [browser benchmarks](/quest/m1/browser-ben
 
 ## Required
 
-- [VarInt codec](/quest/m1/rs2ts/varint-codec.md) - moq-net encodes through a `VarInt` newtype and a concrete slice-based codec, not generic traits on primitives
 - [rs2ts](/quest/m1/rs2ts/translator.md) - a Charon-based translator emits readable TypeScript for moq-net's lite codec, committed and checked for drift in CI
 - [Sans-IO moq-net](/quest/m1/rs2ts/sans-io/README.md) - moq-net builds and runs without a runtime; async helpers sit behind an `async` feature
 - [Mock-clock tests](/quest/m1/rs2ts/mock-clock.md) - moq-net's tests run on the sans-IO clock instead of tokio, so they translate with the code
 - [Generated lite](/quest/m1/rs2ts/lite.md) - @moq/net's lite session and model layer are generated from moq-net
+- [IETF parameters](/quest/m1/rs2ts/ietf-params.md) - the IETF codec drops its `Param` trait on primitives, so it translates like lite
 - [Generated IETF](/quest/m1/rs2ts/ietf.md) - @moq/net's moq-transport session is generated too
 - [Remove moq-wasm](/quest/m1/rs2ts/remove-wasm.md) - the WASM experiment is deleted once generated lite ships
+- [Browser benchmarks](/quest/m1/browser-benchmarks.md) - the harness the no-downgrade report uses
 
 ## Closes
 
 - [#2907](https://github.com/moq-dev/moq/issues/2907) - close this issue when the quest finishes
 - [#2822](https://github.com/moq-dev/moq/issues/2822) - close this issue when the quest finishes
 - [#2835](https://github.com/moq-dev/moq/issues/2835) - close this issue when the quest finishes
-
-## Required
-
-- [Browser benchmarks](/quest/m1/browser-benchmarks.md) - the harness the no-downgrade report uses
 
 ## Related
 

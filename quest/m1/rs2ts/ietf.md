@@ -18,3 +18,4 @@ Public API: breaks `@moq/net`; retargets to `dev`. Wire: none.
 
 - [Generated lite](/quest/m1/rs2ts/lite.md) - the pipeline this reuses
 - [Sans-IO IETF session](/quest/m1/rs2ts/sans-io/ietf.md) - the session shape it translates
+- [IETF parameters](/quest/m1/rs2ts/ietf-params.md) - the concrete parameter codec it translates

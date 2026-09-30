@@ -5,9 +5,9 @@
 //! boundary, so unlike a [`super::Message`] there is no inner length prefix. The model counterpart
 //! is [`crate::Datagram`].
 
-use bytes::{Buf, BufMut, Bytes};
+use bytes::Bytes;
 
-use crate::coding::{Decode, DecodeError, Encode, EncodeError};
+use crate::coding::{DecodeError, Decoder, Encode, EncodeError, Encoder};
 
 use super::Version;
 
@@ -25,35 +25,35 @@ pub struct Datagram {
 }
 
 impl Encode<Version> for Datagram {
-	fn encode<W: BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		if !version.has_datagrams() {
 			return Err(EncodeError::Version);
 		}
 
-		self.subscribe.encode(w, version)?;
-		self.sequence.encode(w, version)?;
-		self.timestamp.encode(w, version)?;
+		w.varint(self.subscribe)?;
+		w.varint(self.sequence)?;
+		w.varint(self.timestamp)?;
 
 		// Payload runs to the datagram boundary: written raw, no length prefix.
-		if w.remaining_mut() < self.payload.len() {
-			return Err(EncodeError::Short);
-		}
-		w.put_slice(&self.payload);
+		w.slice(&self.payload);
 		Ok(())
 	}
 }
 
-impl Decode<Version> for Datagram {
-	fn decode<R: Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+impl Datagram {
+	/// Decode a whole datagram body. The payload shares `buf` rather than copying it.
+	pub fn decode(buf: Bytes, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_datagrams() {
 			return Err(DecodeError::Version);
 		}
 
-		let subscribe = u64::decode(r, version)?;
-		let sequence = u64::decode(r, version)?;
-		let timestamp = u64::decode(r, version)?;
+		let mut r = Decoder::new(&buf, version.into());
+		let subscribe = r.varint()?;
+		let sequence = r.varint()?;
+		let timestamp = r.varint()?;
+
 		// Everything remaining is the payload (the datagram boundary delimits it).
-		let payload = r.copy_to_bytes(r.remaining());
+		let payload = buf.slice(buf.len() - r.remaining()..);
 
 		Ok(Self {
 			subscribe,
@@ -67,7 +67,6 @@ impl Decode<Version> for Datagram {
 #[cfg(test)]
 mod test {
 	use super::*;
-	use bytes::BytesMut;
 
 	#[test]
 	fn roundtrip() {
@@ -77,12 +76,9 @@ mod test {
 			timestamp: 1_000,
 			payload: Bytes::from_static(b"hello"),
 		};
-		let mut buf = BytesMut::new();
-		original.encode(&mut buf, Version::Lite05).unwrap();
-		let mut slice = &buf[..];
-		let decoded = Datagram::decode(&mut slice, Version::Lite05).unwrap();
-		assert_eq!(decoded, original);
-		assert!(!slice.has_remaining(), "payload has no trailing length prefix");
+		let buf = original.encode_bytes(Version::Lite05).unwrap();
+		let decoded = Datagram::decode(buf, Version::Lite05).unwrap();
+		assert_eq!(decoded, original, "payload has no trailing length prefix");
 	}
 
 	#[test]
@@ -93,10 +89,8 @@ mod test {
 			timestamp: 0,
 			payload: Bytes::new(),
 		};
-		let mut buf = BytesMut::new();
-		original.encode(&mut buf, Version::Lite05).unwrap();
-		let mut slice = &buf[..];
-		let decoded = Datagram::decode(&mut slice, Version::Lite05).unwrap();
+		let buf = original.encode_bytes(Version::Lite05).unwrap();
+		let decoded = Datagram::decode(buf, Version::Lite05).unwrap();
 		assert_eq!(decoded, original);
 	}
 
@@ -124,15 +118,10 @@ mod test {
 			timestamp: 3,
 			payload: Bytes::from_static(b"x"),
 		};
-		let mut buf = BytesMut::new();
-		assert!(matches!(
-			dg.encode(&mut buf, Version::Lite04),
-			Err(EncodeError::Version)
-		));
+		assert!(matches!(dg.encode_bytes(Version::Lite04), Err(EncodeError::Version)));
 
-		let mut slice = &b"\x01\x02\x03x"[..];
 		assert!(matches!(
-			Datagram::decode(&mut slice, Version::Lite04),
+			Datagram::decode(Bytes::from_static(b"\x01\x02\x03x"), Version::Lite04),
 			Err(DecodeError::Version)
 		));
 	}

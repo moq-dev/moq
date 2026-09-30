@@ -75,6 +75,12 @@ name = "announce"
 harness = false
 required-features = ["fuzz"]
 
+# Reaches the private message codecs through the hidden `fuzz` module.
+[[bench]]
+name = "codec"
+harness = false
+required-features = ["fuzz"]
+
 [[bench]]
 name = "group"
 harness = false

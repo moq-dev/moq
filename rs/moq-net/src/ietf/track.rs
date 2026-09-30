@@ -28,21 +28,21 @@ pub struct TrackStatus<'a> {
 impl Message for TrackStatus<'_> {
 	const ID: u64 = 0x0d;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		if version == Version::Draft17 {
-			0u64.encode(w, version)?; // required_request_id_delta = 0
+			w.varint(0)?; // required_request_id_delta = 0
 		}
-		encode_namespace(w, &self.track_namespace, version)?;
-		self.track_name.encode(w, version)?;
+		encode_namespace(w, &self.track_namespace)?;
+		w.string(&self.track_name)?;
 
 		match version {
 			Version::Draft14 => {
-				0u8.encode(w, version)?; // subscriber priority
+				w.u8(0); // subscriber priority
 				GroupOrder::Descending.encode(w, version)?;
-				false.encode(w, version)?; // forward
+				w.bool(false); // forward
 				Filter::NextObject.encode(w, version)?; // filter
-				0u8.encode(w, version)?; // no parameters
+				w.u8(0); // no parameters
 			}
 			_ => {
 				encode_params!(w, version,);
@@ -51,20 +51,20 @@ impl Message for TrackStatus<'_> {
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		if version == Version::Draft17 {
-			let _required_request_id_delta = u64::decode(r, version)?;
+			let _required_request_id_delta = r.varint()?;
 		}
-		let track_namespace = decode_namespace(r, version)?;
-		let track_name = Cow::<str>::decode(r, version)?;
+		let track_namespace = decode_namespace(r)?;
+		let track_name = Cow::Owned(r.string()?);
 
 		match version {
 			Version::Draft14 => {
-				let _subscriber_priority = u8::decode(r, version)?;
+				let _subscriber_priority = r.u8()?;
 				let _group_order = GroupOrder::decode(r, version)?;
-				let _forward = bool::decode(r, version)?;
-				let _filter_type = u64::decode(r, version)?;
+				let _forward = r.bool()?;
+				let _filter_type = r.varint()?;
 				let _params = Parameters::decode(r, version)?;
 			}
 			_ => {
@@ -90,32 +90,32 @@ pub enum TrackStatusCode {
 }
 
 impl Encode<Version> for TrackStatusCode {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		u64::from(*self).encode(w, version)?;
+	fn encode(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
+		w.varint(u64::from(*self))?;
 		Ok(())
 	}
 }
 
 impl Decode<Version> for TrackStatusCode {
-	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		Self::try_from(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)
+	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+		Self::try_from(r.varint()?).map_err(|_| DecodeError::InvalidValue)
 	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bytes::BytesMut;
 
 	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
-		let mut buf = BytesMut::new();
-		msg.encode_msg(&mut buf, version).unwrap();
+		let mut buf = Vec::new();
+		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
+			.unwrap();
 		buf.to_vec()
 	}
 
 	fn decode_message<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {
 		let mut buf = bytes::Bytes::from(bytes.to_vec());
-		M::decode_msg(&mut buf, version)
+		crate::coding::decode_buf(&mut buf, version, M::decode_msg)
 	}
 
 	#[test]

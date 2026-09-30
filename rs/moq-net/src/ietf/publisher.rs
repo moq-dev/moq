@@ -15,7 +15,7 @@ use web_transport_trait::poll::SendStream as _;
 
 use crate::{
 	AsPath, Error, Timescale, Timestamp,
-	coding::{Stream, Writer},
+	coding::{Encoder, Stream, Writer},
 	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, GroupOrder, Location, RequestId},
 	track::Subscription,
 	util::{MaybeBoxedExt, MaybeSendBox},
@@ -382,10 +382,11 @@ where
 	pub fn handle_stream(
 		&self,
 		id: u64,
-		mut data: bytes::Bytes,
+		body: ietf::Body,
 		stream: Stream<S, Version>,
 	) -> Result<MaybeSendBox<'static, ()>, Error> {
 		let this = self.clone();
+		let mut data = body.decoder(this.version);
 		let task = match id {
 			ietf::Subscribe::ID => {
 				let msg = ietf::Subscribe::decode_msg(&mut data, this.version)?;
@@ -562,7 +563,7 @@ where
 				.map(|fill| (fill_range(fill, msg.filter, edge.largest), cache, timescale));
 
 			// Send SubscribeOk on the stream
-			stream.writer.encode(&ietf::SubscribeOk::ID).await?;
+			stream.writer.varint(ietf::SubscribeOk::ID).await?;
 			stream
 				.writer
 				.encode(&ietf::SubscribeOk {
@@ -647,7 +648,7 @@ where
 				Ok(()) => (ietf::PublishDoneStatus::TrackEnded, "track ended"),
 				Err(_) => (ietf::PublishDoneStatus::InternalError, "internal error"),
 			};
-			let _ = stream.writer.encode(&ietf::PublishDone::ID).await;
+			let _ = stream.writer.varint(ietf::PublishDone::ID).await;
 			let _ = stream
 				.writer
 				.encode(&ietf::PublishDone {
@@ -701,7 +702,7 @@ where
 
 		match self.version {
 			Version::Draft14 => {
-				writer.encode(&ietf::SubscribeError::ID).await?;
+				writer.varint(ietf::SubscribeError::ID).await?;
 				writer
 					.encode(&ietf::SubscribeError {
 						request_id,
@@ -711,7 +712,7 @@ where
 					.await?;
 			}
 			Version::Draft15 | Version::Draft16 => {
-				writer.encode(&ietf::RequestError::ID).await?;
+				writer.varint(ietf::RequestError::ID).await?;
 				writer
 					.encode(&ietf::RequestError {
 						request_id: Some(request_id),
@@ -722,7 +723,7 @@ where
 					.await?;
 			}
 			_ => {
-				writer.encode(&ietf::RequestError::ID).await?;
+				writer.varint(ietf::RequestError::ID).await?;
 				writer
 					.encode(&ietf::RequestError {
 						request_id: None,
@@ -768,7 +769,7 @@ where
 		stream.set_priority(priority);
 
 		let res = async {
-			stream.encode(&FetchHeader::TYPE).await?;
+			stream.varint(FetchHeader::TYPE).await?;
 			stream.encode(&FetchHeader { request_id }).await?;
 
 			let FillServe::Group { sequence, skip, until } = fill else {
@@ -871,9 +872,9 @@ where
 								version,
 							)
 							.await?;
-							stream.encode(&(frame.payload.len() as u64)).await?;
+							stream.varint(frame.payload.len() as u64).await?;
 							if frame.payload.is_empty() && matches!(version, Version::Draft14 | Version::Draft15) {
-								stream.encode(&0u64).await?;
+								stream.varint(0).await?;
 							}
 							if !frame.payload.is_empty() {
 								let mut payload = frame.payload;
@@ -918,9 +919,9 @@ where
 					.await?;
 					index += 1;
 
-					stream.encode(&frame.size).await?;
+					stream.varint(frame.size).await?;
 					if frame.size == 0 && matches!(version, Version::Draft14 | Version::Draft15) {
-						stream.encode(&0u64).await?;
+						stream.varint(0).await?;
 					}
 					loop {
 						let chunk = {
@@ -965,19 +966,28 @@ where
 		// than written empty: the track declared no units to read a timestamp in.
 		let properties = match timescale {
 			Some(timescale) => {
-				let mut properties = bytes::BytesMut::new();
-				ietf::encode_object_time(&mut properties, timestamp, timescale, version)?;
-				Some(properties.to_vec())
+				let mut properties = Vec::new();
+				ietf::encode_object_time(
+					&mut Encoder::new(&mut properties, version.into()),
+					timestamp,
+					timescale,
+					version,
+				)?;
+				Some(properties)
 			}
 			None => None,
 		};
 
 		if version == Version::Draft14 {
-			stream.encode(&sequence).await?;
-			stream.encode(&0u64).await?;
-			stream.encode(&object).await?;
-			stream.encode(&0u8).await?;
-			stream.encode(&properties.unwrap_or_default()).await?;
+			let properties = properties.unwrap_or_default();
+			stream.buffer_varint(sequence)?;
+			stream.buffer_varint(0)?;
+			stream.buffer_varint(object)?;
+			// Publisher priority, a raw byte.
+			stream.buffer_raw(&[0]);
+			stream.buffer_varint(properties.len() as u64)?;
+			stream.buffer_raw(&properties);
+			std::future::poll_fn(|cx| stream.poll_flush(cx)).await?;
 			return Ok(());
 		}
 
@@ -1178,7 +1188,7 @@ where
 		// FETCH_OK on every draft, never REQUEST_OK: section 5.2 allows exactly one FETCH_OK or
 		// REQUEST_ERROR in answer to a FETCH, and REQUEST_OK's own definition lists the other
 		// requests it answers without ever naming this one.
-		stream.writer.encode(&ietf::FetchOk::ID).await?;
+		stream.writer.varint(ietf::FetchOk::ID).await?;
 		stream
 			.writer
 			.encode(&ietf::FetchOk {
@@ -1197,7 +1207,7 @@ where
 		let uni = self.session.open_uni().await.map_err(Error::from_transport)?;
 		let mut writer = Writer::new(uni, self.version);
 		writer.set_priority(priority);
-		writer.encode(&FetchHeader::TYPE).await?;
+		writer.varint(FetchHeader::TYPE).await?;
 		writer
 			.encode(&FetchHeader {
 				request_id: msg.request_id,
@@ -1214,9 +1224,9 @@ where
 				self.version,
 			)
 			.await?;
-			writer.encode(&(frame.payload.len() as u64)).await?;
+			writer.varint(frame.payload.len() as u64).await?;
 			if frame.payload.is_empty() && matches!(self.version, Version::Draft14 | Version::Draft15) {
-				writer.encode(&0u64).await?;
+				writer.varint(0).await?;
 			}
 			if !frame.payload.is_empty() {
 				let mut payload = frame.payload;
@@ -1236,7 +1246,7 @@ where
 	async fn reject_track_status(&self, mut stream: Stream<S, Version>, request_id: RequestId) -> Result<(), Error> {
 		let error_code = request::to_code(&Error::Unsupported, request::Kind::TrackStatus, self.version);
 		if self.version == Version::Draft14 {
-			stream.writer.encode(&0x0fu64).await?; // TRACK_STATUS_ERROR has the SUBSCRIBE_ERROR body.
+			stream.writer.varint(0x0fu64).await?; // TRACK_STATUS_ERROR has the SUBSCRIBE_ERROR body.
 			stream
 				.writer
 				.encode(&ietf::SubscribeError {
@@ -1246,7 +1256,7 @@ where
 				})
 				.await?;
 		} else {
-			stream.writer.encode(&ietf::RequestError::ID).await?;
+			stream.writer.varint(ietf::RequestError::ID).await?;
 			stream
 				.writer
 				.encode(&ietf::RequestError {
@@ -1288,7 +1298,7 @@ where
 
 		match self.version {
 			Version::Draft14 => {
-				writer.encode(&ietf::FetchError::ID).await?;
+				writer.varint(ietf::FetchError::ID).await?;
 				writer
 					.encode(&ietf::FetchError {
 						request_id,
@@ -1298,7 +1308,7 @@ where
 					.await?;
 			}
 			Version::Draft15 | Version::Draft16 => {
-				writer.encode(&ietf::RequestError::ID).await?;
+				writer.varint(ietf::RequestError::ID).await?;
 				writer
 					.encode(&ietf::RequestError {
 						request_id: Some(request_id),
@@ -1309,7 +1319,7 @@ where
 					.await?;
 			}
 			_ => {
-				writer.encode(&ietf::RequestError::ID).await?;
+				writer.varint(ietf::RequestError::ID).await?;
 				writer
 					.encode(&ietf::RequestError {
 						request_id: None,
@@ -1407,7 +1417,7 @@ where
 				match (advert.wanted(), held) {
 					(true, _) => {
 						tracing::debug!(broadcast = %absolute, "namespace");
-						stream.writer.encode(&ietf::Namespace::ID).await?;
+						stream.writer.varint(ietf::Namespace::ID).await?;
 						stream
 							.writer
 							.encode(&ietf::Namespace {
@@ -1418,7 +1428,7 @@ where
 					}
 					(false, true) => {
 						tracing::debug!(broadcast = %absolute, "namespace_done");
-						stream.writer.encode(&ietf::NamespaceDone::ID).await?;
+						stream.writer.varint(ietf::NamespaceDone::ID).await?;
 						stream
 							.writer
 							.encode(&ietf::NamespaceDone {
@@ -1466,7 +1476,7 @@ where
 			return Ok(Refused::No);
 		};
 
-		request.writer.encode(&ietf::PublishNamespace::ID).await?;
+		request.writer.varint(ietf::PublishNamespace::ID).await?;
 		request
 			.writer
 			.encode(&ietf::PublishNamespace {
@@ -1478,10 +1488,11 @@ where
 
 		// Bounded for the same reason the open is: a peer that takes the stream and answers
 		// nothing would park this loop forever, and every withdrawal queued behind it.
-		let Some((type_id, mut data)) = self.read_response(&mut request).await? else {
+		let Some((type_id, body)) = self.read_response(&mut request).await? else {
 			tracing::debug!(broadcast = %self.origin.absolute(path), "no answer to the advertisement");
 			return Ok(Refused::No);
 		};
+		let mut data = body.decoder(self.version);
 
 		match (self.version, type_id) {
 			(Version::Draft14, ietf::PublishNamespaceOk::ID) => {
@@ -1570,16 +1581,17 @@ where
 		let request_id = self.control.next_request_id(&self.runtime).await?;
 		let update = ietf::PublishNamespaceUpdate::between(request_id, &held, &next);
 
-		request.stream.writer.encode(&ietf::PublishNamespaceUpdate::ID).await?;
+		request.stream.writer.varint(ietf::PublishNamespaceUpdate::ID).await?;
 		request.stream.writer.encode(&update).await?;
 
 		let absolute = self.origin.absolute(&request.path).to_owned();
-		let Some((type_id, mut data)) = self.read_response(&mut request.stream).await? else {
+		let Some((type_id, body)) = self.read_response(&mut request.stream).await? else {
 			tracing::debug!(broadcast = %absolute, "no answer to the update");
 			// Abrupt: a peer that never answers is not owed the FIN handshake.
 			requests.remove(suffix);
 			return Ok(Refused::No);
 		};
+		let mut data = body.decoder(self.version);
 
 		match type_id {
 			ietf::RequestOk::ID => {
@@ -1650,12 +1662,11 @@ where
 	/// behavior seen a step later: a stream the peer accepts and never answers on holds the
 	/// loop just as effectively as one it never grants. Giving up records nothing, so the
 	/// namespace stays outstanding and the retry re-offers it.
-	async fn read_response(&self, request: &mut Stream<S, Version>) -> Result<Option<(u64, bytes::Bytes)>, Error> {
+	async fn read_response(&self, request: &mut Stream<S, Version>) -> Result<Option<(u64, ietf::Body)>, Error> {
 		let mut read = std::pin::pin!(async {
-			let type_id: u64 = request.reader.decode().await?;
-			let size: u16 = request.reader.decode().await?;
-			let data = request.reader.read_exact(size as usize).await?;
-			Ok::<_, Error>((type_id, data))
+			let type_id = request.reader.varint().await?;
+			let body: ietf::Body = request.reader.decode().await?;
+			Ok::<_, Error>((type_id, body))
 		});
 		let mut timeout = crate::runtime::Deadline::after(&self.runtime, ADVERTISE_TIMEOUT);
 
@@ -1705,7 +1716,7 @@ where
 				}
 			}
 			Target::Inline(stream) => {
-				stream.writer.encode(&ietf::NamespaceDone::ID).await?;
+				stream.writer.varint(ietf::NamespaceDone::ID).await?;
 				stream
 					.writer
 					.encode(&ietf::NamespaceDone {
@@ -1837,7 +1848,7 @@ where
 		// Send OK response
 		match self.version {
 			Version::Draft14 => {
-				stream.writer.encode(&ietf::SubscribeNamespaceOk::ID).await?;
+				stream.writer.varint(ietf::SubscribeNamespaceOk::ID).await?;
 				stream
 					.writer
 					.encode(&ietf::SubscribeNamespaceOk {
@@ -1846,7 +1857,7 @@ where
 					.await?;
 			}
 			Version::Draft15 | Version::Draft16 => {
-				stream.writer.encode(&ietf::RequestOk::ID).await?;
+				stream.writer.varint(ietf::RequestOk::ID).await?;
 				stream
 					.writer
 					.encode(&ietf::RequestOk {
@@ -1856,7 +1867,7 @@ where
 					.await?;
 			}
 			_ => {
-				stream.writer.encode(&ietf::RequestOk::ID).await?;
+				stream.writer.varint(ietf::RequestOk::ID).await?;
 				stream
 					.writer
 					.encode(&ietf::RequestOk {
@@ -2124,9 +2135,9 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			flags: ietf::GroupFlags::default(),
 		})?;
 		// Object ID delta 0, then an empty object whose status is END_OF_TRACK.
-		writer.buffer(&0u64)?;
-		writer.buffer(&0u64)?;
-		writer.encode(&END_OF_TRACK).await?;
+		writer.buffer_varint(0)?;
+		writer.buffer_varint(0)?;
+		writer.varint(END_OF_TRACK).await?;
 		// PUBLISH_DONE follows once this closes, like every other data stream.
 		writer.close().await
 	}
@@ -2492,20 +2503,25 @@ fn buffer_object_info<W: crate::transport::poll::SendStream>(
 	timescale: Option<Timescale>,
 	version: Version,
 ) -> Result<(), Error> {
-	writer.buffer(&delta)?;
+	writer.buffer_varint(delta)?;
 
 	if let Some(timescale) = timescale.filter(|_| has_extensions) {
 		// Per-object extension headers carry the frame's presentation timestamp.
-		let mut ext = bytes::BytesMut::new();
-		ietf::encode_object_time(&mut ext, timestamp, timescale, version)?;
-		writer.buffer(&(ext.len() as u64))?;
+		let mut ext = Vec::new();
+		ietf::encode_object_time(
+			&mut Encoder::new(&mut ext, version.into()),
+			timestamp,
+			timescale,
+			version,
+		)?;
+		writer.buffer_varint(ext.len() as u64)?;
 		writer.buffer_raw(&ext);
 	}
 
-	writer.buffer(&size)?;
+	writer.buffer_varint(size)?;
 	if size == 0 {
-		// Have to write the object status too.
-		writer.buffer(&0u8)?;
+		// Have to write the object status too: Normal (0).
+		writer.buffer_varint(0)?;
 	}
 	Ok(())
 }
@@ -2598,7 +2614,8 @@ mod group_priority_test {
 
 		let written = log.writes.lock().unwrap().clone();
 		let mut buf = bytes::Bytes::from(written);
-		let header = ietf::GroupHeader::decode(&mut buf, Version::Draft14).expect("a group header");
+		let header =
+			crate::coding::decode_buf(&mut buf, Version::Draft14, ietf::GroupHeader::decode).expect("a group header");
 		assert_eq!(
 			header.publisher_priority,
 			priority::to_wire(hang_audio_priority()),
@@ -2904,7 +2921,7 @@ mod serve_tests {
 
 				match version {
 					Version::Draft14 => {
-						writer.encode(&ietf::SubscribeError::ID).await.unwrap();
+						writer.varint(ietf::SubscribeError::ID).await.unwrap();
 						writer
 							.encode(&ietf::SubscribeError {
 								request_id: RequestId(REQUEST_ID),
@@ -2915,7 +2932,7 @@ mod serve_tests {
 							.unwrap();
 					}
 					_ => {
-						writer.encode(&ietf::RequestError::ID).await.unwrap();
+						writer.varint(ietf::RequestError::ID).await.unwrap();
 						writer
 							.encode(&ietf::RequestError {
 								request_id: match version {
@@ -2963,12 +2980,13 @@ mod serve_tests {
 				track_namespace: crate::Path::new("live"),
 				track_name: "video".into(),
 			};
-			let mut body = bytes::BytesMut::new();
-			msg.encode_msg(&mut body, version).unwrap();
+			let mut body = Vec::new();
+			msg.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
+				.unwrap();
 			let mark = h.log.writes.lock().unwrap().len();
 			h.publisher
 				.clone()
-				.handle_stream(ietf::TrackStatus::ID, body.freeze(), stream)
+				.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
 				.unwrap()
 				.await;
 			let actual = h.log.writes.lock().unwrap()[mark..].to_vec();
@@ -2977,7 +2995,7 @@ mod serve_tests {
 				let mut writer =
 					crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
 				if version == Version::Draft14 {
-					writer.encode(&0x0fu64).await.unwrap();
+					writer.varint(0x0fu64).await.unwrap();
 					writer
 						.encode(&ietf::SubscribeError {
 							request_id: RequestId(REQUEST_ID),
@@ -2987,7 +3005,7 @@ mod serve_tests {
 						.await
 						.unwrap();
 				} else {
-					writer.encode(&ietf::RequestError::ID).await.unwrap();
+					writer.varint(ietf::RequestError::ID).await.unwrap();
 					writer
 						.encode(&ietf::RequestError {
 							request_id: matches!(version, Version::Draft15 | Version::Draft16)
@@ -3234,10 +3252,10 @@ mod serve_tests {
 			let response = joining_fetch(&h, mark).await.unwrap();
 
 			let mut buf = bytes::Bytes::from(response);
-			let id = u64::decode(&mut buf, version).unwrap();
+			let id = crate::coding::decode_varint(&mut buf, version).unwrap();
 			assert_eq!(id, ietf::FetchOk::ID, "{version}: not a FETCH_OK");
 
-			let ok = ietf::FetchOk::decode(&mut buf, version).unwrap();
+			let ok = crate::coding::decode_buf(&mut buf, version, ietf::FetchOk::decode).unwrap();
 			assert_eq!(
 				ok.request_id,
 				match version {
@@ -3259,30 +3277,38 @@ mod serve_tests {
 				"{version}: wrong saved end boundary"
 			);
 
-			assert_eq!(u64::decode(&mut buf, version).unwrap(), FetchHeader::TYPE);
-			assert_eq!(FetchHeader::decode(&mut buf, version).unwrap().request_id, FETCH_ID);
+			assert_eq!(
+				crate::coding::decode_varint(&mut buf, version).unwrap(),
+				FetchHeader::TYPE
+			);
+			assert_eq!(
+				crate::coding::decode_buf(&mut buf, version, FetchHeader::decode)
+					.unwrap()
+					.request_id,
+				FETCH_ID
+			);
 			for (index, payload) in payloads.iter().enumerate() {
 				if version == Version::Draft14 {
-					assert_eq!(u64::decode(&mut buf, version).unwrap(), LATEST);
-					assert_eq!(u64::decode(&mut buf, version).unwrap(), 0);
-					assert_eq!(u64::decode(&mut buf, version).unwrap(), index as u64);
-					assert_eq!(u8::decode(&mut buf, version).unwrap(), 0);
+					assert_eq!(crate::coding::decode_varint(&mut buf, version).unwrap(), LATEST);
+					assert_eq!(crate::coding::decode_varint(&mut buf, version).unwrap(), 0);
+					assert_eq!(crate::coding::decode_varint(&mut buf, version).unwrap(), index as u64);
+					assert_eq!(bytes::Buf::try_get_u8(&mut buf).unwrap(), 0);
 				} else {
 					assert_eq!(
-						u64::decode(&mut buf, version).unwrap(),
+						crate::coding::decode_varint(&mut buf, version).unwrap(),
 						if index == 0 { 0x3c } else { 0x20 }
 					);
 					if index == 0 {
-						assert_eq!(u64::decode(&mut buf, version).unwrap(), LATEST);
-						assert_eq!(u64::decode(&mut buf, version).unwrap(), 0);
-						assert_eq!(u8::decode(&mut buf, version).unwrap(), 0);
+						assert_eq!(crate::coding::decode_varint(&mut buf, version).unwrap(), LATEST);
+						assert_eq!(crate::coding::decode_varint(&mut buf, version).unwrap(), 0);
+						assert_eq!(bytes::Buf::try_get_u8(&mut buf).unwrap(), 0);
 					}
 				}
-				let _properties = Vec::<u8>::decode(&mut buf, version).unwrap();
-				let size = u64::decode(&mut buf, version).unwrap() as usize;
+				let _properties = crate::coding::decode_buf(&mut buf, version, |r, _| Ok(r.bytes()?.to_vec())).unwrap();
+				let size = crate::coding::decode_varint(&mut buf, version).unwrap() as usize;
 				assert_eq!(size, payload.len());
 				if size == 0 && matches!(version, Version::Draft14 | Version::Draft15) {
-					assert_eq!(u64::decode(&mut buf, version).unwrap(), 0);
+					assert_eq!(crate::coding::decode_varint(&mut buf, version).unwrap(), 0);
 				}
 				assert_eq!(buf.split_to(size).as_ref(), *payload);
 			}
@@ -3290,7 +3316,10 @@ mod serve_tests {
 			let mark = h.log.writes.lock().unwrap().len();
 			assert!(futures::poll!(serve.as_mut()).is_pending());
 			let mut tail = bytes::Bytes::from(h.log.writes.lock().unwrap()[mark..].to_vec());
-			assert_eq!(u64::decode(&mut tail, version).unwrap(), payloads.len() as u64);
+			assert_eq!(
+				crate::coding::decode_varint(&mut tail, version).unwrap(),
+				payloads.len() as u64
+			);
 			assert_eq!(occurrences(&h.log, b"new-object"), 1);
 			assert!(h.log.resets().is_empty(), "{version}: an answered fetch must not reset");
 		}
@@ -3304,13 +3333,13 @@ mod serve_tests {
 		publish_groups(&mut h, 5);
 		settle().await;
 		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
-		let mut data = bytes::BytesMut::new();
+		let mut data = Vec::new();
 		subscribe(Filter::NextObject, None)
-			.encode_msg(&mut data, version)
+			.encode_msg(&mut Encoder::new(&mut data, version.into()), version)
 			.unwrap();
 		let mut serving = h
 			.publisher
-			.handle_stream(ietf::Subscribe::ID, data.freeze(), stream)
+			.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream)
 			.unwrap();
 		let mut fetching = Box::pin(joining_fetch(&h, 0));
 		assert!(
@@ -3337,13 +3366,13 @@ mod serve_tests {
 			"allow SUBSCRIBE to arrive on its stream"
 		);
 		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
-		let mut data = bytes::BytesMut::new();
+		let mut data = Vec::new();
 		subscribe(Filter::NextObject, None)
-			.encode_msg(&mut data, version)
+			.encode_msg(&mut Encoder::new(&mut data, version.into()), version)
 			.unwrap();
 		let mut serving = h
 			.publisher
-			.handle_stream(ietf::Subscribe::ID, data.freeze(), stream)
+			.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream)
 			.unwrap();
 		tokio::select! {
 			response = &mut fetching => { response.unwrap(); }
@@ -3358,29 +3387,33 @@ mod serve_tests {
 		for version in JOINING_DRAFTS {
 			let h = serve(version);
 			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
-			let mut data = bytes::BytesMut::new();
+			let mut data = Vec::new();
 			subscribe(Filter::NextObject, None)
-				.encode_msg(&mut data, version)
+				.encode_msg(&mut Encoder::new(&mut data, version.into()), version)
 				.unwrap();
 			let serving = h
 				.publisher
-				.handle_stream(ietf::Subscribe::ID, data.freeze(), stream)
+				.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream)
 				.unwrap();
 			let mut fetching = Box::pin(joining_fetch(&h, 0));
 			assert!(futures::poll!(fetching.as_mut()).is_pending());
 			drop(serving);
 			let mut response = bytes::Bytes::from(fetching.await.unwrap());
-			let id = u64::decode(&mut response, version).unwrap();
+			let id = crate::coding::decode_varint(&mut response, version).unwrap();
 			if version == Version::Draft14 {
 				assert_eq!(id, ietf::FetchError::ID);
 				assert_eq!(
-					ietf::FetchError::decode(&mut response, version).unwrap().error_code,
+					crate::coding::decode_buf(&mut response, version, ietf::FetchError::decode)
+						.unwrap()
+						.error_code,
 					invalid_joining_request_id(version)
 				);
 			} else {
 				assert_eq!(id, ietf::RequestError::ID);
 				assert_eq!(
-					ietf::RequestError::decode(&mut response, version).unwrap().error_code,
+					crate::coding::decode_buf(&mut response, version, ietf::RequestError::decode)
+						.unwrap()
+						.error_code,
 					invalid_joining_request_id(version)
 				);
 			}
@@ -3399,9 +3432,14 @@ mod serve_tests {
 			.clone()
 			.run_subscribe_stream(stream, subscribe(Filter::NextObject, None));
 		let mut response = bytes::Bytes::from(joining_fetch(&h, 0).await.unwrap());
-		assert_eq!(u64::decode(&mut response, version).unwrap(), ietf::RequestError::ID);
 		assert_eq!(
-			ietf::RequestError::decode(&mut response, version).unwrap().error_code,
+			crate::coding::decode_varint(&mut response, version).unwrap(),
+			ietf::RequestError::ID
+		);
+		assert_eq!(
+			crate::coding::decode_buf(&mut response, version, ietf::RequestError::decode)
+				.unwrap()
+				.error_code,
 			0x2
 		);
 		assert!(response.is_empty());
@@ -3428,9 +3466,14 @@ mod serve_tests {
 		registered(&h, serving.as_mut()).await;
 		let mark = h.log.writes.lock().unwrap().len();
 		let mut response = bytes::Bytes::from(joining_fetch(&h, mark).await.expect("refuse before opening data"));
-		assert_eq!(u64::decode(&mut response, version).unwrap(), ietf::RequestError::ID);
 		assert_eq!(
-			ietf::RequestError::decode(&mut response, version).unwrap().error_code,
+			crate::coding::decode_varint(&mut response, version).unwrap(),
+			ietf::RequestError::ID
+		);
+		assert_eq!(
+			crate::coding::decode_buf(&mut response, version, ietf::RequestError::decode)
+				.unwrap()
+				.error_code,
 			does_not_exist(version)
 		);
 		assert!(response.is_empty());
@@ -3447,17 +3490,21 @@ mod serve_tests {
 			run_live(&mut h, subscribe(Filter::NextObject, None)).await;
 			let mark = h.log.writes.lock().unwrap().len();
 			let mut buf = bytes::Bytes::from(joining_fetch(&h, mark).await.unwrap());
-			let id = u64::decode(&mut buf, version).unwrap();
+			let id = crate::coding::decode_varint(&mut buf, version).unwrap();
 			if version == Version::Draft14 {
 				assert_eq!(id, ietf::FetchError::ID);
 				assert_eq!(
-					ietf::FetchError::decode(&mut buf, version).unwrap().error_code,
+					crate::coding::decode_buf(&mut buf, version, ietf::FetchError::decode)
+						.unwrap()
+						.error_code,
 					invalid_joining_request_id(version)
 				);
 			} else {
 				assert_eq!(id, ietf::RequestError::ID);
 				assert_eq!(
-					ietf::RequestError::decode(&mut buf, version).unwrap().error_code,
+					crate::coding::decode_buf(&mut buf, version, ietf::RequestError::decode)
+						.unwrap()
+						.error_code,
 					invalid_joining_request_id(version)
 				);
 			}
@@ -3487,8 +3534,16 @@ mod serve_tests {
 					assert_eq!(h.log.closes()[0].0, 0x3);
 				} else {
 					let mut buf = bytes::Bytes::from(result.unwrap());
-					assert_eq!(u64::decode(&mut buf, version).unwrap(), ietf::RequestError::ID);
-					assert_eq!(ietf::RequestError::decode(&mut buf, version).unwrap().error_code, 0x3);
+					assert_eq!(
+						crate::coding::decode_varint(&mut buf, version).unwrap(),
+						ietf::RequestError::ID
+					);
+					assert_eq!(
+						crate::coding::decode_buf(&mut buf, version, ietf::RequestError::decode)
+							.unwrap()
+							.error_code,
+						0x3
+					);
 				}
 			}
 		}
@@ -3510,17 +3565,21 @@ mod serve_tests {
 			registered(&h, serving.as_mut()).await;
 			let mark = h.log.writes.lock().unwrap().len();
 			let mut buf = bytes::Bytes::from(joining_fetch(&h, mark).await.unwrap());
-			let id = u64::decode(&mut buf, version).unwrap();
+			let id = crate::coding::decode_varint(&mut buf, version).unwrap();
 			if version == Version::Draft14 {
 				assert_eq!(id, ietf::FetchError::ID);
 				assert_eq!(
-					ietf::FetchError::decode(&mut buf, version).unwrap().error_code,
+					crate::coding::decode_buf(&mut buf, version, ietf::FetchError::decode)
+						.unwrap()
+						.error_code,
 					invalid_range(version)
 				);
 			} else {
 				assert_eq!(id, ietf::RequestError::ID);
 				assert_eq!(
-					ietf::RequestError::decode(&mut buf, version).unwrap().error_code,
+					crate::coding::decode_buf(&mut buf, version, ietf::RequestError::decode)
+						.unwrap()
+						.error_code,
 					invalid_range(version)
 				);
 			}
@@ -3533,9 +3592,12 @@ mod serve_tests {
 	async fn a_joining_fetch_is_not_supported_on_draft20() {
 		let h = serve(Version::Draft20);
 		let mut buf = bytes::Bytes::from(joining_fetch(&h, 0).await.unwrap());
-		assert_eq!(u64::decode(&mut buf, Version::Draft20).unwrap(), ietf::RequestError::ID);
 		assert_eq!(
-			ietf::RequestError::decode(&mut buf, Version::Draft20)
+			crate::coding::decode_varint(&mut buf, Version::Draft20).unwrap(),
+			ietf::RequestError::ID
+		);
+		assert_eq!(
+			crate::coding::decode_buf(&mut buf, Version::Draft20, ietf::RequestError::decode)
 				.unwrap()
 				.error_code,
 			0x3
@@ -3580,8 +3642,13 @@ mod serve_tests {
 		// SUBSCRIBE_OK is the first thing written, before any group stream opens.
 		let writes = h.log.writes.lock().unwrap().clone();
 		let mut buf = writes.as_slice();
-		assert_eq!(u64::decode(&mut buf, version).unwrap(), ietf::SubscribeOk::ID);
-		ietf::SubscribeOk::decode(&mut buf, version).unwrap().largest
+		assert_eq!(
+			crate::coding::decode_varint(&mut buf, version).unwrap(),
+			ietf::SubscribeOk::ID
+		);
+		crate::coding::decode_buf(&mut buf, version, ietf::SubscribeOk::decode)
+			.unwrap()
+			.largest
 	}
 
 	#[tokio::test]
@@ -3972,7 +4039,7 @@ mod tests {
 			crate::lite::test_transport::SinkSend::new(expected.clone()),
 			Version::Draft17,
 		);
-		writer.encode(&ietf::RequestOk::ID).await.unwrap();
+		writer.varint(ietf::RequestOk::ID).await.unwrap();
 		writer
 			.encode(&ietf::RequestOk {
 				request_id: None,
@@ -4072,7 +4139,7 @@ mod tests {
 		let log = crate::lite::test_transport::Log::default();
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
 
-		writer.encode(&ietf::RequestError::ID).await.unwrap();
+		writer.varint(ietf::RequestError::ID).await.unwrap();
 		writer
 			.encode(&ietf::RequestError {
 				request_id: matches!(version, Version::Draft15 | Version::Draft16).then_some(RequestId(1)),
@@ -4144,7 +4211,7 @@ mod tests {
 
 		match version {
 			Version::Draft14 => {
-				writer.encode(&ietf::PublishNamespaceOk::ID).await.unwrap();
+				writer.varint(ietf::PublishNamespaceOk::ID).await.unwrap();
 				writer
 					.encode(&ietf::PublishNamespaceOk {
 						request_id: RequestId(1),
@@ -4153,7 +4220,7 @@ mod tests {
 					.unwrap();
 			}
 			Version::Draft15 | Version::Draft16 => {
-				writer.encode(&ietf::RequestOk::ID).await.unwrap();
+				writer.varint(ietf::RequestOk::ID).await.unwrap();
 				writer
 					.encode(&ietf::RequestOk {
 						request_id: Some(RequestId(1)),
@@ -4164,7 +4231,7 @@ mod tests {
 			}
 			// Draft-17+ dropped the request id: the response rides the request's stream.
 			_ => {
-				writer.encode(&ietf::RequestOk::ID).await.unwrap();
+				writer.varint(ietf::RequestOk::ID).await.unwrap();
 				writer
 					.encode(&ietf::RequestOk {
 						request_id: None,
@@ -4325,7 +4392,7 @@ mod tests {
 
 		let ok = crate::lite::test_transport::Log::default();
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(ok.clone()), VERSION);
-		writer.encode(&ietf::RequestOk::ID).await.unwrap();
+		writer.varint(ietf::RequestOk::ID).await.unwrap();
 		writer
 			.encode(&ietf::RequestOk {
 				request_id: None,
@@ -4666,7 +4733,7 @@ mod tests {
 	async fn request_update(version: Version, msg: &ietf::PublishNamespaceUpdate) -> Vec<u8> {
 		let log = crate::lite::test_transport::Log::default();
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
-		writer.encode(&ietf::PublishNamespaceUpdate::ID).await.unwrap();
+		writer.varint(ietf::PublishNamespaceUpdate::ID).await.unwrap();
 		writer.encode(msg).await.unwrap();
 		log.writes.lock().unwrap().clone()
 	}
@@ -4755,7 +4822,7 @@ mod tests {
 		let counted = crate::lite::test_transport::Log::default();
 		let mut writer =
 			crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(counted.clone()), VERSION);
-		writer.encode(&ietf::RequestOk::ID).await.unwrap();
+		writer.varint(ietf::RequestOk::ID).await.unwrap();
 		writer
 			.encode(&ietf::RequestOk {
 				request_id: None,

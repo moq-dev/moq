@@ -8,7 +8,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::{
 	Error, PathOwned,
-	coding::{Decode, Encode, Reader, Writer},
+	coding::{Decode, Decoder, Encoder, Reader, Writer},
 	ietf::{self, RequestId},
 };
 
@@ -274,31 +274,29 @@ impl OutgoingRegistration {
 	/// Try to parse the request_id (and optionally namespace) from the accumulated bytes.
 	/// Returns Ok(None) if not enough data yet, Err if the message is malformed.
 	fn try_parse(&self) -> Result<Option<RequestId>, crate::Error> {
-		let mut cursor = std::io::Cursor::new(&self.buf);
-		let Ok(type_id) = u64::decode(&mut cursor, self.version) else {
+		let mut r = Decoder::new(&self.buf, self.version.into());
+		let Ok(type_id) = r.varint() else {
 			return Ok(None);
 		};
-		let Ok(size) = u16::decode(&mut cursor, self.version) else {
+		let Ok(size) = r.u16() else {
 			return Ok(None);
 		};
 
 		// We know the full message size now: header bytes + body.
-		let header_len = cursor.position() as usize;
-		let message_len = header_len + size as usize;
-		if self.buf.len() < message_len {
+		let Ok(mut body) = r.sub(size as usize) else {
 			return Ok(None);
-		}
+		};
 
 		// We have enough bytes for the full message; decoding must succeed.
-		let request_id = RequestId::decode(&mut cursor, self.version)?;
+		let request_id = RequestId::decode(&mut body, self.version)?;
 
 		// For PublishNamespace, also extract the namespace for reverse lookup.
 		if type_id == ietf::PublishNamespace::ID {
 			if self.version == Version::Draft17 {
 				// v17 has required_request_id_delta after request_id
-				let _ = u64::decode(&mut cursor, self.version);
+				let _ = body.varint();
 			}
-			if let Ok(ns) = crate::ietf::namespace::decode_namespace(&mut cursor, self.version) {
+			if let Ok(ns) = crate::ietf::namespace::decode_namespace(&mut body) {
 				self.shared.namespaces.register(Direction::Outgoing, ns, request_id);
 			}
 		}
@@ -781,26 +779,19 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 			timeout: timeout_ms,
 		};
 
-		let mut body = BytesMut::new();
-		if let Err(err) = msg.encode_msg(&mut body, version) {
+		// The size prefix is a u16 on a stream shared with every other request, so the
+		// encode refuses a body that would wrap it and desynchronize the framing for all.
+		let mut raw = Vec::new();
+		let mut w = Encoder::new(&mut raw, version.into());
+		if let Err(err) = w
+			.varint(crate::ietf::GoAway::ID)
+			.and_then(|()| msg.encode(&mut w, version))
+		{
 			tracing::warn!(%err, "failed to encode goaway");
 			return;
 		}
 
-		// The size prefix is a u16 on a stream shared with every other request, so a
-		// wrapping cast here would desynchronize the framing for all of them.
-		let Ok(size) = u16::try_from(body.len()) else {
-			tracing::warn!(len = body.len(), "goaway too large for the control stream");
-			return;
-		};
-
-		let mut raw = BytesMut::new();
-		if crate::ietf::GoAway::ID.encode(&mut raw, version).is_err() || size.encode(&mut raw, version).is_err() {
-			return;
-		}
-		raw.extend_from_slice(&body);
-
-		if !self.shared.control.push(raw.freeze()) {
+		if !self.shared.control.push(raw.into()) {
 			tracing::debug!("control stream closed; goaway not sent");
 		}
 	}
@@ -821,17 +812,15 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 		goaway: crate::goaway::Protocol,
 	) -> Result<(), Error> {
 		loop {
-			let type_id: u64 = match reader.decode_maybe().await? {
+			let type_id = match reader.varint_maybe().await? {
 				Some(id) => id,
 				None => return Ok(()),
 			};
 
-			let size: u16 = reader.decode::<u16>().await?;
-
-			let body = reader.read_exact(size as usize).await?;
+			let body = reader.decode::<ietf::Body>().await?.0;
 
 			// Reconstruct raw message bytes: [type_id][size][body]
-			let raw = encode_raw(type_id, size, &body, self.version);
+			let raw = encode_raw(type_id, &body, self.version);
 
 			// Classify and route
 			match classify(type_id, &body, self.version, &self.shared.namespaces)? {
@@ -841,7 +830,7 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 				Route::MaxRequestId(max) => self.control.max_request_id(max),
 				Route::Ignore => {}
 				Route::GoAway => {
-					let mut data = body;
+					let mut data = Decoder::new(&body, self.version.into());
 					let msg = crate::ietf::GoAway::decode_msg(&mut data, self.version)?;
 					tracing::info!(message = ?msg, "received GOAWAY");
 
@@ -1064,8 +1053,8 @@ fn lookup_namespace_request_id(
 	namespaces: &Namespaces,
 	direction: Direction,
 ) -> Result<Option<RequestId>, Error> {
-	let mut cursor = std::io::Cursor::new(body);
-	let ns = crate::ietf::namespace::decode_namespace(&mut cursor, version)?;
+	let mut r = Decoder::new(body, version.into());
+	let ns = crate::ietf::namespace::decode_namespace(&mut r)?;
 	Ok(namespaces.get(direction, &ns))
 }
 
@@ -1167,18 +1156,18 @@ enum Route {
 }
 
 /// Encode raw message bytes as [type_id varint][size u16][body].
-fn encode_raw(type_id: u64, size: u16, body: &Bytes, version: Version) -> Bytes {
-	let mut buf = BytesMut::new();
-	type_id.encode(&mut buf, version).expect("encode type_id");
-	size.encode(&mut buf, version).expect("encode size");
-	buf.extend_from_slice(body);
-	buf.freeze()
+fn encode_raw(type_id: u64, body: &Bytes, version: Version) -> Bytes {
+	let mut buf = Vec::new();
+	let mut w = Encoder::new(&mut buf, version.into());
+	w.varint(type_id).expect("type_id was read from the same wire");
+	w.u16(u16::try_from(body.len()).expect("body was read with a u16 size"));
+	w.slice(body);
+	buf.into()
 }
 
 /// Decode just the request_id from the beginning of a message body.
 fn decode_request_id(body: &Bytes, version: Version) -> Result<RequestId, Error> {
-	let mut cursor = std::io::Cursor::new(body);
-	let request_id = RequestId::decode(&mut cursor, version)?;
+	let (request_id, _) = RequestId::decode_slice(body, version)?;
 	Ok(request_id)
 }
 
@@ -1190,28 +1179,26 @@ fn decode_response_request_id(body: &Bytes, version: Version) -> Result<RequestI
 
 /// Decode the namespace from a PublishNamespace message body (after the request_id).
 fn decode_publish_namespace_body(body: &Bytes, version: Version) -> Result<PathOwned, Error> {
-	let mut cursor = std::io::Cursor::new(body);
+	let mut r = Decoder::new(body, version.into());
 	// Skip request_id
-	let _request_id = RequestId::decode(&mut cursor, version)?;
+	let _request_id = RequestId::decode(&mut r, version)?;
 	// v17 has required_request_id_delta
 	if version == Version::Draft17 {
-		let _ = u64::decode(&mut cursor, version)?;
+		r.varint()?;
 	}
-	let ns = crate::ietf::namespace::decode_namespace(&mut cursor, version)?;
+	let ns = crate::ietf::namespace::decode_namespace(&mut r)?;
 	Ok(ns.into_owned())
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::coding::Encode;
 	use crate::transport::poll::{RecvStream as _, SendStream as _};
-	use bytes::BytesMut;
 	use futures::FutureExt as _;
 
 	fn make_body_with_request_id(id: u64, version: Version) -> Bytes {
-		let mut buf = BytesMut::new();
-		RequestId(id).encode(&mut buf, version).unwrap();
-		buf.freeze()
+		RequestId(id).encode_bytes(version).unwrap()
 	}
 
 	/// Classify against an empty namespace map, for the messages that don't use it.
@@ -1319,14 +1306,13 @@ mod tests {
 	fn test_encode_raw_roundtrip() {
 		let version = Version::Draft15;
 		let body = Bytes::from_static(b"hello");
-		let raw = encode_raw(0x03, 5, &body, version);
+		let raw = encode_raw(0x03, &body, version);
 
 		// Decode the raw bytes
-		let mut cursor = std::io::Cursor::new(&raw[..]);
-		let type_id = u64::decode(&mut cursor, version).unwrap();
-		let size = u16::decode(&mut cursor, version).unwrap();
-		assert_eq!(type_id, 0x03);
-		assert_eq!(size, 5);
+		let mut r = Decoder::new(&raw, version.into());
+		assert_eq!(r.varint().unwrap(), 0x03);
+		assert_eq!(r.u16().unwrap(), 5);
+		assert_eq!(r.rest(), b"hello");
 	}
 
 	#[tokio::test]
@@ -1404,15 +1390,16 @@ mod tests {
 
 	/// Encode a message body (no type_id/size header).
 	fn encode_body<M: Message>(msg: &M, version: Version) -> Bytes {
-		let mut buf = BytesMut::new();
-		msg.encode_msg(&mut buf, version).unwrap();
-		buf.freeze()
+		let mut buf = Vec::new();
+		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
+			.unwrap();
+		bytes::Bytes::from(buf)
 	}
 
 	/// Encode a full control message: [type_id][size][body].
 	fn encode_msg<M: Message>(msg: &M, version: Version) -> Bytes {
 		let body = encode_body(msg, version);
-		encode_raw(M::ID, body.len() as u16, &body, version)
+		encode_raw(M::ID, &body, version)
 	}
 
 	fn publish_namespace(request_id: RequestId, namespace: &str) -> ietf::PublishNamespace<'_> {

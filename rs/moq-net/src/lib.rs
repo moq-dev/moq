@@ -100,7 +100,7 @@ pub mod time;
 pub mod transport;
 
 pub use client::*;
-pub use coding::{BoundsExceeded, DecodeError, EncodeError, VarInt};
+pub use coding::{BoundsExceeded, DecodeError, EncodeError, varint};
 pub use driver::Driver;
 pub use error::*;
 /// The session direction a client advertises in its SETUP (moq-lite-05+).

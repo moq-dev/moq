@@ -625,7 +625,7 @@ pub struct MoqVideoDecodedFrame {
 impl MoqVideoDecodedFrame {
 	/// Presentation timestamp, in microseconds.
 	pub fn timestamp_us(&self) -> u64 {
-		// A decoded Timestamp is bounded by a QUIC VarInt, so its microseconds fit.
+		// A decoded Timestamp is bounded by a QUIC varint, so its microseconds fit.
 		self.frame.timestamp.as_micros() as u64
 	}
 
