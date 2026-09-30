@@ -1543,14 +1543,26 @@ pub(super) struct Liveness {
 
 impl Liveness {
 	/// A PCR arrived on the program's clock PID.
+	///
+	/// Stepped one interval at a time, so a corrupt PCR, or the clock stepping back without a
+	/// flag, costs one interval rather than inventing hours of silence on every PID. The bound
+	/// is the mux-rate meter's.
 	pub(super) fn pcr(&mut self, pcr: u64) {
+		self.step(pcr, super::mux_rate::MAX_INTERVAL);
+	}
+
+	/// A PCR the caller wrote itself. Its clock breaks only where the caller flags a
+	/// discontinuity, so every forward step counts, including the jump across a media gap
+	/// longer than the backfill covers.
+	pub(super) fn written_pcr(&mut self, pcr: u64) {
+		self.step(pcr, super::mux_rate::PCR_WRAP);
+	}
+
+	fn step(&mut self, pcr: u64, max: u64) {
 		let elapsed = self.elapsed.get_or_insert(0);
 		if let Some(last) = self.pcr.replace(pcr) {
 			let step = (pcr + super::mux_rate::PCR_WRAP - last) % super::mux_rate::PCR_WRAP;
-			// Stepped one interval at a time, so a corrupt PCR, or the clock stepping back
-			// without a flag, costs one interval rather than inventing hours of silence on
-			// every PID. The bound is the mux-rate meter's.
-			if step <= super::mux_rate::MAX_INTERVAL {
+			if step <= max {
 				*elapsed += step;
 			}
 		}

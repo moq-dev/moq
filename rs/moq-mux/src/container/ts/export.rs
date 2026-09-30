@@ -1995,7 +1995,7 @@ impl<E: catalog::Catalog> Export<E> {
 			packet[5] |= 0x80;
 			self.liveness.discontinuity();
 		}
-		self.liveness.pcr((ticks & TS_TIMESTAMP_MASK) * 300);
+		self.liveness.written_pcr((ticks & TS_TIMESTAMP_MASK) * 300);
 		Ok(packet)
 	}
 

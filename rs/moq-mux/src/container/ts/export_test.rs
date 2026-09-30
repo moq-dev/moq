@@ -5612,3 +5612,42 @@ async fn export_stats_catch_a_track_that_stops() {
 	);
 	assert!(count_pid(&after, running) > 0, "the surviving track kept flowing");
 }
+
+/// A stopped track's silence counts the whole of a media gap on the surviving track, not just
+/// the one second of clock the exporter backfills: the output's PCR jumps across the rest
+/// unflagged, and that jump is time the stopped track was silent.
+#[tokio::test(start_paused = true)]
+async fn export_stats_count_a_gap_longer_than_the_backfill() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut stopped = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let mut running = aac_rendition(&mut broadcast, &mut catalog, "b.aac");
+
+	let mut export = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	for ms in (0..2_000).step_by(20) {
+		write_aac(&mut stopped, ms);
+		write_aac(&mut running, ms);
+		drain_frames(&mut export).await;
+	}
+	// Five seconds with nothing on either track, then only the second resumes.
+	for ms in (7_000..8_000).step_by(20) {
+		write_aac(&mut running, ms);
+		drain_frames(&mut export).await;
+	}
+
+	let stats = export.stats();
+	let mut rows: Vec<_> = stats.streams.values().collect();
+	rows.sort_by_key(|row| row.units);
+	let [stopped, running] = rows[..] else {
+		panic!("expected two rows: {stats:?}");
+	};
+	assert!(stopped.units < running.units, "{stats:?}");
+	let quiet = stopped.quiet.expect("the output carries a PCR");
+	assert!(
+		quiet > Duration::from_millis(5_800),
+		"stopped at 2 s, quiet for only {quiet:?} at 8 s"
+	);
+	let quiet = running.quiet.expect("the output carries a PCR");
+	assert!(quiet < Duration::from_millis(200), "{quiet:?}");
+}
