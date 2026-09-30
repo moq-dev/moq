@@ -47,8 +47,8 @@ Decisions settled while planning, recorded so review does not relitigate them:
   root, and every token in a union shares the connection's root. Unscoped
   permission is `**`; an empty union grants nothing. Legacy AUTH wire codecs
   explicitly convert representable prefix unions, where `[""]` means all,
-  and refuse patterns they cannot represent. [Pattern interest](/quest/m1/path-patterns.md)
-  upgrades AUTH and ANNOUNCE_REQUEST wire fields together without changing
+  and refuse patterns they cannot represent. Pattern interest (#4277, on this
+  line) upgrades AUTH and ANNOUNCE_REQUEST wire fields together without changing
   the public pattern-valued grant type.
 - **Fail loud by aborting the session.** A publisher whose origin announces a
   broadcast outside the union aborts the session with `Unauthorized`, naming
@@ -111,7 +111,7 @@ existing lite-06 ALPN.
 - [Expired token error](/quest/m1/auth/expired-error.md) - an expired token
   reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
-  binding through moq-ffi and libmoq
+  binding through moq-ffi
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave
   the URL: a session starts on what the URL carried and its AUTH streams add
   the rest, with the URL kept for peers below lite-06
@@ -120,7 +120,6 @@ existing lite-06 ALPN.
 
 ## Related
 
-- [Pattern interest](/quest/m1/path-patterns.md) - moves AUTH's legacy wire prefixes to patterns along with ANNOUNCE_REQUEST
-- [Expiring media grants](/quest/m1/processor/grant-lease.md) - a worker's
+- [Expiring media grants](/quest/m2/processor/grant-lease.md) - a worker's
   lease renewal is a new in-band token
-- [P2P](/quest/m1/p2p/README.md) - the first consumer of hop-bound peer grants
+- [P2P](/quest/m2/p2p/README.md) - the first consumer of hop-bound peer grants

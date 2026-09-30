@@ -84,6 +84,44 @@ test.each([Version.DRAFT_01, Version.DRAFT_03, Version.DRAFT_06])(
 	},
 );
 
+test.each([
+	[Version.DRAFT_05, false],
+	[Version.DRAFT_06, true],
+])("a re-price goes out only where the wire carries cost (version %s)", async (version, sent) => {
+	const pair = createMockTransportPair(ALPN_05);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+	const broadcast = origin.createBroadcast(Path.from("cam"));
+	broadcast.announce({ cost: 7n });
+
+	const written: Uint8Array[] = [];
+	const stream = new Stream({
+		readable: new ReadableStream<Uint8Array>(),
+		writable: new WritableStream<Uint8Array>({
+			write(chunk) {
+				written.push(chunk);
+			},
+		}),
+	});
+	const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+	const running = publisher.runAnnounce(new AnnounceRequest(Path.empty()), stream);
+	await settle();
+	const initial = written.length;
+	expect(initial).toBeGreaterThan(0);
+
+	broadcast.announce({ cost: 9n });
+	await settle();
+	expect(written.length > initial).toBe(sent);
+
+	stream.close();
+	await running;
+	publisher.close();
+	broadcast.close();
+	origin.close();
+	pair.client.close();
+	pair.server.close();
+});
+
 // Delivers `sequences` in the given order, finishes the track, and returns the
 // SUBSCRIBE_END the publisher put on the wire.
 async function subscribeEnd(sequences: number[], version: Version = Version.DRAFT_05): Promise<SubscribeEnd> {

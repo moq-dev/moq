@@ -233,21 +233,23 @@ impl Listener {
 	/// loop, so this always yields. It stays because dropping it is a breaking change
 	/// to a published signature.
 	pub async fn accept(&self) -> Option<Result<qmux::Session>> {
-		self.accept_with_addr()
-			.await
-			.map(|result| result.map(|(session, _)| session))
+		Some(self.accept_pending().await.await.map(|(session, _)| session))
 	}
 
-	/// Accept the next connection and retain the peer's address.
-	pub(crate) async fn accept_with_addr(&self) -> Option<Result<(qmux::Session, net::SocketAddr)>> {
+	/// Accept a socket and return its independently driven qmux handshake.
+	pub(crate) async fn accept_pending(
+		&self,
+	) -> impl Future<Output = Result<(qmux::Session, net::SocketAddr)>> + use<> {
 		let (stream, addr) = self.accept_socket().await;
 		tracing::debug!(%addr, "accepted TCP connection");
-		let session = qmux::tcp::Config::new(WIRE_VERSION)
-			.protocols(self.protocols.iter().map(String::as_str))
-			.accept(stream)
-			.await
-			.map_err(|err| Error::Accept(crate::error::message(err)));
-		Some(session.map(|session| (session, addr)))
+		let config = qmux::tcp::Config::new(WIRE_VERSION).protocols(self.protocols.iter().map(String::as_str));
+		async move {
+			let session = config
+				.accept(stream)
+				.await
+				.map_err(|err| Error::Accept(crate::error::message(err)))?;
+			Ok((session, addr))
+		}
 	}
 
 	/// The `accept(2)` half: keep asking until a connection comes back.

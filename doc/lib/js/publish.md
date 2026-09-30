@@ -31,7 +31,7 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | `source` | `camera`, `screen`, or `file`. |
 | `muted`, `invisible` | Disable audio or video capture. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
-| `announce` | When to advertise: once a `source` is live (default), `always`, or `never`. A camera source waits for every enabled track. The broadcast is created while connected either way, but nobody can see or subscribe to it until it is announced. |
+| `announce` | When to advertise: once a `source` is live (default), `always`, or `never`. A camera source waits for every enabled track, and `source` waits until each captured track's config resolves or fails, so the first catalog lists every rendition. The broadcast is created while connected either way, but nobody can see or subscribe to it until it is announced. |
 
 A nested `<video>` gets the raw capture stream; a `<canvas>` is drawn by the
 element. `<moq-publish-support>` shows what the browser can encode.

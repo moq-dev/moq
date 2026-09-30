@@ -29,13 +29,13 @@ The dev shell provides both `go` and `uniffi-bindgen-go`, so `nix develop --comm
 ```bash
 cargo install uniffi-bindgen-go \
     --git https://github.com/kixelated/uniffi-bindgen-go \
-    --rev v0.9.0+v0.32.0 \
+    --rev v0.10.0-kixelated.1+v0.32.0 \
     --locked
 ```
 
 `--locked` matters: `uniffi_bindgen` depends on `toml` across a `>=0.9, <2` range, so a fresh resolve can pick a different `toml` than the generator was built against.
 
-The revision is `v0.9.0+v0.32.0`, matching the `uniffi` version `rs/moq-ffi` depends on; `flake.nix` pins the same source. It points at a fork because upstream has no uniffi 0.32 release yet; `flake.nix` carries the details. Generated async calls take `context.Context` as the first argument.
+The revision is `v0.10.0-kixelated.1+v0.32.0`, matching the `uniffi` version `rs/moq-ffi` depends on; `flake.nix` pins the same source. It points at a fork because upstream has no uniffi 0.32 release yet; `flake.nix` carries the details. Generated async calls take `context.Context` as the first argument.
 
 ## Layout
 

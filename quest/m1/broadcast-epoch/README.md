@@ -15,8 +15,8 @@ wire message changes. At an epoch-aware relay, a request for a bare name
 resolves to its newest live epoch on every protocol version.
 
 Non-goals: redundant publishers sharing one epoch, and failing over between
-them faster than the keep-alive (the [redundant ingest](/quest/m2/redundant-ingest.md)
-study). Also out of scope: trusting the publisher's clock (a far-future epoch
+them faster than the keep-alive (a question
+[Cluster routing](/quest/m1/cluster-routing/README.md) owns). Also out of scope: trusting the publisher's clock (a far-future epoch
 wins until its route goes away).
 
 ## Plan
@@ -40,10 +40,10 @@ Decided:
   bare `foo`, since a route covers its descendants, not its parent. A
   bare-name viewer behind one needs a publisher that opts out with the raw
   prefix route. Document this rather than promise it works.
-- Derived output lives under the epoch it came from
-  (`pid/foo.hang/@e/transcode.pro`), so nested epochs must parse. This moves
-  the [wildcard](/quest/m0/wildcard/README.md) line's derived-output example
-  down one segment, and its suffix patterns still match.
+- Derived output mirrors the epoch it came from
+  (`.pro/transcode/<pid>/foo.hang/@e`, per the
+  [wildcard](/quest/m0/wildcard/README.md) line's derived-output layout), so
+  the service's prefix claim still covers it.
 
 This README owns:
 
@@ -61,5 +61,5 @@ This README owns:
 - [Origin](/quest/m1/broadcast-epoch/origin.md) - moq-net publish mints an epoch, consumers follow the newest live one, and bare requests resolve to it on every version
 - [Apps](/quest/m1/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web publish under epochs and play bare names
 - [Gateways](/quest/m1/broadcast-epoch/gateways.md) - RTMP, SRT, and WHIP ingest mint an epoch per incoming connection, so an encoder reconnect is a clean takeover
-- [Bindings](/quest/m1/broadcast-epoch/bindings.md) - moq-ffi, libmoq, and every wrapper expose the epoch and inherit the default
+- [Bindings](/quest/m1/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and inherit the default
 - [GStreamer and OBS](/quest/m1/broadcast-epoch/gst-obs.md) - moqsink and the OBS plugin publish each run under a fresh epoch

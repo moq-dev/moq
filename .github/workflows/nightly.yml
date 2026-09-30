@@ -53,6 +53,11 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
+          # Trust the flake's cachix substituter, as check.yml does, so the dev
+          # shell is substituted rather than built from source.
+          extra-conf: |
+            extra-substituters = https://kixelated.cachix.org
+            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
 
       # Restore only, like `tests` below. Saving its own store cost 3.6 GB of the
       # repository's 10 GB budget and evicted the one every pull request restores.
@@ -92,6 +97,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command bun js/net/bench/frames.ts
 
+      # Times one varint encode and decode per wire format. No threshold: it only
+      # has to keep running, and its numbers are the baseline for the generated codec.
+      - name: JS varint benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command bun js/net/bench/varint.ts
+
       # Fails if publishing a group costs more as the track retains more groups,
       # which means the latency guard or the cache went back to scanning them all.
       - name: JS track retention benchmark
@@ -125,7 +136,7 @@ jobs:
       # cost of surfacing a day late rather than in review.
       - name: OBS
         if: ${{ !cancelled() }}
-        run: nix develop --command just obs ci
+        run: nix develop .#obs --command just obs ci
 
       - name: libmoq C fixtures
         if: ${{ !cancelled() }}
@@ -168,6 +179,11 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
+          # Trust the flake's cachix substituter, as check.yml does, so the dev
+          # shell is substituted rather than built from source.
+          extra-conf: |
+            extra-substituters = https://kixelated.cachix.org
+            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
       - name: Rust cache
         uses: ./.github/actions/rust-cache
       - name: Test
@@ -271,6 +287,11 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
+          # Trust the flake's cachix substituter, as check.yml does, so the dev
+          # shell is substituted rather than built from source.
+          extra-conf: |
+            extra-substituters = https://kixelated.cachix.org
+            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:

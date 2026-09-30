@@ -138,6 +138,7 @@ export function attach(el: MoqWatch): () => void {
 			audioContext: el.audio.out.context.peek()?.state,
 			audioTimestamp: el.audio.out.timestamp.peek() ?? undefined,
 			audioStalled: el.audio.out.stalled.peek(),
+			delay: el.sync.out.delay.peek(),
 			...(analyser ? analyze(analyser, spectrum, wave) : {}),
 			paused: el.paused,
 			pausedAttribute: el.hasAttribute("paused"),

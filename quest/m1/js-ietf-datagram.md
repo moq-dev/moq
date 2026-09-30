@@ -18,4 +18,4 @@ every supported draft, and `just test interop --all` covers both directions.
 
 ## Related
 
-- [Datagram range](/quest/m1/datagram-range.md) - the subscribe range for datagrams, settled on both protocols
+- [Datagrams are live-only](/quest/m1/datagram-unfetchable.md) - the subscribe range for datagrams, settled on both protocols

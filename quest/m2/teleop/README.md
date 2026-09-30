@@ -5,12 +5,16 @@
 MoQ carries a robot's video down and its control up on one session, as a
 library capability rather than a demo convention.
 
-Generic in the library, integration-shaped in the proofs: Kyber is the first
-transport replacement, while ArduPilot remains the first open protocol and
-flight integration. The primitive is what any teleoperated machine needs. The
-Kyber integration itself (replacing Kymux with moq-net and hang for Kyber's
-media, input, feedback, and control) lives in Kyber's own repository, so it
-has no quests here.
+Generic in the library: the primitive is what any teleoperated machine needs,
+and integrations are adapters on top of it. ArduPilot is the first open
+protocol and flight integration, parked in m3 until a real ArduPilot user or
+partner shows up.
+
+Decided in the 2026-09-30 audit: the ROS 2 bridge was deleted, cross-track
+correlation folded into [robot](/quest/m2/teleop/robot.md), V4L2-M2M encoding
+folded into [CLI packaging](/quest/m1/cli-packaging.md), and the MAVLink
+bridge, SITL proof, and browser package moved to m3. Kyber is a competitor
+with proprietary framing, not a transport we replace.
 
 ## Plan
 
@@ -25,9 +29,9 @@ demo and private to it. Every integrator rebuilds the announce fan-in, the
 operator arbitration, and the latency instrumentation from scratch.
 
 The hang catalog is no longer a gap: it advertises data tracks in its `json`
-and `binary` sections beside video and audio. What is genuinely missing is
-`moq-video`'s V4L2-M2M encoder backend in a released `moq-cli`, so the boards
-that fly have no native hardware-encode path anyone can install.
+and `binary` sections beside video and audio. The other missing piece,
+`moq-video`'s V4L2-M2M encoder in a released `moq-cli`, is tracked by
+[CLI packaging](/quest/m1/cli-packaging.md).
 
 ### Two delivery classes, one session
 
@@ -49,7 +53,7 @@ The split is a framing decision, not a subscription flag, and `moq-json` and
 modes. What that
 means for the primitive is in [robot](/quest/m2/teleop/robot.md), and what it
 means for a protocol multiplexing many message rates onto one link is in
-[mavlink](/quest/m2/teleop/mavlink.md).
+[mavlink](/quest/m3/teleop-mavlink.md).
 
 ### Who is already here
 
@@ -86,33 +90,24 @@ stating plainly because it is what a builder is comparing against.
 - [Operator arbitration](/quest/m2/teleop/arbitration.md) - exactly one
   controller commands a vehicle at a time, with explicit handoff and a stated
   authorization boundary
-- [MAVLink bridge](/quest/m2/teleop/mavlink.md) - a `moq-mavlink` gateway
-  replacing the VPN plus two unmanaged UDP flows, with QGroundControl and
-  friends unchanged
-- [Browser teleoperation package](/quest/m2/teleop/browser-package.md) - `@moq/robot`
-  mirrors the Rust crate, so browser clients consume the catalog and delivery
-  classes
-- [SITL proof and browser ground station](/quest/m2/teleop/proof.md) - ArduPilot
-  SITL and a synthetic camera flown from a browser ground station, reproducible
-  in five minutes
-- [V4L2-M2M encoding](/quest/m2/teleop/v4l2-encode.md) - a released `moq-cli`
-  reaches `moq-video`'s hardware encoder on the boards that fly, and the boards
-  worth buying are written down
 - [Teleoperation use-case docs](/quest/m2/teleop/docs.md) - `doc/concept/use-case/`
   gains a teleoperation page, with a runnable non-media example beside it
-- [ROS 2 bridge](/quest/m2/teleop/ros2.md) - a ROS 2 bridge sibling to the
-  MAVLink one, carrying topics over the same two delivery classes
-- [Cross-track correlation](/quest/m2/teleop/correlation.md) - a command, the
-  telemetry it produced, and the video frame showing the result share one
-  timebase
 
 ## Related
 
 - [e2ee](/quest/m1/e2ee/README.md) - the answer for a protected control link
-- [Text schema](/quest/m1/text-schema.md) - non-media tracks in a catalog,
-  arrived at from the media side
-- [Client stats](/quest/m1/qos/stats/schema.md) - publisher-reported stats
-  as a `.stats` broadcast (moq#2734); teleop's latency instrumentation
-  extends that extension rather than adding a second stats surface
+- [Media stats](/quest/m1/stats/schema.md) - publisher-reported stats
+  on a catalog-announced track (moq#2734); teleop's latency instrumentation
+  extends those types rather than adding a second stats surface
 - [Video hardware validation](/quest/m3/video-hardware.md) - the VAAPI run
   that covers Intel ground robots and NUC companions
+- [CLI packaging](/quest/m1/cli-packaging.md) - ships the V4L2-M2M encoder the
+  boards that fly need
+- [MAVLink bridge](/quest/m3/teleop-mavlink.md) - a `moq-mavlink` gateway,
+  parked until a real ArduPilot user or partner
+- [SITL proof and browser ground station](/quest/m3/teleop-proof.md) - ArduPilot
+  SITL flown from a browser, parked with the bridge
+- [Browser teleoperation package](/quest/m3/teleop-browser-package.md) -
+  `@moq/robot` mirroring the Rust crate, parked with the bridge
+- [Text schema](/quest/m2/text-schema.md) - non-media tracks in a catalog,
+  arrived at from the media side

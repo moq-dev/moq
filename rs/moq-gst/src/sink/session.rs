@@ -372,28 +372,7 @@ impl Session {
 		// The status task goes first, so it never reports the loop's end as a failure.
 		self.join.abort();
 		self.connection.abort(moq_net::Error::Cancel);
-		// Parks the thread rather than entering an executor, which would panic under a caller's own.
-		let closed = || {
-			let waiter = moq_net::kio::Waiter::new(Arc::new(Unpark(std::thread::current())).into());
-			while self.connection.poll_closed(&waiter).is_pending() {
-				std::thread::park();
-			}
-		};
-		match tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()) {
-			// A state change from a notify or bus sync handler runs on a worker, whose queue may hold the
-			// loop's cancellation. Handing the worker off lets it run while this thread blocks.
-			Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(closed),
-			_ => closed(),
-		}
-	}
-}
-
-/// Wakes a thread parked in [`Session::stop`].
-struct Unpark(std::thread::Thread);
-
-impl std::task::Wake for Unpark {
-	fn wake(self: Arc<Self>) {
-		self.0.unpark();
+		let _ = crate::block_on(self.connection.closed());
 	}
 }
 

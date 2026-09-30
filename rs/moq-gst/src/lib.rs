@@ -1,7 +1,10 @@
 use gst::glib;
 
+mod block;
 mod sink;
 mod source;
+
+use block::block_on;
 
 /// The `moqsink` publish connection lifecycle, exposed as its read-only `status` property.
 pub use sink::ConnectionStatus;

@@ -381,10 +381,14 @@ async fn connect_tls_override(
 		.get(http::header::HOST)
 		.cloned()
 		.ok_or(Error::MissingHostname)?;
+	// tokio-tungstenite takes the TLS name from the URL host, so a bare IPv6 override
+	// needs the URL brackets that `set_host` refuses to add.
 	let mut tls_url = url.clone();
-	tls_url
-		.set_host(Some(tls_host_name))
-		.map_err(|_| Error::connect(qmux::Error::InvalidServerName))?;
+	match tls_host_name.parse::<net::IpAddr>() {
+		Ok(ip) => tls_url.set_ip_host(ip),
+		Err(_) => tls_url.set_host(Some(tls_host_name)).map_err(|_| ()),
+	}
+	.map_err(|_| Error::connect(qmux::Error::InvalidServerName))?;
 	let mut request = tls_url
 		.as_str()
 		.into_client_request()
@@ -702,18 +706,40 @@ mod tests {
 
 	#[tokio::test]
 	async fn tls_host_name_override_dials_url_address() {
-		check_tls_authority(false).await;
+		check_tls_authority("127.0.0.1", false, Some("relay.example")).await;
 	}
 
 	#[tokio::test]
 	async fn fixed_addresses_keep_tls_name_and_request_host() {
 		tokio::time::pause();
-		check_tls_authority(true).await;
+		check_tls_authority("relay.example", true, None).await;
 	}
 
-	async fn check_tls_authority(fixed: bool) {
-		let rcgen::CertifiedKey { cert, signing_key } =
-			rcgen::generate_simple_self_signed(["relay.example".to_string()]).unwrap();
+	#[tokio::test]
+	async fn ipv6_literal() {
+		check_tls_authority("[::1]", false, None).await;
+	}
+
+	#[tokio::test]
+	async fn ipv6_literal_fixed_addresses() {
+		tokio::time::pause();
+		check_tls_authority("[::1]", true, None).await;
+	}
+
+	#[tokio::test]
+	async fn ipv6_tls_host_name_override() {
+		check_tls_authority("[::1]", false, Some("::1")).await;
+	}
+
+	/// Dial `wss://{url_host}` on loopback, optionally pinned to fixed addresses, and
+	/// check the TLS name and HTTP `Host` the server sees.
+	async fn check_tls_authority(url_host: &str, fixed: bool, tls_name: Option<&str>) {
+		let ipv6 = url_host.starts_with('[');
+		let name = tls_name.unwrap_or(url_host.trim_start_matches('[').trim_end_matches(']'));
+		// Clients send SNI only for DNS names, never for IP addresses.
+		let expected_sni = name.parse::<net::IpAddr>().is_err().then_some(name);
+
+		let rcgen::CertifiedKey { cert, signing_key } = rcgen::generate_simple_self_signed([name.to_string()]).unwrap();
 		let cert = CertificateDer::from(cert);
 		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
 		let provider = crate::crypto::provider();
@@ -732,7 +758,8 @@ mod tests {
 			.with_root_certificates(roots)
 			.with_no_client_auth();
 
-		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let loopback = if ipv6 { "[::1]:0" } else { "127.0.0.1:0" };
+		let listener = tokio::net::TcpListener::bind(loopback).await.unwrap();
 		let addr = listener.local_addr().unwrap();
 		let accepted = tokio::spawn(async move {
 			let (stream, _) = listener.accept().await.unwrap();
@@ -771,23 +798,21 @@ mod tests {
 		});
 
 		let config = Config::default();
-		let host = if fixed { "relay.example" } else { "127.0.0.1" };
-		let url = Url::parse(&format!("wss://{host}:{}/anon", addr.port())).unwrap();
+		let url = Url::parse(&format!("wss://{url_host}:{}/anon", addr.port())).unwrap();
 		// A TCP-only race would select this silent TLS peer and strand the dial.
-		let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let silent = tokio::net::TcpListener::bind(loopback).await.unwrap();
 		let target = if fixed {
 			crate::connect::Addr::pinned(url, [silent.local_addr().unwrap(), addr]).unwrap()
 		} else {
 			url.into()
 		};
-		let tls_name = (!fixed).then_some("relay.example");
-		let expected_host = format!("{host}:{}", addr.port());
+		let expected_host = format!("{url_host}:{}", addr.port());
 		let session = connect(&config, &client_tls, tls_name, target, moq_net::ALPNS)
 			.await
 			.unwrap();
 		drop(session);
 		let (server_name, host) = accepted.await.unwrap();
-		assert_eq!(server_name.as_deref(), Some("relay.example"));
+		assert_eq!(server_name.as_deref(), expected_sni);
 		assert_eq!(host.as_deref(), Some(expected_host.as_str()));
 	}
 

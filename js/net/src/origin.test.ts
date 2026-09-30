@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { getter } from "@moq/signals";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
-import { HopSchema, Route } from "./hop.ts";
+import { HopSchema, Route, stampHops } from "./hop.ts";
 import type { Consumer, Table } from "./origin.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -114,6 +114,23 @@ test("unscoped broadcast getters share one fresh snapshot per mutation", () => {
 	expect(repriced.get(path)).toEqual(Route.normalize({ cost: 2n }));
 
 	handle.close();
+	origin.close();
+});
+
+test("a stamped route ranks below an identified one of the same length", () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const stamped = stampHops([], HopSchema.parse(5n));
+	if (!stamped) throw new Error("an empty chain always has room");
+	const identified = [HopSchema.parse(11n), PEER];
+	expect(stamped).toHaveLength(identified.length);
+
+	const legacy = wireOf(origin).receive(path, { hops: stamped, cost: 0n });
+	const named = wireOf(origin).receive(path, { hops: identified, cost: 9n });
+	expect(origin.consume().broadcasts().peek().get(path)).toEqual(Route.normalize({ hops: identified, cost: 9n }));
+
+	legacy.close();
+	named.close();
 	origin.close();
 });
 
@@ -1556,5 +1573,39 @@ test("a scoped reader sees a local broadcast that only loses to a route outside 
 
 	local.close();
 	chat.close();
+	origin.close();
+});
+
+test("broadcast handles carry the path they were created or requested at", async () => {
+	expect(new BroadcastProducer().consume().path).toBe(Path.empty());
+
+	const origin = new Producer();
+	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*")]));
+	const broadcast = publish(scoped, Path.from("room/alice"));
+	expect(broadcast.consume().path).toBe(Path.from("tenant/room/alice"));
+
+	// Relative to each cursor's root, and kept by a clone.
+	const whole = origin.request(Path.from("tenant/room/alice"));
+	const rooted = scoped.consume().request(Path.from("room/alice"));
+	expect(whole.active.peek()?.path).toBe(Path.from("tenant/room/alice"));
+	expect(rooted.active.peek()?.path).toBe(Path.from("room/alice"));
+	const clone = rooted.active.peek()?.clone();
+	expect(clone?.path).toBe(Path.from("room/alice"));
+
+	// A dynamic handler's standalone broadcast is named by the request, too.
+	const dynamic = origin.dynamic(Path.from("live"));
+	const request = origin.request(Path.from("live/bob"));
+	const pending = await dynamic.requested().next();
+	const served = new BroadcastProducer();
+	pending.value?.accept(served);
+	expect(request.active.peek()?.path).toBe(Path.from("live/bob"));
+
+	clone?.close();
+	whole.close();
+	rooted.close();
+	request.close();
+	served.close();
+	dynamic.close();
+	broadcast.close();
 	origin.close();
 });

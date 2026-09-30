@@ -57,15 +57,26 @@ on external activity, `Ok(None)` only on external activity, and `Err` is the
 terminal error (`Error::Closed` for a clean finish): stop polling. Tests drive
 the same interface with explicitly advanced instants.
 
-Dropping the last session handle requests closure on the next poll. Dropping
-the driver cancels the session. `moq-tokio` and `moq-wasm` drive sessions for
-their callers.
+Dropping the last session handle requests closure on the next poll, and
+`session.abort(err)` closes with `err`'s code. Either discards stream data the
+peer has not acknowledged yet. `session.close().await` first waits, up to one
+second, for finished tracks to deliver their last groups and FIN, returning
+`Error::Timeout` if it gave up. Finish or abort live tracks before calling it.
+moq-transport (IETF) sessions close without waiting. Dropping the driver
+cancels the session. `moq-tokio` and `moq-wasm` drive sessions for their
+callers.
 
 `origin::Producer::new` returns a driver with the same `time::Driver`
 interface. It calls `cache::Pool::gc(now)` after each poll and folds the next
 cleanup time into its returned deadline. A standalone pool needs `gc(now)`
 called by its owner, at least by the returned deadline; `None` means expiry is
 disabled.
+
+The origin driver finishes once every owner is gone: each `origin::Producer`
+clone, published broadcast, and `origin::Dynamic`. Producer-side children pin
+their parent where no cycle exists, so a handler can drop its producer and keep
+serving. Read handles (`origin::Consumer`, announce cursors) never pin it: they
+see `Closed` once the owners are gone.
 
 Cache activity is dated lazily: reads and writes mark a group active without
 reading a clock, and the next `gc` pass stamps it with the supplied instant.

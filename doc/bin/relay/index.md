@@ -27,6 +27,9 @@ cargo install moq-relay          # or brew, apt, dnf, winget, docker; see Instal
 moq-relay relay.toml
 ```
 
+The `.deb` and `.rpm` systemd service reads `/etc/moq-relay/relay.toml`
+using the same positional config argument.
+
 The relay takes one TOML file. A local development config:
 
 ```toml

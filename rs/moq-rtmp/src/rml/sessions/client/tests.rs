@@ -1,10 +1,10 @@
 use super::*;
+use crate::rml::amf0::Amf0Value;
 use crate::rml::chunk_io::{ChunkDeserializer, ChunkSerializer, Packet};
 use crate::rml::messages::{MessagePayload, RtmpMessage, UserControlEventType};
 use bytes::Bytes;
 use bytes::BytesMut;
 use rand;
-use rml_amf0::Amf0Value;
 use std::collections::HashMap;
 
 #[test]

@@ -1,10 +1,11 @@
-//! Shared catalog-publishing logic for the video codec importers.
+//! Shared logic for the video codecs.
 //!
 //! Every video importer resolves its [`VideoConfig`](hang::catalog::VideoConfig) lazily from the
 //! bitstream and re-publishes it whenever the stream reveals a change. [`Catalog`] owns the part of
 //! that which is identical across codecs: overlay the caller's [`VideoHint`], skip a publish
 //! that matches the last one, and drive the shared [`hang::catalog::stalled::Detector`] detector so a
-//! lagging rendition is marked in the catalog.
+//! lagging rendition is marked in the catalog. [`Reorder`] is what a sequence header declares about
+//! frame reordering, read by the exporters that author a decode clock.
 
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,18 @@ use hang::catalog::stalled::{Detector, Sample};
 use crate::catalog::VideoHint;
 
 type Track = crate::container::Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig>;
+
+/// The reordering a video sequence header declares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Reorder {
+	/// The most pictures that can precede any picture in decode order and follow it in output
+	/// order: H.264 `max_num_reorder_frames`, HEVC `sps_max_num_reorder_pics`. A count of
+	/// pictures, not a time.
+	pub depth: u32,
+	/// One picture's duration as `(units, scale)`, i.e. `units / scale` seconds, when the header
+	/// declares a fixed picture rate.
+	pub period: Option<(u64, u64)>,
+}
 
 /// The catalog-publishing state a video importer overlays onto every config it resolves.
 ///

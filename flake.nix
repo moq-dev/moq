@@ -27,7 +27,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/46d7fe89247919583632e4963aee1c9a68dfe059";
+      url = "github:kixelated/quest/8590d2a1ddd91c2f499adf37b78aad0d673e3228";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
       inputs.crane.follows = "crane";
@@ -74,8 +74,12 @@
         # string pool 4-byte aligned, which macOS 27's dyld refuses to load, so
         # release-profile proc macros and cdylibs are a coin flip there. The
         # crates still declare their own lower floors (Cargo.toml rust-version).
-        rust-toolchain = pkgs.rust-bin.stable."1.98.1".default.override {
+        rust-toolchain = pkgs.rust-bin.stable."1.98.1".minimal.override {
+          # `minimal` rather than `default`, which adds 740 MB of offline HTML
+          # docs to a closure every CI job downloads.
           extensions = [
+            "rustfmt"
+            "clippy"
             "rust-src"
             "rust-analyzer"
           ];
@@ -268,8 +272,8 @@
         # check` skips itself, which reads as a pass in CI.
         #
         # The tag pairs the generator's own version with the uniffi release it
-        # targets (v0.9.0+v0.32.0 -> uniffi 0.32), and it only understands
-        # metadata emitted by that uniffi, so it moves with the `uniffi`
+        # targets (v0.10.0-kixelated.1+v0.32.0 -> uniffi 0.32), and it only
+        # understands metadata emitted by that uniffi, so it moves with the `uniffi`
         # dependency in rs/moq-ffi/Cargo.toml. Five other places name the same
         # generator version and must be bumped together: the repo and revision
         # in release-go-ffi.yml, and the `cargo install` line in
@@ -280,20 +284,21 @@
         # uniffi 0.32 generator: the metadata encoding changed in 0.32 even
         # though the contract version did not, so v0.7.1+v0.31.0 fails to read a
         # 0.32-built cdylib at all. The fork carries the port, tracked upstream
-        # as NordSecurity/uniffi-bindgen-go#96. Move back to NordSecurity once
-        # they tag a 0.32 release.
+        # as NordSecurity/uniffi-bindgen-go#96, and renders an enum error's
+        # exported Display as its Error(). Move back to NordSecurity once they
+        # tag a 0.32 release carrying both.
         uniffi-bindgen-go = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-go";
-          version = "0.9.0+v0.32.0";
+          version = "0.10.0-kixelated.1+v0.32.0";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-bindgen-go";
             rev = "v${version}";
-            hash = "sha256-7Hli9SmLknZe5p7iGYsRNxmUL6ovKL2jhX62Z/79K4o=";
+            hash = "sha256-0DCIgHt4R5ndtLkeXw/KF500HidB13L2HeuS4eLvLHU=";
           };
 
-          cargoHash = "sha256-ecpo/Z9hc3oPt/pF9Y+EB6SZANR8TDOJR6f/xSzJ9Uw=";
+          cargoHash = "sha256-wD+5Ghd4WFFQWAY2PXedXVPG+oPGozG9HbOhXB0fWco=";
 
           # The tag is a virtual workspace whose other members are uniffi test
           # fixtures. Building from the root would compile all of them, and CI
@@ -319,13 +324,13 @@
         # `-kixelated.N` pre-release so they never collide with upstream's.
         uniffi-bindgen-dart = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-dart";
-          version = "0.3.1-kixelated.4+v0.32.0";
+          version = "0.3.1-kixelated.5+v0.32.0";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-dart";
             rev = "v${version}";
-            hash = "sha256-BCIooajAp0Wqt7LeanFSdmS/GT0uYo+d8Qv2jGWCJD8=";
+            hash = "sha256-MobLv4aov+ySk3X8bd6Sr5MLiXxCprkoFqEFt5xOerw=";
           };
 
           # The upstream repository ignores Cargo.lock so cargo installs test
@@ -392,7 +397,8 @@
         # Type-checking needs headers rather than libraries, and those are
         # cross-platform -- obs-headers above, plus qt6.qtbase, which does build
         # on Darwin. So `just obs compile` and the lints run everywhere while
-        # `just obs build` stays native.
+        # `just obs build` stays native. On Linux it links nixpkgs' obs-studio,
+        # which only the `.#obs` shell below carries.
         obsDeps =
           with pkgs;
           [
@@ -409,7 +415,6 @@
             gersemi
           ]
           ++ lib.optionals (!stdenv.hostPlatform.isDarwin) [
-            obs-studio
             ninja
           ];
 
@@ -475,6 +480,15 @@
         # are disallowed in the flake `packages` schema.
         legacyPackages = {
           inherit (pkgs) gst_all_1;
+
+          # `nix develop .#obs`: the default shell plus obs-studio, which linking
+          # the plugin on Linux needs (`just obs build`, `just obs ci`). Kept out
+          # of the default shell because it pulls in ~3 GB (CEF, mostly) that
+          # every other CI job would download. Under legacyPackages rather than
+          # devShells so `nix flake check` doesn't build it on every Rust PR.
+          obs = self.devShells.${system}.default.overrideAttrs (old: {
+            nativeBuildInputs = old.nativeBuildInputs ++ [ pkgs.obs-studio ];
+          });
         };
 
         devShells.default = pkgs.mkShell {

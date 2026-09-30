@@ -120,3 +120,8 @@ tokio = { workspace = true, features = ["test-util"] }
 tokio-rustls = { workspace = true }
 toml = "1.1"
 tracing-test = { workspace = true, features = ["no-env-filter"] }
+
+# Which sockets the process still holds, so the worker tests can prove a stopped
+# group closed its own without rebinding a port another test could take.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+socket2 = { workspace = true, features = ["all"] }

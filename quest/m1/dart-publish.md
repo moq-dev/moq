@@ -39,11 +39,15 @@ hand-edited before tagging. Verify the published `moq_ffi` resolves its native
 asset from a clean machine with no monorepo checkout, since that download path
 is the one CI never exercises.
 
-The blocker below is about not publishing a claim we cannot support: the
+The iOS blocker is about not publishing a claim we cannot support: the
 first release is the one that reaches strangers, and pub.dev packages generally
 cannot be unpublished or deleted. A version may be retracted within seven days,
 but retraction does not erase it.
 
+Decided in the 2026-09-30 audit: publishing also waits on FFI shape, which
+relies on Dart being unpublished so its breaking renames are free.
+
 ## Required
 
 - [Dart on iOS](/quest/m1/dart-ios.md) - the package advertises iOS, which nobody has run
+- [FFI shape](/quest/m1/ffi-shape/README.md) - its breaking renames are free only while Dart is unpublished

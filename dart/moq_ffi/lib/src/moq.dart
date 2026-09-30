@@ -8,7 +8,9 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
+
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -2107,6 +2109,16 @@ abstract class MoqException implements Exception {
   RustBuffer lower();
   int allocationSize();
   int write(Uint8List buf);
+  @override
+  String toString() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqerror_uniffi_trait_display(
+        FfiConverterMoqException.lower(this),
+        status,
+      ),
+      FfiConverterString.lift,
+    );
+  }
 }
 
 class FfiConverterMoqException {
@@ -2343,11 +2355,6 @@ class ProtocolMoqException extends MoqException {
     );
     return new_offset;
   }
-
-  @override
-  String toString() {
-    return "ProtocolMoqException($details)";
-  }
 }
 
 class TransportMoqException extends MoqException {
@@ -2385,11 +2392,6 @@ class TransportMoqException extends MoqException {
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
-  }
-
-  @override
-  String toString() {
-    return "TransportMoqException($v0)";
   }
 }
 
@@ -2429,11 +2431,6 @@ class InternalMoqException extends MoqException {
     );
     return new_offset;
   }
-
-  @override
-  String toString() {
-    return "InternalMoqException($v0)";
-  }
 }
 
 class MediaMoqException extends MoqException {
@@ -2471,11 +2468,6 @@ class MediaMoqException extends MoqException {
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
-  }
-
-  @override
-  String toString() {
-    return "MediaMoqException($v0)";
   }
 }
 
@@ -2515,11 +2507,6 @@ class MuxMoqException extends MoqException {
     );
     return new_offset;
   }
-
-  @override
-  String toString() {
-    return "MuxMoqException($v0)";
-  }
 }
 
 class JsonTrackMoqException extends MoqException {
@@ -2557,11 +2544,6 @@ class JsonTrackMoqException extends MoqException {
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
-  }
-
-  @override
-  String toString() {
-    return "JsonTrackMoqException($v0)";
   }
 }
 
@@ -2601,11 +2583,6 @@ class UrlMoqException extends MoqException {
     );
     return new_offset;
   }
-
-  @override
-  String toString() {
-    return "UrlMoqException($v0)";
-  }
 }
 
 class TimeOverflowMoqException extends MoqException {
@@ -2633,11 +2610,6 @@ class TimeOverflowMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 8);
     int new_offset = buf.offsetInBytes + 4;
     return new_offset;
-  }
-
-  @override
-  String toString() {
-    return "TimeOverflowMoqException";
   }
 }
 
@@ -2677,11 +2649,6 @@ class LogLevelMoqException extends MoqException {
     );
     return new_offset;
   }
-
-  @override
-  String toString() {
-    return "LogLevelMoqException($v0)";
-  }
 }
 
 class TaskMoqException extends MoqException {
@@ -2719,11 +2686,6 @@ class TaskMoqException extends MoqException {
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
-  }
-
-  @override
-  String toString() {
-    return "TaskMoqException($v0)";
   }
 }
 
@@ -2763,11 +2725,6 @@ class JsonMoqException extends MoqException {
     );
     return new_offset;
   }
-
-  @override
-  String toString() {
-    return "JsonMoqException($v0)";
-  }
 }
 
 class CancelledMoqException extends MoqException {
@@ -2795,11 +2752,6 @@ class CancelledMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 12);
     int new_offset = buf.offsetInBytes + 4;
     return new_offset;
-  }
-
-  @override
-  String toString() {
-    return "CancelledMoqException";
   }
 }
 
@@ -2829,11 +2781,6 @@ class ClosedMoqException extends MoqException {
     int new_offset = buf.offsetInBytes + 4;
     return new_offset;
   }
-
-  @override
-  String toString() {
-    return "ClosedMoqException";
-  }
 }
 
 class BusyMoqException extends MoqException {
@@ -2861,11 +2808,6 @@ class BusyMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 14);
     int new_offset = buf.offsetInBytes + 4;
     return new_offset;
-  }
-
-  @override
-  String toString() {
-    return "BusyMoqException";
   }
 }
 
@@ -2905,11 +2847,6 @@ class ConnectMoqException extends MoqException {
     );
     return new_offset;
   }
-
-  @override
-  String toString() {
-    return "ConnectMoqException($v0)";
-  }
 }
 
 class BindMoqException extends MoqException {
@@ -2947,11 +2884,6 @@ class BindMoqException extends MoqException {
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
-  }
-
-  @override
-  String toString() {
-    return "BindMoqException($v0)";
   }
 }
 
@@ -2991,11 +2923,6 @@ class RejectMoqException extends MoqException {
     );
     return new_offset;
   }
-
-  @override
-  String toString() {
-    return "RejectMoqException($v0)";
-  }
 }
 
 class AlreadyRespondedMoqException extends MoqException {
@@ -3023,11 +2950,6 @@ class AlreadyRespondedMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 18);
     int new_offset = buf.offsetInBytes + 4;
     return new_offset;
-  }
-
-  @override
-  String toString() {
-    return "AlreadyRespondedMoqException";
   }
 }
 
@@ -3067,11 +2989,6 @@ class CodecMoqException extends MoqException {
     );
     return new_offset;
   }
-
-  @override
-  String toString() {
-    return "CodecMoqException($v0)";
-  }
 }
 
 class UnauthorizedMoqException extends MoqException {
@@ -3099,11 +3016,6 @@ class UnauthorizedMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 20);
     int new_offset = buf.offsetInBytes + 4;
     return new_offset;
-  }
-
-  @override
-  String toString() {
-    return "UnauthorizedMoqException";
   }
 }
 
@@ -3133,11 +3045,6 @@ class ForbiddenMoqException extends MoqException {
     int new_offset = buf.offsetInBytes + 4;
     return new_offset;
   }
-
-  @override
-  String toString() {
-    return "ForbiddenMoqException";
-  }
 }
 
 class NotFoundMoqException extends MoqException {
@@ -3165,11 +3072,6 @@ class NotFoundMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 22);
     int new_offset = buf.offsetInBytes + 4;
     return new_offset;
-  }
-
-  @override
-  String toString() {
-    return "NotFoundMoqException";
   }
 }
 
@@ -3199,11 +3101,6 @@ class UnsupportedMoqException extends MoqException {
     int new_offset = buf.offsetInBytes + 4;
     return new_offset;
   }
-
-  @override
-  String toString() {
-    return "UnsupportedMoqException";
-  }
 }
 
 class AlreadyCommittedMoqException extends MoqException {
@@ -3231,11 +3128,6 @@ class AlreadyCommittedMoqException extends MoqException {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 24);
     int new_offset = buf.offsetInBytes + 4;
     return new_offset;
-  }
-
-  @override
-  String toString() {
-    return "AlreadyCommittedMoqException";
   }
 }
 
@@ -3275,11 +3167,6 @@ class InvalidRouteMoqException extends MoqException {
     );
     return new_offset;
   }
-
-  @override
-  String toString() {
-    return "InvalidRouteMoqException($v0)";
-  }
 }
 
 class InvalidPatternMoqException extends MoqException {
@@ -3317,11 +3204,6 @@ class InvalidPatternMoqException extends MoqException {
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
-  }
-
-  @override
-  String toString() {
-    return "InvalidPatternMoqException($v0)";
   }
 }
 
@@ -3361,11 +3243,6 @@ class UnresolvableBroadcastMoqException extends MoqException {
     );
     return new_offset;
   }
-
-  @override
-  String toString() {
-    return "UnresolvableBroadcastMoqException($v0)";
-  }
 }
 
 class LogMoqException extends MoqException {
@@ -3403,11 +3280,6 @@ class LogMoqException extends MoqException {
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
-  }
-
-  @override
-  String toString() {
-    return "LogMoqException($v0)";
   }
 }
 
@@ -11665,6 +11537,14 @@ external RustBuffer uniffi_moq_ffi_fn_method_moqsession_stats(
 @Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
 external Pointer<Void> uniffi_moq_ffi_fn_method_moqsession_status(
   Pointer<Void> ptr,
+);
+
+@Native<RustBuffer Function(RustBuffer, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external RustBuffer uniffi_moq_ffi_fn_method_moqerror_uniffi_trait_display(
+  RustBuffer ptr,
+  Pointer<RustCallStatus> uniffiStatus,
 );
 
 @Native<Void Function(RustBuffer, Pointer<RustCallStatus>)>(

@@ -135,3 +135,11 @@ test("Varint boundary values", () => {
 		expect(decoded).toBe(value);
 	}
 });
+
+test("Varint decode throws past 2^53 - 1 instead of rounding", () => {
+	expect(Varint.decode(Varint.encode(2n ** 53n - 1n))[0]).toBe(Number.MAX_SAFE_INTEGER);
+	for (const value of [2n ** 53n, 2n ** 53n + 1n, 2n ** 62n - 1n]) {
+		expect(() => Varint.decode(Varint.encode(value))).toThrow(`value larger than 53-bits: ${value}`);
+		expect(Varint.decodeBigInt(Varint.encode(value))[0]).toBe(value);
+	}
+});

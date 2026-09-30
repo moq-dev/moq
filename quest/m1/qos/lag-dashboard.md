@@ -21,10 +21,8 @@ and per node like the existing counters.
   bucket, and say which.
 - Skip `.`-prefixed system broadcasts, as the existing aggregate does. Lag is
   per broadcast, so a per-broadcast view is worth adding if it stays cheap.
-- The [browser stats quest](/quest/m1/qos/stats/js.md) moves the dashboard
-  onto `@moq/stats` on the same line. If it has landed, read `lag` and
-  `dropped` through its schemas; otherwise extend the existing interfaces and
-  let whichever lands second reconcile.
+- Extend the dashboard's existing relay-stats interfaces; no `@moq/stats`
+  package is planned.
 
 Public API: none. Wire: none.
 

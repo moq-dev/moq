@@ -73,6 +73,8 @@ impl Waiter {
 	/// Register this waiter with a [`WaiterList`] for future notification.
 	///
 	/// Delegates to [`WaiterList::register`], a no-op while the list still holds it.
+	/// Only the first 8 lists at once are remembered: a waiter kept across polls
+	/// that also sits on more appends a duplicate to those extras on every call.
 	pub fn register(&self, list: &mut WaiterList) {
 		list.register(self);
 	}
@@ -95,11 +97,6 @@ impl Waiter {
 	/// still holds this waiter. A record of an older round of the same list is
 	/// replaced, since the drain that ended that round took the entry with it.
 	fn record(&self, tag: u64) -> bool {
-		// Retiring anyway, so skip the bookkeeping: duplicates die with the waiter.
-		if self.lost.load(Ordering::Relaxed) {
-			return true;
-		}
-
 		// The common case, kept a tight loop of its own.
 		if self.parked.iter().any(|slot| slot.load(Ordering::Relaxed) == tag) {
 			return false;
@@ -973,6 +970,27 @@ mod tests {
 		list.wake();
 		waiter.register(&mut list);
 		assert_eq!(list.entries.len(), 1, "a drained waiter must register again");
+	}
+
+	/// A standalone waiter past its records still skips the lists it recorded, even
+	/// after one of them drains, while an unrecorded list appends on every call.
+	#[test]
+	fn overflow_keeps_recorded_lists_idempotent() {
+		let waiter = Waiter::noop();
+		let mut lists: Vec<_> = (0..=PARKED).map(|_| WaiterList::new()).collect();
+		for _ in 0..3 {
+			for list in &mut lists {
+				waiter.register(list);
+			}
+		}
+		lists[0].wake();
+		for _ in 0..3 {
+			waiter.register(&mut lists[0]);
+		}
+		for list in &lists[..PARKED] {
+			assert_eq!(list.entries.len(), 1, "a recorded list stacked a duplicate");
+		}
+		assert_eq!(lists[PARKED].entries.len(), 3, "an unrecorded list cannot skip");
 	}
 
 	/// The relay's shape: a task parks on a few lists, one of them wakes it, and the

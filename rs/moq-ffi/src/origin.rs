@@ -106,6 +106,9 @@ pub struct MoqAnnounceConsumer {
 #[derive(uniffi::Object)]
 /// A served route: advertises a path prefix and yields the broadcast requests
 /// beneath it for the application to accept or reject.
+///
+/// Keeps its origin running, like a published broadcast, after every
+/// `MoqOriginProducer` is gone.
 pub struct MoqOriginDynamic {
 	slot: Slot,
 	task: std::sync::Mutex<Option<Arc<Task<OriginDynamic>>>>,

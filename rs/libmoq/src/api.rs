@@ -1882,6 +1882,9 @@ pub extern "C" fn moq_origin_request_cancel(task: u32) -> i32 {
 
 /// Close an origin and clean up its resources.
 ///
+/// The origin keeps running while a broadcast published on it or a
+/// [moq_origin_dynamic] handler lives; close or cancel those to end it.
+///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_origin_close(origin: u32) -> i32 {

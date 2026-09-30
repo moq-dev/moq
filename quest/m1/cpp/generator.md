@@ -44,4 +44,4 @@ stop here and write down why.
 
 ## Related
 
-- [C# generator](/quest/m2/cs/generator.md) - the same 0.32 port against NordSecurity's C# generator
+- [C# generator](/quest/m3/cs/generator.md) - the same 0.32 port against NordSecurity's C# generator

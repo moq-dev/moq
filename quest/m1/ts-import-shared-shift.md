@@ -44,8 +44,3 @@ Guidance:
 - Tests beside the existing loop-wrap tests: a muxed H.264 + AAC loop whose
   period is not a multiple of either frame duration keeps the first audio and
   video timestamps of each pass at the source offset across three wraps.
-
-## Related
-
-- [#3489](/quest/m1/3489-ts-import-stream-liveness.md) - per-PID liveness in the same importer; touches `Stream` but not the shift
-- [Remove live()](/quest/m1/remove-live.md) - deletes the restart anchor; a wrap shift stays input-derived

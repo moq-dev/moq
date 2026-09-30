@@ -35,6 +35,12 @@ Encode mirrors decode: an `encode::backend` seam, `Codec::Aac` meaning AAC-LC
 at the input's layout, and platform encoders behind it. Opus encode stays
 mono/stereo.
 
+The next merge from main conflicts in `rs/moq-audio/src/decode/decoder.rs`:
+[#4442](https://github.com/moq-dev/moq/pull/4442) conceals one Opus frame on
+loss there, while this line moved that logic into `decode/backend/libopus.rs`.
+Port the fix by hand, taking the concealed duration from the multistream
+packet rather than the single-stream call.
+
 The core configuration and layout contracts land in main. These quests implement
 surround and backend dispatch on that contract; each platform then lands as
 its own decode and encode quest so verification stays per host. The
@@ -56,7 +62,6 @@ ready now.
 ## Related
 
 - [OBS native codecs](/quest/m1/obs-moq-video/README.md) - the OBS source and encoder adapters consume this through moq-ffi; #3498 narrowed OBS to what moq-audio decodes today
-- [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - Windows and Android verification needs a host; the Windows and macOS CI gates only compile
 - [Dart codec parity](/quest/m1/dart-codecs.md) - Dart gains these once it builds with the `audio` feature
 - [Media Foundation decode](/quest/m2/audio-decode-mediafoundation.md) - Windows decodes HE-AAC, multichannel AAC, and what else the MFTs offer
 - [Media Foundation encode](/quest/m2/audio-encode-mediafoundation.md) - Windows encodes AAC-LC

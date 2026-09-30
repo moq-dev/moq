@@ -2534,25 +2534,33 @@ async fn dynamic_serves_a_request_under_a_prefix() {
 	served.close().unwrap();
 }
 
-/// Tearing the origin down ends every handler with `Closed`. A parked request
-/// keeps the origin's driver alive (its front is lifecycle work the driver
-/// drains before resolving), so the teardown never runs underneath one; the
-/// case that does happen is a live handler with nothing parked.
+/// A dynamic handler keeps its origin alive: dropping (or GC-finalizing) the
+/// last `MoqOriginProducer` leaves the route serving, and a consumer made
+/// earlier still resolves through it.
 #[tokio::test]
-async fn origin_teardown_closes_dynamic_handlers() {
+async fn dynamic_keeps_the_origin_alive() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
 	let dynamic = serve(&origin, "");
-
-	// The last producer handle: the origin's driver resolves and tears it down.
 	drop(origin);
-	match tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+
+	let request_broadcast = {
+		let consumer = consumer.clone();
+		tokio::spawn(async move { consumer.request_broadcast("live".into()).await })
+	};
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
-		.expect("the handler must observe the teardown")
-	{
-		Err(MoqError::Closed) => {}
-		Err(err) => panic!("unexpected error: {err:?}"),
-		Ok(_) => panic!("a request was handed out after the teardown"),
-	}
+		.expect("the handler must still receive requests")
+		.unwrap();
+	let served = MoqBroadcastProducer::new().unwrap();
+	request.accept(&served).unwrap();
+	tokio::time::timeout(TIMEOUT, request_broadcast)
+		.await
+		.expect("timed out waiting for the request to resolve")
+		.expect("request task panicked")
+		.expect("the handler served the path");
+
+	served.close().unwrap();
 }
 
 /// Cancelling a handler retracts its route before returning.

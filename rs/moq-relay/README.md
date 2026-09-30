@@ -26,7 +26,7 @@ walkthrough.
 ### Fedora / RHEL / Rocky / AlmaLinux
 
 ```bash
-sudo dnf config-manager --add-repo https://rpm.moq.dev/moq.repo
+sudo curl -fsSL https://rpm.moq.dev/moq.repo -o /etc/yum.repos.d/moq.repo
 sudo dnf install moq-relay
 ```
 

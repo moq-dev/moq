@@ -4,10 +4,11 @@
 //! or QUIC) or its axum WebSocket path (`serve_ws` over `ws://`), points it at a
 //! scripted auth server, connects a publisher and a subscriber, confirms media
 //! flows, then asserts the relay follows the server's word: a re-check that moves
-//! the tier retags the live session's stats, a narrower grant or a refusal closes it, an outage
-//! keeps it until `expires`, and every close reports `end` with what it moved.
+//! the tier retags the live session's stats, a narrower grant or a refusal closes it,
+//! and every close reports `end` with what it moved.
 //! The last tests swap the server for an in-process decider answering
-//! `Admissions`, and prove the lease it drives reaches the session the same way.
+//! `Admissions`, and prove the lease it drives reaches the session the same way,
+//! including an outage that keeps it until `expires`, on Tokio's paused clock.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -746,60 +747,6 @@ async fn http_routes_hold_a_lease() {
 	relay.abort();
 }
 
-/// An outage keeps the session until `expires`, then closes it as expired.
-///
-/// On the real clock: a paused one jumps to the next timer whenever the runtime
-/// waits on a socket, and macOS delivers loopback asynchronously, so a virtual
-/// timeout can fire before the relay answers. Load only delays the close, so
-/// asserting it never lands before `expires` holds on a busy machine.
-#[tokio::test]
-async fn an_outage_keeps_the_session_until_expires() {
-	// Whole seconds, as the grant crosses the wire, so the relay sees this exact instant.
-	let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
-	let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(now.as_secs() + 3);
-
-	let mut grant = grant(Duration::ZERO);
-	grant.expires = Some(expires);
-	let script = Script::new(grant);
-	script.on_revalidate(Answer::Status(503));
-	let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
-	let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port)).await;
-
-	assert_closed(pub_session, TIMEOUT, "publisher").await;
-	assert!(
-		SystemTime::now() >= expires,
-		"an outage must not close the publisher before expires"
-	);
-	let outages = script
-		.seen
-		.lock()
-		.unwrap()
-		.iter()
-		.filter(|r| r.event == Event::Revalidate)
-		.count();
-	assert!(outages > 0, "no re-check reached the server during the outage");
-	assert_closed(sub_session, TIMEOUT, "subscriber").await;
-
-	let ends = tokio::time::timeout(TIMEOUT, async {
-		loop {
-			let ends = script.ends();
-			if ends.len() == 2 {
-				return ends;
-			}
-			tokio::time::sleep(Duration::from_millis(10)).await;
-		}
-	})
-	.await
-	.expect("both sessions report their end");
-	for end in ends {
-		let Event::End { reason, .. } = &end.event else {
-			unreachable!()
-		};
-		assert_eq!(*reason, moq_auth::lease::Reason::Expired);
-	}
-	relay.abort();
-}
-
 /// A session the client closes reports `end` with its duration and byte counters.
 /// Over QUIC, the one transport whose connection reports its totals.
 #[tokio::test]
@@ -1039,6 +986,98 @@ async fn a_fixed_lease_still_expires() {
 		assert_closed(sub_session, Duration::from_secs(5), &format!("{scheme} subscriber")).await;
 		relay.abort();
 	}
+}
+
+/// A connected `(client, server)` session pair over an in-memory byte stream, so a
+/// test on Tokio's paused clock never waits on a socket: the clock only advances
+/// once every byte in flight has landed.
+async fn memory_sessions() -> (moq_net::Session, moq_net::Session) {
+	let config = || {
+		let mut config = qmux::Config::new(qmux::Version::QMux01);
+		config.protocol = qmux::Protocol::Negotiate(moq_net::ALPNS.iter().map(|alpn| alpn.to_string()).collect());
+		config
+	};
+	let stream = |io| qmux::transport::Stream::new(io, qmux::Version::QMux01, config().max_record_size);
+	let (client, server) = tokio::io::duplex(64 * 1024);
+	let (client, server) = tokio::try_join!(
+		qmux::Session::connect(stream(client), config()),
+		qmux::Session::accept(stream(server), config()),
+	)
+	.expect("qmux handshake");
+
+	let now = tokio::time::Instant::now().into_std();
+	let client = async {
+		let (session, driver) = moq_net::Client::new()
+			.connect(now, moq_tokio::transport::Session::new(client))
+			.await
+			.expect("client handshake");
+		tokio::spawn(moq_net::time::run(driver));
+		session
+	};
+	let server = async {
+		let (session, driver) = moq_net::Server::new()
+			.accept(now, moq_tokio::transport::Session::new(server))
+			.await
+			.expect("server handshake");
+		tokio::spawn(moq_net::time::run(driver));
+		session
+	};
+	tokio::join!(client, server)
+}
+
+/// An outage keeps the session until `expires`, then closes it as expired and
+/// reports that as its end. A decider that never answers again is an outage as
+/// far as the relay can tell, so the relay enforces `expires` itself; how an auth
+/// server's outage keeps the grant is `moq_auth::Client`'s to test.
+#[tokio::test(start_paused = true)]
+async fn an_outage_keeps_the_session_until_expires() {
+	let expires = SystemTime::now() + Duration::from_secs(3);
+	let (auth, mut admissions) = moq_relay::auth::Auth::embedded("test-relay");
+	let decider = tokio::spawn(async move {
+		let admission = admissions.next().await.expect("an admission");
+		let mut grant = Grant::new(all(), all());
+		grant.expires = Some(expires);
+		let (producer, consumer) = moq_auth::lease::Producer::new(grant);
+		admission.grant(consumer);
+		producer
+	});
+
+	// `expires` is wall-clock time, which the relay maps onto Tokio's clock
+	// somewhere inside `admit`, so bracket it: the bounds hold however long it takes.
+	let (wall, tick) = (SystemTime::now(), tokio::time::Instant::now());
+	let lease = auth
+		.admit(auth.request(moq_auth::Transport::Tcp, "/room"))
+		.await
+		.expect("admitted");
+	let earliest = tick + expires.duration_since(SystemTime::now()).unwrap();
+	let latest = tokio::time::Instant::now() + expires.duration_since(wall).unwrap();
+	let producer = decider.await.expect("decider");
+
+	let (client, server) = memory_sessions().await;
+	let supervised = tokio::spawn(moq_relay::supervise(
+		server,
+		lease,
+		moq_relay::shutdown::Observer::disabled(),
+		None,
+	));
+
+	// A millisecond either side for Tokio's timer resolution.
+	let tolerance = Duration::from_millis(1);
+	assert!(
+		tokio::time::timeout_at(earliest - tolerance, client.closed())
+			.await
+			.is_err(),
+		"an outage must not close the session before expires"
+	);
+	tokio::time::timeout_at(latest + tolerance, client.closed())
+		.await
+		.expect("closed at expires, not later");
+	let (reason, _) = producer.closed().await;
+	assert_eq!(reason, moq_auth::lease::Reason::Expired);
+	supervised
+		.await
+		.expect("supervisor")
+		.expect("a lease end is not a session error");
 }
 
 /// A relay whose config names no auth source is the embedder's to decide: `run`
