@@ -15,7 +15,7 @@ not written with a guessed `channel_config_code`.
   Decide from the parsed description: family 0, and family 1 with the Vorbis
   default mapping, keep the plain code; refuse the rest, or write the explicit
   layout if the import side of
-  [TS Opus channel codes](/quest/m1/audio-codecs/ts-opus-channel-codes.md) settles
+  [TS Opus channel codes](/quest/m1/ts-opus-channel-codes.md) settles
   one both sides agree on.
 - A track with no description stays mono or stereo only.
 - Tests with real heads, checked against ffprobe where ffmpeg reads the result.

@@ -1,4 +1,4 @@
-# Audio codecs
+# [M] Audio codecs
 
 ## Goal
 
@@ -37,23 +37,21 @@ Encode mirrors decode: an `encode::backend` seam, `Codec::Aac` meaning AAC-LC
 at the input's layout, and platform encoders behind it. Opus encode stays
 mono/stereo.
 
-The core configuration and layout contracts land in main. These quests implement
-surround and backend dispatch on that contract; each platform then lands as
-its own decode and encode quest so verification stays per host.
+The core configuration and layout contracts land in main. The line lands the
+decode and encode seams, surround layouts, surround Opus, and named codecs.
+Platform backends and the small refusal fixes found along the way are
+standalone quests (split out on 2026-09-30), so the line does not wait on a
+macOS host or on `dev`.
 
-## Required
-
-- [AudioToolbox decode](/quest/m1/audio-codecs/decode-audiotoolbox.md) - macOS and iOS decode HE-AAC, multichannel AAC, and what else the framework offers
-- [HE-AAC catalog output](/quest/m1/audio-codecs/he-aac-catalog-output.md) - HE-AAC catalog entries name the output rate and layout, not the LC core
-- [TS Opus export refusals](/quest/m1/audio-codecs/ts-opus-export-refusals.md) - the TS exporter refuses Opus heads its channel code cannot describe instead of mislabeling them
-- [TS Opus channel codes](/quest/m1/audio-codecs/ts-opus-channel-codes.md) - TS Opus with a channel code of 0x81 or above imports with its real head or is refused, never guessed as stereo
-- [AudioToolbox encode](/quest/m1/audio-codecs/encode-audiotoolbox.md) - macOS and iOS encode AAC-LC
-- [AAC encode refusals](/quest/m1/audio-codecs/aac-encode-refusals.md) - `Config::encode` refuses channel counts it cannot name instead of writing stereo
-- [AAC parse truncated SBR](/quest/m1/audio-codecs/aac-parse-truncated-sbr.md) - `Config::parse` refuses SBR and PS configs cut off before their core
-- [GStreamer surround Opus](/quest/m1/audio-codecs/gst-opus-surround.md) - the moq-gst sink publishes 3 to 8 channel Opus with the OpusHead its caps describe
+Remaining work: merge main in, port
+[#4442](https://github.com/moq-dev/moq/pull/4442)'s one-frame Opus
+concealment from `decode/decoder.rs` into `decode/backend/libopus.rs`, taking
+the concealed duration from the multistream packet, and get CI green.
 
 ## Related
 
+- [AudioToolbox decode](/quest/m1/audio-decode-audiotoolbox.md) - macOS and iOS decode HE-AAC, multichannel AAC, and what else the framework offers
+- [AudioToolbox encode](/quest/m1/audio-encode-audiotoolbox.md) - macOS and iOS encode AAC-LC
 - [OBS native codecs](/quest/m1/obs-moq-video/README.md) - the OBS source and encoder adapters consume this through moq-ffi; #3498 narrowed OBS to what moq-audio decodes today
 - [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - Windows and Android verification needs a host; the Windows and macOS CI gates only compile
 - [Dart codec parity](/quest/m1/dart-codecs.md) - Dart gains these once it builds with the `audio` feature

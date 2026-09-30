@@ -90,6 +90,15 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [OBS native codecs](/quest/m1/obs-moq-video/README.md) - replace FFmpeg video and audio decoding with moq-video and moq-audio, deliver GPU frames, and use native audio/video encoders
 - [Opus concealment](/quest/m1/opus-conceal.md) - a lost Opus packet conceals the last packet's length, not 120 ms
 - [Audio codecs](/quest/m1/audio-codecs/README.md) - platform audio codecs, explicit unsupported cases, and channel layouts up to 7.1
+- [AudioToolbox decode](/quest/m1/audio-decode-audiotoolbox.md) - macOS and iOS decode HE-AAC, multichannel AAC, and what else the framework offers
+- [HE-AAC catalog output](/quest/m1/he-aac-catalog-output.md) - HE-AAC catalog entries name the output rate and layout, not the LC core
+- [TS Opus export refusals](/quest/m1/ts-opus-export-refusals.md) - the TS exporter refuses Opus heads its channel code cannot describe instead of mislabeling them
+- [TS Opus channel codes](/quest/m1/ts-opus-channel-codes.md) - TS Opus with a channel code of 0x81 or above imports with its real head or is refused, never guessed as stereo
+- [AudioToolbox encode](/quest/m1/audio-encode-audiotoolbox.md) - macOS and iOS encode AAC-LC
+- [AAC encode refusals](/quest/m1/aac-encode-refusals.md) - on dev, `Config::encode` refuses channel counts it cannot name instead of writing stereo
+- [AAC parse truncated SBR](/quest/m1/aac-parse-truncated-sbr.md) - `Config::parse` refuses SBR and PS configs cut off before their core
+- [GStreamer surround Opus](/quest/m1/gst-opus-surround.md) - the moq-gst sink publishes 3 to 8 channel Opus with the OpusHead its caps describe
+- [FFI frame duration default](/quest/m1/ffi-frame-duration-default.md) - on dev, the binding audio encoder takes the codec's own frame by default, so `aac()` needs no explicit 0
 - [Opus catalog rate](/quest/m1/opus-catalog-rate.md) - MKV Opus import publishes the 48 kHz codec rate in the catalog, not the OpusHead input rate
 - [mp4-atom dOps mapping](/quest/m1/mp4-atom-dops-mapping.md) - a released mp4-atom reads and writes any `dOps` channel mapping family and table
 - [CMAF surround Opus](/quest/m1/cmaf-opus-surround.md) - fMP4 import and export carry an Opus channel mapping table

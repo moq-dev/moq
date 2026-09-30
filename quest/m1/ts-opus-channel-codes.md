@@ -24,4 +24,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [TS Opus export refusals](/quest/m1/audio-codecs/ts-opus-export-refusals.md) - the exporter side of the same descriptor
+- [TS Opus export refusals](/quest/m1/ts-opus-export-refusals.md) - the exporter side of the same descriptor

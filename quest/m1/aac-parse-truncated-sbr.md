@@ -18,4 +18,4 @@ Public API: none beyond a new error case. Wire: none.
 
 ## Required
 
-- [AAC encode refusals](/quest/m1/audio-codecs/aac-encode-refusals.md) - encode stops producing truncated SBR and PS configs
+- [AAC encode refusals](/quest/m1/aac-encode-refusals.md) - encode stops producing truncated SBR and PS configs
