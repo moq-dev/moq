@@ -34,9 +34,20 @@ Not planned: reliable or cached datagrams. If they are ever wanted, the way to
 get them is back-pressure in the QUIC library and treating each datagram like
 a one-shot stream, not a cache.
 
+The subscription's range bounds datagrams the way it bounds groups, fixed in
+the model rather than filtered per session. Decided in the 2026-09-30 audit:
+the moxygen line's datagram-range quest merged here, since it duplicated this
+late-join rule. Its edge cases:
+
+- a datagram at the start group when a frame offset skips object 0;
+- SUBSCRIBE_UPDATE moving the range while datagrams are in flight;
+- a datagram that lands before the subscription's alias or id is known.
+
 Tests: a subscriber joining after datagrams were sent receives only later
 ones. A FETCH covering a datagram group gets no payload. A fetch stream
 carrying a datagram-flagged object fails that fetch and leaves the session up.
+Each edge case above gets one, and a test tells a datagram filtered by the
+range apart from one dropped for any other reason.
 
 ## Related
 

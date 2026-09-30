@@ -29,5 +29,4 @@ ones. Behind the decode seam as the first candidate on `target_os =
 
 ## Related
 
-- [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - where the Windows run happens
-- [Windows decoded frames](/quest/m1/obs-moq-video/decode-windows.md) - the OBS Windows line this feeds
+- [Windows decoded frames](/quest/m2/obs-decode-windows.md) - the OBS Windows line this feeds

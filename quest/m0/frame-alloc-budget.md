@@ -28,5 +28,5 @@ config, not moq-net. Wire: none.
 
 ## Related
 
-- [Frame slot charge](/quest/m1/frame-slot-charge.md) - also changes what a group charges the cache
+- [Frame slot charge](/quest/m1/frame-slot-charge.md) - lands first; both change the cache charge in `model/group.rs`
 - [Peer limits](/quest/m1/quic/peer-limits.md) - stream counts and windows per peer

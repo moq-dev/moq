@@ -21,8 +21,8 @@ encoded stream. Capture is out: two encoders never align.
   not a per-process counter. Decide how both processes agree across a
   timestamp wrap (TS PTS wraps every 26.5 h) when they started on opposite
   sides of it.
-- Frame timestamps derive from the input alone too: any re-anchor shift must
-  come from the stream, not process start or wall clock.
+- Frame timestamps derive from the input alone too. Importers publish the
+  stream's own timestamps and refuse a rewind, so nothing shifts them.
 - An importer announces only once it knows its tracks, so it never refuses a
   track the incumbent serves.
 - Docs (`doc/bin/cli.md` "Redundant publishers", the `--hop` doc comment)
@@ -40,5 +40,5 @@ survives the standby joining and the incumbent stopping.
 
 ## Related
 
-- [Redundant ingest](/quest/m2/redundant-ingest.md) - splicing across first hops and two encoders, which this does not attempt
+- [Cluster routing](/quest/m1/cluster-routing/README.md) - drops hop lists inside a cluster and must say whether same-hop failover survives; it also owns splicing across first hops and two encoders, which this does not attempt
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - a redundant pair shares one epoch

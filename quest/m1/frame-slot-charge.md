@@ -48,6 +48,6 @@ that was OOM-killing relays serving chat, and deliberately left out of it.
 
 Public API: none, unless `MAX_CACHE_BYTES` is restated. Wire: none.
 
-## Related
+## Required
 
-- [Relay memory](/quest/m1/relay-memory.md) - the per-announcement half of the same question, whose figures also predate the current accounting
+- [Frame alloc budget](/quest/m0/frame-alloc-budget.md) - edits the same group cache charge; land it first

@@ -40,8 +40,8 @@ The shape is settled; this finishes it:
 - Known gap: VAAPI reports `LowLatency` whatever was asked, and V4L2 and
   MediaCodec report unconfirmed; no quest owns measuring and mapping presets
   for them. Media Foundation and VideoToolbox are owned by
-  [Windows GPU input](/quest/m1/obs-moq-video/windows.md) and
-  [macOS GPU input](/quest/m1/obs-moq-video/macos.md).
+  [Windows GPU input](/quest/m2/obs-windows.md) and
+  [macOS GPU input](/quest/m2/obs-macos.md).
 
 Public API: additive on moq-audio (the stored preset and its `Applied`
 report); the unpublished audio `Preset` default changes. Wire: none.

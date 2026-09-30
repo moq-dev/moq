@@ -32,6 +32,9 @@ any wire change.
   exclusion and the per-path fronts from #3312 stay intact.
 - Benchmark resolution swept over epochs per name and names per origin, so
   following does not scan the table.
+- Open: does a catalog `broadcast` reference by bare name pin the epoch its
+  catalog came from, or follow the newest? Settle it with
+  [Catalog track alias](/quest/m1/catalog-track-alias.md).
 - Update `doc/concept` and `drafts/draft-lcurley-moq-lite.md` wherever they
   describe resolution or takeover. The rule is a relay behavior, so state it
   in the draft even though no field changes.
@@ -42,5 +45,7 @@ exact grant admits. Decide at PR time whether that retargets to `dev`.
 Wire: none.
 
 ## Related
+
+- [Catalog track alias](/quest/m1/catalog-track-alias.md) - cross-broadcast catalog references, which must pick an epoch
 
 - [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - a new epoch starts each track at sequence 0
