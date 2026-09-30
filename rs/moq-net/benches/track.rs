@@ -10,6 +10,8 @@
 //! `track_subscriber_churn` measures viewers joining and leaving beside steady ones:
 //! each departure wakes the producer's aggregate poll, which walks the subscription
 //! list, so departed entries left in the list show up as a slope over churn.
+//! `track_subscriber_churn_after_peak` runs the same churn after a departed audience,
+//! so entries walked in proportion to the old peak show up as a slope over it.
 //!
 //! `track_subscriber_join` measures a burst of viewers joining one track: each join
 //! registers in the subscription list, so any per-join walk of it shows up as a slope.
@@ -45,6 +47,9 @@ const CHURN: [usize; 3] = [8, 64, 512];
 
 /// Viewers that join at once and stay, during one measured run.
 const JOIN: [usize; 3] = [64, 1024, 16384];
+
+/// Viewers that joined and left before the churn, leaving the list room for that many.
+const PEAK: [usize; 3] = [0, 1024, 16384];
 
 /// Concurrent publishers sharing one relay-style cache pool.
 const WRITERS: [usize; 4] = [1, 2, 4, 8];
@@ -148,12 +153,16 @@ struct Churn {
 }
 
 impl Churn {
-	fn new(steady: usize) -> Self {
+	/// `peak` more viewers join and leave first, and the aggregate poll sees them go.
+	fn new(steady: usize, peak: usize) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let mut track = broadcast.create_track("bench", None).unwrap();
 		let steady = (0..steady).map(|_| track.subscribe(None)).collect();
+		let peak: Vec<_> = (0..peak).map(|_| track.subscribe(None)).collect();
 		let waiter = kio::Waiter::noop();
 		assert!(track.poll_subscription_changed(&waiter).is_ready());
+		drop(peak);
+		assert!(track.poll_subscription_changed(&waiter).is_pending());
 
 		Self {
 			_broadcast: broadcast,
@@ -265,10 +274,26 @@ fn bench_subscriber_churn(c: &mut Criterion) {
 				BenchmarkId::new(format!("steady_{steady}"), churn),
 				&churn,
 				|b, &churn| {
-					b.iter_batched_ref(|| Churn::new(steady), |setup| setup.run(churn), BatchSize::SmallInput);
+					b.iter_batched_ref(
+						|| Churn::new(steady, 0),
+						|setup| setup.run(churn),
+						BatchSize::SmallInput,
+					);
 				},
 			);
 		}
+	}
+	group.finish();
+}
+
+fn bench_subscriber_churn_after_peak(c: &mut Criterion) {
+	const CHURN: usize = 512;
+	let mut group = c.benchmark_group("track_subscriber_churn_after_peak");
+	group.throughput(Throughput::Elements(CHURN as u64));
+	for peak in PEAK {
+		group.bench_with_input(BenchmarkId::from_parameter(peak), &peak, |b, &peak| {
+			b.iter_batched_ref(|| Churn::new(1, peak), |setup| setup.run(CHURN), BatchSize::SmallInput);
+		});
 	}
 	group.finish();
 }
@@ -301,6 +326,7 @@ criterion_group!(
 	bench_parallel_write,
 	bench_aborted_scan,
 	bench_subscriber_churn,
+	bench_subscriber_churn_after_peak,
 	bench_subscriber_join
 );
 criterion_main!(benches);
