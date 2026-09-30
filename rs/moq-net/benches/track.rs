@@ -11,6 +11,9 @@
 //! each departure wakes the producer's aggregate poll, which walks the subscription
 //! list, so departed entries left in the list show up as a slope over churn.
 //!
+//! `track_subscriber_join` measures a burst of viewers joining one track: each join
+//! registers in the subscription list, so any per-join walk of it shows up as a slope.
+//!
 //! Run with `cargo bench -p moq-net --bench track`.
 
 use std::hint::black_box;
@@ -39,6 +42,9 @@ const STEADY: [usize; 3] = [1, 8, 64];
 
 /// Viewers that join and leave, one at a time, during one measured run.
 const CHURN: [usize; 3] = [8, 64, 512];
+
+/// Viewers that join at once and stay, during one measured run.
+const JOIN: [usize; 3] = [64, 1024, 16384];
 
 /// Concurrent publishers sharing one relay-style cache pool.
 const WRITERS: [usize; 4] = [1, 2, 4, 8];
@@ -267,11 +273,34 @@ fn bench_subscriber_churn(c: &mut Criterion) {
 	group.finish();
 }
 
+fn bench_subscriber_join(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_subscriber_join");
+	for join in JOIN {
+		group.throughput(Throughput::Elements(join as u64));
+		group.bench_with_input(BenchmarkId::from_parameter(join), &join, |b, &join| {
+			b.iter_batched(
+				|| {
+					let broadcast = broadcast::Info::default().produce();
+					let track = broadcast.create_track("bench", None).unwrap();
+					(broadcast, track)
+				},
+				|(broadcast, track)| {
+					let viewers: Vec<_> = (0..join).map(|_| track.subscribe(None)).collect();
+					(broadcast, track, viewers)
+				},
+				BatchSize::SmallInput,
+			);
+		});
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_fanout,
 	bench_parallel_write,
 	bench_aborted_scan,
-	bench_subscriber_churn
+	bench_subscriber_churn,
+	bench_subscriber_join
 );
 criterion_main!(benches);
