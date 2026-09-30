@@ -46,7 +46,6 @@ Published API or wire breaks still land on dev; each quest's Plan says so.
 - [Subgroup refusal](/quest/m0/ietf-subgroup-refusal.md) - a non-zero moq-transport subgroup costs that one stream, never the session
 - [IETF stream types](/quest/m0/ietf-uni-stream-types.md) - padding streams are discarded stream-only and an unknown uni type closes the session, per draft-21
 - [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
-- [quest check everywhere](/quest/m0/quest-check-everywhere.md) - `quest check` guards `main`, `dev`, and the line branches on push and PR, not only PRs into `main`
 - [noq reassembly cap](/quest/m0/noq-reassembly-cap.md) - noq carries quinn's stream reassembly cap and the connection receive window is finite by default
 - [qmux reset race](/quest/m0/qmux-reset-race.md) - qmux handles RESET_STREAM under one lock instead of panicking
 - [Remove gossip](/quest/m0/remove-gossip.md) - a relay dials only configured peers; `cluster.mesh` is refused at startup
