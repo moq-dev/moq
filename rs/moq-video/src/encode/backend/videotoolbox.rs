@@ -39,7 +39,7 @@ use objc2_video_toolbox::{
 	kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
 };
 
-use super::super::encoder::{Codec, Config, Gop};
+use super::super::encoder::{Applied, Codec, Config, Gop, Preset};
 use super::{Backend, Encoded};
 use crate::frame::Surface;
 use crate::{Color, Error, Frame};
@@ -270,6 +270,13 @@ impl Backend for VideoToolbox {
 
 	fn name(&self) -> &'static str {
 		NAME
+	}
+
+	fn applied(&self) -> Applied {
+		// Both are set with a checked `VTSessionSetProperty`, so a session that
+		// opened has them. VideoToolbox gets no distinct Balanced or Quality
+		// mapping until one is measured on Apple hardware.
+		Applied::new(Preset::LowLatency, "real-time, no frame reordering")
 	}
 }
 

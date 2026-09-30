@@ -39,7 +39,7 @@ use std::path::Path;
 use bytes::Bytes;
 use moq_vaapi::encode::{Config as VaapiConfig, Encoder};
 
-use super::super::encoder::{Config, Gop};
+use super::super::encoder::{Applied, Config, Gop, Preset};
 use super::{Backend, Encoded};
 use crate::frame::{DmaBuf, DrmFormat, I420, vaapi};
 use crate::{Error, Frame, Surface};
@@ -190,6 +190,12 @@ impl Backend for Vaapi {
 
 	fn name(&self) -> &'static str {
 		NAME
+	}
+
+	fn applied(&self) -> Applied {
+		// moq-vaapi codes IDR and P pictures one frame at a time and exposes no
+		// effort control, so every preset gets the same controls.
+		Applied::new(Preset::LowLatency, "IDR/P only, one frame in flight, CBR")
 	}
 }
 

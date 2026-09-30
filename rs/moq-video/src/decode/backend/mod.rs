@@ -9,10 +9,11 @@
 //! [`open`] picks the best backend for a [`Codec`] and [`Config`], trying
 //! hardware candidates (platform-gated: VideoToolbox on macOS, Media Foundation
 //! / DXVA on Windows, MediaCodec on Android, NVDEC, VAAPI, then V4L2 on Linux) before
-//! the OpenH264 software fallback when this build enables it, exactly like the
-//! encode side. Only backends that support the requested codec are considered:
-//! there is no software H.265 or AV1 decoder, so those tracks have no fallback
-//! below the hardware path.
+//! the software decoders this build enables (OpenH264 for H.264, libvpx for VP8
+//! and VP9), exactly like the encode side. Only backends that support the
+//! requested codec are considered: there is no software H.265 or AV1 decoder, so
+//! those tracks have no fallback below the hardware path. VP8 / VP9 backends
+//! take one coded frame per call.
 
 use bytes::Bytes;
 use moq_net::Timestamp;
@@ -25,6 +26,9 @@ mod openh264;
 
 #[cfg(test)]
 pub(crate) mod probe;
+
+#[cfg(feature = "vpx")]
+mod vpx;
 
 #[cfg(target_os = "macos")]
 mod videotoolbox;
@@ -56,6 +60,10 @@ pub enum Codec {
 	H265,
 	/// AV1 video.
 	Av1,
+	/// VP8 video.
+	Vp8,
+	/// VP9 video.
+	Vp9,
 }
 
 impl Codec {
@@ -64,6 +72,8 @@ impl Codec {
 			Codec::H264 => "H.264",
 			Codec::H265 => "H.265",
 			Codec::Av1 => "AV1",
+			Codec::Vp8 => "VP8",
+			Codec::Vp9 => "VP9",
 		}
 	}
 }
@@ -103,6 +113,7 @@ pub const NAMES: &[&str] = &[
 	"vaapi",
 	"v4l2",
 	"openh264",
+	"vpx",
 ];
 
 /// A backend opener: builds a decoder for a codec and config.
@@ -165,6 +176,12 @@ const SOFTWARE: &[Candidate] = &[
 		name: openh264::NAME,
 		supports: |c| matches!(c, Codec::H264),
 		open: openh264::Openh264::open,
+	},
+	#[cfg(feature = "vpx")]
+	Candidate {
+		name: vpx::NAME,
+		supports: |c| matches!(c, Codec::Vp8 | Codec::Vp9),
+		open: vpx::Vpx::open,
 	},
 ];
 

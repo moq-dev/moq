@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use super::Encoded;
-use super::encoder::Config;
+use super::encoder::{Applied, Config};
 use crate::{Error, Frame};
 
 #[cfg(target_os = "macos")]
@@ -75,6 +75,12 @@ impl Sink {
 		self.0.name()
 	}
 
+	/// The latency and compression controls the backend applied, like
+	/// [`Encoder::applied`](super::Encoder::applied).
+	pub fn applied(&self) -> &Applied {
+		self.0.applied()
+	}
+
 	/// Cut a new group at the next frame, like
 	/// [`Encoder::cut`](super::Encoder::cut).
 	///
@@ -92,6 +98,12 @@ impl Sink {
 	///
 	/// Otherwise [`Encoder::encode`](super::Encoder::encode): zero or more access
 	/// units, each stamped with the frame it came from.
+	///
+	/// One call at a time, so the sink never queues raw frames of its own: the
+	/// only pictures in flight are the one being encoded and whatever the codec
+	/// pipelines (none on NVENC or openh264). A source that outruns the codec
+	/// should drop the raw frames it has not submitted yet, never encoded
+	/// packets, which later frames depend on.
 	///
 	/// Takes ownership, since the frame may be moved to the encode thread, but
 	/// takes it as anything that can become an [`Arc`] so a caller fanning one
@@ -140,7 +152,7 @@ mod threaded {
 	use tokio::sync::{mpsc, oneshot};
 
 	use super::super::Encoded;
-	use super::super::encoder::{Config, Encoder};
+	use super::super::encoder::{Applied, Config, Encoder};
 	use crate::worker::{Ready, Worker};
 	use crate::{Error, Frame};
 
@@ -180,15 +192,25 @@ mod threaded {
 		},
 	}
 
+	/// What the encode thread reports once its encoder is open.
+	pub struct Opened {
+		name: String,
+		applied: Applied,
+	}
+
 	/// Build an encoder for `config` and serve requests until the channel closes.
 	/// Runs entirely on the encode thread; see [`crate::worker`].
-	fn run(config: Config, ready: Ready, mut requests: mpsc::UnboundedReceiver<Request>) {
+	fn run(config: Config, ready: Ready<Opened>, mut requests: mpsc::UnboundedReceiver<Request>) {
 		let mut encoder = match Encoder::new(&config) {
 			Ok(encoder) => encoder,
 			Err(err) => return ready.err(err),
 		};
 		// If the awaiting `open` was cancelled, give up before encoding.
-		if !ready.ok(encoder.name()) {
+		let opened = Opened {
+			name: encoder.name().to_owned(),
+			applied: encoder.applied().clone(),
+		};
+		if !ready.ok(opened) {
 			return;
 		}
 
@@ -226,7 +248,7 @@ mod threaded {
 	}
 
 	/// An [`Encoder`] running on its own thread. See the module docs.
-	pub struct Inner(Worker<Request>);
+	pub struct Inner(Worker<Request, Opened>);
 
 	impl Inner {
 		pub async fn open(config: &Config) -> Result<Self, Error> {
@@ -236,7 +258,11 @@ mod threaded {
 		}
 
 		pub fn name(&self) -> &str {
-			self.0.name()
+			&self.0.info().name
+		}
+
+		pub fn applied(&self) -> &Applied {
+			&self.0.info().applied
 		}
 
 		pub async fn cut(&mut self) -> Result<(), Error> {
@@ -268,7 +294,7 @@ mod inline {
 	use std::sync::Arc;
 
 	use super::super::Encoded;
-	use super::super::encoder::{Config, Encoder};
+	use super::super::encoder::{Applied, Config, Encoder};
 	use crate::{Error, Frame};
 
 	/// An [`Encoder`] driven inline on the calling thread (see the module docs).
@@ -286,6 +312,10 @@ mod inline {
 
 		pub fn name(&self) -> &str {
 			self.0.name()
+		}
+
+		pub fn applied(&self) -> &Applied {
+			self.0.applied()
 		}
 
 		/// Async only to match the threaded `Inner`; there's no thread to hand this
@@ -391,6 +421,29 @@ mod tests {
 			!log.iter().any(|(event, _)| *event == "cut"),
 			"a refused cut still reached the codec: {log:?}"
 		);
+	}
+
+	/// What the backend applied has to survive the trip off the encode thread,
+	/// since that thread is the only place the encoder can be asked.
+	#[cfg(feature = "openh264")]
+	#[test]
+	fn the_applied_preset_crosses_the_thread() {
+		let mut config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+		config.kind = Kind::Software;
+		config.preset = super::super::Preset::Quality;
+		let sink = pollster::block_on(Sink::open(&config)).unwrap();
+		// openh264 has no Quality controls of its own, and says so.
+		assert_eq!(sink.applied().preset, Some(super::super::Preset::Balanced));
+		assert!(!sink.applied().controls.is_empty());
+	}
+
+	/// A backend that reports nothing claims no preset, rather than echoing the
+	/// one that was asked for.
+	#[test]
+	fn an_unreported_backend_claims_no_preset() {
+		let _probe = probe::exclusive();
+		let sink = pollster::block_on(Sink::open(&probe_config())).unwrap();
+		assert_eq!(sink.applied().preset, None);
 	}
 
 	/// Regression: a queued request runs on the encode thread whether or not the

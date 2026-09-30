@@ -112,13 +112,13 @@ mod threaded {
 
 	/// Build a decoder and serve requests until the channel closes. Runs entirely
 	/// on the decode thread; see [`crate::worker`].
-	fn run(catalog: VideoConfig, config: Config, ready: Ready, mut requests: mpsc::UnboundedReceiver<Request>) {
+	fn run(catalog: VideoConfig, config: Config, ready: Ready<String>, mut requests: mpsc::UnboundedReceiver<Request>) {
 		let mut decoder = match Decoder::new(&catalog, &config) {
 			Ok(decoder) => decoder,
 			Err(err) => return ready.err(err),
 		};
 		// If the awaiting `open` was cancelled, give up before decoding.
-		if !ready.ok(decoder.name()) {
+		if !ready.ok(decoder.name().to_owned()) {
 			return;
 		}
 
@@ -143,7 +143,7 @@ mod threaded {
 	}
 
 	/// A [`Decoder`] running on its own thread. See the module docs.
-	pub struct Inner(Worker<Request>);
+	pub struct Inner(Worker<Request, String>);
 
 	impl Inner {
 		pub async fn open(catalog: &VideoConfig, config: &Config) -> Result<Self, Error> {
@@ -157,7 +157,7 @@ mod threaded {
 		}
 
 		pub fn name(&self) -> &str {
-			self.0.name()
+			self.0.info()
 		}
 
 		pub async fn decode(

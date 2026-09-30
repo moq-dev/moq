@@ -104,8 +104,10 @@ a working software H.264 fallback but compiles vendored C++; disable defaults
 and select native features to omit it. `nvidia` is Linux-only, `dlopen`s the
 driver at runtime, and needs no build-time toolkit. `vaapi` is opt-in because
 its bindgen needs libclang on the build host, while `v4l2` is opt-in only by
-convention, since `moq-v4l` checks its bindings in. `render` is also opt-in so
-codec-only consumers do not compile wgpu.
+convention, since `moq-v4l` checks its bindings in. `vpx` is opt-in because
+libvpx comes from the build host through pkg-config (set `VPX_STATIC=1` to link
+the archive, as the Nix dev shell does). `render` is also opt-in so codec-only
+consumers do not compile wgpu.
 
 ### Vulkan producers on NVIDIA
 
@@ -151,7 +153,7 @@ instead of asserting a threshold.
 ## Decode
 
 `decode::Consumer` (the mirror of `moq_audio::decode::Consumer`) subscribes to an
-H.264, H.265, or AV1 track and returns raw `Frame`s. A hardware-decoded frame stays
+H.264, H.265, AV1, VP8, or VP9 track and returns raw `Frame`s. A hardware-decoded frame stays
 on the GPU: feeding it back to a compatible hardware `encode::Encoder` on the
 same device keeps it there (the transcode path), while `into_i420()` downloads
 it. An encoder that can't take that surface (openh264, or a different device)
@@ -179,6 +181,7 @@ Backends are tried hardware-first, like encode:
 | H.264 | OpenH264 (feature `openh264`, default) | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`), VAAPI (feature `vaapi`) | MediaCodec (feature `mediacodec`, API 26+) |
 | H.265 | none | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, API 26+) |
 | AV1 | none | none | none | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, when the device provides it) |
+| VP8, VP9 | libvpx (feature `vpx`) | none | none | none | none |
 
 On macOS VideoToolbox decodes H.264 and H.265 on hardware, pulling the parameter
 sets (SPS/PPS, plus VPS for H.265) out of each keyframe to build the format
@@ -189,8 +192,10 @@ no software decoder, so it needs the GPU path (on Windows, an HEVC decoder MFT:
 the inbox HEVC Video Extensions or a vendor one). On Linux, NVDEC decodes H.264,
 H.265, and 8-bit 4:2:0 AV1 to CUDA NV12 frames; AV1 is decode-only and is useful
 for AV1 source to H.264/H.265 transcode rungs. VAAPI decodes H.264 to DMA-BUF
-surfaces the renderer imports without a download. A non-H.264/H.265/AV1
-rendition yields `Error::UnsupportedCodec`.
+surfaces the renderer imports without a download. libvpx decodes VP8 and VP9
+profile 0 to CPU I420 on every platform; other VP9 profiles (4:4:4, 10-bit) are
+refused rather than narrowed to 8-bit 4:2:0. Any other rendition yields
+`Error::UnsupportedCodec`.
 
 `decode::Config::output` says where decoded pictures live: `Output::Native`
 (the default) hands back whatever the backend decoded into, a GPU surface or

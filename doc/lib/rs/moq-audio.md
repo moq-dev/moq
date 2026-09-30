@@ -19,6 +19,14 @@ codec requirements in `encode::Settings`; `encode::Options` adds publication
 policy. Decoding likewise separates low-level `decode::Config`, PCM
 `decode::Output`, and subscription `decode::Options`.
 
+`encode::Settings::with_preset` applies an `encode::Preset` without touching
+codec, rate, layout, bitrate, or DTX. `LowLatency` (the default preset) packs
+10 ms of audio per packet, `Balanced` and `Quality` 20 ms, which is also what
+`Settings` defaults to without a preset. That is packetization, not a delay
+guarantee: Opus adds its 6.5 ms lookahead either way. libopus already runs at
+full complexity, where a 10 ms stereo packet takes about 0.1 ms to encode, so
+Quality has nothing further to spend and matches Balanced.
+
 | Module | Does |
 | --- | --- |
 | `capture` | Microphones via CoreAudio, WASAPI, ALSA (and PipeWire/PulseAudio hosts), plus macOS system audio |

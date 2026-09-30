@@ -16,9 +16,9 @@ The MoQ source loads and plays supported video without FFmpeg's video libraries 
 
 ## Required
 
-- [OBS migration](/quest/m1/cpp/obs.md) - the plugin is on the generated C++ before decode changes
+- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the plugin is on the generated C++ before decode changes
 
 ## Related
 
-- [VP8/VP9 decoding](/quest/m1/obs-moq-video/vpx.md) - restores deferred codec coverage independently
+- [VP8/VP9 in OBS](/quest/m1/obs-moq-video/vpx-obs.md) - restores deferred codec coverage once this lands
 - [Audio playback](/quest/m1/obs-moq-video/audio-playback.md) - removes the audio half of the FFmpeg linkage

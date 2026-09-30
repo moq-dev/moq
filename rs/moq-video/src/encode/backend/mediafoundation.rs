@@ -42,7 +42,7 @@ use windows::Win32::Media::MediaFoundation::{
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 use windows::core::{GUID, Interface};
 
-use super::super::encoder::{Codec, Config, Gop};
+use super::super::encoder::{Applied, Codec, Config, Gop};
 use super::{Backend, Encoded};
 use crate::frame::{Surface, interleave_uv};
 use crate::mf::{ComGuard, mf_err, pack_2x32};
@@ -664,6 +664,12 @@ impl Backend for MediaFoundation {
 
 	fn name(&self) -> &'static str {
 		NAME
+	}
+
+	fn applied(&self) -> Applied {
+		// `set_codec` only logs a refused knob, and the MFT is configured lazily on
+		// the first frame, so nothing confirms low-latency mode took.
+		Applied::unconfirmed("AVLowLatencyMode requested, unconfirmed; CBR")
 	}
 }
 
