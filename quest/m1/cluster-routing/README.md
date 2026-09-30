@@ -147,8 +147,8 @@ registry.
   relay loss is noticed after the 30 s QUIC idle timeout in every candidate,
   and subscribes through it go nowhere until then.
 - The simulator saw no loop while views agreed, and HRW split an equal-cost
-  pool 63/49 where today's hash of the announced prefix sends all of it to one
-  sibling. On live's graph no disagreement looped across 20 seeds of link,
+  pool 63/49 where a hash of the announced prefix sent all of it to one
+  sibling (Wildcard has since keyed the tie on the requested path). On live's graph no disagreement looped across 20 seeds of link,
   cost, and relay churn.
 - One registry per region and two cost about the same; two halves the
   busiest registry's load. A registration sent on a dead registry session

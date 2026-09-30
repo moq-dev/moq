@@ -112,5 +112,6 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [SEI separation study](/quest/m2/sei.md) - measure whether separating SEI saves enough, or has a metadata-only consumer, to justify a split
 - [Compressed tracks](/quest/m2/flate.md) - moq-ffi and every wrapper expose flate tracks through a `flate` namespace like `json`
 - [Announcement shapes](/quest/m2/announce-shapes.md) - moq-lite announcements and interests carry prefix, exact, suffix, or prefix+suffix shapes that survive relay hops, benchmarked over the announce table
+- [moq-transport cluster peers](/quest/m2/ietf-cluster-peers.md) - an extended cluster draft lets moq-transport relays peer again, stitching failover on the reply's origin
 - [MSFTS convergence](/quest/m2/msfts-convergence.md) - the demultiplexed TS lane converges on MSFTS where the two still differ: program tables and the ES payload unit
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - H.265 encode and decode, pre-generated bindings, and pooled resize surfaces, including the moq-dev/vaapi release that carries them
