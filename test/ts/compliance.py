@@ -112,6 +112,8 @@ class Scan:
     pid_packets: dict[int, list[tuple[int, int]]]
     # (ts_index, pcr_27mhz) samples for every PID that carries PCR.
     pcr_by_pid: dict[int, list[tuple[int, int]]]
+    # ts_index of every PCR that starts a new time base (discontinuity_indicator).
+    pcr_new_base: set[int]
 
 
 def scan_packets(ts_path: str, packet_size: int) -> Scan:
@@ -125,6 +127,10 @@ def scan_packets(ts_path: str, packet_size: int) -> Scan:
 
     pid_packets: dict[int, list[tuple[int, int]]] = {}
     pcr_by_pid: dict[int, list[tuple[int, int]]] = {}
+    pcr_new_base: set[int] = set()
+    # PIDs whose discontinuity_indicator rode a packet without a PCR, so the new time
+    # base starts at their next PCR (ISO 13818-1 2.4.3.5).
+    pending_base: set[int] = set()
     index = 0
     offset = 0
     n = len(data)
@@ -147,6 +153,8 @@ def scan_packets(ts_path: str, packet_size: int) -> Scan:
             af_len = data[offset + 4]
             if af_len > 0:
                 flags = data[offset + 5]
+                if flags & 0x80:
+                    pending_base.add(pid)
                 if (flags & 0x10) and af_len >= 7:  # PCR present
                     base = (
                         (data[offset + 6] << 25)
@@ -157,6 +165,9 @@ def scan_packets(ts_path: str, packet_size: int) -> Scan:
                     )
                     ext = ((data[offset + 10] & 0x01) << 8) | data[offset + 11]
                     pcr_by_pid.setdefault(pid, []).append((index, base * 300 + ext))
+                    if pid in pending_base:
+                        pending_base.discard(pid)
+                        pcr_new_base.add(index)
         if afc in (1, 3):
             # Payload = 184 minus the adaptation field (its length byte + body).
             consumed = (1 + af_len) if afc == 3 else 0
@@ -173,6 +184,7 @@ def scan_packets(ts_path: str, packet_size: int) -> Scan:
         total_packets=index,
         pid_packets=pid_packets,
         pcr_by_pid=pcr_by_pid,
+        pcr_new_base=pcr_new_base,
     )
 
 
@@ -331,18 +343,22 @@ def check_pcr_presence(analysis: dict, clock_by_pid: dict[int, PcrClock]) -> Che
 
 
 def check_pcr_monotonic(scan: Scan) -> Check:
-    """PCR must strictly increase per PID (a single 33-bit wrap is tolerated)."""
+    """PCR must strictly increase per PID (a single 33-bit wrap is tolerated).
+
+    Except into a PCR that signals a new time base (ISO 13818-1 2.4.3.4), which may
+    take any value; those are counted so a stream that leans on them still shows it.
+    """
     breaks = 0
     for _pid, samples in scan.pcr_by_pid.items():
         prev = None
-        for _i, pcr in samples:
-            if prev is not None:
+        for i, pcr in samples:
+            if prev is not None and i not in scan.pcr_new_base:
                 delta = pcr - prev
                 # A legitimate wrap shows as a large negative jump; anything else is a fault.
                 if delta <= 0 and not delta < -PCR_WRAP / 2:
                     breaks += 1
             prev = pcr
-    metrics = {"pcr_backwards": breaks}
+    metrics = {"pcr_backwards": breaks, "signalled_discontinuities": len(scan.pcr_new_base)}
     if breaks == 0:
         return Check("pcr-monotonic", Severity.HARD, Status.PASS, "PCR strictly increasing", metrics)
     return Check("pcr-monotonic", Severity.HARD, Status.FAIL, f"{breaks} backwards PCR step(s)", metrics)

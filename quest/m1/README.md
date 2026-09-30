@@ -31,6 +31,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Watch refusal](/quest/m1/watch-refusal.md) - `<moq-watch>` shows an origin refusal as an error instead of sitting offline
 - [Resumed groups](/quest/m1/resume-latest.md) - a half-delivered group ends once the new copy is past it, so a group-only reader never parks after a mid-group failover
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
+- [Parked reads wake](/quest/m1/parked-read-wakes.md) - a read parked on an evicted or aborted group wakes and re-judges, for resume successors and plain tracks alike
 - [Reader end parity](/quest/m1/reader-end-parity.md) - JS readers see a track's end once the newest group reaches the declared end, as Rust readers do
 - [Cross-relay bursts](/quest/m1/cross-relay-bursts.md) - bursty small-group tracks cross two relays without lost groups, unanswered FETCHes, or stalls
 - [Request stream cancel](/quest/m1/request-stream-serve.md) - a lite publisher stops resolving a SUBSCRIBE or FETCH once the requester FINs or resets, through one wrapper that owns every request stream's reader

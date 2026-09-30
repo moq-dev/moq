@@ -29,7 +29,7 @@ use srt_tokio::access::{AccessControlList, ConnectionMode, RejectReason, Standar
 use srt_tokio::options::{PacketCount, SocketOptions, StreamId};
 use srt_tokio::{ConnectionRequest, SrtIncoming, SrtListener, SrtSocket};
 
-use crate::Result;
+use crate::{Program, Result};
 
 /// Why an SRT publish or subscribe was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -248,6 +248,7 @@ impl Server {
 				latency: self.latency,
 				max_age: None,
 				bandwidth: moq_net::bandwidth::Allocator::unlimited(),
+				program: None,
 			};
 
 			// `m=request` reads a broadcast out; everything else publishes one in.
@@ -280,6 +281,8 @@ struct Pending {
 	/// Connection allocator each ingested track claims its peak-hold bitrate on.
 	/// Override with [`Publish::with_bandwidth`].
 	bandwidth: moq_net::bandwidth::Allocator,
+	/// The programs of a multiplex an ingest publishes. Override with [`Publish::with_program`].
+	program: Option<Program>,
 }
 
 /// What an accepted SRT connection wants: to contribute media ([`Publish`]) or to
@@ -378,6 +381,13 @@ impl Publish {
 		self
 	}
 
+	/// Publish one program of a multi-program feed, or each as its own broadcast under the
+	/// accepted path. `None` (the default) fails an ingest whose PAT lists more than one.
+	pub fn with_program(mut self, program: impl Into<Option<Program>>) -> Self {
+		self.0.program = program.into();
+		self
+	}
+
 	/// Accept the publish: announce a broadcast at `path` in `origin` and pump the
 	/// connection's MPEG-TS into it until the client disconnects.
 	///
@@ -392,7 +402,7 @@ impl Publish {
 		let config = moq_mux::catalog::Config::default()
 			.with_max_age(self.0.max_age)
 			.with_bandwidth(self.0.bandwidth);
-		serve_publish(origin, path.as_str(), socket, config).await
+		serve_publish(origin, path.as_str(), socket, config, self.0.program).await
 	}
 
 	/// Reject the publish with a verdict the client can distinguish on the wire.
@@ -469,10 +479,11 @@ pub(crate) async fn serve_publish(
 	path: &str,
 	mut socket: SrtSocket,
 	config: moq_mux::catalog::Config,
+	program: Option<Program>,
 ) -> Result<()> {
 	use futures::TryStreamExt;
 
-	let mut publisher = crate::ts::Publisher::new(origin, path, config)?;
+	let mut publisher = crate::ts::Publisher::new(origin, path, config, program)?;
 
 	// Run the read/feed loop so an error surfaces here instead of unwinding past
 	// the publisher, which would drop it (and its tracks) with a bare Error::Dropped.

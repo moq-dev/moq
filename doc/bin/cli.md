@@ -86,6 +86,7 @@ a PAT that adds a program mid-stream ends the import the same way.
 the first PAT lists as its own broadcast, with its own clock and catalog, keeping
 the catalog suffix last: `--broadcast event.hang` publishes `event/1.hang`,
 `event/2.hang`, and so on. `export ts` writes one program per broadcast.
+`import srt` takes the same `--program`.
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast event.hang import ts --program all < mux.ts

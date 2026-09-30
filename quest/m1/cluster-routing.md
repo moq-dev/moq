@@ -200,7 +200,6 @@ registry. What decides the wire:
 
 ## Required
 
-- moq.pro workers stop electing on hop chains, reading the relay's local origin instead ([moq.pro voice-local-origin](https://github.com/moq-dev/moq.pro/blob/main/quest/m0/voice-local-origin.md))
 - [Wildcard](/quest/m0/wildcard/README.md) - the longest-prefix rule, pool spread, and reply identity this selection builds on
 
 ## Related

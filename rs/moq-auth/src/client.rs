@@ -43,7 +43,7 @@ impl Client {
 					None => false,
 				};
 				if !loopback {
-					return Err(Error::InsecureUrl(url.to_string()));
+					return Err(Error::InsecureUrl(redact(&url)));
 				}
 				(builder, url)
 			}
@@ -53,12 +53,12 @@ impl Client {
 			},
 			#[cfg(unix)]
 			"unix" => {
-				let path = url.to_file_path().map_err(|()| Error::InvalidUrl(url.to_string()))?;
+				let path = url.to_file_path().map_err(|()| Error::InvalidUrl(redact(&url)))?;
 				// The socket is the transport; the request target is the server's root.
 				let target = Url::parse("http://localhost/").expect("a constant URL parses");
 				(builder.unix_socket(path), target)
 			}
-			_ => return Err(Error::InvalidUrl(url.to_string())),
+			_ => return Err(Error::InvalidUrl(redact(&url))),
 		};
 
 		Ok(Self {
@@ -141,6 +141,16 @@ async fn ask<S: Post>(server: &S, request: &Request) -> crate::Result<Grant> {
 		other => other,
 	})?;
 	Ok(grant)
+}
+
+/// `url` without its userinfo, query, or fragment, any of which may carry a credential.
+fn redact(url: &Url) -> String {
+	let mut url = url.clone();
+	let _ = url.set_username("");
+	let _ = url.set_password(None);
+	url.set_query(None);
+	url.set_fragment(None);
+	url.to_string()
 }
 
 /// The task behind a lease: re-checks on cadence and reports the end.
@@ -459,6 +469,23 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn http_error_redacts_url() {
+		// A freed port refuses the connection, so reqwest fails with the dialed URL attached.
+		let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+		let address = listener.local_addr().expect("local address");
+		drop(listener);
+
+		let url = format!("http://user:pass@{address}/?jwt=secret").parse().unwrap();
+		let err = Client::new(url, None).unwrap().connect(request()).await.unwrap_err();
+
+		assert!(matches!(err, Error::Unavailable(_)), "unexpected error: {err}");
+		let printed = format!("{err} {err:?}");
+		for secret in ["jwt", "secret", "user:pass"] {
+			assert!(!printed.contains(secret), "error leaked {secret}: {printed}");
+		}
+	}
+
+	#[tokio::test]
 	async fn revalidate_runs_on_cadence_and_applies_the_reply() {
 		let log = Log::default();
 		let server = server(log.clone(), |request| {
@@ -639,6 +666,19 @@ mod tests {
 		));
 		#[cfg(unix)]
 		assert!(Client::new("unix:///run/moq-auth.sock".parse().unwrap(), None).is_ok());
+
+		// The refused URL is reported, minus anything that may carry a credential.
+		for url in [
+			"http://user:pass@auth.example/?jwt=secret#frag",
+			"ftp://user:pass@auth.example/?jwt=secret#frag",
+		] {
+			let err = Client::new(url.parse().unwrap(), None).err().expect("refused");
+			let printed = format!("{err} {err:?}");
+			assert!(printed.contains("auth.example/"), "{printed}");
+			for secret in ["jwt", "secret", "user", "pass", "frag"] {
+				assert!(!printed.contains(secret), "error leaked {secret}: {printed}");
+			}
+		}
 	}
 
 	/// Backoff leaves the driver in this same state (nothing in flight, a timer armed),

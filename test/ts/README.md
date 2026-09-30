@@ -78,7 +78,7 @@ Severities: **hard** checks fail the run by default; **shape** checks report as
 | `psi-crc` | hard | no section dropped for a bad CRC |
 | `continuity` | hard | no continuity-counter discontinuities |
 | `pcr-presence` | hard | a PCR PID is declared and carries PCR |
-| `pcr-monotonic` | hard | PCR strictly increases (one 33-bit wrap tolerated) |
+| `pcr-monotonic` | hard | PCR strictly increases (one 33-bit wrap tolerated), except into a PCR that signals `discontinuity_indicator` |
 | `duration-fidelity` | hard | exported PCR span tracks the source's duration (round-trip only) |
 | `pcr-repetition` | shape | consecutive PCRs within the limit (default 40 ms) |
 | `pcr-jitter` | shape | per-interval PCR jitter vs the nominal bitrate (pcrverify model) |
