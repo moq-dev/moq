@@ -41,8 +41,9 @@ Decided (maintainer, 2026-09-30):
   IETF sessions stay with [IETF drain before close](/quest/m1/ietf-drain-before-close.md).
 - Both subscribers change: moq-net and `@moq/net`.
 
-Update `drafts/draft-lcurley-moq-lite.md`: the Subscribe section gains the
-subscriber FIN rule, with a changelog entry. Check that a lite-07 publisher
+Update `drafts/draft-lcurley-moq-lite.md` (the Subscribe section gains the
+subscriber FIN rule, with a changelog entry) and `doc/concept/moq-lite.md`
+(a subscription ends with both sides' FIN, and a graceful close waits for it). Check that a lite-07 publisher
 already treats a subscriber FIN after SUBSCRIBE_END as the end of a finished
 subscription, not a cancel of one still in flight
 ([Request stream cancel](/quest/m1/request-stream-serve.md)).
@@ -51,8 +52,9 @@ Tests: the reporter's `close_tail` case (one session, paused clock, a mock
 switch that acks a FIN as soon as it is sent, as a real transport does) fails
 today and passes with the fix; a subscriber that never FINs makes close return
 `Error::Timeout`; a final range with a skipped and a reset group still settles
-and FINs. [Track tail interop](/quest/m1/track-tail-interop.md) is the
-cross-language proof over a real relay.
+and FINs. Run `just test interop --all`, since both the Rust and JS subscribers change;
+[Track tail interop](/quest/m1/track-tail-interop.md) is the cross-language
+proof over a real relay.
 
 Public API: none. Wire: on lite-07 a subscriber FINs its Subscribe Stream
 after reading the track's end, and a publisher closing gracefully waits for it.
