@@ -1900,3 +1900,13 @@ test("TrackStatusRequest: carries SUBSCRIBE fields", async () => {
 		expect(msg.trackName).toBe("video");
 	}
 });
+
+// TRACK_PROPERTY_FILTER is legal only on SUBSCRIBE_TRACKS and its updates, so on a
+// SUBSCRIBE or FETCH it stays a protocol violation rather than a per-request refusal.
+test("TRACK_PROPERTY_FILTER is rejected on SUBSCRIBE and FETCH", async () => {
+	// One parameter: TRACK_PROPERTY_FILTER (0x29), SetID 0, property type 2, from 0.
+	const params = [0x01, 0x29, 0x03, 0x00, 0x02, 0x00];
+	const body = framed([...TRACK_HEAD, ...params]);
+	await expect(decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_20)).rejects.toThrow();
+	await expect(decodeVersioned(body, Fetch.decode, Version.DRAFT_20)).rejects.toThrow();
+});

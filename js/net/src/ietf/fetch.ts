@@ -93,6 +93,9 @@ export class Fetch {
 		if (params.rangeFilters && !hasRangeFilters(version)) {
 			throw new Error("Range Filters need draft-19");
 		}
+		if (params.trackPropertyFilter) {
+			throw new Error("TRACK_PROPERTY_FILTER is not allowed on FETCH");
+		}
 
 		return new Fetch({ requestId });
 	}

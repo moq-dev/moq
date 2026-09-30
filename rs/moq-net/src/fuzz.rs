@@ -714,6 +714,7 @@ pub fn seeds() -> Vec<Seed> {
 				group_order: ietf::GroupOrder::Ascending,
 				fetch_type,
 				range_filters: false,
+				fill_timeout: false,
 			};
 			fetch.encode_bytes(*version).ok()
 		}) else {

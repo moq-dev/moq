@@ -223,12 +223,18 @@ const MSG_PARAM_FILL_PARAMETERS = 0x23n;
 /// HOP_PATH, from the MoQ Cluster extension. See `cluster.ts`.
 const MSG_PARAM_HOP_PATH = 0x40b57n;
 
-/// The Range Filters (draft-19): SUBGROUP, OBJECTID, PRIORITY, OBJECT_PROPERTY and
-/// TRACK_PROPERTY. Each is length prefixed whatever the parity of its id.
-const MSG_PARAM_RANGE_FILTERS: readonly bigint[] = [0x25n, 0x26n, 0x27n, 0x28n, 0x29n];
+/// The object Range Filters (draft-19): SUBGROUP, OBJECTID, PRIORITY and OBJECT_PROPERTY.
+/// Each is length prefixed whatever the parity of its id.
+const MSG_PARAM_RANGE_FILTERS: readonly bigint[] = [0x25n, 0x26n, 0x27n, 0x28n];
+/// TRACK_PROPERTY_FILTER, the Range Filter legal only on SUBSCRIBE_TRACKS and its updates.
+const MSG_PARAM_TRACK_PROPERTY_FILTER = 0x29n;
 
 /// The parameters whose definitions let them repeat within one message.
-const MSG_PARAM_REPEATABLE: readonly bigint[] = [MSG_PARAM_AUTHORIZATION_TOKEN, ...MSG_PARAM_RANGE_FILTERS];
+const MSG_PARAM_REPEATABLE: readonly bigint[] = [
+	MSG_PARAM_AUTHORIZATION_TOKEN,
+	...MSG_PARAM_RANGE_FILTERS,
+	MSG_PARAM_TRACK_PROPERTY_FILTER,
+];
 
 type MessageParamKind = "varint" | "uint8" | "bool" | "location" | "bytes";
 /** A `{Group, Object}` pair carried by a message parameter, such as LARGEST_OBJECT. */
@@ -260,7 +266,7 @@ function getMessageParamKind(id: bigint): MessageParamKind {
 		case MSG_PARAM_HOP_PATH:
 			return "bytes";
 		default:
-			if (MSG_PARAM_RANGE_FILTERS.includes(id)) return "bytes";
+			if (MSG_PARAM_REPEATABLE.includes(id)) return "bytes";
 			throw new Error(`unknown message parameter id: ${id.toString()}`);
 	}
 }
@@ -315,6 +321,11 @@ export class Parameters {
 	 */
 	get rangeFilters(): boolean {
 		return MSG_PARAM_RANGE_FILTERS.some((id) => this.#repeated.has(id));
+	}
+
+	/** Whether the message carried TRACK_PROPERTY_FILTER, which only a SUBSCRIBE_TRACKS may. */
+	get trackPropertyFilter(): boolean {
+		return this.#repeated.has(MSG_PARAM_TRACK_PROPERTY_FILTER);
 	}
 
 	// --- Numeric accessors ---

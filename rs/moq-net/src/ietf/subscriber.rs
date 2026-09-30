@@ -2093,6 +2093,7 @@ where
 					group_order: GroupOrder::Ascending,
 					fetch_type,
 					range_filters: false,
+					fill_timeout: false,
 				})
 				.await?;
 			Ok::<(), Error>(())
@@ -3034,6 +3035,7 @@ where
 						},
 					},
 					range_filters: false,
+					fill_timeout: false,
 				})
 				.await?;
 			self.read_group_fetch_response(&mut stream).await

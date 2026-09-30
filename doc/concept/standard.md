@@ -75,7 +75,8 @@ the session's credential is what authorizes it.
 
 A legal request that is not served is refused on its own with `NOT_SUPPORTED`,
 leaving the session open: a `SUBSCRIBE` with `FORWARD=0`, a `SUBSCRIBE` or
-`FETCH` carrying Range Filters (no `MAX_FILTER_RANGES` is advertised),
+`FETCH` carrying Range Filters (no `MAX_FILTER_RANGES` is advertised), a
+`FETCH` carrying `FILL_TIMEOUT` (Timed-Out gaps are not written),
 `TRACK_STATUS`, and the `FETCH` forms above. `NEW_GROUP_REQUEST` is ignored, as
 the draft allows a publisher without dynamic groups to do. A parameter the
 negotiated draft does not define still closes the session with

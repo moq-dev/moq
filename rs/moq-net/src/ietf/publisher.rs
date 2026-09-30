@@ -1164,6 +1164,19 @@ where
 				.await;
 		}
 
+		// FILL_TIMEOUT=0 asks for cache only, and any budget ends in Timed-Out gaps we
+		// don't write, so waiting on upstream regardless would ignore what was asked.
+		if msg.fill_timeout {
+			return self
+				.reject_fetch(
+					stream,
+					msg.request_id,
+					&Error::Unsupported,
+					"FILL_TIMEOUT not supported",
+				)
+				.await;
+		}
+
 		let (track, start, end, timescale, joined) = match msg.fetch_type {
 			FetchType::Standalone {
 				namespace,
@@ -3309,6 +3322,26 @@ mod serve_tests {
 			]),
 		];
 
+		// A standalone FETCH we would otherwise serve, carrying FILL_TIMEOUT=0: cache only,
+		// with gaps reported as Timed-Out, which we can't write.
+		#[rustfmt::skip]
+		let fill_timeout = [
+			0x2B, // Request ID
+			0x01, // Standalone
+			0x01, 0x04, b'r', b'o', b'o', b'm', 0x05, b'v', b'i', b'd', b'e', b'o',
+			0x00, 0x00, // Start Location
+			0x00, 0x00, // End Location: the whole group 0
+			0x01, // Number of Parameters
+			0x0A, 0x00, // FILL_TIMEOUT = 0
+		];
+		for version in [Version::Draft18, Version::Draft19] {
+			assert_eq!(
+				refusal(version, ietf::Fetch::ID, fill_timeout.to_vec()).await,
+				NOT_SUPPORTED,
+				"{version}: FETCH with FILL_TIMEOUT"
+			);
+		}
+
 		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
 			for (label, id, params) in cases {
 				assert_eq!(
@@ -3495,6 +3528,7 @@ mod serve_tests {
 						group_offset: 0,
 					},
 					range_filters: false,
+					fill_timeout: false,
 				},
 			)
 			.await?;
@@ -3901,6 +3935,7 @@ mod serve_tests {
 						end,
 					},
 					range_filters: false,
+					fill_timeout: false,
 				},
 			)
 			.await
@@ -4142,6 +4177,7 @@ mod serve_tests {
 							group_order: GroupOrder::Ascending,
 							fetch_type,
 							range_filters: false,
+							fill_timeout: false,
 						},
 					)
 					.await
@@ -4184,6 +4220,7 @@ mod serve_tests {
 						group_id: 5,
 					},
 					range_filters: false,
+					fill_timeout: false,
 				},
 			)
 			.await
@@ -5730,6 +5767,7 @@ mod tests {
 					group_order: GroupOrder::Descending,
 					fetch_type,
 					range_filters: false,
+					fill_timeout: false,
 				},
 			)
 			.await

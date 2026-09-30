@@ -171,6 +171,9 @@ export class Subscribe {
 		if (params.rangeFilters && !Filter.hasRangeFilters(version)) {
 			throw new Error("Range Filters need draft-19");
 		}
+		if (params.trackPropertyFilter) {
+			throw new Error("TRACK_PROPERTY_FILTER is not allowed on SUBSCRIBE");
+		}
 
 		// An absent LOCATION_FILTER means the subscription is unfiltered.
 		const raw = params.subscriptionFilter;

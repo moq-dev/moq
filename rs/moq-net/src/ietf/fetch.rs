@@ -129,6 +129,10 @@ pub struct Fetch<'a> {
 	/// MAX_FILTER_RANGES, so the request is refused rather than served unfiltered.
 	/// Never encoded; we send no range filters.
 	pub range_filters: bool,
+	/// Whether the request carried FILL_TIMEOUT (0x0A), a budget for waiting on upstream
+	/// that ends in Timed-Out gaps we cannot write, so the request is refused rather than
+	/// left to wait without it. Never encoded; we send no fill timeout.
+	pub fill_timeout: bool,
 }
 
 impl Message for Fetch<'_> {
@@ -186,15 +190,15 @@ impl Message for Fetch<'_> {
 			let _required_request_id_delta = u64::decode(buf, version)?;
 		}
 
-		// The token is ignored: the session's grant is what authorizes the request. We
-		// refuse or serve a FETCH the same whatever its FILL_TIMEOUT or INCLUDE_PROPERTIES.
-		let (fetch_type, subscriber_priority, group_order, range_filters) = match version {
+		// The token is ignored: the session's grant is what authorizes the request, and
+		// INCLUDE_PROPERTIES only shapes a FETCH_OK we don't send on draft-20.
+		let (fetch_type, subscriber_priority, group_order, range_filters, fill_timeout) = match version {
 			Version::Draft14 => {
 				let subscriber_priority = u8::decode(buf, version)?;
 				let group_order = GroupOrder::decode(buf, version)?;
 				let fetch_type = FetchType::decode(buf, version)?;
 				Parameters::skip(buf, version)?;
-				(fetch_type, Some(subscriber_priority), Some(group_order), false)
+				(fetch_type, Some(subscriber_priority), Some(group_order), false, false)
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19 => {
 				let fetch_type = FetchType::decode(buf, version)?;
@@ -224,7 +228,13 @@ impl Message for Fetch<'_> {
 					return Err(DecodeError::InvalidValue);
 				}
 
-				(fetch_type, subscriber_priority, group_order, range_filters)
+				(
+					fetch_type,
+					subscriber_priority,
+					group_order,
+					range_filters,
+					fill_timeout.is_some(),
+				)
 			}
 			// Draft-20 names the track up front and moves the range into LOCATION_FILTER.
 			_ => {
@@ -232,7 +242,7 @@ impl Message for Fetch<'_> {
 				let track = Cow::<str>::decode(buf, version)?;
 				decode_params!(buf, version,
 					0x03 => _authorization_token: Vec<Opaque>,
-					0x0A => _fill_timeout: Option<u64>,
+					0x0A => fill_timeout: Option<u64>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => filter: Option<Filter>,
 					0x22 => group_order: Option<GroupOrder>,
@@ -257,7 +267,13 @@ impl Message for Fetch<'_> {
 					// An absent LOCATION_FILTER fetches the whole track.
 					filter: filter.unwrap_or(Filter::Unfiltered),
 				};
-				(fetch_type, subscriber_priority, group_order, range_filters)
+				(
+					fetch_type,
+					subscriber_priority,
+					group_order,
+					range_filters,
+					fill_timeout.is_some(),
+				)
 			}
 		};
 
@@ -268,6 +284,7 @@ impl Message for Fetch<'_> {
 			group_order: group_order.unwrap_or(GroupOrder::Any),
 			fetch_type,
 			range_filters,
+			fill_timeout,
 		})
 	}
 }
@@ -649,6 +666,7 @@ mod tests {
 				end: Location { group: 10, object: 5 },
 			},
 			range_filters: false,
+			fill_timeout: false,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -671,6 +689,7 @@ mod tests {
 				end: Location { group: 10, object: 5 },
 			},
 			range_filters: false,
+			fill_timeout: false,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -710,6 +729,7 @@ mod tests {
 				end: Location { group: 10, object: 5 },
 			},
 			range_filters: false,
+			fill_timeout: false,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft16);
@@ -732,6 +752,7 @@ mod tests {
 				end: Location { group: 10, object: 5 },
 			},
 			range_filters: false,
+			fill_timeout: false,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -805,6 +826,7 @@ mod tests {
 				end: Location { group: 10, object: 5 },
 			},
 			range_filters: false,
+			fill_timeout: false,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -881,6 +903,7 @@ mod tests {
 			assert_eq!(fetch.subscriber_priority, 64);
 			assert_eq!(fetch.group_order, GroupOrder::Ascending);
 			assert!(fetch.range_filters, "{version}");
+			assert!(fetch.fill_timeout, "{version}");
 			assert_eq!(
 				fetch.fetch_type,
 				FetchType::Filtered {
@@ -910,6 +933,7 @@ mod tests {
 				filter: Filter::Unfiltered,
 			},
 			range_filters: false,
+			fill_timeout: false,
 		};
 
 		#[rustfmt::skip]
@@ -951,6 +975,7 @@ mod tests {
 			assert_eq!(decoded.is_ok(), ok, "{version}: {body:x?}");
 			if let Ok(fetch) = decoded {
 				assert_eq!(fetch.range_filters, body == &range_filter, "{version}");
+				assert_eq!(fetch.fill_timeout, body == &fill_timeout, "{version}");
 			}
 		}
 	}
