@@ -10,17 +10,15 @@ TypeScript runs the same tests under bun.
 
 tokio is in moq-net's tests only for paused, advanceable time
 (`start_paused`, `advance`): 591 `tokio::test`s on dev, 86 of them paused.
-Drive them from the model's injectable clock and a small synchronous
-executor instead.
+Drive them by polling the drivers with supplied instants, the seam the
+model already exposes, and a small synchronous executor instead.
 
 Guidance:
 
 - Port mechanically where possible; keep each test's assertions unchanged.
+- Retire the test-only time hooks in production code as their tests move:
+  `time::Clock::tokio` and the `model::clock` pool registry.
 - Tests that exercise the `async` helpers stay behind that feature and are
   not translated.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Sans-IO model](/quest/m1/rs2ts/sans-io/model.md) - supplies the clock seam

@@ -20,8 +20,7 @@ use crate::{
 	AsPath, Error, InvalidPattern, Path, PathOwned, Pattern, Patterns,
 	coding::{BoundsExceeded, Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
 	path::Segment,
-	runtime::{Instant, Timers},
-	time::Clock,
+	time::{Clock, Instant},
 	util::{Keepalive, TaskSet, Tasks, TasksWeak},
 };
 
@@ -2325,7 +2324,7 @@ async fn run_front(task: FrontTask) {
 	// The in-flight upstream request: the route and its pending channel.
 	let mut upstream: Option<(u64, kio::Consumer<PendingBroadcast>)> = None;
 	let mut tracks: HashMap<Arc<str>, TrackIo> = HashMap::new();
-	let mut deadline = crate::runtime::Deadline::new(&timers);
+	let mut deadline = crate::time::Deadline::new(&timers);
 	// The watch generation the last selection saw.
 	let mut seen = 0;
 	let mut events: VecDeque<Event> = VecDeque::new();
@@ -3407,7 +3406,7 @@ impl Drop for Replaying {
 /// A peer writes its whole set back to back, so the first announcement gets a
 /// round trip's grace and each one after it only has to beat its siblings.
 pub(crate) struct Quiet {
-	deadline: crate::runtime::Deadline<Clock>,
+	deadline: crate::time::Deadline,
 	clock: Clock,
 }
 
@@ -3420,14 +3419,14 @@ impl Quiet {
 	/// Start counting from now.
 	pub(crate) fn new(clock: &Clock) -> Self {
 		Self {
-			deadline: crate::runtime::Deadline::after(clock, Self::FIRST),
+			deadline: crate::time::Deadline::after(clock, Self::FIRST),
 			clock: clock.clone(),
 		}
 	}
 
 	/// An announcement arrived: the set is still landing.
 	pub(crate) fn heard(&mut self) {
-		let now = crate::runtime::Timers::now(&self.clock);
+		let now = self.clock.now();
 		self.deadline.set(now.checked_add(Self::GAP));
 	}
 

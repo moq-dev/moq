@@ -8,7 +8,7 @@
 
 use std::{ops::Range, task::Poll, time::Duration};
 
-use crate::runtime::Deadline;
+use crate::time::Deadline;
 
 /// How long a subscriber waits for a group stream it cannot account for once the
 /// publisher has ended the subscription.
@@ -74,7 +74,7 @@ impl Tail {
 /// Waits out a subscription's tail: until the owed streams are accounted for, or the grace.
 pub(crate) struct Settle {
 	tail: kio::Consumer<Tail>,
-	grace: Deadline<crate::time::Clock>,
+	grace: Deadline,
 }
 
 impl Settle {

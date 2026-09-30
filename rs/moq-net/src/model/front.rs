@@ -18,7 +18,7 @@ use std::{
 	time::Duration,
 };
 
-use crate::{Error, Hop, runtime::Instant, track};
+use crate::{Error, Hop, time::Instant, track};
 
 /// A route the table selected for the front: the entry id, the endpoint that
 /// originated it, and whether it is a broadcast published on this origin.

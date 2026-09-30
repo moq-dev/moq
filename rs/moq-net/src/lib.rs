@@ -92,7 +92,6 @@ mod test_interop;
 mod util;
 mod version;
 
-mod runtime;
 pub mod server;
 pub mod session;
 pub mod stats;

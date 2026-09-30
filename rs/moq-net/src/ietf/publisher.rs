@@ -1,4 +1,3 @@
-use crate::runtime::Timers as _;
 use crate::{frame, group, origin, track};
 use std::{
 	collections::HashMap,
@@ -73,7 +72,7 @@ enum Refused {
 	#[default]
 	No,
 	/// Refused with a minimum wait before re-offering.
-	Until(crate::runtime::Instant),
+	Until(crate::time::Instant),
 	/// Refused with an interval of 0: the peer does not want this offered again.
 	Never,
 }
@@ -84,7 +83,7 @@ impl Refused {
 	/// The single gate, consulted on every reconciliation rather than only on the retry
 	/// sweep: a route change re-prices an advertisement but does not excuse us from a
 	/// wait the peer asked for, nor make a refused namespace a different one.
-	fn offerable(&self, now: crate::runtime::Instant) -> bool {
+	fn offerable(&self, now: crate::time::Instant) -> bool {
 		match self {
 			Self::No => true,
 			Self::Until(at) => now >= *at,
@@ -1066,7 +1065,7 @@ where
 		// the lifetime of a request whose subscription never arrives or resolves.
 		let joined = {
 			let mut pending = false;
-			let mut deadline = crate::runtime::Deadline::after(&self.runtime, Duration::from_secs(10));
+			let mut deadline = crate::time::Deadline::after(&self.runtime, Duration::from_secs(10));
 			kio::wait(|waiter| {
 				let mut cx = waiter.context();
 				// The request reader is what the subscriber FINs or resets. The writer
@@ -1642,7 +1641,7 @@ where
 	async fn open_request(&self) -> Result<Option<Stream<S, Version>>, Error> {
 		let mut session = self.session.clone();
 		let mut open = std::pin::pin!(Stream::open(&mut session, self.version));
-		let mut timeout = crate::runtime::Deadline::after(&self.runtime, ADVERTISE_TIMEOUT);
+		let mut timeout = crate::time::Deadline::after(&self.runtime, ADVERTISE_TIMEOUT);
 
 		kio::wait(|waiter| {
 			if let Poll::Ready(res) = waiter.poll_future(open.as_mut()) {
@@ -1668,7 +1667,7 @@ where
 			let body: ietf::Body = request.reader.decode().await?;
 			Ok::<_, Error>((type_id, body))
 		});
-		let mut timeout = crate::runtime::Deadline::after(&self.runtime, ADVERTISE_TIMEOUT);
+		let mut timeout = crate::time::Deadline::after(&self.runtime, ADVERTISE_TIMEOUT);
 
 		kio::wait(|waiter| {
 			if let Poll::Ready(res) = waiter.poll_future(read.as_mut()) {
@@ -1929,8 +1928,8 @@ where
 		// When to re-offer whatever the peer should hold and doesn't, and how long to wait
 		// the next time that fails. Jittered so a relay's namespaces don't all come back on
 		// the same tick.
-		let mut retry = crate::runtime::Deadline::new(&self.runtime);
-		let mut retry_at: Option<crate::runtime::Instant> = None;
+		let mut retry = crate::time::Deadline::new(&self.runtime);
+		let mut retry_at: Option<crate::time::Instant> = None;
 		let mut retry_delay = RETRY_BASE;
 
 		// Stream updates (origin route (un)announces), bailing if the peer closes

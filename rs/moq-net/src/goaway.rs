@@ -287,14 +287,14 @@ pub(crate) struct Enforce<S: crate::transport::poll::Session> {
 	session: S,
 	/// The armed deadline, or `None` when the GOAWAY carried no timeout (ready
 	/// immediately: there is nothing to enforce).
-	deadline: Option<(crate::runtime::Deadline<crate::time::Clock>, Duration)>,
+	deadline: Option<(crate::time::Deadline, Duration)>,
 }
 
 impl<S: crate::transport::poll::Session> Enforce<S> {
 	pub fn new(runtime: &crate::time::Clock, session: S, timeout: Option<Duration>) -> Self {
 		Self {
 			session,
-			deadline: timeout.map(|timeout| (crate::runtime::Deadline::after(runtime, timeout), timeout)),
+			deadline: timeout.map(|timeout| (crate::time::Deadline::after(runtime, timeout), timeout)),
 		}
 	}
 

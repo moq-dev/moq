@@ -1,4 +1,3 @@
-use crate::runtime::Timers as _;
 use std::{
 	collections::{HashMap, hash_map::Entry},
 	task::{Poll, ready},
@@ -497,7 +496,7 @@ async fn resolve_track_alias(
 	aliases: kio::Consumer<AliasTable>,
 	alias: u64,
 ) -> Result<RequestId, Error> {
-	let mut timeout = crate::runtime::Deadline::after(runtime, TRACK_ALIAS_TIMEOUT);
+	let mut timeout = crate::time::Deadline::after(runtime, TRACK_ALIAS_TIMEOUT);
 	kio::wait(|waiter| {
 		let resolved = aliases.poll(waiter, |aliases| match aliases.map.get(&alias) {
 			Some(Alias::Active(request_id)) => Poll::Ready(Ok(*request_id)),

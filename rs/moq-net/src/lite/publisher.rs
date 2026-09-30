@@ -1,4 +1,3 @@
-use crate::runtime::Timers as _;
 use crate::{SessionError, announce, frame, group, origin, track};
 use std::{
 	collections::{BTreeSet, HashMap},
@@ -351,8 +350,8 @@ struct ProbeServe<S: crate::transport::poll::Session> {
 	shared: Arc<Shared<S>>,
 	runtime: crate::time::Clock,
 	stream: Option<Stream<S, Version>>,
-	last_sent: Option<(lite::Probe, crate::runtime::Instant)>,
-	next_probe: crate::runtime::Deadline<crate::time::Clock>,
+	last_sent: Option<(lite::Probe, crate::time::Instant)>,
+	next_probe: crate::time::Deadline,
 }
 
 impl<S: crate::transport::poll::Session> ProbeServe<S> {
@@ -392,7 +391,7 @@ impl<S: crate::transport::poll::Session> ProbeServe<S> {
 			stream: Some(stream),
 			last_sent: None,
 			// Send the first probe immediately, then keep an anchored cadence.
-			next_probe: crate::runtime::Deadline::at(&runtime, runtime.now()),
+			next_probe: crate::time::Deadline::at(&runtime, runtime.now()),
 			runtime,
 		}
 	}
