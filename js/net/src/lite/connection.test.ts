@@ -52,7 +52,7 @@ test("a throwing getStats advertises None rather than propagating", async () => 
 });
 
 async function sendGoaway(server: WebTransport, uri: string): Promise<void> {
-	const stream = await Stream.open(server);
+	const stream = await Stream.open(server, { version: Version.DRAFT_04 });
 	await stream.writer.u53(StreamId.Goaway);
 	await new Goaway(uri).encode(stream.writer, Version.DRAFT_04);
 	stream.writer.close();

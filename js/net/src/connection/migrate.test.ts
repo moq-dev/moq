@@ -65,7 +65,7 @@ function fleet(origin = new OriginProducer()): { dials: Dial[]; origin: OriginPr
 
 /** Send a moq-lite GOAWAY from the server side of a session. */
 async function goaway(server: WebTransport, uri: string): Promise<void> {
-	const stream = await Stream.open(server);
+	const stream = await Stream.open(server, { version: Lite.Version.DRAFT_06 });
 	await stream.writer.u53(Lite.StreamId.Goaway);
 	await new Lite.Goaway(uri).encode(stream.writer, Lite.Version.DRAFT_06);
 }
