@@ -130,11 +130,12 @@ sd-notify = { workspace = true }
 moq-msf = { path = "../moq-msf" }
 # `test_relay` stands up a real relay for the `fetch` tests to read through.
 moq-relay = { path = "../moq-relay", default-features = false, features = ["test-support"] }
+# Writes the PAT and PMTs, CRCs included, of the two-program input `import ts --program all` splits.
+mpeg2ts = "0.6.0"
 tempfile = { workspace = true }
 # `test-util` enables `tokio::time::pause` so the TS round-trip test simulates the
 # exporter drain timeouts instantly instead of waiting on the wall clock.
 tokio = { workspace = true, features = ["test-util"] }
-tracing-test = { workspace = true, features = ["no-env-filter"] }
 
 [[bench]]
 name = "play_buffer"

@@ -25,7 +25,7 @@ mod test_env;
 mod transcode;
 mod web;
 
-use args::{Command, Export, ExportSink, Import, ImportSource, Invocation, MoqSide};
+use args::{Command, Export, ExportSink, Import, ImportSource, Invocation, MoqSide, TsImport, TsProgram};
 use hang::moq_net;
 use publish::Publish;
 use subscribe::{Subscribe, SubscribeArgs};
@@ -631,11 +631,19 @@ fn spawn_import(
 
 	if let Some(format) = import.source.stdin_format() {
 		warn_if_missing_format(&name);
-		let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 		let config = moq_mux::catalog::Config::default()
 			.with_max_age(max_age)
 			.with_bandwidth(bandwidth.clone());
-		let publish = Publish::new(broadcast, &format, config)?;
+		let publish = if let ImportSource::Ts(TsImport {
+			program: Some(TsProgram::All),
+		}) = &import.source
+		{
+			let name = require_broadcast(name, "import ts --program all")?;
+			Publish::ts_programs(origin.clone(), name, config)
+		} else {
+			let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
+			Publish::new(broadcast, &format, config)?
+		};
 		publish.announce()?;
 		local = Some(publish);
 	} else {
@@ -708,6 +716,7 @@ fn spawn_export(
 		let args = SubscribeArgs {
 			format: stdout.format,
 			max_age: stdout.max_age,
+			linger: stdout.linger,
 			fragment_duration: stdout.fragment_duration,
 			mux_rate: stdout.mux_rate,
 			catalog: export.catalog_format,

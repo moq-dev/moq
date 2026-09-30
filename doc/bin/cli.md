@@ -79,6 +79,18 @@ downstream sees it. A sparse stream such as SCTE-35 goes quiet between cues, so
 the line reports rather than alarms; `Import::stats` carries the same counters
 for a caller that sets its own limit.
 
+MPEG-TS import takes one program. A multi-program stream is refused before
+anything is published, naming its programs, rather than merged onto one clock;
+a PAT that adds a program mid-stream ends the import the same way.
+`--program 2` imports program 2 alone. `--program all` publishes each program
+the first PAT lists as its own broadcast, with its own clock and catalog, keeping
+the catalog suffix last: `--broadcast event.hang` publishes `event/1.hang`,
+`event/2.hang`, and so on. `export ts` writes one program per broadcast.
+
+```bash
+moq --connect https://relay.example.com/anon --broadcast event.hang import ts --program all < mux.ts
+```
+
 MPEG-TS export restarts its clock and table cadence after a declared marker,
 discarding the old mux buffer. The first new clock packet signals the break and
 stdout pacing re-anchors. Every rendition joins the new program generation;
@@ -309,6 +321,14 @@ track for a lagging one. Frames go out in media-time order across all tracks,
 not arrival order, so two exporters of one broadcast emit them in one order. A
 track quiet for longer is muxed around until it catches up; a sparse track
 (SCTE-35) costs that wait once per cue. `--max-age 0` keeps arrival order.
+
+A stdout export ends with the broadcast. `export ts --linger 10s` waits that
+long for the broadcast to come back instead: a publisher that restarts within
+it is picked up under the same PIDs, with the break flagged (PCR discontinuity,
+PAT/PMT re-sent). Nothing is written while it is gone. When the linger runs out,
+the exit code is that of the last end: 0 if the broadcast finished cleanly, 1 if
+it dropped or failed. The default is `0s`, which exits on the first end the same
+way. Only `ts` can mark the restart, so the other formats refuse `--linger`.
 
 ## Debugging
 

@@ -36,14 +36,23 @@ Settled decisions:
   [Per-program SI](/quest/m2/ts-program-si.md) needs the same dependency, and
   whichever change lands first adds it. A section with a bad CRC is dropped and
   the last good table stays in force, so the import continues; it no longer
-  aborts as the `mpeg2ts` reader does.
-- Each dropped section is counted per PID in `Import::stats`, so a corrupt feed
-  is visible rather than silently held on a stale table. `Stats` is
-  `#[non_exhaustive]`, so the new field is additive; its docs (today "frame
-  sync the demuxed audio streams lost") and `is_empty` widen to cover it, and
-  `moq-cli`'s `log_stats` reports it. Name it so the
-  [TR 101 290 plan](/quest/m2/1838-tr-101-290-monitoring-requirements-broadcast-contribution.md)
-  adopts it as `CRC_error`.
+  aborts as the `mpeg2ts` reader does. The section is refused whole, never
+  half-applied, so fail-loud holds at section granularity. A malformed
+  adaptation field on the PAT or a PMT PID, which ends the import today too,
+  costs that section the same way. A feed that never delivers a good PAT and
+  PMT still publishes nothing. Line noise on a live feed then costs one
+  repetition (0.5 s at most), not the broadcast; today one flipped CRC byte on
+  `bbb.ts` makes `decode` return `CRC32 mismatch` and `moq import ts` exit.
+- Each section dropped for a CRC mismatch is counted in `Import::stats` as a
+  cumulative `crc_error`, so a corrupt feed is visible rather than silently
+  held on a stale table. It is stream-wide on `Stats`, since the PAT and PMT
+  PIDs have no elementary-stream row, and named for the TR 101 290 check that
+  [TS import health](/quest/m2/ts-import-health.md) adopts. A section dropped
+  for another reason (a malformed adaptation field, a parse failure) is not a
+  `crc_error`; that quest counts it under `PAT_error` or `PMT_error`. `Stats`
+  is `#[non_exhaustive]`, so the new field is additive; its docs (today per
+  elementary stream) and `is_empty` widen to cover it, and `ts::stats::Log`
+  reports it.
 - `ts::programs()` reads through the same PAT path, so a PAT spanning packets
   is found before any program publishes.
 - One quest, because the demux refactor alone changes nothing observable.
@@ -51,9 +60,10 @@ Settled decisions:
 Keep every existing TS import test and fixture passing unchanged. Add tests for
 a PMT spanning two packets, a PAT behind a nonzero `pointer_field`, a
 multi-packet PAT with enough programs to need it (read by `ts::programs()` and
-by `with_program`), and a PMT with a corrupt CRC that is dropped and counted
-while the import keeps its previous PMT.
+by `with_program`), and a PAT and a PMT with a corrupt CRC, each between good
+repetitions, that is dropped and counted once while the import keeps its
+previous layout and a later good PMT revision still applies. A positive
+control: a feed whose only PAT is corrupt publishes nothing and counts it.
 
-## Required
-
-- [moq import ts: select programs](/quest/m1/ts-programs.md) - `ts::programs()` and `with_program`, which this quest's PAT path and tests build on
+Folded in from `ts-import-psi-crc` while landing the TR 101 290 plan (#4496):
+that quest duplicated this one's bad-CRC drop and `CRC_error` count.

@@ -96,7 +96,8 @@ to one: `fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(pref
 divides the connection's send estimate; pass it to `encodeVideo` /
 `encodeAudio` or `reserve` a share for an app-owned track. `MoqError.isAuth` and
 `isShutdown` classify errors. `protocolError` is the structured protocol failure
-(scope, verbatim code, kind) when the peer sent one.
+(scope, verbatim code, kind) when the peer sent one. An error's `description` is
+the Rust error message.
 
 `encodeAudio` encodes raw PCM inside the binding. Its codec is an object,
 `AudioCodec.opus()`, and `AudioEncoderOutput.frameDurationUs` sets the Opus

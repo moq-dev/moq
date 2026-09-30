@@ -26,10 +26,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::ops::Bound;
 use std::task::{Poll, ready};
 
-#[cfg(test)]
-use crate::Timestamp;
-use crate::{Datagram, Error, Result, frame, group, track};
-use track::{Anchor, LiveEdge, Successor};
+use crate::{Datagram, Error, Result, Timestamp, frame, group, track};
+use track::{Anchor, LiveEdge};
 
 use super::subscription::{Cap, Position, Subscription, max_some, min_some};
 
@@ -144,16 +142,58 @@ fn slice(prefs: &Subscription, start: Option<Position>, end: Option<Position>) -
 	}
 }
 
-/// The first servable group in `from..cap` across `segments`, with the slot identity a
-/// later judgment needs. An unstamped group stops the search: skipping it for a later
-/// start would shrink a reach that is not yet proven.
-fn served_start(segments: &[Segment], from: u64, cap: Option<u64>) -> Option<Successor> {
-	segments.iter().find_map(|segment| {
+/// Where the first servable group in `from..cap` across `segments` starts presenting;
+/// see [`track::Consumer::poll_first_start`]. An unstamped group stops the search:
+/// skipping it for a later start would shrink a reach that is not yet proven.
+fn poll_first_start<'a>(
+	segments: impl IntoIterator<Item = &'a Segment>,
+	waiter: &kio::Waiter,
+	from: u64,
+	cap: Option<u64>,
+) -> Option<Option<Timestamp>> {
+	segments.into_iter().find_map(|segment| {
 		let start = segment.start.map_or(0, |start| start.group).max(from);
 		segment
 			.track
-			.served_start(start, min_some(cap, last_group(segment.end)))
+			.poll_first_start(waiter, start, min_some(cap, last_group(segment.end)))
 	})
+}
+
+/// Where a splice continues past the exclusive group `boundary` of segment `after`,
+/// below the reader's `cap`: the first group the later segments serve there. Holds the
+/// question rather than a cached answer, so a group aborted or evicted before its first
+/// frame hands the bound to whichever group serves there next.
+#[derive(Clone)]
+pub(crate) struct Successor {
+	state: kio::ConsumerWeak<ResumeState>,
+	after: u64,
+	boundary: u64,
+	cap: Option<u64>,
+}
+
+impl Successor {
+	/// Where the successor starts presenting: `None` while no later group is cached or
+	/// the first one is unstamped. Registers `waiter` for anything that could move it.
+	/// Takes the splice's and its segments' locks, so never call it under a track's.
+	pub(crate) fn poll_start(&self, waiter: &kio::Waiter) -> Option<Timestamp> {
+		let mut start = None;
+		let _ = self.state.poll(waiter, |state| {
+			// A draining reader's own segment may already have been pruned.
+			let later = state.segments.iter().filter(|segment| segment.id > self.after);
+			start = poll_first_start(later, waiter, self.boundary, self.cap).flatten();
+			Poll::<()>::Pending
+		});
+		start
+	}
+}
+
+impl PartialEq for Successor {
+	fn eq(&self, other: &Self) -> bool {
+		self.after == other.after
+			&& self.boundary == other.boundary
+			&& self.cap == other.cap
+			&& self.state.same_channel(&other.state)
+	}
 }
 
 /// How many segments a logical track keeps before pruning terminal ones from the
@@ -246,14 +286,6 @@ impl ResumeState {
 				(edge.sequence >= start).then_some(edge)
 			})
 			.max_by_key(|edge| edge.sequence)
-	}
-
-	/// Where the logical track continues past the exclusive group `boundary` of segment
-	/// `id`, below the reader's `cap`: the start of the first group the later segments
-	/// serve there. `None` while none is cached, or it has no frame yet.
-	fn successor(&self, id: u64, boundary: u64, cap: Option<u64>) -> Option<Successor> {
-		let index = self.segments.iter().position(|segment| segment.id == id)?;
-		served_start(&self.segments[index + 1..], boundary, cap)
 	}
 
 	/// Append a segment serving the track from `start` onward, capping (or replacing)
@@ -706,10 +738,20 @@ impl Consumer {
 		self.state.read().live_edge(cap)
 	}
 
-	/// Where the first servable group in `from..cap` starts, with the identity to
-	/// revalidate it; see [`track::Consumer::served_start`].
-	pub(crate) fn served_start(&self, from: u64, cap: Option<u64>) -> Option<Successor> {
-		served_start(&self.state.read().segments, from, cap)
+	/// Where the first servable group in `from..cap` starts presenting; see
+	/// [`track::Consumer::poll_first_start`].
+	pub(crate) fn poll_first_start(
+		&self,
+		waiter: &kio::Waiter,
+		from: u64,
+		cap: Option<u64>,
+	) -> Option<Option<Timestamp>> {
+		let mut start = None;
+		let _ = self.state.poll(waiter, |state| {
+			start = poll_first_start(&state.segments, waiter, from, cap);
+			Poll::<()>::Pending
+		});
+		start
 	}
 
 	/// The newest cached group across every spliced segment; see
@@ -1721,16 +1763,21 @@ impl Subscriber {
 	/// content the logical track holds, which a segment's own track never sees.
 	///
 	/// When the boundary lowers the cap, the reader's next group past it lives in a
-	/// later segment, so `state` supplies where it starts ([`Anchor::successor`]).
-	/// Otherwise the logical anchor's own successor (a wrapping splice's) still holds.
-	fn segment_anchor(seg: &SegmentSub, anchor: Anchor, state: &ResumeState) -> Anchor {
+	/// later segment of `state` ([`Anchor::successor`]). Otherwise the logical anchor's
+	/// own successor (a wrapping splice's) still holds.
+	fn segment_anchor(seg: &SegmentSub, anchor: Anchor, state: &kio::Consumer<ResumeState>) -> Anchor {
 		let Some(boundary) = seg.last_group() else {
 			return anchor;
 		};
 		let cap = anchor.cap;
 		let mut capped = anchor.capped(Some(boundary));
 		if capped.cap != cap {
-			capped.successor = state.successor(seg.id, boundary, cap);
+			capped.successor = Some(Successor {
+				state: state.weak(),
+				after: seg.id,
+				boundary,
+				cap,
+			});
 		}
 		capped
 	}
@@ -1749,8 +1796,9 @@ impl Subscriber {
 	/// logical edge moves whenever any of them grows.
 	fn refresh_anchor(&mut self) {
 		let outer = self.outer.clone().capped(self.end_sequence);
-		let state = self.state.read();
-		let edge = state
+		let edge = self
+			.state
+			.read()
 			.live_edge(outer.cap)
 			.into_iter()
 			.chain(outer.edge.clone())
@@ -1763,7 +1811,7 @@ impl Subscriber {
 			*current = anchor.clone();
 		}
 		for seg in &mut self.segments {
-			let anchor = Self::segment_anchor(seg, anchor.clone(), &state);
+			let anchor = Self::segment_anchor(seg, anchor.clone(), &self.state);
 			seg.anchor = anchor.clone();
 			if let Some(sub) = seg.stale_sub_mut() {
 				sub.set_anchor(anchor);
@@ -3301,6 +3349,157 @@ mod test {
 		})
 		.collect();
 		assert_eq!(replayed, vec![0, 1, 2, 3], "a backlog inside the budget crosses whole");
+	}
+
+	#[tokio::test]
+	async fn unstamped_successor_segment_keeps_the_previous_group_unbounded() {
+		let (mut a, a_read) = track_pair("a");
+		let (b, b_read) = track_pair("b");
+		let (mut c, c_read) = track_pair("c");
+		write_group_at(&mut a, 0, "a0", Duration::ZERO);
+		let _unstamped = b.create_group(1u64.into()).unwrap();
+		write_group_at(&mut c, 2, "c2", Duration::from_secs(10));
+		write_group_at(&mut c, 3, "c3", Duration::from_secs(20));
+		let mut producer = Producer::new();
+		producer.switch(a_read, None).unwrap();
+		producer.switch(b_read, Position::group(1)).unwrap();
+		producer.switch(c_read, Position::group(2)).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+		assert_eq!(
+			recv(&mut sub),
+			0,
+			"the unstamped successor must not borrow segment C's start"
+		);
+	}
+
+	/// A handed-out group parked at its tail is re-judged once its unstamped successor in
+	/// the next segment presents a first frame. That frame touches only the successor's
+	/// group, not either track or the drift anchor, so the read has to watch it directly.
+	#[tokio::test]
+	async fn unstamped_successor_first_frame_wakes_a_parked_read() {
+		use std::task::Context;
+
+		let (a, a_read) = track_pair("a");
+		let (mut b, b_read) = track_pair("b");
+		let mut head = a.create_group(0u64.into()).unwrap();
+		head.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+		let mut successor = b.create_group(1u64.into()).unwrap();
+		write_group_at(&mut b, 2, "edge", Duration::from_secs(20));
+		let mut producer = Producer::new();
+		producer.switch(a_read, None).unwrap();
+		producer.switch(b_read, Position::group(1)).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(reading.sequence, 0, "an unbounded reach is not stale");
+		assert_eq!(read(&mut reading), b"a0");
+
+		let (counter, waker) = CountWaker::new();
+		let mut cx = Context::from_waker(&waker);
+		let mut next = std::pin::pin!(reading.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+
+		let before = counter.count();
+		successor
+			.write_frame(Duration::from_secs(1).try_into().unwrap(), b"b1".to_vec())
+			.unwrap();
+		assert!(counter.count() > before, "the successor's first frame lost its wakeup");
+		let result = next.as_mut().poll(&mut cx);
+		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
+	/// An unstamped successor aborted before its first frame no longer names where the
+	/// track continues, so a read parked at the previous group's tail re-resolves it:
+	/// first to a later group already cached, then to one that arrives after the abort.
+	#[tokio::test]
+	async fn aborted_unstamped_successor_re_resolves_a_parked_read() {
+		use std::task::Context;
+
+		let (a, a_read) = track_pair("a");
+		let (mut b, b_read) = track_pair("b");
+		let mut head = a.create_group(0u64.into()).unwrap();
+		head.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+		let successor = b.create_group(1u64.into()).unwrap();
+		write_group_at(&mut b, 3, "edge", Duration::from_secs(20));
+		let mut producer = Producer::new();
+		producer.switch(a_read, None).unwrap();
+		producer.switch(b_read, Position::group(1)).unwrap();
+		let budget = Subscription::default().with_max_age(Duration::from_secs(10));
+		let mut sub = producer.consume().subscribe(budget);
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(reading.sequence, 0, "an unbounded reach is not stale");
+		assert_eq!(read(&mut reading), b"a0");
+
+		let (counter, waker) = CountWaker::new();
+		let mut cx = Context::from_waker(&waker);
+		let mut next = std::pin::pin!(reading.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+
+		successor.abort(Error::Cancel).unwrap();
+		// Group 3 is now the successor, and the edge itself: within the budget.
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+
+		let before = counter.count();
+		write_group_at(&mut b, 2, "b2", Duration::from_secs(1));
+		assert!(counter.count() > before, "the replacement successor lost its wakeup");
+		let result = next.as_mut().poll(&mut cx);
+		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
+	/// The same across segments: once the next segment's only group is aborted, the
+	/// segment after it says where the track continues.
+	#[tokio::test]
+	async fn aborted_unstamped_successor_re_resolves_across_segments() {
+		use std::task::Context;
+
+		let (a, a_read) = track_pair("a");
+		let (b, b_read) = track_pair("b");
+		let (mut c, c_read) = track_pair("c");
+		let mut head = a.create_group(0u64.into()).unwrap();
+		head.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+		let successor = b.create_group(1u64.into()).unwrap();
+		write_group_at(&mut c, 2, "c2", Duration::from_secs(1));
+		write_group_at(&mut c, 3, "c3", Duration::from_secs(20));
+		let mut producer = Producer::new();
+		producer.switch(a_read, None).unwrap();
+		producer.switch(b_read, Position::group(1)).unwrap();
+		producer.switch(c_read, Position::group(2)).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(reading.sequence, 0, "an unbounded reach is not stale");
+		assert_eq!(read(&mut reading), b"a0");
+
+		let (counter, waker) = CountWaker::new();
+		let mut cx = Context::from_waker(&waker);
+		let mut next = std::pin::pin!(reading.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+
+		let before = counter.count();
+		successor.abort(Error::Cancel).unwrap();
+		assert!(counter.count() > before, "the successor's abort lost its wakeup");
+		let result = next.as_mut().poll(&mut cx);
+		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
+	#[tokio::test]
+	async fn pruned_segment_boundary_is_judged_against_later_segments() {
+		let (mut a, a_read) = track_pair("a");
+		let mut producer = Producer::new();
+		producer.switch(a_read, None).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+		// Keep A's cursor draining while its newest group advances beyond the late boundary group.
+		write_group_at(&mut a, 0, "a0", Duration::ZERO);
+		assert_eq!(recv(&mut sub), 0);
+		write_group_at(&mut a, 3, "past-boundary", Duration::from_secs(3));
+		for sequence in 3..=(2 + MAX_SEGMENTS as u64) {
+			let (mut track, consumer) = track_pair("later");
+			producer.switch(consumer, Position::group(sequence)).unwrap();
+			write_group_at(&mut track, sequence, "later", Duration::from_secs(sequence * 10));
+			assert_eq!(recv(&mut sub), sequence);
+		}
+		assert!(producer.state.read().pruned.is_some());
+		// A's boundary group arrives after A was pruned; it is stale against group 3's start.
+		write_group_at(&mut a, 2, "a2", Duration::from_secs(2));
+		recv_pending(&mut sub);
 	}
 
 	/// A segment's track never sees the groups of the segments after it: its own edge

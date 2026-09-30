@@ -13,7 +13,7 @@ for peers that predate it.
   callers in `rs/moq-relay/src/{connection,uring,websocket}.rs`, and the forced
   `with_hidden(true)` on the outbound dial in `rs/moq-relay/src/cluster.rs`.
 - Replace `rs/moq-relay/tests/hidden_cluster.rs` with a lite-07 mesh test that
-  still sees `.internal/origins`.
+  still sees a `.`-prefixed hidden broadcast.
 
 ## Required
 

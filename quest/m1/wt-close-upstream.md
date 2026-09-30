@@ -23,8 +23,9 @@ Decided 2026-09-29: fix it at the source and remove the timeout workaround.
 The upstream fix makes the close task own a clone of the whole session:
 [moq-dev/noq#23](https://github.com/moq-dev/noq/pull/23) for 2.x (`dev`) and
 its backport [moq-dev/noq#24](https://github.com/moq-dev/noq/pull/24) for
-1.3.x (`main`). Their `tests/close_capsule.rs` drops the session right after
-`close()` against a hand-rolled HTTP/3 peer and fails on 1.3.2 and 2.0.0.
+1.3.x (`main`). Their `web-transport-moq/tests/close_capsule.rs` drops the
+session right after `close()` against a hand-rolled HTTP/3 peer and fails on
+1.3.2 and 2.0.0.
 
 Remaining, once the releases carrying them are published:
 
@@ -33,8 +34,9 @@ Remaining, once the releases carrying them are published:
 - Delete `CLOSE_LINGER`, its task, and its mock-session tests from
   moq-tokio. They are exactly what #4429 added, so reverting it is enough.
 
-A browser check was skipped: the playwright harness has no close-code
-scenario, so it is not cheap.
+A browser check is left to
+[Browser close code](/quest/m1/browser-close-code.md): the playwright harness
+has no close-code scenario, so it is not cheap to add here.
 
 Public API: none. Wire: none.
 
@@ -44,5 +46,6 @@ Public API: none. Wire: none.
 
 ## Related
 
+- [Browser close code](/quest/m1/browser-close-code.md) - the playwright case that proves Chromium reads the code this quest unblocks
 - [Close codes on every transport](/quest/m1/close-codes.md) - the same symptom over qmux and raw QUIC
 - [UnknownSession log flood](/quest/m1/unknown-session-logs.md) - another `web-transport-moq` release and pin bump

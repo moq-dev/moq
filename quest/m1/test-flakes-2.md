@@ -43,6 +43,12 @@ retry.
   `start_paused = true` but sleeps 1.2 s of real time, because the debounce
   reads `crate::Clock`, which uses `std::time::Instant`, so the paused tokio
   clock never reaches it.
+- moq-tokio websocket `fixed_addresses_keep_tls_name_and_request_host` and
+  `ipv6_literal_fixed_addresses` pause the clock over a real TLS dial on
+  loopback. They pass today, but once a timeout lands on that path, the paused
+  clock can fire it before loopback delivers, the race
+  [#4527](https://github.com/moq-dev/moq/pull/4527) removed from the auth
+  outage tests.
 
 ## Plan
 
