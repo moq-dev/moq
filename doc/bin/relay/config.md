@@ -136,6 +136,7 @@ mesh = true                                           # Gossip: peers discover a
 connect_api = "https://api.example.com/peers"        # Or fetch the peer list (JSON array of URLs and/or objects) live.
 token = "cluster.jwt"                                 # JWT for dials without an inline ?jwt=.
 id = 12345                                            # Stable Hop ID across restarts.
+idle_timeout = "5s"                                   # Drop a silent peer link after this long. Default.
 
 [cluster.lan]                                         # Find peers on the LAN over mDNS.
 enabled = true

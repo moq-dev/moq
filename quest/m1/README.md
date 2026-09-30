@@ -22,7 +22,6 @@ QUIC studies there on that rule.
 
 ## Required
 
-- [Cluster idle timeout](/quest/m1/cluster-idle-timeout.md) - a relay notices a silent peer relay within seconds, not after the shared 30 s QUIC idle timeout
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - a relay learns the relay graph once and each announcement once, not once per neighbour, and redundant publishers share an epoch instead of `--hop`
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
 - [Merge queue](/quest/m1/merge-queue.md) - the required checks run on `merge_group`, so a stale green check can no longer break main

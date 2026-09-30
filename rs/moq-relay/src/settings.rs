@@ -87,6 +87,9 @@ struct Cluster {
 	#[usage(env = "MOQ_CLUSTER_TIER", cli("--cluster-tier"))]
 	tier: Option<String>,
 
+	#[usage(env = "MOQ_CLUSTER_IDLE_TIMEOUT", cli("--cluster-idle-timeout"))]
+	idle_timeout: Option<String>,
+
 	#[usage(env = "MOQ_CLUSTER_LINGER", cli("--cluster-linger"))]
 	linger: Option<String>,
 

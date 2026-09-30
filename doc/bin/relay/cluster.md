@@ -195,6 +195,25 @@ for loop detection but makes a restarted relay look like a new node. Set
 `cluster.id` to a stable non-zero integer to pin it, below 2^53 if browser
 clients decode it.
 
+## Failure detection
+
+A peer that crashes or drops off the network sends no goodbye, so a relay only
+learns it is gone when the link goes quiet. Its routes stay in place until then,
+and subscribes through them go nowhere. Cluster links therefore use their own
+QUIC idle timeout, far shorter than the 30s `quic.idle_timeout` viewers get:
+
+```toml
+[cluster]
+idle_timeout = "5s"   # Default. Keep-alives go out at a quarter of it.
+```
+
+QUIC uses the smaller of both ends' idle timeouts, and the accepting relay only
+learns a session is a peer after the handshake has fixed its own, so the
+dialing relay's value bounds both sides of the link. Set it on the relays that
+dial. Lower it to fail over faster; raise it if a lossy long-haul link drops
+while the peer is still alive. The setting covers QUIC dials; iroh and
+WebSocket links keep their transport's own timeouts.
+
 ## Authentication
 
 Peers dial with **mTLS** (recommended: `listen.tls.root` on the listener,

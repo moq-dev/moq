@@ -231,6 +231,34 @@ impl Client {
 		self
 	}
 
+	/// Override [`crate::quic::Config::idle_timeout`] for the QUIC dials this client opens.
+	///
+	/// QUIC uses the smaller of both ends' timeouts, so this also bounds how long the
+	/// peer waits on us. Iroh and WebSocket dials keep their own.
+	#[cfg_attr(not(feature = "noq"), allow(unused_mut))]
+	pub fn with_idle_timeout(mut self, idle_timeout: std::time::Duration) -> Self {
+		#[cfg(feature = "noq")]
+		if let Some(noq) = self.noq.as_mut() {
+			noq.set_idle_timeout(idle_timeout);
+		}
+		#[cfg(not(feature = "noq"))]
+		let _ = idle_timeout;
+		self
+	}
+
+	/// Override [`crate::quic::Config::keep_alive`] for the QUIC dials this client opens;
+	/// `None` disables it. Iroh and WebSocket dials keep their own.
+	#[cfg_attr(not(feature = "noq"), allow(unused_mut))]
+	pub fn with_keep_alive(mut self, keep_alive: Option<std::time::Duration>) -> Self {
+		#[cfg(feature = "noq")]
+		if let Some(noq) = self.noq.as_mut() {
+			noq.set_keep_alive(keep_alive);
+		}
+		#[cfg(not(feature = "noq"))]
+		let _ = keep_alive;
+		self
+	}
+
 	/// Open a connection to the given peer.
 	///
 	/// A background task dials, completes the MoQ handshake, and (by default)

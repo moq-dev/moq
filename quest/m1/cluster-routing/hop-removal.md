@@ -39,7 +39,3 @@ parameter; lands with the line on `dev`.
 - [Selection](/quest/m1/cluster-routing/selection.md) - owns the same-epoch pool this relies on
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - a restart is a new path, not a splice
 - [Same-hop importers](/quest/m1/hop-aligned-import.md) - the importer fixes this re-keys
-
-## Related
-
-- [Cluster idle timeout](/quest/m1/cluster-idle-timeout.md) - bounds how long a dead incumbent holds its pair

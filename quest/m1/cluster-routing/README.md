@@ -43,9 +43,8 @@ Settled in the 2026-09-30 `/quest-plan`:
   rollout, the remaining children move to the next wip version; finalizing
   never waits on this line.
 - The before/after memory figure is a committed benchmark, measured first.
-- A short idle timeout for cluster sessions is its own m1 quest,
-  [Cluster idle timeout](/quest/m1/cluster-idle-timeout.md), since it helps
-  today's path vector too.
+- Failure detection is `cluster.idle_timeout`, outside this line; every
+  routing design inherits its outage window.
 - Reduced flooding ([RFC 9667](https://www.rfc-editor.org/rfc/rfc9667)) and
   registries are m2 unless Propagation pulls registries in; Propagation writes
   whichever it defers.
@@ -189,7 +188,6 @@ Once every child has landed:
 ## Related
 
 - [Wildcard](/quest/m0/wildcard/README.md) - the longest-prefix rule, pool spread, and reply identity Selection builds on
-- [Cluster idle timeout](/quest/m1/cluster-idle-timeout.md) - failure detection sets every outage window, today and after this line
 - [Same-hop importers](/quest/m1/hop-aligned-import.md) - the importer half of a redundant pair; `--hop` removal re-keys it to a shared epoch
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - a redundant pair shares one epoch
 - [Cross-relay delivery under bursts](/quest/m1/cross-relay-bursts.md) - its #4349 report also shows closed broadcasts announced for up to 229 s and flapping between Retracted and Announced across nodes, evidence for per-incarnation seqnos

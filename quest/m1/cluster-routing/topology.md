@@ -57,5 +57,4 @@ just came up. Expose the computed graph where operators already look
 
 ## Related
 
-- [Cluster idle timeout](/quest/m1/cluster-idle-timeout.md) - liveness only reports what the session layer detects
 - [Drain](/quest/m1/drain/README.md) - a second relay per PoP joins this topology

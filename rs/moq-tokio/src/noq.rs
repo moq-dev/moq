@@ -325,6 +325,17 @@ impl NoqClient {
 		})
 	}
 
+	/// Override the idle timeout for later dials, saturating one QUIC can't express.
+	pub fn set_idle_timeout(&mut self, idle_timeout: Duration) {
+		let idle_timeout = noq::IdleTimeout::try_from(idle_timeout).unwrap_or(noq::VarInt::MAX.into());
+		Arc::make_mut(&mut self.transport).max_idle_timeout(Some(idle_timeout));
+	}
+
+	/// Override the keep-alive interval for later dials; `None` disables it.
+	pub fn set_keep_alive(&mut self, keep_alive: Option<Duration>) {
+		Arc::make_mut(&mut self.transport).keep_alive_interval(keep_alive);
+	}
+
 	/// Close every connection, then wait until each has sent its close to the peer.
 	pub async fn close(self) {
 		self.quic.close(noq::VarInt::from_u32(0), b"client shutdown");
