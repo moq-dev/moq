@@ -4,7 +4,8 @@
 //! for is hidden: it is left out of discovery unless the subscription opts in. The
 //! opt-in is the HIDDEN parameter on SUBSCRIBE_NAMESPACE, and since an unknown
 //! parameter fails decoding, it is only sent to a peer whose SETUP carried the HIDDEN
-//! option. The rule itself is the one moq-lite applies (see
+//! option. Peers that did not declare the option receive every namespace.
+//! The rule itself is the one moq-lite applies (see
 //! [`crate::origin::Consumer::with_hidden`]).
 
 use super::Version;

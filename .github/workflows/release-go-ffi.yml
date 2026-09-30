@@ -35,9 +35,9 @@ concurrency:
 
 env:
   # A fork until NordSecurity ships a uniffi 0.32 generator; see flake.nix.
-  # The revision is v0.9.0+v0.32.0.
+  # The revision is v0.10.0-kixelated.1+v0.32.0.
   UNIFFI_BINDGEN_GO_REPO: https://github.com/kixelated/uniffi-bindgen-go
-  UNIFFI_BINDGEN_GO_REV: v0.9.0+v0.32.0
+  UNIFFI_BINDGEN_GO_REV: v0.10.0-kixelated.1+v0.32.0
 
 jobs:
   parse-version:

@@ -21,9 +21,9 @@ on:
     # Android) are omitted so they don't spawn a skipped Alert run on every
     # push to every PR. `just gh check` enforces both halves of that.
     #
-    # Swift and Platform are here despite also running on pull requests: Swift
-    # warms its own Rust cache on `main`, and Platform compiles every merge to
-    # `main` and `dev`. Those push runs are nobody's check, so a break in them
+    # Swift, OBS, and Platform are here despite also running on pull requests:
+    # Swift warms its own Rust cache on `main`, and OBS and Platform build every
+    # merge to `main` and `dev`. Those push runs are nobody's check, so a break in them
     # would otherwise go unseen. The cost is a skipped Alert run per pull
     # request.
     workflows:
@@ -37,6 +37,7 @@ on:
       - moq-gst
       - moq-relay
       - Nightly
+      - OBS
       - Platform
       - release-brew
       - Release Dart

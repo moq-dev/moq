@@ -587,16 +587,11 @@ fix-changed $FILES:
 #
 # Default features rather than `--all-features`: jemalloc doesn't build on
 # MSVC, and the Linux-only features (vaapi, pipewire, io-uring) have nothing to
-# compile here. moq-gst is excluded because it links GStreamer via pkg-config,
-# which the runner doesn't have.
-#
-# `moq-cli/play` and `moq-cli/capture` are named explicitly because they are
-# off by default, and they are what turns on the device and render code in
-# moq-video, moq-audio, and the cli itself.
+# compile here.
 
-# Compile the whole workspace on a Windows host. Must run ON Windows.
-windows *args:
-    cargo check --locked --workspace --exclude moq-gst {{ no_fuzz }} --all-targets --features "moq-cli/play moq-cli/capture" {{ args }}
+# Compile what the branch changed since BASE on a Windows host, or everything with `--all`.
+windows $BASE="":
+    just rs _platform "$BASE"
 
 # Compile and test the io_uring relay path, which is off the default feature set.
 # Linux-only, and the tests below the 6.12 kernel floor skip themselves.
@@ -619,14 +614,51 @@ uring-check *args:
 # encode/decode and its ScreenCaptureKit / AVFoundation capture, moq-audio's
 # ScreenCaptureKit system audio and TCC permission pre-check, and moq-sock's
 # BSD socket-buffer sysctl. platform.yml runs this alongside `windows`.
-#
-# The same workspace and features as `windows`, for the same reasons: moq-gst
-# needs GStreamer, and the cli's `play` and `capture` features are what turn on
-# the device and render code.
 
-# Compile the whole workspace on a macOS host. Must run ON macOS.
-macos *args:
-    cargo check --locked --workspace --exclude moq-gst {{ no_fuzz }} --all-targets --features "moq-cli/play moq-cli/capture" {{ args }}
+# Compile what the branch changed since BASE on a macOS host, or everything with `--all`.
+macos $BASE="":
+    just rs _platform "$BASE"
+
+# The shared body of `windows` and `macos`, scoped like `check-changed` so a
+# one-crate PR compiles one crate on these slow runners too. moq-gst is dropped
+# because it links GStreamer via pkg-config, which the runners don't have.
+#
+# `moq-cli/play` and `moq-cli/capture` are named explicitly because they are
+# off by default, and they are what turns on the device and render code in
+# moq-video, moq-audio, and the cli itself. Only when moq-cli is selected,
+# since cargo rejects a feature of a package outside the selection; any change
+# to the crates those features reach selects moq-cli as a dependent anyway.
+
+# Compile what the branch changed since BASE plus its dependents, or everything with `--all`.
+[private]
+_platform $BASE:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    packages=ALL
+    if [[ "$BASE" != --all ]]; then
+    	files=$(just _changed "$BASE")
+    	# `_select` reads an empty list as everything, so an empty diff stops here.
+    	if [[ -z "$files" ]]; then
+    		echo "rs: nothing changed; skipping."
+    		exit 0
+    	fi
+    	[[ "$files" == ALL ]] || packages=$(just rs _select "$files")
+    fi
+
+    features="--features moq-cli/play,moq-cli/capture"
+    if [[ "$packages" == ALL ]]; then
+    	cargo check --locked --workspace --exclude moq-gst {{ no_fuzz }} --all-targets $features
+    	exit 0
+    fi
+
+    packages=$(sed -E 's|--package [^ ]*/moq-gst#[^ ]* ?||' <<< "$packages")
+    if [[ -z "${packages// }" ]]; then
+    	echo "rs: no crates affected; skipping."
+    	exit 0
+    fi
+    just rs _wants-play "$packages" || features=""
+    echo "rs: checking $(just rs _names "$packages")"
+    cargo check --locked $packages --all-targets $features
 
 # The Linux device code: moq-video's V4L2 and X11 capture and moq-audio's cpal
 # capture, all behind the off-by-default `capture` feature. `check-changed` runs

@@ -19,8 +19,7 @@ What stood in the way when the Rust half landed:
 - `moq import` exits the moment stdin ends, closing its session with the tail
   still in flight, so a finite CLI publisher cannot end a track cleanly. The
   fix is a publisher that waits for its subscriptions to drain before it
-  closes; `moq export`'s linger ([Export linger](/quest/m1/export-linger.md)) is
-  the reader-side cousin.
+  closes; `moq export ts --linger` is the reader-side cousin.
 - The native JS subscriber (`test/interop/clients/js-native`) returns on the
   first frame. It needs a mode that reads a track to its end and reports how it
   ended and which groups it saw.

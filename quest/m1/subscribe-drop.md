@@ -34,6 +34,9 @@ Decided:
   grace, as today.
 - A resumed group ([Resumed groups](/quest/m1/resume-latest.md)) that is the
   new copy's latest ends with the DROP's error when the copy drops it.
+- A dropped or aborted group is visible to readers, not silently skipped.
+  #4533 found the Rust model releases an aborted group's sequence and skips it,
+  so a truncated first object is indistinguishable from a group never sent.
 
 Update `drafts/draft-lcurley-moq-lite.md` (SUBSCRIBE_DROP, SUBSCRIBE_END, the
 lite-07 changelog), `doc/concept/moq-lite.md`, and the Rust and JS lite
@@ -46,5 +49,4 @@ without waiting out the grace.
 
 ## Related
 
-- [Track tail hardening](/quest/m1/track-tail-hardening.md) - the same tail accounting, in both languages
 - [Track tail interop](/quest/m1/track-tail-interop.md) - the Rust-JS proof of the lite-07 drop case

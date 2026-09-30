@@ -14,16 +14,12 @@ node, or one self-hosted relay, loses nothing.
 Reproduce first, on a local two-relay cluster with the reporter's harness
 (offered in the issue) and the relay build cdn.moq.pro ran. Then fix what the
 repro shows. Suspects: `Old` expiry or newest-first dropping on the relay hop,
-and FETCH not forwarded or answered upstream. Re-measure the stalls after
-[FIN wait expiry](/quest/m1/fin-wait-expiry.md), a candidate cause. Keep the
-repro as a regression test in the cluster tests.
+and FETCH not forwarded or answered upstream. A group awaiting its FIN ack
+now expires and follows priority updates, which removed one candidate cause.
+Keep the repro as a regression test in the cluster tests.
 
 The issue's stale and flapping announcements after a clean close are
 cluster-routing evidence, not this quest's scope.
-
-## Required
-
-- [FIN wait expiry](/quest/m1/fin-wait-expiry.md) - removes one candidate cause of the stalls before measuring
 
 ## Closes
 

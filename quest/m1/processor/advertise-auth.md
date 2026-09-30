@@ -17,8 +17,9 @@ announcement or publish request still requires publish permission, so an
 advertise-only worker cannot bypass the demand exchange.
 
 Decided: the advertise scope is prefix-only. Advertising is prefix-only on
-every wire (Wildcard's decision) and suffix routing is dropped, so leading-star
-and suffix advertise patterns have nothing to authorize. Token claim patterns
+every wire (Wildcard's decision) until [announcement shapes](/quest/m3/announce-shapes.md)
+adds exact and suffix shapes to moq-lite, so leading-star and suffix advertise
+patterns have nothing to authorize yet; that quest extends this scope. Token claim patterns
 keep their suffix support for publish and subscribe.
 
 Decided: an advertised prefix must overlap the advertise scope, not sit

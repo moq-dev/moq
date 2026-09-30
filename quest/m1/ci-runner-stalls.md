@@ -25,5 +25,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- A week of nightly interop runs on `main` after #4529 merges
-- [Interop audio cold start](/quest/m1/interop-audio-cold-start.md) - #4529, which adds the `delay` column these traces need
+- A week of nightly interop runs on `main` after #4529, which adds the `delay` column these traces need
