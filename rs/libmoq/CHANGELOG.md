@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.9](https://github.com/moq-dev/moq/compare/libmoq-v0.6.8...libmoq-v0.6.9) - 2026-09-30
+
+### Fixed
+
+- *(net)* an origin::Dynamic keeps its origin alive ([#4417](https://github.com/moq-dev/moq/pull/4417))
+- *(libmoq)* render moq.pc only when packaging ([#4372](https://github.com/moq-dev/moq/pull/4372))
+- *(libmoq)* open extern "C" in the generated moq.h ([#4350](https://github.com/moq-dev/moq/pull/4350))
+
 ## [0.6.8](https://github.com/moq-dev/moq/compare/libmoq-v0.6.7...libmoq-v0.6.8) - 2026-09-27
 
 ### Other

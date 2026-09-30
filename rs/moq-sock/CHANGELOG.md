@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/moq-dev/moq/compare/moq-sock-v0.1.0...moq-sock-v0.2.0) - 2026-09-30
+
+### Fixed
+
+- *(sock)* resolve an ephemeral reuseport group's port with a plain bind ([#4409](https://github.com/moq-dev/moq/pull/4409))
+
 ## [0.0.1](https://github.com/moq-dev/moq/releases/tag/moq-sock-v0.0.1) - 2026-09-23
 
 ### Added

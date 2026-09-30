@@ -116,6 +116,11 @@ export class Connection implements Established {
 		this.url = url;
 		this.#quic = quic;
 		this.#session = session;
+		// The session stream was opened at the SETUP exchange's version; the rest of it speaks this one.
+		if (session) {
+			session.reader.version = version;
+			session.writer.version = version;
+		}
 		this.version = versionName(version);
 		this.#version = version;
 		this.transport = transportOf(quic);
@@ -204,7 +209,7 @@ export class Connection implements Established {
 	// our session identity so the peer can filter
 	// reflected announcements (lite-06 removed ANNOUNCE_REQUEST's exclude_hop for it).
 	async #sendSetup(): Promise<void> {
-		const writer = await Writer.open(this.#quic);
+		const writer = await Writer.open(this.#quic, { version: this.#version });
 		try {
 			await writer.u53(DataType.Setup);
 			const probe = await probeLevel(this.#quic, this.#version);
@@ -218,7 +223,7 @@ export class Connection implements Established {
 
 	async #runBidis() {
 		for (;;) {
-			const stream = await Stream.accept(this.#quic);
+			const stream = await Stream.accept(this.#quic, this.#version);
 			if (!stream) break;
 
 			this.#runBidi(stream)
@@ -259,7 +264,7 @@ export class Connection implements Established {
 	}
 
 	async #runUnis() {
-		const readers = new Readers(this.#quic);
+		const readers = new Readers(this.#quic, this.#version);
 
 		for (;;) {
 			const stream = await readers.next();

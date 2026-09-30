@@ -33,6 +33,7 @@ async function encode(version: Version, resp: SubscribeResponse): Promise<Uint8A
 	const written: Uint8Array[] = [];
 	const writer = new Writer(
 		new WritableStream<Uint8Array>({ write: (chunk) => void written.push(new Uint8Array(chunk)) }),
+		version,
 	);
 	await encodeSubscribeResponse(writer, resp, version);
 	writer.close();
@@ -41,12 +42,12 @@ async function encode(version: Version, resp: SubscribeResponse): Promise<Uint8A
 }
 
 async function responseRoundtrip(version: Version, resp: SubscribeResponse): Promise<SubscribeResponse> {
-	const reader = new Reader(undefined, await encode(version, resp));
+	const reader = new Reader(undefined, await encode(version, resp), version);
 	return decodeSubscribeResponse(reader, version);
 }
 
 async function encodeSubscribe(msg: Subscribe): Promise<void> {
-	const writer = new Writer(new WritableStream<Uint8Array>());
+	const writer = new Writer(new WritableStream<Uint8Array>(), Version.DRAFT_06);
 	try {
 		await msg.encode(writer, Version.DRAFT_06);
 	} finally {
@@ -61,6 +62,7 @@ async function encodeMessage(
 	const written: Uint8Array[] = [];
 	const writer = new Writer(
 		new WritableStream<Uint8Array>({ write: (chunk) => void written.push(new Uint8Array(chunk)) }),
+		version,
 	);
 	await message.encode(writer, version);
 	writer.close();
@@ -91,7 +93,7 @@ test("Subscribe round-trips every option including startGroup 0", async () => {
 	// Lite-06 carries the raw floor, and a floor of 0 with no frame offset is the same
 	// absence of a constraint as no floor at all, so it canonicalizes to undefined.
 	const got = await Subscribe.decode(
-		new Reader(undefined, await encodeMessage(Version.DRAFT_06, message)),
+		new Reader(undefined, await encodeMessage(Version.DRAFT_06, message), Version.DRAFT_06),
 		Version.DRAFT_06,
 	);
 	expect(got.priority).toBe(7);
@@ -103,7 +105,7 @@ test("Subscribe round-trips every option including startGroup 0", async () => {
 	// partway through group 0 (a catalog never leaves it).
 	message.startFrame = 4;
 	const resumed = await Subscribe.decode(
-		new Reader(undefined, await encodeMessage(Version.DRAFT_06, message)),
+		new Reader(undefined, await encodeMessage(Version.DRAFT_06, message), Version.DRAFT_06),
 		Version.DRAFT_06,
 	);
 	expect(resumed.startGroup).toBe(0);
@@ -113,7 +115,7 @@ test("Subscribe round-trips every option including startGroup 0", async () => {
 	// A pre-06 wire folds the vacuous floor back to absent: an explicit group 0 there
 	// would mean "replay from the beginning", which is not what a floor of 0 asks for.
 	const folded = await Subscribe.decode(
-		new Reader(undefined, await encodeMessage(Version.DRAFT_05, message)),
+		new Reader(undefined, await encodeMessage(Version.DRAFT_05, message), Version.DRAFT_05),
 		Version.DRAFT_05,
 	);
 	expect(folded.startGroup).toBeUndefined();
@@ -128,7 +130,7 @@ test("SubscribeUpdate round-trips every option including startGroup 0", async ()
 		endGroup: 12,
 	});
 	const got = await SubscribeUpdate.decode(
-		new Reader(undefined, await encodeMessage(Version.DRAFT_06, message)),
+		new Reader(undefined, await encodeMessage(Version.DRAFT_06, message), Version.DRAFT_06),
 		Version.DRAFT_06,
 	);
 	expect(got.priority).toBe(8);
@@ -138,7 +140,7 @@ test("SubscribeUpdate round-trips every option including startGroup 0", async ()
 
 	// The same fold as SUBSCRIBE on a pre-06 wire.
 	const folded = await SubscribeUpdate.decode(
-		new Reader(undefined, await encodeMessage(Version.DRAFT_05, message)),
+		new Reader(undefined, await encodeMessage(Version.DRAFT_05, message), Version.DRAFT_05),
 		Version.DRAFT_05,
 	);
 	expect(folded.startGroup).toBeUndefined();
@@ -187,9 +189,9 @@ test("SubscribeDrop is gone on draft-07", async () => {
 
 	// A draft-06 DROP is an unknown response type on draft-07.
 	const wire06 = await encode(Version.DRAFT_06, drop);
-	await expect(decodeSubscribeResponse(new Reader(undefined, wire06), Version.DRAFT_07)).rejects.toThrow(
-		"unknown subscribe response type: 2",
-	);
+	await expect(
+		decodeSubscribeResponse(new Reader(undefined, wire06, Version.DRAFT_07), Version.DRAFT_07),
+	).rejects.toThrow("unknown subscribe response type: 2");
 });
 
 test("SubscribeDrop is type 0x2 on draft-05 and 0x1 on draft-04", async () => {

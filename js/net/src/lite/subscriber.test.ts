@@ -73,6 +73,7 @@ function announceHarness(version: Version, origin = 1n) {
 		const written: Uint8Array[] = [];
 		const writer = new Writer(
 			new WritableStream<Uint8Array>({ write: (chunk) => void written.push(new Uint8Array(chunk)) }),
+			version,
 		);
 		await f(writer);
 		writer.close();
@@ -393,6 +394,7 @@ async function probeBytes(probes: Probe[], version: Version): Promise<Uint8Array
 	const chunks: Uint8Array[] = [];
 	const writer = new Writer(
 		new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+		version,
 	);
 	for (const probe of probes) await probe.encode(writer, version);
 	writer.close();
@@ -776,6 +778,7 @@ async function answerTrackInfo(stream: FakeStream): Promise<void> {
 	const chunks: Uint8Array[] = [];
 	const writer = new Writer(
 		new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+		Version.DRAFT_05,
 	);
 	await new TrackInfo({}).encode(writer, Version.DRAFT_05);
 	for (const chunk of chunks) stream.inbound.enqueue(chunk);

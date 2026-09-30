@@ -40,4 +40,4 @@ announcing `.internal/origins`.
 
 ## Related
 
-- [Cluster routing](/quest/m1/cluster-routing/README.md) - takes its topology from configured links only
+- [Cluster topology](/quest/m1/cluster-routing/topology.md) - takes its topology from configured links only, so it waits on this

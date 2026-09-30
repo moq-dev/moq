@@ -11,13 +11,9 @@ default:
     	"just wait && just web"
 
 # Download the given ROM from our R2 bucket.
+[positional-arguments]
 download rom:
-    #!/usr/bin/env bash
-    if [ ! -f "rom/{{ rom }}" ]; then
-    	mkdir -p rom
-    	curl -fSL -o "rom/{{ rom }}.tmp" "https://rom.moq.dev/{{ rom }}"
-    	mv "rom/{{ rom }}.tmp" "rom/{{ rom }}"
-    fi
+    @../../sh/demo/download.sh "https://rom.moq.dev/$1" "rom/$1"
 
 # Big2Small (puzzle): https://mdsteele.itch.io/big2small
 b2s:
@@ -70,15 +66,9 @@ upload file:
     bun wrangler r2 object put "rom-moq-dev/{{ file }}" --file "rom/{{ file }}" --remote
 
 # Sync all ROMs to R2
+[positional-arguments]
 sync dir="rom":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    for file in "{{ dir }}"/*; do
-    	[ -e "$file" ] || continue
-    	key=$(basename "$file")
-    	echo "Uploading $key..."
-    	bun wrangler r2 object put "rom-moq-dev/$key" --file "$file" --remote
-    done
+    ../../sh/demo/sync.sh rom-moq-dev "$@"
 
 # List files in the R2 bucket
 list:

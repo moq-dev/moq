@@ -29,11 +29,4 @@ and there is no merge queue, so nothing re-runs them on the combined tree.
   act, after the workflow change lands on `main`. Hand it over with the
   settings to use rather than changing it.
 
-Decided in the 2026-09-30 audit: no longer waits on the tooling line; the
-queue needs only `just ci $JOB $BASE`, which `main` already has.
-
 Public API: none. Wire: none.
-
-## Related
-
-- [Tooling](/quest/m1/tooling/README.md) - later changes to the `just ci` entry point the queue runs

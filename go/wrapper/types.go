@@ -8,14 +8,14 @@ import ffi "moq.dev/moq-ffi/moq"
 type (
 	// Audio describes one audio rendition in a broadcast catalog: codec, sample rate, channel count, and container.
 	Audio = ffi.MoqAudio
-	// AudioCodec selects the audio encoder codec. Build one with OpusAudioCodec;
+	// AudioCodec selects the audio encoder codec. Build one with OpusAudioCodec or AacAudioCodec;
 	// adding a codec later adds a constructor, not a breaking enum change.
 	AudioCodec = ffi.MoqAudioCodec
 	// AudioDecoderOutput configures the PCM format, sample rate, and channels DecodeAudio delivers.
 	AudioDecoderOutput = ffi.MoqAudioDecoderOutput
 	// AudioEncoderInput declares the PCM sample format, sample rate, and channel count of frames written to an audio producer.
 	AudioEncoderInput = ffi.MoqAudioEncoderInput
-	// AudioEncoderOutput configures the Opus encoder: codec, optional sample rate, channels, bitrate, and frame duration.
+	// AudioEncoderOutput configures the encoder: codec, optional sample rate, channels, bitrate, and frame duration.
 	AudioEncoderOutput = ffi.MoqAudioEncoderOutput
 	// AudioSampleFormat is a raw PCM sample layout, mirroring WebCodecs AudioData.format.
 	AudioSampleFormat = ffi.MoqAudioSampleFormat
@@ -182,6 +182,12 @@ const (
 // OpusAudioCodec selects Opus (RFC 6716) for EncodeAudio.
 func OpusAudioCodec() *AudioCodec {
 	return ffi.MoqAudioCodecOpus()
+}
+
+// AacAudioCodec selects AAC-LC through the platform's encoder for EncodeAudio.
+// A host without one refuses it. Leave FrameDurationUs at 0 for AAC's own frame.
+func AacAudioCodec() *AudioCodec {
+	return ffi.MoqAudioCodecAac()
 }
 
 // VideoPixelFormat values: the raw pixel layout fed to the in-process encoder,

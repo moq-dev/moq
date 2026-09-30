@@ -252,6 +252,124 @@ pub fn decode_announces(mut data: &[u8], compress: bool) -> Vec<Announced> {
 	resolved
 }
 
+/// A varint-heavy lite wire object, as the varint bench times it: what a publisher
+/// pays per frame, per group, and per request.
+#[derive(Clone, Copy, Debug)]
+pub enum LiteSample {
+	/// A 30 fps video group's FRAME headers: a zigzag timestamp delta in microseconds and
+	/// a size, 60 of them, led by a 60 KB keyframe. Payloads are left out.
+	Video,
+	/// A 50 Hz Opus group's FRAME headers: 50 of 20 ms and 160 bytes.
+	Audio,
+	/// A GROUP header, well into a long-running track.
+	Group,
+	/// A SUBSCRIBE for a track, the way a player opens one.
+	Subscribe,
+	/// A datagram's header, with an empty payload.
+	Datagram,
+	/// A SETUP declaring a probe level, a cost, and a random Hop ID.
+	Setup,
+}
+
+impl LiteSample {
+	/// Every sample, in the order the bench reports them.
+	pub const ALL: [Self; 6] = [
+		Self::Video,
+		Self::Audio,
+		Self::Group,
+		Self::Subscribe,
+		Self::Datagram,
+		Self::Setup,
+	];
+
+	/// The FRAME headers for [`Self::Video`] and [`Self::Audio`], as (delta, size) pairs.
+	fn frames(self) -> Vec<(i64, u64)> {
+		match self {
+			Self::Video => (0..60)
+				.map(|n| match n {
+					0 => (0, 60_000),
+					n if n % 10 == 0 => (33_333, 17_000),
+					_ => (33_333, 8_000),
+				})
+				.collect(),
+			Self::Audio => (0..50).map(|n| (if n == 0 { 0 } else { 20_000 }, 160)).collect(),
+			_ => Vec::new(),
+		}
+	}
+
+	/// Encode this sample at `version`, which must be a moq-lite version.
+	pub fn encode(self, version: crate::Version) -> Vec<u8> {
+		let version = lite::Version::try_from(version).expect("a moq-lite version");
+		let mut buf = Vec::new();
+		match self {
+			Self::Video | Self::Audio => {
+				for (delta, size) in self.frames() {
+					VarInt::from_zigzag(delta).unwrap().encode(&mut buf, version).unwrap();
+					size.encode(&mut buf, version).unwrap();
+				}
+			}
+			Self::Group => lite::Group {
+				subscribe: 3,
+				sequence: 1_234,
+				frame_start: 0,
+			}
+			.encode(&mut buf, version)
+			.unwrap(),
+			Self::Subscribe => lite::Subscribe {
+				id: 3,
+				broadcast: Path::new("room/alice"),
+				track: "video".into(),
+				priority: 2,
+				max_age: std::time::Duration::from_secs(10),
+				start_group: None,
+				end_group: None,
+				start_frame: 0,
+				end_frame: None,
+			}
+			.encode(&mut buf, version)
+			.unwrap(),
+			Self::Datagram => lite::Datagram {
+				subscribe: 3,
+				sequence: 1_234,
+				timestamp: 1_234_567_890,
+				payload: bytes::Bytes::new(),
+			}
+			.encode(&mut buf, version)
+			.unwrap(),
+			Self::Setup => lite::Setup {
+				probe: lite::ProbeLevel::Report,
+				cost: Some(1),
+				hop: Some(crate::Hop::new(0x1d_2c3b_4a59_6877).unwrap()),
+				..Default::default()
+			}
+			.encode(&mut buf, version)
+			.unwrap(),
+		}
+		buf
+	}
+
+	/// Decode what [`Self::encode`] wrote at `version`, returning how many objects it read.
+	pub fn decode(self, version: crate::Version, mut data: &[u8]) -> usize {
+		let version = lite::Version::try_from(version).expect("a moq-lite version");
+		let data = &mut data;
+		match self {
+			Self::Video | Self::Audio => {
+				let mut frames = 0;
+				while !data.is_empty() {
+					VarInt::decode(data, version).unwrap();
+					u64::decode(data, version).unwrap();
+					frames += 1;
+				}
+				frames
+			}
+			Self::Group => lite::Group::decode(data, version).map(|_| 1).unwrap(),
+			Self::Subscribe => lite::Subscribe::decode(data, version).map(|_| 1).unwrap(),
+			Self::Datagram => lite::Datagram::decode(data, version).map(|_| 1).unwrap(),
+			Self::Setup => lite::Setup::decode(data, version).map(|_| 1).unwrap(),
+		}
+	}
+}
+
 /// Feed a lite-07 announce stream through the stateful decoder, then check that our
 /// encoder's compression of what it resolved reads back as the same announcements.
 ///
@@ -324,13 +442,14 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 
 /// Decode a varint with whichever codec the selected version uses.
 ///
-/// Byte 0 picks the version, which is the whole point: moq-lite and drafts 14-16 use
-/// the QUIC two-bit length tag, while draft-17+ counts leading ones, and the two
-/// disagree about which byte sequences are even legal.
+/// Byte 0 picks the version, which is the whole point: lite-01 to lite-06 and drafts
+/// 14-16 use the QUIC two-bit length tag, while lite-07 and draft-17+ count leading
+/// ones, and the two disagree about which byte sequences are even legal.
 ///
-/// The decoded value is deliberately not asserted to be within [`VarInt::MAX`]: the
-/// leading-ones form spans the full `u64` by design, so a 9-byte encoding decodes
-/// above the 62-bit ceiling and only fails when re-encoded for a QUIC-form version.
+/// The decoded value is deliberately not asserted to be within [`VarInt::MAX`]: on the
+/// IETF wire the leading-ones form spans the full `u64` by design, so a 9-byte encoding
+/// decodes above the 62-bit ceiling. Lite-07 allows the same range, but refuses it at
+/// decode until `VarInt` widens to 64 bits.
 pub fn varint(data: &[u8]) -> bool {
 	let Some((&selector, rest)) = data.split_first() else {
 		return false;
