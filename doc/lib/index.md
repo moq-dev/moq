@@ -10,14 +10,14 @@ protocol. A publisher in Python is consumable by a subscriber in Swift.
 
 | Language | Package | Best for |
 | --- | --- | --- |
-| [Rust](/lib/rs/) | `moq-net`, `hang`, and friends on crates.io | Servers, CLIs, native apps, anything that needs the full stack including hardware codecs. |
-| [TypeScript](/lib/js/) | `@moq/*` on npm | Browsers (WebTransport + WebCodecs) and Node/Bun/Deno. |
-| [Swift](/lib/swift/) | `Moq` via SwiftPM | iOS, iPadOS, macOS. |
-| [Kotlin](/lib/kt/) | `dev.moq:moq` on Maven Central | Android and the JVM. |
-| [Python](/lib/py/) | `moq-rs` on PyPI | Scripts, ML pipelines, voice agents. |
-| [Go](/lib/go/) | `moq.dev/moq` | Go services and tooling. |
-| [Dart](/lib/dart/) | `moq` on pub.dev | Flutter apps. |
-| [C](/lib/c/) | `libmoq` | C/C++ and any language with a C FFI. |
+| <img class="language-icon" src="/icons/languages/rust.svg" alt="" /> [Rust](/lib/rs/) | `moq-net`, `hang`, and friends on crates.io | Servers, CLIs, native apps, anything that needs the full stack including hardware codecs. |
+| <img class="language-icon" src="/icons/languages/typescript.svg" alt="" /> [TypeScript](/lib/js/) | `@moq/*` on npm | Browsers (WebTransport + WebCodecs) and Node/Bun/Deno. |
+| <img class="language-icon" src="/icons/languages/swift.svg" alt="" /> [Swift](/lib/swift/) | `Moq` via SwiftPM | iOS, iPadOS, macOS. |
+| <img class="language-icon" src="/icons/languages/kotlin.svg" alt="" /> [Kotlin](/lib/kt/) | `dev.moq:moq` on Maven Central | Android and the JVM. |
+| <img class="language-icon" src="/icons/languages/python.svg" alt="" /> [Python](/lib/py/) | `moq-rs` on PyPI | Scripts, ML pipelines, voice agents. |
+| <img class="language-icon" src="/icons/languages/go.svg" alt="" /> [Go](/lib/go/) | `moq.dev/moq` | Go services and tooling. |
+| <img class="language-icon" src="/icons/languages/dart.svg" alt="" /> [Dart](/lib/dart/) | `moq` on pub.dev | Flutter apps. |
+| <img class="language-icon" src="/icons/languages/c.svg" alt="" /> [C](/lib/c/) | `libmoq` | C/C++ and any language with a C FFI. |
 
 ## How they relate
 

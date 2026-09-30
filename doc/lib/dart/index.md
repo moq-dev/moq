@@ -97,7 +97,8 @@ Cancelling a stream releases the native cursor. The package re-exports
 Generated configuration setters throw if a connect, listen, or accept is in
 flight, or after `cancel()`. Incoming requests report a `MoqTransport` enum.
 `ProtocolMoqException` carries a `MoqProtocolException` as `details` (scope, verbatim
-code, kind) when the peer sent a session or stream code.
+code, kind) when the peer sent a session or stream code. An exception's
+`toString()` is the Rust error message.
 
 `moq.bandwidth()` divides the connection's send estimate; `reserve` a share
 for an app-owned encoder so several publishers on one session split the

@@ -14,6 +14,7 @@ import { Version } from "./ietf/version.ts";
 import { Version as Lite } from "./lite/version.ts";
 import { type Cursor, Reader, Stream, type StreamVersion, Writer } from "./stream.ts";
 import { TimeoutError } from "./util/timeout.ts";
+import { U64 } from "./util/u64.ts";
 
 // The generic tests below read and write QUIC varints on the moq-lite stream code registry.
 const QUIC = Lite.DRAFT_06;
@@ -855,4 +856,53 @@ test("a lite-07 stream decodes reset codes with the moq-lite registry", async ()
 	};
 	expect(await reset(Lite.DRAFT_07)).toBe(StreamCode.GoingAway);
 	expect(await reset(Version.DRAFT_17)).toBe(StreamCode.Internal);
+});
+
+test("Writer and Reader varint round-trip every size in both formats", async () => {
+	const values = [0n, 63n, 64n, 127n, 128n, 2n ** 14n, 2n ** 21n, 2n ** 28n, 2n ** 30n, 2n ** 32n, 2n ** 35n];
+	values.push(2n ** 42n, 2n ** 49n, 2n ** 53n, 2n ** 56n, 2n ** 62n - 1n);
+	for (const version of [Lite.DRAFT_06, Lite.DRAFT_07, Version.DRAFT_16, Version.DRAFT_17, Version.DRAFT_19]) {
+		// Only leading-ones varints reach past 62 bits.
+		const all = version === Lite.DRAFT_06 || version === Version.DRAFT_16 ? values : [...values, 2n ** 62n, 2n ** 64n - 1n];
+		const { stream, written } = createTestWritableStream();
+		const writer = new Writer(stream, version);
+		for (const value of all) await writer.varint(U64.fromBigInt(value));
+		writer.close();
+		await writer.closed;
+
+		const reader = new Reader(undefined, concatChunks(written), version);
+		for (const value of all) expect((await reader.varint()).toBigInt()).toBe(value);
+		expect(await reader.done()).toBe(true);
+	}
+});
+
+test("Writer varint refuses a QUIC varint past 62 bits before emitting bytes", async () => {
+	const { stream, written } = createTestWritableStream();
+	const writer = new Writer(stream, Version.DRAFT_16);
+	await expect(writer.varint(U64.fromBigInt(2n ** 62n))).rejects.toThrow(/larger than 62-bits/);
+	await expect(writer.varint(U64.MAX)).rejects.toThrow(/larger than 62-bits/);
+	expect(written).toEqual([]);
+});
+
+test("Reader u53 decodes every size in both formats, one byte per chunk", async () => {
+	const values = [0, 63, 64, 127, 128, 16383, 16384, 2 ** 21, 2 ** 28 - 1, 2 ** 28, 2 ** 30 - 1, 2 ** 30];
+	values.push(2 ** 35, 2 ** 42, 2 ** 49, Number.MAX_SAFE_INTEGER);
+	for (const version of [Lite.DRAFT_06, Lite.DRAFT_07, Version.DRAFT_17]) {
+		const { stream, written } = createTestWritableStream();
+		const writer = new Writer(stream, version);
+		for (const value of values) await writer.u53(value);
+		writer.close();
+		await writer.closed;
+
+		const bytes = concatChunks(written);
+		const chunked = new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (const byte of bytes) controller.enqueue(new Uint8Array([byte]));
+				controller.close();
+			},
+		});
+		const reader = new Reader(chunked, undefined, version);
+		for (const value of values) expect(await reader.u53()).toBe(value);
+		expect(await reader.done()).toBe(true);
+	}
 });

@@ -215,6 +215,10 @@ pub struct Encoder<T> {
 	/// Frames emitted into the current group, snapshot included.
 	group_frames: usize,
 
+	/// The most bytes a group may hold, the cap a delta is admitted under. A field rather than the
+	/// constant so a test can shrink it to a size it can reach.
+	max_group_bytes: u64,
+
 	/// Whether the next frame has to be a full snapshot, because a frame was lost or the caller cut
 	/// the group. Kept separate from [`last`](Self::last) so a resync doesn't erase the value: that
 	/// field is also what [`Producer::modify`](super::Producer::modify) seeds an edit from, and dropping
@@ -235,6 +239,7 @@ impl<T> Encoder<T> {
 			delta_bytes: 0,
 			snapshot_len: 0,
 			group_frames: 0,
+			max_group_bytes: moq_net::group::MAX_CACHE_BYTES,
 			resync: false,
 			_marker: PhantomData,
 		}
@@ -351,7 +356,7 @@ impl<T: Serialize> Encoder<T> {
 		// come out slightly larger than its input, so the plaintext is not an upper bound. Compressing
 		// first advances the window, but [`Self::snapshot`] opens a fresh one, so an over-budget delta
 		// costs only the wasted compression.
-		if self.snapshot_len + self.delta_bytes + payload.len() as u64 > moq_net::group::MAX_CACHE_BYTES {
+		if self.snapshot_len + self.delta_bytes + payload.len() as u64 > self.max_group_bytes {
 			return self.snapshot(value).map(Some);
 		}
 
@@ -694,6 +699,47 @@ mod test {
 			commit(&mut encoder, &json!({ "a": 1 }))
 				.expect("a fresh snapshot")
 				.keyframe
+		);
+	}
+
+	/// A sync-flushed DEFLATE frame can come out larger than its input, so the plaintext is not an
+	/// upper bound on what lands in the group. A patch that fits the budget by its plaintext but not
+	/// by its encoded size would otherwise slip through the gate, overflow the group, and evict the
+	/// snapshot a late joiner needs. Matches the JS `a compressed delta is gated on its encoded size`.
+	#[test]
+	fn a_compressed_delta_is_gated_on_its_encoded_size() {
+		let value = json!({ "v": "x".repeat(1000) });
+		let patched = json!({ "v": "x".repeat(1000), "q": "a" });
+		let plaintext = serde_json::to_vec(&json!({ "q": "a" })).unwrap().len();
+		let config = Config {
+			delta_ratio: 100,
+			compression: Compression::Deflate,
+		};
+
+		// Measure the frames under the default budget, which admits the delta.
+		let mut probe = Encoder::<Value>::new(config.clone());
+		let snapshot = commit(&mut probe, &value).expect("a snapshot");
+		let delta = commit(&mut probe, &patched).expect("a delta");
+		assert!(!delta.keyframe);
+		assert!(
+			delta.payload.len() > plaintext,
+			"the encoded delta ({}) must outgrow its plaintext ({plaintext}) for this to test anything",
+			delta.payload.len()
+		);
+
+		// A budget with room for the plaintext patch but not the encoded one.
+		let mut encoder = Encoder::<Value>::new(config);
+		encoder.max_group_bytes = (snapshot.payload.len() + plaintext) as u64;
+		assert!(commit(&mut encoder, &value).unwrap().keyframe);
+
+		// The patch rolls a fresh snapshot instead of joining the first group.
+		let rolled = commit(&mut encoder, &patched).expect("a rolled snapshot");
+		assert!(rolled.keyframe);
+		let mut decoder = moq_flate::Decoder::new();
+		assert_eq!(
+			serde_json::from_slice::<Value>(&decoder.frame(&rolled.payload).unwrap()).unwrap(),
+			patched,
+			"the snapshot carries the whole value, not a patch"
 		);
 	}
 

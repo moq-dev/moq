@@ -4,8 +4,20 @@ import type { IetfVersion } from "./ietf/version.ts";
 import { Version } from "./ietf/version.ts";
 import { Version as Lite, type Version as LiteVersion } from "./lite/version.ts";
 import { TimeoutError, withTimeout } from "./util/timeout.ts";
+import { POW32, toBigInt, toNumber, U64 } from "./util/u64.ts";
 import { decodeUtf8 } from "./util/utf8.ts";
-import * as Varint from "./varint.ts";
+import {
+	lengthLeadingOnes,
+	lengthQuic,
+	parts,
+	peekLeadingOnes,
+	peekQuic,
+	readLeadingOnes,
+	readQuic,
+	split,
+	writeLeadingOnes,
+	writeQuic,
+} from "./util/varint.ts";
 
 // Decode raw transport errors before mapping so they cannot bypass the negotiated
 // registry. Ordinary errors already send 0 and retain their local identity.
@@ -86,14 +98,23 @@ function isLeadingOnes(version: StreamVersion): boolean {
 	}
 }
 
-// Encode `v` into `dst` in the varint form `version` uses: QUIC up to 2^62-1, leading-ones up to 2^64-1.
-function encodeTo(dst: ArrayBuffer, v: number | bigint, version: StreamVersion): Uint8Array {
-	return isLeadingOnes(version) ? Varint.encodeLeadingOnesTo(dst, v) : Varint.encodeTo(dst, v);
+// Encode `hi`/`lo` into `dst` in the varint form `version` uses: QUIC up to 2^62-1, leading-ones up to 2^64-1.
+function encodeTo(dst: ArrayBuffer, hi: number, lo: number, version: StreamVersion): Uint8Array {
+	let buf: Uint8Array;
+	if (isLeadingOnes(version)) {
+		buf = new Uint8Array(dst, 0, lengthLeadingOnes(hi, lo));
+		writeLeadingOnes(buf, hi, lo, buf.length);
+	} else {
+		buf = new Uint8Array(dst, 0, lengthQuic(hi, lo));
+		writeQuic(buf, hi, lo, buf.length);
+	}
+	return buf;
 }
 
 /** Encode one varint in the form `version` uses, for a body written outside a {@link Writer}. */
 export function encodeVarint(v: number | bigint, version: StreamVersion): Uint8Array {
-	return encodeTo(new ArrayBuffer(9), v, version);
+	const lo = split(v);
+	return encodeTo(new ArrayBuffer(9), parts.hi, lo, version);
 }
 
 /**
@@ -412,6 +433,10 @@ export class Reader {
 		return this.decode(U62);
 	}
 
+	async varint(): Promise<U64> {
+		return this.decode(VARINT);
+	}
+
 	// Returns false if there is more data to read, blocking if it hasn't been received yet.
 	async done(): Promise<boolean> {
 		if (this.#buffer.byteLength > 0 || this.#chunked > 0) return false;
@@ -456,10 +481,20 @@ export class Cursor {
 	readonly version: StreamVersion;
 	#buffer: Uint8Array;
 	#offset = 0;
+	// Resolved once, since every varint read branches on it.
+	#leadingOnes: boolean;
+	// First bytes below this are a whole 1-byte varint, and below this + 0x40 a 2-byte one whose
+	// value is the low 6 bits and the next byte. Both formats share that shape; only the bound moves.
+	#short: number;
+	// First bytes below this are a varint of at most 4 bytes: 0xc0 for QUIC, 0xf0 for leading-ones.
+	#word: number;
 
 	constructor(buffer: Uint8Array, version: StreamVersion) {
 		this.#buffer = buffer;
 		this.version = version;
+		this.#leadingOnes = isLeadingOnes(version);
+		this.#short = this.#leadingOnes ? 0x80 : 0x40;
+		this.#word = this.#leadingOnes ? 0xf0 : 0xc0;
 	}
 
 	/** How many bytes have been read. */
@@ -529,79 +564,66 @@ export class Cursor {
 		return (b[o] << 8) | b[o + 1];
 	}
 
-	// Returns a Number using 53-bits, the max Javascript can use for integer math.
+	/** Read a varint as a `number`, throwing if it is above `Number.MAX_SAFE_INTEGER`. */
 	u53(): number {
-		// Most varints fit in 4 bytes, which decode without a bigint.
+		// Most varints are 1 or 2 bytes, which skip the general decode.
 		this.#ensure(1);
 		const b = this.#buffer;
 		const o = this.#offset;
-		if (!isLeadingOnes(this.version)) {
-			const size = 1 << (b[o] >> 6);
-			if (size < 8) {
-				this.#ensure(size);
-				this.#offset += size;
-				if (size === 1) return b[o] & 0x3f;
-				if (size === 2) return ((b[o] & 0x3f) << 8) | b[o + 1];
-				return (b[o] & 0x3f) * 2 ** 24 + ((b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]);
+		const first = b[o];
+		if (first < this.#short) {
+			this.#offset = o + 1;
+			return first;
+		}
+		if (first < this.#short + 0x40) {
+			this.#ensure(2);
+			this.#offset = o + 2;
+			return ((first & 0x3f) << 8) | b[o + 1];
+		}
+		// Up to 4 bytes still fits 28 (leading-ones) or 30 (QUIC) bits, with no upper half.
+		if (first < this.#word) {
+			const size = this.#leadingOnes ? peekLeadingOnes(first) : 4;
+			this.#ensure(size);
+			this.#offset = o + size;
+			if (size === 3) return ((first & 0x1f) << 16) | (b[o + 1] << 8) | b[o + 2];
+			return ((first & (this.#leadingOnes ? 0x0f : 0x3f)) << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3];
+		}
+		const lo = this.#varint();
+		return toNumber(parts.hi, lo);
+	}
+
+	/** Read a varint as a bigint. A leading-ones varint may exceed 62 bits. */
+	u62(): bigint {
+		const lo = this.#varint();
+		return toBigInt(parts.hi, lo);
+	}
+
+	/** Read a varint. */
+	varint(): U64 {
+		const lo = this.#varint();
+		return new U64(parts.hi, lo);
+	}
+
+	// Decode the next varint in the version's format, returning its lower half and leaving the upper in `parts`.
+	#varint(): number {
+		this.#ensure(1);
+		const b = this.#buffer;
+		const o = this.#offset;
+		let size: number;
+		if (this.#leadingOnes) {
+			size = peekLeadingOnes(b[o]);
+			// 1111110x is a 7-byte form. Draft-17 rejects it; draft-18+ allows it per #1595.
+			if (size === 7 && this.version === Version.DRAFT_17) {
+				throw new Error("invalid leading-ones varint: 1111110x prefix is reserved on draft-17");
 			}
-		} else if (b[o] < 0xf0) {
-			// 0xxxxxxx, 10xxxxxx, 110xxxxx, and 1110xxxx carry up to 28 bits.
-			const size = Math.clz32(~(b[o] << 24)) + 1;
 			this.#ensure(size);
 			this.#offset += size;
-			if (size === 1) return b[o];
-			if (size === 2) return ((b[o] & 0x3f) << 8) | b[o + 1];
-			if (size === 3) return ((b[o] & 0x1f) << 16) | (b[o + 1] << 8) | b[o + 2];
-			return ((b[o] & 0x0f) << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3];
+			return readLeadingOnes(b, o, size);
 		}
-
-		const v = this.u62();
-		if (v > Varint.MAX_U53) {
-			throw new Error(`value larger than 53-bits: ${v.toString()}`);
-		}
-		return Number(v);
-	}
-
-	// NOTE: Returns a bigint instead of a number since it may be larger than 53-bits
-	u62(): bigint {
-		return isLeadingOnes(this.version) ? this.#leadingOnes() : this.#quicVarint();
-	}
-
-	#quicVarint(): bigint {
-		this.#ensure(1);
-		const size = 1 << (this.#buffer[this.#offset] >> 6);
-		if (size < 8) return BigInt(this.u53());
-
-		const slice = this.read(8);
-		const view = new DataView(slice.buffer, slice.byteOffset, slice.byteLength);
-		return view.getBigUint64(0) & 0x3fffffffffffffffn;
-	}
-
-	#leadingOnes(): bigint {
-		this.#ensure(1);
-		const b = this.#buffer[this.#offset];
-		if (b < 0xf0) return BigInt(this.u53());
-
-		// Count leading 1-bits
-		let ones = 0;
-		for (let bit = 7; bit >= 0; bit--) {
-			if (b & (1 << bit)) ones++;
-			else break;
-		}
-
-		// 1111110x is a 7-byte form. Draft-17 rejects it; draft-18+ allows it per #1595.
-		if (ones === 6 && this.version === Version.DRAFT_17) {
-			throw new Error("invalid leading-ones varint: 1111110x prefix is reserved on draft-17");
-		}
-
-		let totalSize: number;
-		if (ones <= 5) totalSize = ones + 1;
-		else if (ones === 6) totalSize = 7;
-		else if (ones === 7) totalSize = 8;
-		else totalSize = 9; // ones === 8
-
-		const [value] = Varint.decodeLeadingOnes(this.read(totalSize));
-		return value;
+		size = peekQuic(b[o]);
+		this.#ensure(size);
+		this.#offset += size;
+		return readQuic(b, o, size);
 	}
 }
 
@@ -612,6 +634,7 @@ const U8 = (c: Cursor) => c.u8();
 const U16 = (c: Cursor) => c.u16();
 const U53 = (c: Cursor) => c.u53();
 const U62 = (c: Cursor) => c.u62();
+const VARINT = (c: Cursor) => c.varint();
 
 // Writer wraps a stream and writes chunks of data
 export class Writer {
@@ -619,8 +642,7 @@ export class Writer {
 	#stream: WritableStream<Uint8Array>;
 	#closed?: Promise<void>;
 
-	// Scratch buffer for writing varints.
-	// Fixed at 9 bytes (leading-ones max).
+	// Scratch buffer for each primitive write, sized for the longest (a 9-byte leading-ones varint).
 	#scratch: ArrayBuffer;
 
 	version: StreamVersion;
@@ -666,7 +688,7 @@ export class Writer {
 			throw new Error(`overflow, value larger than 32-bits: ${v.toString()}`);
 		}
 
-		// We don't use a VarInt, so it always takes 4 bytes.
+		// We don't use a varint, so it always takes 4 bytes.
 		// This could be improved but nothing is standardized yet.
 		await this.write(setInt32(this.#scratch, v));
 	}
@@ -675,11 +697,20 @@ export class Writer {
 		if (!Number.isSafeInteger(v) || v < 0) {
 			throw new RangeError(`invalid u53: ${v}`);
 		}
-		await this.write(encodeTo(this.#scratch, v, this.version));
+		await this.#varint(Math.floor(v / POW32), v >>> 0);
 	}
 
 	async u62(v: bigint) {
-		await this.write(encodeTo(this.#scratch, v, this.version));
+		const lo = split(v);
+		await this.#varint(parts.hi, lo);
+	}
+
+	async varint(v: U64) {
+		await this.#varint(v.hi, v.lo);
+	}
+
+	#varint(hi: number, lo: number): Promise<void> {
+		return this.write(encodeTo(this.#scratch, hi, lo, this.version));
 	}
 
 	async write(v: Uint8Array) {

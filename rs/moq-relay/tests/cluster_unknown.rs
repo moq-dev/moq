@@ -1,6 +1,6 @@
 //! Regression for an external publisher whose protocol does not declare a Hop ID.
-//! The relay records that publisher as `Hop::UNKNOWN`; reflected cluster paths
-//! must not replace it while gossiping around a redundant mesh.
+//! The relay stamps that publisher with a random Hop ID of the connection's own;
+//! reflected cluster paths must not replace it while gossiping around a redundant mesh.
 
 use std::time::Duration;
 
@@ -105,8 +105,8 @@ async fn publish_version(port: u16, version: &str) -> Publisher {
 }
 
 async fn publish_unknown(port: u16) -> Publisher {
-	// Draft-14 has no Cluster extension, so the accepting relay must represent
-	// this external publisher with the wire-defined UNKNOWN Hop ID.
+	// Draft-14 has no Cluster extension, so the accepting relay must name this
+	// external publisher with a stamp of its own.
 	publish_version(port, "moq-transport-14").await
 }
 
@@ -226,7 +226,7 @@ async fn assert_unknown_publisher_stays_announced(cluster_version: Option<moq_ne
 /// Every ingest version that can carry a broadcast must survive the same
 /// redundant mesh. The pre-fix failure set was exactly the versions that
 /// declare no origin identity (lite <= 03, moq-transport <= 16): their
-/// broadcasts enter with an UNKNOWN first hop, and the reflected copy replaced
+/// broadcasts entered with an UNKNOWN first hop, and the reflected copy replaced
 /// the live source instead of parking. The identity-carrying versions held
 /// even before the fix, so this pins both halves of the boundary.
 #[tokio::test]

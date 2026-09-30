@@ -79,9 +79,6 @@ just test interop --publishers rust,python --subscribers rust,c,js-native-bun
 # Subscription termination: Rust/JS response bytes over in-memory transports.
 just test bare-fin
 
-# Lite varints: Rust/JS encodings of boundary values and messages.
-just test lite-varint
-
 # Negative control: no publisher, every subscriber must time out.
 just test interop-negative
 
@@ -168,6 +165,8 @@ contract](../README.md).
 ```text
 interop.sh              orchestrator: build clients, run the relay + matrix or media checks
 interop.toml            relay config (anonymous, self-signed localhost)
+bare-fin.ts             the JS side of `just test bare-fin`, driven by moq-net's tests
+varint.ts               the JS side of the varint check, driven by moq-net's tests
 clients/
   python/interop.py       publish/subscribe via py/moq-rs (import moq)
   go/main.go              publish/subscribe via go/wrapper (import moq-go/moq)
@@ -199,12 +198,18 @@ and FIN without PUBLISH\_DONE on IETF draft-19. Clean-end controls use the same
 path. This tests response interoperability, not network delivery or relay behavior.
 The interop workflow runs it alongside the real-transport matrix.
 
-## Lite varints
+## Varints
 
-`just test lite-varint` has JS decode Rust's lite-06 (QUIC) and lite-07
-(leading-ones) encodings of every varint length boundary up to 2^62-1, a SETUP
-carrying a 62-bit Hop ID, a datagram, and a GROUP stream with frames, then
-checks that JS's own encoding of what it decoded is byte for byte Rust's. Past
-2^62-1 the range is per version: JS writes lite-07's 64-bit values, which Rust
-must refuse with a decode error until its `VarInt` widens, and both sides refuse
-them on lite-06. The interop workflow runs it next to `bare-fin`.
+Every `just test interop` run starts with `varint_interop` in moq-net, which
+hands moq-net's QUIC and leading-ones encodings of each varint size boundary
+(plus 2^53, where a JS `number` stops being exact, and 2^62 - 1) to
+`varint.ts`. That script decodes them into js/net's `U64`, checks its
+`number` conversion, and returns js/net's own encodings, which Rust requires to
+match byte for byte and decode back to the same value.
+
+`lite_varint_interop` runs next to it and does the same through moq-lite's
+version dispatch: `lite-varint.ts` decodes Rust's lite-06 (QUIC) and lite-07
+(leading-ones) varints, a SETUP carrying a 62-bit Hop ID, a datagram, and a
+GROUP stream with frames, and re-encodes them byte for byte. Past 2^62-1 the
+range is per version: JS writes lite-07's 64-bit values, which Rust must refuse
+with a decode error until its `VarInt` widens, and JS refuses them on lite-06.

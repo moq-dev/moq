@@ -1,146 +1,89 @@
-/** Lite-07 leading-ones varints against lite-06 QUIC varints, for what a publisher writes per frame, group, and request. */
-import { randomHop } from "../src/hop.ts";
-import { Datagram } from "../src/lite/datagram.ts";
-import { Group } from "../src/lite/group.ts";
-import { ProbeLevel, Setup } from "../src/lite/setup.ts";
-import { Subscribe } from "../src/lite/subscribe.ts";
-import { Version } from "../src/lite/version.ts";
-import * as Path from "../src/path.ts";
-import { type Cursor, Reader, Writer } from "../src/stream.ts";
+/** Time one varint encode and one decode, for both wire formats, at their 1, 2, 4, and 8-byte sizes. */
+import { Version } from "../src/ietf/version.ts";
+import { Cursor } from "../src/stream.ts";
+import * as Varint from "../src/varint.ts";
 
-const versions = [Version.DRAFT_06, Version.DRAFT_07];
-const minMs = 200; // Run each case at least this long.
+// Decodes run through one Cursor over this many copies, so the Cursor itself isn't timed.
+const run = 1024;
+const runs = 2_000;
+const reps = 9;
+const scratch = new ArrayBuffer(9);
 let checksum = 0;
 
-/** A lite object: how the publisher writes it and how the subscriber reads it back. */
-interface Sample {
+// QUIC varints (lite, and moq-transport before draft-17), and leading-ones (draft-17+), each at the
+// largest value of its 1, 2, 4, and 8-byte forms that a `number` holds.
+const formats = [
+	{
+		name: "quic",
+		version: Version.DRAFT_16,
+		encode: Varint.encodeTo,
+		values: [2 ** 6 - 1, 2 ** 14 - 1, 2 ** 30 - 1, Number.MAX_SAFE_INTEGER],
+	},
+	{
+		name: "leading-ones",
+		version: Version.DRAFT_17,
+		encode: Varint.encodeLeadingOnesTo,
+		values: [2 ** 7 - 1, 2 ** 14 - 1, 2 ** 28 - 1, Number.MAX_SAFE_INTEGER],
+	},
+];
+
+interface Case {
 	name: string;
-	encode(w: Writer, version: Version): Promise<void>;
-	decode(r: Reader, version: Version): Promise<unknown>;
+	ops: [string, () => void][];
 }
 
-// A FRAME header: the zigzag timestamp delta, then the size.
-const header = (c: Cursor) => {
-	c.u62();
-	return c.u53();
-};
+const cases: Case[] = [];
+for (const format of formats) {
+	for (const value of format.values) {
+		const one = format.encode(scratch, value).slice();
+		const encoded = new Uint8Array(one.byteLength * run);
+		for (let i = 0; i < run; i++) encoded.set(one, i * one.byteLength);
 
-// FRAME headers with the payloads left out, as (timestamp delta in µs, size) pairs.
-function frames(name: string, headers: [bigint, number][]): Sample {
-	const zigzag = (d: bigint) => (d << 1n) ^ (d >> 63n);
-	return {
-		name,
-		async encode(w) {
-			for (const [delta, size] of headers) {
-				await w.u62(zigzag(delta));
-				await w.u53(size);
-			}
-		},
-		async decode(r) {
-			// The subscriber's read loop, one synchronous decode per buffered frame, minus the payload.
-			let n = 0;
-			while (r.tryDecode(header) !== undefined) n++;
-			return n;
-		},
-	};
-}
-
-const video = frames(
-	"Video",
-	Array.from({ length: 60 }, (_, n): [bigint, number] => {
-		if (n === 0) return [0n, 60_000];
-		return [33_333n, n % 10 === 0 ? 17_000 : 8_000];
-	}),
-);
-const audio = frames(
-	"Audio",
-	Array.from({ length: 50 }, (_, n): [bigint, number] => [n === 0 ? 0n : 20_000n, 160]),
-);
-
-const group: Sample = {
-	name: "Group",
-	encode: (w, version) => new Group({ subscribe: 3n, sequence: 1_234 }).encode(w, version),
-	decode: (r, version) => Group.decode(r, version),
-};
-
-const subscribe: Sample = {
-	name: "Subscribe",
-	encode: (w, version) =>
-		new Subscribe({
-			id: 3n,
-			broadcast: Path.from("room/alice"),
-			track: "video",
-			priority: 2,
-			maxAge: 10_000,
-		}).encode(w, version),
-	decode: (r, version) => Subscribe.decode(r, version),
-};
-
-const datagram: Sample = {
-	name: "Datagram",
-	encode: (w, version) => w.write(new Datagram(3n, 1_234, 1_234_567_890, new Uint8Array()).encode(version)),
-	decode: (r, version) => r.readAll().then((data) => Datagram.decode(data, version)),
-};
-
-const hop = randomHop();
-const setup: Sample = {
-	name: "Setup",
-	encode: (w, version) => new Setup({ probe: ProbeLevel.Report, hop }).encode(w, version),
-	decode: (r, version) => Setup.decode(r, version),
-};
-
-/** Collect what one encode writes. */
-async function wire(sample: Sample, version: Version): Promise<Uint8Array> {
-	const chunks: Uint8Array[] = [];
-	const w = new Writer(new WritableStream<Uint8Array>({ write: (c) => void chunks.push(c.slice()) }), version);
-	await sample.encode(w, version);
-	w.close();
-	await w.closed;
-	const out = new Uint8Array(chunks.reduce((n, c) => n + c.byteLength, 0));
-	let offset = 0;
-	for (const c of chunks) {
-		out.set(c, offset);
-		offset += c.byteLength;
-	}
-	return out;
-}
-
-/** Time `f` until `minMs` has passed, returning ns per call. */
-async function time(f: () => Promise<unknown>): Promise<number> {
-	for (let i = 0; i < 1_000; i++) await f(); // warm up
-	let calls = 0;
-	const start = performance.now();
-	let elapsed = 0;
-	while (elapsed < minMs) {
-		for (let i = 0; i < 1_000; i++) await f();
-		calls += 1_000;
-		elapsed = performance.now() - start;
-	}
-	return (elapsed * 1e6) / calls;
-}
-
-// A Writer whose sink discards, so encode is timed without collecting bytes.
-const sink = () =>
-	new WritableStream<Uint8Array>({
-		write: (c) => {
-			checksum += c.byteLength;
-		},
-	});
-
-console.log("sample,version,bytes,encode_ns,decode_ns");
-for (const sample of [video, audio, group, subscribe, datagram, setup]) {
-	for (const version of versions) {
-		const bytes = await wire(sample, version);
-		const encode = await time(async () => {
-			const w = new Writer(sink(), version);
-			await sample.encode(w, version);
+		cases.push({
+			name: `${format.name},${one.byteLength}-byte`,
+			ops: [
+				[
+					"encode",
+					() => {
+						for (let i = 0; i < run; i++) checksum += format.encode(scratch, value).byteLength;
+					},
+				],
+				[
+					"decode",
+					() => {
+						const cursor = new Cursor(encoded, format.version);
+						for (let i = 0; i < run; i++) checksum += cursor.u53();
+					},
+				],
+				// The same, as the U64 the generated codec will use, which allocates.
+				[
+					"decode-varint",
+					() => {
+						const cursor = new Cursor(encoded, format.version);
+						for (let i = 0; i < run; i++) checksum += cursor.varint().lo;
+					},
+				],
+			],
 		});
-		const decode = await time(async () => {
-			checksum += Number((await sample.decode(new Reader(undefined, bytes, version), version)) !== undefined);
-		});
-		console.log(
-			`${sample.name},${version.toString(16)},${bytes.byteLength},${encode.toFixed(0)},${decode.toFixed(0)}`,
-		);
 	}
+}
+
+// Nanoseconds per varint for the fastest of several reps, since a slower one measured the machine.
+function time(body: () => void): number {
+	let best = Number.POSITIVE_INFINITY;
+	for (let rep = 0; rep < reps; rep++) {
+		const start = performance.now();
+		for (let i = 0; i < runs; i++) body();
+		best = Math.min(best, ((performance.now() - start) * 1e6) / (runs * run));
+	}
+	return best;
+}
+
+// Run every case once first, so the JIT has seen all of them and the first row isn't timing warmup.
+for (const { ops } of cases) for (const [, body] of ops) for (let i = 0; i < runs; i++) body();
+
+console.log("format,value,op,ns_per_op");
+for (const { name, ops } of cases) {
+	for (const [op, body] of ops) console.log(`${name},${op},${time(body).toFixed(1)}`);
 }
 if (checksum === 0) throw new Error("benchmark did no work");

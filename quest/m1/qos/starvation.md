@@ -85,5 +85,5 @@ sum into one row; the aggregate consumer sums two nodes bucket by bucket.
   moves the frontier at every frame end once `poll_acked` is released
 - [Publisher timeliness](/quest/m1/qos/publisher-timeliness.md) - the ingress
   mirror on the `Role::Subscriber` rows
-- [Client stats](/quest/m1/qos/stats/README.md) - receiver-side evidence
+- [Media stats](/quest/m1/stats/README.md) - receiver-side evidence
   for the same lag, reported by the viewers themselves

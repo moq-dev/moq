@@ -11,8 +11,9 @@ does not cover it, by the token on the request; with neither it is refused
 `UNAUTHORIZED`. The token's grant covers only the request it rode on and
 lives exactly as long as that request, and a REQUEST_UPDATE carrying a new
 token replaces it, which is how a peer refreshes. It scopes by path, never
-by method. Today the strict decoder on newer drafts fails the whole message
-on the unknown key, and the legacy drafts silently ignore it.
+by method. [Legal IETF input](/quest/m0/ietf-legal-input.md) decodes and
+ignores the key first, so a token no longer fails the session; this quest
+gives it meaning.
 
 ## Plan
 
@@ -20,8 +21,9 @@ on the unknown key, and the legacy drafts silently ignore it.
   (`rs/moq-net/src/ietf/token.rs`, `js/net/src/ietf/token.ts`): `USE_VALUE` yields the token, `REGISTER` is a value since we
   advertise no `MAX_AUTH_TOKEN_CACHE_SIZE`, and `DELETE` or `USE_ALIAS`
   closes with `PROTOCOL_VIOLATION`. Both decoder families change: the strict
-  `decode_params!` path, which rejects the key today, and the generic KVP
-  path the legacy drafts use, which ignores it.
+  `decode_params!` path, which ignores the key after
+  [Legal IETF input](/quest/m0/ietf-legal-input.md), and the generic KVP
+  path the legacy drafts use, which also ignores it.
 - Fallback only: a request the session grant already covers is served
   without verifying its token. Otherwise its token becomes an
   `auth::Request` on the session's `auth::Handle`, the seam an AUTH stream's
@@ -71,5 +73,6 @@ to) and on `moq_auth::Client` (the per-request lease). Wire: none new; the param
 
 ## Required
 
+- [Legal IETF input](/quest/m0/ietf-legal-input.md) - decodes the parameter everywhere the draft allows it
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - supplies the lease
   revalidation the per-request lease reuses

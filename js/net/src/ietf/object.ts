@@ -1,6 +1,10 @@
+import { StreamCode, Stream as StreamError } from "../error.ts";
 import { asIetf, type Cursor, type Reader, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { type IetfVersion, Version } from "./version.ts";
+
+// Implementation limit for object extension blocks, independent of the IETF draft.
+const MAX_OBJECT_EXTENSIONS = 64 * 1024;
 
 const GROUP_END = 0x03;
 const END_OF_TRACK = 0x04;
@@ -316,6 +320,9 @@ export class Frame {
 		let timestamp: Timestamp | undefined;
 		if (flags.hasExtensions) {
 			const extensionsLength = c.u53();
+			if (extensionsLength > MAX_OBJECT_EXTENSIONS) {
+				throw new StreamError(StreamCode.MalformedTrack, { message: "object extensions exceed 64 KiB" });
+			}
 			// A track that declared no timescale opted out of timestamps, so its objects
 			// are stamped on arrival even if one carries a Timestamp we cannot interpret.
 			if (timescale !== undefined) {

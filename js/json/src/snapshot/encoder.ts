@@ -13,6 +13,10 @@ const MAX_DELTA_FRAMES = 256;
 // entrypoint: the Producer needs it to know whether to hold a group open, nothing else does.
 export const DEFAULT_DELTA_RATIO = 8;
 
+// Bytes a group may hold before it rolls when {@link Config.maxGroupBytes} is left unset: moq-net's
+// per-group cache limit. Not re-exported from the package entrypoint; a test pins it to that limit.
+export const DEFAULT_MAX_GROUP_BYTES = Group.MAX_GROUP_CACHE_BYTES;
+
 /** Options shared by an {@link Encoder} and the {@link Producer} that wraps one. */
 export interface Config<T> {
 	// Controls how aggressively the encoder emits deltas (merge patches) instead of full snapshots.
@@ -45,7 +49,7 @@ export interface Config<T> {
 
 	/**
 	 * Bytes a group may hold before it rolls, defaulting to moq-net's per-group cache limit. Lets a
-	 * test reach the limit without megabytes of JSON.
+	 * test reach the limit without megabytes of JSON. Must fit the snapshot's own frame.
 	 *
 	 * @internal
 	 */
@@ -149,7 +153,7 @@ export class Encoder<T> {
 	constructor(config: Config<T> = {}) {
 		this.#config = config;
 		this.#compress = isDeflate(config.compression);
-		this.#maxGroupBytes = config.maxGroupBytes ?? Group.MAX_GROUP_CACHE_BYTES;
+		this.#maxGroupBytes = config.maxGroupBytes ?? DEFAULT_MAX_GROUP_BYTES;
 	}
 
 	/**
