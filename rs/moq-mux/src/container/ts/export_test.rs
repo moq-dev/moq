@@ -5337,10 +5337,12 @@ fn export_marker_after_a_dropped_section_does_not_spin() {
 		.recv_timeout(Duration::from_secs(30))
 		.expect("the export hung at the marker");
 	assert_eq!(discontinuity, 1, "the marker was observed");
-	assert!(
-		frames.iter().any(|f| f.timestamp.as_micros() >= 11_000_000),
-		"media after the marker went out"
-	);
+	let ts: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let (video, _) = collect_pes_pts(&ts);
+	for i in 0..10u64 {
+		let pts = (11_000_000 + i * 40_000) * 90 / 1000;
+		assert!(video.contains(&pts), "video after the marker is missing PTS {pts}");
+	}
 }
 
 async fn marker_after_a_dropped_section() -> (u64, Vec<Frame>) {
