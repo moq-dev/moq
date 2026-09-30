@@ -98,7 +98,14 @@ impl Encode<Version> for ObjectDatagram {
 		}
 
 		match &self.body {
-			DatagramBody::Status(status) => status.encode(w, version)?,
+			DatagramBody::Status(status) => {
+				// Draft-17 on: only a Normal Object may carry Properties.
+				let legacy = matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16);
+				if !legacy && *status != 0 && self.properties.is_some() {
+					return Err(EncodeError::InvalidState);
+				}
+				status.encode(w, version)?
+			}
 			DatagramBody::Payload(payload) => {
 				// Runs to the datagram boundary: written raw, no length prefix.
 				if w.remaining_mut() < payload.len() {
@@ -252,6 +259,32 @@ mod tests {
 					ObjectDatagram::decode(&mut &bytes[..], version).is_err(),
 					"{version}: {kind:#x}"
 				);
+			}
+		}
+	}
+
+	#[test]
+	fn status_with_properties_needs_normal() {
+		let datagram = ObjectDatagram {
+			track_alias: 1,
+			group_id: 2,
+			object_id: Some(0),
+			publisher_priority: Some(0),
+			end_of_group: false,
+			properties: Some(vec![0x10, 0x05]),
+			body: DatagramBody::Status(3),
+		};
+		for version in ALL {
+			let legacy = matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16);
+			match datagram.encode_bytes(version) {
+				Ok(mut buf) => {
+					assert!(legacy, "{version}");
+					assert_eq!(ObjectDatagram::decode(&mut buf, version).unwrap(), datagram);
+				}
+				Err(err) => {
+					assert!(!legacy, "{version}");
+					assert!(matches!(err, EncodeError::InvalidState));
+				}
 			}
 		}
 	}
