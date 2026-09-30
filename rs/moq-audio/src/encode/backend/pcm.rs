@@ -2,7 +2,7 @@
 
 use super::Backend;
 use crate::encode::{Encoded, Settings};
-use crate::{Error, pcm};
+use crate::{Error, Layout, pcm};
 
 pub(super) const NAME: &str = "pcm";
 
@@ -11,7 +11,16 @@ pub(super) struct Pcm {
 }
 
 impl Pcm {
+	/// The catalog carries only a channel count, so a named layout that count
+	/// would decode as another one is refused rather than relabeled.
 	pub(super) fn open(settings: &Settings) -> Result<Box<dyn Backend>, Error> {
+		let layout = settings.layout;
+		if !matches!(layout, Layout::Discrete(_)) && Layout::from_channels(layout.channels())? != layout {
+			return Err(Error::Unsupported(format!(
+				"pcm carries only a channel count, which decodes as {:?}, not {layout:?}",
+				Layout::from_channels(layout.channels())?
+			)));
+		}
 		let bitrate = pcm::bitrate(settings.sample_rate, settings.layout.channels())?;
 		Ok(Box::new(Self { bitrate }))
 	}

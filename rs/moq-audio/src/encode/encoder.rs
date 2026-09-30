@@ -767,6 +767,31 @@ mod tests {
 		assert_eq!(output.samples, input);
 	}
 
+	/// A PCM catalog names only a count, and 3 or 4 channels decode as 2.1 or
+	/// quad, so 3.0 and 4.0 are refused; discrete channels still pass through.
+	#[test]
+	fn pcm_refuses_layouts_its_count_cannot_name() {
+		for layout in [Layout::ThreePointZero, Layout::FourPointZero] {
+			let err = Encoder::new(&Settings {
+				codec: Codec::Pcm,
+				..Settings::new(48_000, layout)
+			});
+			assert!(matches!(err, Err(Error::Unsupported(_))), "{layout:?}");
+		}
+
+		for layout in [Layout::TwoPointOne, Layout::Quad, Layout::Discrete(3)] {
+			let mut enc = Encoder::new(&Settings {
+				codec: Codec::Pcm,
+				..Settings::new(48_000, layout)
+			})
+			.unwrap();
+			let mut dec = Decoder::new(&enc.catalog(), &DecodeConfig::default()).unwrap();
+			let input = sine(440.0, enc.codec_rate(), enc.codec_channels(), enc.frame_size());
+			let output = dec.decode(&enc.encode(&input).unwrap().payload).unwrap();
+			assert_eq!(output.samples, input, "{layout:?}");
+		}
+	}
+
 	#[test]
 	fn pcm_catalog_declares_fixed_bitrate() {
 		let enc = Encoder::new(&Settings {
