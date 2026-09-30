@@ -433,6 +433,8 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// Set once the peer sends a GOAWAY; new SUBSCRIBEs are then rejected with
 	// Error::GoingAway (the peer told us to stop opening streams).
 	going_away: crate::goaway::GoingAway,
+	// What this session may allocate up front for objects still arriving.
+	frames: frame::Budget,
 }
 
 /// Resolve the subscription a data stream belongs to.
@@ -499,6 +501,7 @@ where
 			tasks,
 			version,
 			going_away,
+			frames: Default::default(),
 		}
 	}
 
@@ -2226,7 +2229,7 @@ where
 		let producer = crate::recv::Group::new(producer);
 
 		let res = {
-			let mut ingest = GroupIngest::new(self.runtime.clone(), &group, timescale, self.version, start);
+			let mut ingest = GroupIngest::new(self, &group, timescale, start);
 			let mut writing = producer.clone();
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
@@ -2504,6 +2507,7 @@ struct GroupIngest {
 	prior_object: Option<u64>,
 	start: u64,
 	phase: IngestPhase,
+	budget: frame::Budget,
 }
 
 enum IngestPhase {
@@ -2524,22 +2528,22 @@ enum IngestPhase {
 }
 
 impl GroupIngest {
-	fn new(
-		runtime: crate::time::Clock,
+	fn new<S: crate::transport::poll::Boxable>(
+		subscriber: &Subscriber<S>,
 		group: &ietf::GroupHeader,
 		timescale: Option<Timescale>,
-		version: Version,
 		start: u64,
 	) -> Self {
 		Self {
-			runtime,
+			runtime: subscriber.runtime.clone(),
 			has_extensions: group.flags.has_extensions,
 			has_end: group.flags.has_end,
 			timescale,
-			version,
+			version: subscriber.version,
 			prior_object: None,
 			start,
 			phase: IngestPhase::Delta,
+			budget: subscriber.frames.clone(),
 		}
 	}
 }
@@ -2802,9 +2806,9 @@ where
 
 			let (_, next, producer) = head.as_mut().expect("the head was created above");
 
-			// `create_frame_owned` is the allocation chokepoint and rejects an oversized `size`
-			// before allocating, so no pre-check is needed.
-			let mut frame = producer.create_frame_owned(frame::Info { size, timestamp })?;
+			// `create_frame_owned` is the allocation chokepoint: it rejects an oversized `size`
+			// and allocates up front only within the budget, so no pre-check is needed.
+			let mut frame = producer.create_frame_owned(frame::Info { size, timestamp }, &self.frames)?;
 			if let Err(err) = std::future::poll_fn(|cx| stream.poll_read_frame(cx, &mut frame)).await {
 				let _ = frame.abort(err.clone());
 				return Err(err);
@@ -2996,17 +3000,18 @@ impl GroupIngest {
 						self.phase = IngestPhase::Status { timestamp: *timestamp };
 						continue;
 					}
-					// `create_frame_owned` is the allocation chokepoint and rejects an
-					// oversized `size` before allocating, so no pre-check is needed.
+					// `create_frame_owned` is the allocation chokepoint: it rejects an
+					// oversized `size` and allocates up front only within the budget, so
+					// no pre-check is needed.
 					let timestamp = timestamp.unwrap_or_else(|| crate::Timestamp::from(self.runtime.now()));
-					let frame = group.create_frame_owned(frame::Info { size, timestamp })?;
+					let frame = group.create_frame_owned(frame::Info { size, timestamp }, &self.budget)?;
 					self.phase = IngestPhase::Payload { frame };
 				}
 				IngestPhase::Status { timestamp } => {
 					let status: u64 = ready!(reader.poll_decode(&mut cx))?;
 					if status == 0 {
 						let timestamp = timestamp.unwrap_or_else(|| crate::Timestamp::from(self.runtime.now()));
-						let frame = group.create_frame_owned(frame::Info { size: 0, timestamp })?;
+						let frame = group.create_frame_owned(frame::Info { size: 0, timestamp }, &self.budget)?;
 						frame.finish()?;
 						self.phase = IngestPhase::Delta;
 					} else if status == 3 && !self.has_end {

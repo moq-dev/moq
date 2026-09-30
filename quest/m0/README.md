@@ -51,7 +51,6 @@ Published API or wire breaks still land on dev; each quest's Plan says so.
 - [qmux reset race](/quest/m0/qmux-reset-race.md) - qmux handles RESET_STREAM under one lock instead of panicking
 - [Remove gossip](/quest/m0/remove-gossip.md) - a relay dials only configured peers; `cluster.mesh` is refused at startup
 - [Shared fronts](/quest/m0/shared-fronts.md) - viewer sessions share a front, so fronts scale with peers, not viewers
-- [Frame alloc budget](/quest/m0/frame-alloc-budget.md) - frame buffers pre-allocate within a per-session budget and otherwise grow with bytes received
 - [Handshake deadline](/quest/m0/handshake-deadline.md) - an unfinished handshake or slow HTTP header times out
 - [Subscriber prune](/quest/m0/subscriber-prune.md) - a track's subscription list holds only live subscribers
 - [Revalidate overflow](/quest/m0/revalidate-overflow.md) - no auth duration can overflow a deadline and abort the relay

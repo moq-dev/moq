@@ -5098,10 +5098,13 @@ mod test {
 		producer.create_group(1u64.into()).unwrap().finish().unwrap();
 
 		let mut frame = straggler
-			.create_frame_owned(frame::Info {
-				size: 3,
-				timestamp: Timestamp::ZERO,
-			})
+			.create_frame_owned(
+				frame::Info {
+					size: 3,
+					timestamp: Timestamp::ZERO,
+				},
+				&Default::default(),
+			)
 			.unwrap();
 
 		// The sender stalls past the retention window, then the whole payload lands in

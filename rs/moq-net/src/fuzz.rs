@@ -13,10 +13,11 @@
 use bytes::Buf;
 
 use crate::{
-	Hops, Path, PathOwned, Pattern,
+	Hops, Path, PathOwned, Pattern, broadcast, cache, coding,
 	coding::{Decode, Encode, VarInt},
-	ietf, lite,
+	frame, group, ietf, lite,
 	path::Relative,
+	track,
 };
 
 /// One fuzz target body: it returns whether the input decoded, which is what
@@ -838,6 +839,147 @@ pub fn seeds() -> Vec<Seed> {
 	}
 
 	seeds
+}
+
+/// Frames arriving on concurrent group streams, as the frame bench times them: one
+/// frame per stream, read a chunk per stream per poll turn so the streams interleave
+/// the way a session's do.
+///
+/// `budget` is what the session may allocate up front, so `Some(usize::MAX)` allocates
+/// every declared size when the first byte lands and `Some(0)` grows every buffer with
+/// the bytes received.
+pub struct FrameRecv {
+	streams: Vec<Option<(coding::Reader<Chunks, lite::Version>, frame::ProducerOwned)>>,
+	groups: Vec<group::Producer>,
+	// Keeps the groups' track alive.
+	_track: track::Producer,
+	_broadcast: broadcast::Producer,
+}
+
+impl FrameRecv {
+	/// `streams` frames of `size` bytes, delivered `chunk` bytes at a time.
+	/// `None` gives the session's default budget.
+	pub fn new(streams: usize, size: usize, chunk: usize, budget: Option<usize>) -> Self {
+		// Unbounded, so eviction never aborts a group mid-frame.
+		let mut info = broadcast::Info::new();
+		info.pool = cache::Pool::unbounded();
+		let broadcast = info.produce();
+		let track = broadcast.create_track("frames", None).unwrap();
+		let budget = budget.map(frame::Budget::new).unwrap_or_default();
+		let payload = bytes::Bytes::from(vec![0u8; size]);
+
+		let mut groups = Vec::with_capacity(streams);
+		let streams = (0..streams)
+			.map(|_| {
+				let mut group = track.append_group().unwrap();
+				let info = frame::Info {
+					size: size as u64,
+					timestamp: crate::Timestamp::ZERO,
+				};
+				let frame = group.create_frame_owned(info, &budget).unwrap();
+				groups.push(group);
+				let stream = Chunks {
+					payload: payload.clone(),
+					chunk,
+					ready: true,
+				};
+				Some((coding::Reader::new(stream, lite::Version::Lite05), frame))
+			})
+			.collect();
+
+		Self {
+			streams,
+			groups,
+			_track: track,
+			_broadcast: broadcast,
+		}
+	}
+
+	/// Receive every frame, round-robin a chunk at a time, then drop them.
+	pub fn run(mut self) {
+		let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+		let mut open = self.streams.len();
+		while open > 0 {
+			for slot in &mut self.streams {
+				let Some((reader, frame)) = slot else { continue };
+				if let std::task::Poll::Ready(res) = reader.poll_read_frame(&mut cx, frame) {
+					res.unwrap();
+					let (_, frame) = slot.take().unwrap();
+					frame.finish().unwrap();
+					open -= 1;
+				}
+			}
+		}
+		for group in &self.groups {
+			group.finish().unwrap();
+		}
+	}
+}
+
+/// A stream that hands over one chunk of its payload, then blocks until polled again.
+struct Chunks {
+	payload: bytes::Bytes,
+	chunk: usize,
+	ready: bool,
+}
+
+impl web_transport_trait::poll::RecvStream for Chunks {
+	type Error = NoError;
+
+	fn poll_read(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		dst: &mut [u8],
+	) -> std::task::Poll<Result<Option<usize>, NoError>> {
+		let max = dst.len();
+		self.poll_read_chunk(cx, max).map_ok(|chunk| {
+			chunk.map(|chunk| {
+				dst[..chunk.len()].copy_from_slice(&chunk);
+				chunk.len()
+			})
+		})
+	}
+
+	// Zero-copy, like the QUIC stacks, so only the frame buffer's own copy is timed.
+	fn poll_read_chunk(
+		&mut self,
+		_cx: &mut std::task::Context<'_>,
+		max: usize,
+	) -> std::task::Poll<Result<Option<bytes::Bytes>, NoError>> {
+		self.ready = !self.ready;
+		if self.ready {
+			return std::task::Poll::Pending;
+		}
+		if self.payload.is_empty() {
+			return std::task::Poll::Ready(Ok(None));
+		}
+		let n = self.chunk.min(max).min(self.payload.len());
+		std::task::Poll::Ready(Ok(Some(self.payload.split_to(n))))
+	}
+
+	fn stop(&mut self, _code: u32) {}
+
+	fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), NoError>> {
+		std::task::Poll::Pending
+	}
+}
+
+/// [`Chunks`] never fails.
+#[derive(Debug)]
+struct NoError;
+
+impl std::fmt::Display for NoError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str("no error")
+	}
+}
+
+impl std::error::Error for NoError {}
+
+impl web_transport_trait::Error for NoError {
+	fn session_error(&self) -> Option<(u32, String)> {
+		None
+	}
 }
 
 #[cfg(test)]
