@@ -24,7 +24,7 @@ import {
 } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import * as DatagramStream from "./datagram_stream.ts";
-import { Fetch as FetchMessage } from "./fetch.ts";
+import { Fetch as FetchMessage, FetchOk } from "./fetch.ts";
 import { frameDecoder, type Group as GroupMessage, readFrames } from "./group.ts";
 import { sendOrder } from "./priority.ts";
 import { Probe } from "./probe.ts";
@@ -45,6 +45,7 @@ import {
 	hasAnnounceId,
 	hasAnnounceOk,
 	hasDatagrams,
+	hasOrigin,
 	hasProbeRtt,
 	hasStreamCount,
 	restartSupported,
@@ -89,6 +90,12 @@ interface SubscribeEntry {
 	// (SUBSCRIBE_END), once it declares them.
 	start?: number;
 	end?: number;
+	// The broadcast the subscription belongs to, which records the origin SUBSCRIBE_START
+	// names so a session republishing it names the same one.
+	broadcast: broadcast.Consumer;
+	// Whether SUBSCRIBE_START arrived. On draft-07, which names the serving origin there,
+	// group streams wait for it: until then nobody knows whose content they carry.
+	started: Signal<boolean>;
 	// Group streams opened by the publisher, when SUBSCRIBE_END carries the count.
 	streams?: number;
 }
@@ -499,14 +506,14 @@ export class Subscriber {
 			for (;;) {
 				const request = await wireOf(consumer).requested();
 				if (!request) break;
-				void this.#runSubscribe(path, request);
+				void this.#runSubscribe(consumer, path, request);
 			}
 		})();
 
 		return consumer;
 	}
 
-	async #runSubscribe(broadcast: Path.Valid, request: track.Request) {
+	async #runSubscribe(consumer: broadcast.Consumer, broadcast: Path.Valid, request: track.Request) {
 		const id = this.#subscribeNext++;
 		const subscription = request.subscription;
 		const initialBounds = groupBounds(subscription.groups);
@@ -535,7 +542,7 @@ export class Subscriber {
 		// Open the stream under a timeout. The stream handle flows back via `state`
 		// so the timeout path can abort it if it finishes opening after the deadline.
 		const state: { stream?: Stream } = {};
-		const setup = this.#openSubscribe(state, msg, request, id, timescale);
+		const setup = this.#openSubscribe(state, msg, request, id, timescale, consumer);
 
 		let opened: { stream: Stream; entry: SubscribeEntry };
 		try {
@@ -630,6 +637,7 @@ export class Subscriber {
 		request: track.Request,
 		id: bigint,
 		timescale: Signal<number | undefined>,
+		consumer: broadcast.Consumer,
 	): Promise<{ stream: Stream; entry: SubscribeEntry }> {
 		let producer: track.Producer;
 		let drainOk = false;
@@ -660,6 +668,8 @@ export class Subscriber {
 				},
 			}),
 			requested: msg.startGroup,
+			broadcast: consumer,
+			started: new Signal(!hasOrigin(this.version)),
 		};
 		this.#subscribes.set(id, entry);
 
@@ -734,6 +744,7 @@ export class Subscriber {
 	// Open a FETCH stream for one group and stream its bare frames into a group, for the
 	// ConsumeBroadcast backing track.Consumer.fetchGroup() (lite-05+).
 	async fetchGroup(
+		front: broadcast.Consumer,
 		broadcast: Path.Valid,
 		track: string,
 		sequence: number,
@@ -756,7 +767,10 @@ export class Subscriber {
 		} else {
 			const group = new netGroup.Producer(sequence);
 			consumer = group.mirror();
-			entry = { group, accepted: this.#runFetch(broadcast, track, sequence, options.priority ?? 0, group) };
+			entry = {
+				group,
+				accepted: this.#runFetch(front, broadcast, track, sequence, options.priority ?? 0, group),
+			};
 			this.#fetches.set(key, entry);
 			void group.closed.then(() => {
 				if (this.#fetches.get(key)?.group === group) this.#fetches.delete(key);
@@ -776,6 +790,7 @@ export class Subscriber {
 	// group, evict the entry, and reject every caller waiting for acceptance. A setup every caller
 	// has abandoned is cancelled the same way.
 	async #runFetch(
+		front: broadcast.Consumer,
 		broadcast: Path.Valid,
 		track: string,
 		sequence: number,
@@ -787,10 +802,10 @@ export class Subscriber {
 				throw new Error("fetch group requires moq-lite-05 or newer");
 			}
 
-			// Lite has no FETCH_OK, so a publisher that never answers would hold the setup forever.
-			// Subscriber.close() closing the group releases every caller at any stage, and resets
-			// the streams the setup opened.
-			const setup = this.#fetchSetup(broadcast, track, sequence, priority, group);
+			// A publisher that never answers would hold the setup forever. Subscriber.close()
+			// closing the group releases every caller at any stage, and resets the streams the
+			// setup opened.
+			const setup = this.#fetchSetup(front, broadcast, track, sequence, priority, group);
 			let accepted: { stream: Stream; info: TrackInfo };
 			try {
 				accepted = await untilAbandoned(group, setup);
@@ -813,6 +828,7 @@ export class Subscriber {
 	// Resolve the track's timescale, then open the FETCH stream and wait for it to be accepted.
 	// Closing the group during that wait resets the stream.
 	async #fetchSetup(
+		front: broadcast.Consumer,
 		broadcast: Path.Valid,
 		track: string,
 		sequence: number,
@@ -823,9 +839,16 @@ export class Subscriber {
 		return this.#exchange({ sendOrder: sendOrder({ priority }), version: this.version }, async (stream) => {
 			await stream.writer.u53(StreamId.Fetch);
 			await new FetchMessage({ broadcast, track, priority, group: sequence }).encode(stream.writer, this.version);
-			// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
-			// done() buffers that byte so the response pump can decode it normally.
-			await untilClosed(group, stream.reader.done());
+			if (hasOrigin(this.version)) {
+				// Draft-07 accepts with FETCH_OK naming the serving origin before any frame;
+				// record it so a session republishing the broadcast names the same one.
+				const ok = await untilClosed(group, FetchOk.decode(stream.reader, this.version));
+				wireOf(front).name(ok.origin);
+			} else {
+				// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
+				// done() buffers that byte so the response pump can decode it normally.
+				await untilClosed(group, stream.reader.done());
+			}
 			return { stream, info };
 		});
 	}
@@ -890,6 +913,10 @@ export class Subscriber {
 
 			if ("start" in resp) {
 				entry.start = resp.start.group;
+				if (hasOrigin(this.version)) {
+					wireOf(entry.broadcast).name(resp.start.origin);
+					entry.started.set(true);
+				}
 				// The groups the SUBSCRIBE asked for below it are unavailable, whatever the
 				// demand asks later.
 				if (entry.requested !== undefined) entry.tail.account(entry.requested, entry.start);
@@ -1035,11 +1062,22 @@ export class Subscriber {
 			return;
 		}
 
-		const { track, timescale, tail } = entry;
+		const { track, timescale, tail, started } = entry;
 		const producer = new netGroup.Producer(group.sequence);
 		const read = tail.open(group.sequence);
 
 		try {
+			// Hold the group until SUBSCRIBE_START names whose content it is: the group's
+			// stream can arrive before the subscribe stream's.
+			while (!started.peek()) {
+				if (track.closed.peek() !== undefined) {
+					producer.close();
+					stream.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
+					return;
+				}
+				await Signal.race(started, track.closed);
+			}
+
 			// The publisher contradicted its own end, which no later group can repair. lite-05
 			// specified an inclusive end, so its last group lands on it: the write below drops
 			// only that group there.
@@ -1131,6 +1169,10 @@ export class Subscriber {
 
 		const entry = this.#subscribes.get(dg.subscribe);
 		if (!entry) return; // Unknown or already-closed subscription.
+
+		// A datagram cannot wait for SUBSCRIBE_START to name its origin like a group stream
+		// does, so on draft-07 it is dropped until then.
+		if (!entry.started.peek()) return;
 
 		// Datagrams are lite-05+, which always negotiates a timescale; if it hasn't resolved
 		// yet (the datagram raced ahead of TRACK_INFO), drop rather than guess.
@@ -1265,7 +1307,7 @@ class ConsumeBroadcast extends broadcast.Consumer {
 		super(state);
 		overrideBroadcastWire(this, {
 			resolveTrackInfo: (name) => subscriber.resolveTrackInfo(path, name),
-			fetchGroup: (name, sequence, options) => subscriber.fetchGroup(path, name, sequence, options),
+			fetchGroup: (name, sequence, options) => subscriber.fetchGroup(this, path, name, sequence, options),
 		});
 		this.#subscriber = subscriber;
 		this.#path = path;

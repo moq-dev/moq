@@ -197,7 +197,6 @@ impl StreamError {
 			Self::GoingAway => 0x4,
 			Self::TooFarBehind => 0x5,
 			Self::MalformedTrack => 0x12,
-			// 0x30 NO_CAPACITY is assigned by other work in this range. Do not reuse it.
 			Self::ControlTimeout => 0x31,
 			Self::GroupTooLarge => 0x32,
 			Self::NotFound => 0x33,
@@ -682,8 +681,7 @@ mod tests {
 			assert_eq!(StreamError::from_code(err.to_code()), err, "{err:?} did not round trip");
 		}
 
-		// moq-lite's own 48-63 range, pinned to the draft's table. They stay off 0x30
-		// (NO_CAPACITY), which other work assigns.
+		// moq-lite's own 48-63 range, pinned to the draft's table.
 		for (err, code) in [
 			(StreamError::ControlTimeout, 0x31),
 			(StreamError::GroupTooLarge, 0x32),

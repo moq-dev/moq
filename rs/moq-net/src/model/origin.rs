@@ -613,20 +613,25 @@ fn fnv_key(name: &str, origins: impl IntoIterator<Item = Hop>) -> u64 {
 	hash
 }
 
-/// Ordering key for a route entry covering one prefix. Lower wins: an identified
+/// Ordering key for a route entry resolving `path`. Lower wins: an identified
 /// chain (no 0) outranks an anonymous one regardless of cost, then the cheapest
 /// cost, then a broadcast published on this origin (it serves what is here, not a
 /// claim that has to ask), then the shortest hop chain, then a deterministic hash
-/// of the prefix and chain so every node converges on the same winner, and finally
+/// of `path` and the chain so every node converges on the same winner, and finally
 /// the newest announcement, so a reconnect under an otherwise identical route wins
 /// the moment it lands instead of after the transport retires the old session.
-fn route_order(prefix: &Path, entry: &RouteEntry) -> (bool, Cost, bool, usize, u64, Reverse<u64>) {
+///
+/// `path` is what is being resolved: the requested path for a request, the prefix
+/// itself for an advertisement. Keying the hash on the requested path is what
+/// spreads equal-cost advertisers of one prefix: each path picks its own winner
+/// from the pool, rather than every path under the prefix hashing alike.
+fn route_order(path: &Path, entry: &RouteEntry) -> (bool, Cost, bool, usize, u64, Reverse<u64>) {
 	(
 		entry.is_anonymous(),
 		entry.cost,
 		!entry.local,
 		entry.hops.len(),
-		fnv_key(prefix.as_str(), entry.hops.iter().copied()),
+		fnv_key(path.as_str(), entry.hops.iter().copied()),
 		Reverse(entry.id),
 	)
 }
@@ -807,7 +812,7 @@ impl RouteEntry {
 	/// Whether `pin` admits this entry for a front's selection.
 	fn qualifies(&self, pin: Pin) -> bool {
 		match pin {
-			Pin::Any => true,
+			Pin::Any | Pin::Stay(_) => true,
 			Pin::Local => self.local,
 			Pin::Publisher(first) => self.hops.iter().next() == Some(&first),
 			// An update that names a publisher is a different one, even in place.
@@ -2265,6 +2270,8 @@ struct FrontTask {
 	request: kio::Producer<PendingBroadcast>,
 	/// Published for requesters once the first source fixes it; see [`RemoteFront::pin`].
 	pin: kio::Lock<Pin>,
+	/// This origin's hop, which names content originating here.
+	hop: Hop,
 	timers: Clock,
 }
 
@@ -2291,6 +2298,18 @@ struct TrackIo {
 	head: Option<WarmGroup>,
 	/// Whether the track had a reader as of the last demand edge.
 	used: bool,
+	/// Whether the spliced copy's named origin was handed to the machine.
+	reported: bool,
+}
+
+impl TrackIo {
+	/// Every copy the driver holds for the track, with its source.
+	fn copies(&self) -> impl Iterator<Item = (u64, &track::Consumer)> {
+		let query = self.query.as_ref().map(|(source, copy, _)| (*source, copy));
+		let staged = self.staged.as_ref().map(|(source, copy)| (*source, copy));
+		let copy = self.copy.as_ref().map(|(source, copy)| (*source, copy));
+		query.into_iter().chain(staged).chain(copy)
+	}
 }
 
 impl TrackIo {
@@ -2317,6 +2336,7 @@ async fn run_front(task: FrontTask) {
 		watch,
 		request,
 		pin,
+		hop,
 		timers,
 	} = task;
 
@@ -2326,6 +2346,7 @@ async fn run_front(task: FrontTask) {
 		Resolved(u64, Result<broadcast::Consumer, Error>),
 		SourceClosed(u64),
 		Info(Arc<str>, u64, Result<track::Info, Error>),
+		Origin(Arc<str>, u64, Hop),
 		Ended(Arc<str>, u64, Result<(), Error>),
 		Demand(Arc<str>),
 		Deadline,
@@ -2333,6 +2354,16 @@ async fn run_front(task: FrontTask) {
 	}
 
 	let mut front = Front::new(TRACK_IDLE_LINGER);
+	// The origin the front's replies name. Content nobody identifies (an anonymous
+	// source, or an origin without a hop) gets a random one for this front's life,
+	// rather than 0: a downstream relay can still resume within it, and nothing
+	// else ever names it.
+	let anonymous = Hop::random();
+	let named = |front: &Front| match front.origin() {
+		None if hop != Hop::UNKNOWN => hop,
+		Some(origin) if origin != Hop::UNKNOWN => origin,
+		_ => anonymous,
+	};
 	let mut sources: HashMap<u64, broadcast::Consumer> = HashMap::new();
 	let mut next_source = 0u64;
 	// The in-flight upstream request: the route and its pending channel.
@@ -2354,7 +2385,7 @@ async fn run_front(task: FrontTask) {
 		*seen = watch.seen();
 		front.retain_routes(|route| table.routes.covers(&path.as_path(), route));
 		let best = table
-			.best_route(&path.as_path(), horizon, front.pin(), front.refused_routes())
+			.best_route(&path.as_path(), horizon, front.pin(), front.excluded_routes())
 			.map(|entry| Candidate {
 				route: entry.id,
 				first: entry.hops.iter().next().copied(),
@@ -2371,7 +2402,21 @@ async fn run_front(task: FrontTask) {
 
 	loop {
 		while let Some(event) = events.pop_front() {
-			for action in front.step(event) {
+			let actions = front.step(event);
+			// Published before any copy is admitted below: once a copy's content
+			// flows, a reply for it names this origin.
+			*pin.lock() = front.pin();
+			broadcast.set_origin(named(&front));
+			if let Some(origin) = front.admit() {
+				for io in tracks.values() {
+					for (_, copy) in io.copies() {
+						if let Some(provenance) = copy.provenance() {
+							provenance.admit(origin);
+						}
+					}
+				}
+			}
+			for action in actions {
 				match action {
 					Action::Reselect => events.push_back(select(&mut front, &sources, &mut seen)),
 					Action::Request { route } => {
@@ -2406,6 +2451,7 @@ async fn run_front(task: FrontTask) {
 						};
 						front.identify(candidate);
 						*pin.lock() = front.pin();
+						broadcast.set_origin(named(&front));
 						if let Some(source) = source {
 							let id = next_source;
 							next_source += 1;
@@ -2475,8 +2521,14 @@ async fn run_front(task: FrontTask) {
 					Action::Detach { source } => {
 						sources.remove(&source);
 						// Its copies go with it; the segments they delivered stay
-						// spliced until a replacement resumes past them.
+						// spliced until a replacement resumes past them. Whatever they
+						// still hold for admission never will be.
 						for io in tracks.values_mut() {
+							for (_, copy) in io.copies().filter(|(s, _)| *s == source) {
+								if let Some(provenance) = copy.provenance() {
+									provenance.refuse();
+								}
+							}
 							if io.copy.as_ref().is_some_and(|(s, _)| *s == source) {
 								io.copy = None;
 							}
@@ -2535,6 +2587,7 @@ async fn run_front(task: FrontTask) {
 						// edge the copy is asked to advance.
 						io.edge = io.resume.resume_position();
 						io.copy = Some((source, copy));
+						io.reported = false;
 					}
 					Action::Park { track: name } => {
 						let Some(io) = tracks.get_mut(&name) else { continue };
@@ -2581,6 +2634,12 @@ async fn run_front(task: FrontTask) {
 					Action::Abort { track: name, err } => {
 						if let Some(io) = tracks.get_mut(&name) {
 							tracing::debug!(name = %name, %err, "aborting track");
+							// Nothing a copy still holds for admission will be read.
+							for (_, copy) in io.copies() {
+								if let Some(provenance) = copy.provenance() {
+									provenance.refuse();
+								}
+							}
 							io.end();
 							let _ = io.resume.abort(err);
 						}
@@ -2604,6 +2663,16 @@ async fn run_front(task: FrontTask) {
 							// ends as that copy does.
 							let waiting = io.staged.take().map(|(_, copy)| copy);
 							let waiting = waiting.or_else(|| io.query.take().map(|(_, copy, _)| copy));
+							// Whatever a copy still holds is only delivered if it is the
+							// front's origin; with none established, nobody vouches for it.
+							for copy in waiting.iter().chain(io.copy.as_ref().map(|(_, copy)| copy)) {
+								if let Some(provenance) = copy.provenance() {
+									match front.admit() {
+										Some(origin) => provenance.admit(origin),
+										None => provenance.refuse(),
+									}
+								}
+							}
 							if let Some(copy) = waiting
 								&& io.resume.is_used()
 							{
@@ -2659,6 +2728,12 @@ async fn run_front(task: FrontTask) {
 				{
 					return Poll::Ready(Step::Ended(name.clone(), *source, result));
 				}
+				if let Some((source, copy)) = &io.copy
+					&& !io.reported && let Some(provenance) = copy.provenance()
+					&& let Poll::Ready(origin) = provenance.poll_named(waiter)
+				{
+					return Poll::Ready(Step::Origin(name.clone(), *source, origin));
+				}
 				// Watch the demand edge in whichever direction is unmet.
 				let edge = match io.used {
 					true => io.resume.poll_unused(waiter),
@@ -2688,6 +2763,7 @@ async fn run_front(task: FrontTask) {
 						warm: None,
 						head: None,
 						used: false,
+						reported: false,
 					},
 				);
 				Event::TrackAssigned {
@@ -2718,6 +2794,15 @@ async fn run_front(task: FrontTask) {
 				}
 			}
 			Step::SourceClosed(source) => Event::SourceClosed { source },
+			Step::Origin(name, source, origin) => {
+				let Some(io) = tracks.get_mut(&name) else { continue };
+				io.reported = true;
+				Event::Origin {
+					track: name,
+					source,
+					origin,
+				}
+			}
 			Step::Info(name, source, result) => {
 				let closing = sources.get(&source).is_some_and(|s| s.is_closing());
 				let Some(io) = tracks.get_mut(&name) else { continue };
@@ -3326,7 +3411,7 @@ impl OriginState {
 	}
 
 	/// The best served route covering `path` (absolute) for a requester seeing
-	/// `horizon`, skipping the `refused` entry ids.
+	/// `horizon`, skipping the `excluded` entry ids.
 	///
 	/// The most specific covering prefix wins outright, so a narrow advertise-only
 	/// announcement shadows a broad served one: requests under it resolve
@@ -3334,12 +3419,26 @@ impl OriginState {
 	/// prefix, the cheapest served one is picked by [`route_order`].
 	///
 	/// Only announced routes are candidates: an unannounced broadcast serves
-	/// nobody, and does not shadow anything either. `pin` is the front's
+	/// nobody, and does not shadow anything either. The hash tie-break is keyed
+	/// on `path`, so equal-cost advertisers of one prefix share its paths. `pin` is the front's
 	/// identity: only routes it admits are candidates, since a route from anyone
 	/// else is different content rather than an alternate path (see [`Front`]).
 	/// A broadcast published on this origin competes on cost like any other
 	/// route and wins a tie.
-	fn best_route(&self, path: &Path, horizon: Horizon, pin: Pin, refused: &HashSet<u64>) -> Option<&RouteEntry> {
+	fn best_route(&self, path: &Path, horizon: Horizon, pin: Pin, excluded: &HashSet<u64>) -> Option<&RouteEntry> {
+		// A route a front stays on wins while it can still serve, whatever else
+		// appeared since: see [`Pin::Stay`].
+		if let Pin::Stay(route) = pin
+			&& let Some(entry) = self.routes.covering(path).find(|entry| {
+				entry.id == route
+					&& entry.advertised
+					&& entry.scope.matches(path.as_str())
+					&& horizon.admits(entry)
+					&& entry.serves(path)
+			}) {
+			return Some(entry);
+		}
+
 		// Covering prefixes of one path form a chain, so the deepest node with a
 		// candidate holds the unique longest prefix; walking down, the last such
 		// node decides.
@@ -3353,12 +3452,12 @@ impl OriginState {
 				.filter(|entry| entry.scope.matches(path.as_str()))
 				.filter(|entry| horizon.admits(entry))
 				.filter(|entry| entry.qualifies(pin))
-				.filter(|entry| !refused.contains(&entry.id))
+				.filter(|entry| !excluded.contains(&entry.id))
 				.peekable();
 			if candidates.peek().is_some() {
 				best = candidates
 					.filter(|entry| entry.serves(path))
-					.min_by_key(|entry| route_order(&entry.prefix, entry));
+					.min_by_key(|entry| route_order(path, entry));
 			}
 		}
 		best
@@ -4214,6 +4313,7 @@ impl Consumer {
 			watch,
 			request,
 			pin,
+			hop: self.hop,
 			timers: self.timers.clone(),
 		}));
 		kio::Pending::new(Requesting::queued(consumer).with_path(requested).with_stats(scope))
@@ -5074,6 +5174,56 @@ mod tests {
 		// Losing the last retracts.
 		drop(expensive);
 		announced.assert_next_ended("room");
+	}
+
+	/// Equal-cost advertisers of one prefix share its paths: a set of requested
+	/// paths spreads across the pool, and one path always resolves to the same
+	/// advertiser, whatever order the routes arrived in.
+	/// Pinned so `spreadHash` in `js/net` picks the same pool member for a path.
+	#[test]
+	fn spread_hash_matches_js() {
+		assert_eq!(fnv_key("pool/job-0", [origin(10)]), 0xefb5e20a66101c32);
+		assert_eq!(fnv_key("pool/job-0", [origin(11)]), 0x0eb0a91370ff6653);
+	}
+
+	#[tokio::test]
+	async fn equal_cost_pool_spreads_paths() {
+		const WORKERS: [u64; 4] = [10, 11, 12, 13];
+		const PATHS: usize = 64;
+
+		// The first hop of the route each path resolves to on a node whose pool
+		// arrived in `order`.
+		fn winners(order: impl Iterator<Item = u64>) -> Vec<Hop> {
+			let producer = origin(1).produce();
+			let _pool: Vec<Dynamic> = order
+				.map(|id| {
+					producer
+						.dynamic("pool", Route::default().with_hops(hops(&[id])).with_cost(3))
+						.unwrap()
+				})
+				.collect();
+			let table = producer.shared.read();
+			(0..PATHS)
+				.map(|i| {
+					let path = Path::new(&format!("pool/job-{i}")).to_owned();
+					let entry = table
+						.best_route(&path.as_path(), Horizon::default(), Pin::Any, &HashSet::new())
+						.expect("the pool serves every path");
+					entry.hops.iter().next().copied().unwrap()
+				})
+				.collect()
+		}
+
+		let forward = winners(WORKERS.into_iter());
+		let reverse = winners(WORKERS.into_iter().rev());
+		assert_eq!(forward, reverse, "a path must resolve the same way on every node");
+
+		// Not an assertion about any two paths, which a correct hash may put on
+		// one worker: only that the set does not pile onto a few.
+		for worker in WORKERS {
+			let share = forward.iter().filter(|hop| **hop == origin(worker)).count();
+			assert!(share >= PATHS / 16, "worker {worker} took {share} of {PATHS} paths");
+		}
 	}
 
 	#[tokio::test]
@@ -6642,6 +6792,61 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn refusal_while_serving_does_not_fall_through_to_a_broader_route() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let broad = producer.dynamic("", Route::default().with_hops(hops(&[10]))).unwrap();
+
+		let pending = consumer.request_broadcast("jobs/a");
+		let served = broadcast::Info::new().produce();
+		queued(&broad).await.accept(&served);
+		let resolved = pending.await.expect("the broad route serves it");
+
+		// The same publisher claims a narrower prefix, which wins selection and refuses.
+		let narrow = producer
+			.dynamic("jobs", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+		queued(&narrow).await.reject(Error::NotFound);
+
+		tokio::time::timeout(Duration::from_secs(5), resolved.closed())
+			.await
+			.expect("the narrower refusal must end the front, not keep the broader route");
+		assert!(
+			broad.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
+			"the refusal fell through to the broader route"
+		);
+	}
+
+	#[tokio::test]
+	async fn refusal_while_serving_does_not_move_to_a_sibling() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let broad = producer.dynamic("", Route::default().with_hops(hops(&[10]))).unwrap();
+
+		let pending = consumer.request_broadcast("jobs/a");
+		let served = broadcast::Info::new().produce();
+		queued(&broad).await.accept(&served);
+		let resolved = pending.await.expect("the broad route serves it");
+
+		// Two paths from the same publisher claim a narrower prefix; the cheaper refuses.
+		let cheap = producer
+			.dynamic("jobs", Route::default().with_hops(hops(&[10])).with_cost(1))
+			.unwrap();
+		let sibling = producer
+			.dynamic("jobs", Route::default().with_hops(hops(&[10])).with_cost(2))
+			.unwrap();
+		queued(&cheap).await.reject(Error::NotFound);
+
+		tokio::time::timeout(Duration::from_secs(5), resolved.closed())
+			.await
+			.expect("the refusal must end the front");
+		assert!(
+			sibling.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
+			"the refusal moved to a sibling in the tier"
+		);
+	}
+
+	#[tokio::test]
 	async fn most_specific_prefix_shadows() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -6993,6 +7198,176 @@ mod tests {
 		let replacement = broadcast::Info::new().produce();
 		request.accept(&replacement);
 		pending.await.expect("re-request resolves through the rival");
+	}
+
+	/// A copy of "video" whose reply named `member`, as a Lite07 session's is.
+	fn vouching(source: &broadcast::Producer, member: u64) -> track::Producer {
+		let info = track::Info {
+			names_origin: true,
+			..Default::default()
+		};
+		let track = source.create_track("video", info).unwrap();
+		track.provenance().name(origin(member)).unwrap();
+		track
+	}
+
+	/// Wait for the front to admit or refuse a vouching copy, which a Lite07 session
+	/// waits on before delivering anything.
+	async fn admission(track: &track::Producer) -> Result<(), Error> {
+		let provenance = track.provenance();
+		let mut admitted = None;
+		settle(|| match provenance.poll_admitted(&kio::Waiter::noop()) {
+			Poll::Ready(result) => {
+				admitted = Some(result);
+				true
+			}
+			Poll::Pending => false,
+		})
+		.await;
+		admitted.unwrap()
+	}
+
+	/// A pool front: "room/alice" served through a route labelled `first` (at
+	/// cost 5) by a copy whose reply named `member`, one "before" group delivered.
+	async fn pool_rig(first: u64, member: u64) -> (ResumeRig, Dynamic, broadcast::Producer) {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let server = producer
+			.dynamic("room", Route::default().with_hops(hops(&[first])).with_cost(5))
+			.unwrap();
+
+		let pending = consumer.request_broadcast("room/alice");
+		let request = queued(&server).await;
+		let source = broadcast::Info::new().produce();
+		let track = vouching(&source, member);
+		request.accept(&source);
+
+		let resolved = pending.await.expect("resolves");
+		let mut subscription = resolved
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.expect("subscribe");
+		admission(&track)
+			.await
+			.expect("the first reply names the front's origin");
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut group = subscription
+			.recv_group()
+			.await
+			.expect("recv group")
+			.expect("track ended early");
+		let frame = group.read_frame().await.expect("read frame").expect("frame");
+		assert_eq!(&frame.payload[..], b"before");
+
+		let rig = ResumeRig {
+			producer,
+			resolved,
+			subscription,
+			incumbent_track: track,
+		};
+		(rig, server, source)
+	}
+
+	/// A downstream relay reaches a pool through advertisements whose first hop
+	/// labels the pool, not the member serving the path. The reply names the
+	/// member, so a failover through a route with another label still resumes
+	/// when the replacement names the same member, and the relay names that
+	/// member in its own replies.
+	#[tokio::test]
+	async fn failover_resumes_on_the_origin_the_reply_names() {
+		let (mut rig, incumbent, source) = pool_rig(10, 20).await;
+		assert_eq!(rig.resolved.origin(), Some(origin(20)));
+
+		let standby_server = rig.standby(&[11]);
+		drop(incumbent);
+		drop(source);
+
+		let request = queued(&standby_server).await;
+		let replacement = broadcast::Info::new().produce();
+		let track = vouching(&replacement, 20);
+		request.accept(&replacement);
+		admission(&track).await.expect("the same origin is admitted");
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"resumed".as_ref()).unwrap();
+		group.finish().unwrap();
+
+		let mut group = rig
+			.subscription
+			.recv_group()
+			.await
+			.expect("subscription survives the failover")
+			.expect("track ended early");
+		let frame = group.read_frame().await.expect("read frame").expect("frame");
+		assert_eq!(&frame.payload[..], b"resumed");
+		assert_eq!(rig.resolved.origin(), Some(origin(20)));
+	}
+
+	/// Two pool members behind the same advertised label are different content:
+	/// a failover never splices one member's frames onto another's.
+	#[tokio::test]
+	async fn failover_never_splices_another_pool_member() {
+		let (mut rig, incumbent, source) = pool_rig(10, 20).await;
+		let standby_server = rig.standby(&[10]);
+		drop(incumbent);
+		drop(source);
+		rig.incumbent_track.abort(Error::Dropped).unwrap();
+
+		let request = queued(&standby_server).await;
+		let rival = broadcast::Info::new().produce();
+		let track = vouching(&rival, 21);
+		request.accept(&rival);
+		assert!(
+			admission(&track).await.is_err(),
+			"another member's content is never admitted"
+		);
+
+		let err = rig.subscription.recv_group().await.err().expect("subscription ends");
+		assert!(matches!(err, Error::Dropped), "unexpected end: {err}");
+	}
+
+	/// A front serving a named origin does not trade its live source for a
+	/// better route: which member the new route leads to is unknown until it
+	/// replies. Newcomers join it rather than starting a second copy.
+	#[tokio::test]
+	async fn a_named_origin_stays_on_its_live_route() {
+		let (rig, _incumbent, _source) = pool_rig(10, 20).await;
+		let cheaper = rig
+			.producer
+			.dynamic("room", Route::default().with_hops(hops(&[11])).with_cost(1))
+			.unwrap();
+
+		let consumer = rig.producer.consume();
+		let joined = consumer.request_broadcast("room/alice").await.expect("joins");
+		assert!(joined.is_clone(&rig.resolved), "a newcomer joins the live front");
+		for _ in 0..100 {
+			tokio::task::yield_now().await;
+		}
+		assert!(
+			cheaper.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
+			"the front must not re-request through the new route"
+		);
+	}
+
+	/// A front names the origin of what it serves in its replies: this origin's hop
+	/// for content originating here, and a random hop of its own for content nobody
+	/// identifies, never 0.
+	#[tokio::test]
+	async fn a_front_names_an_origin_for_its_content() {
+		let (rig, _server, _source) = ResumeRig::new(&[0]).await;
+		let anonymous = rig.resolved.origin().expect("a front names its origin");
+		assert_ne!(anonymous, Hop::UNKNOWN);
+		assert_ne!(anonymous, origin(1));
+
+		// Content originating here is named by this origin.
+		let (rig, _server, _source) = ResumeRig::new(&[]).await;
+		assert_eq!(rig.resolved.origin(), Some(origin(1)));
 	}
 
 	/// A route updated in place to a new first hop names a new publisher, whether the

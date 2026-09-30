@@ -13,7 +13,7 @@ import { type Advertised, type Advertisements, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import * as DatagramStream from "./datagram_stream.ts";
-import type { Fetch } from "./fetch.ts";
+import { type Fetch, FetchOk } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Priority, sendOrder } from "./priority.ts";
 import { Probe } from "./probe.ts";
@@ -31,6 +31,7 @@ import {
 	hasAnnounceId,
 	hasAnnounceOk,
 	hasDatagrams,
+	hasOrigin,
 	hasProbeRtt,
 	hasRouteCost,
 	hasStreamCount,
@@ -255,6 +256,40 @@ class SubscriptionControls {
 			return;
 		}
 		this.#finish(null);
+	}
+}
+
+/**
+ * A lite-05+ subscription's SUBSCRIBE_START and SUBSCRIBE_END, written in order. The group
+ * and datagram loops both serve the subscription, so START goes out ahead of whichever serves
+ * first: it resolves the start and names the origin, which a draft-07 subscriber needs before
+ * it delivers either.
+ */
+class SubscribeResponses {
+	#controls: SubscriptionControls;
+	#start: (sequence: number) => Promise<void>;
+	#writes: Promise<boolean> = Promise.resolve(true);
+	#started?: Promise<boolean>;
+
+	constructor(controls: SubscriptionControls, start: (sequence: number) => Promise<void>) {
+		this.#controls = controls;
+		this.#start = start;
+	}
+
+	/** Sends SUBSCRIBE_START at `sequence`, once; false when peer departure superseded it. */
+	start(sequence: number): Promise<boolean> {
+		this.#started ??= this.#write(() => this.#start(sequence));
+		return this.#started;
+	}
+
+	/** Sends SUBSCRIBE_END after any START still being written; false as for {@link start}. */
+	end(write: () => Promise<void>): Promise<boolean> {
+		return this.#write(write);
+	}
+
+	#write(write: () => Promise<void>): Promise<boolean> {
+		this.#writes = this.#writes.then((ok) => ok && this.#controls.response(write()));
+		return this.#writes;
 	}
 }
 
@@ -604,12 +639,6 @@ export class Publisher {
 
 			console.debug(`publish ok: broadcast=${msg.broadcast} track=${track.name}`);
 
-			// Serve datagrams concurrently with groups whenever the transport carries them
-			// (the writer exists iff so). No group fallback: otherwise they simply aren't sent.
-			if (this.#datagramWriter) {
-				datagrams = this.#runDatagrams(msg.id, track, timescale);
-			}
-
 			controls = new SubscriptionControls({
 				reader: stream.reader,
 				writer: stream.writer,
@@ -626,16 +655,40 @@ export class Publisher {
 					});
 				},
 			});
+
+			const bounds: FrameBounds = {
+				startGroup: msg.startGroup,
+				startFrame: msg.startFrame,
+				endGroup: msg.endGroup,
+				endFrame: msg.endFrame,
+			};
+			const responses = new SubscribeResponses(controls, async (sequence) => {
+				// SUBSCRIBE_START promises nothing below this sequence will be delivered.
+				// Arrival-order serving could later surface a straggler below the first
+				// group, so pin the floor to what was announced.
+				hooks.replaceGroups(track, {
+					start: { included: sequence },
+					end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
+				});
+				// Read once content flowed: an upstream's SUBSCRIBE_START named the origin
+				// before any of its content did.
+				const start = new SubscribeStart(sequence, wireOf(front).origin());
+				await encodeSubscribeResponse(stream.writer, { start }, this.version);
+			});
+
+			// Serve datagrams concurrently with groups whenever the transport carries them
+			// (the writer exists iff so, and only on lite-05+). No group fallback: otherwise
+			// they simply aren't sent.
+			if (this.#datagramWriter) {
+				datagrams = this.#runDatagrams(msg.id, track, timescale, responses);
+			}
+
 			await this.#runTrack(track, stream.writer, controls, {
 				sub: msg.id,
 				broadcast: msg.broadcast,
 				timescale,
-				bounds: {
-					startGroup: msg.startGroup,
-					startFrame: msg.startFrame,
-					endGroup: msg.endGroup,
-					endFrame: msg.endFrame,
-				},
+				bounds,
+				responses,
 			});
 
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);
@@ -688,6 +741,9 @@ export class Publisher {
 			// come off the same front, so the metadata and the frames are one generation.
 			const info = await this.#resolveTrackInfo(front, msg.track);
 			group = await wireOf(front).fetchGroup(msg.track, msg.group, { priority: msg.priority });
+			if (hasOrigin(this.version)) {
+				await new FetchOk(wireOf(front).origin()).encode(stream.writer, this.version);
+			}
 			await this.#runFetchGroup(group, stream.writer, {
 				timescale: Timescale(info.timescale),
 				start: msg.startFrame,
@@ -719,13 +775,18 @@ export class Publisher {
 		track: track.Subscriber,
 		stream: Writer,
 		controls: SubscriptionControls,
-		serving: { sub: bigint; broadcast: Path.Valid; timescale: Timescale; bounds: FrameBounds },
+		serving: {
+			sub: bigint;
+			broadcast: Path.Valid;
+			timescale: Timescale;
+			bounds: FrameBounds;
+			responses: SubscribeResponses;
+		},
 	) {
-		const { sub, broadcast, timescale, bounds } = serving;
+		const { sub, broadcast, timescale, bounds, responses } = serving;
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = supportsTrackStream(this.version);
-		let startSent = false;
 		let endSent = false;
 
 		// Lite-07+ counts the group streams in SUBSCRIBE_END, so it goes out only once every
@@ -748,14 +809,12 @@ export class Publisher {
 		const sendEnd = async (): Promise<boolean> => {
 			endSent = true;
 			if (!emitRange) return true;
-			return controls.response(
-				(async () => {
-					// A group that gives up before its stream opens is never counted.
-					if (countStreams) while (opening.size > 0) await Promise.all(opening);
-					const end = new SubscribeEnd(boundary(), streams);
-					await encodeSubscribeResponse(stream, { end }, this.version);
-				})(),
-			);
+			return responses.end(async () => {
+				// A group that gives up before its stream opens is never counted.
+				if (countStreams) while (opening.size > 0) await Promise.all(opening);
+				const end = new SubscribeEnd(boundary(), streams);
+				await encodeSubscribeResponse(stream, { end }, this.version);
+			});
 		};
 
 		// One ranking for the whole subscription, shared by every group it serves.
@@ -849,26 +908,7 @@ export class Publisher {
 				const group = recv.group;
 				const range = frameRange(bounds, group.sequence);
 
-				if (emitRange && !startSent) {
-					startSent = true;
-					// SUBSCRIBE_START promises nothing below this sequence will be delivered.
-					// Arrival-order serving could later surface a straggler below the first
-					// group, so pin the floor to what was announced.
-					hooks.replaceGroups(track, {
-						start: { included: group.sequence },
-						end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
-					});
-					if (
-						!(await controls.response(
-							encodeSubscribeResponse(
-								stream,
-								{ start: new SubscribeStart(group.sequence) },
-								this.version,
-							),
-						))
-					)
-						return;
-				}
+				if (emitRange && !(await responses.start(group.sequence))) return;
 
 				const options: RunGroup = {
 					sub,
@@ -962,7 +1002,7 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #runDatagrams(sub: bigint, track: track.Subscriber, timescale: Timescale) {
+	async #runDatagrams(sub: bigint, track: track.Subscriber, timescale: Timescale, responses: SubscribeResponses) {
 		const writer = this.#datagramWriter;
 		if (!writer) return; // Only reached with a writer (see the #datagramWriter gate).
 		const maxSize = DatagramStream.maxDatagramSize(this.#quic);
@@ -971,6 +1011,7 @@ export class Publisher {
 			for (;;) {
 				const datagram = await track.recvDatagram();
 				if (!datagram) return; // Track finished; #runTrack tears the subscription down.
+				if (!(await responses.start(datagram.sequence))) return;
 
 				// Convert the timestamp to the track's advertised timescale, matching #serveGroup.
 				const ts = Math.round(datagram.timestamp.as(timescale));

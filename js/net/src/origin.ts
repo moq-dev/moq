@@ -15,7 +15,7 @@ import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { isAnonymous, Route, routesEqual } from "./hop.ts";
-import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "./internal.ts";
+import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps, spreadHash } from "./internal.ts";
 import * as Path from "./path.ts";
 import { type Advertised, type Advertisements, registerWire, wireOf } from "./wire.ts";
 
@@ -225,8 +225,16 @@ function compareRoutes(a: Route, b: Route): number {
 	return 0;
 }
 
-/** The preferred of `entries` (newest first) not skipped: the best route, then fewest hops, then newest. */
-function preferredEntry(entries: readonly RouteEntry[], skip?: (entry: RouteEntry) => boolean): RouteEntry | undefined {
+/**
+ * The preferred of `entries` (newest first) for resolving `path`, not skipped: the best route,
+ * then fewest hops, then the lowest {@link spreadHash}, then newest. `path` is the requested
+ * path for a request, or the prefix itself for an advertisement.
+ */
+function preferredEntry(
+	path: Path.Valid,
+	entries: readonly RouteEntry[],
+	skip?: (entry: RouteEntry) => boolean,
+): RouteEntry | undefined {
 	let best: RouteEntry | undefined;
 	for (const entry of entries) {
 		if (skip?.(entry)) continue;
@@ -236,7 +244,13 @@ function preferredEntry(entries: readonly RouteEntry[], skip?: (entry: RouteEntr
 		}
 		const a = entry.route.peek();
 		const b = best.route.peek();
-		const order = compareRoutes(a, b) || a.hops.length - b.hops.length;
+		let order = compareRoutes(a, b) || a.hops.length - b.hops.length;
+		// Hashed only on a tie, so the common single-route prefix never pays for it.
+		if (order === 0) {
+			const ha = spreadHash(path, a.hops);
+			const hb = spreadHash(path, b.hops);
+			order = ha < hb ? -1 : ha > hb ? 1 : 0;
+		}
 		if (order < 0) best = entry;
 	}
 	return best;
@@ -247,8 +261,8 @@ function received(entry: RouteEntry): boolean {
 	return !entry.originated;
 }
 
-function noCapacity(): StreamError {
-	return new StreamError(StreamCode.NoCapacity, { message: "no capacity" });
+function unroutable(): StreamError {
+	return new StreamError(StreamCode.Unroutable, { message: "unroutable" });
 }
 
 /** A served route from {@link Producer.dynamic}: the queue a handler drains. */
@@ -320,7 +334,7 @@ class ServeState {
 
 	close(abort?: Error): void {
 		if (this.closed.peek() !== undefined) return;
-		const err = abort ?? noCapacity();
+		const err = abort ?? unroutable();
 		this.closed.set(err);
 		const queued = [...this.pending.values()];
 		this.pending.clear();
@@ -542,6 +556,7 @@ class OriginState {
 		for (const [prefix, entries] of this.routes.peek() ?? []) {
 			if (!Path.hasPrefix(prefix, path)) continue;
 			const entry = preferredEntry(
+				path,
 				entries,
 				(candidate) => !candidate.scope.matches(path) || (skip?.(candidate) ?? false),
 			);
@@ -1523,7 +1538,7 @@ export class Consumer {
  * requests beneath it.
  *
  * Drop it (or {@link close}) to retract the route and reject anything still waiting
- * with {@link StreamCode.NoCapacity}. {@link update} re-prices it in place.
+ * with {@link StreamCode.Unroutable}. {@link update} re-prices it in place.
  *
  * @public
  */
@@ -1569,7 +1584,7 @@ export class Dynamic {
 		if (!server) return;
 		let current: Request | undefined;
 		const drop = () => {
-			current?.reject(noCapacity());
+			current?.reject(unroutable());
 			current = undefined;
 		};
 		try {

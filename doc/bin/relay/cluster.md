@@ -22,7 +22,10 @@ relayed from what the peer just withdrew, rather than falling back to them one
 by one. During reconnect, another session from that peer can still advertise
 the broadcast; an old session's withdrawal does not invalidate that route.
 
-Failover routes must carry copies of the same broadcast. For each track, the
+Failover routes must carry copies of the same broadcast. A relay moves a
+subscription only between sources from the same origin: on moq-lite-07 the one a
+source's SUBSCRIBE\_OK or FETCH\_OK names, otherwise the first hop of its route.
+A change of origin ends the subscription and the viewer re-subscribes. For each track, the
 relay requires matching timescale, retention window, publisher priority, and
 group ordering. A source with different properties is refused before its groups
 are spliced in. If no compatible source remains, the track fails with
@@ -69,10 +72,20 @@ for paths the grant covers.
 
 Routing prefers the longest covering prefix, then a fully identified hop list
 over one that holds a 0 (an anonymous hop) at any depth, then the lowest cost,
-then the shortest hop list, breaking any remaining tie toward the newest
-announcement so a reconnecting publisher isn't outranked by the session it
-replaced. An assigned identity for an anonymous peer is local selection state
-and is never written into the hop list.
+then the shortest hop list, then a hash of the requested path and the hop list,
+breaking any remaining tie toward the newest announcement so a reconnecting
+publisher isn't outranked by the session it replaced. Hashing the requested
+path spreads equal-cost advertisers of one prefix, such as a transcode pool,
+across its paths instead of sending every path to one of them, and every relay
+picks the same one for a given path. An assigned identity for an anonymous peer
+is local selection state and is never written into the hop list.
+
+A prefix advertisement is a capability, not an inventory: the publisher refuses
+the paths it cannot serve, and that refusal is final. The relay never retries a
+shorter prefix or another advertiser of the same one, so a transcoder refusing a
+path does not leak it to an archive claiming the root. An advertiser sheds load
+by withdrawing or re-pricing its advertisement before it runs out, leaving
+headroom for requests already in flight.
 
 ```toml
 [cluster]

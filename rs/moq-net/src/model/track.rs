@@ -107,6 +107,10 @@ pub struct Info {
 	/// The publisher's priority for this track, used only to break ties between
 	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).
 	pub priority: u8,
+	/// Whether a copy's replies name the origin serving it (SUBSCRIBE_OK and FETCH_OK
+	/// on Lite07+), recorded in its [`Provenance`]. The origin's failover only
+	/// splices a copy that can vouch for the front's origin this way.
+	pub(crate) names_origin: bool,
 }
 
 impl Default for Info {
@@ -115,6 +119,7 @@ impl Default for Info {
 			timescale: Timescale::default(),
 			max_age: DEFAULT_MAX_AGE,
 			priority: 0,
+			names_origin: false,
 		}
 	}
 }
@@ -139,6 +144,89 @@ impl Info {
 	pub fn with_priority(mut self, priority: u8) -> Self {
 		self.priority = priority;
 		self
+	}
+}
+
+/// Which origin a copy's content comes from: the one its replies named, and the one
+/// its consumer admits.
+///
+/// A relay's front splices copies from several sources into one logical track, and
+/// only copies of one origin may join. A session whose replies name the serving
+/// origin records each reply here and holds the copy's content until the front
+/// admits that origin, so a copy of another origin never delivers anything.
+#[derive(Clone, Default)]
+pub(crate) struct Provenance(kio::Shared<ProvenanceState>);
+
+#[derive(Default)]
+struct ProvenanceState {
+	named: Option<crate::Hop>,
+	admit: Option<crate::Hop>,
+	refused: bool,
+}
+
+impl ProvenanceState {
+	fn admitted(&self) -> bool {
+		self.named.is_some() && self.named == self.admit
+	}
+}
+
+impl Provenance {
+	/// Record the origin a reply named. A copy has one origin for its whole life, so
+	/// a reply naming another means the upstream is serving a different track.
+	pub(crate) fn name(&self, origin: crate::Hop) -> Result<()> {
+		let mut state = self.0.lock();
+		match state.named {
+			Some(named) if named != origin => Err(Error::Dropped),
+			Some(_) => Ok(()),
+			None => {
+				state.named = Some(origin);
+				Ok(())
+			}
+		}
+	}
+
+	/// Wait for a reply to name the origin.
+	pub(crate) fn poll_named(&self, waiter: &kio::Waiter) -> Poll<crate::Hop> {
+		self.0
+			.poll(waiter, |state| match state.named {
+				Some(_) => Poll::Ready(()),
+				None => Poll::Pending,
+			})
+			.map(|state| state.named.expect("predicate guaranteed a name"))
+	}
+
+	/// The origin whose content may be delivered. Replaces an earlier one: a front
+	/// learns its origin from the first reply, after it had only the route's label.
+	pub(crate) fn admit(&self, origin: crate::Hop) {
+		if self.0.read().admit != Some(origin) {
+			self.0.lock().admit = Some(origin);
+		}
+	}
+
+	/// Nothing more of this copy will be admitted: its consumer let it go.
+	pub(crate) fn refuse(&self) {
+		if !self.0.read().refused {
+			self.0.lock().refused = true;
+		}
+	}
+
+	/// Whether the named origin is admitted now, for content that cannot wait for it.
+	pub(crate) fn is_admitted(&self) -> bool {
+		self.0.read().admitted()
+	}
+
+	/// Wait until the named origin is admitted, or fail once the copy is refused.
+	/// Admission wins: a refusal only stops what was still waiting.
+	pub(crate) fn poll_admitted(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		self.0
+			.poll(waiter, |state| match state.admitted() || state.refused {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			})
+			.map(|state| match state.admitted() {
+				true => Ok(()),
+				false => Err(Error::Dropped),
+			})
 	}
 }
 
@@ -260,6 +348,10 @@ pub(crate) struct TrackState {
 	// The reverse fetch queue (see [`FetchState`]), same reasoning: cache-miss
 	// `fetch_group` calls enqueue here and a `Dynamic` drains.
 	fetch: kio::Shared<FetchState>,
+
+	// Which origin this copy's content comes from, same reasoning: the session
+	// records replies, the consumer admits.
+	provenance: Provenance,
 }
 
 /// A cached group plus its bookkeeping in the track's `lookup` map.
@@ -1771,6 +1863,11 @@ impl Producer {
 		})
 	}
 
+	/// Which origin this copy's content comes from; see [`Provenance`].
+	pub(crate) fn provenance(&self) -> Provenance {
+		self.state.read().provenance.clone()
+	}
+
 	/// Create a [`Dynamic`] handle that serves on-demand fetches of uncached
 	/// (old) groups. Most producers never need this; a relay creates one to fetch
 	/// past groups from upstream.
@@ -2473,6 +2570,15 @@ impl Consumer {
 		match &self.inner {
 			ConsumerKind::Plain(state) => Self::poll_state_start(state, waiter),
 			ConsumerKind::Spliced(_) => Poll::Ready(None),
+		}
+	}
+
+	/// Which origin this copy's content comes from; see [`Provenance`]. `None` for a
+	/// spliced logical track, which is made of copies.
+	pub(crate) fn provenance(&self) -> Option<Provenance> {
+		match &self.inner {
+			ConsumerKind::Plain(state) => Some(state.read().provenance.clone()),
+			ConsumerKind::Spliced(_) => None,
 		}
 	}
 

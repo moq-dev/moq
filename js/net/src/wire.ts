@@ -10,7 +10,7 @@
 import type { Dispose, Getter } from "@moq/signals";
 import type * as broadcast from "./broadcast.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
-import type { Route } from "./hop.ts";
+import type { Hop, Route } from "./hop.ts";
 import type * as origin from "./origin.ts";
 import type * as Path from "./path.ts";
 import type * as track from "./track.ts";
@@ -21,6 +21,13 @@ export interface Broadcast {
 	resolveTrackInfo(name: string): Promise<track.Info>;
 	fetchGroup(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
 	requested(): Promise<track.Request | undefined>;
+	/**
+	 * The origin serving this broadcast, named in SUBSCRIBE_OK and FETCH_OK: the one an
+	 * upstream reply named, or else a random one generated once for the broadcast.
+	 */
+	origin(): Hop;
+	/** Record the origin an upstream reply named for this broadcast. */
+	name(origin: Hop): void;
 }
 
 /** The protocol-facing operations behind an origin producer. */

@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use crate::{
-	Path,
+	Hop, Path,
 	coding::{Decode, DecodeError, Encode, EncodeError, Sizer},
 };
 
@@ -295,6 +295,9 @@ impl Message for SubscribeOk {
 #[derive(Clone, Debug)]
 pub struct SubscribeStart {
 	pub group: u64,
+	/// The origin serving the subscription: the Hop ID a relay stitches failover on.
+	/// [`Hop::UNKNOWN`] names nobody. Lite07+; older versions decode it as unknown.
+	pub origin: Hop,
 }
 
 impl Message for SubscribeStart {
@@ -302,16 +305,23 @@ impl Message for SubscribeStart {
 		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
 		}
-		Ok(Self {
-			group: u64::decode(r, version)?,
-		})
+		let group = u64::decode(r, version)?;
+		let origin = match version.has_origin() {
+			true => Hop::from_wire(u64::decode(r, version)?)?,
+			false => Hop::UNKNOWN,
+		};
+		Ok(Self { group, origin })
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		if !version.has_track_stream() {
 			return Err(EncodeError::Version);
 		}
-		self.group.encode(w, version)
+		self.group.encode(w, version)?;
+		if version.has_origin() {
+			self.origin.id().encode(w, version)?;
+		}
+		Ok(())
 	}
 }
 
@@ -578,7 +588,10 @@ mod test {
 
 	#[test]
 	fn subscribe_start_roundtrips_on_lite05() {
-		let resp = SubscribeResponse::Start(SubscribeStart { group: 42 });
+		let resp = SubscribeResponse::Start(SubscribeStart {
+			group: 42,
+			origin: Hop::UNKNOWN,
+		});
 		let mut buf = Vec::new();
 		resp.encode(&mut buf, Version::Lite05).unwrap();
 		let mut slice = buf.as_slice();
@@ -599,6 +612,31 @@ mod test {
 		match SubscribeResponse::decode(&mut slice, Version::Lite05).unwrap() {
 			SubscribeResponse::End(end) => assert_eq!((end.group, end.streams), (7, 0)),
 			other => panic!("expected End, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn subscribe_start_carries_the_origin_on_lite07() {
+		let resp = SubscribeResponse::Start(SubscribeStart {
+			group: 7,
+			origin: Hop::new(42).unwrap(),
+		});
+		let mut buf = Vec::new();
+		resp.encode(&mut buf, Version::Lite07).unwrap();
+		// Type, length, group, origin.
+		assert_eq!(buf, [0, 2, 7, 42]);
+		match SubscribeResponse::decode(&mut buf.as_slice(), Version::Lite07).unwrap() {
+			SubscribeResponse::Start(start) => assert_eq!((start.group, start.origin), (7, Hop::new(42).unwrap())),
+			other => panic!("expected Start, got {other:?}"),
+		}
+
+		// Older versions have no room for it.
+		let mut buf = Vec::new();
+		resp.encode(&mut buf, Version::Lite06).unwrap();
+		assert_eq!(buf, [0, 1, 7]);
+		match SubscribeResponse::decode(&mut buf.as_slice(), Version::Lite06).unwrap() {
+			SubscribeResponse::Start(start) => assert_eq!(start.origin, Hop::UNKNOWN),
+			other => panic!("expected Start, got {other:?}"),
 		}
 	}
 
