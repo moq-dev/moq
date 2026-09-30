@@ -5147,7 +5147,12 @@ mod tests {
 	async fn a_repricing_is_a_request_update() {
 		const VERSION: Version = Version::Draft19;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		// Forward the update at once: the hold is not what this checks.
+		let origin = crate::origin::Config {
+			update_hold: Duration::ZERO,
+			..crate::origin::Config::new(crate::Hop::new(1).unwrap())
+		}
+		.produce();
 		let _cold = origin
 			.announce("cam", crate::origin::Route::default().with_cost(4))
 			.unwrap();
@@ -5214,7 +5219,12 @@ mod tests {
 	async fn a_publisher_change_is_a_request_update() {
 		const VERSION: Version = Version::Draft19;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		// Forward the update at once: the hold is not what this checks.
+		let origin = crate::origin::Config {
+			update_hold: Duration::ZERO,
+			..crate::origin::Config::new(crate::Hop::new(1).unwrap())
+		}
+		.produce();
 		let publisher_a = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
 		let publisher_b = crate::Hops::try_from(vec![crate::Hop::new(8).unwrap()]).unwrap();
 		let _from_a = origin
