@@ -5475,6 +5475,66 @@ async fn resume_after_a_drop() {
 	resume_after(false).await;
 }
 
+/// The stats count only output that was returned. A frame the muxer refuses fails the export
+/// with the span before it queued but never returned, and the resume discards it.
+#[tokio::test(start_paused = true)]
+async fn export_stats_skip_output_a_failure_discards() {
+	let origin = crate::source::produce_origin();
+	let source = crate::Source::new(origin.consume(), "live");
+	let publish = || {
+		let mut broadcast = origin.publish("live", Default::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		(broadcast, catalog)
+	};
+	let units = |stats: Stats| stats.streams.values().map(|row| row.units).sum::<u64>() as usize;
+
+	let (mut broadcast, mut catalog) = publish();
+	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let ended = source.broadcast().await.unwrap();
+	let mut export = Export::new(source.clone())
+		.await
+		.unwrap()
+		.with_max_age(RECORDING_MAX_AGE);
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut track, ms);
+	}
+	let mut frames = drain_frames(&mut export).await;
+	// One byte past what an ADTS header can frame.
+	track
+		.write(Frame {
+			timestamp: Timestamp::from_millis(200).unwrap(),
+			duration: None,
+			payload: Bytes::from(vec![0; 8185]),
+			keyframe: true,
+		})
+		.unwrap();
+	let (rest, end) = drain_to_end(&mut export).await;
+	frames.extend(rest);
+	assert!(end.is_err(), "an unframeable AAC frame fails the export");
+	assert!(pes_count(&frames) < 10, "the span before the failure stayed queued");
+	assert_eq!(units(export.stats()), pes_count(&frames));
+
+	drop((broadcast, catalog, track));
+	let (mut broadcast, mut catalog) = publish();
+	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	source.returned(&ended).await.unwrap();
+	export.resume().await.unwrap();
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut track, ms);
+	}
+	frames.extend(drain_frames(&mut export).await);
+	track.finish().unwrap();
+	catalog.finish().unwrap();
+	let (rest, end) = drain_to_end(&mut export).await;
+	frames.extend(rest);
+	end.unwrap();
+	assert_eq!(
+		units(export.stats()),
+		pes_count(&frames),
+		"the discarded span never counts"
+	);
+}
+
 /// Export 25 fps video and two AAC tracks for [`TICKS`] video frames, the video and the first
 /// audio track stopping after `stop` while the second carries on. Returns the stats sampled
 /// after `sample` and at the end, and the frames rendered in between.

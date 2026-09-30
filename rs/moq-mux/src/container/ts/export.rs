@@ -158,8 +158,9 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// Offsets into [`pending`](Self::pending) where a keyframe's packets begin, so
 	/// the output frame carrying one keeps the flag.
 	keyframes: Vec<usize>,
-	/// Output frames ready to hand out, one per grid slot the last span covered.
-	queue: VecDeque<Frame>,
+	/// Output frames ready to hand out, one per grid slot the last span covered, each with
+	/// what it tells [`Self::stats`] once returned.
+	queue: VecDeque<(Frame, Tally)>,
 	/// Continuity counter of the last packet emitted on the PCR PID. A clock packet
 	/// carries no payload, so it repeats whatever preceded it on the wire rather
 	/// than advancing the counter ([`Export::pcr_at`]).
@@ -197,11 +198,24 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// up before it ever configures video. `None` until the tables are built, and for
 	/// programs with no video track (nothing to align to).
 	video_start: Option<Timestamp>,
-	/// Access units per PID muxed into the open span, counted once it goes out, since a
-	/// rewind discards it unwritten.
-	span_units: BTreeMap<u16, u64>,
-	/// Each elementary stream's access units and silence on the PCR written ([`Self::stats`]).
+	/// Offsets into [`pending`](Self::pending) where each access unit's packets begin, with
+	/// its PID, so the output frame carrying it counts it.
+	units: Vec<(usize, u16)>,
+	/// Clock packets written into the output frame being laid out ([`Self::push`]).
+	tally: Tally,
+	/// Each elementary stream's access units and silence on the PCR returned ([`Self::stats`]).
 	liveness: super::import::Liveness,
+}
+
+/// What a queued output frame tells [`Export::stats`], applied only once the frame is
+/// returned: a rewind drops the queue unwritten.
+#[derive(Default)]
+struct Tally {
+	/// The frame's clock packets in order: the PCR in 27 MHz ticks, and whether it flags a
+	/// new time base.
+	pcrs: Vec<(u64, bool)>,
+	/// The PID of each access unit whose packets begin in the frame, after its clock packets.
+	units: Vec<u16>,
 }
 
 struct Pending {
@@ -721,7 +735,8 @@ impl<E: catalog::Catalog> Export<E> {
 			mux_rate: None,
 			mux_rate_override: None,
 			stuffing: Stuffing::default(),
-			span_units: BTreeMap::new(),
+			units: Vec::new(),
+			tally: Tally::default(),
 			liveness: Default::default(),
 		})
 	}
@@ -844,8 +859,7 @@ impl<E: catalog::Catalog> Export<E> {
 		// own values imply and lets the caller's pacer release each at the instant
 		// it asserts. See [`Self::advance`].
 		loop {
-			if let Some(out) = self.queue.pop_front() {
-				self.emitted_epoch = self.epoch;
+			if let Some(out) = self.pop() {
 				return Poll::Ready(Ok(Some(out)));
 			}
 			let Some(name) = self.pick_next_track(waiter) else {
@@ -902,8 +916,7 @@ impl<E: catalog::Catalog> Export<E> {
 		let drained = !self.tracks.is_empty() && self.tracks.values().all(|t| t.finished);
 		if drained {
 			self.emit(None)?;
-			if let Some(out) = self.queue.pop_front() {
-				self.emitted_epoch = self.epoch;
+			if let Some(out) = self.pop() {
 				return Poll::Ready(Ok(Some(out)));
 			}
 			// SI emission rides media frames, so a snapshot that arrived behind the
@@ -922,6 +935,22 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 
 		Poll::Pending
+	}
+
+	/// Return the next queued frame, committing what it carries to the output boundary.
+	fn pop(&mut self) -> Option<Frame> {
+		let (out, tally) = self.queue.pop_front()?;
+		self.emitted_epoch = self.epoch;
+		for (pcr, discontinuity) in tally.pcrs {
+			if discontinuity {
+				self.liveness.discontinuity();
+			}
+			self.liveness.written_pcr(pcr);
+		}
+		for pid in tally.units {
+			self.liveness.delivered(pid, 1);
+		}
+		Some(out)
 	}
 
 	/// The trailing SI frame for end of stream: every entry's current sections,
@@ -1346,7 +1375,8 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 		self.pending.clear();
 		self.keyframes.clear();
-		self.span_units.clear();
+		self.units.clear();
+		self.tally = Tally::default();
 		self.queue.clear();
 		self.watermark = None;
 		// The new generation waits for every track again, with a fresh budget: a
@@ -1737,7 +1767,7 @@ impl<E: catalog::Catalog> Export<E> {
 			}
 		}
 		if out.len() > written {
-			*self.span_units.entry(pid).or_default() += 1;
+			self.units.push((self.pending.len() + written, pid));
 		}
 		if keyframe {
 			self.keyframes.push(self.pending.len());
@@ -1802,6 +1832,7 @@ impl<E: catalog::Catalog> Export<E> {
 		self.span_counters = None;
 		let bytes = std::mem::take(&mut self.pending);
 		let keyframes = std::mem::take(&mut self.keyframes);
+		let units = std::mem::take(&mut self.units);
 		let Some(to) = self.low.take() else { return Ok(()) };
 		let packets = bytes.len() / TsPacket::SIZE;
 
@@ -1864,7 +1895,7 @@ impl<E: catalog::Catalog> Export<E> {
 			};
 			self.send(&mut payload, &bytes[cut * TsPacket::SIZE..next * TsPacket::SIZE]);
 			self.stuff(index, &mut payload);
-			self.push(at, payload, &keyframes, cut, next);
+			self.push(at, payload, &keyframes, &units, cut, next);
 			cut = next;
 			at = boundary;
 			let before = counter_before(&bytes, cut * TsPacket::SIZE, pcr_pid, self.pcr_cc);
@@ -1874,12 +1905,9 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 
 		self.send(&mut payload, &bytes[cut * TsPacket::SIZE..]);
-		self.push(at, payload, &keyframes, cut, packets);
+		self.push(at, payload, &keyframes, &units, cut, packets);
 		if let Some(cc) = counter_before(&bytes, bytes.len(), pcr_pid, None) {
 			self.pcr_cc = Some(cc);
-		}
-		for (pid, units) in std::mem::take(&mut self.span_units) {
-			self.liveness.delivered(pid, units);
 		}
 		Ok(())
 	}
@@ -1944,19 +1972,34 @@ impl<E: catalog::Catalog> Export<E> {
 	}
 
 	/// Queue one output frame, unless it would be empty. `from`..`to` are the packet
-	/// indices it carries, which decide whether a keyframe begins in it.
-	fn push(&mut self, timestamp: Timestamp, payload: Vec<u8>, keyframes: &[usize], from: usize, to: usize) {
+	/// indices it carries, which decide whether a keyframe, or which access units, begin in it.
+	fn push(
+		&mut self,
+		timestamp: Timestamp,
+		payload: Vec<u8>,
+		keyframes: &[usize],
+		units: &[(usize, u16)],
+		from: usize,
+		to: usize,
+	) {
 		if payload.is_empty() {
 			return;
 		}
 		let (from, to) = (from * TsPacket::SIZE, to * TsPacket::SIZE);
 		let keyframe = keyframes.iter().any(|&at| at >= from && at < to);
-		self.queue.push_back(Frame {
+		let mut tally = std::mem::take(&mut self.tally);
+		tally.units = units
+			.iter()
+			.filter(|&&(at, _)| at >= from && at < to)
+			.map(|&(_, pid)| pid)
+			.collect();
+		let frame = Frame {
 			timestamp,
 			duration: None,
 			payload: Bytes::from(payload),
 			keyframe,
-		});
+		};
+		self.queue.push_back((frame, tally));
 	}
 
 	/// The clock packet for grid slot `index`, and record that the slot is served.
@@ -1991,11 +2034,11 @@ impl<E: catalog::Catalog> Export<E> {
 		};
 		self.last_pcr = Some(index);
 		let mut packet = pcr_packet(pcr_pid, ticks, cc)?;
-		if std::mem::take(&mut self.pcr_discontinuity) {
+		let discontinuity = std::mem::take(&mut self.pcr_discontinuity);
+		if discontinuity {
 			packet[5] |= 0x80;
-			self.liveness.discontinuity();
 		}
-		self.liveness.written_pcr((ticks & TS_TIMESTAMP_MASK) * 300);
+		self.tally.pcrs.push(((ticks & TS_TIMESTAMP_MASK) * 300, discontinuity));
 		Ok(packet)
 	}
 
