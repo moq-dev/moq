@@ -54,7 +54,6 @@ Published API or wire breaks still land on dev; each quest's Plan says so.
 - [Frame alloc budget](/quest/m0/frame-alloc-budget.md) - frame buffers pre-allocate within a per-session budget and otherwise grow with bytes received
 - [Handshake deadline](/quest/m0/handshake-deadline.md) - an unfinished handshake or slow HTTP header times out
 - [Subscriber prune](/quest/m0/subscriber-prune.md) - a track's subscription list holds only live subscribers
-- [Revalidate overflow](/quest/m0/revalidate-overflow.md) - no auth duration can overflow a deadline and abort the relay
 - [Wildcard](/quest/m0/wildcard/README.md) - a relay resolves subscriptions against advertised prefixes, a service claims the prefix it could serve and refuses the rest instead of enumerating broadcasts, and the browser player treats a covering claim as availability
 - [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - a browser playout latency regression fails a nightly run instead of arriving as a bug report, and its recorder supplies the jitter target's replay traces
 - [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
