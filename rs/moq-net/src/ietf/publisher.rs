@@ -1126,6 +1126,19 @@ where
 	async fn run_fetch_stream(mut self, mut stream: Stream<S, Version>, msg: ietf::Fetch<'_>) -> Result<(), Error> {
 		let priority = super::priority::from_wire(msg.subscriber_priority);
 
+		// Draft-20 moved the range into LOCATION_FILTER and replaced joining FETCH with
+		// subscription fills; this still reads the older layout.
+		if Filter::is_draft20(self.version) {
+			return self
+				.reject_fetch(
+					stream,
+					msg.request_id,
+					&Error::Unsupported,
+					"FETCH not supported on draft-20",
+				)
+				.await;
+		}
+
 		let (track, start, end, timescale, joined) = match msg.fetch_type {
 			FetchType::Standalone {
 				namespace,
@@ -1158,19 +1171,6 @@ where
 				// No SUBSCRIBE declared a timescale for this request, so its objects go
 				// out unstamped.
 				(track, start, end, None, false)
-			}
-			// Draft-20 replaced joining FETCH with subscription fills.
-			FetchType::RelativeJoining { .. } | FetchType::AbsoluteJoining { .. }
-				if Filter::is_draft20(self.version) =>
-			{
-				return self
-					.reject_fetch(
-						stream,
-						msg.request_id,
-						&Error::Unsupported,
-						"joining FETCH removed in draft-20",
-					)
-					.await;
 			}
 			FetchType::RelativeJoining {
 				subscriber_request_id, ..
@@ -3731,16 +3731,13 @@ mod serve_tests {
 	}
 
 	/// Every draft that carries a standalone FETCH.
-	const FETCH_DRAFTS: [Version; 9] = [
+	const FETCH_DRAFTS: [Version; 6] = [
 		Version::Draft14,
 		Version::Draft15,
 		Version::Draft16,
 		Version::Draft17,
 		Version::Draft18,
 		Version::Draft19,
-		Version::Draft20,
-		Version::Draft21,
-		Version::Draft22,
 	];
 
 	/// Groups `0..count`, each holding `g-0` and `g-1`, skipping `hole`.
@@ -3883,6 +3880,25 @@ mod serve_tests {
 			assert_eq!(ok.end_location, Location { group: 4, object: 2 }, "{version}");
 			assert!(ok.end_of_track, "{version}");
 			assert_eq!(objects, pairs([4])[1..].to_vec(), "{version}");
+		}
+	}
+
+	/// Draft-20 carries the range in LOCATION_FILTER, which is not read yet.
+	#[tokio::test]
+	async fn a_draft20_fetch_is_refused() {
+		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+			let mut h = serve(version);
+			publish_pairs(&mut h, 3, None);
+			settle().await;
+
+			let buf = standalone_fetch(
+				&h,
+				Location { group: 1, object: 0 },
+				Location { group: 1, object: 0 },
+				GroupOrder::Ascending,
+			)
+			.await;
+			assert_eq!(fetch_refusal(buf, version), 0x3, "{version}");
 		}
 	}
 

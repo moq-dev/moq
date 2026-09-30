@@ -2989,6 +2989,11 @@ where
 			request.reject(Error::GoingAway);
 			return;
 		}
+		// Our FETCH still encodes the Fetch Type field that draft-20 removed.
+		if Filter::is_draft20(self.version) {
+			request.reject(Error::Unsupported);
+			return;
+		}
 
 		let fetch_id = match self.control.next_request_id(&self.runtime).await {
 			Ok(id) => id,
@@ -7579,7 +7584,7 @@ mod joining_fetch_tests {
 	/// numbers what arrives from there, so a publisher that evicted the prefix can answer.
 	#[tokio::test(start_paused = true)]
 	async fn a_group_fetch_asks_from_the_wanted_frame() {
-		const VERSION: Version = Version::Draft20;
+		const VERSION: Version = Version::Draft19;
 		const GROUP: u64 = 4;
 		const START: u64 = 2;
 
