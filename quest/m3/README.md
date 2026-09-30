@@ -9,31 +9,34 @@ Nothing here should start by opening an editor.
 ## Plan
 
 A quest lands here when its gate is the outside world, not its priority. Its gate
-is a plain-text `Required` bullet, re-checked as the root
-[questline](/quest/README.md) describes. A
+is a condition quest beside it, as the root [questline](/quest/README.md)
+describes. A
 speculative feature with no consumer parks here rather than in m2, and is
 deleted when it goes stale; git history keeps it.
 
 ## Required
 
+- [Video validation hardware is on hand](/quest/m3/video-hardware-access.md) - the machines the validation runs on
 - [Video hardware validation](/quest/m3/video-hardware.md) - run the encode, capture, and zero-copy paths that were never run on real machines, including PipeWire on KDE, the camera portal, and a Pi
+- [An Ada NVIDIA GPU is available](/quest/m3/ada-gpu.md) - the hardware AV1 NVENC is verified on
 - [NVENC AV1](/quest/m3/nvenc-av1.md) - AV1 encode through NVENC, once an Ada-generation GPU is available
+- [An embedded video device is on hand](/quest/m3/embedded-device.md) - the device EGL import is validated on
 - [Embedded video](/quest/m3/video-embedded.md) - EGL import in the renderer, so moq-video presents on a Pi
+- [A physical-NIC peer for the zero-copy sweep](/quest/m3/zero-copy-peer.md) - the rig the zero-copy sweep runs on
 - [#3201: moq-uring: use SENDMSG_ZC for large UDP GSO trains](/quest/m3/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md) - complete the prerequisite issue first
 - [#3204](/quest/m3/3204-moq-uring-register-tx-pool-buffers-for-zero-copy-sends.md) - moq-uring: register TX-pool buffers for zero-copy sends
-- [Receive timestamps](/quest/m3/quic-receive-ts.md) - per-packet arrival times in ACKs, the feedback GCC and deadlines need
-- [QUIC GCC](/quest/m3/quic-gcc.md) - a measured verdict on delay-based congestion control for media egress, shipping as `RealTime`
+- [QUIC GCC](/quest/m3/quic-gcc.md) - receive timestamps in ACKs and a measured verdict on delay-based congestion control for media egress, shipping as `RealTime`
 - [AF_XDP UDP path](/quest/m3/af-xdp.md) - the kernel-bypass verdict on today's virtio hosts that gates DPDK
 - [C# through moq-ffi](/quest/m3/cs/README.md) - generated C# over moq-ffi as a NuGet package with native runtimes
 - [Unity prototype](/quest/m3/unity.md) - the C# package under IL2CPP, playing subscribed audio
 - [Unreal prototype](/quest/m3/unreal.md) - a UE5 module on the C++ package with exceptions disabled, rendering a subscribed broadcast to a texture
-- [LiveKit client shim](/quest/m3/livekit-shim.md) - a media compatibility facade over the room SDK
 - [Conan remote](/quest/m3/cpp-conan.md) - a remote we own serves the same tarball to `conan install`
-- [WHEP ABR](/quest/m3/whep-abr.md) - a WHEP viewer switches renditions from its own congestion feedback
 - [Synced data playback](/quest/m3/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
 - [Linux OBS GPU input](/quest/m3/obs-linux-gpu.md) - publish OBS compositor frames without CPU readback on a validated Linux graphics/encoder combination
 - [Routing cost domains](/quest/m3/routing-cost-domains.md) - design operator boundaries and policy without adding incomparable costs
+- [draft-ietf-moq-c4m registers the moqt claim keys](/quest/m3/c4m-claim-keys.md) - the claim keys a CAT carries
 - [Common Access Tokens](/quest/m3/cat/README.md) - a moq-transport client presents a CAT in SETUP and `moq auth serve` admits it with the scope its `moqt` claim names
+- [The moq.pro mesh runs lite-07](/quest/m3/lite07-mesh.md) - the deployment that makes the exemption dead code
 - [Drop the hidden cluster exemption](/quest/m3/hidden-exemption.md) - relays stop forcing hidden broadcasts on cluster peers once every peer opts in on the wire
 - [MAVLink bridge](/quest/m3/teleop-mavlink.md) - a `moq-mavlink` gateway
   replacing the VPN plus two unmanaged UDP flows, with QGroundControl and

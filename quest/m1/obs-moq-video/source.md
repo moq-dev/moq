@@ -17,7 +17,7 @@ The MoQ source loads and plays supported video without FFmpeg's video libraries 
 ## Required
 
 - [OBS migration](/quest/m1/cpp/obs.md) - the plugin is on the generated C++ before decode changes
-- dev's decoded-frame surface (#4094, 97575f002) reaches main
+- [dev's decoded-frame surface reaches main](/quest/m1/obs-moq-video/decoded-surface.md) - the surface this decodes into
 
 ## Related
 

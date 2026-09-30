@@ -42,4 +42,4 @@ Public API: breaking renames in moq-mux. Wire: none.
 
 ## Required
 
-- `main` merged into `dev`, carrying #4506's `ts::stats` module (dev has none yet)
+- [Merge main into dev](/quest/m1/dev-sync.md) - carries #4506's `ts::stats` module

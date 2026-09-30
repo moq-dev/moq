@@ -24,7 +24,8 @@ needs them. If a consumer turns up, the alternative is returning the same
 current addresses"), so empty and refused stay distinct. Removing or changing a published method is a break, so this
 targets `dev`; update `doc/lib/rs` if it mentions the method.
 
+Start by merging `main` into `dev` if `dev` does not have the drain line yet.
+
 ## Required
 
 - [Graceful relay drains](/quest/m1/drain/README.md) - the stricter `Connection` lands with the line
-- `dev` has merged `main` after the drain line lands

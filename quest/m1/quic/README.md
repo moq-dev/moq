@@ -78,7 +78,5 @@ consumes them.
 - [L4S on the backbone](/quest/m2/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m2/quic-careful-resume.md) - a redial starts at the previous connection's rate
 - [Keep-alive by deadline](/quest/m2/quic-keep-alive.md) - a PING only when the idle deadline nears, no fixed timer
-- [Receive timestamps](/quest/m3/quic-receive-ts.md) - per-packet arrival
-  times for GCC and deadlines
-- [GCC egress experiment](/quest/m3/quic-gcc.md) - a measured verdict on
+- [GCC egress experiment](/quest/m3/quic-gcc.md) - receive timestamps and a measured verdict on
   WebRTC-style delay control
