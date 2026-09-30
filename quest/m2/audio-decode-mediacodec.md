@@ -8,6 +8,10 @@ device's codec list opens.
 
 ## Plan
 
+Rust owns capture and codecs on mobile, settled in the 2026-09-30 audit
+([Mobile ownership](/quest/m1/mobile-ownership.md)), so this backend is
+the Android audio codec path.
+
 The audio counterpart of `rs/moq-video/src/decode/backend/mediacodec.rs`,
 behind a new optional audio `mediacodec` feature and the decode seam, on `target_os
 = "android"`.
