@@ -23,6 +23,7 @@
 //!         eprintln!("dropped {} live audio frames", write.dropped_sample_frames);
 //!     }
 //! }
+//! sink.finish().await;
 //! # Ok(())
 //! # }
 //! ```
@@ -45,7 +46,7 @@ mod sink;
 use std::sync::Arc;
 
 pub use device::{Device, devices};
-pub use sink::{Control, Input, Sink, Write};
+pub use sink::{Control, Drain, Input, Sink, Write};
 
 #[cfg(feature = "aec")]
 pub(crate) use driver::Shared;

@@ -71,6 +71,10 @@ jobs:
         env:
           NEXTEST_PROFILE: ci
 
+      - name: Audio mixer benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs bench-playback
+
       # A single route re-price should expose any slope over the route table or
       # over independent observers of the new live broadcast map.
       - name: JS origin broadcast map benchmark

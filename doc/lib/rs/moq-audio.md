@@ -99,10 +99,15 @@ while let Some(frame) = audio.read().await? {
         eprintln!("dropped {} live audio frames", write.dropped_sample_frames);
     }
 }
+sink.finish().await;
 ```
 
 Playback writes never block. Inspect the returned input sample-frame counts for
 telemetry, but do not retry dropped live audio because that would add latency.
+Await `sink.finish()` to play its queued tail before leaving the mix; dropping
+its `Drain` stops immediately. An unavailable device keeps it pending. When
+sample rates differ, the current resampling channel cannot flush its partial
+input block, so completion covers the output ring.
 
 For a speakerphone, build one echo-cancellation control set from the playback
 engine and give a clone to the microphone configuration. Other clones are safe

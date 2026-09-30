@@ -302,3 +302,7 @@ package-gst *args:
 [positional-arguments]
 gst-smoke *args:
     rs/moq-gst/smoke.sh "$@"
+
+# Device-free mixer cost, swept over sink count and frames per callback.
+bench-playback:
+    cargo nextest run --locked --release -p moq-audio --features playback --run-ignored only -E 'test(benchmark_mixer_callbacks)' --success-output immediate
