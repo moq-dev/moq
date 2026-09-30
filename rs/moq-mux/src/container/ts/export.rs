@@ -2094,7 +2094,7 @@ impl<E: catalog::Catalog> Export<E> {
 			}
 		}
 
-		let sent = 1 + take as i64;
+		let sent = 1 + (take - left) as i64;
 		schedule.balance = schedule.balance.saturating_sub(sent.saturating_mul(STUFFING_UNIT));
 		let floor = rate.saturating_mul(-SLOTS_PER_SECOND);
 		if schedule.balance < floor {
