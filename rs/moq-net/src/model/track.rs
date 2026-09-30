@@ -2112,8 +2112,9 @@ fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Op
 ///
 /// Departed subscribers are pruned here too. The aggregate poll only prunes when the
 /// aggregate changes, so churning subscribers with the same preferences as a steady
-/// one would otherwise pile up and be walked on every wake. Pruning on push bounds the
-/// list by its peak live count, and the push already wakes the pollers.
+/// one would otherwise pile up and be walked on every wake. Pruning on every push would
+/// make a burst of N joins O(N^2), so, like `kio::WaiterList::register`, it only sweeps
+/// when the list is about to grow.
 fn register_subscription(state: kio::Ref<'_, TrackState>, subscription: &kio::Producer<Subscription>) {
 	if state.is_closed() {
 		return;
@@ -2121,7 +2122,12 @@ fn register_subscription(state: kio::Ref<'_, TrackState>, subscription: &kio::Pr
 	let subs = state.subscriptions.clone();
 	drop(state);
 	let mut subs = subs.lock();
-	subs.retain(|sub| !sub.is_closed());
+	if subs.len() == subs.capacity() {
+		subs.retain(|sub| !sub.is_closed());
+		// Leave at least half free, so each sweep is paid for by the pushes before it.
+		let live = subs.len();
+		subs.reserve(live);
+	}
 	subs.push(subscription.consume());
 }
 
@@ -5588,8 +5594,10 @@ mod test {
 		}
 
 		let subs = producer.state.read().subscriptions.clone();
+		// The list sweeps only when about to grow, so it holds a small multiple of the
+		// peak live count (2) rather than all 200 departures.
 		let len = subs.read().len();
-		assert!(len <= 2, "departed subscribers accumulated: {len}");
+		assert!(len <= 8, "departed subscribers accumulated: {len}");
 	}
 
 	/// Append a finished group presenting at `millis`, so the track carries a media
