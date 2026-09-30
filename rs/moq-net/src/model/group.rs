@@ -178,9 +178,16 @@ pub(crate) struct GroupState {
 
 impl GroupState {
 	/// Content still available to a reader of this group.
+	///
+	/// Counts the in-flight frame at its declared size, like [`Self::content_range`]: a
+	/// reader that skips it misses the whole frame, however much has arrived.
 	fn content(&self) -> stats::Content {
+		let unwritten = self
+			.partial
+			.as_ref()
+			.map_or(0, |partial| partial.buf.size() as u64 - partial.charged);
 		stats::Content {
-			bytes: self.cache,
+			bytes: self.cache + unwritten,
 			frames: self.next_index.saturating_sub(self.offset) as u64,
 			groups: 1,
 			datagrams: 0,
@@ -2570,6 +2577,8 @@ mod test {
 		frame.notify();
 		assert_eq!(pool.used(), before + 100);
 		assert_eq!(producer.state.read().cache, 100);
+		// A reader skipping the group still misses the whole declared frame.
+		assert_eq!(producer.state.read().content().bytes, MAX_CACHE_BYTES);
 
 		// Aborting releases what was charged.
 		frame.abort(Error::Cancel).unwrap();
