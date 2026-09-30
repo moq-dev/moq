@@ -42,10 +42,6 @@ Decided in the review of
 
 Docs stay inline in the change that makes them stale. No new guide.
 
-## Required
-
-- [Group fetch fill](/quest/m1/moxygen/fetch-fill.md) - a cache fill from an IETF upstream is complete or refused, validated against a concrete end signal, and asks from the frame the reader wants
-
 ## Related
 
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - the browser publisher answers a FETCH this relay forwards
