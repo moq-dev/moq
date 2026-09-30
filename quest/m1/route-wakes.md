@@ -64,15 +64,15 @@ Decisions:
   cost in woken fronts rather than served paths. (2026-09-30)
 - A same-publisher join still wakes that hop's whole `Publisher` set, even
   where the new route cannot win. Narrowing it to the paths the route wins
-  is the same set `front-upgrade.md` needs (below), so it lands with that.
-  (2026-09-30)
+  is left out: the `Publisher` pin goes with `--hop` removal in the cluster
+  routing line. (2026-09-30)
 - Builds on shared-fronts' keying, so the index hangs off the final front
   identity. `origin-front-parks.md` replaces the `routed_broadcast` retry
   loop, one of the watch consumers here; whichever lands second adapts it.
   (2026-09-30)
-- The wildcard line's `quest/m1/front-upgrade.md` will make a cheaper route
-  matter to Stay fronts, roughly those the new route would win. Keep the
-  index shaped so that set can be added without walking every served path.
+- Stay fronts never need a join or re-price: the edge/core tiers decision
+  (2026-09-30) dropped route upgrades, so a serving front moves only on
+  failover.
 
 Verification: `origin/pool_churn` flat in served paths at every pool width
 it already sweeps, and a unit test that counts `select` calls per route
