@@ -488,7 +488,7 @@ impl Relay {
 	pub async fn run(self) -> anyhow::Result<()> {
 		let Relay {
 			ready,
-			server,
+			mut server,
 			auth,
 			admissions,
 			cluster,
@@ -628,6 +628,7 @@ impl Relay {
 		let has_iroh = false;
 		let serve_shared = {
 			let idle = quic_on_workers && server.accept_health().is_empty() && !has_iroh;
+			let server = &mut server;
 			let cluster = cluster.clone();
 			let auth = auth.clone();
 			let shutdown = shutdown.clone();
@@ -651,6 +652,10 @@ impl Relay {
 			res = drain(shutdown_trigger, shutdown.clone(), signals) => res,
 			else => Ok(()),
 		};
+
+		// Dropping the listener would leave its QUIC socket open until the
+		// endpoint's closing connections finish in the background, past `run`.
+		server.close().await;
 
 		// Explicitly, so the joins land on the blocking pool rather than on the
 		// executor thread this future happens to be running on.
@@ -763,12 +768,12 @@ async fn serve(
 ) -> anyhow::Result<()> {
 	// Each QUIC worker binds here; Relay::run binds the shared listener before
 	// readiness and passes it to the same accept loop.
-	let listener = server.listen().await.context("failed to bind listeners")?;
-	serve_listening(listener, cluster, auth, shutdown, sessions).await
+	let mut listener = server.listen().await.context("failed to bind listeners")?;
+	serve_listening(&mut listener, cluster, auth, shutdown, sessions).await
 }
 
 async fn serve_listening(
-	mut listener: moq_tokio::Listener,
+	listener: &mut moq_tokio::Listener,
 	cluster: cluster::Cluster,
 	auth: auth::Auth,
 	shutdown: shutdown::Observer,
