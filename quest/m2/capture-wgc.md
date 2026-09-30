@@ -32,7 +32,13 @@ Decided in planning (09-30):
   zero-copy, just as camera frames do. Pool frames are recycled, so copying out
   is required. Generalize the existing NV12 `Scaler` in `frame.rs` to take BGRA
   input instead of writing a second processor. openh264 already downloads a
-  `Texture` through `to_i420`.
+  `Texture` through `to_i420`. The existing scaler copies its input color
+  space to its output, which is right for resizing but wrong for converting.
+  Set the RGB range and the output YCbCr matrix explicitly so they match what
+  the encoder signals. Otherwise HD frames get converted with BT.601 while the
+  stream advertises BT.709. NV12 also needs even dimensions, and a window's
+  size is often odd. Keep the BGRA pool at its native size, and crop the NV12
+  texture and the stream geometry down to even, as both current backends do.
 - **The `windows` crate directly** (0.62, already a public re-export), not
   `windows-capture` or another wrapper. We need our own D3D11 device, so it can
   be shared with the encoder, and one `windows` version. This adds WinRT
@@ -43,8 +49,11 @@ Decided in planning (09-30):
 - **Minimum Windows 10 2004 (build 19041).** That is where
   `IsCursorCaptureEnabled` appears. Refuse loud below it with
   `Error::Unsupported`, never silently drop the cursor. Set
-  `IsBorderRequired = false` where the property exists (build 20348+); older
-  builds keep the yellow capture border. Document the minimum in
+  `IsBorderRequired = false` where the property exists (build 20348+), but
+  request `GraphicsCaptureAccessKind::Borderless` first: without that access,
+  setting the property can fail with `E_ACCESSDENIED`. If access is denied,
+  keep the border rather than failing the capture. Older builds keep the
+  yellow capture border. Document the minimum in
   `doc/lib/rs/moq-video.md`.
 - **Resize ends the stream.** When `ContentSize` changes, debounce with
   `Settle` and then return `Read::Done` so the caller reopens, the way
@@ -55,9 +64,11 @@ Decided in planning (09-30):
   rather than adapter 0's DXGI outputs, which miss monitors attached to the
   other GPU on hybrid laptops. Keep the user-visible `display:N` ids and names.
 - **Windows skip DWM-cloaked entries.** Filter on `DWMWA_CLOAKED` (hidden UWP
-  windows and other virtual desktops), and size windows from `ContentSize`
-  rather than `GetWindowRect`, which includes the invisible borders. Keep the
-  `window:{hwnd}` ids.
+  windows and other virtual desktops), and size windows from
+  `DWMWA_EXTENDED_FRAME_BOUNDS` rather than `GetWindowRect`, which includes the
+  invisible borders. Enumeration never opens a capture: `ContentSize` belongs
+  to a frame, so it is only used for resize detection on the selected
+  capture. Keep the `window:{hwnd}` ids.
 
 Public API: no Rust signature changes. `config.cursor` starts working for
 displays. Windows builds older than 19041 go from working to refused.
@@ -67,6 +78,9 @@ real desktop. Add `#[ignore]` display and window tests, run them by hand on
 real Windows hardware, and record this checklist in the PR:
 
 - cursor on and off
+- an odd-sized window
+- color on an SD and an HD source, from BGRA through NV12 to the encoder, on
+  both the Media Foundation path and the openh264 readback path
 - window resize, close, and minimize
 - multi-monitor
 - one Windows 10 2004+ machine, showing that the yellow border appears there
