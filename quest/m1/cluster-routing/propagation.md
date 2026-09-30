@@ -58,7 +58,10 @@ Open questions the chosen design must answer:
 The implementation quests it writes replace the empty-prefix ANNOUNCE_REQUEST
 between peers and per-hop path-vector announcements, drop `Hop Base` and
 `Hop Keep` from the current wip lite version, and report the memory
-benchmark's after figures.
+benchmark's after figures. Add each one to the Required of
+[Selection](/quest/m1/cluster-routing/selection.md) and
+[Routing between clusters](/quest/m1/cluster-routing/inter-cluster.md), so
+neither starts on a record shape that is not implemented yet.
 
 ## Required
 
