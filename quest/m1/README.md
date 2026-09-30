@@ -23,7 +23,9 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, flate, audio, and video namespaces built from the handle below
 - [Track demand](/quest/m1/track-demand.md) - Rust and JS watch a track's subscribers through `demand()` alone
 - [Session close](/quest/m1/session-close.md) - a graceful session end withdraws announces and waits one second for the ack
+- [Close waits for the tail](/quest/m1/close-tail.md) - on lite-07, `close()` returns `Ok` only after each subscriber FINs its Subscribe Stream, having read the track to its end
 - [Graceful close in bindings](/quest/m1/bindings-graceful-close.md) - on dev, `shutdown` drains a session in moq-ffi and every wrapper like Rust, so the wrappers keep the tail of a publish
+- [Android logcat](/quest/m1/android-logcat.md) - on dev, Android builds always log to logcat and the `android-logcat` feature is gone
 - [Close codes](/quest/m1/close-codes.md) - a client sees the peer's application close code over WebSocket and raw QUIC, like WebTransport
 - [Raw stream codes](/quest/m1/raw-stream-codes.md) - raw QUIC stream resets and stops carry the application's code, not an HTTP/3-mapped one
 - [WebTransport close upstream](/quest/m1/wt-close-upstream.md) - web-transport-moq delivers the close capsule itself, and moq-tokio's `CLOSE_LINGER` is deleted
@@ -46,6 +48,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Wire compatibility](/quest/m1/wire-compat.md) - a nightly run tests this checkout against the last published release for tokens, session wire, and catalog/container
 - [TS import shared shift](/quest/m1/ts-import-shared-shift.md) - unflagged loop wraps move audio and video by one shift, so A/V sync holds across wraps
 - [TS PSI reassembly](/quest/m1/ts-psi-reassembly.md) - `import ts` reads a PAT or PMT that spans packets or follows a nonzero pointer_field instead of aborting, and one corrupted section costs a repetition and a counted `CRC_error`, not the import
+- [TS damaged units](/quest/m1/ts-damaged-units.md) - one malformed PES or access unit is dropped, counted as `damaged`, and resynced at the next keyframe instead of ending the import
 - [TS stats module](/quest/m1/ts-stats-module.md) - on dev, the TS stats types move under `ts::stats` as `Snapshot` and `Stream`, with an owned `track`
 - [Same-hop importers](/quest/m1/hop-aligned-import.md) - importers sharing a `--hop` and fed one stream publish identical groups and timestamps, so failover survives
 - [Capture control](/quest/m1/capture-control.md) - on dev, `encode::Capture` replaces `CaptureOptions` without a `clock` field (it reads the catalog's), an unsupported `cut()` errors, and dropping the last `Control` cancels in-flight opens

@@ -44,3 +44,4 @@ delivered and clean. The ordering race itself stays in the unit tests.
 ## Related
 
 - [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - keeps a reset stream's header, so the reset acts as a one-group drop
+- [Close waits for the tail](/quest/m1/close-tail.md) - the publisher-side fix this test proves across a real relay
