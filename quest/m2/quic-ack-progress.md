@@ -46,3 +46,4 @@ hook and [frame-granularity starvation](/quest/m2/starvation-frames.md).
 
 - [poll_acked in web-transport](/quest/m2/quic-ack-hook.md) - the first
   consumer of the accessor
+- [noq#808](https://github.com/n0-computer/noq/issues/808) - the acked-offset ask to n0

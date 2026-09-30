@@ -39,3 +39,4 @@ only when the jump never makes the first second worse than slow start.
 - [Transport upgrade](/quest/m1/transport-upgrade/README.md) - one of the
   reconnects this speeds up
 - [Drain](/quest/m1/drain/README.md) - GOAWAY redials are the other
+- [noq#815](https://github.com/n0-computer/noq/issues/815) - the careful-resume proposal to n0

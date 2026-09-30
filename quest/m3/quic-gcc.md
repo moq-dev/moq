@@ -36,3 +36,7 @@ exists.
 - [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
 - [Receive timestamps](/quest/m3/quic-receive-ts.md) - the per-packet
   arrival times the delay filter runs on
+
+## Related
+
+- [noq#818](https://github.com/n0-computer/noq/issues/818) - the GCC proposal to n0; matheus23 asked for a non-breaking `Controller` trait

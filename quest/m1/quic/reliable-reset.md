@@ -76,3 +76,4 @@ provisional codepoints if the document changes before release.
   known browser-compliance gap.
 - [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - consumes
   the same reset state without a parallel implementation
+- [noq#809](https://github.com/n0-computer/noq/issues/809) - the RESET_STREAM_AT ask to n0

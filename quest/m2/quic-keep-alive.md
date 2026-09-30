@@ -37,3 +37,7 @@ deadline; the maximum knob shortens the period.
 ## Required
 
 - [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
+
+## Related
+
+- [noq#810](https://github.com/n0-computer/noq/issues/810) - the proposal to n0; flub and matheus23 asked to keep a cap for NAT bindings, which the optional maximum covers

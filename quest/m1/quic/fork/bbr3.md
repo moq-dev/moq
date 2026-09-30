@@ -19,9 +19,19 @@ The fork's roughly 580 lines of regression tests are written against noq's
 test harness; rework them onto quinn's rather than porting the harness. Keep
 MoQ's config naming controller families (`Loss`, `Delay`), never algorithms.
 
+BBR3 must fill in `ControllerMetrics::bandwidth_estimate` (quinn#2802, merged),
+which the [switch](/quest/m1/quic/fork/switch.md) reads for
+`web-transport-moq`'s bandwidth stat.
+
 Verify with the fork's BBR tests and the benchmark matrix against `moq-noq`
 1.3.x on the same workloads; report any throughput or latency difference.
 
 ## Required
 
 - [Import quinn](/quest/m1/quic/fork/import.md)
+
+## Related
+
+- [noq#819](https://github.com/n0-computer/noq/issues/819) - BBR3 as the default, proposed to n0; their sims often favor Cubic
+- [noq#475](https://github.com/n0-computer/noq/issues/475) - the original BBR ask
+- [noq#768](https://github.com/n0-computer/noq/issues/768) - the `inflight_at_loss` underflow the fork fixed with `saturating_sub`; keep that regression
