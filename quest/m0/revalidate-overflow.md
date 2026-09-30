@@ -5,8 +5,7 @@
 No auth-server or token duration can panic the relay. Today
 `moq-auth/src/client.rs` computes `Instant::now() + cadence` for the
 `revalidate` value, and `Grant::deadline` adds a token's `exp` the same way.
-A value near `u64::MAX` seconds overflows, and `panic = "abort"` ends the
-process.
+A value near `u64::MAX` seconds overflows and panics.
 
 ## Plan
 

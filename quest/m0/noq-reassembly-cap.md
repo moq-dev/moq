@@ -1,11 +1,11 @@
-# [S] noq carries quinn's stream reassembly cap
+# [M] noq carries quinn's stream reassembly cap
 
 ## Goal
 
 The QUIC stacks the relay builds on bound how many out-of-order chunks a
 stream or CRYPTO buffer holds, as quinn-proto 0.11.15 does, and a connection's
-receive window is finite by default. Today `moq-noq-proto` 1.3.2 and 2.0.0,
-and upstream `noq-proto` 1.3.0 (pulled in by the relay's default `iroh`
+receive window is finite by default. Today `moq-noq-proto` 1.3.2 (`main`) and
+2.0.0 (`dev`), and upstream `noq-proto` 1.3.0 (pulled in by the relay's default `iroh`
 feature), predate quinn's fix, and `cargo audit` cannot match them because
 the crates are renamed.
 
@@ -22,10 +22,10 @@ the crates are renamed.
   n0 releases it; bump when they do.
 - Give `moq-tokio` a finite default connection `receive_window` instead of
   the backend's `VarInt::MAX` (`rs/moq-tokio/src/noq.rs` `apply_windows`,
-  `quic.rs`). Today the effective bound is `max_streams` times the stream
-  window, about 12.5 GB. Pick the value with a throughput measurement, not a
+  `quic.rs`). Pick the value with a throughput measurement, not a
   guess, and update `doc/bin/relay/config.md`.
-- Check whether the io_uring workers share the unpatched assembler.
+- `rs/moq-uring` depends on `moq-noq-proto` too, so the same pin bump
+  covers the io_uring workers.
 
 Public API: none. Wire: a peer that exceeds the chunk cap is closed.
 

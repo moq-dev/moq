@@ -6,8 +6,7 @@ A relay dials only peers an operator configured: `cluster.connect`, the
 connect API, or LAN mDNS. Gossip discovery (`cluster.mesh`), which advertises
 under `.internal/origins/` and dials whatever URL appears there with
 `cluster.token`, is removed. It is the only path that dials a URL learned
-from an announcement, and any grant that reaches `.internal/` could add a
-peer. The design favors a configured full mesh, and moq.pro drives peers
+from an announcement. The design favors a configured full mesh, and moq.pro drives peers
 through `--cluster-connect-api` and never enables gossip.
 
 ## Plan
@@ -15,6 +14,12 @@ through `--cluster-connect-api` and never enables gossip.
 - Delete gossip advertising and discovery (`rs/moq-relay/src/cluster.rs`,
   `nodes.rs` `MESH_PREFIX`) and whatever becomes dead behind them. Keep
   `cluster.node` only if something else still reads it.
+- `nodes.rs` also backs the internal `/nodes` endpoint (`internal.rs`
+  `serve_nodes`), which merges gossiped advertisements with direct sessions.
+  It keeps direct sessions only; document the changed response.
+- Retarget `rs/moq-relay/tests/hidden_cluster.rs` to another `.`-prefixed
+  hidden broadcast, and fix the `.internal/origins` comment in
+  `connection.rs`.
 - Lands on `main` as a security fix, not `dev`. `--cluster-mesh`,
   `MOQ_CLUSTER_MESH` and `mesh = true` fail at startup with a message
   pointing at `cluster.connect`, so nobody silently loses their mesh.

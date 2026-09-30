@@ -1,4 +1,4 @@
-# [M] Peer-declared lengths and request counts are bounded
+# [L] Peer-declared lengths and request counts are bounded
 
 ## Goal
 
@@ -9,8 +9,8 @@ or tracks it. That covers three things:
   (`lite/message.rs`, buffered by `coding/reader.rs` `poll_read_more`);
 - IETF FETCH object properties, decoded as a bare `Vec<u8>` with no cap;
 - IETF incoming request IDs, which are never checked against the
-  `MAX_REQUEST_ID` we advertise (`u32::MAX`, `moq-tokio/src/server.rs` and
-  `client.rs`).
+  `MAX_REQUEST_ID` we advertise on drafts 14 to 16 (`u32::MAX`,
+  `rs/moq-net/src/server.rs` and `client.rs`).
 
 Announces and subscriptions per session are capped as well.
 
@@ -21,9 +21,11 @@ Announces and subscriptions per session are capped as well.
 - Audit `rs/moq-net/src/coding/` for any other decode that allocates from a
   peer length, and cap the fetch properties. This absorbs the deleted
   `coding-reader-cap` quest.
-- IETF: advertise a finite `MAX_REQUEST_ID` window, grant more with
+- IETF drafts 14 to 16: advertise a finite `MAX_REQUEST_ID` window, grant more with
   MAX_REQUEST_ID as requests close, and close with the draft's error on an ID
-  past it (`ietf/control.rs`, `ietf/adapter.rs`).
+  past it (`ietf/control.rs`, `ietf/adapter.rs`). Draft-17 removed
+  MAX_REQUEST_ID; there QUIC's bidi stream limit and the per-session cap
+  bound requests.
 - A per-session cap on live announces and subscriptions on both protocols,
   refused per request rather than session-fatal where the protocol allows.
 - Benchmark per-session request churn swept over sessions and requests per

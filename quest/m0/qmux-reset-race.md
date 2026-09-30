@@ -6,8 +6,8 @@ qmux's RESET_STREAM handling never panics when the writer task removes the
 receive stream concurrently. Today `session.rs` checks
 `streams.recv.contains_key`, drops the lock, and later re-locks with
 `.expect("live recv stream")`; a `StopSending` queued by a dropped
-`RecvStream` can remove the entry in between, and `panic = "abort"` ends the
-process. The WebSocket fallback reaches it.
+`RecvStream` can remove the entry in between. A missing entry must be a
+no-op, not a panic.
 
 ## Plan
 
@@ -17,7 +17,8 @@ process. The WebSocket fallback reaches it.
 - Regression test that removes the entry between the two points.
 - Audit the other `expect`s on the stream maps (`sched.rs`) for the same
   pattern.
-- Release qmux and bump it here.
+- Release a patch on the pinned 0.5 line and on 0.6, then bump the 0.5 pin
+  here. Moving to 0.6 is not part of this quest.
 
 Public API: none. Wire: none.
 

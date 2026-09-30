@@ -2,7 +2,7 @@
 
 ## Goal
 
-On moq-transport's bidi request streams (draft 17+), a peer's FIN means no
+On moq-transport's bidi request streams (draft 19+), a peer's FIN means no
 more updates, not cancel. Only RESET_STREAM, STOP_SENDING or our own end
 cancels. Today a FIN withdraws a PUBLISH_NAMESPACE
 (`ietf/subscriber.rs`), ends a SUBSCRIBE_NAMESPACE, and cancels a SUBSCRIBE
@@ -13,6 +13,8 @@ silently ends the subscription.
 
 ## Plan
 
+- Gate on version: drafts 17 and 18 say a FIN cancels SUBSCRIBE_NAMESPACE,
+  so keep that there, and test both sides of the gate.
 - Separate the read side's clean FIN (`Reader::poll_closed` returning Ok)
   from a reset. On FIN, keep serving and stop reading. Watch the writer for
   STOP_SENDING.
@@ -27,3 +29,4 @@ Public API: none. Wire: conformance fix; no draft change.
 ## Related
 
 - [Legal IETF input](/quest/m0/ietf-legal-input.md) - the other interop blocker
+- [Lite request streams](/quest/m1/request-stream-serve.md) - lite deliberately treats a FIN as ending the request; don't unify the two

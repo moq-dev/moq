@@ -5,8 +5,7 @@
 The memory a relay commits to an incoming frame tracks what the peer has
 sent, not only the size it declared. Today the first payload byte allocates
 the whole declared size (up to `MAX_CACHE_BYTES`, 32 MiB) with
-`vec![0u8; size]` and charges it to the cache, across up to 10,000 streams
-per connection with no aggregate bound.
+`vec![0u8; size]` and charges it to the cache, with no aggregate bound.
 
 ## Plan
 
