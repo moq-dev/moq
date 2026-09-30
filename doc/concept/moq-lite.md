@@ -34,6 +34,28 @@ Rust and TypeScript speak moq-lite 01 through 06 and moq-transport drafts
 still in progress: it negotiates as `moq-lite-07-wip`, and only when both
 sides explicitly enable it.
 
+## Authorization
+
+On moq-lite 06 each side presents a token on its own Auth stream and learns
+what it may publish and subscribe to. Right after setup both sides present the
+credential the connection already carried (the URL token, a client
+certificate, or nothing), so a publisher learns before anyone subscribes
+whether its broadcasts can reach the peer. More tokens can be presented later
+without reconnecting; the session's scope is the union of every open token's
+grant, and withdrawing, revoking, or narrowing one withdraws only what it alone
+covered. A grant is a union of [path patterns](#path-patterns), so `room/*/cam`
+or the exact broadcast `room/alice` arrives as issued rather than widened to a
+prefix. A subscription or fetch that loses access resets with the
+`UNAUTHORIZED` stream code, so the peer can tell it apart from the session
+closing.
+
+A client that publishes a broadcast outside its grant closes the session with
+`UNAUTHORIZED` and names the path in the close reason, rather than waiting
+forever for a subscriber the relay will never let through. A grant is advice
+for the side that holds it; the side that issued it still enforces its own
+scope. Older versions, and moq-transport peers that do not negotiate the MoQ Auth
+extension, have no grant; the token in the URL keeps working everywhere.
+
 ## Subscription completion
 
 On moq-lite 07, `SUBSCRIBE_END` counts the group streams opened for the

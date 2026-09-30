@@ -42,7 +42,7 @@ gives it meaning.
   until it lapses. When a request's grant expires or is revoked, that request
   alone ends with `EXPIRED_AUTH_TOKEN` or `UNAUTHORIZED`. A session grant
   that shrinks cancels the requests it covered, as for any request, through
-  [Origin narrowing](/quest/m1/auth/narrowing.md).
+  `auth::Handle::authorize`.
 - Relay: each such request gets its own lease from a per-request call on
   `moq_auth::Client`, not the `Client::attach` that [Relay
   tokens](/quest/m1/auth/relay-refresh.md) builds. `attach` connects with the

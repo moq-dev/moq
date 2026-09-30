@@ -8,13 +8,22 @@
 //! down to its prefix and beneath it, and each recomputes its best route from
 //! the entries at that prefix alone.
 //!
+//! `origin/narrow*` put a session in front of the origin, since a narrowing is
+//! enforced by the session serving it: every subscription holds a gate on the
+//! session's grant, and a narrowing wakes each one. The baseline is a session
+//! that never narrows.
+//!
 //! Run with `cargo bench -p moq-net --bench origin`.
+
+#[path = "../tests/support/mod.rs"]
+mod support;
 
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Hop, Hops, Pattern, Patterns, Timestamp, announce, broadcast, kio, origin};
+use moq_net::{Hop, Hops, Pattern, Patterns, Timestamp, announce, auth, broadcast, kio, origin, track};
+use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// `(publishers, subscribers)` shapes for the fan-out benchmarks.
 const SHAPES: [(usize, usize); 3] = [(100, 10), (1_000, 100), (1_000, 1_000)];
@@ -423,6 +432,152 @@ fn bench_handoff(c: &mut Criterion) {
 	group.finish();
 }
 
+/// `(routes, subscribers)` shapes for the narrowing benchmarks: [`SHAPES`] plus a
+/// row that grows the routes alone, so each axis shows its own slope.
+const NARROW_SHAPES: [(usize, usize); 4] = [(100, 10), (1_000, 10), (1_000, 100), (1_000, 1_000)];
+
+/// A relay serving `routes` broadcasts to one client session subscribed to
+/// `subscribers` of them. The first subscription is the one a narrowing to
+/// `room/**` ends: its broadcast sits at `muted` instead.
+struct Watching {
+	pair: MockPair,
+	tracks: Vec<track::Producer>,
+	subscriptions: Vec<track::Subscriber>,
+	_broadcasts: Vec<broadcast::Producer>,
+	_origins: [origin::Producer; 2],
+}
+
+fn watched_path(index: usize) -> String {
+	match index {
+		0 => "muted".to_string(),
+		index => format!("room/{index}"),
+	}
+}
+
+async fn watching(routes: usize, subscribers: usize) -> Watching {
+	let spawn = |hop| {
+		let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+		tokio::spawn(support::harness::run(driver));
+		producer
+	};
+	let relay = spawn(1);
+	let received = spawn(2);
+
+	let mut broadcasts = Vec::new();
+	let mut tracks = Vec::new();
+	for index in 0..routes {
+		let broadcast = relay.publish(watched_path(index), origin::Route::default()).unwrap();
+		tracks.push(broadcast.create_track("video", None).unwrap());
+		broadcasts.push(broadcast);
+	}
+
+	let mut options = MockConnectOptions::new("moq-lite-06".parse().unwrap());
+	options.server_publish = Some(relay.consume());
+	options.client_subscribe = Some(received.clone());
+	let pair = connect_mock(options).await;
+
+	let mut subscriptions = Vec::new();
+	for index in 0..subscribers {
+		let remote = received.consume().routed_broadcast(watched_path(index)).await.unwrap();
+		let subscription = remote.track("video").unwrap().subscribe(None).await.unwrap();
+		subscriptions.push(subscription);
+	}
+	// One round, so every subscription is live end to end before anything is timed.
+	let mut watching = Watching {
+		pair,
+		tracks,
+		subscriptions,
+		_broadcasts: broadcasts,
+		_origins: [relay, received],
+	};
+	watching.round().await;
+	watching
+}
+
+impl Watching {
+	/// Every subscribed track writes a group, and every subscription reads it.
+	async fn round(&mut self) {
+		for track in &self.tracks[..self.subscriptions.len()] {
+			let mut group = track.append_group().unwrap();
+			group.write_frame(Timestamp::ZERO, b"frame".as_ref()).unwrap();
+			group.finish().unwrap();
+		}
+		for subscription in &mut self.subscriptions {
+			subscription.recv_group().await.unwrap().expect("track ended");
+		}
+	}
+}
+
+fn runtime() -> tokio::runtime::Runtime {
+	tokio::runtime::Builder::new_current_thread()
+		.enable_time()
+		.build()
+		.unwrap()
+}
+
+/// Everything under `room/`, which leaves out only the `muted` subscription.
+fn room() -> auth::Grant {
+	auth::Grant {
+		subscribe: Pattern::subtree("room").unwrap().into(),
+		..auth::Grant::all()
+	}
+}
+
+/// Steady-state delivery through a session's gates: one round across every
+/// subscription, on a session that never narrows and on one narrowed to a grant
+/// that still covers them all. Neither may depend on `routes`.
+fn bench_narrow_delivery(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/narrow_delivery");
+	let rt = runtime();
+	for (routes, subscribers) in NARROW_SHAPES {
+		group.throughput(Throughput::Elements(subscribers as u64));
+		for narrowed in [false, true] {
+			let label = if narrowed { "narrowed" } else { "never" };
+			let id = BenchmarkId::new(label, format!("{routes}r_{subscribers}s"));
+			group.bench_function(id, |b| {
+				let mut watching = rt.block_on(watching(routes, subscribers));
+				if narrowed {
+					// Covers every subscription but the muted one, which is not subscribed here.
+					let mut grant = room();
+					grant.subscribe.insert(Pattern::literal("muted").unwrap());
+					watching.pair.server.auth().authorize(&grant);
+				}
+				b.iter(|| rt.block_on(watching.round()));
+			});
+		}
+	}
+	group.finish();
+}
+
+/// One narrowing on a live session: from `narrow` until the subscription it
+/// excludes resets. It wakes every subscription's gate and re-checks every route
+/// the session announced, so it may grow with the session's own `subscribers`
+/// and `routes`, never with anything else on the origin.
+fn bench_narrow(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/narrow");
+	group.sample_size(10);
+	group.sampling_mode(criterion::SamplingMode::Flat);
+	let rt = runtime();
+	for (routes, subscribers) in NARROW_SHAPES {
+		let id = BenchmarkId::from_parameter(format!("{routes}r_{subscribers}s"));
+		group.bench_function(id, |b| {
+			b.iter_custom(|iters| {
+				let mut elapsed = Duration::ZERO;
+				for _ in 0..iters {
+					let mut watching = rt.block_on(watching(routes, subscribers));
+					let start = std::time::Instant::now();
+					watching.pair.server.auth().authorize(&room());
+					let ended = rt.block_on(watching.subscriptions[0].recv_group());
+					elapsed += start.elapsed();
+					assert!(ended.is_err(), "the muted subscription outlived the narrowing");
+				}
+				elapsed
+			});
+		});
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_announce,
@@ -433,6 +588,8 @@ criterion_group!(
 	bench_serve_idle,
 	bench_subscribe,
 	bench_request,
-	bench_handoff
+	bench_handoff,
+	bench_narrow_delivery,
+	bench_narrow
 );
 criterion_main!(benches);

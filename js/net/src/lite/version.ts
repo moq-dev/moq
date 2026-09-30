@@ -65,6 +65,24 @@ export function hasDatagrams(version: Version): boolean {
 	}
 }
 
+/**
+ * Whether either endpoint may open an Auth Stream (0x7) to present a token and learn its
+ * grant. Added to lite-06, whose peers that predate it reset the stream as an unknown type.
+ */
+export function hasAuth(version: Version): boolean {
+	// Explicitly list older versions so future versions default to carrying AUTH.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /** Whether announce streams begin with ANNOUNCE_OK and omit the sender's origin from each hop chain. */
 export function hasAnnounceOk(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-05+ announce behavior.

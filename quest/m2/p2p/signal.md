@@ -25,7 +25,7 @@ Rust, so the id in the roster is the id in every chain the tab forwards.
 Roster: each peer publishes `<prefix><id>` with an `info.json` snapshot track:
 the moq ALPNs it accepts, `webrtc: true`, whether it can run qmux unordered,
 the presenter public key that
-[peer grants](/quest/m1/auth/peer-grant.md) bind, the application's `meta`,
+[peer grants](/quest/m2/p2p/peer-grant.md) bind, the application's `meta`,
 and for native peers an optional `webtransport: { url, fingerprint }` and
 `iroh` endpoint id. The schema is shared with
 [moq-cli](/quest/m2/p2p/cli.md). Unordered is advertised here so the dialer
@@ -74,7 +74,7 @@ and short-lived, which the peer presents in band with a proof of possession;
 the other side verifies the relay's signature, the hop id and key against
 the roster, and AUTH_POP, then serves only the granted paths. Issuance,
 asymmetric keys, JWKS, PoP, and refresh live in
-[Peer grants](/quest/m1/auth/peer-grant.md): HMAC keys cannot be given to
+[Peer grants](/quest/m2/p2p/peer-grant.md): HMAC keys cannot be given to
 browsers without also letting them forge grants, so an HS256-only relay
 issues nothing. A peer session with no verifiable grant serves nothing;
 there is no equal-scope shortcut.
@@ -82,4 +82,4 @@ there is no equal-scope shortcut.
 ## Required
 
 - [Data channel transport](/quest/m2/p2p/transport.md)
-- [Peer grants](/quest/m1/auth/peer-grant.md) - the hop-bound, asymmetrically signed credential a direct session presents; HS256 keys issue none
+- [Peer grants](/quest/m2/p2p/peer-grant.md) - the hop-bound, asymmetrically signed credential a direct session presents; HS256 keys issue none

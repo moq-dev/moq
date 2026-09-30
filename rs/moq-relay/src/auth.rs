@@ -412,8 +412,7 @@ impl Token {
 	}
 
 	/// Whether `other` still covers everything this token scopes: the same root and
-	/// mounts, and every grant still held. A narrower re-check closes the session until
-	/// pattern scopes can resize it in place.
+	/// mounts, and every grant still held.
 	pub(crate) fn covered_by(&self, other: &Self) -> bool {
 		self.root == other.root
 			&& self.mounts == other.mounts
@@ -432,6 +431,8 @@ impl Token {
 pub struct Lease {
 	consumer: lease::Consumer,
 	token: Token,
+	/// The live session a re-check re-authorizes in place, once attached.
+	session: Option<moq_net::auth::Handle>,
 	/// When the grant runs out, enforced here whoever drives the lease: a fixed
 	/// grant has no driver, and an auth server's may be mid-outage. Fixed on tokio's
 	/// clock when the grant arrives, so re-polling [`ended`](Self::ended) never
@@ -450,8 +451,16 @@ impl Lease {
 			token: Token::new(path, &grant),
 			expires: grant.deadline(),
 			consumer,
+			session: None,
 			stats: Default::default(),
 		}
+	}
+
+	/// Re-authorize `session` in place when a re-check changes what the grant allows,
+	/// narrower or wider. Without it a narrower grant ends the lease.
+	pub(crate) fn authorizing(mut self, session: &moq_net::Session) -> Self {
+		self.session = Some(session.auth());
+		self
 	}
 
 	/// Attach the session's stats context, so a re-checked tier retags it live.
@@ -460,7 +469,8 @@ impl Lease {
 		self
 	}
 
-	/// The scope the session was admitted under.
+	/// The scope the session holds: what it was admitted under, with the patterns of
+	/// the latest re-check that resized it.
 	pub fn token(&self) -> &Token {
 		&self.token
 	}
@@ -473,11 +483,14 @@ impl Lease {
 	/// Wait for the lease to stop covering the session: the grant expired, was
 	/// revoked, or was re-checked into one that no longer covers the token.
 	///
-	/// A changed root or mounts, or a narrower grant, ends it: origin handles cannot yet narrow
-	/// a live scope in place (tracked by `quest/m1/auth/narrowing.md`). A flipped
-	/// `peer` ends it too, since the routes it already announced would be
-	/// misreported as entering here or from a peer. A changed tier keeps the
-	/// session and moves its [stats](Self::with_stats) to the new tier.
+	/// A grant with the same root and mounts re-authorizes an attached session for its
+	/// patterns, narrower or wider, and keeps going; the origin handles the session was
+	/// admitted with still bound it, so it never reaches past them. Without an attached
+	/// session a narrower grant ends the lease and a wider one changes nothing.
+	/// A changed root or mounts ends it, and so does a flipped `peer`, since the
+	/// routes it already announced would be misreported as entering here or from a
+	/// peer. A changed tier keeps the session and moves its
+	/// [stats](Self::with_stats) to the new tier.
 	pub async fn ended(&mut self) -> lease::Reason {
 		loop {
 			let expire = async {
@@ -501,8 +514,25 @@ impl Lease {
 						if fresh.peer != self.token.peer {
 							return "peer changed".into();
 						}
-						if !self.token.covered_by(&fresh) {
-							return "grant narrowed".into();
+						if fresh.publish != self.token.publish || fresh.subscribe != self.token.subscribe {
+							match &self.session {
+								Some(session) => {
+									tracing::info!(
+										publish = %join(&fresh.publish),
+										subscribe = %join(&fresh.subscribe),
+										"grant changed; re-authorizing the session",
+									);
+									session.authorize(&moq_net::auth::Grant {
+										publish: fresh.publish.clone(),
+										subscribe: fresh.subscribe.clone(),
+										expires: None,
+									});
+									self.token.publish = fresh.publish;
+									self.token.subscribe = fresh.subscribe;
+								}
+								None if !self.token.covered_by(&fresh) => return "grant narrowed".into(),
+								None => {}
+							}
 						}
 						if fresh.tier != self.token.tier {
 							tracing::info!(from = %self.token.tier, to = %fresh.tier, "tier changed");
@@ -524,6 +554,15 @@ impl Lease {
 	pub fn close(self, reason: impl Into<lease::Reason>, bytes: Bytes) -> lease::Reason {
 		self.consumer.close(reason, bytes)
 	}
+}
+
+/// Patterns as one comma-separated line, for logs.
+fn join(patterns: &Patterns) -> String {
+	patterns
+		.iter()
+		.map(|pattern| pattern.as_str())
+		.collect::<Vec<_>>()
+		.join(",")
 }
 
 enum Decider {

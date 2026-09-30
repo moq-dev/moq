@@ -129,6 +129,7 @@ WASM build, so the browser side stays TypeScript.
 ## Required
 
 - [Data channel transport](/quest/m2/p2p/transport.md) - `@moq/p2p` speaks qmux over one ordered RTCDataChannel behind the WebTransport shape `@moq/net` consumes
+- [Peer grants](/quest/m2/p2p/peer-grant.md) - the relay issues a hop-bound, asymmetrically signed grant a browser can verify; HS256 keys issue none
 - [Signaling and policy](/quest/m2/p2p/signal.md) - opted-in peers find each other under the prefix, the application picks who to dial, and the roster-size gate decides whether STUN is used
 - [Native data channel transport](/quest/m2/p2p/webrtc.md) - `moq-tokio` holds a moq-net session with a browser over str0m with a full ICE agent
 - [moq-cli joins](/quest/m2/p2p/cli.md) - `--p2p` publishes a roster entry with its iroh endpoint, dials iroh between native peers, and serves browsers as a transit hop
@@ -140,5 +141,4 @@ WASM build, so the browser side stays TypeScript.
 
 ## Related
 
-- [Peer grants](/quest/m1/auth/peer-grant.md) - the hop-bound credential a direct session presents; HMAC keys issue none
 - [E2EE](/quest/m1/e2ee/README.md) - what a peer would need if the token scope stopped being the trust boundary

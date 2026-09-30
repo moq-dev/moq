@@ -42,6 +42,8 @@ pub(super) struct SubscriberConfig<S: crate::transport::poll::Session> {
 	/// Set once the peer sends a GOAWAY; new request streams are then rejected
 	/// with [`Error::GoingAway`] (the peer told us to stop asking).
 	pub going_away: crate::goaway::GoingAway,
+	/// Our tokens' grants: a subscription the union stops covering is cancelled.
+	pub auth: crate::auth::Handle,
 }
 
 #[derive(Clone)]
@@ -89,6 +91,7 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	/// [`SourceServe`] machines.
 	sources: kio::Queue<(PathOwned, crate::broadcast::Dynamic)>,
 	going_away: crate::goaway::GoingAway,
+	auth: crate::auth::Handle,
 }
 
 #[derive(Clone)]
@@ -124,6 +127,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			cost: config.cost,
 			sources: kio::Queue::new(),
 			going_away: config.going_away,
+			auth: config.auth,
 		}
 	}
 
@@ -327,13 +331,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// outside our scope, so don't serve it. Reflections are already
 		// filtered above.
 		let route = self.announced_route(hops, cost, link_cost, responder_origin);
-		let Ok(dynamic) = self.origin.dynamic(&path, route.clone()) else {
-			return Ok(false);
-		};
-
-		announced.attach(path, route, dynamic);
-
-		Ok(true)
+		Ok(announced.offer(self, path, route))
 	}
 
 	/// The route to announce for a prefix this peer advertised, charging our
@@ -427,13 +425,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			return Ok(true);
 		}
 
-		let Ok(dynamic) = self.origin.dynamic(&path, metadata.clone()) else {
-			announced.declined(path);
-			return Ok(false);
-		};
-		announced.attach(path, metadata, dynamic);
-
-		Ok(true)
+		Ok(announced.offer(self, path, metadata))
 	}
 
 	/// Remove a subscription, releasing the session's handle on its producer.
@@ -1176,6 +1168,8 @@ struct PrefixRun {
 	// path, and lite-07 bases name it too. Tracked even for announces we drop
 	// locally (reflected loops), since the sender doesn't know we dropped them.
 	decoder: lite::AnnounceDecoder,
+	/// The auth epoch last applied, so a new limit holds back or brings back routes.
+	epoch: u64,
 }
 
 impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
@@ -1262,6 +1256,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 						link_cost,
 						announced: Announced::default(),
 						decoder: lite::AnnounceDecoder::default(),
+						epoch: 0,
 					};
 
 					// Lite01/02 send the initial set as one ANNOUNCE_INIT message, so they
@@ -1301,6 +1296,16 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					// since the signal stays set.
 					if self.subscriber.going_away.poll(waiter).is_ready() {
 						run.announced.drain();
+					}
+					// A new limit holds back what the peer may no longer publish to us,
+					// and brings back what it may again. The peer still holds each
+					// advertisement either way.
+					while let Poll::Ready(permit) =
+						self.subscriber
+							.auth
+							.poll_permit(crate::auth::Direction::Subscribe, &mut run.epoch, waiter)
+					{
+						run.announced.limit(&permit, &self.subscriber);
 					}
 					loop {
 						match stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(&mut cx) {
@@ -1483,6 +1488,7 @@ mod tests {
 				peer_hop: None,
 				cost: None,
 				going_away: Default::default(),
+				auth: crate::auth::Handle::new(false),
 			});
 
 			let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
@@ -1539,6 +1545,7 @@ mod tests {
 				peer_hop: None,
 				cost: None,
 				going_away: Default::default(),
+				auth: crate::auth::Handle::new(false),
 			});
 			let serve = TrackServe {
 				subscriber,
@@ -1558,9 +1565,11 @@ mod tests {
 				.subscribe(None)
 				.await
 				.unwrap();
+			let gate = serve.gate();
 			let mut running = TrackServeRun {
 				serve,
 				state: TrackRunState::Serve(serving),
+				gate,
 			};
 			kio::wait(|waiter| kio::Task::poll(&mut running, waiter)).await;
 
@@ -1591,6 +1600,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
 		});
 		let serve = TrackServe {
 			subscriber,
@@ -1607,9 +1617,11 @@ mod tests {
 			.subscribe(None)
 			.await
 			.unwrap();
+		let gate = serve.gate();
 		let mut running = TrackServeRun {
 			serve,
 			state: TrackRunState::Serve(serving),
+			gate,
 		};
 		assert!(
 			kio::Task::poll(&mut running, &kio::Waiter::noop()).is_ready(),
@@ -1675,6 +1687,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
 		});
 
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -1738,6 +1751,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
 		});
 
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -1794,6 +1808,7 @@ mod tests {
 				peer_hop: None,
 				cost: None,
 				going_away: Default::default(),
+				auth: crate::auth::Handle::new(false),
 			});
 
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -1853,6 +1868,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
 		});
 		let subscribes = subscriber.subscribes.clone();
 		let serve = TrackServe {
@@ -1899,6 +1915,63 @@ mod tests {
 		assert!(wire.is_empty(), "a second SUBSCRIBE trailed the first");
 	}
 
+	/// A narrower limit landing while the SUBSCRIBE is still opening resets it with
+	/// UNAUTHORIZED, like a live one, and releases its id.
+	#[tokio::test]
+	async fn a_narrower_limit_resets_a_subscribe_still_opening() {
+		// Writes park, so the SUBSCRIBE is on an open stream but not yet flushed.
+		let gate = kio::Producer::new(false);
+		let session = SinkSession::gated_bi(gate.consume());
+		let auth = crate::auth::Handle::new(false);
+
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::tokio(),
+			session: session.clone(),
+			origin,
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: Default::default(),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: auth.clone(),
+		});
+		let subscribes = subscriber.subscribes.clone();
+		let serve = TrackServe {
+			subscriber,
+			path: Path::new("room/host").to_owned(),
+			name: "audio".to_string(),
+		};
+
+		let broadcast = crate::broadcast::Info::new().produce();
+		let request = broadcast.reserve_track("audio").unwrap();
+		let mut serving = ServeLoop::new(&serve, request, Default::default(), Some(Timescale::default()));
+		let establish = serve.prepare_establish(
+			&mut serving.serving,
+			Subscription::default(),
+			Some(Timescale::default()),
+		);
+		serving.mode = ServeMode::Establish(establish);
+		let gate_run = serve.gate();
+		let mut running = TrackServeRun {
+			serve,
+			state: TrackRunState::Serve(serving),
+			gate: gate_run,
+		};
+
+		assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
+		assert_eq!(session.log.bi_opens(), 1, "the SUBSCRIBE stream is open");
+
+		auth.authorize(&crate::auth::Grant::default());
+		assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_ready());
+
+		let unauthorized = crate::StreamError::Unauthorized.to_code();
+		assert_eq!(session.log.resets(), vec![unauthorized]);
+		assert!(subscribes.lock().is_empty(), "the id outlived its subscription");
+		drop(gate);
+	}
+
 	/// Everything a `handle_subscription` test needs to stay alive for the call.
 	struct Harness {
 		serve: TrackServe<SinkSession>,
@@ -1926,6 +1999,7 @@ mod tests {
 				peer_hop: None,
 				cost: None,
 				going_away: Default::default(),
+				auth: crate::auth::Handle::new(false),
 			});
 			let broadcast = crate::broadcast::Info::new().produce();
 			let producer = broadcast.create_track("catalog.json", None).unwrap();
@@ -2351,6 +2425,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
 		});
 
 		let path = Path::new("room/host").to_owned();
@@ -2403,6 +2478,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(crate::Hop::new(777).unwrap()),
 			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
 		});
 
 		let mut announced = Announced::default();
@@ -2459,6 +2535,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
 		});
 
 		let path = Path::new("room/host").to_owned();
@@ -2515,6 +2592,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
 		});
 
 		let path = Path::new("room/host").to_owned();
@@ -2571,6 +2649,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
 		});
 
 		// The sender's identity is already in the chain: the route came back through it.
@@ -2636,6 +2715,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
 		});
 
 		// The path as advertised to the peer: our hop is already in the chain.
@@ -2695,6 +2775,7 @@ mod tests {
 			peer_hop: Some(assigned),
 			cost: None,
 			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
 		});
 
 		// An announce with an empty chain and no responder id: the versions that
@@ -2742,6 +2823,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
 		});
 
 		let hops = crate::Hops::try_from(vec![crate::Hop::UNKNOWN, crate::Hop::UNKNOWN]).unwrap();
@@ -2822,6 +2904,7 @@ mod tests {
 			cost: None,
 			peer_hop: None,
 			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
 		});
 		(subscriber, consumer)
 	}
@@ -2884,6 +2967,7 @@ mod tests {
 			cost: None,
 			peer_hop: None,
 			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
 		});
 
 		let path = Path::new("room/host").to_owned();
@@ -3022,11 +3106,22 @@ enum Sub<S: crate::transport::poll::Session> {
 /// owns its path and announce id until it retracts or restarts it.
 #[derive(Default)]
 struct Announced {
-	routes: HashMap<PathOwned, Option<AnnouncedRoute>>,
+	routes: HashMap<PathOwned, Held>,
 	/// Attached routes whose request queue woke since the last serve pass. The
 	/// driver wakes for every group the session carries, so a pass must cost what
 	/// was requested, not every route the peer announced.
 	ready: kio::Queue<PathOwned>,
+}
+
+/// What we made of one advertisement the peer holds.
+enum Held {
+	/// Not in the origin for good: a reflection, or outside our origin's scope.
+	Declined,
+	/// Outside the session's limit: the route as advertised, attached once a
+	/// limit allows it.
+	Withheld(crate::origin::Route),
+	/// In the origin, serving requests.
+	Attached(Box<AnnouncedRoute>),
 }
 
 impl Announced {
@@ -3043,12 +3138,42 @@ impl Announced {
 		});
 		let route = AnnouncedRoute::new(route, dynamic, wake);
 		route.waker.wake_by_ref();
-		self.routes.insert(path, Some(route));
+		self.routes.insert(path, Held::Attached(Box::new(route)));
+	}
+
+	/// Put the peer's route into the origin, so paths under it resolve through this
+	/// session on demand, or hold it back when the session's limit does not cover it.
+	/// Returns whether it attached.
+	fn offer<S: crate::transport::poll::Session>(
+		&mut self,
+		subscriber: &Subscriber<S>,
+		path: PathOwned,
+		route: crate::origin::Route,
+	) -> bool {
+		if !subscriber
+			.auth
+			.within_limit(crate::auth::Direction::Subscribe, path.as_str())
+		{
+			tracing::debug!(route = %subscriber.log_path(&path), "withholding announce outside the limit");
+			self.routes.insert(path, Held::Withheld(route));
+			return false;
+		}
+		// An error means the prefix is outside our origin's scope, so don't serve it.
+		match subscriber.origin.dynamic(&path, route.clone()) {
+			Ok(dynamic) => {
+				self.attach(path, route, dynamic);
+				true
+			}
+			Err(_) => {
+				self.declined(path);
+				false
+			}
+		}
 	}
 
 	fn declined(&mut self, path: PathOwned) {
 		// Dropping a replaced route closes its sources.
-		self.routes.insert(path, None);
+		self.routes.insert(path, Held::Declined);
 	}
 
 	/// Record an advertisement before deciding what to do with it.
@@ -3062,17 +3187,20 @@ impl Announced {
 	/// with [`Self::contains`]. Overwriting an attached route is [`Self::declined`]'s job.
 	fn reserve(&mut self, path: PathOwned) {
 		debug_assert!(!self.routes.contains_key(&path), "reserved a prefix already advertised");
-		self.routes.insert(path, None);
+		self.routes.insert(path, Held::Declined);
 	}
 
 	fn attached(&mut self, path: &PathOwned) -> Option<&mut AnnouncedRoute> {
-		self.routes.get_mut(path)?.as_mut()
+		match self.routes.get_mut(path)? {
+			Held::Attached(route) => Some(route.as_mut()),
+			_ => None,
+		}
 	}
 
 	/// Retire this session's advertisement without invalidating another live
 	/// session from the same peer. Dropping its sources closes their requests.
 	fn withdraw(&mut self, path: &PathOwned) {
-		if let Some(Some(entry)) = self.routes.remove(path) {
+		if let Some(Held::Attached(entry)) = self.routes.remove(path) {
 			entry.dynamic.withdrawn();
 		}
 	}
@@ -3084,7 +3212,7 @@ impl Announced {
 		let root = subscriber.origin.root().to_owned();
 		while let Poll::Ready(Ok(path)) = self.ready.poll_pop(waiter) {
 			// A route retired since it woke has nothing left to serve.
-			let Some(Some(entry)) = self.routes.get_mut(&path) else {
+			let Some(Held::Attached(entry)) = self.routes.get_mut(&path) else {
 				continue;
 			};
 			// Cleared before polling, so a request landing mid-pass queues the route again.
@@ -3109,10 +3237,44 @@ impl Announced {
 		}
 	}
 
+	/// Apply a new limit: hold back every attached route it no longer covers, closing
+	/// its sources (tracks in flight end on their own gates, with `Unauthorized`), and
+	/// attach every withheld one it now does.
+	fn limit<S: crate::transport::poll::Session>(&mut self, permit: &crate::auth::Permit, subscriber: &Subscriber<S>) {
+		let changed: Vec<PathOwned> = self
+			.routes
+			.iter()
+			.filter(|(path, held)| match held {
+				Held::Attached(_) => !permit.within_limit(path.as_str()),
+				Held::Withheld(_) => permit.within_limit(path.as_str()),
+				Held::Declined => false,
+			})
+			.map(|(path, _)| path.clone())
+			.collect();
+		for path in changed {
+			match self.routes.remove(&path) {
+				Some(Held::Attached(entry)) => {
+					tracing::info!(route = %subscriber.log_path(&path), "announce no longer authorized");
+					self.routes.insert(path, Held::Withheld(entry.route.clone()));
+				}
+				Some(Held::Withheld(mut route)) => {
+					tracing::info!(route = %subscriber.log_path(&path), "announce authorized again");
+					if subscriber.going_away.is_set() {
+						route.cost = crate::origin::Cost::DRAIN;
+					}
+					self.offer(subscriber, path, route);
+				}
+				_ => unreachable!("only attached and withheld routes change"),
+			}
+		}
+	}
+
 	/// Re-price every attached route to a draining cost (the peer sent a GOAWAY).
 	fn drain(&mut self) {
-		for entry in self.routes.values_mut().flatten() {
-			entry.drain();
+		for held in self.routes.values_mut() {
+			if let Held::Attached(entry) = held {
+				entry.drain();
+			}
 		}
 	}
 }
@@ -3214,6 +3376,16 @@ struct TrackServe<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> TrackServe<S> {
+	/// Watches whether the session still lets us receive this broadcast from the peer:
+	/// our grant, and the ceiling on what the peer may publish.
+	fn gate(&self) -> crate::auth::Gate {
+		crate::auth::Gate::new(
+			self.subscriber.auth.clone(),
+			self.path.clone(),
+			crate::auth::Direction::Subscribe,
+		)
+	}
+
 	fn widen_frame_bounds(&self, subscription: &mut Subscription) {
 		if self.subscriber.version.has_frame_bounds() {
 			return;
@@ -3554,6 +3726,14 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 		}
 	}
 
+	/// Give up on the SUBSCRIBE, resetting it with `err` if it reached the wire.
+	fn abort(self, err: &Error) {
+		self.serve.subscriber.remove_subscribe(self.id);
+		if let EstablishState::Send { stream } | EstablishState::WaitOk { stream } = self.state {
+			stream.writer.abort(err);
+		}
+	}
+
 	fn activate(&self, stream: Stream<S, Version>) -> SubStream<S> {
 		SubStream {
 			stream,
@@ -3574,6 +3754,8 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 struct TrackServeRun<S: crate::transport::poll::Session> {
 	serve: TrackServe<S>,
 	state: TrackRunState<S>,
+	/// Cancels the track once the session stops allowing its broadcast.
+	gate: crate::auth::Gate,
 }
 
 // A state machine's enum is its storage: one transient instance per stream, so the
@@ -3604,12 +3786,44 @@ impl<S: crate::transport::poll::Session> TrackServeRun<S> {
 			let info = track::Info::default().with_max_age(serve.subscriber.origin.default_max_age());
 			TrackRunState::Serve(ServeLoop::new(&serve, request, info, None))
 		};
-		Self { serve, state }
+		let gate = serve.gate();
+		Self { serve, state, gate }
+	}
+
+	/// The session no longer allows the broadcast: end the track and cancel the
+	/// upstream subscription and fetches, leaving the rest of the session alone.
+	fn revoke(&mut self) {
+		tracing::info!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, "subscription no longer authorized");
+		match std::mem::replace(&mut self.state, TrackRunState::Done) {
+			TrackRunState::Info { request, .. } => {
+				if let Some(request) = request {
+					request.reject(Error::Unauthorized);
+				}
+			}
+			TrackRunState::Serve(serve_loop) => {
+				let _ = serve_loop.serving.abort(Error::Unauthorized);
+				// Reset rather than finish, so the publisher reads a revocation instead of
+				// a routine unsubscribe. A SUBSCRIBE still opening is on the wire too.
+				if let Sub::Active(active) = serve_loop.sub {
+					self.serve.subscriber.remove_subscribe(active.id);
+					active.stream.writer.abort(&Error::Unauthorized);
+				}
+				if let ServeMode::Establish(establish) = serve_loop.mode {
+					establish.abort(&Error::Unauthorized);
+				}
+				// Each fetch in flight resets itself as it drops, seeing the same denial.
+			}
+			TrackRunState::Done => {}
+		}
 	}
 }
 
 impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if self.gate.poll_denied(waiter).is_ready() {
+			self.revoke();
+			return Poll::Ready(());
+		}
 		loop {
 			match &mut self.state {
 				TrackRunState::Info { request, info } => {
@@ -4132,6 +4346,45 @@ impl<S: crate::transport::poll::Session> FetchServeRun<S> {
 			timescale,
 			group,
 			state: FetchRunState::Open { request: Some(request) },
+		}
+	}
+}
+
+impl<S: crate::transport::poll::Session> Drop for FetchServeRun<S> {
+	fn drop(&mut self) {
+		// Dropped because the session stopped allowing the broadcast: reset with that
+		// reason, so neither the publisher nor the waiting reader reads a routine cancel.
+		// Any other drop keeps the default cancel.
+		if matches!(self.state, FetchRunState::Done)
+			|| self
+				.serve
+				.subscriber
+				.auth
+				.allows(crate::auth::Direction::Subscribe, self.serve.path.as_str())
+		{
+			return;
+		}
+		let err = Error::Unauthorized;
+		match std::mem::replace(&mut self.state, FetchRunState::Done) {
+			FetchRunState::Open { request } => {
+				if let Some(request) = request {
+					request.reject(err);
+				}
+			}
+			FetchRunState::Send { request, stream, .. } | FetchRunState::Answer { request, stream, .. } => {
+				stream.writer.abort(&err);
+				if let Some(request) = request {
+					request.reject(err);
+				}
+			}
+			FetchRunState::Ingest {
+				mut stream, producer, ..
+			} => {
+				stream.reader.abort(&err);
+				stream.writer.abort(&err);
+				let _ = producer.abort(err);
+			}
+			FetchRunState::Done => {}
 		}
 	}
 }

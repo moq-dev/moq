@@ -59,6 +59,32 @@ than this checkout: it's a prebuilt NAPI QUIC/HTTP3 addon, not part of the moq
 source tree. Everything else (`@moq/net`, `@moq/hang`, ...) resolves to the
 workspace packages, because the JS clients here are bun workspace members.
 
+## Auth
+
+The relay verifies tokens through `moq auth serve` with a key generated for the
+run; nothing is anonymous. Each publisher dials with a token for its broadcast's
+subtree and each subscriber with one to read it, so every cell also covers the
+`?jwt=` URL path in every client.
+
+Clients that print the grant the relay sent back over AUTH, as an
+`auth granted publish=[...] subscribe=[...]` line, must report exactly what
+their token implies: the Rust CLI (a `moq_net::auth` debug log) and the native
+JS subscribers. A cell whose grant is missing or wrong fails even when media
+flowed. The binding clients (Python, Go, C, GStreamer) have no grant to print
+until moq-ffi exposes one, and the browser's shared connection keeps its session
+private, so their cells check media alone. Every client here negotiates
+moq-lite-06, so a printing client that reports nothing never got its grant.
+
+After the matrix, each publisher whose refusal the harness can read (Rust, the
+browser) runs once more with a token that excludes its broadcast. It must fail
+loud, logging Unauthorized and naming the path, and every subscriber must time
+out.
+
+Tokens use patterns no prefix could carry, so every cell checks that AUTH\_OK
+delivers them as minted: a publisher is granted its exact broadcast, a subscriber
+`**/name` (a leading `**` matching zero segments), and the refused publisher
+`interop-allowed-*.hang`.
+
 ## Running locally
 
 You need the workspace toolchain on `PATH` (cargo, ffmpeg, bun, uv, go,
@@ -164,7 +190,7 @@ contract](../README.md).
 
 ```text
 interop.sh              orchestrator: build clients, run the relay + matrix or media checks
-interop.toml            relay config (anonymous, self-signed localhost)
+interop.toml            relay config (token auth via `moq auth serve`, self-signed localhost)
 bare-fin.ts             the JS side of `just test bare-fin`, driven by moq-net's tests
 varint.ts               the JS side of the varint check, driven by moq-net's tests
 clients/

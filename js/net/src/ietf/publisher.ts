@@ -1,4 +1,6 @@
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
+import type { Grant } from "../auth.ts";
+import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { controlTimeout, error, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
@@ -238,6 +240,15 @@ export class Publisher {
 	// back came from us. `undefined` when nothing negotiated it.
 	#advert?: Cluster.Advert;
 
+	// Our grant (MoQ Auth): only what it lets us publish is advertised and served, and a
+	// shrink withdraws what it no longer covers. Undefined until the peer answers, which
+	// allows everything.
+	#grant: Getter<Grant | undefined>;
+
+	// Resolves once the tokens this session presented at setup are answered, so nothing is
+	// advertised before the grant it would be checked against.
+	#ready: Promise<void>;
+
 	/**
 	 * Creates a new Publisher instance.
 	 *
@@ -250,6 +261,8 @@ export class Publisher {
 		requiresSolicitation,
 		hidden = false,
 		cluster,
+		grant = new Signal<Grant | undefined>(undefined),
+		ready = Promise.resolve(),
 	}: {
 		/** The WebTransport session, for uni streams. */
 		quic: WebTransport;
@@ -263,8 +276,14 @@ export class Publisher {
 		hidden?: boolean;
 		/** The Hop IDs the SETUP exchange settled (MoQ Cluster). */
 		cluster?: Cluster.Hops;
+		/** The union of our tokens' grants (MoQ Auth), which bounds what we publish. */
+		grant?: Getter<Grant | undefined>;
+		/** Resolves once the setup tokens are answered (MoQ Auth). */
+		ready?: Promise<void>;
 	}) {
 		this.#quic = quic;
+		this.#grant = grant;
+		this.#ready = ready;
 		this.#session = session;
 		const origin = publish && wireOf(publish);
 		this.#advertised = origin?.advertised ?? new Signal(new Map());
@@ -286,9 +305,19 @@ export class Publisher {
 		let broadcast: broadcast.Consumer | undefined;
 		let refusal: { errorCode: number; reasonPhrase: string } | undefined;
 		try {
+			// Serve only what our grant lets us publish. Checked before resolving, so a denied
+			// request never reaches the origin.
+			if (this.#denied(name)) {
+				refusal = {
+					errorCode: toRequestCode("unauthorized", "subscribe", version),
+					reasonPhrase: "not granted",
+				};
+			}
 			broadcast =
-				this.#publish && (wireOf(this.#publish).local(name) ?? (await wireOf(this.#publish).demand(name)));
-			if (!broadcast) {
+				!refusal && this.#publish
+					? (wireOf(this.#publish).local(name) ?? (await wireOf(this.#publish).demand(name)))
+					: undefined;
+			if (!broadcast && !refusal) {
 				refusal = {
 					errorCode: toRequestCode("does_not_exist", "subscribe", version),
 					reasonPhrase: "broadcast not found",
@@ -477,14 +506,37 @@ export class Publisher {
 						})
 					: Promise.resolve();
 
+			// Losing the grant ends the subscription, leaving the session alone.
+			let revoke!: () => void;
+			const revoked = new Promise<"revoked">((resolve) => {
+				revoke = () => resolve("revoked");
+			});
+			const disposeGrant = this.#grant.subscribe(() => {
+				if (this.#denied(name)) revoke();
+			});
+			// The grant may have shrunk during setup, before this watcher existed.
+			if (this.#denied(name)) revoke();
+
 			let publishError: Error | undefined;
+			let unauthorized = false;
 			let ended = false;
 			try {
 				const served = Symbol("served");
-				ended =
-					(await race([Promise.all([serving, filling]).then(() => served), stream.reader.closed])) === served;
+				const end = await race([
+					Promise.all([serving, filling]).then(() => served),
+					stream.reader.closed,
+					revoked,
+				]);
+				if (end === "revoked") {
+					console.info(`subscription no longer authorized: broadcast=${name} track=${track.name}`);
+					unauthorized = true;
+					unsubscribe();
+				}
+				ended = end === served;
 			} catch (err: unknown) {
 				publishError = error(err);
+			} finally {
+				disposeGrant();
 			}
 
 			// PUBLISH_DONE waits until every stream this subscription will open is closed, as
@@ -519,9 +571,13 @@ export class Publisher {
 						version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
 							? msg.requestId
 							: undefined,
-					statusCode: publishError ? PublishDoneStatus.INTERNAL_ERROR : PublishDoneStatus.TRACK_ENDED,
+					statusCode: unauthorized
+						? PublishDoneStatus.UNAUTHORIZED
+						: publishError
+							? PublishDoneStatus.INTERNAL_ERROR
+							: PublishDoneStatus.TRACK_ENDED,
 					streamCount: BigInt(streams.opened),
-					reasonPhrase: publishError ? "internal error" : "track ended",
+					reasonPhrase: unauthorized ? "not granted" : publishError ? "internal error" : "track ended",
 				});
 				await done.encode(stream.writer, version);
 			} catch {
@@ -776,6 +832,22 @@ export class Publisher {
 		}
 	}
 
+	// Whether our grant excludes publishing this broadcast. No grant yet allows it.
+	#denied(broadcast: Path.Valid): boolean {
+		const grant = this.#grant.peek();
+		return grant !== undefined && !grant.publish.matches(broadcast);
+	}
+
+	/**
+	 * Close the session when our origin publishes a broadcast our grant does not cover;
+	 * see {@link enforceGrant}.
+	 *
+	 * @internal
+	 */
+	async runEnforce(setupAnswered: Promise<void>): Promise<void> {
+		await enforceGrant({ quic: this.#quic, advertised: this.#advertised, grant: this.#grant, setupAnswered });
+	}
+
 	/**
 	 * Handles an incoming SUBSCRIBE_NAMESPACE on a bidi stream.
 	 *
@@ -815,7 +887,11 @@ export class Publisher {
 			// from the empty prefix unasked, so this stream carries only what that hid.
 			const carries = (covered: Path.Valid) =>
 				(!this.#hidden || msg.hidden || !hiddenBelow(prefix, covered)) &&
-				(this.#requiresSolicitation || (this.#hidden && hiddenBelow(Path.empty(), covered)));
+				(this.#requiresSolicitation || (this.#hidden && hiddenBelow(Path.empty(), covered))) &&
+				!this.#denied(covered);
+
+			// Nothing is advertised before the grant it would be checked against.
+			await this.#ready;
 
 			// Inline entries always land, and the receiver treats a repeated NAMESPACE as a
 			// replacement, so repricing one is just sending it again, a new original
@@ -853,8 +929,15 @@ export class Publisher {
 				// waits for its reply only notifies listeners already registered.
 				// TODO Make a better helper within Signals.
 				let dispose!: Dispose;
-				const changed = new Promise<Advertisements | undefined>((resolve) => {
-					dispose = this.#advertised.changed(resolve);
+				const changed = new Promise<"changed">((resolve) => {
+					const table = this.#advertised.changed(() => resolve("changed"));
+					// A grant change re-diffs the same way, withdrawing what it no longer covers.
+					// The loop top re-reads the table, so an ended origin still stops it there.
+					const grant = this.#grant.changed(() => resolve("changed"));
+					dispose = () => {
+						table();
+						grant();
+					};
 				});
 
 				const advertised = this.#advertised.peek();
@@ -925,6 +1008,9 @@ export class Publisher {
 
 		let dispose: Dispose | undefined;
 		try {
+			// Nothing is advertised before the grant it would be checked against.
+			if ((await Promise.race([this.#ready.then(() => "ready" as const), closed])) !== "ready") return;
+
 			// Keyed by path.
 			const ns: Namespaces = { active: new Map(), refused: new Map(), offered: new Map() };
 			let retry = 0;
@@ -936,8 +1022,15 @@ export class Publisher {
 				// through it and leave the namespace unadvertised until something unrelated
 				// changed.
 				// TODO Make a better helper within Signals.
-				const changed = new Promise<Advertisements | undefined>((resolve) => {
-					dispose = this.#advertised.changed(resolve);
+				const changed = new Promise<"changed">((resolve) => {
+					const table = this.#advertised.changed(() => resolve("changed"));
+					// A grant change re-diffs the same way, withdrawing what it no longer covers.
+					// The loop top re-reads the table, so an ended origin still stops it there.
+					const grant = this.#grant.changed(() => resolve("changed"));
+					dispose = () => {
+						table();
+						grant();
+					};
 				});
 
 				const advertised = this.#advertised.peek();
@@ -948,8 +1041,14 @@ export class Publisher {
 
 				const updated = new Map<Path.Valid, Advertised>();
 				for (const [covered, candidates] of advertised) {
-					// Only peers that declared MoQ Hidden filter unsolicited discovery.
-					if ((this.#hidden && hiddenBelow(Path.empty(), covered)) || candidates.length === 0) continue;
+					// Only peers that declared MoQ Hidden filter unsolicited discovery, and
+					// nothing our grant does not cover reaches the peer at all (MoQ Auth).
+					if (
+						(this.#hidden && hiddenBelow(Path.empty(), covered)) ||
+						this.#denied(covered) ||
+						candidates.length === 0
+					)
+						continue;
 					updated.set(covered, candidates[0]);
 				}
 

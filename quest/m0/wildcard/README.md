@@ -51,9 +51,8 @@ Route cost already names this case: "The original publisher seeds it with its
 production cost: zero for a live publish, something large for a standby that
 would have to start working (a cold transcoder)"
 (`drafts/draft-lcurley-moq-lite.md`). `moq_auth::Claims.publish` and
-`origin::Producer` gained versioned patterns on the
-[Auth](/quest/m1/auth/README.md) line, so tokens and filters reuse the
-same matcher; advertisements stay prefixes. `Cost { warm, cold }`
+`origin::Producer` scope by `moq-pattern` patterns, so tokens and filters
+reuse the same matcher; advertisements stay prefixes. `Cost { warm, cold }`
 (`rs/moq-net/src/model/origin.rs:426`) is the route cost since
 [#2925](https://github.com/moq-dev/moq/pull/2925).
 
@@ -88,8 +87,8 @@ field.
 ### Decisions
 
 - **One prefix on the wire, one pattern in the token and the filter.** An
-  advertisement is a path prefix; the pattern dialect from the
-  [Auth](/quest/m1/auth/README.md) line is what tokens and the consume-side filter use, matched by the
+  advertisement is a path prefix; the `moq-pattern`
+  dialect is what tokens and the consume-side filter use, matched by the
   shared matcher, so nothing resembles a second grammar and nothing on the
   wire spells a wildcard.
 - **Longest prefix wins, and its refusal is final.** This is the rule
@@ -189,7 +188,7 @@ field.
 - **Patterns are independent of clustering.** The `moq-pattern` crate owns
   the matching semantics tokens and filters share, with no draft of its own;
   no announce message carries a pattern on either protocol (AUTH grants on
-  lite-06 do, per the [Auth](/quest/m1/auth/README.md) line). moq-cluster adds hop
+  lite-06 do). moq-cluster adds hop
   lists, costs, pool selection, and request resolution to prefix
   advertisements.
 

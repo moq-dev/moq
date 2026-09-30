@@ -334,6 +334,12 @@ fn last_error_protocol_captures_session_known_app_and_unknown() {
 			moq_protocol_kind::MOQ_PROTOCOL_KIND_UNAUTHORIZED as u32,
 		),
 		(
+			moq_net::Error::from(moq_net::StreamError::Unauthorized),
+			moq_error_scope::MOQ_ERROR_SCOPE_STREAM as u32,
+			0x3a,
+			moq_protocol_kind::MOQ_PROTOCOL_KIND_UNAUTHORIZED as u32,
+		),
+		(
 			moq_net::Error::from(moq_net::SessionError::App(7)),
 			moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32,
 			64 + 7,

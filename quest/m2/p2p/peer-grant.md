@@ -45,9 +45,9 @@ against the roster, and verifies AUTH_POP with `cnf`. The origin then
 serves only the granted paths. A missing, expired, HMAC-signed, or
 unproven grant is not a grant.
 
-P2P is the first consumer:
 [Signaling and policy](/quest/m2/p2p/signal.md) presents the grant in band
-on each direct session. This quest does not depend on that line.
+on each direct session. P2P is its only consumer, so it lives on this line
+rather than the auth line (decided in the 2026-09-30 audit).
 
 Docs: `doc/bin/relay/auth.md` states that peer grants need an asymmetric
 key, that HS256 operators get none, and that the public JWKS is not a
@@ -61,9 +61,4 @@ Additive.
 
 ## Required
 
-- [Lite stream](/quest/m1/auth/lite.md) - the AUTH stream the grant rides
-- [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay owns AUTH and knows the session's paths
-
-## Related
-
-- [Signaling and policy](/quest/m2/p2p/signal.md) - the first consumer
+- [In-band auth](/quest/m1/auth/README.md) - relay tokens reach `main` with this line, so the relay owns AUTH and knows the session's paths

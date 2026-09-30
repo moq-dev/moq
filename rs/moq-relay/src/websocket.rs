@@ -127,7 +127,7 @@ struct SessionInputs {
 async fn handle_socket<T>(
 	socket: T,
 	session: SessionInputs,
-	mut lease: auth::Lease,
+	lease: auth::Lease,
 	pending: Option<(crate::session::Registry, moq_auth::Request)>,
 ) -> anyhow::Result<()>
 where
@@ -197,6 +197,7 @@ where
 	// The handshake is done, so this is a MoQ session now: only now can a push
 	// be serviced, and only now does the session appear in the live table.
 	let registration = pending.map(|(sessions, request)| sessions.register(request));
+	let mut lease = lease.authorizing(&session);
 
 	loop {
 		let nudged = async {

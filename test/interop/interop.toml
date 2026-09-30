@@ -1,5 +1,5 @@
 # Relay config for the cross-language interop test.
-# Anonymous access, self-signed localhost cert, QUIC + WebSocket on 127.0.0.1:4443.
+# Token auth, self-signed localhost cert, QUIC + WebSocket on 127.0.0.1:4443.
 
 [log]
 level = "info"
@@ -14,5 +14,6 @@ tls.generate = ["localhost", "127.0.0.1"]
 listen = "127.0.0.1:4443"
 
 [auth]
-# Allow anonymous access to everything.
-public = "**"
+# `moq auth serve`, verifying the tokens interop.sh mints for each cell. No
+# anonymous access: a client that drops its token is refused.
+url = "http://127.0.0.1:4440/"

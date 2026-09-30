@@ -92,6 +92,8 @@ export const StreamCode = Object.freeze(
 		Evicted: 0x35 as StreamCode,
 		/** A frame declared a payload larger than the receiver accepts. */
 		FrameTooLarge: 0x38 as StreamCode,
+		/** The grant does not cover this request, or no longer does. The session stays up. */
+		Unauthorized: 0x3a as StreamCode,
 		/** The publisher could serve this request but has no capacity for it now. */
 		NoCapacity: 0x30 as StreamCode,
 		/** A group grew past its cache budget and was aborted. */
@@ -333,6 +335,16 @@ export function controlTimeout(cause: unknown): Stream {
 }
 
 /**
+ * The {@link StreamCode.Unauthorized} error for a request the grant does not cover, naming
+ * the broadcast. Unlike {@link SessionCode.Unauthorized}, it ends only this stream.
+ *
+ * @internal
+ */
+export function unauthorized(broadcast: string): Stream {
+	return new Stream(StreamCode.Unauthorized, { message: `unauthorized: ${broadcast}` });
+}
+
+/**
  * Decode a transport failure into a {@link Stream} when it carries a stream reset code,
  * otherwise pass it through.
  *
@@ -422,6 +434,24 @@ export function fromClose(info: WebTransportCloseInfo): Session | null {
 	const code = (info.closeCode ?? SessionCode.Cancel) as SessionCode;
 	if (code === SessionCode.Cancel) return null;
 	return new Session(code, { reason: info.reason });
+}
+
+// WebTransport rejects a close reason over 1024 bytes of UTF-8 by throwing, so a reason
+// built from peer-supplied data has to be bounded before it gets there. A broadcast path
+// is peer-supplied and long enough to reach this on its own.
+const MAX_CLOSE_REASON = 1024;
+
+/**
+ * The longest prefix of `text` that fits a session close reason. `encodeInto` stops on a
+ * whole code point, so `read` never lands mid-character the way slicing bytes would.
+ *
+ * @internal
+ */
+export function closeReason(text: string): string {
+	const encoder = new TextEncoder();
+	const buf = new Uint8Array(MAX_CLOSE_REASON);
+	const { read } = encoder.encodeInto(text, buf);
+	return text.slice(0, read);
 }
 
 /**

@@ -82,6 +82,62 @@ Cache activity is dated lazily: reads and writes mark a group active without
 reading a clock, and the next `gc` pass stamps it with the supplied instant.
 Expiry is therefore approximate; a late `gc` extends retention.
 
+## Authorization
+
+`session.auth()` is the session's `auth::Handle`. On moq-lite 06, and on
+moq-transport draft-17+ when both sides negotiate the
+[MoQ Auth extension](/draft/moq-auth), each side presents its connection's
+credential right after setup, and `grant()` watches the union of every grant
+this side holds: `None` until the peer answers, forever otherwise. `add(token)` presents another token and resolves
+once the peer answers; drop the returned `auth::Token` to withdraw it.
+
+```rust
+let mut grant = session.auth().grant();
+while grant.peek().is_none() {
+    grant.changed().await?;
+}
+let refreshed = session.auth().add(jwt).await?;
+```
+
+By default a session answers the peer's connection credential with what its own
+origin handles allow and refuses any other token as unsupported. To verify
+tokens yourself, take `handshake.auth().requests()` on the `server::Handshake`
+before `ok()` (or `session.auth().requests()` before first polling the driver)
+and answer every `auth::Request` with `accept(grant)`, which returns an
+`auth::Issued` you can `update` or `revoke`, or `reject`. moq-lite carries any
+pattern grant as issued. moq-transport carries namespace prefixes, so there a
+grant that is not a union of subtrees is refused and the presenter sees
+`Unsupported`; after a grant, such an update revokes it.
+
+A client whose origin publishes a broadcast outside its grant closes the
+session with `Unauthorized`, naming the path in the close reason. A grant that
+shrinks withdraws the announcements and cancels the subscriptions it no longer
+covers, and leaves the session up. On moq-lite each cancelled stream resets with
+`StreamError::Unauthorized`.
+
+`session.auth().authorize(&grant)` authorizes the peer for `grant` on a live
+session; calling it again re-authorizes, narrower or wider. It works on every
+version, whether or not the peer speaks AUTH: the session enforces it itself, and
+never past its origin handles. A narrower grant ends what falls outside at once: announcements to the peer
+retract, its new requests are refused, its subscriptions and fetches reset with
+`Unauthorized`, and the broadcasts it published abort, so local readers see
+`Unauthorized` too. A wider one brings back what the old grant held back:
+announcements are made again, the peer's own announcements return to the origin,
+and new requests are accepted. The rest of the session carries on. When the
+session answers the peer's connection credential itself, the peer is sent the
+grant.
+
+```rust
+// Deafen alice's audio: the peer may still subscribe to her video.
+let video: Pattern = "room/alice/video/**".parse()?;
+session.auth().authorize(&auth::Grant {
+    subscribe: video.into(),
+    ..auth::Grant::all()
+});
+// Undeafen.
+session.auth().authorize(&auth::Grant::all());
+```
+
 ## Patterns
 
 `Pattern` describes a set of paths; `Patterns` is a union reduced by

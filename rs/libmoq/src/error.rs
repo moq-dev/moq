@@ -400,6 +400,7 @@ fn stream_kind(err: &moq_net::StreamError) -> moq_protocol_kind {
 		moq_net::StreamError::WrongSize => MOQ_PROTOCOL_KIND_WRONG_SIZE,
 		moq_net::StreamError::FrameTooLarge => MOQ_PROTOCOL_KIND_FRAME_TOO_LARGE,
 		moq_net::StreamError::TimestampMismatch => MOQ_PROTOCOL_KIND_TIMESTAMP_MISMATCH,
+		moq_net::StreamError::Unauthorized => MOQ_PROTOCOL_KIND_UNAUTHORIZED,
 		moq_net::StreamError::App(_) => MOQ_PROTOCOL_KIND_APP,
 		moq_net::StreamError::Unknown(_) => MOQ_PROTOCOL_KIND_UNKNOWN,
 		_ => MOQ_PROTOCOL_KIND_UNKNOWN,

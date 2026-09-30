@@ -33,6 +33,8 @@ Decided 2026-09-29 (quest-plan interview):
   the exact-scope leak is a real bug.
 - The old gate ("a deployment needs a suffix claim a service prefix cannot
   express") is removed: the exact-scope leak is reason enough.
+- Path patterns ([#4277](https://github.com/moq-dev/moq/pull/4277)) kept
+  advertisements as prefixes, leaving non-prefix routing to this quest.
 
 ### Wire
 
@@ -54,10 +56,8 @@ cases as vectors both languages test.
 
 Only these four shapes go on the wire. A richer interest pattern
 (`pid/*/chat`) stays a consume-side filter over the widest shape that covers
-it. Path patterns already shipped for that filtering and for token claims
-(`moq-pattern`, `@moq/pattern`,
-[#3746](https://github.com/moq-dev/moq/pull/3746), and the
-[auth line](/quest/m1/auth/README.md)).
+it, as [#3770](https://github.com/moq-dev/moq/pull/3770) decided for every pattern
+before this quest.
 
 ### Model
 

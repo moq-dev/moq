@@ -18,6 +18,8 @@ pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
 	pub driver: Driver<S>,
 	/// The session-side GOAWAY halves, stored on the public [`crate::Session`].
 	pub goaway: crate::goaway::Handle,
+	/// The session's AUTH tokens and grants, stored on the public [`crate::Session`].
+	pub auth: crate::auth::Handle,
 }
 
 /// Server: read the peer's single SETUP message off its Setup Stream before starting
@@ -54,6 +56,11 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// The runtime that arms the session's timers.
 	pub runtime: crate::time::Clock,
 
+	/// Whether we dialed the session. Only the dialing side aborts on a publication
+	/// its grant does not cover: a server's publish origin is everything the peer
+	/// may read, not what it intends to push.
+	pub client: bool,
+
 	/// The transport carrying the session. Cloned into every loop that outlives
 	/// [`start`], so the connection closes when the last of them drops.
 	pub session: S,
@@ -86,6 +93,11 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// gated on the client's path via [`accept_setup`]). Seeds the peer-setup slot so
 	/// the Setup Stream isn't expected again. `None` reads it from the wire as usual.
 	pub peer_setup: Option<Setup>,
+
+	/// The session's auth handle, created before [`start`] so a server can take the
+	/// peer's token requests during its handshake. Supports AUTH exactly when `version`
+	/// does.
+	pub auth: crate::auth::Handle,
 }
 
 /// Start a lite session.
@@ -97,6 +109,7 @@ where
 {
 	let Config {
 		runtime,
+		client,
 		session,
 		setup_stream,
 		publish,
@@ -105,6 +118,7 @@ where
 		version,
 		mut our_setup,
 		peer_setup,
+		auth,
 	} = config;
 
 	let recv_bw = bandwidth::Producer::new();
@@ -132,6 +146,15 @@ where
 			.or_else(|| subscribe.as_ref().map(|origin| origin.hop()))
 			.filter(|hop| hop.id() != 0);
 	}
+
+	// What the peer's connection credential earns by default: publishing what our
+	// subscribe half accepts, and subscribing to what our publish half serves. A
+	// missing half grants nothing.
+	let peer_grant = crate::auth::Grant {
+		publish: subscribe.as_ref().map(|origin| origin.allowed()).unwrap_or_default(),
+		subscribe: publish.as_ref().map(|origin| origin.allowed()).unwrap_or_default(),
+		expires: None,
+	};
 
 	// Always run both loops so inbound control (Subscribe/Announce/Probe/Goaway)
 	// and GROUP streams are accepted regardless of which halves the caller wired.
@@ -164,6 +187,13 @@ where
 	// Read out before the setup machine takes ownership below.
 	let our_cost = our_setup.cost;
 
+	// Present the connection's own credential (the empty token) right away, so
+	// both sides learn their grant without waiting on the app.
+	let setup_token = match version.has_auth() {
+		true => Some(auth.present(bytes::Bytes::new(), true)?),
+		false => None,
+	};
+
 	let publisher = Publisher::new(PublisherConfig {
 		runtime: runtime.clone(),
 		session: session.clone(),
@@ -172,6 +202,9 @@ where
 		peer_setup: peer_setup.clone(),
 		goaway: goaway.clone(),
 		peer_hop,
+		auth: auth.clone(),
+		peer_grant,
+		client,
 	});
 	let subscriber = Subscriber::new(SubscriberConfig {
 		runtime: runtime.clone(),
@@ -186,9 +219,21 @@ where
 		// for its own egress.
 		cost: our_cost,
 		going_away: goaway.going_away.clone(),
+		auth: auth.clone(),
 	});
 
 	let driver = Driver {
+		auth: Present {
+			runtime: runtime.clone(),
+			session: session.clone(),
+			version,
+			handle: auth.clone(),
+			going_away: goaway.going_away.clone(),
+			tokens: kio::Tasks::new(),
+			violation: Default::default(),
+			started: false,
+			_setup: setup_token,
+		},
 		setup: version
 			.has_setup_stream()
 			.then(|| SendSetup::new(session.clone(), our_setup, version)),
@@ -203,12 +248,15 @@ where
 		recv_bandwidth: recv_bw_consumer,
 		driver,
 		goaway: goaway_handle,
+		auth,
 	})
 }
 
 /// The lite session driver: one poll function racing every protocol arm, in
 /// place of a task set of boxed futures.
 pub(crate) struct Driver<S: crate::transport::poll::Session> {
+	/// Presenting our tokens, one AUTH stream each.
+	auth: Present<S>,
 	/// Advertising our capabilities, or `None` once sent (or on a version with no
 	/// Setup Stream).
 	setup: Option<SendSetup<S>>,
@@ -230,6 +278,10 @@ where
 {
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let res = std::task::ready!(self.poll_protocol(waiter));
+		self.auth.handle.close(match &res {
+			Ok(()) => Error::Cancel,
+			Err(err) => err.clone(),
+		});
 		if let Err(err) = &res {
 			// Every track this session was receiving ends with its error.
 			self.subscriber.abort(err);
@@ -260,6 +312,11 @@ where
 	fn poll_protocol(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut cx = Context::from_waker(waiter.waker());
 
+		// Presenting tokens ends the session only when the peer breaks the protocol.
+		if let Poll::Ready(err) = self.auth.poll(waiter) {
+			return Poll::Ready(Err(err));
+		}
+
 		// The send-side machines never end the session; completion just retires them.
 		if let Some(setup) = &mut self.setup
 			&& setup.poll(&mut cx).is_ready()
@@ -284,6 +341,188 @@ where
 			return Poll::Ready(res);
 		}
 		Poll::Pending
+	}
+}
+
+impl<S: crate::transport::poll::Session> Drop for Driver<S> {
+	fn drop(&mut self) {
+		// Dropped without finishing: release anything still waiting on a token.
+		self.auth.handle.close(Error::Cancel);
+	}
+}
+
+/// Opens one AUTH stream per token this side presents.
+struct Present<S: crate::transport::poll::Session> {
+	runtime: crate::time::Clock,
+	session: S,
+	version: Version,
+	handle: crate::auth::Handle,
+	going_away: crate::goaway::GoingAway,
+	tokens: kio::Tasks<PresentToken<S>>,
+	/// Set by a token whose peer broke the protocol, which ends the session.
+	violation: kio::Shared<Option<Error>>,
+	/// Whether the first poll decided who answers the peer's tokens.
+	started: bool,
+	/// The connection's own credential, held for the life of the session.
+	_setup: Option<crate::auth::Token>,
+}
+
+impl<S: crate::transport::poll::Session> Present<S> {
+	/// Resolve only when a token's peer broke the protocol.
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		if !self.started {
+			// Decided once, before any AUTH stream can be accepted: the app took the
+			// requests before running the driver, or the session answers itself.
+			let _ = self.handle.acceptor();
+			self.started = true;
+		}
+		while let Poll::Ready(Some((id, token))) = self.handle.poll_opening(waiter) {
+			self.tokens.push(PresentToken {
+				runtime: self.runtime.clone(),
+				session: self.session.clone(),
+				version: self.version,
+				handle: self.handle.clone(),
+				going_away: self.going_away.clone(),
+				violation: self.violation.clone(),
+				id,
+				state: PresentState::Open { token },
+			});
+		}
+		let _ = self.tokens.poll(waiter);
+		// A token sets it from inside the poll above, so nothing needs waking.
+		match self.violation.lock().take() {
+			Some(err) => Poll::Ready(err),
+			None => Poll::Pending,
+		}
+	}
+}
+
+/// One token's AUTH stream: send the token, then track the grant until either
+/// side ends it.
+struct PresentToken<S: crate::transport::poll::Session> {
+	runtime: crate::time::Clock,
+	session: S,
+	version: Version,
+	handle: crate::auth::Handle,
+	going_away: crate::goaway::GoingAway,
+	violation: kio::Shared<Option<Error>>,
+	id: u64,
+	state: PresentState<S>,
+}
+
+enum PresentState<S: crate::transport::poll::Session> {
+	Open { token: bytes::Bytes },
+	Run { stream: Stream<S, Version>, answered: bool },
+	Done,
+}
+
+impl<S: crate::transport::poll::Session> kio::Task for PresentToken<S> {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let err = ready!(self.poll_present(waiter));
+		let answered = matches!(self.state, PresentState::Run { answered: true, .. });
+		if let PresentState::Run { stream, .. } = std::mem::replace(&mut self.state, PresentState::Done) {
+			stream.writer.abort(&Error::Cancel);
+		}
+		let err = match err {
+			// A peer that predates AUTH resets a stream type it does not know, and one
+			// that takes no tokens in band refuses the same way: either way, before any
+			// reply, this token earns nothing here.
+			Error::Stream(_) | Error::Decode(crate::DecodeError::Short) if !answered => Error::Unsupported,
+			err => err,
+		};
+		match &err {
+			Error::Cancel | Error::Unsupported | Error::Transport(_) | Error::Session(_) => {
+				tracing::debug!(%err, "auth token ended")
+			}
+			err => tracing::warn!(%err, "auth token ended"),
+		}
+		if let Error::ProtocolViolation = err {
+			self.violation.lock().get_or_insert(err.clone());
+		}
+		self.handle.ended(self.id, err);
+		Poll::Ready(())
+	}
+}
+
+impl<S: crate::transport::poll::Session> PresentToken<S> {
+	/// Run the stream, resolving with why the token ended.
+	fn poll_present(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		let mut cx = Context::from_waker(waiter.waker());
+		loop {
+			match &mut self.state {
+				PresentState::Open { token } => {
+					// After a GOAWAY the peer must not see new streams.
+					if self.going_away.is_set() {
+						return Poll::Ready(Error::GoingAway);
+					}
+					let token = token.clone();
+					let mut stream = match ready!(Stream::poll_open(&mut self.session, self.version, &mut cx)) {
+						Ok(stream) => stream,
+						Err(err) => return Poll::Ready(err),
+					};
+					let res = stream
+						.writer
+						.buffer(&super::ControlType::Auth)
+						.and_then(|()| stream.writer.buffer(&super::Auth { token }));
+					if let Err(err) = res {
+						return Poll::Ready(err);
+					}
+					self.state = PresentState::Run {
+						stream,
+						answered: false,
+					};
+				}
+				PresentState::Run { stream, answered } => {
+					if let Err(err) = ready!(stream.writer.poll_flush(&mut cx)) {
+						return Poll::Ready(err);
+					}
+					// Withdrawn: closing the stream is what tells the peer.
+					if self.handle.poll_withdrawn(self.id, waiter).is_ready() {
+						return Poll::Ready(Error::Cancel);
+					}
+					let reply = match ready!(stream.reader.poll_decode_maybe::<super::AuthReply>(&mut cx)) {
+						Ok(Some(reply)) => reply,
+						// The peer ended the grant without revoking it, or closed without
+						// ever answering (mapped to unsupported by the caller).
+						Ok(None) if *answered => return Poll::Ready(Error::Cancel),
+						Ok(None) => return Poll::Ready(Error::Decode(crate::DecodeError::Short)),
+						Err(err) => return Poll::Ready(err),
+					};
+					match reply {
+						super::AuthReply::Ok(ok) => {
+							let now = crate::runtime::Timers::now(&self.runtime);
+							// The expiry is the peer's number: one past the local clock's range
+							// is malformed, not a reason to panic.
+							let expires = match ok.expires.map(|expires| now.checked_add(expires)) {
+								Some(None) => return Poll::Ready(Error::ProtocolViolation),
+								expires => expires.flatten(),
+							};
+							*answered = true;
+							self.handle.granted(
+								self.id,
+								crate::auth::Grant {
+									publish: ok.publish,
+									subscribe: ok.subscribe,
+									expires,
+								},
+							);
+						}
+						super::AuthReply::Error(refused) => {
+							// Session codes are u32 everywhere else, so a wider one is malformed.
+							let Ok(code) = u32::try_from(refused.code) else {
+								return Poll::Ready(Error::ProtocolViolation);
+							};
+							let err = Error::Session(crate::SessionError::from_code(code));
+							tracing::warn!(%err, reason = %refused.reason, "auth token refused");
+							self.handle.refused(self.id);
+							*answered = true;
+							return Poll::Ready(err);
+						}
+					}
+				}
+				PresentState::Done => return Poll::Ready(Error::Cancel),
+			}
+		}
 	}
 }
 
@@ -518,5 +757,52 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 				SendGoawayState::Enforce(enforce) => return enforce.poll(waiter),
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::coding::Encode;
+	use crate::lite::test_transport::ScriptedSession;
+
+	/// An AUTH_ERROR code the session registry cannot hold is the peer breaking the
+	/// protocol: it closes the session rather than surfacing a code the peer never sent.
+	#[tokio::test(start_paused = true)]
+	async fn an_auth_error_code_past_u32_closes_the_session() {
+		let refused = crate::lite::AuthReply::Error(crate::lite::AuthError {
+			code: u64::from(u32::MAX) + 1,
+			reason: String::new(),
+		});
+		let mut script = Vec::new();
+		refused.encode(&mut script, Version::Lite06).unwrap();
+		// The setup token's AUTH stream is the first one the session opens.
+		let transport = ScriptedSession::per_stream(vec![script]);
+		let log = transport.log.clone();
+
+		let start = start(Config {
+			runtime: crate::time::Clock::tokio(),
+			client: true,
+			session: transport,
+			setup_stream: None,
+			publish: None,
+			subscribe: None,
+			peer_hop: None,
+			version: Version::Lite06,
+			our_setup: Setup::default(),
+			peer_setup: None,
+			auth: crate::auth::Handle::new(true),
+		})
+		.unwrap();
+		let mut driver = start.driver;
+
+		let res = tokio::time::timeout(
+			std::time::Duration::from_secs(10),
+			kio::wait(|waiter| driver.poll(waiter)),
+		)
+		.await
+		.expect("the session outlived a malformed AUTH_ERROR");
+		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
+		assert_eq!(log.closes()[0].0, SessionError::ProtocolViolation.to_code());
 	}
 }

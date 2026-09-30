@@ -1,0 +1,21 @@
+# Relay config for the TS compliance round-trip.
+# Anonymous access, self-signed localhost cert, QUIC + HTTP on 127.0.0.1.
+#
+# run.sh overrides the ports on the command line (`--listen` /
+# `--web-http-listen`) with the one it reserved.
+
+[log]
+level = "info"
+
+[listen]
+# QUIC on UDP. 127.0.0.1 avoids IPv6 flakiness on CI runners.
+bind = "127.0.0.1:4470"
+tls.generate = ["localhost", "127.0.0.1"]
+
+[web.http]
+# HTTP on TCP, serving /certificate.sha256 for cert pinning.
+listen = "127.0.0.1:4470"
+
+[auth]
+# Allow anonymous access to everything.
+public = "**"

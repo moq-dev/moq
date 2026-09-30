@@ -4,7 +4,7 @@ use std::{sync::Arc, task::Poll, time::Duration};
 
 use web_transport_trait::Stats as _;
 
-use crate::{Error, SessionError, Version, bandwidth, goaway};
+use crate::{Error, SessionError, Version, auth, bandwidth, goaway};
 
 /// How long [`Session::close`] waits for queued data before closing anyway.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -101,6 +101,7 @@ pub struct Session {
 	send_bandwidth: Option<bandwidth::Consumer>,
 	recv_bandwidth: Option<bandwidth::Consumer>,
 	goaway: Arc<goaway::Handle>,
+	auth: auth::Handle,
 }
 
 impl Session {
@@ -244,6 +245,16 @@ impl Session {
 	pub fn draining(&self) -> goaway::Consumer {
 		self.goaway.consumer()
 	}
+
+	/// The tokens this side presented and the grant they earned, plus the tokens
+	/// the peer presents. See [`auth`].
+	///
+	/// On moq-lite-06, and on moq-transport draft-17+ when both sides negotiate the
+	/// MoQ Auth extension, each side presents its connection's credential right after
+	/// setup. Older versions, and peers that do not negotiate it, leave the grant `None`.
+	pub fn auth(&self) -> auth::Handle {
+		self.auth.clone()
+	}
 }
 
 impl Session {
@@ -254,6 +265,7 @@ impl Session {
 		recv_bandwidth: Option<bandwidth::Consumer>,
 		protocol: crate::driver::Protocol<S>,
 		goaway: goaway::Handle,
+		auth: auth::Handle,
 	) -> (Self, crate::Driver<S>)
 	where
 		S: crate::transport::poll::Session,
@@ -296,6 +308,7 @@ impl Session {
 			send_bandwidth,
 			recv_bandwidth,
 			goaway: Arc::new(goaway),
+			auth,
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),

@@ -51,6 +51,16 @@ if (role !== "subscribe" || !url || !broadcast || !Number.isFinite(timeoutMs) ||
 async function run(): Promise<void> {
 	const origin = new Moq.Origin.Producer();
 	const connection = await Moq.Connection.connect({ url: new URL(url as string), consume: origin });
+	// The grant the relay sent, in the Rust client's `auth granted` shape, so the harness can
+	// check it against the token this cell minted.
+	const printGrant = (grant: Moq.Auth.Grant | undefined) => {
+		if (!grant) return;
+		const publish = JSON.stringify(grant.publish);
+		const subscribe = JSON.stringify(grant.subscribe);
+		console.error(`auth granted publish=${publish} subscribe=${subscribe}`);
+	};
+	printGrant(connection.auth.grant.peek());
+	const unwatch = connection.auth.grant.subscribe(printGrant);
 	let requested: Moq.Origin.Requesting | undefined;
 	try {
 		const path = Moq.Path.from(broadcast as string);
@@ -104,6 +114,7 @@ async function run(): Promise<void> {
 		}
 		throw new Error("no frame data received");
 	} finally {
+		unwatch();
 		requested?.close();
 		connection.close(); // returns void, not a promise
 		origin.close();

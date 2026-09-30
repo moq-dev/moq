@@ -1,9 +1,20 @@
-import { race, Signal } from "@moq/signals";
+import { type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
+import type { Grant } from "../auth.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
-import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError, sessionCause } from "../error.ts";
+import {
+	closeReason,
+	controlTimeout,
+	error,
+	ProtocolViolation,
+	reason,
+	StreamCode,
+	StreamError,
+	sessionCause,
+	unauthorized,
+} from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, randomHop, routesEqual, stampHops, UNKNOWN_HOP } from "../hop.ts";
 import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
@@ -70,6 +81,15 @@ function supportsTrackStream(version: Version): boolean {
 	}
 }
 
+// What a subscription has set up so far, so a revocation (or a timeout) can reach it at
+// any stage.
+interface SubscribeSetup {
+	stream?: Stream;
+	producer?: track.Producer;
+	// Set once our grant stops covering the broadcast.
+	revoked?: Error;
+}
+
 interface SubscribeEntry {
 	// The write side: incoming GROUP streams are routed here. The application reads
 	// the matching track.Subscriber it got from broadcast.Consumer.subscribe.
@@ -104,20 +124,6 @@ interface SubscribeEntry {
 // implementation's code for `Error::ProtocolViolation`: matching it is what makes the
 // two report the same thing, where the default 0 would tell the peer it closed cleanly.
 const PROTOCOL_VIOLATION_CODE = 15;
-
-// WebTransport rejects a close reason over 1024 bytes of UTF-8 by throwing, so a reason
-// built from peer-supplied data has to be bounded before it gets there. A broadcast path
-// is peer-supplied and long enough to reach this on its own.
-const MAX_CLOSE_REASON = 1024;
-
-// The longest prefix of `text` that fits a close reason. `encodeInto` stops on a whole
-// code point, so `read` never lands mid-character the way slicing bytes would.
-function closeReason(text: string): string {
-	const encoder = new TextEncoder();
-	const buf = new Uint8Array(MAX_CLOSE_REASON);
-	const { read } = encoder.encodeInto(text, buf);
-	return text.slice(0, read);
-}
 
 export class Subscriber {
 	#quic: WebTransport;
@@ -155,6 +161,11 @@ export class Subscriber {
 
 	// Distinguishes failures from streams torn down by Subscriber.close().
 	#closed = new AbortController();
+
+	// Our grant: a subscription it stops covering is cancelled. Undefined until the peer
+	// answers, and forever on a version without AUTH, which allows everything.
+	#grant?: Getter<Grant | undefined>;
+
 	/**
 	 * Creates a new Subscriber instance.
 	 * @param quic - The WebTransport session to use
@@ -162,6 +173,7 @@ export class Subscriber {
 	 * @param origin - Hop id shared with the Publisher
 	 * @param probe - Optional sink for the peer's PROBE estimates
 	 * @param peerSetup - Optional peer SETUP slot for capability gating (lite-05+)
+	 * @param grant - The union of our tokens' grants, which bounds what we subscribe to
 	 *
 	 * @internal
 	 */
@@ -171,6 +183,7 @@ export class Subscriber {
 		hop: Hop,
 		probe?: Signal<ProbeStats>,
 		peerSetup?: Signal<Setup | undefined>,
+		grant?: Getter<Grant | undefined>,
 	) {
 		this.#quic = quic;
 		this.version = version;
@@ -178,6 +191,13 @@ export class Subscriber {
 		this.#stamp = randomHop();
 		this.#probe = probe;
 		this.#peerSetup = peerSetup;
+		this.#grant = grant;
+	}
+
+	// Whether our grant no longer lets us subscribe to `broadcast`.
+	#denied(broadcast: Path.Valid): boolean {
+		const grant = this.#grant?.peek();
+		return grant !== undefined && !grant.subscribe.matches(broadcast);
 	}
 
 	/**
@@ -514,6 +534,30 @@ export class Subscriber {
 			request.reject(new Error(EMPTY_RANGE));
 			return;
 		}
+		const refused = unauthorized(broadcast);
+		// Armed before the first check and held to the end, so a shrink while the
+		// subscription sets up is never missed: it resets whatever reached the wire.
+		const state: SubscribeSetup = {};
+		const disposeGrant = this.#grant?.subscribe(() => {
+			if (state.revoked || !this.#denied(broadcast)) return;
+			state.revoked = refused;
+			console.debug(`subscribe revoked: id=${id} broadcast=${broadcast} track=${request.name}`);
+			state.producer?.close(refused);
+			state.stream?.abort(refused);
+		});
+		try {
+			if (this.#denied(broadcast)) {
+				request.reject(refused);
+				return;
+			}
+			await this.#serveSubscribe(id, broadcast, request, state);
+		} finally {
+			disposeGrant?.();
+		}
+	}
+
+	async #serveSubscribe(id: bigint, broadcast: Path.Valid, request: track.Request, state: SubscribeSetup) {
+		const subscription = request.subscription;
 
 		// `timescale` stays undefined until TRACK_INFO (or, on older drafts,
 		// implicit defaults) resolves it; runGroup blocks on it before decoding.
@@ -534,7 +578,6 @@ export class Subscriber {
 
 		// Open the stream under a timeout. The stream handle flows back via `state`
 		// so the timeout path can abort it if it finishes opening after the deadline.
-		const state: { stream?: Stream } = {};
 		const setup = this.#openSubscribe(state, msg, request, id, timescale);
 
 		let opened: { stream: Stream; entry: SubscribeEntry };
@@ -547,8 +590,10 @@ export class Subscriber {
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			// The setup outlived its deadline waiting for the first response: a control
-			// timeout, not content that arrived late.
-			const e = err instanceof TimeoutError ? controlTimeout(err) : await sessionCause(this.#quic, err);
+			// timeout, not content that arrived late. A revocation says so instead.
+			const e =
+				state.revoked ??
+				(err instanceof TimeoutError ? controlTimeout(err) : await sessionCause(this.#quic, err));
 			request.reject(e);
 			this.#subscribes.delete(id);
 			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${reason(e)}`);
@@ -625,7 +670,7 @@ export class Subscriber {
 	// SUBSCRIBE is accepted implicitly (no SUBSCRIBE_OK). Older drafts carry no
 	// per-track properties, so they resolve to defaults and just drain SUBSCRIBE_OK.
 	async #openSubscribe(
-		state: { stream?: Stream },
+		state: SubscribeSetup,
 		msg: Subscribe,
 		request: track.Request,
 		id: bigint,
@@ -637,6 +682,7 @@ export class Subscriber {
 		if (supportsTrackStream(this.version)) {
 			// Fetch the immutable properties once via the TRACK stream.
 			const info = await this.#trackInfo(msg.broadcast, msg.track);
+			if (state.revoked) throw state.revoked;
 			producer = request.accept(this.#toModelInfo(info));
 			timescale.set(info.timescale);
 		} else {
@@ -662,8 +708,14 @@ export class Subscriber {
 			requested: msg.startGroup,
 		};
 		this.#subscribes.set(id, entry);
+		state.producer = producer;
 
 		state.stream = await Stream.open(this.#quic);
+		// Revoked while the stream opened: nothing reached the wire yet, so stop here.
+		if (state.revoked) {
+			state.stream.abort(state.revoked);
+			throw state.revoked;
+		}
 		await state.stream.writer.u53(StreamId.Subscribe);
 		await msg.encode(state.stream.writer, this.version);
 

@@ -1,5 +1,8 @@
 import { expect, mock, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
+import type { Grant } from "../auth.ts";
+import { Producer as BroadcastProducer } from "../broadcast.ts";
+import { StreamCode, toStreamCode } from "../error.ts";
 import { Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import { hooks } from "../internal.ts";
@@ -1635,6 +1638,97 @@ test("lite draft-05: a group that goes stale while its stream opens writes nothi
 		expect(unhandled).toEqual([]);
 	} finally {
 		process.off("unhandledRejection", onUnhandled);
+		publisher.close();
+		client.close();
+		broadcast.close();
+		origin.close();
+	}
+});
+
+function grantOf(publish: string): Grant {
+	return { publish: new Path.Patterns([Path.Pattern.subtree(publish)]), subscribe: new Path.Patterns([]) };
+}
+
+// The resets carrying our UNAUTHORIZED code, by message.
+function unauthorizedResets(resets: { mock: { calls: unknown[][] } }): string[] {
+	return resets.mock.calls
+		.map(([reason]) => reason as Error)
+		.filter((reason) => toStreamCode(reason) === StreamCode.Unauthorized)
+		.map((reason) => reason.message);
+}
+
+// The grant watch is armed before the first check, so a shrink that lands while the broadcast
+// is still resolving resets the subscription instead of being missed for good.
+test("lite draft-06: a grant that shrinks while the broadcast resolves resets the subscription", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	const origin = new OriginProducer();
+	const handle = origin.dynamic(Path.from("live"));
+	const requests = handle.requested();
+	const grant = new Signal<Grant | undefined>(grantOf("live"));
+	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), grant);
+
+	const client = await Stream.open(pair.client);
+	const server = await Stream.accept(pair.server);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+	const resets = spyOn(Writer.prototype, "reset");
+	const produced = new BroadcastProducer();
+	try {
+		const msg = new Subscribe({ id: 0n, broadcast: Path.from("live/cam"), track: "video", priority: 0 });
+		const serving = publisher.runSubscribe(msg, server);
+
+		// The subscription is parked resolving the broadcast when the grant shrinks.
+		const request = await requests.next();
+		if (request.done) throw new Error("the handler never saw the request");
+		grant.set(grantOf("other"));
+		await Promise.resolve();
+		request.value.accept(produced);
+		await serving;
+
+		expect(unauthorizedResets(resets)).toContain("unauthorized: live/cam");
+	} finally {
+		resets.mockRestore();
+		produced.close();
+		handle.close();
+		publisher.close();
+		client.close();
+		origin.close();
+	}
+});
+
+// A fetch holds its grant watch until the last frame: a group can stay open as long as its
+// track, so a check at accept alone would keep serving after a shrink.
+test("lite draft-06: a grant that shrinks mid-fetch resets the fetch", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	const origin = new OriginProducer();
+	const grant = new Signal<Grant | undefined>(grantOf("live"));
+	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), grant);
+
+	const broadcast = publish(origin, Path.from("live"));
+	const track = broadcast.createTrack("video");
+	// Left open, so the fetch is still serving when the grant shrinks.
+	const group = new GroupProducer(0);
+	group.writeString("first");
+	track.writeGroup(group);
+
+	const client = await Stream.open(pair.client);
+	const server = await Stream.accept(pair.server);
+	if (!server) throw new Error("publisher never accepted the fetch stream");
+
+	const resets = spyOn(Writer.prototype, "reset");
+	try {
+		const msg = new Fetch({ broadcast: Path.from("live"), track: "video", priority: 0, group: 0 });
+		const serving = publisher.runFetch(msg, server);
+		// The first frame is on the wire before the grant shrinks.
+		await client.reader.u8();
+
+		grant.set(grantOf("other"));
+		await serving;
+
+		expect(unauthorizedResets(resets)).toContain("unauthorized: live");
+	} finally {
+		resets.mockRestore();
+		group.close();
 		publisher.close();
 		client.close();
 		broadcast.close();

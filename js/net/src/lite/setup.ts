@@ -268,7 +268,7 @@ export class Setup {
 	/** Encode the SETUP message with its size prefix. Throws on pre-lite-05 versions. */
 	async encode(w: Writer, version: Version): Promise<void> {
 		Setup.#guard(version);
-		return Message.encode(w, this.#encode.bind(this), MAX_SETUP_SIZE);
+		return Message.encode(w, this.#encode.bind(this), { max: MAX_SETUP_SIZE });
 	}
 
 	/** Decode a SETUP message with its size prefix. Throws on pre-lite-05 versions. */

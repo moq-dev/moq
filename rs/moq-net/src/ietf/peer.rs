@@ -19,6 +19,9 @@ pub(crate) struct Peer {
 	/// MoQ Hidden: whether the peer understands the HIDDEN parameter on
 	/// SUBSCRIBE_NAMESPACE, so we may send it.
 	pub hidden: bool,
+
+	/// MoQ Auth: whether both sides negotiated the Auth request streams.
+	pub auth: bool,
 }
 
 /// Shared slot for [`Peer`], filled when the peer's SETUP is read.
@@ -78,6 +81,7 @@ mod tests {
 			},
 			solicit: None,
 			hidden: false,
+			auth: false,
 		};
 
 		let slot = PeerSetup::default();
@@ -89,6 +93,7 @@ mod tests {
 			},
 			solicit: Some(true),
 			hidden: true,
+			auth: true,
 		});
 
 		assert_eq!(slot.get().await, first);

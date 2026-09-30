@@ -275,20 +275,21 @@ pub(crate) fn authorize(
 /// the internal listener re-checks this lease; `None` for a session that is
 /// not in the table.
 ///
-/// The lease is the decider's live word on the grant: when it stops covering
-/// the session ([`auth::Lease::ended`]) the session closes with the reason, and
-/// the session's own close is reported back through the lease as the `end` event.
-/// Either way, a relay shutdown drains the session with a GOAWAY instead of
-/// cutting it off.
+/// The lease is the decider's live word on the grant: a re-check re-authorizes the
+/// session in place, narrower or wider, and when it stops covering the session
+/// ([`auth::Lease::ended`]) the session closes with the reason. The session's own
+/// close is reported back through the lease as the `end` event. Either way, a relay
+/// shutdown drains the session with a GOAWAY instead of cutting it off.
 ///
 /// The session handle is `Send + Sync` whatever transport carries it, so this
 /// runs on the shared runtime even for sessions a pinned QUIC worker drives.
 pub async fn supervise(
 	session: moq_net::Session,
-	mut lease: auth::Lease,
+	lease: auth::Lease,
 	mut shutdown: crate::shutdown::Observer,
 	registration: Option<crate::session::Registration>,
 ) -> anyhow::Result<()> {
+	let mut lease = lease.authorizing(&session);
 	loop {
 		let nudged = async {
 			match &registration {

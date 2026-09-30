@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
+import type { Grant } from "../auth.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { error, fromTransport, reason, StreamCode, StreamError } from "../error.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
@@ -839,6 +840,35 @@ test("a fetch started after the subscriber closes rejects without opening a stre
 	const err = await subscriber.fetchGroup(Path.from("room"), "video", 0).catch((err: unknown) => err);
 	expectCut(err, undefined);
 	expect(streams.length).toBe(0);
+});
+
+// The grant watch is armed before the first check, so a shrink while TRACK_INFO is still in
+// flight refuses the subscription rather than opening a SUBSCRIBE the grant no longer covers.
+test("a grant that shrinks while the subscription sets up refuses it", async () => {
+	const { quic, streams } = fakeSession();
+	const scoped = (prefix: string): Grant => ({
+		publish: new Path.Patterns([]),
+		subscribe: new Path.Patterns([Path.Pattern.subtree(prefix)]),
+	});
+	const grant = new Signal<Grant | undefined>(scoped("room"));
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n), undefined, undefined, grant);
+
+	const track = subscriber.consume(Path.from("room/cam")).track("video").subscribe().ordered();
+	const next = track.nextGroup().catch((err: unknown) => err);
+
+	// Parked on TRACK_INFO when the grant shrinks.
+	await drainUntil(() => streams.length === 1);
+	await streams[0].reading;
+	grant.set(scoped("other"));
+	await answerTrackInfo(streams[0]);
+
+	const err = await next;
+	expect(err).toBeInstanceOf(StreamError);
+	expect((err as StreamError).code).toBe(StreamCode.Unauthorized);
+	// Nothing past the TRACK stream reached the wire.
+	expect(streams.length).toBe(1);
+
+	track.close();
 });
 
 test("an already-aborted fetch rejects without opening a stream", async () => {

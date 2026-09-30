@@ -7,6 +7,7 @@
 #[macro_use]
 mod parameters;
 mod adapter;
+pub(crate) mod auth;
 pub mod cluster;
 mod control;
 pub(crate) mod error;

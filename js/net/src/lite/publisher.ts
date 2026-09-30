@@ -1,11 +1,13 @@
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
+import type { Grant } from "../auth.ts";
+import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
-import { error, NotFound, reason, StreamCode, StreamError } from "../error.ts";
+import { error, NotFound, reason, StreamCode, StreamError, unauthorized } from "../error.ts";
 import type * as group from "../group.ts";
 import { Cost, type Hop, type Route, routesEqual } from "../hop.ts";
 import { hiddenBelow, hooks, presented } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
-import type * as Path from "../path.ts";
+import * as Path from "../path.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
 import { Milli, Timescale } from "../time.ts";
 import type * as track from "../track.ts";
@@ -345,6 +347,11 @@ export class Publisher {
 
 	#publish?: OriginConsumer;
 
+	// Our grant: only what it lets us publish is announced and served, and a shrink
+	// withdraws what it no longer covers. Undefined until the peer answers, and forever on a
+	// version without AUTH, which allows everything.
+	#grant?: Getter<Grant | undefined>;
+
 	// TRACK_INFO is immutable per track, so resolve it from the application once
 	// (via a throwaway subscribe whose info() resolves when the app calls accept)
 	// and reuse it for every later TRACK request of the same track. Keyed by the
@@ -359,11 +366,19 @@ export class Publisher {
 	 * @param version - Negotiated protocol version
 	 * @param origin - Hop id shared with the Subscriber
 	 * @param publish - The origin whose broadcasts this session serves; omit to publish nothing
+	 * @param grant - The union of our tokens' grants, which bounds what we publish
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, version: Version, hop: Hop, publish?: OriginConsumer) {
+	constructor(
+		quic: WebTransport,
+		version: Version,
+		hop: Hop,
+		publish?: OriginConsumer,
+		grant?: Getter<Grant | undefined>,
+	) {
 		this.#quic = quic;
+		this.#grant = grant;
 		this.version = version;
 		this.hop = hop;
 		const origin = publish && wireOf(publish);
@@ -449,24 +464,45 @@ export class Publisher {
 			await encodeAnnounceBroadcast(stream.writer, { status: "endedId", id }, this.version);
 		};
 
+		// A hidden route stays off the wire unless the request opted in.
+		const carries = (covered: Path.Valid) => msg.hidden || !hiddenBelow(msg.prefix, covered);
+
+		// What the peer currently sees: the table under the prefix, less whatever our grant
+		// does not let us publish.
+		const visible = (table: Advertisements): Map<Path.Valid, Advertised> => {
+			const out = presented(msg.prefix, table, carries);
+			const grant = this.#grant?.peek();
+			if (grant) {
+				for (const suffix of [...out.keys()]) {
+					if (!grant.publish.matches(Path.join(msg.prefix, suffix))) out.delete(suffix);
+				}
+			}
+			return out;
+		};
+
 		// Subscribe BEFORE writing anything: every encode below awaits the wire, and a publish
 		// landing in that window only notifies the listeners already registered. One created
 		// afterwards would sleep through it, leaving the change unannounced until something
-		// unrelated moved.
+		// unrelated moved. A grant change re-diffs the same way, withdrawing what it no longer
+		// covers and announcing what it now does.
 		// TODO Make a better helper within Signals.
-		let dispose!: Dispose;
-		let changed = new Promise<Advertisements | undefined>((resolve) => {
-			dispose = this.#advertised.changed(resolve);
-		});
-
-		// A hidden route stays off the wire unless the request opted in.
-		const carries = (covered: Path.Valid) => msg.hidden || !hiddenBelow(msg.prefix, covered);
+		let dispose: Dispose = () => {};
+		const arm = () =>
+			new Promise<"changed">((resolve) => {
+				const table = this.#advertised.changed(() => resolve("changed"));
+				const grant = this.#grant?.changed(() => resolve("changed"));
+				dispose = () => {
+					table();
+					grant?.();
+				};
+			});
+		let changed = arm();
 
 		try {
 			const initial = this.#advertised.peek();
 			if (!initial) return; // closed
 
-			for (const [name, snap] of presented(msg.prefix, initial, carries)) {
+			for (const [name, snap] of visible(initial)) {
 				active.set(name, snap);
 			}
 
@@ -498,22 +534,17 @@ export class Publisher {
 			}
 
 			for (;;) {
-				const advertised = await race([changed, stream.reader.closed]);
+				const woke = await race([changed, stream.reader.closed]);
 				dispose();
-				if (!advertised) break;
+				if (woke !== "changed") break;
 
 				// Re-arm before reading, so an advertise that lands while we write is not lost.
-				changed = new Promise<Advertisements | undefined>((resolve) => {
-					dispose = this.#advertised.changed(resolve);
-				});
+				changed = arm();
 
 				const latest = this.#advertised.peek();
 				if (!latest) break;
 
-				const updated = new Map<Path.Valid, Advertised>();
-				for (const [name, snap] of presented(msg.prefix, latest, carries)) {
-					updated.set(name, snap);
-				}
+				const updated = visible(latest);
 
 				for (const [suffix, snap] of active) {
 					const cur = updated.get(suffix);
@@ -543,6 +574,50 @@ export class Publisher {
 	 * @internal
 	 */
 	async runSubscribe(msg: Subscribe, stream: Stream) {
+		// Serve only what our grant lets us publish, and stop once it no longer does. The
+		// watch is armed before the first check and held to the end, so a shrink while the
+		// broadcast resolves is never missed.
+		const revoked = unauthorized(msg.broadcast);
+		let serving: track.Subscriber | undefined;
+		const watch = this.#watch(msg.broadcast, () => {
+			console.debug(`publish revoked: broadcast=${msg.broadcast} track=${msg.track}`);
+			serving?.close(revoked);
+			stream.abort(revoked);
+		});
+		try {
+			await this.#serveSubscribe(msg, stream, watch, (track) => {
+				serving = track;
+			});
+		} finally {
+			watch.dispose();
+		}
+	}
+
+	// Watch whether our grant still lets us publish `broadcast`, calling `onRevoke` once
+	// it does not. Arm it before the request's first check.
+	#watch(broadcast: Path.Valid, onRevoke: () => void): { revoked: () => boolean; dispose: () => void } {
+		let revoked = false;
+		const dispose =
+			this.#grant?.subscribe(() => {
+				if (revoked || !this.#denied(broadcast)) return;
+				revoked = true;
+				onRevoke();
+			}) ?? (() => {});
+		return { revoked: () => revoked || this.#denied(broadcast), dispose };
+	}
+
+	async #serveSubscribe(
+		msg: Subscribe,
+		stream: Stream,
+		watch: { revoked: () => boolean },
+		serving: (track: track.Subscriber) => void,
+	) {
+		// Checked before resolving, so a denied request never reaches the origin.
+		if (watch.revoked()) {
+			stream.writer.reset(unauthorized(msg.broadcast));
+			return;
+		}
+
 		let front: broadcast.Consumer | undefined;
 		try {
 			front =
@@ -552,6 +627,8 @@ export class Publisher {
 			stream.writer.reset(error(err));
 			return;
 		}
+		// Revoked while the broadcast resolved: the watch already reset the stream.
+		if (watch.revoked()) return;
 		if (!front) {
 			console.debug(`publish unknown: broadcast=${msg.broadcast}`);
 			stream.writer.reset(new NotFound(`broadcast ${msg.broadcast}`));
@@ -567,6 +644,7 @@ export class Publisher {
 				end: endGroup === undefined ? undefined : { excluded: endGroup },
 			},
 		});
+		serving(track);
 		positionCursor(track, this.version, msg.startGroup);
 		hooks.replaceGroups(track, { end: endGroup === undefined ? undefined : { excluded: endGroup } });
 
@@ -662,6 +740,34 @@ export class Publisher {
 			stream.writer.reset(new Error("fetch requires moq-lite-05 or newer"));
 			return;
 		}
+		// Like a subscription, the fetch holds its watch until the last frame: a group can stay
+		// open as long as its track, so a check at accept alone would keep serving after a shrink.
+		const revoked = unauthorized(msg.broadcast);
+		let fetched: group.Consumer | undefined;
+		const watch = this.#watch(msg.broadcast, () => {
+			console.debug(`fetch revoked: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
+			fetched?.close(revoked);
+			stream.abort(revoked);
+		});
+		try {
+			await this.#serveFetch(msg, stream, watch, (group) => {
+				fetched = group;
+			});
+		} finally {
+			watch.dispose();
+		}
+	}
+
+	async #serveFetch(
+		msg: Fetch,
+		stream: Stream,
+		watch: { revoked: () => boolean },
+		serving: (group: group.Consumer) => void,
+	) {
+		if (watch.revoked()) {
+			stream.writer.reset(unauthorized(msg.broadcast));
+			return;
+		}
 
 		let front: broadcast.Consumer | undefined;
 		try {
@@ -677,6 +783,8 @@ export class Publisher {
 			stream.writer.reset(new NotFound(`broadcast ${msg.broadcast}`));
 			return;
 		}
+		// Revoked while the broadcast resolved: the watch already reset the stream.
+		if (watch.revoked()) return;
 
 		// The subscriber opened this stream, so its send order only ranked the request. Rank the
 		// response here, on the same scale as the group streams it competes with.
@@ -688,6 +796,12 @@ export class Publisher {
 			// come off the same front, so the metadata and the frames are one generation.
 			const info = await this.#resolveTrackInfo(front, msg.track);
 			group = await wireOf(front).fetchGroup(msg.track, msg.group, { priority: msg.priority });
+			serving(group);
+			// Revoked while the group resolved: the watch already reset the stream.
+			if (watch.revoked()) {
+				group.close(unauthorized(msg.broadcast));
+				return;
+			}
 			await this.#runFetchGroup(group, stream.writer, {
 				timescale: Timescale(info.timescale),
 				start: msg.startFrame,
@@ -905,6 +1019,10 @@ export class Publisher {
 	 * @internal
 	 */
 	async runTrackInfo(msg: TrackMessage, stream: Stream) {
+		if (this.#denied(msg.broadcast)) {
+			stream.writer.reset(unauthorized(msg.broadcast));
+			return;
+		}
 		try {
 			const front =
 				this.#publish &&
@@ -919,6 +1037,12 @@ export class Publisher {
 			console.debug(`track unknown: broadcast=${msg.broadcast} track=${msg.track}`);
 			stream.writer.reset(error(err));
 		}
+	}
+
+	// Whether our grant excludes publishing this broadcast. No grant yet allows it.
+	#denied(broadcast: Path.Valid): boolean {
+		const grant = this.#grant?.peek();
+		return grant !== undefined && !grant.publish.matches(broadcast);
 	}
 
 	// Resolve (and cache) a track's immutable TRACK_INFO by asking the application.
@@ -1211,6 +1335,17 @@ export class Publisher {
 			console.warn("probe stream error", err);
 			stream.close();
 		}
+	}
+
+	/**
+	 * Close the session when our origin publishes a broadcast our grant does not cover;
+	 * see {@link enforceGrant}.
+	 *
+	 * @internal
+	 */
+	async runEnforce(setupAnswered: Promise<void>): Promise<void> {
+		if (!this.#grant) return;
+		await enforceGrant({ quic: this.#quic, advertised: this.#advertised, grant: this.#grant, setupAnswered });
 	}
 
 	close() {
