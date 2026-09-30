@@ -1,8 +1,9 @@
-# [M] moq export ts releases frames on a fixed delay
+# [M] Muxing exports release frames on a fixed delay
 
 ## Goal
 
-`moq export ts --delay <dur>` works like an SRT receiver's TSBPD. Each frame
+`moq export ts --delay <dur>` works like an SRT receiver's TSBPD, through a
+release stage in moq-mux that the FLV and MKV exports adopt next. Each frame
 goes out at its media time plus a fixed delay, measured from when the first
 frame arrived, and in `(pts, pid)` order across tracks. A frame that misses its
 deadline is dropped and counted. Output order is then a function of the media
@@ -16,6 +17,13 @@ Decided (2026-09-30):
 - Why: TS assumes a constant end-to-end delay. Its tracks share one PCR clock,
   and a receiver's T-STD buffers are sized for access units that arrive a fixed
   time before their DTS, which is what SRT and UDP sinks deliver.
+- The release stage is shared, not TS-specific: it takes each track's
+  frames, releases them in `(pts, track)` order at anchor + pts + delay, and
+  drops and counts late ones. TS adopts it here; FLV and MKV follow in their
+  own quests. fMP4 stays out: it deliberately skips cross-track ordering,
+  because its demuxers index by track (`fmp4/export.rs`). The fixed delay is
+  needed only at the final receiver; relays stay hop-by-hop.
+  Open for the PR: the stage's name and module. Ask the maintainer.
 - One mode. Fixed-delay release replaces the stall/hold interleave in
   `rs/moq-mux/src/container/ts/export.rs` (`stall`, `hold`, and the wait in
   `pick_next_track`), which is deleted. #4618 is the interim fix for #4613
@@ -51,5 +59,7 @@ none.
 
 ## Related
 
-- [TS byte schedule](/quest/m1/ts-export-byte-schedule.md) - uses this delay as its mux-ahead buffer delay
+- [FLV export delay](/quest/m1/flv-export-delay.md) - adopts the release stage
+- [MKV export delay](/quest/m1/mkv-export-delay.md) - adopts the release stage
+- [TS byte schedule](/quest/m1/tstd/byte-schedule.md) - uses this delay as its mux-ahead buffer delay
 - [Plan: max-delay](/quest/m1/plan-max-delay.md) - whether `max_age` becomes `max_delay` everywhere else

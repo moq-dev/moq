@@ -12,7 +12,7 @@ delete it.
 
 The maintainer finds "delay" clearer than "age" for how far a group may fall
 behind before it's skipped. `moq play --delay` and `moq export ts --delay`
-([fixed-delay release](/quest/m1/ts-export-delay.md)) already use one delay
+([fixed-delay release](/quest/m1/tstd/delay.md)) already use one delay
 knob for presentation and staleness.
 
 To weigh:
