@@ -344,8 +344,9 @@ impl Rendition {
 	}
 
 	/// Feed one timeline record into this rendition's window: its own ranges (empty when the
-	/// record carries none for it, a gap), timed by the record.
-	pub(crate) fn push(&self, index: u64, entry: &Entry, discontinuity: u64, window: Duration) {
+	/// record carries none for it, a gap), timed by the record. With no `window`, only source
+	/// timeline pops trim it.
+	pub(crate) fn push(&self, index: u64, entry: &Entry, discontinuity: u64, window: Option<Duration>) {
 		if !self.media.admits(&self.live) {
 			return;
 		}

@@ -994,6 +994,7 @@ Trimming occurs only as part of committing a new segment, before that segment's 
 A recording MUST NOT trim after its final segment is committed.
 Expiration first pops expired records from the timeline window and makes the resulting complete timeline groups durable, then deletes the expired segments' objects.
 The writer MUST retain the latest timeline object, even for an all-gap segment, and enough earlier timeline groups to recover the retained window from a checkpoint.
+It MAY delete earlier timeline objects, oldest first, so the remaining segment IDs stay consecutive.
 The index therefore never advertises media the retention process has already deleted, although media objects MAY temporarily outlive the index.
 Relay cache eviction does not change the recording timeline.
 
@@ -1097,6 +1098,7 @@ A publisher MAY estimate an unknown final duration from the frame cadence, but M
 - Specified version 1 recording objects: JSON track properties and binary group/frame tables with ascending, delta-encoded group sequences.
 - Addressed track objects by inclusive group bounds and timeline objects by consecutive segment IDs, with incremental discovery and per-track omission on storage failure.
 - Restricted retention updates to segment commits and removed completion markers.
+- Allowed a DVR to delete timeline objects no checkpoint recovery needs, oldest first.
 - Limited recorded group and segment IDs and frame timestamps to JSON-safe integers, including delta reconstruction.
 - Compared existing track properties by parsed values rather than JSON serialization.
 - Required exclusive DVR restart recovery to remove unreferenced group objects left by interrupted expiration.

@@ -83,8 +83,3 @@ retry.
   as the first round did.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Archive enrollment](/quest/m1/archive/enrollment-flake.md) - the same
-  kind of flake on the archive line, where its test lives

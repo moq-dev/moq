@@ -38,13 +38,27 @@ broadcast by path:
 /{broadcast}/{video|audio}/{rendition}/seg/t{pts}.m4s
 ```
 
+A [`moq-archive`](https://docs.rs/moq-archive) recording replayed through its
+`Reader` is served the same way, with no second stored copy. Playlists come
+from the replayed timeline alone, and a segment GETs exactly one stored object
+of its rendition, so switching renditions never downloads both. An
+inline-parameter-set codec with no catalog `description` is the exception:
+the first playlist render GETs one keyframe group to build the init segment,
+then caches it. Out-of-band configs need no media GET. When the catalog's
+`archive` entry names a `store` and no `replay` path, its ranges are durable on
+this broadcast, so the playlists list the whole retained timeline and only the
+recording's own retention trims them; DASH `timeShiftBufferDepth` is the listed
+span. The playlist ends with `EXT-X-ENDLIST` only once the reader's caller
+declares the recording finished; the store holds no completion marker.
+
 The init URL carries a hash of its bytes, so a reconfigured rendition gets a
 new one. An embedder of the library can also label the publisher's run with
 `Broadcaster::set_generation`. Every segment URL then carries it
 (`seg/{generation}.{segment}.m4s`), since a restarted publisher reuses segment
 numbers for different media.
 
-`--window` sets the playlist duration (default 16 s),
+`--window` sets the live playlist duration (default 16 s) and caps segment
+`Cache-Control: max-age` for every broadcast,
 `--listen-tls-cert`/`--listen-tls-key` or `--listen-tls-generate` serve HTTPS,
 and `--cors-origin` opens it to browsers.
 H.264/H.265 and AAC/Opus renditions are served. Import handles classic HLS;

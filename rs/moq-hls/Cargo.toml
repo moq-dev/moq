@@ -36,6 +36,10 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+async-trait = "0.1"
+futures = { workspace = true }
+moq-archive = { path = "../moq-archive" }
+moq-json = { path = "../moq-json" }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["tcp", "noq", "aws-lc-rs"] }
 tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
