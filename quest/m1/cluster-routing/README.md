@@ -40,7 +40,8 @@ link-state and existence-split design planned earlier that day:
   cores, liveness flooding (the simulator's dominant link-state cost) is never
   paid, and failure detection sets the outage window either way. The parked
   implementation is #4631. If stale paths remain on the tiered layout, the
-  fix is a per-origin seqno ([Tiered path hunting](/quest/m1/cluster-routing/path-hunting.md)).
+  fix is [Path hunting](/quest/m0/path-hunting.md), promoted to m0: a hold-down
+  on route updates, with no wire change.
 - The line lands on `main`: its children are additive. The two breaking
   changes left it for `dev` on their own:
   [Remove `--hop`](/quest/m1/hop-removal.md) and
@@ -117,7 +118,6 @@ Once every child has landed:
 
 - [Edge and core](/quest/m1/cluster-routing/roles.md) - relays take an explicit edge or core role; edges spread paths over their region's cores and are never transit
 - [Selection](/quest/m1/cluster-routing/selection.md) - a broadcast under overlapping prefixes routes to one origin deterministically, and same-epoch origins are one source
-- [Tiered path hunting](/quest/m1/cluster-routing/path-hunting.md) - path vector on the tiered layout never revives an ended path
 - [Between clusters](/quest/m1/cluster-routing/inter-cluster.md) - announcements crossing a cluster boundary stay path vector with cluster ids as hops
 
 ## Related
