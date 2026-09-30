@@ -19,10 +19,11 @@
 //! An import that selects a program ([`Capture::select`]) carries SI for that
 //! service alone. Other services' EIT actual sub-tables are dropped on arrival, and
 //! each SDT actual snapshot is rebuilt as one section holding only the selected
-//! service's entry, with a fresh CRC. An SDT that does not list the service carries
-//! no SDT actual, so a revision that drops it retires the earlier one. Network-wide
-//! tables (NIT, BAT, SDT other, EIT other, TDT/TOT) pass through verbatim, as does
-//! everything when no program is selected.
+//! service's entry, with a fresh CRC. An SDT actual section whose own CRC fails is
+//! dropped, so the last good snapshot stays in force. An SDT that does not list the
+//! service carries no SDT actual, so a revision that drops it retires the earlier
+//! one. Network-wide tables (NIT, BAT, SDT other, EIT other, TDT/TOT) pass through
+//! verbatim, as does everything when no program is selected.
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
@@ -432,6 +433,11 @@ impl<E: catalog::Catalog> Capture<E> {
 		}
 
 		let service = self.program.filter(|_| (pid, table_id) == (SDT_PID, SDT_ACTUAL));
+		// The rebuilt SDT gets a fresh CRC, which would certify corruption the
+		// source's CRC flags; dropping the section keeps the last good generation.
+		if service.is_some() && CRC.checksum(&section) != 0 {
+			return Ok(());
+		}
 		let entry = self.entries.entry((pid, table_id)).or_insert_with(|| Entry {
 			track: None,
 			interval: catalog::si_interval(table_id),

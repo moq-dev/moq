@@ -1741,9 +1741,9 @@ async fn scte35_fixtures_survive_roundtrip() {
 }
 
 /// Build a well-formed long-form section: the full generic header (extension,
-/// current version, `number` of `last`), then `body` and a CRC placeholder
-/// (capture is verbatim, nothing checks it). The SI store buffers a sub-table
-/// until its generation completes, so the header fields must be coherent.
+/// current version, `number` of `last`), then `body` and a valid CRC-32/MPEG-2.
+/// The SI store buffers a sub-table until its generation completes, so the header
+/// fields must be coherent.
 fn make_long_section(table_id: u8, ext: u16, version: u8, number: u8, last: u8, body: &[u8]) -> Vec<u8> {
 	let section_length = 5 + body.len() + 4;
 	let mut s = vec![
@@ -1757,7 +1757,8 @@ fn make_long_section(table_id: u8, ext: u16, version: u8, number: u8, last: u8, 
 		last,
 	];
 	s.extend_from_slice(body);
-	s.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+	let crc = crc::Crc::<u32>::new(&crc::CRC_32_MPEG_2).checksum(&s);
+	s.extend_from_slice(&crc.to_be_bytes());
 	s
 }
 
@@ -3085,6 +3086,48 @@ async fn an_sdt_revision_dropping_the_service_retires_it() {
 	assert_sdt_lists_only(&groups[0][0], 0, 1, b"One");
 	assert!(groups[1].is_empty(), "the retiring snapshot carries no SDT");
 	assert_sdt_lists_only(&groups[2][0], 2, 1, b"One");
+}
+
+/// A corrupted SDT actual is not rebuilt under a fresh, valid CRC: the section is
+/// dropped and the last good snapshot stays in force, rather than the corruption
+/// reading as a revision (or as the service leaving). An intact revision after it
+/// is captured normally.
+#[tokio::test(start_paused = true)]
+async fn a_corrupt_sdt_keeps_the_last_good_snapshot() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+	let mut capture = crate::container::ts::si::Capture::new(broadcast, catalog.clone());
+	capture.select(1);
+	let mut feed = |section: Vec<u8>| {
+		capture.section(0x0011, section).unwrap();
+		capture.flush(Timestamp::ZERO, true).unwrap();
+		catalog
+			.snapshot()
+			.ext
+			.mpegts
+			.si
+			.get(&0x0011)
+			.map(|tables| tables[&0x42].track.clone())
+	};
+
+	let track = feed(sdt_actual(0, 0, 0, &[(1, b"One")])).expect("the SDT is advertised");
+	// One unflagged bit flip turns the service name "One" into "Nne" under the source CRC.
+	let mut corrupt = sdt_actual(1, 0, 0, &[(1, b"One")]);
+	let name = corrupt.len() - 4 - 3;
+	corrupt[name] ^= 0x01;
+	assert_eq!(feed(corrupt), Some(track.clone()), "the corrupt revision kept the SDT");
+	assert_eq!(feed(sdt_actual(2, 0, 0, &[(1, b"Uno")])), Some(track.clone()));
+	capture.finish(Timestamp::ZERO).unwrap();
+
+	let groups = read_si_groups(&consumer, &track).await;
+	assert_eq!(groups.len(), 2, "no snapshot for the corrupt revision");
+	assert_sdt_lists_only(&groups[0][0], 0, 1, b"One");
+	assert_sdt_lists_only(&groups[1][0], 2, 1, b"Uno");
 }
 
 /// A selected program's reduced SI survives export: the TS parses, and importing it
