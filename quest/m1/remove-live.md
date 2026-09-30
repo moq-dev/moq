@@ -46,4 +46,3 @@ replace `ts_import_publishes_on_the_broadcast_clock` in moq-cli.
 ## Related
 
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - the new epoch an encoder restart becomes
-- [TS import shared shift](/quest/m1/ts-import-shared-shift.md) - the TS re-anchor shift that must stay input-derived
