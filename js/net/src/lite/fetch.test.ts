@@ -51,13 +51,14 @@ test("FetchOk names the origin on draft-07 only", async () => {
 	const written: Uint8Array[] = [];
 	const writer = new Writer(
 		new WritableStream<Uint8Array>({ write: (chunk) => void written.push(new Uint8Array(chunk)) }),
+		Version.DRAFT_07,
 	);
 	await new FetchOk(HopSchema.parse(42n)).encode(writer, Version.DRAFT_07);
 	writer.close();
 	await writer.closed;
 	const buf = concat(written);
 	expect(buf).toEqual(new Uint8Array([1, 42]));
-	const got = await FetchOk.decode(new Reader(undefined, buf), Version.DRAFT_07);
+	const got = await FetchOk.decode(new Reader(undefined, buf, Version.DRAFT_07), Version.DRAFT_07);
 	expect(got.origin).toBe(HopSchema.parse(42n));
 
 	await expect(new FetchOk(HopSchema.parse(42n)).encode(writer, Version.DRAFT_06)).rejects.toThrow();

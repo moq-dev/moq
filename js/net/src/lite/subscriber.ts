@@ -6,15 +6,7 @@ import { BroadcastCache } from "../consume.ts";
 import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError, sessionCause } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, randomHop, routesEqual, stampHops, UNKNOWN_HOP } from "../hop.ts";
-import {
-	groupBounds,
-	hiddenBelow,
-	namedOrigin,
-	nameOrigin,
-	scopeCaptures,
-	scopeHead,
-	scopeOverlaps,
-} from "../internal.ts";
+import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { type OpenOptions, type Reader, Stream } from "../stream.ts";
 import { TAIL_GRACE_MS, Tail } from "../tail.ts";
@@ -98,6 +90,9 @@ interface SubscribeEntry {
 	// (SUBSCRIBE_END), once it declares them.
 	start?: number;
 	end?: number;
+	// The origin SUBSCRIBE_START named (draft-07). The subscription feeds one track copy,
+	// and a copy has one origin for its whole life, as Rust's track::Provenance.
+	origin?: Hop;
 	// Whether SUBSCRIBE_START arrived. On draft-07, which names the serving origin there,
 	// group streams wait for it: until then nobody knows whose content they carry.
 	started: Signal<boolean>;
@@ -781,9 +776,6 @@ export class Subscriber {
 
 		try {
 			await untilAborted(entry.accepted, options.signal);
-			// Each mirror carries the origin the shared FETCH_OK named, for a session republishing it.
-			const origin = namedOrigin(entry.group);
-			if (origin !== undefined) nameOrigin(consumer, origin);
 			return consumer;
 		} catch (err) {
 			consumer.close();
@@ -843,10 +835,9 @@ export class Subscriber {
 			await stream.writer.u53(StreamId.Fetch);
 			await new FetchMessage({ broadcast, track, priority, group: sequence }).encode(stream.writer, this.version);
 			if (hasOrigin(this.version)) {
-				// Draft-07 accepts with FETCH_OK naming the serving origin before any frame;
-				// record it on the group so a session republishing it names the same one.
-				const ok = await untilClosed(group, FetchOk.decode(stream.reader, this.version));
-				nameOrigin(group, ok.origin);
+				// Draft-07 accepts with FETCH_OK before any frame. It names the serving origin,
+				// which only a republisher would need, and JS does not republish.
+				await untilClosed(group, FetchOk.decode(stream.reader, this.version));
 			} else {
 				// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
 				// done() buffers that byte so the response pump can decode it normally.
@@ -917,9 +908,12 @@ export class Subscriber {
 			if ("start" in resp) {
 				entry.start = resp.start.group;
 				if (hasOrigin(this.version)) {
-					// A copy has one origin for its whole life: a START naming another means
-					// upstream is serving a different track, so this throws and drops the copy.
-					nameOrigin(entry.track, resp.start.origin);
+					// A START naming another origin means upstream is serving a different
+					// track: drop the copy rather than splice another origin's content into it.
+					if (entry.origin !== undefined && entry.origin !== resp.start.origin) {
+						throw new Error(`origin changed: ${entry.origin} to ${resp.start.origin}`);
+					}
+					entry.origin = resp.start.origin;
 					entry.started.set(true);
 				}
 				// The groups the SUBSCRIBE asked for below it are unavailable, whatever the

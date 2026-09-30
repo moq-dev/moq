@@ -1,12 +1,10 @@
 import { expect, test } from "bun:test";
-import * as broadcast from "../broadcast.ts";
 import { Producer as GroupProducer } from "../group.ts";
 import { type Hop, HopSchema, randomHop } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
-import { wireOf } from "../wire.ts";
 import { Fetch, FetchOk } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Publisher } from "./publisher.ts";
@@ -31,21 +29,9 @@ async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boo
 	}
 }
 
-// The origin upstream named for the track a republishing session serves off `from`.
-function served(from: broadcast.Producer | broadcast.Consumer, name: string): Hop | undefined {
-	return wireOf(from).origin(wireOf(from).subscribe(name));
-}
-
-// Nobody upstream named content that originates here: the serving session names its own hop.
-test("a broadcast originating here carries no upstream origin", () => {
-	const producer = new broadcast.Producer();
-	producer.createTrack("video");
-	expect(served(producer, "video")).toBeUndefined();
-	expect(served(producer.consume(), "video")).toBeUndefined();
-});
-
-// A session names its own hop, as Rust names its origin's, for content nobody upstream named.
-test("a draft-07 publisher names its own hop for content originating here", async () => {
+// JS publishes only what it produces, so the session is always the origin and names its own
+// hop, as Rust names its origin's.
+test("a draft-07 publisher names its own hop in SUBSCRIBE_START and FETCH_OK", async () => {
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const origin = new OriginProducer();
 	const hop = randomHop();
@@ -58,8 +44,8 @@ test("a draft-07 publisher names its own hop for content originating here", asyn
 	group.close();
 	track.writeGroup(group);
 
-	const sub = await Stream.open(pair.client);
-	const serving = await Stream.accept(pair.server);
+	const sub = await Stream.open(pair.client, { version: VERSION });
+	const serving = await Stream.accept(pair.server, VERSION);
 	if (!serving) throw new Error("the publisher never accepted the subscribe stream");
 	void publisher.runSubscribe(
 		new Subscribe({ id: 0n, broadcast: Path.from("room"), track: "video", priority: 0 }),
@@ -69,8 +55,8 @@ test("a draft-07 publisher names its own hop for content originating here", asyn
 	if (!("start" in start)) throw new Error("expected SUBSCRIBE_START");
 	expect(start.start.origin).toBe(hop);
 
-	const fetch = await Stream.open(pair.client);
-	const fetching = await Stream.accept(pair.server);
+	const fetch = await Stream.open(pair.client, { version: VERSION });
+	const fetching = await Stream.accept(pair.server, VERSION);
 	if (!fetching) throw new Error("the publisher never accepted the fetch stream");
 	void publisher.runFetch(
 		new Fetch({ broadcast: Path.from("room"), track: "video", priority: 0, group: 0 }),
@@ -88,23 +74,18 @@ class Upstream {
 	readonly pair = createMockTransportPair(ALPN_07_WIP);
 	readonly subscriber = new Subscriber(this.pair.client, VERSION, randomHop());
 
-	// Answer a TRACK stream, then accept the SUBSCRIBE or FETCH stream that follows it.
-	async accept(): Promise<Stream> {
-		const info = await Stream.accept(this.pair.server);
+	// Answer a TRACK stream, then accept and start the SUBSCRIBE that follows it at group 0,
+	// naming `origin`.
+	async subscribe(origin: Hop): Promise<Stream> {
+		const info = await Stream.accept(this.pair.server, VERSION);
 		if (!info) throw new Error("the subscriber never asked for TRACK_INFO");
 		expect(await info.reader.u53()).toBe(StreamId.Track);
 		await TrackMessage.decode(info.reader, VERSION);
 		await new TrackInfo({ maxAge: 60_000 }).encode(info.writer, VERSION);
 		info.close();
 
-		const stream = await Stream.accept(this.pair.server);
-		if (!stream) throw new Error("the subscriber never requested the track");
-		return stream;
-	}
-
-	// Accept a SUBSCRIBE and start it at group 0, naming `origin`.
-	async subscribe(origin: Hop): Promise<Stream> {
-		const sub = await this.accept();
+		const sub = await Stream.accept(this.pair.server, VERSION);
+		if (!sub) throw new Error("the subscriber never subscribed");
 		expect(await sub.reader.u53()).toBe(StreamId.Subscribe);
 		await Subscribe.decode(sub.reader, VERSION);
 		await this.start(sub, origin);
@@ -114,49 +95,22 @@ class Upstream {
 	async start(sub: Stream, origin: Hop): Promise<void> {
 		await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart(0, origin) }, VERSION);
 	}
-
-	// Accept a FETCH and answer it with an empty group, naming `origin`.
-	async fetch(origin: Hop): Promise<void> {
-		const stream = await this.accept();
-		expect(await stream.reader.u53()).toBe(StreamId.Fetch);
-		await Fetch.decode(stream.reader, VERSION);
-		await new FetchOk(origin).encode(stream.writer, VERSION);
-		stream.close();
-	}
 }
 
-// Resolves once `check` holds, polling across macrotasks for the subscriber to read a reply.
-async function until(check: () => boolean): Promise<void> {
-	for (let i = 0; i < 100 && !check(); i++) await new Promise((resolve) => setTimeout(resolve, 1));
-	expect(check()).toBe(true);
-}
-
-// JS used to keep one origin per broadcast, so the latest reply relabeled content an earlier
-// one named. Each track copy and each fetched group now keeps the origin its own reply named.
-test("tracks and fetched groups of one broadcast keep the origins their own replies named", async () => {
+// JS used to keep one origin per broadcast, which the latest reply overwrote. Each track copy
+// now keeps its own, so two tracks served by different origins are both fine.
+test("tracks of one broadcast keep the origins their own replies named", async () => {
 	const upstream = new Upstream();
 	const consumer = upstream.subscriber.consume(Path.from("room"));
-	const video = HopSchema.parse(42n);
-	const audio = HopSchema.parse(43n);
-	const archive = HopSchema.parse(44n);
 
-	// A republishing session serves a subscription of its own off each cached copy.
-	const videoReader = consumer.track("video").subscribe({});
-	await upstream.subscribe(video);
-	await until(() => served(consumer, "video") === video);
-	const audioReader = consumer.track("audio").subscribe({});
-	await upstream.subscribe(audio);
-	await until(() => served(consumer, "audio") === audio);
+	const video = consumer.track("video").subscribe({});
+	const videoSub = await upstream.subscribe(HopSchema.parse(42n));
+	const audio = consumer.track("audio").subscribe({});
+	await upstream.subscribe(HopSchema.parse(43n));
+	// Repeating a copy's own origin is not a change.
+	await upstream.start(videoSub, HopSchema.parse(42n));
 
-	const fetched = consumer.track("video").fetchGroup(0);
-	await upstream.fetch(archive);
-	const group = await fetched;
-
-	expect(wireOf(consumer).origin(group)).toBe(archive);
-	expect(served(consumer, "video")).toBe(video);
-	expect(served(consumer, "audio")).toBe(audio);
-	expect(videoReader.closed.peek()).toBeUndefined();
-	expect(audioReader.closed.peek()).toBeUndefined();
+	expect(await settlesWithin(Promise.race([video.closed, audio.closed]), 50)).toBe(false);
 
 	upstream.subscriber.close();
 });
@@ -166,13 +120,11 @@ test("tracks and fetched groups of one broadcast keep the origins their own repl
 test("a SUBSCRIBE_START naming a second origin drops the copy", async () => {
 	const upstream = new Upstream();
 	const consumer = upstream.subscriber.consume(Path.from("room"));
-	const origin = HopSchema.parse(42n);
 
 	const reader = consumer.track("video").subscribe({});
-	const sub = await upstream.subscribe(origin);
-	await until(() => served(consumer, "video") === origin);
-
+	const sub = await upstream.subscribe(HopSchema.parse(42n));
 	await upstream.start(sub, HopSchema.parse(43n));
+
 	const closed = await reader.closed;
 	expect(closed).toBeInstanceOf(Error);
 	expect((closed as Error).message).toContain("origin changed");
@@ -180,20 +132,20 @@ test("a SUBSCRIBE_START naming a second origin drops the copy", async () => {
 	upstream.subscriber.close();
 });
 
-test("a draft-07 group waits for SUBSCRIBE_START, whose origin the broadcast then names", async () => {
+test("a draft-07 group waits for SUBSCRIBE_START", async () => {
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const subscriber = new Subscriber(pair.client, VERSION, randomHop());
 	const consumer = subscriber.consume(Path.from("room"));
 	const reader = consumer.track("video").subscribe({});
 
-	const info = await Stream.accept(pair.server);
+	const info = await Stream.accept(pair.server, VERSION);
 	if (!info) throw new Error("the subscriber never asked for TRACK_INFO");
 	expect(await info.reader.u53()).toBe(StreamId.Track);
 	await TrackMessage.decode(info.reader, VERSION);
 	await new TrackInfo({ maxAge: 60_000 }).encode(info.writer, VERSION);
 	info.close();
 
-	const sub = await Stream.accept(pair.server);
+	const sub = await Stream.accept(pair.server, VERSION);
 	if (!sub) throw new Error("the subscriber never subscribed");
 	expect(await sub.reader.u53()).toBe(StreamId.Subscribe);
 	await Subscribe.decode(sub.reader, VERSION);
@@ -201,19 +153,20 @@ test("a draft-07 group waits for SUBSCRIBE_START, whose origin the broadcast the
 	// The group's stream races ahead of the subscribe stream.
 	let controller!: ReadableStreamDefaultController<Uint8Array>;
 	const readable = new ReadableStream<Uint8Array>({ start: (c) => (controller = c) });
-	void subscriber.runGroup(new GroupMessage({ subscribe: 0n, sequence: 0 }), new Reader(readable));
+	void subscriber.runGroup(
+		new GroupMessage({ subscribe: 0n, sequence: 0 }),
+		new Reader(readable, undefined, VERSION),
+	);
 	controller.enqueue(new Uint8Array([0, 1, 120]));
 	controller.close();
 
 	const next = reader.recvGroup();
 	expect(await settlesWithin(next, 50)).toBe(false);
 
-	const origin = HopSchema.parse(42n);
-	await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart(0, origin) }, VERSION);
+	await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart(0, HopSchema.parse(42n)) }, VERSION);
 	const group = await next;
 	expect(group?.sequence).toBe(0);
 	expect(await group?.readString()).toBe("x");
 
-	// Republishing the track proxies the origin upstream named.
-	expect(wireOf(consumer).origin(reader)).toBe(origin);
+	subscriber.close();
 });

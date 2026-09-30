@@ -570,13 +570,6 @@ export class Publisher {
 		}
 	}
 
-	// The origin serving `content`, for SUBSCRIBE_START and FETCH_OK: the one an upstream reply
-	// named, or else this session's own hop for content originating here, as Rust names its
-	// origin's hop.
-	#origin(front: broadcast.Consumer, content: track.Subscriber | group.Consumer): Hop {
-		return wireOf(front).origin(content) ?? this.hop;
-	}
-
 	/**
 	 * Handles a subscribe message.
 	 * @param msg - The subscribe message
@@ -677,9 +670,9 @@ export class Publisher {
 					start: { included: sequence },
 					end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
 				});
-				// Read once content flowed: an upstream's SUBSCRIBE_START named the track
-				// copy's origin before any of its content did.
-				const start = new SubscribeStart(sequence, this.#origin(front, track));
+				// This session is the origin: JS publishes only what it produces, so it names
+				// its own hop, as Rust names its origin's.
+				const start = new SubscribeStart(sequence, this.hop);
 				await encodeSubscribeResponse(stream.writer, { start }, this.version);
 			});
 
@@ -749,7 +742,7 @@ export class Publisher {
 			const info = await this.#resolveTrackInfo(front, msg.track);
 			group = await wireOf(front).fetchGroup(msg.track, msg.group, { priority: msg.priority });
 			if (hasOrigin(this.version)) {
-				await new FetchOk(this.#origin(front, group)).encode(stream.writer, this.version);
+				await new FetchOk(this.hop).encode(stream.writer, this.version);
 			}
 			await this.#runFetchGroup(group, stream.writer, {
 				timescale: Timescale(info.timescale),
