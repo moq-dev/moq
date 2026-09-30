@@ -859,9 +859,10 @@ struct Setup {
 	all(feature = "uds", unix)
 ))]
 impl Setup {
-	/// When a connection accepted now must finish its handshake, or `None` to wait forever.
+	/// When a connection accepted now must finish its handshake, or `None` to wait
+	/// forever, including past the clock's range.
 	fn deadline(&self) -> Option<tokio::time::Instant> {
-		self.timeout.map(|timeout| tokio::time::Instant::now() + timeout)
+		tokio::time::Instant::now().checked_add(self.timeout?)
 	}
 
 	/// Read the peer's MoQ SETUP by `deadline`, closing the session with a timeout
@@ -1908,6 +1909,17 @@ mod tests {
 		async fn closed(&self) -> Self::Error {
 			std::future::pending().await
 		}
+	}
+
+	/// A timeout past the clock's range waits forever instead of panicking on accept.
+	#[cfg(feature = "websocket")]
+	#[tokio::test]
+	async fn unreachable_timeout_has_no_deadline() {
+		let setup = Setup {
+			server: moq_net::Server::new(),
+			timeout: Some(std::time::Duration::MAX),
+		};
+		assert_eq!(setup.deadline(), None);
 	}
 
 	/// A peer that never sends SETUP is refused at the deadline, and told why.

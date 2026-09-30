@@ -426,10 +426,11 @@ impl Config {
 		Ok(())
 	}
 
-	/// How long an accepted connection has to finish its handshake, or `None` to wait forever.
+	/// How long an accepted connection has to finish its handshake, or `None` to wait
+	/// forever: for zero, and for a timeout too long for the clock to reach.
 	pub fn resolved_timeout(&self) -> Option<std::time::Duration> {
 		let timeout = crate::cli::Duration::resolve(self.timeout_arg, self.timeout);
-		(!timeout.is_zero()).then_some(timeout)
+		(!timeout.is_zero() && std::time::Instant::now().checked_add(timeout).is_some()).then_some(timeout)
 	}
 
 	#[cfg(feature = "noq")]
@@ -635,6 +636,13 @@ load_balancer = { id = "ab", nonce = 8 }
 
 		let config: Config = toml::from_str(r#"timeout = "4s""#).expect("parse");
 		assert_eq!(config.resolved_timeout(), Some(secs(4)));
+
+		// Past the clock's range is forever, not a panic on the first accept.
+		let config = Config {
+			timeout: std::time::Duration::MAX,
+			..Default::default()
+		};
+		assert_eq!(config.resolved_timeout(), None);
 	}
 
 	/// The canonical spellings, which is what `--help` teaches.
