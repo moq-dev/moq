@@ -305,11 +305,14 @@ impl Web {
 	}
 
 	/// Bound how long a connection may take to send its HTTP request headers, and a
-	/// WebSocket its MoQ SETUP after the upgrade; `None` waits forever. Defaults to
-	/// the [`moq_tokio::listen::Config::resolved_timeout`] default.
+	/// WebSocket its MoQ SETUP after the upgrade; `None`, or a timeout past the
+	/// clock's range, waits forever. Defaults to the
+	/// [`moq_tokio::listen::Config::resolved_timeout`] default.
 	pub fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
 		let state = Arc::get_mut(&mut self.state).expect("with_timeout called after routes were built");
-		state.timeout = timeout;
+		// hyper adds the header timeout to the clock unchecked, so an unreachable
+		// one would panic on every connection.
+		state.timeout = timeout.filter(|timeout| std::time::Instant::now().checked_add(*timeout).is_some());
 		self
 	}
 
@@ -1413,6 +1416,23 @@ mod tests {
 		);
 
 		serving.abort();
+	}
+
+	/// A timeout past the clock's range waits forever, rather than reaching hyper,
+	/// which would panic adding it to the clock on every connection.
+	#[tokio::test]
+	async fn unreachable_timeout_waits_forever() {
+		let auth_config = crate::auth::Config {
+			public_subscribe: vec![moq_auth::Pattern::all()],
+			..Default::default()
+		};
+		let auth = auth_config.init("test", &moq_tokio::tls::Connect::default()).unwrap();
+		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
+		let web = Web::new(auth, cluster, certificates, Config::default()).with_timeout(Some(std::time::Duration::MAX));
+		assert_eq!(web.state.timeout, None);
 	}
 
 	/// A client that never finishes its request headers is disconnected once the

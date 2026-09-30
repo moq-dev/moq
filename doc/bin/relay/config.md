@@ -36,7 +36,8 @@ allow.uid = [1001]
 ```
 
 `timeout` bounds how long an accepted connection has to finish its handshake:
-the QUIC, WebTransport, WebSocket, or qmux one, then the MoQ SETUP. A peer that
+the QUIC, WebTransport, WebSocket, or qmux one, then the MoQ SETUP, through the
+relay accepting the session. After that it is an ordinary session. A peer that
 connects and never speaks is closed instead of being held open by keep-alives,
 with the MoQ timeout code once its transport is up. The `[web]` listeners apply it to reading HTTP request
 headers and, for the WebSocket fallback, to the SETUP after the upgrade. The

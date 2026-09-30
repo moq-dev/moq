@@ -147,8 +147,8 @@ pub struct Config {
 	pub version: Vec<moq_net::Version>,
 
 	/// Maximum time for one accepted connection to finish its handshake: the
-	/// QUIC, WebTransport, WebSocket, or qmux one, then the MoQ SETUP. Defaults
-	/// to 10 seconds; set to 0 to wait forever.
+	/// QUIC, WebTransport, WebSocket, or qmux one, then the MoQ SETUP, through
+	/// [`crate::server::Request::ok`]. Defaults to 10 seconds; set to 0 to wait forever.
 	///
 	/// A peer that connects and then never speaks would otherwise hold its
 	/// connection open indefinitely, since keep-alives count as activity. The
