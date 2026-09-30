@@ -27,7 +27,7 @@ the draft updated in the same PR.
 
 ## Required
 
-- A simulator run of the tiered layout (moq.pro's routing simulator) that records announces and convergence when an origin ends and when a core is lost
+- A simulator run of the tiered layout ([moq.pro's routing simulator](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/routing-sim-tiers.md)) that records announces and convergence when an origin ends and when a core is lost
 
 ## Related
 

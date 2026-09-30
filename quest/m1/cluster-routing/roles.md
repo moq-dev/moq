@@ -16,6 +16,11 @@ Decided in the 2026-09-30 wildcard audit (cache tiers):
   alongside the peer list the connect API returns. A relay whose links
   contradict its role (an edge linked to another edge, a core dialing an
   edge) fails at startup. Where a region has one edge, that edge is its core.
+- A relay with no role is a legacy peer and links any peer, as before roles.
+  A core accepts and dials a legacy peer as a core-grade link, and an edge
+  never links one. This is what lets an operator migrate one region at a
+  time: a migrated region's cores bridge to the unmigrated mesh. A
+  permanently mixed cluster stays a non-goal.
 - A core refuses a session that is not a cluster peer, loudly, so a
   misrouted client fails instead of silently exposing the shield.
 - Cores dial only cores with lower names, so each pair has one connection;
