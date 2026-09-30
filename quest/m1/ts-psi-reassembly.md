@@ -7,7 +7,7 @@ starts after a nonzero `pointer_field`, instead of aborting the import. Today
 the `mpeg2ts` 0.6.1 reader parses PSI from a single packet and rejects a nonzero
 `pointer_field`, and its error ends the whole import, so a valid long PMT (many
 audio languages, long descriptors) or a PAT with more than about 40 programs
-cannot be imported. `ts::programs()` finds such a PAT too.
+cannot be imported. `ts::Programs` finds such a PAT too.
 
 ## Plan
 
@@ -53,13 +53,13 @@ Settled decisions:
   is `#[non_exhaustive]`, so the new field is additive; its docs (today per
   elementary stream) and `is_empty` widen to cover it, and `ts::stats::Log`
   reports it.
-- `ts::programs()` reads through the same PAT path, so a PAT spanning packets
+- `ts::Programs` reads through the same PAT path, so a PAT spanning packets
   is found before any program publishes.
 - One quest, because the demux refactor alone changes nothing observable.
 
 Keep every existing TS import test and fixture passing unchanged. Add tests for
 a PMT spanning two packets, a PAT behind a nonzero `pointer_field`, a
-multi-packet PAT with enough programs to need it (read by `ts::programs()` and
+multi-packet PAT with enough programs to need it (read by `ts::Programs` and
 by `with_program`), and a PAT and a PMT with a corrupt CRC, each between good
 repetitions, that is dropped and counted once while the import keeps its
 previous layout and a later good PMT revision still applies. A positive
