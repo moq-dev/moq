@@ -933,8 +933,7 @@ Duplicate values of 0 are not a violation, since 0 identifies nothing and any nu
 What subscribing to content under this route costs, in units chosen by the deployment.
 This document defines no rule that prices the two apart: the original publisher seeds both with its production cost (0 for content it is already producing, larger for content it would have to start producing on demand, e.g. a standby transcoder that advertises every broadcast it could serve, at a cost reflecting the work of actually serving it), and a forwarding relay adds the cost the upstream peer declared (see [Cost Parameter](#cost-parameter)) to both, saturating rather than wrapping so an absurd upstream value ranks last instead of overflowing to best.
 The two fields exist for extensions that price a cached copy below the accumulated value: such a discount applies to the Warm cost only, which is what route selection minimizes, while the Cold cost keeps ranking the undiscounted path and breaks a Warm tie (see [Routing](#routing)).
-Saturation MUST cap each sum at 2^62-1, the largest value a variable-length integer carries on every version, since the sums are re-encoded when forwarded, possibly to a peer on an earlier version: a wider ceiling would leave the relay unable to encode what it just computed.
-A receiver MUST read a larger Route Cost, which moq-lite-07 can carry, as 2^62-1; saturation is not the truncation that [Variable-Length Integers](#varint) forbids.
+Saturation MUST cap each sum at the largest value a variable-length integer can carry, since the sums are re-encoded when forwarded: a peer may legally advertise that largest value, and a wider ceiling would leave the relay unable to encode what it just computed.
 
 A relay whose wire cannot express a Cold cost (an endpoint bridging from another protocol, or a peer that predates this field) advertises nothing, and a receiver SHOULD treat the missing value as the saturation ceiling rather than as 0: an unknown path ranks last instead of impersonating the publisher's own.
 
@@ -1348,7 +1347,7 @@ The `Message Length` describes the payload size on the wire.
 ## moq-lite-07
 
 - Assigned `moq-lite-07-wip` as this draft's protocol identifier until it is finalized as `moq-lite-07`.
-- Switched every variable-length integer, including SETUP parameter values, from QUIC's two-bit length prefix to moq-transport's leading-ones encoding, widening the range to 64 bits. Route Costs still saturate at 2^62-1, and a larger received one reads as 2^62-1.
+- Switched every variable-length integer, including SETUP parameter values, from QUIC's two-bit length prefix to moq-transport's leading-ones encoding, widening the range to 64 bits.
 - Hid routes with a `.`-prefixed segment below the requested prefix from announce discovery, and added the ANNOUNCE_REQUEST `Hidden` field to opt in.
 - Added `Stream Count` to SUBSCRIBE_END: the number of Group Streams opened for the subscription. SUBSCRIBE_END is now sent once every counted Group Stream has opened, rather than as soon as the final group is known.
 - Removed SUBSCRIBE_DROP and its type 0x2; a group without a Group Stream is not counted.
