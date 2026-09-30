@@ -51,13 +51,11 @@ enum FetchPrior {
 	None,
 	/// The next object of the same group.
 	Same,
-	/// The first object after this earlier group.
-	Group(u64),
 }
 
-/// One group of a FETCH answer, read out of the cache so a later eviction cannot
+/// The group a FETCH answers with, read out of the cache so a later eviction cannot
 /// truncate what FETCH_OK already promised.
-pub(crate) struct FetchedGroup {
+struct FetchedGroup {
 	sequence: u64,
 	/// The Object ID of the first frame.
 	first: u64,
@@ -84,92 +82,45 @@ impl FetchedGroup {
 	}
 }
 
-/// A FETCH range read out of a track.
-pub(crate) struct Walked {
-	pub(crate) groups: Vec<FetchedGroup>,
-	/// Why the walk stopped before the end of the range, when it did.
-	stopped: Option<Error>,
-}
-
-/// Read `start..end` out of `track` one group at a time, ascending.
+/// Read group `sequence` of `track` for a FETCH, from object `skip` up to the exclusive
+/// `until`, or through the end of the group without one.
 ///
-/// Each group is a [`track::Consumer::fetch_group`], so a relay fetches a miss upstream.
-/// A group that does not exist below the newest one is a hole and is skipped; one at or
-/// past it is the end of the track, so the walk stops there. Any other failure answers
-/// the whole FETCH.
-///
-/// With nothing upstream to ask, the cache is the whole track, so a hole skips straight
-/// to the next cached group: the walk costs the groups it returns, not the range's span.
-pub(crate) async fn walk_fetch(
+/// This is a [`track::Consumer::fetch_group`], so a relay fetches a miss upstream.
+async fn read_fetch(
 	track: &track::Consumer,
-	start: Location,
-	end: Location,
+	sequence: u64,
+	skip: u64,
+	until: Option<u64>,
 	priority: u8,
-) -> Result<Walked, Error> {
-	let mut groups = Vec::new();
-	let mut next = Some(start.group);
-	while let Some(sequence) = next {
-		if sequence > end.group || (sequence == end.group && end.object == 0) {
-			break;
+) -> Result<FetchedGroup, Error> {
+	let fetch = group::Fetch {
+		priority,
+		frame_start: skip,
+	};
+	let mut group = track.fetch_group(sequence, fetch).await?;
+
+	// `fetch_group` positions the consumer at `skip`, or refuses a group that no
+	// longer holds it.
+	let first = group.index();
+	let mut frames = Vec::new();
+	let complete = loop {
+		if let Some(until) = until
+			&& first + frames.len() as u64 >= until
+		{
+			break group.frame_count() as u64 <= until;
 		}
-		next = sequence.checked_add(1);
+		match group.read_frame().await? {
+			Some(frame) => frames.push(frame),
+			None => break true,
+		}
+	};
 
-		let skip = match sequence == start.group {
-			true => start.object,
-			false => 0,
-		};
-		let until = (sequence == end.group).then_some(end.object);
-		let fetch = group::Fetch {
-			priority,
-			frame_start: skip,
-		};
-
-		let mut group = match track.fetch_group(sequence, fetch).await {
-			Ok(group) => group,
-			Err(err @ Error::NotFound) => match track.latest() {
-				Some(latest) if sequence < latest => {
-					// Capped at the newest group, whose own probe judges where the track ends.
-					if !track.fetches_misses() {
-						let cached = track.next_cached(sequence + 1);
-						next = Some(cached.map_or(latest, |cached| cached.min(latest)));
-					}
-					continue;
-				}
-				_ => {
-					return Ok(Walked {
-						groups,
-						stopped: Some(err),
-					});
-				}
-			},
-			Err(err) => return Err(err),
-		};
-
-		// `fetch_group` positions the consumer at `skip`, or refuses a group that no
-		// longer holds it.
-		let first = group.index();
-		let mut frames = Vec::new();
-		let complete = loop {
-			if let Some(until) = until
-				&& first + frames.len() as u64 >= until
-			{
-				break group.frame_count() as u64 <= until;
-			}
-			match group.read_frame().await? {
-				Some(frame) => frames.push(frame),
-				None => break true,
-			}
-		};
-
-		groups.push(FetchedGroup {
-			sequence,
-			first,
-			frames,
-			complete,
-		});
-	}
-
-	Ok(Walked { groups, stopped: None })
+	Ok(FetchedGroup {
+		sequence,
+		first,
+		frames,
+		complete,
+	})
 }
 
 /// A broadcast whose route table is watched for changes in what we advertise: the
@@ -1132,18 +1083,6 @@ where
 				priority: None,
 				properties,
 			},
-			// A later group, walked in ascending order. Draft-18 turned the field into a
-			// delta, where zero is the very next group.
-			FetchPrior::Group(prior) => ietf::FetchObject::Object {
-				subgroup: ietf::FetchSubgroup::Zero,
-				group: Some(match version {
-					Version::Draft15 | Version::Draft16 | Version::Draft17 => sequence,
-					_ => sequence - prior - 1,
-				}),
-				object: Some(object),
-				priority: None,
-				properties,
-			},
 		};
 
 		stream.encode(&header).await?;
@@ -1178,12 +1117,12 @@ where
 		}
 	}
 
-	/// Answer a FETCH: a standalone range of the named track, or a joining FETCH's
-	/// groups up to its subscription's saved start.
+	/// Answer a FETCH within one group: a standalone range of the named track, or a
+	/// joining FETCH's prefix of its subscription's group.
 	///
-	/// Both walk the track one group at a time, ascending, and buffer the answer before
-	/// replying: FETCH_OK names where the response ends, which a range running past the
-	/// track only learns by reading it, and a refusal can still replace it until then.
+	/// The answer is buffered before replying: FETCH_OK names where the response ends,
+	/// which a range running past the track only learns by reading it, and a refusal can
+	/// still replace it until then.
 	async fn run_fetch_stream(mut self, mut stream: Stream<S, Version>, msg: ietf::Fetch<'_>) -> Result<(), Error> {
 		let priority = super::priority::from_wire(msg.subscriber_priority);
 
@@ -1270,38 +1209,39 @@ where
 			}
 		};
 
-		// The walk writes each group after the one before it, so the order the peer
-		// reads object IDs in is fixed. One group has no order to get wrong.
+		// One group per FETCH: on a relay, a range costs a serial upstream fetch per missing
+		// group, all buffered until FETCH_OK. Ranges wait for upstream fills by range.
 		let last = match end.object {
 			0 => end.group - 1,
 			_ => end.group,
 		};
-		if msg.group_order == GroupOrder::Descending && start.group != last {
+		if start.group != last {
 			return self
 				.reject_fetch(
 					stream,
 					msg.request_id,
 					&Error::Unsupported,
-					"descending FETCH not supported",
+					"FETCH spanning several groups not supported",
 				)
 				.await;
 		}
+		let until = (end.object > 0).then_some(end.object);
 
 		// The subscriber cancelling is the only other way this ends early, and is owed
 		// nothing.
-		let walked = {
-			let mut walk = std::pin::pin!(walk_fetch(&track, start, end, priority));
+		let group = {
+			let mut read = std::pin::pin!(read_fetch(&track, start.group, start.object, until, priority));
 			kio::wait(|waiter| {
 				let mut cx = std::task::Context::from_waker(waiter.waker());
 				if stream.reader.poll_closed(&mut cx).is_ready() {
 					return Poll::Ready(None);
 				}
-				waiter.poll_future(walk.as_mut()).map(Some)
+				waiter.poll_future(read.as_mut()).map(Some)
 			})
 			.await
 		};
-		let walked = match walked {
-			Some(Ok(walked)) => walked,
+		let group = match group {
+			Some(Ok(group)) => group,
 			Some(Err(err)) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
 			None => return Ok(()),
 		};
@@ -1309,33 +1249,24 @@ where
 		let (end_location, end_of_track) = if joined {
 			// The subscription starts at the saved Largest Object, so the prefix of that
 			// group has to be here in full or the two leave a gap.
-			let whole = walked
-				.groups
-				.last()
-				.is_some_and(|last| last.sequence == end.group && last.end() == end.object);
-			if !whole {
-				let (err, reason) = match walked.stopped {
-					Some(err) => (err, "joining group unavailable"),
-					None => (Error::Evicted, "joining prefix unavailable"),
-				};
-				return self.reject_fetch(stream, msg.request_id, &err, reason).await;
+			if group.end() != end.object {
+				return self
+					.reject_fetch(stream, msg.request_id, &Error::Evicted, "joining prefix unavailable")
+					.await;
 			}
 			(end, false)
 		} else {
-			let Some(last) = walked.groups.last() else {
-				// Nothing in range exists: the refusal the walk ran into is the answer.
-				let err = walked.stopped.unwrap_or(Error::NotFound);
-				return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await;
-			};
-			let delivered = Location {
-				group: last.sequence,
-				object: last.end(),
-			};
-			let end_of_track = last.complete && track.final_sequence() == last.sequence.checked_add(1);
-			// A response that stopped short ends at its last object; one that covered the
-			// whole range ends where it was asked to.
-			match walked.stopped.is_some() || end_of_track {
-				true => (delivered, end_of_track),
+			let end_of_track = group.complete && track.final_sequence() == group.sequence.checked_add(1);
+			// A group that ends the track ends the response at its last object; otherwise
+			// the response ends where it was asked to.
+			match end_of_track {
+				true => (
+					Location {
+						group: group.sequence,
+						object: group.end(),
+					},
+					true,
+				),
 				false => (end, false),
 			}
 		};
@@ -1370,27 +1301,19 @@ where
 				request_id: msg.request_id,
 			})
 			.await?;
-		let mut prior: Option<u64> = None;
-		for group in walked.groups {
-			for (object, frame) in (group.first..).zip(group.frames) {
-				let at = match prior {
-					None => FetchPrior::None,
-					Some(prior) if prior == group.sequence => FetchPrior::Same,
-					Some(prior) => FetchPrior::Group(prior),
-				};
-				Self::write_fetch_object(
-					&mut writer,
-					group.sequence,
-					object,
-					at,
-					frame.timestamp,
-					timescale,
-					self.version,
-				)
-				.await?;
-				Self::write_fetch_payload(&mut writer, frame.payload, self.version).await?;
-				prior = Some(group.sequence);
-			}
+		let mut first = true;
+		for (object, frame) in (group.first..).zip(group.frames) {
+			Self::write_fetch_object(
+				&mut writer,
+				group.sequence,
+				object,
+				FetchPrior::next(&mut first),
+				frame.timestamp,
+				timescale,
+				self.version,
+			)
+			.await?;
+			Self::write_fetch_payload(&mut writer, frame.payload, self.version).await?;
 		}
 		writer.close().await?;
 
@@ -3915,10 +3838,9 @@ mod serve_tests {
 			.collect()
 	}
 
-	/// A range of whole groups is walked one group at a time and answered on one fetch
-	/// stream, in each draft's own Group ID encoding.
+	/// A whole group is answered on one fetch stream.
 	#[tokio::test]
-	async fn a_standalone_fetch_walks_whole_groups() {
+	async fn a_standalone_fetch_serves_one_whole_group() {
 		for version in FETCH_DRAFTS {
 			let mut h = serve(version);
 			publish_pairs(&mut h, 5, None);
@@ -3927,23 +3849,23 @@ mod serve_tests {
 			// An End Object of 0 asks for the whole End Group.
 			let buf = standalone_fetch(
 				&h,
-				Location { group: 1, object: 0 },
-				Location { group: 3, object: 0 },
+				Location { group: 2, object: 0 },
+				Location { group: 2, object: 0 },
 				GroupOrder::Ascending,
 			)
 			.await;
 			let (ok, objects) = fetch_answer(buf, version);
-			assert_eq!(ok.end_location, Location { group: 4, object: 0 }, "{version}");
+			assert_eq!(ok.end_location, Location { group: 3, object: 0 }, "{version}");
 			assert!(!ok.end_of_track, "{version}");
-			assert_eq!(objects, pairs(1..=3), "{version}");
+			assert_eq!(objects, pairs([2]), "{version}");
 			assert!(h.log.resets().is_empty(), "{version}");
 		}
 	}
 
-	/// A range that runs past the end of a finished track stops there, and FETCH_OK
-	/// says so: it ends one past the last object, with End of Track set.
+	/// The last group of a finished track ends the response one past its last object,
+	/// with End of Track set.
 	#[tokio::test]
-	async fn a_standalone_fetch_past_the_end_reports_the_end_of_track() {
+	async fn a_standalone_fetch_of_the_last_group_reports_the_end_of_track() {
 		for version in FETCH_DRAFTS {
 			let mut h = serve(version);
 			publish_pairs(&mut h, 5, None);
@@ -3952,76 +3874,37 @@ mod serve_tests {
 
 			let buf = standalone_fetch(
 				&h,
-				Location { group: 3, object: 1 },
-				Location { group: 9, object: 0 },
+				Location { group: 4, object: 1 },
+				Location { group: 4, object: 0 },
 				GroupOrder::Any,
 			)
 			.await;
 			let (ok, objects) = fetch_answer(buf, version);
 			assert_eq!(ok.end_location, Location { group: 4, object: 2 }, "{version}");
 			assert!(ok.end_of_track, "{version}");
-			assert_eq!(objects, pairs(3..=4)[1..].to_vec(), "{version}");
+			assert_eq!(objects, pairs([4])[1..].to_vec(), "{version}");
 		}
 	}
 
-	/// A missing group below the newest one is a hole the walk steps over.
+	/// A range touching several groups is refused, in either order: on a relay each
+	/// missing group would be its own upstream fetch.
 	#[tokio::test]
-	async fn a_standalone_fetch_skips_a_missing_group() {
-		for version in [Version::Draft16, Version::Draft18] {
-			let mut h = serve(version);
-			publish_pairs(&mut h, 4, Some(2));
-			settle().await;
+	async fn a_standalone_fetch_of_several_groups_is_refused() {
+		for version in FETCH_DRAFTS {
+			for order in [GroupOrder::Ascending, GroupOrder::Descending] {
+				let mut h = serve(version);
+				publish_pairs(&mut h, 3, None);
+				settle().await;
 
-			let buf = standalone_fetch(
-				&h,
-				Location { group: 1, object: 0 },
-				Location { group: 3, object: 1 },
-				GroupOrder::Ascending,
-			)
-			.await;
-			let (ok, objects) = fetch_answer(buf, version);
-			assert_eq!(ok.end_location, Location { group: 3, object: 1 }, "{version}");
-			let mut expected = pairs([1]);
-			expected.push((3, 0, "3-0".into()));
-			assert_eq!(objects, expected, "{version}");
-		}
-	}
-
-	/// With nothing upstream, a hole skips to the next cached group instead of stepping
-	/// through every missing sequence, which would never finish here.
-	#[tokio::test]
-	async fn a_standalone_fetch_skips_a_sparse_span() {
-		const FAR: u64 = 1 << 40;
-		for version in [Version::Draft16, Version::Draft18] {
-			let h = serve(version);
-			for sequence in [0, 5, FAR] {
-				let mut group = h.track.create_group(group::Info { sequence }).unwrap();
-				for object in 0..2 {
-					group
-						.write_frame(timestamp(), format!("{sequence}-{object}").into_bytes())
-						.unwrap();
-				}
-				group.finish().unwrap();
+				let buf = standalone_fetch(
+					&h,
+					Location { group: 0, object: 1 },
+					Location { group: 1, object: 1 },
+					order,
+				)
+				.await;
+				assert_eq!(fetch_refusal(buf, version), 0x3, "{version}");
 			}
-			settle().await;
-
-			let buf = standalone_fetch(
-				&h,
-				Location { group: 0, object: 0 },
-				Location { group: FAR, object: 0 },
-				GroupOrder::Ascending,
-			)
-			.await;
-			let (ok, objects) = fetch_answer(buf, version);
-			assert_eq!(
-				ok.end_location,
-				Location {
-					group: FAR + 1,
-					object: 0
-				},
-				"{version}"
-			);
-			assert_eq!(objects, pairs([0, 5, FAR]), "{version}");
 		}
 	}
 
@@ -4042,48 +3925,41 @@ mod serve_tests {
 		code
 	}
 
-	/// Nothing in range exists, so the walk's own refusal is the answer.
+	/// A group that does not exist, below the newest one or past it, is refused.
 	#[tokio::test]
-	async fn a_standalone_fetch_past_the_end_is_refused() {
+	async fn a_standalone_fetch_of_a_missing_group_is_refused() {
 		for version in FETCH_DRAFTS {
-			let mut h = serve(version);
-			publish_pairs(&mut h, 2, None);
-			settle().await;
+			for missing in [2, 5] {
+				let mut h = serve(version);
+				publish_pairs(&mut h, 4, Some(2));
+				settle().await;
 
-			let buf = standalone_fetch(
-				&h,
-				Location { group: 5, object: 0 },
-				Location { group: 6, object: 0 },
-				GroupOrder::Ascending,
-			)
-			.await;
-			assert_eq!(fetch_refusal(buf, version), does_not_exist(version), "{version}");
+				let buf = standalone_fetch(
+					&h,
+					Location {
+						group: missing,
+						object: 0,
+					},
+					Location {
+						group: missing,
+						object: 0,
+					},
+					GroupOrder::Ascending,
+				)
+				.await;
+				assert_eq!(
+					fetch_refusal(buf, version),
+					does_not_exist(version),
+					"{version}: group {missing}"
+				);
+			}
 		}
 	}
 
-	/// The walk only runs forwards, so a descending range of several groups is refused.
+	/// A joining FETCH reaching back before the subscription's group is refused, like any
+	/// FETCH touching several groups.
 	#[tokio::test]
-	async fn a_descending_fetch_of_several_groups_is_refused() {
-		for version in [Version::Draft14, Version::Draft16, Version::Draft18] {
-			let mut h = serve(version);
-			publish_pairs(&mut h, 3, None);
-			settle().await;
-
-			let buf = standalone_fetch(
-				&h,
-				Location { group: 0, object: 0 },
-				Location { group: 1, object: 0 },
-				GroupOrder::Descending,
-			)
-			.await;
-			assert_eq!(fetch_refusal(buf, version), 0x3, "{version}");
-		}
-	}
-
-	/// A joining FETCH with an offset walks the whole groups before the subscription's
-	/// group, then that group's prefix, and ends exactly where the subscription starts.
-	#[tokio::test]
-	async fn a_joining_fetch_with_an_offset_walks_back_whole_groups() {
+	async fn a_joining_fetch_reaching_back_is_refused() {
 		for version in JOINING_DRAFTS {
 			let mut h = serve(version);
 			publish_pairs(&mut h, 4, None);
@@ -4099,21 +3975,15 @@ mod serve_tests {
 			);
 			registered(&h, serving.as_mut()).await;
 
-			for (fetch_type, first) in [
-				(
-					FetchType::RelativeJoining {
-						subscriber_request_id: RequestId(REQUEST_ID),
-						group_offset: 2,
-					},
-					2,
-				),
-				(
-					FetchType::AbsoluteJoining {
-						subscriber_request_id: RequestId(REQUEST_ID),
-						group_id: 1,
-					},
-					1,
-				),
+			for fetch_type in [
+				FetchType::RelativeJoining {
+					subscriber_request_id: RequestId(REQUEST_ID),
+					group_offset: 2,
+				},
+				FetchType::AbsoluteJoining {
+					subscriber_request_id: RequestId(REQUEST_ID),
+					group_id: 1,
+				},
 			] {
 				let mark = h.log.writes.lock().unwrap().len();
 				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
@@ -4132,12 +4002,7 @@ mod serve_tests {
 					.unwrap();
 				let buf = bytes::Bytes::from(h.log.writes.lock().unwrap()[mark..].to_vec());
 
-				let (ok, objects) = fetch_answer(buf, version);
-				assert_eq!(ok.end_location, Location { group: 4, object: 1 }, "{version}");
-				assert!(!ok.end_of_track, "{version}");
-				let mut expected = pairs(first..=3);
-				expected.push((4, 0, "4-0".into()));
-				assert_eq!(objects, expected, "{version}");
+				assert_eq!(fetch_refusal(buf, version), 0x3, "{version}");
 			}
 		}
 	}

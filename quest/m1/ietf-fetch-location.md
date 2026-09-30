@@ -2,18 +2,16 @@
 
 ## Goal
 
-On drafts 20 and later, a FETCH whose LOCATION_FILTER names whole groups is
-answered the way drafts 14 to 19 answer a standalone FETCH: from cache, with
-each miss fetched upstream one group at a time, and an upstream refusal passed
-through.
+On drafts 20 and later, a FETCH whose LOCATION_FILTER stays within one group
+is answered the way drafts 14 to 19 answer a standalone FETCH: from cache, with
+a miss fetched upstream, and an upstream refusal passed through. A range
+touching several groups is refused `NOT_SUPPORTED`, as on older drafts.
 
 ## Plan
 
 [Legal IETF input](/quest/m0/ietf-legal-input.md) decodes the draft-20 layout
 and refuses it `NOT_SUPPORTED`. Replace that refusal with the existing
-standalone walk over the filter's range, on the publisher and on the relay's
-upstream group fill. A filter the walk cannot express stays an explicit
-refusal.
+single-group read, on the publisher and on the relay's upstream group fill.
 
 Update the draft-20 note in `doc/concept/standard.md`.
 

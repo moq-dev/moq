@@ -38,17 +38,17 @@ to model priority 127, where higher values are served first. A track that
 never sets a priority is 127 as well, so it goes out as 128 on IETF and 127
 on moq-lite.
 
-The Rust publisher answers a standalone `FETCH` by walking its range one group
-at a time, in ascending order, from the cache. A relay fetches each missing
-group upstream with a `FETCH` of that one whole group, and an upstream refusal
-is the refusal the fetcher sees. A descending range of several groups is
-refused. A standalone `FETCH` carries no timestamps, since no `SUBSCRIBE_OK`
-declared a timescale for it.
+The Rust publisher answers a standalone `FETCH` within one group from the
+cache. A relay fetches a missing group upstream with a `FETCH` of that one
+whole group, and an upstream refusal is the refusal the fetcher sees. A range
+touching several groups is refused with `NOT_SUPPORTED`. A standalone `FETCH`
+carries no timestamps, since no `SUBSCRIBE_OK` declared a timescale for it.
 
 On drafts 14–19, the Rust publisher also serves relative and absolute joining
-`FETCH` requests for `NextObject` subscriptions: the whole groups before the
-subscription's group, then that group's saved prefix, while the subscription
-delivers later objects. Draft-20 uses subscription fills instead. JavaScript
+`FETCH` requests for `NextObject` subscriptions, for the subscription group's
+saved prefix only, while the subscription delivers later objects. One reaching
+back to earlier groups is refused with `NOT_SUPPORTED`. Draft-20 uses
+subscription fills instead. JavaScript
 publishing does not yet serve `FETCH`;
 Rust and JavaScript subscribers request unfiltered delivery on older drafts
 because they do not issue joining fetches. Other publishers may replay a cached
