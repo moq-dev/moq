@@ -1,8 +1,11 @@
 //! Every program of a multiplex, each imported as its own broadcast.
 
-use anyhow::Context;
-use mpeg2ts::ts::{ReadTsPacket, TsPacket, TsPacketReader, TsPayload};
+use std::collections::BTreeMap;
 
+use anyhow::Context;
+use mpeg2ts::ts::{Pid, TsPacket};
+
+use super::import::{Framer, PatReader};
 use super::{Ext, Import, Stats};
 use crate::catalog;
 
@@ -20,6 +23,8 @@ pub struct Programs {
 	live: bool,
 	/// Input held until it contains a whole PAT.
 	pending: Vec<u8>,
+	/// Reads the PAT out of `pending`.
+	scan: PatScan,
 	/// Empty until the PAT arrives.
 	programs: Vec<Program>,
 }
@@ -41,6 +46,7 @@ impl Programs {
 			config,
 			live: false,
 			pending: Vec::new(),
+			scan: PatScan::default(),
 			programs: Vec::new(),
 		}
 	}
@@ -57,10 +63,7 @@ impl Programs {
 			return self.feed(data);
 		}
 		self.pending.extend_from_slice(data);
-		let Some(programs) = pat_programs(&self.pending).filter(|programs| !programs.is_empty()) else {
-			// Only a packet's worth of tail can still hold the start of the PAT.
-			let keep = self.pending.len().saturating_sub(TsPacket::SIZE - 1);
-			self.pending.drain(..keep);
+		let Some(programs) = self.scan.scan(&mut self.pending) else {
 			return Ok(());
 		};
 		for program in programs {
@@ -101,11 +104,22 @@ impl Programs {
 	}
 
 	/// Every program's counters in one map: PIDs are unique across a multiplex.
+	///
+	/// Every importer reads the same PAT, and programs sharing a PMT PID read the same PMT
+	/// sections, so a dropped section counts once however many read it.
 	pub fn stats(&self) -> Stats {
 		let mut stats = Stats::default();
+		let mut crc_errors = BTreeMap::<u16, u64>::new();
 		for program in &self.programs {
 			stats.streams.extend(program.import.stats().streams);
+			for (&pid, &count) in program.import.crc_errors() {
+				let merged = crc_errors.entry(pid).or_default();
+				*merged = (*merged).max(count);
+			}
 		}
+		// The importers only see the PAT from the one that started them.
+		*crc_errors.entry(Pid::PAT).or_default() += self.scan.crc_error;
+		stats.crc_error = crc_errors.values().sum();
 		stats
 	}
 
@@ -137,32 +151,54 @@ fn program_broadcast(name: &str, program: u16) -> String {
 	}
 }
 
-/// The program numbers listed by the first whole PAT in `data`, in PAT order, or `None` if
-/// there is none yet.
-fn pat_programs(data: &[u8]) -> Option<Vec<u16>> {
-	let mut off = 0;
-	while let Some(rel) = memchr::memchr(0x47, &data[off..]) {
-		off += rel;
-		let packet = data.get(off..off + TsPacket::SIZE)?;
-		// PID 0 opening a section. The section CRC rejects a sync byte found in payload.
-		if packet[1] & 0x5f == 0x40
-			&& packet[2] == 0
-			&& let Ok(Some(TsPacket {
-				payload: Some(TsPayload::Pat(pat)),
-				..
-			})) = TsPacketReader::new(packet).read_ts_packet()
-		{
-			return Some(
-				pat.table
-					.iter()
-					.map(|entry| entry.program_num)
-					.filter(|&program| program != 0)
-					.collect(),
-			);
+/// Finds the first whole PAT listing a program, before any importer exists to read one.
+#[derive(Default)]
+struct PatScan {
+	framer: Framer,
+	pat: PatReader,
+	/// PAT sections dropped for a bad CRC before the first whole PAT.
+	crc_error: u64,
+	/// Bytes of the held input already read.
+	read: usize,
+	/// Where the packet opening the PAT section in progress starts, so the importers are
+	/// handed the whole section rather than its tail.
+	opened: Option<usize>,
+}
+
+impl PatScan {
+	/// Read the bytes `pending` gained since the last call. Returns the program numbers the
+	/// first whole PAT lists, in PAT order, with `pending` trimmed to start at that PAT;
+	/// otherwise trims `pending` to what a later PAT can still need.
+	fn scan(&mut self, pending: &mut Vec<u8>) -> Option<Vec<u16>> {
+		let mut off = self.read;
+		while let Some(at) = self.framer.next(pending, &mut off) {
+			let pkt: &[u8; TsPacket::SIZE] = pending[at..at + TsPacket::SIZE].try_into().unwrap();
+			if (u16::from(pkt[1] & 0x1f) << 8 | u16::from(pkt[2])) != Pid::PAT {
+				continue;
+			}
+			if pkt[1] & 0x40 != 0 {
+				self.opened = Some(at);
+			}
+			let pat = self.pat.push(pkt, &mut self.crc_error);
+			let start = self.opened.unwrap_or(at);
+			if !self.pat.in_progress() {
+				self.opened = None;
+			}
+			let Some(programs) = pat
+				.map(|pat| pat.program_numbers())
+				.filter(|programs| !programs.is_empty())
+			else {
+				continue;
+			};
+			pending.drain(..start);
+			return Some(programs);
 		}
-		off += 1;
+		let keep = self.opened.unwrap_or(off).min(off);
+		pending.drain(..keep);
+		self.read = off - keep;
+		self.opened = self.opened.map(|opened| opened - keep);
+		None
 	}
-	None
 }
 
 #[cfg(test)]
@@ -172,13 +208,18 @@ mod test {
 	use super::*;
 	use crate::catalog::hang::Container;
 	use crate::container::Consumer;
-	use crate::container::ts::import::test::two_programs;
+	use crate::container::ts::import::test::{corrupt, fifty_programs, pat_section, psi_packets, two_programs};
 
 	#[test]
 	fn program_broadcasts_keep_the_catalog_suffix_last() {
 		assert_eq!(program_broadcast("event.hang", 2), "event/2.hang");
 		assert_eq!(program_broadcast("demo/event.msf", 7), "demo/event/7.msf");
 		assert_eq!(program_broadcast("event", 1), "event/1");
+	}
+
+	/// The PAT in a whole buffer, as one [`PatScan`] reads it.
+	fn pat_programs(data: &[u8]) -> Option<Vec<u16>> {
+		PatScan::default().scan(&mut data.to_vec())
 	}
 
 	#[test]
@@ -190,6 +231,56 @@ mod test {
 		shifted.extend_from_slice(&data);
 		assert_eq!(pat_programs(&shifted), Some(vec![1, 2]));
 		assert_eq!(pat_programs(&data[..100]), None);
+	}
+
+	/// A PAT too big for one packet is read whole, and each importer is handed all of it, so
+	/// the program listed in its second packet publishes.
+	#[tokio::test]
+	async fn a_pat_spanning_two_packets_starts_every_program() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
+		let input = fifty_programs();
+		for chunk in input.chunks(100) {
+			programs.decode(chunk).unwrap();
+		}
+		programs.finish().unwrap();
+		assert_eq!(programs.programs.len(), 50);
+
+		let consumer = crate::Source::new(origin.consume(), "event/50.hang")
+			.broadcast()
+			.await
+			.unwrap();
+		let catalog = hang::catalog::Catalog::<()>::subscribe(&consumer)
+			.await
+			.unwrap()
+			.next()
+			.await
+			.unwrap()
+			.expect("a catalog");
+		assert_eq!(catalog.audio.renditions.len(), 1, "program 50 publishes its stream");
+	}
+
+	/// A corrupt PAT starts nothing and is counted; the good repetition after it starts the
+	/// program without counting again.
+	#[test]
+	fn a_corrupt_pat_starts_no_program() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		// A null packet after each PAT confirms its sync byte.
+		let mut null = vec![0x47, 0x1f, 0xff, 0x10];
+		null.resize(188, 0xff);
+		let mut cc = 0;
+		let mut data = psi_packets(0, &mut cc, &[], &corrupt(pat_section(&[(1, 0x0100)])));
+		data.extend_from_slice(&null);
+		programs.decode(&data).unwrap();
+		assert!(programs.programs.is_empty());
+		assert_eq!(programs.stats().crc_error, 1);
+
+		let mut data = psi_packets(0, &mut cc, &[], &pat_section(&[(1, 0x0100)]));
+		data.extend_from_slice(&null);
+		programs.decode(&data).unwrap();
+		assert_eq!(programs.programs.len(), 1);
+		assert_eq!(programs.stats().crc_error, 1);
 	}
 
 	/// The input is held until the PAT is whole, then each program publishes as its own
