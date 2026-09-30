@@ -58,4 +58,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [Video hardware validation](/quest/m3/video-hardware.md) - hardware paths nothing runs yet
-- [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - on-demand jobs on hardware hosts, a broader contract than a nightly
