@@ -193,7 +193,6 @@ distinguish recording generations reads the catalog's archive entry
 
 - [Datagrams behind SUBSCRIBE_START](/quest/m0/wildcard/datagram-start.md) - no datagram crosses a subscription's start in either direction, in Rust or JS
 - [JS origin granularity](/quest/m0/wildcard/js-origin.md) - `@moq/net` tracks a reply's origin at the same granularity as Rust
-- [Pool resolution benchmark](/quest/m0/wildcard/pool-bench.md) - route resolution is benchmarked over pool size and requested paths
 
 ## Related
 

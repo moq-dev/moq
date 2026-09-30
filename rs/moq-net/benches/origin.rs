@@ -8,8 +8,12 @@
 //! down to its prefix and beneath it, and each recomputes its best route from
 //! the entries at that prefix alone.
 //!
+//! An equal-cost pool is swept the same way, over its members and the paths it
+//! already serves.
+//!
 //! Run with `cargo bench -p moq-net --bench origin`.
 
+use std::task::Poll;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -363,6 +367,151 @@ fn bench_request(c: &mut Criterion) {
 	group.finish();
 }
 
+/// `(members, paths)` shapes for an equal-cost pool: how many advertisers claim
+/// one prefix, against how many paths beneath it are already being served.
+const POOL: [usize; 3] = [4, 32, 256];
+const POOL_PATHS: [usize; 3] = [100, 1_000, 10_000];
+
+/// An origin where `members` equal-cost advertisers claim `pool`, already
+/// serving `paths` requested paths beneath it, spread across the pool by the
+/// hash on each path. Every handle is held so the fronts stay up.
+struct Pool {
+	consumer: origin::Consumer,
+	producer: origin::Producer,
+	driver: origin::Driver,
+	members: Vec<origin::Dynamic>,
+	_producers: Vec<broadcast::Producer>,
+	_consumers: Vec<broadcast::Consumer>,
+}
+
+fn pool(members: usize, paths: usize) -> Pool {
+	let (producer, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+	let consumer = producer.consume();
+	let members: Vec<_> = (0..members)
+		.map(|i| producer.dynamic("pool", pool_route(POOL_HOP + i as u64)).unwrap())
+		.collect();
+	let waiter = kio::Waiter::noop();
+
+	let requests: Vec<_> = (0..paths)
+		.map(|i| consumer.request_broadcast(format!("pool/job-{i}")))
+		.collect();
+	driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+	let mut producers = Vec::with_capacity(paths);
+	for member in &members {
+		while let Poll::Ready(request) = member.poll_requested_broadcast(&waiter) {
+			let broadcast = broadcast::Info::new().produce();
+			request.unwrap().accept(&broadcast);
+			producers.push(broadcast);
+		}
+	}
+	assert_eq!(producers.len(), paths, "every path reached a member");
+	driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+	let consumers = requests
+		.into_iter()
+		.map(|request| request.now_or_never().expect("resolved once driven").expect("served"))
+		.collect();
+
+	Pool {
+		consumer,
+		producer,
+		driver,
+		members,
+		_producers: producers,
+		_consumers: consumers,
+	}
+}
+
+/// Hop ids for pool members, clear of the origin's own.
+const POOL_HOP: u64 = 1_000;
+
+/// A pool member's claim: one hop, at the same cost as every other member.
+fn pool_route(hop: u64) -> origin::Route {
+	peer_route(hop, 3)
+}
+
+/// Resolving one new path under an equal-cost pool: the request picks its
+/// member by hashing the path with every member's hops, so it scans the pool
+/// by design. It must not also scale with the paths the pool already serves.
+///
+/// Timed from the request to the chosen member holding it; the member then
+/// refuses it untimed, so the next iteration mints a fresh front.
+fn bench_pool_resolve(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/pool_resolve");
+	for members in POOL {
+		for paths in POOL_PATHS {
+			let id = BenchmarkId::from_parameter(format!("{members}m_{paths}p"));
+			group.bench_function(id, |b| {
+				let mut pool = pool(members, paths);
+				let waiter = kio::Waiter::noop();
+				let mut probe = 0usize;
+				b.iter_custom(|iterations| {
+					let mut total = Duration::ZERO;
+					for _ in 0..iterations {
+						// Rotate so the chosen member varies, as it does across real paths.
+						let path = format!("pool/probe-{}", probe % 64);
+						probe += 1;
+
+						let started = std::time::Instant::now();
+						let pending = pool.consumer.request_broadcast(path.as_str());
+						pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+						total += started.elapsed();
+
+						let request = pool
+							.members
+							.iter()
+							.find_map(|member| match member.poll_requested_broadcast(&waiter) {
+								Poll::Ready(request) => Some(request.unwrap()),
+								Poll::Pending => None,
+							})
+							.expect("a member holds the request");
+						request.reject(moq_net::Error::NotFound);
+						pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+						let refused = pending.now_or_never().expect("refusal delivered");
+						assert!(refused.is_err(), "the refusal is final");
+					}
+					total
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
+/// A member joining and leaving a pool that already serves `paths` paths.
+///
+/// Every front under the prefix watches the routes covering it, so each one
+/// re-selects on both changes, and each selection scans the pool: the cost is
+/// paths times members by design, which this sweep makes visible. None of the
+/// fronts switches, since the newcomer is a different publisher.
+fn bench_pool_churn(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/pool_churn");
+	// The widest shapes take a noticeable fraction of a second per iteration.
+	group.sample_size(10);
+	for members in POOL {
+		for paths in POOL_PATHS {
+			let id = BenchmarkId::from_parameter(format!("{members}m_{paths}p"));
+			group.bench_function(id, |b| {
+				let mut pool = pool(members, paths);
+				let waiter = kio::Waiter::noop();
+				let hop = POOL_HOP + members as u64;
+				// Untimed: the newcomer ranks first for some paths, but no front may move to it.
+				let joined = pool.producer.dynamic("pool", pool_route(hop)).unwrap();
+				pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+				assert!(joined.poll_requested_broadcast(&waiter).is_pending());
+				drop(joined);
+				pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+				b.iter(|| {
+					let joined = pool.producer.dynamic("pool", pool_route(hop)).unwrap();
+					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+					drop(joined);
+					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
 /// Publisher handoff at one path: a subscriber is reading from one local
 /// source when a second announces at the same path and takes over (newest
 /// wins). Measured from the standby's attach to the subscriber receiving its
@@ -433,6 +582,8 @@ criterion_group!(
 	bench_serve_idle,
 	bench_subscribe,
 	bench_request,
+	bench_pool_resolve,
+	bench_pool_churn,
 	bench_handoff
 );
 criterion_main!(benches);
