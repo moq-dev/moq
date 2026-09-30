@@ -29,8 +29,19 @@ Decided:
   what moq-mux's `container::Consumer` and the IETF publisher already assume.
   Fix the `Subscription::start` docs in moq-net (which say `None` equals a
   floor of group 0) and the matching js/net docs.
-- `start_floor_suppresses_late_lower_arrivals` stays: it sets an explicit floor
-  of 7, so group 5 is still below it.
+- `raise_start_to` applies only when the subscription has no explicit floor
+  (`start.is_none()`). With an explicit floor, `SUBSCRIBE_START` still reports
+  the first served group, but nothing below it is suppressed.
+- Aggregation follows: `Subscription::poll_combined`
+  (`rs/moq-net/src/model/subscription.rs`) lets any `None` clear another
+  subscriber's explicit floor, so a relay forwards "join at the start" upstream
+  and the explicit-floor subscriber still loses group 0. An explicit floor
+  survives mixing with `None`; the loosest explicit floor wins. Each
+  subscriber's own cursor still filters what it sees.
+- `start_floor_suppresses_late_lower_arrivals` stays as the `None` case: it
+  subscribes with `None`, receives group 7, raises the start to 7 as
+  `SUBSCRIBE_START` does, and group 5 is still suppressed. Add its explicit-floor
+  twin, which delivers group 5.
 
 If `drafts/draft-lcurley-moq-lite.md` describes `SUBSCRIBE_START` as an
 implicit drop below the start regardless of the floor, update it in the same
@@ -39,7 +50,9 @@ PR.
 Test: port the reporter's deterministic repro
 (`rs/moq-net/tests/late_lower_group.rs` on kidq330's fork, paused time and the
 mock transport) for lite-05, lite-06, and lite-07-wip, direct and through a
-relay, with the in-process and moq-transport controls.
+relay, with the in-process and moq-transport controls. Add a mixed case through
+a relay: a `None` subscriber already receiving group 1, then one with a floor
+of group 0, and a fresh group 0 reaches only the second.
 
 ## Closes
 

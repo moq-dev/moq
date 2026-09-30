@@ -11,7 +11,8 @@ A Rust-published hang catalog with no video or audio renditions leaves out the
 Requested by an external consumer (OneTooMany, Discord): data-only broadcasts
 fill logs with misleading empty sections.
 
-Add `skip_serializing_if` on `video` and `audio` in
+Give `Video` and `Audio` an `is_empty` (no renditions), as `Text` has, and add
+`skip_serializing_if` on `video` and `audio` in
 `rs/hang/src/catalog/root.rs`, like `text`/`json`/`binary`, and update the
 tests that pin the empty output (`root.rs` and
 `rs/moq-mux/src/catalog/hang/ext.rs`).

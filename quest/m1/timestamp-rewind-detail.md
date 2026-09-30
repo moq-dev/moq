@@ -10,7 +10,8 @@ error says which timestamp it refused and where the edge was, so a report like
 
 `container::TimestampRewind` (`rs/moq-mux/src/container/mod.rs`) is a unit
 struct, raised at `rs/moq-mux/src/container/producer.rs` when
-`frame.timestamp < live_edge`. Give it `timestamp` and `edge` fields and put
+`frame.timestamp < live_edge`, and also constructed on the consumer side
+(`rs/moq-mux/src/container/consumer.rs`); give those the same detail. Give it `timestamp` and `edge` fields and put
 both, in microseconds, in its message, for example "frame timestamp 1790802494898431
 µs is below the live edge 1790802494898432 µs". moq-ffi surfaces the message
 unchanged.

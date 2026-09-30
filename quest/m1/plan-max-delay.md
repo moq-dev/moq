@@ -12,15 +12,16 @@ delete it.
 
 The maintainer finds "delay" clearer than "age" for how far a group may fall
 behind before it's skipped. `moq play --delay` and `moq export ts --delay`
-([fixed-delay release](/quest/m1/tstd/delay.md)) already use one delay
-knob for presentation and staleness.
+(planned in [fixed-delay release](/quest/m1/tstd/delay.md)) use one delay
+knob for presentation and staleness; only `moq play`'s exists today.
 
 To weigh:
 
 - Publisher retention (`track::Info::max_age`) really is an age of cached
   content, while the subscriber budget is a delay. They may deserve different
   names rather than one rename.
-- The wire field is `Publisher Max Age` in `drafts/draft-lcurley-moq-lite.md`.
+- The wire fields are `Publisher Max Age` and `Subscriber Max Age` in
+  `drafts/draft-lcurley-moq-lite.md`.
   Renaming the draft's field is free on the wire, but it churns the spec.
 - A rename breaks every published API and binding, so it lands on `dev`,
   mirrored across Rust, JS, and the bindings in one release.

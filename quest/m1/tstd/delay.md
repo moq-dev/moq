@@ -38,6 +38,12 @@ Decided (2026-09-30):
   `moq export ts` (`moq play` already dropped `--max-age` for the same reason).
   moq-srt egress passes its SRT latency (`rs/moq-srt/src/ts.rs`, which feeds
   it to the muxer as the skip budget today).
+- Deadlines are on decode time, not PTS. Reordered video reaches the muxer in
+  decode order (PTS 0, 120, 40, 80 ms), so a PTS deadline would either strand
+  a B-frame behind its reference or send it first. Each frame's deadline is
+  anchor + its authored DTS + delay, each track keeps its decode order, and
+  tracks interleave by `(DTS, pid)`, which is also the order T-STD removes
+  access units in.
 - Late frames are dropped, as SRT's too-late drop does. A dropped video frame
   leaves its track waiting for the next keyframe.
 
@@ -47,8 +53,11 @@ release only gates drops and ordering, with pacing left to the CLI's
 `Delivery` pacer, or whether file sinks skip it.
 
 Test with mocked time: two exporters fed the same frames with different
-arrival skew and loss emit identical packet order, and a frame arriving after
-its deadline is dropped. Rerun the #4613 netem rig (10% loss, 120 s) and
+arrival skew, every frame inside its deadline in both, emit identical packet
+order. Separately, a frame arriving after its deadline is dropped and counted,
+and the rest still go out in `(DTS, pid)` order. A B-frame fixture (decode
+order PTS 0, 120, 40, 80) loses nothing on a clean path. It must pass before
+the hold is deleted. Rerun the #4613 netem rig (10% loss, 120 s) and
 compare with #4618's numbers.
 
 Update `doc/bin/cli.md` and the `moq export ts` examples.
