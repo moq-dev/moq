@@ -90,9 +90,9 @@ interface SubscribeEntry {
 	// (SUBSCRIBE_END), once it declares them.
 	start?: number;
 	end?: number;
-	// The broadcast the subscription belongs to, which records the origin SUBSCRIBE_START
-	// names so a session republishing it names the same one.
-	broadcast: broadcast.Consumer;
+	// The origin SUBSCRIBE_START named (draft-07). The subscription feeds one track copy,
+	// and a copy has one origin for its whole life, as Rust's track::Provenance.
+	origin?: Hop;
 	// Whether SUBSCRIBE_START arrived. On draft-07, which names the serving origin there,
 	// group streams wait for it: until then nobody knows whose content they carry.
 	started: Signal<boolean>;
@@ -506,14 +506,14 @@ export class Subscriber {
 			for (;;) {
 				const request = await wireOf(consumer).requested();
 				if (!request) break;
-				void this.#runSubscribe(consumer, path, request);
+				void this.#runSubscribe(path, request);
 			}
 		})();
 
 		return consumer;
 	}
 
-	async #runSubscribe(consumer: broadcast.Consumer, broadcast: Path.Valid, request: track.Request) {
+	async #runSubscribe(broadcast: Path.Valid, request: track.Request) {
 		const id = this.#subscribeNext++;
 		const subscription = request.subscription;
 		const initialBounds = groupBounds(subscription.groups);
@@ -542,7 +542,7 @@ export class Subscriber {
 		// Open the stream under a timeout. The stream handle flows back via `state`
 		// so the timeout path can abort it if it finishes opening after the deadline.
 		const state: { stream?: Stream } = {};
-		const setup = this.#openSubscribe(state, msg, request, id, timescale, consumer);
+		const setup = this.#openSubscribe(state, msg, request, id, timescale);
 
 		let opened: { stream: Stream; entry: SubscribeEntry };
 		try {
@@ -637,7 +637,6 @@ export class Subscriber {
 		request: track.Request,
 		id: bigint,
 		timescale: Signal<number | undefined>,
-		consumer: broadcast.Consumer,
 	): Promise<{ stream: Stream; entry: SubscribeEntry }> {
 		let producer: track.Producer;
 		let drainOk = false;
@@ -668,7 +667,6 @@ export class Subscriber {
 				},
 			}),
 			requested: msg.startGroup,
-			broadcast: consumer,
 			started: new Signal(!hasOrigin(this.version)),
 		};
 		this.#subscribes.set(id, entry);
@@ -744,7 +742,6 @@ export class Subscriber {
 	// Open a FETCH stream for one group and stream its bare frames into a group, for the
 	// ConsumeBroadcast backing track.Consumer.fetchGroup() (lite-05+).
 	async fetchGroup(
-		front: broadcast.Consumer,
 		broadcast: Path.Valid,
 		track: string,
 		sequence: number,
@@ -769,7 +766,7 @@ export class Subscriber {
 			consumer = group.mirror();
 			entry = {
 				group,
-				accepted: this.#runFetch(front, broadcast, track, sequence, options.priority ?? 0, group),
+				accepted: this.#runFetch(broadcast, track, sequence, options.priority ?? 0, group),
 			};
 			this.#fetches.set(key, entry);
 			void group.closed.then(() => {
@@ -790,7 +787,6 @@ export class Subscriber {
 	// group, evict the entry, and reject every caller waiting for acceptance. A setup every caller
 	// has abandoned is cancelled the same way.
 	async #runFetch(
-		front: broadcast.Consumer,
 		broadcast: Path.Valid,
 		track: string,
 		sequence: number,
@@ -805,7 +801,7 @@ export class Subscriber {
 			// A publisher that never answers would hold the setup forever. Subscriber.close()
 			// closing the group releases every caller at any stage, and resets the streams the
 			// setup opened.
-			const setup = this.#fetchSetup(front, broadcast, track, sequence, priority, group);
+			const setup = this.#fetchSetup(broadcast, track, sequence, priority, group);
 			let accepted: { stream: Stream; info: TrackInfo };
 			try {
 				accepted = await untilAbandoned(group, setup);
@@ -828,7 +824,6 @@ export class Subscriber {
 	// Resolve the track's timescale, then open the FETCH stream and wait for it to be accepted.
 	// Closing the group during that wait resets the stream.
 	async #fetchSetup(
-		front: broadcast.Consumer,
 		broadcast: Path.Valid,
 		track: string,
 		sequence: number,
@@ -840,10 +835,9 @@ export class Subscriber {
 			await stream.writer.u53(StreamId.Fetch);
 			await new FetchMessage({ broadcast, track, priority, group: sequence }).encode(stream.writer, this.version);
 			if (hasOrigin(this.version)) {
-				// Draft-07 accepts with FETCH_OK naming the serving origin before any frame;
-				// record it so a session republishing the broadcast names the same one.
-				const ok = await untilClosed(group, FetchOk.decode(stream.reader, this.version));
-				wireOf(front).name(ok.origin);
+				// Draft-07 accepts with FETCH_OK before any frame. It names the serving origin,
+				// which only a republisher would need, and JS does not republish.
+				await untilClosed(group, FetchOk.decode(stream.reader, this.version));
 			} else {
 				// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
 				// done() buffers that byte so the response pump can decode it normally.
@@ -914,7 +908,12 @@ export class Subscriber {
 			if ("start" in resp) {
 				entry.start = resp.start.group;
 				if (hasOrigin(this.version)) {
-					wireOf(entry.broadcast).name(resp.start.origin);
+					// A START naming another origin means upstream is serving a different
+					// track: drop the copy rather than splice another origin's content into it.
+					if (entry.origin !== undefined && entry.origin !== resp.start.origin) {
+						throw new Error(`origin changed: ${entry.origin} to ${resp.start.origin}`);
+					}
+					entry.origin = resp.start.origin;
 					entry.started.set(true);
 				}
 				// The groups the SUBSCRIBE asked for below it are unavailable, whatever the
@@ -1307,7 +1306,7 @@ class ConsumeBroadcast extends broadcast.Consumer {
 		super(state);
 		overrideBroadcastWire(this, {
 			resolveTrackInfo: (name) => subscriber.resolveTrackInfo(path, name),
-			fetchGroup: (name, sequence, options) => subscriber.fetchGroup(this, path, name, sequence, options),
+			fetchGroup: (name, sequence, options) => subscriber.fetchGroup(path, name, sequence, options),
 		});
 		this.#subscriber = subscriber;
 		this.#path = path;

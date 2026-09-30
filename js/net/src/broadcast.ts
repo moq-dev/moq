@@ -6,7 +6,7 @@
 import { type GetPromise, Once, Signal } from "@moq/signals";
 import { NotFound } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
-import { type Hop, Route, randomHop } from "./hop.ts";
+import { Route } from "./hop.ts";
 import { hooks, type TrackSequence } from "./internal.ts";
 import * as Path from "./path.ts";
 import * as track from "./track.ts";
@@ -34,17 +34,6 @@ class BroadcastState {
 	// Live consumer handles sharing this state (see {@link Consumer.clone}). The broadcast
 	// closes once the last one closes, so a shared consumer can be handed to several callers.
 	consumers = 0;
-	// The origin serving this broadcast (see the wire's `origin`): named by an upstream
-	// reply, or generated on first use for content nobody named.
-	origin?: Hop;
-}
-
-// The origin a peer is told serves this broadcast: proxied from upstream, or a random
-// one for content originating here, stable for the broadcast's life and shared by every
-// session serving it.
-function origin(state: BroadcastState): Hop {
-	state.origin ??= randomHop();
-	return state.origin;
 }
 
 function dequeueRequest(state: BroadcastState): track.Request | undefined {
@@ -258,10 +247,6 @@ export class Producer {
 			resolveTrackInfo: (name) => resolveTrackInfo(this.#state, name),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => this.#requested(),
-			origin: () => origin(this.#state),
-			name: (named) => {
-				this.#state.origin = named;
-			},
 		};
 	}
 
@@ -335,10 +320,6 @@ export class Consumer {
 			resolveTrackInfo: (name) => resolveTrackInfo(this.#state, name),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => this.#requested(),
-			origin: () => origin(this.#state),
-			name: (named) => {
-				this.#state.origin = named;
-			},
 		});
 	}
 

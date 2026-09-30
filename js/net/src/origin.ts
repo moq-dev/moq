@@ -14,7 +14,7 @@ import { Derived, type Dispose, type GetPromise, type Getter, getter, Once, Sign
 import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
-import { isAnonymous, Route, routesEqual } from "./hop.ts";
+import { type Hop, isAnonymous, Route, randomHop, routesEqual } from "./hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps, spreadHash } from "./internal.ts";
 import * as Path from "./path.ts";
 import { type Advertised, type Advertisements, registerWire, wireOf } from "./wire.ts";
@@ -383,6 +383,9 @@ class OriginState {
 	// received entry back to a peer, which is what makes an origin shared by both
 	// directions echo-free.
 	created: Map<Path.Valid, broadcast.Consumer> | undefined = new Map();
+	// This origin's identity, which its replies name as the origin of what it serves. Shared by
+	// every session serving it, so a peer can fail over between them (Rust's `origin.hop()`).
+	readonly hop: Hop = randomHop();
 	local = new VersionedSignal<Map<Path.Valid, broadcast.Consumer> | undefined>(new Map());
 	advertisedLocal = new VersionedSignal<Map<Path.Valid, Route> | undefined>(new Map());
 	routes = new VersionedSignal<Map<Path.Valid, RouteEntry[]> | undefined>(new Map());
@@ -1147,6 +1150,7 @@ export class Consumer {
 			total === 0 ? undefined : discovery === total,
 		);
 		registerWire(this, {
+			hop: state.hop,
 			routes: (path) => this.#routes(scope.path(path)),
 			broadcasts:
 				scope === Scope.all ? state.local : new Derived([state.local], (local) => scope.projectPaths(local)),

@@ -1,6 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
-import { Producer as BroadcastProducer } from "../broadcast.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { error, fromTransport, reason, StreamCode, StreamError } from "../error.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
@@ -806,7 +805,7 @@ test.each([
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 
 	let settled = false;
-	const fetch = subscriber.fetchGroup(new BroadcastProducer().consume(), Path.from("room"), "video", 0).then(
+	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0).then(
 		() => {
 			settled = true;
 			return undefined;
@@ -840,9 +839,7 @@ test("a fetch started after the subscriber closes rejects without opening a stre
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 	subscriber.close();
 
-	const err = await subscriber
-		.fetchGroup(new BroadcastProducer().consume(), Path.from("room"), "video", 0)
-		.catch((err: unknown) => err);
+	const err = await subscriber.fetchGroup(Path.from("room"), "video", 0).catch((err: unknown) => err);
 	expectCut(err, undefined);
 	expect(streams.length).toBe(0);
 });
@@ -853,7 +850,7 @@ test("an already-aborted fetch rejects without opening a stream", async () => {
 	const cause = new Error("gone");
 
 	const err = await subscriber
-		.fetchGroup(new BroadcastProducer().consume(), Path.from("room"), "video", 0, {
+		.fetchGroup(Path.from("room"), "video", 0, {
 			signal: AbortSignal.abort(cause),
 		})
 		.catch((err: unknown) => err);
@@ -868,10 +865,10 @@ test("one of two fetch sharers aborting leaves the other's fetch", async () => {
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 
 	const controller = new AbortController();
-	const a = subscriber.fetchGroup(new BroadcastProducer().consume(), Path.from("room"), "video", 0, {
+	const a = subscriber.fetchGroup(Path.from("room"), "video", 0, {
 		signal: controller.signal,
 	});
-	const b = subscriber.fetchGroup(new BroadcastProducer().consume(), Path.from("room"), "video", 0);
+	const b = subscriber.fetchGroup(Path.from("room"), "video", 0);
 
 	await drainUntil(() => streams.length === 1);
 	await answerTrackInfo(streams[0]);
@@ -904,10 +901,10 @@ test.each([
 
 	const first = new AbortController();
 	const second = new AbortController();
-	const a = subscriber.fetchGroup(new BroadcastProducer().consume(), Path.from("room"), "video", 0, {
+	const a = subscriber.fetchGroup(Path.from("room"), "video", 0, {
 		signal: first.signal,
 	});
-	const b = subscriber.fetchGroup(new BroadcastProducer().consume(), Path.from("room"), "video", 0, {
+	const b = subscriber.fetchGroup(Path.from("room"), "video", 0, {
 		signal: second.signal,
 	});
 

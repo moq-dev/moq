@@ -386,6 +386,10 @@ export class Publisher {
 
 	#publish?: OriginConsumer;
 
+	// The origin named in SUBSCRIBE_START and FETCH_OK: the published origin's identity, shared by
+	// every session serving it. Unused without one, since nothing is served.
+	#origin: Hop;
+
 	// TRACK_INFO is immutable per track, so resolve it from the application once
 	// (via a throwaway subscribe whose info() resolves when the app calls accept)
 	// and reuse it for every later TRACK request of the same track. Keyed by the
@@ -410,6 +414,7 @@ export class Publisher {
 		const origin = publish && wireOf(publish);
 		this.#advertised = origin?.advertised ?? new Signal(new Map());
 		this.#publish = publish;
+		this.#origin = origin?.hop ?? hop;
 
 		// Grab the datagram writer up front when the transport carries datagrams (no group
 		// fallback, so it stays undefined otherwise). One writer for all subscriptions.
@@ -678,9 +683,8 @@ export class Publisher {
 					end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
 				});
 				return async () => {
-					// Read once content flowed: an upstream's SUBSCRIBE_START named the origin
-					// before any of its content did.
-					const start = new SubscribeStart(sequence, wireOf(front).origin());
+					// JS publishes only what it produces, so the origin serving it is ours.
+					const start = new SubscribeStart(sequence, this.#origin);
 					await encodeSubscribeResponse(stream.writer, { start }, this.version);
 				};
 			});
@@ -751,7 +755,7 @@ export class Publisher {
 			const info = await this.#resolveTrackInfo(front, msg.track);
 			group = await wireOf(front).fetchGroup(msg.track, msg.group, { priority: msg.priority });
 			if (hasOrigin(this.version)) {
-				await new FetchOk(wireOf(front).origin()).encode(stream.writer, this.version);
+				await new FetchOk(this.#origin).encode(stream.writer, this.version);
 			}
 			await this.#runFetchGroup(group, stream.writer, {
 				timescale: Timescale(info.timescale),
