@@ -27,7 +27,7 @@ sudo apt update && sudo apt install gstreamer1.0-moq
 ### Fedora / RHEL / Rocky / AlmaLinux
 
 ```bash
-sudo curl -fsSL -o /etc/yum.repos.d/moq.repo https://rpm.moq.dev/moq.repo
+sudo curl -fsSL https://rpm.moq.dev/moq.repo -o /etc/yum.repos.d/moq.repo
 sudo dnf install gstreamer1-moq
 ```
 
