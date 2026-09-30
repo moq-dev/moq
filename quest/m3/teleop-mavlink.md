@@ -8,6 +8,8 @@ and MAVProxy connect unchanged.
 
 ## Plan
 
+Parked in m3 until a real ArduPilot user or partner asks (2026-09-30 audit).
+
 ### Shape
 
 A library crate reached through `moq-cli`, the way `moq-srt` and `moq-rtmp`

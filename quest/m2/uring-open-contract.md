@@ -18,3 +18,11 @@ Update the implementation quest with the selected state transitions, resource
 bounds, cancellation behavior, and regression cases for concurrent openers,
 credit starvation, dropped futures, and finish/drop. This quest ships the plan;
 it does not close #3129 or implement an unsettled public contract.
+
+Decided in the 2026-09-30 audit: moved to m2 with #3129, which it plans.
+io_uring ships in no package, and #3129 fixes an API wart no in-tree caller
+hits.
+
+## Related
+
+- [Write headers at open](/quest/m2/3129-moq-uring-write-the-webtransport-stream-header-at-open.md) - implementation after the contract is settled

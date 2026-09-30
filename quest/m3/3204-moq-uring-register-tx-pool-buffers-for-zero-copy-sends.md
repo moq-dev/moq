@@ -34,6 +34,14 @@ The TX pool already owns stable `Box<[u8]>` allocations and grows lazily. If zer
 
 Compare #3201 with and without registered buffers using the same threshold and workload matrix. Record CPU, cycles, registration cost, locked memory, pool starvation, throughput, and latency. Do not add the complexity unless it improves the winning zero-copy range beyond ordinary `SendMsgZc`.
 
+Decided in the 2026-09-30 audit: moved to m3. Fixed buffers on
+`SENDMSG_ZC` need Linux 6.15, above the 6.12 floor, and the #3201
+experiment it builds on moved to m3 too.
+
+## Required
+
+- [#3201](/quest/m3/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md) - the zero-copy send experiment this extends
+
 ## Closes
 
 - [#3204](https://github.com/moq-dev/moq/issues/3204) - close this issue when the quest finishes

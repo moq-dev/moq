@@ -54,6 +54,10 @@ a second peer-policy mechanism. Completion is a documented decision,
 worked counterexamples or model checks, and independently completable follow-up
 quests. Open wire/API choices belong to this design exercise.
 
+## Required
+
+- [Cluster routing](/quest/m1/cluster-routing/README.md) - this designs on its inter-cluster path vector
+
 ## Related
 
 - [#3769](https://github.com/moq-dev/moq/pull/3769) - measurement-based pricing

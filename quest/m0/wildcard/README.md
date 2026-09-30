@@ -22,9 +22,9 @@ over FETCH wants to say "if nobody is publishing this live, I have it", which
 is the catch-all `**`, a claim about every path at once.
 
 The cost of enumerating is real even though its last measurement is stale.
-[relay-memory](/quest/m1/relay-memory.md) measured one announcement at 8.8 KB
-per relay plus 4.3 KB per additional route before prefix routes made a
-standby route a table entry, and owns remeasuring it. Whatever the current
+One announcement measured 8.8 KB per relay plus 4.3 KB per additional route
+before prefix routes made a standby route a table entry;
+[Cluster routing](/quest/m1/cluster-routing/README.md) owns remeasuring it. Whatever the current
 number, every relay that hears an announcement pays it whether or not anything
 there subscribes, so "workers times broadcasts" is that number multiplied
 across the fleet in resident memory.
@@ -51,8 +51,8 @@ Route cost already names this case: "The original publisher seeds it with its
 production cost: zero for a live publish, something large for a standby that
 would have to start working (a cold transcoder)"
 (`drafts/draft-lcurley-moq-lite.md`). `moq_auth::Claims.publish` and
-`origin::Producer` gain versioned patterns through
-[Path patterns](/quest/m1/path-patterns.md), so tokens and filters reuse the
+`origin::Producer` gained versioned patterns on the
+[Auth](/quest/m1/auth/README.md) line, so tokens and filters reuse the
 same matcher; advertisements stay prefixes. `Cost { warm, cold }`
 (`rs/moq-net/src/model/origin.rs:426`) is the route cost since
 [#2925](https://github.com/moq-dev/moq/pull/2925).
@@ -88,8 +88,8 @@ field.
 ### Decisions
 
 - **One prefix on the wire, one pattern in the token and the filter.** An
-  advertisement is a path prefix; the [path-patterns](/quest/m1/path-patterns.md)
-  dialect is what tokens and the consume-side filter use, matched by the
+  advertisement is a path prefix; the pattern dialect from the
+  [Auth](/quest/m1/auth/README.md) line is what tokens and the consume-side filter use, matched by the
   shared matcher, so nothing resembles a second grammar and nothing on the
   wire spells a wildcard.
 - **Longest prefix wins, and its refusal is final.** This is the rule
@@ -189,7 +189,7 @@ field.
 - **Patterns are independent of clustering.** The `moq-pattern` crate owns
   the matching semantics tokens and filters share, with no draft of its own;
   no announce message carries a pattern on either protocol (AUTH grants on
-  lite-06 do, per [Path patterns](/quest/m1/path-patterns.md)). moq-cluster adds hop
+  lite-06 do, per the [Auth](/quest/m1/auth/README.md) line). moq-cluster adds hop
   lists, costs, pool selection, and request resolution to prefix
   advertisements.
 
@@ -206,7 +206,9 @@ never see `.pro/` broadcasts, which could confuse their business logic. Those
 versions cannot opt into hidden routes, so the relay never announces them
 there. Hidden routes are a moq-lite-07 feature, so the player's covering check
 (Demand, done on the line branch) opts into them and sees a claim only when
-lite-07 is negotiated. A customer who wants transcodes upgrades, or
+lite-07 is negotiated. Finalizing lite-07 is a rollout condition, not a
+blocker for this line (decided in the 2026-09-30 audit), since the check works
+whenever lite-07 is negotiated. A customer who wants transcodes upgrades, or
 subscribes to the explicit `.pro/<service>/...` path, which works on any
 version. Grants and metering are the deployment's; moq.pro's are in its
 [wildcard questline](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/wildcard/README.md).
@@ -223,3 +225,5 @@ distinguish recording generations reads the catalog's archive entry
   catalog names the generations a claim cannot
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - derived output
   mirrors the source path, `@<epoch>` segment included
+- [Announcement shapes](/quest/m2/announce-shapes.md) - moq-lite-only exact,
+  suffix, and prefix+suffix claims that survive relay hops

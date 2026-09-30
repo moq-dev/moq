@@ -5,9 +5,14 @@
 Video encoded with periodic intra refresh has no keyframes. Each frame refreshes
 a stripe of the picture, so a decoder that starts at the beginning of a sweep is
 clean once the sweep completes, and the bitrate never spikes. This questline
-makes such video a first-class hang broadcast at both ends: our encoders can
-emit it, streams contributed that way import cleanly, and every viewer tunes in
-without a visible glitch.
+makes such video a first-class hang broadcast on import and playback: streams
+contributed that way import cleanly, and every viewer tunes in without a
+visible glitch.
+
+Decided in the 2026-09-30 audit: the encode side (shared config, NVENC, V4L2,
+bindings) moved to m3 pending the [GOP overhead](/quest/m2/gop-overhead.md)
+verdict. Import and playback stay here because contributed feeds already use
+intra refresh regardless of what our encoders do.
 
 The motivations, in the order they settle tradeoffs: a flat bitrate at low
 latency, so a bandwidth grant holds; faster tune-in, since a short refresh cycle
@@ -29,12 +34,8 @@ Decisions the quests share:
   mid-stream skip both decode everything and present nothing until recovery,
   freezing on the last good frame. A group that opens on a true IDR shows at
   once.
-- The shared encode config extends the `Gop` contract settled in main,
-  and a cut in refresh mode starts a new sweep, never an IDR.
 - H.264 and H.265 only. AV1 and VP9 have no standard gradual refresh signal.
-  WebCodecs has no intra-refresh option, so js/publish is consumer-only here.
-  Backends without the knob refuse refresh mode; NVENC and V4L2 get it now,
-  Media Foundation and MediaCodec are follow-ups.
+  WebCodecs has no intra-refresh option, so js/publish is consumer-only.
 
 ## Required
 
@@ -48,3 +49,5 @@ Decisions the quests share:
 - [Audio warmup](/quest/m1/audio-warmup.md) - Opus convergence after a mid-stream join uses the same `warmup` field
 - [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - frames stamped before the group's keyframe are the other tune-in trim
 - [Catalog warmup](/quest/m1/catalog-warmup.md) - the generic `warmup` field this line reads, kept in m1 for audio and open-GOP tune-in
+- [GOP overhead](/quest/m2/gop-overhead.md) - the verdict that decides whether our encoders emit refresh mode
+- [Encode config](/quest/m3/intra-refresh-encode-config.md) - refresh-mode groups on the `Gop` contract, parked with NVENC, V4L2, and bindings behind it

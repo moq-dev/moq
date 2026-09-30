@@ -31,8 +31,10 @@ the supported drafts without duplicating transport dispatch or codecs here.
 Ship the contract in the `@moq/*` packages. A dashboard browser-to-HLS proof
 remains downstream (moq.pro) work.
 
+Deferred to m2 in the 2026-09-30 audit: no named consumer; the native archive
+lands first.
+
 ## Required
 
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - generic on-demand group serving and IETF FETCH support
-
-- [Recording writer](/quest/m1/archive/writer.md)
+- [Archive](/quest/m1/archive/README.md) - the native writer, reader, and DVR contract this ports

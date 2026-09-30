@@ -25,3 +25,13 @@ than loopback.
 
 State the experiment's boundary beside the result: netem cannot establish
 behavior against production cross traffic or real wifi and cellular loss.
+
+Receive timestamps are native-only: browsers never negotiate the extension,
+so GCC can only target native peers or relay-to-relay sessions, not browser
+egress. Decided in the 2026-09-30 audit: parked in m3 until such a consumer
+exists.
+
+## Required
+
+- [Receive timestamps](/quest/m3/quic-receive-ts.md) - the per-packet
+  arrival times the delay filter runs on

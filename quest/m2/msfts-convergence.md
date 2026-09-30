@@ -4,19 +4,23 @@
 
 A subscriber author can map this repository's demultiplexed TS lane
 (access units, Hang catalog `mpegts` section) onto MSFTS ES-level carriage
-without guessing. #3731 settled four of six divergences (scope, group
-alignment as a SHOULD, mux rate, egress timing); the payload unit (access units
-versus filtered 188-octet packets) is MSFTS's call at msfts#33, and SI
-repetition is now per `table_id` here versus a subscriber obligation there.
-Transporting TS verbatim is a non-goal.
+without guessing. Transporting TS verbatim is a non-goal.
 
 ## Plan
 
-Once msfts#33 settles, re-read the draft and decide what converges: a
-published mapping from the `mpegts` catalog section to the `m2ts` fields, or a
-change on either side. Update `drafts/draft-lcurley-moq-mpegts.md` and
-`doc/concept` with whatever lands.
+Decided in the 2026-09-30 audit: moved from m4 and the msfts#33 gate removed.
+msfts#33 closed on 2026-09-28, answered by msfts#36 (merged 2026-09-24), and
+egress moved to msfts#37 (closed). Two differences remain:
 
-## Required
+- **Program tables.** MSFTS carries them in tracks; here they live in the
+  Hang catalog's `mpegts` section. Decide whether to publish a mapping from
+  the catalog section to MSFTS's table tracks, or change either side.
+- **ES units.** MSFTS es-units carry the whole PES packet; here they carry the
+  payload plus `stream_id`. Decide whether the PES header fields we drop
+  matter to a subscriber, and converge or document the mapping.
 
-- msfts#33 (https://github.com/mondain/msfts/issues/33) settles the ES-level payload unit
+Update `drafts/draft-lcurley-moq-mpegts.md` and `doc/concept` with whatever
+lands. Open TS PRs [#4577](https://github.com/moq-dev/moq/pull/4577) (per-ES
+access units at export), [#4579](https://github.com/moq-dev/moq/pull/4579)
+(export on the mux rate), and [#4580](https://github.com/moq-dev/moq/pull/4580)
+(per-program SI) touch the same area; land or rebase on them first.

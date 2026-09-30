@@ -9,6 +9,9 @@ Windows, macOS, and Linux.
 
 ## Plan
 
+In m3 until a Conan consumer asks; vcpkg and the release tarball cover
+C++ consumers first.
+
 - A `moq-cpp` recipe, named after the package, on a moq-dev remote
   (Artifactory or a GitHub-hosted `conan` index) that packages the prebuilt
   release tarball per setting and exports the `moq::cpp` CMake target from

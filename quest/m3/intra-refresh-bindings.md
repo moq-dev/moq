@@ -21,4 +21,5 @@ both modes.
 
 ## Required
 
+- [Encode config](/quest/m3/intra-refresh-encode-config.md) - the core refresh variant this mirrors
 - [Codecs](/quest/m1/ffi-shape/codec.md) - the `MoqVideoGop` enum this extends

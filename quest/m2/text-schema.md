@@ -8,6 +8,8 @@ the audio or video timeline it transcribes.
 
 ## Plan
 
+Deferred to m2 in the 2026-09-30 audit: no named consumer.
+
 The `text` catalog section already carries the rest of the contract: relative
 `broadcast` references so a transcription can live in its own broadcast, cue
 timing on the shared media clock, and `jitter` for the publisher's flush

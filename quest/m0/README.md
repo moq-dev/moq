@@ -2,14 +2,13 @@
 
 ## Goal
 
-The work in flight now, in three independent tracks. Relay hardening: every
-resource a peer can make the relay hold is bounded by what it sent or by a
-budget, no peer input panics the process, and legal moq-transport input never
-fails a session, ahead of Seattle interop on 2026-10-12. Routing: a publisher stops
-sending announce updates the wire cannot tell apart, a service claims the
-prefix it could serve instead of enumerating broadcasts. Audio playout: the target is a measured
-estimate of arrival timing in both languages, a browser regression fails a
-nightly run, and the audio playhead becomes the clock video follows.
+The work in flight now, in three independent tracks. Relay hardening: legal
+moq-transport input never fails a session ahead of Seattle interop on
+2026-10-12, every resource a peer can make the relay hold is bounded by what
+it sent or by a budget, and no peer input panics the process. Routing: a
+service claims the prefix it could serve instead of enumerating broadcasts.
+Audio playout: the target is a measured estimate of arrival timing in both
+languages, and a browser regression fails a nightly run.
 
 ## Plan
 
@@ -18,19 +17,25 @@ done. moq.pro tracks this repository as a submodule rather than a release, so
 no release quest gates this milestone. The Pronto GPU integration lives in
 moq.pro.
 
-Routing: announce-update dedupe is a wire-compatible fix on every version. The
-wildcard line is prefix-only on the wire; its resolve and demand work is done
-on the line branch and waits to land. Serving the relay's ingested-only
-view (`origin::Consumer::local()`) to localhost workers belongs to moq.pro's
-edge, which embeds moq-relay; it moved there on 2026-09-28.
+Relay hardening: IETF interop leads the ranking, since only those quests
+block Seattle. Subgroup refusal came from the moxygen line and IETF stream
+types from m1; both moved here in the 2026-09-30 audit because a session
+ended by legal input is exactly what Seattle would hit. The DoS hardening
+from an external review on 2026-09-29, verified against `main`, stays in m0
+as security work. Its quests describe fixes, not exploits.
+
+Routing: the wildcard line is prefix-only on the wire; its resolve and demand
+work is done on the line branch and waits to land. Serving the relay's
+ingested-only view (`origin::Consumer::local()`) to localhost workers belongs
+to moq.pro's edge, which embeds moq-relay; it moved there on 2026-09-28.
 
 Audio playout: the jitter target replaces the round-trip guess. The harness's
 browser lane grades it nightly and records the traces it replays; the native
-lane is a standalone m1 quest, since nothing here waits on it. The A/V clock
-builds on the jitter target's per-track spread.
-
-Relay hardening comes from an external review on 2026-09-29, verified against
-`main`. Its quests describe fixes, not exploits.
+lane is a standalone m1 quest, since nothing here waits on it. The harness
+line lands before the jitter line, since both add
+`js/watch/src/audio/replay.test.ts`. The [A/V clock](/quest/m1/av-clock.md)
+moved to m1 in the 2026-09-30 audit: it waits on the whole jitter line and is
+a published `@moq/watch` break on dev.
 
 Published API or wire breaks still land on dev; each quest's Plan says so.
 

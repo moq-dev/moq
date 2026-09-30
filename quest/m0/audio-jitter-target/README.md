@@ -14,7 +14,7 @@ the same arrival trace.
 Boundaries: convergence still uses skip-ahead and silence, so playing slightly
 faster or slower to converge stays [Time
 stretch](/quest/m1/watch-audio-time-stretch.md). No packet loss concealment.
-Video keeps its own target; making the audio playhead the clock is [Plan: A/V
+Video keeps its own target; making the audio playhead the clock is [A/V
 clock](/quest/m1/av-clock.md).
 
 ## Plan
@@ -42,15 +42,15 @@ reporter; they replace the #3477 traces wherever the quests name them.
 The algorithm is written down at `doc/concept/audio-jitter.md`, with a
 conformance corpus beside it that both implementations will read.
 
-Neither `main` nor `dev` has a measured estimator. `js/watch/src/sync.ts:159`
+Neither `main` nor `dev` has a measured estimator yet. `js/watch/src/sync.ts:159`
 still computes `max(MIN_JITTER, minRtt * 1.25)` from the connection's PROBE,
 and `js/watch/src/audio/latency.ts` still exists. `sync.ts` also adds the
 advertised jitter to that term, where the document settles on a maximum.
 
-The prior art is the branch of PR #3517,
-`origin/quest/m0/3477-watch-auto-latency`, two commits ahead of `dev`. The PR
-is closed and never merged; the watch quest starts from the branch rather than
-from `dev`. It already deletes the RTT term
+The prior art from PR #3517 (closed 2026-09-10, branch deleted 2026-09-30)
+landed on this line's branch through
+[#3954](https://github.com/moq-dev/moq/pull/3954), so the watch quest works
+there. It deletes the RTT term
 (`MIN_JITTER`, `FALLBACK_JITTER`, `#minRtt`, and the `probe` input are gone
 from `sync.ts`; `latency.ts` survives, minus `reanchorFloor`) and plumbs a
 per-track arrival `spread` through `Container.Consumer`, measured at container
@@ -66,7 +66,7 @@ is immediate and unclamped, so a tune-in across a stale group sets the target
 to seconds.
 
 Note that `sync.ts` has since been refactored on `main` to a `register(jitter)`
-list, so the branch does not rebase cleanly.
+list, which is one of the conflicts merging `main` in resolves.
 
 Native has no jitter buffer at all. `rs/moq-audio`'s `decode::Options`
 (`rs/moq-audio/src/decode/consumer.rs`) carries `max_age`, how far
@@ -76,7 +76,8 @@ buffer against uneven arrivals.
 
 ## Required
 
-- [Watch](/quest/m0/audio-jitter-target/watch.md) - js/watch and js/hang bring the #3517 branch's estimator into conformance
+- [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - lands first, since both lines add `js/watch/src/audio/replay.test.ts`; it also records the traces the watch quest replays
+- [Watch](/quest/m0/audio-jitter-target/watch.md) - js/watch and js/hang bring the #3954 estimator into conformance
 - [Native](/quest/m0/audio-jitter-target/native.md) - rs/moq-audio grows a measured jitter buffer from the same algorithm
 
 ## Closes
@@ -85,5 +86,4 @@ buffer against uneven arrivals.
 
 ## Related
 
-- [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - the automated proof, and the recorder of the traces the watch quest replays
 - [Time stretch](/quest/m1/watch-audio-time-stretch.md) - inaudible convergence, on top of this

@@ -25,3 +25,9 @@ who joins late joins mid-replay.
 - Test with paused time: record, replay paced, and assert a plain subscriber
   gets every group in order at media pace, that a late subscriber starts at the
   current group, and that two tracks stay aligned.
+- Deferred to m2 in the 2026-09-30 audit: no named consumer; FETCH replay
+  already serves DVR and HLS.
+
+## Required
+
+- [Recording reader](/quest/m1/archive/reader.md) - the FETCH reader this adds live publishing to

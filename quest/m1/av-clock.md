@@ -11,6 +11,9 @@ the next re-anchor.
 
 ## Plan
 
+Moved from m0 to m1 in the 2026-09-30 audit: it waits on the whole jitter
+line and is a published `@moq/watch` break on dev, so it is not in flight.
+
 Settled: per-track handles, and this quest lands them. `sync.track("audio")`
 and `sync.track("video")` each report their advertised delay and measured
 spread, and one is nominated as the clock source. `SyncInput`

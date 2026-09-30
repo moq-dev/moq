@@ -5,12 +5,16 @@
 MoQ carries a robot's video down and its control up on one session, as a
 library capability rather than a demo convention.
 
-Generic in the library, integration-shaped in the proofs: Kyber is the first
-transport replacement, while ArduPilot remains the first open protocol and
-flight integration. The primitive is what any teleoperated machine needs. The
-Kyber integration itself (replacing Kymux with moq-net and hang for Kyber's
-media, input, feedback, and control) lives in Kyber's own repository, so it
-has no quests here.
+Generic in the library: the primitive is what any teleoperated machine needs,
+and integrations are adapters on top of it. ArduPilot is the first open
+protocol and flight integration, parked in m3 until a real ArduPilot user or
+partner shows up.
+
+Decided in the 2026-09-30 audit: the ROS 2 bridge was deleted, cross-track
+correlation folded into [robot](/quest/m2/teleop/robot.md), V4L2-M2M encoding
+folded into [CLI packaging](/quest/m1/cli-packaging.md), and the MAVLink
+bridge, SITL proof, and browser package moved to m3. Kyber is a competitor
+with proprietary framing, not a transport we replace.
 
 ## Plan
 
@@ -25,9 +29,9 @@ demo and private to it. Every integrator rebuilds the announce fan-in, the
 operator arbitration, and the latency instrumentation from scratch.
 
 The hang catalog is no longer a gap: it advertises data tracks in its `json`
-and `binary` sections beside video and audio. What is genuinely missing is
-`moq-video`'s V4L2-M2M encoder backend in a released `moq-cli`, so the boards
-that fly have no native hardware-encode path anyone can install.
+and `binary` sections beside video and audio. The other missing piece,
+`moq-video`'s V4L2-M2M encoder in a released `moq-cli`, is tracked by
+[CLI packaging](/quest/m1/cli-packaging.md).
 
 ### Two delivery classes, one session
 
@@ -97,3 +101,13 @@ stating plainly because it is what a builder is comparing against.
   extends those types rather than adding a second stats surface
 - [Video hardware validation](/quest/m3/video-hardware.md) - the VAAPI run
   that covers Intel ground robots and NUC companions
+- [CLI packaging](/quest/m1/cli-packaging.md) - ships the V4L2-M2M encoder the
+  boards that fly need
+- [MAVLink bridge](/quest/m3/teleop-mavlink.md) - a `moq-mavlink` gateway,
+  parked until a real ArduPilot user or partner
+- [SITL proof and browser ground station](/quest/m3/teleop-proof.md) - ArduPilot
+  SITL flown from a browser, parked with the bridge
+- [Browser teleoperation package](/quest/m3/teleop-browser-package.md) -
+  `@moq/robot` mirroring the Rust crate, parked with the bridge
+- [Text schema](/quest/m2/text-schema.md) - non-media tracks in a catalog,
+  arrived at from the media side

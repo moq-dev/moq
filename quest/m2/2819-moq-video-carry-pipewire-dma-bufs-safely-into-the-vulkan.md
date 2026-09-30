@@ -4,7 +4,7 @@
 
 The Linux zero-copy spine from [#2819](https://github.com/moq-dev/moq/issues/2819),
 `PipeWire DMA-BUF -> Surface::DmaBuf -> Vulkan import -> render shader`, is
-proven on real hardware, and a V4L2 camera feeds `Surface::DmaBuf` too.
+proven on real hardware.
 
 ## Plan
 
@@ -26,9 +26,11 @@ What remains:
   driver will not import, and re-tiles nothing. A VA-API VPP re-tile is only
   worth adding if a measured capture source lands on such a modifier; record
   the modifiers seen and decide.
-- V4L2 capture still converts to I420 on the CPU. Export its buffers with
-  `VIDIOC_EXPBUF` (the ioctl is in `moq-v4l`, unused) as a `Surface::DmaBuf`
-  so a camera reaches VA-API or NVENC without a copy.
+
+Decided in the 2026-09-30 audit: V4L2 `VIDIOC_EXPBUF` export is dropped.
+V4L2 capture only takes YUYV and MJPEG (`rs/moq-video/src/capture/v4l2.rs`),
+both of which need a CPU conversion or decode anyway, so exporting the buffer
+saves no copy. Revisit only if NV12 camera capture lands.
 
 Refs #2481, #1837.
 

@@ -38,15 +38,24 @@ Add the missing wire evidence before release: golden draft-02 vectors,
 bidirectional interoperability against the published `qmux` 0.5.x crate, and
 the TypeScript qmux/WebSocket peer used by `js/net`. Preserve rejection of
 prohibited QUIC frames, params-first setup, record-size validation, close and
-reset semantics (the first recorded close wins, per
-[close codes](/quest/m1/close-codes.md)), keep-alive behavior, and bounded
-flow-control tests.
+reset semantics (the first recorded close wins, as close codes #4262
+settled on dev), keep-alive behavior, and bounded flow-control tests.
 
 The crate lives in the fork's workspace as `moq-noq-qmux`, so the stream
 state machine internals it drives stay crate-private there; `moq-dev/web-transport`'s
 `qmux` becomes a thin re-export or is retired. There must be one stream
 state machine in the dependency graph, and the accessors qmux needs are
 `pub(crate)` to that workspace, never part of `moq-noq-proto`'s public API.
+
+Release it from the fork like the other fork crates: tag `moq-noq-qmux` with
+the parent noq commit and the carried patches (each with its upstream PR or
+the reason there is none), pin the crates.io version in this workspace, and
+verify minimal, default, and all-feature builds so enabling iroh, qmux, or
+the uring runtime never unifies two copies of the stream state. The quest
+completes when that release is on crates.io and `Cargo.lock` names it.
+
+Decided in the 2026-09-30 audit: moved to m2, since no m1 quest consumes it.
+The separate QUIC release quest was deleted and its qmux step folded here.
 
 ## Required
 

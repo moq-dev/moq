@@ -35,6 +35,10 @@ The UDP path already assembles up to 64 KiB GSO trains in stable pool buffers, t
 
 Sweep the threshold across realistic chat and media packet trains. Record relay CPU, goodput, CQEs per send, copy-fallback rate, TX-pool pressure, p99 latency, and memory residency at fixed offered load. Enable it by default only where the end-to-end result beats regular `SendMsg`.
 
+Decided in the 2026-09-30 audit: moved to m3. The #3224 prototype was 6 to
+9% slower, the win needs a physical-NIC sweep nobody has run, and io_uring
+ships in no package.
+
 ## Closes
 
 - [#3201](https://github.com/moq-dev/moq/issues/3201) - close this issue when the quest finishes

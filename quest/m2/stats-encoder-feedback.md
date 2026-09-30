@@ -10,6 +10,9 @@ it already follows. Keyframe requests stay out.
 
 ## Plan
 
+Deferred to m2 in the 2026-09-30 audit: no named consumer; the media stats it
+reads land first in m1.
+
 - `encode::Options` in `rs/moq-video` and `rs/moq-audio` (the producer
   options, beside `bandwidth`) gains `echo: Option<echo::Consumer>`.
   - The handle is built from an `origin::Consumer` and the echo path,
@@ -56,6 +59,23 @@ it already follows. Keyframe requests stay out.
 - Document the flag in `doc/bin/cli.md` and the loop and its config in the
   moq-video README.
 
+Open, to settle before starting (moved from the
+[media stats](/quest/m1/stats/README.md) line):
+
+- **Referenced-rendition feedback.** A derivative catalog (a `moq-transcode`
+  passthrough) collects feedback for a source rendition it lists, but owns
+  no encoder for it, and the source encoder reads only its own catalog's
+  prefix. Candidates: the derivative forwards those rows to the source's
+  echo path, or the source encoder also reads catalogs that reference it,
+  or referenced renditions stay report-only.
+- **Shared echo prefixes.** Two catalogs can resolve their echo paths to one
+  prefix (`../viewers` from `room/a/live` and `room/b/live`). Then a viewer
+  using one name for both closes one `.echo` with the other, and each
+  publisher reads the other's reports under a shared alias. Candidates:
+  require each catalog's echo prefix to be its own, as application policy
+  like the token rights, or carry the catalog's broadcast in the snapshot
+  and ignore reports for another.
+
 ## Required
 
 - [Schema](/quest/m1/stats/schema.md) - the `echo` section and feedback snapshot
@@ -66,3 +86,5 @@ it already follows. Keyframe requests stay out.
 
 - [Audio follows the grant](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) -
   the audio rate follow this signal would feed
+- [Ladder](/quest/m2/ladder/README.md) - the transcode ladder that adapts to
+  its uplink today

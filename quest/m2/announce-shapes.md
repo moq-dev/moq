@@ -26,9 +26,11 @@ Decided 2026-09-29 (quest-plan interview):
   announcements (PUBLISH_NAMESPACE and NAMESPACE are prefix routes), so a
   session negotiated as IETF never carries a shape and there is no draft to
   converge with.
-- The quest stays in m3, grown from the suffix-announce quest rather than a
-  new m1 quest, because that quest already holds the benchmark-first plan and
-  the version-gated wire approach both shapes need.
+- The quest grew from the suffix-announce quest rather than a new m1 quest,
+  because that quest already holds the benchmark-first plan and the
+  version-gated wire approach both shapes need.
+- Moved from m3 to m2 in the 2026-09-30 audit: it has no external gate, and
+  the exact-scope leak is a real bug.
 - The old gate ("a deployment needs a suffix claim a service prefix cannot
   express") is removed: the exact-scope leak is reason enough.
 
@@ -52,8 +54,10 @@ cases as vectors both languages test.
 
 Only these four shapes go on the wire. A richer interest pattern
 (`pid/*/chat`) stays a consume-side filter over the widest shape that covers
-it, as [path patterns](/quest/m1/path-patterns.md) decided for every pattern
-before this quest.
+it. Path patterns already shipped for that filtering and for token claims
+(`moq-pattern`, `@moq/pattern`,
+[#3746](https://github.com/moq-dev/moq/pull/3746), and the
+[auth line](/quest/m1/auth/README.md)).
 
 ### Model
 
@@ -103,3 +107,4 @@ today, and this quest extends them to the new shapes. Token patterns
 ## Related
 
 - [Wildcard](/quest/m0/wildcard/README.md) - prefix-only advertisements and the service-prefix layout this extends
+- [Cluster routing](/quest/m1/cluster-routing/README.md) - forwards announcements between relays, which must keep their shape

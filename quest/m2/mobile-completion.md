@@ -26,6 +26,7 @@ Do not close #700 merely because its next subset or a design decision finished.
 - [Dart codec parity](/quest/m1/dart-codecs.md) - codec-enabled artifacts and Dart video consumer integration
 - [iOS capture](/quest/m2/mobile-capture-ios.md) - deliver the selected iOS capture path
 - [Android capture](/quest/m2/mobile-capture-android.md) - deliver the selected Android capture and codec path
+- [Mobile ownership](/quest/m1/mobile-ownership.md) - select and scope the mobile media architecture
 
 ## Closes
 

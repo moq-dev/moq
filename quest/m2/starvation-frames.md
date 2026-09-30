@@ -41,6 +41,10 @@ Backends that return unsupported from `poll_acked` keep the group-granularity
 sampling from the parent quest, so the histogram never disappears over qmux or
 a browser transport; document which resolution a node offers.
 
+Decided in the 2026-09-30 audit: moved to m2. The group-granularity sampler
+from the parent quest answers the m1 question, and this waits on the m2 ACK
+hook.
+
 Tests: the frontier tracking frame ends under a peer that acknowledges in
 bursts, with interval samples landing one bucket lower than group-granularity
 tracking of the same run; a reset mid-group attributing only the
@@ -52,3 +56,5 @@ unsupported.
 
 - [Starvation](/quest/m1/qos/starvation.md) - fixes the wire shape and the
   group-granularity fallback
+- [poll_acked in web-transport](/quest/m2/quic-ack-hook.md) - the released
+  hook this samples through

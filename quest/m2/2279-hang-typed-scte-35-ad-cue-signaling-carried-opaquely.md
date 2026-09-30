@@ -9,6 +9,8 @@ exporter understands. Server-side ad insertion is a separate future quest.
 
 ## Plan
 
+Deferred to m2 in the 2026-09-30 audit: no named consumer for timed metadata.
+
 Use the shared event contract [emsg](/quest/m2/emsg.md) settles. Deliver cues immediately, including when splice_time is in the
 future; consumers need advance notification. Metadata group sequences are
 independent of media GOPs.
@@ -43,3 +45,7 @@ be in it the day it ships. Cross-package sync: `rs/hang`, `js/hang`,
 ## Closes
 
 - [#2279](https://github.com/moq-dev/moq/issues/2279) - close this issue when the quest finishes
+
+## Related
+
+- [ID3 catalog section](/quest/m2/id3.md) - the other typed timed-metadata section, same rule

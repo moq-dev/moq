@@ -44,6 +44,10 @@ moq-archive's `Info::priority` follows. Its version-1 `.info` stores the
 Report the wire impact in the PR: none in format, but the default byte moves
 again, from 127 to 128 on moq-lite and from 128 to 127 on IETF.
 
+Decided in the 2026-09-30 audit: moved to m2. It stays deferred unless it
+ships in the same `dev` release as the moxygen default change, so the default
+byte moves once instead of twice.
+
 ## Required
 
 - [Moxygen compatibility](/quest/m1/moxygen/README.md) - ships the 127 default and the one-urgency invariant this re-maps
@@ -51,3 +55,4 @@ again, from 127 to 128 on moq-lite and from 128 to 127 on IETF.
 ## Related
 
 - [Scope track priority](/quest/m1/track-priority-scope.md) - which streams a priority competes with, not its type
+- [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - reworks the same priority arithmetic in the transport

@@ -46,3 +46,7 @@ belongs in the mesh too. Write the rule beside route selection in
 `just drafts check`. Then update [watch](/quest/m2/p2p/watch.md) and
 [transit](/quest/m2/p2p/transit.md) with the chosen rule and open the
 implementation quest it needs.
+
+## Related
+
+- [Cluster routing](/quest/m1/cluster-routing/README.md) - the mesh-side use of cost

@@ -15,6 +15,9 @@ state.
 
 ## Plan
 
+Deferred to m2 in the 2026-09-30 audit: no named consumer for the
+publisher-side ladder.
+
 The catalog and player half already shipped in
 [moq#2865](https://github.com/moq-dev/moq/pull/2865): the optional `stalled`
 state exists in `rs/hang`, `js/hang`, `rs/moq-msf`, `js/msf`, the HANG draft

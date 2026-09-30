@@ -8,6 +8,8 @@ five minutes.
 
 ## Plan
 
+Parked in m3 until a real ArduPilot user or partner asks (2026-09-30 audit).
+
 The browser client subscribes video and telemetry and publishes control, the
 shape Blue Robotics' Cockpit proves is viable. It is the demo and the
 end-to-end proof of the primitive, not a bid to out-feature QGroundControl:
@@ -20,3 +22,8 @@ somebody's webcam.
 Standing SITL up in CI is separate work with its own build dependencies.
 Reproducibility by hand is the bar here; automate it later if it proves worth
 the maintenance.
+
+## Required
+
+- [MAVLink bridge](/quest/m3/teleop-mavlink.md)
+- [Browser teleoperation package](/quest/m3/teleop-browser-package.md)

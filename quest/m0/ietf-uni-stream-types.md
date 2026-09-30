@@ -8,6 +8,10 @@ so it ships on main.
 
 ## Plan
 
+Moved from m1 to m0 in the 2026-09-30 audit: a padding stream answered with
+INTERNAL_ERROR is legal input mishandled, which m0 fixes before Seattle
+interop on 2026-10-12.
+
 `run_unis` in `rs/moq-net/src/ietf/session.rs` routes every non-SETUP uni
 stream to `run_uni_group`, which rejects padding and unknown types alike while
 leaving the session alive. That stream-only rejection reaches the wire as

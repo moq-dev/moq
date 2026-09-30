@@ -8,6 +8,8 @@ without extraction those broadcasts have no captions in MoQ at all.
 
 ## Plan
 
+Deferred to m2 in the 2026-09-30 audit: no named consumer for timed metadata.
+
 Parse the `user_data_registered_itu_t_t35` SEI payloads that carry CEA-708
 (with 608 compatibility bytes inside) out of H.264 and H.265 access units at
 import, and publish the decoded cues as a `text` rendition beside the video.
@@ -31,3 +33,9 @@ Whichever lands first, the import order is a contract, not an accident: caption
 extraction sees the SEI before stripping removes it. Running the split first
 silently produces a broadcast with no captions, which is the failure this quest
 exists to prevent, so cover the ordering with a test rather than a comment.
+
+## Related
+
+- [SEI](/quest/m2/sei.md) - carries SEI byte-faithfully as a sidecar; if
+  that line lands, this parser is a candidate to move onto it rather than
+  walking the access unit itself

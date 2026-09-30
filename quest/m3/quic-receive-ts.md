@@ -25,3 +25,12 @@ written reason it does not pay.
 
 The GCC experiment requires this; a delay-based controller without per-packet
 arrival times is a different, weaker experiment.
+
+Both ends must be ours, so this is native-only and serves native peers or
+relay-to-relay sessions. Decided in the 2026-09-30 audit: parked in m3 with
+GCC until such a consumer exists.
+
+## Related
+
+- [QUIC GCC](/quest/m3/quic-gcc.md) - the controller that consumes it
+- [Per-stream deadlines](/quest/m2/quic-deadline.md) - the other consumer

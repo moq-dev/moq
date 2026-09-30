@@ -6,6 +6,9 @@ A supported Linux OBS graphics/encoder combination publishes composited video wi
 
 ## Plan
 
+In m3 until the OBS encoder ships and a Linux user reports CPU readback as
+the bottleneck.
+
 - Start with an API feasibility probe. OBS exposes DMA-BUF import in `graphics.h`; that is not proof its compositor textures can be exported. Determine whether EGL/GL allocation export is available, or whether an upstream OBS hook or an encoder-owned exportable render target is required.
 - moq-video encodes a `Surface::DmaBuf` on VAAPI without a download, and scales one through VPP (moq-vaapi 0.1.0). This quest still has to turn an OBS compositor texture into a DMA-BUF that import accepts.
 - Negotiate DRM device, fourcc, plane offsets/strides, modifiers, and synchronization. Reuse `Surface::DmaBuf` and the hardware encoder's real import path, retaining allocation ownership until completion. A borrowed fd or an importable packed RGB texture does not prove the encoder accepts NV12 on the same device.
@@ -20,3 +23,4 @@ A supported Linux OBS graphics/encoder combination publishes composited video wi
 ## Related
 
 - [Video hardware validation](/quest/m3/video-hardware.md) - native input and encoder acceptance need hardware evidence
+- [VAAPI encode and decode](/quest/m2/video-vaapi.md) - H.265 and checked-in bindings. The DMA-BUF encoder import this quest needs is already on main (moq-vaapi 0.1.0).

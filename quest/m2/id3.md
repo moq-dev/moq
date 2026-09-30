@@ -10,6 +10,8 @@ stream.
 
 ## Plan
 
+Deferred to m2 in the 2026-09-30 audit: no named consumer for timed metadata.
+
 Define the catalog section and frame contract for complete ID3 tags on the
 shared event contract [emsg](/quest/m2/emsg.md) settles. Publish tags when
 received on independently sequenced groups, with their presentation time on
@@ -34,3 +36,8 @@ with default and non-default PMT descriptors, multiple tags, unknown frames,
 large tags spanning PES packets, timestamp wrap, discontinuity, and an ID3-only
 program. Include non-ID3 and malformed stream type `0x15` fixtures that remain
 generic.
+
+## Related
+
+- [SEI sidecars](/quest/m2/sei.md) - the separate codec metadata
+  contract

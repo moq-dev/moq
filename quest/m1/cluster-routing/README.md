@@ -5,14 +5,19 @@
 A broadcast event reaches each relay at most once, and a relay learns only the
 prefixes its own clients asked for. An announcement says a path exists at an
 origin relay, at a cost; how to reach that origin comes from a shared relay
-topology, so no announcement inside a cluster carries a hop list. This quest
-records the design; its wire and implementation quests are planned from the
-simulator's report.
+topology, so no announcement inside a cluster carries a hop list. A relay's
+memory scales with what it serves, not with what the mesh knows. This
+questline records the design; its wire and implementation quests are planned
+from the simulator's report.
 
 Non-goals: warm re-origination (a warm relay would be one more origin with a
 cost, so leave room for it), and a permanently mixed-version cluster.
 
 ## Plan
+
+This is a questline with no children yet. Its children (wire and
+implementation) are planned next in a separate `/quest-plan` session, from
+the decisions and open questions below.
 
 ### Why not path vector or Babel
 
@@ -167,6 +172,29 @@ registry. What decides the wire:
   the same scenario costs 18.6M messages instead of 189k. Per-origin seqnos,
   above, end both.
 
+### Memory before and after
+
+On-demand announcements bound the route table by demand; measure that saving
+before and after the implementation lands. Keep two costs apart: the route
+table and per-announcement state (`RouteEntry` plus `ServeState`) scale with
+announcements and routes, while the served-content cache a `ServeState`
+materializes scales with demand.
+
+Every published figure is stale. The old baseline was 8.8 KB per announced
+broadcast plus 4.3 KB per extra route on `adad52b`, measured with two
+throwaway `moq-net` examples driving an origin under a counting allocator and
+reading `/proc/self/statm`. Since then
+[moq#2989](https://github.com/moq-dev/moq/pull/2989) cut `kio`'s inline waiter
+slots from 32 to 4 (a `kio::State<()>` went from 896 B to about 200 B, and
+`kio`'s `tests/waiter_allocs.rs` pins that lever as spent), and
+[moq#3225](https://github.com/moq-dev/moq/pull/3225) made a standby route a
+table entry rather than an object graph. Neither example is committed, since
+they need `#[doc(hidden)]` size probes on private types. Rebuild them and
+restate the per-broadcast and per-route cost, the per-peer session
+bookkeeping (`announce_ids`, `held`, `watched`), and the shed threshold on a
+degree-5, 1 GB node. Chat-shaped traffic (one broadcast per channel or per
+chatter) depends on the answer.
+
 ### Open questions
 
 - Sharding registries by HRW over a prefix key once one registry cannot hold
@@ -194,6 +222,14 @@ registry. What decides the wire:
   `doc/concept/use-case/contribution.md`). Inside a cluster no announcement
   carries a hop list, so two encoders on different ingest relays become two
   origins. Keep the documented behavior or change the docs in the same PR.
+  Say whether same-hop semantics survive, or
+  [Same-hop importers](/quest/m1/hop-aligned-import.md)' work is thrown
+  away. The redundant ingest study folded in here: whether the pair claims one
+  `@<uuidv7>` epoch, what enforces the aligned groups and matching catalog the
+  docs only ask for, and who declares the incumbent dead early (a failover
+  service that retracts it, or active-active delivery to the relay). Weigh it
+  against the moq-transport rule that each publisher of a namespace must be
+  asked (#3697). The answer may be a no-go.
 - Whether equal-cost next hops should spread by a hash of the path. A fixed
   tie-break sends every path through the same neighbour and its failure takes
   them all.
@@ -204,4 +240,8 @@ registry. What decides the wire:
 
 ## Related
 
+- [Same-hop importers](/quest/m1/hop-aligned-import.md) - builds on `--hop` failover, which this line must keep or replace
+- [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - a redundant pair would share one epoch
+
 - [Cross-relay delivery under bursts](/quest/m1/cross-relay-bursts.md) - its #4349 report also shows closed broadcasts announced for up to 229 s and flapping between Retracted and Announced across nodes, evidence for per-incarnation seqnos
+- [Routing cost domains](/quest/m3/routing-cost-domains.md) - cost across the cluster boundaries this keeps path vector

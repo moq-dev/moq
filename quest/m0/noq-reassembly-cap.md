@@ -16,14 +16,19 @@ the crates are renamed.
   RUSTSEC-2026-0185) to moq-dev/noq: `Assembler::insert` returns an error past
   1024 buffered chunks after defragmenting, the stream path closes with
   `INTERNAL_ERROR`, and the CRYPTO path does the same. Keep quinn's test.
-  Release 1.3.3 and 2.0.1, then bump the pins here.
+  1.3.3 and 2.0.1 are already taken by the open release PRs moq-dev/noq#21
+  and #22: fold the port into those releases or take the next patch numbers,
+  then bump the pins here.
 - Open the same port as a PR on n0-computer/noq (approved 2026-09-29; the
   advisory is public). iroh builds stay on the unfixed upstream crate until
   n0 releases it; bump when they do.
 - Give `moq-tokio` a finite default connection `receive_window` instead of
   the backend's `VarInt::MAX` (`rs/moq-tokio/src/noq.rs` `apply_windows`,
   `quic.rs`). Pick the value with a throughput measurement, not a
-  guess, and update `doc/bin/relay/config.md`.
+  guess, and update `doc/bin/relay/config.md`. Size it so relay-to-relay
+  cluster sessions, which carry every viewer's traffic on one connection,
+  are not throttled; per-peer windows wait for
+  [Peer limits](/quest/m1/quic/peer-limits.md).
 - `rs/moq-uring` depends on `moq-noq-proto` too, so the same pin bump
   covers the io_uring workers.
 
@@ -31,4 +36,4 @@ Public API: none. Wire: a peer that exceeds the chunk cap is closed.
 
 ## Related
 
-- [Peer limits](/quest/m1/quic/peer-limits.md) - per-peer windows and stream limits
+- [Peer limits](/quest/m1/quic/peer-limits.md) - per-peer windows and stream limits, which later let cluster sessions take a larger window than clients

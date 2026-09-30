@@ -7,14 +7,17 @@ estimate and preserved evidence, so a small reported speedup can be evaluated.
 
 ## Plan
 
-`bench/run.sh` runs each relay workload once as base then current,
-without repeated rounds or alternating execution order. `cleanup` deletes the run
+`bench/run.sh --runtime` already repeats rounds (`MOQ_BENCH_RUNTIME_ROUNDS`,
+default 3) and reports the median (`bench/run.sh:15`, `:322`), but the
+`just bench BASE` comparison still runs each relay workload once as base then
+current, without alternating execution order. `cleanup` deletes the run
 directory, including Criterion estimates, load/host JSONL, relay logs, and
-summaries. Preserve the existing default command
-while extending this harness rather than creating another benchmark runner.
+summaries. Preserve the existing default command while extending this harness
+rather than creating another benchmark runner.
 
-- Add configurable repeated paired rounds, alternate base/current order, and
-  perform warmup outside the measured window. Keep the current load generator,
+- Reuse the runtime mode's rounds and median for the BASE comparison, as
+  paired rounds that alternate base/current order, and perform warmup outside
+  the measured window. Keep the current load generator,
   workload, backend, and resolved settings identical for both revisions.
 - Save individual paired results and report median paired deltas plus a documented
   dispersion/confidence estimate. Flag insufficient or noisy samples instead of

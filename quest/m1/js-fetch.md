@@ -40,3 +40,7 @@ A published API break, if the chosen shape requires one, goes through dev.
 ## Required
 
 - [Dynamic track identity](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - settles shared producer identity before adding on-demand group requests
+
+## Related
+
+- [Browser archive](/quest/m2/archive-browser.md) - supplies memory or OPFS archive data through this generic request surface

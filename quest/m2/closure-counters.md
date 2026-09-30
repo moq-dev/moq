@@ -9,6 +9,8 @@ explicit fresh segment. The rule is documented as a consumer-facing contract.
 
 ## Plan
 
+Deferred to m2 in the 2026-09-30 audit: no named consumer.
+
 The stickiness fix ([moq#3625](https://github.com/moq-dev/moq/pull/3625))
 keeps a departed node's last `Traffic` contribution and drops `Presence`
 immediately. Its review raised an open P2: retiring the gauges advances the

@@ -13,9 +13,9 @@ the option fails loud instead of dropping the credential.
 
 - [Token in band](/quest/m1/auth/token-in-band.md) defines the client token
   configuration and writes the first configured token into the setup option
-  as type 0. This quest makes the kind explicit: each configured token is a
-  `moq_net::setup::Token { kind, value }`, a JWT keeps kind `0x0` and its
-  URL and AUTH stream behavior, and a CAT is kind `0x01`. `--connect-token`
+  as type 0. `moq_net::setup::Token { kind, value }` already carries the
+  kind, with CAT = `0x1` (#4278); a JWT keeps kind `0x0` and its URL and
+  AUTH stream behavior. `--connect-token`
   keeps taking a JWT; `--connect-cat <base64url>` (and `MOQ_CONNECT_CAT`)
   adds a CAT. One CAT per connection: it is the connection credential, so a
   configured CAT takes the setup option and the JWT that would have gone

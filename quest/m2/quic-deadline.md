@@ -42,6 +42,10 @@ retransmitted past their deadline (must be zero), spurious resets under
 reordering, and probe overhead versus the default PTO. A proactive probe that
 raises loss or latency under any profile stays off by default.
 
+Decided in the 2026-09-30 audit: moved to m2. No m1 quest consumes it, and
+[Upstream the fork](/quest/m1/quic/upstream.md) offers it when it lands
+rather than waiting on it.
+
 ## Required
 
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - the
@@ -49,5 +53,7 @@ raises loss or latency under any profile stays off by default.
 
 ## Related
 
+- [Receive timestamps](/quest/m3/quic-receive-ts.md) - a measured forward
+  delay replaces the half-RTT estimate
 - [Discover media headroom](/quest/m2/quic-probe.md) - can reuse
   retransmission machinery if redundant capacity probes prove worthwhile

@@ -7,6 +7,8 @@ FLV script tags survive RTMP and FLV import instead of being discarded, so
 
 ## Plan
 
+Deferred to m2 in the 2026-09-30 audit: no named consumer for timed metadata.
+
 `rs/moq-mux/src/container/flv/import.rs` matches `TAG_SCRIPT => {}` and moves
 on, which drops every AMF data message an encoder sends. `onMetaData` is the
 one every RTMP publisher emits, and applications routinely push their own cues

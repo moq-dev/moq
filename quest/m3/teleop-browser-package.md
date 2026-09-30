@@ -7,6 +7,8 @@ and delivery classes rather than reimplementing them.
 
 ## Plan
 
+Parked in m3 until a real ArduPilot user or partner asks (2026-09-30 audit).
+
 Follow the existing split: `net`, `hang`, `json` and `auth` each have a Rust
 crate and a TypeScript package, with zod schemas mirroring the Rust types.
 There is no `@moq/mux`, so the catalog extension goes through the same seam

@@ -47,3 +47,7 @@ Found by CodeRabbit on #3523, which fixed the one-frame-per-group undercount
 that was OOM-killing relays serving chat, and deliberately left out of it.
 
 Public API: none, unless `MAX_CACHE_BYTES` is restated. Wire: none.
+
+## Required
+
+- [Frame alloc budget](/quest/m0/frame-alloc-budget.md) - edits the same group cache charge; land it first

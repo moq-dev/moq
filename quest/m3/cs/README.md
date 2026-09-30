@@ -10,6 +10,9 @@ a mirror. Unity is a separate prototype.
 
 ## Plan
 
+In m3 until a .NET or Unity consumer asks; the C++ line covers native
+embedders first.
+
 NordSecurity's `uniffi-bindgen-cs` (latest `v0.11.0+v0.31.0`) already emits
 async methods as `Task<T>` and async callback interfaces; it needs the same
 uniffi 0.32 port the Go, Dart, and C++ generators got. Plain .NET first; the
@@ -25,3 +28,4 @@ up front.
 ## Related
 
 - [C++ through moq-ffi](/quest/m1/cpp/README.md) - the sibling line this copies
+- [Unity prototype](/quest/m3/unity.md) - the package under IL2CPP

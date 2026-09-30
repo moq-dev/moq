@@ -8,6 +8,9 @@ over MoQ, so a weak link gets SD instead of stalling on HD.
 
 ## Plan
 
+In m3 until a WHEP viewer needs adaptive quality; MoQ viewers already switch
+renditions, and a WHEP viewer gets the best rendition today.
+
 Open questions: whether to drive switching from str0m's bandwidth estimate
 (TWCC) or from loss and REMB, how to switch without a keyframe gap (subscribe
 the new rendition and splice at its next group, as the JS decoder does), and

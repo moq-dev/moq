@@ -10,6 +10,8 @@ target, subscribes to a broadcast, and plays decoded audio through an
 
 ## Plan
 
+In m3 with the C# line; a Unity consumer asking brings both back.
+
 - IL2CPP forbids dynamic callback marshaling: every reverse P/Invoke needs a
   static method with `[MonoPInvokeCallback]`. Audit what the generated `cs/ffi`
   emits for callback interfaces and futures, and whether the generator needs

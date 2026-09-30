@@ -3,18 +3,21 @@
 ## Goal
 
 Work whose first step is outside this repository: hardware nobody on the team
-has, a partner or customer, or a hosting provider's offer. Nothing here can
-start by opening an editor.
+has, a partner or customer who asks for it, or a hosting provider's offer.
+Nothing here should start by opening an editor.
 
 ## Plan
 
 A quest lands here when its gate is the outside world, not its priority. Each
 states the condition in prose or as a plain-text `Required` bullet. When the
-condition clears, move the quest to the milestone its work belongs in.
+condition clears, move the quest to the milestone its work belongs in. A
+speculative feature with no consumer parks here rather than in m2, and is
+deleted when it goes stale; git history keeps it.
 
 ## Required
 
-- [Video hardware validation](/quest/m3/video-hardware.md) - run the encode, capture, and zero-copy paths that were written but never run on real machines
+- [Video hardware validation](/quest/m3/video-hardware.md) - run the encode, capture, and zero-copy paths that were never run on real machines, including PipeWire on KDE, the camera portal, and a Pi
+- [NVENC AV1](/quest/m3/nvenc-av1.md) - AV1 encode through NVENC, once an Ada-generation GPU is available
 - [Embedded video](/quest/m3/video-embedded.md) - EGL import in the renderer, so moq-video presents on a Pi
 - [#3201: moq-uring: use SENDMSG_ZC for large UDP GSO trains](/quest/m3/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md) - complete the prerequisite issue first
 - [#3204](/quest/m3/3204-moq-uring-register-tx-pool-buffers-for-zero-copy-sends.md) - moq-uring: register TX-pool buffers for zero-copy sends

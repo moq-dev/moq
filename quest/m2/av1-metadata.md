@@ -28,3 +28,9 @@ not.
 Preserve `metadata_type`, the payload bytes, and ordering within the temporal
 unit. Test HDR10+ T.35 metadata, timecode, an unknown metadata type, several
 OBUs in one temporal unit, and a byte-identical round trip.
+
+## Related
+
+- [SEI sidecars](/quest/m2/sei.md) - the H.26x contract this should
+  follow rather than duplicate
+- [fMP4 emsg carriage](/quest/m2/emsg.md) - independent carriage of container metadata, not a prerequisite for codec extraction

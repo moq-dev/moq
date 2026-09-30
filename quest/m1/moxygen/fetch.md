@@ -21,6 +21,10 @@ cannot express is still an explicit refusal, not a hang.
 The moxygen FETCH cases that ask for whole groups are the check. The rest of
 that suite is not.
 
+## Required
+
+- [Legal IETF input](/quest/m0/ietf-legal-input.md) - decodes the draft-20+ FETCH layout this serves
+
 ## Related
 
 - [Moxygen compatibility](/quest/m1/moxygen/README.md) - the line this belongs to

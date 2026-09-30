@@ -8,6 +8,9 @@ maintaining another copy of the install logic.
 
 ## Plan
 
+Deferred to m2 in the 2026-09-30 audit: it follows [the
+installer](/quest/m2/moq-installer.md), which is m2.
+
 - Implement the hosting change in **moq-dev/moq.dev**, which owns the root
   website, not moq.pro. Track this cross-repository work here beside its
   installer dependency; complete this quest only after the website change

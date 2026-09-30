@@ -13,10 +13,14 @@ and the connect URL/token changed.
 
 ## Plan
 
+In m3 until a LiveKit user asks to migrate; `@moq/room` already serves
+new rooms directly.
+
 - The shim is a LiveKit-API facade over `@moq/room`, which carries hang.live's convention: the room is a path prefix in the connection URL and token root,
   participants are discovered from the bare announce stream, identity is the
-  next path segment, and each participant publishes `<identity>/camera`
-  (camera + mic, hd/sd renditions) and `<identity>/screen` (screenshare,
+  path before the broadcast name, and each participant publishes
+  `<identity>/camera.hang` (camera + mic, hd/sd renditions) and
+  `<identity>/screen.hang` (screenshare,
   whose announce/unannounce is the screenshare lifecycle). The shim groups
   the two paths per identity into one RemoteParticipant and maps catalog
   entries to TrackPublications.
@@ -27,6 +31,6 @@ and the connect URL/token changed.
   state derives from catalog track presence. Names and coarse state are a
   follow-up wired to the room SDK's `hang/*.json` metadata, not a rival
   scheme.
-- Recommend tokens scoped to `put: <identity>/` so participants cannot
-  publish at each other's paths (hang.live grants `put` on the whole room
-  subtree today).
+- Mint tokens with `@moq/room`'s `claims(room, identity)`, which scopes the
+  `publish` claim to the identity's subtree so participants cannot publish at
+  each other's paths.

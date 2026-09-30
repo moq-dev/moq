@@ -10,6 +10,8 @@ editor stability across a play-stop-play cycle.
 
 ## Plan
 
+In m3 until an Unreal consumer asks; the C++ package it links already exists.
+
 - Consume the release tarball through the module's `Build.cs`
   (`PublicAdditionalLibraries`, include paths); Unreal's build does not use
   vcpkg or CMake, which is why the tarball exists alongside the registries.
@@ -25,4 +27,4 @@ editor stability across a play-stop-play cycle.
 
 ## Required
 
-- [Package](/quest/m1/cpp/package.md) - the tarball the module links
+- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the package the module links landed on this line (#4187) and reaches main with it

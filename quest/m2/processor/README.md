@@ -26,6 +26,9 @@ trailing, so the processor claims its prefix and mirrors the source path
 beneath it. The source's catalog reaches the output through a
 cross-broadcast reference ([media contract](/quest/m2/processor/media-contract.md)).
 
+Deferred to m2 in the 2026-09-30 audit: no processor customer is committed,
+and its end-to-end proof (processor-vision) was deleted.
+
 ## Required
 
 - [Processor media contract](/quest/m2/processor/media-contract.md) - define

@@ -33,6 +33,16 @@ stream teardown: the accessor must not return a prefix that includes bytes the
 peer will never acknowledge, and a waiter for an offset beyond the final
 size must resolve with the reset instead of hanging.
 
-Land it in the fork and offer it upstream once it is stable. The quest
+Land it in the fork and offer it upstream once it is stable. The
+`web-transport-moq` half of [the ACK hook](/quest/m2/quic-ack-hook.md) lives
+in the same fork repository and ships in the same release. The quest
 completes when a `moq-noq-proto` release carries the accessor and
 `Cargo.lock` here can name it.
+
+Decided in the 2026-09-30 audit: moved to m2 with its consumers, the ACK
+hook and [frame-granularity starvation](/quest/m2/starvation-frames.md).
+
+## Related
+
+- [poll_acked in web-transport](/quest/m2/quic-ack-hook.md) - the first
+  consumer of the accessor

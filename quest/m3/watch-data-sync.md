@@ -16,5 +16,10 @@ releases it.
   `delay` and `jitter` with `Sync` like a media rendition.
 - Snapshot tracks release the newest value at or before the playhead; stream
   tracks release every record in order.
-- Take this up when an application needs synchronized data playback; until
-  then, a raw consumer reads payloads as they arrive.
+- In m3 until an application needs synchronized data playback, such as
+  teleop telemetry beside video; until then, a raw consumer reads payloads as
+  they arrive.
+
+## Required
+
+- [Data track clock](/quest/m1/data-track-clock.md) - data timestamps share the media clock mapping, so the playhead can release them

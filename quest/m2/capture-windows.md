@@ -36,6 +36,14 @@ coupling and delivers `IDirect3DSurface` frames the existing D3D11 path could
 take zero-copy. WGC would also answer app capture and the cursor, so weigh
 these three against doing that once.
 
+Decided in the 2026-09-30 audit: the Windows half of the frame-buffer quest
+folds in here. `snapshot` in `capture/window.rs` (lines 334-392) creates a
+memory DC, a compatible bitmap, and a `vec![0u8; w * h * 4]` per call, then
+destroys them: roughly 500 MB/s of allocation plus GDI object churn at 1080p60.
+Build all three once at open in `Capture`; the pump thread owns it, so the
+`!Send` handles are fine. Skip this if WGC replaces the GDI path first, and
+measure before and after on a Windows host (`just rs windows`).
+
 ## Related
 
 - [Linux capture parity](/quest/m2/capture-linux.md) - the same gaps, through

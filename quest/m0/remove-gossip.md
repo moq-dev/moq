@@ -23,11 +23,21 @@ through `--cluster-connect-api` and never enables gossip.
 - Lands on `main` as a security fix, not `dev`. `--cluster-mesh`,
   `MOQ_CLUSTER_MESH` and `mesh = true` fail at startup with a message
   pointing at `cluster.connect`, so nobody silently loses their mesh.
-  Decided 2026-09-29.
+  Decided 2026-09-29. moq-cli reuses moq-relay's cluster config, so the same
+  refusal covers `moq`'s `--cluster-mesh` (`doc/bin/cli.md`).
+- `rs/moq-net/tests/mesh_withdraw.rs` stays: it already wires origins to
+  each other directly (`MockPair`), which is what a configured full mesh
+  does, and its withdraw semantics still apply. Rewrite it only if gossip
+  removal changes what it exercises. Decided in the 2026-09-30 audit.
 - Docs: rewrite the Discovery section of `doc/bin/relay/cluster.md`, drop the
   `.internal/` warning, and add an upgrade note in `doc/setup/upgrade.md`.
-  Search the repo for `cluster-mesh` and `mesh = true` in examples and demo
-  recipes.
+  Fix the mesh examples in `doc/bin/cli.md`, `doc/bin/relay/config.md`, and
+  `rs/moq-relay/README.md`, then search the repo for `cluster-mesh` and
+  `mesh = true` in any other examples and demo recipes.
 
 Public API: removes a relay config field and flag. Wire: relays stop
 announcing `.internal/origins`.
+
+## Related
+
+- [Cluster routing](/quest/m1/cluster-routing/README.md) - takes its topology from configured links only

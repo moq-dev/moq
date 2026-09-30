@@ -117,3 +117,5 @@ where the new implementation makes it redundant.
 - [Scope track priority](/quest/m1/track-priority-scope.md) - owns the
   priority semantics this mechanism realizes, including the scheduling-domain
   scope
+- [Signed priority](/quest/m2/signed-priority.md) - changes the priority type
+  this orders on; keep the ordering, not just the type

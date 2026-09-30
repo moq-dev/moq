@@ -70,3 +70,5 @@ provisional codepoints if the document changes before release.
   a grace for a group whose reset lost its header until this lands
 - The removed quiche backend was the one stack that had this, so it is the
   known browser-compliance gap.
+- [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - consumes
+  the same reset state without a parallel implementation

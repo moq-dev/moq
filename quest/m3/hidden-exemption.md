@@ -9,6 +9,9 @@ for peers that predate it.
 
 ## Plan
 
+In m3 because it waits on a deployment, not on code; it comes back once
+the mesh runs lite-07.
+
 - Remove the `cluster_peer` argument from `connection::authorize` and its
   callers in `rs/moq-relay/src/{connection,uring,websocket}.rs`, and the forced
   `with_hidden(true)` on the outbound dial in `rs/moq-relay/src/cluster.rs`.
@@ -17,4 +20,4 @@ for peers that predate it.
 
 ## Required
 
-- Every deployed relay in the moq.pro mesh speaks a finalized moq-lite-07 or MoQ Hidden; `moq-lite-07-wip` is opt-in only.
+- The moq.pro mesh deploys lite-07

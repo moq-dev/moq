@@ -31,3 +31,7 @@ Land Rust and JavaScript catalog bindings, resolver behavior, and fixtures for
 video, audio, text, missing output, malformed relations, lazy resolution, and
 relative-path escape. The release and the moq.pro (downstream) pin rollout
 stay out of this quest.
+
+## Required
+
+- [Catalog track alias](/quest/m1/catalog-track-alias.md) - renditions from a source and an output broadcast that share a track name would otherwise collide in one catalog

@@ -28,13 +28,14 @@ under "One channel, qmux, ordered".
 
 ## Plan
 
+Deferred to m2 in the 2026-09-30 audit: no named consumer.
+
 ### The relay is the rendezvous and the fallback
 
 Every opted-in peer already holds a session to the same relay, so discovery
 and signaling ride that session as ordinary moq broadcasts under a reserved
-prefix (`.p2p/` by default, configurable), the same shape
-[carrier voice](/quest/m2/carrier-voice/README.md) uses for call setup. The
-relay learns nothing new; trust is its token scope. A peer that may publish
+prefix (`.p2p/` by default, configurable). The relay learns nothing new;
+trust is its token scope. A peer that may publish
 under the prefix is as trusted as any publisher the token admits, so this
 line needs no E2EE.
 

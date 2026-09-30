@@ -34,3 +34,12 @@ Decided 2026-09-29: fix it at the source and remove the timeout workaround.
   moq-tokio.
 
 Public API: none. Wire: none.
+
+Decided in the 2026-09-30 audit: the UnknownSession log flood quest merged
+here, since the same noq 1.3.3 release (moq-dev/noq#21) carries its fix.
+`decode_uni` and `decode_bi` mapped a stream reset before its WebTransport
+header to `UnknownSession`, flooding relay logs with WARNs; the fork now
+keeps the read's cause and logs a reset at debug. Remaining steps: release
+`web-transport-moq` 1.3.3, bump the pin, delete `CLOSE_LINGER`
+(`rs/moq-tokio/src/transport.rs:24`), and confirm on a moq.pro relay that the
+flood stops.

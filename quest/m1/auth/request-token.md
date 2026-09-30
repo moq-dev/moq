@@ -75,3 +75,7 @@ to) and on `moq_auth::Client` (the per-request lease). Wire: none new; the param
 
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - supplies the lease
   revalidation the per-request lease reuses
+
+## Related
+
+- [Legal IETF input](/quest/m0/ietf-legal-input.md) - also edits `decode_params!`; refresh this Plan when it lands, since the strict decoder then decodes and ignores the token

@@ -15,6 +15,11 @@ on stream errors. WebTransport sessions keep the mapping they need.
   `web-transport-iroh` and `web-transport-quinn` (moq-dev/web-transport) do
   the same. A raw peer's code 5 reads as `None` or another value, and ours
   reaches it as a large HTTP/3 code.
+- Close codes (#4262, merged on `dev` 09-28) fixed the same mix-up for
+  `ApplicationClosed` and brought `web-transport-trait` 0.5, which exists
+  only on `dev`, so this targets `dev`. Let each stream know whether its
+  session is raw and skip the mapping there, in all three adapters, with a
+  round-trip test per adapter against a plain QUIC peer.
 - Release the fixed crates and bump the pins here in the same quest; published
   crates depend on crates.io releases, never a patch. A moq-tokio test over
   `moqt://` asserts a reset code arrives verbatim, beside `close_code.rs`.
@@ -28,7 +33,7 @@ on stream errors. WebTransport sessions keep the mapping they need.
   a legacy-sender test per adapter. The other direction has no fix at the
   receiver: an older peer misreads a fixed peer's raw codes. Check which codes
   moq-net acts on (group stream resets, subscribe STOP_SENDING): if any drives
-  behaviour beyond reporting, this is a wire break and retargets to `dev`.
+  behaviour beyond reporting, this is a wire break as well.
 
 Public API: none expected. Wire: raw QUIC stream error codes become the
 application's own values; compatible only if older peers merely report them.

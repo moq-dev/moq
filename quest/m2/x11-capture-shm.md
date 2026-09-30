@@ -24,5 +24,12 @@ capture does the same thing with a per-frame `get_geometry`; it already selects
 `StructureNotify` and drains that queue between frames, so `ConfigureNotify` is
 there to be consumed and the round trip dropped.
 
-Both changes are contained to the one backend and are verifiable on a Linux
+Decided in the 2026-09-30 audit: the X11 half of the frame-buffer quest folds
+in here, since it is the same read path. `PixelFormat::rgb` allocates a
+`w * h * 3` `Vec` per frame and fills it with three `push` calls per pixel,
+then `I420::from_rgb` walks it again into a third buffer. Reuse an
+`&mut Vec<u8>` the `Capture` owns and `clear()` it, so the allocation happens
+once. Measure before and after rather than assuming.
+
+All of these changes are contained to the one backend and are verifiable on a Linux
 host with a real X session; CI compiles the file but cannot run it.

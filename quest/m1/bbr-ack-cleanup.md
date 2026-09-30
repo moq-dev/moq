@@ -10,10 +10,10 @@ behavior.
 
 ## Plan
 
-The fix lives in moq-dev/noq. In released 1.3.1 (`ff9d2ab5`),
-[`on_end_acks`](https://github.com/moq-dev/noq/blob/ff9d2ab518cfb155f9ebb9925f1c784665eac92a/noq-proto/src/congestion/bbr3/mod.rs#L1783)
-runs `retain` over all tracked packets, then scans them again to mark stale
-entries. Draining a flight with fixed-size ACK batches has quadratic total
+The fix lives in moq-dev/noq. The baseline is the current releases: the
+workspace pins moq-noq 1.3.2 and 2.0.0 is out. In both, `on_end_acks`
+(`noq-proto/src/congestion/bbr3/mod.rs:1845`) runs `retain` over all tracked
+packets, then scans them again to mark stale entries. Draining a flight with fixed-size ACK batches has quadratic total
 cleanup work. [Google QUICHE](https://github.com/google/quiche/blob/c961965aa3ee8f2b6f05ebcac794f7854101adcd/quiche/quic/core/congestion_control/bandwidth_sampler.cc#L377)
 uses packet-number lookup and obsolete-prefix reclamation; use that as a
 reference without copying a TCP or single-space assumption into QUIC.
@@ -57,3 +57,4 @@ is needed.
 
 - [BBR starvation edges](/quest/m1/quic/bbr-app-limited-edges.md) - also edits `bbr3/mod.rs`; one owner there at a time
 - [Benchmark comparisons](/quest/m1/performance-comparisons.md) - reusable measurement guidance, not a prerequisite for this fix
+- [Loss sampling](/quest/m2/quic-bbr-loss-parity.md) - preserve packet metadata needed by the separate loss-sample repair; both edit `bbr3/mod.rs`, so sequence them

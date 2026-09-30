@@ -4,12 +4,17 @@
 
 VAAPI encodes H.264 and H.265 from a DMA-BUF without a download, decodes
 H.265 as well as H.264, and the `vaapi` feature costs a consumer nothing at
-build time so it can return to default-on. Every piece needs a `moq-dev/vaapi`
-release first.
+build time so it can return to default-on. A resize reuses its output
+surfaces.
 
 ## Plan
 
-Three gaps, one external dependency.
+Decided in the 2026-09-30 audit: moved from m4, and the "gated on a
+`moq-dev/vaapi` release" blocker is gone. That crate is our own repo (last
+release 0.1.0 on 2026-09-24), so this quest includes the crate work (HEVC
+encode, H.265 decode, pre-generated bindings, the resize pool) and cutting the
+release, then bumping the workspace requirement here. The resize-pool quest
+folds in for the same reason.
 
 **Decode.** The H.264 decoder landed (moq-vaapi 0.0.4, `decode/backend/vaapi.rs`),
 with the default `decode::Config::output` of `Output::Native` handing out
@@ -39,12 +44,15 @@ fixed-width types, `c_char` left symbolic), so one checked-in file serves
 every Linux target, as `moq-v4l` already does for `videodev2.h`. Then the
 feature can return to default-on here.
 
+**Resize pool.** moq-vaapi's `Processor` allocates the blit output with
+`ExportedFrame::from_surface` on every resize. Keep one surface per output
+size; when the exported frame drops, the surface returns for the next blit of
+that size. A frame the consumer still holds is not overwritten; the processor
+allocates another. Keep at most one free surface per size and destroy any
+returned past that, the decoder pool's rule. `Surface::resize` stays the same
+call. The reuse test belongs in moq-vaapi; here, confirm a resize still returns
+an NV12 DMA-BUF.
+
 Note what is already fine: a host with libva present but no usable VA driver
 already falls back cleanly, since `Encoder::new` returns `Err` and
 `backend::open` drops to openh264.
-
-## Required
-
-- A `moq-dev/vaapi` release exposing an HEVC encoder (H.264 decode is in
-  0.0.4; DMA-BUF encode and VPP shipped in 0.1.0) and pre-generated bindings
-  instead of a bindgen build script

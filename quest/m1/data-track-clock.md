@@ -10,6 +10,9 @@ maps its timestamps to a different clock than the media.
 
 ## Plan
 
+Remove live() (#4543) is done on `dev`, and the first-frame clock anchor
+exists only there, so this targets `dev`.
+
 Have data tracks read the catalog's clock when they stamp, not a copy made
 when they were created. Keep it crate-private if possible. Test: a data track
 created before an importer's first frame stamps on the anchored clock.

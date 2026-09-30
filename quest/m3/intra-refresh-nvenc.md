@@ -21,8 +21,16 @@ refuses the mode.
   producer's `warmup` matches the refreshed macroblocks, and translate a cut
   into a forced sweep restart instead of `FORCEIDR`. Check the capability at
   construction and refuse without it.
-- Verification needs hardware: no CI runner has an NVIDIA GPU, so run the
-  probe by hand, feed the output through the H.264 and H.265 import quests'
+- Verification needs hardware: run it on the [GPU CI](/quest/m1/gpu-ci.md)
+  host once it exists, else run the probe by hand, feed the output through the H.264 and H.265 import quests'
   splitters to confirm one group per sweep and the SEI count, and record the
   numbers in the PR. Any test that needs the GPU skips loudly rather than
   reporting success.
+
+## Required
+
+- [Encode config](/quest/m3/intra-refresh-encode-config.md) - the `Gop` enum and cut semantics this implements
+
+## Related
+
+- [GPU CI](/quest/m1/gpu-ci.md) - the RTX 3070 Ti runner that can verify this without a hand run

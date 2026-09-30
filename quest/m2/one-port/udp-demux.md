@@ -2,11 +2,12 @@
 
 ## Goal
 
-`moq-relay` reads one UDP socket and serves QUIC, STUN Binding answers, and
-the WebRTC media path from it. A WHIP or WHEP client sees ICE candidates on
-the QUIC port, a P2P client can list `stun:<relay>:<port>`, and every
-backend config has QUIC-bit greasing off so a short header is always
-recognizable.
+`moq-relay` reads one UDP socket and serves QUIC and STUN Binding answers from
+it. A P2P client can list `stun:<relay>:<port>`, and every backend config has
+QUIC-bit greasing off so a short header is always recognizable. The WebRTC
+media path is an embedder hook: the demux hands its class to a virtual socket
+an embedder such as moq.pro's edge can feed to `moq-rtc`, since `moq-relay`
+serves no WHIP or WHEP.
 
 ## Plan
 
@@ -38,12 +39,19 @@ one is a public query and goes to the responder. Public STUN clients never
 send USERNAME and ICE agents always do.
 Off by default in `moq-relay`, on with `--stun`.
 
-WebRTC: `moq_rtc::server::mux::Mux` gains `Mux::feed(src, bytes)` and a
-constructor over a virtual socket, so it stops binding its own port; its
-advertised candidates become the shared address. `Config.udp_bind` goes.
-When ICE succeeds on a 4-tuple the mux reports it and the outer flow table
-pins that tuple to WebRTC, so later RTP cannot be classified as SRT.
+WebRTC: DTLS, RTP, and USERNAME-carrying STUN go to a `webrtc` virtual
+socket that `moq-relay` leaves unconsumed and an embedder takes. Adapting
+`moq_rtc::server::mux::Mux` to it (`Mux::feed`, a shared advertised address,
+and pinning ICE 4-tuples in the flow table) is the embedder's work, not this
+quest's.
 
-Tests: a unit test per first-byte class routes to the right virtual socket;
-an integration test runs a QUIC client, a STUN Binding round trip, and a WHIP
-session against one bound port. `moq-relay` docs list the port once.
+Decided in the 2026-09-30 audit: narrowed to QUIC plus STUN in the relay,
+because `moq-relay` has no `moq-rtc` dependency and serves no WHIP or WHEP.
+
+Tests: a unit test per first-byte class routes to the right virtual socket,
+including the WebRTC hook; an integration test runs a QUIC client and a STUN
+Binding round trip against one bound port. `moq-relay` docs list the port once.
+
+## Related
+
+- [P2P](/quest/m2/p2p/README.md) - the client side of the STUN answer

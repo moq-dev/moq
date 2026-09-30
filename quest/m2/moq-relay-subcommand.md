@@ -9,6 +9,9 @@ decode, and render stack.
 
 ## Plan
 
+Deferred to m2 in the 2026-09-30 audit: no named consumer, and [`moq --listen`
+admission](/quest/m1/cli-serve.md) no longer waits on it.
+
 `moq-relay` is lib+bin (`rs/moq-relay/Cargo.toml`), with a 15-line
 `main.rs` that installs the aws-lc-rs provider, optionally jemalloc, and calls
 `Relay::load(Config::load()?).await?.run()`.

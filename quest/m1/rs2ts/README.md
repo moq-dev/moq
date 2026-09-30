@@ -5,7 +5,7 @@
 moq-net is the single implementation of the MoQ protocol and model layer.
 The browser runs it as TypeScript generated from the Rust source, retiring
 js/net's hand-written equivalent with no regression in bundle size, CPU, or
-usability. Lite comes first, IETF after. Transport glue (the WebTransport and
+usability. Lite is this line; IETF follows in m2. Transport glue (the WebTransport and
 WebSocket pumps, timers) stays hand-written TypeScript.
 
 ## Plan
@@ -48,11 +48,23 @@ Decided in planning (2026-09-27), with the spike data in
 - Hand-written js/net fixes keep landing until the generated path replaces
   them; it is months out.
 
+Decided in the 2026-09-30 audit: the lite half stays in m1 with an explicit
+go/no-go after the no-downgrade report below; a no-go stops the line before
+anything else is generated. The IETF half (the sans-IO IETF session,
+generated IETF, and the IETF parameters quest on this line's branch) moved to
+m2 and waits on that go.
+
+PR #4455 (branch `quest/m1/rs2ts/lite-leading-ones`) changes the lite-07
+varint wire and no quest tracks it; it coordinates with
+[subscribe drop](/quest/m1/subscribe-drop.md)'s lite-07 edits.
+
 This README's own work is the no-downgrade report once generated lite ships:
 bundle size, per-frame CPU, and first-frame latency against the hand-written
 js/net it replaces, measured with the [browser benchmarks](/quest/m1/browser-benchmarks.md).
 
 ## Required
+
+- [Browser benchmarks](/quest/m1/browser-benchmarks.md) - the harness the no-downgrade report uses
 
 - [VarInt codec](/quest/m1/rs2ts/varint-codec.md) - moq-net encodes through a `VarInt` newtype and a concrete slice-based codec, not generic traits on primitives
 - [rs2ts](/quest/m1/rs2ts/translator.md) - a Charon-based translator emits readable TypeScript for moq-net's lite codec, committed and checked for drift in CI
@@ -67,10 +79,7 @@ js/net it replaces, measured with the [browser benchmarks](/quest/m1/browser-ben
 - [#2822](https://github.com/moq-dev/moq/issues/2822) - close this issue when the quest finishes
 - [#2835](https://github.com/moq-dev/moq/issues/2835) - close this issue when the quest finishes
 
-## Required
-
-- [Browser benchmarks](/quest/m1/browser-benchmarks.md) - the harness the no-downgrade report uses
-
 ## Related
 
-- [#2850](/quest/m1/2850-js-net-give-reader-a-synchronous-decode-so-the-publisher.md) - the same synchronous decode shape, in hand-written js/net today
+- [#2850](/quest/m1/2850-js-net-give-reader-a-synchronous-decode-so-the-publisher.md) - caps hand-written js/net's subscription controls; generated lite replaces the rest
+- [Generated IETF](/quest/m2/rs2ts-ietf.md) - the IETF half, deferred to m2 until the lite go/no-go

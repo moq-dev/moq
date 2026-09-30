@@ -9,10 +9,13 @@ guess.
 
 ## Plan
 
-The work lives in `moq-dev/web-transport`. This quest exists so the release
-it produces is one condition dependents wait on; it supersedes the design in
-moq-dev/web-transport#368, whose snapshot-counter shape loses the wakeups a
-latency sample needs.
+The trait method lives in `moq-dev/web-transport`. The `web-transport-moq`
+adapter lives in the moq-dev/noq fork and is released from it
+(Cargo.toml:236-237), so its implementation folds into
+[ACK progress](/quest/m2/quic-ack-progress.md)'s release rather than a
+separate one. This quest exists so the release it produces is one condition
+dependents wait on; it supersedes the design in moq-dev/web-transport#368,
+whose snapshot-counter shape loses the wakeups a latency sample needs.
 
 Add one method to `SendStream`, in the trait's poll style:
 
@@ -30,7 +33,7 @@ use. A default body cannot construct a backend's own `Self::Error`, so
 unsupported has to live in the return type rather than the error, and a
 consumer must treat `None` as unknown, never as delivered.
 
-Implement it in `web-transport-moq` over the fork's accessor. Leave
+Implement it in `web-transport-moq`, in the fork, over the fork's accessor. Leave
 `web-transport-wasm` on the default; the browser's `WebTransportSendStream.getStats()` is
 unimplemented in shipping Chrome and its `bytesAcknowledged` is at risk in the
 W3C draft. qmux over a reliable transport may treat serialization as
@@ -42,5 +45,21 @@ the middle of an in-flight frame, several waiters on one stream in offset
 order, a waiter whose offset lies beyond the final size, reset by sender,
 STOP_SENDING by the receiver, and session close.
 
-Cut releases of `web-transport-trait` and `web-transport-moq`. The quest
-completes when both are on crates.io.
+Cut a `web-transport-trait` release, and ship the adapter in the fork
+release that carries ACK progress. The quest completes when both are on
+crates.io.
+
+Decided in the 2026-09-30 audit: moved to m2 with its only consumer,
+[frame-granularity starvation](/quest/m2/starvation-frames.md).
+
+## Required
+
+- [Per-stream ACK progress in noq](/quest/m2/quic-ack-progress.md) - the
+  noq-proto accessor the adapter reads, released together
+
+## Related
+
+- [Starvation at frame granularity](/quest/m2/starvation-frames.md) - the
+  moq-net consumer
+- [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - decides
+  what acknowledgment means over a reliable transport

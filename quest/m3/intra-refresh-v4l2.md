@@ -31,3 +31,7 @@ claiming a boundary that was not encoded.
 - Verify on the hardware the backend already targets that the first sweep
   begins at frame zero and note whether the driver emits the SEI; the hang
   side does not need it.
+
+## Required
+
+- [Encode config](/quest/m3/intra-refresh-encode-config.md) - the `Gop` enum and cut semantics this implements

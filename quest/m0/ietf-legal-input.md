@@ -41,3 +41,9 @@ choice, since honoring them would change what existing peers receive.
 - Mirror the decode in `js/net`.
 
 Public API: none. Wire: fixes conformance; no draft change.
+
+## Related
+
+- [Request token](/quest/m1/auth/request-token.md) - also edits `decode_params!`, turning the ignored token into a per-request grant
+- [IETF FIN semantics](/quest/m0/ietf-fin-not-cancel.md) - the other interop blocker
+- [IETF stream types](/quest/m0/ietf-uni-stream-types.md) - same stream-scoped-before-fatal rule for uni streams

@@ -20,6 +20,9 @@ reuseport shard groups are a later consumer, not a blocker.
 
 ## Plan
 
+Deferred to m2 in the 2026-09-30 audit: the consumer is moq.pro's edge, SRT is
+blocked upstream on srt-tokio, and STUN's only consumer is P2P, also m2.
+
 ### Classifying a datagram
 
 RFC 7983 already partitions the first byte: STUN is 0 to 3, DTLS 20 to 63,
@@ -73,6 +76,11 @@ pre-accepted streams can stand behind.
 
 ## Required
 
-- [UDP demux](/quest/m2/one-port/udp-demux.md) - one socket carries QUIC, STUN answers, and the WebRTC media path, with greasing off
+- [UDP demux](/quest/m2/one-port/udp-demux.md) - one socket carries QUIC and STUN answers, with greasing off and a WebRTC hook for embedders
 - [TCP acceptor](/quest/m2/one-port/tcp-demux.md) - one listener carries TLS-terminated HTTP, RTMP, and RTMPS
 - [SRT on the shared socket](/quest/m2/one-port/srt-demux.md) - srt-tokio accepts a virtual socket and the flow table pins its 4-tuples
+
+## Related
+
+- [P2P](/quest/m2/p2p/README.md) - the client that names the relay as its STUN server
+- [Stream sessions](/quest/m2/uring-tcp/README.md) - the io_uring workers that would host the same demux later

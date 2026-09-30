@@ -13,6 +13,8 @@ it rather than restating it. Deferred SEI extraction is not a prerequisite.
 
 ## Plan
 
+Deferred to m2 in the 2026-09-30 audit: no named consumer for timed metadata.
+
 The shared contract, recorded here and mirrored in the Hang draft:
 
 - Publish an event as soon as it is received, on its own group sequence; never
@@ -57,3 +59,6 @@ byte-identical.
 
 - [AV1 metadata OBUs](/quest/m2/av1-metadata.md) - the same silent drop in a
   different layer
+- [ID3 catalog section](/quest/m2/id3.md) - gives one payload type carried here a
+  typed contract
+- [FLV script tags](/quest/m2/flv-script.md) - likewise

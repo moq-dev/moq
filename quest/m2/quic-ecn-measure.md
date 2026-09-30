@@ -36,3 +36,6 @@ from 1.3.1 is a defective baseline, not evidence that classic ECN cannot help.
   and the tcpdump summaries beside the numbers in the L4S quest's Plan.
   If neither provider preserves the marks, say so there: L4S stays off and
   the marking response is only a lab result.
+
+Decided in the 2026-09-30 audit: moved to m2 with its only consumer,
+[L4S on the backbone](/quest/m2/quic-ecn.md).

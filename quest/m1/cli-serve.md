@@ -29,3 +29,12 @@ relay.
   `moq import --listen`; an unscoped one is refused when a key is
   configured; the unauthenticated import-to-export smoke keeps passing with
   `--auth-public`.
+
+Decided in the 2026-09-30 audit: no longer waits on
+[`moq relay`](/quest/m2/moq-relay-subcommand.md). `moq-cli` already depends
+on `moq-relay`, and the open-relay listener is a security gap that should not
+wait on an m2 subcommand.
+
+## Related
+
+- [`moq relay`](/quest/m2/moq-relay-subcommand.md) - the CLI later hosts the whole relay

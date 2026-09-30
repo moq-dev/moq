@@ -41,6 +41,10 @@ Boundaries decided while planning:
 
 ## Plan
 
+In m3 because nobody is asking for CAT yet and the claim keys are
+unregistered; a consumer presenting CATs, or the draft registering the keys,
+brings it back.
+
 Order: the SETUP option already reaches the auth server as
 `moq_auth::Request.token`; verification comes first, then our clients present
 one. Everything rides `moq_auth::Request` and
@@ -49,6 +53,7 @@ one. Everything rides `moq_auth::Request` and
 
 ## Required
 
+- draft-ietf-moq-c4m registers the moqt claim keys
 - [Verify](/quest/m3/cat/verify.md) - `moq_auth::cat` turns a CAT into a
   grant and `moq auth serve` admits one; `moq auth sign|verify` mint and
   check the format

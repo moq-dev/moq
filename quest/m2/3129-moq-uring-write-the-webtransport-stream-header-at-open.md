@@ -31,6 +31,14 @@ The reason it is not a small change: `poll_open_uni` would have to hold a half-o
 
 Worth confirming the trade too: making `open` block on credit moves the backpressure earlier, which is more correct but changes when a caller learns about it.
 
+Decided in the 2026-09-30 audit: moved to m2. No in-tree caller hits the
+wart (moq-net always pairs `finish()` with `poll_closed`), and io_uring
+ships in no package.
+
+## Required
+
+- [Open contract](/quest/m2/uring-open-contract.md) - settle concurrent ownership and backpressure before implementation
+
 ## Closes
 
 - [#3129](https://github.com/moq-dev/moq/issues/3129) - close this issue when the quest finishes

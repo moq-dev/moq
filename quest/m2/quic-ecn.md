@@ -32,3 +32,8 @@ need the fork.
 - ECN visibility stays on the wire: the study observes marks with tcpdump,
   and exposing per-path ECN state in stats is a later quest if operators
   need it.
+
+## Required
+
+- [Measure ECN on the backbone](/quest/m2/quic-ecn-measure.md) - the
+  provider verdict this quest acts on

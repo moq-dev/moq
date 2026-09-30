@@ -14,6 +14,11 @@ without replacing an API after 0.1.
 
 ## Plan
 
+Decided in the 2026-09-30 audit: the encode side moved to m3 pending the
+[GOP overhead](/quest/m2/gop-overhead.md) verdict. If a short keyframe GOP
+is cheap, a flat bitrate is not worth encoder work; imported refresh streams
+are still handled by [the m2 line](/quest/m2/intra-refresh/README.md).
+
 - Extend the non-exhaustive `Gop` contract from main with refresh mode. Keep
   the settled frame-count units and `cut()` operation; do not replace the
   public config or rename the operation again. A cut in refresh mode asks
@@ -43,4 +48,5 @@ without replacing an API after 0.1.
 
 ## Required
 
+- [GOP overhead](/quest/m2/gop-overhead.md) - the verdict on whether keyframe cost justifies refresh encoding
 - [Catalog warmup](/quest/m1/catalog-warmup.md) - the field the producer publishes
