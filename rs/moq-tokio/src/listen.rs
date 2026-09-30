@@ -74,11 +74,14 @@ impl<'de> serde::Deserialize<'de> for Bind {
 	}
 }
 
+/// How long an accepted connection has to finish its handshake, unless overridden by `--listen-timeout`.
+pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// The accept side of an endpoint: what to listen on and how to be trusted.
 ///
 /// Derives [`usage::Args`], so flatten it into a binary's own parser with
 /// `#[usage(flatten)]`. The dial side is [`crate::connect::Config`].
-#[derive(usage::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(usage::Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -142,6 +145,29 @@ pub struct Config {
 		)
 	)]
 	pub version: Vec<moq_net::Version>,
+
+	/// Maximum time for one accepted connection to finish its handshake: the
+	/// QUIC, WebTransport, WebSocket, or qmux one, then the MoQ SETUP. Defaults
+	/// to 10 seconds; set to 0 to wait forever.
+	///
+	/// A peer that connects and then never speaks would otherwise hold its
+	/// connection open indefinitely, since keep-alives count as activity. The
+	/// connection is closed with a timeout code once this passes. See
+	/// [`resolved_timeout`](Self::resolved_timeout) for the value in effect.
+	#[usage(skip)]
+	#[serde(with = "crate::cli::duration::serde_duration")]
+	pub timeout: std::time::Duration,
+
+	#[usage(
+		name = "listen-timeout",
+		long = "listen-timeout",
+		env = "MOQ_LISTEN_TIMEOUT",
+		default_value_t = crate::cli::Duration::fallback(DEFAULT_TIMEOUT),
+		default = "10s",
+		setting = "listen.timeout"
+	)]
+	#[serde(default, rename = "__cli_timeout", skip_serializing_if = "Option::is_none")]
+	pub(crate) timeout_arg: Option<crate::cli::Duration>,
 
 	/// The certificates to serve and the roots that authenticate mTLS clients
 	/// (`--listen-tls-*`).
@@ -220,6 +246,30 @@ pub struct Config {
 	#[usage(skip)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub quic: Option<crate::quic::Config>,
+}
+
+impl Default for Config {
+	fn default() -> Self {
+		Self {
+			bind: None,
+			listen: None,
+			#[cfg(feature = "tcp")]
+			tcp: Default::default(),
+			#[cfg(all(feature = "uds", unix))]
+			unix: Default::default(),
+			version: Vec::new(),
+			timeout: DEFAULT_TIMEOUT,
+			timeout_arg: None,
+			tls: Default::default(),
+			preferred_v4: None,
+			preferred_v6: None,
+			lb_id: None,
+			lb_nonce: None,
+			load_balancer: None,
+			legacy: Default::default(),
+			quic: None,
+		}
+	}
 }
 
 #[cfg(feature = "noq")]
@@ -374,6 +424,12 @@ impl Config {
 	#[cfg(feature = "_transport")]
 	pub(crate) fn validate(&self) -> crate::Result<()> {
 		Ok(())
+	}
+
+	/// How long an accepted connection has to finish its handshake, or `None` to wait forever.
+	pub fn resolved_timeout(&self) -> Option<std::time::Duration> {
+		let timeout = crate::cli::Duration::resolve(self.timeout_arg, self.timeout);
+		(!timeout.is_zero()).then_some(timeout)
 	}
 
 	#[cfg(feature = "noq")]
@@ -562,6 +618,23 @@ load_balancer = { id = "ab", nonce = 8 }
 
 		let server = config.init(Default::default()).unwrap();
 		assert!(server.local_addr().is_ok());
+	}
+
+	/// The handshake deadline defaults on, from the parser and in code alike, and
+	/// `0s` turns it off.
+	#[test]
+	fn timeout_defaults_and_disables() {
+		let secs = std::time::Duration::from_secs;
+		assert_eq!(Config::default().resolved_timeout(), Some(DEFAULT_TIMEOUT));
+		assert_eq!(config_from(["test"]).resolved_timeout(), Some(DEFAULT_TIMEOUT));
+		assert_eq!(
+			config_from(["test", "--listen-timeout", "3s"]).resolved_timeout(),
+			Some(secs(3))
+		);
+		assert_eq!(config_from(["test", "--listen-timeout", "0s"]).resolved_timeout(), None);
+
+		let config: Config = toml::from_str(r#"timeout = "4s""#).expect("parse");
+		assert_eq!(config.resolved_timeout(), Some(secs(4)));
 	}
 
 	/// The canonical spellings, which is what `--help` teaches.
