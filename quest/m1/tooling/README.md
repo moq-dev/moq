@@ -1,4 +1,4 @@
-# Tooling: thin justfiles and CI that calls them
+# [S] Tooling: thin justfiles and CI that calls them
 
 ## Goal
 
@@ -20,7 +20,3 @@ self-inflicted: logic inside recipes.
 
 A recipe that runs a short fixed sequence of commands is thin and stays
 inline; line count is not the test.
-
-## Required
-
-- [Check scope](/quest/m1/tooling/check-scope.md) - check.yml's build-or-skip decision comes from sh/dispatch.sh instead of an inline diff grep
