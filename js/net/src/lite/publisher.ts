@@ -1021,6 +1021,13 @@ export class Publisher {
 				const datagram = await track.recvDatagram();
 				if (!datagram) return; // Track finished; #runTrack tears the subscription down.
 
+				// Below the floor, as a group there is: SUBSCRIBE_START promised nothing below
+				// the start.
+				if (datagram.sequence < hooks.groupFloor(track)) {
+					console.debug(`dropping datagram below the start: sub=${sub} sequence=${datagram.sequence}`);
+					continue;
+				}
+
 				// Convert the timestamp to the track's advertised timescale, matching #serveGroup.
 				const ts = Math.round(datagram.timestamp.as(timescale));
 				const body = new DatagramMessage(sub, datagram.sequence, ts, datagram.payload).encode(this.version);

@@ -1088,6 +1088,7 @@ export class Subscriber {
 			subscriber.#enforceLatency = false;
 		};
 		hooks.replaceGroups = (subscriber, groups) => subscriber.#replaceGroups(groups);
+		hooks.groupFloor = (subscriber) => subscriber.#cursor.peek().start;
 		// The sequence cursor lives here (it shares the buffer and the drift anchor with
 		// the arrival cursor); `Ordered` is the handle that reaches it.
 		ordered_ = {

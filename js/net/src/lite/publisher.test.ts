@@ -10,6 +10,7 @@ import { Reader, Stream, Writer } from "../stream.ts";
 import { Milli, Timestamp } from "../time.ts";
 import { DEFAULT_MAX_AGE_MS } from "../track.ts";
 import { AnnounceRequest } from "./announce.ts";
+import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { sendOrder } from "./priority.ts";
@@ -574,6 +575,7 @@ async function servedSubscription(
 	const serving = publisher.runSubscribe(msg, server);
 
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
+	const datagrams = pair.client.datagrams.readable.getReader();
 
 	return {
 		client,
@@ -618,9 +620,21 @@ async function servedSubscription(
 		async servedSequence(): Promise<number | undefined> {
 			return (await this.servedGroup())?.sequence;
 		},
+		// The next datagram's sequence, or undefined once the publisher has gone idle.
+		async sentDatagram(): Promise<number | undefined> {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const idle = new Promise<undefined>((resolve) => {
+				timer = setTimeout(() => resolve(undefined), IDLE_MS);
+			});
+			const next = await Promise.race([datagrams.read(), idle]);
+			clearTimeout(timer);
+			if (!next || next.done) return undefined;
+			return (await DatagramMessage.decode(next.value, version)).sequence;
+		},
 		async close() {
 			// Settles any pending read as well as dropping the stream.
 			await opened.cancel();
+			await datagrams.cancel();
 			publisher.close();
 			client.close();
 		},
@@ -687,6 +701,25 @@ test("lite draft-05: a dropped datagram does not resolve the start", async () =>
 		expect(resp.start.group).toBe(5);
 	} finally {
 		debug.mockRestore();
+		await sub.close();
+	}
+});
+
+// SUBSCRIBE_START promises nothing below the start, so a datagram below it is dropped like a
+// group there would be.
+test("lite draft-05: a datagram below the announced start is not sent", async () => {
+	const sub = await servedSubscription();
+	try {
+		sub.serve(5);
+		expect(await sub.servedSequence()).toBe(5);
+		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_05);
+		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
+		expect(resp.start.group).toBe(5);
+
+		sub.datagram(3);
+		sub.datagram(6);
+		expect(await sub.sentDatagram()).toBe(6);
+	} finally {
 		await sub.close();
 	}
 });

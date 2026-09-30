@@ -2377,6 +2377,11 @@ impl Subscriber {
 		}
 	}
 
+	/// The lowest sequence this subscriber surfaces. See [`track::Subscriber::floor`].
+	pub(crate) fn floor(&self) -> u64 {
+		self.min_sequence
+	}
+
 	/// Raise the floor to `sequence`, keeping any higher floor already set. See
 	/// [`track::Subscriber::raise_start_to`].
 	pub(crate) fn raise_start_to(&mut self, sequence: u64) {

@@ -4126,6 +4126,16 @@ impl Subscriber {
 		}
 	}
 
+	/// The lowest group sequence this subscriber surfaces, as [`Self::start_at`] and
+	/// [`Self::raise_start_to`] left it. Datagrams bypass it, so a wire publisher that
+	/// promised a start checks them against it.
+	pub(crate) fn floor(&self) -> u64 {
+		match &self.inner {
+			SubscriberKind::Plain(plain) => plain.min_sequence,
+			SubscriberKind::Spliced(spliced) => spliced.floor(),
+		}
+	}
+
 	/// Raise the read cursor's floor to `sequence`, keeping any higher floor already set.
 	///
 	/// The spliced layer positions a segment's inner cursor with this instead of

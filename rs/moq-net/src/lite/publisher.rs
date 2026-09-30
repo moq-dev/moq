@@ -2535,8 +2535,12 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 					}
 					Recv::Datagram(datagram) => {
 						let sequence = datagram.sequence;
-						// A dropped datagram is never sent, so it cannot resolve the start.
-						if let Some(body) = self.ctx.encode_datagram(datagram) {
+						// Below the floor, as a group there is: SUBSCRIBE_START promised nothing
+						// below the start. A dropped datagram is never sent, so it cannot resolve
+						// the start either.
+						if sequence < self.track.floor() {
+							tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "dropping datagram below the start");
+						} else if let Some(body) = self.ctx.encode_datagram(datagram) {
 							match self.emit_range && !self.start_sent {
 								true => self.first = Some(First::Datagram { sequence, body }),
 								false => self.ctx.send_datagram(&body),
@@ -3603,6 +3607,39 @@ mod serve_group_test {
 			"resolved the start from the dropped datagram"
 		);
 		assert!(session.datagrams().is_empty());
+	}
+
+	/// SUBSCRIBE_START promises nothing below the start, so a datagram below it is dropped
+	/// like a group there would be.
+	#[tokio::test]
+	async fn datagram_below_the_start_is_not_sent() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let subscriber = track.subscribe(None);
+		let session = Log::default();
+		let (mut run, mut stream, log) = lite07_run(
+			SinkSession::new(session.clone()).with_datagrams(MAX_DATAGRAM),
+			subscriber,
+		);
+		let mut run = std::pin::pin!(kio::wait(move |waiter| run.poll(&mut stream, waiter)));
+
+		write_group(&mut track, 5, 5);
+		assert!(futures::poll!(run.as_mut()).is_pending());
+		assert!(log.writes.lock().unwrap().starts_with(&[0, 2, 5, 9]));
+
+		write_datagram(&mut track, 3, bytes::Bytes::from_static(b"x"));
+		write_datagram(&mut track, 6, bytes::Bytes::from_static(b"x"));
+		assert!(futures::poll!(run.as_mut()).is_pending());
+
+		let sent: Vec<u64> = session
+			.datagrams()
+			.into_iter()
+			.map(|(_, mut body)| {
+				<lite::Datagram as crate::coding::Decode<Version>>::decode(&mut body, Version::Lite07)
+					.unwrap()
+					.sequence
+			})
+			.collect();
+		assert_eq!(sent, [6], "sent a datagram below the start");
 	}
 
 	/// A datagram that goes first resolves the start the way a group does, under the

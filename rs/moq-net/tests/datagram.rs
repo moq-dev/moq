@@ -191,7 +191,8 @@ async fn ietf_does_not_deliver_datagrams() {
 	.expect("timed out");
 }
 
-/// Explicit insert keeps the origin sequence on the lite wire, including a gap.
+/// Explicit insert keeps the origin sequence on the lite wire, including a gap. The first
+/// datagram resolves SUBSCRIBE_START, so the later one is above it (one below is dropped).
 #[tokio::test]
 async fn inserted_sequences_survive_the_lite_wire() {
 	tokio::time::timeout(TEST_TIMEOUT, async {
@@ -200,32 +201,32 @@ async fn inserted_sequences_survive_the_lite_wire() {
 		fixture
 			.producer
 			.insert_datagram(
-				5,
-				Timestamp::from_millis(5).unwrap(),
+				2,
+				Timestamp::from_millis(2).unwrap(),
 				bytes::Bytes::from_static(PAYLOAD),
 			)
 			.unwrap();
 		fixture
 			.producer
 			.insert_datagram(
-				2,
-				Timestamp::from_millis(2).unwrap(),
+				5,
+				Timestamp::from_millis(5).unwrap(),
 				bytes::Bytes::from_static(PAYLOAD),
 			)
 			.unwrap();
 
 		let first = fixture.subscriber.recv_datagram().await.unwrap().unwrap();
-		assert_eq!(first.sequence, 5);
+		assert_eq!(first.sequence, 2);
 		assert_eq!(
 			first.timestamp,
-			Timestamp::from_millis(5).unwrap(),
+			Timestamp::from_millis(2).unwrap(),
 			"timestamp did not survive the wire"
 		);
 		assert_eq!(&first.payload[..], PAYLOAD);
 
 		let second = fixture.subscriber.recv_datagram().await.unwrap().unwrap();
-		assert_eq!(second.sequence, 2);
-		assert_eq!(second.timestamp, Timestamp::from_millis(2).unwrap());
+		assert_eq!(second.sequence, 5);
+		assert_eq!(second.timestamp, Timestamp::from_millis(5).unwrap());
 		assert_eq!(&second.payload[..], PAYLOAD);
 	})
 	.await
