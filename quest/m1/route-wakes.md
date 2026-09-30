@@ -20,18 +20,22 @@ Facts from the wildcard line (`rs/moq-net/src/model/origin.rs` there):
   `routes.poke_below(prefix)`. That bumps a counter-only `Watch` on every path
   below the prefix, so a woken front cannot tell what changed. Each re-runs
   `select` under the table read lock (`retain_routes`, then `best_route`,
-  which hashes every pool member), then the driver polls every track and
-  rescans deadlines.
+  which hashes every qualifying pool member unless a Stay front's route
+  still serves), then the driver polls every track and rescans deadlines.
 - `route_order` is rendezvous-style: FNV over the path and hop ids, lowest
   wins. A join moves only paths the newcomer wins, a leave only paths the
   leaver was winning.
-- A serving front is `Pin::Stay` and ignores joins and re-prices; it moves
-  only when its own route is withdrawn or its source closes. So on a join
-  the fronts that can act are the waiting ones (no live source, including an
-  upstream request in flight), publisher-pinned ones on the new route's first
-  hop, and local-pinned ones for a local route. On a leave, the fronts served
-  by or requesting through that route. A deeper prefix appearing shadows
-  shallower routes for the same non-Stay fronts.
+- A front's `Pin` limits which routes it can take. `Stay` (an origin-named
+  front while serving) keeps its route while it serves; `Route` qualifies
+  only its own route; `Publisher` only routes whose first hop matches;
+  `Local` only local routes; `Any` (waiting, no live source or an upstream
+  request in flight) every route. Pool fronts in `origin/pool_churn` never
+  get an origin-naming reply, so they are `Publisher`, each on a different
+  member's hop. So on a join the fronts that can act are the `Any` ones,
+  `Publisher` ones on the new route's first hop, and `Local` ones for a
+  local route. On a leave, the fronts served by or requesting through that
+  route. A deeper prefix appearing shadows shallower routes for the same
+  fronts.
 
 Decisions:
 
@@ -44,6 +48,12 @@ Decisions:
   waiters). A change wakes those plus the changed route's own fronts. A
   payload filter would still walk every watch under the prefix, which stays
   linear in paths. (2026-09-30)
+- The prefix node keys its watches by what they qualify for: `Any` and
+  `routed_broadcast` waiters in one set, `Publisher` by hop, `Local` in its
+  own set. `Route` fronts hang off their route only. A join wakes the `Any`
+  set, its first hop's `Publisher` set, and the `Local` set if local, so an
+  unrelated publisher joining wakes no serving pool front. A withdrawal
+  takes the route's served set before dropping the record. (2026-09-30)
 - Builds on shared-fronts' keying, so the index hangs off the final front
   identity. `origin-front-parks.md` replaces the `routed_broadcast` retry
   loop, one of the watch consumers here; whichever lands second adapts it.
@@ -52,9 +62,10 @@ Decisions:
   matter to Stay fronts, roughly those the new route would win. Keep the
   index shaped so that set can be added without walking every served path.
 
-Verification: `origin/pool_churn` flat in served paths, and a unit test
-that counts `select` calls per route change and asserts only affected
-fronts re-select. Keep `pool_resolve` unchanged.
+Verification: `origin/pool_churn` flat in served paths at every pool width
+it already sweeps, and a unit test that counts `select` calls per route
+change and asserts only affected fronts re-select, with zero for an
+unrelated publisher's join and leave. Keep `pool_resolve` unchanged.
 
 Public API: none. Wire: none.
 
