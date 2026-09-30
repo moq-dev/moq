@@ -61,9 +61,10 @@ HTTPS is currently not supported.
 Relays can be joined together to proxy announcements and subscriptions. A viewer talks to whichever relay is closest; if their broadcast lives elsewhere in the cluster, the local relay fetches it from a neighbor and caches it. Hop tracking on every broadcast keeps loops out and picks the shortest path when there's more than one.
 
 - `--cluster-connect <peer-url>` lists the peers this relay dials. Repeatable; defines the topology by hand. A simple chain like `eu-west <- us-east <- us-west` lets `us-east` cache and dedup the transatlantic fetches that fan out to many `us-west` viewers.
-- `--cluster-mesh <self-url>` is optional. When set, this relay advertises its own URL to connected peers and dials any peers it learns about, so larger clusters don't need each node hand-configured. You still need at least one connection (in or out) so the advertisement has a path to flow. A relay with `--cluster-mesh` set and no `--cluster-connect` is a passive rendezvous.
+- `--cluster-connect-api <url-or-path>` fetches that list from an endpoint or file instead, reloading it without a restart.
+- `--cluster-lan` finds peers on the local network over mDNS.
 
-`--cluster-root` and `--cluster-node` from earlier versions were removed. The relay errors at startup if either is set and points at the replacements.
+A relay only dials peers listed this way or found on the LAN. `--cluster-mesh` gossip discovery was removed; the relay errors at startup if it is set.
 
 See [doc/bin/relay/cluster.md](https://github.com/moq-dev/moq/blob/main/doc/bin/relay/cluster.md) for the full walkthrough, including topology trade-offs and authentication.
 
