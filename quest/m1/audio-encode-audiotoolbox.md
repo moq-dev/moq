@@ -23,6 +23,11 @@ the encode seam as the platform candidate on macOS and iOS.
 - Regression: a stereo and a 5.1 encode round-trip through the AudioToolbox
   decoder and through symphonia (stereo only), with timestamps continuous
   across the priming.
+- That continuity fails today for an epoch below the delay: `Producer::timestamp`
+  (`rs/moq-audio/src/encode/producer.rs`) clamps each priming packet to zero,
+  so a zero epoch stamps `[0, 0, 0, 20_000]`, and `decode::Consumer` reads the
+  duplicates as holes and resets AAC between them. Shift the whole timeline by
+  the deficit instead, including the terminal end (found in #4081 review).
 - Until [FFI frame duration default](/quest/m1/ffi-frame-duration-default.md)
   lands on `dev`, binding callers pass `frame_duration_us: 0` with `aac()`.
   Split out on 2026-09-30 so this quest stays on `main`.
