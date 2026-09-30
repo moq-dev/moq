@@ -158,7 +158,6 @@ pub(crate) mod tests {
 		catalog
 	}
 
-	#[cfg(feature = "aac")]
 	/// The published `Decoder` was unwind safe before it boxed a backend; keep it so.
 	#[test]
 	fn decoder_is_unwind_safe() {
@@ -166,6 +165,7 @@ pub(crate) mod tests {
 		assert_unwind_safe::<Decoder>();
 	}
 
+	#[cfg(feature = "aac")]
 	#[test]
 	fn aac_decodes_a_sine() {
 		let mut decoder = Decoder::new(&aac_catalog(), &Config::default()).unwrap();
