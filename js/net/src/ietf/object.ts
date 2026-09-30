@@ -1,5 +1,5 @@
 import { StreamCode, Stream as StreamError } from "../error.ts";
-import { type Cursor, type Reader, Writer } from "../stream.ts";
+import { asIetf, type Cursor, type Reader, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -47,12 +47,7 @@ function hasDeltaObjectPropertyTypes(version: IetfVersion | undefined): boolean 
 	}
 }
 
-async function encodeObjectPropertyType(
-	w: Writer,
-	id: bigint,
-	prev: bigint,
-	version: IetfVersion | undefined,
-): Promise<void> {
+async function encodeObjectPropertyType(w: Writer, id: bigint, prev: bigint, version: IetfVersion): Promise<void> {
 	const encoded = hasDeltaObjectPropertyTypes(version) ? id - prev : id;
 	await w.u62(encoded);
 }
@@ -65,7 +60,7 @@ async function encodeObjectTime(
 	w: Writer,
 	timestamp: Timestamp,
 	timescale: Timescale,
-	version: IetfVersion | undefined,
+	version: IetfVersion,
 ): Promise<void> {
 	const value = Math.round((timestamp.value * timescale) / timestamp.scale);
 	await encodeObjectPropertyType(w, PROP_TIMESTAMP, 0n, version);
@@ -75,7 +70,7 @@ async function encodeObjectTime(
 async function encodeObjectExtensions(
 	timestamp: Timestamp | undefined,
 	timescale: Timescale,
-	version: IetfVersion | undefined,
+	version: IetfVersion,
 ): Promise<Uint8Array> {
 	if (timestamp === undefined) {
 		return new Uint8Array();
@@ -112,7 +107,7 @@ function decodeObjectTime(c: Cursor, timescale: Timescale): Timestamp | undefine
 
 	while (c.remaining > 0) {
 		const step = c.u62();
-		const id = !hasDeltaObjectPropertyTypes(c.version) || first ? step : prevType + step;
+		const id = !hasDeltaObjectPropertyTypes(asIetf(c.version)) || first ? step : prevType + step;
 		first = false;
 		prevType = id;
 
@@ -285,7 +280,7 @@ export class Frame {
 	 * `idDelta` is the first object's absolute Object ID and zero for every later one, so a
 	 * group whose head was trimmed by a filter still puts the true numbering on the wire.
 	 */
-	async encode(w: Writer, flags: GroupFlags, timescale: Timescale, version = w.version, idDelta = 0): Promise<void> {
+	async encode(w: Writer, flags: GroupFlags, timescale: Timescale, version: IetfVersion, idDelta = 0): Promise<void> {
 		await w.u53(idDelta);
 
 		if (flags.hasExtensions) {
@@ -398,7 +393,7 @@ export class FetchFrame {
 	}
 
 	/** Encode this object at `position`, stamping it in the track's timescale. */
-	async encode(w: Writer, position: FetchPosition, timescale: Timescale, version = w.version): Promise<void> {
+	async encode(w: Writer, position: FetchPosition, timescale: Timescale, version: IetfVersion): Promise<void> {
 		if (position.first) {
 			// Include the priority too: "same as the prior object" has no prior to refer to.
 			const properties = this.timestamp !== undefined ? FETCH_PROPERTIES : 0;

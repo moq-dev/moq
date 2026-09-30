@@ -37,8 +37,8 @@ use moq_net::Timestamp;
 
 use crate::catalog::hang::Catalog;
 use crate::catalog::{CatalogFormat, Stream};
-use crate::codec::annexb;
 use crate::codec::video::Reorder;
+use crate::codec::{aac, annexb};
 use crate::container::{ExportSource, Frame};
 
 use super::adts;
@@ -382,11 +382,10 @@ impl Reserve {
 enum Kind {
 	/// Video carries its TS stream type (H.264 = 0x1B, H.265 = 0x24).
 	Video(StreamType),
-	Aac {
-		object_type: u8,
-		sample_rate: u32,
-		channel_count: u32,
-	},
+	/// AAC, framed as ADTS. A `channel_config` of 0 defers the layout to a program config
+	/// element, which leads the next raw data block written and is then taken. A catalog update
+	/// rebuilds the kind and so repeats it once, which a decoder tuning in mid-stream welcomes.
+	Aac(aac::InBand),
 	/// Opus (private stream_type 0x06). Each frame is one Opus packet, prefixed with
 	/// the Opus-in-TS access-unit control header and announced with the 'Opus'
 	/// registration plus DVB extension descriptor.
@@ -1393,7 +1392,7 @@ impl<E: catalog::Catalog> Export<E> {
 				tracks.iter().find(|t| {
 					matches!(
 						t.kind,
-						Kind::Aac { .. } | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3
+						Kind::Aac(_) | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3
 					)
 				})
 			})
@@ -1405,7 +1404,7 @@ impl<E: catalog::Catalog> Export<E> {
 			.map(|t| {
 				let stream_type = match &t.kind {
 					Kind::Video(stream_type) => *stream_type,
-					Kind::Aac { .. } => StreamType::AdtsAac,
+					Kind::Aac(_) => StreamType::AdtsAac,
 					// Opus rides private-data PES; the registration + extension descriptors
 					// below tell the demuxer it's Opus.
 					Kind::Opus { .. } => StreamType::from_u8(0x06).map_err(anyhow::Error::msg)?,
@@ -1553,9 +1552,12 @@ impl<E: catalog::Catalog> Export<E> {
 		if self.span_counters.is_none() {
 			self.span_counters = Some(self.counters.clone());
 		}
-		let track = self.tracks.get(name).context("missing track")?;
+		let track = self.tracks.get_mut(name).context("missing track")?;
 		let pid = track.pid;
 		let kind = track.kind.clone();
+		if let Kind::Aac(aac) = &mut track.kind {
+			aac.program_config.take();
+		}
 		let is_video = matches!(kind, Kind::Video(_));
 		let timestamp = frame.timestamp;
 		let keyframe = frame.keyframe;
@@ -1565,14 +1567,13 @@ impl<E: catalog::Catalog> Export<E> {
 		// verbatim streams carry no PES payload; the section is written separately below.
 		let es_payload = match &kind {
 			Kind::Video(stream_type) => Some(video_es_payload(*stream_type, track.source.description(), &frame)?),
-			Kind::Aac {
-				object_type,
-				sample_rate,
-				channel_count,
-			} => {
-				let header = adts::write_header(*object_type, *sample_rate, *channel_count, frame.payload.len())?;
-				let mut framed = Vec::with_capacity(7 + frame.payload.len());
+			Kind::Aac(aac) => {
+				let pce = aac.program_config.as_deref().unwrap_or_default();
+				let raw_len = pce.len() + frame.payload.len();
+				let header = adts::write_header(aac.object_type, aac.sample_rate, aac.channel_config, raw_len)?;
+				let mut framed = Vec::with_capacity(header.len() + raw_len);
 				framed.extend_from_slice(&header);
+				framed.extend_from_slice(pce);
 				framed.extend_from_slice(&frame.payload);
 				Some(framed)
 			}
@@ -2307,11 +2308,19 @@ fn video_es_payload(stream_type: StreamType, description: Option<&Bytes>, frame:
 fn audio_kind(config: &AudioConfig, name: &str) -> anyhow::Result<Kind> {
 	ensure_raw(&config.container, "audio", name)?;
 	match &config.codec {
-		AudioCodec::AAC(aac) => Ok(Kind::Aac {
-			object_type: aac.profile,
-			sample_rate: config.sample_rate,
-			channel_count: config.channel_count,
-		}),
+		AudioCodec::AAC(codec) => {
+			// The description is exact, and names the LC core under explicit SBR or PS. Without
+			// one, the catalog is all there is.
+			Ok(Kind::Aac(match &config.description {
+				Some(asc) => aac::in_band(asc)?,
+				None => aac::InBand {
+					object_type: codec.profile,
+					sample_rate: config.sample_rate,
+					channel_config: adts::channel_config_from_count(config.channel_count)?,
+					program_config: None,
+				},
+			}))
+		}
 		AudioCodec::Mp2 => Ok(Kind::Mp2 {
 			sample_rate: config.sample_rate,
 		}),

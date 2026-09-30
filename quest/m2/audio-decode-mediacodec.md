@@ -26,8 +26,6 @@ behind a new optional audio `mediacodec` feature and the decode seam, on `target
 ## Required
 
 - [Mobile ownership](/quest/m1/mobile-ownership.md) - if Kotlin owns platform codecs, this backend is moot
-- [Decode seam](/quest/m1/audio-codecs/decode-backend.md) - the candidate order this backend joins
-- [Layout](/quest/m1/audio-codecs/layout.md) - what a multichannel frame is delivered as
 
 ## Related
 

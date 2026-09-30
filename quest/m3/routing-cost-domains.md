@@ -56,7 +56,7 @@ quests. Open wire/API choices belong to this design exercise.
 
 ## Required
 
-- [Cluster routing](/quest/m1/cluster-routing/README.md) - this designs on its inter-cluster path vector
+- [Routing between clusters](/quest/m1/cluster-routing/inter-cluster.md) - this designs on its inter-cluster path vector
 
 ## Related
 
