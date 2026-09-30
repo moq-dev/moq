@@ -2108,7 +2108,8 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 							self.version,
 							slice,
 						)
-						.counted(self.opened.clone()),
+						.counted(self.opened.clone())
+						.delivered(self.track.delivery()),
 					);
 				}
 				Poll::Ready(Ok(None)) => {
@@ -2140,6 +2141,9 @@ struct GroupServe<S: crate::transport::poll::Session> {
 	timescale: Option<Timescale>,
 	version: Version,
 	object_delta: u64,
+	// What this stream wrote, for the subscription's acknowledged frontier: an
+	// acknowledged FIN advances it, anything else counts as dropped on drop.
+	delivery: crate::stats::Delivery,
 	state: GroupState<S>,
 }
 
@@ -2197,6 +2201,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 			timescale,
 			version,
 			object_delta,
+			delivery: Default::default(),
 			state: GroupState::Open,
 		}
 	}
@@ -2204,6 +2209,12 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 	/// Count this group's stream into `opened` once it opens.
 	fn counted(mut self, opened: Arc<AtomicU64>) -> Self {
 		self.opened = opened;
+		self
+	}
+
+	/// Report what this stream writes to its subscription's acknowledged frontier.
+	fn delivered(mut self, delivery: crate::stats::Delivery) -> Self {
+		self.delivery = delivery;
 		self
 	}
 
@@ -2307,6 +2318,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 								) {
 									break 'serve Err(err);
 								}
+								self.delivery.wrote(batched.timestamp, batched.payload.len() as u64);
 								let payload = std::mem::take(&mut batched.payload);
 								if !payload.is_empty() {
 									*chunk = Some(payload);
@@ -2336,6 +2348,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 										) {
 											break 'serve Err(err);
 										}
+										self.delivery.wrote(next.timestamp, next.size);
 										// An empty object has no payload to stream.
 										if next.size > 0 {
 											*frame = Some(next);
@@ -2381,6 +2394,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					let sequence = self.msg.group_id;
 					self.state = GroupState::Done;
 					return Poll::Ready(res.map(|()| {
+						std::mem::take(&mut self.delivery).acked();
 						tracing::debug!(sequence, "finished group");
 					}));
 				}
@@ -2549,6 +2563,73 @@ mod group_priority_test {
 
 	fn hang_video_priority() -> u8 {
 		60
+	}
+
+	/// An acknowledged FIN advances the subscription's frontier; a subgroup abandoned
+	/// mid-stream counts as dropped instead.
+	#[tokio::test]
+	async fn subgroups_report_to_the_frontier() {
+		use futures::FutureExt;
+
+		let registry = crate::stats::Registry::new(crate::stats::Config::new());
+		let session = registry.tier(crate::stats::Tier::default()).session("root");
+		let broadcast = crate::broadcast::Info::new().produce();
+		let track = broadcast.create_track("test", None).unwrap();
+		let sub = broadcast
+			.consume()
+			.with_stats(session.egress("demo"))
+			.track("test")
+			.unwrap()
+			.subscribe(None)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		let serve = |group: group::Consumer| {
+			GroupServe::new(
+				SinkSession::new(Default::default()),
+				ietf::GroupHeader {
+					track_alias: 0,
+					group_id: group.sequence,
+					sub_group_id: 0,
+					publisher_priority: 0,
+					flags: Default::default(),
+				},
+				0,
+				group,
+				Some(Timescale::default()),
+				Version::Draft14,
+				GroupSlice::default(),
+			)
+			.delivered(sub.delivery())
+		};
+		let ms = |ms| crate::Timestamp::from_millis(ms).unwrap();
+
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(ms(0), b"a".as_slice()).unwrap();
+		group.write_frame(ms(500), b"b".as_slice()).unwrap();
+		group.finish().unwrap();
+		let mut done = serve(group.consume());
+		kio::wait(|waiter| done.poll_serve(waiter)).await.unwrap();
+
+		let mut group = track.create_group(group::Info { sequence: 1 }).unwrap();
+		group.write_frame(ms(1000), b"hi".as_slice()).unwrap();
+		group.write_frame(ms(1250), b"yo".as_slice()).unwrap();
+		let mut abandoned = serve(group.consume());
+		assert!(
+			kio::wait(|waiter| abandoned.poll_serve(waiter))
+				.now_or_never()
+				.is_none()
+		);
+		drop(abandoned);
+
+		let mut report = crate::stats::Report::default();
+		registry.report(&mut report);
+		let row = report.traffic[0].publisher;
+		assert_eq!(row.dropped.groups, 1);
+		assert_eq!(row.dropped.bytes, 4);
+		assert_eq!(row.dropped.duration, Duration::from_millis(250));
+		// 1250ms produced against a 500ms frontier: the [500ms, 1s) bucket.
+		assert_eq!(row.lag.buckets(), &[0, 0, 0, 0, 6, 0, 0, 0]);
 	}
 
 	/// A subgroup waiting for stream credit keeps its subscription expiry armed.

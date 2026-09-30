@@ -25,8 +25,3 @@ and per node like the existing counters.
   package is planned.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Starvation](/quest/m1/qos/starvation.md) - the `lag` histogram and
-  `dropped` counters (#4298)

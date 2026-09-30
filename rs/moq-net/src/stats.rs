@@ -59,6 +59,19 @@
 //!   Driven by [`Handle::session`] (the [`Session`] context); a
 //!   [`Session::set_tier`] ends the session on the old tier and starts it on
 //!   the new one.
+//! * `lag` (egress only): a byte-weighted [`Histogram`] of how far behind each
+//!   subscription's acknowledged frontier is, in media time. The frontier is
+//!   the newest frame timestamp the peer acknowledged: it starts at the track's
+//!   newest frame when the subscription opens and advances when a group
+//!   stream's FIN is acknowledged. [`Registry::report`] is the sampler: each
+//!   call walks the live subscriptions and records `max(newest produced -
+//!   frontier, wall time the frontier has stood still while behind)` weighted
+//!   by the bytes the track produced since the previous call. A paused source
+//!   produces nothing, so it adds no weight.
+//! * `dropped` (egress only, a [`Dropped`]): media written toward a peer on a group stream that was reset or abandoned
+//!   before its FIN was acknowledged. The duration is the span between the
+//!   group's oldest and newest written frame timestamps; nothing inside a group
+//!   is known to be acknowledged, so the whole written span counts.
 //!
 //! Counters are strictly monotonic (only `fetch_add`); a counter going
 //! backwards across reads means the underlying entry was garbage collected
@@ -111,15 +124,17 @@ use std::{
 	collections::HashMap,
 	fmt,
 	sync::{
-		Arc, Mutex,
+		Arc, Mutex, Weak,
 		atomic::{AtomicU64, Ordering},
 	},
+	time::Duration,
 };
 
 use kio::Lock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_with::{DurationMilliSecondsWithFrac, serde_as};
 
-use crate::{AsPath, PathOwned, Pattern, Patterns};
+use crate::{AsPath, PathOwned, Pattern, Patterns, Timestamp, cache, runtime::Instant};
 
 /// Cumulative atomic counters for a single `(tier, role)` on a broadcast.
 ///
@@ -159,6 +174,14 @@ pub(crate) struct Counters {
 	// Content the drift budget gave up on before delivery. Disjoint from the
 	// top-level payload counters, which count only what was handed over.
 	stale: ContentCounters,
+	// Egress only: byte-weighted frontier lag, recorded by `sample`.
+	lag: HistogramCounters,
+	// Egress only: media written on a group stream that ended unacknowledged.
+	dropped_duration_nanos: AtomicU64,
+	dropped_bytes: AtomicU64,
+	dropped_groups: AtomicU64,
+	// Egress only: the live subscriptions `sample` walks. Pruned there once dead.
+	frontiers: Mutex<Vec<Weak<FrontierInner>>>,
 }
 
 /// Atomic backing for one [`Content`] readout.
@@ -210,6 +233,12 @@ impl Counters {
 		let groups = self.groups.load(Ordering::Relaxed);
 		let datagrams = self.datagrams.load(Ordering::Relaxed);
 		let stale = self.stale.snapshot();
+		let lag = self.lag.snapshot();
+		let dropped = Dropped {
+			duration: Duration::from_nanos(self.dropped_duration_nanos.load(Ordering::Relaxed)),
+			bytes: self.dropped_bytes.load(Ordering::Relaxed),
+			groups: self.dropped_groups.load(Ordering::Relaxed),
+		};
 		Traffic {
 			announces_started,
 			announces_ended,
@@ -224,6 +253,150 @@ impl Counters {
 			groups,
 			datagrams,
 			stale,
+			lag,
+			dropped,
+		}
+	}
+
+	/// Take one lag sample from every live egress subscription, pruning the dead.
+	fn sample(&self, now: Instant) {
+		let mut frontiers = self.frontiers.lock().expect("stats frontiers poisoned");
+		frontiers.retain(|frontier| {
+			let Some(frontier) = frontier.upgrade() else {
+				return false;
+			};
+			if let Some((lag, weight)) = frontier.sample(now) {
+				self.lag.record(lag, weight);
+			}
+			true
+		});
+	}
+}
+
+/// Number of [`Histogram`] buckets: one below each edge, plus the open top bucket.
+const BUCKETS: usize = Histogram::EDGES.len() + 1;
+
+/// A byte-weighted histogram over media time, cumulative like every [`Traffic`] counter.
+///
+/// Each bucket counts the bytes whose sampled value fell below its edge in
+/// [`Self::EDGES`] and at or above the edge before it; the last bucket is open
+/// above the top edge. Buckets only grow, so the difference of two readouts is the
+/// byte-weighted distribution over that interval.
+///
+/// On the wire it is an object keyed by each bucket's upper edge (`"50ms"` ..
+/// `"5s"`, then `"inf"`), with empty buckets omitted.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "HistogramWire", into = "HistogramWire")]
+pub struct Histogram {
+	buckets: [u64; BUCKETS],
+}
+
+impl Histogram {
+	/// The exclusive upper edge of every bucket but the last.
+	pub const EDGES: [Duration; 7] = [
+		Duration::from_millis(50),
+		Duration::from_millis(100),
+		Duration::from_millis(250),
+		Duration::from_millis(500),
+		Duration::from_secs(1),
+		Duration::from_secs(2),
+		Duration::from_secs(5),
+	];
+
+	/// The bucket `value` falls in.
+	fn bucket(value: Duration) -> usize {
+		Self::EDGES.partition_point(|edge| *edge <= value)
+	}
+
+	/// Bytes per bucket, lowest first; the last is open above the top edge.
+	pub fn buckets(&self) -> &[u64] {
+		&self.buckets
+	}
+
+	/// Total bytes across every bucket.
+	pub fn total(&self) -> u64 {
+		self.buckets.iter().sum()
+	}
+
+	/// True when nothing has been recorded.
+	pub fn is_empty(&self) -> bool {
+		self.buckets.iter().all(|b| *b == 0)
+	}
+
+	/// Fold another readout into this one, bucket by bucket.
+	pub(crate) fn add(&mut self, other: &Histogram) {
+		for (bucket, other) in self.buckets.iter_mut().zip(other.buckets) {
+			*bucket += other;
+		}
+	}
+}
+
+/// The wire shape of a [`Histogram`]: one key per bucket, named by its upper edge.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+struct HistogramWire {
+	#[serde(rename = "50ms", skip_serializing_if = "is_zero")]
+	b50ms: u64,
+	#[serde(rename = "100ms", skip_serializing_if = "is_zero")]
+	b100ms: u64,
+	#[serde(rename = "250ms", skip_serializing_if = "is_zero")]
+	b250ms: u64,
+	#[serde(rename = "500ms", skip_serializing_if = "is_zero")]
+	b500ms: u64,
+	#[serde(rename = "1s", skip_serializing_if = "is_zero")]
+	b1s: u64,
+	#[serde(rename = "2s", skip_serializing_if = "is_zero")]
+	b2s: u64,
+	#[serde(rename = "5s", skip_serializing_if = "is_zero")]
+	b5s: u64,
+	#[serde(rename = "inf", skip_serializing_if = "is_zero")]
+	inf: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+	*value == 0
+}
+
+impl From<HistogramWire> for Histogram {
+	fn from(w: HistogramWire) -> Self {
+		Self {
+			buckets: [w.b50ms, w.b100ms, w.b250ms, w.b500ms, w.b1s, w.b2s, w.b5s, w.inf],
+		}
+	}
+}
+
+impl From<Histogram> for HistogramWire {
+	fn from(h: Histogram) -> Self {
+		let [b50ms, b100ms, b250ms, b500ms, b1s, b2s, b5s, inf] = h.buckets;
+		Self {
+			b50ms,
+			b100ms,
+			b250ms,
+			b500ms,
+			b1s,
+			b2s,
+			b5s,
+			inf,
+		}
+	}
+}
+
+/// Atomic backing for one [`Histogram`] readout.
+#[derive(Default, Debug)]
+struct HistogramCounters {
+	buckets: [AtomicU64; BUCKETS],
+}
+
+impl HistogramCounters {
+	fn record(&self, value: Duration, weight: u64) {
+		if weight > 0 {
+			self.buckets[Histogram::bucket(value)].fetch_add(weight, Ordering::Relaxed);
+		}
+	}
+
+	fn snapshot(&self) -> Histogram {
+		Histogram {
+			buckets: std::array::from_fn(|i| self.buckets[i].load(Ordering::Relaxed)),
 		}
 	}
 }
@@ -254,6 +427,40 @@ impl Content {
 		self.frames += other.frames;
 		self.groups += other.groups;
 		self.datagrams += other.datagrams;
+	}
+}
+
+/// Media written toward a peer on group streams that were reset or abandoned
+/// before the peer acknowledged them. The nested shape of [`Traffic::dropped`].
+///
+/// Group granularity counts each group's whole written span, so this over-reports
+/// media that did arrive.
+#[serde_as]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct Dropped {
+	/// Cumulative media time: each group's oldest to newest written frame.
+	/// Fractional milliseconds on the wire.
+	#[serde_as(as = "DurationMilliSecondsWithFrac<f64>")]
+	pub duration: Duration,
+	/// Cumulative bytes written on those streams.
+	pub bytes: u64,
+	/// Cumulative streams abandoned after writing at least one frame.
+	pub groups: u64,
+}
+
+impl Dropped {
+	/// True when nothing has been dropped.
+	pub fn is_empty(&self) -> bool {
+		self.duration.is_zero() && self.bytes == 0 && self.groups == 0
+	}
+
+	/// Fold another readout into this one, counter by counter.
+	pub(crate) fn add(&mut self, other: Self) {
+		self.duration += other.duration;
+		self.bytes += other.bytes;
+		self.groups += other.groups;
 	}
 }
 
@@ -330,6 +537,13 @@ pub struct Traffic {
 	/// counters: skipped content is never handed over. A steady rate here means
 	/// subscribers are consistently behind the live edge.
 	pub stale: Content,
+	/// Egress only: how far behind the peer's acknowledged frontier was, in media
+	/// time, weighted by the bytes the track produced while it was. Sampled on each
+	/// [`Registry::report`]; see the module docs.
+	pub lag: Histogram,
+	/// Egress only: media written on group streams that were reset or abandoned
+	/// before the peer acknowledged them.
+	pub dropped: Dropped,
 }
 
 /// One spelling of a counter edge on the wire: absent, or a present integer.
@@ -372,6 +586,10 @@ struct TrafficSer {
 	groups: u64,
 	datagrams: u64,
 	stale: Content,
+	#[serde(skip_serializing_if = "Histogram::is_empty")]
+	lag: Histogram,
+	#[serde(skip_serializing_if = "Dropped::is_empty")]
+	dropped: Dropped,
 }
 
 impl From<Traffic> for TrafficSer {
@@ -396,6 +614,8 @@ impl From<Traffic> for TrafficSer {
 			groups: t.groups,
 			datagrams: t.datagrams,
 			stale: t.stale,
+			lag: t.lag,
+			dropped: t.dropped,
 		}
 	}
 }
@@ -422,6 +642,8 @@ struct TrafficDe {
 	groups: u64,
 	datagrams: u64,
 	stale: Content,
+	lag: Histogram,
+	dropped: Dropped,
 }
 
 impl From<TrafficDe> for Traffic {
@@ -440,6 +662,8 @@ impl From<TrafficDe> for Traffic {
 			groups: d.groups,
 			datagrams: d.datagrams,
 			stale: d.stale,
+			lag: d.lag,
+			dropped: d.dropped,
 		}
 	}
 }
@@ -472,6 +696,8 @@ impl Traffic {
 		self.groups += other.groups;
 		self.datagrams += other.datagrams;
 		self.stale.add(other.stale);
+		self.lag.add(&other.lag);
+		self.dropped.add(other.dropped);
 	}
 
 	/// True while the broadcast is announced (an announce guard is open).
@@ -959,6 +1185,10 @@ impl Registry {
 
 	/// Refill `report` with the per-broadcast detail and prune dead entries.
 	///
+	/// Each call is also the lag sampler's tick: every live egress subscription
+	/// records one [`Traffic::lag`] sample weighted by what its track produced
+	/// since the previous call, so call it on a steady interval.
+	///
 	/// Clears `report`, keeping its capacity so a caller draining on an
 	/// interval reuses one report instead of allocating per drain, then fills
 	/// every `(broadcast, tier)` traffic readout and every `(tier, root)`
@@ -973,39 +1203,43 @@ impl Registry {
 		let Some(shared) = self.shared.as_ref() else {
 			return;
 		};
+		// Every report is a lag sample; see `Traffic::lag`.
+		let now = crate::model::clock::now();
 		let mut retired = shared.retired.lock();
 		{
 			let mut entries = shared.entries.lock();
-			for (path, entry) in entries.iter() {
-				let tiers = entry.tiers.lock().expect("stats tiers poisoned");
-				for (tier, counters) in tiers.iter() {
+			entries.retain(|path, entry| {
+				// With only the map's Arc left, and the map locked, no guard can reach
+				// the entry again.
+				let orphan = Arc::strong_count(entry) == 1;
+				let mut tiers = entry.tiers.lock().expect("stats tiers poisoned");
+				tiers.retain(|tier, counters| {
+					// Decided before the readout, so a last bump racing this report (such
+					// as a frontier's final lag sample) lands in this readout or the next,
+					// never after the one that retires the counters.
+					let done = orphan && Arc::strong_count(counters) == 1;
+					if done {
+						// Pairs with the last holder's releasing decrement, so the readout
+						// below sees every bump it made.
+						std::sync::atomic::fence(Ordering::Acquire);
+					}
+					counters.publisher.sample(now);
+					let publisher = counters.publisher.snapshot();
+					let subscriber = counters.subscriber.snapshot();
+					if done {
+						let totals = retired.traffic.entry(tier.clone()).or_default();
+						totals[Role::Publisher.idx()].add(publisher);
+						totals[Role::Subscriber.idx()].add(subscriber);
+					}
 					report.traffic.push(TrafficEntry {
 						path: path.clone(),
 						tier: tier.clone(),
-						publisher: counters.publisher.snapshot(),
-						subscriber: counters.subscriber.snapshot(),
+						publisher,
+						subscriber,
 					});
-				}
-			}
-			// Prune entries no guard holds anymore: with only the map's Arc
-			// left, no future bump can land, so the entry is done. (A guard
-			// created after the readout above still holds the Arc and keeps
-			// its entry alive.)
-			entries.retain(|_, entry| {
-				if Arc::strong_count(entry) > 1 {
-					return true;
-				}
-				let mut tiers = entry.tiers.lock().expect("stats tiers poisoned");
-				tiers.retain(|tier, counters| {
-					if Arc::strong_count(counters) > 1 {
-						return true;
-					}
-					let totals = retired.traffic.entry(tier.clone()).or_default();
-					totals[Role::Publisher.idx()].add(counters.publisher.snapshot());
-					totals[Role::Subscriber.idx()].add(counters.subscriber.snapshot());
-					false
+					!done
 				});
-				!tiers.is_empty()
+				!orphan || !tiers.is_empty()
 			});
 		}
 		{
@@ -1426,22 +1660,25 @@ impl Scope {
 	pub(crate) fn subscribe(&self) -> Subscription {
 		let counters = self.counters();
 		let mut viewer = None;
+		let mut frontier = Frontier::default();
 		if let Some(counters) = &counters {
 			self.side
 				.counters(counters)
 				.subscriptions_started
 				.fetch_add(1, Ordering::Relaxed);
-			// Viewer refcount is egress-only: `broadcasts_started` counts distinct sessions
-			// watching a broadcast.
+			// Viewer refcount and lag are egress-only: `broadcasts_started` counts distinct
+			// sessions watching a broadcast.
 			if matches!(self.side, Side::Publisher) {
 				self.session.viewer_open(&self.path, counters);
 				viewer = Some((self.session.clone(), self.path.clone()));
+				frontier = Frontier::open(counters);
 			}
 		}
 		Subscription {
 			counters,
 			side: self.side,
 			viewer,
+			frontier,
 		}
 	}
 
@@ -1481,6 +1718,16 @@ pub(crate) struct Subscription {
 	side: Side,
 	/// `Some((session, path))` on the egress side, to release the viewer refcount.
 	viewer: Option<(Session, PathOwned)>,
+	/// The acknowledged frontier the lag sampler reads; empty off the egress side.
+	frontier: Frontier,
+}
+
+impl Subscription {
+	/// The subscription's acknowledged frontier, for the model to name the tracks
+	/// feeding it and the wire to advance it.
+	pub(crate) fn frontier(&self) -> &Frontier {
+		&self.frontier
+	}
 }
 
 impl Drop for Subscription {
@@ -1514,6 +1761,253 @@ impl Drop for Announce {
 			// Release pairs with the readout's Acquire load of `announces_ended`.
 			counters.announces_ended.fetch_add(1, Ordering::Release);
 		}
+	}
+}
+
+/// A media timestamp as a plain duration from zero, the unit every lag comparison
+/// uses. Saturates past `u64` nanoseconds (about 584 years).
+fn media_time(timestamp: Timestamp) -> Duration {
+	Duration::from_nanos(u64::try_from(timestamp.as_nanos()).unwrap_or(u64::MAX))
+}
+
+/// What one track has produced: the lag sampler's weight and the edge it measures a
+/// subscription's frontier against. Bumped beside the ingress [`Meter`] on every
+/// frame write, whether or not the track is tagged, since its readers may be.
+#[derive(Default, Debug)]
+pub(crate) struct Production {
+	// Media-time nanoseconds plus one, so zero means nothing produced yet.
+	first: AtomicU64,
+	newest: AtomicU64,
+	// Cumulative frame payload bytes.
+	bytes: AtomicU64,
+}
+
+impl Production {
+	/// Record one frame of `bytes` at `timestamp`.
+	pub(crate) fn record(&self, timestamp: Timestamp, bytes: u64) {
+		let at = u64::try_from(media_time(timestamp).as_nanos())
+			.unwrap_or(u64::MAX)
+			.saturating_add(1);
+		if self.first.load(Ordering::Relaxed) == 0 {
+			let _ = self.first.compare_exchange(0, at, Ordering::Relaxed, Ordering::Relaxed);
+		}
+		// A max, not a store: B-frames present out of order within a group.
+		self.newest.fetch_max(at, Ordering::Relaxed);
+		// Release: a sampler that acquires these bytes also sees the edges above.
+		self.bytes.fetch_add(bytes, Ordering::Release);
+	}
+
+	fn load(cell: &AtomicU64) -> Option<Duration> {
+		cell.load(Ordering::Relaxed).checked_sub(1).map(Duration::from_nanos)
+	}
+}
+
+/// One egress subscription's acknowledged frontier, shared by the wire's group
+/// serve tasks (which advance it through [`Delivery`]) and the lag sampler (which
+/// reads it on every [`Registry::report`]). Empty (no-op) off the egress side.
+#[derive(Clone, Default)]
+pub(crate) struct Frontier(Option<Arc<FrontierInner>>);
+
+struct FrontierInner {
+	counters: Arc<TierCounters>,
+	state: Mutex<FrontierState>,
+}
+
+struct FrontierState {
+	/// The newest timestamp the peer acknowledged, seeded with the track's newest
+	/// when the subscription opened, so a backlog it deliberately starts behind never
+	/// reads as lag. `None` until either exists.
+	acked: Option<Duration>,
+	/// When `acked` last moved, or when the subscription opened.
+	advanced: Instant,
+	/// When a sample first found the subscription behind since `advanced`.
+	behind: Option<Instant>,
+	/// The tracks feeding the subscription: one, or one per segment of a splice.
+	sources: Vec<Source>,
+	/// Bytes an unwatched source produced since the last sample, still owed to it.
+	unsampled: u64,
+}
+
+/// A track feeding a [`Frontier`], with the produced bytes already sampled.
+struct Source {
+	// Only liveness: once dead, the track can never produce again.
+	track: Weak<cache::Track>,
+	// Strong, so the bytes a track produced before it died are still read, however
+	// its last handles and this frontier's last reference race to drop.
+	production: Arc<Production>,
+	sampled: u64,
+}
+
+impl Frontier {
+	fn open(counters: &Arc<TierCounters>) -> Self {
+		let inner = Arc::new(FrontierInner {
+			counters: counters.clone(),
+			state: Mutex::new(FrontierState {
+				acked: None,
+				advanced: crate::model::clock::now(),
+				behind: None,
+				sources: Vec::new(),
+				unsampled: 0,
+			}),
+		});
+		counters
+			.publisher
+			.frontiers
+			.lock()
+			.expect("stats frontiers poisoned")
+			.push(Arc::downgrade(&inner));
+		Self(Some(inner))
+	}
+
+	/// Add a track feeding this subscription. Idempotent. The first track seeds the
+	/// frontier with its newest frame.
+	pub(crate) fn watch(&self, track: &Arc<cache::Track>) {
+		let Some(inner) = &self.0 else { return };
+		let mut state = inner.state.lock().expect("stats frontier poisoned");
+		let production = track.production();
+		if state.sources.iter().any(|s| Arc::ptr_eq(&s.production, production)) {
+			return;
+		}
+		if state.acked.is_none() {
+			state.acked = Production::load(&production.newest);
+		}
+		state.sources.push(Source {
+			track: Arc::downgrade(track),
+			production: production.clone(),
+			sampled: production.bytes.load(Ordering::Relaxed),
+		});
+	}
+
+	/// Remove a track that no longer feeds this subscription, such as a splice
+	/// segment capped by a switch, so what it produces past the cap stops counting.
+	pub(crate) fn unwatch(&self, track: &Arc<cache::Track>) {
+		let Some(inner) = &self.0 else { return };
+		let mut state = inner.state.lock().expect("stats frontier poisoned");
+		let production = track.production();
+		let mut unsampled = 0;
+		state.sources.retain(|s| {
+			if !Arc::ptr_eq(&s.production, production) {
+				return true;
+			}
+			// What it produced before the cap reached this reader: keep it for the next sample.
+			unsampled += production.bytes.load(Ordering::Relaxed).saturating_sub(s.sampled);
+			false
+		});
+		state.unsampled += unsampled;
+	}
+
+	/// Start tracking one group stream written toward the peer.
+	pub(crate) fn delivery(&self) -> Delivery {
+		Delivery {
+			frontier: self.0.clone(),
+			..Default::default()
+		}
+	}
+}
+
+impl FrontierInner {
+	/// One sample: the lag and the bytes produced since the last one, or `None` when
+	/// nothing was produced (a paused source moves nothing).
+	fn sample(&self, now: Instant) -> Option<(Duration, u64)> {
+		let mut state = self.state.lock().expect("stats frontier poisoned");
+		let mut weight = std::mem::take(&mut state.unsampled);
+		let mut newest = None;
+		let mut first: Option<Duration> = None;
+		state.sources.retain_mut(|source| {
+			// Checked before reading: every writer holds the track, so a dead one has
+			// already recorded everything it ever will, and this read is its last.
+			let live = source.track.strong_count() > 0;
+			let production = &source.production;
+			// Acquire pairs with `Production::record`: the edges read below cover these bytes.
+			let bytes = production.bytes.load(Ordering::Acquire);
+			weight += bytes.saturating_sub(source.sampled);
+			source.sampled = bytes;
+			newest = newest.max(Production::load(&production.newest));
+			if let Some(at) = Production::load(&production.first) {
+				first = Some(first.map_or(at, |first| first.min(at)));
+			}
+			live
+		});
+		let newest = newest?;
+		// Opened before the track produced anything: its first frame is where the
+		// subscription started.
+		let acked = *state.acked.get_or_insert(first?);
+
+		// Tracked even without weight, so a pause the peer caught up in doesn't read
+		// as a stalled frontier once production resumes.
+		let behind = newest.saturating_sub(acked);
+		let lag = if behind.is_zero() {
+			state.behind = None;
+			Duration::ZERO
+		} else {
+			// Media time alone trusts the publisher's timestamps; a frontier standing
+			// still on the wall clock while there is newer media is lag too.
+			let since = state.behind.unwrap_or(now).max(state.advanced);
+			state.behind = Some(since);
+			behind.max(now.duration_since(since))
+		};
+		(weight > 0).then_some((lag, weight))
+	}
+}
+
+impl Drop for FrontierInner {
+	/// The last strong reference (the subscription guard or an in-flight [`Delivery`])
+	/// is gone, so no tick will find this frontier again: record the bytes produced
+	/// since the last sample now, at the lag they last had.
+	fn drop(&mut self) {
+		if let Some((lag, weight)) = self.sample(crate::model::clock::now()) {
+			self.counters.publisher.lag.record(lag, weight);
+		}
+	}
+}
+
+/// One group stream written toward a peer, reported to its subscription's
+/// [`Frontier`]: an acknowledged FIN advances the frontier, anything else that ends
+/// it counts the written media as dropped on drop. Empty (no-op) off the egress side.
+#[derive(Default)]
+#[must_use = "an unacknowledged delivery counts as dropped on drop"]
+pub(crate) struct Delivery {
+	frontier: Option<Arc<FrontierInner>>,
+	oldest: Option<Duration>,
+	newest: Option<Duration>,
+	bytes: u64,
+}
+
+impl Delivery {
+	/// Record one frame of `bytes` at `timestamp` written to the stream.
+	pub(crate) fn wrote(&mut self, timestamp: Timestamp, bytes: u64) {
+		if self.frontier.is_none() {
+			return;
+		}
+		let at = media_time(timestamp);
+		self.oldest = Some(self.oldest.map_or(at, |oldest| oldest.min(at)));
+		self.newest = self.newest.max(Some(at));
+		self.bytes += bytes;
+	}
+
+	/// The peer acknowledged the stream's FIN: advance the frontier to its newest frame.
+	pub(crate) fn acked(mut self) {
+		let (Some(inner), Some(newest)) = (self.frontier.take(), self.newest) else {
+			return;
+		};
+		let mut state = inner.state.lock().expect("stats frontier poisoned");
+		if state.acked.is_none_or(|acked| newest > acked) {
+			state.acked = Some(newest);
+			state.advanced = crate::model::clock::now();
+		}
+	}
+}
+
+impl Drop for Delivery {
+	fn drop(&mut self) {
+		let (Some(inner), Some(oldest), Some(newest)) = (self.frontier.take(), self.oldest, self.newest) else {
+			return;
+		};
+		let counters = &inner.counters.publisher;
+		let span = u64::try_from((newest - oldest).as_nanos()).unwrap_or(u64::MAX);
+		counters.dropped_duration_nanos.fetch_add(span, Ordering::Relaxed);
+		counters.dropped_bytes.fetch_add(self.bytes, Ordering::Relaxed);
+		counters.dropped_groups.fetch_add(1, Ordering::Relaxed);
 	}
 }
 
@@ -2287,5 +2781,420 @@ mod tests {
 		assert!(serde_json::from_str::<Traffic>(r#"{"subscriptions_closed":null}"#).is_err());
 		assert!(serde_json::from_str::<Presence>(r#"{"sessions_started":null}"#).is_err());
 		assert!(serde_json::from_str::<Presence>(r#"{"sessions":null,"sessions_closed":1}"#).is_err());
+	}
+}
+
+/// The lag sampler and dropped-media counters, driven through the model the way the
+/// wire's group serve tasks drive them, on the frozen test clock.
+#[cfg(all(test, not(loom)))]
+mod lag_tests {
+	use futures::FutureExt;
+
+	use super::*;
+	use crate::{broadcast, model::clock, track};
+
+	const PATH: &str = "demo";
+	const TICK: Duration = Duration::from_secs(1);
+	/// Bytes per produced group: the weight one tick of media carries.
+	const GROUP_BYTES: u64 = 30 * 100;
+
+	struct Harness {
+		stats: Registry,
+		session: Session,
+		broadcast: broadcast::Producer,
+		track: track::Producer,
+		/// Media time of the next group's first frame.
+		next: Duration,
+	}
+
+	impl Harness {
+		fn new() -> Self {
+			let stats = Registry::new(Config::new());
+			let session = stats.tier(Tier::default()).session("root");
+			let broadcast = broadcast::Info::new().produce();
+			let track = broadcast.create_track("video", None).unwrap();
+			Self {
+				stats,
+				session,
+				broadcast,
+				track,
+				next: Duration::ZERO,
+			}
+		}
+
+		/// A tagged egress subscription, as a session serving a viewer holds one.
+		fn subscribe(&self) -> track::Subscriber {
+			self.subscribe_as(&self.session)
+		}
+
+		fn subscribe_as(&self, session: &Session) -> track::Subscriber {
+			self.broadcast
+				.consume()
+				.with_stats(session.egress(PATH))
+				.track("video")
+				.unwrap()
+				.subscribe(None)
+				.now_or_never()
+				.expect("track is live")
+				.expect("subscribed")
+		}
+
+		/// Produce one second of media as one group of 30 frames, advancing the clock
+		/// by a tick, and return the frame timestamps written.
+		fn produce(&mut self) -> Vec<Timestamp> {
+			let mut group = self.track.append_group().unwrap();
+			let mut written = Vec::new();
+			for i in 0..30u64 {
+				// Whole milliseconds, the track's default scale, so the timestamps
+				// written toward the peer match what the track stored.
+				let at = self.next + Duration::from_millis(i * 33);
+				let ts = Timestamp::try_from(at).unwrap();
+				group.write_frame(ts, vec![0u8; 100]).unwrap();
+				written.push(ts);
+			}
+			group.finish().unwrap();
+			self.next += TICK;
+			clock::advance(TICK);
+			written
+		}
+
+		/// Write a group toward the peer through `sub`'s frontier.
+		fn write(sub: &track::Subscriber, frames: &[Timestamp]) -> Delivery {
+			let mut delivery = sub.delivery();
+			for ts in frames {
+				delivery.wrote(*ts, 100);
+			}
+			delivery
+		}
+
+		/// One sampler tick; the egress row for the broadcast.
+		fn tick(&self) -> Traffic {
+			let mut report = Report::default();
+			self.stats.report(&mut report);
+			report
+				.traffic
+				.iter()
+				.find(|e| e.path.as_str() == PATH)
+				.map(|e| e.publisher)
+				.expect("broadcast row")
+		}
+	}
+
+	/// The buckets that grew between two readouts.
+	fn grew(before: &Traffic, after: &Traffic) -> Vec<(usize, u64)> {
+		before
+			.lag
+			.buckets()
+			.iter()
+			.zip(after.lag.buckets())
+			.enumerate()
+			.filter(|(_, (b, a))| a > b)
+			.map(|(i, (b, a))| (i, a - b))
+			.collect()
+	}
+
+	#[test]
+	fn bucket_edges_are_upper_exclusive() {
+		assert_eq!(Histogram::bucket(Duration::ZERO), 0);
+		assert_eq!(Histogram::bucket(Duration::from_millis(49)), 0);
+		assert_eq!(Histogram::bucket(Duration::from_millis(50)), 1);
+		assert_eq!(Histogram::bucket(Duration::from_millis(4999)), 6);
+		assert_eq!(Histogram::bucket(Duration::from_secs(5)), 7);
+		assert_eq!(Histogram::bucket(Duration::MAX), 7);
+	}
+
+	#[test]
+	fn media_rate_reader_stays_in_the_lowest_bucket() {
+		let mut h = Harness::new();
+		let sub = h.subscribe();
+		let mut last = h.tick();
+		for _ in 0..5 {
+			let frames = h.produce();
+			Harness::write(&sub, &frames).acked();
+			let now = h.tick();
+			assert_eq!(grew(&last, &now), vec![(0, GROUP_BYTES)]);
+			last = now;
+		}
+		assert_eq!(last.dropped.groups, 0);
+	}
+
+	#[test]
+	fn stalled_reader_walks_up_the_buckets() {
+		let mut h = Harness::new();
+		// Media already produced before the subscription opens is a deliberate start
+		// point, not lag.
+		h.produce();
+		let sub = h.subscribe();
+		let mut last = h.tick();
+		assert!(last.lag.is_empty());
+
+		// Never acknowledges anything: the frontier stands at the newest frame the
+		// track held when it opened, and each second of media adds a second of lag.
+		let mut groups = Vec::new();
+		let mut buckets = Vec::new();
+		for _ in 0..6 {
+			let frames = h.produce();
+			groups.push(Harness::write(&sub, &frames));
+			let now = h.tick();
+			let grew = grew(&last, &now);
+			assert_eq!(grew.len(), 1, "one sample per tick: {grew:?}");
+			assert_eq!(grew[0].1, GROUP_BYTES);
+			buckets.push(grew[0].0);
+			last = now;
+		}
+		// 1s, 2s, 3s, 4s, 5s, 6s behind.
+		assert_eq!(buckets, vec![5, 6, 6, 6, 7, 7]);
+	}
+
+	#[test]
+	fn slow_reader_backlog_grows_into_higher_buckets() {
+		let mut h = Harness::new();
+		let sub = h.subscribe();
+		let mut last = h.tick();
+		let mut pending = std::collections::VecDeque::new();
+		let mut buckets = Vec::new();
+		for tick in 0..8 {
+			pending.push_back(Harness::write(&sub, &h.produce()));
+			// Acknowledges one group every other tick: half the media rate.
+			if tick % 2 == 1 {
+				pending.pop_front().unwrap().acked();
+			}
+			let now = h.tick();
+			buckets.push(grew(&last, &now)[0].0);
+			last = now;
+		}
+		assert!(buckets.windows(2).all(|w| w[0] <= w[1]), "{buckets:?}");
+		assert!(buckets.last() > buckets.first(), "{buckets:?}");
+	}
+
+	#[test]
+	fn wall_clock_bounds_a_slow_timeline() {
+		// The publisher's clock crawls: 10ms of media per second. Media time alone
+		// says a viewer that never acknowledges is barely behind; its frontier standing
+		// still on the wall clock says otherwise.
+		let h = Harness::new();
+		let sub = h.subscribe();
+		let mut stalled = Vec::new();
+		let mut last = h.tick();
+		let mut buckets = Vec::new();
+		for i in 0..7u64 {
+			let ts = Timestamp::from_millis(i * 10).unwrap();
+			let mut group = h.track.append_group().unwrap();
+			group.write_frame(ts, vec![0u8; 100]).unwrap();
+			group.finish().unwrap();
+			stalled.push(Harness::write(&sub, &[ts]));
+			clock::advance(TICK);
+			let now = h.tick();
+			let grew = grew(&last, &now);
+			assert_eq!(grew.len(), 1, "{grew:?}");
+			buckets.push(grew[0].0);
+			last = now;
+		}
+		// Behind by 0s, then 10ms, then 1s .. 5s of wall clock.
+		assert_eq!(buckets, vec![0, 0, 5, 6, 6, 6, 7]);
+	}
+
+	#[test]
+	fn a_pause_adds_no_weight_and_no_lag() {
+		let mut h = Harness::new();
+		let sub = h.subscribe();
+		Harness::write(&sub, &h.produce()).acked();
+		let mut last = h.tick();
+
+		// Nothing produced for a minute: the histogram does not move.
+		for _ in 0..60 {
+			clock::advance(TICK);
+			let now = h.tick();
+			assert_eq!(now.lag, last.lag);
+			last = now;
+		}
+
+		// Resuming does not read the pause as a stalled frontier: the group still in
+		// flight is one second of media behind, not the minute the source was away.
+		let _in_flight = Harness::write(&sub, &h.produce());
+		let now = h.tick();
+		assert_eq!(grew(&last, &now), vec![(5, GROUP_BYTES)]);
+	}
+
+	#[test]
+	fn a_subscription_opened_before_any_media_measures_from_the_first_frame() {
+		let mut h = Harness::new();
+		let sub = h.subscribe();
+		let last = h.tick();
+		let _stalled = Harness::write(&sub, &h.produce());
+		h.produce();
+		let now = h.tick();
+		// Two seconds produced since it opened, none acknowledged: 1.96s from the
+		// first frame to the newest.
+		assert_eq!(grew(&last, &now), vec![(5, 2 * GROUP_BYTES)]);
+	}
+
+	#[test]
+	fn an_unacknowledged_group_counts_as_dropped() {
+		let mut h = Harness::new();
+		let sub = h.subscribe();
+		let before = h.tick();
+
+		let frames = h.produce();
+		// Half the group written, then the stream is reset (skip, expiry, stop, or
+		// session close all drop the serve task).
+		drop(Harness::write(&sub, &frames[..15]));
+		// Nothing written at all is not a dropped group.
+		drop(sub.delivery());
+
+		let after = h.tick();
+		assert_eq!(after.dropped.groups, 1);
+		assert_eq!(after.dropped.bytes, 15 * 100);
+		assert_eq!(after.dropped.duration, Duration::from_millis(14 * 33));
+		// The drop itself adds nothing to the histogram beyond the tick's own sample.
+		assert_eq!(after.lag.total() - before.lag.total(), GROUP_BYTES);
+	}
+
+	#[test]
+	fn subscriptions_of_one_broadcast_sum_into_one_row() {
+		let mut h = Harness::new();
+		let other = h.stats.tier(Tier::default()).session("root");
+		let a = h.subscribe();
+		let b = h.subscribe_as(&other);
+		let last = h.tick();
+		let mut stalled = Vec::new();
+		for _ in 0..2 {
+			let frames = h.produce();
+			Harness::write(&a, &frames).acked();
+			stalled.push(Harness::write(&b, &frames));
+		}
+		h.produce();
+		let now = h.tick();
+		// `a` is one second behind, `b` nearly three; both weigh the same three groups.
+		assert_eq!(grew(&last, &now), vec![(5, 3 * GROUP_BYTES), (6, 3 * GROUP_BYTES)]);
+	}
+
+	/// The egress lag bytes recorded so far, without ticking the sampler.
+	fn recorded(stats: &Registry) -> u64 {
+		stats
+			.snapshot()
+			.traffic()
+			.into_iter()
+			.find(|(_, role, _)| matches!(role, Role::Publisher))
+			.map_or(0, |(_, _, traffic)| traffic.lag.total())
+	}
+
+	#[test]
+	fn a_subscription_closed_between_ticks_is_sampled_once() {
+		let mut h = Harness::new();
+		let sub = h.subscribe();
+		let last = h.tick();
+		h.produce();
+		drop(sub);
+
+		// The tick that follows finds no frontier, yet the group still lands, at the
+		// 957ms it was behind when the guard dropped.
+		let now = h.tick();
+		assert_eq!(grew(&last, &now), vec![(4, GROUP_BYTES)]);
+
+		// Sampled exactly once: the closing tick pruned the row, and later media adds
+		// nothing to the retired totals.
+		h.produce();
+		h.stats.report(&mut Report::default());
+		assert_eq!(recorded(&h.stats), GROUP_BYTES);
+	}
+
+	#[test]
+	fn a_subscription_closed_mid_interval_adds_only_the_bytes_since_its_last_sample() {
+		let mut h = Harness::new();
+		let sub = h.subscribe();
+		let mut last = h.tick();
+		h.produce();
+		last = {
+			let now = h.tick();
+			assert_eq!(grew(&last, &now), vec![(4, GROUP_BYTES)]);
+			now
+		};
+		h.produce();
+		h.produce();
+		drop(sub);
+
+		let now = h.tick();
+		assert_eq!(
+			grew(&last, &now).iter().map(|(_, bytes)| bytes).sum::<u64>(),
+			2 * GROUP_BYTES
+		);
+	}
+
+	#[test]
+	fn an_in_flight_delivery_defers_the_final_sample_to_its_own_drop() {
+		let mut h = Harness::new();
+		let sub = h.subscribe();
+		let delivery = Harness::write(&sub, &h.produce());
+		drop(sub);
+		// The delivery still holds the frontier, so it has not closed yet.
+		assert_eq!(recorded(&h.stats), 0);
+
+		drop(delivery);
+		assert_eq!(recorded(&h.stats), GROUP_BYTES);
+	}
+
+	#[test]
+	fn the_last_subscriber_samples_a_track_its_own_drop_releases() {
+		let mut h = Harness::new();
+		let sub = h.subscribe();
+		h.produce();
+		// The producer is gone, so the subscriber holds the last reference to the track.
+		drop(h.track);
+		drop(h.broadcast);
+
+		drop(sub);
+		assert_eq!(recorded(&h.stats), GROUP_BYTES);
+	}
+
+	#[test]
+	fn an_in_flight_delivery_samples_a_track_that_already_closed() {
+		let mut h = Harness::new();
+		let sub = h.subscribe();
+		let delivery = Harness::write(&sub, &h.produce());
+		drop(h.track);
+		drop(h.broadcast);
+		drop(sub);
+		assert_eq!(recorded(&h.stats), 0);
+
+		// The track died with the subscriber; the delivery still owes its bytes.
+		drop(delivery);
+		assert_eq!(recorded(&h.stats), GROUP_BYTES);
+	}
+
+	#[test]
+	fn a_closed_subscription_leaves_the_sampler() {
+		let mut h = Harness::new();
+		let sub = h.subscribe();
+		h.tick();
+		drop(sub);
+		h.produce();
+		let row = h.tick();
+		assert!(row.lag.is_empty());
+	}
+
+	#[test]
+	fn lag_and_drops_round_trip_and_stay_off_the_wire_when_empty() {
+		let empty = serde_json::to_string(&Traffic::default()).unwrap();
+		assert!(!empty.contains("lag") && !empty.contains("dropped"), "{empty}");
+
+		let mut traffic = Traffic::default();
+		traffic.lag.buckets[0] = 7;
+		traffic.lag.buckets[7] = 9;
+		traffic.dropped.duration = Duration::from_micros(1500);
+		traffic.dropped.bytes = 3;
+		traffic.dropped.groups = 1;
+		let json = serde_json::to_string(&traffic).unwrap();
+		assert!(json.contains(r#""lag":{"50ms":7,"inf":9}"#), "{json}");
+		assert!(
+			json.contains(r#""dropped":{"duration":1.5,"bytes":3,"groups":1}"#),
+			"{json}"
+		);
+		assert_eq!(serde_json::from_str::<Traffic>(&json).unwrap(), traffic);
+
+		let mut sum = traffic;
+		sum.add(traffic);
+		assert_eq!(sum.lag.buckets(), &[14, 0, 0, 0, 0, 0, 0, 18]);
+		assert_eq!(sum.dropped.duration, Duration::from_millis(3));
 	}
 }

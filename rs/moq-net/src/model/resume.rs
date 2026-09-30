@@ -635,6 +635,7 @@ impl Consumer {
 			end_sequence: None,
 			outer: Anchor::default(),
 			drift_anchor: kio::Producer::new(Anchor::default()),
+			frontier: Default::default(),
 		}
 	}
 
@@ -1390,6 +1391,9 @@ struct SegmentSub {
 	/// Set while this is a warm segment (see [`Producer::park`]) that has not been
 	/// cleared for live reads: the copy spliced after it, once there is one.
 	warm: Option<Warm>,
+	/// The logical subscription's acknowledged frontier, told about this segment's
+	/// track once its cursor activates.
+	frontier: crate::stats::Frontier,
 }
 
 /// A warm segment waiting on the copy spliced after it; see [`Subscriber::poll_activate`].
@@ -1505,6 +1509,33 @@ pub struct Subscriber {
 	/// with the newest edge across the segments), shared with groups that outlive this
 	/// cursor poll. Refreshed on every [`Self::poll_sync`].
 	drift_anchor: kio::Producer<Anchor>,
+	/// The acknowledged frontier of the logical subscription, told about every
+	/// segment's track so the lag sampler weighs what the splice produces.
+	frontier: crate::stats::Frontier,
+}
+
+impl Subscriber {
+	/// Report every segment's track, current and future, to `frontier`.
+	pub(crate) fn watch(&mut self, frontier: &crate::stats::Frontier) {
+		self.frontier = frontier.clone();
+		for seg in &mut self.segments {
+			seg.frontier = frontier.clone();
+			if let SubState::Active(sub) = &mut seg.sub {
+				sub.watch(frontier);
+			}
+		}
+	}
+
+	/// Stop reporting any segment's track to `frontier`, current or future.
+	pub(crate) fn unwatch(&mut self, frontier: &crate::stats::Frontier) {
+		self.frontier = Default::default();
+		for seg in &mut self.segments {
+			seg.frontier = Default::default();
+			if let SubState::Active(sub) = &mut seg.sub {
+				sub.unwatch(frontier);
+			}
+		}
+	}
 }
 
 impl Subscriber {
@@ -1641,6 +1672,13 @@ impl Subscriber {
 						warm.next = next;
 					}
 					if existing.end != segment.end {
+						// A capped segment's track may live on past the boundary; what it
+						// produces there never reaches this reader, so it stops weighing lag.
+						if existing.end.is_none()
+							&& let SubState::Active(sub) = &mut existing.sub
+						{
+							sub.unwatch(&existing.frontier);
+						}
 						// The boundary bounds the drift anchor as well as the demand; the
 						// anchor follows in `refresh_anchor`.
 						existing.end = segment.end;
@@ -1675,6 +1713,7 @@ impl Subscriber {
 							edge: segment.track.latest(),
 							next,
 						}),
+						frontier: self.frontier.clone(),
 					});
 				}
 			}
@@ -1854,6 +1893,10 @@ impl Subscriber {
 					sub.raise_start_to(seg.first_group().max(min_sequence));
 					sub.set_anchor(seg.anchor.clone());
 					let _ = sub.update(slice(prefs, seg.ask, seg.end));
+					// Only the open-ended segment weighs lag; see `apply`.
+					if seg.end.is_none() {
+						sub.watch(&seg.frontier);
+					}
 					seg.sub = SubState::Active(Box::new(sub));
 				}
 				// The underlying track was rejected or closed: stall, not error.
@@ -2506,6 +2549,53 @@ mod test {
 		assert_eq!(recv(&mut sub), 2);
 		assert_eq!(recv(&mut sub), 3);
 		recv_pending(&mut sub);
+	}
+
+	/// A spliced subscription's lag weighs what the open-ended segment's track
+	/// produces, so a route-fed broadcast (every relay hop) is sampled across
+	/// failovers, and a capped route that lives on stops counting.
+	#[tokio::test]
+	async fn lag_weighs_every_segment() {
+		use crate::stats;
+
+		let registry = stats::Registry::new(stats::Config::new());
+		let session = registry.tier(stats::Tier::default()).session("root");
+		let weight = || {
+			let mut report = stats::Report::default();
+			registry.report(&mut report);
+			report.traffic[0].publisher.lag.total()
+		};
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+		let mut producer = Producer::new();
+		producer.switch(&consumer_a, None).unwrap();
+
+		let mut sub =
+			track::Consumer::spliced("video".into(), Arc::new(broadcast::Info::default()), producer.consume())
+				.with_stats(session.egress("demo"))
+				.subscribe(replay())
+				.now_or_never()
+				.unwrap()
+				.unwrap();
+		let pending = |sub: &mut track::Subscriber| {
+			assert!(kio::wait(|waiter| sub.poll_recv_group(waiter)).now_or_never().is_none());
+		};
+		// Polling activates the segment's cursor, which names its track to the frontier.
+		pending(&mut sub);
+		write_group_at(&mut track_a, 0, "a0", Duration::ZERO);
+		assert_eq!(weight(), 2);
+
+		// Produced before the switch but not sampled yet: still this reader's media.
+		write_group_at(&mut track_a, 1, "a1", Duration::from_millis(500));
+		producer.switch(&consumer_b, Position::group(2)).unwrap();
+		while kio::wait(|waiter| sub.poll_recv_group(waiter)).now_or_never().is_some() {}
+		pending(&mut sub);
+		write_group_at(&mut track_b, 2, "b2", Duration::from_secs(1));
+		assert_eq!(weight(), 6);
+
+		// The capped route keeps publishing past the boundary: not this reader's media.
+		write_group_at(&mut track_a, 3, "a3", Duration::from_secs(2));
+		assert_eq!(weight(), 6);
 	}
 
 	/// A segment that ends at or below the cursor's floor serves it nothing, so its

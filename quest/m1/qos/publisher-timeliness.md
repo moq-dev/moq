@@ -10,8 +10,8 @@ cooperation.
 
 ## Plan
 
-This is the ingress mirror of [starvation](/quest/m1/qos/starvation.md) and
-needs no acknowledgments: the relay is the receiver, and a frame is measured
+This is the ingress mirror of the egress `lag` histogram on `stats::Traffic`
+and needs no acknowledgments: the relay is the receiver, and a frame is measured
 when its last byte arrives, because a partial frame is not useful.
 
 Frame timestamps are relative and jittered with no epoch, so measure each
@@ -27,8 +27,9 @@ milliseconds, and the re-anchor happens on its own as old minima expire.
 Document the window length beside the bucket edges.
 
 Aggregate as a byte-weighted cumulative histogram of drift on the
-`Role::Subscriber` (ingress) rows, with the same bucket edges and the same
-monotonic contract as the starvation histogram. Beside it keep two cumulative
+`Role::Subscriber` (ingress) rows, reusing `stats::Histogram` (its
+`EDGES` and cumulative contract) and its crate-private atomic backing, as the
+egress `lag` field does. Beside it keep two cumulative
 counters: `timestamp_regressions`, frames whose timestamp is below the
 previous group's newest timestamp, and `stalls`, gaps between complete frames
 longer than a documented threshold. Compare only across group boundaries for
@@ -51,7 +52,5 @@ excluded.
 
 ## Related
 
-- [Starvation](/quest/m1/qos/starvation.md) - the egress half, same
-  histogram shape
 - [Media stats](/quest/m1/stats/schema.md) - the publisher's own view
   of the same uplink, in the transport section of its stats track

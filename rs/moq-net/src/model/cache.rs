@@ -491,6 +491,11 @@ pub(crate) struct Track {
 	// This account's slot in the pool's sweep registry, absent when the pool has no
 	// expiry window (nothing is registered) or for the detached default account.
 	sweep: OnceLock<usize>,
+
+	// What the track's groups have produced, for the egress lag sampler. Kept on the
+	// account because it is already the one per-track handle every group holds. Shared
+	// so a sampler can still read the last bytes after the track is gone.
+	production: Arc<crate::stats::Production>,
 }
 
 impl Track {
@@ -503,6 +508,7 @@ impl Track {
 			expiry_cursor: AtomicUsize::new(0),
 			state,
 			sweep: OnceLock::new(),
+			production: Default::default(),
 		});
 		if let Some(key) = track.pool.register(&track) {
 			let _ = track.sweep.set(key);
@@ -513,6 +519,11 @@ impl Track {
 	/// The pool this track caches into.
 	pub(crate) fn pool(&self) -> &Pool {
 		&self.pool
+	}
+
+	/// What this track's groups have produced.
+	pub(crate) fn production(&self) -> &Arc<crate::stats::Production> {
+		&self.production
 	}
 
 	/// Charge a new group's fixed overhead, returning its [`Charge`].
