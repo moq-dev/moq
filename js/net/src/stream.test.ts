@@ -863,7 +863,8 @@ test("Writer and Reader varint round-trip every size in both formats", async () 
 	values.push(2n ** 42n, 2n ** 49n, 2n ** 53n, 2n ** 56n, 2n ** 62n - 1n);
 	for (const version of [Lite.DRAFT_06, Lite.DRAFT_07, Version.DRAFT_16, Version.DRAFT_17, Version.DRAFT_19]) {
 		// Only leading-ones varints reach past 62 bits.
-		const all = version === Lite.DRAFT_06 || version === Version.DRAFT_16 ? values : [...values, 2n ** 62n, 2n ** 64n - 1n];
+		const all =
+			version === Lite.DRAFT_06 || version === Version.DRAFT_16 ? values : [...values, 2n ** 62n, 2n ** 64n - 1n];
 		const { stream, written } = createTestWritableStream();
 		const writer = new Writer(stream, version);
 		for (const value of all) await writer.varint(U64.fromBigInt(value));

@@ -179,5 +179,7 @@ test("SETUP encode stops at the 64 KiB receive limit", async () => {
 test("SETUP decode refuses an oversized length before reading the body", async () => {
 	// Only the prefix is present, so reading the body would fail with a different error.
 	const prefix = await bytes((w) => w.u53(64 * 1024 + 1), Version.DRAFT_05);
-	await expect(Setup.decode(new Reader(undefined, prefix, Version.DRAFT_05), Version.DRAFT_05)).rejects.toThrow("too large");
+	await expect(Setup.decode(new Reader(undefined, prefix, Version.DRAFT_05), Version.DRAFT_05)).rejects.toThrow(
+		"too large",
+	);
 });
