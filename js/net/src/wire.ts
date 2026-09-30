@@ -10,7 +10,7 @@
 import type { Dispose, Getter } from "@moq/signals";
 import type * as broadcast from "./broadcast.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
-import type { Route } from "./hop.ts";
+import type { Hop, Route } from "./hop.ts";
 import type * as origin from "./origin.ts";
 import type * as Path from "./path.ts";
 import type * as track from "./track.ts";
@@ -43,6 +43,8 @@ export interface OriginProducer {
 
 /** The protocol-facing operations behind an origin consumer. */
 export interface OriginConsumer {
+	/** The origin's identity, named in SUBSCRIBE_START and FETCH_OK for everything it serves. */
+	readonly hop: Hop;
 	routes(path: Path.Valid): boolean;
 	readonly broadcasts: Getter<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>;
 	readonly advertised: Getter<Advertisements | undefined>;

@@ -9,7 +9,13 @@ import { Fetch, FetchOk } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Publisher } from "./publisher.ts";
 import { StreamId } from "./stream.ts";
-import { decodeSubscribeResponse, encodeSubscribeResponse, Subscribe, SubscribeStart } from "./subscribe.ts";
+import {
+	decodeSubscribeResponse,
+	encodeSubscribeResponse,
+	Subscribe,
+	SubscribeEnd,
+	SubscribeStart,
+} from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { ALPN_07_WIP, Version } from "./version.ts";
@@ -29,13 +35,36 @@ async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boo
 	}
 }
 
-// JS publishes only what it produces, so the session is always the origin and names its own
-// hop, as Rust names its origin's.
-test("a draft-07 publisher names its own hop in SUBSCRIBE_START and FETCH_OK", async () => {
+// Serve one SUBSCRIBE and one FETCH of `track` over a fresh draft-07 session publishing `origin`,
+// returning the origins its SUBSCRIBE_START and FETCH_OK name.
+async function servedOrigins(origin: OriginProducer, track: string): Promise<[Hop, Hop]> {
 	const pair = createMockTransportPair(ALPN_07_WIP);
+	const publisher = new Publisher(pair.server, VERSION, randomHop(), origin.consume());
+
+	const sub = await Stream.open(pair.client, { version: VERSION });
+	const serving = await Stream.accept(pair.server, VERSION);
+	if (!serving) throw new Error("the publisher never accepted the subscribe stream");
+	void publisher.runSubscribe(new Subscribe({ id: 0n, broadcast: Path.from("room"), track, priority: 0 }), serving);
+	const start = await decodeSubscribeResponse(sub.reader, VERSION);
+	if (!("start" in start)) throw new Error("expected SUBSCRIBE_START");
+
+	const fetch = await Stream.open(pair.client, { version: VERSION });
+	const fetching = await Stream.accept(pair.server, VERSION);
+	if (!fetching) throw new Error("the publisher never accepted the fetch stream");
+	void publisher.runFetch(new Fetch({ broadcast: Path.from("room"), track, priority: 0, group: 0 }), fetching);
+	const ok = await FetchOk.decode(fetch.reader, VERSION);
+
+	publisher.close();
+	sub.close();
+	fetch.close();
+	return [start.start.origin, ok.origin];
+}
+
+// JS publishes only what it produces, so the origin it names is its own: one identity per
+// origin, shared by every session serving it (Rust's `origin.hop()`). A relay failing over
+// from one session to another sees the same origin and resumes rather than ending the broadcast.
+test("every draft-07 session serving an origin names the same origin", async () => {
 	const origin = new OriginProducer();
-	const hop = randomHop();
-	const publisher = new Publisher(pair.server, VERSION, hop, origin.consume());
 	const produced = origin.createBroadcast(Path.from("room"));
 	produced.announce();
 	const track = produced.createTrack("video");
@@ -44,29 +73,15 @@ test("a draft-07 publisher names its own hop in SUBSCRIBE_START and FETCH_OK", a
 	group.close();
 	track.writeGroup(group);
 
-	const sub = await Stream.open(pair.client, { version: VERSION });
-	const serving = await Stream.accept(pair.server, VERSION);
-	if (!serving) throw new Error("the publisher never accepted the subscribe stream");
-	void publisher.runSubscribe(
-		new Subscribe({ id: 0n, broadcast: Path.from("room"), track: "video", priority: 0 }),
-		serving,
-	);
-	const start = await decodeSubscribeResponse(sub.reader, VERSION);
-	if (!("start" in start)) throw new Error("expected SUBSCRIBE_START");
-	expect(start.start.origin).toBe(hop);
+	const [start, fetched] = await servedOrigins(origin, "video");
+	expect(fetched).toBe(start);
+	expect(await servedOrigins(origin, "video")).toEqual([start, start]);
 
-	const fetch = await Stream.open(pair.client, { version: VERSION });
-	const fetching = await Stream.accept(pair.server, VERSION);
-	if (!fetching) throw new Error("the publisher never accepted the fetch stream");
-	void publisher.runFetch(
-		new Fetch({ broadcast: Path.from("room"), track: "video", priority: 0, group: 0 }),
-		fetching,
-	);
-	expect((await FetchOk.decode(fetch.reader, VERSION)).origin).toBe(hop);
-
-	publisher.close();
-	sub.close();
-	fetch.close();
+	const other = new OriginProducer();
+	const elsewhere = other.createBroadcast(Path.from("room"));
+	elsewhere.announce();
+	elsewhere.createTrack("video").writeGroup(group);
+	expect((await servedOrigins(other, "video"))[0]).not.toBe(start);
 });
 
 // Plays the upstream publisher on a mock draft-07 session, answering the subscriber's streams.
@@ -95,6 +110,12 @@ class Upstream {
 	async start(sub: Stream, origin: Hop): Promise<void> {
 		await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart(0, origin) }, VERSION);
 	}
+
+	// End a started subscription cleanly with no groups served.
+	async end(sub: Stream): Promise<void> {
+		await encodeSubscribeResponse(sub.writer, { end: new SubscribeEnd(0, 0) }, VERSION);
+		sub.close();
+	}
 }
 
 // JS used to keep one origin per broadcast, which the latest reply overwrote. Each track copy
@@ -106,11 +127,15 @@ test("tracks of one broadcast keep the origins their own replies named", async (
 	const video = consumer.track("video").subscribe({});
 	const videoSub = await upstream.subscribe(HopSchema.parse(42n));
 	const audio = consumer.track("audio").subscribe({});
-	await upstream.subscribe(HopSchema.parse(43n));
+	const audioSub = await upstream.subscribe(HopSchema.parse(43n));
 	// Repeating a copy's own origin is not a change.
 	await upstream.start(videoSub, HopSchema.parse(42n));
 
-	expect(await settlesWithin(Promise.race([video.closed, audio.closed]), 50)).toBe(false);
+	// Both end cleanly, after every START was read, rather than with a mismatch.
+	await upstream.end(videoSub);
+	await upstream.end(audioSub);
+	expect(await video.closed).toBeNull();
+	expect(await audio.closed).toBeNull();
 
 	upstream.subscriber.close();
 });
