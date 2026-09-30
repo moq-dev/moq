@@ -135,6 +135,10 @@ impl Message for Fetch<'_> {
 	const ID: u64 = 0x16;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		// GROUP_ORDER allows only Ascending or Descending, so no preference is an absent
+		// parameter rather than a 0 the peer must treat as a protocol violation.
+		let group_order = (self.group_order != GroupOrder::Any).then_some(self.group_order);
+
 		self.request_id.encode(w, version)?;
 		if version == Version::Draft17 {
 			0u64.encode(w, version)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
@@ -151,7 +155,7 @@ impl Message for Fetch<'_> {
 				self.fetch_type.encode(w, version)?;
 				encode_params!(w, version,
 					0x20 => self.subscriber_priority,
-					0x22 => self.group_order,
+					0x22 => group_order,
 				);
 			}
 			_ => {
@@ -169,7 +173,7 @@ impl Message for Fetch<'_> {
 				encode_params!(w, version,
 					0x20 => self.subscriber_priority,
 					0x21 => *filter,
-					0x22 => self.group_order,
+					0x22 => group_order,
 				);
 			}
 		}
@@ -260,7 +264,8 @@ impl Message for Fetch<'_> {
 		Ok(Self {
 			request_id,
 			subscriber_priority: subscriber_priority.unwrap_or(128),
-			group_order: group_order.unwrap_or(GroupOrder::Descending),
+			// No preference: the publisher picks the order.
+			group_order: group_order.unwrap_or(GroupOrder::Any),
 			fetch_type,
 			range_filters,
 		})

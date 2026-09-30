@@ -8,10 +8,10 @@
 //!
 //! Delivery is best-effort per hop: a session drops (with a debug log) any datagram whose encoded
 //! body exceeds the transport's datagram size, and sessions that can't carry datagrams at all
-//! (IETF moq-transport, moq-lite before 05, or stream-only transports like WebSocket) never
-//! deliver them.
+//! (moq-lite before 05, or stream-only transports like WebSocket) never deliver them.
 //!
-//! Wire counterpart: [`crate::lite::Datagram`].
+//! Wire counterparts: [`crate::lite::Datagram`], and on moq-transport an OBJECT_DATAGRAM at
+//! object 0 whose Group ID is the sequence ([`crate::ietf::ObjectDatagram`]).
 
 use bytes::Bytes;
 

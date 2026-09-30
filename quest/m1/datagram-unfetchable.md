@@ -24,7 +24,7 @@ datagram flag, and reports it as "unsupported":
 - A received fetch object with the datagram flag is refused as not fetchable.
   It fails only that fetch or fill, not the session, because draft-16+ allows
   the flag (maintainer, 09-29, on Codex's review). That covers the relay's group
-  fill (`recv_group_fetch_objects`, on the moxygen line) and the joining-fetch
+  fill (`recv_group_fetch_objects`) and the joining-fetch
   fill (`run_fill_objects`).
 - Update `drafts/draft-lcurley-moq-lite.md` to say datagrams are neither
   cached nor fetchable, and `doc/concept/`. Run `just drafts check` and
@@ -51,6 +51,5 @@ range apart from one dropped for any other reason.
 
 ## Related
 
-- [Moxygen compatibility](/quest/m1/moxygen/README.md) - says it carries one datagram per group live; this keeps them out of FETCH
 - [JS IETF datagrams](/quest/m1/js-ietf-datagram.md) - JS datagram send and receive over moq-transport
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - datagram groups stay best effort there too

@@ -11,11 +11,12 @@ use crate::media::{MoqAudioInit, MoqContainerFormat, MoqContainerInit, MoqFrame,
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
 ///
 /// Construct with the fields you care about; the rest use raw-track defaults
-/// (priority 0, the publisher's default max age, microsecond timescale).
+/// (priority 127, the publisher's default max age, microsecond timescale).
 #[derive(Clone, uniffi::Record)]
 pub struct MoqTrackInfo {
 	/// Priority, used only to break ties between subscriptions of equal subscriber priority.
-	#[uniffi(default = 0)]
+	/// Higher is more urgent; the default 127 is the midpoint.
+	#[uniffi(default = 127)]
 	pub priority: u8,
 	/// Maximum age of a non-latest group before the publisher evicts it, in
 	/// microseconds. Null uses the default. This is the publisher-side half of
