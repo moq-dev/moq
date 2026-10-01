@@ -3912,10 +3912,10 @@ async fn tune_in_does_not_wait_on_dropped_audio() {
 	assert!(!out.is_empty(), "the tune-in waited on audio it had dropped");
 }
 
-/// A rewind taken while going around a quiet track gives the new generation a
-/// fresh hold rather than the one that already expired.
+/// A rewind taken while going around a quiet track keeps going around it: the
+/// expired hold carries into the new generation rather than starting afresh.
 #[tokio::test(start_paused = true)]
-async fn rewind_restarts_the_stall() {
+async fn rewind_keeps_an_expired_stall() {
 	let max_age = Duration::from_millis(500);
 	let mut rig = Interleave::new();
 	let mut export = rig.export(max_age).await;
@@ -3935,33 +3935,18 @@ async fn rewind_restarts_the_stall() {
 	for tick in 0..=5 {
 		rig.video(GOP + tick);
 	}
-	// Well inside `max_age`: the new generation must still be waiting on the audio.
-	while let Ok(frame) = tokio::time::timeout(max_age / 5, export.next()).await {
-		out.extend(frame.expect("exporter error"));
-	}
-	let after = |out: &[Frame]| {
-		pes_pts_in_order(out)
-			.into_iter()
-			.filter(|&pts| pts > GOP * VIDEO_US * 90 / 1_000)
-			.count()
-	};
-	assert_eq!(
-		after(&out),
-		0,
-		"the new generation went around the audio without waiting"
-	);
-
-	// Once its own wait lapses, it goes around the audio too.
-	tokio::time::advance(max_age).await;
 	out.extend(poll_frames(&mut export));
-	assert!(after(&out) > 0, "the new generation never went out");
+	let after = pes_pts_in_order(&out)
+		.into_iter()
+		.filter(|&pts| pts >= GOP * VIDEO_US * 90 / 1_000)
+		.count();
+	assert!(after > 0, "the new generation waited on the audio again");
 	assert_eq!(export.discontinuity(), 1);
 }
 
-/// A frame held across a rewind starts the new generation's hold afresh rather than
-/// from when it first arrived.
+/// A frame held across a rewind keeps the wait it has already served.
 #[tokio::test(start_paused = true)]
-async fn rewind_restarts_a_held_frame() {
+async fn rewind_keeps_a_held_frame_waiting_time() {
 	let max_age = Duration::from_millis(500);
 	let mut rig = Interleave::new();
 	let mut export = rig.export(max_age).await;
@@ -3980,15 +3965,70 @@ async fn rewind_restarts_a_held_frame() {
 	rig.video.discontinuity().unwrap();
 	rig.video(GOP);
 	out.extend(poll_frames(&mut export));
-	assert_eq!(
-		export.discontinuity(),
-		0,
-		"the held audio went around the video at once"
-	);
+	assert_eq!(export.discontinuity(), 1, "the held audio waited a second budget");
+}
 
+/// A rewind part way through a hold neither ends it nor renews it: the new generation
+/// waits out only what is left of the budget.
+#[tokio::test(start_paused = true)]
+async fn rewind_keeps_a_partial_stall() {
+	let max_age = Duration::from_millis(500);
+	let mut rig = Interleave::new();
+	let mut export = rig.export(max_age).await;
+	let mut out = Vec::new();
+
+	rig.video(0);
+	rig.audio_until(1, &mut export, &mut out);
+	for tick in 1..=5 {
+		rig.video(tick);
+	}
+	assert!(poll_frames(&mut export).is_empty(), "video waits for the quiet audio");
+	tokio::time::advance(max_age / 2).await;
+	assert!(poll_frames(&mut export).is_empty(), "the hold lapsed early");
+
+	rig.video.discontinuity().unwrap();
+	for tick in 0..=5 {
+		rig.video(GOP + tick);
+	}
+	assert!(poll_frames(&mut export).is_empty(), "the rewind ended the hold");
+
+	tokio::time::advance(max_age / 2).await;
+	assert!(!poll_frames(&mut export).is_empty(), "the rewind renewed the hold");
+	assert_eq!(export.discontinuity(), 1);
+}
+
+/// Under loss every source skip is a rewind. However many arrive while a sparse
+/// track stays quiet, the interleave holds for one budget, not one per rewind:
+/// renewing it at each would delay every source by the budget they skip on,
+/// and the feed would collapse into alternating holds and skips.
+#[tokio::test(start_paused = true)]
+async fn repeated_rewinds_hold_once() {
+	let max_age = Duration::from_millis(500);
+	let mut rig = Interleave::new();
+	let mut export = rig.export(max_age).await;
+	let mut out = Vec::new();
+
+	rig.video(0);
+	rig.audio_until(1, &mut export, &mut out);
+	for tick in 1..=5 {
+		rig.video(tick);
+	}
+	assert!(poll_frames(&mut export).is_empty(), "video waits for the quiet audio");
 	tokio::time::advance(max_age).await;
 	out.extend(poll_frames(&mut export));
-	assert_eq!(export.discontinuity(), 1, "the new generation never went out");
+
+	for generation in 1..=8 {
+		rig.video.discontinuity().unwrap();
+		for tick in 0..=5 {
+			rig.video(generation * GOP + tick);
+		}
+		out.extend(poll_frames(&mut export));
+		assert_eq!(
+			export.discontinuity(),
+			generation,
+			"rewind {generation} held the feed for a fresh budget"
+		);
+	}
 }
 
 /// A section lost before the cycle wraps commits an observed subset; the next
@@ -5607,6 +5647,66 @@ async fn resume_after(finish: bool) {
 	assert_eq!(count_discontinuity(&after), 1, "the break is flagged once");
 	assert!(count_pid(&after, 0x0000) >= 1, "PAT re-emitted after the return");
 	assert_eq!(pes_count(&after), 10, "the returned broadcast's frames all went out");
+}
+
+/// A replacement broadcast gets a fresh interleave budget: a hold that expired on the
+/// broadcast before it doesn't let the new one go around a track still within its own.
+#[tokio::test(start_paused = true)]
+async fn resume_does_not_inherit_an_expired_stall() {
+	let max_age = Duration::from_secs(2);
+	let origin = crate::source::produce_origin();
+	let source = crate::Source::new(origin.consume(), "live");
+	let publish = || {
+		let mut broadcast = origin.publish("live", Default::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		(broadcast, catalog)
+	};
+	// Output that needs no more than a tenth of the budget to pass.
+	async fn quick(export: &mut Export, max_age: Duration) -> Vec<Frame> {
+		let mut out = Vec::new();
+		while let Ok(frame) = tokio::time::timeout(max_age / 10, export.next()).await {
+			out.extend(frame.expect("exporter error"));
+		}
+		out
+	}
+
+	let (mut broadcast, mut catalog) = publish();
+	let mut leading = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let mut quiet = aac_rendition(&mut broadcast, &mut catalog, "b.aac");
+	let ended = source.broadcast().await.unwrap();
+	let mut export = Export::new(source.clone()).await.unwrap().with_max_age(max_age);
+	write_aac(&mut quiet, 0);
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut leading, ms);
+	}
+	quick(&mut export, max_age).await;
+	tokio::time::advance(max_age).await;
+	assert!(
+		!quick(&mut export, max_age).await.is_empty(),
+		"the leading track went around the quiet one"
+	);
+	drop((broadcast, catalog, leading, quiet));
+	let (_, end) = drain_to_end(&mut export).await;
+	assert!(end.is_err(), "a drop fails the export");
+
+	let (mut broadcast, mut catalog) = publish();
+	let mut leading = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let mut quiet = aac_rendition(&mut broadcast, &mut catalog, "b.aac");
+	source.returned(&ended).await.unwrap();
+	export.resume().await.unwrap();
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut leading, ms);
+	}
+	assert_eq!(
+		pes_count(&quick(&mut export, max_age).await),
+		0,
+		"the replacement went around its quiet track on the old broadcast's budget"
+	);
+	write_aac(&mut quiet, 200);
+	assert!(
+		!quick(&mut export, max_age).await.is_empty(),
+		"the replacement went out once both tracks showed"
+	);
 }
 
 #[tokio::test(start_paused = true)]

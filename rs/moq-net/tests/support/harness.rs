@@ -29,6 +29,8 @@ pub struct MockConnectOptions {
 	pub server_publish: Option<origin::Consumer>,
 	/// Origin the server inserts remote broadcasts into.
 	pub server_subscribe: Option<origin::Producer>,
+	/// One-way delay for stream data in each direction.
+	pub latency: std::time::Duration,
 }
 
 impl MockConnectOptions {
@@ -40,6 +42,7 @@ impl MockConnectOptions {
 			client_subscribe: None,
 			server_publish: None,
 			server_subscribe: None,
+			latency: std::time::Duration::ZERO,
 		}
 	}
 }
@@ -67,6 +70,7 @@ pub struct MockPair {
 pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	let protocol = opts.version.alpn();
 	let (client_transport, server_transport) = create_mock_session_pair(Some(protocol));
+	client_transport.set_latency(opts.latency);
 	let transports = (client_transport.clone(), server_transport.clone());
 
 	let mut client = Client::new().with_versions(opts.version.into());
@@ -117,6 +121,16 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 
 /// Peer two relays the way `moq-relay`'s cluster does: one session, both directions.
 pub async fn peer(version: Version, a: &origin::Producer, b: &origin::Producer) -> MockPair {
+	peer_with_latency(version, a, b, std::time::Duration::ZERO).await
+}
+
+/// [`peer`] over a link with a one-way `latency`.
+pub async fn peer_with_latency(
+	version: Version,
+	a: &origin::Producer,
+	b: &origin::Producer,
+	latency: std::time::Duration,
+) -> MockPair {
 	let a = a.clone().peer();
 	let b = b.clone().peer();
 	let mut options = MockConnectOptions::new(version);
@@ -124,5 +138,6 @@ pub async fn peer(version: Version, a: &origin::Producer, b: &origin::Producer) 
 	options.client_subscribe = Some(a);
 	options.server_publish = Some(b.consume().with_hidden(true));
 	options.server_subscribe = Some(b);
+	options.latency = latency;
 	connect_mock(options).await
 }
