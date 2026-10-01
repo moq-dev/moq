@@ -50,11 +50,11 @@ Decided (2026-10-01), from a discussion with t0ms:
   `--pcr-pid`. Every byte stays in order behind it. Programs on independent
   clocks are out of scope.
 - The export reuses the [fixed-delay release](/quest/m1/tstd/delay.md)
-  stage, keyed on each object's PCR time instead of a DTS, and the CLI's
-  `Delivery` pacer spreads each object's bytes at the PCR-implied rate. It
-  must pace on the source's PCR, not on arrival: a pacer that re-clocks on
-  arrival moves the PCR-to-PTS offset over a long capture and fails the
-  decoder buffers, even though every byte is intact.
+  stage, keyed on each object's PCR time instead of a DTS, which also
+  spreads each object's bytes at the PCR-implied rate. It must pace on the
+  source's PCR, not on arrival: a pacer that re-clocks on arrival moves the
+  PCR-to-PTS offset over a long capture and fails the decoder buffers, even
+  though every byte is intact.
 - An object that misses its deadline is dropped and counted, as the release
   stage does. The output shows a continuity error there; passthrough never
   rewrites continuity counters.
