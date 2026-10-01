@@ -17,8 +17,9 @@ Decided (2026-10-01), from a discussion with t0ms:
 - Why: the [T-STD line](/quest/m1/tstd/README.md) names a passthrough lane as
   the only one that can carry primary distribution until the remux passes, and
   none exists. Some feeds will want it permanently: the demultiplexed lane
-  cannot parse a scrambled elementary stream into frames, and an operator who must hand on SI and private
-  PIDs as authored has nothing to gain from a remux.
+  cannot parse a scrambled elementary stream into frames, and an operator
+  who must hand on SI and private PIDs as authored has nothing to gain from
+  a remux.
 - The track is listed in a new `m2ts` root section of the hang catalog,
   not in `video`/`audio` (it has no codec to describe) and not in the
   `mpegts` section, whose members (`tracks`, `program`, `si`, ...) record
@@ -58,8 +59,8 @@ Decided (2026-10-01), from a discussion with t0ms:
   Object boundaries and timestamps then depend only on the bytes, so two
   publishers of one feed publish identical objects, which 1+1 needs.
 - A multiplex is paced on one PCR PID: the `PCR_PID` in the PMT of the PAT's
-  first program, or `--pcr-pid`. Every byte stays in order behind it. Programs on independent
-  clocks are out of scope.
+  first program, or `--pcr-pid`. Every byte stays in order behind it. Programs
+  on independent clocks are out of scope.
 - The export reuses the [fixed-delay release](/quest/m1/tstd/delay.md)
   stage, keyed on each object's PCR time instead of a DTS, which also
   spreads each object's bytes at the PCR-implied rate. It must pace on the
@@ -84,18 +85,18 @@ Decided (2026-10-01), from a discussion with t0ms:
 - `--passthrough` publishes only the passthrough track. Publishing it
   alongside the demultiplexed tracks is out of scope.
 
-Test: an export of a broadcast capture is byte-identical to the input from
-the first released group, and the strict T-STD check gives the same verdict
-on output and input. A scrambled fixture (`transport_scrambling_control` set
-on its elementary PIDs) groups and paces the same as its clear twin. A
-two-program fixture on one clock with staggered GOPs publishes
-`randomAccess` false. A single-program fixture with the PCR on its audio PID
-starts groups at video random access points only. PCR discovery finds a PCR
-PID that differs from the PMT PID, with the PMT section split across
-packets. Two exporters fed the same objects with different arrival skew emit
-identical bytes; when only one misses a deadline, its output is the other's
-less that object's packets. A dropped object is counted, and the rest still go out on time. Rerun
-the #4613 netem rig (10% loss, 120 s) against it.
+Test: an export of a broadcast capture is byte-identical to the input from the
+first released group, and the strict T-STD check gives the same verdict on
+output and input. A scrambled fixture (`transport_scrambling_control` set on
+its elementary PIDs) groups and paces the same as its clear twin. A
+two-program fixture on one clock with staggered GOPs publishes `randomAccess`
+false. A single-program fixture with the PCR on its audio PID starts groups at
+video random access points only. PCR discovery finds a PCR PID that differs
+from the PMT PID, with the PMT section split across packets. Two exporters fed
+the same objects with different arrival skew emit identical bytes; when only
+one misses a deadline, its output is the other's less that object's packets. A
+dropped object is counted, and the rest still go out on time. Rerun the #4613
+netem rig (10% loss, 120 s) against it.
 
 Update `doc/bin/cli.md` for both flags, `doc/concept` for the section, and
 the draft's comparison section to say this repository now publishes both
