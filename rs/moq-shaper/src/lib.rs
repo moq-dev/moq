@@ -20,7 +20,7 @@
 
 use std::{
 	cmp::Reverse,
-	collections::{BTreeSet, BinaryHeap, HashMap, hash_map},
+	collections::{BTreeMap, BinaryHeap, HashMap, hash_map},
 	fmt,
 	net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
 	sync::{
@@ -132,8 +132,9 @@ pub struct Batch {
 /// A change to one direction's profile once the run reaches `at`.
 ///
 /// A step changes only what it names, so a later step puts one knob back
-/// without restating the rest. It can add or change a rate limit, never remove
-/// one.
+/// without restating the rest. The rate limit never steps: datagrams already
+/// queued behind it keep the old rate's departures, so a new rate would
+/// reorder them.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
@@ -152,9 +153,6 @@ pub struct Step {
 	/// The reorder from then on.
 	#[serde(default)]
 	pub reorder: Option<f64>,
-	/// The rate limit from then on.
-	#[serde(default)]
-	pub rate: Option<Rate>,
 }
 
 impl Step {
@@ -171,9 +169,6 @@ impl Step {
 		}
 		if let Some(reorder) = self.reorder {
 			profile.reorder = reorder;
-		}
-		if let Some(rate) = &self.rate {
-			profile.rate = Some(rate.clone());
 		}
 	}
 }
@@ -249,17 +244,36 @@ const IMPAIRMENTS: [Impairment; 3] = [
 /// cannot, and that is when the silence means the profile is not in the path.
 const IMPLAUSIBLE: f64 = 1e-4;
 
-/// The impairments `config` configures that `stats` shows implausibly never acted.
-fn unapplied(config: &Config, stats: &Stats) -> Vec<&'static str> {
+/// The impairments that `stats` shows implausibly never acted, given every
+/// phase of both directions as the profile in force and the datagrams it treated.
+///
+/// Each phase is charged only its own traffic, so the clean traffic after a step
+/// that turns an impairment off never counts against the phase before it.
+fn unapplied(phases: &[(Profile, u64)], stats: &Stats) -> Vec<&'static str> {
 	IMPAIRMENTS
 		.iter()
 		.filter(|(_, chance, acted)| {
-			let silence = (1.0 - chance(&config.up)).powf(stats.up.packets as f64)
-				* (1.0 - chance(&config.down)).powf(stats.down.packets as f64);
+			let silence: f64 = phases
+				.iter()
+				.map(|(profile, packets)| (1.0 - chance(profile)).powf(*packets as f64))
+				.product();
 			acted(&stats.up) + acted(&stats.down) == 0 && silence < IMPLAUSIBLE
 		})
 		.map(|(name, ..)| *name)
 		.collect()
+}
+
+/// `profile` as the run opens and as each of `steps` leaves it, paired with the
+/// datagrams `counts` says that phase treated.
+fn phased(profile: &Profile, steps: &[Step], counts: &BTreeMap<usize, u64>) -> Vec<(Profile, u64)> {
+	let count = |phase: usize| counts.get(&phase).copied().unwrap_or(0);
+	let mut profile = profile.clone();
+	let mut phases = vec![(profile.clone(), count(0))];
+	for (index, step) in steps.iter().enumerate() {
+		step.apply(&mut profile);
+		phases.push((profile.clone(), count(index + 1)));
+	}
+	phases
 }
 
 /// Whether the batches `setup` configures implausibly never held a datagram.
@@ -461,10 +475,15 @@ impl Shaper {
 			anyhow::bail!("the shaper stopped forwarding: {err} ({stats})");
 		}
 
-		let mut missing: Vec<String> = unapplied(&self.setup.config, &stats)
-			.into_iter()
-			.map(String::from)
-			.collect();
+		let counts = [UP, DOWN].map(|dir| self.tally[dir].phases.lock().unwrap().clone());
+		let phases: Vec<(Profile, u64)> = [
+			(&self.setup.config.up, &self.setup.up, &counts[UP]),
+			(&self.setup.config.down, &self.setup.down, &counts[DOWN]),
+		]
+		.into_iter()
+		.flat_map(|(profile, options, counts)| phased(profile, &options.steps, counts))
+		.collect();
+		let mut missing: Vec<String> = unapplied(&phases, &stats).into_iter().map(String::from).collect();
 		let batched = self
 			.tally
 			.iter()
@@ -473,19 +492,18 @@ impl Shaper {
 		if unbatched(&self.setup, &stats, batched) {
 			missing.push("batch".to_string());
 		}
-		for (name, options, tally, counters) in [
-			("up", &self.setup.up, &self.tally[UP], &stats.up),
-			("down", &self.setup.down, &self.tally[DOWN], &stats.down),
+		for (name, options, phases, counters) in [
+			("up", &self.setup.up, &counts[UP], &stats.up),
+			("down", &self.setup.down, &counts[DOWN], &stats.down),
 		] {
 			let Some(first) = options.steps.first().filter(|_| counters.packets > 0) else {
 				continue;
 			};
-			let phases = tally.phases.lock().unwrap();
-			if !phases.contains(&0) {
+			if !phases.contains_key(&0) {
 				missing.push(format!("the {name} profile before its step at {:?}", first.at));
 			}
 			for (index, step) in options.steps.iter().enumerate() {
-				if !phases.contains(&(index + 1)) {
+				if !phases.contains_key(&(index + 1)) {
 					missing.push(format!("the {name} step at {:?}", step.at));
 				}
 			}
@@ -516,8 +534,8 @@ struct Tally {
 	throttled: AtomicU64,
 	delayed: AtomicU64,
 	reordered: AtomicU64,
-	/// The phases some link treated a datagram in: 0 before the first step, n after the nth.
-	phases: Mutex<BTreeSet<usize>>,
+	/// Datagrams treated in each phase: 0 before the first step, n after the nth.
+	phases: Mutex<BTreeMap<usize, u64>>,
 	/// Datagrams a batch held past when they would otherwise have left.
 	batched: AtomicU64,
 }
@@ -796,8 +814,6 @@ struct Link {
 	steps: Vec<Step>,
 	/// How many of `steps` have applied.
 	stepped: usize,
-	/// Whether a datagram was treated since the latest step applied.
-	treated: bool,
 	queue: mpsc::UnboundedSender<Parcel>,
 }
 
@@ -826,7 +842,6 @@ impl Link {
 			start,
 			steps: options.steps.clone(),
 			stepped: 0,
-			treated: false,
 			queue,
 		}
 	}
@@ -836,36 +851,14 @@ impl Link {
 	fn step(&mut self, now: Instant, tally: &Tally) {
 		while let Some(step) = self.steps.get(self.stepped) {
 			// A step past what the clock can hold is one the run never reaches.
-			let Some(at) = self.start.checked_add(step.at).filter(|at| *at <= now) else {
+			if self.start.checked_add(step.at).is_none_or(|at| at > now) {
 				break;
-			};
-			if let Some(rate) = &step.rate {
-				// Credit accrues at the new rate from the scheduled transition,
-				// even when no datagram arrived at that instant.
-				self.full_at = self.refilled(rate, at);
 			}
 			step.apply(&mut self.profile);
 			self.stepped += 1;
-			self.treated = false;
 		}
-		// Applying a step is no evidence it acted, so record the phase a datagram sees.
-		if !self.treated {
-			self.treated = true;
-			tally.phases.lock().unwrap().insert(self.stepped);
-		}
-	}
-
-	/// When `rate`'s bucket would be full again if it took over at `now`.
-	///
-	/// A limit that was not there starts full, the way the run started. One
-	/// that was keeps its credit, or its debt, clipped to the new bucket.
-	fn refilled(&self, rate: &Rate, now: Instant) -> Instant {
-		let Some(old) = &self.profile.rate else {
-			return now;
-		};
-		let owed = self.full_at.saturating_duration_since(now).as_secs_f64() * old.bits_per_second as f64 / 8.0;
-		let credit = (old.burst as f64 - owed).min(rate.burst as f64);
-		now + Duration::from_secs_f64((rate.burst as f64 - credit) * 8.0 / rate.bits_per_second as f64)
+		// Applying a step is no evidence it acted, so count the datagrams each phase treated.
+		*tally.phases.lock().unwrap().entry(self.stepped).or_default() += 1;
 	}
 
 	/// Treat a datagram and queue it to leave by `socket` for `dest`.
@@ -1129,16 +1122,11 @@ mod tests {
 
 	#[test]
 	fn silence_is_only_a_failure_once_it_is_implausible() {
-		let config = Config {
-			bind: LOCALHOST,
-			target: LOCALHOST,
-			seed: 0,
-			up: Profile {
-				loss: 0.05,
-				..Default::default()
-			},
-			down: Profile::default(),
+		let lossy = Profile {
+			loss: 0.05,
+			..Default::default()
 		};
+		let both = |packets| [(lossy.clone(), packets), (Profile::default(), packets)];
 		let quiet = |packets| Stats {
 			up: Counters {
 				packets,
@@ -1151,24 +1139,49 @@ mod tests {
 		};
 
 		// 0.95^20 is about a third: a short run seeing no loss proves nothing.
-		assert!(unapplied(&config, &quiet(20)).is_empty());
+		assert!(unapplied(&both(20), &quiet(20)).is_empty());
 		// 0.95^1000 is about 5e-23: the loss is not in the path.
-		assert_eq!(unapplied(&config, &quiet(1000)), ["loss"]);
+		assert_eq!(unapplied(&both(1000), &quiet(1000)), ["loss"]);
 
-		let mut lossy = quiet(1000);
-		lossy.up.lost = 1;
-		assert!(unapplied(&config, &lossy).is_empty());
+		let mut lost = quiet(1000);
+		lost.up.lost = 1;
+		assert!(unapplied(&both(1000), &lost).is_empty());
 
 		// A delay acts on every datagram, so even one undelayed datagram is a
 		// shaper that is not in the path.
-		let config = Config {
-			down: Profile {
-				delay: Duration::from_millis(10),
+		let delayed = Profile {
+			delay: Duration::from_millis(10),
+			..Default::default()
+		};
+		assert_eq!(unapplied(&[(lossy, 1), (delayed, 1)], &quiet(1)), ["delay"]);
+	}
+
+	#[test]
+	fn a_phase_is_charged_only_its_own_traffic() {
+		let ms = Duration::from_millis;
+		let lossy = Profile {
+			loss: 0.02,
+			..Default::default()
+		};
+		let steps = [Step {
+			at: ms(100),
+			loss: Some(0.0),
+			..Default::default()
+		}];
+		// One datagram survived the 2% loss, then the loss stepped off for a thousand.
+		let phases = phased(&lossy, &steps, &BTreeMap::from([(0, 1), (1, 1000)]));
+		let stats = Stats {
+			up: Counters {
+				packets: 1001,
 				..Default::default()
 			},
-			..config
+			down: Counters::default(),
 		};
-		assert_eq!(unapplied(&config, &quiet(1)), ["delay"]);
+		assert!(unapplied(&phases, &stats).is_empty());
+
+		// The same thousand under the loss still fail.
+		let phases = phased(&lossy, &steps, &BTreeMap::from([(0, 1000), (1, 1)]));
+		assert_eq!(unapplied(&phases, &stats), ["loss"]);
 	}
 
 	#[tokio::test]
@@ -1799,76 +1812,6 @@ mod tests {
 		assert_eq!(lost(start + secs(60)), 0, "the step back never cleared");
 	}
 
-	#[test]
-	fn a_rate_step_narrows_the_bucket_and_widens_it_again() {
-		let secs = Duration::from_secs;
-		let rate = |bytes_per_second: u64| Rate {
-			bits_per_second: bytes_per_second * 8,
-			burst: 100,
-			queue: secs(10),
-		};
-		let profile = Profile {
-			rate: Some(rate(4000)),
-			..Default::default()
-		};
-		let options = stepped(vec![
-			Step {
-				at: secs(30),
-				rate: Some(rate(1000)),
-				..Default::default()
-			},
-			Step {
-				at: secs(60),
-				rate: Some(rate(4000)),
-				..Default::default()
-			},
-		]);
-		let (queue, _) = mpsc::unbounded_channel();
-		let start = Instant::now();
-		let mut link = Link::new(&profile, &options, 7, 0, start, queue);
-
-		// The bucket is full at each stretch, so the first 100 bytes leave at
-		// once and the next 100 owe one bucket's refill at the rate in force.
-		let ms = Duration::from_millis;
-		assert_eq!(owed(&mut link, start, &[100, 100]), [ms(0), ms(25)]);
-		assert_eq!(owed(&mut link, start + secs(30), &[100, 100]), [ms(0), ms(100)]);
-		assert_eq!(owed(&mut link, start + secs(60), &[100, 100]), [ms(0), ms(25)]);
-	}
-
-	#[test]
-	fn a_rate_step_keeps_the_debt_it_takes_over() {
-		let ms = Duration::from_millis;
-		let rate = |bytes_per_second: u64| Rate {
-			bits_per_second: bytes_per_second * 8,
-			burst: 100,
-			queue: Duration::from_secs(10),
-		};
-		let profile = Profile {
-			rate: Some(rate(1000)),
-			..Default::default()
-		};
-		// Halfway through a 300 byte backlog at 1000 bytes a second, the rate doubles.
-		let options = stepped(vec![Step {
-			at: ms(100),
-			rate: Some(rate(2000)),
-			..Default::default()
-		}]);
-		let (queue, _) = mpsc::unbounded_channel();
-		let start = Instant::now();
-		let mut link = Link::new(&profile, &options, 7, 0, start, queue);
-		assert_eq!(owed(&mut link, start, &[100, 100, 100]), [ms(0), ms(100), ms(200)]);
-
-		// 100 bytes of the backlog are still owed, and now drain in 50ms, so
-		// a fresh 100 bytes leave once those and themselves are paid.
-		assert_eq!(owed(&mut link, start + ms(100), &[100]), [ms(100)]);
-
-		// A quiet link still changes rates at the step, not at its next arrival.
-		let (queue, _) = mpsc::unbounded_channel();
-		let mut link = Link::new(&profile, &options, 7, 0, start, queue);
-		owed(&mut link, start, &[100, 100, 100]);
-		assert_eq!(owed(&mut link, start + ms(200), &[100]), [ms(0)]);
-	}
-
 	#[tokio::test]
 	async fn a_step_gets_worse_part_way_through() {
 		let ms = Duration::from_millis;
@@ -1923,7 +1866,8 @@ mod tests {
 		assert!(format!("{err:#}").contains("the down step at 60s"), "{err:#}");
 	}
 
-	#[tokio::test(start_paused = true)]
+	// Real sockets, so the wall clock: a paused one could jump past a step while a datagram is still in the kernel.
+	#[tokio::test]
 	async fn a_step_no_datagram_saw_is_unapplied() {
 		let ms = Duration::from_millis;
 		let (shaper, client) = shaped(|config| Setup {
@@ -1965,7 +1909,7 @@ mod tests {
 		assert!(!err.contains("the up step at 200ms"), "{err}");
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn a_profile_no_datagram_saw_before_its_step_is_unapplied() {
 		let ms = Duration::from_millis;
 		let (shaper, client) = shaped(|config| Setup {

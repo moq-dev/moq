@@ -89,11 +89,11 @@ since the datagram that fills a batch never waits.
 
 ## Steps
 
-A step changes a direction's delay, jitter, loss, reorder or rate limit once the run reaches `at`, counted
-from when forwarding started. It changes only what it names, so a later step puts one knob back. A rate
-step keeps the old bucket's credit, or its debt, clipped to the new one, and a limit that was not there
-starts full. A step can add or change a rate limit, never remove one. A step that leaves the profile as
-it was, or comes at zero, is refused. Steps come from a profile file.
+A step changes a direction's delay, jitter, loss or reorder once the run reaches `at`, counted from when
+forwarding started. It changes only what it names, so a later step puts one knob back. The rate limit
+never steps, since datagrams already queued behind it would keep the old rate's departures and a new
+rate would reorder them. A step that leaves the profile as it was, or comes at zero, is refused. Steps
+come from a profile file. `verify` holds each phase's impairments only to the traffic that phase treated.
 A direction that carried traffic fails `verify` unless some datagram saw each phase: the profile before
 the first step and after every step. Traffic that starts late, ends early, or goes quiet across a step
 never saw the path change.
