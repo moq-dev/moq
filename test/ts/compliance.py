@@ -480,8 +480,8 @@ class Stream:
     descriptors: set[str]
     # (ts_index, PES header bytes, ES payload bytes, ES offset before this packet).
     packets: list[tuple[int, int, int, int]] = field(default_factory=list)
-    # (ES offset, 90 kHz PTS, DTS or None, ts_index) per PES that carries a PTS.
-    pes: list[tuple[int, int, int | None, int]] = field(default_factory=list)
+    # (ES offset, 90 kHz PTS or None, DTS or None, ts_index) per PES, from the first timestamped one.
+    pes: list[tuple[int, int | None, int | None, int]] = field(default_factory=list)
     es: bytearray = field(default_factory=bytearray)
     es_len: int = 0
     # Video: the first SPS as TSDuck decodes it.
@@ -525,14 +525,18 @@ def _stamp(b: bytes) -> int:
     return ((b[0] >> 1) & 0x07) << 30 | b[1] << 22 | (b[2] >> 1) << 15 | b[3] << 7 | b[4] >> 1
 
 
-def read_pes(data: bytes, packet_size: int, streams: dict[int, Stream], keep_es: set[int]) -> dict[int, str]:
-    """Split each stream's packets into PES header and ES bytes, and note every PES timestamp.
+def read_pes(data: bytes, packet_size: int, streams: dict[int, Stream]) -> dict[int, str]:
+    """Split each stream's packets into PES header and ES bytes, and note every PES start.
 
-    Packets before a PID's first PES start still count toward its TB, but their bytes
-    belong to an access unit whose start was never captured, so they go no further.
+    Every packet on the PID enters TB (H.222.0 2.4.2.3), but only PES bytes go on to
+    MB/B. So an adaptation-only packet (a PCR, stuffing) costs TB and nothing after it,
+    as does a duplicate (2.4.3.3: the same counter and payload twice), which "is not
+    delivered" downstream. Packets before a PID's first timestamped PES likewise stop at
+    TB: their bytes belong to an access unit whose start was never captured.
     Returns why each stream that could not be read was refused.
     """
     refused: dict[int, str] = {}
+    last: dict[int, tuple[int, bytes]] = {}  # PID -> (continuity_counter, payload)
     for index, offset in enumerate(range(0, len(data) - packet_size + 1, packet_size)):
         if data[offset] != 0x47:
             continue
@@ -541,31 +545,35 @@ def read_pes(data: bytes, packet_size: int, streams: dict[int, Stream], keep_es:
         if stream is None or pid in refused:
             continue
         afc = (data[offset + 3] >> 4) & 0x3
-        if afc not in (1, 3):
+        start = offset + 4 + (1 + data[offset + 4] if afc & 0x2 else 0)
+        payload = data[start : offset + 188] if afc & 0x1 else b""
+        cc = data[offset + 3] & 0x0F
+        duplicate = bool(payload) and last.get(pid) == (cc, payload)
+        if payload:
+            last[pid] = (cc, payload)
+        if not payload or duplicate or not (stream.pes or data[offset + 1] & 0x40):
+            stream.packets.append((index, 0, 0, stream.es_len))
             continue
-        start = offset + 4 + (1 + data[offset + 4] if afc == 3 else 0)
-        length = offset + 188 - start
+        length = len(payload)
         header = 0
         if data[offset + 1] & 0x40:
-            if data[start : start + 3] != b"\x00\x00\x01":
+            if payload[:3] != b"\x00\x00\x01":
                 refused[pid] = f"packet {index} starts a payload without a PES start code"
                 continue
-            if length < 9 or 9 + data[start + 8] > length:
+            if length < 9 or 9 + payload[8] > length:
                 refused[pid] = f"the PES header at packet {index} spans packets"
                 continue
-            header = 9 + data[start + 8]
-            flags = data[start + 7]
-            if flags & 0x80:
-                pts = _stamp(data[start + 9 : start + 14])
-                dts = _stamp(data[start + 14 : start + 19]) if flags & 0x40 else None
-                stream.pes.append((stream.es_len, pts, dts, index))
-        if not stream.pes:
-            stream.packets.append((index, 0, 0, 0))
-            continue
+            header = 9 + payload[8]
+            flags = payload[7]
+            pts = _stamp(payload[9:14]) if flags & 0x80 else None
+            dts = _stamp(payload[14:19]) if flags & 0xC0 == 0xC0 else None
+            if pts is None and not stream.pes:
+                stream.packets.append((index, 0, 0, 0))
+                continue
+            stream.pes.append((stream.es_len, pts, dts, index))
         body = length - header
         stream.packets.append((index, header, body, stream.es_len))
-        if pid in keep_es:
-            stream.es += data[start + header : start + length]
+        stream.es += payload[header:]
         stream.es_len += body
     return refused
 
@@ -807,15 +815,65 @@ def stream_params(kind: str, stream: Stream) -> tuple[Params, object]:
     return Params(label=label, rx=AUDIO_RX, b=bs), parse
 
 
-def access_units(stream: Stream, parse) -> list[AccessUnit]:
-    """Video: one access unit per PES that carries a timestamp. Audio: one per codec frame."""
-    units: list[AccessUnit] = []
+# NAL unit types that open a new access unit when they follow the last VCL NAL unit
+# of the previous one (H.264 7.4.1.2.3, H.265 7.4.2.4.4), and the VCL types.
+AU_OPENERS = {"avc": {6, 7, 8, 9, 14, 15, 16, 17, 18}, "hevc": {32, 33, 34, 35, 39, 41, 42, 43, 44, *range(48, 56)}}
+VCL = {"avc": set(range(1, 6)), "hevc": set(range(0, 32))}
+DELIMITER = {"avc": 9, "hevc": 35}
+
+
+def video_units(stream: Stream, kind: str) -> list[AccessUnit]:
+    """One access unit per coded picture, each decoded at its PES's DTS (or PTS).
+
+    An access unit opens at the first delimiter, parameter set or SEI after the previous
+    picture's last slice (H.264 7.4.1.2.3, H.265 7.4.2.4.4); H.222.0 2.14.1 and 2.17.1
+    also put a delimiter in every one, so a stream without them is refused. A PES may
+    carry several access units, but only the first takes its timestamp; the rest would
+    need decoding times derived from the stream's own timing (2.4.2.3), which this model
+    does not do, so such a layout is refused rather than graded as one unit.
+    """
+    es = bytes(stream.es)
+    starts = []
+    delimited = False
+    after_vcl = True  # the first opener starts the first whole access unit
+    pos = es.find(b"\x00\x00\x01")
+    while 0 <= pos < len(es) - 3:
+        nal = (es[pos + 3] >> 1) & 0x3F if kind == "hevc" else es[pos + 3] & 0x1F
+        delimited |= nal == DELIMITER[kind]
+        if nal in AU_OPENERS[kind] and after_vcl:
+            # The zero_byte ahead of the start code belongs to this NAL unit (H.264 B.1.1,
+            # H.265 B.2.1), so to this access unit rather than the last.
+            starts.append(pos - 1 if pos and es[pos - 1] == 0 else pos)
+            after_vcl = False
+        elif nal in VCL[kind]:
+            after_vcl = True
+        pos = es.find(b"\x00\x00\x01", pos + 3)
+    if not delimited:
+        raise Refused("no access unit delimiter, which H.222.0 2.14.1/2.17.1 requires in every access unit")
     pes = stream.pes
-    if parse is None:
-        for n, (offset, pts, dts, first) in enumerate(pes):
-            end = pes[n + 1][0] if n + 1 < len(pes) else stream.es_len
-            units.append(AccessUnit(offset, end, first, dts if dts is not None else pts))
-        return units
+    pes_at = [offset for offset, *_ in pes]
+    packet_at = [offset for _i, _h, body, offset in stream.packets if body]
+    packets = [index for index, _h, body, _o in stream.packets if body]
+    units: list[AccessUnit] = []
+    stamped: set[int] = set()
+    for n, start in enumerate(starts):
+        k = bisect.bisect_right(pes_at, start) - 1
+        _offset, pts, dts, index = pes[k]
+        if pts is None:
+            raise Refused(f"an access unit starts in the untimestamped PES at packet {index}")
+        if k in stamped:
+            raise Refused(f"the PES at packet {index} carries several access units, whose decode times are not derived")
+        stamped.add(k)
+        end = starts[n + 1] if n + 1 < len(starts) else stream.es_len
+        first = packets[bisect.bisect_right(packet_at, start) - 1]
+        units.append(AccessUnit(start, end, first, dts if dts is not None else pts))
+    return units
+
+
+def access_units(stream: Stream, parse) -> list[AccessUnit]:
+    """Audio: one access unit per codec frame."""
+    units: list[AccessUnit] = []
+    pes = [entry for entry in stream.pes if entry[1] is not None]
     # A PES timestamp belongs to the first frame that starts in that PES (2.4.3.7).
     starts = [(offset, index) for index, _h, body, offset in stream.packets if body]
     keys = [offset for offset, _ in starts]
@@ -905,8 +963,8 @@ def simulate(
             if unit.stamp is not None:
                 base = unit.stamp / PTS_HZ
                 stamped = base + round((clock.time_at(unit.first_packet) - base) / STAMP_WRAP_S) * STAMP_WRAP_S
-                if removals and stamped < removals[-1][0]:
-                    grade.flag("decode time goes backwards")
+                if removals and stamped <= removals[-1][0]:
+                    grade.flag("decode time does not advance")
                 td = max(stamped, removals[-1][0]) if removals else stamped
             elif td is None:
                 continue  # an audio frame ahead of the first timestamp has no decoding time
@@ -1024,8 +1082,7 @@ def check_tstd(ts_path: str, packet_size: int, scan: Scan) -> Check:
             else:
                 kinds[stream.pid] = kind
         modelled = {s.pid: s for s in streams if s.pid in kinds}
-        audio = {pid for pid, kind in kinds.items() if kind not in ("avc", "hevc")}
-        for pid, why in read_pes(data, packet_size, modelled, audio).items():
+        for pid, why in read_pes(data, packet_size, modelled).items():
             refused[pid] = why
             del modelled[pid]
         samples = scan.pcr_by_pid.get(pcr_pid, [])
@@ -1039,7 +1096,10 @@ def check_tstd(ts_path: str, packet_size: int, scan: Scan) -> Check:
                         raise Refused("the HRD-scheduled MB to EB transfer (H.222.0 2.14.3.1) is not modelled")
                     stream.sps = read_sps(ts_path, stream.pid, 7 if kinds[stream.pid] == "avc" else 33)
                 params, parse = stream_params(kinds[stream.pid], stream)
-                units = access_units(stream, parse)
+                if parse is None:
+                    units = video_units(stream, kinds[stream.pid])
+                else:
+                    units = access_units(stream, parse)
             except Refused as err:
                 refused[stream.pid] = str(err)
                 continue

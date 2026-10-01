@@ -138,6 +138,16 @@ video, DVB E-AC-3, and HEVC beyond Main/Main 10. Sections and private data
 graded. A signalled PCR discontinuity starts fresh buffers, since the timestamps
 on either side of it are on different clocks.
 
+Every packet on an elementary stream's PID enters TB, including adaptation-only
+ones (a PCR, stuffing) and legal duplicates (2.4.3.3: the same counter and
+payload twice); only PES bytes of a first copy go on to MB/B. Video access units
+are read from the ES rather than taken from PES boundaries: one opens at the first
+delimiter, parameter set or SEI after the previous picture's slices (H.264
+7.4.1.2.3, H.265 7.4.2.4.4), and H.222.0 requires a delimiter in each. A PES may
+carry several, but only the first takes its timestamp, and deriving the rest from
+the stream's own timing is not modelled, so that layout is refused. Video decode
+times must strictly increase.
+
 One simplification, toward strictness: a packet's bytes reach MB/B when its last
 byte leaves TB, up to one packet's drain time (0.75 ms for audio) later than
 byte-by-byte, so underflow is judged that much stricter.
@@ -163,6 +173,17 @@ changes:
 
 No restamp can overflow the video MB: it holds the level's whole CPB less the
 declared one, about 3.6 MB, more than the 4 s capture carries.
+
+The packet layouts a capture cannot be edited into are built synthetically: a
+10 Mb/s single-video stream carrying the Kyrion SPS, one access unit per PES, with
+a PCR packet between them. Each case fails without the handling it names:
+
+| Case | Expected |
+|---|---|
+| as built | pass |
+| two access units in one PES | refused |
+| four adaptation-only packets after an access unit | TB overflow |
+| an access unit's first packet sent twice | pass |
 
 The ffmpeg clip `run.sh` generates is not a positive control: its muxer sends
 audio 0.7 s ahead by default (`-muxdelay`), which overflows the 3,584-byte ADTS
