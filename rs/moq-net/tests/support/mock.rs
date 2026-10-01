@@ -13,8 +13,11 @@
 //! its earlier data is read.
 
 use std::{
+	future::Future,
+	pin::Pin,
 	sync::{Arc, Mutex},
 	task::{Context, Poll},
+	time::Duration,
 };
 
 use bytes::Bytes;
@@ -104,9 +107,12 @@ impl ClosedSignal {
 	}
 }
 
+/// A chunk in flight: readable by the peer once the link latency has passed.
+type Flight = (tokio::time::Instant, StreamChunk);
+
 /// A mock send stream backed by a queue to the peer's reader.
 pub struct MockSendStream {
-	tx: Option<kio::Queue<StreamChunk>>,
+	tx: Option<kio::Queue<Flight>>,
 	closed: Arc<ClosedSignal>,
 	park: kio::Park,
 	/// Acknowledge the FIN as soon as it is sent, for a stream the peer's transport holds
@@ -124,7 +130,8 @@ impl MockSendStream {
 			return Err(err);
 		}
 		let tx = self.tx.as_ref().ok_or_else(MockError::closed)?;
-		tx.try_push(chunk).map_err(|_| MockError::closed())
+		let arrival = tokio::time::Instant::now() + self.conn.latency();
+		tx.try_push((arrival, chunk)).map_err(|_| MockError::closed())
 	}
 }
 
@@ -190,7 +197,11 @@ impl Drop for MockSendStream {
 
 /// A mock receive stream backed by a queue from the peer's writer.
 pub struct MockRecvStream {
-	rx: kio::Queue<StreamChunk>,
+	rx: kio::Queue<Flight>,
+	/// The next chunk, popped but still crossing the link.
+	flight: Option<Flight>,
+	/// Wakes the reader when `flight` lands.
+	landing: Option<Pin<Box<tokio::time::Sleep>>>,
 	/// Buffered bytes from a chunk that was partially consumed.
 	buf: Bytes,
 	/// Whether we hit FIN or reset.
@@ -205,16 +216,29 @@ impl MockRecvStream {
 	/// Pop the next chunk, mapping queue closure to an implicit FIN. Once everything
 	/// sent before a CONNECTION_CLOSE is read, an unfinished stream fails with it.
 	fn poll_chunk(&mut self, cx: &mut Context<'_>) -> Poll<Option<StreamChunk>> {
-		let waiter = self.park.hold(cx);
-		self.conn.waiters.register(waiter);
-		match self.rx.poll_pop(waiter) {
-			Poll::Ready(Ok(chunk)) => Poll::Ready(Some(chunk)),
-			Poll::Ready(Err(_)) => Poll::Ready(None),
-			Poll::Pending => match self.conn.error() {
-				Some(_) => Poll::Ready(Some(StreamChunk::Closed)),
-				None => Poll::Pending,
-			},
+		if self.flight.is_none() {
+			let waiter = self.park.hold(cx);
+			self.conn.waiters.register(waiter);
+			match self.rx.poll_pop(waiter) {
+				Poll::Ready(Ok(flight)) => self.flight = Some(flight),
+				Poll::Ready(Err(_)) => return Poll::Ready(None),
+				Poll::Pending => {
+					return match self.conn.error() {
+						Some(_) => Poll::Ready(Some(StreamChunk::Closed)),
+						None => Poll::Pending,
+					};
+				}
+			}
 		}
+		let (arrival, _) = self.flight.as_ref().expect("flight set above");
+		if *arrival > tokio::time::Instant::now() {
+			let landing = self
+				.landing
+				.get_or_insert_with(|| Box::pin(tokio::time::sleep_until(*arrival)));
+			landing.as_mut().reset(*arrival);
+			std::task::ready!(landing.as_mut().poll(cx));
+		}
+		Poll::Ready(self.flight.take().map(|(_, chunk)| chunk))
 	}
 }
 
@@ -313,6 +337,8 @@ fn new_stream_pair(conn: &Arc<ConnectionState>) -> (MockSendStream, MockRecvStre
 	};
 	let recv = MockRecvStream {
 		rx: queue,
+		flight: None,
+		landing: None,
 		buf: Bytes::new(),
 		done: false,
 		closed,
@@ -332,11 +358,17 @@ fn new_stream_pair(conn: &Arc<ConnectionState>) -> (MockSendStream, MockRecvStre
 struct ConnectionState {
 	/// Set once by whichever side closes first.
 	close_state: Mutex<Option<(u32, String)>>,
+	/// One-way delay for stream data in each direction. Zero by default.
+	latency: Mutex<Duration>,
 	/// Wakes both sides when close_state is populated.
 	waiters: kio::Fan,
 }
 
 impl ConnectionState {
+	fn latency(&self) -> Duration {
+		*self.latency.lock().unwrap()
+	}
+
 	/// The close every stream and accept fails with, once the connection closed.
 	fn error(&self) -> Option<MockError> {
 		let state = self.close_state.lock().unwrap();
@@ -579,6 +611,13 @@ impl MockSession {
 	/// Lose every datagram this side sends from now on.
 	pub fn lose_datagrams(&self) {
 		*self.side.lossy.lock().unwrap() = true;
+	}
+
+	/// Delay stream data sent from now on by `latency` in each direction, keeping
+	/// each stream in order. Measured on tokio's clock, so paused-time tests advance
+	/// through it without sleeping.
+	pub fn set_latency(&self, latency: Duration) {
+		*self.side.conn.latency.lock().unwrap() = latency;
 	}
 }
 

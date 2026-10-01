@@ -12,7 +12,7 @@ use std::{collections::HashMap, time::Duration};
 use tokio::sync::mpsc;
 
 use moq_net::{Hop, Version, announce, broadcast, origin};
-use support::harness::{MockPair, peer};
+use support::harness::{MockPair, peer, peer_with_latency};
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
@@ -143,4 +143,78 @@ async fn partial_mesh_withdraw_then_republish() {
 		assert!(!kinds.last().unwrap().is_active(), "{prefix}: {kinds:?}");
 	}
 	let _broadcasts = mesh.publish(100, 5).await;
+}
+
+/// A 34-relay partial mesh: moq.pro's production graph on 2026-09-30, where
+/// relays in neighboring PoPs peer and most reach a publisher's relay through
+/// others.
+#[rustfmt::skip]
+const PRODUCTION: &[(usize, usize)] = &[
+	(0, 20), (0, 22), (0, 29), (1, 3), (1, 12), (1, 14), (1, 21), (2, 20), (2, 26), (2, 32), (3, 8),
+	(3, 11), (3, 15), (3, 16), (3, 17), (3, 18), (3, 21), (3, 22), (3, 23), (3, 24), (3, 29), (3, 30),
+	(3, 31), (4, 7), (4, 20), (4, 22), (4, 25), (4, 29), (5, 20), (5, 27), (5, 33), (6, 23), (6, 24),
+	(6, 30), (6, 31), (7, 22), (7, 25), (7, 29), (8, 15), (8, 17), (8, 21), (8, 23), (8, 30), (9, 19),
+	(9, 22), (9, 23), (9, 28), (9, 29), (9, 30), (10, 19), (10, 20), (10, 22), (10, 23), (10, 26),
+	(10, 27), (10, 28), (10, 29), (10, 30), (10, 32), (10, 33), (11, 15), (11, 16), (11, 21),
+	(12, 14), (12, 27), (12, 33), (13, 14), (13, 27), (13, 33), (14, 26), (14, 27), (14, 32),
+	(14, 33), (15, 21), (16, 18), (16, 21), (17, 21), (17, 24), (17, 31), (18, 21), (18, 22),
+	(18, 23), (18, 24), (18, 29), (18, 30), (18, 31), (19, 22), (19, 23), (19, 26), (19, 28),
+	(19, 29), (19, 30), (19, 32), (20, 22), (20, 26), (20, 27), (20, 29), (20, 32), (20, 33),
+	(21, 22), (21, 23), (21, 24), (21, 29), (21, 30), (21, 31), (22, 23), (22, 24), (22, 25),
+	(22, 26), (22, 27), (22, 28), (22, 29), (22, 30), (22, 31), (22, 32), (22, 33), (23, 24),
+	(23, 28), (23, 29), (23, 30), (23, 31), (24, 29), (24, 30), (24, 31), (25, 29), (26, 27),
+	(26, 28), (26, 29), (26, 32), (26, 33), (27, 29), (27, 32), (27, 33), (28, 29), (28, 30),
+	(28, 32), (29, 30), (29, 31), (29, 32), (29, 33), (30, 31), (32, 33),
+];
+
+/// One-way latency in ms for each [`PRODUCTION`] link, from the great-circle
+/// distance between its PoPs at 200 km/ms over a path 1.5 times as long, plus 1 ms.
+#[rustfmt::skip]
+const PRODUCTION_LATENCY_MS: &[u64] = &[
+	10, 7, 7, 50, 30, 51, 50, 9, 13, 13, 5, 4, 6, 8, 3, 4, 1, 50, 6, 4, 50, 6, 4, 50, 63, 58, 50, 58,
+	16, 5, 5, 10, 10, 10, 10, 12, 1, 12, 6, 3, 5, 8, 8, 5, 4, 43, 5, 4, 43, 6, 11, 8, 49, 22, 23, 6,
+	8, 49, 22, 23, 3, 5, 4, 41, 103, 103, 60, 91, 91, 59, 64, 59, 64, 6, 9, 8, 3, 6, 6, 4, 48, 4, 3,
+	48, 4, 3, 5, 44, 26, 1, 5, 44, 26, 15, 21, 18, 15, 21, 18, 50, 6, 4, 50, 6, 4, 45, 47, 12, 29, 30,
+	5, 1, 45, 47, 29, 30, 2, 44, 45, 1, 2, 47, 2, 1, 12, 9, 26, 29, 1, 9, 30, 9, 1, 5, 44, 26, 45, 47,
+	29, 30, 2, 9,
+];
+
+/// One withdrawal on a partial mesh retracts everywhere once. A relay two hops
+/// from the publisher's hears only that its neighbor withdrew, and must not
+/// fall back to, and re-advertise, another path derived from the same
+/// announcement. Holding route updates (`origin::Config::update_hold`) lets the
+/// withdrawal remove those paths first; with link latency and no hold, each
+/// withdrawal here costs tens of thousands of announcements.
+#[tokio::test(start_paused = true)]
+async fn partial_mesh_withdraw_retracts_once() {
+	let version: Version = "moq-lite-06".parse().unwrap();
+	let nodes: Vec<_> = (1..=34).map(produce_origin).collect();
+	let mut pairs = Vec::new();
+	for (&(a, b), &ms) in PRODUCTION.iter().zip(PRODUCTION_LATENCY_MS) {
+		pairs.push(peer_with_latency(version, &nodes[a], &nodes[b], Duration::from_millis(ms)).await);
+	}
+	let mut watched: Vec<_> = nodes.iter().map(|node| watch(node.consume().announced())).collect();
+
+	for publisher in [5, 13, 22, 26, 32] {
+		let broadcast = nodes[publisher].create_broadcast(format!("room/{publisher}")).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		for (relay, watched) in watched.iter_mut().enumerate() {
+			let updates = drain(watched).await;
+			assert!(
+				updates.values().all(|kinds| kinds.last().unwrap().is_active()),
+				"relay {relay}: {updates:?}"
+			);
+		}
+
+		drop(broadcast);
+		let mut hunted = Vec::new();
+		for (relay, watched) in watched.iter_mut().enumerate() {
+			let updates = drain(watched).await;
+			let kinds = &updates[&format!("room/{publisher}")];
+			if kinds != &[announce::Kind::Retracted] {
+				hunted.push((relay, kinds.clone()));
+			}
+		}
+		assert!(hunted.is_empty(), "publisher {publisher}: {hunted:?}");
+	}
 }
