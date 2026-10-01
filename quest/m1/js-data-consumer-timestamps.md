@@ -16,10 +16,10 @@ Decided (2026-10-01): `next()` and the async iterator yield `@moq/net`'s
 `Timed<T>` (`{ value, at? }`), the type the producers take after
 [JS publishing never invents a timestamp](/quest/m1/js-publish-timestamp.md).
 `at` is the frame's timestamp, absent for an untimed frame. Snapshot
-consumers stop coalescing, as in Rust: `@moq/json` yields every
-reconstructed state in order instead of draining to the latest, and
-`@moq/binary` reads groups in order instead of skipping to the newest. A
-reader that falls behind still jumps to the newest group. Update
+consumers get the same two reads as Rust: `next()` yields every state in
+order (`@moq/json` stops draining to the latest, `@moq/binary` reads groups in
+order), and `latest()` skips to the newest state, today's behavior. A reader
+that falls behind still jumps to the newest group. Update
 `doc/lib/js/{json,binary}.md`.
 
 Public API: breaking, on `dev`. Wire: none.
