@@ -13,6 +13,9 @@ this quest and every `Required` entry that links it.
 
 ## Plan
 
+As of 2026-09-30 none of it is on hand. Check by asking the maintainer which
+machines are available.
+
 The validation can start with whatever subset is available; split the rest
 out of [Video hardware validation](/quest/m3/video-hardware.md) when that
 happens.

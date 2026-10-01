@@ -20,7 +20,6 @@ Decided in the 2026-09-30 audit: the Windows and Linux GPU decode paths and the 
 
 ## Required
 
-- [dev's decoded-frame surface reaches main](/quest/m1/obs-moq-video/decoded-surface.md) - the surface the source decodes into is on main
 - [Video source replacement](/quest/m1/obs-moq-video/source.md) - remove the FFmpeg video decode and attempt macOS GPU delivery immediately, with a working CPU fallback on other platforms
 - [Audio playback](/quest/m1/obs-moq-video/audio-playback.md) - replace the FFmpeg audio decode with moq-audio
 - [Linux bundle](/quest/m1/obs-moq-video/linux-bundle.md) - attach a portable Linux x86_64 tarball to every obs-moq release once FFmpeg is gone
