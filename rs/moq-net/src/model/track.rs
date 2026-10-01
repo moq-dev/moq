@@ -2647,6 +2647,31 @@ impl Consumer {
 		}))
 	}
 
+	/// Poll for the newest cached group once its sequence passes `after`, as a producer
+	/// handle: holding one keeps its frames when the track's own producer tears down
+	/// abruptly, which otherwise releases every unfinished group. Pending once closed.
+	pub(crate) fn poll_latest_group(&self, after: Option<u64>, waiter: &kio::Waiter) -> Poll<group::Producer> {
+		let ConsumerKind::Plain(state) = &self.inner else {
+			return Poll::Pending;
+		};
+		let res = state.poll(waiter, |state| {
+			match state
+				.latest_group
+				.filter(|latest| after.is_none_or(|after| *latest > after))
+			{
+				Some(latest) => match state.lookup.get(&latest) {
+					Some(slot) => Poll::Ready(slot.group.clone()),
+					None => Poll::Pending,
+				},
+				None => Poll::Pending,
+			}
+		});
+		match res {
+			Poll::Ready(Ok(group)) => Poll::Ready(group),
+			_ => Poll::Pending,
+		}
+	}
+
 	/// Poll for a cached group by sequence, parking `waiter` until it lands.
 	///
 	/// `Ready(None)` once it can never arrive: the track ended below the sequence, or
