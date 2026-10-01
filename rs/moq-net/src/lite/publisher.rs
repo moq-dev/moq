@@ -2,7 +2,7 @@ use crate::runtime::Timers as _;
 use crate::{SessionError, announce, frame, group, origin, track};
 use std::{
 	collections::{BTreeSet, HashMap},
-	ops::Bound,
+	ops::{Bound, ControlFlow},
 	sync::{
 		Arc,
 		atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -926,13 +926,14 @@ trait Request<S: crate::transport::poll::Session>: Sized {
 	/// Apply an update from the requester.
 	fn update(&mut self, update: Self::Update);
 
-	/// Write the reply, ready once all of it is buffered.
+	/// Write the reply: `Continue` after each unit of work, so the requester is checked
+	/// between them even while work stays ready, and `Break` once all of it is buffered.
 	fn poll(
 		&mut self,
 		shared: &Shared<S>,
 		writer: &mut Writer<S::SendStream, Version>,
 		waiter: &kio::Waiter,
-	) -> Poll<Result<(), Error>>;
+	) -> Poll<Result<ControlFlow<()>, Error>>;
 }
 
 /// The update of a request that takes none: any byte after the request is a violation.
@@ -1062,8 +1063,9 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 					self.state = RequestState::Serve(request);
 				}
 				RequestState::Serve(request) => {
-					ready!(request.poll(&self.shared, &mut stream.writer, waiter))?;
-					self.state = RequestState::Finish { finished: false };
+					if ready!(request.poll(&self.shared, &mut stream.writer, waiter))?.is_break() {
+						self.state = RequestState::Finish { finished: false };
+					}
 				}
 				RequestState::Finish { finished } => {
 					if !*finished {
@@ -1122,7 +1124,7 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 		_: &Shared<S>,
 		writer: &mut Writer<S::SendStream, Version>,
 		waiter: &kio::Waiter,
-	) -> Poll<Result<(), Error>> {
+	) -> Poll<Result<ControlFlow<()>, Error>> {
 		let info = ready!(self.querying.poll_ok(waiter))?;
 
 		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise), where every
@@ -1133,7 +1135,7 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 			max_age: info.max_age,
 			timescale: info.timescale,
 		})?;
-		Poll::Ready(Ok(()))
+		Poll::Ready(Ok(ControlFlow::Break(())))
 	}
 }
 
@@ -1196,7 +1198,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 		shared: &Shared<S>,
 		writer: &mut Writer<S::SendStream, Version>,
 		waiter: &kio::Waiter,
-	) -> Poll<Result<(), Error>> {
+	) -> Poll<Result<ControlFlow<()>, Error>> {
 		loop {
 			match self {
 				Self::Confirm { subscribing, .. } => {
@@ -1263,13 +1265,15 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 					// The live edge reached the boundary; SUBSCRIBE_END was already sent (or
 					// the version predates the track stream). Drain the in-flight group
 					// machines, then FIN.
-					ready!(run.poll(writer, waiter))?;
+					if ready!(run.poll_step(writer, waiter))?.is_continue() {
+						return Poll::Ready(Ok(ControlFlow::Continue(())));
+					}
 					let children = std::mem::take(&mut run.children);
 					*self = Self::Drain { children };
 				}
 				Self::Drain { children } => {
 					ready!(children.poll(waiter));
-					return Poll::Ready(Ok(()));
+					return Poll::Ready(Ok(ControlFlow::Break(())));
 				}
 			}
 		}
@@ -1335,7 +1339,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 		shared: &Shared<S>,
 		writer: &mut Writer<S::SendStream, Version>,
 		waiter: &kio::Waiter,
-	) -> Poll<Result<(), Error>> {
+	) -> Poll<Result<ControlFlow<()>, Error>> {
 		loop {
 			match self {
 				Self::Fetch { msg, fetching } => {
@@ -1412,9 +1416,9 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 							match group.poll_read_frames(waiter, batch) {
 								Poll::Ready(Ok(count)) if count > 0 => {
 									*batch_pos = 0;
-									continue;
+									return Poll::Ready(Ok(ControlFlow::Continue(())));
 								}
-								Poll::Ready(Ok(_)) => return Poll::Ready(Ok(())),
+								Poll::Ready(Ok(_)) => return Poll::Ready(Ok(ControlFlow::Break(()))),
 								Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 								Poll::Pending => {}
 							}
@@ -1422,8 +1426,9 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 								Some(next) => {
 									buffer_frame_info(writer, next.timestamp, next.size, *timescale, prev_ts)?;
 									*frame = Some(next);
+									return Poll::Ready(Ok(ControlFlow::Continue(())));
 								}
-								None => return Poll::Ready(Ok(())),
+								None => return Poll::Ready(Ok(ControlFlow::Break(()))),
 							}
 						}
 					}
@@ -2312,87 +2317,98 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	}
 
 	/// Serve until the live edge reaches the track's boundary.
+	#[cfg(test)]
 	fn poll(&mut self, writer: &mut Writer<S::SendStream, Version>, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		while ready!(self.poll_step(writer, waiter))?.is_continue() {}
+		Poll::Ready(Ok(()))
+	}
+
+	/// Serve one ready group or datagram (`Continue`), or `Break` once the live edge
+	/// reaches the track's boundary. Returning per item lets the caller watch the
+	/// requester while work stays ready.
+	fn poll_step(
+		&mut self,
+		writer: &mut Writer<S::SendStream, Version>,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<ControlFlow<()>, Error>> {
 		let mut cx = Context::from_waker(waiter.waker());
-		loop {
-			// Deliver the buffered range messages before selecting more work.
-			ready!(writer.poll_flush(&mut cx))?;
+		// Deliver the buffered range messages before selecting more work.
+		ready!(writer.poll_flush(&mut cx))?;
 
-			// Drive the in-flight group machines; completions just retire.
-			let _ = self.children.poll(waiter);
+		// Drive the in-flight group machines; completions just retire.
+		let _ = self.children.poll(waiter);
 
-			// The first group waits for the source to resolve where its feed starts; datagrams
-			// keep flowing meanwhile.
-			if let Some(group) = self.first.take() {
-				match self.track.poll_start(waiter) {
-					Poll::Ready(source) => {
-						self.start(group, source, writer)?;
-						continue;
+		// The first group waits for the source to resolve where its feed starts; datagrams
+		// keep flowing meanwhile.
+		if let Some(group) = self.first.take() {
+			match self.track.poll_start(waiter) {
+				Poll::Ready(source) => {
+					self.start(group, source, writer)?;
+					return Poll::Ready(Ok(ControlFlow::Continue(())));
+				}
+				Poll::Pending => {
+					self.first = Some(group);
+					if self.datagrams
+						&& let Poll::Ready(Some(datagram)) = self.track.poll_recv_datagram(waiter)?
+					{
+						self.ctx.serve_datagram(datagram);
+						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					}
-					Poll::Pending => {
-						self.first = Some(group);
-						if self.datagrams
-							&& let Poll::Ready(Some(datagram)) = self.track.poll_recv_datagram(waiter)?
-						{
-							self.ctx.serve_datagram(datagram);
-							continue;
+					return Poll::Pending;
+				}
+			}
+		}
+
+		// One cursor drives the whole subscription: poll the cap-aware arrival-order
+		// group and, when enabled, the next best-effort datagram. Groups are polled
+		// first so a datagram burst can't starve them; datagrams flow whenever no
+		// group is ready (including while groups are parked above the cap).
+		let emit_boundary = self.emit_range && !self.end_sent && !self.count_streams;
+		if let Poll::Ready(res) = poll_recv_next(&mut self.track, self.datagrams, emit_boundary, waiter) {
+			match res? {
+				Recv::Group(mut group) => {
+					if !position_group(&mut group, self.start_frame, self.end_frame) {
+						// Its head is gone, and this subscriber didn't ask for a
+						// partial group. Skip it rather than open a stream that can
+						// only be reset; the next servable group resolves the start.
+						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = group.sequence, "skipping group with a missing head");
+						if self.emit_range && !self.start_sent {
+							self.skipped.insert(group.sequence);
 						}
+						return Poll::Ready(Ok(ControlFlow::Continue(())));
+					}
+					match self.emit_range && !self.start_sent {
+						true => self.first = Some(group),
+						false => self.serve(group),
+					}
+				}
+				Recv::Datagram(datagram) => self.ctx.serve_datagram(datagram),
+				Recv::Boundary(group) => {
+					// The track declared its exclusive final sequence. Forward it now,
+					// even if trailing groups (below `group`) are still in flight, then
+					// keep serving them until the live edge reaches the boundary.
+					self.end_sent = true;
+					writer.buffer(&lite::SubscribeResponse::End(lite::SubscribeEnd { group, streams: 0 }))?;
+				}
+				Recv::Finished if self.count_streams && !self.end_sent => {
+					// The count is final only once no served group is still waiting to
+					// open its stream. A group that gives up first is never counted, so
+					// the subscriber is not left waiting for it. The child's wake
+					// re-polls this loop.
+					if self.ctx.opens.pending.load(Ordering::Relaxed) > 0 {
 						return Poll::Pending;
 					}
+					let group = ready!(self.track.poll_finished(waiter))?;
+					let streams = self.ctx.opens.opened.load(Ordering::Relaxed);
+					self.end_sent = true;
+					writer.buffer(&lite::SubscribeResponse::End(lite::SubscribeEnd { group, streams }))?;
 				}
+				Recv::Finished => return Poll::Ready(Ok(ControlFlow::Break(()))),
 			}
-
-			// One cursor drives the whole subscription: poll the cap-aware arrival-order
-			// group and, when enabled, the next best-effort datagram. Groups are polled
-			// first so a datagram burst can't starve them; datagrams flow whenever no
-			// group is ready (including while groups are parked above the cap).
-			let emit_boundary = self.emit_range && !self.end_sent && !self.count_streams;
-			if let Poll::Ready(res) = poll_recv_next(&mut self.track, self.datagrams, emit_boundary, waiter) {
-				match res? {
-					Recv::Group(mut group) => {
-						if !position_group(&mut group, self.start_frame, self.end_frame) {
-							// Its head is gone, and this subscriber didn't ask for a
-							// partial group. Skip it rather than open a stream that can
-							// only be reset; the next servable group resolves the start.
-							tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = group.sequence, "skipping group with a missing head");
-							if self.emit_range && !self.start_sent {
-								self.skipped.insert(group.sequence);
-							}
-							continue;
-						}
-						match self.emit_range && !self.start_sent {
-							true => self.first = Some(group),
-							false => self.serve(group),
-						}
-					}
-					Recv::Datagram(datagram) => self.ctx.serve_datagram(datagram),
-					Recv::Boundary(group) => {
-						// The track declared its exclusive final sequence. Forward it now,
-						// even if trailing groups (below `group`) are still in flight, then
-						// keep serving them until the live edge reaches the boundary.
-						self.end_sent = true;
-						writer.buffer(&lite::SubscribeResponse::End(lite::SubscribeEnd { group, streams: 0 }))?;
-					}
-					Recv::Finished if self.count_streams && !self.end_sent => {
-						// The count is final only once no served group is still waiting to
-						// open its stream. A group that gives up first is never counted, so
-						// the subscriber is not left waiting for it. The child's wake
-						// re-polls this loop.
-						if self.ctx.opens.pending.load(Ordering::Relaxed) > 0 {
-							return Poll::Pending;
-						}
-						let group = ready!(self.track.poll_finished(waiter))?;
-						let streams = self.ctx.opens.opened.load(Ordering::Relaxed);
-						self.end_sent = true;
-						writer.buffer(&lite::SubscribeResponse::End(lite::SubscribeEnd { group, streams }))?;
-					}
-					Recv::Finished => return Poll::Ready(Ok(())),
-				}
-				continue;
-			}
-
-			return Poll::Pending;
+			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
+
+		Poll::Pending
 	}
 }
 

@@ -755,7 +755,7 @@ impl poll::Session for ScriptedSession {
 			SinkSend::new(self.log.clone()),
 			ScriptedRecv {
 				script,
-					close: self.close.clone(),
+				close: self.close.clone(),
 				log: self.log.clone(),
 			},
 		)))
