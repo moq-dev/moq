@@ -19,28 +19,32 @@ Decided (2026-10-01), from a discussion with t0ms:
   none exists. Some feeds will want it permanently: a scrambled multiplex
   cannot be demultiplexed, and an operator who must hand on SI and private
   PIDs as authored has nothing to gain from a remux.
-- Carriage is MSFTS's whole-packet mode, with its own track fields on the
-  Hang track entry: `packaging: "mpeg2ts"`, `mpeg2tsMode` set to
-  `"unmodified-program"` for a single program or `"unmodified-multiplex"`
-  otherwise, `mpeg2tsPacketSize: 188`, `mpeg2tsRandomAccess`, and
-  `mpeg2tsMuxRate` once measured. The mapping to MSFTS is then the identity,
-  and the track is the whole-packet shape the draft's comparison section
-  already describes rather than a new rendition in the `mpegts` section. A
-  track is one shape or the other.
+- The track is listed in a new `m2ts` root section of the hang catalog,
+  not in `video`/`audio` (it has no codec to describe) and not in the
+  `mpegts` section, whose members (`tracks`, `program`, `si`, ...) record
+  what demultiplexing loses and are all in-band here. `m2ts` maps a track
+  name to `{ scope, randomAccess, muxRate }`: `scope` is `"program"` for a
+  single program or `"multiplex"` otherwise, and `muxRate` is present only
+  while the source holds a constant rate, as in `mpegts`. 188-byte packets
+  only; a 192-byte source is refused, so there is no packet-size field. The
+  section is specified in `drafts/draft-lcurley-moq-mpegts.md` next to
+  `mpegts`, with its mapping onto MSFTS's track fields. A track is one shape
+  or the other.
 - Objects are runs of whole 188-byte packets on one track. A group starts at
   a packet on the PCR PID that carries a PCR with `random_access_indicator`
   set, and also at any PCR with `discontinuity_indicator` set, since MSFTS
   forbids a PCR discontinuity inside a group. A source that never sets the
   indicator falls back to a group every N PCRs (N to be fixed in the PR, with
-  a group spanning at most 1 s of PCR time). `mpeg2tsRandomAccess` is true
-  only while every group has started at an indicator; the first fallback
-  group republishes the catalog with it false. All of these fields sit in the
+  a group spanning at most 1 s of PCR time). `randomAccess` is true only
+  while every group has started at an indicator; the first fallback group
+  republishes the catalog with it false. All of these fields sit in the
   adaptation field, which TS scrambling leaves in clear, so a scrambled feed
   still groups and paces. Nothing past the adaptation field is parsed.
 - Each object's timestamp is the PCR time of its first byte, interpolated
-  between PCRs at the stream's own rate. Object boundaries and timestamps then
-  depend only on the bytes, so two publishers of one feed publish identical
-  objects, which 1+1 needs.
+  between PCRs at the stream's own rate, carried in hang's `legacy`
+  container (a varint timestamp before the packets) as verbatim tracks are.
+  Object boundaries and timestamps then depend only on the bytes, so two
+  publishers of one feed publish identical objects, which 1+1 needs.
 - A multiplex is paced on one PCR PID: the first program's in the PAT, or
   `--pcr-pid`. Every byte stays in order behind it. Programs on independent
   clocks are out of scope.
@@ -56,8 +60,10 @@ Decided (2026-10-01), from a discussion with t0ms:
 - Source clock drift is handled by
   [release clock recovery](/quest/m1/release-clock-recovery.md), shared with
   the demultiplexed export, not here.
-- No JS player. `js/watch` skips the track as one whose shape it does not
-  describe.
+- Rust only. `js/hang` does not parse `m2ts`, and a player sees no
+  rendition for the track.
+- `--passthrough` publishes only the passthrough track. Publishing it
+  alongside the demultiplexed tracks is out of scope.
 
 Test: an export of a broadcast capture is byte-identical to the input from
 the first released group, and the strict T-STD check gives the same verdict
@@ -67,11 +73,12 @@ exporters fed the same objects with different arrival skew emit identical
 bytes. A dropped object is counted, and the rest still go out on time. Rerun
 the #4613 netem rig (10% loss, 120 s) against it.
 
-Update `doc/bin/cli.md` for both flags, and the draft's comparison section to
-say this repository now publishes both shapes.
+Update `doc/bin/cli.md` for both flags, `doc/concept` for the section, and
+the draft's comparison section to say this repository now publishes both
+shapes.
 
 Public API: new import and export modes; nothing existing breaks. Wire: the
-catalog gains an `mpeg2ts` track entry; additive.
+hang catalog gains an `m2ts` root section; additive.
 
 ## Required
 

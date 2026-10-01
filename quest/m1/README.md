@@ -165,7 +165,7 @@ QUIC studies there on that rule.
 - [#3021](/quest/m1/3021-moq-gst-anchor-generated-media-timelines-to-wall-clock.md) - moq-gst picks the broadcast wall epoch; a restarted source is a new epoch, not a forward re-anchor
 - [T-STD TS export](/quest/m1/tstd/README.md) - `moq export ts` is a proper remux that passes the T-STD buffer model, starting with a fixed `--delay`
 - [Release clock recovery](/quest/m1/release-clock-recovery.md) - the fixed-delay release holds its delay against a publisher clock off by up to ±30 ppm, steering within 13818-1's limits
-- [TS passthrough](/quest/m1/ts-passthrough.md) - `--passthrough` carries the multiplex as MSFTS whole packets and writes it back byte-identical on a fixed delay
+- [TS passthrough](/quest/m1/ts-passthrough.md) - `--passthrough` carries the multiplex as whole packets, listed in an `m2ts` catalog section, and writes it back byte-identical on a fixed delay
 - [FLV export delay](/quest/m1/flv-export-delay.md) - FLV interleaves through the shared fixed-delay release stage
 - [MKV export delay](/quest/m1/mkv-export-delay.md) - MKV interleaves through the shared fixed-delay release stage
 - [Release profile](/quest/m1/release-profile.md) - every release build gets fat LTO, one codegen unit, and stripping from the workspace profile instead of three script exports

@@ -5,8 +5,8 @@
 A subscriber author can map this repository's demultiplexed TS lane
 (access units, Hang catalog `mpegts` section) onto MSFTS ES-level carriage
 without guessing. Transporting TS verbatim is out of scope here:
-[TS passthrough](/quest/m1/ts-passthrough.md) carries it with MSFTS's own
-track fields.
+[TS passthrough](/quest/m1/ts-passthrough.md) carries it in an `m2ts`
+catalog section that maps onto MSFTS's track fields.
 
 ## Plan
 
