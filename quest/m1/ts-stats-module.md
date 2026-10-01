@@ -31,10 +31,9 @@ Decided while planning the follow-ups of
 - Update moq-cli's `publish.rs`, the only consumer that names these types.
   moq-srt only uses `stats::Log`.
 - Main quests still add fields under the old names:
-  [TS PSI reassembly](/quest/m1/ts-psi-reassembly.md),
-  [TS import health](/quest/m2/ts-import-health.md) and
-  [TS export liveness](/quest/m2/ts-export-liveness.md). The rename carries
-  those fields at merge time. Update the type names in the quests still open
+  [TS PSI reassembly](/quest/m1/ts-psi-reassembly.md) and
+  [TS import health](/quest/m2/ts-import-health.md). `Export::stats` (#4577)
+  also returns the old `ts::Stats`. The rename carries those at merge time. Update the type names in the quests still open
   when this lands, including [media stats schema](/quest/m1/stats/schema.md)
   and [Rust reporters](/quest/m1/stats/rust.md).
 

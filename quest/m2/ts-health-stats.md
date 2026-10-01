@@ -43,4 +43,3 @@ Decided while planning [#1838](https://github.com/moq-dev/moq/issues/1838):
 - [Media stats schema](/quest/m1/stats/schema.md) - the snapshot the counters flatten into
 - [Rust reporters](/quest/m1/stats/rust.md) - `moq import --stats` and the stats interval
 - [TS import health](/quest/m2/ts-import-health.md) - the ingest counters
-- [TS export liveness](/quest/m2/ts-export-liveness.md) - the egress rows
