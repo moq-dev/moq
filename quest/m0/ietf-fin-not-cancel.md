@@ -26,10 +26,6 @@ silently ends the subscription.
 
 Public API: none. Wire: conformance fix; no draft change.
 
-## Required
-
-- [Legal IETF input](/quest/m0/ietf-legal-input.md) - lands first; both change `ietf/fetch.rs` and the request close path
-
 ## Related
 
 - [Lite request streams](/quest/m1/request-stream-serve.md) - lite deliberately treats a FIN as ending the request; don't unify the two

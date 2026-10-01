@@ -31,6 +31,7 @@ use crate::{Error, Result};
 pub struct Decoder<T> {
 	/// Whether frames are DEFLATE-compressed, matching the encoder's config.
 	compression: bool,
+	max_size: Option<usize>,
 
 	/// The current group's DEFLATE decoder (one window per group), rebuilt at each snapshot.
 	flate: Option<moq_flate::Decoder>,
@@ -52,6 +53,7 @@ impl<T> Decoder<T> {
 	pub fn new(config: Config) -> Self {
 		Self {
 			compression: config.compression.is_deflate(),
+			max_size: config.max_size,
 			flate: None,
 			plain: Vec::new(),
 			check: RefCell::new(crate::merge::CheckScratch::default()),
@@ -65,43 +67,87 @@ impl<T> Decoder<T> {
 	/// Also starts the group's DEFLATE window, so this must be called at every group boundary, not
 	/// only the first.
 	pub fn snapshot(&mut self, payload: &[u8]) -> Result<()> {
-		// Each group is its own compressed stream, so the window starts cold here.
-		self.flate = self.compression.then(moq_flate::Decoder::new);
-		self.current = Some(match self.flate.as_mut() {
-			Some(flate) => serde_json::from_slice(&flate.frame(payload)?)?,
-			None => serde_json::from_slice(payload)?,
+		self.current = None;
+		// Every group starts a new DEFLATE window; enforce the budget while inflating.
+		self.flate = self.compression.then(|| {
+			moq_flate::Decoder::with_max_frame_size(self.max_size.map_or(moq_flate::DEFAULT_MAX_FRAME_SIZE, |size| {
+				(size as u64).min(moq_flate::DEFAULT_MAX_FRAME_SIZE)
+			}))
 		});
-		Ok(())
+		let inflated = self.flate.as_mut().map(|flate| flate.frame(payload)).transpose()?;
+		let plain = inflated.as_deref().unwrap_or(payload);
+		if let Some(limit) = self.max_size
+			&& plain.len() > limit
+		{
+			return Err(Error::TooLarge(limit));
+		}
+		self.current = Some(serde_json::from_slice(plain)?);
+		self.check_size()
 	}
 
-	/// Apply one of a group's later frames: an [RFC 7396](https://www.rfc-editor.org/rfc/rfc7396.html)
-	/// merge patch against the current value.
-	///
-	/// Errors with [`Error::MissingSnapshot`] when no snapshot has been applied yet, since a patch
-	/// has nothing to apply to.
+	/// Apply a merge patch, refusing frames or reconstructed state beyond the configured budget.
+	/// A failed patch invalidates the baseline; start a new snapshot before applying more deltas.
 	pub fn delta(&mut self, payload: &[u8]) -> Result<()> {
 		if self.current.is_none() {
 			return Err(Error::MissingSnapshot);
 		}
-
-		let plain = match self.flate.as_mut() {
-			Some(flate) => {
-				flate.frame_into(payload, &mut self.plain)?;
-				self.plain.as_slice()
+		let result = (|| {
+			let plain = match self.flate.as_mut() {
+				Some(flate) => {
+					flate.frame_into(payload, &mut self.plain)?;
+					self.plain.as_slice()
+				}
+				None => payload,
+			};
+			if let Some(limit) = self.max_size
+				&& plain.len() > limit
+			{
+				return Err(Error::TooLarge(limit));
 			}
-			None => payload,
-		};
-		crate::merge::apply_bytes(
-			self.current.as_mut().expect("a snapshot precedes any delta"),
-			plain,
-			&self.check,
-		)?;
+			crate::merge::apply_bytes(
+				self.current.as_mut().expect("a snapshot precedes any delta"),
+				plain,
+				&self.check,
+			)?;
+			self.check_size()
+		})();
+		if result.is_err() {
+			self.current = None;
+		}
+		result
+	}
+
+	fn check_size(&mut self) -> Result<()> {
+		let Some(limit) = self.max_size else { return Ok(()) };
+		// Count the compact representation without allocating another full snapshot.
+		// A patch and the prior state are each bounded, and an oversized result is
+		// released before it can be materialized or used by another patch.
+		if serde_json::to_writer(Budget(limit), self.current.as_ref().unwrap()).is_err() {
+			self.current = None;
+			return Err(Error::TooLarge(limit));
+		}
 		Ok(())
 	}
 
 	/// The reconstructed value as raw JSON, or `None` before the first snapshot.
 	pub fn value(&self) -> Option<&Value> {
 		self.current.as_ref()
+	}
+}
+
+struct Budget(usize);
+
+impl std::io::Write for Budget {
+	fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+		if bytes.len() > self.0 {
+			return Err(std::io::Error::other("JSON size budget exceeded"));
+		}
+		self.0 -= bytes.len();
+		Ok(bytes.len())
+	}
+
+	fn flush(&mut self) -> std::io::Result<()> {
+		Ok(())
 	}
 }
 
@@ -145,7 +191,10 @@ mod test {
 	use serde_json::{Value, json};
 
 	fn consume(compression: Compression) -> ConsumerConfig {
-		ConsumerConfig { compression }
+		ConsumerConfig {
+			compression,
+			..Default::default()
+		}
 	}
 
 	fn deflate() -> Config {
@@ -175,6 +224,80 @@ mod test {
 			out.push(decoder.decode().unwrap().unwrap());
 		}
 		out
+	}
+
+	#[test]
+	fn inflated_snapshots_and_patches_obey_the_budget() {
+		for snapshot in [true, false] {
+			let mut config = consume(Compression::Deflate);
+			config.max_size = Some(1024);
+			let mut decoder = Decoder::<Value>::new(config);
+			let mut encoder = moq_flate::Encoder::new();
+			if !snapshot {
+				decoder.snapshot(&encoder.frame(b"{}")).unwrap();
+			}
+			let payload = encoder.frame(
+				serde_json::to_string(&json!({"large": "x".repeat(4096)}))
+					.unwrap()
+					.as_bytes(),
+			);
+			assert!(payload.len() < 1024);
+			let result = if snapshot {
+				decoder.snapshot(&payload)
+			} else {
+				decoder.delta(&payload)
+			};
+			assert!(matches!(result, Err(Error::Flate(moq_flate::Error::TooLarge(1024)))));
+			assert!(decoder.value().is_none());
+		}
+	}
+
+	#[test]
+	fn patches_cannot_accumulate_past_the_budget() {
+		for compression in [Compression::None, Compression::Deflate] {
+			let mut config = consume(compression);
+			config.max_size = Some(13);
+			let mut decoder = Decoder::<Value>::new(config);
+			let mut encoder = moq_flate::Encoder::new();
+			let mut payload = |bytes: &[u8]| {
+				if compression == Compression::Deflate {
+					encoder.frame(bytes).to_vec()
+				} else {
+					bytes.to_vec()
+				}
+			};
+			decoder.snapshot(&payload(br#"{"a":1}"#)).unwrap();
+			decoder.delta(&payload(br#"{"b":2}"#)).unwrap(); // exactly 13 bytes
+			assert_eq!(decoder.value(), Some(&json!({"a":1,"b":2})));
+			decoder.delta(&payload(br#"{"a":null}"#)).unwrap(); // deletion frees budget
+			decoder.delta(&payload(br#"{"c":3}"#)).unwrap();
+			assert!(matches!(
+				decoder.delta(&payload(br#"{"d":4}"#)),
+				Err(Error::TooLarge(13))
+			));
+			assert!(decoder.value().is_none());
+			assert!(matches!(decoder.delta(b"{}"), Err(Error::MissingSnapshot)));
+			// A fresh group can recover after refusal.
+			let bytes = if compression == Compression::Deflate {
+				moq_flate::Encoder::new().frame(b"{}").to_vec()
+			} else {
+				b"{}".to_vec()
+			};
+			decoder.snapshot(&bytes).unwrap();
+		}
+	}
+
+	#[test]
+	fn plain_frames_obey_the_budget_before_parsing() {
+		let config = ConsumerConfig {
+			max_size: Some(2),
+			..Default::default()
+		};
+		let mut decoder = Decoder::<Value>::new(config);
+		assert!(matches!(decoder.snapshot(b"not json"), Err(Error::TooLarge(2))));
+		decoder.snapshot(b"{}").unwrap();
+		assert!(matches!(decoder.delta(b"not json"), Err(Error::TooLarge(2))));
+		assert!(decoder.value().is_none());
 	}
 
 	#[test]

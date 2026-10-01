@@ -4,8 +4,9 @@ use crate::{
 	Path,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 	ietf::{
-		GroupOrder, Location, Parameters, RequestId,
+		Filter, GroupOrder, Location, Opaque, Parameters, RequestId,
 		namespace::{decode_namespace, encode_namespace},
+		subscribe::has_range_filters,
 	},
 };
 
@@ -13,9 +14,13 @@ use super::Message;
 
 use super::Version;
 
+/// What a FETCH asks for.
+///
+/// Through draft-19 a Fetch Type tag picks one of the first three. Draft-20 dropped the
+/// tag and the joining forms, leaving [`Self::Filtered`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchType<'a> {
-	//
+	/// An inclusive range of a track, through draft-19.
 	Standalone {
 		namespace: Path<'a>,
 		track: Cow<'a, str>,
@@ -29,6 +34,13 @@ pub enum FetchType<'a> {
 	AbsoluteJoining {
 		subscriber_request_id: RequestId,
 		group_id: u64,
+	},
+	/// A track, with the range as a LOCATION_FILTER, from draft-20 on. Unfiltered is
+	/// everything from `{0, 0}` up to Largest Object.
+	Filtered {
+		namespace: Path<'a>,
+		track: Cow<'a, str>,
+		filter: Filter,
 	},
 }
 
@@ -63,6 +75,8 @@ impl Encode<Version> for FetchType<'_> {
 				subscriber_request_id.encode(w, version)?;
 				group_id.encode(w, version)?;
 			}
+			// Draft-20 has no Fetch Type tag to write.
+			FetchType::Filtered { .. } => return Err(EncodeError::Version),
 		}
 		Ok(())
 	}
@@ -111,12 +125,24 @@ pub struct Fetch<'a> {
 	pub subscriber_priority: u8,
 	pub group_order: GroupOrder,
 	pub fetch_type: FetchType<'a>,
+	/// Whether the request carried a Range Filter (0x25-0x28). We advertise no
+	/// MAX_FILTER_RANGES, so the request is refused rather than served unfiltered.
+	/// Never encoded; we send no range filters.
+	pub range_filters: bool,
+	/// Whether the request carried FILL_TIMEOUT (0x0A), a budget for waiting on upstream
+	/// that ends in Timed-Out gaps we cannot write, so the request is refused rather than
+	/// left to wait without it. Never encoded; we send no fill timeout.
+	pub fill_timeout: bool,
 }
 
 impl Message for Fetch<'_> {
 	const ID: u64 = 0x16;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		// GROUP_ORDER allows only Ascending or Descending, so no preference is an absent
+		// parameter rather than a 0 the peer must treat as a protocol violation.
+		let group_order = (self.group_order != GroupOrder::Any).then_some(self.group_order);
+
 		self.request_id.encode(w, version)?;
 		if version == Version::Draft17 {
 			0u64.encode(w, version)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
@@ -129,11 +155,29 @@ impl Message for Fetch<'_> {
 				self.fetch_type.encode(w, version)?;
 				0u8.encode(w, version)?; // no parameters
 			}
-			_ => {
+			Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19 => {
 				self.fetch_type.encode(w, version)?;
 				encode_params!(w, version,
 					0x20 => self.subscriber_priority,
-					0x22 => self.group_order,
+					0x22 => group_order,
+				);
+			}
+			_ => {
+				// The joining forms and the Fetch Type tag are gone in draft-20.
+				let FetchType::Filtered {
+					namespace,
+					track,
+					filter,
+				} = &self.fetch_type
+				else {
+					return Err(EncodeError::Version);
+				};
+				encode_namespace(w, namespace, version)?;
+				track.encode(w, version)?;
+				encode_params!(w, version,
+					0x20 => self.subscriber_priority,
+					0x21 => *filter,
+					0x22 => group_order,
 				);
 			}
 		}
@@ -146,38 +190,102 @@ impl Message for Fetch<'_> {
 			let _required_request_id_delta = u64::decode(buf, version)?;
 		}
 
-		match version {
+		// The token is ignored: the session's grant is what authorizes the request, and
+		// INCLUDE_PROPERTIES only shapes a FETCH_OK we don't send on draft-20.
+		let (fetch_type, subscriber_priority, group_order, range_filters, fill_timeout) = match version {
 			Version::Draft14 => {
 				let subscriber_priority = u8::decode(buf, version)?;
 				let group_order = GroupOrder::decode(buf, version)?;
 				let fetch_type = FetchType::decode(buf, version)?;
-				let _params = Parameters::decode(buf, version)?;
-				Ok(Self {
-					request_id,
-					subscriber_priority,
-					group_order,
-					fetch_type,
-				})
+				Parameters::skip(buf, version)?;
+				(fetch_type, Some(subscriber_priority), Some(group_order), false, false)
 			}
-			_ => {
+			Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19 => {
 				let fetch_type = FetchType::decode(buf, version)?;
 				decode_params!(buf, version,
+					0x03 => _authorization_token: Vec<Opaque>,
+					0x0A => fill_timeout: Option<u64>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x22 => group_order: Option<GroupOrder>,
+					0x25 => subgroup_filter: Vec<Opaque>,
+					0x26 => object_id_filter: Vec<Opaque>,
+					0x27 => priority_filter: Vec<Opaque>,
+					0x28 => object_property_filter: Vec<Opaque>,
 				);
+				let range_filters = [
+					subgroup_filter,
+					object_id_filter,
+					priority_filter,
+					object_property_filter,
+				]
+				.iter()
+				.any(|filter| !filter.is_empty());
 
-				let subscriber_priority = subscriber_priority.unwrap_or(128);
-				// No preference: the publisher picks the order.
-				let group_order = group_order.unwrap_or(GroupOrder::Any);
+				// An unknown message parameter is a protocol violation, so each stays rejected
+				// on the drafts that predate it: FILL_TIMEOUT arrived in draft-18.
+				let has_fill_timeout = !matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17);
+				if (fill_timeout.is_some() && !has_fill_timeout) || (range_filters && !has_range_filters(version)) {
+					return Err(DecodeError::InvalidValue);
+				}
 
-				Ok(Self {
-					request_id,
+				(
+					fetch_type,
 					subscriber_priority,
 					group_order,
-					fetch_type,
-				})
+					range_filters,
+					fill_timeout.is_some(),
+				)
 			}
-		}
+			// Draft-20 names the track up front and moves the range into LOCATION_FILTER.
+			_ => {
+				let namespace = decode_namespace(buf, version)?;
+				let track = Cow::<str>::decode(buf, version)?;
+				decode_params!(buf, version,
+					0x03 => _authorization_token: Vec<Opaque>,
+					0x0A => fill_timeout: Option<u64>,
+					0x20 => subscriber_priority: Option<u8>,
+					0x21 => filter: Option<Filter>,
+					0x22 => group_order: Option<GroupOrder>,
+					0x25 => subgroup_filter: Vec<Opaque>,
+					0x26 => object_id_filter: Vec<Opaque>,
+					0x27 => priority_filter: Vec<Opaque>,
+					0x28 => object_property_filter: Vec<Opaque>,
+					0x35 => _include_properties: Option<bool>,
+				);
+				let range_filters = [
+					subgroup_filter,
+					object_id_filter,
+					priority_filter,
+					object_property_filter,
+				]
+				.iter()
+				.any(|filter| !filter.is_empty());
+
+				let fetch_type = FetchType::Filtered {
+					namespace,
+					track,
+					// An absent LOCATION_FILTER fetches the whole track.
+					filter: filter.unwrap_or(Filter::Unfiltered),
+				};
+				(
+					fetch_type,
+					subscriber_priority,
+					group_order,
+					range_filters,
+					fill_timeout.is_some(),
+				)
+			}
+		};
+
+		Ok(Self {
+			request_id,
+			subscriber_priority: subscriber_priority.unwrap_or(128),
+			// No preference: the publisher picks the order.
+			group_order: group_order.unwrap_or(GroupOrder::Any),
+			fetch_type,
+			range_filters,
+			fill_timeout,
+		})
 	}
 }
 
@@ -230,7 +338,7 @@ impl Message for FetchOk {
 				let group_order = GroupOrder::decode(buf, version)?;
 				let end_of_track = bool::decode(buf, version)?;
 				let end_location = Location::decode(buf, version)?;
-				let _params = Parameters::decode(buf, version)?;
+				Parameters::skip(buf, version)?;
 				Ok(Self {
 					request_id,
 					group_order,
@@ -557,6 +665,8 @@ mod tests {
 				start: Location { group: 0, object: 0 },
 				end: Location { group: 10, object: 5 },
 			},
+			range_filters: false,
+			fill_timeout: false,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -578,6 +688,8 @@ mod tests {
 				start: Location { group: 0, object: 0 },
 				end: Location { group: 10, object: 5 },
 			},
+			range_filters: false,
+			fill_timeout: false,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -616,6 +728,8 @@ mod tests {
 				start: Location { group: 0, object: 0 },
 				end: Location { group: 10, object: 5 },
 			},
+			range_filters: false,
+			fill_timeout: false,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft16);
@@ -637,6 +751,8 @@ mod tests {
 				start: Location { group: 0, object: 0 },
 				end: Location { group: 10, object: 5 },
 			},
+			range_filters: false,
+			fill_timeout: false,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -709,6 +825,8 @@ mod tests {
 				start: Location { group: 0, object: 0 },
 				end: Location { group: 10, object: 5 },
 			},
+			range_filters: false,
+			fill_timeout: false,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -755,6 +873,111 @@ mod tests {
 			0, // zero message parameters
 		];
 		assert_eq!(encode_message(&msg, Version::Draft18), expected);
+	}
+
+	/// The head of a draft-20 FETCH (Figure 16) up to its Number of Parameters: Request
+	/// ID 1, Track Namespace ("live"), Track Name ("video"). There is no Fetch Type.
+	const FETCH_HEAD: &[u8] = &[
+		0x01, 0x01, 0x04, b'l', b'i', b'v', b'e', 0x05, b'v', b'i', b'd', b'e', b'o',
+	];
+
+	/// A draft-20 FETCH names the track up front and carries its range in LOCATION_FILTER.
+	/// Reading a Fetch Type there instead takes the namespace's field count for one.
+	#[test]
+	fn test_fetch_v20_decodes_every_parameter() {
+		#[rustfmt::skip]
+		let body = [FETCH_HEAD, &[
+			0x07, // Number of Parameters
+			0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN
+			0x07, 0x64, // FILL_TIMEOUT (0x0A) = 100, a varint
+			0x16, 0x40, // SUBSCRIBER_PRIORITY (0x20) = 64
+			0x01, 0x03, 0x04, 0x00, 0x02, // LOCATION_FILTER (0x21): groups 4 through 6
+			0x01, 0x01, // GROUP_ORDER (0x22) = Ascending
+			0x04, 0x02, 0x00, 0x05, // OBJECTID_FILTER (0x26): SetID 0, from 5
+			0x0F, 0x00, // INCLUDE_PROPERTIES (0x35) = 0
+		]].concat();
+
+		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+			let fetch: Fetch = decode_message(&body, version).unwrap_or_else(|e| panic!("{version}: {e}"));
+			assert_eq!(fetch.request_id, RequestId(1));
+			assert_eq!(fetch.subscriber_priority, 64);
+			assert_eq!(fetch.group_order, GroupOrder::Ascending);
+			assert!(fetch.range_filters, "{version}");
+			assert!(fetch.fill_timeout, "{version}");
+			assert_eq!(
+				fetch.fetch_type,
+				FetchType::Filtered {
+					namespace: Path::new("live"),
+					track: "video".into(),
+					filter: Filter::Absolute {
+						start: Location { group: 4, object: 0 },
+						end: Some(crate::ietf::EndLocation { group: 6, object: None }),
+					},
+				},
+				"{version}"
+			);
+		}
+	}
+
+	/// With no LOCATION_FILTER a draft-20 FETCH is the whole track, and that is what we
+	/// write back: the parameter is omitted rather than sent empty.
+	#[test]
+	fn test_fetch_v20_wire() {
+		let fetch = Fetch {
+			request_id: RequestId(1),
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			fetch_type: FetchType::Filtered {
+				namespace: Path::new("live"),
+				track: "video".into(),
+				filter: Filter::Unfiltered,
+			},
+			range_filters: false,
+			fill_timeout: false,
+		};
+
+		#[rustfmt::skip]
+		let expected = [FETCH_HEAD, &[
+			0x02, // Number of Parameters
+			0x20, 0x80, // SUBSCRIBER_PRIORITY = 128
+			0x02, 0x02, // GROUP_ORDER (0x22) = Descending
+		]].concat();
+		assert_eq!(encode_message(&fetch, Version::Draft20), expected);
+		assert_eq!(decode_message::<Fetch>(&expected, Version::Draft20).unwrap(), fetch);
+
+		// The tagged forms have no spelling from draft-20 on, and this one none before it.
+		let mut buf = Vec::new();
+		assert!(fetch.encode_msg(&mut buf, Version::Draft19).is_err());
+	}
+
+	/// FILL_TIMEOUT arrived in draft-18 and the Range Filters in draft-19; each is still
+	/// an unknown parameter before then.
+	#[test]
+	fn test_fetch_parameters_follow_their_draft() {
+		#[rustfmt::skip]
+		let joining = |params: &[u8]| [&[
+			0x01, // Request ID
+			0x02, 0x03, 0x00, // Relative Joining: subscription 3, offset 0
+		][..], params].concat();
+
+		let token = joining(&[0x01, 0x03, 0x03, 0x03, 0x00, 0xAA]);
+		let fill_timeout = joining(&[0x01, 0x0A, 0x20]);
+		let range_filter = joining(&[0x01, 0x25, 0x00]);
+
+		for (version, body, ok) in [
+			(Version::Draft15, &token, true),
+			(Version::Draft16, &fill_timeout, false),
+			(Version::Draft18, &fill_timeout, true),
+			(Version::Draft18, &range_filter, false),
+			(Version::Draft19, &range_filter, true),
+		] {
+			let decoded = decode_message::<Fetch>(body, version);
+			assert_eq!(decoded.is_ok(), ok, "{version}: {body:x?}");
+			if let Ok(fetch) = decoded {
+				assert_eq!(fetch.range_filters, body == &range_filter, "{version}");
+				assert_eq!(fetch.fill_timeout, body == &fill_timeout, "{version}");
+			}
+		}
 	}
 }
 

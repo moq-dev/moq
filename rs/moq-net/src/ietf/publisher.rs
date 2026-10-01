@@ -551,6 +551,21 @@ where
 
 			tracing::info!(id = %request_id, broadcast = %absolute, track = %track_name, "subscribe started");
 
+			// Legal requests we can't honor are refused one at a time, never by closing the
+			// session. A subscription that forwards nothing is only useful to a subscriber
+			// that later turns forwarding on, and serving a Range Filter unfiltered would
+			// deliver objects the subscriber excluded.
+			if !msg.forward {
+				return self
+					.reject_subscribe(stream, request_id, &Error::Unsupported, "FORWARD=0 not supported")
+					.await;
+			}
+			if msg.range_filters {
+				return self
+					.reject_subscribe(stream, request_id, &Error::Unsupported, "range filters not supported")
+					.await;
+			}
+
 			// Stats (subscriptions, viewer refcount, groups/frames/bytes) are counted in
 			// the model, through the tagged `origin::Consumer` the broadcast resolves from.
 
@@ -1124,8 +1139,8 @@ where
 	async fn run_fetch_stream(mut self, mut stream: Stream<S, Version>, msg: ietf::Fetch<'_>) -> Result<(), Error> {
 		let priority = super::priority::from_wire(msg.subscriber_priority);
 
-		// Draft-20 moved the range into LOCATION_FILTER and replaced joining FETCH with
-		// subscription fills; this still reads the older layout.
+		// Draft-20 moved the range into LOCATION_FILTER, which decodes to
+		// `FetchType::Filtered` but is not served yet.
 		if Filter::is_draft20(self.version) {
 			return self
 				.reject_fetch(
@@ -1133,6 +1148,31 @@ where
 					msg.request_id,
 					&Error::Unsupported,
 					"FETCH not supported on draft-20",
+				)
+				.await;
+		}
+
+		// Serving a Range Filter unfiltered would deliver objects the subscriber excluded.
+		if msg.range_filters {
+			return self
+				.reject_fetch(
+					stream,
+					msg.request_id,
+					&Error::Unsupported,
+					"range filters not supported",
+				)
+				.await;
+		}
+
+		// FILL_TIMEOUT=0 asks for cache only, and any budget ends in Timed-Out gaps we
+		// don't write, so waiting on upstream regardless would ignore what was asked.
+		if msg.fill_timeout {
+			return self
+				.reject_fetch(
+					stream,
+					msg.request_id,
+					&Error::Unsupported,
+					"FILL_TIMEOUT not supported",
 				)
 				.await;
 		}
@@ -1204,6 +1244,12 @@ where
 					timescale,
 					true,
 				)
+			}
+			// Refused above: only draft-20 decodes this form.
+			FetchType::Filtered { .. } => {
+				return self
+					.reject_fetch(stream, msg.request_id, &Error::Unsupported, "not supported")
+					.await;
 			}
 		};
 
@@ -3019,6 +3065,8 @@ mod serve_tests {
 			filter,
 			fill,
 			properties_wanted: true,
+			forward: true,
+			range_filters: false,
 		}
 	}
 
@@ -3188,6 +3236,120 @@ mod serve_tests {
 			};
 			assert_eq!(actual, expected, "{version}: wrong TRACK_STATUS refusal bytes");
 			assert!(h.log.resets().is_empty(), "{version}: refusal was reset");
+		}
+	}
+
+	/// Dispatch one request stream, returning the refusal code it wrote.
+	///
+	/// `handle_stream` returning `Ok` is what keeps the session open: the dispatch loop
+	/// closes the session over an `Err`.
+	async fn refusal(version: Version, id: u64, body: Vec<u8>) -> u64 {
+		let h = serve(version);
+		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+		let mark = h.log.writes.lock().unwrap().len();
+		h.publisher
+			.clone()
+			.handle_stream(id, bytes::Bytes::from(body), stream)
+			.unwrap_or_else(|e| panic!("{version}: the request closed the session: {e}"))
+			.await;
+		assert!(h.log.resets().is_empty(), "{version}: refusal was reset");
+
+		let mut buf = bytes::Bytes::from(h.log.writes.lock().unwrap()[mark..].to_vec());
+		match version {
+			Version::Draft14 => {
+				// SUBSCRIBE_ERROR and FETCH_ERROR share their layout.
+				let _id = u64::decode(&mut buf, version).unwrap();
+				ietf::SubscribeError::decode(&mut buf, version).unwrap().error_code
+			}
+			_ => {
+				assert_eq!(u64::decode(&mut buf, version).unwrap(), ietf::RequestError::ID);
+				ietf::RequestError::decode(&mut buf, version).unwrap().error_code
+			}
+		}
+	}
+
+	/// Legal requests we don't serve are refused NOT_SUPPORTED one at a time, and the
+	/// session stays open for the next one.
+	#[tokio::test]
+	async fn legal_requests_we_do_not_serve_are_refused_per_request() {
+		const NOT_SUPPORTED: u64 = 0x3;
+
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			let mut paused = subscribe(Filter::NextObject, None);
+			paused.forward = false;
+			let mut body = bytes::BytesMut::new();
+			paused.encode_msg(&mut body, version).unwrap();
+			assert_eq!(
+				refusal(version, ietf::Subscribe::ID, body.to_vec()).await,
+				NOT_SUPPORTED,
+				"{version}: SUBSCRIBE with FORWARD=0"
+			);
+		}
+
+		// Draft-20 bytes from the figures: Request ID 0x2B, Track Namespace ("room"),
+		// Track Name ("video"), then the parameters.
+		let head: &[u8] = &[
+			0x2B, 0x01, 0x04, b'r', b'o', b'o', b'm', 0x05, b'v', b'i', b'd', b'e', b'o',
+		];
+
+		#[rustfmt::skip]
+		let cases: [(&str, u64, &[u8]); 3] = [
+			("SUBSCRIBE with a Range Filter", ietf::Subscribe::ID, &[
+				0x02, // Number of Parameters
+				0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN
+				0x23, 0x02, 0x00, 0x05, // OBJECTID_FILTER (0x26): SetID 0, from 5
+			]),
+			("FETCH", ietf::Fetch::ID, &[
+				0x03, // Number of Parameters
+				0x0A, 0x00, // FILL_TIMEOUT = 0
+				0x17, 0x01, 0x01, // LOCATION_FILTER (0x21): from one group back
+				0x14, 0x01, // INCLUDE_PROPERTIES (0x35) = 1
+			]),
+			("TRACK_STATUS with parameters", ietf::TrackStatus::ID, &[
+				0x02, // Number of Parameters
+				0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN
+				0x32, 0x00, // INCLUDE_PROPERTIES (0x35) = 0
+			]),
+		];
+
+		// A standalone FETCH we would otherwise serve, carrying FILL_TIMEOUT=0: cache only,
+		// with gaps reported as Timed-Out, which we can't write.
+		#[rustfmt::skip]
+		let fill_timeout = [
+			0x2B, // Request ID
+			0x01, // Standalone
+			0x01, 0x04, b'r', b'o', b'o', b'm', 0x05, b'v', b'i', b'd', b'e', b'o',
+			0x00, 0x00, // Start Location
+			0x00, 0x00, // End Location: the whole group 0
+			0x01, // Number of Parameters
+			0x0A, 0x00, // FILL_TIMEOUT = 0
+		];
+		for version in [Version::Draft18, Version::Draft19] {
+			assert_eq!(
+				refusal(version, ietf::Fetch::ID, fill_timeout.to_vec()).await,
+				NOT_SUPPORTED,
+				"{version}: FETCH with FILL_TIMEOUT"
+			);
+		}
+
+		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+			for (label, id, params) in cases {
+				assert_eq!(
+					refusal(version, id, [head, params].concat()).await,
+					NOT_SUPPORTED,
+					"{version}: {label}"
+				);
+			}
 		}
 	}
 
@@ -3365,6 +3527,8 @@ mod serve_tests {
 						subscriber_request_id: RequestId(REQUEST_ID),
 						group_offset: 0,
 					},
+					range_filters: false,
+					fill_timeout: false,
 				},
 			)
 			.await?;
@@ -3770,6 +3934,8 @@ mod serve_tests {
 						start,
 						end,
 					},
+					range_filters: false,
+					fill_timeout: false,
 				},
 			)
 			.await
@@ -4010,6 +4176,8 @@ mod serve_tests {
 							subscriber_priority: 128,
 							group_order: GroupOrder::Ascending,
 							fetch_type,
+							range_filters: false,
+							fill_timeout: false,
 						},
 					)
 					.await
@@ -4051,6 +4219,8 @@ mod serve_tests {
 						subscriber_request_id: RequestId(REQUEST_ID),
 						group_id: 5,
 					},
+					range_filters: false,
+					fill_timeout: false,
 				},
 			)
 			.await
@@ -5147,7 +5317,12 @@ mod tests {
 	async fn a_repricing_is_a_request_update() {
 		const VERSION: Version = Version::Draft19;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		// Forward the update at once: the hold is not what this checks.
+		let origin = crate::origin::Config {
+			update_hold: Duration::ZERO,
+			..crate::origin::Config::new(crate::Hop::new(1).unwrap())
+		}
+		.produce();
 		let _cold = origin
 			.announce("cam", crate::origin::Route::default().with_cost(4))
 			.unwrap();
@@ -5214,7 +5389,12 @@ mod tests {
 	async fn a_publisher_change_is_a_request_update() {
 		const VERSION: Version = Version::Draft19;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		// Forward the update at once: the hold is not what this checks.
+		let origin = crate::origin::Config {
+			update_hold: Duration::ZERO,
+			..crate::origin::Config::new(crate::Hop::new(1).unwrap())
+		}
+		.produce();
 		let publisher_a = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
 		let publisher_b = crate::Hops::try_from(vec![crate::Hop::new(8).unwrap()]).unwrap();
 		let _from_a = origin
@@ -5571,6 +5751,8 @@ mod tests {
 					filter: Filter::NextObject,
 					fill: None,
 					properties_wanted: true,
+					forward: true,
+					range_filters: false,
 				},
 			)
 			.await
@@ -5594,6 +5776,8 @@ mod tests {
 					subscriber_priority: 128,
 					group_order: GroupOrder::Descending,
 					fetch_type,
+					range_filters: false,
+					fill_timeout: false,
 				},
 			)
 			.await
@@ -5919,6 +6103,8 @@ mod range_tests {
 			filter,
 			fill: None,
 			properties_wanted: true,
+			forward: true,
+			range_filters: false,
 		}
 	}
 
