@@ -25,3 +25,8 @@ nightly.
 - [Fixed-delay release](/quest/m1/tstd/delay.md) - frames go out at media time plus a fixed `--delay`, in one order under loss
 - [T-STD check](/quest/m1/tstd/check.md) - the harness grades the full buffer model instead of the transport buffer alone
 - [TS byte schedule](/quest/m1/tstd/byte-schedule.md) - PCRs sit on the byte grid the mux rate implies, paced against the fixed delay
+
+## Related
+
+- [TS passthrough](/quest/m1/ts-passthrough.md) - the passthrough lane named in the Goal
+- [Release clock recovery](/quest/m1/release-clock-recovery.md) - the fixed delay held against publisher clock drift; the soak gate runs here
