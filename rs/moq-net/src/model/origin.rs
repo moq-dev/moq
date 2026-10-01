@@ -2448,6 +2448,17 @@ impl TrackIo {
 		self.dead = None;
 	}
 
+	/// Keep the spliced copy as dead. The front only refreshes `held` between wakes, so
+	/// first catch a newest group the copy surfaced since, while its cache still has it.
+	fn bury(&mut self) {
+		let Some((_, copy)) = self.copy.take() else { return };
+		let after = self.held.as_ref().map(|held| held.0.sequence);
+		if let Poll::Ready(group) = copy.poll_latest_group(after, &kio::Waiter::noop()) {
+			self.held = Some(HeldGroup(group));
+		}
+		self.dead = Some(copy);
+	}
+
 	/// Retire `copy` as a takeover replaces it. Mid-group, park its delivery warm, open
 	/// group included, so a reader arriving later still gets the group's head and the
 	/// takeover continues it. Between groups its own cache keeps everything finished, so
@@ -2643,7 +2654,7 @@ async fn run_front(task: FrontTask) {
 						// spliced until a replacement resumes past them.
 						for io in tracks.values_mut() {
 							if io.copy.as_ref().is_some_and(|(s, _)| *s == source) {
-								io.dead = io.copy.take().map(|(_, copy)| copy);
+								io.bury();
 							}
 							if io.query.as_ref().is_some_and(|(s, ..)| *s == source) {
 								io.query = None;
@@ -2927,7 +2938,7 @@ async fn run_front(task: FrontTask) {
 			Step::Ended(name, source, result) => {
 				let closing = sources.get(&source).is_some_and(|s| s.is_closing());
 				let Some(io) = tracks.get_mut(&name) else { continue };
-				io.dead = io.copy.take().map(|(_, copy)| copy);
+				io.bury();
 				let delivered = io.resume.resume_position() != io.edge;
 				Event::TrackEnded {
 					track: name,
