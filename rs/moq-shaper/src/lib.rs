@@ -20,7 +20,7 @@
 
 use std::{
 	cmp::Reverse,
-	collections::{BinaryHeap, HashMap, hash_map},
+	collections::{BTreeSet, BinaryHeap, HashMap, hash_map},
 	fmt,
 	net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
 	sync::{
@@ -202,6 +202,9 @@ impl Options {
 		let mut profile = profile.clone();
 		let mut previous: Option<Duration> = None;
 		for step in &self.steps {
+			// The profile is what the run opens with, so a step at zero would
+			// replace it before any datagram saw it.
+			anyhow::ensure!(!step.at.is_zero(), "a step at zero replaces the profile; change the profile instead");
 			// A link only ever looks at the next step due, so one out of order
 			// would be skipped without a word.
 			anyhow::ensure!(
@@ -471,9 +474,14 @@ impl Shaper {
 			("up", &self.setup.up, &self.tally[UP], &stats.up),
 			("down", &self.setup.down, &self.tally[DOWN], &stats.down),
 		] {
-			let reached = tally.stepped.load(Ordering::Relaxed) as usize;
-			if let Some(step) = options.steps.get(reached).filter(|_| counters.packets > 0) {
-				missing.push(format!("the {name} step at {:?}", step.at));
+			if counters.packets == 0 {
+				continue;
+			}
+			let phases = tally.phases.lock().unwrap();
+			for (index, step) in options.steps.iter().enumerate() {
+				if !phases.contains(&(index + 1)) {
+					missing.push(format!("the {name} step at {:?}", step.at));
+				}
 			}
 		}
 		anyhow::ensure!(
@@ -502,8 +510,8 @@ struct Tally {
 	throttled: AtomicU64,
 	delayed: AtomicU64,
 	reordered: AtomicU64,
-	/// The most steps any one link has applied.
-	stepped: AtomicU64,
+	/// The phases some link treated a datagram in: 0 before the first step, n after the nth.
+	phases: Mutex<BTreeSet<usize>>,
 	/// Datagrams a batch held past when they would otherwise have left.
 	batched: AtomicU64,
 }
@@ -782,6 +790,8 @@ struct Link {
 	steps: Vec<Step>,
 	/// How many of `steps` have applied.
 	stepped: usize,
+	/// Whether a datagram was treated since the latest step applied.
+	treated: bool,
 	queue: mpsc::UnboundedSender<Parcel>,
 }
 
@@ -810,21 +820,32 @@ impl Link {
 			start,
 			steps: options.steps.clone(),
 			stepped: 0,
+			treated: false,
 			queue,
 		}
 	}
 
-	/// Apply every step the run has reached by `now`, in order.
+	/// Apply every step the run has reached by `now`, in order, and record the
+	/// phase a datagram arriving then sees.
 	fn step(&mut self, now: Instant, tally: &Tally) {
-		while let Some(step) = self.steps.get(self.stepped).filter(|step| self.start + step.at <= now) {
+		while let Some(step) = self.steps.get(self.stepped) {
+			// A step past what the clock can hold is one the run never reaches.
+			let Some(at) = self.start.checked_add(step.at).filter(|at| *at <= now) else {
+				break;
+			};
 			if let Some(rate) = &step.rate {
 				// Credit accrues at the new rate from the scheduled transition,
 				// even when no datagram arrived at that instant.
-				self.full_at = self.refilled(rate, self.start + step.at);
+				self.full_at = self.refilled(rate, at);
 			}
 			step.apply(&mut self.profile);
 			self.stepped += 1;
-			tally.stepped.fetch_max(self.stepped as u64, Ordering::Relaxed);
+			self.treated = false;
+		}
+		// Applying a step is no evidence it acted, so record the phase a datagram sees.
+		if !self.treated {
+			self.treated = true;
+			tally.phases.lock().unwrap().insert(self.stepped);
 		}
 	}
 
@@ -1896,6 +1917,61 @@ mod tests {
 		assert!(format!("{err:#}").contains("the down step at 60s"), "{err:#}");
 	}
 
+	#[tokio::test(start_paused = true)]
+	async fn a_step_no_datagram_saw_is_unapplied() {
+		let ms = Duration::from_millis;
+		let (shaper, client) = shaped(|config| Setup {
+			up: stepped(vec![
+				Step {
+					at: ms(100),
+					delay: Some(ms(60)),
+					..Default::default()
+				},
+				Step {
+					at: ms(200),
+					delay: Some(ms(5)),
+					..Default::default()
+				},
+			]),
+			..Config {
+				up: Profile {
+					delay: ms(5),
+					..Default::default()
+				},
+				..config
+			}
+			.into()
+		})
+		.await;
+
+		// One datagram before the first step and one after the second, so the
+		// 60ms phase passes with nothing in it.
+		let mut buf = [0u8; 4];
+		client.send(&0u32.to_be_bytes()).await.unwrap();
+		client.recv(&mut buf).await.unwrap();
+		tokio::time::sleep(ms(250)).await;
+		client.send(&1u32.to_be_bytes()).await.unwrap();
+		client.recv(&mut buf).await.unwrap();
+
+		let err = shaper.verify().expect_err("a run that skipped a step passed");
+		let err = format!("{err:#}");
+		assert!(err.contains("the up step at 100ms"), "{err}");
+		assert!(!err.contains("the up step at 200ms"), "{err}");
+	}
+
+	#[test]
+	fn a_step_past_the_clock_never_applies() {
+		let options = stepped(vec![Step {
+			at: Duration::MAX,
+			delay: Some(Duration::from_millis(60)),
+			..Default::default()
+		}]);
+		let (queue, _) = mpsc::unbounded_channel();
+		let start = Instant::now();
+		let mut link = Link::new(&Profile::default(), &options, 7, 0, start, queue);
+		assert_eq!(owed(&mut link, start + Duration::from_secs(1), &[16]), [Duration::ZERO]);
+	}
+
 	#[tokio::test]
 	async fn steps_that_would_be_skipped_or_do_nothing_are_refused() {
 		let refused = |steps: Vec<Step>, why: &'static str| async move {
@@ -1925,6 +2001,7 @@ mod tests {
 		};
 
 		refused(vec![at(60), at(30)], "steps go in order").await;
+		refused(vec![at(0)], "a step at zero").await;
 		refused(
 			vec![Step {
 				at: Duration::from_secs(30),
