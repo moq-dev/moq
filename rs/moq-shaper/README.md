@@ -45,7 +45,7 @@ As a library, `Shaper::bind` takes a `Config`: where to listen and forward, the 
 per direction. It also takes a `Setup`, which is a `Config` plus the opt-in options below, each off by
 default. `Shaper::verify` fails when the shaper stopped forwarding, when an impairment the profile
 configures never acted and the traffic makes that silence implausible, or when a direction carried
-traffic but none of it saw some step's profile. The relay's drills
+traffic but no datagram saw one of its phases, before the first step or after one. The relay's drills
 (`rs/moq-relay/tests/drills.rs`, described in `test/drill/README.md`) run every scenario through it.
 
 ## What a seed does and does not fix
@@ -94,8 +94,9 @@ from when forwarding started. It changes only what it names, so a later step put
 step keeps the old bucket's credit, or its debt, clipped to the new one, and a limit that was not there
 starts full. A step can add or change a rate limit, never remove one. A step that leaves the profile as
 it was, or comes at zero, is refused. Steps come from a profile file.
-A run where no datagram saw some step's profile fails `verify`, whether it ended before the step or
-went quiet until a later step replaced it.
+A direction that carried traffic fails `verify` unless some datagram saw each phase: the profile before
+the first step and after every step. Traffic that starts late, ends early, or goes quiet across a step
+never saw the path change.
 
 ## Profiles
 

@@ -448,13 +448,13 @@ impl Shaper {
 	}
 
 	/// Fail unless the shaper is still forwarding, every impairment the profile
-	/// configures acted on some datagram, and some datagram saw every step, in
-	/// either direction.
+	/// configures acted on some datagram, and some datagram saw every phase of
+	/// a direction with steps, before the first and after each.
 	///
 	/// An impairment is only held to that once the traffic makes its silence
-	/// implausible: a short run can see no loss, but never no delay. A step is
-	/// held to it once its direction carried anything: traffic that all came
-	/// before the step never saw the path change.
+	/// implausible: a short run can see no loss, but never no delay. The phases
+	/// are held to it once their direction carried anything: traffic that all
+	/// came on one side of a step never saw the path change.
 	pub fn verify(&self) -> anyhow::Result<Stats> {
 		let stats = self.stats();
 		if let Some(err) = self.failed.get() {
@@ -477,10 +477,13 @@ impl Shaper {
 			("up", &self.setup.up, &self.tally[UP], &stats.up),
 			("down", &self.setup.down, &self.tally[DOWN], &stats.down),
 		] {
-			if counters.packets == 0 {
+			let Some(first) = options.steps.first().filter(|_| counters.packets > 0) else {
 				continue;
-			}
+			};
 			let phases = tally.phases.lock().unwrap();
+			if !phases.contains(&0) {
+				missing.push(format!("the {name} profile before its step at {:?}", first.at));
+			}
 			for (index, step) in options.steps.iter().enumerate() {
 				if !phases.contains(&(index + 1)) {
 					missing.push(format!("the {name} step at {:?}", step.at));
@@ -1960,6 +1963,38 @@ mod tests {
 		let err = format!("{err:#}");
 		assert!(err.contains("the up step at 100ms"), "{err}");
 		assert!(!err.contains("the up step at 200ms"), "{err}");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_profile_no_datagram_saw_before_its_step_is_unapplied() {
+		let ms = Duration::from_millis;
+		let (shaper, client) = shaped(|config| Setup {
+			up: stepped(vec![Step {
+				at: ms(100),
+				delay: Some(ms(60)),
+				..Default::default()
+			}]),
+			..Config {
+				up: Profile {
+					delay: ms(5),
+					..Default::default()
+				},
+				..config
+			}
+			.into()
+		})
+		.await;
+
+		// The first datagram comes after the step, so the 5ms phase passes with nothing in it.
+		tokio::time::sleep(ms(250)).await;
+		let mut buf = [0u8; 4];
+		client.send(&0u32.to_be_bytes()).await.unwrap();
+		client.recv(&mut buf).await.unwrap();
+
+		let err = shaper.verify().expect_err("a run that started after its step passed");
+		let err = format!("{err:#}");
+		assert!(err.contains("the up profile before its step at 100ms"), "{err}");
+		assert!(!err.contains("the up step at"), "{err}");
 	}
 
 	#[test]
