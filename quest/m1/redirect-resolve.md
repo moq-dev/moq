@@ -22,6 +22,4 @@ needs them. If a consumer turns up, the alternative is returning the same
 `Result<Option<Url>>` as the internal `target` does, so empty and refused stay distinct. Removing or changing a published method is a break, so this
 targets `dev`; update `doc/lib/rs` if it mentions the method.
 
-## Required
-
-- `dev` has merged `main` since the drain line (moq-dev/moq#4132) landed
+Start by merging `main` into `dev` if `dev` does not have the drain line yet.
