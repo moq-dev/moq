@@ -9,9 +9,10 @@ quinn and not noq). One core serves the tokio backend, the thread-per-core
 BBR correctness, reliable stream resets, hierarchical stream scheduling with
 per-broadcast fairness, wider limits for relay peers, and endpoint sharding.
 Per-stream acknowledgment progress, per-stream deadlines, qmux on the shared
-stream state machine, and the experiments (GCC, receive timestamps, the egress
-profile, media probing, L4S, careful resume, deadline keep-alive) live in
-[m2](/quest/m2/README.md) and do not gate this line.
+stream state machine, and the experiments (the egress profile, media probing,
+L4S, careful resume, deadline keep-alive) live in [m2](/quest/m2/README.md);
+GCC with receive timestamps lives in [m3](/quest/m3/README.md). None of them
+gate this line.
 
 ## Plan
 
@@ -78,7 +79,5 @@ consumes them.
 - [L4S on the backbone](/quest/m2/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m2/quic-careful-resume.md) - a redial starts at the previous connection's rate
 - [Keep-alive by deadline](/quest/m2/quic-keep-alive.md) - a PING only when the idle deadline nears, no fixed timer
-- [Receive timestamps](/quest/m3/quic-receive-ts.md) - per-packet arrival
-  times for GCC and deadlines
-- [GCC egress experiment](/quest/m3/quic-gcc.md) - a measured verdict on
+- [GCC egress experiment](/quest/m3/quic-gcc.md) - receive timestamps and a measured verdict on
   WebRTC-style delay control

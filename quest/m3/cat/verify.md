@@ -90,4 +90,4 @@ gain flags. Wire: none.
 
 ## Required
 
-- A consumer asks for CAT, or draft-ietf-moq-c4m registers the moqt claim keys
+- [A consumer asks for CAT, or draft-ietf-moq-c4m registers the moqt claim keys](/quest/m3/c4m-claim-keys.md) - the reason to verify a CAT at all

@@ -1,4 +1,4 @@
-//! Reporting on the per-stream counters [`Import::stats`](super::Import::stats) returns.
+//! Reporting on the counters [`Import::stats`](super::Import::stats) returns.
 
 use std::collections::BTreeSet;
 
@@ -27,7 +27,7 @@ impl Log {
 	/// Compare a snapshot taken [`INTERVAL`](Self::INTERVAL) after the last.
 	///
 	/// Logs a stream whose access units did not advance since the last sample, once per
-	/// silence, and any stream whose frame-sync counters moved.
+	/// silence, any stream whose frame-sync counters moved, and PSI sections dropped since.
 	pub fn sample(&mut self, latest: Stats) {
 		self.sync(&latest);
 		for (pid, stream) in &latest.streams {
@@ -49,17 +49,24 @@ impl Log {
 
 	/// Compare the snapshot taken after [`Import::finish`](super::Import::finish).
 	///
-	/// It covers less than an interval, so only the frame sync is compared: the drain at end
-	/// of input can publish a frame nothing vouched for.
+	/// It covers less than an interval, so only the losses are compared: the drain at end of
+	/// input can publish a frame nothing vouched for.
 	pub fn finish(&self, latest: &Stats) {
 		self.sync(latest);
 	}
 
-	/// Report the streams whose frame-sync counters moved, one line each.
+	/// Report the streams whose frame-sync counters moved, one line each, and the PSI
+	/// sections dropped for a bad CRC if that count moved.
 	///
-	/// The importer already warns on each individual resync; this is the running total, which
-	/// is what an operator turns into a rate.
+	/// The importer already warns on each individual resync and dropped section; this is the
+	/// running total, which is what an operator turns into a rate.
 	fn sync(&self, latest: &Stats) {
+		if self.previous.as_ref().map_or(0, |previous| previous.crc_error) != latest.crc_error {
+			tracing::info!(
+				crc_error = latest.crc_error,
+				"PAT or PMT sections dropped for a bad CRC"
+			);
+		}
 		let lost = |stream: &StreamStats| (stream.resyncs, stream.discarded, stream.unconfirmed);
 		for (pid, stream) in &latest.streams {
 			let previous = self.previous.as_ref().and_then(|previous| previous.streams.get(pid));
@@ -155,5 +162,30 @@ mod test {
 			}
 		});
 		assert!(!logs_contain("stopped delivering"), "the stream kept counting");
+	}
+
+	/// Dropped PSI sections are reported when the count moves, with the running total, and
+	/// not again while it holds.
+	#[test]
+	#[tracing_test::traced_test]
+	fn reports_crc_errors_when_they_move() {
+		let sample = |crc_error: u64| Stats {
+			crc_error,
+			..Default::default()
+		};
+
+		let mut log = Log::default();
+		log.sample(sample(0));
+		log.sample(sample(2));
+		log.sample(sample(2));
+		log.finish(&sample(3));
+
+		logs_assert(|lines: &[&str]| {
+			let dropped: Vec<_> = lines.iter().filter(|line| line.contains("bad CRC")).collect();
+			match dropped.as_slice() {
+				[first, second] if first.contains("crc_error=2") && second.contains("crc_error=3") => Ok(()),
+				_ => Err(format!("expected one line per move, got {dropped:?}")),
+			}
+		});
 	}
 }

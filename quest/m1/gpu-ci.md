@@ -47,7 +47,7 @@ Public API: none. Wire: none.
 
 ## Required
 
-- A self-hosted runner is registered for moq-dev/moq on the maintainer's host, with the NVIDIA driver
+- [A self-hosted NVIDIA runner is registered](/quest/m1/gpu-runner.md) - the host the nightly job runs on
 
 ## Related
 
