@@ -1392,6 +1392,8 @@ impl Group {
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
 		loop {
 			if self.end.is_some_and(|end| self.index >= end) {
+				// Raising the cap re-registers the demand on the next read.
+				self.waiting = None;
 				return Poll::Ready(Ok(None));
 			}
 			if !ready!(self.poll_current(waiter))? {
@@ -1429,6 +1431,8 @@ impl Group {
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
 		loop {
 			if self.end.is_some_and(|end| self.index >= end) {
+				// Raising the cap re-registers the demand on the next read.
+				self.waiting = None;
 				return Poll::Ready(Ok(None));
 			}
 			if !ready!(self.poll_current(waiter))? {
@@ -5273,6 +5277,34 @@ mod test {
 		assert_eq!(read(&mut clone), b"tail");
 		assert!(clone.read_frame().await.unwrap().is_none());
 		assert!(track_b.subscription().is_none(), "the finished group releases demand");
+	}
+
+	/// A reader that stops at its cap may be retained, so the cap releases the demand
+	/// on the replacement rather than the drop.
+	#[tokio::test(start_paused = true)]
+	async fn capped_read_releases_replacement_demand() {
+		let (track_a, consumer_a) = track_pair("a");
+		let (track_b, consumer_b) = track_pair("b");
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"head".to_vec()).unwrap();
+		let mut reading = sub.recv_group().await.unwrap().unwrap();
+		drop(sub);
+		assert_eq!(read(&mut reading), b"head");
+
+		producer.takeover(&consumer_b).unwrap();
+		track_a.abort(Error::Dropped).unwrap();
+		let mut copy = track_b.create_group(group::Info { sequence: 0 }).unwrap();
+		copy.write_frame(Timestamp::ZERO, b"head".to_vec()).unwrap();
+		copy.write_frame(Timestamp::ZERO, b"mid".to_vec()).unwrap();
+		reading.set_frames(..2);
+		assert_eq!(read(&mut reading), b"mid");
+		assert!(track_b.subscription().is_some(), "the read still holds demand");
+
+		assert!(reading.read_frame().now_or_never().unwrap().unwrap().is_none());
+		assert!(track_b.subscription().is_none(), "the cap releases demand");
 	}
 
 	/// `finished()` resolves when the seam's covering route skip-declared the
