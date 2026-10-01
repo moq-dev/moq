@@ -43,4 +43,4 @@ A published API break, if the chosen shape requires one, goes through dev.
 
 ## Related
 
-- [Browser archive](/quest/m1/archive/browser.md) - supplies memory or OPFS archive data through this generic request surface
+- [Browser archive](/quest/m2/archive-browser.md) - supplies memory or OPFS archive data through this generic request surface

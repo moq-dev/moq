@@ -2,14 +2,17 @@
 //!
 //! Wraps [`rubato`] with a small interleaved-`f32` interface so the
 //! producer/consumer doesn't have to convert to planar on every call.
-//! The resampler keeps the channel layout unchanged; [`remix`] converts mono
-//! and stereo after sample-rate conversion.
+//! The resampler keeps the channel layout unchanged; [`Remix`] converts between
+//! layouts after sample-rate conversion.
+
+use std::f32::consts::FRAC_1_SQRT_2;
 
 use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{
 	Async, FixedAsync, Resampler as RubatoTrait, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 
+use crate::layout::Speaker;
 use crate::{Error, Layout};
 
 #[derive(Debug, thiserror::Error)]
@@ -301,49 +304,146 @@ impl Resampler {
 	}
 }
 
-/// Convert between known layouts without assigning positions to discrete channels.
-pub(crate) fn remix(samples: &[f32], input: Layout, output: Layout) -> Result<Vec<f32>, Error> {
-	validate_remix(input, output)?;
-	match (input, output) {
-		(input, output) if input == output => Ok(samples.to_vec()),
-		(Layout::Mono, Layout::Stereo) => {
-			let mut output = Vec::with_capacity(samples.len() * 2);
-			for &sample in samples {
-				output.extend_from_slice(&[sample, sample]);
+/// A channel mix from one layout to another, each output channel a weighted sum
+/// of the input channels.
+///
+/// Refuses to give discrete channels speaker positions, though it will drop
+/// them from named channels.
+///
+/// Downmixing uses the ITU-R BS.775 coefficients: center and surrounds fold into
+/// the front pair at -3 dB and the LFE is dropped. Upmixing leaves the speakers
+/// the input lacks silent. Mono is the exception both ways: it plays at full
+/// level from both front speakers when there is no center, and a mono output
+/// averages the stereo downmix.
+pub(crate) struct Remix {
+	inputs: usize,
+	outputs: usize,
+	/// One row of `inputs` weights per output channel.
+	weights: Vec<f32>,
+}
+
+impl Remix {
+	pub(crate) fn new(input: Layout, output: Layout) -> Result<Self, Error> {
+		input.validate()?;
+		output.validate()?;
+
+		let (inputs, outputs) = (input.channels() as usize, output.channels() as usize);
+		// Dropping speaker positions is always safe; inventing them is not.
+		let unchanged = input == output || output == Layout::Discrete(inputs as u32);
+		let weights = match (input.speakers(), output.speakers()) {
+			_ if unchanged => (0..outputs)
+				.flat_map(|o| (0..inputs).map(move |i| if i == o { 1.0 } else { 0.0 }))
+				.collect(),
+			(Some(from), Some(to)) => weights(from, to),
+			_ => {
+				return Err(Error::Unsupported(format!(
+					"cannot convert audio layout {input:?} to {output:?} without speaker positions"
+				)));
 			}
-			Ok(output)
+		};
+
+		Ok(Self {
+			inputs,
+			outputs,
+			weights,
+		})
+	}
+
+	/// Mix whole interleaved input frames into `output`, which holds as many
+	/// frames. Never allocates, so the audio thread can call it.
+	pub(crate) fn apply(&self, input: &[f32], output: &mut [f32]) {
+		for (frame, out) in input
+			.chunks_exact(self.inputs)
+			.zip(output.chunks_exact_mut(self.outputs))
+		{
+			for (sample, row) in out.iter_mut().zip(self.weights.chunks_exact(self.inputs)) {
+				*sample = row.iter().zip(frame).map(|(weight, input)| weight * input).sum();
+			}
 		}
-		(Layout::Stereo, Layout::Mono) => Ok(samples
-			.as_chunks::<2>()
-			.0
-			.iter()
-			.map(|pair| (pair[0] + pair[1]) * 0.5)
-			.collect()),
-		_ => Err(Error::Unsupported(format!(
-			"cannot convert audio layout {input:?} to {output:?} without speaker positions"
-		))),
+	}
+
+	/// Mix whole interleaved input frames into a new buffer.
+	pub(crate) fn process(&self, input: &[f32]) -> Vec<f32> {
+		let mut output = vec![0.0; input.len() / self.inputs * self.outputs];
+		self.apply(input, &mut output);
+		output
 	}
 }
 
-/// Check that [`remix`] can convert between two layouts.
-pub(crate) fn validate_remix(input: Layout, output: Layout) -> Result<(), Error> {
-	input.validate()?;
-	output.validate()?;
-	if input == output
-		|| matches!(
-			(input, output),
-			(Layout::Mono, Layout::Stereo) | (Layout::Stereo, Layout::Mono)
-		) {
-		return Ok(());
+/// The weights mixing `input` speakers into `output` speakers, one row per output.
+fn weights(input: &[Speaker], output: &[Speaker]) -> Vec<f32> {
+	use Speaker::*;
+
+	// The only layout without a front pair. Average the stereo downmix rather
+	// than invent a center weight for every speaker.
+	if output == [FrontCenter] && input != [FrontCenter] {
+		let stereo = weights(input, &[FrontLeft, FrontRight]);
+		let (left, right) = stereo.split_at(input.len());
+		return left.iter().zip(right).map(|(l, r)| (l + r) * 0.5).collect();
 	}
-	Err(Error::Unsupported(format!(
-		"cannot convert audio layout {input:?} to {output:?} without speaker positions"
-	)))
+
+	let mut weights = vec![0.0; output.len() * input.len()];
+	let has = |speaker| output.contains(&speaker);
+
+	for (i, &speaker) in input.iter().enumerate() {
+		let mut feed = |to: Speaker, weight: f32| {
+			if let Some(o) = output.iter().position(|s| *s == to) {
+				weights[o * input.len() + i] += weight;
+			}
+		};
+
+		if has(speaker) {
+			feed(speaker, 1.0);
+			continue;
+		}
+
+		match speaker {
+			FrontCenter => {
+				let weight = if input == [FrontCenter] { 1.0 } else { FRAC_1_SQRT_2 };
+				feed(FrontLeft, weight);
+				feed(FrontRight, weight);
+			}
+			Lfe => {}
+			SideLeft | BackLeft | SideRight | BackRight => {
+				let (front, side, back) = match speaker {
+					SideLeft | BackLeft => (FrontLeft, SideLeft, BackLeft),
+					_ => (FrontRight, SideRight, BackRight),
+				};
+				// Side and back are the same surround to a layout with only one of them.
+				let other = if speaker == side { back } else { side };
+				if has(other) {
+					feed(other, 1.0);
+				} else {
+					feed(front, FRAC_1_SQRT_2);
+				}
+			}
+			BackCenter => {
+				if has(BackLeft) {
+					feed(BackLeft, FRAC_1_SQRT_2);
+					feed(BackRight, FRAC_1_SQRT_2);
+				} else if has(SideLeft) {
+					feed(SideLeft, FRAC_1_SQRT_2);
+					feed(SideRight, FRAC_1_SQRT_2);
+				} else {
+					feed(FrontLeft, 0.5);
+					feed(FrontRight, 0.5);
+				}
+			}
+			// Every output but mono, handled above, has a front pair.
+			FrontLeft | FrontRight => unreachable!("{output:?} has no front pair"),
+		}
+	}
+
+	weights
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	fn remix(samples: &[f32], input: Layout, output: Layout) -> Result<Vec<f32>, Error> {
+		Ok(Remix::new(input, output)?.process(samples))
+	}
 
 	/// `frames` into a stream at `rate`, as a timestamp in the source's own scale.
 	fn at(frames: u64, rate: u64) -> moq_net::Timestamp {
@@ -547,5 +647,106 @@ mod tests {
 			remix(&[1.0, 3.0, 2.0, 4.0], Layout::Stereo, Layout::Mono).unwrap(),
 			[2.0, 3.0]
 		);
+	}
+
+	/// One frame of 5.1 with a distinct level per speaker, in canonical order.
+	const FIVE_ONE: [f32; 6] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
+
+	fn close(got: &[f32], want: &[f32]) {
+		assert_eq!(got.len(), want.len(), "{got:?} vs {want:?}");
+		for (g, w) in got.iter().zip(want) {
+			assert!((g - w).abs() < 1e-6, "{got:?} vs {want:?}");
+		}
+	}
+
+	#[test]
+	fn remix_downmixes_five_one_to_stereo_by_bs775() {
+		let h = FRAC_1_SQRT_2;
+		let [l, r, c, _lfe, ls, rs] = FIVE_ONE;
+		close(
+			&remix(&FIVE_ONE, Layout::FivePointOne, Layout::Stereo).unwrap(),
+			&[l + h * c + h * ls, r + h * c + h * rs],
+		);
+	}
+
+	#[test]
+	fn remix_downmixes_five_one_to_mono_through_stereo() {
+		let stereo = remix(&FIVE_ONE, Layout::FivePointOne, Layout::Stereo).unwrap();
+		close(
+			&remix(&FIVE_ONE, Layout::FivePointOne, Layout::Mono).unwrap(),
+			&[(stereo[0] + stereo[1]) * 0.5],
+		);
+	}
+
+	#[test]
+	fn remix_upmixes_stereo_into_the_front_pair() {
+		close(
+			&remix(&[0.25, 0.75], Layout::Stereo, Layout::FivePointOne).unwrap(),
+			&[0.25, 0.75, 0.0, 0.0, 0.0, 0.0],
+		);
+	}
+
+	#[test]
+	fn remix_upmixes_mono_into_the_center() {
+		close(
+			&remix(&[0.5], Layout::Mono, Layout::FivePointOne).unwrap(),
+			&[0.0, 0.0, 0.5, 0.0, 0.0, 0.0],
+		);
+		// Quad has no center, so mono plays from both fronts as it does in stereo.
+		close(
+			&remix(&[0.5], Layout::Mono, Layout::Quad).unwrap(),
+			&[0.5, 0.5, 0.0, 0.0],
+		);
+	}
+
+	/// 7.1 to 5.1 folds the back pair into the sides at full level, since a 5.1
+	/// surround pair is the only surround it has.
+	#[test]
+	fn remix_folds_back_into_side_surrounds() {
+		let seven = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
+		close(
+			&remix(&seven, Layout::SevenPointOne, Layout::FivePointOne).unwrap(),
+			&[0.1, 0.2, 0.3, 0.4, 0.5 + 0.7, 0.6 + 0.8],
+		);
+	}
+
+	#[test]
+	fn remix_refuses_positions_it_would_invent() {
+		for (input, output) in [
+			(Layout::Discrete(6), Layout::Stereo),
+			(Layout::Mono, Layout::Discrete(2)),
+			(Layout::Discrete(0), Layout::Discrete(0)),
+		] {
+			assert!(
+				matches!(Remix::new(input, output), Err(Error::Unsupported(_))),
+				"{input:?} -> {output:?}"
+			);
+		}
+
+		assert_eq!(
+			remix(&[1.0, 2.0, 3.0], Layout::Discrete(3), Layout::Discrete(3)).unwrap(),
+			[1.0, 2.0, 3.0]
+		);
+		assert_eq!(
+			remix(&[1.0, 2.0, 3.0], Layout::TwoPointOne, Layout::Discrete(3)).unwrap(),
+			[1.0, 2.0, 3.0]
+		);
+		assert!(Remix::new(Layout::Discrete(3), Layout::TwoPointOne).is_err());
+	}
+
+	/// Every pair of named layouts converts, and the mix is sized to the output.
+	#[test]
+	fn remix_converts_between_every_named_layout() {
+		let layouts: Vec<Layout> = (1..=8)
+			.map(|n| Layout::from_channels(n).unwrap())
+			.chain([Layout::ThreePointZero, Layout::FourPointZero])
+			.collect();
+		for &input in &layouts {
+			for &output in &layouts {
+				let frame = vec![0.5; input.channels() as usize * 2];
+				let mixed = remix(&frame, input, output).unwrap();
+				assert_eq!(mixed.len(), output.channels() as usize * 2, "{input:?} -> {output:?}");
+			}
+		}
 	}
 }

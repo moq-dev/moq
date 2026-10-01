@@ -125,6 +125,36 @@ impl Muxer {
 		Ok(self)
 	}
 
+	/// Synthesize missing video sample durations at `framerate`, a newer estimate than the
+	/// config this muxer was built from.
+	///
+	/// Only the fallback cadence follows it: the timescale, and so the init segment, stays the
+	/// one the original config chose. The cadence snaps to whole ticks at that timescale (an NTSC
+	/// rate is fractional ticks at 90 kHz, which would otherwise fail to mux as inexact). Ignored
+	/// for audio, for a missing, non-finite or non-positive rate, and for one whose frame rounds
+	/// to zero ticks or past `trun`'s 32-bit sample duration.
+	pub fn with_framerate(mut self, framerate: Option<f64>) -> Self {
+		if !matches!(self.kind, Kind::Video(_)) {
+			return self;
+		}
+		let Some(fps) = framerate.filter(|fps| fps.is_finite() && *fps > 0.0) else {
+			return self;
+		};
+		let timescale = self.timescale.as_u64();
+		let ticks = (timescale as f64 / fps).round();
+		if !(1.0..=f64::from(u32::MAX)).contains(&ticks) {
+			return self;
+		}
+		// Exactly `ticks / timescale`, rounded to the nanosecond, so the fallback snaps back to
+		// `ticks` within the muxer's one-nanosecond tolerance.
+		let timescale = u128::from(timescale);
+		let nanos = (ticks as u128 * 1_000_000_000 + timescale / 2) / timescale;
+		if let Ok(nanos) = u64::try_from(nanos) {
+			self.default_frame = Duration::from_nanos(nanos);
+		}
+		self
+	}
+
 	/// The rendition's catalog container, whichever kind of track this is.
 	fn catalog_container(&self) -> &CatalogContainer {
 		match &self.kind {
@@ -580,6 +610,61 @@ mod tests {
 		)
 		.unwrap();
 		assert_eq!(decoded[0].timestamp.as_micros(), 33_333);
+	}
+
+	// A rendition built before the publisher's framerate estimate settled keeps its 90 kHz
+	// timescale, but a duration-less frame follows the newer cadence.
+	#[test]
+	fn with_framerate_updates_the_fallback_without_the_timescale() {
+		let muxer = video_muxer_without_framerate().with_framerate(Some(60.0));
+		assert_eq!(muxer.timescale().as_u64(), 90_000);
+		let fragment = muxer.fragment(0, &[frame(0, true)]).unwrap();
+		assert_eq!(super::super::sample_durations(&fragment), vec![Some(1_500)]);
+	}
+
+	// An NTSC rate is fractional ticks at a timescale that doesn't divide it (1501.5 at 90 kHz),
+	// so the cadence snaps to whole ticks rather than failing the fragment as inexact.
+	#[test]
+	fn with_framerate_snaps_a_fractional_cadence_to_whole_ticks() {
+		for (fps, ticks) in [(60_000.0 / 1001.0, 1_502), (24_000.0 / 1001.0, 3_754)] {
+			let muxer = video_muxer_without_framerate().with_framerate(Some(fps));
+			let fragment = muxer.fragment(0, &[frame(0, true)]).unwrap();
+			assert_eq!(super::super::sample_durations(&fragment), vec![Some(ticks)], "{fps}");
+		}
+
+		// 30 kHz doesn't divide a second's nanoseconds either: 1251.25 ticks rounds to 1251.
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.framerate = Some(30.0);
+		let muxer = Muxer::video(&config).unwrap().with_framerate(Some(24_000.0 / 1001.0));
+		assert_eq!(muxer.timescale().as_u64(), 30_000);
+		let fragment = muxer.fragment(0, &[frame(0, true)]).unwrap();
+		assert_eq!(super::super::sample_durations(&fragment), vec![Some(1_251)]);
+	}
+
+	#[test]
+	fn with_framerate_ignores_an_unusable_rate() {
+		// 90 kHz at 1e-6 fps is 9e10 ticks per frame, past trun's 32 bits; at 1e9 fps it is 0.
+		for fps in [
+			None,
+			Some(0.0),
+			Some(-30.0),
+			Some(f64::NAN),
+			Some(f64::INFINITY),
+			Some(1e-6),
+			Some(1e9),
+		] {
+			let muxer = video_muxer_without_framerate().with_framerate(fps);
+			let fragment = muxer.fragment(0, &[frame(0, true)]).unwrap();
+			// The 30 fps fallback at 90 kHz.
+			assert_eq!(super::super::sample_durations(&fragment), vec![Some(3_000)], "{fps:?}");
+		}
+	}
+
+	fn video_muxer_without_framerate() -> Muxer {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		Muxer::video(&config).unwrap()
 	}
 
 	#[test]

@@ -37,7 +37,7 @@ function groupStream(subscriber: Subscriber, sequence: number) {
 	const readable = new ReadableStream<Uint8Array>({ start: (c) => (controller = c) });
 	const handled = subscriber.runGroup(
 		new GroupMessage({ subscribe: 0n, sequence }),
-		new Reader(readable, undefined, undefined),
+		new Reader(readable, undefined, subscriber.version),
 	);
 	return {
 		write: (payload: string) => controller.enqueue(frame(payload)),
@@ -57,14 +57,14 @@ async function subscribed(version: Version, maxAge = GRACE, groups?: Groups) {
 	const subscriber = new Subscriber(pair.client, version, randomHop());
 	const reader = subscriber.consume(Path.from("room")).track("video").subscribe({ maxAge, groups });
 
-	const info = await Stream.accept(pair.server);
+	const info = await Stream.accept(pair.server, version);
 	if (!info) throw new Error("the subscriber never asked for TRACK_INFO");
 	expect(await info.reader.u53()).toBe(StreamId.Track);
 	await TrackMessage.decode(info.reader, version);
 	await new TrackInfo({ maxAge: 60_000 }).encode(info.writer, version);
 	info.close();
 
-	const sub = await Stream.accept(pair.server);
+	const sub = await Stream.accept(pair.server, version);
 	if (!sub) throw new Error("the subscriber never subscribed");
 	expect(await sub.reader.u53()).toBe(StreamId.Subscribe);
 	await Subscribe.decode(sub.reader, version);

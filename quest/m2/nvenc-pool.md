@@ -15,4 +15,10 @@ quest and report the numbers.
 frames) on every `encode`, and frees them all at the end of the call. Keep a
 small pool sized by the frames in flight, which is one today since B-frames
 are off. Re-register a CUDA resource only when its pointer changes. Measure
-with the `encode-presets` example from #4099.
+with the `encode-presets` example from #4099, which so far exists only on the
+[OBS moq-video](/quest/m1/obs-moq-video/README.md) line; if that line has not
+merged, run it from that branch or add an encode benchmark on main instead.
+
+## Related
+
+- [OBS moq-video](/quest/m1/obs-moq-video/README.md) - carries the `encode-presets` example this measures with

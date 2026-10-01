@@ -37,7 +37,7 @@ sample keeps it climbing the buckets while its frontier stands still. While
 the source is paused nothing is produced, so a tick carries no weight and
 the histogram does not move; a viewer's lag stays whatever it was until its
 frontier catches up, and reappears in the buckets once production resumes. This slice moves the frontier once per group;
-the [frame-granularity quest](/quest/m1/qos/starvation-frames.md) moves it
+the [frame-granularity quest](/quest/m2/starvation-frames.md) moves it
 per frame without changing the wire shape or the sampler, so fix both here.
 
 Aggregate as a byte-weighted cumulative histogram on `Traffic`, on the
@@ -81,8 +81,6 @@ sum into one row; the aggregate consumer sums two nodes bucket by bucket.
 
 ## Related
 
-- [Starvation at frame granularity](/quest/m1/qos/starvation-frames.md) -
-  moves the frontier at every frame end once `poll_acked` is released
 - [Publisher timeliness](/quest/m1/qos/publisher-timeliness.md) - the ingress
   mirror on the `Role::Subscriber` rows
 - [Media stats](/quest/m1/stats/README.md) - receiver-side evidence

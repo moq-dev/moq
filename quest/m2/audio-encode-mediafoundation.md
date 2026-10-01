@@ -20,10 +20,4 @@ behind the encode seam on Windows.
 
 ## Required
 
-- [Encode seam](/quest/m1/audio-codecs/encode-backend.md) - the candidate order this backend joins
-- [Layout](/quest/m1/audio-codecs/layout.md) - the input layout the encoder accepts
 - [Media Foundation decode](/quest/m2/audio-decode-mediafoundation.md) - the round-trip regression decodes through it
-
-## Related
-
-- [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - where the Windows run happens

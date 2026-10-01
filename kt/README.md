@@ -52,7 +52,7 @@ The `dev.moq` package is intentionally thin: Kotlin has extension functions, so 
 - **Fetched media**: `fetchMediaGroup(...).frames()` streams the decoded frames of one retained group, then completes.
 - **Duration extensions** (`Durations.kt`): the FFI carries microseconds as integers, so `stats.rtt`, `backoff.initial`, `frame.timestamp`, and their siblings read back as a `kotlin.time.Duration`.
 - **`logLevel(...)`**: configures native Rust tracing without importing the raw bindings package.
-- **Raw datagrams**: `TrackProducer.appendDatagram(Frame(payload, timestampUs))` sends one best-effort frame and returns its sequence; `TrackConsumer.recvDatagram()` and `datagrams()` receive them. Payloads are capped at 1200 bytes, require a datagram-capable transport plus lite-05 or newer moq-lite, and have no stream fallback.
+- **Raw datagrams**: `TrackProducer.appendDatagram(Frame(payload, timestampUs))` sends one best-effort frame and returns its sequence; `TrackConsumer.recvDatagram()` and `datagrams()` receive them. Payloads are capped at 1200 bytes, require a datagram-capable transport plus lite-05 or newer moq-lite or moq-transport, and have no stream fallback.
 - **`MoqException.isShutdown`** (`Errors.kt`): true for the graceful `Cancelled`/`Closed` cases.
 
 ## Versioning
@@ -89,7 +89,6 @@ kt/
     src/
       jvmAndAndroidMain/kotlin/dev/moq/ Wrapper sources (Moq, Server, Aliases, Flows, Durations, Errors)
       jvmAndAndroidTest/                Facade smoke test
-  scripts/                  check.sh, package.sh
 ```
 
 The native/UniFFI layer stays in a single `dev.moq:moq-ffi` artifact because uniffi-linked libraries can't be split across separately packaged artifacts (the Python `moq-rs` wheel is one umbrella for the same reason). That constraint is about the *native* layer; the pure-Kotlin `dev.moq:moq` wrapper sits cleanly on top of it as its own artifact because it ships no native code.

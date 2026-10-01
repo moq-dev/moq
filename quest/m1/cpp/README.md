@@ -2,7 +2,7 @@
 
 ## Goal
 
-A C++ developer adds one registry line or one tarball, includes `<moq/moq.hpp>`,
+A C++ developer adds one release tarball, includes `<moq/moq.hpp>`,
 and holds the whole moq-ffi surface (session, origin, broadcast, track, group,
 media, audio and video) as RAII objects whose async operations return
 cancellable futures, with no `user_data` plumbing, no handle integers, and no
@@ -41,11 +41,12 @@ One library, C++17 floor (OBS's baseline), feature-gated extras: `co_await`
 on a future under `__cpp_impl_coroutine`, `std::expected` under
 `__cpp_lib_expected`. Never a second library per standard.
 
-Distribution is all of: a release tarball with a CMake package config and
-pkg-config file (mirroring `libmoq.yml`), a vcpkg registry we own, and a Conan
-remote we own, the latter two fetching the prebuilt tarball so consumers never
-need a Rust toolchain or the bindgen fork. vcpkg lands first; the Conan recipe
-reads the same release manifest so a release bumps both.
+Distribution is a release tarball with a CMake package config and pkg-config
+file (mirroring `libmoq.yml`), so consumers never need a Rust toolchain or the
+bindgen fork. Decided in the 2026-09-30 audit: this line promises the tarball
+only. A [vcpkg registry](/quest/m2/cpp-vcpkg.md) (m2) and a
+[Conan remote](/quest/m3/cpp-conan.md) (m3) fetch the same tarball later and
+stay deferred.
 
 Confirmed in [#4100](https://github.com/moq-dev/moq/pull/4100):
 
@@ -74,7 +75,7 @@ Confirmed in [#4100](https://github.com/moq-dev/moq/pull/4100):
 
 ## Related
 
-- [C# through moq-ffi](/quest/m2/cs/README.md) - the same recipe with NordSecurity's C# generator
-- [Unreal prototype](/quest/m2/unreal.md) - a UE5 module consumes the package with exceptions disabled
 - [vcpkg registry](/quest/m2/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests
-- [Conan remote](/quest/m2/cpp-conan.md) - a remote we own serves the same tarball to `conan install`
+- [Conan remote](/quest/m3/cpp-conan.md) - a remote we own serves the prebuilt package to Conan
+- [C# through moq-ffi](/quest/m3/cs/README.md) - the same recipe with NordSecurity's C# generator
+- [Unreal prototype](/quest/m3/unreal.md) - a UE5 module consumes the package with exceptions disabled

@@ -66,6 +66,7 @@ on:
     types: [opened, synchronize, reopened, closed]
     paths:
       - "cpp/obs/**"
+      - "sh/obs/**"
       - "rs/libmoq/**"
       - "doc/lib/c/**"
       - "doc/lib/samples.sh"
@@ -159,8 +160,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
+      - uses: ./.github/actions/just
+
       - name: Build
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-        run: ./cpp/obs/build.sh --target "$TARGET" --output "$RUNNER_TEMP/obs"
+        run: just obs package --target "$TARGET" --output "$RUNNER_TEMP/obs"

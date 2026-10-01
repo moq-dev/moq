@@ -22,7 +22,7 @@ pre-merge `just check` never runs moq-video's `capture` tests:
   it depends on [ALSA link](/quest/m1/capture-alsa-link.md). Once libasound
   loads at runtime, the default costs no system library.
 - Delete the special capture gate (`rs capture`, `capture-test`, and the
-  capture branch in `sh/rs/select.sh` on the tooling line) once default
+  capture branch in `sh/rs/select.sh`) once default
   `just check` covers it. Keep the platform jobs (`just rs macos`,
   `just rs windows`).
 - Update the Cargo feature comments, moq-cli's `capture` feature (it may
@@ -34,5 +34,4 @@ tests, and a `default-features = false` consumer (for example
 
 ## Required
 
-- [Tooling](/quest/m1/tooling/README.md) - rewrites the capture gate this deletes
 - [ALSA link](/quest/m1/capture-alsa-link.md) - moq-audio capture can't be on by default while it links libasound at build time
