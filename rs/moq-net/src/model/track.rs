@@ -1749,22 +1749,7 @@ impl Producer {
 		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
 
-		let prev = &self.prev_subscription;
-		let mut combined = None;
-		let mut guard = ready!(subs.poll(waiter, |subs| {
-			let next = combined_subscription(subs, bound, waiter);
-			if &next == prev {
-				Poll::Pending
-			} else {
-				combined = next;
-				Poll::Ready(())
-			}
-		}));
-		// The aggregate changed: prune any closed subscribers now that we hold the lock.
-		guard.retain(|sub| !sub.is_closed());
-		drop(guard);
-		self.prev_subscription = combined.clone();
-		Poll::Ready(Ok(combined))
+		poll_combined_changed(&subs, bound, &mut self.prev_subscription, waiter).map(Ok)
 	}
 
 	/// Poll for the producer becoming unused (every consumer dropped).
@@ -2008,19 +1993,60 @@ impl Drop for Alive {
 	}
 }
 
-/// Aggregate every live subscriber's preferences into the most demanding request.
+/// Poll until the aggregate across `subs` differs from `prev`, then store and return it.
+///
+/// Departed subscribers are pruned whenever the scan meets one, even when the aggregate
+/// holds. Churn with a steady viewer's preferences never changes it, so otherwise every
+/// wake would walk every departed entry the list has room for since its peak.
+fn poll_combined_changed(
+	subs: &kio::Shared<Subscriptions>,
+	bound: Option<Duration>,
+	prev: &mut Option<Subscription>,
+	waiter: &kio::Waiter,
+) -> Poll<Option<Subscription>> {
+	loop {
+		let mut next = None;
+		let mut departed = false;
+		let mut guard = ready!(subs.poll(waiter, |subs| {
+			(next, departed) = combined_subscription(subs, bound, waiter);
+			if departed || next != *prev {
+				Poll::Ready(())
+			} else {
+				Poll::Pending
+			}
+		}));
+		if departed {
+			guard.retain(|sub| !sub.is_closed());
+		}
+		drop(guard);
+		if next != *prev {
+			*prev = next.clone();
+			return Poll::Ready(next);
+		}
+		// Only pruned: a ready poll skips registering, so poll again to park on the list.
+	}
+}
+
+/// Aggregate every live subscriber's preferences into the most demanding request, and
+/// report whether any departed subscriber is still listed.
 ///
 /// Read-only: iterates the subscriptions immutably and registers `waiter` on each, so a
 /// preference update (or a subscriber dropping) wakes the caller's poll. Callers decide
 /// readiness from the returned value, then prune closed subscribers through the `Mut`.
-fn combined_subscription(subs: &Subscriptions, bound: Option<Duration>, waiter: &kio::Waiter) -> Option<Subscription> {
+fn combined_subscription(
+	subs: &Subscriptions,
+	bound: Option<Duration>,
+	waiter: &kio::Waiter,
+) -> (Option<Subscription>, bool) {
 	let mut combined = None;
+	let mut departed = false;
 	for sub in subs.iter() {
 		// A closed consumer means the subscriber dropped: it holds no live demand.
 		// `Consumer::poll` evaluates the closure before the closed flag, so it would
 		// still replay the final value into the aggregate; skip it explicitly so a
 		// departed subscriber can't keep the aggregate pinned to its last request.
 		if sub.is_closed() {
+			departed = true;
 			continue;
 		}
 		// Arm both waiters explicitly. `poll` registers on the value channel only
@@ -2035,7 +2061,7 @@ fn combined_subscription(subs: &Subscriptions, bound: Option<Duration>, waiter: 
 			combined = Some(merged);
 		}
 	}
-	clamp_combined(combined, bound)
+	(clamp_combined(combined, bound), departed)
 }
 
 /// A non-blocking aggregate of the current subscriptions, without arming any waiter.
@@ -2109,13 +2135,24 @@ fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Op
 /// Register a subscription if the track is live: clone the shared list out of the
 /// state, release the track lock, then push under the list's own lock. A closed
 /// track skips the push; nothing aggregates the preferences anymore.
+///
+/// Departed subscribers are pruned here too, so the list stays bounded on a track whose
+/// aggregate nobody polls. Pruning on every push would make a burst of N joins O(N^2),
+/// so, like `kio::WaiterList::register`, it only sweeps when the list is about to grow.
 fn register_subscription(state: kio::Ref<'_, TrackState>, subscription: &kio::Producer<Subscription>) {
 	if state.is_closed() {
 		return;
 	}
 	let subs = state.subscriptions.clone();
 	drop(state);
-	subs.lock().push(subscription.consume());
+	let mut subs = subs.lock();
+	if subs.len() == subs.capacity() {
+		subs.retain(|sub| !sub.is_closed());
+		// Leave at least half free, so each sweep is paid for by the pushes before it.
+		let live = subs.len();
+		subs.reserve(live);
+	}
+	subs.push(subscription.consume());
 }
 
 /// A weak reference to a track that doesn't prevent auto-close.
@@ -4431,22 +4468,7 @@ impl Request {
 		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
 
-		let prev = &self.prev_subscription;
-		let mut combined = None;
-		let mut guard = ready!(subs.poll(waiter, |subs| {
-			let next = combined_subscription(subs, bound, waiter);
-			if &next == prev {
-				Poll::Pending
-			} else {
-				combined = next;
-				Poll::Ready(())
-			}
-		}));
-		// The aggregate changed: prune any closed subscribers now that we hold the lock.
-		guard.retain(|sub| !sub.is_closed());
-		drop(guard);
-		self.prev_subscription = combined.clone();
-		Poll::Ready(combined)
+		poll_combined_changed(&subs, bound, &mut self.prev_subscription, waiter)
 	}
 
 	pub(super) fn weak(&self) -> TrackWeak {
@@ -5561,6 +5583,44 @@ mod test {
 		let _b = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(10)));
 
 		assert_eq!(producer.subscription().unwrap().max_age, Duration::from_secs(2));
+	}
+
+	#[test]
+	fn churned_subscribers_do_not_accumulate() {
+		let producer = track_producer("test", None);
+		let consumer = producer.consume();
+		let _steady = producer.subscribe(None);
+
+		// Nobody polls the aggregate here, so registration alone has to bound the list.
+		for _ in 0..100 {
+			drop(producer.subscribe(None));
+			drop(consumer.subscribe(None));
+		}
+
+		// Registration sweeps only when the list is about to grow, so it holds a small
+		// multiple of the peak live count (2) rather than all 200 departures.
+		let subs = producer.state.read().subscriptions.clone();
+		let len = subs.read().len();
+		assert!(len <= 8, "departed subscribers accumulated: {len}");
+	}
+
+	#[test]
+	fn aggregate_poll_prunes_after_a_peak() {
+		let mut producer = track_producer("test", None);
+		let waiter = kio::Waiter::noop();
+		let _steady = producer.subscribe(None);
+		assert!(producer.poll_subscription_changed(&waiter).is_ready());
+
+		// A departed burst leaves room for many entries, and identical preferences never
+		// change the aggregate, so each wake has to prune what it walks.
+		drop((0..1000).map(|_| producer.subscribe(None)).collect::<Vec<_>>());
+		for _ in 0..100 {
+			drop(producer.subscribe(None));
+			assert!(producer.poll_subscription_changed(&waiter).is_pending());
+
+			let subs = producer.state.read().subscriptions.clone();
+			assert_eq!(subs.read().len(), 1, "the poll walked past departed subscribers");
+		}
 	}
 
 	/// Append a finished group presenting at `millis`, so the track carries a media

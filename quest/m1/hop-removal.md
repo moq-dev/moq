@@ -32,7 +32,7 @@ idle timeout (a failover service that retracts it, or active-active delivery
 to the relay). Neither is required to land this.
 
 Public API and wire: removes a CLI flag and the publisher's Hop setup
-parameter; lands with the line on `dev`.
+parameter; lands on `dev`, outside the cluster routing line (which lands on `main`).
 
 ## Required
 
