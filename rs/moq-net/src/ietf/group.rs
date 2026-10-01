@@ -702,9 +702,10 @@ mod tests {
 		assert!(flags.has_end);
 	}
 
-	/// Regression: a publisher-emitted Draft18 GroupHeader byte must satisfy the
-	/// subscriber's uni-stream classifier mask `(byte & 0x90) == 0x10`. Otherwise
-	/// the uni stream is dropped as UnexpectedStream and the data plane stalls.
+	/// Regression: a publisher-emitted Draft18 GroupHeader byte must match the
+	/// SUBGROUP_HEADER form `(byte & 0x90) == 0x10` and decode as flags, which is how
+	/// the uni-stream classifier recognizes it. Otherwise the uni stream is an unknown
+	/// type, which closes the session.
 	#[test]
 	fn test_draft18_group_header_passes_stream_classifier() {
 		let header = GroupHeader {
@@ -719,10 +720,14 @@ mod tests {
 		header.encode(&mut buf, Version::Draft18).unwrap();
 		let type_byte = buf[0] as u64;
 
-		// The check in session.rs::run_uni_group.
 		assert_eq!(
 			type_byte & 0x90,
 			0x10,
+			"draft-18 SUBGROUP_HEADER type 0x{type_byte:02x} is outside the SUBGROUP_HEADER form",
+		);
+		// The check in session.rs::UniType::classify.
+		assert!(
+			GroupFlags::decode(type_byte, Version::Draft18).is_ok(),
 			"draft-18 SUBGROUP_HEADER type 0x{type_byte:02x} not recognized by uni-stream classifier",
 		);
 	}

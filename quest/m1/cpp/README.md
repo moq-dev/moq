@@ -77,5 +77,4 @@ Confirmed in [#4100](https://github.com/moq-dev/moq/pull/4100):
 
 - [vcpkg registry](/quest/m2/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests
 - [Conan remote](/quest/m3/cpp-conan.md) - a remote we own serves the prebuilt package to Conan
-- [C# through moq-ffi](/quest/m3/cs/README.md) - the same recipe with NordSecurity's C# generator
 - [Unreal prototype](/quest/m3/unreal.md) - a UE5 module consumes the package with exceptions disabled

@@ -116,6 +116,8 @@ impl From<u16> for Info {
 pub(crate) struct Partial {
 	timestamp: Timestamp,
 	buf: FrameBuf,
+	// How much of `buf` has been charged to the cache so far.
+	charged: u64,
 }
 
 /// Shared group state. `pub(crate)` so [`frame`] handles can observe the abort flag
@@ -144,7 +146,8 @@ pub(crate) struct GroupState {
 	// its opener saw the payload, and only partly.
 	committed: usize,
 
-	// The total size (in bytes) of all cached frames plus any in-flight frame.
+	// The total size (in bytes) of all cached frames plus what the in-flight frame has
+	// written so far.
 	pub(crate) cache: u64,
 
 	// Mirrors `cache` into the track's shared cache pool, so the group's bytes count
@@ -175,9 +178,16 @@ pub(crate) struct GroupState {
 
 impl GroupState {
 	/// Content still available to a reader of this group.
+	///
+	/// Counts the in-flight frame at its declared size, like [`Self::content_range`]: a
+	/// reader that skips it misses the whole frame, however much has arrived.
 	fn content(&self) -> stats::Content {
+		let unwritten = self
+			.partial
+			.as_ref()
+			.map_or(0, |partial| partial.buf.size() as u64 - partial.charged);
 		stats::Content {
-			bytes: self.cache,
+			bytes: self.cache + unwritten,
 			frames: self.next_index.saturating_sub(self.offset) as u64,
 			groups: 1,
 			datagrams: 0,
@@ -203,7 +213,7 @@ impl GroupState {
 			&& self.committed < end
 			&& let Some(partial) = &self.partial
 		{
-			bytes += partial.buf.capacity() as u64;
+			bytes += partial.buf.size() as u64;
 		}
 
 		stats::Content {
@@ -236,7 +246,7 @@ impl GroupState {
 		{
 			self.charge.refresh();
 			let info = frame::Info {
-				size: p.buf.capacity() as u64,
+				size: p.buf.size() as u64,
 				timestamp: p.timestamp,
 			};
 			return Poll::Ready(Ok(Some((info, frame::Source::Partial(p.buf.clone())))));
@@ -280,6 +290,21 @@ impl GroupState {
 	fn would_overflow(&self, extra_frames: usize, extra_bytes: u64) -> bool {
 		self.next_index.saturating_sub(self.offset).saturating_add(extra_frames) > MAX_GROUP_FRAMES
 			|| self.cache.saturating_add(extra_bytes) > MAX_CACHE_BYTES
+	}
+
+	/// Charge the in-flight frame's bytes written since its last charge, as a write access.
+	///
+	/// Returns the coarse tick it stamped, like [`cache::Charge::add`].
+	fn charge_partial(&mut self) -> Option<u64> {
+		let written = match &mut self.partial {
+			Some(partial) => {
+				let written = partial.buf.written(Ordering::Acquire) as u64;
+				written - std::mem::replace(&mut partial.charged, written)
+			}
+			None => 0,
+		};
+		self.cache += written;
+		self.charge.add(written)
 	}
 
 	/// Drop the cached frames (and any in-flight tail) and release their pool charge.
@@ -592,54 +617,10 @@ impl Producer {
 	/// if the declared size exceeds the group's byte budget (refused before allocating)
 	/// or [`Error::TimestampMismatch`] if the timestamp can't be converted (overflow).
 	pub fn create_frame(&mut self, frame: frame::Info) -> Result<frame::Producer<'_>> {
-		let timestamp = frame
-			.timestamp
-			.convert(self.track.timescale)
-			.map_err(|_| Error::TimestampMismatch)?;
-		if frame.size > MAX_CACHE_BYTES {
-			return Err(Error::FrameTooLarge);
-		}
+		// The buffer allocates on its first write, so refusing the frame costs nothing.
 		let buf = FrameBuf::new(frame.size as usize);
-
-		let mut state = modify(&self.state)?;
-		if state.fin.is_some() {
-			return Err(Error::Closed);
-		}
-		if state.partial.is_some() {
-			return Err(Error::FrameOpen);
-		}
-		let next_index = state
-			.next_index
-			.checked_add(1)
-			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
-		if state.would_overflow(1, frame.size) {
-			return Err(self.abort_too_large(state));
-		}
-		state.cache += frame.size;
-		let now = state.charge.add(frame.size);
-		state.partial = Some(Partial {
-			timestamp,
-			buf: buf.clone(),
-		});
-		state.next_index = next_index;
-		// Opening the frame is enough: the header carries the timestamp, so the group's
-		// place in time is known before a single payload byte streams in.
-		state.stamp(timestamp);
-		drop(state);
-
-		// With the group lock released (lock order is track then group), settle
-		// eviction debt if enough has been written since the track last paid.
-		self.cache.settle(now);
-
-		// Ingress payload: one frame opened; its bytes are counted per chunk as the
-		// frame::Producer writes them.
-		self.stats.frames(1);
+		let info = self.open_frame(frame, &buf)?;
 		let meter = self.stats.clone();
-
-		let info = frame::Info {
-			size: frame.size,
-			timestamp,
-		};
 		Ok(frame::Producer::new(self, buf, info).with_meter(meter))
 	}
 
@@ -647,7 +628,30 @@ impl Producer {
 	/// stream a frame across polls and cannot hold the group borrowed inside their
 	/// state. The one-live-frame rule the borrow normally enforces becomes the
 	/// caller's promise; see [`frame::ProducerOwned`].
-	pub(crate) fn create_frame_owned(&mut self, frame: frame::Info) -> Result<frame::ProducerOwned> {
+	///
+	/// The declared size is the peer's claim, so the buffer is allocated up front only
+	/// while it fits the session's `budget`; otherwise it grows with the bytes received.
+	pub(crate) fn create_frame_owned(
+		&mut self,
+		frame: frame::Info,
+		budget: &frame::Budget,
+	) -> Result<frame::ProducerOwned> {
+		let size = frame.size as usize;
+		let reserved = budget.reserve(size);
+		let buf = match reserved {
+			Some(_) => FrameBuf::new(size),
+			None => FrameBuf::growing(size),
+		};
+		let info = self.open_frame(frame, &buf)?;
+		let meter = self.stats.clone();
+		Ok(frame::ProducerOwned::new(self.clone(), buf, info, reserved).with_meter(meter))
+	}
+
+	/// Open `buf` as the in-flight frame, returning its header in the track's timescale.
+	///
+	/// Its bytes are charged to the cache as they are written, not here: the declared
+	/// size is only a promise until they arrive.
+	fn open_frame(&mut self, frame: frame::Info, buf: &FrameBuf) -> Result<frame::Info> {
 		let timestamp = frame
 			.timestamp
 			.convert(self.track.timescale)
@@ -655,7 +659,6 @@ impl Producer {
 		if frame.size > MAX_CACHE_BYTES {
 			return Err(Error::FrameTooLarge);
 		}
-		let buf = FrameBuf::new(frame.size as usize);
 
 		let mut state = modify(&self.state)?;
 		if state.fin.is_some() {
@@ -668,14 +671,16 @@ impl Producer {
 			.next_index
 			.checked_add(1)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+		// Only one frame is ever in flight, so the declared size is the most the cache
+		// can grow by before the next check.
 		if state.would_overflow(1, frame.size) {
 			return Err(self.abort_too_large(state));
 		}
-		state.cache += frame.size;
-		let now = state.charge.add(frame.size);
+		let now = state.charge.record_write();
 		state.partial = Some(Partial {
 			timestamp,
 			buf: buf.clone(),
+			charged: 0,
 		});
 		state.next_index = next_index;
 		// Opening the frame is enough: the header carries the timestamp, so the group's
@@ -690,47 +695,39 @@ impl Producer {
 		// Ingress payload: one frame opened; its bytes are counted per chunk as the
 		// producer writes them.
 		self.stats.frames(1);
-		let meter = self.stats.clone();
 
-		let info = frame::Info {
+		Ok(frame::Info {
 			size: frame.size,
 			timestamp,
-		};
-		Ok(frame::ProducerOwned::new(self.clone(), buf, info).with_meter(meter))
+		})
 	}
 
 	/// Wake consumers parked on the group channel (called after a partial write).
 	pub(crate) fn frame_notify(&self) {
-		// The chunk that was just written is a write access: restart the retention
-		// clock so a straggler group streaming a large frame isn't expired
-		// mid-write (its bytes were already charged when the frame was created).
-		// `record_write` takes `&mut`, which marks the guard modified: kio only
-		// notifies on a mutably-accessed guard's release, and that notify is what
+		// The chunk that was just written is charged, and is a write access: restart the
+		// retention clock so a straggler group streaming a large frame isn't expired
+		// mid-write. `charge_partial` takes `&mut`, which marks the guard modified: kio
+		// only notifies on a mutably-accessed guard's release, and that notify is what
 		// delivers the chunk to parked readers.
-		let now = self
-			.state
-			.write()
-			.ok()
-			.and_then(|mut state| state.charge.record_write());
-		// The payload was charged when the frame opened, but a long streamed frame
-		// still counts as track activity for the independent expiry time gate.
+		let now = self.state.write().ok().and_then(|mut state| state.charge_partial());
+		// A long streamed frame also counts as track activity for the independent
+		// expiry time gate.
 		self.cache.settle(now);
 	}
 
 	/// Commit the in-flight frame as a completed frame (called by [`frame::Producer::finish`]).
 	pub(crate) fn frame_commit(&mut self, frame: Frame) -> Result<()> {
 		let mut state = modify(&self.state)?;
-		// Bytes were already counted against the cache (and the pool charge) when the
-		// frame was created; committing just moves the tail into the completed set.
+		// Completing the frame charges whatever it wrote since the last notify, and is a
+		// write access like any chunk, and the only one the payload is guaranteed to get:
+		// the wire ingest defers its chunk notifications to the poll boundary, so a tail
+		// that arrives and completes in one turn never reaches [`Self::frame_notify`].
+		// Without this, a group whose payload streamed in across an idle gap would expire
+		// the instant it finished.
+		let now = state.charge_partial();
 		state.partial = None;
 		state.frames.push_back(frame);
 		state.committed = state.next_index;
-		// Completing the frame is a write access like any chunk, and the only one the
-		// payload is guaranteed to get: the wire ingest defers its chunk notifications
-		// to the poll boundary, so a tail that arrives and completes in one turn never
-		// reaches [`Self::frame_notify`]. Without this, a group whose payload streamed
-		// in across an idle gap would expire the instant it finished.
-		let now = state.charge.record_write();
 		drop(state);
 
 		// With the group lock released (lock order is track then group), settle
@@ -773,6 +770,20 @@ impl Producer {
 	/// their buffers in memory forever; consumers that haven't drained yet surface the
 	/// abort error instead of the leftover cache.
 	pub fn abort(self, err: Error) -> Result<()> {
+		self.close_aborted(err)
+	}
+
+	/// Abort with `err` unless another handle still owns the group, so a retained clone
+	/// lets go without the unfinished-drop warning and never cuts off a live writer.
+	/// Sound without a lock: only an existing handle can mint another.
+	pub(crate) fn abort_if_last(&self, err: Error) -> Result<()> {
+		if Arc::strong_count(&self.alive) > 1 {
+			return Ok(());
+		}
+		self.close_aborted(err)
+	}
+
+	fn close_aborted(&self, err: Error) -> Result<()> {
 		let mut guard = modify(&self.state)?;
 		guard.abort = Some(err);
 		self.alive.aborted.store(true, Ordering::Release);
@@ -2551,5 +2562,92 @@ mod test {
 			timestamp: Timestamp::ZERO,
 		});
 		assert!(matches!(result, Err(Error::FrameTooLarge)));
+	}
+
+	fn sized(size: u64) -> frame::Info {
+		frame::Info {
+			size,
+			timestamp: Timestamp::ZERO,
+		}
+	}
+
+	/// A declared size costs the peer nothing, so the pool is charged as the bytes
+	/// arrive. Charging the declaration would let a peer evict the cache without
+	/// sending anything.
+	#[test]
+	fn frame_is_charged_as_written() {
+		let pool = cache::Pool::unbounded();
+		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+		let mut producer = Producer::new(Info { sequence: 0 }, track::Info::default(), cache);
+		let before = pool.used();
+
+		let mut frame = producer
+			.create_frame_owned(sized(MAX_CACHE_BYTES), &frame::Budget::default())
+			.unwrap();
+		assert_eq!(pool.used(), before, "the declared size was charged");
+
+		frame.write(Bytes::from(vec![0u8; 100])).unwrap();
+		assert_eq!(pool.used(), before, "charged before the write was published");
+		frame.notify();
+		assert_eq!(pool.used(), before + 100);
+		assert_eq!(producer.state.read().cache, 100);
+		// A reader skipping the group still misses the whole declared frame.
+		assert_eq!(producer.state.read().content().bytes, MAX_CACHE_BYTES);
+
+		// Aborting releases what was charged.
+		frame.abort(Error::Cancel).unwrap();
+		assert_eq!(producer.state.read().cache, 0);
+		assert!(pool.used() <= before);
+	}
+
+	/// Completing a frame charges whatever it wrote since the last notify.
+	#[test]
+	fn frame_commit_charges_the_tail() {
+		let pool = cache::Pool::unbounded();
+		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+		let mut producer = Producer::new(Info { sequence: 0 }, track::Info::default(), cache);
+		let before = pool.used();
+
+		let mut frame = producer
+			.create_frame_owned(sized(300), &frame::Budget::default())
+			.unwrap();
+		frame.write(Bytes::from(vec![0u8; 100])).unwrap();
+		frame.notify();
+		frame.write(Bytes::from(vec![0u8; 200])).unwrap();
+		frame.finish().unwrap();
+		assert_eq!(pool.used(), before + 300);
+		assert_eq!(producer.state.read().cache, 300);
+	}
+
+	/// Frames within the session's budget allocate their declared size up front; past
+	/// it, a frame's buffer holds only what has arrived. A frame hands its share back
+	/// once it ends.
+	#[test]
+	fn frame_budget_bounds_upfront_allocation() {
+		let budget = frame::Budget::new(1024);
+		let mut a = Info { sequence: 0 }.produce();
+		let mut b = Info { sequence: 1 }.produce();
+
+		let mut first = a.create_frame_owned(sized(1024), &budget).unwrap();
+		first.write(Bytes::from_static(b"x")).unwrap();
+		assert_eq!(first.allocated(), 1024, "a frame within budget is allocated up front");
+
+		let mut second = b.create_frame_owned(sized(MAX_CACHE_BYTES), &budget).unwrap();
+		second.write(Bytes::from(vec![0u8; 100])).unwrap();
+		assert_eq!(
+			second.allocated(),
+			100,
+			"a frame past budget allocated its declared size"
+		);
+		second.abort(Error::Cancel).unwrap();
+
+		first.write(Bytes::from(vec![0u8; 1023])).unwrap();
+		first.finish().unwrap();
+		a.finish().unwrap();
+
+		let mut a = Info { sequence: 2 }.produce();
+		let mut third = a.create_frame_owned(sized(1024), &budget).unwrap();
+		third.write(Bytes::from_static(b"x")).unwrap();
+		assert_eq!(third.allocated(), 1024, "the finished frame did not return its share");
 	}
 }

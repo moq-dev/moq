@@ -39,9 +39,11 @@ link-state and existence-split design planned earlier that day:
   path vector with hop lists stays loop-free, path hunting is confined to the
   cores, liveness flooding (the simulator's dominant link-state cost) is never
   paid, and failure detection sets the outage window either way. The parked
-  implementation is #4631. If stale paths remain on the tiered layout, the
-  fix is [Path hunting](/quest/m0/path-hunting.md), promoted to m0: a hold-down
-  on route updates, with no wire change.
+  implementation is #4631. Stale paths after a withdrawal are ended by
+  per-origin seqnos on cluster links
+  ([Path hunting](/quest/m1/cluster-routing/path-hunting.md)); a lite-06
+  hold-down (#4644) was rejected because it breaks seamless failover, and
+  #4642's cursor hold mitigates production meanwhile.
 - The line lands on `main`: its children are additive. The two breaking
   changes left it for `dev` on their own:
   [Remove `--hop`](/quest/m1/hop-removal.md) and
@@ -82,7 +84,7 @@ registry.
 - Unbatched, one relay restart at 340 relays sent half a million liveness
   messages; batched for 50 ms, 27k.
 - Failure detection, not routing, sets every outage window: a silent link or
-  relay loss is noticed after the 30 s QUIC idle timeout in every candidate,
+  relay loss is noticed only after the QUIC idle timeout in every candidate,
   and subscribes through it go nowhere until then.
 - The simulator saw no loop while views agreed, and HRW split an equal-cost
   pool 63/49 where a hash of the announced prefix sent all of it to one
@@ -118,6 +120,7 @@ Once every child has landed:
 
 - [Edge and core](/quest/m1/cluster-routing/roles.md) - relays take an explicit edge or core role; edges spread paths over their region's cores and are never transit
 - [Selection](/quest/m1/cluster-routing/selection.md) - a broadcast under overlapping prefixes routes to one origin deterministically, and same-epoch origins are one source
+- [Path hunting](/quest/m1/cluster-routing/path-hunting.md) - per-origin seqnos on cluster links end stale re-announces without breaking seamless failover
 - [Between clusters](/quest/m1/cluster-routing/inter-cluster.md) - announcements crossing a cluster boundary stay path vector with cluster ids as hops
 
 ## Related

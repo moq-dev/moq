@@ -67,8 +67,8 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Catalog colour model](/quest/m2/color-catalog.md) - the catalog describes a rendition's colour and HDR properties once a renderer consumes them
 - [Archive recovery listing](/quest/m2/archive-recovery-listing.md) - a resumed DVR lists what changed since its checkpoint, not every stored group
 - [Relay io_uring packages](/quest/m2/relay-io-uring-package.md) - Linux relay packages ship io_uring once the ring is on par with tokio
-- [iOS capture](/quest/m2/mobile-capture-ios.md) - camera and screen capture if the mobile ownership decision selects Rust
-- [Android capture](/quest/m2/mobile-capture-android.md) - NDK/JNI capture using the existing codecs if mobile ownership selects Rust
+- [iOS capture](/quest/m2/mobile-capture-ios.md) - Rust captures the camera and screen on iOS
+- [Android capture](/quest/m2/mobile-capture-android.md) - Rust captures through NDK/JNI on Android, reusing the existing codecs
 - [Mobile completion](/quest/m2/mobile-completion.md) - verify the selected native/mobile path before closing #700
 - [Opus implementation](/quest/m2/audio-opus-backend.md) - compare Opus codec quality, CPU, build cost, and the loss recovery each backend offers
 - [Latency ledger](/quest/m2/latency-ledger.md) - a session reports where its end-to-end audio delay went, stage by stage
@@ -98,11 +98,10 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [GOP overhead](/quest/m2/gop-overhead.md) - price the I-frames a short GOP pays for, deciding whether a long GOP plus a keyframe request is worth designing
 - [Per-program SI](/quest/m2/ts-program-si.md) - a selected TS program's broadcast carries only its own service's SDT and EIT
 - [TS import health](/quest/m2/ts-import-health.md) - `moq import ts` counts the TR 101 290 errors of the feed it receives, PCR and PTS graded on its own values
-- [TS export liveness](/quest/m2/ts-export-liveness.md) - `moq export ts` reports each elementary stream's access units and quiet time, catching a per-track stall
 - [TS health stats](/quest/m2/ts-health-stats.md) - the TS counters ride the stats plumbing beside the media counters
+- [TS stopped log: audio and video only](/quest/m2/ts-stopped-av-only.md) - sparse data PIDs like SCTE-35 stop logging "stopped delivering" every quiet second
 - [Teleoperation](/quest/m2/teleop/README.md) - MoQ carries robot video down and control up on one session as a library capability
 - [Media QA on other engines](/quest/m2/browser-media-qa-engines.md) - the media harness measures a Firefox or WebKit player over the fallback and names what each engine lacks
-- [Firefox 155 WebTransport](/quest/m2/firefox-155-webtransport.md) - Firefox negotiates the version by subprotocol, and the other new WebTransport features stay unused on purpose
 - [Windows.Graphics.Capture](/quest/m2/capture-wgc.md) - one WGC backend for display and window capture with the cursor, replacing Desktop Duplication and GDI
 - [Windows capture parity](/quest/m2/capture-windows.md) - system audio and a settled app-capture policy
 - [Linux capture parity](/quest/m2/capture-linux.md) - Wayland window/system-audio capture with explicit display-selection and app-capture limits

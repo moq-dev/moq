@@ -31,6 +31,11 @@ This is an implementation limit, not a limit in the IETF draft. A larger
 declared block stops its subgroup stream with `MALFORMED_TRACK` before reading
 the block; other groups and the session stay open.
 
+Rust and JavaScript read an incoming padding stream (draft-18 and later) to
+the end and discard it, without sending `STOP_SENDING`. A unidirectional stream type the negotiated draft does not
+define, or a `SUBGROUP_HEADER` type it marks invalid, closes the session with
+`PROTOCOL_VIOLATION`, as the draft requires.
+
 An IETF publisher declares the track's default priority in `SUBSCRIBE_OK` or
 `PUBLISH` when that draft carries track properties. Groups without a priority
 flag inherit it. If the property is absent, the IETF wire default of 128 maps
@@ -51,7 +56,7 @@ On drafts 14–19, the Rust publisher also serves relative and absolute joining
 saved prefix only, while the subscription delivers later objects. One reaching
 back to earlier groups is refused with `NOT_SUPPORTED`. Draft-20 uses
 subscription fills instead. JavaScript
-publishing does not yet serve `FETCH`;
+publishing refuses every `FETCH` with `NOT_SUPPORTED`;
 Rust and JavaScript subscribers request unfiltered delivery on older drafts
 because they do not issue joining fetches. Other publishers may replay a cached
 backlog for that filter; selecting the next group instead would leave static
@@ -70,7 +75,17 @@ and bytes to the application unverified; a relay forwards them to its
 [auth server](/bin/relay/auth#the-contract). An alias reference (`DELETE`,
 `USE_ALIAS`) closes the session with `PROTOCOL_VIOLATION`, a structure that
 does not decode with `KEY_VALUE_FORMATTING_ERROR`, and a second token is
-refused.
+refused. An `AUTHORIZATION TOKEN` parameter on a request is read and ignored:
+the session's credential is what authorizes it.
+
+A legal request that is not served is refused on its own with `NOT_SUPPORTED`,
+leaving the session open: a `SUBSCRIBE` with `FORWARD=0`, a `SUBSCRIBE` or
+`FETCH` carrying Range Filters (no `MAX_FILTER_RANGES` is advertised), a
+`FETCH` carrying `FILL_TIMEOUT` (Timed-Out gaps are not written),
+`TRACK_STATUS`, and the `FETCH` forms above. `NEW_GROUP_REQUEST` is ignored, as
+the draft allows a publisher without dynamic groups to do. A parameter the
+negotiated draft does not define still closes the session with
+`PROTOCOL_VIOLATION`, as the draft requires.
 
 Several project drafts extend the IETF wire without breaking it, since `SETUP`
 ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,

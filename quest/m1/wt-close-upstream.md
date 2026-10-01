@@ -49,7 +49,7 @@ a moq.pro relay that the flood stops.
 
 ## Required
 
-- A `web-transport-moq` 1.3.x release that carries moq-dev/noq#24
+- [web-transport-moq 1.3.3 ships noq#24](/quest/m1/web-transport-moq-release.md) - the release to pin
 
 ## Related
 

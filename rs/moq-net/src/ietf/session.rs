@@ -613,10 +613,53 @@ async fn run_setup<S: crate::transport::poll::Session>(
 	Ok(())
 }
 
+/// The PADDING stream type (draft-18+): bytes a peer sends to probe for bandwidth.
+const PADDING: u64 = 0x132B3E28;
+
+/// What a unidirectional stream's type names on the negotiated draft.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UniType {
+	/// The peer's SETUP, which then carries its GOAWAY (draft-17+).
+	Setup,
+	/// A SUBGROUP_HEADER, carrying one subgroup of a subscription.
+	Subgroup,
+	/// A FETCH_HEADER, carrying a fetch response.
+	Fetch,
+	/// Data to discard (draft-18+).
+	Padding,
+}
+
+impl UniType {
+	/// `None` is a type the draft does not define, which MUST close the session
+	/// (draft-21 section 6.4.1, and its equivalent in every draft we negotiate).
+	fn classify(kind: u64, version: Version) -> Option<Self> {
+		// Draft-14-17 use SUBGROUP_HEADER types 0x10-0x1D and 0x30-0x3D; draft-18 adds
+		// 0x40 (FIRST_OBJECT), also covering 0x50-0x5D and 0x70-0x7D. A reserved
+		// SUBGROUP_ID_MODE (0b11) or a bit the draft lacks is invalid, which MUST close the
+		// session too (draft-21 section 11.3.1).
+		if ietf::GroupFlags::decode(kind, version).is_ok() {
+			return Some(Self::Subgroup);
+		}
+
+		match kind {
+			FetchHeader::TYPE => Some(Self::Fetch),
+			setup::SETUP_V17 => match version {
+				// SETUP rides the bidi control stream.
+				Version::Draft14 | Version::Draft15 | Version::Draft16 => None,
+				_ => Some(Self::Setup),
+			},
+			PADDING => match version {
+				Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => None,
+				_ => Some(Self::Padding),
+			},
+			_ => None,
+		}
+	}
+}
+
 /// Accept incoming uni streams and dispatch each to a handler.
 ///
-/// For v17, this also handles the SETUP stream (0x2F00) and GOAWAY.
-/// For v14-16, all uni streams are group data.
+/// For v17+, this also handles the SETUP stream (0x2F00) and GOAWAY.
 async fn run_unis<S>(
 	mut session: S,
 	subscriber: Subscriber<S>,
@@ -679,69 +722,84 @@ where
 			Err(err) => return Err(err),
 		};
 
-		// v17+: SETUP arrives on a uni stream, then becomes the GOAWAY channel.
-		// We accept it in the background without blocking; the one thing that does
-		// need it (the MoQ Cluster negotiation) waits on `peer_setup` instead, so a
-		// slow SETUP delays announcements rather than the whole session.
-		if kind == setup::SETUP_V17 {
-			// Exactly one SETUP per endpoint. A second would let a peer restate its
-			// declared identity mid-session, silently re-attributing every route
-			// already built from the first.
-			if std::mem::replace(&mut seen_setup, true) {
-				return Err(Error::ProtocolViolation);
-			}
+		let Some(ty) = UniType::classify(kind, version) else {
+			tracing::warn!(kind, "unknown uni stream type");
+			return Err(Error::UnexpectedStream);
+		};
 
-			let peer_setup = peer_setup.clone();
-			let mut session = session.clone();
-			let goaway = goaway.clone();
-			tasks.push(async move {
-				// The negotiation gates the announce and dispatch loops, so a SETUP we
-				// cannot read must end the session rather than leave them parked on a
-				// slot nothing will ever fill.
-				let msg = match reader.decode::<setup::Setup>().await {
-					Ok(msg) => msg,
-					Err(err) => {
-						tracing::warn!(%err, "setup decode error");
-						session.close(SessionError::ProtocolViolation.to_code(), "invalid setup");
-						return;
-					}
-				};
+		match ty {
+			// SETUP then becomes the GOAWAY channel. We accept it in the background
+			// without blocking; the one thing that does need it (the MoQ Cluster
+			// negotiation) waits on `peer_setup` instead, so a slow SETUP delays
+			// announcements rather than the whole session.
+			UniType::Setup => {
+				// Exactly one SETUP per endpoint. A second would let a peer restate its
+				// declared identity mid-session, silently re-attributing every route
+				// already built from the first.
+				if std::mem::replace(&mut seen_setup, true) {
+					return Err(Error::ProtocolViolation);
+				}
 
-				if let Some(peer_setup) = peer_setup {
-					let peer = match decode_peer_setup(msg.parameters, version) {
-						Ok(peer) => peer,
+				let peer_setup = peer_setup.clone();
+				let mut session = session.clone();
+				let goaway = goaway.clone();
+				tasks.push(async move {
+					// The negotiation gates the announce and dispatch loops, so a SETUP we
+					// cannot read must end the session rather than leave them parked on a
+					// slot nothing will ever fill.
+					let msg = match reader.decode::<setup::Setup>().await {
+						Ok(msg) => msg,
 						Err(err) => {
-							tracing::warn!(%err, "setup parameter decode error");
-							session.close(SessionError::ProtocolViolation.to_code(), "invalid setup parameters");
+							tracing::warn!(%err, "setup decode error");
+							session.close(SessionError::ProtocolViolation.to_code(), "invalid setup");
 							return;
 						}
 					};
-					peer_setup.set(peer);
-				}
 
-				// Monitor for GOAWAY after setup completes.
-				if let Err(err) = run_goaway(reader.with_version(version), version, goaway).await {
-					tracing::warn!(%err, "goaway error");
-				}
-			});
+					if let Some(peer_setup) = peer_setup {
+						let peer = match decode_peer_setup(msg.parameters, version) {
+							Ok(peer) => peer,
+							Err(err) => {
+								tracing::warn!(%err, "setup parameter decode error");
+								session.close(SessionError::ProtocolViolation.to_code(), "invalid setup parameters");
+								return;
+							}
+						};
+						peer_setup.set(peer);
+					}
 
-			continue;
-		}
-
-		// Poll one child handler for each group stream.
-		let mut sub = subscriber.clone();
-		tasks.push(async move {
-			let mut reader = reader.with_version(version);
-			if let Err(err) = run_uni_group(&mut sub, &mut reader).await {
-				tracing::debug!(%err, "uni stream error");
-				// This handler stops only the stream, so it cannot claim the session closed.
-				let reset = match StreamError::from(&err) {
-					StreamError::Session(_) => StreamError::Internal,
-					reset => reset,
-				};
-				reader.abort(reset);
+					// Monitor for GOAWAY after setup completes.
+					if let Err(err) = run_goaway(reader.with_version(version), version, goaway).await {
+						tracing::warn!(%err, "goaway error");
+					}
+				});
 			}
-		});
+			UniType::Subgroup => {
+				let mut sub = subscriber.clone();
+				tasks.push(async move {
+					let mut reader = reader.with_version(version);
+					let res = sub.recv_group(&mut reader).await;
+					stop_on_error(&mut reader, res);
+				});
+			}
+			// A fill fetch stream carries the head of the group a draft-20 subscription
+			// joined part way through. One answering no fill of ours is refused inside.
+			UniType::Fetch => {
+				let mut sub = subscriber.clone();
+				tasks.push(async move {
+					let mut reader = reader.with_version(version);
+					let res = sub.recv_fill(&mut reader).await;
+					stop_on_error(&mut reader, res);
+				});
+			}
+			// The receiver MUST discard padding. We read it to the end rather than cancel,
+			// so a peer probing for bandwidth gets the throughput it is measuring.
+			UniType::Padding => {
+				tasks.push(async move {
+					while let Ok(Some(_)) = std::future::poll_fn(|cx| reader.poll_read_chunk(cx, usize::MAX)).await {}
+				});
+			}
+		}
 	}
 }
 
@@ -762,30 +820,19 @@ where
 	}
 }
 
-async fn run_uni_group<S>(
-	subscriber: &mut Subscriber<S>,
-	stream: &mut Reader<S::RecvStream, Version>,
-) -> Result<(), Error>
-where
-	S: crate::transport::poll::Boxable,
-{
-	let kind: u64 = stream.decode_peek().await?;
+/// Stop a data stream whose handler failed. The handler owns only the stream, so it
+/// cannot claim the session closed.
+fn stop_on_error<R: crate::transport::poll::RecvStream>(reader: &mut Reader<R, Version>, res: Result<(), Error>) {
+	let Err(err) = res else {
+		return;
+	};
 
-	// SUBGROUP_HEADER type bytes match the form 0b0XX1XXXX (spec §11.4.2):
-	// draft-14-17 use 0x10-0x1D and 0x30-0x3D, draft-18 adds 0x40 (FIRST_OBJECT)
-	// extending the form to also cover 0x50-0x5D and 0x70-0x7D. Per-version and
-	// per-bit validation (e.g., FIRST_OBJECT must be 0 on draft-17) is done in
-	// `GroupFlags::decode`.
-	if kind <= 0xff && (kind & 0x90) == 0x10 {
-		return subscriber.recv_group(stream).await;
-	}
-
-	match kind {
-		// A fill fetch stream carries the head of the group a draft-20 subscription joined
-		// part way through. One answering no fill of ours is refused inside.
-		FetchHeader::TYPE => subscriber.recv_fill(stream).await,
-		_ => Err(Error::UnexpectedStream),
-	}
+	tracing::debug!(%err, "uni stream error");
+	let reset = match StreamError::from(&err) {
+		StreamError::Session(_) => StreamError::Internal,
+		reset => reset,
+	};
+	reader.abort(reset);
 }
 
 /// Accept incoming bidi streams and dispatch to the correct handler based on message type.
@@ -1325,9 +1372,13 @@ mod tests {
 		writes.clone()
 	}
 
-	async fn dispatch_uni(payload: Vec<u8>, retired_alias: Option<u64>) -> crate::lite::test_transport::Log {
-		const VERSION: Version = Version::Draft19;
-
+	/// Run the uni dispatch loop over one incoming stream. Returns what reached the wire,
+	/// and the loop's result if that stream ended it.
+	async fn dispatch_uni(
+		version: Version,
+		payload: Vec<u8>,
+		retired_alias: Option<u64>,
+	) -> (crate::lite::test_transport::Log, Option<Result<(), Error>>) {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		// The peer opens one uni stream and then goes quiet, so
 		// the loop is still running when the assertion is taken.
@@ -1345,7 +1396,7 @@ mod tests {
 			peer_setup.clone(),
 			crate::Hop::new(1).unwrap(),
 			None,
-			VERSION,
+			version,
 			tasks,
 			Default::default(),
 		);
@@ -1357,11 +1408,11 @@ mod tests {
 		let (_goaway, goaway) = crate::goaway::Handle::new(false);
 		// The peer's SETUP has not arrived yet, which is the state a group stream racing
 		// ahead of it lands in.
-		let mut unis = std::pin::pin!(run_unis(session, subscriber, Some(peer_setup), false, VERSION, goaway));
+		let mut unis = std::pin::pin!(run_unis(session, subscriber, Some(peer_setup), false, version, goaway));
 
 		for _ in 0..100 {
 			if let std::task::Poll::Ready(result) = futures::poll!(unis.as_mut()) {
-				panic!("the dispatch loop ended over one rejected stream: {result:?}");
+				return (log, Some(result));
 			}
 			if !log.stops().is_empty() {
 				break;
@@ -1369,36 +1420,87 @@ mod tests {
 			tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 		}
 
-		log
+		(log, None)
 	}
 
 	/// A late group must reach the dispatch loop and stop with CANCELLED.
 	#[tokio::test(start_paused = true)]
 	async fn a_group_for_a_retired_alias_is_stopped_with_cancelled() {
-		let log = dispatch_uni(subgroup_header(Version::Draft19, 7, 0).await, Some(7)).await;
+		let (log, result) =
+			dispatch_uni(Version::Draft19, subgroup_header(Version::Draft19, 7, 0).await, Some(7)).await;
 
 		assert_eq!(
 			log.stops(),
 			vec![crate::ietf::error::CANCELLED],
 			"the group stream must be stopped with the cancelled code",
 		);
+		assert!(result.is_none(), "one dropped group ended the session: {result:?}");
 		assert_eq!(log.closes(), vec![], "one dropped group may not close the session");
 	}
 
 	/// A non-zero subgroup is refused on its own stream, never by closing the session.
 	#[tokio::test(start_paused = true)]
 	async fn a_non_zero_subgroup_is_stopped_without_closing_the_session() {
-		let log = dispatch_uni(subgroup_header(Version::Draft19, 7, 1).await, None).await;
+		let (log, result) = dispatch_uni(Version::Draft19, subgroup_header(Version::Draft19, 7, 1).await, None).await;
 
 		assert_eq!(log.stops(), vec![crate::ietf::error::INTERNAL_ERROR]);
+		assert!(result.is_none(), "one refused subgroup ended the session: {result:?}");
 		assert_eq!(log.closes(), vec![], "one refused subgroup may not close the session");
 	}
 
+	/// A stream type encoded for `version`, followed by a few bytes of body.
+	fn uni_stream(version: Version, kind: u64) -> Vec<u8> {
+		let mut buf = Vec::new();
+		kind.encode(&mut buf, version).unwrap();
+		buf.extend_from_slice(&[0; 4]);
+		buf
+	}
+
+	/// Padding is read and dropped: no STOP_SENDING, and the session stays up.
 	#[tokio::test(start_paused = true)]
-	async fn unknown_uni_type_does_not_claim_the_session_closed() {
-		let log = dispatch_uni(vec![0], None).await;
-		assert_eq!(log.stops(), vec![crate::ietf::error::INTERNAL_ERROR]);
-		assert!(log.closes().is_empty());
+	async fn a_padding_stream_is_discarded() {
+		for version in [
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			let (log, result) = dispatch_uni(version, uni_stream(version, PADDING), None).await;
+
+			assert!(
+				log.stops().is_empty(),
+				"{version:?}: padding was stopped: {:?}",
+				log.stops()
+			);
+			assert!(result.is_none(), "{version:?}: padding ended the session: {result:?}");
+			assert_eq!(log.closes(), vec![], "{version:?}");
+		}
+	}
+
+	/// An unknown or invalid stream type MUST close the session, so it stops nothing on its own:
+	/// the session close takes the stream with it.
+	#[tokio::test(start_paused = true)]
+	async fn an_unknown_uni_type_closes_the_session() {
+		for (version, kind) in [
+			(Version::Draft19, 0),
+			// Padding and uni SETUP arrived in later drafts, so earlier ones do not know them.
+			(Version::Draft17, PADDING),
+			(Version::Draft16, setup::SETUP_V17),
+			// SUBGROUP_HEADER types with the reserved SUBGROUP_ID_MODE (0b11).
+			(Version::Draft19, 0x56),
+			(Version::Draft14, 0x16),
+			// FIRST_OBJECT (0x40) arrived in draft-18.
+			(Version::Draft17, 0x50),
+		] {
+			let (log, result) = dispatch_uni(version, uni_stream(version, kind), None).await;
+
+			let Some(Err(err)) = result else {
+				panic!("{version:?}: type {kind:#x} did not end the session: {result:?}");
+			};
+			assert_eq!(SessionError::from(&err), SessionError::ProtocolViolation, "{version:?}");
+			assert!(log.stops().is_empty(), "{version:?}: stopped {:?}", log.stops());
+		}
 	}
 
 	/// A peer's advertisement of `room/host`, then two namespace-keyed withdrawals of it.
