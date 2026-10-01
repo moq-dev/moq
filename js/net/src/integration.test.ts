@@ -2362,7 +2362,11 @@ const DEATH = SessionCode(71);
  * Serve one track with a group left open, kill the publisher's session once the subscriber has
  * read into it, and return how the subscriber's track ended.
  */
-async function runSessionDeath(protocol: string, version?: number): Promise<Error | null> {
+async function runSessionDeath(
+	protocol: string,
+	version?: number,
+	local = false,
+): Promise<[Error | null, Error | null]> {
 	const pair = createMockTransportPair(protocol);
 	const origin = new OriginProducer();
 
@@ -2383,9 +2387,12 @@ async function runSessionDeath(protocol: string, version?: number): Promise<Erro
 	const remote = wireOf(client).consume(Path.from("test"));
 	const track = remote.track("video").subscribe();
 	const group = await track.recvGroup();
-	expect(await group?.readString()).toBe("head");
+	if (!group) throw new Error("missing group");
+	expect(await group.readString()).toBe("head");
 
-	pair.server.close({ closeCode: DEATH, reason: "killed" });
+	if (local) client.close();
+	else pair.server.close({ closeCode: DEATH, reason: "killed" });
+	const groupEnd = Promise.resolve(group.closed);
 	const closed = await withTimeout(Promise.resolve(track.closed), 2000, "the track never ended");
 
 	broadcast.close();
@@ -2394,7 +2401,7 @@ async function runSessionDeath(protocol: string, version?: number): Promise<Erro
 	client.close();
 	server.close();
 	origin.close();
-	return closed;
+	return [closed, await withTimeout(groupEnd, 2000, "the group never ended")];
 }
 
 for (const [name, protocol, version] of [
@@ -2404,9 +2411,15 @@ for (const [name, protocol, version] of [
 	["ietf draft-17", Ietf.ALPN.DRAFT_17, undefined],
 ] as const) {
 	test(`integration: ${name} ends a track with its session's error`, async () => {
-		const closed = await runSessionDeath(protocol, version);
+		const [closed, groupEnd] = await runSessionDeath(protocol, version);
 		expect(closed).toBeInstanceOf(SessionError);
 		expect((closed as SessionError).code).toBe(DEATH);
+		expect(groupEnd).toBeInstanceOf(SessionError);
+		expect((groupEnd as SessionError).code).toBe(DEATH);
+	});
+	test(`integration: ${name} ends a locally closed track cleanly`, async () => {
+		const [closed] = await runSessionDeath(protocol, version, true);
+		expect(closed).toBeNull();
 	});
 }
 

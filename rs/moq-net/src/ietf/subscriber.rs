@@ -165,11 +165,21 @@ impl State {
 			if let Some(request) = track.pending.take() {
 				request.reject(err.clone());
 			}
+			if let Some(producer) = track.producer {
+				let _ = producer.abort_session(err.clone());
+			}
 			if let Fill::Ready { producer, .. } = &*track.fill.read() {
 				let _ = producer.clone().abort(err.clone());
 			}
+		}
+	}
+	fn close(&mut self) {
+		for (_, mut track) in self.subscribes.drain() {
+			if let Some(request) = track.pending.take() {
+				request.reject(Error::Cancel);
+			}
 			if let Some(producer) = track.producer {
-				let _ = producer.abort(err.clone());
+				let _ = producer.close();
 			}
 		}
 	}
@@ -557,6 +567,10 @@ where
 	/// End every active subscription with the error that ended the session.
 	pub fn abort(&self, err: &Error) {
 		self.state.lock().abort(err);
+	}
+
+	pub fn close(&self) {
+		self.state.lock().close();
 	}
 
 	/// Leave `alias` in the state a cancelled subscription leaves behind: bound to a
@@ -6872,6 +6886,34 @@ mod stitch_tests {
 			matches!(group.read_frame().await, Err(Error::Cancel)),
 			"a waiting fill head must be cancelled, not left parked"
 		);
+	}
+
+	#[tokio::test]
+	async fn session_death_keeps_a_waiting_fill_heads_resume_position() {
+		let h = Harness::new(
+			Fill::Serving(Some(Timescale::MICRO)),
+			vec![fill_stream(SEQUENCE, &[b"head-0"])],
+		);
+		let track = h.track.consume();
+		let mut consumer = h.track.subscribe(None);
+		let mut fill = h.stream().await;
+		h.subscriber.clone().recv_fill(&mut fill).await.expect("fill");
+		let mut group = consumer.recv_group().await.unwrap().expect("the fill head arrived");
+		let resume = track.resume_position();
+		assert_eq!(
+			resume,
+			Some(track::Position {
+				group: SEQUENCE,
+				frame: 1
+			})
+		);
+		let err = Error::Session(crate::SessionError::App(7));
+		h.subscriber.abort(&err);
+		assert_eq!(track.resume_position(), resume);
+		assert!(matches!(
+			group.read_frame().await,
+			Err(Error::Session(crate::SessionError::App(7)))
+		));
 	}
 
 	/// The same contradiction as above, with the streams the other way round: the whole

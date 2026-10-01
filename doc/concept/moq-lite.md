@@ -294,7 +294,9 @@ codes as `moq_net::Error::Session(SessionError)` or `Error::Stream(StreamError)`
 JavaScript exposes `SessionError` and `StreamError`. Match the registry before
 interpreting the number. Native bindings expose scope, code, kind, and a diagnostic
 message; unknown and application codes retain their numeric value. Transport
-failures without a protocol code remain separate.
+failures without a protocol code remain separate. A deliberate local close ends
+received tracks cleanly after their delivered groups; a peer close ends tracks
+and open group readers with the session error.
 
 ## Local read limits
 

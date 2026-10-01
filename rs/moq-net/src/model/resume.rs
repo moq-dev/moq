@@ -1471,7 +1471,7 @@ impl SegmentSub {
 	}
 
 	/// Move an active cursor into terminal retention and mark the segment done.
-	fn complete(&mut self, end: Result<u64>) {
+	fn complete(&mut self, end: Result<Option<u64>>) {
 		let previous = std::mem::replace(&mut self.sub, SubState::Done(end));
 		if let SubState::Active(sub) = previous {
 			self.terminal = Some(*sub);
@@ -1519,7 +1519,7 @@ enum SubState {
 	/// cleanly, `Err` with the cause when it aborted or was dropped. An abort only
 	/// surfaces once no switch can follow: until then a dead route stalls the
 	/// logical track for the next switch to replace.
-	Done(Result<u64>),
+	Done(Result<Option<u64>>),
 }
 
 /// A live subscription spliced across every segment of a logical track.
@@ -1953,7 +1953,7 @@ impl Subscriber {
 						return Poll::Ready(Some(group));
 					}
 					Ok(None) => {
-						let end = match sub.poll_finished(waiter) {
+						let end = match sub.poll_end(waiter) {
 							Poll::Ready(end) => end,
 							Poll::Pending => Err(Error::Dropped),
 						};
@@ -2042,7 +2042,7 @@ impl Subscriber {
 						}
 						// The track ran out at or below the floor: the segment drained.
 						Poll::Ready(Ok(None)) => {
-							let end = match sub.poll_finished(waiter) {
+							let end = match sub.poll_end(waiter) {
 								Poll::Ready(end) => end,
 								Poll::Pending => Err(Error::Dropped),
 							};
@@ -2311,6 +2311,11 @@ impl Subscriber {
 	/// Poll for the logical track finishing, returning the final segment's group
 	/// count (one past its last sequence).
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
+		self.poll_end(waiter)
+			.map(|res| res.and_then(|end| end.ok_or(Error::Closed)))
+	}
+
+	pub(crate) fn poll_end(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<u64>>> {
 		self.poll_sync(waiter);
 
 		if let Some(err) = &self.abort {
@@ -2323,7 +2328,7 @@ impl Subscriber {
 		// only if it finished.
 		match ready!(self.poll_final(waiter)) {
 			Some(end) => Poll::Ready(end),
-			None if self.finished => Poll::Ready(Ok(0)),
+			None if self.finished => Poll::Ready(Ok(Some(0))),
 			None => Poll::Ready(Err(Error::Dropped)),
 		}
 	}
@@ -2353,7 +2358,7 @@ impl Subscriber {
 	/// decide the end. Only the subscription is resolved here: consuming groups, or
 	/// completing the segment, would steal them from a `recv_group` caller on the
 	/// same subscriber.
-	fn poll_final(&mut self, waiter: &kio::Waiter) -> Poll<Option<Result<u64>>> {
+	fn poll_final(&mut self, waiter: &kio::Waiter) -> Poll<Option<Result<Option<u64>>>> {
 		let Some(seg) = self.segments.last_mut() else {
 			return Poll::Ready(None);
 		};
@@ -2362,7 +2367,7 @@ impl Subscriber {
 			SubState::Done(end) => Poll::Ready(Some(end.clone())),
 			// Observe only: the cursor may still hold groups, so the read path
 			// completes the segment once it drains.
-			SubState::Active(sub) => Poll::Ready(Some(ready!(sub.poll_finished(waiter)))),
+			SubState::Active(sub) => Poll::Ready(Some(ready!(sub.poll_end(waiter)))),
 			SubState::Pending(_) => unreachable!("poll_activate resolved above"),
 		}
 	}
