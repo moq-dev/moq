@@ -23,8 +23,8 @@ use std::time::Duration;
 use moq_net::origin;
 use srt_tokio::SrtSocket;
 
-use crate::Result;
 use crate::server::{DEFAULT_LATENCY, configure_buffers, serve_publish, serve_subscribe};
+use crate::{Program, Result};
 
 /// An SRT caller that can publish a MoQ broadcast or pull a remote stream.
 ///
@@ -57,6 +57,9 @@ pub struct Client {
 	/// Connection allocator each ingested track claims its peak-hold bitrate on.
 	/// [`pull`] only; [`publish`] reads a broadcast someone else declared.
 	bandwidth: moq_net::bandwidth::Allocator,
+
+	/// The programs of a multi-program remote [`pull`] publishes, or `None` to refuse one.
+	program: Option<Program>,
 }
 
 impl Client {
@@ -69,6 +72,7 @@ impl Client {
 			latency: DEFAULT_LATENCY,
 			max_age: None,
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
+			program: None,
 		}
 	}
 
@@ -90,6 +94,13 @@ impl Client {
 		self
 	}
 
+	/// Publish one program of a multi-program stream [`pull`](Self::pull) receives, or each as
+	/// its own broadcast under the pulled path. `None` (the default) refuses a multiplex.
+	pub fn with_program(mut self, program: impl Into<Option<Program>>) -> Self {
+		self.program = program.into();
+		self
+	}
+
 	/// Push a MoQ broadcast out to the remote as MPEG-TS until the broadcast ends.
 	pub async fn publish(&self, origin: &origin::Consumer, path: impl moq_net::AsPath) -> Result<()> {
 		let path = path.as_path();
@@ -104,7 +115,7 @@ impl Client {
 		let catalog = moq_mux::catalog::Config::default()
 			.with_max_age(self.max_age)
 			.with_bandwidth(self.bandwidth.clone());
-		serve_publish(origin, path.as_str(), socket, catalog).await
+		serve_publish(origin, path.as_str(), socket, catalog, self.program).await
 	}
 
 	async fn call(&self, mode: Mode) -> Result<SrtSocket> {

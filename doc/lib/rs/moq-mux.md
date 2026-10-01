@@ -14,7 +14,7 @@ Turns existing container formats into hang broadcasts and back. This is what
 | Format | Import | Export | Notes |
 | --- | --- | --- | --- |
 | fMP4 / CMAF | yes | yes | Passthrough as `cmaf` or repackaged as `legacy`. |
-| MPEG-TS | yes | yes | H.264/H.265; AAC, MP2, AC-3, E-AC-3; SCTE-35 and subtitle PIDs carried as tracks; service tables round-trip; signalled timebase discontinuities preserved; paced export. |
+| MPEG-TS | yes | yes | H.264/H.265; AAC, MP2, AC-3, E-AC-3, Opus up to 7.1; SCTE-35 and subtitle PIDs carried as tracks; service tables round-trip; signalled timebase discontinuities preserved; paced export. |
 | FLV / RTMP | yes | yes | Legacy H.264 + AAC + MP3, plus enhanced-RTMP HEVC, AV1, VP9, Opus, AC-3, E-AC-3, and multitrack. |
 | Matroska / WebM | yes | yes | |
 | Annex-B (H.264, H.265) | yes | yes | Parameter sets extracted to the catalog or re-injected per keyframe. |
@@ -103,6 +103,26 @@ mapping, and a source that restarts its timestamps continues forward after the
 real idle gap. fMP4 passthrough rewrites each fragment's `tfdt` to match. Use
 it for a live feed with its own zero; publish verbatim only when the catalog's
 clock (`Config::with_clock`) already names the source's zero.
+
+An application running its own demuxer gets the same mapping from
+`clock::Anchor`: one per source, plus one `clock::Lane` per track. A single
+`SourceMap` per track would let tracks drift apart by their first-PTS
+difference, and one `SourceMap` shared across tracks reads their interleaving
+as a reset. Each lane detects its own restarts, and the anchor moves once for
+all of them. Call `Lane::restart()` before a frame when the demuxer sees a
+discontinuity out of band.
+
+```rust
+use moq_mux::clock;
+
+let mut anchor = clock::Anchor::new(catalog.clock());
+let mut video = clock::Lane::default();
+let mut klv = clock::Lane::default();
+
+// Both tracks keep their source spacing on the broadcast clock.
+let video_ts = anchor.translate(&mut video, video_pts)?;
+let klv_ts = anchor.translate(&mut klv, klv_pts)?;
+```
 
 ```bash
 cargo add moq-mux

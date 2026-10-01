@@ -225,26 +225,27 @@ pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
 	let highest = sps.rbsp.sps_max_sub_layers_minus1 as usize;
 	let reorder = &sps.rbsp.sub_layer_ordering_info.sps_max_num_reorder_pics;
 	let depth = *reorder.get(highest).or(reorder.last())?;
-	let period = sps
-		.rbsp
-		.vui_parameters
-		.as_ref()
-		.and_then(|vui| vui.vui_timing_info.as_ref())
-		.and_then(|timing| {
-			let sub_layers = &timing.hrd_parameters.as_ref()?.sub_layers;
-			let elemental = sub_layers
-				.get(highest)
-				.or(sub_layers.last())?
-				.elemental_duration_in_tc_minus1?;
-			let units = elemental
-				.checked_add(1)?
-				.checked_mul(u64::from(timing.num_units_in_tick.get()))?;
-			Some((units, u64::from(timing.time_scale.get())))
-		});
 	Some(crate::codec::video::Reorder {
 		depth: u32::try_from(depth).ok()?,
-		period,
+		period: sps_period(&sps.rbsp),
 	})
+}
+
+/// One picture's duration at the highest sub-layer as `(units, scale)`, when the VUI's HRD
+/// parameters fix the picture rate within the CVS (ITU-T H.265 E.3.2). Without that the VUI tick
+/// only bounds the rate from above.
+pub(crate) fn sps_period(sps: &scuffle_h265::SpsRbsp) -> Option<(u64, u64)> {
+	let highest = sps.sps_max_sub_layers_minus1 as usize;
+	let timing = sps.vui_parameters.as_ref()?.vui_timing_info.as_ref()?;
+	let sub_layers = &timing.hrd_parameters.as_ref()?.sub_layers;
+	let elemental = sub_layers
+		.get(highest)
+		.or(sub_layers.last())?
+		.elemental_duration_in_tc_minus1?;
+	let units = elemental
+		.checked_add(1)?
+		.checked_mul(u64::from(timing.num_units_in_tick.get()))?;
+	Some((units, u64::from(timing.time_scale.get())))
 }
 
 /// Annex-B → length-prefixed transmuxer; the H.265 analogue of

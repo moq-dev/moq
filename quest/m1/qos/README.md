@@ -44,9 +44,6 @@ on `main`.
   subscription records its last partial interval instead of losing it
 - [Lag dashboard](/quest/m1/qos/lag-dashboard.md) - the demo stats
   dashboard shows viewer lag percentiles and dropped media
-- [Starvation at frame granularity](/quest/m1/qos/starvation-frames.md) - the
-  acknowledged frontier moves at every frame boundary through `poll_acked`,
-  with a delivery-delay histogram for jitter
 - [Publisher timeliness](/quest/m1/qos/publisher-timeliness.md) - per
   broadcast, how late media arrives at the relay against the track's own
   clock, and whether timestamps stay monotonic

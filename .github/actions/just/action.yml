@@ -1,0 +1,11 @@
+name: Install just
+description: Install the pinned just for jobs outside the nix dev shell, which already provides it.
+
+runs:
+  using: composite
+  steps:
+    # A checksum-verified prebuilt, so it costs seconds rather than a
+    # `cargo install`. Keep the version in step with nixpkgs' just in flake.lock.
+    - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+      with:
+        tool: just@1.58.0

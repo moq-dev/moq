@@ -25,6 +25,15 @@ ffplay srt://localhost:9000
 moq --connect https://relay.example.com/anon --broadcast event.hang import srt --connect 'srt://encoder.example.com:9000?streamid=live/cam'
 ```
 
+A multi-program feed is refused, as with `import ts`, unless `--program`
+picks one: `--program 2` imports program 2 alone, and `--program all`
+publishes each program as its own broadcast (`event.hang` becomes
+`event/1.hang`, `event/2.hang`, and so on).
+
+```bash
+moq --connect https://relay.example.com/anon --broadcast event.hang import srt --listen '[::]:9000' --program all
+```
+
 `--latency` sets the SRT receive buffer and doubles as the skip threshold on
 export. Export paces each SRT payload on the media clock, and re-anchors that
 pacing on a declared marker, so a restarted timeline plays out from the

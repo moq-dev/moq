@@ -727,6 +727,13 @@ impl Consumer {
 		self.state.read().latest()
 	}
 
+	/// The newest segment's declared exclusive end, where fetches are routed.
+	pub(crate) fn final_sequence(&self) -> Option<u64> {
+		// Copied out: the segment's track takes its own lock.
+		let track = self.state.read().segments.last().map(|segment| segment.track.clone())?;
+		track.final_sequence()
+	}
+
 	/// One past the newest position across the segments: where a route taking this
 	/// logical track over would resume.
 	pub(crate) fn resume_position(&self) -> Option<Position> {
@@ -843,11 +850,13 @@ impl kio::Pollable for Fetching {
 	type Output = Result<group::Consumer>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
-		if let Some(group) = (Consumer {
+		if let Some(mut group) = (Consumer {
 			state: self.state.clone(),
 		})
 		.cached_group(self.sequence, self.options.frame_start)
 		{
+			// Sitting where the caller asked, as a fetch from the segment's own track would.
+			group.start_at(self.options.frame_start);
 			return Poll::Ready(Ok(group));
 		}
 
@@ -1493,9 +1502,19 @@ impl Group {
 					let mut continuation =
 						track.guard_group(continuation, self.subscription.clone(), self.anchor.clone(), bound);
 					continuation.set_stale_meter(self.stale_stats.clone());
-					let count = ready!(continuation.poll_finished(waiter));
+					// Ask from the seam, as `poll_current` reads from it. A fresh cursor
+					// sits at frame 0, below a continuation that starts past the head,
+					// and would report a live group as lagged. The probe's index is the
+					// seam, not this reader's, so answer with our own.
+					continuation.start_at(cap);
+					if continuation.index() != cap {
+						self.dead = Some((segment, Error::Lagged));
+						continue;
+					}
+					let index = self.index;
+					let end = ready!(continuation.poll_finished(waiter));
 					self.waiting = None;
-					return Poll::Ready(count);
+					return Poll::Ready(end.map(|_| index));
 				}
 				// This route will never have it; wait for whatever replaces it.
 				None => self.dead = Some((segment, Error::NotFound)),
@@ -1551,7 +1570,7 @@ impl SegmentSub {
 	}
 
 	/// Move an active cursor into terminal retention and mark the segment done.
-	fn complete(&mut self, end: Result<u64>) {
+	fn complete(&mut self, end: Result<Option<u64>>) {
 		let previous = std::mem::replace(&mut self.sub, SubState::Done(end));
 		if let SubState::Active(sub) = previous {
 			self.terminal = Some(*sub);
@@ -1599,7 +1618,7 @@ enum SubState {
 	/// cleanly, `Err` with the cause when it aborted or was dropped. An abort only
 	/// surfaces once no switch can follow: until then a dead route stalls the
 	/// logical track for the next switch to replace.
-	Done(Result<u64>),
+	Done(Result<Option<u64>>),
 }
 
 /// A live subscription spliced across every segment of a logical track.
@@ -2033,7 +2052,7 @@ impl Subscriber {
 						return Poll::Ready(Some(group));
 					}
 					Ok(None) => {
-						let end = match sub.poll_finished(waiter) {
+						let end = match sub.poll_end(waiter) {
 							Poll::Ready(end) => end,
 							Poll::Pending => Err(Error::Dropped),
 						};
@@ -2122,7 +2141,7 @@ impl Subscriber {
 						}
 						// The track ran out at or below the floor: the segment drained.
 						Poll::Ready(Ok(None)) => {
-							let end = match sub.poll_finished(waiter) {
+							let end = match sub.poll_end(waiter) {
 								Poll::Ready(end) => end,
 								Poll::Pending => Err(Error::Dropped),
 							};
@@ -2391,6 +2410,11 @@ impl Subscriber {
 	/// Poll for the logical track finishing, returning the final segment's group
 	/// count (one past its last sequence).
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
+		self.poll_end(waiter)
+			.map(|res| res.and_then(|end| end.ok_or(Error::Closed)))
+	}
+
+	pub(crate) fn poll_end(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<u64>>> {
 		self.poll_sync(waiter);
 
 		if let Some(err) = &self.abort {
@@ -2403,7 +2427,7 @@ impl Subscriber {
 		// only if it finished.
 		match ready!(self.poll_final(waiter)) {
 			Some(end) => Poll::Ready(end),
-			None if self.finished => Poll::Ready(Ok(0)),
+			None if self.finished => Poll::Ready(Ok(Some(0))),
 			None => Poll::Ready(Err(Error::Dropped)),
 		}
 	}
@@ -2433,7 +2457,7 @@ impl Subscriber {
 	/// decide the end. Only the subscription is resolved here: consuming groups, or
 	/// completing the segment, would steal them from a `recv_group` caller on the
 	/// same subscriber.
-	fn poll_final(&mut self, waiter: &kio::Waiter) -> Poll<Option<Result<u64>>> {
+	fn poll_final(&mut self, waiter: &kio::Waiter) -> Poll<Option<Result<Option<u64>>>> {
 		let Some(seg) = self.segments.last_mut() else {
 			return Poll::Ready(None);
 		};
@@ -2442,7 +2466,7 @@ impl Subscriber {
 			SubState::Done(end) => Poll::Ready(Some(end.clone())),
 			// Observe only: the cursor may still hold groups, so the read path
 			// completes the segment once it drains.
-			SubState::Active(sub) => Poll::Ready(Some(ready!(sub.poll_finished(waiter)))),
+			SubState::Active(sub) => Poll::Ready(Some(ready!(sub.poll_end(waiter)))),
 			SubState::Pending(_) => unreachable!("poll_activate resolved above"),
 		}
 	}
@@ -3025,6 +3049,33 @@ mod test {
 			.expect("newest cached fetch should resolve")
 			.unwrap();
 		assert_eq!(read(&mut group), b"b4");
+	}
+
+	/// A cached copy is handed back sitting at the requested frame, the same as a fetch
+	/// the segment's own track answers.
+	#[tokio::test]
+	async fn a_cached_fetch_starts_at_the_requested_frame() {
+		let (track_a, consumer_a) = track_pair("a");
+		let mut producer = Producer::new();
+		producer.switch(&consumer_a, None).unwrap();
+
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		for payload in ["f0", "f1", "f2"] {
+			group
+				.write_frame(crate::Timestamp::ZERO, payload.as_bytes().to_vec())
+				.unwrap();
+		}
+		group.finish().unwrap();
+
+		let mut group = producer
+			.consume()
+			.fetch_group(0, group::Fetch::default().with_frame_start(1))
+			.now_or_never()
+			.expect("cached fetch should resolve")
+			.unwrap();
+		assert_eq!(group.index(), 1);
+		let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame.payload.as_ref(), b"f1");
 	}
 
 	#[tokio::test]

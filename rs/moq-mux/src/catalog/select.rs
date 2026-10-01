@@ -85,4 +85,21 @@ mod tests {
 		assert_eq!(out.video.renditions.keys().collect::<Vec<_>>(), vec!["hi"]);
 		assert!(matches!(stream.poll_next(&kio::Waiter::noop()), Poll::Ready(Ok(None))));
 	}
+
+	#[test]
+	fn selects_boxed_stream() {
+		let mut catalog = Catalog::default();
+		catalog.video.renditions = BTreeMap::from_iter(vec![h264("lo"), h264("hi")]);
+
+		let boxed: Box<dyn Stream<Ext = ()>> = Box::new(Once(Some(catalog)));
+		let selection = select::Broadcast::default().video(select::Video::default().name("lo"));
+		let mut stream = boxed.select(selection);
+
+		let out = match stream.poll_next(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(Some(c))) => c,
+			other => panic!("expected snapshot, got {other:?}"),
+		};
+		assert_eq!(out.video.renditions.keys().collect::<Vec<_>>(), vec!["lo"]);
+		assert!(matches!(stream.poll_next(&kio::Waiter::noop()), Poll::Ready(Ok(None))));
+	}
 }

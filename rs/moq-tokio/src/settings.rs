@@ -17,6 +17,9 @@ pub struct Listen {
 	#[usage(env = "MOQ_LISTEN_VERSION", cli("--listen-version"), parse = "list_by_comma")]
 	version: Option<Vec<String>>,
 
+	#[usage(env = "MOQ_LISTEN_TIMEOUT", cli("--listen-timeout"))]
+	timeout: Option<String>,
+
 	#[usage(env = "MOQ_LISTEN_PREFERRED_V4", cli("--listen-preferred-v4"))]
 	preferred_v4: Option<String>,
 

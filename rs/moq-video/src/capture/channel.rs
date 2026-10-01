@@ -72,8 +72,8 @@ impl FrameChannel {
 
 	/// Map a device-local timestamp into this stream's private timeline. The
 	/// source epoch never escapes: its first sample is anchored to arrival.
-	/// Only the blocking-device pump feeds native timestamps, so it is gated like
-	/// `pump` plus `cfg(test)` for the mapping test below.
+	/// The blocking-device pump and WGC feed native timestamps; the mapping is
+	/// also compiled for its host-side tests.
 	///
 	/// A device timeline that steps back or stalls (a driver restarting its clock
 	/// at zero, or one reporting a constant) re-anchors that sample to arrival, or

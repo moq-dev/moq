@@ -7,13 +7,10 @@ so it is not forgotten.
 
 ## Plan
 
-Each quest states its gate as a plain-text `Required` bullet. Re-check the
-gates periodically; when one clears, remove the bullet and promote the quest to
-the milestone its priority belongs in.
+Each quest's gate is a condition quest beside it, as the root
+[questline](/quest/README.md) describes.
 
 ## Required
 
-- [VAAPI encode and decode](/quest/m4/video-vaapi.md) - H.265 encode and decode, and pre-generated bindings that remove the libclang build dependency, gated on a moq-dev/vaapi release
-- [Pool VAAPI resize surfaces](/quest/m4/vaapi-resize-pool.md) - a resize reuses one output surface per size once moq-vaapi ships that pool
+- [Safari ships the WebKit 319818 fix](/quest/m4/webkit-319818.md) - the Safari release the gate admits
 - [Safari WebTransport](/quest/m4/safari-webtransport.md) - WebKit browsers return to WebTransport once WebKit 319818 ships fixed
-- [MSFTS convergence](/quest/m4/msfts-convergence.md) - the demultiplexed TS lane maps onto MSFTS ES-level carriage once msfts#33 settles the payload unit

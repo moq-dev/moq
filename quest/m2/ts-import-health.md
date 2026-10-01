@@ -46,7 +46,7 @@ Decided while planning [#1838](https://github.com/moq-dev/moq/issues/1838):
 - **`CRC_error` covers PAT and PMT only.** TR 101 290 names CAT, PAT, PMT,
   NIT, EIT, BAT, SDT and TOT, and its table 5.1b cuts that to PAT and PMT for
   systems with reduced SI, which a contribution feed is. The importer parses
-  only PAT and PMT, and [TS PSI reassembly](/quest/m1/ts-psi-reassembly.md)
+  only PAT and PMT, and since #4584 it
   already drops a bad-CRC section and counts it as `crc_error`; this quest
   adopts that field. SI captured verbatim (NIT, SDT, EIT, BAT, TOT) is not
   CRC-checked, and CAT is out with the scrambled services below.
@@ -81,7 +81,7 @@ Decided while planning [#1838](https://github.com/moq-dev/moq/issues/1838):
 - **No opaque whole-mux lane**:
   [#1861](https://github.com/moq-dev/moq/issues/1861) is closed not planned
   and verbatim TS is a non-goal in
-  [MSFTS convergence](/quest/m4/msfts-convergence.md). P3 is out of this set;
+  [MSFTS convergence](/quest/m2/msfts-convergence.md). P3 is out of this set;
   `CAT_error` too, since the lane carries no scrambled service. A scrambled
   PAT or PMT still counts under its own check.
 
@@ -105,10 +105,6 @@ Implementation:
   counts nothing, and a 1 s PTS gap on one PID counts one there and nowhere
   else. A TEI packet that also jumps its continuity counter counts one
   `Transport_error` and no `Continuity_count_error`.
-
-## Required
-
-- [TS PSI reassembly](/quest/m1/ts-psi-reassembly.md) - the bad-CRC PAT or PMT the importer survives and counts as `crc_error`
 
 ## Related
 

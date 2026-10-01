@@ -12,7 +12,7 @@ use moq_mux::catalog::hang::CatalogExt;
 use super::producer::Reserved;
 use super::{Input, Options, Producer};
 use crate::capture;
-use crate::resample::{Resampler, remix, validate_remix};
+use crate::resample::{Remix, Resampler};
 use crate::{Error, Format, Frame, Layout as PcmLayout};
 
 /// Backoff bounds for reopening a capture source. The quick first retry covers
@@ -445,7 +445,7 @@ impl<E: CatalogExt> Driver<E> {
 					None => continue,
 				},
 			};
-			let pcm_layout = match PcmLayout::from_channels(layout.channels) {
+			let pcm_layout = match device_layout(layout.channels) {
 				Ok(layout) => layout,
 				Err(err) => match self.failed(err, track, desired.revision).await {
 					Some(result) => return Some(result),
@@ -891,23 +891,29 @@ impl<E: CatalogExt> EncoderOutput<'_, E> {
 	}
 }
 
+/// The layout of a capture device, which reports only a channel count. That names
+/// speakers for mono and stereo alone: a six-channel microphone array is not a
+/// 5.1 speaker layout, so it stays discrete rather than being remixed as one.
+fn device_layout(channels: u32) -> Result<PcmLayout, Error> {
+	match channels {
+		0..=2 => PcmLayout::from_channels(channels),
+		channels => Ok(PcmLayout::Discrete(channels)),
+	}
+}
+
 /// Converts one opened stream's native layout into the producer's fixed input
 /// layout. A new instance per open keeps filter state out of recovery gaps.
 struct Converter {
-	input: capture::Layout,
-	output: capture::Layout,
+	remix: Option<Remix>,
 	resampler: Option<Resampler>,
 	anchor_us: Option<u64>,
 }
 
 impl Converter {
 	fn new(input: capture::Layout, output: capture::Layout) -> Result<Self, Error> {
-		if input.channels != output.channels {
-			validate_remix(
-				PcmLayout::from_channels(input.channels)?,
-				PcmLayout::from_channels(output.channels)?,
-			)?;
-		}
+		let remix = (input.channels != output.channels)
+			.then(|| Remix::new(device_layout(input.channels)?, device_layout(output.channels)?))
+			.transpose()?;
 
 		let resampler = if input.sample_rate == output.sample_rate {
 			None
@@ -924,8 +930,7 @@ impl Converter {
 		};
 
 		Ok(Self {
-			input,
-			output,
+			remix,
 			resampler,
 			anchor_us: None,
 		})
@@ -956,10 +961,8 @@ impl Converter {
 			let data = resampler.process(&samples.data, moq_net::Timestamp::from_micros(timestamp_us)?)?;
 			samples.replace(data);
 		}
-		if self.input.channels != self.output.channels {
-			let input = PcmLayout::from_channels(self.input.channels)?;
-			let output = PcmLayout::from_channels(self.output.channels)?;
-			let data = remix(&samples.data, input, output)?;
+		if let Some(remix) = &self.remix {
+			let data = remix.process(&samples.data);
 			samples.replace(data);
 		}
 		if samples.data.is_empty() {

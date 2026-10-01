@@ -47,6 +47,17 @@ Regression tests: a publisher that expires a group, skips a sequence, and
 resets a stream before its header; on each version the subscriber settles
 without waiting out the grace.
 
+Add the lite-07 drop case to the tail interop harness from
+[track tail interop](/quest/m1/track-tail-interop.md): Rust and JS
+subscribers both settle on SUBSCRIBE_DROP through the relay, so a group the
+publisher skipped or never opened ends the track without waiting out the
+grace. Decided in the 2026-09-30 audit: the case moved here so the basic
+tail interop could land first.
+
+PR #4455 (`quest/m1/rs2ts/lite-leading-ones`) also edits the lite-07 wire
+(varints) and no quest tracks it; coordinate the draft's lite-07 changelog
+with it.
+
 ## Related
 
-- [Track tail interop](/quest/m1/track-tail-interop.md) - the Rust-JS proof of the lite-07 drop case
+- [Track tail interop](/quest/m1/track-tail-interop.md) - the Rust-JS tail harness the lite-07 drop case extends

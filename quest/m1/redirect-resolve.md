@@ -19,12 +19,7 @@ the connection it documents.
 Recommendation: make it private. Nothing outside `moq-tokio` calls it (only
 its own unit tests), and the repo keeps things private until a consumer
 needs them. If a consumer turns up, the alternative is returning the same
-`Result<Option<Url>>` as the internal `target` does once the drain line lands
-(on `main` it is still `Option<Url>`, folding a refusal into "keep the
-current addresses"), so empty and refused stay distinct. Removing or changing a published method is a break, so this
+`Result<Option<Url>>` as the internal `target` does, so empty and refused stay distinct. Removing or changing a published method is a break, so this
 targets `dev`; update `doc/lib/rs` if it mentions the method.
 
-## Required
-
-- [Graceful relay drains](/quest/m1/drain/README.md) - the stricter `Connection` lands with the line
-- `dev` has merged `main` after the drain line lands
+Start by merging `main` into `dev` if `dev` does not have the drain line yet.

@@ -10,6 +10,7 @@ use moq_srt::{Reject, Request, Server};
 use moq_tokio::RedactedUrl;
 use url::Url;
 
+use crate::args::TsProgram;
 use crate::moq::{ImportTarget, notify_ready};
 
 /// SRT endpoint args: exactly one of `--connect` (dial) / `--listen` (bind).
@@ -31,8 +32,49 @@ pub struct Args {
 	pub latency: crate::duration::Duration,
 }
 
+/// SRT import args: the endpoint, plus which programs of a multiplex to publish.
+#[derive(usage::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+pub struct ImportArgs {
+	#[usage(flatten)]
+	pub endpoint: Args,
+
+	/// Import one program of a multi-program feed, by its PAT program number, or `all` to
+	/// publish each program as its own broadcast (`event.hang` becomes `event/1.hang`,
+	/// `event/2.hang`, ...). Without it, a feed carrying more than one program is refused.
+	#[usage(long)]
+	pub program: Option<TsProgram>,
+}
+
+impl ImportArgs {
+	/// The library's selection for `--program`.
+	pub fn program(&self) -> Option<moq_srt::Program> {
+		self.program.map(|program| match program {
+			TsProgram::One(program) => moq_srt::Program::One(program),
+			TsProgram::All => moq_srt::Program::All,
+		})
+	}
+}
+
+/// Point a multi-program refusal at the flag that resolves it.
+fn suggest_program(err: moq_srt::Error) -> anyhow::Error {
+	let multiplex = matches!(&err, moq_srt::Error::Mux(moq_mux::Error::Other(inner))
+		if inner.is::<moq_mux::container::ts::MultipleProgramsError>());
+	let err = anyhow::Error::from(err);
+	if multiplex {
+		err.context("choose one with `--program <n>`, or publish each with `--program all`")
+	} else {
+		err
+	}
+}
+
 /// Accept incoming SRT publishes into the Origin as `target.name`; reject requests (import).
-pub async fn listen_import(target: ImportTarget, addr: SocketAddr, latency: Duration) -> anyhow::Result<()> {
+pub async fn listen_import(
+	target: ImportTarget,
+	addr: SocketAddr,
+	latency: Duration,
+	program: Option<moq_srt::Program>,
+) -> anyhow::Result<()> {
 	let ImportTarget {
 		origin,
 		name,
@@ -53,10 +95,12 @@ pub async fn listen_import(target: ImportTarget, addr: SocketAddr, latency: Dura
 					if let Err(err) = publish
 						.with_max_age(max_age)
 						.with_bandwidth(bandwidth)
+						.with_program(program)
 						.accept(&origin, &name)
 						.await
 					{
-						tracing::warn!(%name, %err, "SRT ingest ended with error");
+						let err = suggest_program(err);
+						tracing::warn!(%name, err = format!("{err:#}"), "SRT ingest ended with error");
 					}
 				});
 			}
@@ -107,7 +151,12 @@ pub async fn listen_export(
 }
 
 /// Dial a remote SRT server and pull its stream into the Origin under `target.name` (import).
-pub async fn connect_import(target: ImportTarget, url: Url, latency: Duration) -> anyhow::Result<()> {
+pub async fn connect_import(
+	target: ImportTarget,
+	url: Url,
+	latency: Duration,
+	program: Option<moq_srt::Program>,
+) -> anyhow::Result<()> {
 	let (addr, resource) = parse_url(&url).await?;
 	let name = &target.name;
 	tracing::info!(url = %RedactedUrl::new(&url), %name, "SRT client pulling");
@@ -116,8 +165,9 @@ pub async fn connect_import(target: ImportTarget, url: Url, latency: Duration) -
 	let client = moq_srt::Client::new(addr, resource)
 		.with_latency(latency)
 		.with_max_age(target.max_age)
-		.with_bandwidth(target.bandwidth);
-	Ok(client.pull(&target.origin, name).await?)
+		.with_bandwidth(target.bandwidth)
+		.with_program(program);
+	client.pull(&target.origin, name).await.map_err(suggest_program)
 }
 
 /// Push a broadcast from the Origin to a remote SRT server (export).
@@ -182,6 +232,18 @@ mod tests {
 	#[tokio::test]
 	async fn rejects_non_srt_scheme() {
 		assert!(parse("udp://127.0.0.1:9000").await.is_err());
+	}
+
+	/// A multiplex refusal names the flag that resolves it; other errors pass through unchanged.
+	#[test]
+	fn a_multiplex_suggests_the_program_flag() {
+		let refused = moq_mux::container::ts::MultipleProgramsError { programs: vec![1, 2] };
+		let err = suggest_program(moq_srt::Error::Mux(anyhow::Error::from(refused).into()));
+		let err = format!("{err:#}");
+		assert!(err.contains("--program") && err.contains("programs (1, 2)"), "{err}");
+
+		let err = format!("{:#}", suggest_program(moq_srt::Error::ListenerClosed));
+		assert!(!err.contains("--program"), "{err}");
 	}
 
 	#[tokio::test]

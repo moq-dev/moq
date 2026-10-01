@@ -35,6 +35,10 @@ use std::{
 /// Default [`Info::max_age`] when the publisher doesn't set one.
 pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(5);
 
+// The higher-first midpoint. IETF flips priority (lower first), so this goes out as 128, the
+// draft's usual publisher priority, while moq-lite carries 127 as written: one urgency on both.
+const DEFAULT_PRIORITY: u8 = 127;
+
 /// Maximum number of datagrams retained in the per-track send buffer.
 ///
 /// Datagrams are a best-effort send buffer, not a replay cache (unlike groups): only the last
@@ -106,6 +110,7 @@ pub struct Info {
 	pub max_age: Duration,
 	/// The publisher's priority for this track, used only to break ties between
 	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).
+	/// Higher is more urgent. Defaults to 127, the midpoint.
 	pub priority: u8,
 }
 
@@ -114,7 +119,7 @@ impl Default for Info {
 		Self {
 			timescale: Timescale::default(),
 			max_age: DEFAULT_MAX_AGE,
-			priority: 0,
+			priority: DEFAULT_PRIORITY,
 		}
 	}
 }
@@ -220,8 +225,8 @@ pub(crate) struct TrackState {
 	// The sequence number at which the track was finalized.
 	final_sequence: Option<u64>,
 
-	// The last producer dropped after the boundary was declared, so a group still missing
-	// below it will never be produced.
+	// Nothing more can arrive: the last producer dropped after a declared boundary,
+	// or the receiving session closed locally without declaring an end.
 	sealed: bool,
 
 	// No producer remains (aborted, sealed, or dropped), so nothing protects the live
@@ -1119,11 +1124,12 @@ impl TrackState {
 	/// An abort before the end settled wins over it: a group below the boundary was
 	/// still open, so the track was cut off rather than ended.
 	fn is_complete(&self) -> bool {
-		// `sealed` is a clean end when the last producer drops. An abort still wins
-		// unless that end had already settled: a group below it was still open.
-		let reached = self
-			.final_sequence
-			.is_some_and(|fin| self.sealed || self.max_sequence.map_or(0, |max| max.saturating_add(1)) >= fin);
+		// `sealed` also ends a locally closed receive track without a declared end.
+		// An abort still wins unless that end had already settled: a group below it was still open.
+		let reached = self.sealed
+			|| self
+				.final_sequence
+				.is_some_and(|fin| self.max_sequence.map_or(0, |max| max.saturating_add(1)) >= fin);
 		reached && (self.abort.is_none() || self.settled)
 	}
 
@@ -1169,8 +1175,19 @@ impl TrackState {
 			Poll::Ready(Ok(fin))
 		} else if let Some(err) = &self.abort {
 			Poll::Ready(Err(err.clone()))
+		} else if self.sealed {
+			Poll::Ready(Err(Error::Closed))
 		} else {
 			Poll::Pending
+		}
+	}
+
+	/// Distinguish a locally closed receive track from a declared content end.
+	fn poll_end(&self) -> Poll<Result<Option<u64>>> {
+		if self.sealed && self.final_sequence.is_none() && self.abort.is_none() {
+			Poll::Ready(Ok(None))
+		} else {
+			self.poll_finished().map(|res| res.map(Some))
 		}
 	}
 
@@ -1374,9 +1391,8 @@ impl Producer {
 	/// track's groups but drawing from the same sequence namespace (so interleaving with
 	/// [`Self::append_group`] never reuses a number). There is no group fallback: each
 	/// session drops (with a debug log) any datagram whose encoded body exceeds the
-	/// transport's datagram size, and sessions that can't carry datagrams at all (IETF
-	/// moq-transport, moq-lite before 05, or stream-only transports like WebSocket) never
-	/// deliver them. Keep payloads well under the 1200-byte minimum path MTU. An origin
+	/// transport's datagram size, and sessions that can't carry datagrams at all (moq-lite
+	/// before 05, or stream-only transports like WebSocket) never deliver them. Keep payloads well under the 1200-byte minimum path MTU. An origin
 	/// publisher uses this; a relay preserving upstream numbering uses
 	/// [`Self::insert_datagram`].
 	pub fn append_datagram<B: crate::IntoBytes>(&mut self, timestamp: Timestamp, payload: B) -> Result<u64> {
@@ -1463,6 +1479,35 @@ impl Producer {
 		let mut group = self.append_group()?;
 		group.write_frame(timestamp, frame)?;
 		group.finish()?;
+		Ok(())
+	}
+
+	/// End a locally closed session's receive track without declaring a wire boundary.
+	pub(crate) fn close(self) -> Result<()> {
+		let mut state = self.modify()?;
+		state.sealed = true;
+		// See `commit_abort`: a takeover resumes mid-group once the open group goes away.
+		state.resume = state.resume_position();
+		state.drop_open_groups();
+		state.close_cache();
+		state.close();
+		Ok(())
+	}
+
+	/// Abort the groups still receiving from a failed session before ending its track.
+	pub(crate) fn abort_session(self, err: Error) -> Result<()> {
+		let state = self.modify()?;
+		let open: Vec<_> = state
+			.lookup
+			.values()
+			.filter(|slot| !slot.group.is_finished())
+			.map(|slot| slot.group.clone())
+			.collect();
+		// Snapshot the resume boundary before aborting groups releases their frames.
+		commit_abort(state, err.clone());
+		for group in open {
+			let _ = group.abort(err.clone());
+		}
 		Ok(())
 	}
 
@@ -1745,22 +1790,7 @@ impl Producer {
 		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
 
-		let prev = &self.prev_subscription;
-		let mut combined = None;
-		let mut guard = ready!(subs.poll(waiter, |subs| {
-			let next = combined_subscription(subs, bound, waiter);
-			if &next == prev {
-				Poll::Pending
-			} else {
-				combined = next;
-				Poll::Ready(())
-			}
-		}));
-		// The aggregate changed: prune any closed subscribers now that we hold the lock.
-		guard.retain(|sub| !sub.is_closed());
-		drop(guard);
-		self.prev_subscription = combined.clone();
-		Poll::Ready(Ok(combined))
+		poll_combined_changed(&subs, bound, &mut self.prev_subscription, waiter).map(Ok)
 	}
 
 	/// Poll for the producer becoming unused (every consumer dropped).
@@ -1992,7 +2022,7 @@ impl Drop for Alive {
 				state.close_cache();
 			}
 			Err(state) => {
-				if state.final_sequence.is_some() || state.abort.is_some() {
+				if state.sealed || state.final_sequence.is_some() || state.abort.is_some() {
 					return;
 				}
 				tracing::warn!(
@@ -2004,19 +2034,60 @@ impl Drop for Alive {
 	}
 }
 
-/// Aggregate every live subscriber's preferences into the most demanding request.
+/// Poll until the aggregate across `subs` differs from `prev`, then store and return it.
+///
+/// Departed subscribers are pruned whenever the scan meets one, even when the aggregate
+/// holds. Churn with a steady viewer's preferences never changes it, so otherwise every
+/// wake would walk every departed entry the list has room for since its peak.
+fn poll_combined_changed(
+	subs: &kio::Shared<Subscriptions>,
+	bound: Option<Duration>,
+	prev: &mut Option<Subscription>,
+	waiter: &kio::Waiter,
+) -> Poll<Option<Subscription>> {
+	loop {
+		let mut next = None;
+		let mut departed = false;
+		let mut guard = ready!(subs.poll(waiter, |subs| {
+			(next, departed) = combined_subscription(subs, bound, waiter);
+			if departed || next != *prev {
+				Poll::Ready(())
+			} else {
+				Poll::Pending
+			}
+		}));
+		if departed {
+			guard.retain(|sub| !sub.is_closed());
+		}
+		drop(guard);
+		if next != *prev {
+			*prev = next.clone();
+			return Poll::Ready(next);
+		}
+		// Only pruned: a ready poll skips registering, so poll again to park on the list.
+	}
+}
+
+/// Aggregate every live subscriber's preferences into the most demanding request, and
+/// report whether any departed subscriber is still listed.
 ///
 /// Read-only: iterates the subscriptions immutably and registers `waiter` on each, so a
 /// preference update (or a subscriber dropping) wakes the caller's poll. Callers decide
 /// readiness from the returned value, then prune closed subscribers through the `Mut`.
-fn combined_subscription(subs: &Subscriptions, bound: Option<Duration>, waiter: &kio::Waiter) -> Option<Subscription> {
+fn combined_subscription(
+	subs: &Subscriptions,
+	bound: Option<Duration>,
+	waiter: &kio::Waiter,
+) -> (Option<Subscription>, bool) {
 	let mut combined = None;
+	let mut departed = false;
 	for sub in subs.iter() {
 		// A closed consumer means the subscriber dropped: it holds no live demand.
 		// `Consumer::poll` evaluates the closure before the closed flag, so it would
 		// still replay the final value into the aggregate; skip it explicitly so a
 		// departed subscriber can't keep the aggregate pinned to its last request.
 		if sub.is_closed() {
+			departed = true;
 			continue;
 		}
 		// Arm both waiters explicitly. `poll` registers on the value channel only
@@ -2031,7 +2102,7 @@ fn combined_subscription(subs: &Subscriptions, bound: Option<Duration>, waiter: 
 			combined = Some(merged);
 		}
 	}
-	clamp_combined(combined, bound)
+	(clamp_combined(combined, bound), departed)
 }
 
 /// A non-blocking aggregate of the current subscriptions, without arming any waiter.
@@ -2105,13 +2176,24 @@ fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Op
 /// Register a subscription if the track is live: clone the shared list out of the
 /// state, release the track lock, then push under the list's own lock. A closed
 /// track skips the push; nothing aggregates the preferences anymore.
+///
+/// Departed subscribers are pruned here too, so the list stays bounded on a track whose
+/// aggregate nobody polls. Pruning on every push would make a burst of N joins O(N^2),
+/// so, like `kio::WaiterList::register`, it only sweeps when the list is about to grow.
 fn register_subscription(state: kio::Ref<'_, TrackState>, subscription: &kio::Producer<Subscription>) {
 	if state.is_closed() {
 		return;
 	}
 	let subs = state.subscriptions.clone();
 	drop(state);
-	subs.lock().push(subscription.consume());
+	let mut subs = subs.lock();
+	if subs.len() == subs.capacity() {
+		subs.retain(|sub| !sub.is_closed());
+		// Leave at least half free, so each sweep is paid for by the pushes before it.
+		let live = subs.len();
+		subs.reserve(live);
+	}
+	subs.push(subscription.consume());
 }
 
 /// A weak reference to a track that doesn't prevent auto-close.
@@ -2229,7 +2311,11 @@ impl Demand {
 	/// The publisher's tie-break priority, as set in [`Info::priority`].
 	pub(crate) fn priority(&self) -> u8 {
 		// Always Some once the track exists; a closed one reads its last value.
-		self.state.read().info.as_ref().map_or(0, |info| info.priority)
+		self.state
+			.read()
+			.info
+			.as_ref()
+			.map_or(DEFAULT_PRIORITY, |info| info.priority)
 	}
 
 	/// Whether anyone is subscribed right now, without waiting.
@@ -2602,6 +2688,31 @@ impl Consumer {
 		}))
 	}
 
+	/// Poll for the newest cached group once its sequence passes `after`, as a producer
+	/// handle: holding one keeps its frames when the track's own producer tears down
+	/// abruptly, which otherwise releases every unfinished group. Pending once closed.
+	pub(crate) fn poll_latest_group(&self, after: Option<u64>, waiter: &kio::Waiter) -> Poll<group::Producer> {
+		let ConsumerKind::Plain(state) = &self.inner else {
+			return Poll::Pending;
+		};
+		let res = state.poll(waiter, |state| {
+			match state
+				.latest_group
+				.filter(|latest| after.is_none_or(|after| *latest > after))
+			{
+				Some(latest) => match state.lookup.get(&latest) {
+					Some(slot) => Poll::Ready(slot.group.clone()),
+					None => Poll::Pending,
+				},
+				None => Poll::Pending,
+			}
+		});
+		match res {
+			Poll::Ready(Ok(group)) => Poll::Ready(group),
+			_ => Poll::Pending,
+		}
+	}
+
 	/// Poll for a cached group by sequence, parking `waiter` until it lands.
 	///
 	/// `Ready(None)` once it can never arrive: the track ended below the sequence, or
@@ -2788,6 +2899,16 @@ impl Consumer {
 		}
 	}
 
+	/// The declared exclusive final sequence, or `None` while the track is open ended.
+	///
+	/// A spliced track answers for its newest segment, which is where fetches go.
+	pub(crate) fn final_sequence(&self) -> Option<u64> {
+		match &self.inner {
+			ConsumerKind::Plain(state) => state.read().final_sequence,
+			ConsumerKind::Spliced(resume) => resume.final_sequence(),
+		}
+	}
+
 	/// The frame-precise point a replacement route should resume from: one past the
 	/// last frame this copy produced. `None` if it produced nothing.
 	///
@@ -2809,7 +2930,8 @@ impl Consumer {
 			return Poll::Pending;
 		};
 		match ready!(state.poll(waiter, |state| {
-			if state.is_complete() {
+			// A local close without a declared end is a dead route, not finished content.
+			if state.final_sequence.is_some() && state.is_complete() {
 				Poll::Ready(())
 			} else {
 				Poll::Pending
@@ -2980,6 +3102,16 @@ impl group::Request {
 			.and_then(|mut state| state.insert_group_request(self.sequence, self.frame_start, info.into()));
 		self.remove();
 		res
+	}
+
+	/// Declare the track's exclusive final sequence, as the publisher answering this
+	/// fetch reported it. A no-op once the track declared one, or holds a later group.
+	pub(crate) fn finish_track_at(&self, final_sequence: u64) {
+		if let Ok(mut state) = TrackState::modify(&self.state)
+			&& state.final_sequence.is_none()
+		{
+			let _ = state.set_final(final_sequence);
+		}
 	}
 
 	/// Reject the fetch, resolving every joined [`Consumer::fetch_group`] with `err`.
@@ -3983,12 +4115,21 @@ impl Subscriber {
 		}
 	}
 
+	/// Observe a declared end or a clean local close for an origin's spliced cursor.
+	pub(crate) fn poll_end(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<u64>>> {
+		match &mut self.inner {
+			SubscriberKind::Plain(plain) => plain.poll(waiter, |state| state.poll_end()),
+			SubscriberKind::Spliced(spliced) => spliced.poll_end(waiter),
+		}
+	}
+
 	/// Block until the track declares its end, returning the exclusive final sequence
 	/// (also the total group count), or the cause on an abort.
 	///
 	/// Resolves as soon as the boundary is known, which may be ahead of the live edge
 	/// when the producer finished via [`Producer::finish_at`]. This reports the declared
-	/// end, not that every group has arrived: drive [`Self::recv_group`] (or
+	/// end, not that every group has arrived. A local session close without a declared
+	/// end returns [`Error::Closed`]. Drive [`Self::recv_group`] (or
 	/// [`Ordered::next_group`]) until it yields `None` to observe the track fully drained.
 	pub async fn finished(&mut self) -> Result<u64> {
 		kio::wait(|waiter| self.poll_finished(waiter)).await
@@ -4403,22 +4544,7 @@ impl Request {
 		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
 
-		let prev = &self.prev_subscription;
-		let mut combined = None;
-		let mut guard = ready!(subs.poll(waiter, |subs| {
-			let next = combined_subscription(subs, bound, waiter);
-			if &next == prev {
-				Poll::Pending
-			} else {
-				combined = next;
-				Poll::Ready(())
-			}
-		}));
-		// The aggregate changed: prune any closed subscribers now that we hold the lock.
-		guard.retain(|sub| !sub.is_closed());
-		drop(guard);
-		self.prev_subscription = combined.clone();
-		Poll::Ready(combined)
+		poll_combined_changed(&subs, bound, &mut self.prev_subscription, waiter)
 	}
 
 	pub(super) fn weak(&self) -> TrackWeak {
@@ -5098,10 +5224,13 @@ mod test {
 		producer.create_group(1u64.into()).unwrap().finish().unwrap();
 
 		let mut frame = straggler
-			.create_frame_owned(frame::Info {
-				size: 3,
-				timestamp: Timestamp::ZERO,
-			})
+			.create_frame_owned(
+				frame::Info {
+					size: 3,
+					timestamp: Timestamp::ZERO,
+				},
+				&Default::default(),
+			)
 			.unwrap();
 
 		// The sender stalls past the retention window, then the whole payload lands in
@@ -5533,6 +5662,44 @@ mod test {
 		let _b = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(10)));
 
 		assert_eq!(producer.subscription().unwrap().max_age, Duration::from_secs(2));
+	}
+
+	#[test]
+	fn churned_subscribers_do_not_accumulate() {
+		let producer = track_producer("test", None);
+		let consumer = producer.consume();
+		let _steady = producer.subscribe(None);
+
+		// Nobody polls the aggregate here, so registration alone has to bound the list.
+		for _ in 0..100 {
+			drop(producer.subscribe(None));
+			drop(consumer.subscribe(None));
+		}
+
+		// Registration sweeps only when the list is about to grow, so it holds a small
+		// multiple of the peak live count (2) rather than all 200 departures.
+		let subs = producer.state.read().subscriptions.clone();
+		let len = subs.read().len();
+		assert!(len <= 8, "departed subscribers accumulated: {len}");
+	}
+
+	#[test]
+	fn aggregate_poll_prunes_after_a_peak() {
+		let mut producer = track_producer("test", None);
+		let waiter = kio::Waiter::noop();
+		let _steady = producer.subscribe(None);
+		assert!(producer.poll_subscription_changed(&waiter).is_ready());
+
+		// A departed burst leaves room for many entries, and identical preferences never
+		// change the aggregate, so each wake has to prune what it walks.
+		drop((0..1000).map(|_| producer.subscribe(None)).collect::<Vec<_>>());
+		for _ in 0..100 {
+			drop(producer.subscribe(None));
+			assert!(producer.poll_subscription_changed(&waiter).is_pending());
+
+			let subs = producer.state.read().subscriptions.clone();
+			assert_eq!(subs.read().len(), 1, "the poll walked past departed subscribers");
+		}
 	}
 
 	/// Append a finished group presenting at `millis`, so the track carries a media
@@ -6918,6 +7085,51 @@ mod test {
 		producer.abort(Error::Timeout).unwrap();
 		let res = consumer.recv_group().now_or_never().expect("should not block");
 		assert!(matches!(res, Err(Error::Timeout)));
+	}
+
+	#[tokio::test]
+	async fn local_close_keeps_finished_groups_without_declaring_an_end() {
+		let producer = track_producer("local", None);
+		let mut consumer = producer.consume().subscribe(None).await.unwrap();
+		producer.append_group().unwrap().finish().unwrap();
+		producer.clone().close().unwrap();
+		assert!(producer.final_sequence().is_none());
+		assert!(matches!(consumer.finished().await, Err(Error::Closed)));
+		assert!(consumer.recv_group().await.unwrap().is_some());
+		assert!(consumer.recv_group().await.unwrap().is_none());
+	}
+
+	#[tokio::test]
+	async fn local_close_cannot_mask_an_abort_before_declared_end_settles() {
+		let mut producer = track_producer("local", None);
+		let mut consumer = producer.consume().subscribe(None).await.unwrap();
+		let _group = producer.append_group().unwrap();
+		producer.finish_at(2).unwrap();
+		producer.clone().abort(Error::Timeout).unwrap();
+		assert!(producer.close().is_err());
+		assert!(matches!(consumer.recv_group().await, Err(Error::Timeout)));
+	}
+
+	/// A local close is a dead route to the origin, not finished content, so a
+	/// replacement route can take over where it left off.
+	#[test]
+	fn local_close_is_not_completion_and_keeps_the_resume_position() {
+		let producer = track_producer("local", None);
+		let consumer = producer.consume();
+		producer.append_group().unwrap().finish().unwrap();
+		let mut group = producer.append_group().unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"a"))
+			.unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"b"))
+			.unwrap();
+		producer.close().unwrap();
+		assert!(matches!(
+			consumer.poll_complete(&kio::Waiter::noop()),
+			Poll::Ready(Err(_))
+		));
+		assert_eq!(consumer.resume_position(), Some(Position { group: 1, frame: 2 }));
 	}
 
 	/// An abort short of the end keeps the groups that finished for a reader that has not

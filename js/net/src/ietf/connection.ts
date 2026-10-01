@@ -1,15 +1,17 @@
-import { type Getter, Signal } from "@moq/signals";
+import { type Getter, Once, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import type { Established } from "../connection/established.ts";
+import type { Drain } from "../connection/goaway.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import { error, fromClose, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
+import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import type * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
 import { registerWire } from "../wire.ts";
 import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
 import * as Cluster from "./cluster.ts";
+import { Fetch, FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
 import { Group } from "./object.ts";
 import { Publish } from "./publish.ts";
@@ -20,6 +22,9 @@ import { SubscribeNamespace, SubscribeNamespaceLegacy } from "./subscribe_namesp
 import { Subscriber } from "./subscriber.ts";
 import { TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version, versionName } from "./version.ts";
+
+// The PADDING stream type (draft-18+): bytes a peer sends to probe for bandwidth.
+const PADDING = 0x132b3e28n;
 
 /**
  * Represents a connection to a MoQ server using moq-transport protocol.
@@ -45,6 +50,9 @@ export class Connection implements Established {
 	// The established WebTransport session.
 	#quic: WebTransport;
 
+	// Whether this side opened the session. Only a server may name a redirect.
+	#client: boolean;
+
 	// Session abstraction: adapter for v14-v16, native for v17.
 	#session: Session;
 
@@ -59,6 +67,9 @@ export class Connection implements Established {
 
 	// The Hop IDs this session declared; see {@link Cluster}.
 	#cluster?: Cluster.Hops;
+
+	// The peer's GOAWAY: read here on v17+, by the control stream adapter before that.
+	#goaway: Once<Drain>;
 
 	// Just to avoid logging when `close()` is called.
 	#closed = false;
@@ -116,19 +127,22 @@ export class Connection implements Established {
 		this.version = versionName(version);
 		this.transport = transportOf(quic);
 		this.#quic = quic;
+		this.#client = client;
 
 		// Two-path dispatch: v14-v16 uses adapter, v17+ uses native bidi streams
 		if (version >= Version.DRAFT_17) {
 			this.#session = new NativeSession(quic, version, client);
+			this.#goaway = new Once();
 			// v17+: control/setup stream only carries GoAway
 			void this.#runGoAway(control, version);
 		} else {
 			const adapter = new ControlStreamAdapter(quic, control, version, maxRequestId, client);
 			this.#session = adapter;
+			this.#goaway = adapter.goaway;
 			// Start the adapter read loop (routes control messages to virtual streams)
 			void adapter.run().catch((err: unknown) => {
 				if (!this.#closed) console.error("adapter error", err);
-				this.close();
+				this.#close();
 			});
 		}
 
@@ -143,7 +157,7 @@ export class Connection implements Established {
 		this.#solicit = solicit;
 		this.#cluster = cluster;
 		this.#subscriber = new Subscriber({ session: this.#session, quic, cluster, hidden });
-		registerWire(this, { consume: (path) => this.#subscriber.consume(path) });
+		registerWire(this, { consume: (path) => this.#subscriber.consume(path), goaway: this.#goaway });
 
 		void this.#run();
 	}
@@ -158,16 +172,30 @@ export class Connection implements Established {
 	 */
 	close() {
 		if (this.#closed) return;
+		this.#subscriber.close();
+		this.#close();
+	}
+
+	// Close with the session code the peer should see, a clean close by default.
+	#close(info?: WebTransportCloseInfo) {
+		if (this.#closed) return;
 
 		this.#closed = true;
 
-		this.#session.close();
-
+		// Before the session, whose own close would send a clean code first.
 		try {
-			this.#quic.close();
+			this.#quic.close(info);
 		} catch {
 			// ignore
 		}
+
+		this.#session.close();
+	}
+
+	// The peer broke the protocol, so losing the stream is not enough: nothing stops it
+	// repeating the violation on the next one.
+	#violated(err: ProtocolViolation) {
+		this.#close({ closeCode: SessionCode.ProtocolViolation, reason: err.message });
 	}
 
 	async #run(): Promise<void> {
@@ -178,7 +206,7 @@ export class Connection implements Established {
 				console.error("fatal error running connection", err);
 			}
 		} finally {
-			this.close();
+			this.#close();
 		}
 	}
 
@@ -198,10 +226,7 @@ export class Connection implements Established {
 			void this.#runBidi(stream).catch((err: unknown) => {
 				console.error("error processing bidi stream", err);
 				stream.abort(new Error("bidi stream error"));
-
-				// The peer broke the protocol, so losing the stream is not enough: nothing
-				// stops it repeating the violation on the next one.
-				if (err instanceof ProtocolViolation) this.close();
+				if (err instanceof ProtocolViolation) this.#violated(err);
 			});
 		}
 	}
@@ -247,6 +272,11 @@ export class Connection implements Established {
 				await this.#publisher.runTrackStatusRequest(msg, stream);
 				break;
 			}
+			case Fetch.id: {
+				const msg = await Fetch.decode(stream.reader, this.#session.version);
+				await this.#publisher.runFetch(msg, stream);
+				break;
+			}
 
 			// Subscriber handles incoming notifications
 			case PublishNamespace.id: {
@@ -271,7 +301,7 @@ export class Connection implements Established {
 					console.error(
 						`unsolicited publish_namespace from a peer that implements MoQ Solicit: broadcast=${msg.trackNamespace}`,
 					);
-					this.close();
+					this.#close();
 					break;
 				}
 
@@ -307,36 +337,71 @@ export class Connection implements Established {
 				.catch((err: unknown) => {
 					console.error("error processing object stream", err);
 					stream.stop(err);
+
+					// An unknown or invalid stream type MUST close the session, not just the stream.
+					if (err instanceof ProtocolViolation) this.#violated(err);
 				});
 		}
 	}
 
 	async #runUni(stream: Reader) {
-		const header = await Group.decode(stream, this.#session.version);
-		await this.#subscriber.handleGroup(header, stream);
+		const version = this.#session.version;
+		// Full width, so an unknown type past 2^53 is still classified rather than thrown.
+		const type = await stream.u62();
+
+		// SUBGROUP_HEADER types match 0b0XX1XXXX; Group.decode validates the bits per draft.
+		if (type <= 0xffn && (type & 0x90n) === 0x10n) {
+			const header = await Group.decode(stream, version, Number(type));
+			await this.#subscriber.handleGroup(header, stream);
+			return;
+		}
+
+		// The receiver MUST discard padding. We read it to the end rather than cancel,
+		// so a peer probing for bandwidth gets the throughput it is measuring.
+		if (type === PADDING && version >= Version.DRAFT_18) {
+			await stream.discard();
+			return;
+		}
+
+		// We never FETCH, so a fetch response answers nothing of ours.
+		if (type === BigInt(FetchHeader.type)) throw new Error("unexpected fetch stream");
+
+		// Anything else is unknown, and a second SETUP is a violation too.
+		throw new ProtocolViolation(`unknown uni stream type: 0x${type.toString(16)}`);
 	}
 
 	/**
 	 * v17+ only: reads GoAway from the setup/control stream.
+	 *
+	 * The session keeps serving after a GOAWAY so its groups in flight can finish while the
+	 * caller migrates; only the stream ending, or a second GOAWAY, closes it here.
 	 */
 	async #runGoAway(controlStream: Stream, version: IetfVersion) {
 		try {
-			const done = await controlStream.reader.done();
-			if (done) return;
+			for (;;) {
+				const done = await controlStream.reader.done();
+				if (done) return;
 
-			const typeId = await controlStream.reader.u53();
-			if (typeId === GoAway.id) {
+				const typeId = await controlStream.reader.u53();
+				if (typeId !== GoAway.id) {
+					console.warn(`unexpected message on setup stream: 0x${typeId.toString(16)}`);
+					return;
+				}
+
 				const msg = await GoAway.decode(controlStream.reader, version);
-				console.warn(`received GOAWAY with redirect URI: ${msg.newSessionUri}`);
-			} else {
-				console.warn(`unexpected message on setup stream: 0x${typeId.toString(16)}`);
+				if (this.#goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
+				// A client may leave, but only the server may name where to go.
+				if (!this.#client && msg.newSessionUri !== "") {
+					throw new ProtocolViolation("client GOAWAY must not name a redirect");
+				}
+				this.#goaway.set(msg.drain());
 			}
 		} catch (err) {
 			if (!this.#closed) {
 				console.error("error reading setup stream", err);
 			}
 		} finally {
-			this.close();
+			this.#close();
 		}
 	}
 

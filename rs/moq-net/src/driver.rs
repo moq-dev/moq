@@ -34,7 +34,7 @@ pub struct Driver<S: crate::transport::poll::Session> {
 pub(crate) enum Protocol<S: crate::transport::poll::Session> {
 	/// Boxed for size only: a concrete box, so `Send` stays inferred.
 	Lite(Box<crate::lite::Driver<S>>),
-	Ietf(crate::util::MaybeSendBox<'static, Result<(), Error>>),
+	Ietf(crate::ietf::Driver),
 }
 
 /// Protocol and lifecycle work owned by the driver.
@@ -62,6 +62,7 @@ impl<S: crate::transport::poll::Session> Driver<S> {
 	/// Panics if `now` is earlier than the previous poll or construction time.
 	pub fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Result<Option<Instant>, Error> {
 		self.clock.advance(now);
+		self.clock.register_driver(waiter);
 		match self.state.poll(waiter) {
 			Poll::Ready(Ok(())) => Err(Error::Closed),
 			Poll::Ready(Err(err)) => Err(err),
@@ -71,10 +72,17 @@ impl<S: crate::transport::poll::Session> Driver<S> {
 }
 
 impl<S: crate::transport::poll::Session> Protocol<S> {
+	pub(crate) fn local_close(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+		match self {
+			Self::Lite(driver) => driver.local_close.clone(),
+			Self::Ietf(driver) => driver.local_close.clone(),
+		}
+	}
+
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		match self {
 			Self::Lite(driver) => driver.poll(waiter),
-			Self::Ietf(driver) => waiter.poll_future(driver.as_mut()),
+			Self::Ietf(driver) => waiter.poll_future(std::pin::Pin::new(driver)),
 		}
 	}
 

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.9](https://github.com/moq-dev/moq/compare/moq-rtc-v0.3.8...moq-rtc-v0.3.9) - 2026-09-30
+
+### Fixed
+
+- *(rtc)* redact WHIP and WHEP client URLs in logs ([#4457](https://github.com/moq-dev/moq/pull/4457))
+
 ## [0.3.8](https://github.com/moq-dev/moq/compare/moq-rtc-v0.3.7...moq-rtc-v0.3.8) - 2026-09-27
 
 ### Fixed

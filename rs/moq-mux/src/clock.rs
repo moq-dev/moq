@@ -15,6 +15,9 @@
 //! A source with its own zero (a file, a restarted encoder) is translated onto the mapping with
 //! [`SourceMap`]: the first frame anchors onto the live edge, and a reset re-anchors forward,
 //! preserving the real idle gap measured on this monotonic clock.
+//!
+//! A source that muxes several tracks (an MPEG-TS program, an fMP4 file) shares one [`Anchor`]
+//! across them, with one [`Lane`] per track, so every track keeps the same offset.
 
 use std::time::{Duration, Instant, SystemTime};
 
@@ -240,7 +243,21 @@ impl SourceMap {
 /// video step back further than [`SourceMap::MAX_REORDER`], which would read as a reset. So
 /// each track keeps its own [`Lane`] that detects its own backwards steps, and a restart any
 /// lane detects moves the anchor once; the other lanes adopt that mapping when they restart too.
-pub(crate) struct Anchor {
+///
+/// ```
+/// use moq_mux::{Clock, clock};
+///
+/// let mut anchor = clock::Anchor::new(Clock::new());
+/// let (mut video, mut klv) = (clock::Lane::default(), clock::Lane::default());
+///
+/// // Both tracks of the program keep the 800ms between their source timestamps.
+/// let v = anchor.translate(&mut video, moq_net::Timestamp::from_micros(10_800_000)?)?;
+/// let k = anchor.translate(&mut klv, moq_net::Timestamp::from_micros(10_000_000)?)?;
+/// assert_eq!(v.as_micros() - k.as_micros(), 800_000);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Debug)]
+pub struct Anchor {
 	clock: Clock,
 	/// Broadcast micros minus source micros for the current generation; `None` until the first
 	/// frame anchors it.
@@ -256,8 +273,8 @@ pub(crate) struct Anchor {
 }
 
 /// One track's position on its source's [`Anchor`].
-#[derive(Default)]
-pub(crate) struct Lane {
+#[derive(Debug, Default)]
+pub struct Lane {
 	/// The offset this lane translates with, in micros; `None` until it adopts one.
 	offset: Option<i128>,
 	generation: u64,
@@ -270,13 +287,14 @@ pub(crate) struct Lane {
 
 impl Lane {
 	/// The next frame starts a new source timeline, however its PTS compares to the last.
-	pub(crate) fn restart(&mut self) {
+	pub fn restart(&mut self) {
 		self.restart = true;
 	}
 }
 
 impl Anchor {
-	pub(crate) fn new(clock: Clock) -> Self {
+	/// A source mapping onto `clock`, unanchored until the first frame on any lane.
+	pub fn new(clock: Clock) -> Self {
 		Self {
 			clock,
 			offset: None,
@@ -288,12 +306,15 @@ impl Anchor {
 	}
 
 	/// Translate one of `lane`'s timestamps, sampling the arrival time.
-	pub(crate) fn translate(&mut self, lane: &mut Lane, pts: moq_net::Timestamp) -> crate::Result<moq_net::Timestamp> {
+	pub fn translate(&mut self, lane: &mut Lane, pts: moq_net::Timestamp) -> crate::Result<moq_net::Timestamp> {
 		self.translate_at(lane, pts, self.clock.now().value())
 	}
 
 	/// Translate one of `lane`'s timestamps, arriving at monotonic `now` micros.
-	pub(crate) fn translate_at(
+	///
+	/// The deterministic core behind [`translate`](Self::translate): `now` is what
+	/// [`Clock::now`] would read, pinned for synthetic sources and tests.
+	pub fn translate_at(
 		&mut self,
 		lane: &mut Lane,
 		pts: moq_net::Timestamp,
@@ -366,7 +387,9 @@ impl Anchor {
 	}
 
 	/// Record that the broadcast has published up to `end`, e.g. a fragment's last sample end.
-	pub(crate) fn extend(&mut self, end: moq_net::Timestamp) {
+	///
+	/// A restart then lands after `end` even when no frame's start reached it.
+	pub fn extend(&mut self, end: moq_net::Timestamp) {
 		self.extend_micros(end.as_micros());
 	}
 

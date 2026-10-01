@@ -25,6 +25,13 @@
 	line-height: 1.4;
 }
 
+@media (min-width: 960px) {
+	.moq-banner {
+		height: var(--moq-banner-height);
+		margin-top: var(--vp-nav-height);
+	}
+}
+
 .moq-banner p {
 	margin: 0.15rem 0;
 	color: var(--vp-c-text-2);

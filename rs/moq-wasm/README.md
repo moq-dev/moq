@@ -7,7 +7,7 @@ wire implementation in `@moq/net` (~10k LOC) with the canonical Rust one, so the
 protocol lives in exactly one place.
 
 This crate is the Rust half; the generated JS package is
-[`@moq/wasm`](../../js/wasm) (`just wasm` builds it). It is **not** the same as
+[`@moq/wasm`](../../js/wasm) (`just js wasm` builds it). It is **not** the same as
 `moq-ffi`: that crate uses UniFFI, which targets the C ABI (Kotlin/Swift/Python/
 Go). Browsers need `wasm-bindgen`, so this is a separate sibling crate. (For
 *React Native* JS, `uniffi-bindgen-react-native` can reuse `moq-ffi` directly;
@@ -66,7 +66,7 @@ dependency is commented out in `Cargo.toml` until then.
 
 ## Building
 
-`just wasm` (from the repo root) does everything: builds for wasm and runs
+`just js wasm` (from the repo root) does everything: builds for wasm and runs
 `wasm-bindgen` (web target) into `js/wasm/dist`. The wasm target, the cfg flags
 (`getrandom` wasm backend + web-sys unstable WebTransport APIs), and the
 `wasm-bindgen-cli` tool come from `.cargo/config.toml` and the Nix dev shell.
