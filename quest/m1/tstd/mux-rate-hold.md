@@ -15,16 +15,23 @@ publishes `mpegts.muxRate` only after a 2 s window agrees. So the export's
 first ~2 s go out unpadded, and the harness skips them (`pcr-timing.py`
 grades from the first null packet).
 
-- Hold the whole catalog until the meter settles or its window closes,
-  whichever is first: a one-time ~2 s start-up cost at ingest. Media written
-  in the meantime is still published.
-- A source whose rate never settles (VBR) publishes after the window without
-  `muxRate`, and the export stays unpadded, as today.
+- Hold the whole catalog until the meter settles, or until one `WINDOW` of
+  PCR time has passed with no rate published, whichever is first: a
+  one-time ~2 s start-up cost at ingest. The meter itself keeps rolling and
+  never times out, so the hold needs that explicit bound. Media written in
+  the meantime is still published.
+- A source whose rate never settles (VBR) publishes after that window
+  without `muxRate`, and the export stays unpadded, as today.
+- End of input releases a held catalog without `muxRate` before
+  `catalog.finish` closes it: a TS shorter than one window never completes
+  a measurement, and finishing would otherwise close the catalog track with
+  the reservation unpublished, leaving media with no catalog.
 - Remove the harness's "grade from the first null packet" skip, and the
   export's grace for a rate that arrives mid-stream, if nothing else needs
   them.
-- Test: an imported CBR source's first catalog carries `muxRate`, and a VBR
-  source's catalog arrives after the window without it. A TS→TS export passes
+- Test: an imported CBR source's first catalog carries `muxRate`, a VBR
+  source's catalog arrives after the window without it, and a CBR import
+  shorter than 2 s still publishes its catalog. A TS→TS export passes
   `pcr-schedule` from its first PCR.
 
 ## Required

@@ -12,7 +12,9 @@ so broadcast-sized CPBs fit out of the box.
 Decided (2026-10-01). Found in [fixed-delay release](/quest/m1/tstd/delay.md)
 (#4645): frames are held until anchor + DTS + delay, and the schedule then
 sends each unit up to another delay ahead of its DTS, so a mid-group joiner
-trails the source by two delays. t0ms measured about 1.7 s at 500 ms.
+trails the source by two delays. t0ms measured about 1.7 s of delivery at
+500 ms: the two delays plus the join and the source's own send-ahead, so
+carving alone should cut it by about one delay, not to 0.5 s.
 
 - One budget. A frame's release deadline is anchor + DTS + delay − its
   send-ahead. The send-ahead is at most what the PID's decoder buffer can hold
