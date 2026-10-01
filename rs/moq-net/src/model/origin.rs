@@ -5992,6 +5992,70 @@ mod tests {
 		}
 	}
 
+	/// A returning reader is handed the parked open group spliced onto the source's
+	/// continuation, which starts past the warm head. The group's end stays unknown
+	/// until the source finishes it, even before a frame of it is read: readers drop a
+	/// group ahead of their cursor whose end resolves to an error.
+	#[tokio::test]
+	async fn returning_reader_gets_a_live_open_warm_group() {
+		use futures::FutureExt;
+
+		let (_server, _upstream, mut dynamic, resolved) = served_front().await;
+
+		// The first reader leaves mid-group.
+		let track = resolved.track("video").unwrap();
+		let subscribing = tokio::spawn(async move { track.subscribe(None).await });
+		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+			.await
+			.expect("the front asked the source")
+			.expect("request");
+		let mut source = request.resolving_start().accept(None);
+		let mut subscription = subscribing.await.unwrap().expect("subscribe");
+		source.start_at(0).unwrap();
+		let mut group = source.create_group(0u64.into()).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"a".as_ref()).unwrap();
+		let mut reading = subscription.recv_group().await.unwrap().expect("group 0");
+		assert_eq!(reading.read_frame().await.unwrap().unwrap().payload.as_ref(), b"a");
+		drop(reading);
+		drop(subscription);
+		tokio::time::timeout(Duration::from_secs(1), source.unused())
+			.await
+			.expect("parked")
+			.expect("source open");
+		drop(group);
+		drop(source);
+
+		// The next reader returns while the group is still live upstream.
+		let track = resolved.track("video").unwrap();
+		let subscribing = tokio::spawn(async move { track.subscribe(None).await });
+		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+			.await
+			.expect("the front asked the source")
+			.expect("request");
+		let mut source = request.resolving_start().accept(None);
+		let mut subscription = subscribing.await.unwrap().expect("subscribe");
+		source.start_at(0).unwrap();
+		let mut group = source.create_group(0u64.into()).unwrap();
+		group.start_at(1).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"b".as_ref()).unwrap();
+
+		let mut reading = tokio::time::timeout(Duration::from_secs(1), subscription.recv_group())
+			.await
+			.expect("group 0")
+			.unwrap()
+			.expect("track ended");
+		assert_eq!(reading.sequence, 0);
+		let early = reading.finished().now_or_never();
+		assert!(
+			early.is_none(),
+			"the live group already resolved its end before a frame was read: {early:?}"
+		);
+		assert_eq!(reading.read_frame().await.unwrap().unwrap().payload.as_ref(), b"a");
+		assert_eq!(reading.read_frame().await.unwrap().unwrap().payload.as_ref(), b"b");
+		group.finish().unwrap();
+		assert_eq!(reading.finished().await.unwrap(), 2);
+	}
+
 	#[tokio::test]
 	async fn warm_head_survives_another_takeover_before_park() {
 		tokio::time::pause();

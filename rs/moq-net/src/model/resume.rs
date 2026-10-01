@@ -1405,6 +1405,14 @@ impl Group {
 					let mut continuation =
 						track.guard_group(continuation, self.subscription.clone(), self.anchor.clone(), bound);
 					continuation.set_stale_meter(self.stale_stats.clone());
+					// Ask from the seam, as `poll_current` reads from it. A fresh cursor
+					// sits at frame 0, below a continuation that starts past the head,
+					// and would report a live group as lagged.
+					continuation.start_at(cap);
+					if continuation.index() != cap {
+						self.dead = Some((segment, Error::Lagged));
+						continue;
+					}
 					return continuation.poll_finished(waiter);
 				}
 				// This route will never have it; wait for whatever replaces it.
