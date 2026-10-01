@@ -1,4 +1,4 @@
-//! Grouped tracks on moq-lite and MoQ Transport; datagrams on moq-lite.
+//! Grouped tracks and datagrams on moq-lite and MoQ Transport.
 
 mod support;
 
@@ -104,10 +104,9 @@ async fn grouped_over_ietf() {
 	.expect("timed out");
 }
 
-#[tokio::test]
-async fn datagrams_over_lite() {
+async fn datagram_roundtrip(version: &str) {
 	tokio::time::timeout(TEST_TIMEOUT, async {
-		let mut fixture = connect_protected("moq-lite-05".parse().unwrap(), "audio").await;
+		let mut fixture = connect_protected(version.parse().unwrap(), "audio").await;
 		fixture
 			.producer
 			.append_datagram(Timestamp::from_millis(9).unwrap(), b"opus")
@@ -122,4 +121,14 @@ async fn datagrams_over_lite() {
 	})
 	.await
 	.expect("timed out");
+}
+
+#[tokio::test]
+async fn datagrams_over_lite() {
+	datagram_roundtrip("moq-lite-05").await;
+}
+
+#[tokio::test]
+async fn datagrams_over_ietf() {
+	datagram_roundtrip("moq-transport-21").await;
 }

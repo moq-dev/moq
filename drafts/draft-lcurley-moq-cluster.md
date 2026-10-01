@@ -109,7 +109,7 @@ It stands for an endpoint that did not negotiate this extension, and an endpoint
 Since any number of endpoints can be 0, it identifies nothing:
 
 - **Loop detection**: 0 in a HOP_PATH is never a loop. A receiver whose own Hop ID is 0 cannot detect loops through itself and MUST NOT discard an advertisement merely because the path contains 0.
-- **Origin identity**: an advertisement whose first entry is 0 has an unknown publisher. A receiver MUST NOT treat two such advertisements as interchangeable ({{selection}}).
+- **Origin identity**: an advertisement whose first entry is 0 has an unknown publisher, which a relay names by putting a stamp of its own in front ({{stamping}}). A receiver MUST NOT treat two unstamped ones as interchangeable ({{selection}}).
 - **Filtering**: a peer that declared 0 gave the receiver nothing to filter that session on. The receiver MAY assign an ID of its own ({{assigned}}) as local selection state and MUST NOT write it into HOP_PATH.
 
 Duplicate *non-zero* Hop IDs in one HOP_PATH are a loop; duplicate zeros are not.
@@ -121,13 +121,21 @@ It uses that ID as local selection state: as what it filters that session on, in
 
 The ID is the receiver's own, not the peer's, and MUST NOT be forwarded.
 An advertisement that arrives with its own HOP_PATH already names the sender there, as 0 if withheld.
-A receiver writes 0 for an upstream that sent no HOP_PATH ({{bridging}}).
+An unnamed publisher is stamped instead ({{stamping}}), which is not an assigned identity.
 
 An assigned ID MUST NOT be shared between peers not known to be the same endpoint.
-Sharing one makes their content interchangeable ({{selection}}) and suppresses each one's advertisements to the other, so two unrelated publishers would be merged into one and starve each other of routes.
+Sharing one suppresses each one's advertisements to the other, so two unrelated peers would starve each other of routes.
 
-A peer the receiver authenticated, or dialed and therefore chose, SHOULD get one stable ID, so its reconnects and redundant sessions are recognized as the same content; a fresh ID per connection would make one peer look like several.
+A peer the receiver authenticated, or dialed and therefore chose, SHOULD get one stable ID, so its reconnects and redundant sessions are filtered as one peer; a fresh ID per connection would make one peer look like several.
 An anonymous accepted session cannot be correlated with anything, so it SHOULD get a distinct ID per session: not an identity, but enough to keep routes learned from it from being advertised back to it, which is the loop 0 cannot prevent.
+
+## Stamping an Unknown Publisher {#stamping}
+A relay that records an advertisement whose first HOP_PATH entry is 0 MUST insert a random non-zero Hop ID in front of it, picked once for the session the advertisement arrived on.
+One that arrived with no HOP_PATH ({{bridging}}) becomes that stamp followed by 0.
+
+Nothing on the wire says whether an unnamed publisher that reconnects is the same one, so a fresh stamp per session makes its reconnect a change of publisher downstream ({{updating}}), while an update on the same session keeps the stamp and applies in place.
+The 0 behind the stamp keeps the path ranked below fully identified ones ({{selection}}), since the unnamed hop may hide any depth.
+A stamp names a session, not a peer: it MUST NOT be reused across sessions or taken as the peer's identity.
 
 
 # Namespace Advertisements {#namespace}
@@ -191,7 +199,7 @@ Unknown, out-of-budget, and saturated routes are outside the guarantee: a receiv
 
 # Relay Behavior
 A relay forwarding an advertisement MUST append its own Hop ID to the HOP_PATH it received, so its ID is always the last entry.
-A received 0 is forwarded unchanged.
+A received 0 is forwarded unchanged, behind a stamp when it is the first entry ({{stamping}}).
 
 A relay MUST discard an advertisement whose HOP_PATH already contains its own non-zero Hop ID: forwarding it would extend a loop, and subscribing through it would route the relay back to itself.
 This check catches loops of any length and is the only loop defense required.
@@ -199,7 +207,7 @@ A conforming sender never sends one ({{selection}}), so a receiver MAY close the
 
 ## Bridging {#bridging}
 An upstream that did not negotiate the extension sends no HOP_PATH.
-The relay creates one with a single 0 entry for that upstream ({{zero}}), then appends its own Hop ID.
+The relay creates one holding its stamp for that session followed by 0 ({{stamping}}), then appends its own Hop ID.
 The identity a receiver assigned that upstream ({{assigned}}) is local selection state and MUST NOT appear in HOP_PATH.
 
 ## Accumulating Cost {#accumulating}
@@ -228,8 +236,9 @@ An advertisement lives as long as its stream, so an update on a new stream would
 An endpoint MUST NOT open a second stream for an advertisement it already maintains on the session.
 
 An update replaces the old parameters atomically, so a receiver MUST NOT tear down subscriptions or drop cached state because one arrived.
-If the first HOP_PATH entry is unchanged the content is continuous and subscriptions MAY resume on the new route at a group boundary, even when that entry is 0: there is one advertisement, and its stream is the continuity.
-If the publisher did change, the endpoint MUST withdraw the advertisement (PUBLISH_NAMESPACE_DONE or NAMESPACE_DONE) and advertise again rather than update in place.
+If the first HOP_PATH entry is unchanged the content is continuous and subscriptions MAY resume on the new route at a group boundary.
+If the first entry changed, the publisher changed, and the endpoint still sends an ordinary update.
+The receiver keeps each subscription it is already serving on the old source until that source ends, MUST NOT resume or splice it onto the updated route, and serves new requests from the updated route without state cached from the old publisher.
 
 The expected update is a ROUTE_COST change, which is how a relay signals that it started or stopped carrying the namespace.
 
@@ -267,7 +276,7 @@ Under this extension an advertisement is a path, so a session advertises a names
 
 A receiver MAY still hold paths to several publishers of one namespace and choose between them as it sees fit: serve from the cheapest and move to the next when it fails.
 A refusal moves to another publisher only as {{selection}} allows: once, and only for NO_CAPACITY.
-The advertised path and the served source stay the same publisher: a relay that moves to another MUST withdraw its advertisement and advertise the new path ({{updating}}), so the first Hop ID downstream always names the publisher whose Objects flow.
+A relay that moves to another publisher MUST update its advertisement to the new path ({{updating}}), so the first Hop ID downstream names the publisher that new subscriptions reach.
 Moving between distinct publishers is a discontinuity: their groups are not one sequence, so a subscriber sees an unrelated Location, and a FETCH that succeeds against one may fail against the other.
 
 Redundant publishers of the same content avoid this by sharing a Hop ID ({{hop-ids}}), which makes their paths interchangeable and lets a subscription fail over at a group boundary.
@@ -330,6 +339,8 @@ This document requests one registration in the "REQUEST_ERROR Codes" registry.
 ## moq-cluster-02
 - Defined request resolution against the longest covering prefix and the NO_CAPACITY refusal with its single re-resolution; any other refusal is terminal, including between several publishers of one namespace.
 - A relay does not advertise a namespace because it resolved it; the publisher advertises the concrete namespace once producing.
+- A change of original publisher is an ordinary update instead of a withdrawal and a new advertisement. Subscriptions already served drain the old source; new requests take the updated route.
+- A relay puts a random Hop ID, picked per session, in front of an advertisement whose first HOP_PATH entry is 0, and writes that stamp followed by 0 for one with no HOP_PATH.
 
 ## moq-cluster-01
 - Assigned identities are local selection state and MUST NOT be forwarded.

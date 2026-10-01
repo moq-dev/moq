@@ -234,7 +234,7 @@ impl<O: Output> Media<O> {
 					decode.output.format = moq_audio::Format::F32;
 					match moq_audio::decode::Consumer::new(&rendition, &config, &name, decode).await {
 						Ok(consumer) => {
-							tracing::info!(track = name, "playing audio rendition");
+							tracing::info!(track = name, decoder = consumer.name(), "playing audio rendition");
 							if speaker.is_none() {
 								speaker = Some(self.output.speaker().await?);
 							}

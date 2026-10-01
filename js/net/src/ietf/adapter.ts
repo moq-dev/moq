@@ -212,9 +212,7 @@ export class ControlStreamAdapter implements Session {
 			},
 		});
 
-		const stream = new Stream({ readable, writable: sendWritable });
-		stream.reader.version = this.version;
-		stream.writer.version = this.version;
+		const stream = new Stream({ readable, writable: sendWritable, version: this.version });
 		return stream;
 	}
 
@@ -339,9 +337,7 @@ export class ControlStreamAdapter implements Session {
 
 		const sendWritable = this.#createSendWritable();
 
-		const stream = new Stream({ readable, writable: sendWritable });
-		stream.reader.version = this.version;
-		stream.writer.version = this.version;
+		const stream = new Stream({ readable, writable: sendWritable, version: this.version });
 
 		this.#streams.set(requestId, { controller });
 

@@ -19,6 +19,7 @@ use crate::{broadcast, cache, group, stats};
 use super::{Datagram, Requests};
 
 use super::Cap;
+use super::resume::Successor;
 pub use super::subscription::{Position, Subscription};
 
 use std::{
@@ -33,6 +34,10 @@ use std::{
 
 /// Default [`Info::max_age`] when the publisher doesn't set one.
 pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(5);
+
+// The higher-first midpoint. IETF flips priority (lower first), so this goes out as 128, the
+// draft's usual publisher priority, while moq-lite carries 127 as written: one urgency on both.
+const DEFAULT_PRIORITY: u8 = 127;
 
 /// Maximum number of datagrams retained in the per-track send buffer.
 ///
@@ -105,6 +110,7 @@ pub struct Info {
 	pub max_age: Duration,
 	/// The publisher's priority for this track, used only to break ties between
 	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).
+	/// Higher is more urgent. Defaults to 127, the midpoint.
 	pub priority: u8,
 }
 
@@ -113,7 +119,7 @@ impl Default for Info {
 		Self {
 			timescale: Timescale::default(),
 			max_age: DEFAULT_MAX_AGE,
-			priority: 0,
+			priority: DEFAULT_PRIORITY,
 		}
 	}
 }
@@ -555,40 +561,20 @@ impl TrackState {
 	/// and `beyond` is where it starts when another track serves it (a splice's next
 	/// segment; see [`Anchor::successor`]).
 	fn reach(&self, sequence: u64, cap: Option<u64>, beyond: Option<Timestamp>) -> Option<Timestamp> {
-		match self.first_start(sequence.saturating_add(1), cap) {
-			Some(start) => start,
+		match self.first_servable(sequence.saturating_add(1), cap) {
+			Some(group) => group.timestamp(),
 			None => beyond,
 		}
 	}
 
-	/// Where the first servable group in `from..cap` starts presenting: `None` when no
-	/// such group is cached, `Some(None)` while it has no frame yet.
-	fn first_start(&self, from: u64, cap: Option<u64>) -> Option<Option<Timestamp>> {
-		let slot = self
-			.lookup
+	/// The first servable group in `from..cap`, stamped or not.
+	fn first_servable(&self, from: u64, cap: Option<u64>) -> Option<&group::Producer> {
+		self.lookup
 			.range(from..)
 			.map(|(_, slot)| slot)
 			.take_while(|slot| super::subscription::before_end(slot.group.sequence, cap))
-			.find(|slot| slot.visible && !slot.group.is_aborted())?;
-		Some(slot.group.timestamp())
-	}
-
-	/// The first servable group's start in `from..cap`, with the slot identity a later
-	/// judgment needs to tell that group from whatever replaces it. `None` when no such
-	/// group is cached or it has no frame yet: an unstamped successor leaves reach
-	/// unbounded, and this does not skip past it to a later group.
-	fn served_start(&self, from: u64, cap: Option<u64>) -> Option<ServedStart> {
-		let slot = self
-			.lookup
-			.range(from..)
-			.map(|(_, slot)| slot)
-			.take_while(|slot| super::subscription::before_end(slot.group.sequence, cap))
-			.find(|slot| slot.visible && !slot.group.is_aborted())?;
-		Some(ServedStart {
-			sequence: slot.group.sequence,
-			stamp: slot.stamp,
-			timestamp: slot.group.timestamp()?,
-		})
+			.find(|slot| slot.visible && !slot.group.is_aborted())
+			.map(|slot| &slot.group)
 	}
 
 	/// Whether the group at `sequence` has drifted further behind `edge` than `budget`
@@ -629,9 +615,9 @@ impl TrackState {
 			.presentation
 			.filter(|live| self.holds(live.sequence, live.stamp))
 			.map(|live| (live.sequence, live.timestamp));
-		// `outer` and `successor` were revalidated on their own tracks before this lock
-		// was taken ([`LiveEdge::is_live`], [`Successor::start`]). There is no slot for
-		// them here, and taking their locks here would nest.
+		// `outer` was revalidated and `successor` resolved on their own tracks before this
+		// lock was taken ([`LiveEdge::is_live`], [`Successor::poll_start`]). There is no
+		// slot for them here, and taking their locks here would nest.
 		let Some((_, timestamp)) = local
 			.into_iter()
 			.chain(edge.outer)
@@ -1393,9 +1379,8 @@ impl Producer {
 	/// track's groups but drawing from the same sequence namespace (so interleaving with
 	/// [`Self::append_group`] never reuses a number). There is no group fallback: each
 	/// session drops (with a debug log) any datagram whose encoded body exceeds the
-	/// transport's datagram size, and sessions that can't carry datagrams at all (IETF
-	/// moq-transport, moq-lite before 05, or stream-only transports like WebSocket) never
-	/// deliver them. Keep payloads well under the 1200-byte minimum path MTU. An origin
+	/// transport's datagram size, and sessions that can't carry datagrams at all (moq-lite
+	/// before 05, or stream-only transports like WebSocket) never deliver them. Keep payloads well under the 1200-byte minimum path MTU. An origin
 	/// publisher uses this; a relay preserving upstream numbering uses
 	/// [`Self::insert_datagram`].
 	pub fn append_datagram<B: crate::IntoBytes>(&mut self, timestamp: Timestamp, payload: B) -> Result<u64> {
@@ -1764,22 +1749,7 @@ impl Producer {
 		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
 
-		let prev = &self.prev_subscription;
-		let mut combined = None;
-		let mut guard = ready!(subs.poll(waiter, |subs| {
-			let next = combined_subscription(subs, bound, waiter);
-			if &next == prev {
-				Poll::Pending
-			} else {
-				combined = next;
-				Poll::Ready(())
-			}
-		}));
-		// The aggregate changed: prune any closed subscribers now that we hold the lock.
-		guard.retain(|sub| !sub.is_closed());
-		drop(guard);
-		self.prev_subscription = combined.clone();
-		Poll::Ready(Ok(combined))
+		poll_combined_changed(&subs, bound, &mut self.prev_subscription, waiter).map(Ok)
 	}
 
 	/// Poll for the producer becoming unused (every consumer dropped).
@@ -2023,19 +1993,60 @@ impl Drop for Alive {
 	}
 }
 
-/// Aggregate every live subscriber's preferences into the most demanding request.
+/// Poll until the aggregate across `subs` differs from `prev`, then store and return it.
+///
+/// Departed subscribers are pruned whenever the scan meets one, even when the aggregate
+/// holds. Churn with a steady viewer's preferences never changes it, so otherwise every
+/// wake would walk every departed entry the list has room for since its peak.
+fn poll_combined_changed(
+	subs: &kio::Shared<Subscriptions>,
+	bound: Option<Duration>,
+	prev: &mut Option<Subscription>,
+	waiter: &kio::Waiter,
+) -> Poll<Option<Subscription>> {
+	loop {
+		let mut next = None;
+		let mut departed = false;
+		let mut guard = ready!(subs.poll(waiter, |subs| {
+			(next, departed) = combined_subscription(subs, bound, waiter);
+			if departed || next != *prev {
+				Poll::Ready(())
+			} else {
+				Poll::Pending
+			}
+		}));
+		if departed {
+			guard.retain(|sub| !sub.is_closed());
+		}
+		drop(guard);
+		if next != *prev {
+			*prev = next.clone();
+			return Poll::Ready(next);
+		}
+		// Only pruned: a ready poll skips registering, so poll again to park on the list.
+	}
+}
+
+/// Aggregate every live subscriber's preferences into the most demanding request, and
+/// report whether any departed subscriber is still listed.
 ///
 /// Read-only: iterates the subscriptions immutably and registers `waiter` on each, so a
 /// preference update (or a subscriber dropping) wakes the caller's poll. Callers decide
 /// readiness from the returned value, then prune closed subscribers through the `Mut`.
-fn combined_subscription(subs: &Subscriptions, bound: Option<Duration>, waiter: &kio::Waiter) -> Option<Subscription> {
+fn combined_subscription(
+	subs: &Subscriptions,
+	bound: Option<Duration>,
+	waiter: &kio::Waiter,
+) -> (Option<Subscription>, bool) {
 	let mut combined = None;
+	let mut departed = false;
 	for sub in subs.iter() {
 		// A closed consumer means the subscriber dropped: it holds no live demand.
 		// `Consumer::poll` evaluates the closure before the closed flag, so it would
 		// still replay the final value into the aggregate; skip it explicitly so a
 		// departed subscriber can't keep the aggregate pinned to its last request.
 		if sub.is_closed() {
+			departed = true;
 			continue;
 		}
 		// Arm both waiters explicitly. `poll` registers on the value channel only
@@ -2050,7 +2061,7 @@ fn combined_subscription(subs: &Subscriptions, bound: Option<Duration>, waiter: 
 			combined = Some(merged);
 		}
 	}
-	clamp_combined(combined, bound)
+	(clamp_combined(combined, bound), departed)
 }
 
 /// A non-blocking aggregate of the current subscriptions, without arming any waiter.
@@ -2124,13 +2135,24 @@ fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Op
 /// Register a subscription if the track is live: clone the shared list out of the
 /// state, release the track lock, then push under the list's own lock. A closed
 /// track skips the push; nothing aggregates the preferences anymore.
+///
+/// Departed subscribers are pruned here too, so the list stays bounded on a track whose
+/// aggregate nobody polls. Pruning on every push would make a burst of N joins O(N^2),
+/// so, like `kio::WaiterList::register`, it only sweeps when the list is about to grow.
 fn register_subscription(state: kio::Ref<'_, TrackState>, subscription: &kio::Producer<Subscription>) {
 	if state.is_closed() {
 		return;
 	}
 	let subs = state.subscriptions.clone();
 	drop(state);
-	subs.lock().push(subscription.consume());
+	let mut subs = subs.lock();
+	if subs.len() == subs.capacity() {
+		subs.retain(|sub| !sub.is_closed());
+		// Leave at least half free, so each sweep is paid for by the pushes before it.
+		let live = subs.len();
+		subs.reserve(live);
+	}
+	subs.push(subscription.consume());
 }
 
 /// A weak reference to a track that doesn't prevent auto-close.
@@ -2248,7 +2270,11 @@ impl Demand {
 	/// The publisher's tie-break priority, as set in [`Info::priority`].
 	pub(crate) fn priority(&self) -> u8 {
 		// Always Some once the track exists; a closed one reads its last value.
-		self.state.read().info.as_ref().map_or(0, |info| info.priority)
+		self.state
+			.read()
+			.info
+			.as_ref()
+			.map_or(DEFAULT_PRIORITY, |info| info.priority)
 	}
 
 	/// Whether anyone is subscribed right now, without waiting.
@@ -2537,20 +2563,29 @@ impl Consumer {
 		}
 	}
 
-	/// Where the first servable group in `from..cap` starts, with enough identity to
-	/// revalidate it later. A splice answers from the first segment holding one.
-	pub(crate) fn served_start(&self, from: u64, cap: Option<u64>) -> Option<Successor> {
+	/// Where the first servable group in `from..cap` starts presenting: `None` while no
+	/// such group is cached, `Some(None)` while it has no frame yet. Registers `waiter`
+	/// for whatever could move that answer: a group arriving or leaving, or the unstamped
+	/// one's first frame. A splice answers from the first segment holding one.
+	pub(crate) fn poll_first_start(
+		&self,
+		waiter: &kio::Waiter,
+		from: u64,
+		cap: Option<u64>,
+	) -> Option<Option<Timestamp>> {
 		match &self.inner {
 			ConsumerKind::Plain(state) => {
-				let served = state.read().served_start(from, cap)?;
-				Some(Successor {
-					sequence: served.sequence,
-					timestamp: served.timestamp,
-					stamp: served.stamp,
-					track: state.weak(),
-				})
+				let mut start = None;
+				let _ = state.poll(waiter, |state| {
+					start = state.first_servable(from, cap).map(|group| {
+						let _ = group.poll_timestamp(waiter);
+						group.timestamp()
+					});
+					Poll::<()>::Pending
+				});
+				start
 			}
-			ConsumerKind::Spliced(resume) => resume.served_start(from, cap),
+			ConsumerKind::Spliced(resume) => resume.poll_first_start(waiter, from, cap),
 		}
 	}
 
@@ -2798,6 +2833,16 @@ impl Consumer {
 		}
 	}
 
+	/// The declared exclusive final sequence, or `None` while the track is open ended.
+	///
+	/// A spliced track answers for its newest segment, which is where fetches go.
+	pub(crate) fn final_sequence(&self) -> Option<u64> {
+		match &self.inner {
+			ConsumerKind::Plain(state) => state.read().final_sequence,
+			ConsumerKind::Spliced(resume) => resume.final_sequence(),
+		}
+	}
+
 	/// The frame-precise point a replacement route should resume from: one past the
 	/// last frame this copy produced. `None` if it produced nothing.
 	///
@@ -2992,6 +3037,16 @@ impl group::Request {
 		res
 	}
 
+	/// Declare the track's exclusive final sequence, as the publisher answering this
+	/// fetch reported it. A no-op once the track declared one, or holds a later group.
+	pub(crate) fn finish_track_at(&self, final_sequence: u64) {
+		if let Ok(mut state) = TrackState::modify(&self.state)
+			&& state.final_sequence.is_none()
+		{
+			let _ = state.set_final(final_sequence);
+		}
+	}
+
 	/// Reject the fetch, resolving every joined [`Consumer::fetch_group`] with `err`.
 	pub fn reject(mut self, err: Error) {
 		self.done = true;
@@ -3164,8 +3219,8 @@ enum SubscriberKind {
 
 /// One poll's view of how far this subscription may drift: the clamped budget and the
 /// live edge to measure a candidate group against. Resolved once, then applied to every
-/// group that poll considers. `outer` and `successor` are revalidated per candidate,
-/// outside this track's lock.
+/// group that poll considers. `outer` is revalidated and `successor` resolved per
+/// candidate, outside this track's lock.
 #[derive(Clone)]
 struct Drift {
 	budget: Duration,
@@ -3208,7 +3263,10 @@ impl group::Expiry for GroupExpiry {
 			.edge
 			.filter(LiveEdge::is_live)
 			.map(|live| (live.sequence, live.timestamp));
-		let successor = anchor.successor.as_ref().and_then(Successor::start);
+		let successor = anchor
+			.successor
+			.as_ref()
+			.and_then(|successor| successor.poll_start(waiter));
 
 		let mut expired = false;
 		let _ = self.state.poll(waiter, |state| {
@@ -3297,8 +3355,8 @@ pub(crate) struct Anchor {
 	/// Where the reader's next group past `cap` starts presenting, when another track
 	/// serves it (a splice's next segment). The last group below the cap has no
 	/// successor in its own track, so without this nothing bounds its reach and it is
-	/// never judged stale. `None` while unknown or unstamped. Revalidated like `edge`:
-	/// a cached start must not convict once that group is gone.
+	/// never judged stale. Resolved afresh on every judgment rather than cached, so a
+	/// group that goes away hands the bound to whichever group serves there next.
 	pub successor: Option<Successor>,
 }
 
@@ -3336,48 +3394,6 @@ impl LiveEdge {
 }
 
 impl PartialEq for LiveEdge {
-	fn eq(&self, other: &Self) -> bool {
-		self.sequence == other.sequence
-			&& self.timestamp == other.timestamp
-			&& self.stamp == other.stamp
-			&& self.track.same_channel(&other.track)
-	}
-}
-
-/// The first servable group past a segment boundary: where it starts, and which slot
-/// that start was read from.
-struct ServedStart {
-	sequence: u64,
-	stamp: u32,
-	timestamp: Timestamp,
-}
-
-/// A successor pushed onto another track's cursor. The timestamp alone is not enough:
-/// once the group is evicted, a later group can keep the outer edge valid while this
-/// start is no longer where the track continues.
-#[derive(Clone)]
-pub(crate) struct Successor {
-	sequence: u64,
-	timestamp: Timestamp,
-	stamp: u32,
-	track: kio::ConsumerWeak<TrackState>,
-}
-
-impl Successor {
-	/// The start this still names, re-read from its own track, or `None` once that
-	/// group is gone or no longer stamped. Takes that track's lock, so never call it
-	/// under another's.
-	fn start(&self) -> Option<Timestamp> {
-		let state = self.track.read();
-		let slot = state.lookup.get(&self.sequence)?;
-		if slot.stamp != self.stamp || slot.group.is_aborted() {
-			return None;
-		}
-		slot.group.timestamp()
-	}
-}
-
-impl PartialEq for Successor {
 	fn eq(&self, other: &Self) -> bool {
 		self.sequence == other.sequence
 			&& self.timestamp == other.timestamp
@@ -3525,7 +3541,10 @@ impl PlainSubscriber {
 			.as_ref()
 			.filter(|live| live.is_live())
 			.map(|live| (live.sequence, live.timestamp));
-		let successor = drift.successor.as_ref().and_then(Successor::start);
+		let successor = drift
+			.successor
+			.as_ref()
+			.and_then(|successor| successor.poll_start(waiter));
 		let presentation = drift.edge.presentation;
 		let cap = drift.edge.cap;
 		let budget = drift.budget;
@@ -4449,22 +4468,7 @@ impl Request {
 		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
 
-		let prev = &self.prev_subscription;
-		let mut combined = None;
-		let mut guard = ready!(subs.poll(waiter, |subs| {
-			let next = combined_subscription(subs, bound, waiter);
-			if &next == prev {
-				Poll::Pending
-			} else {
-				combined = next;
-				Poll::Ready(())
-			}
-		}));
-		// The aggregate changed: prune any closed subscribers now that we hold the lock.
-		guard.retain(|sub| !sub.is_closed());
-		drop(guard);
-		self.prev_subscription = combined.clone();
-		Poll::Ready(combined)
+		poll_combined_changed(&subs, bound, &mut self.prev_subscription, waiter)
 	}
 
 	pub(super) fn weak(&self) -> TrackWeak {
@@ -5581,6 +5585,44 @@ mod test {
 		assert_eq!(producer.subscription().unwrap().max_age, Duration::from_secs(2));
 	}
 
+	#[test]
+	fn churned_subscribers_do_not_accumulate() {
+		let producer = track_producer("test", None);
+		let consumer = producer.consume();
+		let _steady = producer.subscribe(None);
+
+		// Nobody polls the aggregate here, so registration alone has to bound the list.
+		for _ in 0..100 {
+			drop(producer.subscribe(None));
+			drop(consumer.subscribe(None));
+		}
+
+		// Registration sweeps only when the list is about to grow, so it holds a small
+		// multiple of the peak live count (2) rather than all 200 departures.
+		let subs = producer.state.read().subscriptions.clone();
+		let len = subs.read().len();
+		assert!(len <= 8, "departed subscribers accumulated: {len}");
+	}
+
+	#[test]
+	fn aggregate_poll_prunes_after_a_peak() {
+		let mut producer = track_producer("test", None);
+		let waiter = kio::Waiter::noop();
+		let _steady = producer.subscribe(None);
+		assert!(producer.poll_subscription_changed(&waiter).is_ready());
+
+		// A departed burst leaves room for many entries, and identical preferences never
+		// change the aggregate, so each wake has to prune what it walks.
+		drop((0..1000).map(|_| producer.subscribe(None)).collect::<Vec<_>>());
+		for _ in 0..100 {
+			drop(producer.subscribe(None));
+			assert!(producer.poll_subscription_changed(&waiter).is_pending());
+
+			let subs = producer.state.read().subscriptions.clone();
+			assert_eq!(subs.read().len(), 1, "the poll walked past departed subscribers");
+		}
+	}
+
 	/// Append a finished group presenting at `millis`, so the track carries a media
 	/// timeline for the drift budget to measure against.
 	fn append_at(producer: &mut Producer, millis: u64) -> u64 {
@@ -6438,47 +6480,6 @@ mod test {
 		assert!(
 			group.read_frame().now_or_never().is_none(),
 			"a vanished outer edge is no reason to drop what is left"
-		);
-		assert!(!group.latency_expired());
-		open.finish().unwrap();
-	}
-
-	/// A pushed successor is the same kind of cached fact. Evicting it must not keep
-	/// bounding the previous segment's last group while a later group still anchors the
-	/// outer edge.
-	#[tokio::test]
-	async fn an_evicted_successor_convicts_nothing() {
-		let producer = track_producer("a", None);
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(1)));
-		let mut open = producer.append_group().unwrap();
-		open.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"a"))
-			.unwrap();
-		let mut group = subscriber.recv_group().await.unwrap().expect("group");
-		assert!(group.read_frame().await.unwrap().is_some());
-
-		let mut next = track_producer("b", None);
-		// Early enough that group 0 is already past the budget, and not itself the edge.
-		let successor = append_at(&mut next, 10);
-		append_at(&mut next, 30_000);
-		let consumer = next.consume();
-		subscriber.set_anchor(Anchor {
-			cap: None,
-			edge: consumer.live_edge(None),
-			successor: consumer.served_start(successor, None),
-		});
-
-		let mut control = group.clone();
-		assert!(
-			matches!(control.read_frame().now_or_never(), Some(Ok(None))),
-			"the open group ends against the successor"
-		);
-
-		let slot = next.modify().unwrap().lookup.remove(&successor).unwrap();
-		let _ = slot.group.abort(Error::Evicted);
-
-		assert!(
-			group.read_frame().now_or_never().is_none(),
-			"a vanished successor is no reason to drop what is left"
 		);
 		assert!(!group.latency_expired());
 		open.finish().unwrap();

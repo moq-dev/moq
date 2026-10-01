@@ -20,22 +20,22 @@ The published module ships prebuilt `libmoq_ffi.a` for `linux/amd64`, `linux/arm
 
 ## Local development
 
-`go/scripts/stage.sh` builds `moq-ffi` for the host, runs `uniffi-bindgen-go` to regenerate `moq.go`, and stages this module plus the wrapper into `dist/` with the wrapper wired to the local ffi by a `replace`. It prints the two staged module directories, so anything that needs to build Go against this checkout (`go/scripts/check.sh`, `test/interop`) shares one staging path.
+`sh/go/stage.sh` builds `moq-ffi` for the host, runs `uniffi-bindgen-go` to regenerate `moq.go`, and stages this module plus the wrapper into `dist/` with the wrapper wired to the local ffi by a `replace`. It prints the two staged module directories, so anything that needs to build Go against this checkout (`sh/go/check.sh`, `test/interop`) shares one staging path.
 
-`go/scripts/check.sh` stages that way and then runs `go build`/`go vet`/`go test`. It also runs `publish-wrapper.test.sh`, which drives the wrapper publisher against a scratch bare repo (no cargo, no network). Run via `just go check`. Skips cleanly without `cargo`, `go`, or `uniffi-bindgen-go`.
+`sh/go/check.sh` stages that way and then runs `go build`/`go vet`/`go test`. Run via `just go check`. Skips cleanly without `cargo`, `go`, or `uniffi-bindgen-go`.
 
 The dev shell provides both `go` and `uniffi-bindgen-go`, so `nix develop --command just go check` needs no setup. Without Nix, install `uniffi-bindgen-go` once:
 
 ```bash
 cargo install uniffi-bindgen-go \
     --git https://github.com/kixelated/uniffi-bindgen-go \
-    --rev v0.9.0+v0.32.0 \
+    --rev v0.10.0-kixelated.1+v0.32.0 \
     --locked
 ```
 
 `--locked` matters: `uniffi_bindgen` depends on `toml` across a `>=0.9, <2` range, so a fresh resolve can pick a different `toml` than the generator was built against.
 
-The revision is `v0.9.0+v0.32.0`, matching the `uniffi` version `rs/moq-ffi` depends on; `flake.nix` pins the same source. It points at a fork because upstream has no uniffi 0.32 release yet; `flake.nix` carries the details. Generated async calls take `context.Context` as the first argument.
+The revision is `v0.10.0-kixelated.1+v0.32.0`, matching the `uniffi` version `rs/moq-ffi` depends on; `flake.nix` pins the same source. It points at a fork because upstream has no uniffi 0.32 release yet; `flake.nix` carries the details. Generated async calls take `context.Context` as the first argument.
 
 ## Layout
 
@@ -49,8 +49,8 @@ go/ffi/
     lib/<goos>_<goarch>/libmoq_ffi.a  (gitignored, staged at release time)
 ```
 
-Compiled binaries never live in the source tree. `scripts/check.sh` stages into the gitignored `dist/` working dir under the repo root; CI does the equivalent assembly into the [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) mirror.
+Compiled binaries never live in the source tree. `sh/go/check.sh` stages into the gitignored `dist/` working dir under the repo root; CI does the equivalent assembly into the [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) mirror.
 
 ## Release
 
-The `release-go-ffi.yml` workflow fires on every `moq-ffi-v*` tag, builds per-target static libraries, runs `uniffi-bindgen-go`, calls `go/scripts/package-ffi.sh` to assemble the module, and `go/scripts/publish-ffi.sh` to push the result to `moq-dev/moq-go-ffi` with a bare-semver tag (e.g. `v0.2.18`) lockstep with the crate. Go's module proxy picks up the new tag automatically.
+The `release-go-ffi.yml` workflow fires on every `moq-ffi-v*` tag, builds per-target static libraries, runs `uniffi-bindgen-go`, calls `just go package-ffi` to assemble the module, and `just go publish-ffi` to push the result to `moq-dev/moq-go-ffi` with a bare-semver tag (e.g. `v0.2.18`) lockstep with the crate. Go's module proxy picks up the new tag automatically.

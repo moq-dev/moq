@@ -375,6 +375,30 @@ fn consumer(c: &mut Criterion) {
 	group.finish();
 }
 
+fn snapshot_budget(c: &mut Criterion) {
+	let mut group = c.benchmark_group("snapshot_budget");
+	for entries in [100, 1000, 10000] {
+		let value: Map<String, Value> = (0..entries)
+			.map(|i| (format!("path-{i}"), json!({"bytes": 123})))
+			.collect();
+		let bytes = serde_json::to_vec(&value).unwrap();
+		for bounded in [false, true] {
+			group.bench_with_input(
+				BenchmarkId::new(if bounded { "bounded" } else { "unbounded" }, entries),
+				&bytes,
+				|b, bytes| {
+					let mut config = moq_json::snapshot::consumer::Config::default();
+					config.max_size = bounded.then_some(8 * 1024 * 1024);
+					let mut decoder = moq_json::snapshot::Decoder::<Value>::new(config);
+					decoder.snapshot(bytes).unwrap();
+					b.iter(|| decoder.delta(black_box(br#"{"path-0":{"bytes":124}}"#)).unwrap());
+				},
+			);
+		}
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	encode_patch,
@@ -384,6 +408,7 @@ criterion_group!(
 	marshal,
 	baseline,
 	producer,
-	consumer
+	consumer,
+	snapshot_budget
 );
 criterion_main!(benches);

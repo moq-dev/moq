@@ -201,10 +201,13 @@ impl Decode<Version> for Cost {
 		if !version.has_route_cost() {
 			return Ok(Cost::UNKNOWN);
 		}
-		Ok(Cost {
+		// Costs saturate at 2^62-1 on every version, so a larger one (lite-07's varints
+		// reach 2^64-1) reads as the ceiling and still forwards to an older peer.
+		let cost = Cost {
 			warm: u64::decode(buf, version)?,
 			cold: u64::decode(buf, version)?,
-		})
+		};
+		Ok(cost.clamped())
 	}
 }
 
@@ -783,15 +786,19 @@ mod tests {
 		);
 	}
 
-	// A peer may legally advertise the largest varint there is, and adding this
-	// link's price to it must not push the result out of range.
+	// Costs saturate at 2^62-1 on every version, lite-07's 64-bit varints included, so
+	// charging a link on top of the ceiling still re-encodes for a peer on any version.
 	#[test]
 	fn charged_cost_stays_encodable() {
-		let mut buf = Vec::new();
-		crate::origin::Cost::MAX
-			.charged(1)
-			.encode(&mut buf, Version::Lite06)
-			.expect("a charged cost must stay encodable");
+		let cost = Cost::new(u64::MAX).charged(1);
+		assert_eq!(cost, Cost::new((1 << 62) - 1));
+		assert_eq!(Cost::MAX.charged(1), cost);
+		for version in [Version::Lite06, Version::Lite07] {
+			let mut buf = Vec::new();
+			cost.encode(&mut buf, version)
+				.expect("a charged cost must stay encodable");
+			assert_eq!(Cost::decode(&mut &buf[..], version).unwrap(), cost, "{version}");
+		}
 	}
 
 	#[test]

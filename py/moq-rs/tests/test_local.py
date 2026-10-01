@@ -122,6 +122,13 @@ def test_protocol_error_helper_covers_known_app_and_unknown():
     assert moq.protocol_error(RuntimeError("nope")) is None
 
 
+def test_error_str_is_rust_display():
+    assert str(moq.Error.Closed()) == "closed"  # type: ignore[attr-defined]
+    assert str(moq.Error.Transport("reset")) == "transport: reset"  # type: ignore[attr-defined]
+    details = moq.ProtocolError(scope=moq.ErrorScope.STREAM, code=468, kind=moq.ProtocolKind.APP, message="gone")
+    assert str(moq.Error.Protocol(details)) == "gone"  # type: ignore[attr-defined]
+
+
 def test_publish_media_lifecycle():
     broadcast = moq.BroadcastProducer()
     media = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_head())

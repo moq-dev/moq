@@ -48,3 +48,4 @@ pub use dial::Client;
 pub use error::{Error, Result};
 pub use listen::{Config, run};
 pub use server::{Publish, Reject, Request, Server, Subscribe};
+pub use ts::Program;

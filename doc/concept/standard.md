@@ -26,20 +26,42 @@ maps everything else to "not supported" or a harmless equivalent. The
 [moq-lite page](/concept/moq-lite#what-moq-lite-leaves-out) lists the
 differences.
 
+Rust and JavaScript subscribers accept object extension blocks up to 64 KiB.
+This is an implementation limit, not a limit in the IETF draft. A larger
+declared block stops its subgroup stream with `MALFORMED_TRACK` before reading
+the block; other groups and the session stay open.
+
 An IETF publisher declares the track's default priority in `SUBSCRIBE_OK` or
 `PUBLISH` when that draft carries track properties. Groups without a priority
 flag inherit it. If the property is absent, the IETF wire default of 128 maps
-to model priority 127, where higher values are served first.
+to model priority 127, where higher values are served first. A track that
+never sets a priority is 127 as well, so it goes out as 128 on IETF and 127
+on moq-lite.
 
-On drafts 14–19, the Rust publisher serves relative joining `FETCH` requests
-with offset zero for `NextObject` subscriptions. The fetch delivers the saved
-current-group prefix, and the subscription delivers later objects. Standalone,
-absolute joining, and nonzero-offset fetches are refused. Draft-20 uses
-subscription fills instead. JavaScript publishing does not yet serve `FETCH`;
+On drafts 14–19, the Rust publisher answers a standalone `FETCH` within one
+group from the cache. A relay fetches a missing group upstream with a `FETCH`
+of that one whole group, and an upstream refusal is the refusal the fetcher
+sees. A range touching several groups is refused with `NOT_SUPPORTED`, as is
+any `FETCH` on draft-20 and later, which moved the range into
+`LOCATION_FILTER`. A standalone `FETCH`
+carries no timestamps, since no `SUBSCRIBE_OK` declared a timescale for it.
+
+On drafts 14–19, the Rust publisher also serves relative and absolute joining
+`FETCH` requests for `NextObject` subscriptions, for the subscription group's
+saved prefix only, while the subscription delivers later objects. One reaching
+back to earlier groups is refused with `NOT_SUPPORTED`. Draft-20 uses
+subscription fills instead. JavaScript
+publishing does not yet serve `FETCH`;
 Rust and JavaScript subscribers request unfiltered delivery on older drafts
 because they do not issue joining fetches. Other publishers may replay a cached
 backlog for that filter; selecting the next group instead would leave static
 tracks waiting for a group that never arrives.
+
+A moq-lite datagram is a single-frame group, so on moq-transport it travels
+as an `OBJECT_DATAGRAM` at object 0 whose Group ID is the sequence, and a relay
+forwards it without renumbering. A datagram carrying any other Object ID, or a
+status other than Normal, is dropped. JavaScript does not yet carry datagrams
+on moq-transport.
 
 A client may present one credential in its `SETUP` with the `AUTHORIZATION
 TOKEN` option. The server reads a value (`USE_VALUE`, or `REGISTER`, which it
@@ -81,7 +103,7 @@ supports, and prints it in the logs. Publish a test pattern and play it back:
 ```bash
 ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 -f lavfi -i sine=frequency=440 \
     -c:v libx264 -preset ultrafast -tune zerolatency -g 60 -c:a aac \
-    -f mpegts -pes_payload_size 0 - \
+    -f mpegts -pes_payload_size 0 -muxdelay 0 - \
 | moq --connect https://relay.example.com --broadcast test.hang import ts
 
 moq --connect https://relay.example.com --broadcast test.hang export ts | ffplay -

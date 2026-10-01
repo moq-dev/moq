@@ -70,6 +70,14 @@ Wait the deletion grace period from successful recovery, then delete unreference
 left by interrupted expiration or uploads. Failed or incomplete recovery must
 prevent deletion. Preserve `.info` and timeline checkpoint objects.
 
+On resume, fail loud on a track that goes backward. The resume step already
+refuses a group ID at or below the recovered track's last one; also refuse a
+first group whose timestamp is before the recovered track's last recorded
+timestamp, instead of writing overlapping media time. The caller starts a new
+prefix. Test a backward and a forward restart. Decided in the 2026-09-30
+audit: folded in from a separate quest, and the archive format may break in
+place since it is unreleased.
+
 Keep archive policy out of protocol libraries. As the native application that
 owns its storage and track choices, `moq-cli` attaches the writer to every
 import path and enrolls the resulting `broadcast::Consumer` tracks. Downstream

@@ -48,9 +48,11 @@ describe("audioSpecificConfig", () => {
 		expect(audioSpecificConfig(48000, 8)).toEqual(new Uint8Array([0x11, 0xb8]));
 	});
 
-	// Unsupported channel counts fall back to stereo (config 2).
-	it("unsupported channel count falls back to stereo", () => {
-		expect(audioSpecificConfig(48000, 7)).toEqual(audioSpecificConfig(48000, 2));
+	// A count with no channel configuration is refused rather than described as stereo.
+	it("refuses a channel count with no configuration", () => {
+		for (const count of [0, 7, 9]) {
+			expect(() => audioSpecificConfig(48000, count)).toThrow();
+		}
 	});
 
 	// Non-table sample rates use the 5-byte explicit-frequency form (freqIndex 0xF).

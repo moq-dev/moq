@@ -73,17 +73,18 @@ export class Format {
 			prevType = abs;
 			cursor = afterDelta;
 
-			if (abs % 2 === 0) {
-				const [value, afterValue] = Moq.Varint.decode(cursor);
-				cursor = afterValue;
-				if (abs === PROP_TIMESTAMP || abs === PROP_TIMESTAMP_DRAFT03) {
-					timestamp = value;
-				} else if (abs === PROP_TIMESCALE) {
-					if (value === 0) {
-						throw new Error("loc: timescale property must be non-zero");
-					}
-					timescale = value;
+			if (abs === PROP_TIMESTAMP || abs === PROP_TIMESTAMP_DRAFT03) {
+				[timestamp, cursor] = Moq.Varint.decode(cursor);
+			} else if (abs === PROP_TIMESCALE) {
+				let value: number;
+				[value, cursor] = Moq.Varint.decode(cursor);
+				if (value === 0) {
+					throw new Error("loc: timescale property must be non-zero");
 				}
+				timescale = value;
+			} else if (abs % 2 === 0) {
+				// An unknown varint property may use all 62 bits, which a number can't hold; skip it.
+				cursor = Moq.Varint.decodeBigInt(cursor)[1];
 			} else {
 				const [len, afterLenInner] = Moq.Varint.decode(cursor);
 				if (afterLenInner.byteLength < len) {

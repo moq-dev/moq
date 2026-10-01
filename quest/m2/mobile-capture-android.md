@@ -23,7 +23,7 @@ so the mechanism exists.
 
 ## Required
 
-- [Ownership boundary](/quest/m2/mobile-ownership.md) - decides whether an NDK/JNI backend family is worth building
+- [Ownership boundary](/quest/m1/mobile-ownership.md) - decides whether an NDK/JNI backend family is worth building
 
 ## Related
 

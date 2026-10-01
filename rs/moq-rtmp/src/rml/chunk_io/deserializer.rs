@@ -178,7 +178,7 @@ impl ChunkDeserializer {
 	/// This method should almost always be called only in reaction to receiving a `SetChunkSize`
 	/// message from the other end.
 	pub fn set_max_chunk_size(&mut self, new_size: usize) -> Result<(), ChunkDeserializationError> {
-		if new_size > 2147483647 {
+		if new_size == 0 || new_size > 2147483647 {
 			return Err(ChunkDeserializationError::InvalidMaxChunkSize { chunk_size: new_size });
 		}
 
@@ -461,6 +461,18 @@ mod tests {
 	use crate::rml::time::RtmpTimestamp;
 	use byteorder::{BigEndian, LittleEndian, WriteBytesExt};
 	use std::io::{Cursor, Write};
+
+	#[test]
+	fn chunk_size_floor() {
+		let mut decoder = ChunkDeserializer::new();
+		assert!(matches!(
+			decoder.set_max_chunk_size(0),
+			Err(ChunkDeserializationError::InvalidMaxChunkSize { chunk_size: 0 })
+		));
+		assert_eq!(decoder.get_max_chunk_size(), 128);
+		decoder.set_max_chunk_size(1).unwrap();
+		assert_eq!(decoder.get_max_chunk_size(), 1);
+	}
 
 	#[test]
 	fn can_read_type_0_chunk_with_small_chunk_stream_id_and_small_timestamp() {

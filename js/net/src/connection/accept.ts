@@ -143,7 +143,7 @@ async function acceptSetup(
 	wiring: SessionProps,
 ): Promise<Established> {
 	// Accept bidi, read ClientSetup, write ServerSetup
-	const stream = await Stream.accept(transport);
+	const stream = await Stream.accept(transport, version);
 	if (!stream) throw new Error("no incoming bidi stream for SETUP");
 
 	const clientCompat = await stream.reader.u53();
@@ -188,7 +188,7 @@ async function acceptNegotiated(
 ): Promise<Established> {
 	const setupVersion = Ietf.Version.DRAFT_14;
 
-	const stream = await Stream.accept(transport);
+	const stream = await Stream.accept(transport, setupVersion);
 	if (!stream) throw new Error("no incoming bidi stream for SETUP");
 
 	const clientCompat = await stream.reader.u53();

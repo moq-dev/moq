@@ -14,7 +14,7 @@ Turns existing container formats into hang broadcasts and back. This is what
 | Format | Import | Export | Notes |
 | --- | --- | --- | --- |
 | fMP4 / CMAF | yes | yes | Passthrough as `cmaf` or repackaged as `legacy`. |
-| MPEG-TS | yes | yes | H.264/H.265; AAC, MP2, AC-3, E-AC-3; SCTE-35 and subtitle PIDs carried as tracks; service tables round-trip; signalled timebase discontinuities preserved; paced export. |
+| MPEG-TS | yes | yes | H.264/H.265; AAC, MP2, AC-3, E-AC-3, Opus up to 7.1; SCTE-35 and subtitle PIDs carried as tracks; service tables round-trip; signalled timebase discontinuities preserved; paced export. |
 | FLV / RTMP | yes | yes | Legacy H.264 + AAC + MP3, plus enhanced-RTMP HEVC, AV1, VP9, Opus, AC-3, E-AC-3, and multitrack. |
 | Matroska / WebM | yes | yes | |
 | Annex-B (H.264, H.265) | yes | yes | Parameter sets extracted to the catalog or re-injected per keyframe. |
@@ -114,7 +114,7 @@ API: [docs.rs/moq-mux](https://docs.rs/moq-mux). Real-world usage:
 Container producers and consumers take a format configured from the track's audio
 or video catalog entry (`catalog::hang::Container::try_from(&config)`). For a raw
 track, supply `container::Kind` explicitly. `cut(Some(end))` flushes and closes the
-group immediately. Legacy video writes an empty timestamped frame at that end;
+group immediately. Legacy and LOC video write an empty timestamped frame at that end;
 audio and CMAF do not. With no explicit end, the producer uses a known sample
 duration or observed cadence, independently of batching and reorder jitter.
 Streaming consumers deliver frames immediately. The live fMP4 exporter receives

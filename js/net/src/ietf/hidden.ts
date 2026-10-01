@@ -6,7 +6,7 @@ import { SetupOption, type SetupOptions } from "./parameters.ts";
  * A namespace with a field starting with `.` below the prefix a subscription asked for is
  * left out of discovery unless the SUBSCRIBE_NAMESPACE opts in with the HIDDEN parameter.
  * An unknown parameter fails decoding, so the parameter is only sent to a peer whose SETUP
- * carried the HIDDEN option.
+ * carried the HIDDEN option. Peers that did not declare the option receive every namespace.
  *
  * @module
  * @internal

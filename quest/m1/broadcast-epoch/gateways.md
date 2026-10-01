@@ -17,3 +17,7 @@ describes ingest paths.
 ## Required
 
 - [Origin](/quest/m1/broadcast-epoch/origin.md) - the publish default
+
+## Related
+
+- [TS restart](/quest/m1/broadcast-epoch/ts-restart.md) - a signalled restart inside one connection, which this quest's per-connection epoch does not cover

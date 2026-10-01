@@ -17,8 +17,7 @@
 //!   crossing it, so they have no place on the `moq-stats` wire.
 //! - `/health` - a liveness mirror of the public probe, for internal checks
 //!   that don't want to hit the customer port.
-//! - `/nodes` - the cluster nodes visible through gossip plus established
-//!   direct relay connections.
+//! - `/nodes` - the cluster peers this relay dialed and holds a session with.
 //! - `/sessions` and `/sessions/revalidate` - list or nudge live sessions on
 //!   this node. A push only causes a re-check, so a caller on this trusted
 //!   plane gains nothing a scheduled cadence would not do.
@@ -292,11 +291,8 @@ async fn serve_metrics(State(state): State<InternalState>) -> Response {
 	([(http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
 }
 
-/// Cluster nodes currently visible through gossip or a direct outbound dial.
-///
-/// Inbound connections appear only after their SETUP origin identity resolves
-/// to a unique `.internal/origins` node advertisement. Sessions without a
-/// unique match are omitted.
+/// Cluster peers this relay dialed and currently holds a session with. Accepted
+/// peer sessions are omitted, since a peer declares no URL to list it under.
 async fn serve_nodes(State(state): State<InternalState>) -> Json<crate::nodes::Snapshot> {
 	Json(state.nodes.map(|nodes| nodes.snapshot()).unwrap_or_default())
 }
@@ -875,8 +871,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn nodes_endpoint_uses_the_attached_cluster_registry() {
-		let origin = moq_tokio::origin::spawn_config(moq_net::origin::Config::new(moq_net::Hop::new(100).unwrap()));
-		let nodes = crate::nodes::Nodes::new(origin);
+		let nodes = crate::nodes::Nodes::default();
 		let _connection = nodes.connect_outbound(0, "https://relay-b.example/");
 		let state = InternalState {
 			stats: moq_net::stats::Registry::disabled(),
