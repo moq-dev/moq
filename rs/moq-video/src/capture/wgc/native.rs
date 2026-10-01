@@ -33,7 +33,7 @@ use windows::core::{IInspectable, Interface, PWSTR, factory, h};
 
 use super::super::settle::{Settle, Settled};
 use super::super::{Config, Display, FrameChannel, Source, Stream, Window};
-use super::{Event, Signal, display_index, window_handle};
+use super::{Delivery, Event, Signal, display_index, window_handle};
 use crate::frame::{Surface, d3d11};
 use crate::{Error, Rate, Size};
 
@@ -275,12 +275,13 @@ impl Capture {
 		let mut opened = None;
 		let mut settle = None;
 		let mut pending: Option<Captured> = None;
-		let mut next_frame = Instant::now();
+		let mut delivery = Delivery::new(interval, Instant::now());
 		loop {
 			let resize_deadline = settle.as_ref().and_then(Settle::deadline);
 			let deadline = resize_deadline
 				.into_iter()
-				.chain(pending.as_ref().map(|_| next_frame))
+				.chain(delivery.deadline())
+				.chain(pending.as_ref().map(|_| delivery.next))
 				.min();
 			match signal.wait(deadline) {
 				Event::Stop => return Ok(()),
@@ -307,6 +308,7 @@ impl Capture {
 					));
 				}
 				pending = None;
+				delivery.clear();
 				settle = opened.map(Settle::new);
 				continue;
 			}
@@ -314,6 +316,7 @@ impl Capture {
 				let native = frame.0.ContentSize().map_err(|e| error("read WGC content size", e))?;
 				if native.Width < 2 || native.Height < 2 {
 					pending = None;
+					delivery.clear();
 					settle = opened.map(Settle::new);
 					continue;
 				}
@@ -326,6 +329,7 @@ impl Capture {
 					Settled::Open => {}
 					Settled::Waiting => {
 						pending = None;
+						delivery.clear();
 					}
 					Settled::Changed => return Ok(()),
 				}
@@ -338,7 +342,7 @@ impl Capture {
 				tracing::info!(source = %config.source.label(), "WGC source resized; ending capture for reopen");
 				return Ok(());
 			}
-			if now >= next_frame
+			if now >= delivery.next
 				&& let Some(frame) = pending.take()
 			{
 				let ticks = frame
@@ -354,8 +358,19 @@ impl Capture {
 				let texture: ID3D11Texture2D =
 					unsafe { access.GetInterface() }.map_err(|e| error("read WGC texture", e))?;
 				let texture = d3d11::Texture::capture(&self.device, &texture, opened.unwrap())?;
+				delivery.replace(texture, timestamp, now);
+			}
+			if let Some((texture, timestamp)) = delivery.next(now)? {
+				// Only AddRef the owned NV12 output. The WGC pool frame was released
+				// after conversion, and the cached texture is never written again.
+				let texture = d3d11::Texture {
+					device: texture.device.clone(),
+					texture: texture.texture.clone(),
+					width: texture.width,
+					height: texture.height,
+					color: texture.color,
+				};
 				chan.push_native(Surface::Texture(texture), timestamp);
-				next_frame = now + interval;
 			}
 		}
 	}

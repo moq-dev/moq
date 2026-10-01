@@ -2,7 +2,9 @@
 //! Native API calls live separately so the stop/wakeup contract runs in host CI.
 
 use std::sync::{Condvar, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+use moq_net::Timestamp;
 
 use crate::Error;
 
@@ -84,6 +86,56 @@ impl Signal {
 	}
 }
 
+// WGC can omit unchanged frames. Retain only the owned output, keeping the
+// capture stream paced without holding a frame-pool slot or converting again.
+struct Delivery<T> {
+	frame: Option<T>,
+	clock: Option<(Timestamp, Instant)>,
+	interval: Duration,
+	next: Instant,
+}
+
+impl<T> Delivery<T> {
+	fn new(interval: Duration, now: Instant) -> Self {
+		Self {
+			frame: None,
+			clock: None,
+			interval,
+			next: now,
+		}
+	}
+
+	fn replace(&mut self, frame: T, timestamp: Timestamp, now: Instant) {
+		self.frame = Some(frame);
+		// Changed frames can arrive after a repeated frame was already delivered.
+		// Keep one presentation clock instead of rewinding to their acquisition time.
+		self.clock.get_or_insert((timestamp, now));
+	}
+
+	fn clear(&mut self) {
+		self.frame = None;
+	}
+
+	fn deadline(&self) -> Option<Instant> {
+		self.frame.as_ref().map(|_| self.next)
+	}
+
+	fn next(&mut self, now: Instant) -> Result<Option<(&T, Timestamp)>, Error> {
+		if now < self.next {
+			return Ok(None);
+		}
+		let Some(frame) = self.frame.as_ref() else {
+			return Ok(None);
+		};
+		let (timestamp, started) = self.clock.unwrap();
+		let elapsed =
+			u64::try_from(now.saturating_duration_since(started).as_micros()).map_err(|_| moq_net::TimeOverflow)?;
+		let timestamp = timestamp.checked_add(Timestamp::from_micros(elapsed)?)?;
+		self.next = now + self.interval;
+		Ok(Some((frame, timestamp)))
+	}
+}
+
 fn display_index(selector: Option<&str>) -> Result<usize, Error> {
 	selector.map_or(Ok(0), |selector| {
 		selector
@@ -110,6 +162,97 @@ fn window_handle(selector: &str) -> Result<usize, Error> {
 mod tests {
 	use super::*;
 	use std::sync::Arc;
+
+	#[test]
+	fn unchanged_frames_keep_the_delivery_deadline_and_advance_timestamps() {
+		let now = Instant::now();
+		let interval = Duration::from_millis(20);
+		let mut delivery = Delivery::new(interval, now);
+		let pixels = Arc::new([1, 2, 3]);
+		delivery.replace(pixels.clone(), Timestamp::from_micros(1_000_000).unwrap(), now);
+
+		for step in 0..10 {
+			let now = now + interval * step;
+			assert_eq!(delivery.deadline(), Some(now));
+			let (frame, timestamp) = delivery.next(now).unwrap().unwrap();
+			assert!(
+				Arc::ptr_eq(frame, &pixels),
+				"reuse the owned output without a conversion"
+			);
+			assert_eq!(timestamp.as_micros(), 1_000_000 + u128::from(step) * 20_000);
+			assert!(delivery.next(now + interval / 2).unwrap().is_none());
+		}
+	}
+
+	#[test]
+	fn new_frames_and_resume_keep_the_same_presentation_clock() {
+		let now = Instant::now();
+		let interval = Duration::from_millis(20);
+		let mut delivery = Delivery::new(interval, now);
+		delivery.replace(1, Timestamp::from_micros(1_000_000).unwrap(), now);
+		delivery.next(now).unwrap().unwrap();
+		let repeated = now + interval * 5;
+		assert_eq!(delivery.next(repeated).unwrap().unwrap().1.as_micros(), 1_100_000);
+		// This changed frame was acquired before the most recent repeated delivery.
+		delivery.replace(2, Timestamp::from_micros(1_090_000).unwrap(), repeated);
+		let (frame, timestamp) = delivery.next(repeated + interval).unwrap().unwrap();
+		assert_eq!(*frame, 2);
+		assert_eq!(timestamp.as_micros(), 1_120_000);
+
+		// Minimized, empty, or resizing sources stop repeating until new content arrives.
+		delivery.clear();
+		assert_eq!(delivery.deadline(), None);
+		let resumed = now + Duration::from_secs(1);
+		assert!(delivery.next(resumed).unwrap().is_none());
+		delivery.replace(3, Timestamp::from_micros(1_990_000).unwrap(), resumed);
+		let (frame, timestamp) = delivery.next(resumed).unwrap().unwrap();
+		assert_eq!(*frame, 3);
+		assert_eq!(timestamp.as_micros(), 2_000_000);
+		assert_eq!(delivery.deadline(), Some(resumed + interval));
+	}
+
+	#[tokio::test]
+	#[cfg(feature = "openh264")]
+	async fn unchanged_frames_reach_an_active_subscriber() {
+		use crate::encode::{Config, Encoder, Kind, Producer};
+
+		let now = Instant::now();
+		let interval = Duration::from_millis(20);
+		let mut delivery = Delivery::new(interval, now);
+		let surface = crate::frame::I420 {
+			width: 320,
+			height: 240,
+			data: vec![0x80; 320 * 240 * 3 / 2],
+			color: None,
+		};
+		delivery.replace(surface, Timestamp::from_micros(0).unwrap(), now);
+		let mut config = Config::new(320, 240, crate::Rate::integer(50));
+		config.kind = Kind::Software;
+		let mut encoder = Encoder::new(&config).unwrap();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let track = broadcast
+			.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let subscriber = track.subscribe(None);
+		let rendition = config.probe().await.unwrap();
+		let container = moq_mux::catalog::hang::Container::try_from(&rendition).unwrap();
+		let mut subscriber = moq_mux::container::Consumer::new(subscriber, container);
+		let mut producer = Producer::with_track(track, catalog.clone(), rendition).unwrap();
+		assert!(producer.demand().is_used());
+
+		// Only one captured picture arrives; more than three intervals of paced
+		// output must still reach a real video subscriber with advancing timestamps.
+		for step in 0..10 {
+			let now = now + interval * step;
+			assert_eq!(delivery.deadline(), Some(now));
+			let (surface, timestamp) = delivery.next(now).unwrap().unwrap();
+			let frame = crate::Frame::new(crate::Surface::I420(surface.clone()), timestamp);
+			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+			let received = subscriber.read().await.unwrap().unwrap();
+			assert_eq!(received.timestamp.as_micros(), u128::from(step) * 20_000);
+		}
+	}
 
 	#[test]
 	fn selectors_preserve_native_ids_and_refuse_malformed_input() {

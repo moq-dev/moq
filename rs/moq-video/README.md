@@ -62,7 +62,9 @@ a benign reason, such as a window resize, so reopen to follow it. Permission
 denial and a source disappearing are terminal, reported as
 `Error::PermissionDenied` and `Error::SourceUnavailable`.
 On Windows, opening an already minimized window returns `Error::SourceUnavailable`.
-An established capture pauses while the window is minimized.
+An established capture pauses while the window is minimized. Unchanged Windows
+content repeats the last owned GPU texture at the configured frame rate, with
+advancing presentation timestamps, so a static share remains live.
 
 On a Windows desktop, `just rs test -p moq-video --features capture --run-ignored only -E 'test(wgc_)'` runs the opt-in WGC hardware exercises.
 Set `MOQ_WGC_WINDOW=window:HWND` to a visible, odd-sized window from
