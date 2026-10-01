@@ -37,17 +37,23 @@ Decided (2026-10-01), from a discussion with t0ms:
   forbids a PCR discontinuity inside a group. A source that never sets the
   indicator falls back to a group every N PCRs (N to be fixed in the PR, with
   a group spanning at most 1 s of PCR time). `randomAccess` is true only
-  while every group has started at an indicator; the first fallback group
-  republishes the catalog with it false. All of these fields sit in the
-  adaptation field, which TS scrambling leaves in clear, so a scrambled feed
-  still groups and paces. Nothing past the adaptation field is parsed.
+  while the PAT lists a single program and every group has started at an
+  indicator; the first fallback group republishes the catalog with it false.
+  A multi-program multiplex always publishes false, since programs sharing a
+  clock can stagger their GOPs, so one PID's indicator says nothing about
+  the others. All of these fields sit in the adaptation field, which TS
+  scrambling leaves in clear, so a scrambled feed still groups and paces.
+- The publisher reads the PAT and PMT (with the existing `ts/psi.rs`
+  parsers) to find the PCR PID and count programs, and parses nothing else
+  past the adaptation field. PSI is never scrambled, and every byte is still
+  published as received.
 - Each object's timestamp is the PCR time of its first byte, interpolated
   between PCRs at the stream's own rate, carried in hang's `legacy`
   container (a varint timestamp before the packets) as verbatim tracks are.
   Object boundaries and timestamps then depend only on the bytes, so two
   publishers of one feed publish identical objects, which 1+1 needs.
-- A multiplex is paced on one PCR PID: the first program's in the PAT, or
-  `--pcr-pid`. Every byte stays in order behind it. Programs on independent
+- A multiplex is paced on one PCR PID: the `PCR_PID` in the PMT of the PAT's
+  first program, or `--pcr-pid`. Every byte stays in order behind it. Programs on independent
   clocks are out of scope.
 - The export reuses the [fixed-delay release](/quest/m1/tstd/delay.md)
   stage, keyed on each object's PCR time instead of a DTS, which also
@@ -74,7 +80,10 @@ Decided (2026-10-01), from a discussion with t0ms:
 Test: an export of a broadcast capture is byte-identical to the input from
 the first released group, and the strict T-STD check gives the same verdict
 on output and input. A scrambled fixture (`transport_scrambling_control` set
-on its elementary PIDs) groups and paces the same as its clear twin. Two
+on its elementary PIDs) groups and paces the same as its clear twin. A
+two-program fixture on one clock with staggered GOPs publishes
+`randomAccess` false. PCR discovery finds a PCR PID that differs from the
+PMT PID, with the PMT section split across packets. Two
 exporters fed the same objects with different arrival skew emit identical
 bytes. A dropped object is counted, and the rest still go out on time. Rerun
 the #4613 netem rig (10% loss, 120 s) against it.
