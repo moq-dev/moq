@@ -30,6 +30,12 @@ Decided (2026-10-01):
   parallel with every FETCH or SUBSCRIBE. From draft 20 it sets
   INCLUDE_PROPERTIES to 0 on those requests, so the properties aren't sent
   twice. Before draft 20 there's no opt-out, so it ignores the duplicate.
+- First decouple object timestamps from INCLUDE_PROPERTIES: the publisher
+  derives its serving timescale from `properties_wanted`
+  (`publisher.rs:628`), so opting out today strips the Timestamp property
+  from every object and the subscriber falls back to arrival time. Test
+  TRACK_STATUS plus the opt-out with source timestamps that differ from
+  arrival.
 - The publisher serves TRACK_STATUS. Its reply carries what it would set in a
   SUBSCRIBE_OK (d22 §9.13), from the same code that fills SUBSCRIBE_OK and
   FETCH_OK.
