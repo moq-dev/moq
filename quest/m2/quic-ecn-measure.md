@@ -39,3 +39,7 @@ from 1.3.1 is a defective baseline, not evidence that classic ECN cannot help.
 
 Decided in the 2026-09-30 audit: moved to m2 with its only consumer,
 [L4S on the backbone](/quest/m2/quic-ecn.md).
+
+## Required
+
+- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork

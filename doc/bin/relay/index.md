@@ -13,7 +13,7 @@ relay serves video, audio, and data alike.
 
 - **QUIC, WebTransport, and WebSocket** listeners, so browsers and native clients connect to one process.
 - **Path-scoped authentication** with JWTs, mTLS for peers, and anonymous patterns, decided by an auth server or a static grant. See [Authentication](/bin/relay/auth).
-- **Clustering** across hosts and regions with hop-list routing, per-link costs, gossip discovery, and dynamic peer lists. See [Clustering](/bin/relay/cluster).
+- **Clustering** across hosts and regions with hop-list routing, per-link costs, LAN discovery, and dynamic peer lists. See [Clustering](/bin/relay/cluster).
 - **A group cache** with byte and age budgets, so late joiners and the HLS gateway can fetch recent history.
 - **HTTP endpoints** to list broadcasts, fetch groups, probe health, and scrape Prometheus metrics. See [HTTP](/bin/relay/http).
 - **Live stats** published as MoQ tracks per node and per tenant, split by billing tier.

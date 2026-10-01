@@ -84,6 +84,10 @@ pub enum Error {
 	/// a continuous log.
 	#[error("stream rolled to a second group")]
 	Rolled,
+
+	/// A decoded frame or reconstructed snapshot exceeded its configured byte budget.
+	#[error("decoded JSON exceeded {0} bytes")]
+	TooLarge(usize),
 }
 
 impl From<serde_json::Error> for Error {

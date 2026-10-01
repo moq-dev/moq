@@ -126,7 +126,23 @@ pub struct Config {
 	/// edge. Defaults to [`track::DEFAULT_MAX_AGE`], and [`Self::cache_duration`]
 	/// still caps it.
 	pub default_max_age: Duration,
+
+	/// How long an announce cursor holds a changed route before delivering it.
+	///
+	/// A new route and a removed one are delivered at once; only an update (a
+	/// prefix whose best route changes while it stays reachable) waits, and a
+	/// newer change during the wait replaces it. When a publisher withdraws, a
+	/// relay that loses its best route but still holds routes derived from the
+	/// withdrawn one sends nothing while the withdrawal wave removes them, then one
+	/// retraction, instead of advertising each stale path in turn. It must outlast
+	/// the wave's spread across the mesh. Defaults to [`DEFAULT_UPDATE_HOLD`];
+	/// zero delivers updates at once.
+	pub update_hold: Duration,
 }
+
+/// The default [`Config::update_hold`]: longer than a withdrawal takes to cross a
+/// global mesh, with margin.
+pub const DEFAULT_UPDATE_HOLD: Duration = Duration::from_millis(300);
 
 impl Default for Config {
 	/// A fresh random hop with no byte target and the default idle expiry.
@@ -137,6 +153,7 @@ impl Default for Config {
 			pool,
 			cache_duration: Duration::MAX,
 			default_max_age: track::DEFAULT_MAX_AGE,
+			update_hold: DEFAULT_UPDATE_HOLD,
 		}
 	}
 }
@@ -634,6 +651,18 @@ fn route_order(prefix: &Path, entry: &RouteEntry) -> (bool, Cost, bool, usize, u
 /// The `(hops, cost, source)` metadata an announce cursor delivers alongside a prefix.
 type RouteMeta = (Hops, Cost, Source);
 
+/// A pending update's hold, keyed by prefix in its [`AnnounceConsumer`].
+///
+/// A consumer reads the origin's clock outside the driver, where it holds the
+/// driver's last reading, not the time the update arrived. So a hold first waits
+/// for the driver's next reading (armed a nanosecond past the stale one, which
+/// wakes the driver at once), and counts from there.
+#[derive(Clone, Copy)]
+enum Held {
+	Anchoring(Instant),
+	Until(Instant),
+}
+
 /// One coalesced update queued for an `AnnounceConsumer`.
 ///
 /// At most one entry exists per prefix, so a slow consumer's pending set is
@@ -698,9 +727,48 @@ impl OriginConsumerState {
 		}
 	}
 
-	/// Take one update to deliver to the consumer, if any.
-	fn take(&mut self) -> Option<AnnounceUpdate> {
-		let prefix = self.pending.keys().next()?.clone();
+	/// Whether the pending entry at `prefix` changes a route the consumer holds
+	/// to another route, rather than adding or removing one.
+	fn is_update(&self, prefix: &PathOwned, update: &PendingUpdate) -> bool {
+		matches!(update, PendingUpdate::Announce(_)) && self.delivered.contains(prefix)
+	}
+
+	/// The first pending prefix ready to deliver, or when the next held one is.
+	/// See [`Config::update_hold`]; a hold starts the first time a scan sees it.
+	fn scan(
+		&self,
+		held: &mut HashMap<PathOwned, Held>,
+		now: Option<Instant>,
+		hold: Duration,
+	) -> Result<PathOwned, Option<Instant>> {
+		let mut wake = None;
+		for (prefix, update) in &self.pending {
+			let holds = !hold.is_zero() && !self.ended && self.is_update(prefix, update);
+			let Some(now) = now.filter(|_| holds) else {
+				return Ok(prefix.clone());
+			};
+			// The clock reads the driver's last advance, which may be stale: anchor the
+			// hold on the first advance after the update arrived, by waking the driver.
+			let until = match held.get(prefix).copied() {
+				None => {
+					held.insert(prefix.clone(), Held::Anchoring(now));
+					now + Duration::from_nanos(1)
+				}
+				Some(Held::Anchoring(seen)) if now <= seen => seen + Duration::from_nanos(1),
+				Some(Held::Anchoring(_)) => {
+					held.insert(prefix.clone(), Held::Until(now + hold));
+					now + hold
+				}
+				Some(Held::Until(until)) if until <= now => return Ok(prefix.clone()),
+				Some(Held::Until(until)) => until,
+			};
+			wake = Some(wake.map_or(until, |w: Instant| w.min(until)));
+		}
+		Err(wake)
+	}
+
+	/// Take the pending update at `prefix` for delivery.
+	fn take_prefix(&mut self, prefix: PathOwned) -> Option<AnnounceUpdate> {
 		let ((meta, captures), kind) = match self.pending.remove(&prefix).unwrap() {
 			PendingUpdate::Announce(meta) => {
 				// The consumer has seen this prefix before, so it is a metadata update.
@@ -999,6 +1067,50 @@ impl TableCursor {
 			&& self.discovers(&entry.prefix)
 			&& !self.holes.iter().any(|hole| entry.prefix.has_prefix(hole))
 			&& self.named.as_ref().is_none_or(|(mount, _)| mount.names(&entry.prefix))
+	}
+
+	/// Deliver a changed winner at this presented prefix.
+	fn update(&mut self, presented: &PathOwned, best: Option<&RouteEntry>) {
+		match best {
+			Some(entry) => {
+				let meta = (entry.hops.clone(), entry.cost, entry.entered());
+				let served = entry.server.is_some();
+				let captures = self.captures(&entry.prefix);
+				let previous = self
+					.current
+					.insert(presented.clone(), (entry.id, meta.clone(), served, captures.clone()));
+				match previous {
+					// Unchanged metadata and servability: nothing the consumer could
+					// act on, even if the winning entry itself changed (a reconnect
+					// under an identical route is invisible, which is the point). A
+					// servability flip is delivered: a request that failed Unroutable
+					// under an advertise-only route retries on the update, and hiding
+					// it would park that waiter forever.
+					Some((_, prev, prev_served, prev_captures))
+						if prev == meta && prev_served == served && prev_captures == captures => {}
+					// Captures are consumer identity, not route metadata. Replace the
+					// old identity explicitly so capture-keyed consumers can remove it.
+					Some((_, prev, _, prev_captures)) if prev_captures != captures => {
+						if let Ok(mut state) = self.state.write() {
+							state.apply_unannounce(self.under.join(presented), prev, prev_captures);
+							state.apply_announce(self.under.join(presented), meta, captures);
+						}
+					}
+					_ => {
+						if let Ok(mut state) = self.state.write() {
+							state.apply_announce(self.under.join(presented), meta, captures);
+						}
+					}
+				}
+			}
+			None => {
+				if let Some((_, last, _, captures)) = self.current.remove(presented)
+					&& let Ok(mut state) = self.state.write()
+				{
+					state.apply_unannounce(self.under.join(presented), last, captures);
+				}
+			}
+		}
 	}
 
 	/// Whether the hidden rule lets this cursor discover a route at `prefix`.
@@ -1303,7 +1415,7 @@ impl Producer {
 	pub fn new(config: Config) -> (Self, Driver) {
 		let (tasks, set) = TaskSet::new();
 		let scope = OriginScope::default();
-		let shared = kio::Shared::<OriginState>::default();
+		let shared = kio::Shared::new(OriginState::new(config.update_hold));
 		let timers = Clock::default();
 		let pool = config.pool.clone();
 		let producer = Self {
@@ -1358,6 +1470,7 @@ impl Producer {
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
 			default_max_age: self.default_max_age,
+			update_hold: self.shared.lock().update_hold,
 		}
 	}
 
@@ -1384,7 +1497,7 @@ impl Producer {
 			hop,
 			scope: OriginScope::empty(),
 			root: PathOwned::default(),
-			shared: kio::Shared::default(),
+			shared: kio::Shared::new(OriginState::new(DEFAULT_UPDATE_HOLD)),
 			pool: cache::Pool::default(),
 			cache_duration: Duration::MAX,
 			default_max_age: track::DEFAULT_MAX_AGE,
@@ -1980,6 +2093,7 @@ impl Driver {
 	/// has drained.
 	pub fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Result<Option<Instant>, Error> {
 		self.timers.advance(now);
+		self.timers.register_driver(waiter);
 		let result = self.state.poll(waiter);
 		let gc = self.pool.gc(now);
 		if result.is_ready() {
@@ -3101,8 +3215,11 @@ impl RouteTable {
 /// Carried in a [`kio::Shared`], so producers, consumers, and handlers work
 /// under one lock. Broadcasts published here are route table entries like the
 /// routes announced from elsewhere; this holds everything that serves a path.
-#[derive(Default)]
 struct OriginState {
+	// See [`Config::update_hold`]. No `Default`: every origin takes it from its
+	// config, so no path silently disables the hold.
+	update_hold: Duration,
+
 	// The announced routes, keyed by prefix. The table holds one entry per live
 	// advertisement, not one per broadcast consumer.
 	routes: RouteTable,
@@ -3133,6 +3250,19 @@ struct OriginState {
 }
 
 impl OriginState {
+	fn new(update_hold: Duration) -> Self {
+		Self {
+			update_hold,
+			routes: RouteTable::default(),
+			next_route: 0,
+			next_watch: 0,
+			cursors: HashMap::new(),
+			fronts: WeakCache::default(),
+			withdrawn: HashMap::new(),
+			closed: false,
+		}
+	}
+
 	/// Whether a peer in `hops` withdrew `prefix`.
 	fn withdrawn_through(&self, prefix: &Path, hops: &Hops) -> bool {
 		if self.withdrawn.is_empty() {
@@ -3206,12 +3336,32 @@ impl OriginState {
 	fn sync_route(&mut self, prefix: &Path, claim: &Pattern) {
 		// Split borrows: the recompute reads `routes` while mutating a cursor.
 		let routes = &self.routes;
+		let mut candidates = None;
 		for id in routes.cursors_touching(prefix) {
 			let Some(cursor) = self.cursors.get_mut(&id) else {
 				continue;
 			};
 			if let Some(presented) = cursor.presented(prefix, claim) {
-				Self::sync_cursor(routes, cursor, &presented);
+				if presented.is_empty() {
+					// A cursor root can collapse several covering prefixes into one.
+					Self::sync_cursor(routes, cursor, &presented);
+				} else {
+					// Every non-root presentation refers to this exact prefix. Rank
+					// its routes once, then take each cursor's first visible entry.
+					let candidates = candidates.get_or_insert_with(|| {
+						let mut entries: Vec<_> = routes
+							.at(prefix)
+							.map(|entry| (route_order(prefix, entry), entry))
+							.collect();
+						entries.sort_unstable_by_key(|(order, _)| *order);
+						entries
+					});
+					let best = candidates
+						.iter()
+						.map(|(_, entry)| *entry)
+						.find(|entry| cursor.visible(entry));
+					cursor.update(&presented, best);
+				}
 			}
 		}
 		// The fronts and requesters under the prefix re-select from the table.
@@ -3257,46 +3407,7 @@ impl OriginState {
 				.min_by_key(|entry| route_order(&entry.prefix, entry))
 		});
 
-		match best {
-			Some(entry) => {
-				let meta = (entry.hops.clone(), entry.cost, entry.entered());
-				let served = entry.server.is_some();
-				let captures = cursor.captures(&entry.prefix);
-				let previous = cursor
-					.current
-					.insert(presented.clone(), (entry.id, meta.clone(), served, captures.clone()));
-				match previous {
-					// Unchanged metadata and servability: nothing the consumer could
-					// act on, even if the winning entry itself changed (a reconnect
-					// under an identical route is invisible, which is the point). A
-					// servability flip is delivered: a request that failed Unroutable
-					// under an advertise-only route retries on the update, and hiding
-					// it would park that waiter forever.
-					Some((_, prev, prev_served, prev_captures))
-						if prev == meta && prev_served == served && prev_captures == captures => {}
-					// Captures are consumer identity, not route metadata. Replace the
-					// old identity explicitly so capture-keyed consumers can remove it.
-					Some((_, prev, _, prev_captures)) if prev_captures != captures => {
-						if let Ok(mut state) = cursor.state.write() {
-							state.apply_unannounce(cursor.under.join(presented), prev, prev_captures);
-							state.apply_announce(cursor.under.join(presented), meta, captures);
-						}
-					}
-					_ => {
-						if let Ok(mut state) = cursor.state.write() {
-							state.apply_announce(cursor.under.join(presented), meta, captures);
-						}
-					}
-				}
-			}
-			None => {
-				if let Some((_, last, _, captures)) = cursor.current.remove(presented)
-					&& let Ok(mut state) = cursor.state.write()
-				{
-					state.apply_unannounce(cursor.under.join(presented), last, captures);
-				}
-			}
-		}
+		cursor.update(presented, best);
 	}
 
 	/// Register a cursor and replay the current best route per presented prefix.
@@ -3905,7 +4016,14 @@ impl Consumer {
 		if let Some(mount) = self.scope.mount(&self.root) {
 			// A root the mount resolves past the depth limit has nothing to announce.
 			let Some(root) = mount.resolve(&self.root) else {
-				return AnnounceConsumer::new(self.root.clone(), Vec::new(), state, self.stats.clone(), &self.shared);
+				return AnnounceConsumer::new(
+					self.root.clone(),
+					Vec::new(),
+					state,
+					self.stats.clone(),
+					&self.shared,
+					self.timers.clone(),
+				);
 			};
 			let cursors = vec![cursor(
 				root,
@@ -3915,7 +4033,14 @@ impl Consumer {
 				PathOwned::default(),
 				Vec::new(),
 			)];
-			return AnnounceConsumer::new(self.root.clone(), cursors, state, self.stats.clone(), &self.shared);
+			return AnnounceConsumer::new(
+				self.root.clone(),
+				cursors,
+				state,
+				self.stats.clone(),
+				&self.shared,
+				self.timers.clone(),
+			);
 		}
 
 		// Otherwise the consumer's own cursor, minus the mounted subtrees, plus one
@@ -3959,7 +4084,14 @@ impl Consumer {
 				holes,
 			),
 		);
-		AnnounceConsumer::new(self.root.clone(), cursors, state, self.stats.clone(), &self.shared)
+		AnnounceConsumer::new(
+			self.root.clone(),
+			cursors,
+			state,
+			self.stats.clone(),
+			&self.shared,
+			self.timers.clone(),
+		)
 	}
 
 	/// Returns a cheap duplicate of this read handle.
@@ -4262,6 +4394,13 @@ pub struct AnnounceConsumer {
 	// Holds the waiter a `Stream` poll registered; disjoint from `state` so the
 	// borrow never collides with the body's.
 	park: kio::Park,
+
+	// Held updates (see [`Config::update_hold`]): their holds by prefix, the
+	// clock they count on, and the timer that wakes the next.
+	update_hold: Duration,
+	held: HashMap<PathOwned, Held>,
+	timers: Clock,
+	hold: crate::runtime::Deadline<Clock>,
 }
 
 impl AnnounceConsumer {
@@ -4271,10 +4410,13 @@ impl AnnounceConsumer {
 		state: kio::Producer<OriginConsumerState>,
 		stats: stats::Session,
 		shared: &kio::Shared<OriginState>,
+		timers: Clock,
 	) -> Self {
 		let mut ids = Vec::with_capacity(cursors.len());
+		let update_hold;
 		{
 			let mut table = shared.lock();
+			update_hold = table.update_hold;
 			if table.closed {
 				// A cursor on a dead origin is born ended.
 				if let Ok(mut state) = state.write() {
@@ -4297,6 +4439,10 @@ impl AnnounceConsumer {
 			stats,
 			guards: HashMap::new(),
 			park: kio::Park::default(),
+			update_hold,
+			held: HashMap::new(),
+			hold: crate::runtime::Deadline::new(&timers),
+			timers,
 		}
 	}
 
@@ -4331,29 +4477,53 @@ impl AnnounceConsumer {
 	/// cursor is closed, or `Poll::Pending` after registering `waiter` to be
 	/// notified when the next update arrives.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<AnnounceUpdate>> {
-		let update = {
-			let mut state = match ready!(self.state.poll(waiter, |state| {
-				if state.pending.is_empty() && !state.ended {
-					Poll::Pending
-				} else {
-					Poll::Ready(())
+		loop {
+			let now = self.timers.try_now();
+			let hold = self.update_hold;
+			let held = &mut self.held;
+			let mut ready = None;
+			let mut wake = None;
+			let update = match self.state.poll(waiter, |state| {
+				if state.pending.is_empty() {
+					return match state.ended {
+						true => Poll::Ready(()),
+						false => Poll::Pending,
+					};
 				}
-			})) {
-				Ok(state) => state,
+				match state.scan(held, now, hold) {
+					Ok(prefix) => {
+						ready = Some(prefix);
+						Poll::Ready(())
+					}
+					Err(at) => {
+						wake = at;
+						Poll::Pending
+					}
+				}
+			}) {
+				Poll::Ready(Ok(mut state)) => match ready {
+					Some(prefix) => state.take_prefix(prefix),
+					None => {
+						// Ended by the origin's teardown, pending updates already
+						// drained; close the channel so every closure signal agrees.
+						state.close();
+						None
+					}
+				},
 				// Closed: discard the Ref so its MutexGuard doesn't escape this call.
-				Err(_) => return Poll::Ready(None),
-			};
-			match state.take() {
-				Some(update) => update,
-				None => {
-					// Ended by the origin's teardown, pending updates already
-					// drained; close the channel so every closure signal agrees.
-					state.close();
-					return Poll::Ready(None);
+				Poll::Ready(Err(_)) => None,
+				Poll::Pending => {
+					self.hold.set(wake);
+					ready!(self.hold.poll(waiter));
+					continue;
 				}
-			}
-		};
-		Poll::Ready(Some(self.hand_out(update)))
+			};
+			let Some(update) = update else {
+				return Poll::Ready(None);
+			};
+			self.held.remove(&update.prefix);
+			return Poll::Ready(Some(self.hand_out(update)));
+		}
 	}
 
 	/// Returns the next update without blocking.
@@ -4361,7 +4531,21 @@ impl AnnounceConsumer {
 	/// Returns None if there is no update available; NOT because the cursor is closed.
 	/// Use [`Self::is_closed`] to check if the cursor is closed.
 	pub fn try_next(&mut self) -> Option<AnnounceUpdate> {
-		let update = self.state.write().ok()?.take()?;
+		let now = self.timers.try_now();
+		let mut state = self.state.write().ok()?;
+		let prefix = match state.scan(&mut self.held, now, self.update_hold) {
+			Ok(prefix) => prefix,
+			Err(wake) => {
+				// Arm the hold even though nothing polls it: the armed timer wakes the
+				// driver, so its clock reaches the deadline for a later call to see.
+				drop(state);
+				self.hold.set(wake);
+				return None;
+			}
+		};
+		self.held.remove(&prefix);
+		let update = state.take_prefix(prefix)?;
+		drop(state);
 		Some(self.hand_out(update))
 	}
 
@@ -6105,6 +6289,76 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn route_changes_preserve_each_cursors_visible_winner() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let mut all = consumer.clone().announced();
+		let mut excluded = consumer.clone().excluding(origin(7)).announced();
+		let mut video = consumer
+			.clone()
+			.scope("", &scopes(&["room/live/video"]))
+			.unwrap()
+			.announced();
+		let mut rooted = consumer
+			.scope("room/live", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.announced();
+
+		let chat = producer
+			.scope("", &scopes(&["room/live/chat"]))
+			.unwrap()
+			.dynamic("room/live", Route::default().with_hops(hops(&[7])).with_cost(1))
+			.unwrap();
+		assert_eq!(all.assert_next_active("room/live").cost, Cost::new(1));
+		assert_eq!(rooted.assert_next_active("").cost, Cost::new(1));
+		excluded.assert_next_wait();
+		video.assert_next_wait();
+
+		let video_route = producer
+			.scope("", &scopes(&["room/live/video"]))
+			.unwrap()
+			.dynamic("room/live", Route::default().with_hops(hops(&[8])).with_cost(5))
+			.unwrap();
+		all.assert_next_wait();
+		rooted.assert_next_wait();
+		assert_eq!(excluded.assert_next_active("room/live").cost, Cost::new(5));
+		assert_eq!(video.assert_next_active("room/live").cost, Cost::new(5));
+
+		chat.update(Route::default().with_hops(hops(&[7])).with_cost(9))
+			.unwrap();
+		assert_eq!(all.assert_next_active("room/live").cost, Cost::new(5));
+		assert_eq!(rooted.assert_next_active("").cost, Cost::new(5));
+		excluded.assert_next_wait();
+		video.assert_next_wait();
+
+		drop(video_route);
+		assert_eq!(all.assert_next_active("room/live").cost, Cost::new(9));
+		assert_eq!(rooted.assert_next_active("").cost, Cost::new(9));
+		excluded.assert_next_ended("room/live");
+		video.assert_next_ended("room/live");
+	}
+
+	#[tokio::test]
+	async fn root_cursor_keeps_the_more_specific_covering_route() {
+		let producer = origin(1).produce();
+		let broad = producer.dynamic("room", Route::default().with_cost(1)).unwrap();
+		let narrow = producer.dynamic("room/live", Route::default().with_cost(9)).unwrap();
+		let mut announced = producer
+			.consume()
+			.scope("room/live/video", &Patterns::from(Pattern::all()))
+			.unwrap()
+			.announced();
+		assert_eq!(announced.assert_next_active("").cost, Cost::new(9));
+
+		broad.update(Route::default().with_cost(0)).unwrap();
+		announced.assert_next_wait();
+		narrow.update(Route::default().with_cost(8)).unwrap();
+		assert_eq!(announced.assert_next_active("").cost, Cost::new(8));
+		drop(narrow);
+		assert_eq!(announced.assert_next_active("").cost, Cost::new(0));
+	}
+
+	#[tokio::test]
 	async fn dynamic_accepts_a_max_depth_prefix() {
 		let producer = origin(1).produce();
 		let path = (0..Path::MAX_PARTS)
@@ -6342,6 +6596,70 @@ mod tests {
 		let scoped = peer.scope("room", &Patterns::from(Pattern::all())).unwrap();
 		let _nested = scoped.dynamic("x", Route::default().with_via(origin(8))).unwrap();
 		assert_eq!(announced.assert_next_active("room/x").source(), Source::Peer(origin(8)));
+	}
+
+	/// A caller that only polls with `try_next` still gets a held update once its
+	/// hold passes. Nothing else wakes the idle driver, so the hold's own timer
+	/// must, or the origin's clock never reaches the deadline.
+	#[tokio::test(start_paused = true)]
+	async fn try_next_delivers_a_held_update() {
+		// Let paused time pass and every task woken by it run.
+		async fn step(by: Duration) {
+			tokio::time::advance(by).await;
+			for _ in 0..10 {
+				tokio::task::yield_now().await;
+			}
+		}
+
+		let producer = origin(1).produce();
+		let peer = producer.clone().peer();
+		let mut announced = producer.consume().announced();
+		step(Duration::from_millis(1)).await;
+
+		let route = |chain: &[u64], via| Route::default().with_hops(hops(chain)).with_via(origin(via));
+		let near = peer.dynamic("room", route(&[9, 2], 2)).unwrap();
+		assert!(announced.try_next().unwrap().kind.is_active());
+
+		let _far = peer.dynamic("room", route(&[9, 3, 4], 4)).unwrap();
+		drop(near);
+		assert!(announced.try_next().is_none(), "the update is held");
+		step(Duration::from_millis(1)).await;
+		assert!(announced.try_next().is_none(), "the update is still held");
+		step(DEFAULT_UPDATE_HOLD).await;
+		let update = announced.try_next().expect("the hold passed");
+		assert_eq!(update.kind, AnnounceKind::Updated);
+		assert_eq!(update.route.hops, hops(&[9, 3, 4]));
+	}
+
+	/// A new route and a removal are delivered at once. A change of the best route
+	/// waits out the update hold, and a newer change during the wait replaces it.
+	#[tokio::test(start_paused = true)]
+	async fn a_changed_route_waits_out_the_hold() {
+		let producer = origin(1).produce();
+		let peer = producer.clone().peer();
+		let mut announced = producer.consume().announced();
+		// Holds count on the driver's clock, which starts at its first poll.
+		tokio::time::sleep(Duration::from_millis(1)).await;
+
+		let route = |chain: &[u64], via| Route::default().with_hops(hops(chain)).with_via(origin(via));
+		let near = peer.dynamic("room", route(&[9, 2], 2)).unwrap();
+		announced.assert_next_active("room");
+
+		// The best route changes twice; the consumer sees only the last, once.
+		let far = peer.dynamic("room", route(&[9, 3, 4], 4)).unwrap();
+		let farther = peer.dynamic("room", route(&[9, 5, 6, 7], 7)).unwrap();
+		let start = tokio::time::Instant::now();
+		drop(near);
+		drop(far);
+		let update = announced.next().await.unwrap();
+		assert_eq!(update.kind, AnnounceKind::Updated);
+		assert_eq!(update.route.hops, hops(&[9, 5, 6, 7]));
+		assert_eq!(start.elapsed(), DEFAULT_UPDATE_HOLD);
+		announced.assert_next_wait();
+
+		// The last route goes: retracted at once.
+		drop(farther);
+		announced.assert_next_ended("room");
 	}
 
 	/// A peer withdrawing a prefix hides the routes there through it, so the next

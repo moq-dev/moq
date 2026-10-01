@@ -102,6 +102,10 @@ scheduler completion must not wait for that dependent integration. Preserve
 working behavior on backends not yet migrated, and remove queue code only
 where the new implementation makes it redundant.
 
+## Required
+
+- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic` on `dev`, not the frozen fork
+
 ## Closes
 
 - [#699](https://github.com/moq-dev/moq/issues/699) - close this issue when the
@@ -119,3 +123,5 @@ where the new implementation makes it redundant.
   scope
 - [Signed priority](/quest/m2/signed-priority.md) - changes the priority type
   this orders on; keep the ordering, not just the type
+- [noq#816](https://github.com/n0-computer/noq/issues/816) - the send-group proposal to n0; this quest supersedes it
+- [noq#817](https://github.com/n0-computer/noq/issues/817) - the 64-bit priority ask; send groups replace the scalar, but the per-stream order within a group must still hold a 64-bit group sequence
