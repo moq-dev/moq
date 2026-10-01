@@ -90,6 +90,8 @@ the catalog suffix last: `--broadcast event.hang` publishes `event/1.hang`,
 A selected program's SI describes that service alone: its SDT lists only the
 selected service, and other services' EIT is dropped. Network-wide tables (NIT,
 BAT, TDT/TOT, and the SDT and EIT of other transport streams) pass through.
+SI matches the selection by DVB `service_id`, which is assumed to equal the PAT
+`program_number`.
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast event.hang import ts --program all < mux.ts

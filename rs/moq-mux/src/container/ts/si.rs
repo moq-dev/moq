@@ -20,7 +20,8 @@
 //! service alone. Other services' EIT actual sub-tables are dropped on arrival, and
 //! each SDT actual snapshot is rebuilt as one section holding only the selected
 //! service's entry, with a fresh CRC. An SDT actual section whose own CRC fails is
-//! dropped, so the last good snapshot stays in force. An SDT that does not list the
+//! dropped, and a revision commits only once every section has arrived, so the last
+//! good snapshot stays in force until then. An SDT that does not list the
 //! service carries no SDT actual, so a revision that drops it retires the earlier
 //! one. Network-wide tables (NIT, BAT, SDT other, EIT other, TDT/TOT) pass through
 //! verbatim, as does everything when no program is selected.
@@ -265,6 +266,12 @@ impl Entry {
 
 		if let Some(prior) = pending.sections.get(&number) {
 			if *prior == section {
+				// A reduced SDT reads a missing service as removal, so a dense SDT
+				// missing a section (dropped for a bad CRC, or lost) must not commit as
+				// complete-as-observed; it waits for the cycle that completes it.
+				if self.service.is_some() {
+					return;
+				}
 				// The same section came round again before the set completed: the
 				// transmission cycle wrapped, so what we hold is the whole sub-table as
 				// this mux transmits it. For EIT schedule this is the *only* commit
@@ -403,7 +410,8 @@ impl<E: catalog::Catalog> Capture<E> {
 	}
 
 	/// Carry only the service numbered `program`: its EIT actual, and an SDT actual
-	/// listing it alone.
+	/// listing it alone. SI keys services by `service_id`, assumed equal to the PAT
+	/// `program_number`.
 	pub fn select(&mut self, program: u16) {
 		self.program = Some(program);
 	}

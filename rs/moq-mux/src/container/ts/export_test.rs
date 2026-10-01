@@ -3130,6 +3130,83 @@ async fn a_corrupt_sdt_keeps_the_last_good_snapshot() {
 	assert_sdt_lists_only(&groups[1][0], 2, 1, b"Uno");
 }
 
+/// A multi-section SDT revision with the selected service's section corrupt does not
+/// commit as complete-as-observed when the other section repeats: that would read as
+/// the service leaving. The revision commits once the section arrives intact.
+#[tokio::test(start_paused = true)]
+async fn a_partial_sdt_revision_keeps_the_last_good_snapshot() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+	let mut capture = crate::container::ts::si::Capture::new(broadcast, catalog.clone());
+	capture.select(1);
+	let mut feed = |section: Vec<u8>| {
+		capture.section(0x0011, section).unwrap();
+		capture.flush(Timestamp::ZERO, true).unwrap();
+		catalog
+			.snapshot()
+			.ext
+			.mpegts
+			.si
+			.get(&0x0011)
+			.map(|tables| tables[&0x42].track.clone())
+	};
+
+	feed(sdt_actual(0, 0, 1, &[(1, b"One")]));
+	let track = feed(sdt_actual(0, 1, 1, &[(2, b"Two")])).expect("the SDT is advertised");
+	let mut corrupt = sdt_actual(1, 0, 1, &[(1, b"One")]);
+	let name = corrupt.len() - 4 - 3;
+	corrupt[name] ^= 0x01;
+	assert_eq!(feed(corrupt), Some(track.clone()));
+	assert_eq!(feed(sdt_actual(1, 1, 1, &[(2, b"Two")])), Some(track.clone()));
+	assert_eq!(
+		feed(sdt_actual(1, 1, 1, &[(2, b"Two")])),
+		Some(track.clone()),
+		"the repeated section did not commit the partial revision"
+	);
+	assert_eq!(feed(sdt_actual(1, 0, 1, &[(1, b"Uno")])), Some(track.clone()));
+	capture.finish(Timestamp::ZERO).unwrap();
+
+	let groups = read_si_groups(&consumer, &track).await;
+	assert_eq!(groups.len(), 2, "no snapshot for the partial revision");
+	assert_sdt_lists_only(&groups[0][0], 0, 1, b"One");
+	assert_sdt_lists_only(&groups[1][0], 1, 1, b"Uno");
+}
+
+/// A selection filters EIT schedule actual (0x50..=0x5F) by service, as it does
+/// present/following.
+#[tokio::test(start_paused = true)]
+async fn a_selection_filters_eit_schedule() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+	let mut capture = crate::container::ts::si::Capture::new(broadcast, catalog.clone());
+	capture.select(1);
+	let schedule = |service: u16| {
+		let body = [0x00, 0x01, 0x00, 0x02, 0x00, 0x50, service as u8];
+		make_long_section(0x50, service, 0, 0, 0, &body)
+	};
+	for service in [1, 2] {
+		capture.section(0x0012, schedule(service)).unwrap();
+	}
+	capture.finish(Timestamp::ZERO).unwrap();
+
+	let si = catalog.snapshot().ext.mpegts.si.clone();
+	assert_eq!(
+		read_si_sections(&consumer, &si[&0x0012][&0x50].track).await,
+		vec![Bytes::from(schedule(1))],
+		"only the selected service's schedule"
+	);
+}
+
 /// A selected program's reduced SI survives export: the TS parses, and importing it
 /// again finds the same single-service SDT and the same EIT.
 #[tokio::test(start_paused = true)]
