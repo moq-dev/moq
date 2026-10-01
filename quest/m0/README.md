@@ -28,11 +28,10 @@ work is done on the line branch and waits to land. Serving the relay's
 ingested-only view (`origin::Consumer::local()`) to localhost workers belongs
 to moq.pro's edge, which embeds moq-relay; it moved there on 2026-09-28.
 
-Audio playout: the jitter target replaces the round-trip guess. The harness's
-browser lane grades it nightly and records the traces it replays; the native
-lane is a standalone m1 quest, since nothing here waits on it. The harness
-line lands before the jitter line, since both add
-`js/watch/src/audio/replay.test.ts`. The [A/V clock](/quest/m1/av-clock.md)
+Audio playout: the jitter target replaces the round-trip guess. The browser
+audio quality harness in `test/audio-quality/` has landed; it grades the target
+nightly and records the traces it replays. Its native lane is a standalone m1
+quest, since nothing here waits on it. The [A/V clock](/quest/m1/av-clock.md)
 moved to m1 in the 2026-09-30 audit: it waits on the whole jitter line and is
 a published `@moq/watch` break on dev.
 
@@ -49,7 +48,6 @@ Published API or wire breaks still land on dev; each quest's Plan says so.
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
 - [Shared fronts](/quest/m0/shared-fronts.md) - viewer sessions share a front, so fronts scale with peers, not viewers
 - [Wildcard](/quest/m0/wildcard/README.md) - a relay resolves subscriptions against advertised prefixes, a service claims the prefix it could serve and refuses the rest instead of enumerating broadcasts, and the browser player treats a covering claim as availability
-- [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - a browser playout latency regression fails a nightly run instead of arriving as a bug report, and its recorder supplies the jitter target's replay traces
 - [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
 
 ## Related

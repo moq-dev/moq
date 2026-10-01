@@ -80,7 +80,10 @@ against it is likely cheaper than patching the branch's:
   `Container.Consumer` and both rings on a simulated clock at the delay `Sync`
   resolves. Replay them in `replay.test.ts`, move the replay's target onto the
   estimator (its 100 ms fallback covers the public relay's missing PROBE RTT
-  until then), and tighten the harness's exact replay budgets with it.
+  until then), and tighten the harness's exact replay budgets with it. The
+  checked-in `test/audio-quality/budgets.json` was recorded locally (#4426);
+  re-record it from the nightly runner's first runs on `main` before
+  tightening, since nightly only runs `main`'s code.
 - Manual run against the public relay on Chrome and Safari, the two rows the
   issue measured. Re-record the `relay-mic` trace in the same run with a real
   microphone (`just test audio-quality-record`); the checked-in one used
