@@ -29,4 +29,3 @@ nightly.
 ## Related
 
 - [TS passthrough](/quest/m1/ts-passthrough.md) - the passthrough lane named in the Goal
-- [Release clock recovery](/quest/m1/release-clock-recovery.md) - the fixed delay held against publisher clock drift; the soak gate runs here

@@ -57,9 +57,8 @@ Decided (2026-10-01), from a discussion with t0ms:
 - An object that misses its deadline is dropped and counted, as the release
   stage does. The output shows a continuity error there; passthrough never
   rewrites continuity counters.
-- Source clock drift is handled by
-  [release clock recovery](/quest/m1/release-clock-recovery.md), shared with
-  the demultiplexed export, not here.
+- Source clock drift is handled by the fixed-delay release's clock recovery
+  (#4645), shared with the demultiplexed export, not here.
 - Rust only. `js/hang` does not parse `m2ts`, and a player sees no
   rendition for the track.
 - `--passthrough` publishes only the passthrough track. Publishing it
@@ -82,8 +81,7 @@ hang catalog gains an `m2ts` root section; additive.
 
 ## Required
 
-- [Fixed-delay release](/quest/m1/tstd/delay.md) - the release stage this reuses
-- [Release clock recovery](/quest/m1/release-clock-recovery.md) - holds the delay against the source clock
+- [Fixed-delay release](/quest/m1/tstd/delay.md) - the release stage this reuses, with its clock recovery (#4645)
 
 ## Related
 
