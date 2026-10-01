@@ -7,8 +7,9 @@
  *
  * @module
  */
-import type { Dispose, Getter } from "@moq/signals";
+import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type * as broadcast from "./broadcast.ts";
+import type { Drain } from "./connection/goaway.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import type { Route } from "./hop.ts";
 import type * as origin from "./origin.ts";
@@ -65,9 +66,11 @@ export interface Advertised {
  */
 export type Advertisements = ReadonlyMap<Path.Valid, readonly Advertised[]>;
 
-/** The protocol-facing operation behind an established session. */
+/** The protocol-facing operations behind an established session. */
 export interface Established {
 	consume(path: Path.Valid): broadcast.Consumer;
+	/** Settles with the peer's GOAWAY; the session keeps serving until it closes. */
+	readonly goaway: GetPromise<Drain>;
 }
 
 type View = Broadcast | OriginProducer | OriginConsumer | Established;

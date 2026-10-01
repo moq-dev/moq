@@ -1,4 +1,4 @@
-# [M] Every listener bounds its handshake and headers
+# [L] Every listener bounds its handshake and headers
 
 ## Goal
 

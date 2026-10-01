@@ -232,6 +232,94 @@ async fn uring_workers_report_link_facts() {
 	let _ = running.await;
 }
 
+/// The shutdown trigger drains sessions the io_uring workers serve as it does
+/// the shared runtime's: an established session and one arriving mid-drain
+/// are each sent a GOAWAY and leave, and `run` then returns at the deadline
+/// with the worker threads joined and the port free.
+///
+/// What an arrival is told is left of the window only reaches the wire on
+/// moq-transport-17+, which the workers do not speak; `shutdown_signal.rs`
+/// reads it through the shared runtime, whose supervision this path shares.
+#[tokio::test]
+async fn uring_workers_drain_on_the_trigger() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	if !supported() {
+		return;
+	}
+
+	const DRAIN: Duration = Duration::from_secs(2);
+
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+
+	let mut config = uring_config(&cert, &key);
+	config.drain_timeout = DRAIN;
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
+	let port = relay.addr().expect("workers bound an address").port();
+	let trigger = relay.shutdown_trigger().clone();
+	let sessions = relay.sessions().clone();
+	let running = tokio::spawn(relay.run());
+
+	// One-shot (see `client`), so a session leaves on its GOAWAY rather than
+	// migrating, and closing cleanly shows it was one.
+	let client = client();
+	let url: url::Url = format!("moql://127.0.0.1:{port}/drain").parse().expect("parse url");
+
+	let established = connect(client.clone(), url.clone()).await;
+	// moq-lite-03 has no GOAWAY, so this peer stays until the deadline closes it,
+	// keeping the drain open for the arrival below once `established` leaves.
+	let mut straggler = moq_tokio::connect::Config::default();
+	straggler.tls.insecure = Some(true);
+	straggler.once = Some(true);
+	straggler.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
+	straggler.version = vec!["moq-lite-03".parse().expect("parse version")];
+	let _straggler = connect(straggler.init(Default::default()).expect("client init"), url.clone()).await;
+
+	// A client can see its session established before the relay counts it, and a
+	// drain with nothing counted ends at once.
+	let deadline = std::time::Instant::now() + TIMEOUT;
+	while sessions.list(&Default::default()).len() < 2 {
+		assert!(
+			std::time::Instant::now() < deadline,
+			"the relay never listed both sessions"
+		);
+		tokio::time::sleep(Duration::from_millis(25)).await;
+	}
+	trigger.start();
+	let goaway = tokio::time::timeout(TIMEOUT, established.draining().expect("connected").recv())
+		.await
+		.expect("no GOAWAY after the trigger")
+		.expect("session closed without a GOAWAY");
+	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
+	tokio::time::timeout(TIMEOUT, established.closed())
+		.await
+		.expect("the drained session never closed")
+		.expect("a one-shot session leaves cleanly on GOAWAY");
+
+	// A straggler dialing mid-drain is admitted through a worker, then told to
+	// leave at once.
+	tokio::time::sleep(DRAIN / 2).await;
+	let arrival = connect(client, url).await;
+	let goaway = tokio::time::timeout(Duration::from_secs(1), arrival.draining().expect("connected").recv())
+		.await
+		.expect("an arrival mid-drain was not sent a GOAWAY")
+		.expect("arrival closed without a GOAWAY");
+	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
+	tokio::time::timeout(TIMEOUT, arrival.closed())
+		.await
+		.expect("the arrival never closed")
+		.expect("a one-shot session leaves cleanly on GOAWAY");
+
+	// `run` joins the worker threads before returning, so returning at all is
+	// the clean join; the rebind proves every worker let go of the port.
+	tokio::time::timeout(TIMEOUT, running)
+		.await
+		.expect("run did not return after the drain window")
+		.expect("run panicked")
+		.expect("run returned an error after the drain");
+	std::net::UdpSocket::bind(("127.0.0.1", port)).expect("a worker still holds the QUIC port");
+}
+
 /// One HTTP/1.1 GET against `addr`, returning the response body.
 ///
 /// Hand-rolled because the relay has no HTTP client among its dev

@@ -36,10 +36,12 @@ QUIC studies there on that rule.
 - [IETF drain before close](/quest/m1/ietf-drain-before-close.md) - moq-transport sessions deliver finished tracks before a graceful close, as moq-lite does
 - [Close waits for the tail](/quest/m1/close-tail.md) - on lite-07, `close()` returns `Ok` only after each subscriber FINs its Subscribe Stream, having read the track to its end
 - [moq play drain tail](/quest/m1/play-drain-tail.md) - retired renditions and finite tracks play their last 10 ms of audio
+- [A moq-relay release refuses --cluster-mesh](/quest/m1/relay-mesh-refusal-release.md) - the release that lets the cluster flag shims go
 - [web-transport-moq 1.3.3 ships noq#24](/quest/m1/web-transport-moq-release.md) - the release that carries the close-capsule fix
 - [WebTransport close upstream](/quest/m1/wt-close-upstream.md) - web-transport-moq delivers the close capsule itself, and moq-tokio's `CLOSE_LINGER` is deleted
 - [Browser close code](/quest/m1/browser-close-code.md) - a playwright case proves the page reads a relay's close code and reason, on every web-transport backend
 - [Resumed groups](/quest/m1/resume-latest.md) - a half-delivered group ends once the new copy is past it, so a group-only reader never parks after a mid-group failover
+- [Truncated groups fail finished()](/quest/m1/finished-truncated.md) - a spliced group whose continuation can never arrive fails `finished()` instead of reporting a clean end at the seam
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
 - [Late lower groups](/quest/m1/lite-late-lower-group.md) - a moq-lite subscriber with a floor receives a group created below the first served one, as moq-transport does
 - [Parked reads wake](/quest/m1/parked-read-wakes.md) - a read parked on an evicted or aborted group wakes and re-judges, for resume successors and plain tracks alike
@@ -51,6 +53,7 @@ QUIC studies there on that rule.
 - [Watch and publish under CSP](/quest/m1/csp-assets.md) - blob workers stay the default; strict-CSP apps host the files and set a base URL
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [A week of nightly interop after #4529](/quest/m1/interop-week.md) - the nightly traces the stall diagnosis reads
+- [Nightly tests on macOS and Windows](/quest/m1/nightly-platform-tests.md) - `moq-auth`, `hang`, `moq-tokio`, and `moq-native` tests run nightly where `Instant` and sockets differ, not just compile
 - [CI runner stalls](/quest/m1/ci-runner-stalls.md) - the 0.4 to 0.8 s freezes of both interop tracks on CI are attributed from a week of nightlies and fixed or told apart from playback bugs
 - [Catalog estimate rate](/quest/m1/catalog-estimate-rate.md) - a rising `jitter`/`delay` estimate republishes the catalog at most once a second, in js/publish and moq-mux
 - [Rewind detail](/quest/m1/timestamp-rewind-detail.md) - a refused timestamp rewind names the frame's timestamp and the live edge
@@ -114,7 +117,9 @@ QUIC studies there on that rule.
 - [QoS](/quest/m1/qos/README.md) - broadcast health: relay starvation and timeliness histograms, on dev
 - [Catalog track alias](/quest/m1/catalog-track-alias.md) - catalog rendition keys become aliases with an optional `track` name, so one catalog lists renditions from several broadcasts
 - [Media stats](/quest/m1/stats/README.md) - publishers announce a stats track in the catalog, viewers answer a soliciting catalog through a per-catalog `.echo` broadcast, and a Rust encoder adapts to them
-- [Drain](/quest/m1/drain/README.md) - relay restarts drain sessions over GOAWAY instead of hard-dropping them
+- [JS group-boundary handover](/quest/m1/js-group-handover.md) - a JS track subscription carries across a route swap at a group boundary, so `test/drain` passes at zero latency budget
+- [JS GOAWAY requests](/quest/m1/js-goaway-requests.md) - after GOAWAY the JS client opens no new request on the old session, like Rust
+- [Drain handshakes](/quest/m1/drain-handshakes.md) - a drain GOAWAYs and waits for sessions still in their handshake instead of exiting under them
 - [Strict Redirect::resolve](/quest/m1/redirect-resolve.md) - on dev, `Redirect::resolve` can no longer quietly turn a refused redirect into a redial
 - [Transport upgrade](/quest/m1/transport-upgrade/README.md) - a session that came up over WebSocket moves to QUIC once the QUIC dial lands, handing over at a group boundary
 - [Scope track priority](/quest/m1/track-priority-scope.md) - priority orders one owner's streams, and a shared cluster session is fair across tenants

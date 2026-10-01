@@ -42,10 +42,6 @@ skipping inside the Nix shell.
   job gated to `refs/heads/main`, never `pull_request`; a dedicated label only
   this job selects; read-only `permissions`. Read GitHub's self-hosted runner
   hardening guidance before wiring it.
-- Share the runner with the io_uring one that #4132 plans
-  (`quest/m1/uring-runner.md` on the drain line, which wants a 6.12+ kernel on
-  the same host): one registration and one security posture, a label per
-  capability. Whichever quest lands second reuses the first's job shape.
 
 Public API: none. Wire: none.
 
