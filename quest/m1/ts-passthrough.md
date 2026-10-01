@@ -42,11 +42,12 @@ Decided (2026-10-01), from a discussion with t0ms:
   inside a group. A source that never sets the random-access indicator
   falls back to a group every N PCRs (N to be fixed in the PR, with a group
   spanning at most 1 s of PCR time). Pacing stays on the PCR PID throughout.
-- `randomAccess` is true only while the PAT lists a single program and every
-  group has started at a `random_access_indicator`. The first group that
-  starts without one (a fallback, or a `discontinuity_indicator` alone)
-  republishes the catalog with it false. A multi-program multiplex always
-  publishes false, since programs sharing a clock can stagger their GOPs.
+- `randomAccess` is true only while the PAT lists a single program with at
+  most one video PID, and every group has started at a
+  `random_access_indicator`. The first group that starts without one (a
+  fallback, or a `discontinuity_indicator` alone) republishes the catalog
+  with it false. Any other layout always publishes false, since programs or
+  video streams sharing a clock can stagger their GOPs.
   Both indicators sit in the adaptation field, which TS scrambling leaves in
   clear, so a scrambled feed still groups and paces.
 - The publisher reads the PAT and PMT (with the existing `ts/psi.rs`
@@ -72,10 +73,11 @@ Decided (2026-10-01), from a discussion with t0ms:
   rewrites continuity counters.
 - Source clock drift is handled by the fixed-delay release's clock recovery
   (#4645), shared with the demultiplexed export, not here.
-- Passthrough is the ST 2022-7 (1+1) lane: two exporters fed the same
-  objects emit identical bytes for every object both release, continuity
-  counters included. An object one leg drops late is a gap in that leg
-  only, which the 2022-7 receiver fills from the other. The
+- Passthrough is the 1+1 lane: two exporters fed the same objects emit
+  identical TS packets for every object both release, continuity counters
+  included; an object one leg drops late is a gap in that leg only. That is
+  TS identity, not ST 2022-7 recovery, which also needs matching RTP
+  headers: a coordinated RTP egress would be its own quest. The
   demultiplexed export does not promise counter identity; matching them
   there would need a dedicated PCR PID on every export. Aligning the legs in
   time is a non-goal: each releases at its own first arrival plus the delay,
@@ -90,13 +92,14 @@ first released group, and the strict T-STD check gives the same verdict on
 output and input. A scrambled fixture (`transport_scrambling_control` set on
 its elementary PIDs) groups and paces the same as its clear twin. A
 two-program fixture on one clock with staggered GOPs publishes `randomAccess`
-false. A single-program fixture with the PCR on its audio PID starts groups at
-video random access points only. PCR discovery finds a PCR PID that differs
-from the PMT PID, with the PMT section split across packets. Two exporters fed
-the same objects with different arrival skew emit identical bytes; when only
-one misses a deadline, its output is the other's less that object's packets. A
-dropped object is counted, and the rest still go out on time. Rerun the #4613
-netem rig (10% loss, 120 s) against it.
+false, as does one program with two staggered video PIDs. A single-program
+fixture with the PCR on its audio PID starts groups at video random access
+points only. PCR discovery finds a PCR PID that differs from the PMT PID, with
+the PMT section split across packets. Two exporters fed the same objects with
+different arrival skew emit identical bytes; when only one misses a deadline,
+its output is the other's less that object's packets. A dropped object is
+counted, and the rest still go out on time. Rerun the #4613 netem rig (10%
+loss, 120 s) against it.
 
 Update `doc/bin/cli.md` for both flags, `doc/concept` for the section, and
 the draft's comparison section to say this repository now publishes both
