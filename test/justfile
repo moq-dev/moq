@@ -75,6 +75,7 @@ drill *args:
 # See audio-quality/README.md.
 
 # Grade browser audio playout over an impaired path.
+[positional-arguments]
 audio-quality *args:
     ./audio-quality/run.sh "$@"
 
@@ -83,6 +84,7 @@ audio-quality *args:
 # public relay. Needs the network. Narrow it with `--lanes relay-bbb --duration 35`.
 
 # Re-record the audio quality arrival traces.
+[positional-arguments]
 audio-quality-record *args:
     ./audio-quality/record.sh "$@"
 
