@@ -99,6 +99,7 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Per-program SI](/quest/m2/ts-program-si.md) - a selected TS program's broadcast carries only its own service's SDT and EIT
 - [TS import health](/quest/m2/ts-import-health.md) - `moq import ts` counts the TR 101 290 errors of the feed it receives, PCR and PTS graded on its own values
 - [TS health stats](/quest/m2/ts-health-stats.md) - the TS counters ride the stats plumbing beside the media counters
+- [TS stopped log: audio and video only](/quest/m2/ts-stopped-av-only.md) - sparse data PIDs like SCTE-35 stop logging "stopped delivering" every quiet second
 - [Teleoperation](/quest/m2/teleop/README.md) - MoQ carries robot video down and control up on one session as a library capability
 - [Media QA on other engines](/quest/m2/browser-media-qa-engines.md) - the media harness measures a Firefox or WebKit player over the fallback and names what each engine lacks
 - [Windows.Graphics.Capture](/quest/m2/capture-wgc.md) - one WGC backend for display and window capture with the cursor, replacing Desktop Duplication and GDI
