@@ -20,4 +20,4 @@ wakes.
 
 ## Required
 
-- The wildcard line (moq-dev/moq#4403) lands on main, where the walk lives
+- [Wildcard](/quest/m0/wildcard/README.md) - the line the admission walk lives on
