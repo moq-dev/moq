@@ -18,4 +18,4 @@ Public API: removes two hidden `cluster::Config` fields. Wire: none.
 
 ## Required
 
-- A moq-relay release carrying the `--cluster-mesh` refusal from #4601
+- [A moq-relay release refuses --cluster-mesh](/quest/m1/relay-mesh-refusal-release.md) - the release that carries the last refusal
