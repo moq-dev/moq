@@ -23,6 +23,8 @@ export type TapReport = {
 	counts: Counts;
 	/** Gaps closed since the last report. */
 	gaps: Gap[];
+	/** Whether this answers a finish, so no gap is still open. */
+	finished: boolean;
 };
 
 /** A running tap. */
@@ -58,14 +60,14 @@ export async function tap(root: AudioNode, init: TapInit): Promise<Tap> {
 	node.port.onmessage = (event: MessageEvent<TapReport>) => {
 		counts = event.data.counts;
 		gaps.push(...event.data.gaps);
-		reported?.();
+		// A periodic report already in flight is not the answer, and may still miss the open gap.
+		if (event.data.finished) reported?.();
 	};
 
 	return {
 		counts: () => counts,
 		take: () => gaps.splice(0, gaps.length),
 		finish() {
-			// The port is ordered, so the report answering this one is the last to resolve it.
 			const done = new Promise<void>((resolve) => {
 				reported = resolve;
 			});

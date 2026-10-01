@@ -24,13 +24,13 @@ class Tap extends AudioWorkletProcessor {
 		// The run is over: close a gap still open and report at once, rather than lose it.
 		this.port.onmessage = () => {
 			this.#ledger.finish();
-			this.#report();
+			this.#report(true);
 		};
 	}
 
-	#report(): void {
+	#report(finished = false): void {
 		this.#since = 0;
-		const report: TapReport = { counts: { ...this.#ledger.counts }, gaps: this.#ledger.take() };
+		const report: TapReport = { counts: { ...this.#ledger.counts }, gaps: this.#ledger.take(), finished };
 		this.port.postMessage(report);
 	}
 

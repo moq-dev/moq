@@ -83,7 +83,10 @@ against it is likely cheaper than patching the branch's:
   until then), and tighten the harness's exact replay budgets with it. The
   checked-in `test/audio-quality/budgets.json` was recorded locally (#4426);
   re-record it from the nightly runner's first runs on `main` before
-  tightening, since nightly only runs `main`'s code.
+  tightening, since nightly only runs `main`'s code. The replay sizes every
+  frame as the trace's median spacing, which a trace missing most of its
+  frames defeats; once the container knows the codec's frame duration, record
+  it in the trace and replay that instead.
 - Manual run against the public relay on Chrome and Safari, the two rows the
   issue measured. Re-record the `relay-mic` trace in the same run with a real
   microphone (`just test audio-quality-record`); the checked-in one used
