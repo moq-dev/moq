@@ -405,8 +405,8 @@ impl Producer {
 			let key = (Kind::Video, name.clone());
 			if let Some(rendition) = current.get(&key) {
 				// Survived the stale pass, so it decodes the same: keep its window, its cached
-				// init segment and its media sequence, and just take the new advertised bitrate.
-				rendition.refresh(video.bitrate);
+				// init segment and its media sequence, and just take the new bitrate and framerate.
+				rendition.refresh(video.bitrate, video.framerate);
 				continue;
 			}
 			let rendition = match Rendition::video(name.clone(), video, upstream, section.clone(), clock) {
@@ -422,7 +422,7 @@ impl Producer {
 		for (name, audio) in &catalog.audio.renditions {
 			let key = (Kind::Audio, name.clone());
 			if let Some(rendition) = current.get(&key) {
-				rendition.refresh(audio.bitrate);
+				rendition.refresh(audio.bitrate, None);
 				continue;
 			}
 			let rendition = match Rendition::audio(name.clone(), audio, upstream, section.clone(), clock) {

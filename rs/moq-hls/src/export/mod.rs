@@ -736,6 +736,26 @@ mod tests {
 			);
 			assert!(next_event(&mut cursor).await.is_none(), "no rendition churn");
 		}
+
+		// The settled estimate still reaches the fallback cadence of a duration-less frame,
+		// at the timescale the rendition was built with (90 kHz without a framerate).
+		let muxer = video.muxer().unwrap();
+		assert_eq!(muxer.timescale().as_u64(), 90_000);
+		let fragment = muxer.fragment(0, &[vp8_frame(0, true)]).unwrap();
+		assert_eq!(first_sample_duration(&fragment), Some(1_500), "16.7 ms at 90 kHz");
+	}
+
+	/// The `trun` duration of a fragment's first sample.
+	fn first_sample_duration(fragment: &bytes::Bytes) -> Option<u32> {
+		use moq_mux::container::fmp4::mp4_atom::{self, DecodeMaybe};
+
+		let mut cursor = std::io::Cursor::new(fragment.as_ref());
+		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+			if let mp4_atom::Any::Moof(moof) = atom {
+				return moof.traf[0].trun[0].entries[0].duration;
+			}
+		}
+		panic!("no moof in fragment");
 	}
 
 	#[tokio::test]

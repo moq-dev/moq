@@ -125,6 +125,22 @@ impl Muxer {
 		Ok(self)
 	}
 
+	/// Synthesize missing video sample durations at `framerate`, a newer estimate than the
+	/// config this muxer was built from.
+	///
+	/// Only the fallback cadence follows it: the timescale, and so the init segment, stays the
+	/// one the original config chose. Ignored for audio, for a missing, non-finite or
+	/// non-positive rate, and for one whose frame doesn't fit `trun`'s 32-bit sample duration.
+	pub fn with_framerate(mut self, framerate: Option<f64>) -> Self {
+		if matches!(self.kind, Kind::Video(_))
+			&& let Some(fps) = framerate.filter(|fps| fps.is_finite() && *fps > 0.0)
+			&& self.timescale.as_u64() as f64 / fps <= u32::MAX as f64
+		{
+			self.default_frame = Duration::from_secs_f64(1.0 / fps);
+		}
+		self
+	}
+
 	/// The rendition's catalog container, whichever kind of track this is.
 	fn catalog_container(&self) -> &CatalogContainer {
 		match &self.kind {
@@ -580,6 +596,41 @@ mod tests {
 		)
 		.unwrap();
 		assert_eq!(decoded[0].timestamp.as_micros(), 33_333);
+	}
+
+	// A rendition built before the publisher's framerate estimate settled keeps its 90 kHz
+	// timescale, but a duration-less frame follows the newer cadence.
+	#[test]
+	fn with_framerate_updates_the_fallback_without_the_timescale() {
+		let muxer = video_muxer_without_framerate().with_framerate(Some(60.0));
+		assert_eq!(muxer.timescale().as_u64(), 90_000);
+		let fragment = muxer.fragment(0, &[frame(0, true)]).unwrap();
+		assert_eq!(super::super::sample_durations(&fragment), vec![Some(1_500)]);
+	}
+
+	#[test]
+	fn with_framerate_ignores_an_unusable_rate() {
+		// 90 kHz at 1e-6 fps is 9e10 ticks per frame, past trun's 32 bits.
+		for fps in [
+			None,
+			Some(0.0),
+			Some(-30.0),
+			Some(f64::NAN),
+			Some(f64::INFINITY),
+			Some(1e-6),
+		] {
+			let muxer = video_muxer_without_framerate().with_framerate(fps);
+			let fragment = muxer.fragment(0, &[frame(0, true)]).unwrap();
+			// The 30 fps fallback at 90 kHz.
+			assert_eq!(super::super::sample_durations(&fragment), vec![Some(3_000)], "{fps:?}");
+		}
+	}
+
+	fn video_muxer_without_framerate() -> Muxer {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		Muxer::video(&config).unwrap()
 	}
 
 	#[test]
