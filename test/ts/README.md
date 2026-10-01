@@ -7,8 +7,8 @@ runs [TSDuck](https://tsduck.io) plus a custom analyzer over it.
 
 This is a diagnostic gate, not just a pass/fail: the exporter
 ([`rs/moq-mux/src/container/ts/export.rs`](../../rs/moq-mux/src/container/ts/export.rs))
-is VBR, inserts no null packets, and paces PCR once per media frame, so several
-broadcast-shape checks are expected to flag. The report quantifies exactly where
+pads to a constant rate only once the catalog carries the source's mux rate, so
+several broadcast-shape checks are expected to flag. The report quantifies exactly where
 and by how much.
 
 Four instruments live here. `compliance.py` (via `run.sh`) grades a captured file
@@ -39,10 +39,10 @@ That is the only arm that can see release timing at all, and it is what nightly
 runs (see [CI](#ci)).
 
 The default arm runs `pcr-timing.py` over its capture too, after `compliance.py`,
-for the one thing the IRD model does not grade: whether the bytes between
-consecutive PCRs are the ones the mux rate implies
-([`pcr-schedule`](#byte-schedule)). It is a shape check, so it reports without
-gating unless `--strict`.
+for the PCR checks `compliance.py` leaves to it: the value interval (hard), and
+whether the bytes between consecutive PCRs are the ones the mux rate implies
+([`pcr-schedule`](#byte-schedule), a shape check that reports without gating
+unless `--strict`).
 
 The live arm passes only when the grader's verdict *and* the publisher's exit status
 are clean. The grader can only speak for what reached it, and the sample floor
@@ -80,13 +80,7 @@ Severities: **hard** checks fail the run by default; **shape** checks report as
 | `pcr-presence` | hard | a PCR PID is declared and carries PCR |
 | `pcr-monotonic` | hard | PCR strictly increases (one 33-bit wrap tolerated), except into a PCR that signals `discontinuity_indicator` |
 | `duration-fidelity` | hard | exported PCR span tracks the source's duration (round-trip only) |
-| `pcr-repetition` | shape | consecutive PCRs within the limit (default 40 ms) |
-| `pcr-jitter` | shape | per-interval PCR jitter vs the nominal bitrate (pcrverify model) |
-| `null-ratio` | shape | null/stuffing fraction (flags only a pathological excess) |
 | `service-descriptors` | shape | an SDT naming the service is present |
-| `bitrate-consistency` | shape | instantaneous-bitrate spread over 1 ms / 10 ms windows (CBR-ness) |
-| `burstiness` | shape | peak/mean of windowed delivery |
-| `inter-arrival` | shape | packet inter-arrival spread on the PCR clock (informational) |
 | `tstd` | shape | the full T-STD buffer model: no TB, MB, EB or B overflow, no access unit incomplete at its decoding time (see [T-STD](#t-std)) |
 
 Every timing check reads the stream's own PCR, so a PCR emitted on the wrong
@@ -96,9 +90,10 @@ independent duration, which pins the absolute rate. It runs only on a round-trip
 (where a source exists); `run.sh` passes the source automatically, and
 `--analyze-only` skips it.
 
-Thresholds are CLI flags forwarded through `run.sh` (e.g.
-`--pcr-repetition-ms`, `--pcr-jitter-us`, `--bitrate-cov-max`, `--burstiness-max`).
-`--report-json <path>` writes the full machine-readable report.
+`compliance.py` grades what TSDuck parses and the T-STD model, and leaves PCR
+spacing, byte schedule and release timing to `pcr-timing.py`, which honours
+signalled discontinuities. `--report-json <path>` writes the full
+machine-readable report.
 
 ## T-STD
 
@@ -180,11 +175,9 @@ cannot see the other two:
 | release | the bytes carrying a PCR were handed over when that PCR asserts | arrival stamps |
 | position | a PCR packet sits among the media bytes it describes | packet offsets |
 
-`compliance.py` grades `value` from a file, deterministically and with no
-wall-clock capture, which is the right basis for the model math it does. That
-also means it cannot grade `release`: a change to *when* the exporter hands bytes
-over is invisible to any harness that does not stamp arrivals.
-`pcr-timing.py` reads a pipe and grades all three in one pass.
+`pcr-timing.py` grades `value` and `position` from a file, and all three from a
+pipe. A file carries no arrival stamps, so a change to *when* the exporter hands
+bytes over is invisible to any harness that does not stamp them.
 
 A constant-rate stream makes a fourth claim, graded by `pcr-schedule`: that the
 bytes between consecutive PCRs are the bytes the mux rate implies for that
@@ -211,13 +204,19 @@ grades only how evenly the bytes are laid over the PCRs.
 
 | Check | Severity | What it verifies |
 |---|---|---|
-| `sync` | hard | no invalid sync bytes / transport-error packets |
-| `continuity` | hard | no discontinuities, and a payload-less packet must not advance the counter (ISO 13818-1 2.4.3.3) |
-| `pcr-single-pid` | hard | every PCR rides one PID |
+| `sync` | hard | no invalid sync bytes / transport-error packets (`--live` only) |
+| `continuity` | hard | no discontinuities, and a payload-less packet must not advance the counter (ISO 13818-1 2.4.3.3) (`--live` only) |
 | `pcr-value-interval` | hard | no interval above `--repetition-ms` (default 40, TR 101 290), within one time base |
 | `pcr-release-timing` | hard | no more than `--release-pct-max` of intervals arrive further than `--release-ms` from the interval their own values assert, and accumulated drift stays within `--drift-ms`, being the standing lag the sender is allowed to hold; a sample below `--live-min-pcr` PCRs or `--live-cover-pct` of the window is a failure, not a pass (`--live` only) |
 | `pcr-position` | shape | share of PCR packets within `--adjacent-packets` of the previous one |
-| `pcr-schedule` | shape | share of PCR intervals, on the busiest PCR PID, whose bytes are within `--schedule-tolerance-pct` (default 1) or one packet of what `--mux-rate` implies (estimated from the capture if not given); hard, at that share, when `--schedule-pct-min` is given |
+| `pcr-schedule` | shape | share of PCR intervals whose bytes are within `--schedule-tolerance-pct` (default 1) or one packet of what `--mux-rate` implies (estimated from the capture if not given); hard, at that share, when `--schedule-pct-min` is given |
+
+A stream carrying several PCR PIDs (one per program) is graded on the busiest,
+since two correct grids offset from one another pool into one that neither keeps.
+`sync` and `continuity` run only under `--live`: on a file, `compliance.py`
+grades both through TSDuck's `tsanalyze`, which also catches a payload-less
+packet advancing the counter. A pipe cannot go through TSDuck first without
+rebuffering the arrivals `release` stamps.
 
 Accumulated drift has two shapes and only one is a defect, so the check bounds
 the total and reports the rate over the tail of the sample beside it. A sender

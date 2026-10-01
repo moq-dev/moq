@@ -7,19 +7,16 @@ summary, exiting non-zero on failure.
 
 Division of labour: TSDuck does the transport-stream parsing (we shell out to
 `tsanalyze --json` for PSI/service/structure and `tstables` for the PMT), and
-this script does the model math TSDuck does not cover (PCR jitter/repetition,
-packet inter-arrival, burstiness, instantaneous bitrate, and the ISO 13818-1
-T-STD buffer model, which no maintained tool implements).
-The PCR/PTS/DTS timeline the timing model needs comes from a 188/204-byte
-packet-header scan done here, which also gives the per-packet PID that
-`tsp -P pcrextract` does not expose.
+this script does what TSDuck does not cover: the ISO 13818-1 T-STD buffer
+model, which no maintained tool implements, and the PCR checks that need the
+time-base discontinuities a 188/204-byte header scan here recovers. PCR value
+intervals, byte schedule and release timing live in `pcr-timing.py`.
 
 Checks split into two severities:
   - HARD (structural): fail the run by default. PAT/PMT, packet size, sync,
     continuity counters, PSI CRC, PCR presence, PCR monotonicity.
   - SHAPE (broadcast profile): reported as WARN and only fail the run under
-    `--strict`. PCR repetition interval, PCR jitter, null-packet ratio, bitrate
-    consistency / burstiness, service descriptors (SDT), T-STD buffer model.
+    `--strict`. Service descriptors (SDT), T-STD buffer model.
 
 Timing basis is the stream's own PCR clock (an IRD locks to PCR), so the harness
 needs no wall-clock capture and results are deterministic for a given file.
@@ -40,7 +37,6 @@ PCR_HZ = 27_000_000
 PTS_HZ = 90_000
 # The PCR base field is 33 bits at 90 kHz, so the full 27 MHz PCR wraps here.
 PCR_WRAP = (1 << 33) * 300
-NULL_PID = 0x1FFF
 
 
 class Status(Enum):
@@ -69,18 +65,6 @@ class Check:
     metrics: dict = field(default_factory=dict)
 
 
-@dataclass
-class Thresholds:
-    """IRD limits and T-STD model parameters, all overridable from the CLI."""
-
-    pcr_repetition_ms: float = 40.0
-    pcr_jitter_us: float = 500.0
-    null_ratio_max: float = 0.90
-    bitrate_cov_max: float = 0.10
-    burstiness_max: float = 3.0
-    inst_windows_ms: tuple[float, ...] = (1.0, 10.0)
-
-
 # --------------------------------------------------------------------------- IO
 
 
@@ -103,10 +87,7 @@ def run_tsanalyze(ts_path: str) -> dict:
 class Scan:
     """Per-packet facts recovered from a raw header scan of the TS file."""
 
-    packet_size: int
     total_packets: int
-    # (ts_index, payload_bytes) per PID, in file order.
-    pid_packets: dict[int, list[tuple[int, int]]]
     # (ts_index, pcr_27mhz) samples for every PID that carries PCR.
     pcr_by_pid: dict[int, list[tuple[int, int]]]
     # ts_index of every PCR that starts a new time base (discontinuity_indicator).
@@ -114,15 +95,14 @@ class Scan:
 
 
 def scan_packets(ts_path: str, packet_size: int) -> Scan:
-    """Walk the TS packet by packet, recovering PID, payload size, and PCR values.
+    """Walk the TS packet by packet, recovering the PCR timeline.
 
-    This is a header-only scan (no PES/PSI parsing): enough for the timing and
-    buffer models, which need per-packet PID and the PCR timeline.
+    A header-only scan: the PCR samples and which of them start a new time base,
+    which `tsp -P pcrextract` does not report.
     """
     with open(ts_path, "rb") as handle:
         data = handle.read()
 
-    pid_packets: dict[int, list[tuple[int, int]]] = {}
     pcr_by_pid: dict[int, list[tuple[int, int]]] = {}
     pcr_new_base: set[int] = set()
     # PIDs whose discontinuity_indicator rode a packet without a PCR, so the new time
@@ -144,8 +124,6 @@ def scan_packets(ts_path: str, packet_size: int) -> Scan:
         pid = ((b1 & 0x1F) << 8) | b2
         afc = (b3 >> 4) & 0x3
 
-        payload_len = 0
-        af_len = 0
         if afc in (2, 3):
             af_len = data[offset + 4]
             if af_len > 0:
@@ -165,46 +143,18 @@ def scan_packets(ts_path: str, packet_size: int) -> Scan:
                     if pid in pending_base:
                         pending_base.discard(pid)
                         pcr_new_base.add(index)
-        if afc in (1, 3):
-            # Payload = 184 minus the adaptation field (its length byte + body).
-            consumed = (1 + af_len) if afc == 3 else 0
-            payload_len = 184 - consumed
-
-        if pid != NULL_PID:
-            pid_packets.setdefault(pid, []).append((index, max(0, payload_len)))
 
         index += 1
         offset += packet_size
 
     return Scan(
-        packet_size=packet_size,
         total_packets=index,
-        pid_packets=pid_packets,
         pcr_by_pid=pcr_by_pid,
         pcr_new_base=pcr_new_base,
     )
 
 
 # --------------------------------------------------------------- small helpers
-
-
-def percentile(values: list[float], pct: float) -> float:
-    """Linear-interpolated percentile of an unsorted list (0..100). 0 for empty."""
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    if len(ordered) == 1:
-        return ordered[0]
-    rank = (pct / 100.0) * (len(ordered) - 1)
-    low = int(rank)
-    high = min(low + 1, len(ordered) - 1)
-    frac = rank - low
-    return ordered[low] * (1 - frac) + ordered[high] * frac
-
-
-def mean(values: list[float]) -> float:
-    """Arithmetic mean, 0 for an empty list."""
-    return sum(values) / len(values) if values else 0.0
 
 
 def pcr_seconds(pcr_27mhz: int) -> float:
@@ -364,89 +314,6 @@ def check_pcr_monotonic(scan: Scan) -> Check:
 # ------------------------------------------------------------------- shape checks
 
 
-def check_pcr_repetition(scan: Scan, th: Thresholds) -> Check:
-    """Consecutive PCRs on a PID should be no more than `pcr_repetition_ms` apart."""
-    worst_ms = 0.0
-    intervals: list[float] = []
-    over = 0
-    for samples in scan.pcr_by_pid.values():
-        prev = None
-        for _i, pcr in samples:
-            if prev is not None:
-                delta = pcr - prev
-                if delta <= 0:
-                    prev = pcr
-                    continue
-                ms = pcr_seconds(delta) * 1000.0
-                intervals.append(ms)
-                worst_ms = max(worst_ms, ms)
-                if ms > th.pcr_repetition_ms:
-                    over += 1
-            prev = pcr
-    metrics = {
-        "max_interval_ms": round(worst_ms, 3),
-        "mean_interval_ms": round(mean(intervals), 3),
-        "intervals_over_limit": over,
-        "limit_ms": th.pcr_repetition_ms,
-    }
-    detail = f"max {worst_ms:.1f} ms (limit {th.pcr_repetition_ms:.0f} ms), {over} over"
-    status = Status.PASS if over == 0 else Status.WARN
-    return Check("pcr-repetition", Severity.SHAPE, status, detail, metrics)
-
-
-def check_pcr_jitter(scan: Scan, ts_bitrate: float, th: Thresholds) -> Check:
-    """Per-interval PCR jitter vs the nominal bitrate (pcrverify's model).
-
-    For a true CBR mux the actual PCR delta matches the byte delta clocked at the
-    stream bitrate; the difference is the jitter. On a VBR stream it is large by
-    construction, which is exactly the IRD-relevant signal.
-    """
-    if ts_bitrate <= 0:
-        return Check("pcr-jitter", Severity.SHAPE, Status.WARN, "unknown bitrate", {})
-    bits_per_packet = scan.packet_size * 8
-    jitters_us: list[float] = []
-    for samples in scan.pcr_by_pid.values():
-        prev = None
-        for i, pcr in samples:
-            if prev is not None:
-                pi, ppcr = prev
-                d_pcr = pcr - ppcr
-                if d_pcr <= 0:
-                    prev = (i, pcr)
-                    continue
-                expected_s = (i - pi) * bits_per_packet / ts_bitrate
-                actual_s = pcr_seconds(d_pcr)
-                jitters_us.append((actual_s - expected_s) * 1e6)
-            prev = (i, pcr)
-    if not jitters_us:
-        return Check("pcr-jitter", Severity.SHAPE, Status.WARN, "no PCR intervals", {})
-    abs_jit = [abs(j) for j in jitters_us]
-    max_us = max(abs_jit)
-    p95 = percentile(abs_jit, 95)
-    metrics = {
-        "max_abs_us": round(max_us, 1),
-        "p95_abs_us": round(p95, 1),
-        "limit_us": th.pcr_jitter_us,
-    }
-    detail = f"max |jitter| {max_us:.0f} us, p95 {p95:.0f} us (limit {th.pcr_jitter_us:.0f} us)"
-    status = Status.PASS if max_us <= th.pcr_jitter_us else Status.WARN
-    return Check("pcr-jitter", Severity.SHAPE, status, detail, metrics)
-
-
-def check_null_ratio(analysis: dict, th: Thresholds) -> Check:
-    """Report the null-packet (stuffing) fraction; flag only a pathological excess."""
-    total = analysis["ts"]["packets"]["total"] or 1
-    null = 0
-    for pid in analysis.get("pids", []):
-        if pid["id"] == NULL_PID:
-            null = pid.get("packets", {}).get("total", 0)
-    ratio = null / total
-    metrics = {"null_ratio": round(ratio, 4), "null_packets": null, "limit": th.null_ratio_max}
-    detail = f"{ratio * 100:.2f}% null packets"
-    status = Status.PASS if ratio <= th.null_ratio_max else Status.WARN
-    return Check("null-ratio", Severity.SHAPE, status, detail, metrics)
-
-
 def check_service_descriptors(analysis: dict) -> Check:
     """An IRD expects an SDT naming the service; PAT/PMT-only streams get a WARN."""
     tables = analysis.get("tables", [])
@@ -461,104 +328,6 @@ def check_service_descriptors(analysis: dict) -> Check:
         Severity.SHAPE,
         Status.WARN,
         "no SDT (service name/provider absent)",
-        metrics,
-    )
-
-
-def windowed_bitrates(times: list[float], sizes: list[int], window_s: float) -> list[float]:
-    """Bytes-per-window converted to bit/s, over contiguous windows spanning the capture."""
-    if not times:
-        return []
-    start, end = times[0], times[-1]
-    if end <= start:
-        return []
-    n_windows = max(1, int((end - start) / window_s) + 1)
-    buckets = [0] * n_windows
-    for t, size in zip(times, sizes):
-        idx = min(n_windows - 1, int((t - start) / window_s))
-        buckets[idx] += size
-    # Drop the last (partial) window so a short tail doesn't skew the minimum.
-    if n_windows > 1:
-        buckets = buckets[:-1]
-    return [b * 8 / window_s for b in buckets]
-
-
-def check_bitrate_and_burstiness(scan: Scan, clock: PcrClock, ts_bitrate: float, th: Thresholds) -> tuple[Check, Check]:
-    """Instantaneous bitrate spread (CBR-ness) and delivery burstiness, on the PCR clock."""
-    # Every non-null packet, timed on the PCR clock, weighted by its full 188 bytes.
-    events: list[tuple[float, int]] = []
-    for _pid, packets in scan.pid_packets.items():
-        for i, _payload in packets:
-            events.append((clock.time_at(i), scan.packet_size))
-    events.sort(key=lambda e: e[0])
-    times = [t for t, _ in events]
-    sizes = [s for _, s in events]
-
-    inst_metrics: dict = {"nominal_bps": round(ts_bitrate)}
-    worst_cov = 0.0
-    worst_burst = 0.0
-    for window_ms in th.inst_windows_ms:
-        rates = windowed_bitrates(times, sizes, window_ms / 1000.0)
-        if not rates:
-            continue
-        avg = mean(rates)
-        peak = max(rates)
-        low = min(rates)
-        var = mean([(r - avg) ** 2 for r in rates])
-        cov = (var**0.5 / avg) if avg else 0.0
-        burst = (peak / avg) if avg else 0.0
-        worst_cov = max(worst_cov, cov)
-        worst_burst = max(worst_burst, burst)
-        inst_metrics[f"w{int(window_ms)}ms"] = {
-            "min_bps": round(low),
-            "mean_bps": round(avg),
-            "max_bps": round(peak),
-            "p95_bps": round(percentile(rates, 95)),
-            "cov": round(cov, 3),
-            "peak_over_mean": round(burst, 2),
-        }
-
-    bitrate_status = Status.PASS if worst_cov <= th.bitrate_cov_max else Status.WARN
-    bitrate = Check(
-        "bitrate-consistency",
-        Severity.SHAPE,
-        bitrate_status,
-        f"worst CoV {worst_cov:.2f} (limit {th.bitrate_cov_max:.2f})",
-        inst_metrics | {"worst_cov": round(worst_cov, 3)},
-    )
-    burst_status = Status.PASS if worst_burst <= th.burstiness_max else Status.WARN
-    burst = Check(
-        "burstiness",
-        Severity.SHAPE,
-        burst_status,
-        f"peak/mean {worst_burst:.2f} (limit {th.burstiness_max:.2f})",
-        {"worst_peak_over_mean": round(worst_burst, 2), "limit": th.burstiness_max},
-    )
-    return bitrate, burst
-
-
-def check_inter_arrival(scan: Scan, clock: PcrClock) -> Check:
-    """Report the packet inter-arrival spread on the PCR clock (informational)."""
-    indices = sorted(i for packets in scan.pid_packets.values() for i, _ in packets)
-    gaps_us: list[float] = []
-    prev = None
-    for i in indices:
-        t = clock.time_at(i)
-        if prev is not None and t >= prev:
-            gaps_us.append((t - prev) * 1e6)
-        prev = t
-    if not gaps_us:
-        return Check("inter-arrival", Severity.SHAPE, Status.WARN, "no packets timed", {})
-    metrics = {
-        "mean_us": round(mean(gaps_us), 2),
-        "p95_us": round(percentile(gaps_us, 95), 2),
-        "max_us": round(max(gaps_us), 2),
-    }
-    return Check(
-        "inter-arrival",
-        Severity.SHAPE,
-        Status.PASS,
-        f"mean {metrics['mean_us']:.1f} us, p95 {metrics['p95_us']:.1f} us, max {metrics['max_us']:.1f} us",
         metrics,
     )
 
@@ -1299,30 +1068,17 @@ def check_duration_fidelity(captured_s: float, reference_s: float) -> Check:
 # ------------------------------------------------------------------------ driver
 
 
-def analyze(ts_path: str, th: Thresholds, reference_seconds: float | None = None) -> list[Check]:
+def analyze(ts_path: str, reference_seconds: float | None = None) -> list[Check]:
     """Run every check against `ts_path` and return the ordered results.
 
     `reference_seconds` (the source's PCR span, round-trip only) enables the
     duration-fidelity check that pins the exported stream's absolute rate.
     """
     analysis = run_tsanalyze(ts_path)
-    ts = analysis["ts"]
     packet_size = detect_packet_size(analysis)
 
     scan = scan_packets(ts_path, packet_size)
     clock_by_pid = {pid: PcrClock(samples) for pid, samples in scan.pcr_by_pid.items()}
-    # The reference clock is the PID with the most PCR samples (the PCR PID).
-    main_clock = max(clock_by_pid.values(), key=lambda c: len(c.idx), default=PcrClock([]))
-
-    # Nominal bitrate: total bytes clocked over the PCR span (the rate an IRD would
-    # play the stream at). Self-consistent with the PCR clock used everywhere else,
-    # and far more stable than tsanalyze's instantaneous PCR bitrate on a bursty
-    # capture. Fall back to tsanalyze only when there is no usable PCR clock.
-    span = main_clock.sec[-1] - main_clock.sec[0] if main_clock.ok() else 0.0
-    if span > 0:
-        ts_bitrate = scan.total_packets * scan.packet_size * 8 / span
-    else:
-        ts_bitrate = float(ts.get("bitrate") or ts.get("pcr-bitrate") or 0)
 
     checks: list[Check] = []
     checks.append(check_packet_size(analysis))
@@ -1335,21 +1091,9 @@ def analyze(ts_path: str, th: Thresholds, reference_seconds: float | None = None
     checks.append(check_pcr_presence(analysis, clock_by_pid))
     checks.append(check_pcr_monotonic(scan))
     if reference_seconds is not None:
-        checks.append(check_duration_fidelity(span, reference_seconds))
+        checks.append(check_duration_fidelity(pcr_span_seconds(scan), reference_seconds))
 
     checks.append(check_service_descriptors(analysis))
-    checks.append(check_pcr_repetition(scan, th))
-    checks.append(check_pcr_jitter(scan, ts_bitrate, th))
-    checks.append(check_null_ratio(analysis, th))
-
-    if main_clock.ok():
-        bitrate, burst = check_bitrate_and_burstiness(scan, main_clock, ts_bitrate, th)
-        checks.append(bitrate)
-        checks.append(burst)
-        checks.append(check_inter_arrival(scan, main_clock))
-    else:
-        for name in ("bitrate-consistency", "burstiness", "inter-arrival"):
-            checks.append(Check(name, Severity.SHAPE, Status.WARN, "not enough PCRs to build a clock", {}))
     checks.append(check_tstd(ts_path, packet_size, scan))
     return checks
 
@@ -1380,17 +1124,6 @@ def verdict(checks: list[Check], strict: bool) -> int:
     return 0
 
 
-def build_thresholds(args: argparse.Namespace) -> Thresholds:
-    """Assemble a Thresholds from parsed CLI arguments."""
-    return Thresholds(
-        pcr_repetition_ms=args.pcr_repetition_ms,
-        pcr_jitter_us=args.pcr_jitter_us,
-        null_ratio_max=args.null_ratio_max,
-        bitrate_cov_max=args.bitrate_cov_max,
-        burstiness_max=args.burstiness_max,
-    )
-
-
 def main() -> int:
     """CLI entry point: parse args, analyze the TS, print the report, return the exit code."""
     parser = argparse.ArgumentParser(description="MPEG-TS / IRD compliance analyzer")
@@ -1401,17 +1134,11 @@ def main() -> int:
         "--reference",
         help="source TS the capture was muxed from; enables the duration-fidelity check",
     )
-    parser.add_argument("--pcr-repetition-ms", type=float, default=Thresholds.pcr_repetition_ms)
-    parser.add_argument("--pcr-jitter-us", type=float, default=Thresholds.pcr_jitter_us)
-    parser.add_argument("--null-ratio-max", type=float, default=Thresholds.null_ratio_max)
-    parser.add_argument("--bitrate-cov-max", type=float, default=Thresholds.bitrate_cov_max)
-    parser.add_argument("--burstiness-max", type=float, default=Thresholds.burstiness_max)
     args = parser.parse_args()
 
-    th = build_thresholds(args)
     try:
         reference_seconds = source_duration(args.reference) if args.reference else None
-        checks = analyze(args.ts, th, reference_seconds)
+        checks = analyze(args.ts, reference_seconds)
     except (RuntimeError, FileNotFoundError, json.JSONDecodeError) as err:
         print(f"error: {err}", file=sys.stderr)
         return 2
