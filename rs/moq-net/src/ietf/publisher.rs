@@ -515,6 +515,22 @@ where
 				}
 				.maybe_boxed()
 			}
+			// SUBSCRIBE_TRACKS asks for every track under a prefix via PUBLISH, which we
+			// never send. The body is already framed off and draft-17+ replies carry no
+			// Request ID, so there is nothing to decode before refusing.
+			ietf::SUBSCRIBE_TRACKS_ID
+				if !matches!(
+					this.version,
+					Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
+				) =>
+			{
+				async move {
+					if let Err(err) = this.reject_subscribe_tracks(stream).await {
+						tracing::debug!(%err, "subscribe_tracks refusal failed");
+					}
+				}
+				.maybe_boxed()
+			}
 			ietf::TrackStatus::ID => {
 				let msg = ietf::TrackStatus::decode_msg(&mut data, this.version)?;
 				if !data.is_empty() {
@@ -1463,6 +1479,21 @@ where
 				})
 				.await?;
 		}
+		let _ = stream.writer.close().await;
+		Ok(())
+	}
+
+	async fn reject_subscribe_tracks(&self, mut stream: Stream<S, Version>) -> Result<(), Error> {
+		stream.writer.encode(&ietf::RequestError::ID).await?;
+		stream
+			.writer
+			.encode(&ietf::RequestError {
+				request_id: None,
+				error_code: request::to_code(&Error::Unsupported, request::Kind::SubscribeNamespace, self.version),
+				reason_phrase: "SUBSCRIBE_TRACKS is not supported".into(),
+				retry_interval: 0,
+			})
+			.await?;
 		let _ = stream.writer.close().await;
 		Ok(())
 	}

@@ -1273,6 +1273,22 @@ export class Publisher {
 	}
 
 	/**
+	 * Refuses an incoming SUBSCRIBE_TRACKS (draft-18+): we never send the PUBLISH it asks for.
+	 * The reply carries no Request ID, so the message body is left unread.
+	 *
+	 * @internal
+	 */
+	async runSubscribeTracks(stream: Stream) {
+		const version = this.#session.version;
+		await stream.writer.u53(RequestError.id);
+		await new RequestError({
+			errorCode: toRequestCode("not_supported", "subscribe_namespace", version),
+			reasonPhrase: "SUBSCRIBE_TRACKS is not supported",
+		}).encode(stream.writer, version);
+		stream.close();
+	}
+
+	/**
 	 * Handles an incoming FETCH on a bidi stream. We serve none.
 	 *
 	 * @internal

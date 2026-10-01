@@ -951,11 +951,12 @@ where
 
 		match id {
 			// Publisher handles: Subscribe, Fetch, SubscribeNamespace (0x50 modern /
-			// 0x11 legacy), TrackStatus
+			// 0x11 legacy), SubscribeTracks, TrackStatus
 			ietf::Subscribe::ID
 			| ietf::Fetch::ID
 			| ietf::SubscribeNamespace::ID
 			| ietf::SubscribeNamespaceLegacy::ID
+			| ietf::SUBSCRIBE_TRACKS_ID
 			| ietf::TrackStatus::ID => {
 				tasks.push(publisher.handle_stream(id, data, stream)?);
 			}

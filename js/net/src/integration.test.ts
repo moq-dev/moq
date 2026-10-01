@@ -1140,6 +1140,63 @@ test("integration: ietf fetch group is unsupported", async () => {
 	server.close();
 });
 
+// Draft-18 defines SUBSCRIBE_TRACKS, so a limited endpoint answers NOT_SUPPORTED and the
+// subscription already on the session keeps going.
+test("integration: ietf SUBSCRIBE_TRACKS is refused per request", async () => {
+	// SUBSCRIBE_TRACKS, Length, Request ID, Track Namespace Prefix ("room"), no parameters.
+	const subscribeTracks = new Uint8Array([0x51, 0x00, 0x08, 0x01, 0x01, 0x04, 0x72, 0x6f, 0x6f, 0x6d, 0x00]);
+
+	for (const protocol of [
+		Ietf.ALPN.DRAFT_18,
+		Ietf.ALPN.DRAFT_19,
+		Ietf.ALPN.DRAFT_20,
+		Ietf.ALPN.DRAFT_21,
+		Ietf.ALPN.DRAFT_22,
+	]) {
+		const pair = createMockTransportPair(protocol);
+		const origin = new OriginProducer();
+
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+
+		const broadcast = publish(origin, Path.from("test"));
+		const served: TrackProducer[] = [];
+		const serving = (async () => {
+			for (;;) {
+				const req = await wireOf(broadcast).requested();
+				if (!req) break;
+				const track = req.accept();
+				track.writeString("before");
+				served.push(track);
+			}
+		})();
+
+		const remote = wireOf(client).consume(Path.from("test"));
+		const track = remote.track("video").subscribe().ordered();
+		expect(await track.readString()).toBe("before");
+
+		const bidi = await pair.client.createBidirectionalStream();
+		const writer = bidi.writable.getWriter();
+		await writer.write(subscribeTracks);
+		const reply: number[] = [];
+		for await (const chunk of bidi.readable as ReadableStream<Uint8Array>) reply.push(...chunk);
+		// REQUEST_ERROR (0x05), a two-byte length, then the error code: NOT_SUPPORTED (0x3).
+		expect(reply[0]).toBe(0x05);
+		expect(reply[3]).toBe(0x03);
+
+		for (const producer of served) producer.writeString("after");
+		expect(await track.readString()).toBe("after");
+
+		broadcast.close();
+		await serving;
+		remote.close();
+		client.close();
+		server.close();
+	}
+});
+
 test("integration: ietf draft-14", async () => {
 	await runPublishSubscribeFlow("", Ietf.Version.DRAFT_14);
 });

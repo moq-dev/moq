@@ -18,7 +18,7 @@ import { Publish } from "./publish.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
-import { SubscribeNamespace, SubscribeNamespaceLegacy } from "./subscribe_namespace.ts";
+import { SUBSCRIBE_TRACKS_ID, SubscribeNamespace, SubscribeNamespaceLegacy } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version, versionName } from "./version.ts";
@@ -265,6 +265,14 @@ export class Connection implements Established {
 			case Subscribe.id: {
 				const msg = await Subscribe.decode(stream.reader, this.#session.version);
 				await this.#publisher.runSubscribe(msg, stream);
+				break;
+			}
+			case SUBSCRIBE_TRACKS_ID: {
+				// 0x51 is only a message from draft-18 on.
+				if (this.#session.version < Version.DRAFT_18) {
+					throw new ProtocolViolation("SUBSCRIBE_TRACKS before draft-18");
+				}
+				await this.#publisher.runSubscribeTracks(stream);
 				break;
 			}
 			case TrackStatusRequest.id: {
