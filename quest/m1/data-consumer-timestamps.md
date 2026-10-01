@@ -19,20 +19,19 @@ moq-json and moq-binary snapshot and stream consumers they wrap. A snapshot
 consumer returns the timestamp of the frame it decoded last.
 
 Decided: `next()` and `poll_next()` return `Timed<T>`, the type the producers
-take, whose `at` becomes required in
-[Publishing requires a timestamp](/quest/m1/publish-timestamp.md). The
-timestamp is the frame's media timestamp on the track's timescale.
-[Plan: untimed peer objects](/quest/m1/plan-untimed-objects.md) decides
-whether a peer can deliver a frame without one; if it can, `at` becomes an
-`Option` here, so this waits for it and breaks once.
+take in [Publishing never invents a timestamp](/quest/m1/publish-timestamp.md).
+`at` is the frame's media timestamp on the track's timescale, and `None` for
+an untimed frame: [Plan: untimed objects](/quest/m1/plan-untimed-objects.md)
+settled (2026-10-01) that absence survives the wire rather than becoming
+arrival time. A republisher passes `at` straight to a moq-mux data producer.
 
 moq-ffi's json/binary consumers return the timestamp too, and the py, swift,
-kt, go, and dart wrappers and `doc/lib/*` follow. JS readers stay with
-[Data sync in watch](/quest/m3/watch-data-sync.md).
+kt, go, and dart wrappers and `doc/lib/*` follow. JS is
+[JS data consumer timestamps](/quest/m1/js-data-consumer-timestamps.md).
 
 Public API: breaking, on `dev`. Wire: none.
 
 ## Required
 
-- [Publishing requires a timestamp](/quest/m1/publish-timestamp.md) - makes `Timed.at` required, the type this returns
-- [Plan: untimed peer objects](/quest/m1/plan-untimed-objects.md) - decides whether the returned timestamp can be absent
+- [Publishing never invents a timestamp](/quest/m1/publish-timestamp.md) - gives `Timed.at` its untimed meaning, the type this returns
+- [Plan: untimed objects](/quest/m1/plan-untimed-objects.md) - the model must carry an absent timestamp to consumers

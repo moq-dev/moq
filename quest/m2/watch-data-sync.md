@@ -16,10 +16,12 @@ releases it.
   `delay` and `jitter` with `Sync` like a media rendition.
 - Snapshot tracks release the newest value at or before the playhead; stream
   tracks release every record in order.
-- In m3 until an application needs synchronized data playback, such as
-  teleop telemetry beside video; until then, a raw consumer reads payloads as
-  they arrive.
+- An untimed payload has no playhead position; release it on arrival.
+- OneTooMany is the application this waited for (2026-10-01): their web
+  frontend holds KLV and MAVLink telemetry back to the video playhead with
+  its own sync code, which this replaces. In m2 rather than m1 because
+  they aren't blocked.
 
 ## Required
 
-- [Data track clock](/quest/m1/data-track-clock.md) - data timestamps share the media clock mapping, so the playhead can release them
+- [JS data consumer timestamps](/quest/m1/js-data-consumer-timestamps.md) - the reader releases each value by the timestamp its consumer returns

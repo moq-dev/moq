@@ -19,6 +19,7 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [One port](/quest/m2/one-port/README.md) - a relay speaks QUIC and STUN on one UDP port and HTTP, RTMP, and RTMPS on one TCP port; WebRTC media is an embedder hook
 - [Ladder](/quest/m2/ladder/README.md) - a transcode ladder adapts to the uplink it publishes over, instead of encoding every live rung at its ceiling
 - [Processor](/quest/m2/processor/README.md) - a customer-run worker publishes an on-demand contribution under its own service prefix with scoped access
+- [Synced data playback](/quest/m2/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
 - [Stream sessions](/quest/m2/uring-tcp/README.md) - serve WebSocket and HTTP from the io_uring workers, where io_uring pays off most
 - [fMP4 emsg](/quest/m2/emsg.md) - settles the shared framing and missing-data semantics before this section adopts them
 - [ID3 catalog section](/quest/m2/id3.md) - timed ID3 as a first-class container-neutral catalog section
