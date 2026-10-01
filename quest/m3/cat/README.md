@@ -53,7 +53,6 @@ one. Everything rides `moq_auth::Request` and
 
 ## Required
 
-- draft-ietf-moq-c4m registers the moqt claim keys
 - [Verify](/quest/m3/cat/verify.md) - `moq_auth::cat` turns a CAT into a
   grant and `moq auth serve` admits one; `moq auth sign|verify` mint and
   check the format

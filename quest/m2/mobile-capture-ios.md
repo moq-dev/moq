@@ -7,7 +7,7 @@ through ReplayKit.
 
 ## Plan
 
-Not a new codec backend. VideoToolbox already encodes and decodes as the macOS
+Rust owns capture and codecs on mobile, settled in the 2026-09-30 audit ([Mobile ownership](/quest/m1/mobile-ownership.md)). Not a new codec backend. VideoToolbox already encodes and decodes as the macOS
 backend. Reuse its native PixelBuffer surface and verify the iOS build and
 runtime path rather than assuming desktop behavior. The new work is capture
 wiring plus the lifecycle iOS imposes and macOS does not.
@@ -21,10 +21,6 @@ device when it stops, rather than assuming a session it opened stays valid.
 Reuse the `capture::Source` shape the other platforms use rather than growing
 an iOS-specific entry point, so device enumeration and selection behave the
 same everywhere.
-
-## Required
-
-- [Ownership boundary](/quest/m1/mobile-ownership.md) - decides whether Rust owns capture on mobile at all
 
 ## Related
 
