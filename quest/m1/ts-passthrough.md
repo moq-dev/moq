@@ -22,12 +22,13 @@ Decided (2026-10-01), from a discussion with t0ms:
 - The track is listed in a new `m2ts` root section of the hang catalog,
   not in `video`/`audio` (it has no codec to describe) and not in the
   `mpegts` section, whose members (`tracks`, `program`, `si`, ...) record
-  what demultiplexing loses and are all in-band here. `m2ts` maps a track
-  name to `{ scope, randomAccess, muxRate }`: `scope` is `"program"` for a
-  single program or `"multiplex"` otherwise, and `muxRate` is present only
-  while the source holds a constant rate, as in `mpegts`. 188-byte packets
-  only; a 192-byte source is refused, so there is no packet-size field. The
-  section is specified in `drafts/draft-lcurley-moq-mpegts.md` next to
+  what demultiplexing loses and are all in-band here. `m2ts` is one object,
+  `{ track, randomAccess, muxRate }`, naming the broadcast's one passthrough
+  track. Passthrough always carries the whole multiplex: splitting out a
+  program would rewrite the PAT, so there is no scope field, and a second
+  multiplex is a second broadcast. `muxRate` is present only while the
+  source holds a constant rate, as in `mpegts`. 188-byte packets only; a
+  192-byte source is refused, so there is no packet-size field. The section is specified in `drafts/draft-lcurley-moq-mpegts.md` next to
   `mpegts`, with its mapping onto MSFTS's track fields. A track is one shape
   or the other.
 - Objects are runs of whole 188-byte packets on one track. A group starts at
