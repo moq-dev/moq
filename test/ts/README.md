@@ -124,8 +124,10 @@ the stream's SPS, the ADTS and "other audio" rates and sizes in H.222.0 2.4.2.3,
 and ATSC A/52 and A/53 Part 5 for AC-3 and E-AC-3. TSDuck still does the parsing
 it can (`tstables` decodes the PMT).
 
-A stream it has no parameters for is refused by name rather than skipped, which
-fails the check: Opus (the Opus-in-TS spec leaves the buffer size unset), MPEG-1/2
+Opus is graded against ADTS's buffers for the same channel count: the Opus-in-TS
+draft gives Rx (2 Mb/s for 1-2 channels, matching ADTS) but leaves the buffer size
+unset, so that size is borrowed rather than specified. A stream with no parameters
+at all is refused by name rather than skipped, which fails the check: MPEG-1/2
 video, DVB E-AC-3, and HEVC beyond Main/Main 10. Sections and private data
 (SCTE-35, teletext) have no elementary-stream buffers and are listed as not
 graded. A signalled PCR discontinuity starts fresh buffers, since the timestamps

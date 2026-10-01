@@ -706,7 +706,8 @@ class Stream:
 
     pid: int
     stream_type: int
-    # TSDuck's names for the PMT descriptors, plus "registration:<format_identifier>".
+    # TSDuck's names for the PMT descriptors, plus "registration:<format_identifier>"
+    # and, for one TSDuck has no name for, "tag<n>:<hex body>".
     descriptors: set[str]
     # (ts_index, PES header bytes, ES payload bytes, ES offset before this packet).
     packets: list[tuple[int, int, int, int]] = field(default_factory=list)
@@ -737,6 +738,11 @@ def read_programs(ts_path: str) -> list[tuple[int, list[Stream]]]:
             descriptors = [d for d in node.get("#nodes", []) if isinstance(d, dict)]
             names = {d["#name"] for d in descriptors}
             names |= {f"registration:{d['format_identifier']}" for d in descriptors if "format_identifier" in d}
+            names |= {
+                f"tag{d['tag']}:" + "".join(d.get("#nodes", [])).replace(" ", "").lower()
+                for d in descriptors
+                if d["#name"] == "generic_descriptor"
+            }
             streams.append(Stream(node["elementary_pid"], node["stream_type"], names))
         programs[pmt.get("service_id")] = (pmt["pcr_pid"], streams)
     return list(programs.values())
@@ -911,6 +917,33 @@ def ac3_frame(es: bytes, pos: int) -> tuple[int, float]:
     return words * 2, 1536 / (48000, 44100, 32000)[fscod]
 
 
+def opus_frame(es: bytes, pos: int) -> tuple[int, float]:
+    """(length, duration) of the Opus-in-TS access unit at `pos`: control header, then one packet."""
+    if es[pos] != 0x7F or es[pos + 1] & 0xE0 != 0xE0:
+        raise Refused(f"no Opus control header at ES offset {pos}")
+    flags = es[pos + 1]
+    at = pos + 2
+    size = 0
+    while True:
+        size += es[at]
+        at += 1
+        if es[at - 1] != 0xFF:
+            break
+    at += 2 * bool(flags & 0x10) + 2 * bool(flags & 0x08)
+    if flags & 0x04:
+        at += 1 + es[at]
+    # RFC 6716 3.1: the TOC byte's config sets the frame size, its code the frame count.
+    config, code = es[at] >> 3, es[at] & 0x03
+    if config < 12:
+        frame_ms = (10, 20, 40, 60)[config % 4]
+    elif config < 16:
+        frame_ms = (10, 20)[config % 2]
+    else:
+        frame_ms = (2.5, 5, 10, 20)[config % 4]
+    frames = (1, 2, 2, es[at + 1] & 0x3F)[code]
+    return at - pos + size, frame_ms * frames / 1000
+
+
 def stream_kind(stream: Stream) -> str | None:
     """Which T-STD model the stream takes, or None for one with no elementary stream buffers (sections, data)."""
     kind = stream.stream_type
@@ -920,7 +953,7 @@ def stream_kind(stream: Stream) -> str | None:
     if kind == 0x06 and tags & {"DVB_AC3_descriptor", "AC3_descriptor"}:
         return "ac3-dvb"
     if kind == 0x06 and f"registration:{int.from_bytes(b'Opus', 'big')}" in tags:
-        raise Refused("Opus in TS leaves the T-STD buffer size unspecified (ETSI draft, Rx only)")
+        return "opus"
     if kind == 0x06 and tags & {"DVB_enhanced_AC3_descriptor", "enhanced_AC3_descriptor"}:
         raise Refused("E-AC-3 as DVB private data takes its buffer from ETSI TS 101 154, not modelled")
     if kind in (0x01, 0x02, 0x10, 0x11, 0x1C, 0x20, 0x21, 0x42, 0xD1, 0xEA):
@@ -928,8 +961,9 @@ def stream_kind(stream: Stream) -> str | None:
     return None
 
 
-def stream_params(kind: str, es: bytes) -> tuple[Params, object]:
+def stream_params(kind: str, stream: Stream) -> tuple[Params, object]:
     """The stream's T-STD parameters, and its audio frame parser (None for video)."""
+    es = stream.es
     if kind == "avc":
         return avc_params(es), None
     if kind == "hevc":
@@ -942,6 +976,15 @@ def stream_params(kind: str, es: bytes) -> tuple[Params, object]:
         channels = ADTS_CHANNELS[config]
         rx, bs = next((rx, bs) for top, rx, bs in ADTS_BUFFERS if channels <= top)
         return Params(label=f"ADTS AAC {channels} ch", rx=rx, b=bs), adts_frame
+    if kind == "opus":
+        # Borrowed: the Opus-in-TS draft gives Rx (2 Mb/s for 1-2 channels, as here) but no
+        # buffer size, so Opus is graded against ADTS's buffers for the same channel count.
+        config = next((tag[len("tag127:80") :][:2] for tag in stream.descriptors if tag.startswith("tag127:80")), "")
+        if not config or not 0 <= int(config, 16) <= 8:
+            raise Refused("Opus without a channel_config_code of 0-8 in its extension descriptor")
+        channels = int(config, 16) or 2  # 0 is dual mono
+        rx, bs = next((rx, bs) for top, rx, bs in ADTS_BUFFERS if channels <= top)
+        return Params(label=f"Opus {channels} ch (ADTS buffers)", rx=rx, b=bs), opus_frame
     label, bs, parse = {
         "mpeg-audio": ("MPEG audio", MPEG_AUDIO_BS, mpeg_audio_frame),
         "ac3-atsc": ("AC-3 (ATSC)", AC3_ATSC_BS, ac3_frame),
@@ -968,7 +1011,10 @@ def access_units(stream: Stream, parse) -> list[AccessUnit]:
     pos = 0
     # A header cut short by the end of the capture is not a malformed frame.
     while pos + 8 <= len(stream.es):
-        length, duration = parse(stream.es, pos)
+        try:
+            length, duration = parse(stream.es, pos)
+        except IndexError:
+            break  # a header that runs past the end of the capture
         if length <= 0:
             raise Refused(f"zero-length audio frame at ES offset {pos}")
         stamp = None
@@ -1175,7 +1221,7 @@ def check_tstd(ts_path: str, packet_size: int, scan: Scan) -> Check:
         segments = [segment for segment in segments if segment[0].ok()]
         for stream in modelled.values():
             try:
-                params, parse = stream_params(kinds[stream.pid], stream.es)
+                params, parse = stream_params(kinds[stream.pid], stream)
                 units = access_units(stream, parse)
             except Refused as err:
                 refused[stream.pid] = str(err)
