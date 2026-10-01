@@ -138,6 +138,12 @@ jobs:
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
+      # The T-STD model must pass a broadcast capture and fail the same capture
+      # delivered too slowly, too early, or in a burst.
+      - name: T-STD controls
+        run: nix develop --command just test ts-tstd
+        shell: bash -leo pipefail {0}
+
       # A failing harness run keeps its directory, holding the process logs, the
       # relay config, and a Playwright trace of the failing page. Upload it for a
       # short while so a red cell is diagnosable; a passing run deletes its own.

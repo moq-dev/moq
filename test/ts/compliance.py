@@ -6,9 +6,10 @@ checks an Integrated Receiver/Decoder cares about and prints a PASS/WARN/FAIL
 summary, exiting non-zero on failure.
 
 Division of labour: TSDuck does the transport-stream parsing (we shell out to
-`tsanalyze --json` for PSI/service/structure), and this script does the model
-math TSDuck does not cover directly (PCR jitter/repetition, packet
-inter-arrival, burstiness, instantaneous bitrate, and a transport-buffer model).
+`tsanalyze --json` for PSI/service/structure and `tstables` for the PMT), and
+this script does the model math TSDuck does not cover (PCR jitter/repetition,
+packet inter-arrival, burstiness, instantaneous bitrate, and the ISO 13818-1
+T-STD buffer model, which no maintained tool implements).
 The PCR/PTS/DTS timeline the timing model needs comes from a 188/204-byte
 packet-header scan done here, which also gives the per-packet PID that
 `tsp -P pcrextract` does not expose.
@@ -18,7 +19,7 @@ Checks split into two severities:
     continuity counters, PSI CRC, PCR presence, PCR monotonicity.
   - SHAPE (broadcast profile): reported as WARN and only fail the run under
     `--strict`. PCR repetition interval, PCR jitter, null-packet ratio, bitrate
-    consistency / burstiness, service descriptors (SDT), transport-buffer model.
+    consistency / burstiness, service descriptors (SDT), T-STD buffer model.
 
 Timing basis is the stream's own PCR clock (an IRD locks to PCR), so the harness
 needs no wall-clock capture and results are deterministic for a given file.
@@ -77,10 +78,6 @@ class Thresholds:
     null_ratio_max: float = 0.90
     bitrate_cov_max: float = 0.10
     burstiness_max: float = 3.0
-    tb_size_bytes: int = 512
-    video_leak_bps: float = 1.8e7
-    audio_leak_bps: float = 2.0e6
-    data_leak_bps: float = 1.0e6
     inst_windows_ms: tuple[float, ...] = (1.0, 10.0)
 
 
@@ -566,54 +563,650 @@ def check_inter_arrival(scan: Scan, clock: PcrClock) -> Check:
     )
 
 
-def check_tstd(analysis: dict, scan: Scan, clock: PcrClock, th: Thresholds) -> Check:
-    """Approximate T-STD transport-buffer check: TB fills on arrival, leaks at Rx.
+# ---------------------------------------------------------------- T-STD model
+#
+# ISO/IEC 13818-1 2.4.2 (Rec. ITU-T H.222.0 10/2014, free from the ITU), fed each
+# elementary stream's packets at the times its program's PCR assigns them:
+#
+#   video (AVC 2.14.3.1, HEVC 2.17.2)  TB -Rx-> MB -Rbx (leak)-> EB -DTS-> decoder
+#   audio (2.4.2.3)                    TB -Rx-> B  ---------------PTS-> decoder
+#
+# and graded on 2.4.2.6 and its AVC/HEVC counterparts: no buffer overflows, TB
+# empties at least once a second, every access unit is complete in EB/B at its
+# decoding time, and no byte waits longer than the STD delay bound.
+#
+# No maintained tool implements this (TSDuck has no T-STD analyzer), so the
+# parameters are transcribed from the specs named beside each table.
 
-    This models only the transport buffer (TB) smoothing stage of ISO 13818-1
-    2.4.2, not the full multiplex/elementary buffer decode model. TB size is
-    fixed at 512 bytes; the leak rate Rx defaults per stream type. An overflow
-    means the stream delivers a PID's bytes faster than a receiver drains them.
+TB_SIZE = 512
+# 2.4.2.6: TB must empty at least once a second.
+TB_EMPTY_S = 1.0
+# PTS/DTS are 33 bits at 90 kHz.
+STAMP_WRAP_S = (1 << 33) / PTS_HZ
+
+# H.264 Table A-1: level_idc -> (MaxBR, MaxCPB) as tabulated. H.222.0 2.14.3.1
+# scales both by 1200 bits for the buffers, and Rx by the profile's cpbBrNalFactor.
+AVC_LEVELS = {
+    10: (64, 175),
+    11: (192, 500),
+    12: (384, 1000),
+    13: (768, 2000),
+    20: (2000, 2000),
+    21: (4000, 4000),
+    22: (4000, 4000),
+    30: (10000, 10000),
+    31: (14000, 14000),
+    32: (20000, 20000),
+    40: (20000, 25000),
+    41: (50000, 62500),
+    42: (50000, 62500),
+    50: (135000, 135000),
+    51: (240000, 240000),
+    52: (240000, 240000),
+    60: (240000, 240000),
+    61: (480000, 480000),
+    62: (800000, 800000),
+}
+AVC_LEVEL_1B = (128, 350)
+# H.264 Table A-2 cpbBrNalFactor, by profile_idc: the default BitRate that sets Rx.
+AVC_NAL_FACTOR = {66: 1200, 77: 1200, 88: 1200, 100: 1500, 110: 3600, 122: 4800, 244: 4800, 44: 4800}
+
+# H.265 Table A.8: general_level_idc -> ((MaxBR, MaxCPB) Main tier, (MaxBR, MaxCPB) High tier).
+HEVC_LEVELS = {
+    30: ((128, 350), None),
+    60: ((1500, 1500), None),
+    63: ((3000, 3000), None),
+    90: ((6000, 6000), None),
+    93: ((10000, 10000), None),
+    120: ((12000, 12000), (30000, 30000)),
+    123: ((20000, 20000), (50000, 50000)),
+    150: ((25000, 25000), (100000, 100000)),
+    153: ((40000, 40000), (160000, 160000)),
+    156: ((60000, 60000), (240000, 240000)),
+    180: ((60000, 60000), (240000, 240000)),
+    183: ((120000, 120000), (480000, 480000)),
+    186: ((240000, 240000), (800000, 800000)),
+}
+# H.265 Table A.9 CpbNalFactor for Main, Main 10 and Main Still Picture (profile_idc 1-3).
+HEVC_NAL_FACTOR = 1100
+
+# H.222.0 2.4.2.3: ADTS (Rx, BSn) by channels, the LFE not counted.
+ADTS_BUFFERS = ((2, 2_000_000, 3584), (8, 5_529_600, 8976), (12, 8_294_400, 12804), (48, 33_177_600, 51216))
+# channel_configuration -> full-bandwidth channels (5.1 and 7.1 drop the LFE).
+ADTS_CHANNELS = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 5, 7: 7}
+ADTS_RATES = (96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350)
+# 2.4.2.3 "other audio".
+AUDIO_RX = 2_000_000
+MPEG_AUDIO_BS = 3584
+# ATSC A/53 Part 5 5.7 (AC-3) and A/52 Annex G 3.6.1 (E-AC-3: 736 + 64 + 12096).
+AC3_ATSC_BS = 2592
+EAC3_ATSC_BS = 12896
+# ATSC A/52 Annex A 5.4: AC-3 carried as DVB private data.
+AC3_DVB_BS = 5696
+
+MPEG_AUDIO_KBPS = {
+    (1, 1): (0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448),
+    (1, 2): (0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384),
+    (1, 3): (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320),
+    (2, 1): (0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256),
+    (2, 2): (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),
+    (2, 3): (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),
+}
+# stream_type -> model, for the types identified by stream_type alone.
+STREAM_KINDS = {
+    0x1B: "avc",
+    0x24: "hevc",
+    0x0F: "adts",
+    0x03: "mpeg-audio",
+    0x04: "mpeg-audio",
+    0x81: "ac3-atsc",
+    0x87: "eac3-atsc",
+}
+AC3_KBPS = (32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 576, 640)
+
+
+class Refused(Exception):
+    """An elementary stream the model cannot grade: named, never skipped silently."""
+
+
+@dataclass
+class Params:
+    """One elementary stream's T-STD buffers (bytes) and rates (bit/s)."""
+
+    label: str
+    rx: float
+    # Video: MB and EB with the leak rate between them. Audio: the main buffer B alone.
+    mb: float = 0.0
+    eb: float = 0.0
+    rbx: float = 0.0
+    b: float = 0.0
+    # tdn(j) - t(i) bound: 10 s for AVC and HEVC, 1 s otherwise (2.4.2.6, 2.14.3.1, 2.17.2).
+    max_delay_s: float = 1.0
+
+    @property
+    def video(self) -> bool:
+        return self.rbx > 0
+
+
+@dataclass
+class AccessUnit:
+    """ES byte span [start, end), where its first byte arrived, and its decode time."""
+
+    start: int
+    end: int
+    first_packet: int
+    # 90 kHz DTS (or PTS) when the PES stamps it, else derived from the one before.
+    stamp: int | None
+    duration_s: float = 0.0
+
+
+@dataclass
+class Stream:
+    """One elementary stream's packets and PES timestamps, and its ES bytes where needed."""
+
+    pid: int
+    stream_type: int
+    # TSDuck's names for the PMT descriptors, plus "registration:<format_identifier>".
+    descriptors: set[str]
+    # (ts_index, PES header bytes, ES payload bytes, ES offset before this packet).
+    packets: list[tuple[int, int, int, int]] = field(default_factory=list)
+    # (ES offset, 90 kHz PTS, DTS or None, ts_index) per PES that carries a PTS.
+    pes: list[tuple[int, int, int | None, int]] = field(default_factory=list)
+    es: bytearray = field(default_factory=bytearray)
+    es_len: int = 0
+
+
+def read_programs(ts_path: str) -> list[tuple[int, list[Stream]]]:
+    """(PCR PID, elementary streams) of each program's first PMT, as TSDuck decodes it."""
+    proc = subprocess.run(
+        ["tstables", ts_path, "--psi-si", "--tid", "2", "--json-output", "-"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"tstables failed: {proc.stderr.strip()}")
+    programs: dict[int, tuple[int, list[Stream]]] = {}
+    for pmt in json.loads(proc.stdout or "[]"):
+        if pmt.get("service_id") in programs:
+            continue
+        streams = []
+        for node in pmt.get("#nodes", []):
+            if node.get("#name") != "component":
+                continue
+            descriptors = [d for d in node.get("#nodes", []) if isinstance(d, dict)]
+            names = {d["#name"] for d in descriptors}
+            names |= {f"registration:{d['format_identifier']}" for d in descriptors if "format_identifier" in d}
+            streams.append(Stream(node["elementary_pid"], node["stream_type"], names))
+        programs[pmt.get("service_id")] = (pmt["pcr_pid"], streams)
+    return list(programs.values())
+
+
+def _stamp(b: bytes) -> int:
+    """A 33-bit PTS/DTS from its 5-byte PES encoding."""
+    return ((b[0] >> 1) & 0x07) << 30 | b[1] << 22 | (b[2] >> 1) << 15 | b[3] << 7 | b[4] >> 1
+
+
+def read_pes(data: bytes, packet_size: int, streams: dict[int, Stream], keep_es: set[int]) -> dict[int, str]:
+    """Split each stream's packets into PES header and ES bytes, and note every PES timestamp.
+
+    Packets before a PID's first PES start still count toward its TB, but their bytes
+    belong to an access unit whose start was never captured, so they go no further.
+    Returns why each stream that could not be read was refused.
     """
-    kinds: dict[int, float] = {}
-    for pid in analysis.get("pids", []):
-        if pid.get("video"):
-            kinds[pid["id"]] = th.video_leak_bps
-        elif pid.get("audio"):
-            kinds[pid["id"]] = th.audio_leak_bps
+    refused: dict[int, str] = {}
+    for index, offset in enumerate(range(0, len(data) - packet_size + 1, packet_size)):
+        if data[offset] != 0x47:
+            continue
+        pid = ((data[offset + 1] & 0x1F) << 8) | data[offset + 2]
+        stream = streams.get(pid)
+        if stream is None or pid in refused:
+            continue
+        afc = (data[offset + 3] >> 4) & 0x3
+        if afc not in (1, 3):
+            continue
+        start = offset + 4 + (1 + data[offset + 4] if afc == 3 else 0)
+        length = offset + 188 - start
+        header = 0
+        if data[offset + 1] & 0x40:
+            if data[start : start + 3] != b"\x00\x00\x01":
+                refused[pid] = f"packet {index} starts a payload without a PES start code"
+                continue
+            if length < 9 or 9 + data[start + 8] > length:
+                refused[pid] = f"the PES header at packet {index} spans packets"
+                continue
+            header = 9 + data[start + 8]
+            flags = data[start + 7]
+            if flags & 0x80:
+                pts = _stamp(data[start + 9 : start + 14])
+                dts = _stamp(data[start + 14 : start + 19]) if flags & 0x40 else None
+                stream.pes.append((stream.es_len, pts, dts, index))
+        if not stream.pes:
+            stream.packets.append((index, 0, 0, 0))
+            continue
+        body = length - header
+        stream.packets.append((index, header, body, stream.es_len))
+        if pid in keep_es or len(stream.es) < 1 << 20:
+            stream.es += data[start + header : start + length]
+        stream.es_len += body
+    return refused
 
-    overflows = 0
-    worst_pid = None
-    worst_occ = 0.0
-    for pid, leak_bps in kinds.items():
-        packets = scan.pid_packets.get(pid, [])
-        occ = 0.0
-        last_t = None
-        pid_over = 0
-        pid_peak = 0.0
-        for i, payload in packets:
-            t = clock.time_at(i)
-            if last_t is not None and t > last_t:
-                occ = max(0.0, occ - leak_bps * (t - last_t) / 8.0)
-            occ += payload
-            pid_peak = max(pid_peak, occ)
-            if occ > th.tb_size_bytes:
-                pid_over += 1
-            last_t = t
-        overflows += pid_over
-        if pid_peak > worst_occ:
-            worst_occ = pid_peak
-            worst_pid = pid
-    if not kinds:
-        return Check("tstd", Severity.SHAPE, Status.WARN, "no video/audio PID to model", {})
+
+def _nal_units(es: bytes, limit: int = 1 << 20):
+    """Annex-B NAL units (without start codes) in the first `limit` bytes of `es`."""
+    view = bytes(es[:limit])
+    pos = view.find(b"\x00\x00\x01")
+    while pos >= 0:
+        nxt = view.find(b"\x00\x00\x01", pos + 3)
+        yield view[pos + 3 : nxt if nxt >= 0 else len(view)]
+        pos = nxt
+
+
+def avc_params(es: bytes) -> Params:
+    """H.222.0 2.14.3.1 buffers from the first SPS's profile and level, without VUI HRD."""
+    for nal in _nal_units(es):
+        if nal and nal[0] & 0x1F == 7 and len(nal) >= 4:
+            profile, constraints, level = nal[1], nal[2], nal[3]
+            break
+    else:
+        raise Refused("AVC stream carries no SPS")
+    if (level == 11 and constraints & 0x10 and profile in (66, 77, 88)) or level == 9:
+        max_br, max_cpb, name = *AVC_LEVEL_1B, "1b"
+    elif level in AVC_LEVELS:
+        max_br, max_cpb = AVC_LEVELS[level]
+        name = f"{level // 10}.{level % 10}"
+    else:
+        raise Refused(f"AVC level_idc {level} has no Table A-1 entry")
+    if profile not in AVC_NAL_FACTOR:
+        raise Refused(f"AVC profile_idc {profile} has no Table A-2 cpbBrNalFactor")
+    overhead = max(1200 * max_br, 2_000_000)
+    return Params(
+        label=f"AVC profile {profile} level {name}",
+        rx=1.2 * AVC_NAL_FACTOR[profile] * max_br,
+        mb=(0.004 + 1 / 750) * overhead / 8,
+        eb=1200 * max_cpb / 8,
+        rbx=1200 * max_br,
+        max_delay_s=10.0,
+    )
+
+
+def hevc_params(es: bytes) -> Params:
+    """H.222.0 2.17.2 buffers from the first SPS's tier and level, without VUI HRD."""
+    for nal in _nal_units(es):
+        if len(nal) >= 2 and (nal[0] >> 1) & 0x3F == 33:
+            # Emulation prevention can land inside the 32 compatibility flags.
+            rbsp = nal[2:40].replace(b"\x00\x00\x03", b"\x00\x00")
+            if len(rbsp) >= 13:
+                break
+    else:
+        raise Refused("HEVC stream carries no SPS")
+    tier, profile, level = (rbsp[1] >> 5) & 1, rbsp[1] & 0x1F, rbsp[12]
+    if profile not in (1, 2, 3):
+        raise Refused(f"HEVC general_profile_idc {profile} has no CpbNalFactor here (Main, Main 10, Still only)")
+    limits = HEVC_LEVELS.get(level, (None, None))[tier]
+    if limits is None:
+        raise Refused(f"HEVC level_idc {level} tier {tier} has no Table A.8 entry")
+    max_br, max_cpb = limits
+    rate = HEVC_NAL_FACTOR * max_br
+    return Params(
+        label=f"HEVC profile {profile} {'high' if tier else 'main'} tier level {level / 30:g}",
+        rx=rate,
+        mb=(0.004 + 1 / 750) * max(rate, 2_000_000) / 8,
+        eb=HEVC_NAL_FACTOR * max_cpb / 8,
+        rbx=rate,
+        max_delay_s=10.0,
+    )
+
+
+def adts_frame(es: bytes, pos: int) -> tuple[int, float]:
+    """(length, duration) of the ADTS frame at `pos`."""
+    h = es[pos : pos + 7]
+    if len(h) < 7 or h[0] != 0xFF or h[1] & 0xF0 != 0xF0:
+        raise Refused(f"no ADTS sync at ES offset {pos}")
+    rate_index = (h[2] >> 2) & 0x0F
+    if rate_index >= len(ADTS_RATES):
+        raise Refused(f"ADTS sampling_frequency_index {rate_index} at ES offset {pos}")
+    length = ((h[3] & 0x03) << 11) | (h[4] << 3) | (h[5] >> 5)
+    return length, 1024 * ((h[6] & 0x03) + 1) / ADTS_RATES[rate_index]
+
+
+def mpeg_audio_frame(es: bytes, pos: int) -> tuple[int, float]:
+    """(length, duration) of the MPEG-1/2 audio frame at `pos`."""
+    h = es[pos : pos + 4]
+    if len(h) < 4 or h[0] != 0xFF or h[1] & 0xE0 != 0xE0:
+        raise Refused(f"no MPEG audio sync at ES offset {pos}")
+    version_bits = (h[1] >> 3) & 0x03
+    layer = 4 - ((h[1] >> 1) & 0x03)
+    rate_index = (h[2] >> 2) & 0x03
+    kbps_index = h[2] >> 4
+    if version_bits == 1 or layer == 4 or rate_index == 3 or kbps_index in (0, 15):
+        raise Refused(f"MPEG audio header at ES offset {pos} is reserved or free-format")
+    # MPEG-1, MPEG-2 (half rate) and MPEG-2.5 (quarter rate).
+    version = 1 if version_bits == 3 else 2
+    rate = (44100, 48000, 32000)[rate_index] >> {3: 0, 2: 1, 0: 2}[version_bits]
+    bits = MPEG_AUDIO_KBPS[(version, layer)][kbps_index] * 1000
+    pad = (h[2] >> 1) & 0x01
+    if layer == 1:
+        return (12 * bits // rate + pad) * 4, 384 / rate
+    samples = 576 if layer == 3 and version == 2 else 1152
+    return samples // 8 * bits // rate + pad, samples / rate
+
+
+def ac3_frame(es: bytes, pos: int) -> tuple[int, float]:
+    """(length, duration) of the AC-3 or E-AC-3 frame at `pos`; 0 duration for a dependent substream."""
+    h = es[pos : pos + 6]
+    if len(h) < 6 or h[0] != 0x0B or h[1] != 0x77:
+        raise Refused(f"no AC-3 sync at ES offset {pos}")
+    if h[5] >> 3 > 10:  # bsid 11-16: E-AC-3 (A/52 Annex E)
+        blocks = (1, 2, 3, 6)[(h[4] >> 4) & 0x03] if h[4] >> 6 != 3 else 6
+        fscod = h[4] >> 6
+        rate = (48000, 44100, 32000)[fscod] if fscod != 3 else (24000, 22050, 16000)[(h[4] >> 4) & 0x03]
+        dependent = h[2] >> 6 == 1
+        return ((((h[2] & 0x07) << 8) | h[3]) + 1) * 2, 0.0 if dependent else 256 * blocks / rate
+    fscod, code = h[4] >> 6, h[4] & 0x3F
+    if fscod == 3 or code >> 1 >= len(AC3_KBPS):
+        raise Refused(f"AC-3 fscod/frmsizecod reserved at ES offset {pos}")
+    kbps = AC3_KBPS[code >> 1]
+    words = (2 * kbps, 320 * kbps // 147 + (code & 1), 3 * kbps)[fscod]
+    return words * 2, 1536 / (48000, 44100, 32000)[fscod]
+
+
+def stream_kind(stream: Stream) -> str | None:
+    """Which T-STD model the stream takes, or None for one with no elementary stream buffers (sections, data)."""
+    kind = stream.stream_type
+    tags = stream.descriptors
+    if kind in STREAM_KINDS:
+        return STREAM_KINDS[kind]
+    if kind == 0x06 and tags & {"DVB_AC3_descriptor", "AC3_descriptor"}:
+        return "ac3-dvb"
+    if kind == 0x06 and f"registration:{int.from_bytes(b'Opus', 'big')}" in tags:
+        raise Refused("Opus in TS leaves the T-STD buffer size unspecified (ETSI draft, Rx only)")
+    if kind == 0x06 and tags & {"DVB_enhanced_AC3_descriptor", "enhanced_AC3_descriptor"}:
+        raise Refused("E-AC-3 as DVB private data takes its buffer from ETSI TS 101 154, not modelled")
+    if kind in (0x01, 0x02, 0x10, 0x11, 0x1C, 0x20, 0x21, 0x42, 0xD1, 0xEA):
+        raise Refused(f"stream_type 0x{kind:02X} is audio/video this model has no parameters for")
+    return None
+
+
+def stream_params(kind: str, es: bytes) -> tuple[Params, object]:
+    """The stream's T-STD parameters, and its audio frame parser (None for video)."""
+    if kind == "avc":
+        return avc_params(es), None
+    if kind == "hevc":
+        return hevc_params(es), None
+    if kind == "adts":
+        adts_frame(es, 0)
+        config = ((es[2] & 0x01) << 2) | (es[3] >> 6)
+        if config not in ADTS_CHANNELS:
+            raise Refused("ADTS channel_configuration 0 defers the layout to a PCE, which this model does not read")
+        channels = ADTS_CHANNELS[config]
+        rx, bs = next((rx, bs) for top, rx, bs in ADTS_BUFFERS if channels <= top)
+        return Params(label=f"ADTS AAC {channels} ch", rx=rx, b=bs), adts_frame
+    label, bs, parse = {
+        "mpeg-audio": ("MPEG audio", MPEG_AUDIO_BS, mpeg_audio_frame),
+        "ac3-atsc": ("AC-3 (ATSC)", AC3_ATSC_BS, ac3_frame),
+        "eac3-atsc": ("E-AC-3 (ATSC)", EAC3_ATSC_BS, ac3_frame),
+        "ac3-dvb": ("AC-3 (DVB)", AC3_DVB_BS, ac3_frame),
+    }[kind]
+    return Params(label=label, rx=AUDIO_RX, b=bs), parse
+
+
+def access_units(stream: Stream, parse) -> list[AccessUnit]:
+    """Video: one access unit per PES that carries a timestamp. Audio: one per codec frame."""
+    units: list[AccessUnit] = []
+    pes = stream.pes
+    if parse is None:
+        for n, (offset, pts, dts, first) in enumerate(pes):
+            end = pes[n + 1][0] if n + 1 < len(pes) else stream.es_len
+            units.append(AccessUnit(offset, end, first, dts if dts is not None else pts))
+        return units
+    # A PES timestamp belongs to the first frame that starts in that PES (2.4.3.7).
+    starts = [(offset, index) for index, _h, body, offset in stream.packets if body]
+    keys = [offset for offset, _ in starts]
+    stamps = iter(pes)
+    nxt = next(stamps, None)
+    pos = 0
+    # A header cut short by the end of the capture is not a malformed frame.
+    while pos + 8 <= len(stream.es):
+        length, duration = parse(stream.es, pos)
+        if length <= 0:
+            raise Refused(f"zero-length audio frame at ES offset {pos}")
+        stamp = None
+        while nxt is not None and nxt[0] <= pos:
+            stamp = nxt[1]
+            nxt = next(stamps, None)
+        if duration == 0.0 and units:
+            units[-1].end = pos + length
+        else:
+            first = starts[bisect.bisect_right(keys, pos) - 1][1]
+            units.append(AccessUnit(pos, pos + length, first, stamp, duration))
+        pos += length
+    return units
+
+
+@dataclass
+class Grade:
+    """What one elementary stream did in the model."""
+
+    pid: int
+    label: str
+    violations: dict[str, int] = field(default_factory=dict)
+    peaks: dict[str, float] = field(default_factory=dict)
+    worst_late_ms: float = 0.0
+    worst_delay_s: float = 0.0
+    graded_units: int = 0
+
+    def flag(self, name: str) -> None:
+        self.violations[name] = self.violations.get(name, 0) + 1
+
+    def peak(self, name: str, fill: float, size: float) -> None:
+        self.peaks[name] = max(self.peaks.get(name, 0.0), fill / size)
+
+
+def simulate(
+    stream: Stream, params: Params, units: list[AccessUnit], segments: list[tuple[PcrClock, int, int]]
+) -> Grade:
+    """Run one elementary stream through its buffers, with fresh buffers for each time base.
+
+    `segments` are (clock, first packet, end packet) per time base: the timestamps on
+    either side of a signalled discontinuity are on different clocks.
+    """
+    grade = Grade(stream.pid, params.label)
+    eps = 1e-9
+    for clock, lo, hi in segments:
+        # TB: packet i arrives over [t(i), t(i+1)] and leaves at Rx. `leave` is when its
+        # last byte does; the bytes still in TB as the packet finishes arriving are its
+        # peak, and a stretch where TB never empties may not exceed a second.
+        deliveries: list[tuple[float, int, int, int]] = []
+        leave = float("-inf")
+        busy_since = None
+        for index, header, body, offset in stream.packets:
+            if not lo <= index < hi:
+                continue
+            start, end = clock.time_at(index), clock.time_at(index + 1)
+            if leave <= start:
+                busy_since = start
+            leave = max(end, max(leave, start) + 188 * 8 / params.rx)
+            fill = (leave - end) * params.rx / 8
+            grade.peak("TB", fill, TB_SIZE)
+            if fill > TB_SIZE + 0.5:
+                grade.flag("TB overflow")
+            if busy_since is not None and leave - busy_since > TB_EMPTY_S:
+                grade.flag("TB not emptied within 1 s")
+                busy_since = None
+            if header or body:
+                deliveries.append((leave, header, body, offset))
+
+        horizon = clock.time_at(hi)
+        removals: list[tuple[float, AccessUnit]] = []
+        td = None
+        for unit in units:
+            if not lo <= unit.first_packet < hi:
+                continue
+            if unit.stamp is not None:
+                base = unit.stamp / PTS_HZ
+                stamped = base + round((clock.time_at(unit.first_packet) - base) / STAMP_WRAP_S) * STAMP_WRAP_S
+                if removals and stamped < removals[-1][0]:
+                    grade.flag("decode time goes backwards")
+                td = max(stamped, removals[-1][0]) if removals else stamped
+            elif td is None:
+                continue  # an audio frame ahead of the first timestamp has no decoding time
+            if td > horizon:
+                break
+            removals.append((td, unit))
+            td += unit.duration_s
+
+        # MB -> EB (video, leak method) or B (audio): walk deliveries and removals in time
+        # order. EB/B is tracked by ES offset: everything below `into` has reached it and
+        # everything below `out` has been removed, so an access unit whose bytes arrive
+        # after its decoding time passes through as underflow rather than lingering as fill.
+        into = out = deliveries[0][3] if deliveries else 0
+        mb: list[list[int]] = []  # [header, payload] per delivered packet, FIFO
+        mb_header = mb_payload = 0
+        headers: list[tuple[int, int]] = []  # audio: (ES offset, bytes) of PES headers held in B
+        b_header = 0
+        now = float("-inf")
+        late: list[tuple[int, float]] = []
+
+        def settle(t: float, moved_from: int, rate: float) -> None:
+            # Record how late each underflowed unit finished arriving.
+            while late and into >= late[0][0]:
+                end, td = late.pop(0)
+                done = t if rate <= 0 else now + (end - moved_from) * 8 / rate
+                grade.worst_late_ms = max(grade.worst_late_ms, (done - td) * 1000)
+
+        def leak(until: float) -> None:
+            nonlocal into, mb_header, mb_payload, now
+            if not params.video or until <= now or not mb_payload:
+                now = max(now, until)
+                return
+            room = params.eb - max(0, into - out) + max(0, out - into)
+            amount = min(params.rbx * (until - now) / 8, mb_payload, room)
+            before = into
+            remaining = amount
+            while remaining > eps and mb:
+                head = mb[0]
+                mb_header -= head[0]
+                head[0] = 0
+                take = min(head[1], remaining)
+                head[1] -= take
+                remaining -= take
+                if head[1] <= eps:
+                    mb.pop(0)
+            mb_payload -= amount
+            into += amount
+            settle(until, before, params.rbx)
+            grade.peak("EB", max(0, into - out), params.eb)
+            now = until
+
+        events = sorted(
+            [(t, 1, n) for n, (t, *_rest) in enumerate(deliveries)] + [(t, 0, n) for n, (t, _u) in enumerate(removals)]
+        )
+        for t, kind, n in events:
+            leak(t)
+            if kind == 1:
+                _t, header, body, offset = deliveries[n]
+                if params.video:
+                    mb.append([header, body])
+                    mb_header += header
+                    mb_payload += body
+                    grade.peak("MB", mb_header + mb_payload, params.mb)
+                    if mb_header + mb_payload > params.mb + 0.5:
+                        grade.flag("MB overflow")
+                else:
+                    if header:
+                        headers.append((offset, header))
+                        b_header += header
+                    into += body
+                    settle(t, into, 0)
+                    fill = max(0, into - out) + b_header
+                    grade.peak("B", fill, params.b)
+                    if fill > params.b + 0.5:
+                        grade.flag("B overflow")
+                continue
+            _t, unit = removals[n]
+            grade.graded_units += 1
+            grade.worst_delay_s = max(grade.worst_delay_s, t - clock.time_at(unit.first_packet))
+            if t - clock.time_at(unit.first_packet) > params.max_delay_s:
+                grade.flag(f"held over {params.max_delay_s:g} s")
+            if into + eps < unit.end:
+                grade.flag("EB underflow" if params.video else "B underflow")
+                late.append((unit.end, t))
+            out = max(out, unit.end)
+            while headers and headers[0][0] < unit.end:
+                b_header -= headers.pop(0)[1]
+    return grade
+
+
+def check_tstd(ts_path: str, packet_size: int, scan: Scan) -> Check:
+    """Full T-STD buffer model (ISO 13818-1 2.4.2) for every audio and video stream.
+
+    Each program's streams run on that program's PCR, one time base at a time: a
+    signalled discontinuity starts fresh buffers, since the timestamps before and
+    after it are on different clocks.
+    """
+    with open(ts_path, "rb") as handle:
+        data = handle.read()
+    programs = read_programs(ts_path)
+
+    grades: list[Grade] = []
+    refused: dict[int, str] = {}
+    skipped: list[int] = []
+    for pcr_pid, streams in programs:
+        kinds: dict[int, str] = {}
+        for stream in streams:
+            try:
+                kind = stream_kind(stream)
+            except Refused as err:
+                refused[stream.pid] = str(err)
+                continue
+            if kind is None:
+                skipped.append(stream.pid)
+            else:
+                kinds[stream.pid] = kind
+        modelled = {s.pid: s for s in streams if s.pid in kinds}
+        audio = {pid for pid, kind in kinds.items() if kind not in ("avc", "hevc")}
+        for pid, why in read_pes(data, packet_size, modelled, audio).items():
+            refused[pid] = why
+            del modelled[pid]
+        samples = scan.pcr_by_pid.get(pcr_pid, [])
+        bounds = [0, *sorted(i for i, _ in samples if i in scan.pcr_new_base), scan.total_packets]
+        segments = [(PcrClock([s for s in samples if lo <= s[0] < hi]), lo, hi) for lo, hi in zip(bounds, bounds[1:])]
+        segments = [segment for segment in segments if segment[0].ok()]
+        for stream in modelled.values():
+            try:
+                params, parse = stream_params(kinds[stream.pid], stream.es)
+                units = access_units(stream, parse)
+            except Refused as err:
+                refused[stream.pid] = str(err)
+                continue
+            grades.append(simulate(stream, params, units, segments))
+
     metrics = {
-        "tb_overflows": overflows,
-        "worst_pid": worst_pid,
-        "worst_peak_bytes": round(worst_occ, 1),
-        "tb_size_bytes": th.tb_size_bytes,
+        "streams": {
+            str(g.pid): {
+                "type": g.label,
+                "access_units": g.graded_units,
+                "violations": g.violations,
+                "peak_fill_pct": {k: round(v * 100, 1) for k, v in g.peaks.items()},
+                "worst_underflow_late_ms": round(g.worst_late_ms, 1),
+                "worst_delay_s": round(g.worst_delay_s, 3),
+            }
+            for g in grades
+        },
+        "refused": {str(pid): why for pid, why in refused.items()},
+        "not_elementary": skipped,
     }
-    detail = f"TB overflows {overflows}, worst peak {worst_occ:.0f}B on PID {worst_pid} (TB {th.tb_size_bytes}B)"
-    status = Status.PASS if overflows == 0 else Status.WARN
-    return Check("tstd", Severity.SHAPE, status, detail, metrics)
+    faults = [f"PID {g.pid} {name} x{count}" for g in grades for name, count in sorted(g.violations.items())]
+    faults += [f"PID {pid} refused: {why}" for pid, why in refused.items()]
+    if not grades and not refused:
+        return Check("tstd", Severity.SHAPE, Status.WARN, "no audio/video stream to model", metrics)
+    if not faults and not any(g.graded_units for g in grades):
+        return Check("tstd", Severity.SHAPE, Status.WARN, "no access unit fell inside a modelled time base", metrics)
+    if faults:
+        return Check("tstd", Severity.SHAPE, Status.WARN, "; ".join(faults), metrics)
+    peaks = ", ".join(f"PID {g.pid} " + "/".join(f"{k} {v * 100:.0f}%" for k, v in g.peaks.items()) for g in grades)
+    return Check("tstd", Severity.SHAPE, Status.PASS, f"no overflow or underflow; peak fill {peaks}", metrics)
 
 
 def detect_packet_size(analysis: dict) -> int:
@@ -708,10 +1301,10 @@ def analyze(ts_path: str, th: Thresholds, reference_seconds: float | None = None
         checks.append(bitrate)
         checks.append(burst)
         checks.append(check_inter_arrival(scan, main_clock))
-        checks.append(check_tstd(analysis, scan, main_clock, th))
     else:
-        for name in ("bitrate-consistency", "burstiness", "inter-arrival", "tstd"):
+        for name in ("bitrate-consistency", "burstiness", "inter-arrival"):
             checks.append(Check(name, Severity.SHAPE, Status.WARN, "not enough PCRs to build a clock", {}))
+    checks.append(check_tstd(ts_path, packet_size, scan))
     return checks
 
 
@@ -749,9 +1342,6 @@ def build_thresholds(args: argparse.Namespace) -> Thresholds:
         null_ratio_max=args.null_ratio_max,
         bitrate_cov_max=args.bitrate_cov_max,
         burstiness_max=args.burstiness_max,
-        tb_size_bytes=args.tb_size_bytes,
-        video_leak_bps=args.video_leak_bps,
-        audio_leak_bps=args.audio_leak_bps,
     )
 
 
@@ -770,9 +1360,6 @@ def main() -> int:
     parser.add_argument("--null-ratio-max", type=float, default=Thresholds.null_ratio_max)
     parser.add_argument("--bitrate-cov-max", type=float, default=Thresholds.bitrate_cov_max)
     parser.add_argument("--burstiness-max", type=float, default=Thresholds.burstiness_max)
-    parser.add_argument("--tb-size-bytes", type=int, default=Thresholds.tb_size_bytes)
-    parser.add_argument("--video-leak-bps", type=float, default=Thresholds.video_leak_bps)
-    parser.add_argument("--audio-leak-bps", type=float, default=Thresholds.audio_leak_bps)
     args = parser.parse_args()
 
     th = build_thresholds(args)

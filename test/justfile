@@ -78,7 +78,7 @@ drill-sensitivity *args:
 
 # Round-trips a PCR-paced TS through a relay and checks the subscriber's `export
 # ts` output with TSDuck plus a custom analyzer (PCR jitter/repetition,
-# burstiness, instantaneous bitrate, T-STD). Flags: `--analyze-only file.ts`
+# burstiness, instantaneous bitrate, the T-STD buffer model). Flags: `--analyze-only file.ts`
 # (skip the round-trip), `--strict` (fail on shape warnings), `--source file.ts`
 # (use a real capture), `--live` (grade PCR release timing and byte position off
 # the pipe instead, which a capture cannot carry; nightly runs this arm),
@@ -95,6 +95,13 @@ ts *args:
 [positional-arguments]
 ts-eit *args:
     ./ts/eit-roundtrip.sh "$@"
+
+# The T-STD model's controls: a broadcast capture must pass, and the same capture
+# delivered too slowly, too early, or in a burst must fail. Needs only TSDuck.
+
+# Prove the T-STD model passes a compliant stream and fails broken ones.
+ts-tstd:
+    ./ts/tstd-controls.py
 
 # Runs the @moq/wasm bindings in headless Chromium against a real relay, one per
 # protocol flavour. The crate is `#![cfg(target_arch = "wasm32")]`, so nothing in

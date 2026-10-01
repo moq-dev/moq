@@ -62,6 +62,9 @@ compare with #4618's numbers.
 
 Update `doc/bin/cli.md` and the `moq export ts` examples.
 
+Promote `tstd` in `test/ts/compliance.py` from shape to hard, so `just test
+ts` fails a round-trip the T-STD model rejects; it reports only until then.
+
 Public API: `ts::Export` takes the delay in place of its max age and loses the
 hold; breaking, on `dev`. Wire:
 none.

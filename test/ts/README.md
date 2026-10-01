@@ -57,7 +57,7 @@ moq --connect http://localhost:4443 --broadcast live.hang export ts > sub.ts
 ./run.sh --analyze-only sub.ts
 ```
 
-Requirements: `tsp` and `tsanalyze` (TSDuck) and `python3` for every mode; the
+Requirements: `tsp`, `tsanalyze` and `tstables` (TSDuck) and `python3` for every mode; the
 round-trip modes also need `cargo`, `ffmpeg`, `curl`, and `timeout`.
 
 ## Checks
@@ -87,7 +87,7 @@ Severities: **hard** checks fail the run by default; **shape** checks report as
 | `bitrate-consistency` | shape | instantaneous-bitrate spread over 1 ms / 10 ms windows (CBR-ness) |
 | `burstiness` | shape | peak/mean of windowed delivery |
 | `inter-arrival` | shape | packet inter-arrival spread on the PCR clock (informational) |
-| `tstd` | shape | transport-buffer smoothing (TB fills on arrival, leaks at Rx) |
+| `tstd` | shape | the full T-STD buffer model: no TB, MB, EB or B overflow, no access unit incomplete at its decoding time (see [T-STD](#t-std)) |
 
 Every timing check reads the stream's own PCR, so a PCR emitted on the wrong
 clock rate stays internally consistent and passes them all. `duration-fidelity`
@@ -97,9 +97,75 @@ independent duration, which pins the absolute rate. It runs only on a round-trip
 `--analyze-only` skips it.
 
 Thresholds are CLI flags forwarded through `run.sh` (e.g.
-`--pcr-repetition-ms`, `--pcr-jitter-us`, `--bitrate-cov-max`, `--burstiness-max`,
-`--tb-size-bytes`, `--video-leak-bps`, `--audio-leak-bps`). `--report-json <path>`
-writes the full machine-readable report.
+`--pcr-repetition-ms`, `--pcr-jitter-us`, `--bitrate-cov-max`, `--burstiness-max`).
+`--report-json <path>` writes the full machine-readable report.
+
+## T-STD
+
+`tstd` runs every audio and video stream through the ISO 13818-1 system target
+decoder (2.4.2; Rec. ITU-T H.222.0, whose 10/2014 edition is a free download),
+fed on the stream's own PCR clock:
+
+```text
+video (AVC 2.14.3.1, HEVC 2.17.2)   TB --Rx--> MB --Rbx (leak)--> EB --DTS--> decoder
+audio (2.4.2.3)                     TB --Rx--> B  ----------------PTS--> decoder
+```
+
+It fails a stream where TB, MB, EB or B overflows, where TB stays occupied for a
+second, where an access unit is not wholly in EB/B at its decoding time
+(underflow), or where a byte waits longer than the STD delay bound (1 s, 10 s for
+AVC/HEVC). The report gives each stream's peak fill per buffer, how late the worst
+underflowed access unit finished arriving, and the longest any access unit waited.
+
+No maintained tool implements this. TSDuck has no T-STD analyzer, and nothing else
+in nixpkgs does either, so the model is hand-rolled and its parameters are
+transcribed from the specs: H.264 Table A-1 and H.265 Table A.8 levels read from
+the stream's SPS, the ADTS and "other audio" rates and sizes in H.222.0 2.4.2.3,
+and ATSC A/52 and A/53 Part 5 for AC-3 and E-AC-3. TSDuck still does the parsing
+it can (`tstables` decodes the PMT).
+
+A stream it has no parameters for is refused by name rather than skipped, which
+fails the check: Opus (the Opus-in-TS spec leaves the buffer size unset), MPEG-1/2
+video, DVB E-AC-3, and HEVC beyond Main/Main 10. Sections and private data
+(SCTE-35, teletext) have no elementary-stream buffers and are listed as not
+graded. A signalled PCR discontinuity starts fresh buffers, since the timestamps
+on either side of it are on different clocks.
+
+Two simplifications, one lenient and one strict:
+
+- VUI HRD parameters are not read. The level's default CPB size and bit rate stand
+  in, so a stream declaring smaller ones gets a faster Rx and the same MB + EB total.
+- A packet's bytes reach MB/B when its last byte leaves TB, up to one packet's
+  drain time (0.75 ms for audio) later than byte-by-byte, so underflow is judged
+  that much stricter.
+
+### Controls
+
+`just test ts-tstd` (`tstd-controls.py`) proves the model can tell a compliant
+stream from a broken one. The positive control is a real broadcast encoder's
+output (`kyrion_dirtystart.ts` from the `moq-mux` test data: AVC High@4.0 plus
+two MPEG-1 Layer II tracks), which passes. The negatives restamp its PCRs with
+`tsp -P pcradjust`, leaving every PES and timestamp alone, so only delivery
+changes:
+
+| Case | Expected |
+|---|---|
+| as captured | pass |
+| PCRs restamped at the capture's own rate | pass |
+| delivered at 0.7x | EB and B underflow |
+| delivered at 4x | B overflow |
+| delivered at 15x (a burst) | TB, MB and B overflow |
+
+The ffmpeg clip `run.sh` generates is not a positive control: its muxer sends
+audio 0.7 s ahead by default (`-muxdelay`), which overflows the 3,584-byte ADTS
+buffer, and even at 0.1 s a four-packet audio burst overflows TB.
+
+### Gate
+
+`tstd` is a shape check, so `just test ts` reports it without failing. `export
+ts` output does not pass yet: some video access units arrive after their DTS, and
+audio runs far enough ahead, in bursts, to overflow both TB and B. The change that
+makes the exporter release on a fixed delay promotes `tstd` to a hard check.
 
 ## PCR timing (`pcr-timing.py`)
 
@@ -444,8 +510,8 @@ exporter re-emits SI on its own repetition cadence rather than the source's.
 ## CI
 
 `.github/workflows/interop.yml` runs `just test ts`, `just test ts --open-gop`,
-and `just test ts-eit` after the interop matrix (nightly, on demand, and on PRs
-touching `test/ts/`).
+`just test ts-eit`, and `just test ts-tstd` after the interop matrix (nightly, on
+demand, and on PRs touching `test/ts/`).
 `ts-eit` is `eit-roundtrip.sh`: it builds the sparse-schedule and
 pending-version fixtures from a generated clip, round-trips them through a
 relay, and censuses the capture, so a break in the generators or in the SI
@@ -469,6 +535,3 @@ that from a pipe running slow.
 - Wall-clock delivery jitter/burstiness is out of scope *for `compliance.py`*:
   all of its timing is derived from the stream's PCR, not from arrival times.
   `pcr-timing.py --live` covers that axis separately, by stamping a pipe.
-- `tstd` models only the transport-buffer (TB) smoothing stage of the ISO 13818-1
-  T-STD, not the full multiplex/elementary decode buffers. Its leak rates are
-  defaults, not level-derived, so treat overflow as a smell rather than proof.
