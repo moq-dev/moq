@@ -102,7 +102,6 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [TS health stats](/quest/m2/ts-health-stats.md) - the TS counters ride the stats plumbing beside the media counters
 - [Teleoperation](/quest/m2/teleop/README.md) - MoQ carries robot video down and control up on one session as a library capability
 - [Media QA on other engines](/quest/m2/browser-media-qa-engines.md) - the media harness measures a Firefox or WebKit player over the fallback and names what each engine lacks
-- [Firefox 155 WebTransport](/quest/m2/firefox-155-webtransport.md) - Firefox negotiates the version by subprotocol, and the other new WebTransport features stay unused on purpose
 - [Windows.Graphics.Capture](/quest/m2/capture-wgc.md) - one WGC backend for display and window capture with the cursor, replacing Desktop Duplication and GDI
 - [Windows capture parity](/quest/m2/capture-windows.md) - system audio and a settled app-capture policy
 - [Linux capture parity](/quest/m2/capture-linux.md) - Wayland window/system-audio capture with explicit display-selection and app-capture limits
