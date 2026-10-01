@@ -339,8 +339,12 @@ export class Connection implements Established {
 			return;
 		}
 
-		// Either side may cancel padding at any time, which discards the rest unread.
-		if (type === PADDING && version >= Version.DRAFT_18) return;
+		// The receiver MUST discard padding. We read it to the end rather than cancel,
+		// so a peer probing for bandwidth gets the throughput it is measuring.
+		if (type === PADDING && version >= Version.DRAFT_18) {
+			await stream.discard();
+			return;
+		}
 
 		// We never FETCH, so a fetch response answers nothing of ours.
 		if (type === BigInt(FetchHeader.type)) throw new Error("unexpected fetch stream");

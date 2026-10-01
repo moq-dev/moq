@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { SessionCode, StreamCode, Stream as StreamError } from "../error.ts";
+import { SessionCode } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Stream, Writer } from "../stream.ts";
 import { Connection } from "./connection.ts";
@@ -30,8 +30,8 @@ async function openUni(
 	return { pair, connection, writer };
 }
 
-/** The draft lets the receiver cancel padding at any time without affecting the session. */
-test("a padding stream is cancelled", async () => {
+/** Padding is read to the end and dropped: no STOP_SENDING, and the session stays up. */
+test("a padding stream is discarded", async () => {
 	const { pair, connection, writer } = await openUni(Version.DRAFT_19, ALPN.DRAFT_19, PADDING);
 	let closed = false;
 	void pair.server.closed.then(() => {
@@ -39,14 +39,13 @@ test("a padding stream is cancelled", async () => {
 	});
 
 	try {
-		const err = await writer.closed.then(
-			() => undefined,
-			(err: unknown) => err,
-		);
-		expect(err).toBeInstanceOf(StreamError);
-		expect((err as StreamError).code).toBe(StreamCode.Cancel);
+		await writer.write(new Uint8Array(4096));
+		writer.close();
 
-		// A session close would come from the same handler that stopped the stream.
+		// A STOP_SENDING would reject this; a clean close means every byte was read.
+		await writer.closed;
+
+		// A session close would come from the same handler that read the stream.
 		await Bun.sleep(0);
 		expect(closed).toBe(false);
 	} finally {

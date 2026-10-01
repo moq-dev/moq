@@ -407,6 +407,15 @@ export class Reader {
 		return this.#slice(this.#buffer.byteLength);
 	}
 
+	// Reads to the end of the stream, dropping every byte instead of buffering it.
+	async discard(): Promise<void> {
+		this.#buffer = new Uint8Array();
+		do {
+			this.#chunks = [];
+			this.#chunked = 0;
+		} while (await this.#fill());
+	}
+
 	async string(): Promise<string> {
 		return this.decode(STRING);
 	}

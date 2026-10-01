@@ -792,9 +792,13 @@ where
 					stop_on_error(&mut reader, res);
 				});
 			}
-			// Either side may cancel padding at any time, which discards the rest without
-			// spending flow control on bytes nobody reads.
-			UniType::Padding => reader.abort(&Error::Cancel),
+			// The receiver MUST discard padding. We read it to the end rather than cancel,
+			// so a peer probing for bandwidth gets the throughput it is measuring.
+			UniType::Padding => {
+				tasks.push(async move {
+					while let Ok(Some(_)) = std::future::poll_fn(|cx| reader.poll_read_chunk(cx, usize::MAX)).await {}
+				});
+			}
 		}
 	}
 }
@@ -1452,10 +1456,9 @@ mod tests {
 		buf
 	}
 
-	/// The draft lets the receiver cancel padding at any time without affecting the
-	/// session, so it is stopped as a routine cancel rather than an error.
+	/// Padding is read and dropped: no STOP_SENDING, and the session stays up.
 	#[tokio::test(start_paused = true)]
-	async fn a_padding_stream_is_cancelled() {
+	async fn a_padding_stream_is_discarded() {
 		for version in [
 			Version::Draft18,
 			Version::Draft19,
@@ -1465,7 +1468,11 @@ mod tests {
 		] {
 			let (log, result) = dispatch_uni(version, uni_stream(version, PADDING), None).await;
 
-			assert_eq!(log.stops(), vec![crate::ietf::error::CANCELLED], "{version:?}");
+			assert!(
+				log.stops().is_empty(),
+				"{version:?}: padding was stopped: {:?}",
+				log.stops()
+			);
 			assert!(result.is_none(), "{version:?}: padding ended the session: {result:?}");
 			assert_eq!(log.closes(), vec![], "{version:?}");
 		}

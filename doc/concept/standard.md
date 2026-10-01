@@ -31,8 +31,8 @@ This is an implementation limit, not a limit in the IETF draft. A larger
 declared block stops its subgroup stream with `MALFORMED_TRACK` before reading
 the block; other groups and the session stay open.
 
-Rust and JavaScript cancel an incoming padding stream (draft-18 and later)
-without reading it. A unidirectional stream type the negotiated draft does not
+Rust and JavaScript read an incoming padding stream (draft-18 and later) to
+the end and discard it, without sending `STOP_SENDING`. A unidirectional stream type the negotiated draft does not
 define, or a `SUBGROUP_HEADER` type it marks invalid, closes the session with
 `PROTOCOL_VIOLATION`, as the draft requires.
 
