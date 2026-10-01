@@ -17,6 +17,7 @@
 #   ./run.sh --with-eit            # add a synthetic EPG first, report which SI survived
 #   ./run.sh --live                # grade PCR release timing off the live pipe
 #   ./run.sh --pair                # two exporters of one broadcast, grade table anchoring
+#   ./run.sh --open-gop            # open-GOP clip; its leading pictures must survive
 
 # `--live` swaps the analyzer, not the rig. compliance.py grades a captured file
 # on the stream's own PCR clock, which is the right basis for the IRD model it
@@ -59,6 +60,7 @@ STRICT=""
 WITH_EIT="" # add a synthetic EPG to the source and report which SI survived
 LIVE=""     # grade the exporter's stdout as it arrives, rather than a capture
 PAIR=""     # subscribe twice and grade the two captures against each other
+OPEN_GOP="" # publish open GOP with leading pictures, and grade them through the round-trip
 # How far into the run the second subscriber joins. A late join is the point: two
 # exporters started together can share a cadence by starting together, which is
 # exactly the thing under test.
@@ -116,6 +118,10 @@ while [[ $# -gt 0 ]]; do
             PAIR_JOIN="$2"
             shift 2
             ;;
+        --open-gop)
+            OPEN_GOP=1
+            shift
+            ;;
         *)
             PASSTHRU+=("$1")
             shift
@@ -140,6 +146,12 @@ if [[ -n "$PAIR" ]]; then
         echo "  raise --duration above $((PAIR_JOIN + PAIR_MIN_OVERLAP)), or lower --pair-join" >&2
         exit 1
     fi
+fi
+
+# open-gop.py grades a capture against its source, which only the plain round-trip keeps.
+if [[ -n "$OPEN_GOP" && -n "$ANALYZE_ONLY$LIVE$PAIR" ]]; then
+    echo "error: --open-gop cannot be combined with --analyze-only, --live, or --pair" >&2
+    exit 1
 fi
 
 URL="" # set once a port is reserved, below
@@ -226,17 +238,22 @@ if [[ -n "$SOURCE" ]]; then
         exit 1
     }
 else
-    echo "### generating ~${DURATION}s broadcast-like clip with ffmpeg"
+    echo "### generating ~${DURATION}s broadcast-like ${OPEN_GOP:+open-GOP }clip with ffmpeg"
     # CBR with a 20 ms PCR, like a contribution feed. Not cosmetic: `regulate`
     # paces on the source PCR, so a clip whose clock is coarse and whose rate is
     # unconstrained is released unevenly and finishes early (measured: a 20 s clip
     # in 17 s, and release jitter of its own). The harness then grades ffmpeg.
+    X264="keyint=25:min-keyint=25:scenecut=0"
+    # Open GOP: after the first IDR, every keyframe is a non-IDR I picture with a
+    # recovery-point SEI. Fixed B placement in a 24-frame GOP puts three B pictures
+    # right after each one in decode order, presented before it: leading pictures.
+    [[ -n "$OPEN_GOP" ]] && X264="keyint=24:min-keyint=24:scenecut=0:open-gop=1:bframes=3:b-adapt=0"
     ffmpeg -y -hide_banner -loglevel error \
         -f lavfi -i "testsrc=size=1280x720:rate=25" \
         -f lavfi -i "sine=frequency=1000:sample_rate=48000" \
         -t "$DURATION" \
         -c:v libx264 -profile:v high -preset veryfast -pix_fmt yuv420p \
-        -x264-params "keyint=25:min-keyint=25:scenecut=0" -b:v 8M \
+        -x264-params "$X264" -b:v 8M \
         -c:a aac -b:a 128k \
         -f mpegts -muxrate "$BITRATE" -pcr_period 20 -pes_payload_size 0 "$SRC_TS"
 fi
@@ -477,6 +494,18 @@ if [[ -n "$WITH_EIT" ]]; then
         printf '  %-10s %-8s %12s %12s\n' "${spec%%:*}" "${spec##*:}" \
             "$(count_pid "$SRC_TS" "${spec##*:}")" "$(count_pid "$SUB_TS" "${spec##*:}")"
     done
+fi
+
+# Leading pictures are only decodable in continuous playback, which is the case this
+# subscriber is in, so the round-trip owes every one of them, in decode order.
+if [[ -n "$OPEN_GOP" ]]; then
+    echo
+    if ! python3 "$DIR/open-gop.py" "$SRC_TS" "$SUB_TS" $STRICT; then
+        echo >&2
+        echo "error: open-GOP analysis failed (see round-trip logs below)" >&2
+        dump_logs
+        exit 1
+    fi
 fi
 echo
 # Pass the source so duration-fidelity can pin the exported stream's rate. A tiny

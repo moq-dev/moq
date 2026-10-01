@@ -188,16 +188,17 @@ class SharedAudioBuffer implements AudioBuffer {
 	setLatency(samples: number): void {
 		this.#backpressure.setHeadroom(samplesToMicro(samples, this.rate));
 
+		// Park the current ring before any resize: the worklet keeps reading it until `init-shared`
+		// lands, and `resize` carries the floor and the park over to the copy.
+		this.#ring.setLatency(samples);
+
 		// Grow the ring (preserving the unread window) if it's too small for the new latency.
 		if (this.#ring.capacity < samples * 1.5) {
 			const newCapacity = Math.max(this.rate, samples * 2);
 			this.#ring = this.#ring.resize(newCapacity);
-			this.#ring.setLatency(samples);
 
 			const msg: InitShared = { type: "init-shared", ...this.#ring.init };
 			this.#worklet.port.postMessage(msg);
-		} else {
-			this.#ring.setLatency(samples);
 		}
 	}
 

@@ -1,36 +1,25 @@
 //! Audio decoder front end.
 //!
-//! Mirror of [`encode::Encoder`](crate::encode::Encoder): dispatches over the
-//! catalog codec and produces interleaved `f32` PCM.
-
-use unsafe_libopus::{
-	OPUS_OK, OPUS_RESET_STATE, OPUS_SET_GAIN_REQUEST, OpusDecoder, opus_decode_float, opus_decoder_create,
-	opus_decoder_ctl_impl, opus_decoder_destroy, varargs,
-};
-
-#[cfg(feature = "aac")]
-use symphonia_core::codecs::audio::AudioDecoder;
+//! Mirror of [`encode::Encoder`](crate::encode::Encoder): opens a
+//! [`Backend`](super::backend::Backend) for the catalog codec and trims its
+//! startup delay, producing interleaved `f32` PCM.
 
 use super::Decoded;
-#[cfg(feature = "aac")]
-use crate::aac;
-use crate::opus;
-use crate::pcm;
-use crate::{Activity, Error, Layout};
-
-/// Opus packets cap at 120 ms (RFC 6716 §2.1.4).
-const MAX_FRAME_MS: usize = 120;
+use super::backend::{self, Backend};
+use crate::{Error, Layout};
 
 /// Decoder backend selection.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Kind {
-	/// Pick the available backend automatically.
+	/// Prefer a platform decoder, falling back to software.
 	#[default]
 	Auto,
-	/// Require the built-in software backend.
+	/// Require a software backend.
 	Software,
-	/// Require a backend by its stable lowercase name.
+	/// Require the track to be this codec, by its lowercase name: `"opus"`,
+	/// `"pcm"`, or `"aac"`. Any other codec is refused. The library still picks
+	/// the backend, platform first.
 	Named(String),
 }
 
@@ -54,183 +43,43 @@ impl Config {
 /// The bring-your-own-payload layer under [`Consumer`](super::Consumer): use it
 /// when the packets don't come from a plain track subscription.
 pub struct Decoder {
-	backend: Backend,
-	sample_rate: u32,
-	layout: Layout,
+	backend: Box<dyn Backend>,
+	/// Startup delay in native-rate frames, and how much of it is left to trim.
 	delay: usize,
-}
-
-enum Backend {
-	Opus(Opus),
-	Pcm {
-		bytes_per_frame: usize,
-	},
-	#[cfg(feature = "aac")]
-	Aac(Box<Aac>),
-}
-
-struct Opus {
-	inner: *mut OpusDecoder,
-	pre_skip_remaining: usize,
-	max_frame_size: usize,
-	in_dtx: bool,
-}
-
-// SAFETY: see Encoder.
-unsafe impl Send for Opus {}
-
-/// Boxed in [`Backend`]: the symphonia decoder carries its own filterbank state,
-/// which is far larger than the other backends' handles.
-#[cfg(feature = "aac")]
-struct Aac {
-	inner: symphonia_codec_aac::AacDecoder,
+	delay_remaining: usize,
 }
 
 impl Decoder {
 	/// Build a decoder from a catalog [`AudioConfig`](hang::catalog::AudioConfig).
 	///
 	/// Opus decodes at 48 kHz with the pre-skip and gain its OpusHead
-	/// `description` declares, refusing a malformed head or a channel mapping
-	/// other than mono/stereo; without a description it takes the catalog's
-	/// channel count and applies neither. PCM uses the catalog fields directly
-	/// and requires an absent `description`.
+	/// `description` declares, refusing a malformed head; without a description
+	/// it takes the catalog's channel count and applies neither. PCM uses the
+	/// catalog fields directly and requires an absent `description`. AAC reads
+	/// its AudioSpecificConfig, synthesizing one from the catalog when absent.
 	pub fn new(catalog: &hang::catalog::AudioConfig, config: &Config) -> Result<Self, Error> {
-		let name = match &catalog.codec {
-			hang::catalog::AudioCodec::Opus => "opus",
-			hang::catalog::AudioCodec::Pcm => "pcm",
-			#[cfg(feature = "aac")]
-			hang::catalog::AudioCodec::AAC(_) => "aac",
-			codec => return Err(Error::Unsupported(format!("unsupported audio codec: {codec}"))),
-		};
-		match &config.kind {
-			Kind::Auto | Kind::Software => {}
-			Kind::Named(requested) if requested == name => {}
-			Kind::Named(requested) => {
-				return Err(Error::Unsupported(format!(
-					"audio decoder backend {requested:?} is unavailable for {name}"
-				)));
-			}
-		}
-		match &catalog.codec {
-			hang::catalog::AudioCodec::Opus => Self::new_opus(catalog),
-			hang::catalog::AudioCodec::Pcm => Self::new_pcm(catalog),
-			#[cfg(feature = "aac")]
-			hang::catalog::AudioCodec::AAC(aac) => Self::new_aac(catalog, aac.profile),
-			codec => Err(Error::Unsupported(format!("unsupported audio codec: {codec}"))),
-		}
-	}
-
-	fn new_opus(catalog: &hang::catalog::AudioConfig) -> Result<Self, Error> {
-		let head = opus::head(catalog)?;
-		let channels = opus::validate_channels(head.channel_count)?;
-
-		let mut err = 0i32;
-		// SAFETY: out-pointer is valid; inner is checked for null below.
-		let inner = unsafe { opus_decoder_create(opus::DECODE_RATE as i32, channels, &mut err) };
-		if err != OPUS_OK || inner.is_null() {
-			return Err(opus::error(err, "opus_decoder_create"));
-		}
-		// Owned before the gain ctl so a failure there still destroys the decoder.
-		let decoder = Opus {
-			inner,
-			pre_skip_remaining: head.pre_skip as usize,
-			max_frame_size: (opus::DECODE_RATE as usize * MAX_FRAME_MS) / 1000,
-			in_dtx: false,
-		};
-
-		// Same Q7.8 dB units as OpusHead, and it survives OPUS_RESET_STATE.
-		// SAFETY: `inner` owns a live decoder and OPUS_SET_GAIN takes one i32.
-		let rc =
-			unsafe { opus_decoder_ctl_impl(decoder.inner, OPUS_SET_GAIN_REQUEST, varargs![head.output_gain as i32]) };
-		if rc != OPUS_OK {
-			return Err(opus::error(rc, "OPUS_SET_GAIN"));
-		}
-
+		let backend = backend::open(catalog, config)?;
+		let delay = backend.delay();
 		Ok(Self {
-			delay: decoder.pre_skip_remaining,
-			backend: Backend::Opus(decoder),
-			sample_rate: opus::DECODE_RATE,
-			layout: Layout::from_channels(head.channel_count)?,
+			backend,
+			delay,
+			delay_remaining: delay,
 		})
 	}
 
-	/// AAC-LC only, which is what every gateway that feeds this crate publishes.
-	///
-	/// HE-AAC is rejected however its config spells it: leading with SBR or PS
-	/// (mp4a.40.5 / .29), or leading with LC and declaring SBR in a sync extension
-	/// after the core. Symphonia decodes no SBR either way, so the alternative is
-	/// half-rate audio that sounds like a fault rather than an unsupported codec.
-	/// A stream that signals SBR only in band is indistinguishable from LC in the
-	/// config, and does decode as the core.
-	#[cfg(feature = "aac")]
-	fn new_aac(catalog: &hang::catalog::AudioConfig, profile: u8) -> Result<Self, Error> {
-		use symphonia_core::codecs::audio::well_known::CODEC_ID_AAC;
-		use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoderOptions};
-
-		let description = aac::description(catalog, profile)?;
-
-		let mut params = AudioCodecParameters::new();
-		params
-			.for_codec(CODEC_ID_AAC)
-			.with_extra_data(description.to_vec().into_boxed_slice());
-
-		let inner = symphonia_codec_aac::AacDecoder::try_new(&params, &AudioDecoderOptions::default())
-			.map_err(|err| Error::Unsupported(format!("aac decoder: {err}")))?;
-
-		// Resolved by the decoder from the config, so this is what it will emit
-		// even when the catalog's own fields say otherwise.
-		let params = inner.codec_params();
-		let sample_rate = params
-			.sample_rate
-			.ok_or_else(|| Error::Unsupported("aac config declares no sample rate".into()))?;
-		let channel_count = params
-			.channels
-			.as_ref()
-			.map(|channels| channels.count())
-			.ok_or_else(|| Error::Unsupported("aac config declares no channels".into()))?;
-
-		Ok(Self {
-			backend: Backend::Aac(Box::new(Aac { inner })),
-			sample_rate,
-			layout: Layout::from_channels(channel_count as u32)?,
-			delay: 0,
-		})
+	/// The decoder backend name in use, e.g. `"libopus"` or `"symphonia"`.
+	pub fn name(&self) -> &str {
+		self.backend.name()
 	}
 
-	fn new_pcm(catalog: &hang::catalog::AudioConfig) -> Result<Self, Error> {
-		if catalog.sample_rate == 0 {
-			return Err(Error::Unsupported("pcm sample rate must be greater than zero".into()));
-		}
-		if catalog.channel_count == 0 {
-			return Err(Error::Unsupported("pcm channel count must be greater than zero".into()));
-		}
-		if catalog.description.is_some() {
-			return Err(Error::Unsupported("pcm catalog description must be absent".into()));
-		}
-		let bitrate = pcm::bitrate(catalog.sample_rate, catalog.channel_count)?;
-		if catalog.bitrate.is_some_and(|declared| declared != bitrate) {
-			return Err(Error::Unsupported(format!(
-				"pcm catalog bitrate must be {bitrate} bits per second"
-			)));
-		}
-		let bytes_per_frame = pcm::frame_bytes(1, catalog.channel_count)?;
-
-		Ok(Self {
-			backend: Backend::Pcm { bytes_per_frame },
-			sample_rate: catalog.sample_rate,
-			layout: Layout::from_channels(catalog.channel_count)?,
-			delay: 0,
-		})
-	}
-
-	/// The rate the codec decodes at, read from the catalog.
+	/// The rate the codec decodes at, which may differ from the catalog's.
 	pub fn sample_rate(&self) -> u32 {
-		self.sample_rate
+		self.backend.sample_rate()
 	}
 
-	/// The PCM layout decoded from the catalog.
+	/// The PCM layout the codec decodes to.
 	pub fn layout(&self) -> Layout {
-		self.layout
+		self.backend.layout()
 	}
 
 	/// Reset codec history and reapply startup delay for a new discontinuous epoch.
@@ -242,27 +91,12 @@ impl Decoder {
 
 	/// Reapply catalog startup delay for a new playhead epoch without resetting codec prediction.
 	pub(super) fn reapply_delay(&mut self) {
-		if let Backend::Opus(opus) = &mut self.backend {
-			opus.pre_skip_remaining = self.delay;
-		}
+		self.delay_remaining = self.delay;
 	}
 
 	/// Reset codec prediction after packet loss without reapplying stream startup delay.
 	pub(super) fn reset_prediction(&mut self) -> Result<(), Error> {
-		match &mut self.backend {
-			Backend::Opus(opus) => {
-				// SAFETY: `inner` owns a live decoder and OPUS_RESET_STATE takes no arguments.
-				let rc = unsafe { opus_decoder_ctl_impl(opus.inner, OPUS_RESET_STATE, varargs![]) };
-				if rc != OPUS_OK {
-					return Err(crate::opus::error(rc, "OPUS_RESET_STATE"));
-				}
-				opus.in_dtx = false;
-			}
-			Backend::Pcm { .. } => {}
-			#[cfg(feature = "aac")]
-			Backend::Aac(aac) => aac.inner.reset(),
-		}
-		Ok(())
+		self.backend.reset()
 	}
 
 	/// How much startup delay is still to be trimmed, in native-rate frames.
@@ -271,101 +105,25 @@ impl Decoder {
 	/// it, so a caller tracking where a packet ends has to add back whatever this
 	/// dropped across the call.
 	pub(super) fn delay_remaining(&self) -> usize {
-		match &self.backend {
-			Backend::Opus(opus) => opus.pre_skip_remaining,
-			Backend::Pcm { .. } => 0,
-			#[cfg(feature = "aac")]
-			Backend::Aac(_) => 0,
-		}
+		self.delay_remaining
 	}
 
 	/// Decode one packet into interleaved `f32` PCM and report its codec activity.
 	///
-	/// Empty Opus packets invoke packet-loss concealment. Loss during DTX remains
-	/// classified as DTX, while loss during active audio remains active.
+	/// An empty Opus packet marks one lost packet and conceals as much audio as the
+	/// last packet that decoded held, so a lost 20 ms packet yields 20 ms. It is
+	/// refused with [`Error::Decode`] before any packet has decoded, since there is
+	/// no length to conceal. Loss during DTX remains classified as DTX, while loss
+	/// during active audio remains active.
 	pub fn decode(&mut self, packet: &[u8]) -> Result<Decoded, Error> {
-		match &mut self.backend {
-			Backend::Opus(opus) => {
-				let channels = self.layout.channels() as usize;
-				let mut out = vec![0.0f32; opus.max_frame_size * channels];
-				// SAFETY: `inner` owns a live OpusDecoder; packet/out slices are
-				// bounded by the lengths we pass.
-				let samples = unsafe {
-					opus_decode_float(
-						&mut *opus.inner,
-						packet.as_ptr(),
-						packet.len() as i32,
-						out.as_mut_ptr(),
-						opus.max_frame_size as i32,
-						0,
-					)
-				};
-				if samples < 0 {
-					return Err(crate::opus::decode_error(samples));
-				}
-				out.truncate(samples as usize * channels);
-				let trim_frames = opus.pre_skip_remaining.min(samples as usize);
-				if trim_frames > 0 {
-					let trim_samples = trim_frames * channels;
-					out.copy_within(trim_samples.., 0);
-					out.truncate(out.len() - trim_samples);
-					opus.pre_skip_remaining -= trim_frames;
-				}
-				let activity = crate::opus::activity(packet, opus.in_dtx);
-				opus.in_dtx = activity.is_dtx();
-				Ok(Decoded { samples: out, activity })
-			}
-			Backend::Pcm { bytes_per_frame } => {
-				if packet.is_empty() || !packet.len().is_multiple_of(*bytes_per_frame) {
-					return Err(Error::Misaligned {
-						got: packet.len(),
-						expected: packet.len().max(1).next_multiple_of(*bytes_per_frame),
-					});
-				}
-
-				let out = packet
-					.as_chunks::<{ pcm::BYTES_PER_SAMPLE }>()
-					.0
-					.iter()
-					.map(|sample| f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]))
-					.collect();
-				Ok(Decoded {
-					samples: out,
-					activity: Activity::Active,
-				})
-			}
-			#[cfg(feature = "aac")]
-			Backend::Aac(aac) => {
-				// The packet is a raw AAC frame, not ADTS, so there is nothing to
-				// timestamp it with here: the container carries the timestamp and the
-				// decoder only reads the payload.
-				let packet = symphonia_core::packet::PacketRef::new(
-					0,
-					symphonia_core::units::Timestamp::ZERO,
-					symphonia_core::units::Duration::ZERO,
-					packet,
-				);
-
-				let decoded = aac
-					.inner
-					.decode_ref(&packet)
-					.map_err(|err| Error::Decode(format!("aac: {err}")))?;
-
-				let mut out = Vec::new();
-				decoded.copy_to_vec_interleaved(&mut out);
-				Ok(Decoded {
-					samples: out,
-					activity: Activity::Active,
-				})
-			}
+		let mut decoded = self.backend.decode(packet)?;
+		let channels = self.backend.layout().channels() as usize;
+		let trim = self.delay_remaining.min(decoded.samples.len() / channels);
+		if trim > 0 {
+			decoded.samples.drain(..trim * channels);
+			self.delay_remaining -= trim;
 		}
-	}
-}
-
-impl Drop for Opus {
-	fn drop(&mut self) {
-		// SAFETY: `inner` is a live OpusDecoder that nothing else aliases.
-		unsafe { opus_decoder_destroy(self.inner) };
+		Ok(decoded)
 	}
 }
 
@@ -400,10 +158,18 @@ pub(crate) mod tests {
 		catalog
 	}
 
+	/// The published `Decoder` was unwind safe before it boxed a backend; keep it so.
+	#[test]
+	fn decoder_is_unwind_safe() {
+		fn assert_unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+		assert_unwind_safe::<Decoder>();
+	}
+
 	#[cfg(feature = "aac")]
 	#[test]
 	fn aac_decodes_a_sine() {
 		let mut decoder = Decoder::new(&aac_catalog(), &Config::default()).unwrap();
+		assert_eq!(decoder.name(), "symphonia");
 		assert_eq!(decoder.sample_rate(), 44_100);
 		assert_eq!(decoder.layout(), Layout::Mono);
 
@@ -504,6 +270,29 @@ pub(crate) mod tests {
 		}
 	}
 
+	/// One lost packet conceals one packet's worth of audio, not the 120 ms
+	/// libopus would fill given the whole buffer.
+	#[test]
+	fn opus_conceals_the_length_of_the_last_packet() {
+		let packets = opus_packets(3);
+		let mut decoder = Decoder::new(
+			&opus_catalog(moq_mux::codec::opus::Config::new(48_000, 1)),
+			&Config::default(),
+		)
+		.unwrap();
+
+		// Nothing decoded yet, so there is no length to conceal.
+		assert!(matches!(decoder.decode(&[]), Err(Error::Decode(_))));
+
+		for packet in &packets {
+			decoder.decode(packet).unwrap();
+		}
+		assert_eq!(decoder.decode(&[]).unwrap().samples.len(), 960);
+
+		// Concealment doesn't change the length: the next loss is the same size.
+		assert_eq!(decoder.decode(&[]).unwrap().samples.len(), 960);
+	}
+
 	#[test]
 	fn opus_applies_the_declared_gain() {
 		let packets = opus_packets(5);
@@ -564,26 +353,6 @@ pub(crate) mod tests {
 		}
 	}
 
-	/// Mapping families other than 0 need the multistream decoder; a stereo
-	/// family 1 head is refused rather than decoded as family 0.
-	#[test]
-	fn opus_refuses_unsupported_channel_mappings() {
-		let valid = moq_mux::codec::opus::Config::new(48_000, 2).encode().unwrap().to_vec();
-		for family in [1, 255] {
-			let mut description = valid.clone();
-			description[18] = family;
-			// One coupled stream, left then right.
-			description.extend_from_slice(&[1, 1, 0, 1]);
-
-			let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
-			catalog.description = Some(description.into());
-			assert!(
-				matches!(Decoder::new(&catalog, &Config::default()), Err(Error::Unsupported(_))),
-				"family {family}"
-			);
-		}
-	}
-
 	/// Without a description the catalog shapes the stream, which has no pre-skip.
 	#[test]
 	fn opus_decodes_without_a_description() {
@@ -632,6 +401,24 @@ pub(crate) mod tests {
 
 		assert!(matches!(
 			Decoder::new(&catalog, &Config::default()),
+			Err(Error::Unsupported(_))
+		));
+	}
+
+	/// Published moq-audio accepts the codec's name, not a backend's.
+	#[cfg(feature = "aac")]
+	#[test]
+	fn named_aac_decodes_aac() {
+		let config = Config {
+			kind: Kind::Named("aac".into()),
+		};
+		assert!(Decoder::new(&aac_catalog(), &config).is_ok());
+
+		let config = Config {
+			kind: Kind::Named("opus".into()),
+		};
+		assert!(matches!(
+			Decoder::new(&aac_catalog(), &config),
 			Err(Error::Unsupported(_))
 		));
 	}

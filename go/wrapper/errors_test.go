@@ -30,6 +30,27 @@ func TestStreamAbortProtocolDetails(t *testing.T) {
 	}
 }
 
+func TestErrorMessage(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{ffi.NewMoqErrorClosed(), "closed"},
+		{ffi.NewMoqErrorTransport("reset"), "transport: reset"},
+		{ffi.NewMoqErrorProtocol(ffi.MoqProtocolError{
+			Scope:   ffi.MoqErrorScopeStream,
+			Code:    468,
+			Kind:    ffi.MoqProtocolKindApp,
+			Message: "gone",
+		}), "gone"},
+	}
+	for _, test := range tests {
+		if got := test.err.Error(); got != test.want {
+			t.Errorf("Error() = %q, want %q", got, test.want)
+		}
+	}
+}
+
 func TestErrorSentinels(t *testing.T) {
 	tests := []struct {
 		name     string

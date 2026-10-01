@@ -81,7 +81,7 @@ Decided while planning [#1838](https://github.com/moq-dev/moq/issues/1838):
 - **No opaque whole-mux lane**:
   [#1861](https://github.com/moq-dev/moq/issues/1861) is closed not planned
   and verbatim TS is a non-goal in
-  [MSFTS convergence](/quest/m4/msfts-convergence.md). P3 is out of this set;
+  [MSFTS convergence](/quest/m2/msfts-convergence.md). P3 is out of this set;
   `CAT_error` too, since the lane carries no scrambled service. A scrambled
   PAT or PMT still counts under its own check.
 
@@ -92,8 +92,8 @@ Implementation:
   declared by `discontinuity_indicator`, the one duplicate ISO 13818-1
   2.4.3.3 permits, and a payload-less packet repeating its counter are not
   errors.
-- `rs/moq-cli/src/publish.rs` `log_stats` logs a line when a counter moves,
-  as it does for resyncs.
+- `ts::stats::Log` logs a line when a counter moves, as it does for
+  resyncs.
 - Measure `decode` throughput on `test_data/kyrion_mpeg2av_ac3.ts` before and
   after; the checks read header bytes the loop already reads, so a measurable
   cost is a finding.
@@ -112,5 +112,4 @@ Implementation:
 
 ## Related
 
-- [SRT import stats](/quest/m1/srt-import-stats.md) - the gateway forwards the same `stats()`
 - [TS health stats](/quest/m2/ts-health-stats.md) - where these counters are published

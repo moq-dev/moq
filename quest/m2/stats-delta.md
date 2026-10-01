@@ -76,10 +76,9 @@ Design points left open for the implementer:
 - Extensibility: if every field is a varint, a reader can skip mask bits it
   does not know, so fields append without breaking old readers. Decide that
   or refuse unknown bits loudly, and say which.
-- Gauges: the [client stats](/quest/m1/qos/stats/README.md) extension adds
-  non-monotonic gauges (a latency, a target bitrate). Encode them absolute or
-  zigzag, or have a producer with a non-`()` extension refuse this flavor, and
-  document the contract.
+- Gauges: none today. Media stats, with their latency and bitrate gauges,
+  ride hang tracks rather than a moq-stats extension, so this flavor encodes
+  relay frames only.
 - Measure `sessions` (`Presence`) too; the benchmark skipped it.
 - Sweep the aggregate over node publishers x entries per node, for both
   flavors; the benchmark above only varied one relay's stream, so it cannot
@@ -95,8 +94,7 @@ which is a published API break and goes to `dev` unless additive.
 `TrafficFrame` / `SessionsFrame`. The JS decoder is about 120 lines and
 dependency-free apart from inflate (`@moq/flate`); read varints through
 `BigInt` or split 32-bit halves, since counters exceed 2^53. It belongs with
-the JS stats reader, `@moq/stats` if [browser reporters](/quest/m1/qos/stats/js.md)
-has landed by then. Share fixtures between Rust and JS so the two stay wire
+the demo dashboard's relay-stats reader. Share fixtures between Rust and JS so the two stay wire
 identical, and keep the benchmark in-tree, wired into CI at least nightly.
 
 **Docs and spec.** No IETF draft covers stats today. Write the format into
@@ -108,8 +106,11 @@ maintainer's call; ask before writing one.
 Public API impact: additive on moq-stats unless the helpers change. Wire
 impact: new on-demand tracks; existing tracks unchanged.
 
+## Required
+
+- [Bench coverage](/quest/m2/bench-coverage.md) - its stats producer benchmark is the moq-json snapshot encoder profile the gate needs
+
 ## Related
 
 - [Stats format page](/doc/concept/stats.md) - where the new flavor is documented
-- [Client stats](/quest/m1/qos/stats/README.md) - the extension and gauges the format must carry or refuse
-- [Compressed tracks](/quest/m2/flate/README.md) - group-scoped DEFLATE tracks, whose group-window discipline this flavor repeats
+- [Compressed tracks](/quest/m2/flate.md) - group-scoped DEFLATE tracks, whose group-window discipline this flavor repeats

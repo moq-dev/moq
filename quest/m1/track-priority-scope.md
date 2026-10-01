@@ -57,6 +57,11 @@ Direction to settle in the draft first, then the code:
   or narrow the goal to subscription delivery.
 - Keep the current ranking: track priority, then subscription, then newest
   group; do not reintroduce a group-order direction knob.
+- Decide whether the publisher's `track::Info::priority` breaks a tie
+  between equal subscriber priorities in `Priority::cmp`
+  (`rs/moq-net/src/lite/priority.rs:48`). The
+  [ladder controller](/quest/m2/ladder/controller.md), now in m2, wants that
+  tiebreak; this quest owns the answer so the controller only consumes it.
 - A per-session cap on distinct ranks is a scheduling detail; whatever replaces
   the 255-entry sort must stay O(log n) per group under chat-shaped churn.
 
@@ -77,3 +82,5 @@ change.
 
 - [Starvation](/quest/m1/qos/starvation.md) - the relay-side signal that
   shows a starved subscription
+- [Signed priority](/quest/m2/signed-priority.md) - changes the priority type,
+  not which streams it competes with

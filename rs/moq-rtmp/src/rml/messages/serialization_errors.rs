@@ -1,4 +1,4 @@
-use rml_amf0::Amf0SerializationError;
+use crate::rml::amf0::Amf0SerializationError;
 use thiserror::Error;
 
 use std::io;

@@ -14,9 +14,9 @@ mod types;
 pub use self::deserialization_errors::MessageDeserializationError;
 pub use self::message_payload::MessagePayload;
 pub use self::serialization_errors::MessageSerializationError;
+use crate::rml::amf0::Amf0Value;
 use crate::rml::time::RtmpTimestamp;
 use bytes::Bytes;
-use rml_amf0::Amf0Value;
 
 /// The type of bandwidth limiting that is being requested
 #[derive(Eq, PartialEq, Debug, Clone)]

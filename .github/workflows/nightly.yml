@@ -53,6 +53,11 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
+          # Trust the flake's cachix substituter, as check.yml does, so the dev
+          # shell is substituted rather than built from source.
+          extra-conf: |
+            extra-substituters = https://kixelated.cachix.org
+            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
 
       # Restore only, like `tests` below. Saving its own store cost 3.6 GB of the
       # repository's 10 GB budget and evicted the one every pull request restores.
@@ -70,39 +75,43 @@ jobs:
       # over independent observers of the new live broadcast map.
       - name: JS origin broadcast map benchmark
         if: ${{ !cancelled() }}
-        run: |
-          nix develop --command bun install --frozen-lockfile
-          nix develop --command bun js/net/bench/broadcasts.ts
+        run: nix develop --command just js bench broadcasts
 
       # A route above several interest heads lands once per head, so its re-price
       # should expose any slope over heads times received routes.
       - name: JS origin announce forwarding benchmark
         if: ${{ !cancelled() }}
-        run: nix develop --command bun js/net/bench/forward.ts
+        run: nix develop --command just js bench forward
 
       # Fails if reading a fragmented frame costs more per byte as the frame grows.
       - name: JS stream reader benchmark
         if: ${{ !cancelled() }}
-        run: nix develop --command bun js/net/bench/reader.ts
+        run: nix develop --command just js bench reader
 
       # Fails if a chunk carrying many small frames costs as much per frame as one
       # carrying a single frame, on either the lite or moq-transport group stream,
       # which means decoding went back to a wakeup per frame.
       - name: JS group frame benchmark
         if: ${{ !cancelled() }}
-        run: nix develop --command bun js/net/bench/frames.ts
+        run: nix develop --command just js bench frames
 
       # Times one varint encode and decode per wire format. No threshold: it only
       # has to keep running, and its numbers are the baseline for the generated codec.
       - name: JS varint benchmark
         if: ${{ !cancelled() }}
-        run: nix develop --command bun js/net/bench/varint.ts
+        run: nix develop --command just js bench varint
+
+      # Bytes and time for lite-06 against lite-07 frames, groups, and requests. No
+      # threshold: it only has to keep running.
+      - name: JS lite varint benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just js bench lite-varint
 
       # Fails if publishing a group costs more as the track retains more groups,
       # which means the latency guard or the cache went back to scanning them all.
       - name: JS track retention benchmark
         if: ${{ !cancelled() }}
-        run: nix develop --command bun js/net/bench/track.ts
+        run: nix develop --command just js bench track
 
       # Runs each moq-net Criterion routine once, so a bench that panics (an
       # unparsable version, a shape that deadlocks) fails here instead of on the
@@ -161,7 +170,8 @@ jobs:
       matrix:
         # `rs uring` is a separate feature compile (off the default set) and
         # kernel-gated below 6.12. The embedding tests for io_uring live there.
-        recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring"]
+        # `gh test` exercises the release tooling, which no pull request runs.
+        recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "gh test"]
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
@@ -174,6 +184,11 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
+          # Trust the flake's cachix substituter, as check.yml does, so the dev
+          # shell is substituted rather than built from source.
+          extra-conf: |
+            extra-substituters = https://kixelated.cachix.org
+            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
       - name: Rust cache
         uses: ./.github/actions/rust-cache
       - name: Test
@@ -277,6 +292,11 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
+          # Trust the flake's cachix substituter, as check.yml does, so the dev
+          # shell is substituted rather than built from source.
+          extra-conf: |
+            extra-substituters = https://kixelated.cachix.org
+            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:

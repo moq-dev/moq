@@ -19,29 +19,23 @@ What stood in the way when the Rust half landed:
 - `moq import` exits the moment stdin ends, closing its session with the tail
   still in flight, so a finite CLI publisher cannot end a track cleanly. The
   fix is a publisher that waits for its subscriptions to drain before it
-  closes; `moq export`'s linger ([Export linger](/quest/m1/export-linger.md)) is
-  the reader-side cousin.
+  closes; `moq export ts --linger` is the reader-side cousin.
 - The native JS subscriber (`test/interop/clients/js-native`) returns on the
   first frame. It needs a mode that reads a track to its end and reports how it
   ended and which groups it saw.
 
-Also cover the drop case:
+The harness exposed a relay start-floor defect: when a newer group arrives
+first, earlier in-flight groups can be lost. #4387 fixed it (merged 09-28).
 
-- On moq-lite-07 add a drop case: both subscribers settle on SUBSCRIBE_DROP,
-  so a group the publisher skipped or never opened ends the track without
-  waiting out the grace. lite-07 replaces the SUBSCRIBE_END stream count
-  (#4224) with it.
-- The harness exposed a relay start-floor defect: when a newer group arrives
-  first, earlier in-flight groups can be lost. #4387 fixes it, so the drop
-  proof waits on it.
+Decided in the 2026-09-30 audit: the lite-07 drop case moved into
+[SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md)'s tests, so the basic Rust and
+JS tail interop lands now instead of waiting on that [L] quest.
 
 QUIC on localhost rarely reorders, so this is a smoke check that the end is
 delivered and clean. The ordering race itself stays in the unit tests.
 
-## Required
-
-- [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - publishers name every group they won't deliver, which the lite-07 case checks
-
 ## Related
 
+- [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - owns the lite-07 drop case on top of this harness
 - [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - keeps a reset stream's header, so the reset acts as a one-group drop
+- [Close waits for the tail](/quest/m1/close-tail.md) - the publisher-side fix this test proves across a real relay

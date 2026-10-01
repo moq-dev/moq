@@ -38,7 +38,7 @@ use crate::{Error, Rate, Size};
 const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// List the PipeWire cameras as [`Camera`]s with `pipewire:<node name>` ids.
-pub(in crate::capture) async fn cameras() -> Result<Vec<Camera>, Error> {
+pub(in crate::capture) async fn cameras(v4l2: &[Camera]) -> Result<Vec<Camera>, Error> {
 	let sandboxed = ashpd::is_sandboxed();
 	let remote = if sandboxed {
 		match portal().await? {
@@ -68,13 +68,22 @@ pub(in crate::capture) async fn cameras() -> Result<Vec<Camera>, Error> {
 	})
 	.await?;
 
-	Ok(nodes
+	Ok(camera_list(nodes, v4l2))
+}
+
+fn camera_list(nodes: Vec<Node>, v4l2: &[Camera]) -> Vec<Camera> {
+	nodes
 		.into_iter()
+		.filter(|node| {
+			!v4l2
+				.iter()
+				.any(|camera| node.v4l2_path.as_deref() == Some(camera.id.as_str()))
+		})
 		.map(|node| Camera {
 			id: format!("{PIPEWIRE}:{}", node.name),
 			name: node.description,
 		})
-		.collect())
+		.collect()
 }
 
 /// List the modes the camera named `node` (or the default camera) reports, for
@@ -196,6 +205,8 @@ pub(super) struct Node {
 	description: String,
 	/// `priority.session`, which the session manager ranks default nodes by.
 	priority: i32,
+	/// The underlying V4L2 path, only when the node uses the V4L2 backend.
+	v4l2_path: Option<String>,
 }
 
 impl Node {
@@ -219,6 +230,11 @@ impl Node {
 			name: name.to_string(),
 			description: description.to_string(),
 			priority,
+			v4l2_path: (prop("device.api") == Some("v4l2"))
+				.then(|| prop("api.v4l2.path"))
+				.flatten()
+				.filter(|path| !path.is_empty())
+				.map(str::to_string),
 		})
 	}
 }
@@ -734,6 +750,37 @@ mod tests {
 	];
 
 	#[test]
+	fn listing_hides_only_v4l2_paths_already_enumerated() {
+		let mut props = WEBCAM.to_vec();
+		props.extend([("device.api", "v4l2"), ("api.v4l2.path", "/dev/video0")]);
+		let webcam = node(&props).unwrap();
+		let v4l2 = [Camera {
+			id: "/dev/video0".into(),
+			name: webcam.description.clone(),
+		}];
+		assert!(camera_list(vec![webcam.clone()], &v4l2).is_empty());
+		assert_eq!(camera_list(vec![webcam.clone()], &[]).len(), 1);
+		// An identical label on another device must not hide it.
+		props.pop();
+		props.push(("api.v4l2.path", "/dev/video2"));
+		assert_eq!(camera_list(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		// Missing paths and non-V4L2 backends are not proof of duplication.
+		props.pop();
+		assert_eq!(camera_list(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		props.pop();
+		props.extend([("device.api", "libcamera"), ("api.v4l2.path", "/dev/video0")]);
+		assert_eq!(camera_list(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		props.remove(props.len() - 2);
+		assert_eq!(camera_list(vec![node(&props).unwrap()], &v4l2).len(), 1);
+		// Listing never removes nodes from explicit or priority-based resolution.
+		assert_eq!(
+			resolve(std::slice::from_ref(&webcam), Some(&webcam.name)).unwrap(),
+			&webcam
+		);
+		assert_eq!(resolve(std::slice::from_ref(&webcam), None).unwrap(), &webcam);
+	}
+
+	#[test]
 	fn camera_nodes_are_video_sources_with_the_camera_role() {
 		assert_eq!(
 			node(&WEBCAM),
@@ -742,6 +789,7 @@ mod tests {
 				name: "v4l2_input.pci-0000_00_14.0-usb-0_4_1.0".to_string(),
 				description: "Integrated Camera (V4L2)".to_string(),
 				priority: 1000,
+				v4l2_path: None,
 			})
 		);
 
@@ -1113,7 +1161,7 @@ mod tests {
 			eprintln!("skipping: listing inside a sandbox would ask the camera portal");
 			return;
 		}
-		let cameras = cameras().await.expect("listing PipeWire cameras");
+		let cameras = cameras(&[]).await.expect("listing PipeWire cameras");
 		for camera in &cameras {
 			assert!(camera.id.starts_with("pipewire:"), "{}", camera.id);
 			assert!(!camera.name.is_empty());
@@ -1153,7 +1201,7 @@ mod tests {
 			eprintln!("skipping: capturing inside a sandbox would ask the camera portal");
 			return;
 		}
-		let cameras = cameras().await.expect("listing PipeWire cameras");
+		let cameras = cameras(&[]).await.expect("listing PipeWire cameras");
 		if cameras.is_empty() {
 			eprintln!("skipping: no PipeWire camera");
 			return;

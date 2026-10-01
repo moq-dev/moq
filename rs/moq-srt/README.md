@@ -39,9 +39,10 @@ tokio::select! {
 ## CLI
 
 A command-line interface is provided by the [`moq-cli`](../moq-cli) binary, on
-top of this library.
+top of this library. Its listener bridges the single `--broadcast` and ignores
+the stream id; see [`doc/bin/srt.md`](../../doc/bin/srt.md).
 
-Feed any SRT source:
+Feed any SRT source into a `run` listener with prefix `live`:
 
 ```bash
 # Publish: lands at broadcast `live/cam0`.
@@ -58,15 +59,21 @@ the publisher does.
 
 ## Routing
 
-Each connection's broadcast path and direction come from its SRT stream id:
+Under `run`, each connection's broadcast path and direction come from its SRT
+stream id:
 
 - Standard form `#!::r=<resource>,m=<mode>` -> `<resource>`, with `m=request`
   selecting egress and anything else (including absent) selecting ingest.
 - Otherwise the raw stream id (e.g. OBS-style `app/key`), always ingest.
 
-`--srt-prefix` is prepended to namespace a listener's streams. First publisher on
+`Config::prefix` is prepended to namespace a listener's streams. First publisher on
 a path wins; a second publish of the same path is rejected. Requests don't claim
 a path, so any number of players can pull the same broadcast.
+
+A multi-program feed is refused unless `Config::program` picks one program
+(`Program::One(n)`) or every program (`Program::All`), which publishes each on
+its own broadcast under the path: `live/cam0/1`, `live/cam0/2`, and so on. To
+choose per connection, drive `Server` and call `Publish::with_program`.
 
 ## Auth
 

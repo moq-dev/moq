@@ -339,16 +339,10 @@ impl Export {
 			tracing::warn!("ignoring FLV rendition that appeared after the stream header");
 		}
 
-		// A bound track vanishing from the catalog is a layout change FLV can't express.
-		for track in self.tracks() {
-			let present = if is_video_flavor(track.flavor) {
-				catalog.video.renditions.contains_key(&track.name)
-			} else {
-				catalog.audio.renditions.contains_key(&track.name)
-			};
-			anyhow::ensure!(present, "FLV track '{}' removed mid-stream", track.name);
-		}
-
+		// A bound track leaving the catalog is read to its own end rather than refused. A
+		// publisher retires a rendition as its track finishes or drops, and the catalog
+		// update races that end on another stream, so only the track's end can say which it
+		// was: a finish ends it cleanly, and a drop is the error the export reports.
 		Ok(())
 	}
 
@@ -694,10 +688,6 @@ fn ensure_legacy(container: &Container, kind: &str, name: &str) -> anyhow::Resul
 			unknown.kind().unwrap_or("<missing>")
 		),
 	}
-}
-
-fn is_video_flavor(flavor: Flavor) -> bool {
-	matches!(flavor, Flavor::Avc | Flavor::Hevc | Flavor::Av1 | Flavor::Vp9)
 }
 
 fn video_flavor(config: &hang::catalog::VideoConfig) -> anyhow::Result<Flavor> {

@@ -58,4 +58,4 @@ by the stop deadline and encoder reconnect.
 
 ## Related
 
-- [Cluster routing](/quest/m1/cluster-routing.md) - the configured topology and link costs a second relay per PoP joins
+- [Cluster routing](/quest/m1/cluster-routing/README.md) - the configured topology and link costs a second relay per PoP joins

@@ -12,17 +12,23 @@ counter rates and PID quiet times.
 
 Decided while planning [#1838](https://github.com/moq-dev/moq/issues/1838):
 
-- **Surface through the stats plumbing**, as the issue settled. The shape is
-  whatever [per-track stats](/quest/m1/qos/stats/per-track.md) decides: a
-  section on the client `.stats` entry, or an `mpegts.stats` track referenced
-  from the catalog's `mpegts` section. Either way the name follows the
+- **Surface through the stats plumbing**, as the issue settled. The
+  [media stats schema](/quest/m1/stats/schema.md) settles the shape: an
+  import flattens `ts::Stats` into the publisher's stats snapshot under the
   catalog's `mpegts` key, the counters stay owned by moq-mux beside
   `ts::Ext`, and `hang` stays TS-free.
+- Open: an export is a viewer, which has no stats track and reports only
+  through a soliciting catalog's `.echo` feedback, so where `moq export ts
+  --stats` publishes its egress rows is unsettled. Candidates: extend the
+  solicited `.echo` snapshot with a flattened container section, give viewers
+  their own stats surface, or narrow this quest to import. Leaning toward
+  narrowing, since the other two widen the settled stats design.
 - **Counters sum, gauges do not.** Every check is a cumulative counter, which
   keeps `.z` deltas small and lets an aggregate sum; the PID's `quiet` is a gauge and
   merges newest-wins.
-- `ts::Stats` gains serde, every field defaulted and unknown fields ignored;
-  `StreamStats.track` becomes owned so the type deserializes.
+- `ts::Stats` gains serde, every field defaulted and unknown fields ignored.
+  [TS stats module](/quest/m1/ts-stats-module.md) makes `track` owned so the
+  type deserializes.
 - Docs: `doc/concept/stats.md` documents each counter's TR 101 290 check, its
   monitoring point (ingest grades the feed, egress grades our muxer, and
   neither is the groomed wire), the value domain of the PCR checks, and that
@@ -33,7 +39,8 @@ Decided while planning [#1838](https://github.com/moq-dev/moq/issues/1838):
 
 ## Required
 
-- [Per-track stats](/quest/m1/qos/stats/per-track.md) - where and in what shape the counters are published
-- [Rust reporters](/quest/m1/qos/stats/rust.md) - `moq import --stats` and `moq export --stats`
+- [TS stats module](/quest/m1/ts-stats-module.md) - the owned `track` that lets the rows deserialize
+- [Media stats schema](/quest/m1/stats/schema.md) - the snapshot the counters flatten into
+- [Rust reporters](/quest/m1/stats/rust.md) - `moq import --stats` and the stats interval
 - [TS import health](/quest/m2/ts-import-health.md) - the ingest counters
 - [TS export liveness](/quest/m2/ts-export-liveness.md) - the egress rows
