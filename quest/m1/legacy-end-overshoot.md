@@ -4,7 +4,8 @@
 
 A `@moq/watch` subscriber never aborts a browser-published track with "group
 timestamp is below the live edge" when the publisher's next group starts
-inside the previous group's estimated end.
+inside the previous group's estimated end: the JS consumer enforces
+monotonic group starts, like Rust.
 
 ## Plan
 
@@ -22,13 +23,22 @@ takes the live edge from the end marker, so that keyframe's group reads as
 below it and the track aborts. The consumer's covered-group skip tolerates the
 same overlap the live-edge check rejects.
 
+Decided (maintainer, #4543): group starts are monotonic, and that is the only
+hard rule. A group's keyframe may not start below the previous group's start,
+and no frame may sit below the start of the group before its own. Frames,
+keyframes included, may dip below the previous group's content (B-frames, or
+a keyframe overlapping its last frame), so an estimated end is never a hard
+edge. A group may start at the same timestamp as the previous one; strictly
+increasing starts are not enforced. Group IDs never move backwards. A group
+starting before the previous group's start is a restart, a new broadcast.
+The Rust `moq-mux` producer and consumer enforce this on `dev` since #4543.
+
 - Reproduce with a mocked clock: cut a group, then resume with a keyframe
   between the last frame and the estimated end.
-- Decide which side is wrong: the producer's estimate reaching past what it
-  will refuse, or the consumer treating an estimated end as a hard edge.
-  Fix it there and keep the other side's rule consistent with it.
-- Check the Rust `moq-mux` producer for the same estimate.
+- Align `js/hang/src/container/consumer.ts` (and the JS producer, if it
+  differs) to "group starts monotonic", matching `rs/moq-mux/src/container`.
+- Target `dev`, where the #4543 rule lives.
 
 ## Related
 
-- [More tests under load](/quest/m1/test-flakes-2.md) - other load-only failures, fixed at the cause
+- [More tests under load](/quest/m1/test-flakes-2/README.md) - other load-only failures, fixed at the cause

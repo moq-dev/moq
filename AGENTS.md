@@ -60,6 +60,7 @@ A bad shape costs a breaking change in every language, and the surface is huge.
 - Keep things private until a consumer needs them. Scrutinize every new exported item.
 - Never add `foo_with_x`, `foo_checked`, or a compatibility shim. Make the breaking change to `foo` on `dev` instead. Additive changes stay on `main`.
 - Let the type system make misuse unrepresentable
+- A broadcast, track, or group name always means the same content. MoQ has no ETag-style invalidation, so a publisher that reuses a name for different content (such as restarting group numbers) is a bug; publish a new broadcast instead of working around it.
 - Avoid callback parameters. Return a handle, an event, or a Producer/Consumer split.
 - Avoid 4+ args; use a struct or object.
 - Name by role, not today's implementation.
@@ -91,7 +92,7 @@ just fix          # Auto-fix lint/formatting, same scope
 
 These diff the branch against its base and only run the affected packages.
 
-When work mentions a quest, run `quest guide` and follow it.
+Quests: when work mentions a quest, run `quest guide` and follow it.
 The `quest` binary comes from the kixelated/quest flake input and serves the quest skills; change them upstream and bump the input.
 A quest deleted on `dev` is done, even while `main` still lists it.
 

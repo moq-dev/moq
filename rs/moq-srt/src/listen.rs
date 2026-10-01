@@ -31,8 +31,8 @@ use std::time::Duration;
 
 use moq_net::{Path, PathOwned, origin};
 
-use crate::Result;
 use crate::server::{Request, Server};
+use crate::{Program, Result};
 
 /// SRT gateway configuration.
 ///
@@ -64,6 +64,11 @@ pub struct Config {
 	/// advertise segments that are still fetchable. Lower it when nothing reads history
 	/// and the memory matters. Only affects ingest (`m=publish`); egress ignores it.
 	pub max_age: Option<Duration>,
+
+	/// The programs of a multi-program feed every ingest publishes, or `None` to refuse a
+	/// multiplex. To choose per path, drive [`Server`] and call
+	/// [`Publish::with_program`](crate::Publish::with_program) on each request.
+	pub program: Option<Program>,
 }
 
 impl Default for Config {
@@ -73,6 +78,7 @@ impl Default for Config {
 			prefix: Path::empty().to_owned(),
 			latency: crate::server::DEFAULT_LATENCY,
 			max_age: None,
+			program: None,
 		}
 	}
 }
@@ -110,6 +116,7 @@ pub async fn run(origin: origin::Producer, config: Config) -> Result<()> {
 	let active = ActivePaths::default();
 	let prefix = config.prefix;
 	let max_age = config.max_age;
+	let program = config.program;
 
 	while let Some(request) = server.accept().await {
 		let prefix = prefix.clone();
@@ -130,7 +137,12 @@ pub async fn run(origin: origin::Producer, config: Config) -> Result<()> {
 						let _ = publish.reject(crate::Reject::Unavailable).await;
 						return;
 					};
-					if let Err(err) = publish.with_max_age(max_age).accept(&origin, &path).await {
+					if let Err(err) = publish
+						.with_max_age(max_age)
+						.with_program(program)
+						.accept(&origin, &path)
+						.await
+					{
 						tracing::warn!(%peer, %path, %err, "SRT ingest ended with error");
 					} else {
 						tracing::info!(%peer, %path, "SRT ingest ended");

@@ -7,8 +7,8 @@
 //! reads one frame, sharing the group's channel rather than a per-frame one.
 use std::ops::Range;
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::task::{Poll, ready};
 
 use arrayvec::ArrayVec;
@@ -127,40 +127,93 @@ impl<const N: usize> Buffer<N> {
 	}
 }
 
+/// Bytes one session may allocate up front for the frames it is still receiving.
+///
+/// A peer declares each frame's size before sending it, and allocating that size up
+/// front saves a reallocation and copy per doubling as the payload arrives. The
+/// declaration costs the peer nothing, though, so without a bound it could commit up to
+/// [`group::MAX_CACHE_BYTES`] per stream without sending a byte. A frame whose declared
+/// size fits what remains is allocated up front; past that, its buffer grows with the
+/// bytes received. Each frame returns its share once it completes or aborts.
+#[derive(Clone)]
+pub(crate) struct Budget(Arc<AtomicUsize>);
+
+impl Budget {
+	/// Enough for a handful of large keyframes in flight at once.
+	const DEFAULT: usize = 16 * 1024 * 1024;
+
+	pub(crate) fn new(bytes: usize) -> Self {
+		Self(Arc::new(AtomicUsize::new(bytes)))
+	}
+
+	/// Take `size` bytes of the budget, or `None` if that is more than remains.
+	pub(crate) fn reserve(&self, size: usize) -> Option<Reservation> {
+		self.0
+			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(size))
+			.ok()?;
+		Some(Reservation {
+			budget: self.clone(),
+			size,
+		})
+	}
+}
+
+impl Default for Budget {
+	fn default() -> Self {
+		Self::new(Self::DEFAULT)
+	}
+}
+
+/// A frame's share of a [`Budget`], returned on drop.
+pub(crate) struct Reservation {
+	budget: Budget,
+	size: usize,
+}
+
+impl Drop for Reservation {
+	fn drop(&mut self) {
+		self.budget.0.fetch_add(self.size, Ordering::Relaxed);
+	}
+}
+
 /// Payload storage for the single in-flight frame, shared between the writing
 /// [`Producer`] and any streaming [`Consumer`]s.
 ///
-/// A whole-frame [`Bytes`] write is stored directly. Chunked writes fall back to one
-/// mutable heap allocation sized to the declared frame. The producer writes through
-/// the raw pointer (sole writer, guaranteed by the exclusive borrow of the parent
-/// group); `written` provides happens-before for cross-thread reads. Implements
-/// [AsRef]<[u8]> so it can back a [`Bytes::from_owner`].
+/// A whole-frame [`Bytes`] write is stored directly. Chunked writes are copied into a
+/// heap [`Segment`], either sized to the declared frame up front or grown as bytes
+/// arrive (see [`Budget`]). The producer writes through the raw pointer (sole writer,
+/// guaranteed by the exclusive borrow of the parent group); `written` provides
+/// happens-before for cross-thread reads.
 #[derive(Clone)]
 pub(crate) struct FrameBuf(Arc<FrameBufInner>);
 
 struct FrameBufInner {
-	capacity: usize,
+	size: usize,
+	grow: bool,
 	written: AtomicUsize,
 	storage: OnceLock<FrameStorage>,
 }
 
 enum FrameStorage {
 	Shared(Bytes),
-	Mutable(MutableFrameBuf),
+	Fixed(Arc<Segment>),
+	// Replaced by a larger copy whenever a write outgrows it. A reader clones the current
+	// segment under the lock, so a slice it already handed out keeps the old one alive.
+	Growing(Mutex<Arc<Segment>>),
 }
 
-struct MutableFrameBuf {
-	// Owned heap allocation of `capacity` bytes (zero-initialized).
+/// An owned, zero-initialized heap allocation that chunked writes are copied into.
+struct Segment {
 	data: *mut u8,
 	capacity: usize,
 }
 
 // Safety: `data` is owned (Box-allocated, freed in Drop). The producer is the sole
 // writer and consumers only read bytes `< written`.
-unsafe impl Send for MutableFrameBuf {}
-unsafe impl Sync for MutableFrameBuf {}
+unsafe impl Send for Segment {}
+unsafe impl Sync for Segment {}
 
-impl Drop for MutableFrameBuf {
+impl Drop for Segment {
 	fn drop(&mut self) {
 		// Safety: data was obtained from `Box::into_raw` of a `Box<[u8]>` of length
 		// `capacity` and is not aliased at drop (Arc refcount hit 0).
@@ -171,30 +224,66 @@ impl Drop for MutableFrameBuf {
 	}
 }
 
-impl MutableFrameBuf {
-	fn new(size: usize) -> Self {
-		let boxed: Box<[u8]> = vec![0u8; size].into_boxed_slice();
+impl Segment {
+	fn new(capacity: usize) -> Self {
+		let boxed: Box<[u8]> = vec![0u8; capacity].into_boxed_slice();
 		let capacity = boxed.len();
 		let data = Box::into_raw(boxed) as *mut u8;
 		Self { data, capacity }
 	}
+
+	/// Copy `src` in at `offset`.
+	///
+	/// Safety: caller must be the sole writer, `offset + src.len()` must be within
+	/// `capacity`, and no reader may have been handed bytes at or past `offset`.
+	unsafe fn write(&self, offset: usize, src: &[u8]) {
+		debug_assert!(offset + src.len() <= self.capacity);
+		unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), self.data.add(offset), src.len()) };
+	}
+}
+
+/// The first `len` bytes of a [`Segment`], all written, so it can back a
+/// [`Bytes::from_owner`].
+struct Filled {
+	segment: Arc<Segment>,
+	len: usize,
+}
+
+impl AsRef<[u8]> for Filled {
+	fn as_ref(&self) -> &[u8] {
+		// Safety: `len` never exceeds what the producer had published when this was
+		// built, and the producer never rewrites published bytes. The Arc keeps the
+		// allocation alive while any reference to the slice lives.
+		unsafe { std::slice::from_raw_parts(self.segment.data, self.len) }
+	}
 }
 
 impl FrameBuf {
-	/// Allocate a buffer for a frame of `size` bytes.
+	/// A buffer for a frame of `size` bytes, allocated at that size on the first write.
 	///
 	/// The oversized-frame guard lives in [`group::Producer`], which rejects a declared
 	/// size larger than the group's byte budget before calling this.
 	pub(crate) fn new(size: usize) -> Self {
+		Self::with_growth(size, false)
+	}
+
+	/// A buffer for a frame of `size` bytes that allocates only as bytes arrive.
+	pub(crate) fn growing(size: usize) -> Self {
+		Self::with_growth(size, true)
+	}
+
+	fn with_growth(size: usize, grow: bool) -> Self {
 		Self(Arc::new(FrameBufInner {
-			capacity: size,
+			size,
+			grow,
 			written: AtomicUsize::new(0),
 			storage: OnceLock::new(),
 		}))
 	}
 
-	pub(crate) fn capacity(&self) -> usize {
-		self.0.capacity
+	/// The frame's declared size.
+	pub(crate) fn size(&self) -> usize {
+		self.0.size
 	}
 
 	pub(crate) fn written(&self, ord: Ordering) -> usize {
@@ -202,7 +291,7 @@ impl FrameBuf {
 	}
 
 	fn try_set_bytes(&self, bytes: Bytes) -> std::result::Result<(), Bytes> {
-		if bytes.len() != self.capacity() || self.written(Ordering::Acquire) != 0 {
+		if bytes.len() != self.size() || self.written(Ordering::Acquire) != 0 {
 			return Err(bytes);
 		}
 		self.0
@@ -210,25 +299,11 @@ impl FrameBuf {
 			.set(FrameStorage::Shared(bytes))
 			.map_err(|storage| match storage {
 				FrameStorage::Shared(bytes) => bytes,
-				FrameStorage::Mutable(_) => unreachable!("try_set_bytes only installs shared storage"),
+				_ => unreachable!("try_set_bytes only installs shared storage"),
 			})
 	}
 
-	/// The mutable buffer for multi-chunk writes, lazily allocated.
-	///
-	/// Returns `None` once a whole-frame write has installed shared storage.
-	fn mutable(&self) -> Option<&MutableFrameBuf> {
-		match self
-			.0
-			.storage
-			.get_or_init(|| FrameStorage::Mutable(MutableFrameBuf::new(self.capacity())))
-		{
-			FrameStorage::Shared(_) => None,
-			FrameStorage::Mutable(buf) => Some(buf),
-		}
-	}
-
-	/// Safety: caller must be the sole producer and `new_written` must be `<= capacity`.
+	/// Safety: caller must be the sole producer and `new_written` must be `<= size`.
 	unsafe fn store_written(&self, new_written: usize) {
 		// Release pairs with consumers' Acquire load to publish prior writes.
 		self.0.written.store(new_written, Ordering::Release);
@@ -244,50 +319,70 @@ impl FrameBuf {
 			return;
 		}
 		let prev = self.written(Ordering::Relaxed);
-		let Some(buf) = self.mutable() else {
+		let storage = self.0.storage.get_or_init(|| match self.0.grow {
+			true => FrameStorage::Growing(Mutex::new(Arc::new(Segment::new(0)))),
+			false => FrameStorage::Fixed(Arc::new(Segment::new(self.size()))),
+		});
+		// Safety (every write below): sole writer; the caller bounds-checked `src` against
+		// the remaining size, and consumers only read `[..written]`.
+		match storage {
 			// Only reachable if the frame is already complete via shared storage, which
 			// `Producer::write` rejects for a non-empty chunk. Nothing to copy.
-			return;
-		};
-		// Safety: sole writer; the caller bounds-checked `src` against the remaining
-		// capacity, and consumers only read `[..written]`.
-		unsafe {
-			std::ptr::copy_nonoverlapping(src.as_ptr(), buf.data.add(prev), src.len());
-			self.store_written(prev + src.len());
+			FrameStorage::Shared(_) => return,
+			FrameStorage::Fixed(segment) => unsafe { segment.write(prev, src) },
+			FrameStorage::Growing(current) => {
+				let mut current = current.lock().expect("mutex poisoned");
+				let needed = prev + src.len();
+				if current.capacity < needed {
+					// Doubling keeps the copies linear in the frame size, and the cap makes
+					// the last segment exactly the frame, so it freezes without a copy.
+					let next = Segment::new(needed.max(current.capacity * 2).min(self.size()));
+					let filled = Filled {
+						segment: current.clone(),
+						len: prev,
+					};
+					unsafe { next.write(0, filled.as_ref()) };
+					*current = Arc::new(next);
+				}
+				unsafe { current.write(prev, src) };
+			}
 		}
+		// Safety: sole writer, and the caller bounds-checked `src` against the size.
+		unsafe { self.store_written(prev + src.len()) };
 	}
 
-	/// Freeze the buffer into the completed payload (`size` bytes).
+	/// Freeze the buffer into the completed payload.
 	///
 	/// Returns the shared [`Bytes`] directly for a whole-frame write (zero-copy), or
 	/// wraps the mutable allocation otherwise.
-	fn freeze(&self, size: usize) -> Bytes {
-		match self.0.storage.get() {
-			Some(FrameStorage::Shared(bytes)) => bytes.clone(),
-			_ => self.slice(0, size),
-		}
+	fn freeze(&self) -> Bytes {
+		self.slice(0, self.size())
 	}
 
-	/// A zero-copy slice of the initialized region `[start..end]`.
+	/// A zero-copy slice of the written region `[start..end]`.
+	///
+	/// `end` must not exceed a `written` value already loaded with `Acquire`, which is
+	/// also what makes the segment read here at least as new as those bytes.
 	fn slice(&self, start: usize, end: usize) -> Bytes {
-		Bytes::from_owner(self.clone()).slice(start..end)
+		let segment = match self.0.storage.get() {
+			Some(FrameStorage::Shared(bytes)) => return bytes.slice(start..end),
+			Some(FrameStorage::Fixed(segment)) => segment.clone(),
+			Some(FrameStorage::Growing(current)) => current.lock().expect("mutex poisoned").clone(),
+			// Nothing written, so the range is empty.
+			None => return Bytes::new(),
+		};
+		debug_assert!(end <= segment.capacity);
+		Bytes::from_owner(Filled { segment, len: end }).slice(start..)
 	}
-}
 
-impl AsRef<[u8]> for FrameBuf {
-	fn as_ref(&self) -> &[u8] {
-		// Snapshot the initialized region (bytes the producer has written so far).
-		// Acquire pairs with the producer's Release on `written`.
-		let written = self.0.written.load(Ordering::Acquire);
+	/// Heap bytes the buffer currently holds for the payload.
+	#[cfg(test)]
+	pub(crate) fn allocated(&self) -> usize {
 		match self.0.storage.get() {
-			Some(FrameStorage::Shared(bytes)) => &bytes[..written],
-			Some(FrameStorage::Mutable(buf)) => {
-				// Safety: data..data+written is initialized (zero-init at alloc + producer
-				// writes up to `written`). The Arc keeps the allocation alive while any
-				// reference to the slice lives.
-				unsafe { std::slice::from_raw_parts(buf.data, written) }
-			}
-			None => &[],
+			Some(FrameStorage::Shared(bytes)) => bytes.len(),
+			Some(FrameStorage::Fixed(segment)) => segment.capacity,
+			Some(FrameStorage::Growing(current)) => current.lock().expect("mutex poisoned").capacity,
+			None => 0,
 		}
 	}
 }
@@ -307,7 +402,7 @@ struct Raw<G: std::borrow::BorrowMut<group::Producer>> {
 
 impl<G: std::borrow::BorrowMut<group::Producer>> Raw<G> {
 	fn remaining(&self) -> usize {
-		self.buf.capacity() - self.buf.written(Ordering::Acquire)
+		self.buf.size() - self.buf.written(Ordering::Acquire)
 	}
 
 	fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
@@ -318,13 +413,13 @@ impl<G: std::borrow::BorrowMut<group::Producer>> Raw<G> {
 		// Ingress payload: count the chunk's bytes as they're written.
 		self.stats.bytes(len as u64);
 		// Fast path: a single whole-frame write keeps the caller's allocation.
-		if len == self.buf.capacity() && self.buf.written(Ordering::Acquire) == 0 {
+		if len == self.buf.size() && self.buf.written(Ordering::Acquire) == 0 {
 			match self.buf.try_set_bytes(chunk.into_bytes()) {
 				Ok(()) => {
-					let cap = self.buf.capacity();
+					let size = self.buf.size();
 					// Safety: `try_set_bytes` checked the buffer exactly matches the declared
 					// size, so publishing all bytes is in bounds.
-					unsafe { self.buf.store_written(cap) };
+					unsafe { self.buf.store_written(size) };
 				}
 				Err(chunk) => self.buf.append(&chunk),
 			}
@@ -335,10 +430,10 @@ impl<G: std::borrow::BorrowMut<group::Producer>> Raw<G> {
 	}
 
 	fn finish(&mut self) -> Result<()> {
-		if self.buf.written(Ordering::Acquire) != self.buf.capacity() {
+		if self.buf.written(Ordering::Acquire) != self.buf.size() {
 			return Err(Error::WrongSize);
 		}
-		let payload = self.buf.freeze(self.buf.capacity());
+		let payload = self.buf.freeze();
 		self.group.borrow_mut().frame_commit(Frame {
 			timestamp: self.info.timestamp,
 			payload,
@@ -448,36 +543,44 @@ impl<'a> Producer<'a> {
 /// Crate-private on purpose: the exclusivity the public borrow enforces (one
 /// live frame per group) becomes the holder's promise here. Do not open another
 /// frame on the group until this one is finished or aborted.
-pub(crate) struct ProducerOwned(Raw<group::Producer>);
+///
+/// Holds the frame's share of the session's [`Budget`], if it got one, until then.
+pub(crate) struct ProducerOwned {
+	raw: Raw<group::Producer>,
+	_reserved: Option<Reservation>,
+}
 
 impl std::ops::Deref for ProducerOwned {
 	type Target = Info;
 
 	fn deref(&self) -> &Self::Target {
-		&self.0.info
+		&self.raw.info
 	}
 }
 
 impl ProducerOwned {
-	pub(crate) fn new(group: group::Producer, buf: FrameBuf, info: Info) -> Self {
-		Self(Raw {
-			group,
-			buf,
-			info,
-			done: false,
-			stats: stats::Meter::default(),
-		})
+	pub(crate) fn new(group: group::Producer, buf: FrameBuf, info: Info, reserved: Option<Reservation>) -> Self {
+		Self {
+			raw: Raw {
+				group,
+				buf,
+				info,
+				done: false,
+				stats: stats::Meter::default(),
+			},
+			_reserved: reserved,
+		}
 	}
 
 	/// Attach the parent group's ingress meter, so written chunks bump `bytes`.
 	pub(crate) fn with_meter(mut self, meter: stats::Meter) -> Self {
-		self.0.stats = meter;
+		self.raw.stats = meter;
 		self
 	}
 
 	/// Bytes still needed to complete the frame.
 	pub fn remaining(&self) -> usize {
-		self.0.remaining()
+		self.raw.remaining()
 	}
 
 	/// Write a chunk of payload *without* waking consumers; pair it with [`Self::notify`].
@@ -489,22 +592,28 @@ impl ProducerOwned {
 	///
 	/// `coding::Reader::poll_read_frame` owns the pairing and is the only caller.
 	pub(crate) fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
-		self.0.write(chunk)
+		self.raw.write(chunk)
 	}
 
 	/// Publish what has been written so far, waking consumers parked on the group.
 	pub(crate) fn notify(&self) {
-		self.0.group.frame_notify();
+		self.raw.group.frame_notify();
 	}
 
 	/// Commit the frame, verifying that all bytes were written.
 	pub fn finish(mut self) -> Result<()> {
-		self.0.finish()
+		self.raw.finish()
 	}
 
 	/// Abort the frame (and its group) with the given error.
 	pub fn abort(mut self, err: Error) -> Result<()> {
-		self.0.abort(err)
+		self.raw.abort(err)
+	}
+
+	/// Heap bytes the frame's buffer currently holds for the payload.
+	#[cfg(test)]
+	pub(crate) fn allocated(&self) -> usize {
+		self.raw.buf.allocated()
 	}
 }
 
@@ -748,4 +857,73 @@ where
 		Ok(res) => res,
 		Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
 	})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Each reallocation leaves the slices already handed out intact, and the last
+	/// segment is exactly the frame, so the payload freezes without another copy.
+	#[test]
+	fn growing_buffer_keeps_handed_out_slices() {
+		let buf = FrameBuf::growing(10);
+		buf.append(b"abc");
+		assert_eq!(buf.allocated(), 3);
+		let early = buf.slice(0, 3);
+
+		buf.append(b"defg");
+		assert_eq!(buf.allocated(), 7);
+		buf.append(b"hij");
+		assert_eq!(buf.allocated(), 10, "doubling stops at the declared size");
+
+		assert_eq!(early, &b"abc"[..]);
+		assert_eq!(buf.slice(3, 7), &b"defg"[..]);
+		assert_eq!(buf.freeze(), &b"abcdefghij"[..]);
+	}
+
+	/// A reader on another thread slicing while the writer reallocates only ever sees
+	/// the bytes that were written.
+	#[test]
+	fn growing_buffer_reads_across_threads() {
+		const SIZE: usize = 256 * 1024;
+		let buf = FrameBuf::growing(SIZE);
+		let reader = std::thread::spawn({
+			let buf = buf.clone();
+			move || {
+				let mut read = 0;
+				while read < SIZE {
+					let written = buf.written(Ordering::Acquire);
+					let chunk = buf.slice(read, written);
+					for (i, byte) in chunk.iter().enumerate() {
+						assert_eq!(*byte, ((read + i) % 251) as u8);
+					}
+					read = written;
+					std::thread::yield_now();
+				}
+			}
+		});
+
+		let payload: Vec<u8> = (0..SIZE).map(|i| (i % 251) as u8).collect();
+		for chunk in payload.chunks(1000) {
+			buf.append(chunk);
+		}
+		reader.join().unwrap();
+		assert_eq!(buf.freeze(), payload);
+	}
+
+	/// A reservation holds its bytes until it drops, and a request larger than what
+	/// remains takes nothing.
+	#[test]
+	fn budget_returns_reservations() {
+		let budget = Budget::new(100);
+		let a = budget.reserve(60).unwrap();
+		assert!(budget.reserve(41).is_none());
+		let b = budget.reserve(40).unwrap();
+		assert!(budget.reserve(1).is_none());
+
+		drop(a);
+		drop(b);
+		assert!(budget.reserve(100).is_some());
+	}
 }

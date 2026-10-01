@@ -13,7 +13,7 @@ this.
 - Name the exact Safari and iOS or iPadOS releases that ship the fix in the
   quest and in the `browser.ts` comment, then gate on them for Safari and for
   the iOS WebKit browsers, keeping older versions on the fallback. As of
-  2026-09-08 the bug is still NEW with no fix released.
+  2026-09-30 the bug is still NEW with no fix released.
 - Before flipping, rerun the raw WebTransport reproduction from #2388 (about
   7,600 eleven-byte unidirectional streams, and about 16 MiB of data) on the
   fixed Safari, then a watch longer than two minutes in the QA harness on
@@ -23,7 +23,7 @@ this.
 
 ## Required
 
-- WebKit bug 319818 (https://bugs.webkit.org/show_bug.cgi?id=319818) is fixed and shipping in a Safari release
+- [Safari ships the WebKit 319818 fix](/quest/m4/webkit-319818.md) - the release to gate on
 
 ## Closes
 

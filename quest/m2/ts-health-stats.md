@@ -26,8 +26,9 @@ Decided while planning [#1838](https://github.com/moq-dev/moq/issues/1838):
 - **Counters sum, gauges do not.** Every check is a cumulative counter, which
   keeps `.z` deltas small and lets an aggregate sum; the PID's `quiet` is a gauge and
   merges newest-wins.
-- `ts::Stats` gains serde, every field defaulted and unknown fields ignored;
-  `StreamStats.track` becomes owned so the type deserializes.
+- `ts::Stats` gains serde, every field defaulted and unknown fields ignored.
+  [TS stats module](/quest/m1/ts-stats-module.md) makes `track` owned so the
+  type deserializes.
 - Docs: `doc/concept/stats.md` documents each counter's TR 101 290 check, its
   monitoring point (ingest grades the feed, egress grades our muxer, and
   neither is the groomed wire), the value domain of the PCR checks, and that
@@ -38,7 +39,7 @@ Decided while planning [#1838](https://github.com/moq-dev/moq/issues/1838):
 
 ## Required
 
+- [TS stats module](/quest/m1/ts-stats-module.md) - the owned `track` that lets the rows deserialize
 - [Media stats schema](/quest/m1/stats/schema.md) - the snapshot the counters flatten into
 - [Rust reporters](/quest/m1/stats/rust.md) - `moq import --stats` and the stats interval
 - [TS import health](/quest/m2/ts-import-health.md) - the ingest counters
-- [TS export liveness](/quest/m2/ts-export-liveness.md) - the egress rows

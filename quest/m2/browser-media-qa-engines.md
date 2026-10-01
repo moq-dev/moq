@@ -18,8 +18,10 @@ WebCodecs encode and decode, AudioWorklet, `MediaStreamTrackProcessor`,
 
 Neither Playwright Firefox nor Playwright WebKit ships WebTransport, and
 WebKit also lacks the WebCodecs encoder, so neither can publish and neither
-can play over QUIC. What they can do is play over the WebSocket fallback,
-which is the path a real Firefox viewer takes today.
+can play over QUIC. What they can do is play over the WebSocket fallback.
+Real Firefox does use WebTransport; only Playwright's build lacks it, so a
+fallback run covers the player, not Firefox's transport path (see open PR
+[#4460](https://github.com/moq-dev/moq/pull/4460)).
 
 - Split the harness's publisher and subscriber roles so an engine can take
   one side: a Chromium fixture with a Firefox or WebKit player over the
@@ -31,7 +33,6 @@ which is the path a real Firefox viewer takes today.
   a measurement of that engine, not of the player.
 - Playwright WebKit is not Safari. Say so in the report; a Safari defect such
   as #2812 still needs a manual run.
-
-## Related
-
-- [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - where an engine that will not run on the CI image runs
+- Real Firefox 155 still needs a manual run too: it reports a non-empty
+  `WebTransport.protocol` and lands on lite-06 against the in-tree relay, while
+  153/154 take the draft-14 SETUP path.

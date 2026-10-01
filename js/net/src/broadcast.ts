@@ -10,6 +10,7 @@ import { Route } from "./hop.ts";
 import { hooks, type TrackSequence } from "./internal.ts";
 import * as Path from "./path.ts";
 import * as track from "./track.ts";
+import { untilAborted } from "./util/abort.ts";
 import { registerWire, trackOf, type Broadcast as Wire } from "./wire.ts";
 
 /** The origin callback a created broadcast uses to advertise its exact path. @internal */
@@ -129,11 +130,12 @@ async function fetchGroup(
 	sequence: number,
 	options: track.FetchGroupOptions = {},
 ): Promise<GroupConsumer> {
+	options.signal?.throwIfAborted();
 	const subscriber = subscribe(state, name, { priority: options.priority });
 	hooks.exemptFetch(subscriber);
 	try {
 		for (;;) {
-			const group = await subscriber.recvGroup();
+			const group = await untilAborted(subscriber.recvGroup(), options.signal);
 			if (!group) throw new NotFound(`group ${sequence}`);
 			if (group.sequence === sequence) {
 				// Close the subscription when the returned group finishes, not now: an

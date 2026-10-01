@@ -23,8 +23,8 @@ a GitHub App:
 
 - PR: one job builds base and head on the same runner and runs only the
   selected targets, saving and comparing Criterion baselines. Selection is the
-  changed crates plus their dependents, from the impact map that the
-  [tooling line](/quest/m1/tooling/README.md) lands. No selected bench
+  changed crates plus their dependents, from the impact map in
+  `sh/dispatch.sh`. No selected bench
   means no job. Extend `bench/run.sh` with a Criterion-only, crate-scoped mode
   behind a recipe instead of writing a second runner. Hosted runners vary by
   about 3%, so the comment highlights only changes Criterion calls
@@ -43,11 +43,7 @@ a GitHub App:
 - Document the comment, the trend, and local reproduction in
   `bench/README.md`.
 
-## Required
-
-- [Tooling](/quest/m1/tooling/README.md) - owns the diff-to-crate impact map the PR job reuses
-
 ## Related
 
 - [Benchmark comparisons](/quest/m1/performance-comparisons.md) - extends the same `bench/run.sh` with repeated paired rounds
-- [Bench coverage](/quest/m1/bench-coverage.md) - more targets for this job to track
+- [Bench coverage](/quest/m2/bench-coverage.md) - more targets for this job to track

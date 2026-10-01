@@ -14,4 +14,4 @@ MoQ consumers, including the OBS source, decode VP8 and VP9 without depending on
 ## Related
 
 - [Video source replacement](/quest/m1/obs-moq-video/source.md) - consumer integration, not a blocker for codec implementation
-- [Color model](/quest/m1/color-model.md) - share codec-neutral color metadata rather than introducing VP9-only conversions
+- [Catalog colour model](/quest/m2/color-catalog.md) - share codec-neutral color metadata rather than introducing VP9-only conversions

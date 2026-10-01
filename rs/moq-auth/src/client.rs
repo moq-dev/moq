@@ -43,7 +43,7 @@ impl Client {
 					None => false,
 				};
 				if !loopback {
-					return Err(Error::InsecureUrl(url.to_string()));
+					return Err(Error::InsecureUrl(redact(&url)));
 				}
 				(builder, url)
 			}
@@ -53,12 +53,12 @@ impl Client {
 			},
 			#[cfg(unix)]
 			"unix" => {
-				let path = url.to_file_path().map_err(|()| Error::InvalidUrl(url.to_string()))?;
+				let path = url.to_file_path().map_err(|()| Error::InvalidUrl(redact(&url)))?;
 				// The socket is the transport; the request target is the server's root.
 				let target = Url::parse("http://localhost/").expect("a constant URL parses");
 				(builder.unix_socket(path), target)
 			}
-			_ => return Err(Error::InvalidUrl(url.to_string())),
+			_ => return Err(Error::InvalidUrl(redact(&url))),
 		};
 
 		Ok(Self {
@@ -143,6 +143,16 @@ async fn ask<S: Post>(server: &S, request: &Request) -> crate::Result<Grant> {
 	Ok(grant)
 }
 
+/// `url` without its userinfo, query, or fragment, any of which may carry a credential.
+fn redact(url: &Url) -> String {
+	let mut url = url.clone();
+	let _ = url.set_username("");
+	let _ = url.set_password(None);
+	url.set_query(None);
+	url.set_fragment(None);
+	url.to_string()
+}
+
 /// The task behind a lease: re-checks on cadence and reports the end.
 struct Driver<S> {
 	server: S,
@@ -175,7 +185,10 @@ impl<S: Post> Driver<S> {
 			.take()
 			.expect("the driver owns the producer until it ends");
 		let mut failures = 0u32;
-		let mut next = grant.revalidate.map(|cadence| tokio::time::Instant::now() + cadence);
+		// A cadence beyond the clock's range never fires.
+		let mut next = grant
+			.revalidate
+			.and_then(|cadence| tokio::time::Instant::now().checked_add(cadence));
 		// The re-check in flight, kept out of the select so expiry and the session's
 		// close are still polled while a stalled server holds the reply.
 		let mut inflight: Option<Pin<Box<dyn Future<Output = crate::Result<Grant>> + Send>>> = None;
@@ -212,7 +225,9 @@ impl<S: Post> Driver<S> {
 						Ok(fresh) => {
 							failures = 0;
 							self.expires = fresh.deadline();
-							next = fresh.revalidate.map(|cadence| tokio::time::Instant::now() + cadence);
+							next = fresh
+								.revalidate
+								.and_then(|cadence| tokio::time::Instant::now().checked_add(cadence));
 							producer.update(fresh.clone());
 							grant = fresh;
 						}
@@ -459,6 +474,23 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn http_error_redacts_url() {
+		// A freed port refuses the connection, so reqwest fails with the dialed URL attached.
+		let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+		let address = listener.local_addr().expect("local address");
+		drop(listener);
+
+		let url = format!("http://user:pass@{address}/?jwt=secret").parse().unwrap();
+		let err = Client::new(url, None).unwrap().connect(request()).await.unwrap_err();
+
+		assert!(matches!(err, Error::Unavailable(_)), "unexpected error: {err}");
+		let printed = format!("{err} {err:?}");
+		for secret in ["jwt", "secret", "user:pass"] {
+			assert!(!printed.contains(secret), "error leaked {secret}: {printed}");
+		}
+	}
+
+	#[tokio::test]
 	async fn revalidate_runs_on_cadence_and_applies_the_reply() {
 		let log = Log::default();
 		let server = server(log.clone(), |request| {
@@ -528,6 +560,29 @@ mod tests {
 		grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
 		let script = Script::new(Log::default(), move |_| Some(Ok(grant.clone())));
 		assert!(matches!(script.connect().await, Err(Error::GrantExpired)));
+	}
+
+	/// Regression: a cadence past the clock's range overflowed `Instant` and panicked
+	/// the driver, at connect and on each reply. It never fires; the grant expires.
+	#[tokio::test]
+	async fn a_cadence_past_the_clock_never_rechecks() {
+		tokio::time::pause();
+		let log = Log::default();
+		let script = Script::new(log.clone(), |_| {
+			Some(Ok(grant(
+				Some(Duration::from_secs(3)),
+				Some(Duration::from_secs(u64::MAX)),
+			)))
+		});
+
+		let consumer = script.connect().await.unwrap();
+		// A nudge's reply schedules the next re-check the same way.
+		consumer.revalidate();
+		let reason = tokio::time::timeout(Duration::from_secs(4), consumer.closed())
+			.await
+			.expect("closed at expires");
+		assert_eq!(reason, Reason::Expired);
+		assert_eq!(log.revalidates(), 1, "only the nudge re-checked");
 	}
 
 	/// An outage is evidence of nothing: the grant stands through failed re-checks
@@ -639,6 +694,19 @@ mod tests {
 		));
 		#[cfg(unix)]
 		assert!(Client::new("unix:///run/moq-auth.sock".parse().unwrap(), None).is_ok());
+
+		// The refused URL is reported, minus anything that may carry a credential.
+		for url in [
+			"http://user:pass@auth.example/?jwt=secret#frag",
+			"ftp://user:pass@auth.example/?jwt=secret#frag",
+		] {
+			let err = Client::new(url.parse().unwrap(), None).err().expect("refused");
+			let printed = format!("{err} {err:?}");
+			assert!(printed.contains("auth.example/"), "{printed}");
+			for secret in ["jwt", "secret", "user", "pass", "frag"] {
+				assert!(!printed.contains(secret), "error leaked {secret}: {printed}");
+			}
+		}
 	}
 
 	/// Backoff leaves the driver in this same state (nothing in flight, a timer armed),

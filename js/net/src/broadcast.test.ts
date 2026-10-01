@@ -487,3 +487,19 @@ test("a fetch waits for a group still to come", async () => {
 
 	broadcast.close();
 });
+
+test("aborting a fetch rejects with the signal's reason", async () => {
+	const broadcast = new BroadcastProducer();
+	broadcast.createTrack("video");
+
+	const early = new Error("early");
+	await expect(wireOf(broadcast).fetchGroup("video", 0, { signal: AbortSignal.abort(early) })).rejects.toBe(early);
+
+	const controller = new AbortController();
+	const pending = wireOf(broadcast).fetchGroup("video", 0, { signal: controller.signal });
+	const late = new Error("late");
+	controller.abort(late);
+	await expect(pending).rejects.toBe(late);
+
+	broadcast.close();
+});

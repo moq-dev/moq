@@ -14,9 +14,9 @@
  * `lite/announce.ts`); this module is the moq-transport binding, negotiated on draft-17+
  * only, where SETUP is a Key-Value-Pair block.
  *
- * We are a leaf, never a relay: the only path we can advertise is our own, so we stamp a
- * single-entry HOP_PATH and seed the cost at 0. What we get out of declaring is the other
- * direction. A relay that knows our Hop ID withholds the advertisements that already flowed
+ * A broadcast we produce carries a single-entry HOP_PATH and a cost of 0, and a route we
+ * forward carries its own hop chain and warm cost with our id appended. What we get out of
+ * declaring is also the other direction. A relay that knows our Hop ID withholds the advertisements that already flowed
  * through us, so publishing a broadcast no longer announces it back to us, which is what
  * moq-lite has always done with its own hop chain.
  *

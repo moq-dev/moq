@@ -69,6 +69,11 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// another session's, while a client only assigns one it knows out of band. The
 	// assigned id stays local and is never written into a hop chain.
 	session_origin: crate::Hop,
+	// A random Hop ID of this connection's own, written as the first hop of any chain
+	// that names no publisher (Lite01/02, a Lite03 placeholder, or a peer reporting 0),
+	// so a publisher that reconnects reads downstream as a new one. Fresh per
+	// connection, unlike `session_origin`.
+	stamp: crate::Hop,
 	subscribes: Lock<HashMap<u64, TrackEntry>>,
 	/// Why this session ended, once it has. A track still waiting on TRACK_INFO is
 	/// not in [`Self::subscribes`], so dropping its request reads this instead of
@@ -84,6 +89,8 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	/// [`SourceServe`] machines.
 	sources: kio::Queue<(PathOwned, crate::broadcast::Dynamic)>,
 	going_away: crate::goaway::GoingAway,
+	/// What this session may allocate up front for frames still arriving.
+	frames: frame::Budget,
 }
 
 #[derive(Clone)]
@@ -110,6 +117,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			recv_bandwidth: config.recv_bandwidth,
 			self_origin,
 			session_origin: config.peer_hop.unwrap_or(crate::Hop::UNKNOWN),
+			stamp: crate::Hop::random(),
 			subscribes: Default::default(),
 			ended: Default::default(),
 			next_id: Default::default(),
@@ -118,6 +126,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			cost: config.cost,
 			sources: kio::Queue::new(),
 			going_away: config.going_away,
+			frames: Default::default(),
 		}
 	}
 
@@ -306,13 +315,12 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			return Ok(false);
 		}
 
-		// Lite03 carries its hop count as UNKNOWN placeholders rather than real
-		// ids; they stay 0 and count as anonymous. Lite01/02 send no list at all.
-		// Either way the chain must have at least the anonymous mark so a
-		// downstream hop can see that this path passed through an unidentified hop.
-		if hops.is_empty() {
-			hops.push(crate::Hop::UNKNOWN)
-				.expect("an empty hop chain always has room for one entry, and repeats nothing");
+		// Lite01/02 send no list at all, and Lite03 carries only UNKNOWN placeholders,
+		// so the publisher may be unnamed: this connection's stamp goes in front to name
+		// it, and the 0s stay so the route still ranks as anonymous.
+		if hops.stamp(self.stamp).is_err() {
+			tracing::debug!(route = %self.log_path(&path), "dropping announce; no room to stamp the chain");
+			return Ok(false);
 		}
 
 		tracing::debug!(route = %self.log_path(&path), hops = hops.len(), "announce");
@@ -405,9 +413,11 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			return Ok(false);
 		}
 
-		if hops.is_empty() {
-			hops.push(crate::Hop::UNKNOWN)
-				.expect("an empty hop chain always has room for one entry, and repeats nothing");
+		// Named by this connection's stamp when the chain names no publisher, exactly as
+		// the announce was, so a restart of the same unnamed publisher stays in place.
+		if hops.stamp(self.stamp).is_err() {
+			announced.declined(path);
+			return Ok(false);
 		}
 
 		tracing::debug!(route = %self.log_path(&path), hops = hops.len(), "restart");
@@ -803,7 +813,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 					self.state = GroupRecvState::Serve {
 						group: crate::recv::Group::new(group),
 						track,
-						ingest: FrameIngest::new(self.subscriber.runtime.clone(), timescale),
+						ingest: FrameIngest::new(&self.subscriber, timescale),
 						_reading: reading,
 					};
 				}
@@ -868,6 +878,7 @@ struct FrameIngest {
 	/// zigzag-delta decode. The first frame's delta is absolute (prev = 0).
 	prev_ts: u64,
 	phase: IngestPhase,
+	budget: frame::Budget,
 }
 
 enum IngestPhase {
@@ -882,12 +893,13 @@ enum IngestPhase {
 }
 
 impl FrameIngest {
-	fn new(runtime: crate::time::Clock, timescale: Option<Timescale>) -> Self {
+	fn new<S: crate::transport::poll::Session>(subscriber: &Subscriber<S>, timescale: Option<Timescale>) -> Self {
 		Self {
 			timescale,
 			prev_ts: 0,
 			phase: IngestPhase::Timing,
-			runtime,
+			runtime: subscriber.runtime.clone(),
+			budget: subscriber.frames.clone(),
 		}
 	}
 
@@ -926,11 +938,12 @@ impl FrameIngest {
 					let Some(size) = ready!(reader.poll_decode_maybe::<u64>(&mut cx))? else {
 						return Poll::Ready(Ok(()));
 					};
-					// `create_frame_owned` is the allocation chokepoint and rejects an
-					// oversized `size` before allocating, so no pre-check is needed. No
-					// wire timestamp (pre-lite-05) means local receive time.
+					// `create_frame_owned` is the allocation chokepoint: it rejects an
+					// oversized `size` and allocates up front only within the budget, so
+					// no pre-check is needed. No wire timestamp (pre-lite-05) means local
+					// receive time.
 					let timestamp = timestamp.unwrap_or_else(|| Timestamp::from(self.runtime.now()));
-					let frame = group.create_frame_owned(frame::Info { size, timestamp })?;
+					let frame = group.create_frame_owned(frame::Info { size, timestamp }, &self.budget)?;
 					self.phase = IngestPhase::Payload { frame };
 				}
 				IngestPhase::Payload { frame } => {
@@ -2668,8 +2681,9 @@ mod tests {
 		);
 	}
 
-	/// A peer that declares no identity is marked anonymous (hop 0). The assigned
-	/// identity stays on `via` for split-horizon and is never written into the chain.
+	/// A peer that declares no identity has its publisher named by the connection's
+	/// stamp. The assigned identity stays on `via` for split-horizon and is never
+	/// written into the chain.
 	#[tokio::test]
 	async fn assigned_peer_hop_attributes_announces() {
 		let session = SinkSession::new(Default::default());
@@ -2704,19 +2718,21 @@ mod tests {
 			.unwrap();
 		assert!(accepted);
 
-		// The route is announced synchronously: hop 0 on the wire, assigned id local.
+		// The route is announced synchronously: the stamp in the chain, assigned id local.
 		let mut cursor = consumer.announced();
 		let route = cursor.assert_next_active("room/host");
 		let hops: Vec<_> = route.hops.iter().copied().collect();
-		assert_eq!(hops, vec![crate::Hop::UNKNOWN]);
+		assert_eq!(hops, vec![subscriber.stamp, crate::Hop::UNKNOWN]);
+		assert_ne!(subscriber.stamp, assigned);
 		assert!(route.is_anonymous());
 
 		let mut hidden = consumer.excluding(assigned).announced();
 		hidden.assert_next_wait();
 	}
 
-	/// Lite03 hop-count placeholders stay 0 and count as anonymous; they are not
-	/// rewritten with the assigned identity.
+	/// Lite03 hop-count placeholders name nobody, so the connection's stamp goes in front;
+	/// the placeholders stay 0 and count as anonymous. None is rewritten with the
+	/// assigned identity.
 	#[tokio::test]
 	async fn lite03_placeholders_stay_anonymous() {
 		let assigned = crate::Hop::new(777).unwrap();
@@ -2752,26 +2768,28 @@ mod tests {
 		let mut cursor = consumer.announced();
 		let route = cursor.assert_next_active("room/host");
 		let hops: Vec<_> = route.hops.iter().copied().collect();
-		assert_eq!(hops, vec![crate::Hop::UNKNOWN, crate::Hop::UNKNOWN]);
+		assert_eq!(hops, vec![subscriber.stamp, crate::Hop::UNKNOWN, crate::Hop::UNKNOWN]);
 		assert!(route.is_anonymous());
 	}
 
-	/// A peer with no assigned identity is attributed the reserved origin 0
-	/// (UNKNOWN). This layer never mints one of its own: whether an anonymous peer
-	/// gets an identity, and whether two of its sessions share it, is the caller's
-	/// policy, and a minted id here would be indistinguishable from a declared one.
+	/// A publisher that names nobody is stamped with a random id fresh per connection,
+	/// never 0, ahead of the 0 that keeps it ranked as unknown: a restart on the same connection keeps the stamp and updates in place,
+	/// while the same publisher reconnecting reads as a new first hop.
 	#[tokio::test]
-	async fn absent_peer_hop_stamps_unknown() {
-		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
+	async fn an_unnamed_publisher_is_stamped_per_connection() {
+		let (mut first, consumer) = restart_subscriber(SinkSession::new(Default::default()));
+		let (second, _) = restart_subscriber(SinkSession::new(Default::default()));
+		assert_ne!(first.stamp, crate::Hop::UNKNOWN);
+		assert_ne!(first.stamp, second.stamp, "each connection stamps its own id");
 
 		let mut announced = Announced::default();
-		subscriber
+		first
 			.start_announce(
 				Path::new("room/host").to_owned(),
 				crate::Hops::new(),
 				crate::origin::Cost::UNKNOWN,
 				0,
-				None,
+				Some(crate::Hop::UNKNOWN),
 				&mut announced,
 			)
 			.unwrap();
@@ -2779,7 +2797,22 @@ mod tests {
 		let mut cursor = consumer.announced();
 		let route = cursor.assert_next_active("room/host");
 		let hops: Vec<_> = route.hops.iter().copied().collect();
-		assert_eq!(hops, vec![crate::Hop::UNKNOWN]);
+		assert_eq!(hops, vec![first.stamp, crate::Hop::UNKNOWN]);
+
+		// A reprice from the same unnamed publisher keeps the stamp, so it stays in place.
+		first
+			.restart_announce(
+				Path::new("room/host").to_owned(),
+				crate::Hops::new(),
+				crate::origin::Cost::UNKNOWN,
+				4,
+				Some(crate::Hop::UNKNOWN),
+				&mut announced,
+			)
+			.unwrap();
+		let route = cursor.assert_next_active("room/host");
+		let hops: Vec<_> = route.hops.iter().copied().collect();
+		assert_eq!(hops, vec![first.stamp, crate::Hop::UNKNOWN]);
 	}
 
 	fn restart_subscriber(session: SinkSession) -> (Subscriber<SinkSession>, crate::origin::Consumer) {
@@ -4090,7 +4123,8 @@ enum FetchRunState<S: crate::transport::poll::Session> {
 	Ingest {
 		stream: Stream<S, Version>,
 		producer: group::Producer,
-		ingest: FrameIngest,
+		// Boxed so the other states stay small; one allocation per fetch.
+		ingest: Box<FrameIngest>,
 	},
 	Done,
 }
@@ -4255,7 +4289,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					self.state = FetchRunState::Ingest {
 						stream,
 						producer,
-						ingest: FrameIngest::new(self.serve.subscriber.runtime.clone(), self.timescale),
+						ingest: Box::new(FrameIngest::new(&self.serve.subscriber, self.timescale)),
 					};
 				}
 				FetchRunState::Ingest {

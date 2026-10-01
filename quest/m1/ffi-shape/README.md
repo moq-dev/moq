@@ -56,7 +56,3 @@ work no child does:
 - [Net](/quest/m1/ffi-shape/net.md) - client and server take config records, snapshots are records, and the verbs match moq-net
 - [Media](/quest/m1/ffi-shape/media.md) - catalog, import, and container consume move under `media`
 - [Codecs](/quest/m1/ffi-shape/codec.md) - audio and video encoders and decoders move under their own namespaces with one constructor shape
-
-## Related
-
-- [Track demand](/quest/m1/track-demand.md) - the same `demand()` cleanup in Rust and JS

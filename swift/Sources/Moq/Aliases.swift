@@ -52,7 +52,7 @@ public typealias VideoDecodedFrame = MoqVideoDecodedFrame
 public typealias AudioDecoderOutput = MoqFFI.MoqAudioDecoderOutput
 /// A raw PCM sample format, mirroring WebCodecs `AudioData.format`.
 public typealias AudioSampleFormat = MoqFFI.MoqAudioSampleFormat
-/// Selects the audio encoder codec. Build one with `AudioCodec.opus()`.
+/// Selects the audio encoder codec. Build one with `AudioCodec.opus()` or `AudioCodec.aac()`.
 public typealias AudioCodec = MoqFFI.MoqAudioCodec
 /// One raw video frame: pixels in the configured layout plus a presentation
 /// timestamp.

@@ -134,7 +134,7 @@ typealias FetchGroupOptions = uniffi.moq.MoqFetchGroupOptions
 typealias TrackInfo = uniffi.moq.MoqTrackInfo
 /** One audio frame: PCM payload bytes plus a presentation timestamp. */
 typealias AudioFrame = uniffi.moq.MoqAudioFrame
-/** Selects the audio encoder codec. Build one with `AudioCodec.opus()`. */
+/** Selects the audio encoder codec. Build one with `AudioCodec.opus()` or `AudioCodec.aac()`. */
 typealias AudioCodec = uniffi.moq.MoqAudioCodec
 /** A raw PCM sample format, mirroring WebCodecs `AudioData.format`. */
 typealias AudioSampleFormat = uniffi.moq.MoqAudioSampleFormat
