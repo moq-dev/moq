@@ -114,10 +114,20 @@ underflowed access unit finished arriving, and the longest any access unit waite
 
 No maintained tool implements this. TSDuck has no T-STD analyzer, and nothing else
 in nixpkgs does either, so the model is hand-rolled and its parameters are
-transcribed from the specs: H.264 Table A-1 and H.265 Table A.8 levels read from
-the stream's SPS, the ADTS and "other audio" rates and sizes in H.222.0 2.4.2.3,
-and ATSC A/52 and A/53 Part 5 for AC-3 and E-AC-3. TSDuck still does the parsing
-it can (`tstables` decodes the PMT).
+transcribed from the specs: H.264 Table A-1 and H.265 Table A.8 for the level, the
+ADTS and "other audio" rates and sizes in H.222.0 2.4.2.3, and ATSC A/52 and A/53
+Part 5 for AC-3 and E-AC-3. TSDuck does the parsing: `tstables` decodes the PMT
+and `tsp -P pes --avc-access-unit` the SPS, AVC and HEVC alike.
+
+Video takes its buffers from the HRD the SPS declares, as H.222.0 2.14.3.1
+(AVC) and 2.17.2 (HEVC) specify. A NAL HRD sets Rx from its bit rate and EB to
+its CPB size, and MB grows by whatever the level's CPB leaves over; Rbx stays the
+level's. Without one, the level's limits stand in. A VCL HRD describes the VCL
+alone, not the byte stream EB holds, so a stream declaring only that takes the
+level defaults too. An `AVC_timing_and_HRD_descriptor` or
+`HEVC_timing_and_HRD_descriptor` with `hrd_management_valid` switches MB-to-EB
+transfer to the HRD's own schedule, which is not modelled, so such a stream is
+refused.
 
 Opus is graded against ADTS's buffers for the same channel count: the Opus-in-TS
 draft gives Rx (2 Mb/s for 1-2 channels, matching ADTS) but leaves the buffer size
@@ -128,20 +138,18 @@ video, DVB E-AC-3, and HEVC beyond Main/Main 10. Sections and private data
 graded. A signalled PCR discontinuity starts fresh buffers, since the timestamps
 on either side of it are on different clocks.
 
-Two simplifications, one lenient and one strict:
-
-- VUI HRD parameters are not read. The level's default CPB size and bit rate stand
-  in, so a stream declaring smaller ones gets a faster Rx and the same MB + EB total.
-- A packet's bytes reach MB/B when its last byte leaves TB, up to one packet's
-  drain time (0.75 ms for audio) later than byte-by-byte, so underflow is judged
-  that much stricter.
+One simplification, toward strictness: a packet's bytes reach MB/B when its last
+byte leaves TB, up to one packet's drain time (0.75 ms for audio) later than
+byte-by-byte, so underflow is judged that much stricter.
 
 ### Controls
 
 `just test ts-tstd` (`tstd-controls.py`) proves the model can tell a compliant
 stream from a broken one. The positive control is a real broadcast encoder's
-output (`kyrion_dirtystart.ts` from the `moq-mux` test data: AVC High@4.0 plus
-two MPEG-1 Layer II tracks), which passes. The negatives restamp its PCRs with
+output (`kyrion_dirtystart.ts` from the `moq-mux` test data: AVC High@4.0 with a
+1.935 Mb/s CBR NAL HRD and a 755 kbit CPB, plus two MPEG-1 Layer II tracks), which
+passes against its own declared buffer, filling EB to the brim as a CBR stream
+should. The negatives restamp its PCRs with
 `tsp -P pcradjust`, leaving every PES and timestamp alone, so only delivery
 changes:
 
@@ -150,8 +158,11 @@ changes:
 | as captured | pass |
 | PCRs restamped at the capture's own rate | pass |
 | delivered at 0.7x | EB and B underflow |
-| delivered at 4x | B overflow |
-| delivered at 15x (a burst) | TB, MB and B overflow |
+| delivered at 4x | TB and B overflow |
+| delivered at 15x (a burst) | TB and B overflow |
+
+No restamp can overflow the video MB: it holds the level's whole CPB less the
+declared one, about 3.6 MB, more than the 4 s capture carries.
 
 The ffmpeg clip `run.sh` generates is not a positive control: its muxer sends
 audio 0.7 s ahead by default (`-muxdelay`), which overflows the 3,584-byte ADTS

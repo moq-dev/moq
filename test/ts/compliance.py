@@ -484,6 +484,8 @@ class Stream:
     pes: list[tuple[int, int, int | None, int]] = field(default_factory=list)
     es: bytearray = field(default_factory=bytearray)
     es_len: int = 0
+    # Video: the first SPS as TSDuck decodes it.
+    sps: dict[str, str] = field(default_factory=dict)
 
 
 def read_programs(ts_path: str) -> list[tuple[int, list[Stream]]]:
@@ -507,6 +509,7 @@ def read_programs(ts_path: str) -> list[tuple[int, list[Stream]]]:
             descriptors = [d for d in node.get("#nodes", []) if isinstance(d, dict)]
             names = {d["#name"] for d in descriptors}
             names |= {f"registration:{d['format_identifier']}" for d in descriptors if "format_identifier" in d}
+            names |= {"hrd_management_valid" for d in descriptors if d.get("hrd_management_valid") is True}
             names |= {
                 f"tag{d['tag']}:" + "".join(d.get("#nodes", [])).replace(" ", "").lower()
                 for d in descriptors
@@ -561,31 +564,58 @@ def read_pes(data: bytes, packet_size: int, streams: dict[int, Stream], keep_es:
             continue
         body = length - header
         stream.packets.append((index, header, body, stream.es_len))
-        if pid in keep_es or len(stream.es) < 1 << 20:
+        if pid in keep_es:
             stream.es += data[start + header : start + length]
         stream.es_len += body
     return refused
 
 
-def _nal_units(es: bytes, limit: int = 1 << 20):
-    """Annex-B NAL units (without start codes) in the first `limit` bytes of `es`."""
-    view = bytes(es[:limit])
-    pos = view.find(b"\x00\x00\x01")
-    while pos >= 0:
-        nxt = view.find(b"\x00\x00\x01", pos + 3)
-        yield view[pos + 3 : nxt if nxt >= 0 else len(view)]
-        pos = nxt
+def read_sps(ts_path: str, pid: int, nal_type: int) -> dict[str, str]:
+    """The first SPS on `pid`, field by field, as TSDuck's `pes` plugin decodes it."""
+    proc = subprocess.run(
+        ["tsp", "-I", "file", ts_path, "-P", "pes", "--pid", str(pid), "--avc-access-unit"]
+        + ["--nal-unit-type", str(nal_type), "--max-dump-count", "1", "-O", "drop"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"tsp -P pes failed: {proc.stderr.strip()}")
+    fields = {}
+    for line in (proc.stdout + proc.stderr).splitlines():
+        key, eq, value = line.strip().partition(" = ")
+        # A key repeats once per CPB schedule; the last is the one H.222.0 sizes EB from.
+        if eq:
+            fields[key] = value
+    if not fields:
+        raise Refused("the stream carries no SPS")
+    return fields
 
 
-def avc_params(es: bytes) -> Params:
-    """H.222.0 2.14.3.1 buffers from the first SPS's profile and level, without VUI HRD."""
-    for nal in _nal_units(es):
-        if nal and nal[0] & 0x1F == 7 and len(nal) >= 4:
-            profile, constraints, level = nal[1], nal[2], nal[3]
-            break
-    else:
-        raise Refused("AVC stream carries no SPS")
-    if (level == 11 and constraints & 0x10 and profile in (66, 77, 88)) or level == 9:
+def _hrd(sps: dict[str, str], prefix: str, value: str) -> tuple[float, float] | None:
+    """(BitRate bit/s, CpbSize bits) of the highest-numbered CPB a NAL HRD declares.
+
+    H.264 E.2.2 and H.265 E.3.3: BitRate = (bit_rate_value_minus1 + 1) * 2^(6 + bit_rate_scale)
+    and CpbSize = (cpb_size_value_minus1 + 1) * 2^(4 + cpb_size_scale). H.222.0 2.14.3.1
+    sizes EB from CpbSize[cpb_cnt_minus1], so the last schedule is the one that counts.
+    """
+    rates = [int(v) for k, v in sps.items() if k.startswith(prefix) and "bit_rate_value_minus1" in k]
+    sizes = [int(v) for k, v in sps.items() if k.startswith(prefix) and "cpb_size_value_minus1" in k]
+    if not rates or not sizes:
+        return None
+    rate = (rates[-1] + 1) << (6 + int(sps[f"{value}bit_rate_scale"]))
+    size = (sizes[-1] + 1) << (4 + int(sps[f"{value}cpb_size_scale"]))
+    return rate, size
+
+
+def avc_params(sps: dict[str, str]) -> Params:
+    """H.222.0 2.14.3.1 buffers from the SPS: level limits, overridden by a declared NAL HRD.
+
+    Only the NAL HRD counts: EB sizes the byte stream, which a VCL HRD does not describe,
+    so a stream declaring only a VCL HRD takes the level defaults (H.264 E.2.2).
+    """
+    profile, level = int(sps["profile_idc"]), int(sps["level_idc"])
+    if (level == 11 and sps.get("constraint_set3_flag") == "1" and profile in (66, 77, 88)) or level == 9:
         max_br, max_cpb, name = *AVC_LEVEL_1B, "1b"
     elif level in AVC_LEVELS:
         max_br, max_cpb = AVC_LEVELS[level]
@@ -594,40 +624,54 @@ def avc_params(es: bytes) -> Params:
         raise Refused(f"AVC level_idc {level} has no Table A-1 entry")
     if profile not in AVC_NAL_FACTOR:
         raise Refused(f"AVC profile_idc {profile} has no Table A-2 cpbBrNalFactor")
-    overhead = max(1200 * max_br, 2_000_000)
+    # Absent a NAL HRD, BitRate is cpbBrNalFactor * MaxBR (H.264 E.2.2) and cpb_size is
+    # 1200 * MaxCPB (H.222.0 2.14.3.1).
+    declared = (
+        _hrd(sps, "vui.nal_hrd.", "vui.nal_hrd.") if sps.get("vui.nal_hrd_parameters_present_flag") == "1" else None
+    )
+    bit_rate, cpb = declared or (AVC_NAL_FACTOR[profile] * max_br, 1200 * max_cpb)
+    overhead = (0.004 + 1 / 750) * max(1200 * max_br, 2_000_000)
     return Params(
-        label=f"AVC profile {profile} level {name}",
-        rx=1.2 * AVC_NAL_FACTOR[profile] * max_br,
-        mb=(0.004 + 1 / 750) * overhead / 8,
-        eb=1200 * max_cpb / 8,
+        label=f"AVC profile {profile} level {name}, "
+        + (f"NAL HRD {bit_rate / 1e6:.3f} Mb/s cpb {cpb / 1e3:.0f} kbit" if declared else "level defaults"),
+        # H.222.0 2.14.3.1: Rx = 1.2 * BitRate[SchedSelIdx]; MBS = BSmux + BSoh + 1200 *
+        # MaxCPB - cpb_size; EBS = cpb_size; Rbx = 1200 * MaxBR whatever the HRD declares.
+        rx=1.2 * bit_rate,
+        mb=(overhead + 1200 * max_cpb - cpb) / 8,
+        eb=cpb / 8,
         rbx=1200 * max_br,
         max_delay_s=10.0,
     )
 
 
-def hevc_params(es: bytes) -> Params:
-    """H.222.0 2.17.2 buffers from the first SPS's tier and level, without VUI HRD."""
-    for nal in _nal_units(es):
-        if len(nal) >= 2 and (nal[0] >> 1) & 0x3F == 33:
-            # Emulation prevention can land inside the 32 compatibility flags.
-            rbsp = nal[2:40].replace(b"\x00\x00\x03", b"\x00\x00")
-            if len(rbsp) >= 13:
-                break
-    else:
-        raise Refused("HEVC stream carries no SPS")
-    tier, profile, level = (rbsp[1] >> 5) & 1, rbsp[1] & 0x1F, rbsp[12]
+def hevc_params(sps: dict[str, str]) -> Params:
+    """H.222.0 2.17.2 buffers from the SPS: tier and level limits, overridden by a declared NAL HRD."""
+    prefix = "profile_tier_level.general_"
+    tier, profile, level = (int(sps[f"{prefix}{k}"]) for k in ("tier_flag", "profile_idc", "level_idc"))
     if profile not in (1, 2, 3):
         raise Refused(f"HEVC general_profile_idc {profile} has no CpbNalFactor here (Main, Main 10, Still only)")
     limits = HEVC_LEVELS.get(level, (None, None))[tier]
     if limits is None:
         raise Refused(f"HEVC level_idc {level} tier {tier} has no Table A.8 entry")
     max_br, max_cpb = limits
+    declared = (
+        _hrd(sps, "vui.hrd.nal_hrd_parameters", "vui.hrd.")
+        if sps.get("vui.hrd.nal_hrd_parameters_present_flag") == "1"
+        else None
+    )
+    # Absent a NAL HRD, BitRate is CpbBrVclFactor * MaxBR (H.265 E.3.3), which H.222.0 then
+    # scales by CpbBrNalFactor / CpbBrVclFactor; cpb_size is CpbBrNalFactor * MaxCPB.
+    bit_rate, cpb = declared or (1000 * max_br, HEVC_NAL_FACTOR * max_cpb)
     rate = HEVC_NAL_FACTOR * max_br
     return Params(
-        label=f"HEVC profile {profile} {'high' if tier else 'main'} tier level {level / 30:g}",
-        rx=rate,
-        mb=(0.004 + 1 / 750) * max(rate, 2_000_000) / 8,
-        eb=HEVC_NAL_FACTOR * max_cpb / 8,
+        label=f"HEVC profile {profile} {'high' if tier else 'main'} tier level {level / 30:g}, "
+        + (f"NAL HRD {bit_rate / 1e6:.3f} Mb/s cpb {cpb / 1e3:.0f} kbit" if declared else "level defaults"),
+        # H.222.0 2.17.2: Rx = CpbBrNalFactor / CpbBrVclFactor * BitRate[SchedSelIdx]; MBS =
+        # BSmux + BSoh + CpbBrNalFactor * MaxCPB - cpb_size; EBS = cpb_size; Rbx =
+        # CpbBrNalFactor * MaxBR.
+        rx=HEVC_NAL_FACTOR / 1000 * bit_rate,
+        mb=((0.004 + 1 / 750) * max(rate, 2_000_000) + HEVC_NAL_FACTOR * max_cpb - cpb) / 8,
+        eb=cpb / 8,
         rbx=rate,
         max_delay_s=10.0,
     )
@@ -734,9 +778,9 @@ def stream_params(kind: str, stream: Stream) -> tuple[Params, object]:
     """The stream's T-STD parameters, and its audio frame parser (None for video)."""
     es = stream.es
     if kind == "avc":
-        return avc_params(es), None
+        return avc_params(stream.sps), None
     if kind == "hevc":
-        return hevc_params(es), None
+        return hevc_params(stream.sps), None
     if kind == "adts":
         adts_frame(es, 0)
         config = ((es[2] & 0x01) << 2) | (es[3] >> 6)
@@ -990,6 +1034,10 @@ def check_tstd(ts_path: str, packet_size: int, scan: Scan) -> Check:
         segments = [segment for segment in segments if segment[0].ok()]
         for stream in modelled.values():
             try:
+                if kinds[stream.pid] in ("avc", "hevc"):
+                    if "hrd_management_valid" in stream.descriptors:
+                        raise Refused("the HRD-scheduled MB to EB transfer (H.222.0 2.14.3.1) is not modelled")
+                    stream.sps = read_sps(ts_path, stream.pid, 7 if kinds[stream.pid] == "avc" else 33)
                 params, parse = stream_params(kinds[stream.pid], stream)
                 units = access_units(stream, parse)
             except Refused as err:

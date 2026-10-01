@@ -10,8 +10,13 @@ DTS untouched, so the only thing that changes is when the bytes arrive:
     as captured     the broadcast itself                       must pass
     restamped 1x    PCRs rewritten at the capture's own rate   must pass (the rewrite is not the fault)
     0.7x            delivered too slowly                       EB and B underflow
-    4x              delivered too early                        B overflow
-    15x             delivered in a burst                       TB, MB and B overflow
+    4x              delivered too early                        TB and B overflow
+    15x             delivered in a burst                       TB and B overflow
+
+The video TB drains at 1.2x the bit rate the SPS's NAL HRD declares (1.935 Mb/s),
+so any delivery well above real time overflows it. MB holds the level's whole CPB
+less the declared one, ~3.6 MB, more than this 4 s capture carries, so no restamp
+of it can overflow MB.
 
 A model that passes everything, or fails everything, cannot tell these apart.
 """
@@ -33,8 +38,8 @@ CASES = [
     ("as captured", None, set()),
     ("restamped 1x", 1.0, set()),
     ("0.7x", 0.7, {"EB underflow", "B underflow"}),
-    ("4x", 4.0, {"B overflow"}),
-    ("15x", 15.0, {"TB overflow", "MB overflow", "B overflow"}),
+    ("4x", 4.0, {"TB overflow", "B overflow"}),
+    ("15x", 15.0, {"TB overflow", "B overflow"}),
 ]
 
 
