@@ -32,6 +32,7 @@ GCC until such a consumer exists.
 
 ## Required
 
+- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
 - A native-to-native consumer of receive timestamps (browsers never see them)
 
 ## Related
