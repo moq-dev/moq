@@ -1635,11 +1635,6 @@ impl PatReader {
 		}
 		pat
 	}
-
-	/// Whether a section is part-way through reassembly.
-	pub(super) fn in_progress(&self) -> bool {
-		!self.sections.acc.is_empty()
-	}
 }
 
 /// Where a packet's payload is.

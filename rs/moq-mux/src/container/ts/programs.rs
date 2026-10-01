@@ -309,7 +309,11 @@ mod test {
 			programs.decode(&null).unwrap();
 		}
 		assert!(programs.programs.is_empty());
-		assert!(programs.pending.len() < 2 * 188, "held {} bytes", programs.pending.len());
+		assert!(
+			programs.pending.len() < 2 * 188,
+			"held {} bytes",
+			programs.pending.len()
+		);
 	}
 
 	/// A corrupt PAT section sharing a packet with the good one that starts the programs is
