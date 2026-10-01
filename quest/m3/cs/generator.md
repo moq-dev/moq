@@ -21,6 +21,10 @@ catches a typed `MoqException`, on the host runtime.
   handle cancels its pending calls. If upstream lacks the mapping, it lands in
   the fork here, never in the wrapper; the probe above is the acceptance test.
 
+## Required
+
+- [A .NET or Unity consumer asks for C# bindings](/quest/m3/cs-demand.md) - the reason to generate C# at all
+
 ## Related
 
 - [C++ generator](/quest/m1/cpp/generator.md) - the same port against the C++ generator
