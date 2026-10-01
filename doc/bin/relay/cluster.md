@@ -22,6 +22,13 @@ relayed from what the peer just withdrew, rather than falling back to them one
 by one. During reconnect, another session from that peer can still advertise
 the broadcast; an old session's withdrawal does not invalidate that route.
 
+A relay two hops from the publisher's still holds routes relayed through others.
+So a change of a broadcast's best route waits 300 ms before it is announced,
+while a new broadcast and a removed one go out at once. By then the withdrawal
+has usually removed the other stale routes too, and the relay sends one
+retraction instead of advertising each stale path in turn. Requests still
+follow the current best route immediately; only the announcement waits.
+
 Failover routes must carry copies of the same broadcast. For each track, the
 relay requires matching timescale, retention window, publisher priority, and
 group ordering. A source with different properties is refused before its groups
