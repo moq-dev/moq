@@ -367,10 +367,13 @@ mod tests {
 		let mut group = crate::group::Info { sequence: 0 }.produce();
 		let mut consumer = group.consume();
 		let frame = group
-			.create_frame_owned(crate::frame::Info {
-				size: size as u64,
-				timestamp: crate::Timestamp::ZERO,
-			})
+			.create_frame_owned(
+				crate::frame::Info {
+					size: size as u64,
+					timestamp: crate::Timestamp::ZERO,
+				},
+				&Default::default(),
+			)
 			.unwrap();
 
 		let payload = consumer.next_frame().now_or_never().unwrap().unwrap().unwrap();

@@ -9,15 +9,13 @@ work and deferred mobile phases are complete before #700 closes.
 ## Plan
 
 This quest owns the cross-phase completion proof, not another implementation.
-Use the chosen Rust or platform-owned capture path and the existing binding
-APIs. Record the supported path, limitations, and reproducible device results;
-wire repeatable coverage into CI and identify the hardware evidence separately.
-Update the native/mobile getting-started docs with the working path.
+Use the Rust capture path and the existing binding APIs: Rust owns capture
+and codecs on mobile, settled in the 2026-09-30 audit
+([Mobile ownership](/quest/m1/mobile-ownership.md)). Record the supported
+path, limitations, and reproducible device results; wire repeatable coverage
+into CI and identify the hardware evidence separately. Update the
+native/mobile getting-started docs with the working path.
 
-The ownership decision may replace the Rust capture quests with platform-owned
-work. In that case, update this quest's Required links to the replacement
-implementation and proof quests before removing the abandoned blockers.
-Abandoning a backend is not evidence that native/mobile support is complete.
 Do not close #700 merely because its next subset or a design decision finished.
 
 ## Required
@@ -26,7 +24,6 @@ Do not close #700 merely because its next subset or a design decision finished.
 - [Dart codec parity](/quest/m1/dart-codecs.md) - codec-enabled artifacts and Dart video consumer integration
 - [iOS capture](/quest/m2/mobile-capture-ios.md) - deliver the selected iOS capture path
 - [Android capture](/quest/m2/mobile-capture-android.md) - deliver the selected Android capture and codec path
-- [Mobile ownership](/quest/m1/mobile-ownership.md) - select and scope the mobile media architecture
 
 ## Closes
 

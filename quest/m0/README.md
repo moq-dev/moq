@@ -40,7 +40,6 @@ Published API or wire breaks still land on dev; each quest's Plan says so.
 
 ## Required
 
-- [Legal IETF input](/quest/m0/ietf-legal-input.md) - draft-20+ FETCH, allowed parameters, INCLUDE_PROPERTIES and FORWARD=0 decode and are refused per request, not session-fatal
 - [IETF FIN semantics](/quest/m0/ietf-fin-not-cancel.md) - a request stream FIN stops updates without cancelling, and REQUEST_UPDATE on a subscribe is parsed
 - [IETF stream types](/quest/m0/ietf-uni-stream-types.md) - padding streams are discarded stream-only and an unknown uni type closes the session, per draft-21
 - [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
@@ -49,8 +48,6 @@ Published API or wire breaks still land on dev; each quest's Plan says so.
 - [qmux reset race](/quest/m0/qmux-reset-race.md) - qmux handles RESET_STREAM under one lock instead of panicking
 - [Path hunting](/quest/m0/path-hunting.md) - a withdrawn path is retracted about once per relay instead of hunting stale alternatives, with a hold-down on route updates and no wire change
 - [Shared fronts](/quest/m0/shared-fronts.md) - viewer sessions share a front, so fronts scale with peers, not viewers
-- [Frame alloc budget](/quest/m0/frame-alloc-budget.md) - frame buffers pre-allocate within a per-session budget and otherwise grow with bytes received
-- [Handshake deadline](/quest/m0/handshake-deadline.md) - an unfinished handshake or slow HTTP header times out
 - [Wildcard](/quest/m0/wildcard/README.md) - a relay resolves subscriptions against advertised prefixes, a service claims the prefix it could serve and refuses the rest instead of enumerating broadcasts, and the browser player treats a covering claim as availability
 - [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - a browser playout latency regression fails a nightly run instead of arriving as a bug report, and its recorder supplies the jitter target's replay traces
 - [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess

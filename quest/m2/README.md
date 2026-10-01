@@ -67,8 +67,8 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Catalog colour model](/quest/m2/color-catalog.md) - the catalog describes a rendition's colour and HDR properties once a renderer consumes them
 - [Archive recovery listing](/quest/m2/archive-recovery-listing.md) - a resumed DVR lists what changed since its checkpoint, not every stored group
 - [Relay io_uring packages](/quest/m2/relay-io-uring-package.md) - Linux relay packages ship io_uring once the ring is on par with tokio
-- [iOS capture](/quest/m2/mobile-capture-ios.md) - camera and screen capture if the mobile ownership decision selects Rust
-- [Android capture](/quest/m2/mobile-capture-android.md) - NDK/JNI capture using the existing codecs if mobile ownership selects Rust
+- [iOS capture](/quest/m2/mobile-capture-ios.md) - Rust captures the camera and screen on iOS
+- [Android capture](/quest/m2/mobile-capture-android.md) - Rust captures through NDK/JNI on Android, reusing the existing codecs
 - [Mobile completion](/quest/m2/mobile-completion.md) - verify the selected native/mobile path before closing #700
 - [Opus implementation](/quest/m2/audio-opus-backend.md) - compare Opus codec quality, CPU, build cost, and the loss recovery each backend offers
 - [Latency ledger](/quest/m2/latency-ledger.md) - a session reports where its end-to-end audio delay went, stage by stage
