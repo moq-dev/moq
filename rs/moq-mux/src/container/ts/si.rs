@@ -33,13 +33,11 @@ use bytes::Bytes;
 use moq_net::Timestamp;
 
 use super::catalog;
+use super::psi::{self, CRC};
 
 const SDT_PID: u16 = 0x0011;
 const SDT_ACTUAL: u8 = 0x42;
 const EIT_PID: u16 = 0x0012;
-
-/// The checksum closing every long-form DVB section.
-const CRC: crc::Crc<u32> = crc::Crc::<u32>::new(&crc::CRC_32_MPEG_2);
 
 /// Coalesce snapshot cuts: a junction revises many sub-tables inside a second
 /// (every service's now/next rolls on the hour), and one group carrying all of them
@@ -443,7 +441,7 @@ impl<E: catalog::Catalog> Capture<E> {
 		let service = self.program.filter(|_| (pid, table_id) == (SDT_PID, SDT_ACTUAL));
 		// The rebuilt SDT gets a fresh CRC, which would certify corruption the
 		// source's CRC flags; dropping the section keeps the last good generation.
-		if service.is_some() && CRC.checksum(&section) != 0 {
+		if service.is_some() && !psi::crc_ok(&section) {
 			return Ok(());
 		}
 		let entry = self.entries.entry((pid, table_id)).or_insert_with(|| Entry {

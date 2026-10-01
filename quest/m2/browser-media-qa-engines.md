@@ -33,7 +33,6 @@ fallback run covers the player, not Firefox's transport path (see open PR
   a measurement of that engine, not of the player.
 - Playwright WebKit is not Safari. Say so in the report; a Safari defect such
   as #2812 still needs a manual run.
-
-## Related
-
-- [Firefox 155 WebTransport](/quest/m2/firefox-155-webtransport.md) - the real Firefox transport path, verified by hand
+- Real Firefox 155 still needs a manual run too: it reports a non-empty
+  `WebTransport.protocol` and lands on lite-06 against the in-tree relay, while
+  153/154 take the draft-14 SETUP path.

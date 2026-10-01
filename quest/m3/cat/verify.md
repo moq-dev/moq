@@ -87,3 +87,7 @@ in the 2026-09-28 quest audit. `@moq/auth` stays flat.
 
 Public API: `moq_auth::cat` new, `moq auth serve` and `moq auth sign|verify`
 gain flags. Wire: none.
+
+## Required
+
+- A consumer asks for CAT, or draft-ietf-moq-c4m registers the moqt claim keys
