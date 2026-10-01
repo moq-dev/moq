@@ -4619,6 +4619,7 @@ dependencies = [
  "futures",
  "http-cache-reqwest",
  "humantime",
+ "hyper-util",
  "libc",
  "moq-auth",
  "moq-net",

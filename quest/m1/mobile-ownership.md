@@ -17,6 +17,6 @@ carry the Rust codecs, and #4094 added the `CVPixelBuffer` bridge
 stack beside one that exists.
 
 What remains is recording the verdict in `rs/moq-ffi/AGENTS.md` (a maintainer
-edit) and in [Android capture](/quest/m2/mobile-capture-android.md) and
-[iOS capture](/quest/m2/mobile-capture-ios.md), which target `moq-video` as
-written and no longer wait on this.
+edit). [Android capture](/quest/m2/mobile-capture-android.md),
+[iOS capture](/quest/m2/mobile-capture-ios.md), and the MediaCodec audio
+quests already record it and no longer wait on this.
