@@ -60,7 +60,6 @@ QUIC studies there on that rule.
 - [Legacy end overshoot](/quest/m1/legacy-end-overshoot.md) - browser playback survives a group that starts inside the previous group's estimated end
 - [Plan: max-delay](/quest/m1/plan-max-delay.md) - decide whether `max_age` becomes `max_delay` across the CLI, APIs, and bindings
 - [Wire compatibility](/quest/m1/wire-compat.md) - a nightly run tests this checkout against the last published release for tokens, session wire, and catalog/container
-- [TS PSI reassembly](/quest/m1/ts-psi-reassembly.md) - `import ts` reads a PAT or PMT that spans packets or follows a nonzero pointer_field instead of aborting, and one corrupted section costs a repetition and a counted `CRC_error`, not the import
 - [TS damaged units](/quest/m1/ts-damaged-units.md) - one malformed PES or access unit is dropped, counted as `damaged`, and resynced at the next keyframe instead of ending the import
 - [RTMP interleaving](/quest/m1/rtmp-interleaving.md) - isolate partial messages before optimizing assembly copies
 - [Merge main into dev](/quest/m1/dev-sync.md) - dev picks up `ts::stats` from main
