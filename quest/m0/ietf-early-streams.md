@@ -32,7 +32,3 @@ Tests in both languages: a padding stream and a group stream that arrive
 before SETUP are handled after it, and the session opens.
 
 Public API: none. Wire: none; fixes conformance.
-
-## Required
-
-- moq-dev/moq#4603 merges, adding the uni-stream classifier the queued streams go through

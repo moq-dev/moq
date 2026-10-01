@@ -41,7 +41,6 @@ Published API or wire breaks still land on dev; each quest's Plan says so.
 ## Required
 
 - [IETF FIN semantics](/quest/m0/ietf-fin-not-cancel.md) - a request stream FIN stops updates without cancelling, and REQUEST_UPDATE on a subscribe is parsed
-- [IETF stream types](/quest/m0/ietf-uni-stream-types.md) - padding streams are discarded stream-only and an unknown uni type closes the session, per draft-21
 - [IETF early streams](/quest/m0/ietf-early-streams.md) - a moq-transport stream that arrives before SETUP is held until SETUP lands, never aborted
 - [SUBSCRIBE_TRACKS refusal](/quest/m0/ietf-subscribe-tracks.md) - a draft-18+ SUBSCRIBE_TRACKS gets NOT_SUPPORTED on its stream, not a session close
 - [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
