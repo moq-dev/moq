@@ -11,8 +11,9 @@ jobs, so platform-only behavior is tested and not just compiled.
 Today `.github/workflows/platform.yml` runs `just rs windows|macos`, which only
 `cargo check`s (`sh/rs/select.sh`), and every `nightly.yml` job runs on
 `ubuntu-24.04-arm`. [#4600](https://github.com/moq-dev/moq/pull/4600)'s
-`Instant` overflow regressions only fail where `Instant` has a narrower range
-(macOS, Windows), so CI never runs them where they matter.
+regressions exercise different clocks: `Instant` overflow in `moq-auth` fails on
+macOS and `SystemTime` overflow in `hang` fails on Windows. On Linux they only
+prove no panic, so CI never runs them where they matter.
 
 Decision (2026-10-01): ✅ the platform-sensitive crates above. Rejected: the
 whole workspace (slower, more flake surface) and only `moq-auth` + `hang`.

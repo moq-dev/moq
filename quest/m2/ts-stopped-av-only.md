@@ -18,10 +18,15 @@ second after each cue.
 Decision (2026-10-01): ✅ grade only audio/video. Rejected: learning each
 PID's usual gap (more logic) and leaving the noise.
 
-Decide continuity from the stream type the PMT already gives each PID; add a
-test with a sparse PID beside a stalled video PID.
+`Log::sample` only sees `Stats`, and `StreamStats` carries no stream type; the
+`track` suffix can't tell (`.ts` is any verbatim data, `""` is MPEG-1/2 video).
+Carry the classification import already resolved into `StreamStats` for active,
+retired, and section rows, not the raw PMT `stream_type`: `0x86` is DTS or,
+with a CUEI descriptor, SCTE-35, and import routes the latter to sections.
+Test a sparse CUEI-marked `0x86` PID beside a stalled video PID.
 
-Public API: none. Wire: none.
+Public API: an additive field on the `#[non_exhaustive]` `StreamStats`. Wire:
+none.
 
 ## Related
 
