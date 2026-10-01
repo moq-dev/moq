@@ -30,3 +30,4 @@ nightly.
 
 - [Fixed-delay release](/quest/m1/tstd/delay.md) - frames go out at media time plus a fixed `--delay`, in one order under loss
 - [TS byte schedule](/quest/m1/tstd/byte-schedule.md) - PCRs sit on the byte grid the mux rate implies, paced against the fixed delay
+- [Burst](/quest/m1/tstd/burst.md) - catalog `burst` sizes the send-ahead window, so `--delay` is only network margin

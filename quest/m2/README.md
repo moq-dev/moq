@@ -22,6 +22,7 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Stream sessions](/quest/m2/uring-tcp/README.md) - serve WebSocket and HTTP from the io_uring workers, where io_uring pays off most
 - [fMP4 emsg](/quest/m2/emsg.md) - settles the shared framing and missing-data semantics before this section adopts them
 - [ID3 catalog section](/quest/m2/id3.md) - timed ID3 as a first-class container-neutral catalog section
+- [Encoders declare burst](/quest/m2/burst-encoders.md) - Rust encoders advertise their VBV bound as the catalog `burst`
 - [FLV script tags](/quest/m2/flv-script.md) - onMetaData and AMF data messages survive RTMP and FLV import
 - [#2279](/quest/m2/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md) - hang: SCTE-35 cues arrive immediately on an independent metadata track, optionally associated with a rendition
 - [CEA-608/708](/quest/m2/captions-cea.md) - captions carried inside video SEI become a real text rendition at import
