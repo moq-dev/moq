@@ -161,23 +161,19 @@ async function read(sub: Moq.Track.Subscriber, gen: number): Promise<void> {
 
 // Follow whichever broadcast the path routes to, as a player does: subscribe to the new one and
 // drop the old one each time the route changes.
-let watching = true;
-const follow = (async () => {
-	let current: { broadcast: Moq.Broadcast.Consumer; sub: Moq.Track.Subscriber } | undefined;
-	while (watching) {
-		const active = request.active.peek();
-		if (active && active !== current?.broadcast) {
-			generation++;
-			log(`watching generation ${generation}`);
-			const sub = active.track(trackName).subscribe({ maxAge: MAX_AGE });
-			void read(sub, generation);
-			current?.sub.close();
-			current = { broadcast: active, sub };
-		}
-		await request.active.changed();
-	}
+// Subscribed before the first peek, so no route change can land between reading it and listening.
+let current: { broadcast: Moq.Broadcast.Consumer; sub: Moq.Track.Subscriber } | undefined;
+const follow = (active: Moq.Broadcast.Consumer | undefined) => {
+	if (!active || active === current?.broadcast) return;
+	generation++;
+	log(`watching generation ${generation}`);
+	const sub = active.track(trackName).subscribe({ maxAge: MAX_AGE });
+	void read(sub, generation);
 	current?.sub.close();
-})();
+	current = { broadcast: active, sub };
+};
+const unfollow = request.active.subscribe(follow);
+follow(request.active.peek());
 
 const readOn = (gen: number) => [...seen.values()].filter((gens) => gens.has(gen)).length;
 const newestOn = (gen: number) => Math.max(-1, ...[...seen].filter(([, gens]) => gens.has(gen)).map(([seq]) => seq));
@@ -222,7 +218,8 @@ try {
 } catch (err) {
 	failure = err instanceof Error ? err : new Error(String(err));
 } finally {
-	watching = false;
+	unfollow();
+	current?.sub.close();
 	clearInterval(ticker);
 	request.close();
 	viewer.close();
@@ -230,8 +227,6 @@ try {
 	broadcast.close();
 	proxy.close();
 }
-// `follow` parks on a route change that may never come once the request closes.
-void follow;
 
 if (failure) {
 	console.error(`error: ${failure.message}`);
