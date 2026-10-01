@@ -78,7 +78,7 @@ Decided (2026-10-01), from a discussion with t0ms:
   continuity counters included, since passthrough never rewrites them; an
   object one leg drops late is a gap in that leg only. Aligning the legs in
   time is left to the `--sync` anchor planned for the demultiplexed export's
-  2022-7 legs (`quest/m2/ts-hitless.md`, #4680), which passthrough can adopt.
+  2022-7 legs, which passthrough can adopt.
   That is TS identity, not ST 2022-7 recovery, which also needs matching RTP
   headers from a coordinated RTP egress.
 - Rust only. `js/hang` does not parse `m2ts`, and a player sees no
@@ -113,5 +113,6 @@ hang catalog gains an `m2ts` root section; additive.
 
 ## Related
 
+- [TS hitless](/quest/m2/ts-hitless.md) - the demultiplexed lane's 2022-7 legs and the `--sync` anchor
 - [MSFTS convergence](/quest/m2/msfts-convergence.md) - the ES-level side of the same mapping
 - [TS byte schedule](/quest/m1/tstd/byte-schedule.md) - the remux's equivalent of pacing on the source PCR

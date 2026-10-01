@@ -36,3 +36,7 @@ requirement, so this waits until the T-STD line settles.
 ## Required
 
 - [T-STD TS export](/quest/m1/tstd/README.md) - the export, clock recovery, and schedule these legs share
+
+## Related
+
+- [TS passthrough](/quest/m1/ts-passthrough.md) - byte-identical legs for free in its own lane; adopts `--sync` for alignment
