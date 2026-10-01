@@ -179,13 +179,18 @@ impl poll::RecvStream for PendingRecv {
 	}
 }
 
-/// A reset with stream code 0, decoded as `Error::Stream(StreamError::Internal)`.
-#[derive(Debug, Clone, Default)]
-pub struct ResetError;
+/// A RESET_STREAM as the transport reports it. `Some(code)` decodes as
+/// `Error::Stream`; `None` is a code the transport could not place in the stream
+/// registry, which decodes as `Error::Transport`.
+#[derive(Debug, Clone, Copy)]
+pub struct ResetError(pub Option<u32>);
 
 impl std::fmt::Display for ResetError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(f, "stream reset by peer (code 0)")
+		match self.0 {
+			Some(code) => write!(f, "stream reset by peer (code {code})"),
+			None => write!(f, "stream reset by peer (unmapped code)"),
+		}
 	}
 }
 
@@ -197,27 +202,27 @@ impl web_transport_trait::Error for ResetError {
 	}
 
 	fn stream_error(&self) -> Option<u32> {
-		Some(0)
+		self.0
 	}
 }
 
 /// A stream that died before delivering a single byte: every read reports a
-/// code-0 RESET_STREAM ([`ResetError`]), the wire shape of a reset arriving
-/// ahead of any payload. QUIC does not order a reset behind the data, so this
-/// reaches an accept loop in normal operation, not just from a misbehaving peer.
-pub struct DeadRecv;
+/// RESET_STREAM ([`ResetError`]), the wire shape of a reset arriving ahead of any
+/// payload. QUIC does not order a reset behind the data, so this reaches an accept
+/// loop in normal operation, not just from a misbehaving peer.
+pub struct DeadRecv(ResetError);
 
 impl poll::RecvStream for DeadRecv {
 	type Error = ResetError;
 
 	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		Poll::Ready(Err(ResetError))
+		Poll::Ready(Err(self.0))
 	}
 
 	fn stop(&mut self, _code: u32) {}
 
 	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		Poll::Ready(Err(ResetError))
+		Poll::Ready(Err(self.0))
 	}
 }
 
@@ -230,6 +235,7 @@ pub struct DeadStreamSession {
 	pub log: Log,
 	unis: Arc<Mutex<usize>>,
 	bis: Arc<Mutex<usize>>,
+	reset: ResetError,
 }
 
 impl DeadStreamSession {
@@ -239,6 +245,7 @@ impl DeadStreamSession {
 			log: Log::default(),
 			unis: Arc::new(Mutex::new(count)),
 			bis: Arc::new(Mutex::new(0)),
+			reset: ResetError(Some(0)),
 		}
 	}
 
@@ -248,7 +255,15 @@ impl DeadStreamSession {
 			log: Log::default(),
 			unis: Arc::new(Mutex::new(0)),
 			bis: Arc::new(Mutex::new(count)),
+			reset: ResetError(Some(0)),
 		}
+	}
+
+	/// Reset with a code the transport cannot map, the way a raw QUIC moq-transport
+	/// peer's CANCELLED reads through the WebTransport code space.
+	pub fn unmapped(mut self) -> Self {
+		self.reset = ResetError(None);
+		self
 	}
 
 	fn take(counter: &Mutex<usize>) -> bool {
@@ -270,21 +285,21 @@ impl poll::Session for DeadStreamSession {
 
 	fn poll_accept_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
 		match Self::take(&self.unis) {
-			true => Poll::Ready(Ok(DeadRecv)),
+			true => Poll::Ready(Ok(DeadRecv(self.reset))),
 			false => Poll::Pending,
 		}
 	}
 
 	fn poll_accept_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		match Self::take(&self.bis) {
-			true => Poll::Ready(Ok((SinkSend::new(self.log.clone()), DeadRecv))),
+			true => Poll::Ready(Ok((SinkSend::new(self.log.clone()), DeadRecv(self.reset)))),
 			false => Poll::Pending,
 		}
 	}
 
 	fn poll_open_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
-		Poll::Ready(Ok((SinkSend::new(self.log.clone()), DeadRecv)))
+		Poll::Ready(Ok((SinkSend::new(self.log.clone()), DeadRecv(self.reset))))
 	}
 
 	fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
@@ -546,6 +561,8 @@ pub struct ScriptedRecv {
 	/// Report EOF once the script is exhausted rather than parking, so a test can drive
 	/// a read loop all the way through its exit path. See [`ScriptedSession::eof`].
 	eof: bool,
+	/// Report a reset once the script is exhausted. See [`ScriptedSession::per_stream_reset`].
+	reset: bool,
 	log: Log,
 }
 
@@ -566,6 +583,7 @@ impl poll::RecvStream for ScriptedRecv {
 		};
 
 		match take {
+			0 if self.reset => Poll::Ready(Err(SinkError)),
 			0 if self.eof => Poll::Ready(Ok(None)),
 			0 => Poll::Pending,
 			take => Poll::Ready(Ok(Some(take))),
@@ -592,6 +610,8 @@ pub struct ScriptedSession {
 	pub log: Log,
 	/// Whether an exhausted script reports EOF instead of parking.
 	eof: bool,
+	/// Whether an exhausted script reports a reset instead of parking.
+	reset: bool,
 	script: Arc<Mutex<Vec<u8>>>,
 	/// Per-stream scripts popped by `open_bi` in order; `None` shares `script`
 	/// across every stream.
@@ -611,6 +631,7 @@ impl ScriptedSession {
 		Self {
 			log: Log::default(),
 			eof: false,
+			reset: false,
 			script: Arc::new(Mutex::new(script)),
 			queue: None,
 			open_gate: None,
@@ -661,6 +682,15 @@ impl ScriptedSession {
 		}
 	}
 
+	/// Like [`Self::per_stream`], but an exhausted script resets the stream, as a peer
+	/// that fails after replying would.
+	pub fn per_stream_reset(scripts: Vec<Vec<u8>>) -> Self {
+		Self {
+			reset: true,
+			..Self::per_stream(scripts)
+		}
+	}
+
 	/// Append to the shared script: the peer sending more on a stream it already opened.
 	/// Nothing is woken, so the test re-polls the reader itself.
 	pub fn push(&self, bytes: &[u8]) {
@@ -689,6 +719,7 @@ impl poll::Session for ScriptedSession {
 		Poll::Ready(Ok(ScriptedRecv {
 			script: Arc::new(Mutex::new(script)),
 			eof: self.eof,
+			reset: self.reset,
 			log: self.log.clone(),
 		}))
 	}
@@ -720,6 +751,7 @@ impl poll::Session for ScriptedSession {
 			ScriptedRecv {
 				script,
 				eof: self.eof,
+				reset: self.reset,
 				log: self.log.clone(),
 			},
 		)))

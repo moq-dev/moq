@@ -37,8 +37,8 @@ use moq_net::Timestamp;
 
 use crate::catalog::hang::Catalog;
 use crate::catalog::{CatalogFormat, Stream};
-use crate::codec::annexb;
 use crate::codec::video::Reorder;
+use crate::codec::{aac, annexb};
 use crate::container::{ExportSource, Frame};
 
 use super::adts;
@@ -175,8 +175,8 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// high-water mark rather than on every frame.
 	watermark: Option<Timestamp>,
 	/// When the interleave started waiting on a lagging track: the arrival of the
-	/// first leading frame it held. Cleared once every track has caught up
-	/// ([`Self::pick_next_track`]).
+	/// first leading frame it held. Cleared once every track has caught up, or by
+	/// [`Self::resume`], but not by a rewind ([`Self::pick_next_track`]).
 	stall: Option<web_async::time::Instant>,
 	/// Wakes [`Self::pick_next_track`] once the stall has lasted `max_age`.
 	hold: Option<Pin<Box<web_async::time::Sleep>>>,
@@ -401,11 +401,10 @@ impl Reserve {
 enum Kind {
 	/// Video carries its TS stream type (H.264 = 0x1B, H.265 = 0x24).
 	Video(StreamType),
-	Aac {
-		object_type: u8,
-		sample_rate: u32,
-		channel_count: u32,
-	},
+	/// AAC, framed as ADTS. A `channel_config` of 0 defers the layout to a program config
+	/// element, which leads the next raw data block written and is then taken. A catalog update
+	/// rebuilds the kind and so repeats it once, which a decoder tuning in mid-stream welcomes.
+	Aac(aac::InBand),
 	/// Opus (private stream_type 0x06). Each frame is one Opus packet, prefixed with
 	/// the Opus-in-TS access-unit control header and announced with the 'Opus'
 	/// registration plus DVB extension descriptor.
@@ -1362,6 +1361,10 @@ impl<E: catalog::Catalog> Export<E> {
 			track.discontinuity = 0;
 			self.stale.insert(name.clone());
 		}
+		// A replacement broadcast gets its own budget: only a rewind within one broadcast
+		// carries a stall across.
+		self.stall = None;
+		self.hold = None;
 		self.rewind();
 		Ok(())
 	}
@@ -1379,9 +1382,8 @@ impl<E: catalog::Catalog> Export<E> {
 		self.tally = Tally::default();
 		self.queue.clear();
 		self.watermark = None;
-		// The new generation waits for every track again, with a fresh budget: a
-		// frame held across the break restarts its `arrived` below.
-		self.stall = None;
+		// The stall carries across with its budget, and so does a held frame's
+		// `arrived` ([`Self::pick_next_track`]).
 		self.clock = None;
 		self.low = None;
 		self.last_pcr = None;
@@ -1399,8 +1401,7 @@ impl<E: catalog::Catalog> Export<E> {
 			if let Some(pending) = track.pending.as_ref() {
 				track.discontinuity = pending.discontinuity;
 			}
-			if let Some(mut pending) = track.pending.take() {
-				pending.arrived = web_async::time::Instant::now();
+			if let Some(pending) = track.pending.take() {
 				track.pending = track.admit(pending, self.epoch);
 			}
 		}
@@ -1472,7 +1473,7 @@ impl<E: catalog::Catalog> Export<E> {
 				tracks.iter().find(|t| {
 					matches!(
 						t.kind,
-						Kind::Aac { .. } | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3
+						Kind::Aac(_) | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3
 					)
 				})
 			})
@@ -1484,7 +1485,7 @@ impl<E: catalog::Catalog> Export<E> {
 			.map(|t| {
 				let stream_type = match &t.kind {
 					Kind::Video(stream_type) => *stream_type,
-					Kind::Aac { .. } => StreamType::AdtsAac,
+					Kind::Aac(_) => StreamType::AdtsAac,
 					// Opus rides private-data PES; the registration + extension descriptors
 					// below tell the demuxer it's Opus.
 					Kind::Opus { .. } => StreamType::from_u8(0x06).map_err(anyhow::Error::msg)?,
@@ -1599,8 +1600,12 @@ impl<E: catalog::Catalog> Export<E> {
 	/// sources give a stalled group, output goes around the lagging track until it
 	/// catches up; zero keeps arrival order. The stall is timed from its first held
 	/// frame rather than per frame: a frame's successor is only pulled once it goes
-	/// out, so a per-frame wait would release one frame per `max_age`. No track is
-	/// fenced, so a boundary does not jump the queue.
+	/// out, so a per-frame wait would release one frame per `max_age`. A rewind does
+	/// not restart it either: a source's latency skip is a rewind, and a hold renewed
+	/// at each one delays every source by the budget they skip on, so under loss the
+	/// feed collapses into alternating holds and skips. [`Self::resume`] does, since a
+	/// replacement broadcast owes nothing to the one it replaced. No track is fenced,
+	/// so a boundary does not jump the queue.
 	fn pick_next_track(&mut self, waiter: &kio::Waiter) -> Option<String> {
 		let (timestamp, pid, name, arrived) = self
 			.tracks
@@ -1635,9 +1640,12 @@ impl<E: catalog::Catalog> Export<E> {
 		if self.span_counters.is_none() {
 			self.span_counters = Some(self.counters.clone());
 		}
-		let track = self.tracks.get(name).context("missing track")?;
+		let track = self.tracks.get_mut(name).context("missing track")?;
 		let pid = track.pid;
 		let kind = track.kind.clone();
+		if let Kind::Aac(aac) = &mut track.kind {
+			aac.program_config.take();
+		}
 		let is_video = matches!(kind, Kind::Video(_));
 		let timestamp = frame.timestamp;
 		let keyframe = frame.keyframe;
@@ -1647,14 +1655,13 @@ impl<E: catalog::Catalog> Export<E> {
 		// verbatim streams carry no PES payload; the section is written separately below.
 		let es_payload = match &kind {
 			Kind::Video(stream_type) => Some(video_es_payload(*stream_type, track.source.description(), &frame)?),
-			Kind::Aac {
-				object_type,
-				sample_rate,
-				channel_count,
-			} => {
-				let header = adts::write_header(*object_type, *sample_rate, *channel_count, frame.payload.len())?;
-				let mut framed = Vec::with_capacity(7 + frame.payload.len());
+			Kind::Aac(aac) => {
+				let pce = aac.program_config.as_deref().unwrap_or_default();
+				let raw_len = pce.len() + frame.payload.len();
+				let header = adts::write_header(aac.object_type, aac.sample_rate, aac.channel_config, raw_len)?;
+				let mut framed = Vec::with_capacity(header.len() + raw_len);
 				framed.extend_from_slice(&header);
+				framed.extend_from_slice(pce);
 				framed.extend_from_slice(&frame.payload);
 				Some(framed)
 			}
@@ -2412,11 +2419,19 @@ fn video_es_payload(stream_type: StreamType, description: Option<&Bytes>, frame:
 fn audio_kind(config: &AudioConfig, name: &str) -> anyhow::Result<Kind> {
 	ensure_raw(&config.container, "audio", name)?;
 	match &config.codec {
-		AudioCodec::AAC(aac) => Ok(Kind::Aac {
-			object_type: aac.profile,
-			sample_rate: config.sample_rate,
-			channel_count: config.channel_count,
-		}),
+		AudioCodec::AAC(codec) => {
+			// The description is exact, and names the LC core under explicit SBR or PS. Without
+			// one, the catalog is all there is.
+			Ok(Kind::Aac(match &config.description {
+				Some(asc) => aac::in_band(asc)?,
+				None => aac::InBand {
+					object_type: codec.profile,
+					sample_rate: config.sample_rate,
+					channel_config: adts::channel_config_from_count(config.channel_count)?,
+					program_config: None,
+				},
+			}))
+		}
 		AudioCodec::Mp2 => Ok(Kind::Mp2 {
 			sample_rate: config.sample_rate,
 		}),

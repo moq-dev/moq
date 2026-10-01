@@ -30,4 +30,4 @@ Public API: none. Wire: none.
 
 - [Front deadlines](/quest/m1/front-deadline-index.md) - per-front cost per track
 - [Front parking](/quest/m1/origin-front-parks.md) - also changes what mints a front
-- [Relay memory](/quest/m1/relay-memory.md) - per-announcement measurements
+- [Wildcard](/quest/m0/wildcard/README.md) - its line rewrites `model/origin.rs` heavily (+401 lines, fronts end on a standing refusal); land after it or rebase onto it

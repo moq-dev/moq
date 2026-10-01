@@ -21,7 +21,7 @@ just test wasm
 just test wasm --timeout 60
 ```
 
-Everything is built from this checkout: `just wasm` for the bindings, `cargo
+Everything is built from this checkout: `just js wasm` for the bindings, `cargo
 build -p moq-relay` for the relay. Each relay reserves its own port (see
 [the harness contract](../README.md)); `WASM_PORT` pins the first one instead.
 `WASM_PROFILE` picks the relay's cargo profile, and `RELAY_BIN` points at a

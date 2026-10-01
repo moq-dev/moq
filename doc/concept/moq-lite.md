@@ -32,7 +32,10 @@ and newer, each side also sends a `SETUP` message with its capabilities.
 Rust and TypeScript speak moq-lite 01 through 06 and moq-transport drafts
 14 through 22. Clients offer `moq-lite-06` first by default. moq-lite 07 is
 still in progress: it negotiates as `moq-lite-07-wip`, and only when both
-sides explicitly enable it.
+sides explicitly enable it. moq-lite 07 also switches every varint from QUIC's
+two-bit length prefix to moq-transport's leading-ones form, so values up to 127
+take one byte instead of up to 63, and the range widens from 62 to 64 bits. Rust
+still refuses lite-07 values above 2^62-1 until its `VarInt` widens.
 
 ## Subscription completion
 
@@ -101,8 +104,8 @@ through the new one.
 
 A path segment starting with `.` hides a route from discovery, the way a
 dotfile hides from `ls`. A platform publishes its own broadcasts there (relay
-stats under `.stats/`, cluster gossip under `.internal/`) without them turning
-up in an app that lists everything and plays what it finds. Only segments
+stats under `.stats/`) without them turning up in an app that lists
+everything and plays what it finds. Only segments
 below the requested prefix count: listing the root skips `.stats/node`, but
 listing `.stats` shows `node`. A `.` elsewhere in a segment (`catalog.pro`) is
 part of the name.

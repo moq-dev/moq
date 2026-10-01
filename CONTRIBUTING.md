@@ -50,6 +50,10 @@ Wait for Codex to review the final head before merging.
 Merge only on its thumbs up, or once every Codex finding on the PR is fixed or replied to.
 Codex skips fork PRs; ask the maintainer to request one.
 
+# CI
+
+Workflow steps run `just` recipes, never a script path; `just gh check` enforces it.
+
 # Follow-ups
 
 If you encounter issues, or findings that are out of scope, create follow-up quests.

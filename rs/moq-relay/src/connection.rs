@@ -79,7 +79,6 @@ impl Connection {
 	/// Admits and serves this connection until it closes.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id, remote = self.request.remote_addr().map(tracing::field::display), session = tracing::field::Empty))]
 	pub async fn run(self) -> anyhow::Result<()> {
-		let peer_hop = self.request.peer_hop();
 		let (lease, registration) = match self.admit().await {
 			Ok(admitted) => admitted,
 			Err(err) => {
@@ -120,7 +119,6 @@ impl Connection {
 			request = request.with_subscriber(publish);
 		}
 		let session = request.ok().await?;
-		let _node_connection = peer_hop.map(|origin| self.cluster.nodes.connect_inbound(self.id, origin));
 
 		tracing::info!(version = %session.version(), %transport, "negotiated");
 
@@ -201,8 +199,8 @@ pub(crate) struct Grants {
 /// `cluster_peer` marks an authenticated cluster peer (a verified client
 /// certificate or the LAN credential), which discovers hidden routes whether
 /// or not it asks. A peer that predates the hidden opt-in (below moq-lite-07-wip,
-/// or moq-transport without MoQ Hidden) would otherwise lose `.internal/origins`
-/// and every other dot path during a rolling upgrade.
+/// or moq-transport without MoQ Hidden) would otherwise lose every dot path
+/// during a rolling upgrade.
 // TODO: drop the exemption once deployed peers all opt in.
 pub(crate) fn authorize(
 	cluster: &cluster::Cluster,

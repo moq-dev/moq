@@ -22,22 +22,22 @@ on:
       - "swift/Package.swift.template"
       - "swift/Sources/Moq/**"
       - "swift/Tests/**"
-      - "swift/scripts/package.sh"
-      - "swift/scripts/publish.sh"
-      - "swift/scripts/verify.sh"
+      - "sh/swift/package.sh"
+      - "sh/swift/publish.sh"
+      - "sh/swift/verify.sh"
       - ".github/workflows/release-swift-lib.yml"
-      - ".github/scripts/release.sh"
+      - "sh/gh/release.sh"
   pull_request:
     paths:
       - "swift/VERSION"
       - "swift/Package.swift.template"
       - "swift/Sources/Moq/**"
       - "swift/Tests/**"
-      - "swift/scripts/package.sh"
-      - "swift/scripts/publish.sh"
-      - "swift/scripts/verify.sh"
+      - "sh/swift/package.sh"
+      - "sh/swift/publish.sh"
+      - "sh/swift/verify.sh"
       - ".github/workflows/release-swift-lib.yml"
-      - ".github/scripts/release.sh"
+      - "sh/gh/release.sh"
   workflow_run:
     workflows: ["Release Swift FFI"]
     types:
@@ -79,6 +79,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Read versions
         id: version
         env:
@@ -101,13 +103,13 @@ jobs:
         if: github.event_name != 'workflow_run'
         env:
           FFI_VERSION: ${{ steps.version.outputs.ffi_version }}
-        run: .github/scripts/release.sh ffi-unreleased "$FFI_VERSION"
+        run: just gh release ffi-unreleased "$FFI_VERSION"
 
       - name: Check FFI mirror tag
         id: ffi-gate
         env:
           FFI_VERSION: ${{ steps.version.outputs.ffi_version }}
-        run: .github/scripts/release.sh git-tag-exists moq-dev/moq-swift-ffi "$FFI_VERSION"
+        run: just gh release git-tag-exists moq-dev/moq-swift-ffi "$FFI_VERSION"
 
       - name: Unpublished FFI notice
         if: steps.ffi-diff.outputs.unreleased != 'true' && steps.ffi-gate.outputs.exists != 'true' && github.event_name != 'pull_request'
@@ -121,12 +123,12 @@ jobs:
         id: gate
         env:
           VERSION: ${{ steps.version.outputs.version }}
-        run: .github/scripts/release.sh git-tag-exists moq-dev/moq-swift "$VERSION"
+        run: just gh release git-tag-exists moq-dev/moq-swift "$VERSION"
 
       - name: Package
         env:
           BUILD_VERSION: ${{ steps.version.outputs.version }}
-        run: ./swift/scripts/package.sh --version "$BUILD_VERSION" --output release-out
+        run: just swift package --version "$BUILD_VERSION" --output release-out
 
       - name: Upload Swift package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -149,6 +151,8 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Check FFI mirror tag
         id: ffi
         if: needs.build.outputs.publish == 'true' || (github.event_name == 'pull_request' && needs.build.outputs.ffi_unreleased != 'true')
@@ -158,7 +162,7 @@ jobs:
         # rather than a hard failure, so the first bootstrap (before
         # moq-swift-ffi exists) skips the cross-package resolve instead of
         # failing the job. publish.sh stays idempotent regardless.
-        run: .github/scripts/release.sh git-tag-exists moq-dev/moq-swift-ffi "$FFI_VERSION" || echo "exists=false" >> "$GITHUB_OUTPUT"
+        run: just gh release git-tag-exists moq-dev/moq-swift-ffi "$FFI_VERSION" || echo "exists=false" >> "$GITHUB_OUTPUT"
 
       - name: Download staged package
         if: steps.ffi.outputs.exists == 'true'
@@ -171,7 +175,7 @@ jobs:
         if: steps.ffi.outputs.exists == 'true'
         env:
           BUILD_VERSION: ${{ needs.build.outputs.version }}
-        run: ./swift/scripts/verify.sh --tarball "artifacts/moq-${BUILD_VERSION}-swift.tar.gz"
+        run: just swift verify --tarball "artifacts/moq-${BUILD_VERSION}-swift.tar.gz"
 
       - name: Skip notice
         if: needs.build.outputs.ffi_unreleased == 'true'
@@ -193,6 +197,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
+
+      - uses: ./.github/actions/just
 
       - name: Generate moq-bot token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
@@ -218,7 +224,7 @@ jobs:
           SWIFT_MIRROR_TOKEN: ${{ steps.token.outputs.token }}
           GIT_AUTHOR_NAME: moq-bot
           GIT_AUTHOR_EMAIL: moq-bot[bot]@users.noreply.github.com
-        run: ./swift/scripts/publish.sh
+        run: just swift publish
 
   publish-dry-run:
     name: Publish dry-run
@@ -231,6 +237,8 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Download package
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -240,4 +248,4 @@ jobs:
       - name: Dry-run publish to mirror
         env:
           BUILD_VERSION: ${{ needs.build.outputs.version }}
-        run: ./swift/scripts/publish.sh --dry-run
+        run: just swift publish --dry-run

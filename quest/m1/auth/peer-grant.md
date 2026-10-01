@@ -46,7 +46,7 @@ serves only the granted paths. A missing, expired, HMAC-signed, or
 unproven grant is not a grant.
 
 P2P is the first consumer:
-[Signaling and policy](/quest/m1/p2p/signal.md) presents the grant in band
+[Signaling and policy](/quest/m2/p2p/signal.md) presents the grant in band
 on each direct session. This quest does not depend on that line.
 
 Docs: `doc/bin/relay/auth.md` states that peer grants need an asymmetric
@@ -66,4 +66,4 @@ Additive.
 
 ## Related
 
-- [Signaling and policy](/quest/m1/p2p/signal.md) - the first consumer
+- [Signaling and policy](/quest/m2/p2p/signal.md) - the first consumer

@@ -54,6 +54,9 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// transports). A server passes `None`.
 	pub path: Option<String>,
 
+	/// The URI authority we advertise in our SETUP, under the same rules as `path`.
+	pub authority: Option<String>,
+
 	/// The peer's SETUP stream, when it was already read before [`start`] (a draft-17+
 	/// server that gated on the client's path via [`accept_setup`]). It becomes the
 	/// GOAWAY channel; `None` lets the uni loop read the SETUP itself.
@@ -80,6 +83,7 @@ where
 		cost,
 		version,
 		path,
+		authority,
 		peer_setup_stream,
 		peer_declared,
 	} = config;
@@ -200,6 +204,7 @@ where
 					subscriber.clone(),
 					version
 				)));
+				let mut datagrams = std::pin::pin!(err_only(run_datagrams(adapter.clone(), subscriber.clone())));
 				// Unsolicited PUBLISH_NAMESPACE unless the peer requires solicitation;
 				// see `Publisher::run_publish_namespaces`.
 				let mut pub_ns_run = std::pin::pin!(err_only(publisher.clone().run_publish_namespaces()));
@@ -250,6 +255,9 @@ where
 					if let Poll::Ready(err) = waiter.poll_future(dispatch.as_mut()) {
 						return Poll::Ready(Err(err));
 					}
+					if let Poll::Ready(err) = waiter.poll_future(datagrams.as_mut()) {
+						return Poll::Ready(Err(err));
+					}
 					if task_set.poll(waiter).is_ready() {
 						return Poll::Ready(Ok(()));
 					}
@@ -275,7 +283,9 @@ where
 					let session = session.clone();
 					let goaway = goaway.clone();
 					async move {
-						if let Err(err) = run_setup(runtime, session, version, path, self_origin, cost, goaway).await {
+						if let Err(err) =
+							run_setup(runtime, session, version, path, authority, self_origin, cost, goaway).await
+						{
 							tracing::warn!(%err, "setup send error");
 						}
 						std::future::pending::<()>().await;
@@ -340,6 +350,7 @@ where
 					subscriber.clone(),
 					version
 				)));
+				let mut datagrams = std::pin::pin!(err_only(run_datagrams(session.clone(), subscriber.clone())));
 				let mut goaway_recv = std::pin::pin!(err_only(goaway_recv));
 				let mut setup = std::pin::pin!(setup);
 				// Unsolicited PUBLISH_NAMESPACE unless the peer requires solicitation;
@@ -379,6 +390,9 @@ where
 					if let Poll::Ready(err) = waiter.poll_future(dispatch.as_mut()) {
 						return Poll::Ready(Err(err));
 					}
+					if let Poll::Ready(err) = waiter.poll_future(datagrams.as_mut()) {
+						return Poll::Ready(Err(err));
+					}
 					if let Poll::Ready(err) = waiter.poll_future(goaway_recv.as_mut()) {
 						return Poll::Ready(Err(err));
 					}
@@ -406,8 +420,8 @@ where
 		};
 
 		match &res {
-			Err(Error::Transport(_)) => {
-				tracing::info!("session terminated");
+			Err(err @ Error::Transport(_)) => {
+				tracing::info!(%err, "session terminated");
 				session.close(SessionError::Internal.to_code(), "");
 			}
 			Err(err) => {
@@ -524,11 +538,13 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 /// server passes `None`. `self_origin` and `cost` are the MoQ Cluster options, which
 /// declare our identity and (client-only) what this link costs to cross. The MoQ Solicit
 /// declaration is unconditional, so it takes no argument.
+#[allow(clippy::too_many_arguments)]
 async fn run_setup<S: crate::transport::poll::Session>(
 	runtime: crate::time::Clock,
 	mut session: S,
 	version: Version,
 	path: Option<String>,
+	authority: Option<String>,
 	self_origin: Hop,
 	cost: Option<u64>,
 	goaway: crate::goaway::Protocol,
@@ -542,6 +558,9 @@ async fn run_setup<S: crate::transport::poll::Session>(
 	parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
 	if let Some(path) = path {
 		parameters.set_bytes(ietf::ParameterBytes::Path, path.into_bytes());
+	}
+	if let Some(authority) = authority {
+		parameters.set_bytes(ietf::ParameterBytes::Authority, authority.into_bytes());
 	}
 	cluster::peer_into_setup(&mut parameters, self_origin, cost, version);
 	solicit::into_setup(&mut parameters, version);
@@ -633,6 +652,12 @@ where
 		// the peer wrote to. Failing the loop here would tear down the whole session
 		// over a single stream the peer had already given up on. Only death is
 		// tolerated: bytes that arrive and do not parse stay session-fatal.
+		//
+		// A transport error counts as death too. A reset whose code the transport cannot
+		// place in the stream registry surfaces as one: over raw QUIC a moq-transport
+		// peer resets with its own codes (moxygen's CANCELLED is 0x1), which the
+		// WebTransport code mapping rejects. If the connection itself died, the next
+		// accept reports it.
 		let kind: u64 = match tasks
 			.drive(|waiter| {
 				let mut cx = std::task::Context::from_waker(waiter.waker());
@@ -641,7 +666,13 @@ where
 			.await
 		{
 			Ok(kind) => kind,
-			Err(err @ (Error::Cancel | Error::Stream(_) | Error::Remote(_) | Error::Decode(DecodeError::Short))) => {
+			Err(
+				err @ (Error::Cancel
+				| Error::Stream(_)
+				| Error::Remote(_)
+				| Error::Transport(_)
+				| Error::Decode(DecodeError::Short)),
+			) => {
 				tracing::debug!(%err, "dropping uni stream that died before its type");
 				continue;
 			}
@@ -711,6 +742,23 @@ where
 				reader.abort(reset);
 			}
 		});
+	}
+}
+
+/// Receive QUIC datagrams, each an OBJECT_DATAGRAM for one of our subscriptions.
+///
+/// A transport without datagrams never delivers one, so this parks. A transport failure
+/// or a malformed datagram ends the session.
+async fn run_datagrams<S>(mut session: S, subscriber: Subscriber<S>) -> Result<(), Error>
+where
+	S: crate::transport::poll::Boxable,
+{
+	if session.max_datagram_size() == 0 {
+		return Ok(());
+	}
+	loop {
+		let payload = session.recv_datagram().await.map_err(Error::from_transport)?;
+		subscriber.recv_datagram(payload)?;
 	}
 }
 
@@ -794,7 +842,13 @@ where
 		// header that does not parse included, still fails the session.
 		let (id, data) = match header {
 			Ok(header) => header,
-			Err(err @ (Error::Cancel | Error::Stream(_) | Error::Remote(_) | Error::Decode(DecodeError::Short))) => {
+			Err(
+				err @ (Error::Cancel
+				| Error::Stream(_)
+				| Error::Remote(_)
+				| Error::Transport(_)
+				| Error::Decode(DecodeError::Short)),
+			) => {
 				tracing::debug!(%err, "dropping bidi stream that died before its header");
 				continue;
 			}
@@ -946,6 +1000,7 @@ mod tests {
 			cost: None,
 			version: VERSION,
 			path: None,
+			authority: None,
 			peer_setup_stream: None,
 			// A peer that declared its Hop ID negotiated the extension, which is what
 			// makes the cluster parameters mandatory in both directions.
@@ -1004,6 +1059,7 @@ mod tests {
 			cost: None,
 			version: Version::Draft18,
 			path: None,
+			authority: None,
 			peer_setup_stream: None,
 			// The requests wait on the peer's SETUP (MoQ Hidden).
 			peer_declared: Some(peer::Peer::default()),
@@ -1055,6 +1111,7 @@ mod tests {
 			cost: None,
 			version: Version::Draft18,
 			path: None,
+			authority: None,
 			peer_setup_stream: None,
 			peer_declared,
 		})
@@ -1162,6 +1219,7 @@ mod tests {
 			cost: None,
 			version: VERSION,
 			path: None,
+			authority: None,
 			peer_setup_stream: None,
 			// Pre-settled, so nothing waits on a SETUP the dead stream will never
 			// carry and the dispatch loop actually runs.
@@ -1176,6 +1234,49 @@ mod tests {
 		assert_eq!(log.closes(), vec![], "nothing may close the transport");
 	}
 
+	/// A draft-17+ client advertises its AUTHORITY in the SETUP it writes on its uni stream.
+	#[tokio::test]
+	async fn setup_carries_the_authority() {
+		const AUTHORITY: &[u8] = b"relay.example.com:4443";
+
+		// The driver parks forever once SETUP is out, so bound it: paused time makes the
+		// deadline fire the moment nothing else can run.
+		tokio::time::pause();
+
+		for version in [Version::Draft18, Version::Draft19] {
+			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+			let log = session.log.clone();
+
+			let (driver, _goaway) = start(Config {
+				runtime: crate::time::Clock::tokio(),
+				session,
+				setup: None,
+				request_id_max: None,
+				client: true,
+				publish: None,
+				subscribe: None,
+				peer_hop: None,
+				cost: None,
+				version,
+				path: None,
+				authority: Some(String::from_utf8(AUTHORITY.to_vec()).unwrap()),
+				peer_setup_stream: None,
+				peer_declared: Some(peer::Peer::default()),
+			})
+			.expect("start the session");
+
+			tokio::time::timeout(std::time::Duration::from_secs(10), driver)
+				.await
+				.expect_err("the session ended instead of parking after SETUP");
+
+			assert_eq!(
+				occurrences(&log, AUTHORITY),
+				1,
+				"{version:?}: SETUP must carry the authority once"
+			);
+		}
+	}
+
 	#[tokio::test]
 	async fn a_uni_stream_dead_before_its_type_does_not_end_the_session() {
 		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::unis(1)).await;
@@ -1186,10 +1287,23 @@ mod tests {
 		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::bis(1)).await;
 	}
 
+	/// moxygen resets a subgroup stream it opened but never wrote with its own CANCELLED
+	/// (0x1). Over raw QUIC our transport reads that code through the WebTransport space
+	/// and cannot map it, which used to end the session.
+	#[tokio::test]
+	async fn a_uni_stream_reset_with_an_unmapped_code_does_not_end_the_session() {
+		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::unis(1).unmapped()).await;
+	}
+
+	#[tokio::test]
+	async fn a_bidi_stream_reset_with_an_unmapped_code_does_not_end_the_session() {
+		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::bis(1).unmapped()).await;
+	}
+
 	/// The bytes a publisher writes at the head of a group's unidirectional stream. Built
 	/// with the crate's own encoder so the framing can't drift from the decoder the
 	/// dispatch loop runs.
-	async fn subgroup_header(version: Version, track_alias: u64) -> Vec<u8> {
+	async fn subgroup_header(version: Version, track_alias: u64, sub_group_id: u64) -> Vec<u8> {
 		let log = crate::lite::test_transport::Log::default();
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
 
@@ -1197,9 +1311,12 @@ mod tests {
 			.encode(&ietf::GroupHeader {
 				track_alias,
 				group_id: 0,
-				sub_group_id: 0,
+				sub_group_id,
 				publisher_priority: 128,
-				flags: ietf::GroupFlags::default(),
+				flags: ietf::GroupFlags {
+					has_subgroup: sub_group_id != 0,
+					..Default::default()
+				},
 			})
 			.await
 			.unwrap();
@@ -1258,7 +1375,7 @@ mod tests {
 	/// A late group must reach the dispatch loop and stop with CANCELLED.
 	#[tokio::test(start_paused = true)]
 	async fn a_group_for_a_retired_alias_is_stopped_with_cancelled() {
-		let log = dispatch_uni(subgroup_header(Version::Draft19, 7).await, Some(7)).await;
+		let log = dispatch_uni(subgroup_header(Version::Draft19, 7, 0).await, Some(7)).await;
 
 		assert_eq!(
 			log.stops(),
@@ -1266,6 +1383,15 @@ mod tests {
 			"the group stream must be stopped with the cancelled code",
 		);
 		assert_eq!(log.closes(), vec![], "one dropped group may not close the session");
+	}
+
+	/// A non-zero subgroup is refused on its own stream, never by closing the session.
+	#[tokio::test(start_paused = true)]
+	async fn a_non_zero_subgroup_is_stopped_without_closing_the_session() {
+		let log = dispatch_uni(subgroup_header(Version::Draft19, 7, 1).await, None).await;
+
+		assert_eq!(log.stops(), vec![crate::ietf::error::INTERNAL_ERROR]);
+		assert_eq!(log.closes(), vec![], "one refused subgroup may not close the session");
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1354,6 +1480,7 @@ mod tests {
 			cost: None,
 			version: VERSION,
 			path: None,
+			authority: None,
 			peer_setup_stream: None,
 			peer_declared: None,
 		})

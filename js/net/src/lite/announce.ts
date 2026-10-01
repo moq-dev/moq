@@ -176,16 +176,20 @@ async function decodeHopsBlock(r: Reader, version: Version): Promise<{ hops: Hop
 }
 
 // The route cost rides lite-06+ announcements as two varints, warm then cold; older
-// versions carry neither.
+// versions carry neither. Costs saturate at 2^62-1 on every version, even where lite-07's
+// varints could carry more, so a cost always forwards to a peer on an older version.
+const MAX_COST = 2n ** 62n - 1n;
+const saturate = (v: bigint) => (v > MAX_COST ? MAX_COST : v);
+
 async function encodeRouteCost(w: Writer, version: Version, cost: Cost | undefined) {
 	if (!hasRouteCost(version)) return;
-	await w.u62(cost?.warm ?? 0n);
-	await w.u62(cost?.cold ?? 0n);
+	await w.u62(saturate(cost?.warm ?? 0n));
+	await w.u62(saturate(cost?.cold ?? 0n));
 }
 
 async function decodeRouteCost(r: Reader, version: Version): Promise<Cost | undefined> {
 	if (!hasRouteCost(version)) return undefined;
-	return { warm: await r.u62(), cold: await r.u62() };
+	return { warm: saturate(await r.u62()), cold: saturate(await r.u62()) };
 }
 
 // lite-06 message body (no discriminator; the type is carried outside the length prefix).

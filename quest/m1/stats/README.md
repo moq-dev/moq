@@ -7,8 +7,7 @@ that wants to hear from its viewers can solicit feedback there too. The
 publisher's `stats` track is one snapshot of what it sent, per rendition and
 for its connection. A viewer publishes one `.echo` broadcast per soliciting
 catalog it reads, carrying what it received and played, per rendition, and
-its own connection. A dashboard reads both the same way a publisher does, and
-a Rust encoder adapts its bitrate to what its viewers report. Stats and
+its own connection. A dashboard reads both the same way a publisher does. Stats and
 feedback cost nothing on the network unless someone subscribes. Not here: the
 relay's `moq-stats` layout, which stays as it is; clock synchronization; any
 requirement that a client report; and feedback as an input to billing,
@@ -68,10 +67,7 @@ kind.
   request API.
 - **Trust is the token prefix** (2026-09-29). Whoever the application's
   tokens let publish under the echo path may report, and no report is
-  authenticated beyond that. How far one viewer may move the encoder is
-  application-specific (a simulcast ladder suffers less from one viewer than
-  a single rendition), so the encoder's built-in step-down policy takes a
-  tunable config that the application can adjust or disable.
+  authenticated beyond that.
 - **Feedback track: one snapshot**, `{ transport, renditions: { <alias>:
   echo::Track } }`, so the publisher looks up its own renditions directly.
 - **One type per role, shared across kinds.**
@@ -97,22 +93,9 @@ kind.
   `doc/concept/stats.md` gains a media section beside the relay's, and
   `drafts/draft-lcurley-moq-hang.md` specs the wire.
 
-Open, to settle before [encoder feedback](/quest/m1/stats/encoder-feedback.md)
-starts:
-
-- **Referenced-rendition feedback.** A derivative catalog (a `moq-transcode`
-  passthrough) collects feedback for a source rendition it lists, but owns
-  no encoder for it, and the source encoder reads only its own catalog's
-  prefix. Candidates: the derivative forwards those rows to the source's
-  echo path, or the source encoder also reads catalogs that reference it,
-  or referenced renditions stay report-only.
-- **Shared echo prefixes.** Two catalogs can resolve their echo paths to one
-  prefix (`../viewers` from `room/a/live` and `room/b/live`). Then a viewer
-  using one name for both closes one `.echo` with the other, and each
-  publisher reads the other's reports under a shared alias. Candidates:
-  require each catalog's echo prefix to be its own, as application policy
-  like the token rights, or carry the catalog's broadcast in the snapshot
-  and ignore reports for another.
+Decided in the 2026-09-30 audit: a Rust encoder adapting its bitrate to viewer
+feedback moved to [encoder feedback](/quest/m2/stats-encoder-feedback.md) (m2),
+along with its open questions. This line only publishes and reads the reports.
 
 ## Required
 
@@ -124,10 +107,10 @@ starts:
   moq-mux remuxes publish stats and feedback
 - [Browser reporters](/quest/m1/stats/js.md) - `<moq-publish>` publishes
   stats and `<moq-watch>` publishes feedback
-- [Encoder feedback](/quest/m1/stats/encoder-feedback.md) - a Rust encoder
-  reads its viewers' feedback and adapts its bitrate
 
 ## Related
 
 - [QoS](/quest/m1/qos/README.md) - the relay's delivery counters, the other
   half of a health verdict
+- [Encoder feedback](/quest/m2/stats-encoder-feedback.md) - a Rust encoder
+  adapts its bitrate to what its viewers report

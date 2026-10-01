@@ -1,6 +1,6 @@
 //! Regression for an external publisher whose protocol does not declare a Hop ID.
 //! The relay stamps that publisher with a random Hop ID of the connection's own;
-//! reflected cluster paths must not replace it while gossiping around a redundant mesh.
+//! reflected cluster paths must not replace it while propagating around a redundant mesh.
 
 use std::time::Duration;
 

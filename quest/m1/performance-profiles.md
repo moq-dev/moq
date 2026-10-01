@@ -45,5 +45,4 @@ verify current supported versions and pin any newly installed tools.
 ## Related
 
 - [Benchmark comparisons](/quest/m1/performance-comparisons.md) - repeatable results and artifact metadata
-- [Relay memory](/quest/m1/relay-memory.md) - retained route and announcement memory
 - [Release profile](/quest/m1/release-profile.md) - also changes `[profile.profiling]`; land one, then rebase the other

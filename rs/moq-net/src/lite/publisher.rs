@@ -1857,6 +1857,7 @@ mod announce_test {
 		h.announcement
 			.update(crate::origin::Route::default().with_hops(pub_hops()).with_cost(3))
 			.unwrap();
+		tokio::time::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 		settle().await;
 		match h.wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::Restart { id: 0, hops, cost }] => {
@@ -1908,10 +1909,12 @@ mod announce_test {
 		let mut h = harness().await;
 		let route = |cost| crate::origin::Route::default().with_hops(pub_hops()).with_cost(cost);
 		h.announcement.update(route(u64::MAX)).unwrap();
+		tokio::time::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 		settle().await;
 		assert_eq!(h.wire.take_announces().len(), 1, "expected the clamped restart");
 
 		h.announcement.update(route(u64::MAX - 1)).unwrap();
+		tokio::time::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 		settle().await;
 		h.assert_idle();
 	}
@@ -1981,6 +1984,7 @@ mod announce_test {
 					.with_cost(u64::MAX),
 			)
 			.unwrap();
+		tokio::time::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 		settle().await;
 		match h.wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::Restart { cost, .. }] => {
