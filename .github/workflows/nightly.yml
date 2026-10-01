@@ -18,7 +18,7 @@ name: Nightly
 # the wheel builds in a manylinux container, the Kotlin/Swift/Go/Dart packages
 # link the FFI on every platform) and nothing notices until the tag is pushed.
 #
-# `audio-quality` is here because of what it measures. It plays sixteen rows of
+# `audio-quality` is here because of what it measures. It plays twenty-four rows of
 # audio in real time, a minute each, which no merge gate should carry, and every
 # number it grades is a timing one that moves with whatever else the runner is
 # doing. A per-PR arm would fail on unrelated load often enough to be ignored;
@@ -207,7 +207,7 @@ jobs:
   audio-quality:
     name: Audio quality
     runs-on: ubuntu-24.04-arm
-    # Sixteen rows at a minute each, plus the relay, CLI, and shaper built from source.
+    # Twenty-four rows at a minute each, plus the relay, CLI, and shaper built from source.
     timeout-minutes: 60
     steps:
       - name: Free disk space

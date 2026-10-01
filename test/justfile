@@ -77,7 +77,7 @@ drill *args:
 
 # Plays a tone in headless Chromium through moq-shaper and grades what the listener
 # heard (underruns, skip-aheads, silence, the resolved delay) against
-# audio-quality/budgets.json. The full matrix is 16 rows at 60 s; nightly runs it with
+# audio-quality/budgets.json. The full matrix is 24 rows at 60 s; nightly runs it with
 # --enforce. Narrow it with `--profiles mild --codecs opus --rings plain --duration 20`.
 # `--replays` grades only the recorded traces, in seconds, as PRs touching the player do.
 # See audio-quality/README.md.

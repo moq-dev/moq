@@ -124,6 +124,7 @@ hex = "0.4"
 # HMAC-SHA256 for the mDNS membership proofs (moq-tokio's `mdns` feature).
 hmac = "0.13"
 humantime = "2.3"
+humantime-serde = "1.1.1"
 io-uring = "0.7.14"
 jsonwebtoken = "11"
 kio = { version = "0.6.1", path = "rs/kio" }

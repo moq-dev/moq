@@ -15,7 +15,7 @@ source "$AQ_DIR/../lib/harness.sh"
 # Captured before the parse consumes it, so the rerun command carries every flag.
 RERUN="$(harness_env AQ_PROFILE RELAY_BIN)just test audio-quality$(harness_argv "$@")"
 
-ALL_PROFILES=(near-zero mild wide fixed-250)
+ALL_PROFILES=(near-zero mild wide bursty step fixed-250)
 ALL_RINGS=(isolated plain)
 ALL_CODECS=(opus aac)
 
@@ -122,7 +122,13 @@ valid() {
     echo "error: unknown $name '$want' (known: $*)" >&2
     exit 2
 }
-for p in "${PROFILES[@]}"; do valid "$p" profile "${ALL_PROFILES[@]}" "${ALL_TRACES[@]}"; done
+for p in "${PROFILES[@]}"; do
+    valid "$p" profile "${ALL_PROFILES[@]}" "${ALL_TRACES[@]}"
+    if [[ "$p" == step ]] && ((DURATION <= 30)); then
+        echo "error: --duration must exceed the step at 30s" >&2
+        exit 2
+    fi
+done
 for r in "${RINGS[@]}"; do valid "$r" ring "${ALL_RINGS[@]}"; done
 for c in "${CODECS[@]}"; do valid "$c" codec "${ALL_CODECS[@]}"; done
 
@@ -152,8 +158,9 @@ delay_of() {
 shaper_of() {
     case "$1" in
         near-zero | fixed-250) ;;
-        mild) echo "--delay 5ms --jitter 5ms" ;;
-        wide) echo "--delay 40ms --jitter 40ms" ;;
+        mild) echo "--delay 5ms --jitter 5ms --jitter-model gaussian --shared" ;;
+        wide) echo "--delay 40ms --jitter 40ms --jitter-model gaussian --shared" ;;
+        bursty | step) echo "--profile $1" ;;
     esac
 }
 

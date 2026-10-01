@@ -1,4 +1,4 @@
-# Audio quality harness
+# [S] Audio quality harness
 
 ## Goal
 
@@ -23,14 +23,14 @@ are. The native lane moved to m1 as a standalone quest (decided in the
 same budgets and metric schema so the two implementations can be compared
 rather than merely both passing.
 
-The browser lane has landed as `test/audio-quality/`, upstreamed from the
-reporter's fork on #3477 (`fperex/moq`, branch `debug-findings-solution`) on
-its own, without the fork's player, estimator, or shaper changes. Real arrival
-traces have landed beside it in `test/audio-quality/traces/`, graded as replay
-rows through the player's container consumer and rings, and replayed by the
-[jitter target's watch quest](/quest/m0/audio-jitter-target/watch.md). That
-leaves the bursty and step profiles, which need shaper features the fork has
-and `main` does not.
+The browser lane and its opt-in shaper profiles have landed in `test/audio-quality/`,
+upstreamed from the reporter's fork on #3477 (`fperex/moq`, branch
+`debug-findings-solution`), without the fork's player or estimator changes.
+The matrix includes bursty and mid-run step paths, and mild/wide jitter preserves
+packet order. Real arrival traces have landed beside it in
+`test/audio-quality/traces/`, graded as replay rows through the player's
+container consumer and rings, and replayed by the [jitter target's watch
+quest](/quest/m0/audio-jitter-target/watch.md).
 
 Jitter comes from the seeded userspace UDP shaper the transport drills run
 under (`rs/moq-shaper`, documented in `test/drill/README.md`), not from a fake
@@ -55,10 +55,6 @@ Once the line lands, re-record `test/audio-quality/budgets.json` from the
 nightly runner's first runs, since nightly only runs `main`'s code. Tightening
 the auto rows belongs to the [jitter target's watch
 quest](/quest/m0/audio-jitter-target/watch.md).
-
-## Required
-
-- [Shaper profiles](/quest/m0/audio-quality-harness/shaper-profiles.md) - the bursty and mid-run step profiles, once moq-shaper can express them
 
 ## Related
 

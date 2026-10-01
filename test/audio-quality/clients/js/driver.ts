@@ -57,8 +57,12 @@ if (
 	process.exit(2);
 }
 
-/** How long the session and the first audio each get before the row is abandoned. */
-const STARTUP_MS = 30_000;
+/**
+ * How long the session and the first audio get, together, before the row is abandoned. It stays short
+ * of the step profile's change at 30s, so a step row always measures audio from before the change.
+ */
+const STARTUP_MS = 20_000;
+const startupDeadline = Date.now() + STARTUP_MS;
 /** How often the probe is drained into the ndjson. */
 const DRAIN_MS = 1000;
 
@@ -98,8 +102,7 @@ const refuse = (assertion: string, detail: string) => {
 
 /** Poll the page until `ready` returns a value, or throw naming what never happened. */
 async function waitFor<T>(page: Page, what: string, ready: () => T | undefined): Promise<T> {
-	const deadline = Date.now() + STARTUP_MS;
-	while (Date.now() < deadline) {
+	while (Date.now() < startupDeadline) {
 		const value = await page.evaluate(ready);
 		if (value !== undefined && value !== null) return value;
 		await sleep(200);

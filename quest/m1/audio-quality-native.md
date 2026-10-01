@@ -45,7 +45,3 @@ Standalone in m1 rather than a child of the m0 [Audio quality
 harness](/quest/m0/audio-quality-harness/README.md) line (decided in the
 2026-09-28 quest audit): nothing in m0 waits on it. The native jitter target
 it grades is done on the jitter target line.
-
-## Related
-
-- [Shaper profiles](/quest/m0/audio-quality-harness/shaper-profiles.md) - the bursty and step profiles both lanes should run
