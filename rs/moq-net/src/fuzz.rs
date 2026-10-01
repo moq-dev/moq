@@ -13,10 +13,11 @@
 use bytes::Buf;
 
 use crate::{
-	Hops, Path, PathOwned, Pattern,
+	Hops, Path, PathOwned, Pattern, broadcast, cache, coding,
 	coding::{Decode, Encode, VarInt},
-	ietf, lite,
+	frame, group, ietf, lite,
 	path::Relative,
+	track,
 };
 
 /// One fuzz target body: it returns whether the input decoded, which is what
@@ -61,7 +62,7 @@ const IETF_VERSIONS: &[ietf::Version] = &[
 const LITE_KINDS: u8 = 21;
 
 /// How many types [`ietf_wire`] dispatches over.
-const IETF_KINDS: u8 = 39;
+const IETF_KINDS: u8 = 40;
 
 /// Split the two selector bytes off the input: a version and a type.
 fn select(data: &[u8], versions: usize) -> Option<(usize, u8, &[u8])> {
@@ -252,6 +253,124 @@ pub fn decode_announces(mut data: &[u8], compress: bool) -> Vec<Announced> {
 	resolved
 }
 
+/// A varint-heavy lite wire object, as the varint bench times it: what a publisher
+/// pays per frame, per group, and per request.
+#[derive(Clone, Copy, Debug)]
+pub enum LiteSample {
+	/// A 30 fps video group's FRAME headers: a zigzag timestamp delta in microseconds and
+	/// a size, 60 of them, led by a 60 KB keyframe. Payloads are left out.
+	Video,
+	/// A 50 Hz Opus group's FRAME headers: 50 of 20 ms and 160 bytes.
+	Audio,
+	/// A GROUP header, well into a long-running track.
+	Group,
+	/// A SUBSCRIBE for a track, the way a player opens one.
+	Subscribe,
+	/// A datagram's header, with an empty payload.
+	Datagram,
+	/// A SETUP declaring a probe level, a cost, and a random Hop ID.
+	Setup,
+}
+
+impl LiteSample {
+	/// Every sample, in the order the bench reports them.
+	pub const ALL: [Self; 6] = [
+		Self::Video,
+		Self::Audio,
+		Self::Group,
+		Self::Subscribe,
+		Self::Datagram,
+		Self::Setup,
+	];
+
+	/// The FRAME headers for [`Self::Video`] and [`Self::Audio`], as (delta, size) pairs.
+	fn frames(self) -> Vec<(i64, u64)> {
+		match self {
+			Self::Video => (0..60)
+				.map(|n| match n {
+					0 => (0, 60_000),
+					n if n % 10 == 0 => (33_333, 17_000),
+					_ => (33_333, 8_000),
+				})
+				.collect(),
+			Self::Audio => (0..50).map(|n| (if n == 0 { 0 } else { 20_000 }, 160)).collect(),
+			_ => Vec::new(),
+		}
+	}
+
+	/// Encode this sample at `version`, which must be a moq-lite version.
+	pub fn encode(self, version: crate::Version) -> Vec<u8> {
+		let version = lite::Version::try_from(version).expect("a moq-lite version");
+		let mut buf = Vec::new();
+		match self {
+			Self::Video | Self::Audio => {
+				for (delta, size) in self.frames() {
+					VarInt::from_zigzag(delta).unwrap().encode(&mut buf, version).unwrap();
+					size.encode(&mut buf, version).unwrap();
+				}
+			}
+			Self::Group => lite::Group {
+				subscribe: 3,
+				sequence: 1_234,
+				frame_start: 0,
+			}
+			.encode(&mut buf, version)
+			.unwrap(),
+			Self::Subscribe => lite::Subscribe {
+				id: 3,
+				broadcast: Path::new("room/alice"),
+				track: "video".into(),
+				priority: 2,
+				max_age: std::time::Duration::from_secs(10),
+				start_group: None,
+				end_group: None,
+				start_frame: 0,
+				end_frame: None,
+			}
+			.encode(&mut buf, version)
+			.unwrap(),
+			Self::Datagram => lite::Datagram {
+				subscribe: 3,
+				sequence: 1_234,
+				timestamp: 1_234_567_890,
+				payload: bytes::Bytes::new(),
+			}
+			.encode(&mut buf, version)
+			.unwrap(),
+			Self::Setup => lite::Setup {
+				probe: lite::ProbeLevel::Report,
+				cost: Some(1),
+				hop: Some(crate::Hop::new(0x1d_2c3b_4a59_6877).unwrap()),
+				..Default::default()
+			}
+			.encode(&mut buf, version)
+			.unwrap(),
+		}
+		buf
+	}
+
+	/// Decode what [`Self::encode`] wrote at `version`, returning how many objects it read.
+	pub fn decode(self, version: crate::Version, mut data: &[u8]) -> usize {
+		let version = lite::Version::try_from(version).expect("a moq-lite version");
+		let data = &mut data;
+		match self {
+			Self::Video | Self::Audio => {
+				let mut frames = 0;
+				while !data.is_empty() {
+					VarInt::decode(data, version).unwrap();
+					u64::decode(data, version).unwrap();
+					frames += 1;
+				}
+				frames
+			}
+			Self::Group => lite::Group::decode(data, version).map(|_| 1).unwrap(),
+			Self::Subscribe => lite::Subscribe::decode(data, version).map(|_| 1).unwrap(),
+			Self::Datagram => lite::Datagram::decode(data, version).map(|_| 1).unwrap(),
+			Self::Setup => lite::Setup::decode(data, version).map(|_| 1).unwrap(),
+		}
+	}
+}
+
 /// Feed a lite-07 announce stream through the stateful decoder, then check that our
 /// encoder's compression of what it resolved reads back as the same announcements.
 ///
@@ -318,19 +437,21 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 		36 => roundtrip::<ietf::Location, _>(rest, version, stable),
 		37 => roundtrip::<ietf::FetchObject, _>(rest, version, stable),
 		38 => roundtrip::<ietf::PublishNamespaceUpdate, _>(rest, version, stable),
+		39 => roundtrip::<ietf::ObjectDatagram, _>(rest, version, stable),
 		_ => unreachable!("kind is taken modulo IETF_KINDS"),
 	}
 }
 
 /// Decode a varint with whichever codec the selected version uses.
 ///
-/// Byte 0 picks the version, which is the whole point: moq-lite and drafts 14-16 use
-/// the QUIC two-bit length tag, while draft-17+ counts leading ones, and the two
-/// disagree about which byte sequences are even legal.
+/// Byte 0 picks the version, which is the whole point: lite-01 to lite-06 and drafts
+/// 14-16 use the QUIC two-bit length tag, while lite-07 and draft-17+ count leading
+/// ones, and the two disagree about which byte sequences are even legal.
 ///
-/// The decoded value is deliberately not asserted to be within [`VarInt::MAX`]: the
-/// leading-ones form spans the full `u64` by design, so a 9-byte encoding decodes
-/// above the 62-bit ceiling and only fails when re-encoded for a QUIC-form version.
+/// The decoded value is deliberately not asserted to be within [`VarInt::MAX`]: on the
+/// IETF wire the leading-ones form spans the full `u64` by design, so a 9-byte encoding
+/// decodes above the 62-bit ceiling. Lite-07 allows the same range, but refuses it at
+/// decode until `VarInt` widens to 64 bits.
 pub fn varint(data: &[u8]) -> bool {
 	let Some((&selector, rest)) = data.split_first() else {
 		return false;
@@ -574,18 +695,30 @@ pub fn seeds() -> Vec<Seed> {
 	// FETCH is the one arm the sweep above cannot reach: its body ends in a parameter
 	// count, and a uniform fill never lands a zero there. Build it from the encoder
 	// instead, which also means a field change breaks the build rather than the seed.
+	// Draft-20 dropped the joining forms, so each draft gets whichever layout it has.
 	for (index, version) in IETF_VERSIONS.iter().enumerate() {
-		let fetch = ietf::Fetch {
-			request_id: ietf::RequestId(0),
-			subscriber_priority: 128,
-			group_order: ietf::GroupOrder::Ascending,
-			fetch_type: ietf::FetchType::AbsoluteJoining {
+		let fetch_types = [
+			ietf::FetchType::AbsoluteJoining {
 				subscriber_request_id: ietf::RequestId(0),
 				group_id: 0,
 			},
-		};
-
-		let Ok(encoded) = fetch.encode_bytes(*version) else {
+			ietf::FetchType::Filtered {
+				namespace: crate::Path::new("a"),
+				track: "b".into(),
+				filter: ietf::Filter::Relative(1),
+			},
+		];
+		let Some(encoded) = fetch_types.into_iter().find_map(|fetch_type| {
+			let fetch = ietf::Fetch {
+				request_id: ietf::RequestId(0),
+				subscriber_priority: 128,
+				group_order: ietf::GroupOrder::Ascending,
+				fetch_type,
+				range_filters: false,
+				fill_timeout: false,
+			};
+			fetch.encode_bytes(*version).ok()
+		}) else {
 			continue;
 		};
 
@@ -719,6 +852,147 @@ pub fn seeds() -> Vec<Seed> {
 	}
 
 	seeds
+}
+
+/// Frames arriving on concurrent group streams, as the frame bench times them: one
+/// frame per stream, read a chunk per stream per poll turn so the streams interleave
+/// the way a session's do.
+///
+/// `budget` is what the session may allocate up front, so `Some(usize::MAX)` allocates
+/// every declared size when the first byte lands and `Some(0)` grows every buffer with
+/// the bytes received.
+pub struct FrameRecv {
+	streams: Vec<Option<(coding::Reader<Chunks, lite::Version>, frame::ProducerOwned)>>,
+	groups: Vec<group::Producer>,
+	// Keeps the groups' track alive.
+	_track: track::Producer,
+	_broadcast: broadcast::Producer,
+}
+
+impl FrameRecv {
+	/// `streams` frames of `size` bytes, delivered `chunk` bytes at a time.
+	/// `None` gives the session's default budget.
+	pub fn new(streams: usize, size: usize, chunk: usize, budget: Option<usize>) -> Self {
+		// Unbounded, so eviction never aborts a group mid-frame.
+		let mut info = broadcast::Info::new();
+		info.pool = cache::Pool::unbounded();
+		let broadcast = info.produce();
+		let track = broadcast.create_track("frames", None).unwrap();
+		let budget = budget.map(frame::Budget::new).unwrap_or_default();
+		let payload = bytes::Bytes::from(vec![0u8; size]);
+
+		let mut groups = Vec::with_capacity(streams);
+		let streams = (0..streams)
+			.map(|_| {
+				let mut group = track.append_group().unwrap();
+				let info = frame::Info {
+					size: size as u64,
+					timestamp: crate::Timestamp::ZERO,
+				};
+				let frame = group.create_frame_owned(info, &budget).unwrap();
+				groups.push(group);
+				let stream = Chunks {
+					payload: payload.clone(),
+					chunk,
+					ready: true,
+				};
+				Some((coding::Reader::new(stream, lite::Version::Lite05), frame))
+			})
+			.collect();
+
+		Self {
+			streams,
+			groups,
+			_track: track,
+			_broadcast: broadcast,
+		}
+	}
+
+	/// Receive every frame, round-robin a chunk at a time, then drop them.
+	pub fn run(mut self) {
+		let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+		let mut open = self.streams.len();
+		while open > 0 {
+			for slot in &mut self.streams {
+				let Some((reader, frame)) = slot else { continue };
+				if let std::task::Poll::Ready(res) = reader.poll_read_frame(&mut cx, frame) {
+					res.unwrap();
+					let (_, frame) = slot.take().unwrap();
+					frame.finish().unwrap();
+					open -= 1;
+				}
+			}
+		}
+		for group in &self.groups {
+			group.finish().unwrap();
+		}
+	}
+}
+
+/// A stream that hands over one chunk of its payload, then blocks until polled again.
+struct Chunks {
+	payload: bytes::Bytes,
+	chunk: usize,
+	ready: bool,
+}
+
+impl web_transport_trait::poll::RecvStream for Chunks {
+	type Error = NoError;
+
+	fn poll_read(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		dst: &mut [u8],
+	) -> std::task::Poll<Result<Option<usize>, NoError>> {
+		let max = dst.len();
+		self.poll_read_chunk(cx, max).map_ok(|chunk| {
+			chunk.map(|chunk| {
+				dst[..chunk.len()].copy_from_slice(&chunk);
+				chunk.len()
+			})
+		})
+	}
+
+	// Zero-copy, like the QUIC stacks, so only the frame buffer's own copy is timed.
+	fn poll_read_chunk(
+		&mut self,
+		_cx: &mut std::task::Context<'_>,
+		max: usize,
+	) -> std::task::Poll<Result<Option<bytes::Bytes>, NoError>> {
+		self.ready = !self.ready;
+		if self.ready {
+			return std::task::Poll::Pending;
+		}
+		if self.payload.is_empty() {
+			return std::task::Poll::Ready(Ok(None));
+		}
+		let n = self.chunk.min(max).min(self.payload.len());
+		std::task::Poll::Ready(Ok(Some(self.payload.split_to(n))))
+	}
+
+	fn stop(&mut self, _code: u32) {}
+
+	fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), NoError>> {
+		std::task::Poll::Pending
+	}
+}
+
+/// [`Chunks`] never fails.
+#[derive(Debug)]
+struct NoError;
+
+impl std::fmt::Display for NoError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str("no error")
+	}
+}
+
+impl std::error::Error for NoError {}
+
+impl web_transport_trait::Error for NoError {
+	fn session_error(&self) -> Option<(u32, String)> {
+		None
+	}
 }
 
 #[cfg(test)]

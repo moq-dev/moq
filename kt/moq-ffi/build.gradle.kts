@@ -11,7 +11,7 @@
 //      ├─ jvmMain                    JVM-specific: native libs as JAR resources
 //      └─ androidMain                Android-specific: native libs in jniLibs
 //
-// Native libraries + bindings are populated by `kt/scripts/package.sh`:
+// Native libraries + bindings are populated by `sh/kt/package.sh`:
 //   src/jvmMain/resources/<os>-<arch>/<libname>          (JNA classpath layout)
 //   src/androidMain/jniLibs/<abi>/libmoq_ffi.so          (Android packaging layout)
 //   src/jvmAndAndroidMain/kotlin/uniffi/moq/moq.kt       (uniffi-bindgen output)

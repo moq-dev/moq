@@ -531,6 +531,7 @@ where
 				cost: None,
 				version,
 				path: None,
+				authority: None,
 				peer_setup_stream: Some(peer_setup.stream),
 				peer_declared: Some(peer_setup.declared),
 			})?;
@@ -637,6 +638,7 @@ where
 						cost: None,
 						version: v,
 						path: None,
+						authority: None,
 						peer_setup_stream: None,
 						peer_declared: Some(peer_declared),
 					})?;

@@ -71,3 +71,5 @@ Regression tests, on a paused clock (`#[tokio::test(start_paused = true)]`):
 ## Related
 
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - tells a resumed latest group when the new copy dropped it
+- [Parked reads wake](/quest/m1/parked-read-wakes.md) - edits the same `resume.rs` wakeups; lands after this quest's #4491
+- [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - extends the same `resume.rs` takeover tests

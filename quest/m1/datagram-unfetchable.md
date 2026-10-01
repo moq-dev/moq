@@ -24,7 +24,7 @@ datagram flag, and reports it as "unsupported":
 - A received fetch object with the datagram flag is refused as not fetchable.
   It fails only that fetch or fill, not the session, because draft-16+ allows
   the flag (maintainer, 09-29, on Codex's review). That covers the relay's group
-  fill (`recv_group_fetch_objects`, on the moxygen line) and the joining-fetch
+  fill (`recv_group_fetch_objects`) and the joining-fetch
   fill (`run_fill_objects`).
 - Update `drafts/draft-lcurley-moq-lite.md` to say datagrams are neither
   cached nor fetchable, and `doc/concept/`. Run `just drafts check` and
@@ -34,12 +34,22 @@ Not planned: reliable or cached datagrams. If they are ever wanted, the way to
 get them is back-pressure in the QUIC library and treating each datagram like
 a one-shot stream, not a cache.
 
+The subscription's range bounds datagrams the way it bounds groups, fixed in
+the model rather than filtered per session. Decided in the 2026-09-30 audit:
+the moxygen line's datagram-range quest merged here, since it duplicated this
+late-join rule. Its edge cases:
+
+- a datagram at the start group when a frame offset skips object 0;
+- SUBSCRIBE_UPDATE moving the range while datagrams are in flight;
+- a datagram that lands before the subscription's alias or id is known.
+
 Tests: a subscriber joining after datagrams were sent receives only later
 ones. A FETCH covering a datagram group gets no payload. A fetch stream
 carrying a datagram-flagged object fails that fetch and leaves the session up.
+Each edge case above gets one, and a test tells a datagram filtered by the
+range apart from one dropped for any other reason.
 
 ## Related
 
-- [Moxygen compatibility](/quest/m1/moxygen/README.md) - says it carries one datagram per group live; this keeps them out of FETCH
 - [JS IETF datagrams](/quest/m1/js-ietf-datagram.md) - JS datagram send and receive over moq-transport
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - datagram groups stay best effort there too

@@ -106,7 +106,11 @@ maintainer's call; ask before writing one.
 Public API impact: additive on moq-stats unless the helpers change. Wire
 impact: new on-demand tracks; existing tracks unchanged.
 
+## Required
+
+- [Bench coverage](/quest/m2/bench-coverage.md) - its stats producer benchmark is the moq-json snapshot encoder profile the gate needs
+
 ## Related
 
 - [Stats format page](/doc/concept/stats.md) - where the new flavor is documented
-- [Compressed tracks](/quest/m2/flate/README.md) - group-scoped DEFLATE tracks, whose group-window discipline this flavor repeats
+- [Compressed tracks](/quest/m2/flate.md) - group-scoped DEFLATE tracks, whose group-window discipline this flavor repeats

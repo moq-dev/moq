@@ -102,6 +102,11 @@ discarding the old mux buffer. The first new clock packet signals the break and
 stdout pacing re-anchors. Every rendition joins the new program generation;
 no track is fenced across the marker.
 
+MPEG-TS export frames AAC as ADTS, which labels only the AAC Main, LC, SSR,
+and LTP profiles. HE-AAC and HE-AACv2 go out as their AAC-LC core, and decoders
+find the SBR and PS in band, as ffmpeg's ADTS output does. A track whose
+profile or channel layout ADTS cannot label is refused rather than mislabeled.
+
 A constant-rate MPEG-TS source records its multiplex rate in the catalog
 (`mpegts.muxRate`, measured off the PCR clock, null stuffing included), and
 `export ts` pads its output with null packets back to that rate so an IRD or
@@ -123,9 +128,11 @@ moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
 moq ... play --delay 500ms          # trade latency for a jittery link
 ```
 
-Decodes H.264, H.265, and AV1 video and Opus, PCM, and AAC-LC audio using
-the platform hardware decoder where available. `--video-name` and
-`--audio-name` pick a rendition.
+Decodes H.264, H.265, and AV1 video using the platform hardware decoder where
+available, and Opus, PCM, and AAC-LC (mono or stereo) audio in software. The
+log names the decoder each track opened. `--video-name` and `--audio-name`
+pick a rendition. HE-AAC signaled only in band (implicit SBR, as over MPEG-TS)
+plays as its half-rate AAC-LC core.
 
 Playback runs on a clock it owns. `--delay` (default 100 ms) is how far it
 trails the live edge, which is both the jitter a late frame may absorb and the
@@ -258,8 +265,8 @@ and publishes on the cluster origin. A `moq --cluster-lan` process and a
 `--cluster-lan` advertises this process on the LAN over mDNS and meshes with
 every other participating MoQ process. It reuses `--listen`, filling in an
 ephemeral port and a generated certificate when those are unset. A LAN peer
-authenticates with its mDNS credential; `cluster.token` is for static and
-gossip peers only.
+authenticates with its mDNS credential; `cluster.token` is for
+`--cluster-connect` and `--cluster-connect-api` peers only.
 
 ```bash
 moq --cluster-lan import capture
@@ -277,8 +284,7 @@ under. Peers using a different name never discover this one. It defaults to
 configuration. An application built on the library picks its own name.
 
 The WAN flags (`--cluster-connect`, `--cluster-connect-api`, `--cluster-node`,
-`--cluster-mesh`, `--cluster-token`, `--cluster-id`, `--cluster-tier`) match
-the relay. `--cluster-connect` and `--cluster-connect-api` are a MoQ side on
+`--cluster-token`, `--cluster-id`, `--cluster-tier`) match the relay. `--cluster-connect` and `--cluster-connect-api` are a MoQ side on
 their own, so `moq --cluster-connect https://relay.example import ts` needs
 no `--connect`. See [Clustering](/bin/relay/cluster).
 

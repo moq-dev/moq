@@ -76,6 +76,7 @@ mod test {
 			track,
 			consumer::Config {
 				compression: Compression::Deflate,
+				..Default::default()
 			},
 		)
 	}

@@ -30,7 +30,7 @@ on:
       - "kt/build.gradle.kts"
       - "kt/settings.gradle.kts"
       - ".github/workflows/release-kt-lib.yml"
-      - ".github/scripts/release.sh"
+      - "sh/gh/release.sh"
   pull_request:
     paths:
       - "kt/moq/**"
@@ -38,7 +38,7 @@ on:
       - "kt/build.gradle.kts"
       - "kt/settings.gradle.kts"
       - ".github/workflows/release-kt-lib.yml"
-      - ".github/scripts/release.sh"
+      - "sh/gh/release.sh"
       - "rs/moq-ffi/build.sh"
   # Manual trigger so a wrapper bump can be published once the bindings it
   # depends on land on Maven Central (the guard below skips otherwise).
@@ -75,6 +75,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Read moq.version
         id: version
         run: |
@@ -103,18 +105,18 @@ jobs:
       - name: Check for unreleased FFI changes
         id: ffi-diff
         if: github.event_name != 'workflow_run'
-        run: .github/scripts/release.sh ffi-unreleased "${{ steps.ffi.outputs.version }}"
+        run: just gh release ffi-unreleased "${{ steps.ffi.outputs.version }}"
 
       - name: Check wrapper publication
         id: wrapper
-        run: .github/scripts/release.sh maven-exists dev.moq moq "${{ steps.version.outputs.version }}"
+        run: just gh release maven-exists dev.moq moq "${{ steps.version.outputs.version }}"
 
       # The bindings this checkout generates must be on Maven Central, or the
       # wrapper's POM range resolves to an older moq-ffi without them.
       - name: Check bindings publication
         id: bindings
         if: github.event_name != 'workflow_run' && steps.wrapper.outputs.exists != 'true' && steps.ffi-diff.outputs.unreleased != 'true'
-        run: .github/scripts/release.sh maven-exists dev.moq moq-ffi "${{ steps.ffi.outputs.version }}"
+        run: just gh release maven-exists dev.moq moq-ffi "${{ steps.ffi.outputs.version }}"
 
       - name: Decide publish
         id: decide
@@ -167,6 +169,8 @@ jobs:
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
@@ -178,7 +182,7 @@ jobs:
         env:
           BUILD_VERSION: ${{ needs.check-version.outputs.version }}
         run: |
-          ./rs/moq-ffi/build.sh --bindings-only --version "$BUILD_VERSION" --output dist
+          just rs package-ffi --bindings-only --version "$BUILD_VERSION" --output dist
           mkdir -p kt/moq-ffi/src/jvmAndAndroidMain/kotlin/uniffi/moq
           cp dist/bindings/kotlin/uniffi/moq/moq.kt \
             kt/moq-ffi/src/jvmAndAndroidMain/kotlin/uniffi/moq/moq.kt
@@ -202,7 +206,7 @@ jobs:
       - name: Recheck wrapper publication
         id: recheck
         if: github.event_name != 'pull_request'
-        run: .github/scripts/release.sh maven-exists dev.moq moq "${{ needs.check-version.outputs.version }}"
+        run: just gh release maven-exists dev.moq moq "${{ needs.check-version.outputs.version }}"
 
       - name: Publish to Maven Central
         if: github.event_name != 'pull_request' && steps.recheck.outputs.exists != 'true'

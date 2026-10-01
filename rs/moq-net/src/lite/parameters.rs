@@ -23,20 +23,19 @@ impl Parameters {
 		self.0.get(&id).map(Vec::as_slice)
 	}
 
-	/// Set a parameter to a varint value, replacing any existing entry.
-	pub fn set_varint(&mut self, id: u64, value: u64) {
-		let mut buf = Vec::new();
-		// Infallible: writing into a Vec never runs short.
-		value.encode(&mut buf, Version::Lite05).expect("varint encode into Vec");
-		self.0.insert(id, buf);
+	/// Set a parameter to a varint value in `version`'s encoding, replacing any existing entry.
+	pub fn set_varint(&mut self, id: u64, value: u64, version: Version) -> Result<(), EncodeError> {
+		self.0.insert(id, value.encode_bytes(version)?.to_vec());
+		Ok(())
 	}
 
-	/// Decode a parameter as a single varint, if present. Errors if trailing bytes remain.
-	pub fn get_varint(&self, id: u64) -> Result<Option<u64>, DecodeError> {
+	/// Decode a parameter as a single varint in `version`'s encoding, if present. Errors if
+	/// trailing bytes remain.
+	pub fn get_varint(&self, id: u64, version: Version) -> Result<Option<u64>, DecodeError> {
 		let Some(mut bytes) = self.0.get(&id).map(Vec::as_slice) else {
 			return Ok(None);
 		};
-		let value = u64::decode(&mut bytes, Version::Lite05)?;
+		let value = u64::decode(&mut bytes, version)?;
 		if !bytes.is_empty() {
 			return Err(DecodeError::Long);
 		}
