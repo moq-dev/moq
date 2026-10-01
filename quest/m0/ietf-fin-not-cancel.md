@@ -26,6 +26,5 @@ silently ends the subscription.
 
 Public API: none. Wire: conformance fix; no draft change.
 
-## Related
-
-- [Lite request streams](/quest/m1/request-stream-serve.md) - lite deliberately treats a FIN as ending the request; don't unify the two
+Lite deliberately treats a FIN as ending the request (`RequestServe` in
+`rs/moq-net/src/lite/publisher.rs`); don't unify the two.

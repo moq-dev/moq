@@ -84,6 +84,8 @@ pub struct Policy {
 	pub revalidate: Option<Duration>,
 	/// How long a grant with no bound of its own lasts: an anonymous session, a token
 	/// without `exp`, a certificate without one. `None` leaves those unbounded.
+	/// A bound past the system clock's range is refused by [`Server::new`], and by
+	/// [`decide`](Self::decide) for each session it would bound.
 	pub expires: Option<Duration>,
 	/// Live session caps.
 	pub limits: Limits,
@@ -119,6 +121,8 @@ pub enum Refusal {
 	UnsupportedToken(u64),
 	#[error("both a JWT and a client certificate were presented; present one")]
 	TokenAndCertificate,
+	#[error("the policy's grant bound reaches past the system clock's range")]
+	ExpiresOutOfRange,
 }
 
 impl Policy {
@@ -153,7 +157,11 @@ impl Policy {
 		};
 
 		let mut grant = Grant::new(permissions.publish, permissions.subscribe);
-		grant.expires = expires.or_else(|| self.expires.map(|bound| SystemTime::now() + bound));
+		grant.expires = match (expires, self.expires) {
+			(Some(expires), _) => Some(expires),
+			(None, Some(bound)) => Some(SystemTime::now().checked_add(bound).ok_or(Refusal::ExpiresOutOfRange)?),
+			(None, None) => None,
+		};
 		grant.revalidate = self.revalidate;
 		grant.tier = self.tier.clone();
 		Ok(grant)
@@ -237,7 +245,7 @@ impl Sessions {
 	fn sweep(&mut self, cadence: Duration) {
 		let now = Instant::now();
 		self.slots
-			.retain(|_, slot| now.saturating_duration_since(slot.seen) < 2 * cadence);
+			.retain(|_, slot| now.saturating_duration_since(slot.seen) < cadence.saturating_mul(2));
 	}
 
 	/// Admit a `connect`, refusing over the cap. A known id refreshes instead.
@@ -304,10 +312,17 @@ pub struct Server {
 
 impl Server {
 	/// A server answering with `policy`, refusing one that asks for a re-check without
-	/// a bound, or caps sessions without the re-check that ages out a dead relay's.
+	/// a bound, bounds grants past the clock's range, or caps sessions without the
+	/// re-check that ages out a dead relay's.
 	pub fn new(policy: Policy) -> crate::Result<Self> {
 		if policy.revalidate.is_some() && policy.expires.is_none() {
 			return Err(crate::Error::UnboundedRevalidate);
+		}
+		if policy
+			.expires
+			.is_some_and(|bound| SystemTime::now().checked_add(bound).is_none())
+		{
+			return Err(crate::Error::ExpiresOutOfRange);
 		}
 		let limited = policy.limits.token.is_some() || policy.limits.remote.is_some();
 		if limited && policy.revalidate.is_none() {
@@ -883,6 +898,41 @@ mod tests {
 			..Default::default()
 		};
 		assert!(matches!(Server::new(unbounded), Err(Error::UnboundedRevalidate)));
+	}
+
+	/// Regression: `--expires` past the system clock's range panicked every answer.
+	/// The server refuses it up front, and the policy alone refuses the session
+	/// rather than grant it no bound.
+	#[tokio::test]
+	async fn a_bound_past_the_clock_is_refused() {
+		let endless = Policy {
+			public: rules(&["**"], &["**"]),
+			expires: Some(Duration::MAX),
+			..Default::default()
+		};
+		assert_eq!(
+			endless.decide(&request("/")).await.unwrap_err(),
+			Refusal::ExpiresOutOfRange
+		);
+		assert!(matches!(Server::new(endless), Err(Error::ExpiresOutOfRange)));
+	}
+
+	/// Regression: `--revalidate` near `Duration::MAX` overflowed the two-cadence
+	/// sweep and panicked every answer once a limit kept a session table.
+	#[tokio::test]
+	async fn a_cadence_past_the_clock_keeps_every_slot() {
+		let server = Server::new(Policy {
+			public: rules(&["**"], &["**"]),
+			limits: Limits {
+				token: None,
+				remote: Some(1),
+			},
+			revalidate: Some(Duration::MAX),
+			..limited()
+		})
+		.unwrap();
+		server.answer(&request("/")).await.unwrap();
+		assert_eq!(server.answer(&request("/")).await.unwrap_err(), Refusal::RemoteLimit);
 	}
 
 	/// With no limit to count against, nothing is kept per session, so a relay that

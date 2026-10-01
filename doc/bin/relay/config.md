@@ -19,6 +19,7 @@ written (an empty list, a `false` boolean) overrides the built-in default.
 [listen]
 bind = "[::]:443"                    # QUIC (UDP), as --listen. Omit for a stream-only relay.
 version = ["moq-lite-05"]            # Restrict accepted versions. Omit for all.
+timeout = "10s"                      # Handshake deadline. "0" waits forever.
 
 [listen.tls]
 cert = "cert.pem"                    # Certificate chain and key. Reloaded on change.
@@ -34,6 +35,14 @@ bind = "/run/moq/internal.sock"
 allow.uid = [1001]
 ```
 
+`timeout` bounds how long an accepted connection has to finish its handshake:
+the QUIC, WebTransport, WebSocket, or qmux one, then the MoQ SETUP, through the
+relay accepting the session. After that it is an ordinary session. A peer that
+connects and never speaks is closed instead of being held open by keep-alives,
+with the MoQ timeout code once its transport is up. The `[web]` listeners apply it to reading HTTP request
+headers and, for the WebSocket fallback, to the SETUP after the upgrade. The
+`io_uring` workers do not apply it yet.
+
 ## \[quic]
 
 Transport tuning, applied to accepted and dialed connections alike.
@@ -42,8 +51,8 @@ Transport tuning, applied to accepted and dialed connections alike.
 [quic]
 congestion_control = "delay"         # "delay" (BBR, the default) or "loss" (CUBIC).
 max_streams = 10000                  # Concurrent streams per connection, bidi and uni. Default.
-idle_timeout = "30s"                 # Drop a connection after this long with nothing on it.
-keep_alive = "5s"                    # Ping interval; "0s" disables it. Ignored by iroh.
+idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
+keep_alive = "3s"                    # Ping interval; "0s" disables it. Ignored by iroh. Default.
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.
 mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 67108864            # Flow-control windows, in bytes. Omit for the backend default.
@@ -54,6 +63,14 @@ qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` buil
 
 The native QUIC stack uses BBRv3 for delay-based congestion control. Iroh also
 uses noq and the same congestion controller.
+
+`idle_timeout` is how long a peer that vanished without a close keeps its
+sessions, and so its [cluster routes](/bin/relay/cluster#failure-detection).
+QUIC uses the smaller of the two endpoints' values
+([RFC 9000 section 10.1](https://www.rfc-editor.org/rfc/rfc9000#section-10.1)),
+so this also bounds the clients and peers on the other end. Keep `keep_alive`
+under a third of it, so a quiet connection that loses one ping still pings
+again before the deadline.
 
 Raise the receive windows when a fat, long path idles below the link rate: a
 window under the bandwidth-delay product stalls the sender waiting for credit.

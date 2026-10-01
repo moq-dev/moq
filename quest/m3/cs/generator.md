@@ -23,7 +23,7 @@ catches a typed `MoqException`, on the host runtime.
 
 ## Required
 
-- A .NET or Unity consumer asks for C# bindings
+- [A .NET or Unity consumer asks for C# bindings](/quest/m3/cs-demand.md) - the reason to generate C# at all
 
 ## Related
 
