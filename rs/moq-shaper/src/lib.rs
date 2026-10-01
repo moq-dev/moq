@@ -204,7 +204,10 @@ impl Options {
 		for step in &self.steps {
 			// The profile is what the run opens with, so a step at zero would
 			// replace it before any datagram saw it.
-			anyhow::ensure!(!step.at.is_zero(), "a step at zero replaces the profile; change the profile instead");
+			anyhow::ensure!(
+				!step.at.is_zero(),
+				"a step at zero replaces the profile; change the profile instead"
+			);
 			// A link only ever looks at the next step due, so one out of order
 			// would be skipped without a word.
 			anyhow::ensure!(
