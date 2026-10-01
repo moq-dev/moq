@@ -743,6 +743,12 @@ mod tests {
 		assert_eq!(muxer.timescale().as_u64(), 90_000);
 		let fragment = muxer.fragment(0, &[vp8_frame(0, true)]).unwrap();
 		assert_eq!(first_sample_duration(&fragment), Some(1_500), "16.7 ms at 90 kHz");
+
+		// An NTSC estimate is 1501.5 ticks at 90 kHz: it snaps to whole ticks and still muxes.
+		catalog.video.renditions.get_mut("video0").unwrap().framerate = Some(60_000.0 / 1001.0);
+		renditions.sync(&upstream, &catalog);
+		let fragment = video.muxer().unwrap().fragment(0, &[vp8_frame(0, true)]).unwrap();
+		assert_eq!(first_sample_duration(&fragment), Some(1_502));
 	}
 
 	/// The `trun` duration of a fragment's first sample.
