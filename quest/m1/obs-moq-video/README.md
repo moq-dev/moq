@@ -38,6 +38,7 @@ Decided in the 2026-09-30 audit: the Windows and Linux GPU decode paths and the 
 - [macOS GPU input](/quest/m2/obs-macos.md) - feed compositor frames to VideoToolbox without a CPU round trip; needs physical-hardware proof
 - [Windows GPU input](/quest/m2/obs-windows.md) - feed D3D11 compositor frames to the encoder without CPU staging; needs physical-hardware proof
 - [Video hardware validation](/quest/m3/video-hardware.md) - physical hardware evidence is required for each claimed GPU path
-- [Audio codecs](/quest/m1/audio-codecs/README.md) - HE-AAC, multichannel, and native AAC encode reach the OBS source and encoder adapters through moq-ffi
+- [AudioToolbox decode](/quest/m1/audio-decode-audiotoolbox.md) - HE-AAC and multichannel AAC reach the OBS source on macOS through moq-ffi
+- [AudioToolbox encode](/quest/m1/audio-encode-audiotoolbox.md) - native AAC encode reaches the OBS encoder adapter on macOS through moq-ffi
 - [Linux GPU input](/quest/m3/obs-linux-gpu.md) - allocation-export feasibility and its dependent implementation are deferred
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - owns Linux backend decode/import capabilities; reconcile its older dependency assumptions against current code

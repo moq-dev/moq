@@ -30,9 +30,14 @@ Measure time to the encoder's target rate after a reconnect on the impaired
 path profile, plus loss and latency during the jump. Ship it on by default
 only when the jump never makes the first second worse than slow start.
 
+## Required
+
+- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
+
 ## Related
 
 - [Transport upgrade](/quest/m1/transport-upgrade/README.md) - one of the
   reconnects this speeds up
 - [JS group-boundary handover](/quest/m1/js-group-handover.md) - GOAWAY
   redials are the other
+- [noq#815](https://github.com/n0-computer/noq/issues/815) - the careful-resume proposal to n0

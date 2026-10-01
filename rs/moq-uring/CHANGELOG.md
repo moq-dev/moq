@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.10](https://github.com/moq-dev/moq/compare/moq-uring-v0.0.9...moq-uring-v0.0.10) - 2026-09-30
+
+### Fixed
+
+- *(uring)* publish a local close only once its CONNECTION_CLOSE is staged ([#4431](https://github.com/moq-dev/moq/pull/4431))
+
+### Other
+
+- *(uring)* noq paces inside poll_transmit, not ignored ([#4400](https://github.com/moq-dev/moq/pull/4400))
+
 ## [0.0.9](https://github.com/moq-dev/moq/compare/moq-uring-v0.0.8...moq-uring-v0.0.9) - 2026-09-27
 
 ### Other

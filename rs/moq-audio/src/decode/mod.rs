@@ -10,8 +10,11 @@
 //!   [`Decoded`] interleaved `f32` samples.
 //!
 //! [`Options`] keeps subscription and output policy separate from the
-//! lower-level decoder [`Config`].
+//! lower-level decoder [`Config`], whose [`Kind`] picks the backend: a
+//! platform decoder first where one takes the track, then software (libopus,
+//! PCM, and symphonia for AAC-LC).
 
+mod backend;
 mod consumer;
 mod decoded;
 mod decoder;

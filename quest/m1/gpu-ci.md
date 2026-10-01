@@ -26,8 +26,7 @@ skipping inside the Nix shell.
   tests (Android, D3D11, PipeWire). Inside that selection a missing GPU fails
   the test instead of returning early. Keep the no-driver tests
   (`missing_driver_errors_instead_of_panicking`) outside it.
-- `just rs nvidia`, a one-line recipe over `sh/rs/nvidia.sh` in the tooling
-  line's `sh/<module>/` layout: symlink only those three libraries (by
+- `just rs nvidia`, a one-line recipe over `sh/rs/nvidia.sh`: symlink only those three libraries (by
   soname) from `/usr/lib/x86_64-linux-gnu` into a private directory, put that
   on `LD_LIBRARY_PATH`, and run that selection. Fail when a library is missing
   instead of skipping. `just rs vulkan-cuda` (`sh/rs/vulkan-cuda.sh`) puts the
@@ -48,7 +47,6 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Tooling](/quest/m1/tooling/README.md) - the `sh/` script layout and recipe-only workflows this follows
 - A self-hosted runner is registered for moq-dev/moq on the maintainer's host, with the NVIDIA driver
 
 ## Related

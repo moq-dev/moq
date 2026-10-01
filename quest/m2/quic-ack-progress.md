@@ -1,17 +1,16 @@
-# [S] noq-proto reports per-stream acknowledgment progress
+# [S] moq-quic reports per-stream acknowledgment progress
 
 ## Goal
 
-A released noq-proto lets a sender ask how much of a send stream the peer has
+`moq-quic` lets a sender ask how much of a send stream the peer has
 acknowledged and when each acknowledgment was received, corrected for the
 peer's reported ACK delay. Nothing MoQ builds on top needs private state.
 
 ## Plan
 
-The work lives in the moq-dev/noq fork. This quest exists so the release it
-produces is one condition dependents wait on.
+The work lives in `moq-quic`, in-tree after [the fork](/quest/m1/quic/fork/README.md).
 
-noq-proto already tracks everything needed in `SendBuffer`: the acknowledged
+noq-proto (and so quinn-proto; check on the fork) already tracks everything needed in `SendBuffer`: the acknowledged
 range set, `fully_acked_offset()`, and the unacked length. `Connection` also
 computes the peer's `ack_delay` per ACK frame when it updates the RTT
 estimator. Expose that state through the public `SendStream` handle without
@@ -33,16 +32,18 @@ stream teardown: the accessor must not return a prefix that includes bytes the
 peer will never acknowledge, and a waiter for an offset beyond the final
 size must resolve with the reset instead of hanging.
 
-Land it in the fork and offer it upstream once it is stable. The
-`web-transport-moq` half of [the ACK hook](/quest/m2/quic-ack-hook.md) lives
-in the same fork repository and ships in the same release. The quest
-completes when a `moq-noq-proto` release carries the accessor and
-`Cargo.lock` here can name it.
+The `web-transport-moq` half of [the ACK hook](/quest/m2/quic-ack-hook.md)
+is in-tree too and can land in the same PR.
 
 Decided in the 2026-09-30 audit: moved to m2 with its consumers, the ACK
 hook and [frame-granularity starvation](/quest/m2/starvation-frames.md).
+
+## Required
+
+- [Hard fork](/quest/m1/quic/fork/README.md) - the accessor lands in `moq-quic`
 
 ## Related
 
 - [poll_acked in web-transport](/quest/m2/quic-ack-hook.md) - the first
   consumer of the accessor
+- [noq#808](https://github.com/n0-computer/noq/issues/808) - the acked-offset ask to n0

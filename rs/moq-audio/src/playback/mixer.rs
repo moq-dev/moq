@@ -19,6 +19,10 @@ use fixed_resample::ResamplingCons;
 #[cfg(feature = "aec")]
 use fixed_resample::ResamplingProd;
 
+#[cfg(feature = "aec")]
+use crate::resample::Remix;
+use crate::{Error, Layout};
+
 /// Frames mixed per pass. The callback buffer is chunked to this so the scratch
 /// buffers stay a fixed size no matter what period the device asks for.
 const CHUNK: usize = 1024;
@@ -27,9 +31,10 @@ const CHUNK: usize = 1024;
 /// inaudible as a click, short enough to feel instant.
 const RAMP: f32 = 0.003;
 
-/// The mix bus is stereo: sinks resample into it and it fans out to however many
-/// channels the device wants.
-pub(crate) const BUS_CHANNELS: usize = 2;
+/// The echo reference is the mix downmixed to stereo, whatever layout the
+/// device plays, so the canceller's model survives a device switch.
+#[cfg(feature = "aec")]
+pub(crate) const REFERENCE_CHANNELS: usize = 2;
 
 /// Sinks one device will mix. The entry list is allocated to this up front and
 /// never grows, which is what keeps registration off the allocator.
@@ -138,36 +143,61 @@ pub(super) struct Mixer {
 	/// Where anything the mixer is done with goes to be dropped, since dropping
 	/// it here would free on the audio thread.
 	retired: SyncSender<Retired>,
-	/// Channels the device takes.
+	/// Channels the device takes, which is also the bus layout's: every sink
+	/// remixes into it on its way here.
 	channels: usize,
 	/// Per-frame gain step, so any change spans [`RAMP`] regardless of rate.
 	step: f32,
-	/// Stereo accumulator for one chunk.
+	/// Accumulator for one chunk, in the device's layout.
 	bus: Vec<f32>,
-	/// Stereo scratch for the sink being read.
+	/// Scratch for the sink being read, in the device's layout.
 	scratch: Vec<f32>,
-	/// Where echo cancellation reads what was played. Fed the mix after
-	/// clipping but before it fans out, since that is the signal the speaker
-	/// gets and therefore the one the microphone hears back.
+	/// Where echo cancellation reads what was played. Fed the clipped mix, since
+	/// that is the signal the speaker gets and therefore the one the microphone
+	/// hears back.
 	#[cfg(feature = "aec")]
 	reference: Option<ResamplingProd<f32>>,
+	/// Downmixes the bus to the reference's stereo.
+	#[cfg(feature = "aec")]
+	downmix: Remix,
+	/// Stereo scratch for the downmixed reference.
+	#[cfg(feature = "aec")]
+	stereo: Vec<f32>,
 }
 
 impl Mixer {
-	/// `rate` and `channels` describe the device, not the sinks: each sink
-	/// resamples into the bus on its way here.
-	pub(super) fn new(commands: Receiver<Command>, retired: SyncSender<Retired>, rate: u32, channels: usize) -> Self {
-		Self {
+	/// `rate` and `layout` describe the device, not the sinks: each sink
+	/// resamples and remixes into the bus on its way here.
+	pub(super) fn new(
+		commands: Receiver<Command>,
+		retired: SyncSender<Retired>,
+		rate: u32,
+		layout: Layout,
+	) -> Result<Self, Error> {
+		// Sinks remix by speaker position, so a bus without any has nothing to
+		// remix into.
+		if layout.speakers().is_none() {
+			return Err(Error::Unsupported(format!(
+				"cannot mix into an output without speaker positions ({layout:?})"
+			)));
+		}
+
+		let channels = layout.channels() as usize;
+		Ok(Self {
 			entries: Vec::with_capacity(MAX_SINKS),
 			commands,
 			retired,
 			channels,
 			step: 1.0 / (rate as f32 * RAMP),
-			bus: vec![0.0; CHUNK * BUS_CHANNELS],
-			scratch: vec![0.0; CHUNK * BUS_CHANNELS],
+			bus: vec![0.0; CHUNK * channels],
+			scratch: vec![0.0; CHUNK * channels],
 			#[cfg(feature = "aec")]
 			reference: None,
-		}
+			#[cfg(feature = "aec")]
+			downmix: Remix::new(layout, Layout::Stereo)?,
+			#[cfg(feature = "aec")]
+			stereo: vec![0.0; CHUNK * REFERENCE_CHANNELS],
+		})
 	}
 
 	/// Hand something the mixer is done with back to the driver to drop.
@@ -234,6 +264,10 @@ impl Mixer {
 			scratch,
 			#[cfg(feature = "aec")]
 			reference,
+			#[cfg(feature = "aec")]
+			downmix,
+			#[cfg(feature = "aec")]
+			stereo,
 			..
 		} = self;
 		let channels = *channels;
@@ -242,7 +276,7 @@ impl Mixer {
 		let mut done = 0;
 		while done < total {
 			let frames = (total - done).min(CHUNK);
-			let samples = frames * BUS_CHANNELS;
+			let samples = frames * channels;
 
 			bus[..samples].fill(0.0);
 
@@ -257,13 +291,16 @@ impl Mixer {
 				let mut applied = entry.applied;
 				let mut peak = 0.0f32;
 
-				for frame in 0..frames {
+				for (input, mixed) in scratch[..samples]
+					.chunks_exact(channels)
+					.zip(bus[..samples].chunks_exact_mut(channels))
+				{
 					applied += (target - applied).clamp(-*step, *step);
-					let left = scratch[frame * 2] * applied;
-					let right = scratch[frame * 2 + 1] * applied;
-					peak = peak.max(left.abs()).max(right.abs());
-					bus[frame * 2] += left;
-					bus[frame * 2 + 1] += right;
+					for (input, mixed) in input.iter().zip(mixed) {
+						let sample = input * applied;
+						peak = peak.max(sample.abs());
+						*mixed += sample;
+					}
 				}
 
 				entry.applied = applied;
@@ -280,26 +317,12 @@ impl Mixer {
 			// useful to do about it from here and nothing may be logged.
 			#[cfg(feature = "aec")]
 			if let Some(reference) = reference.as_mut() {
-				reference.push_interleaved(&bus[..samples]);
+				let stereo = &mut stereo[..frames * REFERENCE_CHANNELS];
+				downmix.apply(&bus[..samples], stereo);
+				reference.push_interleaved(stereo);
 			}
 
-			let out = &mut out[done * channels..(done + frames) * channels];
-			match channels {
-				1 => {
-					for (frame, out) in out.iter_mut().enumerate() {
-						*out = (bus[frame * 2] + bus[frame * 2 + 1]) * 0.5;
-					}
-				}
-				_ => {
-					for (frame, out) in out.chunks_exact_mut(channels).enumerate() {
-						out[0] = bus[frame * 2];
-						out[1] = bus[frame * 2 + 1];
-						// Surround devices get silence past the front pair, which
-						// is better than duplicating stereo into the rears.
-						out[2..].fill(0.0);
-					}
-				}
-			}
+			out[done * channels..(done + frames) * channels].copy_from_slice(&bus[..samples]);
 
 			done += frames;
 		}
@@ -316,6 +339,9 @@ mod tests {
 
 	const RATE: u32 = 48_000;
 
+	/// The bus most tests mix into.
+	const STEREO: usize = 2;
+
 	/// Frames pushed per test: a tenth of a second, far more than any `fill`
 	/// below drains, so a short read never starves by accident.
 	const FRAMES: usize = RATE as usize / 10;
@@ -328,21 +354,23 @@ mod tests {
 		/// audio thread never drops one.
 		retired: Receiver<Retired>,
 		next: u64,
+		channels: usize,
 	}
 
 	impl Harness {
-		fn new(channels: usize) -> Self {
-			Self::with_depth(channels, 8)
+		fn new(layout: Layout) -> Self {
+			Self::with_depth(layout, 8)
 		}
 
-		fn with_depth(channels: usize, depth: usize) -> Self {
+		fn with_depth(layout: Layout, depth: usize) -> Self {
 			let (commands, rx) = sync_channel(depth);
 			let (retired_tx, retired) = sync_channel(MAX_SINKS);
 			Self {
-				mixer: Mixer::new(rx, retired_tx, RATE, channels),
+				mixer: Mixer::new(rx, retired_tx, RATE, layout).unwrap(),
 				commands,
 				retired,
 				next: 0,
+				channels: layout.channels() as usize,
 			}
 		}
 
@@ -352,7 +380,7 @@ mod tests {
 		/// pushed samples and the assertions.
 		fn add(&mut self, gain: Arc<Gain>) -> (u64, ResamplingProd<f32>) {
 			let (prod, cons) = resampling_channel::<f32>(
-				BUS_CHANNELS,
+				self.channels,
 				RATE,
 				RATE,
 				true,
@@ -389,12 +417,12 @@ mod tests {
 
 	/// Push `frames` stereo frames of a constant sample.
 	fn push(prod: &mut ResamplingProd<f32>, value: f32, frames: usize) {
-		prod.push_interleaved(&vec![value; frames * BUS_CHANNELS]);
+		prod.push_interleaved(&vec![value; frames * STEREO]);
 	}
 
 	#[test]
 	fn discards_writes_until_the_device_reads() {
-		let mut harness = Harness::new(2);
+		let mut harness = Harness::new(Layout::Stereo);
 		let (_, mut prod) = harness.add(Arc::new(Gain::new()));
 
 		// Nothing has read yet, so these samples are dropped rather than queued
@@ -411,7 +439,7 @@ mod tests {
 
 	#[test]
 	fn sums_sinks_and_clips() {
-		let mut harness = Harness::new(2);
+		let mut harness = Harness::new(Layout::Stereo);
 		let mut out = vec![0.0f32; 2048];
 
 		// Three sinks at 0.5 sum to 1.5, which must clip to 1.0.
@@ -433,7 +461,7 @@ mod tests {
 
 	#[test]
 	fn volume_ramps_instead_of_stepping() {
-		let mut harness = Harness::new(2);
+		let mut harness = Harness::new(Layout::Stereo);
 		let mut out = vec![0.0f32; 2048];
 
 		let gain = Arc::new(Gain::new());
@@ -453,8 +481,8 @@ mod tests {
 		// The whole ramp is monotonic, not just its endpoints.
 		let ramp = (RATE as f32 * RAMP) as usize;
 		assert!(ramp < out.len() / 2, "test buffer is shorter than the ramp");
-		for frame in out[..ramp * BUS_CHANNELS]
-			.as_chunks::<BUS_CHANNELS>()
+		for frame in out[..ramp * STEREO]
+			.as_chunks::<STEREO>()
 			.0
 			.iter()
 			.collect::<Vec<_>>()
@@ -484,7 +512,7 @@ mod tests {
 	/// device buffer into NaN.
 	#[test]
 	fn output_stays_finite_after_a_non_finite_volume() {
-		let mut harness = Harness::new(2);
+		let mut harness = Harness::new(Layout::Stereo);
 		let mut out = vec![0.0f32; 2048];
 
 		let gain = Arc::new(Gain::new());
@@ -500,7 +528,7 @@ mod tests {
 
 	#[test]
 	fn peak_reports_the_loudest_sample_then_resets() {
-		let mut harness = Harness::new(2);
+		let mut harness = Harness::new(Layout::Stereo);
 		let mut out = vec![0.0f32; 2048];
 
 		let gain = Arc::new(Gain::new());
@@ -517,7 +545,7 @@ mod tests {
 
 	#[test]
 	fn removed_sinks_stop_mixing() {
-		let mut harness = Harness::new(2);
+		let mut harness = Harness::new(Layout::Stereo);
 		let mut out = vec![0.0f32; 2048];
 
 		let (id, mut prod) = harness.add(Arc::new(Gain::new()));
@@ -536,7 +564,7 @@ mod tests {
 	/// callback would free on the audio thread, so it goes back to the driver.
 	#[test]
 	fn removed_sinks_are_handed_back_rather_than_dropped() {
-		let mut harness = Harness::new(2);
+		let mut harness = Harness::new(Layout::Stereo);
 		let mut out = vec![0.0f32; 512];
 
 		let (id, _prod) = harness.add(Arc::new(Gain::new()));
@@ -561,7 +589,7 @@ mod tests {
 	#[cfg(feature = "aec")]
 	#[test]
 	fn the_echo_reference_gets_the_mix() {
-		let mut harness = Harness::new(2);
+		let mut harness = Harness::new(Layout::Stereo);
 		let mut out = vec![0.0f32; 2048];
 
 		let (reference, mut tap) = reference_channel();
@@ -574,7 +602,7 @@ mod tests {
 		// does, so that nothing queues up while nobody is listening. That first
 		// read also primes the channel with its configured latency in silence,
 		// which is why the buffer below is read past it rather than at it.
-		let mut heard = vec![0.0f32; 2048 * BUS_CHANNELS];
+		let mut heard = vec![0.0f32; 2048 * REFERENCE_CHANNELS];
 		tap.read_interleaved(&mut heard, false);
 
 		for prod in &mut prods {
@@ -596,7 +624,7 @@ mod tests {
 	#[cfg(feature = "aec")]
 	#[test]
 	fn a_replaced_echo_reference_is_handed_back() {
-		let mut harness = Harness::new(2);
+		let mut harness = Harness::new(Layout::Stereo);
 		let mut out = vec![0.0f32; 512];
 
 		harness
@@ -629,7 +657,7 @@ mod tests {
 	#[cfg(feature = "aec")]
 	fn reference_channel() -> (ResamplingProd<f32>, ResamplingCons<f32>) {
 		resampling_channel::<f32>(
-			BUS_CHANNELS,
+			REFERENCE_CHANNELS,
 			RATE,
 			RATE,
 			true,
@@ -645,7 +673,7 @@ mod tests {
 	/// thread, which is why the driver caps registrations at MAX_SINKS.
 	#[test]
 	fn the_entry_list_never_grows() {
-		let mut harness = Harness::with_depth(2, MAX_SINKS);
+		let mut harness = Harness::with_depth(Layout::Stereo, MAX_SINKS);
 		let mut out = vec![0.0f32; 512];
 
 		let capacity = harness.mixer.entries.capacity();
@@ -660,50 +688,65 @@ mod tests {
 
 	#[test]
 	fn silence_when_no_sink_is_registered() {
-		let mut harness = Harness::new(2);
+		let mut harness = Harness::new(Layout::Stereo);
 		let mut out = vec![1.0f32; 512];
 		harness.fill(&mut out);
 		assert!(out.iter().all(|s| *s == 0.0), "callback buffer was not overwritten");
 	}
 
+	/// The bus is the device's own layout, so every speaker of a surround device
+	/// carries what the sinks put there rather than silence past the front pair.
 	#[test]
-	fn mono_device_gets_the_stereo_average() {
-		let mut harness = Harness::new(1);
-		let mut out = vec![0.0f32; 1024];
-
-		let (_, mut prod) = harness.add(Arc::new(Gain::new()));
-		harness.fill(&mut out);
-
-		// Hard left, so a mono device should hear half of it.
-		let mut samples = vec![0.0f32; FRAMES * BUS_CHANNELS];
-		for frame in samples.as_chunks_mut::<BUS_CHANNELS>().0.iter_mut() {
-			frame[0] = 1.0;
-		}
-		prod.push_interleaved(&samples);
-
-		harness.settle(&mut out);
-		assert!((out[out.len() - 1] - 0.5).abs() < 1e-5, "got {}", out[out.len() - 1]);
-	}
-
-	#[test]
-	fn surround_devices_get_silence_past_the_front_pair() {
-		let mut harness = Harness::new(6);
+	fn a_surround_bus_mixes_every_speaker() {
+		let mut harness = Harness::new(Layout::FivePointOne);
 		let mut out = vec![0.0f32; 6 * 512];
 
 		let (_, mut prod) = harness.add(Arc::new(Gain::new()));
 		harness.fill(&mut out);
-		push(&mut prod, 1.0, FRAMES);
+		let frame = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
+		prod.push_interleaved(&frame.repeat(FRAMES));
 
 		harness.settle(&mut out);
 
 		let last = &out[out.len() - 6..];
-		assert!(last[0] > 0.9 && last[1] > 0.9, "front pair was silent");
-		assert!(last[2..].iter().all(|s| *s == 0.0), "rear channels were not silent");
+		for (got, want) in last.iter().zip(frame) {
+			assert!((got - want).abs() < 1e-5, "got {last:?}");
+		}
+	}
+
+	/// The canceller models a stereo reference whatever the device plays, so a
+	/// surround bus reaches it downmixed rather than cut to its front pair.
+	#[cfg(feature = "aec")]
+	#[test]
+	fn the_echo_reference_downmixes_a_surround_bus() {
+		let mut harness = Harness::new(Layout::FivePointOne);
+		let mut out = vec![0.0f32; 6 * 2048];
+
+		let (reference, mut tap) = reference_channel();
+		harness.commands.send(Command::Reference(Some(reference))).unwrap();
+		let (_, mut prod) = harness.add(Arc::new(Gain::new()));
+		harness.fill(&mut out);
+
+		let mut heard = vec![0.0f32; 2048 * REFERENCE_CHANNELS];
+		tap.read_interleaved(&mut heard, false);
+
+		// Center only, which a stereo downmix splits evenly at -3 dB.
+		prod.push_interleaved(&[0.0, 0.0, 0.5, 0.0, 0.0, 0.0].repeat(FRAMES));
+		harness.settle(&mut out);
+		tap.read_interleaved(&mut heard, false);
+
+		let want = 0.5 * std::f32::consts::FRAC_1_SQRT_2;
+		let tail = &heard[heard.len() - 64..];
+		assert!(
+			tail.iter().all(|s| (*s - want).abs() < 1e-5),
+			"the tap saw {:?}, not the downmix",
+			&tail[..4]
+		);
 	}
 
 	#[test]
 	fn underflow_reads_as_silence_rather_than_stale_samples() {
-		let mut harness = Harness::new(2);
+		let mut harness = Harness::new(Layout::Stereo);
 		let mut out = vec![0.0f32; 8192];
 
 		let (_, mut prod) = harness.add(Arc::new(Gain::new()));

@@ -7,11 +7,11 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::{
 	Path,
 	coding::*,
-	ietf::{Filter, GroupOrder, Parameters, RequestId},
+	ietf::{Filter, GroupOrder, RequestId, Subscribe},
 };
 
 use super::Message;
-use super::namespace::{decode_namespace, encode_namespace};
+use super::namespace::encode_namespace;
 
 use super::Version;
 
@@ -51,31 +51,14 @@ impl Message for TrackStatus<'_> {
 		Ok(())
 	}
 
+	/// Every draft defines TRACK_STATUS as identical to SUBSCRIBE, so it decodes as one and
+	/// keeps only what names the track. We refuse the request, so the rest goes unread.
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(r, version)?;
-		if version == Version::Draft17 {
-			let _required_request_id_delta = u64::decode(r, version)?;
-		}
-		let track_namespace = decode_namespace(r, version)?;
-		let track_name = Cow::<str>::decode(r, version)?;
-
-		match version {
-			Version::Draft14 => {
-				let _subscriber_priority = u8::decode(r, version)?;
-				let _group_order = GroupOrder::decode(r, version)?;
-				let _forward = bool::decode(r, version)?;
-				let _filter_type = u64::decode(r, version)?;
-				let _params = Parameters::decode(r, version)?;
-			}
-			_ => {
-				decode_params!(r, version,);
-			}
-		}
-
+		let subscribe = Subscribe::decode_msg(r, version)?;
 		Ok(Self {
-			request_id,
-			track_namespace,
-			track_name,
+			request_id: subscribe.request_id,
+			track_namespace: subscribe.track_namespace,
+			track_name: subscribe.track_name,
 		})
 	}
 }
@@ -196,5 +179,45 @@ mod tests {
 		assert_eq!(decoded.request_id, RequestId(1));
 		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
 		assert_eq!(decoded.track_name, "video");
+	}
+
+	/// TRACK_STATUS is identical to SUBSCRIBE on every draft, so it carries whatever
+	/// fields and parameters a SUBSCRIBE can. A peer that sends them must still reach
+	/// our refusal rather than having its session closed.
+	#[test]
+	fn test_track_status_carries_subscribe_fields() {
+		// Request ID 1, Track Namespace ("live"), Track Name ("video").
+		let head: &[u8] = &[
+			0x01, 0x01, 0x04, b'l', b'i', b'v', b'e', 0x05, b'v', b'i', b'd', b'e', b'o',
+		];
+
+		#[rustfmt::skip]
+		let cases: [(Version, &[u8]); 3] = [
+			(Version::Draft14, &[
+				0x80, // Subscriber Priority
+				0x02, // Group Order
+				0x00, // Forward
+				0x03, 0x05, 0x01, // Filter Type AbsoluteStart, at {5, 1}
+				0x00, // Number of Parameters
+			]),
+			(Version::Draft15, &[
+				0x02, // Number of Parameters
+				0x10, 0x00, // FORWARD = 0
+				0x20, 0x01, // SUBSCRIBER_PRIORITY = 1
+			]),
+			(Version::Draft20, &[
+				0x02, // Number of Parameters
+				0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN
+				0x32, 0x00, // INCLUDE_PROPERTIES (0x35) = 0
+			]),
+		];
+
+		for (version, rest) in cases {
+			let body = [head, rest].concat();
+			let mut buf = bytes::Bytes::from(body);
+			let msg = TrackStatus::decode_msg(&mut buf, version).unwrap_or_else(|e| panic!("{version}: {e}"));
+			assert!(buf.is_empty(), "{version}: trailing bytes");
+			assert_eq!(msg.track_name, "video", "{version}");
+		}
 	}
 }

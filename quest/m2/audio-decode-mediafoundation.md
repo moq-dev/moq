@@ -22,11 +22,6 @@ ones. Behind the decode seam as the first candidate on `target_os =
 - Verification runs on a Windows host; the per-PR CI only compiles the
   platform code (`just rs windows`).
 
-## Required
-
-- [Decode seam](/quest/m1/audio-codecs/decode-backend.md) - the candidate order this backend joins
-- [Layout](/quest/m1/audio-codecs/layout.md) - what a multichannel frame is delivered as
-
 ## Related
 
 - [Windows decoded frames](/quest/m2/obs-decode-windows.md) - the OBS Windows line this feeds

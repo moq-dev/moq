@@ -11,6 +11,7 @@ import { type Reader, Readers, type Stream } from "../stream.ts";
 import { registerWire } from "../wire.ts";
 import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
 import * as Cluster from "./cluster.ts";
+import { Fetch } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
 import { Group } from "./object.ts";
 import { Publish } from "./publish.ts";
@@ -255,6 +256,11 @@ export class Connection implements Established {
 			case TrackStatusRequest.id: {
 				const msg = await TrackStatusRequest.decode(stream.reader, this.#session.version);
 				await this.#publisher.runTrackStatusRequest(msg, stream);
+				break;
+			}
+			case Fetch.id: {
+				const msg = await Fetch.decode(stream.reader, this.#session.version);
+				await this.#publisher.runFetch(msg, stream);
 				break;
 			}
 

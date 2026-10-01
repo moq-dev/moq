@@ -14,9 +14,10 @@ The epoch rides in the path, so it survives any moq-transport relay, and no
 wire message changes. At an epoch-aware relay, a request for a bare name
 resolves to its newest live epoch on every protocol version.
 
-Non-goals: redundant publishers sharing one epoch, and failing over between
-them faster than the keep-alive (a question
-[Cluster routing](/quest/m1/cluster-routing/README.md) owns). Also out of scope: trusting the publisher's clock (a far-future epoch
+Non-goals: pooling redundant publishers that share one epoch, which
+[Cluster routing](/quest/m1/cluster-routing/README.md)'s selection and
+`--hop` removal own; this line only keeps an epoch a caller supplies. Also out
+of scope: trusting the publisher's clock (a far-future epoch
 wins until its route goes away).
 
 ## Plan

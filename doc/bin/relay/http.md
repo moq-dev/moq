@@ -94,9 +94,10 @@ curl -X POST 'http://127.0.0.1:9101/sessions/revalidate?id=00ff'
 
 ### GET /nodes
 
-This relay's view of the cluster: each visible node's URL, Hop ID, the route
-its advertisement took, and the connections to it (with the same `conn` id the
-logs use). A route is priced twice: `cost` as the cluster stands, which reads 0
-through a relay already carrying the broadcast, and `cold_cost` with those
-discounts removed, which is what tells two warm relays apart. It is best-effort
-correlation, not authenticated identity.
+The peers this relay dialed and holds a session with: each node's URL, without
+its query, and the connections to it, with the same `conn` id the logs use.
+Peers that dialed this relay are not listed, since they declare no URL.
+
+```json
+{ "nodes": [{ "node": "https://us-east.example.com/", "connections": [{ "id": 3 }] }] }
+```

@@ -75,45 +75,43 @@ jobs:
       # over independent observers of the new live broadcast map.
       - name: JS origin broadcast map benchmark
         if: ${{ !cancelled() }}
-        run: |
-          nix develop --command bun install --frozen-lockfile
-          nix develop --command bun js/net/bench/broadcasts.ts
+        run: nix develop --command just js bench broadcasts
 
       # A route above several interest heads lands once per head, so its re-price
       # should expose any slope over heads times received routes.
       - name: JS origin announce forwarding benchmark
         if: ${{ !cancelled() }}
-        run: nix develop --command bun js/net/bench/forward.ts
+        run: nix develop --command just js bench forward
 
       # Fails if reading a fragmented frame costs more per byte as the frame grows.
       - name: JS stream reader benchmark
         if: ${{ !cancelled() }}
-        run: nix develop --command bun js/net/bench/reader.ts
+        run: nix develop --command just js bench reader
 
       # Fails if a chunk carrying many small frames costs as much per frame as one
       # carrying a single frame, on either the lite or moq-transport group stream,
       # which means decoding went back to a wakeup per frame.
       - name: JS group frame benchmark
         if: ${{ !cancelled() }}
-        run: nix develop --command bun js/net/bench/frames.ts
+        run: nix develop --command just js bench frames
 
       # Times one varint encode and decode per wire format. No threshold: it only
       # has to keep running, and its numbers are the baseline for the generated codec.
       - name: JS varint benchmark
         if: ${{ !cancelled() }}
-        run: nix develop --command bun js/net/bench/varint.ts
+        run: nix develop --command just js bench varint
 
       # Bytes and time for lite-06 against lite-07 frames, groups, and requests. No
       # threshold: it only has to keep running.
       - name: JS lite varint benchmark
         if: ${{ !cancelled() }}
-        run: nix develop --command bun js/net/bench/lite-varint.ts
+        run: nix develop --command just js bench lite-varint
 
       # Fails if publishing a group costs more as the track retains more groups,
       # which means the latency guard or the cache went back to scanning them all.
       - name: JS track retention benchmark
         if: ${{ !cancelled() }}
-        run: nix develop --command bun js/net/bench/track.ts
+        run: nix develop --command just js bench track
 
       # Runs each moq-net Criterion routine once, so a bench that panics (an
       # unparsable version, a shape that deadlocks) fails here instead of on the
@@ -175,7 +173,8 @@ jobs:
         # `test drain` stands up two relays and drains one under a live JS
         # viewer: diff-independent, since a break can arrive through the relay,
         # js/net, or the wire between them.
-        recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain"]
+        # `gh test` exercises the release tooling, which no pull request runs.
+        recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "gh test"]
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
