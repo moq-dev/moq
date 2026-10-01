@@ -115,7 +115,7 @@ async function acceptAlpn(
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
 ): Promise<Established> {
-	const { control, solicit, hidden, cluster } = await exchangeSetup(transport, version, "moq-lite-js");
+	const { control, early, solicit, hidden, cluster } = await exchangeSetup(transport, version, "moq-lite-js");
 
 	return new Ietf.Connection({
 		...wiring,
@@ -123,6 +123,7 @@ async function acceptAlpn(
 		url,
 		quic: transport,
 		control,
+		early,
 		solicit,
 		hidden,
 		cluster,

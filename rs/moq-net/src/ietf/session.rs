@@ -65,6 +65,10 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// What that pre-read SETUP declared, so the session does not have to parse it
 	/// twice. `None` when [`Self::peer_setup_stream`] is.
 	pub peer_declared: Option<peer::Peer>,
+
+	/// Uni streams that arrived before that pre-read SETUP (see [`PeerSetup::early`]),
+	/// classified by the session before it accepts any more.
+	pub early_unis: Vec<Reader<S::RecvStream, crate::Version>>,
 }
 
 pub(crate) struct Driver {
@@ -98,6 +102,7 @@ where
 		authority,
 		peer_setup_stream,
 		peer_declared,
+		early_unis,
 	} = config;
 
 	// GOAWAY wiring: the public Session holds one half (drain trigger, received
@@ -210,6 +215,7 @@ where
 					UniSetup {
 						peer: None,
 						read: false,
+						early: Vec::new(),
 						version,
 						goaway,
 						local_close: closing.clone()
@@ -361,6 +367,7 @@ where
 					UniSetup {
 						peer: Some(peer_setup.clone()),
 						read: setup_read,
+						early: early_unis,
 						version,
 						goaway,
 						local_close: closing.clone()
@@ -484,6 +491,11 @@ pub struct PeerSetup<S: crate::transport::poll::Session> {
 
 	/// The Setup Options it declared (see [`cluster`] and [`solicit`]).
 	pub declared: peer::Peer,
+
+	/// Uni streams that arrived before the SETUP, type peeked but unread. The drafts say
+	/// to buffer early data until the control streams arrive, so the session classifies
+	/// these once it starts. QUIC stream credit bounds how many can pile up.
+	pub early: Vec<Reader<S::RecvStream, crate::Version>>,
 }
 
 /// The Hop ID this session declares and detects loops against.
@@ -501,23 +513,32 @@ fn self_origin(publish: Option<&origin::Consumer>, subscribe: Option<&origin::Pr
 /// Server (draft-17+): read the peer's SETUP off its uni stream before starting the
 /// session, returning that stream plus what it declared.
 ///
-/// Blocks on the peer's Setup Stream; any other uni stream racing ahead of it is
-/// `STOP_SENDING`-ed and skipped (group data needs a prior subscribe, so nothing
-/// legitimate precedes the SETUP at connect). Pass the returned reader to [`start`]
-/// as its `peer_setup_stream` so GOAWAY monitoring continues without re-reading it.
+/// Blocks on the peer's Setup Stream. Any other uni stream racing ahead of it (padding,
+/// or group data for a subscription the peer already holds) is held in
+/// [`PeerSetup::early`] for the session to classify. Pass the returned reader to
+/// [`start`] as its `peer_setup_stream` so GOAWAY monitoring continues without
+/// re-reading it.
 pub async fn accept_setup<S: crate::transport::poll::Session>(
 	session: &mut S,
 	version: Version,
 ) -> Result<PeerSetup<S>, Error> {
 	let outer_version = crate::Version::Ietf(version);
+	let mut early = Vec::new();
 
 	loop {
 		let recv = session.accept_uni().await.map_err(Error::from_transport)?;
 		let mut reader: Reader<S::RecvStream, crate::Version> = Reader::new(recv, outer_version);
 
-		if reader.decode_peek::<u64>().await? != setup::SETUP_V17 {
-			// Not the SETUP (group data this early is unexpected). Reject and keep waiting.
-			reader.abort(&Error::UnexpectedStream);
+		let kind = match reader.decode_peek::<u64>().await {
+			Ok(kind) => kind,
+			Err(err) if died_before_header(&err) => {
+				tracing::debug!(%err, "dropping uni stream that died before its type");
+				continue;
+			}
+			Err(err) => return Err(err),
+		};
+		if kind != setup::SETUP_V17 {
+			early.push(reader);
 			continue;
 		}
 
@@ -540,6 +561,7 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 			path,
 			token,
 			declared,
+			early,
 		});
 	}
 }
@@ -688,22 +710,25 @@ impl UniType {
 }
 
 /// Setup and lifecycle state for the incoming uni stream dispatcher.
-struct UniSetup {
+struct UniSetup<S: crate::transport::poll::Session> {
 	peer: Option<peer::PeerSetup>,
 	read: bool,
+	/// Streams accepted before the session started, handled before accepting more.
+	early: Vec<Reader<S::RecvStream, crate::Version>>,
 	version: Version,
 	goaway: crate::goaway::Protocol,
 	local_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Accept incoming uni streams, including SETUP and GOAWAY on draft-17+.
-async fn run_unis<S>(mut session: S, subscriber: Subscriber<S>, setup: UniSetup) -> Result<(), Error>
+async fn run_unis<S>(mut session: S, subscriber: Subscriber<S>, setup: UniSetup<S>) -> Result<(), Error>
 where
 	S: crate::transport::poll::Boxable,
 {
 	let UniSetup {
 		peer: peer_setup,
 		read: setup_read,
+		early,
 		version,
 		goaway,
 		local_close,
@@ -713,29 +738,35 @@ where
 	// A gated server accept already read the peer's one SETUP off its own uni stream,
 	// so anything arriving here is a second one.
 	let mut seen_setup = setup_read;
+	let mut early = early.into_iter();
 
 	loop {
-		let recv = tasks
-			.drive(|waiter| {
-				let mut cx = std::task::Context::from_waker(waiter.waker());
-				session.poll_accept_uni(&mut cx)
-			})
-			.await;
-		let recv = match recv {
-			Ok(recv) => recv,
-			Err(err) => {
-				let err = Error::from_transport(err);
-				// Settle tracks and open groups before the owned receive tasks drop
-				// their cancellation guards, which would otherwise record Cancel.
-				if local_close.load(std::sync::atomic::Ordering::Relaxed) {
-					subscriber.close();
-				} else {
-					subscriber.abort(&err);
-				}
-				return Err(err);
+		let mut reader = match early.next() {
+			Some(reader) => reader,
+			None => {
+				let recv = tasks
+					.drive(|waiter| {
+						let mut cx = std::task::Context::from_waker(waiter.waker());
+						session.poll_accept_uni(&mut cx)
+					})
+					.await;
+				let recv = match recv {
+					Ok(recv) => recv,
+					Err(err) => {
+						let err = Error::from_transport(err);
+						// Settle tracks and open groups before the owned receive tasks drop
+						// their cancellation guards, which would otherwise record Cancel.
+						if local_close.load(std::sync::atomic::Ordering::Relaxed) {
+							subscriber.close();
+						} else {
+							subscriber.abort(&err);
+						}
+						return Err(err);
+					}
+				};
+				Reader::new(recv, outer_version)
 			}
 		};
-		let mut reader: Reader<S::RecvStream, crate::Version> = Reader::new(recv, outer_version);
 		// A stream that dies before its type varint is that stream's failure, not the
 		// session's. RESET_STREAM is how a peer drops a group, and QUIC does not order
 		// the reset behind the data, so one can beat the first byte even of a stream
@@ -756,13 +787,7 @@ where
 			.await
 		{
 			Ok(kind) => kind,
-			Err(
-				err @ (Error::Cancel
-				| Error::Stream(_)
-				| Error::Remote(_)
-				| Error::Transport(_)
-				| Error::Decode(DecodeError::Short)),
-			) => {
+			Err(err) if died_before_header(&err) => {
 				tracing::debug!(%err, "dropping uni stream that died before its type");
 				continue;
 			}
@@ -848,6 +873,15 @@ where
 			}
 		}
 	}
+}
+
+/// Whether reading an incoming stream's header failed because the stream died, which is
+/// that stream's failure and not the session's. Bytes that arrive and do not parse are not.
+fn died_before_header(err: &Error) -> bool {
+	matches!(
+		err,
+		Error::Cancel | Error::Stream(_) | Error::Remote(_) | Error::Transport(_) | Error::Decode(DecodeError::Short)
+	)
 }
 
 /// Receive QUIC datagrams, each an OBJECT_DATAGRAM for one of our subscriptions.
@@ -936,13 +970,7 @@ where
 		// header that does not parse included, still fails the session.
 		let (id, data) = match header {
 			Ok(header) => header,
-			Err(
-				err @ (Error::Cancel
-				| Error::Stream(_)
-				| Error::Remote(_)
-				| Error::Transport(_)
-				| Error::Decode(DecodeError::Short)),
-			) => {
+			Err(err) if died_before_header(&err) => {
 				tracing::debug!(%err, "dropping bidi stream that died before its header");
 				continue;
 			}
@@ -1105,6 +1133,7 @@ mod tests {
 				},
 				..Default::default()
 			}),
+			early_unis: Vec::new(),
 		})
 		.expect("start the session");
 
@@ -1157,6 +1186,7 @@ mod tests {
 			peer_setup_stream: None,
 			// The requests wait on the peer's SETUP (MoQ Hidden).
 			peer_declared: Some(peer::Peer::default()),
+			early_unis: Vec::new(),
 		})
 		.expect("start the session");
 		let _driver = tokio::spawn(driver);
@@ -1208,6 +1238,7 @@ mod tests {
 			authority: None,
 			peer_setup_stream: None,
 			peer_declared,
+			early_unis: Vec::new(),
 		})
 		.expect("start the session");
 		let _driver = tokio::spawn(driver);
@@ -1318,6 +1349,7 @@ mod tests {
 			// Pre-settled, so nothing waits on a SETUP the dead stream will never
 			// carry and the dispatch loop actually runs.
 			peer_declared: Some(peer::Peer::default()),
+			early_unis: Vec::new(),
 		})
 		.expect("start the session");
 
@@ -1356,6 +1388,7 @@ mod tests {
 				authority: Some(String::from_utf8(AUTHORITY.to_vec()).unwrap()),
 				peer_setup_stream: None,
 				peer_declared: Some(peer::Peer::default()),
+				early_unis: Vec::new(),
 			})
 			.expect("start the session");
 
@@ -1426,10 +1459,21 @@ mod tests {
 		payload: Vec<u8>,
 		retired_alias: Option<u64>,
 	) -> (crate::lite::test_transport::Log, Option<Result<(), Error>>) {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		// The peer opens one uni stream and then goes quiet, so
 		// the loop is still running when the assertion is taken.
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![payload]);
+		drive_unis(version, session, None, retired_alias).await
+	}
+
+	/// Run the uni dispatch loop until it stops a stream or ends. `accepted` is a SETUP
+	/// already read by [`accept_setup`], with the streams that raced ahead of it.
+	async fn drive_unis(
+		version: Version,
+		session: crate::lite::test_transport::ScriptedSession,
+		accepted: Option<PeerSetup<crate::lite::test_transport::ScriptedSession>>,
+		retired_alias: Option<u64>,
+	) -> (crate::lite::test_transport::Log, Option<Result<(), Error>>) {
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let log = session.log.clone();
 
 		let (tasks, _task_set) = TaskSet::new();
@@ -1453,14 +1497,17 @@ mod tests {
 
 		// Held so the trigger side stays alive for as long as the loop runs.
 		let (_goaway, goaway) = crate::goaway::Handle::new(false);
-		// The peer's SETUP has not arrived yet, which is the state a group stream racing
-		// ahead of it lands in.
+		// Without `accepted`, the peer's SETUP has not arrived yet, which is the state a
+		// group stream racing ahead of it lands in.
+		let read = accepted.is_some();
+		let early = accepted.map(|accepted| accepted.early).unwrap_or_default();
 		let mut unis = std::pin::pin!(run_unis(
 			session,
 			subscriber,
 			UniSetup {
 				peer: Some(peer_setup),
-				read: false,
+				read,
+				early,
 				version,
 				goaway,
 				local_close: Default::default()
@@ -1533,6 +1580,37 @@ mod tests {
 			assert!(result.is_none(), "{version:?}: padding ended the session: {result:?}");
 			assert_eq!(log.closes(), vec![], "{version:?}");
 		}
+	}
+
+	/// A server waiting on the client's SETUP holds the padding and group streams that beat
+	/// it, then classifies them once the session starts. The drafts say to buffer early
+	/// data; rejecting it reached the wire as INTERNAL_ERROR.
+	#[tokio::test(start_paused = true)]
+	async fn uni_streams_before_setup_are_held_until_it_lands() {
+		const VERSION: Version = Version::Draft19;
+
+		let mut setup = Vec::new();
+		setup::Setup {
+			parameters: ietf::Parameters::default().encode_bytes(VERSION).unwrap(),
+		}
+		.encode(&mut setup, crate::Version::Ietf(VERSION))
+		.unwrap();
+
+		let mut session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![
+			uni_stream(VERSION, PADDING),
+			subgroup_header(VERSION, 7, 0).await,
+			setup,
+		]);
+		let accepted = accept_setup(&mut session, VERSION).await.expect("accept the SETUP");
+		assert_eq!(accepted.early.len(), 2, "both early streams are held");
+		assert!(session.log.stops().is_empty(), "stopped {:?}", session.log.stops());
+
+		// The group answers a retired subscription, so the classifier reaching it shows
+		// as CANCELLED; the padding is read to its end and stops nothing.
+		let (log, result) = drive_unis(VERSION, session, Some(accepted), Some(7)).await;
+		assert_eq!(log.stops(), vec![crate::ietf::error::CANCELLED]);
+		assert!(result.is_none(), "an early stream ended the session: {result:?}");
+		assert_eq!(log.closes(), vec![]);
 	}
 
 	/// An unknown or invalid stream type MUST close the session, so it stops nothing on its own:
@@ -1642,6 +1720,7 @@ mod tests {
 			authority: None,
 			peer_setup_stream: None,
 			peer_declared: None,
+			early_unis: Vec::new(),
 		})
 		.expect("start the session");
 		let driver = tokio::spawn(driver);

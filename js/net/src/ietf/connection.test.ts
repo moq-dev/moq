@@ -1,8 +1,12 @@
 import { expect, spyOn, test } from "bun:test";
+import { exchangeSetup } from "../connection/handshake.ts";
 import { SessionCode } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Stream, Writer } from "../stream.ts";
 import { Connection } from "./connection.ts";
+import { Group } from "./object.ts";
+import { SetupOption, SetupOptions } from "./parameters.ts";
+import { Setup } from "./setup.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 const PADDING = 0x132b3e28n;
@@ -74,5 +78,73 @@ test("an unknown uni stream type closes the session", async () => {
 			logged.mockRestore();
 			connection.close();
 		}
+	}
+});
+
+/**
+ * Padding and group streams that beat the peer's SETUP are held and classified once it
+ * lands. The drafts say to buffer early data; failing the handshake over it broke a peer
+ * that already held a subscription or probed for bandwidth straight away.
+ */
+test("uni streams before SETUP are held until it lands", async () => {
+	const version = Version.DRAFT_19;
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+
+	const padding = new Writer(await pair.client.createUnidirectionalStream(), version);
+	await padding.u62(PADDING);
+	await padding.write(new Uint8Array(4096));
+	padding.close();
+
+	const group = new Writer(await pair.client.createUnidirectionalStream(), version);
+	await new Group({
+		trackAlias: 7n,
+		groupId: 0,
+		subGroupId: 0,
+		publisherPriority: 128,
+		flags: {
+			hasExtensions: false,
+			hasSubgroup: false,
+			hasSubgroupObject: false,
+			hasEnd: false,
+			hasPriority: true,
+			firstObject: true,
+		},
+	}).encode(group, version);
+
+	const setup = new Writer(await pair.client.createUnidirectionalStream(), version);
+	await setup.u53(Setup.id);
+	const parameters = new SetupOptions();
+	parameters.setBytes(SetupOption.Implementation, new TextEncoder().encode("test"));
+	await new Setup({ parameters }).encode(setup, version);
+
+	const { control, early, solicit, hidden, cluster } = await exchangeSetup(pair.server, version, "test");
+	expect(early.length).toBe(2);
+
+	let closed = false;
+	void pair.server.closed.then(() => {
+		closed = true;
+	});
+
+	const connection = new Connection({
+		url: new URL("https://example.com"),
+		quic: pair.server,
+		control,
+		early,
+		solicit,
+		hidden,
+		cluster,
+		maxRequestId: 0n,
+		version,
+		client: false,
+	});
+
+	try {
+		// A STOP_SENDING would reject this; a clean close means the padding was read to its end.
+		await padding.closed;
+
+		await Bun.sleep(0);
+		expect(closed).toBe(false);
+	} finally {
+		connection.close();
 	}
 });

@@ -364,13 +364,22 @@ export class Reader {
 		}
 	}
 
+	// Like decode, but leaves the bytes buffered for the next read.
+	async #peek<T>(decode: (c: Cursor) => T): Promise<T> {
+		for (;;) {
+			const result = this.#try(decode, false);
+			if (!(result instanceof Short)) return result;
+			await this.#fillTo(result.need);
+		}
+	}
+
 	/** Like {@link decode}, but returns undefined if the stream ends cleanly first. */
 	async decodeMaybe<T>(decode: (c: Cursor) => T): Promise<T | undefined> {
 		if (await this.done()) return undefined;
 		return this.decode(decode);
 	}
 
-	#try<T>(decode: (c: Cursor) => T): T | Short {
+	#try<T>(decode: (c: Cursor) => T, consume = true): T | Short {
 		// A retry of the decode that last ran short, before the bytes it needs have arrived,
 		// would only throw again. Every decode reads at least a byte, so none can succeed on
 		// an empty buffer either.
@@ -382,7 +391,7 @@ export class Reader {
 		const cursor = new Cursor(this.#buffer, this.version);
 		try {
 			const result = decode(cursor);
-			this.#slice(cursor.offset);
+			if (consume) this.#slice(cursor.offset);
 			this.#short = undefined;
 			return result;
 		} catch (err: unknown) {
@@ -440,6 +449,11 @@ export class Reader {
 	// NOTE: Returns a bigint instead of a number since it may be larger than 53-bits
 	async u62(): Promise<bigint> {
 		return this.decode(U62);
+	}
+
+	/** Like {@link u62}, but leaves the varint buffered, so a stream's type can be read twice. */
+	async peekU62(): Promise<bigint> {
+		return this.#peek(U62);
 	}
 
 	async varint(): Promise<U64> {

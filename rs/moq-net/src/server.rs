@@ -534,6 +534,7 @@ where
 				authority: None,
 				peer_setup_stream: Some(peer_setup.stream),
 				peer_declared: Some(peer_setup.declared),
+				early_unis: peer_setup.early,
 			})?;
 			tracing::debug!(?version, "connected");
 			Ok(Session::new(
@@ -641,6 +642,7 @@ where
 						authority: None,
 						peer_setup_stream: None,
 						peer_declared: Some(peer_declared),
+						early_unis: Vec::new(),
 					})?;
 					(None, crate::driver::Protocol::Ietf(protocol), goaway)
 				}
@@ -1243,6 +1245,7 @@ mod tests {
 						path: None,
 						token: None,
 						declared: ietf::peer::Peer::default(),
+						early: Vec::new(),
 					},
 				})),
 			}),
