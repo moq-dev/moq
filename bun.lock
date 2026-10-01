@@ -359,6 +359,12 @@
         "vite": "^8.3.0",
       },
     },
+    "test/drain": {
+      "name": "@moq/drain-test",
+      "dependencies": {
+        "@moq/net": "workspace:*",
+      },
+    },
     "test/interop/clients/js": {
       "name": "@moq/interop-browser",
       "dependencies": {
@@ -669,6 +675,8 @@
     "@moq/demo": ["@moq/demo@workspace:demo/web"],
 
     "@moq/demo-boy": ["@moq/demo-boy@workspace:demo/boy"],
+
+    "@moq/drain-test": ["@moq/drain-test@workspace:test/drain"],
 
     "@moq/flate": ["@moq/flate@workspace:js/flate"],
 
