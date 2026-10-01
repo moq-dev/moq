@@ -7,6 +7,10 @@ where the device's encoder supports it.
 
 ## Plan
 
+Rust owns capture and codecs on mobile, settled in the 2026-09-30 audit
+([Mobile ownership](/quest/m1/mobile-ownership.md)), so this backend is
+the Android audio codec path.
+
 The audio counterpart of `rs/moq-video/src/encode/backend/mediacodec.rs`,
 behind the `mediacodec` feature and the encode seam.
 
@@ -23,5 +27,4 @@ behind the `mediacodec` feature and the encode seam.
 
 ## Required
 
-- [Mobile ownership](/quest/m1/mobile-ownership.md) - if Kotlin owns platform codecs, this backend is moot
 - [MediaCodec decode](/quest/m2/audio-decode-mediacodec.md) - the round-trip regression decodes through it

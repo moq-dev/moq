@@ -5,38 +5,13 @@ use std::borrow::Cow;
 use crate::{
 	Path,
 	coding::*,
-	ietf::{Fill, Filter, GroupOrder, Location, Param, Parameters, Properties, RequestId},
+	ietf::{Fill, Filter, GroupOrder, Location, Opaque, Parameters, Properties, RequestId},
 };
 
 use super::Message;
 use super::namespace::{decode_namespace, encode_namespace};
 
 use super::Version;
-
-/// The INCLUDE_PROPERTIES parameter (0x35), draft-20's opt-out from Track Properties.
-///
-/// Length prefixed despite holding a single byte. The Key-Value-Pair rule keys the framing
-/// off the parameter id's parity and 0x35 is odd, so a Length is present even though the
-/// parameter's own section calls the value a uint8. Parity is what the generic parser uses
-/// to skip a parameter it does not know, so following the prose instead would desync every
-/// parameter after this one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct IncludeProperties(pub bool);
-
-impl Param for IncludeProperties {
-	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		vec![u8::from(self.0)].encode(w, version)
-	}
-
-	fn param_decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		match Vec::<u8>::decode(r, version)?[..] {
-			// The draft allows exactly 0 or 1; anything else is a protocol violation.
-			[0] => Ok(Self(false)),
-			[1] => Ok(Self(true)),
-			_ => Err(DecodeError::InvalidValue),
-		}
-	}
-}
 
 /// Subscribe message (0x03)
 /// Sent by the subscriber to request all future objects for the given track.
@@ -53,6 +28,26 @@ pub struct Subscribe<'a> {
 	pub fill: Option<Fill>,
 	/// Whether the subscriber wants Track Properties on the response (draft-20).
 	pub properties_wanted: bool,
+	/// Whether Objects are forwarded (FORWARD). We only serve forwarding subscriptions,
+	/// so a subscriber that asks for none is refused.
+	pub forward: bool,
+	/// Whether the request carried a Range Filter (0x25-0x28). We advertise no
+	/// MAX_FILTER_RANGES, so the request is refused rather than served unfiltered.
+	/// Never encoded; we send no range filters.
+	pub range_filters: bool,
+}
+
+/// NEW_GROUP_REQUEST (0x32) arrived in draft-16.
+fn has_new_group_request(version: Version) -> bool {
+	!matches!(version, Version::Draft14 | Version::Draft15)
+}
+
+/// The Range Filters (0x25-0x29) arrived in draft-19.
+pub(super) fn has_range_filters(version: Version) -> bool {
+	!matches!(
+		version,
+		Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18
+	)
 }
 
 impl Message for Subscribe<'_> {
@@ -72,13 +67,9 @@ impl Message for Subscribe<'_> {
 				let group_order = GroupOrder::decode(r, version)?;
 
 				let forward = bool::decode(r, version)?;
-				if !forward {
-					return Err(DecodeError::Unsupported);
-				}
-
 				let filter = Filter::decode(r, version)?;
 
-				let _params = Parameters::decode(r, version)?;
+				Parameters::skip(r, version)?;
 
 				Ok(Self {
 					request_id,
@@ -89,11 +80,17 @@ impl Message for Subscribe<'_> {
 					filter,
 					fill: None,
 					properties_wanted: true,
+					forward,
+					range_filters: false,
 				})
 			}
 			_ => {
+				// The token is ignored: the session's grant is what authorizes the request.
+				// NEW_GROUP_REQUEST is ignored too, as the draft lets a publisher without
+				// dynamic groups do.
 				decode_params!(r, version,
 					0x02 => _object_delivery_timeout: Option<u64>,
+					0x03 => _authorization_token: Vec<Opaque>,
 					0x04 => rendezvous_timeout: Option<u64>,
 					0x06 => _subgroup_delivery_timeout: Option<u64>,
 					0x10 => forward: Option<bool>,
@@ -101,18 +98,34 @@ impl Message for Subscribe<'_> {
 					0x21 => filter: Option<Filter>,
 					0x22 => group_order: Option<GroupOrder>,
 					0x23 => fill: Option<Fill>,
-					0x35 => include_properties: Option<IncludeProperties>,
+					0x25 => subgroup_filter: Vec<Opaque>,
+					0x26 => object_id_filter: Vec<Opaque>,
+					0x27 => priority_filter: Vec<Opaque>,
+					0x28 => object_property_filter: Vec<Opaque>,
+					0x32 => new_group_request: Option<u64>,
+					0x35 => include_properties: Option<bool>,
 				);
 
-				// FILL_PARAMETERS and INCLUDE_PROPERTIES are draft-20 additions. An unknown
-				// message parameter is a protocol violation, so they stay rejected on the
-				// drafts that predate them rather than being quietly tolerated.
-				if (fill.is_some() || include_properties.is_some()) && !Filter::is_draft20(version) {
+				let range_filters = [
+					subgroup_filter,
+					object_id_filter,
+					priority_filter,
+					object_property_filter,
+				]
+				.iter()
+				.any(|filter| !filter.is_empty());
+
+				// An unknown message parameter is a protocol violation, so each stays rejected
+				// on the drafts that predate it rather than being quietly tolerated.
+				if ((fill.is_some() || include_properties.is_some()) && !Filter::is_draft20(version))
+					|| (range_filters && !has_range_filters(version))
+					|| (new_group_request.is_some() && !has_new_group_request(version))
+				{
 					return Err(DecodeError::InvalidValue);
 				}
 
 				// Defaults to 1, so an absent parameter means the subscriber wants them.
-				let properties_wanted = include_properties.is_none_or(|p| p.0);
+				let properties_wanted = include_properties.unwrap_or(true);
 
 				// RENDEZVOUS_TIMEOUT arrived in draft-17; 0x04 means MAX_CACHE_DURATION in
 				// draft-15, which is a publisher parameter with no business in a SUBSCRIBE.
@@ -125,10 +138,6 @@ impl Message for Subscribe<'_> {
 				// published right now, which is the shorter timeout the draft lets a relay pick.
 				// We still have to parse it, or the parameter alone would kill the session.
 				let _ = rendezvous_timeout;
-
-				if forward == Some(false) {
-					return Err(DecodeError::Unsupported);
-				}
 
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
 				let group_order = group_order.unwrap_or(GroupOrder::Descending);
@@ -144,6 +153,9 @@ impl Message for Subscribe<'_> {
 					filter,
 					fill,
 					properties_wanted,
+					// Absent means 1.
+					forward: forward.unwrap_or(true),
+					range_filters,
 				})
 			}
 		}
@@ -161,7 +173,7 @@ impl Message for Subscribe<'_> {
 			Version::Draft14 => {
 				self.subscriber_priority.encode(w, version)?;
 				self.group_order.encode(w, version)?;
-				true.encode(w, version)?; // forward
+				self.forward.encode(w, version)?;
 
 				self.filter.encode(w, version)?;
 				0u8.encode(w, version)?; // no parameters
@@ -175,11 +187,10 @@ impl Message for Subscribe<'_> {
 				// INCLUDE_PROPERTIES defaults to 1, so only the opt-out is worth bytes. It
 				// arrived in draft-20, and an older peer would read it as an unknown
 				// parameter, which is a protocol violation.
-				let include_properties =
-					(!self.properties_wanted && Filter::is_draft20(version)).then_some(IncludeProperties(false));
+				let include_properties = (!self.properties_wanted && Filter::is_draft20(version)).then_some(false);
 
 				encode_params!(w, version,
-					0x10 => true,
+					0x10 => self.forward,
 					0x20 => self.subscriber_priority,
 					0x21 => self.filter,
 					0x22 => self.group_order,
@@ -279,7 +290,7 @@ impl Message for SubscribeOk {
 					largest = Some(Location::decode(r, version)?);
 				}
 
-				let _params = Parameters::decode(r, version)?;
+				Parameters::skip(r, version)?;
 			}
 			_ => {
 				// GROUP_ORDER is only legal here through draft-15, but keep accepting it so a
@@ -432,7 +443,7 @@ impl Message for SubscribeUpdate {
 				let end_group = u64::decode(r, version)?;
 				let subscriber_priority = u8::decode(r, version)?;
 				let forward = bool::decode(r, version)?;
-				let _parameters = Parameters::decode(r, version)?;
+				Parameters::skip(r, version)?;
 
 				Ok(Self {
 					request_id,
@@ -448,11 +459,18 @@ impl Message for SubscribeUpdate {
 				let subscription_request_id = Some(RequestId::decode(r, version)?);
 				decode_params!(r, version,
 					0x02 => _object_delivery_timeout: Option<u64>,
+					0x03 => _authorization_token: Vec<Opaque>,
 					0x06 => _subgroup_delivery_timeout: Option<u64>,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => _filter: Option<Filter>,
+					0x32 => new_group_request: Option<u64>,
 				);
+
+				// NEW_GROUP_REQUEST arrived in draft-16.
+				if new_group_request.is_some() && !has_new_group_request(version) {
+					return Err(DecodeError::InvalidValue);
+				}
 
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
 				let forward = forward.unwrap_or(true);
@@ -472,18 +490,38 @@ impl Message for SubscribeUpdate {
 				if matches!(version, Version::Draft17) {
 					let _required_request_id_delta = u64::decode(r, version)?;
 				}
+				// Nothing reads an update's Range Filters yet; they are consumed so a legal
+				// update does not fail the session. TRACK_PROPERTY_FILTER (0x29) is legal
+				// only on an update to SUBSCRIBE_TRACKS, which the message alone can't tell.
 				decode_params!(r, version,
 					0x02 => _object_delivery_timeout: Option<u64>,
+					0x03 => _authorization_token: Vec<Opaque>,
 					0x06 => _subgroup_delivery_timeout: Option<u64>,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => _filter: Option<Filter>,
 					0x23 => fill: Option<Fill>,
+					0x25 => subgroup_filter: Vec<Opaque>,
+					0x26 => object_id_filter: Vec<Opaque>,
+					0x27 => priority_filter: Vec<Opaque>,
+					0x28 => object_property_filter: Vec<Opaque>,
+					0x29 => track_property_filter: Vec<Opaque>,
+					0x32 => _new_group_request: Option<u64>,
 				);
 
-				// FILL_PARAMETERS is a draft-20 addition, so an earlier peer sending one is
-				// still the protocol violation it was.
-				if fill.is_some() && !Filter::is_draft20(version) {
+				let range_filters = [
+					subgroup_filter,
+					object_id_filter,
+					priority_filter,
+					object_property_filter,
+					track_property_filter,
+				]
+				.iter()
+				.any(|filter| !filter.is_empty());
+
+				// FILL_PARAMETERS and the Range Filters postdate draft-17, so an earlier peer
+				// sending one is still the protocol violation it was.
+				if (fill.is_some() && !Filter::is_draft20(version)) || (range_filters && !has_range_filters(version)) {
 					return Err(DecodeError::InvalidValue);
 				}
 
@@ -530,6 +568,8 @@ mod tests {
 			filter: Filter::NextObject,
 			fill: None,
 			properties_wanted: true,
+			forward: true,
+			range_filters: false,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -552,6 +592,8 @@ mod tests {
 			filter: Filter::NextObject,
 			fill: None,
 			properties_wanted: true,
+			forward: true,
+			range_filters: false,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -642,6 +684,8 @@ mod tests {
 			filter: Filter::NextObject,
 			fill: None,
 			properties_wanted: true,
+			forward: true,
+			range_filters: false,
 		};
 
 		for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft20] {
@@ -671,6 +715,8 @@ mod tests {
 			filter: Filter::NextObject,
 			fill: None,
 			properties_wanted: true,
+			forward: true,
+			range_filters: false,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -854,6 +900,8 @@ mod tests {
 				filter: Filter::NextObject,
 				fill: None,
 				properties_wanted: wanted,
+				forward: true,
+				range_filters: false,
 			};
 
 			let encoded = encode_message(&msg, version);
@@ -976,6 +1024,8 @@ mod tests {
 			filter: Filter::NextObject,
 			fill: None,
 			properties_wanted: true,
+			forward: true,
+			range_filters: false,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -1034,6 +1084,8 @@ mod tests {
 			filter: Filter::NextObject,
 			fill: None,
 			properties_wanted: true,
+			forward: true,
+			range_filters: false,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -1241,5 +1293,169 @@ mod tests {
 		let v17 = encode_message(&v17_msg, Version::Draft17);
 		let v18 = encode_message(&v18_msg, Version::Draft18);
 		assert_eq!(v17.len(), v18.len() + 1);
+	}
+
+	/// The head of a SUBSCRIBE (draft-20 Figure 10) up to its Number of Parameters:
+	/// Request ID 1, Track Namespace ("live"), Track Name ("video"). Every value is
+	/// below 128, so each varint is one byte in the drafts before and after 17 alike.
+	const SUBSCRIBE_HEAD: &[u8] = &[
+		0x01, 0x01, 0x04, b'l', b'i', b'v', b'e', 0x05, b'v', b'i', b'd', b'e', b'o',
+	];
+
+	fn subscribe_body(params: &[u8]) -> Vec<u8> {
+		[SUBSCRIBE_HEAD, params].concat()
+	}
+
+	/// Every parameter draft-20 lets a SUBSCRIBE carry that we don't act on still decodes,
+	/// with what we have to refuse recorded rather than failing the session.
+	#[test]
+	fn subscribe_decodes_every_draft20_parameter() {
+		#[rustfmt::skip]
+		let body = subscribe_body(&[
+			0x06, // Number of Parameters
+			0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN: USE_VALUE, type 0, one byte
+			0x00, 0x03, 0x03, 0x00, 0xBB, // a second one, which the draft allows
+			0x0D, 0x00, // FORWARD (0x10) = 0, a uint8
+			0x15, 0x03, 0x00, 0x00, 0x01, // SUBGROUP_FILTER (0x25): SetID 0, range 0-1
+			0x0D, 0x07, // NEW_GROUP_REQUEST (0x32), a varint
+			0x03, 0x00, // INCLUDE_PROPERTIES (0x35) = 0, a uint8
+		]);
+
+		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+			let mut buf = bytes::Bytes::from(body.clone());
+			let msg = Subscribe::decode_msg(&mut buf, version).unwrap_or_else(|e| panic!("{version}: {e}"));
+			assert!(buf.is_empty(), "{version}: trailing bytes");
+			assert!(!msg.forward, "{version}");
+			assert!(msg.range_filters, "{version}");
+			assert!(!msg.properties_wanted, "{version}");
+		}
+	}
+
+	/// INCLUDE_PROPERTIES is a uint8, one raw byte with no Length. Reading a Length would
+	/// swallow the parameter after it, or fail on the value.
+	#[test]
+	fn include_properties_is_a_uint8() {
+		let msg = Subscribe {
+			request_id: RequestId(1),
+			track_namespace: crate::Path::new("live"),
+			track_name: "video".into(),
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			filter: Filter::Unfiltered,
+			fill: None,
+			properties_wanted: false,
+			forward: true,
+			range_filters: false,
+		};
+
+		#[rustfmt::skip]
+		let expected = subscribe_body(&[
+			0x04, // Number of Parameters
+			0x10, 0x01, // FORWARD = 1
+			0x10, 0x80, // SUBSCRIBER_PRIORITY (0x20) = 128, a raw byte
+			0x02, 0x02, // GROUP_ORDER (0x22) = Descending
+			0x13, 0x00, // INCLUDE_PROPERTIES (0x35) = 0
+		]);
+		assert_eq!(encode_message(&msg, Version::Draft20), expected);
+
+		// Anything but 0 or 1 is a protocol violation.
+		let body = subscribe_body(&[0x01, 0x35, 0x02]);
+		assert!(decode_message::<Subscribe>(&body, Version::Draft20).is_err());
+	}
+
+	/// FORWARD=0 is legal on every draft. It decodes so the request can be refused,
+	/// rather than closing the session.
+	#[test]
+	fn subscribe_decodes_forward_zero() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+		] {
+			let msg = Subscribe {
+				request_id: RequestId(1),
+				track_namespace: crate::Path::new("live"),
+				track_name: "video".into(),
+				subscriber_priority: 128,
+				group_order: GroupOrder::Descending,
+				filter: Filter::NextObject,
+				fill: None,
+				properties_wanted: true,
+				forward: false,
+				range_filters: false,
+			};
+			let decoded: Subscribe = decode_message(&encode_message(&msg, version), version).unwrap();
+			assert!(!decoded.forward, "{version}");
+		}
+	}
+
+	/// AUTHORIZATION TOKEN is a Key-Value-Pair with an odd type through draft-16, so its
+	/// value is length prefixed there too.
+	#[test]
+	fn subscribe_accepts_a_token_on_every_draft() {
+		#[rustfmt::skip]
+		let body = subscribe_body(&[
+			0x01, // Number of Parameters
+			0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN
+		]);
+		for version in [
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+		] {
+			let mut body = body.clone();
+			if version == Version::Draft17 {
+				// Required Request ID Delta, draft-17 only.
+				body.insert(1, 0x00);
+			}
+			let mut buf = bytes::Bytes::from(body);
+			Subscribe::decode_msg(&mut buf, version).unwrap_or_else(|e| panic!("{version}: {e}"));
+			assert!(buf.is_empty(), "{version}: trailing bytes");
+		}
+	}
+
+	/// A parameter from a later draft is still an unknown parameter, which the draft makes
+	/// a protocol violation.
+	#[test]
+	fn subscribe_refuses_parameters_before_their_draft() {
+		for (version, params) in [
+			// NEW_GROUP_REQUEST arrived in draft-16.
+			(Version::Draft15, &[0x01, 0x32, 0x00][..]),
+			// The Range Filters arrived in draft-19.
+			(Version::Draft18, &[0x01, 0x25, 0x00][..]),
+			// INCLUDE_PROPERTIES arrived in draft-20.
+			(Version::Draft19, &[0x01, 0x35, 0x00][..]),
+		] {
+			let body = subscribe_body(params);
+			assert!(
+				decode_message::<Subscribe>(&body, version).is_err(),
+				"{version}: {params:x?}"
+			);
+		}
+	}
+
+	/// REQUEST_UPDATE (draft-20 Figure 12) carries a token, NEW_GROUP_REQUEST and the
+	/// Range Filters, TRACK_PROPERTY_FILTER included, since the update may be for a
+	/// SUBSCRIBE_TRACKS.
+	#[test]
+	fn request_update_decodes_every_draft20_parameter() {
+		#[rustfmt::skip]
+		let body = [
+			0x02, // Request ID
+			0x04, // Number of Parameters
+			0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN
+			0x22, 0x00, // SUBGROUP_FILTER (0x25), empty: remove the filter
+			0x04, 0x04, 0x00, 0x02, 0x00, 0x01, // TRACK_PROPERTY_FILTER (0x29): SetID 0, type 2, range 0-1
+			0x09, 0x00, // NEW_GROUP_REQUEST (0x32)
+		];
+		let decoded: SubscribeUpdate = decode_message(&body, Version::Draft20).unwrap();
+		assert_eq!(decoded.request_id, RequestId(2));
 	}
 }

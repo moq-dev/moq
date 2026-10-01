@@ -38,7 +38,3 @@ that ACKs every PING), and the iroh backend honors `quic.keep_alive`.
   deadline while one with a request in flight is not.
 
 Public API: none beyond existing settings. Wire: none.
-
-## Required
-
-- moq-dev/moq#4612 merges, adding `listen.timeout` and the HTTP/1 header timer this extends
