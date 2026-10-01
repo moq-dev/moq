@@ -1,6 +1,8 @@
 set fallback
+set shell := ["bash", "-euo", "pipefail", "-c"]
 
 # Subscribe to a broadcast using GStreamer and render to the screen.
+[positional-arguments]
 gst name url='http://localhost:4443' *args:
     cargo build -p moq-gst
 
@@ -8,6 +10,6 @@ gst name url='http://localhost:4443' *args:
     # by name so a bare `! decodebin3` can't latch onto the audio pad and leave the
     # video sink empty; route audio to its own sink so it doesn't stall the session.
     GST_PLUGIN_PATH_1_0="${PWD}/../../target/debug${GST_PLUGIN_PATH_1_0:+:$GST_PLUGIN_PATH_1_0}" \
-    gst-launch-1.0 -v -e moqsrc name=s url="{{ url }}" broadcast="{{ name }}" {{ args }} \
+    gst-launch-1.0 -v -e moqsrc name=s url="{{ url }}" broadcast="{{ name }}" "${@:3}" \
     	s.video_0 ! queue ! decodebin3 ! videoconvert ! autovideosink \
     	s.audio_0 ! queue ! decodebin3 ! audioconvert ! autoaudiosink

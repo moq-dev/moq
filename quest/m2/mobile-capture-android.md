@@ -11,12 +11,11 @@ Rust owns capture and codecs on mobile, settled in the 2026-09-30 audit ([Mobile
 planning a second backend family. The remaining capture and native Surface
 integration needs NDK/JNI lifecycle, synchronization, and actual device proof.
 
-Weigh the cost honestly before starting. `moq-kit` already does this in Kotlin
-over `moq-ffi`, and raw frames cannot cross the FFI boundary zero-copy, so a
-Rust Android media path pays off for Rust-native consumers and not for the
-mobile SDK. That is a real audience (this is the same gap that made
-`iroh-live` reimplement the native layer) but it is worth naming, since it
-decides whether XL is worth spending.
+This is the Android SDK's media path, not a Rust-only extra. `moq-kit`'s
+Kotlin capture is the parallel stack the verdict retires once this lands.
+Frames cross `moq-ffi` as opaque `HardwareBuffer`/`Surface` handles rather than
+copies. Rust-native consumers benefit too (the same gap that made `iroh-live`
+reimplement the native layer).
 
 `moq-tokio` already reaches into Android through JNI for `tls::init_android`,
 so the mechanism exists.

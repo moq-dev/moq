@@ -17,6 +17,9 @@ behind the `mediacodec` feature and the encode seam.
 - `audio/mp4a-latm` with `KEY_AAC_PROFILE` = LC. The catalog ASC is
   synthesized at construction per the encode seam, since `csd-0` only arrives
   with the first output buffer; assert the two match.
+- MediaCodec pipelines output, which the one-packet-per-frame seam does not
+  allow yet: add a `flush` and a zero-or-more return, a change to
+  `Encoder::encode` that targets `dev`, unless the AudioToolbox quest already did.
 - Multichannel is device-dependent; probe the encoder's capabilities at open
   and refuse a layout it does not list.
 - Round-trip regression through the MediaCodec decoder; runtime proof on a
@@ -24,6 +27,4 @@ behind the `mediacodec` feature and the encode seam.
 
 ## Required
 
-- [Encode seam](/quest/m1/audio-codecs/encode-backend.md) - the candidate order this backend joins
-- [Layout](/quest/m1/audio-codecs/layout.md) - the input layout the encoder accepts
 - [MediaCodec decode](/quest/m2/audio-decode-mediacodec.md) - the round-trip regression decodes through it

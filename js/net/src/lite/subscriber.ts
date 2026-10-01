@@ -217,7 +217,7 @@ export class Subscriber {
 		// to reset the stream, not just close our side of it.
 		let stream: Stream;
 		try {
-			stream = await Stream.open(this.#quic);
+			stream = await Stream.open(this.#quic, { version: this.version });
 		} catch (err: unknown) {
 			announced.close(error(err));
 			return;
@@ -663,7 +663,7 @@ export class Subscriber {
 		};
 		this.#subscribes.set(id, entry);
 
-		state.stream = await Stream.open(this.#quic);
+		state.stream = await Stream.open(this.#quic, { version: this.version });
 		await state.stream.writer.u53(StreamId.Subscribe);
 		await msg.encode(state.stream.writer, this.version);
 
@@ -680,7 +680,7 @@ export class Subscriber {
 
 	// Opens a TRACK stream, reads the single TRACK_INFO, and FINs. Lite-05+ only.
 	async #trackInfo(broadcast: Path.Valid, track: string): Promise<TrackInfo> {
-		return this.#exchange(undefined, async (stream) => {
+		return this.#exchange({ version: this.version }, async (stream) => {
 			await stream.writer.u53(StreamId.Track);
 			await new TrackMessage(broadcast, track).encode(stream.writer, this.version);
 			const info = await TrackInfo.decode(stream.reader, this.version);
@@ -693,7 +693,7 @@ export class Subscriber {
 	// Opens a stream and runs a request/response exchange on it, resetting the stream if `run`
 	// fails. Subscriber.close() also resets it while `run` is pending, so a peer that never
 	// answers cannot hold it open, and a stream that opens after the close is reset at once.
-	async #exchange<T>(options: OpenOptions | undefined, run: (stream: Stream) => Promise<T>): Promise<T> {
+	async #exchange<T>(options: OpenOptions, run: (stream: Stream) => Promise<T>): Promise<T> {
 		const closed = this.#closed.signal;
 		closed.throwIfAborted();
 		const stream = await Stream.open(this.#quic, options);
@@ -820,7 +820,7 @@ export class Subscriber {
 		group: netGroup.Producer,
 	): Promise<{ stream: Stream; info: TrackInfo }> {
 		const info = await untilClosed(group, this.#trackInfo(broadcast, track));
-		return this.#exchange({ sendOrder: sendOrder({ priority }) }, async (stream) => {
+		return this.#exchange({ sendOrder: sendOrder({ priority }), version: this.version }, async (stream) => {
 			await stream.writer.u53(StreamId.Fetch);
 			await new FetchMessage({ broadcast, track, priority, group: sequence }).encode(stream.writer, this.version);
 			// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
@@ -1127,7 +1127,7 @@ export class Subscriber {
 	// Decode one datagram body and hand it to the matching subscription's producer. Drops the
 	// datagram (best-effort) if the subscription is unknown/closed or its timescale isn't resolved.
 	async #routeDatagram(payload: Uint8Array): Promise<void> {
-		const dg = await DatagramMessage.decode(payload);
+		const dg = await DatagramMessage.decode(payload, this.version);
 
 		const entry = this.#subscribes.get(dg.subscribe);
 		if (!entry) return; // Unknown or already-closed subscription.
@@ -1180,7 +1180,7 @@ export class Subscriber {
 		// transport hiccup) MUST NOT tear down the connection. On error, drop the
 		// estimates so consumers know they're stale.
 		try {
-			const stream = await Stream.open(this.#quic);
+			const stream = await Stream.open(this.#quic, { version: this.version });
 			await stream.writer.u53(StreamId.Probe);
 
 			for (;;) {

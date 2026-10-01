@@ -14,10 +14,11 @@ function concat(chunks: Uint8Array[]): Uint8Array {
 	return out;
 }
 
-async function bytes(f: (w: Writer) => Promise<void>): Promise<Uint8Array> {
+async function bytes(f: (w: Writer) => Promise<void>, version: Version): Promise<Uint8Array> {
 	const written: Uint8Array[] = [];
 	const writer = new Writer(
 		new WritableStream<Uint8Array>({ write: (chunk) => void written.push(new Uint8Array(chunk)) }),
+		version,
 	);
 	await f(writer);
 	writer.close();
@@ -26,7 +27,7 @@ async function bytes(f: (w: Writer) => Promise<void>): Promise<Uint8Array> {
 }
 
 async function roundTrip(msg: Probe, version: Version = Version.DRAFT_05): Promise<Probe> {
-	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, version)));
+	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, version), version), version);
 	const got = await Probe.decode(reader, version);
 	expect(await reader.done()).toBe(true);
 	return got;
@@ -66,7 +67,9 @@ test("lite-03 carries the bitrate alone", async () => {
 // varint encoder converts with `BigInt`, which throws on one, and the publisher's
 // catch would then close the probe stream for the rest of the session.
 test("a fractional RTT must not reach the encoder", async () => {
-	await expect(bytes((w) => new Probe({ bitrate: 1_000, rtt: 12.34 }).encode(w, Version.DRAFT_05))).rejects.toThrow();
+	await expect(
+		bytes((w) => new Probe({ bitrate: 1_000, rtt: 12.34 }).encode(w, Version.DRAFT_05), Version.DRAFT_05),
+	).rejects.toThrow();
 
 	// Rounding first is what the publisher does, and it encodes cleanly.
 	const got = await roundTrip(new Probe({ bitrate: 1_000, rtt: Math.round(12.34) }));
