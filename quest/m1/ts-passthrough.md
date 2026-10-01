@@ -73,15 +73,14 @@ Decided (2026-10-01), from a discussion with t0ms:
   rewrites continuity counters.
 - Source clock drift is handled by the fixed-delay release's clock recovery
   (#4645), shared with the demultiplexed export, not here.
-- Passthrough is the 1+1 lane: two exporters fed the same objects emit
-  identical TS packets for every object both release, continuity counters
-  included; an object one leg drops late is a gap in that leg only. That is
-  TS identity, not ST 2022-7 recovery, which also needs matching RTP
-  headers: a coordinated RTP egress would be its own quest. The
-  demultiplexed export does not promise counter identity; matching them
-  there would need a dedicated PCR PID on every export. Aligning the legs in
-  time is a non-goal: each releases at its own first arrival plus the delay,
-  so their skew is the path difference, which a 2022-7 receiver absorbs.
+- Passthrough gives 1+1 identity for free: two exporters fed the same
+  objects emit identical TS packets for every object both release,
+  continuity counters included, since passthrough never rewrites them; an
+  object one leg drops late is a gap in that leg only. Aligning the legs in
+  time is left to the `--sync` anchor planned for the demultiplexed export's
+  2022-7 legs (`quest/m2/ts-hitless.md`, #4680), which passthrough can adopt.
+  That is TS identity, not ST 2022-7 recovery, which also needs matching RTP
+  headers from a coordinated RTP egress.
 - Rust only. `js/hang` does not parse `m2ts`, and a player sees no
   rendition for the track.
 - `--passthrough` publishes only the passthrough track. Publishing it
