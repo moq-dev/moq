@@ -31,7 +31,6 @@ QUIC studies there on that rule.
 - [Merge queue](/quest/m1/merge-queue.md) - the required checks run on `merge_group`, so a stale green check can no longer break main
 - [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, flate, audio, and video namespaces built from the handle below
-- [Android logcat](/quest/m1/android-logcat.md) - on dev, Android builds always log to logcat and the `android-logcat` feature is gone
 - [Raw stream codes](/quest/m1/raw-stream-codes.md) - raw QUIC stream resets and stops carry the application's code, not an HTTP/3-mapped one
 - [IETF drain before close](/quest/m1/ietf-drain-before-close.md) - moq-transport sessions deliver finished tracks before a graceful close, as moq-lite does
 - [Close waits for the tail](/quest/m1/close-tail.md) - on lite-07, `close()` returns `Ok` only after each subscriber FINs its Subscribe Stream, having read the track to its end
