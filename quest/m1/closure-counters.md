@@ -26,8 +26,3 @@ Settle which counters must be monotonic and over what lifetime, and whether the
 fresh-segment contract already permits a per-node closure reset or only a
 cumulative traffic regression. The answer is a consumer-facing contract, so
 document it in `moq-stats` rather than leaving it as an aggregate detail.
-
-## Related
-
-- [Client stats](/quest/m1/qos/stats/README.md) - publishes the same counters
-  to consumers

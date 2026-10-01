@@ -620,25 +620,39 @@ where
 				.await
 			};
 
-			// Every data stream this subscription opened is closed by now, which PUBLISH_DONE
-			// requires, so the count it reports is final.
 			let completed = served.is_some();
 			let (res, filled) = served.unwrap_or((Ok(()), false));
-			let mut streams = track_serve.opened() + u64::from(filled);
 
 			// Draft-14 on carries no end location in PUBLISH_DONE: an END_OF_TRACK object is
 			// what tells the subscriber where the track ended. A cancelled subscription is
-			// owed nothing more.
+			// owed nothing more, and one cancelled while the marker waits for stream credit
+			// abandons it.
 			if completed
 				&& res.is_ok()
 				&& let Some(end) = track_serve.end()
 			{
-				match track_serve.write_end_of_track(end, priority).await {
-					Ok(()) => streams += 1,
-					// A failure only costs the subscriber the early boundary.
-					Err(err) => tracing::debug!(%err, id = %request_id, "end of track failed"),
+				let mut marker = std::pin::pin!(track_serve.write_end_of_track(end, priority));
+				let mut closed_session = self.session.clone();
+				let written = kio::wait(|waiter| {
+					if let Poll::Ready(res) = waiter.poll_future(marker.as_mut()) {
+						return Poll::Ready(res);
+					}
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					if stream.reader.poll_closed(&mut cx).is_ready() || closed_session.poll_closed(&mut cx).is_ready() {
+						return Poll::Ready(Err(Error::Cancel));
+					}
+					Poll::Pending
+				})
+				.await;
+				// A failure only costs the subscriber the early boundary.
+				if let Err(err) = written {
+					tracing::debug!(%err, id = %request_id, "end of track failed");
 				}
 			}
+
+			// Every data stream this subscription opened is closed by now, which PUBLISH_DONE
+			// requires, so the count it reports is final.
+			let streams = track_serve.opened() + u64::from(filled);
 
 			// Send PublishDone
 			let (status, reason) = match &res {
@@ -1731,7 +1745,9 @@ where
 
 		// Split horizon, as the solicited loop applies it: never advertise a route back
 		// to the peer it came from.
-		let origin = self.excluding(&peer);
+		let origin = self
+			.excluding(&peer)
+			.discovery(!self.peer_setup.get().await.hidden || self.origin.includes_hidden());
 
 		let ns = Namespaces::new(peer, Target::Requests(None));
 		self.run_namespaces(origin, crate::Path::empty().to_owned(), ns).await
@@ -1809,12 +1825,10 @@ where
 			_ => Target::Inline(stream),
 		};
 
-		// Hidden namespaces are left out unless the peer opted in (MoQ Hidden). A publish
+		// Peers that declared MoQ Hidden filter namespaces unless they opted in. A publish
 		// origin that already opted in (the caller's choice for this peer) keeps them.
-		let origin = match msg.hidden {
-			true => origin.with_hidden(true),
-			false => origin,
-		};
+		let declared = self.peer_setup.get().await.hidden;
+		let origin = origin.discovery(!declared || msg.hidden || self.origin.includes_hidden());
 
 		// Unless the peer asked to be told only on request, it has already heard what an
 		// unsolicited PUBLISH_NAMESPACE can say. Repeating it here would leave it holding
@@ -1823,8 +1837,8 @@ where
 		// until the peer is done with it.
 		let origin = match self.requires_solicitation().await {
 			true => origin,
-			false if self.origin.includes_hidden() => origin.empty(),
-			false => origin.beyond(&self.origin),
+			false if !declared || self.origin.includes_hidden() => origin.empty(),
+			false => origin.beyond(&self.origin.clone().discovery(false)),
 		};
 
 		let ns = Namespaces::new(peer, target);
@@ -2015,11 +2029,13 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 	/// the group that will never exist.
 	///
 	/// The last group's stream has usually finished before the track ends, so the marker
-	/// cannot ride on it. The stream counts toward PUBLISH_DONE once it is open.
+	/// cannot ride on it. Like a group stream, it counts toward PUBLISH_DONE once open,
+	/// since a reset can still deliver its header.
 	async fn write_end_of_track(&mut self, end: u64, priority: u8) -> Result<(), Error> {
 		let mut stream = std::future::poll_fn(|cx| self.session.poll_open_uni(cx))
 			.await
 			.map_err(Error::from_transport)?;
+		self.opened.fetch_add(1, Ordering::Relaxed);
 		stream.set_priority(priority);
 
 		let mut writer = Writer::new(stream, self.version);
@@ -2143,7 +2159,7 @@ enum GroupState<S: crate::transport::poll::Session> {
 		batch_pos: usize,
 	},
 	/// Every frame is written and the FIN sent: wait for the acknowledgement so a
-	/// late cancel can still reset the stream.
+	/// late cancel or expiry can still reset the stream.
 	Closed {
 		writer: Writer<S::SendStream, Version>,
 	},
@@ -2351,7 +2367,17 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					// Wait until everything is acknowledged by the peer so we can still
 					// cancel the stream. poll_close releases the stream on completion so
 					// the Drop fallback cannot reset the acknowledged stream.
-					let res = ready!(writer.poll_close(&mut cx));
+					let res = match writer.poll_close(&mut cx) {
+						Poll::Ready(res) => res,
+						// Those bytes still hold the connection until acknowledged, so a
+						// group gone stale meanwhile releases them like one still serving:
+						// dropping the writer resets the stream.
+						Poll::Pending if self.group.poll_expired_while_pending(waiter, true) => {
+							self.state = GroupState::Done;
+							return Poll::Ready(Err(Error::Old));
+						}
+						Poll::Pending => return Poll::Pending,
+					};
 					let sequence = self.msg.group_id;
 					self.state = GroupState::Done;
 					return Poll::Ready(res.map(|()| {
@@ -2567,6 +2593,53 @@ mod group_priority_test {
 		edge.finish().unwrap();
 
 		assert!(matches!(serving.await, Err(Error::Old)));
+	}
+
+	/// A FIN holds the subgroup's bytes until the peer acknowledges it, so a subgroup
+	/// that goes stale while waiting still expires instead of pinning them.
+	#[tokio::test]
+	async fn unacknowledged_fin_expires_with_the_group() {
+		tokio::time::pause();
+
+		let session = SinkSession::new(Default::default()).with_unacked_fin();
+		let log = session.log.clone();
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let mut subscriber = track.subscribe(None);
+		let mut old = track.append_group().unwrap();
+		old.write_frame(crate::Timestamp::ZERO, b"old".as_slice()).unwrap();
+		old.finish().unwrap();
+		let group = subscriber.recv_group().await.unwrap().expect("old group");
+
+		let mut serve = GroupServe::new(
+			session,
+			ietf::GroupHeader {
+				track_alias: 0,
+				group_id: 0,
+				sub_group_id: 0,
+				publisher_priority: 0,
+				flags: Default::default(),
+			},
+			0,
+			group,
+			Some(Timescale::default()),
+			Version::Draft19,
+			GroupSlice::default(),
+		);
+		let mut serving = std::pin::pin!(kio::wait(|waiter| serve.poll_serve(waiter)));
+		assert!(
+			futures::poll!(serving.as_mut()).is_pending(),
+			"the FIN is unacknowledged"
+		);
+		assert!(log.resets().is_empty());
+
+		tokio::time::advance(Duration::from_secs(1)).await;
+		let mut edge = track.append_group().unwrap();
+		edge.write_frame(crate::Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
+			.unwrap();
+		edge.finish().unwrap();
+
+		assert!(matches!(futures::poll!(serving.as_mut()), Poll::Ready(Err(Error::Old))));
+		assert_eq!(log.resets(), vec![crate::StreamError::Cancel.to_code()]);
 	}
 
 	/// The final payload remains guarded after its frame has advanced the group cursor.
@@ -4142,19 +4215,47 @@ mod tests {
 	/// were opened. One stream means the entry rode the subscription inline; two means
 	/// it went out as its own PUBLISH_NAMESPACE request.
 	async fn advertise_both_ways(solicit: Option<bool>) -> (usize, usize) {
-		let log = advertise_with_hidden(solicit, "", false).await;
+		let log = advertise_with_hidden(Discovery {
+			solicit,
+			..Discovery::default()
+		})
+		.await;
 		(occurrences(&log, b"cam"), log.bi_opens())
 	}
 
 	/// [`advertise_both_ways`] with a hidden `.stats/node` beside `cam`, and the peer's
 	/// SUBSCRIBE_NAMESPACE for `prefix` opting in to hidden namespaces or not.
-	async fn advertise_with_hidden(
+	struct Discovery<'a> {
+		version: Version,
+		declared: bool,
 		solicit: Option<bool>,
-		prefix: &str,
+		prefix: &'a str,
 		hidden: bool,
-	) -> crate::lite::test_transport::Log {
-		const VERSION: Version = Version::Draft17;
+		scoped: bool,
+	}
 
+	impl Default for Discovery<'_> {
+		fn default() -> Self {
+			Self {
+				version: Version::Draft17,
+				declared: true,
+				solicit: Some(true),
+				prefix: "",
+				hidden: false,
+				scoped: false,
+			}
+		}
+	}
+
+	async fn advertise_with_hidden(case: Discovery<'_>) -> crate::lite::test_transport::Log {
+		let Discovery {
+			version,
+			declared: hidden_declared,
+			solicit,
+			prefix,
+			hidden,
+			scoped,
+		} = case;
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
 		let _stats = origin.announce(".stats/node", crate::origin::Route::default()).unwrap();
@@ -4164,21 +4265,34 @@ mod tests {
 		// PUBLISH_NAMESPACE request.
 		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![
 			Vec::new(),
-			publish_namespace_ok(VERSION).await,
+			publish_namespace_ok(version).await,
 		]);
 		let log = session.log.clone();
 
+		let setup = peer::PeerSetup::default();
+		setup.set(peer::Peer {
+			solicit,
+			hidden: hidden_declared,
+			..Default::default()
+		});
+		let consume = match scoped {
+			true => origin
+				.consume()
+				.scope("", &crate::Pattern::subtree(".stats").unwrap().into())
+				.unwrap(),
+			false => origin.consume(),
+		};
 		let publisher = Publisher::new(
 			crate::time::Clock::tokio(),
 			session.clone(),
-			origin.consume(),
+			consume,
 			Control::new(None, false),
 			None,
-			declared(solicit),
-			VERSION,
+			setup,
+			version,
 		);
 
-		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let stream = Stream::open(&mut session.clone(), version).await.unwrap();
 		let msg = ietf::SubscribeNamespace {
 			request_id: RequestId(1),
 			namespace: crate::Path::new(prefix),
@@ -4216,11 +4330,52 @@ mod tests {
 			(Some(true), "", true, 1, 1),
 			(Some(true), ".stats", false, 0, 1),
 		] {
-			let log = advertise_with_hidden(solicit, prefix, hidden).await;
+			let log = advertise_with_hidden(Discovery {
+				solicit,
+				prefix,
+				hidden,
+				..Discovery::default()
+			})
+			.await;
 			let case = format!("solicit {solicit:?}, prefix {prefix:?}, hidden {hidden}");
 			assert_eq!(occurrences(&log, b"cam"), cam, "{case}");
 			// An inline entry names its suffix, so count the leaf.
 			assert_eq!(occurrences(&log, b"node"), stats, "{case}");
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn hidden_discovery_obeys_peer_setup_and_requested_prefix() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft19,
+			Version::Draft22,
+		] {
+			for declared in [false, true] {
+				for solicit in [Some(false), Some(true)] {
+					for scoped in [false, true] {
+						for (prefix, hidden) in [("", false), ("", true), (".stats", false)] {
+							let log = advertise_with_hidden(Discovery {
+								version,
+								declared,
+								solicit,
+								prefix,
+								hidden,
+								scoped,
+							})
+							.await;
+							let expected = usize::from(!declared || hidden || prefix == ".stats");
+							assert_eq!(
+								occurrences(&log, b"node"),
+								expected,
+								"{version:?}: declared={declared}, solicit={solicit:?}, scoped={scoped}, prefix={prefix}, hidden={hidden}"
+							);
+						}
+					}
+				}
+			}
 		}
 	}
 

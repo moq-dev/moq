@@ -8,7 +8,7 @@ import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import type { Cursor, Reader, Stream } from "../stream.ts";
-import { TAIL_GRACE_MS, Tail } from "../tail.ts";
+import { Tail } from "../tail.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
@@ -52,6 +52,8 @@ type Subscription = {
 	// The group streams received, so the subscription can wait for the ones PUBLISH_DONE
 	// says are still owed.
 	tail: Tail;
+	// The track's exclusive end, once an END_OF_TRACK declares it.
+	end?: number;
 };
 
 // Out-parameter for #openSubscribe: lets the caller observe partial progress
@@ -674,7 +676,7 @@ export class Subscriber {
 
 		const { tail, track } = subscription;
 		const complete = () => count > 0n && BigInt(tail.streams) >= count;
-		await tail.settle(complete, TAIL_GRACE_MS, track.closed);
+		await tail.settle(complete, track.closed);
 	}
 
 	/**
@@ -1018,6 +1020,12 @@ export class Subscriber {
 		let producer: netGroup.Producer | undefined;
 		const open = () => {
 			if (!producer) {
+				// The publisher contradicted its own end, which no later group can repair.
+				if (subscription.end !== undefined && group.groupId >= subscription.end) {
+					throw new ProtocolViolation(
+						`group ${group.groupId} is at or past the declared end ${subscription.end}`,
+					);
+				}
 				producer = new netGroup.Producer(group.groupId);
 				track.writeGroup(producer);
 			}
@@ -1068,6 +1076,7 @@ export class Subscriber {
 					} catch (err: unknown) {
 						throw new ProtocolViolation(`invalid END_OF_TRACK: ${reason(error(err))}`);
 					}
+					subscription.end ??= end;
 					return;
 				}
 				if (frame.payload === undefined) break;

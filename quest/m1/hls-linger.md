@@ -35,7 +35,3 @@ Guidance:
 - Tests: a request inside the linger after close still gets the playlist and
   a cached segment; after it expires the name 404s; a republish inside the
   linger is served.
-
-## Related
-
-- [Export linger](/quest/m1/export-linger.md) - the CLI exporter's wait for a broadcast to return; same idea, separate code

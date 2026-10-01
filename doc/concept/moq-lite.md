@@ -38,14 +38,21 @@ sides explicitly enable it.
 
 On moq-lite 07, `SUBSCRIBE_END` counts the group streams opened for the
 subscription. Rust and TypeScript stop waiting for missing streams once that
-many headers have arrived; skipped group sequences add no wait. Groups already
-being received continue until their own stream ends or resets.
+many headers have arrived; skipped group sequences add no wait. A stream whose
+header arrived is always read to its end before the subscription completes.
 
 A stream reset before its header arrived cannot be counted, so the subscriber
 still allows a grace period for late streams. The grace uses the subscription's
 nonzero effective maximum age, or one second when no maximum age is set.
-moq-lite 05 and 06 instead account for group sequences using received headers
-and `SUBSCRIBE_DROP`.
+moq-lite 05 and 06 instead account for group sequences using received headers,
+datagrams, and `SUBSCRIBE_DROP`, from the start group the subscription last
+asked for. A lost datagram is not owed, but its hole waits out the grace like a
+lost stream.
+
+From moq-lite 06, an end that contradicts the groups received aborts the track:
+a group at or past `SUBSCRIBE_END`, or a `SUBSCRIBE_END` below a group already
+received. moq-lite 05 specified an inclusive end, so there it only drops that
+group or the early boundary.
 
 ## Discovery
 
@@ -111,8 +118,12 @@ const announced = connection.announced(Path.Pattern.all(), { hidden: true });
 On the wire, moq-lite 07 (`moq-lite-07-wip`, opt-in only) carries the opt-in
 on each announce request, and
 moq-transport carries it as a `SUBSCRIBE_NAMESPACE` parameter once the peer's
-`SETUP` says it understands one ([hidden](/draft/moq-hidden)). An older peer
-never opts in, so it never discovers hidden routes. Rust sessions always opt in
+`SETUP` says it understands one ([hidden](/draft/moq-hidden)). An older MoQ Lite peer
+never opts in, so it never discovers hidden routes.
+IETF peers that omit the MoQ Hidden setup option receive all authorized
+namespaces, including dot-prefixed namespaces. Peers that declare it opt in
+per subscription; a prefix naming the dot segment itself also lists its
+children. Rust sessions always opt in
 on the wire and filter per local reader, so a relay mirrors everything and
 each consumer decides.
 
