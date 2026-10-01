@@ -28,16 +28,22 @@ hold-down or a retraction of live alternatives.
 
 - Start from #4644's branch (`quest/m0/path-hunting`): its live-graph
   regression tests (withdrawal at several latencies, and failover) fail on
-  `main` and stay the acceptance tests. Add a check that a downstream
-  in-flight subscription survives the failover.
+  `main` and stay the acceptance tests. Their fixture hard-codes lite-06;
+  run them on the wip version. Add a check that a downstream in-flight
+  subscription survives the failover.
 - Keep an ended path's seqno long enough to outlive delayed copies of its
   start; a new incarnation clears it.
 - Decide whether #4642's cursor hold can then be removed.
 - Clients and lite-06 cluster peers are unchanged; only wip-version cluster
   links carry the field.
 
-Wire: a field on ANNOUNCE_START and ANNOUNCE_END in the wip lite version,
-with `drafts/draft-lcurley-moq-lite.md` updated in the same PR.
+Wire: a field on ANNOUNCE_START, ANNOUNCE_UPDATE, and ANNOUNCE_END in the
+wip lite version, with `drafts/draft-lcurley-moq-lite.md` updated in the
+implementation PR. A failover that switches origin or advances its seqno
+travels as ANNOUNCE_UPDATE (`AnnounceBroadcast::Restart`), so the update
+carries its own seqno; forcing END then START would bring back the
+retraction this quest removes. Add a regression that advances the seqno via
+an update without retracting the live advertisement.
 
 ## Related
 
