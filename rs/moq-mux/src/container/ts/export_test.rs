@@ -17,7 +17,7 @@ use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
 
 use crate::catalog::hang::Container as HangContainer;
 use crate::container::ts::export::PCR_INTERVAL;
-use crate::container::ts::{Export, catalog as tscat};
+use crate::container::ts::{Export, Stats, catalog as tscat};
 use crate::container::{Frame, Kind, Producer};
 use moq_net::Timestamp;
 
@@ -5717,4 +5717,241 @@ async fn resume_after_a_finish() {
 #[tokio::test(start_paused = true)]
 async fn resume_after_a_drop() {
 	resume_after(false).await;
+}
+
+/// The stats count only output that was returned. A frame the muxer refuses fails the export
+/// with the span before it queued but never returned, and the resume discards it.
+#[tokio::test(start_paused = true)]
+async fn export_stats_skip_output_a_failure_discards() {
+	let origin = crate::source::produce_origin();
+	let source = crate::Source::new(origin.consume(), "live");
+	let publish = || {
+		let mut broadcast = origin.publish("live", Default::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		(broadcast, catalog)
+	};
+	let units = |stats: Stats| stats.streams.values().map(|row| row.units).sum::<u64>() as usize;
+
+	let (mut broadcast, mut catalog) = publish();
+	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let ended = source.broadcast().await.unwrap();
+	let mut export = Export::new(source.clone())
+		.await
+		.unwrap()
+		.with_max_age(RECORDING_MAX_AGE);
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut track, ms);
+	}
+	let mut frames = drain_frames(&mut export).await;
+	// One byte past what an ADTS header can frame.
+	track
+		.write(Frame {
+			timestamp: Timestamp::from_millis(200).unwrap(),
+			duration: None,
+			payload: Bytes::from(vec![0; 8185]),
+			keyframe: true,
+		})
+		.unwrap();
+	let (rest, end) = drain_to_end(&mut export).await;
+	frames.extend(rest);
+	assert!(end.is_err(), "an unframeable AAC frame fails the export");
+	assert!(pes_count(&frames) < 10, "the span before the failure stayed queued");
+	assert_eq!(units(export.stats()), pes_count(&frames));
+
+	drop((broadcast, catalog, track));
+	let (mut broadcast, mut catalog) = publish();
+	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	source.returned(&ended).await.unwrap();
+	export.resume().await.unwrap();
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut track, ms);
+	}
+	frames.extend(drain_frames(&mut export).await);
+	track.finish().unwrap();
+	catalog.finish().unwrap();
+	let (rest, end) = drain_to_end(&mut export).await;
+	frames.extend(rest);
+	end.unwrap();
+	assert_eq!(
+		units(export.stats()),
+		pes_count(&frames),
+		"the discarded span never counts"
+	);
+}
+
+/// Export 25 fps video and two AAC tracks for [`TICKS`] video frames, the video and the first
+/// audio track stopping after `stop` while the second carries on. Returns the stats sampled
+/// after `sample` and at the end, and the frames rendered in between.
+///
+/// Drained after every write, like [`export_twice`], so the export reads every frame and a row
+/// stops only because its track did.
+async fn export_liveness(sample: u64, stop: u64) -> (Stats, Stats, Vec<Frame>) {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+
+	let track = broadcast
+		.create_track("video.avc1", hang::container::track_info(hang::catalog::PRIORITY.video))
+		.unwrap();
+	let mut cfg = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1f,
+		inline: false,
+	});
+	cfg.container = Container::Legacy;
+	cfg.description =
+		Some(crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap());
+	catalog
+		.modify()
+		.unwrap()
+		.video
+		.renditions
+		.insert(track.name().to_string(), cfg);
+	let mut video = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+	let mut audio = [
+		aac_rendition(&mut broadcast, &mut catalog, "primary.aac"),
+		aac_rendition(&mut broadcast, &mut catalog, "secondary.aac"),
+	];
+
+	let mut export = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	assert!(export.stats().is_empty(), "no row before the program tables");
+	let (mut sampled, mut frames) = (None, Vec::new());
+	let mut audio_index = 0;
+	for tick in 0..TICKS {
+		if tick < stop {
+			let keyframe = tick % GOP == 0;
+			let slice = if keyframe {
+				vec![0x65u8; 3_000]
+			} else {
+				vec![0x41u8; 400]
+			};
+			video
+				.write(Frame {
+					timestamp: Timestamp::from_micros(tick * VIDEO_US).unwrap(),
+					duration: None,
+					payload: length_prefixed(&[&slice]),
+					keyframe,
+				})
+				.unwrap();
+		}
+		while audio_index * AUDIO_US < (tick + 1) * VIDEO_US {
+			let running = if tick < stop { &mut audio[..] } else { &mut audio[1..] };
+			for track in running {
+				track
+					.write(Frame {
+						timestamp: Timestamp::from_micros(audio_index * AUDIO_US).unwrap(),
+						duration: None,
+						payload: Bytes::from_iter((0..180u16).map(|i| (i ^ audio_index as u16) as u8)),
+						keyframe: audio_index % AUDIO_GROUP == 0,
+					})
+					.unwrap();
+			}
+			audio_index += 1;
+		}
+
+		let out = drain_frames(&mut export).await;
+		if sampled.is_some() {
+			frames.extend(out);
+		}
+		if tick + 1 == sample {
+			sampled = Some(export.stats());
+		}
+	}
+	(sampled.expect("sampled mid-run"), export.stats(), frames)
+}
+
+/// A healthy export advances every elementary stream's row, each quiet for no longer than
+/// its own frame spacing plus the mux buffer, and leaves the import-only counters at zero.
+#[tokio::test(start_paused = true)]
+async fn export_stats_advance_every_stream() {
+	let (mid, end, _) = export_liveness(TICKS / 2, TICKS).await;
+
+	let tracks: Vec<&str> = end.streams.values().map(|row| row.track).collect();
+	assert_eq!(tracks, [".aac", ".aac", ".avc3"], "one row per elementary stream");
+	for (pid, row) in &end.streams {
+		let before = &mid.streams[pid];
+		assert!(before.units > 0, "PID {pid:#x} wrote nothing by mid-run");
+		assert!(
+			row.units > before.units,
+			"PID {pid:#x} stopped advancing: {before:?} -> {row:?}"
+		);
+		let quiet = row.quiet.expect("the output carries a PCR");
+		assert!(quiet < Duration::from_millis(200), "PID {pid:#x} quiet for {quiet:?}");
+		assert_eq!((row.resyncs, row.discarded, row.unconfirmed), (0, 0, 0));
+	}
+}
+
+/// The #3533 shape: video and the primary audio stop reaching the exporter while the
+/// secondary audio carries on. Their rows freeze and their quiet time grows on the output's
+/// own PCR, which keeps running on the surviving track, as do the PSI and that track's row.
+#[tokio::test(start_paused = true)]
+async fn export_stats_catch_a_track_that_stops() {
+	let stop = TICKS / 2;
+	// Sampled once the mux buffer has written out what the stopped tracks sent last.
+	let (sampled, end, after) = export_liveness(stop + 5, stop).await;
+	let stalled = Duration::from_micros((TICKS - stop) * VIDEO_US);
+
+	let advanced = |pid: &u16| end.streams[pid].units > sampled.streams[pid].units;
+	let (running, stopped): (Vec<u16>, Vec<u16>) = end.streams.keys().copied().partition(advanced);
+	let [running] = running[..] else {
+		panic!("expected one stream to keep advancing, got {running:?}: {end:?}");
+	};
+	assert_eq!(end.streams[&running].track, ".aac");
+	assert_eq!(stopped.len(), 2, "video and the primary audio stopped");
+
+	let quiet = |pid: u16| end.streams[&pid].quiet.expect("the output carries a PCR");
+	assert!(quiet(running) < Duration::from_millis(200), "{:?}", quiet(running));
+	for pid in stopped {
+		// The mux buffer holds the last span back, so the output's clock trails the media.
+		assert!(
+			quiet(pid) > stalled - Duration::from_millis(200),
+			"PID {pid:#x} quiet for only {:?} of a {stalled:?} stall",
+			quiet(pid)
+		);
+	}
+	assert!(
+		count_pid(&after, 0x0000) >= 3,
+		"the PAT kept repeating through the stall"
+	);
+	assert!(count_pid(&after, running) > 0, "the surviving track kept flowing");
+}
+
+/// A stopped track's silence counts the whole of a media gap on the surviving track, not just
+/// the one second of clock the exporter backfills: the output's PCR jumps across the rest
+/// unflagged, and that jump is time the stopped track was silent.
+#[tokio::test(start_paused = true)]
+async fn export_stats_count_a_gap_longer_than_the_backfill() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut stopped = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let mut running = aac_rendition(&mut broadcast, &mut catalog, "b.aac");
+
+	let mut export = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	for ms in (0..2_000).step_by(20) {
+		write_aac(&mut stopped, ms);
+		write_aac(&mut running, ms);
+		drain_frames(&mut export).await;
+	}
+	// Five seconds with nothing on either track, then only the second resumes.
+	for ms in (7_000..8_000).step_by(20) {
+		write_aac(&mut running, ms);
+		drain_frames(&mut export).await;
+	}
+
+	let stats = export.stats();
+	let mut rows: Vec<_> = stats.streams.values().collect();
+	rows.sort_by_key(|row| row.units);
+	let [stopped, running] = rows[..] else {
+		panic!("expected two rows: {stats:?}");
+	};
+	assert!(stopped.units < running.units, "{stats:?}");
+	let quiet = stopped.quiet.expect("the output carries a PCR");
+	assert!(
+		quiet > Duration::from_millis(5_800),
+		"stopped at 2 s, quiet for only {quiet:?} at 8 s"
+	);
+	let quiet = running.quiet.expect("the output carries a PCR");
+	assert!(quiet < Duration::from_millis(200), "{quiet:?}");
 }

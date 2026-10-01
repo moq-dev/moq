@@ -185,7 +185,10 @@ impl<S: Post> Driver<S> {
 			.take()
 			.expect("the driver owns the producer until it ends");
 		let mut failures = 0u32;
-		let mut next = grant.revalidate.map(|cadence| tokio::time::Instant::now() + cadence);
+		// A cadence beyond the clock's range never fires.
+		let mut next = grant
+			.revalidate
+			.and_then(|cadence| tokio::time::Instant::now().checked_add(cadence));
 		// The re-check in flight, kept out of the select so expiry and the session's
 		// close are still polled while a stalled server holds the reply.
 		let mut inflight: Option<Pin<Box<dyn Future<Output = crate::Result<Grant>> + Send>>> = None;
@@ -222,7 +225,9 @@ impl<S: Post> Driver<S> {
 						Ok(fresh) => {
 							failures = 0;
 							self.expires = fresh.deadline();
-							next = fresh.revalidate.map(|cadence| tokio::time::Instant::now() + cadence);
+							next = fresh
+								.revalidate
+								.and_then(|cadence| tokio::time::Instant::now().checked_add(cadence));
 							producer.update(fresh.clone());
 							grant = fresh;
 						}
@@ -555,6 +560,29 @@ mod tests {
 		grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
 		let script = Script::new(Log::default(), move |_| Some(Ok(grant.clone())));
 		assert!(matches!(script.connect().await, Err(Error::GrantExpired)));
+	}
+
+	/// Regression: a cadence past the clock's range overflowed `Instant` and panicked
+	/// the driver, at connect and on each reply. It never fires; the grant expires.
+	#[tokio::test]
+	async fn a_cadence_past_the_clock_never_rechecks() {
+		tokio::time::pause();
+		let log = Log::default();
+		let script = Script::new(log.clone(), |_| {
+			Some(Ok(grant(
+				Some(Duration::from_secs(3)),
+				Some(Duration::from_secs(u64::MAX)),
+			)))
+		});
+
+		let consumer = script.connect().await.unwrap();
+		// A nudge's reply schedules the next re-check the same way.
+		consumer.revalidate();
+		let reason = tokio::time::timeout(Duration::from_secs(4), consumer.closed())
+			.await
+			.expect("closed at expires");
+		assert_eq!(reason, Reason::Expired);
+		assert_eq!(log.revalidates(), 1, "only the nudge re-checked");
 	}
 
 	/// An outage is evidence of nothing: the grant stands through failed re-checks
