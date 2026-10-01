@@ -39,6 +39,7 @@ on:
       - Nightly
       - OBS
       - Platform
+      - Quest
       - release-brew
       - Release Dart
       - Release Dart FFI

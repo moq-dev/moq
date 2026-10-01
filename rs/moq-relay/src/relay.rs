@@ -142,6 +142,7 @@ impl Relay {
 		}
 
 		let server_versions = config.listen.versions();
+		let handshake_timeout = config.listen.resolved_timeout();
 
 		// Bind the QUIC workers first: they own the listen address when configured,
 		// so the server below must not also try to bind it.
@@ -275,6 +276,7 @@ impl Relay {
 		let web = web::Web::new(auth.clone(), cluster.clone(), certificates, config.web)
 			.with_shutdown(shutdown.clone())
 			.with_versions(server_versions)
+			.with_timeout(handshake_timeout)
 			.with_sessions(sessions.clone())
 			.bind()?;
 		// `bind`, not `listen`: the TCP/Unix accept loops handshake as soon as
