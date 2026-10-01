@@ -348,6 +348,8 @@ def check_service_descriptors(analysis: dict) -> Check:
 # parameters are transcribed from the specs named beside each table.
 
 TB_SIZE = 512
+# ETSI EN 300 472 5: teletext's transport buffer is smaller than the 512 bytes of 2.4.2.3.
+TELETEXT_TB_SIZE = 480
 # 2.4.2.6: TB must empty at least once a second.
 TB_EMPTY_S = 1.0
 # PTS/DTS are 33 bits at 90 kHz.
@@ -444,7 +446,9 @@ class Params:
 
     label: str
     rx: float
+    tb: float = TB_SIZE
     # Video: MB and EB with the leak rate between them. Audio: the main buffer B alone.
+    # Teletext: neither, only its transport buffer.
     mb: float = 0.0
     eb: float = 0.0
     rbx: float = 0.0
@@ -773,6 +777,8 @@ def stream_kind(stream: Stream) -> str | None:
         return STREAM_KINDS[kind]
     if kind == 0x06 and tags & {"DVB_AC3_descriptor", "AC3_descriptor"}:
         return "ac3-dvb"
+    if kind == 0x06 and "teletext_descriptor" in tags:
+        return "teletext"
     if kind == 0x06 and f"registration:{int.from_bytes(b'Opus', 'big')}" in tags:
         return "opus"
     if kind == 0x06 and tags & {"DVB_enhanced_AC3_descriptor", "enhanced_AC3_descriptor"}:
@@ -789,6 +795,9 @@ def stream_params(kind: str, stream: Stream) -> tuple[Params, object]:
         return avc_params(stream.sps), None
     if kind == "hevc":
         return hevc_params(stream.sps), None
+    if kind == "teletext":
+        # ETSI EN 300 472 5: a 480-byte transport buffer drained at 6.75 Mb/s.
+        return Params(label="teletext", rx=6_750_000, tb=TELETEXT_TB_SIZE), None
     if kind == "adts":
         adts_frame(es, 0)
         config = ((es[2] & 0x01) << 2) | (es[3] >> 6)
@@ -945,8 +954,8 @@ def simulate(
                 busy_since = start
             leave = max(end, max(leave, start) + 188 * 8 / params.rx)
             fill = (leave - end) * params.rx / 8
-            grade.peak("TB", fill, TB_SIZE)
-            if fill > TB_SIZE + 0.5:
+            grade.peak("TB", fill, params.tb)
+            if fill > params.tb + 0.5:
                 grade.flag("TB overflow")
             if busy_since is not None and leave - busy_since > TB_EMPTY_S:
                 grade.flag("TB not emptied within 1 s")
@@ -1030,7 +1039,7 @@ def simulate(
                     grade.peak("MB", mb_header + mb_payload, params.mb)
                     if mb_header + mb_payload > params.mb + 0.5:
                         grade.flag("MB overflow")
-                else:
+                elif params.b:
                     if header:
                         headers.append((offset, header))
                         b_header += header
@@ -1096,7 +1105,9 @@ def check_tstd(ts_path: str, packet_size: int, scan: Scan) -> Check:
                         raise Refused("the HRD-scheduled MB to EB transfer (H.222.0 2.14.3.1) is not modelled")
                     stream.sps = read_sps(ts_path, stream.pid, 7 if kinds[stream.pid] == "avc" else 33)
                 params, parse = stream_params(kinds[stream.pid], stream)
-                if parse is None:
+                if kinds[stream.pid] == "teletext":
+                    units = []
+                elif parse is None:
                     units = video_units(stream, kinds[stream.pid])
                 else:
                     units = access_units(stream, parse)
@@ -1127,9 +1138,9 @@ def check_tstd(ts_path: str, packet_size: int, scan: Scan) -> Check:
     if not faults and not any(g.graded_units for g in grades):
         return Check("tstd", Severity.SHAPE, Status.WARN, "no access unit fell inside a modelled time base", metrics)
     if faults:
-        return Check("tstd", Severity.SHAPE, Status.WARN, "; ".join(faults), metrics)
+        return Check("tstd", Severity.HARD, Status.FAIL, "; ".join(faults), metrics)
     peaks = ", ".join(f"PID {g.pid} " + "/".join(f"{k} {v * 100:.0f}%" for k, v in g.peaks.items()) for g in grades)
-    return Check("tstd", Severity.SHAPE, Status.PASS, f"no overflow or underflow; peak fill {peaks}", metrics)
+    return Check("tstd", Severity.HARD, Status.PASS, f"no overflow or underflow; peak fill {peaks}", metrics)
 
 
 def detect_packet_size(analysis: dict) -> int:

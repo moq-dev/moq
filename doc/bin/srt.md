@@ -37,8 +37,9 @@ publishes each program as its own broadcast (`event.hang` becomes
 moq --connect https://relay.example.com/anon --broadcast event.hang import srt --listen '[::]:9000' --program all
 ```
 
-`--latency` sets the SRT receive buffer and doubles as the skip threshold on
-export. Export paces each SRT payload on the media clock, and re-anchors that
+`--latency` sets the SRT receive buffer and doubles as the export's jitter
+buffer delay, as `export ts --delay` in the [CLI](/bin/cli): each frame is muxed that
+long after its decode time, and one arriving later is dropped. Export paces each SRT payload on the media clock, and re-anchors that
 pacing on a declared marker, so a restarted timeline plays out from the
 live edge instead of stalling until it catches up. A `--connect` URL needs a `streamid` query or a path; a listener
 bridges one `--broadcast` and ignores the stream id it is offered. The

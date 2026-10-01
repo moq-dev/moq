@@ -11,9 +11,8 @@ delete it.
 ## Plan
 
 The maintainer finds "delay" clearer than "age" for how far a group may fall
-behind before it's skipped. `moq play --delay` and `moq export ts --delay`
-(planned in [fixed-delay release](/quest/m1/tstd/delay.md)) use one delay
-knob for presentation and staleness; only `moq play`'s exists today.
+behind before it's skipped. `moq play --delay` and `moq export ts --delay` use one delay knob for
+presentation and staleness.
 
 To weigh:
 

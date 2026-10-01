@@ -27,6 +27,17 @@ pub(crate) struct Reorder {
 	pub period: Option<(u64, u64)>,
 }
 
+/// The hypothetical reference decoder a video sequence header declares: its NAL HRD's last
+/// schedule, the one the transport stream's decoder buffers are sized from (ISO 13818-1
+/// 2.14.3.1, 2.17.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Hrd {
+	/// The CPB's input rate in bits per second.
+	pub bit_rate: u64,
+	/// The CPB's size in bits.
+	pub cpb_size: u64,
+}
+
 /// The catalog-publishing state a video importer overlays onto every config it resolves.
 ///
 /// Holds the caller's hint, the last config published (to dedupe re-publishes), and the

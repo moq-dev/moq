@@ -285,17 +285,6 @@ impl Invocation {
 	/// Called before anything binds a port or dials out, so a refused invocation has
 	/// no side effects to unwind.
 	pub fn validate(&self) -> anyhow::Result<()> {
-		for command in &self.stages {
-			if let Command::Export(export) = command
-				&& let Some(stdout) = export.sink.stdout()
-			{
-				anyhow::ensure!(
-					stdout.linger.is_zero() || matches!(stdout.format, SubscribeFormat::Ts),
-					"--linger needs an output that can mark a restart, and only `export ts` can"
-				);
-			}
-		}
-
 		// One stage is what the CLI has always run, so nothing below can bite.
 		if self.stages.len() == 1 {
 			return Ok(());
@@ -860,7 +849,7 @@ impl Export {
 		}
 		match &self.sink {
 			ExportSink::Fmp4(args) | ExportSink::Mkv(args) => found.extend(args.container.deprecated()),
-			ExportSink::Ts(args) => found.extend(args.container.deprecated()),
+			ExportSink::Ts(args) => found.extend(args.deprecated()),
 			ExportSink::Flv(args) | ExportSink::H264(args) | ExportSink::H265(args) => found.extend(args.deprecated()),
 			ExportSink::Hls(hls) => found.extend(hls.tls.deprecated()),
 			ExportSink::Rtmp(rtmp) if rtmp.latency_max.is_some() => {
@@ -910,7 +899,7 @@ impl ExportSink {
 		let container = |format, container: &Container| Stdout {
 			format,
 			max_age: container.max_age.into_std(),
-			linger: container.linger.into_std(),
+			linger: Duration::ZERO,
 			fragment_duration: None,
 			mux_rate: None,
 		};
@@ -924,8 +913,11 @@ impl ExportSink {
 				..container(SubscribeFormat::Mkv, &args.container)
 			},
 			Self::Ts(args) => Stdout {
+				format: SubscribeFormat::Ts,
+				max_age: args.delay.into_std(),
+				linger: args.linger.into_std(),
+				fragment_duration: None,
 				mux_rate: args.mux_rate,
-				..container(SubscribeFormat::Ts, &args.container)
 			},
 			Self::Flv(args) => container(SubscribeFormat::Flv, args),
 			Self::H264(args) => container(SubscribeFormat::H264, args),
@@ -938,6 +930,7 @@ impl ExportSink {
 /// A stdout sink's format and the options that apply to it.
 pub struct Stdout {
 	pub format: SubscribeFormat,
+	/// The staleness budget, which `ts` also holds every frame for (`--delay`).
 	pub max_age: Duration,
 	pub linger: Duration,
 	pub fragment_duration: Option<Duration>,
@@ -951,11 +944,6 @@ pub struct Container {
 	/// How stale a group may get before it is skipped (e.g. `500ms`, `1s`).
 	#[usage(long, default = "500ms")]
 	pub max_age: crate::duration::Duration,
-
-	/// How long to wait for the broadcast to come back once it ends (e.g. `10s`).
-	/// `ts` only; the output stops while it is gone and resumes flagged as a break.
-	#[usage(long, default = "0s")]
-	pub linger: crate::duration::Duration,
 
 	/// The released spelling of [`Self::max_age`].
 	#[usage(long = "latency-max", hide = true)]
@@ -972,18 +960,48 @@ impl Container {
 	}
 }
 
-/// The MPEG-TS stdout container: [`Container`] plus null padding.
+/// The MPEG-TS stdout container.
 #[derive(usage::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Transport {
-	#[usage(flatten)]
-	pub container: Container,
+	/// How long after its decode time each frame is written (e.g. `500ms`), like an SRT
+	/// receiver's latency. It is also how stale a group may get before it is skipped,
+	/// and a frame that arrives later than this is dropped.
+	#[usage(long, default = "500ms")]
+	pub delay: crate::duration::Duration,
+
+	/// How long to wait for the broadcast to come back once it ends (e.g. `10s`).
+	/// The output stops while it is gone and resumes flagged as a break.
+	#[usage(long, default = "0s")]
+	pub linger: crate::duration::Duration,
 
 	/// Pad the output with null packets to this constant rate, in bits per second.
 	/// Defaults to the multiplex rate the catalog recorded from a constant-rate
 	/// source (`mpegts.muxRate`); without either the output is unpadded.
 	#[usage(long)]
 	pub mux_rate: Option<u64>,
+
+	/// The released spelling of [`Self::delay`].
+	#[usage(long = "max-age", hide = true)]
+	max_age: Option<crate::duration::Duration>,
+
+	/// The released spelling of [`Self::delay`], before `--max-age`.
+	#[usage(long = "latency-max", hide = true)]
+	latency_max: Option<crate::duration::Duration>,
+}
+
+impl Transport {
+	fn deprecated(&self) -> moq_tokio::cli::Deprecated {
+		const HOLDS: &str = "it also holds every frame that long after its decode time";
+		let mut found = moq_tokio::cli::Deprecated::default();
+		if self.max_age.is_some() {
+			found.changed("--max-age", None, "--delay", HOLDS);
+		}
+		if self.latency_max.is_some() {
+			found.changed("--latency-max", None, "--delay", HOLDS);
+		}
+		found
+	}
 }
 
 /// The fmp4 / mkv stdout containers: [`Container`] plus a fragment cap.
@@ -1030,18 +1048,41 @@ mod tests {
 	/// Only TS can mark where a returned broadcast restarts, so only `export ts` may linger.
 	#[test]
 	fn linger_is_ts_only() {
-		let parse = |format: &str, linger: &str| {
-			Invocation::try_parse_from(["moq", "--connect", "http://relay", "export", format, "--linger", linger])
-				.unwrap()
+		let parse = |format: &str| {
+			Invocation::try_parse_from(["moq", "--connect", "http://relay", "export", format, "--linger", "10s"])
 		};
-		assert!(parse("ts", "10s").validate().is_ok());
+		assert!(parse("ts").unwrap().validate().is_ok());
 		for format in ["fmp4", "mkv", "flv", "h264", "h265"] {
-			let err = parse(format, "10s").validate().unwrap_err().to_string();
-			assert!(err.contains("--linger"), "{format}: {err}");
-			assert!(
-				parse(format, "0s").validate().is_ok(),
-				"{format}: no linger is always fine"
-			);
+			let Err(err) = parse(format) else {
+				panic!("{format} took --linger");
+			};
+			assert!(err.to_string().contains("--linger"), "{format}: {err}");
+		}
+	}
+
+	/// `export ts` holds every frame for its staleness budget, so the budget is spelled
+	/// `--delay` there, and the released spellings stop a run with a migration.
+	#[test]
+	fn export_ts_takes_a_delay() {
+		let parse = |args: &[&str]| {
+			let mut argv = vec!["moq", "export", "--broadcast", "b", "ts"];
+			argv.extend_from_slice(args);
+			Invocation::try_parse_from(argv)
+		};
+		let stdout = |args: &[&str]| {
+			let cli = parse(args).unwrap();
+			let Command::Export(export) = &cli.stages[0] else {
+				panic!("not an export");
+			};
+			export.sink.stdout().unwrap().max_age
+		};
+		assert_eq!(stdout(&[]), Duration::from_millis(500));
+		assert_eq!(stdout(&["--delay", "2s"]), Duration::from_secs(2));
+		for old in ["--max-age", "--latency-max"] {
+			let Err(err) = parse(&[old, "1s"]) else {
+				panic!("{old} must not start a run");
+			};
+			assert!(err.to_string().contains(&format!("{old} -> --delay")), "{err}");
 		}
 	}
 
@@ -1554,7 +1595,7 @@ mod tests {
 		};
 		assert!(err.to_string().contains("--latency-max -> --max-age"), "{}", err);
 
-		let Err(err) = Invocation::try_parse_from(["moq", "export", "--broadcast", "b", "ts", "--latency-max", "1s"])
+		let Err(err) = Invocation::try_parse_from(["moq", "export", "--broadcast", "b", "mkv", "--latency-max", "1s"])
 		else {
 			panic!("--latency-max must not start a run");
 		};

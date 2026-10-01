@@ -82,7 +82,8 @@ drill-sensitivity *args:
 # (skip the round-trip), `--strict` (fail on shape warnings), `--source file.ts`
 # (use a real capture), `--live` (grade PCR release timing and byte position off
 # the pipe instead, which a capture cannot carry; nightly runs this arm),
-# `--open-gop` (an open-GOP clip whose leading pictures must survive). See
+# `--open-gop` (an open-GOP clip whose leading pictures must survive), `--hrd`
+# (1080p video filling a broadcast-sized CPB), `--delay 1s` (the exporter's). See
 # ts/README.md.
 
 # Check the subscriber's MPEG-TS output for IRD compliance.

@@ -231,6 +231,31 @@ pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
 	})
 }
 
+/// The HRD an SPS NAL unit's VUI declares at its highest sub-layer, when it carries one: the
+/// NAL HRD's last schedule, or the VCL HRD's when that is all there is.
+pub(crate) fn sps_hrd(nal: &[u8]) -> Option<crate::codec::video::Hrd> {
+	let sps = SpsNALUnit::parse(&mut &nal[..]).ok()?;
+	let highest = sps.rbsp.sps_max_sub_layers_minus1 as usize;
+	let hrd = sps
+		.rbsp
+		.vui_parameters
+		.as_ref()?
+		.vui_timing_info
+		.as_ref()?
+		.hrd_parameters
+		.as_ref()?;
+	let layer = hrd.sub_layers.get(highest).or(hrd.sub_layers.last())?;
+	// The NAL HRD's schedules come first when both are present.
+	let schedules = usize::try_from(layer.cpb_cnt_minus1).ok()? + 1;
+	let last = layer.sub_layer_parameters.get(..schedules)?.last()?;
+	let bit_rate_scale = u32::from(hrd.common_inf.bit_rate_scale?);
+	let cpb_size_scale = u32::from(hrd.common_inf.cpb_size_scale?);
+	Some(crate::codec::video::Hrd {
+		bit_rate: (u64::from(last.bit_rate_value_minus1) + 1) << (6 + bit_rate_scale),
+		cpb_size: (u64::from(last.cpb_size_value_minus1) + 1) << (4 + cpb_size_scale),
+	})
+}
+
 /// One picture's duration at the highest sub-layer as `(units, scale)`, when the VUI's HRD
 /// parameters fix the picture rate within the CVS (ITU-T H.265 E.3.2). Without that the VUI tick
 /// only bounds the rate from above.

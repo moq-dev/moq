@@ -168,13 +168,13 @@ pub struct Subscriber {
 impl Subscriber {
 	/// Resolve the broadcast at `path` in the origin and prepare to mux it to TS.
 	///
-	/// `latency` bounds how long the muxer waits for a stalled group before it
-	/// skips ahead to a newer one. We reuse the locally configured SRT receive
-	/// latency for it: SRT paces egress on the media clock, so the skip threshold
-	/// shares the same latency budget. It's the configured value, not the
-	/// handshake result (srt-tokio doesn't expose the negotiated latency), so a
-	/// peer that requests a higher receive latency gets a larger actual buffer
-	/// than this skip threshold.
+	/// `latency` is the muxer's jitter-buffer delay: each frame is muxed that long after
+	/// its decode time, a frame arriving later is dropped, and a stalled group is
+	/// skipped after it. We reuse the locally configured SRT receive latency for
+	/// it, the same budget an SRT hop gives a packet. It's the configured value,
+	/// not the handshake result (srt-tokio doesn't expose the negotiated latency),
+	/// so a peer that requests a higher receive latency gets a larger actual
+	/// buffer than this delay.
 	///
 	/// Returns `Ok(None)` if the broadcast can never be served (path outside the
 	/// consumer's scope, or the origin closed). Otherwise waits for the broadcast
@@ -190,7 +190,7 @@ impl Subscriber {
 		let source = moq_mux::Source::new(origin.consume(), path);
 		let export = ts::Export::with_ts(source, moq_mux::catalog::CatalogFormat::Hang)
 			.await?
-			.with_max_age(latency);
+			.with_delay(latency);
 		Ok(Some(Self { export }))
 	}
 

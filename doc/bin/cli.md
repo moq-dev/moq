@@ -108,11 +108,20 @@ profile or channel layout ADTS cannot label is refused rather than mislabeled.
 
 A constant-rate MPEG-TS source records its multiplex rate in the catalog
 (`mpegts.muxRate`, measured off the PCR clock, null stuffing included), and
-`export ts` pads its output with null packets back to that rate so an IRD or
-groomer receives a constant-rate stream. `--mux-rate 5000000` pads to an explicit
-rate instead, including for a broadcast that recorded none. Media is never delayed
-or dropped to fit: a source that sustains more than the rate overruns it, and a
-VBR source records nothing, so export without either stays unpadded.
+`export ts` pads its output with null packets back to that rate on a constant-rate
+schedule, so an IRD or groomer recovering its clock from packet arrival can lock:
+every PCR is the time of its own byte position at the rate. `--mux-rate 5000000`
+pads to an explicit rate instead, including for a broadcast that recorded none.
+
+Each frame goes out as early as a receiver's buffers for its PID admit (the
+ISO 13818-1 T-STD: no more of a PID's packets per interval than its transport
+buffer passes on, and no more bytes than its decoder buffer holds, sized from the
+SPS's HRD or level for video and per codec for audio), up to `--delay` ahead of its
+decode time, earliest decode time first. So a heavy passage rides the intervals
+before it, and the output trails the source by twice the delay. A frame that cannot
+arrive by its decode time at the rate fails the export with an error naming both
+knobs; a broadcast-sized decoder buffer (a CPB of a second or more) needs a delay to
+match. A VBR source records no rate, so export without one stays unpadded.
 
 fMP4 export writes one fragment per publisher group on each track. Audio follows
 the publisher's cuts; video normally follows GOPs. Closing a group flushes it
@@ -352,11 +361,26 @@ See [Authentication](/bin/relay/auth).
 groups fetchable, which the [HLS gateway](/bin/hls) depends on. `export --max-age` (default 500 ms) is how long *this* consumer waits for a
 stalled group before skipping. Raising the first never delays playback.
 
-For `export ts`, `--max-age` also bounds how long the muxer holds a leading
-track for a lagging one. Frames go out in media-time order across all tracks,
-not arrival order, so two exporters of one broadcast emit them in one order. A
-track quiet for longer is muxed around until it catches up; a sparse track
-(SCTE-35) costs that wait once per cue. `--max-age 0` keeps arrival order.
+`export ts` takes `--delay` (default 500 ms) instead, and works like an SRT
+receiver's latency. Every frame is muxed that long after its decode time, on
+a clock that keeps the source's pace and muxes all tracks in decode order
+whatever their arrival skew: two exporters of one broadcast emit them in one
+order. The export joins at the newest group and holds its output until a
+track starts its next group, or one of the frames it holds falls due, then
+starts the clock on the freshest frame it saw. What of the joined group is
+older than the delay is dropped, so a joiner runs at the delay from its first
+output. A frame that arrives later than its deadline is dropped, and video
+then resumes at its next keyframe. The clock follows the source's, measured
+from the frames that arrive least delayed, so a source whose clock runs a
+little fast or slow neither goes late nor piles up over a long run, and a
+spell of network queueing does not move it. The output's PCR is that clock,
+so it keeps to what ISO/IEC 13818-1 allows a system clock: within 30 ppm of
+the exporter's, its rate changing by at most 0.075 Hz/s. Catching up with a
+source near that limit takes hours; one further off is counted in the
+export's stats, and fails the export once it has used half the delay. Each
+25 ms slice of the output is written when the clock reaches it. The delay is also how
+stale a group may get before it is skipped. `--delay 0` holds nothing and drops
+nothing, writing frames in arrival order as they come.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the broadcast to come back instead: a publisher that restarts within

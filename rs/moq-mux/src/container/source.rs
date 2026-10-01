@@ -66,6 +66,9 @@ pub(crate) struct ExportSource {
 	/// Wire format, consumed when the subscription resolves into a consumer.
 	media: Option<HangContainer>,
 	max_age: std::time::Duration,
+	/// Start at the newest group, rather than the oldest the max age still reaches, and
+	/// apply the max age once it is read.
+	live: bool,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
 	/// OpusHead). Some once the codec config is available — from the catalog
@@ -125,6 +128,7 @@ impl ExportSource {
 			state: SourceState::Requesting(request, name.to_string()),
 			media: Some(media),
 			max_age,
+			live: false,
 			transform,
 			description,
 			video_codec: Some(config.codec.clone()),
@@ -154,6 +158,7 @@ impl ExportSource {
 			state: SourceState::Requesting(request, name.to_string()),
 			media: Some(media),
 			max_age,
+			live: false,
 			transform: None,
 			description,
 			video_codec: None,
@@ -172,6 +177,7 @@ impl ExportSource {
 			state: SourceState::Requesting(source.request_catalog(), name.to_string()),
 			media: Some(HangContainer::Legacy(crate::container::Kind::Data)),
 			max_age,
+			live: false,
 			transform: None,
 			description: None,
 			video_codec: None,
@@ -179,21 +185,38 @@ impl ExportSource {
 		})
 	}
 
+	/// Start at the newest group the publisher has, the live edge, rather than the oldest
+	/// one the max age still reaches; the max age applies from the first frame on, to the
+	/// groups that follow.
+	pub fn live(mut self) -> Self {
+		self.live = true;
+		self
+	}
+
+	/// The underlying consumer's playhead generation, or 0 until the subscription resolves:
+	/// it counts skipped groups as well as restarts ([`Consumer::discontinuity`]).
+	pub fn skips(&self) -> u64 {
+		match &self.state {
+			SourceState::Active(consumer) => consumer.discontinuity(),
+			_ => 0,
+		}
+	}
+
 	/// The resolved codec-config record, if available.
 	pub fn description(&self) -> Option<&Bytes> {
 		self.description.as_ref()
 	}
 
-	/// The underlying consumer's playhead generation, or 0 until the
+	/// How many times the publisher declared its timeline restarted, or 0 until the
 	/// subscription resolves.
 	///
-	/// See [`Consumer::discontinuity`]. Sample it alongside each frame returned by
-	/// [`poll_read`](Self::poll_read): the frame read while the counter changes is
-	/// the first after a playhead event, so anything anchored on the media clock (a
-	/// repetition cadence, a clock grid, a pacer) has to re-anchor to it.
-	pub fn discontinuity(&self) -> u64 {
+	/// See [`Consumer::restarts`]. Sample it alongside each frame returned by
+	/// [`poll_read`](Self::poll_read): the frame read while the counter changes is the
+	/// first on the new timeline, so anything anchored on the media clock has to
+	/// re-anchor to it. A skipped group is not a restart: the timeline carries on.
+	pub fn restarts(&self) -> u64 {
 		match &self.state {
-			SourceState::Active(consumer) => consumer.discontinuity(),
+			SourceState::Active(consumer) => consumer.restarts(),
 			_ => 0,
 		}
 	}
@@ -250,7 +273,12 @@ impl ExportSource {
 				};
 				(ready!(pending.poll_ok(waiter))?, name.clone())
 			};
-			let subscription = moq_net::track::Subscription::default().with_max_age(self.max_age);
+			// A zero budget asks only for the newest group.
+			let max_age = match self.live {
+				true => std::time::Duration::ZERO,
+				false => self.max_age,
+			};
+			let subscription = moq_net::track::Subscription::default().with_max_age(max_age);
 			self.state = SourceState::Subscribing(broadcast.track(&name)?.subscribe(subscription));
 		}
 
@@ -277,7 +305,12 @@ impl ExportSource {
 				let SourceState::Active(consumer) = &mut self.state else {
 					unreachable!("subscription resolved into an Active consumer");
 				};
-				match ready!(consumer.poll_event(waiter))? {
+				let event = ready!(consumer.poll_event(waiter))?;
+				if std::mem::take(&mut self.live) {
+					// Started at the live edge: from here the budget tolerates reordering.
+					consumer.set_max_age(self.max_age);
+				}
+				match event {
 					Some(Event::Frame(frame)) => frame,
 					event => return Poll::Ready(Ok(event)),
 				}
