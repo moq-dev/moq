@@ -16,8 +16,8 @@ Decided (2026-10-01), from a discussion with t0ms:
 
 - Why: the [T-STD line](/quest/m1/tstd/README.md) names a passthrough lane as
   the only one that can carry primary distribution until the remux passes, and
-  none exists. Some feeds will want it permanently: a scrambled multiplex
-  cannot be demultiplexed, and an operator who must hand on SI and private
+  none exists. Some feeds will want it permanently: the demultiplexed lane
+  cannot parse a scrambled elementary stream into frames, and an operator who must hand on SI and private
   PIDs as authored has nothing to gain from a remux.
 - The track is listed in a new `m2ts` root section of the hang catalog,
   not in `video`/`audio` (it has no codec to describe) and not in the
@@ -28,25 +28,30 @@ Decided (2026-10-01), from a discussion with t0ms:
   program would rewrite the PAT, so there is no scope field, and a second
   multiplex is a second broadcast. `muxRate` is present only while the
   source holds a constant rate, as in `mpegts`. 188-byte packets only; a
-  192-byte source is refused, so there is no packet-size field. The section is specified in `drafts/draft-lcurley-moq-mpegts.md` next to
+  192-byte source is refused, so there is no packet-size field. This quest
+  specifies the section in `drafts/draft-lcurley-moq-mpegts.md` next to
   `mpegts`, with its mapping onto MSFTS's track fields. A track is one shape
   or the other.
 - Objects are runs of whole 188-byte packets on one track. A group starts at
-  a packet on the PCR PID that carries a PCR with `random_access_indicator`
-  set, and also at any PCR with `discontinuity_indicator` set, since MSFTS
-  forbids a PCR discontinuity inside a group. A source that never sets the
-  indicator falls back to a group every N PCRs (N to be fixed in the PR, with
-  a group spanning at most 1 s of PCR time). `randomAccess` is true only
-  while the PAT lists a single program and every group has started at an
-  indicator; the first fallback group republishes the catalog with it false.
-  A multi-program multiplex always publishes false, since programs sharing a
-  clock can stagger their GOPs, so one PID's indicator says nothing about
-  the others. All of these fields sit in the adaptation field, which TS
-  scrambling leaves in clear, so a scrambled feed still groups and paces.
+  a packet with `random_access_indicator` set on the program's video PID
+  (its `stream_type` read from the PMT), or on the PCR PID when the program
+  has no video, so a joiner lands on a decodable picture whichever PID
+  carries the PCR. A group also starts at any PCR with
+  `discontinuity_indicator` set, since MSFTS forbids a PCR discontinuity
+  inside a group. A source that never sets the random-access indicator
+  falls back to a group every N PCRs (N to be fixed in the PR, with a group
+  spanning at most 1 s of PCR time). Pacing stays on the PCR PID throughout.
+- `randomAccess` is true only while the PAT lists a single program and every
+  group has started at a `random_access_indicator`. The first group that
+  starts without one (a fallback, or a `discontinuity_indicator` alone)
+  republishes the catalog with it false. A multi-program multiplex always
+  publishes false, since programs sharing a clock can stagger their GOPs.
+  Both indicators sit in the adaptation field, which TS scrambling leaves in
+  clear, so a scrambled feed still groups and paces.
 - The publisher reads the PAT and PMT (with the existing `ts/psi.rs`
-  parsers) to find the PCR PID and count programs, and parses nothing else
-  past the adaptation field. PSI is never scrambled, and every byte is still
-  published as received.
+  parsers) to find the PCR and video PIDs and count programs, and parses
+  nothing else past the adaptation field. PSI is never scrambled, and every
+  byte is still published as received.
 - Each object's timestamp is the PCR time of its first byte, interpolated
   between PCRs at the stream's own rate, carried in hang's `legacy`
   container (a varint timestamp before the packets) as verbatim tracks are.
@@ -67,7 +72,9 @@ Decided (2026-10-01), from a discussion with t0ms:
 - Source clock drift is handled by the fixed-delay release's clock recovery
   (#4645), shared with the demultiplexed export, not here.
 - Passthrough is the ST 2022-7 (1+1) lane: two exporters fed the same
-  objects emit identical bytes, continuity counters included. The
+  objects emit identical bytes for every object both release, continuity
+  counters included. An object one leg drops late is a gap in that leg
+  only, which the 2022-7 receiver fills from the other. The
   demultiplexed export does not promise counter identity; matching them
   there would need a dedicated PCR PID on every export. Aligning the legs in
   time is a non-goal: each releases at its own first arrival plus the delay,
@@ -82,10 +89,12 @@ the first released group, and the strict T-STD check gives the same verdict
 on output and input. A scrambled fixture (`transport_scrambling_control` set
 on its elementary PIDs) groups and paces the same as its clear twin. A
 two-program fixture on one clock with staggered GOPs publishes
-`randomAccess` false. PCR discovery finds a PCR PID that differs from the
-PMT PID, with the PMT section split across packets. Two
-exporters fed the same objects with different arrival skew emit identical
-bytes. A dropped object is counted, and the rest still go out on time. Rerun
+`randomAccess` false. A single-program fixture with the PCR on its audio PID
+starts groups at video random access points only. PCR discovery finds a PCR
+PID that differs from the PMT PID, with the PMT section split across
+packets. Two exporters fed the same objects with different arrival skew emit
+identical bytes; when only one misses a deadline, its output is the other's
+less that object's packets. A dropped object is counted, and the rest still go out on time. Rerun
 the #4613 netem rig (10% loss, 120 s) against it.
 
 Update `doc/bin/cli.md` for both flags, `doc/concept` for the section, and
