@@ -25,6 +25,11 @@ on:
       - "flake.lock"
       - ".github/workflows/quest.yml"
 
+# Only the newest push to a branch matters; Alert ignores the cancelled runs.
+concurrency:
+  group: quest-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     # Not `Check`: that is check.yml's required status, and a second job with
