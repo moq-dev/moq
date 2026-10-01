@@ -6000,6 +6000,7 @@ mod tests {
 	async fn returning_reader_gets_a_live_open_warm_group() {
 		use futures::FutureExt;
 
+		tokio::time::pause();
 		let (_server, _upstream, mut dynamic, resolved) = served_front().await;
 
 		// The first reader leaves mid-group.
@@ -6050,9 +6051,13 @@ mod tests {
 			early.is_none(),
 			"the live group already resolved its end before a frame was read: {early:?}"
 		);
-		assert_eq!(reading.read_frame().await.unwrap().unwrap().payload.as_ref(), b"a");
-		assert_eq!(reading.read_frame().await.unwrap().unwrap().payload.as_ref(), b"b");
+
+		// The end answers for this reader's cursor, not the seam it was probed from.
 		group.finish().unwrap();
+		assert_eq!(reading.finished().await.unwrap(), 0);
+		assert_eq!(reading.read_frame().await.unwrap().unwrap().payload.as_ref(), b"a");
+		assert_eq!(reading.finished().await.unwrap(), 1);
+		assert_eq!(reading.read_frame().await.unwrap().unwrap().payload.as_ref(), b"b");
 		assert_eq!(reading.finished().await.unwrap(), 2);
 	}
 
