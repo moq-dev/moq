@@ -47,10 +47,15 @@ The conversion declares BT.601 limited range through 576 lines and BT.709
 limited range above it, preserving that color through resize and CPU download.
 Media Foundation encodes on the capture device; openh264 uses the download path.
 Display enumeration covers all adapters, and window enumeration excludes
-DWM-cloaked windows and reports visible frame bounds. Enumeration does not
+DWM-cloaked windows and reports visible frame bounds. Windows `display:N`
+selectors are enumeration indices, not persistent monitor identities. Switching
+from Desktop Duplication to WGC can change their mapping; enumerate displays
+again and reselect the intended monitor after upgrading. Enumeration does not
 start capture. A settled source resize ends the stream so callers can reopen;
 closing the captured item returns `Error::SourceUnavailable`. Dropping the
 stream releases its session even when no new frames arrive.
+If no usable first frame arrives within five seconds after capture starts,
+opening fails with `Error::SourceUnavailable` and releases the session.
 
 Windows shows a capture border by default. On build 20348 or newer the backend
 requests borderless access; denial keeps the border and does not fail capture.

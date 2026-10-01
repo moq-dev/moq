@@ -86,6 +86,33 @@ impl Signal {
 	}
 }
 
+// A source can stop producing events before its first frame, for example if
+// a window is minimized just after capture starts. Startup must still finish.
+struct Startup {
+	deadline: Option<Instant>,
+}
+
+impl Startup {
+	fn new(now: Instant) -> Self {
+		Self {
+			deadline: Some(now + Duration::from_secs(5)),
+		}
+	}
+
+	fn check(&self, now: Instant) -> Result<(), Error> {
+		if self.deadline.is_some_and(|deadline| now >= deadline) {
+			return Err(Error::SourceUnavailable(
+				"WGC did not deliver its first frame within 5 seconds".into(),
+			));
+		}
+		Ok(())
+	}
+
+	fn delivered(&mut self) {
+		self.deadline = None;
+	}
+}
+
 // WGC can omit unchanged frames. Retain only the owned output, keeping the
 // capture stream paced without holding a frame-pool slot or converting again.
 struct Delivery<T> {
@@ -162,6 +189,57 @@ fn window_handle(selector: &str) -> Result<usize, Error> {
 mod tests {
 	use super::*;
 	use std::sync::Arc;
+
+	#[test]
+	fn startup_without_frame_events_expires() {
+		let now = Instant::now();
+		let startup = Startup::new(now);
+		let deadline = now + Duration::from_secs(5);
+		assert_eq!(startup.deadline, Some(deadline));
+		assert!(startup.check(deadline - Duration::from_nanos(1)).is_ok());
+		// Model WGC silence after minimizing between StartCapture and its first
+		// frame. No callback is required to reach the failure boundary.
+		assert!(matches!(startup.check(deadline), Err(Error::SourceUnavailable(_))));
+	}
+
+	#[test]
+	fn startup_callbacks_without_usable_frames_do_not_extend_the_deadline() {
+		let now = Instant::now();
+		let startup = Startup::new(now);
+		let signal = Signal::default();
+		for second in 1..=5 {
+			signal.notify(Event::Frame);
+			signal.notify(Event::Borderless);
+			assert_eq!(signal.wait(startup.deadline), Event::Borderless);
+			assert_eq!(signal.wait(startup.deadline), Event::Frame);
+			// Empty pools and invalid content sizes do not deliver a frame.
+			assert_eq!(startup.deadline, Some(now + Duration::from_secs(5)));
+			assert_eq!(startup.check(now + Duration::from_secs(second)).is_err(), second == 5);
+		}
+	}
+
+	#[test]
+	fn first_delivery_removes_the_startup_deadline() {
+		let now = Instant::now();
+		let mut startup = Startup::new(now);
+		assert!(startup.check(now + Duration::from_secs(1)).is_ok());
+		startup.delivered();
+		assert_eq!(startup.deadline, None);
+		assert!(startup.check(now + Duration::from_secs(10)).is_ok());
+	}
+
+	#[test]
+	fn terminal_events_take_precedence_over_expired_startup() {
+		let startup = Startup::new(Instant::now() - Duration::from_secs(5));
+		let signal = Signal::default();
+		assert_eq!(signal.wait(startup.deadline), Event::Deadline);
+		signal.notify(Event::Frame);
+		signal.notify(Event::Borderless);
+		signal.notify(Event::Closed);
+		assert_eq!(signal.wait(startup.deadline), Event::Closed);
+		signal.notify(Event::Stop);
+		assert_eq!(signal.wait(startup.deadline), Event::Stop);
+	}
 
 	#[test]
 	fn unchanged_frames_keep_the_delivery_deadline_and_advance_timestamps() {

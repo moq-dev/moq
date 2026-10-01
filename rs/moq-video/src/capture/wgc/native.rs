@@ -33,7 +33,7 @@ use windows::core::{IInspectable, Interface, PWSTR, factory, h};
 
 use super::super::settle::{Settle, Settled};
 use super::super::{Config, Display, FrameChannel, Source, Stream, Window};
-use super::{Delivery, Event, Signal, display_index, window_handle};
+use super::{Delivery, Event, Signal, Startup, display_index, window_handle};
 use crate::frame::{Surface, d3d11};
 use crate::{Error, Rate, Size};
 
@@ -269,6 +269,7 @@ impl Capture {
 			.unwrap()
 			.StartCapture()
 			.map_err(|e| error("start WGC", e))?;
+		let mut startup = Startup::new(Instant::now());
 		let rate = config.framerate.unwrap_or(Rate::integer(30));
 		let interval =
 			Duration::from_nanos(1_000_000_000 * u64::from(rate.denominator()) / u64::from(rate.numerator()));
@@ -280,6 +281,7 @@ impl Capture {
 			let resize_deadline = settle.as_ref().and_then(Settle::deadline);
 			let deadline = resize_deadline
 				.into_iter()
+				.chain(startup.deadline)
 				.chain(delivery.deadline())
 				.chain(pending.as_ref().map(|_| delivery.next))
 				.min();
@@ -301,6 +303,7 @@ impl Capture {
 				Event::Deadline => {}
 			}
 			let now = Instant::now();
+			startup.check(now)?;
 			if self.window.is_some_and(|window| unsafe { IsIconic(window) }.as_bool()) {
 				if opened.is_none() {
 					return Err(Error::SourceUnavailable(
@@ -371,6 +374,7 @@ impl Capture {
 					color: texture.color,
 				};
 				chan.push_native(Surface::Texture(texture), timestamp);
+				startup.delivered();
 			}
 		}
 	}

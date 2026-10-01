@@ -186,6 +186,9 @@ capture configuration. The system capture border stays visible unless the OS
 supports borderless capture and grants access. Frames are converted to NV12
 on the GPU; software encoding reads them back. Windows application capture
 and system audio are separate capabilities, not enabled by this backend.
+Windows `display:N` selectors are enumeration indices; switching from Desktop
+Duplication to WGC can change which monitor a saved selector names. Run
+`moq devices` again and reselect the intended display after upgrading.
 
 ## Transcode
 

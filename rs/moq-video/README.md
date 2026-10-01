@@ -42,6 +42,11 @@ the same for macOS, Windows, and X11 displays. `capture::windows()` lists macOS,
 Windows, and X11 windows. Wayland display selection stays in the desktop portal
 picker, which does not expose a stable display identifier.
 
+Windows `display:N` selectors are enumeration indices, not persistent monitor
+identities. Switching from Desktop Duplication to WGC can change which monitor
+a saved selector names. Run `moq devices` again and reselect the intended display
+after upgrading.
+
 Embedded applications can consume raw capture without creating a MoQ
 broadcast:
 
@@ -62,6 +67,8 @@ a benign reason, such as a window resize, so reopen to follow it. Permission
 denial and a source disappearing are terminal, reported as
 `Error::PermissionDenied` and `Error::SourceUnavailable`.
 On Windows, opening an already minimized window returns `Error::SourceUnavailable`.
+After capture starts, receiving no usable first frame within five seconds also
+returns `Error::SourceUnavailable` and releases the capture session.
 An established capture pauses while the window is minimized. Unchanged Windows
 content repeats the last owned GPU texture at the configured frame rate, with
 advancing presentation timestamps, so a static share remains live.
