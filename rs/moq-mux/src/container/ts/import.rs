@@ -835,7 +835,7 @@ impl<E: catalog::Catalog> Import<E> {
 	///
 	/// Every PAT is checked, so a program added mid-stream ends an unselected import, and a
 	/// selected program that disappears ends a selected one; media already published stays.
-	fn handle_pat(&mut self, pat: &psi::Pat) -> anyhow::Result<()> {
+	pub(super) fn handle_pat(&mut self, pat: &psi::Pat) -> anyhow::Result<()> {
 		// program_number 0 is the network PID association, not a program.
 		let programs: Vec<_> = pat.programs.iter().filter(|entry| entry.program_number != 0).collect();
 		let numbers = || programs.iter().map(|entry| entry.program_number).collect::<Vec<_>>();
@@ -5572,6 +5572,24 @@ pub(super) mod test {
 			&pmt_section(50, 0, &[(MP2, 0x0061, &[])]),
 		));
 		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
+		data
+	}
+
+	/// A PAT split into two sections, each in its own packet, listing program 1 then program
+	/// 2, then each program's PMT (one MP2 stream) and one PES on it.
+	pub(in crate::container::ts) fn two_section_pat() -> Vec<u8> {
+		let mut cc = 0;
+		let mut data = Vec::new();
+		for (number, program) in [(0, 1u16), (1, 2)] {
+			let entry = [0x00, program as u8, 0xe0 | program as u8, 0x00];
+			let section = super::psi::section(0x00, 1, 0, number, 1, &entry);
+			data.extend(psi_packets(0, &mut cc, &[], &section));
+		}
+		for (program, pid, fills) in [(1u16, 0x0061, [0xAA, 0xBB]), (2, 0x0071, [0xCC, 0xDD])] {
+			let pmt = pmt_section(program, 0, &[(MP2, pid, &[])]);
+			data.extend(psi_packets(program << 8, &mut 0, &[], &pmt));
+			data.extend(mp2_pes(pid, 0, 90_000, fills));
+		}
 		data
 	}
 

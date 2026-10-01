@@ -6,7 +6,7 @@ use anyhow::Context;
 use mpeg2ts::ts::{Pid, TsPacket};
 
 use super::import::{Framer, PatReader};
-use super::{Ext, Import, Stats};
+use super::{Ext, Import, Stats, psi};
 use crate::catalog;
 
 /// Imports every program the first PAT lists, each as its own broadcast on `origin`, with its
@@ -21,9 +21,9 @@ pub struct Programs {
 	name: moq_net::PathOwned,
 	config: catalog::Config,
 	live: bool,
-	/// Input held until it contains a whole PAT.
+	/// Input not yet read for the PAT: a trailing partial packet, or what follows the PAT.
 	pending: Vec<u8>,
-	/// Reads the PAT out of `pending`.
+	/// Reads the PAT out of the input.
 	scan: PatScan,
 	/// Empty until the PAT arrives.
 	programs: Vec<Program>,
@@ -63,10 +63,10 @@ impl Programs {
 			return self.feed(data);
 		}
 		self.pending.extend_from_slice(data);
-		let Some(programs) = self.scan.scan(&mut self.pending) else {
+		let Some(pat) = self.scan.scan(&mut self.pending) else {
 			return Ok(());
 		};
-		for program in programs {
+		for program in pat.program_numbers() {
 			let name = program_broadcast(self.name.as_str(), program);
 			let mut broadcast = self
 				.origin
@@ -83,6 +83,9 @@ impl Programs {
 			if self.live {
 				import = import.live();
 			}
+			// Seeded with the scanner's PAT rather than replaying its packets, so every section
+			// reaches the importer and nothing the scanner counted is counted again.
+			import.handle_pat(&pat)?;
 			broadcast
 				.announce(Default::default())
 				.with_context(|| format!("failed to announce broadcast {name}"))?;
@@ -117,7 +120,7 @@ impl Programs {
 				*merged = (*merged).max(count);
 			}
 		}
-		// The importers only see the PAT from the one that started them.
+		// The importers only see the PATs after the one that started them.
 		*crc_errors.entry(Pid::PAT).or_default() += self.scan.crc_error;
 		stats.crc_error = crc_errors.values().sum();
 		stats
@@ -158,46 +161,29 @@ struct PatScan {
 	pat: PatReader,
 	/// PAT sections dropped for a bad CRC before the first whole PAT.
 	crc_error: u64,
-	/// Bytes of the held input already read.
-	read: usize,
-	/// Where the packet opening the PAT section in progress starts, so the importers are
-	/// handed the whole section rather than its tail.
-	opened: Option<usize>,
 }
 
 impl PatScan {
-	/// Read the bytes `pending` gained since the last call. Returns the program numbers the
-	/// first whole PAT lists, in PAT order, with `pending` trimmed to start at that PAT;
-	/// otherwise trims `pending` to what a later PAT can still need.
-	fn scan(&mut self, pending: &mut Vec<u8>) -> Option<Vec<u16>> {
-		let mut off = self.read;
+	/// Read `pending` up to the first whole PAT listing a program, returning it with `pending`
+	/// trimmed to start just after the packet that completed it. Otherwise only a trailing
+	/// partial packet is kept: the reader holds a partial PAT itself.
+	fn scan(&mut self, pending: &mut Vec<u8>) -> Option<psi::Pat> {
+		let mut off = 0;
+		let mut found = None;
 		while let Some(at) = self.framer.next(pending, &mut off) {
 			let pkt: &[u8; TsPacket::SIZE] = pending[at..at + TsPacket::SIZE].try_into().unwrap();
 			if (u16::from(pkt[1] & 0x1f) << 8 | u16::from(pkt[2])) != Pid::PAT {
 				continue;
 			}
-			if pkt[1] & 0x40 != 0 {
-				self.opened = Some(at);
+			if let Some(pat) = self.pat.push(pkt, &mut self.crc_error)
+				&& !pat.program_numbers().is_empty()
+			{
+				found = Some(pat);
+				break;
 			}
-			let pat = self.pat.push(pkt, &mut self.crc_error);
-			let start = self.opened.unwrap_or(at);
-			if !self.pat.in_progress() {
-				self.opened = None;
-			}
-			let Some(programs) = pat
-				.map(|pat| pat.program_numbers())
-				.filter(|programs| !programs.is_empty())
-			else {
-				continue;
-			};
-			pending.drain(..start);
-			return Some(programs);
 		}
-		let keep = self.opened.unwrap_or(off).min(off);
-		pending.drain(..keep);
-		self.read = off - keep;
-		self.opened = self.opened.map(|opened| opened - keep);
-		None
+		pending.drain(..off);
+		found
 	}
 }
 
@@ -208,7 +194,9 @@ mod test {
 	use super::*;
 	use crate::catalog::hang::Container;
 	use crate::container::Consumer;
-	use crate::container::ts::import::test::{corrupt, fifty_programs, pat_section, psi_packets, two_programs};
+	use crate::container::ts::import::test::{
+		corrupt, fifty_programs, pat_section, psi_packets, two_programs, two_section_pat,
+	};
 
 	#[test]
 	fn program_broadcasts_keep_the_catalog_suffix_last() {
@@ -219,7 +207,7 @@ mod test {
 
 	/// The PAT in a whole buffer, as one [`PatScan`] reads it.
 	fn pat_programs(data: &[u8]) -> Option<Vec<u16>> {
-		PatScan::default().scan(&mut data.to_vec())
+		Some(PatScan::default().scan(&mut data.to_vec())?.program_numbers())
 	}
 
 	#[test]
@@ -277,6 +265,64 @@ mod test {
 		assert_eq!(programs.stats().crc_error, 1);
 
 		let mut data = psi_packets(0, &mut cc, &[], &pat_section(&[(1, 0x0100)]));
+		data.extend_from_slice(&null);
+		programs.decode(&data).unwrap();
+		assert_eq!(programs.programs.len(), 1);
+		assert_eq!(programs.stats().crc_error, 1);
+	}
+
+	/// How many audio renditions the catalog `path` publishes lists.
+	async fn renditions(origin: &moq_net::origin::Producer, path: &str) -> usize {
+		let consumer = crate::Source::new(origin.consume(), path).broadcast().await.unwrap();
+		let catalog = hang::catalog::Catalog::<()>::subscribe(&consumer)
+			.await
+			.unwrap()
+			.next()
+			.await
+			.unwrap()
+			.expect("a catalog");
+		catalog.audio.renditions.len()
+	}
+
+	/// A PAT in two sections starts both programs, each importer seeded with the whole table
+	/// rather than only the section that completed it.
+	#[tokio::test]
+	async fn a_pat_in_two_sections_starts_every_program() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
+		programs.decode(&two_section_pat()).unwrap();
+		programs.finish().unwrap();
+		assert_eq!(programs.programs.len(), 2);
+		assert_eq!(renditions(&origin, "event/1.hang").await, 1);
+		assert_eq!(renditions(&origin, "event/2.hang").await, 1);
+	}
+
+	/// A partial PAT holds only itself, not the multiplex that follows it.
+	#[test]
+	fn a_partial_pat_does_not_hold_the_multiplex() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		programs.decode(&fifty_programs()[..188]).unwrap();
+		let mut null = vec![0x47, 0x1f, 0xff, 0x10];
+		null.resize(188, 0xff);
+		for _ in 0..1000 {
+			programs.decode(&null).unwrap();
+		}
+		assert!(programs.programs.is_empty());
+		assert!(programs.pending.len() < 2 * 188, "held {} bytes", programs.pending.len());
+	}
+
+	/// A corrupt PAT section sharing a packet with the good one that starts the programs is
+	/// counted once.
+	#[test]
+	fn a_corrupt_pat_beside_a_good_one_counts_once() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut sections = corrupt(pat_section(&[(1, 0x0100)]));
+		sections.extend(pat_section(&[(1, 0x0100)]));
+		let mut data = psi_packets(0, &mut 0, &[], &sections);
+		let mut null = vec![0x47, 0x1f, 0xff, 0x10];
+		null.resize(188, 0xff);
 		data.extend_from_slice(&null);
 		programs.decode(&data).unwrap();
 		assert_eq!(programs.programs.len(), 1);
