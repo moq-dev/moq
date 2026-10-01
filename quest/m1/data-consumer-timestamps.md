@@ -25,6 +25,15 @@ an untimed frame: [Plan: untimed objects](/quest/m1/plan-untimed-objects.md)
 settled (2026-10-01) that absence survives the wire rather than becoming
 arrival time. A republisher passes `at` straight to a moq-mux data producer.
 
+Decided (2026-10-01): snapshot consumers stop coalescing. Today the moq-json
+snapshot consumer applies every buffered delta but yields only the newest
+state, and moq-binary jumps to the newest group, so a 9s state is lost when
+11s is already buffered. A caller syncing to a playhead needs the newest
+state at or before it, so every state is yielded in order with its `at`, and
+a caller that wants only the latest keeps the last one. A reader that falls
+behind the drift budget (`Lagged`) still jumps to the newest group, so a
+slow reader stays bounded. Same in the moq-mux wrappers and moq-ffi.
+
 moq-ffi's json/binary consumers return the timestamp too, and the py, swift,
 kt, go, and dart wrappers and `doc/lib/*` follow. JS is
 [JS data consumer timestamps](/quest/m1/js-data-consumer-timestamps.md).
