@@ -147,6 +147,9 @@ try {
 		await sleep(Math.min(DRAIN_MS, end - Date.now()));
 		await drain(page);
 	}
+	// A run that ends inside a gap still counts it.
+	await page.evaluate(() => globalThis.audioQuality.finish());
+	await drain(page);
 	// The context rate is only known once the graph exists, which is after the catalog.
 	environment = (await page.evaluate(() => globalThis.audioQuality.environment())) ?? environment;
 	notes = await page.evaluate(() => globalThis.audioQuality.notes());

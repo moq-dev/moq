@@ -31,6 +31,8 @@ export type Tap = {
 	counts(): Counts | undefined;
 	/** Gaps closed since the last call. */
 	take(): Gap[];
+	/** Close a gap still open, and resolve once its report is in for {@link take}. */
+	finish(): Promise<void>;
 	close(): void;
 };
 
@@ -52,14 +54,24 @@ export async function tap(root: AudioNode, init: TapInit): Promise<Tap> {
 
 	let counts: Counts | undefined;
 	const gaps: Gap[] = [];
+	let reported: (() => void) | undefined;
 	node.port.onmessage = (event: MessageEvent<TapReport>) => {
 		counts = event.data.counts;
 		gaps.push(...event.data.gaps);
+		reported?.();
 	};
 
 	return {
 		counts: () => counts,
 		take: () => gaps.splice(0, gaps.length),
+		finish() {
+			// The port is ordered, so the report answering this one is the last to resolve it.
+			const done = new Promise<void>((resolve) => {
+				reported = resolve;
+			});
+			node.port.postMessage("finish");
+			return done;
+		},
 		close() {
 			node.port.onmessage = null;
 			root.disconnect(node);

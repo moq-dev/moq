@@ -82,8 +82,8 @@ The shaper's profiles are synthetic. [`traces/`](traces) holds real arrivals, ea
 | `relay-mic` | `<moq-publish>` in headless Chromium, publishing its fake capture device through the public relay |
 
 A trace is a [`Trace`](clients/js/src/schema.ts): the catalog's audio rendition, the smallest
-PROBE round trip the session saw, and every frame's `[at, timestamp, group]`, with `at` on the
-viewer's clock. `record.ts` stamps a frame as it comes off its group's stream, the way
+PROBE round trip the session saw, how long it observed, and every frame's `[at, timestamp, group]`,
+with `at` on the viewer's clock. `record.ts` stamps a frame as it comes off its group's stream, the way
 `Container.Consumer` receives it, using only public `@moq/net` and `@moq/hang` in the same Chromium
 over WebTransport. It stamps before the consumer's in-order delivery, whose waits and skips depend
 on the delay, so the replay decides those again.
@@ -92,7 +92,9 @@ on the delay, so the replay decides those again.
 clock ([`js/watch/src/audio/replay.ts`](../../js/watch/src/audio/replay.ts)), at the "auto" delay a
 real `Sync` resolves for the recorded catalog and round trip, and reads each quantum through the
 tap's classifier. The consumer makes the player's group ordering, max age skips, and discontinuity
-resets again at that delay; a group's stream is taken to finish with its last recorded frame. It
+resets again at that delay; a group's stream is taken to finish with its last recorded frame. Every
+frame is the trace's median spacing long, so a frame that never arrived stays missing audio, and
+rendering runs to the end of the observation, so an outage after the last arrival is heard. It
 writes the same samples a page does, so `analyze.ts` reduces both alike, and the shaper, transport,
 and clock checks have nothing to void. Decoding is taken as instant. A replay is deterministic, so
 its budgets are exactly what it measured.

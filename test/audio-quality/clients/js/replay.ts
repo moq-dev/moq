@@ -72,7 +72,7 @@ for (const [name, list, known] of selectors) {
 
 const rows: { row: Row; trace: Trace }[] = [];
 for (const { profile, trace } of traces) {
-	if (trace.version !== 1) throw new Error(`${profile}: trace version ${trace.version}, expected 1`);
+	if (trace.version !== 2) throw new Error(`${profile}: trace version ${trace.version}, expected 2`);
 	const codec = traceCodec(trace);
 	if (profiles && !profiles.includes(profile)) continue;
 	if (!codecs.includes(codec)) continue;
@@ -114,7 +114,29 @@ for (const { row, trace } of rows) {
 	};
 
 	const arrivals = trace.arrivals.map(([at, timestamp, group]) => ({ at, timestamp, group }));
-	const quanta = replay(arrivals, { ring: row.ring === "isolated" ? "shared" : "post", rate, delay });
+	const sample = (quantum: { at: number; timestamp: number; stalled: boolean }) => {
+		const gaps = ledger.take();
+		samples.push({
+			at: quantum.at,
+			render: quantum.at,
+			timestamp: quantum.timestamp,
+			stalled: quantum.stalled,
+			delay,
+			quanta: ledger.counts.quanta,
+			quiet: ledger.counts.quiet,
+			gaps: gaps.length > 0 ? gaps : undefined,
+			stalls: stalls.length > 0 ? stalls : undefined,
+		});
+		stalls = [];
+	};
+
+	const quanta = replay(arrivals, {
+		ring: row.ring === "isolated" ? "shared" : "post",
+		rate,
+		delay,
+		duration: trace.duration,
+	});
+	let last: { at: number; timestamp: number; stalled: boolean } | undefined;
 	for await (const quantum of quanta) {
 		// The render clock is the simulated one: the trace's `at`, which starts at zero.
 		ledger.add(frame, quantum.output.length, classify([quantum.output]));
@@ -123,24 +145,16 @@ for (const { row, trace } of rows) {
 			stalled = quantum.stalled;
 			stalls.push({ at: quantum.at, stalled });
 		}
+		last = { at: quantum.at, timestamp: quantum.timestamp, stalled: quantum.stalled };
 
 		if (quantum.at >= next) {
 			next += SAMPLE_INTERVAL_MS;
-			const gaps = ledger.take();
-			samples.push({
-				at: quantum.at,
-				render: quantum.at,
-				timestamp: quantum.timestamp,
-				stalled: quantum.stalled,
-				delay,
-				quanta: ledger.counts.quanta,
-				quiet: ledger.counts.quiet,
-				gaps: gaps.length > 0 ? gaps : undefined,
-				stalls: stalls.length > 0 ? stalls : undefined,
-			});
-			stalls = [];
+			sample(last);
 		}
 	}
+	// A trace that ends inside a gap still counts it.
+	ledger.finish();
+	if (last) sample(last);
 	console.warn = warn;
 
 	const environment: Environment = {

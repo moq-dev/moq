@@ -1,5 +1,5 @@
 {
-	"version": 1,
+	"version": 2,
 	"source": "a local moq-relay on 127.0.0.1, ffmpeg's AAC sine over MPEG-TS through moq import ts, recorded 2026-09-29",
 	"description": "The shallow control: the audio quality harness's AAC publisher with nothing but loopback between it and the viewer.",
 	"transport": "webtransport",
@@ -14,6 +14,7 @@
 		"numberOfChannels": 2,
 		"jitter": 163
 	},
+	"duration": 35000,
 	"arrivals": [
 		[0,10016.133,0],
 		[2.55,10039.344,1],

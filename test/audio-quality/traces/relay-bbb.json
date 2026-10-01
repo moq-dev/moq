@@ -1,5 +1,5 @@
 {
-	"version": 1,
+	"version": 2,
 	"source": "https://cdn.moq.dev/demo bbb.hang, the public demo's MPEG-TS import, recorded 2026-09-29",
 	"description": "The public relay's Big Buck Bunny: one AAC frame per group, flushed in bursts of about seven, the flush-span shape #3477 measured.",
 	"transport": "webtransport",
@@ -15,6 +15,7 @@
 		"bitrate": 139613,
 		"jitter": 186
 	},
+	"duration": 35000,
 	"arrivals": [
 		[0,234535,9642],
 		[2.98,240014.922,9878],

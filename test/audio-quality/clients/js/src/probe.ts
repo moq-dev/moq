@@ -18,12 +18,15 @@ import { type Tap, tap } from "./tap.ts";
 type RenderCapacity = {
 	start(options: { updateInterval: number }): void;
 	addEventListener(type: "update", listener: (event: { averageLoad: number }) => void): void;
+	removeEventListener(type: "update", listener: (event: { averageLoad: number }) => void): void;
 };
 
 /** What the probe has collected, until someone drains it. */
 export type Probe = {
 	/** Samples taken since the last drain. */
 	drain(): Sample[];
+	/** End the measurement: take one last sample, with any gap still open closed into it. */
+	finish(): Promise<void>;
 	/** What the page is, once the catalog says the session is up. */
 	environment(): Environment | undefined;
 	/** Console warnings and errors so far. */
@@ -55,6 +58,7 @@ export function probe(watch: MoqWatch): Probe {
 	let tapped: AudioNode | undefined;
 	let current: Tap | undefined;
 	let renderLoad: number | undefined;
+	let unlisten: (() => void) | undefined;
 	const attach = () => {
 		const root = audio.out.root.peek();
 		if (!root || root === tapped) return;
@@ -70,14 +74,19 @@ export function probe(watch: MoqWatch): Probe {
 			(err: unknown) => note(`tap: ${err instanceof Error ? err.message : String(err)}`),
 		);
 
+		// The previous root's context stops reporting into this one's reading.
+		unlisten?.();
+		unlisten = undefined;
 		const capacity = (root.context as unknown as { renderCapacity?: RenderCapacity }).renderCapacity;
 		if (!capacity) {
 			note("renderCapacity: unavailable, render_load will be null");
 			return;
 		}
-		capacity.addEventListener("update", (event) => {
+		const update = (event: { averageLoad: number }) => {
 			renderLoad = event.averageLoad;
-		});
+		};
+		capacity.addEventListener("update", update);
+		unlisten = () => capacity.removeEventListener("update", update);
 		// A whole second: shorter intervals are refused by some builds, and load is smooth anyway.
 		capacity.start({ updateInterval: 1 });
 	};
@@ -119,6 +128,11 @@ export function probe(watch: MoqWatch): Probe {
 
 	return {
 		drain: () => samples.splice(0, samples.length),
+		async finish() {
+			attach();
+			await current?.finish();
+			samples.push(sample());
+		},
 		environment() {
 			const catalog = broadcast.out.catalog.peek();
 			if (!catalog) return undefined;

@@ -1,5 +1,5 @@
 {
-	"version": 1,
+	"version": 2,
 	"source": "https://cdn.moq.dev/anon, <moq-publish> in headless Chromium capturing its fake audio device, recorded 2026-09-29",
 	"description": "A browser publisher through the public relay: getUserMedia, the capture worklet, and WebCodecs Opus, with the relay's round trip in between.",
 	"transport": "webtransport",
@@ -13,6 +13,7 @@
 		"numberOfChannels": 2,
 		"bitrate": 64000
 	},
+	"duration": 35000,
 	"arrivals": [
 		[0,2324.745,0],
 		[16.53,2344.745,1],

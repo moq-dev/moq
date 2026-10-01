@@ -294,7 +294,7 @@ export type Arrival = [at: Ms, timestamp: Ms, group: number];
 /** A recorded arrival trace, as checked in under `traces/`. The file name is its profile. */
 export type Trace = {
 	/** Bumped when a field's meaning changes. */
-	version: 1;
+	version: 2;
 	/** Where it was recorded: the relay, the broadcast, its publisher, the date. */
 	source: string;
 	/** The shape it carries, and why it is kept. */
@@ -313,6 +313,8 @@ export type Trace = {
 		delay?: number;
 		[key: string]: unknown;
 	};
+	/** How long the recording observed, from the first arrival: silence after the last one is an outage. */
+	duration: Ms;
 	/** Every arrival in order, `at` counted from the first. */
 	arrivals: Arrival[];
 };

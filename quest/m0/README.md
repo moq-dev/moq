@@ -29,7 +29,7 @@ ingested-only view (`origin::Consumer::local()`) to localhost workers belongs
 to moq.pro's edge, which embeds moq-relay; it moved there on 2026-09-28.
 
 Audio playout: the jitter target replaces the round-trip guess. The browser
-audio quality harness in `test/audio-quality/` has landed; it grades the target
+audio quality harness in `test/audio-quality/` has landed; it grades playout
 nightly and records the traces it replays. Its native lane is a standalone m1
 quest, since nothing here waits on it. The [A/V clock](/quest/m1/av-clock.md)
 moved to m1 in the 2026-09-30 audit: it waits on the whole jitter line and is

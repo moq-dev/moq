@@ -10,6 +10,9 @@ function paced(seconds: number, lateness: (i: number) => number): Arrival[] {
 	return Array.from({ length: seconds * 50 }, (_, i) => ({ at: i * 20 + lateness(i), timestamp: i * 20, group: i }));
 }
 
+/** How long {@link paced} observes `seconds` of frames: the frames, plus one more. */
+const observed = (seconds: number) => seconds * 1000 + 20;
+
 /** Quanta that came back short or empty while playing, once the ring had first played. */
 async function underruns(trace: Arrival[], options: Options): Promise<number> {
 	let started = false;
@@ -34,7 +37,7 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 		expect(
 			await underruns(
 				paced(10, () => 30),
-				{ ring, rate: RATE, delay: 100 },
+				{ ring, rate: RATE, delay: 100, duration: observed(10) },
 			),
 		).toBe(0);
 	});
@@ -42,8 +45,8 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 	it("underruns when a flush span outlasts the target, and not when it is covered", async () => {
 		// Five frames held and flushed at once: 80 ms of arrival spread.
 		const trace = paced(10, (i) => 30 + (4 - (i % 5)) * 20);
-		expect(await underruns(trace, { ring, rate: RATE, delay: 40 })).toBeGreaterThan(50);
-		expect(await underruns(trace, { ring, rate: RATE, delay: 150 })).toBe(0);
+		expect(await underruns(trace, { ring, rate: RATE, delay: 40, duration: observed(10) })).toBeGreaterThan(50);
+		expect(await underruns(trace, { ring, rate: RATE, delay: 150, duration: observed(10) })).toBe(0);
 	});
 
 	it("holds newer groups behind a missing one until the max age gives up on it", async () => {
@@ -51,8 +54,35 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 		// The consumer delivers in group order, so the ring runs dry for longer than the missing frame
 		// while the groups behind it wait. Writing arrivals straight into the ring plays straight through.
 		const frame = Math.ceil((20 / 1000) * (RATE / QUANTUM));
-		expect(await underruns(trace, { ring, rate: RATE, delay: 100 })).toBeGreaterThan(frame);
+		expect(await underruns(trace, { ring, rate: RATE, delay: 100, duration: observed(10) })).toBeGreaterThan(frame);
 		expect(warn).toHaveBeenCalled();
+	});
+
+	it("leaves a frame missing inside a group as missing audio", async () => {
+		// Five frames a group, delivered on time, with one from the middle of a group never sent.
+		const trace = paced(10, () => 30)
+			.map((arrival, i) => ({ ...arrival, group: Math.floor(i / 5) }))
+			.filter((_, i) => i !== 252);
+		expect(await underruns(trace, { ring, rate: RATE, delay: 100, duration: observed(10) })).toBeGreaterThan(0);
+	});
+
+	it("renders through the end of the observation, past the last arrival", async () => {
+		let last = 0;
+		let heard = 0;
+		for await (const { at, output } of replay(
+			paced(10, () => 30),
+			{
+				ring,
+				rate: RATE,
+				delay: 100,
+				duration: 15_000,
+			},
+		)) {
+			last = at;
+			if (at > 11_000 && output.some((v) => v !== 0)) heard++;
+		}
+		expect(last).toBeGreaterThanOrEqual(15_000);
+		expect(heard).toBe(0);
 	});
 });
 

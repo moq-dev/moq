@@ -58,4 +58,18 @@ describe("Ledger", () => {
 		expect(gap).toMatchObject({ quanta: 3, short: 2 });
 		expect(ledger.counts).toEqual({ quanta: 5, quiet: 1 });
 	});
+
+	test("a run that ends inside a gap still reports it once finished", () => {
+		const ledger = new Ledger(RATE, 0.001);
+		ledger.add(0, 128, full);
+		ledger.add(128, 128, silent);
+		ledger.add(256, 128, silent);
+		expect(ledger.take()).toEqual([]);
+
+		ledger.finish();
+		const [gap, ...rest] = ledger.take();
+		expect(rest).toEqual([]);
+		expect(gap?.ms).toBeCloseTo((256 / RATE) * 1000);
+		expect(gap).toMatchObject({ quanta: 2, short: 0 });
+	});
 });

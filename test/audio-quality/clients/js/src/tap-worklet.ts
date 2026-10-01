@@ -21,17 +21,24 @@ class Tap extends AudioWorkletProcessor {
 		super();
 		const init = options.processorOptions as TapInit;
 		this.#ledger = new Ledger(sampleRate, init.floor);
+		// The run is over: close a gap still open and report at once, rather than lose it.
+		this.port.onmessage = () => {
+			this.#ledger.finish();
+			this.#report();
+		};
+	}
+
+	#report(): void {
+		this.#since = 0;
+		const report: TapReport = { counts: { ...this.#ledger.counts }, gaps: this.#ledger.take() };
+		this.port.postMessage(report);
 	}
 
 	process(inputs: Float32Array[][]): boolean {
 		const input = inputs[0] ?? [];
 		this.#ledger.add(currentFrame, input[0]?.length ?? 128, classify(input));
 
-		if (++this.#since >= REPORT_EVERY) {
-			this.#since = 0;
-			const report: TapReport = { counts: { ...this.#ledger.counts }, gaps: this.#ledger.take() };
-			this.port.postMessage(report);
-		}
+		if (++this.#since >= REPORT_EVERY) this.#report();
 		return true;
 	}
 }

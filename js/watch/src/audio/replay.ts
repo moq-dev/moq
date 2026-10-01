@@ -28,9 +28,6 @@ import { Terminal } from "./terminal";
 /** An AudioWorklet render quantum, in frames. */
 export const QUANTUM = 128;
 
-/** A media gap longer than this is missing audio, not one long frame. */
-const MAX_FRAME_MS = 100;
-
 /**
  * The replay's own subscription passes every recorded group through: the recorder's relay already
  * applied a wire max age, so only the consumer's decisions are made again.
@@ -92,6 +89,11 @@ export interface Options {
 	 * which `Sync` sets to the delay plus a lookahead a live viewer does not configure.
 	 */
 	delay: number;
+	/**
+	 * How long the trace observed, from its first arrival, in ms. Rendering runs to here, so an
+	 * outage after the last arrival is heard rather than cut off.
+	 */
+	duration: number;
 }
 
 /** One render quantum, as the worklet produced it. */
@@ -143,25 +145,25 @@ function post(rate: number, latency: number): Ring {
 const micros = (ms: number) => Math.round(ms * 1000) as Time.Micro;
 
 /**
- * Samples each frame carries, by its timestamp: up to where the next one starts, so consecutive
- * frames tile the timeline exactly. A frame followed by a hole, or by nothing, gets the trace's
- * typical frame.
+ * Samples each frame carries, by its timestamp: the trace's typical frame, the median spacing.
+ *
+ * A frame within half a frame of that runs up to where the next one starts instead, so consecutive
+ * frames tile the timeline exactly despite rounding. Any wider spacing is a frame that never
+ * arrived, which stays missing audio rather than stretching the frame before it.
  */
 function frameSamples(trace: Arrival[], rate: number): Map<Time.Micro, number> {
 	const starts = [...new Set(trace.map((a) => a.timestamp))].sort((a, b) => a - b);
 	const sample = (ms: number) => Math.round((ms * rate) / 1000);
+	const gaps = starts.slice(1).map((next, i) => sample(next) - sample(starts[i]));
+	const typical = [...gaps].sort((a, b) => a - b)[Math.floor(gaps.length / 2)];
+	if (typical === undefined) throw new Error("a trace needs two frames");
+
 	const spans = new Map<Time.Micro, number>();
-	for (let i = 0; i < starts.length - 1; i++) {
-		if (starts[i + 1] - starts[i] < MAX_FRAME_MS) {
-			spans.set(micros(starts[i]), sample(starts[i + 1]) - sample(starts[i]));
-		}
-	}
-	const sorted = [...spans.values()].sort((a, b) => a - b);
-	const typical = sorted[Math.floor(sorted.length / 2)];
-	if (typical === undefined) throw new Error("a trace needs two frames less than 100 ms apart");
-	for (const start of starts) {
-		if (!spans.has(micros(start))) spans.set(micros(start), typical);
-	}
+	starts.forEach((start, i) => {
+		const gap = gaps[i];
+		const tiles = gap !== undefined && Math.abs(gap - typical) * 2 <= typical;
+		spans.set(micros(start), tiles ? gap : typical);
+	});
 	return spans;
 }
 
@@ -175,7 +177,7 @@ const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 /**
  * Play `trace` in simulated real time, yielding every render quantum from the first arrival to the
- * last.
+ * end of the observation.
  *
  * A group's stream finishes with its last recorded frame. The audio is a constant, never zero, so
  * what the ring did not supply is exactly the zeros at the end of a quantum, which is how the
@@ -185,6 +187,8 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	const first = trace[0];
 	const last = trace.at(-1);
 	if (!first || !last) return;
+	const end = first.at + options.duration;
+	if (end < last.at) throw new Error(`an arrival at ${last.at} ms is past the ${options.duration} ms observed`);
 
 	const { rate } = options;
 	const samples = frameSamples(trace, rate);
@@ -227,7 +231,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	let next = 0;
 
 	try {
-		for (let n = 1; first.at + (n - 1) * step <= last.at; n++) {
+		for (let n = 1; first.at + (n - 1) * step <= end; n++) {
 			// The quantum ending at `now` renders once everything that arrived by then is delivered.
 			const now = first.at + n * step;
 			const written = next;

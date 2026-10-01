@@ -102,6 +102,11 @@ export class Ledger {
 		return this.#closed.splice(0, this.#closed.length);
 	}
 
+	/** Close a gap still open, for the next {@link take}: the measurement ended inside it. */
+	finish(): void {
+		this.#close();
+	}
+
 	#close(): void {
 		if (!this.#open) return;
 		const ms = (samples: number) => (samples / this.#rate) * 1000;
