@@ -1424,4 +1424,41 @@ mod tests {
 		let keyframe = frames.first().expect("a keyframe");
 		assert_eq!(declared_color(&keyframe.payload), Some(BT709_DESCRIBED));
 	}
+
+	#[cfg(all(target_os = "windows", feature = "capture", feature = "openh264"))]
+	#[test]
+	#[ignore = "requires Windows WGC video processing and a Media Foundation hardware H.264 encoder"]
+	fn wgc_nv12_encodes_with_matching_color_on_gpu_and_software() {
+		use super::backend::test_util::{BT601_DESCRIBED, BT709_DESCRIBED, declared_color};
+		use crate::frame::d3d11;
+
+		let device = d3d11::create_device().expect("D3D11 hardware device");
+		for (size, declared) in [
+			(Size::new(640, 480), BT601_DESCRIBED),
+			(Size::new(1280, 720), BT709_DESCRIBED),
+		] {
+			let pixels = [0, 0, 255, 255].repeat(size.pixels() as usize);
+			let source = d3d11::upload_bgra(&device, size, &pixels);
+			for backend in ["mediafoundation", "openh264"] {
+				let texture = d3d11::Texture::capture(&device, &source, size).expect("BGRA to NV12");
+				let frame = Frame::new(Surface::Texture(texture), moq_net::Timestamp::from_micros(0).unwrap());
+				let config = Config {
+					kind: Kind::Named(backend.into()),
+					color: frame.surface.color(),
+					..Config::new(size.width, size.height, crate::Rate::new(30, 1).unwrap())
+				};
+				let mut encoder = Encoder::new(&config).expect("requested encoder must be available");
+				assert_eq!(encoder.name(), backend);
+				let mut encoded = encoder.encode(&frame).expect("encode WGC texture");
+				encoded.extend(encoder.finish().unwrap());
+				assert!(!encoded.is_empty(), "{backend} must produce a frame");
+				assert!(
+					encoded
+						.iter()
+						.any(|frame| declared_color(&frame.payload).as_ref() == Some(&declared)),
+					"{backend} {size} SPS color"
+				);
+			}
+		}
+	}
 }

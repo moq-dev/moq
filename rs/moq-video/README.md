@@ -27,9 +27,14 @@ Per-platform, picked at compile time:
   feature), with native X11 monitor/window selection and capture as the X11
   fallback. The Wayland picker dialog chooses the screen, and the portal's
   restore token is reused so demand-driven reopens don't re-prompt.
-- **Windows**: native Media Foundation (camera; `IMFSourceReader`) and DXGI
-  Desktop Duplication (display), plus GDI single-window capture. Both convert
-  BGRA to CPU I420 and use the ids returned by the enumerators.
+- **Windows**: native Media Foundation (camera; `IMFSourceReader`) and
+  Windows.Graphics.Capture (display and window; Windows 10 2004/build 19041
+  or newer). Screen capture honors `Config::cursor` and converts BGRA to an
+  owned NV12 texture on the GPU, shared with the Media Foundation encoder;
+  software encoding downloads that texture. Odd screen edges are cropped to
+  even dimensions. Builds before 19041 return `Error::Unsupported`, with no
+  older capture fallback. The system capture border remains unless borderless
+  access is available (build 20348+) and granted.
 
 `capture::cameras()` lists AVFoundation, V4L2, or Media Foundation cameras with
 identifiers accepted by `capture::Source::Camera`. `capture::displays()` does
@@ -56,6 +61,19 @@ drops rather than latency. `read` ends with `None` when the source stopped for
 a benign reason, such as a window resize, so reopen to follow it. Permission
 denial and a source disappearing are terminal, reported as
 `Error::PermissionDenied` and `Error::SourceUnavailable`.
+On Windows, opening an already minimized window returns `Error::SourceUnavailable`.
+An established capture pauses while the window is minimized.
+
+On a Windows desktop, `just rs test -p moq-video --features capture --run-ignored only -E 'test(wgc_)'` runs the opt-in WGC hardware exercises.
+Set `MOQ_WGC_WINDOW=window:HWND` to a visible, odd-sized window from
+`moq devices` first. These tests capture each monitor and the selected window
+with cursor capture on and off, reopen sessions, verify owned NV12 pixels after
+pool reuse, and check SD/HD conversion and encoder color descriptions. They
+require a GPU video processor and a hardware H.264 encoder; unsupported
+hardware fails rather than silently skipping the exercise. Cursor appearance,
+resize/close/minimize behavior, hybrid-GPU monitors, and border permissions
+still need visual checks. The conversion workload prints submission time and
+batch completion time including one final readback, not end-to-end latency.
 
 ## Encode
 

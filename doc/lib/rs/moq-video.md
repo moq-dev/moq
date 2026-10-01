@@ -13,7 +13,7 @@ ffmpeg, no GStreamer, no system codec to install.
 
 | Module | Does | Backends |
 | --- | --- | --- |
-| `capture` | Camera, display, window, or application frames | AVFoundation + ScreenCaptureKit (macOS), V4L2 + X11/portal + PipeWire (Linux), Media Foundation + DXGI (Windows) |
+| `capture` | Camera, display, window, or application frames | AVFoundation + ScreenCaptureKit (macOS), V4L2 + X11/portal + PipeWire (Linux), Media Foundation + Windows.Graphics.Capture (Windows) |
 | `encode` | Frames to H.264/H.265, published as a hang track | VideoToolbox, Media Foundation, NVENC, VAAPI, V4L2 M2M, MediaCodec (Android), openh264 |
 | `decode` | A subscribed track back to frames | VideoToolbox, Media Foundation/DXVA, NVDEC, VAAPI, V4L2 M2M, MediaCodec (Android), openh264 |
 | `render` | A frame as a `wgpu` texture | wgpu, with zero-copy Metal and Vulkan imports |
@@ -38,6 +38,24 @@ driver's step,
 and an empty rate list means no discrete intervals were reported. Device errors
 are returned rather than treated as an empty list. Other platforms return
 `Error::Unsupported`.
+
+Windows display and window capture require Windows 10 2004 (build 19041) or
+newer and use Windows.Graphics.Capture without a Desktop Duplication or GDI
+fallback. `Config::cursor` controls cursor capture. Frames leave the capture
+pool as owned GPU NV12 textures; odd native edges are cropped to even sizes.
+The conversion declares BT.601 limited range through 576 lines and BT.709
+limited range above it, preserving that color through resize and CPU download.
+Media Foundation encodes on the capture device; openh264 uses the download path.
+Display enumeration covers all adapters, and window enumeration excludes
+DWM-cloaked windows and reports visible frame bounds. Enumeration does not
+start capture. A settled source resize ends the stream so callers can reopen;
+closing the captured item returns `Error::SourceUnavailable`. Dropping the
+stream releases its session even when no new frames arrive.
+
+Windows shows a capture border by default. On build 20348 or newer the backend
+requests borderless access; denial keeps the border and does not fail capture.
+Older supported builds keep the border. Application capture and system audio
+are not provided by this backend.
 
 With `pipewire` enabled, `capture::cameras` also lists PipeWire camera nodes as
 `pipewire:<node name>` after the V4L2 devices. V4L2 lists only devices offering
