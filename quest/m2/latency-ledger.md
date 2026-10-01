@@ -9,8 +9,8 @@ come from the same place.
 
 ## Plan
 
-The audio quality harness lands on ad-hoc debug probes, which is the right
-trade to get it running. This quest promotes them.
+The audio quality harness (`test/audio-quality/`) landed on ad-hoc debug
+probes, which was the right trade to get it running. This quest promotes them.
 
 - Take the stage schema the harness already defines (capture, encode, publish
   flush, network, jitter buffer, decode, render) and expose it as fields of
@@ -33,10 +33,8 @@ trade to get it running. This quest promotes them.
 
 ## Required
 
-- [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - defines the stage schema and lands the probes this promotes
 - [Media stats schema](/quest/m1/stats/schema.md) - adds the stats and feedback snapshots this extends
 
 ## Related
 
-- [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - defines the stages and is the first consumer
 - [QoS](/quest/m1/qos/README.md) - relay-side health, the same idea from the other end

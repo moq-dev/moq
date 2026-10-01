@@ -35,9 +35,8 @@ was wrong, and both compile unchanged for existing callers. The line branch is
 about 200 commits behind `main` with conflicts in `js/watch/src/sync.ts` and
 `rs/moq-cli`; merge `main` in (never rebase the shared branch) before
 finishing the watch quest. The raw #3477 traces are gone, so record fresh
-traces with the [audio quality
-harness](/quest/m0/audio-quality-harness/README.md) instead of asking the
-reporter; they replace the #3477 traces wherever the quests name them.
+traces with the audio quality harness in `test/audio-quality/` instead of
+asking the reporter; they replace the #3477 traces wherever the quests name them.
 
 The algorithm is written down at `doc/concept/audio-jitter.md`, with a
 conformance corpus beside it that both implementations will read.
@@ -76,7 +75,6 @@ buffer against uneven arrivals.
 
 ## Required
 
-- [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - lands first, since both lines add `js/watch/src/audio/replay.test.ts`; it also records the traces the watch quest replays
 - [Watch](/quest/m0/audio-jitter-target/watch.md) - js/watch and js/hang bring the #3954 estimator into conformance
 - [Native](/quest/m0/audio-jitter-target/native.md) - rs/moq-audio grows a measured jitter buffer from the same algorithm
 

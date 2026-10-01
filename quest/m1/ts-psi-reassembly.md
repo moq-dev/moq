@@ -32,9 +32,8 @@ Settled decisions:
   elementary-stream loop with descriptors) are parsed in moq-mux. PES is
   routed by the PIDs of the parsed PMT, and its header (PTS/DTS) is also parsed
   in moq-mux.
-- Each reassembled section's CRC-32/MPEG-2 is checked with the `crc` crate.
-  [Per-program SI](/quest/m2/ts-program-si.md) needs the same dependency, and
-  whichever change lands first adds it. A section with a bad CRC is dropped and
+- Each reassembled section's CRC-32/MPEG-2 is checked with the `crc` crate,
+  which moq-mux already depends on. A section with a bad CRC is dropped and
   the last good table stays in force, so the import continues; it no longer
   aborts as the `mpeg2ts` reader does. The section is refused whole, never
   half-applied, so fail-loud holds at section granularity. A malformed

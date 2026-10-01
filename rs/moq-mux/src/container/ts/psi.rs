@@ -12,7 +12,8 @@ use mpeg2ts::ts::Pid;
 
 use super::catalog::Descriptor;
 
-const CRC: crc::Crc<u32> = crc::Crc::<u32>::new(&crc::CRC_32_MPEG_2);
+/// The checksum closing every long-form section.
+pub(super) const CRC: crc::Crc<u32> = crc::Crc::<u32>::new(&crc::CRC_32_MPEG_2);
 
 /// Whether a section's trailing CRC-32/MPEG-2 matches the bytes before it.
 pub(super) fn crc_ok(section: &[u8]) -> bool {

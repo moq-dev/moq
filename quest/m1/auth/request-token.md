@@ -48,9 +48,8 @@ no longer fails the session; this quest gives it meaning.
   connection's id, and the auth server treats that as one more grant on the
   session that never POSTs `end`, so a request token would widen the whole
   connection for its life. The per-request call carries the token in
-  `moq_auth::Request.token` with its kind (a CAT reaches the CAT verifier,
-  not the JWT one) and the request's path, is never counted as a session
-  grant, and ends when the request ends. Two requests carrying the same bytes
+  `moq_auth::Request.token` with its kind and the request's path, is never
+  counted as a session grant, and ends when the request ends. Two requests carrying the same bytes
   get two leases. The request is resolved against the origin with the path
   checked against that lease's grant, not through the session's scoped
   origin handle. Name the call while implementing.

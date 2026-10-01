@@ -11,7 +11,3 @@ with its `Lane`s is the one way to map a source onto the broadcast clock.
 it. A single-track source uses `Anchor` with one `Lane`. Migrate the
 `SourceMap` tests in `rs/moq-mux/src/clock.rs` onto `Anchor`, and update
 `doc/lib/rs/moq-mux.md`.
-
-## Required
-
-- [Public clock anchor](/quest/m1/clock-anchor-public.md) - `Anchor` and `Lane` must be public first

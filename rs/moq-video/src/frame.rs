@@ -5,7 +5,7 @@
 //!   Capture and the VideoToolbox decoder both produce it, and the VideoToolbox
 //!   encoder consumes it directly, no copy and no color conversion.
 //! - `Surface::Texture` is a Windows Direct3D11 NV12 texture, produced by Media
-//!   Foundation capture and decode one GPU blit removed from their own pools
+//!   Foundation capture/decode and Windows.Graphics.Capture, one GPU blit removed from their pools
 //!   (which they recycle, so a frame has to be lifted out of them), and consumed
 //!   by the hardware encoder MFT on the same device with no copy at all, so a
 //!   camera or a decoder reaches an encoder without touching the CPU. Drawing one
@@ -42,6 +42,9 @@ use moq_net::Timestamp;
 use yuv::{YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, rgba_to_yuv420};
 
 use crate::{Color, Error, Size};
+
+#[cfg(any(target_os = "windows", test))]
+mod processor;
 
 /// One raw (uncompressed) video frame: the pixels plus when they are shown.
 ///
@@ -634,7 +637,7 @@ impl Surface {
 			#[cfg(target_os = "macos")]
 			Surface::PixelBuffer(s) => s.color(),
 			#[cfg(target_os = "windows")]
-			Surface::Texture(_) => None,
+			Surface::Texture(texture) => texture.color,
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
 			Surface::Cuda(c) => c.color(),
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
@@ -1957,6 +1960,7 @@ pub mod d3d11 {
 		D3D11_FORMAT_SUPPORT_VIDEO_ENCODER, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION,
 		D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
 		D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+		D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT,
 		D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
 		D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
 		D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
@@ -1964,23 +1968,23 @@ pub mod d3d11 {
 		ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
 		ID3D11VideoProcessorOutputView,
 	};
-	#[cfg(test)]
-	use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
 	use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
+	use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12};
 	use windows::Win32::Media::MediaFoundation::{IMFDXGIBuffer, IMFSample};
 	use windows::core::Interface;
 
+	use super::processor::Plan;
 	use super::{Cache, I420};
-	use crate::{Error, Size};
+	use crate::{Color, Error, Size};
 
 	fn err(ctx: &str, e: windows::core::Error) -> Error {
 		Error::Codec(anyhow::anyhow!("{ctx}: {e}"))
 	}
 
 	/// Create a hardware Direct3D11 device, multithread-protected (Media
-	/// Foundation's internal threads or DXGI duplication and our capture thread
+	/// Foundation's internal threads or WGC and our capture thread
 	/// both touch it). The shared low-level constructor behind the Media
-	/// Foundation device manager and the Desktop Duplication capture path.
+	/// Foundation device manager and Windows.Graphics.Capture.
 	pub(crate) fn create_device() -> Result<ID3D11Device, Error> {
 		let mut device: Option<ID3D11Device> = None;
 		unsafe {
@@ -2008,8 +2012,8 @@ pub mod d3d11 {
 		Ok(device)
 	}
 
-	/// A GPU texture (NV12) on the Direct3D11 device of whichever Media Foundation
-	/// object produced it: the capture source reader, or the DXVA decoder. Holds
+	/// A GPU texture (NV12) on its producer's Direct3D11 device: a Media Foundation
+	/// source reader, DXVA decoder, or Windows.Graphics.Capture session. Holds
 	/// that device so the download fallback and the hardware encoder run on the
 	/// device that owns the texture. Cloning the COM handles is a cheap `AddRef`,
 	/// which is what keeps capture -> encode and decode -> encode zero-copy.
@@ -2018,6 +2022,7 @@ pub mod d3d11 {
 		pub(crate) texture: ID3D11Texture2D,
 		pub(crate) width: u32,
 		pub(crate) height: u32,
+		pub(crate) color: Option<Color>,
 	}
 
 	impl Texture {
@@ -2076,6 +2081,27 @@ pub mod d3d11 {
 				texture,
 				width,
 				height,
+				color: None,
+			})
+		}
+
+		/// Convert a recycled WGC BGRA surface to an owned, even-sized NV12 texture.
+		#[cfg(feature = "capture")]
+		pub(crate) fn capture(device: &ID3D11Device, source: &ID3D11Texture2D, size: Size) -> Result<Self, Error> {
+			let plan = Plan::capture(size)?;
+			let mut desc = D3D11_TEXTURE2D_DESC::default();
+			unsafe { source.GetDesc(&mut desc) };
+			if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM || desc.Width < size.width || desc.Height < size.height {
+				return Err(Error::Codec(anyhow::anyhow!(
+					"invalid WGC BGRA surface geometry or format"
+				)));
+			}
+			Ok(Self {
+				device: device.clone(),
+				texture: process(device, source, plan)?,
+				width: plan.target.width,
+				height: plan.target.height,
+				color: Some(Color::infer(plan.target)),
 			})
 		}
 
@@ -2183,9 +2209,7 @@ pub mod d3d11 {
 				width: self.width,
 				height: self.height,
 				data,
-				// A deinterleave, not a color conversion, and nothing here names
-				// the space these samples are in. Left unknown to be inferred.
-				color: None,
+				color: self.color,
 			})
 		}
 
@@ -2201,51 +2225,58 @@ pub mod d3d11 {
 		pub(crate) fn resize(&self, width: u32, height: u32) -> Result<Self, Error> {
 			let source = Size::new(self.width, self.height);
 			let target = Size::new(width, height);
-			let key = ScalerKey::new(&self.device, source, target);
-
-			let scaler = {
-				let mut scalers = SCALERS
-					.lock()
-					.map_err(|_| Error::Codec(anyhow::anyhow!("video-processor cache lock poisoned")))?;
-				scalers
-					.get_or_insert_with(key, || {
-						Ok::<_, std::convert::Infallible>(ScalerState::discover(&self.device, source, target))
-					})
-					.expect("scaler discovery is infallible")
-			};
-			let mut state = scaler
-				.lock()
-				.map_err(|_| Error::Codec(anyhow::anyhow!("video processor lock poisoned")))?;
-			let result = match &*state {
-				ScalerState::Ready(scaler) => scaler.scale(&self.texture),
-				ScalerState::Unsupported { reason, .. } => {
-					return Err(Error::Codec(anyhow::anyhow!("GPU resize is unsupported: {reason}")));
-				}
-			};
-			let texture = match result {
-				Ok(texture) => texture,
-				Err(ScaleError::Unsupported(err)) => {
-					*state = ScalerState::Unsupported {
-						_device: self.device.clone(),
-						reason: err.to_string(),
-					};
-					return Err(err);
-				}
-				Err(ScaleError::Transient(err)) => return Err(err),
-			};
-			drop(state);
-			drop(scaler);
-			if let Ok(mut scalers) = SCALERS.lock() {
-				scalers.prune();
-			}
-
+			let texture = process(&self.device, &self.texture, Plan::resize(source, target, self.color))?;
 			Ok(Self {
 				device: self.device.clone(),
 				texture,
 				width,
 				height,
+				color: self.color,
 			})
 		}
+	}
+
+	fn process(device: &ID3D11Device, source: &ID3D11Texture2D, plan: Plan) -> Result<ID3D11Texture2D, Error> {
+		let key = ScalerKey {
+			device: device.as_raw() as usize,
+			plan,
+		};
+		let scaler = {
+			let mut scalers = SCALERS
+				.lock()
+				.map_err(|_| Error::Codec(anyhow::anyhow!("video-processor cache lock poisoned")))?;
+			scalers
+				.get_or_insert_with(key, || {
+					Ok::<_, std::convert::Infallible>(ScalerState::discover(device, plan))
+				})
+				.expect("processor discovery is infallible")
+		};
+		let mut state = scaler
+			.lock()
+			.map_err(|_| Error::Codec(anyhow::anyhow!("video processor lock poisoned")))?;
+		let result = match &*state {
+			ScalerState::Ready(scaler) => scaler.scale(source),
+			ScalerState::Unsupported { reason, .. } => {
+				return Err(Error::Codec(anyhow::anyhow!("GPU processing is unsupported: {reason}")));
+			}
+		};
+		let texture = match result {
+			Ok(texture) => texture,
+			Err(ScaleError::Unsupported(err)) => {
+				*state = ScalerState::Unsupported {
+					_device: device.clone(),
+					reason: err.to_string(),
+				};
+				return Err(err);
+			}
+			Err(ScaleError::Transient(err)) => return Err(err),
+		};
+		drop(state);
+		drop(scaler);
+		if let Ok(mut scalers) = SCALERS.lock() {
+			scalers.prune();
+		}
+		Ok(texture)
 	}
 
 	/// Enough reusable video processors for a large rendition ladder without
@@ -2270,8 +2301,8 @@ pub mod d3d11 {
 	}
 
 	impl ScalerState {
-		fn discover(device: &ID3D11Device, source: Size, target: Size) -> Self {
-			match Scaler::new(device, source, target) {
+		fn discover(device: &ID3D11Device, plan: Plan) -> Self {
+			match Scaler::new(device, plan) {
 				Ok(scaler) => Self::Ready(scaler),
 				Err(err) => Self::Unsupported {
 					_device: device.clone(),
@@ -2290,22 +2321,11 @@ pub mod d3d11 {
 	#[derive(Clone, PartialEq, Eq, Hash)]
 	struct ScalerKey {
 		device: usize,
-		source: Size,
-		target: Size,
-	}
-
-	impl ScalerKey {
-		fn new(device: &ID3D11Device, source: Size, target: Size) -> Self {
-			Self {
-				device: device.as_raw() as usize,
-				source,
-				target,
-			}
-		}
+		plan: Plan,
 	}
 
 	/// One Direct3D11 video processor, configured for a single source and target
-	/// size. The GPU scaler behind [`Texture::resize`].
+	/// size, crop, format and color conversion. Shared by resize and WGC capture.
 	struct Scaler {
 		/// Keeps the device keying this entry alive, so its address stays unique.
 		device: ID3D11Device,
@@ -2314,6 +2334,7 @@ pub mod d3d11 {
 		enumerator: ID3D11VideoProcessorEnumerator,
 		processor: ID3D11VideoProcessor,
 		target: Size,
+		input_format: DXGI_FORMAT,
 	}
 
 	/// Whether a failed scale proves this key unsupported or can succeed later.
@@ -2323,7 +2344,8 @@ pub mod d3d11 {
 	}
 
 	impl Scaler {
-		fn new(device: &ID3D11Device, source: Size, target: Size) -> Result<Self, Error> {
+		fn new(device: &ID3D11Device, plan: Plan) -> Result<Self, Error> {
+			let (source, target) = (plan.source, plan.target);
 			let video = device
 				.cast::<ID3D11VideoDevice>()
 				.map_err(|e| err("query ID3D11VideoDevice", e))?;
@@ -2351,14 +2373,31 @@ pub mod d3d11 {
 
 			let enumerator = unsafe { video.CreateVideoProcessorEnumerator(&desc) }
 				.map_err(|e| err("CreateVideoProcessorEnumerator", e))?;
+			let input_format = if plan.bgra {
+				DXGI_FORMAT_B8G8R8A8_UNORM
+			} else {
+				DXGI_FORMAT_NV12
+			};
+			for (format, required) in [
+				(input_format, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT),
+				(DXGI_FORMAT_NV12, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT),
+			] {
+				let support = unsafe { enumerator.CheckVideoProcessorFormat(format) }
+					.map_err(|e| err("CheckVideoProcessorFormat", e))?;
+				if support & required.0 as u32 == 0 {
+					return Err(Error::Codec(anyhow::anyhow!(
+						"video processor does not support {format:?} as {required:?}"
+					)));
+				}
+			}
 			let processor =
 				unsafe { video.CreateVideoProcessor(&enumerator, 0) }.map_err(|e| err("CreateVideoProcessor", e))?;
 
 			let full = RECT {
 				left: 0,
 				top: 0,
-				right: source.width as i32,
-				bottom: source.height as i32,
+				right: plan.picture.width as i32,
+				bottom: plan.picture.height as i32,
 			};
 			let scaled = RECT {
 				left: 0,
@@ -2368,19 +2407,20 @@ pub mod d3d11 {
 			};
 			unsafe {
 				context.VideoProcessorSetStreamFrameFormat(&processor, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
-				// The whole picture into the whole destination: the scale itself.
+				// Capture crops odd edges; resize maps the entire input picture.
 				context.VideoProcessorSetStreamSourceRect(&processor, 0, true, Some(&full));
 				context.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&scaled));
 				// Drivers ship denoise and edge enhancement on by default here.
 				// This is a resize, not a filter chain, so a rung must not come out
 				// looking different from the frame it was scaled from.
 				context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
-				// One space in, the same space out. Resampling moves samples
-				// around, it must not reinterpret them, and a processor left to
-				// its own devices will happily convert between ranges.
-				let space = D3D11_VIDEO_PROCESSOR_COLOR_SPACE::default();
-				context.VideoProcessorSetStreamColorSpace(&processor, 0, &space);
-				context.VideoProcessorSetOutputColorSpace(&processor, &space);
+				let input = D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
+					_bitfield: plan.input_space(),
+				};
+				let output = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: plan.space };
+				context.VideoProcessorSetStreamColorSpace(&processor, 0, &input);
+				context.VideoProcessorSetOutputColorSpace(&processor, &output);
+				context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&scaled));
 			}
 
 			Ok(Self {
@@ -2390,6 +2430,7 @@ pub mod d3d11 {
 				enumerator,
 				processor,
 				target,
+				input_format,
 			})
 		}
 
@@ -2397,7 +2438,12 @@ pub mod d3d11 {
 		fn scale(&self, source: &ID3D11Texture2D) -> Result<ID3D11Texture2D, ScaleError> {
 			let mut desc = D3D11_TEXTURE2D_DESC::default();
 			unsafe { source.GetDesc(&mut desc) };
-			let output = alloc(&self.device, self.target.width, self.target.height, desc.Format)
+			if desc.Format != self.input_format {
+				return Err(ScaleError::Transient(Error::Codec(anyhow::anyhow!(
+					"video processor input format changed"
+				))));
+			}
+			let output = alloc(&self.device, self.target.width, self.target.height, DXGI_FORMAT_NV12)
 				.map_err(ScaleError::Transient)?;
 
 			let input_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
@@ -2518,7 +2564,27 @@ pub mod d3d11 {
 			texture,
 			width,
 			height,
+			color: frame.color,
 		})
+	}
+
+	/// A synthetic pool surface for the opt-in WGC conversion/encoding tests.
+	#[cfg(all(test, feature = "capture"))]
+	pub(crate) fn upload_bgra(device: &ID3D11Device, size: Size, pixels: &[u8]) -> ID3D11Texture2D {
+		assert_eq!(pixels.len(), size.pixels() as usize * 4);
+		let texture = alloc(device, size.width, size.height, DXGI_FORMAT_B8G8R8A8_UNORM).unwrap();
+		let context = unsafe { device.GetImmediateContext() }.unwrap();
+		unsafe {
+			context.UpdateSubresource(
+				&texture,
+				0,
+				None,
+				pixels.as_ptr().cast(),
+				size.width * 4,
+				pixels.len() as u32,
+			);
+		}
+		texture
 	}
 
 	/// The Direct3D11 texture behind a Media Foundation sample, and which slice of
@@ -2581,6 +2647,94 @@ pub mod d3d11 {
 	impl Drop for UnmapGuard<'_> {
 		fn drop(&mut self) {
 			unsafe { self.context.Unmap(self.resource, 0) };
+		}
+	}
+
+	#[cfg(all(test, feature = "capture"))]
+	mod tests {
+		use super::*;
+
+		#[test]
+		#[ignore = "requires a Windows GPU with BGRA-to-NV12 video processing"]
+		fn wgc_conversion_crops_odd_edges_and_preserves_color() {
+			let device = create_device().expect("D3D11 hardware device");
+			for size in [Size::new(641, 481), Size::new(1281, 721)] {
+				let mut pixels = Vec::with_capacity(size.pixels() as usize * 4);
+				for y in 0..size.height {
+					for x in 0..size.width {
+						// A green odd edge must be cropped, not scaled into the red picture.
+						pixels.extend_from_slice(if x + 1 == size.width || y + 1 == size.height {
+							&[0, 255, 0, 255]
+						} else {
+							&[0, 0, 255, 255]
+						});
+					}
+				}
+				let source = upload_bgra(&device, size, &pixels);
+				let output = Texture::capture(&device, &source, size).expect("BGRA to NV12");
+				let expected_size = Size::new(size.width & !1, size.height & !1);
+				let color = Color::infer(expected_size);
+				assert_eq!(Size::new(output.width, output.height), expected_size);
+				assert_eq!(output.color, Some(color));
+				assert_eq!(output.device.as_raw(), device.as_raw());
+				assert_ne!(output.texture.as_raw(), source.as_raw(), "must own the output");
+
+				// Simulate immediate reuse of a WGC pool frame after conversion.
+				pixels.fill(0);
+				unsafe {
+					device.GetImmediateContext().unwrap().UpdateSubresource(
+						&source,
+						0,
+						None,
+						pixels.as_ptr().cast(),
+						size.width * 4,
+						pixels.len() as u32,
+					);
+				}
+				drop(source);
+				assert_red(&output.download_i420().unwrap(), color);
+				// HD -> SD scaling must keep 709, not infer 601 from the new height.
+				let scaled = output.resize(320, 240).expect("NV12 GPU resize");
+				assert_eq!(scaled.color, Some(color));
+				assert_red(&scaled.download_i420().unwrap(), color);
+			}
+		}
+
+		fn assert_red(frame: &I420, color: Color) {
+			assert_eq!(frame.color(), Some(color));
+			let expected = color.coefficients().apply([255, 0, 0]);
+			for (plane, value) in [frame.y(), frame.u(), frame.v()].into_iter().zip(expected) {
+				assert!(
+					plane.iter().all(|sample| sample.abs_diff(value) <= 3),
+					"{color:?}: expected {value}"
+				);
+			}
+		}
+
+		#[test]
+		#[ignore = "Windows GPU workload; reports submission and batch completion, not capture latency"]
+		fn wgc_conversion_workload() {
+			let device = create_device().expect("D3D11 hardware device");
+			for size in [Size::new(640, 480), Size::new(1280, 720), Size::new(1920, 1080)] {
+				let pixels = [0, 0, 255, 255].repeat(size.pixels() as usize);
+				let source = upload_bgra(&device, size, &pixels);
+				Texture::capture(&device, &source, size)
+					.unwrap()
+					.download_i420()
+					.unwrap();
+				let start = std::time::Instant::now();
+				let mut output = None;
+				for _ in 0..32 {
+					output = Some(Texture::capture(&device, &source, size).unwrap());
+				}
+				let submitted = start.elapsed();
+				// Mapping the final result fences the preceding ordered GPU blits.
+				output.unwrap().download_i420().unwrap();
+				eprintln!(
+					"WGC {size}: 32 frames, submit={submitted:?}, complete_with_one_readback={:?}",
+					start.elapsed()
+				);
+			}
 		}
 	}
 }

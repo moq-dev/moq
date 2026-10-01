@@ -770,6 +770,20 @@ impl Producer {
 	/// their buffers in memory forever; consumers that haven't drained yet surface the
 	/// abort error instead of the leftover cache.
 	pub fn abort(self, err: Error) -> Result<()> {
+		self.close_aborted(err)
+	}
+
+	/// Abort with `err` unless another handle still owns the group, so a retained clone
+	/// lets go without the unfinished-drop warning and never cuts off a live writer.
+	/// Sound without a lock: only an existing handle can mint another.
+	pub(crate) fn abort_if_last(&self, err: Error) -> Result<()> {
+		if Arc::strong_count(&self.alive) > 1 {
+			return Ok(());
+		}
+		self.close_aborted(err)
+	}
+
+	fn close_aborted(&self, err: Error) -> Result<()> {
 		let mut guard = modify(&self.state)?;
 		guard.abort = Some(err);
 		self.alive.aborted.store(true, Ordering::Release);

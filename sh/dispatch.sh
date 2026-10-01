@@ -53,7 +53,7 @@ fi
 # The impact map: a module is in scope when a changed path matches its
 # pattern. An empty pattern is a repository-wide lint that runs on every diff.
 declare -A scope=(
-    [js]='^(js/|doc/|drafts/|demo/(boy|web)/|test/interop/clients/js|test/wasm/|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
+    [js]='^(js/|doc/|drafts/|demo/(boy|web)/|test/(audio-quality|interop)/clients/js|test/wasm/|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
     # Workers with lockfiles outside the Bun workspace.
     [workers]='^(infra/apt/|infra/rpm/|demo/pub/|sh/js/workers\.sh$)'
     # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.

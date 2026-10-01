@@ -30,7 +30,8 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 default = ["mediacodec", "nvidia", "openh264"]
 # Native camera and screen capture. Costs the build nothing on any platform:
 # Linux goes through moq-v4l (bindings checked in), macOS and Windows use OS
-# frameworks. Still off by default until every distribution ships it, which is
+# frameworks (Windows display/window capture requires Windows 10 2004+ WGC).
+# Still off by default until every distribution ships it, which is
 # a packaging decision rather than a build cost. moq-cli's `capture` turns it on.
 capture = ["dep:libc", "dep:moq-v4l", "dep:x11rb", "dep:zune-jpeg"]
 # Android MediaCodec encode/decode and its AHardwareBuffer frame surface. Kept
@@ -216,6 +217,11 @@ objc2-video-toolbox = "0.3.2"
 # vendor SDK. The Direct3D11 / Dxgi features cover the shared D3D11 device and
 # the `IMFDXGIBuffer` surfaces wrapping each captured texture.
 windows = { version = "0.62", features = [
+    "Foundation",
+    "Foundation_Metadata",
+    "Graphics_Capture",
+    "Graphics_DirectX_Direct3D11",
+    "Security_Authorization_AppCapabilityAccess",
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_Media_MediaFoundation",
@@ -225,12 +231,13 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
-    # PrintWindow lives under Storage_Xps in the Win32 metadata; it is how a
-    # DirectComposition window renders into our capture DC.
-    "Win32_Storage_Xps",
+    "Win32_Graphics_Dwm",
     "Win32_System_Ole",
     "Win32_System_Threading",
     "Win32_System_Variant",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
     "Win32_UI_HiDpi",
     "Win32_UI_WindowsAndMessaging",
 ] }
