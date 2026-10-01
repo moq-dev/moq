@@ -490,7 +490,12 @@ impl SubscriptionCleanup {
 	/// their cleanup independently; this records the track's terminal state.
 	fn abort(&self, err: &Error) {
 		for (_, entry) in self.0.lock().drain() {
-			let _ = entry.producer.abort(err.clone());
+			let _ = entry.producer.abort_session(err.clone());
+		}
+	}
+	fn close(&self) {
+		for (_, entry) in self.0.lock().drain() {
+			let _ = entry.producer.close();
 		}
 	}
 }
@@ -545,6 +550,11 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 		// rejects with `err` rather than `Dropped`.
 		self.subscriber.note_end(err);
 		self.cleanup.abort(err);
+	}
+
+	pub fn close(&self) {
+		self.subscriber.note_end(&Error::Cancel);
+		self.cleanup.close();
 	}
 
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {

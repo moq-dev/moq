@@ -427,6 +427,8 @@
 
         # Apply our overlay to get the package definitions
         overlayPkgs = pkgs.extend self.overlays.default;
+
+        quest-cli = quest.packages.${system}.default;
       in
       {
         packages = (rec {
@@ -459,6 +461,10 @@
             ;
 
           inherit uniffi-bindgen-dart;
+
+          # The quest CLI alone, so quest.yml can validate the tree without
+          # realising the whole dev shell.
+          quest = quest-cli;
 
           # Bundle of packaging + repo-publish tooling, pinned via flake.lock.
           # CI builds this and prepends its bin/ to $PATH so subsequent steps
@@ -504,7 +510,7 @@
             ++ goDeps
             ++ dartDeps
             ++ devTools
-            ++ [ quest.packages.${system}.default ];
+            ++ [ quest-cli ];
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).

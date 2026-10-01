@@ -67,7 +67,19 @@ pub struct Config<S: crate::transport::poll::Session> {
 	pub peer_declared: Option<peer::Peer>,
 }
 
-pub fn start<S>(config: Config<S>) -> Result<(MaybeSendBox<'static, Result<(), Error>>, crate::goaway::Handle), Error>
+pub(crate) struct Driver {
+	pub(crate) local_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
+	future: MaybeSendBox<'static, Result<(), Error>>,
+}
+
+impl std::future::Future for Driver {
+	type Output = Result<(), Error>;
+	fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+		self.future.as_mut().poll(cx)
+	}
+}
+
+pub fn start<S>(config: Config<S>) -> Result<(Driver, crate::goaway::Handle), Error>
 where
 	S: crate::transport::poll::Boxable,
 {
@@ -94,6 +106,8 @@ where
 	// server to open connections (draft-19 sect 10.4).
 	let (goaway_handle, goaway) = crate::goaway::Handle::new(!client);
 
+	let local_close = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+	let closing = local_close.clone();
 	let driver = async move {
 		// Our own Hop ID, taken from whichever origin the caller actually supplied so
 		// every session out of this process stamps the same one and cross-session loop
@@ -193,10 +207,13 @@ where
 				let mut unis = std::pin::pin!(err_only(run_unis(
 					adapter.clone(),
 					subscriber.clone(),
-					None,
-					false,
-					version,
-					goaway,
+					UniSetup {
+						peer: None,
+						read: false,
+						version,
+						goaway,
+						local_close: closing.clone()
+					},
 				)));
 				let mut dispatch = std::pin::pin!(err_only(run_dispatch(
 					dispatch_session,
@@ -270,7 +287,9 @@ where
 					Poll::Pending
 				})
 				.await;
-				if let Err(err) = &res {
+				if closing.load(std::sync::atomic::Ordering::Relaxed) {
+					subscriber.close();
+				} else if let Err(err) = &res {
 					// Every track this session was receiving ends with its error.
 					subscriber.abort(err);
 				}
@@ -339,10 +358,13 @@ where
 				let mut unis = std::pin::pin!(err_only(run_unis(
 					session.clone(),
 					subscriber.clone(),
-					Some(peer_setup.clone()),
-					setup_read,
-					version,
-					goaway,
+					UniSetup {
+						peer: Some(peer_setup.clone()),
+						read: setup_read,
+						version,
+						goaway,
+						local_close: closing.clone()
+					},
 				)));
 				let mut dispatch = std::pin::pin!(err_only(run_dispatch(
 					session.clone(),
@@ -411,7 +433,9 @@ where
 					Poll::Pending
 				})
 				.await;
-				if let Err(err) = &res {
+				if closing.load(std::sync::atomic::Ordering::Relaxed) {
+					subscriber.close();
+				} else if let Err(err) = &res {
 					// Every track this session was receiving ends with its error.
 					subscriber.abort(err);
 				}
@@ -438,7 +462,13 @@ where
 	}
 	.maybe_boxed();
 
-	Ok((driver, goaway_handle))
+	Ok((
+		Driver {
+			local_close,
+			future: driver,
+		},
+		goaway_handle,
+	))
 }
 
 /// What a peer's SETUP told us, beyond the stream it arrived on.
@@ -657,23 +687,27 @@ impl UniType {
 	}
 }
 
-/// Accept incoming uni streams and dispatch each to a handler.
-///
-/// For v17+, this also handles the SETUP stream (0x2F00) and GOAWAY.
-async fn run_unis<S>(
-	mut session: S,
-	subscriber: Subscriber<S>,
-	// Where to record the peer's MoQ Cluster options once its SETUP arrives. `None`
-	// for draft-14..16, whose SETUP rides the control stream instead.
-	peer_setup: Option<peer::PeerSetup>,
-	// Whether the peer's SETUP was already consumed before this loop started.
-	setup_read: bool,
+/// Setup and lifecycle state for the incoming uni stream dispatcher.
+struct UniSetup {
+	peer: Option<peer::PeerSetup>,
+	read: bool,
 	version: Version,
 	goaway: crate::goaway::Protocol,
-) -> Result<(), Error>
+	local_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Accept incoming uni streams, including SETUP and GOAWAY on draft-17+.
+async fn run_unis<S>(mut session: S, subscriber: Subscriber<S>, setup: UniSetup) -> Result<(), Error>
 where
 	S: crate::transport::poll::Boxable,
 {
+	let UniSetup {
+		peer: peer_setup,
+		read: setup_read,
+		version,
+		goaway,
+		local_close,
+	} = setup;
 	let outer_version = crate::Version::Ietf(version);
 	let mut tasks = TaskSet::owned();
 	// A gated server accept already read the peer's one SETUP off its own uni stream,
@@ -686,8 +720,21 @@ where
 				let mut cx = std::task::Context::from_waker(waiter.waker());
 				session.poll_accept_uni(&mut cx)
 			})
-			.await
-			.map_err(Error::from_transport)?;
+			.await;
+		let recv = match recv {
+			Ok(recv) => recv,
+			Err(err) => {
+				let err = Error::from_transport(err);
+				// Settle tracks and open groups before the owned receive tasks drop
+				// their cancellation guards, which would otherwise record Cancel.
+				if local_close.load(std::sync::atomic::Ordering::Relaxed) {
+					subscriber.close();
+				} else {
+					subscriber.abort(&err);
+				}
+				return Err(err);
+			}
+		};
 		let mut reader: Reader<S::RecvStream, crate::Version> = Reader::new(recv, outer_version);
 		// A stream that dies before its type varint is that stream's failure, not the
 		// session's. RESET_STREAM is how a peer drops a group, and QUIC does not order
@@ -1408,7 +1455,17 @@ mod tests {
 		let (_goaway, goaway) = crate::goaway::Handle::new(false);
 		// The peer's SETUP has not arrived yet, which is the state a group stream racing
 		// ahead of it lands in.
-		let mut unis = std::pin::pin!(run_unis(session, subscriber, Some(peer_setup), false, version, goaway));
+		let mut unis = std::pin::pin!(run_unis(
+			session,
+			subscriber,
+			UniSetup {
+				peer: Some(peer_setup),
+				read: false,
+				version,
+				goaway,
+				local_close: Default::default()
+			}
+		));
 
 		for _ in 0..100 {
 			if let std::task::Poll::Ready(result) = futures::poll!(unis.as_mut()) {

@@ -64,7 +64,9 @@ second, for finished tracks to deliver their last groups and FIN, returning
 `Error::Timeout` if it gave up. Finish or abort live tracks before calling it.
 moq-transport (IETF) sessions close without waiting. Dropping the driver
 cancels the session. `moq-tokio` and `moq-wasm` drive sessions for their
-callers.
+callers. A deliberate local session close ends received tracks cleanly after
+their delivered groups. A peer close ends received tracks and open group
+readers with the session error, preserving its close code.
 
 `origin::Producer::new` returns a driver with the same `time::Driver`
 interface. It calls `cache::Pool::gc(now)` after each poll and folds the next

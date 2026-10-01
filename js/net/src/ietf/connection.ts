@@ -142,7 +142,7 @@ export class Connection implements Established {
 			// Start the adapter read loop (routes control messages to virtual streams)
 			void adapter.run().catch((err: unknown) => {
 				if (!this.#closed) console.error("adapter error", err);
-				this.close();
+				this.#close();
 			});
 		}
 
@@ -171,6 +171,8 @@ export class Connection implements Established {
 	 * Closes the connection.
 	 */
 	close() {
+		if (this.#closed) return;
+		this.#subscriber.close();
 		this.#close();
 	}
 
@@ -204,7 +206,7 @@ export class Connection implements Established {
 				console.error("fatal error running connection", err);
 			}
 		} finally {
-			this.close();
+			this.#close();
 		}
 	}
 
@@ -299,7 +301,7 @@ export class Connection implements Established {
 					console.error(
 						`unsolicited publish_namespace from a peer that implements MoQ Solicit: broadcast=${msg.trackNamespace}`,
 					);
-					this.close();
+					this.#close();
 					break;
 				}
 
@@ -399,7 +401,7 @@ export class Connection implements Established {
 				console.error("error reading setup stream", err);
 			}
 		} finally {
-			this.close();
+			this.#close();
 		}
 	}
 

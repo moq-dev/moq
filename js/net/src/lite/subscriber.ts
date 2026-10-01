@@ -1071,7 +1071,7 @@ export class Subscriber {
 			producer.close();
 			stream.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
 		} catch (err: unknown) {
-			const e = error(err);
+			const e = await sessionCause(this.#quic, err);
 			producer.close(e);
 			stream.stop(e);
 		} finally {
