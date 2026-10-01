@@ -60,6 +60,12 @@ Decided (2026-10-01), from a discussion with t0ms:
   rewrites continuity counters.
 - Source clock drift is handled by the fixed-delay release's clock recovery
   (#4645), shared with the demultiplexed export, not here.
+- Passthrough is the ST 2022-7 (1+1) lane: two exporters fed the same
+  objects emit identical bytes, continuity counters included. The
+  demultiplexed export does not promise counter identity; matching them
+  there would need a dedicated PCR PID on every export. Aligning the legs in
+  time is a non-goal: each releases at its own first arrival plus the delay,
+  so their skew is the path difference, which a 2022-7 receiver absorbs.
 - Rust only. `js/hang` does not parse `m2ts`, and a player sees no
   rendition for the track.
 - `--passthrough` publishes only the passthrough track. Publishing it
