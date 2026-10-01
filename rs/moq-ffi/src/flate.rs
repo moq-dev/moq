@@ -45,6 +45,9 @@ pub struct MoqFlateSnapshotProducer {
 impl MoqFlateSnapshotProducer {
 	/// Publish `track` as an opaque snapshot track (lossy latest-value), advertised in `broadcast`'s catalog.
 	///
+	/// `track` must come from `broadcast`; otherwise the catalog advertises a track the broadcast
+	/// does not carry.
+	///
 	/// Takes over `track`, whose handle is closed afterward. Errors if the catalog already
 	/// carries an entry under the track's name.
 	#[uniffi::constructor]
@@ -88,6 +91,9 @@ pub struct MoqFlateStreamProducer {
 #[uniffi::export]
 impl MoqFlateStreamProducer {
 	/// Publish `track` as an opaque stream track (lossless append-log), advertised in `broadcast`'s catalog.
+	///
+	/// `track` must come from `broadcast`; otherwise the catalog advertises a track the broadcast
+	/// does not carry.
 	///
 	/// Takes over `track`, whose handle is closed afterward. Errors if the catalog already
 	/// carries an entry under the track's name.

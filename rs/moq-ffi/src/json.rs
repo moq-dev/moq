@@ -111,6 +111,9 @@ pub struct MoqJsonSnapshotProducer {
 impl MoqJsonSnapshotProducer {
 	/// Publish `track` as a JSON snapshot track (lossy latest-value), advertised in `broadcast`'s catalog.
 	///
+	/// `track` must come from `broadcast`; otherwise the catalog advertises a track the broadcast
+	/// does not carry.
+	///
 	/// The catalog carries `json.tracks.<name>` (`mode: snapshot`, and `compression: deflate` when
 	/// set) for as long as the producer lives; finishing or dropping it retires the entry. Takes
 	/// over `track`, whose handle is closed afterward. Errors if the catalog already carries an
@@ -218,6 +221,9 @@ pub struct MoqJsonStreamProducer {
 #[uniffi::export]
 impl MoqJsonStreamProducer {
 	/// Publish `track` as a JSON stream track (lossless append-log), advertised in `broadcast`'s catalog.
+	///
+	/// `track` must come from `broadcast`; otherwise the catalog advertises a track the broadcast
+	/// does not carry.
 	///
 	/// The catalog carries `json.tracks.<name>` (`mode: stream`) for as long as the producer
 	/// lives. Takes over `track`, whose handle is closed afterward. Errors if the catalog already
