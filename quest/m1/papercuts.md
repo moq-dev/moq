@@ -9,11 +9,13 @@ gitignored `.scratch/` alone, and `remote_wake_unparks` passes under load.
 ## Plan
 
 - JS republish: `@moq/net` publishes only what it produces (decided with
-  moq-dev/moq#4599), naming its own origin. When the lite publisher resolves
-  a request to a received route rather than an originated one (the
-  `local(..) ?? demand(..)` path in `js/net/src/lite/publisher.ts`,
-  `RouteEntry.originated` in `origin.ts`), refuse it loudly instead of
-  labeling upstream content with the local origin.
+  moq-dev/moq#4599), naming its own origin. Requests already skip received
+  routes (`#demand` resolves through `bestEntry(path, received)` in
+  `js/net/src/origin.ts`), so the gap is an app handing a consumed
+  `broadcast.Consumer` (one a session delivered) back to an origin for
+  serving, e.g. `Request.accept(consumer)`, which labels upstream content
+  with the local origin's hop. Refuse that loudly at the point it enters the
+  origin, not in the lite publisher's `local(..) ?? demand(..)` resolve.
 - `.scratch/`: add it to `.taplo.toml`'s excludes and to `.remarkignore`, so
   `taplo format` and `sh/markdown.sh` stop rewriting agents' scratch clones.
   biome, nixfmt, just, and shfmt already skip it.

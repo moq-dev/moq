@@ -6,7 +6,8 @@ A qmux session returns connection-level credit for every byte it receives,
 whether the app reads it, drops the stream unread, or it arrives after
 STOP_SENDING, so a long-lived session never stalls on MAX_DATA. `close()`
 delivers its APPLICATION_CLOSE frame before the transport drops, so a TCP or
-WebSocket peer always sees the close code. Both hold on the 0.5 line that
+WebSocket peer sees the close code whenever the transport stays writable
+within the close bound. Both hold on the 0.5 line that
 `main` pins and the 0.6 line `dev` uses.
 
 ## Plan
