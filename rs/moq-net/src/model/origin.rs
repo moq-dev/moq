@@ -1415,10 +1415,7 @@ impl Producer {
 	pub fn new(config: Config) -> (Self, Driver) {
 		let (tasks, set) = TaskSet::new();
 		let scope = OriginScope::default();
-		let shared = kio::Shared::new(OriginState {
-			update_hold: config.update_hold,
-			..Default::default()
-		});
+		let shared = kio::Shared::new(OriginState::new(config.update_hold));
 		let timers = Clock::default();
 		let pool = config.pool.clone();
 		let producer = Self {
@@ -1500,7 +1497,7 @@ impl Producer {
 			hop,
 			scope: OriginScope::empty(),
 			root: PathOwned::default(),
-			shared: kio::Shared::default(),
+			shared: kio::Shared::new(OriginState::new(DEFAULT_UPDATE_HOLD)),
 			pool: cache::Pool::default(),
 			cache_duration: Duration::MAX,
 			default_max_age: track::DEFAULT_MAX_AGE,
@@ -3218,9 +3215,9 @@ impl RouteTable {
 /// Carried in a [`kio::Shared`], so producers, consumers, and handlers work
 /// under one lock. Broadcasts published here are route table entries like the
 /// routes announced from elsewhere; this holds everything that serves a path.
-#[derive(Default)]
 struct OriginState {
-	// See [`Config::update_hold`].
+	// See [`Config::update_hold`]. No `Default`: every origin takes it from its
+	// config, so no path silently disables the hold.
 	update_hold: Duration,
 
 	// The announced routes, keyed by prefix. The table holds one entry per live
@@ -3253,6 +3250,19 @@ struct OriginState {
 }
 
 impl OriginState {
+	fn new(update_hold: Duration) -> Self {
+		Self {
+			update_hold,
+			routes: RouteTable::default(),
+			next_route: 0,
+			next_watch: 0,
+			cursors: HashMap::new(),
+			fronts: WeakCache::default(),
+			withdrawn: HashMap::new(),
+			closed: false,
+		}
+	}
+
 	/// Whether a peer in `hops` withdrew `prefix`.
 	fn withdrawn_through(&self, prefix: &Path, hops: &Hops) -> bool {
 		if self.withdrawn.is_empty() {
@@ -4523,7 +4533,16 @@ impl AnnounceConsumer {
 	pub fn try_next(&mut self) -> Option<AnnounceUpdate> {
 		let now = self.timers.try_now();
 		let mut state = self.state.write().ok()?;
-		let prefix = state.scan(&mut self.held, now, self.update_hold).ok()?;
+		let prefix = match state.scan(&mut self.held, now, self.update_hold) {
+			Ok(prefix) => prefix,
+			Err(wake) => {
+				// Arm the hold even though nothing polls it: the armed timer wakes the
+				// driver, so its clock reaches the deadline for a later call to see.
+				drop(state);
+				self.hold.set(wake);
+				return None;
+			}
+		};
 		self.held.remove(&prefix);
 		let update = state.take_prefix(prefix)?;
 		drop(state);
@@ -6577,6 +6596,39 @@ mod tests {
 		let scoped = peer.scope("room", &Patterns::from(Pattern::all())).unwrap();
 		let _nested = scoped.dynamic("x", Route::default().with_via(origin(8))).unwrap();
 		assert_eq!(announced.assert_next_active("room/x").source(), Source::Peer(origin(8)));
+	}
+
+	/// A caller that only polls with `try_next` still gets a held update once its
+	/// hold passes. Nothing else wakes the idle driver, so the hold's own timer
+	/// must, or the origin's clock never reaches the deadline.
+	#[tokio::test(start_paused = true)]
+	async fn try_next_delivers_a_held_update() {
+		// Let paused time pass and every task woken by it run.
+		async fn step(by: Duration) {
+			tokio::time::advance(by).await;
+			for _ in 0..10 {
+				tokio::task::yield_now().await;
+			}
+		}
+
+		let producer = origin(1).produce();
+		let peer = producer.clone().peer();
+		let mut announced = producer.consume().announced();
+		step(Duration::from_millis(1)).await;
+
+		let route = |chain: &[u64], via| Route::default().with_hops(hops(chain)).with_via(origin(via));
+		let near = peer.dynamic("room", route(&[9, 2], 2)).unwrap();
+		assert!(announced.try_next().unwrap().kind.is_active());
+
+		let _far = peer.dynamic("room", route(&[9, 3, 4], 4)).unwrap();
+		drop(near);
+		assert!(announced.try_next().is_none(), "the update is held");
+		step(Duration::from_millis(1)).await;
+		assert!(announced.try_next().is_none(), "the update is still held");
+		step(DEFAULT_UPDATE_HOLD).await;
+		let update = announced.try_next().expect("the hold passed");
+		assert_eq!(update.kind, AnnounceKind::Updated);
+		assert_eq!(update.route.hops, hops(&[9, 3, 4]));
 	}
 
 	/// A new route and a removal are delivered at once. A change of the best route
