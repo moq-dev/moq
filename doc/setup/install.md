@@ -32,7 +32,7 @@ cargo install moq-relay moq-cli
 # Homebrew (macOS and Linux)
 brew install moq-dev/tap/moq-relay moq-dev/tap/moq
 
-# Nix (pin a release tag to use the binary cache)
+# Nix (`release` builds from source; a release tag such as moq-relay-v0.12.4 uses the binary cache)
 nix run github:moq-dev/moq/release#moq-relay -- relay.toml
 nix run github:moq-dev/moq/release#moq -- --help
 
