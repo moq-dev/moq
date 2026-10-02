@@ -29,14 +29,13 @@ use super::hang::{Catalog, CatalogExt};
 ///
 /// #[derive(Serialize, Deserialize, Clone)]
 /// struct Mavlink {
-///     #[serde(flatten)]
-///     binary: BinaryConfig,
+///     config: BinaryConfig,
 ///     sysid: u8,
 /// }
 ///
 /// impl AsMut<BinaryConfig> for Mavlink {
 ///     fn as_mut(&mut self) -> &mut BinaryConfig {
-///         &mut self.binary
+///         &mut self.config
 ///     }
 /// }
 ///
@@ -57,14 +56,14 @@ use super::hang::{Catalog, CatalogExt};
 ///     }
 ///     fn estimate(&self) -> Estimate {
 ///         Estimate::default()
-///             .with_bitrate(self.binary.bitrate)
-///             .with_jitter(self.binary.jitter)
-///             .with_delay(self.binary.delay)
+///             .with_bitrate(self.config.bitrate)
+///             .with_jitter(self.config.jitter)
+///             .with_delay(self.config.delay)
 ///     }
 ///     fn set_estimate(&mut self, estimate: Estimate) {
-///         self.binary.bitrate = estimate.bitrate;
-///         self.binary.jitter = estimate.jitter;
-///         self.binary.delay = estimate.delay;
+///         self.config.bitrate = estimate.bitrate;
+///         self.config.jitter = estimate.jitter;
+///         self.config.delay = estimate.delay;
 ///     }
 /// }
 ///
@@ -74,7 +73,7 @@ use super::hang::{Catalog, CatalogExt};
 /// # ) -> moq_mux::Result<()> {
 /// let track = broadcast.create_track("telemetry", None)?;
 /// // The producer fixes the mode, so the one passed here is only a placeholder.
-/// let entry = Mavlink { binary: BinaryConfig::new(Mode::Stream), sysid: 1 };
+/// let entry = Mavlink { config: BinaryConfig::new(Mode::Stream), sysid: 1 };
 /// let mut telemetry = catalog.binary_stream(track, entry)?;
 /// telemetry.append(&b"\xfd..."[..])?;
 /// # Ok(())

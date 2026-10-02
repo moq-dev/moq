@@ -120,8 +120,9 @@ or `catalog.binary.tracks`, then pair its name and config with
 subscribe by name, and hand the track to `@moq/json` or `@moq/binary`.
 
 An application with its own per-track fields can list a data track in its own
-root section instead, flattening the JSON or binary entry beside those fields
-so there is one entry per track. Name the section with a namespaced key such as
+root section instead, nesting the JSON or binary config in a `config` field
+beside the application fields so future config fields cannot collide with them.
+Name the section with a namespaced key such as
 `com.example.mavlink`. A generic consumer only finds tracks in `json` and
 `binary`.
 
