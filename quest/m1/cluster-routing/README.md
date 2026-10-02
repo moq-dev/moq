@@ -20,7 +20,7 @@ route is the fallback), and a permanently mixed-version cluster.
 
 ### Decisions
 
-Settled in the 2026-10-01 audit (#TBD), replacing the per-broadcast path
+Settled in the 2026-10-01 audit (#4694), replacing the per-broadcast path
 vector the 2026-09-30 cache-tiers audit kept:
 
 - **Two layers on one stream.** A ROUTE advertises reachability of one origin
