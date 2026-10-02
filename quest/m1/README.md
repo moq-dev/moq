@@ -28,6 +28,7 @@ QUIC studies there on that rule.
 - [One route cost](/quest/m1/route-cost.md) - on `dev`, Warm and Cold collapse to one static route cost
 - [Delete removed cluster flags](/quest/m1/cluster-shims.md) - on `dev`, once a release has carried their refusals, `mesh` and `linger` leave `cluster::Config`
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
+- [Demand everywhere](/quest/m1/demand-everywhere.md) - on `dev`, requests and producers at every level watch subscribers through `demand()` alone, ahead of the bindings exposing it
 - [Merge queue](/quest/m1/merge-queue.md) - the required checks run on `merge_group`, so a stale green check can no longer break main
 - [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, flate, audio, and video namespaces built from the handle below
@@ -48,6 +49,7 @@ QUIC studies there on that rule.
 - [JS cache window](/quest/m1/js-prune-cache-window.md) - js/net ages idle groups on a cache window and keeps max_age as media-time staleness, as Rust does
 - [Cross-relay bursts](/quest/m1/cross-relay-bursts.md) - bursty small-group tracks cross two relays without lost groups, unanswered FETCHes, or stalls
 - [FETCH abandonment](/quest/m1/fetch-abandonment.md) - Rust and JS lite subscribers close an upstream FETCH once demand leaves, so an abandoned FETCH is released across relays
+- [IETF FETCH abandonment](/quest/m1/ietf-fetch-abandonment.md) - the Rust moq-transport subscriber cancels a group FETCH once its last reader leaves
 - [Watch and publish under CSP](/quest/m1/csp-assets.md) - blob workers stay the default; strict-CSP apps host the files and set a base URL
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [A week of nightly interop after #4529](/quest/m1/interop-week.md) - the nightly traces the stall diagnosis reads
