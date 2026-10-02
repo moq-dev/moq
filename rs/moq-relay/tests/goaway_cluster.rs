@@ -177,7 +177,10 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 		.expect("track ended");
 	assert_eq!(read(&mut reading).await, (0, Some("a".into())));
 
+	// The cursor replays A's route first. After the GOAWAY, A's re-prices to DRAIN, so
+	// the next route at any other cost is B's.
 	let mut announced = consumer.announced();
+	within("A's route", announced.next()).await.expect("announce update");
 	session_a
 		.drain()
 		.send(moq_net::goaway::Goaway::redirect(format!("tcp://127.0.0.1:{port_b}/")))
