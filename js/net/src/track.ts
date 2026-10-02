@@ -217,6 +217,11 @@ export class Request {
 		hooks.pendingTrackProducer = (request) => request.#producer;
 	}
 
+	/** Watch the subscribers waiting for this request. */
+	demand(): Demand {
+		return this.#producer.demand();
+	}
+
 	/** The aggregate subscription requested for this track. */
 	get subscription(): Readonly<Subscription> {
 		return this.#producer.subscription.peek() ?? subscriptionDefaults();
@@ -415,7 +420,7 @@ let ordered_: {
 let makeDemand: (name: string, used: Getter<boolean>, state: TrackState) => Demand;
 
 /**
- * A watch-only view of a track's subscriber demand, from {@link Producer.demand}. Mirrors the
+ * A watch-only view of a track's subscriber demand, from {@link Producer.demand} or {@link Request.demand}. Mirrors the
  * Rust `Demand`.
  *
  * Lets a publisher gate work (on-demand capture or encoding) on whether anyone is subscribed,

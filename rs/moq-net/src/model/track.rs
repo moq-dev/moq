@@ -1836,9 +1836,12 @@ impl Dynamic {
 		poll_requested_group(&self.state, &self.fetch, waiter)
 	}
 
-	/// Poll for the track becoming unused (every consumer dropped).
-	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.state.poll_unused(waiter).map(|_| ())
+	/// Watch subscriber demand without keeping the track alive.
+	pub fn demand(&self) -> Demand {
+		Demand {
+			name: self.name.clone(),
+			state: self.state.weak(),
+		}
 	}
 }
 
@@ -2199,7 +2202,8 @@ impl super::WeakEntry for TrackWeak {
 
 /// A cloneable, watch-only handle to a track's subscriber demand.
 ///
-/// Obtained from [`Producer::demand`]. A publisher uses it to react to
+/// Obtained from [`Producer::demand`], [`Request::demand`], or [`Dynamic::demand`].
+/// A publisher uses it to react to
 /// whether anyone is subscribed (on-demand capture / encoding) without being able
 /// to publish frames or close the track. It's a weak handle, so it neither keeps
 /// the track alive nor pins its cached groups; once the owning [`Producer`]
@@ -2961,6 +2965,11 @@ impl kio::Task for Querying {
 }
 
 impl group::Request {
+	/// Watch the callers waiting for this fetch without keeping the attempt alive.
+	pub fn demand(&self) -> group::Demand {
+		group::Demand::fetch(self.sequence, self.result.weak())
+	}
+
 	/// The group sequence the consumer wants.
 	pub fn sequence(&self) -> u64 {
 		self.sequence
@@ -4347,10 +4356,12 @@ impl Request {
 		Dynamic::new(self.name.clone(), self.state.clone(), self.alive.clone())
 	}
 
-	/// Poll for the request becoming unused (every consumer dropped), so a relay can
-	/// stop serving and drop the request.
-	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.state.poll_unused(waiter).map(|_| ())
+	/// Watch subscriber demand without keeping the track alive.
+	pub fn demand(&self) -> Demand {
+		Demand {
+			name: self.name.clone(),
+			state: self.state.weak(),
+		}
 	}
 
 	/// Mark this request as taken by a dynamic handler, which alone decides its answer.
@@ -4362,7 +4373,7 @@ impl Request {
 	}
 
 	/// Reject only while no consumer needs this pending track. Demand and the check
-	/// share one lock, so demand returning after `poll_unused` wins the race, and the
+	/// share one lock, so demand returning after `Demand::poll_unused` wins the race, and the
 	/// close under that lock stops a later consumer attaching to a dead request.
 	pub(crate) fn reject_unused(&self, err: Error) -> bool {
 		match self.state.write_unused() {
@@ -8931,6 +8942,42 @@ mod test {
 
 		assert!(consumer.peek_group(2).is_none(), "expired backfill is reclaimed");
 		assert!(pool.used() < used, "its bytes are released");
+	}
+
+	#[test]
+	fn request_and_dynamic_share_weak_track_demand() {
+		let request = Request::new(Arc::new(broadcast::Info::default()), "demand");
+		let dynamic = request.dynamic();
+		let demand = request.demand();
+		let consumer = request.consume();
+		assert!(demand.is_used());
+		assert!(dynamic.demand().is_used());
+		drop(consumer);
+		assert!(!demand.is_used());
+		let producer = request.accept(None);
+		assert_eq!(producer.demand().name(), demand.name());
+		drop(producer);
+		drop(dynamic);
+		assert!(matches!(demand.used().now_or_never(), Some(Err(Error::Dropped))));
+	}
+
+	#[test]
+	fn fetch_request_demand_counts_every_joined_caller() {
+		let producer = track_producer("test", None);
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let first = consumer.fetch_group(3, None);
+		let second = consumer.fetch_group(3, None);
+		let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		let demand = request.demand();
+		assert_eq!(demand.sequence(), 3);
+		assert!(demand.is_used());
+		drop(first);
+		assert!(demand.poll_unused(&kio::Waiter::noop()).is_pending());
+		drop(second);
+		assert!(matches!(demand.poll_unused(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
+		request.reject(Error::Cancel);
+		assert!(matches!(demand.used().now_or_never(), Some(Err(Error::Cancel))));
 	}
 
 	#[tokio::test]

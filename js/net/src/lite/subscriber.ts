@@ -868,7 +868,10 @@ export class Subscriber {
 			// promise; the check is level-triggered, so a coalesced fetch that arrives before we
 			// cancel re-arms and resumes.
 			const idle: unique symbol = Symbol("idle");
-			let unused = group.unused().then((): typeof idle => idle);
+			let unused = group
+				.demand()
+				.unused()
+				.then((): typeof idle => idle);
 			// A decode consumes its frame whenever it lands, so one outstanding across a re-arm is
 			// kept and awaited again rather than abandoned with its frame.
 			let pending: Promise<netGroup.Frame | undefined> | undefined;
@@ -879,8 +882,11 @@ export class Subscriber {
 					pending ??= stream.reader.decodeMaybe(decode);
 					const next = await race([pending, group.closed, unused]);
 					if (next === idle) {
-						if (!group.isClosed && group.used.peek()) {
-							unused = group.unused().then((): typeof idle => idle);
+						if (!group.isClosed && group.demand().used.peek()) {
+							unused = group
+								.demand()
+								.unused()
+								.then((): typeof idle => idle);
 							continue;
 						}
 						break;
@@ -1271,9 +1277,18 @@ async function untilClosed<T>(group: netGroup.Producer, step: Promise<T>): Promi
 async function untilAbandoned<T>(group: netGroup.Producer, step: Promise<T>): Promise<T> {
 	const idle: unique symbol = Symbol("idle");
 	for (;;) {
-		const value = await untilClosed(group, race([step, group.unused().then((): typeof idle => idle)]));
+		const value = await untilClosed(
+			group,
+			race([
+				step,
+				group
+					.demand()
+					.unused()
+					.then((): typeof idle => idle),
+			]),
+		);
 		if (value !== idle) return value as T;
-		if (!group.used.peek()) throw new StreamError(StreamCode.Cancel, { message: "cancel" });
+		if (!group.demand().used.peek()) throw new StreamError(StreamCode.Cancel, { message: "cancel" });
 	}
 }
 

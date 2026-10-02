@@ -1768,7 +1768,7 @@ where
 					else {
 						return Poll::Ready(Setup::Gone);
 					};
-					if pending.poll_unused(waiter).is_ready() {
+					if pending.demand().poll_unused(waiter).is_ready() {
 						return Poll::Ready(Setup::Unused);
 					}
 					Poll::Pending

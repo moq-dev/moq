@@ -3719,7 +3719,7 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 					// otherwise hold this task, its TRACK stream, and the track for good.
 					// Dropping the fetch resets the stream.
 					let pending = request.as_ref().expect("request pending");
-					if pending.poll_unused(waiter).is_ready() {
+					if pending.demand().poll_unused(waiter).is_ready() {
 						if pending.reject_unused(Error::Cancel) {
 							self.state = TrackRunState::Done;
 							return Poll::Ready(());

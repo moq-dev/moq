@@ -124,3 +124,13 @@ Examples in
 [`js/net/examples/`](https://github.com/moq-dev/moq/tree/main/js/net/examples).
 Runs in the browser and, over WebSocket, in Node, Bun, and Deno; see
 [server-side](/lib/js/#server-side).
+
+## Subscriber demand
+
+Call `demand()` on a track producer or pending track request, a group producer,
+or a broadcast producer. The returned `Track.Demand`, `Group.Demand`, or
+`Broadcast.Demand` exposes a read-only `used` signal, `unused()`, and `closed`.
+A broadcast watches subscribers to its tracks; holding a broadcast consumer
+alone is not demand. A group's demand counts its mirror readers, preserving
+fetch coalescing: the shared download becomes unused only after every reader
+leaves. Demand handles cannot write or close the producer.

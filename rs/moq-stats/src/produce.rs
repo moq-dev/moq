@@ -480,7 +480,7 @@ impl PendingPair {
 		self.plain
 			.iter()
 			.chain(self.compressed.iter())
-			.any(|request| request.poll_unused(waiter).is_pending())
+			.any(|request| request.demand().poll_unused(waiter).is_pending())
 	}
 }
 
