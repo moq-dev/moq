@@ -22,12 +22,13 @@ Facts (2026-10-02):
 - Rulesets: "main" targets `~DEFAULT_BRANCH` (linear history, Check and Test
   required), so it moves to trunk. "dev" targets `refs/heads/dev` (PRs only,
   squash or merge commit) and does not follow a rename.
-- Renaming `main` makes GitHub retarget its 35 open PRs to `release`; `dev`'s 11
+- Renaming `main` makes GitHub retarget its 35 open PRs to `release`; `dev`'s 10
   follow it to the new `main`.
 - `sh/changed.sh` falls back to `origin/main`, which stays right for trunk.
   `quest` hardcodes `main` as the milestone base, which becomes right too.
-- 76 quest files say "on `dev`"; AGENTS.md (API, Development, quest sections),
-  CONTRIBUTING.md, `py/AGENTS.md`, and `quest/README.md` encode the split.
+- 52 quest files on `main` (40 on `dev`) say "on `dev`"; AGENTS.md (API,
+  Development, quest sections), CONTRIBUTING.md, `py/AGENTS.md`, and
+  `quest/README.md` encode the split.
 - `nix run github:moq-dev/moq`, `npx skills add moq-dev/moq`, and docs "edit"
   links follow the default branch.
 
