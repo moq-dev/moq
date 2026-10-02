@@ -2459,10 +2459,10 @@ impl TrackIo {
 		self.dead = Some(copy);
 	}
 
-	/// Retire `copy` as a takeover replaces it. Mid-group, its segment is served from a
-	/// warm cache of its delivery instead, open group included, so a reader arriving
-	/// later still gets the group's head and the takeover continues it. Between groups
-	/// its own cache keeps everything finished, so there is nothing to do.
+	/// Retire `copy` as a takeover replaces it. Mid-group, park its delivery warm, open
+	/// group included, so a reader arriving later still gets the group's head and the
+	/// takeover continues it. Between groups its own cache keeps everything finished, so
+	/// there is nothing to do.
 	fn retire(&mut self, copy: &track::Consumer) -> Result<(), Error> {
 		let Some(held) = self.held.take() else {
 			return Ok(());
@@ -2474,7 +2474,7 @@ impl TrackIo {
 			return Ok(());
 		};
 		self.head = None;
-		self.resume.retire(&warm.track)?;
+		self.resume.park(&warm.track)?;
 		self.warm = Some(warm);
 		Ok(())
 	}
