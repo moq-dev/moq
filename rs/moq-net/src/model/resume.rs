@@ -50,6 +50,8 @@ struct Segment {
 	/// A parked track's warm cache (see [`Producer::park`]), which live readers hold
 	/// until the next segment's copy resolves its start.
 	warm: bool,
+	/// `track` is a retired source's cache (see [`Producer::retire`]).
+	cache: bool,
 }
 
 impl Segment {
@@ -328,6 +330,7 @@ impl ResumeState {
 			track,
 			ask: start,
 			warm: false,
+			cache: false,
 		});
 		self.epoch += 1;
 		self.prune();
@@ -497,6 +500,27 @@ impl Producer {
 		if let Some(segment) = state.segments.last_mut() {
 			segment.warm = true;
 		}
+		Ok(())
+	}
+
+	/// Serve the newest segment's range from `cache`, a copy of what its source delivered,
+	/// as that source retires.
+	///
+	/// The segment keeps its place, so a reader already on it keeps its cursor rather than
+	/// being handed the cached groups a second time. A reader yet to arrive, or whose
+	/// cursor died with the source, reads the cache instead.
+	pub(crate) fn retire(&mut self, cache: impl super::origin_impl::Consume<track::Consumer>) -> Result<()> {
+		let track = cache.consume();
+		let mut state = self.state.write().map_err(|_| Error::Dropped)?;
+		if state.finished || state.abort.is_some() {
+			return Err(Error::Closed);
+		}
+		let Some(last) = state.segments.last_mut() else {
+			return Err(Error::Dropped);
+		};
+		last.track = track;
+		last.cache = true;
+		state.epoch += 1;
 		Ok(())
 	}
 
@@ -1532,6 +1556,12 @@ struct SegmentSub {
 	id: u64,
 	start: Option<Position>,
 	end: Option<Position>,
+	/// Whether a reconcile already saw the segment's source retire for its cache; see
+	/// [`Producer::retire`].
+	cache: bool,
+	/// Groups below this were handed out before the cursor subscribed: a cursor
+	/// re-subscribed onto a retired source's cache must not surface them again.
+	floor: u64,
 	/// Where the source is asked to start; see [`Segment::ask`].
 	ask: Option<Position>,
 	sub: SubState,
@@ -1583,7 +1613,7 @@ impl SegmentSub {
 
 	/// The first group this segment can serve, for the underlying read cursor.
 	fn first_group(&self) -> u64 {
-		self.start.map_or(0, |start| start.group)
+		self.start.map_or(0, |start| start.group).max(self.floor)
 	}
 
 	/// The exclusive group cap this segment can serve, for the underlying read
@@ -1804,6 +1834,21 @@ impl Subscriber {
 					if let Some(warm) = &mut existing.warm {
 						warm.next = next;
 					}
+					if segment.cache && !existing.cache {
+						existing.cache = true;
+						// The source retired for its cache. A live cursor keeps reading the
+						// source, which still holds whatever it owes; one that died with it
+						// picks the cache up past what this reader already has.
+						if matches!(existing.sub, SubState::Done(Err(_))) {
+							existing.sub = SubState::Pending(segment.track.subscribe(slice(
+								&self.last_prefs,
+								segment.ask,
+								segment.end,
+							)));
+							existing.terminal = None;
+							existing.floor = self.next_sequence;
+						}
+					}
 					if existing.end != segment.end {
 						// The boundary bounds the drift anchor as well as the demand; the
 						// anchor follows in `refresh_anchor`.
@@ -1829,6 +1874,8 @@ impl Subscriber {
 						id: segment.id,
 						start: segment.start,
 						end: segment.end,
+						cache: segment.cache,
+						floor: 0,
 						ask: segment.ask,
 						sub: SubState::Pending(sub),
 						terminal: None,

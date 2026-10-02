@@ -2459,10 +2459,10 @@ impl TrackIo {
 		self.dead = Some(copy);
 	}
 
-	/// Retire `copy` as a takeover replaces it. Mid-group, park its delivery warm, open
-	/// group included, so a reader arriving later still gets the group's head and the
-	/// takeover continues it. Between groups its own cache keeps everything finished, so
-	/// there is nothing to do.
+	/// Retire `copy` as a takeover replaces it. Mid-group, its segment is served from a
+	/// warm cache of its delivery instead, open group included, so a reader arriving
+	/// later still gets the group's head and the takeover continues it. Between groups
+	/// its own cache keeps everything finished, so there is nothing to do.
 	fn retire(&mut self, copy: &track::Consumer) -> Result<(), Error> {
 		let Some(held) = self.held.take() else {
 			return Ok(());
@@ -2474,7 +2474,7 @@ impl TrackIo {
 			return Ok(());
 		};
 		self.head = None;
-		self.resume.park(&warm.track)?;
+		self.resume.retire(&warm.track)?;
 		self.warm = Some(warm);
 		Ok(())
 	}
@@ -6080,7 +6080,8 @@ mod tests {
 	/// next route only for the frames past the break. The front keeps the head it
 	/// spliced, so a reader arriving afterwards still gets the whole group: whether the
 	/// old route dies before the new one takes over (a reconnect) or after (a cheaper
-	/// route preempting it).
+	/// route preempting it). A reader joining mid-outage gets it too, and the reader
+	/// already mid-group is not handed it a second time.
 	#[tokio::test]
 	async fn a_takeover_keeps_the_open_group_head_for_later_readers() {
 		tokio::time::pause();
@@ -6124,8 +6125,18 @@ mod tests {
 		// Either the first route's session ends and reconnects, announcing the same route
 		// afresh while the old one is still held, or a cheaper route preempts the live one.
 		let mut first = Some((group, source, upstream, dynamic));
+		let mut joining = None;
 		if dies_first {
 			drop(first.take());
+			// The reader sees its route die and stalls. Polled in place: yielding would let
+			// the front give up on a path with no route left before the replacement lands.
+			assert!(futures::FutureExt::now_or_never(subscription.recv_group()).is_none());
+			let track = resolved.track("log").unwrap();
+			joining = Some(tokio::spawn(async move {
+				let mut joined = track.subscribe(None).await.unwrap();
+				let group = joined.recv_group().await.unwrap().expect("track ended");
+				(joined, group)
+			}));
 		}
 		let cost = if dies_first { 5 } else { 0 };
 		let replacement_server = producer
@@ -6171,13 +6182,37 @@ mod tests {
 		for expect in [b"a", b"b", b"c"] {
 			assert_eq!(read(&mut late).await, expect, "dies_first={dies_first}");
 		}
+		let mut joined = None;
+		if let Some(joining) = joining {
+			let (subscription, mut group) = tokio::time::timeout(Duration::from_secs(1), joining)
+				.await
+				.expect("the reader joining mid-outage never got the group")
+				.unwrap();
+			assert_eq!(group.sequence, 0);
+			for expect in [b"a", b"b", b"c"] {
+				assert_eq!(read(&mut group).await, expect);
+			}
+			joined = Some((subscription, group));
+		}
+
+		// The reader that was mid-group already has it.
+		assert!(
+			tokio::time::timeout(Duration::from_secs(1), subscription.recv_group())
+				.await
+				.is_err(),
+			"dies_first={dies_first}: the group was handed out twice"
+		);
 
 		// The continuation still flows to both.
 		next_group.write_frame(crate::Timestamp::ZERO, b"d".as_ref()).unwrap();
 		assert_eq!(read(&mut reading).await, b"d");
 		assert_eq!(read(&mut late).await, b"d");
+		if let Some((_, group)) = &mut joined {
+			assert_eq!(read(group).await, b"d");
+		}
 		next_group.finish().unwrap();
 		drop((
+			joined,
 			reading,
 			late,
 			subscription,
