@@ -683,7 +683,7 @@ impl AnnounceRun {
 		// Pre-lite-06 wires carry no cost at all, leaving hop count as the
 		// effective metric exactly as before.
 		let cost = match self.version.has_route_cost() {
-			true => route.cost.clamped(),
+			true => route.cost,
 			false => crate::origin::Cost::UNKNOWN,
 		};
 		Some((hops, cost))

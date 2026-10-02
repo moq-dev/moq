@@ -1756,14 +1756,8 @@ class FfiConverterMoqOriginConfig {
 class MoqRoute {
   final List<int> hops;
   final int cost;
-  final int? cold;
   final bool anonymous;
-  MoqRoute({
-    this.hops = const [],
-    this.cost = 0,
-    this.cold = null,
-    this.anonymous = false,
-  });
+  MoqRoute({this.hops = const [], this.cost = 0, this.anonymous = false});
 }
 
 class FfiConverterMoqRoute {
@@ -1783,18 +1777,13 @@ class FfiConverterMoqRoute {
     );
     final cost = cost_lifted.value;
     new_offset += cost_lifted.bytesRead;
-    final cold_lifted = FfiConverterOptionalUInt64.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final cold = cold_lifted.value;
-    new_offset += cold_lifted.bytesRead;
     final anonymous_lifted = FfiConverterBool.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final anonymous = anonymous_lifted.value;
     new_offset += anonymous_lifted.bytesRead;
     return LiftRetVal(
-      MoqRoute(hops: hops, cost: cost, cold: cold, anonymous: anonymous),
+      MoqRoute(hops: hops, cost: cost, anonymous: anonymous),
       new_offset - buf.offsetInBytes,
     );
   }
@@ -1803,7 +1792,6 @@ class FfiConverterMoqRoute {
     final total_length =
         FfiConverterSequenceUInt64.allocationSize(value.hops) +
         FfiConverterUInt64.allocationSize(value.cost) +
-        FfiConverterOptionalUInt64.allocationSize(value.cold) +
         FfiConverterBool.allocationSize(value.anonymous) +
         0;
     final buf = Uint8List(total_length);
@@ -1821,10 +1809,6 @@ class FfiConverterMoqRoute {
       value.cost,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterOptionalUInt64.write(
-      value.cold,
-      Uint8List.view(buf.buffer, new_offset),
-    );
     new_offset += FfiConverterBool.write(
       value.anonymous,
       Uint8List.view(buf.buffer, new_offset),
@@ -1835,7 +1819,6 @@ class FfiConverterMoqRoute {
   static int allocationSize(MoqRoute value) {
     return FfiConverterSequenceUInt64.allocationSize(value.hops) +
         FfiConverterUInt64.allocationSize(value.cost) +
-        FfiConverterOptionalUInt64.allocationSize(value.cold) +
         FfiConverterBool.allocationSize(value.anonymous) +
         0;
   }
@@ -12754,7 +12737,7 @@ void _checkApiChecksums() {
       54021) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqorigindynamic_update() != 27700) {
+  if (uniffi_moq_ffi_checksum_method_moqorigindynamic_update() != 7304) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqoriginproducer_consume() != 52357) {

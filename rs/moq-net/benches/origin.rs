@@ -223,55 +223,57 @@ fn bench_announce_duplicate(c: &mut Criterion) {
 /// honor each cursor's scope rather than reuse one global winner.
 fn bench_reprice_duplicate(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/reprice_duplicate");
-	for (duplicates, subscribers) in CONTENDED {
-		let id = BenchmarkId::from_parameter(format!("{duplicates}d_{subscribers}s"));
-		group.bench_function(id, |b| {
-			let (producer, _driver) = origin::Producer::new(origin::Config::default());
-			let _routes: Vec<_> = (1..=duplicates)
-				.map(|peer| {
-					producer
-						.scope(
-							"",
-							&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", (peer - 1) % 2)).unwrap()),
-						)
-						.unwrap()
-						.dynamic(PATH, peer_route(peer as u64, INCUMBENT_COST))
-						.unwrap()
-				})
-				.collect();
-			let challenger = duplicates as u64 + 1;
-			let route = producer
-				.dynamic(PATH, peer_route(challenger, INCUMBENT_COST + 1))
-				.unwrap();
-			let mut cursors: Vec<announce::Consumer> = (0..subscribers)
-				.map(|peer| {
-					producer
-						.consume()
-						.scope(
-							"",
-							&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", peer % 2)).unwrap()),
-						)
-						.unwrap()
-						.with_hidden(true)
-						.announced()
-				})
-				.collect();
-			for cursor in &mut cursors {
-				while cursor.next().now_or_never().flatten().is_some() {}
-			}
-			b.iter(|| {
-				for cost in [INCUMBENT_COST - 1, INCUMBENT_COST + 1] {
-					route.update(peer_route(challenger, cost)).unwrap();
-					for cursor in &mut cursors {
-						let event = cursor.next().now_or_never().flatten().expect("winner changed");
-						let moq_net::announce::Event::Update(update) = event else {
-							panic!("expected an update: got {event:?}");
-						};
-						assert_eq!(update.route.cost, moq_net::origin::Cost::new(cost.min(INCUMBENT_COST)));
-					}
+	for incumbent_cost in [INCUMBENT_COST, origin::Cost::MAX.value() - 1] {
+		for (duplicates, subscribers) in CONTENDED {
+			let id = BenchmarkId::from_parameter(format!("{duplicates}d_{subscribers}s_cost{incumbent_cost}"));
+			group.bench_function(id, |b| {
+				let (producer, _driver) = origin::Producer::new(origin::Config::default());
+				let _routes: Vec<_> = (1..=duplicates)
+					.map(|peer| {
+						producer
+							.scope(
+								"",
+								&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", (peer - 1) % 2)).unwrap()),
+							)
+							.unwrap()
+							.dynamic(PATH, peer_route(peer as u64, incumbent_cost))
+							.unwrap()
+					})
+					.collect();
+				let challenger = duplicates as u64 + 1;
+				let route = producer
+					.dynamic(PATH, peer_route(challenger, incumbent_cost + 1))
+					.unwrap();
+				let mut cursors: Vec<announce::Consumer> = (0..subscribers)
+					.map(|peer| {
+						producer
+							.consume()
+							.scope(
+								"",
+								&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", peer % 2)).unwrap()),
+							)
+							.unwrap()
+							.with_hidden(true)
+							.announced()
+					})
+					.collect();
+				for cursor in &mut cursors {
+					while cursor.next().now_or_never().flatten().is_some() {}
 				}
+				b.iter(|| {
+					for cost in [incumbent_cost - 1, incumbent_cost + 1] {
+						route.update(peer_route(challenger, cost)).unwrap();
+						for cursor in &mut cursors {
+							let event = cursor.next().now_or_never().flatten().expect("winner changed");
+							let moq_net::announce::Event::Update(update) = event else {
+								panic!("expected an update: got {event:?}");
+							};
+							assert_eq!(update.route.cost, moq_net::origin::Cost::new(cost.min(incumbent_cost)));
+						}
+					}
+				});
 			});
-		});
+		}
 	}
 	group.finish();
 }

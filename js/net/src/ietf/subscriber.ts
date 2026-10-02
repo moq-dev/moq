@@ -190,7 +190,7 @@ export class Subscriber {
 		// A full chain, or a stamp colliding with an entry (a 1-in-2^53 draw), keeps the
 		// path as sent.
 		const hops = stampHops(advert.hops, this.#stamp) ?? [...advert.hops];
-		return { hops, cost: { warm: advert.cost, cold: advert.cost } };
+		return { hops, cost: advert.cost };
 	}
 
 	/**

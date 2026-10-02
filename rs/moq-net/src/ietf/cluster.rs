@@ -169,15 +169,9 @@ impl Advert {
 	/// The addition saturates rather than wraps, so an absurd upstream value ranks last
 	/// instead of overflowing to best.
 	///
-	/// The Cluster extension carries one cost, which is the warm one: a relay already
-	/// carrying the broadcast advertises zero here just as it does on lite-06. There
-	/// is nowhere to put the cold path, so it stays [`Cost::UNKNOWN`] and this route
-	/// never outranks one whose cold cost is actually known.
+	/// Add the arriving link price to the peer's static route cost.
 	pub fn route(&self, link_cost: u64) -> crate::origin::Route {
-		let advertised = crate::origin::Cost {
-			warm: self.cost,
-			..crate::origin::Cost::UNKNOWN
-		};
+		let advertised = crate::origin::Cost::new(self.cost);
 		// The prefix travels separately: it is stamped where the advertisement
 		// attaches (the namespace).
 		crate::origin::Route::default()
@@ -435,14 +429,14 @@ mod tests {
 			cost: 4,
 		};
 		let route = advert.route(3);
-		assert_eq!(route.cost.warm, 7);
+		assert_eq!(route.cost.value(), 7);
 		assert_eq!(&route.hops, hop_path(&[1, 2]).hops());
 
 		let absurd = Advert {
 			hops: hop_path(&[1]),
 			cost: u64::MAX,
 		};
-		assert_eq!(absurd.route(10).cost.warm, crate::origin::Cost::MAX.warm);
+		assert_eq!(absurd.route(10).cost.value(), crate::origin::Cost::MAX.value());
 	}
 
 	/// Negotiating the extension and declaring an identity are separate questions, and a

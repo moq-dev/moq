@@ -26,7 +26,6 @@ QUIC studies there on that rule.
 - [moq-transport peers are plain clients](/quest/m1/ietf-cluster-off.md) - no moq-transport session negotiates the cluster extension, so none can splice a pool's members on a Hop ID label
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - edge and core tiers carry each broadcast into a region once over path vector, with the backbone hidden from end users
 - [Remove `--hop`](/quest/m1/hop-removal.md) - on `dev`, redundant publishers share an explicit `@<epoch>`, and `--hop` and the publisher's Hop ID are gone
-- [One route cost](/quest/m1/route-cost.md) - on `dev`, Warm and Cold collapse to one static route cost
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
 - [Merge queue](/quest/m1/merge-queue.md) - the required checks run on `merge_group`, so a stale green check can no longer break main
 - [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay

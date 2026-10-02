@@ -383,87 +383,36 @@ where
 	}
 }
 
-/// The highest value either half of a [`Cost`] can take, and where cost
-/// accumulation saturates.
-///
-/// The ceiling is the wire's, not the model's: lite-06 carries each cost as a QUIC
-/// varint, which tops out at 2^62-1, so a larger value could be selected on but
-/// never forwarded. It applies on every version, lite-07's 64-bit varints included,
-/// so a cost stays forwardable to a QUIC-varint version.
+/// The highest route cost, shared by every wire version.
 const MAX_COST: u64 = (1 << 62) - 1;
 
-/// What pulling content via a route costs, in two magnitudes that accumulate
-/// together and are compared in that order: lower [`warm`](Self::warm) wins, and
-/// [`cold`](Self::cold) breaks the tie.
-///
-/// Both are the same path priced against different cache states. `warm` is what one
-/// more subscription would cost the mesh right now; `cold` prices the identical
-/// path as if nothing were cached, so it stays meaningful once discounts have
-/// flattened `warm`.
+/// The static cost of pulling content through a route; lower wins.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Cost {
-	/// The cost of pulling content via this route as the mesh stands today,
-	/// accumulated per link. Lower wins.
-	///
-	/// The original publisher seeds it with its production cost (zero for a live
-	/// publish, something large for a standby that would have to start working, like
-	/// a cold transcoder), and each link adds its own configured price as the
-	/// announcement crosses it, so a route over a metered backbone ranks worse than
-	/// an equal-length one within a datacenter.
-	pub warm: u64,
-
-	/// The same path with every warm discount removed: what pulling the content
-	/// would cost if no relay along it were carrying anything.
-	///
-	/// Accumulates exactly like [`warm`](Self::warm) but never restarts. [`MAX`](Self::MAX)
-	/// when the peer's wire cannot express it (pre-lite-06, or the MoQ Cluster
-	/// extension), which ranks last rather than pretending the path is free.
-	pub cold: u64,
-}
+pub struct Cost(u64);
 
 impl Cost {
-	/// Both magnitudes at `cost`: an undiscounted route, which is what a publisher
-	/// seeding its production cost means.
+	/// Price a route, saturating at the wire ceiling.
 	pub const fn new(cost: u64) -> Self {
-		Self { warm: cost, cold: cost }
+		Self(if cost > MAX_COST { MAX_COST } else { cost })
 	}
 
-	/// The highest cost either half can take, and where accumulation saturates.
-	///
-	/// A draining session stamps this on its routes so every other candidate outranks
-	/// them while they stay selectable as the last path to the content. Draining is
-	/// not a distinct state: cost is the whole mechanism, and a route whose accumulated
-	/// cost saturates the wire ceiling ranks (and is treated) the same way.
-	pub const MAX: Self = Self::new(MAX_COST);
+	/// The accumulated route price.
+	pub const fn value(self) -> u64 {
+		self.0
+	}
 
-	/// A draining route: [`MAX`](Self::MAX) in both magnitudes, so every other
-	/// candidate outranks it.
+	/// The maximum price, leaving a route selectable only as a last resort.
+	pub const MAX: Self = Self(MAX_COST);
+
+	/// The price of a draining route.
 	pub const DRAIN: Self = Self::MAX;
 
-	/// What a peer advertises when its wire has no room for a cost at all: free to
-	/// reach (leaving hop count as the effective metric, exactly as before route
-	/// cost existed) with an unknown cold path.
-	pub(crate) const UNKNOWN: Self = Self {
-		warm: 0,
-		cold: MAX_COST,
-	};
+	/// A peer without a wire cost contributes only the local link price.
+	pub(crate) const UNKNOWN: Self = Self(0);
 
-	/// Add a link's price to both magnitudes, saturating at the largest cost the
-	/// wire can carry so a huge cost sorts last instead of wrapping around to best.
+	/// Add a link's static price without overflowing the wire ceiling.
 	pub(crate) fn charged(self, link_cost: u64) -> Self {
-		Self {
-			warm: self.warm.saturating_add(link_cost).min(MAX_COST),
-			cold: self.cold.saturating_add(link_cost).min(MAX_COST),
-		}
-	}
-
-	/// Clamp both magnitudes to what a varint can carry, since a locally created
-	/// route can name an arbitrary `u64`.
-	pub(crate) fn clamped(self) -> Self {
-		Self {
-			warm: self.warm.min(MAX_COST),
-			cold: self.cold.min(MAX_COST),
-		}
+		Self::new(self.0.saturating_add(link_cost))
 	}
 }
 
@@ -6707,7 +6656,7 @@ mod tests {
 	fn charged_wildcard_cost_accumulates_across_hops() {
 		let first = Cost::new(4).charged(1);
 		let second = first.charged(2);
-		assert_eq!(second, Cost { warm: 7, cold: 7 });
+		assert_eq!(second, Cost::new(7));
 	}
 
 	#[tokio::test]
@@ -8580,18 +8529,16 @@ mod tests {
 		drop(remote);
 	}
 
-	/// Charging a link accumulates onto both halves, saturating rather than wrapping
+	/// Charging a link accumulates onto the static price, saturating rather than wrapping
 	/// so a bogus peer sorts last, not first. The ceiling is the largest cost a
 	/// varint can carry, so whatever a peer advertises, the sum we forward still
 	/// encodes.
 	#[test]
 	fn cost_charge_saturates() {
-		assert_eq!(Cost { warm: 4, cold: 6 }.charged(5), Cost { warm: 9, cold: 11 });
+		assert_eq!(Cost::new(4).charged(5), Cost::new(9));
 		assert_eq!(Cost::new(u64::MAX).charged(10), Cost::new(MAX_COST));
 
-		// An unknown cold path stays unknown however many links it crosses, so it
-		// can never accumulate its way into outranking a path we actually know.
-		assert_eq!(Cost::UNKNOWN.charged(3).cold, MAX_COST);
+		assert_eq!(Cost::UNKNOWN.charged(3), Cost::new(3));
 	}
 
 	/// Mint an origin whose pool reclaims idle content after `expiry`.

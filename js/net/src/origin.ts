@@ -216,12 +216,11 @@ function compareCandidates(a: Candidate, b: Candidate): number {
 	);
 }
 
-/** Orders two routes by preference: identified before anonymous, then lower warm cost, then lower cold cost. */
+/** Orders two routes by preference: identified before anonymous, then lower static cost. */
 function compareRoutes(a: Route, b: Route): number {
 	const anonymous = Number(isAnonymous(a)) - Number(isAnonymous(b));
 	if (anonymous !== 0) return anonymous;
-	if (a.cost.warm !== b.cost.warm) return a.cost.warm < b.cost.warm ? -1 : 1;
-	if (a.cost.cold !== b.cost.cold) return a.cost.cold < b.cost.cold ? -1 : 1;
+	if (a.cost !== b.cost) return a.cost < b.cost ? -1 : 1;
 	return 0;
 }
 

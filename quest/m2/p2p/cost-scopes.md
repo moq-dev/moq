@@ -6,7 +6,7 @@ A written rule, in `doc/concept/transport.md` and the drafts, for how a route
 through a P2P peer compares with the relay's own route, such that a peer
 already carrying a broadcast wins and an idle peer never has traffic pulled
 through it. The rule is implementable by the Rust and JS origins with the
-existing `Cost { warm, cold }` and the per-link price a publisher declares in
+existing scalar static `Cost` and the per-link price a publisher declares in
 SETUP.
 
 ## Plan
@@ -16,8 +16,8 @@ implementation quests that depend on it.
 
 What is settled today: a publisher declares an egress price in SETUP on
 lite-06 and the receiver charges it per link, with local policy able to
-override the peer's declaration; `warm` and `cold` accumulate per link and
-compare in that order; a chain containing an anonymous hop loses to any
+override the peer's declaration; one static cost accumulates per link and
+lower wins; a chain containing an anonymous hop loses to any
 identified chain; Rust migrates a live subscription only to a route with the
 same first hop.
 

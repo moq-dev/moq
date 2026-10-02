@@ -32,8 +32,7 @@ link-state and existence-split design planned earlier that day:
   [Edge and core](/quest/m1/cluster-routing/roles.md).
 - Core links are configured and static, and may skip PoPs when the RTT is
   short: Seattle pulls from San Jose directly rather than via Oregon. Nothing
-  switches routes on cache state, so Warm and Cold collapse to one route cost
-  ([One route cost](/quest/m1/route-cost.md)), and the wildcard line's route
+  switches routes on cache state, so routes use one static cost, and the wildcard line's route
   upgrade quest is deleted.
 - No link-state topology. With split-horizon edges and a sparse core graph,
   path vector with hop lists stays loop-free, path hunting is confined to the
@@ -42,10 +41,8 @@ link-state and existence-split design planned earlier that day:
   implementation is #4631. If stale paths remain on the tiered layout, the
   fix is [Path hunting](/quest/m0/path-hunting.md), promoted to m0: a hold-down
   on route updates, with no wire change.
-- The line lands on `main`: its children are additive. The two breaking
-  changes left it for `dev` on their own:
-  [Remove `--hop`](/quest/m1/hop-removal.md) and
-  [One route cost](/quest/m1/route-cost.md).
+- The line lands on `main`: its children are additive. The breaking
+  [Remove `--hop`](/quest/m1/hop-removal.md) quest remains on `dev`; static route costs are already implemented there.
 - Cluster links are moq-lite only; moq-transport peers are plain clients
   ([moq-transport peers are plain clients](/quest/m1/ietf-cluster-off.md)).
 - An epoch-qualified concrete path (`foo/@<uuidv7>`) is a source's identity:
@@ -124,7 +121,6 @@ Once every child has landed:
 
 - [Wildcard](/quest/m0/wildcard/README.md) - the longest-prefix rule, pool spread, and reply identity Selection builds on
 - [Remove `--hop`](/quest/m1/hop-removal.md) - on `dev`: redundant publishers share an explicit `@<epoch>`
-- [One route cost](/quest/m1/route-cost.md) - on `dev`: Warm and Cold collapse to one static cost
 - [Same-hop importers](/quest/m1/hop-aligned-import.md) - the importer half of a redundant pair; `--hop` removal re-keys it to a shared epoch
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - a redundant pair shares one epoch
 - [Cross-relay delivery under bursts](/quest/m1/cross-relay-bursts.md) - its #4349 report shows closed broadcasts announced for up to 229 s, evidence for per-origin seqnos

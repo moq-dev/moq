@@ -402,7 +402,7 @@ Hiding is a convenience for discovery, not access control: a publisher MAY treat
 SUBSCRIBE, FETCH, and TRACK resolve a hidden path exactly as any other.
 
 #### Routing {#routing}
-Each advertisement carries the path of Hop IDs it traversed and an accumulated Warm and Cold Route Cost (see [ANNOUNCE_START](#announce-start)), which relays use to build a loop-free mesh.
+Each advertisement carries the path of Hop IDs it traversed and an accumulated Route Cost (see [ANNOUNCE_START](#announce-start)), which relays use to build a loop-free mesh.
 
 A receiver MUST discard an announcement whose reconstructed path contains its own Hop ID: it has looped back, so forwarding it would extend the loop and subscribing through it would route the receiver back to itself.
 This is the only loop defense moq-lite requires, and it catches loops of any length.
@@ -422,7 +422,7 @@ The per-subscriber winner changing travels as an ANNOUNCE_UPDATE; the last quali
 When serving a subscription, a publisher MUST select the source by that same exclusion; if only excluded sources remain, the subscription is unroutable.
 Applying one rule to both advertisement and dispatch keeps advertised paths truthful, which is what prevents subscription cycles of any length.
 
-When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering route (see [Resolution](#resolution)), then a path that contains no 0 Hop ID over one that does, then the lowest Warm Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the lowest Cold Route Cost, then toward the shortest path, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
+When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering route (see [Resolution](#resolution)), then a path that contains no 0 Hop ID over one that does, then the lowest Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the shortest path, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
 
 A route's identity is its first hop: the endpoint that originated it (see [ANNOUNCE_START](#announce-start)).
 Two routes covering one path with the same non-zero first hop are the same origin reached different ways, and a relay MAY move a live subscription between them, resuming at a group boundary, so a route change the identity survives (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
@@ -884,8 +884,7 @@ ANNOUNCE_START Message {
   Path Keep (i),
   Route Prefix Suffix (s),
   Hops (..),
-  Warm Route Cost (i),
-  Cold Route Cost (i),
+  Route Cost (i),
 }
 
 Hops {
@@ -929,13 +928,13 @@ An identity a receiver assigned that upstream is local selection state and MUST 
 A receiver MUST close the session with a PROTOCOL_VIOLATION if a non-zero Hop ID appears twice in the resolved list.
 Duplicate values of 0 are not a violation, since 0 identifies nothing and any number of hops may be unknown.
 
-**Warm Route Cost** and **Cold Route Cost**:
-What subscribing to content under this route costs, in units chosen by the deployment.
-This document defines no rule that prices the two apart: the original publisher seeds both with its production cost (0 for content it is already producing, larger for content it would have to start producing on demand, e.g. a standby transcoder that advertises every broadcast it could serve, at a cost reflecting the work of actually serving it), and a forwarding relay adds the cost the upstream peer declared (see [Cost Parameter](#cost-parameter)) to both, saturating rather than wrapping so an absurd upstream value ranks last instead of overflowing to best.
-The two fields exist for extensions that price a cached copy below the accumulated value: such a discount applies to the Warm cost only, which is what route selection minimizes, while the Cold cost keeps ranking the undiscounted path and breaks a Warm tie (see [Routing](#routing)).
-Saturation MUST cap each sum at the largest value a variable-length integer can carry, since the sums are re-encoded when forwarded: a peer may legally advertise that largest value, and a wider ceiling would leave the relay unable to encode what it just computed.
+**Route Cost**:
+The static production and link price, in units chosen by the deployment.
+The publisher seeds its production cost (0 for content it already produces, larger for a standby that starts work on demand). Each forwarding relay adds the upstream peer's declared link cost (see [Cost Parameter](#cost-parameter)).
+Each sum MUST saturate at 2^62-1, so it remains forwardable to a lite-06 peer.
+A peer whose wire carries no route cost contributes 0 before the arriving link's price is added.
 
-A relay whose wire cannot express a Cold cost (an endpoint bridging from another protocol, or a peer that predates this field) advertises nothing, and a receiver SHOULD treat the missing value as the saturation ceiling rather than as 0: an unknown path ranks last instead of impersonating the publisher's own.
+lite-06 carries Warm and Cold Route Cost fields. A receiver MUST read Warm as Route Cost and ignore Cold. A sender MUST write Route Cost as Warm and 2^62-1 as Cold.
 
 
 ## ANNOUNCE_END {#announce-end}
@@ -973,8 +972,7 @@ ANNOUNCE_UPDATE Message {
   Message Length (i)
   Announce ID (i),
   Hops (..),
-  Warm Route Cost (i),
-  Cold Route Cost (i),
+  Route Cost (i),
 }
 ~~~
 
@@ -985,7 +983,7 @@ Set to 0x2 to indicate an ANNOUNCE_UPDATE message.
 The ordinal implicitly assigned by a prior ANNOUNCE_START on this stream.
 Referencing an id that was never assigned, or one already retired by an ANNOUNCE_END, is a protocol violation.
 
-**Hops**, **Warm Route Cost**, and **Cold Route Cost**:
+**Hops** and **Route Cost**:
 As defined for [ANNOUNCE_START](#announce-start).
 `Hop Base` may name this advertisement itself, which resolves against the list being replaced.
 An update whose only change is a Route Cost is valid: it is how a relay re-prices a route without disturbing it.
@@ -1349,6 +1347,8 @@ The `Message Length` describes the payload size on the wire.
 # Appendix A: Changelog
 
 ## moq-lite-07
+
+- Replaced Warm and Cold Route Cost with one static Route Cost in moq-lite-07-wip; lite-06 retains both fields, reading Warm and writing Cold at saturation.
 
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
 

@@ -85,7 +85,7 @@ test("a borrowed table exposes dynamic serving and a live scoped broadcast map",
 	local.announce({ cost: 4n });
 	await settle();
 	expect(live.peek().get(localPath)).toEqual(Route.normalize({ cost: 4n }));
-	expect(changes.some((value) => value.get(localPath)?.cost.warm === 4n)).toBe(true);
+	expect(changes.some((value) => value.get(localPath)?.cost === 4n)).toBe(true);
 
 	const prefix = Path.from("room");
 	const dynamic = table.dynamic(prefix, { cost: 2n });
@@ -527,7 +527,7 @@ test("a local publish shadows a remote entry", async () => {
 
 	const upstream = new BroadcastProducer();
 	upstream.createTrack("remote-track");
-	const dispose = serve(origin, path, provider(upstream), { hops: [], cost: { warm: 9n, cold: 9n } });
+	const dispose = serve(origin, path, provider(upstream), { hops: [], cost: 9n });
 
 	const local = publish(origin, path);
 	local.createTrack("local-track");
@@ -1122,7 +1122,7 @@ test("createBroadcast is invisible to everyone until announce", async () => {
 	expect(await nextRoute(announced)).toMatchObject({
 		prefix: path,
 		kind: "start",
-		route: { hops: [], cost: { warm: 4n, cold: 4n } },
+		route: { hops: [], cost: 4n },
 	});
 	const first = request.active.peek();
 	expect(first).toBeDefined();
@@ -1625,7 +1625,7 @@ test("a scoped dynamic only serves allowed paths and presents relative requests"
 	pending.value?.accept(broadcast);
 	expect(request.active.peek()).toBeDefined();
 	dynamic.update({ cost: 2n });
-	expect(origin.broadcasts().peek().get(Path.from("tenant/room"))?.cost.warm).toBe(2n);
+	expect(origin.broadcasts().peek().get(Path.from("tenant/room"))?.cost).toBe(2n);
 	await requests.return?.();
 	dynamic.close();
 	request.close();
@@ -1670,8 +1670,8 @@ test("a rooted reader presents the most specific covering route", () => {
 	const narrow = origin.dynamic(Path.from("room/alice"), { cost: 9n });
 	const broad = origin.dynamic(Path.from("room"), { cost: 1n });
 	const rooted = origin.scope(Path.from("room/alice"), new Path.Patterns([Path.Pattern.all()]));
-	expect(rooted.broadcasts().peek().get(Path.empty())?.cost.warm).toBe(9n);
-	expect(wireOf(rooted.consume()).advertised.peek()?.get(Path.empty())?.[0]?.route.cost.warm).toBe(9n);
+	expect(rooted.broadcasts().peek().get(Path.empty())?.cost).toBe(9n);
+	expect(wireOf(rooted.consume()).advertised.peek()?.get(Path.empty())?.[0]?.route.cost).toBe(9n);
 	broad.close();
 	narrow.close();
 	origin.close();
@@ -1684,15 +1684,15 @@ test("a scoped reader picks the best route its scope can see at a prefix", async
 	const video = scoped("*/video").dynamic(Path.empty(), { cost: 5n });
 	const reader = scoped("room/video");
 
-	expect(reader.broadcasts().peek().get(Path.empty())?.cost.warm).toBe(5n);
-	expect(origin.broadcasts(Path.Pattern.parse("room/video")).peek().get(Path.empty())?.cost.warm).toBe(5n);
+	expect(reader.broadcasts().peek().get(Path.empty())?.cost).toBe(5n);
+	expect(origin.broadcasts(Path.Pattern.parse("room/video")).peek().get(Path.empty())?.cost).toBe(5n);
 	const announced = reader.announced();
-	expect((await nextRoute(announced))?.route.cost.warm).toBe(5n);
+	expect((await nextRoute(announced))?.route.cost).toBe(5n);
 	announced.close();
 
 	// A session publishing the scoped view offers the video route too.
 	const offered = [...(wireOf(reader.consume()).advertised.peek()?.get(Path.empty()) ?? [])];
-	expect(offered.map((advert) => advert.route.cost.warm)).toEqual([5n]);
+	expect(offered.map((advert) => advert.route.cost)).toEqual([5n]);
 
 	video.close();
 	chat.close();
@@ -1708,9 +1708,9 @@ test("a scoped reader sees a local broadcast that only loses to a route outside 
 	local.announce({ cost: 5n });
 	const reader = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*")]));
 
-	expect(reader.broadcasts().peek().get(Path.from("room/alice"))?.cost.warm).toBe(5n);
+	expect(reader.broadcasts().peek().get(Path.from("room/alice"))?.cost).toBe(5n);
 	// Unscoped, the cheaper route still wins the prefix.
-	expect(origin.broadcasts().peek().get(Path.from("room/alice"))?.cost.warm).toBe(0n);
+	expect(origin.broadcasts().peek().get(Path.from("room/alice"))?.cost).toBe(0n);
 
 	local.close();
 	chat.close();
@@ -1747,6 +1747,20 @@ test("broadcast handles carry the path they were created or requested at", async
 	request.close();
 	served.close();
 	dynamic.close();
+	broadcast.close();
+	origin.close();
+});
+
+test("public announcements saturate static costs and refuse invalid cost shapes", async () => {
+	const origin = new Producer();
+	const path = Path.from("priced");
+	const broadcast = origin.createBroadcast(path);
+	const view = origin.broadcasts();
+	broadcast.announce({ cost: 2n ** 64n - 1n });
+	await settle();
+	expect(view.peek().get(path)?.cost).toBe(2n ** 62n - 1n);
+	expect(() => broadcast.announce({ cost: -1n })).toThrow(RangeError);
+	expect(() => broadcast.announce({ cost: { warm: 1n, cold: 2n } } as unknown as Route)).toThrow(RangeError);
 	broadcast.close();
 	origin.close();
 });

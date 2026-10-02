@@ -118,12 +118,9 @@ a standby transcoder pool seeds a high cost and drops it once it's working, and
 a relay receiving a GOAWAY re-prices every route learned from that peer to the
 maximum so new subscriptions go elsewhere while existing ones finish.
 
-moq-lite-06 announcements carry two prices, *warm* and *cold*. Both accumulate
-identically today, so routing runs on link costs alone; the split reserves room
-for a warm-copy discount, letting a relay advertise its cached copy cheaper on
-the warm side while the cold price still says who sits closest to the publisher.
-moq-transport has nowhere to carry the cold price, so a route learned from it
-ranks with an unknown (worst-case) one.
+Routes carry one static price: the publisher's production cost plus the configured link costs. A live publisher seeds 0; a standby uses a higher price than any live route it competes with. Caching does not change the route price.
+
+moq-lite-07-wip carries that one cost. For lite-06 compatibility, the relay reads Warm as the cost, ignores Cold, and writes Cold at the saturation ceiling. A protocol without a route cost adds only the local link price.
 
 ## LAN discovery
 

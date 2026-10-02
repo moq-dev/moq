@@ -2221,8 +2221,6 @@ fn announce_accepts_an_anonymous_hop() {
 		hops: hops.as_ptr(),
 		hops_len: hops.len(),
 		cost: 1,
-		cold: 0,
-		has_cold: false,
 	};
 	assert_eq!(unsafe { moq_publish_announce(broadcast, &route) }, 0);
 	assert_eq!(moq_publish_close(broadcast), 0);

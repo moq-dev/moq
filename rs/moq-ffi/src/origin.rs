@@ -27,7 +27,7 @@ pub struct MoqAnnounceConfig {
 	pub hidden: bool,
 }
 
-/// A path-prefix route: hops and costs for an advertisement.
+/// A path-prefix route: hops and a static cost for an advertisement.
 ///
 /// Pair one with `MoqBroadcastProducer::announce` for an exact path, or with
 /// `MoqOriginProducer::dynamic` for a prefix. Observe them with
@@ -46,11 +46,6 @@ pub struct MoqRoute {
 	/// larger for content it would have to start producing on demand.
 	#[uniffi(default = 0)]
 	pub cost: u64,
-	/// The same path with every warm discount removed: what pulling the content
-	/// would cost if no relay along it were carrying anything. `None` means the
-	/// same as `cost`, which is right for a publisher seeding a production cost.
-	#[uniffi(default = None)]
-	pub cold: Option<u64>,
 	/// Whether the chain holds a 0 anywhere. An anonymous route ranks below every
 	/// fully identified one, whatever the costs say.
 	#[uniffi(default = false)]
@@ -61,8 +56,7 @@ impl From<moq_net::origin::Route> for MoqRoute {
 	fn from(route: moq_net::origin::Route) -> Self {
 		Self {
 			hops: route.hops.iter().map(|origin| origin.id()).collect(),
-			cost: route.cost.warm,
-			cold: Some(route.cost.cold),
+			cost: route.cost.value(),
 			anonymous: route.is_anonymous(),
 		}
 	}
@@ -72,7 +66,6 @@ impl TryFrom<MoqRoute> for moq_net::origin::Route {
 	type Error = MoqError;
 
 	fn try_from(route: MoqRoute) -> Result<Self, MoqError> {
-		let cold = route.cold.unwrap_or(route.cost);
 		let mut hops = moq_net::Hops::new();
 		for id in route.hops {
 			let origin = if id == 0 {
@@ -83,7 +76,7 @@ impl TryFrom<MoqRoute> for moq_net::origin::Route {
 			hops.push(origin).map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
 		}
 		Ok(moq_net::origin::Route::default()
-			.with_cost(moq_net::origin::Cost { warm: route.cost, cold })
+			.with_cost(moq_net::origin::Cost::new(route.cost))
 			.with_hops(hops))
 	}
 }
@@ -181,7 +174,7 @@ pub struct MoqAnnounce {
 	pub prefix: String,
 	/// What each wildcard matched, or `None` when the route only overlaps the scope.
 	pub captures: Option<Vec<String>>,
-	/// The route serving the prefix: its hops and costs.
+	/// The route serving the prefix: its hops and a static cost.
 	pub route: MoqRoute,
 }
 
@@ -430,7 +423,7 @@ impl MoqOriginDynamic {
 			.await
 	}
 
-	/// Re-price the route in place: replace its hops and costs. The prefix cannot
+	/// Re-price the route in place: replace its hops and a static cost. The prefix cannot
 	/// change; call `dynamic` again instead.
 	pub fn update(&self, route: MoqRoute) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();

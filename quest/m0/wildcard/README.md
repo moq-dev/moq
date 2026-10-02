@@ -52,7 +52,7 @@ would have to start working (a cold transcoder)"
 (`drafts/draft-lcurley-moq-lite.md`). `moq_auth::Claims.publish` and
 `origin::Producer` gained versioned patterns on the
 [Auth](/quest/m1/auth/README.md) line, so tokens and filters reuse the
-same matcher; advertisements stay prefixes. `Cost { warm, cold }`
+same matcher; advertisements stay prefixes. a scalar static `Cost`
 (`rs/moq-net/src/model/origin.rs:426`) is the route cost since
 [#2925](https://github.com/moq-dev/moq/pull/2925).
 
@@ -120,7 +120,7 @@ field.
   concrete claim shadows a healthy pool even when its service is
   broken, its terminal refusal does not fall through, and the shadow lasts
   exactly as long as the claiming session that carries it.
-  The seed still has a floor, because standby and running claims of the same
+  The static production seed still has a floor, because standby and running claims of the same
   prefix do meet: a standby concrete claim (`with_cost(1000)` is the
   existing per-broadcast convention) shares a tier with a running publisher's
   concrete announcement. The

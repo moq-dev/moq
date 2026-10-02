@@ -80,28 +80,13 @@ export function stampHops(hops: readonly Hop[], stamp: Hop): Hop[] | undefined {
 	return [stamp, ...hops];
 }
 
-/**
- * What pulling content via a route costs, in two magnitudes accumulated together
- * and compared in that order: lower {@link Cost.warm} wins, and {@link Cost.cold}
- * breaks the tie.
- *
- * Both price the same path against different cache states. `warm` is what one more
- * subscription would cost the mesh right now, so it collapses to zero at any relay
- * already carrying the broadcast. `cold` prices the identical path as if nothing were
- * cached, so it keeps flowing through a warm relay unchanged and still says which of
- * two warm relays sits closer to the publisher.
- */
-export interface Cost {
-	/** The cost as the mesh stands today, discounted to zero at every carrying relay. */
-	warm: bigint;
-	/** The same path with every warm discount removed. */
-	cold: bigint;
-}
+/** The static cost of pulling content through a route; lower wins. */
+export type Cost = bigint;
 
-/** Constructors for {@link Cost}. */
+/** Common route prices. */
 export const Cost = {
-	/** A free path in both magnitudes: what a live publisher seeds. */
-	zero: { warm: 0n, cold: 0n } as Cost,
+	/** The price a live publisher seeds. */
+	zero: 0n,
 };
 
 /**
@@ -123,13 +108,12 @@ export const Route = {
 	/** An empty hop chain at zero cost: what a publisher seeds for a live broadcast. */
 	default: { hops: [], cost: Cost.zero } as Route,
 
-	/** Normalize a partial route, treating a bare bigint cost as both magnitudes alike. */
-	normalize(route: Route | { hops?: readonly Hop[]; cost?: Cost | bigint } = {}): Route {
-		const hops = route.hops ? [...route.hops] : [];
-		const cost = route.cost;
-		if (cost === undefined) return { hops, cost: Cost.zero };
-		if (typeof cost === "bigint") return { hops, cost: { warm: cost, cold: cost } };
-		return { hops, cost: { warm: cost.warm, cold: cost.cold } };
+	/** Fill route defaults and saturate the static price at the wire ceiling. */
+	normalize(route: Route | { hops?: readonly Hop[]; cost?: Cost } = {}): Route {
+		const cost = route.cost ?? Cost.zero;
+		if (typeof cost !== "bigint" || cost < 0n) throw new RangeError("route cost must be a non-negative bigint");
+		const max = 2n ** 62n - 1n;
+		return { hops: route.hops ? [...route.hops] : [], cost: cost > max ? max : cost };
 	},
 };
 
@@ -147,10 +131,5 @@ export function isAnonymous(route: Route): boolean {
 export function routesEqual(a: Route | undefined, b: Route | undefined): boolean {
 	if (a === b) return true;
 	if (!a || !b) return false;
-	return (
-		a.cost.warm === b.cost.warm &&
-		a.cost.cold === b.cost.cold &&
-		a.hops.length === b.hops.length &&
-		a.hops.every((hop, i) => hop === b.hops[i])
-	);
+	return a.cost === b.cost && a.hops.length === b.hops.length && a.hops.every((hop, i) => hop === b.hops[i]);
 }
