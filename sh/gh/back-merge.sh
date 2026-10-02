@@ -43,14 +43,27 @@ case "$status" in
         ;;
 esac
 
-pr=$(gh pr list --repo "$repo" --head "$branch" --base main --state open --json number --jq '.[0].number // empty')
+# Only a pull request from this repository's own branch: `gh pr list --head`
+# matches the branch name alone, so a fork's branch of the same name would pass.
+find_pr() {
+    gh api "repos/$repo/pulls?state=open&base=main&head=${repo%%/*}:$branch" \
+        --jq "[.[] | select(.head.repo.full_name == \"$repo\")][0].number // empty"
+}
+
+pr=$(find_pr)
 if [[ -z "$pr" ]]; then
     gh pr create --repo "$repo" --head "$branch" --base main \
         --title "chore: merge release into main" \
         --body "Carries what \`release\` published (versions, CHANGELOGs, backports) back to trunk. Opened by the Back-merge workflow.
 
 **Merge with a merge commit. Never squash.** A squash leaves the merge base at the last cut, so the next back-merge conflicts. On a conflict, merge \`main\` into \`$branch\` and resolve it there."
-    pr=$(gh pr list --repo "$repo" --head "$branch" --base main --state open --json number --jq '.[0].number')
+    pr=$(find_pr)
+fi
+if [[ -z "$pr" ]]; then
+    echo "error: no pull request from $repo:$branch into main" >&2
+    exit 1
 fi
 
-gh pr merge --repo "$repo" "$pr" --auto --merge
+# Queue exactly the commit this run produced, so a later push cannot ride along.
+head=$(gh api "repos/$repo/git/ref/heads/$branch" --jq .object.sha)
+gh pr merge --repo "$repo" "$pr" --auto --merge --match-head-commit "$head"

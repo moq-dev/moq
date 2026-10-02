@@ -40,7 +40,8 @@ on:
       - "sh/gh/release.sh"
       - "rs/moq-ffi/build.sh"
   # Manual trigger so a wrapper bump can be published once the bindings it
-  # depends on land on Maven Central (the guard below skips otherwise).
+  # depends on land on Maven Central (the guard below skips otherwise). Only a
+  # dispatch on `release` publishes.
   workflow_dispatch:
   workflow_run:
     workflows: ["Release Kotlin FFI"]
@@ -143,7 +144,10 @@ jobs:
     name: Publish wrapper
     needs: [check-version]
     # PRs always run (dry-run). Pushes publish only when the version is new.
-    if: github.event_name == 'pull_request' || needs.check-version.outputs.should_publish == 'true'
+    if: >-
+      github.event_name == 'pull_request' ||
+      (needs.check-version.outputs.should_publish == 'true' &&
+       (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/release'))
     # Only publishing runs share the serialized group. GitHub keeps a single
     # pending run per group and drops the older one, so a PR or a no-op push
     # sharing it silently cancelled a queued release. Scoped to this job so runs
