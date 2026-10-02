@@ -147,8 +147,8 @@ moq-mux = { version = "0.10.9", path = "rs/moq-mux" }
 moq-net = { version = "0.3.8", path = "rs/moq-net" }
 # The MoQ fork of noq (moq-dev/noq). iroh keeps upstream noq, so a build with the
 # iroh feature carries both stacks.
-moq-noq-proto = { version = "2.0", default-features = false }
-moq-noq-udp = "2.0"
+moq-noq-proto = { version = "2.0.1", default-features = false }
+moq-noq-udp = "2.0.1"
 # NVENC bindings, forked from ViliamVadocz/nvidia-video-codec-sdk to dlopen the
 # driver at runtime. Compiles on any platform (macOS included) but only actually
 # used by moq-video on Linux.
@@ -232,7 +232,7 @@ web-transport-iroh = "0.8"
 # default-features off so the QUIC crypto provider is chosen by moq-tokio's
 # aws-lc-rs / ring features.
 # The WebTransport adapter released with moq-noq, from the same repository.
-web-transport-moq = { version = "2.0", default-features = false }
+web-transport-moq = { version = "2.0.1", default-features = false }
 web-transport-proto = "0.6"
 web-transport-trait = "0.5"
 web-transport-wasm = "0.7"
