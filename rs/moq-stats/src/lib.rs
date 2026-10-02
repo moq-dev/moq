@@ -14,9 +14,9 @@
 //!
 //! # Wire format
 //!
-//! A [`Producer`] publishes one broadcast per node at `<prefix>/node/<node>/<epoch>`
+//! A [`Producer`] publishes one broadcast per node at `<prefix>/node/<node>/@<epoch>`
 //! (default prefix `.stats`), or one per group of leading broadcast-path
-//! segments at `<prefix>/<group>/node/<node>/<epoch>`; parse announce paths back with
+//! segments at `<prefix>/<group>/node/<node>/@<epoch>`; parse announce paths back with
 //! [`parse_node_path`]. Each [`Tier`] carries `publisher.json`,
 //! `subscriber.json`, and `sessions.json` tracks of cumulative [`Traffic`] and
 //! [`Presence`] counters, plus `.json.z` siblings encoded with

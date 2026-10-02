@@ -20,14 +20,14 @@ it. Traffic under the prefix is never counted, so serving stats doesn't
 generate more stats.
 
 ```text
-<prefix>/node/<node>/<epoch>               depth 0: one broadcast per node
-<prefix>/<group>/node/<node>/<epoch>       depth N: one broadcast per group per node
+<prefix>/node/<node>/@<epoch>              depth 0: one broadcast per node
+<prefix>/<group>/node/<node>/@<epoch>       depth N: one broadcast per group per node
 ```
 
 - `<node>` tells relays sharing a cluster apart. It may span several segments
   (`sjc/1`), and defaults to `local` when unset.
-- `<epoch>` is a unique ID for this node instance, shared by all its project
-  broadcasts. A restarted producer gets a new epoch, so relays cannot serve
+- `@<epoch>` is a trailing `@` followed by a lowercase hyphenated UUIDv7,
+  unique to this node instance and shared by all its project broadcasts. A restarted producer gets a new epoch, so relays cannot serve
   snapshots cached under the previous instance's name.
 - `<group>` is the first `depth` segments of each broadcast path (for traffic)
   or auth root (for sessions), so a consumer can scope an announce to one

@@ -1,7 +1,7 @@
 //! The aggregating half: fold a group's per-node stats broadcasts into one view.
 //!
 //! A single-broadcast [`Consumer`](crate::Consumer) reads one
-//! `<prefix>/<group>/node/<node>/<epoch>` broadcast. This reader watches an origin's
+//! `<prefix>/<group>/node/<node>/@<epoch>` broadcast. This reader watches an origin's
 //! announce stream for *every* node broadcast in a group and folds their
 //! cumulative counters into one merged frame per `(tier, role)`, so a downstream
 //! sees a project's whole live traffic as if it came from a single node.
@@ -698,8 +698,8 @@ mod tests {
 		// and still growing: the total holds through the swap, then advances,
 		// never dipping.
 		let origin = produce_origin();
-		let mut node_a = NodeBroadcast::new(&origin, "acme", "a/epoch");
-		let mut node_b = NodeBroadcast::new(&origin, "acme", "b/epoch");
+		let mut node_a = NodeBroadcast::new(&origin, "acme", "a/@epoch");
+		let mut node_b = NodeBroadcast::new(&origin, "acme", "b/@epoch");
 
 		node_a.publish("acme/room", 100);
 		node_b.publish("acme/room", 40);
@@ -713,7 +713,7 @@ mod tests {
 		drop(node_a);
 		drive_tick().await;
 
-		let mut node_a = NodeBroadcast::new(&origin, "acme", "a/epoch");
+		let mut node_a = NodeBroadcast::new(&origin, "acme", "a/@epoch");
 		node_a.publish("acme/room", 120);
 		drive_tick().await;
 

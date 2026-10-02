@@ -1999,7 +1999,10 @@ mod tests {
 		let epoch = stats.epoch().to_string();
 		let cluster = cluster.with_stats(stats);
 
-		let path = moq_net::Path::new(".stats").join("node").join("test").join(&epoch);
+		let path = moq_net::Path::new(".stats")
+			.join("node")
+			.join("test")
+			.join(format!("@{epoch}"));
 		let consumer = cluster.origin.consume();
 		tokio::time::timeout(std::time::Duration::from_secs(5), consumer.routed(&path))
 			.await
@@ -2569,7 +2572,10 @@ mod tests {
 			.expect("broadcast resolves")
 			.expect("broadcast present");
 
-		let stats_path = moq_net::Path::new(".stats").join("node").join("test").join(&epoch);
+		let stats_path = moq_net::Path::new(".stats")
+			.join("node")
+			.join("test")
+			.join(format!("@{epoch}"));
 		tokio::time::timeout(Duration::from_secs(5), consumer.routed(&stats_path))
 			.await
 			.expect("stats announced")

@@ -216,7 +216,7 @@ the task running for as long as you hold it.
 ```toml
 [stats]
 enabled = true
-prefix = ".stats"                    # Broadcasts appear under <prefix>/node/<node>/<epoch>.
+prefix = ".stats"                    # Broadcasts appear under <prefix>/node/<node>/@<epoch>.
 interval = 1                         # Seconds between snapshots.
 node = "sjc/1"                       # Disambiguates relays sharing a cluster.
 depth = 1                            # Also bucket by the first N path segments (per tenant).

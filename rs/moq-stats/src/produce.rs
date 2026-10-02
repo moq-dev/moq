@@ -29,7 +29,7 @@ pub struct Config {
 	/// When `None`, [`Producer::new`] spawns no task and publishes nothing.
 	pub origin: Option<origin::Producer>,
 	/// Top-level path stats are published under (default `.stats`). The full
-	/// advertised path is `<prefix>/node/<node>/<epoch>` (`local` is used when
+	/// advertised path is `<prefix>/node/<node>/@<epoch>` (`local` is used when
 	/// `node` is unset). Also the registry's exclude prefix, so serving a
 	/// stats broadcast doesn't generate more stats.
 	pub prefix: PathOwned,
@@ -41,9 +41,9 @@ pub struct Config {
 	pub interval: Duration,
 	/// How many leading broadcast-path segments to use as a grouping key.
 	///
-	/// Default `0` publishes one `<prefix>/node/<node>/<epoch>` broadcast carrying every
+	/// Default `0` publishes one `<prefix>/node/<node>/@<epoch>` broadcast carrying every
 	/// path. `1` publishes one broadcast per first segment at
-	/// `<prefix>/<group>/node/<node>/<epoch>`, and larger values include more leading
+	/// `<prefix>/<group>/node/<node>/@<epoch>`, and larger values include more leading
 	/// segments. Group broadcasts are announced while their group has live traffic;
 	/// at depth `0`, the single broadcast stays announced for the producer's life.
 	pub depth: usize,
@@ -162,7 +162,10 @@ impl Producer {
 		// `config.node` is normalized too.
 		let node = node.filter(|p| !p.is_empty());
 		let epoch: Arc<str> = uuid::Uuid::now_v7().to_string().into();
-		let node = Some(node.unwrap_or_else(|| PathOwned::from("local")).join(epoch.as_ref()));
+		let node = Some(
+			node.unwrap_or_else(|| PathOwned::from("local"))
+				.join(format!("@{epoch}")),
+		);
 
 		let Some(origin) = origin else {
 			return Self {
@@ -194,7 +197,7 @@ impl Producer {
 		}
 	}
 
-	/// The unique epoch appended to every broadcast this producer publishes.
+	/// The lowercase UUIDv7 carried in every broadcast's trailing `@<epoch>` segment.
 	pub fn epoch(&self) -> &str {
 		&self.epoch
 	}
@@ -1052,7 +1055,7 @@ fn group_key(path: &str, depth: usize) -> &str {
 }
 
 fn advertised_path(prefix: &Path, group: &Path, node: Option<&str>) -> PathOwned {
-	// `<prefix>/<group>/node/<node>/<epoch>`. The group segment is empty at depth 0.
+	// `<prefix>/<group>/node/<node>/@<epoch>`. The group segment is empty at depth 0.
 	// The fixed `node` category leaves room for sibling categories (e.g.
 	// `<top-prefix>/<group>/cluster` for relay-mesh stats) under the same prefix.
 	let mut out = prefix.as_str().to_string();
@@ -1073,8 +1076,12 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn node_instances_publish_different_broadcast_names() {
-		let (_first, first_origin) = test_producer(Some("sjc/1"));
+		let (first_producer, first_origin) = test_producer(Some("sjc/1"));
 		let first = announced(&first_origin).await.0;
+		assert_eq!(first.as_str(), format!(".stats/node/sjc/1/@{}", first_producer.epoch()));
+		let epoch = uuid::Uuid::parse_str(first_producer.epoch()).unwrap();
+		assert_eq!(epoch.get_version_num(), 7);
+		assert_eq!(epoch.hyphenated().to_string(), first_producer.epoch());
 		let (_second, second_origin) = test_producer(Some("sjc/1"));
 		let second = announced(&second_origin).await.0;
 		assert_ne!(first, second, "a new node instance cannot reuse cached broadcast names");
@@ -1307,13 +1314,13 @@ mod tests {
 		let (_producer, origin) = test_producer(Some("/sjc//1/"));
 		assert_eq!(
 			announced(&origin).await.0,
-			format!(".stats/node/sjc/1/{}", _producer.epoch())
+			format!(".stats/node/sjc/1/@{}", _producer.epoch())
 		);
 
 		let (_producer, origin) = test_producer(Some("///"));
 		assert_eq!(
 			announced(&origin).await.0,
-			format!(".stats/node/local/{}", _producer.epoch())
+			format!(".stats/node/local/@{}", _producer.epoch())
 		);
 	}
 
@@ -1328,7 +1335,7 @@ mod tests {
 
 		assert_eq!(
 			announced(&origin).await.0,
-			format!(".stats/node/sjc/1/{}", producer.epoch())
+			format!(".stats/node/sjc/1/@{}", producer.epoch())
 		);
 	}
 
@@ -1338,7 +1345,7 @@ mod tests {
 		let _f = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 8).await;
 		assert_eq!(
 			announced(&origin).await.0,
-			format!(".stats/node/local/{}", producer.epoch())
+			format!(".stats/node/local/@{}", producer.epoch())
 		);
 	}
 
