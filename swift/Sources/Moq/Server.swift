@@ -90,21 +90,9 @@ public final class Request: Sendable {
         ffi.transport()
     }
 
-    /// Override the publish origin for this session, falling back to the server's.
-    /// Captured at `accept()`. Throws if the request is busy, already answered, or cancelled.
-    public func setPublish(_ origin: OriginProducer?) throws {
-        try ffi.setPublish(origin: origin?.ffi)
-    }
-
-    /// Override the consume origin for this session, falling back to the server's.
-    /// Captured at `accept()`. Throws if the request is busy, already answered, or cancelled.
-    public func setConsume(_ origin: OriginProducer?) throws {
-        try ffi.setConsume(origin: origin?.ffi)
-    }
-
-    /// Complete the handshake and return the established session.
-    public func accept() async throws -> Session {
-        Session(try await ffi.accept())
+    /// Complete the handshake, inheriting server origins wherever an argument is nil.
+    public func accept(publish: OriginProducer? = nil, consume: OriginProducer? = nil) async throws -> Session {
+        Session(try await ffi.accept(publish: publish?.ffi, consume: consume?.ffi))
     }
 
     /// Reject the session with an application error code; 401 and 403 map to unauthorized.

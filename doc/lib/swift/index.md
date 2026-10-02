@@ -91,7 +91,11 @@ a 200 ms head start. `WebSocketConfig(enabled: false)` turns it off for a
 QUIC-only relay, and `delayUs` changes the head start, in microseconds.
 
 `Server(bind:tls:)` binds, generates or loads TLS, and hands you each request to
-`accept()` or `reject(code:)`; `request.transport` is a `Transport` enum. JSON tracks live under `Json` and take `Codable` types
+`accept(publish: nil, consume: nil)` or `reject(code:)`. Nil inherits the server
+default; a supplied origin replaces it. Pass fresh origins for isolation, or
+the same origin on both sides to share it. Origins are captured when accept
+starts. A second response throws `AlreadyResponded`; calls after cancel throw
+`Cancelled`; `request.transport` is a `Transport` enum. JSON tracks live under `Json` and take `Codable` types
 (`Json.SnapshotProducer<Value>(broadcast:track:)`, `Json.StreamConsumer<Value>(track:)`), and the
 rest of the [shared feature list](/lib/#what-every-binding-can-do) maps one
 to one: `fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(prefix:)` for broadcasts, `appendDatagram`/

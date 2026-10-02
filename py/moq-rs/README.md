@@ -95,7 +95,7 @@ async def main():
             safe_path = request.path.split("?", 1)[0]
             safe_url = request.url.split("?", 1)[0] if request.url else None
             print(f"  + {request.transport} {safe_path} from {safe_url}")
-            sessions.append(await request.accept())
+            sessions.append(await request.accept(publish=None, consume=None))
 
 
 asyncio.run(main())
@@ -138,8 +138,7 @@ client = moq.Client(
   - `.create_broadcast(path) → BroadcastProducer`. Create an unannounced broadcast, invisible to everyone; `announce()` makes it discoverable and reachable; `close()` ends it.
 - **`Request`**. An incoming session, yielded by `async for request in server`.
   - `.url`, `.path`, `.query`, `.transport`. The query-free path is uniform across transports; the root or missing path is `""`. The encoded query may contain credentials.
-  - `.set_publish(origin)`, `.set_consume(origin)`. Per-request overrides, captured at `accept()`. Raise if the request is already answered, cancelled, or currently accepting.
-  - `await .accept() → Session`. Complete the handshake (hold the result to keep the connection alive).
+  - `await .accept(*, publish=None, consume=None) → Session`. Origins are captured when accept starts; None inherits the server default and a supplied origin replaces it. Pass fresh origins for isolation, or the same origin on both sides to share it. A second response raises `AlreadyResponded`; calls after cancel raise `Cancelled`. Complete the handshake (hold the result to keep the connection alive).
   - `await .reject(code)`. Reject with an application error code; 401 and 403 map to unauthorized.
   - `.cancel()`. Cancel an in-flight `accept()`/`reject()` call.
 - **`Session`**. An established connection. Holding it keeps the connection alive; it is also an `async with` context manager that shuts down on exit.

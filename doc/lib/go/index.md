@@ -123,9 +123,10 @@ QUIC-only relay, and `moq.WithWebSocketDelay` changes the head start.
 
 `moq.Listen` accepts sessions with per-request `Accept`/`Reject`; `Request.Transport()`
 returns the closed `moq.Transport` enum.
-`Request.SetPublish`/`SetConsume` return an error if the request is already
-answered, cancelled, or currently accepting; `ErrBusy` is the race with an
-in-flight Accept. An invalid option fails `Dial` or `Listen` with `moq.ErrConfig`.
+`Request.Accept(ctx, publish, consume)` captures per-request origins when it starts.
+A nil origin inherits the server default; a supplied origin replaces it.
+Pass fresh origins for isolation, or the same origin on both sides to share it.
+A second response returns `ErrAlreadyResponded`; calls after cancel return `ErrCancelled`. An invalid option fails `Dial` or `Listen` with `moq.ErrConfig`.
 Every live stream ranges with `All(ctx)`; a `TrackConsumer` also offers
 `Groups`, `GroupsAsArrived`, and `Datagrams`. JSON tracks live in `moq.dev/moq/json` (import it as `moqjson`):
 `moqjson.NewSnapshotProducer(broadcast, track, options)` takes over a `TrackProducer`

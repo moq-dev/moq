@@ -111,10 +111,13 @@ here: `moq.Server` with per-request accept/reject, `fetch_group` and
 `fetch_media_group`, `dynamic()` handlers for on-demand tracks and
 `dynamic(prefix)` for broadcasts, `append_datagram`/`recv_datagram`, `set_catalog_section`,
 and a producer's `demand()`, a `TrackDemand` whose
-`used()`/`unused()` let capture idle when nobody is subscribed. `request.set_publish`/`set_consume` raise if the request is already
-answered, cancelled, or currently accepting. `session.bandwidth()` divides the connection's send estimate;
+`used()`/`unused()` let capture idle when nobody is subscribed.
+`await request.accept(publish=None, consume=None)` inherits the server defaults.
+A supplied origin replaces its side; pass fresh origins for isolation, or the
+same origin on both sides to share it. Origins are captured when accept starts.
+A second response raises `AlreadyResponded`; calls after cancel raise `Cancelled`. `session.bandwidth()` divides the connection's send estimate;
 pass it to `encode_video` / `encode_audio` or `reserve` a share for an
-app-owned track. `moq.is_auth(err)` and `moq.is_shutdown(err)` classify errors. `moq.protocol_error(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one. Catch `moq.Error.Busy` when a request setter races its in-flight accept.
+app-owned track. `moq.is_auth(err)` and `moq.is_shutdown(err)` classify errors. `moq.protocol_error(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one.
 Each server request reports a `moq.Transport` enum, including QUIC, Iroh,
 WebSocket, TCP, and Unix sockets.
 

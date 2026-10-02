@@ -822,7 +822,7 @@ impl MoqSession {
 
 	/// The publish-side origin: where local broadcasts get advertised
 	/// to the remote. Either the producer the caller wired via
-	/// `set_publish` / `set_consume` before connect/accept, or one
+	/// client config or request accept arguments, or one
 	/// auto-created if neither was set.
 	pub fn publish(&self) -> Arc<MoqOriginProducer> {
 		self.publisher.clone()
@@ -830,7 +830,7 @@ impl MoqSession {
 
 	/// The subscribe-side origin: a read handle for receiving
 	/// announcements pushed by the remote. Either derived from the
-	/// origin the caller wired via `set_consume`, or auto-created if
+	/// consume origin the caller supplied, or auto-created if
 	/// neither was set.
 	pub fn consume(&self) -> Arc<MoqOriginConsumer> {
 		self.consumer.clone()

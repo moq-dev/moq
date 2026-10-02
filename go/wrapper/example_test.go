@@ -142,7 +142,7 @@ func ExampleServer_All() {
 			continue
 		}
 
-		session, err := req.Accept(ctx)
+		session, err := req.Accept(ctx, nil, nil)
 		if err != nil {
 			continue
 		}

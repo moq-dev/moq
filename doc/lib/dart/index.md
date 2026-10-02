@@ -64,7 +64,7 @@ final server = await Server.listen(
 final live = server.createBroadcast('live/camera');
 live.announce(route: MoqRoute()); // unannounced broadcasts are invisible
 await for (final request in server.requests()) {
-  final session = await request.accept();
+  final session = await request.accept(publish: null, consume: null);
   print(session.epoch());
 }
 ```
@@ -106,8 +106,10 @@ wrappers. `Container`, `Route`, and the exceptions keep theirs, because
 
 Cancelling a stream releases the native cursor. The package re-exports
 `moq_ffi`, so the full generated API is available without a second import.
-`MoqRequest.setPublish`/`setConsume` throw if an accept is in flight, after a
-response, or after `cancel()`. Incoming requests report a `MoqTransport` enum.
+`request.accept(publish: null, consume: null)` inherits the server defaults.
+A supplied origin replaces its side; pass fresh origins for isolation, or the
+same origin on both sides to share it. Origins are captured when accept starts.
+A second response throws `AlreadyResponded`; calls after `cancel()` throw `Cancelled`. Incoming requests report a `MoqTransport` enum.
 `ProtocolMoqException` carries a `MoqProtocolException` as `details` (scope, verbatim
 code, kind) when the peer sent a session or stream code.
 

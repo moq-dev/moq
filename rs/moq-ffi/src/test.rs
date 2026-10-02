@@ -3446,7 +3446,7 @@ async fn server_client_roundtrip() {
 			.expect("accept returned None");
 		assert_eq!(request.path(), "/test");
 		assert_eq!(request.query().as_deref(), Some("foo=bar"));
-		request.accept().await.expect("handshake failed")
+		request.accept(None, None).await.expect("handshake failed")
 	});
 
 	// Client side: connect, subscribe via a consume origin.
@@ -3520,8 +3520,8 @@ async fn server_client_roundtrip() {
 
 #[tokio::test]
 async fn server_client_roundtrip_auto_origin() {
-	// Same shape as `server_client_roundtrip` but the client never calls
-	// `set_publish` / `set_consume`: the auto-created origin sides on
+	// Same shape as `server_client_roundtrip` but the client config omits
+	// origins: the auto-created origin sides on
 	// `MoqClientSession` are what drive publishing and subscribing.
 	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let server = MoqServer::new(MoqServerConfig {
@@ -3545,10 +3545,10 @@ async fn server_client_roundtrip_auto_origin() {
 			.await
 			.expect("accept errored")
 			.expect("accept returned None");
-		request.accept().await.expect("handshake failed")
+		request.accept(None, None).await.expect("handshake failed")
 	});
 
-	// No set_publish / set_consume, so this uses the auto-origin path.
+	// No configured origins, so this uses the auto-origin path.
 	let client = MoqClient::new(MoqClientConfig {
 		tls: insecure_tls(),
 		bind: Some("127.0.0.1:0".into()),
@@ -3736,8 +3736,8 @@ async fn request_double_respond_returns_already_responded() {
 			.expect("accept returned None");
 
 		// Accept once, then try a second response. It must error.
-		let session = request.accept().await.expect("first ok succeeds");
-		let second_ok = request.accept().await;
+		let session = request.accept(None, None).await.expect("first ok succeeds");
+		let second_ok = request.accept(None, None).await;
 		assert!(
 			matches!(second_ok, Err(MoqError::AlreadyResponded)),
 			"second ok() must fail"
@@ -3794,8 +3794,10 @@ async fn request_per_session_publish_override() {
 			.expect("accept errored")
 			.expect("accept returned None");
 		// Override publish on a per-request basis.
-		request.set_publish(Some(override_for_task)).unwrap();
-		request.accept().await.expect("ok succeeds")
+		request
+			.accept(Some(override_for_task), None)
+			.await
+			.expect("ok succeeds")
 	});
 
 	let client_origin = MoqOriginProducer::new(MoqOriginConfig::default());
@@ -3864,7 +3866,7 @@ async fn client_reconnects_and_resumes_announcements() {
 			.await
 			.expect("first accept errored")
 			.expect("first accept returned None");
-		let first = first.accept().await.expect("first handshake failed");
+		let first = first.accept(None, None).await.expect("first handshake failed");
 		if first_tx.send(first).is_err() {
 			panic!("test body gone");
 		}
@@ -3875,7 +3877,7 @@ async fn client_reconnects_and_resumes_announcements() {
 			.await
 			.expect("second accept errored")
 			.expect("second accept returned None");
-		second.accept().await.expect("second handshake failed")
+		second.accept(None, None).await.expect("second handshake failed")
 	});
 
 	let client_origin = MoqOriginProducer::new(MoqOriginConfig::default());
@@ -3977,7 +3979,7 @@ async fn one_shot_client_close_surfaces_through_closed() {
 			.await
 			.expect("accept errored")
 			.expect("accept returned None");
-		request.accept().await.expect("handshake failed")
+		request.accept(None, None).await.expect("handshake failed")
 	});
 
 	let client = MoqClient::new(MoqClientConfig {
@@ -4113,7 +4115,7 @@ async fn cancelled_status_does_not_swallow_the_next_transition() {
 			.await
 			.expect("accept errored")
 			.expect("accept returned None");
-		request.accept().await.expect("handshake failed")
+		request.accept(None, None).await.expect("handshake failed")
 	});
 
 	let client = MoqClient::new(MoqClientConfig {
@@ -4325,7 +4327,7 @@ async fn one_shot_peers() -> (Arc<MoqSession>, Arc<MoqSession>, Arc<MoqServer>) 
 			.await
 			.expect("accept errored")
 			.expect("accept returned None");
-		request.accept().await.expect("handshake failed")
+		request.accept(None, None).await.expect("handshake failed")
 	});
 
 	let client = MoqClient::new(MoqClientConfig {
@@ -4443,81 +4445,97 @@ async fn server_cert_fingerprints_busy_during_accept_and_cancelled_after() {
 	assert!(matches!(accept_err, Err(MoqError::Cancelled)));
 }
 
+// Queue accept behind another operation so the origin arguments must survive the
+// caller releasing its handles before the handshake starts on the FFI runtime.
 #[tokio::test]
-async fn request_origin_setters_apply_or_error() {
-	let server = MoqServer::new(MoqServerConfig {
-		bind: Some("127.0.0.1:0".into()),
-		tls: localhost_tls(),
-		..Default::default()
-	})
-	.unwrap();
-	let addr = server.listen().await.expect("listen failed");
+async fn request_accept_inherits_overrides_and_captures_origins() {
+	for (override_publish, override_consume) in [(false, false), (true, false), (false, true), (true, true)] {
+		let default_publish = MoqOriginProducer::new(MoqOriginConfig::default());
+		let default_consume = MoqOriginProducer::new(MoqOriginConfig::default());
+		let fresh = MoqOriginProducer::new(MoqOriginConfig::default());
+		let publish = override_publish.then(|| fresh.clone());
+		let consume = override_consume.then(|| fresh.clone());
+		let expected_publish = publish.as_ref().unwrap_or(&default_publish).inner().hop();
+		let expected_consume = consume.as_ref().unwrap_or(&default_consume).consume();
+		let captured = Arc::downgrade(&fresh);
+		let server = MoqServer::new(MoqServerConfig {
+			bind: Some("127.0.0.1:0".into()),
+			tls: localhost_tls(),
+			publish: Some(default_publish),
+			consume: Some(default_consume),
+			..Default::default()
+		})
+		.unwrap();
+		let addr = server.listen().await.unwrap();
+		let client = MoqClient::new(MoqClientConfig {
+			tls: insecure_tls(),
+			bind: Some("127.0.0.1:0".into()),
+			once: true,
+			..Default::default()
+		})
+		.unwrap();
+		let connecting = client.clone();
+		let connect = tokio::spawn(async move { connecting.connect(format!("https://{addr}")).await });
+		let request = tokio::time::timeout(TIMEOUT, server.accept())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+		let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+		let holding = request.clone();
+		let hold = tokio::spawn(async move {
+			holding
+				.hold_lock(|| async move {
+					let _ = held_tx.send(());
+					let _ = release_rx.await;
+				})
+				.await
+		});
+		tokio::time::timeout(TIMEOUT, held_rx).await.unwrap().unwrap();
+		let accepting = request.clone();
+		let accept = spawn_parked(async move { accepting.accept(publish, consume).await }).await;
+		drop(fresh);
+		if override_publish || override_consume {
+			assert!(
+				captured.upgrade().is_some(),
+				"accept must own the origin arguments while queued"
+			);
+		}
+		release_tx.send(()).unwrap();
+		tokio::time::timeout(TIMEOUT, hold).await.unwrap().unwrap().unwrap();
+		let session = tokio::time::timeout(TIMEOUT, accept).await.unwrap().unwrap().unwrap();
+		let client_session = tokio::time::timeout(TIMEOUT, connect).await.unwrap().unwrap().unwrap();
+		assert_eq!(session.publish().inner().hop(), expected_publish);
 
-	let client = MoqClient::new(MoqClientConfig {
-		tls: insecure_tls(),
-		bind: Some("127.0.0.1:0".into()),
-		once: true,
-		..Default::default()
-	})
-	.unwrap();
-
-	let connecting = client.clone();
-	let connect = tokio::spawn(async move { connecting.connect(format!("https://{addr}")).await });
-
-	let request = tokio::time::timeout(TIMEOUT, server.accept())
-		.await
-		.expect("accept timed out")
-		.expect("accept errored")
-		.expect("accept returned None");
-
-	request.set_publish(None).unwrap();
-	request.set_consume(None).unwrap();
-
-	let (held_tx, held_rx) = tokio::sync::oneshot::channel();
-	let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-	let holding = request.clone();
-	let hold = holding.hold_lock(|| async move {
-		let _ = held_tx.send(());
-		let _ = release_rx.await;
-	});
-	tokio::pin!(hold);
-	tokio::select! {
-		biased;
-		result = &mut hold => panic!("lock holder returned before release: {result:?}"),
-		held = held_rx => held.expect("lock holder dropped"),
+		// Incoming broadcasts reach the selected consume origin, independently
+		// of which publish side was selected.
+		let announced = expected_consume.announced(MoqAnnounceConfig::default()).unwrap();
+		let broadcast = create_announced(&client_session.publish(), "incoming");
+		assert_eq!(next_announced(&announced).await.prefix, "incoming");
+		if override_publish && override_consume {
+			// Both explicit arguments referred to one fresh origin, so the
+			// publish handle must see broadcasts arriving on the consume side.
+			let shared = session
+				.publish()
+				.consume()
+				.announced(MoqAnnounceConfig::default())
+				.unwrap();
+			assert_eq!(next_announced(&shared).await.prefix, "incoming");
+		}
+		assert!(matches!(
+			request.accept(None, None).await,
+			Err(MoqError::AlreadyResponded)
+		));
+		broadcast.close().unwrap();
+		client_session.cancel(0);
+		session.cancel(0);
+		server.cancel();
 	}
-
-	assert!(matches!(
-		wait_for_config_error(|| request.set_publish(None), |err| matches!(err, MoqError::Busy)).await,
-		MoqError::Busy
-	));
-	assert!(matches!(request.set_consume(None), Err(MoqError::Busy)));
-
-	release_tx.send(()).expect("lock holder should still be waiting");
-	tokio::time::timeout(TIMEOUT, hold)
-		.await
-		.expect("lock holder timed out")
-		.expect("lock holder failed");
-
-	let session = tokio::time::timeout(TIMEOUT, request.accept())
-		.await
-		.expect("handshake timed out")
-		.expect("handshake failed");
-
-	assert!(matches!(request.set_publish(None), Err(MoqError::AlreadyResponded)));
-	assert!(matches!(request.set_consume(None), Err(MoqError::AlreadyResponded)));
-
-	let _cs = tokio::time::timeout(TIMEOUT, connect)
-		.await
-		.expect("connect timed out")
-		.expect("connect task panicked")
-		.expect("connect failed");
-	session.cancel(0);
-	server.cancel();
 }
 
 #[tokio::test]
-async fn request_origin_setters_cancelled_after_cancel() {
+async fn request_accept_cancelled_after_cancel() {
 	let server = MoqServer::new(MoqServerConfig {
 		bind: Some("127.0.0.1:0".into()),
 		tls: localhost_tls(),
@@ -4543,10 +4561,36 @@ async fn request_origin_setters_cancelled_after_cancel() {
 		.expect("accept errored")
 		.expect("accept returned None");
 
-	request.set_publish(None).unwrap();
+	let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+	let (_release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+	let holding = request.clone();
+	let hold = tokio::spawn(async move {
+		holding
+			.hold_lock(|| async move {
+				let _ = held_tx.send(());
+				let _ = release_rx.await;
+			})
+			.await
+	});
+	tokio::time::timeout(TIMEOUT, held_rx).await.unwrap().unwrap();
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let captured = Arc::downgrade(&origin);
+	let accepting = request.clone();
+	let accept = spawn_parked(async move { accepting.accept(Some(origin), None).await }).await;
+	assert!(captured.upgrade().is_some());
+
 	request.cancel();
-	assert!(matches!(request.set_publish(None), Err(MoqError::Cancelled)));
-	assert!(matches!(request.set_consume(None), Err(MoqError::Cancelled)));
+	assert!(matches!(request.accept(None, None).await, Err(MoqError::Cancelled)));
+	assert!(matches!(request.reject(403).await, Err(MoqError::Cancelled)));
+
+	let result = tokio::time::timeout(TIMEOUT, accept).await.unwrap().unwrap();
+	assert!(matches!(result, Err(MoqError::Cancelled)));
+	let result = tokio::time::timeout(TIMEOUT, hold).await.unwrap().unwrap();
+	assert!(matches!(result, Err(MoqError::Cancelled)));
+	assert!(
+		captured.upgrade().is_none(),
+		"cancel must release the queued origin arguments"
+	);
 
 	client.cancel();
 	let _ = tokio::time::timeout(TIMEOUT, connect).await;
@@ -4584,7 +4628,7 @@ async fn shutdown_cancels_and_drops_cleanly() {
 	let accept_server = server.clone();
 	let accept = tokio::spawn(async move {
 		let request = accept_server.accept().await.unwrap().expect("accept returned None");
-		request.accept().await.expect("handshake failed")
+		request.accept(None, None).await.expect("handshake failed")
 	});
 
 	let client_origin = MoqOriginProducer::new(MoqOriginConfig::default());

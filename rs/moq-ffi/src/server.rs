@@ -29,7 +29,7 @@ pub struct MoqServerConfig {
 	/// The origin whose broadcasts are served to incoming sessions.
 	///
 	/// With neither `publish` nor `consume` set, each session's two sides share one fresh
-	/// origin. A [`MoqRequest`] can override either side before it is accepted.
+	/// origin. A [`MoqRequest`] can override either side in [`accept`](MoqRequest::accept).
 	#[uniffi(default = None)]
 	pub publish: Option<Arc<MoqOriginProducer>>,
 	/// The origin that receives broadcasts published by incoming sessions. See `publish`.
@@ -241,9 +241,9 @@ mod transport_tests {
 
 /// An incoming MoQ session that can be accepted or rejected.
 ///
-/// Origin overrides are captured at [`accept`](Self::accept). Setters fail with
-/// [`MoqError::Busy`] while accept/reject is in flight, [`MoqError::AlreadyResponded`]
-/// after a response, and [`MoqError::Cancelled`] after [`cancel`](Self::cancel).
+/// Origin arguments are captured when [`accept`](Self::accept) starts. A second
+/// response fails with [`MoqError::AlreadyResponded`], and calls after
+/// [`cancel`](Self::cancel) fail with [`MoqError::Cancelled`].
 #[derive(uniffi::Object)]
 pub struct MoqRequest {
 	task: Task<RequestState>,
@@ -275,15 +275,6 @@ impl MoqRequest {
 			query,
 		}))
 	}
-
-	fn configure_origin(&self, f: impl FnOnce(&mut RequestState)) -> Result<(), MoqError> {
-		let mut state = self.task.configure()?;
-		if state.request.is_none() {
-			return Err(MoqError::AlreadyResponded);
-		}
-		f(&mut state);
-		Ok(())
-	}
 }
 
 #[cfg(test)]
@@ -291,7 +282,7 @@ impl MoqRequest {
 	/// Hold the request lock until `held` finishes.
 	///
 	/// `accept`/`reject` use the same `Task::run` path; a live handshake can
-	/// finish before a waiter samples `Busy`.
+	/// finish before a queued accept samples the locked state.
 	pub(crate) async fn hold_lock<F, Fut>(&self, held: F) -> Result<(), MoqError>
 	where
 		F: FnOnce() -> Fut + Send + 'static,
@@ -329,32 +320,26 @@ impl MoqRequest {
 		self.transport
 	}
 
-	/// Override the publish origin for this session. Falls back to the server's
-	/// configured publish origin if unset. Captured at [`accept`](Self::accept).
-	pub fn set_publish(&self, origin: Option<Arc<MoqOriginProducer>>) -> Result<(), MoqError> {
-		self.configure_origin(|state| {
-			state.publish = origin;
-		})
-	}
-
-	/// Override the consume origin for this session. Falls back to the server's
-	/// configured consume origin if unset. Captured at [`accept`](Self::accept).
-	pub fn set_consume(&self, origin: Option<Arc<MoqOriginProducer>>) -> Result<(), MoqError> {
-		self.configure_origin(|state| {
-			state.consume = origin;
-		})
-	}
-
 	/// Complete the MoQ handshake and return the established session.
 	///
-	/// Returns `AlreadyResponded` if `accept()` or `reject()` has already been called.
-	pub async fn accept(&self) -> Result<Arc<MoqSession>, MoqError> {
+	/// A null origin inherits the server's configured origin; a supplied origin replaces it.
+	/// Pass a fresh origin for isolation, or the same fresh origin on both sides to share it.
+	/// Returns `AlreadyResponded` after a response and `Cancelled` after cancellation.
+	#[uniffi::method(default(publish = None, consume = None))]
+	pub async fn accept(
+		&self,
+		publish: Option<Arc<MoqOriginProducer>>,
+		consume: Option<Arc<MoqOriginProducer>>,
+	) -> Result<Arc<MoqSession>, MoqError> {
 		self.task
-			.run(|mut state| async move {
+			.run(move |mut state| async move {
 				let request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
 				// Materialize both origin sides so the session can publish/subscribe and the
 				// FFI can hand back a publisher/consumer.
-				let (publish, subscribe) = crate::origin::resolve_pair(state.publish.as_ref(), state.consume.as_ref());
+				let (publish, subscribe) = crate::origin::resolve_pair(
+					publish.as_ref().or(state.publish.as_ref()),
+					consume.as_ref().or(state.consume.as_ref()),
+				);
 				let session = request
 					.with_publisher(&publish)
 					.with_subscriber(subscribe.clone())

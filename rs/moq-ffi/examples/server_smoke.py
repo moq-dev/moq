@@ -36,7 +36,7 @@ async def main() -> int:
     async def accept_one() -> moq.MoqSession:
         request = await server.accept()
         assert request is not None, "server.accept() returned None"
-        return await request.accept()
+        return await request.accept(publish=None, consume=None)
 
     accept_task = asyncio.create_task(accept_one())
 

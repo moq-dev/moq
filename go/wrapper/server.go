@@ -51,28 +51,20 @@ func (r *Request) Transport() Transport {
 	return r.inner.Transport()
 }
 
-// SetPublish overrides the publish origin for this session. Pass nil to fall
-// back to the server's configured publish origin. Captured at Accept.
-func (r *Request) SetPublish(o *OriginProducer) error {
-	if o == nil {
-		return r.inner.SetPublish(nil)
+// Accept completes the handshake, inheriting server origins wherever an argument is nil.
+// Hold the session to keep the connection alive. Pass fresh origins for isolation,
+// or the same fresh origin on both sides to share it.
+func (r *Request) Accept(ctx context.Context, publish, consume *OriginProducer) (*Session, error) {
+	var ffiPublish, ffiConsume **ffi.MoqOriginProducer
+	if publish != nil {
+		ffiPublish = &publish.inner
 	}
-	return r.inner.SetPublish(&o.inner)
-}
-
-// SetConsume overrides the consume origin for this session. Pass nil to fall
-// back to the server's configured consume origin. Captured at Accept.
-func (r *Request) SetConsume(o *OriginProducer) error {
-	if o == nil {
-		return r.inner.SetConsume(nil)
+	if consume != nil {
+		ffiConsume = &consume.inner
 	}
-	return r.inner.SetConsume(&o.inner)
-}
-
-// Accept completes the handshake and returns the established session. Hold the
-// session to keep the connection alive.
-func (r *Request) Accept(ctx context.Context) (*Session, error) {
-	inner, err := bridge.CallHandle(ctx, r.inner.Cancel, r.inner.Accept)
+	inner, err := bridge.CallHandle(ctx, r.inner.Cancel, func(ctx context.Context) (*ffi.MoqSession, error) {
+		return r.inner.Accept(ctx, ffiPublish, ffiConsume)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +257,7 @@ func (s *Server) All(ctx context.Context) iter.Seq2[*Request, error] {
 //	        _ = req.Reject(ctx, 403)
 //	        continue
 //	    }
-//	    session, err := req.Accept(ctx)
+//	    session, err := req.Accept(ctx, nil, nil)
 //	    // hold the session to keep the connection alive
 //	}
 func (s *Server) Serve(ctx context.Context) error {
@@ -289,7 +281,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		wg.Add(1)
 		go func(req *Request) {
 			defer wg.Done()
-			session, err := req.Accept(ctx)
+			session, err := req.Accept(ctx, nil, nil)
 			if err != nil {
 				return
 			}

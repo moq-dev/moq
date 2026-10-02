@@ -18,7 +18,7 @@ Transport = MoqTransport
 class Request:
     """Wraps MoqRequest, an incoming session that can be accepted or rejected.
 
-    Use `await request.accept()` to complete the handshake, or
+    Use `await request.accept(publish=None, consume=None)` to complete the handshake, or
     `await request.reject(code)` to reject with an application error code.
 
     Dropping a Request without responding closes the underlying connection
@@ -48,30 +48,22 @@ class Request:
         """The network transport carrying this session."""
         return self._inner.transport()
 
-    def set_publish(self, origin: OriginProducer | None) -> None:
-        """Override the publish origin for this session. Falls back to the
-        server's configured publish origin if unset. Captured at ``accept()``.
-
-        Raises if the request is currently accepting, already answered, or cancelled.
-        """
-        self._inner.set_publish(origin._inner if origin is not None else None)
-
-    def set_consume(self, origin: OriginProducer | None) -> None:
-        """Override the consume origin for this session. Falls back to the
-        server's configured consume origin if unset. Captured at ``accept()``.
-
-        Raises if the request is currently accepting, already answered, or cancelled.
-        """
-        self._inner.set_consume(origin._inner if origin is not None else None)
-
-    async def accept(self) -> Session:
+    async def accept(self, *, publish: OriginProducer | None = None, consume: OriginProducer | None = None) -> Session:
         """Complete the MoQ handshake and return the established session.
+
+        None inherits the server origin; a supplied origin replaces it.
+        Pass a fresh origin for isolation, or the same origin for both sides.
 
         The caller must hold the returned session to keep the connection
         alive; dropping it closes the session. Raises `Error.AlreadyResponded`
         if `accept()` or `reject()` has already been called.
         """
-        return Session(await self._inner.accept())
+        return Session(
+            await self._inner.accept(
+                publish=publish._inner if publish is not None else None,
+                consume=consume._inner if consume is not None else None,
+            )
+        )
 
     async def reject(self, code: int) -> None:
         """Reject the session with the given application error code.
@@ -105,7 +97,7 @@ class Server:
                 if request.path == "/admin":
                     await request.reject(403)
                     continue
-                session = await request.accept()  # hold to keep the connection alive
+                session = await request.accept(publish=None, consume=None)  # hold to keep the connection alive
 
     Exiting the context manager stops accepting new sessions and releases the
     listening socket before it returns, so the address can be bound again
@@ -218,12 +210,12 @@ class Server:
                 if request.path == "/admin":
                     await request.reject(403)
                     continue
-                session = await request.accept()
+                session = await request.accept(publish=None, consume=None)
         """
         session_tasks: set[asyncio.Task] = set()
 
         async def serve_session(request: Request) -> None:
-            session = await request.accept()
+            session = await request.accept(publish=None, consume=None)
             await session.closed()
 
         try:

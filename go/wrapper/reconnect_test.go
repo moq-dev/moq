@@ -41,7 +41,7 @@ func startRelay(t *testing.T, ctx context.Context, addr string) *relay {
 			if err != nil {
 				return
 			}
-			session, err := req.Accept(ctx)
+			session, err := req.Accept(ctx, nil, nil)
 			if err != nil {
 				continue
 			}

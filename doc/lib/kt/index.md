@@ -85,8 +85,11 @@ a 200 ms head start. `WebSocketConfig(enabled = false)` turns it off for a
 QUIC-only relay, and `delayUs` changes the head start.
 
 `Server.listen(ServerConfig(bind = ..., tls = ServerTls(generate = ...)))` accepts
-sessions with per-request `accept()`/`reject()`. `MoqRequest.setPublish`/`setConsume`
-throw if an accept is in flight, after a response, or after cancel. `MoqRequest.transport()` returns a `Transport` enum.
+sessions with per-request `accept(publish = null, consume = null)`/`reject()`.
+Null inherits the server default; a supplied origin replaces it. Pass a fresh
+origin for isolation, or the same origin on both sides to share it. Origins are
+captured when accept starts; a second response throws `AlreadyResponded`, and
+calls after cancel throw `Cancelled`. `MoqRequest.transport()` returns a `Transport` enum.
 JSON tracks live in the `dev.moq.json` package and take `@Serializable` types:
 `SnapshotProducer(broadcast, track, SnapshotConfig())` takes over a track from
 `publishTrack`, `SnapshotConsumer(track, SnapshotConfig())` one from
