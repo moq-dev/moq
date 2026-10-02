@@ -20,11 +20,11 @@ import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.t
 
 export type { Datagram } from "./datagram.ts";
 
-// The largest delay setTimeout keeps: anything more truncates to a signed 32-bit int
-// and fires right away.
-const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+// Wall-clock bound for idle cached content, matching Rust cache::DEFAULT_EXPIRY.
+// Media maxAge only bounds how far behind the live edge a reader may fall.
+const CACHE_WINDOW_MS = 30_000;
 
-// The cache scans at most this many times per retention window.
+// The cache scans at most this many times per idle cache window.
 const PRUNE_SLICES = 8;
 
 /** Default {@link Info.maxAge} window (milliseconds) when the publisher does not set one. */
@@ -67,9 +67,11 @@ export interface Info {
 	 */
 	timescale: Timescale;
 	/**
-	 * Publisher Max Age: the maximum age (milliseconds) of a non-latest group before
-	 * the publisher evicts it. Reported in TRACK_INFO (Lite05+) so relays re-serve with the
-	 * same bound. The publisher-side half of the budget a subscriber sets for itself.
+	 * Publisher Max Age: how far behind the live edge a group may fall in media
+	 * timestamps, in milliseconds, before it is stale. Reported in TRACK_INFO (Lite05+)
+	 * so relays re-serve with the same bound. A congestion stall cannot age content out;
+	 * idle cache eviction has a separate wall-clock window. This clamps each subscriber
+	 * budget.
 	 * Rounded up to a whole millisecond by {@link infoDefaults}, which refuses a negative
 	 * or non-finite value and a result past `Number.MAX_SAFE_INTEGER`.
 	 */
@@ -425,7 +427,7 @@ let makeSubscriber: (name: string, state: TrackState) => Subscriber;
  * subscription the publisher serves from it) gets an independent
  * {@link Subscriber} that receives a full copy of the groups, each with its own
  * read cursor. Groups are mirrored into every live subscriber and retained for the
- * track's `maxAge` window so a late subscriber replays the recent groups.
+ * idle cache window so a late subscriber can replay groups within its media budget.
  *
  * Obtained from {@link Request.accept} (the wire asks the application for a track to
  * serve) or constructed directly for an in-process track.
@@ -666,13 +668,13 @@ export class Producer {
 		this.#cached.delete(entry.group.sequence);
 	}
 
-	// The one group retention never takes: the newest, while it is still open. That is
-	// the live edge a publisher is appending to, and a track may legitimately keep it
-	// open across a long quiet stretch (a catalog snapshot, a JSON stream). Every other
-	// open group is an abandoned one, and ages out like a closed one.
+	// A live track's newest group remains replayable even after its group closes:
+	// a catalog can publish one snapshot for the broadcast's whole lifetime.
+	// Closing the track removes that protection so every idle entry can be reclaimed.
 	#liveEdge(): GroupProducer | undefined {
-		const latest = this.#cache.at(-1)?.group;
-		return latest?.closed.peek() === undefined ? latest : undefined;
+		const latest = this.#state.latest;
+		if (this.#state.closed.peek() !== undefined || latest === undefined) return undefined;
+		return this.#cached.get(latest)?.group;
 	}
 
 	// Evict cached groups idle for longer than the cache window. Idle means nothing
@@ -683,9 +685,8 @@ export class Producer {
 	// evicts a run of groups per scan instead of scanning everything to evict one per
 	// write. A group can outlive the window by up to one slice.
 	#prune(): void {
-		const maxAgeMs = this.#state.info.peek()?.maxAge ?? DEFAULT_MAX_AGE_MS;
 		const now = performance.now();
-		const slice = maxAgeMs / PRUNE_SLICES;
+		const slice = CACHE_WINDOW_MS / PRUNE_SLICES;
 		if (now < this.#pruned + slice) {
 			// Something may have come due since the last scan, so make sure another follows.
 			this.#wake(this.#pruned + slice);
@@ -693,7 +694,7 @@ export class Producer {
 		}
 		this.#pruned = now;
 
-		const cutoff = now - maxAgeMs;
+		const cutoff = now - CACHE_WINDOW_MS;
 		const live = this.#liveEdge();
 
 		let oldest: number | undefined;
@@ -716,7 +717,7 @@ export class Producer {
 		// over-arm: an entry written since is retained and re-armed.
 		clearTimeout(this.#pruneTimer);
 		this.#pruneTimer = undefined;
-		if (oldest !== undefined) this.#wake(Math.max(oldest + maxAgeMs, now + slice));
+		if (oldest !== undefined) this.#wake(Math.max(oldest + CACHE_WINDOW_MS, now + slice));
 	}
 
 	// Arm the prune wakeup for `at`, unless one is already armed sooner. Kept after a close,
@@ -725,10 +726,7 @@ export class Producer {
 		if (this.#pruneTimer !== undefined && this.#pruneTimerAt <= at) return;
 		clearTimeout(this.#pruneTimer);
 
-		// setTimeout truncates its delay to a signed 32-bit int, so a longer window
-		// would fire immediately and spin. Wake at the cap instead and re-arm: #prune
-		// retains anything still fresh, so the extra wakeups are the only cost.
-		const delay = Math.min(MAX_TIMEOUT_MS, Math.max(0, at - performance.now()));
+		const delay = Math.max(0, at - performance.now());
 		const timer = setTimeout(() => {
 			this.#pruneTimer = undefined;
 			this.#prune();
@@ -745,6 +743,7 @@ export class Producer {
 		this.#cache.push(entry);
 		this.#cached.set(group.sequence, entry);
 		this.#received = Math.max(this.#received, group.sequence + 1);
+		this.#state.latest = Math.max(this.#state.latest ?? 0, group.sequence);
 		for (const sink of this.#sinks) this.#mirror(entry, sink);
 		// Give held mirrors the new live edge before pruning their timeline entry,
 		// so their latency guard can preserve a terminal expiry verdict.
@@ -886,7 +885,7 @@ export class Producer {
 	 * sequence produced; an abort ends without one. Subscribers still draining get the
 	 * finished groups first, then the end or the abort. An abort after the declared end
 	 * settled (reached, with every group below it finished) is a clean close. The groups
-	 * left behind still age out after the track's `maxAge`, so a stale subscriber can't pin
+	 * left behind still age out on the idle cache window, so a stale subscriber can't pin
 	 * them.
 	 */
 	close(abort?: Error) {

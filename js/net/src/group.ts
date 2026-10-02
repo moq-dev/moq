@@ -111,7 +111,7 @@ export class Producer {
 	/**
 	 * When the group was created or last written, in `performance.now()` milliseconds.
 	 *
-	 * @internal Track retention only.
+	 * @internal Idle cache eviction only.
 	 */
 	get activity(): number {
 		return this.#activity;
