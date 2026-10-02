@@ -3668,6 +3668,8 @@ mod serve_tests {
 			}
 			assert!(buf.is_empty(), "FETCH delivered objects beyond the saved prefix");
 			let mark = h.log.writes.lock().unwrap().len();
+			// The origin's pump carries the new object to the subscription.
+			settle().await;
 			assert!(futures::poll!(serve.as_mut()).is_pending());
 			let mut tail = bytes::Bytes::from(h.log.writes.lock().unwrap()[mark..].to_vec());
 			assert_eq!(u64::decode(&mut tail, version).unwrap(), payloads.len() as u64);

@@ -3080,6 +3080,15 @@ impl Consumer {
 	/// (the final group was produced), `Err` once it closed or aborted before
 	/// completing. The origin's dispatcher uses this to tell a track that truly
 	/// ended from one whose serving route died mid-stream.
+	/// Poll for the track closing: no producer is left to write it, so nothing more
+	/// will ever arrive.
+	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
+		match &self.inner {
+			ConsumerKind::Plain(state) => state.poll_closed(waiter),
+			ConsumerKind::Spliced(_) => Poll::Pending,
+		}
+	}
+
 	pub(crate) fn poll_complete(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		let ConsumerKind::Plain(state) = &self.inner else {
 			// Spliced tracks are compositions; the dispatcher never monitors one.

@@ -6340,16 +6340,15 @@ mod filter_tests {
 		}
 	}
 
-	/// A frame-level start has no joining-FETCH spelling, so it is refused rather than
-	/// rounded down to the group.
+	/// A frame-level start has no joining-FETCH spelling, so a resumed subscription asks
+	/// for its whole group; the frames below the start are already cached elsewhere.
 	#[test]
-	fn older_drafts_refuse_a_frame_level_start() {
+	fn older_drafts_widen_a_frame_level_start_to_its_group() {
 		for version in JOINING_DRAFTS {
+			let join = subscribe_join(Some(track::Position { group: 7, frame: 1 }), None, version)
+				.unwrap_or_else(|err| panic!("{version}: {err}"));
 			assert!(
-				matches!(
-					subscribe_join(Some(track::Position { group: 7, frame: 1 }), None, version),
-					Err(Error::Unsupported)
-				),
+				matches!(join.fetch, Some(JoiningFetch::Absolute { group_id: 7 })),
 				"{version}"
 			);
 		}
@@ -7686,41 +7685,6 @@ mod joining_fetch_tests {
 				"{version}: the subscription continues live"
 			);
 		}
-	}
-
-	/// A frame-level start is refused before SUBSCRIBE is written, rather than rounded down.
-	#[tokio::test(start_paused = true)]
-	async fn a_frame_level_start_never_reaches_the_wire() {
-		let version = Version::Draft19;
-		let session = ScriptedSession::new(Vec::new());
-		let log = session.log.clone();
-		let (tasks, _task_set) = crate::util::TaskSet::new();
-		let mut subscriber = Subscriber::new(
-			crate::time::Clock::tokio(),
-			session,
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
-			Control::new(None, false),
-			None,
-			peer::PeerSetup::default(),
-			crate::Hop::new(1).unwrap(),
-			None,
-			version,
-			tasks,
-			Default::default(),
-		);
-
-		let producer = crate::broadcast::Info::default().produce();
-		let mut dynamic = producer.dynamic();
-		let consumer = producer.consume();
-		let track = consumer.track("video").unwrap();
-		let _subscription =
-			track.subscribe(track::Subscription::default().with_start(track::Position { group: 7, frame: 1 }));
-		let request = dynamic.requested_track().await.expect("no track requested");
-
-		subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
-
-		let writes = log.writes.lock().unwrap().clone();
-		assert!(writes.is_empty(), "a refused join must not write SUBSCRIBE");
 	}
 
 	/// A publisher that resets the request after FETCH_OK owes no fetch stream, so the

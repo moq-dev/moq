@@ -371,6 +371,9 @@ struct Alive {
 	// out of `GroupState` has to read both under one guard, or the two halves can
 	// straddle the abort: see `Producer::live_first_frame`.
 	aborted: AtomicBool,
+	// Set the first time a consumer is handed out, and never cleared: a reader can take
+	// the group and let go between two polls of whoever watches for that.
+	handed_out: AtomicBool,
 	// The cache stamp `GroupState::charge` maintains, held here as well so the
 	// eviction and expiry walks can weigh a candidate without taking the group lock
 	// they already hold the track lock over.
@@ -436,6 +439,7 @@ impl Producer {
 			info,
 			state: state.clone(),
 			aborted: AtomicBool::new(false),
+			handed_out: AtomicBool::new(false),
 			access,
 		});
 		Self {
@@ -947,6 +951,7 @@ impl Producer {
 	}
 
 	fn consumer(&self, state: kio::Consumer<GroupState>) -> Consumer {
+		self.alive.handed_out.store(true, Ordering::Release);
 		Consumer {
 			info: self.info,
 			track: self.track.clone(),
@@ -1007,6 +1012,19 @@ impl Producer {
 	/// Poll for the group becoming unused (every consumer dropped).
 	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state.poll_unused(waiter).map(|_| ())
+	}
+
+	/// Poll for a consumer being handed out, ever: ready once one has been, even if it
+	/// already let go.
+	pub(crate) fn poll_handed_out(&self, waiter: &kio::Waiter) -> Poll<()> {
+		// A consumer that exists was handed out; one minted after the registration wakes it.
+		if self.alive.handed_out.load(Ordering::Acquire) || self.state.poll_used(waiter).is_ready() {
+			return Poll::Ready(());
+		}
+		match self.alive.handed_out.load(Ordering::Acquire) {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
+		}
 	}
 
 	/// The recorded abort reason, or [`Error::Dropped`] if the group closed without one.

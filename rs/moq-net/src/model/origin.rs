@@ -2225,7 +2225,9 @@ struct FrontTask {
 struct Asked {
 	source: u64,
 	copy: track::Consumer,
-	sub: kio::Pending<track::Subscribing>,
+	/// The copy's info, once its query resolved.
+	info: Option<track::Info>,
+	sub: Option<kio::Pending<track::Subscribing>>,
 	floor: Option<track::Position>,
 }
 
@@ -2233,6 +2235,7 @@ impl Asked {
 	fn feed(self) -> super::pump::Feed {
 		super::pump::Feed {
 			copy: self.copy,
+			info: self.info,
 			sub: self.sub,
 			floor: self.floor,
 		}
@@ -2462,11 +2465,13 @@ async fn run_front(task: FrontTask) {
 								// Subscribe at once, from where the logical track stops and
 								// with what its readers want, so the resume point rides the
 								// first request: some sessions read the demand only once.
+								// Without a subscriber yet, the pump subscribes once one shows.
 								let floor = io.pump.resume_floor();
-								let demand = io.pump.subscription().unwrap_or_default();
-								let sub = copy.subscribe(track::Subscription {
-									start: super::subscription::max_some(demand.start, floor),
-									..demand
+								let sub = io.pump.subscription().map(|demand| {
+									copy.subscribe(track::Subscription {
+										start: super::subscription::max_some(demand.start, floor),
+										..demand
+									})
 								});
 								// `into_inner` sheds the `Pending` future wrapper so only
 								// the pollable (which is `Sync`) is held across the wait.
@@ -2475,6 +2480,7 @@ async fn run_front(task: FrontTask) {
 									Asked {
 										source,
 										copy,
+										info: None,
 										sub,
 										floor,
 									},
@@ -2557,6 +2563,19 @@ async fn run_front(task: FrontTask) {
 								&& io.pump.is_used()
 							{
 								let source = asked.source;
+								// Still subscribed to it, so the pump learns the info from the
+								// subscription itself.
+								let asked = Asked {
+									sub: asked.sub.or_else(|| {
+										io.pump.subscription().map(|demand| {
+											asked.copy.subscribe(track::Subscription {
+												start: super::subscription::max_some(demand.start, asked.floor),
+												..demand
+											})
+										})
+									}),
+									..asked
+								};
 								let feed = io.pump.feed(asked.feed());
 								io.copy = Some((source, feed));
 							}
@@ -2681,8 +2700,13 @@ async fn run_front(task: FrontTask) {
 				};
 				// Staged only while the track has a reader: without one the machine
 				// will not splice, and a held copy would keep the source subscribed.
-				if result.is_ok() && io.used {
-					io.staged = Some(asked);
+				if let Ok(info) = &result
+					&& io.used
+				{
+					io.staged = Some(Asked {
+						info: Some(info.clone()),
+						..asked
+					});
 				}
 				Event::TrackInfo {
 					track: name,
@@ -7973,6 +7997,11 @@ mod tests {
 			"repeated demand keeps every complete group while releasing its source"
 		);
 
+		// A group the leaf produced while every front was parked: no cache on the way has
+		// it, so the fetch re-splices each hop to reach the leaf.
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"fetched".as_ref()).unwrap();
+		group.finish().unwrap();
 		let fetch = edge_resolved.track("video").unwrap().fetch_group(2, None);
 		let mut fetch = std::pin::pin!(fetch);
 		assert!(futures::poll!(fetch.as_mut()).is_pending(), "fetch should re-splice");
@@ -7980,9 +8009,6 @@ mod tests {
 			.await
 			.expect("fetch should reach the leaf")
 			.expect("source open");
-		let mut group = track.append_group().unwrap();
-		group.write_frame(crate::Timestamp::ZERO, b"fetched".as_ref()).unwrap();
-		group.finish().unwrap();
 		let mut group = tokio::time::timeout(Duration::from_secs(5), fetch)
 			.await
 			.expect("re-spliced source should answer the fetch")
