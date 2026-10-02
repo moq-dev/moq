@@ -970,6 +970,11 @@ impl Producer {
 		self.state.unused().await.map_err(|_| self.abort_reason())
 	}
 
+	/// Poll for the group becoming unused (every consumer dropped).
+	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state.poll_unused(waiter).map(|_| ())
+	}
+
 	/// The recorded abort reason, or [`Error::Dropped`] if the group closed without one.
 	fn abort_reason(&self) -> Error {
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)
