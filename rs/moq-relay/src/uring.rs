@@ -773,7 +773,7 @@ async fn serve_connection(
 		}
 	});
 
-	tracing::info!(id, version = %session.version(), transport = %moq_tokio::server::Transport::Quic, "negotiated");
+	tracing::info!(id, version = %session.version(), transport = %moq_tokio::Transport::Quic, "negotiated");
 
 	// The session handle is Send + Sync however its transport is driven, so
 	// its lifecycle (credential expiry, GOAWAY drain) lives with the timers
