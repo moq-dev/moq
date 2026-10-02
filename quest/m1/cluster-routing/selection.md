@@ -3,8 +3,9 @@
 ## Goal
 
 A broadcast under overlapping announcements routes to one origin chosen
-deterministically, and an edge spreads paths over its region's cores so
-every edge sends a given path the same way.
+deterministically, and a relay spreads paths over equally ranked next hops
+(an edge over its region's cores) so every relay sends a given path the same
+way.
 Origins that announce the same epoch-qualified concrete path are one source,
 so a subscriber moves between them at a group boundary when the incumbent
 ends or becomes unreachable.
@@ -27,14 +28,20 @@ Decided:
   announce the same epoch-qualified path and must not pool. This extends
   Wildcard's resume rule to concrete same-epoch origins.
 
-Candidate mechanics (re-scoped to path vector by the 2026-09-30 tiers
-decision; there is no topology to forward by):
+Candidate mechanics:
 
 - Route selection stays `route_order` over the routes a relay holds: longest
   prefix, then cost, then a rendezvous hash (HRW) of the requested path and
   the route's origin. At an edge that spreads paths over the region's cores
   and makes every edge pick the same core for a path; failover moves only the
   paths the lost core won.
+- Every hop re-selects (decided 2026-10-01): SUBSCRIBE names no origin, since
+  a pin breaks subscription aggregation. Once
+  [Routes and announces](/quest/m1/cluster-routing/routes.md) lands, the
+  candidates are the origin nodes announcing the path, ranked by longest
+  prefix, then route metric to the node, then HRW, and the reply's Origin is
+  the serving node id. Write the ranking so that change swaps its inputs, not
+  its shape.
 - A refusal follows Wildcard's refusal rule: every refusal is terminal, and
   an origin sheds load by withdrawing or re-pricing its route instead.
 - The serving origin's identity rides the Origin field of the reply, per
@@ -54,9 +61,6 @@ subscribers end and resubscribe rather than splice.
 
 ## Required
 
-- [Non-transit relays](/quest/m1/cluster-routing/transit.md) - the edges and cores this spreads over
+- [Upstream links](/quest/m1/cluster-routing/transit.md) - the edges and cores this spreads over
 - [Wildcard](/quest/m0/wildcard/README.md) - the longest-prefix rule, pool spread, and reply identity this builds on
-
-## Related
-
 - [Epoch primitive](/quest/m1/epoch.md) - parses the `@<uuidv7>` segment that makes a path a source identity
