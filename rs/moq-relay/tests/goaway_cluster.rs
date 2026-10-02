@@ -119,6 +119,102 @@ async fn drain_session_with_zero_timeout_closes_at_once_inner() {
 }
 
 #[test]
+fn cluster_continues_a_group_split_by_goaway() {
+	run_cluster_test(cluster_continues_a_group_split_by_goaway_inner());
+}
+
+/// A GOAWAY that lands mid-group hands the rest of the group to the reader already
+/// holding it, and the next group after it, never the split group a second time.
+async fn cluster_continues_a_group_split_by_goaway_inner() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let upstream_origin = moq_tokio::origin::spawn();
+	let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
+	broadcast.announce(Default::default()).expect("announce");
+	let track = broadcast.create_track("video", None).expect("create track");
+
+	let (port_a, mut accepted_a, _handle_a) = spawn_upstream(upstream_origin.clone()).await;
+	let (port_b, mut accepted_b, _handle_b) = spawn_upstream(upstream_origin.clone()).await;
+
+	let mut client_config = moq_tokio::connect::Config::default();
+	client_config.tls.insecure = Some(true);
+	client_config.goaway.handover = Duration::from_secs(2);
+	let client = client_config.init(Default::default()).expect("client init");
+
+	let mut cluster_config = cluster::Config::default();
+	cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port_a}/"))];
+	let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
+		.expect("cluster init")
+		.with_client(client);
+	let started = cluster.clone().start().await.expect("cluster start");
+	let cluster_run = tokio::spawn(started.run());
+
+	let session_a = within("A accepts", accepted_a.recv()).await.expect("A accepts");
+	let consumer = cluster.origin.consume();
+	within("routed via A", consumer.routed("cam")).await.expect("routed");
+	let bc = consumer.request_broadcast("cam").await.expect("broadcast resolves");
+	let mut sub = within("subscribe", bc.track("video").expect("track").subscribe(None))
+		.await
+		.expect("subscribe");
+
+	let write = |group: &mut moq_net::group::Producer, payload: &'static str| {
+		group
+			.write_frame(moq_net::Timestamp::ZERO, payload.as_bytes())
+			.expect("write frame");
+	};
+	// A group's sequence and its next frame, or `None` at its end.
+	async fn read(group: &mut moq_net::group::Consumer) -> (u64, Option<bytes::Bytes>) {
+		let frame = within("read frame", group.read_frame()).await.expect("read");
+		(group.sequence, frame.map(|frame| frame.payload))
+	}
+
+	// The first group is open, its first frame read, when A redirects to B.
+	let mut split = track.append_group().expect("append group");
+	write(&mut split, "a");
+	let mut reading = within("recv the split group", sub.recv_group())
+		.await
+		.expect("recv")
+		.expect("track ended");
+	assert_eq!(read(&mut reading).await, (0, Some("a".into())));
+
+	let mut announced = consumer.announced();
+	session_a
+		.drain()
+		.send(moq_net::goaway::Goaway::redirect(format!("tcp://127.0.0.1:{port_b}/")))
+		.expect("send goaway");
+	let _session_b = within("B accepts", accepted_b.recv()).await.expect("B accepts");
+	within("routed via B", async {
+		loop {
+			let update = announced.next().await.expect("announce update");
+			if update.kind.is_active() && update.route.cost != moq_net::origin::Cost::DRAIN {
+				break;
+			}
+		}
+	})
+	.await;
+
+	write(&mut split, "b");
+	split.finish().expect("finish");
+	assert_eq!(read(&mut reading).await, (0, Some("b".into())));
+	assert_eq!(read(&mut reading).await, (0, None));
+
+	let mut after = track.append_group().expect("append group");
+	write(&mut after, "c");
+	after.finish().expect("finish");
+	let mut next = within("recv the next group", sub.recv_group())
+		.await
+		.expect("recv")
+		.expect("track ended");
+	assert_eq!(
+		read(&mut next).await,
+		(1, Some("c".into())),
+		"the split group came back"
+	);
+
+	cluster_run.abort();
+}
+
+#[test]
 fn cluster_reconnects_on_empty_uri_goaway() {
 	run_cluster_test(cluster_reconnects_on_empty_uri_goaway_inner());
 }
