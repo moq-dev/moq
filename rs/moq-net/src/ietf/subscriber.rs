@@ -1614,8 +1614,9 @@ where
 		}
 
 		let subscription = request.subscription();
+		let start = subscription.as_ref().and_then(|s| s.start);
 		// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest.
-		let live = subscription.as_ref().and_then(|s| s.start).is_none();
+		let live = start.is_none();
 		let join = match subscribe_join(
 			subscription.as_ref().and_then(|s| s.start),
 			subscription.as_ref().and_then(|s| s.end),
@@ -1812,9 +1813,11 @@ where
 		// queued meanwhile waits for it rather than failing for want of a handler.
 		let dynamic = request.dynamic();
 		let mut track = request.accept(info);
-		if live {
-			let _ = track.start_at(largest.map(|largest| largest.group));
-		}
+		// A live join starts at the publisher's edge; an absolute one where it asked.
+		let _ = match live {
+			true => track.start_at(largest.map(|largest| largest.group)),
+			false => track.start_at(start.map(|start| start.group)),
+		};
 		let mut fetching: Option<MaybeSendBox<'static, ()>> = None;
 		{
 			let mut state = self.state.lock();

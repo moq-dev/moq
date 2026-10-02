@@ -284,6 +284,10 @@ struct Slot {
 	// Whether this incarnation came from the live publisher and can replace older
 	// subscription content. Fetch-only backfill stays cached but never anchors drift.
 	visible: bool,
+
+	// Withheld from arrival-order readers while the track is parked; see
+	// [`TrackState::park_cache`].
+	parked: bool,
 }
 
 /// Heap the track keeps per cached group, excluding the group itself
@@ -964,6 +968,7 @@ impl TrackState {
 				group: group.clone(),
 				stamp,
 				visible,
+				parked: false,
 			},
 		);
 		if visible {
@@ -1171,6 +1176,72 @@ impl TrackState {
 			// hand the same sequence out twice, so roll to the next group exactly as a
 			// finished one does.
 			None => Some(Position::group(max.saturating_add(1))),
+		}
+	}
+
+	/// Withhold every cached group from arrival-order readers, for a front's logical
+	/// track gone idle. A reader returning before the next source says where its feed
+	/// starts must not be handed a cache the source may already have judged stale; see
+	/// [`Self::unpark_cache`]. Fetches still find the groups.
+	///
+	/// Each group is restamped, which retires its arrival entry, and re-enters the
+	/// eviction order under the new stamp.
+	fn park_cache(&mut self) {
+		let sequences: Vec<u64> = self
+			.lookup
+			.iter()
+			.filter(|(_, slot)| slot.visible)
+			.map(|(sequence, _)| *sequence)
+			.collect();
+		for sequence in sequences {
+			self.next_stamp = self.next_stamp.wrapping_add(1);
+			let stamp = self.next_stamp;
+			let protected = self.protects(sequence);
+			let slot = self.lookup.get_mut(&sequence).expect("collected above");
+			slot.stamp = stamp;
+			slot.visible = false;
+			slot.parked = true;
+			if !protected {
+				self.evict.push_back((sequence, stamp));
+			}
+		}
+	}
+
+	/// Settle a [`Self::park_cache`] once the next source declared where its feed
+	/// starts. At or below the cache's newest group the cache still leads into the live
+	/// feed, so readers get it back in sequence order, ahead of anything the source
+	/// sends. Past it, the source skipped groups as stale, so the older cache is stale
+	/// too and stays fetch-only. A source that declares no start is taken at its word.
+	fn unpark_cache(&mut self, start: Option<u64>) {
+		let reveal = start.is_none_or(|start| self.latest_group.is_some_and(|latest| start <= latest));
+		for (sequence, slot) in self.lookup.iter_mut() {
+			if !std::mem::take(&mut slot.parked) {
+				continue;
+			}
+			if reveal {
+				slot.visible = true;
+				self.arrival.push_back((*sequence, slot.stamp));
+			}
+		}
+	}
+
+	/// Where the next source of a parked track is asked to start: like
+	/// [`Self::resume_floor`], except a finished newest group is asked for its (empty)
+	/// tail rather than the next group's head. A source only declares its start once
+	/// it has something to serve, so asking past its newest group would leave a
+	/// returning reader waiting on the next one.
+	fn park_floor(&self) -> Option<Position> {
+		let latest = self.latest_group?;
+		let unfinished = self
+			.lookup
+			.values()
+			.any(|slot| !slot.group.is_finished() && !slot.group.is_aborted());
+		match (unfinished, self.lookup.get(&latest)) {
+			(false, Some(slot)) => Some(Position {
+				group: latest,
+				frame: slot.group.frame_count() as u64,
+			}),
+			_ => self.resume_floor(),
 		}
 	}
 
@@ -1583,6 +1654,18 @@ impl Producer {
 	/// its floor is unknown until the feed declares one.
 	pub fn start_at(&mut self, sequence: impl Into<Option<u64>>) -> Result<()> {
 		self.modify()?.set_start(sequence.into(), false);
+		Ok(())
+	}
+
+	/// Withhold the cache from arrival-order readers; see `TrackState::park_cache`.
+	pub(crate) fn park_cache(&mut self) -> Result<()> {
+		self.modify()?.park_cache();
+		Ok(())
+	}
+
+	/// Settle a [`Self::park_cache`]; see `TrackState::unpark_cache`.
+	pub(crate) fn unpark_cache(&mut self, start: Option<u64>) -> Result<()> {
+		self.modify()?.unpark_cache(start);
 		Ok(())
 	}
 
@@ -2282,6 +2365,11 @@ impl TrackWeak {
 	/// Where a route taking the track over should start; see `TrackState::resume_floor`.
 	pub(crate) fn resume_floor(&self) -> Option<Position> {
 		self.state.read().resume_floor()
+	}
+
+	/// Where the next source of a parked track starts; see `TrackState::park_floor`.
+	pub(crate) fn park_floor(&self) -> Option<Position> {
+		self.state.read().park_floor()
 	}
 
 	/// The readers' aggregate demand, or `None` while nobody subscribes.

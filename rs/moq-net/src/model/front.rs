@@ -196,6 +196,10 @@ struct Track {
 	refusal: Option<Error>,
 	/// Whether anyone reads the track: a copy is only spliced in for a reader.
 	used: bool,
+	/// A detached source whose copy still feeds the track until the serving source's
+	/// replaces it: a route being beaten keeps serving until then, and keeps serving if
+	/// the newcomer refuses the track.
+	draining: Option<u64>,
 	/// The track finished or aborted: nothing is spliced again, and it stays only
 	/// until it goes unread for the linger.
 	ended: bool,
@@ -299,6 +303,7 @@ impl Front {
 						refusal: None,
 						used: false,
 						ended: false,
+						draining: None,
 					},
 				);
 			}
@@ -385,18 +390,14 @@ impl Front {
 				self.last_err = Some(Error::Unroutable);
 				actions.push(Action::Reselect);
 			}
-			// An authoritative refusal of the path. It ends a front with no
-			// other source; a serving front merely skips the refuser.
+			// An authoritative refusal of the path: skip the refuser. Another route to
+			// the same publisher may still serve, and with none left the selection
+			// ends the front with this error.
 			Err(Refusal { err, standing: true }) => {
 				self.upstream = None;
-				match self.serving {
-					Some(_) => {
-						self.refused.insert(route);
-						self.last_err = Some(err);
-						actions.push(Action::Reselect);
-					}
-					None => self.end(err, actions),
-				}
+				self.refused.insert(route);
+				self.last_err = Some(err);
+				actions.push(Action::Reselect);
 			}
 		}
 	}
@@ -404,12 +405,16 @@ impl Front {
 	fn attach(&mut self, source: u64, route: u64, actions: &mut Vec<Action>) {
 		if let Some((old, _)) = self.serving.take() {
 			actions.push(Action::Detach { source: old });
-			// Its copies are gone with it; the segments they delivered stay
-			// spliced and the replacement resumes past them.
+			// A spliced copy keeps feeding its track until the replacement's is spliced
+			// in; one still being asked for is dropped with its source.
 			for track in self.tracks.values_mut() {
-				if matches!(track.state, TrackState::Querying { source: s } | TrackState::Spliced { source: s } if s == old)
-				{
-					track.state = TrackState::Idle;
+				match track.state {
+					TrackState::Spliced { source } if source == old => {
+						track.draining = Some(old);
+						track.state = TrackState::Idle;
+					}
+					TrackState::Querying { source } if source == old => track.state = TrackState::Idle,
+					_ => {}
 				}
 			}
 		}
@@ -508,6 +513,7 @@ impl Front {
 		};
 		match verdict {
 			Ok(()) => {
+				track.draining = None;
 				track.state = TrackState::Spliced { source };
 				actions.push(Action::Splice {
 					track: name.clone(),
@@ -530,6 +536,13 @@ impl Front {
 		let Some(track) = self.tracks.get_mut(&name) else {
 			return;
 		};
+		// The copy of a source being replaced ran out: the replacement decides.
+		if track.draining == Some(source) {
+			track.draining = None;
+			if track.state != (TrackState::Spliced { source }) {
+				return;
+			}
+		}
 		if track.state != (TrackState::Spliced { source }) {
 			return;
 		}
@@ -564,6 +577,12 @@ impl Front {
 		}
 		track.refused.insert(source);
 		track.refusal = Some(err);
+		// A source being replaced still serves it: keep reading that copy, and the
+		// refusal stands once it runs out.
+		if let Some(draining) = track.draining {
+			track.state = TrackState::Spliced { source: draining };
+			return;
+		}
 		self.redispatch(name, actions);
 	}
 
@@ -932,8 +951,10 @@ mod tests {
 		);
 	}
 
+	/// A refusal skips the refuser rather than ending the front: another route to the
+	/// same content may serve. With none left, the front ends with the refusal.
 	#[test]
-	fn standing_refusal_ends_an_unresolved_front() {
+	fn standing_refusal_tries_the_next_route_then_ends() {
 		let mut front = Front::new(LINGER);
 		front.step(Event::Selected {
 			best: Some(remote(1, 10)),
@@ -947,7 +968,44 @@ mod tests {
 					standing: true,
 				}),
 			}),
+			&[Action::Reselect],
+		);
+		assert_eq!(front.refused_routes(), &HashSet::from([1]));
+		assert_actions(
+			front.step(Event::Selected {
+				best: None,
+				serving_closing: false,
+			}),
 			&[Action::End { err: Error::NotFound }],
+		);
+	}
+
+	/// The audit's F2: the serving source died, and the first replacement refuses the
+	/// path. A second route to the same publisher is still tried.
+	#[test]
+	fn standing_refusal_after_the_source_died_tries_another_route() {
+		let mut front = serving(remote(1, 10), 100);
+		front.step(Event::SourceClosed { source: 100 });
+		front.step(Event::Selected {
+			best: Some(remote(2, 10)),
+			serving_closing: false,
+		});
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 2,
+				result: Err(Refusal {
+					err: Error::NotFound,
+					standing: true,
+				}),
+			}),
+			&[Action::Reselect],
+		);
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(remote(3, 10)),
+				serving_closing: false,
+			}),
+			&[Action::Request { route: 3 }],
 		);
 	}
 
@@ -1117,12 +1175,24 @@ mod tests {
 			max_age: Duration::from_secs(1),
 			..track::Info::default()
 		};
+		// The source it replaced keeps feeding the track (the audit's F3)...
 		assert_actions(
 			front.step(Event::TrackInfo {
 				track: name("video"),
 				source: 200,
 				closing: false,
 				result: Ok(other),
+			}),
+			&[],
+		);
+		// ...and the refusal stands once that runs out.
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(Error::Dropped),
+				delivered: true,
 			}),
 			&[Action::Abort {
 				track: name("video"),

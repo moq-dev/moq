@@ -2230,13 +2230,12 @@ struct Asked {
 }
 
 impl Asked {
-	fn feed(self) -> super::pump::Command {
-		super::pump::Command::Feed(super::pump::Feed {
-			id: self.source,
+	fn feed(self) -> super::pump::Feed {
+		super::pump::Feed {
 			copy: self.copy,
 			sub: self.sub,
 			floor: self.floor,
-		})
+		}
 	}
 }
 
@@ -2249,8 +2248,8 @@ struct TrackIo {
 	query: Option<(Asked, track::Querying)>,
 	/// The copy whose info resolved, waiting for the machine to splice it.
 	staged: Option<Asked>,
-	/// The source whose copy the pump reads.
-	copy: Option<u64>,
+	/// The source whose copy the pump reads, and the pump's id for that feed.
+	copy: Option<(u64, u64)>,
 	/// Whether the track had a reader as of the last demand edge.
 	used: bool,
 }
@@ -2287,7 +2286,7 @@ async fn run_front(task: FrontTask) {
 		Resolved(u64, Result<broadcast::Consumer, Error>),
 		SourceClosed(u64),
 		Info(Arc<str>, u64, Result<track::Info, Error>),
-		Ended(Arc<str>, super::pump::Ended),
+		Ended(Arc<str>, u64, super::pump::Ended),
 		Demand(Arc<str>),
 		Deadline,
 		Table,
@@ -2499,14 +2498,14 @@ async fn run_front(task: FrontTask) {
 						if asked.source != source {
 							continue;
 						}
-						io.pump.send(asked.feed());
-						io.copy = Some(source);
+						let feed = io.pump.feed(asked.feed());
+						io.copy = Some((source, feed));
 					}
 					Action::Park { track: name } => {
 						let Some(io) = tracks.get_mut(&name) else { continue };
 						// Drop the copy so its source goes idle at once; what it
 						// delivered stays cached for a returning reader.
-						io.pump.send(super::pump::Command::Detach);
+						io.pump.detach();
 						io.copy = None;
 					}
 					Action::Forget { track: name } => {
@@ -2557,8 +2556,9 @@ async fn run_front(task: FrontTask) {
 							if let Some(asked) = waiting
 								&& io.pump.is_used()
 							{
-								io.pump.send(asked.feed());
-								io.copy = Some(0);
+								let source = asked.source;
+								let feed = io.pump.feed(asked.feed());
+								io.copy = Some((source, feed));
 							}
 							// Nothing in flight: unread, or nothing feeding it.
 							if !io.pump.is_used() || io.copy.is_none() {
@@ -2602,10 +2602,10 @@ async fn run_front(task: FrontTask) {
 				{
 					return Poll::Ready(Step::Info(name.clone(), asked.source, result));
 				}
-				if let Some(source) = io.copy
-					&& let Poll::Ready(ended) = io.pump.poll_ended(source, waiter)
+				if let Some((source, feed)) = io.copy
+					&& let Poll::Ready(ended) = io.pump.poll_ended(feed, waiter)
 				{
-					return Poll::Ready(Step::Ended(name.clone(), ended));
+					return Poll::Ready(Step::Ended(name.clone(), source, ended));
 				}
 				// Watch the demand edge in whichever direction is unmet.
 				let edge = match io.used {
@@ -2691,13 +2691,13 @@ async fn run_front(task: FrontTask) {
 					result,
 				}
 			}
-			Step::Ended(name, ended) => {
-				let closing = sources.get(&ended.id).is_some_and(|s| s.is_closing());
+			Step::Ended(name, source, ended) => {
+				let closing = sources.get(&source).is_some_and(|s| s.is_closing());
 				let Some(io) = tracks.get_mut(&name) else { continue };
 				io.copy = None;
 				Event::TrackEnded {
 					track: name,
-					source: ended.id,
+					source,
 					closing,
 					result: ended.result,
 					delivered: ended.delivered,

@@ -101,6 +101,9 @@ struct TrackEntry {
 	timescale: Option<Timescale>,
 	/// The groups received so far, so the subscription's end can wait for the ones owed.
 	tail: kio::Producer<Tail>,
+	/// Where the subscription asked to start, when that is partway through a group a
+	/// peer without frame bounds sends whole: the frames below it are dropped on arrival.
+	resume: Option<Position>,
 }
 
 impl<S: crate::transport::poll::Session> Subscriber<S> {
@@ -781,7 +784,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 					let mut cx = std::task::Context::from_waker(waiter.waker());
 					let hdr = ready!(self.reader.poll_decode::<lite::Group>(&mut cx))?;
 
-					let (group, track, timescale, reading) = {
+					let (group, track, timescale, reading, skip) = {
 						let mut subs = self.subscriber.subscribes.lock();
 						let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 						// The subscription's end waits until this stream is read.
@@ -812,9 +815,15 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						};
 						// The stream may carry only the tail of the group; number the frames
 						// from where the publisher said they start so a reader splicing
-						// across routes lines them up.
-						group.start_at(hdr.frame_start)?;
-						(group, entry.producer.clone(), entry.timescale, reading)
+						// across routes lines them up. A peer that can't start partway
+						// through sends the group from its head, and the frames below the
+						// requested start are dropped as they arrive.
+						let skip = entry
+							.resume
+							.filter(|resume| resume.group == hdr.sequence)
+							.map_or(0, |resume| resume.frame.saturating_sub(hdr.frame_start));
+						group.start_at(hdr.frame_start + skip)?;
+						(group, entry.producer.clone(), entry.timescale, reading, skip)
 					};
 
 					// The timescale came from TRACK_INFO (read before this subscription was
@@ -823,7 +832,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 					self.state = GroupRecvState::Serve {
 						group: crate::recv::Group::new(group),
 						track,
-						ingest: FrameIngest::new(&self.subscriber, timescale),
+						ingest: FrameIngest::new(&self.subscriber, timescale).skip(skip),
 						_reading: reading,
 					};
 				}
@@ -889,6 +898,8 @@ struct FrameIngest {
 	prev_ts: u64,
 	phase: IngestPhase,
 	budget: frame::Budget,
+	/// Leading frames to read and drop: ones below the start the subscription asked for.
+	skip: u64,
 }
 
 enum IngestPhase {
@@ -900,6 +911,8 @@ enum IngestPhase {
 	Size { timestamp: Option<Timestamp> },
 	/// Streaming the frame payload.
 	Payload { frame: frame::ProducerOwned },
+	/// Reading past a frame nobody asked for.
+	Skip { size: usize },
 }
 
 impl FrameIngest {
@@ -910,7 +923,14 @@ impl FrameIngest {
 			phase: IngestPhase::Timing,
 			runtime: subscriber.runtime.clone(),
 			budget: subscriber.frames.clone(),
+			skip: 0,
 		}
+	}
+
+	/// Drop the first `frames` frames instead of writing them.
+	fn skip(mut self, frames: u64) -> Self {
+		self.skip = frames;
+		self
 	}
 
 	/// `Ready(Ok(()))` once the stream FINs on a frame boundary. The caller
@@ -952,9 +972,19 @@ impl FrameIngest {
 					// oversized `size` and allocates up front only within the budget, so
 					// no pre-check is needed. No wire timestamp (pre-lite-05) means local
 					// receive time.
+					if self.skip > 0 {
+						self.skip -= 1;
+						let size = usize::try_from(size).map_err(|_| Error::FrameTooLarge)?;
+						self.phase = IngestPhase::Skip { size };
+						continue;
+					}
 					let timestamp = timestamp.unwrap_or_else(|| Timestamp::from(self.runtime.now()));
 					let frame = group.create_frame_owned(frame::Info { size, timestamp }, &self.budget)?;
 					self.phase = IngestPhase::Payload { frame };
+				}
+				IngestPhase::Skip { size } => {
+					ready!(reader.poll_read_exact(&mut cx, *size))?;
+					self.phase = IngestPhase::Timing;
 				}
 				IngestPhase::Payload { frame } => {
 					let failed = ready!(reader.poll_read_frame(&mut cx, frame)).err();
@@ -1509,6 +1539,7 @@ mod tests {
 					producer: track.clone(),
 					timescale: Some(Timescale::default()),
 					tail: Default::default(),
+					resume: None,
 				},
 			);
 
@@ -1704,6 +1735,7 @@ mod tests {
 				producer,
 				timescale: Some(Timescale::default()),
 				tail: Default::default(),
+				resume: None,
 			},
 		);
 
@@ -3230,6 +3262,15 @@ struct TrackServe<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> TrackServe<S> {
+	/// The mid-group start a peer without frame bounds can't be asked for, recorded so
+	/// the frames below it are dropped when its whole group arrives.
+	fn resume(&self, requested: &Subscription) -> Option<Position> {
+		match self.subscriber.version.has_frame_bounds() {
+			true => None,
+			false => requested.start.filter(|start| start.frame != 0),
+		}
+	}
+
 	fn widen_frame_bounds(&self, subscription: &mut Subscription) {
 		if self.subscriber.version.has_frame_bounds() {
 			return;
@@ -3280,6 +3321,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 
 		match pref {
 			Some(mut subscription) => {
+				let resume = self.resume(&subscription);
 				self.widen_frame_bounds(&mut subscription);
 				match sub {
 					Sub::None => {
@@ -3287,6 +3329,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						Ok(Begin::Establish(self.prepare_establish(
 							producer,
 							subscription,
+							resume,
 							timescale,
 						)))
 					}
@@ -3305,6 +3348,9 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 							}
 						}
 						active.start = subscription.start;
+						if let Some(entry) = self.subscriber.subscribes.lock().get_mut(&active.id) {
+							entry.resume = resume;
+						}
 						if supports_update {
 							// The floor follows the requested start, in both directions:
 							// moving below a declared SUBSCRIBE_START reopens those groups
@@ -3357,6 +3403,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		&self,
 		producer: &mut track::Producer,
 		subscription: Subscription,
+		resume: Option<Position>,
 		timescale: Option<Timescale>,
 	) -> Establish<S> {
 		let id = self.subscriber.next_id.fetch_add(1, atomic::Ordering::Relaxed);
@@ -3383,6 +3430,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 				producer: producer.clone(),
 				timescale,
 				tail: tail.clone(),
+				resume,
 			},
 		);
 
@@ -3407,7 +3455,8 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		subscription: Subscription,
 		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
-		let mut est = Box::new(self.prepare_establish(producer, subscription, timescale));
+		let resume = self.resume(&subscription);
+		let mut est = Box::new(self.prepare_establish(producer, subscription, resume, timescale));
 		let id = est.id;
 		match kio::wait(move |waiter| est.poll(waiter)).await {
 			Ok(active) => {
