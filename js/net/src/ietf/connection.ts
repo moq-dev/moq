@@ -83,6 +83,7 @@ export class Connection implements Established {
 	 * @param version - The negotiated protocol version
 	 * @param solicit - What the peer's SETUP declared (undefined when it declared nothing)
 	 * @param cluster - The Hop IDs the SETUP exchange settled, on the versions that negotiate them
+	 * @param early - Uni streams that arrived before the peer's SETUP
 	 *
 	 * @internal
 	 */
@@ -98,6 +99,7 @@ export class Connection implements Established {
 		solicit,
 		hidden = false,
 		cluster,
+		early = [],
 	}: {
 		url: URL;
 		quic: WebTransport;
@@ -121,6 +123,8 @@ export class Connection implements Established {
 		 * cannot negotiate the extension, as is a `peer` the peer never declared.
 		 */
 		cluster?: Cluster.Hops;
+		/** Uni streams that arrived before the peer's SETUP, type unread (v17+). */
+		early?: Reader[];
 	}) {
 		this.url = url;
 		this.discovery = discovery;
@@ -159,7 +163,7 @@ export class Connection implements Established {
 		this.#subscriber = new Subscriber({ session: this.#session, quic, cluster, hidden });
 		registerWire(this, { consume: (path) => this.#subscriber.consume(path), goaway: this.#goaway });
 
-		void this.#run();
+		void this.#run(early);
 	}
 
 	/** Snapshot the transport's counters; see {@link Established.stats}. */
@@ -198,9 +202,9 @@ export class Connection implements Established {
 		this.#close({ closeCode: SessionCode.ProtocolViolation, reason: err.message });
 	}
 
-	async #run(): Promise<void> {
+	async #run(early: Reader[]): Promise<void> {
 		try {
-			await Promise.all([this.#runBidis(), this.#runUnis(), this.#publisher.runPublishNamespaces()]);
+			await Promise.all([this.#runBidis(), this.#runUnis(early), this.#publisher.runPublishNamespaces()]);
 		} catch (err) {
 			if (!this.#closed) {
 				console.error("fatal error running connection", err);
@@ -331,25 +335,30 @@ export class Connection implements Established {
 	/**
 	 * Handles unidirectional streams for media delivery (groups).
 	 */
-	async #runUnis() {
-		const readers = new Readers(this.#quic, this.#session.version);
+	async #runUnis(early: Reader[]) {
+		// Streams that beat the SETUP go first, in arrival order.
+		for (const stream of early) this.#spawnUni(stream);
 
+		const readers = new Readers(this.#quic, this.#session.version);
 		for (;;) {
 			const stream = await readers.next();
 			if (!stream) break;
-
-			this.#runUni(stream)
-				.then(() => {
-					stream.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
-				})
-				.catch((err: unknown) => {
-					console.error("error processing object stream", err);
-					stream.stop(err);
-
-					// An unknown or invalid stream type MUST close the session, not just the stream.
-					if (err instanceof ProtocolViolation) this.#violated(err);
-				});
+			this.#spawnUni(stream);
 		}
+	}
+
+	#spawnUni(stream: Reader) {
+		this.#runUni(stream)
+			.then(() => {
+				stream.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
+			})
+			.catch((err: unknown) => {
+				console.error("error processing object stream", err);
+				stream.stop(err);
+
+				// An unknown or invalid stream type MUST close the session, not just the stream.
+				if (err instanceof ProtocolViolation) this.#violated(err);
+			});
 	}
 
 	async #runUni(stream: Reader) {

@@ -50,6 +50,11 @@ decode, and the JS test should drive the software decoder.
   Every continuous group is passed through untouched.
 - The same rule in the Rust decode path (`moq-video` decode consumers), so
   native playback and the transcoder tune in the same way.
+- The same rule in `moq export ts`. Decided (2026-10-01): the fixed-delay
+  export (#4645) still sends a join's orphaned leading pictures, so 3 of 500
+  frames on the open-GOP fixture decode after they present
+  (`dts-before-pts`). Trim them at tune-in from the same signal, and make
+  `just test ts --open-gop` pass under `--strict`.
 - This quest owns the Rust non-continuous signal, which audio warmup and
   consumer warmup reuse rather than each adding one. Today
   `moq_mux::container::Consumer::poll_read` returns a bare frame, and

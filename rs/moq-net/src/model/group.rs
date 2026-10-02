@@ -783,13 +783,30 @@ impl Producer {
 		self.close_aborted(err)
 	}
 
+	/// Abort with `err` only while nothing consumes the group, returning whether it is
+	/// closed. Consumer creation and the check share a lock, so a reader arriving after
+	/// [`poll_unused`](Self::poll_unused) keeps the group alive instead of reading the abort.
+	pub(crate) fn abort_unused(&self, err: Error) -> bool {
+		match self.state.write_unused() {
+			kio::Unused::Idle(guard) => {
+				self.commit_abort(guard, err);
+				true
+			}
+			kio::Unused::Closed => true,
+			kio::Unused::Used => false,
+		}
+	}
+
 	fn close_aborted(&self, err: Error) -> Result<()> {
-		let mut guard = modify(&self.state)?;
+		self.commit_abort(modify(&self.state)?, err);
+		Ok(())
+	}
+
+	fn commit_abort(&self, mut guard: kio::Mut<'_, GroupState>, err: Error) {
 		guard.abort = Some(err);
 		self.alive.aborted.store(true, Ordering::Release);
 		guard.release();
 		guard.close();
-		Ok(())
 	}
 
 	/// Abort a write that would grow the group past its budget, holding the lock already
@@ -913,11 +930,22 @@ impl Producer {
 
 	/// Create a new consumer for the group.
 	pub fn consume(&self) -> Consumer {
+		self.consumer(self.state.consume())
+	}
+
+	/// Create a consumer, or `None` once the group is aborted. Paired with
+	/// [`abort_unused`](Self::abort_unused): the closed check and the count share its
+	/// lock, so a consumer either exists in time to decline the abort or is never made.
+	pub(crate) fn try_consume(&self) -> Option<Consumer> {
+		self.state.weak().try_consume().map(|state| self.consumer(state))
+	}
+
+	fn consumer(&self, state: kio::Consumer<GroupState>) -> Consumer {
 		Consumer {
 			info: self.info,
 			track: self.track.clone(),
 			inner: ConsumerKind::Plain(Plain {
-				state: self.state.consume(),
+				state,
 				index: 0,
 				end: None,
 				prefetch: Prefetch::default(),
@@ -968,6 +996,11 @@ impl Producer {
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
 		self.state.unused().await.map_err(|_| self.abort_reason())
+	}
+
+	/// Poll for the group becoming unused (every consumer dropped).
+	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state.poll_unused(waiter).map(|_| ())
 	}
 
 	/// The recorded abort reason, or [`Error::Dropped`] if the group closed without one.
@@ -1967,6 +2000,21 @@ mod test {
 
 		let result = consumer.next_frame().now_or_never().unwrap();
 		assert!(matches!(result, Err(crate::Error::Cancel)));
+	}
+
+	#[test]
+	fn abort_unused_pairs_with_try_consume() {
+		let producer = Info { sequence: 0 }.produce();
+
+		let consumer = producer.try_consume().expect("open");
+		assert!(
+			!producer.abort_unused(crate::Error::Cancel),
+			"a reader declines the abort"
+		);
+		drop(consumer);
+
+		assert!(producer.abort_unused(crate::Error::Cancel));
+		assert!(producer.try_consume().is_none(), "an aborted group mints no reader");
 	}
 
 	#[test]

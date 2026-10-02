@@ -925,3 +925,27 @@ test.each([
 
 	subscriber.close();
 });
+
+// A reader leaving partway through a fetched group cancels the FETCH: the truncated group
+// must not end clean, as a FIN would make it read whole.
+test("the last reader leaving mid-response cancels the fetch", async () => {
+	const { quic, streams } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+
+	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0);
+	await drainUntil(() => streams.length === 1);
+	await answerTrackInfo(streams[0]);
+	await drainUntil(() => streams.length === 2);
+	await streams[1].reading;
+
+	// One frame of the group: a zero timestamp delta, then the sized payload.
+	streams[1].inbound.enqueue(new Uint8Array([0, 4, ...new TextEncoder().encode("head")]));
+	const group = await fetch;
+	expect(new TextDecoder().decode((await group.readFrame())?.payload)).toBe("head");
+	group.close();
+
+	const err = fromTransport(await streams[1].aborted) as StreamError;
+	expect(err.code).toBe(StreamCode.Cancel);
+
+	subscriber.close();
+});

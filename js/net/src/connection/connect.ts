@@ -362,7 +362,7 @@ async function handshakeAlpn(
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
 ): Promise<Established> {
-	const { control, solicit, hidden, cluster } = await exchangeSetup(session, version, "moq-lite-js");
+	const { control, early, solicit, hidden, cluster } = await exchangeSetup(session, version, "moq-lite-js");
 
 	return new Ietf.Connection({
 		...wiring,
@@ -370,6 +370,7 @@ async function handshakeAlpn(
 		url,
 		quic: session,
 		control,
+		early,
 		solicit,
 		hidden,
 		cluster,
