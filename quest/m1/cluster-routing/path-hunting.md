@@ -47,5 +47,5 @@ an update without retracting the live advertisement.
 
 ## Related
 
-- [Edge and core](/quest/m1/cluster-routing/roles.md) - tiers shrink the core graph this hunts on
+- [Non-transit relays](/quest/m1/cluster-routing/transit.md) - non-transit edges shrink the graph this hunts on to the cores
 - [Cross-relay delivery under bursts](/quest/m1/cross-relay-bursts.md) - closed broadcasts announced for minutes, the same symptom

@@ -33,6 +33,7 @@ QUIC studies there on that rule.
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, flate, audio, and video namespaces built from the handle below
 - [Android logcat](/quest/m1/android-logcat.md) - on dev, Android builds always log to logcat and the `android-logcat` feature is gone
 - [Raw stream codes](/quest/m1/raw-stream-codes.md) - raw QUIC stream resets and stops carry the application's code, not an HTTP/3-mapped one
+- [moq-net owns its transport seam](/quest/m1/transport-seam.md) - moq-net names only its own transport traits, so a web-transport-trait or qmux major bump is a patch for it
 - [IETF drain before close](/quest/m1/ietf-drain-before-close.md) - moq-transport sessions deliver finished tracks before a graceful close, as moq-lite does
 - [Close waits for the tail](/quest/m1/close-tail.md) - on lite-07, `close()` returns `Ok` only after each subscriber FINs its Subscribe Stream, having read the track to its end
 - [moq play drain tail](/quest/m1/play-drain-tail.md) - retired renditions and finite tracks play their last 10 ms of audio
@@ -40,7 +41,6 @@ QUIC studies there on that rule.
 - [web-transport-moq 1.3.3 ships noq#24](/quest/m1/web-transport-moq-release.md) - the release that carries the close-capsule fix
 - [WebTransport close upstream](/quest/m1/wt-close-upstream.md) - web-transport-moq delivers the close capsule itself, and moq-tokio's `CLOSE_LINGER` is deleted
 - [Browser close code](/quest/m1/browser-close-code.md) - a playwright case proves the page reads a relay's close code and reason, on every web-transport backend
-- [Resumed groups](/quest/m1/resume-latest.md) - a half-delivered group ends once the new copy is past it, so a group-only reader never parks after a mid-group failover
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
 - [Late lower groups](/quest/m1/lite-late-lower-group.md) - a moq-lite subscriber with a floor receives a group created below the first served one, as moq-transport does
 - [Parked reads wake](/quest/m1/parked-read-wakes.md) - a read parked on an evicted or aborted group wakes and re-judges, for resume successors and plain tracks alike
@@ -78,6 +78,7 @@ QUIC studies there on that rule.
 - [Omit empty catalog sections](/quest/m1/catalog-omit-empty.md) - a Rust catalog with no video or audio leaves those keys out, as JS does
 - [Delete SourceMap](/quest/m1/source-map-removal.md) - on dev, `Anchor` with its `Lane`s is the one way onto the broadcast clock
 - [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) - a draft-20+ FETCH within one group is served from its LOCATION_FILTER, as older drafts are
+- [FETCH_OK properties](/quest/m1/fetch-ok-properties.md) - our FETCH_OK carries the track properties SUBSCRIBE_OK does, as draft 16+ requires
 - [Fetch without SUBSCRIBE](/quest/m1/ietf-fetch-only.md) - a relay fetches from an IETF upstream without subscribing, finished tracks included, with End of Track always reported
 - [IETF timestamp units](/quest/m1/ietf-timestamp-units.md) - drafts 14-16 stop sending Timestamp properties they can't give units for
 - [JS IETF datagrams](/quest/m1/js-ietf-datagram.md) - `@moq/net` sends and receives datagram groups over moq-transport, like Rust

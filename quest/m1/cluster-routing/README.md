@@ -3,10 +3,11 @@
 ## Goal
 
 A cluster carries each broadcast into a region once and never exposes its
-backbone to end users. Relays take an explicit edge or core role: edges
-serve end users and spread paths over their region's cores, cores link to
-the cores of other regions over configured links with static costs, and
-routing between them stays path vector. A broadcast under overlapping
+backbone to end users. An operator builds edge and core tiers from one
+relay: an edge runs with transit off, serves end users, and spreads paths
+over its region's cores; cores link to the cores of other regions over
+configured links with static costs; and routing between them stays path
+vector. A broadcast under overlapping
 prefixes routes to one origin deterministically. Redundancy an operator
 configures may deliver more than one copy.
 
@@ -21,15 +22,17 @@ mixed-version cluster.
 Settled in the 2026-09-30 wildcard audit (cache tiers), replacing the
 link-state and existence-split design planned earlier that day:
 
-- Two roles, edge and core. Where a region has one edge, that edge is also
-  its core. A region may have several cores, which do not link to each other.
-  An edge dials every core in its region over qmux on TLS (intra-region links
-  are not congested) and picks one per path by rendezvous hashing, so a
-  broadcast crosses into a region once. An edge never re-advertises one
-  core's routes to another, so it is never transit. Cores dial the cores of
-  the regions they link to, only those with lower names, so each pair has one
-  connection. Cores are hidden from end users, which is the DDoS shield. See
-  [Edge and core](/quest/m1/cluster-routing/roles.md).
+- Edge and core are tiers an operator configures, not relay roles
+  (decided 2026-10-01). The relay's one setting is `cluster.transit`: off, it
+  never re-advertises a route from one cluster link to another. An edge runs
+  with it off and dials every core in its region over qmux on TLS
+  (intra-region links are not congested), picking one per path by rendezvous
+  hashing, so a broadcast crosses into a region once. A region may have
+  several cores, which do not link to each other. Cores dial the cores of
+  the regions they link to, only those with lower names, so each pair has
+  one connection. A one-node region is a transit relay that also serves end
+  users. Cores are hidden from end users by admission, which is the DDoS
+  shield. See [Non-transit relays](/quest/m1/cluster-routing/transit.md).
 - Core links are configured and static, and may skip PoPs when the RTT is
   short: Seattle pulls from San Jose directly rather than via Oregon. Nothing
   switches routes on cache state, so Warm and Cold collapse to one route cost
@@ -56,8 +59,9 @@ link-state and existence-split design planned earlier that day:
   per-origin identity. See [Selection](/quest/m1/cluster-routing/selection.md).
 - Between clusters, announcements stay path vector with cluster ids as hops,
   in the last child.
-- Anything specific to moq.pro's deployment (generating peer lists and roles
-  from its inventory, its simulator) is planned in moq.pro, not here.
+- Anything specific to moq.pro's deployment (generating peer lists and tiers
+  from its inventory, refusing clients on its cores, its simulator) is
+  planned in moq.pro, not here.
 
 ### Simulator findings
 
@@ -113,12 +117,12 @@ Once every child has landed:
   publish, an end, a core loss, and a redundant-pair failover each reach a
   subscriber on a far edge, with time mocked.
 - Rewrite `doc/bin/relay/cluster.md` into the operator's view (edge and core
-  layout, dial rules, TLS edge links, link costs, idle timeout, redundant
+  layout with `cluster.transit`, dial rules, TLS edge links, link costs, idle timeout, redundant
   pairs), and add a routing page under `doc/concept`.
 
 ## Required
 
-- [Edge and core](/quest/m1/cluster-routing/roles.md) - relays take an explicit edge or core role; edges spread paths over their region's cores and are never transit
+- [Non-transit relays](/quest/m1/cluster-routing/transit.md) - a relay with `cluster.transit` off never carries routes between its cluster links, which is what an edge tier needs
 - [Selection](/quest/m1/cluster-routing/selection.md) - a broadcast under overlapping prefixes routes to one origin deterministically, and same-epoch origins are one source
 - [Path hunting](/quest/m1/cluster-routing/path-hunting.md) - per-origin seqnos on cluster links end stale re-announces without breaking seamless failover
 - [Between clusters](/quest/m1/cluster-routing/inter-cluster.md) - announcements crossing a cluster boundary stay path vector with cluster ids as hops

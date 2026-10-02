@@ -54,7 +54,7 @@ subscribers end and resubscribe rather than splice.
 
 ## Required
 
-- [Edge and core](/quest/m1/cluster-routing/roles.md) - the edges and cores this spreads over
+- [Non-transit relays](/quest/m1/cluster-routing/transit.md) - the edges and cores this spreads over
 - [Wildcard](/quest/m0/wildcard/README.md) - the longest-prefix rule, pool spread, and reply identity this builds on
 
 ## Related
