@@ -953,6 +953,14 @@ impl Producer {
 		}
 	}
 
+	/// Create a consumer, or `None` once the group is aborted. Paired with
+	/// [`abort_unused`](Self::abort_unused): a consumer either exists in time to decline
+	/// the abort, or sees it here and is never handed out.
+	pub(crate) fn try_consume(&self) -> Option<Consumer> {
+		let consumer = self.consume();
+		(!self.state.read().is_closed()).then_some(consumer)
+	}
+
 	/// Register for the first-frame timestamp while the group is still unstamped.
 	pub(crate) fn poll_timestamp(&self, waiter: &kio::Waiter) -> Poll<()> {
 		match self.state.poll(waiter, |state| {
