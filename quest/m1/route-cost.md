@@ -24,6 +24,9 @@ state, so Warm has no job.
 - Replace `Cost { warm, cold }` in `rs/moq-net/src/model/origin.rs` and its
   JS mirror, and delete what computes Warm from cache state.
 - The moq-transport cluster extension already carries one cost.
+- Once [Routes and announces](/quest/m1/cluster-routing/routes.md) lands, this
+  single cost stays on ANNOUNCE as the origin's per-prefix seed and stops
+  accumulating per hop; link costs move to the ROUTE metric.
 
 Public API: `Cost` changes shape (a break, so it lands on `dev`). Wire: the
 wip version drops a field; lite-06 is unchanged.

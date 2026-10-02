@@ -69,7 +69,10 @@ vector the 2026-09-30 cache-tiers audit kept:
   primary, Cloudflare secondary) ahead of the metric, so metrics from
   different operators are never compared; a CDN that speaks no ROUTE is just
   a link. See [Multi-CDN endpoints](/quest/m1/cluster-routing/multi-cdn.md).
-- **Metric on the wire, cost policy local.** One additive metric. Static
+- **Metric on the wire, cost policy local.** One additive metric on ROUTE,
+  where each hop adds its link cost plus one so it strictly increases; the
+  origin's per-prefix cost rides ANNOUNCE untouched (`transcode/**` at 10 and
+  `transcode/foobar` at 1 from one node). Static
   configured costs stay the default (the CDN); a radio link may measure its
   own ([Link quality](/quest/m1/cluster-routing/link-quality.md)).
 - **Topology now, wire later.** moq.pro's edge and core migration runs on
