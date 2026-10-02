@@ -18,8 +18,8 @@ Facts (2026-10-01): `track::Demand` and `broadcast::Demand` already exist.
 broadcast `used`/`unused`, since group demand drives fetch coalescing.
 `broadcast::Producer` is already `demand()`-only, with `used`/`unused` on
 `broadcast::Demand`; there is no `group::Demand` yet.
-`track::Request` and `track::Dynamic` have `poll_unused`, and #4691 (still
-open) adds `group::Request::poll_unused`. moq-ffi wraps only `track::Demand`
+`track::Request` and `track::Dynamic` have `poll_unused`, and #4691 added
+`group::Request::poll_unused`. moq-ffi wraps only `track::Demand`
 (`MoqTrackDemand`); `MoqGroupRequest` and `MoqTrackRequest` have no demand.
 
 Decided (2026-10-01):

@@ -38,8 +38,7 @@ Work:
 - Tests in `rs/qmux`: a session that drops many unread streams keeps
   delivering past its initial window, and a peer reads the close code after a
   close issued mid-write.
-- Release on both lines (0.5.x after 0.5.2 from
-  [qmux reset race](/quest/m0/qmux-reset-race.md), and 0.6.x), then bump
+- Release on both lines (0.5.x after 0.5.2, and 0.6.x), then bump
   `main`'s pin to that 0.5.x. `main` stays on 0.5: 0.6 needs
   web-transport-trait 0.5, a breaking change that belongs on `dev`, which
   picks up 0.6.x.
@@ -51,5 +50,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [qmux reset race](/quest/m0/qmux-reset-race.md) - same file and release train; lands first
 - [qmux on noq-proto](/quest/m2/quic-qmux.md) - replaces these stream maps later

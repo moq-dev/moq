@@ -36,5 +36,5 @@ negotiating an optional extension.
 
 ## Related
 
-- [Non-transit relays](/quest/m1/cluster-routing/transit.md) - cluster links are lite-only
+- [Upstream links](/quest/m1/cluster-routing/transit.md) - cluster links are lite-only
 - [Wildcard](/quest/m0/wildcard/README.md) - the pool spread that makes a Hop ID label unsafe to splice on
