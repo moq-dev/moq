@@ -1,18 +1,21 @@
 //! Adapts the async transport interface to the poll one moq-net requires.
 //!
-//! moq-net only accepts the poll interface (`web_transport_trait::poll`).
+//! moq-net accepts its own `moq_net::transport::poll` traits.
 //! A backend that offers only the async interface (qmux, iroh, noq) is wrapped
 //! in [`Session`] here, at the edge where async already lives. The wrapping
 //! costs one allocation per operation and one copy per write, and its
 //! closed-watch emulation is weaker than a native implementation (see
 //! [`Session`]), so a backend that implements the poll interface itself is
-//! handed to moq-net directly.
+//! adapted to moq-net at this boundary.
 
 use std::task::{Context, Poll, ready};
 
 use bytes::Bytes;
 use futures::FutureExt;
 use web_transport_trait::poll as wt_poll;
+
+mod owned;
+pub use owned::Error;
 
 /// A stored in-flight operation future. Native transports are Send, so the
 /// plain boxed flavor suffices.
@@ -1267,6 +1270,26 @@ mod tests {
 			let _ = self.closed.clone().wait_for(|closed| *closed).await;
 			FakeError
 		}
+	}
+
+	#[test]
+	fn owned_poll_adapter_forwards_writes_and_resets() {
+		use moq_net::transport::poll;
+		let fake = FakeSend::default();
+		let mut send = SendStream::new(fake.clone());
+		let mut cx = cx();
+		assert!(matches!(
+			poll::SendStream::poll_write(&mut send, &mut cx, b"hello"),
+			Poll::Ready(Ok(5))
+		));
+		poll::SendStream::set_priority(&mut send, 7);
+		poll::SendStream::reset(&mut send, 0x33);
+		assert_eq!(fake.writes.lock().unwrap().as_slice(), b"hello");
+		assert_eq!(fake.priorities.lock().unwrap().as_slice(), &[7]);
+		assert_eq!(fake.resets.lock().unwrap().as_slice(), &[0x33]);
+		let (fake, _close) = fake_session();
+		let mut session = Session::new(fake);
+		assert!(poll::Session::poll_accept_uni(&mut session, &mut cx).is_pending());
 	}
 
 	fn fake_session() -> (FakeSession, tokio::sync::watch::Sender<bool>) {

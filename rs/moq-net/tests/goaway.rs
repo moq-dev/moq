@@ -245,7 +245,6 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 	/// process (and drop) the stream.
 	async fn send_goaway_raw<S: moq_net::transport::poll::Session>(session: &mut S, uri: &str) -> S::RecvStream {
 		use moq_net::transport::poll::SendStream as _;
-		use moq_net::web_transport_trait::poll::SendStream as _;
 		assert!(uri.len() < 63, "helper only encodes single-byte varints");
 		// Message body = [uri length varint][uri bytes]; the size prefix covers it.
 		let mut frame = vec![0x05u8, uri.len() as u8 + 1, uri.len() as u8];

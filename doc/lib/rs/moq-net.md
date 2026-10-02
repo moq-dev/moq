@@ -25,9 +25,13 @@ above ([hang](/lib/rs/hang)); relays and CDNs implement only this.
 - **Routes** record the relay hops and a cost, which is what the relay [cluster](/bin/relay/cluster) routes on. A hop of 0 marks the chain anonymous: `Route::is_anonymous()` is true, and that route ranks below every fully identified one. `Route::source()` says where a delivered route entered: `Source::Local`, or `Source::Peer(hop)` when a handle marked `origin::Producer::peer()` announced it. `origin::Consumer::local()` sees only the local ones.
 - **Stats** counters per broadcast and session, drained by [`moq-stats`](https://docs.rs/moq-stats).
 
-It runs over anything implementing `web_transport_trait::poll::Session`: noq, the
-browser, iroh, or qmux over TCP, Unix sockets, and
-WebSockets. [`moq-tokio`](https://docs.rs/moq-tokio) wires those up.
+It runs over its own `moq_net::transport::poll::Session`, `SendStream`, and
+`RecvStream` traits. Implement these for a custom transport; session clones keep
+independent operation state, and errors expose session and stream codes separately.
+[`moq-tokio`](https://docs.rs/moq-tokio) adapts native backends, `moq-wasm` adapts
+browser WebTransport, and `moq-uring::transport::Session::new` wraps a poll backend
+without adding thread bounds. `moq-net` does not depend on `web-transport-trait`,
+so backend trait upgrades affect their adapters rather than this public API.
 
 ```bash
 cargo add moq-net moq-tokio

@@ -461,7 +461,7 @@ mod tests {
 
 	impl std::error::Error for FakeError {}
 
-	impl web_transport_trait::Error for FakeError {
+	impl crate::transport::Error for FakeError {
 		fn session_error(&self) -> Option<(u32, String)> {
 			Some((0, "closed".to_string()))
 		}
@@ -530,7 +530,7 @@ mod tests {
 		}
 	}
 
-	impl web_transport_trait::poll::Session for FakeSession {
+	impl crate::transport::poll::Session for FakeSession {
 		type SendStream = FakeSendStream;
 		type RecvStream = FakeRecvStream;
 		type Error = FakeError;
@@ -582,7 +582,7 @@ mod tests {
 			Poll::Ready(FakeError)
 		}
 
-		fn stats(&self) -> impl web_transport_trait::Stats {
+		fn stats(&self) -> impl crate::transport::Stats {
 			FakeStats {
 				send_rate: *self.state.send_rate.lock().unwrap(),
 				bytes_sent: *self.state.bytes_sent.lock().unwrap(),
@@ -595,7 +595,7 @@ mod tests {
 		bytes_sent: Option<u64>,
 	}
 
-	impl web_transport_trait::Stats for FakeStats {
+	impl crate::transport::Stats for FakeStats {
 		fn estimated_send_rate(&self) -> Option<u64> {
 			self.send_rate
 		}
@@ -610,7 +610,7 @@ mod tests {
 		writes: Arc<Mutex<Vec<u8>>>,
 	}
 
-	impl web_transport_trait::poll::SendStream for FakeSendStream {
+	impl crate::transport::poll::SendStream for FakeSendStream {
 		type Error = FakeError;
 
 		fn poll_write(&mut self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
@@ -635,7 +635,7 @@ mod tests {
 		data: VecDeque<u8>,
 	}
 
-	impl web_transport_trait::poll::RecvStream for FakeRecvStream {
+	impl crate::transport::poll::RecvStream for FakeRecvStream {
 		type Error = FakeError;
 
 		fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
@@ -914,7 +914,7 @@ mod tests {
 		_local: std::rc::Rc<()>,
 	}
 
-	impl web_transport_trait::poll::Session for LocalSession {
+	impl crate::transport::poll::Session for LocalSession {
 		type SendStream = LocalSend;
 		type RecvStream = LocalRecv;
 		type Error = FakeError;
@@ -993,12 +993,12 @@ mod tests {
 			self.inner.poll_closed(cx)
 		}
 
-		fn stats(&self) -> impl web_transport_trait::Stats {
+		fn stats(&self) -> impl crate::transport::Stats {
 			self.inner.stats()
 		}
 	}
 
-	impl web_transport_trait::poll::SendStream for LocalSend {
+	impl crate::transport::poll::SendStream for LocalSend {
 		type Error = FakeError;
 
 		fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
@@ -1018,11 +1018,11 @@ mod tests {
 		}
 
 		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			web_transport_trait::poll::SendStream::poll_closed(&mut self.inner, cx)
+			crate::transport::poll::SendStream::poll_closed(&mut self.inner, cx)
 		}
 	}
 
-	impl web_transport_trait::poll::RecvStream for LocalRecv {
+	impl crate::transport::poll::RecvStream for LocalRecv {
 		type Error = FakeError;
 
 		fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
@@ -1034,7 +1034,7 @@ mod tests {
 		}
 
 		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			web_transport_trait::poll::RecvStream::poll_closed(&mut self.inner, cx)
+			crate::transport::poll::RecvStream::poll_closed(&mut self.inner, cx)
 		}
 	}
 

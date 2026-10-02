@@ -2,7 +2,7 @@
 
 use std::{sync::Arc, task::Poll, time::Duration};
 
-use web_transport_trait::Stats as _;
+use crate::transport::Stats as _;
 
 use crate::{Error, SessionError, Version, bandwidth, goaway};
 

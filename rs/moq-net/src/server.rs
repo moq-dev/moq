@@ -1,7 +1,7 @@
 //! Accepting a MoQ session, including the paused handshake that inspects the
 //! peer's SETUP before granting origins.
 
-use web_transport_trait::{MaybeSend, MaybeSync};
+use crate::transport::{MaybeSend, MaybeSync};
 
 use crate::origin;
 use crate::time::{Clock, Instant};
@@ -829,7 +829,7 @@ mod tests {
 		}
 	}
 	impl std::error::Error for FakeError {}
-	impl web_transport_trait::Error for FakeError {
+	impl crate::transport::Error for FakeError {
 		fn session_error(&self) -> Option<(u32, String)> {
 			Some((0, "closed".to_string()))
 		}
@@ -866,7 +866,7 @@ mod tests {
 		}
 	}
 
-	impl web_transport_trait::poll::Session for FakeSession {
+	impl crate::transport::poll::Session for FakeSession {
 		type SendStream = FakeSend;
 		type RecvStream = FakeRecv;
 		type Error = FakeError;
@@ -926,14 +926,14 @@ mod tests {
 		fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Error> {
 			std::task::Poll::Pending
 		}
-		fn stats(&self) -> impl web_transport_trait::Stats {
-			web_transport_trait::StatsUnavailable
+		fn stats(&self) -> impl crate::transport::Stats {
+			crate::transport::StatsUnavailable
 		}
 	}
 
 	#[derive(Clone, Default)]
 	struct FakeSend;
-	impl web_transport_trait::poll::SendStream for FakeSend {
+	impl crate::transport::poll::SendStream for FakeSend {
 		type Error = FakeError;
 		fn poll_write(
 			&mut self,
@@ -955,7 +955,7 @@ mod tests {
 	struct FakeRecv {
 		data: VecDeque<u8>,
 	}
-	impl web_transport_trait::poll::RecvStream for FakeRecv {
+	impl crate::transport::poll::RecvStream for FakeRecv {
 		type Error = FakeError;
 		fn poll_read(
 			&mut self,

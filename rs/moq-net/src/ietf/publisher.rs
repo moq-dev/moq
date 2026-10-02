@@ -11,7 +11,7 @@ use std::{
 	time::Duration,
 };
 
-use web_transport_trait::poll::SendStream as _;
+use crate::transport::poll::SendStream as _;
 
 use crate::{
 	AsPath, Error, Timescale, Timestamp,

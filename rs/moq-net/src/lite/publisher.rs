@@ -11,7 +11,7 @@ use std::{
 	time::Duration,
 };
 
-use web_transport_trait::Stats;
+use crate::transport::Stats;
 
 use crate::{
 	Error, Hop, Hops,
@@ -3442,7 +3442,7 @@ mod serve_group_test {
 
 			let mut session = ScriptedSession::new(Vec::new());
 			let (send, recv) = futures::future::poll_fn(|cx| {
-				<ScriptedSession as web_transport_trait::poll::Session>::poll_open_bi(&mut session, cx)
+				<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
 			})
 			.await
 			.unwrap();
@@ -3986,7 +3986,7 @@ mod tests {
 		] {
 			let mut session = session;
 			let (send, recv) = futures::future::poll_fn(|cx| {
-				<ScriptedSession as web_transport_trait::poll::Session>::poll_open_bi(&mut session, cx)
+				<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
 			})
 			.await
 			.unwrap();

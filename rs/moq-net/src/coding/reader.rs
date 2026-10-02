@@ -279,7 +279,7 @@ mod tests {
 		stops: Vec<u32>,
 	}
 
-	impl web_transport_trait::poll::RecvStream for StopLog {
+	impl crate::transport::poll::RecvStream for StopLog {
 		type Error = crate::lite::test_transport::SinkError;
 
 		fn poll_read(
@@ -385,7 +385,7 @@ mod tests {
 	#[derive(Default)]
 	struct Chunks(std::collections::VecDeque<&'static [u8]>);
 
-	impl web_transport_trait::poll::RecvStream for Chunks {
+	impl crate::transport::poll::RecvStream for Chunks {
 		type Error = crate::lite::test_transport::SinkError;
 
 		fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
@@ -563,7 +563,7 @@ mod tests {
 		waiter: kio::Waiter,
 	}
 
-	impl web_transport_trait::poll::RecvStream for Burst {
+	impl crate::transport::poll::RecvStream for Burst {
 		type Error = crate::lite::test_transport::SinkError;
 
 		fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {

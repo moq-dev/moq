@@ -33,7 +33,6 @@ slab = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 web-async = { workspace = true }
-web-transport-trait = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

@@ -16,7 +16,7 @@ use std::{
 	task::{Context, Poll},
 };
 
-use web_transport_trait::poll;
+use crate::transport::poll;
 
 #[derive(Debug, Clone, Default)]
 pub struct SinkError;
@@ -29,7 +29,7 @@ impl std::fmt::Display for SinkError {
 
 impl std::error::Error for SinkError {}
 
-impl web_transport_trait::Error for SinkError {
+impl crate::transport::Error for SinkError {
 	fn session_error(&self) -> Option<(u32, String)> {
 		Some((0, "closed".to_string()))
 	}
@@ -197,7 +197,7 @@ impl std::fmt::Display for ResetError {
 
 impl std::error::Error for ResetError {}
 
-impl web_transport_trait::Error for ResetError {
+impl crate::transport::Error for ResetError {
 	fn session_error(&self) -> Option<(u32, String)> {
 		None
 	}
@@ -331,7 +331,7 @@ impl poll::Session for DeadStreamSession {
 		Poll::Pending
 	}
 
-	fn stats(&self) -> impl web_transport_trait::Stats {
+	fn stats(&self) -> impl crate::transport::Stats {
 		SinkStats::default()
 	}
 }
@@ -515,7 +515,7 @@ impl poll::Session for SinkSession {
 		Poll::Pending
 	}
 
-	fn stats(&self) -> impl web_transport_trait::Stats {
+	fn stats(&self) -> impl crate::transport::Stats {
 		*self.stats.lock().unwrap()
 	}
 }
@@ -542,7 +542,7 @@ impl SinkStats {
 	}
 }
 
-impl web_transport_trait::Stats for SinkStats {
+impl crate::transport::Stats for SinkStats {
 	fn estimated_send_rate(&self) -> Option<u64> {
 		self.estimated_send_rate
 	}
@@ -786,7 +786,7 @@ impl poll::Session for ScriptedSession {
 		Poll::Pending
 	}
 
-	fn stats(&self) -> impl web_transport_trait::Stats {
+	fn stats(&self) -> impl crate::transport::Stats {
 		SinkStats::default()
 	}
 }
