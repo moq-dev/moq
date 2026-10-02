@@ -2199,190 +2199,6 @@ impl Drop for DriverState {
 /// waiting longer costs cached state, not a viewer.
 const TRACK_IDLE_LINGER: Duration = Duration::from_secs(30);
 
-/// A local copy of groups the front already delivered, so resume stays spliced
-/// after the source track is dropped. Cache misses stay pending while demand
-/// re-splices the upstream source. Finished on drop so an idle linger does not
-/// warn about an abandoned producer.
-struct WarmCopy {
-	track: track::Producer,
-	_dynamic: track::Dynamic,
-	/// The newest group, where the copy spliced after this one picks up (see
-	/// [`TrackIo::head`]).
-	edge: Option<WarmGroup>,
-}
-
-impl Drop for WarmCopy {
-	fn drop(&mut self) {
-		let _ = self.track.finish();
-	}
-}
-
-/// A warm copy's newest group, which the copy spliced after it continues.
-///
-/// Kept past that splice: an open one must stay open for the continuation (dropping
-/// an unfinished producer clears its frames), and either kind supplies the head the
-/// continuation lacks when the next park rebuilds the group. Nothing will ever finish
-/// an open one, so it aborts on drop.
-struct WarmGroup(group::Producer);
-
-impl Drop for WarmGroup {
-	fn drop(&mut self) {
-		if !self.0.is_finished() {
-			let _ = self.0.clone().abort(Error::Cancel);
-		}
-	}
-}
-
-/// A spliced copy's newest group, held so its head outlives the copy's route (see
-/// [`TrackIo::held`]). Borrowed from the route, which may still be writing it for other
-/// readers, so it aborts on drop only once it is the last handle: a dead route never
-/// finishes it.
-struct HeldGroup(group::Producer);
-
-impl Drop for HeldGroup {
-	fn drop(&mut self) {
-		if !self.0.is_finished() {
-			let _ = self.0.abort_if_last(Error::Cancel);
-		}
-	}
-}
-
-/// Cache what `source` delivered on a new local track the origin owns: its complete
-/// groups, and its open live edge rebuilt from the frames already delivered.
-///
-/// `head` is the previous park's edge. A copy spliced after a warm cache continues its
-/// edge group from the next frame, so its copy of that group lacks the head, which
-/// `head` supplies. `held` is the copy's newest group as [`TrackIo::held`] kept it: a
-/// copy that died tore its open groups out of its own cache, but not out of the held one.
-fn warm_copy(source: &track::Consumer, head: Option<&WarmGroup>, held: Option<&group::Producer>) -> Option<WarmCopy> {
-	let info = source.cached_info()?;
-	let mut track = track::Producer::new(Arc::new(source.broadcast().clone()), source.name(), info);
-	let head = head.map(|head| &head.0);
-	let mut groups = source.cached_groups();
-	if let Some(held) = held
-		&& !groups.iter().any(|(group, _)| group.sequence == held.sequence)
-	{
-		groups.push((held.clone(), true));
-	}
-	// Not `source.latest()`: datagrams share the sequence counter and can run past it.
-	let latest = groups
-		.iter()
-		.filter(|(_, visible)| *visible)
-		.map(|(group, _)| group.sequence)
-		.max();
-	let mut edge = None;
-	let mut first = None;
-
-	// A spliced copy hides the group it continued (its halves sit in two segments), so
-	// carry the previous edge over when the copy has no version of it at all. First,
-	// since it arrived before anything the copy holds.
-	if let Some(head) = head
-		&& !groups.iter().any(|(group, _)| group.sequence == head.sequence)
-	{
-		let is_latest = latest.is_none_or(|latest| head.sequence >= latest);
-		if head.is_finished() {
-			let _ = track.adopt_group(head.clone(), true);
-			first = Some(head.sequence);
-			if is_latest {
-				edge = Some(WarmGroup(head.clone()));
-			}
-		} else if is_latest {
-			edge = warm_rebuild(&track, head, None);
-			first = edge.as_ref().map(|_| head.sequence);
-		}
-	}
-
-	for (group, visible) in groups {
-		let finished = group.is_finished();
-		let whole = group.live_first_frame() == Some(0);
-		let is_latest = visible && Some(group.sequence) == latest;
-		let warm = if finished && whole {
-			let _ = track.adopt_group(group.clone(), visible);
-			Some(WarmGroup(group))
-		} else if (finished || is_latest) && (whole || head.is_some_and(|head| head.sequence == group.sequence)) {
-			// Dropping the source copy resets an open live edge mid-transfer, so rebuild
-			// it from the frames already delivered: the re-splice asks for the next
-			// frame, and a group that stays open for good (a JSON log in group 0)
-			// continues instead of being re-sent whole on every resume. A continuation
-			// is rebuilt whole from the previous edge's head the same way.
-			warm_rebuild(&track, &group, head)
-		} else {
-			// Mid-transfer backlog, or a continuation with no head to complete it.
-			None
-		};
-		if visible && let Some(warm) = &warm {
-			first = Some(first.map_or(warm.0.sequence, |first: u64| first.min(warm.0.sequence)));
-		}
-		if is_latest {
-			edge = warm;
-		}
-	}
-	// Arrival order can put the live group before cached history. Declare the
-	// cache's oldest group so a new subscription cannot resolve its floor from
-	// whichever group arrived first and permanently skip that history.
-	track.start_at(first).ok()?;
-	let dynamic = track.dynamic();
-	Some(WarmCopy {
-		track,
-		_dynamic: dynamic,
-		edge,
-	})
-}
-
-/// Rebuild `live` on `track` from its delivered frames, prefixed by `head`'s when `live`
-/// only holds a continuation of it. Finished like `live`, or left open.
-fn warm_rebuild(track: &track::Producer, live: &group::Producer, head: Option<&group::Producer>) -> Option<WarmGroup> {
-	// A continuation holds nothing below its offset.
-	let mut start = live.live_first_frame()? as u64;
-	let mut tail = live.consume();
-	tail.start_at(start);
-	let mut frames = Vec::new();
-	if start > 0
-		&& let Some(head) = head.filter(|head| head.sequence == live.sequence)
-		&& let Some(head_start) = head.live_first_frame()
-	{
-		let mut head = head.consume();
-		head.start_at(head_start as u64);
-		while head.index() < start {
-			match head.poll_read_frame(&kio::Waiter::noop()) {
-				Poll::Ready(Ok(Some(frame))) => frames.push(frame),
-				_ => break,
-			}
-		}
-		match head.index() == start {
-			true => start = head_start as u64,
-			// The head doesn't reach the continuation: keep only the continuation.
-			false => frames.clear(),
-		}
-	}
-	while let Poll::Ready(Ok(Some(frame))) = tail.poll_read_frame(&kio::Waiter::noop()) {
-		frames.push(frame);
-	}
-	if frames.is_empty() {
-		return None;
-	}
-
-	// Wrapped first, so a failed write aborts it rather than dropping it unfinished.
-	let rebuilt = WarmGroup(
-		track
-			.create_group(group::Info {
-				sequence: live.sequence,
-			})
-			.ok()?,
-	);
-	let mut writer = rebuilt.0.clone();
-	if start > 0 {
-		writer.start_at(start).ok()?;
-	}
-	for frame in frames {
-		writer.write_frame(frame.timestamp, frame.payload).ok()?;
-	}
-	if live.is_finished() {
-		writer.finish().ok()?;
-	}
-	Some(rebuilt)
-}
-
 /// Everything [`run_front`] owns, queued by [`Consumer::request_broadcast`].
 struct FrontTask {
 	/// The route table the front selects from.
@@ -2399,84 +2215,53 @@ struct FrontTask {
 	request: kio::Producer<PendingBroadcast>,
 	/// Published for requesters once the first source fixes it; see [`RemoteFront::pin`].
 	pin: kio::Lock<Pin>,
+	/// Where the front runs the pumps writing its tracks.
+	tasks: TasksWeak,
 	timers: Clock,
+}
+
+/// A route asked for its copy of a track: the copy, its pending info, and the
+/// subscription made alongside it, so the resume point rides the first request.
+struct Asked {
+	source: u64,
+	copy: track::Consumer,
+	sub: kio::Pending<track::Subscribing>,
+	floor: Option<track::Position>,
+}
+
+impl Asked {
+	fn feed(self) -> super::pump::Command {
+		super::pump::Command::Feed(super::pump::Feed {
+			id: self.source,
+			copy: self.copy,
+			sub: self.sub,
+			floor: self.floor,
+		})
+	}
 }
 
 /// The driver's side of one logical track: the handles behind the names the
 /// machine uses.
 struct TrackIo {
-	resume: super::resume::Producer,
+	/// The pump writing the logical track readers hold.
+	pump: super::pump::Handle,
+	/// A copy whose info is still in flight.
+	query: Option<(Asked, track::Querying)>,
 	/// The copy whose info resolved, waiting for the machine to splice it.
-	staged: Option<(u64, track::Consumer)>,
-	/// A query in flight: the source asked, its copy, and the pending info.
-	query: Option<(u64, track::Consumer, track::Querying)>,
-	/// The spliced copy: its source and the track.
-	copy: Option<(u64, track::Consumer)>,
-	/// The delivered edge when the copy spliced in: a copy that dies without
-	/// advancing it delivered nothing. Snapshotted per splice, not per wake, so an
-	/// unrelated wake between the copy's last frame and its death cannot launder
-	/// its progress away.
-	edge: Option<track::Position>,
-	/// Delivered groups kept after the copy was dropped, so resume stays spliced
-	/// through the linger without pinning the source as a reader.
-	warm: Option<WarmCopy>,
-	/// The last warm copy's newest group, outliving it so the copy spliced after it
-	/// can continue the group (see [`WarmGroup`]). Released at the next park.
-	head: Option<WarmGroup>,
-	/// The spliced copy's newest group. A route that ends abruptly releases its open
-	/// groups, and the takeover after it asks the next copy only for the frames past
-	/// the break, so without this handle no route holds the group's head for a reader
-	/// that arrives later. See [`TrackIo::retire`].
-	held: Option<HeldGroup>,
-	/// The spliced copy, once it died: its segment keeps ending readers with its error
-	/// unless a takeover follows, which retires it.
-	dead: Option<track::Consumer>,
+	staged: Option<Asked>,
+	/// The source whose copy the pump reads.
+	copy: Option<u64>,
 	/// Whether the track had a reader as of the last demand edge.
 	used: bool,
 }
 
 impl TrackIo {
-	/// Let go of every source handle once the logical track ended: its segments keep
-	/// what readers drain, and only its demand is still watched, until it is forgotten.
+	/// Let go of every source handle once the logical track ended: its cache stays
+	/// readable, and only its demand is still watched, until it is forgotten.
 	fn end(&mut self) {
-		self.staged = None;
 		self.query = None;
+		self.staged = None;
 		self.copy = None;
-		self.warm = None;
-		self.head = None;
-		self.held = None;
-		self.dead = None;
-	}
-
-	/// Keep the spliced copy as dead. The front only refreshes `held` between wakes, so
-	/// first catch a newest group the copy surfaced since, while its cache still has it.
-	fn bury(&mut self) {
-		let Some((_, copy)) = self.copy.take() else { return };
-		let after = self.held.as_ref().map(|held| held.0.sequence);
-		if let Poll::Ready(group) = copy.poll_latest_group(after, &kio::Waiter::noop()) {
-			self.held = Some(HeldGroup(group));
-		}
-		self.dead = Some(copy);
-	}
-
-	/// Retire `copy` as a takeover replaces it. Mid-group, park its delivery warm, open
-	/// group included, so a reader arriving later still gets the group's head and the
-	/// takeover continues it. Between groups its own cache keeps everything finished, so
-	/// there is nothing to do.
-	fn retire(&mut self, copy: &track::Consumer) -> Result<(), Error> {
-		let Some(held) = self.held.take() else {
-			return Ok(());
-		};
-		if held.0.is_finished() {
-			return Ok(());
-		}
-		let Some(warm) = warm_copy(copy, self.head.as_ref(), Some(&held.0)) else {
-			return Ok(());
-		};
-		self.head = None;
-		self.resume.park(&warm.track)?;
-		self.warm = Some(warm);
-		Ok(())
 	}
 }
 
@@ -2492,22 +2277,25 @@ async fn run_front(task: FrontTask) {
 		watch,
 		request,
 		pin,
+		tasks,
 		timers,
 	} = task;
 
 	/// What the wait below returns: one thing that happened.
 	enum Step {
-		Assigned(Arc<str>, super::resume::Producer),
+		Assigned(track::Request),
 		Resolved(u64, Result<broadcast::Consumer, Error>),
 		SourceClosed(u64),
 		Info(Arc<str>, u64, Result<track::Info, Error>),
-		Ended(Arc<str>, u64, Result<(), Error>),
-		Held(Arc<str>, group::Producer),
+		Ended(Arc<str>, super::pump::Ended),
 		Demand(Arc<str>),
 		Deadline,
 		Table,
 	}
 
+	// The front serves its broadcast on demand: every track a reader names is
+	// handed here, and a pump writes it from whichever source serves the path.
+	let mut dynamic = broadcast.dynamic();
 	let mut front = Front::new(TRACK_IDLE_LINGER);
 	let mut sources: HashMap<u64, broadcast::Consumer> = HashMap::new();
 	let mut next_source = 0u64;
@@ -2649,17 +2437,15 @@ async fn run_front(task: FrontTask) {
 						upstream = Some((route, pending));
 					}
 					Action::Detach { source } => {
+						// The pump keeps reading the source's copy until a replacement
+						// is fed, so a route being beaten keeps serving until then; a
+						// route that died ends its copy, and the pump says when.
 						sources.remove(&source);
-						// Its copies go with it; the segments they delivered stay
-						// spliced until a replacement resumes past them.
 						for io in tracks.values_mut() {
-							if io.copy.as_ref().is_some_and(|(s, _)| *s == source) {
-								io.bury();
-							}
-							if io.query.as_ref().is_some_and(|(s, ..)| *s == source) {
+							if io.query.as_ref().is_some_and(|(asked, _)| asked.source == source) {
 								io.query = None;
 							}
-							if io.staged.as_ref().is_some_and(|(s, _)| *s == source) {
+							if io.staged.as_ref().is_some_and(|asked| asked.source == source) {
 								io.staged = None;
 							}
 						}
@@ -2674,10 +2460,27 @@ async fn run_front(task: FrontTask) {
 						let closing = sources.get(&source).is_some_and(|s| s.is_closing());
 						match sources.get(&source).map(|s| s.track(&name)) {
 							Some(Ok(copy)) => {
+								// Subscribe at once, from where the logical track stops and
+								// with what its readers want, so the resume point rides the
+								// first request: some sessions read the demand only once.
+								let floor = io.pump.resume_floor();
+								let demand = io.pump.subscription().unwrap_or_default();
+								let sub = copy.subscribe(track::Subscription {
+									start: super::subscription::max_some(demand.start, floor),
+									..demand
+								});
 								// `into_inner` sheds the `Pending` future wrapper so only
 								// the pollable (which is `Sync`) is held across the wait.
-								let query = copy.query().into_inner();
-								io.query = Some((source, copy, query));
+								let info = copy.query().into_inner();
+								io.query = Some((
+									Asked {
+										source,
+										copy,
+										sub,
+										floor,
+									},
+									info,
+								));
 							}
 							Some(Err(err)) => events.push_back(Event::TrackInfo {
 								track: name,
@@ -2690,54 +2493,21 @@ async fn run_front(task: FrontTask) {
 					}
 					Action::Splice { track: name, source } => {
 						let Some(io) = tracks.get_mut(&name) else { continue };
-						let Some((staged, copy)) = io.staged.take() else {
+						let Some(asked) = io.staged.take() else {
 							continue;
 						};
-						if staged != source {
+						if asked.source != source {
 							continue;
 						}
-						let outgoing = io.copy.take().map(|(_, copy)| copy).or_else(|| io.dead.take());
-						let retired = match outgoing {
-							Some(outgoing) => io.retire(&outgoing),
-							None => Ok(()),
-						};
-						if let Err(err) = retired.and_then(|()| io.resume.takeover(&copy)) {
-							// Closed means the logical track already ended. Anything
-							// else is a boundary bug; abort rather than strand
-							// subscribers on a track nobody serves.
-							let _ = io.resume.abort(err);
-							tracks.remove(&name);
-							continue;
-						}
-						if let Some(head) = io.warm.take().and_then(|mut warm| warm.edge.take()) {
-							io.head = Some(head);
-						}
-						// The new segment has produced nothing yet: this is the
-						// edge the copy is asked to advance.
-						io.edge = io.resume.resume_position();
-						io.held = None;
-						io.copy = Some((source, copy));
+						io.pump.send(asked.feed());
+						io.copy = Some(source);
 					}
 					Action::Park { track: name } => {
 						let Some(io) = tracks.get_mut(&name) else { continue };
-						let Some((_, copy)) = io.copy.take() else { continue };
-						// Drop the source copy so its producer goes idle at once; keep
-						// the groups it delivered on a local track so resume stays
-						// spliced until the linger expires.
-						let warm = warm_copy(&copy, io.head.as_ref(), io.held.as_ref().map(|held| &held.0));
-						drop(copy);
-						io.head = None;
-						io.held = None;
-						io.dead = None;
-						let parked = match &warm {
-							Some(warm) => io.resume.park(&warm.track),
-							None => io.resume.release(),
-						};
-						if parked.is_err() {
-							tracks.remove(&name);
-							continue;
-						}
-						io.warm = warm;
+						// Drop the copy so its source goes idle at once; what it
+						// delivered stays cached for a returning reader.
+						io.pump.send(super::pump::Command::Detach);
+						io.copy = None;
 					}
 					Action::Forget { track: name } => {
 						// A reader that looked the track up since the machine decided keeps
@@ -2745,7 +2515,7 @@ async fn run_front(task: FrontTask) {
 						// current level, so a reader gone before the next poll would
 						// otherwise leave the track unread with no linger armed.
 						if let Some(io) = tracks.get_mut(&name)
-							&& !broadcast.forget_spliced(&name, &io.resume)
+							&& !io.pump.abort_unused(Error::Dropped)
 						{
 							if !io.used {
 								io.used = true;
@@ -2759,14 +2529,14 @@ async fn run_front(task: FrontTask) {
 					Action::Finish { track: name } => {
 						if let Some(io) = tracks.get_mut(&name) {
 							io.end();
-							let _ = io.resume.finish();
+							io.pump.send(super::pump::Command::Finish);
 						}
 					}
 					Action::Abort { track: name, err } => {
 						if let Some(io) = tracks.get_mut(&name) {
 							tracing::debug!(name = %name, %err, "aborting track");
 							io.end();
-							let _ = io.resume.abort(err);
+							io.pump.send(super::pump::Command::Abort(err));
 						}
 					}
 					Action::Arm { at } => deadline.set(at),
@@ -2777,28 +2547,22 @@ async fn run_front(task: FrontTask) {
 						// Ending the broadcast only retracts it: no new requesters or
 						// tracks, and a newcomer at the path gets a fresh front. Tracks
 						// in flight carry on (moq-lite: retraction does not disturb
-						// subscriptions already in flight): dropping their producers
-						// leaves each reader on the copy it was spliced from, ending
-						// when and as that copy ends.
+						// subscriptions already in flight): each pump drains the copy it
+						// reads and ends its track as that copy ends.
 						broadcast.close();
-						broadcast.release_spliced(err.clone());
 						for (_, mut io) in tracks.drain() {
 							// A reader still waiting on its source's answer is in flight
-							// too: splice the copy it asked, past any warm cache, so it
-							// ends as that copy does.
-							let waiting = io.staged.take().map(|(_, copy)| copy);
-							let waiting = waiting.or_else(|| io.query.take().map(|(_, copy, _)| copy));
-							if let Some(copy) = waiting
-								&& io.resume.is_used()
+							// too: feed the copy it asked, so it ends as that copy does.
+							let waiting = io.staged.take().or_else(|| io.query.take().map(|(asked, _)| asked));
+							if let Some(asked) = waiting
+								&& io.pump.is_used()
 							{
-								if io.resume.takeover(&copy).is_err() {
-									continue;
-								}
-								io.warm = None;
+								io.pump.send(asked.feed());
+								io.copy = Some(0);
 							}
-							// Nothing in flight: unread, never spliced, or only a warm cache.
-							if !io.resume.is_used() || !io.resume.is_spliced() || io.warm.is_some() {
-								let _ = io.resume.abort(err.clone());
+							// Nothing in flight: unread, or nothing feeding it.
+							if !io.pump.is_used() || io.copy.is_none() {
+								io.pump.send(super::pump::Command::Abort(err.clone()));
 							}
 						}
 						return;
@@ -2808,8 +2572,8 @@ async fn run_front(task: FrontTask) {
 		}
 
 		let step = kio::wait(|waiter| {
-			if let Poll::Ready((name, resume)) = broadcast.poll_spliced_assigned(waiter) {
-				return Poll::Ready(Step::Assigned(name, resume));
+			if let Poll::Ready(Ok(request)) = dynamic.poll_requested_track(waiter) {
+				return Poll::Ready(Step::Assigned(request));
 			}
 			if let Some((route, pending)) = &upstream
 				&& let Poll::Ready(result) = pending.poll(waiter, |p| match &p.resolved {
@@ -2833,26 +2597,20 @@ async fn run_front(task: FrontTask) {
 				return Poll::Ready(Step::SourceClosed(id));
 			}
 			for (name, io) in &tracks {
-				if let Some((source, _, query)) = &io.query
+				if let Some((asked, query)) = &io.query
 					&& let Poll::Ready(result) = query.poll(waiter)
 				{
-					return Poll::Ready(Step::Info(name.clone(), *source, result));
+					return Poll::Ready(Step::Info(name.clone(), asked.source, result));
 				}
-				if let Some((source, copy)) = &io.copy
-					&& let Poll::Ready(result) = copy.poll_complete(waiter)
+				if let Some(source) = io.copy
+					&& let Poll::Ready(ended) = io.pump.poll_ended(source, waiter)
 				{
-					return Poll::Ready(Step::Ended(name.clone(), *source, result));
-				}
-				if let Some((_, copy)) = &io.copy
-					&& let Poll::Ready(group) =
-						copy.poll_latest_group(io.held.as_ref().map(|held| held.0.sequence), waiter)
-				{
-					return Poll::Ready(Step::Held(name.clone(), group));
+					return Poll::Ready(Step::Ended(name.clone(), ended));
 				}
 				// Watch the demand edge in whichever direction is unmet.
 				let edge = match io.used {
-					true => io.resume.poll_unused(waiter),
-					false => io.resume.poll_used(waiter),
+					true => io.pump.poll_unused(waiter),
+					false => io.pump.poll_used(waiter),
 				};
 				if edge.is_ready() {
 					return Poll::Ready(Step::Demand(name.clone()));
@@ -2866,19 +2624,17 @@ async fn run_front(task: FrontTask) {
 		.await;
 
 		let event = match step {
-			Step::Assigned(name, resume) => {
+			Step::Assigned(request) => {
+				let name: Arc<str> = request.name().into();
+				let (pump, handle) = super::pump::Pump::new(request);
+				tasks.push(pump.run());
 				tracks.insert(
 					name.clone(),
 					TrackIo {
-						resume,
-						staged: None,
+						pump: handle,
 						query: None,
+						staged: None,
 						copy: None,
-						edge: None,
-						warm: None,
-						head: None,
-						held: None,
-						dead: None,
 						used: false,
 					},
 				);
@@ -2913,11 +2669,11 @@ async fn run_front(task: FrontTask) {
 			Step::Info(name, source, result) => {
 				let closing = sources.get(&source).is_some_and(|s| s.is_closing());
 				let Some(io) = tracks.get_mut(&name) else { continue };
-				let Some((_, copy, _)) = io.query.take() else { continue };
+				let Some((asked, _)) = io.query.take() else { continue };
 				// A copy that is already aborted cannot be spliced; its error is
 				// the source's answer for the track.
 				let result = match result {
-					Ok(info) => match copy.poll_complete(&kio::Waiter::noop()) {
+					Ok(info) => match asked.copy.poll_complete(&kio::Waiter::noop()) {
 						Poll::Ready(Err(err)) => Err(err),
 						_ => Ok(info),
 					},
@@ -2926,7 +2682,7 @@ async fn run_front(task: FrontTask) {
 				// Staged only while the track has a reader: without one the machine
 				// will not splice, and a held copy would keep the source subscribed.
 				if result.is_ok() && io.used {
-					io.staged = Some((source, copy));
+					io.staged = Some(asked);
 				}
 				Event::TrackInfo {
 					track: name,
@@ -2935,28 +2691,21 @@ async fn run_front(task: FrontTask) {
 					result,
 				}
 			}
-			Step::Ended(name, source, result) => {
-				let closing = sources.get(&source).is_some_and(|s| s.is_closing());
+			Step::Ended(name, ended) => {
+				let closing = sources.get(&ended.id).is_some_and(|s| s.is_closing());
 				let Some(io) = tracks.get_mut(&name) else { continue };
-				io.bury();
-				let delivered = io.resume.resume_position() != io.edge;
+				io.copy = None;
 				Event::TrackEnded {
 					track: name,
-					source,
+					source: ended.id,
 					closing,
-					result,
-					delivered,
+					result: ended.result,
+					delivered: ended.delivered,
 				}
-			}
-			Step::Held(name, group) => {
-				if let Some(io) = tracks.get_mut(&name) {
-					io.held = Some(HeldGroup(group));
-				}
-				continue;
 			}
 			Step::Demand(name) => {
 				let Some(io) = tracks.get_mut(&name) else { continue };
-				io.used = io.resume.is_used();
+				io.used = io.pump.is_used();
 				if !io.used {
 					// Nothing will be spliced now: let go of the copies a query
 					// holds, or the source stays subscribed with nobody reading.
@@ -4402,7 +4151,7 @@ impl Consumer {
 		// request. The watcher materializes the path from the best covering
 		// route, resolves the channel, and re-splices the front through
 		// routes sharing its first hop for as long as one serves.
-		let broadcast = broadcast::Producer::new_spliced(broadcast::Info {
+		let broadcast = broadcast::Producer::new(broadcast::Info {
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
 			path: absolute.clone(),
@@ -4430,6 +4179,7 @@ impl Consumer {
 			watch,
 			request,
 			pin,
+			tasks: self.tasks.clone(),
 			timers: self.timers.clone(),
 		}));
 		kio::Pending::new(Requesting::queued(consumer).with_path(requested).with_stats(scope))

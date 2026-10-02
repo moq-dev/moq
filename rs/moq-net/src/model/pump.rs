@@ -45,8 +45,9 @@ pub(crate) struct Feed {
 	pub id: u64,
 	/// The copy itself, for fetches and the start it declares.
 	pub copy: track::Consumer,
-	/// A subscription to `copy`, starting at `floor`.
-	pub sub: track::Subscriber,
+	/// A subscription to `copy`, starting at `floor`. Made by the front when it asks
+	/// the route for the track, so the start rides the initial SUBSCRIBE.
+	pub sub: kio::Pending<track::Subscribing>,
 	/// Where the subscription was asked to start. Demand updates never ask for less,
 	/// so a reader at the live edge cannot pull the replacement past what it owes.
 	pub floor: Option<Position>,
@@ -70,6 +71,10 @@ pub(crate) struct Status {
 }
 
 /// The front's side of a pump: commands in, status out.
+///
+/// Dropping it concludes the pump: no more inputs. It drains the one it has, ending
+/// the logical track the way that input ends, so readers mid-track carry on after
+/// the front itself is gone.
 pub(crate) struct Handle {
 	commands: kio::Queue<Command>,
 	status: kio::Consumer<Status>,
@@ -86,6 +91,39 @@ impl Handle {
 	/// [`track::TrackWeak::resume_floor`].
 	pub(crate) fn resume_floor(&self) -> Option<Position> {
 		self.weak.resume_floor()
+	}
+
+	/// What the track's readers want, aggregated.
+	pub(crate) fn subscription(&self) -> Option<Subscription> {
+		self.weak.subscription()
+	}
+
+	/// Whether anyone reads the track.
+	pub(crate) fn is_used(&self) -> bool {
+		self.weak.is_used()
+	}
+
+	/// Poll for a reader arriving.
+	pub(crate) fn poll_used(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.weak.poll_used(waiter);
+		match self.weak.is_used() {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
+		}
+	}
+
+	/// Poll for the last reader leaving.
+	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.weak.poll_unused(waiter);
+		match self.weak.is_used() {
+			true => Poll::Pending,
+			false => Poll::Ready(()),
+		}
+	}
+
+	/// End the track unless a reader holds it; see [`track::TrackWeak::abort_unused`].
+	pub(crate) fn abort_unused(&self, err: Error) -> bool {
+		self.weak.abort_unused(err)
 	}
 
 	/// Poll for input `id` running out, once its delivery has been written.
@@ -108,7 +146,6 @@ impl Handle {
 
 impl Drop for Handle {
 	fn drop(&mut self) {
-		// The pump exits once it sees the queue closed, dropping the logical track.
 		self.commands.close();
 	}
 }
@@ -139,11 +176,17 @@ impl Logical {
 	}
 }
 
+/// The subscription being read: pending until the copy's info arrives.
+enum Sub {
+	Pending(kio::Pending<track::Subscribing>),
+	Ready(track::Subscriber),
+}
+
 /// The subscription being read.
 struct Input {
 	id: u64,
 	copy: track::Consumer,
-	sub: track::Subscriber,
+	sub: Sub,
 	floor: Option<Position>,
 	/// The copy ran out: `Ok` for a clean end. Reported once its groups drained.
 	end: Option<Result<()>>,
@@ -214,6 +257,8 @@ pub(crate) struct Pump {
 	budget: frame::Budget,
 	/// The aggregate demand last forwarded to the input.
 	demand: Option<Subscription>,
+	/// The front let go: drain the input, then end the track as it ends.
+	concluding: bool,
 }
 
 impl Pump {
@@ -236,6 +281,7 @@ impl Pump {
 			fetches: Vec::new(),
 			budget: frame::Budget::default(),
 			demand: None,
+			concluding: false,
 		};
 		(pump, handle)
 	}
@@ -249,19 +295,28 @@ impl Pump {
 	/// Ready once the front let go.
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
-			match self.commands.poll_pop(waiter) {
-				Poll::Ready(Ok(command)) => {
-					self.apply(command);
-					continue;
+			if !self.concluding {
+				match self.commands.poll_pop(waiter) {
+					Poll::Ready(Ok(command)) => {
+						self.apply(command);
+						continue;
+					}
+					Poll::Ready(Err(kio::Closed)) => {
+						self.concluding = true;
+						continue;
+					}
+					Poll::Pending => {}
 				}
-				Poll::Ready(Err(kio::Closed)) => return Poll::Ready(()),
-				Poll::Pending => {}
+			}
+			if self.concluding && self.conclude() {
+				return Poll::Ready(());
 			}
 
 			let mut progress = self.poll_input(waiter);
 			progress |= self.poll_groups(waiter);
 			progress |= self.poll_fetches(waiter);
 			progress |= self.poll_demand(waiter);
+			self.prune_orphans(waiter);
 			self.report();
 			if !progress {
 				return Poll::Pending;
@@ -273,58 +328,92 @@ impl Pump {
 		match command {
 			Command::Feed(feed) => self.feed(feed),
 			Command::Detach => self.detach(),
-			Command::Finish => {
-				self.detach();
-				self.give_up_orphans(|_| true, Error::Closed);
-				self.logical = Logical::Done(match std::mem::replace(&mut self.logical, Logical::Done(None)) {
-					Logical::Live(producer) => {
-						let _ = producer.finish();
-						Some(producer)
-					}
-					// Finished before any route served it: nothing to read.
-					Logical::Pending(request) => {
-						request.reject(Error::NotFound);
-						None
-					}
-					Logical::Done(producer) => producer,
-				});
-			}
-			Command::Abort(err) => {
-				self.detach();
-				self.give_up_orphans(|_| true, err.clone());
-				for fetch in self.fetches.drain(..) {
-					fetch.request.reject(err.clone());
-				}
-				match std::mem::replace(&mut self.logical, Logical::Done(None)) {
-					Logical::Live(producer) => {
-						let _ = producer.abort(err);
-					}
-					Logical::Pending(request) => request.reject(err),
-					Logical::Done(producer) => self.logical = Logical::Done(producer),
-				}
-			}
+			Command::Finish => self.finish(),
+			Command::Abort(err) => self.abort(err),
 		}
+	}
+
+	fn finish(&mut self) {
+		self.detach();
+		self.give_up_orphans(|_| true, Error::Closed);
+		self.logical = Logical::Done(match std::mem::replace(&mut self.logical, Logical::Done(None)) {
+			Logical::Live(producer) => {
+				let _ = producer.finish();
+				Some(producer)
+			}
+			// Finished before any route served it: nothing to read.
+			Logical::Pending(request) => {
+				request.reject(Error::NotFound);
+				None
+			}
+			Logical::Done(producer) => producer,
+		});
+	}
+
+	fn abort(&mut self, err: Error) {
+		self.detach();
+		self.give_up_orphans(|_| true, err.clone());
+		for fetch in self.fetches.drain(..) {
+			fetch.request.reject(err.clone());
+		}
+		match std::mem::replace(&mut self.logical, Logical::Done(None)) {
+			Logical::Live(producer) => {
+				let _ = producer.abort(err);
+			}
+			Logical::Pending(request) => request.reject(err),
+			Logical::Done(producer) => self.logical = Logical::Done(producer),
+		}
+	}
+
+	/// With the front gone, end the track once the input does. True when there is
+	/// nothing left to do.
+	fn conclude(&mut self) -> bool {
+		if let Logical::Done(_) = self.logical {
+			return true;
+		}
+		match &self.input {
+			// Nothing in flight: nothing more will ever be written.
+			None => {
+				self.abort(Error::Dropped);
+				true
+			}
+			Some(input) => match &input.end {
+				Some(_) if self.draining(input.id) => false,
+				Some(Ok(())) => {
+					self.finish();
+					true
+				}
+				Some(Err(err)) => {
+					let err = err.clone();
+					self.abort(err);
+					true
+				}
+				None => false,
+			},
+		}
+	}
+
+	/// Whether groups from input `id` are still being written.
+	fn draining(&self, id: u64) -> bool {
+		self.groups
+			.values()
+			.any(|open| open.src.as_ref().is_some_and(|src| src.input == id))
 	}
 
 	fn feed(&mut self, feed: Feed) {
 		self.detach();
-		if let Logical::Pending(_) = &self.logical {
-			let Logical::Pending(request) = std::mem::replace(&mut self.logical, Logical::Done(None)) else {
-				unreachable!()
-			};
-			self.logical = Logical::Live(request.accept(feed.sub.info().clone()));
+		if let Logical::Done(_) = self.logical {
+			return;
 		}
 		self.demand = None;
 		self.input = Some(Input {
 			id: feed.id,
 			copy: feed.copy,
-			sub: feed.sub,
+			sub: Sub::Pending(feed.sub),
 			floor: feed.floor,
 			end: None,
 			delivered: false,
 		});
-		// Groups the replacement declares it will never serve can't be continued.
-		self.prune_orphans();
 	}
 
 	/// Drop the input; its groups wait for the next one.
@@ -335,8 +424,7 @@ impl Pump {
 		for open in self.groups.values_mut() {
 			open.src = None;
 		}
-		self.prune_orphans();
-	}
+			}
 
 	/// Read new groups and datagrams off the input.
 	fn poll_input(&mut self, waiter: &kio::Waiter) -> bool {
@@ -348,7 +436,37 @@ impl Pump {
 		}
 		let mut progress = false;
 
-		while let Poll::Ready(res) = input.sub.poll_recv_datagram(waiter) {
+		if let Sub::Pending(pending) = &input.sub {
+			match pending.poll_ok(waiter) {
+				Poll::Pending => return false,
+				Poll::Ready(Err(err)) => {
+					input.end = Some(Err(err));
+					return true;
+				}
+				Poll::Ready(Ok(sub)) => {
+					// The first copy to resolve says what the logical track is. The
+					// front checked every later one against it.
+					if let Logical::Pending(_) = &self.logical {
+						let Logical::Pending(request) = std::mem::replace(&mut self.logical, Logical::Done(None))
+						else {
+							unreachable!()
+						};
+						self.logical = Logical::Live(request.accept(sub.info().clone()));
+					}
+					input.sub = Sub::Ready(sub);
+					progress = true;
+					// Groups the input declares it will never serve can't be continued.
+									}
+			}
+		}
+		let Some(input) = self.input.as_mut() else {
+			return progress;
+		};
+		let Sub::Ready(sub) = &mut input.sub else {
+			unreachable!("resolved above")
+		};
+
+		while let Poll::Ready(res) = sub.poll_recv_datagram(waiter) {
 			let Ok(Some(datagram)) = res else { break };
 			if let Some(producer) = self.logical.producer() {
 				let _ = producer.insert_datagram(datagram.sequence, datagram.timestamp, datagram.payload);
@@ -358,7 +476,10 @@ impl Pump {
 
 		loop {
 			let input = self.input.as_mut().expect("checked above");
-			let group = match input.sub.poll_recv_group(waiter) {
+			let Sub::Ready(sub) = &mut input.sub else {
+				unreachable!("resolved above")
+			};
+			let group = match sub.poll_recv_group(waiter) {
 				Poll::Ready(Ok(Some(group))) => group,
 				Poll::Ready(Ok(None)) => {
 					input.end = Some(Ok(()));
@@ -430,8 +551,7 @@ impl Pump {
 			input.delivered = true;
 		}
 		if progress {
-			self.prune_orphans();
-		}
+					}
 		progress
 	}
 
@@ -552,8 +672,11 @@ impl Pump {
 
 	/// Give up groups no route can continue: past [`MAX_ORPHANS`], below a start the
 	/// input declared, or anything left once the input ended cleanly.
-	fn prune_orphans(&mut self) {
-		let start = self.input.as_ref().and_then(|input| match input.copy.poll_start(&kio::Waiter::noop()) {
+	fn prune_orphans(&mut self, waiter: &kio::Waiter) {
+		if self.groups.values().all(|open| open.src.is_some()) {
+			return;
+		}
+		let start = self.input.as_ref().and_then(|input| match input.copy.poll_start(waiter) {
 			Poll::Ready(start) => start,
 			Poll::Pending => None,
 		});
@@ -675,7 +798,10 @@ impl Pump {
 			start: max_some(demand.start, input.floor),
 			..demand.clone()
 		};
-		let _ = input.sub.update(wire);
+		let _ = match &mut input.sub {
+			Sub::Pending(pending) => pending.update(wire),
+			Sub::Ready(sub) => sub.update(wire),
+		};
 		self.demand = Some(demand);
 		false
 	}
@@ -699,8 +825,7 @@ impl Pump {
 		if let Ok(mut status) = self.status.write() {
 			status.ended = Some(ended);
 		}
-		self.prune_orphans();
-	}
+			}
 }
 
 #[cfg(test)]
@@ -732,14 +857,10 @@ mod test {
 	/// Feed `copy` as input `id`, subscribed from where the logical track stops.
 	fn feed(pump: &mut Pump, handle: &Handle, id: u64, copy: &track::Consumer) {
 		let floor = handle.resume_floor();
-		let sub = copy
-			.subscribe(Subscription {
-				start: floor,
-				..replay()
-			})
-			.now_or_never()
-			.expect("copy info is known")
-			.expect("copy is live");
+		let sub = copy.subscribe(Subscription {
+			start: floor,
+			..replay()
+		});
 		handle.send(Command::Feed(Feed {
 			id,
 			copy: copy.clone(),
@@ -1154,7 +1275,7 @@ mod test {
 		tokio::spawn(pump.run());
 		let (a, a_copy) = copy("a");
 		let floor = handle.resume_floor();
-		let sub = a_copy.subscribe(replay()).await.unwrap();
+		let sub = a_copy.subscribe(replay());
 		handle.send(Command::Feed(Feed {
 			id: 1,
 			copy: a_copy.clone(),
@@ -1170,13 +1291,10 @@ mod test {
 
 		let (b, b_copy) = copy("b");
 		let floor = handle.resume_floor();
-		let sub_b = b_copy
-			.subscribe(Subscription {
-				start: floor,
-				..replay()
-			})
-			.await
-			.unwrap();
+		let sub_b = b_copy.subscribe(Subscription {
+			start: floor,
+			..replay()
+		});
 		handle.send(Command::Feed(Feed {
 			id: 2,
 			copy: b_copy.clone(),

@@ -399,6 +399,11 @@ struct TrackState {
 	// A pre-draft-20 joining FETCH, which reuses the fill rendezvous.
 	joining: Option<JoiningFetch>,
 
+	// Where the subscription asked to start, when that is partway through a group: a
+	// resumed subscription picking up after the frames a previous route delivered. The
+	// stream for that group legitimately starts there, without a head.
+	resume: Option<track::Position>,
+
 	// The data streams read so far, which PUBLISH_DONE's Stream Count is checked against.
 	tail: kio::Producer<Tail>,
 }
@@ -428,6 +433,7 @@ impl TrackState {
 			largest: None,
 			fetch_id: None,
 			joining,
+			resume: None,
 			tail: Default::default(),
 		}
 	}
@@ -1650,7 +1656,13 @@ where
 			let mut state = self.state.lock();
 			state.subscribes.insert(
 				request_id,
-				TrackState::pending(request.name().to_owned(), broadcast_path.to_owned(), fill, joining),
+				TrackState {
+					resume: subscription
+						.as_ref()
+						.and_then(|s| s.start)
+						.filter(|start| start.frame != 0),
+					..TrackState::pending(request.name().to_owned(), broadcast_path.to_owned(), fill, joining)
+				},
 			);
 		}
 
@@ -2239,13 +2251,15 @@ where
 			}
 		};
 
-		let (mut track, timescale, fill, mut reading) = {
+		let (mut track, timescale, fill, resume, mut reading) = {
 			let state = self.state.lock();
 			let track = state.subscribes.get(&request_id).ok_or(Error::NotFound)?;
 			(
 				track.producer.clone().ok_or(Error::NotFound)?,
 				track.timescale,
 				track.fill.clone(),
+				// Only the group the subscription resumes partway through.
+				track.resume.filter(|resume| resume.group == group.group_id),
 				// Every data stream counts toward PUBLISH_DONE's Stream Count, even one
 				// dropped below, and the subscription's end waits until it is read.
 				Reading::open(&track.tail, Some(group.group_id), self.runtime.now()),
@@ -2265,13 +2279,14 @@ where
 		// degradation as a publisher that no longer holds the head.
 		//
 		// A fill we asked for is the exception, since its fetch stream is carrying exactly
-		// that head for [`Self::open_group`] to stitch this onto.
+		// that head for [`Self::open_group`] to stitch this onto. So is the group a resumed
+		// subscription asked to start partway through: the head came from another route.
 		//
 		// The bit is only the publisher's claim, so what is enforced is the object ids
 		// themselves: [`next_object_id`] holds every object to starting where the head
 		// stopped and incrementing by 1, whatever the header said and on the drafts that
 		// have no such bit to read.
-		if !group.flags.first_object && !fill.read().outstanding() {
+		if !group.flags.first_object && !fill.read().outstanding() && resume.is_none() {
 			tracing::debug!(
 				track_alias = %group.track_alias,
 				group = %group.group_id,
@@ -2285,7 +2300,7 @@ where
 		// Otherwise dropping the local subscriber cannot end this handler.
 		let opened = {
 			let mut opening = track.clone();
-			let mut open = std::pin::pin!(self.open_group(stream, &mut opening, &fill, &group, &mut reading));
+			let mut open = std::pin::pin!(self.open_group(stream, &mut opening, &fill, resume, &group, &mut reading));
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
@@ -2516,6 +2531,7 @@ where
 		stream: &mut Reader<S::RecvStream, Version>,
 		track: &mut track::Producer,
 		fill: &kio::Producer<Fill>,
+		resume: Option<track::Position>,
 		header: &ietf::GroupHeader,
 		reading: &mut Reading,
 	) -> Result<Opened, Error> {
@@ -2551,6 +2567,16 @@ where
 		}
 
 		if !fill.read().outstanding() {
+			// The group a resumed subscription picks up partway through starts where it
+			// asked, and a stream with no objects is the end of a group complete there.
+			// A publisher sending the whole group anyway is just early.
+			if let Some(resume) = resume
+				&& first.is_none_or(|first| first.id == resume.frame)
+			{
+				let mut producer = create(track)?;
+				producer.start_at(resume.frame)?;
+				return Ok(Opened::Group(producer, resume.frame));
+			}
 			return Ok(Opened::Group(create(track)?, 0));
 		}
 
@@ -6074,7 +6100,9 @@ fn subscribe_join(
 	version: Version,
 ) -> Result<Join, Error> {
 	if !Filter::is_draft20(version) {
-		if start.is_some_and(|start| start.frame != 0) || end.is_some() {
+		// No pre-draft-20 join starts partway through a group, so a resume point there
+		// asks for its whole group; the objects below it are dropped on arrival.
+		if end.is_some() {
 			return Err(Error::Unsupported);
 		}
 		return Ok(Join {

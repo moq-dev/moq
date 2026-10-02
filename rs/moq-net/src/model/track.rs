@@ -2284,6 +2284,31 @@ impl TrackWeak {
 		self.state.read().resume_floor()
 	}
 
+	/// The readers' aggregate demand, or `None` while nobody subscribes.
+	pub(crate) fn subscription(&self) -> Option<Subscription> {
+		let state = self.state.read();
+		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
+		drop(state);
+		snapshot_subscription(&subs, bound)
+	}
+
+	/// End the track with `err` unless a reader holds it, atomically with lookups: a
+	/// lookup either gets a consumer in time to keep it, or finds it closed and asks
+	/// afresh. True once the track is gone.
+	pub(crate) fn abort_unused(&self, err: Error) -> bool {
+		let Some(producer) = self.state.produce() else {
+			return true;
+		};
+		match producer.write_unused() {
+			kio::Unused::Idle(guard) => {
+				commit_abort(guard, err);
+				true
+			}
+			kio::Unused::Closed => true,
+			kio::Unused::Used => false,
+		}
+	}
+
 	/// Park `waiter` for the next consumer appearing; a no-op once one exists.
 	/// Feeds [`crate::broadcast::Demand`], which recomputes on wake.
 	pub(crate) fn poll_used(&self, waiter: &kio::Waiter) {
