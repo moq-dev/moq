@@ -930,11 +930,22 @@ impl Producer {
 
 	/// Create a new consumer for the group.
 	pub fn consume(&self) -> Consumer {
+		self.consumer(self.state.consume())
+	}
+
+	/// Create a consumer, or `None` once the group is aborted. Paired with
+	/// [`abort_unused`](Self::abort_unused): the closed check and the count share its
+	/// lock, so a consumer either exists in time to decline the abort or is never made.
+	pub(crate) fn try_consume(&self) -> Option<Consumer> {
+		self.state.weak().try_consume().map(|state| self.consumer(state))
+	}
+
+	fn consumer(&self, state: kio::Consumer<GroupState>) -> Consumer {
 		Consumer {
 			info: self.info,
 			track: self.track.clone(),
 			inner: ConsumerKind::Plain(Plain {
-				state: self.state.consume(),
+				state,
 				index: 0,
 				end: None,
 				prefetch: Prefetch::default(),
@@ -951,14 +962,6 @@ impl Producer {
 			ended: false,
 			stale_counted: Arc::default(),
 		}
-	}
-
-	/// Create a consumer, or `None` once the group is aborted. Paired with
-	/// [`abort_unused`](Self::abort_unused): a consumer either exists in time to decline
-	/// the abort, or sees it here and is never handed out.
-	pub(crate) fn try_consume(&self) -> Option<Consumer> {
-		let consumer = self.consume();
-		(!self.state.read().is_closed()).then_some(consumer)
 	}
 
 	/// Register for the first-frame timestamp while the group is still unstamped.
@@ -1997,6 +2000,21 @@ mod test {
 
 		let result = consumer.next_frame().now_or_never().unwrap();
 		assert!(matches!(result, Err(crate::Error::Cancel)));
+	}
+
+	#[test]
+	fn abort_unused_pairs_with_try_consume() {
+		let producer = Info { sequence: 0 }.produce();
+
+		let consumer = producer.try_consume().expect("open");
+		assert!(
+			!producer.abort_unused(crate::Error::Cancel),
+			"a reader declines the abort"
+		);
+		drop(consumer);
+
+		assert!(producer.abort_unused(crate::Error::Cancel));
+		assert!(producer.try_consume().is_none(), "an aborted group mints no reader");
 	}
 
 	#[test]
