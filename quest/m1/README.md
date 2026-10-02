@@ -28,6 +28,7 @@ QUIC studies there on that rule.
 - [One route cost](/quest/m1/route-cost.md) - on `dev`, Warm and Cold collapse to one static route cost
 - [Delete removed cluster flags](/quest/m1/cluster-shims.md) - on `dev`, once a release has carried their refusals, `mesh` and `linger` leave `cluster::Config`
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
+- [moq-mux truncated group](/quest/m1/mux-truncated-group.md) - a test pins that moq-mux skips a truncated spliced group as aborted
 - [Merge queue](/quest/m1/merge-queue.md) - the required checks run on `merge_group`, so a stale green check can no longer break main
 - [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, flate, audio, and video namespaces built from the handle below

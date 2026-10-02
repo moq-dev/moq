@@ -42,6 +42,8 @@ Published API or wire breaks still land on dev; each quest's Plan says so.
 - [IETF FIN semantics](/quest/m0/ietf-fin-not-cancel.md) - a request stream FIN stops updates without cancelling, and REQUEST_UPDATE on a subscribe is parsed
 - [IETF early streams](/quest/m0/ietf-early-streams.md) - a moq-transport stream that arrives before SETUP is held until SETUP lands, never aborted
 - [SUBSCRIBE_TRACKS refusal](/quest/m0/ietf-subscribe-tracks.md) - a draft-18+ SUBSCRIBE_TRACKS gets NOT_SUPPORTED on its stream, not a session close
+- [JS unknown bidi](/quest/m0/ietf-unknown-bidi.md) - an unknown moq-transport bidi stream type closes the session in JS, as in Rust
+- [moq-lite early streams](/quest/m0/lite-early-streams.md) - a lite uni stream that arrives before SETUP is held until SETUP lands, and a second SETUP is fatal
 - [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
 - [noq reassembly cap](/quest/m0/noq-reassembly-cap.md) - noq carries quinn's stream reassembly cap and the connection receive window is finite by default
 - [qmux reset race](/quest/m0/qmux-reset-race.md) - qmux handles RESET_STREAM under one lock instead of panicking
