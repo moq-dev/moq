@@ -16,8 +16,10 @@ Facts (2026-10-01): `track::Demand` and `broadcast::Demand` already exist.
 [#4528](https://github.com/moq-dev/moq/pull/4528) (the track-demand quest) moved
 `track::Producer` to `demand()` on `dev`, and deliberately kept group and
 broadcast `used`/`unused`, since group demand drives fetch coalescing.
-`track::Request` and `track::Dynamic` have `poll_unused`, and #4691 adds
-`group::Request::poll_unused` on `main`. moq-ffi wraps only `track::Demand`
+`broadcast::Producer` is already `demand()`-only, with `used`/`unused` on
+`broadcast::Demand`; there is no `group::Demand` yet.
+`track::Request` and `track::Dynamic` have `poll_unused`, and #4691 (still
+open) adds `group::Request::poll_unused`. moq-ffi wraps only `track::Demand`
 (`MoqTrackDemand`); `MoqGroupRequest` and `MoqTrackRequest` have no demand.
 
 Decided (2026-10-01):
@@ -41,4 +43,4 @@ Public API: breaking on `dev` in moq-net and `@moq/net`. Wire: none.
 
 ## Related
 
-- [IETF FETCH abandonment](/quest/m1/ietf-fetch-abandonment.md) - first new consumer of group request demand
+- [IETF FETCH abandonment](/quest/m1/ietf-fetch-abandonment.md) - first new consumer of group request demand; can ship on `poll_unused` without waiting for this
