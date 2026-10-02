@@ -4143,17 +4143,11 @@ enum FetchRunState<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> FetchRunState<S> {
-	/// Whether nobody wants the group any more: no fetch waits on the request, and
-	/// once accepted, nobody reads the group either.
-	fn poll_abandoned(&self, waiter: &kio::Waiter) -> bool {
+	/// The downstream request, while it waits on the publisher's answer.
+	fn request(&self) -> Option<&group::Request> {
 		match self {
-			Self::Open { request } | Self::Send { request, .. } | Self::Answer { request, .. } => request
-				.as_ref()
-				.is_some_and(|request| request.poll_unused(waiter).is_ready()),
-			Self::Ingest { producer, joined, .. } => {
-				joined.poll_unused(waiter).is_ready() && producer.poll_unused(waiter).is_ready()
-			}
-			Self::Done => false,
+			Self::Open { request } | Self::Send { request, .. } | Self::Answer { request, .. } => request.as_ref(),
+			Self::Ingest { .. } | Self::Done => None,
 		}
 	}
 }
@@ -4176,20 +4170,16 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let mut cx = std::task::Context::from_waker(waiter.waker());
 		loop {
-			// A fetch nobody wants any more is cancelled upstream, so the publisher stops
-			// serving it (and a relay there releases its own FETCH). A group cut short is
-			// aborted, never cached as complete.
-			if self.state.poll_abandoned(waiter) {
+			// A fetch nobody waits on any more is cancelled upstream, so the publisher stops
+			// serving it (and a relay there releases its own FETCH). Ingest has its own check.
+			if let Some(request) = self.state.request()
+				&& request.poll_unused(waiter).is_ready()
+			{
 				tracing::debug!(track = %self.serve.name, group = self.group, "fetch abandoned");
-				match std::mem::replace(&mut self.state, FetchRunState::Done) {
-					FetchRunState::Send { stream, .. } | FetchRunState::Answer { stream, .. } => {
-						stream.writer.abort(&Error::Cancel);
-					}
-					FetchRunState::Ingest { stream, producer, .. } => {
-						stream.writer.abort(&Error::Cancel);
-						let _ = producer.abort(Error::Cancel);
-					}
-					FetchRunState::Open { .. } | FetchRunState::Done => {}
+				if let FetchRunState::Send { stream, .. } | FetchRunState::Answer { stream, .. } =
+					std::mem::replace(&mut self.state, FetchRunState::Done)
+				{
+					stream.writer.abort(&Error::Cancel);
 				}
 				return Poll::Ready(());
 			}
@@ -4346,10 +4336,29 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 				FetchRunState::Ingest {
 					stream,
 					producer,
+					joined,
 					ingest,
-					..
 				} => {
-					let res = ready!(ingest.poll(&mut stream.reader, producer, waiter));
+					let Poll::Ready(res) = ingest.poll(&mut stream.reader, producer, waiter) else {
+						// Still short of its end, so completion always wins. Once nobody
+						// wants the rest (no joined fetch left to pick it up, no reader),
+						// cancel upstream and abort the truncated group, never caching it
+						// as complete. The abort is atomic with a new reader arriving.
+						if joined.poll_unused(waiter).is_pending() || producer.poll_unused(waiter).is_pending() {
+							return Poll::Pending;
+						}
+						if !producer.abort_unused(Error::Cancel) {
+							continue;
+						}
+						tracing::debug!(track = %self.serve.name, group = self.group, "fetch abandoned");
+						let FetchRunState::Ingest { stream, .. } =
+							std::mem::replace(&mut self.state, FetchRunState::Done)
+						else {
+							unreachable!()
+						};
+						stream.writer.abort(&Error::Cancel);
+						return Poll::Ready(());
+					};
 					let FetchRunState::Ingest { producer, .. } =
 						std::mem::replace(&mut self.state, FetchRunState::Done)
 					else {

@@ -783,13 +783,30 @@ impl Producer {
 		self.close_aborted(err)
 	}
 
+	/// Abort with `err` only while nothing consumes the group, returning whether it is
+	/// closed. Consumer creation and the check share a lock, so a reader arriving after
+	/// [`poll_unused`](Self::poll_unused) keeps the group alive instead of reading the abort.
+	pub(crate) fn abort_unused(&self, err: Error) -> bool {
+		match self.state.write_unused() {
+			kio::Unused::Idle(guard) => {
+				self.commit_abort(guard, err);
+				true
+			}
+			kio::Unused::Closed => true,
+			kio::Unused::Used => false,
+		}
+	}
+
 	fn close_aborted(&self, err: Error) -> Result<()> {
-		let mut guard = modify(&self.state)?;
+		self.commit_abort(modify(&self.state)?, err);
+		Ok(())
+	}
+
+	fn commit_abort(&self, mut guard: kio::Mut<'_, GroupState>, err: Error) {
 		guard.abort = Some(err);
 		self.alive.aborted.store(true, Ordering::Release);
 		guard.release();
 		guard.close();
-		Ok(())
 	}
 
 	/// Abort a write that would grow the group past its budget, holding the lock already

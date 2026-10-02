@@ -26,6 +26,8 @@ enum Stage {
 	Unanswered,
 	/// After the first frame, with the rest of the group still to come.
 	MidResponse,
+	/// Once every frame is read, as the FIN arrives.
+	Drained,
 }
 
 /// `relays` relays between the publisher and the reader.
@@ -98,11 +100,43 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 			}
 			assert_eq!(payloads, [&b"head"[..], &b"tail"[..]], "{ctx}");
 		}
+		Stage::Drained => {
+			let mut group = request.accept(None).unwrap();
+			group.write_frame(Timestamp::ZERO, Bytes::from_static(b"head")).unwrap();
+			group.write_frame(Timestamp::ZERO, Bytes::from_static(b"tail")).unwrap();
+
+			let mut fetched = waiting.await.unwrap();
+			for expected in [&b"head"[..], b"tail"] {
+				let frame = fetched.read_frame().await.unwrap().unwrap();
+				assert_eq!(&frame.payload[..], expected, "{ctx}");
+			}
+
+			// The FIN reaches the reader's node at the instant the reader leaves: the
+			// group is whole, so it must be cached as such rather than cancelled.
+			const LATENCY: Duration = Duration::from_millis(100);
+			_pairs.last().unwrap().client_transport.set_latency(LATENCY);
+			group.finish().unwrap();
+			tokio::time::sleep(LATENCY).await;
+			drop(fetched);
+			tokio::time::sleep(Duration::from_secs(1)).await;
+
+			// The publisher can no longer serve it, so only a cached copy answers.
+			group.abort(moq_net::Error::Cancel).unwrap();
+			let mut fetched = tokio::time::timeout(Duration::from_secs(5), track.fetch_group(0, None))
+				.await
+				.unwrap_or_else(|_| panic!("{ctx}: the refetch stalled"))
+				.unwrap_or_else(|err| panic!("{ctx}: the whole group was not cached: {err}"));
+			let mut payloads = Vec::new();
+			while let Some(frame) = fetched.read_frame().await.unwrap() {
+				payloads.push(frame.payload);
+			}
+			assert_eq!(payloads, [&b"head"[..], &b"tail"[..]], "{ctx}");
+		}
 	}
 }
 
 async fn abandoned_fetches_reach_the_publisher(version: &str) {
-	for stage in [Stage::Unanswered, Stage::MidResponse] {
+	for stage in [Stage::Unanswered, Stage::MidResponse, Stage::Drained] {
 		for relays in [1, 2] {
 			abandoned_fetch_reaches_the_publisher(version, relays, stage).await;
 		}
