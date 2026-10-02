@@ -22,12 +22,9 @@ Follow-ups from [#4484](https://github.com/moq-dev/moq/pull/4484), which made
 Settled: one quest, since both are the same wakeup invariant in
 `rs/moq-net/src/model/track.rs` and `resume.rs`.
 
-Land after [resume latest](/quest/m1/resume-latest.md) (#4491), which edits
-the same `resume.rs` wakeups, and rebase onto it.
-
 Public API: none. Wire: none.
 
 ## Related
 
-- [Resume latest](/quest/m1/resume-latest.md) - edits the same `resume.rs` wakeups; lands first (#4491)
+- [#4491](https://github.com/moq-dev/moq/pull/4491) - a resumed group holds demand on its replacement copy in the same `resume.rs` wakeups
 - [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - extends the `resume.rs` takeover tests

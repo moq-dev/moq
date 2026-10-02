@@ -34,4 +34,4 @@ Public API: behavior only (an error where `Ok` was returned). Wire: none.
 
 ## Related
 
-- [Resumed groups](/quest/m1/resume-latest.md) - same `poll_finished` subscription path
+- [#4491](https://github.com/moq-dev/moq/pull/4491) - the same `poll_finished` subscription path

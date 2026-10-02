@@ -41,7 +41,6 @@ QUIC studies there on that rule.
 - [web-transport-moq 1.3.3 ships noq#24](/quest/m1/web-transport-moq-release.md) - the release that carries the close-capsule fix
 - [WebTransport close upstream](/quest/m1/wt-close-upstream.md) - web-transport-moq delivers the close capsule itself, and moq-tokio's `CLOSE_LINGER` is deleted
 - [Browser close code](/quest/m1/browser-close-code.md) - a playwright case proves the page reads a relay's close code and reason, on every web-transport backend
-- [Resumed groups](/quest/m1/resume-latest.md) - a half-delivered group ends once the new copy is past it, so a group-only reader never parks after a mid-group failover
 - [Truncated groups fail finished()](/quest/m1/finished-truncated.md) - a spliced group whose continuation can never arrive fails `finished()` instead of reporting a clean end at the seam
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
 - [Late lower groups](/quest/m1/lite-late-lower-group.md) - a moq-lite subscriber with a floor receives a group created below the first served one, as moq-transport does
