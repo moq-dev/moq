@@ -169,3 +169,23 @@ test("malformed uni stream before SETUP fails the handshake", async () => {
 
 	await expect(exchangeSetup(pair.server, version, "test")).rejects.toThrow("leading-ones varint");
 });
+
+/** An early stream that ends partway through its type died; it is skipped like an empty one. */
+test("truncated uni stream before SETUP is skipped", async () => {
+	const version = Version.DRAFT_17;
+	const pair = createMockTransportPair(ALPN.DRAFT_17);
+
+	// A two-byte varint prefix, then FIN.
+	const truncated = new Writer(await pair.client.createUnidirectionalStream(), version);
+	await truncated.write(new Uint8Array([0x80]));
+	truncated.close();
+
+	const setup = new Writer(await pair.client.createUnidirectionalStream(), version);
+	await setup.u53(Setup.id);
+	const parameters = new SetupOptions();
+	parameters.setBytes(SetupOption.Implementation, new TextEncoder().encode("test"));
+	await new Setup({ parameters }).encode(setup, version);
+
+	const { early } = await exchangeSetup(pair.server, version, "test");
+	expect(early.length).toBe(0);
+});

@@ -1,7 +1,7 @@
 import { StreamError } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
 import * as Ietf from "../ietf/index.ts";
-import { Reader, Stream, Writer } from "../stream.ts";
+import { Reader, Stream, UnexpectedEnd, Writer } from "../stream.ts";
 
 /**
  * Draft-17+ SETUP exchange. Each side opens a uni stream, writes its Setup
@@ -92,12 +92,12 @@ async function receiveSetup(
 			if (next.done) throw new Error("no incoming uni stream for SETUP");
 
 			const stream = new Reader(next.value, undefined, version);
-			// A stream that died before its type is that stream's failure, not the session's.
+			// A stream that ended or reset before its full type is that stream's failure, not the session's.
 			// Malformed bytes are still the peer's fault, so a bad type fails the handshake.
 			if (await stream.done().catch(() => true)) continue;
 			// Full width, so an unknown type past 2^53 is held for the classifier to refuse.
 			const streamType = await stream.peekU62().catch((err: unknown) => {
-				if (err instanceof StreamError) return undefined;
+				if (err instanceof StreamError || err instanceof UnexpectedEnd) return undefined;
 				throw err;
 			});
 			if (streamType === undefined) continue;

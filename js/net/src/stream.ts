@@ -304,7 +304,7 @@ export class Reader {
 
 		while (this.#buffer.byteLength + this.#chunked < size) {
 			if (!(await this.#fill())) {
-				throw new Error("unexpected end of stream");
+				throw new UnexpectedEnd();
 			}
 		}
 
@@ -477,6 +477,13 @@ export class Reader {
 			throw fromTransport(err, { version: asIetf(this.version) });
 		});
 		return this.#closed;
+	}
+}
+
+/** The stream ended cleanly partway through a read. */
+export class UnexpectedEnd extends Error {
+	constructor() {
+		super("unexpected end of stream");
 	}
 }
 
