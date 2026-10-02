@@ -61,14 +61,11 @@ Decided (2026-10-02):
   breaks), the rules describe trunk, `release`, and backports, and
   `dev`-only process quests are deleted.
 - ✅ One quest, m0, right after dev-sync lands.
-
-Open:
-
-- Trunk's linear-history rule rejects the back-merge's merge commit.
-  Recommended: drop linear history from trunk's ruleset, so the back-merge
-  lands as a merge commit and advances the merge base; ordinary PRs still
-  squash. Rejected: squash-merging the back-merge, which leaves the base at
-  the last cut, so a second publish before the next cut conflicts.
+- ✅ Trunk's ruleset drops linear history, so the back-merge lands as a merge
+  commit and advances the merge base; ordinary PRs still squash. Rejected:
+  squash-merging the back-merge, which leaves the base at the last cut, so a
+  second publish before the next cut conflicts; and a ruleset bypass for the
+  workflow token.
 
 Sequence:
 
