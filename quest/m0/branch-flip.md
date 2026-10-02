@@ -16,10 +16,11 @@ Facts (2026-10-02):
 - Publishing on push: `release-rs` (release-plz), `release-js`, `release-py`,
   and `release-go` trigger on `main`; `release-kt-lib` and `release-swift-lib`
   on `main` and `dev`. Everything else publishes from tags and is unaffected.
-- `workflow_run` chains (`release-go` after Release Go FFI, plus `py`,
-  `kt-lib`, `swift-lib`, `brew`, `winget`) run the default branch's
-  workflow file and check out its head unless the checkout names a ref, so
-  after the flip they would build trunk.
+- `workflow_run` chains run the default branch's workflow file, and a
+  checkout without a ref takes its head. `release-py`, `release-kt-lib`, and
+  the `release-swift-lib` build pin the triggering `head_sha`; `release-go`,
+  `release-brew`, and the other `release-swift-lib` checkouts do not, so after
+  the flip they would build trunk.
 - `cache.yml` and `swift.yml` warm caches on `main` on both branches. PRs
   read caches only from the default branch, so writers stay on trunk and
   need no change. `obs`, `platform`, and `quest` push filters name `main` and
@@ -73,7 +74,7 @@ Sequence:
 1. [dev-sync](/quest/m1/dev-sync.md) (#4720) lands.
 2. A PR on `dev`: the wording sweep, trunk stops publishing, `obs`,
    `platform`, and `quest` push filters name `main` and `release`,
-   `workflow_run` publishers check out `release` or the triggering tag, the
+   unpinned `workflow_run` checkouts pin the triggering `head_sha`, the
    back-merge workflow, docs pin `release`.
 3. A small PR on `main`: publish triggers move to `release`; cache writers
    keep `main`, so they stop running there.
