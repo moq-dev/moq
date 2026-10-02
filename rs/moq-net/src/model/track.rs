@@ -1174,6 +1174,28 @@ impl TrackState {
 		}
 	}
 
+	/// Where a route taking this track over should start: the first frame the oldest
+	/// unfinished group still lacks, or the head of the group after the newest. `None`
+	/// while the track holds nothing, which is a takeover at the live edge.
+	///
+	/// Unlike [`Self::resume_position`] this does not skip an empty open group or an
+	/// older one still open behind the newest: a front's logical track has a single
+	/// writer that continues any open group in place, so every frame still owed is
+	/// worth asking for.
+	fn resume_floor(&self) -> Option<Position> {
+		let open = self
+			.lookup
+			.iter()
+			.find(|(_, slot)| !slot.group.is_finished() && !slot.group.is_aborted());
+		match open {
+			Some((sequence, slot)) => Some(Position {
+				group: *sequence,
+				frame: slot.group.committed_frame() as u64,
+			}),
+			None => Some(Position::group(self.latest_group?.saturating_add(1))),
+		}
+	}
+
 	fn poll_finished(&self) -> Poll<Result<u64>> {
 		if let Some(fin) = self.final_sequence {
 			Poll::Ready(Ok(fin))
@@ -2255,6 +2277,11 @@ impl TrackWeak {
 	/// count even if consumers linger to drain its cache: no new work is owed.
 	pub(crate) fn is_used(&self) -> bool {
 		!self.state.is_closed() && self.state.is_used()
+	}
+
+	/// Where a route taking the track over should start; see `TrackState::resume_floor`.
+	pub(crate) fn resume_floor(&self) -> Option<Position> {
+		self.state.read().resume_floor()
 	}
 
 	/// Park `waiter` for the next consumer appearing; a no-op once one exists.

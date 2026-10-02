@@ -869,6 +869,12 @@ impl Producer {
 		(state.committed > state.offset).then_some(state.committed)
 	}
 
+	/// One past the last frame fully written: where a replacement route resumes,
+	/// redelivering any frame still in flight.
+	pub(crate) fn committed_frame(&self) -> usize {
+		self.state.read().committed
+	}
+
 	/// Where the group starts in presentation time: its first frame's timestamp,
 	/// or `None` while no frame has been opened.
 	///
