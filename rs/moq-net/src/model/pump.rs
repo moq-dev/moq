@@ -303,6 +303,8 @@ pub(crate) struct Pump {
 	/// Held while a fetched group is still being written: a fetch in progress reads the
 	/// track, so the front keeps an input for it.
 	fetching: Option<track::Consumer>,
+	/// The logical track's start is still the first copy's to declare.
+	starting: bool,
 }
 
 impl Pump {
@@ -330,6 +332,7 @@ impl Pump {
 			concluding: false,
 			parked: false,
 			fetching: None,
+			starting: false,
 		};
 		(pump, handle)
 	}
@@ -356,12 +359,13 @@ impl Pump {
 					Poll::Pending => {}
 				}
 			}
-			// The front forgot the track (it went unread): nothing is written anymore.
+			// The front forgot the track (it went unread): nothing new is written, but a
+			// reader already holding a group still gets the rest of it.
 			if let Logical::Live(producer) = &self.logical
 				&& producer.poll_closed(waiter).is_ready()
 			{
-				self.detach();
 				self.logical = Logical::Done(None);
+				self.give_up_orphans(|_| true, Error::Dropped);
 			}
 			if self.concluding && self.conclude() {
 				return Poll::Ready(());
@@ -441,7 +445,7 @@ impl Pump {
 	/// nothing left to do.
 	fn conclude(&mut self) -> bool {
 		if let Logical::Done(_) = self.logical {
-			return true;
+			return !self.groups.values().any(|open| open.src.is_some());
 		}
 		match &self.input {
 			// Nothing in flight: nothing more will ever be written.
@@ -497,12 +501,17 @@ impl Pump {
 
 	/// The first copy says what the logical track is. The front checked every later one
 	/// against it.
+	///
+	/// Where the logical feed starts is the first copy's to say, which a relay publishing
+	/// the track waits on: resolving it from whichever group lands first instead would
+	/// drop an older one still in flight.
 	fn accept(&mut self, info: &track::Info) {
 		if let Logical::Pending(_) = &self.logical {
 			let Logical::Pending(request) = std::mem::replace(&mut self.logical, Logical::Done(None)) else {
 				unreachable!()
 			};
-			self.logical = Logical::Live(request.accept(info.clone()));
+			self.logical = Logical::Live(request.resolving_start().accept(info.clone()));
+			self.starting = true;
 		}
 	}
 
@@ -521,7 +530,8 @@ impl Pump {
 		let Some(input) = self.input.as_mut() else {
 			return false;
 		};
-		if input.end.is_some() {
+		// A forgotten track takes no new groups.
+		if input.end.is_some() || !matches!(self.logical, Logical::Live(_) | Logical::Pending(_)) {
 			return false;
 		}
 		let mut progress = false;
@@ -559,6 +569,13 @@ impl Pump {
 		let Some(input) = self.input.as_mut() else {
 			return progress;
 		};
+		if self.starting
+			&& let Poll::Ready(start) = input.copy.poll_start(waiter)
+			&& let Logical::Live(producer) = &mut self.logical
+		{
+			let _ = producer.start_at(start);
+			self.starting = false;
+		}
 		// A parked cache waits on where this input starts, and so do its groups:
 		// revealed, the cache comes back ahead of them.
 		if self.parked {
