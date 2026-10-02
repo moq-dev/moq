@@ -5,7 +5,7 @@ name: Release Swift Lib
 # on are built separately (release-swift-ffi.yml).
 #
 # Versioned independently of the moq-ffi crate: bump `swift/VERSION` by hand in a
-# normal PR. On merge to main/dev this reads that version and publishes only if
+# normal PR. On merge to `release` this reads that version and publishes only if
 # it isn't already tagged on the mirror. That tag check is the release gate (the
 # same model release-plz uses for crates), so there's no separate tag to
 # remember. When wrapper and FFI changes land together, publication waits for
@@ -45,8 +45,8 @@ on:
 permissions:
   contents: read
 
-# Separate PR builds from mainline publishes so a PR run can't queue ahead of
-# (and delay) a release on main.
+# Separate PR builds from publishes so a PR run can't queue ahead of (and
+# delay) a release.
 concurrency:
   group: release-swift-lib-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'publish' }}
   cancel-in-progress: false
@@ -67,7 +67,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       ffi_version: ${{ steps.version.outputs.ffi_version }}
       ffi_unreleased: ${{ steps.ffi-diff.outputs.unreleased }}
-      # On PRs we only build (dry-run). On main/dev we publish when the version
+      # On PRs we only build (dry-run). On `release` we publish when the version
       # isn't already tagged on the mirror.
       publish: ${{ (github.event_name == 'push' || github.event_name == 'workflow_run') && steps.ffi-diff.outputs.unreleased != 'true' && steps.ffi-gate.outputs.exists == 'true' && steps.gate.outputs.exists == 'false' }}
 
@@ -148,6 +148,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
 
       - uses: ./.github/actions/just
@@ -195,6 +196,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
 
       - uses: ./.github/actions/just

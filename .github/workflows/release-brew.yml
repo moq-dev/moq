@@ -39,6 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # workflow_run runs the default branch's file, whose checkout would
+          # otherwise take trunk rather than the tag that was released.
+          ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
 
       - uses: ./.github/actions/just

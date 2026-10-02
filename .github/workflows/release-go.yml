@@ -8,7 +8,7 @@ name: Release Go
 #     (registry is the gate, like release-plz / the PyPI check in release.sh).
 #
 # Triggers:
-#   * push to main        — a wrapper API or VERSION change. The ffi require is
+#   * push to release     — a wrapper API or VERSION change. The ffi require is
 #                           pinned to the current crate version, whose mirror tag
 #                           already exists in steady state. If it's missing (a
 #                           release is mid-flight) or rs/moq-ffi changed since
@@ -20,7 +20,7 @@ name: Release Go
 #                           Chaining off the upstream run guarantees the mirror
 #                           tag is already present, so there is nothing to poll.
 #
-# Stray main pushes are harmless: publish-wrapper.sh skips when the staged tree
+# Stray release pushes are harmless: publish-wrapper.sh skips when the staged tree
 # matches the mirror, so unchanged content never mints an empty patch release.
 
 on:
@@ -62,6 +62,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
           # Tags, for the unreleased ffi check.
           fetch-depth: 0
           persist-credentials: false
@@ -84,7 +85,7 @@ jobs:
           echo "wrapper line: $LINE"
 
       # The ffi version the wrapper should require: the version of the ffi that
-      # just published (workflow_run), or the current crate version (main push).
+      # just published (workflow_run), or the current crate version (release push).
       - name: Resolve ffi version
         id: ffi
         env:
@@ -100,7 +101,7 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      # On a main push the wrapper pins the current crate's ffi version, but it
+      # On a release push the wrapper pins the current crate's ffi version, but it
       # may call API added to rs/moq-ffi since that version was tagged.
       - name: Check for unreleased ffi changes (push only)
         id: ffi-diff
@@ -180,6 +181,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
 
       - uses: ./.github/actions/just
