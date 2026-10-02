@@ -1230,7 +1230,11 @@ impl TrackState {
 		// An evicted sequence can be re-fetched; a live one is a duplicate.
 		self.claim_sequence(sequence, frame_start)?;
 
-		let group = group::Producer::new(group::Info { sequence }, info, self.cache.clone());
+		let mut group = group::Producer::new(group::Info { sequence }, info, self.cache.clone());
+		// Start where the request did before the group is visible: a fetch looking it up
+		// in between would otherwise see it begin at 0 and get a reader that later skips
+		// the head it asked for.
+		group.start_at(frame_start)?;
 		// A backfill exists because someone is fetching it right now: stamp that
 		// access so the eviction walk can't kill it before the fetch resolves.
 		// It is also invisible to arrival-order subscribers: fetched on demand,
@@ -3089,8 +3093,10 @@ impl group::Request {
 
 	/// The first frame of the group the consumer wants; 0 is the whole group.
 	///
-	/// A handler serving this must [`start_at`](group::Producer::start_at) it, so the frames
-	/// it writes carry the indices they have in the group rather than restarting at 0.
+	/// The group [`accept`](Self::accept) returns already starts here, so the frames a
+	/// handler writes carry the indices they have in the group rather than restarting at
+	/// 0. A handler serving from elsewhere moves it with
+	/// [`start_at`](group::Producer::start_at) before the first frame.
 	///
 	/// There is no end: the handler fetches through the end of the group so the result
 	/// is cacheable for anyone (see [`group::Fetch::frame_start`]).
@@ -8118,6 +8124,33 @@ mod test {
 		assert!(!group.abort_unused(Error::Cancel), "the pending hit wants the group");
 		let mut fetched = hit.await.unwrap();
 		assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"head");
+	}
+
+	/// An accepted group starts where its request did before anyone can see it, so a
+	/// wider fetch arriving before the handler writes misses instead of being handed a
+	/// reader that would skip the head it asked for.
+	#[tokio::test]
+	async fn accepted_group_starts_at_the_request() {
+		let producer = track_producer("test", None);
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+
+		let _tail = consumer.fetch_group(5, group::Fetch::default().with_frame_start(3));
+		let req = dynamic
+			.requested_group()
+			.now_or_never()
+			.expect("should not block")
+			.unwrap();
+		let _group = req.accept(None).unwrap();
+
+		let whole = consumer.fetch_group(5, None);
+		let req = dynamic
+			.requested_group()
+			.now_or_never()
+			.expect("the wider fetch misses and queues its own request")
+			.unwrap();
+		assert_eq!(req.frame_start(), 0);
+		assert!(kio::Pollable::poll(&*whole, &kio::Waiter::noop()).is_pending());
 	}
 
 	/// Once a group nobody wanted is aborted, a later fetch misses rather than reading
