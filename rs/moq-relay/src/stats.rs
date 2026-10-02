@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Set `enabled = true` to attach a [`moq_stats::Producer`] to every session
 /// the relay accepts (and every cluster dial). The producer publishes a single
-/// `<prefix>/node/<node>` broadcast (or `<prefix>/node` when [`Self::node`] is
+/// `<prefix>/node/<node>/<epoch>` broadcast (`local` when [`Self::node`] is
 /// unset) on the cluster origin. Each broadcast carries plain `.json` tracks
 /// (a JSON map of broadcast path to a cumulative counter snapshot per frame)
 /// plus compressed `.json.z` siblings; see `moq_stats` for the wire format and
@@ -53,20 +53,15 @@ pub struct Config {
 	)]
 	pub interval: u64,
 
-	/// Node identifier appended to the advertised stats path to disambiguate
-	/// broadcasts when multiple relays share a cluster origin. Without this,
-	/// peer relays would publish to the same `<prefix>/node` path and the
-	/// origin's single-source delivery would drop all but one.
-	///
-	/// May be multi-segment (e.g. `sjc/1`, `sjc/2`) when a region has multiple
-	/// hosts; the segments nest under a shared region key on the advertised
-	/// path. Single-relay deployments can leave this unset.
+	/// Logical node name in the stats path, followed by a unique producer epoch
+	/// so restarted nodes cannot reuse a cached broadcast. Defaults to `local`.
+	/// May be multi-segment (e.g. `sjc/1`) to group hosts by region.
 	#[usage(long = "stats-node", env = "MOQ_STATS_NODE", setting = "stats.node")]
 	pub node: Option<String>,
 
 	/// Number of leading broadcast-path segments to bucket stats by, one
-	/// broadcast per bucket at `<prefix>/<group>/node/<node>`. Defaults to 0: a
-	/// single `<prefix>/node/<node>` broadcast for the whole node. Set to 1 to
+	/// broadcast per bucket at `<prefix>/<group>/node/<node>/<epoch>`. Defaults to 0: a
+	/// single `<prefix>/node/<node>/<epoch>` broadcast for the whole node. Set to 1 to
 	/// publish a per-first-segment broadcast (e.g. per tenant), so a consumer can
 	/// announce-scope to just that group rather than slurping every node's full
 	/// stats. See [`moq_stats::produce::Config::depth`].

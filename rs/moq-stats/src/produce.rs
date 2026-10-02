@@ -1,6 +1,7 @@
 //! The publishing half: drain a [`Registry`] on an interval into stats tracks.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -28,23 +29,21 @@ pub struct Config {
 	/// When `None`, [`Producer::new`] spawns no task and publishes nothing.
 	pub origin: Option<origin::Producer>,
 	/// Top-level path stats are published under (default `.stats`). The full
-	/// advertised path is `<prefix>/node/<node>` (or `<prefix>/node` when
+	/// advertised path is `<prefix>/node/<node>/<epoch>` (`local` is used when
 	/// `node` is unset). Also the registry's exclude prefix, so serving a
 	/// stats broadcast doesn't generate more stats.
 	pub prefix: PathOwned,
-	/// Node suffix that disambiguates broadcasts from different relays sharing a
-	/// cluster origin. Set this on every node in multi-relay deployments. May be
-	/// multi-segment (e.g. `sjc/1`, `sjc/2`) so a region with multiple hosts can
-	/// nest under a shared region key. An empty path is treated as unset.
-	/// Default none.
+	/// Logical node label before its unique producer epoch. May span several
+	/// segments (e.g. `sjc/1`) for geographic grouping. An empty path is treated
+	/// as unset, defaulting to `local`.
 	pub node: Option<PathOwned>,
 	/// How long the publish task waits between drains. Default 1s.
 	pub interval: Duration,
 	/// How many leading broadcast-path segments to use as a grouping key.
 	///
-	/// Default `0` publishes one `<prefix>/node/<node>` broadcast carrying every
+	/// Default `0` publishes one `<prefix>/node/<node>/<epoch>` broadcast carrying every
 	/// path. `1` publishes one broadcast per first segment at
-	/// `<prefix>/<group>/node/<node>`, and larger values include more leading
+	/// `<prefix>/<group>/node/<node>/<epoch>`, and larger values include more leading
 	/// segments. Group broadcasts are announced while their group has live traffic;
 	/// at depth `0`, the single broadcast stays announced for the producer's life.
 	pub depth: usize,
@@ -135,6 +134,7 @@ struct Keepalive;
 #[derive(Clone)]
 pub struct Producer {
 	registry: Registry,
+	epoch: Arc<str>,
 	/// `None` for a no-op producer (config had no origin): no task was spawned
 	/// and the registry is disabled.
 	_keepalive: Option<Arc<Keepalive>>,
@@ -161,10 +161,13 @@ impl Producer {
 		// We do this here (not in `with_node`) so a directly-assigned
 		// `config.node` is normalized too.
 		let node = node.filter(|p| !p.is_empty());
+		let epoch: Arc<str> = uuid::Uuid::now_v7().to_string().into();
+		let node = Some(node.unwrap_or_else(|| PathOwned::from("local")).join(epoch.as_ref()));
 
 		let Some(origin) = origin else {
 			return Self {
 				registry: Registry::disabled(),
+				epoch,
 				_keepalive: None,
 			};
 		};
@@ -180,13 +183,20 @@ impl Producer {
 			node,
 			depth,
 			interval,
+			sequence: Arc::new(AtomicU64::new(0)),
 		};
 		spawn(task.run(Arc::downgrade(&keepalive)));
 
 		Self {
 			registry,
+			epoch,
 			_keepalive: Some(keepalive),
 		}
+	}
+
+	/// The unique epoch appended to every broadcast this producer publishes.
+	pub fn epoch(&self) -> &str {
+		&self.epoch
 	}
 
 	/// The registry this producer drains. Hand sessions tier-scoped handles via
@@ -205,6 +215,7 @@ struct Task {
 	node: Option<PathOwned>,
 	depth: usize,
 	interval: Duration,
+	sequence: Arc<AtomicU64>,
 }
 
 impl Task {
@@ -259,7 +270,7 @@ impl Drain {
 	fn new(task: Task) -> Option<Self> {
 		let mut groups = HashMap::new();
 		if task.depth == 0 {
-			let group = GroupPublisher::create(&task.origin, &task.prefix, &Path::empty(), task.node())?;
+			let group = GroupPublisher::create(&task, &Path::empty())?;
 			groups.insert(String::new(), group);
 		}
 		Some(Self {
@@ -313,7 +324,7 @@ impl Drain {
 			if refused.iter().any(|name| name == key) {
 				return None;
 			}
-			match GroupPublisher::create(&task.origin, &task.prefix, &Path::new(key), task.node()) {
+			match GroupPublisher::create(task, &Path::new(key)) {
 				Some(group) => {
 					groups.insert(key.to_string(), group);
 				}
@@ -379,50 +390,93 @@ impl<V: Serialize> Serialize for Frame<V> {
 	}
 }
 
+/// Encodes snapshots while the node instance owns the group-number namespace.
+/// The allocator outlives on-demand tracks and project broadcasts, without
+/// retaining one tombstone for every requested tier name.
+struct Snapshot<V> {
+	track: track::Producer,
+	encoder: moq_json::snapshot::Encoder<Frame<V>>,
+	group: Option<moq_net::group::Producer>,
+	sequence: Arc<AtomicU64>,
+	deltas: bool,
+}
+
+impl<V: Serialize> Snapshot<V> {
+	fn new(track: track::Producer, config: moq_json::snapshot::Config, sequence: Arc<AtomicU64>) -> Self {
+		Self {
+			track,
+			deltas: config.delta_ratio != 0,
+			encoder: moq_json::snapshot::Encoder::new(config),
+			group: None,
+			sequence,
+		}
+	}
+
+	fn is_used(&self) -> bool {
+		self.track.is_used()
+	}
+
+	fn update(&mut self, value: &Frame<V>) -> moq_json::Result<()> {
+		let Some(frame) = self.encoder.update(value)? else {
+			return Ok(());
+		};
+		if frame.payload.len() as u64 > moq_net::group::MAX_CACHE_BYTES {
+			return Err(moq_net::Error::FrameTooLarge.into());
+		}
+		if frame.keyframe {
+			if let Some(group) = self.group.take() {
+				group.finish()?;
+			}
+			self.group = Some(self.track.create_group(moq_net::group::Info {
+				sequence: self.sequence.fetch_add(1, Ordering::Relaxed),
+			})?);
+		}
+		let group = self.group.as_mut().expect("a delta follows a snapshot");
+		if let Err(err) = group.write_frame(moq_net::Timestamp::now(), frame.payload.clone()) {
+			let _ = self.group.take().unwrap().finish();
+			return Err(err.into());
+		}
+		if !self.deltas {
+			self.group.take().unwrap().finish()?;
+		}
+		frame.commit();
+		Ok(())
+	}
+
+	fn finish(&mut self) -> moq_json::Result<()> {
+		if let Some(group) = self.group.take() {
+			group.finish()?;
+		}
+		Ok(self.track.finish()?)
+	}
+}
+
 /// A plain track and its `.z` sibling, kept in lockstep. The plain side runs
 /// moq-json with deltas and compression off, which is wire-identical to
 /// writing each frame as its own single-frame group; the compressed side uses
 /// merge-patch deltas inside a shared DEFLATE window.
 struct TrackPair<V> {
-	plain: moq_json::snapshot::Producer<Frame<V>>,
-	compressed: moq_json::snapshot::Producer<Frame<V>>,
+	plain: Snapshot<V>,
+	compressed: Snapshot<V>,
 	/// This drain's entries, published and cleared by [`Self::publish`].
 	frame: Frame<V>,
 }
 
 impl<V: Serialize> TrackPair<V> {
-	fn create(broadcast: &broadcast::Producer, name: &str) -> Result<Self, moq_net::Error> {
+	fn create(broadcast: &broadcast::Producer, name: &str, sequence: Arc<AtomicU64>) -> Result<Self, moq_net::Error> {
 		let plain_track = broadcast.create_track(name, None)?;
 		let compressed_track = broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), None)?;
-		Ok(Self::from_tracks(plain_track, compressed_track))
+		Ok(Self::from_tracks(plain_track, compressed_track, sequence))
 	}
 
-	/// Build a pair from consumer requests, creating whichever flavor was not
-	/// requested. A popped request is no longer queued, so `create_track`'s
-	/// queued-request fulfillment cannot reach it; the caller collects both
-	/// flavors' popped requests and this serves each through its actual
-	/// request where one exists.
-	fn adopt(broadcast: &broadcast::Producer, name: &str, pending: PendingPair) -> Result<Self, moq_net::Error> {
-		let PendingPair { plain, compressed } = pending;
-		let plain_track = match plain {
-			Some(request) => request.accept(None),
-			None => broadcast.create_track(name, None)?,
-		};
-		let compressed_track = match compressed {
-			Some(request) => request.accept(None),
-			None => broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), None)?,
-		};
-		Ok(Self::from_tracks(plain_track, compressed_track))
-	}
-
-	fn from_tracks(plain_track: track::Producer, compressed_track: track::Producer) -> Self {
+	fn from_tracks(plain_track: track::Producer, compressed_track: track::Producer, sequence: Arc<AtomicU64>) -> Self {
 		let plain_config = moq_json::snapshot::Config::default().with_delta_ratio(0);
 		let mut compressed_config = moq_json::snapshot::Config::default();
 		compressed_config.compression = moq_json::Compression::Deflate;
 
 		Self {
-			plain: moq_json::snapshot::Producer::new(plain_track, plain_config),
-			compressed: moq_json::snapshot::Producer::new(compressed_track, compressed_config),
+			plain: Snapshot::new(plain_track, plain_config, sequence.clone()),
+			compressed: Snapshot::new(compressed_track, compressed_config, sequence),
 			frame: Frame::default(),
 		}
 	}
@@ -463,6 +517,29 @@ struct PendingPair {
 }
 
 impl PendingPair {
+	/// Build a pair from consumer requests, creating whichever flavor was not
+	/// requested. A popped request is no longer queued, so `create_track`'s
+	/// queued-request fulfillment cannot reach it; the caller collects both
+	/// flavors' popped requests and this serves each through its actual
+	/// request where one exists.
+	fn adopt<V: Serialize>(
+		self,
+		broadcast: &broadcast::Producer,
+		name: &str,
+		sequence: Arc<AtomicU64>,
+	) -> Result<TrackPair<V>, moq_net::Error> {
+		let PendingPair { plain, compressed } = self;
+		let plain_track = match plain {
+			Some(request) => request.accept(None),
+			None => broadcast.create_track(name, None)?,
+		};
+		let compressed_track = match compressed {
+			Some(request) => request.accept(None),
+			None => broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), None)?,
+		};
+		Ok(TrackPair::from_tracks(plain_track, compressed_track, sequence))
+	}
+
 	fn reject(self, err: moq_net::Error) {
 		if let Some(request) = self.plain {
 			request.reject(err.clone());
@@ -487,6 +564,7 @@ impl PendingPair {
 /// One frame type's live pairs and the requests parked for them; the traffic
 /// tracks and the sessions tracks each form one family.
 struct TrackFamily<V> {
+	sequence: Arc<AtomicU64>,
 	tracks: HashMap<String, TrackPair<V>>,
 	/// Valid-shaped requests awaiting quota, keyed by plain name and bounded by
 	/// [`MAX_PARKED_REQUESTS`] across both families. Adopted as the quota
@@ -495,8 +573,9 @@ struct TrackFamily<V> {
 }
 
 impl<V: Serialize> TrackFamily<V> {
-	fn new() -> Self {
+	fn new(sequence: Arc<AtomicU64>) -> Self {
 		Self {
+			sequence,
 			tracks: HashMap::new(),
 			parked: HashMap::new(),
 		}
@@ -521,8 +600,8 @@ impl<V: Serialize> TrackFamily<V> {
 	) {
 		if !self.tracks.contains_key(name) {
 			let result = match self.parked.remove(name) {
-				Some(pending) => TrackPair::adopt(broadcast, name, pending),
-				None => TrackPair::create(broadcast, name),
+				Some(pending) => pending.adopt(broadcast, name, self.sequence.clone()),
+				None => TrackPair::create(broadcast, name, self.sequence.clone()),
 			};
 			match result {
 				Ok(pair) => {
@@ -633,7 +712,7 @@ impl<V: Serialize> TrackFamily<V> {
 			pending.reject(moq_net::Error::NotFound);
 			return;
 		}
-		match TrackPair::adopt(broadcast, &plain, pending) {
+		match pending.adopt(broadcast, &plain, self.sequence.clone()) {
 			Ok(mut pair) => {
 				// Hold the subscription open with zeros until the tier records.
 				pair.publish(&plain);
@@ -693,9 +772,9 @@ impl TierNames {
 }
 
 impl GroupPublisher {
-	fn create(origin: &origin::Producer, prefix: &Path, group: &Path, node: Option<&str>) -> Option<Self> {
-		let advertised = advertised_path(prefix, group, node);
-		let broadcast = match origin.publish(&advertised, origin::Route::default()) {
+	fn create(task: &Task, group: &Path) -> Option<Self> {
+		let advertised = advertised_path(&task.prefix, group, task.node());
+		let broadcast = match task.origin.publish(&advertised, origin::Route::default()) {
 			Ok(broadcast) => broadcast,
 			Err(err) => {
 				tracing::warn!(advertised = %advertised, ?err, "stats: origin rejected stats broadcast");
@@ -704,14 +783,14 @@ impl GroupPublisher {
 		};
 		tracing::debug!(advertised = %advertised, "stats: publishing broadcast");
 
-		let mut traffic = TrackFamily::new();
-		let mut sessions = TrackFamily::new();
+		let mut traffic = TrackFamily::new(task.sequence.clone());
+		let mut sessions = TrackFamily::new(task.sequence.clone());
 
 		// The default tier's tracks always exist, even while idle.
 		let tier = Tier::default();
 		for role in [Role::Publisher, Role::Subscriber] {
 			let name = traffic_track(&tier, role, false);
-			match TrackPair::create(&broadcast, &name) {
+			match TrackPair::create(&broadcast, &name, task.sequence.clone()) {
 				Ok(pair) => {
 					traffic.tracks.insert(name, pair);
 				}
@@ -722,7 +801,7 @@ impl GroupPublisher {
 			}
 		}
 		let name = sessions_track(&tier, false);
-		match TrackPair::create(&broadcast, &name) {
+		match TrackPair::create(&broadcast, &name, task.sequence.clone()) {
 			Ok(pair) => {
 				sessions.tracks.insert(name, pair);
 			}
@@ -973,7 +1052,7 @@ fn group_key(path: &str, depth: usize) -> &str {
 }
 
 fn advertised_path(prefix: &Path, group: &Path, node: Option<&str>) -> PathOwned {
-	// `<prefix>/<group>/node/<node>`. The group segment is empty at depth 0.
+	// `<prefix>/<group>/node/<node>/<epoch>`. The group segment is empty at depth 0.
 	// The fixed `node` category leaves room for sibling categories (e.g.
 	// `<top-prefix>/<group>/cluster` for relay-mesh stats) under the same prefix.
 	let mut out = prefix.as_str().to_string();
@@ -991,6 +1070,60 @@ fn advertised_path(prefix: &Path, group: &Path, node: Option<&str>) -> PathOwned
 
 #[cfg(test)]
 mod tests {
+
+	#[tokio::test(start_paused = true)]
+	async fn node_instances_publish_different_broadcast_names() {
+		let (_first, first_origin) = test_producer(Some("sjc/1"));
+		let first = announced(&first_origin).await.0;
+		let (_second, second_origin) = test_producer(Some("sjc/1"));
+		let second = announced(&second_origin).await.0;
+		assert_ne!(first, second, "a new node instance cannot reuse cached broadcast names");
+	}
+	#[tokio::test(start_paused = true)]
+	async fn reclaimed_requested_tracks_resume_after_the_last_group() {
+		use futures::FutureExt;
+		for name in ["idle/publisher.json", "idle/publisher.json.z"] {
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let _dynamic = broadcast.dynamic();
+			let consumer = broadcast.consume();
+			let mut family = TrackFamily::<Traffic>::new(Arc::new(AtomicU64::new(0)));
+			let mut requested = HashSet::new();
+			let subscribing = consumer.track(name).unwrap().subscribe(None);
+			family.adopt_pair(
+				&broadcast,
+				&mut requested,
+				"idle/publisher.json".into(),
+				PendingPair::default(),
+			);
+			let mut subscriber = subscribing.await.unwrap();
+			let group = subscriber.recv_group().await.unwrap().unwrap();
+			let floor = group.sequence + 1;
+			drop(group);
+			drop(subscriber);
+			family.reclaim(&mut requested);
+			assert!(family.tracks.is_empty());
+
+			let subscribing = consumer
+				.track(name)
+				.unwrap()
+				.subscribe(track::Subscription::default().with_start(track::Position::group(floor)));
+			family.adopt_pair(
+				&broadcast,
+				&mut requested,
+				"idle/publisher.json".into(),
+				PendingPair::default(),
+			);
+			let mut subscriber = subscribing.await.unwrap();
+			let group = subscriber
+				.recv_group()
+				.now_or_never()
+				.expect("a recreated stats track must advance beyond its cached groups")
+				.unwrap()
+				.unwrap();
+			assert!(group.sequence >= floor);
+		}
+	}
+
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
 		let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
@@ -1172,10 +1305,16 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn new_normalizes_and_drops_empty_node() {
 		let (_producer, origin) = test_producer(Some("/sjc//1/"));
-		assert_eq!(announced(&origin).await.0, ".stats/node/sjc/1");
+		assert_eq!(
+			announced(&origin).await.0,
+			format!(".stats/node/sjc/1/{}", _producer.epoch())
+		);
 
 		let (_producer, origin) = test_producer(Some("///"));
-		assert_eq!(announced(&origin).await.0, ".stats/node");
+		assert_eq!(
+			announced(&origin).await.0,
+			format!(".stats/node/local/{}", _producer.epoch())
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1187,14 +1326,20 @@ mod tests {
 		let _f1 = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 8).await;
 		let _f2 = feed(producer.registry(), Tier::default(), "baz/qux", true, 1, 8).await;
 
-		assert_eq!(announced(&origin).await.0, ".stats/node/sjc/1");
+		assert_eq!(
+			announced(&origin).await.0,
+			format!(".stats/node/sjc/1/{}", producer.epoch())
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn task_announces_without_node_suffix() {
 		let (producer, origin) = test_producer(None);
 		let _f = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 8).await;
-		assert_eq!(announced(&origin).await.0, ".stats/node");
+		assert_eq!(
+			announced(&origin).await.0,
+			format!(".stats/node/local/{}", producer.epoch())
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1740,6 +1885,7 @@ mod tests {
 					origin: produce_origin(),
 					prefix: PathOwned::from(".stats"),
 					node: None,
+					sequence: Arc::new(AtomicU64::new(0)),
 					depth,
 					interval: Duration::from_secs(1),
 				})

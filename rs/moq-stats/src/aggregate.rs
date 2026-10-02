@@ -1,7 +1,7 @@
 //! The aggregating half: fold a group's per-node stats broadcasts into one view.
 //!
 //! A single-broadcast [`Consumer`](crate::Consumer) reads one
-//! `<prefix>/<group>/node/<node>` broadcast. This reader watches an origin's
+//! `<prefix>/<group>/node/<node>/<epoch>` broadcast. This reader watches an origin's
 //! announce stream for *every* node broadcast in a group and folds their
 //! cumulative counters into one merged frame per `(tier, role)`, so a downstream
 //! sees a project's whole live traffic as if it came from a single node.
