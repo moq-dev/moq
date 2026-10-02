@@ -16,13 +16,18 @@ Facts (2026-10-02):
 - Publishing on push: `release-rs` (release-plz), `release-js`, `release-py`,
   and `release-go` trigger on `main`; `release-kt-lib` and `release-swift-lib`
   on `main` and `dev`. Everything else publishes from tags and is unaffected.
+- `workflow_run` chains (`release-go` after Release Go FFI, plus `py`,
+  `kt-lib`, `swift-lib`, `brew`, `winget`) run the default branch's
+  workflow file and check out its head unless the checkout names a ref, so
+  after the flip they would build trunk.
 - `cache.yml` and `swift.yml` warm caches on `main` on both branches. PRs
   read caches only from the default branch, so writers stay on trunk and
   need no change. `obs`, `platform`, and `quest` push filters name `main` and
   `dev`. Nightly and interop crons run on the default branch.
 - Rulesets: "main" targets `~DEFAULT_BRANCH` (linear history, Check and Test
-  required), so it moves to trunk. "dev" targets `refs/heads/dev` (PRs only,
-  squash or merge commit) and does not follow a rename.
+  required), so it moves to trunk and forbids a merge-commit back-merge.
+  "dev" targets `refs/heads/dev` (PRs only, squash or merge commit) and does
+  not follow a rename.
 - Renaming `main` makes GitHub retarget its ~35 open PRs to `release`; `dev`'s 10
   follow it to the new `main`.
 - `sh/changed.sh` falls back to `origin/main`, which stays right for trunk.
@@ -56,19 +61,29 @@ Decided (2026-10-02):
   `dev`-only process quests are deleted.
 - ✅ One quest, m0, right after dev-sync lands.
 
+Open:
+
+- Trunk's linear-history rule rejects the back-merge's merge commit.
+  Recommended: squash-merge the back-merge PR; each cut's merge commit on
+  `release` advances the merge base, so the next cut stays clean.
+  Alternative: drop linear history from trunk's ruleset.
+
 Sequence:
 
 1. [dev-sync](/quest/m1/dev-sync.md) (#4720) lands.
 2. A PR on `dev`: the wording sweep, trunk stops publishing, `obs`,
-   `platform`, and `quest` push filters name `main` and `release`, the
+   `platform`, and `quest` push filters name `main` and `release`,
+   `workflow_run` publishers check out `release` or the triggering tag, the
    back-merge workflow, docs pin `release`.
 3. A small PR on `main`: publish triggers move to `release`; cache writers
    keep `main`, so they stop running there.
 4. Admin, back to back, run by the agent only after the maintainer's
    go-ahead in chat: rename `main` to `release`, rename `dev` to `main`, set
    the default branch, create the `release` ruleset, delete the `dev`
-   ruleset, retarget open PRs. Dry-run first and show the PR list.
+   ruleset, retarget open PRs. Release-plz PRs (such as #4596) stay on
+   `release`. Dry-run first and show the PR list with each PR's class.
 5. Verify: a no-op push to `main` publishes nothing; release-plz runs on
-   `release`; the back-merge opens on the first publish.
+   `release`; a chained publish builds `release` while trunk differs; the
+   first back-merge lands on `main`, not just opens.
 
 Public API: none. Wire: none. Contributors see the new branch model.
