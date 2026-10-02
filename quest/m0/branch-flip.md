@@ -65,9 +65,10 @@ Decided (2026-10-02):
 Open:
 
 - Trunk's linear-history rule rejects the back-merge's merge commit.
-  Recommended: squash-merge the back-merge PR; each cut's merge commit on
-  `release` advances the merge base, so the next cut stays clean.
-  Alternative: drop linear history from trunk's ruleset.
+  Recommended: drop linear history from trunk's ruleset, so the back-merge
+  lands as a merge commit and advances the merge base; ordinary PRs still
+  squash. Rejected: squash-merging the back-merge, which leaves the base at
+  the last cut, so a second publish before the next cut conflicts.
 
 Sequence:
 
@@ -85,6 +86,6 @@ Sequence:
    `release`. Dry-run first and show the PR list with each PR's class.
 5. Verify: a no-op push to `main` publishes nothing; release-plz runs on
    `release`; a chained publish builds `release` while trunk differs; the
-   first back-merge lands on `main`, not just opens.
+   back-merges of two publishes without a cut between both land on `main`.
 
 Public API: none. Wire: none. Contributors see the new branch model.
