@@ -4139,6 +4139,16 @@ enum FetchRunState<S: crate::transport::poll::Session> {
 	Done,
 }
 
+impl<S: crate::transport::poll::Session> FetchRunState<S> {
+	/// The downstream request, while it waits on the publisher's answer.
+	fn request(&self) -> Option<&group::Request> {
+		match self {
+			Self::Open { request } | Self::Send { request, .. } | Self::Answer { request, .. } => request.as_ref(),
+			Self::Ingest { .. } | Self::Done => None,
+		}
+	}
+}
+
 impl<S: crate::transport::poll::Session> FetchServeRun<S> {
 	fn new(serve: TrackServe<S>, request: group::Request, timescale: Option<Timescale>) -> Self {
 		let session = serve.subscriber.session.clone();
@@ -4157,6 +4167,20 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let mut cx = std::task::Context::from_waker(waiter.waker());
 		loop {
+			// Until answered, a fetch nobody waits on any more is cancelled upstream, so
+			// the publisher stops serving it (and a relay there releases its own FETCH).
+			if let Some(request) = self.state.request()
+				&& request.poll_unused(waiter).is_ready()
+			{
+				tracing::debug!(track = %self.serve.name, group = self.group, "fetch abandoned");
+				if let FetchRunState::Send { stream, .. } | FetchRunState::Answer { stream, .. } =
+					std::mem::replace(&mut self.state, FetchRunState::Done)
+				{
+					stream.writer.abort(&Error::Cancel);
+				}
+				return Poll::Ready(());
+			}
+
 			match &mut self.state {
 				FetchRunState::Open { request } => {
 					tracing::info!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, group = self.group, "fetch started");

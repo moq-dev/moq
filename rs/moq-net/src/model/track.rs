@@ -3125,6 +3125,25 @@ impl group::Request {
 		}
 	}
 
+	/// Poll for the request becoming unused (every waiting [`Consumer::fetch_group`]
+	/// dropped), so a handler can stop serving and drop the request.
+	///
+	/// Once ready, a later fetch of the group starts a fresh request rather than
+	/// joining this abandoned one.
+	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
+		loop {
+			ready!(self.result.poll_unused(waiter));
+			// Fetches join under the fetch lock, so re-checking under it makes the
+			// withdrawal atomic with a join racing the last one leaving.
+			let mut fetch = self.fetch.lock();
+			if self.result.is_used() {
+				continue;
+			}
+			fetch.remove_if(&self.sequence, |pending| pending.result.same_channel(&self.result));
+			return Poll::Ready(());
+		}
+	}
+
 	/// Remove this attempt from the fetch state, unless a newer attempt for the same
 	/// sequence has already replaced it.
 	fn remove(&self) {
@@ -8007,6 +8026,39 @@ mod test {
 
 		drop(req);
 		assert!(matches!(pending.await, Err(Error::Dropped)));
+	}
+
+	/// A request stays wanted while any joined fetch waits, and once the last leaves it
+	/// is withdrawn: a later fetch starts a fresh request instead of joining it.
+	#[tokio::test]
+	async fn fetch_request_unused_once_every_fetch_leaves() {
+		let producer = track_producer("test", None);
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+
+		let first = consumer.fetch_group(5, None);
+		let req = dynamic
+			.requested_group()
+			.now_or_never()
+			.expect("should not block")
+			.unwrap();
+		let second = consumer.fetch_group(5, None);
+
+		drop(first);
+		assert!(req.poll_unused(&kio::Waiter::noop()).is_pending());
+		drop(second);
+		assert!(req.poll_unused(&kio::Waiter::noop()).is_ready());
+
+		let retry = consumer.fetch_group(5, None);
+		let fresh = dynamic
+			.requested_group()
+			.now_or_never()
+			.expect("the retry queues a fresh request")
+			.unwrap();
+		drop(req);
+		assert!(fresh.poll_unused(&kio::Waiter::noop()).is_pending());
+		fresh.accept(None).unwrap().finish().unwrap();
+		assert_eq!(retry.await.unwrap().sequence, 5);
 	}
 
 	#[tokio::test]
