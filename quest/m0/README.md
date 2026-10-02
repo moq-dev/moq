@@ -39,6 +39,7 @@ Published API or wire breaks still land on dev; each quest's Plan says so.
 
 ## Required
 
+- [Branch flip](/quest/m0/branch-flip.md) - `dev` becomes the default `main` trunk and today's `main` becomes `release`, where publishing runs
 - [IETF FIN semantics](/quest/m0/ietf-fin-not-cancel.md) - a request stream FIN stops updates without cancelling, and REQUEST_UPDATE on a subscribe is parsed
 - [JS unknown bidi](/quest/m0/ietf-unknown-bidi.md) - an unknown moq-transport bidi stream type closes the session in JS, as in Rust
 - [moq-lite early streams](/quest/m0/lite-early-streams.md) - a lite uni stream that arrives before SETUP is held until SETUP lands, and a second SETUP is fatal
