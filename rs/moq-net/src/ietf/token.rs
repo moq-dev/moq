@@ -32,6 +32,14 @@ pub fn from_setup(params: &Parameters, version: Version) -> Result<Option<Token>
 		.transpose()
 }
 
+/// Decode a Token structure carried as a request message's `AUTHORIZATION TOKEN`
+/// parameter value (section 8.9), the same structure the SETUP option carries. The
+/// message parameter's Length framing is stripped by the parameter decoder, so this sees
+/// the bare structure, exactly as [`from_setup`] hands one to [`decode`].
+pub fn decode_value(value: &[u8], version: Version) -> Result<Token, Error> {
+	decode(value, version)
+}
+
 /// Present `token` in our SETUP, by value.
 #[cfg_attr(not(test), expect(dead_code))]
 pub fn into_setup(params: &mut Parameters, token: &Token, version: Version) -> Result<(), EncodeError> {
@@ -64,6 +72,46 @@ fn decode(mut buf: &[u8], version: Version) -> Result<Token, Error> {
 		kind,
 		value: buf.to_vec(),
 	})
+}
+
+/// Debug for a request-borne `AUTHORIZATION TOKEN` field that shows its length, never its
+/// bytes, so a credential cannot reach the logs through a message's `Debug`.
+pub(super) struct Redacted<'a>(pub &'a Option<bytes::Bytes>);
+
+impl std::fmt::Debug for Redacted<'_> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self.0 {
+			Some(token) => write!(f, "Some(<{} bytes>)", token.len()),
+			None => f.write_str("None"),
+		}
+	}
+}
+
+#[cfg(test)]
+mod redacted_tests {
+	use super::super::{PublishNamespace, PublishNamespaceUpdate, RequestId};
+
+	/// A request-borne credential shows only its length in a message's `Debug`.
+	#[test]
+	fn debug_never_shows_the_token_bytes() {
+		let secret = bytes::Bytes::from_static(b"s3cr3t-jwt");
+		let announce = PublishNamespace {
+			request_id: RequestId(1),
+			track_namespace: crate::Path::new("room"),
+			cluster: None,
+			authorization_token: Some(secret.clone()),
+		};
+		let update = PublishNamespaceUpdate {
+			request_id: RequestId(2),
+			hops: None,
+			cost: None,
+			authorization_token: Some(secret),
+		};
+		for debug in [format!("{announce:?}"), format!("{update:?}")] {
+			assert!(!debug.contains("s3cr3t"), "{debug}");
+			assert!(debug.contains("<10 bytes>"), "{debug}");
+		}
+	}
 }
 
 #[cfg(test)]
@@ -149,6 +197,17 @@ mod tests {
 				value: Vec::new(),
 			};
 			assert_eq!(from_setup(&params, version).unwrap(), Some(expected), "{version:?}");
+		}
+	}
+
+	/// The reusable message-parameter decoder reads the same structure `from_setup` does,
+	/// so a token on a request and a token on the SETUP are decoded identically.
+	#[test]
+	fn decode_value_matches_from_setup() {
+		for version in VERSIONS {
+			let params = structure(version, &[REGISTER, 7, token().kind], &token().value);
+			let value = params.get_bytes(ParameterBytes::AuthorizationToken).unwrap();
+			assert_eq!(decode_value(value, version).unwrap(), token(), "{version:?}");
 		}
 	}
 

@@ -20,6 +20,7 @@ pub struct Client {
 	setup_authority: Option<String>,
 	cost: Option<u64>,
 	peer_hop: Option<crate::Hop>,
+	extensions: crate::setup::Extensions,
 }
 
 impl Client {
@@ -129,6 +130,12 @@ impl Client {
 	/// An identity the peer does declare wins over this one.
 	pub fn with_peer_hop(mut self, hop: crate::Hop) -> Self {
 		self.peer_hop = Some(hop);
+		self
+	}
+
+	/// Choose which moq-transport extensions this client offers in its SETUP. Defaults to all.
+	pub fn with_extensions(mut self, extensions: crate::setup::Extensions) -> Self {
+		self.extensions = extensions;
 		self
 	}
 
@@ -264,8 +271,10 @@ impl Client {
 
 				// Draft-17+: SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
-				// The peer's SETUP decides whether AUTH is negotiated.
-				let auth = crate::auth::Handle::new(true);
+				// The peer's SETUP decides whether AUTH is negotiated. A client that does not
+				// offer the extension builds a handle that does not speak it, so its SETUP
+				// omits the option and no connection credential is presented.
+				let auth = crate::auth::Handle::new(self.extensions.auth);
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					session: session.clone(),
@@ -282,6 +291,7 @@ impl Client {
 					peer_setup_stream: None,
 					peer_declared: None,
 					auth: auth.clone(),
+					extensions: self.extensions,
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -359,7 +369,9 @@ impl Client {
 		if let Some(authority) = &self.setup_authority {
 			parameters.set_bytes(ietf::ParameterBytes::Authority, authority.clone().into_bytes());
 		}
-		ietf::solicit::into_setup(&mut parameters, ietf_encoding);
+		if self.extensions.solicit {
+			ietf::solicit::into_setup(&mut parameters, ietf_encoding);
+		}
 		ietf::hidden::into_setup(&mut parameters, ietf_encoding);
 		let parameters = parameters.encode_bytes(ietf_encoding)?;
 
@@ -438,6 +450,7 @@ impl Client {
 					peer_setup_stream: None,
 					peer_declared: Some(peer_declared),
 					auth: auth.clone(),
+					extensions: self.extensions,
 				})?;
 				(None, crate::driver::Protocol::Ietf(protocol), goaway, auth)
 			}

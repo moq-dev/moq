@@ -350,7 +350,10 @@ impl Server {
 			iroh::listen(endpoint, &versions)?;
 		}
 
-		let mut moq = moq_net::Server::new().with_versions(versions.clone()).with_stats(stats);
+		let mut moq = moq_net::Server::new()
+			.with_versions(versions.clone())
+			.with_extensions(config.extensions)
+			.with_stats(stats);
 		if let Some(publisher) = publisher {
 			moq = moq.with_publisher(publisher);
 		}
@@ -1509,6 +1512,18 @@ impl Request {
 		request_ref!(self, r => r.token())
 	}
 
+	/// The session's [`auth::Handle`](moq_net::auth::Handle), for an app that verifies the
+	/// peer's request tokens itself (the `AUTHORIZATION TOKEN` carried on a PUBLISH_NAMESPACE,
+	/// SUBSCRIBE, or other request).
+	///
+	/// Take [`requests`](moq_net::auth::Handle::requests) here and answer them BEFORE
+	/// [`ok`](Self::ok): the acceptor is fixed on the session driver's first poll, which `ok`
+	/// starts, so a consumer installed afterwards races it. Mirrors the moq-net-native accept
+	/// path.
+	pub fn auth(&self) -> moq_net::auth::Handle {
+		request_ref!(self, r => r.auth())
+	}
+
 	/// The client certificate chain the peer presented, if any, validated
 	/// against a configured [`crate::tls::Listen::root`] during the handshake.
 	///
@@ -1641,6 +1656,15 @@ mod tests {
 		for name in moq_net::Version::names() {
 			assert!(help.contains(name), "missing {name} from --server-version help");
 		}
+	}
+
+	/// `Request::auth` must exist and yield an owned `auth::Handle`, so a QUIC app can take
+	/// `requests()` on it before `ok()`. Constructing a `Request` needs a live transport
+	/// handshake (the pre-ok runtime behavior is exercised over real QUIC by the request-token
+	/// end-to-end verification), so this pins the accessor's shape without binding one.
+	#[test]
+	fn request_exposes_an_auth_handle() {
+		let _signature: fn(&Request) -> moq_net::auth::Handle = Request::auth;
 	}
 
 	/// The handles have to exist before anything binds, and cover the stream

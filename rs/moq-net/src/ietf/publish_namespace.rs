@@ -12,7 +12,7 @@ use super::Version;
 
 /// PublishNamespace message (0x06)
 /// Sent by the publisher to announce the availability of a namespace.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PublishNamespace<'a> {
 	pub request_id: RequestId,
 	pub track_namespace: Path<'a>,
@@ -21,6 +21,26 @@ pub struct PublishNamespace<'a> {
 	/// negotiated the extension and `None` on one that did not, which is what decides
 	/// whether they appear on the wire at all.
 	pub cluster: Option<cluster::Advert>,
+
+	/// The `AUTHORIZATION TOKEN` (0x03) the announcer presented on this request, if any.
+	/// A subscriber verifies it when its session grant does not already cover the
+	/// namespace (MoQ request-token); the value is the Token structure of section 8.9,
+	/// decoded with [`super::token::decode_value`].
+	pub authorization_token: Option<bytes::Bytes>,
+}
+
+impl std::fmt::Debug for PublishNamespace<'_> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("PublishNamespace")
+			.field("request_id", &self.request_id)
+			.field("track_namespace", &self.track_namespace)
+			.field("cluster", &self.cluster)
+			.field(
+				"authorization_token",
+				&super::token::Redacted(&self.authorization_token),
+			)
+			.finish()
+	}
 }
 
 impl PublishNamespace<'_> {
@@ -36,12 +56,13 @@ impl PublishNamespace<'_> {
 			let _required_request_id_delta = u64::decode(r, version)?;
 		}
 		let track_namespace = decode_namespace(r, version)?;
-		let cluster = decode_cluster_params(r, version, negotiated)?;
+		let (cluster, authorization_token) = decode_request_params(r, version, negotiated)?;
 
 		Ok(Self {
 			request_id,
 			track_namespace,
 			cluster,
+			authorization_token,
 		})
 	}
 }
@@ -55,12 +76,69 @@ impl Message for PublishNamespace<'_> {
 			0u64.encode(w, version)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
 		}
 		encode_namespace(w, &self.track_namespace, version)?;
-		encode_cluster_params(w, version, self.cluster.as_ref())
+		encode_request_params(w, version, self.cluster.as_ref(), self.authorization_token.as_ref())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		Self::decode_body(r, version, false)
 	}
+}
+
+/// Write the Parameters field of a PUBLISH_NAMESPACE: the optional AUTHORIZATION TOKEN
+/// (0x03) followed by the cluster parameters. The token rides the same block as the
+/// cluster params but is independent of the extension, so it is handled here rather than
+/// in [`encode_cluster_params`] (which also serves the NAMESPACE advertisement, where no
+/// token belongs).
+fn encode_request_params<W: bytes::BufMut>(
+	w: &mut W,
+	version: Version,
+	advert: Option<&cluster::Advert>,
+	token: Option<&bytes::Bytes>,
+) -> Result<(), EncodeError> {
+	match advert {
+		Some(advert) => {
+			let cost = (advert.cost != 0).then_some(advert.cost);
+			encode_params!(w, version,
+				0x03 => token.cloned(),
+				cluster::HOP_PATH => advert.hops,
+				cluster::ROUTE_COST => cost,
+			);
+		}
+		None => encode_params!(w, version,
+			0x03 => token.cloned(),
+		),
+	}
+	Ok(())
+}
+
+/// Read the Parameters field of a PUBLISH_NAMESPACE. See [`encode_request_params`].
+fn decode_request_params<R: bytes::Buf>(
+	r: &mut R,
+	version: Version,
+	negotiated: bool,
+) -> Result<(Option<cluster::Advert>, Option<bytes::Bytes>), DecodeError> {
+	if !negotiated {
+		// The cluster parameters are a violation on a non-negotiated session, so only the
+		// AUTHORIZATION TOKEN is allowed in the block here.
+		decode_params!(r, version,
+			0x03 => authorization_token: Option<bytes::Bytes>,
+		);
+		return Ok((None, authorization_token));
+	}
+
+	decode_params!(r, version,
+		0x03 => authorization_token: Option<bytes::Bytes>,
+		cluster::HOP_PATH => hops: Option<cluster::HopPath>,
+		cluster::ROUTE_COST => cost: Option<u64>,
+	);
+
+	Ok((
+		Some(cluster::Advert {
+			hops: hops.ok_or(DecodeError::InvalidValue)?,
+			cost: cost.unwrap_or(0),
+		}),
+		authorization_token,
+	))
 }
 
 /// REQUEST_UPDATE (0x02) on a PUBLISH_NAMESPACE stream: the cluster parameters that
@@ -69,7 +147,7 @@ impl Message for PublishNamespace<'_> {
 /// An omitted parameter keeps its value (moq-transport Section 9.5), so a cost that
 /// dropped to 0 is sent as an explicit 0, unlike the advertisement itself where absent
 /// means 0. Draft-17+ only: the extension negotiates on nothing earlier.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PublishNamespaceUpdate {
 	/// The update's own Request ID; every REQUEST_UPDATE consumes one.
 	pub request_id: RequestId,
@@ -77,6 +155,24 @@ pub struct PublishNamespaceUpdate {
 	pub hops: Option<cluster::HopPath>,
 	/// ROUTE_COST, when the cost changed.
 	pub cost: Option<u64>,
+	/// The `AUTHORIZATION TOKEN` (0x03) presented on this REQUEST_UPDATE, if any. A fresh
+	/// token refreshes the announce's request grant (MoQ request-token); the value is the
+	/// Token structure of section 8.9, decoded with [`super::token::decode_value`].
+	pub authorization_token: Option<bytes::Bytes>,
+}
+
+impl std::fmt::Debug for PublishNamespaceUpdate {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("PublishNamespaceUpdate")
+			.field("request_id", &self.request_id)
+			.field("hops", &self.hops)
+			.field("cost", &self.cost)
+			.field(
+				"authorization_token",
+				&super::token::Redacted(&self.authorization_token),
+			)
+			.finish()
+	}
 }
 
 impl PublishNamespaceUpdate {
@@ -86,6 +182,7 @@ impl PublishNamespaceUpdate {
 			request_id,
 			hops: (held.hops != next.hops).then(|| next.hops.clone()),
 			cost: (held.cost != next.cost).then_some(next.cost),
+			authorization_token: None,
 		}
 	}
 
@@ -111,6 +208,7 @@ impl Message for PublishNamespaceUpdate {
 			_ => self.request_id.encode(w, version)?,
 		}
 		encode_params!(w, version,
+			0x03 => self.authorization_token.clone(),
 			cluster::HOP_PATH => self.hops,
 			cluster::ROUTE_COST => self.cost,
 		);
@@ -128,10 +226,16 @@ impl Message for PublishNamespaceUpdate {
 			_ => RequestId::decode(r, version)?,
 		};
 		decode_params!(r, version,
+			0x03 => authorization_token: Option<bytes::Bytes>,
 			cluster::HOP_PATH => hops: Option<cluster::HopPath>,
 			cluster::ROUTE_COST => cost: Option<u64>,
 		);
-		Ok(Self { request_id, hops, cost })
+		Ok(Self {
+			request_id,
+			hops,
+			cost,
+			authorization_token,
+		})
 	}
 }
 
@@ -358,12 +462,78 @@ mod tests {
 			request_id: RequestId(1),
 			track_namespace: Path::new("test/broadcast"),
 			cluster: None,
+			authorization_token: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
 		let decoded: PublishNamespace = decode_message(&encoded, Version::Draft14).unwrap();
 
 		assert_eq!(decoded.track_namespace.as_str(), "test/broadcast");
+	}
+
+	/// A request-borne AUTHORIZATION TOKEN round-trips on a legacy draft (draft-14) and a
+	/// strict one (draft-18), so a non-moq-dev peer can present a credential on a
+	/// PUBLISH_NAMESPACE the draft-17+ standard way.
+	#[test]
+	fn authorization_token_round_trips_legacy_and_strict() {
+		let token = bytes::Bytes::from_static(&[0x03, 0x81, 0x2c, 0x00, 0xff]);
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+		] {
+			let msg = PublishNamespace {
+				request_id: RequestId(1),
+				track_namespace: Path::new("room/alice"),
+				cluster: None,
+				authorization_token: Some(token.clone()),
+			};
+			let encoded = encode_message(&msg, version);
+			let decoded: PublishNamespace = decode_message(&encoded, version).unwrap();
+			assert_eq!(decoded.authorization_token, Some(token.clone()), "{version:?}");
+			assert_eq!(decoded.track_namespace.as_str(), "room/alice", "{version:?}");
+		}
+	}
+
+	/// No token stays no token: a PUBLISH_NAMESPACE without one carries no phantom
+	/// parameter, on both families.
+	#[test]
+	fn absent_authorization_token_stays_none() {
+		for version in [Version::Draft14, Version::Draft18] {
+			let msg = PublishNamespace {
+				request_id: RequestId(2),
+				track_namespace: Path::new("room/bob"),
+				cluster: None,
+				authorization_token: None,
+			};
+			let encoded = encode_message(&msg, version);
+			let decoded: PublishNamespace = decode_message(&encoded, version).unwrap();
+			assert_eq!(decoded.authorization_token, None, "{version:?}");
+		}
+	}
+
+	/// On a cluster-negotiated session the token rides the same parameter block as
+	/// HOP_PATH and ROUTE_COST, and both survive the trip.
+	#[test]
+	fn authorization_token_rides_alongside_cluster_params() {
+		let version = Version::Draft19;
+		let token = bytes::Bytes::from_static(&[0x03, 0x81, 0x2c, 0x00, 0xff]);
+		let msg = PublishNamespace {
+			request_id: RequestId(3),
+			track_namespace: Path::new("room/alice"),
+			cluster: Some(cluster::Advert {
+				hops: hop_path(&[7, 9]),
+				cost: 5,
+			}),
+			authorization_token: Some(token.clone()),
+		};
+		let mut buf = bytes::Bytes::from(encode_message(&msg, version));
+		let decoded = PublishNamespace::decode_body(&mut buf, version, true).unwrap();
+		assert!(buf.is_empty());
+		assert_eq!(decoded.authorization_token, Some(token));
+		assert_eq!(decoded.cluster, msg.cluster);
 	}
 
 	#[test]
@@ -447,6 +617,7 @@ mod tests {
 			request_id: RequestId(5),
 			track_namespace: Path::new("v17/broadcast"),
 			cluster: None,
+			authorization_token: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -462,6 +633,7 @@ mod tests {
 			request_id: RequestId(5),
 			track_namespace: Path::new("v18/broadcast"),
 			cluster: None,
+			authorization_token: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -554,6 +726,7 @@ mod tests {
 			request_id: RequestId(2),
 			hops: None,
 			cost: Some(0),
+			authorization_token: None,
 		};
 		let mut buf = BytesMut::new();
 		assert!(msg.encode_msg(&mut buf, Version::Draft16).is_err());

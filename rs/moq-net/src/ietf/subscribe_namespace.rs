@@ -76,7 +76,7 @@ impl Message for SubscribeNamespace<'_> {
 		}
 		let request_id = RequestId::decode(r, version)?;
 		let namespace = decode_namespace(r, version)?;
-		decode_params!(r, version, HIDDEN_PARAM => hidden: Option<u64>);
+		decode_params!(r, version, 0x03 => _authorization_token: Option<bytes::Bytes>, HIDDEN_PARAM => hidden: Option<u64>);
 
 		Ok(Self {
 			request_id,
@@ -135,7 +135,7 @@ impl Message for SubscribeNamespaceLegacy<'_> {
 			_ => 0x01,
 		};
 
-		decode_params!(r, version, HIDDEN_PARAM => hidden: Option<u64>);
+		decode_params!(r, version, 0x03 => _authorization_token: Option<bytes::Bytes>, HIDDEN_PARAM => hidden: Option<u64>);
 
 		Ok(Self {
 			request_id,
@@ -419,6 +419,7 @@ mod tests {
 				hops: hop_path(&[7]),
 				cost: 0,
 			}),
+			authorization_token: None,
 		};
 
 		let mut buf = BytesMut::new();
@@ -535,5 +536,38 @@ mod tests {
 			SubscribeNamespaceLegacy::decode_msg(&mut buf, Version::Draft18),
 			Err(DecodeError::Version)
 		));
+	}
+
+	/// A request-token peer may present an AUTHORIZATION TOKEN (0x03) on a SUBSCRIBE_NAMESPACE.
+	/// Both message shapes consume it, so the message is accepted rather than failing the
+	/// session; the token is dropped.
+	#[test]
+	fn subscribe_namespace_accepts_a_dropped_authorization_token() -> Result<(), EncodeError> {
+		let token = &[0x03u8, 0x81, 0x2c, 0x00, 0xff];
+
+		// Modern (draft-18, 0x50).
+		let version = Version::Draft18;
+		let mut buf = BytesMut::new();
+		RequestId(4).encode(&mut buf, version).unwrap();
+		encode_namespace(&mut buf, &Path::new("example"), version).unwrap();
+		encode_params!(&mut buf, version, 0x03 => Some(bytes::Bytes::from_static(token)));
+		let mut bytes = buf.freeze();
+		assert_eq!(
+			SubscribeNamespace::decode_msg(&mut bytes, version)
+				.expect("modern token accepted")
+				.request_id,
+			RequestId(4)
+		);
+		assert!(bytes.is_empty());
+
+		// Legacy (draft-14, 0x11).
+		let version = Version::Draft14;
+		let mut buf = BytesMut::new();
+		RequestId(4).encode(&mut buf, version).unwrap();
+		encode_namespace(&mut buf, &Path::new("example"), version).unwrap();
+		encode_params!(&mut buf, version, 0x03 => Some(bytes::Bytes::from_static(token)));
+		let mut bytes = buf.freeze();
+		SubscribeNamespaceLegacy::decode_msg(&mut bytes, version).expect("legacy token accepted");
+		Ok(())
 	}
 }

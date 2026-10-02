@@ -258,6 +258,10 @@ pub struct VirtualSendStream {
 	/// Accumulates bytes until the request_id can be parsed,
 	/// then registers the stream and flushes.
 	pending: Option<OutgoingRegistration>,
+	/// Watches the outgoing frames of an outgoing request stream for a REQUEST_UPDATE
+	/// renewal, so its reply (keyed to the update's own Request ID on draft-15/16) routes
+	/// back to the subscription. `None` for incoming streams, which never send renewals.
+	sniff: Option<UpdateSniffer>,
 }
 
 struct OutgoingRegistration {
@@ -325,13 +329,71 @@ impl VirtualSendStream {
 		Self {
 			control_tx,
 			pending: None,
+			sniff: None,
 		}
 	}
 
 	fn with_registration(control_tx: Queue<Bytes>, pending: OutgoingRegistration) -> Self {
+		// Only draft-15/16 key a renewal reply to the update's own Request ID; draft-14 answers
+		// nothing and draft-17+ uses real bidi streams, not this adapter, so only those sniff.
+		let sniff = matches!(pending.version, Version::Draft15 | Version::Draft16).then(|| UpdateSniffer {
+			shared: Arc::clone(&pending.shared),
+			version: pending.version,
+			buf: BytesMut::new(),
+		});
 		Self {
 			control_tx,
 			pending: Some(pending),
+			sniff,
+		}
+	}
+}
+
+/// Watches the outgoing control frames of an outgoing request stream for a REQUEST_UPDATE
+/// renewal (a SUBSCRIBE_UPDATE carrying a fresh token). Draft-14/15/16 give the update its own
+/// Request ID, distinct from the subscription's, and the receiver keys its REQUEST_OK /
+/// REQUEST_ERROR to that update id, but the adapter only ever registered the subscription under
+/// its initial id. Recording the update id against the subscription lets the reply route back
+/// to the subscription stream (see [`Shared::route_update_reply`]).
+///
+/// It observes a copy of the written bytes and never alters forwarding: a parse that falls
+/// short only leaves a reply unrouted, which is the behavior before this existed.
+///
+/// Only draft-15/16 are recorded: draft-14 answers nothing (no reply to route) and draft-17+
+/// uses real bidi streams, not this adapter. Only SUBSCRIBE_UPDATE is sniffed; a
+/// PUBLISH_NAMESPACE_UPDATE carries no subscription id to route a reply to.
+struct UpdateSniffer {
+	shared: Arc<Shared>,
+	version: Version,
+	buf: BytesMut,
+}
+
+impl UpdateSniffer {
+	fn observe(&mut self, chunk: &[u8]) {
+		self.buf.extend_from_slice(chunk);
+		loop {
+			let mut cursor = std::io::Cursor::new(&self.buf);
+			let Ok(type_id) = u64::decode(&mut cursor, self.version) else {
+				return;
+			};
+			let Ok(size) = u16::decode(&mut cursor, self.version) else {
+				return;
+			};
+			let header_len = cursor.position() as usize;
+			let frame_len = header_len + size as usize;
+			if self.buf.len() < frame_len {
+				return;
+			}
+			if type_id == ietf::SubscribeUpdate::ID {
+				let body = Bytes::copy_from_slice(&self.buf[header_len..frame_len]);
+				if let (Ok(update_id), Ok(subscription_id)) = (
+					decode_request_id(&body, self.version),
+					decode_subscribe_update_request_id(&body, self.version),
+				) {
+					self.shared.record_update(update_id, subscription_id);
+				}
+			}
+			let _ = self.buf.split_to(frame_len);
 		}
 	}
 }
@@ -341,6 +403,11 @@ impl VirtualSendStream {
 	/// register and flush; forward directly afterwards. Never blocks, since the
 	/// control queue is unbounded.
 	fn push(&mut self, chunk: Bytes) -> Result<(), crate::Error> {
+		// Observe the bytes for a renewal update before forwarding; this never alters what is
+		// forwarded, only what the reply routing later knows.
+		if let Some(sniff) = &mut self.sniff {
+			sniff.observe(&chunk);
+		}
 		if let Some(pending) = &mut self.pending {
 			pending.buf.extend_from_slice(&chunk);
 
@@ -643,6 +710,13 @@ struct Shared {
 
 	/// Namespace → request_id reverse lookup (for v14/v15 namespace-keyed messages).
 	namespaces: Namespaces,
+
+	/// A renewal update's own Request ID → the subscription it renews, for draft-15/16 where
+	/// the receiver keys the renewal's REQUEST_OK / REQUEST_ERROR to the update id rather than
+	/// the subscription id. [`route_update_reply`](Self::route_update_reply) consumes an entry;
+	/// [`forget`](Self::forget) / [`close`](Self::close) drop any left by a subscription that
+	/// ended before its reply arrived.
+	updates: Mutex<HashMap<RequestId, RequestId>>,
 }
 
 impl Shared {
@@ -693,6 +767,10 @@ impl Shared {
 	fn close(&self, request_id: RequestId, raw: Bytes) {
 		let tx = self.streams.lock().unwrap().remove(&request_id);
 		self.namespaces.forget(request_id);
+		self.updates
+			.lock()
+			.unwrap()
+			.retain(|_, subscription_id| *subscription_id != request_id);
 		if let Some(tx) = tx {
 			tx.push(raw);
 		}
@@ -702,6 +780,40 @@ impl Shared {
 	fn forget(&self, request_id: RequestId) {
 		self.streams.lock().unwrap().remove(&request_id);
 		self.namespaces.forget(request_id);
+		self.updates
+			.lock()
+			.unwrap()
+			.retain(|_, subscription_id| *subscription_id != request_id);
+	}
+
+	/// Record a renewal update's own Request ID against the subscription it renews.
+	fn record_update(&self, update_id: RequestId, subscription_id: RequestId) {
+		self.updates.lock().unwrap().insert(update_id, subscription_id);
+	}
+
+	/// Route a reply to a buffered REQUEST_UPDATE back to the subscription it renews.
+	///
+	/// Draft-15/16 key the renewal's REQUEST_OK / REQUEST_ERROR to the update's own Request ID,
+	/// which the adapter never registered as a stream of its own. Deliver it to the
+	/// subscription stream as a follow-up (data, never a close), so the client observes the
+	/// answer and a refused renewal leaves the subscription open, as the keep-old-grant policy
+	/// and draft-14/15/16 cancellation require. Returns true when it handled the message.
+	fn route_update_reply(&self, type_id: u64, classified: &Route, raw: &Bytes) -> bool {
+		// Only a renewal's REQUEST_OK / REQUEST_ERROR is rerouted. A PUBLISH_DONE, UNSUBSCRIBE,
+		// or FETCH_CANCEL that happens to classify as a response or close for a recorded id keeps
+		// its normal routing: those are not renewal replies.
+		if type_id != ietf::RequestOk::ID && type_id != ietf::RequestError::ID {
+			return false;
+		}
+		let reply_id = match classified {
+			Route::Response(id) | Route::CloseStream(id) => *id,
+			_ => return false,
+		};
+		let Some(subscription_id) = self.updates.lock().unwrap().remove(&reply_id) else {
+			return false;
+		};
+		self.push(subscription_id, raw.clone());
+		true
 	}
 }
 
@@ -834,7 +946,13 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 			let raw = encode_raw(type_id, size, &body, self.version);
 
 			// Classify and route
-			match classify(type_id, &body, self.version, &self.shared.namespaces)? {
+			let classified = classify(type_id, &body, self.version, &self.shared.namespaces)?;
+			// A reply to a buffered REQUEST_UPDATE renewal is keyed to the update's own Request
+			// ID, which has no stream of its own; route it to the subscription it renews.
+			if self.shared.route_update_reply(type_id, &classified, &raw) {
+				continue;
+			}
+			match classified {
 				Route::NewRequest(request_id) => self.shared.open_incoming(request_id, raw)?,
 				Route::Response(request_id) | Route::FollowUp(request_id) => self.shared.push(request_id, raw),
 				Route::CloseStream(request_id) => self.shared.close(request_id, raw),
@@ -981,9 +1099,10 @@ fn classify(type_id: u64, body: &Bytes, version: Version, namespaces: &Namespace
 			_ => Err(Error::UnexpectedMessage),
 		},
 
-		// Follow-up messages: route to existing stream
+		// Follow-up messages: route to existing stream. A SUBSCRIBE_UPDATE targets the
+		// subscription by its Subscribe Request ID (the second field), not the update's own.
 		ietf::SubscribeUpdate::ID => {
-			let id = decode_request_id(body, version)?;
+			let id = decode_subscribe_update_request_id(body, version)?;
 			Ok(Route::FollowUp(id))
 		}
 
@@ -1188,6 +1307,19 @@ fn decode_response_request_id(body: &Bytes, version: Version) -> Result<RequestI
 	decode_request_id(body, version)
 }
 
+/// The subscription a SUBSCRIBE_UPDATE targets, for follow-up routing.
+///
+/// At draft-14/15/16 a SUBSCRIBE_UPDATE carries its own Request ID first and the subscription's
+/// Request ID (Subscribe Request ID) second, so the follow-up must route to the subscription's
+/// stream by the second id, not the update's own first id, or a renewal (a fresh token on
+/// REQUEST_UPDATE) never reaches the subscription it renews.
+fn decode_subscribe_update_request_id(body: &Bytes, version: Version) -> Result<RequestId, Error> {
+	let mut cursor = std::io::Cursor::new(body);
+	let _update_request_id = RequestId::decode(&mut cursor, version)?;
+	let subscription_request_id = RequestId::decode(&mut cursor, version)?;
+	Ok(subscription_request_id)
+}
+
 /// Decode the namespace from a PublishNamespace message body (after the request_id).
 fn decode_publish_namespace_body(body: &Bytes, version: Version) -> Result<PathOwned, Error> {
 	let mut cursor = std::io::Cursor::new(body);
@@ -1275,7 +1407,13 @@ mod tests {
 
 	#[test]
 	fn test_classify_subscribe_update_followup() {
-		let body = make_body_with_request_id(10, Version::Draft15);
+		use crate::coding::Encode;
+		// A SUBSCRIBE_UPDATE carries its own Request ID (7) first and the subscription's
+		// Request ID (10) second; the follow-up must route to the subscription (10).
+		let mut buf = BytesMut::new();
+		RequestId(7).encode(&mut buf, Version::Draft15).unwrap();
+		RequestId(10).encode(&mut buf, Version::Draft15).unwrap();
+		let body = buf.freeze();
 		let route = classify_msg(Version::Draft15, ietf::SubscribeUpdate::ID, &body).unwrap();
 		assert!(matches!(route, Route::FollowUp(RequestId(10))));
 	}
@@ -1420,6 +1558,7 @@ mod tests {
 			request_id,
 			track_namespace: crate::Path::new(namespace),
 			cluster: None,
+			authorization_token: None,
 		}
 	}
 
@@ -1491,6 +1630,184 @@ mod tests {
 		};
 
 		(shared, ours, theirs)
+	}
+
+	/// One SUBSCRIBE_UPDATE renewal keyed to its own `update_id`, naming the subscription it
+	/// renews by `subscription_id` in the second field, as a draft-15/16 client frames it.
+	fn subscribe_update(update_id: RequestId, subscription_id: RequestId) -> ietf::SubscribeUpdate {
+		ietf::SubscribeUpdate {
+			request_id: update_id,
+			subscription_request_id: Some(subscription_id),
+			start_location: ietf::Location { group: 0, object: 0 },
+			end_group: 0,
+			subscriber_priority: None,
+			forward: None,
+			filter: None,
+			authorization_token: Some(Bytes::from_static(&[0x03, 0x81, 0x2c, 0x00, 0xff])),
+		}
+	}
+
+	/// A renewal's reply is keyed to the update's own Request ID on draft-15/16, which owns no
+	/// stream of its own. It must route to the subscription the update renews, as data on that
+	/// stream, so the client observes REQUEST_OK / REQUEST_ERROR and a refused renewal leaves the
+	/// subscription open. Before the update was recorded against the subscription, the accept
+	/// (routed as a Response to an unknown id) was dropped and the refuse (a CloseStream to an
+	/// unknown id) was a no-op, so the client's renewal never resolved.
+	async fn renewal_reply_reaches_the_subscription(version: Version) {
+		let shared = Arc::new(Shared::default());
+
+		// Open the subscription stream on request id 4; the first write registers it.
+		let (mut send, mut recv) = shared.open_outgoing(version);
+		send.write_chunk(encode_msg(&subscribe(RequestId(4)), version))
+			.await
+			.unwrap();
+
+		// The client renews twice: 0x40 to be accepted, 0x41 refused. Each names subscription 4.
+		send.write_chunk(encode_msg(&subscribe_update(RequestId(0x40), RequestId(4)), version))
+			.await
+			.unwrap();
+		send.write_chunk(encode_msg(&subscribe_update(RequestId(0x41), RequestId(4)), version))
+			.await
+			.unwrap();
+
+		// The peer answers each on the update's own id. Route them the way the read loop does.
+		let ok_msg = ietf::RequestOk {
+			request_id: Some(RequestId(0x40)),
+		};
+		let ok = encode_msg(&ok_msg, version);
+		let ok_route = classify(
+			ietf::RequestOk::ID,
+			&encode_body(&ok_msg, version),
+			version,
+			&shared.namespaces,
+		)
+		.unwrap();
+		assert!(
+			shared.route_update_reply(ietf::RequestOk::ID, &ok_route, &ok),
+			"{version:?}: an accepted renewal must route to its subscription"
+		);
+
+		let err_msg = ietf::RequestError {
+			request_id: Some(RequestId(0x41)),
+			error_code: 0,
+			reason_phrase: "no".into(),
+			retry_interval: 0,
+		};
+		let err = encode_msg(&err_msg, version);
+		let err_route = classify(
+			ietf::RequestError::ID,
+			&encode_body(&err_msg, version),
+			version,
+			&shared.namespaces,
+		)
+		.unwrap();
+		assert!(
+			shared.route_update_reply(ietf::RequestError::ID, &err_route, &err),
+			"{version:?}: a refused renewal must route to its subscription"
+		);
+
+		// Both answers arrive on the subscription stream, in order, and it is still open: the
+		// refusal was delivered as data, not a close.
+		assert_eq!(
+			recv.read_chunk(usize::MAX).await.unwrap(),
+			Some(ok),
+			"{version:?}: the client observes the REQUEST_OK"
+		);
+		assert_eq!(
+			recv.read_chunk(usize::MAX).await.unwrap(),
+			Some(err),
+			"{version:?}: the client observes the REQUEST_ERROR"
+		);
+		// The refusal was delivered as data, not a close: the subscription is still open.
+		assert!(
+			recv.read_chunk(usize::MAX).now_or_never().is_none(),
+			"{version:?}: a refused renewal must not close the subscription stream"
+		);
+	}
+
+	#[tokio::test]
+	async fn a_renewal_reply_routes_back_to_its_subscription_at_draft_15_and_16() {
+		renewal_reply_reaches_the_subscription(Version::Draft15).await;
+		renewal_reply_reaches_the_subscription(Version::Draft16).await;
+	}
+
+	/// A minimal SUBSCRIBE for `request_id`, enough to open and register a subscription stream.
+	fn subscribe(request_id: RequestId) -> ietf::Subscribe<'static> {
+		ietf::Subscribe {
+			request_id,
+			track_namespace: crate::Path::new("room/alice"),
+			track_name: "video".into(),
+			subscriber_priority: 0,
+			group_order: ietf::GroupOrder::Descending,
+			filter: ietf::Filter::NextObject,
+			fill: None,
+			properties_wanted: false,
+			authorization_token: None,
+		}
+	}
+
+	/// A renewal is recorded only on a draft that answers one, and the mapping is released when
+	/// the subscription is forgotten or closed, so an outstanding renewal cannot outlive it.
+	#[tokio::test]
+	async fn a_renewal_mapping_is_pre_draft_17_only_and_released_with_its_subscription() {
+		// Draft-14 answers no renewal, so nothing is recorded.
+		let shared = Arc::new(Shared::default());
+		let (mut send, _recv) = shared.open_outgoing(Version::Draft14);
+		send.write_chunk(encode_msg(&subscribe(RequestId(4)), Version::Draft14))
+			.await
+			.unwrap();
+		send.write_chunk(encode_msg(
+			&subscribe_update(RequestId(0x40), RequestId(4)),
+			Version::Draft14,
+		))
+		.await
+		.unwrap();
+		assert!(
+			shared.updates.lock().unwrap().is_empty(),
+			"draft-14 records no renewal mapping"
+		);
+
+		// Draft-15 records the mapping; forgetting the subscription releases it.
+		let shared = Arc::new(Shared::default());
+		let (mut send, _recv) = shared.open_outgoing(Version::Draft15);
+		send.write_chunk(encode_msg(&subscribe(RequestId(4)), Version::Draft15))
+			.await
+			.unwrap();
+		send.write_chunk(encode_msg(
+			&subscribe_update(RequestId(0x40), RequestId(4)),
+			Version::Draft15,
+		))
+		.await
+		.unwrap();
+		assert_eq!(
+			shared.updates.lock().unwrap().len(),
+			1,
+			"draft-15 records the renewal mapping"
+		);
+		shared.forget(RequestId(4));
+		assert!(
+			shared.updates.lock().unwrap().is_empty(),
+			"forgetting the subscription releases its renewal mapping"
+		);
+
+		// Draft-16 records; closing the subscription releases it.
+		let shared = Arc::new(Shared::default());
+		let (mut send, _recv) = shared.open_outgoing(Version::Draft16);
+		send.write_chunk(encode_msg(&subscribe(RequestId(4)), Version::Draft16))
+			.await
+			.unwrap();
+		send.write_chunk(encode_msg(
+			&subscribe_update(RequestId(0x41), RequestId(4)),
+			Version::Draft16,
+		))
+		.await
+		.unwrap();
+		assert_eq!(shared.updates.lock().unwrap().len(), 1);
+		shared.close(RequestId(4), Bytes::new());
+		assert!(
+			shared.updates.lock().unwrap().is_empty(),
+			"closing the subscription releases its renewal mapping"
+		);
 	}
 
 	/// Read until the stream FINs, returning whether it did so within `limit` reads.

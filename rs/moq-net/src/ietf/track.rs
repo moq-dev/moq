@@ -68,7 +68,9 @@ impl Message for TrackStatus<'_> {
 				let _params = Parameters::decode(r, version)?;
 			}
 			_ => {
-				decode_params!(r, version,);
+				decode_params!(r, version,
+					0x03 => _authorization_token: Option<bytes::Bytes>,
+				);
 			}
 		}
 
@@ -148,6 +150,48 @@ mod tests {
 		assert_eq!(decoded.request_id, RequestId(1));
 		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
 		assert_eq!(decoded.track_name, "video");
+	}
+
+	/// A request-token peer may present an AUTHORIZATION TOKEN (0x03) on a TRACK_STATUS. The
+	/// strict decoder consumes it and the legacy trailing block carries it, so the message
+	/// is accepted rather than failing the session; the token is dropped (TRACK_STATUS is
+	/// refused NOT_SUPPORTED regardless).
+	#[test]
+	fn track_status_accepts_a_dropped_authorization_token() -> Result<(), EncodeError> {
+		let token = &[0x03u8, 0x81, 0x2c, 0x00, 0xff];
+
+		// Strict (draft-18): the parameter is consumed by decode_params.
+		let version = Version::Draft18;
+		let mut body = BytesMut::new();
+		RequestId(1).encode(&mut body, version).unwrap();
+		encode_namespace(&mut body, &Path::new("test/ns"), version).unwrap();
+		"video".encode(&mut body, version).unwrap();
+		encode_params!(&mut body, version, 0x03 => Some(bytes::Bytes::from_static(token)));
+		let mut buf = body.freeze();
+		assert_eq!(
+			TrackStatus::decode_msg(&mut buf, version)
+				.expect("strict token accepted")
+				.track_name,
+			"video"
+		);
+		assert!(buf.is_empty());
+
+		// Legacy (draft-14): the token rides the trailing parameter block.
+		let version = Version::Draft14;
+		let mut params = Parameters::default();
+		params.set_bytes(crate::ietf::ParameterBytes::AuthorizationToken, token.to_vec());
+		let mut body = BytesMut::new();
+		RequestId(1).encode(&mut body, version).unwrap();
+		encode_namespace(&mut body, &Path::new("test/ns"), version).unwrap();
+		"video".encode(&mut body, version).unwrap();
+		0u8.encode(&mut body, version).unwrap(); // subscriber priority
+		GroupOrder::Descending.encode(&mut body, version).unwrap();
+		false.encode(&mut body, version).unwrap(); // forward
+		Filter::NextObject.encode(&mut body, version).unwrap();
+		params.encode(&mut body, version).unwrap();
+		let mut buf = body.freeze();
+		TrackStatus::decode_msg(&mut buf, version).expect("legacy token accepted");
+		Ok(())
 	}
 
 	#[test]

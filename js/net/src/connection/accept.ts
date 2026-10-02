@@ -3,6 +3,7 @@ import * as Lite from "../lite/index.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import { Stream } from "../stream.ts";
 import type { Established } from "./established.ts";
+import * as Extensions from "./extensions.ts";
 import { forwardAnnounced } from "./forward.ts";
 import { exchangeSetup } from "./handshake.ts";
 
@@ -33,6 +34,9 @@ export interface AcceptProps {
 	 * nothing. The entries retract when the session dies; see the `consume` connect option.
 	 */
 	consume?: OriginProducer;
+
+	/** The moq-transport extensions to offer; each is on unless set to `false`. */
+	extensions?: Extensions.Extensions;
 }
 
 /** The per-session wiring shared by every negotiated protocol path. */
@@ -41,6 +45,8 @@ type SessionProps = {
 	publish?: OriginConsumer;
 	/** Whether this side dialed; only the dialing side aborts on a publication its grant does not cover. */
 	client: boolean;
+	/** The moq-transport extensions this side offers. */
+	extensions: Extensions.Offered;
 };
 
 /**
@@ -69,6 +75,7 @@ async function acceptInner(
 		discovery: props.discovery ?? true,
 		publish: props.publish,
 		client: false,
+		extensions: Extensions.offered(props.extensions),
 	};
 
 	if (protocol === Ietf.ALPN.DRAFT_22) {
@@ -117,7 +124,12 @@ async function acceptAlpn(
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
 ): Promise<Established> {
-	const { control, solicit, hidden, cluster, auth } = await exchangeSetup(transport, version, "moq-lite-js");
+	const { control, solicit, hidden, cluster, auth } = await exchangeSetup(
+		transport,
+		version,
+		"moq-lite-js",
+		wiring.extensions,
+	);
 
 	return new Ietf.Connection({
 		...wiring,
@@ -162,7 +174,7 @@ async function acceptSetup(
 	const params = new Ietf.SetupOptions();
 	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n);
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
-	Ietf.solicitIntoSetup(params);
+	Extensions.intoSetup(params, wiring.extensions, version);
 	Ietf.hiddenIntoSetup(params);
 
 	const server = new Ietf.ServerSetup({ version, parameters: params });
@@ -222,7 +234,7 @@ async function acceptNegotiated(
 	const params = new Ietf.SetupOptions();
 	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n);
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
-	Ietf.solicitIntoSetup(params);
+	Extensions.intoSetup(params, wiring.extensions, setupVersion);
 	Ietf.hiddenIntoSetup(params);
 
 	const server = new Ietf.ServerSetup({ version: selectedVersion, parameters: params });

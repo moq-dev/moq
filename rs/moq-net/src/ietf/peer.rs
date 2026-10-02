@@ -22,6 +22,13 @@ pub(crate) struct Peer {
 
 	/// MoQ Auth: whether both sides negotiated the Auth request streams.
 	pub auth: bool,
+
+	/// MAX_REQUEST_UPDATES: the most unanswered REQUEST_UPDATEs the peer accepts on one
+	/// request stream, if it set a limit (draft-19 section 10.3.1.7). `None` on a draft
+	/// without the option, and when the peer advertised none or `0` (both meaning no limit).
+	/// Recorded for a future sender that paces to this credit; the current sender keeps one
+	/// renewal in flight per request, which stays within any limit without reading it.
+	pub max_request_updates: Option<u64>,
 }
 
 /// Shared slot for [`Peer`], filled when the peer's SETUP is read.
@@ -82,6 +89,7 @@ mod tests {
 			solicit: None,
 			hidden: false,
 			auth: false,
+			max_request_updates: None,
 		};
 
 		let slot = PeerSetup::default();
@@ -94,6 +102,7 @@ mod tests {
 			solicit: Some(true),
 			hidden: true,
 			auth: true,
+			max_request_updates: Some(16),
 		});
 
 		assert_eq!(slot.get().await, first);

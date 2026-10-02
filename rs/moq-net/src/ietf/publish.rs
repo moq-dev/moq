@@ -334,6 +334,7 @@ impl Message for Publish<'_> {
 				// letting the request reach its NOT_SUPPORTED response.
 				decode_params!(r, version,
 					0x02 => object_delivery_timeout: Option<u64>,
+					0x03 => _authorization_token: Option<bytes::Bytes>,
 					0x06 => subgroup_delivery_timeout: Option<u64>,
 					0x08 => _expires: Option<u64>,
 					0x09 => largest_location: Option<Location>,
@@ -955,5 +956,50 @@ mod tests {
 		let decoded: PublishDone = decode_message(&encoded, Version::Draft19).unwrap();
 
 		assert_eq!(decoded.status_code, UNKNOWN);
+	}
+
+	/// A request-token peer may present an AUTHORIZATION TOKEN (0x03) on a PUBLISH. The
+	/// strict decoder consumes it and the legacy trailing block carries it, so the message
+	/// is accepted rather than failing the session; the token is dropped (PUBLISH is refused
+	/// NOT_SUPPORTED regardless).
+	#[test]
+	fn publish_accepts_a_dropped_authorization_token() -> Result<(), EncodeError> {
+		use super::super::namespace::encode_namespace;
+		let token = &[0x03u8, 0x81, 0x2c, 0x00, 0xff];
+
+		// Strict (draft-18): the parameter is consumed alongside the Track Properties block.
+		let version = Version::Draft18;
+		let mut body = BytesMut::new();
+		RequestId(1).encode(&mut body, version).unwrap();
+		encode_namespace(&mut body, &Path::new("room"), version).unwrap();
+		"video".encode(&mut body, version).unwrap();
+		42u64.encode(&mut body, version).unwrap();
+		encode_params!(&mut body, version, 0x03 => Some(bytes::Bytes::from_static(token)));
+		Properties::default().encode(&mut body, version).unwrap();
+		let mut buf = body.freeze();
+		assert_eq!(
+			Publish::decode_msg(&mut buf, version)
+				.expect("strict token accepted")
+				.track_alias,
+			42
+		);
+		assert!(buf.is_empty());
+
+		// Legacy (draft-14): the token rides the trailing parameter block.
+		let version = Version::Draft14;
+		let mut params = crate::ietf::Parameters::default();
+		params.set_bytes(crate::ietf::ParameterBytes::AuthorizationToken, token.to_vec());
+		let mut body = BytesMut::new();
+		RequestId(1).encode(&mut body, version).unwrap();
+		encode_namespace(&mut body, &Path::new("room"), version).unwrap();
+		"video".encode(&mut body, version).unwrap();
+		42u64.encode(&mut body, version).unwrap();
+		GroupOrder::Descending.encode(&mut body, version).unwrap();
+		false.encode(&mut body, version).unwrap(); // content exists
+		true.encode(&mut body, version).unwrap(); // forward
+		params.encode(&mut body, version).unwrap();
+		let mut buf = body.freeze();
+		Publish::decode_msg(&mut buf, version).expect("legacy token accepted");
+		Ok(())
 	}
 }

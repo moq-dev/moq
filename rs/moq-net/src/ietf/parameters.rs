@@ -20,6 +20,8 @@ pub enum ParameterVarInt {
 	/// Removed in draft-17; only used in draft-14/15/16.
 	MaxRequestId = 2,
 	MaxAuthTokenCacheSize = 4,
+	/// MAX_REQUEST_UPDATES, added in draft-19.
+	MaxRequestUpdates = super::request_update::OPTION,
 	/// HOP_ID, from the MoQ Cluster extension.
 	HopId = super::cluster::HOP_ID,
 	/// RELAY_COST, from the MoQ Cluster extension.
@@ -300,6 +302,20 @@ impl Param for u64 {
 
 	fn param_decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		u64::decode(r, version)
+	}
+}
+
+/// A length-prefixed byte-string parameter value, such as the `AUTHORIZATION TOKEN`
+/// (0x03) a request carries. The odd parameter key frames the value with a Length on
+/// every draft, so this is the same byte-string coding [`Vec<u8>`] uses; the bytes are
+/// the Token structure of section 8.9, decoded with [`super::token::decode_value`].
+impl Param for bytes::Bytes {
+	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.encode(w, version)
+	}
+
+	fn param_decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		bytes::Bytes::decode(r, version)
 	}
 }
 
@@ -646,6 +662,35 @@ mod tests {
 			assert!(!encoded.has_remaining(), "{version}");
 		}
 		Ok(())
+	}
+
+	#[test]
+	fn test_param_bytes_round_trip() {
+		// A value that is not text and not a single byte, so no codec can assume UTF-8 or a
+		// fixed width: the AUTHORIZATION TOKEN structure a request carries.
+		let value = Bytes::from_static(&[0x03, 0x81, 0x2c, 0x00, 0xff]);
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+		] {
+			let value = value.clone();
+			let expected = value.clone();
+			round_trip_params(
+				version,
+				move |w, v| {
+					encode_params!(w, v, 0x03 => value);
+					Ok(())
+				},
+				move |r, v| {
+					decode_params!(r, v, 0x03 => token: Option<Bytes>);
+					assert_eq!(token, Some(expected), "{version}");
+					Ok(())
+				},
+			);
+		}
 	}
 
 	#[test]

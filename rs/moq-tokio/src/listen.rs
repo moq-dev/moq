@@ -143,6 +143,11 @@ pub struct Config {
 	)]
 	pub version: Vec<moq_net::Version>,
 
+	/// The moq-transport extensions to offer in the SETUP, all by default.
+	#[serde(default, skip_serializing_if = "crate::connect::all_extensions")]
+	#[usage(skip)]
+	pub extensions: moq_net::setup::Extensions,
+
 	/// The certificates to serve and the roots that authenticate mTLS clients
 	/// (`--listen-tls-*`).
 	#[usage(flatten)]
@@ -392,6 +397,20 @@ impl Config {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	/// The listen config offers every extension unless told otherwise, and leaves the
+	/// default out when serialized.
+	#[test]
+	fn extensions_default_on_and_parse_off() {
+		let config: Config = toml::from_str("[extensions]\nsolicit = false\n").expect("parse");
+		assert!(!config.extensions.solicit);
+		assert!(config.extensions.auth);
+		assert!(
+			!toml::to_string(&Config::default())
+				.expect("serialize")
+				.contains("extensions")
+		);
+	}
+
 	/// A parser wrapping the config, since it derives `Args` (see the note in
 	/// [`crate::connect`]).
 	#[derive(usage::Cli)]

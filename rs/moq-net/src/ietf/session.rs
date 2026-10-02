@@ -9,7 +9,7 @@ use crate::{
 
 use super::{
 	Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter, auth, cluster, hidden, peer,
-	solicit, subscriber::is_protocol_violation,
+	request_update, solicit, subscriber::is_protocol_violation,
 };
 
 /// Everything one moq-transport session needs to start.
@@ -70,6 +70,12 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// peer's token requests during its handshake. Supports AUTH exactly when the
 	/// version can negotiate it; the peer's SETUP decides whether it does.
 	pub auth: crate::auth::Handle,
+
+	/// The extensions we offer in our SETUP (draft-17+). Without MoQ Solicit a peer that
+	/// speaks it sends an unsolicited PUBLISH_NAMESPACE (the base moq-transport behavior)
+	/// instead of answering our SUBSCRIBE_NAMESPACE inline. MoQ Auth is offered only when
+	/// [`Self::auth`] also supports it.
+	pub extensions: crate::setup::Extensions,
 }
 
 pub fn start<S>(config: Config<S>) -> Result<(MaybeSendBox<'static, Result<(), Error>>, crate::goaway::Handle), Error>
@@ -92,7 +98,10 @@ where
 		peer_setup_stream,
 		peer_declared,
 		auth,
+		extensions,
 	} = config;
+	let request_token = auth.request_token();
+	let solicit = extensions.solicit;
 
 	// GOAWAY wiring: the public Session holds one half (drain trigger, received
 	// signal), the protocol tasks below hold the other.
@@ -168,7 +177,8 @@ where
 					peer_setup.clone(),
 					version,
 				)
-				.with_auth(auth.clone());
+				.with_auth(auth.clone())
+				.with_request_token(request_token.clone());
 				let (tasks, mut task_set) = TaskSet::new();
 				let subscriber = Subscriber::new(
 					runtime.clone(),
@@ -183,7 +193,9 @@ where
 					tasks.clone(),
 					goaway.going_away.clone(),
 				)
-				.with_auth(auth.clone());
+				.with_auth(auth.clone())
+				.with_request_token(request_token.clone())
+				.with_solicit(solicit);
 
 				// GOAWAY send task: draft-14-16 carry GOAWAY on the shared control
 				// stream. Parked on the drain trigger; races the transport close so
@@ -309,9 +321,23 @@ where
 					let runtime = runtime.clone();
 					let session = session.clone();
 					let goaway = goaway.clone();
+					let extensions = crate::setup::Extensions {
+						auth: auth.supported(),
+						..extensions
+					};
 					async move {
-						if let Err(err) =
-							run_setup(runtime, session, version, path, authority, self_origin, cost, goaway).await
+						if let Err(err) = run_setup(
+							runtime,
+							session,
+							version,
+							path,
+							authority,
+							self_origin,
+							cost,
+							extensions,
+							goaway,
+						)
+						.await
 						{
 							tracing::warn!(%err, "setup send error");
 						}
@@ -327,9 +353,11 @@ where
 					let auth = auth.clone();
 					let origin = publish.clone();
 					let session = session.clone();
+					let request_token = request_token.clone();
+					let peer_setup = peer_setup.clone();
 					async move {
 						match client {
-							true => enforce_grant(auth, origin, session).await,
+							true => enforce_grant(auth, origin, session, request_token, peer_setup, version).await,
 							false => std::future::pending().await,
 						}
 					}
@@ -343,7 +371,8 @@ where
 					peer_setup.clone(),
 					version,
 				)
-				.with_auth(auth.clone());
+				.with_auth(auth.clone())
+				.with_request_token(request_token.clone());
 				let (tasks, mut task_set) = TaskSet::new();
 				let subscriber = Subscriber::new(
 					runtime.clone(),
@@ -358,7 +387,9 @@ where
 					tasks,
 					goaway.going_away.clone(),
 				)
-				.with_auth(auth.clone());
+				.with_auth(auth.clone())
+				.with_request_token(request_token.clone())
+				.with_solicit(solicit);
 
 				// Our tokens, one Auth request each, once the peer's SETUP negotiates it.
 				let present = auth::run_present(
@@ -604,6 +635,7 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 		solicit: solicit::from_setup(params, version)?,
 		hidden: hidden::from_setup(params, version),
 		auth: auth::from_setup(params, version) == Some(true),
+		max_request_updates: request_update::from_setup(params, version),
 	})
 }
 
@@ -612,8 +644,8 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 ///
 /// `path` is the request path we advertise (clients on URL-less transports); a
 /// server passes `None`. `self_origin` and `cost` are the MoQ Cluster options, which
-/// declare our identity and (client-only) what this link costs to cross. The MoQ Solicit
-/// declaration is unconditional, so it takes no argument.
+/// declare our identity and (client-only) what this link costs to cross. `extensions`
+/// names which moq-dev Setup Options we offer.
 #[allow(clippy::too_many_arguments)]
 async fn run_setup<S: crate::transport::poll::Session>(
 	runtime: crate::time::Clock,
@@ -623,6 +655,7 @@ async fn run_setup<S: crate::transport::poll::Session>(
 	authority: Option<String>,
 	self_origin: Hop,
 	cost: Option<u64>,
+	extensions: crate::setup::Extensions,
 	goaway: crate::goaway::Protocol,
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
@@ -639,9 +672,14 @@ async fn run_setup<S: crate::transport::poll::Session>(
 		parameters.set_bytes(ietf::ParameterBytes::Authority, authority.into_bytes());
 	}
 	cluster::peer_into_setup(&mut parameters, self_origin, cost, version);
-	solicit::into_setup(&mut parameters, version);
+	if extensions.solicit {
+		solicit::into_setup(&mut parameters, version);
+	}
 	hidden::into_setup(&mut parameters, version);
-	auth::into_setup(&mut parameters, version);
+	if extensions.auth {
+		auth::into_setup(&mut parameters, version);
+	}
+	request_update::into_setup(&mut parameters, version);
 	let parameters = parameters.encode_bytes(version)?;
 
 	writer.encode(&setup::Setup { parameters }).await?;
@@ -836,6 +874,13 @@ where
 	}
 }
 
+/// Whether to serve an inbound AUTH stream: only when the peer advertised MoQ Auth AND this
+/// endpoint offered it (its handle is supported). The Auth draft's Setup Negotiation requires
+/// both offers; without this endpoint's offer, an inbound AUTH stream is a protocol violation.
+fn serve_inbound_auth(peer_offered: bool, local_supported: bool) -> bool {
+	peer_offered && local_supported
+}
+
 /// Accept incoming bidi streams and dispatch to the correct handler based on message type.
 async fn run_dispatch<S>(
 	session: S,
@@ -855,12 +900,12 @@ where
 	// costs a handshake round rather than blocking.
 	let peer = subscriber.peer().await;
 
-	// An AUTH from a peer that did not negotiate MoQ Auth is an unknown request, which
-	// falls through to the protocol violation below.
-	let serve = match peer_setup.get().await.auth {
-		true => serve,
-		false => None,
-	};
+	// Serve inbound AUTH only when both endpoints negotiated it. The handle carries
+	// `peer.auth && local.auth` from the handshake, so a peer that advertised AUTH this
+	// endpoint never offered leaves no serve task and its AUTH stream falls through to the
+	// protocol violation below, as the Auth draft's Setup Negotiation requires both offers.
+	let peer_auth = peer_setup.get().await.auth;
+	let serve = serve.filter(|serve| serve_inbound_auth(peer_auth, serve.handle.supported()));
 
 	// From the same slot, so this costs nothing extra: it decides whether an unsolicited
 	// advertisement is the peer ignoring our own SETUP (MoQ Solicit).
@@ -1039,7 +1084,18 @@ async fn enforce_grant<S: crate::transport::poll::Session>(
 	auth: crate::auth::Handle,
 	origin: origin::Consumer,
 	mut session: S,
+	request_token: crate::RequestToken,
+	peer_setup: peer::PeerSetup,
+	version: Version,
 ) -> Result<(), Error> {
+	// A request token authorizes an announce outside the connection grant only when the
+	// announce carries it, which is when it rides its own PUBLISH_NAMESPACE request: always on
+	// draft-14/15, and on later drafts unless the peer requires solicitation, which turns every
+	// advertisement into an inline NAMESPACE entry with no token slot. Then the grant still
+	// bounds what we publish.
+	if request_token.peek().is_some() && announces_carry_token(&peer_setup, version).await {
+		return Ok(());
+	}
 	let mut announced = origin.announced();
 	let mut check = crate::auth::Enforce::default();
 	let Some(path) = kio::wait(|waiter| check.poll(&auth, &mut announced, waiter)).await else {
@@ -1054,10 +1110,35 @@ async fn enforce_grant<S: crate::transport::poll::Session>(
 	Err(err)
 }
 
+/// Whether our announces will ride their own PUBLISH_NAMESPACE requests, the only form that
+/// carries a request token, rather than inline NAMESPACE entries. Draft-14/15 predate
+/// NAMESPACE; later drafts send requests unless the peer requires solicitation.
+async fn announces_carry_token(peer_setup: &peer::PeerSetup, version: Version) -> bool {
+	match version {
+		Version::Draft14 | Version::Draft15 => true,
+		_ => !peer_setup.get().await.solicit.unwrap_or(false),
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
 	use crate::model::ProduceTest;
+
+	// An inbound AUTH is served only when both sides offered it. Before the fix the dispatch
+	// kept the serve task on the peer's offer alone, so a server that declined MoQ Auth still
+	// served a client that offered it; now a declined local offer drops the serve task and the
+	// AUTH stream becomes an UnexpectedStream protocol violation.
+	#[test]
+	fn inbound_auth_requires_both_offers() {
+		assert!(serve_inbound_auth(true, true), "both offered: serve it");
+		assert!(
+			!serve_inbound_auth(true, false),
+			"peer offered, this endpoint declined: an inbound AUTH is a protocol violation"
+		);
+		assert!(!serve_inbound_auth(false, true), "peer did not offer: nothing to serve");
+		assert!(!serve_inbound_auth(false, false), "neither offered");
+	}
 
 	fn occurrences(log: &crate::lite::test_transport::Log, needle: &[u8]) -> usize {
 		let writes = log.writes.lock().unwrap();
@@ -1128,6 +1209,7 @@ mod tests {
 				..Default::default()
 			}),
 			auth: crate::auth::Handle::new(false),
+			extensions: Default::default(),
 		})
 		.expect("start the session");
 
@@ -1181,6 +1263,7 @@ mod tests {
 			// The requests wait on the peer's SETUP (MoQ Hidden).
 			peer_declared: Some(peer::Peer::default()),
 			auth: crate::auth::Handle::new(false),
+			extensions: Default::default(),
 		})
 		.expect("start the session");
 		let _driver = tokio::spawn(driver);
@@ -1202,6 +1285,85 @@ mod tests {
 	/// paused in these tests, so each turn costs nothing and only runs the driver until it
 	/// parks again; a busy machine cannot turn a slow announce into a passing silence.
 	const ANNOUNCE_TURNS: usize = 100;
+
+	/// A client that presents a request token authorizes each announce at the server when the
+	/// announce carries the token, so dialing-side grant enforcement stands down for a peer
+	/// that takes unsolicited PUBLISH_NAMESPACE requests: enforcing it would close the client
+	/// for announcing outside the connection grant the token was meant to extend.
+	#[tokio::test]
+	async fn a_client_may_send_a_token_bearing_request_its_connection_grant_does_not_cover() {
+		let auth = crate::auth::Handle::new(true);
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let _cam = origin.announce("room/alice", crate::origin::Route::default()).unwrap();
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let log = session.log.clone();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer {
+			solicit: Some(false),
+			..Default::default()
+		});
+
+		let result = enforce_grant(
+			auth,
+			origin.consume(),
+			session,
+			crate::RequestToken::new(Some(bytes::Bytes::from_static(b"jwt"))),
+			peer_setup,
+			Version::Draft18,
+		)
+		.await;
+
+		assert!(
+			result.is_ok(),
+			"a token-bearing client must not be closed by grant enforcement"
+		);
+		assert!(
+			log.closes().is_empty(),
+			"the session must stay open for a token-bearing client"
+		);
+	}
+
+	/// When the peer requires solicitation, every advertisement is an inline NAMESPACE entry,
+	/// which has no slot for a request token. A token set for SUBSCRIBE must not let the client
+	/// advertise outside its connection grant there: the grant is still enforced.
+	#[tokio::test]
+	async fn a_request_token_does_not_lift_the_grant_when_announces_are_inline() {
+		let auth = crate::auth::Handle::new(true);
+		let setup = auth.present(bytes::Bytes::new(), true).unwrap();
+		auth.granted(
+			0,
+			crate::auth::Grant {
+				publish: crate::Pattern::subtree("room/alice").unwrap().into(),
+				subscribe: crate::Patterns::new(),
+				expires: None,
+			},
+		);
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let _cam = origin
+			.announce("room/bob/cam", crate::origin::Route::default())
+			.unwrap();
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let log = session.log.clone();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer {
+			solicit: Some(true),
+			..Default::default()
+		});
+
+		let result = enforce_grant(
+			auth,
+			origin.consume(),
+			session,
+			crate::RequestToken::new(Some(bytes::Bytes::from_static(b"jwt"))),
+			peer_setup,
+			Version::Draft18,
+		)
+		.await;
+
+		assert!(matches!(result, Err(Error::Unauthorized)), "{result:?}");
+		assert_eq!(log.closes().len(), 1, "the session closes on the uncovered announce");
+		drop(setup);
+	}
 
 	/// Run a publish-only session against a peer that declared `peer_declared`, returning
 	/// how many times the namespace reached the wire.
@@ -1233,6 +1395,7 @@ mod tests {
 			peer_setup_stream: None,
 			peer_declared,
 			auth: crate::auth::Handle::new(false),
+			extensions: Default::default(),
 		})
 		.expect("start the session");
 		let _driver = tokio::spawn(driver);
@@ -1334,6 +1497,7 @@ mod tests {
 				..Default::default()
 			}),
 			auth: handle.clone(),
+			extensions: Default::default(),
 		})
 		.expect("start the session");
 		AuthSession {
@@ -1447,6 +1611,7 @@ mod tests {
 			// carry and the dispatch loop actually runs.
 			peer_declared: Some(peer::Peer::default()),
 			auth: crate::auth::Handle::new(false),
+			extensions: Default::default(),
 		})
 		.expect("start the session");
 
@@ -1486,6 +1651,7 @@ mod tests {
 				peer_setup_stream: None,
 				peer_declared: Some(peer::Peer::default()),
 				auth: crate::auth::Handle::new(false),
+				extensions: Default::default(),
 			})
 			.expect("start the session");
 
@@ -1612,6 +1778,7 @@ mod tests {
 				request_id: RequestId(1),
 				track_namespace: crate::Path::new("room/host"),
 				cluster: None,
+				authorization_token: None,
 			})
 			.await
 			.unwrap();
@@ -1683,6 +1850,7 @@ mod tests {
 			peer_setup_stream: None,
 			peer_declared: None,
 			auth: crate::auth::Handle::new(false),
+			extensions: Default::default(),
 		})
 		.expect("start the session");
 		let driver = tokio::spawn(driver);

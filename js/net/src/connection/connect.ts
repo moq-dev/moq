@@ -9,6 +9,7 @@ import * as Hex from "../util/hex.ts";
 import { dev, redact } from "../util/log.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import type { Established } from "./established.ts";
+import * as Extensions from "./extensions.ts";
 import { forwardAnnounced } from "./forward.ts";
 import { exchangeSetup } from "./handshake.ts";
 
@@ -110,6 +111,9 @@ export interface ConnectProps {
 	 */
 	consume?: OriginProducer;
 
+	/** The moq-transport extensions to offer; each is on unless set to `false`. */
+	extensions?: Extensions.Extensions;
+
 	/**
 	 * Aborts the connection attempt with the signal's reason. An already-aborted
 	 * signal rejects before anything opens, and aborting after the connection is
@@ -124,6 +128,8 @@ type SessionProps = {
 	publish?: OriginConsumer;
 	/** Whether this side dialed; only the dialing side aborts on a publication its grant does not cover. */
 	client: boolean;
+	/** The moq-transport extensions this side offers. */
+	extensions: Extensions.Offered;
 };
 
 // Save if WebSocket won the last race, so we won't give QUIC a head start next time.
@@ -170,6 +176,7 @@ async function connectInner(url: URL, props: Omit<ConnectProps, "url">, abort: P
 		discovery: props.discovery ?? true,
 		publish: props.publish,
 		client: true,
+		extensions: Extensions.offered(props.extensions),
 	};
 
 	if (props.transport) {
@@ -308,7 +315,7 @@ async function negotiate(url: URL, session: WebTransport, wiring: SessionProps):
 	const params = new Ietf.SetupOptions();
 	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n);
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
-	Ietf.solicitIntoSetup(params);
+	Extensions.intoSetup(params, wiring.extensions, setupVersion);
 	Ietf.hiddenIntoSetup(params);
 
 	const client = new Ietf.ClientSetup({
@@ -365,7 +372,12 @@ async function handshakeAlpn(
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
 ): Promise<Established> {
-	const { control, solicit, hidden, cluster, auth } = await exchangeSetup(session, version, "moq-lite-js");
+	const { control, solicit, hidden, cluster, auth } = await exchangeSetup(
+		session,
+		version,
+		"moq-lite-js",
+		wiring.extensions,
+	);
 
 	return new Ietf.Connection({
 		...wiring,

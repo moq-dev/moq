@@ -164,6 +164,27 @@ TOKEN` option with Token Type 0; `moq auth serve` verifies it the same way. HMAC
 can itself be **scoped** at generation (`--root`, `--publish`, `--subscribe`),
 after which it can never sign a broader token.
 
+### On a request
+
+The same `AUTHORIZATION TOKEN` may ride an individual request (SUBSCRIBE,
+REQUEST\_UPDATE, PUBLISH\_NAMESPACE, FETCH, PUBLISH, SUBSCRIBE\_NAMESPACE,
+TRACK\_STATUS), not only the SETUP. A request is authorized by the session's
+grant first; when that does not cover the request's path, by the token on the
+request; with neither it is refused `UNAUTHORIZED`. A request token's grant
+covers only the request it rode on, never widens the session, and ends when
+the request ends. A REQUEST\_UPDATE carrying a fresh token refreshes it, so a
+long-lived request (an ingest PUBLISH\_NAMESPACE, a subscription) renews its
+credential in place without reconnecting; a refused renewal leaves the old
+grant standing until it lapses.
+
+Verifying a request token is a moq-net library capability: an application takes
+`auth::Handle::requests()` before running the session and answers each token
+tagged with the request's path and kind (`auth::Request::path()`, `::kind()`).
+moq-relay does not yet opt in on the request path, so as of this release it
+refuses a request token with `NOT_SUPPORTED`; wiring a per-request lease into
+the `--auth-url` server and the in-process [`admissions()`](#in-process) API is
+a follow-up.
+
 ### Claims
 
 | Claim | Meaning |

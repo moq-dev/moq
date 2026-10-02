@@ -211,6 +211,11 @@ const MSG_PARAM_HIDDEN = 0x40b5en;
 
 // Bytes parameter IDs (odd)
 const MSG_PARAM_LARGEST_OBJECT = 0x09n;
+/// AUTHORIZATION TOKEN (0x03): a per-request credential (MoQ request-token). This client has
+/// no accept-side consumer to verify one, so it is decoded and dropped; an uncovered request
+/// is then refused by the session grant as before. Recognizing it keeps a draft-17+ peer that
+/// presents a token from failing the whole message on an unknown parameter.
+const MSG_PARAM_AUTHORIZATION_TOKEN = 0x03n;
 const MSG_PARAM_SUBSCRIPTION_FILTER = 0x21n;
 /// FILL_PARAMETERS, draft-20's request for a backfill.
 const MSG_PARAM_FILL_PARAMETERS = 0x23n;
@@ -245,6 +250,7 @@ function getMessageParamKind(id: bigint): MessageParamKind {
 		case MSG_PARAM_FILL_PARAMETERS:
 		case MSG_PARAM_INCLUDE_PROPERTIES:
 		case MSG_PARAM_HOP_PATH:
+		case MSG_PARAM_AUTHORIZATION_TOKEN:
 			return "bytes";
 		default:
 			throw new Error(`unknown message parameter id: ${id.toString()}`);

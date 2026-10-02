@@ -162,6 +162,7 @@ impl Message for Fetch<'_> {
 			_ => {
 				let fetch_type = FetchType::decode(buf, version)?;
 				decode_params!(buf, version,
+					0x03 => _authorization_token: Option<bytes::Bytes>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x22 => group_order: Option<GroupOrder>,
 				);
@@ -754,6 +755,50 @@ mod tests {
 			0, // zero message parameters
 		];
 		assert_eq!(encode_message(&msg, Version::Draft18), expected);
+	}
+
+	/// A request-token peer may present an AUTHORIZATION TOKEN (0x03) on a FETCH. The strict
+	/// decoder consumes it and the legacy trailing block carries it, so the message is
+	/// accepted rather than failing the session; the token itself is dropped (a FETCH is not
+	/// authorized by a request token yet).
+	#[test]
+	fn fetch_accepts_a_dropped_authorization_token() -> Result<(), EncodeError> {
+		let token = &[0x03u8, 0x81, 0x2c, 0x00, 0xff];
+		let standalone = || FetchType::Standalone {
+			namespace: Path::new("room"),
+			track: "video".into(),
+			start: Location { group: 0, object: 0 },
+			end: Location { group: 1, object: 0 },
+		};
+
+		// Strict (draft-18): the parameter is consumed by decode_params.
+		let version = Version::Draft18;
+		let mut body = BytesMut::new();
+		RequestId(1).encode(&mut body, version).unwrap();
+		standalone().encode(&mut body, version).unwrap();
+		encode_params!(&mut body, version, 0x03 => Some(bytes::Bytes::from_static(token)));
+		let mut buf = body.freeze();
+		assert_eq!(
+			Fetch::decode_msg(&mut buf, version)
+				.expect("strict token accepted")
+				.request_id,
+			RequestId(1)
+		);
+		assert!(buf.is_empty());
+
+		// Legacy (draft-14): the token rides the trailing parameter block.
+		let version = Version::Draft14;
+		let mut params = crate::ietf::Parameters::default();
+		params.set_bytes(crate::ietf::ParameterBytes::AuthorizationToken, token.to_vec());
+		let mut body = BytesMut::new();
+		RequestId(1).encode(&mut body, version).unwrap();
+		128u8.encode(&mut body, version).unwrap();
+		GroupOrder::Descending.encode(&mut body, version).unwrap();
+		standalone().encode(&mut body, version).unwrap();
+		params.encode(&mut body, version).unwrap();
+		let mut buf = body.freeze();
+		Fetch::decode_msg(&mut buf, version).expect("legacy token accepted");
+		Ok(())
 	}
 }
 

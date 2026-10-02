@@ -28,6 +28,11 @@ pub enum SessionError {
 	#[error("protocol violation")]
 	ProtocolViolation,
 
+	/// The peer left more unacknowledged REQUEST_UPDATEs outstanding on one request stream
+	/// than the MAX_REQUEST_UPDATES it was advertised (draft-19 section 10.3.1.7).
+	#[error("too many request updates")]
+	TooManyRequestUpdates,
+
 	/// A key-value pair was malformed or repeated more than allowed.
 	#[error("key-value formatting error")]
 	KeyValueFormatting,
@@ -65,6 +70,7 @@ impl SessionError {
 			Self::GoawayTimeout => 0x10,
 			Self::Timeout => 0x11,
 			Self::Version => 0x15,
+			Self::TooManyRequestUpdates => 0x1B,
 			Self::App(app) => *app as u32 + 64,
 			Self::Unknown(code) => *code,
 		}
@@ -85,6 +91,7 @@ impl SessionError {
 			0x10 => Self::GoawayTimeout,
 			0x11 => Self::Timeout,
 			0x15 => Self::Version,
+			0x1B => Self::TooManyRequestUpdates,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
 				Err(_) => Self::Unknown(code),
@@ -630,6 +637,7 @@ mod tests {
 			SessionError::Internal,
 			SessionError::Unauthorized,
 			SessionError::ProtocolViolation,
+			SessionError::TooManyRequestUpdates,
 			SessionError::KeyValueFormatting,
 			SessionError::GoawayTimeout,
 			SessionError::Timeout,

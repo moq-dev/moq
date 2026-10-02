@@ -90,6 +90,27 @@ async function encodeFetchFrameVersioned(
 	return concatChunks(written);
 }
 
+test("message parameters accept and drop an AUTHORIZATION TOKEN (0x03)", async () => {
+	// A request-token peer may present the token on SUBSCRIBE, FETCH, PUBLISH, TRACK_STATUS,
+	// PUBLISH_NAMESPACE or SUBSCRIBE_NAMESPACE. draft-16 tolerates unknown parameters
+	// generically; a draft-18 strict decoder must recognize 0x03 or it fails the whole
+	// message. We have no accept-side consumer, so the value is decoded and dropped.
+	const token = new Uint8Array([0x03, 0x81, 0x2c, 0x00, 0xff]);
+	for (const version of [Version.DRAFT_16, Version.DRAFT_18]) {
+		const params = new Parameters();
+		params.bytes.set(0x03n, token);
+
+		const { stream, written } = createTestWritableStream();
+		const writer = new Writer(stream, version);
+		await params.encode(writer, version);
+		writer.close();
+		await writer.closed;
+
+		const decoded = await Parameters.decode(new Reader(undefined, concatChunks(written), version), version);
+		expect(decoded.bytes.get(0x03n)).toEqual(token);
+	}
+});
+
 test("DEFAULT_PUBLISHER_PRIORITY has exact SUBSCRIBE_OK bytes per draft", async () => {
 	for (const version of [
 		Version.DRAFT_14,

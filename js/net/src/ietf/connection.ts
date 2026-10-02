@@ -71,6 +71,8 @@ export class Connection implements Established {
 
 	// What the peer declared about being solicited; see {@link Ietf.solicitFromSetup}.
 	#solicit: boolean | undefined;
+	/** Whether our SETUP declared MoQ Solicit, which is what makes an unasked announce a fault. */
+	#declaredSolicit: boolean;
 
 	// The Hop IDs this session declared; see {@link Cluster}.
 	#cluster?: Cluster.Hops;
@@ -103,6 +105,7 @@ export class Connection implements Established {
 		hidden = false,
 		cluster,
 		auth = false,
+		extensions,
 	}: {
 		url: URL;
 		quic: WebTransport;
@@ -126,8 +129,10 @@ export class Connection implements Established {
 		 * cannot negotiate the extension, as is a `peer` the peer never declared.
 		 */
 		cluster?: Cluster.Hops;
-		/** Whether the peer's SETUP offered MoQ Auth (draft-17+). */
+		/** Whether MoQ Auth is negotiated (draft-17+): offered by both SETUPs. */
 		auth?: boolean;
+		/** What our own SETUP offered; every extension when omitted. */
+		extensions?: { solicit: boolean };
 	}) {
 		this.url = url;
 		this.discovery = discovery;
@@ -180,6 +185,7 @@ export class Connection implements Established {
 			ready: this.#auth.setupAnswered(),
 		});
 		this.#solicit = solicit;
+		this.#declaredSolicit = extensions?.solicit ?? true;
 		this.#cluster = cluster;
 		this.#subscriber = new Subscriber({ session: this.#session, quic, cluster, hidden, grant: this.#auth.grant });
 		registerWire(this, { consume: (path) => this.#subscriber.consume(path) });
@@ -300,18 +306,19 @@ export class Connection implements Established {
 					Cluster.negotiated(this.#cluster),
 				);
 
-				// We always declare that advertisements to us must be solicited (MoQ
-				// Solicit), and writing the option at all proves the peer implements the
-				// extension, whichever value it chose. It also cannot have advertised
-				// before reading our SETUP, since our SETUP is what says whether
+				// Unless told otherwise we declare that advertisements to us must be
+				// solicited (MoQ Solicit), and writing the option at all proves the peer
+				// implements the extension, whichever value it chose. It also cannot have
+				// advertised before reading our SETUP, since our SETUP is what says whether
 				// advertising unasked is allowed. So this is a bug in the peer, and a
-				// silent one on both sides if we tolerate it.
+				// silent one on both sides if we tolerate it. Without our declaration an
+				// unasked announce is what we invited.
 				//
 				// Draft-14/15 are exempt: they have no inline NAMESPACE, so a
 				// PUBLISH_NAMESPACE request is also how a peer answers our
 				// SUBSCRIBE_NAMESPACE there, and the message alone does not say which.
 				const legacy = this.#session.version === Version.DRAFT_14 || this.#session.version === Version.DRAFT_15;
-				if (this.#solicit !== undefined && !legacy) {
+				if (this.#declaredSolicit && this.#solicit !== undefined && !legacy) {
 					console.error(
 						`unsolicited publish_namespace from a peer that implements MoQ Solicit: broadcast=${msg.trackNamespace}`,
 					);

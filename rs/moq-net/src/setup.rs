@@ -19,6 +19,28 @@ const SERVER_SETUP: u8 = 0x21;
 /// Draft-17 unified SETUP message type (varint 0x2F00)
 pub(crate) const SETUP_V17: u64 = 0x2F00;
 
+/// The moq-transport Setup Options this side offers, each on by default. Turning one off
+/// connects as a peer that does not speak that extension; moq-lite carries both in its core.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
+pub struct Extensions {
+	/// The MoQ Auth extension: tokens presented and granted on their own stream.
+	pub auth: bool,
+	/// The MoQ Solicit extension: the peer answers our SUBSCRIBE_NAMESPACE rather than
+	/// announcing unasked.
+	pub solicit: bool,
+}
+
+impl Default for Extensions {
+	fn default() -> Self {
+		Self {
+			auth: true,
+			solicit: true,
+		}
+	}
+}
+
 /// A credential a moq-transport peer presented in its SETUP's `AUTHORIZATION TOKEN` option.
 ///
 /// The transport never reads the bytes; verifying them is the application's job.

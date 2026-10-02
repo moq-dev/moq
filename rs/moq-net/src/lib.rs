@@ -100,6 +100,7 @@ pub mod stats;
 pub mod time;
 pub mod transport;
 
+pub(crate) use auth::RequestToken;
 pub use client::*;
 pub use coding::{BoundsExceeded, DecodeError, EncodeError, VarInt};
 pub use driver::Driver;

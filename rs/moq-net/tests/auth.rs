@@ -20,6 +20,9 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 const LITE_06: &str = "moq-lite-06";
 /// The first draft that negotiates MoQ Auth, and the newest.
 const MOQT_17: &str = "moq-transport-17";
+/// A draft at the deployed floor, used for the request-token launch shape.
+const MOQT_18: &str = "moq-transport-18";
+const MOQT_19: &str = "moq-transport-19";
 const MOQT_22: &str = "moq-transport-22";
 
 /// Run each case on every version that exchanges AUTH.
@@ -164,6 +167,14 @@ struct Options {
 	server_subscribe: Option<origin::Producer>,
 	/// Take the server's AUTH requests before its driver runs.
 	server_requests: bool,
+	/// A request token the client attaches to its outgoing PUBLISH_NAMESPACE / SUBSCRIBE.
+	client_request_token: Option<Vec<u8>>,
+	/// The client does not offer the MoQ Auth extension (`Extensions::auth` off).
+	client_decline_auth: bool,
+	/// The server does not offer the MoQ Solicit extension (`Extensions::solicit` off).
+	server_decline_solicit: bool,
+	/// The server does not offer the MoQ Auth extension (`Extensions::auth` off).
+	server_decline_auth: bool,
 	version: Option<&'static str>,
 }
 
@@ -188,8 +199,19 @@ async fn connect(opts: Options) -> Pair {
 	if let Some(subscribe) = opts.client_subscribe {
 		client = client.with_subscriber(subscribe);
 	}
+	if opts.client_decline_auth {
+		let mut extensions = moq_net::setup::Extensions::default();
+		extensions.auth = false;
+		client = client.with_extensions(extensions);
+	}
 
 	let mut server = Server::new().with_versions(version.into());
+	if opts.server_decline_solicit || opts.server_decline_auth {
+		let mut extensions = moq_net::setup::Extensions::default();
+		extensions.solicit = !opts.server_decline_solicit;
+		extensions.auth = !opts.server_decline_auth;
+		server = server.with_extensions(extensions);
+	}
 	if let Some(publish) = &opts.server_publish {
 		server = server.with_publisher(publish);
 	}
@@ -199,8 +221,13 @@ async fn connect(opts: Options) -> Pair {
 
 	let observe = client_transport.clone();
 	let observe_server = server_transport.clone();
+	let client_token = opts.client_request_token;
 	let client_fut = async {
 		let (session, driver) = client.connect(now(), client_transport).await.expect("client handshake");
+		// Set before the driver runs, so the first request already carries it.
+		if let Some(token) = client_token {
+			session.auth().set_request_token(token);
+		}
 		tokio::spawn(run(driver));
 		session
 	};
@@ -329,6 +356,459 @@ async fn an_out_of_scope_announce_aborts_with_the_path(version: &'static str) {
 		let (code, reason) = pair.client_transport.close_reason().expect("closed");
 		assert_eq!(code, SessionError::Unauthorized.to_code());
 		assert_eq!(reason, "unauthorized: foo/bar");
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A request token on a PUBLISH_NAMESPACE authorizes the announce on a session that never
+/// negotiated the MoQ Auth extension (draft-14), the standard moq-transport peer shape, when the
+/// token reaches the acceptor THROUGH THE DRIVER rather than an inline `verify_request`.
+///
+/// This exercises `ietf::start`'s legacy (draft 14-16) branch. That branch built its
+/// Subscriber without `.with_auth(auth)`, so the driver's subscriber consulted a fresh
+/// default `Handle` instead of the session handle the `requests()` acceptor was installed on:
+/// `verify_request` found no `App` acceptor and refused the announce `NOT_SUPPORTED`, and the
+/// announce never reached the server origin. The modern (17+) branch already wired
+/// `.with_auth`, so only the legacy / no-extension path was affected, and the unit tests
+/// missed it by constructing the Subscriber with `.with_auth` by hand.
+#[tokio::test]
+async fn a_request_token_authorizes_a_legacy_announce_through_the_driver() {
+	within(async {
+		let publisher = produce_origin(2);
+		let relay = produce_origin(1);
+		let mut pair = connect(Options {
+			version: Some("moq-transport-14"),
+			client_publish: Some(publisher.clone()),
+			// USE_VALUE (0x03), token kind 0, value "ok": a decodable request token the
+			// acceptor answers unconditionally below.
+			client_request_token: Some(vec![0x03, 0x00, b'o', b'k']),
+			server_subscribe: Some(relay.scope("", &patterns(&["room/alice"])).unwrap()),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+
+		// The server answers the request token from its acceptor with a grant covering the
+		// announced path. Held for the test by the returned receiver.
+		let requests = pair.requests.take().expect("server took its requests pre-ok");
+		let mut answered = serve(requests, |_token| Some(grant(&["room/alice"], &["room/alice"])));
+
+		// The client announces under the token. On the legacy path there is no session grant,
+		// so the token is the only authorization for the announce.
+		let bc = publisher.create_broadcast("room/alice").unwrap();
+		bc.announce(Default::default()).unwrap();
+
+		// Mechanism: the token reached the acceptor over the driver (not admitted by a
+		// permissive default, and not refused NOT_SUPPORTED by a disconnected handle).
+		let (_token, _issued) = answered.recv().await.expect("the token reached the acceptor");
+
+		// End to end: the verified announce reached the server's subscribe origin.
+		wait_announced(&relay.consume(), "room/alice", true).await;
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A client may decline the MoQ Auth extension, connecting at draft-18 as a peer that
+/// does not negotiate it (a non-moq-dev encoder or CDN). Its SETUP omits the option, so
+/// the server sees `declared.auth == false` and the session carries no connection grant
+/// (`None` union). A request-borne `AUTHORIZATION TOKEN` is then the authorizing artifact
+/// and reaches the server's acceptor, where a normal draft-18 client's connection grant
+/// would cover the request and skip the token. A token-less request on such a
+/// session is admitted by the permissive default of the ungranted session.
+///
+/// The token is exercised on a SUBSCRIBE, which is always a request and carries the token
+/// on every draft. A request token on a PUBLISH_NAMESPACE does NOT reach a moq-net peer at
+/// draft-16+ regardless of this option: moq-net declares MoQ Solicit unconditionally, so
+/// the announce answers the peer's SUBSCRIBE_NAMESPACE inline via `ietf::Namespace`, which
+/// carries no token, and the token-bearing unsolicited PUBLISH_NAMESPACE loop is disabled.
+/// A server that does not offer the MoQ Auth extension leaves it un-negotiated even with a
+/// client that offers it: neither side presents a session token.
+#[tokio::test]
+async fn a_server_may_decline_the_auth_extension() {
+	within(async {
+		// Control: with the default extensions the client's connection credential earns a grant.
+		let offered = connect(Options {
+			version: Some(MOQT_18),
+			..Default::default()
+		})
+		.await;
+		wait_for(offered.client.auth().grant(), Option::is_some).await.unwrap();
+
+		let declined = connect(Options {
+			version: Some(MOQT_18),
+			server_decline_auth: true,
+			..Default::default()
+		})
+		.await;
+		let granted = tokio::time::timeout(
+			Duration::from_millis(200),
+			wait_for(declined.client.auth().grant(), Option::is_some),
+		)
+		.await;
+		assert!(granted.is_err(), "no grant without the extension: {granted:?}");
+		assert!(matches!(declined.client.auth().add("x").await, Err(Error::Unsupported)));
+	})
+	.await
+	.expect("timed out");
+}
+
+#[tokio::test]
+async fn a_client_may_decline_the_auth_extension() {
+	within(async {
+		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
+		let prefs = || moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10));
+		let server_origin = produce_origin(1);
+		let down = server_origin.create_broadcast("room/alice").unwrap();
+		let down_track = down.create_track("video", None).unwrap();
+		down.announce(Default::default()).unwrap();
+
+		let received = produce_origin(3);
+		let mut pair = connect(Options {
+			version: Some(MOQT_18),
+			client_subscribe: Some(received.clone()),
+			// USE_VALUE (0x03), token kind 0, value "ok".
+			client_request_token: Some(vec![0x03, 0x00, b'o', b'k']),
+			client_decline_auth: true,
+			server_publish: Some(server_origin.clone()),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+
+		// declared.auth == false: the declining client speaks no AUTH, so it holds no
+		// session grant and cannot present a session token (unlike a normal draft-18 peer).
+		assert_eq!(pair.client.auth().grant().peek(), None);
+		assert!(matches!(pair.client.auth().add("x").await, Err(Error::Unsupported)));
+
+		// The client's token-bearing SUBSCRIBE reaches the acceptor: on the `None`-union
+		// session the covers-gate does not short-circuit, so the token is verified rather
+		// than admitted by a covering connection grant.
+		let requests = pair.requests.take().expect("server took its requests pre-ok");
+		let mut answered = serve(requests, |_token| Some(grant(&["room/alice"], &["room/alice"])));
+
+		let remote = received.consume().routed_broadcast("room/alice").await.unwrap();
+		let mut sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
+		let mut group = down_track.append_group().unwrap();
+		group.write_frame(ts(0), b"down".as_ref()).unwrap();
+
+		let (_token, _issued) = answered.recv().await.expect("the token reached the acceptor");
+		sub.recv_group().await.unwrap().unwrap();
+
+		// Token-less: a declining client with no token is admitted by the permissive default.
+		let bare_publisher = produce_origin(4);
+		let bare_relay = produce_origin(5);
+		let bare = connect(Options {
+			version: Some(MOQT_18),
+			client_publish: Some(bare_publisher.clone()),
+			client_decline_auth: true,
+			server_subscribe: Some(bare_relay.clone()),
+			..Default::default()
+		})
+		.await;
+		let bc = bare_publisher.create_broadcast("room/bob").unwrap();
+		bc.announce(Default::default()).unwrap();
+		wait_announced(&bare_relay.consume(), "room/bob", true).await;
+		assert_eq!(bare.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A request token renews over the wire: replacing it on the client's `Session::auth()`
+/// re-presents it on the live SUBSCRIBE as a REQUEST_UPDATE, the server's driver routes it to
+/// the acceptor, and the new grant keeps the subscription alive past the old one's expiry.
+/// Runs through both drivers at draft-18, in the shape a base moq-transport peer produces
+/// (no MoQ Auth, so the token is what authorizes).
+#[tokio::test]
+async fn a_request_token_renews_a_subscription_through_the_driver() {
+	within(async {
+		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
+		let prefs = || moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10));
+		let server_origin = produce_origin(1);
+		let down = server_origin.create_broadcast("room/alice").unwrap();
+		let down_track = down.create_track("video", None).unwrap();
+		down.announce(Default::default()).unwrap();
+
+		let first = vec![0x03, 0x00, b'a', b'a'];
+		let second = vec![0x03, 0x00, b'b', b'b'];
+		let received = produce_origin(3);
+		let mut pair = connect(Options {
+			version: Some(MOQT_18),
+			client_subscribe: Some(received.clone()),
+			client_request_token: Some(first.clone()),
+			client_decline_auth: true,
+			server_publish: Some(server_origin.clone()),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+
+		// The first token lapses in a second; the renewal never does. Real time, not a paused
+		// clock: both drivers and the mock transport run on their own tasks.
+		let expires = Some(now() + Duration::from_secs(1));
+		// The acceptor sees the Token structure's value, past its USE_VALUE header.
+		let renewal = second[2..].to_vec();
+		let requests = pair.requests.take().expect("server took its requests pre-ok");
+		let mut answered = serve(requests, move |token| {
+			let mut granted = grant(&[], &["room/alice"]);
+			if token != renewal.as_slice() {
+				granted.expires = expires;
+			}
+			Some(granted)
+		});
+
+		let remote = received.consume().routed_broadcast("room/alice").await.unwrap();
+		let mut sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
+		let mut group = down_track.append_group().unwrap();
+		group.write_frame(ts(0), b"one".as_ref()).unwrap();
+		group.finish().unwrap();
+		let (token, _first_issued) = answered.recv().await.expect("the first token reached the acceptor");
+		assert_eq!(token, first[2..]);
+		sub.recv_group().await.unwrap().unwrap();
+
+		pair.client.auth().set_request_token(second.clone());
+		let (token, _renewed) = answered.recv().await.expect("the renewal reached the acceptor");
+		assert_eq!(token, second[2..], "the replaced token rides the REQUEST_UPDATE");
+
+		// Past the first grant's expiry the subscription still delivers.
+		tokio::time::sleep(Duration::from_millis(1500)).await;
+		let mut group = down_track.append_group().unwrap();
+		group.write_frame(ts(2000), b"two".as_ref()).unwrap();
+		group.finish().unwrap();
+		sub.recv_group()
+			.await
+			.unwrap()
+			.expect("the renewed subscription is still live");
+		assert_eq!(
+			pair.client_transport.close_reason(),
+			None,
+			"renewal never touches the session"
+		);
+		// The same subscription carried on: a lapse would have ended it, and the client's
+		// re-subscribe would have reached the acceptor as another request.
+		assert!(
+			answered.try_recv().is_err(),
+			"the original subscription was renewed, not replaced"
+		);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// The sender honors the receiver's MAX_REQUEST_UPDATES credit: it keeps at most one
+/// renewal in flight per request and coalesces replacements that arrive while one is
+/// unanswered, so a burst of token changes never outruns the credit (draft-19 section
+/// 10.3.1.7).
+///
+/// Two drivers over the in-process transport at draft-19, where the serving side advertises
+/// and enforces a 16-update credit with a session close ([`SessionError::TooManyRequestUpdates`]).
+/// The acceptor holds the first renewal's verifier, the client replaces its token well past
+/// the credit, and the test asserts the connection stays up, only the held renewal reaches the
+/// acceptor, and resolving it releases exactly the newest token, not any coalesced between.
+///
+/// A fire-and-forget sender would put every renewal outstanding behind the held verifier and
+/// the serving side would close the session, losing every request on it.
+///
+/// [`SessionError::TooManyRequestUpdates`]: moq_net::SessionError::TooManyRequestUpdates
+#[tokio::test]
+async fn a_held_renewal_coalesces_a_burst_without_tripping_the_credit() {
+	within(async {
+		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
+		let prefs = || moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10));
+		let server_origin = produce_origin(1);
+		let down = server_origin.create_broadcast("room/alice").unwrap();
+		let down_track = down.create_track("video", None).unwrap();
+		down.announce(Default::default()).unwrap();
+
+		// USE_VALUE (0x03), token kind 0, then a distinct value per credential.
+		let token = |n: u8| vec![0x03, 0x00, b't', n];
+		let initial = token(0);
+		let received = produce_origin(3);
+		let mut pair = connect(Options {
+			version: Some(MOQT_19),
+			client_subscribe: Some(received.clone()),
+			client_request_token: Some(initial.clone()),
+			client_decline_auth: true,
+			server_publish: Some(server_origin.clone()),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+
+		// The acceptor runs concurrently with the subscribe (the initial token rides the
+		// SUBSCRIBE, so nothing reaches it until we subscribe). It reports every token it
+		// verifies and holds the first renewal's verifier until released, the way a relay with
+		// a slow authorizer would.
+		let mut requests = pair.requests.take().expect("server took its requests pre-ok");
+		let (seen_tx, mut seen) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+		let release = std::sync::Arc::new(tokio::sync::Notify::new());
+		let release_waiter = release.clone();
+		let acceptor = tokio::spawn(async move {
+			let mut issued = Vec::new();
+			let mut count = 0u64;
+			while let Some(request) = requests.next().await {
+				let token = request.token().to_vec();
+				count += 1;
+				// Request 1 is the initial SUBSCRIBE token; request 2 is the first renewal,
+				// held until the test releases it.
+				if count == 2 {
+					seen_tx.send(token).ok();
+					release_waiter.notified().await;
+				} else {
+					seen_tx.send(token).ok();
+				}
+				issued.push(request.accept(grant(&[], &["room/alice"])));
+			}
+		});
+
+		// Establish and deliver one group so the subscription is live. The initial token rides
+		// the SUBSCRIBE, which the acceptor (above) verifies concurrently.
+		let remote = received.consume().routed_broadcast("room/alice").await.unwrap();
+		let mut sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
+		let mut group = down_track.append_group().unwrap();
+		group.write_frame(ts(0), b"one".as_ref()).unwrap();
+		group.finish().unwrap();
+		sub.recv_group().await.unwrap().unwrap();
+		assert_eq!(
+			seen.recv().await.expect("initial token"),
+			initial[2..],
+			"the SUBSCRIBE carries the token"
+		);
+
+		// Replace the token once and let that one renewal reach the held acceptor, so the held
+		// renewal is deterministic regardless of scheduling.
+		pair.client.auth().set_request_token(token(1));
+		assert_eq!(
+			seen.recv().await.expect("first renewal"),
+			token(1)[2..],
+			"the first replacement goes out immediately"
+		);
+
+		// With that renewal held unanswered, replace the token many more times, spaced so the
+		// driver observes each: the scenario the credit guards. Far past any plausible credit,
+		// so the test keeps guarding if MAX_REQUEST_UPDATES grows. A fire-and-forget sender
+		// would put all of these outstanding behind the held verifier and the serving side
+		// would close the session with TOO_MANY_REQUEST_UPDATES, losing every request on it;
+		// the one-in-flight rule coalesces them behind the held one instead.
+		for n in 2..=64u8 {
+			pair.client.auth().set_request_token(token(n));
+			tokio::time::sleep(Duration::from_millis(5)).await;
+		}
+
+		assert_eq!(
+			pair.client_transport.close_reason(),
+			None,
+			"the burst never tripped the receiver's credit"
+		);
+		assert_eq!(
+			pair.server_transport.close_reason(),
+			None,
+			"the server never closed the session"
+		);
+
+		// Resolve the held verifier. The sender sends the coalesced renewal carrying the newest
+		// token, not any of the ones replaced between.
+		release.notify_one();
+		assert_eq!(
+			seen.recv().await.expect("coalesced renewal"),
+			token(64)[2..],
+			"the newest token wins; the rest are coalesced away"
+		);
+
+		// Only the newest coalesced renewal followed the held one: the burst collapsed to one,
+		// not a backlog queued behind it.
+		assert!(
+			tokio::time::timeout(Duration::from_millis(100), seen.recv())
+				.await
+				.is_err(),
+			"only the newest coalesced renewal followed, not a backlog"
+		);
+		assert_eq!(
+			pair.client_transport.close_reason(),
+			None,
+			"the session stayed up throughout"
+		);
+		acceptor.abort();
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A server may decline the MoQ Solicit extension, so a peer sends an unsolicited
+/// PUBLISH_NAMESPACE (the base moq-transport behavior) instead of answering our
+/// SUBSCRIBE_NAMESPACE inline. Only the unsolicited PUBLISH_NAMESPACE carries an
+/// `AUTHORIZATION TOKEN`; the inline `Namespace` entry has no parameter slot for one. So a
+/// request-borne token on an announce reaches the acceptor exactly when the server does not
+/// solicit, which is the shape a standard moq-transport peer (an encoder or CDN) always sends.
+///
+/// This runs at draft-18 (the deployed floor) in the launch shape: the client also declines
+/// the AUTH extension, so the session's union is `None`, the covers-gate does not short-circuit
+/// on a connection grant, and the request token is the authorizing artifact. The
+/// control half shows the default: with Solicit declared the client answers inline, no token
+/// reaches the acceptor, and the announce is admitted by the permissive default of the
+/// ungranted session.
+#[tokio::test]
+async fn a_server_that_declines_solicit_gets_a_token_bearing_unsolicited_announce() {
+	within(async {
+		// USE_VALUE (0x03), token kind 0, value "ok".
+		let request_token = vec![0x03, 0x00, b'o', b'k'];
+
+		// Server declines Solicit: the client sends an unsolicited PUBLISH_NAMESPACE carrying
+		// the token, which reaches the acceptor as a PublishNamespace request.
+		let publisher = produce_origin(1);
+		let relay = produce_origin(2);
+		let mut pair = connect(Options {
+			version: Some(MOQT_18),
+			client_publish: Some(publisher.clone()),
+			client_request_token: Some(request_token.clone()),
+			client_decline_auth: true,
+			server_subscribe: Some(relay.clone()),
+			server_decline_solicit: true,
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let bc = publisher.create_broadcast("room/alice").unwrap();
+		bc.announce(Default::default()).unwrap();
+
+		let requests = pair.requests.take().expect("server took its requests pre-ok");
+		let mut answered = serve(requests, |_token| Some(grant(&["room/alice"], &["room/alice"])));
+		// The announce is admitted once the token is granted.
+		wait_announced(&relay.consume(), "room/alice", true).await;
+		let (tok, _issued) = answered
+			.recv()
+			.await
+			.expect("the unsolicited PUBLISH_NAMESPACE carried the token to the acceptor");
+		assert_eq!(tok, b"ok", "the acceptor saw the request token's decoded value");
+
+		// Control: with Solicit declared (the default) the same client answers our
+		// SUBSCRIBE_NAMESPACE inline with a Namespace, which carries no token, so nothing
+		// reaches the acceptor. The announce is still admitted by the permissive default.
+		let publisher = produce_origin(3);
+		let relay = produce_origin(4);
+		let mut pair = connect(Options {
+			version: Some(MOQT_18),
+			client_publish: Some(publisher.clone()),
+			client_request_token: Some(request_token.clone()),
+			client_decline_auth: true,
+			server_subscribe: Some(relay.clone()),
+			// server_decline_solicit defaults false: the server declares Solicit.
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let bc = publisher.create_broadcast("room/carol").unwrap();
+		bc.announce(Default::default()).unwrap();
+
+		let requests = pair.requests.take().expect("server took its requests pre-ok");
+		let mut answered = serve(requests, |_token| Some(grant(&["room/carol"], &[])));
+		wait_announced(&relay.consume(), "room/carol", true).await;
+		assert!(
+			answered.try_recv().is_err(),
+			"a solicited (inline) announce carries no token, so the acceptor is never consulted"
+		);
 	})
 	.await
 	.expect("timed out");
@@ -697,6 +1177,8 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 			server_publish: Some(server_origin.clone()),
 			server_subscribe: Some(server_origin.clone()),
 			server_requests: true,
+			client_request_token: None,
+			..Default::default()
 		})
 		.await;
 		let mut issued = serve(pair.requests.take().unwrap(), |token| {
