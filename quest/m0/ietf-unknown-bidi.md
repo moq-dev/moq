@@ -23,8 +23,14 @@ Facts (`origin/main`, 2026-10-01):
 Decided (2026-10-01): unknown is fatal; defined but unsupported is refused per
 request. Rejected: making Rust lenient to match JS.
 
-Work: throw `ProtocolViolation` from the JS default arm, and add a bidi test in
-both languages. moq-lite is out of scope: its draft says an unknown stream type
+- JS reads the bidi type with `u53()`, which throws `RangeError` for a valid
+  varint above 2^53 before the switch runs, so `#runBidis` never sees a
+  `ProtocolViolation` for it either. The uni path already reads `u62()`.
+
+Work: read the bidi type at full wire width (`u62()`), throw
+`ProtocolViolation` from the JS default arm, and add a bidi test in both
+languages that asserts the PROTOCOL_VIOLATION close code for a small unknown
+type and one at or above 2^53. moq-lite is out of scope: its draft says an unknown stream type
 MUST be reset and MUST NOT be fatal, and both implementations comply.
 
 Public API: none. Wire: none; fixes conformance.

@@ -17,7 +17,10 @@ Facts (`origin/main`, 2026-10-01):
   pins that. An unknown `DataType` fails the handshake.
 - JS lite has no pre-SETUP gate: `#runUni` in `js/net/src/lite/connection.ts`
   handles SETUP like any other uni stream, so early groups already work. It
-  also accepts a second SETUP silently.
+  also accepts a second SETUP silently, and the `#runUnis` catch only stops the
+  stream, so throwing `ProtocolViolation` there would not close the session.
+  The `#runBidis` catch closes on `ProtocolViolation`, but with a bare
+  `close()` rather than the PROTOCOL_VIOLATION code.
 - `drafts/draft-lcurley-moq-lite.md`: neither endpoint waits for the peer's
   SETUP. A receiver MUST buffer only streams whose encoding depends on a
   negotiated extension, and a second Setup Stream MUST close with
@@ -32,7 +35,12 @@ Decided (2026-10-01):
   route before SETUP anyway, since path and role come from it. Rejected:
   processing immediately unless extension-dependent, which needs a session
   before SETUP.
-- ✅ The duplicate-SETUP check rides along, in both languages.
+- ✅ The duplicate-SETUP check rides along, in both languages. In JS the uni
+  catch must close the session with the PROTOCOL_VIOLATION code, not copy the
+  bidi path's bare `close()`.
+
+The remaining JS gap is the duplicate SETUP and its close path; the hold is
+Rust work unless JS turns out to need an extension-dependent hold.
 
 Crib from #4686: its `died_before_header` helper and peek-then-hold pattern.
 QUIC stream credit bounds the held queue. Check whether JS lite must buffer any
