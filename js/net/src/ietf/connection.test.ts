@@ -148,3 +148,24 @@ test("uni streams before SETUP are held until it lands", async () => {
 		connection.close();
 	}
 });
+
+/** An early stream that dies before its type is skipped, but a malformed type is still fatal. */
+test("malformed uni stream before SETUP fails the handshake", async () => {
+	const version = Version.DRAFT_17;
+	const pair = createMockTransportPair(ALPN.DRAFT_17);
+
+	const empty = new Writer(await pair.client.createUnidirectionalStream(), version);
+	empty.close();
+
+	// 0b1111110x is a reserved varint prefix on draft-17.
+	const malformed = new Writer(await pair.client.createUnidirectionalStream(), version);
+	await malformed.write(new Uint8Array([0xfc, 0, 0, 0, 0, 0, 0, 0, 0]));
+
+	const setup = new Writer(await pair.client.createUnidirectionalStream(), version);
+	await setup.u53(Setup.id);
+	const parameters = new SetupOptions();
+	parameters.setBytes(SetupOption.Implementation, new TextEncoder().encode("test"));
+	await new Setup({ parameters }).encode(setup, version);
+
+	await expect(exchangeSetup(pair.server, version, "test")).rejects.toThrow("leading-ones varint");
+});
