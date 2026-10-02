@@ -131,9 +131,10 @@ Every counter is a cumulative, monotonic unsigned integer. A rate is the
 difference between two frames divided by the time between them, and a live
 count is started minus ended. A frame never shows ended above started.
 
-A counter going **down** means the relay restarted or the entry was dropped
-and re-created. Treat it as the start of a fresh segment rather than a
-negative rate.
+A restarted producer publishes under a new node epoch, so an aggregate keeps
+the old instance's contribution and adds the new one. Within one identity,
+a counter going **down** means an entry was dropped and re-created, or a
+legacy relay restarted. Treat it as a fresh segment rather than a negative rate.
 
 A reader ignores unknown fields, so a newer relay can add counters, and
 defaults a missing field to zero, so it can read an older relay.
