@@ -16,17 +16,18 @@ Facts (2026-10-02):
 - Publishing on push: `release-rs` (release-plz), `release-js`, `release-py`,
   and `release-go` trigger on `main`; `release-kt-lib` and `release-swift-lib`
   on `main` and `dev`. Everything else publishes from tags and is unaffected.
-- `cache.yml` and `swift.yml` warm caches on `main`; `obs`, `platform`, and
-  `quest` push filters name `main` and `dev`. Nightly and interop crons run on
-  the default branch.
+- `cache.yml` and `swift.yml` warm caches on `main` on both branches. PRs
+  read caches only from the default branch, so writers stay on trunk and
+  need no change. `obs`, `platform`, and `quest` push filters name `main` and
+  `dev`. Nightly and interop crons run on the default branch.
 - Rulesets: "main" targets `~DEFAULT_BRANCH` (linear history, Check and Test
   required), so it moves to trunk. "dev" targets `refs/heads/dev` (PRs only,
   squash or merge commit) and does not follow a rename.
-- Renaming `main` makes GitHub retarget its 35 open PRs to `release`; `dev`'s 10
+- Renaming `main` makes GitHub retarget its ~35 open PRs to `release`; `dev`'s 10
   follow it to the new `main`.
 - `sh/changed.sh` falls back to `origin/main`, which stays right for trunk.
   `quest` hardcodes `main` as the milestone base, which becomes right too.
-- 52 quest files on `main` (40 on `dev`) say "on `dev`"; AGENTS.md (API,
+- About 50 quest files on `main` (40 on `dev`) say "on `dev`"; AGENTS.md (API,
   Development, quest sections), CONTRIBUTING.md, `py/AGENTS.md`, and
   `quest/README.md` encode the split.
 - `nix run github:moq-dev/moq`, `npx skills add moq-dev/moq`, and docs "edit"
@@ -58,10 +59,11 @@ Decided (2026-10-02):
 Sequence:
 
 1. [dev-sync](/quest/m1/dev-sync.md) (#4720) lands.
-2. A PR on `dev`: the wording sweep, trunk stops publishing, cache and push
-   filters updated, the back-merge workflow, docs pin `release`.
-3. A small PR on `main`: publish triggers and cache filters move to
-   `release`.
+2. A PR on `dev`: the wording sweep, trunk stops publishing, `obs`,
+   `platform`, and `quest` push filters name `main` and `release`, the
+   back-merge workflow, docs pin `release`.
+3. A small PR on `main`: publish triggers move to `release`; cache writers
+   keep `main`, so they stop running there.
 4. Admin, back to back, run by the agent only after the maintainer's
    go-ahead in chat: rename `main` to `release`, rename `dev` to `main`, set
    the default branch, create the `release` ruleset, delete the `dev`

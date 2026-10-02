@@ -17,8 +17,9 @@ done. moq.pro tracks this repository as a submodule rather than a release, so
 no release quest gates this milestone. The Pronto GPU integration lives in
 moq.pro.
 
-Relay hardening: IETF interop leads the ranking, since only those quests
-block Seattle. IETF stream types came from m1 in the 2026-09-30 audit
+The branch flip ranks first: it is a short cutover that every later PR
+targets. Relay hardening: IETF interop leads the rest, since only those
+quests block Seattle. IETF stream types came from m1 in the 2026-09-30 audit
 because a session ended by legal input is exactly what Seattle would hit. The DoS hardening
 from an external review on 2026-09-29, verified against `main`, stays in m0
 as security work. Its quests describe fixes, not exploits.
