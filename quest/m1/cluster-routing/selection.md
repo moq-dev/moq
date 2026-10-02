@@ -39,7 +39,9 @@ Candidate mechanics:
   a pin breaks subscription aggregation. Once
   [Routes and announces](/quest/m1/cluster-routing/routes.md) lands, the
   candidates are the origin nodes announcing the path, ranked by longest
-  prefix, then route metric to the node, then HRW, and the reply's Origin is
+  prefix, then the link's preference
+  ([Multi-CDN endpoints](/quest/m1/cluster-routing/multi-cdn.md)), then route
+  metric to the node, then HRW, and the reply's Origin is
   the serving node id. Write the ranking so that change swaps its inputs, not
   its shape.
 - A refusal follows Wildcard's refusal rule: every refusal is terminal, and

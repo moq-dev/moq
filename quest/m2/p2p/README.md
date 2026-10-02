@@ -5,9 +5,10 @@
 Opted-in moq-lite clients serve each other directly, over WebRTC data channels
 between any two peers and over iroh between native ones, while the relay stays
 the rendezvous and the path of last resort. A client subscribes through the
-relay at once, negotiates peers in the background, and each subscription
-migrates to a peer when the origin ranks that route cheaper and back to the
-relay when the peer goes away. Nothing waits on ICE and nothing breaks when it
+relay at once, negotiates peers in the background, and a subscription
+migrates to a direct peer when that peer is the broadcast's origin (or a
+routing node such as `moq-cli --p2p`) and back to the relay when the peer
+goes away. A browser never carries another peer's traffic. Nothing waits on ICE and nothing breaks when it
 fails: a symmetric NAT, a denied local-network prompt, or a filtered multicast
 segment leaves the client exactly where it started.
 
@@ -93,23 +94,19 @@ the same independence without fighting the browser.
 
 ### Routes and migration
 
-Rust already does the serving-side work: `best_route` re-runs on every table
-change and a live subscription re-splices onto a cheaper route with the same
-first hop at a group boundary, while an anonymous chain never wins. The JS
-origin ranks the same way (`compareRoutes` in `js/net/src/origin.ts`: cost,
-then fewest hops, then newest). The JS handshake
-already declares a random hop id, so browser hops are identified; the roster
-id is that hop id, held once per origin rather than once per session.
+Routing is the [cluster routing line](/quest/m1/cluster-routing/README.md)'s:
+every session speaks per-node ROUTEs and path-less ANNOUNCEs, so a broadcast's
+announce names its origin node, the roster maps that node to a peer, and the
+route metric over the node's own link costs picks the direct link or the
+relay. The roster id is the node id, held once per origin rather than once
+per session.
 
-Watcher-to-watcher offload needs a tab to forward what it receives, which the
-JS origin does not do today: [transit](/quest/m2/p2p/transit.md).
-
-How a P2P route outranks the relay's is deliberately open. Costs today live
-in one scope, a relay mesh pricing its own links; a P2P link is neither free
-nor the CDN's egress, and `warm` only accumulates, so a tab forwarding the
-relay's route ties the relay and loses on chain length.
-[Cost across scopes](/quest/m2/p2p/cost-scopes.md) writes the rule before
-the watcher depends on it.
+Decided 2026-10-01: a direct link wins only when the peer is the origin or a
+routing node; a watching tab never re-serves what it receives. Offloading a
+room of watchers is a customer relay's job (`moq-cli --p2p` is the small
+one), which keeps warm and cold costs and cache-aware routing out of the
+protocol. [Direct peers win](/quest/m2/p2p/cost-scopes.md) sets the cost
+knobs and defaults.
 
 No Rust + WASM in-tab hop: [rs2ts](/quest/m1/rs2ts/remove-wasm.md) removes the
 WASM build, so the browser side stays TypeScript.
@@ -132,8 +129,7 @@ WASM build, so the browser side stays TypeScript.
 - [Signaling and policy](/quest/m2/p2p/signal.md) - opted-in peers find each other under the prefix, the application picks who to dial, and the roster-size gate decides whether STUN is used
 - [Native data channel transport](/quest/m2/p2p/webrtc.md) - `moq-tokio` holds a moq-net session with a browser over str0m with a full ICE agent
 - [moq-cli joins](/quest/m2/p2p/cli.md) - `--p2p` publishes a roster entry with its iroh endpoint, dials iroh between native peers, and serves browsers as a transit hop
-- [Transit in the JS origin](/quest/m2/p2p/transit.md) - a tab forwards the routes it receives to its peers with split horizon and its hop id appended
-- [Cost across scopes](/quest/m2/p2p/cost-scopes.md) - the written rule for how relay egress, mesh links, and P2P links compare, so a peer that already carries a broadcast wins
+- [Direct peers win](/quest/m2/p2p/cost-scopes.md) - a direct link wins only when the peer is the origin or a routing node, by link costs the node sets itself
 - [Watch opts in](/quest/m2/p2p/watch.md) - one attribute turns it on in the demo and the watcher migrates to the cheapest route
 - [Harness](/quest/m2/p2p/harness.md) - the Playwright harness and the numbers behind every mapping decision
 - [Unordered qmux](/quest/m2/p2p/unordered.md) - qmux tolerates reordering so the data channel runs unordered and a loss stalls one stream

@@ -9,7 +9,8 @@ every layout: moq.pro's edge and core tiers, a customer's own cluster, and a
 drone swarm where some drones have an uplink, the rest reach it over a lossy
 radio mesh, and every drone proxies for its neighbours. A node holding both a
 direct link and a CDN link knows which one reaches an origin, so it uses the
-CDN only when no direct route exists. The CDN never exposes its backbone to
+CDN only when no direct route exists, and an endpoint linked to several CDNs
+prefers its primary and fails over to the next. The CDN never exposes its backbone to
 end users, and a broadcast under overlapping prefixes routes to one origin
 deterministically.
 
@@ -64,6 +65,10 @@ vector the 2026-09-30 cache-tiers audit kept:
 - **Trust.** Cluster-peer links may advertise any node; a client link's node
   ids stay scoped to its session. See
   [Route trust](/quest/m1/cluster-routing/route-trust.md).
+- **Multi-CDN by link preference.** A node may rank its links (moq.pro
+  primary, Cloudflare secondary) ahead of the metric, so metrics from
+  different operators are never compared; a CDN that speaks no ROUTE is just
+  a link. See [Multi-CDN endpoints](/quest/m1/cluster-routing/multi-cdn.md).
 - **Metric on the wire, cost policy local.** One additive metric. Static
   configured costs stay the default (the CDN); a radio link may measure its
   own ([Link quality](/quest/m1/cluster-routing/link-quality.md)).
@@ -123,6 +128,7 @@ Once every child has landed:
 
 - [Upstream links](/quest/m1/cluster-routing/transit.md) - a link marked upstream never receives routes learned on another upstream link, which builds edge tiers and drone uplinks from one rule
 - [Selection](/quest/m1/cluster-routing/selection.md) - a broadcast under overlapping prefixes routes to one origin deterministically, and same-epoch origins are one source
+- [Multi-CDN endpoints](/quest/m1/cluster-routing/multi-cdn.md) - an endpoint holds sessions to several CDNs, uses its preferred one, and fails over to the next
 - [Simulate the split](/quest/m1/cluster-routing/sim.md) - moq.pro's simulator compares the route layer with path vector before the wire is written
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - ROUTE per origin node and path-less ANNOUNCE on one stream, loop-free by Babel feasibility
 - [Route trust](/quest/m1/cluster-routing/route-trust.md) - a peer grant lets a client link advertise the nodes behind it as one identity
