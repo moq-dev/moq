@@ -33,7 +33,6 @@ Public API: none. Wire: none.
 - [moq-cli tests on a paused clock](/quest/m1/test-flakes-2/cli-paused-clock.md) - the fetch timeout and completion tests stop racing wall-clock budgets
 - [Subscription cut by disconnect](/quest/m1/test-flakes-2/subscription-cut.md) - a publisher disconnect never ends a subscription clean
 - [Media late join](/quest/m1/test-flakes-2/media-late-join.md) - `just test media` late join stays within one GOP, or the regression is fixed
-- [moq-mux live import clock](/quest/m1/test-flakes-2/mux-live-import-clock.md) - the live import restart tests advance a paused clock instead of sleeping
 
 ## Related
 
