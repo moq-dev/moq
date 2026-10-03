@@ -288,6 +288,13 @@ struct Slot {
 	parked: bool,
 }
 
+impl Slot {
+	/// Delivered by the live feed, parked or not, rather than fetched as backfill.
+	fn live(&self) -> bool {
+		self.visible || self.parked
+	}
+}
+
 /// Heap the track keeps per cached group, excluding the group itself
 /// ([`group::CACHE_OVERHEAD`]).
 ///
@@ -1206,7 +1213,7 @@ impl TrackState {
 		let unfinished = self
 			.lookup
 			.values()
-			.any(|slot| !slot.group.is_finished() && !slot.group.is_aborted());
+			.any(|slot| slot.live() && !slot.group.is_finished() && !slot.group.is_aborted());
 		match unfinished {
 			true => self.resume_floor(),
 			false => None,
@@ -1220,19 +1227,21 @@ impl TrackState {
 	/// Unlike [`Self::resume_position`] this does not skip an empty open group or an
 	/// older one still open behind the newest: a front's logical track has a single
 	/// writer that continues any open group in place, so every frame still owed is
-	/// worth asking for.
+	/// worth asking for. Fetched backfill is not the live feed's to continue, so it
+	/// neither holds the start back nor moves it on.
 	fn resume_floor(&self) -> Option<Position> {
-		let open = self
-			.lookup
-			.iter()
-			.find(|(_, slot)| !slot.group.is_finished() && !slot.group.is_aborted());
-		match open {
-			Some((sequence, slot)) => Some(Position {
+		let mut live = self.lookup.iter().filter(|(_, slot)| slot.live());
+		if let Some((sequence, slot)) = live
+			.clone()
+			.find(|(_, slot)| !slot.group.is_finished() && !slot.group.is_aborted())
+		{
+			return Some(Position {
 				group: *sequence,
 				frame: slot.group.committed_frame() as u64,
-			}),
-			None => Some(Position::group(self.latest_group?.saturating_add(1))),
+			});
 		}
+		let (newest, _) = live.next_back()?;
+		Some(Position::group(newest.saturating_add(1)))
 	}
 
 	fn poll_finished(&self) -> Poll<Result<u64>> {
@@ -2799,6 +2808,13 @@ impl group::Request {
 		self.frame_start
 	}
 
+	/// The fetches waiting on this request, watched past [`Self::accept`]: they resolve
+	/// once the group is cached, so a handler cutting short a group nobody wants must not
+	/// cut it before they take it.
+	pub(crate) fn waiting(&self) -> FetchWaiting {
+		FetchWaiting(self.result.clone())
+	}
+
 	/// Insert the fetched group into the track cache, resolving the waiting
 	/// [`Consumer::fetch_group`], and return a [`group::Producer`] to fill.
 	///
@@ -2884,6 +2900,16 @@ impl Drop for group::Request {
 		if let Ok(mut outcome) = self.result.write() {
 			outcome.rejected = Some(Error::Dropped);
 		}
+	}
+}
+
+/// The fetches waiting on a [`group::Request`]; see [`group::Request::waiting`].
+pub(crate) struct FetchWaiting(kio::Producer<FetchOutcome>);
+
+impl FetchWaiting {
+	/// Poll for every waiting fetch having resolved or gone away.
+	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.0.poll_unused(waiter).map(|_| ())
 	}
 }
 

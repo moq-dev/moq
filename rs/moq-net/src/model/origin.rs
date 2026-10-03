@@ -8193,6 +8193,77 @@ mod tests {
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"live");
 	}
 
+	/// A reader still holding an open group after its track goes unread gets the rest
+	/// of the group: parking the track drops the upstream subscription, not the groups
+	/// a reader holds.
+	#[tokio::test(start_paused = true)]
+	async fn a_held_group_continues_after_its_track_goes_unread() {
+		let producer = origin(1).produce();
+		let server = producer
+			.dynamic("live", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+		let pending = producer.consume().request_broadcast("live");
+		let source = broadcast::Info::new().produce();
+		let track = source.create_track("video", None).unwrap();
+		queued(&server).await.accept(&source);
+		let resolved = pending.await.unwrap();
+
+		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut writing = track.append_group().unwrap();
+		writing.write_frame(crate::Timestamp::ZERO, b"head".as_ref()).unwrap();
+		let mut reading = subscription.recv_group().await.unwrap().unwrap();
+		assert_eq!(&reading.read_frame().await.unwrap().unwrap().payload[..], b"head");
+
+		drop(subscription);
+		tokio::time::timeout(Duration::from_secs(1), track.demand().unused())
+			.await
+			.expect("the front parks the track")
+			.expect("source closed");
+		writing.write_frame(crate::Timestamp::ZERO, b"tail".as_ref()).unwrap();
+		writing.finish().unwrap();
+
+		let tail = tokio::time::timeout(Duration::from_secs(1), reading.read_frame())
+			.await
+			.expect("the held group lost its source")
+			.unwrap()
+			.expect("the group ended early");
+		assert_eq!(&tail.payload[..], b"tail");
+		let end = tokio::time::timeout(Duration::from_secs(1), reading.read_frame()).await;
+		assert!(matches!(end, Ok(Ok(None))), "the group should finish: {end:?}");
+	}
+
+	/// A source that aborts one group while its track carries on ends that group for
+	/// the reader too, rather than leaving it waiting for a route change that never
+	/// comes.
+	#[tokio::test(start_paused = true)]
+	async fn a_group_the_source_aborts_ends_while_the_track_lives() {
+		let producer = origin(1).produce();
+		let broadcast = producer.publish("live", Route::default()).unwrap();
+		let track = broadcast.create_track("video", None).unwrap();
+		let resolved = producer.consume().request_broadcast("live").await.unwrap();
+		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
+
+		let mut aborted = track.append_group().unwrap();
+		aborted.write_frame(crate::Timestamp::ZERO, b"head".as_ref()).unwrap();
+		let mut reading = subscription.recv_group().await.unwrap().unwrap();
+		assert_eq!(&reading.read_frame().await.unwrap().unwrap().payload[..], b"head");
+		aborted.abort(Error::Cancel).unwrap();
+
+		let end = tokio::time::timeout(Duration::from_secs(1), reading.read_frame()).await;
+		assert!(matches!(end, Ok(Err(_))), "the group should fail: {end:?}");
+
+		// The track carries on.
+		let mut next = track.append_group().unwrap();
+		next.write_frame(crate::Timestamp::ZERO, b"next".as_ref()).unwrap();
+		next.finish().unwrap();
+		let mut group = tokio::time::timeout(Duration::from_secs(1), subscription.recv_group())
+			.await
+			.expect("the next group")
+			.unwrap()
+			.unwrap();
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"next");
+	}
+
 	/// A returning reader judges the warm cache against the logical track's live
 	/// edge: groups the fresh source has left behind by more than the budget are
 	/// skipped, exactly as they would be on a track read without a break.
