@@ -8,8 +8,10 @@ tests live in each language's own justfile.
 | [interop](interop/README.md) | `just test interop` | every client built from this checkout interoperates |
 | [wasm](wasm/README.md) | `just test wasm` | the `@moq/wasm` bindings work in a real browser |
 | [ts](ts/README.md) | `just test ts` | the subscriber's `export ts` output is IRD-compliant |
+| [audio-quality](audio-quality/README.md) | `just test audio-quality` | browser audio playout stays within budget over an impaired path |
+| [drain](drain/README.md) | `just test drain` | a JS viewer migrates off a draining relay without a dropped group |
 
-All three stand up a `moq-relay` and clients, so two of them running at once, or
+All five stand up a `moq-relay` and clients, so two of them running at once, or
 the same one running from two worktrees, would otherwise collide. `lib/harness.sh`
 is what keeps them apart.
 

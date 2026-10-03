@@ -216,6 +216,8 @@ export class Subscriber {
 		// Opened outside the try so the catch can reach it: a protocol violation below has
 		// to reset the stream, not just close our side of it.
 		let stream: Stream;
+		// Lite03/04: lands the initial set once the stream goes quiet.
+		let quiet: announce.Quiet | undefined;
 		try {
 			stream = await Stream.open(this.#quic, { version: this.version });
 		} catch (err: unknown) {
@@ -232,12 +234,15 @@ export class Subscriber {
 			// It no longer stamps itself onto each hop chain, so we append it here to
 			// keep the reflected-announce loop check seeing the full chain.
 			let responderOrigin: Hop | undefined;
+			// Lite05+: the initial set ends after this many more ANNOUNCE_STARTs.
+			let remaining: number | undefined;
 			if (hasAnnounceOk(this.version)) {
 				const ok = await AnnounceOk.decode(stream.reader, this.version);
 				// Keep a withheld 0: it names nobody for loop detection, but it is the
 				// anonymous mark and must travel the reconstructed chain. Assigned identities
 				// stay off this hop and are never forwarded.
 				responderOrigin = ok.hop;
+				remaining = ok.active;
 			}
 
 			// Every advertisement the peer currently has live, keyed by suffix (at most one
@@ -282,12 +287,20 @@ export class Subscriber {
 						advertised.set(path, { publisher: this.#stamp, live, route, captures });
 						if (!live) continue;
 						console.debug(`announced: broadcast=${path} active=true`);
-						announced.append({ prefix: path, captures, kind: "announced", route });
+						announced.append({ prefix: path, captures, kind: "start", route });
 					}
+					announced.append({ kind: "live" });
 					break;
 				}
+				case Version.DRAFT_03:
+				case Version.DRAFT_04:
+					// No AnnounceInit and no count: the initial set has landed once the stream goes quiet.
+					quiet = new announce.Quiet(() => {
+						if (announced.closed.peek() === undefined) announced.append({ kind: "live" });
+					});
+					break;
 				default:
-					// Draft03+: no AnnounceInit, initial state comes via Announce messages.
+					// Lite05+: initial state comes via Announce messages, counted by AnnounceOk.
 					break;
 			}
 
@@ -297,8 +310,14 @@ export class Subscriber {
 			// doesn't know we skipped.
 			const history = new AnnounceHistory();
 
-			// Receive announce updates (for Draft03, this includes initial state)
+			// Receive announce updates (for Draft03+, this includes initial state)
 			for (;;) {
+				// Land before decoding past the boundary, so no live update arrives ahead of the marker.
+				if (remaining === 0) {
+					announced.append({ kind: "live" });
+					remaining = undefined;
+				}
+
 				const announce = await race([
 					decodeAnnounceBroadcastMaybe(stream.reader, this.version),
 					announced.closed,
@@ -306,6 +325,10 @@ export class Subscriber {
 				// undefined: the stream ended. null: the consumer closed cleanly.
 				if (!announce) break;
 				if (announce instanceof Error) throw announce;
+
+				quiet?.heard();
+				// The count is of ANNOUNCE_STARTs, not every message.
+				if (remaining !== undefined && announce.status === "active") remaining -= 1;
 
 				let path: Path.Valid;
 				let active: boolean;
@@ -375,7 +398,7 @@ export class Subscriber {
 					announced.append({
 						prefix: path,
 						captures: previous.captures,
-						kind: "retracted",
+						kind: "end",
 						route: previous.route,
 					});
 				};
@@ -446,7 +469,7 @@ export class Subscriber {
 					advertised.set(path, { publisher, live: true, route, captures });
 					console.debug(`announced: broadcast=${path} rerouted`);
 					if (!routesEqual(previous.route, route)) {
-						announced.append({ prefix: path, captures, kind: "updated", route });
+						announced.append({ prefix: path, captures, kind: "update", route });
 					}
 					continue;
 				}
@@ -454,7 +477,7 @@ export class Subscriber {
 				advertised.set(path, { publisher, live: true, route, captures });
 
 				console.debug(`announced: broadcast=${path} active=true`);
-				announced.append({ prefix: path, captures, kind: "announced", route });
+				announced.append({ prefix: path, captures, kind: "start", route });
 			}
 
 			announced.close();
@@ -472,6 +495,8 @@ export class Subscriber {
 			if (e instanceof ProtocolViolation) {
 				this.#quic.close({ closeCode: PROTOCOL_VIOLATION_CODE, reason: closeReason(reason(e)) });
 			}
+		} finally {
+			quiet?.close();
 		}
 	}
 
@@ -596,9 +621,10 @@ export class Subscriber {
 			// wake is level-triggered: re-check demand so a subscriber that returns before we tear
 			// down (e.g. a quickly unmuted tile) resumes on the same subscription.
 			const idle = Symbol("idle");
+			const demand = producer.demand();
 			for (;;) {
-				const reason = await race([done, producer.unused().then(() => idle)]);
-				if (reason === idle && producer.closed.peek() === undefined && producer.used.peek()) continue;
+				const reason = await race([done, demand.unused().then(() => idle)]);
+				if (reason === idle && demand.closed.peek() === undefined && demand.used.peek()) continue;
 				break;
 			}
 
@@ -716,7 +742,7 @@ export class Subscriber {
 			timescale: Time.Timescale(info.timescale),
 			// Publisher Max Age rides on the wire, so the local retention window
 			// matches what the upstream advertises (relays re-serve with the same bound).
-			maxAge: Time.Milli(info.maxAge),
+			maxAge: info.maxAge === undefined ? undefined : Time.Milli(info.maxAge),
 			priority: info.priority,
 		};
 	}
@@ -853,11 +879,13 @@ export class Subscriber {
 					pending ??= stream.reader.decodeMaybe(decode);
 					const next = await race([pending, group.closed, unused]);
 					if (next === idle) {
-						if (!group.isClosed && group.used.peek()) {
+						if (group.isClosed) break;
+						if (group.used.peek()) {
 							unused = group.unused().then((): typeof idle => idle);
 							continue;
 						}
-						break;
+						// Abandoned mid-group: the truncated group must never end clean.
+						throw new StreamError(StreamCode.Cancel, { message: "cancel" });
 					}
 					pending = undefined;
 					if (!next || next instanceof Error) break;
@@ -1071,7 +1099,7 @@ export class Subscriber {
 			producer.close();
 			stream.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
 		} catch (err: unknown) {
-			const e = error(err);
+			const e = await sessionCause(this.#quic, err);
 			producer.close(e);
 			stream.stop(e);
 		} finally {

@@ -23,6 +23,7 @@ or Docker; see [Install](/setup/install).
 | `export` | `rtmp`, `srt`, `rtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
 | `play` | | Decode and play in a native window with sound. |
 | `transcode` | | Publish a just-in-time rendition ladder next to a broadcast. |
+| `ls` | `[prefix]` | List the broadcasts live on a relay. |
 | `fetch` | `<track>` | Write one group of a track to stdout. |
 | `auth` | | Generate, sign, and verify relay JWTs. |
 | `devices` | | List capture sources and their ids. |
@@ -33,6 +34,7 @@ or Docker; see [Install](/setup/install).
 moq <MoQ side> import <source> [options]
 moq <MoQ side> export <sink> [options]
 moq <MoQ side> play [options]
+moq <MoQ side> ls [prefix] [options]
 moq <MoQ side> fetch <track> [options]
 ```
 
@@ -56,18 +58,20 @@ moq --connect https://relay.example.com/anon --broadcast my-stream.hang export t
 moq --connect "https://relay.example.com/rooms/1?jwt=$TOKEN" --broadcast alice.hang import ts
 ```
 
-The `ts`, `fmp4`, and `flv` imports publish on the broadcast clock the catalog
-advertises, not the input's own timestamps. The first frame is stamped when it
-arrives, every track keeps its offset from the others, and an input that
-restarts its timestamps, such as a restarted encoder, continues forward
-after the real gap rather than rewinding. So a feed whose PTS starts hours in,
-or whose first frame arrives late, still names the right wall time.
+The `ts`, `fmp4`, and `flv` imports publish the input's own timestamps, and
+the catalog clock maps the first frame to the time it arrived. So a feed whose
+PTS starts hours in still names the right wall time, and every track keeps its
+offset from the others. A group starting before the previous group's start,
+such as a restarted encoder or a looping file wrapping to the top, ends the
+import with an error; run it again to publish anew. A keyframe that merely
+overlaps the previous group's last frame is not a rewind.
 
 MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3, passes SCTE-35 and
 subtitle PIDs through as tracks, and round-trips the service tables. A
 `discontinuity_indicator` on the program's PCR PID is a system time-base reset,
 so it breaks every track's timeline and the exported clock declares the break in
-turn. The same flag on an elementary PID other than the program PCR PID, a
+turn. A new timeline whose first group starts before the previous group's start
+ends the import like any other rewind. The same flag on an elementary PID other than the program PCR PID, a
 continuity-counter gap, and the 33-bit timestamp rollover move no clock and
 declare nothing. FLV covers H.264 + AAC.
 
@@ -87,6 +91,11 @@ the first PAT lists as its own broadcast, with its own clock and catalog, keepin
 the catalog suffix last: `--broadcast event.hang` publishes `event/1.hang`,
 `event/2.hang`, and so on. `export ts` writes one program per broadcast.
 `import srt` takes the same `--program`.
+A selected program's SI describes that service alone: its SDT lists only the
+selected service, and other services' EIT is dropped. Network-wide tables (NIT,
+BAT, TDT/TOT, and the SDT and EIT of other transport streams) pass through.
+SI matches the selection by DVB `service_id`, which is assumed to equal the PAT
+`program_number`.
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast event.hang import ts --program all < mux.ts
@@ -180,6 +189,16 @@ id. Requires the `capture` feature; on Linux that needs the ALSA headers for
 the microphone, and `--display` and `pipewire:` cameras also need the
 `pipewire` feature (links libpipewire).
 
+On Windows, display and window capture use Windows.Graphics.Capture and
+require Windows 10 2004 (build 19041) or newer. Cursor capture follows the
+capture configuration. The system capture border stays visible unless the OS
+supports borderless capture and grants access. Frames are converted to NV12
+on the GPU; software encoding reads them back. Windows application capture
+and system audio are separate capabilities, not enabled by this backend.
+Windows `display:N` selectors are enumeration indices; switching from Desktop
+Duplication to WGC can change which monitor a saved selector names. Run
+`moq devices` again and reselect the intended display after upgrading.
+
 ## Transcode
 
 ```bash
@@ -210,6 +229,29 @@ Custom `--rung` values may be supplied in any order. Heights round down to even;
 heights and bitrates must then increase strictly together. Duplicate heights or
 bitrates, inverted rankings, and zero-sized or zero-bitrate rungs are rejected
 before connecting.
+
+## List
+
+```bash
+moq --connect https://relay.example.com/anon ls
+moq ... ls room --follow --json
+```
+
+Lists the broadcasts live on a relay over MoQ, with the session's own auth: the
+counterpart of the relay's HTTP `/announced/<prefix>`. It prints one path per
+line, relative to the `--connect` path, and exits once the relay has sent
+everything live under `prefix`. `--follow` keeps running: it prints `+ path`
+for each live broadcast, then `+ path` and `- path` as broadcasts come and go,
+and exits non-zero if the session ends. `--json` prints
+`{"path": "room/alice", "active": true}` per line instead, in either mode.
+
+Like `/announced`, it lists announced prefixes, which by convention are
+broadcast paths. A new route to a path already live prints nothing. A name
+starting with `.` stays hidden unless `prefix` names it. `ls` only dials
+`--connect`, and refuses any other MoQ-side flag.
+
+[Inspect a relay](/bin/inspect) walks through `ls` and `fetch` next to their
+`curl` equivalents, including reading the relay's stats.
 
 ## Fetch
 
@@ -260,8 +302,8 @@ and publishes on the cluster origin. A `moq --cluster-lan` process and a
 `--cluster-lan` advertises this process on the LAN over mDNS and meshes with
 every other participating MoQ process. It reuses `--listen`, filling in an
 ephemeral port and a generated certificate when those are unset. A LAN peer
-authenticates with its mDNS credential; `cluster.token` is for static and
-gossip peers only.
+authenticates with its mDNS credential; `cluster.token` is for
+`--cluster-connect` and `--cluster-connect-api` peers only.
 
 ```bash
 moq --cluster-lan import capture
@@ -279,8 +321,7 @@ under. Peers using a different name never discover this one. It defaults to
 configuration. An application built on the library picks its own name.
 
 The WAN flags (`--cluster-connect`, `--cluster-connect-api`, `--cluster-node`,
-`--cluster-mesh`, `--cluster-token`, `--cluster-id`, `--cluster-tier`) match
-the relay. `--cluster-connect` and `--cluster-connect-api` are a MoQ side on
+`--cluster-token`, `--cluster-id`, `--cluster-tier`) match the relay. `--cluster-connect` and `--cluster-connect-api` are a MoQ side on
 their own, so `moq --cluster-connect https://relay.example import ts` needs
 no `--connect`. See [Clustering](/bin/relay/cluster).
 
@@ -302,6 +343,8 @@ rules, an explicit mTLS grant, tiers, and session limits; see
 ```bash
 moq auth serve --listen 127.0.0.1:4440 --key-dir keys/ --public-subscribe 'anon/**'
 ```
+
+`moq auth serve` also accepts `--key-set keys.jwks` to verify tokens from a JWK Set.
 
 `moq auth sessions` and `moq auth revalidate` talk to a relay's internal
 listener. A push is a re-check: the auth server's reply is what kicks. An
@@ -341,7 +384,7 @@ way. Only `ts` can mark the restart, so the other formats refuse `--linger`.
 ## Debugging
 
 `RUST_LOG=debug` prints the negotiated version and every subscription.
-`curl http://relay:4443/announced/` confirms the relay is reachable and shows
-what it holds. Connection refused means UDP isn't getting through; certificate
+`moq --connect <url> ls`, or `curl http://relay:4443/announced`, confirms the
+relay is reachable and shows what it holds; see [Inspect a relay](/bin/inspect). Connection refused means UDP isn't getting through; certificate
 errors on a dev relay want `--connect-tls-insecure` or the `http://`
 fingerprint flow.

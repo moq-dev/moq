@@ -53,6 +53,10 @@ immutable fork release, and pin the corrected dependency chain here before
 completing this quest. Do not wait for the broader QUIC stack release. Update internal packet-lifetime comments inline; no new user guide
 is needed.
 
+## Required
+
+- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic`, not the frozen fork
+
 ## Related
 
 - [BBR starvation edges](/quest/m1/quic/bbr-app-limited-edges.md) - also edits `bbr3/mod.rs`; one owner there at a time

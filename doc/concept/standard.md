@@ -31,20 +31,42 @@ This is an implementation limit, not a limit in the IETF draft. A larger
 declared block stops its subgroup stream with `MALFORMED_TRACK` before reading
 the block; other groups and the session stay open.
 
+Rust and JavaScript read an incoming padding stream (draft-18 and later) to
+the end and discard it, without sending `STOP_SENDING`. A unidirectional stream type the negotiated draft does not
+define, or a `SUBGROUP_HEADER` type it marks invalid, closes the session with
+`PROTOCOL_VIOLATION`, as the draft requires.
+
 An IETF publisher declares the track's default priority in `SUBSCRIBE_OK` or
 `PUBLISH` when that draft carries track properties. Groups without a priority
 flag inherit it. If the property is absent, the IETF wire default of 128 maps
-to model priority 127, where higher values are served first.
+to model priority 127, where higher values are served first. A track that
+never sets a priority is 127 as well, so it goes out as 128 on IETF and 127
+on moq-lite.
 
-On drafts 14–19, the Rust publisher serves relative joining `FETCH` requests
-with offset zero for `NextObject` subscriptions. The fetch delivers the saved
-current-group prefix, and the subscription delivers later objects. Standalone,
-absolute joining, and nonzero-offset fetches are refused. Draft-20 uses
-subscription fills instead. JavaScript publishing does not yet serve `FETCH`;
+On drafts 14–19, the Rust publisher answers a standalone `FETCH` within one
+group from the cache. A relay fetches a missing group upstream with a `FETCH`
+of that one whole group, and an upstream refusal is the refusal the fetcher
+sees. A range touching several groups is refused with `NOT_SUPPORTED`, as is
+any `FETCH` on draft-20 and later, which moved the range into
+`LOCATION_FILTER`. A standalone `FETCH`
+carries no timestamps, since no `SUBSCRIBE_OK` declared a timescale for it.
+
+On drafts 14–19, the Rust publisher also serves relative and absolute joining
+`FETCH` requests for `NextObject` subscriptions, for the subscription group's
+saved prefix only, while the subscription delivers later objects. One reaching
+back to earlier groups is refused with `NOT_SUPPORTED`. Draft-20 uses
+subscription fills instead. JavaScript
+publishing refuses every `FETCH` with `NOT_SUPPORTED`;
 Rust and JavaScript subscribers request unfiltered delivery on older drafts
 because they do not issue joining fetches. Other publishers may replay a cached
 backlog for that filter; selecting the next group instead would leave static
 tracks waiting for a group that never arrives.
+
+A moq-lite datagram is a single-frame group, so on moq-transport it travels
+as an `OBJECT_DATAGRAM` at object 0 whose Group ID is the sequence, and a relay
+forwards it without renumbering. A datagram carrying any other Object ID, or a
+status other than Normal, is dropped. JavaScript does not yet carry datagrams
+on moq-transport.
 
 A client may present one credential in its `SETUP` with the `AUTHORIZATION
 TOKEN` option. The server reads a value (`USE_VALUE`, or `REGISTER`, which it
@@ -53,12 +75,25 @@ and bytes to the application unverified; a relay forwards them to its
 [auth server](/bin/relay/auth#the-contract). An alias reference (`DELETE`,
 `USE_ALIAS`) closes the session with `PROTOCOL_VIOLATION`, a structure that
 does not decode with `KEY_VALUE_FORMATTING_ERROR`, and a second token is
-refused.
+refused. An `AUTHORIZATION TOKEN` parameter on a request is read and ignored:
+the session's credential is what authorizes it.
+
+A legal request that is not served is refused on its own with `NOT_SUPPORTED`,
+leaving the session open: a `SUBSCRIBE` with `FORWARD=0`, a `SUBSCRIBE` or
+`FETCH` carrying Range Filters (no `MAX_FILTER_RANGES` is advertised), a
+`FETCH` carrying `FILL_TIMEOUT` (Timed-Out gaps are not written),
+`TRACK_STATUS`, `SUBSCRIBE_TRACKS` (draft-18 and later), and the `FETCH`
+forms above. `NEW_GROUP_REQUEST` is ignored, as
+the draft allows a publisher without dynamic groups to do. A parameter the
+negotiated draft does not define still closes the session with
+`PROTOCOL_VIOLATION`, as the draft requires.
 
 Several project drafts extend the IETF wire without breaking it, since `SETUP`
 ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
 [solicit](/draft/moq-solicit) to make announcements opt-in,
-[hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery, and
+[hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery,
+[active-count](/draft/moq-active-count) to count the `NAMESPACE` messages
+before a `SUBSCRIBE_NAMESPACE` is caught up, and
 [probe](/draft/moq-probe) for bandwidth estimation.
 [moq-e2ee](/draft/moq-e2ee) is not a transport extension: it encrypts application
 payloads so relays still forward named tracks they cannot read.

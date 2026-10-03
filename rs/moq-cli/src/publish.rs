@@ -246,7 +246,7 @@ fn ts_import(
 ) -> anyhow::Result<(ts::Import<ts::Ext>, moq_mux::catalog::Producer<ts::Ext>)> {
 	let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
 	let catalog = moq_mux::catalog::Producer::new(broadcast, config)?;
-	let mut import = ts::Import::new(broadcast.clone(), catalog.reserve()).live();
+	let mut import = ts::Import::new(broadcast.clone(), catalog.reserve());
 	if let Some(program) = program {
 		import = import.with_program(program);
 	}
@@ -291,8 +291,8 @@ impl Publish {
 	/// the catalog tracks, so announcing after it lands the advertisement with
 	/// the tracks already in place.
 	///
-	/// Stdin is a live feed with its own zero, so the container importers translate its
-	/// timestamps onto the broadcast clock the catalog advertises (`live`).
+	/// Stdin is a live feed with its own zero: the container importers publish its timestamps
+	/// verbatim and anchor the catalog clock so the first frame is live on arrival.
 	pub fn new(
 		mut broadcast: moq_net::broadcast::Producer,
 		format: &PublishFormat,
@@ -322,12 +322,12 @@ impl Publish {
 				}
 			}
 			PublishFormat::Fmp4 => {
-				let fmp4 = fmp4::Import::new(broadcast.clone(), catalog.reserve()).live();
+				let fmp4 = fmp4::Import::new(broadcast.clone(), catalog.reserve());
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
 			PublishFormat::Ts { .. } => unreachable!("TS is handled above with the mpegts catalog extension"),
 			PublishFormat::Flv => {
-				let flv = flv::Import::new(broadcast.clone(), catalog.reserve()).live();
+				let flv = flv::Import::new(broadcast.clone(), catalog.reserve());
 				PublishDecoder::Flv(Box::new(flv))
 			}
 		};
@@ -349,7 +349,7 @@ impl Publish {
 	pub fn ts_programs(origin: moq_net::origin::Producer, name: String, config: moq_mux::catalog::Config) -> Self {
 		Self {
 			source: Source::Stream {
-				decoder: PublishDecoder::TsPrograms(Box::new(ts::Programs::new(origin, name, config).live())),
+				decoder: PublishDecoder::TsPrograms(Box::new(ts::Programs::new(origin, name, config))),
 				catalog: PublishCatalog::TsPrograms,
 			},
 			broadcast: None,
@@ -416,20 +416,22 @@ impl Publish {
 				audio,
 			} => {
 				// Each enabled medium publishes its own track onto the shared
-				// broadcast + catalog. Frames are stamped from the catalog's
-				// advertised clock so HLS/DASH wall times match the mapping on
+				// broadcast + catalog. Both stamp frames on the catalog's
+				// advertised clock, so HLS/DASH wall times match the mapping on
 				// the wire. Video encodes on demand (camera opens only while
 				// subscribed). Both run on this task rather than a spawn: on
 				// macOS the audio future holds ObjC handles across an await,
 				// so it is `!Send`.
-				let clock = catalog.clock();
 				let video_fut = {
 					let broadcast = broadcast.clone();
 					let catalog = catalog.clone();
 					async move {
 						match video {
 							Some((config, encode)) => {
-								moq_video::encode::publish_capture(broadcast, catalog, config, encode, clock)
+								let mut options = moq_video::encode::Capture::default();
+								options.capture = config;
+								options.encode = encode;
+								moq_video::encode::publish_capture(broadcast, catalog, options)
 									.await
 									.map_err(anyhow::Error::from)
 							}
@@ -440,10 +442,9 @@ impl Publish {
 				let audio_fut = async move {
 					match audio {
 						Some((config, encode)) => {
-							let mut options = moq_audio::encode::PublicationOptions::default();
+							let mut options = moq_audio::encode::Capture::default();
 							options.capture = config;
 							options.encode = encode;
-							options.clock = clock;
 							moq_audio::encode::publish_capture(broadcast, catalog, options)
 								.await
 								.map_err(anyhow::Error::from)
@@ -841,23 +842,20 @@ mod tests {
 		);
 	}
 
-	/// `moq import ts` publishes on the broadcast clock it advertises: a feed arriving a minute
-	/// after the broadcast began is live on arrival, not stamped with its own PTS (1.4s into bbb).
+	/// `moq import ts` publishes the feed's own PTS (1.4s into bbb) and anchors the catalog
+	/// clock on it, so the first frame is live on arrival.
 	#[tokio::test]
-	async fn ts_import_publishes_on_the_broadcast_clock() {
-		let ago = Duration::from_secs(60);
-		let clock = moq_mux::Clock::at(std::time::Instant::now() - ago, std::time::SystemTime::now() - ago).unwrap();
+	async fn ts_import_anchors_the_catalog_clock_on_arrival() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let config = moq_mux::catalog::Config::default().with_clock(clock);
-		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, config).unwrap();
+		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
 		#[allow(irrefutable_let_patterns)]
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
 		};
-		let before = clock.now();
+		let before = std::time::SystemTime::now();
 		decoder.decode_chunk(BBB).unwrap();
-		let after = clock.now();
+		let after = std::time::SystemTime::now();
 		decoder.finish().unwrap();
 
 		let catalog = hang::catalog::Catalog::<()>::subscribe(&consumer)
@@ -867,11 +865,7 @@ mod tests {
 			.await
 			.unwrap()
 			.expect("a catalog");
-		assert_eq!(
-			catalog.clock,
-			Some(clock.wall()),
-			"the advertised clock is the one stamped on"
-		);
+		let clock = catalog.clock.expect("the catalog advertises a clock");
 		let (name, config) = catalog.video.renditions.iter().next().expect("a video rendition");
 		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
 		let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
@@ -881,11 +875,16 @@ mod tests {
 			.unwrap()
 			.expect("a video frame")
 			.timestamp;
-		// The PES that anchors the mapping need not be this frame: the mux spaces them apart.
-		let skew = Duration::from_secs(2).as_micros();
 		assert!(
-			before.as_micros() - skew <= first.as_micros() && first.as_micros() <= after.as_micros() + skew,
-			"the first frame is live on arrival: {first:?} not in {before:?}..={after:?}"
+			first.as_micros() < Duration::from_secs(5).as_micros(),
+			"the feed's own PTS: {first:?}"
+		);
+		// The PES that anchors the mapping need not be this frame: the mux spaces them apart.
+		let skew = Duration::from_secs(2);
+		let wall = clock.wall_clock(first).unwrap();
+		assert!(
+			before - skew <= wall && wall <= after + skew,
+			"the first frame is live on arrival"
 		);
 	}
 

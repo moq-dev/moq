@@ -21,7 +21,7 @@ Implement in the fork.
 - On loss detection, before queueing a retransmission for a stream with a
   deadline, estimate the arrival instant as now plus the forward one-way
   delay. Start with `min_rtt / 2`, corrected by the peer's reported ACK delay;
-  the [receive-timestamps spike](/quest/m3/quic-receive-ts.md) replaces that
+  the [GCC experiment](/quest/m3/quic-gcc.md)'s receive timestamps replace that
   guess with a measured forward delay. If the estimate is past the deadline,
   reset the stream with a dedicated error code and drop its retransmit ranges,
   including bytes already lost, so flow control is returned in one step.
@@ -42,18 +42,18 @@ retransmitted past their deadline (must be zero), spurious resets under
 reordering, and probe overhead versus the default PTO. A proactive probe that
 raises loss or latency under any profile stays off by default.
 
-Decided in the 2026-09-30 audit: moved to m2. No m1 quest consumes it, and
-[Upstream the fork](/quest/m1/quic/upstream.md) offers it when it lands
-rather than waiting on it.
+Decided in the 2026-09-30 audit: moved to m2. No m1 quest consumes it.
 
 ## Required
 
+- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - the
   scheduler decides which stream's data a probe carries
 
 ## Related
 
-- [Receive timestamps](/quest/m3/quic-receive-ts.md) - a measured forward
-  delay replaces the half-RTT estimate
+- [QUIC GCC](/quest/m3/quic-gcc.md) - its receive timestamps give a measured
+  forward delay that replaces the half-RTT estimate
 - [Discover media headroom](/quest/m2/quic-probe.md) - can reuse
   retransmission machinery if redundant capacity probes prove worthwhile
+- [noq#813](https://github.com/n0-computer/noq/issues/813) - the per-stream deadline proposal to n0

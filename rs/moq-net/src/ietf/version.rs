@@ -53,8 +53,8 @@ mod tests {
 	use super::*;
 	use crate::coding::Encode;
 	use crate::ietf::{
-		Fetch, FetchType, Fill, Filter, GroupFlags, GroupHeader, GroupOrder, Location, Message, Properties, Publish,
-		RequestId, Subscribe, SubscribeOk,
+		EndLocation, Fetch, FetchType, Fill, Filter, GroupFlags, GroupHeader, GroupOrder, Location, Message,
+		Properties, Publish, RequestId, Subscribe, SubscribeOk,
 	};
 	use crate::{Path, Timescale};
 
@@ -77,6 +77,7 @@ mod tests {
 	#[test]
 	fn draft21_and_draft22_match_draft20_on_the_wire() {
 		let properties = Properties {
+			max_cache_duration: None,
 			timescale: Some(Timescale::new(90_000).unwrap()),
 			priority: Some(64),
 			group_order: Some(GroupOrder::Descending),
@@ -94,6 +95,8 @@ mod tests {
 				range_filters: false,
 			}),
 			properties_wanted: false,
+			forward: true,
+			range_filters: false,
 		};
 
 		let subscribe_ok = SubscribeOk {
@@ -118,12 +121,19 @@ mod tests {
 			request_id: RequestId(3),
 			subscriber_priority: 64,
 			group_order: GroupOrder::Ascending,
-			fetch_type: FetchType::Standalone {
+			fetch_type: FetchType::Filtered {
 				namespace: Path::new("broadcast"),
 				track: "video".into(),
-				start: Location { group: 1, object: 0 },
-				end: Location { group: 2, object: 0 },
+				filter: Filter::Absolute {
+					start: Location { group: 1, object: 0 },
+					end: Some(EndLocation {
+						group: 2,
+						object: Some(0),
+					}),
+				},
 			},
+			range_filters: false,
+			fill_timeout: false,
 		};
 
 		let group = GroupHeader {

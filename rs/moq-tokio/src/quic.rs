@@ -91,10 +91,17 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 pub(crate) const DEFAULT_RECEIVE_WINDOW: u64 = 64 << 20;
 
 /// Default idle timeout before an inactive connection is dropped.
-pub(crate) const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// A peer that dies or drops off the network sends no close, so this is how long
+/// its routes and subscriptions stay stuck. Short enough to fail over in seconds;
+/// [`DEFAULT_KEEP_ALIVE`] keeps a live but quiet peer from reaching it.
+pub(crate) const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default keep-alive ping interval.
-pub(crate) const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(5);
+///
+/// Under a third of [`DEFAULT_IDLE_TIMEOUT`], so a lost ping is followed by
+/// another (plus QUIC's probe retransmits) before the peer's timer runs out.
+pub(crate) const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(3);
 
 /// The `--quic-*` transport section, applied to dialed and accepted connections alike.
 #[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
@@ -130,7 +137,9 @@ pub struct Config {
 	)]
 	pub gso: Option<bool>,
 
-	/// Idle timeout before an inactive connection is dropped. Defaults to 30s.
+	/// Idle timeout before an inactive connection is dropped. Defaults to 10s.
+	///
+	/// QUIC uses the smaller of both ends' timeouts, so either side can shorten it.
 	#[usage(skip)]
 	#[serde(with = "crate::cli::duration::serde_duration")]
 	pub idle_timeout: Duration,
@@ -140,13 +149,13 @@ pub struct Config {
 		long = "quic-idle-timeout",
 		env = "MOQ_QUIC_IDLE_TIMEOUT",
 		default_value_t = CliDuration::fallback(DEFAULT_IDLE_TIMEOUT),
-		default = "30s",
+		default = "10s",
 		setting = "quic.idle_timeout"
 	)]
 	#[serde(default, rename = "__cli_idle_timeout", skip_serializing_if = "Option::is_none")]
 	idle_timeout_arg: Option<CliDuration>,
 
-	/// Keep-alive ping interval. Defaults to 5s; set `0s` to disable.
+	/// Keep-alive ping interval. Defaults to 3s; set `0s` to disable.
 	/// Ignored by the iroh backend, which has no keep-alive knob.
 	#[usage(skip)]
 	#[serde(with = "crate::cli::duration::serde_duration")]
@@ -157,7 +166,7 @@ pub struct Config {
 		long = "quic-keep-alive",
 		env = "MOQ_QUIC_KEEP_ALIVE",
 		default_value_t = CliDuration::fallback(DEFAULT_KEEP_ALIVE),
-		default = "5s",
+		default = "3s",
 		setting = "quic.keep_alive"
 	)]
 	#[serde(default, rename = "__cli_keep_alive", skip_serializing_if = "Option::is_none")]
@@ -509,7 +518,7 @@ impl Config {
 	/// here as the default rather than the value that was written.
 	pub fn resolve(&self) -> Resolved {
 		// A zero keep-alive means "disabled"; anything else (including unset) keeps
-		// the connection warm, defaulting to 5s.
+		// the connection warm, defaulting to 3s.
 		let idle_timeout = CliDuration::resolve(self.idle_timeout_arg, self.idle_timeout);
 		let keep_alive = CliDuration::resolve(self.keep_alive_arg, self.keep_alive);
 		let keep_alive = (!keep_alive.is_zero()).then_some(keep_alive);

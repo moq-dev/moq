@@ -4,7 +4,7 @@ The UniFFI core every non-Rust binding is generated from. Proc-macro based (`#[u
 
 Mirror every change in the same PR:
 
-- `rs/libmoq`: the C staticlib (`cbindgen` emits `moq.h`). If the C ABI moved, also `cpp/obs`.
+- `rs/moq-c`: the C staticlib (`cbindgen` emits `moq.h`). If the C ABI moved, also `cpp/obs`.
 - Hand-written wrappers: `py/moq-rs`, `go/wrapper/moq`, `dart/moq`, `swift/Sources`, `kt/moq`. The `go/ffi` and `dart/moq_ffi` layers regenerate, but a new method still needs its ergonomic wrapper.
 - Docs under `doc/lib/{py,go,dart,swift,kt,c}`.
 - Then `just test interop --all` for the interop matrix.

@@ -71,7 +71,7 @@ async fn setup() -> Setup {
 		}
 	});
 
-	tokio::time::timeout(TIMEOUT, track.used())
+	tokio::time::timeout(TIMEOUT, track.demand().used())
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
@@ -154,4 +154,44 @@ async fn abort_cuts_a_drain_short() {
 		"{res:?} after {:?}",
 		started.elapsed()
 	);
+}
+
+#[tokio::test(start_paused = true)]
+async fn close_withdraws_announcements_before_closing_the_transport() {
+	for version in ["moq-lite-01", "moq-lite-07-wip", "moq-transport-17", "moq-transport-22"] {
+		let publisher = produce_origin(1);
+		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let subscriber = produce_origin(2);
+		let mut options = MockConnectOptions::new(version.parse().unwrap());
+		options.client_publish = Some(publisher.consume());
+		options.server_subscribe = Some(subscriber.clone());
+		let pair = connect_mock(options).await;
+		subscriber.consume().routed("bcast").await.unwrap();
+		let before = pair.client_transport.finished_streams();
+		pair.client.close().await.unwrap();
+		assert!(
+			pair.client_transport.finished_streams() > before,
+			"{version}: announcement ended by cancellation instead of FIN"
+		);
+	}
+}
+
+#[tokio::test(start_paused = true)]
+async fn close_times_out_waiting_for_announcement_acknowledgements() {
+	for version in ["moq-lite-01", "moq-lite-07-wip", "moq-transport-17", "moq-transport-22"] {
+		let publisher = produce_origin(1);
+		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let subscriber = produce_origin(2);
+		let mut options = MockConnectOptions::new(version.parse().unwrap());
+		options.client_publish = Some(publisher.consume());
+		options.server_subscribe = Some(subscriber.clone());
+		let pair = connect_mock(options).await;
+		subscriber.consume().routed("bcast").await.unwrap();
+		pair.client_transport.hold_fin_acknowledgements();
+		let started = tokio::time::Instant::now();
+		assert!(matches!(pair.client.close().await, Err(Error::Timeout)), "{version}");
+		assert_eq!(started.elapsed(), Duration::from_secs(1));
+	}
 }

@@ -23,4 +23,4 @@ Guidance:
   or return values the driver acts on.
 - Keep maps as Vec slabs where the key space is small.
 
-Public API: breaks moq-net's session API; retargets to `dev`. Wire: none.
+Public API: breaks moq-net's session API. Wire: none.

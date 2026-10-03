@@ -26,7 +26,7 @@ grant back. The schemas are `moq_auth::Request` and `moq_auth::Grant`
 
 **Request.** `id` (random 128-bit hex, unique per session), `event`
 (`connect`, `revalidate`, or `end`), `node` (the relay's `--stats-node`, else
-`--cluster-node`), `transport` (`quic`, `websocket`, `tcp`, `unix`, `iroh`, or
+`--cluster-node`), `transport` (`quic`, `websocket`, `tcp`, `unix`, `iroh`, `rtmp`, `srt`, `webrtc`, or
 `http` for a one-shot `/fetch` or `/announced` request), `remote` and `local`
 socket addresses, `server_name` (the SNI or the host the client addressed),
 `alpn` (the negotiated moq protocol), `path` exactly as dialed, `query` raw,
@@ -78,7 +78,8 @@ an outage always has the bound the server chose. There is no `Cache-Control`
 and no cache on the relay.
 
 **End.** Every close reports `end` with the reason: `expired`, `refused`,
-`invalid`, the session's own close classification, or `dropped`. The byte
+`invalid`, `narrowed` when a re-check removes its scope, `shutdown` when the
+relay drains it, the session's own close classification, or `dropped`. The byte
 totals are what the transport reports; QUIC reports them, the qmux stream
 transports do not yet.
 
@@ -148,7 +149,7 @@ moq auth verify --key public.jwk --in alice.jwt
 ```
 
 ```bash
-moq auth serve --key public.jwk   # or --key-dir /etc/moq/keys/ for {kid}.jwk rotation
+moq auth serve --key public.jwk   # or --key-dir /etc/moq/keys/ or --key-set /etc/moq/keys.jwks
 ```
 
 The client dials `https://relay.example.com/rooms/123?jwt=<token>`. A
@@ -283,8 +284,8 @@ evaluated or refused: nothing is ignored, and no two are combined.
 | a JWT and a certificate | never requested | refused |
 
 A JWT, from the `jwt` query or a SETUP `token` of `kind` 0, is verified
-against `--key FILE` or `--key-dir DIR` (by `kid`, read per request so
-rotation needs no restart) and authorized at the dialed path, as in
+against `--key FILE`, `--key-dir DIR`, or `--key-set FILE` (by `kid`, read per
+request so rotation needs no restart) and authorized at the dialed path, as in
 [Path matching](#path-matching). A malformed, expired, or unknown-key token is
 refused; it never falls through to the anonymous rules. So is a SETUP token of
 any other `kind`. A SETUP token and a `jwt` query with the same value are one
@@ -351,40 +352,23 @@ An application that [embeds](/bin/relay/#embed) the relay can be the auth
 server without the HTTP: leave `[auth]` empty and take `relay.admissions()`
 before `run`. Each `Admission` carries the same `moq_auth::Request` the server
 would have read, and is answered with `grant(lease)` or `refuse(err)`. A
-`lease::Consumer::fixed(grant)` never changes; the consumer of a
-`lease::Producer` the application keeps is driven by it, which re-checks,
-updates, revokes, and learns when the session ends. Either way the relay closes the session at the
+`lease::Consumer::fixed(grant)` never changes. A `lease::Producer` the
+application keeps owns the re-check clock: `due()`
+yields `Revalidate` or `Expired`, `update(grant)` resets it, and `failed()`
+schedules bounded backoff after an outage. The producer also learns when the
+session ends. Either way the relay closes the session at the
 grant's `expires`. `run` refuses to start while nobody has taken the
 admissions, a dropped `Admissions` fails every later session as unavailable,
 and an admission left unanswered for ten seconds (the bound an auth server
-gets) is refused the same way.
+gets) is refused the same way. Gateway accept loops can call
+`Cluster::admit(&auth, request)` for the same scoped publisher, subscriber,
+stats tier, and lease as a native connection, then run work under
+`auth::hold(lease, work)` so a revoke cancels it.
 
-```rust
-let mut relay = Relay::load(config).await?;
-let mut admissions = relay.admissions().expect("[auth] is empty");
-tokio::spawn(async move {
-    while let Some(admission) = admissions.next().await {
-        match policy.decide(&admission.request) {
-            Ok(grant) => {
-                let (producer, consumer) = moq_auth::lease::Producer::new(grant);
-                admission.grant(consumer);
-                tokio::spawn(async move {
-                    loop {
-                        tokio::select! {
-                            reason = producer.closed() => break reason,
-                            () = producer.revalidate_requested() => {
-                                // Re-run the decision now: update, revoke, or keep.
-                            }
-                        }
-                    }
-                });
-            }
-            Err(err) => admission.refuse(err),
-        }
-    }
-});
-relay.run().await
-```
+The decider keeps each `lease::Producer` after answering `Admission::grant`.
+It waits for `producer.due()` alongside `producer.closed()`, updates on a fresh
+grant, calls `failed()` after an outage, and revokes on refusal or expiry. A
+re-check request from the session wakes `due()` before the cadence.
 
 ## Stream listeners
 

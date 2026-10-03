@@ -13,7 +13,7 @@ relay serves video, audio, and data alike.
 
 - **QUIC, WebTransport, and WebSocket** listeners, so browsers and native clients connect to one process.
 - **Path-scoped authentication** with JWTs, mTLS for peers, and anonymous patterns, decided by an auth server or a static grant. See [Authentication](/bin/relay/auth).
-- **Clustering** across hosts and regions with hop-list routing, per-link costs, gossip discovery, and dynamic peer lists. See [Clustering](/bin/relay/cluster).
+- **Clustering** across hosts and regions with hop-list routing, per-link costs, LAN discovery, and dynamic peer lists. See [Clustering](/bin/relay/cluster).
 - **A group cache** with byte and age budgets, so late joiners and the HLS gateway can fetch recent history.
 - **HTTP endpoints** to list broadcasts, fetch groups, probe health, and scrape Prometheus metrics. See [HTTP](/bin/relay/http).
 - **Live stats** published as MoQ tracks per node and per tenant, split by billing tier.
@@ -81,12 +81,18 @@ TLS, and a certificate fingerprint for client pinning.
 
 The accessors borrow and `run` consumes the relay, so clone `cluster`,
 `auth`, `client`, `stats`, `shutdown`, and `shutdown_trigger` for application
-tasks before calling it. `trigger.start()` drains every session with a GOAWAY
-and `run` returns once the drain window elapses, with the listeners released
-and the workers joined. Build routes from `web().routes()` (or
+tasks before calling it. `trigger.start()` drains every session with a GOAWAY,
+including any that connect afterwards, and `run` returns once every session
+has left or the drain window elapses, with the listeners released and the
+workers joined. `run` also starts
+the drain on SIGTERM or SIGINT. An application that owns those signals, for
+example to withdraw the node from DNS and wait out the TTL before draining,
+calls `with_signals(false)` and fires the trigger itself. Build routes from `web().routes()` (or
 `internal().routes()`): `with_web` replaces the router, so `Router::new()`
 drops the built-in routes. Extra listeners (RTMP, SRT, ...) sit beside `run`
-in the application's `select!`. `runtime.workers` and `runtime.io_uring` stay
+in the application's `select!`. The drain reaches only MoQ sessions: an
+extra listener has no GOAWAY, so the application stops it on its own deadline
+and leaves the encoder to reconnect. `runtime.workers` and `runtime.io_uring` stay
 inside the owner; do not split the worker group yourself. An application that
 decides admissions itself leaves `[auth]` empty and answers
 `relay.admissions()`; see [Authentication](/bin/relay/auth#in-process). See
