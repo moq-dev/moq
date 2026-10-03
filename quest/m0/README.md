@@ -17,8 +17,9 @@ done. moq.pro tracks this repository as a submodule rather than a release, so
 no release quest gates this milestone. The Pronto GPU integration lives in
 moq.pro.
 
-Relay hardening: IETF interop leads the ranking, since only those quests
-block Seattle. IETF stream types came from m1 in the 2026-09-30 audit
+The branch flip ranks first: it is a short cutover that every later PR
+targets. Relay hardening: IETF interop leads the rest, since only those
+quests block Seattle. IETF stream types came from m1 in the 2026-09-30 audit
 because a session ended by legal input is exactly what Seattle would hit. The DoS hardening
 from an external review on 2026-09-29, verified against `main`, stays in m0
 as security work. Its quests describe fixes, not exploits.
@@ -33,17 +34,16 @@ audio quality harness in `test/audio-quality/` has landed; it grades playout
 nightly and records the traces it replays. Its native lane is a standalone m1
 quest, since nothing here waits on it. The [A/V clock](/quest/m1/av-clock.md)
 moved to m1 in the 2026-09-30 audit: it waits on the whole jitter line and is
-a published `@moq/watch` break on dev.
-
-Published API or wire breaks still land on dev; each quest's Plan says so.
+a published `@moq/watch` break.
 
 ## Required
 
+- [Branch flip](/quest/m0/branch-flip.md) - `dev` becomes the default `main` trunk and today's `main` becomes `release`, where publishing runs
 - [IETF FIN semantics](/quest/m0/ietf-fin-not-cancel.md) - a request stream FIN stops updates without cancelling, and REQUEST_UPDATE on a subscribe is parsed
 - [JS unknown bidi](/quest/m0/ietf-unknown-bidi.md) - an unknown moq-transport bidi stream type closes the session in JS, as in Rust
 - [moq-lite early streams](/quest/m0/lite-early-streams.md) - a lite uni stream that arrives before SETUP is held until SETUP lands, and a second SETUP is fatal
 - [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
-- [noq reassembly cap](/quest/m0/noq-reassembly-cap.md) - noq carries quinn's stream reassembly cap and the connection receive window is finite by default
+- [noq reassembly cap](/quest/m0/noq-reassembly-cap.md) - iroh's upstream noq carries quinn's stream reassembly cap, once n0 releases it
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
 - [Shared fronts](/quest/m0/shared-fronts.md) - viewer sessions share a front, so fronts scale with peers, not viewers
 - [Wildcard](/quest/m0/wildcard/README.md) - a relay resolves subscriptions against advertised prefixes, a service claims the prefix it could serve and refuses the rest instead of enumerating broadcasts, and the browser player treats a covering claim as availability

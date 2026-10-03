@@ -27,8 +27,8 @@ Decided:
   (NULL on success) with `moq_error_message()`, results come through
   out-params, records are owned structs with `moq_<type>_free`, and names are
   the uniffi names in snake case.
-- The line targets `dev`: #4288 already renamed the hand-written crate to
-  `moq-c` (`rs/moq-c`) there, and the generated package takes over that name
+- #4288 already renamed the hand-written crate to
+  `moq-c` (`rs/moq-c`), and the generated package takes over that name
   and `moq::c` target, so C users migrate once. Its first release is 0.8.0, a
   minor bump over the hand-written 0.7.x.
 - Docs change inline: the consumer quest rewrites `doc/lib/c`, and retirement
@@ -38,7 +38,7 @@ The line owns the end-to-end check: every `doc/lib/c` sample and the C interop
 client build and run against the released 0.8.0 archive, not only in-tree.
 
 The hand-written crate gets no more feature work: its shutdown, CMake library,
-and fetch quests were abandoned for this line, and hidden is done on dev.
+and fetch quests were abandoned for this line, and hidden is done.
 
 ## Required
 

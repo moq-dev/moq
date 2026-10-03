@@ -158,6 +158,8 @@
             # time (bindgenHook above provides libclang). Linux-only; macOS uses
             # ScreenCaptureKit.
             pkgs.pipewire
+            # Isolated X11 server for SHM/GetImage capture measurements.
+            pkgs.xvfb-run
           ];
 
         # Where the shell's libasound looks for PCM plugins.
@@ -447,7 +449,7 @@
           # The package was `moq-cli` through 0.12.2. Refuse with the new name
           # so `nix run` and `nix profile upgrade` break instead of going stale.
           moq-cli = pkgs.writeShellScriptBin "moq" ''
-            echo "error: the moq-cli package is now moq: nix run github:moq-dev/moq#moq" >&2
+            echo "error: the moq-cli package is now moq: nix run github:moq-dev/moq/release#moq" >&2
             exit 1
           '';
 
@@ -456,7 +458,7 @@
             moq-relay
             moq-bench
             moq-boy
-            libmoq
+            moq-c
             moq-gst
             ;
 

@@ -19,7 +19,18 @@ Costs reflect SKU, directional egress economics, provider affinity, and marginal
 transfer savings. A hosting provider is not necessarily a policy domain:
 moq.pro can coordinate one model across its OVH and Linode nodes. Domain
 membership must come from an operator-controlled trust boundary, not a peer's
-unverified assertion.
+unverified assertion. Whatever identifies a boundary must hold to these
+operator-safety constraints:
+
+- A boundary is an explicitly configured link with an expected remote
+  identity. A URL, an observed address, or the `peer` grant alone does not
+  make a link a boundary.
+- The identity is bound to the authenticated link, whichever side dialed,
+  never taken from a route or announcement.
+- A missing, malformed, or mismatched boundary identity is fatal: refuse it
+  at startup or drop the link.
+- `cluster.id` is never reused as a domain identity. It is one node's id, and
+  sharing it across nodes merges distinct origins.
 
 Investigate a shared cost model within a coordinating domain and explicit
 import/export policy at its boundaries. A remote number is not comparable to
@@ -63,3 +74,5 @@ quests. Open wire/API choices belong to this design exercise.
 
 - [#3769](https://github.com/moq-dev/moq/pull/3769) - measurement-based pricing
   prompted the separation of measurement, operator policy, and protocol
+- [#4718](https://github.com/moq-dev/moq/pull/4718) - the dropped
+  cluster-domain hop plan the boundary constraints come from

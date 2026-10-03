@@ -56,8 +56,8 @@ impl Log {
 		self.sync(latest);
 	}
 
-	/// Report the streams whose frame-sync counters moved, one line each, and the PSI
-	/// sections dropped for a bad CRC if that count moved.
+	/// Report the streams whose frame-sync counters moved, one line each, the PSI sections
+	/// dropped for a bad CRC if that count moved, and the TR 101 290 counters if any moved.
 	///
 	/// The importer already warns on each individual resync and dropped section; this is the
 	/// running total, which is what an operator turns into a rate.
@@ -66,6 +66,21 @@ impl Log {
 			tracing::info!(
 				crc_error = latest.crc_error,
 				"PAT or PMT sections dropped for a bad CRC"
+			);
+		}
+		if self.previous.as_ref().map_or([0; 9], Stats::health) != latest.health() {
+			tracing::info!(
+				ts_sync_loss = latest.ts_sync_loss,
+				sync_byte_error = latest.sync_byte_error,
+				pat_error = latest.pat_error,
+				continuity_count_error = latest.continuity_count_error,
+				pmt_error = latest.pmt_error,
+				transport_error = latest.transport_error,
+				crc_error = latest.crc_error,
+				pcr_repetition_error = latest.pcr_repetition_error,
+				pcr_discontinuity_indicator_error = latest.pcr_discontinuity_indicator_error,
+				pts_error = latest.pts_error,
+				"TR 101 290 errors in the received transport stream"
 			);
 		}
 		let lost = |stream: &StreamStats| (stream.resyncs, stream.discarded, stream.unconfirmed);
@@ -186,6 +201,40 @@ mod test {
 			match dropped.as_slice() {
 				[first, second] if first.contains("crc_error=2") && second.contains("crc_error=3") => Ok(()),
 				_ => Err(format!("expected one line per move, got {dropped:?}")),
+			}
+		});
+		assert!(!logs_contain("TR 101 290"), "a CRC error is reported on its own line");
+	}
+
+	/// The TR 101 290 counters are reported together, with their totals, when any of them
+	/// moves, and not while they hold.
+	#[test]
+	#[tracing_test::traced_test]
+	fn reports_tr_101_290_errors_when_they_move() {
+		let sample = |transport_error: u64, pcr_repetition_error: u64| Stats {
+			transport_error,
+			pcr_repetition_error,
+			..Default::default()
+		};
+
+		let mut log = Log::default();
+		log.sample(sample(0, 0));
+		log.sample(sample(1, 0));
+		log.sample(sample(1, 0));
+		log.sample(sample(1, 2));
+		log.finish(&sample(1, 2));
+
+		logs_assert(|lines: &[&str]| {
+			let moved: Vec<_> = lines.iter().filter(|line| line.contains("TR 101 290")).collect();
+			match moved.as_slice() {
+				[first, second]
+					if [first, second].iter().all(|line| line.contains(" transport_error=1"))
+						&& first.contains(" pcr_repetition_error=0")
+						&& second.contains(" pcr_repetition_error=2") =>
+				{
+					Ok(())
+				}
+				_ => Err(format!("expected one line per move, got {moved:?}")),
 			}
 		});
 	}

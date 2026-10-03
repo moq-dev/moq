@@ -1,6 +1,6 @@
 [package]
 name = "libmoq"
-description = "Media over QUIC, C bindings"
+description = "Renamed to moq-c: Media over QUIC, C bindings"
 authors = ["Luke Curley <kixelated@gmail.com>", "Brian Medley <bpm@bmedley.org>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
@@ -9,39 +9,5 @@ version = "0.6.9"
 edition = "2024"
 rust-version.workspace = true
 
-keywords = ["quic", "http3", "webtransport", "media", "live"]
-categories = ["multimedia", "network-programming", "web-programming"]
-
-[lib]
-name = "moq"
-crate-type = ["staticlib"]
-
-[dependencies]
-anyhow = { workspace = true, features = ["backtrace"] }
-bytes = { workspace = true }
-hang = { workspace = true }
-kio = { workspace = true }
-# Codecs only: OBS and the other C consumers do their own device I/O.
-moq-audio = { workspace = true, features = ["aac"] }
-moq-json = { workspace = true }
-moq-mux = { workspace = true }
-moq-net = { workspace = true }
-moq-tokio = { workspace = true, features = ["noq", "aws-lc-rs", "websocket", "tcp", "uds"] }
-# Select the OpenH264 fallback plus NVIDIA and VAAPI hardware codecs explicitly
-# because workspace defaults are off. The hardware backends dlopen their driver;
-# `vaapi` also runs bindgen, so Linux builds need libclang.
-moq-video = { workspace = true, features = ["nvidia", "openh264", "vaapi"] }
-# Blocking on `encode::Sink` from the synchronous C entry points; see
-# `video::block_on` for why not a tokio helper.
-pollster = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros"] }
-tracing = { workspace = true }
-url = { workspace = true }
-
-[build-dependencies]
-cbindgen = "0.29"
-
-[dev-dependencies]
-moq-loc = { path = "../moq-loc" }
+keywords = ["quic", "media", "live"]
+categories = ["multimedia", "network-programming"]

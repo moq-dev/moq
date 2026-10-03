@@ -12,7 +12,7 @@ Values above 2^53 are legal on the IETF wire (request ids, track aliases);
 they stay exact as `U64` and only fail where code converts them to
 `number`.
 
-Public API: breaks `@moq/net`; retargets to `dev`. Wire: none.
+Public API: breaks `@moq/net`. Wire: none.
 
 Decided in the 2026-09-30 audit: deferred to m2 until generated lite passes
 its no-downgrade go/no-go in the [rs2ts line](/quest/m1/rs2ts/README.md).

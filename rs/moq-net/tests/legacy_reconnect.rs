@@ -35,8 +35,11 @@ async fn connect_legacy(publisher: &origin::Producer, relay: &origin::Producer) 
 /// race, and either way the path comes back.
 async fn next_first_hop(announced: &mut announce::Consumer) -> Hop {
 	loop {
-		let update = announced.next().await.expect("announce cursor ended");
-		if update.prefix.as_str() != PATH || !update.kind.is_active() {
+		let update = match announced.next().await.expect("announce cursor ended") {
+			announce::Event::Start(update) | announce::Event::Update(update) => update,
+			announce::Event::End(_) | announce::Event::Live => continue,
+		};
+		if update.prefix.as_str() != PATH {
 			continue;
 		}
 		return *update.route.hops.iter().next().expect("a route names its first hop");

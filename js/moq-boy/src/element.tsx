@@ -137,13 +137,14 @@ export default class MoqBoy extends HTMLElement {
 			for (;;) {
 				const entry = await effect.race(announced.next());
 				if (!entry) break;
+				if (entry.kind === "live") continue;
 
 				// A broad route that cannot pin the game id names nothing to open.
 				const capture = entry.captures?.[0];
 				if (!capture?.isLiteral) continue;
 
 				const id = capture.text;
-				if (Moq.Announce.isActive(entry.kind) && !this.#sessions.has(id)) {
+				if (entry.kind !== "end" && !this.#sessions.has(id)) {
 					const config: GameConfig = {
 						sessionId: id,
 						connection: this.connection,
@@ -155,7 +156,7 @@ export default class MoqBoy extends HTMLElement {
 					const game = new Game(config);
 					this.#sessions.set(id, game);
 					this.games.set(new Map(this.#sessions));
-				} else if (entry.kind === "retracted") {
+				} else if (entry.kind === "end") {
 					const game = this.#sessions.get(id);
 					if (game) {
 						game.close();

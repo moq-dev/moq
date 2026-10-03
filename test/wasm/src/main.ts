@@ -143,14 +143,16 @@ async function withPublisher<T>(relay: RelayFixture, path: string, run: () => Pr
 	const broadcast = origin.createBroadcast(Moq.Path.from(path));
 	const track = broadcast.createTrack(TRACK);
 	const missing = broadcast.createTrack("missing");
+	const used = track.demand().used;
+	const missingUsed = missing.demand().used;
 	broadcast.announce();
 	const connection = await Moq.Connection.connect({ url: new URL(relay.url), publish: origin.consume() });
 
 	let stopped = false;
 	const writer = (async () => {
 		while (!stopped && track.closed.peek() === undefined) {
-			if (!track.used.peek()) {
-				await Promise.race([track.used.changed(), track.closed]);
+			if (!used.peek()) {
+				await Promise.race([used.changed(), track.closed]);
 				continue;
 			}
 			const group = track.appendGroup();
@@ -158,15 +160,15 @@ async function withPublisher<T>(relay: RelayFixture, path: string, run: () => Pr
 				group.writeFrame({ payload: frame, timestamp: Moq.Time.Timestamp.now() });
 			}
 			group.close();
-			await Promise.race([sleep(GROUP_INTERVAL_MS), track.used.changed(), track.closed]);
+			await Promise.race([sleep(GROUP_INTERVAL_MS), used.changed(), track.closed]);
 		}
 		track.close();
 	})();
 	const rejecting = (async () => {
-		while (!missing.used.peek() && missing.closed.peek() === undefined) {
-			await Promise.race([missing.used.changed(), missing.closed]);
+		while (!missingUsed.peek() && missing.closed.peek() === undefined) {
+			await Promise.race([missingUsed.changed(), missing.closed]);
 		}
-		if (missing.used.peek()) missing.close(new Error("no such track: missing"));
+		if (missingUsed.peek()) missing.close(new Error("no such track: missing"));
 	})();
 
 	try {
@@ -176,7 +178,9 @@ async function withPublisher<T>(relay: RelayFixture, path: string, run: () => Pr
 		track.close();
 		missing.close();
 		broadcast.close();
-		connection.close();
+		// Teardown, not a graceful end: the case is over and the harness is not waiting
+		// on delivery, so skip the drain `close()` would spend up to a second on.
+		connection.abort();
 		origin.close();
 		await writer;
 		await rejecting;

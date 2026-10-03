@@ -11,6 +11,7 @@ export * as Hang from "@moq/hang";
 export type { BufferedRange, BufferedRanges } from "@moq/hang/container";
 export * as Net from "@moq/net";
 export * as Signals from "@moq/signals";
+export { assets } from "./assets";
 export * as Audio from "./audio";
 export * from "./broadcast";
 export * from "./player";

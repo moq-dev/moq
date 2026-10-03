@@ -867,6 +867,43 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
+	async fn flac_cut_per_frame_rewind_names_timestamp_and_edge() {
+		let (broadcast, catalog) = new_broadcast();
+		let config = crate::codec::flac::Config {
+			min_block_size: 4608,
+			max_block_size: 4608,
+			min_frame_size: 0,
+			max_frame_size: 0,
+			sample_rate: 48_000,
+			channel_count: 2,
+			bits_per_sample: 24,
+			total_samples: 0,
+			md5: [0; 16],
+		};
+		let mut import = Track::audio(
+			broadcast.reserve_track("audio").unwrap(),
+			catalog.reserve(),
+			AudioInit::new(AudioFormat::Flac, config.description()),
+		)
+		.unwrap();
+
+		let floor = 1_790_802_494_898_432;
+		for timestamp in [floor - 10_000, floor] {
+			import
+				.decode(b"flac frame", Some(Timestamp::from_micros(timestamp).unwrap()))
+				.unwrap();
+			import.cut(None).unwrap();
+		}
+		let err = import
+			.decode(b"flac frame", Some(Timestamp::from_micros(floor - 1).unwrap()))
+			.unwrap_err();
+		assert!(matches!(err, crate::Error::TimestampRewind(_)), "{err:?}");
+		let message = err.to_string();
+		assert!(message.contains("1790802494898431 µs"), "{message}");
+		assert!(message.contains("1790802494898432 µs"), "{message}");
+	}
+
+	#[tokio::test(start_paused = true)]
 	async fn aac_import_attaches_audio_specific_config() {
 		let (broadcast, catalog) = new_broadcast();
 		let config = crate::codec::aac::Config {

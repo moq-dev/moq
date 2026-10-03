@@ -23,6 +23,7 @@ or Docker; see [Install](/setup/install).
 | `export` | `rtmp`, `srt`, `rtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
 | `play` | | Decode and play in a native window with sound. |
 | `transcode` | | Publish a just-in-time rendition ladder next to a broadcast. |
+| `ls` | `[prefix]` | List the broadcasts live on a relay. |
 | `fetch` | `<track>` | Write one group of a track to stdout. |
 | `auth` | | Generate, sign, and verify relay JWTs. |
 | `devices` | | List capture sources and their ids. |
@@ -33,6 +34,7 @@ or Docker; see [Install](/setup/install).
 moq <MoQ side> import <source> [options]
 moq <MoQ side> export <sink> [options]
 moq <MoQ side> play [options]
+moq <MoQ side> ls [prefix] [options]
 moq <MoQ side> fetch <track> [options]
 ```
 
@@ -56,18 +58,20 @@ moq --connect https://relay.example.com/anon --broadcast my-stream.hang export t
 moq --connect "https://relay.example.com/rooms/1?jwt=$TOKEN" --broadcast alice.hang import ts
 ```
 
-The `ts`, `fmp4`, and `flv` imports publish on the broadcast clock the catalog
-advertises, not the input's own timestamps. The first frame is stamped when it
-arrives, every track keeps its offset from the others, and an input that
-restarts its timestamps, such as a restarted encoder, continues forward
-after the real gap rather than rewinding. So a feed whose PTS starts hours in,
-or whose first frame arrives late, still names the right wall time.
+The `ts`, `fmp4`, and `flv` imports publish the input's own timestamps, and
+the catalog clock maps the first frame to the time it arrived. So a feed whose
+PTS starts hours in still names the right wall time, and every track keeps its
+offset from the others. A group starting before the previous group's start,
+such as a restarted encoder or a looping file wrapping to the top, ends the
+import with an error; run it again to publish anew. A keyframe that merely
+overlaps the previous group's last frame is not a rewind.
 
 MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3, passes SCTE-35 and
 subtitle PIDs through as tracks, and round-trips the service tables. A
 `discontinuity_indicator` on the program's PCR PID is a system time-base reset,
 so it breaks every track's timeline and the exported clock declares the break in
-turn. The same flag on an elementary PID other than the program PCR PID, a
+turn. A new timeline whose first group starts before the previous group's start
+ends the import like any other rewind. The same flag on an elementary PID other than the program PCR PID, a
 continuity-counter gap, and the 33-bit timestamp rollover move no clock and
 declare nothing. FLV covers H.264 + AAC.
 
@@ -78,6 +82,20 @@ continuity intact, around a PID that delivers nothing, and no transport check
 downstream sees it. A sparse stream such as SCTE-35 goes quiet between cues, so
 the line reports rather than alarms; `Import::stats` carries the same counters
 for a caller that sets its own limit.
+
+`import ts` also counts the ETSI TR 101 290 errors of the feed it receives, at
+that standard's fixed limits: `TS_sync_loss`, `Sync_byte_error`, `PAT_error`,
+`Continuity_count_error`, `PMT_error`, `Transport_error`, `CRC_error` (PAT and
+PMT), `PCR_repetition_error`, `PCR_discontinuity_indicator_error` and
+`PTS_error`. They are cumulative, logged with their totals in the sample after
+any of them moves, and carried on `Import::stats` stream-wide and per PID. They
+change nothing that is published. They grade the stream as it reached the
+importer, not the wire a receiver sees downstream, and the PCR checks grade
+consecutive PCR values rather than arrival times, so they speak for the encoder
+and not for the network in front of the importer. Table, PCR and PTS intervals
+run on the program clock, which starts at the first PCR after the PMT.
+`PID_error` is covered, more strictly, by the access-unit counts above.
+`PCR_accuracy_error` is not measured.
 
 MPEG-TS import takes one program. A multi-program stream is refused before
 anything is published, naming its programs, rather than merged onto one clock;
@@ -226,6 +244,29 @@ heights and bitrates must then increase strictly together. Duplicate heights or
 bitrates, inverted rankings, and zero-sized or zero-bitrate rungs are rejected
 before connecting.
 
+## List
+
+```bash
+moq --connect https://relay.example.com/anon ls
+moq ... ls room --follow --json
+```
+
+Lists the broadcasts live on a relay over MoQ, with the session's own auth: the
+counterpart of the relay's HTTP `/announced/<prefix>`. It prints one path per
+line, relative to the `--connect` path, and exits once the relay has sent
+everything live under `prefix`. `--follow` keeps running: it prints `+ path`
+for each live broadcast, then `+ path` and `- path` as broadcasts come and go,
+and exits non-zero if the session ends. `--json` prints
+`{"path": "room/alice", "active": true}` per line instead, in either mode.
+
+Like `/announced`, it lists announced prefixes, which by convention are
+broadcast paths. A new route to a path already live prints nothing. A name
+starting with `.` stays hidden unless `prefix` names it. `ls` only dials
+`--connect`, and refuses any other MoQ-side flag.
+
+[Inspect a relay](/bin/inspect) walks through `ls` and `fetch` next to their
+`curl` equivalents, including reading the relay's stats.
+
 ## Fetch
 
 ```bash
@@ -317,6 +358,8 @@ rules, an explicit mTLS grant, tiers, and session limits; see
 moq auth serve --listen 127.0.0.1:4440 --key-dir keys/ --public-subscribe 'anon/**'
 ```
 
+`moq auth serve` also accepts `--key-set keys.jwks` to verify tokens from a JWK Set.
+
 `moq auth sessions` and `moq auth revalidate` talk to a relay's internal
 listener. A push is a re-check: the auth server's reply is what kicks. An
 empty filter is every session on that node.
@@ -355,7 +398,7 @@ way. Only `ts` can mark the restart, so the other formats refuse `--linger`.
 ## Debugging
 
 `RUST_LOG=debug` prints the negotiated version and every subscription.
-`curl http://relay:4443/announced/` confirms the relay is reachable and shows
-what it holds. Connection refused means UDP isn't getting through; certificate
+`moq --connect <url> ls`, or `curl http://relay:4443/announced`, confirms the
+relay is reachable and shows what it holds; see [Inspect a relay](/bin/inspect). Connection refused means UDP isn't getting through; certificate
 errors on a dev relay want `--connect-tls-insecure` or the `http://`
 fingerprint flow.

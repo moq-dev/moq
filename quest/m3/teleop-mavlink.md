@@ -44,8 +44,7 @@ them all in one long-lived group has the opposite failure: nothing can be
 skipped and head-of-line blocking is back.
 
 So the lossy class is a latest-value snapshot of opaque bytes:
-`moq_binary::snapshot` (moving to `moq_flate::snapshot` in
-moq-binary's fold into moq-flate ([#4425](https://github.com/moq-dev/moq/pull/4425), on `dev`)), with the raw
+`moq_flate::snapshot`, with the raw
 frame as the value. Every update is a self-contained group, so a newer value
 never waits behind an older one. One detail decides whether it actually
 delivers latest-value:

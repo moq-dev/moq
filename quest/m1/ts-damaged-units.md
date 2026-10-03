@@ -30,7 +30,7 @@ Decided (maintainer, 2026-09-30):
 - Count each drop in a new cumulative per-PID `damaged` counter on the stream's
   stats row, beside `resyncs` and `discarded`, reported by `ts::stats::Log`.
   It names what happened; no TR 101 290 check matches a codec error, and
-  [TS import health](/quest/m2/ts-import-health.md) keeps the ETSI names.
+  the TR 101 290 counters keep the ETSI names.
   The rows are `#[non_exhaustive]`, so the field is additive; follow
   [TS stats module](/quest/m1/ts-stats-module.md)'s names if it has landed.
 - Errors that are not confined to one unit (the producer refusing a rewind,
@@ -50,7 +50,3 @@ Public API: additive, one stats field. Wire: none.
 ## Closes
 
 - [#4581](https://github.com/moq-dev/moq/issues/4581) - one malformed packet ends the TS import
-
-## Related
-
-- [TS import health](/quest/m2/ts-import-health.md) - the TR 101 290 counters for the same feed

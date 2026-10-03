@@ -19,10 +19,10 @@ categories = ["multimedia", "network-programming", "web-programming"]
 [[bin]]
 name = "moq"
 path = "src/main.rs"
-# `libmoq`'s staticlib is also named `moq`, so a `cargo doc` selecting both renders
+# `moq-c`'s staticlib is also named `moq`, so a `cargo doc` selecting both renders
 # them to `target/doc/moq` and the two rustdoc processes race to clean it (#3094).
 # This binary's page is the one to give up: nothing links it, and a bin target has
-# no public API to render, whereas docs.rs/libmoq is the published C API reference.
+# no public API to render, whereas docs.rs/moq-c is the published C API reference.
 doc = false
 
 [features]
