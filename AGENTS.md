@@ -79,7 +79,7 @@ PRs target `main`, the trunk, where breaking API changes are allowed.
 Wire changes should be backwards compatible for any *published* drafts/versions.
 
 Before starting, `git fetch origin` and set the upstream to the base branch.
-Write scratch files (PR bodies, logs, notes) to the worktree's gitignored `.scratch/`, never a directory other agents share.
+Pass PR bodies to `gh` on stdin (`--body-file -`); never write to a directory other agents share.
 
 Use the Nix dev shell so tooling matches CI.
 direnv loads it automatically, but if not: `nix develop --command ...`.

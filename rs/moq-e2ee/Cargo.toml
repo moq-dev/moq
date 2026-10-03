@@ -19,7 +19,6 @@ bytes = { workspace = true }
 kio = { workspace = true }
 moq-net = { workspace = true }
 thiserror = { workspace = true }
-uuid = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]

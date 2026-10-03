@@ -3081,6 +3081,11 @@ impl group::Expiry for GroupExpiry {
 		let _ = self.state.poll(waiter, |state| {
 			let budget = clamp_max_age(max_age, state.max_age_bound());
 			loop {
+				// An abort can change reach even after the successor is stamped.
+				// Register before judging, so a racing abort is observed or wakes us.
+				if let Some(group) = state.first_servable(self.sequence.saturating_add(1), cap) {
+					let _ = group.poll_closed(waiter);
+				}
 				let edge = state.drift_edge(cap);
 				expired = state.is_stale(self.sequence, &edge, budget);
 				if expired {
@@ -5431,6 +5436,39 @@ mod test {
 		// ended there.
 		let result = pending.await.unwrap();
 		assert!(matches!(result, Ok(None)), "the held group ends: {result:?}");
+	}
+
+	/// A rewound successor can keep a drained group within budget until its abort
+	/// moves the reach to the next cached group, without changing the track itself.
+	#[tokio::test]
+	async fn aborted_stamped_successor_wakes_a_parked_read() {
+		tokio::time::pause();
+		let mut producer = track_producer("test", None);
+		let mut head = producer.append_group().unwrap();
+		head.write_frame(Timestamp::ZERO, b"head".as_slice()).unwrap();
+		let mut successor = producer.append_group().unwrap();
+		successor
+			.write_frame(Timestamp::from_millis(30_000).unwrap(), b"next".as_slice())
+			.unwrap();
+		append_at(&mut producer, 1000);
+		append_at(&mut producer, 20_000);
+		let mut sub = producer.subscribe(None);
+		let mut reading = sub.recv_group().await.unwrap().unwrap();
+		assert_eq!(reading.sequence, 0, "the rewound successor extends the reach");
+		assert!(reading.read_frame().await.unwrap().is_some());
+
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waker = futures::task::waker(Arc::new(FlagWake(woken.clone())));
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(reading.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+		successor.abort(Error::Cancel).unwrap();
+		assert!(
+			woken.load(Ordering::SeqCst),
+			"the stamped successor's abort lost its wakeup"
+		);
+		let result = next.as_mut().poll(&mut cx);
+		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
 	}
 
 	/// A first timestamp on a *newer* group can convict a held one, so the held reader has

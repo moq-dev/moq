@@ -59,5 +59,5 @@ Wire: none.
 
 ## Related
 
-- [Broadcast epoch primitive](/quest/m1/epoch.md) - the epoch each camera session's broadcast publishes under
+- [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - the epoch each camera session's broadcast publishes under
 - [moq.pro's Pronto truck](https://github.com/moq-dev/moq.pro/blob/main/pronto/truck/src/camera.rs) - the prior art this generalizes, and the first consumer

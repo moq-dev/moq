@@ -43,8 +43,8 @@ them:
   a break.
 - **Security folds into the fork.** Rebasing on quinn picks up the 2026
   advisories noq is missing; `release` stays on `moq-noq` until the next cut.
-  [noq reassembly cap](/quest/m0/noq-reassembly-cap.md) still finishes on the
-  old fork for `release`.
+  [noq reassembly cap](/quest/m0/noq-reassembly-cap.md) only tracks iroh's
+  upstream noq, which the fork does not replace.
 - **moq-dev/noq is frozen**: security patches for `main` only, archived once
   no released MoQ crate depends on it. The other
   [QUIC quests](/quest/m1/quic/README.md) wait for this line and land

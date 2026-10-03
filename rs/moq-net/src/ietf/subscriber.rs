@@ -3167,7 +3167,7 @@ where
 
 		// Registered before the FETCH goes out, since its fetch stream can overtake FETCH_OK.
 		let slot = kio::Producer::new(GroupFetch::Pending);
-		let _registered = GroupFetchEntry::new(&self.state, fetch_id, slot.clone());
+		let registered = GroupFetchEntry::new(&self.state, fetch_id, slot.clone());
 
 		let mut stream = match Stream::open(&mut self.session.clone(), self.version).await {
 			Ok(stream) => stream,
@@ -3199,13 +3199,33 @@ where
 					fill_timeout: false,
 				})
 				.await?;
-			self.read_group_fetch_response(&mut stream).await
+			Ok::<_, Error>(())
 		}
 		.await;
+		let res = match res {
+			Err(err) => Some(Err(err)),
+			Ok(()) => {
+				let mut response = std::pin::pin!(self.read_group_fetch_response(&mut stream));
+				kio::wait(|waiter| {
+					// A refusal retires the peer's request, so it wins over abandonment.
+					if let Poll::Ready(res) = waiter.poll_future(response.as_mut()) {
+						return Poll::Ready(Some(res));
+					}
+					request.poll_unused(waiter).map(|()| None)
+				})
+				.await
+			}
+		};
 
 		let ok = match res {
-			Ok(ok) => ok,
-			Err(err) => {
+			Some(Ok(ok)) => ok,
+			None => {
+				request.reject(Error::Cancel);
+				drop(registered);
+				self.cancel_group_fetch(stream, fetch_id).await;
+				return;
+			}
+			Some(Err(err)) => {
 				tracing::debug!(%err, group = sequence, "group fetch refused");
 				request.reject(err);
 				let _ = stream.writer.close().await;
@@ -3241,6 +3261,8 @@ where
 		let info = track::Info::default()
 			.with_timescale(Timescale::MICRO)
 			.with_max_age(ok.properties.max_cache_duration);
+		// Joined fetches still count until they pick the accepted group up from the cache.
+		let joined = request.result.clone();
 		let mut producer = match request.accept(info) {
 			Ok(producer) => producer,
 			// Already served by a concurrent fetch, or the track closed.
@@ -3256,6 +3278,7 @@ where
 			let _ = stream.writer.close().await;
 			return;
 		}
+		let demand = producer.clone();
 		if let Ok(mut state) = slot.write() {
 			*state = GroupFetch::Ready {
 				producer,
@@ -3265,11 +3288,12 @@ where
 			};
 		}
 
-		// Hold the request open until its fetch stream is done: closing our side first is
-		// what a draft-14-16 adapter reads as cancelling the FETCH. A publisher that fails
-		// after FETCH_OK resets the request instead and owes no fetch stream, so the group
-		// it left waiting is aborted. A FIN is not that: the fetch stream can trail it.
+		// Keep the request open until its data stream finishes or every reader leaves.
+		// A publisher that fails after FETCH_OK resets the request instead and owes no fetch
+		// stream, so the group it left waiting is aborted. A FIN is not that: the fetch
+		// stream can trail it.
 		let mut open = true;
+		let mut abandoned = false;
 		let reset = kio::wait(|waiter| {
 			if open {
 				let mut cx = std::task::Context::from_waker(waiter.waker());
@@ -3281,11 +3305,24 @@ where
 			}
 			slot.poll(waiter, |state| match &**state {
 				GroupFetch::Done => Poll::Ready(()),
+				_ if joined.poll_unused(waiter).is_ready()
+					&& demand.poll_unused(waiter).is_ready()
+					&& demand.abort_unused(Error::Cancel) =>
+				{
+					abandoned = true;
+					Poll::Ready(())
+				}
 				_ => Poll::Pending,
 			})
 			.map(|_| None)
 		})
 		.await;
+		if abandoned {
+			drop(registered);
+			self.cancel_group_fetch(stream, fetch_id).await;
+			return;
+		}
+		// A group already written stays cached; only one still waiting for its stream is lost.
 		if let Some(err) = reset
 			&& let Ok(mut state) = slot.write()
 			&& matches!(*state, GroupFetch::Ready { .. })
@@ -3294,6 +3331,27 @@ where
 			let _ = producer.abort(err);
 		}
 		let _ = stream.writer.close().await;
+	}
+
+	/// Cancel a FETCH using the negotiated draft's existing cancellation signal.
+	async fn cancel_group_fetch(&self, mut stream: Stream<S, Version>, request_id: RequestId) {
+		stream.reader.abort(&Error::Cancel);
+		match self.version {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
+				// The adapter has no transport reset, so deliver FETCH_CANCEL without a
+				// subsequent writer drop discarding unacknowledged control bytes.
+				let res = async {
+					stream.writer.encode(&ietf::FetchCancel::ID).await?;
+					stream.writer.encode(&ietf::FetchCancel { request_id }).await?;
+					stream.writer.close().await
+				}
+				.await;
+				if let Err(err) = res {
+					tracing::debug!(%err, "failed to cancel group fetch");
+				}
+			}
+			_ => stream.writer.abort(&Error::Cancel),
+		}
 	}
 
 	/// Read the answer to a group FETCH: FETCH_OK, or the publisher's refusal as an error.
@@ -3350,20 +3408,32 @@ where
 		.await;
 		let (producer, timescale, start, end) = taken?;
 
+		let closed = producer.clone();
 		let mut producer = crate::recv::Group::new(producer);
-		let res = match self
-			.recv_group_fetch_objects(stream, &mut producer, start, end, timescale)
+		let res = {
+			let mut receive =
+				std::pin::pin!(self.recv_group_fetch_objects(stream, &mut producer, start, end, timescale));
+			kio::wait(|waiter| {
+				if let Poll::Ready(res) = waiter.poll_future(receive.as_mut()) {
+					return Poll::Ready(res);
+				}
+				closed.poll_closed(waiter).map(Err)
+			})
 			.await
-		{
+		};
+
+		// Completion and abandonment share the slot lock, so a complete group is never
+		// aborted between finishing it and publishing Done to the request handler.
+		let mut state = slot.write().ok();
+		let res = match res {
 			Ok(()) => producer.finish(),
 			Err(err) => {
 				let _ = producer.abort(err.clone());
 				Err(err)
 			}
 		};
-
-		if let Ok(mut state) = slot.write() {
-			*state = GroupFetch::Done;
+		if let Some(state) = state.as_mut() {
+			**state = GroupFetch::Done;
 		}
 		res
 	}
@@ -7955,6 +8025,216 @@ mod joining_fetch_tests {
 				run.subscriber.state.lock().subscribes.values().next().is_some(),
 				"{version}: the subscription continues live"
 			);
+		}
+	}
+
+	#[derive(Clone, Copy, PartialEq, Eq)]
+	enum FetchStage {
+		Unanswered,
+		Accepted,
+		Receiving,
+		Complete,
+		/// Complete, then the publisher resets the request stream.
+		CompleteReset,
+	}
+
+	/// Last-reader cancellation covers a pending answer, an accepted group waiting for
+	/// its stream, and a stream stalled after its first complete frame.
+	async fn abandon_group_fetch(version: Version, stage: FetchStage) {
+		const GROUP: u64 = 4;
+		let complete = matches!(stage, FetchStage::Complete | FetchStage::CompleteReset);
+		let session = ScriptedSession::new(Vec::new());
+		let (tasks, _task_set) = TaskSet::new();
+		let subscriber = Subscriber::new(
+			crate::time::Clock::tokio(),
+			session.clone(),
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			version,
+			tasks,
+			Default::default(),
+		);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			track::Info::default(),
+		);
+		let dynamic = track.dynamic();
+		let consumer = track.consume();
+		let mut fetch = Box::pin(consumer.fetch_group(GROUP, None));
+		assert!(futures::poll!(fetch.as_mut()).is_pending());
+		let request = dynamic.requested_group().await.expect("group request");
+		let outcome = request.result.clone();
+		let mut run = Box::pin(subscriber.clone().run_group_fetch(
+			Path::new("broadcast").to_owned(),
+			"video".into(),
+			request,
+			None,
+		));
+		assert!(futures::poll!(run.as_mut()).is_pending());
+		let slot = subscriber.state.lock().group_fetches[&RequestId(1)].clone();
+
+		if stage == FetchStage::Unanswered {
+			drop(fetch);
+			assert!(
+				futures::poll!(run.as_mut()).is_ready(),
+				"{version:?}: unanswered FETCH stays alive"
+			);
+			assert!(matches!(outcome.read().rejected, Some(Error::Cancel)));
+		} else {
+			session.push(&message_bytes(
+				ietf::FetchOk::ID,
+				&ietf::FetchOk {
+					request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+						.then_some(RequestId(1)),
+					group_order: GroupOrder::Ascending,
+					end_of_track: false,
+					end_location: ietf::Location {
+						group: GROUP + 1,
+						object: 0,
+					},
+					properties: Default::default(),
+				},
+				version,
+			));
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			let group = fetch.await.expect("accepted group");
+			let observed = {
+				let state = slot.read();
+				let GroupFetch::Ready { producer, .. } = &*state else {
+					panic!("accepted slot")
+				};
+				producer.clone()
+			};
+			if stage == FetchStage::Accepted {
+				drop(group);
+				assert!(
+					futures::poll!(run.as_mut()).is_ready(),
+					"{version:?}: accepted FETCH stays alive"
+				);
+			} else {
+				let mut objects = Vec::new();
+				if version == Version::Draft14 {
+					GROUP.encode(&mut objects, version).unwrap();
+					0u64.encode(&mut objects, version).unwrap(); // subgroup
+					0u64.encode(&mut objects, version).unwrap(); // object
+					0u8.encode(&mut objects, version).unwrap(); // priority
+					Vec::<u8>::new().encode(&mut objects, version).unwrap();
+				} else {
+					ietf::FetchObject::Object {
+						subgroup: ietf::FetchSubgroup::Zero,
+						group: Some(GROUP),
+						object: Some(0),
+						priority: Some(0),
+						properties: None,
+					}
+					.encode(&mut objects, version)
+					.unwrap();
+				}
+				1u64.encode(&mut objects, version).unwrap();
+				objects.push(b'x');
+				let data = ScriptedSession::new(objects);
+				let (_, recv) = data.clone().open_bi().await.unwrap();
+				let mut reader = Reader::new(recv, version);
+				let mut receiving = subscriber.clone();
+				let mut fill = Box::pin(receiving.recv_group_fetch(&mut reader, slot.clone()));
+				assert!(futures::poll!(fill.as_mut()).is_pending());
+				let mut group = group;
+				assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"x");
+				assert!(
+					futures::poll!(run.as_mut()).is_pending(),
+					"the reader still wants the group"
+				);
+				drop(group);
+				if complete {
+					data.close(crate::lite::test_transport::Close::Fin);
+					assert!(matches!(futures::poll!(fill.as_mut()), Poll::Ready(Ok(()))));
+					if stage == FetchStage::CompleteReset {
+						session.close(crate::lite::test_transport::Close::Reset);
+					}
+					assert!(futures::poll!(run.as_mut()).is_ready());
+					assert!(observed.is_finished());
+					assert!(!observed.is_aborted());
+					let mut cached = consumer.fetch_group(GROUP, None).await.expect("complete group cached");
+					assert_eq!(cached.read_frame().await.unwrap().unwrap().payload.as_ref(), b"x");
+					assert!(cached.read_frame().await.unwrap().is_none());
+				} else {
+					assert!(
+						futures::poll!(run.as_mut()).is_ready(),
+						"{version:?}: partial FETCH stays alive"
+					);
+					assert!(matches!(futures::poll!(fill.as_mut()), Poll::Ready(Err(Error::Cancel))));
+				}
+			}
+			if !complete {
+				assert!(
+					matches!(observed.poll_closed(&kio::Waiter::noop()), Poll::Ready(Error::Cancel)),
+					"partial group must abort"
+				);
+			}
+		}
+
+		if complete {
+			assert!(session.log.stops().is_empty());
+			assert!(session.log.resets().is_empty());
+			assert!(subscriber.state.lock().group_fetches.is_empty());
+			return;
+		}
+		assert_eq!(session.log.stops(), [crate::ietf::error::CANCELLED]);
+		let messages = decode_messages(&session.log, version);
+		let cancels: Vec<_> = messages.iter().filter(|(id, _)| *id == ietf::FetchCancel::ID).collect();
+		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
+			assert_eq!(cancels.len(), 1, "legacy FETCH_CANCEL");
+			let mut body = cancels[0].1.clone();
+			assert_eq!(
+				ietf::FetchCancel::decode_msg(&mut body, version).unwrap().request_id,
+				RequestId(1)
+			);
+			assert!(session.log.resets().is_empty(), "deliver FETCH_CANCEL before closing");
+		} else {
+			assert!(cancels.is_empty(), "FETCH_CANCEL was removed");
+			assert_eq!(session.log.resets(), [crate::ietf::error::CANCELLED]);
+		}
+		assert!(subscriber.state.lock().group_fetches.is_empty(), "request retired");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn an_abandoned_group_fetch_before_fetch_ok_is_cancelled() {
+		for version in JOINING_DRAFTS {
+			abandon_group_fetch(version, FetchStage::Unanswered).await;
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn an_abandoned_group_fetch_after_fetch_ok_is_cancelled() {
+		for version in JOINING_DRAFTS {
+			abandon_group_fetch(version, FetchStage::Accepted).await;
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn an_abandoned_partial_group_fetch_is_cancelled() {
+		for version in JOINING_DRAFTS {
+			abandon_group_fetch(version, FetchStage::Receiving).await;
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_complete_group_fetch_is_cached_when_the_reader_leaves() {
+		for version in JOINING_DRAFTS {
+			abandon_group_fetch(version, FetchStage::Complete).await;
+		}
+	}
+
+	/// A request reset after the group is written must not abort the cached group.
+	#[tokio::test(start_paused = true)]
+	async fn a_complete_group_fetch_survives_a_request_reset() {
+		for version in JOINING_DRAFTS {
+			abandon_group_fetch(version, FetchStage::CompleteReset).await;
 		}
 	}
 
