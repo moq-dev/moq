@@ -303,8 +303,12 @@ pub(crate) struct Pump {
 	/// Held while a fetched group is still being written: a fetch in progress reads the
 	/// track, so the front keeps an input for it.
 	fetching: Option<track::Consumer>,
-	/// The logical track's start is still the first copy's to declare.
+	/// The logical track's start is the first copy's to declare, mirrored for as long as
+	/// that copy feeds it: a lite-05 SUBSCRIBE_START lands after its subscription resolves.
 	starting: bool,
+	/// The start last mirrored, so re-reading an unchanged one wakes no reader. `None`
+	/// until a copy declared one: until then, the next copy fed is still the first.
+	mirrored: Option<Option<u64>>,
 }
 
 impl Pump {
@@ -333,6 +337,7 @@ impl Pump {
 			parked: false,
 			fetching: None,
 			starting: false,
+			mirrored: None,
 		};
 		(pump, handle)
 	}
@@ -359,13 +364,20 @@ impl Pump {
 					Poll::Pending => {}
 				}
 			}
-			// The front forgot the track (it went unread): nothing new is written, but a
-			// reader already holding a group still gets the rest of it.
+			// The front forgot the track (it went unread): unsubscribe so the source goes
+			// idle, but a reader already holding a group still gets the rest of it.
 			if let Logical::Live(producer) = &self.logical
 				&& producer.poll_closed(waiter).is_ready()
 			{
 				self.logical = Logical::Done(None);
-				self.give_up_orphans(|_| true, Error::Dropped);
+				self.input = None;
+				self.groups.retain(|_, open| {
+					let held = open.src.is_some() && open.dst.poll_unused(&kio::Waiter::noop()).is_pending();
+					if !held {
+						let _ = open.dst.clone().abort(Error::Dropped);
+					}
+					held
+				});
 			}
 			if self.concluding && self.conclude() {
 				return Poll::Ready(());
@@ -481,6 +493,10 @@ impl Pump {
 		if let Logical::Done(_) = self.logical {
 			return;
 		}
+		// A replacement continues the track from where the declaring copy left it.
+		if self.mirrored.is_some() {
+			self.starting = false;
+		}
 		if let Some(info) = &feed.info {
 			self.accept(info);
 		}
@@ -571,10 +587,11 @@ impl Pump {
 		};
 		if self.starting
 			&& let Poll::Ready(start) = input.copy.poll_start(waiter)
+			&& self.mirrored != Some(start)
 			&& let Logical::Live(producer) = &mut self.logical
 		{
 			let _ = producer.start_at(start);
-			self.starting = false;
+			self.mirrored = Some(start);
 		}
 		// A parked cache waits on where this input starts, and so do its groups:
 		// revealed, the cache comes back ahead of them.

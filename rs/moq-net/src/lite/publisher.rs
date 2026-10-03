@@ -95,12 +95,15 @@ fn serving_max_age(version: Version, requested: Duration) -> Duration {
 /// carry a Max Age, but there it is a staleness tolerance only; Lite01/02 additionally get
 /// an unbounded budget so nothing is dropped under them (see [`serving_max_age`]), which
 /// must not read as a request to replay the whole cache on join.
-fn position_cursor(track: &mut track::Subscriber, version: Version, start_group: Option<u64>) {
+///
+/// `latest` is the newest group when the SUBSCRIBE arrived, not once the subscription
+/// resolved: anything written in between is newer, so it is delivered.
+fn position_cursor(track: &mut track::Subscriber, version: Version, start_group: Option<u64>, latest: Option<u64>) {
 	if version.resolves_start() || start_group.is_some() {
 		return;
 	}
 
-	if let Some(latest) = track.latest() {
+	if let Some(latest) = latest {
 		track.start_at(latest);
 	}
 }
@@ -1206,6 +1209,8 @@ enum SubscribeServe<S: crate::transport::poll::Session> {
 	Confirm {
 		msg: lite::Subscribe<'static>,
 		subscribing: track::Subscribing,
+		/// The newest group when the SUBSCRIBE arrived; see [`position_cursor`].
+		latest: Option<u64>,
 		update: Option<lite::SubscribeUpdate>,
 	},
 	/// Streaming groups and datagrams. Boxed: by far the largest state, and the enum
@@ -1236,10 +1241,13 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 		// One subscriber for the whole subscription: the run loop polls its groups and its
 		// best-effort datagrams from this single cursor, so a group-only or datagram-only
 		// track opens exactly one subscription (no duplicate demand).
-		let subscribing = broadcast.track(&msg.track)?.subscribe(subscription).into_inner();
+		let track = broadcast.track(&msg.track)?;
+		let latest = track.latest();
+		let subscribing = track.subscribe(subscription).into_inner();
 		Ok(Self::Confirm {
 			msg,
 			subscribing,
+			latest,
 			update: None,
 		})
 	}
@@ -1262,8 +1270,8 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 		loop {
 			match self {
 				Self::Confirm { subscribing, .. } => {
-					let track = ready!(subscribing.poll_ok(waiter))?;
-					let Self::Confirm { msg, update, .. } = std::mem::replace(
+					let mut track = ready!(subscribing.poll_ok(waiter))?;
+					let Self::Confirm { msg, latest, update, .. } = std::mem::replace(
 						self,
 						Self::Drain {
 							children: Default::default(),
@@ -1315,7 +1323,9 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 						opens: Default::default(),
 					};
 
-					let mut run = TrackRun::new(sub, track, Bounds::from(&msg), track_priority_tx);
+					let bounds = Bounds::from(&msg);
+					position_cursor(&mut track, shared.version, bounds.start_group, latest);
+					let mut run = TrackRun::new(sub, track, bounds, track_priority_tx);
 					if let Some(update) = update {
 						run.update(update);
 					}
@@ -1546,20 +1556,20 @@ mod test {
 		);
 
 		let mut legacy = served(Version::Lite01);
-		position_cursor(&mut legacy, Version::Lite01, None);
+		position_cursor(&mut legacy, Version::Lite01, None, producer.latest());
 		assert_eq!(drain(&mut legacy), vec![2]);
 
 		// Lite03-05 declare a budget, but their drafts define it as a staleness tolerance
 		// and an absent start as the latest group, so they are pinned all the same.
 		let mut tolerant =
 			producer.subscribe(track::Subscription::default().with_max_age(std::time::Duration::from_secs(5)));
-		position_cursor(&mut tolerant, Version::Lite05, None);
+		position_cursor(&mut tolerant, Version::Lite05, None, producer.latest());
 		assert_eq!(drain(&mut tolerant), vec![2]);
 
 		// On lite-06 the declared budget is what resolves the start, so it stands.
 		let mut declared =
 			producer.subscribe(track::Subscription::default().with_max_age(std::time::Duration::from_secs(5)));
-		position_cursor(&mut declared, Version::Lite06, None);
+		position_cursor(&mut declared, Version::Lite06, None, producer.latest());
 		assert_eq!(drain(&mut declared), vec![0, 1, 2]);
 	}
 
@@ -2321,8 +2331,6 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		bounds: Bounds,
 		track_priority_tx: kio::Producer<u8>,
 	) -> Self {
-		position_cursor(&mut track, ctx.version, bounds.start_group);
-
 		// Apply the initial cap from the original Subscribe. Subsequent updates
 		// flow through the SUBSCRIBE_UPDATE arm below.
 		track.end_at(bounds.end_group.map_or(Bound::Unbounded, Bound::Included));
