@@ -9,7 +9,7 @@
  * @module
  */
 import { defineConfig } from "vite";
-import { workletInline } from "../../../../js/common/vite-plugin-worklet";
+import { worklet } from "../../../../js/common/vite-plugin-worklet";
 
 /**
  * esnext keeps WebCodecs / WebTransport syntax intact for headless Chromium. Three pages: the player
@@ -17,7 +17,7 @@ import { workletInline } from "../../../../js/common/vite-plugin-worklet";
  */
 export default defineConfig({
 	base: "./",
-	plugins: [workletInline()],
+	plugins: [worklet()],
 	build: {
 		target: "esnext",
 		outDir: "dist",
