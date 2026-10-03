@@ -42,6 +42,11 @@ web-async = { workspace = true }
 webm-iterable = "0.7"
 
 [dev-dependencies]
+criterion = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true, features = ["no-env-filter"] }
+
+[[bench]]
+name = "catalog"
+harness = false
