@@ -52,7 +52,7 @@ link-state and existence-split design planned earlier that day:
   origins that announce the same one are interchangeable, which is how a
   redundant pair is expressed. A path a claim produces keeps Wildcard's
   per-origin identity. See [Selection](/quest/m1/cluster-routing/selection.md).
-- Between clusters, announcements stay path vector with cluster ids as hops,
+- Between clusters, announcements stay path vector with cluster domains as hops,
   in the last child.
 - Anything specific to moq.pro's deployment (generating peer lists and roles
   from its inventory, its simulator) is planned in moq.pro, not here.
@@ -118,7 +118,7 @@ Once every child has landed:
 
 - [Edge and core](/quest/m1/cluster-routing/roles.md) - relays take an explicit edge or core role; edges spread paths over their region's cores and are never transit
 - [Selection](/quest/m1/cluster-routing/selection.md) - a broadcast under overlapping prefixes routes to one origin deterministically, and same-epoch origins are one source
-- [Between clusters](/quest/m1/cluster-routing/inter-cluster.md) - announcements crossing a cluster boundary stay path vector with cluster ids as hops
+- [Between clusters](/quest/m1/cluster-routing/inter-cluster.md) - announcements crossing a cluster boundary stay path vector with cluster domains as hops
 
 ## Related
 
