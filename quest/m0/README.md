@@ -42,7 +42,7 @@ a published `@moq/watch` break.
 - [JS unknown bidi](/quest/m0/ietf-unknown-bidi.md) - an unknown moq-transport bidi stream type closes the session in JS, as in Rust
 - [moq-lite early streams](/quest/m0/lite-early-streams.md) - a lite uni stream that arrives before SETUP is held until SETUP lands, and a second SETUP is fatal
 - [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
-- [noq reassembly cap](/quest/m0/noq-reassembly-cap.md) - noq carries quinn's stream reassembly cap and the connection receive window is finite by default
+- [noq reassembly cap](/quest/m0/noq-reassembly-cap.md) - iroh's upstream noq carries quinn's stream reassembly cap, once n0 releases it
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
 - [Shared fronts](/quest/m0/shared-fronts.md) - viewer sessions share a front, so fronts scale with peers, not viewers
 - [Wildcard](/quest/m0/wildcard/README.md) - a relay resolves subscriptions against advertised prefixes, a service claims the prefix it could serve and refuses the rest instead of enumerating broadcasts, and the browser player treats a covering claim as availability
