@@ -29,14 +29,29 @@ typealias OriginConsumer = uniffi.moq.MoqOriginConsumer
 typealias OriginDynamic = uniffi.moq.MoqOriginDynamic
 /** A requested broadcast not yet accepted: fulfill it with a producer or reject it. */
 typealias BroadcastRequest = uniffi.moq.MoqBroadcastRequest
-/** A stream of route announcements and retractions under a prefix. */
+/** A stream of announce events under a prefix. */
 typealias AnnounceConsumer = uniffi.moq.MoqAnnounceConsumer
 /** A literal prefix, an optional relative pattern, and the hidden-path opt-in for announcement discovery. */
 typealias AnnounceConfig = uniffi.moq.MoqAnnounceConfig
 /** A pending wait for a route to cover a specific path. */
 typealias AnnouncedBroadcast = uniffi.moq.MoqAnnouncedBroadcast
-/** A single route announcement or retraction: its path, route metadata, and active flag. */
-typealias AnnounceUpdate = uniffi.moq.MoqAnnounceUpdate
+/** A route over a prefix: its origin-relative path, wildcard captures, and route metadata. */
+typealias Announce = uniffi.moq.MoqAnnounce
+/**
+ * What an [AnnounceConsumer] yields: [AnnounceEventStart], [AnnounceEventUpdate],
+ * [AnnounceEventEnd], or [AnnounceEventLive].
+ */
+typealias AnnounceEvent = uniffi.moq.MoqAnnounceEvent
+// Kotlin cannot reach a sealed class's subtypes through its typealias, so each
+// variant gets its own.
+/** A route now covers the prefix; the stream had none there. */
+typealias AnnounceEventStart = uniffi.moq.MoqAnnounceEvent.Start
+/** The route covering the prefix changed hops or cost. */
+typealias AnnounceEventUpdate = uniffi.moq.MoqAnnounceEvent.Update
+/** No route covers the prefix any more; carries its last route. */
+typealias AnnounceEventEnd = uniffi.moq.MoqAnnounceEvent.End
+/** Every route live at subscribe time has been delivered; what follows is live changes. */
+typealias AnnounceEventLive = uniffi.moq.MoqAnnounceEvent.Live
 // Broadcast / track / group producers and consumers.
 /** The write side of a broadcast: publish tracks into it. */
 typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer
@@ -140,9 +155,9 @@ typealias AudioCodec = uniffi.moq.MoqAudioCodec
 typealias AudioSampleFormat = uniffi.moq.MoqAudioSampleFormat
 /** The PCM layout an [AudioConsumer] should decode to. */
 typealias AudioDecoderOutput = uniffi.moq.MoqAudioDecoderOutput
-/** What a [VideoConsumer] decodes to: an optional pixel format and resize, plus a latency budget. */
+/** What a [VideoConsumer] decodes to: an optional resize, a latency budget, and whether frames keep the decoder's surface (macOS only; refused elsewhere). */
 typealias VideoDecoderOutput = uniffi.moq.MoqVideoDecoderOutput
-/** One decoded video frame: packed pixels, the layout they are in, its dimensions, and a timestamp. */
+/** One decoded video frame, owning the decoder's surface until closed; `pixels(format)` converts it to packed CPU pixels. */
 typealias VideoDecodedFrame = uniffi.moq.MoqVideoDecodedFrame
 /** The PCM layout the caller feeds an [AudioProducer]. */
 typealias AudioEncoderInput = uniffi.moq.MoqAudioEncoderInput
@@ -152,7 +167,7 @@ typealias AudioEncoderOutput = uniffi.moq.MoqAudioEncoderOutput
 typealias VideoFrame = uniffi.moq.MoqVideoFrame
 /** A video codec identifier (H.264 or H.265). */
 typealias VideoCodec = uniffi.moq.MoqVideoCodec
-/** A CPU pixel layout (I420 or RGBA): fed to a [VideoProducer], or delivered by `decodeVideo`. */
+/** A CPU pixel layout (I420 or RGBA): fed to a [VideoProducer], or read from a [VideoDecodedFrame]. */
 typealias VideoPixelFormat = uniffi.moq.MoqVideoPixelFormat
 /** The pixel layout, resolution, and framerate the caller feeds a [VideoProducer]. */
 typealias VideoEncoderInput = uniffi.moq.MoqVideoEncoderInput

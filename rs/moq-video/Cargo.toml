@@ -33,7 +33,7 @@ default = ["mediacodec", "nvidia", "openh264"]
 # frameworks (Windows display/window capture requires Windows 10 2004+ WGC).
 # Still off by default until every distribution ships it, which is
 # a packaging decision rather than a build cost. moq-cli's `capture` turns it on.
-capture = ["dep:libc", "dep:moq-v4l", "dep:x11rb", "dep:zune-jpeg"]
+capture = ["dep:kio", "dep:libc", "dep:moq-v4l", "dep:x11rb", "dep:zune-jpeg"]
 # Android MediaCodec encode/decode and its AHardwareBuffer frame surface. Kept
 # behind a feature because these NDK entry points require API 26, while the
 # language-binding artifacts still support API 24 and disable default features.
@@ -108,6 +108,8 @@ bytes = { workspace = true }
 fast_image_resize = "6"
 # Catalog types (VideoConfig / VideoCodec) the decode consumer reads.
 hang = { workspace = true }
+# The capture publish's control handle.
+kio = { workspace = true, optional = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # Vendored, statically linked software H.264 fallback (no system dependency).
@@ -129,6 +131,18 @@ tracing = { workspace = true }
 wgpu = { version = "30", optional = true }
 # RGBA -> I420 color conversion (replaces ffmpeg swscale).
 yuv = "0.8.14"
+
+# VideoToolbox codecs and CoreVideo surfaces, shared by macOS and iOS (the
+# `apple` cfg alias in build.rs).
+[target.'cfg(any(target_os="macos", target_os="ios"))'.dependencies]
+objc2-core-foundation = "0.3.2"
+objc2-core-media = { workspace = true }
+objc2-core-video = "0.3.2"
+# MTLDevice / MTLTexture for the `render` feature's zero-copy CVPixelBuffer
+# import (CVMetalTextureCache aliases the decoder's IOSurface as a Metal texture,
+# which wgpu then adopts).
+objc2-metal = { version = "0.3.2", optional = true }
+objc2-video-toolbox = "0.3.2"
 
 [target.'cfg(target_os="android")'.dependencies]
 # MediaCodec (hardware H.264/H.265 encode and decode), ImageReader, and
@@ -192,22 +206,15 @@ pipewire = { version = "0.10", optional = true }
 x11rb = { workspace = true, optional = true }
 zune-jpeg = { version = "0.5", optional = true }
 
+# AVFoundation and ScreenCaptureKit capture, macOS only.
 [target.'cfg(target_os="macos")'.dependencies]
 block2 = { workspace = true }
 dispatch2 = { workspace = true }
 objc2 = { workspace = true }
 objc2-av-foundation = { workspace = true }
-objc2-core-foundation = "0.3.2"
 objc2-core-graphics = { version = "0.3.2", features = ["CGDirectDisplay"] }
-objc2-core-media = { workspace = true }
-objc2-core-video = "0.3.2"
 objc2-foundation = { workspace = true }
-# MTLDevice / MTLTexture for the `render` feature's zero-copy CVPixelBuffer
-# import (CVMetalTextureCache aliases the decoder's IOSurface as a Metal texture,
-# which wgpu then adopts).
-objc2-metal = { version = "0.3.2", optional = true }
 objc2-screen-capture-kit = { workspace = true }
-objc2-video-toolbox = "0.3.2"
 
 [target.'cfg(target_os="windows")'.dependencies]
 # Native Media Foundation webcam capture + hardware H.264 encode (replaces
@@ -242,6 +249,9 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[build-dependencies]
+cfg_aliases = "0.2.2"
+
 [dev-dependencies]
 # Native Vulkan producer for the opt-in Vulkan/CUDA interop hardware exercise.
 ash = { workspace = true }
@@ -253,4 +263,6 @@ h264-reader = "0.9.0"
 libc = { workspace = true }
 # Driving `encode::Sink` from a plain test thread, the way an FFI caller does.
 pollster = { workspace = true }
+# `start_paused`, so the capture driver tests run on mocked time.
+tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true }

@@ -873,14 +873,21 @@ impl MoqSession {
 		// (with the close reason, or Ok once the connection loop stops).
 	}
 
-	/// Graceful shutdown. Equivalent to `cancel(0)`. Documents the
-	/// convention that code 0 means "no error" so callers don't have to
-	/// pick one. Named `shutdown` (not `close`) because UniFFI's Kotlin
-	/// generator already emits an `AutoCloseable.close()` that releases
-	/// the FFI handle, and shadowing it would silently mean a different
-	/// thing per binding.
-	pub fn shutdown(&self) {
-		self.cancel(0);
+	/// Drain finished tracks within one second, returning any delivery error.
+	///
+	/// Finish or abort live tracks first. `cancel` stays immediate. The name
+	/// avoids Kotlin's generated `AutoCloseable.close()`, which releases the handle.
+	/// IETF media streams are not drained yet.
+	pub async fn shutdown(&self) -> Result<(), MoqError> {
+		let inner = self.inner.clone();
+		crate::ffi::detached(async move {
+			match inner {
+				#[cfg(not(target_arch = "wasm32"))]
+				Inner::Connection(connection) => connection.close().await.map_err(map_closed_error),
+				Inner::Session(session) => session.close().await.map_err(MoqError::from),
+			}
+		})
+		.await
 	}
 
 	/// The publish-side origin: where local broadcasts get advertised

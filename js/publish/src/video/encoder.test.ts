@@ -119,9 +119,9 @@ test("encoding tracks encoder config in its child effect", async () => {
 	}
 });
 
-test("a demand gap cuts the group and leaves the broadcast-owned track open for resume", async () => {
+test("a demand gap marks a discontinuity and leaves the broadcast-owned track open for resume", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
-	const cut = spyOn(Container.Legacy.Producer.prototype, "cut");
+	const discontinuity = spyOn(Container.Legacy.Producer.prototype, "discontinuity");
 
 	const track = new Moq.Track.Producer("video").accept({ priority: 60 });
 	const live = new Signal<Moq.Track.Producer | undefined>(track);
@@ -148,20 +148,20 @@ test("a demand gap cuts the group and leaves the broadcast-owned track open for 
 		live.set(undefined);
 		await settle();
 		expect(track.closed.peek()).toBeUndefined();
-		expect(cut).toHaveBeenCalledTimes(1);
+		expect(discontinuity).toHaveBeenCalledTimes(1);
 
 		live.set(track);
 		await settle();
 		expect(track.closed.peek()).toBeUndefined();
 
-		cut.mockClear();
+		discontinuity.mockClear();
 		track.close();
 		encoder.close();
-		expect(cut).not.toHaveBeenCalled();
+		expect(discontinuity).not.toHaveBeenCalled();
 	} finally {
 		encoder.close();
 		track.close();
-		cut.mockRestore();
+		discontinuity.mockRestore();
 	}
 });
 
@@ -751,5 +751,124 @@ test("a re-probe swaps the catalog entry in one update", async () => {
 	} finally {
 		encoder.close();
 		probe.mockRestore();
+	}
+});
+
+test("cut forces a keyframe, coalescing requests and spacing them at least 500ms apart", async () => {
+	const keys: number[] = [];
+	class RecordingVideoEncoder {
+		state: CodecState = "unconfigured";
+		#output: VideoEncoderInit["output"];
+		#codec?: string;
+
+		constructor(init: VideoEncoderInit) {
+			this.#output = init.output;
+		}
+
+		static async isConfigSupported(config: VideoEncoderConfig): Promise<{ supported: boolean }> {
+			return { supported: config.codec.startsWith("avc1") };
+		}
+
+		configure(config: VideoEncoderConfig): void {
+			this.state = "configured";
+			this.#codec = config.codec;
+		}
+
+		// Records the test's frames only, not the probe's.
+		encode(frame: VideoFrame, options?: VideoEncoderEncodeOptions): void {
+			if (options?.keyFrame && frame instanceof Frame) keys.push(frame.timestamp / 1000);
+		}
+
+		// Only the probe flushes; report the configured codec, as Chrome does.
+		async flush(): Promise<void> {
+			const chunk = { type: "key", timestamp: 0, byteLength: 1, copyTo: () => {} };
+			this.#output(chunk as never, { decoderConfig: { codec: this.#codec } } as never);
+		}
+
+		close(): void {
+			this.state = "closed";
+		}
+	}
+
+	const original = Object.getOwnPropertyDescriptor(globalThis, "VideoEncoder");
+	Object.defineProperty(globalThis, "VideoEncoder", {
+		configurable: true,
+		value: RecordingVideoEncoder,
+		writable: true,
+	});
+	const videoFrame = Object.getOwnPropertyDescriptor(globalThis, "VideoFrame");
+	Object.defineProperty(globalThis, "VideoFrame", { configurable: true, value: FakeVideoFrame, writable: true });
+
+	class Frame {
+		readonly timestamp: number;
+		constructor(timestamp: number) {
+			this.timestamp = timestamp;
+		}
+		clone(): Frame {
+			return new Frame(this.timestamp);
+		}
+		close(): void {}
+	}
+
+	const { Fanout } = await import("../fanout");
+	let controller!: ReadableStreamDefaultController<VideoFrame>;
+	const fanout = new Fanout(
+		new ReadableStream<VideoFrame>({
+			start: (c) => {
+				controller = c;
+			},
+		}),
+		{ clone: (frame) => frame.clone(), release: (frame) => frame.close() },
+	);
+
+	const track = new Moq.Track.Producer("video").accept();
+	const rendition = {
+		config: new Signal(undefined),
+		track: new Signal<Moq.Track.Producer | undefined>(track),
+		close: () => track.close(),
+	};
+	const capture = {
+		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) } as never) },
+		out: { display: new Signal({ width: 640, height: 480 }), frames: new Signal(fanout) },
+	};
+	const encoder = new Encoder("video", {
+		enabled: true,
+		broadcast: { video: () => rendition } as never,
+		capture: capture as never,
+	});
+
+	// One frame per 100ms of media time, after calling cut() when `cut` says so.
+	const send = async (millis: number, cut = false) => {
+		if (cut) encoder.cut();
+		controller.enqueue(new Frame(millis * 1000) as unknown as VideoFrame);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	};
+
+	try {
+		await settle();
+
+		// The opening keyframe serves a request made before it.
+		await send(0, true);
+		await send(100);
+		// Several requests before one frame produce one keyframe.
+		encoder.cut();
+		encoder.cut();
+		await send(600, true);
+		await send(700);
+		// Too soon after the last: deferred until 500ms have passed, not dropped.
+		await send(800, true);
+		await send(1000);
+		await send(1100);
+		await send(1200);
+
+		expect(keys).toEqual([0, 600, 1100]);
+	} finally {
+		encoder.close();
+		fanout.close();
+		track.close();
+		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
+		else Reflect.deleteProperty(globalThis, "VideoEncoder");
+		if (videoFrame) Object.defineProperty(globalThis, "VideoFrame", videoFrame);
+		else Reflect.deleteProperty(globalThis, "VideoFrame");
 	}
 });

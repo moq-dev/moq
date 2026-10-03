@@ -34,7 +34,7 @@ change is intended.
 
 ## Required
 
-- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic` on `dev`, not the frozen fork
+- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic`, not the frozen fork
 
 ## Related
 

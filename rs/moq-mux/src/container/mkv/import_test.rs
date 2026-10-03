@@ -344,46 +344,6 @@ fn test_mp3_catalog() {
 }
 
 #[test]
-fn test_chunked_decode_dedup() {
-	// Build the same WebM and feed it in tiny chunks. The dedup logic should ensure
-	// that frames aren't emitted twice across the parse restarts.
-	let data = MkvBuilder::new()
-		.header("webm")
-		.segment_start()
-		.info(1_000_000)
-		.track_video(1, "V_VP9", 320, 240)
-		.cluster(0, || {
-			vec![
-				simple_block(1, 0, true, b"k0"),
-				simple_block(1, 33, false, b"p1"),
-				simple_block(1, 66, false, b"p2"),
-			]
-		})
-		.cluster(100, || {
-			vec![simple_block(1, 0, true, b"k1"), simple_block(1, 33, false, b"p3")]
-		})
-		.segment_end()
-		.build();
-
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
-
-	// Feed in 16-byte chunks to stress the chunked-restart code path.
-	for chunk in data.chunks(16) {
-		let b = bytes::BytesMut::from(chunk);
-		mkv.decode(&b).expect("decode chunk");
-	}
-	mkv.finish().expect("finish");
-
-	let catalog = catalog.snapshot();
-	assert_eq!(catalog.video.renditions.len(), 1);
-	let v = catalog.video.renditions.values().next().unwrap();
-	assert_eq!(v.coded_width, Some(320));
-	assert_eq!(v.coded_height, Some(240));
-}
-
-#[test]
 fn test_unsupported_codec_skipped() {
 	// Mix of supported (Opus) and unsupported (Vorbis) audio tracks. The Vorbis track
 	// should be dropped with a warning; Opus should make it into the catalog.
@@ -467,4 +427,123 @@ fn rendition_is_not_published_when_the_media_track_fails() {
 		catalog.snapshot().video.renditions.is_empty(),
 		"a rendition whose media producer failed must not be advertised"
 	);
+}
+
+/// What an MKV import published, and the wall-clock window its input arrived in.
+struct Imported {
+	published: std::collections::BTreeMap<String, Vec<u128>>,
+	/// The root clock the catalog advertised.
+	clock: hang::catalog::Clock,
+	arrival: std::ops::RangeInclusive<std::time::SystemTime>,
+	/// Why a chunk was refused, if one was.
+	refused: Option<crate::Error>,
+}
+
+/// Import `data` in `chunk`-byte pieces on a catalog with the default clock, stopping at the
+/// first refused piece.
+async fn import_chunked(data: &[u8], chunk: usize) -> Imported {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
+
+	let before = std::time::SystemTime::now();
+	let mut refused = None;
+	for piece in data.chunks(chunk) {
+		if let Err(err) = mkv.decode(piece) {
+			refused = Some(err);
+			break;
+		}
+	}
+	let after = std::time::SystemTime::now();
+	mkv.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	Imported {
+		published: crate::container::test_util::published(&consumer, &snapshot).await,
+		clock: snapshot.clock.expect("the catalog advertises a clock"),
+		arrival: before..=after,
+		refused,
+	}
+}
+
+/// Every drain pass restarts from a replay point, so a small chunk replays tags; each block
+/// still publishes exactly once.
+#[tokio::test]
+async fn chunked_decode_publishes_each_block_once() {
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.track_video(1, "V_VP9", 320, 240)
+		.cluster(0, || {
+			vec![
+				simple_block(1, 0, true, b"k0"),
+				simple_block(1, 33, false, b"p1"),
+				simple_block(1, 66, false, b"p2"),
+			]
+		})
+		.cluster(100, || {
+			vec![simple_block(1, 0, true, b"k1"), simple_block(1, 33, false, b"p3")]
+		})
+		.segment_end()
+		.build();
+
+	let import = import_chunked(&data, 16).await;
+	assert!(import.refused.is_none());
+	let video = import.published.values().next().unwrap();
+	assert_eq!(video, &[0, 33_000, 66_000, 100_000, 133_000]);
+}
+
+/// A feed an hour into its own timeline publishes its block timestamps verbatim, and the
+/// catalog clock maps its first block to the arrival time.
+#[tokio::test]
+async fn import_publishes_block_timestamps_on_an_arrival_clock() {
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.track_video(1, "V_VP9", 16, 16)
+		.cluster(3_600_000, || {
+			vec![simple_block(1, 0, true, b"k0"), simple_block(1, 33, false, b"p1")]
+		})
+		.segment_end()
+		.build();
+
+	let import = import_chunked(&data, data.len()).await;
+	assert!(import.refused.is_none());
+	let first = import.published.values().next().unwrap()[0];
+	assert_eq!(first, 3_600_000_000, "the source's own timestamp");
+
+	let tick = std::time::Duration::from_millis(1);
+	let wall = import
+		.clock
+		.wall_clock(moq_net::Timestamp::from_micros(first as u64).unwrap())
+		.unwrap();
+	assert!(
+		*import.arrival.start() - tick <= wall && wall <= *import.arrival.end() + tick,
+		"the first block is live on arrival"
+	);
+}
+
+/// A cluster that restarts the timeline is a new epoch: the import refuses the rewind rather
+/// than dropping it, keeping everything published before it.
+#[tokio::test]
+async fn import_refuses_a_restart() {
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.track_video(1, "V_VP9", 16, 16)
+		.cluster(5_000, || {
+			vec![simple_block(1, 0, true, b"k0"), simple_block(1, 33, false, b"p1")]
+		})
+		.cluster(0, || vec![simple_block(1, 0, true, b"k1")])
+		.segment_end()
+		.build();
+
+	let import = import_chunked(&data, data.len()).await;
+	let err = import.refused.expect("the restart is refused");
+	assert!(matches!(err, crate::Error::TimestampRewind(_)), "{err:?}");
+	assert_eq!(import.published.values().next().unwrap().len(), 2);
 }

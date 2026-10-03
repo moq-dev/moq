@@ -55,7 +55,7 @@ test("a padding stream is discarded", async () => {
 		await Bun.sleep(0);
 		expect(closed).toBe(false);
 	} finally {
-		connection.close();
+		connection.abort();
 	}
 });
 
@@ -78,7 +78,7 @@ test("an unknown uni stream type closes the session", async () => {
 			expect(info.closeCode).toBe(SessionCode.ProtocolViolation);
 		} finally {
 			logged.mockRestore();
-			connection.close();
+			connection.abort();
 		}
 	}
 });
@@ -213,7 +213,7 @@ test("uni streams before SETUP are held until it lands", async () => {
 		await Bun.sleep(0);
 		expect(closed).toBe(false);
 	} finally {
-		connection.close();
+		connection.abort();
 	}
 });
 

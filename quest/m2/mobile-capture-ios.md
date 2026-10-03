@@ -7,10 +7,11 @@ through ReplayKit.
 
 ## Plan
 
-Rust owns capture and codecs on mobile, settled in the 2026-09-30 audit ([Mobile ownership](/quest/m1/mobile-ownership.md)). Not a new codec backend. VideoToolbox already encodes and decodes as the macOS
-backend. Reuse its native PixelBuffer surface and verify the iOS build and
-runtime path rather than assuming desktop behavior. The new work is capture
-wiring plus the lifecycle iOS imposes and macOS does not.
+Rust owns capture and codecs on mobile, settled in the 2026-09-30 audit ([Mobile ownership](/quest/m1/mobile-ownership.md)).
+Not a new codec backend. VideoToolbox encode, decode, and the native
+PixelBuffer surface compile on iOS (the `apple` cfg in moq-video). Verify the
+runtime path on a device rather than assuming desktop behavior. The new work is
+capture wiring plus the lifecycle iOS imposes and macOS does not.
 
 That lifecycle is the work. Camera and screen access are permission-gated and
 revocable, an app is suspended and resumed on foreground changes, and

@@ -275,7 +275,7 @@ export class Broadcast {
 				);
 				tracks.cleanup(() => track.close());
 				tracks.run((demand) => {
-					demand.set(signal, demand.get(track.used) ? track : undefined);
+					demand.set(signal, demand.get(track.demand().used) ? track : undefined);
 				});
 			}
 		});

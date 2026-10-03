@@ -20,7 +20,6 @@ pub struct Programs {
 	origin: moq_net::origin::Producer,
 	name: moq_net::PathOwned,
 	config: catalog::Config,
-	live: bool,
 	/// Input not yet read for the PAT: a trailing partial packet, or what follows the PAT.
 	pending: Vec<u8>,
 	/// Reads the PAT out of the input.
@@ -44,17 +43,10 @@ impl Programs {
 			origin,
 			name: name.as_path().to_owned(),
 			config,
-			live: false,
 			pending: Vec::new(),
 			scan: PatScan::default(),
 			programs: Vec::new(),
 		}
-	}
-
-	/// Publish each program on its broadcast's clock, as [`Import::live`] does.
-	pub fn live(mut self) -> Self {
-		self.live = true;
-		self
 	}
 
 	/// Demux a chunk of the multiplex. A trailing partial packet is retained for the next call.
@@ -80,9 +72,6 @@ impl Programs {
 				.with_catalog(catalog::hang::Catalog::<Ext>::default());
 			let catalog = catalog::Producer::new(&mut broadcast, config)?;
 			let mut import = Import::new(broadcast.clone(), catalog.reserve()).with_program(program);
-			if self.live {
-				import = import.live();
-			}
 			// Seeded with the scanner's PAT rather than replaying its packets, so every section
 			// reaches the importer and nothing the scanner counted is counted again.
 			import.handle_pat(&pat)?;
@@ -334,18 +323,15 @@ mod test {
 	}
 
 	/// The input is held until the PAT is whole, then each program publishes as its own
-	/// broadcast carrying only that program, live on its own first frame rather than an hour
+	/// broadcast carrying only that program, its catalog clock anchored on its own first frame
 	/// apart on one shared clock.
 	#[tokio::test]
 	async fn every_program_publishes_its_own_broadcast() {
 		let origin = crate::source::produce_origin();
-		let ago = Duration::from_secs(60);
-		let clock = crate::Clock::at(std::time::Instant::now() - ago, std::time::SystemTime::now() - ago).unwrap();
-		let config = catalog::Config::default().with_clock(clock);
-		let mut programs = Programs::new(origin.clone(), "event.hang", config).live();
+		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
 
 		let input = two_programs();
-		let before = clock.now();
+		let before = std::time::SystemTime::now();
 		programs.decode(&input[..100]).unwrap();
 		assert!(
 			programs.programs.is_empty(),
@@ -353,7 +339,7 @@ mod test {
 		);
 		programs.decode(&input[100..]).unwrap();
 		programs.finish().unwrap();
-		let after = clock.now();
+		let after = std::time::SystemTime::now();
 
 		for (path, fills) in [("event/1.hang", [0xAA, 0xBB]), ("event/2.hang", [0xCC, 0xDD])] {
 			let consumer = crate::Source::new(origin.consume(), path).broadcast().await.unwrap();
@@ -371,12 +357,15 @@ mod test {
 			let container = Container::try_from(config).unwrap();
 			let frame = Consumer::new(track, container).read().await.unwrap().expect("a frame");
 			assert!(fills.contains(&frame.payload[4]), "{path} carries only its own program");
-			let skew = Duration::from_secs(2).as_micros();
+			let skew = Duration::from_secs(2);
+			let wall = catalog
+				.clock
+				.expect("the catalog advertises a clock")
+				.wall_clock(frame.timestamp)
+				.unwrap();
 			assert!(
-				before.as_micros() - skew <= frame.timestamp.as_micros()
-					&& frame.timestamp.as_micros() <= after.as_micros() + skew,
-				"{path} is live on arrival: {:?} not in {before:?}..={after:?}",
-				frame.timestamp
+				before - skew <= wall && wall <= after + skew,
+				"{path} is live on arrival: {wall:?} not in {before:?}..={after:?}"
 			);
 		}
 	}

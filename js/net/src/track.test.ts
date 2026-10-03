@@ -1,4 +1,4 @@
-import { expect, setSystemTime, test } from "bun:test";
+import { expect, setSystemTime, spyOn, test } from "bun:test";
 import { TooFarBehind } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { hooks } from "./internal.ts";
@@ -38,21 +38,21 @@ test("used reflects subscriber demand and unused resolves when the last one leav
 	const producer = new TrackProducer("test");
 
 	// No subscribers: no demand.
-	expect(producer.used.peek()).toBe(false);
+	expect(producer.demand().used.peek()).toBe(false);
 
 	const a = producer.subscribe();
 	const b = producer.subscribe().ordered();
-	expect(producer.used.peek()).toBe(true);
+	expect(producer.demand().used.peek()).toBe(true);
 
 	// Closing one of two keeps demand, so unused() stays pending.
 	a.close();
-	expect(producer.used.peek()).toBe(true);
+	expect(producer.demand().used.peek()).toBe(true);
 
 	// Closing the last subscriber drops demand; unused() resolves. The consumer wire awaits this
 	// to tear an idle upstream down.
 	b.close();
-	await producer.unused();
-	expect(producer.used.peek()).toBe(false);
+	await producer.demand().unused();
+	expect(producer.demand().used.peek()).toBe(false);
 });
 
 test("a producer never self-closes on zero demand: a publisher keeps serving new subscribers", async () => {
@@ -61,7 +61,7 @@ test("a producer never self-closes on zero demand: a publisher keeps serving new
 	// Demand comes and goes...
 	const a = producer.subscribe();
 	a.close();
-	await producer.unused();
+	await producer.demand().unused();
 
 	// ...but the producer stays open (only the wire acts on `unused`, not the producer itself),
 	// so a publisher writing to a track nobody is watching is unaffected.
@@ -71,14 +71,14 @@ test("a producer never self-closes on zero demand: a publisher keeps serving new
 	producer.writeString("still here");
 	const b = producer.subscribe().ordered();
 	expect(await b.readString()).toBe("still here");
-	expect(producer.used.peek()).toBe(true);
+	expect(producer.demand().used.peek()).toBe(true);
 });
 
 test("unused() resolves immediately when there was never any demand", async () => {
 	const producer = new TrackProducer("video");
 	// No subscriber was ever attached; unused() must not hang.
-	await producer.unused();
-	expect(producer.used.peek()).toBe(false);
+	await producer.demand().unused();
+	expect(producer.demand().used.peek()).toBe(false);
 });
 
 test("used stays true across churn while at least one subscriber remains", async () => {
@@ -89,12 +89,12 @@ test("used stays true across churn while at least one subscriber remains", async
 	for (let i = 0; i < 20; i++) {
 		const t = producer.subscribe();
 		t.close();
-		expect(producer.used.peek()).toBe(true);
+		expect(producer.demand().used.peek()).toBe(true);
 	}
 
 	a.close();
-	await producer.unused();
-	expect(producer.used.peek()).toBe(false);
+	await producer.demand().unused();
+	expect(producer.demand().used.peek()).toBe(false);
 });
 
 test("appendDatagram shares the group sequence counter", () => {
@@ -1686,6 +1686,61 @@ test("finished rejects when the track aborts or closes without an end", async ()
 	clean.appendGroup().close();
 	clean.close();
 	expect(await reader.finished()).toBe(1);
+});
+
+test("publisher max age is absent unless explicitly declared", () => {
+	expect(infoDefaults().maxAge).toBeUndefined();
+	expect(infoDefaults({ maxAge: Milli.zero }).maxAge).toBe(Milli.zero);
+	expect(infoDefaults({ maxAge: Milli(30_000) }).maxAge).toBe(Milli(30_000));
+});
+
+test("an omitted publisher limit retains old groups", async () => {
+	const clock = mockMonotonicTime(10_000);
+	const producer = new TrackProducer("unlimited").accept();
+	try {
+		const source = producer.appendGroup();
+		source.writeString("old");
+		source.close();
+		clock.set(100_000);
+		producer.appendGroup();
+		const subscriber = producer.subscribe({ maxAge: Milli(100_000) });
+		const cached = await subscriber.recvGroup();
+		expect(await cached?.readString()).toBe("old");
+		subscriber.close();
+	} finally {
+		producer.close();
+		clock.restore();
+	}
+});
+
+test("a late subscriber to a closed unlimited track is not held by the producer", async () => {
+	const producer = new TrackProducer("unlimited").accept();
+	const source = producer.appendGroup();
+	source.writeString("last");
+	source.close();
+	producer.close();
+
+	// Counts the map entries subscribing leaves behind, rather than the heap: nothing ages an
+	// unlimited track's cache out, so any entry keyed by the subscriber would outlive it.
+	const added: [Map<unknown, unknown>, unknown][] = [];
+	const set = Map.prototype.set;
+	const spy = spyOn(Map.prototype, "set").mockImplementation(function (this: Map<unknown, unknown>, key, value) {
+		added.push([this, key]);
+		return set.call(this, key, value);
+	});
+	let subscriber: ReturnType<TrackProducer["subscribe"]>;
+	try {
+		subscriber = producer.subscribe();
+	} finally {
+		spy.mockRestore();
+	}
+
+	const group = await subscriber.recvGroup();
+	expect(await group?.readString()).toBe("last");
+	expect(await subscriber.recvGroup()).toBeUndefined();
+	subscriber.close();
+
+	expect(added.filter(([map, key]) => map.has(key)).length).toBe(0);
 });
 
 test("an abort keeps finished groups for a slow reader, then reports it", async () => {

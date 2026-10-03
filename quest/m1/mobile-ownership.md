@@ -13,7 +13,7 @@ Decided in the 2026-09-30 audit: option 2 from #700, Rust owns codecs. The
 tree already shipped it. `moq-ffi` defaults to the `audio` and `video`
 features (`rs/moq-ffi/Cargo.toml:27`), so the Kotlin and Swift packages already
 carry the Rust codecs, and #4094 added the `CVPixelBuffer` bridge
-(`MoqVideoSurface::PixelBuffer` on `dev`). Option 1 would add a second media
+(`MoqVideoSurface::PixelBuffer`). Option 1 would add a second media
 stack beside one that exists.
 
 What remains is recording the verdict in `rs/moq-ffi/AGENTS.md` (a maintainer

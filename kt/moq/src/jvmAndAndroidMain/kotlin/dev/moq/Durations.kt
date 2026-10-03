@@ -67,4 +67,4 @@ val VideoFrame.timestamp: Duration
 
 /** Presentation timestamp. */
 val VideoDecodedFrame.timestamp: Duration
-    get() = timestampUs.toLong().microseconds
+    get() = timestampUs().toLong().microseconds
