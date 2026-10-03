@@ -15,7 +15,9 @@ Decided 2026-09-30:
   `pub(crate)`: the only users are the lite and IETF sessions in the same crate.
 - A frame written out of order keeps the received chunks by offset instead of
   copying into a pre-allocated buffer, so its memory tracks bytes received and
-  the per-session pre-allocation `Budget` (`model/frame.rs`) does not apply. The
+  the per-session pre-allocation `Budget` (`model/frame.rs`) does not apply.
+  Each in-flight frame keeps the existing charge-by-bytes-written cache
+  accounting (`charge_partial` in `model/group.rs`), per frame. The
   in-order readers (`poll_read_chunk`, `poll_read_all`) still see contiguous
   bytes up to the first hole, and `finish` still requires every byte.
 - Overlapping or out-of-bounds ranges are errors.

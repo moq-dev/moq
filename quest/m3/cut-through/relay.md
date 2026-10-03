@@ -5,8 +5,8 @@
 The lite and IETF sessions read incoming group streams out of order and write
 each payload range to every subscriber's stream at its output offset, so bytes
 behind an ingress hole reach the next hop before the hole is filled. On the
-[bench](/quest/m3/cut-through/bench.md), frame completion moves toward the
-direct-connection bound.
+[bench](/quest/m3/cut-through/bench.md), cut-through shrinks the post-hole
+drain time on the same two-hop path.
 
 ## Plan
 

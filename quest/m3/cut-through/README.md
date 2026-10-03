@@ -43,8 +43,9 @@ Decided 2026-09-30:
   `moq-net`, since the lite and IETF publishers and subscribers that use them
   live in the same crate. Cut-through frames keep the received chunks by
   offset instead of copying into a pre-allocated buffer, so memory tracks bytes
-  received and the per-session pre-allocation `Budget` (`model/frame.rs`,
-  #4609) is unaffected.
+  received and the per-session pre-allocation `Budget` (`model/frame.rs`)
+  does not apply. The group cache already charges each frame by bytes written
+  (#4609), so several in-flight frames charge only what has arrived.
 - `web-transport-trait` gains an unordered chunk read and an offset write whose
   defaults report unsupported, and moq-net falls back to ordered I/O. Only the
   `moq-quic` backends implement them; browsers, qmux, and iroh keep the defaults.
