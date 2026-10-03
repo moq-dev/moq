@@ -20,12 +20,18 @@ fn produce_origin(hop: u64) -> origin::Producer {
 	producer
 }
 
+/// The kind of an [`announce::Event`] for a prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+	Start,
+	Update,
+	End,
+}
+
 /// Every update per prefix until the watcher goes quiet. Time is paused, so the
 /// timeout fires only once every task is idle.
-async fn drain(
-	watched: &mut mpsc::UnboundedReceiver<(String, announce::Kind)>,
-) -> HashMap<String, Vec<announce::Kind>> {
-	let mut updates = HashMap::<String, Vec<announce::Kind>>::new();
+async fn drain(watched: &mut mpsc::UnboundedReceiver<(String, Kind)>) -> HashMap<String, Vec<Kind>> {
+	let mut updates = HashMap::<String, Vec<Kind>>::new();
 	while let Ok(Some((prefix, kind))) = tokio::time::timeout(Duration::from_secs(1), watched.recv()).await {
 		updates.entry(prefix).or_default().push(kind);
 	}
@@ -35,11 +41,17 @@ async fn drain(
 /// Watch `announced` from its own task, the way a session's announce writer does:
 /// it runs when woken, between the relays' own tasks, rather than only once the
 /// test task is polled again, which would coalesce every intermediate update.
-fn watch(mut announced: announce::Consumer) -> mpsc::UnboundedReceiver<(String, announce::Kind)> {
+fn watch(mut announced: announce::Consumer) -> mpsc::UnboundedReceiver<(String, Kind)> {
 	let (tx, rx) = mpsc::unbounded_channel();
 	tokio::spawn(async move {
-		while let Some(update) = announced.next().await {
-			if tx.send((update.prefix.to_string(), update.kind)).is_err() {
+		while let Some(event) = announced.next().await {
+			let (kind, announce) = match event {
+				announce::Event::Start(announce) => (Kind::Start, announce),
+				announce::Event::Update(announce) => (Kind::Update, announce),
+				announce::Event::End(announce) => (Kind::End, announce),
+				announce::Event::Live => continue,
+			};
+			if tx.send((announce.prefix.to_string(), kind)).is_err() {
 				break;
 			}
 		}
@@ -51,7 +63,7 @@ fn watch(mut announced: announce::Consumer) -> mpsc::UnboundedReceiver<(String, 
 struct Mesh {
 	nodes: Vec<origin::Producer>,
 	_pairs: Vec<MockPair>,
-	watched: mpsc::UnboundedReceiver<(String, announce::Kind)>,
+	watched: mpsc::UnboundedReceiver<(String, Kind)>,
 }
 
 impl Mesh {
@@ -86,8 +98,8 @@ impl Mesh {
 		let updates = drain(&mut self.watched).await;
 		assert_eq!(updates.len(), count);
 		for (prefix, kinds) in updates {
-			assert_eq!(kinds[0], announce::Kind::Announced, "{prefix}: {kinds:?}");
-			assert!(kinds.last().unwrap().is_active(), "{prefix}: {kinds:?}");
+			assert_eq!(kinds[0], Kind::Start, "{prefix}: {kinds:?}");
+			assert_ne!(kinds.last(), Some(&Kind::End), "{prefix}: {kinds:?}");
 		}
 		broadcasts
 	}
@@ -122,7 +134,7 @@ async fn full_mesh_withdraw_retracts_once(version: &str) {
 	let updates = drain(&mut mesh.watched).await;
 	assert_eq!(updates.len(), 100);
 	for (prefix, kinds) in updates {
-		assert_eq!(kinds, [announce::Kind::Retracted], "{prefix}");
+		assert_eq!(kinds, [Kind::End], "{prefix}");
 	}
 	// The same relays publish again, clearing their own withdrawals.
 	let _broadcasts = mesh.publish(100, 0).await;
@@ -140,7 +152,7 @@ async fn partial_mesh_withdraw_then_republish() {
 	let updates = drain(&mut mesh.watched).await;
 	assert_eq!(updates.len(), 100);
 	for (prefix, kinds) in updates {
-		assert!(!kinds.last().unwrap().is_active(), "{prefix}: {kinds:?}");
+		assert_eq!(kinds.last(), Some(&Kind::End), "{prefix}: {kinds:?}");
 	}
 	let _broadcasts = mesh.publish(100, 5).await;
 }
@@ -201,7 +213,7 @@ async fn partial_mesh_withdraw_retracts_once() {
 		for (relay, watched) in watched.iter_mut().enumerate() {
 			let updates = drain(watched).await;
 			assert!(
-				updates.values().all(|kinds| kinds.last().unwrap().is_active()),
+				updates.values().all(|kinds| kinds.last() != Some(&Kind::End)),
 				"relay {relay}: {updates:?}"
 			);
 		}
@@ -211,7 +223,7 @@ async fn partial_mesh_withdraw_retracts_once() {
 		for (relay, watched) in watched.iter_mut().enumerate() {
 			let updates = drain(watched).await;
 			let kinds = &updates[&format!("room/{publisher}")];
-			if kinds != &[announce::Kind::Retracted] {
+			if kinds != &[Kind::End] {
 				hunted.push((relay, kinds.clone()));
 			}
 		}

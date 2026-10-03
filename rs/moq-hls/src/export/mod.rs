@@ -1977,6 +1977,7 @@ mod tests {
 	// replacement would serve restarted groups under the previous publisher's segment numbers.
 	#[tokio::test]
 	async fn a_replaced_first_hop_sibling_drops_old_rows_and_rebinds() {
+		tokio::time::pause();
 		const OLD: &[u8] = b"OLDOLDOLDOLDOLDO";
 		const NEW: &[u8] = b"NEWNEWNEWNEWNEWN";
 
@@ -1999,7 +2000,15 @@ mod tests {
 		let mut config = video_config();
 		config.broadcast = Some(moq_net::path::Relative::new("media").to_owned());
 
-		let (rendition, watcher) = export(&upstream, &config);
+		let mut snapshot = moq_mux::catalog::hang::Catalog::default();
+		snapshot.video.renditions.insert("video0".to_string(), config.clone());
+		let archive = hang::catalog::Archive::new(hang::timeline::DEFAULT_NAME);
+		snapshot.archive = Some(archive.clone());
+		let renditions = renditions::Producer::new(Config::default().window);
+		renditions.sync(&upstream, &snapshot);
+		let fanout = renditions.fanout();
+		let watcher = tokio::spawn(watch_timeline(upstream.broadcast.clone(), archive, fanout.clone()));
+		let rendition = renditions.get(Kind::Video, "video0").unwrap();
 		accept_sibling(&old_server, &old_media).await;
 		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
 			.await
@@ -2011,6 +2020,8 @@ mod tests {
 			.expect("the original sibling is servable");
 		assert!(contains(&served, OLD), "the first hop serves the original publisher");
 		assert!(!rendition.snapshot().segments.is_empty());
+		let mut early = rendition.segments();
+		assert_eq!(early.next().await.unwrap().unwrap().discontinuity, 0);
 
 		// The replacement is already announced before the incumbent is dropped, matching a
 		// rival publisher that appears while the current first hop is still serving.
@@ -2031,6 +2042,9 @@ mod tests {
 			.expect("the rebound sibling resolves")
 			.expect("the replacement is routable");
 		let recorder = catalog.enroll_test("video0").unwrap();
+		// Model source records lost during the outage: every rendition must carry the
+		// same new timeline sequence, including a recorder that starts after this rebind.
+		fanout.skip();
 		let _new_track = write_routed_media(&mut new_media, NEW, recorder, 6_000_000);
 		let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 		loop {
@@ -2060,6 +2074,15 @@ mod tests {
 			"rows after the new bind come from the replacement"
 		);
 		assert!(!contains(&served, OLD));
+		let mut late = rendition.segments();
+		let early = early.next().await.unwrap().unwrap();
+		let late = late.next().await.unwrap().unwrap();
+		assert_eq!(early.segment, late.segment);
+		assert!(early.discontinuity > 0, "the replacement starts after a timeline break");
+		assert_eq!(
+			late.discontinuity, early.discontinuity,
+			"cursor creation cannot reset the baseline"
+		);
 		assert!(
 			rendition.segment(0).await.unwrap().is_none(),
 			"a row listed for the old publisher is not served from the replacement"
@@ -2341,11 +2364,11 @@ mod tests {
 		assert_eq!(first.segment, 0);
 		assert_eq!(&first.media[4..8], b"moof", "the segment carries its transmuxed media");
 		assert_eq!(first.duration, Duration::from_secs(2));
-		assert!(!first.discontinuity, "a clean start is not a discontinuity");
+		assert_eq!(first.discontinuity, 0, "a clean start is not a discontinuity");
 
 		let second = segments.next().await.unwrap().expect("second segment");
 		assert_eq!(second.segment, 1);
-		assert!(!second.discontinuity, "consecutive segments are continuous");
+		assert_eq!(second.discontinuity, 0, "consecutive segments are continuous");
 
 		// Tear down the publisher mid-group. The track ends abruptly (the cursor drains the
 		// segments it already saw and ends; the still-open live-edge group is NOT finalized,

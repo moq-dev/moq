@@ -71,7 +71,7 @@ test("concurrent tracks split the estimate", () => {
 
 	const firstTrack = track(VIDEO);
 	firstTrack.subscribe();
-	const first = allocator.reserve(firstTrack, 4_000_000);
+	const first = allocator.reserve(firstTrack.demand(), 4_000_000);
 
 	estimate.set(2_000_000);
 	// Alone, it gets everything it asked for that the link can carry.
@@ -79,7 +79,7 @@ test("concurrent tracks split the estimate", () => {
 
 	const secondTrack = track(VIDEO);
 	secondTrack.subscribe();
-	const second = allocator.reserve(secondTrack, 4_000_000);
+	const second = allocator.reserve(secondTrack.demand(), 4_000_000);
 
 	expect(first.peek()).toBe(1_000_000);
 	expect(second.peek()).toBe(1_000_000);
@@ -93,10 +93,10 @@ test("an idle track claims nothing", () => {
 
 	const watchedTrack = track(VIDEO);
 	watchedTrack.subscribe();
-	const watched = allocator.reserve(watchedTrack, 4_000_000);
+	const watched = allocator.reserve(watchedTrack.demand(), 4_000_000);
 
 	const idleTrack = track(VIDEO);
-	const idle = allocator.reserve(idleTrack, 4_000_000);
+	const idle = allocator.reserve(idleTrack.demand(), 4_000_000);
 
 	expect(watched.peek()).toBe(2_000_000);
 	// Not zero: an idle share reports "no opinion" so a sender that is mid-shutdown
@@ -116,11 +116,11 @@ test("a share wakes when a sibling goes idle", async () => {
 
 	const mineTrack = track(VIDEO);
 	mineTrack.subscribe();
-	const mine = allocator.reserve(mineTrack, 4_000_000);
+	const mine = allocator.reserve(mineTrack.demand(), 4_000_000);
 
 	const siblingTrack = track(VIDEO);
 	const siblingSub = siblingTrack.subscribe();
-	const sibling = allocator.reserve(siblingTrack, 4_000_000);
+	const sibling = allocator.reserve(siblingTrack.demand(), 4_000_000);
 
 	expect(mine.peek()).toBe(1_000_000);
 	expect(sibling.peek()).toBe(1_000_000);
@@ -139,7 +139,7 @@ test("an unchanged slice still follows the estimate past the cap", async () => {
 
 	const producer = track(VIDEO);
 	producer.subscribe();
-	const reserved = allocator.reserve(producer, 4_000_000);
+	const reserved = allocator.reserve(producer.demand(), 4_000_000);
 
 	estimate.set(10_000_000);
 	expect(reserved.peek()).toBe(4_000_000);
@@ -163,11 +163,11 @@ test("a parked share is woken by sibling demand", async () => {
 
 	const mineTrack = track(VIDEO);
 	mineTrack.subscribe();
-	const reserved = allocator.reserve(mineTrack, 4_000_000);
+	const reserved = allocator.reserve(mineTrack.demand(), 4_000_000);
 
 	const siblingTrack = track(VIDEO);
 	const siblingSub = siblingTrack.subscribe();
-	const sibling = allocator.reserve(siblingTrack, 4_000_000);
+	const sibling = allocator.reserve(siblingTrack.demand(), 4_000_000);
 
 	expect(reserved.peek()).toBe(1_000_000);
 	expect(sibling.peek()).toBe(1_000_000);
@@ -185,12 +185,12 @@ test("a closed track is pruned", () => {
 
 	const first = track(VIDEO);
 	first.subscribe();
-	const firstShare = allocator.reserve(first, 4_000_000);
+	const firstShare = allocator.reserve(first.demand(), 4_000_000);
 	first.close();
 
 	const second = track(VIDEO);
 	second.subscribe();
-	const secondShare = allocator.reserve(second, 4_000_000);
+	const secondShare = allocator.reserve(second.demand(), 4_000_000);
 
 	expect(firstShare.peek()).toBeUndefined();
 	expect(secondShare.peek()).toBe(2_000_000);
@@ -204,11 +204,11 @@ test("closing a reservation releases it", async () => {
 
 	const firstTrack = track(VIDEO);
 	firstTrack.subscribe();
-	const first = allocator.reserve(firstTrack, 4_000_000);
+	const first = allocator.reserve(firstTrack.demand(), 4_000_000);
 
 	const secondTrack = track(VIDEO);
 	secondTrack.subscribe();
-	const second = allocator.reserve(secondTrack, 4_000_000);
+	const second = allocator.reserve(secondTrack.demand(), 4_000_000);
 	expect(second.peek()).toBe(1_000_000);
 
 	const orphan = first.grant;
@@ -230,11 +230,11 @@ test("update changes the claim in place", () => {
 
 	const smallTrack = track(VIDEO);
 	smallTrack.subscribe();
-	const small = allocator.reserve(smallTrack, 1_000_000);
+	const small = allocator.reserve(smallTrack.demand(), 1_000_000);
 
 	const largeTrack = track(VIDEO);
 	largeTrack.subscribe();
-	const large = allocator.reserve(largeTrack, 8_000_000);
+	const large = allocator.reserve(largeTrack.demand(), 8_000_000);
 
 	expect(small.peek()).toBe(1_000_000);
 	expect(large.peek()).toBe(5_000_000);
@@ -255,7 +255,7 @@ test("update wakes a parked reader", async () => {
 
 	const producer = track(VIDEO);
 	producer.subscribe();
-	const reserved = allocator.reserve(producer, 1_000_000);
+	const reserved = allocator.reserve(producer.demand(), 1_000_000);
 	expect(reserved.peek()).toBe(1_000_000);
 
 	const next = reserved.grant.changed();
@@ -269,7 +269,7 @@ test("unlimited reservations never claim", () => {
 	const allocator = Allocator.unlimited();
 	const producer = track(VIDEO);
 	producer.subscribe();
-	const reserved = allocator.reserve(producer, 4_000_000);
+	const reserved = allocator.reserve(producer.demand(), 4_000_000);
 	expect(reserved.peek()).toBeUndefined();
 	allocator.close();
 });
@@ -279,7 +279,7 @@ test("a closed allocator reports no grant", () => {
 	const allocator = new Allocator(estimate);
 	const producer = track(VIDEO);
 	producer.subscribe();
-	const reserved = allocator.reserve(producer, 4_000_000);
+	const reserved = allocator.reserve(producer.demand(), 4_000_000);
 	expect(reserved.peek()).toBe(2_000_000);
 
 	allocator.close();
@@ -293,10 +293,10 @@ test("reserve and update reject a non-finite or negative ceiling", () => {
 	producer.subscribe();
 
 	for (const max of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1]) {
-		expect(() => allocator.reserve(producer, max)).toThrow(/finite non-negative/);
+		expect(() => allocator.reserve(producer.demand(), max)).toThrow(/finite non-negative/);
 	}
 
-	const reserved = allocator.reserve(producer, 1_000_000);
+	const reserved = allocator.reserve(producer.demand(), 1_000_000);
 	for (const max of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1]) {
 		expect(() => reserved.update(max)).toThrow(/finite non-negative/);
 	}

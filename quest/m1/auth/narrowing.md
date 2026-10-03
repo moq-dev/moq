@@ -45,8 +45,8 @@ A narrowing always succeeds. A changed root still closes the session.
   side does. Draining is not an option: a group may stay open as long as its
   track.
 - Relay revalidation uses it: a re-checked grant with the same root narrows
-  the session instead of closing it (`Lease::ended` reporting "grant
-  narrowed" in `rs/moq-relay/src/auth.rs`), on every accept path: native,
+  the session instead of closing it (`Lease::ended` reporting
+  `Reason::Narrowed` in `rs/moq-relay/src/auth.rs`), on every accept path: native,
   io_uring, and `moq --listen` share `connection::supervise`, while WebSocket
   has its own copy of the loop.
 - Prove the deafen case end to end: subscribe under a room prefix, narrow

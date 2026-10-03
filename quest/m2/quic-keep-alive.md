@@ -6,8 +6,7 @@ A connection sends a PING only when its idle deadline is near, never on a
 fixed clock. An idle connection with a 10 s idle timeout costs one packet per
 roughly 10 s minus a few PTOs; a busy connection costs none. The
 `keep_alive` setting on `quic::Client` and `quic::Server` becomes an optional
-maximum, default none. Redefining it is a config and CLI break, so this
-targets `dev`.
+maximum, default none. Redefining it is a config and CLI break.
 
 ## Plan
 

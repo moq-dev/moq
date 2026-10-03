@@ -25,8 +25,8 @@ track name would collapse them.
 - Open: a released reader ignores `track` and subscribes by the key, so it
   cannot play a rendition whose `track` differs from its alias. Candidates:
   accept that, since such a listing was not expressible before and a
-  publisher sets `track` only when it must; or move the reader change to
-  `dev` behind a catalog version. The maintainer settled it as additive on
+  publisher sets `track` only when it must; or gate the reader change
+  behind a catalog version. The maintainer settled it as additive on
   main; confirm the forward-compatibility cost before starting.
 - The MSF conversion in `rs/moq-mux` names MSF tracks by the key today.
   It carries the wire name and keeps the alias through a round-trip test, or

@@ -376,7 +376,7 @@ impl web_transport_trait::poll::SendStream for VirtualSendStream {
 		Poll::Ready(self.push(chunk).map(|()| len))
 	}
 
-	fn set_priority(&mut self, _order: u8) {}
+	fn set_priority(&mut self, _order: i32) {}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
 		// Flush any remaining buffered data (e.g. if registration never completed).
@@ -419,7 +419,7 @@ impl<S: crate::transport::poll::Session> web_transport_trait::poll::SendStream f
 		}
 	}
 
-	fn set_priority(&mut self, order: u8) {
+	fn set_priority(&mut self, order: i32) {
 		match self {
 			Self::Real(s) => s.set_priority(order),
 			Self::Virtual(s) => s.set_priority(order),

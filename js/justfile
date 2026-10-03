@@ -40,13 +40,18 @@ fix:
 # Run all unit tests.
 test:
     bun install --frozen-lockfile
-    bun test common/declarations.test.ts common/deps.test.ts
+    bun test common/declarations.test.ts common/deps.test.ts common/worklet.test.ts
     bun run --filter='*' --elide-lines=0 test
 
 # Run one net benchmark: broadcasts, forward, reader, frames, track, varint, or lite-varint.
 bench name:
     bun install --frozen-lockfile
     bun net/bench/{{ name }}.ts
+
+# Bundle the worklets with Vite, webpack, esbuild, and Bun, and load them in Chromium, with and
+# without a strict CSP. Manual only: it installs webpack and launches a browser.
+worklet-matrix:
+    bun common/worklet-matrix.ts
 
 # Build all packages.
 build:

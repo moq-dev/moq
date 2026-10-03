@@ -46,8 +46,8 @@ const CONTIGUITY_TOLERANCE = Moq.Time.Micro.fromMilli(1 as Time.Milli);
  * durations and base-decode-times. Undefined on either side means continuity can't be proven.
  *
  * The bound is one-sided (upper only) by design: a next start at or before `end` continues the
- * timeline, a start past `end` beyond the tolerance is a gap. A start well before `end` is
- * malformed and aborts the track.
+ * timeline, a start past `end` beyond the tolerance is a gap. Group starts are validated
+ * separately; an overlapping endpoint is not a rewind.
  */
 function ptsContiguous(end: Time.Micro | undefined, nextStart: Time.Micro | undefined): boolean {
 	return end !== undefined && nextStart !== undefined && nextStart <= Moq.Time.Micro.add(end, CONTIGUITY_TOLERANCE);
@@ -86,11 +86,13 @@ export class Consumer {
 	// sits. Only the consumer can know this, which is why next() reports it instead of leaving
 	// callers to guess from group numbers.
 	#gap = false;
-	// The live edge of playback: max delivered timestamp and the group that carried it.
-	#liveEdge?: { group: number; timestamp: Time.Micro };
+	// The first media timestamp of the latest delivered group, and its predecessor's start.
+	// Endpoints and later frames can overlap the next group without moving this floor.
+	#start?: { group: number; timestamp: Time.Micro };
+	#floor?: Time.Micro;
 	// Increments on a declared marker, an unproven delivered hole, and a latency skip.
 	#discontinuity = 0;
-	// A group below the live edge aborts the track.
+	// A group below the previous group start aborts the track.
 	#error?: Error;
 
 	// Wake up the consumer when a new frame is available.
@@ -386,27 +388,27 @@ export class Consumer {
 		return true;
 	}
 
-	// A group whose media timestamps sit below the live edge earlier groups reached is
+	// A later group whose media timestamps sit below the latest delivered group start is
 	// malformed. Returns true if the track was aborted.
 	#checkMalformed(): void {
-		const live = this.#liveEdge;
-		if (live === undefined) return;
+		const start = this.#start;
+		if (start === undefined) return;
 		for (const group of this.#groups) {
-			if (group.consumer.sequence <= live.group) continue;
-			if (group.minMedia !== undefined && group.minMedia < live.timestamp) {
-				this.#abort(new Error("group timestamp is below the live edge"));
+			if (group.consumer.sequence <= start.group) continue;
+			if (group.minMedia !== undefined && group.minMedia < start.timestamp) {
+				this.#abort(new Error("group timestamp is below the previous group start"));
 				return;
 			}
 		}
 	}
 
 	#abortIfRewound(group: Group, timestamp: Time.Micro): boolean {
-		const live = this.#liveEdge;
-		if (live === undefined) return false;
-		if (group.consumer.sequence <= live.group) return false;
-		if (timestamp >= live.timestamp) return false;
+		const start = this.#start;
+		if (start === undefined) return false;
+		if (group.consumer.sequence <= start.group) return false;
+		if (timestamp >= start.timestamp) return false;
 
-		this.#abort(new Error("group timestamp is below the live edge"));
+		this.#abort(new Error("group timestamp is below the previous group start"));
 		return true;
 	}
 
@@ -504,9 +506,6 @@ export class Consumer {
 					const end = this.#format.end?.(frame);
 					if (end !== undefined) {
 						if (!this.#groups[0].media) this.#markPlayhead();
-						if (this.#liveEdge === undefined || end > this.#liveEdge.timestamp) {
-							this.#liveEdge = { group: seq, timestamp: end };
-						}
 						this.#updateBuffered();
 						return {
 							frame: undefined,
@@ -520,9 +519,14 @@ export class Consumer {
 					if (seq !== this.#deliveredGroup) this.#gap = false;
 					this.#deliveredGroup = seq;
 
-					const live = this.#liveEdge;
-					if (live === undefined || frame.timestamp > live.timestamp) {
-						this.#liveEdge = { group: seq, timestamp: frame.timestamp };
+					if (this.#start === undefined || seq > this.#start.group) {
+						this.#floor = this.#start?.timestamp;
+						this.#start = { group: seq, timestamp: frame.timestamp };
+					}
+					// Delayed history has its own earlier floor; this bound belongs to #start.group.
+					if (seq === this.#start.group && this.#floor !== undefined && frame.timestamp < this.#floor) {
+						this.#abort(new Error("frame timestamp is below the previous group start"));
+						throw this.#error;
 					}
 					this.#updateBuffered();
 					return { frame, group: seq, discontinuity: this.#discontinuity, continuous };

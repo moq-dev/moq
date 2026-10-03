@@ -42,11 +42,11 @@ public typealias AudioEncoderInput = MoqFFI.MoqAudioEncoderInput
 /// The encoder-side config for a published audio track: codec, rate, channels,
 /// bitrate, and frame duration.
 public typealias AudioEncoderOutput = MoqFFI.MoqAudioEncoderOutput
-/// What a `VideoConsumer` decodes to: an optional pixel format and resize,
-/// plus a max age.
+/// What a `VideoConsumer` decodes to: an optional resize, a max age, and
+/// whether frames keep the decoder's native surface.
 public typealias VideoDecoderOutput = MoqVideoDecoderOutput
-/// One decoded video frame: packed pixels, the layout they are in, their
-/// dimensions, and a timestamp.
+/// One decoded video frame, owning the decoder's surface until released;
+/// `pixels(format:)` converts it to packed CPU pixels.
 public typealias VideoDecodedFrame = MoqVideoDecodedFrame
 /// The PCM layout an `AudioConsumer` decodes to, plus its max age.
 public typealias AudioDecoderOutput = MoqFFI.MoqAudioDecoderOutput
@@ -79,6 +79,14 @@ public typealias Datagram = MoqFFI.MoqDatagram
 /// and the advertised costs: warm `cost`, lower wins, plus undiscounted `cold`
 /// (`nil` means the same as `cost`).
 public typealias Route = MoqFFI.MoqRoute
+/// A route over a prefix: the origin-relative `prefix`, what each filter
+/// wildcard matched (`captures`, `nil` for a partial overlap), and the `route`
+/// serving it. Resolve a path with `OriginConsumer.requestBroadcast`.
+public typealias Announce = MoqFFI.MoqAnnounce
+/// What an `AnnounceConsumer` yields: `.start`, `.update`, or `.end`
+/// carrying an `Announce`, or `.live` once every route live at subscribe time
+/// has been delivered.
+public typealias AnnounceEvent = MoqFFI.MoqAnnounceEvent
 /// Per-subscription delivery preferences: priority, group ordering, latency
 /// budget, and group range.
 public typealias Subscription = MoqFFI.MoqSubscription
