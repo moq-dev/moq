@@ -12,7 +12,8 @@
  *         --tag chromium-opus-48000-mild-plain --out <run dir>
  *
  * Writes `<tag>.ndjson` (the samples, appended as they are drained) and `<tag>.page.json` (the
- * environment, console notes, and voids). Exits nonzero when the row could not be played at all.
+ * environment, console notes, and voids). `--capture` also writes `<tag>.arrivals.ndjson`, with
+ * frame arrivals on the samples' viewer clock. Exits nonzero when playback or capture fails.
  *
  * @module
  */
@@ -21,7 +22,7 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { Page } from "playwright";
 import { launch, sleep } from "../../../interop/clients/js/harness.ts";
-import type { Environment, Ring, Void } from "./src/schema.ts";
+import type { Arrival, Environment, Ring, Void } from "./src/schema.ts";
 
 const { values } = parseArgs({
 	options: {
@@ -34,6 +35,7 @@ const { values } = parseArgs({
 		duration: { type: "string", default: "60" },
 		tag: { type: "string" },
 		out: { type: "string" },
+		capture: { type: "boolean", default: false },
 	},
 });
 
@@ -52,7 +54,7 @@ if (
 	(ring !== "plain" && ring !== "isolated")
 ) {
 	console.error(
-		"usage: driver.ts --url U --fingerprint F --broadcast B --page DIR --ring plain|isolated --tag T --out DIR [--delay auto] [--duration S>0]",
+		"usage: driver.ts --url U --fingerprint F --broadcast B --page DIR --ring plain|isolated --tag T --out DIR [--delay auto] [--duration S>0] [--capture]",
 	);
 	process.exit(2);
 }
@@ -89,11 +91,12 @@ const server = Bun.serve({
 	},
 });
 
-const query = new URLSearchParams({ url, broadcast, delay: values.delay });
+const query = new URLSearchParams({ url, broadcast, delay: values.delay, capture: String(values.capture) });
 const pageUrl = `http://127.0.0.1:${server.port}/${ring}/?${query}`;
 console.log(`page: ${pageUrl}`);
 
 const samplesFile = join(out, `${tag}.ndjson`);
+const arrivalsFile = join(out, `${tag}.arrivals.ndjson`);
 const voids: Void[] = [];
 const refuse = (assertion: string, detail: string) => {
 	console.error(`void: ${assertion}: ${detail}`);
@@ -111,8 +114,14 @@ async function waitFor<T>(page: Page, what: string, ready: () => T | undefined):
 }
 
 const drain = async (page: Page) => {
+	const error = await page.evaluate(() => globalThis.audioQuality.error());
+	if (error) throw new Error(`arrival capture: ${error}`);
 	const samples = await page.evaluate(() => globalThis.audioQuality.drain());
 	if (samples.length > 0) appendFileSync(samplesFile, `${samples.map((s) => JSON.stringify(s)).join("\n")}\n`);
+	if (values.capture) {
+		const arrivals: Arrival[] = await page.evaluate(() => globalThis.audioQuality.arrivals());
+		if (arrivals.length > 0) appendFileSync(arrivalsFile, `${arrivals.map((a) => JSON.stringify(a)).join("\n")}\n`);
+	}
 };
 
 // No fake devices: nothing here captures. The autoplay flag stands in for the click a viewer makes.
