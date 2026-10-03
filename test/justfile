@@ -22,6 +22,7 @@ default:
 # which this recipe installs, as the interop and wasm harnesses do.
 harness:
     ./lib/harness.test.sh
+    cd .. && bun test test/interop/compat/resolve.test.ts
     cd .. && bun install --frozen-lockfile
     cd interop/clients/js && bunx playwright install chromium
     cd interop/clients/js && bun test ./harness.browser.ts
@@ -38,6 +39,11 @@ harness:
 interop *args:
     just rs test -p moq-net --lib varint_interop --run-ignored all
     ./interop/interop.sh "$@"
+
+# Nightly main vs newest installable registry releases: tokens, pinned session
+# versions, decoded catalogs/containers, and group FETCH. See interop/README.md.
+wire-compat:
+    ./interop/compat.sh
 
 # Negative control: no publisher, every subscriber must time out (proves the
 

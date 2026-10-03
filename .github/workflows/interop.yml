@@ -106,6 +106,16 @@ jobs:
           # and a passing one is deleted as usual.
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
+      # Registry installs and the release matrix run only on main, nightly or
+      # on demand. A dev branch intentionally permits unpublished API breaks.
+      - name: Released wire compatibility
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: nix develop --command just test wire-compat
+        shell: bash -leo pipefail {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
       - name: Interop negative control
         run: nix develop --command just test interop-negative
         shell: bash -leo pipefail {0}

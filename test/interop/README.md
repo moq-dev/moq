@@ -92,6 +92,49 @@ Subscriber names: `rust`, `python`, `go`, `js` (browser), `js-native-node`,
 A client whose source build fails fails only its own matrix cells (see
 `mark_broken` in `interop.sh`); it never aborts the rest of the run.
 
+## Released wire compatibility
+
+`just test wire-compat` compares this checkout with the newest stable,
+non-yanked crates.io and npm releases. The existing Interop workflow runs it
+nightly and on demand on `main`. Registry installation is omitted from PR runs;
+resolver and removed-version regressions run through `just test harness`.
+
+The run records exact releases, npm's resolved lockfile, both CLI help outputs,
+and each matrix cell in the harness artifacts. It uses checksummed GitHub
+binaries when available on Linux x86\_64, with an exact-version `cargo install`
+fallback. Run inside `nix develop` with GitHub CLI registry access.
+
+Four sources sign JWTs: current and published Rust CLI, and current and
+published `@moq/auth`. All four verify every token; the JavaScript readers also
+assert normalized permission scope. Current and released `hang` and
+`@moq/hang` encode and decode one another's catalogs and legacy frame headers,
+checking the exact timestamp and payload. These are format checks, independent
+of a media decoder.
+
+The session lanes derive supported drafts from each CLI's `--connect-version`
+choices. The relay offers only the cell's version, and JavaScript checks the
+negotiated version. Current Rust media publishers feed released Rust and JS
+readers, then released publishers feed current readers, through both relay
+sources. Rust exports must decode to a video frame through ffmpeg. The existing
+JS subscriber reconstructs the catalog and decodes the container. JS publishers
+write one group after actual subscriber demand, and opposite-source Rust
+readers verify its bytes through a live subscription. Both Rust versions also
+fetch the same completed media group and compare every frame's exact payload.
+FETCH support is derived from each Rust library's protocol capabilities; older
+lite drafts without FETCH are logged and skipped. Losing a published FETCH
+capability fails the run. JS IETF FETCH is unsupported in both directions and
+is logged as a capability boundary; Rust covers this operation.
+
+Checkout-only versions are logged and omitted. Removing a released version
+fails before sessions start. A maintainer-approved deliberate removal belongs
+in `compat/planned-breaks.json` as a protocol name mapped to its approval,
+reason, and the exact affected release versions. Every exception is logged.
+Entries become errors once an affected release changes or no longer offers the
+version, forcing removal or a fresh review. The measured lite-07-wip exception
+was approved because the draft is unpublished; future WIP drafts receive no
+automatic exception. `dev` does not run
+this release comparison because its unpublished breaks are intentional.
+
 ## Media QA
 
 The matrix asks "did bytes arrive and did a pixel light up". That passes on a

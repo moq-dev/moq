@@ -12,6 +12,7 @@
  *
  * @module
  */
+import { writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
@@ -36,6 +37,7 @@ const { positionals, values } = parseArgs({
 		url: { type: "string" },
 		broadcast: { type: "string" },
 		timeout: { type: "string", default: "20" },
+		"track-file": { type: "string" },
 	},
 });
 
@@ -50,7 +52,10 @@ if (role !== "subscribe" || !url || !broadcast || !Number.isFinite(timeoutMs) ||
 
 async function run(): Promise<void> {
 	const origin = new Moq.Origin.Producer();
-	const connection = await Moq.Connection.connect({ url: new URL(url as string), consume: origin });
+	const connect = process.env.INTEROP_COMPAT_TRANSPORT
+		? (await import(process.env.INTEROP_COMPAT_TRANSPORT)).connect
+		: Moq.Connection.connect;
+	const connection = await connect({ url: new URL(url as string), consume: origin });
 	let requested: Moq.Origin.Requesting | undefined;
 	try {
 		const path = Moq.Path.from(broadcast as string);
@@ -74,6 +79,10 @@ async function run(): Promise<void> {
 		}
 
 		const [name, config] = video;
+		if (values["track-file"]) {
+			writeFileSync(values["track-file"], name);
+			return;
+		}
 		let format: Container.Format;
 		if (config.container.kind === "legacy") {
 			format = new Container.Legacy.Format(config);
