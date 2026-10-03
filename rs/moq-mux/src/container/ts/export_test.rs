@@ -6135,6 +6135,9 @@ async fn export_stats_skip_output_a_failure_discards() {
 	assert_eq!(units(export.stats()), pes_count(&frames));
 
 	drop((broadcast, catalog, track));
+	// The old broadcast ends before the publisher comes back: a path still routed is one
+	// broadcast, so a publisher back before then would resume it instead.
+	ended.closed().await;
 	let (mut broadcast, mut catalog) = publish();
 	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
 	source.returned(&ended).await.unwrap();
