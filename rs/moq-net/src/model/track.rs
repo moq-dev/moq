@@ -243,6 +243,10 @@ pub(crate) struct TrackState {
 	// [`Consumer::poll_start`]) wait on it; everything else treats the floor as usual.
 	start_pending: bool,
 
+	// The newest group the serving route said it had when it answered (moq-transport's
+	// Largest Location), before delivering any: where the live feed is now.
+	edge: Option<u64>,
+
 	// Where production stopped, snapshotted when the open groups are released (an
 	// abort, or the last producer dropping). Computed live from the cache otherwise;
 	// see [`Self::resume_position`].
@@ -1163,11 +1167,11 @@ impl TrackState {
 	/// Withhold every group the live feed delivered from readers, for a front's logical
 	/// track gone idle: how stale the cache is cannot be told until a live feed shows
 	/// where the track is now. Fetches still find the groups. Buffered datagrams are
-	/// dropped, being no more current.
+	/// dropped, being no more current. Returns the newest group withheld.
 	///
 	/// Each group is restamped, which retires its arrival entry, and re-enters the
 	/// eviction order under the new stamp.
-	fn hide_cache(&mut self) {
+	fn hide_cache(&mut self) -> Option<u64> {
 		self.datagram_offset += self.datagrams.len();
 		self.datagrams.clear();
 		let sequences: Vec<u64> = self
@@ -1188,10 +1192,11 @@ impl TrackState {
 				self.evict.push_back((*sequence, stamp));
 			}
 		}
+		sequences.last().copied()
 	}
 
-	/// Hand every group [`Self::hide_cache`] withheld back to readers, in sequence order,
-	/// once the track ended: its cache is then the whole track.
+	/// Hand every group [`Self::hide_cache`] withheld back to readers, in sequence order:
+	/// the track ended, so its cache is the whole track, or the live feed is within it.
 	fn reveal_cache(&mut self) {
 		for (sequence, slot) in self.lookup.iter_mut() {
 			if std::mem::take(&mut slot.parked) && !slot.group.is_aborted() {
@@ -1611,14 +1616,12 @@ impl Producer {
 	}
 
 	/// Withhold the cache from readers unless one is consuming the track already and so
-	/// may have read it; see `TrackState::hide_cache`. False while used.
-	pub(crate) fn hide_cache(&mut self) -> bool {
+	/// may have read it; see `TrackState::hide_cache`. `None` while used, otherwise the
+	/// newest group withheld.
+	pub(crate) fn hide_cache(&mut self) -> Option<Option<u64>> {
 		match self.state.write_unused() {
-			kio::Unused::Idle(mut state) => {
-				state.hide_cache();
-				true
-			}
-			kio::Unused::Used | kio::Unused::Closed => false,
+			kio::Unused::Idle(mut state) => Some(state.hide_cache()),
+			kio::Unused::Used | kio::Unused::Closed => None,
 		}
 	}
 
@@ -2695,6 +2698,13 @@ impl Consumer {
 	/// The declared exclusive final sequence, or `None` while the track is open ended.
 	pub(crate) fn final_sequence(&self) -> Option<u64> {
 		self.state.read().final_sequence
+	}
+
+	/// The newest group the serving route has: what it said when it answered, or the
+	/// newest it delivered since. `None` until either is known.
+	pub(crate) fn edge(&self) -> Option<u64> {
+		let state = self.state.read();
+		state.edge.max(state.max_sequence)
 	}
 
 	/// The frame-precise point a replacement route should resume from: one past the
@@ -3918,6 +3928,9 @@ pub struct Request {
 	// The serving session resolves the start of each subscription itself, so the
 	// accepted track's start is unknown until it says (see [`Self::resolving_start`]).
 	resolving_start: bool,
+
+	// The route's live edge, applied on accept; see [`Self::with_edge`].
+	edge: Option<u64>,
 }
 
 impl Request {
@@ -3935,6 +3948,7 @@ impl Request {
 			_dynamic: dynamic,
 			stats: stats::Scope::default(),
 			resolving_start: false,
+			edge: None,
 		}
 	}
 
@@ -3944,6 +3958,13 @@ impl Request {
 	/// [`Self::accept`], before any reader can see the track.
 	pub(crate) fn resolving_start(mut self) -> Self {
 		self.resolving_start = true;
+		self
+	}
+
+	/// The newest group the serving route has, when its answer says so before it delivers
+	/// anything; see [`Consumer::edge`]. Applied atomically with [`Self::accept`].
+	pub(crate) fn with_edge(mut self, group: Option<u64>) -> Self {
+		self.edge = group;
 		self
 	}
 
@@ -4012,6 +4033,7 @@ impl Request {
 		if let Ok(mut state) = self.state.write() {
 			state.accept(info.clone());
 			state.start_pending = self.resolving_start;
+			state.edge = self.edge;
 		}
 		// Accepting the request creates the track producer: count it as one ingress
 		// subscription (closed when the last handle drops). No-op when untagged.

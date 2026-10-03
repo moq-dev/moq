@@ -1883,6 +1883,9 @@ where
 			true => request.resolving_start(),
 			false => request,
 		};
+		// Where the publisher is now, which a front judges an idle cache against before any
+		// object arrives (an open group may not see one for a while).
+		let request = request.with_edge(largest.map(|largest| largest.group));
 		// Serves cache misses with a group FETCH. Registered before accepting, so a miss
 		// queued meanwhile waits for it rather than failing for want of a handler.
 		let dynamic = request.dynamic();

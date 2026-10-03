@@ -388,10 +388,13 @@ pub(crate) struct Pump {
 	/// stale, so the next route joins at its live edge unless a group is still owed.
 	idle: Arc<AtomicBool>,
 	/// The track went unread: withhold the cache from readers once nobody reads it. How
-	/// stale it is cannot be told, so a group comes back only once the serving route
-	/// delivers it again, which a route answering a subscription does at once for the
-	/// group it is on. All of it comes back once the track ends.
+	/// stale it is cannot be told until a live route says where the track is now.
 	hiding: bool,
+	/// The newest group withheld, until the serving route's live edge settles it: an edge
+	/// within the cache brings it all back (readers' budgets judge it against a real edge
+	/// then), one past it leaves it to fetches. Either way a group the serving route
+	/// delivers again comes back, and all of it does once the track ends.
+	hidden: Option<u64>,
 	/// Held while a fetched group is still being written: a fetch in progress reads the
 	/// track, so the front keeps an input for it.
 	fetching: Option<track::Consumer>,
@@ -434,6 +437,7 @@ impl Pump {
 			concluding: false,
 			idle,
 			hiding: false,
+			hidden: None,
 			fetching: None,
 			starting: false,
 			mirrored: None,
@@ -685,8 +689,9 @@ impl Pump {
 			return;
 		};
 		loop {
-			if producer.hide_cache() {
+			if let Some(newest) = producer.hide_cache() {
 				self.hiding = false;
+				self.hidden = newest;
 				return;
 			}
 			// The reader may have left since: register, then look again.
@@ -700,6 +705,7 @@ impl Pump {
 
 	/// The track ended, so its cache is the whole track: nothing is stale any more.
 	fn reveal(&mut self) {
+		self.hidden = None;
 		if let Some(producer) = self.logical.producer() {
 			producer.reveal_cache();
 		}
@@ -733,6 +739,7 @@ impl Pump {
 			let _ = producer.finish_at(fin);
 			// The track ended, so its cache is the whole track.
 			producer.reveal_cache();
+			self.hidden = None;
 		}
 
 		match &input.sub {
@@ -770,6 +777,19 @@ impl Pump {
 		{
 			let _ = producer.start_at(start);
 			self.mirrored = Some(start);
+		}
+		// The serving route's live edge settles a hidden cache, from its answer alone where
+		// it gives one (an open group may see no object for a while), else from the first
+		// group it delivers.
+		if let Some(newest) = self.hidden
+			&& let Some(edge) = input.copy.edge()
+		{
+			if edge <= newest
+				&& let Some(producer) = self.logical.producer()
+			{
+				producer.reveal_cache();
+			}
+			self.hidden = None;
 		}
 		let Sub::Ready(sub) = &mut input.sub else {
 			unreachable!("resolved above")
@@ -2356,6 +2376,34 @@ mod test {
 		again.finish().unwrap();
 		step(&mut pump);
 		assert_eq!(recv(&mut sub).sequence, 0, "C delivers group 0 again");
+	}
+
+	/// A route whose answer puts its live edge within the hidden cache (moq-transport's
+	/// Largest Location) vouches for the cache before it delivers anything: an open group
+	/// may see no object for a while. One whose edge is past the cache does not.
+	#[test]
+	fn an_answer_with_an_edge_settles_the_hidden_cache() {
+		for (edge, revealed) in [(0, true), (3, false)] {
+			let (mut pump, mut handle, logical) = logical();
+			let (a, a_copy) = copy("a");
+			feed(&mut pump, &mut handle, &a_copy);
+			let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+			write(&mut group, "0.0");
+			step(&mut pump);
+			drop(logical);
+			handle.detach();
+			step(&mut pump);
+
+			let logical = handle.weak.try_consume().expect("cached");
+			let mut sub = subscribe(&logical);
+			let request = track::Request::new(Arc::new(broadcast::Info::default()), "b");
+			let b_copy = request.consume();
+			let _b = request.with_edge(Some(edge)).accept(None);
+			feed(&mut pump, &mut handle, &b_copy);
+			let got = sub.recv_group().now_or_never().and_then(|group| group.ok().flatten());
+			assert_eq!(got.map(|group| group.sequence), revealed.then_some(0), "edge {edge}");
+			drop(group);
+		}
 	}
 
 	/// A group a fetch put in the cache is hidden from readers of the live feed. Once
