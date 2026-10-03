@@ -3178,6 +3178,9 @@ struct Cursor {
 	/// Groups the seek path has convicted but whose sequences no caller has committed
 	/// past yet, keyed by sequence; see [`Self::commit_seek_stale`].
 	seek_pending: BTreeMap<u64, stats::Content>,
+	/// Whether arrival-order reads apply the drift budget; see
+	/// [`Subscriber::without_budget`].
+	budgeted: bool,
 }
 
 impl Cursor {
@@ -3195,6 +3198,7 @@ impl Cursor {
 			drift_cap: kio::Producer::new(None),
 			stale: stats::Content::default(),
 			seek_pending: BTreeMap::new(),
+			budgeted: true,
 		}
 	}
 
@@ -3333,6 +3337,9 @@ impl Cursor {
 				}
 			};
 
+			if !self.budgeted {
+				return Poll::Ready(Ok(Some(consumer)));
+			}
 			// Drop a group the drift budget has given up on and keep scanning, so one
 			// poll walks a whole backlog off rather than handing it out group by group.
 			if ready!(self.poll_stale(&consumer, drift, waiter))? {
@@ -3616,6 +3623,15 @@ impl Subscriber {
 		let (start, end) = super::subscription::sequence_bounds(groups);
 		self.raise_start_to(start);
 		self.end_at(end.map_or(Bound::Unbounded, Bound::Excluded));
+	}
+
+	/// Hand out every group in arrival order, without the drift budget skipping or
+	/// expiring any: a front's pump copies what its route delivers, and the readers of
+	/// its track apply their own budgets, and count what they skip. The budget still
+	/// rides the subscription upstream.
+	pub(crate) fn without_budget(mut self) -> Self {
+		self.cursor.budgeted = false;
+		self
 	}
 
 	/// Start this subscriber's read cursor at the given sequence.

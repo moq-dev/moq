@@ -569,7 +569,7 @@ impl Pump {
 				}
 				Poll::Ready(Ok(sub)) => {
 					let info = sub.info().clone();
-					input.sub = Sub::Ready(sub);
+					input.sub = Sub::Ready(sub.without_budget());
 					self.accept(&info);
 					progress = true;
 				}
@@ -1562,6 +1562,29 @@ mod test {
 			group.poll_unused(&kio::Waiter::noop()).is_ready(),
 			"nothing copies a group nobody reads"
 		);
+	}
+
+	/// A group the readers' budget would skip is still copied: skipping it, and counting
+	/// it as stale, is each reader's own.
+	#[test]
+	fn stale_groups_are_left_to_the_readers() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut sub = subscribe(&logical);
+
+		// Group 0 reaches 60 s, a minute behind the newest frame: past the 30 s budget.
+		for (sequence, secs) in [(0, 0), (1, 60), (2, 120)] {
+			let mut group = a.create_group(group::Info { sequence }).unwrap();
+			group
+				.write_frame(Timestamp::from_secs(secs).unwrap(), b"frame".to_vec())
+				.unwrap();
+			group.finish().unwrap();
+		}
+		step(&mut pump);
+
+		assert_eq!(logical.cached_sequences(), vec![0, 1, 2], "every group is copied");
+		assert_eq!(recv(&mut sub).sequence, 1, "the reader skips the stale one itself");
 	}
 
 	#[test]
