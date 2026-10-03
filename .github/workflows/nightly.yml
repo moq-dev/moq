@@ -43,6 +43,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  x11:
+    uses: ./.github/workflows/x11.yml
+
   nightly:
     name: Nightly
     runs-on: ubuntu-24.04-arm

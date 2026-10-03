@@ -62,6 +62,32 @@ requests borderless access; denial keeps the border and does not fail capture.
 Older supported builds keep the border. Application capture and system audio
 are not provided by this backend.
 
+X11 display and window capture use MIT-SHM 1.2 fd-backed buffers on local Unix
+connections. Remote connections and servers without that support use
+`GetImage`. Shared-memory setup or read failures are reported rather than
+silently switching paths. RandR events refresh monitor geometry; window
+`ConfigureNotify` events update the captured size. A settled size or monitor
+change ends the stream so callers can reopen. Unmapped windows hold capture
+until viewable again. RGB conversion reuses its buffer.
+
+On Linux, `just rs x11-bench` compares the production SHM and `GetImage`
+capture paths on the current local X display, which must be at least 1920×1080
+and support MIT-SHM 1.2. It checks pixels for static and changing images at
+three sizes and records paired median frame times and their ratio. Timings
+include RGB and I420 conversion; capture pacing and fixture drawing are not
+measured. The GetImage baseline keeps the same event handling and buffer reuse,
+so it isolates transport rather than comparing the entire pre-quest backend.
+`just rs x11-rgb-bench` isolates conversion-buffer allocation.
+
+`just rs x11-bench-ci` runs both workloads with an isolated Xvfb server and
+writes `.scratch/x11-capture-benchmark.log` (override with `MOQ_X11_BENCH_LOG`).
+PR and nightly CI retain the log for 30 days, including the source commit,
+paired GetImage baseline and SHM/baseline ratios. Compare those
+records across runs to investigate regressions; timing has no hard threshold
+until runner variance is measured. Missing SHM support or incorrect pixels
+fails the test. Xvfb coverage does not replace real-desktop capture, lifecycle
+and before/after performance checks.
+
 With `pipewire` enabled, `capture::cameras` also lists PipeWire camera nodes as
 `pipewire:<node name>` after the V4L2 devices. V4L2 lists only devices offering
 YUYV or MJPEG. A PipeWire V4L2 node is hidden only when its device path was
