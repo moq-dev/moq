@@ -405,8 +405,8 @@ impl<V: Serialize> Snapshot<V> {
 		}
 	}
 
-	fn is_used(&self) -> bool {
-		self.track.is_used()
+	fn demand(&self) -> moq_net::track::Demand {
+		self.track.demand()
 	}
 
 	fn update(&mut self, value: &Frame<V>) -> moq_json::Result<()> {
