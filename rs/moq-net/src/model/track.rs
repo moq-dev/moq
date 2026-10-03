@@ -282,17 +282,6 @@ struct Slot {
 	// Whether this incarnation came from the live publisher and can replace older
 	// subscription content. Fetch-only backfill stays cached but never anchors drift.
 	visible: bool,
-
-	// Withheld from arrival-order readers while the track is parked; see
-	// [`TrackState::park_cache`].
-	parked: bool,
-}
-
-impl Slot {
-	/// Delivered by the live feed, parked or not, rather than fetched as backfill.
-	fn live(&self) -> bool {
-		self.visible || self.parked
-	}
 }
 
 /// Heap the track keeps per cached group, excluding the group itself
@@ -947,7 +936,6 @@ impl TrackState {
 				group: group.clone(),
 				stamp,
 				visible,
-				parked: false,
 			},
 		);
 		if visible {
@@ -1158,49 +1146,15 @@ impl TrackState {
 		}
 	}
 
-	/// Withhold every cached group from arrival-order readers, for a front's logical
-	/// track gone idle. A reader returning before the next source says where its feed
-	/// starts must not be handed a cache the source may already have judged stale; see
-	/// [`Self::unpark_cache`]. Fetches still find the groups.
-	///
-	/// Each group is restamped, which retires its arrival entry, and re-enters the
-	/// eviction order under the new stamp.
-	fn park_cache(&mut self) {
-		let sequences: Vec<u64> = self
-			.lookup
-			.iter()
-			.filter(|(_, slot)| slot.visible)
-			.map(|(sequence, _)| *sequence)
-			.collect();
-		for sequence in sequences {
-			self.next_stamp = self.next_stamp.wrapping_add(1);
-			let stamp = self.next_stamp;
-			let protected = self.protects(sequence);
-			let slot = self.lookup.get_mut(&sequence).expect("collected above");
-			slot.stamp = stamp;
-			slot.visible = false;
-			slot.parked = true;
-			if !protected {
-				self.evict.push_back((sequence, stamp));
-			}
-		}
-	}
-
-	/// Settle a [`Self::park_cache`] once the next source declared where its feed
-	/// starts. At or below the cache's newest group the cache still leads into the live
-	/// feed, so readers get it back in sequence order, ahead of anything the source
-	/// sends. Past it, the source skipped groups as stale, so the older cache is stale
-	/// too and stays fetch-only. A source that declares no start is taken at its word.
-	fn unpark_cache(&mut self, start: Option<u64>) {
-		let reveal = start.is_none_or(|start| self.latest_group.is_some_and(|latest| start <= latest));
-		for (sequence, slot) in self.lookup.iter_mut() {
-			if !std::mem::take(&mut slot.parked) {
-				continue;
-			}
-			if reveal {
-				slot.visible = true;
-				self.arrival.push_back((*sequence, slot.stamp));
-			}
+	/// Hand a group the cache holds only for fetches to arrival-order readers, once the
+	/// live feed delivered it too. A no-op for a group they were already offered.
+	fn reveal_group(&mut self, sequence: u64) {
+		if let Some(slot) = self.lookup.get_mut(&sequence)
+			&& !slot.visible
+			&& !slot.group.is_aborted()
+		{
+			slot.visible = true;
+			self.arrival.push_back((sequence, slot.stamp));
 		}
 	}
 
@@ -1214,12 +1168,11 @@ impl TrackState {
 	/// worth asking for. Fetched backfill is not the live feed's to continue, so it
 	/// neither holds the start back nor moves it on.
 	///
-	/// A parked cache owing nothing asks for no start at all: the source joins as it would
-	/// for a new reader, which is what judges the cache (lite-06 resolves the start from
-	/// the budget and an IETF live join from its Largest), while an explicit start would
-	/// be honored however stale.
-	fn resume_floor(&self) -> Option<Position> {
-		let mut live = self.lookup.iter().filter(|(_, slot)| slot.live());
+	/// An `idle` track owing nothing asks for no start at all: what it cached may be long
+	/// stale, so the source joins at its live edge as it would for a new reader, while an
+	/// explicit start would be honored however stale.
+	fn resume_floor(&self, idle: bool) -> Option<Position> {
+		let mut live = self.lookup.iter().filter(|(_, slot)| slot.visible);
 		if let Some((sequence, slot)) = live
 			.clone()
 			.find(|(_, slot)| !slot.group.is_finished() && !slot.group.is_aborted())
@@ -1229,7 +1182,7 @@ impl TrackState {
 				frame: slot.group.committed_frame() as u64,
 			});
 		}
-		if self.lookup.values().any(|slot| slot.parked) {
+		if idle {
 			return None;
 		}
 		let (newest, _) = live.next_back()?;
@@ -1599,22 +1552,19 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Withhold the cache from arrival-order readers, unless one is consuming the track
-	/// already and so may have read it; see `TrackState::park_cache`. True once parked.
-	pub(crate) fn park_cache(&mut self) -> bool {
-		match self.state.write_unused() {
-			kio::Unused::Idle(mut state) => {
-				state.park_cache();
-				true
-			}
-			kio::Unused::Used | kio::Unused::Closed => false,
+	/// Offer a group cached for fetches to arrival-order readers, once the live feed
+	/// delivered it too; see `TrackState::reveal_group`.
+	pub(crate) fn reveal_group(&mut self, sequence: u64) {
+		if let Ok(mut state) = self.modify() {
+			state.reveal_group(sequence);
 		}
 	}
 
-	/// Settle a [`Self::park_cache`]; see `TrackState::unpark_cache`.
-	pub(crate) fn unpark_cache(&mut self, start: Option<u64>) -> Result<()> {
-		self.modify()?.unpark_cache(start);
-		Ok(())
+	/// Whether every reader with this `budget` would skip group `sequence` as stale, the
+	/// same verdict a subscriber reaches on its own.
+	pub(crate) fn is_stale(&self, sequence: u64, budget: Duration) -> bool {
+		let state = self.state.read();
+		state.is_stale(sequence, &state.drift_edge(None), budget)
 	}
 
 	/// Declare the floor a subscription asked for while the serving session has yet to
@@ -2250,8 +2200,8 @@ impl TrackWeak {
 	}
 
 	/// Where a route taking the track over should start; see `TrackState::resume_floor`.
-	pub(crate) fn resume_floor(&self) -> Option<Position> {
-		self.state.read().resume_floor()
+	pub(crate) fn resume_floor(&self, idle: bool) -> Option<Position> {
+		self.state.read().resume_floor(idle)
 	}
 
 	/// The readers' aggregate demand, or `None` while nobody subscribes.

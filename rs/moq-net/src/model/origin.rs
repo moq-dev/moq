@@ -5848,68 +5848,6 @@ mod tests {
 		(server, upstream, dynamic, resolved)
 	}
 
-	/// A reader returning to a parked track waits for the fresh copy to resolve its
-	/// start, and skips the warm cache when the copy resolves past it: the source
-	/// judged the groups in between stale, so the older cache is stale too. Without the
-	/// hold the reader was handed the whole warm cache first, seconds behind live.
-	#[tokio::test]
-	async fn returning_reader_skips_a_warm_cache_the_copy_resolved_past() {
-		let ms = |v: u64| crate::Timestamp::from_millis(v).unwrap();
-		let (_server, _upstream, mut dynamic, resolved) = served_front().await;
-		let budget = track::Subscription::default().with_max_age(Duration::from_millis(100));
-
-		let track = resolved.track("audio").unwrap();
-		let b = budget.clone();
-		let subscribing = tokio::spawn(async move { track.subscribe(b).await });
-		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
-			.await
-			.expect("the front asked the source")
-			.expect("request");
-		let source = request.resolving_start().accept(None);
-		for seq in 0..4u64 {
-			let mut group = source.create_group(seq.into()).unwrap();
-			group.write_frame(ms(seq * 20), b"old".as_ref()).unwrap();
-			group.finish().unwrap();
-		}
-		let mut subscription = subscribing.await.unwrap().expect("subscribe");
-		subscription.recv_group().await.unwrap().expect("the live group");
-		drop(subscription);
-		tokio::time::timeout(Duration::from_secs(1), source.demand().unused())
-			.await
-			.expect("parked")
-			.expect("source open");
-		drop(source);
-
-		let track = resolved.track("audio").unwrap();
-		let subscribing = tokio::spawn(async move { track.subscribe(budget).await });
-		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
-			.await
-			.expect("the front asked the source again")
-			.expect("request");
-		let mut source = request.resolving_start().accept(None);
-		let mut subscription = subscribing.await.unwrap().expect("resubscribe");
-
-		// The copy has not resolved its start: nothing is handed out yet.
-		assert!(
-			tokio::time::timeout(Duration::from_millis(50), subscription.recv_group())
-				.await
-				.is_err(),
-			"the warm cache was served before the copy resolved its start"
-		);
-
-		// The source resolves past the floor (lite-06 skipped 4..20 as stale).
-		source.start_at(20).unwrap();
-		let mut group = source.create_group(20u64.into()).unwrap();
-		group.write_frame(ms(2000), b"new".as_ref()).unwrap();
-		group.finish().unwrap();
-		let group = subscription.recv_group().await.unwrap().expect("the live group");
-		assert_eq!(group.sequence, 20, "a stale warm group was served");
-	}
-
-	/// A warm cache whose newest group finished still resumes when the source has
-	/// nothing newer: the source is asked to join as it would for a new reader, and its
-	/// start at the cached group brings the cache back. Asking past that group left a
-	/// returning catalog reader waiting for the next catalog change.
 	#[tokio::test]
 	async fn returning_reader_replays_a_current_warm_cache() {
 		let (_server, _upstream, mut dynamic, resolved) = served_front().await;
@@ -6178,14 +6116,14 @@ mod tests {
 		next_group.write_frame(crate::Timestamp::ZERO, b"c".as_ref()).unwrap();
 		assert_eq!(read(&mut reading).await, b"c", "dies_first={dies_first}");
 
-		// A preempted route still owns its open group: its writer and other readers carry on.
+		// A preempted route still owns its open group: its writer and other readers carry
+		// on, and its copy of the frame the replacement already wrote is a duplicate.
 		if let Some((group, ..)) = &mut first {
 			let mut independent = group.consume();
-			group.write_frame(crate::Timestamp::ZERO, b"x".as_ref()).unwrap();
-			for expect in [b"a", b"b", b"x"] {
+			group.write_frame(crate::Timestamp::ZERO, b"c".as_ref()).unwrap();
+			for expect in [b"a", b"b", b"c"] {
 				assert_eq!(read(&mut independent).await, expect);
 			}
-			group.finish().unwrap();
 		}
 		drop(first);
 
@@ -8079,8 +8017,8 @@ mod tests {
 	}
 
 	/// A reader still holding an open group after its track goes unread gets the rest
-	/// of the group: parking the track drops the upstream subscription, not the groups
-	/// a reader holds.
+	/// of the group: parking the track reads no new group, but the upstream stays
+	/// subscribed until the held one ends.
 	#[tokio::test(start_paused = true)]
 	async fn a_held_group_continues_after_its_track_goes_unread() {
 		let producer = origin(1).produce();
@@ -8100,10 +8038,7 @@ mod tests {
 		assert_eq!(&reading.read_frame().await.unwrap().unwrap().payload[..], b"head");
 
 		drop(subscription);
-		tokio::time::timeout(Duration::from_secs(1), track.demand().unused())
-			.await
-			.expect("the front parks the track")
-			.expect("source closed");
+		tokio::time::sleep(Duration::from_millis(10)).await;
 		writing.write_frame(crate::Timestamp::ZERO, b"tail".as_ref()).unwrap();
 		writing.finish().unwrap();
 
@@ -8115,6 +8050,10 @@ mod tests {
 		assert_eq!(&tail.payload[..], b"tail");
 		let end = tokio::time::timeout(Duration::from_secs(1), reading.read_frame()).await;
 		assert!(matches!(end, Ok(Ok(None))), "the group should finish: {end:?}");
+		tokio::time::timeout(Duration::from_secs(1), track.demand().unused())
+			.await
+			.expect("the front lets the source go once the held group ends")
+			.expect("source closed");
 	}
 
 	/// A source that aborts one group while its track carries on ends that group for
