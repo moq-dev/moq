@@ -53,7 +53,6 @@ QUIC studies there on that rule.
 - [Reader end parity](/quest/m1/reader-end-parity.md) - JS readers see a track's end once the newest group reaches the declared end, as Rust readers do
 - [JS cache window](/quest/m1/js-prune-cache-window.md) - js/net ages idle groups on a cache window and keeps max_age as media-time staleness, as Rust does
 - [IETF FETCH abandonment](/quest/m1/ietf-fetch-abandonment.md) - the Rust moq-transport subscriber cancels a group FETCH once its last reader leaves
-- [Watch and publish under CSP](/quest/m1/csp-assets.md) - blob workers stay the default; strict-CSP apps host the files and set a base URL
 - [A watch and publish release ships assets()](/quest/m1/assets-release.md) - the release that lets the sites host the worklets
 - [Dogfood hosted worklets](/quest/m1/dogfood-assets.md) - moq.dev and the moq.pro dashboard host the worklets and call `assets()` after the release
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
