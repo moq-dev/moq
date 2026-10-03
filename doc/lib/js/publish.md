@@ -162,6 +162,6 @@ Publish.assets("/moq/");
 
 The URL must end with `/`. Copy the files again on every upgrade: they change
 with the package. The capture worker only runs where the main thread lacks
-`MediaStreamTrackProcessor` (Firefox and Safari); if it fails to load, capture
-falls back to a slower `<video>` path instead of stopping. `@moq/room`
+`MediaStreamTrackProcessor` (Firefox and Safari); if the hosted file fails to
+load, capture errors instead of hiding the broken deploy. `@moq/room`
 publishes through `@moq/publish`, so this one call covers it.

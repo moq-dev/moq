@@ -23,17 +23,22 @@ export function TrackProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 	return deferred(async () => (await workerProcessor(track)) ?? videoProcessor(track));
 }
 
-// Cached so repeated support checks don't each spawn a worker.
-let probe: Promise<boolean> | undefined;
+// Cached so repeated support checks don't each spawn a worker. Keyed on the assets base, because a
+// blob: worker refused by the CSP says nothing about the hosted file that assets() switches to.
+let probe: { base: URL | undefined; supported: Promise<boolean> } | undefined;
 
 /** Whether this engine can capture via a native MediaStreamTrackProcessor in a worker. */
 export async function workerSupported(): Promise<boolean> {
-	probe ??= spawn().then((worker) => {
-		worker?.close();
-		return worker !== undefined;
-	});
+	const base = hostedAssets();
+	if (probe === undefined || probe.base !== base) {
+		const supported = spawn().then((worker) => {
+			worker?.close();
+			return worker !== undefined;
+		});
+		probe = { base, supported };
+	}
 
-	return probe;
+	return probe.supported;
 }
 
 // Maps capture timestamps onto our wall clock so audio and video share one epoch. The first frame
@@ -140,12 +145,13 @@ type Handle = {
 };
 
 // Starts a capture worker and waits for its support report, returning undefined when the engine has
-// no MediaStreamTrackProcessor in a worker either.
+// no MediaStreamTrackProcessor in a worker either, and throwing when a hosted file fails to load.
 async function spawn(): Promise<Handle | undefined> {
+	const hosted = hostedAssets();
 	let worker: Handle;
 
 	try {
-		worker = handle(new Worker(await CaptureWorker(hostedAssets())));
+		worker = handle(new Worker(await CaptureWorker(hosted)));
 	} catch (err) {
 		// A strict CSP can refuse blob: workers, so treat it like an engine without the API. A hosted
 		// file that fails to load reports through onerror instead.
@@ -154,6 +160,11 @@ async function spawn(): Promise<Handle | undefined> {
 	}
 
 	const ready = await worker.next();
+	if (ready.type === "error" && hosted) {
+		// The page opted into hosted files, so a load failure is a broken deploy, not a missing API.
+		worker.close();
+		throw new Error(`moq-publish: failed to load the hosted capture worker from ${hosted}: ${ready.message}`);
+	}
 	if (ready.type !== "ready" || !ready.supported) {
 		worker.close();
 		return undefined;
