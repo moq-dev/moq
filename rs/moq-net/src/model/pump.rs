@@ -88,8 +88,6 @@ pub(crate) struct Handle {
 	/// The id of the next feed: the same source can be fed again, so its id would not
 	/// tell one feed's end from the next.
 	feeds: u64,
-	/// Detached since the last feed: the cache is parked; see [`Command::Detach`].
-	parked: bool,
 }
 
 impl Handle {
@@ -102,23 +100,18 @@ impl Handle {
 	pub(crate) fn feed(&mut self, feed: Feed) -> u64 {
 		let id = self.feeds;
 		self.feeds += 1;
-		self.parked = false;
 		self.send(Command::Feed(id, Box::new(feed)));
 		id
 	}
 
 	/// Stop reading for a track nobody reads; see [`Command::Detach`].
 	pub(crate) fn detach(&mut self) {
-		self.parked = true;
 		self.send(Command::Detach);
 	}
 
 	/// Where the next route feeding the track should start.
 	pub(crate) fn resume_floor(&self) -> Option<Position> {
-		match self.parked {
-			true => self.weak.park_floor(),
-			false => self.weak.resume_floor(),
-		}
+		self.weak.resume_floor()
 	}
 
 	/// What the track's readers want, aggregated.
@@ -223,6 +216,11 @@ struct Input {
 	end: Option<Result<()>>,
 	/// Whether anything this input delivered was written.
 	delivered: bool,
+	/// The newest group its subscription delivered.
+	newest: Option<u64>,
+	/// The newest datagram written before it was fed: a copy that buffers datagrams
+	/// replays them to a new subscriber, and those are already written.
+	datagrams: Option<u64>,
 }
 
 /// A frame being written into the logical track.
@@ -278,7 +276,7 @@ impl Open {
 	}
 
 	/// Whether the current input's subscription owes this group: it is neither a fetch
-	/// nor one that input already failed to deliver.
+	/// nor one already asked of that input.
 	fn owed(&self) -> bool {
 		self.fetched.is_none() && matches!(self.refetch, Refetch::None)
 	}
@@ -287,6 +285,23 @@ impl Open {
 	fn refetch(&mut self, input: &Input) {
 		let options = group::Fetch::default().with_frame_start(self.next());
 		self.refetch = Refetch::Pending(Box::new(input.copy.fetch_group(self.dst.sequence, options)));
+	}
+}
+
+impl Input {
+	/// The group below which the subscription delivers nothing more: the start the copy
+	/// declared, or past the newest group it delivered. An input that declares no start is
+	/// a local copy, which has nothing in flight below its live edge either.
+	fn passed(&self, waiter: &kio::Waiter) -> Option<u64> {
+		let Sub::Ready(_) = &self.sub else {
+			return None;
+		};
+		let start = match self.copy.poll_start(waiter) {
+			Poll::Ready(Some(start)) => Some(start),
+			Poll::Ready(None) => self.copy.latest(),
+			Poll::Pending => None,
+		};
+		start.max(self.newest)
 	}
 }
 
@@ -344,6 +359,8 @@ pub(crate) struct Pump {
 	/// The start last mirrored, so re-reading an unchanged one wakes no reader. `None`
 	/// until a copy declared one: until then, the next copy fed is still the first.
 	mirrored: Option<Option<u64>>,
+	/// The newest datagram written.
+	datagrams: Option<u64>,
 }
 
 impl Pump {
@@ -356,7 +373,6 @@ impl Pump {
 			status: status.consume(),
 			weak: request.weak(),
 			feeds: 0,
-			parked: false,
 		};
 		let pump = Self {
 			dynamic: request.dynamic(),
@@ -373,6 +389,7 @@ impl Pump {
 			fetching: None,
 			starting: false,
 			mirrored: None,
+			datagrams: None,
 		};
 		(pump, handle)
 	}
@@ -408,7 +425,7 @@ impl Pump {
 				self.release();
 				self.give_up_orphans(|_, _| true, Error::Dropped);
 			}
-			if self.concluding && self.conclude() {
+			if self.concluding && self.conclude(waiter) {
 				return Poll::Ready(());
 			}
 
@@ -418,7 +435,7 @@ impl Pump {
 			progress |= self.poll_input(waiter);
 			progress |= self.poll_groups(waiter);
 			progress |= self.poll_fetches(waiter);
-			self.prune_orphans(waiter);
+			self.prune_orphans();
 			self.report();
 			let fetching = self.groups.values().any(|open| open.fetched.is_some());
 			match (fetching, &self.logical) {
@@ -438,8 +455,11 @@ impl Pump {
 			// A group a reader holds keeps its copy; see `poll_groups`.
 			Command::Detach => {
 				self.release();
-				if let Some(producer) = self.logical.producer() {
-					let _ = producer.park_cache();
+				// A reader that arrived since the front saw the track go unread may have read
+				// the cache already: it stays as it is, or that reader would get it twice.
+				if let Some(producer) = self.logical.producer()
+					&& producer.park_cache()
+				{
 					self.parked = true;
 				}
 			}
@@ -485,14 +505,25 @@ impl Pump {
 
 	/// With the front gone, end the track once the input does, then let the groups
 	/// readers hold run out. True when there is nothing left to do.
-	fn conclude(&mut self) -> bool {
+	fn conclude(&mut self, waiter: &kio::Waiter) -> bool {
+		// Nobody reads it, and with the front gone nobody will: let go of the input now
+		// rather than when it ends, which a live one never does.
+		if let Logical::Live(producer) = &self.logical {
+			let weak = producer.weak();
+			weak.poll_unused(waiter);
+			if !weak.is_used() {
+				self.abort(Error::Dropped);
+			}
+		}
 		if !matches!(self.logical, Logical::Done(_)) {
 			match &self.input {
 				// Nothing in flight: nothing more will ever be written.
 				None => self.abort(Error::Dropped),
 				Some(input) => match &input.end {
 					Some(_) if self.draining(input.id) => return false,
-					Some(Ok(())) => self.finish(),
+					// No front is left to fail over, and a local close is a close, not an
+					// error.
+					Some(Ok(()) | Err(Error::Closed)) => self.finish(),
 					Some(Err(err)) => {
 						let err = err.clone();
 						self.abort(err);
@@ -536,6 +567,8 @@ impl Pump {
 			floor: feed.floor,
 			end: None,
 			delivered: false,
+			newest: None,
+			datagrams: self.datagrams,
 		});
 	}
 
@@ -627,6 +660,12 @@ impl Pump {
 		// A parked cache waits on where this input starts, and so do its groups:
 		// revealed, the cache comes back ahead of them.
 		if self.parked {
+			// A copy that died before saying where it starts judged nothing: the cache stays
+			// parked for the next one.
+			if let Poll::Ready(Err(err)) = input.copy.poll_complete(waiter) {
+				input.end = Some(Err(err));
+				return true;
+			}
 			let Poll::Ready(start) = input.copy.poll_start(waiter) else {
 				return progress;
 			};
@@ -645,10 +684,18 @@ impl Pump {
 
 		while let Poll::Ready(res) = sub.poll_recv_datagram(waiter) {
 			let Ok(Some(datagram)) = res else { break };
-			if let Some(producer) = self.logical.producer() {
-				let _ = producer.insert_datagram(datagram.sequence, datagram.timestamp, datagram.payload);
-			}
 			progress = true;
+			if input.datagrams.is_some_and(|written| datagram.sequence <= written) {
+				continue;
+			}
+			if let Logical::Live(producer) = &mut self.logical
+				&& producer
+					.insert_datagram(datagram.sequence, datagram.timestamp, datagram.payload)
+					.is_ok()
+			{
+				input.delivered = true;
+				self.datagrams = self.datagrams.max(Some(datagram.sequence));
+			}
 		}
 
 		loop {
@@ -660,9 +707,15 @@ impl Pump {
 				Poll::Ready(Ok(Some(group))) => group,
 				Poll::Ready(Ok(None)) => {
 					// Settled once the copy closes: a group still owed below the end
-					// arrives in the meantime.
+					// arrives in the meantime. Closed without reaching a declared end, the
+					// route went away rather than the track ending: `Closed` for a session
+					// closed locally, which another route may still take over.
 					if input.copy.poll_closed(waiter).is_ready() {
-						input.end = Some(Ok(()));
+						let end = match input.copy.poll_complete(&kio::Waiter::noop()) {
+							Poll::Ready(end) => end,
+							Poll::Pending => Err(Error::Dropped),
+						};
+						input.end = Some(end);
 						return true;
 					}
 					return progress;
@@ -674,6 +727,7 @@ impl Pump {
 				Poll::Pending => return progress,
 			};
 			progress = true;
+			input.newest = input.newest.max(Some(group.sequence));
 			let id = input.id;
 			self.attach(id, group, false);
 		}
@@ -718,7 +772,15 @@ impl Pump {
 		let mut closed = Vec::new();
 		let mut delivered = false;
 		let done = matches!(self.logical, Logical::Done(_));
+		let passed = self.input.as_ref().and_then(|input| input.passed(waiter));
 		for (sequence, open) in self.groups.iter_mut() {
+			// Aborted under the pump, by the cache's expiry or eviction: nothing more can be
+			// written to it, and a later copy of the group starts afresh.
+			if open.dst.is_aborted() {
+				closed.push(*sequence);
+				progress = true;
+				continue;
+			}
 			// A fetched group nobody wants any more is cut short, never cached as whole. The
 			// waiting fetches go first: one resolving takes the group before letting go.
 			if let Some(waiting) = &open.fetched
@@ -744,6 +806,12 @@ impl Pump {
 			}
 			if open.src.is_none() {
 				let Some(input) = &self.input else { continue };
+				// The subscription went past a group it owes (it declared a later start, or
+				// delivered a later group), so only a fetch answers for it now. One arriving
+				// on the subscription after all takes over from the fetch.
+				if open.owed() && passed.is_some_and(|passed| *sequence < passed) {
+					open.refetch(input);
+				}
 				match Self::poll_refetch(open, input, waiter) {
 					Step::Open if open.src.is_some() => progress = true,
 					Step::Open => continue,
@@ -940,26 +1008,11 @@ impl Pump {
 		Step::Open
 	}
 
-	/// Give up groups no route can continue: past [`MAX_ORPHANS`], owed by the input's
-	/// subscription below the start it declared, or anything left once the input ended
-	/// cleanly.
-	fn prune_orphans(&mut self, waiter: &kio::Waiter) {
+	/// Give up groups no route can continue: past [`MAX_ORPHANS`], or anything left once
+	/// the input ended cleanly.
+	fn prune_orphans(&mut self) {
 		if self.groups.values().all(|open| open.src.is_some()) {
 			return;
-		}
-		// Below a start the input declared, its subscription delivers nothing. An input
-		// that declares none is a local copy, which has nothing in flight below its live
-		// edge either.
-		let start = self
-			.input
-			.as_ref()
-			.and_then(|input| match (&input.sub, input.copy.poll_start(waiter)) {
-				(Sub::Ready(_), Poll::Ready(Some(start))) => Some(start),
-				(Sub::Ready(_), Poll::Ready(None)) => input.copy.latest(),
-				_ => None,
-			});
-		if let Some(start) = start {
-			self.give_up_orphans(|sequence, open| open.owed() && sequence < start, Error::NotFound);
 		}
 		if let Some(input) = &self.input
 			&& matches!(input.end, Some(Ok(())))
@@ -1033,14 +1086,19 @@ impl Pump {
 					let fetch = self.fetches.swap_remove(i);
 					let sequence = fetch.request.sequence();
 					let waiting = fetch.request.waiting();
+					// Accepted only over a group the cache no longer holds, so any open one
+					// here was aborted under the pump and is replaced.
 					if let Ok(dst) = fetch.request.accept(None) {
-						self.groups.entry(sequence).or_insert(Open {
-							dst,
-							fetched: Some(waiting),
-							refetch: Refetch::None,
-							partial: None,
-							src: None,
-						});
+						self.groups.insert(
+							sequence,
+							Open {
+								dst,
+								fetched: Some(waiting),
+								refetch: Refetch::None,
+								partial: None,
+								src: None,
+							},
+						);
 						self.attach(id, group, true);
 					}
 				}
@@ -1887,5 +1945,316 @@ mod test {
 			held.push((group, fetching.await.unwrap().unwrap()));
 		}
 		assert_eq!(handle.resume_floor(), Some(Position::group(6)));
+	}
+
+	// ---- audit ----
+
+	/// The front let go (its route was retracted) while a reader was mid-track. Once that
+	/// reader leaves too, nothing reads the track, so the upstream must be let go.
+	#[test]
+	fn a_concluded_pump_lets_go_once_unread() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		drop(a_copy);
+		let sub = subscribe(&logical);
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut group, "0.0");
+		group.finish().unwrap();
+		step(&mut pump);
+
+		drop(handle);
+		step(&mut pump);
+		drop((sub, logical));
+		let done = pump.poll(&kio::Waiter::noop());
+		assert!(
+			a.subscription().is_none(),
+			"the upstream stays subscribed with nobody reading"
+		);
+		assert!(done.is_ready(), "the pump outlives every reader");
+	}
+
+	/// Datagrams are written into the logical track, so an input that delivered only
+	/// datagrams before dying delivered something: it did not refuse the track.
+	#[test]
+	fn datagrams_count_as_delivered() {
+		let (mut pump, mut handle, logical) = logical();
+		let (mut a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut sub = subscribe(&logical);
+		a.insert_datagram(0, Timestamp::ZERO, b"d".to_vec()).unwrap();
+		step(&mut pump);
+		assert!(sub.recv_datagram().now_or_never().unwrap().unwrap().is_some());
+
+		kill(a, Vec::<group::Producer>::new());
+		step(&mut pump);
+		let Poll::Ready(ended) = handle.poll_ended(0, &kio::Waiter::noop()) else {
+			panic!("not reported")
+		};
+		assert!(ended.result.is_err());
+		assert!(ended.delivered, "the datagram it wrote does not count");
+	}
+
+	/// The front picks the replacement's floor when it queries it, but the beaten route
+	/// keeps feeding until the replacement's info comes back. A group that route opens
+	/// below the floor meanwhile is fetched from the replacement, not given up.
+	#[test]
+	fn a_group_opened_while_the_replacement_is_queried_survives() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut sub = subscribe(&logical);
+
+		let mut five = a.create_group(group::Info { sequence: 5 }).unwrap();
+		write(&mut five, "5.0");
+		five.finish().unwrap();
+		step(&mut pump);
+		assert_eq!(recv(&mut sub).sequence, 5);
+
+		// B beats A: the front queries B, subscribing from where the logical track stops.
+		let floor = handle.resume_floor();
+		assert_eq!(floor, Some(Position::group(6)));
+		let (mut b, b_copy) = copy("b");
+		let mut b_four = b.create_group(group::Info { sequence: 4 }).unwrap();
+		write(&mut b_four, "4.0");
+		write(&mut b_four, "4.1");
+		b_four.finish().unwrap();
+		let b_sub = b_copy.subscribe(Subscription {
+			start: floor,
+			..replay()
+		});
+
+		// While B's info is in flight, A (healthy) delivers group 4, whose stream was slow.
+		let mut four = a.create_group(group::Info { sequence: 4 }).unwrap();
+		write(&mut four, "4.0");
+		step(&mut pump);
+		let mut reading = recv(&mut sub);
+		assert_eq!(reading.sequence, 4);
+		assert_eq!(drain(&mut reading), (vec!["4.0".into()], None));
+
+		// B is spliced in, declaring the start it was asked for.
+		b.start_at(6).unwrap();
+		handle.feed(Feed {
+			copy: b_copy.clone(),
+			info: Some(track::Info::default()),
+			sub: Some(b_sub),
+			floor,
+		});
+		step(&mut pump);
+		assert_eq!(
+			drain(&mut reading),
+			(vec!["4.1".into()], Some(Ok(()))),
+			"B continues group 4, which A was still delivering"
+		);
+	}
+
+	/// The front parks a track it saw go unread, but a reader may subscribe before the
+	/// pump gets the Detach. The cache that reader may have read stays as it is, so it
+	/// never gets those groups twice.
+	#[test]
+	fn a_reader_across_a_park_gets_no_group_twice() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut group, "0.0");
+		group.finish().unwrap();
+		step(&mut pump);
+
+		// The front saw the last reader leave and parks; a new reader beats the command.
+		let mut sub = subscribe(&logical);
+		assert_eq!(recv(&mut sub).sequence, 0);
+		handle.detach();
+		step(&mut pump);
+
+		// The front sees the reader and feeds the serving source again.
+		let (_b, b_copy) = copy("b");
+		feed(&mut pump, &mut handle, &b_copy);
+		step(&mut pump);
+		let again = sub.recv_group().now_or_never();
+		assert!(
+			again.is_none(),
+			"group {} delivered twice",
+			again.unwrap().unwrap().unwrap().sequence
+		);
+	}
+
+	/// A session closed locally seals its receive tracks without declaring an end: the
+	/// route went away, the content did not end, so the front may still fail over.
+	#[test]
+	fn a_locally_closed_route_is_not_a_clean_end() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		drop(a_copy);
+		let mut sub = subscribe(&logical);
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut group, "0.0");
+		group.finish().unwrap();
+		step(&mut pump);
+		assert_eq!(recv(&mut sub).sequence, 0);
+
+		a.close().unwrap();
+		step(&mut pump);
+		let Poll::Ready(ended) = handle.poll_ended(0, &kio::Waiter::noop()) else {
+			panic!("not reported")
+		};
+		assert!(
+			ended.result.is_err(),
+			"a route closed locally reads as the track's clean end"
+		);
+	}
+
+	/// The replacement's subscription replays whatever datagrams its copy still buffers;
+	/// those already written are not written again.
+	#[test]
+	fn a_switch_delivers_no_datagram_twice() {
+		let (mut pump, mut handle, logical) = logical();
+		let (mut a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut sub = subscribe(&logical);
+		a.insert_datagram(0, Timestamp::ZERO, b"d0".to_vec()).unwrap();
+		step(&mut pump);
+		assert_eq!(
+			sub.recv_datagram().now_or_never().unwrap().unwrap().unwrap().sequence,
+			0
+		);
+
+		// B serves the same broadcast and already buffered that datagram.
+		let (mut b, b_copy) = copy("b");
+		b.insert_datagram(0, Timestamp::ZERO, b"d0".to_vec()).unwrap();
+		feed(&mut pump, &mut handle, &b_copy);
+		step(&mut pump);
+		let again = sub.recv_datagram().now_or_never();
+		assert!(
+			again.is_none(),
+			"datagram {} delivered twice",
+			again.unwrap().unwrap().unwrap().sequence
+		);
+	}
+
+	/// An orphan waiting for the next route can lose its logical group to the cache
+	/// (expiry of an idle group, or eviction) while the pump still tracks it. A fetch of
+	/// that sequence then writes the fresh group the cache holds.
+	#[test]
+	fn a_fetch_over_an_evicted_orphan_is_served() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let _sub = subscribe(&logical);
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut group, "0.0");
+		step(&mut pump);
+		kill(a, [group]);
+		step(&mut pump);
+
+		// The idle orphan expires out of the logical cache.
+		pump.groups.get(&0).unwrap().dst.clone().abort(Error::Old).unwrap();
+		step(&mut pump);
+
+		// A reader fetches it while the front finds a replacement, which has it whole.
+		let fetching = logical.fetch_group(0, None);
+		step(&mut pump);
+		let (b, b_copy) = copy("b");
+		let mut whole = b.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut whole, "0.0");
+		write(&mut whole, "0.1");
+		whole.finish().unwrap();
+		let floor = handle.resume_floor();
+		handle.feed(Feed {
+			copy: b_copy.clone(),
+			info: Some(track::Info::default()),
+			sub: Some(b_copy.subscribe(Subscription {
+				start: floor,
+				..replay()
+			})),
+			floor,
+		});
+		step(&mut pump);
+		step(&mut pump);
+
+		let mut fetched = fetching.now_or_never().expect("resolved").expect("served");
+		assert_eq!(
+			drain(&mut fetched),
+			(vec!["0.0".into(), "0.1".into()], Some(Ok(()))),
+			"the fetched group is never written"
+		);
+	}
+
+	/// A parked cache comes back only once the next input's start shows it is not stale.
+	/// An input that dies before declaring one judged nothing: the cache stays parked, and
+	/// the source after it is asked for no start in particular.
+	#[test]
+	fn an_input_dying_before_its_start_keeps_the_cache_parked() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut group, "0.0");
+		group.finish().unwrap();
+		step(&mut pump);
+		drop(logical);
+		handle.detach();
+		step(&mut pump);
+		assert_eq!(handle.resume_floor(), None, "the next source judges the cache");
+
+		// A reader returns; the source's copy resolves its start on the wire (lite-06).
+		let logical = handle.weak.try_consume().expect("cached");
+		let mut sub = subscribe(&logical);
+		let request = track::Request::new(Arc::new(broadcast::Info::default()), "b");
+		let b_copy = request.consume();
+		let b = request.resolving_start().accept(None);
+		feed(&mut pump, &mut handle, &b_copy);
+		assert!(sub.recv_group().now_or_never().is_none(), "parked until B says");
+
+		// B dies before its SUBSCRIBE_START.
+		kill(b, Vec::<group::Producer>::new());
+		step(&mut pump);
+		assert!(handle.poll_ended(1, &kio::Waiter::noop()).is_ready());
+		assert!(
+			sub.recv_group().now_or_never().is_none(),
+			"the cache was revealed with no source having judged it"
+		);
+		assert_eq!(handle.resume_floor(), None, "the next source is told where to start");
+	}
+
+	/// A replacement that no longer has an orphan's group (evicted upstream) declares a
+	/// start at or below it but goes on with later groups. Once it has, the orphan is
+	/// fetched instead, and given up when the replacement refuses, so it neither stays
+	/// open for good nor pins the resume floor.
+	#[test]
+	fn an_orphan_the_replacement_skips_is_fetched() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut sub = subscribe(&logical);
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut group, "0.0");
+		step(&mut pump);
+		let mut reading = recv(&mut sub);
+		kill(a, [group]);
+		step(&mut pump);
+
+		// B is asked from (0, 1) and declares group 0 as its start (as a pre-06 session
+		// does), but its cache lost group 0: its subscription goes on from group 1.
+		let (mut b, b_copy) = copy("b");
+		b.start_at(0).unwrap();
+		feed(&mut pump, &mut handle, &b_copy);
+		for sequence in 1..20 {
+			let mut next = b.create_group(group::Info { sequence }).unwrap();
+			write(&mut next, "x");
+			next.finish().unwrap();
+		}
+		step(&mut pump);
+		assert_eq!(recv(&mut sub).sequence, 1);
+		assert_eq!(
+			handle.resume_floor(),
+			Some(Position::group(20)),
+			"the next replacement is asked from the stuck orphan"
+		);
+		assert!(
+			drain(&mut reading).1.is_some(),
+			"group 0 stays open with nothing to continue it"
+		);
 	}
 }

@@ -1204,22 +1204,6 @@ impl TrackState {
 		}
 	}
 
-	/// Where the next source of a parked track is asked to start: the rest of a group
-	/// the cache holds unfinished, or nowhere in particular. With nothing owed, the
-	/// source joins as it would for a new reader, which is what judges the cache:
-	/// lite-06 resolves the start from the budget and an IETF live join from its
-	/// Largest, while an explicit start would be honored however stale.
-	fn park_floor(&self) -> Option<Position> {
-		let unfinished = self
-			.lookup
-			.values()
-			.any(|slot| slot.live() && !slot.group.is_finished() && !slot.group.is_aborted());
-		match unfinished {
-			true => self.resume_floor(),
-			false => None,
-		}
-	}
-
 	/// Where a route taking this track over should start: the first frame the oldest
 	/// unfinished group still lacks, or the head of the group after the newest. `None`
 	/// while the track holds nothing, which is a takeover at the live edge.
@@ -1229,6 +1213,11 @@ impl TrackState {
 	/// writer that continues any open group in place, so every frame still owed is
 	/// worth asking for. Fetched backfill is not the live feed's to continue, so it
 	/// neither holds the start back nor moves it on.
+	///
+	/// A parked cache owing nothing asks for no start at all: the source joins as it would
+	/// for a new reader, which is what judges the cache (lite-06 resolves the start from
+	/// the budget and an IETF live join from its Largest), while an explicit start would
+	/// be honored however stale.
 	fn resume_floor(&self) -> Option<Position> {
 		let mut live = self.lookup.iter().filter(|(_, slot)| slot.live());
 		if let Some((sequence, slot)) = live
@@ -1239,6 +1228,9 @@ impl TrackState {
 				group: *sequence,
 				frame: slot.group.committed_frame() as u64,
 			});
+		}
+		if self.lookup.values().any(|slot| slot.parked) {
+			return None;
 		}
 		let (newest, _) = live.next_back()?;
 		Some(Position::group(newest.saturating_add(1)))
@@ -1607,10 +1599,16 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Withhold the cache from arrival-order readers; see `TrackState::park_cache`.
-	pub(crate) fn park_cache(&mut self) -> Result<()> {
-		self.modify()?.park_cache();
-		Ok(())
+	/// Withhold the cache from arrival-order readers, unless one is consuming the track
+	/// already and so may have read it; see `TrackState::park_cache`. True once parked.
+	pub(crate) fn park_cache(&mut self) -> bool {
+		match self.state.write_unused() {
+			kio::Unused::Idle(mut state) => {
+				state.park_cache();
+				true
+			}
+			kio::Unused::Used | kio::Unused::Closed => false,
+		}
 	}
 
 	/// Settle a [`Self::park_cache`]; see `TrackState::unpark_cache`.
@@ -2256,11 +2254,6 @@ impl TrackWeak {
 		self.state.read().resume_floor()
 	}
 
-	/// Where the next source of a parked track starts; see `TrackState::park_floor`.
-	pub(crate) fn park_floor(&self) -> Option<Position> {
-		self.state.read().park_floor()
-	}
-
 	/// The readers' aggregate demand, or `None` while nobody subscribes.
 	pub(crate) fn subscription(&self) -> Option<Subscription> {
 		let state = self.state.read();
@@ -2695,7 +2688,7 @@ impl Consumer {
 	/// Poll for the track reaching a terminal state: `Ok(())` once it is complete
 	/// (the final group was produced), `Err` once it closed or aborted before
 	/// completing. This tells a track that truly ended from one whose serving route
-	/// died mid-stream.
+	/// died mid-stream. A session closed locally, on purpose, is [`Error::Closed`].
 	pub(crate) fn poll_complete(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		match ready!(self.state.poll(waiter, |state| {
 			// A local close without a declared end is a dead route, not finished content.
@@ -2708,7 +2701,11 @@ impl Consumer {
 			Ok(_) => Poll::Ready(Ok(())),
 			// Closed before completing. Read through the returned guard: it holds
 			// the lock, so re-locking the channel here would deadlock.
-			Err(closed) => Poll::Ready(Err(closed.abort.clone().unwrap_or(Error::Dropped))),
+			Err(closed) => Poll::Ready(Err(match (&closed.abort, closed.sealed) {
+				(Some(err), _) => err.clone(),
+				(None, true) => Error::Closed,
+				(None, false) => Error::Dropped,
+			})),
 		}
 	}
 }

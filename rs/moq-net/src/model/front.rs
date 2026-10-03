@@ -46,7 +46,7 @@ pub(super) struct Refusal {
 /// What happened in the world.
 #[derive(Clone, Debug)]
 pub(super) enum Event {
-	/// The routes covering the path were re-read: the best qualifying route, if
+	/// The routes covering the path were re-read: the best route, if
 	/// any, and whether the serving source has begun closing.
 	Selected {
 		best: Option<Candidate>,
@@ -95,7 +95,7 @@ pub(super) enum Event {
 /// What the driver does in the world.
 #[derive(Clone, Debug)]
 pub(super) enum Action {
-	/// Ask the route table for the best qualifying route and feed it back as
+	/// Ask the route table for the best route and feed it back as
 	/// [`Event::Selected`].
 	Reselect,
 	/// Request the path through `route`; feed the outcome back as
@@ -311,11 +311,10 @@ impl Front {
 			// a later announcement gets a fresh front.
 			None => {
 				self.upstream = None;
-				let unserved = match self.resolved {
+				let err = match self.resolved {
 					true => Error::Dropped,
-					false => Error::Unroutable,
+					false => self.last_err.take().unwrap_or(Error::Unroutable),
 				};
-				let err = self.last_err.take().unwrap_or(unserved);
 				self.end(err, actions);
 			}
 		}
@@ -357,19 +356,9 @@ impl Front {
 		if let Some((old, _)) = self.serving.take() {
 			actions.push(Action::Detach { source: old });
 		}
-		// Every copy is from an older source: a spliced one keeps feeding its track until
-		// the newcomer's is spliced in, and one still being asked for is dropped. That
-		// includes a track still draining a source the previous one replaced.
-		for track in self.tracks.values_mut() {
-			match track.state {
-				TrackState::Spliced { source } => {
-					track.draining = Some(source);
-					track.state = TrackState::Idle;
-				}
-				TrackState::Querying { .. } => track.state = TrackState::Idle,
-				TrackState::Idle | TrackState::Parked { .. } => {}
-			}
-		}
+		// Every copy is from an older source, including one a track still drains from a
+		// source the previous one replaced.
+		self.drain_copies();
 		self.serving = Some((source, candidate));
 		self.serving_closing = false;
 		if !self.resolved {
@@ -402,14 +391,25 @@ impl Front {
 		self.serving = None;
 		self.serving_closing = false;
 		actions.push(Action::Detach { source });
-		for track in self.tracks.values_mut() {
-			if matches!(track.state, TrackState::Querying { source: s } | TrackState::Spliced { source: s } if s == source)
-			{
-				track.state = TrackState::Idle;
-			}
-		}
+		self.drain_copies();
 		self.last_err = Some(Error::Dropped);
 		actions.push(Action::Reselect);
+	}
+
+	/// The serving source is going: a spliced copy keeps feeding its track (the pump reads
+	/// it until a replacement's is fed, or it runs out), and one still being asked for is
+	/// dropped.
+	fn drain_copies(&mut self) {
+		for track in self.tracks.values_mut() {
+			match track.state {
+				TrackState::Spliced { source } => {
+					track.draining = Some(source);
+					track.state = TrackState::Idle;
+				}
+				TrackState::Querying { .. } => track.state = TrackState::Idle,
+				TrackState::Idle | TrackState::Parked { .. } => {}
+			}
+		}
 	}
 
 	fn track_info(
@@ -470,14 +470,22 @@ impl Front {
 		let Some(track) = self.tracks.get_mut(&name) else {
 			return;
 		};
-		// The copy of a source being replaced ran out: the replacement decides.
+		let spliced = track.state == (TrackState::Spliced { source });
 		if track.draining == Some(source) {
 			track.draining = None;
-			if track.state != (TrackState::Spliced { source }) {
+			// A path is one broadcast, so a copy that completed ends the track whoever
+			// serves it now. One that failed leaves the track to the serving source.
+			if result.is_ok() && !track.ended {
+				track.state = TrackState::Idle;
+				track.ended = true;
+				actions.push(Action::Finish { track: name });
+				return;
+			}
+			if !spliced {
 				return;
 			}
 		}
-		if track.state != (TrackState::Spliced { source }) {
+		if !spliced {
 			return;
 		}
 		match result {
@@ -560,6 +568,8 @@ impl Front {
 			return;
 		};
 		track.used = false;
+		// Nothing reads it, so a copy it still drains goes with the park.
+		let draining = track.draining.take().is_some();
 		match track.state {
 			// A local source keeps its own cache, so a cached copy would only be a staler
 			// duplicate of it: forget the track outright, and a returning reader
@@ -579,7 +589,12 @@ impl Front {
 				actions.push(Action::Park { track: name });
 			}
 			TrackState::Parked { .. } => {}
-			TrackState::Idle | TrackState::Querying { .. } => track.state = TrackState::Parked { since: now },
+			TrackState::Idle | TrackState::Querying { .. } => {
+				track.state = TrackState::Parked { since: now };
+				if draining {
+					actions.push(Action::Park { track: name });
+				}
+			}
 		}
 	}
 
@@ -781,7 +796,7 @@ mod tests {
 	}
 
 	#[test]
-	fn dead_source_reselects_through_the_same_publisher() {
+	fn dead_source_reselects_another_route() {
 		let mut front = serving(remote(1), 100);
 		assert_actions(
 			front.step(Event::SourceClosed { source: 100 }),
@@ -1463,6 +1478,139 @@ mod tests {
 					source: 300,
 				},
 			],
+		);
+	}
+
+	/// The newcomer refused the track, so it drained the incumbent's copy. Going unread
+	/// parks the track and drops that copy, so a later refusal cannot put the track back
+	/// on a copy nothing feeds any more.
+	#[test]
+	fn an_unread_track_lets_go_of_the_copy_it_drains() {
+		let mut front = serving(remote(1), 100);
+		front.step(Event::Selected {
+			best: Some(remote(2)),
+			serving_closing: false,
+		});
+		front.step(Event::Resolved {
+			route: 2,
+			result: Ok(200),
+		});
+		front.step(Event::TrackInfo {
+			track: name("video"),
+			source: 200,
+			closing: false,
+			result: Err(Error::NotFound),
+		});
+		let t0 = Instant::now();
+		assert_actions(
+			front.step(Event::Unused {
+				track: name("video"),
+				now: t0,
+			}),
+			&[
+				Action::Park { track: name("video") },
+				Action::Arm { at: Some(t0 + LINGER) },
+			],
+		);
+		front.step(Event::Selected {
+			best: Some(remote(3)),
+			serving_closing: false,
+		});
+		front.step(Event::Resolved {
+			route: 3,
+			result: Ok(300),
+		});
+		front.step(Event::Used { track: name("video") });
+		let actions = front.step(Event::TrackInfo {
+			track: name("video"),
+			source: 300,
+			closing: false,
+			result: Err(Error::NotFound),
+		});
+		assert_ne!(
+			front.tracks[&name("video")].state,
+			TrackState::Spliced { source: 100 },
+			"spliced to a copy the park dropped; actions {actions:?}"
+		);
+	}
+
+	/// A track draining the incumbent while the newcomer's answer is pending goes unread:
+	/// the copy it drains is parked at once, like any unread track's.
+	#[test]
+	fn a_draining_track_parks_its_copy_when_unread() {
+		let mut front = serving(remote(1), 100);
+		front.step(Event::Selected {
+			best: Some(remote(2)),
+			serving_closing: false,
+		});
+		front.step(Event::Resolved {
+			route: 2,
+			result: Ok(200),
+		});
+		let t0 = Instant::now();
+		assert_actions(
+			front.step(Event::Unused {
+				track: name("video"),
+				now: t0,
+			}),
+			&[
+				Action::Park { track: name("video") },
+				Action::Arm { at: Some(t0 + LINGER) },
+			],
+		);
+	}
+
+	/// A front that served ends `Dropped` when its route leaves, not with the refusal or
+	/// retraction of a challenger that never took over.
+	#[test]
+	fn a_front_that_served_ends_dropped() {
+		for standing in [true, false] {
+			let mut front = serving(remote(1), 100);
+			front.step(Event::Selected {
+				best: Some(remote(2)),
+				serving_closing: false,
+			});
+			front.step(Event::Resolved {
+				route: 2,
+				result: Err(Refusal {
+					err: Error::NotFound,
+					standing,
+				}),
+			});
+			front.step(Event::Selected {
+				best: Some(remote(1)),
+				serving_closing: false,
+			});
+			assert_actions(
+				front.step(Event::Selected {
+					best: None,
+					serving_closing: false,
+				}),
+				&[Action::End { err: Error::Dropped }],
+			);
+		}
+	}
+
+	/// The serving source closed and the front reselected, but the pump still reads the
+	/// closed source's copy. That copy ending cleanly ends the track: a path is one
+	/// broadcast, whoever serves it.
+	#[test]
+	fn a_closed_sources_clean_end_finishes_the_track() {
+		let mut front = serving(remote(1), 100);
+		front.step(Event::SourceClosed { source: 100 });
+		front.step(Event::Selected {
+			best: Some(remote(2)),
+			serving_closing: false,
+		});
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Ok(()),
+				delivered: true,
+			}),
+			&[Action::Finish { track: name("video") }],
 		);
 	}
 }
