@@ -14,9 +14,7 @@ outcome that abandons the quest.
 
 ## Plan
 
-Quests branch from main unless they say otherwise;
-[Run to quiescence](/quest/m1/perf/uring-quiescence.md) needs dev, where
-`kio`'s `Tasks::poll` changed (#4156).
+Quests branch from main unless they say otherwise.
 
 Planning quests can settle their contracts independently. Facts from the 2026-09
 hot-path survey, so quests don't re-litigate them:
@@ -66,3 +64,4 @@ the rest.
 - [Ingest batch](/quest/m1/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per chunk burst instead of per chunk
 - [#3122](/quest/m1/perf/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md) - moq-uring: ~2.5% of relay CPU is vdso clock reads; the drive loop and its callers each re-read Instant::now()
 - [#3199](/quest/m1/perf/3199-moq-uring-remove-sq-indirection-and-per-enter-ring-fd.md) - moq-uring: remove SQ indirection and per-enter ring fd lookup
+- [Remove moq-uring copies](/quest/m1/perf/uring-copies.md) - egress, stream send and receive, and datagram receive stop copying where the QUIC core already allows it, after the fork

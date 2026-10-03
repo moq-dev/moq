@@ -37,7 +37,8 @@ export interface Established {
 	 * Subscribe to broadcast announcements matching `scope`, any pattern (`foo/**`
 	 * for a subtree, `room/* /chat` for each room's chat, default `**`). Paths are
 	 * relative to the session; captures report what the scope's wildcards stood for.
-	 * Hidden routes are left out unless `options.hidden` opts in.
+	 * Hidden routes are left out unless `options.hidden` opts in. The `live` marker follows
+	 * once the peer's initial set has landed.
 	 */
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer;
 
@@ -49,8 +50,11 @@ export interface Established {
 	 */
 	stats(): Promise<Stats>;
 
-	/** Close the session. */
-	close(): void;
+	/** Withdraw announcements and wait up to one second for delivery, then close the session. */
+	close(): Promise<void>;
+
+	/** End the session immediately without waiting for delivery. */
+	abort(): void;
 
 	/**
 	 * Resolves when the session closes: `null` for a clean close, an `Error.Session` when the

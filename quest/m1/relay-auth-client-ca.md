@@ -2,7 +2,7 @@
 
 ## Goal
 
-On dev, no caller of `moq_relay::auth::Config` can start with `--auth-public`
+No caller of `moq_relay::auth::Config` can start with `--auth-public`
 rules alongside a listener TLS client CA by forgetting a check.
 `Config::validate` takes the client-CA flag, `init` requires it too, and
 `validate_client_ca` is gone. The `moq` CLI fails loud on an invalid auth
@@ -11,7 +11,7 @@ config instead of quietly refusing every session.
 ## Plan
 
 - [#4364](https://github.com/moq-dev/moq/pull/4364) (merged 09-28, and
-  `dev` has merged `main` since) added an additive
+  now on `main`) added an additive
   `Config::validate_client_ca(&self, client_ca: bool)` that `Relay::load` and
   the CLI must each remember to call; the CLI missing the original check is
   the bug it fixes. Fold it into `validate(&self, client_ca: bool)` so every
@@ -34,4 +34,4 @@ config instead of quietly refusing every session.
   the methods.
 
 Public API: breaks `moq_relay::auth::Config::validate` and `init`, removes
-`validate_client_ca`, so this targets `dev`. Wire: none.
+`validate_client_ca`. Wire: none.

@@ -673,10 +673,10 @@ fn withdrawal(c: &mut Criterion) {
 							let start = Instant::now();
 							drop(live);
 							let mut retracted = 0;
-							while let Ok(Some(update)) =
+							while let Ok(Some(event)) =
 								tokio::time::timeout(Duration::from_secs(1), announced.next()).await
 							{
-								assert_eq!(update.kind, moq_net::announce::Kind::Retracted);
+								assert!(matches!(event, moq_net::announce::Event::End(_)), "{event:?}");
 								retracted += 1;
 							}
 							let elapsed = start.elapsed();

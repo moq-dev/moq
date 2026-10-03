@@ -18,7 +18,7 @@ crate that [Generated lite](/quest/m1/rs2ts/lite.md) translates.
   that do stay behind the feature.
 
 Public API: moq-net's async helpers move behind a default feature, so a
-`default-features = false` caller loses them; lands on `dev` with the line.
+`default-features = false` caller loses them; lands with the line.
 Wire: none.
 
 ## Required

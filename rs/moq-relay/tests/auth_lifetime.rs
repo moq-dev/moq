@@ -245,12 +245,12 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 	.expect("subscriber connect timeout")
 	.expect("subscriber connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
-	assert!(update.kind.is_active(), "expected announce, got retraction");
+	assert!(active, "expected announce, got retraction");
 	let bc = sub_consumer
 		.request_broadcast("test")
 		.await
@@ -477,10 +477,12 @@ async fn a_moved_tier_retags_the_live_session() {
 	.await
 	.expect("subscriber connect timeout")
 	.expect("subscriber connect failed");
-	tokio::time::timeout(TIMEOUT, announcements.next())
+	let (update, announced) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
+	assert_eq!(update.prefix.as_str(), "test");
+	assert!(announced, "expected announce, got retraction");
 	let bc = sub_consumer
 		.request_broadcast("test")
 		.await
@@ -655,12 +657,12 @@ async fn http_routes_hold_a_lease() {
 	.await
 	.expect("subscriber connect timeout")
 	.expect("subscriber connect failed");
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
-	assert!(update.kind.is_active(), "expected announce, got retraction");
+	assert!(active, "expected announce, got retraction");
 
 	let http = reqwest::Client::new();
 	let announced = http
@@ -1117,4 +1119,15 @@ async fn a_relay_without_an_auth_source_is_decided_by_the_embedder() {
 		.expect("run returned after the trigger")
 		.expect("relay task panicked")
 		.expect("relay exited with an error");
+}
+
+/// The next route and whether it is active, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	loop {
+		return match announced.next().await? {
+			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+			moq_net::announce::Event::End(route) => Some((route, false)),
+			moq_net::announce::Event::Live => continue,
+		};
+	}
 }

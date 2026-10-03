@@ -46,7 +46,7 @@ subscriber FIN rule, with a changelog entry) and `doc/concept/moq-lite.md`
 (a subscription ends with both sides' FIN, and a graceful close waits for it). Check that a lite-07 publisher
 already treats a subscriber FIN after SUBSCRIBE_END as the end of a finished
 subscription, not a cancel of one still in flight
-([Request stream cancel](/quest/m1/request-stream-serve.md)).
+(`RequestServe` in `rs/moq-net/src/lite/publisher.rs`).
 
 Tests: the reporter's `close_tail` case (one session, paused clock, a mock
 switch that acks a FIN as soon as it is sent, as a real transport does) fails

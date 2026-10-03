@@ -32,8 +32,8 @@ Decided:
 - Datagram groups stay best effort. A publisher counts a datagram as
   delivered, so a lost one leaves an uncovered hole that waits out the tail
   grace, as today.
-- A resumed group ([Resumed groups](/quest/m1/resume-latest.md)) that is the
-  new copy's latest ends with the DROP's error when the copy drops it.
+- A resumed group that is the new copy's latest ends with the DROP's error
+  when the copy drops it.
 - A dropped or aborted group is visible to readers, not silently skipped.
   #4533 found the Rust model releases an aborted group's sequence and skips it,
   so a truncated first object is indistinguishable from a group never sent.

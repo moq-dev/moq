@@ -88,7 +88,7 @@ Design points left open for the implementer:
 `requested_track_shape` and the track-name helpers for every name that takes
 `.json.z`, created only when requested rather than with the plain/compressed
 pair. Weigh replacing `compressed: bool` in the helpers with a flavor enum,
-which is a published API break and goes to `dev` unless additive.
+which is a published API break.
 
 **Readers.** `Consumer` and the aggregate read either flavor into
 `TrafficFrame` / `SessionsFrame`. The JS decoder is about 120 lines and

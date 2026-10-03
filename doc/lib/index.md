@@ -17,7 +17,7 @@ protocol. A publisher in Python is consumable by a subscriber in Swift.
 | <img class="language-icon" src="/icons/languages/python.svg" alt="" /> [Python](/lib/py/) | `moq-rs` on PyPI | Scripts, ML pipelines, voice agents. |
 | <img class="language-icon" src="/icons/languages/go.svg" alt="" /> [Go](/lib/go/) | `moq.dev/moq` | Go services and tooling. |
 | <img class="language-icon" src="/icons/languages/dart.svg" alt="" /> [Dart](/lib/dart/) | `moq` on pub.dev | Flutter apps. |
-| <img class="language-icon" src="/icons/languages/c.svg" alt="" /> [C](/lib/c/) | `libmoq` | C/C++ and any language with a C FFI. |
+| <img class="language-icon" src="/icons/languages/c.svg" alt="" /> [C](/lib/c/) | `moq-c` | C/C++ and any language with a C FFI. |
 
 ## How they relate
 
@@ -26,7 +26,7 @@ TypeScript is a from-scratch browser implementation. The other six wrap the
 Rust core: Python, Kotlin, Swift, Go, and Dart are generated from one
 [UniFFI](https://mozilla.github.io/uniffi-rs/) crate (`moq-ffi`) and then
 wrapped in an idiomatic layer, while C gets a hand-written stable ABI
-(`libmoq`). A feature added to the core lands in all of them together.
+(`moq-c`). A feature added to the core lands in all of them together.
 
 ## What every binding can do
 

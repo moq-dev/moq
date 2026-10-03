@@ -62,6 +62,7 @@ impl<S: crate::transport::poll::Session> Driver<S> {
 	/// Panics if `now` is earlier than the previous poll or construction time.
 	pub fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Result<Option<Instant>, Error> {
 		self.clock.advance(now);
+		self.clock.register_driver(waiter);
 		match self.state.poll(waiter) {
 			Poll::Ready(Ok(())) => Err(Error::Closed),
 			Poll::Ready(Err(err)) => Err(err),
@@ -71,10 +72,24 @@ impl<S: crate::transport::poll::Session> Driver<S> {
 }
 
 impl<S: crate::transport::poll::Session> Protocol<S> {
+	pub(crate) fn local_close(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+		match self {
+			Self::Lite(driver) => driver.local_close.clone(),
+			Self::Ietf(driver) => driver.local_close.clone(),
+		}
+	}
+
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		match self {
 			Self::Lite(driver) => driver.poll(waiter),
 			Self::Ietf(driver) => waiter.poll_future(std::pin::Pin::new(driver)),
+		}
+	}
+
+	fn close(&self) {
+		match self {
+			Self::Lite(driver) => driver.close(),
+			Self::Ietf(driver) => driver.withdrawal.begin(),
 		}
 	}
 
@@ -94,6 +109,10 @@ impl<S: crate::transport::poll::Session> State<S> {
 			&& supervisor.poll(waiter).is_ready()
 		{
 			self.supervisor = None;
+		}
+
+		if self.supervisor.as_ref().is_some_and(|supervisor| supervisor.draining()) {
+			self.protocol.close();
 		}
 
 		if self.result.is_none() {
