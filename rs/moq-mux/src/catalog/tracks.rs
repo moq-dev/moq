@@ -636,7 +636,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			// Still an observation: it releases a rise held back until its window ended. A closed
 			// catalog has nothing left to release.
 			if let Ok(guard) = self.catalog.modify() {
-				guard.commit_estimate()?;
+				guard.commit_estimate(true)?;
 			}
 			return Ok(());
 		}
@@ -648,12 +648,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		});
 		let mut config = self.config()?;
 		config.set_estimate(resolved.clone());
-		let guard = self.stage(config)?;
-		if throttled {
-			guard.commit_estimate()?;
-		} else {
-			guard.commit()?;
-		}
+		self.stage(config)?.commit_estimate(throttled)?;
 		self.published = Some(resolved);
 		Ok(())
 	}

@@ -802,6 +802,8 @@ impl<E: CatalogExt> Producer<E> {
 	}
 
 	/// Finish publishing to this catalog.
+	///
+	/// An estimate rise still held by the once-a-second limit is not published: media has ended.
 	pub fn finish(&mut self) -> crate::Result<()> {
 		take(&self.current).closed = Some(moq_net::Error::Closed.into());
 		self.outputs.hang.finish()?;
@@ -858,16 +860,19 @@ impl<E: CatalogExt> Guard<'_, E> {
 			r.published = true;
 		}
 
+		// Folded only once it is on the wire, so a failed emit leaves the estimate held.
+		self.outputs.emit(&self.state.catalog)?;
 		self.state.estimates.fold();
-		self.outputs.emit(&self.state.catalog)
+		Ok(())
 	}
 
-	/// Publish an estimate-driven edit, at most once per [`ESTIMATE_WINDOW`].
+	/// Publish an estimate-driven edit, at most once per [`ESTIMATE_WINDOW`] when `throttle` is set.
 	///
 	/// The first estimate publishes at once. Later ones inside the window stay in the catalog and go
 	/// out with the first call after the window ends, which an unchanged estimate makes too, or with
-	/// any [`commit`](Self::commit) before then.
-	pub(super) fn commit_estimate(mut self) -> crate::Result<()> {
+	/// any [`commit`](Self::commit) before then. Without `throttle` it publishes at once, still
+	/// opening a window.
+	pub(super) fn commit_estimate(mut self, throttle: bool) -> crate::Result<()> {
 		if std::mem::take(&mut self.updated) {
 			self.state.estimates.pending = true;
 		}
@@ -876,7 +881,7 @@ impl<E: CatalogExt> Guard<'_, E> {
 			return Ok(());
 		}
 		let now = web_async::time::Instant::now();
-		if estimates.last.is_some_and(|last| now < last + ESTIMATE_WINDOW) {
+		if throttle && estimates.last.is_some_and(|last| now < last + ESTIMATE_WINDOW) {
 			return Ok(());
 		}
 		self.updated = true;
@@ -1955,22 +1960,44 @@ mod test {
 		);
 	}
 
-	/// Bitrate and framerate are already measured per second, so a new value never waits.
+	/// Bitrate and framerate are already measured per second, so a new value never waits, but it
+	/// still opens a window for the jitter it carries.
 	#[tokio::test(start_paused = true)]
 	async fn a_bitrate_estimate_publishes_immediately() {
 		let (_broadcast, catalog, mut renditions) = estimating(&["v"]);
 		let v = &mut renditions[0];
-		v.estimate(jitter(1)).unwrap();
-		tokio::time::advance(std::time::Duration::from_millis(10)).await;
-		v.estimate(jitter(2)).unwrap();
-		let held = sent(&catalog);
+		v.estimate(jitter(1).with_bitrate(1_000_000)).unwrap();
+		let first = sent(&catalog);
 		v.estimate(jitter(2).with_bitrate(1_000_000)).unwrap();
-		assert_ne!(sent(&catalog), held);
+		assert_eq!(sent(&catalog), first, "the bitrate publish opened a window");
+
+		tokio::time::advance(std::time::Duration::from_millis(10)).await;
+		v.estimate(jitter(3).with_bitrate(2_000_000)).unwrap();
+		assert_ne!(sent(&catalog), first);
 		let snapshot = wire(&catalog);
-		assert_eq!(snapshot.video.renditions["v"].bitrate, Some(1_000_000));
+		assert_eq!(snapshot.video.renditions["v"].bitrate, Some(2_000_000));
 		assert_eq!(
 			snapshot.video.renditions["v"].jitter,
-			Some(std::time::Duration::from_millis(2))
+			Some(std::time::Duration::from_millis(3))
 		);
+	}
+
+	/// A rise while the initial catalog is reserved is held by the gate, goes out with the first
+	/// snapshot, and that snapshot opens the window.
+	#[tokio::test(start_paused = true)]
+	async fn estimate_rise_waits_for_the_reservation_gate() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let reserved = catalog.reserve();
+		let mut v = reserved.init::<VideoConfig>("v").unwrap();
+		v.set(VideoConfig::new(hang::catalog::VideoCodec::VP8)).unwrap();
+		v.estimate(jitter(1)).unwrap();
+		assert_eq!(sent(&catalog), None, "the gate withholds the rise");
+
+		drop(reserved);
+		assert_eq!(sent(&catalog), Some(0));
+		assert_eq!(wire_jitter(&catalog, "v"), Some(std::time::Duration::from_millis(1)));
+		v.estimate(jitter(2)).unwrap();
+		assert_eq!(sent(&catalog), Some(0), "the gated publish opened a window");
 	}
 }
