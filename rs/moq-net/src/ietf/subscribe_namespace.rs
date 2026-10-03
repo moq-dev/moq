@@ -15,9 +15,7 @@ use super::Version;
 ///
 /// moq-lite does not implement PUBLISH replication through a CDN, which is the
 /// only thing that SUBSCRIBE_TRACKS enables (subscribing to all tracks under a
-/// prefix). If a peer sends this we fail the session loudly rather than
-/// silently ignoring it, since ignoring would leave the peer waiting forever
-/// for a REQUEST_OK.
+/// prefix), so each one is refused with REQUEST_ERROR NOT_SUPPORTED.
 pub const SUBSCRIBE_TRACKS_ID: u64 = 0x51;
 
 /// True for the drafts that use the legacy 0x11 SUBSCRIBE_NAMESPACE message.

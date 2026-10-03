@@ -106,7 +106,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 		}
 	});
 
-	tokio::time::timeout(TIMEOUT, track.used())
+	tokio::time::timeout(TIMEOUT, track.demand().used())
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
@@ -199,7 +199,7 @@ const DEATH: moq_net::SessionError = moq_net::SessionError::App(7);
 
 /// Kill the publisher's session with a group still open, and return the error the
 /// subscriber's `recv_group` ends with once it drains what arrived.
-async fn killed(version: &str) -> Option<moq_net::Error> {
+async fn killed(version: &str, local: bool) -> (Option<moq_net::Error>, Option<moq_net::Error>) {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast.create_track("video", None).unwrap();
@@ -224,23 +224,36 @@ async fn killed(version: &str) -> Option<moq_net::Error> {
 			.subscribe(subscription)
 			.await
 			.expect("subscribe");
+		let mut group_end = None;
 		loop {
 			let mut group = match sub.recv_group().await {
 				Ok(Some(group)) => group,
-				Ok(None) => return None,
-				Err(err) => return Some(err),
+				Ok(None) => return (None, group_end),
+				Err(err) => return (Some(err), group_end),
 			};
-			// The open group ends however it ends; only the track's end is at stake here.
-			while let Ok(Some(_)) = group.read_frame().await {}
+			loop {
+				match group.read_frame().await {
+					Ok(Some(_)) => {}
+					Ok(None) => break,
+					Err(err) => {
+						group_end = Some(err);
+						break;
+					}
+				}
+			}
 		}
 	});
 
-	track.used().await.expect("no subscriber appeared");
+	track.demand().used().await.expect("no subscriber appeared");
 	let mut group = track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, HEAD[0]).unwrap();
 	settle().await;
 
-	server.abort(moq_net::Error::Session(DEATH));
+	if local {
+		client.clone().close().await.expect("local close");
+	} else {
+		server.abort(moq_net::Error::Session(DEATH));
+	}
 	let err = reader.await.expect("reader panicked");
 	drop((client, server, group, track, broadcast, publisher, subscriber));
 	err
@@ -252,12 +265,26 @@ async fn killed(version: &str) -> Option<moq_net::Error> {
 async fn a_session_death_ends_the_track_with_its_error() {
 	tokio::time::pause();
 	for version in DEATH_VERSIONS {
-		let err = tokio::time::timeout(TIMEOUT, killed(version))
+		let (err, group_end) = tokio::time::timeout(TIMEOUT, killed(version, false))
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the track never ended"));
 		assert!(
 			matches!(&err, Some(moq_net::Error::Session(code)) if *code == DEATH),
 			"{version}: the track ended with {err:?}, not the session's error"
 		);
+		assert!(
+			matches!(&group_end, Some(moq_net::Error::Session(code)) if *code == DEATH),
+			"{version}: group ended with {group_end:?}"
+		);
+	}
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_local_session_close_ends_the_track_cleanly() {
+	for version in DEATH_VERSIONS {
+		let (err, _) = tokio::time::timeout(TIMEOUT, killed(version, true))
+			.await
+			.expect("the track never ended");
+		assert!(err.is_none(), "{version}: local close ended with {err:?}");
 	}
 }

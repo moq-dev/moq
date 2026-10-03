@@ -85,8 +85,8 @@ kind.
   Gauges are carried but never summed.
 - **On main.** Every change is additive: optional sections on
   `#[non_exhaustive]` catalog types, and new types. The line left the
-  [QoS](/quest/m1/qos/README.md) line, which stays on `dev` for the relay's
-  moq-stats changes.
+  [QoS](/quest/m1/qos/README.md) line, which keeps the relay's moq-stats
+  changes.
 - **No `@moq/stats` package.** Media types live in `@moq/hang`, and the
   demo dashboard's relay-stats reader stays where it is.
 - Docs stay inline: `doc/concept/hang.md` documents both catalog sections,

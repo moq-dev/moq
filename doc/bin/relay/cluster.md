@@ -185,6 +185,20 @@ for loop detection but makes a restarted relay look like a new node. Set
 `cluster.id` to a stable non-zero integer to pin it, below 2^53 if browser
 clients decode it.
 
+## Failure detection
+
+A peer that crashes or drops off the network sends no goodbye, so a relay only
+learns it is gone when the link goes quiet for [`quic.idle_timeout`](/bin/relay/config#quic)
+(10s by default). Until then its routes stay in place and subscribes through
+them go nowhere. Lower it to fail over faster; raise it if a lossy long-haul
+link drops while the peer is still alive, and keep `quic.keep_alive` well under
+it.
+
+QUIC uses the smaller of the two endpoints' idle timeouts
+([RFC 9000 section 10.1](https://www.rfc-editor.org/rfc/rfc9000#section-10.1)),
+so either relay on a link can shorten it for both. iroh links use the same
+timeout; WebSocket links keep their own 30s deadline.
+
 ## Authentication
 
 Peers dial with **mTLS** (recommended: `listen.tls.root` on the listener,

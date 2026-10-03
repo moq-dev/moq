@@ -1,0 +1,16 @@
+{
+	"extends": "../../../../js/tsconfig.json",
+	"compilerOptions": {
+		"types": ["audioworklet", "bun", "vite/client"]
+	},
+	"include": [
+		"analyze.ts",
+		"driver.ts",
+		"grade.ts",
+		"record.ts",
+		"replay.ts",
+		"src",
+		"vite.config.ts",
+		"../../../../js/common/worklet.d.ts"
+	]
+}

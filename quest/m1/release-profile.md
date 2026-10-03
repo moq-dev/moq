@@ -4,9 +4,9 @@
 
 Every `cargo build --release` produces what we mean to ship: the relay and
 CLI binaries, the Python wheel (maturin), Dart's native asset, the nix
-packages, and the moq-ffi and libmoq builds all get the same size settings
+packages, and the moq-ffi and moq-c builds all get the same size settings
 from `[profile.release]` in the workspace `Cargo.toml`. Today only
-`rs/moq-ffi/build.sh`, `rs/libmoq/build.sh`, and `nix/overlay.nix` export
+`rs/moq-ffi/build.sh`, `rs/moq-c/build.sh`, and `nix/overlay.nix` export
 `CARGO_PROFILE_RELEASE_LTO=thin` and one codegen unit, so the PyPI wheel
 ships a 31 MiB unstripped `.so` where `build.sh` ships 24 MiB, and the
 relay and CLI get no LTO at all.

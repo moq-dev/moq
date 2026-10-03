@@ -137,7 +137,8 @@ impl poll::SendStream for SinkSend {
 		Poll::Ready(Ok(buf.len()))
 	}
 
-	fn set_priority(&mut self, order: u8) {
+	fn set_priority(&mut self, order: i32) {
+		let order = u8::try_from(order).expect("moq-net sends u8 send orders");
 		self.log.priorities.lock().unwrap().push(order);
 	}
 
@@ -558,12 +559,16 @@ impl web_transport_trait::Stats for SinkStats {
 /// EOF would exit, and a test usually wants to assert against the loop still running.
 pub struct ScriptedRecv {
 	script: Arc<Mutex<Vec<u8>>>,
-	/// Report EOF once the script is exhausted rather than parking, so a test can drive
-	/// a read loop all the way through its exit path. See [`ScriptedSession::eof`].
-	eof: bool,
-	/// Report a reset once the script is exhausted. See [`ScriptedSession::per_stream_reset`].
-	reset: bool,
+	/// How the peer's send side ends once the script runs out; `None` parks.
+	close: Arc<Mutex<Option<Close>>>,
 	log: Log,
+}
+
+/// How a scripted peer closes its send side. See [`ScriptedSession::close`].
+#[derive(Clone, Copy, Debug)]
+pub enum Close {
+	Fin,
+	Reset,
 }
 
 impl poll::RecvStream for ScriptedRecv {
@@ -583,9 +588,11 @@ impl poll::RecvStream for ScriptedRecv {
 		};
 
 		match take {
-			0 if self.reset => Poll::Ready(Err(SinkError)),
-			0 if self.eof => Poll::Ready(Ok(None)),
-			0 => Poll::Pending,
+			0 => match *self.close.lock().unwrap() {
+				Some(Close::Fin) => Poll::Ready(Ok(None)),
+				Some(Close::Reset) => Poll::Ready(Err(SinkError)),
+				None => Poll::Pending,
+			},
 			take => Poll::Ready(Ok(Some(take))),
 		}
 	}
@@ -608,10 +615,8 @@ impl poll::RecvStream for ScriptedRecv {
 #[derive(Clone)]
 pub struct ScriptedSession {
 	pub log: Log,
-	/// Whether an exhausted script reports EOF instead of parking.
-	eof: bool,
-	/// Whether an exhausted script reports a reset instead of parking.
-	reset: bool,
+	/// Shared with every stream, like `script`. See [`Self::close`].
+	close: Arc<Mutex<Option<Close>>>,
 	script: Arc<Mutex<Vec<u8>>>,
 	/// Per-stream scripts popped by `open_bi` in order; `None` shares `script`
 	/// across every stream.
@@ -630,8 +635,7 @@ impl ScriptedSession {
 	pub fn new(script: Vec<u8>) -> Self {
 		Self {
 			log: Log::default(),
-			eof: false,
-			reset: false,
+			close: Default::default(),
 			script: Arc::new(Mutex::new(script)),
 			queue: None,
 			open_gate: None,
@@ -658,10 +662,9 @@ impl ScriptedSession {
 	/// Parking is the right default for asserting that a loop is still running, but a
 	/// test for what a loop does on the way *out* needs the read to actually end.
 	pub fn eof(script: Vec<u8>) -> Self {
-		Self {
-			eof: true,
-			..Self::new(script)
-		}
+		let session = Self::new(script);
+		session.close(Close::Fin);
+		session
 	}
 
 	/// Each `open_bi` replays the next script in order. An exhausted queue (or an
@@ -676,25 +679,29 @@ impl ScriptedSession {
 	/// Like [`Self::per_stream`], but an exhausted script closes the stream instead of
 	/// parking, for a test that drives each stream to its end.
 	pub fn per_stream_eof(scripts: Vec<Vec<u8>>) -> Self {
-		Self {
-			eof: true,
-			..Self::per_stream(scripts)
-		}
+		let session = Self::per_stream(scripts);
+		session.close(Close::Fin);
+		session
 	}
 
 	/// Like [`Self::per_stream`], but an exhausted script resets the stream, as a peer
 	/// that fails after replying would.
 	pub fn per_stream_reset(scripts: Vec<Vec<u8>>) -> Self {
-		Self {
-			reset: true,
-			..Self::per_stream(scripts)
-		}
+		let session = Self::per_stream(scripts);
+		session.close(Close::Reset);
+		session
 	}
 
 	/// Append to the shared script: the peer sending more on a stream it already opened.
 	/// Nothing is woken, so the test re-polls the reader itself.
 	pub fn push(&self, bytes: &[u8]) {
 		self.script.lock().unwrap().extend_from_slice(bytes);
+	}
+
+	/// Close the peer's send side once the script runs out. Nothing is woken, so the
+	/// test re-polls the reader itself.
+	pub fn close(&self, close: Close) {
+		*self.close.lock().unwrap() = Some(close);
 	}
 
 	/// Answer each stream from `scripts`, but only once the gate opens: a peer that
@@ -718,8 +725,7 @@ impl poll::Session for ScriptedSession {
 		};
 		Poll::Ready(Ok(ScriptedRecv {
 			script: Arc::new(Mutex::new(script)),
-			eof: self.eof,
-			reset: self.reset,
+			close: self.close.clone(),
 			log: self.log.clone(),
 		}))
 	}
@@ -750,8 +756,7 @@ impl poll::Session for ScriptedSession {
 			SinkSend::new(self.log.clone()),
 			ScriptedRecv {
 				script,
-				eof: self.eof,
-				reset: self.reset,
+				close: self.close.clone(),
 				log: self.log.clone(),
 			},
 		)))

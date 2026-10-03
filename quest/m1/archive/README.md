@@ -20,10 +20,10 @@ landed on main; the line may still reshape both.
 ### Compatibility
 
 Decided (2026-09-28): the line may break the hang `archive` catalog entry and
-the recording format in place on `main`, without a version bump or a `dev`
-detour (for example the track-timeline rework in #4280). No archives exist
+the recording format in place on `main`, without a version bump
+(for example the track-timeline rework in #4280). No archives exist
 yet, so nothing recorded or published depends on either shape. This is an
-exception to the main/dev rule for this line only; once a release ships
+exception for this line only; once a release ships
 recordings, later format changes go through the entry's format version.
 
 ### Landed

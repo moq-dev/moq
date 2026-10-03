@@ -322,6 +322,10 @@ impl Subscribe {
 		// hand-rolled poll instead of `ts.next()`.
 		let mut delivery = Delivery::new(self.args.max_age);
 		let linger = self.args.linger;
+		// Reports a track that stops reaching the output while the rest keeps flowing,
+		// the way `publish` reports one that stops arriving.
+		let mut log = moq_mux::container::ts::stats::Log::default();
+		let mut sampled = tokio::time::Instant::now();
 		loop {
 			let end = loop {
 				let mut waited = false;
@@ -341,6 +345,11 @@ impl Subscribe {
 				};
 				delivery.update(&frame, ts.discontinuity());
 				delivery.deliver(&frame, waited, &mut stdout).await?;
+
+				if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
+					sampled = tokio::time::Instant::now();
+					log.sample(ts.stats());
+				}
 			};
 
 			// Any end waits out the linger, and on expiry the last one is the result: a

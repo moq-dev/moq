@@ -165,11 +165,21 @@ impl State {
 			if let Some(request) = track.pending.take() {
 				request.reject(err.clone());
 			}
+			if let Some(producer) = track.producer {
+				let _ = producer.abort_session(err.clone());
+			}
 			if let Fill::Ready { producer, .. } = &*track.fill.read() {
 				let _ = producer.clone().abort(err.clone());
 			}
+		}
+	}
+	fn close(&mut self) {
+		for (_, mut track) in self.subscribes.drain() {
+			if let Some(request) = track.pending.take() {
+				request.reject(Error::Cancel);
+			}
 			if let Some(producer) = track.producer {
-				let _ = producer.abort(err.clone());
+				let _ = producer.close();
 			}
 		}
 	}
@@ -345,6 +355,7 @@ enum JoiningFetch {
 
 /// What a SUBSCRIBE_OK told us about the track it accepted.
 struct Accepted {
+	max_age: Option<std::time::Duration>,
 	/// The Track Alias the publisher bound to this subscription.
 	alias: u64,
 
@@ -486,6 +497,46 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	frames: frame::Budget,
 }
 
+/// The prefixes to issue SUBSCRIBE_NAMESPACE for: `origin`'s permitted scope,
+/// relative to its root.
+///
+/// The scope is what we may ASK the peer for; the root is where what comes back
+/// MOUNTS locally. Those are independent, and only coincide when the peer shares
+/// our namespace -- a peer outside it has never heard of our root, so a rooted
+/// subscriber asks for its scope and mounts the replies under the root.
+///
+/// Asked unconditionally: a peer with nothing to advertise answers with an empty set,
+/// which costs one stream.
+///
+/// Each comes with the guard its stream holds until the peer's initial set has
+/// landed. Taken when the session starts, before it is handed out, so no announce
+/// cursor misses the replay.
+pub(super) fn subscribe_prefixes(origin: &origin::Producer) -> Vec<(PathOwned, crate::model::Replaying)> {
+	crate::model::interest_prefixes(&origin.allowed())
+		.into_iter()
+		.map(|prefix| (prefix.clone(), origin.replaying(prefix)))
+		.collect()
+}
+
+/// How a SUBSCRIBE_NAMESPACE stream's initial set ends.
+enum Landing {
+	/// MoQ Active Count: after this many more NAMESPACE messages.
+	Count(u64),
+	/// Once the stream goes quiet, which is all the base protocol offers.
+	Quiet(crate::model::Quiet),
+}
+
+impl Landing {
+	/// Ready once the initial set has landed.
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		match self {
+			Self::Count(0) => Poll::Ready(()),
+			Self::Count(_) => Poll::Pending,
+			Self::Quiet(quiet) => quiet.poll(waiter),
+		}
+	}
+}
+
 /// Resolve the subscription a data stream belongs to.
 ///
 /// SUBSCRIBE_OK can be reordered behind the stream it describes, so an alias we have not
@@ -557,6 +608,10 @@ where
 	/// End every active subscription with the error that ended the session.
 	pub fn abort(&self, err: &Error) {
 		self.state.lock().abort(err);
+	}
+
+	pub fn close(&self) {
+		self.state.lock().close();
 	}
 
 	/// Leave `alias` in the state a cancelled subscription leaves behind: bound to a
@@ -708,20 +763,6 @@ where
 		Some(track)
 	}
 
-	/// The prefixes to issue SUBSCRIBE_NAMESPACE for: this handle's permitted scope,
-	/// relative to its root.
-	///
-	/// The scope is what we may ASK the peer for; the root is where what comes back
-	/// MOUNTS locally. Those are independent, and only coincide when the peer shares
-	/// our namespace -- a peer outside it has never heard of our root, so a rooted
-	/// subscriber asks for its scope and mounts the replies under the root.
-	///
-	/// Asked unconditionally: a peer with nothing to advertise answers with an empty set,
-	/// which costs one stream.
-	pub fn subscribe_prefixes(&self) -> Vec<PathOwned> {
-		crate::model::interest_prefixes(&self.origin.allowed())
-	}
-
 	/// Send SUBSCRIBE_NAMESPACE for one prefix on a bidi stream.
 	/// The caller is responsible for opening the appropriate stream type
 	/// (virtual for v14/v15, real bidi for v16+), one per prefix.
@@ -733,6 +774,7 @@ where
 		&mut self,
 		mut stream: Stream<T, Version>,
 		prefix: PathOwned,
+		replaying: crate::model::Replaying,
 	) -> Result<(), Error> {
 		// A peer that sent GOAWAY told us to stop opening requests on this session,
 		// announce-interest included (draft-19 sect 10.4).
@@ -744,7 +786,8 @@ where
 		// peer into the origin and each local reader opts in on its own. The parameter
 		// fails decoding at a peer that doesn't know it, so it waits on the peer's SETUP
 		// to say whether it does (MoQ Hidden).
-		let hidden = self.peer_setup.get().await.hidden;
+		let declared = self.peer_setup.get().await;
+		let hidden = declared.hidden;
 
 		let request_id = self.control.next_request_id(&self.runtime).await?;
 
@@ -779,13 +822,12 @@ where
 		let size: u16 = stream.reader.decode().await?;
 		let mut data = stream.reader.read_exact(size as usize).await?;
 
-		match type_id {
+		let count = match type_id {
 			ietf::SubscribeNamespaceOk::ID if self.version == Version::Draft14 => {
-				let _msg = ietf::SubscribeNamespaceOk::decode_msg(&mut data, self.version)?;
+				ietf::SubscribeNamespaceOk::decode_msg(&mut data, self.version)?;
+				None
 			}
-			ietf::RequestOk::ID => {
-				let _msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
-			}
+			ietf::RequestOk::ID => ietf::RequestOk::decode_msg(&mut data, self.version)?.active,
 			ietf::SubscribeNamespaceError::ID if self.version == Version::Draft14 => {
 				let msg = ietf::SubscribeNamespaceError::decode_msg(&mut data, self.version)?;
 				let err = request::from_code(msg.error_code, request::Kind::SubscribeNamespace, self.version);
@@ -799,9 +841,20 @@ where
 				return Err(err);
 			}
 			_ => return Err(Error::UnexpectedMessage),
-		}
+		};
 
-		tracing::debug!(%prefix, "subscribe_namespace ok");
+		tracing::debug!(%prefix, ?count, "subscribe_namespace ok");
+
+		// MoQ Active Count says how many NAMESPACE messages come before we are caught up.
+		// Without it nothing on this wire marks the end, so the set has landed once the
+		// stream goes quiet. A count the negotiation did not promise, or a missing one it
+		// did, is the peer breaking the extension.
+		let landing = match (declared.active_count, count) {
+			(true, Some(count)) => Landing::Count(count),
+			(false, None) => Landing::Quiet(crate::model::Quiet::new(&self.runtime)),
+			_ => return Err(Error::ProtocolViolation),
+		};
+		let mut landing = Some((replaying, landing));
 
 		// The extension changes the NAMESPACE encoding, so we can't parse one until
 		// the peer's SETUP says whether it negotiated.
@@ -817,7 +870,9 @@ where
 		//
 		// This is what moq-lite already does, where the equivalent map is a local whose
 		// guards drop.
-		let res = self.run_namespace_entries(&mut stream, &prefix, &peer, &mut live).await;
+		let res = self
+			.run_namespace_entries(&mut stream, &prefix, &peer, &mut live, &mut landing)
+			.await;
 		for path in live {
 			let _ = self.stop_announce(path);
 		}
@@ -835,12 +890,31 @@ where
 		prefix: &PathOwned,
 		peer: &cluster::Peer,
 		live: &mut std::collections::HashSet<PathOwned>,
+		// The replay guard and how it lands, until the initial set has.
+		landing: &mut Option<(crate::model::Replaying, Landing)>,
 	) -> Result<(), Error> {
 		loop {
-			let type_id: u64 = match stream.reader.decode_maybe().await? {
+			let next = {
+				let mut decode = std::pin::pin!(stream.reader.decode_maybe::<u64>());
+				kio::wait(|waiter| {
+					// Land before decoding past the boundary, so no live update enters the
+					// origin ahead of the marker.
+					if let Some((_, how)) = landing
+						&& how.poll(waiter).is_ready()
+					{
+						*landing = None;
+					}
+					waiter.poll_future(decode.as_mut())
+				})
+				.await
+			};
+			let type_id: u64 = match next? {
 				Some(id) => id,
 				None => break, // Stream closed
 			};
+			if let Some((_, Landing::Quiet(quiet))) = landing {
+				quiet.heard();
+			}
 			let size: u16 = stream.reader.decode().await?;
 			let mut data = stream.reader.read_exact(size as usize).await?;
 
@@ -852,6 +926,12 @@ where
 					let msg = ietf::Namespace::decode_body(&mut data, self.version, peer.negotiated())?;
 					if !data.is_empty() {
 						return Err(Error::WrongSize);
+					}
+					// Counted whether or not we keep it: the publisher cannot know we will
+					// drop a reflection. The guard only drops at the top of the loop, after
+					// this one is in the origin.
+					if let Some((_, Landing::Count(remaining))) = landing {
+						*remaining = remaining.saturating_sub(1);
 					}
 					let path = prefix.join(&msg.suffix);
 					let Some(advert) = self.route(msg.cluster.as_ref(), peer) else {
@@ -1224,12 +1304,19 @@ where
 					.writer
 					.encode(&ietf::RequestOk {
 						request_id: Some(request_id),
+						active: None,
 					})
 					.await?;
 			}
 			_ => {
 				stream.writer.encode(&ietf::RequestOk::ID).await?;
-				stream.writer.encode(&ietf::RequestOk { request_id: None }).await?;
+				stream
+					.writer
+					.encode(&ietf::RequestOk {
+						request_id: None,
+						active: None,
+					})
+					.await?;
 			}
 		}
 		Ok(())
@@ -1440,7 +1527,7 @@ where
 	async fn drain(&self, tasks: &mut TaskSet) {
 		let mut session = self.session.clone();
 		kio::wait(|waiter| {
-			let mut cx = std::task::Context::from_waker(waiter.waker());
+			let mut cx = waiter.context();
 			if session.poll_closed(&mut cx).is_ready() {
 				return Poll::Ready(());
 			}
@@ -1459,7 +1546,7 @@ where
 		loop {
 			let next = broadcasts
 				.drive(|waiter| {
-					let mut cx = std::task::Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					if closed_session.poll_closed(&mut cx).is_ready() {
 						return Poll::Ready(None);
 					}
@@ -1546,7 +1633,7 @@ where
 		loop {
 			let next = subscribes
 				.drive(|waiter| {
-					let mut cx = std::task::Context::from_waker(waiter.waker());
+					let mut cx = waiter.context();
 					if closed_session.poll_closed(&mut cx).is_ready() {
 						return Poll::Ready(None);
 					}
@@ -1762,6 +1849,7 @@ where
 			}
 		};
 		let Accepted {
+			max_age,
 			alias,
 			timescale,
 			priority,
@@ -1769,7 +1857,7 @@ where
 		} = accepted;
 		let info = track::Info::default()
 			.with_timescale(Timescale::MICRO)
-			.with_max_age(self.origin.default_max_age())
+			.with_max_age(max_age)
 			.with_priority(super::priority::from_wire(priority.unwrap_or(128)));
 		// Declared before the track is released to readers, so a warm cache waiting on
 		// this copy judges itself against where the live feed actually starts.
@@ -1835,6 +1923,7 @@ where
 		}
 
 		let mut fetch_done = fetching.is_none();
+		let demand = track.demand();
 		// Group FETCHes for cache misses, cancelled with the subscription.
 		let mut group_fetches = TaskSet::owned();
 		let cancelled = {
@@ -1852,7 +1941,7 @@ where
 						return Poll::Ready(End::Fetch(request));
 					}
 					let _ = group_fetches.poll(waiter);
-					if track.poll_unused(waiter).is_ready() {
+					if demand.poll_unused(waiter).is_ready() {
 						return Poll::Ready(End::Unused);
 					}
 					waiter.poll_future(done.as_mut()).map(End::Done)
@@ -2165,6 +2254,7 @@ where
 				let msg = ietf::SubscribeOk::decode_msg(&mut data, self.version)?;
 				tracing::debug!(message = ?msg, "received subscribe ok");
 				Ok(Some(Accepted {
+					max_age: msg.properties.max_cache_duration,
 					alias: msg.track_alias,
 					timescale: msg.properties.timescale,
 					priority: msg.properties.priority,
@@ -3079,10 +3169,11 @@ where
 		let end = (end.group == sequence).then_some(end.object);
 
 		// Only a track nothing has subscribed to yet takes this info, as SUBSCRIBE_OK would
-		// have set it.
+		// have set it. FETCH_OK carries the same Track Properties, so the retention window
+		// comes from it.
 		let info = track::Info::default()
 			.with_timescale(Timescale::MICRO)
-			.with_max_age(self.origin.default_max_age());
+			.with_max_age(ok.properties.max_cache_duration);
 		let mut producer = match request.accept(info) {
 			Ok(producer) => producer,
 			// Already served by a concurrent fetch, or the track closed.
@@ -3440,7 +3531,7 @@ impl GroupIngest {
 		group: &mut group::Producer,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Ended, Error>> {
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		loop {
 			match &mut self.phase {
 				IngestPhase::Delta => {
@@ -3751,14 +3842,16 @@ mod tests {
 			Default::default(),
 		);
 
+		let mut namespaces = subscribe_prefixes(&subscriber.origin);
 		assert_eq!(
-			subscriber.subscribe_prefixes(),
+			namespaces.iter().map(|(prefix, _)| prefix.clone()).collect::<Vec<_>>(),
 			vec![crate::Path::new("cam").to_owned()],
 			"one SUBSCRIBE_NAMESPACE per permitted prefix, relative to the root",
 		);
+		let (prefix, replaying) = namespaces.pop().unwrap();
 
 		let stream = Stream::open(&mut session.clone(), Version::Draft16).await.unwrap();
-		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("cam").to_owned()));
+		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, replaying));
 		// Parks awaiting the peer's response; the request is already on the wire.
 		assert!(futures::poll!(run.as_mut()).is_pending());
 
@@ -3774,7 +3867,13 @@ mod tests {
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
 
 		writer.encode(&ietf::RequestOk::ID).await.unwrap();
-		writer.encode(&ietf::RequestOk { request_id: None }).await.unwrap();
+		writer
+			.encode(&ietf::RequestOk {
+				request_id: None,
+				active: None,
+			})
+			.await
+			.unwrap();
 		writer.encode(&ietf::Namespace::ID).await.unwrap();
 		writer
 			.encode(&ietf::Namespace {
@@ -3823,10 +3922,10 @@ mod tests {
 			Default::default(),
 		);
 
-		let prefix = subscriber.subscribe_prefixes().pop().expect("one prefix");
+		let (prefix, replaying) = subscribe_prefixes(&subscriber.origin).pop().expect("one prefix");
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		// Parks on the read after the scripted NAMESPACE is consumed.
-		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix));
+		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, replaying));
 		for _ in 0..100 {
 			// The result is deliberately ignored: a regressed mount lands out of scope
 			// and errors here, which the assertions below name far better than a poll
@@ -3846,6 +3945,60 @@ mod tests {
 			routed_now(&consumer, "rootns/rootns/cam/x.hang").is_none(),
 			"the root was applied twice",
 		);
+	}
+
+	/// MoQ Active Count is negotiated, so a REQUEST_OK that breaks the negotiation
+	/// either way is the peer's fault: a count we cannot rely on, or one missing where we
+	/// would otherwise wait on it forever.
+	#[tokio::test(start_paused = true)]
+	async fn a_count_the_negotiation_did_not_promise_is_a_violation() {
+		const VERSION: Version = Version::Draft18;
+
+		for (negotiated, count) in [(true, None), (false, Some(0))] {
+			let log = crate::lite::test_transport::Log::default();
+			let mut writer =
+				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			writer.encode(&ietf::RequestOk::ID).await.unwrap();
+			writer
+				.encode(&ietf::RequestOk {
+					request_id: None,
+					active: count,
+				})
+				.await
+				.unwrap();
+			let response = log.writes.lock().unwrap().clone();
+
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let session = crate::lite::test_transport::ScriptedSession::new(response);
+			let (tasks, _task_set) = crate::util::TaskSet::new();
+			let peer_setup = peer::PeerSetup::default();
+			peer_setup.set(peer::Peer {
+				active_count: negotiated,
+				..Default::default()
+			});
+			let mut subscriber = Subscriber::new(
+				crate::time::Clock::tokio(),
+				session.clone(),
+				origin,
+				Control::new(None, false),
+				None,
+				peer_setup,
+				crate::Hop::new(1).unwrap(),
+				None,
+				VERSION,
+				tasks,
+				Default::default(),
+			);
+
+			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+			let res = subscriber
+				.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), subscriber.origin.replaying(""))
+				.await;
+			assert!(
+				matches!(res, Err(Error::ProtocolViolation)),
+				"negotiated {negotiated}, count {count:?}: {res:?}"
+			);
+		}
 	}
 
 	#[test]
@@ -4997,7 +5150,7 @@ mod tests {
 
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		subscriber
-			.run_subscribe_namespace(stream, crate::Path::new("").to_owned())
+			.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), subscriber.origin.replaying(""))
 			.await
 			.expect("a clean FIN is not an error");
 		settle().await;
@@ -5023,7 +5176,13 @@ mod tests {
 			let mut writer =
 				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
 			writer.encode(&ietf::RequestOk::ID).await.unwrap();
-			writer.encode(&ietf::RequestOk { request_id: None }).await.unwrap();
+			writer
+				.encode(&ietf::RequestOk {
+					request_id: None,
+					active: None,
+				})
+				.await
+				.unwrap();
 			for cost in [4, 0] {
 				writer.encode(&ietf::Namespace::ID).await.unwrap();
 				writer
@@ -5067,7 +5226,9 @@ mod tests {
 		);
 
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
-		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("").to_owned()));
+		let replaying = subscriber.origin.replaying("");
+		let mut run =
+			std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), replaying));
 		for _ in 0..100 {
 			assert!(
 				futures::poll!(run.as_mut()).is_pending(),
@@ -6874,6 +7035,34 @@ mod stitch_tests {
 		);
 	}
 
+	#[tokio::test]
+	async fn session_death_keeps_a_waiting_fill_heads_resume_position() {
+		let h = Harness::new(
+			Fill::Serving(Some(Timescale::MICRO)),
+			vec![fill_stream(SEQUENCE, &[b"head-0"])],
+		);
+		let track = h.track.consume();
+		let mut consumer = h.track.subscribe(None);
+		let mut fill = h.stream().await;
+		h.subscriber.clone().recv_fill(&mut fill).await.expect("fill");
+		let mut group = consumer.recv_group().await.unwrap().expect("the fill head arrived");
+		let resume = track.resume_position();
+		assert_eq!(
+			resume,
+			Some(track::Position {
+				group: SEQUENCE,
+				frame: 1
+			})
+		);
+		let err = Error::Session(crate::SessionError::App(7));
+		h.subscriber.abort(&err);
+		assert_eq!(track.resume_position(), resume);
+		assert!(matches!(
+			group.read_frame().await,
+			Err(Error::Session(crate::SessionError::App(7)))
+		));
+	}
+
 	/// The same contradiction as above, with the streams the other way round: the whole
 	/// group lands before the fill has written its head. The model holds one producer per
 	/// live sequence, so the fill loses the race to create it and gives up, rather than a
@@ -7399,6 +7588,7 @@ mod joining_fetch_tests {
 				group_order: GroupOrder::Ascending,
 				end_of_track: false,
 				end_location: ietf::Location { group: 4, object: 2 },
+				properties: Default::default(),
 			},
 			version,
 		)
@@ -7668,6 +7858,7 @@ mod joining_fetch_tests {
 					group: GROUP + 1,
 					object: 0,
 				},
+				properties: Default::default(),
 			},
 			VERSION,
 		);
@@ -7707,6 +7898,70 @@ mod joining_fetch_tests {
 		assert!(fetch.await.is_err(), "the accepted group was aborted");
 	}
 
+	/// A group FETCH for a track nothing subscribed to takes its retention window from
+	/// FETCH_OK's properties, as a subscription would from SUBSCRIBE_OK's.
+	#[tokio::test(start_paused = true)]
+	async fn a_group_fetch_takes_fetch_ok_max_age() {
+		const GROUP: u64 = 4;
+		const MAX_AGE: Duration = Duration::from_secs(12);
+
+		for version in [Version::Draft17, Version::Draft19] {
+			let ok = message_bytes(
+				ietf::FetchOk::ID,
+				&ietf::FetchOk {
+					request_id: None,
+					group_order: GroupOrder::Ascending,
+					end_of_track: false,
+					end_location: ietf::Location {
+						group: GROUP + 1,
+						object: 0,
+					},
+					properties: ietf::Properties {
+						max_cache_duration: Some(MAX_AGE),
+						..Default::default()
+					},
+				},
+				version,
+			);
+
+			let session = ScriptedSession::per_stream_reset(vec![ok]);
+			let (tasks, _task_set) = crate::util::TaskSet::new();
+			let subscriber = Subscriber::new(
+				crate::time::Clock::tokio(),
+				session.clone(),
+				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				Control::new(None, false),
+				None,
+				peer::PeerSetup::default(),
+				crate::Hop::new(1).unwrap(),
+				None,
+				version,
+				tasks,
+				Default::default(),
+			);
+
+			// A track the publisher has not accepted, so the fetch supplies its info.
+			let broadcast = crate::broadcast::Info::new().produce();
+			let reserved = broadcast.reserve_track("video").unwrap();
+			let dynamic = reserved.dynamic();
+			let track = broadcast.consume().track("video").unwrap();
+			let mut fetch = std::pin::pin!(track.fetch_group(GROUP, None));
+			assert!(futures::poll!(fetch.as_mut()).is_pending());
+			let request = dynamic.requested_group().await.expect("no group requested");
+
+			subscriber
+				.clone()
+				.run_group_fetch(Path::new("broadcast").to_owned(), "video".into(), request, None)
+				.await;
+
+			let info = tokio::time::timeout(Duration::from_secs(1), track.query())
+				.await
+				.expect("the fetch installed the track info")
+				.expect("info");
+			assert_eq!(info.max_age, Some(MAX_AGE), "{version}");
+		}
+	}
+
 	/// A cache miss for a group's tail asks upstream from the frame the reader wants and
 	/// numbers what arrives from there, so a publisher that evicted the prefix can answer.
 	#[tokio::test(start_paused = true)]
@@ -7725,6 +7980,7 @@ mod joining_fetch_tests {
 					group: GROUP + 1,
 					object: 0,
 				},
+				properties: Default::default(),
 			},
 			VERSION,
 		);

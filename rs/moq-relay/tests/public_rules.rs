@@ -99,11 +99,18 @@ async fn first_broadcast(url: url::Url) -> String {
 	.expect("subscriber connect timeout")
 	.expect("subscriber connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
-		.await
-		.expect("announcement timeout")
-		.expect("origin closed");
-	assert!(update.kind.is_active(), "expected announce, got retraction");
+	let update = tokio::time::timeout(TIMEOUT, async {
+		loop {
+			match announcements.next().await.expect("origin closed") {
+				moq_net::announce::Event::Start(update) => break update,
+				// The local origin is caught up before the session brings anything.
+				moq_net::announce::Event::Live => continue,
+				other => panic!("expected announce, got {other:?}"),
+			}
+		}
+	})
+	.await
+	.expect("announcement timeout");
 	let name = update.prefix.to_string();
 
 	let broadcast = consumer.request_broadcast(&name).await.expect("broadcast resolves");

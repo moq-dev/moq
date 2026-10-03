@@ -33,22 +33,22 @@ them:
   moved to noq in the first place (#1706, #3342, #3789).
 - **Multipath is deleted**, and with it the multipath spike.
 - **In-tree**, so `just check` and CI cover the stack, one PR spans the core
-  and its consumers, and `main` and `dev` each carry their own copy instead of
+  and its consumers, and `release` and `main` each carry their own copy instead of
   double-landing fixes on the 1.3 and 2.0 fork lines.
 - **Named by role**: `moq-quic`, `moq-quic-udp`, `moq-quic-tokio`;
   `web-transport-moq` keeps its name. Each crate's README and license credit
   quinn and noq.
-- **Lands on `dev`.** moq-tokio exposes `noq::Endpoint`,
+- **A break.** moq-tokio exposes `noq::Endpoint`,
   `noq::TransportConfig`, and `noq::Incoming` publicly, so the crate swap is
   a break.
 - **Security folds into the fork.** Rebasing on quinn picks up the 2026
-  advisories noq is missing; `main` stays on `moq-noq` until `dev` releases.
+  advisories noq is missing; `release` stays on `moq-noq` until the next cut.
   [noq reassembly cap](/quest/m0/noq-reassembly-cap.md) still finishes on the
-  old fork for `main`.
+  old fork for `release`.
 - **moq-dev/noq is frozen**: security patches for `main` only, archived once
   no released MoQ crate depends on it. The other
   [QUIC quests](/quest/m1/quic/README.md) wait for this line and land
-  in-tree on `dev`.
+  in-tree.
 
 This README's own work: delete moq-dev/noq's `moq-sync.yml`, mark its README
 frozen, and document advisory triage in `rs/moq-quic/README.md`. `cargo audit`
