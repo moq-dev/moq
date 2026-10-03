@@ -1,6 +1,6 @@
 # Commits
 
-PRs into `main` are squash-merged, so the PR title becomes the commit subject and the PR description becomes the body in `git log`.
+PRs into `main` merge through the queue and are squash-merged, so the PR title becomes the commit subject and the PR description becomes the body in `git log`.
 PRs into any other branch (`release`, a questline) use a merge commit, so their history survives until they land.
 
 - Use conventional-commit subjects (`feat(watch): ...`, `fix: ...`, `chore: ...`, `docs: ...`)
@@ -24,6 +24,14 @@ When taking over someone else's PR, push commits on top of theirs so they keep c
 Create a draft PR.
 Switch it to "Ready for review" when you're finished and local `just check` passes.
 Fix any merge conflicts and failing CI checks.
+
+# Merge queue
+
+After the workflow support lands on `main`, a maintainer enables **Require merge queue** in the `main` ruleset, chooses **Squash**, and keeps **Check** and **Test** required.
+
+Enqueue a reviewed PR with `gh pr merge <number>`; GitHub checks it against the latest `main` and the PRs ahead of it before merging. Do not bypass the queue with `--admin`.
+
+A dequeued PR can mean the combined changes failed checks, timed out, or no longer meet branch protection. Read the removal reason in its timeline and the merge group run, fix the cause, and enqueue again.
 
 # AI
 
