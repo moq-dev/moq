@@ -405,17 +405,18 @@ impl Front {
 	fn attach(&mut self, source: u64, route: u64, actions: &mut Vec<Action>) {
 		if let Some((old, _)) = self.serving.take() {
 			actions.push(Action::Detach { source: old });
-			// A spliced copy keeps feeding its track until the replacement's is spliced
-			// in; one still being asked for is dropped with its source.
-			for track in self.tracks.values_mut() {
-				match track.state {
-					TrackState::Spliced { source } if source == old => {
-						track.draining = Some(old);
-						track.state = TrackState::Idle;
-					}
-					TrackState::Querying { source } if source == old => track.state = TrackState::Idle,
-					_ => {}
+		}
+		// Every copy is from an older source: a spliced one keeps feeding its track until
+		// the newcomer's is spliced in, and one still being asked for is dropped. That
+		// includes a track still draining a source the previous one replaced.
+		for track in self.tracks.values_mut() {
+			match track.state {
+				TrackState::Spliced { source } => {
+					track.draining = Some(source);
+					track.state = TrackState::Idle;
 				}
+				TrackState::Querying { .. } => track.state = TrackState::Idle,
+				TrackState::Idle | TrackState::Parked { .. } => {}
 			}
 		}
 		self.serving = Some((source, route));
@@ -1545,5 +1546,43 @@ mod tests {
 		let mut sequences = 0;
 		walk(&Front::new(LINGER), &alphabet, 5, &mut sequences);
 		assert!(sequences > 100_000);
+	}
+
+	/// The newcomer refused the track, so it stays on the source the newcomer replaced.
+	/// A third source still asks for it: every copy the front holds is older than it.
+	#[test]
+	fn a_new_source_queries_a_track_draining_an_older_one() {
+		let mut front = serving(remote(1, 10), 100);
+		front.step(Event::Selected {
+			best: Some(remote(2, 10)),
+			serving_closing: false,
+		});
+		front.step(Event::Resolved {
+			route: 2,
+			result: Ok(200),
+		});
+		front.step(Event::TrackInfo {
+			track: name("video"),
+			source: 200,
+			closing: false,
+			result: Err(Error::NotFound),
+		});
+		front.step(Event::Selected {
+			best: Some(remote(3, 10)),
+			serving_closing: false,
+		});
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 3,
+				result: Ok(300),
+			}),
+			&[
+				Action::Detach { source: 200 },
+				Action::Query {
+					track: name("video"),
+					source: 300,
+				},
+			],
+		);
 	}
 }
