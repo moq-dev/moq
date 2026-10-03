@@ -63,7 +63,7 @@ pub(crate) async fn serve_ws(
 	let token = lease.token();
 	let publish = state.cluster.publisher(token);
 	// A verified client certificate marks a cluster peer, which discovers hidden
-	// routes; see `connection::authorize`.
+	// routes; see `Cluster::scope`.
 	let subscribe = state
 		.cluster
 		.subscriber(token)
@@ -211,6 +211,7 @@ where
 	// The handshake is done, so this is a MoQ session now: only now can a push
 	// be serviced, and only now does the session appear in the live table.
 	let registration = pending.map(|(sessions, request)| sessions.register(request));
+	let _serving = shutdown.serve();
 
 	loop {
 		let nudged = async {
@@ -243,7 +244,7 @@ where
 					err = &mut driver => ended(err),
 					_ = &mut drain => ended(driver.await),
 				};
-				lease.close("shutdown", crate::connection::session_bytes(&session));
+				lease.close(moq_auth::lease::Reason::Shutdown, crate::connection::session_bytes(&session));
 				return res;
 			}
 			() = nudged => lease.revalidate(),

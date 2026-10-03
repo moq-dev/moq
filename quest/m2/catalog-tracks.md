@@ -24,7 +24,7 @@ when the whole broadcast restarts. The catalog may still add and remove
 tracks; a removed name is never reused for different content.
 
 Cover codec changes, rendition switches, reconnects, and late joiners in Rust,
-JS, and HLS/watch tests. Target any published API break at `dev`.
+JS, and HLS/watch tests.
 
 ## Related
 

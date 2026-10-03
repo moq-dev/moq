@@ -19,27 +19,25 @@ connection cannot publish several broadcasts with different identities.
   an epoch a caller supplies ([Broadcast epochs](/quest/m1/broadcast-epoch/README.md)).
   Give `moq` a flag for it if Broadcast epochs has not.
 - Relays keep `cluster.id` as their identity; `--hop` fills it today
-  (`rs/moq-cli/src/args.rs`), so split that coupling. Decide whether relays
-  still need the Hop setup parameter or learn identity from topology.
+  (`rs/moq-cli/src/args.rs`), so split that coupling. Relays and P2P peers
+  keep the Hop setup parameter: it becomes the node id of
+  [Routes and announces](/quest/m1/cluster-routing/routes.md). Only the
+  publisher-facing use goes.
 - Re-key [Same-hop importers](/quest/m1/hop-aligned-import.md)'s docs and 1+1
   tests to a shared epoch.
 - Docs: rewrite "Redundant publishers" in `doc/bin/cli.md` and
   `doc/concept/use-case/contribution.md`, then search the repo for `--hop`,
   `MOQ_HOP`, and `--cluster-id` examples, including demo recipes.
 
-Open: whether anything declares an incumbent dead faster than the cluster
+Open: whether anything declares an incumbent dead faster than the QUIC
 idle timeout (a failover service that retracts it, or active-active delivery
 to the relay). Neither is required to land this.
 
 Public API and wire: removes a CLI flag and the publisher's Hop setup
-parameter; lands on `dev`, outside the cluster routing line (which lands on `main`).
+parameter; lands outside the cluster routing line.
 
 ## Required
 
 - [Selection](/quest/m1/cluster-routing/selection.md) - owns the same-epoch pool this relies on
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - a restart is a new path, not a splice
 - [Same-hop importers](/quest/m1/hop-aligned-import.md) - the importer fixes this re-keys
-
-## Related
-
-- [Cluster idle timeout](/quest/m1/cluster-idle-timeout.md) - bounds how long a dead incumbent holds its pair

@@ -1,7 +1,7 @@
 import { expect, mock, test } from "bun:test";
 import type { StreamTrack } from "./types";
 
-mock.module("./capture-worker.ts?worker&inline", () => ({ default: class {} }));
+mock.module("./capture-worker.ts?worklet", () => ({ default: async () => "blob:fake-worker" }));
 const { Capture } = await import("./capture");
 
 class Frame {

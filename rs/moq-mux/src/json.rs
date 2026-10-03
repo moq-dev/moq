@@ -165,8 +165,6 @@ fn delta_ratio_of<C: std::any::Any>(config: &C) -> Option<u32> {
 pub struct Snapshot<T, E: CatalogExt = ()> {
 	inner: moq_json::snapshot::Producer<T>,
 	listing: Listing,
-	/// Maps a value's capture instant onto the broadcast timeline.
-	clock: crate::Clock,
 	/// Which catalog the entry lives in. The entry's own type is erased by `Listing`.
 	_catalog: PhantomData<fn() -> E>,
 }
@@ -192,12 +190,10 @@ impl<T: Serialize, E: CatalogExt> Snapshot<T, E> {
 			json.delta_ratio = delta_ratio;
 		}
 		let inner = moq_json::snapshot::Producer::new(track, json);
-		let clock = rendition.clock();
 		let listing = Listing::new(rendition, config)?;
 		Ok(Self {
 			inner,
 			listing,
-			clock,
 			_catalog: PhantomData,
 		})
 	}
@@ -226,7 +222,7 @@ impl<T: Serialize, E: CatalogExt> Snapshot<T, E> {
 	where
 		T: 'a,
 	{
-		let (value, captured) = self.clock.stamp(value.into())?;
+		let (value, captured) = self.listing.stamp(value.into())?;
 		match self.inner.update(value)? {
 			Some(size) => self.listing.record(size, captured),
 			None => Ok(()),
@@ -255,8 +251,6 @@ pub struct Stream<T, E: CatalogExt = ()> {
 	/// entry advertising a track that can no longer accept records only misleads a consumer that
 	/// discovers it afterwards.
 	listing: Option<Listing>,
-	/// Maps a record's capture instant onto the broadcast timeline.
-	clock: crate::Clock,
 	/// Which catalog the entry lives in. The entry's own type is erased by `Listing`.
 	_catalog: PhantomData<fn() -> E>,
 }
@@ -272,13 +266,11 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 			json.compression = moq_json::Compression::Deflate;
 		}
 		let inner = moq_json::stream::Producer::new(track, json);
-		let clock = rendition.clock();
 		let listing = Listing::new(rendition, config)?;
 		Ok(Self {
 			inner,
 			name: listing.name().to_string(),
 			listing: Some(listing),
-			clock,
 			_catalog: PhantomData,
 		})
 	}
@@ -310,7 +302,11 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 	where
 		T: 'a,
 	{
-		let (value, captured) = self.clock.stamp(value.into())?;
+		let (value, captured) = match &mut self.listing {
+			Some(listing) => listing.stamp(value.into())?,
+			// A failed write already ended the log, which refuses this record whatever its time.
+			None => (Timed::from(value.into().value), None),
+		};
 		let size = match self.inner.append(value) {
 			Ok(size) => size,
 			Err(err) => {
@@ -515,6 +511,44 @@ mod test {
 		let consumer = Consumer::from_track(track, &entry).unwrap();
 		assert_eq!(consumer.mode(), &Mode::Snapshot);
 		assert_eq!(drain(consumer), vec![json!({ "live": true })]);
+	}
+
+	/// A track created before an importer's first frame stamps on the clock that frame anchors, not
+	/// the one the catalog started with.
+	#[test]
+	fn a_write_follows_the_anchored_clock() {
+		let (mut broadcast, mut catalog) = catalog();
+		let mut status = catalog
+			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default())
+			.unwrap();
+		let mut chat = catalog
+			.json_stream::<Value>(track(&mut broadcast, "chat"), Config::default())
+			.unwrap();
+		let mut subscribers = [status.consume(), chat.consume()];
+
+		// The stream starts an hour in, far from the ten seconds a fresh clock reads.
+		let first = moq_net::Timestamp::from_secs(3600).unwrap();
+		catalog.anchor(first).unwrap();
+		status.update(&json!({ "live": true })).unwrap();
+		chat.append(Timed::from(&json!({ "n": 1 })).at(std::time::Instant::now()))
+			.unwrap();
+		let after = catalog.clock().now();
+
+		let waiter = kio::Waiter::noop();
+		for subscriber in &mut subscribers {
+			let mut stamps = Vec::new();
+			while let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) {
+				while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
+					stamps.push(frame.timestamp.as_millis());
+				}
+			}
+			assert_eq!(stamps.len(), 1);
+			assert!(
+				// The track stores milliseconds.
+				first.as_millis() <= stamps[0] && stamps[0] <= after.as_millis(),
+				"{first:?} {stamps:?} {after:?}"
+			);
+		}
 	}
 
 	/// `delta_ratio` is an encoder setting on [`Config`], not a catalog field. A ratio of 0

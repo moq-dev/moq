@@ -24,11 +24,19 @@ fn produce_origin(hop: u64) -> origin::Producer {
 	producer
 }
 
-/// Drain every update the cursor has pending, as `kind prefix` lines.
+/// Drain every event the cursor has pending, as `kind prefix` lines, skipping the
+/// live marker.
 fn drain(announced: &mut moq_net::announce::Consumer) -> Vec<String> {
+	use moq_net::announce::Event;
 	let mut seen = Vec::new();
-	while let Some(update) = announced.try_next() {
-		seen.push(format!("{:?} {}", update.kind, update.prefix));
+	while let Some(event) = announced.try_next() {
+		let (kind, announce) = match event {
+			Event::Start(announce) => ("Start", announce),
+			Event::Update(announce) => ("Update", announce),
+			Event::End(announce) => ("End", announce),
+			Event::Live => continue,
+		};
+		seen.push(format!("{kind} {}", announce.prefix));
 	}
 	seen
 }
@@ -73,7 +81,7 @@ async fn covering(version: Option<&str>) -> Vec<String> {
 	log
 }
 
-const EXPECTED: &[&str] = &["served: [\"Announced \"]", "below: [\"Announced cam\"]"];
+const EXPECTED: &[&str] = &["served: [\"Start \"]", "below: [\"Start cam\"]"];
 
 #[tokio::test]
 async fn local_cursor_sees_the_covering_route_at_its_root() {

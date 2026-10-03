@@ -7,7 +7,9 @@ runs [TSDuck](https://tsduck.io) plus a custom analyzer over it.
 
 This is a diagnostic gate, not just a pass/fail: the exporter
 ([`rs/moq-mux/src/container/ts/export.rs`](../../rs/moq-mux/src/container/ts/export.rs))
-is VBR, inserts no null packets, and paces PCR once per media frame, so several
+pads with null packets to the multiplex rate the source recorded (or `--mux-rate`),
+leaves a source without one unpadded, never delays media to fit the rate, and
+puts a PCR on its own packet every 25 ms of media time, so several
 broadcast-shape checks are expected to flag. The report quantifies exactly where
 and by how much.
 
@@ -80,7 +82,7 @@ Severities: **hard** checks fail the run by default; **shape** checks report as
 | `pcr-presence` | hard | a PCR PID is declared and carries PCR |
 | `pcr-monotonic` | hard | PCR strictly increases (one 33-bit wrap tolerated), except into a PCR that signals `discontinuity_indicator` |
 | `duration-fidelity` | hard | exported PCR span tracks the source's duration (round-trip only) |
-| `pcr-repetition` | shape | consecutive PCRs within the limit (default 40 ms) |
+| `pcr-repetition` | shape | consecutive PCRs within the limit (default 100 ms, TR 101 290 V1.4.1) |
 | `pcr-jitter` | shape | per-interval PCR jitter vs the nominal bitrate (pcrverify model) |
 | `null-ratio` | shape | null/stuffing fraction (flags only a pathological excess) |
 | `service-descriptors` | shape | an SDT naming the service is present |
@@ -146,7 +148,7 @@ grades only how evenly the bytes are laid over the PCRs.
 | `sync` | hard | no invalid sync bytes / transport-error packets |
 | `continuity` | hard | no discontinuities, and a payload-less packet must not advance the counter (ISO 13818-1 2.4.3.3) |
 | `pcr-single-pid` | hard | every PCR rides one PID |
-| `pcr-value-interval` | hard | no interval above `--repetition-ms` (default 40, TR 101 290), within one time base |
+| `pcr-value-interval` | hard | no interval above `--repetition-ms` (default 100, TR 101 290 V1.4.1), within one time base |
 | `pcr-release-timing` | hard | no more than `--release-pct-max` of intervals arrive further than `--release-ms` from the interval their own values assert, and accumulated drift stays within `--drift-ms`, being the standing lag the sender is allowed to hold; a sample below `--live-min-pcr` PCRs or `--live-cover-pct` of the window is a failure, not a pass (`--live` only) |
 | `pcr-position` | shape | share of PCR packets within `--adjacent-packets` of the previous one |
 | `pcr-schedule` | shape | share of PCR intervals, on the busiest PCR PID, whose bytes are within `--schedule-tolerance-pct` (default 1) or one packet of what `--mux-rate` implies (estimated from the capture if not given); hard, at that share, when `--schedule-pct-min` is given |

@@ -66,11 +66,7 @@ is not a bug any amount of review finds.
 
 ## Required
 
-- Someone with the hardware runs it: an Intel GPU exposing the VAAPI low-power
-  entrypoint, a second render node, a Windows machine with MJPEG and YUY2
-  cameras, a live camera per platform, a KDE/Wayland desktop with an Intel or
-  AMD GPU, a sandbox that can show the camera portal dialog, and a Raspberry
-  Pi whose CSI camera appears as a PipeWire node
+- [Video validation hardware is on hand](/quest/m3/video-hardware-access.md) - the machines to run it on
 
 ## Closes
 

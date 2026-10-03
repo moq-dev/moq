@@ -23,7 +23,7 @@ Public API: additive. Wire: existing AV1 codec signaling.
 
 ## Required
 
-- Ada or newer NVIDIA GPU available for verification
+- [An Ada NVIDIA GPU is available](/quest/m3/ada-gpu.md) - the hardware to verify on
 
 ## Related
 

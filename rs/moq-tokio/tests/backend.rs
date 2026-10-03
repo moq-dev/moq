@@ -176,12 +176,12 @@ async fn connect_test(config: ConnectTest<'_>) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
-	assert!(update.kind.is_active(), "expected announce, got retraction");
+	assert!(active, "expected announce, got retraction");
 	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
 		.expect("request timed out")
@@ -697,12 +697,12 @@ async fn iroh_connect_test(version: Option<&str>) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
-	assert!(update.kind.is_active(), "expected announce, got retraction");
+	assert!(active, "expected announce, got retraction");
 	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
 		.expect("request timed out")
@@ -744,11 +744,9 @@ async fn iroh_connect_test(version: Option<&str>) {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn noq_client_close_reaches_server() {
-	let quic = moq_tokio::quic::Config::default();
-	assert!(
-		quic.idle_timeout > TIMEOUT,
-		"an idle timeout inside TIMEOUT would hide a lost close"
-	);
+	// An idle timeout inside TIMEOUT would hide a lost close.
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.idle_timeout = TIMEOUT * 3;
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -868,7 +866,7 @@ async fn noq_client_close_drains_finished_track() {
 		.await
 		.expect("server handshake failed");
 
-	tokio::time::timeout(TIMEOUT, announcements.next())
+	tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -987,7 +985,7 @@ async fn noq_client_close_drains_migrated_predecessor() {
 		.await
 		.expect("server handshake failed");
 
-	tokio::time::timeout(TIMEOUT, announcements.next())
+	tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -1122,7 +1120,7 @@ async fn noq_client_close_keeps_predecessor_handover() {
 		.await
 		.expect("server handshake failed");
 
-	tokio::time::timeout(TIMEOUT, announcements.next())
+	tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -1351,4 +1349,15 @@ async fn window_test(scheme: &str) {
 #[tokio::test]
 async fn noq_windows() {
 	window_test("moqt").await;
+}
+
+/// The next route and whether it is active, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	loop {
+		return match announced.next().await? {
+			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+			moq_net::announce::Event::End(route) => Some((route, false)),
+			moq_net::announce::Event::Live => continue,
+		};
+	}
 }

@@ -7,7 +7,8 @@
  *
  * @module
  */
-import { Effect, type GetPromise, type Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, Signal } from "@moq/signals";
+import type { Demand } from "./track.ts";
 
 /**
  * One demanded track's claim, snapshotted for {@link allocate}.
@@ -72,16 +73,6 @@ export function allocate(estimate: number, wants: readonly Want[], id: number): 
 	}
 
 	return undefined;
-}
-
-/** What {@link Allocator.reserve} reads off a track. */
-export interface Demand {
-	/** Whether any subscriber is currently attached. */
-	readonly used: Getter<boolean>;
-	/** Settles once the track closes. */
-	readonly closed: GetPromise<Error | null>;
-	/** Publisher priority; higher is served first. */
-	readonly priority: number;
 }
 
 interface Entry {
