@@ -1,10 +1,10 @@
-# [L] JS group-boundary handover
+# [L] JS track handover
 
 ## Goal
 
 A `js/net` track subscription survives its broadcast's route swapping to
 another provider, such as a relay migration after a GOAWAY, and resumes from
-the new provider at the first group it has not delivered. A viewer at the live
+the new provider at the first frame it has not delivered. A viewer at the live
 edge with no latency budget never loses a group across the swap, and never
 has to notice the swap to keep reading.
 
@@ -21,20 +21,22 @@ old relay drops its upstream pull, the new relay subscribes upstream from
 scratch at the live edge. A group boundary that lands inside that window loses
 the group in flight: about 1 run in 5 at 100 ms groups.
 
-Rust already solves this. `moq-net`'s origin fronts are spliced broadcasts, and
-`model/resume.rs` resumes each track from the replacement at the first missing
-group, capping the old segment so it ends at the boundary on its own. Mirror
-that shape and naming in JS rather than inventing a second model. Things to
+Rust solves this with #4741's single-writer pump (`model/pump.rs`): each track a
+front serves is one producer, a route change subscribes the new route from
+the first frame the logical track lacks (mid-group), an open group is
+continued in place, duplicates are dropped by frame index, and the old route
+is cancelled once the new one feeds the track. Mirror that shape and naming
+in JS rather than inventing a second model. Things to
 settle along the way:
 
 - Whether the request's `active` broadcast stays the same object across a swap,
   with its tracks re-sourced underneath. That is the Rust behavior and the
   simplest for players. It is also a behavior change for code that watches
   `active` to resubscribe.
-- The resumed subscription names where it left off (the `groups` floor) so the
-  new provider serves the missing group from its cache or upstream instead of
-  starting at its own live edge.
-- Failover compatibility: Rust refuses to splice a source whose track
+- The resumed subscription names where it left off (group and frame) so the
+  new provider serves the rest from its cache or upstream instead of starting
+  at its own live edge.
+- Failover compatibility: Rust refuses to resume onto a source whose track
   properties differ (timescale, retention, priority, order). Match it.
 - `js/watch` and `js/hang` consumers that re-subscribe on `active` changes.
   Check whether they still need to.

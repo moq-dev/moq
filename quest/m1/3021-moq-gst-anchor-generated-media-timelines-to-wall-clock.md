@@ -20,7 +20,7 @@ its own. Do not define a GStreamer-specific catalog shape.
 
 Decided in the 2026-09-30 audit: a restart is a new broadcast epoch, not a
 forward re-anchor on the old clock (per remove-live and
-[GStreamer and OBS](/quest/m1/broadcast-epoch/gst-obs.md)), and
+[GStreamer and OBS](/quest/m0/broadcast-epoch/gst-obs.md)), and
 [#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md)
 handles the sink side.
 
@@ -33,4 +33,4 @@ delayed first buffers, and multiple pads sharing one epoch.
 
 ## Related
 
-- [GStreamer and OBS](/quest/m1/broadcast-epoch/gst-obs.md) - a restarted pipeline publishes a new epoch
+- [GStreamer and OBS](/quest/m0/broadcast-epoch/gst-obs.md) - a restarted pipeline publishes a new epoch

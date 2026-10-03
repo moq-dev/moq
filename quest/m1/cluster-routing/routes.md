@@ -53,8 +53,8 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
 - The node id is global and opaque: a relay's `cluster.id` or a random id,
   and an app's handshake id. It is needed so routes from two neighbours to
   one origin are recognized as one, which carries loop freedom,
-  deduplication, the reply's serving node, and P2P dialing (an app maps an
-  announce's node to a roster peer).
+  deduplication, and P2P dialing (an app maps an announce's node to a roster
+  peer).
 - Loop freedom is Babel's feasibility condition (RFC 8966) keyed by node:
   accept a route if its seqno is newer, or equal with a metric below the
   feasibility distance. Only the origin advances its seqno. Retraction is an
@@ -73,8 +73,8 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
   identity across sessions is [Route trust](/quest/m1/cluster-routing/route-trust.md)).
   A relay advertising routes to a client sends them as usual; node ids reveal
   nothing about the backbone.
-- Every hop re-selects; SUBSCRIBE names no origin. The reply names the
-  serving node, which is the identity Selection's splice rule uses.
+- Every hop re-selects; SUBSCRIBE names no origin, and the reply names none
+  either: any route announcing a path resumes it.
 - Mixed versions: a lite-06 peer keeps today's path vector, translated at the
   relay that speaks both, for the rollout window only.
 

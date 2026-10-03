@@ -10,21 +10,17 @@ fully supported.
 
 ## Plan
 
-Why now: the Wildcard line spreads a pool's paths behind one route, and names
-the serving member only in lite-07's reply Origin. The cluster extension has
-no such field, so a moq-transport downstream relay pins failover to the
-advertisement's first Hop ID, which labels the pool rather than the member,
-and can splice one member's objects onto another's. A peer that never learns
-Hop IDs cannot make that mistake. Decided in the 2026-09-30 wildcard audit,
-matching the topology decision that cluster links are lite-only.
+Why: cluster links are moq-lite only (the 2026-09-30 topology decision), so
+a moq-transport peer stays a plain client until
+[moq-transport cluster peers](/quest/m2/ietf-cluster-peers.md) extends the
+draft.
 
 - Stop offering and accepting the cluster Setup Options in Rust
   (`rs/moq-net/src/ietf/cluster.rs`, `parameters.rs`, `publish_namespace.rs`)
   and JS (`js/net/src/ietf/cluster.ts` and its callers). A peer that offers
   them is served as if it had not.
-- Delete what becomes dead, in both languages. The draft stays:
-  [moq-transport cluster peers](/quest/m2/ietf-cluster-peers.md) extends it
-  and brings the code back.
+- Delete what becomes dead, in both languages. The draft stays, for
+  moq-transport cluster peers to extend.
 - Update `doc/bin/relay/cluster.md` and `doc/concept` wherever they say
   moq-transport relays can join a cluster.
 - Test: a moq-transport 17+ peer that offers the extension gets a session
@@ -37,4 +33,3 @@ negotiating an optional extension.
 ## Related
 
 - [Upstream links](/quest/m1/cluster-routing/transit.md) - cluster links are lite-only
-- [Wildcard](/quest/m0/wildcard/README.md) - the pool spread that makes a Hop ID label unsafe to splice on

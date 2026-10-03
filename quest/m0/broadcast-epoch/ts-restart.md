@@ -8,7 +8,7 @@ When a TS feed rewinds its time base and signals it
 the rest of the same input as a new broadcast under a fresh epoch, in the same
 process and connection. This covers an encoder restart or source switch behind
 a gateway that keeps its connection up, and a looping playout server, none of
-which makes a new connection for [Gateways](/quest/m1/broadcast-epoch/gateways.md)
+which makes a new connection for [Gateways](/quest/m0/broadcast-epoch/gateways.md)
 to turn into an epoch. An unsignalled rewind stays fatal, as #4543 decided.
 
 ## Plan
@@ -21,7 +21,7 @@ Decided (maintainer, 2026-09-30):
 
 - A rewind is new content, so it is always a new broadcast at a new epoch
   path, never a continuation of the old name. Viewers of the bare name follow
-  it through [Origin](/quest/m1/broadcast-epoch/origin.md).
+  it through [Origin](/quest/m0/broadcast-epoch/origin.md).
 - `decode` stops at the flagged rewind and reports it. The caller finishes the
   old broadcast (a clean end, not an abort, so its viewers read to its end),
   publishes a new broadcast at a fresh epoch path, and calls
@@ -45,7 +45,7 @@ and `restart` is new. Wire: none.
 
 ## Required
 
-- [Origin](/quest/m1/broadcast-epoch/origin.md) - the fresh epoch path the rest of the feed publishes under
+- [Origin](/quest/m0/broadcast-epoch/origin.md) - the fresh epoch path the rest of the feed publishes under
 
 ## Closes
 
