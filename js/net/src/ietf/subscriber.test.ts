@@ -111,7 +111,7 @@ test("an unsolicited announcement lands", async () => {
 		new PublishNamespace({ requestId: 2n, trackNamespace: Path.from("sentinel") }),
 		second,
 	);
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("sentinel"), kind: "announced" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("sentinel"), kind: "start" });
 	peer.close();
 	await handler;
 	expect(await nextRoute(announced)).toMatchObject({

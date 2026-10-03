@@ -869,7 +869,13 @@ where
 					}
 					if let Err(err) = async {
 						stream.writer.encode(&ietf::RequestOk::ID).await?;
-						stream.writer.encode(&ietf::RequestOk { request_id: None }).await
+						stream
+							.writer
+							.encode(&ietf::RequestOk {
+								request_id: None,
+								active: None,
+							})
+							.await
 					}
 					.await
 					{

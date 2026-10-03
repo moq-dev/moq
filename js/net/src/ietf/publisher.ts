@@ -587,7 +587,7 @@ export class Publisher {
 							: undefined,
 					statusCode:
 						publishError instanceof UpdateFailed
-							? 0x08
+							? PublishDoneStatus.UPDATE_FAILED
 							: publishError
 								? PublishDoneStatus.INTERNAL_ERROR
 								: PublishDoneStatus.TRACK_ENDED,
