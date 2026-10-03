@@ -51,6 +51,8 @@ enum Trigger {
 	Unannounce,
 	/// `R` gains a direct (shorter) route to `P` while `A` stays healthy.
 	BetterRoute,
+	/// The direct route from [`Trigger::BetterRoute`] dies, sending the track back.
+	BetterRouteDies,
 }
 
 /// Where in the stream the route changes.
@@ -71,6 +73,7 @@ struct Topology {
 	track: track::Producer,
 	p_to_a: Option<MockPair>,
 	a_to_r: Option<MockPair>,
+	direct: Option<MockPair>,
 	_links: Vec<MockPair>,
 }
 
@@ -106,6 +109,7 @@ impl Topology {
 			track,
 			p_to_a: Some(p_to_a),
 			a_to_r: Some(a_to_r),
+			direct: None,
 			_links: vec![p_to_b],
 		};
 		(topology, sub)
@@ -131,8 +135,12 @@ impl Topology {
 				pair.client.abort(Error::Cancel);
 			}
 			Trigger::BetterRoute => {
-				let direct = link(self.version, &self.publisher, &self.subscriber).await;
-				self._links.push(direct);
+				self.direct = Some(link(self.version, &self.publisher, &self.subscriber).await);
+			}
+			Trigger::BetterRouteDies => {
+				let pair = self.direct.take().unwrap();
+				pair.server.abort(Error::Cancel);
+				pair.client.abort(Error::Cancel);
 			}
 		}
 		settle().await;
@@ -244,6 +252,38 @@ async fn route_change(version: &str, trigger: Trigger, position: Position) {
 	);
 }
 
+/// The route changes again and again in one stream, each time mid-group: a direct
+/// route beats `A`, then dies, then `A`'s session dies too, leaving `B`. The reader
+/// still sees every frame exactly once.
+async fn route_flaps(version: &str) {
+	let version: Version = version.parse().unwrap();
+	let (mut topology, sub) = Topology::new(version).await;
+	let mut rx = read(sub);
+	topology.standby().await;
+
+	let triggers = [Trigger::BetterRoute, Trigger::BetterRouteDies, Trigger::Disconnect];
+	let mut expected = Vec::new();
+	let mut seen = Vec::new();
+	for sequence in 0..=triggers.len() as u64 {
+		let mut group = topology.track.append_group().unwrap();
+		for frame in 0..FRAMES {
+			if frame == FRAMES / 2
+				&& let Some(trigger) = triggers.get(sequence as usize)
+			{
+				topology.trigger(*trigger).await;
+			}
+			group.write_frame(Timestamp::ZERO, payload(sequence, frame)).unwrap();
+			expected.push((sequence, payload(sequence, frame)));
+			seen.push(next(&mut rx).await);
+		}
+		group.finish().unwrap();
+	}
+
+	assert_eq!(seen, expected, "{version}");
+	settle().await;
+	assert!(rx.try_recv().is_err(), "{version}: trailing delivery");
+}
+
 macro_rules! route_change_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
@@ -285,12 +325,14 @@ macro_rules! route_change_tests {
 				async fn better_route_mid_group() {
 					run(Trigger::BetterRoute, Position::MidGroup).await;
 				}
+
 			}
 		)*
 	};
 }
 
 route_change_tests! {
+	lite_07: "moq-lite-07-wip",
 	lite_06: "moq-lite-06",
 	lite_05: "moq-lite-05",
 	lite_04: "moq-lite-04",
@@ -394,4 +436,27 @@ async fn an_older_ietf_draft_still_resumes_the_open_group() {
 	let mut rx = lagging_route_dies(version).await;
 	assert_eq!(next(&mut rx).await, (1, payload(1, 2)));
 	assert_eq!(next(&mut rx).await, (1, payload(1, 3)));
+}
+
+/// moq-transport 22 is left out: its relay fills a group's missing frames with a FETCH,
+/// which draft 20+ does not serve yet (see `quest/m1/ietf-fetch-location.md`).
+macro_rules! route_flap_tests {
+	($($name:ident: $version:literal,)*) => {
+		$(
+			#[tokio::test(start_paused = true)]
+			async fn $name() {
+				tokio::time::timeout(TEST_TIMEOUT, route_flaps($version))
+					.await
+					.expect("timed out");
+			}
+		)*
+	};
+}
+
+route_flap_tests! {
+	flaps_lite_07: "moq-lite-07-wip",
+	flaps_lite_06: "moq-lite-06",
+	flaps_lite_05: "moq-lite-05",
+	flaps_lite_04: "moq-lite-04",
+	flaps_ietf_19: "moq-transport-19",
 }
