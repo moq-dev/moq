@@ -101,7 +101,8 @@ registration directly. There is no software H.265 encoder (it's hardware-only).
 
 `encode::Encoder::encode` takes a raw `Frame` (a timestamp plus a `Surface`
 holding the pixels) and returns `encode::Encoded`s: one whole access unit each,
-carrying the timestamp of the picture it was encoded from. That matters for a
+carrying the timestamp of the picture it was encoded from and whether it is a
+keyframe, forced by `cut()` or on the GOP cadence. The timestamp matters for a
 backend that buffers, which hands back an earlier frame's access unit while a
 later one goes in, and for the tail `finish()` drains. Bring your own pixels with
 `Surface::rgba(...)`, or feed a frame straight from capture or `decode`.
@@ -118,11 +119,18 @@ driver without the force-keyframe control), and queues nothing then: groups
 keep falling where `Config::gop` puts them. `encode::Sink` answers the same
 way, awaited.
 
-Two public entry points:
+Public entry points:
 
 - `encode::publish_capture(...)` captures a webcam, encodes it, and publishes on
   demand: the track and catalog are advertised up front, but the camera opens
   only while a subscriber is watching and is released when the last one leaves.
+- `encode::Control::new(...)` does the same but returns a `Control` handle with
+  the `Driver` that runs it, like `moq-audio`'s. `Control::cut()` asks for a
+  keyframe: requests coalesce, any keyframe serves them (the GOP cadence
+  included), and a forced one lands at least 500ms after any other. On a
+  backend that cannot force one it returns `Error::CutUnsupported` and the
+  publish carries on. Dropping the last `Control` ends the `Driver` promptly,
+  even mid-open.
 - `encode::Producer` publishes frames you encoded yourself (`publish(&[Encoded])`),
   handling the catalog and framing. Each is published at its own timestamp.
 
@@ -157,15 +165,18 @@ staging fallback for `Surface::Vulkan`.
 `frame::cuda::Converter` turns a published Vulkan frame into the NV12
 `Surface::Cuda` that NVENC encodes in place. It runs on the GPU in one declared
 color space (matrix and range), averages 4:2:0 chroma per 2x2 block, applies no
-transfer function, and draws every buffer from a pool sized at construction;
-`cuda::Frame::resize` scales a converted frame for a smaller rendition from the
-same pool. One captured frame feeding HD and SD therefore holds a fixed number
-of buffers, and a producer that outruns its encoder gets an error rather than
-unbounded device memory. Open the encoder with `encode::Kind::Named("nvenc")`
-and the same `encode::Config::color`: `Kind::Auto` could fall back to a software
-encoder that reads the frame back, and the portable `Surface::resize` downloads
-when the GPU scaler fails. Everything under `frame::cuda` and `frame::vulkan`
-runs on the device or returns an error.
+transfer function, and draws every buffer from a pool sized at construction.
+`Converter::reserve` holds one as a `cuda::Slot`; `Slot::convert` fills it with
+the captured frame and `Slot::resize` with a smaller rendition. One captured
+frame feeding HD and SD therefore holds a fixed number of buffers, and a
+producer that outruns its encoder gets `None` from `reserve`, its cue to drop
+the frame, rather than unbounded device memory. A slot dropped unfilled, or
+consumed by a failed conversion, returns its buffer, so only a real failure is
+an error. Open the encoder with `encode::Kind::Named("nvenc")` and the same
+`encode::Config::color`: `Kind::Auto` could fall back to a software encoder that
+reads the frame back, and the portable `Surface::resize` downloads when the GPU
+scaler fails. Everything under `frame::cuda` and `frame::vulkan` runs on the
+device or returns an error.
 
 Run `just rs vulkan-cuda` for the opt-in native hardware exercise. It creates a
 Vulkan image independently of Unreal, imports it once into CUDA, checks repeated
@@ -183,7 +194,7 @@ on the GPU: feeding it back to a compatible hardware `encode::Encoder` on the
 same device keeps it there (the transcode path), while `into_i420()` downloads
 it. An encoder that can't take that surface (openh264, or a different device)
 downloads it through I420 for you. Every frame carries a `Surface`, a
-`#[non_exhaustive]` enum naming where the pixels live (`PixelBuffer` on macOS,
+`#[non_exhaustive]` enum naming where the pixels live (`PixelBuffer` on macOS and iOS,
 `Texture` on Windows, `Vulkan` and `Cuda` on Linux, `HardwareBuffer` on Android,
 or CPU `I420`). Match
 it to take a GPU path for a representation you recognize, and fall back to
@@ -207,7 +218,7 @@ Backends are tried hardware-first, like encode:
 | H.265 | none | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, API 26+) |
 | AV1 | none | none | none | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, when the device provides it) |
 
-On macOS VideoToolbox decodes H.264 and H.265 on hardware, pulling the parameter
+On macOS and iOS VideoToolbox decodes H.264 and H.265 on hardware, pulling the parameter
 sets (SPS/PPS, plus VPS for H.265) out of each keyframe to build the format
 description. On Windows the Microsoft decoder MFT runs synchronously with a
 Direct3D11 device bound to it, so the decode happens on the GPU through DXVA

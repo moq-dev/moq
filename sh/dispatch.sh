@@ -73,9 +73,9 @@ declare -A scope=(
     [swift]='^(swift/|sh/swift/|rs/moq-ffi/|doc/lib/swift/|doc/lib/samples\.sh$)'
     [go]='^(go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)'
     [dart]='^(dart/|sh/dart/|rs/moq-ffi/|doc/lib/dart/|doc/lib/samples\.sh$)'
-    # The plugin calls libmoq through its generated header, and flake.nix owns
+    # The plugin calls moq-c through its generated header, and flake.nix owns
     # the libobs headers it compiles against.
-    [obs_compile]='^(cpp/obs/|sh/obs/|rs/libmoq/|flake\.nix$)'
+    [obs_compile]='^(cpp/obs/|sh/obs/|rs/moq-c/|flake\.nix$)'
     # `obs check` compares the OBS pinned in buildspec.json, flake.nix, and
     # nixpkgs, and the last moves on a flake.lock bump alone.
     [obs]='^(cpp/obs/|sh/obs/|flake\.(nix|lock)$)'

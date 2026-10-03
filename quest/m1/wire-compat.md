@@ -50,7 +50,7 @@ Guidance:
   the published crates if the build time threatens the nightly budget.
 - Subscribers must decode the catalog and frames, not only see a non-empty
   frame, or the container lane proves nothing.
-- A deliberate break on `dev` is expected to fail against `main`'s release.
+- A deliberate break on `main` is expected to fail against the last release.
   Run against `main` only, and document in the harness how a planned break
   is acknowledged (for example a skip list that the next release clears).
 - Wire the job into the existing nightly (`interop.yml` already has a

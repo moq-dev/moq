@@ -33,12 +33,22 @@ permissions:
 jobs:
   publish:
     name: Publish formula to homebrew-tap
-    if: ${{ github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'moq-') }}
+    # workflow_run has the base repository's privileges and this job checks out
+    # the triggering commit, so accept only a successful tag push in this
+    # repository: a fork PR can rename a workflow and its branch to match.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      startsWith(github.event.workflow_run.head_branch, 'moq-')
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # workflow_run runs the default branch's file, whose checkout would
+          # otherwise take trunk rather than the tag that was released.
+          ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
 
       - uses: ./.github/actions/just

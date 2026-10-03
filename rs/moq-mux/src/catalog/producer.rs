@@ -27,6 +27,15 @@ struct State<E: CatalogExt> {
 	/// Why the catalog tracks are closed, so [`Producer::modify`] refuses further edits with the
 	/// cause: [`Producer::finish`], or a drop-time publish that failed and aborted them.
 	closed: Option<crate::Error>,
+
+	/// The broadcast's shared clock, advertised at the catalog root. Every importer on this
+	/// catalog reads it (the same timeline), so timestamps they synthesize when a caller has none
+	/// land on one timeline and audio/video stay in sync.
+	clock: crate::Clock,
+
+	/// Whether the clock's mapping is settled: set by [`Config::with_clock`] or placed by an
+	/// importer's first timestamp. Until then [`Producer::anchor`] may still place it.
+	anchored: bool,
 }
 
 /// Take the shared state, ignoring a poisoned lock.
@@ -162,14 +171,6 @@ pub struct Producer<E: CatalogExt = ()> {
 
 	current: Arc<Mutex<State<E>>>,
 
-	/// Shared wall clock for the broadcast's tracks. Every importer on this catalog
-	/// gets a copy (the same epoch), so timestamps they synthesize when
-	/// a caller has none land on one timeline and audio/video stay in sync.
-	///
-	/// It also owns the broadcast's wall mapping, published at the catalog root as
-	/// `clock: { wall, timescale }` independently of any archive timeline.
-	clock: crate::Clock,
-
 	/// The broadcast's timeline: the shared boundary list every enrolled track's groups map
 	/// onto, and the track those segment records are published on. See
 	/// [`timeline`](Self::timeline).
@@ -193,7 +194,6 @@ impl<E: CatalogExt> Clone for Producer<E> {
 		Self {
 			outputs: self.outputs.clone(),
 			current: self.current.clone(),
-			clock: self.clock,
 			timeline: self.timeline.clone(),
 			max_age: self.max_age,
 			bandwidth: self.bandwidth.clone(),
@@ -214,7 +214,7 @@ pub struct Config<E: CatalogExt = ()> {
 	catalog: Catalog<E>,
 	max_age: Option<std::time::Duration>,
 	bandwidth: moq_net::bandwidth::Allocator,
-	clock: crate::Clock,
+	clock: Option<crate::Clock>,
 	timeline: crate::timeline::Config,
 }
 
@@ -224,7 +224,7 @@ impl Default for Config<()> {
 			catalog: Catalog::default(),
 			max_age: None,
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
-			clock: crate::Clock::new(),
+			clock: None,
 			timeline: crate::timeline::Config::default(),
 		}
 	}
@@ -246,11 +246,13 @@ impl<E: CatalogExt> Config<E> {
 
 	/// Publish with this broadcast clock instead of a fresh one.
 	///
-	/// The clock's wall mapping is advertised at the catalog root, so pass a clock whose PTS
-	/// zero names the content's real start when importing a recording; live publishers use the
-	/// default. The mapping is fixed for the broadcast and never overwritten.
+	/// The clock's wall mapping is advertised at the catalog root and fixed for the broadcast.
+	/// Without this, the catalog starts a fresh clock, and a container importer (fMP4, MPEG-TS,
+	/// FLV, MKV) re-anchors it on its first timestamp, before writing any frame, so the stream's own
+	/// timestamps map to the arrival time. Pass one whose PTS zero names the content's real start
+	/// when importing a recording.
 	pub fn with_clock(mut self, clock: crate::Clock) -> Self {
-		self.clock = clock;
+		self.clock = Some(clock);
 		self
 	}
 
@@ -321,8 +323,10 @@ impl<E: CatalogExt> Producer<E> {
 		// The broadcast clock is advertised at the catalog root from the first snapshot,
 		// independently of any archive timeline: a live-only publisher exposes its mapping
 		// without creating a segment index.
+		let anchored = config.clock.is_some();
+		let clock = config.clock.unwrap_or_default();
 		let mut catalog = config.catalog;
-		catalog.clock = Some(config.clock.wall());
+		catalog.clock = Some(clock.wall());
 
 		// The contents are `Send + Sync` natively; on wasm moq-net's handles are
 		// `Rc`-backed, so clippy sees a pointlessly atomic `Arc`. Keeping one type for
@@ -341,8 +345,9 @@ impl<E: CatalogExt> Producer<E> {
 				owned: BTreeSet::new(),
 				reservations: Reservations::default(),
 				closed: None,
+				clock,
+				anchored,
 			})),
-			clock: config.clock,
 			timeline,
 			max_age: config.max_age,
 			bandwidth: config.bandwidth,
@@ -372,7 +377,7 @@ impl<E: CatalogExt> Producer<E> {
 	pub fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
 		match hint {
 			Some(pts) => Ok(pts),
-			None => Ok(self.clock.now()),
+			None => Ok(self.clock().now()),
 		}
 	}
 
@@ -421,14 +426,36 @@ impl<E: CatalogExt> Producer<E> {
 		take(&self.current).catalog.clone()
 	}
 
-	/// The broadcast's shared clock: the epoch importers stamp against and the wall mapping
+	/// The broadcast's shared clock: the timeline producers stamp against and the wall mapping
 	/// advertised at the catalog root.
 	///
-	/// Copies share the epoch, so handing them to concurrent producers keeps every track on
-	/// one timeline. Translate a source with its own zero through
-	/// [`Clock::source`](crate::Clock::source).
+	/// Copies share the timeline, so handing them to concurrent producers keeps every track on
+	/// one clock. A container importer may still re-anchor it on its first timestamp (see
+	/// [`Config::with_clock`]), so read it after that when mixing the two.
 	pub fn clock(&self) -> crate::Clock {
-		self.clock
+		take(&self.current).clock
+	}
+
+	/// Map a stream's first timestamp to now, unless the clock is already anchored.
+	///
+	/// Container importers publish their stream's timestamps verbatim and call this before
+	/// writing each frame: the first call places the wall mapping so `pts` is live on arrival,
+	/// and every later call, from any track or importer sharing this catalog, is a no-op.
+	pub(crate) fn anchor(&mut self, pts: moq_net::Timestamp) -> crate::Result<()> {
+		if take(&self.current).anchored {
+			return Ok(());
+		}
+		let mut guard = self.modify()?;
+		// Another clone may have anchored between the check and the lock.
+		if guard.state.anchored {
+			return Ok(());
+		}
+		let since = std::time::Duration::from_micros(u64::try_from(pts.as_micros()).unwrap_or(u64::MAX));
+		let clock = crate::Clock::arrival(since)?;
+		guard.state.clock = clock;
+		guard.state.anchored = true;
+		guard.clock = Some(clock.wall());
+		guard.commit()
 	}
 
 	/// Begin reserving the initial track set, returning a clonable [`Reserved`](super::Reserved).
@@ -1032,13 +1059,12 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 
 		// Unset, a catalog mints hang's media defaults, sized so a segmented egress can serve a
-		// full playlist window rather than moq-net's live-edge default.
+		// full playlist window. Raw tracks impose no publisher age limit.
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		assert_eq!(
 			catalog.track_info(hang::catalog::PRIORITY.video).max_age,
 			hang::container::track_info(hang::catalog::PRIORITY.video).max_age
 		);
-		assert!(catalog.track_info(hang::catalog::PRIORITY.video).max_age > moq_net::track::DEFAULT_MAX_AGE);
 
 		// An override reaches every media track this catalog mints, and does NOT disturb the
 		// timescale hang pins (or survive a retimescale for a source-scale container).
@@ -1047,22 +1073,22 @@ mod test {
 		let catalog = Producer::new(&mut broadcast, config).unwrap();
 
 		let info = catalog.track_info(hang::catalog::PRIORITY.video);
-		assert_eq!(info.max_age, std::time::Duration::from_secs(3));
+		assert_eq!(info.max_age, Some(std::time::Duration::from_secs(3)));
 		assert_eq!(info.timescale, hang::container::TIMESCALE);
 
 		let at = info.with_timescale(moq_net::Timescale::MILLI);
-		assert_eq!(at.max_age, std::time::Duration::from_secs(3));
+		assert_eq!(at.max_age, Some(std::time::Duration::from_secs(3)));
 		assert_eq!(at.timescale, moq_net::Timescale::MILLI);
 
 		// Every handle mints under the same policy, whatever order it was taken in: the codec
 		// paths hold a reservation and the container paths hold a clone.
 		assert_eq!(
 			catalog.reserve().track_info(hang::catalog::PRIORITY.video).max_age,
-			std::time::Duration::from_secs(3)
+			Some(std::time::Duration::from_secs(3))
 		);
 		assert_eq!(
 			catalog.clone().track_info(hang::catalog::PRIORITY.video).max_age,
-			std::time::Duration::from_secs(3)
+			Some(std::time::Duration::from_secs(3))
 		);
 	}
 
@@ -1277,10 +1303,41 @@ mod test {
 		let catalog = Producer::new(&mut broadcast, config).unwrap();
 
 		// A recording import advertises the content's start, not the construction instant.
-		assert_eq!(
-			catalog.snapshot().clock.map(|clock| clock.wall),
-			Some(moq_net::Timestamp::from_micros(60_000_000).unwrap())
+		let advertised = Some(moq_net::Timestamp::from_micros(60_000_000).unwrap());
+		assert_eq!(catalog.snapshot().clock.map(|clock| clock.wall), advertised);
+
+		// An importer's first timestamp never re-anchors an explicit clock.
+		let mut catalog = catalog;
+		catalog.anchor(moq_net::Timestamp::from_secs(3600).unwrap()).unwrap();
+		assert_eq!(catalog.snapshot().clock.map(|clock| clock.wall), advertised);
+	}
+
+	/// The first anchor maps its timestamp to now for every clone; later ones change nothing.
+	#[test]
+	fn anchor_places_the_default_clock_once() {
+		use std::time::{Duration, SystemTime};
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let mut clone = catalog.clone();
+
+		let first = moq_net::Timestamp::from_secs(3600).unwrap();
+		catalog.anchor(first).unwrap();
+		let clock = clone.clock();
+		assert_eq!(catalog.snapshot().clock, Some(clock.wall()), "the anchor is advertised");
+		assert!(
+			clock.now().as_micros() >= first.as_micros(),
+			"the clock reads on from the anchor"
 		);
+		let drift = clock
+			.wall_clock(first)
+			.unwrap()
+			.duration_since(SystemTime::now())
+			.unwrap_or_else(|err| err.duration());
+		assert!(drift < Duration::from_secs(1), "the first timestamp is live on arrival");
+
+		clone.anchor(moq_net::Timestamp::ZERO).unwrap();
+		assert_eq!(catalog.clock().wall(), clock.wall(), "a second anchor is a no-op");
 	}
 
 	fn h264_config() -> VideoConfig {

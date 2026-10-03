@@ -23,7 +23,7 @@ default:
 # check` pass: clippy is a superset of it, and the two use different rustc
 # wrappers, so running both compiles the workspace twice.
 #
-# A bare `just rs check` is default-members, which skips libmoq, moq-ffi,
+# A bare `just rs check` is default-members, which skips moq-c, moq-ffi,
 # moq-gst, and moq-wasm; pass `--workspace` for all of it.
 
 # Compile, lint, format-check, doc-check, and verify dependency hygiene.
@@ -127,10 +127,13 @@ capture-test *args:
 # than a denying clippy: the capture plumbing is dead on a target without a
 # capture backend.
 
-# Compile the Android backends, which the host-target check skips.
+# Compile the Android backends, which the host-target check skips, and assert the
+# moq-ffi library links logcat: `Log::init` is silent on Android without it.
 [positional-arguments]
 android *args:
     cargo ndk -t arm64-v8a --platform 26 check --locked -p moq-video --all-targets "$@"
+    cargo ndk -t arm64-v8a --platform 26 -o target/android-jni build --locked -p moq-ffi "$@"
+    nm -D --undefined-only target/android-jni/arm64-v8a/libmoq_ffi.so | grep -q __android_log_
 
 # moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so only a wasm32
 # build sees the code. Not to be confused with `just js wasm`, which builds the
@@ -159,7 +162,7 @@ relay-minimal:
 
 # Outside nextest because the staticlib link alone outlasts its hang budget.
 
-# Compile and run libmoq's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
+# Compile and run moq-c's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
 c-tests:
     sh/rs/c-tests.sh
 
@@ -288,10 +291,10 @@ package-nfpm *args:
 package-ffi *args:
     rs/moq-ffi/build.sh "$@"
 
-# Build and package libmoq.
+# Build and package moq-c.
 [positional-arguments]
-package-libmoq *args:
-    rs/libmoq/build.sh "$@"
+package-moq-c *args:
+    rs/moq-c/build.sh "$@"
 
 # Build and package the moq-gst GStreamer plugin.
 [positional-arguments]

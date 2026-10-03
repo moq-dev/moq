@@ -11,7 +11,7 @@ configure and observe audio playout delay.
 - One PR, each wrapper touched once, in its own idiom: durations as the
   language's duration type where the wrapper already uses one, handles over
   flat methods where a surface has more than one call.
-- moq-ffi only, not libmoq: the [generated C](/quest/m1/c/README.md) and
+- moq-ffi only, not the hand-written moq-c: the [generated C](/quest/m1/c/README.md) and
   C++ bindings inherit it from moq-ffi.
 - Update `doc/lib/{py,swift,kt,go,dart}` in the same PR.
 - Test configuration and observed delay in every wrapper that has tests.

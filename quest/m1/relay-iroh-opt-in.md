@@ -14,7 +14,7 @@ Decided in planning:
   questline dials native peers over it, which mDNS's LAN discovery doesn't
   replace. `moq relay` (the planned verb) keeps iroh through moq-cli's
   features.
-- Target `dev`. Removing a default feature from a published crate, and
+- Removing a default feature from a published crate, and
   flags from a shipped binary, is a published break.
 
 Guidance:

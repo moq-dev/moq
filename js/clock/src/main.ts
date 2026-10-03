@@ -181,7 +181,7 @@ async function subscribe(config: Config) {
 		}
 	}
 
-	connection.close();
+	await connection.close();
 	origin.close();
 }
 

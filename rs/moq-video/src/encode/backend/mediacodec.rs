@@ -286,12 +286,13 @@ impl MediaCodec {
 			} else if !unit.is_empty() {
 				let timestamp =
 					take_timestamp(&mut self.pending, &mut self.last_timestamp, info.presentation_time_us());
-				let payload = if flags & FLAG_KEY_FRAME != 0 {
+				let keyframe = flags & FLAG_KEY_FRAME != 0;
+				let payload = if keyframe {
 					with_parameter_sets(self.parameter_sets.as_ref(), self.kind, unit)
 				} else {
 					unit
 				};
-				out.push(Encoded::new(payload, timestamp));
+				out.push(Encoded::new(payload, timestamp, keyframe));
 			}
 
 			if flags & FLAG_END_OF_STREAM != 0 {

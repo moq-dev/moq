@@ -8,6 +8,7 @@ import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamErr
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import type * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
+import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
 import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
 import * as Cluster from "./cluster.ts";
@@ -32,6 +33,7 @@ const PADDING = 0x132b3e28n;
  * @public
  */
 export class Connection implements Established {
+	#closing?: Promise<void>;
 	// The URL of the connection.
 	readonly url: URL;
 
@@ -171,10 +173,16 @@ export class Connection implements Established {
 		return transportStats(this.#quic);
 	}
 
-	/**
-	 * Closes the connection.
-	 */
-	close() {
+	/** Withdraw announcements and wait up to one second for delivery before closing. */
+	close(): Promise<void> {
+		this.#closing ??= withTimeout(this.#publisher.withdraw(), 1000, "session close timed out").finally(() =>
+			this.abort(),
+		);
+		return this.#closing;
+	}
+
+	/** End the session immediately without waiting for delivery. */
+	abort(): void {
 		if (this.#closed) return;
 		this.#subscriber.close();
 		this.#close();
@@ -210,7 +218,11 @@ export class Connection implements Established {
 				console.error("fatal error running connection", err);
 			}
 		} finally {
-			this.#close();
+			// A graceful close owns the teardown while it drains. runPublishNamespaces is
+			// a tracked withdrawal, so a failure in it ends this driver while close() is
+			// still waiting on the sibling loops; closing here would drop their
+			// withdrawals. close() aborts once its barrier settles or the deadline hits.
+			if (!this.#closing) this.#close();
 		}
 	}
 

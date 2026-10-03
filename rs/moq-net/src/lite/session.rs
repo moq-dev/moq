@@ -256,13 +256,18 @@ where
 		Poll::Ready(res)
 	}
 
+	/// Start withdrawing this session's announcements.
+	pub(crate) fn close(&self) {
+		self.publisher.close();
+	}
+
 	/// Whether no stream still owes the peer data, for a draining close.
 	pub(crate) fn drained(&self) -> bool {
 		self.publisher.drained()
 	}
 
 	fn poll_protocol(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let mut cx = Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 
 		// The send-side machines never end the session; completion just retires them.
 		if let Some(setup) = &mut self.setup
@@ -439,7 +444,7 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let mut cx = Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		loop {
 			match &mut self.state {
 				SendGoawayState::Waiting => {

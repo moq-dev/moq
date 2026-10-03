@@ -43,16 +43,20 @@ announced, err := client.Announced(moq.AnnounceOptions{Prefix: "demos/"})
 if err != nil {
 	log.Fatal(err)
 }
-for ann, err := range announced.All(ctx) {
+for event, err := range announced.All(ctx) {
 	if err != nil {
 		if moq.IsShutdown(err) {
 			break
 		}
 		log.Fatal(err)
 	}
-	// Prefix stays origin-relative; Captures reports wildcard matches.
-	fmt.Println("got broadcast", ann.Prefix())
-	fmt.Println("captures", ann.Captures())
+	switch event := event.(type) {
+	case moq.AnnounceEventStart:
+		// Prefix stays origin-relative; Captures reports wildcard matches.
+		fmt.Println("got broadcast", event.Announce.Prefix)
+	case moq.AnnounceEventLive:
+		fmt.Println("caught up; later events are live changes")
+	}
 }
 ```
 
