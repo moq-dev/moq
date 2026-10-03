@@ -19,7 +19,6 @@ pub(crate) mod clock;
 mod datagram;
 pub(crate) mod pump;
 mod requests;
-pub(crate) mod resume;
 mod subscription;
 mod time;
 mod timed;

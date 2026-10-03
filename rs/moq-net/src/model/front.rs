@@ -1,8 +1,8 @@
 //! The origin's failover as a state machine.
 //!
-//! A [`Front`] is one path served through a spliced broadcast: it picks the
-//! source it serves from and splices each logical track from that source's
-//! copy, re-splicing when the source is replaced and refusing what a source
+//! A [`Front`] is one path served through one broadcast: it picks the source it
+//! serves from and splices each logical track from that source's copy (a pump
+//! writes it; see `super::pump`), re-splicing when the source is replaced and refusing what a source
 //! will not serve. Everything here is plain data: [`Front::step`] takes one
 //! [`Event`] and returns the [`Action`]s to perform, without locks or waiters.
 //! The origin's driver task feeds events from the world (the route table, the
@@ -53,7 +53,7 @@ pub(super) enum Event {
 	Resolved { route: u64, result: Result<u64, Refusal> },
 	/// A source closed: it will never serve again.
 	SourceClosed { source: u64 },
-	/// The spliced broadcast handed out a new logical track to serve. It has no
+	/// The front's broadcast handed out a new logical track to serve. It has no
 	/// reader until [`Event::Used`] says so.
 	TrackAssigned { track: Arc<str>, now: Instant },
 	/// A source answered a track query: its copy's metadata, or a refusal.
@@ -104,9 +104,9 @@ pub(super) enum Action {
 	/// Ask `source` for its copy of `track`; feed the answer back as
 	/// [`Event::TrackInfo`].
 	Query { track: Arc<str>, source: u64 },
-	/// Splice `source`'s copy of `track` in, resuming where the segments stop.
+	/// Splice `source`'s copy of `track` in, resuming where the logical track stops.
 	Splice { track: Arc<str>, source: u64 },
-	/// Drop the source copy of `track` but keep the delivered groups spliced,
+	/// Drop the source copy of `track` but keep the delivered groups cached,
 	/// so resume stays seamless while nobody reads.
 	Park { track: Arc<str> },
 	/// Remove `track` from the broadcast and drop everything behind it, unless a reader
@@ -174,15 +174,15 @@ impl Identity {
 /// Where a track stands with respect to its source copy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum TrackState {
-	/// No copy: nothing spliced, or the segment stays spliced from a source
-	/// that left.
+	/// No copy: nothing spliced, or the track keeps what a source that left
+	/// delivered.
 	Idle,
 	/// A source was asked for its copy.
 	Querying { source: u64 },
 	/// A source's copy is spliced in and being served.
 	Spliced { source: u64 },
 	/// Nobody reads it: the copy was dropped, and whatever the track delivered
-	/// stays spliced until the linger expires and the track is forgotten.
+	/// stays cached until the linger expires and the track is forgotten.
 	Parked { since: Instant },
 }
 
@@ -627,7 +627,7 @@ impl Front {
 		};
 		track.used = false;
 		match track.state {
-			// A local source keeps its own cache, so a warm copy would only be a staler
+			// A local source keeps its own cache, so a cached copy would only be a staler
 			// duplicate of it: forget the track outright, and a returning reader
 			// re-splices the source and reads its cache against the real live edge.
 			TrackState::Spliced { .. } if self.identity == Identity::Local => {
@@ -635,7 +635,7 @@ impl Front {
 				actions.push(Action::Forget { track: name });
 			}
 			// Drop the copy so the source goes idle at once; the delivered
-			// groups stay spliced for the linger.
+			// groups stay cached for the linger.
 			TrackState::Spliced { .. } => {
 				track.state = TrackState::Parked { since: now };
 				actions.push(Action::Park { track: name });

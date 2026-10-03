@@ -816,8 +816,8 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 							Err(err) => return Poll::Ready(Err(err)),
 						};
 						// The stream may carry only the tail of the group; number the frames
-						// from where the publisher said they start so a reader splicing
-						// across routes lines them up. A peer that can't start partway
+						// from where the publisher said they start so a front continuing the
+						// group across routes lines them up. A peer that can't start partway
 						// through sends the group from its head, and the frames below the
 						// requested start are dropped as they arrive.
 						let skip = entry
@@ -2049,9 +2049,8 @@ mod tests {
 		}
 	}
 
-	/// The `(group, frame)` bounds `resume::slice` produces after a mid-group takeover: a
-	/// subscriber resuming at frame 3 of group 5, capped by a later boundary in the same
-	/// group.
+	/// Mid-group demand: a subscriber resuming at frame 3 of group 5, capped by a later
+	/// bound in the same group.
 	fn mid_group_demand() -> Subscription {
 		Subscription::default()
 			.with_start(Position { group: 5, frame: 3 })
@@ -2063,8 +2062,8 @@ mod tests {
 	///
 	/// The codec rejects a frame bound such a peer cannot carry, so passing the demand
 	/// through unchanged fails the SUBSCRIBE and hands the track back. The origin then
-	/// re-splices the same route indefinitely, since the splice itself keeps succeeding
-	/// and the retry budget never trips.
+	/// asks the same route again indefinitely, since asking keeps succeeding and the
+	/// retry budget never trips.
 	#[tokio::test]
 	async fn frame_bounds_widen_for_an_older_peer() {
 		let mut h = Harness::new(Version::Lite05);
@@ -3343,15 +3342,15 @@ impl std::task::Wake for RouteWake {
 enum ServeEnd {
 	/// The upstream FIN'd: the track is over for good.
 	Finished,
-	/// The route or session failed: abort the track so the origin re-splices it
-	/// from another source.
+	/// The route or session failed: abort the track so the origin serves it from
+	/// another source.
 	GiveBack(Error),
 	/// No consumers or in-flight fetches remain; the owner must commit the idle abort.
 	Idle,
 }
 
 /// Serves one requested track for a relay: owns this session's copy of the
-/// track (spliced into the origin's logical track), driving the single upstream
+/// track (pumped into the origin's logical track), driving the single upstream
 /// subscription (opened lazily on the first downstream subscriber, canceled when
 /// the last one leaves) concurrently with any number of one-shot fetches.
 #[derive(Clone)]
@@ -3412,9 +3411,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		// An empty half-open range asks for nothing, and the wire cannot say that: its
 		// bounds are inclusive, so the nearest encoding either hands back the position
 		// the caller excluded or inverts the range outright once the two bounds meet. No
-		// demand at all is the faithful translation. `resume::slice` reaches this on its
-		// own: a subscriber resuming exactly at a segment's cap owes that segment nothing.
-		// An absent start is the live edge, wherever that lands, so the only end that is
+		// demand at all is the faithful translation. An absent start is the live edge, wherever that lands, so the only end that is
 		// certainly empty is the very first position, which is what `Position::default()`
 		// stands in for.
 		let pref = pref.filter(|sub| sub.end.is_none_or(|end| end > sub.start.unwrap_or_default()));
@@ -3494,11 +3491,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 	/// in the map yet is dropped, stalling the track forever). The caller
 	/// deregisters `id` if the establish fails.
 	///
-	/// The subscription's bounds come straight from the demand aggregate. After a
-	/// route change a takeover boundary caps the *previous* segment's `end_group`;
-	/// the segment resuming the track keeps whatever start the subscribers asked for,
-	/// so a live-edge subscriber gets the live edge upstream rather than a replay of
-	/// the outage.
+	/// The subscription's bounds come straight from the demand aggregate.
 	fn prepare_establish(
 		&self,
 		producer: &mut track::Producer,
@@ -3938,15 +3931,15 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 	}
 }
 
-/// The serve loop proper: owns this session's copy of the track (spliced into
+/// The serve loop proper: owns this session's copy of the track (pumped into
 /// the origin's logical track), driving the single upstream subscription
 /// (opened lazily on the first downstream subscriber, canceled when the last
 /// one leaves) concurrently with any number of one-shot fetches.
 struct ServeLoop<S: crate::transport::poll::Session> {
-	/// This session's copy, accepted with the resolved info. The origin splices
+	/// This session's copy, accepted with the resolved info. The origin pumps
 	/// it into the logical track; demand from the logical subscribers arrives
-	/// through the producer's aggregate, sliced to this segment's bounds
-	/// (including the resume floor after a source change).
+	/// through the producer's aggregate (including the resume floor after a source
+	/// change).
 	serving: track::Producer,
 	/// Watches `serving`'s subscribers, to release the copy once nobody reads it.
 	demand: track::Demand,
@@ -4159,7 +4152,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 									// SUBSCRIBE_START names the first group this feed serves:
 									// the publisher skipped everything below it (e.g. it could
 									// not serve the requested frame). Record it as a drop
-									// signal, so a spliced reader waiting on a skipped group
+									// signal, so a reader waiting on a skipped group
 									// fails over instead of stalling on a live route.
 									lite::SubscribeResponse::Start(start) => {
 										// A START describes the demand the SUBSCRIBE carried.

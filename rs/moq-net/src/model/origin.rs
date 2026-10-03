@@ -1,4 +1,4 @@
-use crate::{broadcast, cache, group, stats, track};
+use crate::{broadcast, cache, stats, track};
 use kio::Task;
 use std::{
 	cmp::Reverse,
@@ -997,15 +997,15 @@ impl Horizon {
 	}
 }
 
-/// One remotely-served front in [`OriginState::fronts`]: the shared spliced
-/// broadcast at a path plus the channel requesters resolve through.
+/// One remotely-served front in [`OriginState::fronts`]: the shared broadcast at a
+/// path plus the channel requesters resolve through.
 #[derive(Clone)]
 struct RemoteFront {
 	/// Resolves requesters with the front's consumer (or the error that ended it
 	/// unresolved). The producer lives here so the teardown can reject requesters
 	/// still parked on a front whose watcher was cancelled.
 	request: kio::Producer<PendingBroadcast>,
-	/// The front's spliced broadcast, weak: dead once the front ends, so a
+	/// The front's broadcast, weak: dead once the front ends, so a
 	/// later request re-creates the front instead of joining a corpse.
 	broadcast: broadcast::WeakConsumer,
 	/// Which routes serve the front's content, fixed by its first source. A
@@ -1532,10 +1532,10 @@ impl Producer {
 	///
 	/// This is how local content enters an origin. The returned
 	/// [`broadcast::Producer`] is a source: the origin owns the broadcast
-	/// consumers actually see, and splices its tracks across every source created
-	/// at the same path, preferring the newest. When the serving source changes,
-	/// tracks resume from the replacement at the first missing group; consumers
-	/// never observe the swap.
+	/// consumers actually see, and feeds its tracks from every source created at the
+	/// same path, preferring the newest. When the serving source changes, tracks
+	/// resume from the replacement where they left off; consumers never observe the
+	/// swap.
 	///
 	/// The broadcast exists for nobody until [`broadcast::Producer::announce`]:
 	/// until then no announce cursor lists it and a request for its path fails
@@ -2232,17 +2232,17 @@ impl Drop for DriverState {
 	}
 }
 
-/// How long a spliced track stays warm after its last reader leaves.
+/// How long a front's track stays cached after its last reader leaves.
 ///
 /// Within the window a returning viewer, or the next of a run of back-to-back
 /// fetches, reads the groups the front already cached: no second round trip for
-/// `TRACK_INFO`. Groups past that cached edge cost a fresh source splice. After
+/// `TRACK_INFO`. Groups past that cached edge cost asking a source again. After
 /// the window the track is forgotten, finished and aborted ones included, so a
 /// long-lived broadcast only holds the tracks read recently.
 ///
 /// Sized above the fetch cadence of a segmented consumer: HLS polls every
 /// `TARGETDURATION` seconds, commonly 6 or 10, so a shorter window would drop the
-/// copy between every segment and re-request the track each time. A warm copy
+/// copy between every segment and re-request the track each time. A cached track
 /// holds no upstream subscription (that is canceled as soon as demand ends), so
 /// waiting longer costs cached state, not a viewer.
 const TRACK_IDLE_LINGER: Duration = Duration::from_secs(30);
@@ -2251,7 +2251,7 @@ const TRACK_IDLE_LINGER: Duration = Duration::from_secs(30);
 struct FrontTask {
 	/// The route table the front selects from.
 	shared: kio::Shared<OriginState>,
-	/// The spliced broadcast the front serves.
+	/// The broadcast the front serves.
 	broadcast: broadcast::Producer,
 	/// Absolute path of the front.
 	path: PathOwned,
@@ -3137,8 +3137,8 @@ struct OriginState {
 	cursors: HashMap<ConsumerId, TableCursor>,
 
 	// The remotely-served fronts, keyed by absolute path and the requester's
-	// split-horizon exclusion. Each is a spliced broadcast whose watcher task
-	// materializes it from the best covering route and re-splices it through
+	// split-horizon exclusion. Each is a broadcast whose watcher task
+	// materializes it from the best covering route and switches it between
 	// routes sharing its first hop, so a route change the identity survives is
 	// invisible to subscribers. Keyed per exclusion so a front's failover can
 	// never adopt a route flowing back through one of its own readers. Weak, so
@@ -4234,8 +4234,8 @@ impl Consumer {
 	/// cheapest, a broadcast published on this origin winning ties) and
 	/// materializes it, from the broadcast itself or from the peer that
 	/// announced the route. When its serving source dies or a better qualifying
-	/// route appears, the front re-splices through the best route sharing its
-	/// first hop at a group boundary, invisibly to subscribers. A change that
+	/// route appears, the front switches to the best route sharing its first hop,
+	/// invisibly to subscribers. A change that
 	/// does not preserve the first hop ends the broadcast instead, as does its
 	/// route retracting with no replacement, and the next request re-serves the
 	/// path. Tracks already in flight carry on to their own end.
@@ -4289,11 +4289,11 @@ impl Consumer {
 
 		// Join the live front for this path and exclusion, if any: its watcher
 		// resolves (or already resolved) the request channel with the front's
-		// spliced broadcast, so repeat requests share one upstream
+		// broadcast, so repeat requests share one upstream
 		// subscription. Only while the best route still serves the front's
 		// content, though: once a different publisher wins (a cheaper route), a
 		// newcomer gets a fresh front from it, and the old front keeps serving the
-		// readers it has, since other content can't be spliced into it.
+		// readers it has, since other content can't continue its tracks.
 		let key = (absolute.clone(), self.horizon);
 		if let Some(front) = state.fronts.get(&key) {
 			let pin = *front.pin.lock();
@@ -4311,7 +4311,7 @@ impl Consumer {
 
 		// A route covers the path: mint the front and hand its watcher the
 		// request. The watcher materializes the path from the best covering
-		// route, resolves the channel, and re-splices the front through
+		// route, resolves the channel, and switches the front between
 		// routes sharing its first hop for as long as one serves.
 		let broadcast = broadcast::Producer::new(broadcast::Info {
 			pool: self.pool.clone(),
@@ -6070,7 +6070,7 @@ mod tests {
 	async fn returning_reader_continues_an_open_warm_group() {
 		let (_server, _upstream, mut dynamic, resolved) = served_front().await;
 
-		async fn read(group: &mut group::Consumer) -> Vec<u8> {
+		async fn read(group: &mut crate::group::Consumer) -> Vec<u8> {
 			let frame = tokio::time::timeout(Duration::from_secs(1), group.read_frame())
 				.await
 				.expect("frame")
@@ -6158,7 +6158,7 @@ mod tests {
 		queued(&first_server).await.accept(&upstream);
 		let resolved = pending.await.unwrap();
 
-		async fn read(group: &mut group::Consumer) -> Vec<u8> {
+		async fn read(group: &mut crate::group::Consumer) -> Vec<u8> {
 			let frame = tokio::time::timeout(Duration::from_secs(1), group.read_frame())
 				.await
 				.expect("frame")
@@ -6281,8 +6281,8 @@ mod tests {
 		));
 	}
 
-	/// A returning reader is handed the parked open group spliced onto the source's
-	/// continuation, which starts past the warm head. The group's end stays unknown
+	/// A returning reader is handed the parked open group, continued by the source
+	/// from past the warm head. The group's end stays unknown
 	/// until the source finishes it, even before a frame of it is read: readers drop a
 	/// group ahead of their cursor whose end resolves to an error.
 	#[tokio::test]
@@ -7569,7 +7569,7 @@ mod tests {
 		let replacement = broadcast::Info::new().produce();
 		let track = replacement.create_track("video", None).unwrap();
 		// The same content: group 0 was already delivered through the old route,
-		// so the splice resumes at group 1.
+		// so the track resumes at group 1.
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -8134,7 +8134,7 @@ mod tests {
 	/// An origin front drops the source track as soon as its last reader leaves,
 	/// so the publisher's `unused()` resolves far below `TRACK_IDLE_LINGER`.
 	/// Cached groups stay on the front for the linger; a returning reader
-	/// replays them and re-splices for groups past that edge.
+	/// replays them and asks the source again for groups past that edge.
 	#[tokio::test]
 	async fn origin_front_drops_the_source_when_unused() {
 		let producer = origin(1).produce();
@@ -8195,12 +8195,11 @@ mod tests {
 	}
 
 	/// A returning reader judges the warm cache against the logical track's live
-	/// edge, not the parked segment's own frozen one: groups the fresh source
-	/// has left behind by more than the budget are skipped, exactly as they would
-	/// be on one unspliced track.
+	/// edge: groups the fresh source has left behind by more than the budget are
+	/// skipped, exactly as they would be on a track read without a break.
 	///
 	/// A local source is released rather than parked (it keeps its own cache), so
-	/// this goes through a served front, which is what actually holds the warm copy.
+	/// this goes through a served front, which is what actually holds the cache.
 	/// The copy resolves at the cached edge, not past it: resolving past it drops
 	/// the cache outright, which is a different case.
 	#[tokio::test]
@@ -8254,7 +8253,7 @@ mod tests {
 		for (sequence, millis) in [(20, 400), (21, 420), (22, 440)] {
 			write(&source, sequence, millis);
 		}
-		// At the cached edge, not past it, so the warm copy stays and the budget
+		// At the cached edge, not past it, so the cache stays and the budget
 		// decides. Past it, the copy has already judged the cache stale.
 		source.start_at(3).unwrap();
 		let mut subscription = subscribing.await.unwrap().expect("resubscribe");
@@ -8265,10 +8264,9 @@ mod tests {
 		assert_eq!(drain(&mut subscription), [3, 20, 21, 22]);
 	}
 
-	/// A front serving from another front's spliced copy has no snapshot to keep:
-	/// it still drops upstream on the unused edge, so the publisher's `unused()`
-	/// resolves far below `TRACK_IDLE_LINGER` through the whole chain. The next
-	/// reader re-splices, paying `TRACK_INFO` again.
+	/// A front serving from another front still drops upstream on the unused edge,
+	/// so the publisher's `unused()` resolves far below `TRACK_IDLE_LINGER` through
+	/// the whole chain, while each front keeps the groups it delivered.
 	#[tokio::test]
 	async fn chained_front_drops_the_source_when_unused() {
 		let leaf = origin(1).produce();
@@ -8280,8 +8278,7 @@ mod tests {
 		group.write_frame(crate::Timestamp::ZERO, b"cached".as_ref()).unwrap();
 		group.finish().unwrap();
 
-		// The leaf's front view: a spliced broadcast, so any front serving from
-		// it holds a spliced source copy with nothing to snapshot.
+		// The leaf's front view, which the next front serves from.
 		let leaf_front = leaf_consumer.request_broadcast("room/alice").await.expect("resolves");
 
 		let mid = origin(2).produce();
@@ -8312,9 +8309,9 @@ mod tests {
 			.expect("chained unused should resolve far below TRACK_IDLE_LINGER")
 			.expect("source closed");
 
-		let cached = edge_resolved.track("video").unwrap().cached_groups();
+		let cached = edge_resolved.track("video").unwrap().cached_sequences();
 		assert_eq!(
-			cached.iter().map(|(group, _)| group.sequence).collect::<Vec<_>>(),
+			cached,
 			vec![0],
 			"every front keeps the delivered groups after releasing its source"
 		);
@@ -8346,9 +8343,9 @@ mod tests {
 			.expect("second chained unused should resolve far below TRACK_IDLE_LINGER")
 			.expect("source closed");
 
-		let cached = edge_resolved.track("video").unwrap().cached_groups();
+		let cached = edge_resolved.track("video").unwrap().cached_sequences();
 		assert_eq!(
-			cached.iter().map(|(group, _)| group.sequence).collect::<Vec<_>>(),
+			cached,
 			vec![0, 1],
 			"repeated demand keeps every complete group while releasing its source"
 		);
