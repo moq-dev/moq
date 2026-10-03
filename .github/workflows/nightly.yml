@@ -138,6 +138,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command cargo bench --locked -p moq-net --features fuzz --bench '*' -- --test
 
+      # The catalog bench asserts the estimate rate limit's publish counts, so one pass is
+      # the regression check.
+      - name: moq-mux catalog estimate fanout benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command cargo bench --locked -p moq-mux --bench catalog -- --test
+
       - name: BBB rendition alignment
         if: ${{ !cancelled() }}
         run: nix develop --command just pub check-bbb

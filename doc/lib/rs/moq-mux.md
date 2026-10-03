@@ -42,8 +42,11 @@ retires the entry. Calling `modify` before the first `set` returns
 measure batch span or reorder delay for jitter. Locally encoded frames call
 `container::Producer::flush(timestamp, Instant::now())`; jitter is the spread
 above that track's own recent minimum lateness, and delay is how far that
-minimum trails the earliest track on the same catalog. Both are published as
-soon as they rise. `import::Track::discontinuity()` marks a source seek or
+minimum trails the earliest track on the same catalog. The first rise publishes
+the catalog at once; later rises within a second stay in the catalog and go out
+with the first frame after that second, or with any earlier structural edit.
+There is no timer, so a rise held when media stops waits for the next frame.
+`import::Track::discontinuity()` marks a source seek or
 pause, clears partial input, and restarts the flush baseline without lowering
 advertised values. It forwards the container timeline marker, so resumed
 timestamps must continue forward on the broadcast clock. Generic imports remain

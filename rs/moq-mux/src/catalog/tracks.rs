@@ -610,8 +610,10 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	/// [`set`](Self::set).
 	///
 	/// Mint the estimate from an [`Estimator`](super::Estimator), usually the one owned by a
-	/// [`container::Producer`](crate::container::Producer). Cheap to call after every write, since an
-	/// estimate that resolves to what the catalog already carries doesn't republish it.
+	/// [`container::Producer`](crate::container::Producer). Call it after every write: an estimate
+	/// that resolves to what the catalog already carries doesn't republish it, and a `jitter` or
+	/// `delay` rise republishes at most once a second (see
+	/// [`Guard::commit_estimate`](super::Guard::commit_estimate)), going out on a later call.
 	///
 	/// Calling this before [`set`](Self::set) is not wasted: the measurement is remembered and seeds
 	/// the config once it lands.
@@ -630,12 +632,29 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		resolved.jitter = resolved.jitter.max(published.jitter);
 		resolved.delay = resolved.delay.max(published.delay);
 		self.detected = estimate;
-		if self.published.as_ref() != Some(&resolved) {
-			let mut config = self.config()?;
-			config.set_estimate(resolved.clone());
-			self.replace(config)?;
-			self.published = Some(resolved);
+		if self.published.as_ref() == Some(&resolved) {
+			// Still an observation: it releases a rise held back until its window ended. A closed
+			// catalog has nothing left to release.
+			if let Ok(guard) = self.catalog.modify() {
+				guard.commit_estimate()?;
+			}
+			return Ok(());
 		}
+
+		// Bitrate and framerate are already measured over a second of media, so they never churn;
+		// only jitter and delay climb a step per frame.
+		let throttled = self.published.as_ref().is_some_and(|published| {
+			published.bitrate == resolved.bitrate && published.framerate == resolved.framerate
+		});
+		let mut config = self.config()?;
+		config.set_estimate(resolved.clone());
+		let guard = self.stage(config)?;
+		if throttled {
+			guard.commit_estimate()?;
+		} else {
+			guard.commit()?;
+		}
+		self.published = Some(resolved);
 		Ok(())
 	}
 
@@ -666,6 +685,11 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	}
 
 	pub(crate) fn replace(&mut self, config: C) -> crate::Result<()> {
+		self.stage(config)?.commit()
+	}
+
+	/// Write `config` into the catalog, leaving the caller to choose how the guard publishes it.
+	fn stage(&mut self, config: C) -> crate::Result<super::Guard<'_, E>> {
 		if !self.present {
 			return Err(crate::Error::NotPublished);
 		}
@@ -675,7 +699,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		config.insert(&mut next, &self.name);
 		serde_json::to_writer(std::io::sink(), &next).map_err(moq_json::Error::from)?;
 		*guard = next;
-		guard.commit()
+		Ok(guard)
 	}
 }
 

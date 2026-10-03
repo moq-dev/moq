@@ -36,6 +36,35 @@ struct State<E: CatalogExt> {
 	/// Whether the clock's mapping is settled: set by [`Config::with_clock`] or placed by an
 	/// importer's first timestamp. Until then [`Producer::anchor`] may still place it.
 	anchored: bool,
+
+	/// Holds estimate-driven publishes to one per [`ESTIMATE_WINDOW`].
+	estimates: Throttle,
+}
+
+/// How often a rising `jitter` or `delay` estimate may republish the catalog. Each republish makes
+/// every viewer update every media subscription, and an overloaded publisher's estimate rises a
+/// millisecond at a time.
+const ESTIMATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The window an estimate-driven publish opens (see [`Guard::commit_estimate`]).
+///
+/// No timer: a held estimate goes out on the first observation after the window ends, so the
+/// catalog needs no runtime. If media stops, so does the estimate it would carry.
+#[derive(Default)]
+struct Throttle {
+	/// When the last publish carrying an estimate went out.
+	last: Option<web_async::time::Instant>,
+	/// An estimate is in the catalog but not yet on the wire.
+	pending: bool,
+}
+
+impl Throttle {
+	/// A publish is going out: any held estimate rides it and opens a new window.
+	fn fold(&mut self) {
+		if std::mem::take(&mut self.pending) {
+			self.last = Some(web_async::time::Instant::now());
+		}
+	}
 }
 
 /// Take the shared state, ignoring a poisoned lock.
@@ -347,6 +376,7 @@ impl<E: CatalogExt> Producer<E> {
 				closed: None,
 				clock,
 				anchored,
+				estimates: Throttle::default(),
 			})),
 			timeline,
 			max_age: config.max_age,
@@ -592,6 +622,7 @@ impl<E: CatalogExt> Producer<E> {
 			}
 			r.pending = false;
 			r.published = true;
+			state.estimates.fold();
 			state.catalog.clone()
 		};
 		if let Err(err) = self.outputs.emit(&catalog) {
@@ -827,7 +858,29 @@ impl<E: CatalogExt> Guard<'_, E> {
 			r.published = true;
 		}
 
+		self.state.estimates.fold();
 		self.outputs.emit(&self.state.catalog)
+	}
+
+	/// Publish an estimate-driven edit, at most once per [`ESTIMATE_WINDOW`].
+	///
+	/// The first estimate publishes at once. Later ones inside the window stay in the catalog and go
+	/// out with the first call after the window ends, which an unchanged estimate makes too, or with
+	/// any [`commit`](Self::commit) before then.
+	pub(super) fn commit_estimate(mut self) -> crate::Result<()> {
+		if std::mem::take(&mut self.updated) {
+			self.state.estimates.pending = true;
+		}
+		let estimates = &self.state.estimates;
+		if !estimates.pending {
+			return Ok(());
+		}
+		let now = web_async::time::Instant::now();
+		if estimates.last.is_some_and(|last| now < last + ESTIMATE_WINDOW) {
+			return Ok(());
+		}
+		self.updated = true;
+		self.publish()
 	}
 
 	/// Release a name taken by [`Producer::acquire`], along with the entry it owns.
@@ -1762,5 +1815,162 @@ mod test {
 		let video = &msf.tracks[0];
 		assert_eq!(video.max_grp_sap_starting_type, None);
 		assert_eq!(video.max_obj_sap_starting_type, None);
+	}
+
+	/// A catalog with live video renditions named `names`, each already set.
+	fn estimating(names: &[&str]) -> (moq_net::broadcast::Producer, Producer, Vec<super::super::VideoTrack>) {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let reserved = catalog.reserve();
+		let renditions = names
+			.iter()
+			.map(|name| {
+				let mut rendition = reserved.init::<VideoConfig>(*name).unwrap();
+				rendition.set(VideoConfig::new(hang::catalog::VideoCodec::VP8)).unwrap();
+				rendition
+			})
+			.collect();
+		drop(reserved);
+		(broadcast, catalog, renditions)
+	}
+
+	fn jitter(ms: u64) -> super::super::Estimate {
+		super::super::Estimate::default().with_jitter(std::time::Duration::from_millis(ms))
+	}
+
+	/// How many catalogs have gone out on the wire.
+	fn sent(catalog: &Producer) -> Option<u64> {
+		catalog.outputs.hang_track.latest()
+	}
+
+	/// The catalog a viewer joining now receives.
+	fn wire(catalog: &Producer) -> Catalog<()> {
+		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang.consume());
+		match consumer.poll_next(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(Some(catalog))) => catalog,
+			_ => panic!("a published catalog"),
+		}
+	}
+
+	fn wire_jitter(catalog: &Producer, name: &str) -> Option<std::time::Duration> {
+		wire(catalog).video.renditions[name].jitter
+	}
+
+	/// A rising estimate publishes at once, then coalesces until an observation after the window,
+	/// which carries the latest value. Regression: every rise republished the catalog.
+	#[tokio::test(start_paused = true)]
+	async fn estimate_rises_publish_at_the_leading_edge_and_coalesce() {
+		let (_broadcast, catalog, mut renditions) = estimating(&["v"]);
+		let v = &mut renditions[0];
+		let initial = sent(&catalog);
+
+		v.estimate(jitter(1)).unwrap();
+		let leading = sent(&catalog);
+		assert_ne!(leading, initial, "the first rise publishes at once");
+		assert_eq!(wire_jitter(&catalog, "v"), Some(std::time::Duration::from_millis(1)));
+
+		for ms in 2..=17 {
+			tokio::time::advance(std::time::Duration::from_millis(50)).await;
+			v.estimate(jitter(ms)).unwrap();
+		}
+		assert_eq!(sent(&catalog), leading, "rises inside the window are held");
+		assert_eq!(
+			catalog.snapshot().video.renditions["v"].jitter,
+			Some(std::time::Duration::from_millis(17)),
+			"the held value is already in the catalog"
+		);
+
+		// No timer: the window ending publishes nothing until the next observation.
+		tokio::time::advance(std::time::Duration::from_millis(200)).await;
+		assert_eq!(sent(&catalog), leading);
+		v.estimate(jitter(17)).unwrap();
+		let trailing = sent(&catalog);
+		assert_ne!(trailing, leading, "an unchanged observation releases the held rise");
+		assert_eq!(wire_jitter(&catalog, "v"), Some(std::time::Duration::from_millis(17)));
+
+		// Nothing is held, so later observations publish nothing.
+		tokio::time::advance(std::time::Duration::from_secs(2)).await;
+		v.estimate(jitter(17)).unwrap();
+		assert_eq!(sent(&catalog), trailing);
+
+		// A rise a window after the trailing publish is a new leading edge.
+		v.estimate(jitter(18)).unwrap();
+		assert_ne!(sent(&catalog), trailing);
+		assert_eq!(wire_jitter(&catalog, "v"), Some(std::time::Duration::from_millis(18)));
+	}
+
+	/// A structural edit never waits, carries the held estimate, and opens a new window.
+	#[tokio::test(start_paused = true)]
+	async fn structural_edit_folds_a_held_estimate() {
+		let (_broadcast, mut catalog, mut renditions) = estimating(&["v"]);
+		let v = &mut renditions[0];
+		v.estimate(jitter(1)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(100)).await;
+		v.estimate(jitter(2)).unwrap();
+		let held = sent(&catalog);
+
+		catalog
+			.mutate(|catalog| {
+				catalog.video.display = Some(hang::catalog::Display {
+					width: 1280,
+					height: 720,
+				})
+			})
+			.unwrap();
+		let folded = sent(&catalog);
+		assert_ne!(folded, held, "a structural edit publishes at once");
+		assert_eq!(wire_jitter(&catalog, "v"), Some(std::time::Duration::from_millis(2)));
+
+		// The fold opened a window: the next rise inside it is held, and nothing is left to flush.
+		tokio::time::advance(std::time::Duration::from_millis(950)).await;
+		v.estimate(jitter(3)).unwrap();
+		assert_eq!(sent(&catalog), folded);
+		tokio::time::advance(std::time::Duration::from_millis(50)).await;
+		v.estimate(jitter(3)).unwrap();
+		assert_ne!(sent(&catalog), folded);
+		assert_eq!(wire_jitter(&catalog, "v"), Some(std::time::Duration::from_millis(3)));
+	}
+
+	/// The window is the catalog's, so a delay rise on one track waits behind a jitter rise on
+	/// another, and any track's next observation releases it.
+	#[tokio::test(start_paused = true)]
+	async fn estimate_window_is_shared_across_renditions() {
+		let (_broadcast, catalog, mut renditions) = estimating(&["a", "b"]);
+		let [a, b] = renditions.as_mut_slice() else {
+			unreachable!()
+		};
+		a.estimate(jitter(1)).unwrap();
+		let leading = sent(&catalog);
+		b.estimate(super::super::Estimate::default().with_delay(std::time::Duration::from_millis(7)))
+			.unwrap();
+		assert_eq!(sent(&catalog), leading);
+
+		tokio::time::advance(std::time::Duration::from_secs(1)).await;
+		a.estimate(jitter(1)).unwrap();
+		assert_ne!(sent(&catalog), leading);
+		let snapshot = wire(&catalog);
+		assert_eq!(
+			snapshot.video.renditions["b"].delay,
+			Some(std::time::Duration::from_millis(7))
+		);
+	}
+
+	/// Bitrate and framerate are already measured per second, so a new value never waits.
+	#[tokio::test(start_paused = true)]
+	async fn a_bitrate_estimate_publishes_immediately() {
+		let (_broadcast, catalog, mut renditions) = estimating(&["v"]);
+		let v = &mut renditions[0];
+		v.estimate(jitter(1)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(10)).await;
+		v.estimate(jitter(2)).unwrap();
+		let held = sent(&catalog);
+		v.estimate(jitter(2).with_bitrate(1_000_000)).unwrap();
+		assert_ne!(sent(&catalog), held);
+		let snapshot = wire(&catalog);
+		assert_eq!(snapshot.video.renditions["v"].bitrate, Some(1_000_000));
+		assert_eq!(
+			snapshot.video.renditions["v"].jitter,
+			Some(std::time::Duration::from_millis(2))
+		);
 	}
 }
