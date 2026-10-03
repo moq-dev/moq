@@ -450,7 +450,11 @@ impl<E: catalog::Catalog> Import<E> {
 		if pkt[1] & 0x40 != 0 {
 			match PesStart::parse(payload) {
 				Ok(pes) => self.handle_pes_start(pid, pes),
-				Err(err) => self.damage(pid, &err),
+				Err(err) => {
+					// The start still ends the PES before it, which is whole.
+					self.flush(pid)?;
+					self.damage(pid, &err)
+				}
 			}
 		} else {
 			self.handle_pes_continuation(pid, payload)
@@ -6190,6 +6194,35 @@ pub(super) mod test {
 		assert!(import.last_pts.is_some(), "a malformed field reset the program clock");
 		let stats = import.stats();
 		assert_eq!((stats.streams[&PCR].track, stats.streams[&PCR].damaged), ("", 1));
+	}
+
+	/// A damaged PES start refuses only its own unit: the unbounded PES before it ends there,
+	/// whole, and still publishes.
+	#[test]
+	fn damaged_pes_start_flushes_the_unit_before_it() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let unbounded = |cc, pts, keyframe| {
+			let mut packet = video_pes(VIDEO, cc, pts, None, &annexb_au(keyframe));
+			let start = 5 + usize::from(packet[4]);
+			packet[start + 4..start + 6].fill(0);
+			packet
+		};
+		let mut data = synth_pmt(&[(StreamType::H264, VIDEO)], false);
+		data.extend(unbounded(0, 90_000, true));
+		let mut damaged = unbounded(1, 90_000 + FRAME, false);
+		let start = 5 + usize::from(damaged[4]);
+		damaged[start + 6..start + 19].fill(0);
+		data.extend(damaged);
+		import.decode(&data).unwrap();
+		import.finish().unwrap();
+		assert_eq!(import.stats().streams[&VIDEO].damaged, 1);
+		assert_eq!(
+			import.stats().streams[&VIDEO].units,
+			1,
+			"the keyframe before the damage"
+		);
 	}
 
 	/// A malformed unbounded PES drained at EOF is still refused and counted.
