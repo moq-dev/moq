@@ -62,7 +62,3 @@ node.
 Public API: an `upstream` peer attribute and a TLS qmux URL scheme.
 `cluster.tier` is unrelated: it stays the billing and stats label.
 Wire: none.
-
-## Related
-
-- [moq-transport peers are plain clients](/quest/m1/ietf-cluster-off.md) - cluster links are lite-only
