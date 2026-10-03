@@ -13,7 +13,7 @@ use crate::Size;
 ///
 /// [`Surface::color`](crate::Surface::color) reports it where the crate knows:
 /// when the crate did the conversion itself, or when the surface carries the
-/// answer (a macOS pixel buffer names its matrix, which VideoToolbox copies out
+/// answer (a CoreVideo pixel buffer names its matrix, which VideoToolbox copies out
 /// of the stream's VUI). It is `None` for pixels that merely passed through with
 /// nothing naming their space, a camera's raw YUYV among them.
 /// [`Color::infer`] is the fallback then.
@@ -48,9 +48,9 @@ impl Color {
 	/// the range and not the matrix.
 	///
 	/// Only a surface whose pixel format spells out its range reaches this, which
-	/// is why it is macOS-only: CoreVideo's video-range and full-range NV12 name
+	/// is why it is Apple-only: CoreVideo's video-range and full-range NV12 name
 	/// theirs.
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	pub(crate) fn with_range(self, limited: bool) -> Self {
 		match (self, limited) {
 			(Color::Bt601Limited | Color::Bt601Full, true) => Color::Bt601Limited,
@@ -151,7 +151,7 @@ mod tests {
 		assert_eq!(Color::infer(Size::new(1280, 720)), Color::Bt709Limited);
 	}
 
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	#[test]
 	fn with_range_keeps_the_matrix() {
 		assert_eq!(Color::Bt709Limited.with_range(false), Color::Bt709Full);

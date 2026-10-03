@@ -43,7 +43,7 @@ use moq_nvenc::sys::nvEncodeAPI::{
 use moq_nvenc::{Encoder, EncoderInitParams, Session};
 
 use super::super::encoder::{Codec, Config, Gop};
-use super::{Backend, Encoded};
+use super::{Backend, Encoded, keyframe_annexb};
 use crate::frame::{Surface, interleave_uv};
 use crate::{Color, Error, Frame};
 
@@ -63,6 +63,7 @@ pub(crate) struct Nvenc {
 	// Keep the CUDA context alive for as long as the session uses it.
 	_cuda: Arc<CudaContext>,
 	timestamp: u64,
+	codec: Codec,
 }
 
 impl Nvenc {
@@ -205,6 +206,7 @@ impl Nvenc {
 			session,
 			_cuda: cuda,
 			timestamp: 0,
+			codec: config.codec,
 		}))
 	}
 }
@@ -293,7 +295,9 @@ impl Backend for Nvenc {
 		Ok(if data.is_empty() {
 			Vec::new()
 		} else {
-			vec![Encoded::new(Bytes::from(data), frame.timestamp)]
+			// moq-nvenc hands back only the bytes, not the picture type it locked them with.
+			let keyframe = keyframe_annexb(self.codec, &data);
+			vec![Encoded::new(Bytes::from(data), frame.timestamp, keyframe)]
 		})
 	}
 

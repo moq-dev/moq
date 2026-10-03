@@ -21,7 +21,7 @@ h264-parser = { version = "0.4.2" }
 hang = { workspace = true }
 kio = { workspace = true }
 memchr = "2"
-moq-binary = { workspace = true }
+moq-flate = { workspace = true }
 moq-json = { workspace = true }
 moq-loc = { workspace = true }
 moq-msf = { workspace = true }

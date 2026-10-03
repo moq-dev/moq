@@ -42,9 +42,8 @@ Decided in planning (2026-09-27), with the spike data in
   change.
 - Parity: `just test interop --all`, plus moq-net's own tests translated with
   the code once they run on a mock clock instead of tokio.
-- The line lands on `dev`: the Rust refactors break moq-net's published API,
-  and the translator and generated code build on them. Only the additive
-  JS `U64` (`js/net/src/util/u64.ts`) is on `main`, package-internal.
+- The Rust refactors break moq-net's published API, and the translator and
+  generated code build on them.
 - Hand-written js/net fixes keep landing until the generated path replaces
   them; it is months out.
 

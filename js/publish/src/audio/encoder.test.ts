@@ -7,7 +7,7 @@ import type { AudioFrame, Format } from "./capture";
 import { Encoder, resolve } from "./encoder";
 
 // Bun does not load Vite's worklet URL imports from the public audio entrypoint.
-mock.module("./capture-worklet.ts?worklet", () => ({ default: "blob:fake-capture" }));
+mock.module("./capture-worklet.ts?worklet", () => ({ default: async () => "blob:fake-capture" }));
 
 const Audio = await import("./index");
 

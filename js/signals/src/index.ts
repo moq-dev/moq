@@ -20,6 +20,7 @@ const DEV = typeof import.meta.env !== "undefined" && import.meta.env?.MODE !== 
 // SIGNAL_BRAND is Signal only (it implies a write side); GETTER_BRAND is every readable we ship.
 const SIGNAL_BRAND = Symbol.for("@moq/signals");
 const GETTER_BRAND = Symbol.for("@moq/signals.getter");
+const CHANGE_LISTEN = Symbol.for("@moq/signals.change.listen");
 
 function branded(value: unknown, brand: symbol): boolean {
 	return typeof value === "object" && value !== null && brand in value;
@@ -203,20 +204,114 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		return dispose;
 	}
 
-	/** Resolves with the next value from whichever of the given readables changes first. */
-	static async race<T extends readonly unknown[]>(
+	/**
+	 * Waits lazily for the next change, releasing listeners when it settles or loses a race.
+	 * Use {@link race} or {@link Effect.race} to cancel a losing wait; direct `await` also works.
+	 */
+	static race<T extends readonly unknown[]>(
 		...sigs: { [K in keyof T]: Getter<T[K]> }
-	): Promise<Awaited<T[number]>> {
-		const dispose: Dispose[] = [];
+	): GetPromise<Awaited<T[number]>> {
+		return new Changed<T[number]>(sigs);
+	}
+}
 
-		const result: Awaited<T[number]> = await new Promise((resolve) => {
-			for (const sig of sigs) {
-				dispose.push(sig.changed(resolve));
-			}
+// A shared, lazy wait for one change. Unlike Once, a change can settle with undefined,
+// so keep a separate settled flag and let listen() observe that distinction.
+class Changed<T> implements GetPromise<Awaited<T>> {
+	#sources: readonly Getter<T>[];
+	#listeners = new Set<Listener>();
+	#dispose: Dispose[] = [];
+	#won = false;
+	#result?: Settled;
+
+	constructor(sources: readonly Getter<T>[]) {
+		this.#sources = sources;
+	}
+
+	peek(): Awaited<T> | undefined {
+		return this.#result?.ok ? (this.#result.value as Awaited<T>) : undefined;
+	}
+
+	changed(): Promise<Awaited<T> | undefined>;
+	changed(fn: Subscriber<Awaited<T> | undefined>): Dispose;
+	changed(fn?: Subscriber<Awaited<T> | undefined>): Promise<Awaited<T> | undefined> | Dispose {
+		return fn ? this.subscribe(fn) : new Promise((resolve) => this.subscribe(resolve));
+	}
+
+	subscribe(fn: Subscriber<Awaited<T> | undefined>): Dispose {
+		return this.#watch((result) => {
+			if (result.ok) fn(result.value as Awaited<T>);
 		});
+	}
 
-		for (const fn of dispose) fn();
-		return result;
+	#watch(fn: Listener): Dispose {
+		if (this.#result) return noop;
+		this.#listeners.add(fn);
+		if (!this.#won && this.#listeners.size === 1) {
+			try {
+				for (const source of this.#sources) {
+					this.#dispose.push(source.changed((value) => this.#finish(value)));
+				}
+			} catch (error) {
+				this.#listeners.delete(fn);
+				this.#stop();
+				throw error;
+			}
+		}
+		return () => {
+			this.#listeners.delete(fn);
+			if (!this.#listeners.size) this.#stop();
+		};
+	}
+
+	[CHANGE_LISTEN](fn: Listener): Dispose {
+		if (this.#result) {
+			fn(this.#result);
+			return noop;
+		}
+		return this.#watch(fn);
+	}
+
+	#finish(value: T): void {
+		if (this.#won) return;
+		this.#won = true;
+		this.#stop();
+		this.#sources = [];
+		Promise.resolve(value).then(
+			(value) => this.#resolve({ ok: true, value }),
+			(error: unknown) => this.#resolve({ ok: false, error }),
+		);
+	}
+
+	#resolve(result: Settled): void {
+		this.#result = result;
+		const listeners = [...this.#listeners];
+		this.#listeners.clear();
+		for (const listener of listeners) {
+			try {
+				listener(result);
+			} catch (error) {
+				console.error("signal changed error", error);
+			}
+		}
+	}
+
+	#stop(): void {
+		for (const dispose of this.#dispose) dispose();
+		this.#dispose = [];
+	}
+
+	// Await reads `then` synchronously before scheduling its call. Start here so a
+	// queued source notification cannot slip between the caller's check and await.
+	// biome-ignore lint/suspicious/noThenProperty: The change wait is intentionally awaitable.
+	get then(): Promise<Awaited<T>>["then"] {
+		const promise = new Promise<Awaited<T>>((resolve, reject) => {
+			this[CHANGE_LISTEN]((result) => {
+				if (result.ok) resolve(result.value as Awaited<T>);
+				else reject(result.error);
+			});
+		});
+		return promise.then.bind(promise);
 	}
 }
 
@@ -295,6 +390,10 @@ function isThenable(value: unknown): value is PromiseLike<unknown> & object {
 
 // Calls `fn` once when `value` settles, synchronously if it already has. Returns a disposer.
 function listen(value: unknown, fn: Listener): Dispose {
+	if (branded(value, CHANGE_LISTEN)) {
+		return (value as Changed<unknown>)[CHANGE_LISTEN](fn);
+	}
+
 	if (!isThenable(value)) {
 		fn({ ok: true, value });
 		return noop;
@@ -518,7 +617,6 @@ export class Effect {
 	#stack?: string;
 	#scheduled = false;
 
-	#stopped: PromiseWithResolvers<void>;
 	#closed: PromiseWithResolvers<void>;
 
 	#abort: AbortController = new AbortController();
@@ -541,7 +639,6 @@ export class Effect {
 			this.#stack = new Error().stack;
 		}
 
-		this.#stopped = Promise.withResolvers();
 		this.#closed = Promise.withResolvers();
 
 		if (fn) {
@@ -565,9 +662,8 @@ export class Effect {
 		if (this.#dispose === undefined) return; // closed, no error because this is a microtask
 
 		// The next run's scope is created when that run starts, not here, so a spawn task
-		// resuming in between still sees its own run's state: aborted and cancelled.
+		// resuming in between still sees its own run's state: aborted.
 		this.#stale = true;
-		this.#stopped.resolve();
 		this.#abort.abort();
 
 		// Unsubscribe from all signals.
@@ -630,7 +726,6 @@ export class Effect {
 
 		// Open this run's scope. Anything still holding the previous one keeps seeing it torn down.
 		this.#stale = false;
-		this.#stopped = Promise.withResolvers();
 		this.#abort = new AbortController();
 		this.#abortUsed = false;
 
@@ -1025,7 +1120,6 @@ export class Effect {
 		this.#dispose = undefined;
 
 		this.#closed.resolve();
-		this.#stopped.resolve();
 		this.#abort.abort();
 
 		this.#drain(dispose);
@@ -1043,15 +1137,6 @@ export class Effect {
 	/** Resolves when the effect is closed. */
 	get closed(): Promise<void> {
 		return this.#closed.promise;
-	}
-
-	/**
-	 * Resolves when the current run is about to be torn down, by a rerun or close.
-	 *
-	 * @internal Racing it adds a reaction per call that lives until the run ends; use {@link race}.
-	 */
-	get cancel(): Promise<void> {
-		return this.#stopped.promise;
 	}
 
 	/**

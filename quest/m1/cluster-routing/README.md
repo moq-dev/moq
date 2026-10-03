@@ -85,8 +85,7 @@ Cold collapse to one cost ([One route cost](/quest/m1/route-cost.md));
 epoch-qualified paths are a source's identity
 ([Selection](/quest/m1/cluster-routing/selection.md)); cluster links are
 moq-lite only ([moq-transport peers are plain clients](/quest/m1/ietf-cluster-off.md));
-`--hop` removal and One route cost land on `dev` on their own. Children
-changing the wip lite version count as additive and land on `main`.
+`--hop` removal and One route cost land on their own.
 Anything specific to moq.pro's deployment is planned in moq.pro.
 
 ### Simulator findings
@@ -141,8 +140,8 @@ Once every child has landed:
 
 - [Wildcard](/quest/m0/wildcard/README.md) - the longest-prefix rule, pool spread, and reply identity Selection builds on
 - [P2P](/quest/m2/p2p/README.md) - browser and native peers that become routing nodes over this layer
-- [Remove `--hop`](/quest/m1/hop-removal.md) - on `dev`: redundant publishers share an explicit `@<epoch>`
-- [One route cost](/quest/m1/route-cost.md) - on `dev`: Warm and Cold collapse to one static cost
+- [Remove `--hop`](/quest/m1/hop-removal.md) - redundant publishers share an explicit `@<epoch>`
+- [One route cost](/quest/m1/route-cost.md) - Warm and Cold collapse to one static cost
 - [Same-hop importers](/quest/m1/hop-aligned-import.md) - the importer half of a redundant pair; `--hop` removal re-keys it to a shared epoch
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - a redundant pair shares one epoch
 - [Cross-relay delivery under bursts](/quest/m1/cross-relay-bursts.md) - its #4349 report shows closed broadcasts announced for up to 229 s

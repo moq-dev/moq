@@ -1,8 +1,8 @@
 import MoqFFI
 
 /// Read side of a video track decoded inside the bindings. Iterating yields
-/// tightly-packed frames, each carrying the pixel layout and the size it
-/// actually decoded to.
+/// frames that own their decoded picture; call `pixels(format:)` for tightly
+/// packed CPU pixels. Release frames promptly: held frames hold decoder buffers.
 public final class VideoConsumer: AsyncSequence, Sendable {
     /// The decoded video frame emitted by this sequence.
     public typealias Element = VideoDecodedFrame

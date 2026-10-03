@@ -22,7 +22,7 @@ Decided in planning:
   needed.
 - Scope:
   - moq-ffi, default and `--no-default-features`, as cdylib and staticlib
-  - libmoq, moq-relay, and moq-cli
+  - moq-c, moq-relay, and moq-cli
   - the moq-wasm module, raw, gzip, and brotli
   - the consumer cost of the JS entries: `@moq/net`, `@moq/watch/element`
     with and without `/ui`, and `@moq/publish/element`. Measure them the way

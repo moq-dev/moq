@@ -1,4 +1,4 @@
-//! Zero-copy import of a decoded `CVPixelBuffer` into `wgpu`, on macOS.
+//! Zero-copy import of a decoded `CVPixelBuffer` into `wgpu`, on macOS and iOS.
 //!
 //! VideoToolbox hands back IOSurface-backed pixel buffers, and Metal can address
 //! an IOSurface directly. `CVMetalTextureCache` is the bridge: it wraps one
@@ -25,7 +25,7 @@ use objc2_core_video::{
 use objc2_metal::{MTLPixelFormat, MTLTextureType};
 
 use super::source::{Layout, Source};
-use crate::frame::macos::PixelBuffer;
+use crate::frame::apple::PixelBuffer;
 use crate::{Color, Error, Size};
 
 fn err(message: impl std::fmt::Display) -> Error {
