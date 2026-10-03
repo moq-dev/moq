@@ -45,7 +45,9 @@ customer/provider export rule, RFC 9234, reduced to one bit):
 - Edge links run qmux over TLS on TCP, not WebSocket and not QUIC:
   intra-region links are not congested. qmux over TCP exists today only in
   plaintext (`tcp://`, moq-tokio's `tcp.rs`); add `tls://` beside it on
-  moq-tokio's `tls` helpers. (Scheme name decided 2026-09-30.)
+  moq-tokio's `tls` helpers. (Scheme name decided 2026-09-30.) The closed
+  [#4731](https://github.com/moq-dev/moq/pull/4731) is prior art for the
+  `tls://` qmux piece in moq-tokio; its edge/core roles are not wanted.
 
 Test: a two-region cluster in `rs/moq-relay/tests`. One region has two edges
 whose links to two cores are upstream; the other is one relay that also
