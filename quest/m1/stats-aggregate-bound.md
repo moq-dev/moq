@@ -6,11 +6,11 @@ The stats aggregator's memory is bounded by its keys plus recent churn, not
 by every node it has ever seen, while merged traffic totals stay monotonic.
 
 Today `aggregate::Merged` keeps a sticky traffic node with `Reader::Ended`
-forever (the `STICKY` unannounce branch in `rs/moq-stats/src/aggregate.rs`),
-so a long-lived aggregator's `nodes` grows with every relay restart, scale-out,
-or renamed node. This is a bug on main regardless of
-[stats epochs](/quest/m1/stats-epoch.md), which make it worse by giving every
-restart a new name.
+forever (the `STICKY` unannounce branch in `rs/moq-stats/src/aggregate.rs`).
+A returning path reuses its entry, but every distinct path ever announced (a
+scale-out, a renamed node) stays in a long-lived aggregator's `nodes`. This is
+a bug on main regardless of [stats epochs](/quest/m1/stats-epoch.md), which
+make it worse by giving every restart a distinct path.
 
 ## Plan
 
@@ -20,6 +20,12 @@ Decided (2026-10-02): grace-window fold.
   reconnect with intact counters is not new traffic.
 - After the window, its last counters fold into one retired total per key and
   the entry is dropped. The merged total is live nodes plus the retired total.
+- Open: a path that returns after the window with intact counters would count
+  its pre-departure traffic twice. Decide whether that bounded error is
+  acceptable (rare once the window exceeds reconnect times, and with epochs
+  only a same-instance return after a long outage), or whether some bounded
+  per-path baseline reconciles it. Test exact totals across that return either
+  way, not just monotonicity.
 - Rejected: folding on depart double-counts a node that reconnects with its
   counters intact. TTL eviction without a fold makes merged totals regress.
 - Timers follow the repo rule: time decisions use `max(wall, pts)`. Tests mock
