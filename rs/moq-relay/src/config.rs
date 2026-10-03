@@ -91,8 +91,9 @@ pub struct Config {
 
 	/// How long accepted sessions may keep running after a shutdown signal, e.g.
 	/// "10s" or "500ms". The first signal sends every session a GOAWAY and waits
-	/// this long for clients to reconnect elsewhere before force-closing them; a
-	/// second signal exits immediately. Zero closes them at once, with no GOAWAY
+	/// up to this long for clients to reconnect elsewhere before force-closing
+	/// them, exiting as soon as they have all left; a second signal exits
+	/// immediately. Zero closes them at once, with no GOAWAY
 	/// they would have no time to act on. Defaults to 10 seconds.
 	#[usage(skip)]
 	#[serde(with = "crate::duration::serde_duration")]
@@ -345,6 +346,17 @@ impl Config {
 mod tests {
 	use super::*;
 	use crate::test_env::EnvGuard;
+
+	#[test]
+	fn packaged_service_arguments() {
+		let unit = include_str!("../../../packaging/moq-relay/moq-relay.service");
+		let command = unit.lines().find_map(|line| line.strip_prefix("ExecStart=")).unwrap();
+		let mut args = command.split_whitespace();
+		assert_eq!(args.next(), Some("/usr/bin/moq-relay"));
+		let args: Vec<_> = args.map(std::ffi::OsStr::new).collect();
+		let cli = Cli::parse_from(&args).expect("packaged service arguments must parse");
+		assert_eq!(cli.config.file.as_deref(), Some("/etc/moq-relay/relay.toml"));
+	}
 
 	/// The relay's own default still applies once the released spellings are gone.
 	#[test]

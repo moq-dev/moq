@@ -279,6 +279,7 @@ impl Session {
 		});
 
 		let supervisor = Supervisor {
+			local_close: protocol.local_close(),
 			runtime: runtime.clone(),
 			closed_watch: session.clone(),
 			session,
@@ -319,6 +320,7 @@ impl Session {
 ///
 /// Finishes once the transport reports closed; everything else is moot then.
 pub(crate) struct Supervisor<S> {
+	local_close: Arc<std::sync::atomic::AtomicBool>,
 	runtime: crate::time::Clock,
 	session: S,
 	// A dedicated clone for the close watch, since each pending poll operation
@@ -395,9 +397,12 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 			}) {
 				Poll::Ready(Ok(request)) => (request, false),
 				Poll::Ready(Err(last)) => (
-					last.clone().unwrap_or_else(|| Close::Abort {
-						code: SessionError::Cancel.to_code(),
-						reason: "dropped".to_string(),
+					last.clone().unwrap_or_else(|| {
+						self.local_close.store(true, std::sync::atomic::Ordering::Relaxed);
+						Close::Abort {
+							code: SessionError::Cancel.to_code(),
+							reason: "dropped".to_string(),
+						}
 					}),
 					true,
 				),
@@ -443,6 +448,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 			false if deadline.poll(waiter).is_ready() => Err(Error::Timeout),
 			false => return false,
 		};
+		self.local_close.store(true, std::sync::atomic::Ordering::Relaxed);
 		self.session.close(SessionError::Cancel.to_code(), "");
 		self.drain = Drain::Done(res);
 		// The transport is closed, so no later request can change anything.

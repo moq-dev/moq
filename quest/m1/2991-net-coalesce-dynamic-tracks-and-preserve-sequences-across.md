@@ -86,3 +86,8 @@ the closed producer's cache or terminal state.
 ## Closes
 
 - [#2991](https://github.com/moq-dev/moq/issues/2991) - close this issue when the quest finishes
+
+## Related
+
+- [#4491](https://github.com/moq-dev/moq/pull/4491) - edits `resume.rs` and its takeover tests
+- [Parked reads wake](/quest/m1/parked-read-wakes.md) - edits the same `resume.rs` wakeups

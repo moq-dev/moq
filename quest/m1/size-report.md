@@ -39,8 +39,8 @@ Decided in planning:
   visible without a local rebuild. `cargo bloat` needs symbols, so build that
   pass with `CARGO_PROFILE_RELEASE_STRIP=none` and report stripped sizes
   separately.
-- Following the tooling questline, the work lives in a `sh/` script behind a
-  `just` recipe, and `nightly.yml` calls the recipe.
+- The work lives in a `sh/` script behind a `just` recipe, and `nightly.yml`
+  calls the recipe.
 
 Considered and declined (do not re-ask):
 

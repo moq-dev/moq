@@ -3,8 +3,12 @@ import { Producer } from "../group.ts";
 import { Reader } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { readFrames } from "./group.ts";
+import { Version } from "./version.ts";
 
 const SCALE = 1000;
+
+// The frames below are QUIC varints, so the streams read them as lite-06.
+const VERSION = Version.DRAFT_06;
 
 /** Frames as a group stream carries them: a zigzag timestamp delta when timestamped, then the sized payload. */
 function encode(frames: { delta?: number; payload: number[] }[]): Uint8Array {
@@ -24,6 +28,8 @@ function streamOf(chunks: Uint8Array[]): Reader {
 				controller.close();
 			},
 		}),
+		undefined,
+		VERSION,
 	);
 }
 
@@ -86,7 +92,7 @@ test("a stream that ends inside a frame rejects", async () => {
 test("stops once the group closes", async () => {
 	const producer = new Producer(0);
 	// Never ends: only the close can stop the read.
-	const stream = new Reader(new ReadableStream<Uint8Array>());
+	const stream = new Reader(new ReadableStream<Uint8Array>(), undefined, VERSION);
 	const done = readFrames(stream, producer, SCALE);
 	producer.close();
 	await done;

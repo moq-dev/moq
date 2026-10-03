@@ -23,7 +23,7 @@ requirement.
 
 Public API: removing `renderer.out.frame`, moving `Sync`, and changing what
 `Player` and the composable classes accept are breaks to the published
-`@moq/watch`, so the PR targets `dev`. The `@moq/signals` bridge is additive.
+`@moq/watch`. The `@moq/signals` bridge is additive.
 Wire: none.
 
 Gate on the plan's jank harness and N-player sweep, both nightly.
@@ -31,7 +31,7 @@ Gate on the plan's jank harness and N-player sweep, both nightly.
 ## Required
 
 - [Plan: watch worker](/quest/m1/plan-watch-worker.md) - picks the worker model and rewrites this quest
-- [A/V clock](/quest/m0/plan-av-clock.md) - reshapes `Sync` and the worklet playhead, so the move to the worker happens once
+- [A/V clock](/quest/m1/av-clock.md) - reshapes `Sync` and the worklet playhead, so the move to the worker happens once
 
 ## Related
 

@@ -99,12 +99,21 @@ connection's send estimate; pass it to `encodeVideo` / `encodeAudio` or
 `reserve` a share for an app-owned track. `MoqException.isAuth` and
 `isShutdown` classify errors. Microsecond fields read back as a
 `kotlin.time.Duration`: `stats.rtt`, `backoff.initial`, `frame.timestamp`. `protocolError` is the structured protocol failure
-(scope, verbatim code, kind) when the peer sent one. Cancelling the collecting coroutine cancels the
-native side.
+(scope, verbatim code, kind) when the peer sent one. An exception's `toString()` is the Rust error message.
+Cancelling the collecting coroutine cancels the native side.
 
 `encodeAudio` encodes raw PCM inside the binding. Its codec is an object,
-`AudioCodec.opus()`, and `AudioEncoderOutput.frameDurationUs` sets the Opus
-frame length: 2500, 5000, 10000, 20000 (the default), 40000, or 60000.
+`AudioCodec.opus()` or `AudioCodec.aac()`, and
+`AudioEncoderOutput.frameDurationUs` sets the Opus frame length: 2500, 5000,
+10000, 20000 (the default), 40000, or 60000. 0 takes the codec's own frame,
+which AAC needs. AAC-LC encodes through the platform's encoder, so a host
+without one refuses it.
+
+Audio `channels` also names the speaker layout, by the WAVE convention: 1 is
+mono, 2 stereo, 3 2.1, 4 quad, 5 5.0, 6 5.1, 7 6.1, and 8 7.1, interleaved
+front left, front right, center, LFE, back, then side. Decoding remixes to the
+count you ask for; past 8 channels the samples pass through but can't be
+remixed.
 
 Each frame from `decodeVideo` owns its decoded picture until `close()` (or
 `use {}`), including after the consumer is cancelled. `frame.pixels(format)`

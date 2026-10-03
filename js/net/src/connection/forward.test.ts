@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Once } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "../broadcast.ts";
 import { Route } from "../hop.ts";
@@ -33,7 +34,7 @@ class FakeSession {
 
 	constructor(discovery = true) {
 		this.discovery = discovery;
-		registerWire(this, { consume: (path) => this.consume(path) });
+		registerWire(this, { consume: (path) => this.consume(path), goaway: new Once() });
 		this.closed = new Promise((resolve) => {
 			this.#die = resolve;
 		});

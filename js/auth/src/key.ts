@@ -6,9 +6,10 @@ import { type Claims, ClaimsSchema, ScopeSchema, scopeAllows } from "./claims.ts
 import { encodeGrants } from "./wire.ts";
 
 /**
- * A validated key identifier (kid). Only alphanumeric, hyphens, and underscores.
+ * A validated key identifier (kid). At most 128 alphanumeric, hyphen, or underscore characters.
  */
 export const KeyIdSchema = z.string().check(
+	z.maxLength(128),
 	z.refine((value) => /^[A-Za-z0-9_-]+$/.test(value), {
 		message: "Key ID must contain only alphanumeric characters, hyphens, and underscores",
 	}),

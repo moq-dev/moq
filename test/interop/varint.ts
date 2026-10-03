@@ -7,7 +7,7 @@ import { U64 } from "../../js/net/src/util/u64.ts";
 // Each value is a decimal string, since JSON numbers round past 2^53.
 const input: { values: string[]; quic: number[][]; leadingOnes: number[][] } = JSON.parse(process.argv[2]);
 
-async function encode(v: U64, version?: Version): Promise<number[]> {
+async function encode(v: U64, version: Version): Promise<number[]> {
 	const bytes: number[] = [];
 	const writer = new Writer(new WritableStream<Uint8Array>({ write: (chunk) => void bytes.push(...chunk) }), version);
 	await writer.varint(v);
@@ -16,7 +16,7 @@ async function encode(v: U64, version?: Version): Promise<number[]> {
 	return bytes;
 }
 
-async function decode(bytes: number[], version?: Version): Promise<U64> {
+async function decode(bytes: number[], version: Version): Promise<U64> {
 	const reader = new Reader(undefined, new Uint8Array(bytes), version);
 	const v = await reader.varint();
 	assert(await reader.done(), `trailing bytes after ${v}`);
@@ -27,7 +27,7 @@ const output: { quic: number[][]; leadingOnes: number[][] } = { quic: [], leadin
 for (const [i, value] of input.values.entries()) {
 	const expected = U64.fromBigInt(BigInt(value));
 	for (const [format, version] of [
-		["quic", undefined],
+		["quic", Version.DRAFT_16],
 		["leadingOnes", Version.DRAFT_17],
 	] as const) {
 		const decoded = await decode(input[format][i], version);

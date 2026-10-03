@@ -59,6 +59,15 @@ impl Source {
 		crate::catalog::Consumer::new(&broadcast, format).await
 	}
 
+	/// Wait for the broadcast to come back after `ended`, the one an export was reading, closes.
+	///
+	/// A broadcast that stays up never returns, so a clean catalog end that leaves it announced
+	/// waits here until the caller's own deadline. Bound the wait with a timeout.
+	pub async fn returned(&self, ended: &moq_net::broadcast::Consumer) -> crate::Result<moq_net::broadcast::Consumer> {
+		ended.closed().await;
+		Ok(self.origin.routed_broadcast(&self.path).await?)
+	}
+
 	/// Begin resolving the catalog broadcast (the one at this source's path).
 	pub(crate) fn request_catalog(&self) -> kio::Pending<moq_net::origin::Requesting> {
 		self.origin.request_broadcast(&self.path)
@@ -371,6 +380,36 @@ mod tests {
 		settle().await;
 		assert!(!source.broadcast().await.unwrap().is_closed());
 		assert!(binding.broadcast().await.is_err());
+	}
+
+	#[tokio::test]
+	async fn returned_waits_for_a_new_broadcast_after_the_old_one_ends() {
+		let origin = produce_origin();
+		let first = origin.publish("live", Default::default()).unwrap();
+		settle().await;
+		let source = Source::new(origin.consume(), "live");
+		let ended = source.broadcast().await.unwrap();
+
+		let returned = source.returned(&ended);
+		tokio::pin!(returned);
+		tokio::select! {
+			biased;
+			_ = &mut returned => panic!("the broadcast is still up"),
+			_ = settle() => {}
+		}
+
+		// Gone, and nothing serves the path yet.
+		drop(first);
+		tokio::select! {
+			biased;
+			_ = &mut returned => panic!("nothing has published the path again"),
+			_ = settle() => {}
+		}
+
+		let _second = origin.publish("live", Default::default()).unwrap();
+		let back = returned.await.unwrap();
+		assert!(!back.is_closed());
+		assert!(!back.is_clone(&ended));
 	}
 
 	#[tokio::test]

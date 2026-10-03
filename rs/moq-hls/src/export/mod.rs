@@ -708,6 +708,62 @@ mod tests {
 		assert_eq!(video.bandwidth(), 2_000_000);
 	}
 
+	// The estimator also measures the framerate and publishes it once it settles, so an
+	// imported source gains one about a second in. Rebuilding for it would re-time the fMP4
+	// (its timescale derives from the framerate) and churn every recording cursor mid-stream.
+	#[tokio::test]
+	async fn estimated_framerate_keeps_the_rendition() {
+		let origin = produce_origin();
+		let _broadcast = origin.create_broadcast("live").expect("publish allowed");
+		_broadcast.announce(Default::default()).expect("publish allowed");
+		settle().await;
+		let upstream = empty_upstream(&origin, "live").await;
+
+		let mut catalog = catalog_with_both();
+		catalog.video.renditions.get_mut("video0").unwrap().framerate = None;
+		let renditions = renditions::Producer::new(Config::default().window);
+		let mut cursor = renditions.subscribe();
+		renditions.sync(&upstream, &catalog);
+		let video = renditions.get(Kind::Video, "video0").expect("video rendition");
+		while next_event(&mut cursor).await.is_some() {}
+
+		for framerate in [Some(30.0), Some(60.0)] {
+			catalog.video.renditions.get_mut("video0").unwrap().framerate = framerate;
+			renditions.sync(&upstream, &catalog);
+			assert!(
+				Arc::ptr_eq(&video, &renditions.get(Kind::Video, "video0").unwrap()),
+				"the video rendition survives a framerate estimate of {framerate:?}"
+			);
+			assert!(next_event(&mut cursor).await.is_none(), "no rendition churn");
+		}
+
+		// The settled estimate still reaches the fallback cadence of a duration-less frame,
+		// at the timescale the rendition was built with (90 kHz without a framerate).
+		let muxer = video.muxer().unwrap();
+		assert_eq!(muxer.timescale().as_u64(), 90_000);
+		let fragment = muxer.fragment(0, &[vp8_frame(0, true)]).unwrap();
+		assert_eq!(first_sample_duration(&fragment), Some(1_500), "16.7 ms at 90 kHz");
+
+		// An NTSC estimate is 1501.5 ticks at 90 kHz: it snaps to whole ticks and still muxes.
+		catalog.video.renditions.get_mut("video0").unwrap().framerate = Some(60_000.0 / 1001.0);
+		renditions.sync(&upstream, &catalog);
+		let fragment = video.muxer().unwrap().fragment(0, &[vp8_frame(0, true)]).unwrap();
+		assert_eq!(first_sample_duration(&fragment), Some(1_502));
+	}
+
+	/// The `trun` duration of a fragment's first sample.
+	fn first_sample_duration(fragment: &bytes::Bytes) -> Option<u32> {
+		use moq_mux::container::fmp4::mp4_atom::{self, DecodeMaybe};
+
+		let mut cursor = std::io::Cursor::new(fragment.as_ref());
+		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+			if let mp4_atom::Any::Moof(moof) = atom {
+				return moof.traf[0].trun[0].entries[0].duration;
+			}
+		}
+		panic!("no moof in fragment");
+	}
+
 	#[tokio::test]
 	async fn estimate_before_first_init_reaches_aac_descriptor() {
 		let origin = produce_origin();

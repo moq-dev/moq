@@ -138,16 +138,14 @@ The `container.kind` on each rendition says how frames are framed:
 A consumer skips renditions with a kind it doesn't recognize and carries them
 through when republishing the catalog.
 
-A Legacy video publisher can close the last frame's duration with an empty
+A Legacy or LOC video publisher can close the last frame's duration with an empty
 codec payload whose timestamp is that frame's exclusive end. Consumers treat it
 as metadata and never pass it to a decoder. This lets a group close immediately
 without waiting for the next frame. Audio has codec-defined durations, and CMAF
 carries sample durations directly, so neither needs per-group duration markers.
 Audio retains its separate terminal marker before codec drain packets, allowing
-consumers to discard encoder padding beyond the source endpoint. LOC readers
-also skip empty payloads; LOC writers wait for the compatibility release before
-emitting markers. Empty payloads on data tracks remain data, including empty
-text cues.
+consumers to discard encoder padding beyond the source endpoint. Empty payloads
+on data tracks remain data, including empty text cues.
 
 ## Groups and keyframes
 

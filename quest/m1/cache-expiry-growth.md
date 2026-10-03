@@ -27,7 +27,3 @@ Otherwise reproduce with a focused test. Unexpired groups at higher throughput,
 expiry not running on some path, or groups held outside the pool's accounting
 would each explain it. Fix what is actually wrong. Consider whether an
 unbounded default is the right default for an origin at all.
-
-## Related
-
-- [Relay memory](/quest/m1/relay-memory.md) - what an announcement costs in memory

@@ -189,6 +189,7 @@ where
 	});
 
 	let driver = Driver {
+		local_close: Default::default(),
 		setup: version
 			.has_setup_stream()
 			.then(|| SendSetup::new(session.clone(), our_setup, version)),
@@ -209,6 +210,7 @@ where
 /// The lite session driver: one poll function racing every protocol arm, in
 /// place of a task set of boxed futures.
 pub(crate) struct Driver<S: crate::transport::poll::Session> {
+	pub(crate) local_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
 	/// Advertising our capabilities, or `None` once sent (or on a version with no
 	/// Setup Stream).
 	setup: Option<SendSetup<S>>,
@@ -230,7 +232,9 @@ where
 {
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let res = std::task::ready!(self.poll_protocol(waiter));
-		if let Err(err) = &res {
+		if self.local_close.load(std::sync::atomic::Ordering::Relaxed) {
+			self.subscriber.close();
+		} else if let Err(err) = &res {
 			// Every track this session was receiving ends with its error.
 			self.subscriber.abort(err);
 		}

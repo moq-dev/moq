@@ -35,7 +35,6 @@ Run the supported-draft matrix and `just test interop --all` through CI.
 Public API: a producer-side on-demand group request surface in `@moq/net`,
 matching Rust's lifecycle. Wire: implement the existing supported IETF FETCH
 formats; update relevant documentation and any MoQ draft claims that change.
-A published API break, if the chosen shape requires one, goes through dev.
 
 ## Required
 
@@ -43,4 +42,4 @@ A published API break, if the chosen shape requires one, goes through dev.
 
 ## Related
 
-- [Browser archive](/quest/m1/archive/browser.md) - supplies memory or OPFS archive data through this generic request surface
+- [Browser archive](/quest/m2/archive-browser.md) - supplies memory or OPFS archive data through this generic request surface

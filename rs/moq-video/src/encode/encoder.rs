@@ -16,7 +16,7 @@ use crate::{Color, Error, Frame, Rate, Size};
 /// breaking external `match`es.
 ///
 /// Not every codec has a backend on every platform: H.265 is hardware-only
-/// (VideoToolbox on macOS today). Building an [`Encoder`] returns
+/// (VideoToolbox on macOS and iOS today). Building an [`Encoder`] returns
 /// [`Error::NoEncoder`](crate::Error::NoEncoder) when nothing can encode the
 /// requested codec on this machine.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -595,7 +595,7 @@ mod tests {
 	/// Exercises the hand-rolled VideoToolbox backend end to end on macOS:
 	/// synthetic frames through the real `VTCompressionSession`, asserting the
 	/// AVCC -> Annex-B conversion produces a self-contained IDR (SPS+PPS+slice).
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	#[test]
 	fn videotoolbox_emits_annexb_keyframe() {
 		let config = Config {
@@ -641,7 +641,7 @@ mod tests {
 	/// HEVC via VideoToolbox: synthetic frames through the real
 	/// `VTCompressionSession` with `kCMVideoCodecType_HEVC`, asserting the
 	/// HVCC -> Annex-B conversion produces a self-contained IRAP (VPS+SPS+PPS+IDR).
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	#[test]
 	fn videotoolbox_emits_annexb_keyframe_h265() {
 		let config = Config {
@@ -683,7 +683,7 @@ mod tests {
 	}
 
 	/// HEVC NAL unit types in an Annex-B buffer (type = `(byte >> 1) & 0x3f`).
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	fn hevc_nal_types(annexb: &[u8]) -> Vec<u8> {
 		let mut types = Vec::new();
 		let mut i = 0;
@@ -700,7 +700,7 @@ mod tests {
 
 	/// Feed a GPU surface (NV12 `CVPixelBuffer`) straight into VideoToolbox:
 	/// the zero-copy capture -> encode path, no I420 round-trip.
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	#[test]
 	fn videotoolbox_encodes_surface_zero_copy() {
 		let config = Config {
@@ -730,7 +730,7 @@ mod tests {
 
 	/// A software encoder must download a GPU surface to I420 first. Exercises
 	/// the NV12 -> I420 fallback path.
-	#[cfg(all(target_os = "macos", feature = "openh264"))]
+	#[cfg(all(apple, feature = "openh264"))]
 	#[test]
 	fn openh264_downloads_surface() {
 		let config = Config {
@@ -751,8 +751,8 @@ mod tests {
 
 	/// A mid-gray NV12 `CVPixelBuffer`, the format AVFoundation/ScreenCaptureKit
 	/// hand us. Y and interleaved UV planes filled with 128.
-	#[cfg(target_os = "macos")]
-	fn nv12_surface(width: u32, height: u32) -> crate::frame::macos::PixelBuffer {
+	#[cfg(apple)]
+	fn nv12_surface(width: u32, height: u32) -> crate::frame::apple::PixelBuffer {
 		use std::ptr::{self, NonNull};
 
 		use objc2_core_foundation::CFRetained;
@@ -785,7 +785,7 @@ mod tests {
 		}
 		unsafe { CVPixelBufferUnlockBaseAddress(&buffer, flags) };
 
-		crate::frame::macos::PixelBuffer::new(buffer, width, height)
+		crate::frame::apple::PixelBuffer::new(buffer, width, height)
 	}
 
 	/// NAL unit types in an Annex-B buffer, found via 3-byte start codes (a
@@ -1354,7 +1354,7 @@ mod tests {
 	/// pixels were actually converted into. VideoToolbox takes the three
 	/// properties as a request, so read the SPS back rather than trusting that it
 	/// honored them.
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	#[test]
 	fn videotoolbox_sps_declares_the_color_space() {
 		use super::backend::test_util::{BT601_DESCRIBED, BT709_DESCRIBED, declared_color};
@@ -1435,5 +1435,42 @@ mod tests {
 
 		let keyframe = frames.first().expect("a keyframe");
 		assert_eq!(declared_color(&keyframe.payload), Some(BT709_DESCRIBED));
+	}
+
+	#[cfg(all(target_os = "windows", feature = "capture", feature = "openh264"))]
+	#[test]
+	#[ignore = "requires Windows WGC video processing and a Media Foundation hardware H.264 encoder"]
+	fn wgc_nv12_encodes_with_matching_color_on_gpu_and_software() {
+		use super::backend::test_util::{BT601_DESCRIBED, BT709_DESCRIBED, declared_color};
+		use crate::frame::d3d11;
+
+		let device = d3d11::create_device().expect("D3D11 hardware device");
+		for (size, declared) in [
+			(Size::new(640, 480), BT601_DESCRIBED),
+			(Size::new(1280, 720), BT709_DESCRIBED),
+		] {
+			let pixels = [0, 0, 255, 255].repeat(size.pixels() as usize);
+			let source = d3d11::upload_bgra(&device, size, &pixels);
+			for backend in ["mediafoundation", "openh264"] {
+				let texture = d3d11::Texture::capture(&device, &source, size).expect("BGRA to NV12");
+				let frame = Frame::new(Surface::Texture(texture), moq_net::Timestamp::from_micros(0).unwrap());
+				let config = Config {
+					kind: Kind::Named(backend.into()),
+					color: frame.surface.color(),
+					..Config::new(size.width, size.height, crate::Rate::new(30, 1).unwrap())
+				};
+				let mut encoder = Encoder::new(&config).expect("requested encoder must be available");
+				assert_eq!(encoder.name(), backend);
+				let mut encoded = encoder.encode(&frame).expect("encode WGC texture");
+				encoded.extend(encoder.finish().unwrap());
+				assert!(!encoded.is_empty(), "{backend} must produce a frame");
+				assert!(
+					encoded
+						.iter()
+						.any(|frame| declared_color(&frame.payload).as_ref() == Some(&declared)),
+					"{backend} {size} SPS color"
+				);
+			}
+		}
 	}
 }

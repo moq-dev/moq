@@ -4,7 +4,7 @@ import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import type { Algorithm } from "./algorithm.ts";
 import { authorize, type Claims } from "./claims.ts";
 import { INSECURE_TEST_RS256_OTHER, INSECURE_TEST_RSA_KEYS } from "./insecure-test-keys.ts";
-import { Key } from "./key.ts";
+import { Key, KeyIdSchema } from "./key.ts";
 
 // Helper function to encode JSON to base64url
 function encodeJwk(obj: unknown): string {
@@ -810,4 +810,16 @@ test("verify - enforces not before", async () => {
 	const now = Math.floor(Date.now() / 1000);
 	expect((await Key.verify(key, await signRaw({ publish: ["**"], nbf: now - 60 }))).nbf).toBe(now - 60);
 	await expect(Key.verify(key, await signRaw({ publish: ["**"], nbf: now + 3600 }))).rejects.toThrow();
+});
+
+test("key IDs share Rust's grammar and 128-character limit", async () => {
+	for (const kid of ["a", "A0_-", "a".repeat(128)]) {
+		expect(KeyIdSchema.parse(kid)).toBe(kid);
+		expect(Key.parse(JSON.stringify({ ...testKey, kid })).kid).toBe(kid);
+	}
+	for (const kid of ["", "bad.key", "é", "a".repeat(129)]) {
+		expect(KeyIdSchema.safeParse(kid).success).toBe(false);
+		expect(() => Key.parse(JSON.stringify({ ...testKey, kid }))).toThrow();
+	}
+	await expect(Key.generate("HS256", "a".repeat(129))).rejects.toThrow();
 });

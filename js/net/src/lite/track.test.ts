@@ -17,10 +17,11 @@ function concat(chunks: Uint8Array[]): Uint8Array {
 	return out;
 }
 
-async function bytes(f: (w: Writer) => Promise<void>): Promise<Uint8Array> {
+async function bytes(f: (w: Writer) => Promise<void>, version: Version): Promise<Uint8Array> {
 	const written: Uint8Array[] = [];
 	const writer = new Writer(
 		new WritableStream<Uint8Array>({ write: (chunk) => void written.push(new Uint8Array(chunk)) }),
+		version,
 	);
 	await f(writer);
 	writer.close();
@@ -34,7 +35,11 @@ test("TrackInfo round-trips on draft-05", async () => {
 		maxAge: 2000,
 		timescale: 90000,
 	});
-	const reader = new Reader(undefined, await bytes((w) => info.encode(w, Version.DRAFT_05)));
+	const reader = new Reader(
+		undefined,
+		await bytes((w) => info.encode(w, Version.DRAFT_05), Version.DRAFT_05),
+		Version.DRAFT_05,
+	);
 	const got = await TrackInfo.decode(reader, Version.DRAFT_05);
 	expect(got.priority).toBe(7);
 	expect(got.maxAge).toBe(2000);
@@ -43,14 +48,18 @@ test("TrackInfo round-trips on draft-05", async () => {
 
 test("TrackInfo defaults match cross-language wire bytes", async () => {
 	const info = new TrackInfo(infoDefaults());
-	expect(await bytes((w) => info.encode(w, Version.DRAFT_05))).toEqual(
-		new Uint8Array([0x0c, 0x00, 0x00, 0xc0, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x43, 0xe8]),
+	expect(await bytes((w) => info.encode(w, Version.DRAFT_05), Version.DRAFT_05)).toEqual(
+		new Uint8Array([0x0c, 0x7f, 0x00, 0xc0, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x43, 0xe8]),
 	);
 });
 
 test("Track request round-trips on draft-05", async () => {
 	const msg = new Track(Path.from("room"), "video");
-	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, Version.DRAFT_05)));
+	const reader = new Reader(
+		undefined,
+		await bytes((w) => msg.encode(w, Version.DRAFT_05), Version.DRAFT_05),
+		Version.DRAFT_05,
+	);
 	const got = await Track.decode(reader, Version.DRAFT_05);
 	expect(got.broadcast).toBe(Path.from("room"));
 	expect(got.track).toBe("video");
@@ -58,7 +67,7 @@ test("Track request round-trips on draft-05", async () => {
 
 test("TRACK_INFO is rejected before draft-05", async () => {
 	const info = new TrackInfo({ timescale: 90000 });
-	await expect(bytes((w) => info.encode(w, Version.DRAFT_04))).rejects.toThrow();
+	await expect(bytes((w) => info.encode(w, Version.DRAFT_04), Version.DRAFT_04)).rejects.toThrow();
 });
 
 test("TrackInfo round-trips valid boundary metadata", async () => {
@@ -67,7 +76,11 @@ test("TrackInfo round-trips valid boundary metadata", async () => {
 		maxAge: Number.MAX_SAFE_INTEGER - 1,
 		timescale: Number.MAX_SAFE_INTEGER,
 	});
-	const reader = new Reader(undefined, await bytes((w) => info.encode(w, Version.DRAFT_05)));
+	const reader = new Reader(
+		undefined,
+		await bytes((w) => info.encode(w, Version.DRAFT_05), Version.DRAFT_05),
+		Version.DRAFT_05,
+	);
 	const got = await TrackInfo.decode(reader, Version.DRAFT_05);
 	expect(got.priority).toBe(255);
 	expect(got.maxAge).toBe(Number.MAX_SAFE_INTEGER - 1);
@@ -116,6 +129,7 @@ test("mutated TrackInfo fields emit no bytes on encode", async () => {
 		const written: Uint8Array[] = [];
 		const writer = new Writer(
 			new WritableStream<Uint8Array>({ write: (chunk) => void written.push(new Uint8Array(chunk)) }),
+			Version.DRAFT_05,
 		);
 		await expect(info.encode(writer, Version.DRAFT_05)).rejects.toThrow(RangeError);
 		writer.close();
@@ -127,8 +141,8 @@ test("mutated TrackInfo fields emit no bytes on encode", async () => {
 for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 	test(`optional max age survives ${version}`, async () => {
 		for (const maxAge of [undefined, 0, 30_000, Number.MAX_SAFE_INTEGER]) {
-			const encoded = await bytes((w) => new TrackInfo({ maxAge }).encode(w, version));
-			const got = await TrackInfo.decode(new Reader(undefined, encoded), version);
+			const encoded = await bytes((w) => new TrackInfo({ maxAge }).encode(w, version), version);
+			const got = await TrackInfo.decode(new Reader(undefined, encoded, version), version);
 			expect(got.maxAge).toBe(
 				version !== Version.DRAFT_07 && maxAge === Number.MAX_SAFE_INTEGER ? undefined : maxAge,
 			);
@@ -138,8 +152,8 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 
 for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 	test(`legacy unlimited value fits the old u53 reader on ${version}`, async () => {
-		const encoded = await bytes((w) => new TrackInfo({}).encode(w, version));
-		const old = new Reader(undefined, encoded);
+		const encoded = await bytes((w) => new TrackInfo({}).encode(w, version), version);
+		const old = new Reader(undefined, encoded, version);
 		await old.u53(); // message length
 		await old.u8(); // priority
 		if (version === Version.DRAFT_05) await old.bool();
@@ -156,12 +170,12 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 				if (version === Version.DRAFT_05) await w.bool(false);
 				await w.u62(age);
 				await w.u53(1000);
-			});
+			}, version);
 			const encoded = await bytes(async (w) => {
 				await w.u53(payload.length);
 				await w.write(payload);
-			});
-			const info = await TrackInfo.decode(new Reader(undefined, encoded), version);
+			}, version);
+			const info = await TrackInfo.decode(new Reader(undefined, encoded, version), version);
 			expect(info.maxAge).toBe(age < boundary ? Number(age) : undefined);
 		}
 	});

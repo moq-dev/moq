@@ -75,8 +75,8 @@ export class PublishNamespace {
  * REQUEST_UPDATE (0x02) on a PUBLISH_NAMESPACE stream: the cluster parameters that
  * changed (draft-lcurley-moq-cluster, Updating an Advertisement).
  *
- * Draft-17+ only: the extension negotiates on nothing earlier. We are a leaf and never
- * reprice, so only a relay sends one to us.
+ * Draft-17+ only: the extension negotiates on nothing earlier. The publisher sends one when
+ * a forwarded route's price or hop chain moves behind the same original publisher.
  */
 export class PublishNamespaceUpdate {
 	static id = 0x02;

@@ -61,11 +61,12 @@ impl Grant {
 		}
 	}
 
-	/// Snapshot the expiry on Tokio's clock; one already past is now.
+	/// Snapshot the expiry on Tokio's clock; one already past is now, and one beyond
+	/// the clock's range is never.
 	#[cfg(feature = "tokio")]
 	pub fn deadline(&self) -> Option<tokio::time::Instant> {
 		let remaining = self.expires?.duration_since(SystemTime::now()).unwrap_or_default();
-		Some(tokio::time::Instant::now() + remaining)
+		tokio::time::Instant::now().checked_add(remaining)
 	}
 
 	/// Refuse a grant that admits nothing, asks to be revalidated without a bound or
@@ -194,5 +195,18 @@ mod tests {
 			Some(start),
 			"a past expiry is now, not a grace window"
 		);
+	}
+
+	/// Regression: the furthest `expires` the wire carries overflowed `Instant` on
+	/// clocks with a narrower range than `SystemTime` (macOS) and panicked. Windows'
+	/// `SystemTime` cannot represent it, so the grant does not parse there.
+	#[cfg(all(feature = "tokio", unix))]
+	#[tokio::test(start_paused = true)]
+	async fn deadline_past_the_clock_is_never() {
+		let start = tokio::time::Instant::now();
+		let grant: Grant = serde_json::from_str(r#"{"publish":["**"],"expires":9223372036854775807}"#).unwrap();
+		// Linux's clock reaches that far; macOS's does not, which reads as no expiry.
+		let deadline = grant.deadline();
+		assert!(deadline.is_none_or(|at| at > start + Duration::from_secs(1 << 40)));
 	}
 }

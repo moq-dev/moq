@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { getter, Once, race, Signal } from "@moq/signals";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
-import { HopSchema, Route } from "./hop.ts";
+import { HopSchema, Route, stampHops } from "./hop.ts";
 import type { Consumer, Table } from "./origin.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -124,6 +124,23 @@ test("unscoped broadcast getters share one fresh snapshot per mutation", () => {
 	expect(repriced.get(path)).toEqual(Route.normalize({ cost: 2n }));
 
 	handle.close();
+	origin.close();
+});
+
+test("a stamped route ranks below an identified one of the same length", () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const stamped = stampHops([], HopSchema.parse(5n));
+	if (!stamped) throw new Error("an empty chain always has room");
+	const identified = [HopSchema.parse(11n), PEER];
+	expect(stamped).toHaveLength(identified.length);
+
+	const legacy = wireOf(origin).receive(path, { hops: stamped, cost: 0n });
+	const named = wireOf(origin).receive(path, { hops: identified, cost: 9n });
+	expect(origin.consume().broadcasts().peek().get(path)).toEqual(Route.normalize({ hops: identified, cost: 9n }));
+
+	legacy.close();
+	named.close();
 	origin.close();
 });
 
@@ -1405,6 +1422,52 @@ test("a rejected request is not asked of the same route again", async () => {
 
 	retry.close();
 	handle.close();
+	origin.close();
+});
+
+// A relay migration lands the replacement session's route next to the draining one's. The
+// request must hand over to it, not drop to nothing while the new session answers.
+test("an outranked route keeps serving until its replacement answers", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("migrating");
+
+	const older = new BroadcastProducer();
+	const keepOlder = older.consume();
+	const disposeOlder = serve(origin, path, () => keepOlder.clone());
+
+	const request = consumer.request(path);
+	await settle();
+	const first = request.active.peek();
+	expect(first).toBeDefined();
+
+	let gaps = 0;
+	const stop = request.active.subscribe((active) => {
+		if (active === undefined) gaps++;
+	});
+
+	// The newer route wins the tie but has not answered yet.
+	const newer = wireOf(origin).receive(path);
+	const asked = newer.requested().next();
+	await settle();
+	expect(request.active.peek()).toBe(first);
+
+	// Once it answers, the request swaps straight across.
+	const replacement = new BroadcastProducer();
+	const { value: req } = await asked;
+	req?.accept(replacement.consume());
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	expect(request.active.peek()).not.toBe(first);
+	expect(gaps).toBe(0);
+
+	stop();
+	request.close();
+	newer.close();
+	disposeOlder();
+	keepOlder.close();
+	older.close();
+	replacement.close();
 	origin.close();
 });
 

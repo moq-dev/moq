@@ -986,7 +986,7 @@ export class Publisher {
 
 				// Convert the timestamp to the track's advertised timescale, matching #serveGroup.
 				const ts = Math.round(datagram.timestamp.as(timescale));
-				const body = new DatagramMessage(sub, datagram.sequence, ts, datagram.payload).encode();
+				const body = new DatagramMessage(sub, datagram.sequence, ts, datagram.payload).encode(this.version);
 
 				// No group fallback: drop anything that doesn't fit a single datagram.
 				if (body.byteLength > maxSize) {
@@ -1050,6 +1050,7 @@ export class Publisher {
 			// in the order we asked, which is oldest-first, exactly backwards for live media.
 			// Failing here drops the group and lets the next one compete for the next slot.
 			const stream = await Writer.tryOpen(this.#quic, {
+				version: this.version,
 				sendOrder: priority.rank(group.sequence),
 				cancel: unsubscribed,
 				waitUntilAvailable: false,

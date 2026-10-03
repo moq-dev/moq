@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
-import { Encoder } from "./encoder.ts";
+import { DEFAULT_MAX_GROUP_BYTES, Encoder } from "./encoder.ts";
 import { Producer } from "./producer.ts";
 
 type Value = Record<string, unknown>;
@@ -331,19 +331,24 @@ test("a rejected update leaves the previous value readable", async () => {
 	expect(await drain(track.subscribe())).toEqual([{ keep: true }]);
 });
 
+test("the default group budget is moq-net's group cache limit", () => {
+	// The tests below shrink the budget, so pin the default they stand in for.
+	expect(DEFAULT_MAX_GROUP_BYTES).toBe(Group.MAX_GROUP_CACHE_BYTES);
+});
+
 test("a delta that would overflow the snapshot rolls a new one instead", async () => {
 	// A delta is only readable while its group still holds the snapshot it applies to. A patch
-	// that pushes the group past the cache would abort it, leaving a late subscriber with no
+	// that pushes the group past the budget would abort it, leaving a late subscriber with no
 	// value. Mirrors the cumulative check in the Rust encoder.
 	//
-	// The value is replaced rather than grown, so each snapshot fits the cache on its own while the
+	// The value is replaced rather than grown, so each snapshot fits the budget on its own while the
 	// snapshot plus the patch that rewrites it does not.
-	const half = Math.floor(Group.MAX_GROUP_CACHE_BYTES * 0.6);
+	const size = 40;
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track });
+	const producer = new Producer<Value>({ track, maxGroupBytes: 64 });
 
-	producer.update({ v: "x".repeat(half) });
-	producer.update({ v: "y".repeat(half) });
+	producer.update({ v: "x".repeat(size) });
+	producer.update({ v: "y".repeat(size) });
 	producer.finish();
 
 	// Two groups, a self-contained snapshot each, rather than one whose frame 0 was evicted.
@@ -354,7 +359,7 @@ test("a delta that would overflow the snapshot rolls a new one instead", async (
 
 	// The newest value is readable with no earlier frame to apply it to.
 	const values = await drain(track.subscribe({ maxAge: REPLAY_LATENCY }));
-	expect(values[values.length - 1]).toEqual({ v: "y".repeat(half) });
+	expect(values[values.length - 1]).toEqual({ v: "y".repeat(size) });
 });
 
 test("a compressed delta is gated on its encoded size, not its plaintext", async () => {

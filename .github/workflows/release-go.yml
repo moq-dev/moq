@@ -8,7 +8,7 @@ name: Release Go
 #     (registry is the gate, like release-plz / the PyPI check in release.sh).
 #
 # Triggers:
-#   * push to main        — a wrapper API or VERSION change. The ffi require is
+#   * push to release     — a wrapper API or VERSION change. The ffi require is
 #                           pinned to the current crate version, whose mirror tag
 #                           already exists in steady state. If it's missing (a
 #                           release is mid-flight) or rs/moq-ffi changed since
@@ -20,13 +20,13 @@ name: Release Go
 #                           Chaining off the upstream run guarantees the mirror
 #                           tag is already present, so there is nothing to poll.
 #
-# Stray main pushes are harmless: publish-wrapper.sh skips when the staged tree
+# Stray release pushes are harmless: publish-wrapper.sh skips when the staged tree
 # matches the mirror, so unchanged content never mints an empty patch release.
 
 on:
   push:
     branches:
-      - main
+      - release
   workflow_run:
     workflows: ["Release Go FFI"]
     types:
@@ -62,9 +62,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
           # Tags, for the unreleased ffi check.
           fetch-depth: 0
           persist-credentials: false
+
+      - uses: ./.github/actions/just
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -82,7 +85,7 @@ jobs:
           echo "wrapper line: $LINE"
 
       # The ffi version the wrapper should require: the version of the ffi that
-      # just published (workflow_run), or the current crate version (main push).
+      # just published (workflow_run), or the current crate version (release push).
       - name: Resolve ffi version
         id: ffi
         env:
@@ -98,14 +101,14 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      # On a main push the wrapper pins the current crate's ffi version, but it
+      # On a release push the wrapper pins the current crate's ffi version, but it
       # may call API added to rs/moq-ffi since that version was tagged.
       - name: Check for unreleased ffi changes (push only)
         id: ffi-diff
         if: github.event_name == 'push'
         env:
           FFI_VERSION: ${{ steps.ffi.outputs.version }}
-        run: .github/scripts/release.sh ffi-unreleased "$FFI_VERSION"
+        run: just gh release ffi-unreleased "$FFI_VERSION"
 
       # Skip on unreleased ffi changes, and when the pinned ffi's mirror tag is
       # missing (release-plz merged but Release Go FFI hasn't published yet):
@@ -160,7 +163,7 @@ jobs:
           LINE: ${{ steps.line.outputs.line }}
           FFI_VERSION: ${{ steps.ffi.outputs.version }}
         run: |
-          ./go/scripts/package-wrapper.sh --line "$LINE" --ffi-version "$FFI_VERSION" --output release-out
+          just go package-wrapper --line "$LINE" --ffi-version "$FFI_VERSION" --output release-out
 
       - name: Upload wrapper module
         if: steps.gate.outputs.skip != 'true'
@@ -178,7 +181,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
+
+      - uses: ./.github/actions/just
 
       - name: Generate moq-bot token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
@@ -203,4 +209,4 @@ jobs:
           GO_MIRROR_TOKEN: ${{ steps.token.outputs.token }}
           GIT_AUTHOR_NAME: moq-bot
           GIT_AUTHOR_EMAIL: moq-bot[bot]@users.noreply.github.com
-        run: ./go/scripts/publish-wrapper.sh
+        run: just go publish-wrapper

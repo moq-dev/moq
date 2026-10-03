@@ -6,8 +6,8 @@
 //! catalog entries. Elementary streams we don't decode are carried verbatim, one
 //! MoQ track per PID, described in the `mpegts` catalog section: PES-framed streams
 //! ride the normal PES reassembly, while section-framed streams (SCTE-35 and
-//! other private sections, which are not PES) are intercepted before the mpeg2ts
-//! reader and reassembled. TS adds PAT/PMT discovery, PES reassembly, the
+//! other private sections, which are not PES) are reassembled as sections, as the
+//! PAT and PMT are. TS adds PAT/PMT discovery, PES reassembly, the
 //! private-section path, and the 90 kHz -> microsecond PTS conversion. The service
 //! layer is captured too: the identity parsed from the PAT as a
 //! [`Program`](catalog::Program) record in the `mpegts` catalog section, and the
@@ -15,18 +15,14 @@
 //! (see [`si`](super::si)), so both survive the round-trip.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::Read;
-use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
-use bytes::BytesMut;
 use mpeg2ts::es::StreamType;
-use mpeg2ts::pes::PesHeader;
-use mpeg2ts::ts::payload::Pes;
-use mpeg2ts::ts::{Pid, ReadTsPacket, TsPacket, TsPacketReader, TsPayload};
+use mpeg2ts::ts::{Pid, TsPacket};
 
 use super::adts;
 use super::catalog;
+use super::psi::{self, PesStart, Pmt};
 use crate::catalog::hang::CatalogExt;
 use crate::codec::{aac, ac3, eac3, h264, h265, legacy, mp2, opus};
 use moq_net::Timestamp;
@@ -42,8 +38,12 @@ use moq_net::Timestamp;
 /// PID, when the catalog `E` carries the [`mpegts`](super::Mpegts) section: PES-framed
 /// streams ride the normal PES reassembly, section-framed streams (SCTE-35, marked
 /// by a program-level 'CUEI' registration descriptor, and other private sections)
-/// are intercepted before the reader and reassembled. With a base `Catalog<()>`
-/// they're logged and dropped instead.
+/// are reassembled as sections. With a base `Catalog<()>` they're logged and dropped
+/// instead.
+///
+/// The PAT and every PMT are reassembled the same way, so a table that spans packets or
+/// sits behind a nonzero pointer_field is read whole. A PAT or PMT section whose CRC-32
+/// fails is dropped and counted in [`Stats::crc_error`]; the last good table stays in force.
 ///
 /// The selected container applies only to decoded media renditions. Verbatim tracks in the
 /// `mpegts` catalog section continue to use the legacy Hang container.
@@ -58,19 +58,19 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// snapshot rather than a half-converged one. See [`Reserved`](crate::catalog::Reserved).
 	initial_reservation: Option<crate::catalog::Reserved<E>>,
 
-	/// Shared, refillable byte source the persistent reader pulls whole packets
-	/// from. Kept beside the reader so [`decode`](Self::decode) can append bytes
-	/// between reads without recreating the reader (which holds PAT/PMT state).
-	feed: Feed,
-	reader: TsPacketReader<Feed>,
-
-	/// PMT PIDs announced by the PAT. With `streams` (the ES PIDs a PMT registers)
-	/// these are the only PIDs the reader can route; see [`Self::decode`].
-	pmt_pids: HashSet<Pid>,
+	/// The PAT, reassembled off PID 0.
+	pat: PatReader,
+	/// The PMT PIDs PATs have named for the imported program, each with its reassembler.
+	/// Several programs' PMTs may share one.
+	pmt_sections: HashMap<Pid, SectionReassembler>,
+	/// PAT and PMT sections dropped for a CRC mismatch, keyed by PID.
+	crc_errors: BTreeMap<u16, u64>,
 	/// Per elementary-stream-PID codec routing.
 	streams: HashMap<Pid, Stream<E>>,
-	/// Counters from audio routes a later PMT replaced, keyed by PID.
+	/// Counters from routes a later PMT replaced, keyed by PID.
 	retired_stats: BTreeMap<u16, StreamStats>,
+	/// Access units per elementary stream, timed on the program clock.
+	liveness: Liveness,
 	/// In-progress PES reassembly, keyed by elementary PID.
 	pending: HashMap<Pid, Pending>,
 	/// Per elementary-stream-PID TS continuity state.
@@ -90,20 +90,13 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// True once a PMT with at least one supported stream has been parsed.
 	initialized: bool,
 
-	/// Whole-packet accumulator. Bytes are routed one TS packet at a time
-	/// (section-framed verbatim PIDs diverted, the rest fed to the reader); a
-	/// trailing partial packet is kept here for the next call.
+	/// Whole-packet accumulator. Bytes are routed one TS packet at a time; a trailing
+	/// partial packet is kept here for the next call.
 	scratch: Vec<u8>,
-	/// Sync lock. 0x47 is the packet sync byte but also occurs freely in payload (TS
-	/// has no byte stuffing), so a lone 0x47 isn't a boundary. False until a candidate
-	/// is confirmed by the next packet's sync byte; once true we stride 188 at a time
-	/// and trust the per-packet check. Persists across `decode` calls so a candidate
-	/// pending confirmation at a buffer tail is re-confirmed, not trusted blindly.
-	synced: bool,
-	/// Section-framed verbatim PIDs, intercepted before the reader. Private sections
-	/// (SCTE-35 table_id 0xFC and others) are not PES, so the reader would
-	/// `Pes::read_from` and abort. Keyed by PID. SCTE-35 is detected via the PMT
-	/// 'CUEI' registration descriptor.
+	framer: Framer,
+	/// Section-framed verbatim PIDs. Private sections (SCTE-35 table_id 0xFC and others)
+	/// are not PES, so they are reassembled as sections rather than PES-parsed. Keyed by
+	/// PID. SCTE-35 is detected via the PMT 'CUEI' registration descriptor.
 	sections: HashMap<u16, SectionStream<E>>,
 	/// Whether the catalog can carry the `mpegts` section, sampled once at construction.
 	/// A base `Catalog<()>` can't, so its undecoded PIDs route to `Stream::Ignored`.
@@ -117,9 +110,9 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// Whether the PMT program-level descriptors have been recorded yet (set once;
 	/// PMT `program_info` is stable for the program's life).
 	program_recorded: bool,
-	/// Reassemblers for the standalone SI PIDs ([`catalog::SI_PIDS`]), keyed by PID.
-	/// Intercepted before the reader (like SCTE-35 sections) so the service layer
-	/// survives the round-trip. Only populated with `mpegts` catalog support.
+	/// Reassemblers for the standalone SI PIDs ([`catalog::SI_PIDS`]), keyed by PID, so
+	/// the service layer survives the round-trip. Only populated with `mpegts` catalog
+	/// support.
 	si_sections: HashMap<u16, SectionReassembler>,
 	/// The SI store: buffers each sub-table to a complete generation, publishes the
 	/// per-`(PID, table_id)` snapshot tracks, and advertises them in the catalog.
@@ -133,11 +126,13 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// advances it, so a cue could be stamped with another program's PTS.
 	last_pts: Option<Timestamp>,
 	media_unwrap: PtsUnwrap,
+	/// The program number chosen by [`with_program`](Self::with_program). `None` imports the
+	/// multiplex's only program and refuses a PAT that lists more than one.
+	program: Option<u16>,
 }
 
 impl<E: catalog::Catalog> Import<E> {
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
-		let feed = Feed::default();
 		let container = hang::catalog::Container::default();
 		// A long-lived producer handle for catalog edits (mpegts sections, later PMTs); the passed
 		// reservation gates the initial publish and is dropped once the first PMT is parsed.
@@ -152,11 +147,12 @@ impl<E: catalog::Catalog> Import<E> {
 			catalog,
 			container,
 			initial_reservation: Some(reserved),
-			reader: TsPacketReader::new(feed.clone()),
-			feed,
-			pmt_pids: HashSet::new(),
+			pat: PatReader::default(),
+			pmt_sections: HashMap::new(),
+			crc_errors: BTreeMap::new(),
 			streams: HashMap::new(),
 			retired_stats: BTreeMap::new(),
+			liveness: Liveness::default(),
 			pending: HashMap::new(),
 			continuity: HashMap::new(),
 			pcr_pid: None,
@@ -164,7 +160,7 @@ impl<E: catalog::Catalog> Import<E> {
 			published: false,
 			initialized: false,
 			scratch: Vec::new(),
-			synced: false,
+			framer: Framer::default(),
 			sections: HashMap::new(),
 			supports_mpegts,
 			es_descriptors: HashMap::new(),
@@ -175,7 +171,20 @@ impl<E: catalog::Catalog> Import<E> {
 			identity_recorded: false,
 			last_pts: None,
 			media_unwrap: PtsUnwrap::default(),
+			program: None,
 		}
+	}
+
+	/// Import only the program numbered `program` in the PAT, ignoring the rest of the multiplex.
+	///
+	/// Without this, a PAT that lists more than one program fails the import with
+	/// [`MultipleProgramsError`] rather than merging them onto one clock. A PAT that does not
+	/// list `program` fails it too. The SI describes only this program's service: other
+	/// services' EIT actual is dropped and the SDT actual lists this service alone.
+	pub fn with_program(mut self, program: u16) -> Self {
+		self.program = Some(program);
+		self.si.select(program);
+		self
 	}
 
 	/// Select the container this importer wraps decoded media renditions in.
@@ -205,51 +214,11 @@ impl<E: catalog::Catalog> Import<E> {
 	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<()> {
 		self.scratch.extend_from_slice(data);
 
-		// Route one whole packet at a time. Section-framed verbatim PIDs are
-		// intercepted here (the reader would PES-parse their sections and abort);
-		// every other packet is fed to the reader. Per-packet so a PMT is parsed
-		// (and any section PID registered) before the packets that follow it in the
-		// same chunk route.
+		// Route one whole packet at a time, so a PMT is parsed (and any PID it declares
+		// registered) before the packets that follow it in the same chunk route.
 		let mut off = 0;
-		while off + TsPacket::SIZE <= self.scratch.len() {
-			// A TS packet starts with the 0x47 sync byte. Once synced we trust it and stride
-			// 188 at a time; until then (or after a miss) we must (re)acquire the lock.
-			if !self.synced || self.scratch[off] != 0x47 {
-				self.synced = false;
-				// 0x47 also occurs freely in payload (TS has no byte stuffing), so a lone one
-				// isn't a boundary. Scan (SIMD via memchr) for a candidate whose next packet
-				// also begins with 0x47, confirming the 188 stride before locking onto it.
-				// Striding past a false candidate would route one bogus packet; jumping a flat
-				// 188 instead would only re-align on exact multiples and could desync forever.
-				loop {
-					let Some(rel) = memchr::memchr(0x47, &self.scratch[off..]) else {
-						// No sync byte left: the buffer is junk, drop it.
-						off = self.scratch.len();
-						break;
-					};
-					off += rel;
-					match self.scratch.get(off + TsPacket::SIZE) {
-						// Next packet also starts with a sync byte: lock onto this candidate.
-						Some(&0x47) => {
-							self.synced = true;
-							break;
-						}
-						// The byte 188 ahead isn't a sync byte: this 0x47 was payload, keep scanning.
-						Some(_) => off += 1,
-						// Can't confirm yet (candidate is near the buffer tail). Stay unsynced so
-						// it's re-confirmed next call (with the trailing bytes) instead of trusted.
-						None => break,
-					}
-				}
-				// Unsynced means the buffer had no confirmable sync byte, or the candidate is
-				// pending confirmation; either way there's nothing to route until more arrives.
-				if !self.synced {
-					break;
-				}
-				continue;
-			}
-			let pkt: [u8; TsPacket::SIZE] = self.scratch[off..off + TsPacket::SIZE].try_into().unwrap();
-			off += TsPacket::SIZE;
+		while let Some(at) = self.framer.next(&self.scratch, &mut off) {
+			let pkt: [u8; TsPacket::SIZE] = self.scratch[at..at + TsPacket::SIZE].try_into().unwrap();
 			let pid = (((pkt[1] & 0x1f) as u16) << 8) | pkt[2] as u16;
 			// Every packet paces the multiplex, null stuffing and retransmissions included.
 			if self.supports_mpegts {
@@ -264,28 +233,29 @@ impl<E: catalog::Catalog> Import<E> {
 				continue;
 			}
 			// Read the clock's own flag before routing, so the break lands between the media
-			// either side of it. The PCR PID can be a dedicated one the routing gate below
-			// drops, and the flag rides an adaptation-only packet as readily as a payload one.
+			// either side of it. The PCR PID can be a dedicated one nothing below routes, and
+			// the flag rides an adaptation-only packet as readily as a payload one.
 			// A packet the demodulator flagged corrupt (`transport_error_indicator`) is not
 			// read: its adaptation field is as untrustworthy as its payload, and taking a bit
 			// out of it would break every track in the program on line noise.
 			if self.pcr_pid.is_some_and(|p| p.as_u16() == pid) && pkt[1] & 0x80 == 0 {
 				if discontinuity_indicator(&pkt) {
 					self.timebase_break()?;
-				} else if self.supports_mpegts
-					&& let Some(pcr) = pcr(&pkt)
-					&& self.mux_rate.pcr(pcr)
-				{
-					self.record_mux_rate()?;
+				} else if let Some(pcr) = pcr(&pkt) {
+					self.liveness.pcr(pcr);
+					if self.supports_mpegts && self.mux_rate.pcr(pcr) {
+						self.record_mux_rate()?;
+					}
 				}
 			}
 			if let Some(section) = self.sections.get_mut(&pid) {
-				self.published |= section.packet(&pkt, self.last_pts)?;
+				let units = section.packet(&pkt, self.last_pts)?;
+				self.published |= units > 0;
+				self.liveness.delivered(pid, units);
 				continue;
 			}
-			// Intercept the standalone SI PIDs before the routing gate below drops them:
-			// they carry the service layer, not media, and are not fed to the reader
-			// (which only routes the PAT/PMT/ES PIDs it learns).
+			// The standalone SI PIDs carry the service layer, not media, and no PAT or PMT
+			// names them.
 			if self.supports_mpegts && catalog::SI_PIDS.contains(&pid) {
 				self.si_section(pid, &pkt)?;
 				continue;
@@ -317,33 +287,22 @@ impl<E: catalog::Catalog> Import<E> {
 					Continuation::Contiguous => {}
 				}
 			}
-			// PIDs we don't decode and don't carry (`Stream::Ignored`: a base catalog's
-			// undecoded streams, or an ambiguous 0x86 PID without CUEI) are dropped here,
-			// not fed to the PES reader, which aborts on private sections (spec section 7:
-			// never fatal).
-			if let Ok(p) = Pid::new(pid)
-				&& matches!(self.streams.get(&p), Some(Stream::Ignored))
-			{
+			let Ok(pid) = Pid::new(pid) else {
 				continue;
-			}
-			// Feed the reader only PIDs it can route: the PAT, the PMT PIDs it
-			// announces, and the ES PIDs a PMT registers. A live capture joins
-			// mid-stream, so PES arrive before their PSI; feeding those would make
-			// the reader abort on an unknown PID. Drop them until the layout is
-			// learned (PSI repeats), then normal demux resumes.
-			if pid != Pid::PAT
-				&& !Pid::new(pid).is_ok_and(|p| self.pmt_pids.contains(&p) || self.streams.contains_key(&p))
-			{
-				continue;
-			}
-			{
-				let mut state = self.feed.lock();
-				state.data.clear();
-				state.data.extend_from_slice(&pkt);
-				state.pos = 0;
-			}
-			while let Some(packet) = self.reader.read_ts_packet()? {
-				self.handle_packet(packet)?;
+			};
+			if pid.as_u16() == Pid::PAT {
+				self.pat_packet(&pkt)?;
+			} else if self.pmt_sections.contains_key(&pid) {
+				self.pmt_packet(pid, &pkt)?;
+			} else {
+				// PIDs we don't decode and don't carry (`Stream::Ignored`: a base catalog's
+				// undecoded streams, or an ambiguous 0x86 PID without CUEI) are dropped, as is
+				// every PID before the PSI that declares it: a live capture joins mid-stream,
+				// so PES arrive before their PMT.
+				match self.streams.get(&pid) {
+					None | Some(Stream::Ignored) => {}
+					Some(_) => self.pes_packet(pid, &pkt)?,
+				}
 			}
 		}
 
@@ -359,81 +318,121 @@ impl<E: catalog::Catalog> Import<E> {
 		Ok(())
 	}
 
-	fn handle_packet(&mut self, packet: TsPacket) -> anyhow::Result<()> {
-		let pid = packet.header.pid;
-		match packet.payload {
-			Some(TsPayload::Pmt(pmt)) => {
-				// Which PID speaks for the program clock, so a `discontinuity_indicator` there
-				// can be read as a timebase reset rather than a counter jump.
-				if self.pcr_pid != pmt.pcr_pid {
-					self.pcr_pid = pmt.pcr_pid;
-					// A new clock: the intervals straddling the switch measure nothing.
-					if self.mux_rate.discontinuity() {
-						self.record_mux_rate()?;
-					}
-				}
-
-				// SCTE-35 is announced by a program-level registration descriptor with
-				// format_identifier 'CUEI' (ITU-T J.181). The stream itself uses
-				// stream_type 0x86, which mpeg2ts maps to a DTS audio variant, so
-				// detection keys off the CUEI descriptor, not the stream type alone.
-				let cuei = pmt
-					.program_info
-					.iter()
-					.any(|d| d.tag == 0x05 && d.data.len() >= 4 && &d.data[0..4] == b"CUEI");
-
-				// Record the program-level descriptors once (PMT program_info is stable);
-				// export re-emits them verbatim, including the original CUEI.
-				if self.supports_mpegts && !self.program_recorded && !pmt.program_info.is_empty() {
-					let program = to_descriptors(&pmt.program_info);
-					if let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut() {
-						mpegts.program_descriptors = program;
-					}
-					self.program_recorded = true;
-				}
-
-				for es in &pmt.es_info {
-					let stream_type = es.stream_type as u8;
-					// Stash ES descriptors so a decoded media track can record them once its
-					// (lazily created) track exists; verbatim streams record their own.
-					if self.supports_mpegts {
-						self.es_descriptors
-							.insert(es.elementary_pid.as_u16(), to_descriptors(&es.descriptors));
-					}
-					// Section-framed private data is intercepted before the reader (which
-					// aborts on private sections): private sections (0x05) and CUEI-marked
-					// SCTE-35 (0x86). Everything else routes through ensure_stream (a decoded
-					// codec, PES-framed verbatim, or dropped).
-					if stream_type == 0x05 || (cuei && matches!(es.stream_type, StreamType::Dts8ChannelLosslessAudio)) {
-						self.ensure_section(es.elementary_pid, stream_type, &es.descriptors)?;
-					} else {
-						self.ensure_stream(es.elementary_pid, es.stream_type, &es.descriptors)?;
-					}
-				}
-
-				// Every stream in the initial program is registered now; release the reservation
-				// so the catalog publishes once each rendition's config resolves, not before.
-				self.initial_reservation = None;
-			}
-			Some(TsPayload::PesStart(pes)) => self.handle_pes_start(pid, pes)?,
-			Some(TsPayload::PesContinuation(bytes)) => self.handle_pes_continuation(pid, &bytes)?,
-			// Learn the PMT PIDs so the routing gate in `decode` lets them through.
-			Some(TsPayload::Pat(pat)) => {
-				self.pmt_pids
-					.extend(pat.table.iter().map(|entry| entry.program_map_pid));
-				self.record_program_identity(&pat)?;
-			}
-			_ => {}
+	/// Feed one packet on PID 0 to the PAT's reassembler, applying every whole table.
+	fn pat_packet(&mut self, pkt: &[u8; TsPacket::SIZE]) -> anyhow::Result<()> {
+		let crc_error = self.crc_errors.entry(Pid::PAT).or_default();
+		if let Some(pat) = self.pat.push(pkt, crc_error) {
+			self.handle_pat(&pat)?;
 		}
 		Ok(())
 	}
 
-	fn ensure_stream(
-		&mut self,
-		pid: Pid,
-		stream_type: StreamType,
-		descriptors: &[mpeg2ts::ts::Descriptor],
-	) -> anyhow::Result<()> {
+	/// Feed one packet on a PMT PID to its reassembler, applying every good PMT section.
+	fn pmt_packet(&mut self, pid: Pid, pkt: &[u8; TsPacket::SIZE]) -> anyhow::Result<()> {
+		let mut sections = Vec::new();
+		self.pmt_sections.entry(pid).or_default().push(pkt, &mut sections);
+		for section in sections {
+			// Other tables may share the PID; only a PMT is this path's to check.
+			if section.first() != Some(&psi::PMT_TABLE_ID) {
+				continue;
+			}
+			if !psi::crc_ok(&section) {
+				self.crc_error(pid);
+				continue;
+			}
+			if let Some(pmt) = Pmt::parse(&section) {
+				self.handle_pmt(pmt)?;
+			}
+		}
+		Ok(())
+	}
+
+	/// A PAT or PMT section failed its CRC: it is dropped whole, and the table already in
+	/// force stays.
+	fn crc_error(&mut self, pid: Pid) {
+		*self.crc_errors.entry(pid.as_u16()).or_default() += 1;
+		tracing::warn!(pid = pid.as_u16(), "dropped a PSI section with a bad CRC");
+	}
+
+	fn handle_pmt(&mut self, pmt: Pmt) -> anyhow::Result<()> {
+		// PMTs of several programs may share one PID; only the chosen one maps streams.
+		if self.program.is_some_and(|program| program != pmt.program_number) {
+			return Ok(());
+		}
+		// Which PID speaks for the program clock, so a `discontinuity_indicator` there
+		// can be read as a timebase reset rather than a counter jump.
+		if self.pcr_pid != pmt.pcr_pid {
+			self.pcr_pid = pmt.pcr_pid;
+			// A new clock: the intervals straddling the switch measure nothing.
+			self.liveness.discontinuity();
+			if self.mux_rate.discontinuity() {
+				self.record_mux_rate()?;
+			}
+		}
+
+		// SCTE-35 is announced by a program-level registration descriptor with
+		// format_identifier 'CUEI' (ITU-T J.181). The stream itself uses
+		// stream_type 0x86, which is also a DTS audio variant, so detection keys
+		// off the CUEI descriptor, not the stream type alone.
+		let cuei = pmt
+			.program_info
+			.iter()
+			.any(|d| d.tag == 0x05 && d.data.len() >= 4 && &d.data[0..4] == b"CUEI");
+
+		// Record the program-level descriptors once (PMT program_info is stable);
+		// export re-emits them verbatim, including the original CUEI.
+		if self.supports_mpegts && !self.program_recorded && !pmt.program_info.is_empty() {
+			if let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut() {
+				mpegts.program_descriptors = pmt.program_info.clone();
+			}
+			self.program_recorded = true;
+		}
+
+		for es in &pmt.streams {
+			// Stash ES descriptors so a decoded media track can record them once its
+			// (lazily created) track exists; verbatim streams record their own.
+			if self.supports_mpegts {
+				self.es_descriptors.insert(es.pid.as_u16(), es.descriptors.clone());
+			}
+			// Section-framed private data is reassembled as sections, never PES-parsed:
+			// private sections (0x05) and CUEI-marked SCTE-35 (0x86). Everything else
+			// routes through ensure_stream (a decoded codec, PES-framed verbatim, or
+			// dropped).
+			if es.stream_type == 0x05 || (cuei && es.stream_type == StreamType::Dts8ChannelLosslessAudio as u8) {
+				self.ensure_section(es.pid, es.stream_type, &es.descriptors)?;
+			} else {
+				self.ensure_stream(es.pid, es.stream_type, &es.descriptors)?;
+			}
+		}
+
+		// Every stream in the initial program is registered now; release the reservation
+		// so the catalog publishes once each rendition's config resolves, not before.
+		self.initial_reservation = None;
+		Ok(())
+	}
+
+	/// Route one packet on an elementary stream PID into its PES reassembly.
+	fn pes_packet(&mut self, pid: Pid, pkt: &[u8; TsPacket::SIZE]) -> anyhow::Result<()> {
+		let payload = match payload(pkt) {
+			Payload::None => return Ok(()),
+			Payload::Bytes(payload) => payload,
+			// No payload can be found in it, so like a corrupt packet it breaks the PES.
+			Payload::Malformed => {
+				self.pending.remove(&pid);
+				if let Some(stream) = self.streams.get_mut(&pid) {
+					stream.desync();
+				}
+				return Ok(());
+			}
+		};
+		if pkt[1] & 0x40 != 0 {
+			self.handle_pes_start(pid, PesStart::parse(payload)?)
+		} else {
+			self.handle_pes_continuation(pid, payload)
+		}
+	}
+
+	fn ensure_stream(&mut self, pid: Pid, stream_type: u8, descriptors: &[catalog::Descriptor]) -> anyhow::Result<()> {
 		// A later PMT can remap a PID that was section-framed (intercepted in
 		// `decode`) to a PES codec/verbatim stream. Drop the stale section route first,
 		// or it would keep intercepting the PID and the new stream would never get data.
@@ -447,8 +446,8 @@ impl<E: catalog::Catalog> Import<E> {
 			return Ok(());
 		}
 
-		let stream = match stream_type {
-			StreamType::H264 => {
+		let stream = match StreamType::from_u8(stream_type).ok() {
+			Some(StreamType::H264) => {
 				let track = self
 					.broadcast
 					.unique_track(".avc3", self.catalog.track_info(hang::catalog::PRIORITY.video))?;
@@ -458,7 +457,7 @@ impl<E: catalog::Catalog> Import<E> {
 					unwrap: PtsUnwrap::default(),
 				}
 			}
-			StreamType::H265 => {
+			Some(StreamType::H265) => {
 				let track = self
 					.broadcast
 					.unique_track(".hev1", self.catalog.track_info(hang::catalog::PRIORITY.video))?;
@@ -470,7 +469,7 @@ impl<E: catalog::Catalog> Import<E> {
 			}
 			// Only ADTS-framed AAC (0x0F). 0x11 is LATM/LOAS, which uses a different
 			// framing and syncword, so it falls through to the ignored arm below.
-			StreamType::AdtsAac => Stream::Aac(Box::new(AacStream {
+			Some(StreamType::AdtsAac) => Stream::Aac(Box::new(AacStream {
 				import: None,
 				broadcast: self.broadcast.clone(),
 				reserved: Some(self.reserve()),
@@ -484,20 +483,19 @@ impl<E: catalog::Catalog> Import<E> {
 			// Legacy broadcast audio, carried verbatim. Both MP2 stream types
 			// (0x03 MPEG-1, 0x04 MPEG-2 half rate) share one parser; sample rate and
 			// channels always come from the frame header, not the PMT.
-			StreamType::Mpeg1Audio | StreamType::Mpeg2HalvedSampleRateAudio => {
+			Some(StreamType::Mpeg1Audio | StreamType::Mpeg2HalvedSampleRateAudio) => {
 				self.legacy_stream(pid, &mp2::DESCRIPTOR)
 			}
-			StreamType::DolbyDigitalUpToSixChannelAudio => self.legacy_stream(pid, &ac3::DESCRIPTOR),
-			StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc => self.legacy_stream(pid, &eac3::DESCRIPTOR),
+			Some(StreamType::DolbyDigitalUpToSixChannelAudio) => self.legacy_stream(pid, &ac3::DESCRIPTOR),
+			Some(StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc) => self.legacy_stream(pid, &eac3::DESCRIPTOR),
 			// Opus rides private-data PES (0x06), distinguished from other private streams
 			// by an 'Opus' registration descriptor. Channels and the (always 48 kHz) rate
 			// come from the descriptors, so the importer is built up front.
-			StreamType::Mpeg2PacketizedData if registration_format(descriptors) == Some(*b"Opus") => {
-				let channel_count = opus_channel_count(descriptors).unwrap_or(2);
+			Some(StreamType::Mpeg2PacketizedData) if registration_format(descriptors) == Some(*b"Opus") => {
+				let config = opus_config(descriptors)?;
 				let track = self
 					.broadcast
 					.unique_track(".opus", self.catalog.track_info(hang::catalog::PRIORITY.audio))?;
-				let config = opus::Config::new(48_000, channel_count);
 				let mut config: hang::catalog::AudioConfig = config.into();
 				config.container = self.container.clone();
 				Stream::Opus(Box::new(OpusStream {
@@ -505,19 +503,19 @@ impl<E: catalog::Catalog> Import<E> {
 					unwrap: PtsUnwrap::default(),
 				}))
 			}
-			StreamType::Mpeg1Video | StreamType::Mpeg2Video => Stream::Clock,
-			// A codec we don't decode. Carry it verbatim as PES when the catalog supports
-			// the `mpegts` section. 0x86 is excluded: it's ambiguous (DTS audio, or a
-			// non-conformant SCTE-35 mux without CUEI, which is sections the PES reader
-			// would abort on), so drop it rather than risk feeding sections to the reader.
-			other => {
-				if self.supports_mpegts && !matches!(other, StreamType::Dts8ChannelLosslessAudio) {
-					let descriptors = to_descriptors(descriptors);
+			Some(StreamType::Mpeg1Video | StreamType::Mpeg2Video) => Stream::Clock,
+			// A codec we don't decode, named or not. Carry it verbatim as PES when the
+			// catalog supports the `mpegts` section. 0x86 is excluded: it's ambiguous (DTS
+			// audio, or a non-conformant SCTE-35 mux without CUEI, which is sections a PES
+			// parse would abort on), so drop it rather than risk PES-parsing sections.
+			_ => {
+				if self.supports_mpegts && stream_type != StreamType::Dts8ChannelLosslessAudio as u8 {
+					let descriptors = descriptors.to_vec();
 					match VerbatimStream::new(
 						self.broadcast.clone(),
 						self.catalog.clone(),
 						pid.as_u16(),
-						stream_type as u8,
+						stream_type,
 						descriptors,
 					) {
 						Ok(stream) => Stream::Verbatim(Box::new(stream)),
@@ -527,7 +525,7 @@ impl<E: catalog::Catalog> Import<E> {
 						}
 					}
 				} else {
-					tracing::warn!(?other, pid = pid.as_u16(), "unsupported TS stream type, dropping");
+					tracing::warn!(stream_type, pid = pid.as_u16(), "unsupported TS stream type, dropping");
 					Stream::Ignored
 				}
 			}
@@ -536,6 +534,9 @@ impl<E: catalog::Catalog> Import<E> {
 		// Clock is not a decodable track, so it doesn't initialize the importer.
 		if !matches!(stream, Stream::Ignored | Stream::Clock) {
 			self.initialized = true;
+		}
+		if !matches!(stream, Stream::Ignored) {
+			self.liveness.register(pid.as_u16());
 		}
 		self.streams.insert(pid, stream);
 		self.continuity.entry(pid).or_default();
@@ -559,12 +560,7 @@ impl<E: catalog::Catalog> Import<E> {
 	/// Register a section-framed verbatim PID (SCTE-35 or other private sections):
 	/// intercepted (see [`Self::decode`]) with a verbatim track when the catalog
 	/// carries the `mpegts` section, dropped as `Ignored` when it can't.
-	fn ensure_section(
-		&mut self,
-		pid: Pid,
-		stream_type: u8,
-		descriptors: &[mpeg2ts::ts::Descriptor],
-	) -> anyhow::Result<()> {
+	fn ensure_section(&mut self, pid: Pid, stream_type: u8, descriptors: &[catalog::Descriptor]) -> anyhow::Result<()> {
 		if self.sections.contains_key(&pid.as_u16()) {
 			return Ok(());
 		}
@@ -573,7 +569,7 @@ impl<E: catalog::Catalog> Import<E> {
 		self.continuity.remove(&pid);
 		if !self.supports_mpegts {
 			// Always route to Ignored, replacing any prior codec on this PID (a later PMT
-			// can reassign it), so a private section never reaches the PES reader. Warn once.
+			// can reassign it), so a private section is never PES-parsed. Warn once.
 			let previous = self.retire_stream(pid);
 			self.streams.insert(pid, Stream::Ignored);
 			if !matches!(previous, Some(Stream::Ignored)) {
@@ -586,7 +582,7 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		// A prior PMT may have routed this PID to Ignored; drop it so the PID has one route.
 		self.retire_stream(pid);
-		let descriptors = to_descriptors(descriptors);
+		let descriptors = descriptors.to_vec();
 		let stream = SectionStream::new(
 			self.broadcast.clone(),
 			self.catalog.clone(),
@@ -595,11 +591,12 @@ impl<E: catalog::Catalog> Import<E> {
 			descriptors,
 		)?;
 		self.sections.insert(pid.as_u16(), stream);
+		self.liveness.register(pid.as_u16());
 		self.initialized = true;
 		tracing::debug!(
 			pid = pid.as_u16(),
 			stream_type,
-			"private section stream detected; intercepting before the reader"
+			"private section stream detected; reassembling its sections"
 		);
 		Ok(())
 	}
@@ -616,7 +613,7 @@ impl<E: catalog::Catalog> Import<E> {
 		Some(stream)
 	}
 
-	fn handle_pes_start(&mut self, pid: Pid, pes: Pes) -> anyhow::Result<()> {
+	fn handle_pes_start(&mut self, pid: Pid, pes: PesStart) -> anyhow::Result<()> {
 		// A new PES start means the previous one for this PID is complete.
 		if self.pending.contains_key(&pid) {
 			self.flush(pid)?;
@@ -639,30 +636,31 @@ impl<E: catalog::Catalog> Import<E> {
 			// flushes on the next PES, so a SCTE-35 section arriving during this
 			// frame must be timestamped with this frame's PTS ("now"), not the
 			// previous one's.
-			if pes.header.pts.is_some() {
-				self.last_pts = unwrap_pts(&mut self.media_unwrap, pes.header.pts.map(|t| t.as_u64()))?;
+			if pes.pts.is_some() {
+				self.last_pts = unwrap_pts(&mut self.media_unwrap, pes.pts)?;
 			}
 		}
 
 		if is_clock {
 			// A clock-only stream never flushes, but sections are stamped with its PTS, so it
 			// anchors the catalog here like a flushed PES would.
-			if let Some(pts) = pes.header.pts {
-				self.catalog.anchor(Timestamp::from_scale(pts.as_u64(), 90_000)?)?;
+			if let Some(pts) = pes.pts {
+				self.catalog.anchor(Timestamp::from_scale(pts, 90_000)?)?;
 			}
+			// Nothing is published, but each PES is a picture the source delivered.
+			self.liveness.delivered(pid.as_u16(), 1);
 			return Ok(());
 		}
 
-		let data_len = pes_data_len(&pes.header, pes.pes_packet_len);
 		let mut pending = Pending {
-			pts: pes.header.pts.map(|t| t.as_u64()),
-			dts: pes.header.dts.map(|t| t.as_u64()),
-			stream_id: pes.header.stream_id.as_u8(),
+			pts: pes.pts,
+			dts: pes.dts,
+			stream_id: pes.stream_id,
 			data: Vec::with_capacity(pes.data.len()),
-			data_len,
+			data_len: pes.data_len,
 		};
-		pending.data.extend_from_slice(&pes.data);
-		let complete = matches!(data_len, Some(len) if pending.data.len() >= len);
+		pending.data.extend_from_slice(pes.data);
+		let complete = matches!(pes.data_len, Some(len) if pending.data.len() >= len);
 		self.pending.insert(pid, pending);
 
 		if complete {
@@ -698,7 +696,9 @@ impl<E: catalog::Catalog> Import<E> {
 		if let Some(pts) = pending.pts {
 			self.catalog.anchor(Timestamp::from_scale(pts, 90_000)?)?;
 		}
-		self.published |= stream.write(pending, batched)?;
+		let units = stream.write(pending, batched)?;
+		self.published |= units > 0;
+		self.liveness.delivered(pid.as_u16(), units);
 
 		// Record the decoded media track's PID + PMT descriptors (language, ...) once
 		// its lazily created track exists, so export can preserve them.
@@ -749,6 +749,7 @@ impl<E: catalog::Catalog> Import<E> {
 		self.media_unwrap.discontinuity();
 		self.last_pts = None;
 		self.published = false;
+		self.liveness.discontinuity();
 		if self.mux_rate.discontinuity() {
 			self.record_mux_rate()?;
 		}
@@ -795,21 +796,44 @@ impl<E: catalog::Catalog> Import<E> {
 		Ok(())
 	}
 
+	/// Pick the imported program from a whole PAT and learn its PMT PID, so `decode`
+	/// reassembles that PMT and no other.
+	///
+	/// Every PAT is checked, so a program added mid-stream ends an unselected import, and a
+	/// selected program that disappears ends a selected one; media already published stays.
+	pub(super) fn handle_pat(&mut self, pat: &psi::Pat) -> anyhow::Result<()> {
+		// program_number 0 is the network PID association, not a program.
+		let programs: Vec<_> = pat.programs.iter().filter(|entry| entry.program_number != 0).collect();
+		let numbers = || programs.iter().map(|entry| entry.program_number).collect::<Vec<_>>();
+		let entry = match self.program {
+			Some(program) => match programs.iter().find(|entry| entry.program_number == program) {
+				Some(entry) => entry,
+				None => anyhow::bail!(
+					"transport stream has no program {program}; its PAT lists {}",
+					list_programs(&numbers())
+				),
+			},
+			None => match programs.as_slice() {
+				[] => return Ok(()),
+				[entry] => entry,
+				_ => return Err(MultipleProgramsError { programs: numbers() }.into()),
+			},
+		};
+		self.pmt_sections.entry(entry.pmt_pid).or_default();
+		self.record_program_identity(pat.transport_stream_id, entry)
+	}
+
 	/// Capture the transport/service identity (TSID, service number, PMT PID) from the
 	/// PAT into the catalog service record, once. No-op without `mpegts` support.
-	fn record_program_identity(&mut self, pat: &mpeg2ts::ts::payload::Pat) -> anyhow::Result<()> {
+	fn record_program_identity(&mut self, transport_stream_id: u16, entry: &psi::Association) -> anyhow::Result<()> {
 		if !self.supports_mpegts || self.identity_recorded {
 			return Ok(());
 		}
-		// program_number 0 is the network PID association, not a service; skip it.
-		let Some(entry) = pat.table.iter().find(|entry| entry.program_num != 0) else {
-			return Ok(());
-		};
 		if let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut() {
 			let program = mpegts.program.get_or_insert_with(Default::default);
-			program.transport_stream_id = pat.transport_stream_id;
-			program.program_number = entry.program_num;
-			program.pmt_pid = entry.program_map_pid.as_u16();
+			program.transport_stream_id = transport_stream_id;
+			program.program_number = entry.program_number;
+			program.pmt_pid = entry.pmt_pid.as_u16();
 		}
 		self.identity_recorded = true;
 		Ok(())
@@ -820,10 +844,11 @@ impl<E: catalog::Catalog> Import<E> {
 	///
 	/// Every section is captured, whatever its `table_id`: the SDT PID also carries
 	/// the BAT, the EIT PID carries now/next and the schedule, and a table we don't
-	/// recognize is exactly as worth preserving as one we do. The store buffers each
-	/// sub-table to a complete generation and commits it atomically, so a plain
-	/// repetition (SI repeats every couple of seconds) publishes nothing and a torn
-	/// multi-section transition is never visible.
+	/// recognize is exactly as worth preserving as one we do. A selected program is the
+	/// exception: its SI describes that service alone ([`with_program`](Self::with_program)).
+	/// The store buffers each sub-table to a complete generation and commits it atomically,
+	/// so a plain repetition (SI repeats every couple of seconds) publishes nothing and a
+	/// torn multi-section transition is never visible.
 	fn si_section(&mut self, pid: u16, pkt: &[u8]) -> anyhow::Result<()> {
 		let mut sections = Vec::new();
 		self.si_sections.entry(pid).or_default().push(pkt, &mut sections);
@@ -850,8 +875,9 @@ impl<E: catalog::Catalog> Import<E> {
 		for pid in pids {
 			self.flush(pid)?;
 		}
-		for stream in self.streams.values_mut() {
-			stream.finish()?;
+		for (pid, stream) in &mut self.streams {
+			let units = stream.finish()?;
+			self.liveness.delivered(pid.as_u16(), units);
 		}
 		for section in self.sections.values_mut() {
 			section.finish()?;
@@ -860,22 +886,36 @@ impl<E: catalog::Catalog> Import<E> {
 		Ok(())
 	}
 
-	/// Snapshot the audio frame sync this importer has lost or could not verify.
+	/// Snapshot what every elementary stream has delivered, the audio frame sync lost on the
+	/// way, and the PAT and PMT sections dropped for a bad CRC.
 	///
 	/// Cheap: it reads counters the demuxer already keeps, so a caller can poll it per
 	/// chunk and report the delta.
 	pub fn stats(&self) -> Stats {
 		let mut streams = self.retired_stats.clone();
-		for (pid, stream) in &self.streams {
-			let Some(current) = stream.stats() else {
-				continue;
-			};
+		let routes = self
+			.streams
+			.iter()
+			.filter_map(|(pid, stream)| Some((pid.as_u16(), stream.stats()?)))
+			.chain(self.sections.keys().map(|&pid| (pid, StreamStats::new(".ts"))));
+		for (pid, current) in routes {
 			streams
-				.entry(pid.as_u16())
+				.entry(pid)
 				.and_modify(|retired| retired.merge(&current))
 				.or_insert(current);
 		}
-		Stats { streams }
+		for (pid, stats) in &mut streams {
+			(stats.units, stats.quiet) = self.liveness.stream(*pid);
+		}
+		Stats {
+			streams,
+			crc_error: self.crc_errors.values().sum(),
+		}
+	}
+
+	/// [`Stats::crc_error`] per PID, for merging importers that read the same PSI.
+	pub(super) fn crc_errors(&self) -> &BTreeMap<u16, u64> {
+		&self.crc_errors
 	}
 
 	/// Abort every track with `err` instead of finishing, so subscribers see the
@@ -896,33 +936,74 @@ impl<E: catalog::Catalog> Import<E> {
 	}
 }
 
-/// Frame sync the demuxed audio streams lost or could not verify, keyed by elementary
-/// stream PID.
+/// A PAT listed more than one program, and the [`Import`] was not told which one to take.
+///
+/// Importing them all onto one broadcast would put unrelated clocks on one timeline, so the
+/// import stops instead. Pick one with [`Import::with_program`], or import each as its own
+/// broadcast with [`Programs`](super::Programs).
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("transport stream carries {} programs ({})", .programs.len(), list_programs(.programs))]
+pub struct MultipleProgramsError {
+	/// The program numbers the PAT lists, in PAT order.
+	pub programs: Vec<u16>,
+}
+
+fn list_programs(programs: &[u16]) -> String {
+	programs.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")
+}
+
+/// What each demuxed elementary stream delivered, and the audio frame sync it lost or could
+/// not verify, keyed by elementary stream PID; and the PSI sections the stream as a whole
+/// lost to corruption.
 ///
 /// Snapshot it with [`Import::stats`]. Every count is cumulative for the life of the
 /// importer, so what an operator alarms on is the rate: a feed that resyncs once an hour is
-/// healthy, one that resyncs every second is losing audio.
+/// healthy, one that resyncs every second is losing audio, and one whose access units stop
+/// advancing while the mux keeps flowing has lost that stream.
+///
+/// [`Export::stats`](super::Export::stats) returns the same rows for the streams it writes,
+/// so one schema reads both edges. Only `units` and `quiet` move there: the exporter builds
+/// every frame header itself, so it has no frame sync to lose.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Stats {
-	/// Counters per elementary stream PID, ordered by PID. A PID that has never lost frame
-	/// sync is absent, so an empty map means nothing has been lost.
+	/// One row per elementary stream PID the importer carries or the exporter writes, ordered
+	/// by PID. A PID the importer drops (an undecoded stream without the `mpegts` catalog
+	/// section) has none.
 	pub streams: BTreeMap<u16, StreamStats>,
+	/// PAT and PMT sections dropped because their CRC-32 did not match. Each one left the
+	/// table already in force standing, or, before any, delayed the program's start to the
+	/// next good repetition. Counted for the stream rather than per elementary stream, since
+	/// the PSI PIDs have no row of their own.
+	pub crc_error: u64,
 }
 
 impl Stats {
-	/// Whether no stream has lost frame sync.
+	/// Whether no elementary stream has been registered yet and nothing has been lost.
 	pub fn is_empty(&self) -> bool {
-		self.streams.is_empty()
+		self.streams.is_empty() && self.crc_error == 0
 	}
 }
 
-/// What one elementary stream lost or could not verify. See [`Stats`].
+/// What one elementary stream delivered, lost, or could not verify. See [`Stats`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct StreamStats {
-	/// The current or most recent MoQ track suffix for this PID (`.mp2`, `.ac3`, `.aac`, ...).
+	/// The current or most recent MoQ track suffix for this PID (`.avc3`, `.mp2`, `.ts`, ...),
+	/// or empty for MPEG-1/2 video, which is read for its clock and not published. At export,
+	/// the suffix an import of the output would give the PID.
 	pub track: &'static str,
+	/// Access units the stream delivered: frames published for decoded media, PES payloads or
+	/// sections carried verbatim, and PES read on MPEG-1/2 video. At export, the PES or
+	/// sections written for each frame.
+	pub units: u64,
+	/// Transport time since the stream last delivered an access unit, or since the PMT
+	/// declared it, measured on the program clock (PCR): the one read at import, the one
+	/// written at export. `None` until the first PCR.
+	///
+	/// No threshold applies: a sparse stream such as SCTE-35 is legitimately quiet for
+	/// seconds, so how long is too long is for whoever alarms to decide.
+	pub quiet: Option<std::time::Duration>,
 	/// Completed resyncs: the stream lost frame sync and locked onto a confirmed frame
 	/// again. Each one is a gap in the audio.
 	pub resyncs: u64,
@@ -937,7 +1018,15 @@ pub struct StreamStats {
 }
 
 impl StreamStats {
-	/// Add a newer route's counters while naming the route that is active now.
+	fn new(track: &'static str) -> Self {
+		Self {
+			track,
+			..Default::default()
+		}
+	}
+
+	/// Add a newer route's frame-sync counters while naming the route that is active now.
+	/// Delivery is kept per PID rather than per route, so it needs no merging.
 	fn merge(&mut self, current: &Self) {
 		self.track = current.track;
 		self.resyncs += current.resyncs;
@@ -971,17 +1060,6 @@ impl Pending {
 			data_len: None,
 		}
 	}
-}
-
-/// Convert mpeg2ts PMT descriptors to the catalog's verbatim form.
-fn to_descriptors(descriptors: &[mpeg2ts::ts::Descriptor]) -> Vec<catalog::Descriptor> {
-	descriptors
-		.iter()
-		.map(|d| catalog::Descriptor {
-			tag: d.tag,
-			data: bytes::Bytes::copy_from_slice(&d.data),
-		})
-		.collect()
 }
 
 /// Create a verbatim track and record it in the `mpegts` catalog section as a
@@ -1098,13 +1176,13 @@ impl<E: catalog::Catalog> SectionStream<E> {
 		})
 	}
 
-	/// Consume one 188-byte TS packet, publishing each completed section. `pts` is
-	/// the current media clock used to timestamp a section (its arrival on the
+	/// Consume one 188-byte TS packet, publishing each completed section and returning how
+	/// many. `pts` is the current media clock used to timestamp a section (its arrival on the
 	/// timeline; the splice time itself is inside the section bytes), if one is running.
-	fn packet(&mut self, pkt: &[u8], pts: Option<Timestamp>) -> anyhow::Result<bool> {
+	fn packet(&mut self, pkt: &[u8], pts: Option<Timestamp>) -> anyhow::Result<u64> {
 		let mut sections = Vec::new();
 		self.reassembler.push(pkt, &mut sections);
-		let published = !sections.is_empty();
+		let published = sections.len() as u64;
 		for section in sections {
 			self.emit(section, pts)?;
 		}
@@ -1197,7 +1275,7 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 
 	/// Publish one reassembled PES payload verbatim, in its own group, stamped with
 	/// its PTS (or the live edge when the PES carried none).
-	fn write(&mut self, pending: Pending) -> anyhow::Result<bool> {
+	fn write(&mut self, pending: Pending) -> anyhow::Result<u64> {
 		// Record the original PES stream_id once, from the first PES, so export
 		// re-emits the stream under its real id (e.g. 0xBD for teletext/DVB AC-3).
 		if !self.stream_id_recorded {
@@ -1223,7 +1301,7 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 		};
 		self.track.write(frame)?;
 		self.track.cut(None)?;
-		Ok(true)
+		Ok(1)
 	}
 
 	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
@@ -1331,7 +1409,7 @@ impl Continuity {
 	/// Classify one 188-byte packet, recording what the next call needs.
 	fn observe(&mut self, pkt: &[u8; 188]) -> Continuation {
 		// transport_error_indicator: the demodulator flagged this packet as corrupt, so its
-		// payload can't be trusted (and we don't validate CRC-32). Forgetting the counter
+		// payload can't be trusted (and only a PAT or PMT has its CRC-32 checked). Forgetting the counter
 		// keeps the next clean packet from also looking like a gap.
 		if pkt[1] & 0x80 != 0 {
 			self.last_cc = None;
@@ -1375,6 +1453,195 @@ impl Continuity {
 	}
 }
 
+/// How long each elementary stream has gone without delivering an access unit.
+///
+/// Measured on the program clock, the PCR summed interval by interval, so it runs straight
+/// through the 33-bit wrap, a signalled time-base reset and a corrupt PCR instead of jumping
+/// with them. Not the media clock: that follows the video PTS, and stops with the very stream
+/// this catches. [`Export`](super::Export) runs the same meter on the PCR it writes.
+#[derive(Default)]
+pub(super) struct Liveness {
+	/// The last PCR in 27 MHz ticks, forgotten at a reset so no interval spans one.
+	pcr: Option<u64>,
+	/// PCR ticks elapsed since the first PCR, if one has arrived.
+	elapsed: Option<u64>,
+	/// Per PID: access units delivered, and `elapsed` at the last one, or at registration.
+	/// Kept per PID rather than per route, so a PMT remap carries it like `retired_stats`.
+	streams: HashMap<u16, (u64, u64)>,
+}
+
+impl Liveness {
+	/// A PCR arrived on the program's clock PID.
+	///
+	/// Stepped one interval at a time, so a corrupt PCR, or the clock stepping back without a
+	/// flag, costs one interval rather than inventing hours of silence on every PID. The bound
+	/// is the mux-rate meter's.
+	pub(super) fn pcr(&mut self, pcr: u64) {
+		self.step(pcr, super::mux_rate::MAX_INTERVAL);
+	}
+
+	/// A PCR the caller wrote itself. Its clock breaks only where the caller flags a
+	/// discontinuity, so every forward step counts, including the jump across a media gap
+	/// longer than the backfill covers.
+	pub(super) fn written_pcr(&mut self, pcr: u64) {
+		self.step(pcr, super::mux_rate::PCR_WRAP);
+	}
+
+	fn step(&mut self, pcr: u64, max: u64) {
+		let elapsed = self.elapsed.get_or_insert(0);
+		if let Some(last) = self.pcr.replace(pcr) {
+			let step = (pcr + super::mux_rate::PCR_WRAP - last) % super::mux_rate::PCR_WRAP;
+			if step <= max {
+				*elapsed += step;
+			}
+		}
+	}
+
+	/// The clock restarted or changed PID: the next interval measures nothing.
+	pub(super) fn discontinuity(&mut self) {
+		self.pcr = None;
+	}
+
+	/// The PMT declared `pid`. Its silence counts from here until it delivers.
+	pub(super) fn register(&mut self, pid: u16) {
+		let now = self.elapsed.unwrap_or(0);
+		self.streams.entry(pid).or_insert((0, now));
+	}
+
+	/// `pid` delivered `units` access units just now.
+	pub(super) fn delivered(&mut self, pid: u16, units: u64) {
+		if units == 0 {
+			return;
+		}
+		let now = self.elapsed.unwrap_or(0);
+		if let Some((count, last)) = self.streams.get_mut(&pid) {
+			*count += units;
+			*last = now;
+		}
+	}
+
+	/// `pid`'s access units and how long it has been quiet. See [`StreamStats`].
+	pub(super) fn stream(&self, pid: u16) -> (u64, Option<std::time::Duration>) {
+		let Some(&(units, last)) = self.streams.get(&pid) else {
+			return (0, None);
+		};
+		let quiet = self
+			.elapsed
+			.map(|now| std::time::Duration::from_nanos((now - last) * 1_000 / 27));
+		(units, quiet)
+	}
+}
+
+/// Locks onto the 188-byte packet grid of a TS byte stream.
+///
+/// 0x47 is the packet sync byte but also occurs freely in payload (TS has no byte
+/// stuffing), so a lone 0x47 isn't a boundary.
+#[derive(Default)]
+pub(super) struct Framer {
+	/// False until a candidate is confirmed by the next packet's sync byte; once true we
+	/// stride 188 at a time and trust the per-packet check. Persists across calls so a
+	/// candidate pending confirmation at a buffer tail is re-confirmed, not trusted blindly.
+	synced: bool,
+}
+
+impl Framer {
+	/// Where the next whole packet in `buf` at or after `*off` starts, advancing `*off` past
+	/// it. `None` once no confirmed packet remains, with `*off` at the first byte the next
+	/// call still needs.
+	pub(super) fn next(&mut self, buf: &[u8], off: &mut usize) -> Option<usize> {
+		while *off + TsPacket::SIZE <= buf.len() {
+			if self.synced && buf[*off] == 0x47 {
+				let at = *off;
+				*off += TsPacket::SIZE;
+				return Some(at);
+			}
+			self.synced = false;
+			// Scan (SIMD via memchr) for a candidate whose next packet also begins with 0x47,
+			// confirming the 188 stride before locking onto it. Striding past a false
+			// candidate would route one bogus packet; jumping a flat 188 instead would only
+			// re-align on exact multiples and could desync forever.
+			loop {
+				let Some(rel) = memchr::memchr(0x47, &buf[*off..]) else {
+					// No sync byte left: the buffer is junk, drop it.
+					*off = buf.len();
+					break;
+				};
+				*off += rel;
+				match buf.get(*off + TsPacket::SIZE) {
+					// Next packet also starts with a sync byte: lock onto this candidate.
+					Some(&0x47) => {
+						self.synced = true;
+						break;
+					}
+					// The byte 188 ahead isn't a sync byte: this 0x47 was payload, keep scanning.
+					Some(_) => *off += 1,
+					// Can't confirm yet (candidate is near the buffer tail). Stay unsynced so
+					// it's re-confirmed next call (with the trailing bytes) instead of trusted.
+					None => break,
+				}
+			}
+			// Unsynced means the buffer had no confirmable sync byte, or the candidate is
+			// pending confirmation; either way there's nothing to route until more arrives.
+			if !self.synced {
+				return None;
+			}
+		}
+		None
+	}
+}
+
+/// Reads whole PATs off PID 0: reassembles its sections, drops any whose CRC fails, and
+/// collects the rest until every section of a version is in.
+#[derive(Default)]
+pub(super) struct PatReader {
+	sections: SectionReassembler,
+	table: psi::PatAssembler,
+}
+
+impl PatReader {
+	/// Consume one packet on PID 0, counting each section dropped for a bad CRC into
+	/// `crc_error`. Returns the whole PAT if this packet completed one.
+	pub(super) fn push(&mut self, pkt: &[u8; TsPacket::SIZE], crc_error: &mut u64) -> Option<psi::Pat> {
+		let mut sections = Vec::new();
+		self.sections.push(pkt, &mut sections);
+		let mut pat = None;
+		for section in sections {
+			if section.first() != Some(&psi::PAT_TABLE_ID) {
+				continue;
+			}
+			if !psi::crc_ok(&section) {
+				*crc_error += 1;
+				tracing::warn!(pid = Pid::PAT, "dropped a PSI section with a bad CRC");
+				continue;
+			}
+			pat = self.table.section(&section).or(pat);
+		}
+		pat
+	}
+}
+
+/// Where a packet's payload is.
+enum Payload<'a> {
+	/// Adaptation field only, or reserved `adaptation_field_control`.
+	None,
+	Bytes(&'a [u8]),
+	/// The adaptation field claims to run past the packet.
+	Malformed,
+}
+
+fn payload(pkt: &[u8; TsPacket::SIZE]) -> Payload<'_> {
+	let afc = (pkt[3] >> 4) & 0x3;
+	if afc & 0x1 == 0 {
+		return Payload::None;
+	}
+	let off = if afc & 0x2 != 0 { 5 + pkt[4] as usize } else { 4 };
+	match pkt.get(off..) {
+		Some([]) => Payload::None,
+		Some(payload) => Payload::Bytes(payload),
+		None => Payload::Malformed,
+	}
+}
+
 /// Byte-level reassembler for MPEG-TS private sections on one PID.
 ///
 /// Private sections (SCTE-35 table_id 0xFC and others) are not PES. This handles
@@ -1409,23 +1676,15 @@ impl SectionReassembler {
 		}
 
 		let pusi = pkt[1] & 0x40 != 0;
-		let afc = (pkt[3] >> 4) & 0x3;
-		let has_payload = afc & 0x1 != 0;
-
-		let mut off = 4;
-		if afc & 0x2 != 0 {
-			let af_len = pkt[4] as usize;
-			off = 5 + af_len;
-		}
-
-		if !has_payload {
-			return;
-		}
-
-		if off >= pkt.len() {
-			return;
-		}
-		let payload = &pkt[off..];
+		let payload = match payload(pkt) {
+			Payload::None => return,
+			Payload::Bytes(payload) => payload,
+			// A section can't be found in it, so like a counter gap it costs the partial.
+			Payload::Malformed => {
+				self.acc.clear();
+				return;
+			}
+		};
 
 		if pusi {
 			// pointer_field: payload[1..1+ptr] is the tail of the section already in
@@ -1521,7 +1780,8 @@ enum Stream<E: catalog::Catalog = ()> {
 }
 
 impl<E: catalog::Catalog> Stream<E> {
-	fn write(&mut self, pending: Pending, batched: bool) -> anyhow::Result<bool> {
+	/// Route one reassembled PES, returning how many access units it published.
+	fn write(&mut self, pending: Pending, batched: bool) -> anyhow::Result<u64> {
 		match self {
 			Stream::H264 { split, import, unwrap } => {
 				let reorder = reorder_delay(pending.pts, pending.dts);
@@ -1529,9 +1789,9 @@ impl<E: catalog::Catalog> Stream<E> {
 				// Each PES is one access unit, so flush to emit it immediately.
 				let mut frames = split.decode(&pending.data, pts)?;
 				frames.extend(split.flush(pts)?);
-				let mut published = false;
+				let mut published = 0;
 				for frame in frames {
-					published |= skip_missing_keyframe(import.decode([frame]))?;
+					published += u64::from(skip_missing_keyframe(import.decode([frame]))?);
 				}
 				// After decode, so the track (and its catalog rendition) exists.
 				if let Some(reorder) = reorder {
@@ -1545,9 +1805,9 @@ impl<E: catalog::Catalog> Stream<E> {
 				// Each PES is one access unit, so flush to emit it immediately.
 				let mut frames = split.decode(&pending.data, pts)?;
 				frames.extend(split.flush(pts)?);
-				let mut published = false;
+				let mut published = 0;
 				for frame in frames {
-					published |= skip_missing_keyframe(import.decode([frame]))?;
+					published += u64::from(skip_missing_keyframe(import.decode([frame]))?);
 				}
 				if let Some(reorder) = reorder {
 					import.observe_reorder(reorder)?;
@@ -1558,7 +1818,7 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::Opus(stream) => stream.write(pending),
 			Stream::Legacy(stream) => stream.write(pending),
 			Stream::Verbatim(stream) => stream.write(pending),
-			Stream::Clock | Stream::Ignored => Ok(false),
+			Stream::Clock | Stream::Ignored => Ok(0),
 		}
 	}
 
@@ -1652,16 +1912,19 @@ impl<E: catalog::Catalog> Stream<E> {
 		}
 	}
 
-	fn finish(&mut self) -> anyhow::Result<()> {
+	/// Finish the track, returning the access units a drained tail published.
+	fn finish(&mut self) -> anyhow::Result<u64> {
 		match self {
-			Stream::H264 { import, .. } => Ok(import.finish()?),
-			Stream::H265 { import, .. } => Ok(import.finish()?),
-			Stream::Aac(stream) => stream.finish(),
-			Stream::Opus(stream) => stream.finish(),
-			Stream::Legacy(stream) => stream.finish(),
-			Stream::Verbatim(stream) => stream.finish(),
-			Stream::Clock | Stream::Ignored => Ok(()),
+			// Only the self-describing audio holds a frame back for a successor to confirm.
+			Stream::Aac(stream) => return stream.finish(),
+			Stream::Legacy(stream) => return stream.finish(),
+			Stream::H264 { import, .. } => import.finish()?,
+			Stream::H265 { import, .. } => import.finish()?,
+			Stream::Opus(stream) => stream.finish()?,
+			Stream::Verbatim(stream) => stream.finish()?,
+			Stream::Clock | Stream::Ignored => {}
 		}
+		Ok(0)
 	}
 
 	fn abort(self, err: moq_net::Error) {
@@ -1676,22 +1939,19 @@ impl<E: catalog::Catalog> Stream<E> {
 		}
 	}
 
-	/// Frame sync this stream has lost, or `None` when it has lost none (or scans for none:
-	/// only the self-describing audio codecs do).
+	/// This route's track and the frame sync it has lost (only the self-describing audio
+	/// codecs scan for it), or `None` for a PID that is dropped rather than carried.
 	fn stats(&self) -> Option<StreamStats> {
-		let stats = match self {
+		Some(match self {
 			Stream::Aac(stream) => stream.resync.stats(),
 			Stream::Legacy(stream) => stream.resync.stats(),
-			Stream::H264 { .. }
-			| Stream::H265 { .. }
-			| Stream::Opus(_)
-			| Stream::Verbatim(_)
-			| Stream::Clock
-			| Stream::Ignored => return None,
-		};
-		// A healthy stream reports nothing, so an empty snapshot means an intact feed.
-		let lost = stats.resyncs > 0 || stats.discarded > 0 || stats.unconfirmed > 0;
-		lost.then_some(stats)
+			Stream::H264 { .. } => StreamStats::new(".avc3"),
+			Stream::H265 { .. } => StreamStats::new(".hev1"),
+			Stream::Opus(_) => StreamStats::new(".opus"),
+			Stream::Verbatim(_) => StreamStats::new(".ts"),
+			Stream::Clock => StreamStats::new(""),
+			Stream::Ignored => return None,
+		})
 	}
 
 	/// The MoQ track name of a decoded media stream, once its (lazily created) track
@@ -1761,10 +2021,7 @@ impl Resync {
 			// count from it for the life of the broadcast.
 			unconfirmed: true,
 			draining: false,
-			stats: StreamStats {
-				track,
-				..Default::default()
-			},
+			stats: StreamStats::new(track),
 		}
 	}
 
@@ -1954,7 +2211,7 @@ struct AacStream<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> AacStream<E> {
-	fn write(&mut self, pending: Pending, batched: bool) -> anyhow::Result<bool> {
+	fn write(&mut self, pending: Pending, batched: bool) -> anyhow::Result<u64> {
 		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts)?;
 
 		// Prepend the partial frame left by the previous PES, if any.
@@ -1976,6 +2233,7 @@ impl<E: CatalogExt> AacStream<E> {
 
 		// A single PES can carry several ADTS frames; split and feed each raw frame.
 		let mut burst = std::time::Duration::ZERO;
+		let mut published = 0;
 		let mut offset = 0;
 		// Earliest candidate passed over for declaring a frame longer than the buffer holds,
 		// carried only if nothing later in the buffer confirms.
@@ -2077,36 +2335,41 @@ impl<E: CatalogExt> AacStream<E> {
 				}
 			};
 
+			let mut block = &data[offset + header.header_len..end];
 			let import = match &mut self.import {
 				Some(import) => import,
 				None => {
-					let config = aac::Config {
-						profile: header.object_type,
-						sample_rate: header.sample_rate,
-						channel_count: header.channel_count,
-					};
+					// Synthesize the AudioSpecificConfig `description` so out-of-band consumers
+					// (fMP4/MKV export, WebCodecs) can configure the decoder. A channel_config of 0
+					// moves the program config element out of this first frame into it, as
+					// ffmpeg's aac_adtstoasc does; the TS export puts it back.
+					let asc = aac::in_band_config(
+						header.object_type,
+						header.sample_rate,
+						header.channel_config,
+						&mut block,
+					)?;
+					let mut config = aac::config(&asc)?;
+					config.container = self.container.clone();
 					// Consume the reservation held since the PMT: this resolves the gated rendition,
 					// and carries the catalog's declared media retention onto the track.
-					// The importer synthesizes the AudioSpecificConfig `description` from the config so
-					// out-of-band consumers (fMP4/MKV export, WebCodecs) can configure the decoder.
 					let reserved = self.reserved.take().expect("aac reservation already consumed");
 					let track = self
 						.broadcast
 						.unique_track(".aac", reserved.track_info(hang::catalog::PRIORITY.audio))?;
-					let mut config: hang::catalog::AudioConfig = config.into();
-					config.container = self.container.clone();
 					let aac = aac::Import::new(track, reserved, config)?;
 					self.import.insert(aac)
 				}
 			};
 
-			import.decode(&data[offset + header.header_len..end], pts)?;
+			import.decode(block, pts)?;
 			// Count only completed frames; input gaps and unfinished tails are not a media burst.
 			burst += std::time::Duration::from_nanos((1024_u64 * 1_000_000_000).div_ceil(header.sample_rate as u64));
 			// The importer accumulates; cut each ADTS frame into its own group (one QUIC stream)
 			// so the relay forwards it without waiting for the next.
 			import.cut(None)?;
 			self.resync.published(unvouched);
+			published += 1;
 			// Offsets behind the published frame are spent; carrying one would republish it.
 			fallback = None;
 
@@ -2130,7 +2393,7 @@ impl<E: CatalogExt> AacStream<E> {
 			self.tail_pts = pts;
 		}
 
-		Ok(!burst.is_zero())
+		Ok(published)
 	}
 
 	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
@@ -2160,17 +2423,18 @@ impl<E: CatalogExt> AacStream<E> {
 		self.resync.desynced();
 	}
 
-	fn finish(&mut self) -> anyhow::Result<()> {
+	fn finish(&mut self) -> anyhow::Result<u64> {
 		// Drain a frame held only for want of a successor to confirm it: at end of stream
 		// that successor is never coming. Only once this stream has published a frame,
 		// though. Before that nothing has vouched for any boundary, so accepting one here
 		// would hand a capture that joined mid-frame and ended immediately the same false
 		// frame that starting unconfirmed exists to reject, and build the track's config out
 		// of it.
+		let mut drained = 0;
 		if !self.tail.is_empty() && self.import.is_some() {
 			self.resync.drain();
 			// No PTS to translate, so no mapping needed.
-			self.write(Pending::empty(), true)?;
+			drained = self.write(Pending::empty(), true)?;
 		}
 		// A partial frame at end of stream isn't emissible; drop it, but leave a trace for
 		// diagnosing truncated captures.
@@ -2186,7 +2450,7 @@ impl<E: CatalogExt> AacStream<E> {
 		if let Some(import) = &mut self.import {
 			import.finish()?;
 		}
-		Ok(())
+		Ok(drained)
 	}
 
 	fn abort(mut self, err: moq_net::Error) {
@@ -2205,11 +2469,12 @@ struct OpusStream {
 }
 
 impl OpusStream {
-	fn write(&mut self, pending: Pending) -> anyhow::Result<bool> {
+	fn write(&mut self, pending: Pending) -> anyhow::Result<u64> {
 		let base = unwrap_pts(&mut self.unwrap, pending.pts)?;
 
 		let data = &pending.data;
 		let mut offset = 0;
+		let mut published = 0;
 		// 48 kHz samples elapsed since this PES's PTS, advancing each packet after the first.
 		let mut elapsed: u64 = 0;
 		while offset < data.len() {
@@ -2237,8 +2502,9 @@ impl OpusStream {
 			// doesn't stall the timeline for the rest of the PES.
 			elapsed += opus::packet_samples(packet).unwrap_or(960) as u64;
 			offset = end;
+			published += 1;
 		}
-		Ok(offset > 0)
+		Ok(published)
 	}
 
 	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
@@ -2264,7 +2530,7 @@ impl OpusStream {
 
 /// The 4-byte registration `format_identifier` from a PMT registration descriptor
 /// (tag 0x05), if present. Identifies the codec of a private-data (0x06) stream.
-fn registration_format(descriptors: &[mpeg2ts::ts::Descriptor]) -> Option<[u8; 4]> {
+fn registration_format(descriptors: &[catalog::Descriptor]) -> Option<[u8; 4]> {
 	descriptors
 		.iter()
 		.find(|d| d.tag == 0x05)
@@ -2272,14 +2538,15 @@ fn registration_format(descriptors: &[mpeg2ts::ts::Descriptor]) -> Option<[u8; 4
 		.and_then(|s| s.try_into().ok())
 }
 
-/// The Opus channel count from the DVB extension descriptor (tag 0x7f, ext tag 0x80).
+/// The OpusHead implied by the DVB extension descriptor (tag 0x7f, ext tag 0x80).
 ///
 /// `channel_config_code` follows the Opus-in-TS mapping (and ffmpeg's demuxer): 0 is dual
-/// mono (decoded as stereo), 1..=8 is the channel count directly. Higher codes (0x81
-/// explicitly-coded layouts, reserved values) aren't supported, so they fall back to the
-/// caller's default rather than being read as a raw 129..=255 count.
-fn opus_channel_count(descriptors: &[mpeg2ts::ts::Descriptor]) -> Option<u32> {
-	descriptors
+/// mono (decoded as stereo), 1..=8 is the channel count directly, with family 0 for mono and
+/// stereo and the Vorbis family 1 mapping above that. Higher codes (0x81 explicitly-coded
+/// layouts, reserved values) aren't supported, so they fall back to stereo rather than being
+/// read as a raw 129..=255 count.
+fn opus_config(descriptors: &[catalog::Descriptor]) -> crate::Result<opus::Config> {
+	let channels = descriptors
 		.iter()
 		.find(|d| d.tag == 0x7f && d.data.first() == Some(&0x80))
 		.and_then(|d| d.data.get(1))
@@ -2288,6 +2555,15 @@ fn opus_channel_count(descriptors: &[mpeg2ts::ts::Descriptor]) -> Option<u32> {
 			1..=8 => Some(cc as u32),
 			_ => None,
 		})
+		.unwrap_or(2);
+
+	let mut config = opus::Config::new(48_000, channels);
+	if channels > 2 {
+		let mapping = opus::Mapping::vorbis(channels as u8)?;
+		config.mapping_family = mapping.family();
+		config.mapping = Some(mapping);
+	}
+	Ok(config)
 }
 
 /// Parse one Opus-in-TS access-unit control header, returning `(header_len, payload_size)`.
@@ -2357,8 +2633,8 @@ struct LegacyStream<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> LegacyStream<E> {
-	fn write(&mut self, pending: Pending) -> anyhow::Result<bool> {
-		let mut published = false;
+	fn write(&mut self, pending: Pending) -> anyhow::Result<u64> {
+		let mut published = 0;
 		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts)?;
 
 		// Prepend the partial frame left by the previous PES, if any.
@@ -2519,7 +2795,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 			// so the relay forwards it without waiting for the next.
 			import.cut(None)?;
 			self.resync.published(unvouched);
-			published = true;
+			published += 1;
 			// Offsets behind the published frame are spent; carrying one would republish it.
 			fallback = None;
 
@@ -2566,17 +2842,18 @@ impl<E: CatalogExt> LegacyStream<E> {
 		self.resync.desynced();
 	}
 
-	fn finish(&mut self) -> anyhow::Result<()> {
+	fn finish(&mut self) -> anyhow::Result<u64> {
 		// Drain a frame held only for want of a successor to confirm it: at end of stream
 		// that successor is never coming. Only once this stream has published a frame,
 		// though. Before that nothing has vouched for any boundary, so accepting one here
 		// would hand a capture that joined mid-frame and ended immediately the same false
 		// frame that starting unconfirmed exists to reject, and build the track's config out
 		// of it.
+		let mut drained = 0;
 		if !self.tail.is_empty() && self.import.is_some() {
 			self.resync.drain();
 			// No PTS to translate, so no mapping needed.
-			self.write(Pending::empty())?;
+			drained = self.write(Pending::empty())?;
 		}
 		// A partial frame at end of stream isn't emissible verbatim; drop it, but
 		// leave a trace for diagnosing truncated captures.
@@ -2596,7 +2873,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 		if let Some(import) = &mut self.import {
 			import.finish()?;
 		}
-		Ok(())
+		Ok(drained)
 	}
 
 	fn abort(mut self, err: moq_net::Error) {
@@ -2604,17 +2881,6 @@ impl<E: CatalogExt> LegacyStream<E> {
 			import.abort(err);
 		}
 	}
-}
-
-/// Replicates [`PesHeader::optional_header_len`] (which is crate-private) to
-/// compute the declared PES payload length for bounded packets.
-fn pes_data_len(header: &PesHeader, pes_packet_len: u16) -> Option<usize> {
-	if pes_packet_len == 0 {
-		// Unbounded (the usual case for video); flush on the next PES start.
-		return None;
-	}
-	let optional = 3 + header.pts.map_or(0, |_| 5) + header.dts.map_or(0, |_| 5) + header.escr.map_or(0, |_| 6);
-	pes_packet_len.checked_sub(optional).map(|n| n as usize)
 }
 
 /// Swallow a [`MissingKeyframe`](crate::container::MissingKeyframe) from a video
@@ -2699,40 +2965,8 @@ impl PtsUnwrap {
 	}
 }
 
-/// A cloneable, refillable [`Read`] source backed by a shared buffer.
-///
-/// [`Import`] loads one whole TS packet at a time; the reader consumes it and
-/// reaches end-of-stream before the next refill.
-#[derive(Clone, Default)]
-struct Feed(Arc<Mutex<FeedState>>);
-
-#[derive(Default)]
-struct FeedState {
-	data: BytesMut,
-	pos: usize,
-}
-
-impl Feed {
-	fn lock(&self) -> std::sync::MutexGuard<'_, FeedState> {
-		self.0.lock().unwrap()
-	}
-}
-
-impl Read for Feed {
-	fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-		let mut state = self.lock();
-		let n = out.len().min(state.data.len() - state.pos);
-		if n == 0 {
-			return Ok(0);
-		}
-		out[..n].copy_from_slice(&state.data[state.pos..state.pos + n]);
-		state.pos += n;
-		Ok(n)
-	}
-}
-
 #[cfg(test)]
-mod test {
+pub(super) mod test {
 	use std::collections::BTreeMap;
 	use std::time::Duration;
 
@@ -2767,6 +3001,29 @@ mod test {
 		let stats = resync.stats();
 		assert_eq!(stats.discarded, 7, "the active scan must be visible before recovery");
 		assert_eq!(stats.resyncs, 0, "the stream has not regained sync yet");
+	}
+
+	#[test]
+	fn liveness_steps_over_a_corrupt_pcr_and_the_wrap() {
+		const MS: u64 = 27_000;
+		let mut liveness = super::Liveness::default();
+		liveness.register(0x100);
+		let mut pcr = super::super::mux_rate::PCR_WRAP - 100 * MS;
+		for _ in 0..10 {
+			liveness.pcr(pcr);
+			pcr = (pcr + 40 * MS) % super::super::mux_rate::PCR_WRAP;
+		}
+		assert_eq!(liveness.stream(0x100), (0, Some(Duration::from_millis(360))));
+
+		// A PCR hours ahead, then the clock carrying on where it was: neither step counts.
+		liveness.pcr(pcr + 23_861_000 * MS);
+		liveness.pcr(pcr);
+		assert_eq!(liveness.stream(0x100).1, Some(Duration::from_millis(360)));
+
+		liveness.pcr(pcr + 40 * MS);
+		liveness.delivered(0x100, 3);
+		liveness.pcr(pcr + 80 * MS);
+		assert_eq!(liveness.stream(0x100), (3, Some(Duration::from_millis(40))));
 	}
 
 	#[test]
@@ -2985,23 +3242,34 @@ mod test {
 	///
 	/// The clock rides the first elementary stream, as a real mux puts it on the video.
 	fn synth_pmt(es: &[(StreamType, u16)], cuei: bool) -> Vec<u8> {
+		synth_programs(&[(1, 0x0100, es)], cuei)
+	}
+
+	/// A program to synthesize: `(program_num, pmt_pid, [(stream_type, pid)])`.
+	type SynthProgram<'a> = (u16, u16, &'a [(StreamType, u16)]);
+
+	/// Serialize one PAT listing every program, then each program's PMT, as [`synth_pmt`]
+	/// does for one.
+	fn synth_programs(programs: &[SynthProgram], cuei: bool) -> Vec<u8> {
 		use mpeg2ts::ts::payload::{Pat, Pmt};
 		use mpeg2ts::ts::{
 			ContinuityCounter, Descriptor, EsInfo, Pid, ProgramAssociation, TransportScramblingControl, TsHeader,
 			TsPacket, TsPacketWriter, TsPayload, VersionNumber, WriteTsPacket,
 		};
 
-		const PMT_PID: u16 = 0x0100;
 		let pat = Pat {
 			transport_stream_id: 1,
 			version_number: VersionNumber::default(),
-			table: vec![ProgramAssociation {
-				program_num: 1,
-				program_map_pid: Pid::new(PMT_PID).unwrap(),
-			}],
+			table: programs
+				.iter()
+				.map(|&(program_num, pmt_pid, _)| ProgramAssociation {
+					program_num,
+					program_map_pid: Pid::new(pmt_pid).unwrap(),
+				})
+				.collect(),
 		};
-		let pmt = Pmt {
-			program_num: 1,
+		let pmt = |program_num: u16, es: &[(StreamType, u16)]| Pmt {
+			program_num,
 			pcr_pid: es.first().map(|&(_, pid)| Pid::new(pid).unwrap()),
 			version_number: VersionNumber::default(),
 			program_info: if cuei {
@@ -3039,7 +3307,9 @@ mod test {
 
 		let mut out = Vec::new();
 		write(&mut out, Pid::PAT, TsPayload::Pat(pat));
-		write(&mut out, PMT_PID, TsPayload::Pmt(pmt));
+		for &(program_num, pmt_pid, es) in programs {
+			write(&mut out, pmt_pid, TsPayload::Pmt(pmt(program_num, es)));
+		}
 		out
 	}
 
@@ -3853,6 +4123,8 @@ mod test {
 				AAC_PID,
 				super::StreamStats {
 					track: ".aac",
+					units: 4,
+					quiet: None,
 					resyncs: 1,
 					discarded: 47,
 					unconfirmed: 0,
@@ -4044,6 +4316,8 @@ mod test {
 				MP2_PID,
 				super::StreamStats {
 					track: ".mp2",
+					units: 4,
+					quiet: None,
 					resyncs: 1,
 					discarded: 72,
 					unconfirmed: 0,
@@ -4229,6 +4503,8 @@ mod test {
 				MP2_PID,
 				super::StreamStats {
 					track: ".mp2",
+					units: 2,
+					quiet: None,
 					resyncs: 0,
 					discarded: 0,
 					unconfirmed: 1,
@@ -4988,6 +5264,314 @@ mod test {
 		}
 		assert_eq!(out.len(), 2, "both renditions must exist");
 		out
+	}
+
+	/// A two-program multiplex whose clocks sit an hour apart: program 1's MP2 on
+	/// `0x0061` starts at 1 s, program 2's on `0x0071` at 3601 s.
+	pub(in crate::container::ts) fn two_programs() -> Vec<u8> {
+		let mut data = synth_programs(
+			&[
+				(1, 0x0100, &[(StreamType::Mpeg1Audio, 0x0061)]),
+				(2, 0x0200, &[(StreamType::Mpeg1Audio, 0x0071)]),
+			],
+			false,
+		);
+		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
+		data.extend(mp2_pes(0x0071, 0, 3_601 * 90_000, [0xCC, 0xDD]));
+		data
+	}
+
+	#[test]
+	fn a_multi_program_input_is_refused_before_publishing() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let err = import.decode(&two_programs()).unwrap_err();
+		assert_eq!(
+			err.downcast_ref::<super::MultipleProgramsError>(),
+			Some(&super::MultipleProgramsError { programs: vec![1, 2] }),
+			"{err:#}"
+		);
+		assert!(catalog.snapshot().audio.renditions.is_empty(), "nothing was published");
+	}
+
+	#[test]
+	fn a_program_added_mid_stream_ends_the_import() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&synth_pmt(&[(StreamType::Mpeg1Audio, 0x0061)], false))
+			.unwrap();
+		import.decode(&mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB])).unwrap();
+
+		let err = import.decode(&two_programs()).unwrap_err();
+		assert!(err.downcast_ref::<super::MultipleProgramsError>().is_some(), "{err:#}");
+		assert_eq!(
+			catalog.snapshot().audio.renditions.len(),
+			1,
+			"program 1 stays published"
+		);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_selected_program_publishes_only_its_streams_on_its_clock() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve()).with_program(2);
+		import.decode(&two_programs()).unwrap();
+		import.finish().unwrap();
+
+		let snapshot = catalog.snapshot();
+		let names: Vec<_> = snapshot.audio.renditions.keys().collect();
+		assert_eq!(names.len(), 1, "only program 2's stream: {names:?}");
+		let (frames, _) = read_breaks(&consumer, names[0]).await;
+		assert!(!frames.is_empty(), "program 2 published");
+		assert!(
+			frames
+				.iter()
+				.all(|frame| frame.payload[4] == 0xCC || frame.payload[4] == 0xDD),
+			"no program 1 frame leaks in"
+		);
+		assert_eq!(frames[0].timestamp.as_micros(), 3_601_000_000, "program 2's own PTS");
+	}
+
+	#[test]
+	fn a_selected_program_the_pat_does_not_list_is_refused() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve()).with_program(3);
+
+		let err = import.decode(&two_programs()).unwrap_err().to_string();
+		assert!(err.contains("no program 3") && err.contains("1, 2"), "{err}");
+	}
+
+	/// `section` on `pid` as the packets a mux would send, counting from `*cc`: the first
+	/// opens it behind a pointer_field skipping `tail` (the end of an earlier section), and
+	/// the rest carry it on.
+	pub(in crate::container::ts) fn psi_packets(pid: u16, cc: &mut u8, tail: &[u8], section: &[u8]) -> Vec<u8> {
+		let mut payload = vec![tail.len() as u8];
+		payload.extend_from_slice(tail);
+		payload.extend_from_slice(section);
+		let mut out = Vec::new();
+		for (i, chunk) in payload.chunks(184).enumerate() {
+			let pusi = if i == 0 { 0x40 } else { 0 };
+			out.extend_from_slice(&[0x47, pusi | (pid >> 8) as u8, pid as u8, 0x10 | *cc]);
+			out.extend_from_slice(chunk);
+			out.resize(out.len().next_multiple_of(188), 0xff);
+			*cc = (*cc + 1) & 0x0f;
+		}
+		out
+	}
+
+	/// A PAT section listing `(program_number, pmt_pid)`.
+	pub(in crate::container::ts) fn pat_section(programs: &[(u16, u16)]) -> Vec<u8> {
+		let body: Vec<u8> = programs
+			.iter()
+			.flat_map(|&(number, pid)| [(number >> 8) as u8, number as u8, 0xe0 | (pid >> 8) as u8, pid as u8])
+			.collect();
+		super::psi::section(0x00, 1, 0, 0, 0, &body)
+	}
+
+	/// A PMT section listing `(stream_type, pid, es_descriptors)`, the clock on the first.
+	fn pmt_section(program: u16, version: u8, streams: &[(u8, u16, &[u8])]) -> Vec<u8> {
+		let pcr = streams.first().map_or(0x1fff, |&(_, pid, _)| pid);
+		let mut body = vec![0xe0 | (pcr >> 8) as u8, pcr as u8, 0xf0, 0x00];
+		for &(stream_type, pid, descriptors) in streams {
+			body.extend_from_slice(&[
+				stream_type,
+				0xe0 | (pid >> 8) as u8,
+				pid as u8,
+				0xf0,
+				descriptors.len() as u8,
+			]);
+			body.extend_from_slice(descriptors);
+		}
+		super::psi::section(0x02, program, version, 0, 0, &body)
+	}
+
+	/// `section` with one bit of its CRC flipped.
+	pub(in crate::container::ts) fn corrupt(mut section: Vec<u8>) -> Vec<u8> {
+		*section.last_mut().unwrap() ^= 0x01;
+		section
+	}
+
+	const MP2: u8 = StreamType::Mpeg1Audio as u8;
+
+	/// A PAT listing fifty programs, which takes two packets, then program 50's PMT (one
+	/// MP2 stream on `0x0061`) and one PES on it.
+	pub(in crate::container::ts) fn fifty_programs() -> Vec<u8> {
+		let programs: Vec<_> = (1..=50).map(|n| (n, 0x0100 + n)).collect();
+		let pat = pat_section(&programs);
+		let mut data = psi_packets(0, &mut 0, &[], &pat);
+		assert_eq!(data.len(), 2 * 188, "the PAT spans two packets");
+		data.extend(psi_packets(
+			0x0132,
+			&mut 0,
+			&[],
+			&pmt_section(50, 0, &[(MP2, 0x0061, &[])]),
+		));
+		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
+		data
+	}
+
+	/// A PAT split into two sections, each in its own packet, listing program 1 then program
+	/// 2, then each program's PMT (one MP2 stream) and one PES on it.
+	pub(in crate::container::ts) fn two_section_pat() -> Vec<u8> {
+		let mut cc = 0;
+		let mut data = Vec::new();
+		for (number, program) in [(0, 1u16), (1, 2)] {
+			let entry = [0x00, program as u8, 0xe0 | program as u8, 0x00];
+			let section = super::psi::section(0x00, 1, 0, number, 1, &entry);
+			data.extend(psi_packets(0, &mut cc, &[], &section));
+		}
+		for (program, pid, fills) in [(1u16, 0x0061, [0xAA, 0xBB]), (2, 0x0071, [0xCC, 0xDD])] {
+			let pmt = pmt_section(program, 0, &[(MP2, pid, &[])]);
+			data.extend(psi_packets(program << 8, &mut 0, &[], &pmt));
+			data.extend(mp2_pes(pid, 0, 90_000, fills));
+		}
+		data
+	}
+
+	fn psi_import() -> (crate::catalog::Producer, super::Import) {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let import = super::Import::new(broadcast, catalog.reserve());
+		(catalog, import)
+	}
+
+	#[test]
+	fn a_pmt_spanning_two_packets_is_read_whole() {
+		let (catalog, mut import) = psi_import();
+		// A private descriptor long enough to push the second stream into the next packet.
+		let mut descriptor = vec![0x80, 200];
+		descriptor.resize(202, 0x00);
+		let pmt = pmt_section(1, 0, &[(MP2, 0x0061, &descriptor), (MP2, 0x0062, &[])]);
+		let mut data = psi_packets(0, &mut 0, &[], &pat_section(&[(1, 0x0100)]));
+		data.extend(psi_packets(0x0100, &mut 0, &[], &pmt));
+		assert_eq!(data.len(), 3 * 188, "the PMT spans two packets");
+		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
+		data.extend(mp2_pes(0x0062, 0, 90_000, [0xCC, 0xDD]));
+
+		import.decode(&data).unwrap();
+		import.finish().unwrap();
+		assert_eq!(catalog.snapshot().audio.renditions.len(), 2, "both streams publish");
+		assert_eq!(import.stats().crc_error, 0);
+	}
+
+	#[test]
+	fn a_pat_behind_a_nonzero_pointer_field_is_read() {
+		let (catalog, mut import) = psi_import();
+		let mut data = psi_packets(0, &mut 0, &[0xab; 7], &pat_section(&[(1, 0x0100)]));
+		data.extend(psi_packets(
+			0x0100,
+			&mut 0,
+			&[],
+			&pmt_section(1, 0, &[(MP2, 0x0061, &[])]),
+		));
+		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
+
+		import.decode(&data).unwrap();
+		import.finish().unwrap();
+		assert_eq!(catalog.snapshot().audio.renditions.len(), 1);
+	}
+
+	#[test]
+	fn a_program_listed_in_a_pats_second_packet_is_selected() {
+		let (catalog, import) = psi_import();
+		let mut import = import.with_program(50);
+		import.decode(&fifty_programs()).unwrap();
+		import.finish().unwrap();
+		assert_eq!(catalog.snapshot().audio.renditions.len(), 1, "program 50 publishes");
+
+		// Unselected, the whole PAT is what refuses the input.
+		let (_, mut import) = psi_import();
+		let err = import.decode(&fifty_programs()).unwrap_err();
+		let err = err.downcast_ref::<super::MultipleProgramsError>().unwrap();
+		assert_eq!(err.programs, (1..=50).collect::<Vec<_>>());
+	}
+
+	/// A corrupt PAT and a corrupt PMT between good repetitions are each dropped and counted
+	/// once, while the layout they would have changed holds; a later good PMT revision still
+	/// applies.
+	#[test]
+	fn corrupt_psi_between_good_repetitions_is_dropped_and_counted() {
+		let (catalog, mut import) = psi_import();
+		let (mut pat_cc, mut pmt_cc) = (0, 0);
+		let pat = pat_section(&[(1, 0x0100)]);
+		let pmt = pmt_section(1, 0, &[(MP2, 0x0061, &[])]);
+		let two = [(MP2, 0x0061, &[][..]), (MP2, 0x0062, &[][..])];
+
+		let mut data = psi_packets(0, &mut pat_cc, &[], &pat);
+		data.extend(psi_packets(0x0100, &mut pmt_cc, &[], &pmt));
+		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
+		import.decode(&data).unwrap();
+		let units = import.stats().streams[&0x0061].units;
+
+		// Read, this PAT would end the unselected import with a second program, and this PMT
+		// would add a stream.
+		let mut data = psi_packets(0, &mut pat_cc, &[], &corrupt(pat_section(&[(1, 0x0100), (2, 0x0200)])));
+		data.extend(psi_packets(0x0100, &mut pmt_cc, &[], &corrupt(pmt_section(1, 1, &two))));
+		data.extend(psi_packets(0, &mut pat_cc, &[], &pat));
+		data.extend(psi_packets(0x0100, &mut pmt_cc, &[], &pmt));
+		data.extend(mp2_pes(0x0061, 1, 180_000, [0xAA, 0xBB]));
+		import.decode(&data).unwrap();
+
+		assert_eq!(
+			catalog.snapshot().audio.renditions.len(),
+			1,
+			"the corrupt PMT added nothing"
+		);
+		assert!(
+			import.stats().streams[&0x0061].units > units,
+			"the stream kept delivering"
+		);
+		assert_eq!(import.crc_errors(), &BTreeMap::from([(0x0000, 1), (0x0100, 1)]));
+		assert_eq!(import.stats().crc_error, 2);
+
+		let mut data = psi_packets(0x0100, &mut pmt_cc, &[], &pmt_section(1, 2, &two));
+		data.extend(mp2_pes(0x0062, 0, 180_000, [0xCC, 0xDD]));
+		import.decode(&data).unwrap();
+		import.finish().unwrap();
+		assert_eq!(
+			catalog.snapshot().audio.renditions.len(),
+			2,
+			"the good revision applied"
+		);
+		assert_eq!(import.stats().crc_error, 2, "good sections count nothing");
+	}
+
+	/// The positive control: with no good PAT, nothing is learned, so nothing publishes.
+	#[test]
+	fn a_feed_whose_only_pat_is_corrupt_publishes_nothing() {
+		let (catalog, mut import) = psi_import();
+		let mut data = psi_packets(0, &mut 0, &[], &corrupt(pat_section(&[(1, 0x0100)])));
+		data.extend(psi_packets(
+			0x0100,
+			&mut 0,
+			&[],
+			&pmt_section(1, 0, &[(MP2, 0x0061, &[])]),
+		));
+		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
+
+		import.decode(&data).unwrap();
+		import.finish().unwrap();
+		assert!(catalog.snapshot().audio.renditions.is_empty());
+		assert_eq!(import.stats().crc_error, 1);
+		assert!(!import.stats().is_empty(), "a dropped section is something to report");
+	}
+
+	#[test]
+	fn adaptation_field_past_the_packet_drops_partial() {
+		let section = fake_section(0xfc, 300);
+		let mut malformed = packet(false, 1, 0, &section[183..]);
+		// afc 0b11 with an adaptation_field_length reaching past the packet.
+		malformed[3] = 0x31;
+		malformed[4] = 200;
+		let rest = packet(false, 2, 0, &section[183..]);
+		assert!(run(&[packet(true, 0, 0, &section[..183]), malformed, rest]).is_empty());
 	}
 
 	/// Two MP2 renditions, the first of which the PMT designates as the PCR PID.

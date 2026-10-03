@@ -3,6 +3,7 @@ import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { Parameters } from "./parameters.ts";
+import { Subscribe } from "./subscribe.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 // we only support Group Order descending
@@ -50,29 +51,12 @@ export class TrackStatusRequest {
 		return Message.encode(w, (mw) => this.#encode(mw, version));
 	}
 
+	/**
+	 * Every draft defines TRACK_STATUS as identical to SUBSCRIBE, so it decodes as one and
+	 * keeps only what names the track. We refuse the request, so the rest goes unread.
+	 */
 	static async decode(r: Reader, version: IetfVersion): Promise<TrackStatusRequest> {
-		return Message.decode(r, (mr) => TrackStatusRequest.#decode(mr, version));
-	}
-
-	static async #decode(r: Reader, version: IetfVersion): Promise<TrackStatusRequest> {
-		const requestId = await r.u62();
-		if (version === Version.DRAFT_17) {
-			await r.u62(); // required_request_id_delta
-		}
-		const trackNamespace = await Namespace.decode(r);
-		const trackName = await r.string();
-
-		if (version === Version.DRAFT_14) {
-			await r.u8(); // subscriber_priority
-			await r.u8(); // group_order
-			await r.bool(); // forward
-			await r.u53(); // filter_type
-			await Parameters.decode(r, version); // parameters
-		} else {
-			// v15+: just parameters
-			await Parameters.decode(r, version);
-		}
-
+		const { requestId, trackNamespace, trackName } = await Subscribe.decode(r, version);
 		return new TrackStatusRequest({ requestId, trackNamespace, trackName });
 	}
 }

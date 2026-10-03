@@ -2,42 +2,32 @@
 
 ## Goal
 
-Choose how a catalog describes a track over its lifetime so live playback and
-recorded playback do not guess which configuration applies to a media group.
-Explore immutable track definitions as an alternative to correlating catalog
-updates with groups. This is independent of DVR and does not gate archives.
+A track's catalog definition never changes for its name, so live and recorded
+playback never guess which configuration applies to a group. A publisher whose
+track configuration changes either refuses the change or publishes it under a
+new track name or a new broadcast epoch. This is independent of DVR and does
+not gate archives.
 
 ## Plan
 
-There is no explicit catalog-update-to-group binding. Timestamps alone do not
-establish one. Audit publishers, consumers, and catalog composition in Rust and
-JS to identify which track properties change today and why: codec/config bytes,
-resolution, audio layout, rendition metadata, and broadcast references.
+Decided in the 2026-09-30 audit: track identity is immutable. Mutable
+definitions with a configuration identity that groups reference (the old
+option 2) are out, because they contradict the rule that a track name always
+means the same content, and MoQ has no ETag-style invalidation.
 
-Compare two approaches with concrete publish and playback examples:
+Audit publishers in Rust and JS for the properties that change mid-track
+today (codec/config bytes, resolution, audio layout, rendition metadata) and
+make each one either refuse the change or mint a new identity: a new track
+name through a [catalog alias](/quest/m1/catalog-track-alias.md) when the
+catalog can keep both, or a new [broadcast epoch](/quest/m1/broadcast-epoch/README.md)
+when the whole broadcast restarts. The catalog may still add and remove
+tracks; a removed name is never reused for different content.
 
-- Make each track definition immutable for its identity. A configuration change
-  creates a new track identity instead of changing the meaning of existing
-  groups. This is the preferred direction to investigate, not a settled API.
-- Keep mutable definitions with an explicit configuration identity or update
-  boundary that groups can reference. Measure the protocol and lifecycle cost
-  against immutable definitions rather than assuming version binding is needed.
-
-Distinguish immutable track definitions from a completely immutable catalog.
-Decide whether catalogs may add/remove tracks or change presentation metadata,
-what happens to removed track identities, and whether a name can be reused.
-Cover codec changes, rendition switches, reconnects, late joiners, reordered
-catalog/media delivery, and readers seeking older groups. Evaluate what catalog
-state must remain discoverable when media outlives the publishing session;
-retaining snapshots alone cannot establish which configuration a group uses.
-
-Present the recommendation and migration costs for maintainer agreement before
-changing public APIs or wire semantics. Produce focused implementation quests
-for the chosen design, including Rust/JS and binding synchronization, HLS/watch
-behavior, draft changes, and CI regression coverage. Target any published API
-break at dev. Do not add an archive-only version index or change DVR retention
-as a substitute for deciding track identity.
+Cover codec changes, rendition switches, reconnects, and late joiners in Rust,
+JS, and HLS/watch tests.
 
 ## Related
 
-- [Archive](/quest/m1/archive/README.md) - storage and replay consume the eventual identity contract
+- [Catalog track alias](/quest/m1/catalog-track-alias.md) - lets a catalog list a new track name for a changed rendition
+- [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - a restart is a new epoch rather than a changed track
+- [Archive](/quest/m1/archive/README.md) - storage and replay consume the identity contract

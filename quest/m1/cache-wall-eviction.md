@@ -34,6 +34,9 @@ instead of only on a write. The pool's idle expiry is out of scope.
 - Weigh the semantics too: `max_age` is media time on purpose, so a congestion
   stall cannot age content out (`track::Info::max_age`). A wall term changes
   that for a stalled but live publisher.
+- Whatever this decides, an untimed group is never media-stale and only the
+  pool's expiry reclaims it, as decided in
+  [moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md).
 - Record the numbers and the decision in the PR, then rewrite this quest into
   the implementation or delete it.
 
@@ -42,4 +45,5 @@ Public API: none from the plan. Wire: none.
 ## Related
 
 - [Cache expiry growth](/quest/m1/cache-expiry-growth.md) - relay memory past the expiry window, in the same cache
-- [Cache shard](/quest/m1/perf/cache-shard.md) - the pool's shared counters under many workers
+- [Cache shard](/quest/m2/cache-shard.md) - the pool's shared counters under many workers
+- [moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md) - untimed groups are never media-stale

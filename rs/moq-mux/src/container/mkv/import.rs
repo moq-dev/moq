@@ -572,20 +572,18 @@ fn build_audio_config(
 
 	match codec_id {
 		"A_OPUS" => {
-			// Codec private is OpusHead. If present, it's authoritative for rate/channels.
-			let (cfg_rate, cfg_channels) = if let Some(priv_data) = codec_private {
-				let mut cursor = priv_data.clone();
-				let cfg = crate::codec::opus::Config::parse(&mut cursor)?;
-				(cfg.sample_rate, cfg.channel_count)
-			} else {
-				(sample_rate, channels)
+			// The catalog describes the decoder's output: Opus always decodes at 48 kHz, whatever the
+			// informational input rate in the OpusHead or SamplingFrequency claims.
+			let mut config = match codec_private {
+				Some(head) => {
+					let mut config = crate::codec::opus::config(head)?;
+					if config.channel_count == 0 {
+						config.channel_count = channels;
+					}
+					config
+				}
+				None => AudioConfig::new(AudioCodec::Opus, 48_000, channels),
 			};
-
-			let mut config = AudioConfig::new(
-				AudioCodec::Opus,
-				if cfg_rate > 0 { cfg_rate } else { sample_rate },
-				if cfg_channels > 0 { cfg_channels } else { channels },
-			);
 			config.description = codec_private.cloned();
 			Ok(config)
 		}

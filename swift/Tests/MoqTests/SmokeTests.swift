@@ -32,6 +32,12 @@ final class SmokeTests: XCTestCase {
         }
     }
 
+    /// An error's description is the Rust error message.
+    func testErrorDescriptionIsRustMessage() {
+        XCTAssertEqual(MoqError.Closed.description, "closed")
+        XCTAssertEqual(MoqError.Transport("reset").description, "transport: reset")
+    }
+
     /// Verifies the native lib loads and the wrapper compiles against the
     /// generated API. No network needed: we just instantiate a few types and
     /// exercise the cancel path.

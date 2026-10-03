@@ -409,7 +409,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		match packet_type {
 			AUDIO_PACKET_SEQUENCE_START => {
 				let config = match fourcc {
-					b"Opus" => config_from_opus_head(payload)?,
+					b"Opus" => crate::codec::opus::config(payload)?,
 					b"mp4a" => config_from_asc(payload)?,
 					// MP3 / AC-3 / E-AC-3 are verbatim with no sequence header; they
 					// configure from the first frame. Anything else is unsupported.
@@ -783,15 +783,6 @@ fn config_from_asc(asc_bytes: &[u8]) -> anyhow::Result<AudioConfig> {
 	let cfg = crate::codec::aac::Config::parse(&mut cursor)?;
 	let mut config = AudioConfig::new(AAC { profile: cfg.profile }, cfg.sample_rate, cfg.channel_count);
 	config.description = Some(Bytes::copy_from_slice(asc_bytes));
-	Ok(config)
-}
-
-/// Build an audio config for Opus from an `OpusHead` (RFC 7845) record.
-fn config_from_opus_head(head: &[u8]) -> anyhow::Result<AudioConfig> {
-	let mut cursor = head;
-	let cfg = crate::codec::opus::Config::parse(&mut cursor)?;
-	let mut config = AudioConfig::new(AudioCodec::Opus, cfg.sample_rate, cfg.channel_count);
-	config.description = Some(Bytes::copy_from_slice(head));
 	Ok(config)
 }
 

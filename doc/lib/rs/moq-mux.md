@@ -14,7 +14,7 @@ Turns existing container formats into hang broadcasts and back. This is what
 | Format | Import | Export | Notes |
 | --- | --- | --- | --- |
 | fMP4 / CMAF | yes | yes | Passthrough as `cmaf` or repackaged as `legacy`. |
-| MPEG-TS | yes | yes | H.264/H.265; AAC, MP2, AC-3, E-AC-3; SCTE-35 and subtitle PIDs carried as tracks; service tables round-trip; signalled timebase discontinuities preserved; paced export. |
+| MPEG-TS | yes | yes | H.264/H.265; AAC, MP2, AC-3, E-AC-3, Opus up to 7.1; SCTE-35 and subtitle PIDs carried as tracks; service tables round-trip; signalled timebase discontinuities preserved; paced export. |
 | FLV / RTMP | yes | yes | Legacy H.264 + AAC + MP3, plus enhanced-RTMP HEVC, AV1, VP9, Opus, AC-3, E-AC-3, and multitrack. |
 | Matroska / WebM | yes | yes | |
 | Annex-B (H.264, H.265) | yes | yes | Parameter sets extracted to the catalog or re-injected per keyframe. |
@@ -100,14 +100,18 @@ The fMP4, MPEG-TS, FLV, and MKV importers publish the source's own timestamps
 (MPEG-TS after unwrapping its 33-bit PTS; fMP4 passthrough keeps each `tfdt`)
 and anchor the catalog's broadcast clock instead: the first frame's timestamp
 maps to the time it arrived, and every track of the input, like every importer
-sharing the catalog, keeps that one mapping. A clock set with
+sharing the catalog, keeps that one mapping. Data tracks stamp on it too, even
+one created before that first frame, though anything it wrote earlier stays on
+the clock the catalog started with. A clock set with
 `Config::with_clock` is never re-anchored, for a recording whose zero names its
 real start.
 
 Group starts never go backwards. A group starting before the previous group's
-start ends the import with `TimestampRewind`, as a restarted encoder or a looping
-file wrapping to the top does, flagged MPEG-TS discontinuity or not; republish
-it as a new broadcast. Frames may still dip below the previous group's content:
+start ends the import with `TimestampRewind`, whose `timestamp` and `floor` fields
+name the refused frame and the previous group's start; the message gives both in
+microseconds. A restarted encoder or a looping file wrapping to the top does this,
+flagged MPEG-TS discontinuity or not; republish it as a new broadcast. Frames may
+still dip below the previous group's content:
 B-frames, and a keyframe overlapping the previous group's last frame. A flagged
 MPEG-TS discontinuity that jumps forward continues the broadcast.
 
@@ -121,7 +125,7 @@ API: [docs.rs/moq-mux](https://docs.rs/moq-mux). Real-world usage:
 Container producers and consumers take a format configured from the track's audio
 or video catalog entry (`catalog::hang::Container::try_from(&config)`). For a raw
 track, supply `container::Kind` explicitly. `cut(Some(end))` flushes and closes the
-group immediately. Legacy video writes an empty timestamped frame at that end;
+group immediately. Legacy and LOC video write an empty timestamped frame at that end;
 audio and CMAF do not. With no explicit end, the producer uses a known sample
 duration or observed cadence, independently of batching and reorder jitter.
 Streaming consumers deliver frames immediately. The live fMP4 exporter receives

@@ -271,7 +271,8 @@ async fn import_enhanced_vp9() {
 /// header and carries the frames through.
 #[tokio::test(start_paused = true)]
 async fn import_enhanced_opus() {
-	let head = crate::codec::opus::Config::new(48_000, 2).encode().unwrap();
+	// A 44.1 kHz input rate is informational; the catalog still reports the decoder's 48 kHz.
+	let head = crate::codec::opus::Config::new(44_100, 2).encode().unwrap();
 
 	let mut out = Vec::new();
 	out.extend_from_slice(b"FLV");

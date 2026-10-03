@@ -79,7 +79,6 @@ impl Connection {
 	/// Admits and serves this connection until it closes.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id, remote = self.request.remote_addr().map(tracing::field::display), session = tracing::field::Empty))]
 	pub async fn run(self) -> anyhow::Result<()> {
-		let peer_hop = self.request.peer_hop();
 		let (admitted, registration) = match self.admit().await {
 			Ok(admitted) => admitted,
 			Err(err) => {
@@ -116,7 +115,6 @@ impl Connection {
 			request = request.with_subscriber(publisher);
 		}
 		let session = request.ok().await?;
-		let _node_connection = peer_hop.map(|origin| self.cluster.nodes.connect_inbound(self.id, origin));
 
 		tracing::info!(version = %session.version(), %transport, "negotiated");
 
@@ -186,7 +184,7 @@ impl Connection {
 /// the session ([`auth::Lease::ended`]) the session closes with the reason, and
 /// the session's own close is reported back through the lease as the `end` event.
 /// Either way, a relay shutdown drains the session with a GOAWAY instead of
-/// cutting it off.
+/// cutting it off, and does not exit before this returns or the drain deadline.
 ///
 /// The session handle is `Send + Sync` whatever transport carries it, so this
 /// runs on the shared runtime even for sessions a pinned QUIC worker drives.
@@ -196,6 +194,7 @@ pub async fn supervise(
 	mut shutdown: crate::shutdown::Observer,
 	registration: Option<crate::session::Registration>,
 ) -> anyhow::Result<()> {
+	let _serving = shutdown.serve();
 	loop {
 		let nudged = async {
 			match &registration {

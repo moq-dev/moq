@@ -272,7 +272,7 @@ fn config_from_sps(sps_nal: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	});
 	config.coded_width = Some(sps.rbsp.cropped_width() as u32);
 	config.coded_height = Some(sps.rbsp.cropped_height() as u32);
-	config.framerate = vui_data.framerate;
+	config.framerate = super::sps_period(&sps.rbsp).map(|(units, scale)| scale as f64 / units as f64);
 	config.display_aspect_width = vui_data.display_ratio_width;
 	config.display_aspect_height = vui_data.display_ratio_height;
 	Ok(config)
@@ -297,19 +297,12 @@ fn find_sps(payload: &[u8]) -> Option<Bytes> {
 
 #[derive(Default)]
 struct VuiData {
-	framerate: Option<f64>,
 	display_ratio_width: Option<u32>,
 	display_ratio_height: Option<u32>,
 }
 
 impl VuiData {
 	fn new(vui: &scuffle_h265::VuiParameters) -> Self {
-		// FPS = time_scale / num_units_in_tick
-		let framerate = vui
-			.vui_timing_info
-			.as_ref()
-			.map(|t| t.time_scale.get() as f64 / t.num_units_in_tick.get() as f64);
-
 		let (display_ratio_width, display_ratio_height) = match &vui.aspect_ratio_info {
 			// Extended SAR has explicit arbitrary values for width and height.
 			scuffle_h265::AspectRatioInfo::ExtendedSar { sar_width, sar_height } => {
@@ -322,7 +315,6 @@ impl VuiData {
 		};
 
 		VuiData {
-			framerate,
 			display_ratio_width,
 			display_ratio_height,
 		}
@@ -367,6 +359,19 @@ mod tests {
 			.create_track(name, hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		(track, catalog)
+	}
+
+	/// Only an SPS whose HRD fixes the picture rate states it; the VUI tick alone is a ceiling,
+	/// left for the catalog estimator to measure.
+	#[test]
+	fn config_takes_only_a_fixed_framerate() {
+		let mut fixed = vec![0, 0, 0, 1];
+		fixed.extend_from_slice(fixtures::SPS_PYRAMID);
+		assert_eq!(config(&fixed).unwrap().framerate, Some(25.0));
+
+		let mut ceiling = vec![0, 0, 0, 1];
+		ceiling.extend_from_slice(fixtures::SPS);
+		assert_eq!(config(&ceiling).unwrap().framerate, None);
 	}
 
 	/// An hvcC initializer resolves a config with the hvcC stored as `description`.
