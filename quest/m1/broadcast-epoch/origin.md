@@ -22,8 +22,8 @@ any wire change.
   one `@` segment below it. They pick the greatest live epoch, and on a table
   change, re-select: move up at once, or fall back when the current one is
   retracted. A path that names an epoch pins it and never moves. Each move is
-  a new broadcast to the caller, never a splice. Within one epoch path, any
-  route resumes a subscription, whoever serves it.
+  a new broadcast to the caller, never a splice. The #3312 first-hop resume
+  rule still applies within one epoch path.
 - Bare resolution: a bare request with no route of its own resolves to that
   epoch. A takeover ends the bare subscription with a typed reset, never a
   silent switch. Choose the code so existing clients resubscribe rather than
