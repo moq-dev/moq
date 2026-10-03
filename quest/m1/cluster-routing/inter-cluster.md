@@ -46,7 +46,7 @@ clusters.
   importing boundary relay announces the record inside its cluster as the
   origin, with the boundary link's cost added. The serving origin's identity
   still rides the reply, so re-originating does not merge two sources.
-- Cluster-id lists are short, so they need no `Hop Base`/`Hop Keep`
+- Cluster-domain lists are short, so they need no `Hop Base`/`Hop Keep`
   compression.
 - Cost across the boundary is plain configured link cost; business policy
   and incomparable costs are
