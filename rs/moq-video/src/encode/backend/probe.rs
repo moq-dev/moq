@@ -47,7 +47,7 @@ static GATE: Mutex<()> = Mutex::new(());
 ///
 /// Lets a test pin the codec mid-call, so a cancellation lands while the request
 /// is genuinely in flight rather than racing the encode thread for it.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(apple))]
 pub(crate) fn hold() -> std::sync::MutexGuard<'static, ()> {
 	GATE.lock().unwrap_or_else(|err| err.into_inner())
 }
@@ -97,7 +97,7 @@ impl Backend for Probe {
 		// The payload is the frame's timestamp, so a test can tell which frame a
 		// packet came from independently of what it's stamped with.
 		let payload = bytes::Bytes::from(frame.timestamp.as_micros().to_string());
-		let previous = self.pending.replace(Encoded::new(payload, frame.timestamp));
+		let previous = self.pending.replace(Encoded::new(payload, frame.timestamp, cut));
 		Ok(previous.into_iter().collect())
 	}
 

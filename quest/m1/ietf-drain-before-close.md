@@ -8,7 +8,7 @@ the shared one second `CLOSE_TIMEOUT`.
 
 ## Plan
 
-`Protocol::drained` in `rs/moq-net/src/driver.rs` returns `true` for IETF, so
-its sessions close at once. Count the IETF publisher's in-flight subscribe and
+`Protocol::drained` in `rs/moq-net/src/driver.rs` tracks IETF namespace
+withdrawals, but not media delivery. Count the IETF publisher's in-flight subscribe and
 fetch serves the way `lite::Publisher::drained` does, and report them there.
 Extend `rs/moq-net/tests/session_close.rs` to cover an IETF version.

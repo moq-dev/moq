@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Getter } from "@moq/signals";
+import type * as Announce from "./announce.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import {
 	type AcceptProps,
@@ -21,6 +22,16 @@ import { Milli, Timescale, Timestamp } from "./time.ts";
 import type { Producer as TrackProducer } from "./track.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
+
+/** The next route event, skipping the live marker: these tests pin routes, and the marker has its own. */
+async function nextRoute<E extends { kind: string }>(announced: {
+	next(): Promise<E | undefined>;
+}): Promise<Exclude<E, { kind: "live" }> | undefined> {
+	for (;;) {
+		const event = await announced.next();
+		if (event?.kind !== "live") return event as Exclude<E, { kind: "live" }> | undefined;
+	}
+}
 
 function publish(origin: OriginProducer, path: Path.Valid) {
 	const broadcast = origin.createBroadcast(path);
@@ -90,17 +101,17 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 
 	// Client discovers announced broadcast
 	const announced = client.announced();
-	const entry = await announced.next();
+	const entry = await nextRoute(announced);
 	if (!entry) throw new Error("expected entry");
 	expect(entry.prefix).toBe("test" as Path.Valid);
-	expect(entry.kind).toBe("announced");
+	expect(entry.kind).toBe("start");
 
 	// Scoped discovery only echoes the suffix on the wire, but presents the whole path.
 	const prefixed = client.announced(Path.Pattern.subtree(Path.from("root")));
-	const prefixedEntry = await prefixed.next();
+	const prefixedEntry = await nextRoute(prefixed);
 	if (!prefixedEntry) throw new Error("expected prefixed entry");
 	expect(prefixedEntry.prefix).toBe("root/child" as Path.Valid);
-	expect(prefixedEntry.kind).toBe("announced");
+	expect(prefixedEntry.kind).toBe("start");
 
 	// Client consumes the broadcast and subscribes to a track
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -118,8 +129,8 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 	announced.close();
 	prefixed.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 }
 
 test("integration: lite draft-01", async () => {
@@ -194,8 +205,8 @@ test("integration: lite subscription options and updates reach the publisher", a
 	remote.close();
 	broadcast.close();
 	await serving;
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: lite carries a fractional maxAge as a whole millisecond", async () => {
@@ -245,8 +256,8 @@ test("integration: lite carries a fractional maxAge as a whole millisecond", asy
 	broadcast.close();
 	await serving;
 	origin.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: lite applies initial and updated group bounds", async () => {
@@ -299,8 +310,8 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		subscriber.close();
 		remote.close();
 		broadcast.close();
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 	}
 });
 
@@ -352,8 +363,8 @@ test("integration: lite refuses an empty requested range on open and on update",
 	} finally {
 		remote.close();
 		broadcast.close();
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 	}
 });
 
@@ -374,45 +385,45 @@ test("integration: lite draft-06 announce lifecycle", async () => {
 	const first = publish(origin, Path.from("first"));
 
 	const announced = client.announced();
-	let entry = await announced.next();
+	let entry = await nextRoute(announced);
 	if (!entry) throw new Error("expected announce");
 	expect(entry.prefix).toBe("first" as Path.Valid);
-	expect(entry.kind).toBe("announced");
+	expect(entry.kind).toBe("start");
 
 	// A live announce.
 	const second = publish(origin, Path.from("second"));
-	entry = await announced.next();
+	entry = await nextRoute(announced);
 	if (!entry) throw new Error("expected announce");
 	expect(entry.prefix).toBe("second" as Path.Valid);
-	expect(entry.kind).toBe("announced");
+	expect(entry.kind).toBe("start");
 
 	// Unannounce: retracted by announce id on the wire.
 	second.close();
-	entry = await announced.next();
+	entry = await nextRoute(announced);
 	if (!entry) throw new Error("expected unannounce");
 	expect(entry.prefix).toBe("second" as Path.Valid);
-	expect(entry.kind).toBe("retracted");
+	expect(entry.kind).toBe("end");
 
 	// Re-announce the same path: a fresh announce assigning a fresh id.
 	const secondAgain = publish(origin, Path.from("second"));
-	entry = await announced.next();
+	entry = await nextRoute(announced);
 	if (!entry) throw new Error("expected re-announce");
 	expect(entry.prefix).toBe("second" as Path.Valid);
-	expect(entry.kind).toBe("announced");
+	expect(entry.kind).toBe("start");
 
 	// Cleanup
 	first.close();
 	secondAgain.close();
 	announced.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 /** Collect announced prefixes until `until` arrives. */
-async function announcedUntil(announced: { next(): Promise<{ prefix: Path.Valid } | undefined> }, until: string) {
+async function announcedUntil(announced: Announce.Consumer, until: string) {
 	const seen: string[] = [];
 	while (!seen.includes(until)) {
-		const entry = await withTimeout(announced.next(), 1000, `waiting for ${until}`);
+		const entry = await withTimeout(nextRoute(announced), 1000, `waiting for ${until}`);
 		if (!entry) throw new Error("announcements ended");
 		seen.push(entry.prefix);
 	}
@@ -460,8 +471,8 @@ for (const [protocol, carriesOptIn, version] of [
 		opted.close();
 		hidden.close();
 		visible.close();
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 	});
 }
 
@@ -503,8 +514,8 @@ test("integration: lite draft-05 datagram delivery", async () => {
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: lite draft-05 datagrams not sent on a non-datagram transport", async () => {
@@ -552,8 +563,8 @@ test("integration: lite draft-05 datagrams not sent on a non-datagram transport"
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: lite draft-05 datagrams sent with standards-track createWritable", async () => {
@@ -591,8 +602,8 @@ test("integration: lite draft-05 datagrams sent with standards-track createWrita
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: lite draft-05 missing datagram writer does not close streams", async () => {
@@ -618,8 +629,8 @@ test("integration: lite draft-05 missing datagram writer does not close streams"
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: ietf does not deliver datagrams", async () => {
@@ -651,8 +662,8 @@ test("integration: ietf does not deliver datagrams", async () => {
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: lite draft-05 missing datagram reader does not close streams", async () => {
@@ -678,8 +689,8 @@ test("integration: lite draft-05 missing datagram reader does not close streams"
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 /** A stream reset as a transport delivers one: the peer's code, and nothing else useful. */
@@ -729,8 +740,8 @@ test("integration: a group reset carries the peer's code to the subscriber", asy
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: a locally raised group error reaches the peer as its own code", async () => {
@@ -772,8 +783,8 @@ test("integration: a locally raised group error reaches the peer as its own code
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: subscribing to an unserved broadcast is refused as NotFound", async () => {
@@ -797,8 +808,8 @@ test("integration: subscribing to an unserved broadcast is refused as NotFound",
 	expect((err as StreamError).code).toBe(StreamCode.NotFound);
 
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: a peer is served the cheaper route it was offered, not the local broadcast", async () => {
@@ -821,8 +832,8 @@ test("integration: a peer is served the cheaper route it was offered, not the lo
 
 	track.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	dynamic.close();
 	local.close();
 	origin.close();
@@ -867,8 +878,8 @@ test("integration: lite draft-05 fetches a cached group", async () => {
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test.each(["gap", "end"])("integration: lite fetch rejects coalesced misses at %s with NotFound", async (missing) => {
@@ -911,8 +922,8 @@ test.each(["gap", "end"])("integration: lite fetch rejects coalesced misses at %
 		broadcast.close();
 		await serving;
 		remote.close();
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 		origin.close();
 	}
 });
@@ -954,8 +965,8 @@ test.each(["frame", "FIN"])("integration: lite fetch waits for the publisher's f
 		group.close();
 		broadcast.close();
 		remote.close();
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 		origin.close();
 	}
 });
@@ -1000,8 +1011,8 @@ test("integration: lite draft-05 coalesces concurrent fetches of one group", asy
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: lite draft-05 fetches an in-progress group", async () => {
@@ -1039,8 +1050,8 @@ test("integration: lite draft-05 fetches an in-progress group", async () => {
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 // The publisher caches TRACK_INFO so it only asks the application once per track. The cache
@@ -1078,8 +1089,8 @@ test("integration: lite draft-05 track info follows a republished broadcast", as
 	first.close();
 	second.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 // FETCH reads the same cache to decide the timescale it serves frames in, so a stale entry
@@ -1119,8 +1130,8 @@ test("integration: lite draft-05 fetch uses the republished track's timescale", 
 	first.close();
 	second.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: ietf fetch group is unsupported", async () => {
@@ -1136,8 +1147,8 @@ test("integration: ietf fetch group is unsupported", async () => {
 	await expect(remote.track("video").fetchGroup(0)).rejects.toThrow("fetch group is not supported for moq-transport");
 
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 // Draft-18 defines SUBSCRIBE_TRACKS, so a limited endpoint answers NOT_SUPPORTED and the
@@ -1253,8 +1264,8 @@ async function runConsumeDedup(protocol: string, version?: number) {
 	expect(third.closed.peek()).toBeUndefined();
 	third.close();
 
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 }
 
 async function waitUntil(predicate: () => boolean): Promise<void> {
@@ -1284,17 +1295,17 @@ async function runSubscriberTeardown(protocol: string, version?: number) {
 	expect(await sub.readString()).toBe("hello");
 
 	// The publisher now has a live downstream reader for the track.
-	await waitUntil(() => video.used.peek());
+	await waitUntil(() => video.demand().used.peek());
 
 	// Closing the only subscriber must tear the wire subscription down, so demand drops on the
 	// publisher rather than the relay serving groups to nobody.
 	sub.close();
-	await waitUntil(() => !video.used.peek());
+	await waitUntil(() => !video.demand().used.peek());
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 }
 
 test("integration: lite subscriber teardown on last unsubscribe", async () => {
@@ -1330,23 +1341,23 @@ test("integration: ietf draft-14 subscriber teardown on last unsubscribe", async
 
 	// Draft-14 only completes SUBSCRIBE_OK once the session is warmed by an announce round-trip.
 	const announced = client.announced();
-	await announced.next();
+	await nextRoute(announced);
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const sub = remote.track("video").subscribe().ordered();
 	expect(await sub.readString()).toBe("hello");
-	await waitUntil(() => served?.used.peek() === true);
+	await waitUntil(() => served?.demand().used.peek() === true);
 
 	// Closing the subscriber sends Unsubscribe and tears the subscription down, so demand drops.
 	sub.close();
-	await waitUntil(() => served?.used.peek() === false);
+	await waitUntil(() => served?.demand().used.peek() === false);
 
 	broadcast.close();
 	await serving;
 	announced.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 // A fetched group can stay open indefinitely (a catalog track, a JSON stream), so abandoning the
@@ -1379,8 +1390,8 @@ test("integration: lite fetch teardown when the reader abandons an open group", 
 	group.close();
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 // Older drafts have no TRACK stream or SUBSCRIBE_UPDATE, so the demand loop must still tear the
@@ -1408,22 +1419,22 @@ test("integration: lite fan-out keeps the upstream until the last subscriber lea
 	const b = remote.track("video").subscribe().ordered();
 	expect(await a.readString()).toBe("hello");
 	expect(await b.readString()).toBe("hello");
-	await waitUntil(() => video.used.peek());
+	await waitUntil(() => video.demand().used.peek());
 
 	// Closing one leaves the shared upstream serving the other.
 	a.close();
 	video.writeString("more");
 	expect(await b.readString()).toBe("more");
-	expect(video.used.peek()).toBe(true);
+	expect(video.demand().used.peek()).toBe(true);
 
 	// The last close tears it down.
 	b.close();
-	await waitUntil(() => !video.used.peek());
+	await waitUntil(() => !video.demand().used.peek());
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 // Repeated subscribe/unsubscribe cycles must each tear down and re-open cleanly (the 40-toggle
@@ -1445,16 +1456,16 @@ test("integration: lite re-subscribe re-opens the upstream after each teardown",
 		video.writeString(`hello-${i}`);
 		const sub = remote.track("video").subscribe().ordered();
 		expect(await sub.readString()).toBe(`hello-${i}`);
-		await waitUntil(() => video.used.peek());
+		await waitUntil(() => video.demand().used.peek());
 
 		sub.close();
-		await waitUntil(() => !video.used.peek());
+		await waitUntil(() => !video.demand().used.peek());
 	}
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 // Coalesced fetches of one open group share a single FETCH stream: closing one keeps it flowing
@@ -1492,8 +1503,8 @@ test("integration: lite coalesced fetch stays until every reader abandons the op
 	group.close();
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 // A fetch that coalesces after the last reader left, but before the FETCH is cancelled, re-arms
@@ -1536,8 +1547,8 @@ test("integration: lite fetch re-armed by a late reader keeps every frame", asyn
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 // A finite group must still deliver every frame and end cleanly (the demand watch must not disturb
@@ -1567,8 +1578,8 @@ test("integration: lite fetch delivers every frame of a finite multi-frame group
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: lite consume dedup", async () => {
@@ -1608,8 +1619,8 @@ async function runSubscribeWithoutWarmup(version: number) {
 	broadcast.close();
 	await serving;
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 }
 
 test("integration: ietf draft-14 subscribe without announce warmup", async () => {
@@ -1644,8 +1655,8 @@ test("integration: subscribe to non-existent broadcast", async () => {
 		})(),
 	).rejects.toThrow();
 
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 // Resolves once `signal` satisfies `pred`, returning the matching value.
@@ -1709,8 +1720,8 @@ test("integration: an announced request waits for a late publisher", async () =>
 
 	second.close();
 	await servingSecond;
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	clientOrigin.close();
 });
 
@@ -1741,8 +1752,8 @@ test("integration: an announced request consumes blind without discovery", async
 	watched.close();
 	broadcast.close();
 	await serving;
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	clientOrigin.close();
 });
 
@@ -1793,8 +1804,8 @@ test("integration: a republish is not served from the previous generation's cach
 	watched.close();
 	second.close();
 	await servingSecond;
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	clientOrigin.close();
 });
 
@@ -1854,8 +1865,8 @@ async function runRepublishCycle(protocol: string, version?: number) {
 	watched.close();
 	origin.close();
 	clientOrigin.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 }
 
 test("integration: lite republish on one session swaps the handle every generation", async () => {
@@ -1900,8 +1911,8 @@ test("integration: a blind handle picks up a publisher that arrives late", async
 	watched.close();
 	producer.close();
 	await serving;
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	clientOrigin.close();
 });
 
@@ -1919,8 +1930,8 @@ test("integration: a blind handle goes offline when the session dies", async () 
 
 	// The gated path goes offline when the announcement stream ends with the session. There is
 	// no stream here, so the session itself is what has to clear it.
-	server.close();
-	client.close();
+	server.abort();
+	client.abort();
 	await waitFor(watched.active, (b) => b === undefined);
 
 	watched.close();
@@ -1960,8 +1971,8 @@ test("integration: ietf blind handle picks up a publisher that arrives late", as
 	watched.close();
 	producer.close();
 	await serving;
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	clientOrigin.close();
 });
 
@@ -2005,7 +2016,7 @@ async function runOriginFlow(protocol: string, version?: number) {
 	// The announcement lands in the client's origin.
 	const reader = clientOrigin.consume();
 	const announced = reader.announced();
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("test"), kind: "announced" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("test"), kind: "start" });
 
 	// Consuming through the origin reaches the wire.
 	const remote = await routed(reader, Path.from("test"));
@@ -2015,15 +2026,15 @@ async function runOriginFlow(protocol: string, version?: number) {
 
 	// Unpublishing retracts the entry over the wire and out of the origin.
 	broadcast.close();
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("test"), kind: "retracted" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("test"), kind: "end" });
 	await until(() => !wireOf(reader).routes(Path.from("test")));
 
 	await serving;
 	track.close();
 	remote.close();
 	announced.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	serverOrigin.close();
 	clientOrigin.close();
 }
@@ -2052,8 +2063,8 @@ test("origin: remote entries retract when the session dies, local ones survive",
 	const reader = clientOrigin.consume();
 	await until(() => wireOf(reader).routes(Path.from("remote")));
 
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 
 	// The session that fed the entry is gone, so the entry goes with it.
 	await until(() => !wireOf(reader).routes(Path.from("remote")));
@@ -2111,8 +2122,8 @@ test("origin: one origin on both directions consumes locally and never echoes", 
 	expect(wireOf(serverReader).routes(Path.from("from-server"))).toBe(false);
 
 	mine.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	shared.close();
 	serverSees.close();
 });
@@ -2155,8 +2166,8 @@ test("origin: a request resolves blind on a relay without discovery", async () =
 	request.close();
 	broadcast.close();
 	await serving;
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	serverOrigin.close();
 	clientOrigin.close();
 });
@@ -2238,8 +2249,8 @@ test("origin: a reactive handle follows announcements, republishes, and reconnec
 	await until(() => watch.active.peek() === undefined);
 
 	watch.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	serverOrigin.close();
 	clientOrigin.close();
 });
@@ -2274,8 +2285,8 @@ test("origin: overlapping sessions carrying one path fail over", async () => {
 	await until(() => wireOf(reader).routes(Path.from("redundant")));
 
 	// The newer session dies; the older one still carries the path and must keep serving.
-	second.client.close();
-	second.server.close();
+	second.client.abort();
+	second.server.abort();
 	await sleep(50);
 
 	const remote = await routed(reader, Path.from("redundant"));
@@ -2287,8 +2298,8 @@ test("origin: overlapping sessions carrying one path fail over", async () => {
 	remote.close();
 	first.broadcast.close();
 	await first.serving;
-	first.client.close();
-	first.server.close();
+	first.client.abort();
+	first.server.abort();
 	first.serverOrigin.close();
 	second.serverOrigin.close();
 	second.broadcast.close();
@@ -2328,8 +2339,8 @@ test("origin: a standby session re-answers a request when the answerer dies", as
 	// complete within one scheduler tick, so assert the front changed rather than racing
 	// to observe the vacant slot.
 	const before = request.active.peek();
-	answerer.client.close();
-	answerer.server.close();
+	answerer.client.abort();
+	answerer.server.abort();
 	await until(() => request.active.peek() !== undefined && request.active.peek() !== before);
 
 	const front = request.active.peek();
@@ -2341,8 +2352,8 @@ test("origin: a standby session re-answers a request when the answerer dies", as
 	request.close();
 	standby.broadcast.close();
 	await standby.serving;
-	standby.client.close();
-	standby.server.close();
+	standby.client.abort();
+	standby.server.abort();
 	standby.serverOrigin.close();
 	answerer.serverOrigin.close();
 	answerer.broadcast.close();
@@ -2362,16 +2373,16 @@ test("create then announce is discoverable on the wire", async () => {
 	const broadcast = origin.createBroadcast(Path.from("later"));
 	broadcast.createTrack("chat");
 
-	const pending = announced.next();
+	const pending = nextRoute(announced);
 	broadcast.announce();
 	const entry = await pending;
 	expect(entry?.prefix).toBe("later" as Path.Valid);
-	expect(entry?.kind).toBe("announced");
+	expect(entry?.kind).toBe("start");
 
 	announced.close();
 	broadcast.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	origin.close();
 });
 
@@ -2394,9 +2405,9 @@ test("a handle serves a request under live/** over the wire", async () => {
 	]);
 
 	const announced = client.announced();
-	const entry = await announced.next();
+	const entry = await nextRoute(announced);
 	expect(entry?.prefix).toBe("live" as Path.Valid);
-	expect(entry?.kind).toBe("announced");
+	expect(entry?.kind).toBe("start");
 
 	const remote = wireOf(client).consume(Path.from("live/cam"));
 	const track = remote.track("chat").subscribe().ordered();
@@ -2407,8 +2418,8 @@ test("a handle serves a request under live/** over the wire", async () => {
 	announced.close();
 	handle.close();
 	await serving;
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	origin.close();
 });
 
@@ -2455,8 +2466,8 @@ async function runSessionDeath(
 	broadcast.close();
 	await serving;
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	origin.close();
 	return [closed, await withTimeout(groupEnd, 2000, "the group never ended")];
 }
@@ -2517,7 +2528,62 @@ test("integration: lite draft-05 ends a track with the publisher's reset", async
 	broadcast.close();
 	await serving;
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	origin.close();
 });
+
+/**
+ * Connect a client whose origin is fed by a peer publishing `paths`, then read the origin's
+ * announcement stream up to the live marker, returning the paths delivered before it.
+ */
+async function caughtUp(protocol: string, version: number | undefined, paths: string[]): Promise<string[]> {
+	const pair = createMockTransportPair(protocol);
+	const serverOrigin = new OriginProducer();
+	const clientOrigin = new OriginProducer();
+	const broadcasts = paths.map((path) => publish(serverOrigin, Path.from(path)));
+
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client, consume: clientOrigin }),
+		accept(pair.server, url, { version, publish: serverOrigin.consume() }),
+	]);
+
+	const announced = clientOrigin.announced();
+	const seen: string[] = [];
+	for (;;) {
+		const event = await withTimeout(announced.next(), 2000, `${protocol || version}: never caught up`);
+		if (!event) throw new Error("announcements ended");
+		if (event.kind === "live") break;
+		if (event.kind !== "start") throw new Error(`only announcements before the marker: got ${event.kind}`);
+		seen.push(event.prefix);
+	}
+
+	announced.close();
+	for (const broadcast of broadcasts) broadcast.close();
+	client.abort();
+	server.abort();
+	serverOrigin.close();
+	clientOrigin.close();
+	return seen.sort();
+}
+
+// Every version reaches the marker after the whole initial set: lite-01/02 via ANNOUNCE_INIT,
+// lite-05+ via ANNOUNCE_OK's count, and lite-03/04 and moq-transport once the stream goes quiet.
+for (const [name, protocol, version] of [
+	["lite draft-01", "", Lite.Version.DRAFT_01],
+	["lite draft-02", "", Lite.Version.DRAFT_02],
+	["lite draft-03", Lite.ALPN_03, undefined],
+	["lite draft-04", Lite.ALPN_04, undefined],
+	["lite draft-05", Lite.ALPN_05, undefined],
+	["lite draft-06", Lite.ALPN_06, undefined],
+	["ietf draft-14", "", Ietf.Version.DRAFT_14],
+	["ietf draft-19", Ietf.ALPN.DRAFT_19, undefined],
+] as const) {
+	test(`integration: ${name} is live after the whole initial set`, async () => {
+		expect(await caughtUp(protocol, version, ["a", "b", "c"])).toEqual(["a", "b", "c"]);
+	});
+
+	test(`integration: ${name} is live with an empty peer`, async () => {
+		expect(await caughtUp(protocol, version, [])).toEqual([]);
+	});
+}

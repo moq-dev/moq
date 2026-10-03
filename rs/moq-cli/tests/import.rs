@@ -58,10 +58,14 @@ async fn import_delivers_the_catalog_finish_at_eof() {
 		.await
 		.expect("subscriber connects");
 
-	tokio::time::timeout(TIMEOUT, announced.next())
-		.await
-		.expect("announce timed out")
-		.expect("origin closed");
+	// `Live` can come first while the relay has yet to learn the publisher's route.
+	while !matches!(
+		tokio::time::timeout(TIMEOUT, announced.next())
+			.await
+			.expect("announce timed out")
+			.expect("origin closed"),
+		moq_tokio::moq_net::announce::Event::Start(_)
+	) {}
 	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("demo"))
 		.await
 		.expect("request timed out")

@@ -70,7 +70,7 @@ async fn setup(version: Version) -> Setup {
 		}
 	});
 
-	tokio::time::timeout(TIMEOUT, track.used())
+	tokio::time::timeout(TIMEOUT, track.demand().used())
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();

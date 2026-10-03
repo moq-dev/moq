@@ -25,6 +25,9 @@ ffplay srt://localhost:9000
 moq --connect https://relay.example.com/anon --broadcast event.hang import srt --connect 'srt://encoder.example.com:9000?streamid=live/cam'
 ```
 
+Import publishes the feed's own PTS and anchors the catalog clock on its first
+frame, as [`import ts`](/bin/cli) does.
+
 A multi-program feed is refused, as with `import ts`, unless `--program`
 picks one: `--program 2` imports program 2 alone, and `--program all`
 publishes each program as its own broadcast (`event.hang` becomes

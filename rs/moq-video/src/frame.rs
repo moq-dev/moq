@@ -1,7 +1,7 @@
 //! [`Frame`]: one raw picture, and [`Surface`]: its pixels and where they live.
 //!
 //! Representations chosen so the common path stays zero-copy:
-//! - `Surface::PixelBuffer` is a macOS `CVPixelBuffer` (IOSurface-backed NV12).
+//! - `Surface::PixelBuffer` is an Apple `CVPixelBuffer` (IOSurface-backed NV12).
 //!   Capture and the VideoToolbox decoder both produce it, and the VideoToolbox
 //!   encoder consumes it directly, no copy and no color conversion.
 //! - `Surface::Texture` is a Windows Direct3D11 NV12 texture, produced by Media
@@ -378,7 +378,7 @@ pub(crate) trait DmaBufFrame: Send + Sync {
 ///
 /// ```ignore
 /// match surface {
-///     #[cfg(target_os = "macos")]
+///     #[cfg(any(target_os = "macos", target_os = "ios"))]
 ///     Surface::PixelBuffer(buffer) => draw_metal(buffer),
 ///     other => upload(other.into_i420()?),
 /// }
@@ -389,10 +389,10 @@ pub(crate) trait DmaBufFrame: Send + Sync {
 /// building everywhere.
 #[non_exhaustive]
 pub enum Surface {
-	/// Zero-copy GPU surface (macOS `CVPixelBuffer`), from capture or a
+	/// Zero-copy GPU surface (Apple `CVPixelBuffer`), from capture or a
 	/// VideoToolbox decode.
-	#[cfg(target_os = "macos")]
-	PixelBuffer(macos::PixelBuffer),
+	#[cfg(apple)]
+	PixelBuffer(apple::PixelBuffer),
 	/// Zero-copy GPU texture (Windows Direct3D11 NV12).
 	#[cfg(target_os = "windows")]
 	Texture(d3d11::Texture),
@@ -419,7 +419,7 @@ impl Surface {
 	/// The frame width in pixels.
 	pub fn width(&self) -> u32 {
 		match self {
-			#[cfg(target_os = "macos")]
+			#[cfg(apple)]
 			Surface::PixelBuffer(s) => s.width,
 			#[cfg(target_os = "windows")]
 			Surface::Texture(t) => t.width,
@@ -438,7 +438,7 @@ impl Surface {
 	/// The frame height in pixels.
 	pub fn height(&self) -> u32 {
 		match self {
-			#[cfg(target_os = "macos")]
+			#[cfg(apple)]
 			Surface::PixelBuffer(s) => s.height,
 			#[cfg(target_os = "windows")]
 			Surface::Texture(t) => t.height,
@@ -496,11 +496,11 @@ impl Surface {
 
 		Ok(match self {
 			Surface::I420(i420) => Surface::I420(i420.resize(size)?),
-			#[cfg(target_os = "macos")]
+			#[cfg(apple)]
 			Surface::PixelBuffer(pixels) if config.output == crate::Output::Cpu => {
 				Surface::I420(pixels.download_i420()?.resize(size)?)
 			}
-			#[cfg(target_os = "macos")]
+			#[cfg(apple)]
 			Surface::PixelBuffer(pixels) => match pixels.resize(size.width, size.height) {
 				Ok(scaled) => Surface::PixelBuffer(scaled),
 				// A transfer session or pool can fail on older hardware. Keep the
@@ -613,13 +613,13 @@ impl Surface {
 	///
 	/// A decoded buffer comes from the decoder's pool, so holding many frames holds
 	/// pool slots and eventually stalls decoding. Draw and drop.
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	pub fn into_pixel_buffer(
 		self,
 	) -> Result<objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>, Error> {
 		match self {
 			Surface::PixelBuffer(pixels) => Ok(pixels.buffer),
-			Surface::I420(i420) => macos::upload_i420(&i420),
+			Surface::I420(i420) => apple::upload_i420(&i420),
 		}
 	}
 
@@ -634,7 +634,7 @@ impl Surface {
 	/// honest.
 	pub fn color(&self) -> Option<Color> {
 		match self {
-			#[cfg(target_os = "macos")]
+			#[cfg(apple)]
 			Surface::PixelBuffer(s) => s.color(),
 			#[cfg(target_os = "windows")]
 			Surface::Texture(texture) => texture.color,
@@ -660,7 +660,7 @@ impl Surface {
 	/// of one and no consuming exit is reachable from it.
 	pub fn to_i420(&self) -> Result<Cow<'_, I420>, Error> {
 		match self {
-			#[cfg(target_os = "macos")]
+			#[cfg(apple)]
 			Surface::PixelBuffer(s) => Ok(Cow::Owned(s.download_i420()?)),
 			#[cfg(target_os = "windows")]
 			Surface::Texture(t) => Ok(Cow::Owned(t.download_i420()?)),
@@ -1092,14 +1092,14 @@ pub(crate) fn deinterleave_uv(uv: &[u8], u: &mut [u8], v: &mut [u8]) {
 /// once, while a rendition ladder resizes on a thread per rung. So each key owns
 /// a serialized value, rungs share rather than contend, and a long-lived process
 /// does not retain every size it has ever seen.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(apple, target_os = "windows"))]
 struct Cache<K, T> {
 	values: std::collections::HashMap<K, std::sync::Arc<std::sync::Mutex<T>>>,
 	order: std::collections::VecDeque<K>,
 	capacity: usize,
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(apple, target_os = "windows"))]
 impl<K: Clone + Eq + std::hash::Hash, T> Cache<K, T> {
 	fn new(capacity: usize) -> Self {
 		Self {
@@ -1149,7 +1149,7 @@ impl<K: Clone + Eq + std::hash::Hash, T> Cache<K, T> {
 	}
 }
 
-#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
+#[cfg(all(test, any(apple, target_os = "windows")))]
 mod cache_tests {
 	use super::Cache;
 
@@ -1288,7 +1288,7 @@ pub mod android {
 	// (`AImage_getPlane*`, `AImage_getHardwareBuffer`) of an image nothing else can
 	// reach: the decoder acquires it and hands ownership straight out, and it is
 	// never re-acquired. The reader alongside it carries its own assertion. `Sync`
-	// is load-bearing the same way it is for the macOS pixel buffer, since
+	// is load-bearing the same way it is for the CoreVideo pixel buffer, since
 	// moq-transcode fans decoded frames out as `Arc<Frame>`.
 	unsafe impl Send for HardwareBuffer {}
 	unsafe impl Sync for HardwareBuffer {}
@@ -1467,9 +1467,9 @@ pub mod android {
 	}
 }
 
-#[cfg(target_os = "macos")]
-pub mod macos {
-	//! macOS CoreVideo surfaces: the [`PixelBuffer`] behind
+#[cfg(apple)]
+pub mod apple {
+	//! CoreVideo surfaces on macOS and iOS: the [`PixelBuffer`] behind
 	//! `Surface::PixelBuffer`, GPU resize, and download/upload between it and CPU
 	//! I420.
 
@@ -2997,7 +2997,7 @@ mod tests {
 	/// `into_pixel_buffer` is total: a CPU frame uploads rather than failing, so a
 	/// renderer never has to write the upload itself. Software-decoded frames take
 	/// this path.
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	#[test]
 	fn into_pixel_buffer_uploads_a_cpu_frame() {
 		use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
@@ -3061,7 +3061,7 @@ mod tests {
 
 	/// VideoToolbox and the CPU convolution agree on a smooth NV12 gradient.
 	/// The result remains a pixel buffer, pinning the residency regression.
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	#[test]
 	fn pixel_buffer_resize_matches_cpu() {
 		let src_i420 = gradient_i420(320, 240);
@@ -3082,8 +3082,8 @@ mod tests {
 		assert!(mae(gpu.v(), cpu.v()) < 4, "GPU and CPU v disagree");
 	}
 
-	/// CPU output downloads a macOS pixel buffer before scaling.
-	#[cfg(target_os = "macos")]
+	/// CPU output downloads a CoreVideo pixel buffer before scaling.
+	#[cfg(apple)]
 	#[test]
 	fn pixel_buffer_resize_can_force_the_cpu() {
 		let config = crate::resize::Config {
@@ -3098,7 +3098,7 @@ mod tests {
 
 	/// The packed-pixel exit is total for a hardware surface and produces the
 	/// same image as its CPU representation, including padded CoreVideo rows.
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	#[test]
 	fn pixel_buffer_converts_to_rgba() {
 		let source = gradient_i420(322, 242);
@@ -3115,8 +3115,8 @@ mod tests {
 		assert_eq!(actual.data(), expected.data());
 	}
 
-	#[cfg(target_os = "macos")]
-	use super::macos::nv12_surface;
+	#[cfg(apple)]
+	use super::apple::nv12_surface;
 
 	/// A Direct3D11 texture stays on the GPU by default.
 	#[cfg(target_os = "windows")]

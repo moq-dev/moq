@@ -8,7 +8,7 @@ STOP_SENDING, so a long-lived session never stalls on MAX_DATA. `close()`
 delivers its APPLICATION_CLOSE frame before the transport drops, so a TCP or
 WebSocket peer sees the close code whenever the transport stays writable
 within the close bound. Both hold on the 0.5 line that
-`main` pins and the 0.6 line `dev` uses.
+`release` pins and the 0.6 line `main` uses.
 
 ## Plan
 
@@ -39,9 +39,8 @@ Work:
   delivering past its initial window, and a peer reads the close code after a
   close issued mid-write.
 - Release on both lines (0.5.x after 0.5.2, and 0.6.x), then bump
-  `main`'s pin to that 0.5.x. `main` stays on 0.5: 0.6 needs
-  web-transport-trait 0.5, a breaking change that belongs on `dev`, which
-  picks up 0.6.x.
+  `main` to that 0.6.x and backport `release`'s pin to that 0.5.x. `release`
+  stays on 0.5: 0.6 needs web-transport-trait 0.5, a breaking change.
 
 Why m0: the WebSocket fallback and the planned edge-to-core `tls://` links
 both run on qmux, and MoQ drops streams constantly.

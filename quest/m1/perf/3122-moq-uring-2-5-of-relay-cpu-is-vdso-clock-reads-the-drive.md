@@ -8,7 +8,7 @@ A worker drive turn reads the clock once and hands that instant down, so
 
 ## Plan
 
-Profiling the io_uring relay (`dev` @ `fc57e0175`, `perf record -F 499`,
+Profiling the io_uring relay (`fc57e0175`, `perf record -F 499`,
 relay process only) shows `[vdso]` as a top-5 DSO, at roughly 3x its share on
 the tokio worker path:
 

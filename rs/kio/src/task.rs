@@ -5,7 +5,7 @@
 //! the task it was aimed at (plus any newly pushed ones). A driver serving
 //! hundreds of children steps one machine per event, not all of them.
 //!
-//! A task is anything implementing [`Task`]: a plain poll closure (the same
+//! A task is any [`Task`] resolving to `()`: a plain poll closure (the same
 //! `FnMut(&Waiter) -> Poll<()>` shape [`wait`](crate::wait) takes, state in the
 //! captures) or a named machine implementing the trait directly. `Send` is
 //! purely inferred either way: a [`Tasks`] of `Send` tasks is `Send` and drives
@@ -199,24 +199,39 @@ impl<T> Tasks<T> {
 	}
 }
 
-/// A unit of work a [`Tasks`] set drives: polled with a [`Waiter`] until `Ready`.
+/// A computation polled with a [`Waiter`] until it resolves.
 ///
-/// Every `FnMut(&Waiter) -> Poll<()>` closure implements it, so captures-based
-/// tasks need nothing extra. Implement it on a named machine to store one
-/// concrete type in a set without boxing; `Send` then stays inferred from the
-/// machine's fields, exactly as it is from a closure's captures.
+/// Implementors register the [`Waiter`] with the channels they read. Every
+/// `FnMut(&Waiter) -> Poll<R>` closure implements it, so state can live in the
+/// captures; implement it on a named machine to store one concrete type without
+/// boxing. Wrap it in [`Pending`](crate::Pending) to get a real [`Future`](std::future::Future), or push it
+/// into a [`Tasks`] set.
+///
+/// This exists because a kio [`Waiter`] holds the strong `Arc<Waker>` while the
+/// channel's [`crate::WaiterList`] keeps only a `Weak`. A bare [`Future`](std::future::Future) would have
+/// to park the strong `Waiter` in a field for as long as it stays pending (or lose
+/// its wakeup); [`Pending`](crate::Pending) does that once so each implementor doesn't have to.
 pub trait Task {
-	/// Drive the task, registering `waiter` for its next wakeup.
-	fn poll(&mut self, waiter: &Waiter) -> Poll<()>;
+	/// The value the computation resolves to.
+	type Output;
+
+	/// Poll for the output, registering `waiter` with the relevant channels if not
+	/// yet ready.
+	fn poll(&mut self, waiter: &Waiter) -> Poll<Self::Output>;
 }
 
-impl<F: FnMut(&Waiter) -> Poll<()>> Task for F {
-	fn poll(&mut self, waiter: &Waiter) -> Poll<()> {
+impl<F, R> Task for F
+where
+	F: FnMut(&Waiter) -> Poll<R>,
+{
+	type Output = R;
+
+	fn poll(&mut self, waiter: &Waiter) -> Poll<R> {
 		self(waiter)
 	}
 }
 
-impl<T: Task> Tasks<T> {
+impl<T: Task<Output = ()>> Tasks<T> {
 	/// Poll every task that is new or was woken since the last call, retiring
 	/// the ones that return `Ready`.
 	///

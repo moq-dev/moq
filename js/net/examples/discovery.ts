@@ -10,7 +10,11 @@ async function main() {
 
 	// Discover broadcasts announced by the server
 	for await (const announcement of announced) {
-		if (announcement.kind === "retracted") continue;
+		if (announcement.kind === "live") {
+			console.log("Caught up: everything live has been listed");
+			continue;
+		}
+		if (announcement.kind === "end") continue;
 		console.log("New stream available:", announcement.prefix);
 
 		// Subscribe to new streams
@@ -19,7 +23,7 @@ async function main() {
 		// Do something with the broadcast
 	}
 
-	connection.close();
+	await connection.close();
 	origin.close();
 }
 

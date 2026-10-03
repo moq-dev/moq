@@ -2,7 +2,7 @@
 
 ## Goal
 
-On `dev`, every model handle that serves subscribers watches them through a
+Every model handle that serves subscribers watches them through a
 `Demand` handle returned by `demand()`: `track::Request`, `group::Request`,
 `group::Producer`, and `broadcast::Producer`. Their own
 `used`/`unused`/`is_used`/`poll_unused` copies are gone, in Rust and `js/net`.
@@ -14,7 +14,7 @@ handler can see a group request abandoned.
 
 Facts (2026-10-01): `track::Demand` and `broadcast::Demand` already exist.
 [#4528](https://github.com/moq-dev/moq/pull/4528) (the track-demand quest) moved
-`track::Producer` to `demand()` on `dev`, and deliberately kept group and
+`track::Producer` to `demand()`, and deliberately kept group and
 broadcast `used`/`unused`, since group demand drives fetch coalescing.
 `broadcast::Producer` is already `demand()`-only, with `used`/`unused` on
 `broadcast::Demand`; there is no `group::Demand` yet.
@@ -39,7 +39,7 @@ Decided (2026-10-01):
 Keep fetch coalescing's group demand semantics, and keep `abort_unused` where
 its race still needs an owner.
 
-Public API: breaking on `dev` in moq-net and `@moq/net`. Wire: none.
+Public API: breaking in moq-net and `@moq/net`. Wire: none.
 
-When main's IETF FETCH cancellation integrates into dev, migrate its request
-watch from `poll_unused` to `demand().poll_unused` along with the other handlers.
+Migrate the IETF FETCH cancellation's request watch from `poll_unused` to
+`demand().poll_unused` along with the other handlers.

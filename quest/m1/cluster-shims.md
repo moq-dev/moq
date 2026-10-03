@@ -12,7 +12,7 @@ pointer to the replacement (`deprecated()` in `rs/moq-relay/src/cluster.rs`,
 checked there and in `config.rs`). The linger refusal shipped in
 moq-relay 0.15.0; the mesh refusal (#4601) ships in the next release. Once a
 release has carried both, delete the fields, `deprecated()`, and its checks,
-per the no-shim rule. Lands on `dev`: removing public fields is a break.
+per the no-shim rule. Removing public fields is a break.
 
 Public API: removes two hidden `cluster::Config` fields. Wire: none.
 
