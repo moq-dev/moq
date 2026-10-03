@@ -30,23 +30,28 @@ Decided 2026-10-01:
 - A camera reboot or network blip reconnects in-process with backoff rather
   than exiting for a supervisor to restart. This deliberately differs from
   Pronto's truck, which exits so a supervisor surfaces half-dead sessions.
-- A new session's RTP time restarts, and moq-mux ends the import on a group
-  that starts before the previous one. So reconnect keeps the importers and
-  shifts every track by one offset that lands the new session's first frame
-  at its arrival time on the existing catalog clock, after a `discontinuity()`
-  marker. Group sequence and A/V alignment carry on, and video resumes on a
-  keyframe. A timestamp jump inside one session (retina #64) takes the same
-  path instead of failing the track.
+- Each camera session publishes a new broadcast under a fresh epoch, per
+  [Broadcast epochs](/quest/m1/broadcast-epoch/README.md), never spliced onto
+  the last one. A new session's RTP time restarts, so a reconnect finishes the
+  old broadcast cleanly and builds a fresh catalog, tracks, and importers,
+  starting on a keyframe. A timestamp jump inside one session (retina #64)
+  also ends that session's broadcast and starts a new one, instead of failing
+  the track. Decided 2026-10-02; shifting timestamps onto the existing
+  catalog clock behind a `discontinuity()` marker was rejected, since a
+  broadcast name always means the same content.
 - Credentials ride the URL's userinfo, as every RTSP tool takes them. retina
   refuses a URL with userinfo, so strip it into `SessionOptions::creds`
-  before `describe`, and log only the redacted URL (`RedactedUrl`).
+  before `describe`, and log only the redacted URL (`RedactedUrl`). A
+  `--connect` URL is visible to other local users through `/proc` cmdline;
+  accepted for now, and revisit with an env var or file for shared hosts.
 - Prior art: moq.pro's `pronto/truck/src/camera.rs` is a working retina pull
   client, video only, run against mediamtx and real cameras.
 
 Test against a local RTSP source serving a known H.264 + AAC clip (Pronto
 uses mediamtx), checking the catalog and first frames; a G.711 source that
 publishes video only; and a source restarted mid-stream, whose RTP time
-resets, that resumes on a keyframe without a rewind or A/V drift.
+resets, that ends the first broadcast cleanly and publishes a second one under
+a new epoch, starting on a keyframe with its own catalog.
 `doc/bin/cli.md` documents `import rtsp`.
 
 Public API: the `moq-rtsp` crate and the `moq import rtsp` subcommand.
@@ -54,4 +59,5 @@ Wire: none.
 
 ## Related
 
+- [Broadcast epoch primitive](/quest/m1/epoch.md) - the epoch each camera session's broadcast publishes under
 - [moq.pro's Pronto truck](https://github.com/moq-dev/moq.pro/blob/main/pronto/truck/src/camera.rs) - the prior art this generalizes, and the first consumer
