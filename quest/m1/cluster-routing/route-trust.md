@@ -27,8 +27,7 @@ Decided 2026-10-01:
 
 Test: a client advertising a cheap route to a cluster node does not move any
 other session's subscription; two uplinks of one mesh holding grants for the
-same drone node fail over between each other at a group boundary instead of
-ending the subscription.
+same drone node advertise one origin node rather than two unrelated ones.
 
 Public API: the grant's node scope (`moq-token`, `js/token`, and the token
 CLI docs). Wire: none beyond the grant.

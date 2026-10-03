@@ -46,8 +46,7 @@ vector the 2026-09-30 cache-tiers audit kept:
   subscription aggregation and has no good answer when stale. Nearest-origin
   selection over consistent metrics is still a shortest-path tree, so it is
   loop-free once converged, and a transient cycle collapses into one
-  aggregated subscription until re-selection moves it. The reply names the
-  serving node for the splice rule.
+  aggregated subscription until re-selection moves it.
 - **Policy per link, not roles.** A link marked upstream never receives
   routes learned on another upstream link, and a route learned upstream keeps
   a down-only mark across other links so a mesh with two uplinks cannot leak
@@ -82,10 +81,11 @@ vector the 2026-09-30 cache-tiers audit kept:
 
 Kept from 2026-09-30: core links are configured and may skip PoPs; Warm and
 Cold collapse to one cost ([One route cost](/quest/m1/route-cost.md));
-epoch-qualified paths are a source's identity
-([Selection](/quest/m1/cluster-routing/selection.md)); cluster links are
-moq-lite only ([moq-transport peers are plain clients](/quest/m1/ietf-cluster-off.md));
-`--hop` removal and One route cost land on their own.
+cluster links are moq-lite only
+([moq-transport peers are plain clients](/quest/m1/ietf-cluster-off.md));
+`--hop` removal and One route cost land on their own. Decided 2026-10-03: a
+concrete path is a source's identity, whoever serves it
+([Selection](/quest/m1/cluster-routing/selection.md)).
 Anything specific to moq.pro's deployment is planned in moq.pro.
 
 ### Simulator findings
@@ -129,7 +129,7 @@ Once every child has landed:
 ## Required
 
 - [Upstream links](/quest/m1/cluster-routing/transit.md) - a link marked upstream never receives routes learned on another upstream link, which builds edge tiers and drone uplinks from one rule
-- [Selection](/quest/m1/cluster-routing/selection.md) - a broadcast under overlapping prefixes routes to one origin deterministically, and same-epoch origins are one source
+- [Selection](/quest/m1/cluster-routing/selection.md) - a broadcast under overlapping prefixes routes to one origin deterministically, and same-path origins are one source
 - [Multi-CDN endpoints](/quest/m1/cluster-routing/multi-cdn.md) - an endpoint holds sessions to several CDNs, uses its preferred one, and fails over to the next
 - [Simulate the split](/quest/m1/cluster-routing/sim.md) - moq.pro's simulator compares the route layer with path vector before the wire is written
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - ROUTE per origin node and path-less ANNOUNCE on one stream, loop-free by Babel feasibility
@@ -138,11 +138,11 @@ Once every child has landed:
 
 ## Related
 
-- [Wildcard](/quest/m0/wildcard/README.md) - the longest-prefix rule, pool spread, and reply identity Selection builds on
+- [Wildcard](/quest/m0/wildcard/README.md) - the longest-prefix rule and pool spread Selection builds on
 - [P2P](/quest/m2/p2p/README.md) - browser and native peers that become routing nodes over this layer
-- [Remove `--hop`](/quest/m1/hop-removal.md) - redundant publishers share an explicit `@<epoch>`
+- [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - redundant publishers share an explicit `@<epoch>`
 - [One route cost](/quest/m1/route-cost.md) - Warm and Cold collapse to one static cost
-- [Same-hop importers](/quest/m1/hop-aligned-import.md) - the importer half of a redundant pair; `--hop` removal re-keys it to a shared epoch
-- [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - a redundant pair shares one epoch
+- [Same-epoch importers](/quest/m1/hop-aligned-import.md) - the importer half of a redundant pair under one explicit epoch
+- [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a redundant pair shares one epoch
 - [Cross-relay delivery under bursts](/quest/m1/cross-relay-bursts.md) - its #4349 report shows closed broadcasts announced for up to 229 s
 - [Routing cost domains](/quest/m3/routing-cost-domains.md) - policy and aggregation at boundaries between operators
