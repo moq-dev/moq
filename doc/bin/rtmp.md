@@ -29,6 +29,11 @@ the [`moq-rtmp`](https://docs.rs/moq-rtmp) library, which hands you each
 publish or play request to accept, map to a path, or reject. The CLI listener
 is unauthenticated; firewall it.
 
+Each push is its own broadcast. Import publishes the encoder's own timestamps
+and anchors the catalog clock on the first frame, so it names the wall time the
+push arrived. A group starting before the previous group's start, such as an
+encoder restarting its timestamps mid-push, ends that push with an error.
+
 A player that advertises enhanced-RTMP multitrack receives every rendition.
 Any other player receives one video rendition: the largest picture (then
 highest bitrate) in a codec it advertised. A push carries the largest one.

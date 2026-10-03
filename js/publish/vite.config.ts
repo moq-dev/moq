@@ -1,9 +1,9 @@
 import { resolve } from "path";
 import { defineConfig } from "vite";
-import { workletInline } from "../common/vite-plugin-worklet";
+import { worklet } from "../common/vite-plugin-worklet";
 
 export default defineConfig({
-	plugins: [workletInline()],
+	plugins: [worklet()],
 	build: {
 		lib: {
 			entry: {

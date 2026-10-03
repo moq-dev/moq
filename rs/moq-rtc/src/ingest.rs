@@ -104,6 +104,6 @@ mod tests {
 		.unwrap();
 
 		let info = broadcast.consume().track("0.avc3").unwrap().query().await.unwrap();
-		assert_eq!(info.max_age, Duration::from_secs(3));
+		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	}
 }

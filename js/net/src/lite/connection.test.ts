@@ -83,6 +83,6 @@ test("a lite GOAWAY keeps the session open, and a second one closes it", async (
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		expect(closed).toBe(true);
 	} finally {
-		connection.close();
+		connection.abort();
 	}
 });

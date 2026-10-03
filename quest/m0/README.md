@@ -34,9 +34,7 @@ audio quality harness in `test/audio-quality/` has landed; it grades playout
 nightly and records the traces it replays. Its native lane is a standalone m1
 quest, since nothing here waits on it. The [A/V clock](/quest/m1/av-clock.md)
 moved to m1 in the 2026-09-30 audit: it waits on the whole jitter line and is
-a published `@moq/watch` break on dev.
-
-Published API or wire breaks still land on dev; each quest's Plan says so.
+a published `@moq/watch` break.
 
 ## Required
 

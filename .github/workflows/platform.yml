@@ -9,9 +9,9 @@ name: Platform
 #
 # A pull request compiles only the crates it changed plus their dependents,
 # the same selection the Linux `check` job makes, because these are the
-# slowest and scarcest runners in CI. Pushes to `main` and `dev` compile
+# slowest and scarcest runners in CI. Pushes to `main` and `release` compile
 # everything, catching the break two individually green PRs make once both
-# land. `dev` never ran the nightly at all.
+# land.
 #
 # Outside Nix, like android.yml: neither runner has it, so each installs the
 # runner-native toolchain. rust-toolchain.toml still pins the compiler, and the
@@ -26,7 +26,7 @@ permissions:
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, release]
     paths:
       - "rs/**"
       - ".cargo/**"

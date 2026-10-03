@@ -19,7 +19,7 @@ behind the `mediacodec` feature and the encode seam.
   with the first output buffer; assert the two match.
 - MediaCodec pipelines output, which the one-packet-per-frame seam does not
   allow yet: add a `flush` and a zero-or-more return, a change to
-  `Encoder::encode` that targets `dev`, unless the AudioToolbox quest already did.
+  `Encoder::encode`, unless the AudioToolbox quest already did.
 - Multichannel is device-dependent; probe the encoder's capabilities at open
   and refuse a layout it does not list.
 - Round-trip regression through the MediaCodec decoder; runtime proof on a
