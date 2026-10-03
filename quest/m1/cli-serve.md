@@ -30,6 +30,11 @@ relay.
   configured; the unauthenticated import-to-export smoke keeps passing with
   `--auth-public`.
 
-## Required
+Decided in the 2026-09-30 audit: no longer waits on
+[`moq relay`](/quest/m2/moq-relay-subcommand.md). `moq-cli` already depends
+on `moq-relay`, and the open-relay listener is a security gap that should not
+wait on an m2 subcommand.
 
-- [`moq relay`](/quest/m1/moq-relay-subcommand.md) - the CLI hosts the relay library, which `serve` comes from
+## Related
+
+- [`moq relay`](/quest/m2/moq-relay-subcommand.md) - the CLI later hosts the whole relay

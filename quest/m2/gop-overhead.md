@@ -36,3 +36,7 @@ this quest.
 ## Closes
 
 - [#2284](https://github.com/moq-dev/moq/issues/2284) - close this issue when the quest finishes
+
+## Related
+
+- [Intra-refresh GOPs](/quest/m2/intra-refresh/README.md) - refresh encoding is the flat-bitrate alternative this verdict prices

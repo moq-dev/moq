@@ -19,6 +19,7 @@ async function encode(version: Version, fetch: Fetch): Promise<Uint8Array> {
 	const written: Uint8Array[] = [];
 	const writer = new Writer(
 		new WritableStream<Uint8Array>({ write: (chunk) => void written.push(new Uint8Array(chunk)) }),
+		version,
 	);
 	await fetch.encode(writer, version);
 	writer.close();
@@ -27,7 +28,7 @@ async function encode(version: Version, fetch: Fetch): Promise<Uint8Array> {
 }
 
 async function roundtrip(version: Version, fetch: Fetch): Promise<Fetch> {
-	const reader = new Reader(undefined, await encode(version, fetch));
+	const reader = new Reader(undefined, await encode(version, fetch), version);
 	return Fetch.decode(reader, version);
 }
 

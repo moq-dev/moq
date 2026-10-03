@@ -1,6 +1,6 @@
 //! Regression for an external publisher whose protocol does not declare a Hop ID.
-//! The relay records that publisher as `Hop::UNKNOWN`; reflected cluster paths
-//! must not replace it while gossiping around a redundant mesh.
+//! The relay stamps that publisher with a random Hop ID of the connection's own;
+//! reflected cluster paths must not replace it while propagating around a redundant mesh.
 
 use std::time::Duration;
 
@@ -105,8 +105,8 @@ async fn publish_version(port: u16, version: &str) -> Publisher {
 }
 
 async fn publish_unknown(port: u16) -> Publisher {
-	// Draft-14 has no Cluster extension, so the accepting relay must represent
-	// this external publisher with the wire-defined UNKNOWN Hop ID.
+	// Draft-14 has no Cluster extension, so the accepting relay must name this
+	// external publisher with a stamp of its own.
 	publish_version(port, "moq-transport-14").await
 }
 
@@ -174,8 +174,8 @@ async fn watch_announces(port: u16, window: Duration) -> Vec<(String, bool)> {
 
 	let mut updates = Vec::new();
 	let deadline = tokio::time::Instant::now() + window;
-	while let Ok(Some(update)) = tokio::time::timeout_at(deadline, announced.next()).await {
-		updates.push((update.prefix.as_str().to_string(), update.kind.is_active()));
+	while let Ok(Some((update, active))) = tokio::time::timeout_at(deadline, next_update(&mut announced)).await {
+		updates.push((update.prefix.as_str().to_string(), active));
 	}
 	updates
 }
@@ -226,7 +226,7 @@ async fn assert_unknown_publisher_stays_announced(cluster_version: Option<moq_ne
 /// Every ingest version that can carry a broadcast must survive the same
 /// redundant mesh. The pre-fix failure set was exactly the versions that
 /// declare no origin identity (lite <= 03, moq-transport <= 16): their
-/// broadcasts enter with an UNKNOWN first hop, and the reflected copy replaced
+/// broadcasts entered with an UNKNOWN first hop, and the reflected copy replaced
 /// the live source instead of parking. The identity-carrying versions held
 /// even before the fix, so this pins both halves of the boundary.
 #[tokio::test]
@@ -363,4 +363,15 @@ async fn unknown_publisher_frames_over_an_ietf_cluster() {
 async fn unknown_publisher_does_not_flap_across_a_lite04_cluster_triangle() {
 	let version = "moq-lite-04".parse().expect("parse version");
 	assert_unknown_publisher_stays_announced(Some(version), true).await;
+}
+
+/// The next route and whether it is active, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	loop {
+		return match announced.next().await? {
+			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+			moq_net::announce::Event::End(route) => Some((route, false)),
+			moq_net::announce::Event::Live => continue,
+		};
+	}
 }

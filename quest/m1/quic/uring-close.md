@@ -16,3 +16,9 @@ Reproduce on a Linux kernel supporting the io_uring worker, both in isolation
 and alongside the full test suite. Determine where the final close is lost
 between QUIC output, UDP submission, and worker teardown. Preserve the existing
 close contract; do not mask the failure with a retry or a longer timeout.
+
+## Plan
+
+#4431 (2f4b78581) fixed the same root cause, a paced CONNECTION_CLOSE lost
+at teardown. Re-run this test under the #4431 stress setup (8 stress-ng hogs
+on one CPU); if it passes, delete this quest.

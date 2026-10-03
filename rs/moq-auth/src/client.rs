@@ -4,14 +4,11 @@ use std::time::{Duration, Instant};
 
 use url::Url;
 
-use crate::lease::{self, Reason};
+use crate::lease::{self, Due, Reason};
 use crate::{Bytes, Error, Event, Grant, Request};
 
 /// Every request is bounded so a hung server refuses rather than parks the session.
 const TIMEOUT: Duration = Duration::from_secs(10);
-
-/// The longest a failed re-check waits before trying again.
-const BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 /// The HTTP side of the contract: one JSON POST per event to an auth server.
 ///
@@ -43,7 +40,7 @@ impl Client {
 					None => false,
 				};
 				if !loopback {
-					return Err(Error::InsecureUrl(url.to_string()));
+					return Err(Error::InsecureUrl(redact(&url)));
 				}
 				(builder, url)
 			}
@@ -53,12 +50,12 @@ impl Client {
 			},
 			#[cfg(unix)]
 			"unix" => {
-				let path = url.to_file_path().map_err(|()| Error::InvalidUrl(url.to_string()))?;
+				let path = url.to_file_path().map_err(|()| Error::InvalidUrl(redact(&url)))?;
 				// The socket is the transport; the request target is the server's root.
 				let target = Url::parse("http://localhost/").expect("a constant URL parses");
 				(builder.unix_socket(path), target)
 			}
-			_ => return Err(Error::InvalidUrl(url.to_string())),
+			_ => return Err(Error::InvalidUrl(redact(&url))),
 		};
 
 		Ok(Self {
@@ -70,26 +67,24 @@ impl Client {
 	/// Admit a session: POST `connect`, validate the reply, and return the lease the
 	/// session holds. The session reports totals through [`lease::Consumer::close`].
 	pub async fn connect(&self, request: Request) -> crate::Result<lease::Consumer> {
-		let mut request = request;
-		request.event = Event::Connect;
-
-		let grant = self.post(&request).await?;
-		let (producer, consumer) = lease::Producer::new(grant.clone());
-
-		let driver = Driver {
-			client: self.clone(),
-			request,
-			producer: Some(producer),
-			expires: grant.deadline(),
-			started: Instant::now(),
-		};
-		tokio::spawn(driver.run(grant));
-
-		Ok(consumer)
+		connect(self.clone(), request).await
 	}
+}
 
-	/// One POST: a 2xx with a valid grant admits, a 401 or 403 refuses, a 2xx
-	/// whose grant fails validation is that error, and everything else is an
+/// Where a lease's requests go: the auth server over HTTP, or an in-process
+/// answer in tests, so the lease's timers run on Tokio's paused clock with no
+/// socket for them to outrun.
+trait Post: Clone + Send + Sync + 'static {
+	/// Send a `connect` or `revalidate`: the grant as answered, not yet validated,
+	/// a refusal, or an outage.
+	fn post(&self, request: &Request) -> impl Future<Output = crate::Result<Grant>> + Send;
+
+	/// Send the `end`.
+	fn post_end(&self, request: &Request) -> impl Future<Output = crate::Result<()>> + Send;
+}
+
+impl Post for Client {
+	/// A 2xx carries the grant, a 401 or 403 refuses, and everything else is an
 	/// outage the caller decides about.
 	async fn post(&self, request: &Request) -> crate::Result<Grant> {
 		let response = self.http.post(self.url.clone()).json(request).send().await?;
@@ -100,133 +95,9 @@ impl Client {
 		if !status.is_success() {
 			return Err(Error::Unavailable(format!("auth server answered {status}")));
 		}
-		let grant: Grant = response.json().await?;
-		grant.validate().map_err(|err| match err {
-			// An empty grant is a refusal, not a malformed answer.
-			Error::UselessGrant => Error::Refused,
-			other => other,
-		})?;
-		Ok(grant)
-	}
-}
-
-/// The task behind a lease: re-checks on cadence and reports the end.
-struct Driver {
-	client: Client,
-	request: Request,
-	producer: Option<lease::Producer>,
-	started: Instant,
-	expires: Option<tokio::time::Instant>,
-}
-
-impl Driver {
-	async fn run(mut self, grant: Grant) {
-		let (reason, bytes) = self.drive(grant).await;
-
-		let mut request = self.request.clone();
-		request.event = Event::End {
-			reason,
-			duration: self.started.elapsed(),
-			bytes,
-		};
-		// The session is already gone; nothing to do with a failure but say so.
-		if let Err(err) = self.client.post_end(&request).await {
-			tracing::warn!(id = %request.id, %err, "failed to report the session end");
-		}
+		Ok(response.json().await?)
 	}
 
-	/// Re-check until the lease ends, returning why it did and the totals the session reported.
-	async fn drive(&mut self, mut grant: Grant) -> (Reason, Bytes) {
-		let producer = self
-			.producer
-			.take()
-			.expect("the driver owns the producer until it ends");
-		let mut failures = 0u32;
-		let mut next = grant.revalidate.map(|cadence| tokio::time::Instant::now() + cadence);
-		// The re-check in flight, kept out of the select so expiry and the session's
-		// close are still polled while a stalled server holds the reply.
-		let mut inflight: Option<Pin<Box<dyn Future<Output = crate::Result<Grant>> + Send>>> = None;
-		// A nudge while a re-check is in flight: POST once more when the reply lands,
-		// so a ban set after this request left is not missed until the next cadence.
-		let mut pending = false;
-
-		loop {
-			let revalidate = async {
-				match next {
-					Some(at) => tokio::time::sleep_until(at).await,
-					None => std::future::pending().await,
-				}
-			};
-			let expire = async {
-				match self.expires {
-					Some(at) => tokio::time::sleep_until(at).await,
-					None => std::future::pending().await,
-				}
-			};
-			let reply = async {
-				match inflight.as_mut() {
-					Some(request) => request.await,
-					None => std::future::pending().await,
-				}
-			};
-
-			tokio::select! {
-				ended = producer.closed() => return ended,
-				() = expire => return producer.finish(Reason::Expired, Bytes::default()),
-				result = reply => {
-					inflight = None;
-					match result {
-						Ok(fresh) => {
-							failures = 0;
-							self.expires = fresh.deadline();
-							next = fresh.revalidate.map(|cadence| tokio::time::Instant::now() + cadence);
-							producer.update(fresh.clone());
-							grant = fresh;
-						}
-						Err(Error::Refused) => return producer.finish(Reason::Refused, Bytes::default()),
-						Err(Error::GrantExpired | Error::UnboundedRevalidate | Error::ZeroRevalidate) => {
-							return producer.finish(Reason::Invalid, Bytes::default());
-						}
-						Err(err) => {
-							// Evidence of nothing: the grant stands until `expires`.
-							failures += 1;
-							let delay = backoff(failures, grant.revalidate.unwrap_or(BACKOFF_MAX));
-							tracing::warn!(id = %self.request.id, %err, ?delay, "auth revalidation failed; retrying");
-							next = Some(tokio::time::Instant::now() + delay);
-						}
-					}
-					if pending {
-						pending = false;
-						next = None;
-						inflight = Some(self.post_revalidate());
-					}
-				}
-				() = revalidate => {
-					// One re-check at a time; the reply schedules the next.
-					next = None;
-					inflight = Some(self.post_revalidate());
-				}
-				() = producer.revalidate_requested() => {
-					if inflight.is_some() {
-						pending = true;
-					} else {
-						next = None;
-						inflight = Some(self.post_revalidate());
-					}
-				}
-			}
-		}
-	}
-
-	fn post_revalidate(&self) -> Pin<Box<dyn Future<Output = crate::Result<Grant>> + Send>> {
-		let client = self.client.clone();
-		let mut request = self.request.clone();
-		request.event = Event::Revalidate;
-		Box::pin(async move { client.post(&request).await })
-	}
-}
-
-impl Client {
 	async fn post_end(&self, request: &Request) -> crate::Result<()> {
 		self.http
 			.post(self.url.clone())
@@ -238,14 +109,124 @@ impl Client {
 	}
 }
 
-/// Exponential backoff from one second, capped by the cadence and [`BACKOFF_MAX`],
-/// jittered by up to a quarter so a fleet does not retry in lockstep.
-fn backoff(failures: u32, cadence: Duration) -> Duration {
-	use rand::RngExt;
-	let base = Duration::from_secs(1) * 2u32.saturating_pow(failures.saturating_sub(1).min(16));
-	let base = base.min(cadence).min(BACKOFF_MAX);
-	let jitter = rand::rng().random_range(0.75..=1.25);
-	base.mul_f64(jitter)
+/// Admit a session through `server` and spawn the driver behind its lease.
+async fn connect<S: Post>(server: S, mut request: Request) -> crate::Result<lease::Consumer> {
+	request.event = Event::Connect;
+
+	let grant = ask(&server, &request).await?;
+	let (producer, consumer) = lease::Producer::new(grant.clone());
+
+	let driver = Driver {
+		server,
+		request,
+		producer: Some(producer),
+		started: Instant::now(),
+	};
+	tokio::spawn(driver.run());
+
+	Ok(consumer)
+}
+
+/// One `connect` or `revalidate`: a valid grant admits, and one that fails
+/// validation is that error.
+async fn ask<S: Post>(server: &S, request: &Request) -> crate::Result<Grant> {
+	let grant = server.post(request).await?;
+	grant.validate().map_err(|err| match err {
+		// An empty grant is a refusal, not a malformed answer.
+		Error::UselessGrant => Error::Refused,
+		other => other,
+	})?;
+	Ok(grant)
+}
+
+/// `url` without its userinfo, query, or fragment, any of which may carry a credential.
+fn redact(url: &Url) -> String {
+	let mut url = url.clone();
+	let _ = url.set_username("");
+	let _ = url.set_password(None);
+	url.set_query(None);
+	url.set_fragment(None);
+	url.to_string()
+}
+
+/// The task behind a lease: re-checks on cadence and reports the end.
+struct Driver<S> {
+	server: S,
+	request: Request,
+	producer: Option<lease::Producer>,
+	started: Instant,
+}
+
+impl<S: Post> Driver<S> {
+	async fn run(mut self) {
+		let (reason, bytes) = self.drive().await;
+
+		let mut request = self.request.clone();
+		request.event = Event::End {
+			reason,
+			duration: self.started.elapsed(),
+			bytes,
+		};
+		// The session is already gone; nothing to do with a failure but say so.
+		if let Err(err) = self.server.post_end(&request).await {
+			tracing::warn!(id = %request.id, %err, "failed to report the session end");
+		}
+	}
+
+	/// Re-check until the lease ends, returning why it did and the totals the session reported.
+	async fn drive(&mut self) -> (Reason, Bytes) {
+		let producer = self
+			.producer
+			.take()
+			.expect("the driver owns the producer until it ends");
+		// Keep an in-flight request alive while expiry or a push is observed.
+		let mut inflight: Option<Pin<Box<dyn Future<Output = crate::Result<Grant>> + Send>>> = None;
+		let mut pending = false;
+
+		loop {
+			let reply = async {
+				match inflight.as_mut() {
+					Some(request) => request.await,
+					None => std::future::pending().await,
+				}
+			};
+			tokio::select! {
+				biased;
+				ended = producer.closed() => return ended,
+				due = producer.due() => match due {
+					Due::Expired => return producer.finish(Reason::Expired, Bytes::default()),
+					Due::Revalidate if inflight.is_some() => pending = true,
+					Due::Revalidate => inflight = Some(self.post_revalidate()),
+				},
+				result = reply => {
+					inflight = None;
+					match result {
+						Ok(fresh) => producer.update(fresh),
+						Err(Error::Refused) => return producer.finish(Reason::Refused, Bytes::default()),
+						Err(Error::GrantExpired | Error::UnboundedRevalidate | Error::ZeroRevalidate) => {
+							return producer.finish(Reason::Invalid, Bytes::default());
+						},
+						Err(err) => {
+							let delay = producer.failed();
+							tracing::warn!(id = %self.request.id, %err, ?delay, "auth revalidation failed; retrying");
+						},
+					}
+					if pending {
+						pending = false;
+						producer.immediate();
+						inflight = Some(self.post_revalidate());
+					}
+				},
+			}
+		}
+	}
+
+	fn post_revalidate(&self) -> Pin<Box<dyn Future<Output = crate::Result<Grant>> + Send>> {
+		let server = self.server.clone();
+		let mut request = self.request.clone();
+		request.event = Event::Revalidate;
+		Box::pin(async move { ask(&server, &request).await })
+	}
 }
 
 #[cfg(test)]
@@ -316,34 +297,42 @@ mod tests {
 		server
 	}
 
-	/// Keep HTTP handling on the paused test clock instead of wiremock's separate runtime.
-	async fn clock_server(log: Log, grant: Grant, stall: bool) -> Client {
-		use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::post};
-		let router = Router::new()
-			.route(
-				"/",
-				post(
-					|State((log, grant, stall)): State<(Log, Grant, bool)>, Json(request): Json<Request>| async move {
-						let event = request.event.clone();
-						log.0.lock().push(request);
-						match event {
-							Event::Connect => Json(grant).into_response(),
-							Event::Revalidate if stall => std::future::pending().await,
-							Event::Revalidate => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-							Event::End { .. } => StatusCode::OK.into_response(),
-						}
-					},
-				),
-			)
-			.with_state((log, grant, stall));
-		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-		let url = format!("http://{}/", listener.local_addr().unwrap());
-		tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-		// Only the lease clock is under test; an HTTP timeout can auto-advance
-		// Tokio's paused clock before loopback I/O gets its first reactor turn.
-		Client {
-			http: reqwest::Client::builder().no_proxy().build().unwrap(),
-			url: url.parse().unwrap(),
+	/// An in-process auth server for tests on Tokio's paused clock: it logs each
+	/// request and answers with `respond`, never when that returns `None`. With no
+	/// socket, the clock only advances once every answer has landed.
+	#[derive(Clone)]
+	struct Script {
+		log: Log,
+		#[allow(clippy::type_complexity)]
+		respond: std::sync::Arc<dyn Fn(&Request) -> Option<crate::Result<Grant>> + Send + Sync>,
+	}
+
+	impl Script {
+		fn new(log: Log, respond: impl Fn(&Request) -> Option<crate::Result<Grant>> + Send + Sync + 'static) -> Self {
+			Self {
+				log,
+				respond: std::sync::Arc::new(respond),
+			}
+		}
+
+		async fn connect(&self) -> crate::Result<lease::Consumer> {
+			connect(self.clone(), request()).await
+		}
+	}
+
+	impl Post for Script {
+		async fn post(&self, request: &Request) -> crate::Result<Grant> {
+			self.log.0.lock().push(request.clone());
+			let answer = (self.respond)(request);
+			match answer {
+				Some(answer) => answer,
+				None => std::future::pending().await,
+			}
+		}
+
+		async fn post_end(&self, request: &Request) -> crate::Result<()> {
+			self.log.0.lock().push(request.clone());
+			Ok(())
 		}
 	}
 
@@ -430,6 +419,23 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn http_error_redacts_url() {
+		// A freed port refuses the connection, so reqwest fails with the dialed URL attached.
+		let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+		let address = listener.local_addr().expect("local address");
+		drop(listener);
+
+		let url = format!("http://user:pass@{address}/?jwt=secret").parse().unwrap();
+		let err = Client::new(url, None).unwrap().connect(request()).await.unwrap_err();
+
+		assert!(matches!(err, Error::Unavailable(_)), "unexpected error: {err}");
+		let printed = format!("{err} {err:?}");
+		for secret in ["jwt", "secret", "user:pass"] {
+			assert!(!printed.contains(secret), "error leaked {secret}: {printed}");
+		}
+	}
+
+	#[tokio::test]
 	async fn revalidate_runs_on_cadence_and_applies_the_reply() {
 		let log = Log::default();
 		let server = server(log.clone(), |request| {
@@ -497,25 +503,55 @@ mod tests {
 		tokio::time::pause();
 		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
 		grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
-		let client = clock_server(Log::default(), grant, false).await;
-		assert!(matches!(client.connect(request()).await, Err(Error::GrantExpired)));
+		let script = Script::new(Log::default(), move |_| Some(Ok(grant.clone())));
+		assert!(matches!(script.connect().await, Err(Error::GrantExpired)));
 	}
 
+	/// Regression: a cadence past the clock's range overflowed `Instant` and panicked
+	/// the driver, at connect and on each reply. It never fires; the grant expires.
 	#[tokio::test]
-	async fn a_grant_closes_at_its_expiry() {
+	async fn a_cadence_past_the_clock_never_rechecks() {
 		tokio::time::pause();
-		// Whole seconds, as the grant crosses the wire, so the client sees this exact instant.
-		// An hour out, so a slow runner cannot expire it before `connect` answers.
-		let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
-		let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(now.as_secs() + 3600);
-		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
-		grant.expires = Some(expires);
-		let client = clock_server(Log::default(), grant, false).await;
+		let log = Log::default();
+		let script = Script::new(log.clone(), |_| {
+			Some(Ok(grant(
+				Some(Duration::from_secs(3)),
+				Some(Duration::from_secs(u64::MAX)),
+			)))
+		});
 
-		// The client reads both clocks somewhere inside `connect`, so bracket it: the
-		// bounds hold however long it takes.
+		let consumer = script.connect().await.unwrap();
+		// A nudge's reply schedules the next re-check the same way.
+		consumer.revalidate();
+		let reason = tokio::time::timeout(Duration::from_secs(4), consumer.closed())
+			.await
+			.expect("closed at expires");
+		assert_eq!(reason, Reason::Expired);
+		assert_eq!(log.revalidates(), 1, "only the nudge re-checked");
+	}
+
+	/// An outage is evidence of nothing: the grant stands through failed re-checks
+	/// until `expires`, and closes then, not later.
+	#[tokio::test]
+	async fn an_outage_keeps_the_grant_until_expires() {
+		tokio::time::pause();
+		let expires = SystemTime::now() + Duration::from_secs(3);
+		let log = Log::default();
+		let script = Script::new(log.clone(), move |request| {
+			Some(match request.event {
+				Event::Connect => {
+					let mut grant = grant(None, Some(Duration::from_secs(1)));
+					grant.expires = Some(expires);
+					Ok(grant)
+				}
+				_ => Err(Error::Unavailable("auth server answered 503".into())),
+			})
+		});
+
+		// `expires` is wall-clock time, which the client maps onto Tokio's clock
+		// somewhere inside `connect`, so bracket it: the bounds hold however long it takes.
 		let (wall, tick) = (SystemTime::now(), tokio::time::Instant::now());
-		let consumer = client.connect(request()).await.unwrap();
+		let consumer = script.connect().await.unwrap();
 		let earliest = tick + expires.duration_since(SystemTime::now()).unwrap();
 		let latest = tokio::time::Instant::now() + expires.duration_since(wall).unwrap();
 
@@ -525,51 +561,18 @@ mod tests {
 			tokio::time::timeout_at(earliest - tolerance, consumer.closed())
 				.await
 				.is_err(),
-			"live until its expiry"
+			"an outage must not close before expires"
 		);
-		let reason = tokio::time::timeout_at(latest + tolerance, consumer.closed())
-			.await
-			.expect("closed at its expiry, not later");
-		assert_eq!(reason, Reason::Expired);
-	}
-
-	/// On the real clock: a paused one jumps to the expiry timer whenever the runtime
-	/// waits on a socket, and macOS delivers loopback asynchronously, so the lease can
-	/// expire and drop the re-check before the server sees it. Load only delays the
-	/// close, so asserting it never lands before `expires` holds on a busy machine.
-	#[tokio::test]
-	async fn an_outage_keeps_the_grant_until_expires() {
-		// Whole seconds, as the grant crosses the wire, so the client sees this exact instant.
-		let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
-		let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(now.as_secs() + 3);
-
-		let log = Log::default();
-		let server = server(log.clone(), move |request| match request.event {
-			Event::Connect => {
-				let mut grant = grant(None, Some(Duration::from_secs(1)));
-				grant.expires = Some(expires);
-				ResponseTemplate::new(200).set_body_json(grant)
-			}
-			Event::Revalidate => ResponseTemplate::new(503),
-			Event::End { .. } => ResponseTemplate::new(200),
-		})
-		.await;
-		let consumer = client(&server).connect(request()).await.unwrap();
-
-		let reason = tokio::time::timeout(Duration::from_secs(10), consumer.closed())
-			.await
-			.expect("expired");
-		assert_eq!(reason, Reason::Expired);
-		assert!(SystemTime::now() >= expires, "an outage must not close before expires");
-		assert!(
-			log.revalidates() >= 1,
-			"no re-check reached the server during the outage"
-		);
+		assert!(log.revalidates() >= 1, "the outage was answered before expires");
 		assert_eq!(
 			consumer.grant().publish,
 			patterns(&["**"]),
 			"the grant stands through the outage"
 		);
+		let reason = tokio::time::timeout_at(latest + tolerance, consumer.closed())
+			.await
+			.expect("closed at expires, not later");
+		assert_eq!(reason, Reason::Expired);
 		assert!(matches!(
 			log.end().await.event,
 			Event::End {
@@ -582,13 +585,11 @@ mod tests {
 	#[tokio::test]
 	async fn expiry_fires_while_a_recheck_is_stalled() {
 		tokio::time::pause();
-		let client = clock_server(
-			Log::default(),
-			grant(Some(Duration::from_secs(3)), Some(Duration::from_secs(1))),
-			true,
-		)
-		.await;
-		let consumer = client.connect(request()).await.unwrap();
+		let script = Script::new(Log::default(), |request| match request.event {
+			Event::Connect => Some(Ok(grant(Some(Duration::from_secs(3)), Some(Duration::from_secs(1))))),
+			_ => None,
+		});
+		let consumer = script.connect().await.unwrap();
 
 		let reason = tokio::time::timeout(Duration::from_secs(5), consumer.closed())
 			.await
@@ -638,6 +639,19 @@ mod tests {
 		));
 		#[cfg(unix)]
 		assert!(Client::new("unix:///run/moq-auth.sock".parse().unwrap(), None).is_ok());
+
+		// The refused URL is reported, minus anything that may carry a credential.
+		for url in [
+			"http://user:pass@auth.example/?jwt=secret#frag",
+			"ftp://user:pass@auth.example/?jwt=secret#frag",
+		] {
+			let err = Client::new(url.parse().unwrap(), None).err().expect("refused");
+			let printed = format!("{err} {err:?}");
+			assert!(printed.contains("auth.example/"), "{printed}");
+			for secret in ["jwt", "secret", "user", "pass", "frag"] {
+				assert!(!printed.contains(secret), "error leaked {secret}: {printed}");
+			}
+		}
 	}
 
 	/// Backoff leaves the driver in this same state (nothing in flight, a timer armed),
@@ -701,18 +715,5 @@ mod tests {
 			2,
 			"a burst during an in-flight re-check is one extra POST"
 		);
-	}
-
-	#[test]
-	fn backoff_grows_and_stays_bounded() {
-		let cadence = Duration::from_secs(30);
-		let first = backoff(1, cadence);
-		assert!(
-			first >= Duration::from_millis(750) && first <= Duration::from_millis(1250),
-			"{first:?}"
-		);
-		let later = backoff(10, cadence);
-		assert!(later <= cadence.mul_f64(1.25), "{later:?}");
-		assert!(backoff(40, Duration::from_secs(3600)) <= BACKOFF_MAX.mul_f64(1.25));
 	}
 }

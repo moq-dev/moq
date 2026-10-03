@@ -2,6 +2,17 @@ import Foundation
 import XCTest
 @testable import Moq
 
+/// The next announce event that is not `.live`, which lands wherever the backlog ends.
+private func nextRoute(_ announced: AnnounceConsumer) async throws -> AnnounceEvent {
+    while true {
+        let next = try await announced.next()
+        let event = try XCTUnwrap(next, "announce stream ended")
+        if event != .live {
+            return event
+        }
+    }
+}
+
 final class SmokeTests: XCTestCase {
     func testStreamAbortPreservesProtocolDetails() async throws {
         let broadcast = try BroadcastProducer()
@@ -19,6 +30,12 @@ final class SmokeTests: XCTestCase {
             XCTAssertEqual(details.code, 468)
             XCTAssertEqual(details.kind, .app)
         }
+    }
+
+    /// An error's description is the Rust error message.
+    func testErrorDescriptionIsRustMessage() {
+        XCTAssertEqual(MoqError.Closed.description, "closed")
+        XCTAssertEqual(MoqError.Transport("reset").description, "transport: reset")
     }
 
     /// Verifies the native lib loads and the wrapper compiles against the
@@ -85,22 +102,25 @@ final class SmokeTests: XCTestCase {
 
         try broadcast.announce()
         let announced = try consumer.announced(prefix: "")
-        let first = try await announced.next()
-        XCTAssertEqual(first?.prefix, "live")
-        XCTAssertEqual(first?.active, true)
+        guard case .start(let first) = try await nextRoute(announced) else {
+            return XCTFail("expected an announcement")
+        }
+        XCTAssertEqual(first.prefix, "live")
 
         try broadcast.unannounce()
-        let retracted = try await announced.next()
-        XCTAssertEqual(retracted?.prefix, "live")
-        XCTAssertEqual(retracted?.active, false)
+        guard case .end(let retracted) = try await nextRoute(announced) else {
+            return XCTFail("expected a retraction")
+        }
+        XCTAssertEqual(retracted.prefix, "live")
         do {
             _ = try await consumer.requestBroadcast(path: "live")
             XCTFail("an unannounced broadcast must be unroutable")
         } catch {}
 
         try broadcast.announce()
-        let back = try await announced.next()
-        XCTAssertEqual(back?.active, true)
+        guard case .start = try await nextRoute(announced) else {
+            return XCTFail("expected a reannouncement")
+        }
         _ = try await consumer.requestBroadcast(path: "live")
     }
 
@@ -110,9 +130,35 @@ final class SmokeTests: XCTestCase {
         let chat = try origin.createBroadcast(path: "room/alice/chat")
         try chat.announce()
 
-        let update = try await announced.next()
-        XCTAssertEqual(update?.prefix, "room/alice/chat")
-        XCTAssertEqual(update?.captures, ["alice"])
+        guard case .start(let update) = try await nextRoute(announced) else {
+            return XCTFail("expected an announcement")
+        }
+        XCTAssertEqual(update.prefix, "room/alice/chat")
+        XCTAssertEqual(update.captures, ["alice"])
+    }
+
+    func testAnnouncedYieldsLiveOnceCaughtUp() async throws {
+        let origin = OriginProducer()
+        let consumer = origin.consume()
+
+        let empty = try consumer.announced()
+        let first = try await empty.next()
+        XCTAssertEqual(first, .live)
+        empty.cancel()
+
+        let broadcast = try origin.createBroadcast(path: "cam")
+        try broadcast.announce()
+        _ = try await consumer.announcedBroadcast(path: "cam").available()
+
+        var listed: [String] = []
+        for try await event in try consumer.announced() {
+            if case .start(let announce) = event {
+                listed.append(announce.prefix)
+            } else if event == .live {
+                break
+            }
+        }
+        XCTAssertEqual(listed, ["cam"])
     }
 
     func testDynamicServesARequestUnderAPrefix() async throws {
@@ -341,14 +387,14 @@ final class SmokeTests: XCTestCase {
         try broadcast.close()
     }
 
-    /// The decode side picks its CPU layout: an unset `format` is I420, and RGBA
-    /// is four bytes a pixel, with each frame naming the layout it decoded to.
-    func testDecodeVideoFormat() async throws {
+    /// A decoded frame owns its picture: it converts to either CPU layout on
+    /// demand and stays readable after its consumer is cancelled.
+    func testDecodeVideoFrame() async throws {
         let origin = OriginProducer()
-        let broadcast = try origin.createBroadcast(path: "video-decode-format")
+        let broadcast = try origin.createBroadcast(path: "video-decode-frame")
         let video = try broadcast.encodeVideo(
             input: VideoEncoderInput(format: .rgba, width: 320, height: 240, framerate: 30),
-            // Software both ways so the test is deterministic everywhere.
+            // Software so the encode is deterministic everywhere.
             output: VideoEncoderOutput(codec: .h264, track: "camera", kind: .software)
         )
         try broadcast.announce()
@@ -360,39 +406,30 @@ final class SmokeTests: XCTestCase {
             try video.write(VideoFrame(timestampUs: UInt64(i) * 33_333, data: rgba))
         }
 
-        let consumer = try await origin.consume().requestBroadcast(path: "video-decode-format")
+        let consumer = try await origin.consume().requestBroadcast(path: "video-decode-frame")
         let catalogs = try await consumer.subscribeCatalog()
         // XCTUnwrap takes an autoclosure, which can't hold an await.
         let nextCatalog = try await catalogs.next()
         let catalog = try XCTUnwrap(nextCatalog)
         let rendition = try XCTUnwrap(catalog.video["camera"])
 
-        // Two subscribers over one publication, so the same encoded frames are
-        // read twice and only the requested layout differs.
-        let i420 = try await consumer.decodeVideo(name: "camera", catalogVideo: rendition)
-        defer { i420.cancel() }
-        let packed = try await consumer.decodeVideo(
-            name: "camera",
-            catalogVideo: rendition,
-            output: VideoDecoderOutput(format: .rgba)
-        )
-        defer { packed.cancel() }
+        let decoder = try await consumer.decodeVideo(name: "camera", catalogVideo: rendition)
 
-        // Keep the encoder fed so both decoders see frames after they joined.
+        // Keep the encoder fed so the decoder sees frames after it joined.
         for i in 10..<40 {
             try video.write(VideoFrame(timestampUs: UInt64(i) * 33_333, data: rgba))
         }
 
-        let nextPlanar = try await i420.next()
-        let planar = try XCTUnwrap(nextPlanar)
-        XCTAssertEqual(planar.format, .i420)
-        XCTAssertEqual(planar.data.count, Int(planar.width) * Int(planar.height) * 3 / 2)
+        let next = try await decoder.next()
+        let frame = try XCTUnwrap(next)
+        decoder.cancel()
 
-        let nextPacked = try await packed.next()
-        let frame = try XCTUnwrap(nextPacked)
-        XCTAssertEqual(frame.format, .rgba)
-        XCTAssertEqual(frame.data.count, Int(frame.width) * Int(frame.height) * 4)
-        XCTAssertTrue(stride(from: 3, to: frame.data.count, by: 4).allSatisfy { frame.data[$0] == 0xFF })
+        let planar = try frame.pixels(format: .i420)
+        XCTAssertEqual(planar.count, Int(frame.width()) * Int(frame.height()) * 3 / 2)
+
+        let packed = try frame.pixels(format: .rgba)
+        XCTAssertEqual(packed.count, Int(frame.width()) * Int(frame.height()) * 4)
+        XCTAssertTrue(stride(from: 3, to: packed.count, by: 4).allSatisfy { packed[$0] == 0xFF })
 
         try video.finish()
         try broadcast.close()

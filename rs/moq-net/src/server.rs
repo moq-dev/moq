@@ -364,6 +364,7 @@ impl Server {
 				let peer_declared = ietf::peer::Peer {
 					solicit: ietf::solicit::from_setup(&params, v)?,
 					hidden: ietf::hidden::from_setup(&params, v),
+					active_count: ietf::active_count::from_setup(&params, v),
 					..Default::default()
 				};
 				(path, token, request_id_max, peer_declared)
@@ -531,8 +532,10 @@ where
 				cost: None,
 				version,
 				path: None,
+				authority: None,
 				peer_setup_stream: Some(peer_setup.stream),
 				peer_declared: Some(peer_setup.declared),
+				early_unis: peer_setup.early,
 			})?;
 			tracing::debug!(?version, "connected");
 			Ok(Session::new(
@@ -590,6 +593,7 @@ where
 					parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
 					ietf::solicit::into_setup(&mut parameters, v);
 					ietf::hidden::into_setup(&mut parameters, v);
+					ietf::active_count::into_setup(&mut parameters, v);
 					parameters.encode_bytes(v)?
 				}
 				Version::Lite(v) => lite::Parameters::default().encode_bytes(v)?,
@@ -637,8 +641,10 @@ where
 						cost: None,
 						version: v,
 						path: None,
+						authority: None,
 						peer_setup_stream: None,
 						peer_declared: Some(peer_declared),
+						early_unis: Vec::new(),
 					})?;
 					(None, crate::driver::Protocol::Ietf(protocol), goaway)
 				}
@@ -938,7 +944,7 @@ mod tests {
 		) -> std::task::Poll<Result<usize, Self::Error>> {
 			std::task::Poll::Ready(Ok(buf.len()))
 		}
-		fn set_priority(&mut self, _order: u8) {}
+		fn set_priority(&mut self, _order: i32) {}
 		fn finish(&mut self) -> Result<(), Self::Error> {
 			Ok(())
 		}
@@ -1241,6 +1247,7 @@ mod tests {
 						path: None,
 						token: None,
 						declared: ietf::peer::Peer::default(),
+						early: Vec::new(),
 					},
 				})),
 			}),

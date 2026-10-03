@@ -21,7 +21,8 @@ pub(super) struct Header {
 	/// audioObjectType (ADTS `profile` + 1). AAC-LC is 2.
 	pub object_type: u8,
 	pub sample_rate: u32,
-	pub channel_count: u32,
+	/// channelConfiguration; 0 means a program config element in the raw data block describes the channels.
+	pub channel_config: u8,
 	/// Total access-unit length, header included.
 	pub frame_len: usize,
 	/// Header length: 7 without CRC, 9 with.
@@ -51,7 +52,7 @@ impl Header {
 		Ok(Self {
 			object_type: profile + 1,
 			sample_rate,
-			channel_count: channel_count_from_config(channel_config),
+			channel_config,
 			frame_len,
 			header_len,
 		})
@@ -62,13 +63,21 @@ impl Header {
 pub(super) fn write_header(
 	object_type: u8,
 	sample_rate: u32,
-	channel_count: u32,
+	channel_config: u8,
 	raw_len: usize,
 ) -> anyhow::Result<[u8; 7]> {
-	// ADTS `profile` is the 2-bit audioObjectType - 1.
-	let profile = object_type.saturating_sub(1) & 0x03;
+	// ADTS `profile` is the 2-bit audioObjectType - 1, so only Main, LC, SSR, and LTP fit.
+	anyhow::ensure!(
+		(1..=4).contains(&object_type),
+		"audioObjectType {object_type} not representable in ADTS"
+	);
+	let profile = object_type - 1;
 	let freq_index = freq_index_from_rate(sample_rate)?;
-	let channel_config = channel_config_from_count(channel_count);
+	// ADTS has 3 bits for it; the higher configurations only fit an AudioSpecificConfig.
+	anyhow::ensure!(
+		channel_config < 8,
+		"channelConfiguration {channel_config} not representable in ADTS"
+	);
 
 	let frame_len = raw_len + 7;
 	anyhow::ensure!(frame_len < (1 << 13), "AAC frame too large for ADTS framing");
@@ -96,21 +105,13 @@ fn freq_index_from_rate(sample_rate: u32) -> anyhow::Result<u8> {
 		.with_context(|| format!("sample rate {sample_rate} not representable in ADTS"))
 }
 
-/// Map an AAC `channel_config` (ISO 14496-3 Table 1.19) to a channel count.
-fn channel_count_from_config(channel_config: u8) -> u32 {
-	match channel_config {
-		1..=6 => channel_config as u32,
-		7 => 8,
-		_ => 2,
-	}
-}
-
-/// Inverse of [`channel_count_from_config`].
-fn channel_config_from_count(channel_count: u32) -> u8 {
+/// Map a channel count to the ADTS `channel_config` (ISO 14496-3 Table 1.19) naming it, refusing a
+/// count that none does rather than guess a layout.
+pub(super) fn channel_config_from_count(channel_count: u32) -> anyhow::Result<u8> {
 	match channel_count {
-		1..=6 => channel_count as u8,
-		8 => 7,
-		_ => 2,
+		1..=6 => Ok(channel_count as u8),
+		8 => Ok(7),
+		_ => anyhow::bail!("{channel_count} channels have no ADTS channelConfiguration"),
 	}
 }
 
@@ -126,7 +127,7 @@ mod tests {
 
 		assert_eq!(parsed.object_type, 2);
 		assert_eq!(parsed.sample_rate, 48_000);
-		assert_eq!(parsed.channel_count, 2);
+		assert_eq!(parsed.channel_config, 2);
 		assert_eq!(parsed.header_len, 7);
 		assert_eq!(parsed.frame_len, 107, "frame_len includes the 7-byte header");
 	}
@@ -139,10 +140,29 @@ mod tests {
 	}
 
 	#[test]
+	fn write_refuses_object_types_outside_the_profile_field() {
+		for object_type in [0, 5, 29] {
+			assert!(write_header(object_type, 48_000, 2, 10).is_err());
+		}
+		for object_type in 1..=4 {
+			let header = write_header(object_type, 48_000, 2, 10).unwrap();
+			assert_eq!(Header::parse(&header).unwrap().object_type, object_type);
+		}
+	}
+
+	#[test]
+	fn channel_counts_without_a_configuration_are_refused() {
+		assert_eq!(channel_config_from_count(8).unwrap(), 7);
+		for count in [0, 7, 9, 24] {
+			assert!(channel_config_from_count(count).is_err());
+		}
+	}
+
+	#[test]
 	fn frame_len_for_5_1() {
 		let header = write_header(2, 44_100, 6, 512).unwrap();
 		let parsed = Header::parse(&header).unwrap();
-		assert_eq!(parsed.channel_count, 6);
+		assert_eq!(parsed.channel_config, 6);
 		assert_eq!(parsed.sample_rate, 44_100);
 		assert_eq!(parsed.frame_len, 519);
 	}

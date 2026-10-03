@@ -37,9 +37,20 @@ in sync at the latency you ask for.
 | `announced` | Wait for the broadcast to be announced before subscribing (default on), so a player can be mounted before the stream exists. |
 | `catalog-format` | `hang` (default, from the `.hang` suffix), `hangz` (compressed), `msf`, or `manual` to supply the catalog yourself. |
 
+Video holds its last picture while paused, out of view, or waiting for a
+resumed rendition's first frame. Its reported timestamp stays with that picture.
+Going offline or closing the player clears it.
+
 The overlay adds play/pause, volume, fullscreen, a quality selector, a
 buffering indicator, an unsupported-codec warning, and a stats panel.
 `<moq-watch-support>` shows what the browser can play.
+
+`el.broadcast.out.status` is `offline`, `loading`, `live`, or `error`. It is
+`error` when the origin refuses the broadcast, such as a `dynamic()` handler
+rejecting the request, and `el.broadcast.out.error` then holds the refusal's
+`Error`; the overlay shows its message in place of the offline notice. A
+refusal is final: only a new `name`, a new origin, a changed `announced`, or
+re-enabling asks again, which clears both back to `offline`.
 
 ## Binding from a framework
 

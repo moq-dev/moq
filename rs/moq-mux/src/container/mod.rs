@@ -121,9 +121,9 @@ pub struct MissingKeyframe;
 #[error("video group endpoint precedes its last frame")]
 pub struct InvalidEnd;
 
-/// A frame's timestamp sits below the live edge earlier groups reached.
+/// A group starts before the previous group did: the source restarted, which is a new broadcast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("frame timestamp is below the live edge")]
+#[error("frame timestamp is below the previous group's start")]
 pub struct TimestampRewind;
 
 /// Encode and decode media frames over a moq-lite group.

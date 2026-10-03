@@ -176,12 +176,12 @@ async fn connect_test(config: ConnectTest<'_>) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
-	assert!(update.kind.is_active(), "expected announce, got retraction");
+	assert!(active, "expected announce, got retraction");
 	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
 		.expect("request timed out")
@@ -528,7 +528,76 @@ async fn mtls_test(scheme: &str, reject: bool) {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn iroh_connect() {
+	iroh_connect_test(None).await;
+}
+
+/// `moq-lite-07-wip` is opt-in, so it is on the wire only when both ends configure it.
+/// iroh once built its ALPNs from the default constant and ignored that opt-in.
+#[cfg(feature = "iroh")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn iroh_connect_lite_07_wip() {
+	iroh_connect_test(Some("moq-lite-07-wip")).await;
+}
+
+/// A dialer and a listener that share no version never connect, instead of the
+/// listener falling back to the default set.
+#[cfg(feature = "iroh")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn iroh_versions_disjoint() {
 	use moq_tokio::iroh::Config as IrohConfig;
+
+	let bind = || async {
+		let mut config = IrohConfig::default();
+		config.enabled = Some(true);
+		config
+			.bind(&moq_tokio::quic::Config::default())
+			.await
+			.expect("failed to bind iroh endpoint")
+			.expect("iroh endpoint not enabled")
+	};
+
+	let server_endpoint = bind().await;
+	let server_endpoint_id = server_endpoint.id();
+	let server_addrs: Vec<std::net::SocketAddr> = server_endpoint.addr().ip_addrs().copied().collect();
+
+	let mut server_config = moq_tokio::listen::Config::default();
+	server_config.bind = Some("[::]:0".parse().unwrap());
+	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec!["moq-lite-07-wip".parse().unwrap()];
+	let mut config = moq_tokio::server::Config::default();
+	config.listen = server_config;
+	config.iroh = Some(server_endpoint);
+	let mut server = config
+		.init()
+		.expect("failed to init server")
+		.listen()
+		.await
+		.expect("failed to listen");
+	let server_handle = tokio::spawn(async move { server.accept().await.is_some() });
+
+	let mut client_config = moq_tokio::connect::Config::default();
+	client_config.tls.insecure = Some(true);
+	let client = client_config
+		.init(Default::default())
+		.expect("failed to init client")
+		.with_iroh(bind().await)
+		.with_iroh_addrs(server_addrs);
+
+	let url: url::Url = format!("iroh://{server_endpoint_id}/room").parse().unwrap();
+	let result = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+		.await
+		.expect("client connect timed out");
+	assert!(result.is_err(), "the default set must not reach a wip-only listener");
+	server_handle.abort();
+}
+
+#[cfg(feature = "iroh")]
+async fn iroh_connect_test(version: Option<&str>) {
+	use moq_tokio::iroh::Config as IrohConfig;
+
+	let version: Vec<moq_tokio::moq_net::Version> = version.map(|v| v.parse().unwrap()).into_iter().collect();
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn();
@@ -563,6 +632,7 @@ async fn iroh_connect() {
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = version.clone();
 
 	let mut config = moq_tokio::server::Config::default();
 	config.listen = server_config;
@@ -586,6 +656,7 @@ async fn iroh_connect() {
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
+	client_config.version = version.clone();
 
 	let client = client_config
 		.init(Default::default())
@@ -608,6 +679,9 @@ async fn iroh_connect() {
 		assert_eq!(request.url(), None);
 		assert_eq!(request.path(), "/room");
 		assert_eq!(request.query(), Some("jwt=abc"));
+		if let Some(version) = version.first() {
+			assert_eq!(request.alpn(), Some(version.alpn()));
+		}
 		let session = request.with_publisher(&pub_origin).ok().await?;
 
 		let _broadcast = broadcast;
@@ -623,12 +697,12 @@ async fn iroh_connect() {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
-	assert!(update.kind.is_active(), "expected announce, got retraction");
+	assert!(active, "expected announce, got retraction");
 	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
 		.expect("request timed out")
@@ -670,11 +744,9 @@ async fn iroh_connect() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn noq_client_close_reaches_server() {
-	let quic = moq_tokio::quic::Config::default();
-	assert!(
-		quic.idle_timeout > TIMEOUT,
-		"an idle timeout inside TIMEOUT would hide a lost close"
-	);
+	// An idle timeout inside TIMEOUT would hide a lost close.
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.idle_timeout = TIMEOUT * 3;
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -794,7 +866,7 @@ async fn noq_client_close_drains_finished_track() {
 		.await
 		.expect("server handshake failed");
 
-	tokio::time::timeout(TIMEOUT, announcements.next())
+	tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -913,7 +985,7 @@ async fn noq_client_close_drains_migrated_predecessor() {
 		.await
 		.expect("server handshake failed");
 
-	tokio::time::timeout(TIMEOUT, announcements.next())
+	tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -1048,7 +1120,7 @@ async fn noq_client_close_keeps_predecessor_handover() {
 		.await
 		.expect("server handshake failed");
 
-	tokio::time::timeout(TIMEOUT, announcements.next())
+	tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -1277,4 +1349,15 @@ async fn window_test(scheme: &str) {
 #[tokio::test]
 async fn noq_windows() {
 	window_test("moqt").await;
+}
+
+/// The next route and whether it is active, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	loop {
+		return match announced.next().await? {
+			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+			moq_net::announce::Event::End(route) => Some((route, false)),
+			moq_net::announce::Event::Live => continue,
+		};
+	}
 }

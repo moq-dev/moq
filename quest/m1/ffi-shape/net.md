@@ -15,10 +15,20 @@ are renamed.
   in Rust, since Go gets none; Option fields keep additions additive. This
   also retires Kotlin `Moq.connect`'s twelve named parameters.
 - The client config carries the protocol versions to offer, as libmoq's
-  `moq_client_config.versions` already does (`rs/libmoq/src/api.rs`), so every
-  binding can pin or restrict versions. moq-ffi has no version setter today.
+  `moq_client_config.versions` already does (`rs/moq-c/src/client.rs:37`), so
+  every binding can pin or restrict versions. moq-ffi has no version setter
+  today.
+- The cpp line's client-config quest (`quest/m1/cpp/client-config.md` on
+  branch `quest/m1/cpp/README`) ships this same `MoqClientConfig` record
+  additively. Decided in the 2026-09-30 audit: this quest then only
+  removes the fallible setters, rather than designing the record
+  twice.
 - Objects that are only getters become records (`AnnounceUpdate` today).
   Handles with verbs (`Request`, `TrackRequest`, `GroupRequest`) stay objects.
+- An enum whose variants a wrapper must name spells each variant
+  `<Enum><Variant>` (`AnnounceEventStart`, `AnnounceEventEnd`) in Go,
+  Kotlin, Dart, and Python, whatever the generated name. Swift keeps its
+  generated `<Enum>.<variant>` cases, since it cannot alias a case.
 - `TrackProducer` drops `name`/`is_used`/`used`/`unused` for `demand()`.
 - The renames no additive change could make:
   - `subscribe` to `consume` on Python `Client`/`connect`, Kotlin

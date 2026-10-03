@@ -93,6 +93,8 @@ pub struct SinkSend {
 	/// [`poll_closed`](poll::SendStream::poll_closed) waits on, mirroring a peer that
 	/// acknowledges the FIN; an unfinished one parks like a peer that never answers.
 	finished: bool,
+	/// A finished stream still parks, like a peer that has not acknowledged the FIN.
+	unacked_fin: bool,
 }
 
 impl SinkSend {
@@ -102,6 +104,7 @@ impl SinkSend {
 			gate: None,
 			park: kio::Park::default(),
 			finished: false,
+			unacked_fin: false,
 		}
 	}
 
@@ -112,6 +115,7 @@ impl SinkSend {
 			gate: Some(gate),
 			park: kio::Park::default(),
 			finished: false,
+			unacked_fin: false,
 		}
 	}
 }
@@ -133,7 +137,8 @@ impl poll::SendStream for SinkSend {
 		Poll::Ready(Ok(buf.len()))
 	}
 
-	fn set_priority(&mut self, order: u8) {
+	fn set_priority(&mut self, order: i32) {
+		let order = u8::try_from(order).expect("moq-net sends u8 send orders");
 		self.log.priorities.lock().unwrap().push(order);
 	}
 
@@ -149,7 +154,7 @@ impl poll::SendStream for SinkSend {
 	}
 
 	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		match self.finished {
+		match self.finished && !self.unacked_fin {
 			true => Poll::Ready(Ok(())),
 			// Nothing to acknowledge yet, so park like a peer that never answers.
 			false => Poll::Pending,
@@ -175,13 +180,18 @@ impl poll::RecvStream for PendingRecv {
 	}
 }
 
-/// A reset with stream code 0, decoded as `Error::Stream(StreamError::Internal)`.
-#[derive(Debug, Clone, Default)]
-pub struct ResetError;
+/// A RESET_STREAM as the transport reports it. `Some(code)` decodes as
+/// `Error::Stream`; `None` is a code the transport could not place in the stream
+/// registry, which decodes as `Error::Transport`.
+#[derive(Debug, Clone, Copy)]
+pub struct ResetError(pub Option<u32>);
 
 impl std::fmt::Display for ResetError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(f, "stream reset by peer (code 0)")
+		match self.0 {
+			Some(code) => write!(f, "stream reset by peer (code {code})"),
+			None => write!(f, "stream reset by peer (unmapped code)"),
+		}
 	}
 }
 
@@ -193,27 +203,27 @@ impl web_transport_trait::Error for ResetError {
 	}
 
 	fn stream_error(&self) -> Option<u32> {
-		Some(0)
+		self.0
 	}
 }
 
 /// A stream that died before delivering a single byte: every read reports a
-/// code-0 RESET_STREAM ([`ResetError`]), the wire shape of a reset arriving
-/// ahead of any payload. QUIC does not order a reset behind the data, so this
-/// reaches an accept loop in normal operation, not just from a misbehaving peer.
-pub struct DeadRecv;
+/// RESET_STREAM ([`ResetError`]), the wire shape of a reset arriving ahead of any
+/// payload. QUIC does not order a reset behind the data, so this reaches an accept
+/// loop in normal operation, not just from a misbehaving peer.
+pub struct DeadRecv(ResetError);
 
 impl poll::RecvStream for DeadRecv {
 	type Error = ResetError;
 
 	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		Poll::Ready(Err(ResetError))
+		Poll::Ready(Err(self.0))
 	}
 
 	fn stop(&mut self, _code: u32) {}
 
 	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		Poll::Ready(Err(ResetError))
+		Poll::Ready(Err(self.0))
 	}
 }
 
@@ -226,6 +236,7 @@ pub struct DeadStreamSession {
 	pub log: Log,
 	unis: Arc<Mutex<usize>>,
 	bis: Arc<Mutex<usize>>,
+	reset: ResetError,
 }
 
 impl DeadStreamSession {
@@ -235,6 +246,7 @@ impl DeadStreamSession {
 			log: Log::default(),
 			unis: Arc::new(Mutex::new(count)),
 			bis: Arc::new(Mutex::new(0)),
+			reset: ResetError(Some(0)),
 		}
 	}
 
@@ -244,7 +256,15 @@ impl DeadStreamSession {
 			log: Log::default(),
 			unis: Arc::new(Mutex::new(0)),
 			bis: Arc::new(Mutex::new(count)),
+			reset: ResetError(Some(0)),
 		}
+	}
+
+	/// Reset with a code the transport cannot map, the way a raw QUIC moq-transport
+	/// peer's CANCELLED reads through the WebTransport code space.
+	pub fn unmapped(mut self) -> Self {
+		self.reset = ResetError(None);
+		self
 	}
 
 	fn take(counter: &Mutex<usize>) -> bool {
@@ -266,21 +286,21 @@ impl poll::Session for DeadStreamSession {
 
 	fn poll_accept_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
 		match Self::take(&self.unis) {
-			true => Poll::Ready(Ok(DeadRecv)),
+			true => Poll::Ready(Ok(DeadRecv(self.reset))),
 			false => Poll::Pending,
 		}
 	}
 
 	fn poll_accept_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		match Self::take(&self.bis) {
-			true => Poll::Ready(Ok((SinkSend::new(self.log.clone()), DeadRecv))),
+			true => Poll::Ready(Ok((SinkSend::new(self.log.clone()), DeadRecv(self.reset)))),
 			false => Poll::Pending,
 		}
 	}
 
 	fn poll_open_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
-		Poll::Ready(Ok((SinkSend::new(self.log.clone()), DeadRecv)))
+		Poll::Ready(Ok((SinkSend::new(self.log.clone()), DeadRecv(self.reset))))
 	}
 
 	fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
@@ -331,6 +351,8 @@ pub struct SinkSession {
 	/// Set by [`Self::gated_open_uni`] to withhold unidirectional stream credit.
 	uni_open_gate: Option<kio::Consumer<bool>>,
 	uni_open_park: kio::Park,
+	/// Set by [`Self::with_unacked_fin`].
+	unacked_fin: bool,
 	/// The ALPN to report, for a test that needs a specific negotiated version rather
 	/// than the SETUP-negotiated fallback an absent one selects.
 	protocol: Option<&'static str>,
@@ -344,14 +366,15 @@ impl SinkSession {
 	pub fn new(log: Log) -> Self {
 		Self {
 			log,
-			bi_gate: None,
-			accept_gate: None,
-			uni_gate: None,
-			uni_open_gate: None,
-			uni_open_park: kio::Park::default(),
-			protocol: None,
-			stats: Arc::new(Mutex::new(SinkStats::default())),
+			..Default::default()
 		}
+	}
+
+	/// Never acknowledge a unidirectional stream's FIN, like a congested peer, so a
+	/// finished group stays waiting on it.
+	pub fn with_unacked_fin(mut self) -> Self {
+		self.unacked_fin = true;
+		self
 	}
 
 	/// Report these connection statistics, as a real transport would.
@@ -378,14 +401,8 @@ impl SinkSession {
 	/// into the test.
 	pub fn gated_bi(gate: kio::Consumer<bool>) -> Self {
 		Self {
-			log: Log::default(),
 			bi_gate: Some(gate),
-			accept_gate: None,
-			uni_gate: None,
-			uni_open_gate: None,
-			uni_open_park: kio::Park::default(),
-			protocol: None,
-			stats: Arc::new(Mutex::new(SinkStats::default())),
+			..Default::default()
 		}
 	}
 
@@ -396,42 +413,24 @@ impl SinkSession {
 	/// a reply reaches the wire needs a session that hands out accepted streams.
 	pub fn accepted_bi(gate: kio::Consumer<bool>) -> Self {
 		Self {
-			log: Log::default(),
-			bi_gate: None,
 			accept_gate: Some(gate),
-			uni_gate: None,
-			uni_open_gate: None,
-			uni_open_park: kio::Park::default(),
-			protocol: None,
-			stats: Arc::new(Mutex::new(SinkStats::default())),
+			..Default::default()
 		}
 	}
 
 	/// Open unidirectional streams immediately, holding their writes until `gate` opens.
 	pub fn gated_uni(gate: kio::Consumer<bool>) -> Self {
 		Self {
-			log: Log::default(),
-			bi_gate: None,
-			accept_gate: None,
 			uni_gate: Some(gate),
-			uni_open_gate: None,
-			uni_open_park: kio::Park::default(),
-			protocol: None,
-			stats: Arc::new(Mutex::new(SinkStats::default())),
+			..Default::default()
 		}
 	}
 
 	/// Hold unidirectional stream opens until `gate` grants stream credit.
 	pub fn gated_open_uni(gate: kio::Consumer<bool>) -> Self {
 		Self {
-			log: Log::default(),
-			bi_gate: None,
-			accept_gate: None,
-			uni_gate: None,
 			uni_open_gate: Some(gate),
-			uni_open_park: kio::Park::default(),
-			protocol: None,
-			stats: Arc::new(Mutex::new(SinkStats::default())),
+			..Default::default()
 		}
 	}
 }
@@ -455,6 +454,7 @@ impl poll::Session for SinkSession {
 			gate: Some(gate),
 			park: kio::Park::default(),
 			finished: false,
+			unacked_fin: false,
 		};
 		Poll::Ready(Ok((send, PendingRecv)))
 	}
@@ -470,6 +470,7 @@ impl poll::Session for SinkSession {
 			gate: Some(gate),
 			park: kio::Park::default(),
 			finished: false,
+			unacked_fin: false,
 		};
 		Poll::Ready(Ok((send, PendingRecv)))
 	}
@@ -482,10 +483,12 @@ impl poll::Session for SinkSession {
 				Poll::Ready(Err(_)) | Poll::Pending => return Poll::Pending,
 			}
 		}
-		Poll::Ready(Ok(match &self.uni_gate {
+		let mut send = match &self.uni_gate {
 			Some(gate) => SinkSend::gated(self.log.clone(), gate.clone()),
 			None => SinkSend::new(self.log.clone()),
-		}))
+		};
+		send.unacked_fin = self.unacked_fin;
+		Poll::Ready(Ok(send))
 	}
 
 	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
@@ -556,10 +559,16 @@ impl web_transport_trait::Stats for SinkStats {
 /// EOF would exit, and a test usually wants to assert against the loop still running.
 pub struct ScriptedRecv {
 	script: Arc<Mutex<Vec<u8>>>,
-	/// Report EOF once the script is exhausted rather than parking, so a test can drive
-	/// a read loop all the way through its exit path. See [`ScriptedSession::eof`].
-	eof: bool,
+	/// How the peer's send side ends once the script runs out; `None` parks.
+	close: Arc<Mutex<Option<Close>>>,
 	log: Log,
+}
+
+/// How a scripted peer closes its send side. See [`ScriptedSession::close`].
+#[derive(Clone, Copy, Debug)]
+pub enum Close {
+	Fin,
+	Reset,
 }
 
 impl poll::RecvStream for ScriptedRecv {
@@ -579,8 +588,11 @@ impl poll::RecvStream for ScriptedRecv {
 		};
 
 		match take {
-			0 if self.eof => Poll::Ready(Ok(None)),
-			0 => Poll::Pending,
+			0 => match *self.close.lock().unwrap() {
+				Some(Close::Fin) => Poll::Ready(Ok(None)),
+				Some(Close::Reset) => Poll::Ready(Err(SinkError)),
+				None => Poll::Pending,
+			},
 			take => Poll::Ready(Ok(Some(take))),
 		}
 	}
@@ -603,8 +615,8 @@ impl poll::RecvStream for ScriptedRecv {
 #[derive(Clone)]
 pub struct ScriptedSession {
 	pub log: Log,
-	/// Whether an exhausted script reports EOF instead of parking.
-	eof: bool,
+	/// Shared with every stream, like `script`. See [`Self::close`].
+	close: Arc<Mutex<Option<Close>>>,
 	script: Arc<Mutex<Vec<u8>>>,
 	/// Per-stream scripts popped by `open_bi` in order; `None` shares `script`
 	/// across every stream.
@@ -623,7 +635,7 @@ impl ScriptedSession {
 	pub fn new(script: Vec<u8>) -> Self {
 		Self {
 			log: Log::default(),
-			eof: false,
+			close: Default::default(),
 			script: Arc::new(Mutex::new(script)),
 			queue: None,
 			open_gate: None,
@@ -650,10 +662,9 @@ impl ScriptedSession {
 	/// Parking is the right default for asserting that a loop is still running, but a
 	/// test for what a loop does on the way *out* needs the read to actually end.
 	pub fn eof(script: Vec<u8>) -> Self {
-		Self {
-			eof: true,
-			..Self::new(script)
-		}
+		let session = Self::new(script);
+		session.close(Close::Fin);
+		session
 	}
 
 	/// Each `open_bi` replays the next script in order. An exhausted queue (or an
@@ -668,16 +679,29 @@ impl ScriptedSession {
 	/// Like [`Self::per_stream`], but an exhausted script closes the stream instead of
 	/// parking, for a test that drives each stream to its end.
 	pub fn per_stream_eof(scripts: Vec<Vec<u8>>) -> Self {
-		Self {
-			eof: true,
-			..Self::per_stream(scripts)
-		}
+		let session = Self::per_stream(scripts);
+		session.close(Close::Fin);
+		session
+	}
+
+	/// Like [`Self::per_stream`], but an exhausted script resets the stream, as a peer
+	/// that fails after replying would.
+	pub fn per_stream_reset(scripts: Vec<Vec<u8>>) -> Self {
+		let session = Self::per_stream(scripts);
+		session.close(Close::Reset);
+		session
 	}
 
 	/// Append to the shared script: the peer sending more on a stream it already opened.
 	/// Nothing is woken, so the test re-polls the reader itself.
 	pub fn push(&self, bytes: &[u8]) {
 		self.script.lock().unwrap().extend_from_slice(bytes);
+	}
+
+	/// Close the peer's send side once the script runs out. Nothing is woken, so the
+	/// test re-polls the reader itself.
+	pub fn close(&self, close: Close) {
+		*self.close.lock().unwrap() = Some(close);
 	}
 
 	/// Answer each stream from `scripts`, but only once the gate opens: a peer that
@@ -701,7 +725,7 @@ impl poll::Session for ScriptedSession {
 		};
 		Poll::Ready(Ok(ScriptedRecv {
 			script: Arc::new(Mutex::new(script)),
-			eof: self.eof,
+			close: self.close.clone(),
 			log: self.log.clone(),
 		}))
 	}
@@ -732,7 +756,7 @@ impl poll::Session for ScriptedSession {
 			SinkSend::new(self.log.clone()),
 			ScriptedRecv {
 				script,
-				eof: self.eof,
+				close: self.close.clone(),
 				log: self.log.clone(),
 			},
 		)))

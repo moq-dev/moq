@@ -18,6 +18,7 @@ async function encode(msg: Goaway, version: Version): Promise<Uint8Array> {
 	const written: Uint8Array[] = [];
 	const writer = new Writer(
 		new WritableStream<Uint8Array>({ write: (chunk) => void written.push(new Uint8Array(chunk)) }),
+		version,
 	);
 	await msg.encode(writer, version);
 	writer.close();
@@ -26,7 +27,7 @@ async function encode(msg: Goaway, version: Version): Promise<Uint8Array> {
 }
 
 async function decode(bytes: Uint8Array, version: Version): Promise<Goaway> {
-	const reader = new Reader(undefined, bytes);
+	const reader = new Reader(undefined, bytes, version);
 	return await Goaway.decode(reader, version);
 }
 

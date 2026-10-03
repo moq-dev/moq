@@ -21,8 +21,8 @@ against the re-anchored clock for the full distance between the two timelines.
   audio decoder does (`js/watch/src/audio/decoder.ts:374-376`). WebCodecs
   `reset()` discards queued outputs, so stale frames never surface.
 - Keep the post-await guard. `reset()` cannot cancel a callback that already
-  holds a frame and is parked in `Promise.race([wait, effect.cancel])`
-  (`decoder.ts:332-334`); `sync.reset()` releases exactly that wait, and the
+  holds a frame and is parked in `effect.race(wait)`
+  (`decoder.ts:360`); `sync.reset()` releases exactly that wait, and the
   guard is what stops it writing `timestamp` and `frame` after the reset.
 - The regression needs a real WebCodecs decoder, so it lives in a browser
   harness rather than a bun unit test.

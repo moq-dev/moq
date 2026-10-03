@@ -1,13 +1,15 @@
-import { type Getter, Signal } from "@moq/signals";
+import { type Getter, Once, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import type { Established } from "../connection/established.ts";
+import type { Drain } from "../connection/goaway.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import { closeError, error, fromClose, StreamCode, StreamError, sessionCause } from "../error.ts";
+import { closeError, error, fromClose, ProtocolViolation, StreamCode, StreamError, sessionCause } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import type * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
+import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
 import { AnnounceRequest } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
@@ -48,6 +50,7 @@ export interface ConnectionProps {
  * @public
  */
 export class Connection implements Established {
+	#closing?: Promise<void>;
 	// The URL of the connection.
 	readonly url: URL;
 
@@ -94,6 +97,9 @@ export class Connection implements Established {
 	// Written by the Subscriber as PROBE messages arrive.
 	#probe = new Signal<Probe>({});
 
+	// The peer's GOAWAY. Lite carries no deadline, so only the URI is set.
+	#goaway = new Once<Drain>();
+
 	/**
 	 * The {@link Role} the peer advertised in its SETUP, for a server deciding whether the
 	 * peer's authorization grants the direction it intends to use.
@@ -116,6 +122,11 @@ export class Connection implements Established {
 		this.url = url;
 		this.#quic = quic;
 		this.#session = session;
+		// The session stream was opened at the SETUP exchange's version; the rest of it speaks this one.
+		if (session) {
+			session.reader.version = version;
+			session.writer.version = version;
+		}
 		this.version = versionName(version);
 		this.#version = version;
 		this.transport = transportOf(quic);
@@ -126,15 +137,21 @@ export class Connection implements Established {
 		this.hop = randomHop();
 		this.#publisher = new Publisher(this.#quic, this.#version, this.hop, publish);
 		this.#subscriber = new Subscriber(this.#quic, this.#version, this.hop, this.#probe, this.#peerSetup);
-		registerWire(this, { consume: (path) => this.#subscriber.consume(path) });
+		registerWire(this, { consume: (path) => this.#subscriber.consume(path), goaway: this.#goaway });
 
 		void this.#run();
 	}
 
-	/**
-	 * Closes the connection.
-	 */
-	close() {
+	/** Withdraw announcements and wait up to one second for delivery before closing. */
+	close(): Promise<void> {
+		this.#closing ??= withTimeout(this.#publisher.withdraw(), 1000, "session close timed out").finally(() =>
+			this.abort(),
+		);
+		return this.#closing;
+	}
+
+	/** End the session immediately without waiting for delivery. */
+	abort(): void {
 		this.#publisher.close();
 		this.#subscriber.close();
 
@@ -172,7 +189,7 @@ export class Connection implements Established {
 			// The session died under every track it was receiving, so they end with its
 			// error. A deliberate close() already ended them cleanly, which makes this a no-op.
 			this.#subscriber.close(fatal ?? (await closeError(this.#quic)));
-			this.close();
+			this.abort();
 		}
 	}
 
@@ -204,7 +221,7 @@ export class Connection implements Established {
 	// our session identity so the peer can filter
 	// reflected announcements (lite-06 removed ANNOUNCE_REQUEST's exclude_hop for it).
 	async #sendSetup(): Promise<void> {
-		const writer = await Writer.open(this.#quic);
+		const writer = await Writer.open(this.#quic, { version: this.#version });
 		try {
 			await writer.u53(DataType.Setup);
 			const probe = await probeLevel(this.#quic, this.#version);
@@ -218,12 +235,16 @@ export class Connection implements Established {
 
 	async #runBidis() {
 		for (;;) {
-			const stream = await Stream.accept(this.#quic);
+			const stream = await Stream.accept(this.#quic, this.#version);
 			if (!stream) break;
 
 			this.#runBidi(stream)
 				.catch((err: unknown) => {
 					stream.writer.reset(err);
+					// A protocol violation on one stream is the peer breaking the session.
+					// Resetting that stream leaves it free to repeat the violation; a duplicate
+					// GOAWAY is the one this dispatcher raises.
+					if (err instanceof ProtocolViolation) this.abort();
 				})
 				.finally(() => {
 					stream.writer.close();
@@ -252,14 +273,16 @@ export class Connection implements Established {
 			await this.#publisher.runProbe(stream);
 		} else if (typ === StreamId.Goaway) {
 			const msg = await Goaway.decode(stream.reader, this.#version);
-			console.info("received goaway:", msg.uri);
+			// A peer sends at most one; a second is a protocol violation.
+			if (this.#goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
+			this.#goaway.set({ uri: msg.uri });
 		} else {
 			throw new Error(`unknown stream type: ${typ.toString()}`);
 		}
 	}
 
 	async #runUnis() {
-		const readers = new Readers(this.#quic);
+		const readers = new Readers(this.#quic, this.#version);
 
 		for (;;) {
 			const stream = await readers.next();

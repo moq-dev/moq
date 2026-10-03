@@ -15,7 +15,7 @@ let checksum = 0;
 const formats = [
 	{
 		name: "quic",
-		version: undefined,
+		version: Version.DRAFT_16,
 		encode: Varint.encodeTo,
 		values: [2 ** 6 - 1, 2 ** 14 - 1, 2 ** 30 - 1, Number.MAX_SAFE_INTEGER],
 	},

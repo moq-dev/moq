@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.9](https://github.com/moq-dev/moq/compare/moq-hls-v0.5.8...moq-hls-v0.5.9) - 2026-09-30
+
+### Fixed
+
+- *(hls,auth)* redact credentials from URLs in errors ([#4536](https://github.com/moq-dev/moq/pull/4536))
+
 ## [0.5.8](https://github.com/moq-dev/moq/compare/moq-hls-v0.5.7...moq-hls-v0.5.8) - 2026-09-27
 
 ### Other

@@ -7,6 +7,7 @@ import { Subscribe, SubscribeOk } from "../src/ietf/subscribe.ts";
 import { Subscriber as IetfSubscriber } from "../src/ietf/subscriber.ts";
 import { ALPN, Version as IetfVersion } from "../src/ietf/version.ts";
 import { readFrames } from "../src/lite/group.ts";
+import { Version as LiteVersion } from "../src/lite/version.ts";
 import { createMockTransportPair } from "../src/mock.ts";
 import * as Path from "../src/path.ts";
 import { Reader, Stream } from "../src/stream.ts";
@@ -48,7 +49,9 @@ const lite: Protocol = {
 	async subscribe() {
 		const open: Open = (stream) => {
 			const producer = new Producer(0);
-			const done = readFrames(new Reader(stream), producer, 1_000_000).then(() => producer.close());
+			const done = readFrames(new Reader(stream, undefined, LiteVersion.DRAFT_06), producer, 1_000_000).then(() =>
+				producer.close(),
+			);
 			return { group: Promise.resolve(producer.consume()), done };
 		};
 		return { open, close: () => {} };

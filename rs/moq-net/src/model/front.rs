@@ -138,7 +138,8 @@ pub(super) enum Identity {
 	Local,
 	/// The serving route's first hop was absent or [`Hop::UNKNOWN`], which
 	/// identifies nobody: the front cannot resume through any other route, so
-	/// its source ending, or `route` leaving the table, ends it.
+	/// its source ending, `route` leaving the table, or `route` gaining a first
+	/// hop ends it.
 	Anonymous { route: u64 },
 	/// The first hop of the serving route. Routes sharing it are the same
 	/// origin reached another way and safe to resume through.
@@ -154,7 +155,8 @@ pub(super) enum Pin {
 	Local,
 	/// Only routes originated by this first hop.
 	Publisher(Hop),
-	/// Only this route: the front never fails over.
+	/// Only this route, while its publisher stays unknown: the front never fails
+	/// over, and an update naming a publisher ends it.
 	Route(u64),
 }
 
@@ -1112,7 +1114,7 @@ mod tests {
 			result: Ok(200),
 		});
 		let other = track::Info {
-			max_age: Duration::from_secs(1),
+			max_age: Some(Duration::from_secs(1)),
 			..track::Info::default()
 		};
 		assert_actions(

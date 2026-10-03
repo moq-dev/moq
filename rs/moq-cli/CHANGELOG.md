@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0](https://github.com/moq-dev/moq/compare/moq-cli-v0.12.8...moq-cli-v0.13.0) - 2026-09-30
+
+### Added
+
+- *(srt)* select a program of a multi-program feed ([#4569](https://github.com/moq-dev/moq/pull/4569))
+- *(cli)* linger export ts across a broadcast that leaves and returns ([#4504](https://github.com/moq-dev/moq/pull/4504))
+- *(ts)* import one program of a multiplex, or each as its own broadcast ([#4505](https://github.com/moq-dev/moq/pull/4505))
+- *(srt)* log the TS importer's per-stream counters on ingest ([#4506](https://github.com/moq-dev/moq/pull/4506))
+- *(mux)* report every TS elementary stream's access units and quiet time ([#4502](https://github.com/moq-dev/moq/pull/4502))
+- *(net)* drain queued stream data before a graceful close ([#4430](https://github.com/moq-dev/moq/pull/4430))
+
+### Fixed
+
+- *(cli)* refuse every MoQ-side flag a verb never reads ([#4419](https://github.com/moq-dev/moq/pull/4419))
+- *(cli)* refuse a client CA under --auth-public on a listener ([#4364](https://github.com/moq-dev/moq/pull/4364))
+- *(cli)* schedule play decode by the earliest owed picture ([#4374](https://github.com/moq-dev/moq/pull/4374))
+- *(auth)* [**breaking**] restore 0.14 auth parity ([#4319](https://github.com/moq-dev/moq/pull/4319))
+
+### Other
+
+- flush quiet audio in the documented ffmpeg MPEG-TS line ([#4514](https://github.com/moq-dev/moq/pull/4514))
+
 ## [0.12.8](https://github.com/moq-dev/moq/compare/moq-cli-v0.12.7...moq-cli-v0.12.8) - 2026-09-27
 
 ### Fixed

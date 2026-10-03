@@ -73,7 +73,9 @@ pub enum Error {
 
 impl From<reqwest::Error> for Error {
 	fn from(err: reqwest::Error) -> Self {
-		Self::Http(std::sync::Arc::new(err))
+		// reqwest prints the full URL in its error, and a dialed URL routinely
+		// carries the auth token in its query, or userinfo.
+		Self::Http(std::sync::Arc::new(err.without_url()))
 	}
 }
 

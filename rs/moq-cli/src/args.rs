@@ -2,7 +2,8 @@
 //!
 //! Grammar: `moq <MoQ side> <stage> [-- <stage>]...`, where a stage is
 //! `<import|export> <endpoint> [endpoint opts]`, plus `moq <MoQ side> play` for
-//! native playback and `moq <MoQ side> fetch <track>` to read one group.
+//! native playback, `moq <MoQ side> ls [prefix]` to list what is live, and
+//! `moq <MoQ side> fetch <track>` to read one group.
 //!
 //! - The MoQ side (`--connect`, the `--listen*` transport binds, `--cluster-lan`,
 //!   and `--cluster-connect` / `--cluster-connect-api`; all optional, at least
@@ -188,12 +189,12 @@ impl Invocation {
 		Ok(())
 	}
 
-	/// Refuse every MoQ-side flag but the dial, on a verb that only reads from a
-	/// relay: a listener, cluster, or auth policy it would never serve is not
-	/// silently ignored. The dial is `--connect*`, the `--quic-*` and `--iroh-*`
-	/// settings it dials with, and `--broadcast`. Answered from the command line,
-	/// like [`Self::reject`].
-	pub fn dial_only(&self, command: &str) -> anyhow::Result<()> {
+	/// Refuse every MoQ-side flag but the dial and those in `allow`, on a verb that
+	/// only reads from a relay: a listener, cluster, or auth policy it would never
+	/// serve is not silently ignored. The dial is `--connect*` and the `--quic-*` and
+	/// `--iroh-*` settings it dials with. Answered from the command line, like
+	/// [`Self::reject`].
+	pub fn dial_only(&self, command: &str, allow: &[&str]) -> anyhow::Result<()> {
 		use usage::spec::CommandArgs;
 
 		fn owns<T: CommandArgs>(flag: &usage::Flag<'_>) -> bool {
@@ -206,7 +207,9 @@ impl Invocation {
 			}
 			owns::<moq_tokio::connect::Config>(flag)
 				|| owns::<moq_tokio::quic::Config>(flag)
-				|| flag.longs.contains(&"broadcast")
+				|| allow
+					.iter()
+					.any(|name| name.strip_prefix("--").is_some_and(|name| flag.longs.contains(&name)))
 		};
 
 		if let Some(flags) = Self::names(self.given.iter().filter(|flag| !dials(flag))) {
@@ -282,6 +285,17 @@ impl Invocation {
 	/// Called before anything binds a port or dials out, so a refused invocation has
 	/// no side effects to unwind.
 	pub fn validate(&self) -> anyhow::Result<()> {
+		for command in &self.stages {
+			if let Command::Export(export) = command
+				&& let Some(stdout) = export.sink.stdout()
+			{
+				anyhow::ensure!(
+					stdout.linger.is_zero() || matches!(stdout.format, SubscribeFormat::Ts),
+					"--linger needs an output that can mark a restart, and only `export ts` can"
+				);
+			}
+		}
+
 		// One stage is what the CLI has always run, so nothing below can bite.
 		if self.stages.len() == 1 {
 			return Ok(());
@@ -289,7 +303,7 @@ impl Invocation {
 
 		// Only `import` and `export` share an Origin. The rest own the process: `play`
 		// drives a window on the main thread, `transcode` builds its own Origin, `fetch`
-		// opens its own session, and `auth` / `devices` never touch the network at all.
+		// and `ls` open their own session, and `auth` / `devices` never touch the network at all.
 		if let Some(command) = self.stages.iter().find(|command| !command.is_stageable()) {
 			anyhow::bail!(
 				"`{}` must be the only verb; it can't share a process with another `--` stage",
@@ -573,6 +587,8 @@ pub enum Command {
 	/// The released spelling of [`Self::Export`].
 	#[usage(hide = true)]
 	Subscribe(Export),
+	/// List the broadcasts live on a relay.
+	Ls(crate::ls::Args),
 	/// Write one group of a track to stdout.
 	Fetch(crate::fetch::Args),
 	/// Play a broadcast in a native window and speaker.
@@ -632,6 +648,7 @@ impl Command {
 		match self {
 			Self::Import(_) | Self::Publish(_) => "import",
 			Self::Export(_) | Self::Subscribe(_) => "export",
+			Self::Ls(_) => "ls",
 			Self::Fetch(_) => "fetch",
 			#[cfg(feature = "play")]
 			Self::Play(_) => "play",
@@ -728,7 +745,7 @@ pub enum ImportSource {
 	/// Fragmented MP4 / CMAF from stdin.
 	Fmp4,
 	/// MPEG-TS from stdin.
-	Ts,
+	Ts(TsImport),
 	/// FLV / RTMP container from stdin.
 	Flv,
 	/// Pull a remote HLS / LL-HLS playlist (http/https URL or local file) into MoQ.
@@ -736,7 +753,7 @@ pub enum ImportSource {
 	/// RTMP: pull a remote play (`--connect`) or accept incoming publishes (`--listen`).
 	Rtmp(crate::rtmp::Args),
 	/// SRT: pull a remote stream (`--connect`) or accept incoming publishes (`--listen`).
-	Srt(crate::srt::Args),
+	Srt(crate::srt::ImportArgs),
 	/// WebRTC: WHEP client pulling a remote (`--connect`) or WHIP server accepting publishes (`--listen`).
 	Rtc(crate::rtc::Args),
 	/// Capture a local source (camera, display, window, app, microphone) and
@@ -751,10 +768,57 @@ impl ImportSource {
 		Some(match self {
 			Self::Avc3 => PublishFormat::Avc3,
 			Self::Fmp4 => PublishFormat::Fmp4,
-			Self::Ts => PublishFormat::Ts,
+			Self::Ts(args) => PublishFormat::Ts {
+				program: args.program.and_then(TsProgram::number),
+			},
 			Self::Flv => PublishFormat::Flv,
 			_ => return None,
 		})
+	}
+}
+
+/// The MPEG-TS stdin container: which programs of a multiplex to publish.
+#[derive(usage::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+pub struct TsImport {
+	/// Import one program of a multi-program stream, by its PAT program number, or `all` to
+	/// publish each program as its own broadcast (`event.hang` becomes `event/1.hang`,
+	/// `event/2.hang`, ...). Without it, a stream carrying more than one program is refused.
+	#[usage(long)]
+	pub program: Option<TsProgram>,
+}
+
+/// An `import ts --program` or `import srt --program` value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TsProgram {
+	/// The program with this PAT program number.
+	One(u16),
+	/// Every program, each as its own broadcast.
+	All,
+}
+
+impl TsProgram {
+	/// The single program selected, `None` for `all`.
+	fn number(self) -> Option<u16> {
+		match self {
+			Self::One(program) => Some(program),
+			Self::All => None,
+		}
+	}
+}
+
+impl std::str::FromStr for TsProgram {
+	type Err = String;
+
+	fn from_str(arg: &str) -> Result<Self, Self::Err> {
+		match arg {
+			"all" => Ok(Self::All),
+			_ => match arg.parse() {
+				Ok(0) => Err("program 0 is the network PID, not a program".to_string()),
+				Ok(program) => Ok(Self::One(program)),
+				Err(_) => Err(format!("expected a program number or `all`, got `{arg}`")),
+			},
+		}
 	}
 }
 
@@ -846,6 +910,7 @@ impl ExportSink {
 		let container = |format, container: &Container| Stdout {
 			format,
 			max_age: container.max_age.into_std(),
+			linger: container.linger.into_std(),
 			fragment_duration: None,
 			mux_rate: None,
 		};
@@ -874,6 +939,7 @@ impl ExportSink {
 pub struct Stdout {
 	pub format: SubscribeFormat,
 	pub max_age: Duration,
+	pub linger: Duration,
 	pub fragment_duration: Option<Duration>,
 	pub mux_rate: Option<u64>,
 }
@@ -885,6 +951,11 @@ pub struct Container {
 	/// How stale a group may get before it is skipped (e.g. `500ms`, `1s`).
 	#[usage(long, default = "500ms")]
 	pub max_age: crate::duration::Duration,
+
+	/// How long to wait for the broadcast to come back once it ends (e.g. `10s`).
+	/// `ts` only; the output stops while it is gone and resumes flagged as a break.
+	#[usage(long, default = "0s")]
+	pub linger: crate::duration::Duration,
 
 	/// The released spelling of [`Self::max_age`].
 	#[usage(long = "latency-max", hide = true)]
@@ -954,6 +1025,62 @@ mod tests {
 		assert_eq!(cli.stages.len(), 1);
 		assert_eq!(cli.stages[0].name(), "import");
 		assert!(cli.validate().is_ok());
+	}
+
+	/// Only TS can mark where a returned broadcast restarts, so only `export ts` may linger.
+	#[test]
+	fn linger_is_ts_only() {
+		let parse = |format: &str, linger: &str| {
+			Invocation::try_parse_from(["moq", "--connect", "http://relay", "export", format, "--linger", linger])
+				.unwrap()
+		};
+		assert!(parse("ts", "10s").validate().is_ok());
+		for format in ["fmp4", "mkv", "flv", "h264", "h265"] {
+			let err = parse(format, "10s").validate().unwrap_err().to_string();
+			assert!(err.contains("--linger"), "{format}: {err}");
+			assert!(
+				parse(format, "0s").validate().is_ok(),
+				"{format}: no linger is always fine"
+			);
+		}
+	}
+
+	#[test]
+	fn import_ts_takes_a_program_number_or_all() {
+		// `None` when the command line is refused.
+		let program = |value: &str| {
+			let cli = Invocation::try_parse_from(["moq", "import", "ts", "--program", value]).ok()?;
+			let Command::Import(import) = &cli.stages[0] else {
+				panic!("an import stage");
+			};
+			let ImportSource::Ts(args) = &import.source else {
+				panic!("an import ts stage");
+			};
+			Some(args.program)
+		};
+		assert_eq!(program("2"), Some(Some(TsProgram::One(2))));
+		assert_eq!(program("all"), Some(Some(TsProgram::All)));
+		assert_eq!(program("0"), None, "0 is the network PID");
+		assert_eq!(program("two"), None);
+	}
+
+	/// `import srt` takes the same `--program` as `import ts`; `export srt` has no program to pick.
+	#[test]
+	fn import_srt_takes_a_program() {
+		let cli =
+			Invocation::try_parse_from(["moq", "import", "srt", "--listen", "[::]:9000", "--program", "all"]).unwrap();
+		let Command::Import(import) = &cli.stages[0] else {
+			panic!("an import stage");
+		};
+		let ImportSource::Srt(args) = &import.source else {
+			panic!("an import srt stage");
+		};
+		assert_eq!(args.program(), Some(moq_srt::Program::All));
+		assert!(args.endpoint.listen.is_some());
+
+		assert!(
+			Invocation::try_parse_from(["moq", "export", "srt", "--listen", "[::]:9000", "--program", "2"]).is_err()
+		);
 	}
 
 	/// A released spelling is refused, and the error names what to write instead.
@@ -1481,9 +1608,11 @@ mod tests {
 			assert!(err.contains(reported), "{err}");
 		}
 
-		let cli = Invocation::try_parse_from(["moq", "--cluster-mesh", "auth", "generate"]).unwrap();
-		let err = cli.reject("auth").unwrap_err().to_string();
-		assert!(err.contains("--cluster-mesh"), "{err}");
+		// Gossip discovery is removed, so its flag is refused for every verb.
+		let Err(err) = Invocation::try_parse_from(["moq", "--cluster-mesh", "auth", "generate"]) else {
+			panic!("--cluster-mesh must be refused");
+		};
+		assert!(err.to_string().contains("--cluster-mesh"), "{err}");
 
 		#[cfg(unix)]
 		{
@@ -1573,14 +1702,14 @@ mod tests {
 
 		for flag in accept {
 			let err = parse(flag, &["fetch", "data"])
-				.dial_only("fetch")
+				.dial_only("fetch", &["--broadcast"])
 				.unwrap_err()
 				.to_string();
 			assert!(err.contains(flag[0]), "{flag:?}: {err}");
 		}
 		for flag in dial {
 			parse(flag, &["fetch", "data"])
-				.dial_only("fetch")
+				.dial_only("fetch", &["--broadcast"])
 				.unwrap_or_else(|err| panic!("{flag:?}: {err}"));
 		}
 	}

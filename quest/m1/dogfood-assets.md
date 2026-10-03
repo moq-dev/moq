@@ -29,4 +29,4 @@ Guidance:
 
 ## Required
 
-- A `@moq/watch` and `@moq/publish` release that ships `assets()`
+- [A watch and publish release ships assets()](/quest/m1/assets-release.md) - the hosted files exist on npm to copy

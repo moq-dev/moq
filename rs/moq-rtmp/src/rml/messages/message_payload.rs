@@ -137,10 +137,10 @@ impl MessagePayload {
 #[cfg(test)]
 mod tests {
 	use super::{MessagePayload, RtmpMessage};
+	use crate::rml::amf0::Amf0Value;
 	use crate::rml::messages::{PeerBandwidthLimitType, UserControlEventType};
 	use crate::rml::time::RtmpTimestamp;
 	use bytes::{BufMut, Bytes, BytesMut};
-	use rml_amf0::Amf0Value;
 
 	#[test]
 	fn can_get_payload_from_abort_message() {

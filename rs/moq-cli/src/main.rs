@@ -12,6 +12,7 @@ mod devices;
 mod duration;
 mod fetch;
 mod hls;
+mod ls;
 mod moq;
 mod play;
 mod publish;
@@ -25,7 +26,7 @@ mod test_env;
 mod transcode;
 mod web;
 
-use args::{Command, Export, ExportSink, Import, ImportSource, Invocation, MoqSide};
+use args::{Command, Export, ExportSink, Import, ImportSource, Invocation, MoqSide, TsImport, TsProgram};
 use hang::moq_net;
 use publish::Publish;
 use subscribe::{Subscribe, SubscribeArgs};
@@ -317,10 +318,12 @@ async fn main() -> anyhow::Result<()> {
 		}
 	}
 
-	// `fetch` only dials, so an ambient listener or cluster setting it never uses
-	// is not validated either.
+	// `fetch` and `ls` only dial, so an ambient listener or cluster setting they
+	// never use is not validated either.
 	if let [Command::Fetch(_)] = stages.as_slice() {
-		cli.dial_only("fetch")?;
+		cli.dial_only("fetch", &["--broadcast"])?;
+	} else if let [Command::Ls(_)] = stages.as_slice() {
+		cli.dial_only("ls", &[])?;
 	} else {
 		cli.moq.validate()?;
 	}
@@ -342,6 +345,7 @@ async fn main() -> anyhow::Result<()> {
 		if stages.len() == 1 && !stages[0].is_stageable() {
 			match stages.remove(0) {
 				Command::Fetch(args) => return fetch::run(cli.moq, args, net).await,
+				Command::Ls(args) => return ls::run(cli.moq, args, net).await,
 				#[cfg(feature = "play")]
 				Command::Play(args) => return run_play(cli.moq, args, net).await,
 				#[cfg(feature = "transcode")]
@@ -631,11 +635,19 @@ fn spawn_import(
 
 	if let Some(format) = import.source.stdin_format() {
 		warn_if_missing_format(&name);
-		let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 		let config = moq_mux::catalog::Config::default()
 			.with_max_age(max_age)
 			.with_bandwidth(bandwidth.clone());
-		let publish = Publish::new(broadcast, &format, config)?;
+		let publish = if let ImportSource::Ts(TsImport {
+			program: Some(TsProgram::All),
+		}) = &import.source
+		{
+			let name = require_broadcast(name, "import ts --program all")?;
+			Publish::ts_programs(origin.clone(), name, config)
+		} else {
+			let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
+			Publish::new(broadcast, &format, config)?
+		};
 		publish.announce()?;
 		local = Some(publish);
 	} else {
@@ -653,11 +665,13 @@ fn spawn_import(
 				}
 			}
 			ImportSource::Srt(srt) => {
+				let program = srt.program();
+				let srt = srt.endpoint;
 				if let Some(addr) = srt.listen {
 					let name = require_broadcast(name, "import srt --listen")?;
-					tasks.spawn(srt::listen_import(target(name), addr, srt.latency.into_std()));
+					tasks.spawn(srt::listen_import(target(name), addr, srt.latency.into_std(), program));
 				} else if let Some(url) = srt.connect {
-					tasks.spawn(srt::connect_import(target(name), url, srt.latency.into_std()));
+					tasks.spawn(srt::connect_import(target(name), url, srt.latency.into_std(), program));
 				}
 			}
 			ImportSource::Rtc(rtc) => {
@@ -708,6 +722,7 @@ fn spawn_export(
 		let args = SubscribeArgs {
 			format: stdout.format,
 			max_age: stdout.max_age,
+			linger: stdout.linger,
 			fragment_duration: stdout.fragment_duration,
 			mux_rate: stdout.mux_rate,
 			catalog: export.catalog_format,

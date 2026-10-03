@@ -1,5 +1,6 @@
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import type * as broadcast from "../broadcast.ts";
+import { Withdrawal } from "../connection/withdrawal.ts";
 import { error, NotFound, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import { Cost, type Hop, type Route, routesEqual } from "../hop.ts";
@@ -323,6 +324,7 @@ function positionCursor(track: track.Subscriber, version: Version, startGroup: n
  * @internal
  */
 export class Publisher {
+	#withdrawal = new Withdrawal();
 	// The version of the connection.
 	readonly version: Version;
 
@@ -384,7 +386,12 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async runAnnounce(msg: AnnounceRequest, stream: Stream) {
+	runAnnounce(msg: AnnounceRequest, stream: Stream): Promise<void> {
+		return this.#withdrawal.track(this.#runAnnounce(msg, stream));
+	}
+
+	async #runAnnounce(msg: AnnounceRequest, stream: Stream) {
+		if (this.#withdrawal.closing.peek()) return;
 		console.debug(`announce: prefix=${msg.prefix}`);
 
 		// Keyed by suffix, valued by identity plus route, so a republish diffs as
@@ -498,9 +505,9 @@ export class Publisher {
 			}
 
 			for (;;) {
-				const advertised = await race([changed, stream.reader.closed]);
+				const advertised = await race([changed, stream.reader.closed, this.#withdrawal.closing]);
 				dispose();
-				if (!advertised) break;
+				if (!advertised || advertised === true) break;
 
 				// Re-arm before reading, so an advertise that lands while we write is not lost.
 				changed = new Promise<Advertisements | undefined>((resolve) => {
@@ -529,6 +536,11 @@ export class Publisher {
 				}
 
 				active = updated;
+			}
+			if (this.#withdrawal.closing.peek()) {
+				for (const suffix of active.keys()) await retract(suffix);
+				stream.close();
+				await stream.writer.closed;
 			}
 		} finally {
 			dispose();
@@ -974,7 +986,7 @@ export class Publisher {
 
 				// Convert the timestamp to the track's advertised timescale, matching #serveGroup.
 				const ts = Math.round(datagram.timestamp.as(timescale));
-				const body = new DatagramMessage(sub, datagram.sequence, ts, datagram.payload).encode();
+				const body = new DatagramMessage(sub, datagram.sequence, ts, datagram.payload).encode(this.version);
 
 				// No group fallback: drop anything that doesn't fit a single datagram.
 				if (body.byteLength > maxSize) {
@@ -1038,6 +1050,7 @@ export class Publisher {
 			// in the order we asked, which is oldest-first, exactly backwards for live media.
 			// Failing here drops the group and lets the next one compete for the next slot.
 			const stream = await Writer.tryOpen(this.#quic, {
+				version: this.version,
 				sendOrder: priority.rank(group.sequence),
 				cancel: unsubscribed,
 				waitUntilAvailable: false,
@@ -1211,6 +1224,10 @@ export class Publisher {
 			console.warn("probe stream error", err);
 			stream.close();
 		}
+	}
+
+	withdraw(): Promise<void> {
+		return this.#withdrawal.close();
 	}
 
 	close() {

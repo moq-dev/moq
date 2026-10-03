@@ -49,6 +49,11 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 
 	/// Accumulated unparsed input.
 	buffer: BytesMut,
+	/// Bytes already dropped from the front of `buffer`, so a tag's offset in it is absolute.
+	consumed: u64,
+	/// Where the latest handled tag starts, as an absolute offset. A drain pass restarts from a
+	/// replay point, so any tag starting at or before it was already handled.
+	handled: Option<u64>,
 	/// Whether the Tracks element has been processed.
 	tracks_seen: bool,
 
@@ -82,9 +87,6 @@ struct MkvTrack {
 	kind: TrackKind,
 	track: Media,
 	group: Option<moq_net::group::Producer>,
-	/// Highest block timestamp (Matroska ticks: cluster_ts + block_relative) already emitted.
-	/// Used to dedup re-parsed blocks across decode() calls.
-	last_emitted_ticks: Option<i64>,
 }
 
 enum Media {
@@ -138,6 +140,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			container,
 			initial_reservation: Some(reserved),
 			buffer: BytesMut::new(),
+			consumed: 0,
+			handled: None,
 			tracks_seen: false,
 			timestamp_scale_ns: DEFAULT_TIMESTAMP_SCALE_NS,
 			cluster_timestamp: 0,
@@ -168,9 +172,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Run the iterator over the buffered bytes, processing every fully-parsed top-level tag.
 	///
-	/// On each call, the iterator restarts from the beginning of the retained buffer. Tag
-	/// handling is idempotent (state flags for header/tracks, per-track timestamp dedup for
-	/// blocks). After parsing stops (UnexpectedEOF or end of buffer), bytes up to the start
+	/// On each call, the iterator restarts from the beginning of the retained buffer, so tags
+	/// already handled are skipped by their absolute offset. After parsing stops (UnexpectedEOF or end of buffer), bytes up to the start
 	/// of the most-recently emitted top-level tag are discarded so memory does not grow
 	/// unboundedly.
 	fn drain(&mut self) -> Result<()> {
@@ -195,8 +198,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// We restart the iterator from the beginning of the retained buffer on every
 		// drain pass. Once data is replayed mid-Segment, ebml-iterable would otherwise
 		// reject Segment children (Cluster, Tracks, etc.) as appearing without their
-		// parent. Allowing hierarchy problems plus our own dedup logic on emitted
-		// blocks gives us idempotent streaming behavior.
+		// parent. Allowing hierarchy problems plus skipping tags by offset gives us
+		// idempotent streaming behavior.
 		iter.allow_errors(&[AllowableErrors::HierarchyProblems]);
 		// Don't synthesize Master::End tags when the buffer ends mid-element.
 		iter.emit_master_end_when_eof(false);
@@ -207,6 +210,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			match iter.next() {
 				Some(Ok(tag)) => {
 					last_offset = iter.last_emitted_tag_offset();
+					// A Master::End reports its master's start, so it is skipped here too.
+					let start = self.consumed + last_offset as u64;
+					if self.handled.is_some_and(|handled| start <= handled) {
+						continue;
+					}
+					self.handled = Some(start);
 					self.handle_tag(tag)?;
 				}
 				Some(Err(TagIteratorError::UnexpectedEOF { .. })) => break,
@@ -227,6 +236,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// If we never emitted anything (very first call with too few bytes), keep everything.
 		if last_offset > 0 {
 			self.buffer.advance(last_offset);
+			self.consumed += last_offset as u64;
 		}
 
 		Ok(())
@@ -248,9 +258,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					}
 				}
 			}
-			// Idempotency: if the parser restarts mid-stream and `last_offset`
-			// happens to point at Tracks (i.e. Tracks was the last fully-emitted
-			// tag), we'll see it again. Process once.
+			// A second Tracks element would redeclare a published track set.
 			MatroskaSpec::Tracks(Master::Full(children)) if !self.tracks_seen => {
 				self.handle_tracks(children)?;
 				self.tracks_seen = true;
@@ -374,7 +382,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				kind,
 				track: media,
 				group: None,
-				last_emitted_ticks: None,
 			},
 		);
 
@@ -419,18 +426,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Err(Error::NegativeBlockTimestamp.into());
 		}
 
-		// Skip blocks we've already emitted on a previous decode() pass (buffer replay).
-		if let Some(last) = track.last_emitted_ticks
-			&& block_ticks <= last
-		{
-			return Ok(());
-		}
-		track.last_emitted_ticks = Some(block_ticks);
-
 		let pts_ns = (block_ticks as u64)
 			.checked_mul(self.timestamp_scale_ns)
 			.ok_or(Error::TimestampOverflow)?;
 		let timestamp = Timestamp::from_nanos(pts_ns)?;
+		// The first block is live on arrival.
+		self.catalog.anchor(timestamp)?;
 
 		// Audio tracks: always treat as keyframes (matches fmp4 behavior).
 		let keyframe = matches!(track.kind, TrackKind::Audio) || keyframe;
@@ -571,20 +572,18 @@ fn build_audio_config(
 
 	match codec_id {
 		"A_OPUS" => {
-			// Codec private is OpusHead. If present, it's authoritative for rate/channels.
-			let (cfg_rate, cfg_channels) = if let Some(priv_data) = codec_private {
-				let mut cursor = priv_data.clone();
-				let cfg = crate::codec::opus::Config::parse(&mut cursor)?;
-				(cfg.sample_rate, cfg.channel_count)
-			} else {
-				(sample_rate, channels)
+			// The catalog describes the decoder's output: Opus always decodes at 48 kHz, whatever the
+			// informational input rate in the OpusHead or SamplingFrequency claims.
+			let mut config = match codec_private {
+				Some(head) => {
+					let mut config = crate::codec::opus::config(head)?;
+					if config.channel_count == 0 {
+						config.channel_count = channels;
+					}
+					config
+				}
+				None => AudioConfig::new(AudioCodec::Opus, 48_000, channels),
 			};
-
-			let mut config = AudioConfig::new(
-				AudioCodec::Opus,
-				if cfg_rate > 0 { cfg_rate } else { sample_rate },
-				if cfg_channels > 0 { cfg_channels } else { channels },
-			);
 			config.description = codec_private.cloned();
 			Ok(config)
 		}

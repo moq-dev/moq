@@ -11,7 +11,7 @@ and verb maps to a Rust one. A docs page shows the layers in each language.
 ## Plan
 
 Lands after the release, as one binding break in Python, Go, Swift, and
-Kotlin (Dart is unpublished), so its PRs retarget to `dev`.
+Kotlin (Dart is unpublished).
 
 Settled shape:
 
@@ -20,8 +20,7 @@ Settled shape:
   binding never sees that split (catalog, import producers, container
   consumers); `json`, `flate`, `audio`, and `video` own their producers and
   consumers. `flate` holds the opaque snapshot and stream tracks moq-ffi
-  publishes as `publish_binary_*` today (#4137), named after the crate they
-  fold into in moq-binary's fold into moq-flate ([#4425](https://github.com/moq-dev/moq/pull/4425), on `dev`).
+  publishes as `publish_flate_*` today, named after the `moq-flate` crate.
 - A layer's type is constructed from the handles its Rust constructor takes,
   not reached through an accessor on the broadcast: JSON wraps a track
   (`moq_json::snapshot::Producer::new(track, config)`), so it also works on a
@@ -35,7 +34,7 @@ Settled shape:
   namespaces.
 - `demand()` is the one way to watch subscribers; producers drop their
   `name`/`is_used`/`used`/`unused` duplicates.
-- moq-ffi only. libmoq and `cpp/obs` are out of scope: the
+- moq-ffi only. The hand-written moq-c and `cpp/obs` are out of scope: the
   [generated C](/quest/m1/c/README.md) and [C++](/quest/m1/cpp/README.md)
   bindings inherit this shape from moq-ffi, so reshaping the hand-written C
   ABI would break C users twice.
@@ -56,7 +55,3 @@ work no child does:
 - [Net](/quest/m1/ffi-shape/net.md) - client and server take config records, snapshots are records, and the verbs match moq-net
 - [Media](/quest/m1/ffi-shape/media.md) - catalog, import, and container consume move under `media`
 - [Codecs](/quest/m1/ffi-shape/codec.md) - audio and video encoders and decoders move under their own namespaces with one constructor shape
-
-## Related
-
-- [Track demand](/quest/m1/track-demand.md) - the same `demand()` cleanup in Rust and JS
