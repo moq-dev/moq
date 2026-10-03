@@ -128,6 +128,8 @@ pub(crate) enum PublishDoneStatus {
 	Unauthorized,
 	/// The track is no longer being published.
 	TrackEnded,
+	/// A requested subscription update could not be applied.
+	UpdateFailed,
 }
 
 impl PublishDoneStatus {
@@ -148,6 +150,7 @@ impl PublishDoneStatus {
 				Self::InternalError => 0x0,
 				Self::Unauthorized => 0x1,
 				Self::TrackEnded => 0x2,
+				Self::UpdateFailed => 0x8,
 			},
 		}
 	}

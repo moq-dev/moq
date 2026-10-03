@@ -2,7 +2,16 @@ import { race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
-import { closeError, controlTimeout, error, ProtocolViolation, reason, sessionCause } from "../error.ts";
+import {
+	closeError,
+	controlTimeout,
+	error,
+	ProtocolViolation,
+	reason,
+	StreamCode,
+	Stream as StreamError,
+	sessionCause,
+} from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Route, randomHop, routesEqual, stampHops, UNKNOWN_HOP } from "../hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
@@ -28,6 +37,7 @@ import {
 	PublishNamespaceUpdate,
 } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
+import { finCancels } from "./request_stream.ts";
 import { joinFilter, Subscribe, SubscribeError, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import {
 	PublishBlocked,
@@ -911,8 +921,18 @@ export class Subscriber {
 			// is kept current, since an update carries only what changed.
 			let held = msg.cluster;
 			const done = version === Version.DRAFT_16 || legacy;
+			const stopped = !done
+				? stream.writer.closed.then(
+						() => true,
+						() => true,
+					)
+				: undefined;
 			for (;;) {
-				if (await stream.reader.done()) break;
+				if (await (stopped !== undefined ? race([stream.reader.done(), stopped]) : stream.reader.done())) {
+					if (!finCancels(version)) await stopped;
+					stream.reader.stop(new StreamError(StreamCode.Cancel));
+					break;
+				}
 
 				const typeId = await stream.reader.u53();
 				if (done && typeId === PublishNamespaceDone.id) {

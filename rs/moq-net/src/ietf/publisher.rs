@@ -260,9 +260,14 @@ impl<S: crate::transport::poll::Session> Target<S> {
 	///
 	/// An unsolicited loop has no stream of its own to watch and parks here: the
 	/// session driver polling it is what drops it when the session ends.
-	fn poll_closed(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Result<(), Error>> {
+	fn poll_closed(
+		&mut self,
+		finished: &mut bool,
+		version: Version,
+		cx: &mut std::task::Context<'_>,
+	) -> Poll<Result<(), Error>> {
 		match self.stream() {
-			Some(stream) => stream.reader.poll_closed(cx),
+			Some(stream) => super::request_stream::poll_cancel(stream, finished, version, cx),
 			None => Poll::Pending,
 		}
 	}
@@ -700,37 +705,22 @@ where
 				})
 				.await?;
 
-			// Run the track, cancelling on reader close (Unsubscribe or stream close).
+			let mut request_finished = false;
+
+			// Serve the track while reading updates; only abrupt closure cancels on draft-19+.
 			// The fill (when one was requested) runs alongside on its own fetch stream;
 			// its failures reset that stream and never touch the subscription.
 			let mut track_serve =
 				TrackServe::new(self.session.clone(), track, request_id, self.version, range, timescale);
-			let served = {
-				let serve = async {
-					match fill {
-						Some((fill, cache, timescale)) => {
-							let fill = self.run_fill(request_id, priority, fill, cache, timescale);
-							let track = kio::wait(|waiter| track_serve.poll(waiter));
-							let (res, filled) = futures::join!(track, fill);
-							(res, filled)
-						}
-						None => (kio::wait(|waiter| track_serve.poll(waiter)).await, false),
-					}
-				};
-				let mut serve = std::pin::pin!(serve);
-				let mut closed_session = self.session.clone();
-				kio::wait(|waiter| {
-					if let Poll::Ready(served) = waiter.poll_future(serve.as_mut()) {
-						return Poll::Ready(Some(served));
-					}
-					let mut cx = waiter.context();
-					if stream.reader.poll_closed(&mut cx).is_ready() || closed_session.poll_closed(&mut cx).is_ready() {
-						return Poll::Ready(None);
-					}
-					Poll::Pending
-				})
-				.await
+			let fill = async {
+				match fill {
+					Some((fill, cache, timescale)) => self.run_fill(request_id, priority, fill, cache, timescale).await,
+					None => false,
+				}
 			};
+			let served = self
+				.run_subscription(&mut stream, &mut track_serve, &mut request_finished, fill)
+				.await;
 
 			let completed = served.is_some();
 			let (res, filled) = served.unwrap_or((Ok(()), false));
@@ -749,8 +739,10 @@ where
 					if let Poll::Ready(res) = waiter.poll_future(marker.as_mut()) {
 						return Poll::Ready(res);
 					}
-					let mut cx = std::task::Context::from_waker(waiter.waker());
-					if stream.reader.poll_closed(&mut cx).is_ready() || closed_session.poll_closed(&mut cx).is_ready() {
+					let mut cx = waiter.context();
+					if super::request_stream::poll_cancel(&mut stream, &mut request_finished, self.version, &mut cx)
+						.is_ready() || closed_session.poll_closed(&mut cx).is_ready()
+					{
 						return Poll::Ready(Err(Error::Cancel));
 					}
 					Poll::Pending
@@ -769,6 +761,7 @@ where
 			// Send PublishDone
 			let (status, reason) = match &res {
 				Ok(()) => (ietf::PublishDoneStatus::TrackEnded, "track ended"),
+				Err(Error::Unsupported) => (ietf::PublishDoneStatus::UpdateFailed, "update failed"),
 				Err(_) => (ietf::PublishDoneStatus::InternalError, "internal error"),
 			};
 			let _ = stream.writer.encode(&ietf::PublishDone::ID).await;
@@ -789,6 +782,107 @@ where
 			let _ = stream.writer.close().await;
 
 			res
+		}
+	}
+
+	async fn run_subscription(
+		&self,
+		stream: &mut Stream<S, Version>,
+		serve: &mut TrackServe<S>,
+		finished: &mut bool,
+		fill: impl std::future::Future<Output = bool>,
+	) -> Option<(Result<(), Error>, bool)> {
+		let mut session = self.session.clone();
+		let mut fill = std::pin::pin!(fill);
+		let mut filled = None;
+		let mut served = None;
+		loop {
+			let event = kio::wait(|waiter| {
+				let mut cx = waiter.context();
+				if session.poll_closed(&mut cx).is_ready() {
+					return Poll::Ready(Err(Error::Cancel));
+				}
+				if !matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+					&& stream.writer.poll_closed(&mut cx).is_ready()
+				{
+					return Poll::Ready(Err(Error::Cancel));
+				}
+				if !*finished {
+					if matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
+						if stream.reader.poll_closed(&mut cx).is_ready() {
+							return Poll::Ready(Err(Error::Cancel));
+						}
+					} else {
+						match stream
+							.reader
+							.poll_decode_maybe::<super::request_stream::Update>(&mut cx)
+						{
+							Poll::Ready(Ok(Some(update))) => return Poll::Ready(Ok(Some(update))),
+							Poll::Ready(Ok(None)) if !super::request_stream::fin_cancels(self.version) => {
+								*finished = true
+							}
+							Poll::Ready(Ok(None)) => return Poll::Ready(Err(Error::Cancel)),
+							Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+							Poll::Pending => {}
+						}
+					}
+				}
+				if filled.is_none()
+					&& let Poll::Ready(done) = waiter.poll_future(fill.as_mut())
+				{
+					filled = Some(done);
+				}
+				if served.is_none()
+					&& let Poll::Ready(done) = serve.poll(waiter)
+				{
+					served = Some(done);
+				}
+				match (&served, filled) {
+					(Some(Ok(())), Some(_)) => Poll::Ready(Ok(None)),
+					(Some(Err(err)), Some(_)) => Poll::Ready(Err(err.clone())),
+					_ => Poll::Pending,
+				}
+			})
+			.await;
+			match event {
+				Ok(None) => return Some((Ok(()), filled.unwrap_or(false))),
+				Err(Error::Cancel) => return None,
+				Err(err) => return Some((Err(err), filled.unwrap_or(false))),
+				Ok(Some(update)) => {
+					if update.unsupported {
+						let result = self
+							.write_subscribe_error(
+								&mut stream.writer,
+								serve.request_id,
+								&Error::Unsupported,
+								"REQUEST_UPDATE parameters not supported",
+							)
+							.await;
+						return Some((result.and(Err(Error::Unsupported)), filled.unwrap_or(false)));
+					}
+					if let Some(priority) = update.priority {
+						let mut subscription = serve.track.subscription();
+						subscription.priority = super::priority::from_wire(priority);
+						if let Err(err) = serve.track.update(subscription) {
+							return Some((Err(err), filled.unwrap_or(false)));
+						}
+					}
+					if let Err(err) = async {
+						stream.writer.encode(&ietf::RequestOk::ID).await?;
+						stream
+							.writer
+							.encode(&ietf::RequestOk {
+								request_id: None,
+								active: None,
+							})
+							.await
+					}
+					.await
+					{
+						return Some((Err(err), filled.unwrap_or(false)));
+					}
+				}
+			}
 		}
 	}
 
@@ -1295,9 +1389,10 @@ where
 		// nothing.
 		let group = {
 			let mut read = std::pin::pin!(read_fetch(&track, start.group, start.object, until, priority));
+			let mut finished = false;
 			kio::wait(|waiter| {
-				let mut cx = std::task::Context::from_waker(waiter.waker());
-				if stream.reader.poll_closed(&mut cx).is_ready() {
+				let mut cx = waiter.context();
+				if super::request_stream::poll_cancel(&mut stream, &mut finished, self.version, &mut cx).is_ready() {
 					return Poll::Ready(None);
 				}
 				waiter.poll_future(read.as_mut()).map(Some)
@@ -1401,13 +1496,14 @@ where
 		// the lifetime of a request whose subscription never arrives or resolves.
 		let joined = {
 			let mut pending = false;
+			let mut finished = false;
 			let mut deadline = crate::runtime::Deadline::after(&self.runtime, Duration::from_secs(10));
 			kio::wait(|waiter| {
 				let mut cx = waiter.context();
 				// The request reader is what the subscriber FINs or resets. The writer
 				// on a draft-14-16 virtual stream reports closed immediately, which is
 				// not a cancellation.
-				if stream.reader.poll_closed(&mut cx).is_ready() {
+				if super::request_stream::poll_cancel(stream, &mut finished, self.version, &mut cx).is_ready() {
 					return Poll::Ready(Err(Error::Cancel));
 				}
 				let joins = self.joins.poll(waiter, |joins| match joins.get(&subscribe_id) {
@@ -1915,11 +2011,12 @@ where
 		match target {
 			Target::Requests(_) => {
 				if let Some(mut request) = requests.remove(&suffix) {
-					// Draft-17+ removed PUBLISH_NAMESPACE_DONE: the FIN below is the whole
-					// withdrawal. Sending it anyway puts the type on the wire before the
-					// body fails to encode, and a receiver reading 0x09 there has no choice
-					// but to treat it as a protocol violation (see
-					// `Subscriber::terminal_publish_namespace`).
+					// Draft-19+ FIN only ends updates; withdrawal must cancel both directions.
+					if !super::request_stream::fin_cancels(self.version) {
+						request.stream.reader.abort(&Error::Cancel);
+						request.stream.writer.abort(&Error::Cancel);
+						return Ok(());
+					}
 					if matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 						// Best effort: the peer may already be gone.
 						let _ = request
@@ -2143,6 +2240,7 @@ where
 		mut ns: Namespaces<S>,
 		initial: Vec<crate::announce::Announce>,
 	) -> Result<(), Error> {
+		let mut finished = false;
 		let _withdrawing = self.withdrawal.register();
 		if self.withdrawal.poll(&kio::Waiter::noop()).is_ready() {
 			return Ok(());
@@ -2179,7 +2277,7 @@ where
 						return Poll::Ready(NamespaceEvent::Update(None));
 					}
 					let mut cx = waiter.context();
-					if let Poll::Ready(res) = target.poll_closed(&mut cx) {
+					if let Poll::Ready(res) = target.poll_closed(&mut finished, self.version, &mut cx) {
 						return Poll::Ready(NamespaceEvent::Closed(res));
 					}
 					// The origin's live marker means nothing to the peer here.
@@ -3184,6 +3282,116 @@ mod serve_tests {
 			track,
 			_origin: origin,
 			_broadcast: broadcast,
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn requester_fin_is_version_gated_for_subscriptions() {
+		for version in [
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			let h = serve(version);
+			let mut session = ScriptedSession::per_stream_eof(vec![vec![]]);
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut serving = TrackServe::new(
+				h.session.clone(),
+				h.track.subscribe(None),
+				RequestId(0),
+				version,
+				ServeRange::default(),
+				None,
+			);
+			let mut finished = false;
+			let mut run =
+				std::pin::pin!(
+					h.publisher
+						.run_subscription(&mut stream, &mut serving, &mut finished, async { false })
+				);
+			assert_eq!(
+				futures::poll!(run.as_mut()).is_ready(),
+				super::super::request_stream::fin_cancels(version),
+				"{version}"
+			);
+			if !super::super::request_stream::fin_cancels(version) {
+				let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+				group.write_frame(timestamp(), b"after FIN".as_slice()).unwrap();
+				group.finish().unwrap();
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				assert_eq!(occurrences(&h.log, b"after FIN"), 1, "{version}");
+			}
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn subscription_update_applies_priority_without_ending_the_request() {
+		let version = Version::Draft19;
+		let h = serve(version);
+		let mut session = ScriptedSession::per_stream(vec![vec![0x02, 0, 4, 2, 1, 0x20, 10, 0x02, 0, 2, 4, 0]]);
+		let mut stream = Stream::open(&mut session, version).await.unwrap();
+		let mut serving = TrackServe::new(
+			h.session.clone(),
+			h.track.subscribe(None),
+			RequestId(0),
+			version,
+			ServeRange::default(),
+			None,
+		);
+		let mut finished = false;
+		let mut run = std::pin::pin!(
+			h.publisher
+				.run_subscription(&mut stream, &mut serving, &mut finished, async { false })
+		);
+		assert!(futures::poll!(run.as_mut()).is_pending());
+		assert_eq!(h.track.subscription().unwrap().priority, 245);
+		assert_eq!(occurrences(&session.log, &[0x07, 0, 1, 0]), 2);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn unsupported_subscription_update_fails_the_subscription() {
+		let version = Version::Draft19;
+		let h = serve(version);
+		// FORWARD=0 asks to pause delivery, which this publisher does not support.
+		let mut session = ScriptedSession::per_stream(vec![vec![0x02, 0, 4, 2, 1, 0x10, 0]]);
+		let mut stream = Stream::open(&mut session, version).await.unwrap();
+		let mut serving = TrackServe::new(
+			h.session.clone(),
+			h.track.subscribe(None),
+			RequestId(0),
+			version,
+			ServeRange::default(),
+			None,
+		);
+		let mut finished = false;
+		let served = h
+			.publisher
+			.run_subscription(&mut stream, &mut serving, &mut finished, async { false })
+			.await;
+		assert!(matches!(served, Some((Err(Error::Unsupported), false))), "{served:?}");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn namespace_requester_fin_is_version_gated() {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft22] {
+			let h = serve(version);
+			tokio::task::yield_now().await;
+			let mut session = ScriptedSession::per_stream_eof(vec![vec![]]);
+			let stream = Stream::open(&mut session, version).await.unwrap();
+			let msg = ietf::SubscribeNamespace {
+				request_id: RequestId(0),
+				namespace: crate::Path::new(""),
+				hidden: false,
+			};
+			let mut run = std::pin::pin!(h.publisher.clone().run_subscribe_namespace_stream(stream, msg));
+			assert_eq!(
+				futures::poll!(run.as_mut()).is_ready(),
+				super::super::request_stream::fin_cancels(version),
+				"{version}"
+			);
 		}
 	}
 

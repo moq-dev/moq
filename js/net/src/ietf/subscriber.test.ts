@@ -103,12 +103,25 @@ test("an unsolicited announcement lands", async () => {
 	// namespace on the way out.
 	const peer = await nextStream(pair.client);
 	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream to close");
+	peer.writer.close();
+	await peer.writer.closed;
+	// A second advertisement is a processing barrier: the FIN must not retract the first.
+	const second = await Stream.open(pair.server, { version: VERSION });
+	const other = subscriber.runPublishNamespace(
+		new PublishNamespace({ requestId: 2n, trackNamespace: Path.from("sentinel") }),
+		second,
+	);
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("sentinel"), kind: "start" });
 	peer.close();
 	await handler;
 	expect(await nextRoute(announced)).toMatchObject({
 		prefix: Path.from("surprise"),
 		kind: "end",
 	});
+	const secondPeer = await nextStream(pair.client);
+	if (!secondPeer) throw new Error("missing sentinel stream");
+	secondPeer.close();
+	await other;
 });
 
 /**

@@ -1170,9 +1170,26 @@ where
 		attached: &mut bool,
 	) -> Result<(), Error> {
 		loop {
-			let type_id: u64 = match stream.reader.decode_maybe().await? {
+			let next = kio::wait(|waiter| {
+				let mut cx = waiter.context();
+				if !matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+					&& let Poll::Ready(result) = stream.writer.poll_closed(&mut cx)
+				{
+					stream.reader.abort(&Error::Cancel);
+					return Poll::Ready(result.map(|()| None));
+				}
+				stream.reader.poll_decode_maybe(&mut cx)
+			})
+			.await?;
+			let type_id: u64 = match next {
 				Some(id) => id,
-				None => return Ok(()),
+				None => {
+					if super::request_stream::fin_cancels(self.version) {
+						return Ok(());
+					}
+					// The advertisement outlives the peer's send direction.
+					return stream.writer.closed().await;
+				}
 			};
 			let terminal = self.terminal_publish_namespace(type_id);
 			if type_id != ietf::PublishNamespaceUpdate::ID && !terminal {
@@ -5261,6 +5278,55 @@ mod tests {
 			routed_now(&consumer, "room/host").is_none(),
 			"an explicit NAMESPACE_DONE must retract the route",
 		);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn publish_namespace_requester_fin_keeps_the_route() {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft22] {
+			for reset in [false, true] {
+				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+				let consumer = origin.consume();
+				let session = if reset {
+					crate::lite::test_transport::ScriptedSession::per_stream_reset(vec![vec![]])
+				} else {
+					crate::lite::test_transport::ScriptedSession::per_stream_eof(vec![vec![]])
+				};
+				let (tasks, _task_set) = crate::util::TaskSet::new();
+				let mut subscriber = Subscriber::new(
+					crate::time::Clock::tokio(),
+					session.clone(),
+					origin,
+					Control::new(None, false),
+					None,
+					peer::PeerSetup::default(),
+					crate::Hop::new(1).unwrap(),
+					None,
+					version,
+					tasks,
+					Default::default(),
+				);
+				let stream = Stream::open(&mut session.clone(), version).await.unwrap();
+				let msg = ietf::PublishNamespace {
+					request_id: RequestId(0),
+					track_namespace: crate::Path::new("room/host"),
+					cluster: None,
+				};
+				let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
+					stream,
+					msg,
+					cluster::Peer::default(),
+					None
+				));
+				assert_eq!(
+					futures::poll!(run.as_mut()).is_ready(),
+					reset || super::super::request_stream::fin_cancels(version),
+					"{version}"
+				);
+				if !reset && !super::super::request_stream::fin_cancels(version) {
+					assert!(routed_now(&consumer, "room/host").is_some(), "{version}");
+				}
+			}
+		}
 	}
 
 	/// v14-16 withdraw a PUBLISH_NAMESPACE with PUBLISH_NAMESPACE_DONE, which the adapter
