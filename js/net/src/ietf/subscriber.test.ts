@@ -653,8 +653,8 @@ test("a PUBLISH_NAMESPACE repricing is acknowledged in place", async () => {
 
 /**
  * An update whose first Hop ID differs names a different publisher. It still updates the
- * advertisement in place and the stream stays open. A broadcast already held keeps
- * draining, while the next consume starts fresh.
+ * advertisement in place, the stream stays open, and the path names the same broadcast, so
+ * the next consume shares it.
  */
 test("a PUBLISH_NAMESPACE update that changes the publisher applies in place", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
@@ -694,8 +694,7 @@ test("a PUBLISH_NAMESPACE update that changes the publisher applies in place", a
 		route: { hops: [HopSchema.parse(8n), PEER] },
 	});
 
-	const fresh = subscriber.consume(Path.from("theirs"));
-	expect(fresh.closed).not.toBe(held.closed);
+	expect(subscriber.consume(Path.from("theirs")).closed).toBe(held.closed);
 	expect(held.closed.peek()).toBeUndefined();
 
 	// Still announced: the stream ending is what retracts it.

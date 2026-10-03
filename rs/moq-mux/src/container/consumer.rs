@@ -1644,7 +1644,7 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn truncated_spliced_group_skips_to_the_next_clean_group() {
+	async fn truncated_resumed_group_skips_to_the_next_clean_group() {
 		let origin = crate::source::produce_origin();
 		let hops = moq_net::Hops::try_from(vec![moq_net::Hop::new(10).unwrap()]).unwrap();
 		let first_route = origin
@@ -1681,8 +1681,9 @@ mod tests {
 			)
 			.unwrap();
 
-		// Each cheaper route advances beyond the seam without serving its continuation.
-		// Enough takeovers prune every route that could still cover group 0.
+		// Each cheaper route takes over beyond group 0 without holding its continuation,
+		// while the first route stays up but silent. The front gives the open group up once
+		// the track runs a full budget past it.
 		let mut routes = Vec::new();
 		let mut sources = Vec::new();
 		for sequence in 1..=4 {
@@ -1701,15 +1702,15 @@ mod tests {
 			if sequence == 1 {
 				assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(0));
 			}
-			write_group(&mut track, sequence, &[ts(sequence * 100_000)]);
+			write_group(&mut track, sequence, &[ts(sequence * 1_000_000)]);
 			routes.push(route);
 			sources.push((source, track));
 		}
 
 		let waiter = kio::Waiter::noop();
 
-		// Group 1 was never handed out before its segment was pruned. An abort
-		// skips straight to the retained successor; a short clean group emits GroupEnd.
+		// The aborted group 0 skips straight to its successor; a short clean group emits
+		// GroupEnd.
 		let event = consumer.poll_event(&waiter);
 		let Poll::Ready(Ok(Some(Event::Frame(frame)))) = event else {
 			panic!(
@@ -1718,14 +1719,14 @@ mod tests {
 				event.is_pending()
 			);
 		};
-		assert_eq!(frame.timestamp, ts(200_000));
+		assert_eq!(frame.timestamp, ts(1_000_000));
 		assert!(frame.keyframe);
-		assert_eq!(consumer.current, 2);
+		assert_eq!(consumer.current, 1);
 		assert!(
 			matches!(consumer.poll_event(&waiter), Poll::Ready(Ok(Some(Event::GroupEnd)))),
 			"the complete successor still emits its clean boundary"
 		);
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(300_000));
+		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(2_000_000));
 	}
 
 	// ---- Eviction recovery (pause/resume) ----

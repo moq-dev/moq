@@ -583,6 +583,11 @@ impl ProducerOwned {
 		self.raw.remaining()
 	}
 
+	/// Bytes written so far.
+	pub(crate) fn written(&self) -> usize {
+		self.raw.buf.written(Ordering::Acquire)
+	}
+
 	/// Write a chunk of payload *without* waking consumers; pair it with [`Self::notify`].
 	///
 	/// The wake is split out because the wire ingest drains every chunk the transport

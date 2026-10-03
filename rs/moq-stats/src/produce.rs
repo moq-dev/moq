@@ -1428,7 +1428,11 @@ mod tests {
 			.consume()
 			.with_stats(registry.tier(Tier::default()).session("viewer"));
 
+		// Each viewer joins at the live edge, so the group it reads is written first.
 		async fn view(egress: &origin::Consumer, video: &mut track::Producer, size: usize) {
+			let mut group = video.append_group().expect("group");
+			group.write_frame(Timestamp::ZERO, vec![0u8; size]).expect("write");
+			group.finish().expect("finish");
 			let broadcast = egress.request_broadcast("foo/bar").await.expect("resolve");
 			let mut sub = broadcast
 				.track("video")
@@ -1436,9 +1440,6 @@ mod tests {
 				.subscribe(None)
 				.await
 				.expect("subscribe");
-			let mut group = video.append_group().expect("group");
-			group.write_frame(Timestamp::ZERO, vec![0u8; size]).expect("write");
-			group.finish().expect("finish");
 			let mut group = sub.recv_group().await.expect("recv").expect("group");
 			while group.read_frame().await.expect("read").is_some() {}
 		}

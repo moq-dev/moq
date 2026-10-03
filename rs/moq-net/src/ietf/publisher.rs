@@ -629,6 +629,10 @@ where
 				}
 			};
 
+			// A track that is not live (a relay's gone idle) cannot say where its live edge is
+			// until a route answers it; answering from its cache would advertise a stale one.
+			kio::wait(|waiter| track.poll_live(waiter)).await;
+
 			// The filter and any fill are relative to the live edge, so snapshot it once:
 			// the fill ends exactly where a Next Object subscription begins, which is what
 			// lets the draft's current-group join (Next Object plus a StartGroup=1 fill)
@@ -3772,6 +3776,8 @@ mod serve_tests {
 			}
 			assert!(buf.is_empty(), "FETCH delivered objects beyond the saved prefix");
 			let mark = h.log.writes.lock().unwrap().len();
+			// The origin's pump carries the new object to the subscription.
+			settle().await;
 			assert!(futures::poll!(serve.as_mut()).is_pending());
 			let mut tail = bytes::Bytes::from(h.log.writes.lock().unwrap()[mark..].to_vec());
 			assert_eq!(u64::decode(&mut tail, version).unwrap(), payloads.len() as u64);
@@ -6225,8 +6231,8 @@ struct LiveEdge {
 	/// The newest group sequence, `None` before any group exists.
 	latest: Option<u64>,
 	/// The precise Largest Object. `None` when the track is empty, or when the newest
-	/// group's frames cannot be read right now (none written yet, or a spliced track
-	/// between segments), in which case nothing is advertised and no fill is servable.
+	/// group's frames cannot be read right now (none written yet), in which case nothing
+	/// is advertised and no fill is servable.
 	largest: Option<Location>,
 	/// One past the Largest Object, which is where a Next Object subscription begins.
 	/// When the edge is imprecise this falls back to the next group boundary: never below

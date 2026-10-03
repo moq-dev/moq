@@ -1701,11 +1701,10 @@ mod tests {
 		(rendition, watcher)
 	}
 
-	// A same-path republish takes the origin leaf over with a brand new broadcast (an ordinary
-	// publisher is `Hop::UNKNOWN`, which never counts as the same publisher, so even a plain
-	// reconnect qualifies). Renditions derived from the old broadcast's catalog must not serve the
-	// replacement's media: its group numbering restarts, so those bytes would be served under the
-	// replaced broadcast's segment number, duration, and PROGRAM-DATE-TIME.
+	// A path published again after its broadcast ended is a brand new broadcast. Renditions
+	// derived from the old broadcast's catalog must not serve the replacement's media: its group
+	// numbering restarts, so those bytes would be served under the replaced broadcast's segment
+	// number, duration, and PROGRAM-DATE-TIME.
 	#[tokio::test]
 	async fn a_replacement_publisher_is_not_served_under_the_replaced_catalog() {
 		const OLD: &[u8] = b"OLDOLDOLDOLDOLDO";
@@ -1753,10 +1752,13 @@ mod tests {
 			source,
 		};
 
-		// The publisher reconnects before the catalog snapshot is reconciled. That gap is wide in
-		// practice: `watch_catalog` retries a not-yet-written catalog track with backoff, so
-		// seconds can pass between resolving the broadcast and syncing its first snapshot.
+		// The publisher goes away and comes back before the catalog snapshot is reconciled. That
+		// gap is wide in practice: `watch_catalog` retries a not-yet-written catalog track with
+		// backoff, so seconds can pass between resolving the broadcast and syncing its first
+		// snapshot. The old broadcast ends first: a path still routed is one broadcast, so a
+		// publisher back before then would resume it instead.
 		drop(old);
+		settle().await;
 		let (new, _) = publish(&origin, NEW);
 		settle().await;
 
@@ -1865,9 +1867,10 @@ mod tests {
 			.await
 			.expect("the timeline reaches the rendition");
 
-		// The media publisher reconnects before any segment is requested, taking the origin leaf
-		// over with a brand new broadcast whose group numbering restarts from zero.
+		// The media publisher goes away and comes back before any segment is requested, as a
+		// brand new broadcast whose group numbering restarts from zero.
 		drop(old_media);
+		settle().await;
 		let new_media = publish_media(&origin, NEW, None);
 		settle().await;
 
@@ -1925,8 +1928,8 @@ mod tests {
 		moq_net::origin::Route::default().with_hops(hops(&[first]))
 	}
 
-	/// A standalone media publisher (not an origin leaf) so the sibling is served through a
-	/// routed front whose first hop can change.
+	/// A standalone media publisher (not an origin leaf), so the sibling is served through a
+	/// routed front.
 	fn write_routed_media(
 		broadcast: &mut moq_net::broadcast::Producer,
 		payload: &'static [u8],
@@ -1971,12 +1974,12 @@ mod tests {
 		}
 	}
 
-	// A bound sibling whose publisher is replaced through a different first hop ends with
-	// Dropped. The exporter must drop rows listed for the old publisher, re-bind, and list
-	// only rows that arrive after the new bind resolves: fetching an old row from the
+	// A bound sibling whose route goes away ends with Dropped, and a new publisher may serve
+	// the path afterwards. The exporter must drop rows listed for the old publisher, re-bind,
+	// and list only rows that arrive after the new bind resolves: fetching an old row from the
 	// replacement would serve restarted groups under the previous publisher's segment numbers.
 	#[tokio::test]
-	async fn a_replaced_first_hop_sibling_drops_old_rows_and_rebinds() {
+	async fn a_replaced_sibling_drops_old_rows_and_rebinds() {
 		tokio::time::pause();
 		const OLD: &[u8] = b"OLDOLDOLDOLDOLDO";
 		const NEW: &[u8] = b"NEWNEWNEWNEWNEWN";
@@ -2023,15 +2026,18 @@ mod tests {
 		let mut early = rendition.segments();
 		assert_eq!(early.next().await.unwrap().unwrap().discontinuity, 0);
 
-		// The replacement is already announced before the incumbent is dropped, matching a
-		// rival publisher that appears while the current first hop is still serving.
-		let new_server = origin.dynamic("media", sibling_route(11)).unwrap();
 		drop((old_server, old_media, _old_track));
 		until_empty(&rendition).await;
 		assert!(
 			rendition.segment(0).await.unwrap().is_none(),
 			"a row listed for the old publisher answers 404 after replacement"
 		);
+
+		// A publisher still routed when the incumbent goes would resume its broadcast
+		// instead: a path is one broadcast, whoever serves it. The bind failed while nothing
+		// served the path, so the next poll re-issues it.
+		let new_server = origin.dynamic("media", sibling_route(11)).unwrap();
+		let _ = rendition.snapshot();
 
 		let mut new_media = moq_net::broadcast::Info::new().produce();
 		accept_sibling(&new_server, &new_media).await;

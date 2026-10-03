@@ -400,6 +400,11 @@ struct TrackState {
 	// A pre-draft-20 joining FETCH, which reuses the fill rendezvous.
 	joining: Option<JoiningFetch>,
 
+	// Where the subscription asked to start, when that is partway through a group: a
+	// resumed subscription picking up after the frames a previous route delivered. The
+	// stream for that group legitimately starts there, without a head.
+	resume: Option<track::Position>,
+
 	// The data streams read so far, which PUBLISH_DONE's Stream Count is checked against.
 	tail: kio::Producer<Tail>,
 }
@@ -429,6 +434,7 @@ impl TrackState {
 			largest: None,
 			fetch_id: None,
 			joining,
+			resume: None,
 			tail: Default::default(),
 		}
 	}
@@ -1681,8 +1687,9 @@ where
 		}
 
 		let subscription = request.subscription();
+		let start = subscription.as_ref().and_then(|s| s.start);
 		// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest.
-		let live = subscription.as_ref().and_then(|s| s.start).is_none();
+		let live = start.is_none();
 		let join = match subscribe_join(
 			subscription.as_ref().and_then(|s| s.start),
 			subscription.as_ref().and_then(|s| s.end),
@@ -1723,7 +1730,13 @@ where
 			let mut state = self.state.lock();
 			state.subscribes.insert(
 				request_id,
-				TrackState::pending(request.name().to_owned(), broadcast_path.to_owned(), fill, joining),
+				TrackState {
+					resume: subscription
+						.as_ref()
+						.and_then(|s| s.start)
+						.filter(|start| start.frame != 0),
+					..TrackState::pending(request.name().to_owned(), broadcast_path.to_owned(), fill, joining)
+				},
 			);
 		}
 
@@ -1870,13 +1883,24 @@ where
 			true => request.resolving_start(),
 			false => request,
 		};
+		// Not live until the answer says where the publisher is, or the first object does.
+		let request = request.not_live();
 		// Serves cache misses with a group FETCH. Registered before accepting, so a miss
 		// queued meanwhile waits for it rather than failing for want of a handler.
 		let dynamic = request.dynamic();
 		let mut track = request.accept(info);
-		if live {
-			let _ = track.start_at(largest.map(|largest| largest.group));
+		// The publisher's Largest Location is where its live feed is now.
+		if let Some(largest) = largest {
+			track.set_live(Some(track::Position {
+				group: largest.group,
+				frame: largest.object,
+			}));
 		}
+		// A live join starts at the publisher's edge; an absolute one where it asked.
+		let _ = match live {
+			true => track.start_at(largest.map(|largest| largest.group)),
+			false => track.start_at(start.map(|start| start.group)),
+		};
 		let mut fetching: Option<MaybeSendBox<'static, ()>> = None;
 		{
 			let mut state = self.state.lock();
@@ -2133,15 +2157,21 @@ where
 		track: &track::Producer,
 		joining: JoiningFetch,
 	) -> Option<MaybeSendBox<'static, ()>> {
-		let fill = {
+		let (fill, largest) = {
 			let state = self.state.lock();
-			state.subscribes.get(&subscribe_id)?.fill.clone()
+			let held = state.subscribes.get(&subscribe_id)?;
+			(held.fill.clone(), held.largest)
+		};
+		// Where the subscription starts if the join falls back to live.
+		let live = Live {
+			track: track.clone(),
+			start: largest.map(|largest| largest.group),
 		};
 
 		let fetch_id = match self.control.next_request_id(&self.runtime).await {
 			Ok(id) => id,
 			Err(_) => {
-				settle_join_live(&fill);
+				settle_join_live(&fill, live);
 				return None;
 			}
 		};
@@ -2157,7 +2187,7 @@ where
 			Ok(s) => s,
 			Err(err) => {
 				tracing::debug!(%err, "failed to open joining FETCH stream");
-				settle_join_live(&fill);
+				settle_join_live(&fill, live);
 				return None;
 			}
 		};
@@ -2193,22 +2223,22 @@ where
 		.await
 		{
 			tracing::debug!(%err, "failed to write joining FETCH");
-			settle_join_live(&fill);
+			settle_join_live(&fill, live);
 			return None;
 		}
 
 		let mut this = self.clone();
 		Some(
 			async move {
-				this.finish_joining_fetch(stream, fill).await;
+				this.finish_joining_fetch(stream, fill, live).await;
 			}
 			.maybe_boxed(),
 		)
 	}
 
-	async fn finish_joining_fetch(&mut self, mut stream: Stream<S, Version>, fill: kio::Producer<Fill>) {
+	async fn finish_joining_fetch(&mut self, mut stream: Stream<S, Version>, fill: kio::Producer<Fill>, live: Live) {
 		if !matches!(self.read_fetch_response(&mut stream).await, Ok(true)) {
-			settle_join_live(&fill);
+			settle_join_live(&fill, live);
 			let _ = stream.writer.close().await;
 			return;
 		}
@@ -2315,13 +2345,15 @@ where
 			}
 		};
 
-		let (mut track, timescale, fill, mut reading) = {
+		let (mut track, timescale, fill, resume, mut reading) = {
 			let state = self.state.lock();
 			let track = state.subscribes.get(&request_id).ok_or(Error::NotFound)?;
 			(
 				track.producer.clone().ok_or(Error::NotFound)?,
 				track.timescale,
 				track.fill.clone(),
+				// Only the group the subscription resumes partway through.
+				track.resume.filter(|resume| resume.group == group.group_id),
 				// Every data stream counts toward PUBLISH_DONE's Stream Count, even one
 				// dropped below, and the subscription's end waits until it is read.
 				Reading::open(&track.tail, Some(group.group_id), self.runtime.now()),
@@ -2341,13 +2373,14 @@ where
 		// degradation as a publisher that no longer holds the head.
 		//
 		// A fill we asked for is the exception, since its fetch stream is carrying exactly
-		// that head for [`Self::open_group`] to stitch this onto.
+		// that head for [`Self::open_group`] to stitch this onto. So is the group a resumed
+		// subscription asked to start partway through: the head came from another route.
 		//
 		// The bit is only the publisher's claim, so what is enforced is the object ids
 		// themselves: [`next_object_id`] holds every object to starting where the head
 		// stopped and incrementing by 1, whatever the header said and on the drafts that
 		// have no such bit to read.
-		if !group.flags.first_object && !fill.read().outstanding() {
+		if !group.flags.first_object && !fill.read().outstanding() && resume.is_none() {
 			tracing::debug!(
 				track_alias = %group.track_alias,
 				group = %group.group_id,
@@ -2361,7 +2394,7 @@ where
 		// Otherwise dropping the local subscriber cannot end this handler.
 		let opened = {
 			let mut opening = track.clone();
-			let mut open = std::pin::pin!(self.open_group(stream, &mut opening, &fill, &group, &mut reading));
+			let mut open = std::pin::pin!(self.open_group(stream, &mut opening, &fill, resume, &group, &mut reading));
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
@@ -2386,6 +2419,13 @@ where
 			// No object at or past object 0 of this group exists, so neither does the group.
 			Opened::EndOfTrack => return end_track(&mut track, group.group_id),
 		};
+		// The first object says where the live feed is, when SUBSCRIBE_OK named no Largest.
+		if !track.is_live() {
+			track.set_live(Some(track::Position {
+				group: group.group_id,
+				frame: start,
+			}));
+		}
 
 		// Guarded: this handler can be dropped at any await below, and a group producer
 		// that dies without a terminal leaves its consumer waiting on nothing.
@@ -2481,6 +2521,10 @@ where
 		let Some(producer) = track.producer.as_mut() else {
 			return Ok(());
 		};
+		// A datagram says where the live feed is as well as an object does.
+		if !producer.is_live() {
+			producer.set_live(Some(track::Position::group(sequence)));
+		}
 		if let Err(err) = producer.insert_datagram(sequence, timestamp, payload) {
 			tracing::debug!(%err, alias, sequence, "dropping datagram");
 		}
@@ -2592,6 +2636,7 @@ where
 		stream: &mut Reader<S::RecvStream, Version>,
 		track: &mut track::Producer,
 		fill: &kio::Producer<Fill>,
+		resume: Option<track::Position>,
 		header: &ietf::GroupHeader,
 		reading: &mut Reading,
 	) -> Result<Opened, Error> {
@@ -2627,6 +2672,17 @@ where
 		}
 
 		if !fill.read().outstanding() {
+			// The group a resumed subscription picks up partway through starts where it
+			// asked, and a stream with no objects is the end of a group complete there.
+			// A publisher sending more of it (a pre-draft-20 join asks for all of it) has
+			// the objects below the start dropped as they arrive.
+			if let Some(resume) = resume
+				&& first.is_none_or(|first| first.id <= resume.frame)
+			{
+				let mut producer = create(track)?;
+				producer.start_at(resume.frame)?;
+				return Ok(Opened::Group(producer, first.map_or(resume.frame, |first| first.id)));
+			}
 			return Ok(Opened::Group(create(track)?, 0));
 		}
 
@@ -2727,6 +2783,8 @@ struct GroupIngest {
 	version: Version,
 	prior_object: Option<u64>,
 	start: u64,
+	/// The object being read is one the group started past, so it is read and dropped.
+	dropping: bool,
 	phase: IngestPhase,
 	budget: frame::Budget,
 }
@@ -2744,6 +2802,8 @@ enum IngestPhase {
 	Status { timestamp: Option<crate::Timestamp> },
 	/// Streaming the object payload.
 	Payload { frame: frame::ProducerOwned },
+	/// Discarding a dropped object's payload: the bytes of it still to read.
+	Skip { size: usize },
 	/// An explicit end-of-group or end-of-track status arrived.
 	Finished(Ended),
 }
@@ -2763,6 +2823,7 @@ impl GroupIngest {
 			version: subscriber.version,
 			prior_object: None,
 			start,
+			dropping: false,
 			phase: IngestPhase::Delta,
 			budget: subscriber.frames.clone(),
 		}
@@ -2791,7 +2852,7 @@ where
 			return self.recv_group_fetch(stream, slot).await;
 		}
 
-		let (subscribe_id, fill, joining, largest, _counted) = {
+		let (subscribe_id, fill, joining, largest, resume, _counted) = {
 			let state = self.state.lock();
 			// A draft-20 fill is named by the SUBSCRIBE's request id. A pre-draft-20 joining
 			// FETCH has its own id, which `fetches` maps back to that subscription.
@@ -2803,7 +2864,14 @@ where
 			let counted = joined
 				.is_none()
 				.then(|| Reading::open(&track.tail, None, self.runtime.now()));
-			(subscribe_id, track.fill.clone(), track.joining, track.largest, counted)
+			(
+				subscribe_id,
+				track.fill.clone(),
+				track.joining,
+				track.largest,
+				track.resume,
+				counted,
+			)
 		};
 
 		// SUBSCRIBE_OK declares the units these object timestamps are in, and this stream can
@@ -2848,7 +2916,7 @@ where
 		// track does not close a group producer, since those lifecycles are independent.
 		let res = {
 			let mut serving = track.clone();
-			let mut serve = std::pin::pin!(self.run_fill(stream, &mut serving, timescale, joining, largest));
+			let mut serve = std::pin::pin!(self.run_fill(stream, &mut serving, timescale, joining, largest, resume));
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
@@ -2895,11 +2963,12 @@ where
 		timescale: Option<Timescale>,
 		joining: Option<JoiningFetch>,
 		largest: Option<ietf::Location>,
+		resume: Option<track::Position>,
 	) -> Result<Fill, Error> {
 		let mut head: Option<(u64, u64, crate::recv::Group)> = None;
 
 		match self
-			.run_fill_objects(stream, track, timescale, joining, largest, &mut head)
+			.run_fill_objects(stream, track, timescale, joining, largest, resume, &mut head)
 			.await
 		{
 			Ok(()) => Ok(match head {
@@ -2939,6 +3008,10 @@ where
 	/// Location; each complete group below that is finished, and the last one is the head
 	/// the live stream continues. Anything else is a head the model cannot represent, and
 	/// refusing the stream leaves the subscription itself alone.
+	///
+	/// A pre-draft-20 join resuming partway through a group asks for all of it, so the
+	/// objects below `resume` are dropped: another route already delivered them.
+	#[allow(clippy::too_many_arguments)]
 	async fn run_fill_objects(
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
@@ -2946,6 +3019,7 @@ where
 		timescale: Option<Timescale>,
 		joining: Option<JoiningFetch>,
 		largest: Option<ietf::Location>,
+		resume: Option<track::Position>,
 		head: &mut Option<(u64, u64, crate::recv::Group)>,
 	) -> Result<(), Error> {
 		let mut prior_group = None;
@@ -3009,9 +3083,15 @@ where
 				}
 			}
 
-			let (_, next, producer) = head.as_mut().expect("the head was created above");
+			let (sequence, next, producer) = head.as_mut().expect("the head was created above");
+			if *next == 0
+				&& let Some(resume) = resume.filter(|resume| resume.group == *sequence)
+			{
+				producer.start_at(resume.frame)?;
+			}
+			let keep = *next >= producer.frame_count() as u64;
 			if !self
-				.recv_fetch_payload(stream, producer, object.properties, timescale)
+				.recv_fetch_payload(stream, producer, object.properties, timescale, keep)
 				.await?
 			{
 				return Err(Error::Unsupported);
@@ -3022,7 +3102,8 @@ where
 		Ok(())
 	}
 
-	/// Read one fetch object's length and payload into `producer`, after its header.
+	/// Read one fetch object's length and payload into `producer`, after its header, or
+	/// past it unless `keep`.
 	///
 	/// Returns `false` for a draft-14 or 15 end-of-group or end-of-track marker, which
 	/// is a status rather than a frame.
@@ -3032,6 +3113,7 @@ where
 		producer: &mut group::Producer,
 		properties: Option<Vec<u8>>,
 		timescale: Option<Timescale>,
+		keep: bool,
 	) -> Result<bool, Error> {
 		// The properties carry the frame's presentation timestamp (the Timestamp Object
 		// Property) in the units the track declared. A track that declared none opted
@@ -3054,6 +3136,11 @@ where
 				END_OF_GROUP | END_OF_TRACK => return Ok(false),
 				_ => return Err(Error::Unsupported),
 			}
+		}
+		if !keep {
+			let mut remaining = usize::try_from(size).map_err(|_| Error::FrameTooLarge)?;
+			std::future::poll_fn(|cx| stream.poll_skip(cx, &mut remaining)).await?;
+			return Ok(true);
 		}
 
 		// `create_frame_owned` is the allocation chokepoint: it rejects an oversized `size`
@@ -3417,7 +3504,7 @@ where
 			}
 
 			match self
-				.recv_fetch_payload(stream, producer, object.properties, timescale)
+				.recv_fetch_payload(stream, producer, object.properties, timescale, true)
 				.await?
 			{
 				true => next += 1,
@@ -3580,14 +3667,24 @@ fn poll_settled(settle: &mut Settle, waiter: &kio::Waiter, fill: &kio::Producer<
 	settle.poll(waiter, |tail| filled && count > 0 && tail.streams() >= count)
 }
 
+/// The track a joining FETCH serves, and the group its subscription starts at should the
+/// join fall back to live: the publisher's edge, Largest.
+struct Live {
+	track: track::Producer,
+	start: Option<u64>,
+}
+
 /// A refused or missing joining FETCH continues the subscription live: drop the outstanding
-/// fill so a mid-group tail is not left waiting on a head that is never coming.
-fn settle_join_live(fill: &kio::Producer<Fill>) {
-	let Ok(mut state) = fill.write() else {
-		return;
-	};
-	if matches!(*state, Fill::Requested | Fill::Serving(_)) {
+/// fill so a mid-group tail is not left waiting on a head that is never coming, and declare
+/// the start at the edge, since nothing below it is coming now.
+fn settle_join_live(fill: &kio::Producer<Fill>, live: Live) {
+	if let Ok(mut state) = fill.write()
+		&& matches!(*state, Fill::Requested | Fill::Serving(_))
+	{
 		*state = Fill::Done;
+	}
+	if let Some(start) = live.start {
+		let _ = live.track.clone().start_at(start);
 	}
 }
 
@@ -3608,7 +3705,9 @@ impl GroupIngest {
 					let Some(id_delta) = ready!(reader.poll_decode_maybe::<u64>(&mut cx))? else {
 						return Poll::Ready(Ok(Ended::Group));
 					};
-					self.prior_object = Some(next_object_id(self.prior_object, id_delta, self.start)?);
+					let id = next_object_id(self.prior_object, id_delta, self.start)?;
+					self.prior_object = Some(id);
+					self.dropping = id < group.frame_count() as u64;
 					self.phase = match self.has_extensions {
 						true => IngestPhase::ExtSize,
 						false => IngestPhase::Size { timestamp: None },
@@ -3637,6 +3736,11 @@ impl GroupIngest {
 						self.phase = IngestPhase::Status { timestamp: *timestamp };
 						continue;
 					}
+					if self.dropping {
+						let size = usize::try_from(size).map_err(|_| Error::FrameTooLarge)?;
+						self.phase = IngestPhase::Skip { size };
+						continue;
+					}
 					// `create_frame_owned` is the allocation chokepoint: it rejects an
 					// oversized `size` and allocates up front only within the budget, so
 					// no pre-check is needed.
@@ -3647,9 +3751,11 @@ impl GroupIngest {
 				IngestPhase::Status { timestamp } => {
 					let status: u64 = ready!(reader.poll_decode(&mut cx))?;
 					if status == 0 {
-						let timestamp = timestamp.unwrap_or_else(|| crate::Timestamp::from(self.runtime.now()));
-						let frame = group.create_frame_owned(frame::Info { size: 0, timestamp }, &self.budget)?;
-						frame.finish()?;
+						if !self.dropping {
+							let timestamp = timestamp.unwrap_or_else(|| crate::Timestamp::from(self.runtime.now()));
+							let frame = group.create_frame_owned(frame::Info { size: 0, timestamp }, &self.budget)?;
+							frame.finish()?;
+						}
 						self.phase = IngestPhase::Delta;
 					} else if status == END_OF_GROUP && !self.has_end {
 						self.phase = IngestPhase::Finished(Ended::Group);
@@ -3676,6 +3782,10 @@ impl GroupIngest {
 							return Poll::Ready(Err(err));
 						}
 					}
+				}
+				IngestPhase::Skip { size } => {
+					ready!(reader.poll_skip(&mut cx, size))?;
+					self.phase = IngestPhase::Delta;
 				}
 				IngestPhase::Finished(ended) => {
 					let ended = std::mem::replace(ended, Ended::Group);
@@ -6291,7 +6401,9 @@ fn subscribe_join(
 	version: Version,
 ) -> Result<Join, Error> {
 	if !Filter::is_draft20(version) {
-		if start.is_some_and(|start| start.frame != 0) || end.is_some() {
+		// No pre-draft-20 join starts partway through a group, so a resume point there
+		// asks for its whole group; the objects below it are dropped on arrival.
+		if end.is_some() {
 			return Err(Error::Unsupported);
 		}
 		return Ok(Join {
@@ -6526,16 +6638,15 @@ mod filter_tests {
 		}
 	}
 
-	/// A frame-level start has no joining-FETCH spelling, so it is refused rather than
-	/// rounded down to the group.
+	/// A frame-level start has no joining-FETCH spelling, so a resumed subscription asks
+	/// for its whole group; the frames below the start are already cached elsewhere.
 	#[test]
-	fn older_drafts_refuse_a_frame_level_start() {
+	fn older_drafts_widen_a_frame_level_start_to_its_group() {
 		for version in JOINING_DRAFTS {
+			let join = subscribe_join(Some(track::Position { group: 7, frame: 1 }), None, version)
+				.unwrap_or_else(|err| panic!("{version}: {err}"));
 			assert!(
-				matches!(
-					subscribe_join(Some(track::Position { group: 7, frame: 1 }), None, version),
-					Err(Error::Unsupported)
-				),
+				matches!(join.fetch, Some(JoiningFetch::Absolute { group_id: 7 })),
 				"{version}"
 			);
 		}
@@ -6746,6 +6857,15 @@ mod stitch_tests {
 					track.joining = Some(joining);
 					track.largest = Some(largest);
 				}
+			}
+			self
+		}
+
+		/// Resume the subscription partway through a group another route delivered the
+		/// head of.
+		fn with_resume(self, resume: track::Position) -> Self {
+			if let Some(track) = self.subscriber.state.lock().subscribes.get_mut(&REQUEST) {
+				track.resume = Some(resume);
 			}
 			self
 		}
@@ -7164,6 +7284,59 @@ mod stitch_tests {
 		let (sequence, frames) = read_group(&mut consumer).await;
 		assert_eq!(sequence, SEQUENCE);
 		assert_eq!(frames.len(), 1, "the group is whatever one producer wrote, not both");
+	}
+
+	/// A resumed subscription that gets its group whole (a pre-draft-20 join can only ask
+	/// for all of it) keeps only the objects from where it asked: another route already
+	/// delivered the rest.
+	#[tokio::test]
+	async fn a_resumed_whole_group_drops_the_delivered_head() {
+		let h = Harness::new(Fill::Done, vec![tail_stream(SEQUENCE, 0, &[b"0", b"1", b"2"])]).with_resume(
+			track::Position {
+				group: SEQUENCE,
+				frame: 2,
+			},
+		);
+		let mut consumer = h.track.subscribe(None);
+		let mut whole = h.stream().await;
+		h.subscriber.clone().recv_group(&mut whole).await.expect("the group");
+
+		let mut group = consumer.recv_group().await.unwrap().expect("the group arrived");
+		group.start_at(0);
+		assert_eq!(group.index(), 2, "the group starts where the subscription asked");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"2");
+		assert!(group.read_frame().await.unwrap().is_none());
+	}
+
+	/// The same for a joining FETCH's head: the objects below the resume point are
+	/// dropped, and the live tail continues what is left.
+	#[tokio::test]
+	async fn a_resumed_fill_drops_the_delivered_head() {
+		let h = Harness::new(
+			Fill::Serving(Some(Timescale::MICRO)),
+			vec![
+				fill_stream(SEQUENCE, &[b"0", b"1", b"2"]),
+				tail_stream(SEQUENCE, 3, &[b"3"]),
+			],
+		)
+		.with_resume(track::Position {
+			group: SEQUENCE,
+			frame: 2,
+		});
+		let mut consumer = h.track.subscribe(None);
+		let mut fill = h.stream().await;
+		let mut tail = h.stream().await;
+		h.subscriber.clone().recv_fill(&mut fill).await.expect("fill");
+		h.subscriber.clone().recv_group(&mut tail).await.expect("tail");
+
+		let mut group = consumer.recv_group().await.unwrap().expect("the group arrived");
+		group.start_at(0);
+		assert_eq!(group.index(), 2, "the group starts where the subscription asked");
+		let mut frames = Vec::new();
+		while let Some(frame) = group.read_frame().await.unwrap() {
+			frames.push(frame.payload.to_vec());
+		}
+		assert_eq!(frames, [b"2".to_vec(), b"3".to_vec()]);
 	}
 
 	/// Without a head there is nothing to stitch onto, so a stream that starts part way
@@ -7873,41 +8046,6 @@ mod joining_fetch_tests {
 				"{version}: the subscription continues live"
 			);
 		}
-	}
-
-	/// A frame-level start is refused before SUBSCRIBE is written, rather than rounded down.
-	#[tokio::test(start_paused = true)]
-	async fn a_frame_level_start_never_reaches_the_wire() {
-		let version = Version::Draft19;
-		let session = ScriptedSession::new(Vec::new());
-		let log = session.log.clone();
-		let (tasks, _task_set) = crate::util::TaskSet::new();
-		let mut subscriber = Subscriber::new(
-			crate::time::Clock::tokio(),
-			session,
-			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
-			Control::new(None, false),
-			None,
-			peer::PeerSetup::default(),
-			crate::Hop::new(1).unwrap(),
-			None,
-			version,
-			tasks,
-			Default::default(),
-		);
-
-		let producer = crate::broadcast::Info::default().produce();
-		let mut dynamic = producer.dynamic();
-		let consumer = producer.consume();
-		let track = consumer.track("video").unwrap();
-		let _subscription =
-			track.subscribe(track::Subscription::default().with_start(track::Position { group: 7, frame: 1 }));
-		let request = dynamic.requested_track().await.expect("no track requested");
-
-		subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
-
-		let writes = log.writes.lock().unwrap().clone();
-		assert!(writes.is_empty(), "a refused join must not write SUBSCRIBE");
 	}
 
 	#[derive(Clone, Copy, PartialEq, Eq)]
