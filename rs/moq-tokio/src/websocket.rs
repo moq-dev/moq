@@ -719,7 +719,6 @@ mod tests {
 
 	#[tokio::test]
 	async fn fixed_addresses_keep_tls_name_and_request_host() {
-		tokio::time::pause();
 		check_tls_authority("relay.example", true, None).await;
 	}
 
@@ -730,7 +729,6 @@ mod tests {
 
 	#[tokio::test]
 	async fn ipv6_literal_fixed_addresses() {
-		tokio::time::pause();
 		check_tls_authority("[::1]", true, None).await;
 	}
 
