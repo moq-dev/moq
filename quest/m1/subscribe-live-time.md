@@ -8,11 +8,12 @@ frame's timestamp. A front then reveals an idle track's hidden cache as soon as
 the next route answers, and every reader's budget judges that cache against the
 real live edge, even across a gap.
 
-Today (since [#4741](https://github.com/moq-dev/moq/pull/4741)) a front brings a
-hidden group back only once the serving route delivers it again, which a route
-answering a subscription does at once for the group it is on: a quiet catalog
-or an open log returns, but older cached groups that a reader's budget would
-still accept stay fetch-only. The route's resolved start was tried as the
+Today (since [#4741](https://github.com/moq-dev/moq/pull/4741)) the serving
+route's live edge settles a hidden cache: moq-transport's Largest Location from
+its answer, or the newest group a lite route delivers (a lite answer carries no
+edge). An edge within the cache brings it back; one past it leaves the cache
+fetch-only, because nothing bounds how old it is, even when a reader's budget
+would still accept a cached group. The route's resolved start was tried as the
 signal and dropped: lite-05 answers before its SUBSCRIBE_START, and a shared
 copy reports an older subscription's start. A sparse track that delivers
 nothing for a while must still be judged on the answer, never on a frame.
@@ -38,16 +39,17 @@ Decided in planning (2026-10-03):
   is absent, encoded the same way as an absent frame timestamp. A track whose
   frames are all untimed never reports one, and no receiver invents one.
 - **lite-07 only.** It is still WIP (`moq-lite-07-wip`), so the field is added
-  without negotiation. Older versions keep revealing only what is delivered again.
+  without negotiation. Older versions keep the edge rule.
 - **API: `track::Subscriber::live().await`** resolves once the route answers the
   subscription, to `Live { start, latest: Option<Position>, time: Option<Timestamp> }`:
   the resolved start, the newest group/frame, and the live media time. Mirrored in
-  js/net. The front's pump switches to it from the crate-private
-  `track::Consumer::poll_start`, which is deleted.
+  js/net. It grows out of the crate-private `track::Request::with_edge` and
+  `track::Consumer::edge` that carry moq-transport's Largest Location today, and the
+  front's pump switches to it from those and `track::Consumer::poll_start`.
 - **The front's unpark** reveals the whole hidden cache when the answer carries
   a live time, and readers' budgets measure staleness against it instead of the
-  cache's frozen edge. Without one (untimed, older version), only groups the
-  route delivers again come back, as today.
+  cache's frozen edge. Without one (untimed, older version), the edge rule
+  stays.
 - **Independent of [Subscribe ranges](/quest/m1/subscribe-ranges/README.md)**,
   which rewrites the same messages: whichever lands second rebases.
 - `js/watch/src/sync.ts` stays as it is: its latency range (from #1620) is
