@@ -5942,9 +5942,9 @@ mod tests {
 	}
 
 	/// A warm cache whose newest group finished still resumes when the source has
-	/// nothing newer: the re-splice asks for that group's tail, which a source that
-	/// resolves starts lazily (with its first served group) can answer at once. Asking
-	/// past it left a returning catalog reader waiting for the next catalog change.
+	/// nothing newer: the source is asked to join as it would for a new reader, and its
+	/// start at the cached group brings the cache back. Asking past that group left a
+	/// returning catalog reader waiting for the next catalog change.
 	#[tokio::test]
 	async fn returning_reader_replays_a_current_warm_cache() {
 		let (_server, _upstream, mut dynamic, resolved) = served_front().await;
@@ -5977,8 +5977,7 @@ mod tests {
 		let mut source = request.resolving_start().accept(None);
 		let mut subscription = subscribing.await.unwrap().expect("resubscribe");
 
-		// The source still has group 0 as its newest: it serves the empty tail, and
-		// that is when its start resolves.
+		// The source still has group 0 as its newest, so that is where it starts.
 		let reading = tokio::spawn(async move {
 			let mut group = subscription.recv_group().await.unwrap().expect("the catalog");
 			assert_eq!(group.sequence, 0);
@@ -5987,13 +5986,13 @@ mod tests {
 		tokio::task::yield_now().await;
 		assert_eq!(
 			source.subscription().and_then(|sub| sub.start),
-			Some(track::Position { group: 0, frame: 1 }),
-			"the re-splice asked past the cached catalog"
+			None,
+			"a parked track owes nothing, so the source picks the start"
 		);
 		source.start_at(0).unwrap();
-		let mut tail = source.create_group(0u64.into()).unwrap();
-		tail.start_at(1).unwrap();
-		tail.finish().unwrap();
+		let mut group = source.create_group(0u64.into()).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"snapshot".as_ref()).unwrap();
+		group.finish().unwrap();
 		let payload = tokio::time::timeout(Duration::from_secs(1), reading)
 			.await
 			.expect("the returning reader never got the catalog")

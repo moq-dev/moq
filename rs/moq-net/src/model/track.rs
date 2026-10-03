@@ -1197,23 +1197,19 @@ impl TrackState {
 		}
 	}
 
-	/// Where the next source of a parked track is asked to start: like
-	/// [`Self::resume_floor`], except a finished newest group is asked for its (empty)
-	/// tail rather than the next group's head. A source only declares its start once
-	/// it has something to serve, so asking past its newest group would leave a
-	/// returning reader waiting on the next one.
+	/// Where the next source of a parked track is asked to start: the rest of a group
+	/// the cache holds unfinished, or nowhere in particular. With nothing owed, the
+	/// source joins as it would for a new reader, which is what judges the cache:
+	/// lite-06 resolves the start from the budget and an IETF live join from its
+	/// Largest, while an explicit start would be honored however stale.
 	fn park_floor(&self) -> Option<Position> {
-		let latest = self.latest_group?;
 		let unfinished = self
 			.lookup
 			.values()
 			.any(|slot| !slot.group.is_finished() && !slot.group.is_aborted());
-		match (unfinished, self.lookup.get(&latest)) {
-			(false, Some(slot)) => Some(Position {
-				group: latest,
-				frame: slot.group.frame_count() as u64,
-			}),
-			_ => self.resume_floor(),
+		match unfinished {
+			true => self.resume_floor(),
+			false => None,
 		}
 	}
 
