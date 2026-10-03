@@ -272,12 +272,12 @@ anything on its own. Both ends apply it: the publisher skips a group rather
 than sending it, and the subscriber skips it again as it reads, since the
 publisher only ever sees the most tolerant budget across its subscribers.
 
-Across a native route failover, the reader still judges buffered groups against
-the logical track's live edge, including groups it is draining from a retired
-route. A successor group with no timestamp leaves the preceding group's reach
-unbounded until its first frame arrives; if it is dropped first, the next group
-takes its place. A cached open group's prefix remains
-readable across repeated takeovers and idle resumes.
+A route failover is invisible to max age: the reader reads one track whichever
+route feeds it, so buffered groups are judged against that track's live edge. A
+successor group with no timestamp leaves the preceding group's reach unbounded
+until its first frame arrives; if it is dropped first, the next group takes its
+place. A cached open group's prefix stays readable when its route changes or
+its track goes idle and returns.
 
 The publisher may declare a retention window per track. Omission sets no limit;
 zero keeps only the live edge. The origin cache ceiling and cache pool may still

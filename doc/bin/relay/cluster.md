@@ -29,17 +29,22 @@ has usually removed the other stale routes too, and the relay sends one
 retraction instead of advertising each stale path in turn. Requests still
 follow the current best route immediately; only the announcement waits.
 
+When the route serving a broadcast dies, withdraws, or is beaten by a cheaper
+route from the same publisher, each subscription continues on the new route
+from the first frame its readers lack, so they see every frame once, mid-group
+included. A route through the subscribing peer itself is never used.
+
 Failover routes must carry copies of the same broadcast. For each track, the
 relay requires matching timescale, retention window, publisher priority, and
-group ordering. A source with different properties is refused before its groups
-are spliced in. If no compatible source remains, the track fails with
+group ordering. A source with different properties is refused before it serves
+the track. If no compatible source remains, the track fails with
 `Unsupported`. New immutable properties require a new track name or broadcast
 identity.
 
 A route whose original publisher (its first hop) changes is updated in place on
 both wire protocols, so the broadcast never briefly vanishes downstream.
 Subscriptions already in flight keep draining the old publisher until it ends
-and are never spliced onto the new one. New requests resolve through the updated
+and never continue on the new one. New requests resolve through the updated
 route as a fresh broadcast, without the old publisher's track properties.
 
 A publisher whose protocol names no hop (moq-transport without the cluster
