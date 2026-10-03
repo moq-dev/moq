@@ -243,7 +243,7 @@ jobs:
         run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
         shell: bash -leo pipefail {0}
       - name: Audio quality
-        run: nix develop --command just test audio-quality --enforce
+        run: nix develop --command just test audio-quality --enforce --capture
         shell: bash -leo pipefail {0}
         env:
           # Somewhere upload-artifact can reach; the harness default is under $TMPDIR.
