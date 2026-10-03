@@ -29,8 +29,8 @@ session right after `close()` against a hand-rolled HTTP/3 peer and fails on
 
 Remaining, once the releases carrying them are published:
 
-- Bump the `web-transport-moq` pin on `main` (and on `dev` if 2.0.x lands
-  first).
+- Bump the `web-transport-moq` pin on `main`, and backport it to `release`
+  if the fix lands on its line too.
 - Delete `CLOSE_LINGER`, its task, and its mock-session tests from
   moq-tokio. They are exactly what #4429 added, so reverting it is enough.
 
@@ -46,10 +46,6 @@ here, since the same `web-transport-moq` release carries its fix.
 header to `UnknownSession`, flooding relay logs with WARNs; the fork now
 keeps the read's cause and logs a reset at debug. After the bump, confirm on
 a moq.pro relay that the flood stops.
-
-## Required
-
-- [web-transport-moq 1.3.3 ships noq#24](/quest/m1/web-transport-moq-release.md) - the release to pin
 
 ## Related
 

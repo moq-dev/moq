@@ -23,7 +23,7 @@ requirement.
 
 Public API: removing `renderer.out.frame`, moving `Sync`, and changing what
 `Player` and the composable classes accept are breaks to the published
-`@moq/watch`, so the PR targets `dev`. The `@moq/signals` bridge is additive.
+`@moq/watch`. The `@moq/signals` bridge is additive.
 Wire: none.
 
 Gate on the plan's jank harness and N-player sweep, both nightly.

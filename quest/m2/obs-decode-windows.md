@@ -6,7 +6,7 @@ Supported Windows hardware decoders deliver GPU frames to the OBS source without
 
 ## Plan
 
-- Extend the native frame contract from the source replacement using moq-video's D3D11 texture representation. Verify the decoder adapter/device, OBS graphics device, texture format, and sharing capabilities. Start with Media Foundation's actual native texture path; do not infer CUDA/D3D interop from handle types.
+- Extend the native frame contract from the source replacement using moq-video's D3D11 texture representation. Add the `MoqVideoSurface` variant and lift the Windows refusal of `MoqVideoDecoderOutput.surface` in moq-ffi's `decode_video` together, with hardware proof. Verify the decoder adapter/device, OBS graphics device, texture format, and sharing capabilities. Start with Media Foundation's actual native texture path; do not infer CUDA/D3D interop from handle types.
 - Import compatible allocations or GPU-convert/blit into an OBS-compatible bounded pool. Model fences/keyed mutexes, render-thread ownership, device removal, resize, and release after GPU completion. An AddRef prevents object destruction but not decoder pool reuse.
 - Test decoded color/timestamps and no-readback traces on real Windows hardware. Include incompatible adapters, hybrid GPU, unsupported formats, import failure, and stream restart. Fallback must preserve timing and expose its reason without silently reintroducing FFmpeg.
 

@@ -11,8 +11,8 @@ then a patch for moq-net: only the adapters outside moq-net change.
 Today `rs/moq-net/src/lib.rs` re-exports `web_transport_trait`, and
 `Client::connect` / `Server::accept` (via `transport::poll::Boxable`) and the
 `*_lite` entry points are bounded by `transport::poll::Session`, which on both
-`main` and `dev` is a supertrait of `web_transport_trait::poll::Session` with a
-blanket impl. So the upstream trait is public either way, and moving `main` from
+`release` and `main` is a supertrait of `web_transport_trait::poll::Session` with a
+blanket impl. So the upstream trait is public either way, and moving `release` from
 qmux 0.5 to 0.6 (which needs `web-transport-trait` 0.5) would break moq-net.
 That kept qmux 0.5.2 a hand-published backport on 2026-10-01.
 
@@ -29,7 +29,7 @@ Decisions (2026-10-01):
   moq-tokio's `Client`/`Server` see no change; direct moq-net users wrap
   explicitly. Rejected: a blanket impl behind a feature in moq-net (versioned or
   not) and a new adapter crate.
-- ✅ Standalone m1 quest on `dev`, related to sans-io rather than a child of it.
+- ✅ Standalone m1 quest, related to sans-io rather than a child of it.
 
 Work:
 
@@ -42,7 +42,7 @@ Work:
   branch. Add an adapter test each.
 - Update `doc/` and the rustdoc on `transport`.
 
-Public API: breaking (moq-net's transport bounds and re-export), so `dev`.
+Public API: breaking (moq-net's transport bounds and re-export).
 Wire: none.
 
 ## Related

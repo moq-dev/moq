@@ -18,9 +18,8 @@ gate this line.
 
 Decided in the 2026-09-30 plan: the moq-dev/noq soft fork is replaced by a
 hard fork of quinn in `rs/`, so every QUIC change here waits for
-[the fork](/quest/m1/quic/fork/README.md) and lands on `dev`. Retarget this
-line's PR (#3975) to `dev` when the fork starts. moq-dev/noq is frozen to
-security patches for `main`.
+[the fork](/quest/m1/quic/fork/README.md). moq-dev/noq is frozen to
+security patches for `release`.
 
 Older quests say "the fork" or "noq"; read that as `moq-quic`. Their steps to
 publish a fork release, pin it, or offer a change upstream are superseded:
