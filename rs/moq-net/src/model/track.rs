@@ -282,6 +282,17 @@ struct Slot {
 	// Whether this incarnation came from the live publisher and can replace older
 	// subscription content. Fetch-only backfill stays cached but never anchors drift.
 	visible: bool,
+
+	// Delivered live, then withheld from arrival-order readers while the track is idle;
+	// see [`TrackState::hide_cache`].
+	parked: bool,
+}
+
+impl Slot {
+	/// Delivered by the live feed, parked or not, rather than fetched as backfill.
+	fn live(&self) -> bool {
+		self.visible || self.parked
+	}
 }
 
 /// Heap the track keeps per cached group, excluding the group itself
@@ -936,6 +947,7 @@ impl TrackState {
 				group: group.clone(),
 				stamp,
 				visible,
+				parked: false,
 			},
 		);
 		if visible {
@@ -1146,14 +1158,55 @@ impl TrackState {
 		}
 	}
 
-	/// Hand a group the cache holds only for fetches to arrival-order readers, once the
-	/// live feed delivered it too. A no-op for a group they were already offered.
+	/// Withhold every group the live feed delivered from arrival-order readers, for a
+	/// front's logical track gone idle: how stale the cache is cannot be told until a live
+	/// feed shows where the track is now. Fetches still find the groups. Returns the
+	/// newest group withheld.
+	///
+	/// Each group is restamped, which retires its arrival entry, and re-enters the
+	/// eviction order under the new stamp.
+	fn hide_cache(&mut self) -> Option<u64> {
+		let sequences: Vec<u64> = self
+			.lookup
+			.iter()
+			.filter(|(_, slot)| slot.visible)
+			.map(|(sequence, _)| *sequence)
+			.collect();
+		for sequence in &sequences {
+			self.next_stamp = self.next_stamp.wrapping_add(1);
+			let stamp = self.next_stamp;
+			let protected = self.protects(*sequence);
+			let slot = self.lookup.get_mut(sequence).expect("collected above");
+			slot.stamp = stamp;
+			slot.visible = false;
+			slot.parked = true;
+			if !protected {
+				self.evict.push_back((*sequence, stamp));
+			}
+		}
+		sequences.last().copied()
+	}
+
+	/// Hand every group [`Self::hide_cache`] withheld back to arrival-order readers, in
+	/// sequence order.
+	fn reveal_cache(&mut self) {
+		for (sequence, slot) in self.lookup.iter_mut() {
+			if std::mem::take(&mut slot.parked) && !slot.group.is_aborted() {
+				slot.visible = true;
+				self.arrival.push_back((*sequence, slot.stamp));
+			}
+		}
+	}
+
+	/// Hand a group withheld from arrival-order readers (fetched, or hidden while idle)
+	/// to them, once the live feed delivered it. A no-op for a group already offered.
 	fn reveal_group(&mut self, sequence: u64) {
 		if let Some(slot) = self.lookup.get_mut(&sequence)
 			&& !slot.visible
 			&& !slot.group.is_aborted()
 		{
 			slot.visible = true;
+			slot.parked = false;
 			self.arrival.push_back((sequence, slot.stamp));
 		}
 	}
@@ -1172,7 +1225,7 @@ impl TrackState {
 	/// stale, so the source joins at its live edge as it would for a new reader, while an
 	/// explicit start would be honored however stale.
 	fn resume_floor(&self, idle: bool) -> Option<Position> {
-		let mut live = self.lookup.iter().filter(|(_, slot)| slot.visible);
+		let mut live = self.lookup.iter().filter(|(_, slot)| slot.live());
 		if let Some((sequence, slot)) = live
 			.clone()
 			.find(|(_, slot)| !slot.group.is_finished() && !slot.group.is_aborted())
@@ -1552,8 +1605,25 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Offer a group cached for fetches to arrival-order readers, once the live feed
-	/// delivered it too; see `TrackState::reveal_group`.
+	/// Withhold the cache from arrival-order readers unless one is consuming the track
+	/// already and so may have read it; see `TrackState::hide_cache`. `Err` while used,
+	/// otherwise the newest group withheld.
+	pub(crate) fn hide_cache(&mut self) -> std::result::Result<Option<u64>, ()> {
+		match self.state.write_unused() {
+			kio::Unused::Idle(mut state) => Ok(state.hide_cache()),
+			kio::Unused::Used | kio::Unused::Closed => Err(()),
+		}
+	}
+
+	/// Settle a [`Self::hide_cache`]; see `TrackState::reveal_cache`.
+	pub(crate) fn reveal_cache(&mut self) {
+		if let Ok(mut state) = self.modify() {
+			state.reveal_cache();
+		}
+	}
+
+	/// Offer a withheld group to arrival-order readers, once the live feed delivered it
+	/// too; see `TrackState::reveal_group`.
 	pub(crate) fn reveal_group(&mut self, sequence: u64) {
 		if let Ok(mut state) = self.modify() {
 			state.reveal_group(sequence);

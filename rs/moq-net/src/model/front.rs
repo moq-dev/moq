@@ -569,7 +569,7 @@ impl Front {
 		};
 		track.used = false;
 		// Nothing reads it, so a copy it still drains goes with the park.
-		let draining = track.draining.take().is_some();
+		track.draining = None;
 		match track.state {
 			// A local source keeps its own cache, so a cached copy would only be a staler
 			// duplicate of it: forget the track outright, and a returning reader
@@ -589,9 +589,12 @@ impl Front {
 				actions.push(Action::Park { track: name });
 			}
 			TrackState::Parked { .. } => {}
+			// The pump still holds what earlier copies delivered: park it too, so a reader
+			// returning within the linger is not handed a cache no live route vouched for.
 			TrackState::Idle | TrackState::Querying { .. } => {
 				track.state = TrackState::Parked { since: now };
-				if draining {
+				// An ended track's cache is the whole track: nothing is live to vouch for.
+				if !track.ended {
 					actions.push(Action::Park { track: name });
 				}
 			}
