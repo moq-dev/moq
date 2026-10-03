@@ -2148,15 +2148,21 @@ where
 		track: &track::Producer,
 		joining: JoiningFetch,
 	) -> Option<MaybeSendBox<'static, ()>> {
-		let fill = {
+		let (fill, largest) = {
 			let state = self.state.lock();
-			state.subscribes.get(&subscribe_id)?.fill.clone()
+			let held = state.subscribes.get(&subscribe_id)?;
+			(held.fill.clone(), held.largest)
+		};
+		// Where the subscription starts if the join falls back to live.
+		let live = Live {
+			track: track.clone(),
+			start: largest.map(|largest| largest.group),
 		};
 
 		let fetch_id = match self.control.next_request_id(&self.runtime).await {
 			Ok(id) => id,
 			Err(_) => {
-				settle_join_live(&fill);
+				settle_join_live(&fill, live);
 				return None;
 			}
 		};
@@ -2172,7 +2178,7 @@ where
 			Ok(s) => s,
 			Err(err) => {
 				tracing::debug!(%err, "failed to open joining FETCH stream");
-				settle_join_live(&fill);
+				settle_join_live(&fill, live);
 				return None;
 			}
 		};
@@ -2208,22 +2214,22 @@ where
 		.await
 		{
 			tracing::debug!(%err, "failed to write joining FETCH");
-			settle_join_live(&fill);
+			settle_join_live(&fill, live);
 			return None;
 		}
 
 		let mut this = self.clone();
 		Some(
 			async move {
-				this.finish_joining_fetch(stream, fill).await;
+				this.finish_joining_fetch(stream, fill, live).await;
 			}
 			.maybe_boxed(),
 		)
 	}
 
-	async fn finish_joining_fetch(&mut self, mut stream: Stream<S, Version>, fill: kio::Producer<Fill>) {
+	async fn finish_joining_fetch(&mut self, mut stream: Stream<S, Version>, fill: kio::Producer<Fill>, live: Live) {
 		if !matches!(self.read_fetch_response(&mut stream).await, Ok(true)) {
-			settle_join_live(&fill);
+			settle_join_live(&fill, live);
 			let _ = stream.writer.close().await;
 			return;
 		}
@@ -3571,14 +3577,24 @@ fn poll_settled(settle: &mut Settle, waiter: &kio::Waiter, fill: &kio::Producer<
 	settle.poll(waiter, |tail| filled && count > 0 && tail.streams() >= count)
 }
 
+/// The track a joining FETCH serves, and the group its subscription starts at should the
+/// join fall back to live: the publisher's edge, Largest.
+struct Live {
+	track: track::Producer,
+	start: Option<u64>,
+}
+
 /// A refused or missing joining FETCH continues the subscription live: drop the outstanding
-/// fill so a mid-group tail is not left waiting on a head that is never coming.
-fn settle_join_live(fill: &kio::Producer<Fill>) {
-	let Ok(mut state) = fill.write() else {
-		return;
-	};
-	if matches!(*state, Fill::Requested | Fill::Serving(_)) {
+/// fill so a mid-group tail is not left waiting on a head that is never coming, and declare
+/// the start at the edge, since nothing below it is coming now.
+fn settle_join_live(fill: &kio::Producer<Fill>, live: Live) {
+	if let Ok(mut state) = fill.write()
+		&& matches!(*state, Fill::Requested | Fill::Serving(_))
+	{
 		*state = Fill::Done;
+	}
+	if let Some(start) = live.start {
+		let _ = live.track.clone().start_at(start);
 	}
 }
 

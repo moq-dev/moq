@@ -297,3 +297,101 @@ route_change_tests! {
 	ietf_19: "moq-transport-19",
 	ietf_22: "moq-transport-22",
 }
+
+/// `P` feeds `A` slowly and `B` promptly, and `R` reads through `A` until that route dies
+/// partway through group 1: `A` has handed on (1, 0) and (1, 1) while `P` has already
+/// moved on to group 2. `B` (warmed by another reader on `W`) holds everything, so `R`
+/// resumes there from (1, 2).
+async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<(u64, moq_net::Result<Vec<u8>>)> {
+	async fn lagged(version: Version, from: &origin::Producer, to: &origin::Producer, lag: Duration) -> MockPair {
+		let mut options = MockConnectOptions::new(version);
+		options.server_publish = Some(from.consume());
+		options.client_subscribe = Some(to.clone());
+		options.latency = lag;
+		connect_mock(options).await
+	}
+	async fn subscribe(origin: &origin::Producer) -> track::Subscriber {
+		let consumer = origin.consume();
+		consumer.routed("live").await.unwrap();
+		let remote = consumer.request_broadcast("live").await.unwrap();
+		let preferences = track::Subscription::default().with_max_age(Duration::from_secs(60));
+		remote.track("video").unwrap().subscribe(preferences).await.unwrap()
+	}
+	fn write(group: &mut moq_net::group::Producer, sequence: u64, frame: u64) {
+		let timestamp = Timestamp::from_micros(1_000_000 + sequence * 100_000 + frame * 1_000).unwrap();
+		group.write_frame(timestamp, payload(sequence, frame)).unwrap();
+	}
+
+	let (p, a, b, r, w) = (
+		produce_origin(1),
+		produce_origin(2),
+		produce_origin(3),
+		produce_origin(4),
+		produce_origin(5),
+	);
+	let broadcast = p.create_broadcast("live").unwrap();
+	let track = broadcast.create_track("video", None).unwrap();
+	broadcast.announce(Default::default()).unwrap();
+	let p_a = lagged(version, &p, &a, Duration::from_millis(300)).await;
+	let p_b = lagged(version, &p, &b, Duration::ZERO).await;
+	let a_r = lagged(version, &a, &r, Duration::ZERO).await;
+	let b_w = lagged(version, &b, &w, Duration::ZERO).await;
+	let warm = read(subscribe(&w).await);
+	let mut rx = read(subscribe(&r).await);
+	let b_r = lagged(version, &b, &r, Duration::ZERO).await;
+	settle().await;
+
+	let mut group = track.append_group().unwrap();
+	for frame in 0..4 {
+		write(&mut group, 0, frame);
+	}
+	group.finish().unwrap();
+	for frame in 0..4 {
+		assert_eq!(next(&mut rx).await, (0, payload(0, frame)), "{version}");
+	}
+
+	let mut group = track.append_group().unwrap();
+	write(&mut group, 1, 0);
+	write(&mut group, 1, 1);
+	assert_eq!(next(&mut rx).await, (1, payload(1, 0)), "{version}");
+	assert_eq!(next(&mut rx).await, (1, payload(1, 1)), "{version}");
+	// P moves on while A is still behind.
+	write(&mut group, 1, 2);
+	write(&mut group, 1, 3);
+	group.finish().unwrap();
+	let mut group = track.append_group().unwrap();
+	write(&mut group, 2, 0);
+
+	a_r.server.abort(Error::Cancel);
+	a_r.client.abort(Error::Cancel);
+	settle().await;
+	tokio::spawn(async move {
+		let _keep = (broadcast, track, group, p_a, p_b, b_w, b_r, warm, a_r, p, a, b, r, w);
+		std::future::pending::<()>().await
+	});
+	rx
+}
+
+/// Lite carries the resume point upstream, so the rest of the group and the next one
+/// arrive in order.
+#[tokio::test(start_paused = true)]
+async fn lite_resumes_after_a_lagging_route_dies() {
+	for version in ["moq-lite-05", "moq-lite-06"] {
+		let version: Version = version.parse().unwrap();
+		let mut rx = lagging_route_dies(version).await;
+		assert_eq!(next(&mut rx).await, (1, payload(1, 2)), "{version}");
+		assert_eq!(next(&mut rx).await, (1, payload(1, 3)), "{version}");
+		assert_eq!(next(&mut rx).await, (2, payload(2, 0)), "{version}");
+	}
+}
+
+/// Before draft 20 the resume rides a joining FETCH from group 1 through Largest, which
+/// a moq-rs publisher refuses for spanning several groups, so the subscription joins
+/// live instead. The rest of group 1 is still fetched on its own.
+#[tokio::test(start_paused = true)]
+async fn an_older_ietf_draft_still_resumes_the_open_group() {
+	let version: Version = "moq-transport-19".parse().unwrap();
+	let mut rx = lagging_route_dies(version).await;
+	assert_eq!(next(&mut rx).await, (1, payload(1, 2)));
+	assert_eq!(next(&mut rx).await, (1, payload(1, 3)));
+}
