@@ -640,10 +640,11 @@ impl Pump {
 	}
 
 	/// Stop reading new groups from the input. It keeps feeding the live groups it has
-	/// open, through the newest of them, and is let go once it feeds none. A fetch still
-	/// in flight there is dropped: the next input is asked instead.
+	/// open, through the newest of them, and is let go once it feeds none; its
+	/// subscription is bounded there so the route stops sending anything newer. A fetch
+	/// still in flight there is dropped: the next input is asked instead.
 	fn retire(&mut self) {
-		let Some(input) = self.input.take() else { return };
+		let Some(mut input) = self.input.take() else { return };
 		for open in self.groups.values_mut().chain(self.fetched.values_mut()) {
 			if let Some(Asked {
 				input: id,
@@ -661,6 +662,16 @@ impl Pump {
 			.map(|(sequence, _)| *sequence)
 			.next_back();
 		if let Some(until) = until {
+			// Only an answered subscription: bounding one still in flight could ride its
+			// first request, and a moq-transport publisher reaching that end finishes the
+			// session's copy of the track for every reader of it.
+			if let Sub::Ready(sub) = &mut input.sub {
+				let wire = Subscription {
+					end: Position::after_group(until),
+					..sub.subscription()
+				};
+				let _ = sub.update(wire);
+			}
 			self.draining.push((input, until));
 		}
 	}
@@ -930,8 +941,9 @@ impl Pump {
 				let step = match step {
 					// Every reader would skip it, and the serving route is not delivering it:
 					// nothing is left to wait for, whether no copy has its next frame or only a
-					// replaced route that went quiet does. The serving route's own groups are
-					// left to the readers, like any relay's.
+					// replaced route that went quiet does. Aborted rather than left to each
+					// reader's budget, which would end a truncated group as if it were whole.
+					// The serving route's own groups are left to the readers, like any relay's.
 					Step::Open
 						if live
 							&& (open.blocked() || !open.copies.iter().any(|copy| Some(copy.input) == serving))
@@ -1710,7 +1722,11 @@ mod test {
 		let (b, b_copy) = copy("b");
 		feed(&mut pump, &mut handle, &b_copy);
 		drop(a_copy);
-		assert!(a.subscription().is_some(), "the replaced route still feeds group 0");
+		assert_eq!(
+			a.subscription().map(|sub| sub.end),
+			Some(Position::after_group(0)),
+			"the replaced route still feeds group 0, and nothing newer"
+		);
 
 		// A's frame lands; B's copy of it is a duplicate.
 		write(&mut group, "0.1");
