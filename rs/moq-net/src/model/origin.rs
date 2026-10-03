@@ -6284,6 +6284,9 @@ mod tests {
 		let subscribing = tokio::spawn(async move { track.subscribe(None).await });
 		let mut resumed = dynamic.requested_track().await.unwrap().resolving_start().accept(None);
 		resumed.start_at(0).unwrap();
+		// The route resumes the open group where the warm head stops, which vouches for it.
+		let mut resumed_group = resumed.create_group(0u64.into()).unwrap();
+		resumed_group.start_at(2).unwrap();
 		let mut subscription = subscribing.await.unwrap().unwrap();
 		let mut reading = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&reading.read_frame().await.unwrap().unwrap().payload[..], b"a");
@@ -6330,6 +6333,8 @@ mod tests {
 			.resolving_start()
 			.accept(None);
 		next.start_at(0).unwrap();
+		let mut next_group = next.create_group(0u64.into()).unwrap();
+		next_group.start_at(3).unwrap();
 		let mut subscription = subscribing.await.unwrap().unwrap();
 		let mut reading = subscription.recv_group().await.unwrap().unwrap();
 		for expected in [b"a", b"b", b"c"] {
@@ -8088,14 +8093,12 @@ mod tests {
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"next");
 	}
 
-	/// A returning reader judges the warm cache against the logical track's live
-	/// edge: groups the fresh source has left behind by more than the budget are
-	/// skipped, exactly as they would be on a track read without a break.
+	/// A returning reader is served only what the fresh source delivers: the warm cache
+	/// stays with fetches unless the source delivers a cached group again, even when its
+	/// start is at the cached edge and a cached group would still pass the budget.
 	///
 	/// A local source is released rather than parked (it keeps its own cache), so
 	/// this goes through a served front, which is what actually holds the cache.
-	/// The copy resolves at the cached edge, not past it: resolving past it drops
-	/// the cache outright, which is a different case.
 	#[tokio::test]
 	async fn resumed_reader_skips_warm_groups_behind_the_new_edge() {
 		let ms = |v: u64| crate::Timestamp::from_millis(v).unwrap();
@@ -8153,9 +8156,9 @@ mod tests {
 		let mut subscription = subscribing.await.unwrap().expect("resubscribe");
 		settle(|| subscription.latest() == Some(22)).await;
 
-		// Groups 0..=2 reach at most 60ms against an edge at 440ms. Group 3 reaches
-		// where group 20 starts, 40ms behind that edge, inside the 100ms budget.
-		assert_eq!(drain(&mut subscription), [3, 20, 21, 22]);
+		// The hidden cache comes back only as the route delivers it again, which this one
+		// does not: groups 0..=3 stay with fetches, however fresh group 3 still is.
+		assert_eq!(drain(&mut subscription), [20, 21, 22]);
 	}
 
 	/// A front serving from another front still drops upstream on the unused edge,

@@ -387,11 +387,11 @@ pub(crate) struct Pump {
 	/// The track went unread and no input has delivered since: what is cached may be
 	/// stale, so the next route joins at its live edge unless a group is still owed.
 	idle: Arc<AtomicBool>,
-	/// The track went unread: withhold the cache from readers once nobody reads it.
+	/// The track went unread: withhold the cache from readers once nobody reads it. How
+	/// stale it is cannot be told, so a group comes back only once the serving route
+	/// delivers it again, which a route answering a subscription does at once for the
+	/// group it is on. All of it comes back once the track ends.
 	hiding: bool,
-	/// The newest group withheld: how stale the cache is cannot be told until a live route
-	/// says where the track is now. The next one to answer its subscription settles it.
-	hidden: Option<u64>,
 	/// Held while a fetched group is still being written: a fetch in progress reads the
 	/// track, so the front keeps an input for it.
 	fetching: Option<track::Consumer>,
@@ -434,7 +434,6 @@ impl Pump {
 			concluding: false,
 			idle,
 			hiding: false,
-			hidden: None,
 			fetching: None,
 			starting: false,
 			mirrored: None,
@@ -517,6 +516,7 @@ impl Pump {
 
 	fn finish(&mut self) {
 		self.retire();
+		self.reveal();
 		self.give_up_orphans(Error::Closed);
 		self.logical = Logical::Done(match std::mem::replace(&mut self.logical, Logical::Done(None)) {
 			Logical::Live(producer) => {
@@ -684,12 +684,24 @@ impl Pump {
 			self.hiding = false;
 			return;
 		};
-		match producer.hide_cache() {
-			Ok(newest) => {
+		loop {
+			if producer.hide_cache() {
 				self.hiding = false;
-				self.hidden = self.hidden.max(newest);
+				return;
 			}
-			Err(()) => producer.weak().poll_unused(waiter),
+			// The reader may have left since: register, then look again.
+			let weak = producer.weak();
+			weak.poll_unused(waiter);
+			if weak.is_used() {
+				return;
+			}
+		}
+	}
+
+	/// The track ended, so its cache is the whole track: nothing is stale any more.
+	fn reveal(&mut self) {
+		if let Some(producer) = self.logical.producer() {
+			producer.reveal_cache();
 		}
 	}
 
@@ -719,6 +731,8 @@ impl Pump {
 			&& producer.final_sequence().is_none()
 		{
 			let _ = producer.finish_at(fin);
+			// The track ended, so its cache is the whole track.
+			producer.reveal_cache();
 		}
 
 		match &input.sub {
@@ -756,23 +770,6 @@ impl Pump {
 		{
 			let _ = producer.start_at(start);
 			self.mirrored = Some(start);
-		}
-		// The route's answer settles a hidden cache, without waiting on a group a sparse
-		// track may not send for a while. Starting where the cache leaves off (or declaring
-		// no start), the cache leads into its feed and comes back. Starting past a gap, it
-		// stays with fetches: nothing bounds how old it is. Groups already racing in land
-		// first either way.
-		if let Some(newest) = self.hidden
-			&& let Poll::Ready(start) = input.copy.poll_start(waiter)
-			// A copy that died reads as having declared nothing, which is no answer.
-			&& (start.is_some() || input.copy.poll_complete(&kio::Waiter::noop()).is_pending())
-		{
-			if start.is_none_or(|start| start <= newest.saturating_add(1))
-				&& let Some(producer) = self.logical.producer()
-			{
-				producer.reveal_cache();
-			}
-			self.hidden = None;
 		}
 		let Sub::Ready(sub) = &mut input.sub else {
 			unreachable!("resolved above")
@@ -827,7 +824,7 @@ impl Pump {
 			input.newest = input.newest.max(Some(group.sequence));
 			let id = input.id;
 			self.idle.store(false, Ordering::Relaxed);
-			self.attach(id, group);
+			self.attach(id, group, true);
 		}
 	}
 
@@ -869,31 +866,37 @@ impl Pump {
 		}
 		let progress = !groups.is_empty();
 		for (id, group) in groups {
-			self.attach(id, group);
+			self.attach(id, group, false);
 		}
 		progress
 	}
 
 	/// Add a copy the live feed delivered to its logical group, creating the group unless
 	/// it was closed already. One the cache holds but readers were not offered (fetched, or
-	/// hidden while idle) is current, so it is offered now.
-	fn attach(&mut self, input: u64, group: group::Consumer) {
+	/// hidden while idle) is current once the serving route delivers it, so it is offered
+	/// now. While the track is idle a replaced route only continues groups: nothing new it
+	/// sends then is vouched for.
+	fn attach(&mut self, input: u64, group: group::Consumer, serving: bool) {
 		let sequence = group.sequence;
+		// Before the closed check: a group finished before the track went idle is closed,
+		// and still current once the serving route delivers it again.
+		if serving && let Some(producer) = self.logical.producer() {
+			producer.reveal_group(sequence);
+		}
 		if self.closed.contains(&sequence) {
 			return;
 		}
 		let open = match self.groups.entry(sequence) {
 			btree_map::Entry::Occupied(open) => open.into_mut(),
+			btree_map::Entry::Vacant(_) if !serving && self.idle.load(Ordering::Relaxed) => return,
 			btree_map::Entry::Vacant(vacant) => {
 				let Some(producer) = self.logical.producer() else {
 					return;
 				};
 				match producer.create_group(group::Info { sequence }) {
 					Ok(dst) => vacant.insert(Open::new(dst, None)),
-					// The cache holds it whole already, perhaps hidden from readers of the
-					// live feed, which now delivers it.
+					// The cache holds it whole already (offered above if hidden).
 					Err(_) => {
-						producer.reveal_group(sequence);
 						let Some(mut open) = self.fetched.remove(&sequence) else {
 							return;
 						};
@@ -2274,11 +2277,11 @@ mod test {
 		);
 	}
 
-	/// A route whose answer picks up where the hidden cache leaves off brings it back,
-	/// ahead of its own groups. The hide waits for a passing lookup to go, so a reader
-	/// that saw the cache never gets it twice.
+	/// A route delivering a hidden group again brings that group back: it is current.
+	/// The hide waits for a passing lookup to go, so a reader that saw the cache never gets
+	/// it twice.
 	#[test]
-	fn a_connected_route_brings_the_hidden_cache_back() {
+	fn a_redelivered_group_comes_back() {
 		let (mut pump, mut handle, logical) = logical();
 		let (a, a_copy) = copy("a");
 		feed(&mut pump, &mut handle, &a_copy);
@@ -2303,16 +2306,22 @@ mod test {
 		);
 		let (b, b_copy) = copy("b");
 		feed(&mut pump, &mut handle, &b_copy);
+		let mut again = b.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut again, "0.0");
+		again.finish().unwrap();
 		let mut next = b.create_group(group::Info { sequence: 1 }).unwrap();
 		write(&mut next, "1.0");
 		next.finish().unwrap();
 		step(&mut pump);
-		assert_eq!(recv(&mut sub).sequence, 0);
+		let mut zero = recv(&mut sub);
+		assert_eq!(zero.sequence, 0);
+		assert_eq!(drain(&mut zero), (vec!["0.0".into()], Some(Ok(()))));
 		assert_eq!(recv(&mut sub).sequence, 1);
+		assert!(sub.recv_group().now_or_never().is_none(), "a group was delivered twice");
 	}
 
-	/// A route that dies before answering its subscription judged nothing: the cache stays
-	/// hidden, and the next route's answer settles it.
+	/// A route that dies before delivering anything vouched for nothing: the cache stays
+	/// hidden until the next route delivers it again.
 	#[test]
 	fn a_route_dying_before_its_answer_keeps_the_cache_hidden() {
 		let (mut pump, mut handle, logical) = logical();
@@ -2340,10 +2349,13 @@ mod test {
 			"revealed by a route that never answered"
 		);
 
-		let (mut c, c_copy) = copy("c");
-		c.start_at(1).unwrap();
+		let (c, c_copy) = copy("c");
 		feed(&mut pump, &mut handle, &c_copy);
-		assert_eq!(recv(&mut sub).sequence, 0, "C picks up where the cache leaves off");
+		let mut again = c.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut again, "0.0");
+		again.finish().unwrap();
+		step(&mut pump);
+		assert_eq!(recv(&mut sub).sequence, 0, "C delivers group 0 again");
 	}
 
 	/// A group a fetch put in the cache is hidden from readers of the live feed. Once
@@ -2745,7 +2757,8 @@ mod test {
 
 	/// A returning reader's next input declares its start, delivers a whole group, and
 	/// dies, all before the pump task runs. Its group is still written, and it reads as a
-	/// route that served the track, not one that refused it.
+	/// route that served the track, not one that refused it. The hidden group it did not
+	/// deliver again stays hidden.
 	#[test]
 	fn a_copy_dying_after_its_start_still_counts() {
 		let (mut pump, mut handle, logical) = logical();
@@ -2781,7 +2794,7 @@ mod test {
 		let got: Vec<u64> = std::iter::from_fn(|| sub.recv_group().now_or_never().and_then(|g| g.ok().flatten()))
 			.map(|g| g.sequence)
 			.collect();
-		assert_eq!(got, vec![0, 1], "B delivered group 1");
+		assert_eq!(got, vec![1], "B delivered group 1, and only that");
 		assert!(ended.delivered, "B delivered a whole group but reads as a refusal");
 	}
 
@@ -3404,5 +3417,194 @@ mod test {
 		whole.finish().unwrap();
 		step(&mut pump);
 		assert_eq!(drain(&mut reading), (vec!["".into(), "0.1".into()], Some(Ok(()))));
+	}
+
+	/// Readers leave, and the next route starts past a gap, so the hidden cache (group 0)
+	/// stays with fetches. Readers leave again, and the route after that delivers only
+	/// newer groups: neither hidden group is vouched for.
+	#[test]
+	fn a_cache_judged_past_a_gap_stays_hidden_across_a_second_idle() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut zero = a.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut zero, "0.0");
+		zero.finish().unwrap();
+		step(&mut pump);
+		drop(logical);
+		handle.detach();
+		step(&mut pump);
+
+		// B starts past a gap: group 0 is left to fetches.
+		let logical = handle.weak.try_consume().expect("cached");
+		let mut sub = subscribe(&logical);
+		let (mut b, b_copy) = copy("b");
+		b.start_at(7).unwrap();
+		feed(&mut pump, &mut handle, &b_copy);
+		let mut seven = b.create_group(group::Info { sequence: 7 }).unwrap();
+		write(&mut seven, "7.0");
+		seven.finish().unwrap();
+		step(&mut pump);
+		assert_eq!(recv(&mut sub).sequence, 7);
+		assert!(sub.recv_group().now_or_never().is_none());
+
+		// Unread again, then C picks up right after group 7.
+		drop((sub, logical));
+		handle.detach();
+		step(&mut pump);
+		let logical = handle.weak.try_consume().expect("cached");
+		let mut sub = subscribe(&logical);
+		let (mut c, c_copy) = copy("c");
+		c.start_at(8).unwrap();
+		feed(&mut pump, &mut handle, &c_copy);
+		let mut eight = c.create_group(group::Info { sequence: 8 }).unwrap();
+		write(&mut eight, "8.0");
+		eight.finish().unwrap();
+		step(&mut pump);
+		let mut got = Vec::new();
+		while let Some(Ok(Some(group))) = sub.recv_group().now_or_never() {
+			got.push(group.sequence);
+		}
+		assert_eq!(got, vec![8], "a hidden group no route delivered again was served");
+	}
+
+	/// A lite-05 route resolves its subscription before its SUBSCRIBE_START lands, so its
+	/// answer cannot vouch for the hidden cache. Only what it delivers comes back.
+	#[test]
+	fn a_start_declared_after_the_answer_reveals_nothing() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut zero = a.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut zero, "0.0");
+		zero.finish().unwrap();
+		step(&mut pump);
+		drop(logical);
+		handle.detach();
+		step(&mut pump);
+
+		let logical = handle.weak.try_consume().expect("cached");
+		let mut sub = subscribe(&logical);
+		// Lite-05: the copy is accepted with the requested floor (none, at the live edge)
+		// as its start, and the SUBSCRIBE_START arrives afterwards on the control stream.
+		let (mut b, b_copy) = copy("b");
+		feed(&mut pump, &mut handle, &b_copy);
+		b.start_at(50).unwrap();
+		let mut live = b.create_group(group::Info { sequence: 50 }).unwrap();
+		write(&mut live, "50.0");
+		live.finish().unwrap();
+		step(&mut pump);
+		let first = recv(&mut sub).sequence;
+		assert_eq!(
+			first, 50,
+			"group {first} of a stale cache was served before the live edge"
+		);
+	}
+
+	/// B answers starting right after the hidden cache, then dies before delivering a
+	/// group. It vouched for nothing, so nothing comes back and the next route still joins
+	/// at its live edge.
+	#[test]
+	fn an_answer_without_a_delivery_reveals_nothing() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut zero = a.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut zero, "0.0");
+		zero.finish().unwrap();
+		step(&mut pump);
+		drop(logical);
+		handle.detach();
+		step(&mut pump);
+
+		let logical = handle.weak.try_consume().expect("cached");
+		let mut sub = subscribe(&logical);
+		let (mut b, b_copy) = copy("b");
+		b.start_at(1).unwrap();
+		feed(&mut pump, &mut handle, &b_copy);
+		assert!(
+			sub.recv_group().now_or_never().is_none(),
+			"an answer alone revealed the cache"
+		);
+		kill(b, Vec::<group::Producer>::new());
+		step(&mut pump);
+		assert_eq!(handle.resume_floor(), None, "the next route joins at its live edge");
+	}
+
+	/// The hide drops buffered datagrams too: a reader returning within the linger is not
+	/// handed datagrams no live route vouched for.
+	#[test]
+	fn a_hidden_track_withholds_its_datagrams() {
+		let (mut pump, mut handle, logical) = logical();
+		let (mut a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let sub = subscribe(&logical);
+		a.insert_datagram(0, Timestamp::ZERO, b"stale".to_vec()).unwrap();
+		step(&mut pump);
+		drop((sub, logical));
+		handle.detach();
+		step(&mut pump);
+
+		let logical = handle.weak.try_consume().expect("cached");
+		let mut sub = subscribe(&logical);
+		let stale = sub.recv_datagram().now_or_never();
+		assert!(
+			!matches!(stale, Some(Ok(Some(_)))),
+			"a datagram from before the idle was served before a route vouched for it"
+		);
+	}
+
+	/// The hide covers sequence-order readers (moq-json, moq-ffi, moq-c) as well as
+	/// arrival-order ones.
+	#[test]
+	fn a_hidden_cache_is_withheld_from_ordered_readers() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut zero = a.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut zero, "0.0");
+		zero.finish().unwrap();
+		step(&mut pump);
+		drop(logical);
+		handle.detach();
+		step(&mut pump);
+
+		let logical = handle.weak.try_consume().expect("cached");
+		let mut ordered = subscribe(&logical).ordered();
+		let stale = ordered.next_group().now_or_never();
+		assert!(
+			!matches!(stale, Some(Ok(Some(_)))),
+			"an ordered reader was served the hidden cache"
+		);
+	}
+
+	/// The track ended upstream while it sat hidden: an ended track's cache is the whole
+	/// track, so it comes back, and a returning reader gets its last group.
+	#[test]
+	fn a_hidden_cache_comes_back_when_the_track_turns_out_finished() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut zero = a.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut zero, "0.0");
+		zero.finish().unwrap();
+		step(&mut pump);
+		drop(logical);
+		handle.detach();
+		step(&mut pump);
+
+		let logical = handle.weak.try_consume().expect("cached");
+		let mut sub = subscribe(&logical);
+		let (mut b, b_copy) = copy("b");
+		b.finish_at(1).unwrap();
+		drop(b);
+		feed(&mut pump, &mut handle, &b_copy);
+		step(&mut pump);
+		let got = sub.recv_group().now_or_never();
+		assert!(
+			matches!(&got, Some(Ok(Some(group))) if group.sequence == 0),
+			"the finished track's cache was withheld: {:?}",
+			got.map(|res| res.map(|group| group.map(|group| group.sequence)))
+		);
 	}
 }

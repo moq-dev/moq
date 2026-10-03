@@ -289,7 +289,7 @@ struct Slot {
 }
 
 impl Slot {
-	/// Delivered by the live feed, parked or not, rather than fetched as backfill.
+	/// Delivered by the live feed, hidden or not, rather than fetched as backfill.
 	fn live(&self) -> bool {
 		self.visible || self.parked
 	}
@@ -454,6 +454,8 @@ impl TrackState {
 		let best = self
 			.lookup
 			.range(next_sequence..)
+			// Hidden while the track is idle, from sequence-order readers too.
+			.filter(|(_, slot)| !slot.parked)
 			.map(|(_, slot)| &slot.group)
 			.take_while(|group| super::subscription::before_end(group.sequence, end_sequence))
 			.find(|group| !group.is_aborted());
@@ -1158,14 +1160,16 @@ impl TrackState {
 		}
 	}
 
-	/// Withhold every group the live feed delivered from arrival-order readers, for a
-	/// front's logical track gone idle: how stale the cache is cannot be told until a live
-	/// feed shows where the track is now. Fetches still find the groups. Returns the
-	/// newest group withheld.
+	/// Withhold every group the live feed delivered from readers, for a front's logical
+	/// track gone idle: how stale the cache is cannot be told until a live feed shows
+	/// where the track is now. Fetches still find the groups. Buffered datagrams are
+	/// dropped, being no more current.
 	///
 	/// Each group is restamped, which retires its arrival entry, and re-enters the
 	/// eviction order under the new stamp.
-	fn hide_cache(&mut self) -> Option<u64> {
+	fn hide_cache(&mut self) {
+		self.datagram_offset += self.datagrams.len();
+		self.datagrams.clear();
 		let sequences: Vec<u64> = self
 			.lookup
 			.iter()
@@ -1184,11 +1188,10 @@ impl TrackState {
 				self.evict.push_back((*sequence, stamp));
 			}
 		}
-		sequences.last().copied()
 	}
 
-	/// Hand every group [`Self::hide_cache`] withheld back to arrival-order readers, in
-	/// sequence order.
+	/// Hand every group [`Self::hide_cache`] withheld back to readers, in sequence order,
+	/// once the track ended: its cache is then the whole track.
 	fn reveal_cache(&mut self) {
 		for (sequence, slot) in self.lookup.iter_mut() {
 			if std::mem::take(&mut slot.parked) && !slot.group.is_aborted() {
@@ -1223,7 +1226,9 @@ impl TrackState {
 	///
 	/// An `idle` track owing nothing asks for no start at all: what it cached may be long
 	/// stale, so the source joins at its live edge as it would for a new reader, while an
-	/// explicit start would be honored however stale.
+	/// explicit start would be honored however stale. A group still open is owed either
+	/// way, so a quiet group that stays open (a log) continues from its next frame rather
+	/// than being sent whole on every return.
 	fn resume_floor(&self, idle: bool) -> Option<Position> {
 		let mut live = self.lookup.iter().filter(|(_, slot)| slot.live());
 		if let Some((sequence, slot)) = live
@@ -1605,13 +1610,15 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Withhold the cache from arrival-order readers unless one is consuming the track
-	/// already and so may have read it; see `TrackState::hide_cache`. `Err` while used,
-	/// otherwise the newest group withheld.
-	pub(crate) fn hide_cache(&mut self) -> std::result::Result<Option<u64>, ()> {
+	/// Withhold the cache from readers unless one is consuming the track already and so
+	/// may have read it; see `TrackState::hide_cache`. False while used.
+	pub(crate) fn hide_cache(&mut self) -> bool {
 		match self.state.write_unused() {
-			kio::Unused::Idle(mut state) => Ok(state.hide_cache()),
-			kio::Unused::Used | kio::Unused::Closed => Err(()),
+			kio::Unused::Idle(mut state) => {
+				state.hide_cache();
+				true
+			}
+			kio::Unused::Used | kio::Unused::Closed => false,
 		}
 	}
 
