@@ -153,9 +153,8 @@ export class SubscribeNamespaceLegacy {
 /// SUBSCRIBE_TRACKS message ID (0x51) introduced in draft-18 (#1542).
 ///
 /// moq-lite does not implement PUBLISH replication through a CDN, which is the
-/// only thing SUBSCRIBE_TRACKS enables. We never send it and reject it loudly
-/// on receipt rather than silently ignoring, since the peer would otherwise
-/// wait forever for a REQUEST_OK.
+/// only thing SUBSCRIBE_TRACKS enables. We never send it and refuse each one
+/// with REQUEST_ERROR NOT_SUPPORTED.
 export const SUBSCRIBE_TRACKS_ID = 0x51;
 
 export class SubscribeNamespaceOk {

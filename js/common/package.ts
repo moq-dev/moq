@@ -53,6 +53,11 @@ if (pkg.exports) {
 	}
 }
 
+// Worklets and workers that a page whose CSP refuses blob: hosts itself; see the package's assets().
+if (existsSync("dist/assets")) {
+	pkg.exports["./assets/*"] = "./assets/*";
+}
+
 if (pkg.sideEffects) {
 	pkg.sideEffects = pkg.sideEffects.map((p: string) => rewritePath(p, "js"));
 }

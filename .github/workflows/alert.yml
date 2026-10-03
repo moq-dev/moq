@@ -23,23 +23,25 @@ on:
     #
     # Swift, OBS, and Platform are here despite also running on pull requests:
     # Swift warms its own Rust cache on `main`, and OBS and Platform build every
-    # merge to `main` and `dev`. Those push runs are nobody's check, so a break in them
+    # merge to `main` and `release`. Those push runs are nobody's check, so a break in them
     # would otherwise go unseen. The cost is a skipped Alert run per pull
     # request.
     workflows:
       - apt-repo
+      - Back-merge
       - Cache
       - Cachix
       - Check
       - Docker
       - Interop
-      - libmoq
+      - moq-c
       - moq-cli
       - moq-gst
       - moq-relay
       - Nightly
       - OBS
       - Platform
+      - Quest
       - release-brew
       - Release Dart
       - Release Dart FFI

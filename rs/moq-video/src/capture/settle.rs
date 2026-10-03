@@ -45,6 +45,12 @@ impl<T: Clone + PartialEq> Settle<T> {
 		Self { opened, pending: None }
 	}
 
+	/// Wake an event-driven source even if its final resized frame was static.
+	#[cfg(any(target_os = "windows", test))]
+	pub fn deadline(&self) -> Option<Instant> {
+		self.pending.as_ref().map(|(_, since)| *since + HOLD)
+	}
+
 	/// Feed the geometry observed at `now`.
 	pub fn observe(&mut self, current: &T, now: Instant) -> Settled {
 		if *current == self.opened {
@@ -73,6 +79,19 @@ impl<T: Clone + PartialEq> Settle<T> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn a_static_resize_has_a_deadline_without_another_frame() {
+		let now = Instant::now();
+		let mut settle = Settle::new((800, 600));
+		assert_eq!(settle.deadline(), None);
+		assert_eq!(settle.observe(&(900, 600), now), Settled::Waiting);
+		assert_eq!(settle.deadline(), Some(now + HOLD));
+		assert_eq!(settle.observe(&(902, 600), now + HOLD / 2), Settled::Waiting);
+		assert_eq!(settle.deadline(), Some(now + HOLD + HOLD / 2));
+		assert_eq!(settle.observe(&(800, 600), now + HOLD), Settled::Open);
+		assert_eq!(settle.deadline(), None);
+	}
 
 	#[test]
 	fn the_open_geometry_captures() {

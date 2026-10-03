@@ -23,7 +23,7 @@ this.
 
 ## Required
 
-- WebKit bug 319818 (https://bugs.webkit.org/show_bug.cgi?id=319818) is fixed and shipping in a Safari release
+- [Safari ships the WebKit 319818 fix](/quest/m4/webkit-319818.md) - the release to gate on
 
 ## Closes
 

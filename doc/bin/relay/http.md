@@ -26,6 +26,9 @@ The announcement listing names each announced route by the prefix it covers;
 by convention a publisher announces each broadcast's exact path, so the list
 reads as broadcast names.
 
+`moq ls` and `moq fetch` answer the same questions over MoQ; see
+[Inspect a relay](/bin/inspect).
+
 A relay configured with more than one certificate has no single fingerprint to
 publish, and this endpoint answers for the first. The others are reachable over
 `https://`, which selects a certificate by SNI at the handshake.
@@ -52,7 +55,9 @@ split by `tier` and `role`, plus accept-loop counters per TCP listener. Alert
 on `moq_relay_accept_failures_total{class="exhausted"}`, which means the
 process ran out of a resource `accept` needs. Content dropped for drifting past
 a subscriber's budget is counted separately as `moq_relay_stale_bytes_total`
-and friends. Host CPU and memory belong to a node exporter.
+and friends. During a [shutdown drain](/bin/relay/config#shutdown),
+`moq_relay_draining_sessions` counts the sessions sent a GOAWAY that have not
+left yet. Host CPU and memory belong to a node exporter.
 
 Traffic and session counters accumulate for the node's lifetime, including
 broadcasts and sessions that have ended. The stats publishing prefix (normally

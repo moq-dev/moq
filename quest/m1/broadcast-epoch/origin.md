@@ -41,7 +41,7 @@ any wire change.
 
 Public API: behavior change on publish (the announced path gains an epoch,
 and a 32-part bare path is refused), on bare-name consume, and on what an
-exact grant admits. Decide at PR time whether that retargets to `dev`.
+exact grant admits.
 Wire: none.
 
 ## Related

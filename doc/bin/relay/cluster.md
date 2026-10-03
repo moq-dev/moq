@@ -22,6 +22,13 @@ relayed from what the peer just withdrew, rather than falling back to them one
 by one. During reconnect, another session from that peer can still advertise
 the broadcast; an old session's withdrawal does not invalidate that route.
 
+A relay two hops from the publisher's still holds routes relayed through others.
+So a change of a broadcast's best route waits 300 ms before it is announced,
+while a new broadcast and a removed one go out at once. By then the withdrawal
+has usually removed the other stale routes too, and the relay sends one
+retraction instead of advertising each stale path in turn. Requests still
+follow the current best route immediately; only the announcement waits.
+
 Failover routes must carry copies of the same broadcast. For each track, the
 relay requires matching timescale, retention window, publisher priority, and
 group ordering. A source with different properties is refused before its groups
@@ -177,6 +184,20 @@ detection and shortest-path routing. It is random on every start, which is fine
 for loop detection but makes a restarted relay look like a new node. Set
 `cluster.id` to a stable non-zero integer to pin it, below 2^53 if browser
 clients decode it.
+
+## Failure detection
+
+A peer that crashes or drops off the network sends no goodbye, so a relay only
+learns it is gone when the link goes quiet for [`quic.idle_timeout`](/bin/relay/config#quic)
+(10s by default). Until then its routes stay in place and subscribes through
+them go nowhere. Lower it to fail over faster; raise it if a lossy long-haul
+link drops while the peer is still alive, and keep `quic.keep_alive` well under
+it.
+
+QUIC uses the smaller of the two endpoints' idle timeouts
+([RFC 9000 section 10.1](https://www.rfc-editor.org/rfc/rfc9000#section-10.1)),
+so either relay on a link can shorten it for both. iroh links use the same
+timeout; WebSocket links keep their own 30s deadline.
 
 ## Authentication
 
