@@ -371,13 +371,7 @@ impl Pump {
 			{
 				self.logical = Logical::Done(None);
 				self.input = None;
-				self.groups.retain(|_, open| {
-					let held = open.src.is_some() && open.dst.poll_unused(&kio::Waiter::noop()).is_pending();
-					if !held {
-						let _ = open.dst.clone().abort(Error::Dropped);
-					}
-					held
-				});
+				self.give_up_orphans(|_| true, Error::Dropped);
 			}
 			if self.concluding && self.conclude() {
 				return Poll::Ready(());
@@ -683,7 +677,16 @@ impl Pump {
 		let mut progress = false;
 		let mut closed = Vec::new();
 		let mut delivered = false;
+		// Nothing new is read for a track that ended, so a group still being written goes
+		// on only while a reader holds it.
+		let done = matches!(self.logical, Logical::Done(_));
 		for (sequence, open) in self.groups.iter_mut() {
+			if done && open.dst.poll_unused(waiter).is_ready() {
+				let _ = open.dst.clone().abort(Error::Dropped);
+				closed.push(*sequence);
+				progress = true;
+				continue;
+			}
 			// A fetched group nobody reads any more is cut short, never cached as whole.
 			if open.fetched
 				&& open.dst.poll_handed_out(waiter).is_ready()
@@ -1506,6 +1509,36 @@ mod test {
 		tokio::time::timeout(Duration::from_secs(1), kio::wait(|waiter| group.poll_unused(waiter)))
 			.await
 			.expect("the copy's group is still wanted");
+	}
+
+	/// A forgotten track lets its source go at once, but a reader holding a group still
+	/// gets the rest of it, and only for as long as it holds it.
+	#[test]
+	fn a_forgotten_track_finishes_only_held_groups() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut sub = subscribe(&logical);
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut group, "0.0");
+		step(&mut pump);
+		let mut reading = recv(&mut sub);
+		drop((sub, logical));
+
+		assert!(handle.abort_unused(Error::Dropped), "only a group is held");
+		step(&mut pump);
+		assert!(a.subscription().is_none(), "the source is let go");
+
+		write(&mut group, "0.1");
+		step(&mut pump);
+		assert_eq!(drain(&mut reading), (vec!["0.0".into(), "0.1".into()], None));
+
+		drop(reading);
+		step(&mut pump);
+		assert!(
+			group.poll_unused(&kio::Waiter::noop()).is_ready(),
+			"nothing copies a group nobody reads"
+		);
 	}
 
 	#[test]
