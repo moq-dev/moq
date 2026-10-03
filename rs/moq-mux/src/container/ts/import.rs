@@ -414,6 +414,8 @@ impl<E: catalog::Catalog> Import<E> {
 				self.ensure_stream(es.pid, es.stream_type, &es.descriptors)?;
 			}
 		}
+		let pids: Vec<u16> = pmt.streams.iter().map(|es| es.pid.as_u16()).collect();
+		self.health.pmt_streams(&pids);
 
 		// Every stream in the initial program is registered now; release the reservation
 		// so the catalog publishes once each rendition's config resolves, not before.

@@ -261,6 +261,12 @@ impl Health {
 		self.pts.entry(pid).or_default().reset(now);
 	}
 
+	/// The elementary PIDs the latest PMT lists. A PID it no longer lists has no PTS cadence
+	/// left to grade.
+	pub(super) fn pmt_streams(&mut self, pids: &[u16]) {
+		self.pts.retain(|pid, _| pids.contains(pid));
+	}
+
 	/// `pid` changed route: forget the chain behind it, so the new route's first packet is not
 	/// judged against bytes it never accumulated, and stop grading its PTS until it has one.
 	pub(super) fn restart(&mut self, pid: u16) {
@@ -585,12 +591,13 @@ mod test {
 			self.psi(0, &psi::section(0x00, 1, 0, 0, 0, &entry));
 		}
 
-		fn pmt(&mut self) {
+		/// A PMT listing `pids` as MPEG-2 video, with the clock on [`VIDEO`].
+		fn pmt(&mut self, version: u8, pids: &[u16]) {
 			let mut body = vec![0xe0 | (VIDEO >> 8) as u8, VIDEO as u8, 0xf0, 0x00];
-			for pid in [VIDEO, PEER] {
+			for &pid in pids {
 				body.extend_from_slice(&[0x02, 0xe0 | (pid >> 8) as u8, pid as u8, 0xf0, 0x00]);
 			}
-			self.psi(PMT_PID, &psi::section(0x02, 1, 0, 0, 0, &body));
+			self.psi(PMT_PID, &psi::section(0x02, 1, version, 0, 0, &body));
 		}
 
 		/// An adaptation-only clock packet; `flag` sets `discontinuity_indicator`.
@@ -651,7 +658,7 @@ mod test {
 						self.pat();
 					}
 					if keep(t, Part::Pmt) {
-						self.pmt();
+						self.pmt(0, &[VIDEO, PEER]);
 					}
 				}
 				if keep(t, Part::Pcr) {
@@ -822,6 +829,24 @@ mod test {
 		assert_eq!(stats.pts_error, 1, "{stats:?}");
 		assert_eq!(stats.streams[&PEER].pts_error, 1);
 		assert_eq!(stats.streams[&VIDEO].pts_error, 0);
+	}
+
+	/// A stream a PMT revision drops has no PTS cadence left to grade.
+	#[test]
+	fn a_stream_the_pmt_drops_has_no_pts_cadence() {
+		let mut feed = Feed::default();
+		feed.clean(0, 1_000);
+		for t in (1_000..3_000).step_by(100) {
+			feed.pmt(1, &[VIDEO]);
+			feed.run(
+				t,
+				t + 100,
+				|t| t * MS,
+				|_, part| part != Part::Pmt && part != Part::Pes(PEER),
+			);
+		}
+		let stats = feed.stats();
+		assert_eq!(stats.health(), [0; 9], "{stats:?}");
 	}
 
 	/// The continuity counts after a feed with `fault` applied at 500 ms on [`PEER`]: stream
