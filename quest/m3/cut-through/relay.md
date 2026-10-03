@@ -5,7 +5,7 @@
 The lite and IETF sessions read incoming group streams out of order and write
 each payload range to every subscriber's stream at its output offset, so bytes
 behind an ingress hole reach the next hop before the hole is filled. On the
-[bench](/quest/m2/cut-through/bench.md), frame completion moves toward the
+[bench](/quest/m3/cut-through/bench.md), frame completion moves toward the
 direct-connection bound.
 
 ## Plan
@@ -20,7 +20,7 @@ it, no config knob; otherwise today's ordered path.
   first payload bytes.
   Frame headers are parsed from the contiguous prefix; once a header is known,
   its frame's payload ranges go into the frame with the
-  [offset write](/quest/m2/cut-through/frames.md) wherever they land. A hole
+  [offset write](/quest/m3/cut-through/frames.md) wherever they land. A hole
   covering the next header blocks later frames, because that header's position
   depends on it. Lite: `FrameIngest` in `lite/subscriber.rs`; IETF:
   `GroupIngest` in `ietf/subscriber.rs`. `Reader::poll_read_frame` in
@@ -31,7 +31,7 @@ it, no config knob; otherwise today's ordered path.
   has been parsed, including across a lite and IETF translation, since output
   header lengths depend on values (timestamp and object id deltas). Write the
   header, then the ranges with the
-  [offset write](/quest/m2/cut-through/transport.md). Lite: `GroupServe` in
+  [offset write](/quest/m3/cut-through/transport.md). Lite: `GroupServe` in
   `lite/publisher.rs`; IETF: `GroupServe` in `ietf/publisher.rs`.
 - The fetch paths stay ordered.
 - Tests over the mock transport with shuffled chunk delivery: every subscriber
@@ -52,5 +52,5 @@ must stay flat against the ordered path. Re-run it and record the result in the 
 
 ## Required
 
-- [Frame ranges](/quest/m2/cut-through/frames.md) - the model primitive
-- [Transport trait](/quest/m2/cut-through/transport.md) - the I/O primitive
+- [Frame ranges](/quest/m3/cut-through/frames.md) - the model primitive
+- [Transport trait](/quest/m3/cut-through/transport.md) - the I/O primitive

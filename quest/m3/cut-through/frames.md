@@ -15,7 +15,7 @@ Decided 2026-09-30:
   `pub(crate)`: the only users are the lite and IETF sessions in the same crate.
 - A frame written out of order keeps the received chunks by offset instead of
   copying into a pre-allocated buffer, so its memory tracks bytes received and
-  [the allocation budget](/quest/m0/frame-alloc-budget.md) does not apply. The
+  the per-session pre-allocation `Budget` (`model/frame.rs`) does not apply. The
   in-order readers (`poll_read_chunk`, `poll_read_all`) still see contiguous
   bytes up to the first hole, and `finish` still requires every byte.
 - Overlapping or out-of-bounds ranges are errors.
@@ -37,4 +37,4 @@ has a hole.
 
 ## Required
 
-- [Bench](/quest/m2/cut-through/bench.md) - a go verdict
+- [Bench](/quest/m3/cut-through/bench.md) - a go verdict

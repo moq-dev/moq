@@ -26,6 +26,7 @@ deleted when it goes stale; git history keeps it.
 - [#3201: moq-uring: use SENDMSG_ZC for large UDP GSO trains](/quest/m3/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md) - complete the prerequisite issue first
 - [#3204](/quest/m3/3204-moq-uring-register-tx-pool-buffers-for-zero-copy-sends.md) - moq-uring: register TX-pool buffers for zero-copy sends
 - [QUIC GCC](/quest/m3/quic-gcc.md) - receive timestamps in ACKs and a measured verdict on delay-based congestion control for media egress, shipping as `RealTime`
+- [Cut-through](/quest/m3/cut-through/README.md) - a relay forwards bytes behind a QUIC stream hole before the retransmission fills it, if a lossy-hop bench says it is worth it
 - [AF_XDP UDP path](/quest/m3/af-xdp.md) - the kernel-bypass verdict on today's virtio hosts that gates DPDK
 - [Unreal prototype](/quest/m3/unreal.md) - a UE5 module on the C++ package with exceptions disabled, rendering a subscribed broadcast to a texture
 - [Conan remote](/quest/m3/cpp-conan.md) - a remote we own serves the same tarball to `conan install`
