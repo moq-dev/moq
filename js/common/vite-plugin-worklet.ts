@@ -1,56 +1,80 @@
+import { basename } from "node:path";
 import { build } from "esbuild";
 import type { Plugin } from "vite";
 
 const SUFFIX = "?worklet";
+const BLOB = "?worklet-blob";
 
 /**
- * A Vite plugin that compiles AudioWorklet files and inlines them as blob URLs.
+ * A Vite plugin that bundles an AudioWorklet or Worker into a standalone script.
  *
- * Usage: import workletUrl from "./my-worklet.ts?worklet"
+ * Usage: import url from "./my-worklet.ts?worklet"; await addModule(await url(base));
  *
- * The worklet file is compiled to JS with all dependencies bundled via esbuild,
- * then inlined as a string. At runtime, a blob URL is created and exported.
- * Pass the URL to audioWorklet.addModule().
+ * The default export resolves to `new URL("<name>.js", base)` when given a base, for pages whose CSP
+ * refuses blob: and that host the file themselves. Builds emit it to `assets/<name>.js`. Without a
+ * base it resolves to a blob: URL, whose inlined source sits behind a dynamic import so code-splitting
+ * bundlers only fetch it when used. Never `import.meta.url`: many consumer bundlers drop the asset.
  */
-export function workletInline(alias?: Record<string, string>): Plugin {
+export function worklet(alias?: Record<string, string>): Plugin {
+	let production = false;
+
+	const compile = async (path: string) => {
+		const result = await build({
+			entryPoints: [path],
+			bundle: true,
+			write: false,
+			format: "esm",
+			target: "esnext",
+			// A consumer can't minify code inlined as a string, so builds do it here; dev stays readable.
+			minify: production,
+			alias: alias,
+		});
+		return result.outputFiles[0].text;
+	};
+
 	return {
-		name: "worklet-inline",
+		name: "worklet",
 		enforce: "pre",
 
-		async resolveId(source, importer) {
-			if (!source.endsWith(SUFFIX)) return;
+		configResolved(config) {
+			production = config.command === "build";
+		},
 
-			const cleanSource = source.slice(0, -SUFFIX.length);
-			const resolved = await this.resolve(cleanSource, importer, { skipSelf: true });
+		async resolveId(source, importer) {
+			const suffix = [SUFFIX, BLOB].find((suffix) => source.endsWith(suffix));
+			if (!suffix) return;
+
+			const resolved = await this.resolve(source.slice(0, -suffix.length), importer, { skipSelf: true });
 			if (!resolved) return;
 
-			return { id: resolved.id + SUFFIX, moduleSideEffects: false };
+			return { id: resolved.id + suffix, moduleSideEffects: false };
 		},
 
 		async load(id) {
-			if (!id.endsWith(SUFFIX)) return;
+			if (id.endsWith(BLOB)) {
+				const path = id.slice(0, -BLOB.length);
+				this.addWatchFile(path);
 
-			const filePath = id.slice(0, -SUFFIX.length);
-
-			if (this.addWatchFile) {
-				this.addWatchFile(filePath);
+				return [
+					`const code = ${JSON.stringify(await compile(path))};`,
+					`export default URL.createObjectURL(new Blob([code], { type: "text/javascript" }));`,
+				].join("\n");
 			}
 
-			const result = await build({
-				entryPoints: [filePath],
-				bundle: true,
-				write: false,
-				format: "esm",
-				target: "esnext",
-				alias: alias,
-			});
+			if (!id.endsWith(SUFFIX)) return;
 
-			const compiled = result.outputFiles[0].text;
+			const path = id.slice(0, -SUFFIX.length);
+			const name = basename(path).replace(/\.ts$/, ".js");
+
+			if (production) {
+				this.emitFile({ type: "asset", fileName: `assets/${name}`, source: await compile(path) });
+			}
 
 			return [
-				`const code = ${JSON.stringify(compiled)};`,
-				`const blob = new Blob([code], { type: "application/javascript" });`,
-				`export default URL.createObjectURL(blob);`,
+				`export default async (base) => {`,
+				`	if (base) return new URL(${JSON.stringify(name)}, base).href;`,
+				`	return (await import(${JSON.stringify(path + BLOB)})).default;`,
+				`};`,
 			].join("\n");
 		},
 	};

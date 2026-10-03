@@ -14,7 +14,7 @@ here.
 If the [async feature](/quest/m1/rs2ts/sans-io/async-feature.md) landed
 first with the IETF session behind it, move the session out.
 
-Public API: breaks moq-net's IETF session API; retargets to `dev`. Wire: none.
+Public API: breaks moq-net's IETF session API. Wire: none.
 
 Decided in the 2026-09-30 audit: deferred to m2 with generated IETF, its only
 consumer, until generated lite passes its go/no-go.

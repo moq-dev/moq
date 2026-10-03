@@ -12,7 +12,7 @@ the next re-anchor.
 ## Plan
 
 Moved from m0 to m1 in the 2026-09-30 audit: it waits on the whole jitter
-line and is a published `@moq/watch` break on dev, so it is not in flight.
+line and is a published `@moq/watch` break, so it is not in flight.
 
 Settled: per-track handles, and this quest lands them. `sync.track("audio")`
 and `sync.track("video")` each report their advertised delay and measured
@@ -23,8 +23,7 @@ already keeps one jitter entry per track and grows into the handles. The
 measured spread per track comes from the [Audio jitter
 target](/quest/m0/audio-jitter-target/README.md) line, whose watch branch
 replaces `probe` with per-track spread inputs that this quest folds into the
-handles. `SyncInput` is a published `@moq/watch` shape, so the break lands on
-dev.
+handles. `SyncInput` is a published `@moq/watch` shape, so this is a break.
 
 Recommendations for the implementation:
 

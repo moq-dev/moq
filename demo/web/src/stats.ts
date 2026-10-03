@@ -129,13 +129,14 @@ discovery.run((effect) => {
 
 	effect.spawn(async () => {
 		for (;;) {
-			const entry = await Promise.race([effect.cancel, announced.next()]);
+			const entry = await effect.race(announced.next());
 			if (!entry) break;
+			if (entry.kind === "live") continue;
 			const path = entry.prefix;
 			const node = Net.Path.stripPrefix(prefix, path);
 			if (!node) continue;
 
-			if (Net.Announce.isActive(entry.kind)) {
+			if (entry.kind !== "end") {
 				if (subs.has(node)) continue;
 				const ne = new Signals.Effect();
 				subs.set(node, ne);
@@ -171,7 +172,7 @@ function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Table, path: N
 		effect.cleanup(() => track.close());
 		effect.spawn(async () => {
 			for (;;) {
-				const data = await Promise.race([effect.cancel, track.readJson()]);
+				const data = await effect.race(track.readJson());
 				if (data === undefined) break;
 				nodeStats.mutate((s) => {
 					const cur = s[node];

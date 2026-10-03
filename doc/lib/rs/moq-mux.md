@@ -96,33 +96,24 @@ keep it in the payload.
 telemetry.append(moq_net::Timed::from(packet).at(received_at))?;
 ```
 
-The fMP4, MPEG-TS, and FLV importers publish the source's own timestamps unless
-built with `live()`, which translates them onto the catalog's broadcast clock:
-the first frame is live on arrival, every track of the input shares that one
-mapping, and a source that restarts its timestamps continues forward after the
-real idle gap. fMP4 passthrough rewrites each fragment's `tfdt` to match. Use
-it for a live feed with its own zero; publish verbatim only when the catalog's
-clock (`Config::with_clock`) already names the source's zero.
+The fMP4, MPEG-TS, FLV, and MKV importers publish the source's own timestamps
+(MPEG-TS after unwrapping its 33-bit PTS; fMP4 passthrough keeps each `tfdt`)
+and anchor the catalog's broadcast clock instead: the first frame's timestamp
+maps to the time it arrived, and every track of the input, like every importer
+sharing the catalog, keeps that one mapping. Data tracks stamp on it too, even
+one created before that first frame, though anything it wrote earlier stays on
+the clock the catalog started with. A clock set with
+`Config::with_clock` is never re-anchored, for a recording whose zero names its
+real start.
 
-An application running its own demuxer gets the same mapping from
-`clock::Anchor`: one per source, plus one `clock::Lane` per track. A single
-`SourceMap` per track would let tracks drift apart by their first-PTS
-difference, and one `SourceMap` shared across tracks reads their interleaving
-as a reset. Each lane detects its own restarts, and the anchor moves once for
-all of them. Call `Lane::restart()` before a frame when the demuxer sees a
-discontinuity out of band.
-
-```rust
-use moq_mux::clock;
-
-let mut anchor = clock::Anchor::new(catalog.clock());
-let mut video = clock::Lane::default();
-let mut klv = clock::Lane::default();
-
-// Both tracks keep their source spacing on the broadcast clock.
-let video_ts = anchor.translate(&mut video, video_pts)?;
-let klv_ts = anchor.translate(&mut klv, klv_pts)?;
-```
+Group starts never go backwards. A group starting before the previous group's
+start ends the import with `TimestampRewind`, whose `timestamp` and `floor` fields
+name the refused frame and the previous group's start; the message gives both in
+microseconds. A restarted encoder or a looping file wrapping to the top does this,
+flagged MPEG-TS discontinuity or not; republish it as a new broadcast. Frames may
+still dip below the previous group's content:
+B-frames, and a keyframe overlapping the previous group's last frame. A flagged
+MPEG-TS discontinuity that jumps forward continues the broadcast.
 
 ```bash
 cargo add moq-mux

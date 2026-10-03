@@ -86,12 +86,19 @@ impl<S: crate::transport::poll::Session> Protocol<S> {
 		}
 	}
 
+	fn close(&self) {
+		match self {
+			Self::Lite(driver) => driver.close(),
+			Self::Ietf(driver) => driver.withdrawal.begin(),
+		}
+	}
+
 	/// Whether the protocol owes the peer no queued data, so a draining close can
-	/// proceed. The IETF driver does not track this and closes at once.
+	/// proceed. IETF currently tracks namespace withdrawals only.
 	fn drained(&self) -> bool {
 		match self {
 			Self::Lite(driver) => driver.drained(),
-			Self::Ietf(_) => true,
+			Self::Ietf(driver) => driver.withdrawal.drained(),
 		}
 	}
 }
@@ -102,6 +109,10 @@ impl<S: crate::transport::poll::Session> State<S> {
 			&& supervisor.poll(waiter).is_ready()
 		{
 			self.supervisor = None;
+		}
+
+		if self.supervisor.as_ref().is_some_and(|supervisor| supervisor.draining()) {
+			self.protocol.close();
 		}
 
 		if self.result.is_none() {

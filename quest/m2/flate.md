@@ -13,8 +13,8 @@ Decided in the 2026-09-30 audit: collapse the line into this quest and follow
 the `json` namespace pattern that [#4526](https://github.com/moq-dev/moq/pull/4526)
 sets, rather than the per-wrapper siblings of the old bindings quest.
 
-`moq-flate` and `@moq/flate` absorb `moq-binary`'s snapshot and stream modes
-in moq-binary's fold into moq-flate ([#4425](https://github.com/moq-dev/moq/pull/4425), on `dev`), so the crate
+`moq-flate` and `@moq/flate` own the snapshot and stream track modes
+([#4425](https://github.com/moq-dev/moq/pull/4425)), so the crate
 already owns the per-group window a caller could otherwise desynchronize.
 Bind those track modes, not the bare codec: a `frame()` call across the FFI
 boundary invites the window desync the track modes exist to prevent.

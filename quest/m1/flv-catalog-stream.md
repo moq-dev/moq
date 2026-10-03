@@ -2,12 +2,12 @@
 
 ## Goal
 
-On `dev`, `flv::Export` is built from a catalog stream like `fmp4::Export`, so
+`flv::Export` is built from a catalog stream like `fmp4::Export`, so
 callers narrow renditions with `catalog::Stream::select` and the FLV-only
 `with_select` builder is gone.
 
 ## Plan
 
-This is a published API break, so it targets `dev`. Consider whether the TS
+This is a published API break. Consider whether the TS
 and Matroska exports should take the same shape in the same pass. RTMP play
 passes its client-capability selection through the stream instead.
