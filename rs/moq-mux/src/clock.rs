@@ -23,6 +23,18 @@ use std::time::{Duration, Instant, SystemTime};
 
 use hang::catalog::{MAX_SAFE_INTEGER, MOQ_EPOCH_UNIX_MILLIS};
 
+/// Native capture inputs use the same epoch as the async clock.
+fn monotonic(at: Instant) -> crate::Result<web_async::time::Instant> {
+	#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+	return Ok(web_async::time::Instant::from_std(at));
+
+	#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+	{
+		let _ = at;
+		Err(anyhow::anyhow!("std::time::Instant inputs are unsupported in the browser").into())
+	}
+}
+
 /// The catalog clock for PTS zero at `wall`.
 fn wall_clock(wall: SystemTime) -> crate::Result<hang::catalog::Clock> {
 	let unix_micros = wall
@@ -51,7 +63,7 @@ fn wall_clock(wall: SystemTime) -> crate::Result<hang::catalog::Clock> {
 /// pinned up front and that frame's PTS converts into the mapping instead.
 #[derive(Clone, Copy, Debug)]
 pub struct Clock {
-	epoch: Instant,
+	epoch: web_async::time::Instant,
 	wall: hang::catalog::Clock,
 }
 
@@ -73,22 +85,25 @@ impl Clock {
 	/// Start a clock at the current instant, with PTS zero ten seconds earlier on both the
 	/// monotonic and the wall clock, so earlier-stamped frames of a source anchored now still map.
 	pub fn new() -> Self {
-		let (now, wall) = (Instant::now(), SystemTime::now());
+		let (now, wall) = (web_async::time::Instant::now(), SystemTime::now());
 		// Shortly after boot the monotonic clock may not reach back that far; start at now then.
 		let (epoch, wall) = match (now.checked_sub(Self::LEAD), wall.checked_sub(Self::LEAD)) {
 			(Some(epoch), Some(wall)) => (epoch, wall),
 			_ => (now, wall),
 		};
-		Self::at(epoch, wall).expect("the current wall time is representable as a broadcast clock")
+		Self {
+			epoch,
+			wall: wall_clock(wall).expect("the current wall time is representable as a broadcast clock"),
+		}
 	}
 
 	/// Start a clock at an explicit monotonic epoch and wall time.
 	///
 	/// The deterministic constructor: synthetic sources and fixtures pin both ends instead of
-	/// sampling. Refuses an unrepresentable wall.
+	/// sampling. Refuses an unrepresentable wall or a browser target without native instants.
 	pub fn at(epoch: Instant, wall: SystemTime) -> crate::Result<Self> {
 		Ok(Self {
-			epoch,
+			epoch: monotonic(epoch)?,
 			wall: wall_clock(wall)?,
 		})
 	}
@@ -103,9 +118,11 @@ impl Clock {
 	/// Map the instant a payload was captured (a datagram's arrival, a sensor read) onto this clock.
 	///
 	/// Refuses an instant ahead of now, which would claim the payload reached the transport before
-	/// it existed, and one before the clock's epoch, which no timestamp can name.
+	/// it existed, and one before the clock's epoch, which no timestamp can name. Native capture
+	/// instants are unsupported in the browser.
 	pub(crate) fn capture(&self, at: Instant) -> crate::Result<moq_net::Timestamp> {
-		if at > Instant::now() {
+		let at = monotonic(at)?;
+		if at > web_async::time::Instant::now() {
 			return Err(crate::Error::InvalidCapture);
 		}
 		let elapsed = at
@@ -452,6 +469,40 @@ mod tests {
 		));
 		assert!(matches!(
 			clock.capture(now - Duration::from_secs(6)),
+			Err(crate::Error::InvalidCapture)
+		));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn paused_clock_preserves_native_boundaries() {
+		let epoch = tokio::time::Instant::now();
+		let clock = Clock::at(epoch.into_std(), moq_epoch()).unwrap();
+		let fresh = Clock::new();
+		let before = fresh.now();
+		let wall = clock.wall();
+
+		tokio::time::advance(Duration::from_secs(3)).await;
+		assert_eq!(clock.now(), us(3_000_000));
+		assert_eq!(fresh.now().as_micros() - before.as_micros(), 3_000_000);
+		assert_eq!(clock.wall(), wall);
+		assert_eq!(
+			clock.wall_clock(clock.now()).unwrap(),
+			moq_epoch() + Duration::from_secs(3)
+		);
+
+		let captured = (epoch + Duration::from_secs(2)).into_std();
+		let (timed, at) = clock.stamp(moq_net::Timed::from("payload").at(captured)).unwrap();
+		assert_eq!(timed.at, Some(us(2_000_000)));
+		assert_eq!(at, Some(us(2_000_000)));
+		let (untimed, at) = clock.stamp(moq_net::Timed::from("payload")).unwrap();
+		assert_eq!(untimed.at, Some(us(3_000_000)));
+		assert_eq!(at, None);
+		assert!(matches!(
+			clock.capture((epoch + Duration::from_secs(4)).into_std()),
+			Err(crate::Error::InvalidCapture)
+		));
+		assert!(matches!(
+			clock.capture((epoch - Duration::from_secs(1)).into_std()),
 			Err(crate::Error::InvalidCapture)
 		));
 	}

@@ -89,8 +89,9 @@ A payload that knows when it was captured (a datagram's arrival, a sensor read)
 carries that `Instant`. The producer maps it onto the broadcast clock and writes
 it as the frame timestamp, and the entry advertises `jitter` and `delay` the way
 a media rendition does, so telemetry lagging its video shows up as `delay`. An
-instant ahead of now is refused. A device's own clock is an unrelated epoch;
-keep it in the payload.
+instant ahead of now is refused. Capture inputs stay `std::time::Instant` on
+native; browser targets refuse these native instants. A device's own clock is an
+unrelated epoch; keep it in the payload.
 
 ```rust
 telemetry.append(moq_net::Timed::from(packet).at(received_at))?;
@@ -102,7 +103,9 @@ the first frame is live on arrival, every track of the input shares that one
 mapping, and a source that restarts its timestamps continues forward after the
 real idle gap. fMP4 passthrough rewrites each fragment's `tfdt` to match. Use
 it for a live feed with its own zero; publish verbatim only when the catalog's
-clock (`Config::with_clock`) already names the source's zero.
+clock (`Config::with_clock`) already names the source's zero. The broadcast clock
+uses the async runtime's monotonic time, so native tests can pause and advance it
+with Tokio; its wall mapping stays fixed.
 
 An application running its own demuxer gets the same mapping from
 `clock::Anchor`: one per source, plus one `clock::Lane` per track. A single

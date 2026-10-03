@@ -1331,7 +1331,7 @@ async fn live_import(
 	let mut after = before;
 	for (i, chunk) in chunks.iter().enumerate() {
 		if i > 0 {
-			std::thread::sleep(idle);
+			tokio::time::advance(idle).await;
 		}
 		fmp4.decode(chunk).unwrap();
 		if i == 0 {
@@ -1393,7 +1393,7 @@ async fn live_import_rewrites_tfdt_onto_the_broadcast_clock() {
 
 /// A source whose decode times restart at zero continues forward after the real idle gap rather
 /// than being refused as non-monotonic, with every track moving onto one new mapping.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn live_import_restarts_forward_after_idle() {
 	for idle in [std::time::Duration::ZERO, std::time::Duration::from_millis(300)] {
 		let input = [live_session(5_000_000, 20), live_session(0, 20)];

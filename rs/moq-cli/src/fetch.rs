@@ -67,17 +67,46 @@ async fn fetch(
 		.with_subscriber(origin.clone())
 		.with_reconnect(false);
 
+	fetch_from(
+		Request {
+			args,
+			path: &broadcast,
+			deadline,
+		},
+		async {
+			let connection = client.connect(url).established().await.context("failed to connect")?;
+			anyhow::Ok((origin, connection))
+		},
+		out,
+	)
+	.await
+}
+
+/// The operation's selection and one absolute deadline, including setup.
+struct Request<'a> {
+	args: &'a Args,
+	path: &'a str,
+	deadline: Instant,
+}
+
+/// Keep setup and all reads under the caller's one absolute deadline.
+async fn fetch_from<C>(
+	request: Request<'_>,
+	setup: impl std::future::Future<Output = anyhow::Result<(hang::moq_net::origin::Producer, C)>>,
+	out: &mut (impl AsyncWrite + Unpin),
+) -> anyhow::Result<()> {
+	let Request { args, path, deadline } = request;
 	let result = timeout_at(deadline, async {
 		// Held until the last frame is read; dropping it closes the session.
-		let _connection = client.connect(url).established().await.context("failed to connect")?;
+		let (origin, _connection) = setup.await?;
 
 		// Wait for a covering route rather than asking on the spot: the announcement
 		// is still in flight right after connecting.
 		let broadcast = origin
 			.consume()
-			.routed_broadcast(broadcast.as_str())
+			.routed_broadcast(path)
 			.await
-			.with_context(|| format!("broadcast `{}` not found", crate::display_name(&broadcast)))?;
+			.with_context(|| format!("broadcast `{}` not found", crate::display_name(path)))?;
 		let track = broadcast.track(&args.track)?;
 		let mut group = moq_relay::fetch_group(&track, args.group)
 			.await
@@ -131,15 +160,10 @@ mod tests {
 		]
 	}
 
-	/// A running relay with a publisher attached, and the flags that reach it.
+	/// An in-memory origin with the same finished, empty, and live tracks.
 	struct Fixture {
-		/// `--connect` and the TLS pin for the relay's generated certificate.
-		connect: [String; 4],
-		/// The relay's HTTP listener, for comparing against `/fetch`.
-		http: std::net::SocketAddr,
-		/// Kept so the published broadcast, its tracks, and the open group stay live.
-		_publisher: (
-			moq_tokio::Connection,
+		origin: moq_net::origin::Producer,
+		_keep: (
 			moq_net::broadcast::Producer,
 			Vec<moq_net::track::Producer>,
 			moq_net::group::Producer,
@@ -147,22 +171,7 @@ mod tests {
 	}
 
 	impl Fixture {
-		/// Publish `demo` with three finished groups on `data`, no group on `empty`,
-		/// and one frame of a group that never finishes on `live`.
 		async fn new() -> Self {
-			let _ = moq_tokio::crypto::install_default();
-			let fixture = moq_relay::test_relay().await.expect("test relay");
-			let ready = fixture.relay.ready();
-			tokio::spawn(fixture.relay.run());
-			ready.wait().await.expect("relay ready");
-
-			let connect = [
-				"--connect".to_string(),
-				fixture.url.to_string(),
-				"--connect-tls-fingerprint".to_string(),
-				fixture.fingerprint.clone(),
-			];
-
 			let origin = moq_tokio::origin::spawn();
 			let broadcast = origin.create_broadcast("demo").expect("broadcast");
 			broadcast.announce(Default::default()).expect("announce");
@@ -181,11 +190,61 @@ mod tests {
 			open.write_frame(moq_net::Timestamp::ZERO, b"first".as_ref())
 				.expect("frame");
 
+			Self {
+				origin,
+				_keep: (broadcast, vec![data, empty, live], open),
+			}
+		}
+
+		async fn fetch(&self, args: &[&str], timeout: Duration) -> (anyhow::Result<()>, Vec<u8>) {
+			let (_, args) = parse(&[], args);
+			let mut out = Vec::new();
+			let result = fetch_from(
+				Request {
+					args: &args,
+					path: "demo",
+					deadline: Instant::now() + timeout,
+				},
+				std::future::ready(Ok((self.origin.clone(), ()))),
+				&mut out,
+			)
+			.await;
+			(result, out)
+		}
+	}
+
+	/// A running relay with a publisher attached and its HTTP address.
+	struct NetworkFixture {
+		/// The relay's HTTP listener, for comparing against `/fetch`.
+		http: std::net::SocketAddr,
+		/// Kept so the published broadcast, its tracks, and the open group stay live.
+		_publisher: (moq_tokio::Connection, Fixture),
+	}
+
+	impl NetworkFixture {
+		/// Publish `demo` with three finished groups on `data`, no group on `empty`,
+		/// and one frame of a group that never finishes on `live`.
+		async fn new() -> Self {
+			let _ = moq_tokio::crypto::install_default();
+			let fixture = moq_relay::test_relay().await.expect("test relay");
+			let ready = fixture.relay.ready();
+			tokio::spawn(fixture.relay.run());
+			ready.wait().await.expect("relay ready");
+
+			let connect = [
+				"--connect".to_string(),
+				fixture.url.to_string(),
+				"--connect-tls-fingerprint".to_string(),
+				fixture.fingerprint.clone(),
+			];
+
+			let publisher = Fixture::new().await;
+
 			let (moq, _) = parse(&connect, &[]);
 			let connection = net()
 				.client(moq.client.clone())
 				.expect("client")
-				.with_publisher(origin.consume())
+				.with_publisher(publisher.origin.consume())
 				.with_reconnect(false)
 				.connect(fixture.url.clone())
 				.established()
@@ -193,19 +252,9 @@ mod tests {
 				.expect("publisher connects");
 
 			Self {
-				connect,
 				http: fixture.http,
-				_publisher: (connection, broadcast, vec![data, empty, live], open),
+				_publisher: (connection, publisher),
 			}
-		}
-
-		/// Run `moq <connect> --broadcast demo fetch <args>` with `timeout`, returning
-		/// the outcome and what it wrote.
-		async fn fetch(&self, args: &[&str], timeout: Duration) -> (anyhow::Result<()>, Vec<u8>) {
-			let (moq, args) = parse(&self.connect, args);
-			let mut out = Vec::new();
-			let result = super::fetch(&moq, &args, &net(), Instant::now() + timeout, &mut out).await;
-			(result, out)
 		}
 
 		/// The relay's HTTP `/fetch` status and body for the same group.
@@ -245,7 +294,7 @@ mod tests {
 	const ENV: &[&str] = &["MOQ_CONNECT", "MOQ_HOP"];
 
 	/// A known sequence prints its frames back to back, the same bytes as `/fetch`.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_sequence_prints_its_exact_bytes() {
 		let _env = EnvGuard::clear(ENV);
 		let fixture = Fixture::new().await;
@@ -253,11 +302,10 @@ mod tests {
 		let (result, out) = fixture.fetch(&["data", "--group", "1"], TIMEOUT).await;
 		result.expect("fetch");
 		assert_eq!(out, frames(1).concat());
-		assert_eq!(fixture.curl("?group=1").await, (200, out));
 	}
 
 	/// No `--group` reads the newest group, as `/fetch` does by default.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn the_default_is_the_newest_group() {
 		let _env = EnvGuard::clear(ENV);
 		let fixture = Fixture::new().await;
@@ -265,12 +313,11 @@ mod tests {
 		let (result, out) = fixture.fetch(&["data"], TIMEOUT).await;
 		result.expect("fetch");
 		assert_eq!(out, frames(2).concat());
-		assert_eq!(fixture.curl("").await, (200, out));
 	}
 
 	/// A missing sequence fails the lookup itself, before any output, as `/fetch`
 	/// answers 404 rather than starting a body.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_missing_sequence_fails() {
 		let _env = EnvGuard::clear(ENV);
 		let fixture = Fixture::new().await;
@@ -279,16 +326,15 @@ mod tests {
 		let err = result.expect_err("group 99 does not exist");
 		assert_eq!(err.to_string(), "group 99 of `data` not found", "{err:#}");
 		assert!(out.is_empty());
-		assert_eq!(fixture.curl("?group=99").await, (404, Vec::new()));
 	}
 
 	/// A track with no group never resolves "newest", so the deadline ends it.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_lookup_times_out() {
 		let _env = EnvGuard::clear(ENV);
 		let fixture = Fixture::new().await;
 
-		let (result, out) = fixture.fetch(&["empty"], Duration::from_millis(500)).await;
+		let (result, out) = fixture.fetch(&["empty"], TIMEOUT).await;
 		let err = result.expect_err("no group ever arrives");
 		assert!(err.to_string().contains("timed out"), "{err:#}");
 		assert!(out.is_empty());
@@ -296,21 +342,80 @@ mod tests {
 
 	/// A group that never finishes is cut off by the same deadline, after the frames
 	/// that did arrive.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_frame_read_times_out() {
 		let _env = EnvGuard::clear(ENV);
 		let fixture = Fixture::new().await;
 
-		let (result, out) = fixture
-			.fetch(&["live", "--group", "0"], Duration::from_millis(500))
-			.await;
+		let (result, out) = fixture.fetch(&["live", "--group", "0"], TIMEOUT).await;
 		let err = result.expect_err("the group never finishes");
 		assert!(err.to_string().contains("timed out"), "{err:#}");
 		assert_eq!(out, b"first");
 	}
 
-	/// Each `--json` line is the whole record and decodes to the frame's bytes.
+	/// Discovery and reads share the deadline; setup cannot grant a fresh budget.
+	#[tokio::test(start_paused = true)]
+	async fn setup_and_reads_share_one_deadline() {
+		let _env = EnvGuard::clear(ENV);
+		let fixture = Fixture::new().await;
+		let (_, args) = parse(&[], &["live", "--group", "0"]);
+		let started = Instant::now();
+		let mut out = Vec::new();
+		let result = fetch_from(
+			Request {
+				args: &args,
+				path: "demo",
+				deadline: started + TIMEOUT,
+			},
+			async {
+				// Advance simulated discovery time before handing back the ready origin.
+				tokio::time::advance(TIMEOUT / 2).await;
+				Ok((fixture.origin.clone(), ()))
+			},
+			&mut out,
+		)
+		.await;
+		assert_eq!(result.unwrap_err().to_string(), "fetch timed out");
+		assert_eq!(out, b"first");
+		assert_eq!(Instant::now() - started, TIMEOUT);
+	}
+
+	/// A setup that never establishes is bounded by that same deadline.
+	#[tokio::test(start_paused = true)]
+	async fn setup_is_bounded() {
+		let _env = EnvGuard::clear(ENV);
+		let (_, args) = parse(&[], &["data"]);
+		let started = Instant::now();
+		let result = fetch_from::<()>(
+			Request {
+				args: &args,
+				path: "demo",
+				deadline: started + TIMEOUT,
+			},
+			std::future::pending(),
+			&mut Vec::new(),
+		)
+		.await;
+		assert_eq!(result.unwrap_err().to_string(), "fetch timed out");
+		assert_eq!(Instant::now() - started, TIMEOUT);
+	}
+
+	/// The real HTTP endpoint agrees with the deterministic operation tests.
 	#[tokio::test]
+	async fn real_relay_matches_http_fetch() {
+		let _env = EnvGuard::clear(ENV);
+		for (query, expected) in [
+			("?group=1", (200, frames(1).concat())),
+			("", (200, frames(2).concat())),
+			("?group=99", (404, Vec::new())),
+		] {
+			let fixture = NetworkFixture::new().await;
+			assert_eq!(fixture.curl(query).await, expected);
+		}
+	}
+
+	/// Each `--json` line is the whole record and decodes to the frame's bytes.
+	#[tokio::test(start_paused = true)]
 	async fn json_lines_decode_to_the_frames() {
 		let _env = EnvGuard::clear(ENV);
 		let fixture = Fixture::new().await;

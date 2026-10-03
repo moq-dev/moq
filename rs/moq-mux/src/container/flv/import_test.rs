@@ -734,7 +734,7 @@ async fn import(chunks: &[Vec<u8>], live: bool, ago: Duration, idle: Duration) -
 	let mut after = before;
 	for (i, chunk) in chunks.iter().enumerate() {
 		if i > 0 {
-			std::thread::sleep(idle);
+			tokio::time::advance(idle).await;
 		}
 		importer.decode(chunk).unwrap();
 		if i == 0 {
@@ -774,7 +774,7 @@ async fn live_import_anchors_a_late_first_frame() {
 
 /// An encoder restarting its timestamps at zero continues the broadcast forward: after the real
 /// idle gap, and with every track moving onto the one new mapping.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn live_import_restarts_forward_after_idle() {
 	for idle in [Duration::ZERO, Duration::from_millis(300)] {
 		let input = [session(true, 5_000, 50), session(false, 0, 50)];
