@@ -221,9 +221,6 @@ struct Input {
 	floor: Option<Position>,
 	/// The copy ran out: `Ok` for a clean end. Reported once its groups drained.
 	end: Option<Result<()>>,
-	/// The copy's live edge reached its declared end. Groups below it may still be in
-	/// flight, so the input only ends once the copy closes.
-	complete: bool,
 	/// Whether anything this input delivered was written.
 	delivered: bool,
 }
@@ -538,7 +535,6 @@ impl Pump {
 			},
 			floor: feed.floor,
 			end: None,
-			complete: false,
 			delivered: false,
 		});
 	}
@@ -665,7 +661,6 @@ impl Pump {
 				Poll::Ready(Ok(None)) => {
 					// Settled once the copy closes: a group still owed below the end
 					// arrives in the meantime.
-					input.complete = true;
 					if input.copy.poll_closed(waiter).is_ready() {
 						input.end = Some(Ok(()));
 						return true;
