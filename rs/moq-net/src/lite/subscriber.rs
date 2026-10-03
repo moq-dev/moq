@@ -913,7 +913,7 @@ enum IngestPhase {
 	Size { timestamp: Option<Timestamp> },
 	/// Streaming the frame payload.
 	Payload { frame: frame::ProducerOwned },
-	/// Reading past a frame nobody asked for.
+	/// Reading past a frame nobody asked for: the bytes of it still to discard.
 	Skip { size: usize },
 }
 
@@ -985,7 +985,7 @@ impl FrameIngest {
 					self.phase = IngestPhase::Payload { frame };
 				}
 				IngestPhase::Skip { size } => {
-					ready!(reader.poll_read_exact(&mut cx, *size))?;
+					ready!(reader.poll_skip(&mut cx, size))?;
 					self.phase = IngestPhase::Timing;
 				}
 				IngestPhase::Payload { frame } => {
