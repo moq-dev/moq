@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- release
+- *(moxygen)* Moxygen compatibility ([#4253](https://github.com/moq-dev/moq/pull/4253))
+
+## [0.19.21](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.20...moq-tokio-v0.19.21) - 2026-10-03
+
+### Added
+
+- *(relay)* drain sessions gracefully over GOAWAY ([#4132](https://github.com/moq-dev/moq/pull/4132))
+- *(tokio)* default QUIC idle timeout to 10s ([#4606](https://github.com/moq-dev/moq/pull/4606))
+- *(tokio)* deadline accepted handshakes and relay HTTP headers ([#4612](https://github.com/moq-dev/moq/pull/4612))
+
+### Other
+
 - *(moxygen)* Moxygen compatibility ([#4253](https://github.com/moq-dev/moq/pull/4253))
 
 ## [0.19.20](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.19...moq-tokio-v0.19.20) - 2026-09-30
