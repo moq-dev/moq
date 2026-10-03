@@ -220,7 +220,7 @@ pub struct SendStream<S: web_transport_trait::SendStream + 'static> {
 	// `Sync` off the containing session types.
 	state: std::sync::Mutex<Option<SendState<S>>>,
 	// Deferred actions, applied when the in-flight operation settles.
-	priority: Option<u8>,
+	priority: Option<i32>,
 	finish: bool,
 	reset: Option<u32>,
 	/// Bytes already transmitted but not yet reported to the caller: a write the
@@ -382,7 +382,7 @@ impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for SendS
 		}
 	}
 
-	fn set_priority(&mut self, order: u8) {
+	fn set_priority(&mut self, order: i32) {
 		match self.state.get_mut().unwrap().as_mut() {
 			Some(SendState::Idle(stream)) => stream.set_priority(order),
 			// A finished stream still retransmits under its priority until the FIN is
@@ -822,7 +822,7 @@ mod tests {
 	struct FakeSend {
 		writes: Arc<Mutex<Vec<u8>>>,
 		blocked: Arc<AtomicBool>,
-		priorities: Arc<Mutex<Vec<u8>>>,
+		priorities: Arc<Mutex<Vec<i32>>>,
 		finished: Arc<AtomicBool>,
 		resets: Arc<Mutex<Vec<u32>>>,
 		/// The peer never acknowledges the FIN: closed() stays pending forever.
@@ -846,7 +846,7 @@ mod tests {
 			Ok(buf.len())
 		}
 
-		fn set_priority(&mut self, order: u8) {
+		fn set_priority(&mut self, order: i32) {
 			self.priorities.lock().unwrap().push(order);
 		}
 

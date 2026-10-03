@@ -837,6 +837,7 @@ mod tests {
 			largest_location: None,
 			forward: true,
 			properties: Properties {
+				max_cache_duration: None,
 				timescale: None,
 				priority: None,
 				group_order: Some(GroupOrder::Descending),
@@ -872,6 +873,7 @@ mod tests {
 			largest_location: None,
 			forward: true,
 			properties: Properties {
+				max_cache_duration: None,
 				timescale: None,
 				priority: None,
 				group_order: Some(GroupOrder::Descending),

@@ -18,7 +18,7 @@ import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../
 import * as Path from "../path.ts";
 import type { Cursor, Reader, Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { type Timescale, Timestamp } from "../time.ts";
+import { Milli, type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
@@ -108,6 +108,7 @@ function sees(filter: Filter, path: Path.Valid): boolean {
  */
 export class Subscriber {
 	#session: Session;
+	#localClose = false;
 
 	// The transport, so a request cut off by the session's close ends with the session's
 	// error. Optional for tests that drive a bare session.
@@ -152,6 +153,11 @@ export class Subscriber {
 
 	// Whether the peer understands the HIDDEN parameter (MoQ Hidden).
 	#hidden: boolean;
+
+	/** Marks this subscriber's deliberate local session close. @internal */
+	close() {
+		this.#localClose = true;
+	}
 
 	/**
 	 * Creates a new Subscriber instance.
@@ -226,7 +232,7 @@ export class Subscriber {
 			announced.append({
 				prefix: active,
 				captures: scopeCaptures(scope, active),
-				kind: "announced",
+				kind: "start",
 				route: info.route,
 			});
 		}
@@ -256,13 +262,13 @@ export class Subscriber {
 		for (const [consumer, filter] of this.#announcedConsumers) {
 			if (!sees(filter, path)) continue;
 			const scope = filter.scope;
-			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "announced", route });
+			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "start", route });
 		}
 	}
 
 	/**
 	 * Replace the stored route for a path that is already announced. A no-op when the
-	 * hops and cost did not change; otherwise consumers hear `updated` so a forwarder
+	 * hops and cost did not change; otherwise consumers hear `update` so a forwarder
 	 * can reprice without retracting.
 	 *
 	 * A new first hop is a new publisher: holders keep their broadcast to drain, but the
@@ -277,7 +283,7 @@ export class Subscriber {
 		for (const [consumer, filter] of this.#announcedConsumers) {
 			if (!sees(filter, path)) continue;
 			const scope = filter.scope;
-			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "updated", route });
+			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "update", route });
 		}
 	}
 
@@ -306,7 +312,7 @@ export class Subscriber {
 				consumer.append({
 					prefix: path,
 					captures: scopeCaptures(scope, path),
-					kind: "retracted",
+					kind: "end",
 					route: existing.route,
 				});
 			} catch {
@@ -328,6 +334,10 @@ export class Subscriber {
 		// fully buffered entry can still decode afterwards. Attaching one then would take a
 		// reference nobody is left to release, pinning the path for the session.
 		let released = false;
+
+		// Nothing on this wire says where the initial set ends, so it has landed once the
+		// stream goes quiet.
+		let quiet: announce.Quiet | undefined;
 
 		// v14/v15: SubscribeNamespace on control stream (via adapter virtual stream)
 		// v16+: SubscribeNamespace on its own real bidi stream
@@ -377,6 +387,10 @@ export class Subscriber {
 					throw new Error(`SubscribeNamespace rejected: typeId=0x${respTypeId.toString(16)}`);
 				}
 
+				quiet = new announce.Quiet(() => {
+					if (announced.closed.peek() === undefined) announced.append({ kind: "live" });
+				});
+
 				// Loop reading Namespace/NamespaceDone entries
 				const readLoop = (async () => {
 					for (;;) {
@@ -384,6 +398,7 @@ export class Subscriber {
 						if (done) break;
 
 						const msgType = await stream.reader.u53();
+						quiet?.heard();
 						if (msgType === SubscribeNamespaceEntry.id) {
 							const entry = await SubscribeNamespaceEntry.decode(
 								stream.reader,
@@ -479,6 +494,7 @@ export class Subscriber {
 			// each namespace keeps its count and the source never detaches, which would
 			// pin the path for the session even after the other source withdrew.
 			released = true;
+			quiet?.close();
 			for (const path of live) {
 				this.#detachAnnounce(path);
 			}
@@ -549,14 +565,15 @@ export class Subscriber {
 		// would miss the local side going away and leave it serving a track nobody reads.
 		// Demand returning before we commit is not abandonment, matching the serving loop.
 		const waitAbandoned = async (): Promise<null> => {
+			const demand = producer.demand();
 			// An info-only lookup attaches no subscriber yet still waits on SUBSCRIBE_OK for
 			// the track info, so only demand that arrived and then left is abandonment.
-			while (!producer.used.peek() && producer.closed.peek() === undefined) {
-				await Signal.race(producer.used, producer.closed);
+			while (!demand.used.peek() && demand.closed.peek() === undefined) {
+				await Signal.race(demand.used, demand.closed);
 			}
 			for (;;) {
-				await producer.unused();
-				if (producer.closed.peek() !== undefined || !producer.used.peek()) return null;
+				await demand.unused();
+				if (demand.closed.peek() !== undefined || !demand.used.peek()) return null;
 			}
 		};
 
@@ -643,9 +660,10 @@ export class Subscriber {
 			// wake is level-triggered: re-check demand so a subscriber that returns before we tear
 			// down resumes on the same stream.
 			let terminal = localEnded;
+			const demand = producer.demand();
 			for (;;) {
-				const reason = await race([done, producer.unused().then(() => idle)]);
-				if (reason === idle && producer.closed.peek() === undefined && producer.used.peek()) continue;
+				const reason = await race([done, demand.unused().then(() => idle)]);
+				if (reason === idle && demand.closed.peek() === undefined && demand.used.peek()) continue;
 				terminal = reason;
 				break;
 			}
@@ -664,7 +682,7 @@ export class Subscriber {
 			console.debug(`subscribe close: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			const e = await sessionCause(this.#quic, err);
-			producer.close(e);
+			producer.close(this.#localClose ? undefined : e);
 			stream.abort(e);
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
@@ -787,7 +805,14 @@ export class Subscriber {
 
 		const ok = await SubscribeOk.decode(state.stream.reader, version);
 		if (state.cancelled) throw new Error("subscribe cancelled before acceptance");
-		request.accept({ priority: fromWire(ok.properties.priority ?? 128) });
+		const maxCacheDuration = ok.properties.maxCacheDuration;
+		if (maxCacheDuration !== undefined && maxCacheDuration > BigInt(Number.MAX_SAFE_INTEGER)) {
+			throw new RangeError("max cache duration exceeds safe milliseconds");
+		}
+		request.accept({
+			priority: fromWire(ok.properties.priority ?? 128),
+			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
+		});
 
 		try {
 			this.#aliases.set(ok.trackAlias, subscription, { broadcast, name: request.name });
@@ -1021,7 +1046,7 @@ export class Subscriber {
 			// The control message establishing this alias can arrive after the data stream.
 			subscription = await this.#aliases.get(group.trackAlias);
 		} catch (err: unknown) {
-			const e = error(err);
+			const e = await sessionCause(this.#quic, err);
 			// Ours: we cancelled the subscription and the publisher has not stopped yet.
 			// Anything else on this alias is the publisher sending data for a track it never
 			// acknowledged, which is worth seeing.
@@ -1108,7 +1133,7 @@ export class Subscriber {
 			// A group with no objects still exists.
 			open().close();
 		} catch (err: unknown) {
-			const e = error(err);
+			const e = await sessionCause(this.#quic, err);
 			if (e instanceof ProtocolViolation) {
 				// The publisher broke the track's end, which no later group can repair.
 				producer?.close(e);

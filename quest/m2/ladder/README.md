@@ -41,7 +41,6 @@ priorities, what to send first;
 ranking means on the first mile versus a cluster session before the
 controller depends on it.
 
-`moq-transcode` is 0.1.x, so a published break in this line targets dev.
 
 ### Adaptive bands
 

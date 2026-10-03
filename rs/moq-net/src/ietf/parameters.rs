@@ -28,6 +28,8 @@ pub enum ParameterVarInt {
 	Solicit = super::solicit::SOLICIT,
 	/// HIDDEN, from the MoQ Hidden extension.
 	Hidden = super::hidden::HIDDEN,
+	/// ACTIVE_COUNT, from the MoQ Active Count extension.
+	ActiveCount = super::active_count::ACTIVE_COUNT,
 	#[num_enum(catch_all)]
 	Unknown(u64),
 }
@@ -211,22 +213,28 @@ impl Encode<Version> for Parameters {
 }
 
 impl Parameters {
-	/// Consume a draft-14 message parameter block without interpreting it.
+	/// Consume a draft-14 message parameter block, returning its first MAX_CACHE_DURATION
+	/// (0x04), the one parameter we act on.
 	///
 	/// Draft-14 section 9.2 has a receiver ignore unrecognized parameters and allow their
-	/// duplicates, and lets AUTHORIZATION TOKEN repeat. We act on none of these, so unlike
-	/// [`Parameters::decode`], which SETUP uses, a repeat is not refused.
-	pub fn skip<R: bytes::Buf>(r: &mut R, version: Version) -> Result<(), DecodeError> {
+	/// duplicates, and lets AUTHORIZATION TOKEN repeat, so unlike [`Parameters::decode`],
+	/// which SETUP uses, a repeat is not refused.
+	pub fn skip<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Option<u64>, DecodeError> {
 		let count = u64::decode(r, version)?;
 		if count > MAX_PARAMS {
 			return Err(DecodeError::TooMany);
 		}
 
+		let mut cache_duration = None;
 		for _ in 0..count {
 			// Parity frames a Key-Value-Pair: even is one varint, odd is length prefixed.
-			match u64::decode(r, version)? % 2 {
+			let kind = u64::decode(r, version)?;
+			match kind % 2 {
 				0 => {
-					u64::decode(r, version)?;
+					let value = u64::decode(r, version)?;
+					if kind == 0x04 {
+						cache_duration.get_or_insert(value);
+					}
 				}
 				_ => {
 					let len = usize::try_from(u64::decode(r, version)?).map_err(|_| DecodeError::BoundsExceeded)?;
@@ -241,7 +249,7 @@ impl Parameters {
 			}
 		}
 
-		Ok(())
+		Ok(cache_duration)
 	}
 
 	pub fn get_varint(&self, kind: ParameterVarInt) -> Option<u64> {

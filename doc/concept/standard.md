@@ -37,6 +37,11 @@ This is an implementation limit, not a limit in the IETF draft. A larger
 declared block stops its subgroup stream with `MALFORMED_TRACK` before reading
 the block; other groups and the session stay open.
 
+Rust and JavaScript read an incoming padding stream (draft-18 and later) to
+the end and discard it, without sending `STOP_SENDING`. A unidirectional stream type the negotiated draft does not
+define, or a `SUBGROUP_HEADER` type it marks invalid, closes the session with
+`PROTOCOL_VIOLATION`, as the draft requires.
+
 An IETF publisher declares the track's default priority in `SUBSCRIBE_OK` or
 `PUBLISH` when that draft carries track properties. Groups without a priority
 flag inherit it. If the property is absent, the IETF wire default of 128 maps
@@ -83,7 +88,8 @@ A legal request that is not served is refused on its own with `NOT_SUPPORTED`,
 leaving the session open: a `SUBSCRIBE` with `FORWARD=0`, a `SUBSCRIBE` or
 `FETCH` carrying Range Filters (no `MAX_FILTER_RANGES` is advertised), a
 `FETCH` carrying `FILL_TIMEOUT` (Timed-Out gaps are not written),
-`TRACK_STATUS`, and the `FETCH` forms above. `NEW_GROUP_REQUEST` is ignored, as
+`TRACK_STATUS`, `SUBSCRIBE_TRACKS` (draft-18 and later), and the `FETCH`
+forms above. `NEW_GROUP_REQUEST` is ignored, as
 the draft allows a publisher without dynamic groups to do. A parameter the
 negotiated draft does not define still closes the session with
 `PROTOCOL_VIOLATION`, as the draft requires.
@@ -91,7 +97,9 @@ negotiated draft does not define still closes the session with
 Several project drafts extend the IETF wire without breaking it, since `SETUP`
 ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
 [solicit](/draft/moq-solicit) to make announcements opt-in,
-[hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery, and
+[hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery,
+[active-count](/draft/moq-active-count) to count the `NAMESPACE` messages
+before a `SUBSCRIBE_NAMESPACE` is caught up, and
 [probe](/draft/moq-probe) for bandwidth estimation.
 [moq-e2ee](/draft/moq-e2ee) is not a transport extension: it encrypts application
 payloads so relays still forward named tracks they cannot read.
