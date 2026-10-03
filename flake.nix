@@ -158,6 +158,8 @@
             # time (bindgenHook above provides libclang). Linux-only; macOS uses
             # ScreenCaptureKit.
             pkgs.pipewire
+            # Isolated X11 server for SHM/GetImage capture measurements.
+            pkgs.xvfb-run
           ];
 
         # Where the shell's libasound looks for PCM plugins.

@@ -122,6 +122,27 @@ capture *args:
 capture-test *args:
     just rs test -p moq-video -p moq-audio --features moq-video/capture,moq-audio/capture "$@"
 
+# Compare SHM and GetImage through production capture on the current X11 display.
+x11-bench:
+    just rs test --release -p moq-video --no-default-features --features capture -E 'test(x11_capture_workload)' --run-ignored only --no-capture
+
+# Compare RGB conversion allocation separately, without an X server.
+x11-rgb-bench:
+    just rs test --release -p moq-video --no-default-features --features capture -E 'test(x11_rgb_workload)' --run-ignored only --no-capture
+
+# Use an isolated virtual X server and retain paired measurements for comparison.
+x11-bench-ci:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    log="${MOQ_X11_BENCH_LOG:-.scratch/x11-capture-benchmark.log}"
+    mkdir -p "$(dirname "$log")"
+    {
+        git rev-parse HEAD
+        rustc --version
+        xvfb-run -a -s "-screen 0 1920x1080x24 -nolisten tcp" just rs x11-bench
+        just rs x11-rgb-bench
+    } 2>&1 | tee "$log"
+
 # moq-video's MediaCodec code is `#[cfg(target_os = "android")]`. Needs an NDK,
 # which the dev shell lacks, so android.yml runs it outside Nix. `check` rather
 # than a denying clippy: the capture plumbing is dead on a target without a
