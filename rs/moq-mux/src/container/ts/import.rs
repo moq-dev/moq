@@ -22,6 +22,7 @@ use mpeg2ts::ts::{Pid, TsPacket};
 
 use super::adts;
 use super::catalog;
+use super::health::{Continuation, Continuity, Health};
 use super::psi::{self, PesStart, Pmt};
 use crate::catalog::hang::CatalogExt;
 use crate::codec::{aac, ac3, eac3, h264, h265, legacy, mp2, opus};
@@ -73,12 +74,12 @@ pub struct Import<E: catalog::Catalog = ()> {
 	liveness: Liveness,
 	/// In-progress PES reassembly, keyed by elementary PID.
 	pending: HashMap<Pid, Pending>,
-	/// Per elementary-stream-PID TS continuity state.
-	continuity: HashMap<Pid, Continuity>,
+	/// The TR 101 290 checks, and the per-PID continuity state routing reads.
+	health: Health,
 	/// PID the PMT designates as carrying the program clock reference. An
 	/// adaptation-field `discontinuity_indicator` means a *system time-base*
 	/// discontinuity only here; on any other PID it says nothing but that the
-	/// continuity counter jumped ([`Continuity`]).
+	/// continuity counter jumped ([`Continuation::Broken`]).
 	pcr_pid: Option<Pid>,
 	/// The multiplex rate measured off the PCR PID, recorded in the `mpegts` section
 	/// while the source holds one. Only fed with `mpegts` catalog support.
@@ -154,7 +155,7 @@ impl<E: catalog::Catalog> Import<E> {
 			retired_stats: BTreeMap::new(),
 			liveness: Liveness::default(),
 			pending: HashMap::new(),
-			continuity: HashMap::new(),
+			health: Health::default(),
 			pcr_pid: None,
 			mux_rate: Default::default(),
 			published: false,
@@ -218,16 +219,20 @@ impl<E: catalog::Catalog> Import<E> {
 		// registered) before the packets that follow it in the same chunk route.
 		let mut off = 0;
 		while let Some(at) = self.framer.next(&self.scratch, &mut off) {
+			self.health.routed(&self.scratch, at);
 			let pkt: [u8; TsPacket::SIZE] = self.scratch[at..at + TsPacket::SIZE].try_into().unwrap();
 			let pid = (((pkt[1] & 0x1f) as u16) << 8) | pkt[2] as u16;
 			// Every packet paces the multiplex, null stuffing and retransmissions included.
 			if self.supports_mpegts {
 				self.mux_rate.packet();
 			}
+			// Every packet is graded, but only the media PIDs and the clock route on the
+			// verdict: PSI and section PIDs keep their reassemblers' own.
+			let continuation = self.health.packet(&pkt, self.liveness.now());
 			let continuation = Pid::new(pid)
 				.ok()
 				.filter(|pid| self.streams.contains_key(pid) || self.pcr_pid == Some(*pid))
-				.map(|pid| self.continuity.entry(pid).or_default().observe(&pkt));
+				.map(|_| continuation);
 			// A retransmitted payload must not repeat the clock reset it carried.
 			if matches!(continuation, Some(Continuation::Duplicate)) {
 				continue;
@@ -243,6 +248,9 @@ impl<E: catalog::Catalog> Import<E> {
 					self.timebase_break()?;
 				} else if let Some(pcr) = pcr(&pkt) {
 					self.liveness.pcr(pcr);
+					if let Some(now) = self.liveness.now() {
+						self.health.tick(now);
+					}
 					if self.supports_mpegts && self.mux_rate.pcr(pcr) {
 						self.record_mux_rate()?;
 					}
@@ -306,6 +314,7 @@ impl<E: catalog::Catalog> Import<E> {
 			}
 		}
 
+		self.health.drained(&self.scratch, off);
 		self.scratch.drain(..off);
 		// Cut the snapshot groups for whatever SI committed in this batch. Batching per
 		// decode call (plus the store's own host-clock debounce) coalesces a junction's
@@ -363,6 +372,7 @@ impl<E: catalog::Catalog> Import<E> {
 		// can be read as a timebase reset rather than a counter jump.
 		if self.pcr_pid != pmt.pcr_pid {
 			self.pcr_pid = pmt.pcr_pid;
+			self.health.pcr_pid(pmt.pcr_pid.map(|pid| pid.as_u16()));
 			// A new clock: the intervals straddling the switch measure nothing.
 			self.liveness.discontinuity();
 			if self.mux_rate.discontinuity() {
@@ -539,7 +549,7 @@ impl<E: catalog::Catalog> Import<E> {
 			self.liveness.register(pid.as_u16());
 		}
 		self.streams.insert(pid, stream);
-		self.continuity.entry(pid).or_default();
+		self.health.restart(pid.as_u16());
 		Ok(())
 	}
 
@@ -566,7 +576,7 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		// This PID is becoming section-framed; drop any partial PES a prior codec left pending.
 		self.pending.remove(&pid);
-		self.continuity.remove(&pid);
+		self.health.restart(pid.as_u16());
 		if !self.supports_mpegts {
 			// Always route to Ignored, replacing any prior codec on this PID (a later PMT
 			// can reassign it), so a private section is never PES-parsed. Warn once.
@@ -626,6 +636,11 @@ impl<E: catalog::Catalog> Import<E> {
 
 		let is_video = matches!(stream, Stream::H264 { .. } | Stream::H265 { .. } | Stream::Clock);
 		let is_clock = matches!(stream, Stream::Clock);
+		// Verbatim streams with no cadence (SCTE-35, DVB subtitles) are left ungraded
+		// rather than watched against an invented one.
+		if pes.pts.is_some() && !matches!(stream, Stream::Verbatim(_) | Stream::Ignored) {
+			self.health.pts(pid.as_u16(), self.liveness.now());
+		}
 		if is_video {
 			for stream in self.streams.values_mut() {
 				if let Stream::Aac(audio) = stream {
@@ -820,6 +835,7 @@ impl<E: catalog::Catalog> Import<E> {
 			},
 		};
 		self.pmt_sections.entry(entry.pmt_pid).or_default();
+		self.health.pmt_pids(&[entry.pmt_pid.as_u16()], self.liveness.now());
 		self.record_program_identity(pat.transport_stream_id, entry)
 	}
 
@@ -907,10 +923,19 @@ impl<E: catalog::Catalog> Import<E> {
 		for (pid, stats) in &mut streams {
 			(stats.units, stats.quiet) = self.liveness.stream(*pid);
 		}
-		Stats {
+		let mut stats = Stats {
 			streams,
 			crc_error: self.crc_errors.values().sum(),
-		}
+			..Default::default()
+		};
+		self.health.errors().report(&mut stats);
+		stats
+	}
+
+	/// The TR 101 290 counts behind [`Self::stats`], for merging importers that read the same
+	/// multiplex.
+	pub(super) fn errors(&self) -> &super::health::Errors {
+		self.health.errors()
 	}
 
 	/// [`Stats::crc_error`] per PID, for merging importers that read the same PSI.
@@ -953,17 +978,23 @@ fn list_programs(programs: &[u16]) -> String {
 }
 
 /// What each demuxed elementary stream delivered, and the audio frame sync it lost or could
-/// not verify, keyed by elementary stream PID; and the PSI sections the stream as a whole
-/// lost to corruption.
+/// not verify, keyed by elementary stream PID; the PSI sections the stream as a whole lost to
+/// corruption; and its TR 101 290 errors.
 ///
 /// Snapshot it with [`Import::stats`]. Every count is cumulative for the life of the
 /// importer, so what an operator alarms on is the rate: a feed that resyncs once an hour is
 /// healthy, one that resyncs every second is losing audio, and one whose access units stop
 /// advancing while the mux keeps flowing has lost that stream.
 ///
+/// The fields named for ETSI TR 101 290 (V1.4.1) checks count them at that standard's fixed
+/// limits. They grade the stream as the importer received it, not the wire a receiver sees
+/// downstream. TR 101 290's `PID_error` is covered, more strictly, by each row's `units` and
+/// `quiet`: a dead video path behind a live mux still sends PCR-only packets on its PID, which
+/// a packet count reads as live. `PCR_accuracy_error` is not measured.
+///
 /// [`Export::stats`](super::Export::stats) returns the same rows for the streams it writes,
 /// so one schema reads both edges. Only `units` and `quiet` move there: the exporter builds
-/// every frame header itself, so it has no frame sync to lose.
+/// every frame header itself, so it has no frame sync to lose, and it grades nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Stats {
@@ -974,14 +1005,50 @@ pub struct Stats {
 	/// PAT and PMT sections dropped because their CRC-32 did not match. Each one left the
 	/// table already in force standing, or, before any, delayed the program's start to the
 	/// next good repetition. Counted for the stream rather than per elementary stream, since
-	/// the PSI PIDs have no row of their own.
+	/// the PSI PIDs have no row of their own. TR 101 290 2.2 `CRC_error`, on the PAT and PMT
+	/// only: the reduced-SI set of its table 5.1b. Captured SI is not CRC-checked.
 	pub crc_error: u64,
+	/// 1.1 `TS_sync_loss`: sync lost after two consecutive corrupt sync bytes on the packet
+	/// grid, and acquired again after five correct ones (ISO/IEC 13818-1 G.1).
+	pub ts_sync_loss: u64,
+	/// 1.2 `Sync_byte_error`: a byte other than 0x47 where the grid expects a sync byte, while
+	/// in sync.
+	pub sync_byte_error: u64,
+	/// 1.3 `PAT_error_2`: each 0.5 s of program clock without a PAT section on PID 0, and each
+	/// packet on PID 0 that is scrambled or starts a section other than a PAT.
+	pub pat_error: u64,
+	/// 1.4 `Continuity_count_error`, on every PID but the null PID: a counter gap, or a third
+	/// copy of a packet. A gap declared by `discontinuity_indicator`, the one duplicate ISO/IEC
+	/// 13818-1 2.4.3.3 permits, and a payload-less packet repeating its counter are not errors.
+	/// A loss of exactly 16 packets leaves the counter in step, and only a byte comparison
+	/// tells a loss of 15 from a duplicate, so the count is a floor.
+	pub continuity_count_error: u64,
+	/// 1.5 `PMT_error_2`: each 0.5 s of program clock without a PMT section on a PMT PID the
+	/// PAT names for the imported program, and each scrambled packet on one.
+	pub pmt_error: u64,
+	/// 2.1 `Transport_error`: packets with `transport_error_indicator` set, on any PID. Such a
+	/// packet counts nothing else.
+	pub transport_error: u64,
+	/// 2.3a `PCR_repetition_error`: consecutive PCR values on the PCR PID more than 100 ms
+	/// apart. Graded on the values, not on arrival: that speaks for the encoder's insertion,
+	/// which is what ingest can, while the network in front of the importer re-times arrival.
+	/// The interval across a `discontinuity_indicator` is not graded.
+	pub pcr_repetition_error: u64,
+	/// 2.3b `PCR_discontinuity_indicator_error`: consecutive PCR values outside 0 to 100 ms
+	/// apart, backwards included, without `discontinuity_indicator`. On values a run of missing
+	/// PCRs and an unsignalled jump are the same difference, so a forward step over 100 ms
+	/// counts here and as a repetition error both.
+	pub pcr_discontinuity_indicator_error: u64,
+	/// 2.5 `PTS_error`: each 700 ms of program clock without a PTS on an elementary stream
+	/// that has carried one. Verbatim streams are not graded: SCTE-35 and subtitles have no
+	/// cadence to hold.
+	pub pts_error: u64,
 }
 
 impl Stats {
 	/// Whether no elementary stream has been registered yet and nothing has been lost.
 	pub fn is_empty(&self) -> bool {
-		self.streams.is_empty() && self.crc_error == 0
+		self.streams.is_empty() && self.crc_error == 0 && self.health() == [0; 9]
 	}
 }
 
@@ -1015,6 +1082,12 @@ pub struct StreamStats {
 	/// confirm it. That substitutes audio rather than leaving a gap, which is why it is
 	/// counted separately from a resync.
 	pub unconfirmed: u64,
+	/// This PID's share of [`Stats::continuity_count_error`].
+	pub continuity_count_error: u64,
+	/// This PID's share of [`Stats::transport_error`].
+	pub transport_error: u64,
+	/// This PID's share of [`Stats::pts_error`].
+	pub pts_error: u64,
 }
 
 impl StreamStats {
@@ -1327,46 +1400,17 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 	}
 }
 
-/// Whether one PID's TS packets are still an unbroken chain, for whoever is accumulating
-/// bytes out of them.
-///
-/// Both reassemblers on this PID need the same answer: a section and a PES are equally
-/// meaningless when spliced onto bytes that didn't follow them. Keeping one implementation
-/// keeps a subtle rule (which packets advance the counter, which retransmissions to ignore)
-/// from drifting into two.
-#[derive(Default)]
-struct Continuity {
-	/// Last continuity_counter seen on a packet with payload, to spot gaps.
-	last_cc: Option<u8>,
-	/// Last payload packet, to identify ISO 13818-1 retransmissions.
-	last_pkt: Option<[u8; 188]>,
-}
-
-/// What one packet says about the bytes already accumulated for its PID.
-enum Continuation {
-	/// A retransmission, which may refresh PCR/OPCR. Ignore it entirely to avoid duplicate bytes.
-	Duplicate,
-	/// Contiguous with the previous payload packet.
-	Contiguous,
-	/// A counter gap or a declared discontinuity. Whatever was accumulating for this PID is
-	/// lost, but this packet's own payload is intact and still worth routing.
-	Broken,
-	/// The demodulator flagged this packet corrupt. The partial is lost like [`Broken`], and
-	/// so is the packet: nothing in it can be trusted.
-	Corrupt,
-}
-
 /// Whether a packet's adaptation field sets `discontinuity_indicator`.
 ///
 /// What that declares depends on the PID: a continuity-counter break on an elementary
 /// stream, and additionally a system time-base break on the program's PCR PID. It rides an
 /// adaptation-only packet (a clock packet with no payload) as readily as a payload one.
-fn discontinuity_indicator(pkt: &[u8; 188]) -> bool {
+pub(super) fn discontinuity_indicator(pkt: &[u8; 188]) -> bool {
 	pkt[3] & 0x20 != 0 && pkt[4] > 0 && pkt[5] & 0x80 != 0
 }
 
 /// The PCR a packet's adaptation field carries, in 27 MHz ticks.
-fn pcr(pkt: &[u8; 188]) -> Option<u64> {
+pub(super) fn pcr(pkt: &[u8; 188]) -> Option<u64> {
 	if pkt[3] & 0x20 == 0 || pkt[4] < 7 || pkt[5] & 0x10 == 0 {
 		return None;
 	}
@@ -1377,80 +1421,6 @@ fn pcr(pkt: &[u8; 188]) -> Option<u64> {
 		| (u64::from(pkt[10]) >> 7);
 	let ext = (u64::from(pkt[10] & 0x01) << 8) | u64::from(pkt[11]);
 	Some(base * 300 + ext)
-}
-
-/// Whether two packets differ only in the clock fields a retransmission may refresh.
-fn is_duplicate(last: &[u8; 188], pkt: &[u8; 188]) -> bool {
-	if last == pkt {
-		return true;
-	}
-
-	// A refreshed clock requires the same adaptation-field shape in both packets. Comparing
-	// through the flags byte also pins the PID, payload-unit start, counter, length, and every
-	// other header bit before any bytes are ignored.
-	let afc = (last[3] >> 4) & 0x3;
-	if afc & 0x2 == 0 || last[..6] != pkt[..6] {
-		return false;
-	}
-
-	let af_len = last[4] as usize;
-	let flags = last[5];
-	let clock_len = usize::from(flags & 0x10 != 0) * 6 + usize::from(flags & 0x08 != 0) * 6;
-	let clock_end = 6 + clock_len;
-	let adaptation_end = 5 + af_len;
-	if clock_len == 0 || clock_end > adaptation_end || adaptation_end > last.len() {
-		return false;
-	}
-
-	last[clock_end..] == pkt[clock_end..]
-}
-
-impl Continuity {
-	/// Classify one 188-byte packet, recording what the next call needs.
-	fn observe(&mut self, pkt: &[u8; 188]) -> Continuation {
-		// transport_error_indicator: the demodulator flagged this packet as corrupt, so its
-		// payload can't be trusted (and only a PAT or PMT has its CRC-32 checked). Forgetting the counter
-		// keeps the next clean packet from also looking like a gap.
-		if pkt[1] & 0x80 != 0 {
-			self.last_cc = None;
-			self.last_pkt = None;
-			return Continuation::Corrupt;
-		}
-
-		let afc = (pkt[3] >> 4) & 0x3;
-		let has_payload = afc & 0x1 != 0;
-		// Read the adaptation field before the no-payload case: a discontinuity can ride on
-		// an adaptation-only packet, and it counts just the same.
-		let discontinuity = discontinuity_indicator(pkt);
-
-		if !has_payload {
-			if discontinuity {
-				self.last_cc = None;
-				self.last_pkt = None;
-				return Continuation::Broken;
-			}
-			return Continuation::Contiguous;
-		}
-
-		// A retransmission repeats the counter, and so does a loss of exactly 15 packets.
-		// Only the bytes tell them apart, which is why the counter alone can't decide: taking
-		// every repeat for a duplicate would carry a partial straight across that loss and
-		// join it to unrelated bytes.
-		if self.last_pkt.as_ref().is_some_and(|last| is_duplicate(last, pkt)) {
-			return Continuation::Duplicate;
-		}
-		self.last_pkt = Some(*pkt);
-
-		// Only payload packets advance the counter, so this is the one place it moves.
-		let cc = pkt[3] & 0x0f;
-		let cc_gap = matches!(self.last_cc, Some(last) if cc != (last + 1) & 0x0f);
-		self.last_cc = Some(cc);
-		if discontinuity || cc_gap {
-			Continuation::Broken
-		} else {
-			Continuation::Contiguous
-		}
-	}
 }
 
 /// How long each elementary stream has gone without delivering an access unit.
@@ -1495,6 +1465,11 @@ impl Liveness {
 				*elapsed += step;
 			}
 		}
+	}
+
+	/// PCR ticks elapsed on the program clock since its first PCR, or `None` before one.
+	pub(super) fn now(&self) -> Option<u64> {
+		self.elapsed
 	}
 
 	/// The clock restarted or changed PID: the next interval measures nothing.
@@ -1621,7 +1596,7 @@ impl PatReader {
 }
 
 /// Where a packet's payload is.
-enum Payload<'a> {
+pub(super) enum Payload<'a> {
 	/// Adaptation field only, or reserved `adaptation_field_control`.
 	None,
 	Bytes(&'a [u8]),
@@ -1629,7 +1604,7 @@ enum Payload<'a> {
 	Malformed,
 }
 
-fn payload(pkt: &[u8; TsPacket::SIZE]) -> Payload<'_> {
+pub(super) fn payload(pkt: &[u8; TsPacket::SIZE]) -> Payload<'_> {
 	let afc = (pkt[3] >> 4) & 0x3;
 	if afc & 0x1 == 0 {
 		return Payload::None;
@@ -4128,6 +4103,7 @@ pub(super) mod test {
 					resyncs: 1,
 					discarded: 47,
 					unconfirmed: 0,
+					..Default::default()
 				}
 			)]),
 			"the resync left no trace an operator could alarm on"
@@ -4321,6 +4297,7 @@ pub(super) mod test {
 					resyncs: 1,
 					discarded: 72,
 					unconfirmed: 0,
+					..Default::default()
 				}
 			)]),
 			"the resync left no trace an operator could alarm on"
@@ -4508,6 +4485,7 @@ pub(super) mod test {
 					resyncs: 0,
 					discarded: 0,
 					unconfirmed: 1,
+					..Default::default()
 				}
 			)]),
 			"the drained frame was published without a trace"
