@@ -14,6 +14,9 @@
 /.claude/tmp/
 /.claude/worktrees/
 
+# Per-worktree agent scratch (PR bodies, logs, notes) that agents may still create.
+/.scratch/
+
 # IDE
 .idea
 

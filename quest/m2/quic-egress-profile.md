@@ -48,6 +48,10 @@ Report CPU per Gbps, RSS, loss, and p99 latency via `just bench BASE` on
 Linux. The verdict names which levers ship and which qdisc, if any, relay
 hosts need.
 
+## Required
+
+- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
+
 ## Related
 
 - [#3201](/quest/m3/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md) -

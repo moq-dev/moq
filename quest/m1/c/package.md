@@ -5,7 +5,7 @@
 The generated C ships as the `moq-c` package, version 0.8.0: a release archive
 with the header, the moq-ffi staticlib, a CMake config exporting `moq::c`, and
 `moq-c.pc`, built the same way `cpp/moq` builds the C++ package. It replaces the
-hand-written `rs/moq-c` crate's artifacts (renamed from libmoq on dev by #4288)
+hand-written `rs/moq-c` crate's artifacts (renamed from libmoq by #4288)
 under the same names.
 
 ## Plan

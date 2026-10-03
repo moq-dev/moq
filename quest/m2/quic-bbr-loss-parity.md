@@ -35,6 +35,6 @@ Decided in the 2026-09-30 audit: moved to m2. The seven correctness fixes
 already shipped, and this remaining gap has no observed impact on MoQ
 traffic yet.
 
-## Related
+## Required
 
-- [Upstream the fork](/quest/m1/quic/upstream.md) - offers this fix alongside the seven
+- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork

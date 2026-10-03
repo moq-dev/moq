@@ -77,7 +77,7 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 		}
 	});
 
-	tokio::time::timeout(TIMEOUT, track.used())
+	tokio::time::timeout(TIMEOUT, track.demand().used())
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();

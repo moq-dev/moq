@@ -125,10 +125,7 @@ impl Producer {
 
 	/// Poll until there are no active consumers. Errors if the channel closes first.
 	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_unused(waiter).map(|used| match used {
-			Some(()) => Ok(()),
-			None => Err(self.close_error()),
-		})
+		self.state.poll_unused(waiter).map_err(|_| self.close_error())
 	}
 
 	/// Whether at least one active consumer exists right now.
@@ -143,10 +140,7 @@ impl Producer {
 
 	/// Poll until at least one active consumer exists. Errors if the channel closes first.
 	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_used(waiter).map(|used| match used {
-			Some(()) => Ok(()),
-			None => Err(self.close_error()),
-		})
+		self.state.poll_used(waiter).map_err(|_| self.close_error())
 	}
 
 	fn modify(&self) -> Result<kio::Mut<'_, State>> {
@@ -232,9 +226,9 @@ impl Allocator {
 	/// decision about what to *produce*, and there is no single subscriber
 	/// priority to read when several are watching one track.
 	///
-	/// That last part is what carries the common case, since publishers leave
-	/// `priority` at its default today: one tier of audio and video still serves
-	/// audio's small reservation in full before video takes the remainder.
+	/// That last part carries a publisher that leaves `priority` at its default:
+	/// one tier of audio and video still serves audio's small reservation in full
+	/// before video takes the remainder.
 	///
 	/// The reservation lasts as long as the returned [`Reservation`]: hold it for as
 	/// long as the sender is publishing, change the ceiling with
@@ -663,9 +657,8 @@ mod tests {
 		assert_eq!(allocate(bps(1_000_000), &wants, 1), Some(bps(0)));
 	}
 
-	/// Publishers don't set [`track::Info::priority`] today (it defaults to 0 and
-	/// `hang::container::track_info` leaves it there), so audio and video land in
-	/// one tier. That has to come out right anyway, and it does: max-min fair
+	/// A publisher that doesn't set [`track::Info::priority`] puts audio and video
+	/// in one tier. That has to come out right anyway, and it does: max-min fair
 	/// satisfies the small claim first, so audio still gets its full reservation
 	/// and video takes the rest. Priority only changes the answer once a tier's
 	/// smaller claims outgrow an even split.

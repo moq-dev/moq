@@ -1,0 +1,27 @@
+# Relay config for the drain harness.
+# Anonymous access, self-signed localhost cert, QUIC + HTTP on 127.0.0.1.
+#
+# run.sh starts two relays from this file, overriding the ports on the command
+# line (`--listen` / `--web-http-listen`), and clusters the draining one to the
+# other with `--cluster-connect`. Only the settings both share live here.
+
+# Long enough that a client still on the draining relay at the deadline is a
+# failure the harness reports, not a close it races.
+drain_timeout = "20s"
+
+[log]
+level = "info"
+
+[listen]
+# QUIC on UDP. 127.0.0.1 avoids IPv6 flakiness on CI runners.
+bind = "127.0.0.1:4470"
+tls.generate = ["localhost", "127.0.0.1"]
+
+[web.http]
+# HTTP and WebSocket on TCP, also serving /certificate.sha256, which is how the
+# cluster dial over `http://` pins the peer's self-signed certificate.
+listen = "127.0.0.1:4470"
+
+[auth]
+# Allow anonymous access to everything.
+public = "**"

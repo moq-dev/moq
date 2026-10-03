@@ -43,7 +43,7 @@ use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 use windows::core::{GUID, Interface};
 
 use super::super::encoder::{Codec, Config, Gop};
-use super::{Backend, Encoded};
+use super::{Backend, Encoded, keyframe_annexb};
 use crate::frame::{Surface, interleave_uv};
 use crate::mf::{ComGuard, mf_err, pack_2x32};
 use crate::{Color, Error, Frame};
@@ -496,10 +496,11 @@ impl MediaFoundation {
 
 		let Some(sample) = sample else { return Ok(None) };
 		let sample_time = unsafe { sample.GetSampleTime() }.ok();
-		Ok(Some(Encoded::new(
-			sample_to_bytes(&sample)?,
-			self.take_timestamp(sample_time),
-		)))
+		let payload = sample_to_bytes(&sample)?;
+		// Read from the bitstream rather than `MFSampleExtension_CleanPoint`, which a
+		// hardware MFT is not required to set.
+		let keyframe = keyframe_annexb(self.codec, &payload);
+		Ok(Some(Encoded::new(payload, self.take_timestamp(sample_time), keyframe)))
 	}
 
 	/// End the stream and wait the MFT's tail out, returning everything it was

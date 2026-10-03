@@ -37,12 +37,15 @@ pub(crate) struct Listing {
 	rendition: Box<dyn Owned>,
 	/// Measures `delay` against the catalog's other renditions, media included.
 	estimator: Estimator,
+	/// The catalog clock as of the last write. Read again on every write, since an importer's first
+	/// frame re-anchors the catalog's clock however long after this track was created.
+	clock: crate::Clock,
 }
 
 /// The parts of a [`Rendition`] a [`Listing`] uses, without its config type.
 trait Owned: Send + Sync {
 	fn name(&self) -> &str;
-	fn timestamp(&self) -> crate::Result<moq_net::Timestamp>;
+	fn clock(&self) -> crate::Clock;
 	fn estimate(&mut self, estimate: super::Estimate) -> crate::Result<()>;
 }
 
@@ -50,8 +53,8 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Owned for Rendition<E, C> {
 	fn name(&self) -> &str {
 		Rendition::name(self)
 	}
-	fn timestamp(&self) -> crate::Result<moq_net::Timestamp> {
-		Rendition::timestamp(self, None)
+	fn clock(&self) -> crate::Clock {
+		Rendition::clock(self)
 	}
 	fn estimate(&mut self, estimate: super::Estimate) -> crate::Result<()> {
 		Rendition::estimate(self, estimate)
@@ -67,6 +70,7 @@ impl Listing {
 		rendition.set(config)?;
 		Ok(Self {
 			estimator: rendition.estimator(),
+			clock: rendition.clock(),
 			rendition: Box::new(rendition),
 		})
 	}
@@ -76,10 +80,25 @@ impl Listing {
 		self.rendition.name()
 	}
 
+	/// Stamp a payload on the catalog's current clock, at its capture instant or else now. Also
+	/// returns the capture time, if there was one.
+	pub(crate) fn stamp<P>(
+		&mut self,
+		timed: moq_net::Timed<P, std::time::Instant>,
+	) -> crate::Result<(moq_net::Timed<P>, Option<moq_net::Timestamp>)> {
+		let clock = self.rendition.clock();
+		// A re-anchor moves this track's timeline, which measured across would read as jitter.
+		if clock.wall() != self.clock.wall() {
+			self.estimator.discontinuity();
+		}
+		self.clock = clock;
+		clock.stamp(timed)
+	}
+
 	/// Measure a frame of `bytes` encoded bytes, just written, captured at `captured` on the
 	/// broadcast clock if known.
 	pub(crate) fn record(&mut self, bytes: usize, captured: Option<moq_net::Timestamp>) -> crate::Result<()> {
-		let now = self.rendition.timestamp()?;
+		let now = self.clock.now();
 		let flush = captured.map(|captured| (captured, std::time::Instant::now()));
 		self.record_at(now, bytes, flush)
 	}

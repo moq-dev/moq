@@ -33,4 +33,4 @@ Guidance:
 - Benchmark the codec before and after (Criterion); it is on every message.
 
 Public API: breaks moq-net's `coding` module (Encode/Decode on primitives
-go away), so this retargets to `dev`. Wire: none.
+go away). Wire: none.

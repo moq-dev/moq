@@ -1,52 +1,45 @@
-# [S] Cost across scopes
+# [S] Direct peers win
 
 ## Goal
 
-A written rule, in `doc/concept/transport.md` and the drafts, for how a route
-through a P2P peer compares with the relay's own route, such that a peer
-already carrying a broadcast wins and an idle peer never has traffic pulled
-through it. The rule is implementable by the Rust and JS origins with the
-existing `Cost { warm, cold }` and the per-link price a publisher declares in
-SETUP.
+A subscriber uses a direct P2P link only when the peer at the other end is
+the broadcast's origin or a routing node (a `moq-cli --p2p` hop or a relay
+the customer hosts), and the CDN otherwise. A browser never carries another
+peer's traffic. The rule is the route layer's ordinary metric over link
+costs the node sets itself, with defaults that make a direct link beat the
+relay, so a watcher next to the publishing tab pulls from it and everyone
+else pulls from the CDN.
 
 ## Plan
 
-This is a planning quest; it produces the rule and rewrites the
-implementation quests that depend on it.
+Decided 2026-10-01 (moq-dev/moq#4694):
 
-What is settled today: a publisher declares an egress price in SETUP on
-lite-06 and the receiver charges it per link, with local policy able to
-override the peer's declaration; `warm` and `cold` accumulate per link and
-compare in that order; a chain containing an anonymous hop loses to any
-identified chain; Rust migrates a live subscription only to a route with the
-same first hop.
+- No warm or cold cost and no cache state. A peer that merely watches a
+  broadcast does not offer it to other peers; deduplicating a site's internet
+  traffic is a customer relay's job, which is a routing node like any other.
+  This deleted the JS transit quest.
+- Link costs are the node's own policy: `Peers` sets the cost of P2P links
+  and of the relay session, mirrored by `moq-cli --p2p`. The relay declares
+  nothing per client. Pick defaults so one direct LAN hop beats the relay
+  route, and a relay route beats two P2P hops through a routing node only
+  when the application says so.
+- The comparison needs the node ids and metrics of
+  [Routes and announces](/quest/m1/cluster-routing/routes.md): a broadcast's
+  ANNOUNCE names its origin node, and the roster maps that node to a peer the
+  application may dial, so an app learns whom to dial from the announce.
+- Switching between the peer and the relay splices for an epoch-qualified
+  path (same source), and is a discontinuity otherwise, per
+  [Selection](/quest/m1/cluster-routing/selection.md).
 
-What is not: costs live in one scope, a mesh pricing its own links. A P2P
-link is neither free (peer uplink, reliability) nor the CDN's egress, and
-nothing flattens `warm` when an origin already carries the content, so a tab
-forwarding the relay's route at the relay's price plus its own ties the relay
-and loses on chain length. Candidate rules to weigh, with the numbers from
-the [harness](/quest/m2/p2p/harness.md) where they exist:
+Deliverables: the `Peers` and `moq-cli` cost knobs with their defaults, the
+rule written beside route selection in the routing concept page the cluster
+routing line adds, and tests with the mock transport: a watcher with a direct
+link to the publishing tab uses it and returns to the relay when it drops; a
+watcher whose only direct peer is another watcher stays on the relay.
 
-- a warm discount: an origin actively receiving a broadcast re-announces it
-  at `warm` 0 and `cold` unchanged, over every session, in both languages,
-  which is what the two magnitudes were designed for;
-- explicit prices per scope: the relay's client-facing link priced as egress,
-  the P2P link priced by the application, and a documented comparison between
-  them;
-- a scope tag on the route, so a P2P route is compared with a relay route by
-  a rule rather than by subtraction.
+Public API: cost knobs on `Peers` and `moq-cli`. Wire: none beyond the route
+layer.
 
-Decide who sets the P2P link price (the application, per `Peers` knob), what
-the relay's client-facing default is, whether the first-hop migration gate
-holds when the first hop is a publisher tab, and whether the warm discount
-belongs in the mesh too. Write the rule beside route selection in
-`doc/concept/transport.md`, mirror it in `draft-lcurley-moq-lite.md` and
-`draft-lcurley-moq-cluster.md` where the wire carries it, and pass
-`just drafts check`. Then update [watch](/quest/m2/p2p/watch.md) and
-[transit](/quest/m2/p2p/transit.md) with the chosen rule and open the
-implementation quest it needs.
+## Required
 
-## Related
-
-- [Cluster routing](/quest/m1/cluster-routing/README.md) - the mesh-side use of cost
+- [Routes and announces](/quest/m1/cluster-routing/routes.md) - the origin node ids and metrics this compares

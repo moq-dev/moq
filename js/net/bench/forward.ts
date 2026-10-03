@@ -37,7 +37,7 @@ class FakeSession {
 	}
 }
 
-const announce = (stream: Announce.Producer, prefix: Path.Valid, cost: bigint, kind: Announce.Kind) =>
+const announce = (stream: Announce.Producer, prefix: Path.Valid, cost: bigint, kind: "start" | "update") =>
 	stream.append({ prefix, captures: undefined, kind, route: Route.normalize({ cost }) });
 
 console.log("touched,heads,routes,update_us");
@@ -58,9 +58,9 @@ for (const touched of ["covering", "single"] as const) {
 			// presents that covering route on each head's stream, so it lands once per head.
 			for (let index = 0; index < routeCount; index++) {
 				const head = index % headCount;
-				announce(session.streams[head], Path.join(heads[head], Path.from(`r${index}`)), 1n, "announced");
+				announce(session.streams[head], Path.join(heads[head], Path.from(`r${index}`)), 1n, "start");
 			}
-			for (const stream of session.streams) announce(stream, Path.empty(), 1n, "announced");
+			for (const stream of session.streams) announce(stream, Path.empty(), 1n, "start");
 			await flush();
 
 			const path = touched === "covering" ? Path.empty() : Path.join(heads[0], Path.from("r0"));
@@ -71,9 +71,9 @@ for (const touched of ["covering", "single"] as const) {
 			for (let index = 0; index < updates; index++) {
 				const cost = BigInt(index + 2);
 				if (touched === "covering") {
-					for (const stream of session.streams) announce(stream, path, cost, "updated");
+					for (const stream of session.streams) announce(stream, path, cost, "update");
 				} else {
-					announce(session.streams[0], path, cost, "updated");
+					announce(session.streams[0], path, cost, "update");
 				}
 				await flush();
 				if (table.peek().get(path)?.cost.warm !== cost) throw new Error("re-price did not land");

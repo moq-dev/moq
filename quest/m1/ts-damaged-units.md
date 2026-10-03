@@ -19,10 +19,10 @@ packet (clears `pending[pid]` and calls `stream.desync()`), and it is the model.
 
 Decided (maintainer, 2026-09-30):
 
-- Fail-loud holds at unit granularity, as [TS PSI reassembly](/quest/m1/ts-psi-reassembly.md)
-  holds it at section granularity: a damaged unit is refused whole, never half
+- Fail-loud holds at unit granularity, as the importer
+  holds it at section granularity for PSI (#4584): a damaged unit is refused whole, never half
   published, and counted, and nothing else about the feed changes. PSI damage
-  stays that quest's.
+  is already handled.
 - Drop the unit the way the TEI branch does: clear the PID's pending PES and
   desync its stream, so a codec that needs one waits for the next keyframe.
   Make sure the scratch buffer still advances past the packet on this path
@@ -46,10 +46,6 @@ again from the next keyframe; a clean fixture counts zero. Document the counter
 wherever the TS stats fields are described.
 
 Public API: additive, one stats field. Wire: none.
-
-## Required
-
-- [TS PSI reassembly](/quest/m1/ts-psi-reassembly.md) - moq-mux owns the demux and PES header parsing this drops through
 
 ## Closes
 

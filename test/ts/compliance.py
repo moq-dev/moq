@@ -72,7 +72,7 @@ class Check:
 class Thresholds:
     """IRD limits and T-STD model parameters, all overridable from the CLI."""
 
-    pcr_repetition_ms: float = 40.0
+    pcr_repetition_ms: float = 100.0
     pcr_jitter_us: float = 500.0
     null_ratio_max: float = 0.90
     bitrate_cov_max: float = 0.10

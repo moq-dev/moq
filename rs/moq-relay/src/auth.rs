@@ -321,6 +321,10 @@ pub enum Error {
 	#[error("auth server unavailable: {0}")]
 	Unavailable(String),
 
+	/// A valid grant does not cover the requested direction or path.
+	#[error("{0}")]
+	Forbidden(String),
+
 	/// The relay could not build the request the server needs.
 	#[error("{0}")]
 	Request(String),
@@ -341,6 +345,7 @@ impl From<&Error> for http::StatusCode {
 			// A server-side problem, not a credential problem: the client may retry.
 			Error::Unavailable(_) => http::StatusCode::BAD_GATEWAY,
 			Error::Request(_) => http::StatusCode::BAD_REQUEST,
+			Error::Forbidden(_) => http::StatusCode::FORBIDDEN,
 			_ => http::StatusCode::UNAUTHORIZED,
 		}
 	}
@@ -491,7 +496,7 @@ impl Lease {
 					Ok(grant) => {
 						let fresh = self.token.recheck(&grant);
 						if fresh.root != self.token.root {
-							return "root changed".into();
+							return lease::Reason::Narrowed;
 						}
 						if fresh.mounts != self.token.mounts {
 							return "mounts changed".into();
@@ -502,7 +507,7 @@ impl Lease {
 							return "peer changed".into();
 						}
 						if !self.token.covered_by(&fresh) {
-							return "grant narrowed".into();
+							return lease::Reason::Narrowed;
 						}
 						if fresh.tier != self.token.tier {
 							tracing::info!(from = %self.token.tier, to = %fresh.tier, "tier changed");
@@ -523,6 +528,25 @@ impl Lease {
 	/// revoked first. Dropping the consumer reports zero bytes.
 	pub fn close(self, reason: impl Into<lease::Reason>, bytes: Bytes) -> lease::Reason {
 		self.consumer.close(reason, bytes)
+	}
+}
+
+/// Run gateway work while its admission lease still covers the session.
+///
+/// Work is dropped when the lease expires, narrows, or is revoked. A completed
+/// work future ends the lease with zero byte totals. A gateway that tracks
+/// transport totals can use [`Lease::ended`] and [`Lease::close`] directly.
+pub async fn hold<T>(mut lease: Lease, work: impl std::future::Future<Output = T>) -> Result<T, lease::Reason> {
+	tokio::select! {
+		biased;
+		reason = lease.ended() => {
+			lease.close(reason.clone(), Bytes::default());
+			Err(reason)
+		},
+		result = work => {
+			lease.close("done", Bytes::default());
+			Ok(result)
+		},
 	}
 }
 
@@ -717,12 +741,18 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 		.map(str::to_owned)
 		.or_else(|| request.authority().map(str::to_owned));
 	out.alpn = request.alpn().map(str::to_owned);
-	out.role = request.role().map(|role| match role {
-		moq_net::Role::Publisher => moq_auth::Role::Publisher,
-		_ => moq_auth::Role::Subscriber,
-	});
+	out.role = request.role().and_then(role);
 	out.tls = request.peer_identity().as_ref().and_then(peer);
 	out
+}
+
+/// The auth role for a session role, `None` for one `moq-auth` cannot name yet.
+pub(crate) fn role(role: moq_net::Role) -> Option<moq_auth::Role> {
+	match role {
+		moq_net::Role::Publisher => Some(moq_auth::Role::Publisher),
+		moq_net::Role::Subscriber => Some(moq_auth::Role::Subscriber),
+		_ => None,
+	}
 }
 
 /// The certificate facts for a verified peer, or `None` when the chain does not parse.

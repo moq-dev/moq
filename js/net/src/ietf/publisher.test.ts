@@ -8,12 +8,12 @@ import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
-import { Timestamp } from "../time.ts";
+import { Milli, Timestamp } from "../time.ts";
 import type { Producer as TrackProducer } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { NativeSession, type Session } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
-import { FetchHeader } from "./fetch.ts";
+import { Fetch, FetchHeader } from "./fetch.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
 import { PublishDone } from "./publish.ts";
 import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
@@ -174,6 +174,51 @@ test("TRACK_STATUS gets exact NOT_SUPPORTED refusal bytes on every draft", async
 	}
 });
 
+// Legal requests we don't serve are refused NOT_SUPPORTED one at a time.
+test("FETCH and a non-forwarding SUBSCRIBE get NOT_SUPPORTED", async () => {
+	const refusal = async (version: IetfVersion, run: (pub: Publisher, stream: Stream) => Promise<void>) => {
+		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const session = new NativeSession(pair.server, version, true);
+		const { pub, origin } = publisher(pair.server, { session });
+		const written: Uint8Array[] = [];
+		const stream = new Stream({
+			readable: new ReadableStream<Uint8Array>(),
+			writable: new WritableStream<Uint8Array>({
+				write: (chunk) => {
+					written.push(new Uint8Array(chunk));
+				},
+			}),
+			version,
+		});
+		await run(pub, stream);
+		await stream.writer.closed;
+		origin.close();
+		return written.flatMap((chunk) => Array.from(chunk));
+	};
+
+	for (const version of [Version.DRAFT_14, Version.DRAFT_16, Version.DRAFT_20] as const) {
+		const fetch = await refusal(version, (pub, stream) => pub.runFetch(new Fetch({ requestId: 7n }), stream));
+		// FETCH_ERROR on draft-14, REQUEST_ERROR after; the code follows the Length and any Request ID.
+		expect(fetch[0]).toBe(version === Version.DRAFT_14 ? 0x19 : 0x05);
+		expect(fetch[version <= Version.DRAFT_16 ? 4 : 3]).toBe(0x3);
+
+		const paused = await refusal(version, (pub, stream) =>
+			pub.runSubscribe(
+				new Subscribe({
+					requestId: 7n,
+					trackNamespace: Path.from("test"),
+					trackName: "video",
+					subscriberPriority: 0,
+					forward: false,
+				}),
+				stream,
+			),
+		);
+		expect(paused[0]).toBe(0x05);
+		expect(paused[version <= Version.DRAFT_16 ? 4 : 3]).toBe(0x3);
+	}
+});
+
 // The header is part of the group's lifetime too. If it blocks on flow control, advancing
 // the live edge must reset the stream without waiting for that write to finish.
 test("a blocked group header is reset when the group expires", async () => {
@@ -210,7 +255,7 @@ test("a blocked group header is reset when the group expires", async () => {
 
 	const { pub, origin } = publisher(pair.server);
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video");
+	const track = broadcast.createTrack("video", { maxAge: Milli(5000) });
 	const client = await Stream.open(pair.client, { version: VERSION });
 	const server = await Stream.accept(pair.server, VERSION);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
@@ -294,7 +339,7 @@ test("a group that goes stale while its stream opens writes nothing", async () =
 
 	const { pub, origin } = publisher(pair.server);
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video");
+	const track = broadcast.createTrack("video", { maxAge: Milli(5000) });
 	const client = await Stream.open(pair.client, { version: VERSION });
 	const server = await Stream.accept(pair.server, VERSION);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");

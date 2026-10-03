@@ -59,8 +59,7 @@ failure is terminal for the pair until either side re-announces; no retry
 loop. Each established connection goes through `connect` with the supplied
 transport on the dialing side and `accept` on the answering side, both with
 `publish: origin.consume()` and `consume: origin`, so the tab serves what it
-publishes and, once [transit](/quest/m2/p2p/transit.md) lands, what it
-receives.
+publishes, never what it receives (a tab is not transit).
 
 Trust: publishing under the prefix proves only that the relay admitted the
 peer to the prefix, not that it may read everything this tab can. Tokens

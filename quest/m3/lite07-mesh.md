@@ -1,0 +1,15 @@
+# [XS] The moq.pro mesh runs lite-07
+
+## Goal
+
+Every relay in the moq.pro mesh dials its cluster peers with moq-lite-07, so
+each one opts in to hidden broadcasts on the wire.
+
+This quest tracks a condition outside the repository. When it holds, delete
+this quest and every `Required` entry that links it.
+
+## Plan
+
+As of 2026-09-30 lite-07 ships only as the off-by-default `moq-lite-07-wip`
+ALPN, and moq.pro still has its lite-07 rollout quest open
+(`quest/m1/lite07.md` in moq-dev/moq.pro).
