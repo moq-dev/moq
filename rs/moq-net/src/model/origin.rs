@@ -7773,6 +7773,72 @@ mod tests {
 		assert!(matches!(err, Error::Dropped), "unexpected end: {err}");
 	}
 
+	/// A session never subscribes to itself: when the route serving a peer dies, its
+	/// front never resumes onto a route through that peer, even one from the same
+	/// publisher. A reader that can see the route resumes there.
+	#[tokio::test]
+	async fn resume_never_routes_through_the_requester() {
+		for peer in [Some(origin(7)), None] {
+			let producer = origin(1).produce();
+			let consumer = match peer {
+				Some(peer) => producer.consume().excluding(peer),
+				None => producer.consume(),
+			};
+			let incumbent = producer
+				.dynamic("room", Route::default().with_hops(hops(&[10])))
+				.unwrap();
+			// The same publisher, reached through the requesting peer.
+			let echo = producer
+				.dynamic("room", Route::default().with_hops(hops(&[10, 7])))
+				.unwrap();
+
+			let pending = consumer.request_broadcast("room/alice");
+			let request = queued(&incumbent).await;
+			let source = broadcast::Info::new().produce();
+			let track = source.create_track("video", None).unwrap();
+			let mut group = track.append_group().unwrap();
+			group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
+			group.finish().unwrap();
+			request.accept(&source);
+
+			let resolved = pending.await.expect("resolves through the incumbent");
+			let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
+			let mut group = next_group(&mut subscription).await.unwrap().expect("first group");
+			assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
+
+			// The serving route dies, like a session.
+			drop(incumbent);
+			drop(source);
+			track.abort(Error::Dropped).unwrap();
+
+			match peer {
+				Some(_) => {
+					let err = next_group(&mut subscription).await.err().expect("subscription ends");
+					assert!(matches!(err, Error::Dropped), "unexpected end: {err}");
+					assert!(
+						echo.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
+						"the front asked the requester for its own copy"
+					);
+				}
+				None => {
+					let request = queued(&echo).await;
+					let replacement = broadcast::Info::new().produce();
+					let track = replacement.create_track("video", None).unwrap();
+					let mut group = track.append_group().unwrap();
+					group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
+					group.finish().unwrap();
+					request.accept(&replacement);
+					let mut group = track.append_group().unwrap();
+					group.write_frame(crate::Timestamp::ZERO, b"resumed".as_ref()).unwrap();
+					group.finish().unwrap();
+
+					let mut group = next_group(&mut subscription).await.unwrap().expect("resumed group");
+					assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"resumed");
+				}
+			}
+		}
+	}
+
 	/// An anonymous publisher that dies without unannouncing is replaced by the
 	/// next anonymous session at the same path: a subscriber on a third session
 	/// gets the newcomer's media immediately, not a lingering dead front.
