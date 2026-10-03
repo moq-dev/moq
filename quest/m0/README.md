@@ -41,7 +41,6 @@ a published `@moq/watch` break.
 - [Branch flip](/quest/m0/branch-flip.md) - `dev` becomes the default `main` trunk and today's `main` becomes `release`, where publishing runs
 - [IETF FIN semantics](/quest/m0/ietf-fin-not-cancel.md) - a request stream FIN stops updates without cancelling, and REQUEST_UPDATE on a subscribe is parsed
 - [JS unknown bidi](/quest/m0/ietf-unknown-bidi.md) - an unknown moq-transport bidi stream type closes the session in JS, as in Rust
-- [moq-lite early streams](/quest/m0/lite-early-streams.md) - a lite uni stream that arrives before SETUP is held until SETUP lands, and a second SETUP is fatal
 - [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
 - [noq reassembly cap](/quest/m0/noq-reassembly-cap.md) - noq carries quinn's stream reassembly cap and the connection receive window is finite by default
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines

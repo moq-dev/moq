@@ -4,7 +4,16 @@ import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import { closeError, error, fromClose, ProtocolViolation, StreamCode, StreamError, sessionCause } from "../error.ts";
+import {
+	closeError,
+	error,
+	fromClose,
+	ProtocolViolation,
+	SessionCode,
+	StreamCode,
+	StreamError,
+	sessionCause,
+} from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import type * as Path from "../path.ts";
@@ -89,6 +98,7 @@ export class Connection implements Established {
 	// encoding depends on a negotiated capability (e.g. PROBE) wait on this. undefined
 	// until the peer's SETUP arrives; stays undefined forever on older drafts.
 	#peerSetup = new Signal<Setup | undefined>(undefined);
+	#setupSeen = false;
 
 	// Mirrors the role out of #peerSetup, so the public surface exposes the peer's declared
 	// direction without handing out the whole SETUP (whose probe level gates our own streams).
@@ -294,6 +304,9 @@ export class Connection implements Established {
 				})
 				.catch((err: unknown) => {
 					stream.stop(err);
+					if (err instanceof ProtocolViolation) {
+						this.#quic.close({ closeCode: SessionCode.ProtocolViolation, reason: err.message });
+					}
 				});
 		}
 	}
@@ -304,8 +317,11 @@ export class Connection implements Established {
 			const msg = await Group.decode(stream, this.#version);
 			await this.#subscriber.runGroup(msg, stream);
 		} else if (typ === DataType.Setup) {
+			// Claim the stream before decoding, so two incomplete SETUPs are duplicates too.
+			if (this.#setupSeen) throw new ProtocolViolation("duplicate SETUP");
+			this.#setupSeen = true;
 			// The peer sends exactly one SETUP, then FINs. Record it so capability-gated
-			// streams (e.g. PROBE) can react, then drain to the FIN.
+			// streams (e.g. PROBE) can react.
 			const setup = await Setup.decode(stream, this.#version);
 			this.#peerSetup.set(setup);
 			this.#peerRole.set(setup.role);

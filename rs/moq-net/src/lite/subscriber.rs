@@ -525,7 +525,7 @@ pub(super) struct SubscriberDriver<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
-	pub fn new(subscriber: Subscriber<S>) -> Self {
+	pub fn new(subscriber: Subscriber<S>, early: Vec<Reader<S::RecvStream, Version>>) -> Self {
 		// The wire speaks announce interest by prefix: ask for each granted
 		// pattern's literal head and let the origin's scope filter what arrives.
 		let prefixes = crate::model::interest_prefixes(&subscriber.origin.allowed())
@@ -536,7 +536,7 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 		Self {
 			prefixes,
 			cleanup: SubscriptionCleanup(subscriber.subscribes.clone()),
-			uni: UniAccept::new(subscriber.clone()),
+			uni: UniAccept::new(subscriber.clone(), early),
 			bandwidth: Some(RecvBandwidth::new(subscriber.clone())),
 			datagrams: Some(DatagramRecv::new(subscriber.clone())),
 			sources: kio::Tasks::new(),
@@ -616,12 +616,19 @@ struct UniAccept<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> UniAccept<S> {
-	fn new(subscriber: Subscriber<S>) -> Self {
+	fn new(subscriber: Subscriber<S>, early: Vec<Reader<S::RecvStream, Version>>) -> Self {
 		let accept = subscriber.session.clone();
+		let mut children = kio::Tasks::new();
+		for reader in early {
+			children.push(UniServe {
+				subscriber: subscriber.clone(),
+				state: UniState::Start { reader },
+			});
+		}
 		Self {
 			subscriber,
 			accept,
-			children: kio::Tasks::new(),
+			children,
 		}
 	}
 
@@ -679,6 +686,12 @@ impl<S: crate::transport::poll::Session> kio::Task for UniServe<S> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		if let Err(err) = ready!(self.poll_serve(waiter)) {
 			tracing::debug!(%err, "error running uni stream");
+			if matches!(err, Error::ProtocolViolation) {
+				self.subscriber
+					.session
+					.clone()
+					.close(crate::SessionError::ProtocolViolation.to_code(), &err.to_string());
+			}
 		}
 		Poll::Ready(())
 	}
@@ -702,6 +715,10 @@ impl<S: crate::transport::poll::Session> UniServe<S> {
 					// A decode error here is only logged; the peer hung up or spoke garbage
 					// before the stream had a type.
 					let kind = ready!(reader.poll_decode::<lite::DataType>(&mut cx))?;
+					// Claim before decoding the body, so two incomplete SETUPs are duplicates too.
+					if matches!(kind, lite::DataType::Setup) && self.subscriber.version.has_setup_stream() {
+						self.subscriber.peer_setup.claim()?;
+					}
 					let UniState::Start { reader } = std::mem::replace(&mut self.state, UniState::Done) else {
 						unreachable!()
 					};
@@ -1522,6 +1539,77 @@ mod tests {
 			Some(4..8),
 			"a live-edge floor starts where START resolved it"
 		);
+	}
+
+	/// A GROUP needs no negotiated extension, so it proceeds before SETUP, or after a
+	/// server's gated accept held it.
+	#[tokio::test(start_paused = true)]
+	async fn early_group_is_delivered() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			for pre_read in [false, true] {
+				let mut bytes = Vec::new();
+				lite::DataType::Group.encode(&mut bytes, version).unwrap();
+				lite::Group {
+					subscribe: 7,
+					sequence: 3,
+					frame_start: 0,
+				}
+				.encode(&mut bytes, version)
+				.unwrap();
+				0u64.encode(&mut bytes, version).unwrap();
+				1u64.encode(&mut bytes, version).unwrap();
+				bytes.push(42);
+				let mut setup = Vec::new();
+				lite::DataType::Setup.encode(&mut setup, version).unwrap();
+				lite::Setup::default().encode(&mut setup, version).unwrap();
+				let mut session =
+					crate::lite::test_transport::ScriptedSession::eof(Vec::new()).with_incoming_unis(if pre_read {
+						vec![Vec::new(), vec![42], bytes, setup]
+					} else {
+						vec![bytes]
+					});
+				let log = session.log.clone();
+				let peer_setup = lite::PeerSetup::default();
+				let early = if pre_read {
+					let accepted = lite::accept_setup(&mut session, version).await.unwrap();
+					assert_eq!(accepted.early.len(), 2);
+					assert!(log.stops().is_empty());
+					peer_setup.set(accepted.setup);
+					accepted.early
+				} else {
+					Vec::new()
+				};
+				let subscriber = Subscriber::new(SubscriberConfig {
+					runtime: crate::time::Clock::tokio(),
+					session,
+					origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+					recv_bandwidth: None,
+					version,
+					peer_setup: peer_setup.clone(),
+					peer_hop: None,
+					cost: None,
+					going_away: Default::default(),
+				});
+				let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+				let mut consumer = track.consume().subscribe(None).await.unwrap();
+				subscriber.subscribes.lock().insert(
+					7,
+					TrackEntry {
+						producer: track,
+						timescale: Some(Timescale::default()),
+						tail: Default::default(),
+					},
+				);
+				let mut accept = UniAccept::new(subscriber, early);
+				assert!(accept.poll(&kio::Waiter::noop()).is_pending());
+				assert!(log.stops().is_empty());
+				let mut group = consumer.recv_group().await.unwrap().unwrap();
+				assert_eq!(group.sequence, 3);
+				let frame = group.read_frame().await.unwrap().unwrap();
+				assert_eq!(frame.payload.as_ref(), &[42]);
+				assert!(group.read_frame().await.unwrap().is_none());
+			}
+		}
 	}
 
 	/// A group at or past the end the publisher declared contradicts that end, which no later
