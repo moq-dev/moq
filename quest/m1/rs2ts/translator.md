@@ -52,7 +52,7 @@ Guidance:
 - Charon stalled for 40+ minutes on the whole crate; extract only the modules
   being generated.
 
-Public API: none (internal tool). Lands on `dev` with the codec it
+Public API: none (internal tool). Lands with the codec it
 translates. Wire: none.
 
 ## Required

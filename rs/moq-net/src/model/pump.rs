@@ -819,8 +819,8 @@ impl Pump {
 			let options = group::Fetch::default().with_frame_start(open.next());
 			open.refetch = Some((input.id, input.copy.fetch_group(open.dst.sequence, options)));
 		}
-		let (id, pending) = open.refetch.as_ref().expect("issued above");
-		match kio::Pollable::poll(&**pending, waiter) {
+		let (id, pending) = open.refetch.as_mut().expect("issued above");
+		match kio::Task::poll(&mut **pending, waiter) {
 			Poll::Pending => Step::Open,
 			Poll::Ready(Ok(group)) => {
 				open.src = Some(Source {
@@ -932,8 +932,8 @@ impl Pump {
 					.with_frame_start(fetch.request.frame_start());
 				fetch.pending = Some((id, input.copy.fetch_group(fetch.request.sequence(), options)));
 			}
-			let (_, pending) = fetch.pending.as_ref().expect("issued above");
-			let result = match kio::Pollable::poll(&**pending, waiter) {
+			let (_, pending) = fetch.pending.as_mut().expect("issued above");
+			let result = match kio::Task::poll(&mut **pending, waiter) {
 				Poll::Pending => {
 					i += 1;
 					continue;

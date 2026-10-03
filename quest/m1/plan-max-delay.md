@@ -23,5 +23,5 @@ To weigh:
 - The wire fields are `Publisher Max Age` and `Subscriber Max Age` in
   `drafts/draft-lcurley-moq-lite.md`.
   Renaming the draft's field is free on the wire, but it churns the spec.
-- A rename breaks every published API and binding, so it lands on `dev`,
+- A rename breaks every published API and binding, so it lands
   mirrored across Rust, JS, and the bindings in one release.

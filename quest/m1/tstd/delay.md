@@ -63,7 +63,7 @@ compare with #4618's numbers.
 Update `doc/bin/cli.md` and the `moq export ts` examples.
 
 Public API: `ts::Export` takes the delay in place of its max age and loses the
-hold; breaking, on `dev`. Wire:
+hold; breaking. Wire:
 none.
 
 ## Related

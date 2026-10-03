@@ -35,11 +35,19 @@ enum Observer {
 	Remote(&'static str),
 }
 
-/// Drain every update the cursor has pending, as `kind prefix` lines.
+/// Drain every route event the cursor has pending, as `kind prefix` lines.
 fn drain(announced: &mut moq_net::announce::Consumer) -> Vec<String> {
+	use moq_net::announce::Event;
+
 	let mut seen = Vec::new();
-	while let Some(update) = announced.try_next() {
-		seen.push(format!("{:?} {}", update.kind, update.prefix));
+	while let Some(event) = announced.try_next() {
+		let (kind, announce) = match event {
+			Event::Start(announce) => ("Start", announce),
+			Event::Update(announce) => ("Update", announce),
+			Event::End(announce) => ("End", announce),
+			Event::Live => continue,
+		};
+		seen.push(format!("{kind} {}", announce.prefix));
 	}
 	seen
 }
@@ -147,7 +155,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 
 	// A track in flight across the unannounce.
 	let mut reader = read(&first, "video").await;
-	tokio::time::timeout(SETTLE, track.used())
+	tokio::time::timeout(SETTLE, track.demand().used())
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
@@ -187,7 +195,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 
 	let audio = broadcast.create_track("audio", None).unwrap();
 	let mut reader = read(&again, "audio").await;
-	tokio::time::timeout(SETTLE, audio.used())
+	tokio::time::timeout(SETTLE, audio.demand().used())
 		.await
 		.expect("no subscriber appeared after reannouncing")
 		.unwrap();
@@ -199,11 +207,11 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 
 const EXPECTED: &[&str] = &[
 	"created: [] unroutable",
-	"announced: [\"Announced bcast\"] ok",
+	"announced: [\"Start bcast\"] ok",
 	"in flight: before",
-	"unannounced: [\"Retracted bcast\"] unroutable closed=true",
+	"unannounced: [\"End bcast\"] unroutable closed=true",
 	"draining: after then end",
-	"reannounced: [\"Announced bcast\"] ok fresh=true",
+	"reannounced: [\"Start bcast\"] ok fresh=true",
 	"serving again: again",
 ];
 

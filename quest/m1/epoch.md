@@ -19,8 +19,8 @@ line builds on, and it replaces the e2ee-local `moq_e2ee::Epoch`.
   counts as an epoch, so an app's own UUID segments never parse as one.
 - Path helpers split a path into name and epoch and join them back. A segment
   like `@alice` is valid today and stays valid: strict parsing already keeps it
-  from reading as an epoch. Rejecting it instead would break the path contract
-  and land on `dev`. Check how the split interacts with
+  from reading as an epoch. Rejecting it instead would break the path contract.
+  Check how the split interacts with
   path patterns (done on the [auth line](/quest/m1/auth/README.md)) and
   hidden broadcasts (a leading `.`, see `doc/concept/moq-lite.md`).
 - `moq-e2ee` uses the shared type. Update

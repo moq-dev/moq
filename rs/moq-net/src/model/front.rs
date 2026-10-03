@@ -1172,7 +1172,7 @@ mod tests {
 			result: Ok(200),
 		});
 		let other = track::Info {
-			max_age: Duration::from_secs(1),
+			max_age: Some(Duration::from_secs(1)),
 			..track::Info::default()
 		};
 		// The source it replaced keeps feeding the track (the audit's F3)...

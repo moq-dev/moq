@@ -22,7 +22,7 @@ frame a group start, so it refuses any backward step, while a dip inside an
 open group is tolerated. Test: a FLAC `import::Track` with `cut(None)` per
 frame and one frame 1 µs back reports both values.
 
-Public API: a unit struct gains fields, so breaking, on `dev`. Wire: none.
+Public API: a unit struct gains fields, so breaking. Wire: none.
 
 ## Related
 
