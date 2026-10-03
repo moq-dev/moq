@@ -2319,7 +2319,10 @@ mod test {
 		assert!(sub.recv_group().now_or_never().is_none(), "revealed before B answered");
 		kill(b, Vec::<group::Producer>::new());
 		step(&mut pump);
-		assert!(sub.recv_group().now_or_never().is_none(), "revealed by a route that never answered");
+		assert!(
+			sub.recv_group().now_or_never().is_none(),
+			"revealed by a route that never answered"
+		);
 
 		let (mut c, c_copy) = copy("c");
 		c.start_at(1).unwrap();
