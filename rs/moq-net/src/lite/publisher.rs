@@ -1271,12 +1271,15 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 			match self {
 				Self::Confirm { subscribing, .. } => {
 					let mut track = ready!(subscribing.poll_ok(waiter))?;
-					let Self::Confirm { msg, latest, update, .. } = std::mem::replace(
+					let Self::Confirm {
+						msg, latest, update, ..
+					} = std::mem::replace(
 						self,
 						Self::Drain {
 							children: Default::default(),
 						},
-					) else {
+					)
+					else {
 						unreachable!()
 					};
 

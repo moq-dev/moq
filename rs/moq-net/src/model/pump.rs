@@ -30,7 +30,7 @@ const MAX_ORPHANS: usize = 4;
 pub(crate) enum Command {
 	/// Read this subscription from now on, replacing the current input. Sent through
 	/// [`Handle::feed`], which numbers it.
-	Feed(u64, Feed),
+	Feed(u64, Box<Feed>),
 	/// Nobody reads the track: drop the input, cancelling its upstream subscription.
 	/// What it delivered stays cached but parked: a returning reader gets it back only
 	/// once the next input's start shows it is not stale.
@@ -102,7 +102,7 @@ impl Handle {
 		let id = self.feeds;
 		self.feeds += 1;
 		self.parked = false;
-		self.send(Command::Feed(id, feed));
+		self.send(Command::Feed(id, Box::new(feed)));
 		id
 	}
 
@@ -399,7 +399,7 @@ impl Pump {
 
 	fn apply(&mut self, command: Command) {
 		match command {
-			Command::Feed(id, feed) => self.feed(id, feed),
+			Command::Feed(id, feed) => self.feed(id, *feed),
 			Command::Detach => {
 				self.detach();
 				if let Some(producer) = self.logical.producer() {
@@ -533,7 +533,7 @@ impl Pump {
 		for open in self.groups.values_mut() {
 			open.src = None;
 		}
-			}
+	}
 
 	/// Read new groups and datagrams off the input.
 	fn poll_input(&mut self, waiter: &kio::Waiter) -> bool {
@@ -650,7 +650,9 @@ impl Pump {
 		let open = match self.groups.entry(sequence) {
 			btree_map::Entry::Occupied(open) => open.into_mut(),
 			btree_map::Entry::Vacant(vacant) => {
-				let Some(producer) = self.logical.producer() else { return };
+				let Some(producer) = self.logical.producer() else {
+					return;
+				};
 				// A group the logical track already has in full (or still caches from an
 				// earlier route) is a duplicate.
 				let Ok(dst) = producer.create_group(group::Info { sequence }) else {
@@ -688,10 +690,7 @@ impl Pump {
 				continue;
 			}
 			// A fetched group nobody reads any more is cut short, never cached as whole.
-			if open.fetched
-				&& open.dst.poll_handed_out(waiter).is_ready()
-				&& open.dst.poll_unused(waiter).is_ready()
-			{
+			if open.fetched && open.dst.poll_handed_out(waiter).is_ready() && open.dst.poll_unused(waiter).is_ready() {
 				let _ = open.dst.clone().abort(Error::Cancel);
 				closed.push(*sequence);
 				progress = true;
@@ -728,19 +727,12 @@ impl Pump {
 		if delivered && let Some(input) = self.input.as_mut() {
 			input.delivered = true;
 		}
-		if progress {
-					}
 		progress
 	}
 
 	/// Copy frames from `open`'s source into the logical group until the source has
 	/// nothing more for now.
-	fn poll_forward(
-		open: &mut Open,
-		budget: &frame::Budget,
-		input: &Option<Input>,
-		waiter: &kio::Waiter,
-	) -> Step {
+	fn poll_forward(open: &mut Open, budget: &frame::Budget, input: &Option<Input>, waiter: &kio::Waiter) -> Step {
 		loop {
 			let next = open.next();
 			let src = open.src.as_mut().expect("polled with a source");
@@ -777,7 +769,12 @@ impl Pump {
 									timestamp: frame.timestamp,
 								};
 								match open.dst.create_frame_owned(info, budget) {
-									Ok(owned) => open.partial = Some(Partial { frame: owned, index: next }),
+									Ok(owned) => {
+										open.partial = Some(Partial {
+											frame: owned,
+											index: next,
+										})
+									}
 									Err(_) => return Step::Close,
 								}
 								0
@@ -792,7 +789,11 @@ impl Pump {
 							return Step::Close;
 						}
 						// It ended below what the logical group already holds.
-						tracing::warn!(group = open.dst.sequence, frame = next, "routes disagree on a group's length");
+						tracing::warn!(
+							group = open.dst.sequence,
+							frame = next,
+							"routes disagree on a group's length"
+						);
 						let _ = open.dst.clone().abort(Error::ProtocolViolation);
 						return Step::Close;
 					}
@@ -885,11 +886,14 @@ impl Pump {
 		}
 		// Below a start the input declared, nothing is coming. An input that declares
 		// none promises nothing below its live edge either.
-		let start = self.input.as_ref().and_then(|input| match (&input.sub, input.copy.poll_start(waiter)) {
-			(Sub::Ready(_), Poll::Ready(Some(start))) => Some(start),
-			(Sub::Ready(_), Poll::Ready(None)) => input.copy.latest(),
-			_ => None,
-		});
+		let start = self
+			.input
+			.as_ref()
+			.and_then(|input| match (&input.sub, input.copy.poll_start(waiter)) {
+				(Sub::Ready(_), Poll::Ready(Some(start))) => Some(start),
+				(Sub::Ready(_), Poll::Ready(None)) => input.copy.latest(),
+				_ => None,
+			});
 		if let Some(start) = start {
 			self.give_up_orphans(|sequence| sequence < start, Error::NotFound);
 		}
@@ -1027,7 +1031,11 @@ impl Pump {
 	fn report(&mut self) {
 		let Some(input) = &self.input else { return };
 		let Some(result) = &input.end else { return };
-		if self.groups.values().any(|open| open.src.as_ref().is_some_and(|src| src.input == input.id)) {
+		if self
+			.groups
+			.values()
+			.any(|open| open.src.as_ref().is_some_and(|src| src.input == input.id))
+		{
 			return;
 		}
 		let id = input.id;
@@ -1042,7 +1050,7 @@ impl Pump {
 		if let Ok(mut status) = self.status.write() {
 			status.ended = Some(ended);
 		}
-			}
+	}
 }
 
 #[cfg(test)]
@@ -1147,14 +1155,19 @@ mod test {
 		group.finish().unwrap();
 		a.finish().unwrap();
 		step(&mut pump);
-		assert!(handle.poll_ended(0, &kio::Waiter::noop()).is_pending(), "a group may still be owed");
+		assert!(
+			handle.poll_ended(0, &kio::Waiter::noop()).is_pending(),
+			"a group may still be owed"
+		);
 		drop(a);
 		step(&mut pump);
 
 		let mut got = recv(&mut sub);
 		assert_eq!(drain(&mut got), (vec!["0.0".into(), "0.1".into()], Some(Ok(()))));
 		let ended = handle.poll_ended(0, &kio::Waiter::noop());
-		let Poll::Ready(ended) = ended else { panic!("not reported") };
+		let Poll::Ready(ended) = ended else {
+			panic!("not reported")
+		};
 		assert!(ended.result.is_ok());
 		assert!(ended.delivered);
 	}
@@ -1177,7 +1190,11 @@ mod test {
 
 		kill(a, [group]);
 		step(&mut pump);
-		assert_eq!(drain(&mut reading), (vec![], None), "a dead route must not end the group");
+		assert_eq!(
+			drain(&mut reading),
+			(vec![], None),
+			"a dead route must not end the group"
+		);
 		assert_eq!(handle.resume_floor(), Some(Position { group: 0, frame: 2 }));
 
 		let (b, b_copy) = copy("b");
@@ -1258,7 +1275,10 @@ mod test {
 		let mut reading = recv(&mut sub);
 		assert_eq!(drain(&mut reading).0, vec!["0.0".to_string()]);
 		let mut streaming = reading.next_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(streaming.read_chunk().now_or_never().unwrap().unwrap().unwrap(), b"foo".as_ref());
+		assert_eq!(
+			streaming.read_chunk().now_or_never().unwrap().unwrap().unwrap(),
+			b"foo".as_ref()
+		);
 
 		kill(a, [group]);
 		step(&mut pump);
@@ -1276,7 +1296,10 @@ mod test {
 		group.finish().unwrap();
 		step(&mut pump);
 
-		assert_eq!(streaming.read_chunk().now_or_never().unwrap().unwrap().unwrap(), b"bar".as_ref());
+		assert_eq!(
+			streaming.read_chunk().now_or_never().unwrap().unwrap().unwrap(),
+			b"bar".as_ref()
+		);
 		assert_eq!(streaming.read_chunk().now_or_never().unwrap().unwrap(), None);
 		assert_eq!(drain(&mut reading), (vec![], Some(Ok(()))));
 	}

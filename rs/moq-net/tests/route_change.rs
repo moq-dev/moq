@@ -238,7 +238,10 @@ async fn route_change(version: &str, trigger: Trigger, position: Position) {
 
 	// Nothing trails: no duplicate group or frame arrives later.
 	settle().await;
-	assert!(rx.try_recv().is_err(), "{version} {trigger:?} {position:?}: trailing delivery");
+	assert!(
+		rx.try_recv().is_err(),
+		"{version} {trigger:?} {position:?}: trailing delivery"
+	);
 }
 
 macro_rules! route_change_tests {
