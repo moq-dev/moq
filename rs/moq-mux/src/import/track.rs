@@ -887,15 +887,15 @@ mod tests {
 		)
 		.unwrap();
 
-		let edge = 1_790_802_494_898_432;
-		for timestamp in [edge - 10_000, edge] {
+		let floor = 1_790_802_494_898_432;
+		for timestamp in [floor - 10_000, floor] {
 			import
 				.decode(b"flac frame", Some(Timestamp::from_micros(timestamp).unwrap()))
 				.unwrap();
 			import.cut(None).unwrap();
 		}
 		let err = import
-			.decode(b"flac frame", Some(Timestamp::from_micros(edge - 1).unwrap()))
+			.decode(b"flac frame", Some(Timestamp::from_micros(floor - 1).unwrap()))
 			.unwrap_err();
 		assert!(matches!(err, crate::Error::TimestampRewind(_)), "{err:?}");
 		let message = err.to_string();

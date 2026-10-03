@@ -234,10 +234,10 @@ impl<F: Container> Consumer<F> {
 					Poll::Ready(Ok(Some(Event::Frame(frame)))) => {
 						let seq = group.group.sequence;
 						let ts = frame.timestamp;
-						if let Some(edge) = self.floor
-							&& ts.as_micros() < edge.as_micros()
+						if let Some(floor) = self.floor
+							&& ts.as_micros() < floor.as_micros()
 						{
-							return Poll::Ready(Err(TimestampRewind { timestamp: ts, edge }.into()));
+							return Poll::Ready(Err(TimestampRewind { timestamp: ts, floor }.into()));
 						}
 						if self.start.is_none_or(|(start, _)| start != seq) {
 							self.start = Some((seq, ts));
@@ -476,7 +476,7 @@ impl<F: Container> Consumer<F> {
 	// A later group with a media timestamp below the latest delivered group's start is malformed:
 	// group starts never go backwards. Markers have no media timestamp, so they are not this check.
 	fn poll_malformed(&mut self, waiter: &kio::Waiter) -> Result<(), F::Error> {
-		let Some((prev_group, edge)) = self.start else {
+		let Some((prev_group, floor)) = self.start else {
 			return Ok(());
 		};
 
@@ -485,9 +485,9 @@ impl<F: Container> Consumer<F> {
 				continue;
 			}
 			if let Poll::Ready(Ok(min)) = group.poll_min_timestamp(waiter, &self.format)
-				&& min.as_micros() < edge.as_micros()
+				&& min.as_micros() < floor.as_micros()
 			{
-				return Err(TimestampRewind { timestamp: min, edge }.into());
+				return Err(TimestampRewind { timestamp: min, floor }.into());
 			}
 		}
 
@@ -1178,8 +1178,8 @@ mod tests {
 		let err = consumer.read().await.unwrap_err();
 		assert!(matches!(
 			err,
-			crate::Error::TimestampRewind(TimestampRewind { timestamp, edge })
-				if timestamp == ts(0) && edge == ts(100_000)
+			crate::Error::TimestampRewind(TimestampRewind { timestamp, floor })
+				if timestamp == ts(0) && floor == ts(100_000)
 		));
 		assert_eq!(
 			err.to_string(),
@@ -1327,8 +1327,8 @@ mod tests {
 		let err = consumer.read().await.unwrap_err();
 		assert!(matches!(
 			err,
-			crate::Error::TimestampRewind(TimestampRewind { timestamp, edge })
-				if timestamp == ts(50_000) && edge == ts(100_000)
+			crate::Error::TimestampRewind(TimestampRewind { timestamp, floor })
+				if timestamp == ts(50_000) && floor == ts(100_000)
 		));
 		assert_eq!(
 			err.to_string(),

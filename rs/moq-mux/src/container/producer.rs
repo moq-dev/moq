@@ -412,12 +412,12 @@ where
 			true => self.start,
 			false => self.floor,
 		};
-		if let Some(edge) = floor
-			&& timestamp_lt(frame.timestamp, edge)
+		if let Some(floor) = floor
+			&& timestamp_lt(frame.timestamp, floor)
 		{
 			return Err(super::TimestampRewind {
 				timestamp: frame.timestamp,
-				edge,
+				floor,
 			}
 			.into());
 		}

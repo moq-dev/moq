@@ -126,13 +126,13 @@ pub struct InvalidEnd;
 #[error(
 	"frame timestamp {} µs is below the previous group's start {} µs",
 	.timestamp.as_micros(),
-	.edge.as_micros()
+	.floor.as_micros()
 )]
 pub struct TimestampRewind {
 	/// The refused frame's timestamp.
 	pub timestamp: moq_net::Timestamp,
-	/// The previous group's start that the frame must not precede.
-	pub edge: moq_net::Timestamp,
+	/// The lowest allowed timestamp: the previous group's start.
+	pub floor: moq_net::Timestamp,
 }
 
 /// Encode and decode media frames over a moq-lite group.
