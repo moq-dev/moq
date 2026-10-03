@@ -180,25 +180,20 @@ mod test {
 	#[test]
 	fn media_tracks_declare_their_retention() {
 		// A media track is read as history (a segmented egress FETCHes segments a playlist
-		// advertised), so it declares a retention rather than inheriting the live-edge default.
-		assert_eq!(track_info(crate::catalog::PRIORITY.video).max_age, MAX_AGE);
-		assert!(MAX_AGE > moq_net::track::DEFAULT_MAX_AGE);
+		// advertised), so it declares a finite retention window.
+		assert_eq!(track_info(crate::catalog::PRIORITY.video).max_age, Some(MAX_AGE));
 
 		// Retimescaling for a container that carries the source's own scale keeps it, since that
 		// is the shape that would otherwise reach for `Info::default()` and lose the retention.
 		let at = track_info(crate::catalog::PRIORITY.video).with_timescale(Timescale::MILLI);
 		assert_eq!(at.timescale, Timescale::MILLI);
-		assert_eq!(at.max_age, MAX_AGE);
+		assert_eq!(at.max_age, Some(MAX_AGE));
 	}
 
 	#[test]
 	fn non_media_tracks_keep_the_default_retention() {
-		// The catalog is snapshot mode and the timeline is a single never-rolled group: in both
-		// the useful value is the live edge, which is retained unconditionally, so neither pays
-		// for history it never serves.
-		assert_eq!(
-			crate::Catalog::default_track_info().max_age,
-			moq_net::track::DEFAULT_MAX_AGE
-		);
+		// Catalog and timeline metadata impose no publisher age limit; local cache policy
+		// still controls storage.
+		assert_eq!(crate::Catalog::default_track_info().max_age, None);
 	}
 }

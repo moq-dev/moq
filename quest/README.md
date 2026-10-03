@@ -12,9 +12,7 @@ Seattle, wildcard routing, and audio playout (jitter target and quality
 harness). m1 is the next wave across reliability, features, performance, and
 planning. m2 holds later features, design studies, and experiments. m3 is
 gated on the outside world: hardware, a partner, a consumer, or a provider's
-offer. m4 waits on an upstream release. Priority is
-separate from branch targeting: published API and wire breaks still land on dev
-under the repository rules.
+offer. m4 waits on an upstream release.
 
 A quest waiting on the outside world, in any milestone, requires a small quest
 beside it that names the condition. That condition quest stays ready, so

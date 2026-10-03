@@ -11,9 +11,13 @@ name: Android
 # recipe is still `just rs android`, so a local run and this one compile the
 # same thing, and rust-toolchain.toml still pins the compiler.
 #
+# It also builds moq-ffi and asserts the `.so` imports `__android_log_*`, so a
+# build that stops linking logcat fails here.
+#
 # Narrow trigger, like wasm.yml. The filter is moq-video's in-repo dependency
-# graph (`cargo metadata`, normal dependencies), plus the files that decide how
-# it is built. A crate added to that graph has to be added here too.
+# graph (`cargo metadata`, normal dependencies), plus moq-ffi and moq-tokio, which
+# own the logcat link, and the files that decide how it is built. A crate added
+# to that graph has to be added here too.
 
 permissions:
   contents: read
@@ -25,13 +29,14 @@ on:
     types: [opened, synchronize, reopened, closed]
     paths:
       - "rs/moq-video/**"
+      - "rs/moq-ffi/**"
+      - "rs/moq-tokio/**"
       - "rs/moq-mux/**"
       - "rs/moq-net/**"
       - "rs/moq-nvenc/**"
       - "rs/moq-loc/**"
       - "rs/moq-msf/**"
       - "rs/moq-json/**"
-      - "rs/moq-binary/**"
       - "rs/moq-flate/**"
       - "rs/moq-pattern/**"
       - "rs/hang/**"

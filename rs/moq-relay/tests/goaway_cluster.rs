@@ -188,8 +188,10 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	let _session_b = within("B accepts", accepted_b.recv()).await.expect("B accepts");
 	within("routed via B", async {
 		loop {
-			let update = announced.next().await.expect("announce update");
-			if update.kind.is_active() && update.route.cost != moq_net::origin::Cost::DRAIN {
+			let event = announced.next().await.expect("announce update");
+			if let moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update) = event
+				&& update.route.cost != moq_net::origin::Cost::DRAIN
+			{
 				break;
 			}
 		}
@@ -320,7 +322,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		// unannounce the path (metadata updates are expected: the drain
 		// re-prices the old route and the sibling announces its own).
 		let mut announcements = cluster.origin.consume().announced();
-		let first = announcements.next().await.expect("initial announce");
+		let (first, _) = next_update(&mut announcements).await.expect("initial announce");
 		assert_eq!(first.prefix.as_str(), "cam");
 
 		// ── sibling A drains with a redirect to sibling B ────────────────
@@ -358,9 +360,9 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		// updates (the drain re-pricing, the sibling's route) are expected and
 		// harmless; an inactive event means the path flapped.
 		loop {
-			match tokio::time::timeout(Duration::from_millis(500), announcements.next()).await {
+			match tokio::time::timeout(Duration::from_millis(500), next_update(&mut announcements)).await {
 				Err(_) => break,
-				Ok(Some(update)) if update.kind.is_active() => continue,
+				Ok(Some((_, true))) => continue,
 				Ok(event) => panic!("migration must not retract the path on the cluster origin: {event:?}"),
 			}
 		}
@@ -523,9 +525,12 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// Watch announcements for the whole test: the failover must never
 	// unannounce the broadcast under the subscriber.
 	let mut announcements = sub_origin.consume().announced();
-	let first = within("broadcast announced through the MID-A leg", announcements.next())
-		.await
-		.expect("origin closed before the announce");
+	let (first, _) = within(
+		"broadcast announced through the MID-A leg",
+		next_update(&mut announcements),
+	)
+	.await
+	.expect("origin closed before the announce");
 	assert_eq!(first.prefix.as_str(), "diamond");
 
 	let bc = within("broadcast resolves on the subscriber origin", async {
@@ -674,9 +679,9 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// ── announcement stability: the path never retracted under the swap ──
 	// Metadata updates (route re-pricing, the new leg's hops) are expected.
 	loop {
-		match tokio::time::timeout(Duration::from_millis(500), announcements.next()).await {
+		match tokio::time::timeout(Duration::from_millis(500), next_update(&mut announcements)).await {
 			Err(_) => break,
-			Ok(Some(update)) if update.kind.is_active() => continue,
+			Ok(Some((_, true))) => continue,
 			Ok(event) => panic!("failover must not retract the path under the subscriber: {event:?}"),
 		}
 	}
@@ -904,4 +909,15 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	);
 
 	drop(connection);
+}
+
+/// The next route and whether it is active, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	loop {
+		return match announced.next().await? {
+			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+			moq_net::announce::Event::End(route) => Some((route, false)),
+			moq_net::announce::Event::Live => continue,
+		};
+	}
 }

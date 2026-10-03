@@ -45,6 +45,23 @@ type (
 	OriginConfig = ffi.MoqOriginConfig
 	// Route is the hop chain a broadcast takes to reach an origin, and its costs: warm Cost plus undiscounted Cold (nil Cold means Cost).
 	Route = ffi.MoqRoute
+	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
+	// wildcard matched (nil Captures for a route that only overlaps the scope), and the
+	// Route serving it. It carries no broadcast; resolve a path with
+	// [OriginConsumer.RequestBroadcast].
+	Announce = ffi.MoqAnnounce
+	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventStart,
+	// AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventLive.
+	AnnounceEvent = ffi.MoqAnnounceEvent
+	// AnnounceEventStart reports a route now covering a prefix that had none.
+	AnnounceEventStart = ffi.MoqAnnounceEventStart
+	// AnnounceEventUpdate reports the route covering a prefix changing hops or cost.
+	AnnounceEventUpdate = ffi.MoqAnnounceEventUpdate
+	// AnnounceEventEnd reports that no route covers a prefix any more, carrying its last route.
+	AnnounceEventEnd = ffi.MoqAnnounceEventEnd
+	// AnnounceEventLive reports that every route live at subscribe time has been
+	// delivered; what follows is live changes. Yielded once.
+	AnnounceEventLive = ffi.MoqAnnounceEventLive
 	// Subscription holds subscriber-side delivery preferences: priority, ordering, max age, and group range.
 	Subscription = ffi.MoqSubscription
 	// TrackInfo holds publisher-side track properties: priority, ordering, max age, and timescale.
@@ -54,10 +71,12 @@ type (
 	Video = ffi.MoqVideo
 	// VideoHint supplies catalog fields a video stream can't reveal itself, such as bitrate, filling only the gaps.
 	VideoHint = ffi.MoqVideoHint
-	// VideoDecodedFrame is one decoded video frame: packed pixels, the layout they are in, their dimensions, and a timestamp in microseconds.
-	VideoDecodedFrame = ffi.MoqVideoDecodedFrame
-	// VideoDecoderOutput configures what DecodeVideo delivers: an optional pixel format and resize, plus a max age.
+	// VideoDecoderOutput configures what DecodeVideo delivers: an optional resize, a max age, and whether frames keep the decoder's surface (macOS only; refused elsewhere).
 	VideoDecoderOutput = ffi.MoqVideoDecoderOutput
+	// VideoSurface is a decoded frame's platform surface, from VideoDecodedFrame.Surface: VideoSurfacePixelBuffer on macOS and iOS.
+	VideoSurface = ffi.MoqVideoSurface
+	// VideoSurfacePixelBuffer is an Apple CVPixelBufferRef (IOSurface-backed NV12), as the address in Pointer.
+	VideoSurfacePixelBuffer = ffi.MoqVideoSurfacePixelBuffer
 	// AudioFormat is a single audio codec an importer can parse.
 	AudioFormat = ffi.MoqAudioFormat
 	// VideoFormat is a single video codec an importer can parse.
@@ -68,7 +87,7 @@ type (
 	VideoProperties = ffi.MoqVideoProperties
 	// VideoCodec identifies a published video track's codec: H.264 or H.265.
 	VideoCodec = ffi.MoqVideoCodec
-	// VideoPixelFormat is a CPU pixel layout (I420 or RGBA): written to a VideoProducer, or delivered by DecodeVideo.
+	// VideoPixelFormat is a CPU pixel layout (I420 or RGBA): written to a VideoProducer, or read from a VideoDecodedFrame.
 	VideoPixelFormat = ffi.MoqVideoPixelFormat
 	// VideoEncoderInput declares the pixel layout, resolution, and framerate of frames written to a video producer.
 	VideoEncoderInput = ffi.MoqVideoEncoderInput
@@ -225,7 +244,7 @@ func SoftwareEncoder() VideoEncoderKind {
 }
 
 // NamedEncoder selects a specific backend these bindings compile:
-// "videotoolbox" (macOS), "mediafoundation" (Windows), or "openh264"
+// "videotoolbox" (macOS, iOS), "mediafoundation" (Windows), or "openh264"
 // (software, everywhere). Naming one this build lacks fails with a no-encoder
 // error.
 func NamedEncoder(name string) VideoEncoderKind {

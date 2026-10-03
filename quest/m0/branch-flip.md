@@ -1,4 +1,4 @@
-# [M] Trunk is main, releases ship from release
+# [S] Trunk is main, releases ship from release
 
 ## Goal
 
@@ -61,31 +61,42 @@ Decided (2026-10-02):
   breaks), the rules describe trunk, `release`, and backports, and
   `dev`-only process quests are deleted.
 - ✅ One quest, m0, right after dev-sync lands.
+- ✅ Trunk's ruleset drops linear history, so the back-merge lands as a merge
+  commit and advances the merge base; ordinary PRs still squash. Rejected:
+  squash-merging the back-merge, which leaves the base at the last cut, so a
+  second publish before the next cut conflicts; and a ruleset bypass for the
+  workflow token.
 
-Open:
+Decided (2026-10-02, after #4737 and #4738 opened):
 
-- Trunk's linear-history rule rejects the back-merge's merge commit.
-  Recommended: drop linear history from trunk's ruleset, so the back-merge
-  lands as a merge commit and advances the merge base; ordinary PRs still
-  squash. Rejected: squash-merging the back-merge, which leaves the base at
-  the last cut, so a second publish before the next cut conflicts.
+- ✅ Releases stay patch-only for now, so no cut follows the flip: a cut
+  would carry trunk's breaking changes into `release` and force minor bumps.
+  The back-merge workflow, script, recipe, and alert entry ship in both PRs
+  as identical files, so `release` back-merges from its first publish.
+- ✅ The Cloudflare docs and demo builds track `release`. The maintainer
+  switches them in the dashboard during step 4.
+- ✅ #4605 (noq reassembly cap, part 1) is retargeted to trunk, then
+  backported to `release` once it merges.
+- ✅ The `dev` PR merges first; the `main` PR merges immediately before
+  step 4, which needs the maintainer's explicit go-ahead.
 
-Sequence:
+Done (2026-10-02): #4720, #4737, #4740, and #4738 landed, then the admin
+steps ran. GitHub refused to rename `dev` onto `main`, since the old name was
+still a redirect to `release`, so `main` was created at `dev`'s head
+(`e0a4aaac`), every open PR on `dev` and `release` (except release-plz #4596)
+was retargeted to `main`, and `dev` was deleted. The default branch is `main`,
+its ruleset has no linear history, the `release` ruleset exists, and the `dev`
+ruleset is gone. The first back-merge ran during the rename window and 404ed;
+its re-run opened #4742.
 
-1. [dev-sync](/quest/m1/dev-sync.md) (#4720) lands.
-2. A PR on `dev`: the wording sweep, trunk stops publishing, `obs`,
-   `platform`, and `quest` push filters name `main` and `release`,
-   unpinned `workflow_run` checkouts pin the triggering `head_sha`, the
-   back-merge workflow, docs pin `release`.
-3. A small PR on `main`: publish triggers move to `release`; cache writers
-   keep `main`, so they stop running there.
-4. Admin, back to back, run by the agent only after the maintainer's
-   go-ahead in chat: rename `main` to `release`, rename `dev` to `main`, set
-   the default branch, create the `release` ruleset, delete the `dev`
-   ruleset, retarget open PRs. Release-plz PRs (such as #4596) stay on
-   `release`. Dry-run first and show the PR list with each PR's class.
-5. Verify: a no-op push to `main` publishes nothing; release-plz runs on
-   `release`; a chained publish builds `release` while trunk differs; the
-   back-merges of two publishes without a cut between both land on `main`.
+Remaining:
+
+- The maintainer points the Cloudflare docs (`moq-doc`) and demo builds'
+  production branch at `release`.
+- Once #4605 merges on `main`, cherry-pick it into `release` as a backport PR.
+- Verify: #4742 lands on `main` as a merge commit; release-plz runs on
+  `release`; a chained publish builds `release` while trunk differs; the
+  back-merges of two patch publishes on `release`, without a cut between,
+  both land on `main`.
 
 Public API: none. Wire: none. Contributors see the new branch model.

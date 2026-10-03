@@ -43,6 +43,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  x11:
+    uses: ./.github/workflows/x11.yml
+
   nightly:
     name: Nightly
     runs-on: ubuntu-24.04-arm
@@ -139,8 +142,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just rs audit
 
-      # The OBS plugin and libmoq's C fixtures are the only things that link
-      # libmoq.a from outside cargo, so a stale `rs/libmoq/native-libs/*.txt`
+      # The OBS plugin and moq-c's C fixtures are the only things that link
+      # libmoq.a from outside cargo, so a stale `rs/moq-c/native-libs/*.txt`
       # breaks them and nothing else. obs.yml lists the inputs that can do that,
       # but a list of paths can't be complete: a build script emitting
       # `cargo::rustc-link-lib` needs no manifest change, and widening that
@@ -151,7 +154,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop .#obs --command just obs ci
 
-      - name: libmoq C fixtures
+      - name: moq-c C fixtures
         if: ${{ !cancelled() }}
         run: nix develop --command just rs c-tests
 
@@ -296,9 +299,9 @@ jobs:
       contents: write
       id-token: write
 
-  release-libmoq:
-    name: libmoq
-    uses: ./.github/workflows/libmoq.yml
+  release-moq-c:
+    name: moq-c
+    uses: ./.github/workflows/moq-c.yml
     permissions:
       contents: write
 

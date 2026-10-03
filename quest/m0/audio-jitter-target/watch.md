@@ -17,9 +17,9 @@ them.
 ## Plan
 
 Start from `origin/quest/m0/3477-watch-auto-latency`, the branch of the closed
-PR #3517, two commits ahead of `dev`. Rebase it onto the base branch first, and
+PR #3517. Rebase it onto the base branch first, and
 expect conflicts: `sync.ts` on `main` has since replaced the `audio`/`video`
-inputs with a `register(jitter)` list. Nothing on `main` or `dev` has any of
+inputs with a `register(jitter)` list. Nothing on `main` or `release` has any of
 it: `js/watch/src/sync.ts:159` still sizes auto from `minRtt * 1.25`.
 
 What the branch already has, and this quest keeps:

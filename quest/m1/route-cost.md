@@ -28,5 +28,5 @@ state, so Warm has no job.
   single cost stays on ANNOUNCE as the origin's per-prefix seed and stops
   accumulating per hop; link costs move to the ROUTE metric.
 
-Public API: `Cost` changes shape (a break, so it lands on `dev`). Wire: the
+Public API: `Cost` changes shape (a break). Wire: the
 wip version drops a field; lite-06 is unchanged.

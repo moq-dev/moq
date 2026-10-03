@@ -3,7 +3,7 @@ import { resolve } from "path";
 import { defineConfig } from "vite";
 import solidPlugin from "vite-plugin-solid";
 import { crossOriginIsolation } from "../../js/common/vite-plugin-isolate";
-import { workletInline } from "../../js/common/vite-plugin-worklet";
+import { worklet } from "../../js/common/vite-plugin-worklet";
 import { consoleOverlay } from "./console-overlay";
 import { openTabs } from "./open-tabs";
 
@@ -13,7 +13,7 @@ export default defineConfig({
 	plugins: [
 		tailwindcss(),
 		solidPlugin(),
-		workletInline(),
+		worklet(),
 		crossOriginIsolation(),
 		consoleOverlay(),
 		// Open the stats, publish, and watch demos each in their own tab.

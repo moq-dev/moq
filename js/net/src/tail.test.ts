@@ -36,8 +36,8 @@ async function session(protocol: string) {
 		close: () => {
 			broadcast.close();
 			remote.close();
-			client.close();
-			server.close();
+			client.abort();
+			server.abort();
 		},
 	};
 }

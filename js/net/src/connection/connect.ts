@@ -156,7 +156,7 @@ export async function connect({ url, ...props }: ConnectProps): Promise<Establis
 		}
 
 		// Close a connection that settles after the abort.
-		pending.then((conn) => conn.close()).catch(() => {});
+		pending.then((conn) => conn.abort()).catch(() => {});
 		throw signal.reason;
 	} finally {
 		signal.removeEventListener("abort", onAbort);
