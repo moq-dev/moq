@@ -29,21 +29,23 @@ pub struct Config {
 	/// When `None`, [`Producer::new`] spawns no task and publishes nothing.
 	pub origin: Option<origin::Producer>,
 	/// Top-level path stats are published under (default `.stats`). The full
-	/// advertised path is `<prefix>/node/<node>/@<epoch>` (`local` is used when
+	/// advertised path is `<prefix>/node/<node>` (or `<prefix>/node` when
 	/// `node` is unset). Also the registry's exclude prefix, so serving a
 	/// stats broadcast doesn't generate more stats.
 	pub prefix: PathOwned,
-	/// Logical node label before its unique producer epoch. May span several
-	/// segments (e.g. `sjc/1`) for geographic grouping. An empty path is treated
-	/// as unset, defaulting to `local`.
+	/// Node suffix that disambiguates broadcasts from different relays sharing a
+	/// cluster origin. Set this on every node in multi-relay deployments. May be
+	/// multi-segment (e.g. `sjc/1`, `sjc/2`) so a region with multiple hosts can
+	/// nest under a shared region key. An empty path is treated as unset.
+	/// Default none.
 	pub node: Option<PathOwned>,
 	/// How long the publish task waits between drains. Default 1s.
 	pub interval: Duration,
 	/// How many leading broadcast-path segments to use as a grouping key.
 	///
-	/// Default `0` publishes one `<prefix>/node/<node>/@<epoch>` broadcast carrying every
+	/// Default `0` publishes one `<prefix>/node/<node>` broadcast carrying every
 	/// path. `1` publishes one broadcast per first segment at
-	/// `<prefix>/<group>/node/<node>/@<epoch>`, and larger values include more leading
+	/// `<prefix>/<group>/node/<node>`, and larger values include more leading
 	/// segments. Group broadcasts are announced while their group has live traffic;
 	/// at depth `0`, the single broadcast stays announced for the producer's life.
 	pub depth: usize,
@@ -134,7 +136,6 @@ struct Keepalive;
 #[derive(Clone)]
 pub struct Producer {
 	registry: Registry,
-	epoch: Arc<str>,
 	/// `None` for a no-op producer (config had no origin): no task was spawned
 	/// and the registry is disabled.
 	_keepalive: Option<Arc<Keepalive>>,
@@ -161,16 +162,10 @@ impl Producer {
 		// We do this here (not in `with_node`) so a directly-assigned
 		// `config.node` is normalized too.
 		let node = node.filter(|p| !p.is_empty());
-		let epoch: Arc<str> = uuid::Uuid::now_v7().to_string().into();
-		let node = Some(
-			node.unwrap_or_else(|| PathOwned::from("local"))
-				.join(format!("@{epoch}")),
-		);
 
 		let Some(origin) = origin else {
 			return Self {
 				registry: Registry::disabled(),
-				epoch,
 				_keepalive: None,
 			};
 		};
@@ -192,14 +187,8 @@ impl Producer {
 
 		Self {
 			registry,
-			epoch,
 			_keepalive: Some(keepalive),
 		}
-	}
-
-	/// The lowercase UUIDv7 carried in every broadcast's trailing `@<epoch>` segment.
-	pub fn epoch(&self) -> &str {
-		&self.epoch
 	}
 
 	/// The registry this producer drains. Hand sessions tier-scoped handles via
@@ -393,9 +382,10 @@ impl<V: Serialize> Serialize for Frame<V> {
 	}
 }
 
-/// Encodes snapshots while the node instance owns the group-number namespace.
-/// The allocator outlives on-demand tracks and project broadcasts, without
-/// retaining one tombstone for every requested tier name.
+/// Writes encoded snapshots with group numbers from the producer-wide
+/// allocator. The allocator outlives on-demand tracks and group broadcasts, so
+/// a recreated track resumes past any group a subscriber has cached, without
+/// retaining a tombstone per requested name.
 struct Snapshot<V> {
 	track: track::Producer,
 	encoder: moq_json::snapshot::Encoder<Frame<V>>,
@@ -1055,7 +1045,7 @@ fn group_key(path: &str, depth: usize) -> &str {
 }
 
 fn advertised_path(prefix: &Path, group: &Path, node: Option<&str>) -> PathOwned {
-	// `<prefix>/<group>/node/<node>/@<epoch>`. The group segment is empty at depth 0.
+	// `<prefix>/<group>/node/<node>`. The group segment is empty at depth 0.
 	// The fixed `node` category leaves room for sibling categories (e.g.
 	// `<top-prefix>/<group>/cluster` for relay-mesh stats) under the same prefix.
 	let mut out = prefix.as_str().to_string();
@@ -1073,19 +1063,6 @@ fn advertised_path(prefix: &Path, group: &Path, node: Option<&str>) -> PathOwned
 
 #[cfg(test)]
 mod tests {
-
-	#[tokio::test(start_paused = true)]
-	async fn node_instances_publish_different_broadcast_names() {
-		let (first_producer, first_origin) = test_producer(Some("sjc/1"));
-		let first = announced(&first_origin).await.0;
-		assert_eq!(first.as_str(), format!(".stats/node/sjc/1/@{}", first_producer.epoch()));
-		let epoch = uuid::Uuid::parse_str(first_producer.epoch()).unwrap();
-		assert_eq!(epoch.get_version_num(), 7);
-		assert_eq!(epoch.hyphenated().to_string(), first_producer.epoch());
-		let (_second, second_origin) = test_producer(Some("sjc/1"));
-		let second = announced(&second_origin).await.0;
-		assert_ne!(first, second, "a new node instance cannot reuse cached broadcast names");
-	}
 	#[tokio::test(start_paused = true)]
 	async fn reclaimed_requested_tracks_resume_after_the_last_group() {
 		use futures::FutureExt;
@@ -1323,16 +1300,10 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn new_normalizes_and_drops_empty_node() {
 		let (_producer, origin) = test_producer(Some("/sjc//1/"));
-		assert_eq!(
-			announced(&origin).await.0,
-			format!(".stats/node/sjc/1/@{}", _producer.epoch())
-		);
+		assert_eq!(announced(&origin).await.0, ".stats/node/sjc/1");
 
 		let (_producer, origin) = test_producer(Some("///"));
-		assert_eq!(
-			announced(&origin).await.0,
-			format!(".stats/node/local/@{}", _producer.epoch())
-		);
+		assert_eq!(announced(&origin).await.0, ".stats/node");
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1344,20 +1315,14 @@ mod tests {
 		let _f1 = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 8).await;
 		let _f2 = feed(producer.registry(), Tier::default(), "baz/qux", true, 1, 8).await;
 
-		assert_eq!(
-			announced(&origin).await.0,
-			format!(".stats/node/sjc/1/@{}", producer.epoch())
-		);
+		assert_eq!(announced(&origin).await.0, ".stats/node/sjc/1");
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn task_announces_without_node_suffix() {
 		let (producer, origin) = test_producer(None);
 		let _f = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 8).await;
-		assert_eq!(
-			announced(&origin).await.0,
-			format!(".stats/node/local/@{}", producer.epoch())
-		);
+		assert_eq!(announced(&origin).await.0, ".stats/node");
 	}
 
 	#[tokio::test(start_paused = true)]

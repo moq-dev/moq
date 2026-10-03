@@ -29,7 +29,7 @@ impl Config {
 	}
 }
 
-/// Reads one published stats broadcast (a `<prefix>/node/<node>/@<epoch>` announce),
+/// Reads one published stats broadcast (a `<prefix>/node/<node>` announce),
 /// yielding typed frames per track.
 ///
 /// Subscribe to the traffic and session tracks you care about with

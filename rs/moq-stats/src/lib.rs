@@ -14,9 +14,9 @@
 //!
 //! # Wire format
 //!
-//! A [`Producer`] publishes one broadcast per node at `<prefix>/node/<node>/@<epoch>`
+//! A [`Producer`] publishes one broadcast per node at `<prefix>/node/<node>`
 //! (default prefix `.stats`), or one per group of leading broadcast-path
-//! segments at `<prefix>/<group>/node/<node>/@<epoch>`; parse announce paths back with
+//! segments at `<prefix>/<group>/node/<node>`; parse announce paths back with
 //! [`parse_node_path`]. Each [`Tier`] carries `publisher.json`,
 //! `subscriber.json`, and `sessions.json` tracks of cumulative [`Traffic`] and
 //! [`Presence`] counters, plus `.json.z` siblings encoded with
@@ -78,7 +78,7 @@ pub struct NodePath {
 	/// The grouping key: the leading broadcast-path segments selected by the
 	/// producer's `depth`, empty at depth 0.
 	pub group: PathOwned,
-	/// The full node identity, including its epoch when present. Empty on legacy unnamed broadcasts.
+	/// The node suffix, empty when the producer has no node configured.
 	pub node: PathOwned,
 }
 

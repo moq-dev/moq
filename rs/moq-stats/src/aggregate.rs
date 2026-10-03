@@ -1,7 +1,7 @@
 //! The aggregating half: fold a group's per-node stats broadcasts into one view.
 //!
 //! A single-broadcast [`Consumer`](crate::Consumer) reads one
-//! `<prefix>/<group>/node/<node>/@<epoch>` broadcast. This reader watches an origin's
+//! `<prefix>/<group>/node/<node>` broadcast. This reader watches an origin's
 //! announce stream for *every* node broadcast in a group and folds their
 //! cumulative counters into one merged frame per `(tier, role)`, so a downstream
 //! sees a project's whole live traffic as if it came from a single node.
@@ -84,10 +84,9 @@ impl Default for Config {
 /// group, summing the cumulative counters per key. Traffic is sticky: a node
 /// dropping out (its broadcast unannounces or its reader ends) keeps its last
 /// contribution, so a relay that returns with its boot-lifetime counters
-/// intact never looks like new traffic. A restarted producer uses a new epoch,
-/// adding its new counters to the kept contribution. Legacy producers that
-/// reuse an identity and reset their
-/// counters still regress the merged counter. Presence is not sticky: a
+/// intact never looks like new traffic. Only a genuine per-node counter
+/// regression (a restarted relay) regresses the merged counter, the same reset
+/// contract a single node's own restart follows. Presence is not sticky: a
 /// departed node stops counting sessions immediately.
 pub struct Consumer {
 	origin: origin::Consumer,
@@ -715,11 +714,11 @@ mod tests {
 		// and still growing: the total holds through the swap, then advances,
 		// never dipping.
 		let origin = produce_origin();
-		let mut node_a = NodeBroadcast::new(&origin, "acme", "a/@epoch");
-		let mut node_b = NodeBroadcast::new(&origin, "acme", "b/@epoch");
+		let node_a = node_producer(&origin, "a");
+		let node_b = node_producer(&origin, "b");
 
-		node_a.publish("acme/room", 100);
-		node_b.publish("acme/room", 40);
+		let fa = feed(&node_a, Tier::default(), "acme", "acme/room", 100).await;
+		let _fb = feed(&node_b, Tier::default(), "acme", "acme/room", 40).await;
 		drive_tick().await;
 
 		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1));
@@ -727,11 +726,12 @@ mod tests {
 		read_until_bytes(&mut traffic, "acme/room", 140).await;
 
 		// Node A's broadcast goes away and comes back with a higher counter.
+		drop(fa);
 		drop(node_a);
 		drive_tick().await;
 
-		let mut node_a = NodeBroadcast::new(&origin, "acme", "a/@epoch");
-		node_a.publish("acme/room", 120);
+		let node_a = node_producer(&origin, "a");
+		let _fa = feed(&node_a, Tier::default(), "acme", "acme/room", 120).await;
 		drive_tick().await;
 
 		// The kept contribution holds the total at 140 until the new frame
@@ -741,9 +741,10 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn restarted_node_epoch_keeps_the_traffic_total() {
-		// A fresh node epoch contributes new traffic without replacing the old
-		// instance's kept contribution.
+	async fn restarted_node_regresses_the_total() {
+		// A node that returns with a fresh counter (it restarted) replaces its
+		// contribution wholesale: the total regresses once, the existing
+		// fresh-segment contract.
 		let origin = produce_origin();
 		let node_a = node_producer(&origin, "a");
 		let node_b = node_producer(&origin, "b");
@@ -765,24 +766,9 @@ mod tests {
 		let _fa = feed(&node_a, Tier::default(), "acme", "acme/room", 30).await;
 		drive_tick().await;
 
-		let frame = read_monotonic_until(&mut traffic, "acme/room", 140, 170).await;
-		assert_eq!(frame.get("acme/room").expect("entry").bytes, 170);
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn legacy_node_counter_reset_regresses_the_total() {
-		let origin = produce_origin();
-		let mut node_a = NodeBroadcast::new(&origin, "acme", "a");
-		let mut node_b = NodeBroadcast::new(&origin, "acme", "b");
-		node_a.publish("acme/room", 100);
-		node_b.publish("acme/room", 40);
-		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1));
-		let mut traffic = agg.traffic(&Tier::default(), Role::Publisher);
-		read_until_bytes(&mut traffic, "acme/room", 140).await;
-		drop(node_a);
-		drive_tick().await;
-		let mut node_a = NodeBroadcast::new(&origin, "acme", "a");
-		node_a.publish("acme/room", 30);
+		// The restarted frame replaces A's contribution, so the total drops to
+		// 30 + 40, a genuine per-node regression downstream treats as a fresh
+		// segment. An earlier frame may retire A's live gauges first.
 		loop {
 			let frame = traffic.next().await.expect("read").expect("frame");
 			if frame.get("acme/room").map(|t| t.bytes) == Some(70) {

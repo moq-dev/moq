@@ -20,15 +20,12 @@ it. Traffic under the prefix is never counted, so serving stats doesn't
 generate more stats.
 
 ```text
-<prefix>/node/<node>/@<epoch>              depth 0: one broadcast per node
-<prefix>/<group>/node/<node>/@<epoch>       depth N: one broadcast per group per node
+<prefix>/node/<node>               depth 0: one broadcast per node
+<prefix>/<group>/node/<node>       depth N: one broadcast per group per node
 ```
 
 - `<node>` tells relays sharing a cluster apart. It may span several segments
-  (`sjc/1`), and defaults to `local` when unset.
-- `@<epoch>` is a trailing `@` followed by a lowercase hyphenated UUIDv7,
-  unique to this node instance and shared by all its project broadcasts. A restarted producer gets a new epoch, so relays cannot serve
-  snapshots cached under the previous instance's name.
+  (`sjc/1`), and is omitted along with its slash when unset: `<prefix>/node`.
 - `<group>` is the first `depth` segments of each broadcast path (for traffic)
   or auth root (for sessions), so a consumer can scope an announce to one
   tenant. A path shorter than `depth` groups under all of its segments.
@@ -39,9 +36,9 @@ generate more stats.
 At depth 0 the broadcast stays announced for the producer's life. At depth
 1 or more, a group's broadcast is announced while that group has entries and
 unannounced once it has none. Group numbers keep increasing across recreated
-tracks and group broadcasts within one epoch; they may have gaps. A recreated
-compressed track starts a new group with a full snapshot, never a delta whose
-compression state belonged to its previous writer.
+tracks and group broadcasts for the producer's life; they may have gaps. A
+recreated compressed track starts a new group with a full snapshot, never a
+delta whose compression state belonged to its previous writer.
 
 ## Tracks
 
@@ -131,10 +128,9 @@ Every counter is a cumulative, monotonic unsigned integer. A rate is the
 difference between two frames divided by the time between them, and a live
 count is started minus ended. A frame never shows ended above started.
 
-A restarted producer publishes under a new node epoch, so an aggregate keeps
-the old instance's contribution and adds the new one. Within one identity,
-a counter going **down** means an entry was dropped and re-created, or a
-legacy relay restarted. Treat it as a fresh segment rather than a negative rate.
+A counter going **down** means the relay restarted or the entry was dropped
+and re-created. Treat it as the start of a fresh segment rather than a
+negative rate.
 
 A reader ignores unknown fields, so a newer relay can add counters, and
 defaults a missing field to zero, so it can read an older relay.
