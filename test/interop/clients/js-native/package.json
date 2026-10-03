@@ -2,6 +2,9 @@
 	"name": "@moq/interop-native",
 	"private": true,
 	"type": "module",
+	"scripts": {
+		"check": "tsc --noEmit"
+	},
 	"dependencies": {
 		"@moq/hang": "workspace:*",
 		"@moq/json": "workspace:*",

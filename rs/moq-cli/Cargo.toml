@@ -140,3 +140,7 @@ tokio = { workspace = true, features = ["test-util"] }
 [[bench]]
 name = "play_buffer"
 harness = false
+
+[[example]]
+name = "interop-tail"
+path = "../../test/interop/clients/rust/tail.rs"
