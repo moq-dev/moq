@@ -3121,4 +3121,288 @@ mod test {
 			"group 0 given up while its tail was in flight"
 		);
 	}
+
+	// ---- edge cases a peer can trigger ----
+
+	/// Two copies of one frame race: the replaced route resumes the frame it stalled in
+	/// while the replacement delivers it whole. Each byte is written once, whichever copy
+	/// has it first.
+	#[test]
+	fn two_copies_racing_on_one_frame_write_each_byte_once() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut sub = subscribe(&logical);
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut frame = group
+			.create_frame(frame::Info {
+				size: 9,
+				timestamp: Timestamp::ZERO,
+			})
+			.unwrap();
+		frame.write(b"abc".to_vec()).unwrap();
+		step(&mut pump);
+		let mut reading = recv(&mut sub);
+		let mut streaming = reading.next_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(
+			streaming.read_chunk().now_or_never().unwrap().unwrap().unwrap(),
+			b"abc".as_ref()
+		);
+
+		let (b, b_copy) = copy("b");
+		feed(&mut pump, &mut handle, &b_copy);
+		let mut tail = b.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut whole = tail
+			.create_frame(frame::Info {
+				size: 9,
+				timestamp: Timestamp::ZERO,
+			})
+			.unwrap();
+		whole.write(b"abcdef".to_vec()).unwrap();
+		step(&mut pump);
+		// A catches up past B, then B finishes the frame.
+		frame.write(b"defgh".to_vec()).unwrap();
+		step(&mut pump);
+		whole.write(b"ghi".to_vec()).unwrap();
+		whole.finish().unwrap();
+		tail.finish().unwrap();
+		step(&mut pump);
+
+		let mut got = Vec::new();
+		while let Some(Ok(Some(chunk))) = streaming.read_chunk().now_or_never() {
+			got.extend_from_slice(&chunk);
+		}
+		assert_eq!(got, b"defghi");
+		assert_eq!(drain(&mut reading), (vec![], Some(Ok(()))));
+		std::mem::forget(frame);
+	}
+
+	/// Routes that disagree on a frame's size cannot both be right: the group fails
+	/// rather than splicing two contents.
+	#[test]
+	fn routes_disagreeing_on_a_frame_size_fail_the_group() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut sub = subscribe(&logical);
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut frame = group
+			.create_frame(frame::Info {
+				size: 6,
+				timestamp: Timestamp::ZERO,
+			})
+			.unwrap();
+		frame.write(b"abc".to_vec()).unwrap();
+		std::mem::forget(frame);
+		step(&mut pump);
+		let mut reading = recv(&mut sub);
+		kill(a, [group]);
+		step(&mut pump);
+
+		let (b, b_copy) = copy("b");
+		feed(&mut pump, &mut handle, &b_copy);
+		let mut other = b.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut other, "different");
+		step(&mut pump);
+		assert_eq!(drain(&mut reading).1, Some(Err(Error::ProtocolViolation.to_string())));
+	}
+
+	/// A replacement whose copy of a group ends below what the logical group already
+	/// holds disagrees on its length: the group fails rather than ending short.
+	#[test]
+	fn a_copy_shorter_than_the_logical_group_fails_it() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut sub = subscribe(&logical);
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut group, "0.0");
+		write(&mut group, "0.1");
+		step(&mut pump);
+		let mut reading = recv(&mut sub);
+		assert_eq!(drain(&mut reading), (vec!["0.0".into(), "0.1".into()], None));
+		kill(a, [group]);
+		step(&mut pump);
+
+		let (b, b_copy) = copy("b");
+		feed(&mut pump, &mut handle, &b_copy);
+		let mut short = b.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut short, "0.0");
+		short.finish().unwrap();
+		step(&mut pump);
+		assert_eq!(
+			drain(&mut reading),
+			(vec![], Some(Err(Error::ProtocolViolation.to_string())))
+		);
+	}
+
+	/// Once one route finished a group, another route's longer copy of it is a
+	/// disagreement that arrives too late to matter: the group stays as it ended.
+	#[test]
+	fn a_finished_group_ignores_a_longer_copy() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut sub = subscribe(&logical);
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut group, "0.0");
+		group.finish().unwrap();
+		step(&mut pump);
+
+		let (b, b_copy) = copy("b");
+		feed(&mut pump, &mut handle, &b_copy);
+		let mut longer = b.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut longer, "0.0");
+		write(&mut longer, "0.1");
+		longer.finish().unwrap();
+		step(&mut pump);
+
+		let mut reading = recv(&mut sub);
+		assert_eq!(drain(&mut reading), (vec!["0.0".into()], Some(Ok(()))));
+		assert!(
+			sub.recv_group().now_or_never().is_none(),
+			"the group was delivered twice"
+		);
+	}
+
+	/// The replacement's copy of a group starts past where the logical group is, while
+	/// the replaced route still feeds it. The late copy waits as a candidate and takes
+	/// over when the replaced route dies at the frame it starts from.
+	#[test]
+	fn a_late_copy_takes_over_where_the_replaced_route_dies() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut sub = subscribe(&logical);
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut group, "0.0");
+		step(&mut pump);
+		let mut reading = recv(&mut sub);
+
+		let (b, b_copy) = copy("b");
+		feed(&mut pump, &mut handle, &b_copy);
+		let mut late = b.create_group(group::Info { sequence: 0 }).unwrap();
+		late.start_at(2).unwrap();
+		write(&mut late, "0.2");
+		step(&mut pump);
+		assert_eq!(drain(&mut reading), (vec!["0.0".into()], None), "frame 1 is still A's");
+
+		write(&mut group, "0.1");
+		step(&mut pump);
+		kill(a, [group]);
+		write(&mut late, "0.3");
+		late.finish().unwrap();
+		step(&mut pump);
+		assert_eq!(
+			drain(&mut reading),
+			(vec!["0.1".into(), "0.2".into(), "0.3".into()], Some(Ok(())))
+		);
+	}
+
+	/// A route the front feeds again while its previous feed still drains (it was beaten,
+	/// then won back) delivers each group once.
+	#[test]
+	fn a_route_fed_again_while_it_drains_delivers_once() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut sub = subscribe(&logical);
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut group, "0.0");
+		step(&mut pump);
+		let mut reading = recv(&mut sub);
+
+		let (_b, b_copy) = copy("b");
+		feed(&mut pump, &mut handle, &b_copy);
+		feed(&mut pump, &mut handle, &a_copy);
+		write(&mut group, "0.1");
+		group.finish().unwrap();
+		let mut next = a.create_group(group::Info { sequence: 1 }).unwrap();
+		write(&mut next, "1.0");
+		next.finish().unwrap();
+		step(&mut pump);
+
+		assert_eq!(drain(&mut reading), (vec!["0.0".into(), "0.1".into()], Some(Ok(()))));
+		assert_eq!(recv(&mut sub).sequence, 1);
+		assert!(sub.recv_group().now_or_never().is_none(), "a group was delivered twice");
+	}
+
+	/// The serving route declares the track's end while the replaced route still feeds a
+	/// group below it: that group still finishes, and the track ends after it.
+	#[test]
+	fn a_track_end_during_the_overlap_waits_for_the_owed_group() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut sub = subscribe(&logical);
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut group, "0.0");
+		step(&mut pump);
+		let mut reading = recv(&mut sub);
+
+		let (mut b, b_copy) = copy("b");
+		b.start_at(1).unwrap();
+		feed(&mut pump, &mut handle, &b_copy);
+		let mut last = b.create_group(group::Info { sequence: 1 }).unwrap();
+		write(&mut last, "1.0");
+		last.finish().unwrap();
+		b.finish().unwrap();
+		step(&mut pump);
+		assert_eq!(recv(&mut sub).sequence, 1);
+
+		write(&mut group, "0.1");
+		group.finish().unwrap();
+		step(&mut pump);
+		assert_eq!(drain(&mut reading), (vec!["0.0".into(), "0.1".into()], Some(Ok(()))));
+		assert!(
+			matches!(sub.recv_group().now_or_never(), Some(Ok(None))),
+			"the track did not end"
+		);
+	}
+
+	/// A reader changing what it wants during the overlap updates the serving route only:
+	/// the replaced route stays bounded to the group it owes.
+	#[test]
+	fn demand_during_the_overlap_leaves_the_replaced_route_bounded() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let _sub = subscribe(&logical);
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut group, "0.0");
+		step(&mut pump);
+
+		let (b, b_copy) = copy("b");
+		feed(&mut pump, &mut handle, &b_copy);
+		let wanted = Subscription::default().with_max_age(Duration::from_secs(9));
+		let _late = logical.subscribe(wanted).now_or_never().unwrap().unwrap();
+		step(&mut pump);
+		assert_eq!(a.subscription().unwrap().end, Position::after_group(0));
+		assert_eq!(b.subscription().unwrap().max_age, Duration::from_secs(30));
+		drop(group);
+	}
+
+	/// An empty frame half of a group's way through a switch is still written once.
+	#[test]
+	fn an_empty_frame_survives_a_switch() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut sub = subscribe(&logical);
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut group, "");
+		step(&mut pump);
+		let mut reading = recv(&mut sub);
+		kill(a, [group]);
+		step(&mut pump);
+
+		let (b, b_copy) = copy("b");
+		feed(&mut pump, &mut handle, &b_copy);
+		let mut whole = b.create_group(group::Info { sequence: 0 }).unwrap();
+		write(&mut whole, "");
+		write(&mut whole, "0.1");
+		whole.finish().unwrap();
+		step(&mut pump);
+		assert_eq!(drain(&mut reading), (vec!["".into(), "0.1".into()], Some(Ok(()))));
+	}
 }
