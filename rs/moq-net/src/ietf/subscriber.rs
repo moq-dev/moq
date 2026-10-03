@@ -3223,9 +3223,10 @@ where
 
 		// Keep the request open until its data stream finishes or every reader leaves.
 		// A publisher that fails after FETCH_OK resets the request instead and owes no fetch
-		// stream, so the group
-		// it left waiting is aborted. A FIN is not that: the fetch stream can trail it.
+		// stream, so the group it left waiting is aborted. A FIN is not that: the fetch
+		// stream can trail it.
 		let mut open = true;
+		let mut abandoned = false;
 		let reset = kio::wait(|waiter| {
 			if open {
 				let mut cx = std::task::Context::from_waker(waiter.waker());
@@ -3235,32 +3236,32 @@ where
 					Poll::Pending => {}
 				}
 			}
-			let mut abandoned = false;
 			slot.poll(waiter, |state| match &**state {
 				GroupFetch::Done => Poll::Ready(()),
-				_ => {
-					if joined.poll_unused(waiter).is_ready()
-						&& demand.poll_unused(waiter).is_ready()
-						&& demand.abort_unused(Error::Cancel)
-					{
-						abandoned = true;
-						Poll::Ready(())
-					} else {
-						Poll::Pending
-					}
+				_ if joined.poll_unused(waiter).is_ready()
+					&& demand.poll_unused(waiter).is_ready()
+					&& demand.abort_unused(Error::Cancel) =>
+				{
+					abandoned = true;
+					Poll::Ready(())
 				}
+				_ => Poll::Pending,
 			})
-			.map(|_| abandoned.then_some(Error::Cancel))
+			.map(|_| None)
 		})
 		.await;
-		if let Some(err) = reset {
-			let cancel = matches!(err, Error::Cancel);
-			let _ = demand.abort(err);
+		if abandoned {
 			drop(registered);
-			if cancel {
-				self.cancel_group_fetch(stream, fetch_id).await;
-				return;
-			}
+			self.cancel_group_fetch(stream, fetch_id).await;
+			return;
+		}
+		// A group already written stays cached; only one still waiting for its stream is lost.
+		if let Some(err) = reset
+			&& let Ok(mut state) = slot.write()
+			&& matches!(*state, GroupFetch::Ready { .. })
+			&& let GroupFetch::Ready { producer, .. } = std::mem::replace(&mut *state, GroupFetch::Done)
+		{
+			let _ = producer.abort(err);
 		}
 		let _ = stream.writer.close().await;
 	}
@@ -7915,12 +7916,15 @@ mod joining_fetch_tests {
 		Accepted,
 		Receiving,
 		Complete,
+		/// Complete, then the publisher resets the request stream.
+		CompleteReset,
 	}
 
 	/// Last-reader cancellation covers a pending answer, an accepted group waiting for
 	/// its stream, and a stream stalled after its first complete frame.
 	async fn abandon_group_fetch(version: Version, stage: FetchStage) {
 		const GROUP: u64 = 4;
+		let complete = matches!(stage, FetchStage::Complete | FetchStage::CompleteReset);
 		let session = ScriptedSession::new(Vec::new());
 		let (tasks, _task_set) = TaskSet::new();
 		let subscriber = Subscriber::new(
@@ -8028,9 +8032,12 @@ mod joining_fetch_tests {
 					"the reader still wants the group"
 				);
 				drop(group);
-				if stage == FetchStage::Complete {
+				if complete {
 					data.close(crate::lite::test_transport::Close::Fin);
 					assert!(matches!(futures::poll!(fill.as_mut()), Poll::Ready(Ok(()))));
+					if stage == FetchStage::CompleteReset {
+						session.close(crate::lite::test_transport::Close::Reset);
+					}
 					assert!(futures::poll!(run.as_mut()).is_ready());
 					assert!(observed.is_finished());
 					assert!(!observed.is_aborted());
@@ -8045,7 +8052,7 @@ mod joining_fetch_tests {
 					assert!(matches!(futures::poll!(fill.as_mut()), Poll::Ready(Err(Error::Cancel))));
 				}
 			}
-			if stage != FetchStage::Complete {
+			if !complete {
 				assert!(
 					matches!(observed.poll_closed(&kio::Waiter::noop()), Poll::Ready(Error::Cancel)),
 					"partial group must abort"
@@ -8053,7 +8060,7 @@ mod joining_fetch_tests {
 			}
 		}
 
-		if stage == FetchStage::Complete {
+		if complete {
 			assert!(session.log.stops().is_empty());
 			assert!(session.log.resets().is_empty());
 			assert!(subscriber.state.lock().group_fetches.is_empty());
@@ -8102,6 +8109,14 @@ mod joining_fetch_tests {
 	async fn a_complete_group_fetch_is_cached_when_the_reader_leaves() {
 		for version in JOINING_DRAFTS {
 			abandon_group_fetch(version, FetchStage::Complete).await;
+		}
+	}
+
+	/// A request reset after the group is written must not abort the cached group.
+	#[tokio::test(start_paused = true)]
+	async fn a_complete_group_fetch_survives_a_request_reset() {
+		for version in JOINING_DRAFTS {
+			abandon_group_fetch(version, FetchStage::CompleteReset).await;
 		}
 	}
 
