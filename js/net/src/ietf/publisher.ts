@@ -474,8 +474,9 @@ export class Publisher {
 						}).encode(stream.writer, version);
 						throw new UpdateFailed();
 					}
+					// update() replaces every option, so carry the rest over as Rust does.
 					if (params.subscriberPriority !== undefined)
-						track.update({ priority: fromWire(params.subscriberPriority) });
+						track.update({ ...track.subscription.peek(), priority: fromWire(params.subscriberPriority) });
 					await stream.writer.u53(RequestOk.id);
 					await new RequestOk({ requestId: undefined }).encode(stream.writer, version);
 				}

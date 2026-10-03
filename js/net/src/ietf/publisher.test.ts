@@ -2361,10 +2361,14 @@ test("REQUEST_UPDATE applies priority and preserves it when omitted", async () =
 		}),
 	);
 	try {
+		const before = track.subscription.peek();
 		await client.writer.write(new Uint8Array([0x02, 0, 4, 2, 1, 0x20, 10]));
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
 		expect(track.subscription.peek()?.priority).toBe(245);
+		// Only the priority changes; retention and the group range survive.
+		expect(track.subscription.peek()?.maxAge).toBe(before?.maxAge);
+		expect(track.subscription.peek()?.groups).toEqual(before?.groups);
 		await client.writer.write(new Uint8Array([0x02, 0, 2, 4, 0]));
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);

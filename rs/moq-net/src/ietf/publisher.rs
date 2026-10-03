@@ -3352,6 +3352,29 @@ mod serve_tests {
 	}
 
 	#[tokio::test(start_paused = true)]
+	async fn unsupported_subscription_update_fails_the_subscription() {
+		let version = Version::Draft19;
+		let h = serve(version);
+		// FORWARD=0 asks to pause delivery, which this publisher does not support.
+		let mut session = ScriptedSession::per_stream(vec![vec![0x02, 0, 4, 2, 1, 0x10, 0]]);
+		let mut stream = Stream::open(&mut session, version).await.unwrap();
+		let mut serving = TrackServe::new(
+			h.session.clone(),
+			h.track.subscribe(None),
+			RequestId(0),
+			version,
+			ServeRange::default(),
+			None,
+		);
+		let mut finished = false;
+		let served = h
+			.publisher
+			.run_subscription(&mut stream, &mut serving, &mut finished, async { false })
+			.await;
+		assert!(matches!(served, Some((Err(Error::Unsupported), false))), "{served:?}");
+	}
+
+	#[tokio::test(start_paused = true)]
 	async fn namespace_requester_fin_is_version_gated() {
 		for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft22] {
 			let h = serve(version);
