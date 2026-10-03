@@ -6168,7 +6168,8 @@ pub(super) mod test {
 	/// A dedicated PCR PID's malformed adaptation field cannot declare a timebase break.
 	#[test]
 	fn damaged_adaptation_on_a_dedicated_pcr_pid_keeps_the_clock() {
-		const PCR: u16 = 0x0100;
+		// Clear of the PMT PID and every stream, so only the clock-only row can carry it.
+		const PCR: u16 = 0x0200;
 		let mut mux = Mux {
 			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
 			..Default::default()
@@ -6187,7 +6188,8 @@ pub(super) mod test {
 		packet[5] = 0x90;
 		import.decode(&packet).unwrap();
 		assert!(import.last_pts.is_some(), "a malformed field reset the program clock");
-		assert_eq!(import.stats().streams[&PCR].damaged, 1);
+		let stats = import.stats();
+		assert_eq!((stats.streams[&PCR].track, stats.streams[&PCR].damaged), ("", 1));
 	}
 
 	/// A malformed unbounded PES drained at EOF is still refused and counted.
