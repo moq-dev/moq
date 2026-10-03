@@ -28,6 +28,10 @@ Decided 2026-09-30:
   N+1's header. The group consumer still yields frames in order. Decided
   2026-09-30 after review of #4616, so a hole in frame N does not hold back
   N+1's bytes.
+- The open-time `would_overflow` check assumes one frame in flight, so it
+  counts only the new frame's declared size. With several open frames it must
+  also count the unwritten remainder of every other in-flight frame, or
+  concurrent declarations could jointly exceed `MAX_CACHE_BYTES`.
 - Today's single sequential writer (`model/frame.rs`, the one `written`
   watermark and its safety comments) is the invariant being changed; keep the
   ordered fast path, including the whole-frame zero-copy install, unchanged.

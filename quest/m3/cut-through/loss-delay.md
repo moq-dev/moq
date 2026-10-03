@@ -35,7 +35,9 @@ Independent of the bench; it can start once `moq-quic` lands.
 Test: a seeded loss on a `moq-quic` pair counts the held bytes; a reorder shorter than
 an RTT counts nothing.
 
-Public API: an additive trait accessor. Wire: a new `moq-stats` field.
+Public API: an additive trait accessor. Wire: a new `moq-stats` field,
+additive on `main` since `Traffic` is `#[non_exhaustive]` and readers default
+missing fields.
 
 ## Required
 
