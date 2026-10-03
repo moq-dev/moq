@@ -125,8 +125,12 @@ export function checkCredential(credential: Credential): void {
 
 export function checkGeneration(generation: Generation): void {
 	checkCredential(generation);
+	// Check bytes, not decoded length: TextDecoder strips a leading BOM.
 	const epoch = new TextDecoder().decode(generation.epoch);
-	if (epoch.length !== 36 || !/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(epoch)) {
+	if (
+		generation.epoch.length !== 36 ||
+		!/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(epoch)
+	) {
 		throw new ProfileError("identity", "epoch is not canonical UUIDv7 text");
 	}
 }
@@ -316,7 +320,7 @@ function gen(epoch = EPOCH, secret = utf8("moq-e2ee-00 test secret!!!!!!!!!")): 
 function generationJson(generation: Generation) {
 	return {
 		context: hex(generation.context),
-		epoch: new TextDecoder().decode(generation.epoch),
+		epoch: new TextDecoder("utf-8", { ignoreBOM: true }).decode(generation.epoch),
 		kid: Number(generation.kid),
 		secret: hex(generation.secret),
 	};
@@ -484,6 +488,7 @@ async function generate() {
 		["kid-exhausted", { ...base, kid: BigInt(MAX_U53) + 1n }, "identity"],
 		["epoch-empty", { ...base, epoch: new Uint8Array() }, "identity"],
 		["epoch-slash", { ...base, epoch: utf8("2026/09") }, "identity"],
+		["epoch-bom", { ...base, epoch: utf8(`\ufeff${EPOCH}`) }, "identity"],
 	] as const) {
 		negative.push({ id, operation: "generation", error, generation: generationJson(generation) });
 	}
@@ -755,7 +760,9 @@ async function main(): Promise<void> {
 	const jsonPath = pathFor("moq-e2ee-00.json");
 	if (write) {
 		mkdirSync(dirname(jsonPath), { recursive: true });
-		writeFileSync(jsonPath, `${JSON.stringify(generated, null, "\t")}\n`);
+		// Escape the BOM vector so it stays visible in the file.
+		const json = JSON.stringify(generated, null, "\t").replaceAll("\ufeff", "\\ufeff");
+		writeFileSync(jsonPath, `${json}\n`);
 	}
 	const onDisk = JSON.parse(readFileSync(jsonPath, "utf8")) as Awaited<ReturnType<typeof generate>>;
 	await verify(onDisk);
