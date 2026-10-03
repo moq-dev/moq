@@ -287,11 +287,11 @@ moq --connect https://relay.example.com/anon \
 
 ## Redundant publishers
 
-Two publishers that share a Hop ID (`--hop 42`) are treated as
-interchangeable sources: relays hold both routes and fail over at a group
-boundary. They must produce identical tracks with aligned groups. Everywhere
-else leave `--hop` unset: a fresh id per run is what makes a restarted
-encoder take over cleanly instead of splicing mid-stream.
+Two publishers of the same broadcast name are interchangeable sources:
+relays hold both routes and fail over between them mid-group. They must
+produce identical tracks with aligned groups. A restarted encoder is the same
+broadcast too, so one whose groups restart from 0 must publish under a new
+name, or viewers wait for its sequence to catch up.
 
 ## Cluster
 

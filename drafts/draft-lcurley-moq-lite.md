@@ -116,8 +116,9 @@ Each client establishes a session with a CDN edge server, ideally the closest on
 Any broadcasts and subscriptions are transparently proxied by the CDN behind the scenes.
 
 ## Broadcast
-A Broadcast is a collection of Tracks from a single publisher.
+A Broadcast is a collection of Tracks named by a path.
 This corresponds to a MoqTransport's "track namespace".
+A path names one Broadcast whichever publisher serves it: a publisher MUST NOT reuse a path for different content, and publishes a new instance under a new path instead.
 
 A publisher advertises what it can serve via ANNOUNCE_START messages, each carrying a path prefix: a route covering every broadcast path beneath it.
 A route is the only shape an advertisement takes: a publisher that serves only some of the paths beneath a prefix, such as a transcoder for any broadcast's derivative, advertises the covering prefix and refuses the requests it will not serve (see [Resolution](#resolution)); no message narrows a route.
@@ -424,9 +425,7 @@ Applying one rule to both advertisement and dispatch keeps advertised paths trut
 
 When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering route (see [Resolution](#resolution)), then a path that contains no 0 Hop ID over one that does, then the lowest Warm Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the lowest Cold Route Cost, then toward the shortest path, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
 
-A route's identity is its first hop: the endpoint that originated it (see [ANNOUNCE_START](#announce-start)).
-Two routes covering one path with the same non-zero first hop are the same origin reached different ways and carry interchangeable content, so a relay MAY move a live subscription between them, continuing from the first frame the subscriber lacks, and a route change the identity survives (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
-Across differing first hops, or where either is 0, the routes promise nothing about each other's content: a relay MUST NOT splice a live subscription across them, and when the serving session ends, in-flight subscriptions end with it (a reset) and the subscriber re-requests through the best remaining route.
+Every route covering a path serves the same Broadcast, so a relay MAY move a live subscription between them, continuing from the first frame the subscriber lacks, and a route change (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
 
 #### Resolution {#resolution}
 A SUBSCRIBE, FETCH, or TRACK request names a path, and the receiver resolves it against the routes covering that path, after the per-subscriber exclusion above.
@@ -1350,7 +1349,7 @@ The `Message Length` describes the payload size on the wire.
 ## moq-lite-07
 
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
-- Routes with the same non-zero first hop carry interchangeable content, so a relay moving a subscription between them continues from the first frame the subscriber lacks instead of at a group boundary.
+- A path names one Broadcast whichever publisher serves it, and a publisher MUST NOT reuse a path for different content. A relay MAY move a subscription between any routes covering the path, continuing from the first frame the subscriber lacks instead of at a group boundary. Replaces the first-hop identity.
 
 - Assigned `moq-lite-07-wip` as this draft's protocol identifier until it is finalized as `moq-lite-07`.
 - Switched every variable-length integer, including SETUP parameter values, from QUIC's two-bit length prefix to moq-transport's leading-ones encoding, widening the range to 64 bits.

@@ -1,7 +1,7 @@
 //! A subscription survives its route changing, end to end over real sessions.
 //!
 //! A publisher `P` is pulled by two relays `A` and `B`, both of which re-advertise
-//! it to the subscribing relay `R`. Both routes share `P` as their first hop, so `R`
+//! it to the subscribing relay `R`. A path is one broadcast whoever serves it, so `R`
 //! may resume a subscription served through one onto the other. The reader on `R`
 //! must see every frame exactly once, in order, whether the route changes between
 //! groups or in the middle of one, and however it changes.

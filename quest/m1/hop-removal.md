@@ -12,9 +12,8 @@ connection cannot publish several broadcasts with different identities.
 
 - The pool semantics already live in
   [Selection](/quest/m1/cluster-routing/selection.md): origins announcing the
-  same epoch-qualified concrete path are one source. This quest deletes what
-  that makes dead, including `Pin::Publisher(Hop)` in
-  `rs/moq-net/src/model/front.rs` and `RouteEntry::qualifies`.
+  same epoch-qualified concrete path are one source. A front already resumes
+  through any route at its path, whatever the first hop.
 - A redundant pair passes one explicit epoch; the broadcast-publish path keeps
   an epoch a caller supplies ([Broadcast epochs](/quest/m1/broadcast-epoch/README.md)).
   Give `moq` a flag for it if Broadcast epochs has not.
