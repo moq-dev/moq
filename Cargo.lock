@@ -9864,9 +9864,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-iroh"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e70872b1e0cb791a06373859105570e78759dd3286b1f42bccd31f5b812539c"
+checksum = "12f6120c66f3ef235e063e716fd0e3014c9ba07901c3a31a6b3cde20f318fa0a"
 dependencies = [
  "bytes",
  "http",
