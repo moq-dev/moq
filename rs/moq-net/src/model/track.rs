@@ -8080,6 +8080,15 @@ mod test {
 		assert_eq!(retry.await.unwrap().sequence, 5);
 	}
 
+	/// Dropping an auto trait from a published type is a semver break, so the group
+	/// consumer a cached fetch holds must not cost `Fetching` its unwind safety.
+	#[test]
+	fn fetching_is_unwind_safe() {
+		fn assert_unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+		assert_unwind_safe::<Fetching>();
+		assert_unwind_safe::<group::Consumer>();
+	}
+
 	/// A fetch that hits the cache holds the group until polled, so a handler that aborts
 	/// the group once nobody wants it (an abandoned upstream fetch) leaves it alone.
 	#[tokio::test]
