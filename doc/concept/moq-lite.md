@@ -299,6 +299,15 @@ until its first frame arrives; if it is dropped first, the next group takes its
 place. A cached open group's prefix stays readable when its route changes or
 its track goes idle and returns.
 
+A track whose cache may be stale is not live, and readers get nothing from its
+cache until it is. A relay's track goes not live when nobody reads it. When a
+reader returns, the relay asks its source from just past what it holds, and
+serves the cache again once the source says where its live feed is: lite-07 and
+moq-transport answer with their largest position, and older lite versions are
+asked from the head of the cached group, so their first frame says. A source
+whose live feed has moved past a gap in the cache leaves the groups below the
+gap to fetches, since nothing bounds how old they are.
+
 The publisher may declare a retention window per track. Omission sets no limit;
 zero keeps only the live edge. The origin cache ceiling and cache pool may still
 evict content sooner. Relays preserve the publisher's declaration rather than

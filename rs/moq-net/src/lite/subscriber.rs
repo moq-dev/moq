@@ -101,9 +101,6 @@ struct TrackEntry {
 	timescale: Option<Timescale>,
 	/// The groups received so far, so the subscription's end can wait for the ones owed.
 	tail: kio::Producer<Tail>,
-	/// Where the subscription asked to start, when that is partway through a group a
-	/// peer without frame bounds sends whole: the frames below it are dropped on arrival.
-	resume: Option<Position>,
 }
 
 impl<S: crate::transport::poll::Session> Subscriber<S> {
@@ -471,6 +468,10 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		if let Ok(mut tail) = entry.tail.write() {
 			tail.account(dg.sequence..dg.sequence.saturating_add(1), self.runtime.now());
 		}
+		// A datagram says where the live feed is as well as a group does.
+		if !entry.producer.is_live() {
+			entry.producer.set_live(Some(Position::group(dg.sequence)));
+		}
 		entry.producer.insert_datagram(dg.sequence, timestamp, dg.payload)?;
 		Ok(())
 	}
@@ -786,7 +787,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 					let mut cx = waiter.context();
 					let hdr = ready!(self.reader.poll_decode::<lite::Group>(&mut cx))?;
 
-					let (group, track, timescale, reading, skip) = {
+					let (group, track, timescale, reading) = {
 						let mut subs = self.subscriber.subscribes.lock();
 						let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 						// The subscription's end waits until this stream is read.
@@ -817,15 +818,17 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						};
 						// The stream may carry only the tail of the group; number the frames
 						// from where the publisher said they start so a front continuing the
-						// group across routes lines them up. A peer that can't start partway
-						// through sends the group from its head, and the frames below the
-						// requested start are dropped as they arrive.
-						let skip = entry
-							.resume
-							.filter(|resume| resume.group == hdr.sequence)
-							.map_or(0, |resume| resume.frame.saturating_sub(hdr.frame_start));
-						group.start_at(hdr.frame_start + skip)?;
-						(group, entry.producer.clone(), entry.timescale, reading, skip)
+						// group across routes lines them up.
+						group.start_at(hdr.frame_start)?;
+						// The first frame a route delivers says where its live feed is, when
+						// its answer did not.
+						if !entry.producer.is_live() {
+							entry.producer.set_live(Some(Position {
+								group: hdr.sequence,
+								frame: hdr.frame_start,
+							}));
+						}
+						(group, entry.producer.clone(), entry.timescale, reading)
 					};
 
 					// The timescale came from TRACK_INFO (read before this subscription was
@@ -834,7 +837,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 					self.state = GroupRecvState::Serve {
 						group: crate::recv::Group::new(group),
 						track,
-						ingest: FrameIngest::new(&self.subscriber, timescale).skip(skip),
+						ingest: FrameIngest::new(&self.subscriber, timescale),
 						_reading: reading,
 					};
 				}
@@ -900,8 +903,6 @@ struct FrameIngest {
 	prev_ts: u64,
 	phase: IngestPhase,
 	budget: frame::Budget,
-	/// Leading frames to read and drop: ones below the start the subscription asked for.
-	skip: u64,
 }
 
 enum IngestPhase {
@@ -913,8 +914,6 @@ enum IngestPhase {
 	Size { timestamp: Option<Timestamp> },
 	/// Streaming the frame payload.
 	Payload { frame: frame::ProducerOwned },
-	/// Reading past a frame nobody asked for: the bytes of it still to discard.
-	Skip { size: usize },
 }
 
 impl FrameIngest {
@@ -925,14 +924,7 @@ impl FrameIngest {
 			phase: IngestPhase::Timing,
 			runtime: subscriber.runtime.clone(),
 			budget: subscriber.frames.clone(),
-			skip: 0,
 		}
-	}
-
-	/// Drop the first `frames` frames instead of writing them.
-	fn skip(mut self, frames: u64) -> Self {
-		self.skip = frames;
-		self
 	}
 
 	/// `Ready(Ok(()))` once the stream FINs on a frame boundary. The caller
@@ -974,19 +966,9 @@ impl FrameIngest {
 					// oversized `size` and allocates up front only within the budget, so
 					// no pre-check is needed. No wire timestamp (pre-lite-05) means local
 					// receive time.
-					if self.skip > 0 {
-						self.skip -= 1;
-						let size = usize::try_from(size).map_err(|_| Error::FrameTooLarge)?;
-						self.phase = IngestPhase::Skip { size };
-						continue;
-					}
 					let timestamp = timestamp.unwrap_or_else(|| Timestamp::from(self.runtime.now()));
 					let frame = group.create_frame_owned(frame::Info { size, timestamp }, &self.budget)?;
 					self.phase = IngestPhase::Payload { frame };
-				}
-				IngestPhase::Skip { size } => {
-					ready!(reader.poll_skip(&mut cx, size))?;
-					self.phase = IngestPhase::Timing;
 				}
 				IngestPhase::Payload { frame } => {
 					let failed = ready!(reader.poll_read_frame(&mut cx, frame)).err();
@@ -1591,7 +1573,6 @@ mod tests {
 					producer: track.clone(),
 					timescale: Some(Timescale::default()),
 					tail: Default::default(),
-					resume: None,
 				},
 			);
 
@@ -1621,9 +1602,12 @@ mod tests {
 	async fn a_subscribe_end_below_a_received_group() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let mut responses = Vec::new();
-			lite::SubscribeResponse::Start(lite::SubscribeStart { group: 0 })
-				.encode(&mut responses, version)
-				.unwrap();
+			lite::SubscribeResponse::Start(lite::SubscribeStart {
+				group: 0,
+				largest: None,
+			})
+			.encode(&mut responses, version)
+			.unwrap();
 			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 2, streams: 1 })
 				.encode(&mut responses, version)
 				.unwrap();
@@ -1724,9 +1708,12 @@ mod tests {
 	fn fin_responses(version: Version, started: bool, clean: bool) -> Vec<u8> {
 		let mut responses = Vec::new();
 		if started {
-			lite::SubscribeResponse::Start(lite::SubscribeStart { group: 0 })
-				.encode(&mut responses, version)
-				.unwrap();
+			lite::SubscribeResponse::Start(lite::SubscribeStart {
+				group: 0,
+				largest: None,
+			})
+			.encode(&mut responses, version)
+			.unwrap();
 		}
 		if clean {
 			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0, streams: 0 })
@@ -1787,7 +1774,6 @@ mod tests {
 				producer,
 				timescale: Some(Timescale::default()),
 				tail: Default::default(),
-				resume: None,
 			},
 		);
 
@@ -2092,32 +2078,36 @@ mod tests {
 		assert_eq!((msg.start_frame, msg.end_frame), (0, None));
 	}
 
-	/// The same demand on a lite-06 peer keeps its frame offsets, so the widening is
-	/// version-gated rather than unconditional.
+	/// A lite-07 SUBSCRIBE keeps a mid-group start: its answer carries the largest position,
+	/// which says whether what the subscriber holds is current. Lite-06's answer does not,
+	/// so it asks from the head of the group instead, and the first frame says where the
+	/// live feed is; its end keeps the frame bound.
 	#[tokio::test]
-	async fn frame_bounds_survive_on_a_lite06_peer() {
-		let mut h = Harness::new(Version::Lite06);
-		let mut sub = Sub::None;
+	async fn a_mid_group_start_survives_only_where_the_answer_has_the_largest() {
+		for (version, start_frame) in [(Version::Lite07, 3), (Version::Lite06, 0)] {
+			let mut h = Harness::new(version);
+			let mut sub = Sub::None;
 
-		h.serve
-			.handle_subscription(
-				&mut h.producer,
-				&mut sub,
-				Some(mid_group_demand()),
-				true,
-				Some(Timescale::default()),
-			)
-			.await
-			.unwrap();
+			h.serve
+				.handle_subscription(
+					&mut h.producer,
+					&mut sub,
+					Some(mid_group_demand()),
+					true,
+					Some(Timescale::default()),
+				)
+				.await
+				.unwrap();
 
-		let wire = h.wire();
-		let mut wire = wire.as_slice();
-		assert_eq!(
-			lite::ControlType::decode(&mut wire, Version::Lite06).unwrap(),
-			lite::ControlType::Subscribe
-		);
-		let msg = lite::Subscribe::decode(&mut wire, Version::Lite06).unwrap();
-		assert_eq!((msg.start_frame, msg.end_frame), (3, Some(7)));
+			let wire = h.wire();
+			let mut wire = wire.as_slice();
+			assert_eq!(
+				lite::ControlType::decode(&mut wire, version).unwrap(),
+				lite::ControlType::Subscribe
+			);
+			let msg = lite::Subscribe::decode(&mut wire, version).unwrap();
+			assert_eq!((msg.start_frame, msg.end_frame), (start_frame, Some(7)), "{version:?}");
+		}
 	}
 
 	/// The model's exclusive end maps back to the wire's inclusive pair.
@@ -3363,14 +3353,13 @@ struct TrackServe<S: crate::transport::poll::Session> {
 impl<S: crate::transport::poll::Session> TrackServe<S> {
 	/// The mid-group start a peer without frame bounds can't be asked for, recorded so
 	/// the frames below it are dropped when its whole group arrives.
-	fn resume(&self, requested: &Subscription) -> Option<Position> {
-		match self.subscriber.version.has_frame_bounds() {
-			true => None,
-			false => requested.start.filter(|start| start.frame != 0),
-		}
-	}
-
 	fn widen_frame_bounds(&self, subscription: &mut Subscription) {
+		// An answer that does not carry the largest position cannot vouch for what a
+		// subscriber holds, so ask from the head of its group instead: the first frame then
+		// arrives at once and says where the live feed is.
+		if !self.subscriber.version.has_largest() {
+			subscription.start = subscription.start.map(|start| Position::group(start.group));
+		}
 		if self.subscriber.version.has_frame_bounds() {
 			return;
 		}
@@ -3418,7 +3407,6 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 
 		match pref {
 			Some(mut subscription) => {
-				let resume = self.resume(&subscription);
 				self.widen_frame_bounds(&mut subscription);
 				match sub {
 					Sub::None => {
@@ -3426,7 +3414,6 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						Ok(Begin::Establish(self.prepare_establish(
 							producer,
 							subscription,
-							resume,
 							timescale,
 						)))
 					}
@@ -3445,9 +3432,6 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 							}
 						}
 						active.start = subscription.start;
-						if let Some(entry) = self.subscriber.subscribes.lock().get_mut(&active.id) {
-							entry.resume = resume;
-						}
 						if supports_update {
 							// The floor follows the requested start, in both directions:
 							// moving below a declared SUBSCRIBE_START reopens those groups
@@ -3496,7 +3480,6 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		&self,
 		producer: &mut track::Producer,
 		subscription: Subscription,
-		resume: Option<Position>,
 		timescale: Option<Timescale>,
 	) -> Establish<S> {
 		let id = self.subscriber.next_id.fetch_add(1, atomic::Ordering::Relaxed);
@@ -3523,7 +3506,6 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 				producer: producer.clone(),
 				timescale,
 				tail: tail.clone(),
-				resume,
 			},
 		);
 
@@ -3548,8 +3530,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		subscription: Subscription,
 		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
-		let resume = self.resume(&subscription);
-		let mut est = Box::new(self.prepare_establish(producer, subscription, resume, timescale));
+		let mut est = Box::new(self.prepare_establish(producer, subscription, timescale));
 		let id = est.id;
 		match kio::wait(move |waiter| est.poll(waiter)).await {
 			Ok(active) => {
@@ -3989,7 +3970,9 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 			true => request.resolving_start(),
 			false => request,
 		};
-		let serving = request.accept(info);
+		// Not live until the route answers with its largest position (lite-07) or delivers
+		// its first group: until then nothing says how current a cache built on it is.
+		let serving = request.not_live().accept(info);
 		Self {
 			demand: serving.demand(),
 			serving,
@@ -4155,6 +4138,12 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 									// signal, so a reader waiting on a skipped group
 									// fails over instead of stalling on a live route.
 									lite::SubscribeResponse::Start(start) => {
+										// Where the live feed is, on versions whose answer says.
+										if serve.subscriber.version.has_largest()
+											&& let Some(largest) = start.largest
+										{
+											self.serving.set_live(Some(largest));
+										}
 										// A START describes the demand the SUBSCRIBE carried.
 										// It applies only while the current start still matches
 										// that demand (updates get no fresh START, so an update

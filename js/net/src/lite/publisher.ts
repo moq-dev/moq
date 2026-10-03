@@ -32,6 +32,7 @@ import {
 	hasAnnounceId,
 	hasAnnounceOk,
 	hasDatagrams,
+	hasLargest,
 	hasProbeRtt,
 	hasRouteCost,
 	hasStreamCount,
@@ -823,6 +824,31 @@ export class Publisher {
 					case "error":
 						throw recv.error;
 					case "idle":
+						// A start past everything the track has (a subscriber resuming just after
+						// what it holds) is answered at once with the largest position, on
+						// versions that carry it: a quiet track may not reach that start for a
+						// while, and the subscriber judges what it holds against the answer.
+						if (emitRange && !startSent && hasLargest(this.version) && bounds.startGroup !== undefined) {
+							const largest = track.largest();
+							const startFrame = bounds.startFrame;
+							if (
+								largest !== undefined &&
+								(bounds.startGroup > largest.group ||
+									(bounds.startGroup === largest.group && startFrame > largest.frame))
+							) {
+								startSent = true;
+								hooks.replaceGroups(track, {
+									start: { included: bounds.startGroup },
+									end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
+								});
+								const start = new SubscribeStart(bounds.startGroup, largest);
+								if (
+									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
+								)
+									return;
+								continue;
+							}
+						}
 						// Before lite-07, an end declared ahead of the live edge goes out as
 						// soon as it is known, while the remaining groups are still being
 						// produced. The lite-07 count is not final until those groups open.
@@ -874,7 +900,7 @@ export class Publisher {
 						!(await controls.response(
 							encodeSubscribeResponse(
 								stream,
-								{ start: new SubscribeStart(group.sequence) },
+								{ start: new SubscribeStart(group.sequence, track.largest()) },
 								this.version,
 							),
 						))

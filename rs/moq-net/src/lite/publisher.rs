@@ -2430,6 +2430,26 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			}
 		}
 
+		// A start past everything the live feed has (a subscriber resuming just after what it
+		// holds) is answered at once with the largest position, on versions that carry it:
+		// a quiet track may not reach that start for a while, and the subscriber judges
+		// what it holds against the answer.
+		if self.emit_range
+			&& !self.start_sent
+			&& self.ctx.version.has_largest()
+			&& let Some(start) = self.track.subscription().start
+			&& let Poll::Ready(Some(largest)) = self.track.poll_live(waiter)
+			&& start > largest
+		{
+			self.start_sent = true;
+			writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
+				group: start.group,
+				largest: Some(largest),
+			}))?;
+			self.track.raise_start_to(start.group);
+			return Poll::Ready(Ok(ControlFlow::Continue(())));
+		}
+
 		// One cursor drives the whole subscription: poll the cap-aware arrival-order
 		// group and, when enabled, the next best-effort datagram. Groups are polled
 		// first so a datagram burst can't starve them; datagrams flow whenever no
@@ -2506,8 +2526,16 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		self.skipped.clear();
 		self.start_sent = true;
 		// Only the group: the subscriber derives the start frame from its own request
-		// (see `lite::SubscribeStart`).
-		writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart { group: start }))?;
+		// (see `lite::SubscribeStart`). The track is live by now, since its first group
+		// was readable.
+		let largest = match self.track.poll_live(&kio::Waiter::noop()) {
+			Poll::Ready(largest) => largest,
+			Poll::Pending => None,
+		};
+		writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
+			group: start,
+			largest,
+		}))?;
 		// SUBSCRIBE_START is an implicit drop of everything below the resolved start (the
 		// subscriber records it as a permanent miss), so a lower group arriving late must
 		// not be served after all. A widening SUBSCRIBE_UPDATE re-lowers the floor,
@@ -3354,8 +3382,8 @@ mod serve_group_test {
 		track.finish().unwrap();
 		run.await.unwrap();
 
-		// SUBSCRIBE_START at 0, then SUBSCRIBE_END at 3 with 2 streams.
-		assert_eq!(*log.writes.lock().unwrap(), [0, 1, 0, 1, 2, 3, 2]);
+		// SUBSCRIBE_START at 0 (largest 0.0), then SUBSCRIBE_END at 3 with 2 streams.
+		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 1, 2, 3, 2]);
 	}
 
 	/// A lite-07 run over a relay's track, whose upstream subscription still waits on the
@@ -3419,9 +3447,13 @@ mod serve_group_test {
 
 		/// Whether the first thing written was SUBSCRIBE_START at `group`.
 		fn started_at(&self, group: u64) -> bool {
-			let start = lite::SubscribeResponse::Start(lite::SubscribeStart { group });
-			let start = start.encode_bytes(Version::Lite07).unwrap();
-			self.session.log.writes.lock().unwrap().starts_with(&start)
+			use crate::coding::Decode;
+			let writes = self.session.log.writes.lock().unwrap();
+			let mut slice = writes.as_slice();
+			matches!(
+				lite::SubscribeResponse::decode(&mut slice, Version::Lite07),
+				Ok(lite::SubscribeResponse::Start(start)) if start.group == group
+			)
 		}
 	}
 
@@ -3532,7 +3564,11 @@ mod serve_group_test {
 		write_group(&mut track, 1, 1000);
 		track.finish().unwrap();
 		assert!(futures::poll!(run.as_mut()).is_pending(), "group 1 is still opening");
-		assert_eq!(*log.writes.lock().unwrap(), [0, 1, 0], "only SUBSCRIBE_START so far");
+		assert_eq!(
+			*log.writes.lock().unwrap(),
+			[0, 3, 0, 1, 0],
+			"only SUBSCRIBE_START so far"
+		);
 
 		let Ok(mut open) = gate.write() else {
 			panic!("transport gate closed");
@@ -3540,7 +3576,7 @@ mod serve_group_test {
 		*open = true;
 		drop(open);
 		run.await.unwrap();
-		assert_eq!(*log.writes.lock().unwrap(), [0, 1, 0, 1, 2, 2, 1]);
+		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 1, 2, 2, 1]);
 	}
 }
 

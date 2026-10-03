@@ -1883,13 +1883,19 @@ where
 			true => request.resolving_start(),
 			false => request,
 		};
-		// Where the publisher is now, which a front judges an idle cache against before any
-		// object arrives (an open group may not see one for a while).
-		let request = request.with_edge(largest.map(|largest| largest.group));
+		// Not live until the answer says where the publisher is, or the first object does.
+		let request = request.not_live();
 		// Serves cache misses with a group FETCH. Registered before accepting, so a miss
 		// queued meanwhile waits for it rather than failing for want of a handler.
 		let dynamic = request.dynamic();
 		let mut track = request.accept(info);
+		// The publisher's Largest Location is where its live feed is now.
+		if let Some(largest) = largest {
+			track.set_live(Some(track::Position {
+				group: largest.group,
+				frame: largest.object,
+			}));
+		}
 		// A live join starts at the publisher's edge; an absolute one where it asked.
 		let _ = match live {
 			true => track.start_at(largest.map(|largest| largest.group)),
@@ -2413,6 +2419,13 @@ where
 			// No object at or past object 0 of this group exists, so neither does the group.
 			Opened::EndOfTrack => return end_track(&mut track, group.group_id),
 		};
+		// The first object says where the live feed is, when SUBSCRIBE_OK named no Largest.
+		if !track.is_live() {
+			track.set_live(Some(track::Position {
+				group: group.group_id,
+				frame: start,
+			}));
+		}
 
 		// Guarded: this handler can be dropped at any await below, and a group producer
 		// that dies without a terminal leaves its consumer waiting on nothing.
@@ -2508,6 +2521,10 @@ where
 		let Some(producer) = track.producer.as_mut() else {
 			return Ok(());
 		};
+		// A datagram says where the live feed is as well as an object does.
+		if !producer.is_live() {
+			producer.set_live(Some(track::Position::group(sequence)));
+		}
 		if let Err(err) = producer.insert_datagram(sequence, timestamp, payload) {
 			tracing::debug!(%err, alias, sequence, "dropping datagram");
 		}

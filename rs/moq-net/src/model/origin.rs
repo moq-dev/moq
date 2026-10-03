@@ -5889,8 +5889,8 @@ mod tests {
 		tokio::task::yield_now().await;
 		assert_eq!(
 			source.subscription().and_then(|sub| sub.start),
-			None,
-			"a parked track owes nothing, so the source picks the start"
+			Some(crate::track::Position { group: 0, frame: 1 }),
+			"a parked track asks from just past what it holds"
 		);
 		source.start_at(0).unwrap();
 		let mut group = source.create_group(0u64.into()).unwrap();
@@ -8093,9 +8093,9 @@ mod tests {
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"next");
 	}
 
-	/// A returning reader is served only what the fresh source delivers: the warm cache
-	/// stays with fetches unless the source delivers a cached group again, even when its
-	/// start is at the cached edge and a cached group would still pass the budget.
+	/// A returning reader is served the warm cache only where the fresh source's feed
+	/// connects to it: past a gap, nothing bounds how old the cache is, so readers start at
+	/// the source's first group.
 	///
 	/// A local source is released rather than parked (it keeps its own cache), so
 	/// this goes through a served front, which is what actually holds the cache.
@@ -8156,9 +8156,12 @@ mod tests {
 		let mut subscription = subscribing.await.unwrap().expect("resubscribe");
 		settle(|| subscription.latest() == Some(22)).await;
 
-		// The hidden cache comes back only as the route delivers it again, which this one
-		// does not: groups 0..=3 stay with fetches, however fresh group 3 still is.
-		assert_eq!(drain(&mut subscription), [20, 21, 22]);
+		// The source's feed starts at group 20, past a gap in the cache: nothing bounds how
+		// old groups 0..=3 are (group 3's reach runs on to group 20), so readers start at 20.
+		// In arrival order: the live group the source named is opened first.
+		let mut got = drain(&mut subscription);
+		got.sort();
+		assert_eq!(got, [20, 21, 22]);
 	}
 
 	/// A front serving from another front still drops upstream on the unused edge,
