@@ -98,6 +98,7 @@ function sees(filter: Filter, path: Path.Valid): boolean {
  */
 export class Subscriber {
 	#session: Session;
+	#localClose = false;
 
 	// The transport, so a request cut off by the session's close ends with the session's
 	// error. Optional for tests that drive a bare session.
@@ -142,6 +143,11 @@ export class Subscriber {
 
 	// Whether the peer understands the HIDDEN parameter (MoQ Hidden).
 	#hidden: boolean;
+
+	/** Marks this subscriber's deliberate local session close. @internal */
+	close() {
+		this.#localClose = true;
+	}
 
 	/**
 	 * Creates a new Subscriber instance.
@@ -666,7 +672,7 @@ export class Subscriber {
 			console.debug(`subscribe close: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			const e = await sessionCause(this.#quic, err);
-			producer.close(e);
+			producer.close(this.#localClose ? undefined : e);
 			stream.abort(e);
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
@@ -1020,7 +1026,7 @@ export class Subscriber {
 			// The control message establishing this alias can arrive after the data stream.
 			subscription = await this.#aliases.get(group.trackAlias);
 		} catch (err: unknown) {
-			const e = error(err);
+			const e = await sessionCause(this.#quic, err);
 			// Ours: we cancelled the subscription and the publisher has not stopped yet.
 			// Anything else on this alias is the publisher sending data for a track it never
 			// acknowledged, which is worth seeing.
@@ -1107,7 +1113,7 @@ export class Subscriber {
 			// A group with no objects still exists.
 			open().close();
 		} catch (err: unknown) {
-			const e = error(err);
+			const e = await sessionCause(this.#quic, err);
 			if (e instanceof ProtocolViolation) {
 				// The publisher broke the track's end, which no later group can repair.
 				producer?.close(e);

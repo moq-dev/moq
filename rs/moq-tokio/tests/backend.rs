@@ -744,11 +744,9 @@ async fn iroh_connect_test(version: Option<&str>) {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn noq_client_close_reaches_server() {
-	let quic = moq_tokio::quic::Config::default();
-	assert!(
-		quic.idle_timeout > TIMEOUT,
-		"an idle timeout inside TIMEOUT would hide a lost close"
-	);
+	// An idle timeout inside TIMEOUT would hide a lost close.
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.idle_timeout = TIMEOUT * 3;
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("127.0.0.1:0".parse().unwrap());

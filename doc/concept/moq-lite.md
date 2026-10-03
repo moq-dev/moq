@@ -57,6 +57,19 @@ a group at or past `SUBSCRIBE_END`, or a `SUBSCRIBE_END` below a group already
 received. moq-lite 05 specified an inclusive end, so there it only drops that
 group or the early boundary.
 
+## Group reads across failover
+
+Rust origin readers can keep reading an in-flight group after its source fails.
+A group reader waiting on a replacement copy subscribes to it from the frame it
+needs, even when the caller is not polling for the next group, and holds that
+subscription until the group ends. If that copy refuses the subscription, the
+read ends with an error. The copy's declared start says whether the group is
+still coming, so a newer group overtaking it on the wire does not end the wait.
+A copy that declares no start (a local track) and has advanced past the group
+ends the read with an error. This also applies when waiting for the group's
+completion; no FETCH is issued. A replacement that later drops the group it is
+serving still needs SUBSCRIBE\_DROP support to resolve that wait.
+
 ## Discovery
 
 A session can ask for announcements matching a path prefix. The peer replies
@@ -326,7 +339,9 @@ codes as `moq_net::Error::Session(SessionError)` or `Error::Stream(StreamError)`
 JavaScript exposes `SessionError` and `StreamError`. Match the registry before
 interpreting the number. Native bindings expose scope, code, kind, and a diagnostic
 message; unknown and application codes retain their numeric value. Transport
-failures without a protocol code remain separate.
+failures without a protocol code remain separate. A deliberate local close ends
+received tracks cleanly after their delivered groups; a peer close ends tracks
+and open group readers with the session error.
 
 ## Local read limits
 

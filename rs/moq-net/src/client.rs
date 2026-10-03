@@ -276,6 +276,7 @@ impl Client {
 					authority: self.setup_authority.clone(),
 					peer_setup_stream: None,
 					peer_declared: None,
+					early_unis: Vec::new(),
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -426,6 +427,7 @@ impl Client {
 					authority: None,
 					peer_setup_stream: None,
 					peer_declared: Some(peer_declared),
+					early_unis: Vec::new(),
 				})?;
 				(None, crate::driver::Protocol::Ietf(protocol), goaway)
 			}

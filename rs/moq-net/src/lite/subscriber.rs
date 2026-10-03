@@ -89,6 +89,8 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	/// [`SourceServe`] machines.
 	sources: kio::Queue<(PathOwned, crate::broadcast::Dynamic)>,
 	going_away: crate::goaway::GoingAway,
+	/// What this session may allocate up front for frames still arriving.
+	frames: frame::Budget,
 }
 
 #[derive(Clone)]
@@ -124,6 +126,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			cost: config.cost,
 			sources: kio::Queue::new(),
 			going_away: config.going_away,
+			frames: Default::default(),
 		}
 	}
 
@@ -487,7 +490,12 @@ impl SubscriptionCleanup {
 	/// their cleanup independently; this records the track's terminal state.
 	fn abort(&self, err: &Error) {
 		for (_, entry) in self.0.lock().drain() {
-			let _ = entry.producer.abort(err.clone());
+			let _ = entry.producer.abort_session(err.clone());
+		}
+	}
+	fn close(&self) {
+		for (_, entry) in self.0.lock().drain() {
+			let _ = entry.producer.close();
 		}
 	}
 }
@@ -542,6 +550,11 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 		// rejects with `err` rather than `Dropped`.
 		self.subscriber.note_end(err);
 		self.cleanup.abort(err);
+	}
+
+	pub fn close(&self) {
+		self.subscriber.note_end(&Error::Cancel);
+		self.cleanup.close();
 	}
 
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -812,7 +825,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 					self.state = GroupRecvState::Serve {
 						group: crate::recv::Group::new(group),
 						track,
-						ingest: FrameIngest::new(self.subscriber.runtime.clone(), timescale),
+						ingest: FrameIngest::new(&self.subscriber, timescale),
 						_reading: reading,
 					};
 				}
@@ -877,6 +890,7 @@ struct FrameIngest {
 	/// zigzag-delta decode. The first frame's delta is absolute (prev = 0).
 	prev_ts: u64,
 	phase: IngestPhase,
+	budget: frame::Budget,
 }
 
 enum IngestPhase {
@@ -891,12 +905,13 @@ enum IngestPhase {
 }
 
 impl FrameIngest {
-	fn new(runtime: crate::time::Clock, timescale: Option<Timescale>) -> Self {
+	fn new<S: crate::transport::poll::Session>(subscriber: &Subscriber<S>, timescale: Option<Timescale>) -> Self {
 		Self {
 			timescale,
 			prev_ts: 0,
 			phase: IngestPhase::Timing,
-			runtime,
+			runtime: subscriber.runtime.clone(),
+			budget: subscriber.frames.clone(),
 		}
 	}
 
@@ -935,11 +950,12 @@ impl FrameIngest {
 					let Some(size) = ready!(reader.poll_decode_maybe::<u64>(&mut cx))? else {
 						return Poll::Ready(Ok(()));
 					};
-					// `create_frame_owned` is the allocation chokepoint and rejects an
-					// oversized `size` before allocating, so no pre-check is needed. No
-					// wire timestamp (pre-lite-05) means local receive time.
+					// `create_frame_owned` is the allocation chokepoint: it rejects an
+					// oversized `size` and allocates up front only within the budget, so
+					// no pre-check is needed. No wire timestamp (pre-lite-05) means local
+					// receive time.
 					let timestamp = timestamp.unwrap_or_else(|| Timestamp::from(self.runtime.now()));
-					let frame = group.create_frame_owned(frame::Info { size, timestamp })?;
+					let frame = group.create_frame_owned(frame::Info { size, timestamp }, &self.budget)?;
 					self.phase = IngestPhase::Payload { frame };
 				}
 				IngestPhase::Payload { frame } => {
@@ -4221,9 +4237,23 @@ enum FetchRunState<S: crate::transport::poll::Session> {
 	Ingest {
 		stream: Stream<S, Version>,
 		producer: group::Producer,
-		ingest: FrameIngest,
+		// The accepted request's demand: fetches that joined it but have not yet
+		// picked the group up from the cache.
+		joined: kio::Producer<track::FetchOutcome>,
+		// Boxed so the other states stay small; one allocation per fetch.
+		ingest: Box<FrameIngest>,
 	},
 	Done,
+}
+
+impl<S: crate::transport::poll::Session> FetchRunState<S> {
+	/// The downstream request, while it waits on the publisher's answer.
+	fn request(&self) -> Option<&group::Request> {
+		match self {
+			Self::Open { request } | Self::Send { request, .. } | Self::Answer { request, .. } => request.as_ref(),
+			Self::Ingest { .. } | Self::Done => None,
+		}
+	}
 }
 
 impl<S: crate::transport::poll::Session> FetchServeRun<S> {
@@ -4246,6 +4276,20 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let mut cx = waiter.context();
 		loop {
+			// A fetch nobody waits on any more is cancelled upstream, so the publisher stops
+			// serving it (and a relay there releases its own FETCH). Ingest has its own check.
+			if let Some(request) = self.state.request()
+				&& request.poll_unused(waiter).is_ready()
+			{
+				tracing::debug!(track = %self.serve.name, group = self.group, "fetch abandoned");
+				if let FetchRunState::Send { stream, .. } | FetchRunState::Answer { stream, .. } =
+					std::mem::replace(&mut self.state, FetchRunState::Done)
+				{
+					stream.writer.abort(&Error::Cancel);
+				}
+				return Poll::Ready(());
+			}
+
 			match &mut self.state {
 				FetchRunState::Open { request } => {
 					tracing::info!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, group = self.group, "fetch started");
@@ -4365,6 +4409,9 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					// `Some`; fall back to the default scale defensively rather than
 					// panicking.
 					let group_info = track::Info::default().with_timescale(self.timescale.unwrap_or_default());
+					// The joined fetches pick the group up from the cache only when next
+					// polled, so their demand outlives the request until then.
+					let joined = request.result.clone();
 					let mut producer = match request.accept(group_info) {
 						Ok(producer) => producer,
 						Err(err) => {
@@ -4386,15 +4433,36 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					self.state = FetchRunState::Ingest {
 						stream,
 						producer,
-						ingest: FrameIngest::new(self.serve.subscriber.runtime.clone(), self.timescale),
+						joined,
+						ingest: Box::new(FrameIngest::new(&self.serve.subscriber, self.timescale)),
 					};
 				}
 				FetchRunState::Ingest {
 					stream,
 					producer,
+					joined,
 					ingest,
 				} => {
-					let res = ready!(ingest.poll(&mut stream.reader, producer, waiter));
+					let Poll::Ready(res) = ingest.poll(&mut stream.reader, producer, waiter) else {
+						// Still short of its end, so completion always wins. Once nobody
+						// wants the rest (no joined fetch left to pick it up, no reader),
+						// cancel upstream and abort the truncated group, never caching it
+						// as complete. The abort is atomic with a new reader arriving.
+						if joined.poll_unused(waiter).is_pending() || producer.poll_unused(waiter).is_pending() {
+							return Poll::Pending;
+						}
+						if !producer.abort_unused(Error::Cancel) {
+							continue;
+						}
+						tracing::debug!(track = %self.serve.name, group = self.group, "fetch abandoned");
+						let FetchRunState::Ingest { stream, .. } =
+							std::mem::replace(&mut self.state, FetchRunState::Done)
+						else {
+							unreachable!()
+						};
+						stream.writer.abort(&Error::Cancel);
+						return Poll::Ready(());
+					};
 					let FetchRunState::Ingest { producer, .. } =
 						std::mem::replace(&mut self.state, FetchRunState::Done)
 					else {

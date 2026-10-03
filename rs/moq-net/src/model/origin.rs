@@ -2281,17 +2281,37 @@ impl Drop for WarmGroup {
 	}
 }
 
+/// A spliced copy's newest group, held so its head outlives the copy's route (see
+/// [`TrackIo::held`]). Borrowed from the route, which may still be writing it for other
+/// readers, so it aborts on drop only once it is the last handle: a dead route never
+/// finishes it.
+struct HeldGroup(group::Producer);
+
+impl Drop for HeldGroup {
+	fn drop(&mut self) {
+		if !self.0.is_finished() {
+			let _ = self.0.abort_if_last(Error::Cancel);
+		}
+	}
+}
+
 /// Cache what `source` delivered on a new local track the origin owns: its complete
 /// groups, and its open live edge rebuilt from the frames already delivered.
 ///
 /// `head` is the previous park's edge. A copy spliced after a warm cache continues its
 /// edge group from the next frame, so its copy of that group lacks the head, which
-/// `head` supplies.
-fn warm_copy(source: &track::Consumer, head: Option<&WarmGroup>) -> Option<WarmCopy> {
+/// `head` supplies. `held` is the copy's newest group as [`TrackIo::held`] kept it: a
+/// copy that died tore its open groups out of its own cache, but not out of the held one.
+fn warm_copy(source: &track::Consumer, head: Option<&WarmGroup>, held: Option<&group::Producer>) -> Option<WarmCopy> {
 	let info = source.cached_info()?;
 	let mut track = track::Producer::new(Arc::new(source.broadcast().clone()), source.name(), info);
 	let head = head.map(|head| &head.0);
-	let groups = source.cached_groups();
+	let mut groups = source.cached_groups();
+	if let Some(held) = held
+		&& !groups.iter().any(|(group, _)| group.sequence == held.sequence)
+	{
+		groups.push((held.clone(), true));
+	}
 	// Not `source.latest()`: datagrams share the sequence counter and can run past it.
 	let latest = groups
 		.iter()
@@ -2451,6 +2471,14 @@ struct TrackIo {
 	/// The last warm copy's newest group, outliving it so the copy spliced after it
 	/// can continue the group (see [`WarmGroup`]). Released at the next park.
 	head: Option<WarmGroup>,
+	/// The spliced copy's newest group. A route that ends abruptly releases its open
+	/// groups, and the takeover after it asks the next copy only for the frames past
+	/// the break, so without this handle no route holds the group's head for a reader
+	/// that arrives later. See [`TrackIo::retire`].
+	held: Option<HeldGroup>,
+	/// The spliced copy, once it died: its segment keeps ending readers with its error
+	/// unless a takeover follows, which retires it.
+	dead: Option<track::Consumer>,
 	/// Whether the track had a reader as of the last demand edge.
 	used: bool,
 }
@@ -2464,6 +2492,39 @@ impl TrackIo {
 		self.copy = None;
 		self.warm = None;
 		self.head = None;
+		self.held = None;
+		self.dead = None;
+	}
+
+	/// Keep the spliced copy as dead. The front only refreshes `held` between wakes, so
+	/// first catch a newest group the copy surfaced since, while its cache still has it.
+	fn bury(&mut self) {
+		let Some((_, copy)) = self.copy.take() else { return };
+		let after = self.held.as_ref().map(|held| held.0.sequence);
+		if let Poll::Ready(group) = copy.poll_latest_group(after, &kio::Waiter::noop()) {
+			self.held = Some(HeldGroup(group));
+		}
+		self.dead = Some(copy);
+	}
+
+	/// Retire `copy` as a takeover replaces it. Mid-group, park its delivery warm, open
+	/// group included, so a reader arriving later still gets the group's head and the
+	/// takeover continues it. Between groups its own cache keeps everything finished, so
+	/// there is nothing to do.
+	fn retire(&mut self, copy: &track::Consumer) -> Result<(), Error> {
+		let Some(held) = self.held.take() else {
+			return Ok(());
+		};
+		if held.0.is_finished() {
+			return Ok(());
+		}
+		let Some(warm) = warm_copy(copy, self.head.as_ref(), Some(&held.0)) else {
+			return Ok(());
+		};
+		self.head = None;
+		self.resume.park(&warm.track)?;
+		self.warm = Some(warm);
+		Ok(())
 	}
 }
 
@@ -2489,6 +2550,7 @@ async fn run_front(task: FrontTask) {
 		SourceClosed(u64),
 		Info(Arc<str>, u64, Result<track::Info, Error>),
 		Ended(Arc<str>, u64, Result<(), Error>),
+		Held(Arc<str>, group::Producer),
 		Demand(Arc<str>),
 		Deadline,
 		Table,
@@ -2640,7 +2702,7 @@ async fn run_front(task: FrontTask) {
 						// spliced until a replacement resumes past them.
 						for io in tracks.values_mut() {
 							if io.copy.as_ref().is_some_and(|(s, _)| *s == source) {
-								io.copy = None;
+								io.bury();
 							}
 							if io.query.as_ref().is_some_and(|(s, ..)| *s == source) {
 								io.query = None;
@@ -2682,7 +2744,12 @@ async fn run_front(task: FrontTask) {
 						if staged != source {
 							continue;
 						}
-						if let Err(err) = io.resume.takeover(&copy) {
+						let outgoing = io.copy.take().map(|(_, copy)| copy).or_else(|| io.dead.take());
+						let retired = match outgoing {
+							Some(outgoing) => io.retire(&outgoing),
+							None => Ok(()),
+						};
+						if let Err(err) = retired.and_then(|()| io.resume.takeover(&copy)) {
 							// Closed means the logical track already ended. Anything
 							// else is a boundary bug; abort rather than strand
 							// subscribers on a track nobody serves.
@@ -2696,6 +2763,7 @@ async fn run_front(task: FrontTask) {
 						// The new segment has produced nothing yet: this is the
 						// edge the copy is asked to advance.
 						io.edge = io.resume.resume_position();
+						io.held = None;
 						io.copy = Some((source, copy));
 					}
 					Action::Park { track: name } => {
@@ -2704,9 +2772,11 @@ async fn run_front(task: FrontTask) {
 						// Drop the source copy so its producer goes idle at once; keep
 						// the groups it delivered on a local track so resume stays
 						// spliced until the linger expires.
-						let warm = warm_copy(&copy, io.head.as_ref());
+						let warm = warm_copy(&copy, io.head.as_ref(), io.held.as_ref().map(|held| &held.0));
 						drop(copy);
 						io.head = None;
+						io.held = None;
+						io.dead = None;
 						let parked = match &warm {
 							Some(warm) => io.resume.park(&warm.track),
 							None => io.resume.release(),
@@ -2821,6 +2891,12 @@ async fn run_front(task: FrontTask) {
 				{
 					return Poll::Ready(Step::Ended(name.clone(), *source, result));
 				}
+				if let Some((_, copy)) = &io.copy
+					&& let Poll::Ready(group) =
+						copy.poll_latest_group(io.held.as_ref().map(|held| held.0.sequence), waiter)
+				{
+					return Poll::Ready(Step::Held(name.clone(), group));
+				}
 				// Watch the demand edge in whichever direction is unmet.
 				let edge = match io.used {
 					true => io.resume.poll_unused(waiter),
@@ -2849,6 +2925,8 @@ async fn run_front(task: FrontTask) {
 						edge: None,
 						warm: None,
 						head: None,
+						held: None,
+						dead: None,
 						used: false,
 					},
 				);
@@ -2908,7 +2986,7 @@ async fn run_front(task: FrontTask) {
 			Step::Ended(name, source, result) => {
 				let closing = sources.get(&source).is_some_and(|s| s.is_closing());
 				let Some(io) = tracks.get_mut(&name) else { continue };
-				io.copy = None;
+				io.bury();
 				let delivered = io.resume.resume_position() != io.edge;
 				Event::TrackEnded {
 					track: name,
@@ -2917,6 +2995,12 @@ async fn run_front(task: FrontTask) {
 					result,
 					delivered,
 				}
+			}
+			Step::Held(name, group) => {
+				if let Some(io) = tracks.get_mut(&name) {
+					io.held = Some(HeldGroup(group));
+				}
+				continue;
 			}
 			Step::Demand(name) => {
 				let Some(io) = tracks.get_mut(&name) else { continue };
@@ -6273,6 +6357,223 @@ mod tests {
 				frame: expect.len() as u64,
 			});
 		}
+	}
+
+	/// A route that ends abruptly releases its open groups, and the takeover asks the
+	/// next route only for the frames past the break. The front keeps the head it
+	/// spliced, so a reader arriving afterwards still gets the whole group: whether the
+	/// old route dies before the new one takes over (a reconnect) or after (a cheaper
+	/// route preempting it). A reader joining mid-outage gets it too, and the reader
+	/// already mid-group is not handed it a second time.
+	#[tokio::test]
+	async fn a_takeover_keeps_the_open_group_head_for_later_readers() {
+		tokio::time::pause();
+		for dies_first in [true, false] {
+			takeover_keeps_the_open_group_head(dies_first).await;
+		}
+	}
+
+	async fn takeover_keeps_the_open_group_head(dies_first: bool) {
+		let producer = origin(1).produce();
+		let first_server = producer
+			.dynamic("room/alice", Route::default().with_hops(hops(&[10])).with_cost(5))
+			.unwrap();
+		let pending = producer.consume().request_broadcast("room/alice");
+		let upstream = broadcast::Info::new().produce();
+		let mut dynamic = upstream.dynamic();
+		queued(&first_server).await.accept(&upstream);
+		let resolved = pending.await.unwrap();
+
+		async fn read(group: &mut group::Consumer) -> Vec<u8> {
+			let frame = tokio::time::timeout(Duration::from_secs(1), group.read_frame())
+				.await
+				.expect("frame")
+				.unwrap()
+				.expect("group ended");
+			frame.payload.to_vec()
+		}
+
+		// A reader is mid-way through the open group when the route changes.
+		let track = resolved.track("log").unwrap();
+		let subscribing = tokio::spawn(async move { track.subscribe(None).await });
+		let source = dynamic.requested_track().await.unwrap().accept(None);
+		let mut group = source.create_group(0u64.into()).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"a".as_ref()).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"b".as_ref()).unwrap();
+		let mut subscription = subscribing.await.unwrap().unwrap();
+		let mut reading = subscription.recv_group().await.unwrap().unwrap();
+		assert_eq!(read(&mut reading).await, b"a");
+		assert_eq!(read(&mut reading).await, b"b");
+
+		// Either the first route's session ends and reconnects, announcing the same route
+		// afresh while the old one is still held, or a cheaper route preempts the live one.
+		let mut first = Some((group, source, upstream, dynamic));
+		let mut joining = None;
+		if dies_first {
+			drop(first.take());
+			// The reader sees its route die and stalls. Polled in place: yielding would let
+			// the front give up on a path with no route left before the replacement lands.
+			assert!(futures::FutureExt::now_or_never(subscription.recv_group()).is_none());
+			let track = resolved.track("log").unwrap();
+			joining = Some(tokio::spawn(async move {
+				let mut joined = track.subscribe(None).await.unwrap();
+				let group = joined.recv_group().await.unwrap().expect("track ended");
+				(joined, group)
+			}));
+		}
+		let cost = if dies_first { 5 } else { 0 };
+		let replacement_server = producer
+			.dynamic("room/alice", Route::default().with_hops(hops(&[10])).with_cost(cost))
+			.unwrap();
+		let replacement = broadcast::Info::new().produce();
+		let mut replacement_dynamic = replacement.dynamic();
+		queued(&replacement_server).await.accept(&replacement);
+		let mut next = tokio::time::timeout(Duration::from_secs(1), replacement_dynamic.requested_track())
+			.await
+			.expect("the front asked the replacement")
+			.unwrap()
+			.resolving_start()
+			.accept(None);
+		next.start_at(0).unwrap();
+		let mut next_group = next.create_group(0u64.into()).unwrap();
+		next_group.start_at(2).unwrap();
+		next_group.write_frame(crate::Timestamp::ZERO, b"c".as_ref()).unwrap();
+		assert_eq!(read(&mut reading).await, b"c", "dies_first={dies_first}");
+
+		// A preempted route still owns its open group: its writer and other readers carry on.
+		if let Some((group, ..)) = &mut first {
+			let mut independent = group.consume();
+			group.write_frame(crate::Timestamp::ZERO, b"x".as_ref()).unwrap();
+			for expect in [b"a", b"b", b"x"] {
+				assert_eq!(read(&mut independent).await, expect);
+			}
+			group.finish().unwrap();
+		}
+		drop(first);
+
+		let track = resolved.track("log").unwrap();
+		let mut later = tokio::time::timeout(Duration::from_secs(1), track.subscribe(None))
+			.await
+			.expect("subscribe")
+			.unwrap();
+		let mut late = tokio::time::timeout(Duration::from_secs(1), later.recv_group())
+			.await
+			.unwrap_or_else(|_| panic!("dies_first={dies_first}: the later reader never got the group"))
+			.unwrap()
+			.expect("track ended");
+		assert_eq!(late.sequence, 0);
+		for expect in [b"a", b"b", b"c"] {
+			assert_eq!(read(&mut late).await, expect, "dies_first={dies_first}");
+		}
+		let mut joined = None;
+		if let Some(joining) = joining {
+			let (subscription, mut group) = tokio::time::timeout(Duration::from_secs(1), joining)
+				.await
+				.expect("the reader joining mid-outage never got the group")
+				.unwrap();
+			assert_eq!(group.sequence, 0);
+			for expect in [b"a", b"b", b"c"] {
+				assert_eq!(read(&mut group).await, expect);
+			}
+			joined = Some((subscription, group));
+		}
+
+		// The reader that was mid-group already has it.
+		assert!(
+			tokio::time::timeout(Duration::from_secs(1), subscription.recv_group())
+				.await
+				.is_err(),
+			"dies_first={dies_first}: the group was handed out twice"
+		);
+
+		// The continuation still flows to both.
+		next_group.write_frame(crate::Timestamp::ZERO, b"d".as_ref()).unwrap();
+		assert_eq!(read(&mut reading).await, b"d");
+		assert_eq!(read(&mut late).await, b"d");
+		if let Some((_, group)) = &mut joined {
+			assert_eq!(read(group).await, b"d");
+		}
+		next_group.finish().unwrap();
+		drop((
+			joined,
+			reading,
+			late,
+			subscription,
+			later,
+			next,
+			replacement,
+			replacement_server,
+			first_server,
+		));
+	}
+
+	/// A returning reader is handed the parked open group spliced onto the source's
+	/// continuation, which starts past the warm head. The group's end stays unknown
+	/// until the source finishes it, even before a frame of it is read: readers drop a
+	/// group ahead of their cursor whose end resolves to an error.
+	#[tokio::test]
+	async fn returning_reader_gets_a_live_open_warm_group() {
+		use futures::FutureExt;
+
+		tokio::time::pause();
+		let (_server, _upstream, mut dynamic, resolved) = served_front().await;
+
+		// The first reader leaves mid-group.
+		let track = resolved.track("video").unwrap();
+		let subscribing = tokio::spawn(async move { track.subscribe(None).await });
+		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+			.await
+			.expect("the front asked the source")
+			.expect("request");
+		let mut source = request.resolving_start().accept(None);
+		let mut subscription = subscribing.await.unwrap().expect("subscribe");
+		source.start_at(0).unwrap();
+		let mut group = source.create_group(0u64.into()).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"a".as_ref()).unwrap();
+		let mut reading = subscription.recv_group().await.unwrap().expect("group 0");
+		assert_eq!(reading.read_frame().await.unwrap().unwrap().payload.as_ref(), b"a");
+		drop(reading);
+		drop(subscription);
+		tokio::time::timeout(Duration::from_secs(1), source.demand().unused())
+			.await
+			.expect("parked")
+			.expect("source open");
+		drop(group);
+		drop(source);
+
+		// The next reader returns while the group is still live upstream.
+		let track = resolved.track("video").unwrap();
+		let subscribing = tokio::spawn(async move { track.subscribe(None).await });
+		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+			.await
+			.expect("the front asked the source")
+			.expect("request");
+		let mut source = request.resolving_start().accept(None);
+		let mut subscription = subscribing.await.unwrap().expect("subscribe");
+		source.start_at(0).unwrap();
+		let mut group = source.create_group(0u64.into()).unwrap();
+		group.start_at(1).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"b".as_ref()).unwrap();
+
+		let mut reading = tokio::time::timeout(Duration::from_secs(1), subscription.recv_group())
+			.await
+			.expect("group 0")
+			.unwrap()
+			.expect("track ended");
+		assert_eq!(reading.sequence, 0);
+		let early = reading.finished().now_or_never();
+		assert!(
+			early.is_none(),
+			"the live group already resolved its end before a frame was read: {early:?}"
+		);
+
+		// The end answers for this reader's cursor, not the seam it was probed from.
+		group.finish().unwrap();
+		assert_eq!(reading.finished().await.unwrap(), 0);
+		assert_eq!(reading.read_frame().await.unwrap().unwrap().payload.as_ref(), b"a");
+		assert_eq!(reading.finished().await.unwrap(), 1);
+		assert_eq!(reading.read_frame().await.unwrap().unwrap().payload.as_ref(), b"b");
+		assert_eq!(reading.finished().await.unwrap(), 2);
 	}
 
 	#[tokio::test]

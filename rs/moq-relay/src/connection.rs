@@ -184,7 +184,7 @@ impl Connection {
 /// the session ([`auth::Lease::ended`]) the session closes with the reason, and
 /// the session's own close is reported back through the lease as the `end` event.
 /// Either way, a relay shutdown drains the session with a GOAWAY instead of
-/// cutting it off.
+/// cutting it off, and does not exit before this returns or the drain deadline.
 ///
 /// The session handle is `Send + Sync` whatever transport carries it, so this
 /// runs on the shared runtime even for sessions a pinned QUIC worker drives.
@@ -194,6 +194,7 @@ pub async fn supervise(
 	mut shutdown: crate::shutdown::Observer,
 	registration: Option<crate::session::Registration>,
 ) -> anyhow::Result<()> {
+	let _serving = shutdown.serve();
 	loop {
 		let nudged = async {
 			match &registration {

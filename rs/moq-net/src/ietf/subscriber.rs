@@ -165,11 +165,21 @@ impl State {
 			if let Some(request) = track.pending.take() {
 				request.reject(err.clone());
 			}
+			if let Some(producer) = track.producer {
+				let _ = producer.abort_session(err.clone());
+			}
 			if let Fill::Ready { producer, .. } = &*track.fill.read() {
 				let _ = producer.clone().abort(err.clone());
 			}
+		}
+	}
+	fn close(&mut self) {
+		for (_, mut track) in self.subscribes.drain() {
+			if let Some(request) = track.pending.take() {
+				request.reject(Error::Cancel);
+			}
 			if let Some(producer) = track.producer {
-				let _ = producer.abort(err.clone());
+				let _ = producer.close();
 			}
 		}
 	}
@@ -483,6 +493,8 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// Set once the peer sends a GOAWAY; new SUBSCRIBEs are then rejected with
 	// Error::GoingAway (the peer told us to stop opening streams).
 	going_away: crate::goaway::GoingAway,
+	// What this session may allocate up front for objects still arriving.
+	frames: frame::Budget,
 }
 
 /// The prefixes to issue SUBSCRIBE_NAMESPACE for: `origin`'s permitted scope,
@@ -589,12 +601,17 @@ where
 			tasks,
 			version,
 			going_away,
+			frames: Default::default(),
 		}
 	}
 
 	/// End every active subscription with the error that ended the session.
 	pub fn abort(&self, err: &Error) {
 		self.state.lock().abort(err);
+	}
+
+	pub fn close(&self) {
+		self.state.lock().close();
 	}
 
 	/// Leave `alias` in the state a cancelled subscription leaves behind: bound to a
@@ -2097,6 +2114,8 @@ where
 				filter: join.filter,
 				fill: join.fill,
 				properties_wanted: true,
+				forward: true,
+				range_filters: false,
 			})
 			.await?;
 		Ok(())
@@ -2165,6 +2184,8 @@ where
 					),
 					group_order: GroupOrder::Ascending,
 					fetch_type,
+					range_filters: false,
+					fill_timeout: false,
 				})
 				.await?;
 			Ok::<(), Error>(())
@@ -2371,7 +2392,7 @@ where
 		let producer = crate::recv::Group::new(producer);
 
 		let res = {
-			let mut ingest = GroupIngest::new(self.runtime.clone(), &group, timescale, self.version, start);
+			let mut ingest = GroupIngest::new(self, &group, timescale, start);
 			let mut writing = producer.clone();
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
@@ -2707,6 +2728,7 @@ struct GroupIngest {
 	prior_object: Option<u64>,
 	start: u64,
 	phase: IngestPhase,
+	budget: frame::Budget,
 }
 
 enum IngestPhase {
@@ -2727,22 +2749,22 @@ enum IngestPhase {
 }
 
 impl GroupIngest {
-	fn new(
-		runtime: crate::time::Clock,
+	fn new<S: crate::transport::poll::Boxable>(
+		subscriber: &Subscriber<S>,
 		group: &ietf::GroupHeader,
 		timescale: Option<Timescale>,
-		version: Version,
 		start: u64,
 	) -> Self {
 		Self {
-			runtime,
+			runtime: subscriber.runtime.clone(),
 			has_extensions: group.flags.has_extensions,
 			has_end: group.flags.has_end,
 			timescale,
-			version,
+			version: subscriber.version,
 			prior_object: None,
 			start,
 			phase: IngestPhase::Delta,
+			budget: subscriber.frames.clone(),
 		}
 	}
 }
@@ -3034,9 +3056,9 @@ where
 			}
 		}
 
-		// `create_frame_owned` is the allocation chokepoint and rejects an oversized `size`
-		// before allocating, so no pre-check is needed.
-		let mut frame = producer.create_frame_owned(frame::Info { size, timestamp })?;
+		// `create_frame_owned` is the allocation chokepoint: it rejects an oversized `size`
+		// and allocates up front only within the budget, so no pre-check is needed.
+		let mut frame = producer.create_frame_owned(frame::Info { size, timestamp }, &self.frames)?;
 		if let Err(err) = std::future::poll_fn(|cx| stream.poll_read_frame(cx, &mut frame)).await {
 			let _ = frame.abort(err.clone());
 			return Err(err);
@@ -3106,6 +3128,8 @@ where
 							object: 0,
 						},
 					},
+					range_filters: false,
+					fill_timeout: false,
 				})
 				.await?;
 			self.read_group_fetch_response(&mut stream).await
@@ -3543,17 +3567,18 @@ impl GroupIngest {
 						self.phase = IngestPhase::Status { timestamp: *timestamp };
 						continue;
 					}
-					// `create_frame_owned` is the allocation chokepoint and rejects an
-					// oversized `size` before allocating, so no pre-check is needed.
+					// `create_frame_owned` is the allocation chokepoint: it rejects an
+					// oversized `size` and allocates up front only within the budget, so
+					// no pre-check is needed.
 					let timestamp = timestamp.unwrap_or_else(|| crate::Timestamp::from(self.runtime.now()));
-					let frame = group.create_frame_owned(frame::Info { size, timestamp })?;
+					let frame = group.create_frame_owned(frame::Info { size, timestamp }, &self.budget)?;
 					self.phase = IngestPhase::Payload { frame };
 				}
 				IngestPhase::Status { timestamp } => {
 					let status: u64 = ready!(reader.poll_decode(&mut cx))?;
 					if status == 0 {
 						let timestamp = timestamp.unwrap_or_else(|| crate::Timestamp::from(self.runtime.now()));
-						let frame = group.create_frame_owned(frame::Info { size: 0, timestamp })?;
+						let frame = group.create_frame_owned(frame::Info { size: 0, timestamp }, &self.budget)?;
 						frame.finish()?;
 						self.phase = IngestPhase::Delta;
 					} else if status == END_OF_GROUP && !self.has_end {
@@ -7008,6 +7033,34 @@ mod stitch_tests {
 			matches!(group.read_frame().await, Err(Error::Cancel)),
 			"a waiting fill head must be cancelled, not left parked"
 		);
+	}
+
+	#[tokio::test]
+	async fn session_death_keeps_a_waiting_fill_heads_resume_position() {
+		let h = Harness::new(
+			Fill::Serving(Some(Timescale::MICRO)),
+			vec![fill_stream(SEQUENCE, &[b"head-0"])],
+		);
+		let track = h.track.consume();
+		let mut consumer = h.track.subscribe(None);
+		let mut fill = h.stream().await;
+		h.subscriber.clone().recv_fill(&mut fill).await.expect("fill");
+		let mut group = consumer.recv_group().await.unwrap().expect("the fill head arrived");
+		let resume = track.resume_position();
+		assert_eq!(
+			resume,
+			Some(track::Position {
+				group: SEQUENCE,
+				frame: 1
+			})
+		);
+		let err = Error::Session(crate::SessionError::App(7));
+		h.subscriber.abort(&err);
+		assert_eq!(track.resume_position(), resume);
+		assert!(matches!(
+			group.read_frame().await,
+			Err(Error::Session(crate::SessionError::App(7)))
+		));
 	}
 
 	/// The same contradiction as above, with the streams the other way round: the whole

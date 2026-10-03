@@ -3,9 +3,11 @@
 ## Goal
 
 Settle how independently operated MoQ networks exchange reachability without
-adding incomparable costs, at the cluster boundaries where
-[Cluster routing](/quest/m1/cluster-routing/README.md) keeps path vector with cluster
-ids as hops. Cost inside one cluster is cluster-routing's. Produce a
+adding incomparable costs, at the boundaries between operators on the one node id space
+[Cluster routing](/quest/m1/cluster-routing/README.md) routes over. Cost inside
+one operator's network is cluster-routing's. This includes whether a boundary
+may fold a large customer cluster's nodes into one advertised node, and how
+that keeps loop safety. Produce a
 reviewed design and scoped implementation quests, not a protocol
 implementation. Cloudflare, moq.pro, and self-hosted relays can retain their
 own business policy; no RTT/loss-driven repricing or automatic performance
@@ -45,8 +47,7 @@ The design must work through examples of two operators using different scales,
 multiple entrances to one domain, asymmetric charges, mixed-provider nodes in
 one domain, unknown or untrusted peers, and a route leaving and re-entering a
 domain. Preserve publisher identity and loop safety across any metric rewrite.
-Explain how warm-route marginal savings interact with border policy without
-pretending those savings erase upstream delay. State tradeoffs, migration and
+State tradeoffs, migration and
 mixed-version behavior, and the limits of any convergence claim.
 
 Reconcile with cluster-routing's configured link costs rather than creating
@@ -56,7 +57,7 @@ quests. Open wire/API choices belong to this design exercise.
 
 ## Required
 
-- [Routing between clusters](/quest/m1/cluster-routing/inter-cluster.md) - this designs on its inter-cluster path vector
+- [Cluster routing](/quest/m1/cluster-routing/README.md) - the route layer this designs policy on
 
 ## Related
 

@@ -15,8 +15,8 @@ import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
 import * as Cluster from "./cluster.ts";
-import { requestReason, toRequestCode } from "./error.ts";
-import { FetchHeader } from "./fetch.ts";
+import { type RequestKind, requestReason, toRequestCode } from "./error.ts";
+import { type Fetch, FetchError, FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
 import { FetchFrame, Frame, Group as GroupMessage } from "./object.ts";
 import { fromWire, toWire } from "./priority.ts";
@@ -291,20 +291,34 @@ export class Publisher {
 		const name = msg.trackNamespace;
 		let broadcast: broadcast.Consumer | undefined;
 		let refusal: { errorCode: number; reasonPhrase: string } | undefined;
-		try {
-			broadcast =
-				this.#publish && (wireOf(this.#publish).local(name) ?? (await wireOf(this.#publish).demand(name)));
-			if (!broadcast) {
-				refusal = {
-					errorCode: toRequestCode("does_not_exist", "subscribe", version),
-					reasonPhrase: "broadcast not found",
-				};
+
+		// Legal requests we can't honor are refused one at a time. A subscription that
+		// forwards nothing is only useful to a subscriber that later turns forwarding on,
+		// and serving a Range Filter unfiltered would deliver objects it excluded.
+		const unsupported = !msg.forward
+			? "FORWARD=0 not supported"
+			: msg.rangeFilters
+				? "range filters not supported"
+				: undefined;
+
+		if (unsupported) {
+			refusal = { errorCode: toRequestCode("not_supported", "subscribe", version), reasonPhrase: unsupported };
+		} else {
+			try {
+				broadcast =
+					this.#publish && (wireOf(this.#publish).local(name) ?? (await wireOf(this.#publish).demand(name)));
+				if (!broadcast) {
+					refusal = {
+						errorCode: toRequestCode("does_not_exist", "subscribe", version),
+						reasonPhrase: "broadcast not found",
+					};
+				}
+			} catch (err: unknown) {
+				const e = error(err);
+				const condition =
+					e instanceof StreamError && e.code === StreamCode.NotFound ? "does_not_exist" : "internal";
+				refusal = { errorCode: toRequestCode(condition, "subscribe", version), reasonPhrase: reason(e) };
 			}
-		} catch (err: unknown) {
-			const e = error(err);
-			const condition =
-				e instanceof StreamError && e.code === StreamCode.NotFound ? "does_not_exist" : "internal";
-			refusal = { errorCode: toRequestCode(condition, "subscribe", version), reasonPhrase: reason(e) };
 		}
 
 		if (refusal) {
@@ -1291,22 +1305,57 @@ export class Publisher {
 	 * @internal
 	 */
 	async runTrackStatusRequest(msg: TrackStatusRequest, stream: Stream) {
+		// TRACK_STATUS_ERROR is 0x0f on draft-14.
+		await this.#refuseUnsupported(stream, msg.requestId, "track_status", 0x0f, "TRACK_STATUS is not supported");
+	}
+
+	/**
+	 * Refuses an incoming SUBSCRIBE_TRACKS (draft-18+): we never send the PUBLISH it asks for.
+	 * The reply carries no Request ID, so the message body is left unread.
+	 *
+	 * @internal
+	 */
+	async runSubscribeTracks(stream: Stream) {
 		const version = this.#session.version;
-		const errorCode = toRequestCode("not_supported", "track_status", version);
+		await stream.writer.u53(RequestError.id);
+		await new RequestError({
+			errorCode: toRequestCode("not_supported", "subscribe_namespace", version),
+			reasonPhrase: "SUBSCRIBE_TRACKS is not supported",
+		}).encode(stream.writer, version);
+		stream.close();
+	}
+
+	/**
+	 * Handles an incoming FETCH on a bidi stream. We serve none.
+	 *
+	 * @internal
+	 */
+	async runFetch(msg: Fetch, stream: Stream) {
+		await this.#refuseUnsupported(stream, msg.requestId, "fetch", FetchError.id, "FETCH is not supported");
+	}
+
+	/**
+	 * Refuse a request NOT_SUPPORTED. Draft-14 gives each request its own error message,
+	 * `errorId14`, with the SUBSCRIBE_ERROR body; later drafts use REQUEST_ERROR.
+	 */
+	async #refuseUnsupported(
+		stream: Stream,
+		requestId: bigint,
+		kind: RequestKind,
+		errorId14: number,
+		reasonPhrase: string,
+	) {
+		const version = this.#session.version;
+		const errorCode = toRequestCode("not_supported", kind, version);
 		if (version === Version.DRAFT_14) {
-			// TRACK_STATUS_ERROR shares the SUBSCRIBE_ERROR body on draft-14.
-			await stream.writer.u53(0x0f);
-			await new SubscribeError({
-				requestId: msg.requestId,
-				errorCode,
-				reasonPhrase: "TRACK_STATUS is not supported",
-			}).encode(stream.writer, version);
+			await stream.writer.u53(errorId14);
+			await new SubscribeError({ requestId, errorCode, reasonPhrase }).encode(stream.writer, version);
 		} else {
 			await stream.writer.u53(RequestError.id);
 			await new RequestError({
-				requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
+				requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? requestId : undefined,
 				errorCode,
-				reasonPhrase: "TRACK_STATUS is not supported",
+				reasonPhrase,
 			}).encode(stream.writer, version);
 		}
 		stream.close();

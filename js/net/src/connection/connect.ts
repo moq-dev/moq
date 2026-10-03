@@ -254,8 +254,8 @@ async function connectTransport(url: URL, session: WebTransport, wiring: Session
 // Negotiate the MoQ protocol over an established transport. The caller races this against
 // the session closing so a close code is not lost behind a failed or stalled SETUP stream.
 async function negotiate(url: URL, session: WebTransport, wiring: SessionProps): Promise<Established> {
-	// qmux Session exposes the negotiated protocol directly (as "" when there is none);
-	// native WebTransport doesn't have a standard .protocol property yet.
+	// The DOM lib has no `protocol` property yet. It is "" when none was negotiated, and
+	// undefined in a browser that predates subprotocols (Firefox before 155).
 	const protocol: string | undefined = (session as { protocol?: string }).protocol || undefined;
 	if (dev()) console.debug(redact(url), "negotiated ALPN:", protocol ?? "(none)");
 
@@ -362,7 +362,7 @@ async function handshakeAlpn(
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
 ): Promise<Established> {
-	const { control, solicit, hidden, cluster } = await exchangeSetup(session, version, "moq-lite-js");
+	const { control, early, solicit, hidden, cluster } = await exchangeSetup(session, version, "moq-lite-js");
 
 	return new Ietf.Connection({
 		...wiring,
@@ -370,6 +370,7 @@ async function handshakeAlpn(
 		url,
 		quic: session,
 		control,
+		early,
 		solicit,
 		hidden,
 		cluster,

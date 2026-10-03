@@ -879,11 +879,13 @@ export class Subscriber {
 					pending ??= stream.reader.decodeMaybe(decode);
 					const next = await race([pending, group.closed, unused]);
 					if (next === idle) {
-						if (!group.isClosed && group.used.peek()) {
+						if (group.isClosed) break;
+						if (group.used.peek()) {
 							unused = group.unused().then((): typeof idle => idle);
 							continue;
 						}
-						break;
+						// Abandoned mid-group: the truncated group must never end clean.
+						throw new StreamError(StreamCode.Cancel, { message: "cancel" });
 					}
 					pending = undefined;
 					if (!next || next instanceof Error) break;
@@ -1097,7 +1099,7 @@ export class Subscriber {
 			producer.close();
 			stream.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
 		} catch (err: unknown) {
-			const e = error(err);
+			const e = await sessionCause(this.#quic, err);
 			producer.close(e);
 			stream.stop(e);
 		} finally {

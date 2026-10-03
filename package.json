@@ -45,8 +45,10 @@
 		"demo/boy",
 		"demo/web",
 		"js/moq-boy",
+		"test/audio-quality/clients/js",
 		"test/interop/clients/js",
 		"test/interop/clients/js-native",
+		"test/drain",
 		"test/wasm"
 	]
 }

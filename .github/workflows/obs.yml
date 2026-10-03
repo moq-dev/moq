@@ -39,7 +39,7 @@ name: OBS
 # .cargo/config.toml could do it too -- and `rs/**` would run this on nearly
 # every PR, which is the cost that removed the Windows and macOS gates (#2600).
 # So this filter covers the likely inputs at PR time, and pushes to `main` and
-# `dev` rebuild on any Rust or plugin change to cover the rest. nightly.yml also
+# `release` rebuild on any Rust or plugin change to cover the rest. nightly.yml also
 # runs the Linux recipe diff-independently.
 
 permissions:
@@ -47,7 +47,7 @@ permissions:
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, release]
     paths:
       - "rs/**"
       - "cpp/obs/**"

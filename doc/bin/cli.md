@@ -91,6 +91,11 @@ the first PAT lists as its own broadcast, with its own clock and catalog, keepin
 the catalog suffix last: `--broadcast event.hang` publishes `event/1.hang`,
 `event/2.hang`, and so on. `export ts` writes one program per broadcast.
 `import srt` takes the same `--program`.
+A selected program's SI describes that service alone: its SDT lists only the
+selected service, and other services' EIT is dropped. Network-wide tables (NIT,
+BAT, TDT/TOT, and the SDT and EIT of other transport streams) pass through.
+SI matches the selection by DVB `service_id`, which is assumed to equal the PAT
+`program_number`.
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast event.hang import ts --program all < mux.ts
@@ -183,6 +188,16 @@ to fit the connection's bandwidth estimate. `moq devices` prints every source
 id. Requires the `capture` feature; on Linux that needs the ALSA headers for
 the microphone, and `--display` and `pipewire:` cameras also need the
 `pipewire` feature (links libpipewire).
+
+On Windows, display and window capture use Windows.Graphics.Capture and
+require Windows 10 2004 (build 19041) or newer. Cursor capture follows the
+capture configuration. The system capture border stays visible unless the OS
+supports borderless capture and grants access. Frames are converted to NV12
+on the GPU; software encoding reads them back. Windows application capture
+and system audio are separate capabilities, not enabled by this backend.
+Windows `display:N` selectors are enumeration indices; switching from Desktop
+Duplication to WGC can change which monitor a saved selector names. Run
+`moq devices` again and reselect the intended display after upgrading.
 
 ## Transcode
 

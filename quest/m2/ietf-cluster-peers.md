@@ -18,8 +18,9 @@ The extension must carry what a lite cluster link carries by then:
   FETCH_OK Origin, so a downstream stitches failover on the member serving the
   path rather than the advertisement's first Hop ID. The draft's "Several
   Publishers of One Namespace" section changes with it.
-- Whatever the [cluster routing line](/quest/m1/cluster-routing/README.md)
-  settles for topology and selection, since cluster links are lite-only there.
+- The route layer of the [cluster routing line](/quest/m1/cluster-routing/README.md)
+  (per-node ROUTEs with seqno and metric, path-less announces, the down-only
+  bit) and its selection, since cluster links are lite-only there.
 
 Test: two workers behind a pool relay behind a moq-transport downstream relay;
 killing the serving worker ends the downstream subscription rather than
