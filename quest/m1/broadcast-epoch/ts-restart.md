@@ -2,7 +2,7 @@
 
 ## Goal
 
-On dev, when a TS feed rewinds its time base and signals it
+When a TS feed rewinds its time base and signals it
 (`discontinuity_indicator` on the PCR PID, ISO/IEC 13818-1 2.4.3.5),
 `moq import ts` and `moq-srt` finish the current broadcast cleanly and publish
 the rest of the same input as a new broadcast under a fresh epoch, in the same
@@ -13,7 +13,7 @@ to turn into an epoch. An unsignalled rewind stays fatal, as #4543 decided.
 
 ## Plan
 
-Since #4543 (on dev), every rewind ends the import with `TimestampRewind` from
+Since #4543, every rewind ends the import with `TimestampRewind` from
 `Producer::write`; the importer already reads the flag in `timebase_break`,
 and a flagged forward jump publishes break markers and carries on.
 
@@ -40,7 +40,7 @@ Tests: a fixture with a flagged rewind publishes two broadcasts, the second
 starting at the rewound PTS; the same rewind unflagged still errors; one SRT
 connection carries both epochs. Update `doc/bin/cli.md` and `doc/bin/srt.md`.
 
-Public API: breaking in moq-mux on dev, `ts::Import::decode` reports a restart
+Public API: breaking in moq-mux, `ts::Import::decode` reports a restart
 and `restart` is new. Wire: none.
 
 ## Required

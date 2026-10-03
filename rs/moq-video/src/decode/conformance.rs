@@ -132,7 +132,7 @@ const VECTORS: &[&Vector] = &[&IDR_BLUE, &SEQ_PATTERN, &MAIN_YELLOW, &NON_SQUARE
 /// one is actually usable is settled at runtime by [`decoders`].
 const CANDIDATES: &[&str] = &[
 	"openh264",
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	"videotoolbox",
 	#[cfg(target_os = "windows")]
 	"mediafoundation",

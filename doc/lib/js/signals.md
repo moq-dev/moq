@@ -42,6 +42,15 @@ The rules that differ from other signal libraries:
 - **Race with `race`, not `Promise.race`.** `Promise.race` leaves a listener on every value that loses, so racing a long-lived one (a `closed`, a run's teardown) once per frame grows the heap. `race([...])` accepts promises and `Once` values and drops its listeners when it settles; `effect.race(promise)` also resolves `undefined` once the run is torn down.
 - **Dev builds warn** about effects that tracked nothing, effects garbage-collected without `close()`, and signals leaking subscribers.
 
+`Signal.race(a, b)` returns a lazy `GetPromise` for the next signal change.
+It attaches listeners when awaited or subscribed and releases them when it
+settles or its last subscriber detaches. Use `race([Signal.race(a, b), closed])`
+or `effect.race(Signal.race(a, b))` to release the signal listeners when another
+value wins. Direct `await Signal.race(a, b)` still works. To start waiting now
+and await later, call `race([Signal.race(a, b)])`; merely creating the handle
+does not observe changes. The handle supports `.then()`, but is not a native
+`Promise` and has no `.catch()` or `.finally()`.
+
 Components follow one shape: `in` (wired inputs), `out` (read-only derived
 state), and public writable knobs. `getter()` and `Inputs<T>` accept a raw
 value, a signal, another component's output, or any other `Getter`

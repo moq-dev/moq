@@ -103,7 +103,7 @@ export type Sample = {
 	/** Whether the subscriber has resolved an announced broadcast. */
 	broadcastActive: boolean;
 	/** The subscriber's catalog state, which stays offline without an announcement. */
-	broadcastStatus: "offline" | "loading" | "live";
+	broadcastStatus: "offline" | "loading" | "live" | "error";
 	/** Whether this document has received user activation. */
 	userActivated: boolean;
 	/** `performance.now()` when the sample was taken. */

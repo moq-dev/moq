@@ -19,7 +19,6 @@ the connection it documents.
 Recommendation: make it private. Nothing outside `moq-tokio` calls it (only
 its own unit tests), and the repo keeps things private until a consumer
 needs them. If a consumer turns up, the alternative is returning the same
-`Result<Option<Url>>` as the internal `target` does, so empty and refused stay distinct. Removing or changing a published method is a break, so this
-targets `dev`; update `doc/lib/rs` if it mentions the method.
+`Result<Option<Url>>` as the internal `target` does, so empty and refused stay distinct. Removing or changing a published method is a break;
+update `doc/lib/rs` if it mentions the method.
 
-Start by merging `main` into `dev` if `dev` does not have the drain line yet.

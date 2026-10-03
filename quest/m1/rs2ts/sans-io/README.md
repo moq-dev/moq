@@ -10,8 +10,8 @@ cargo feature, and a CI lane builds and tests the crate without it.
 
 Decided in planning: moq-net itself is the core, not a second crate. JS
 reimplements the async helpers natively with Promises, so the translator
-reads the crate without the `async` feature. Split by layer so each lands on
-`dev` independently.
+reads the crate without the `async` feature. Split by layer so each lands
+independently.
 
 The line has no work of its own beyond its children. Decided in the
 2026-09-30 audit: the IETF session moved to m2 with the rest of the IETF

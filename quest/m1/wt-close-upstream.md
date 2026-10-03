@@ -29,8 +29,8 @@ session right after `close()` against a hand-rolled HTTP/3 peer and fails on
 
 Remaining, once the releases carrying them are published:
 
-- Bump the `web-transport-moq` pin on `main` (and on `dev` if 2.0.x lands
-  first).
+- Bump the `web-transport-moq` pin on `main`, and backport it to `release`
+  if the fix lands on its line too.
 - Delete `CLOSE_LINGER`, its task, and its mock-session tests from
   moq-tokio. They are exactly what #4429 added, so reverting it is enough.
 

@@ -309,7 +309,7 @@ export class Encoder {
 		});
 
 		// When demand disappears, end the epoch with a discontinuity marker (see
-		// Container.Legacy.Producer.cut) so a later subscriber resumes on the same track without the
+		// Container.Legacy.Producer.discontinuity) so a later subscriber resumes on the same track without the
 		// pre-gap frames reading as live. Its empty payload marks where the submitted media ends.
 		effect.run((effect) => {
 			const track = effect.get(rendition.track);
@@ -353,7 +353,7 @@ export class Encoder {
 			effect.subscribe(this.#config, (config) => {
 				const bitrate = config?.catalog.bitrate;
 				if (bitrate === undefined) return;
-				if (!reservation) reservation = allocator.reserve(track, bitrate);
+				if (!reservation) reservation = allocator.reserve(track.demand(), bitrate);
 				else reservation.update(bitrate);
 			});
 			effect.cleanup(() => reservation?.close());
