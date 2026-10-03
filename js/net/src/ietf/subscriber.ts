@@ -259,15 +259,12 @@ export class Subscriber {
 	/**
 	 * Replace the stored route for a path that is already announced. A no-op when the
 	 * hops and cost did not change; otherwise consumers hear `update` so a forwarder
-	 * can reprice without retracting.
-	 *
-	 * A new first hop is a new publisher: holders keep their broadcast to drain, but the
-	 * next consume starts fresh rather than reusing the old publisher's cached track info.
+	 * can reprice without retracting. The path still names the same broadcast, whatever
+	 * the first hop now says, so the shared consume stays.
 	 */
 	#updateAnnounce(path: Path.Valid, route: Route) {
 		const existing = this.#announced.get(path);
 		if (existing === undefined || routesEqual(existing.route, route)) return;
-		if (existing.route.hops[0] !== route.hops[0]) this.#consumes.evict(path);
 		existing.route = route;
 		console.debug(`announced: broadcast=${path} rerouted`);
 		for (const [consumer, filter] of this.#announcedConsumers) {
