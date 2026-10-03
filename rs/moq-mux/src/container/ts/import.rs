@@ -240,11 +240,11 @@ impl<E: catalog::Catalog> Import<E> {
 			if matches!(continuation, Some(Continuation::Duplicate)) {
 				continue;
 			}
-			// A media packet whose adaptation field overruns itself is refused before its
-			// clock bits can reach the program clock. Its counter already joined the chain,
-			// so a gap in front of it still salvages what came before.
+			// A media or PCR packet whose adaptation field overruns itself is refused before
+			// its clock bits can reach the program clock. Its counter already joined the
+			// chain, so a gap in front of it still salvages what came before.
 			if let Ok(pid) = Pid::new(pid)
-				&& self.streams.contains_key(&pid)
+				&& (self.streams.contains_key(&pid) || self.pcr_pid == Some(pid))
 				&& pkt[1] & 0x80 == 0
 				&& !adaptation_valid(&pkt)
 			{
@@ -6157,6 +6157,30 @@ pub(super) mod test {
 	#[tokio::test(start_paused = true)]
 	async fn clean_video_has_no_damage() {
 		damaged_video_recovers("clean").await;
+	}
+
+	/// A dedicated PCR PID's malformed adaptation field cannot declare a timebase break.
+	#[test]
+	fn damaged_adaptation_on_a_dedicated_pcr_pid_keeps_the_clock() {
+		const PCR: u16 = 0x0100;
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
+			..Default::default()
+		};
+		mux.gop(VIDEO, 90_000);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import.decode(&mux.out).unwrap();
+		import.pcr_pid = Some(Pid::new(PCR).unwrap());
+		assert!(import.last_pts.is_some());
+
+		// The flag byte is the field's only byte, so the PCR it announces overruns it.
+		let mut packet = clock_break_packet(PCR);
+		packet[4] = 1;
+		packet[5] = 0x90;
+		import.decode(&packet).unwrap();
+		assert!(import.last_pts.is_some(), "a malformed field reset the program clock");
 	}
 
 	/// A malformed unbounded PES drained at EOF is still refused and counted.
