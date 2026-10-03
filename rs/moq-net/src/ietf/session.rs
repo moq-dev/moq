@@ -8,8 +8,10 @@ use crate::{
 };
 
 use super::{
-	Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter, cluster, hidden, peer, solicit,
-	subscriber::is_protocol_violation,
+	Control, Message, Publisher, Subscriber, Version, active_count,
+	adapter::ControlStreamAdapter,
+	cluster, hidden, peer, solicit,
+	subscriber::{is_protocol_violation, subscribe_prefixes},
 };
 
 /// Everything one moq-transport session needs to start.
@@ -72,6 +74,7 @@ pub struct Config<S: crate::transport::poll::Session> {
 }
 
 pub(crate) struct Driver {
+	pub(crate) withdrawal: crate::session::Withdrawal,
 	pub(crate) local_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
 	future: MaybeSendBox<'static, Result<(), Error>>,
 }
@@ -111,6 +114,12 @@ where
 	// server to open connections (draft-19 sect 10.4).
 	let (goaway_handle, goaway) = crate::goaway::Handle::new(!client);
 
+	// One SUBSCRIBE_NAMESPACE per permitted prefix, like `lite::Subscriber`: the
+	// scope is what we may ask for, and it is not the origin's root.
+	let namespaces = subscribe.as_ref().map(subscribe_prefixes).unwrap_or_default();
+
+	let withdrawal = crate::session::Withdrawal::default();
+	let withdrawing = withdrawal.clone();
 	let local_close = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 	let closing = local_close.clone();
 	let driver = async move {
@@ -151,7 +160,7 @@ where
 				let control = Control::new(request_id_max, client);
 				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version);
 
-				let publisher = Publisher::new(
+				let mut publisher = Publisher::new(
 					runtime.clone(),
 					adapter.clone(),
 					publish,
@@ -161,6 +170,8 @@ where
 					version,
 				);
 				let (tasks, mut task_set) = TaskSet::new();
+				publisher.withdrawal = withdrawing.clone();
+
 				let subscriber = Subscriber::new(
 					runtime.clone(),
 					adapter.clone(),
@@ -185,7 +196,7 @@ where
 					let runtime = runtime.clone();
 					tasks.push(async move {
 						let payload = kio::wait(|waiter| {
-							let mut cx = std::task::Context::from_waker(waiter.waker());
+							let mut cx = waiter.context();
 							if session.poll_closed(&mut cx).is_ready() {
 								return std::task::Poll::Ready(None);
 							}
@@ -231,11 +242,9 @@ where
 				// Unsolicited PUBLISH_NAMESPACE unless the peer requires solicitation;
 				// see `Publisher::run_publish_namespaces`.
 				let mut pub_ns_run = std::pin::pin!(err_only(publisher.clone().run_publish_namespaces()));
-				// One SUBSCRIBE_NAMESPACE per permitted prefix, like `lite::Subscriber`:
-				// the scope is what we may ask for, and it is not the origin's root.
 				let mut sub_ns_run = std::pin::pin!(err_only(async {
 					let mut prefixes = futures::stream::FuturesUnordered::new();
-					for prefix in sub_ns.subscribe_prefixes() {
+					for (prefix, replaying) in namespaces {
 						let mut sub_ns = sub_ns.clone();
 						let sub_ns_adapter = sub_ns_adapter.clone();
 						prefixes.push(async move {
@@ -250,7 +259,7 @@ where
 								}
 								_ => Stream::open(&mut sub_ns_adapter.clone(), version).await?,
 							};
-							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
+							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix, replaying).await {
 								// The peer breaking the protocol is fatal, and the driver
 								// below turns this into the session close the draft wants.
 								if is_protocol_violation(&err) {
@@ -318,7 +327,7 @@ where
 				};
 
 				let control = Control::new(None, client);
-				let publisher = Publisher::new(
+				let mut publisher = Publisher::new(
 					runtime.clone(),
 					session.clone(),
 					publish,
@@ -328,6 +337,8 @@ where
 					version,
 				);
 				let (tasks, mut task_set) = TaskSet::new();
+				publisher.withdrawal = withdrawing.clone();
+
 				let subscriber = Subscriber::new(
 					runtime.clone(),
 					session.clone(),
@@ -385,16 +396,15 @@ where
 				// Unsolicited PUBLISH_NAMESPACE unless the peer requires solicitation;
 				// see `Publisher::run_publish_namespaces`.
 				let mut pub_ns_run = std::pin::pin!(err_only(publisher.clone().run_publish_namespaces()));
-				// One SUBSCRIBE_NAMESPACE per permitted prefix; see the draft-16 arm.
 				let mut sub_ns_run = std::pin::pin!(err_only(async {
 					let mut prefixes = futures::stream::FuturesUnordered::new();
-					for prefix in sub_ns.subscribe_prefixes() {
+					for (prefix, replaying) in namespaces {
 						let mut sub_ns = sub_ns.clone();
 						let sub_ns_session = sub_ns_session.clone();
 						prefixes.push(async move {
 							let mut sub_ns_session = sub_ns_session;
 							let stream = Stream::open(&mut sub_ns_session, version).await?;
-							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
+							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix, replaying).await {
 								// The peer breaking the protocol is fatal, and the driver
 								// below turns this into the session close the draft wants.
 								if is_protocol_violation(&err) {
@@ -471,6 +481,7 @@ where
 
 	Ok((
 		Driver {
+			withdrawal,
 			local_close,
 			future: driver,
 		},
@@ -580,6 +591,7 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 		cluster: cluster::peer_from_setup(params, version)?,
 		solicit: solicit::from_setup(params, version)?,
 		hidden: hidden::from_setup(params, version),
+		active_count: active_count::from_setup(params, version),
 	})
 }
 
@@ -617,6 +629,7 @@ async fn run_setup<S: crate::transport::poll::Session>(
 	cluster::peer_into_setup(&mut parameters, self_origin, cost, version);
 	solicit::into_setup(&mut parameters, version);
 	hidden::into_setup(&mut parameters, version);
+	active_count::into_setup(&mut parameters, version);
 	let parameters = parameters.encode_bytes(version)?;
 
 	writer.encode(&setup::Setup { parameters }).await?;
@@ -626,7 +639,7 @@ async fn run_setup<S: crate::transport::poll::Session>(
 	// drops without draining; keep holding either way (closing this stream
 	// mid-session is a protocol violation on strict peers).
 	let payload = kio::wait(|waiter| {
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		if session.poll_closed(&mut cx).is_ready() {
 			return std::task::Poll::Ready(None);
 		}
@@ -746,7 +759,7 @@ where
 			None => {
 				let recv = tasks
 					.drive(|waiter| {
-						let mut cx = std::task::Context::from_waker(waiter.waker());
+						let mut cx = waiter.context();
 						session.poll_accept_uni(&mut cx)
 					})
 					.await;
@@ -781,7 +794,7 @@ where
 		// accept reports it.
 		let kind: u64 = match tasks
 			.drive(|waiter| {
-				let mut cx = std::task::Context::from_waker(waiter.waker());
+				let mut cx = waiter.context();
 				reader.poll_decode_peek(&mut cx)
 			})
 			.await
@@ -941,7 +954,7 @@ where
 	loop {
 		let mut stream = tasks
 			.drive(|waiter| {
-				let mut cx = std::task::Context::from_waker(waiter.waker());
+				let mut cx = waiter.context();
 				Stream::poll_accept(&mut accept, version, &mut cx)
 			})
 			.await?;
@@ -952,7 +965,7 @@ where
 		let mut hdr_size: Option<u16> = None;
 		let header = tasks
 			.drive(|waiter| {
-				let mut cx = std::task::Context::from_waker(waiter.waker());
+				let mut cx = waiter.context();
 				let id = match hdr_id {
 					Some(id) => id,
 					None => *hdr_id.insert(std::task::ready!(stream.reader.poll_decode(&mut cx))?),
@@ -1079,7 +1092,13 @@ mod tests {
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
 
 		writer.encode(&ietf::RequestOk::ID).await.unwrap();
-		writer.encode(&ietf::RequestOk { request_id: None }).await.unwrap();
+		writer
+			.encode(&ietf::RequestOk {
+				request_id: None,
+				active: None,
+			})
+			.await
+			.unwrap();
 		writer.encode(&ietf::Namespace::ID).await.unwrap();
 		writer
 			.encode(&ietf::Namespace {

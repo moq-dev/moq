@@ -134,7 +134,7 @@ async fn round(version: &str, late: Late, final_sequence: u64) -> Outcome {
 		(frames, err, tokio::time::Instant::now())
 	});
 
-	tokio::time::timeout(TIMEOUT, track.used())
+	tokio::time::timeout(TIMEOUT, track.demand().used())
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
@@ -272,7 +272,7 @@ async fn ietf_leaving_cancels_a_blocked_end_of_track() {
 			.subscribe(subscription)
 			.await
 			.expect("subscribe");
-		tokio::time::timeout(TIMEOUT, track.used())
+		tokio::time::timeout(TIMEOUT, track.demand().used())
 			.await
 			.expect("no subscriber appeared")
 			.unwrap();
@@ -338,7 +338,7 @@ async fn a_lost_datagram_never_delays_the_end() {
 			}
 			(groups, tokio::time::Instant::now())
 		});
-		tokio::time::timeout(TIMEOUT, track.used())
+		tokio::time::timeout(TIMEOUT, track.demand().used())
 			.await
 			.expect("no subscriber appeared")
 			.unwrap();

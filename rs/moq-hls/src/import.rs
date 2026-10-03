@@ -556,6 +556,13 @@ impl TrackState {
 		// `consume_segments` resolves the effective map before every segment, so a missing
 		// importer means the playlist never carried an `EXT-X-MAP`.
 		let importer = self.importer.as_mut().ok_or(Error::MissingMap)?;
+		// Only a discontinuity starts a new media timeline; a sequence skip must keep advancing.
+		if self
+			.next_discontinuity
+			.is_some_and(|previous| previous != discontinuity_sequence)
+		{
+			importer.discontinuity();
+		}
 		if reanchored {
 			importer.seek(group_sequence)?;
 		}

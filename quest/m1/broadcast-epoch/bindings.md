@@ -13,12 +13,11 @@ reconnect counter `session.epoch()` is renamed so "epoch" has one meaning.
 - Expose the parsed epoch (text and time) and an explicit-epoch publish
   argument. Keep the surface to what a binding consumer needs.
 - Rename `session.epoch()` in every binding (for example to `connects()`).
-  That is a break, so it lands on `dev`.
+  That is a break.
 - Update `doc/lib/{py,swift,kt,go,dart}` per the cross-package sync table,
   and run `just test smoke --all`.
 
-Decided in the 2026-09-30 audit: libmoq is frozen (renamed `rs/moq-c` on
-`dev`), so C and C++ consumers get epochs from moq-ffi.
+Decided in the 2026-09-30 audit: libmoq is frozen (renamed `rs/moq-c`), so C and C++ consumers get epochs from moq-ffi.
 
 ## Required
 

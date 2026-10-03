@@ -45,6 +45,13 @@ The overlay adds play/pause, volume, fullscreen, a quality selector, a
 buffering indicator, an unsupported-codec warning, and a stats panel.
 `<moq-watch-support>` shows what the browser can play.
 
+`el.broadcast.out.status` is `offline`, `loading`, `live`, or `error`. It is
+`error` when the origin refuses the broadcast, such as a `dynamic()` handler
+rejecting the request, and `el.broadcast.out.error` then holds the refusal's
+`Error`; the overlay shows its message in place of the offline notice. A
+refusal is final: only a new `name`, a new origin, a changed `announced`, or
+re-enabling asks again, which clears both back to `offline`.
+
 ## Binding from a framework
 
 `import "@moq/watch/element"` registers `<moq-watch>` while the module

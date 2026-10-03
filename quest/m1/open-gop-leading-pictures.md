@@ -62,7 +62,7 @@ decode, and the JS test should drive the software decoder.
   unproven delivered hole, or a latency skip, but not on the subscribe itself.
   Add the equivalent of JS `continuous`: false on the first frame after the
   subscribe and after every bump, true otherwise. It changes the moq-mux
-  consumer API, so pick main or dev by whether the shape is additive.
+  consumer API.
 - Tests: a synthetic group with a keyframe followed by two earlier-stamped
   deltas is trimmed on the first group and kept on the second; and a viewer
   that plays continuously, then latency-skips into a later open GOP, has that

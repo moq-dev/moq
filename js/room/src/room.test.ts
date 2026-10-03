@@ -17,10 +17,10 @@ test("room restores the announce prefix and reconciles local identity changes", 
 		origin: new Signal({
 			announced(scope: Net.Path.Pattern) {
 				expect(scope.equals(Net.Path.Pattern.subtree(Net.Path.from("room-a")))).toBe(true);
-				let update: Net.Announce.Update | undefined = {
+				let update: Net.Announce.Event | undefined = {
 					prefix: Net.Path.from("room-a/bob/camera.hang"),
 					captures: [Net.Path.Pattern.literal(Net.Path.from("bob/camera.hang"))],
-					kind: "announced",
+					kind: "start",
 					route: { hops: [], cost: { warm: 0n, cold: 0n } },
 				};
 				const stream = {

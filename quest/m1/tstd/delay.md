@@ -63,7 +63,7 @@ compare with #4618's numbers.
 Update `doc/bin/cli.md` and the `moq export ts` examples.
 
 Public API: `ts::Export` takes the delay in place of its max age and loses the
-hold; breaking, on `dev`. Wire:
+hold; breaking. Wire:
 none.
 
 ## Related
@@ -71,4 +71,4 @@ none.
 - [FLV export delay](/quest/m1/flv-export-delay.md) - adopts the release stage
 - [MKV export delay](/quest/m1/mkv-export-delay.md) - adopts the release stage
 - [TS byte schedule](/quest/m1/tstd/byte-schedule.md) - uses this delay as its mux-ahead buffer delay
-- [Subscriber max-delay](/quest/m1/subscriber-max-delay.md) - subscriber staleness is renamed on dev; publisher retention stays `max_age`
+- [Subscriber max-delay](/quest/m1/subscriber-max-delay.md) - subscriber staleness is renamed; publisher retention stays `max_age`

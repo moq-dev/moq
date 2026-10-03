@@ -9,7 +9,7 @@ meets draft 16+'s rule to include all of a track's properties.
 
 ## Plan
 
-Found (2026-10-01) while merging main into dev (#4647): a group FETCH with no
+Found (2026-10-01) in #4647: a group FETCH with no
 prior SUBSCRIBE_OK now reads its max age from FETCH_OK, but our publisher
 sends an empty block.
 

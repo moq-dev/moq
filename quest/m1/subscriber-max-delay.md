@@ -2,7 +2,7 @@
 
 ## Goal
 
-On `dev`, subscriber staleness budgets are named `max_delay` in Rust and
+Subscriber staleness budgets are named `max_delay` in Rust and
 `maxDelay` in JavaScript, mirrored by the bindings and the corresponding CLI
 flags. Publisher retention keeps `max_age`/`maxAge` and `--max-age`. The
 rename changes no retention, delivery, presentation, or wire behavior.
@@ -26,7 +26,7 @@ Use different names for these different roles rather than rename both.
 - Keep the wire field identifiers, encoding, and interpretation unchanged.
   Describe subscriber staleness consistently in the matching draft and docs;
   a terminology edit must not accidentally rename the publisher's field.
-- This is a published API and CLI break, so implementation targets `dev`.
+- This is a published API and CLI break.
   Replace the old APIs and flags instead of adding aliases or compatibility
   shims. Follow the existing unsupported-flag error convention.
 - Search the whole repository for the affected APIs and binaries. Update the
@@ -38,7 +38,7 @@ Use different names for these different roles rather than rename both.
   subscriber `--max-delay`. Verify examples against `--help` and run the
   affected checks plus `just test interop --all` for the binding changes.
 
-Public API: breaking subscriber option, method, and CLI names on `dev`;
+Public API: breaking subscriber option, method, and CLI names;
 publisher retention names stay the same. Wire: no encoding or behavior change.
 
 ## Related
