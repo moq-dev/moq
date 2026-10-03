@@ -326,3 +326,8 @@ package-gst *args:
 [positional-arguments]
 gst-smoke *args:
     rs/moq-gst/smoke.sh "$@"
+
+# Sweep retained RTMP chunk-stream IDs independently of message and chunk sizes.
+[positional-arguments]
+bench-rtmp *args:
+    cargo bench --locked -p moq-rtmp --bench chunk_interleaving -- "$@"

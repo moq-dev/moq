@@ -134,6 +134,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command cargo bench --locked -p moq-net --features fuzz --bench '*' -- --test
 
+      - name: RTMP chunk-stream benchmark smoke
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs bench-rtmp --test
+
       - name: BBB rendition alignment
         if: ${{ !cancelled() }}
         run: nix develop --command just pub check-bbb

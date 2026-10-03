@@ -4700,6 +4700,7 @@ dependencies = [
  "anyhow",
  "byteorder",
  "bytes",
+ "criterion",
  "futures",
  "hang",
  "hmac 0.13.0",

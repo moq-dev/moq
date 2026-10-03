@@ -90,4 +90,3 @@ the closed producer's cache or terminal state.
 ## Related
 
 - [#4491](https://github.com/moq-dev/moq/pull/4491) - edits `resume.rs` and its takeover tests
-- [Parked reads wake](/quest/m1/parked-read-wakes.md) - edits the same `resume.rs` wakeups
