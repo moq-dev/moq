@@ -425,9 +425,8 @@ Applying one rule to both advertisement and dispatch keeps advertised paths trut
 When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering route (see [Resolution](#resolution)), then a path that contains no 0 Hop ID over one that does, then the lowest Warm Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the lowest Cold Route Cost, then toward the shortest path, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
 
 A route's identity is its first hop: the endpoint that originated it (see [ANNOUNCE_START](#announce-start)).
-Two routes covering one path with the same non-zero first hop are the same origin reached different ways, and a relay MAY move a live subscription between them, resuming at a group boundary, so a route change the identity survives (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
+Two routes covering one path with the same non-zero first hop are the same origin reached different ways and carry interchangeable content, so a relay MAY move a live subscription between them, continuing from the first frame the subscriber lacks, and a route change the identity survives (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
 Across differing first hops, or where either is 0, the routes promise nothing about each other's content: a relay MUST NOT splice a live subscription across them, and when the serving session ends, in-flight subscriptions end with it (a reset) and the subscriber re-requests through the best remaining route.
-Equal first hops promise the same origin, not interchangeable bytes; what a resuming relay serves next is whatever that origin publishes next at the group boundary.
 
 #### Resolution {#resolution}
 A SUBSCRIBE, FETCH, or TRACK request names a path, and the receiver resolves it against the routes covering that path, after the per-subscriber exclusion above.
@@ -1351,6 +1350,7 @@ The `Message Length` describes the payload size on the wire.
 ## moq-lite-07
 
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
+- Routes with the same non-zero first hop carry interchangeable content, so a relay moving a subscription between them continues from the first frame the subscriber lacks instead of at a group boundary.
 
 - Assigned `moq-lite-07-wip` as this draft's protocol identifier until it is finalized as `moq-lite-07`.
 - Switched every variable-length integer, including SETUP parameter values, from QUIC's two-bit length prefix to moq-transport's leading-ones encoding, widening the range to 64 bits.

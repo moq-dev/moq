@@ -236,7 +236,7 @@ An advertisement lives as long as its stream, so an update on a new stream would
 An endpoint MUST NOT open a second stream for an advertisement it already maintains on the session.
 
 An update replaces the old parameters atomically, so a receiver MUST NOT tear down subscriptions or drop cached state because one arrived.
-If the first HOP_PATH entry is unchanged the content is continuous and subscriptions MAY resume on the new route at a group boundary.
+If the first HOP_PATH entry is unchanged the content is continuous and subscriptions MAY resume on the new route from the first object the subscriber lacks.
 If the first entry changed, the publisher changed, and the endpoint still sends an ordinary update.
 The receiver keeps each subscription it is already serving on the old source until that source ends, MUST NOT resume or splice it onto the updated route, and serves new requests from the updated route without state cached from the old publisher.
 
@@ -258,7 +258,7 @@ A receiver SHOULD NOT cache refusals.
 
 A relay MUST NOT advertise a namespace merely because it resolved it: the covering advertisement stays the only one until the publisher advertises the concrete namespace, which it SHOULD do once producing, so a later request finds the running content by its exact namespace instead of resolving a second producer.
 
-Two advertisements whose HOP_PATH begins with the same non-zero Hop ID come from the same publisher and carry interchangeable content: a receiver MAY hold them as redundant paths and fail an active subscription over to the survivor at a group boundary.
+Two advertisements whose HOP_PATH begins with the same non-zero Hop ID come from the same publisher and carry interchangeable content: a receiver MAY hold them as redundant paths and fail an active subscription over to the survivor, continuing from the first object the subscriber lacks.
 If the first entries differ, or either is 0, they are distinct publishers reusing a namespace ({{publishers}}).
 
 An endpoint MUST NOT advertise a path whose HOP_PATH contains the Hop ID the peer declared: the peer could only discard it, and acting on it would form a loop.
@@ -279,7 +279,7 @@ A refusal moves to another publisher only as {{selection}} allows: once, and onl
 A relay that moves to another publisher MUST update its advertisement to the new path ({{updating}}), so the first Hop ID downstream names the publisher that new subscriptions reach.
 Moving between distinct publishers is a discontinuity: their groups are not one sequence, so a subscriber sees an unrelated Location, and a FETCH that succeeds against one may fail against the other.
 
-Redundant publishers of the same content avoid this by sharing a Hop ID ({{hop-ids}}), which makes their paths interchangeable and lets a subscription fail over at a group boundary.
+Redundant publishers of the same content avoid this by sharing a Hop ID ({{hop-ids}}), which makes their paths interchangeable and lets a subscription fail over without a gap.
 Publishers that do not share one are treated as reusing a name.
 
 
@@ -337,6 +337,7 @@ This document requests one registration in the "REQUEST_ERROR Codes" registry.
 # Appendix A: Changelog
 
 ## moq-cluster-02
+- Failing over between paths from the same publisher continues from the first object the subscriber lacks instead of at a group boundary.
 - Defined request resolution against the longest covering prefix and the NO_CAPACITY refusal with its single re-resolution; any other refusal is terminal, including between several publishers of one namespace.
 - A relay does not advertise a namespace because it resolved it; the publisher advertises the concrete namespace once producing.
 - A change of original publisher is an ordinary update instead of a withdrawal and a new advertisement. Subscriptions already served drain the old source; new requests take the updated route.
