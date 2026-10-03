@@ -21,9 +21,9 @@ state carries the timestamp of the frame that produced it.
 Decided: `next()` and `poll_next()` return `Timed<T>`, the type the producers
 take in [Publishing never invents a timestamp](/quest/m1/publish-timestamp.md).
 `at` is the frame's media timestamp on the track's timescale, and `None` for
-an untimed frame: [Plan: untimed objects](/quest/m1/plan-untimed-objects.md)
-settled (2026-10-01) that absence survives the wire rather than becoming
-arrival time. A republisher passes `at` straight to a moq-mux data producer.
+an untimed frame: absence survives the wire rather than becoming arrival
+time (decided 2026-10-01, see
+[moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md)). A republisher passes `at` straight to a moq-mux data producer.
 
 Decided (2026-10-01): snapshot consumers get two reads, both returning
 `Timed<T>`. Today the moq-json snapshot consumer applies every buffered delta
@@ -48,4 +48,4 @@ Public API: breaking. Wire: none.
 ## Required
 
 - [Publishing never invents a timestamp](/quest/m1/publish-timestamp.md) - gives `Timed.at` its untimed meaning, the type this returns
-- [Plan: untimed objects](/quest/m1/plan-untimed-objects.md) - the model must carry an absent timestamp to consumers
+- [moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md) - the model must carry an absent timestamp to consumers

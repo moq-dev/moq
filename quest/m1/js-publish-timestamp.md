@@ -25,4 +25,4 @@ Public API: breaking. Wire: none.
 
 ## Required
 
-- [Plan: untimed objects](/quest/m1/plan-untimed-objects.md) - an untimed payload must travel as untimed before producers stop filling in now
+- [@moq/net carries untimed frames faithfully](/quest/m1/js-untimed-model.md) - the model must hold an untimed payload before producers stop filling in now

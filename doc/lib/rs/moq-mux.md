@@ -107,9 +107,11 @@ the clock the catalog started with. A clock set with
 real start.
 
 Group starts never go backwards. A group starting before the previous group's
-start ends the import with `TimestampRewind`, as a restarted encoder or a looping
-file wrapping to the top does, flagged MPEG-TS discontinuity or not; republish
-it as a new broadcast. Frames may still dip below the previous group's content:
+start ends the import with `TimestampRewind`, whose `timestamp` and `floor` fields
+name the refused frame and the previous group's start; the message gives both in
+microseconds. A restarted encoder or a looping file wrapping to the top does this,
+flagged MPEG-TS discontinuity or not; republish it as a new broadcast. Frames may
+still dip below the previous group's content:
 B-frames, and a keyframe overlapping the previous group's last frame. A flagged
 MPEG-TS discontinuity that jumps forward continues the broadcast.
 

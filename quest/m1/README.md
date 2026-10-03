@@ -25,6 +25,8 @@ QUIC studies there on that rule.
 - [moq-transport peers are plain clients](/quest/m1/ietf-cluster-off.md) - no moq-transport session negotiates the cluster extension, so none can splice a pool's members on a Hop ID label
 - [Epoch primitive](/quest/m1/epoch.md) - one `Epoch` type in moq-net and @moq/net, carried as a trailing `@<uuidv7>` path segment, shared by e2ee and broadcast epochs
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - each publish of a name gets a fresh `@<uuidv7>` epoch, viewers follow the newest live one at once, and bare names still resolve on every version
+- [Bounded stats aggregate](/quest/m1/stats-aggregate-bound.md) - the stats aggregator folds departed nodes into a retired total after a grace window, so its memory stops growing with node churn
+- [Stats epochs](/quest/m1/stats-epoch.md) - each stats producer publishes under `.../node/<node>/@<epoch>`, so a restarted node never reuses a name
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - any node routes toward a broadcast's origin over CDN and P2P links alike, with per-origin routes and path-less announces
 - [Remove `--hop`](/quest/m1/hop-removal.md) - redundant publishers share an explicit `@<epoch>`, and `--hop` and the publisher's Hop ID are gone
 - [One route cost](/quest/m1/route-cost.md) - Warm and Cold collapse to one static route cost
@@ -53,15 +55,15 @@ QUIC studies there on that rule.
 - [Reader end parity](/quest/m1/reader-end-parity.md) - JS readers see a track's end once the newest group reaches the declared end, as Rust readers do
 - [JS cache window](/quest/m1/js-prune-cache-window.md) - js/net ages idle groups on a cache window and keeps max_age as media-time staleness, as Rust does
 - [IETF FETCH abandonment](/quest/m1/ietf-fetch-abandonment.md) - the Rust moq-transport subscriber cancels a group FETCH once its last reader leaves
-- [Watch and publish under CSP](/quest/m1/csp-assets.md) - blob workers stay the default; strict-CSP apps host the files and set a base URL
+- [A watch and publish release ships assets()](/quest/m1/assets-release.md) - the release that lets the sites host the worklets
+- [Dogfood hosted worklets](/quest/m1/dogfood-assets.md) - moq.dev and the moq.pro dashboard host the worklets and call `assets()` after the release
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [Shaper step on mock time](/quest/m1/shaper-step-clock.md) - the `moq-shaper` step test asserts on a paused clock, so a loaded runner cannot fail it
 - [A week of nightly interop after #4529](/quest/m1/interop-week.md) - the nightly traces the stall diagnosis reads
 - [Nightly tests on macOS and Windows](/quest/m1/nightly-platform-tests.md) - `moq-auth`, `hang`, `moq-tokio`, and `moq-native` tests run nightly where `Instant` and sockets differ, not just compile
 - [CI runner stalls](/quest/m1/ci-runner-stalls.md) - the 0.4 to 0.8 s freezes of both interop tracks on CI are attributed from a week of nightlies and fixed or told apart from playback bugs
 - [Catalog estimate rate](/quest/m1/catalog-estimate-rate.md) - a rising `jitter`/`delay` estimate republishes the catalog at most once a second, in js/publish and moq-mux
-- [Rewind detail](/quest/m1/timestamp-rewind-detail.md) - a refused timestamp rewind names the frame's timestamp and the live edge
-- [Plan: max-delay](/quest/m1/plan-max-delay.md) - decide whether `max_age` becomes `max_delay` across the CLI, APIs, and bindings
+- [Subscriber max-delay](/quest/m1/subscriber-max-delay.md) - subscriber staleness becomes `max_delay`; publisher retention stays `max_age`
 - [Wire compatibility](/quest/m1/wire-compat.md) - a nightly run tests this checkout against the last published release for tokens, session wire, and catalog/container
 - [Same-hop importers](/quest/m1/hop-aligned-import.md) - importers fed one stream publish identical groups and timestamps, so failover between a redundant pair survives
 - [Auth client CA](/quest/m1/relay-auth-client-ca.md) - `auth::Config::validate` and `init` take the client-CA flag, so no caller can skip the check
@@ -72,11 +74,15 @@ QUIC studies there on that rule.
 - [Capture by default](/quest/m1/capture-default.md) - moq-video and moq-audio build `capture` by default, so pre-merge checks test it and the capture gate goes away
 - [Ship capture and playback](/quest/m1/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
 - [Go and Dart doc samples](/quest/m1/doc-samples-go-dart.md) - Go and Dart doc samples compile against their wrappers
-- [Publishing never invents a timestamp](/quest/m1/publish-timestamp.md) - no Rust or binding publish API fills in a timestamp; an untimed payload goes out untimed, and moq-mux data producers take broadcast-clock timestamps
-- [JS publishing never invents a timestamp](/quest/m1/js-publish-timestamp.md) - the same in @moq/json, @moq/binary, and @moq/net
-- [Plan: untimed objects](/quest/m1/plan-untimed-objects.md) - map faithful timestamp absence, publisher to consumer, into implementation quests
+- [Mux data timestamp](/quest/m1/mux-data-timestamp.md) - moq-mux JSON and binary producers take a broadcast-clock timestamp, with no ahead-of-now refusal
+- [Publishing never invents a timestamp](/quest/m1/publish-timestamp.md) - no Rust or binding publish API fills in a timestamp; an untimed payload goes out untimed
+- [JS publishing never invents a timestamp](/quest/m1/js-publish-timestamp.md) - the same in @moq/json, @moq/flate, and @moq/net
+- [Untimed model](/quest/m1/untimed-model.md) - moq-net frames and datagrams carry an absent timestamp to every subscriber; no receiver fills in arrival time
+- [JS untimed model](/quest/m1/js-untimed-model.md) - the same in @moq/net
+- [Untimed lite-07](/quest/m1/lite-untimed.md) - lite-07 encodes an absent timestamp in both languages; lite-05/06 write send time
+- [Plan: untimed verbatim PES](/quest/m1/plan-ts-pes-untimed.md) - decide how a verbatim TS track carries a PES that has no PTS, then write the implementation quest
 - [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - json and binary consumers return each value's timestamp, in Rust and every binding; snapshots add `latest()` beside an in-order `next()`
-- [JS data consumer timestamps](/quest/m1/js-data-consumer-timestamps.md) - @moq/json and @moq/binary consumers return each value's timestamp, with snapshot `next()` and `latest()`
+- [JS data consumer timestamps](/quest/m1/js-data-consumer-timestamps.md) - @moq/json and @moq/flate consumers return each value's timestamp, with snapshot `next()` and `latest()`
 - [Nested data configs](/quest/m1/data-config-nesting.md) - docs nest `BinaryConfig`/`JsonConfig` in an application section instead of flattening it
 - [Omit empty catalog sections](/quest/m1/catalog-omit-empty.md) - a Rust catalog with no video or audio leaves those keys out, as JS does
 - [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) - a draft-20+ FETCH within one group is served from its LOCATION_FILTER, as older drafts are
@@ -172,7 +178,7 @@ QUIC studies there on that rule.
 - [Release profile](/quest/m1/release-profile.md) - every release build gets fat LTO, one codegen unit, and stripping from the workspace profile instead of three script exports
 - [Size report](/quest/m1/size-report.md) - a nightly job reports every shipped artifact's size, native and JS, and alerts when one grows
 - [Publish lazy file source](/quest/m1/publish-lazy-file.md) - a camera or screen `<moq-publish>` stops downloading mediabunny's ~99 KB gzip
-- [JS bundle trims](/quest/m1/js-bundle-trims.md) - minified worklets, no bowser, split pako, and lazy qmux and captions
+- [JS bundle trims](/quest/m1/js-bundle-trims.md) - no bowser, split pako, and lazy qmux and captions
 - [Slim Docker images](/quest/m1/docker-slim.md) - images carry only the package's nix closure, not ~170 MiB of nixos/nix
 - [Bindings size profile](/quest/m1/ffi-size-profile.md) - a benchmark decides whether the moq-ffi builds ship at opt-level "s", which halves the dylib
 - [Go mirror delivery](/quest/m1/go-mirror-delivery.md) - the Go binding's staticlibs stop growing git history by ~210 MiB per release

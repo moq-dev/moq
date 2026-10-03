@@ -52,3 +52,5 @@ on `main`.
 
 - [Media stats](/quest/m1/stats/README.md) - publishers and viewers report
   their own media, transport, and playback health, the media half of a verdict
+- [Loss delay](/quest/m3/cut-through/loss-delay.md) - an ingress counter of
+  bytes a loss held back by at least one RTT, on the same rows

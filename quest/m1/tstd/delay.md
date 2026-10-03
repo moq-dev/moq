@@ -71,4 +71,4 @@ none.
 - [FLV export delay](/quest/m1/flv-export-delay.md) - adopts the release stage
 - [MKV export delay](/quest/m1/mkv-export-delay.md) - adopts the release stage
 - [TS byte schedule](/quest/m1/tstd/byte-schedule.md) - uses this delay as its mux-ahead buffer delay
-- [Plan: max-delay](/quest/m1/plan-max-delay.md) - whether `max_age` becomes `max_delay` everywhere else
+- [Subscriber max-delay](/quest/m1/subscriber-max-delay.md) - subscriber staleness is renamed; publisher retention stays `max_age`

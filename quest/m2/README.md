@@ -120,3 +120,4 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [moq-transport cluster peers](/quest/m2/ietf-cluster-peers.md) - an extended cluster draft lets moq-transport relays peer again, stitching failover on the reply's origin
 - [MSFTS convergence](/quest/m2/msfts-convergence.md) - the demultiplexed TS lane converges on MSFTS where the two still differ: program tables and the ES payload unit
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - H.265 encode and decode, pre-generated bindings, and pooled resize surfaces, including the moq-dev/vaapi release that carries them
+- [Dead worklet config](/quest/m2/worklet-dead-config.md) - delete moq-boy's unused worklet plugin and hang's unused `?worker&url` typings
