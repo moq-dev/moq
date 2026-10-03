@@ -42,7 +42,7 @@ on a future under `__cpp_impl_coroutine`, `std::expected` under
 `__cpp_lib_expected`. Never a second library per standard.
 
 Distribution is a release tarball with a CMake package config and pkg-config
-file (mirroring `libmoq.yml`), so consumers never need a Rust toolchain or the
+file (mirroring `moq-c.yml`), so consumers never need a Rust toolchain or the
 bindgen fork. Decided in the 2026-09-30 audit: this line promises the tarball
 only. A [vcpkg registry](/quest/m2/cpp-vcpkg.md) (m2) and a
 [Conan remote](/quest/m3/cpp-conan.md) (m3) fetch the same tarball later and
@@ -71,11 +71,10 @@ Confirmed in [#4100](https://github.com/moq-dev/moq/pull/4100):
 - [Cancel](/quest/m1/cpp/cancel.md) - a cancelled or consumed future reports `valid() == false`, like `std::future`, and a read of it aborts with a message naming the misuse
 - [macOS alias check](/quest/m1/cpp/macos-alias-check.md) - `just cpp check` passes its alias step with the BSD `sed` macOS ships
 - [C++ standard](/quest/m1/cpp/cxx-standard.md) - a consumer that sets C++23 only on its own target links the package
-- [OBS migration](/quest/m1/cpp/obs.md) - the OBS plugin moves from libmoq handles and trampolines to the generated C++
+- [OBS migration](/quest/m1/cpp/obs.md) - the OBS plugin moves from moq-c handles and trampolines to the generated C++
 
 ## Related
 
 - [vcpkg registry](/quest/m2/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests
 - [Conan remote](/quest/m3/cpp-conan.md) - a remote we own serves the prebuilt package to Conan
-- [C# through moq-ffi](/quest/m3/cs/README.md) - the same recipe with NordSecurity's C# generator
 - [Unreal prototype](/quest/m3/unreal.md) - a UE5 module consumes the package with exceptions disabled

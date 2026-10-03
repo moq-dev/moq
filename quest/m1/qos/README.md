@@ -30,8 +30,8 @@ The counters and channels land here. The moq.pro (downstream) dashboard work,
 including the health badge, connection-health drill-down, and stream
 preflight, consumes them downstream.
 
-Decided (2026-09-28): the whole line targets `dev`, because its moq-stats
-changes break the published crate. Client stats left the line (2026-09-29)
+Decided (2026-09-28): the line's moq-stats changes break the published
+crate. Client stats left the line (2026-09-29)
 when media stats moved out of moq-stats onto hang tracks, which are additive
 on `main`.
 

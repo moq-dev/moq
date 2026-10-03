@@ -25,18 +25,18 @@ A `test/interop/clients/cpp` client joins `just test interop --all`, and
   continuations must not block on the moq-ffi runtime thread.
 - Build: `cpp/CMakeLists.txt` builds `libmoq_ffi` (staticlib, features
   `video`+`audio`) with the same `cargo build` custom command and
-  `BUILD_RUST_LIB` switch `rs/libmoq/CMakeLists.txt` uses (no Corrosion, so
+  `BUILD_RUST_LIB` switch `rs/moq-c/CMakeLists.txt` uses (no Corrosion, so
   the two CMake entry points stay alike), compiles `cpp/ffi`, installs headers, `moqConfig.cmake`, and `moq.pc`. Windows MSVC,
-  macOS, and Linux, both architectures, matching `libmoq.yml`'s matrix.
-- Release: `release-cpp.yml` mirrors `libmoq.yml` (tag `cpp-v*`, nightly
+  macOS, and Linux, both architectures, matching `moq-c.yml`'s matrix.
+- Release: `release-cpp.yml` mirrors `moq-c.yml` (tag `cpp-v*`, nightly
   dry-run through the `workflow_call` chain), producing one tarball per target
   containing the static library, generated sources, wrapper headers, and the
   CMake package. The registries quest consumes these artifacts.
 - Interop: `test/interop/clients/cpp` subscribes and publishes like the Go client;
-  the C client stays, since libmoq stays.
+  the C client stays, since moq-c stays.
 - Docs: `doc/lib/cpp/index.md` (install via tarball, then the registries once
   they exist; the future, expected, executor, and coroutine rules) and a row in
-  `doc/lib/index.md`. The C row now says libmoq is the plain-C ABI and points
+  `doc/lib/index.md`. The C row now says moq-c is the plain-C ABI and points
   C++ readers at the new package.
 
 ## Required

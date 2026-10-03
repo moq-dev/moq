@@ -169,7 +169,9 @@ impl Session {
 	/// the session's terminal error if it ended some other way first. A track that
 	/// is still live never finishes, so finish or abort tracks before closing.
 	///
-	/// moq-transport (IETF) sessions close without waiting.
+	/// Both protocols withdraw this session's announcements and wait for their
+	/// delivery. IETF drafts 14 through 16 send withdrawals without waiting, and
+	/// IETF media streams are not drained yet.
 	pub async fn close(self) -> Result<(), Error> {
 		if let Ok(mut close) = self.close.write()
 			&& close.is_none()
@@ -277,6 +279,7 @@ impl Session {
 		});
 
 		let supervisor = Supervisor {
+			local_close: protocol.local_close(),
 			runtime: runtime.clone(),
 			closed_watch: session.clone(),
 			session,
@@ -317,6 +320,7 @@ impl Session {
 ///
 /// Finishes once the transport reports closed; everything else is moot then.
 pub(crate) struct Supervisor<S> {
+	local_close: Arc<std::sync::atomic::AtomicBool>,
 	runtime: crate::time::Clock,
 	session: S,
 	// A dedicated clone for the close watch, since each pending poll operation
@@ -359,7 +363,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 
 		// The transport's terminal error ends the supervisor.
 		if let Poll::Ready(err) = self.closed_watch.poll_closed(&mut cx) {
@@ -393,9 +397,12 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 			}) {
 				Poll::Ready(Ok(request)) => (request, false),
 				Poll::Ready(Err(last)) => (
-					last.clone().unwrap_or_else(|| Close::Abort {
-						code: SessionError::Cancel.to_code(),
-						reason: "dropped".to_string(),
+					last.clone().unwrap_or_else(|| {
+						self.local_close.store(true, std::sync::atomic::Ordering::Relaxed);
+						Close::Abort {
+							code: SessionError::Cancel.to_code(),
+							reason: "dropped".to_string(),
+						}
 					}),
 					true,
 				),
@@ -423,6 +430,10 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 		Poll::Pending
 	}
 
+	pub(crate) fn draining(&self) -> bool {
+		matches!(self.drain, Drain::Waiting(_))
+	}
+
 	/// Finish a requested drain once the protocol owes the peer nothing, or at
 	/// the deadline. Returns whether this closed the transport.
 	///
@@ -437,6 +448,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 			false if deadline.poll(waiter).is_ready() => Err(Error::Timeout),
 			false => return false,
 		};
+		self.local_close.store(true, std::sync::atomic::Ordering::Relaxed);
 		self.session.close(SessionError::Cancel.to_code(), "");
 		self.drain = Drain::Done(res);
 		// The transport is closed, so no later request can change anything.
@@ -535,3 +547,45 @@ const _: () = {
 	const fn assert_send_sync<T: Send + Sync>() {}
 	assert_send_sync::<Session>();
 };
+
+/// Session-local advertisement withdrawal; the source origin remains shared.
+#[derive(Clone, Default)]
+pub(crate) struct Withdrawal(kio::Shared<WithdrawalState>);
+
+#[derive(Default)]
+struct WithdrawalState {
+	closing: bool,
+	active: usize,
+}
+
+impl Withdrawal {
+	pub(crate) fn begin(&self) {
+		self.0.lock().closing = true;
+	}
+
+	pub(crate) fn poll(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.0
+			.poll(
+				waiter,
+				|state| if state.closing { Poll::Ready(()) } else { Poll::Pending },
+			)
+			.map(|_| ())
+	}
+
+	pub(crate) fn drained(&self) -> bool {
+		self.0.read().active == 0
+	}
+
+	pub(crate) fn register(&self) -> Withdrawing {
+		self.0.lock().active += 1;
+		Withdrawing(self.clone())
+	}
+}
+
+pub(crate) struct Withdrawing(Withdrawal);
+
+impl Drop for Withdrawing {
+	fn drop(&mut self) {
+		self.0.0.lock().active -= 1;
+	}
+}

@@ -20,4 +20,4 @@ the mesh runs lite-07.
 
 ## Required
 
-- The moq.pro mesh deploys lite-07
+- [The moq.pro mesh runs lite-07](/quest/m3/lite07-mesh.md) - every peer opts in on the wire

@@ -52,8 +52,8 @@ string(JSON _email GET ${buildspec} email)
 string(JSON _version GET ${buildspec} version)
 string(JSON _bundleId GET ${buildspec} platformConfig macos bundleId)
 
-# Release CI builds the plugin against a specific libmoq release and versions it
-# to match (see build.sh --libmoq-release), so allow overriding the buildspec
+# Release CI builds the plugin against a specific moq-c release and versions it
+# to match (see build.sh --moq-c-release), so allow overriding the buildspec
 # version. Everything below derives PLUGIN_VERSION_* from _version.
 if(DEFINED PLUGIN_VERSION_OVERRIDE AND NOT PLUGIN_VERSION_OVERRIDE STREQUAL "")
   set(_version "${PLUGIN_VERSION_OVERRIDE}")
