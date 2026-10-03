@@ -13,7 +13,8 @@ same per-stream lines as `import ts`, under an `srt{path=...}` span: an
 elementary stream that stopped delivering access units, audio frame sync lost,
 damaged units refused on each PID, and the TR 101 290 counters when one moves.
 They grade the TS as SRT delivered it, after retransmission. Damage drops that
-unit and keeps the session alive; video resumes at its next keyframe.
+unit and keeps the session alive; video closes its group at the break and
+resumes at its next keyframe, freezing for up to one GOP.
 
 ```bash
 # Accept a contribution feed and publish it

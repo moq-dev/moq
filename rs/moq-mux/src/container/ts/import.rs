@@ -232,22 +232,26 @@ impl<E: catalog::Catalog> Import<E> {
 			// Every packet is graded, but only the media PIDs and the clock route on the
 			// verdict: PSI and section PIDs keep their reassemblers' own.
 			let continuation = self.health.packet(&pkt, self.liveness.now());
-			// A media packet whose adaptation field overruns itself is refused before its
-			// clock bits can reach the program clock. Its counter already joined the chain.
-			if let Ok(pid) = Pid::new(pid)
-				&& self.streams.contains_key(&pid)
-				&& pkt[1] & 0x80 == 0
-				&& !adaptation_valid(&pkt)
-			{
-				self.damage(pid, &anyhow::anyhow!("malformed TS adaptation field"))?;
-				continue;
-			}
 			let continuation = Pid::new(pid)
 				.ok()
 				.filter(|pid| self.streams.contains_key(pid) || self.pcr_pid == Some(*pid))
 				.map(|_| continuation);
 			// A retransmitted payload must not repeat the clock reset it carried.
 			if matches!(continuation, Some(Continuation::Duplicate)) {
+				continue;
+			}
+			// A media packet whose adaptation field overruns itself is refused before its
+			// clock bits can reach the program clock. Its counter already joined the chain,
+			// so a gap in front of it still salvages what came before.
+			if let Ok(pid) = Pid::new(pid)
+				&& self.streams.contains_key(&pid)
+				&& pkt[1] & 0x80 == 0
+				&& !adaptation_valid(&pkt)
+			{
+				if matches!(continuation, Some(Continuation::Broken)) {
+					self.salvage(pid)?;
+				}
+				self.damage(pid, &anyhow::anyhow!("malformed TS adaptation field"))?;
 				continue;
 			}
 			// Read the clock's own flag before routing, so the break lands between the media
@@ -6056,6 +6060,13 @@ pub(super) mod test {
 				au.extend_from_slice(&[0, 0, 0, 1, 0xe1, 0x80]);
 				packet.copy_from_slice(&video_pes(VIDEO, 4, 90_000 + 5 * FRAME, Some(90_000 + 4 * FRAME), &au));
 			}
+			"queued" => {
+				// The AUD completes the IDR before the forbidden NAL fails, so the splitter
+				// has already queued it when the unit is refused.
+				let mut au = annexb_au(true);
+				au.extend_from_slice(&[0, 0, 0, 1, 0x09, 0xf0, 0, 0, 0, 1, 0xe1, 0x80, 0, 0, 0, 1, 0x41, 0x9a]);
+				packet.copy_from_slice(&video_pes(VIDEO, 4, 90_000 + 5 * FRAME, Some(90_000 + 4 * FRAME), &au));
+			}
 			"adaptation" => packet[4] = 255,
 			"adaptation-clock" => {
 				packet[4] = 1;
@@ -6121,6 +6132,11 @@ pub(super) mod test {
 	#[tokio::test(start_paused = true)]
 	async fn damaged_trailing_nal_refuses_the_whole_access_unit() {
 		damaged_video_recovers("late-nal").await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn damaged_unit_drops_a_picture_the_splitter_queued() {
+		damaged_video_recovers("queued").await;
 	}
 
 	#[tokio::test(start_paused = true)]
