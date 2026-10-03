@@ -32,7 +32,9 @@ follow the current best route immediately; only the announcement waits.
 A path names one broadcast, whoever publishes it. When the route serving a
 broadcast dies, withdraws, or is beaten by a cheaper route, each subscription
 continues on the new route from the first frame its readers lack, so they see
-every frame once, mid-group included. A route through the subscribing peer
+every frame once, mid-group included. A route that is still up finishes the
+groups it has open, overlapping the new one. A group neither route delivers is
+dropped once the readers' max age has passed it. A route through the subscribing peer
 itself is never used. A publisher whose groups restart, such as an encoder
 restarting from group 0, must publish under a new broadcast name; resumed under
 the old one, readers wait for its sequence to catch up.

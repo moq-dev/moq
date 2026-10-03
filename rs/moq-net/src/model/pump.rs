@@ -855,6 +855,7 @@ impl Pump {
 		let mut progress = false;
 		let done = matches!(self.logical, Logical::Done(_));
 		let budget = self.logical.subscription().map(|demand| demand.max_age);
+		let serving = self.input.as_ref().map(|input| input.id);
 		for live in [true, false] {
 			let groups = match live {
 				true => &mut self.groups,
@@ -866,10 +867,13 @@ impl Pump {
 				let step = Self::poll_open(*sequence, open, &self.input, done, &self.budget, waiter, &mut progressed);
 				progress |= progressed;
 				let step = match step {
-					// Every reader would skip it: nobody's budget lets a later group wait on it.
+					// Every reader would skip it, and the serving route is not delivering it:
+					// nothing is left to wait for, whether no copy has its next frame or only a
+					// replaced route that went quiet does. The serving route's own groups are
+					// left to the readers, like any relay's.
 					Step::Open
 						if live
-							&& open.blocked()
+							&& (open.blocked() || !open.copies.iter().any(|copy| Some(copy.input) == serving))
 							&& let (Some(budget), Logical::Live(producer)) = (budget, &self.logical)
 							&& producer.is_stale(*sequence, budget) =>
 					{
@@ -1639,6 +1643,34 @@ mod test {
 		step(&mut pump);
 		assert_eq!(drain(&mut reading), (vec![], Some(Ok(()))));
 		assert!(a.subscription().is_none(), "the replaced route is let go once it feeds nothing");
+	}
+
+	/// A replaced route that stays up but goes quiet on the group it had open holds it
+	/// only until the readers' budget convicts it; the route is let go with it.
+	#[test]
+	fn a_quiet_replaced_route_holds_its_group_until_stale() {
+		let (mut pump, mut handle, logical) = logical();
+		let (a, a_copy) = copy("a");
+		feed(&mut pump, &mut handle, &a_copy);
+		let mut sub = subscribe(&logical);
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"0.0".to_vec()).unwrap();
+		step(&mut pump);
+		let mut reading = recv(&mut sub);
+		assert_eq!(drain(&mut reading), (vec!["0.0".into()], None));
+
+		let (mut b, b_copy) = copy("b");
+		b.start_at(1).unwrap();
+		feed(&mut pump, &mut handle, &b_copy);
+		for (sequence, secs) in [(1, 10), (2, 60)] {
+			let mut next = b.create_group(group::Info { sequence }).unwrap();
+			next.write_frame(Timestamp::from_secs(secs).unwrap(), b"x".to_vec()).unwrap();
+			next.finish().unwrap();
+			step(&mut pump);
+		}
+		assert_eq!(drain(&mut reading), (vec![], Some(Err(Error::Old.to_string()))));
+		assert!(a.subscription().is_none(), "the quiet route is let go");
+		drop(group);
 	}
 
 	/// A transcoder asked for (0, 1) starts at (1, 0) and refuses a mid-group fetch. The

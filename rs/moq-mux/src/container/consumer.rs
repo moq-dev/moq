@@ -1682,7 +1682,8 @@ mod tests {
 			.unwrap();
 
 		// Each cheaper route takes over beyond group 0 without holding its continuation,
-		// so the front gives the open group up once a route goes past it.
+		// while the first route stays up but silent. The front gives the open group up once
+		// the track runs a full budget past it.
 		let mut routes = Vec::new();
 		let mut sources = Vec::new();
 		for sequence in 1..=4 {
@@ -1701,7 +1702,7 @@ mod tests {
 			if sequence == 1 {
 				assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(0));
 			}
-			write_group(&mut track, sequence, &[ts(sequence * 100_000)]);
+			write_group(&mut track, sequence, &[ts(sequence * 1_000_000)]);
 			routes.push(route);
 			sources.push((source, track));
 		}
@@ -1718,14 +1719,14 @@ mod tests {
 				event.is_pending()
 			);
 		};
-		assert_eq!(frame.timestamp, ts(100_000));
+		assert_eq!(frame.timestamp, ts(1_000_000));
 		assert!(frame.keyframe);
 		assert_eq!(consumer.current, 1);
 		assert!(
 			matches!(consumer.poll_event(&waiter), Poll::Ready(Ok(Some(Event::GroupEnd)))),
 			"the complete successor still emits its clean boundary"
 		);
-		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(200_000));
+		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(2_000_000));
 	}
 
 	// ---- Eviction recovery (pause/resume) ----
