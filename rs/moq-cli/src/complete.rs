@@ -108,20 +108,28 @@ thread_local! {
 	/// Thread-local rather than a process global because this is per-request state:
 	/// [`answer`]'s future is `!Send` (Usage's completion futures are), so it can
 	/// only ever be driven on the thread that started it.
-	static GLOBALS: RefCell<Option<MoqSide>> = const { RefCell::new(None) };
+	static GLOBALS: RefCell<Option<Lookup>> = const { RefCell::new(None) };
+}
+
+/// The parsed flags and optional local source for one lookup.
+#[derive(Clone)]
+struct Lookup {
+	side: MoqSide,
+	/// A local source lets operation tests exercise the grammar without socket timers.
+	origin: Option<moq_net::origin::Producer>,
 }
 
 /// Holds [`GLOBALS`] for one request and clears it on the way out.
 struct Globals;
 
 impl Globals {
-	fn set(side: Option<MoqSide>) -> Self {
-		GLOBALS.with_borrow_mut(|slot| *slot = side);
+	fn set(side: Option<MoqSide>, origin: Option<moq_net::origin::Producer>) -> Self {
+		GLOBALS.with_borrow_mut(|slot| *slot = side.map(|side| Lookup { side, origin }));
 		Self
 	}
 
 	/// The globals this request parsed, or `None` when the line has none yet.
-	fn get() -> Option<MoqSide> {
+	fn get() -> Option<Lookup> {
 		GLOBALS.with_borrow(Clone::clone)
 	}
 }
@@ -142,9 +150,14 @@ impl Drop for Globals {
 /// stage refuses, so the request is rewritten to the active chunk and handed to
 /// [`Stage`].
 pub async fn answer(argv: &[OsString]) -> Option<String> {
+	answer_from(argv, None).await
+}
+
+/// Answer against a supplied local origin, or dial the relay parsed from the line.
+async fn answer_from(argv: &[OsString], origin: Option<moq_net::origin::Producer>) -> Option<String> {
 	let request = CompletionRequest::parse(argv)?;
 	// Dropped at the end of this call, so a second request cannot read the first's.
-	let _globals = Globals::set(globals(&request));
+	let _globals = Globals::set(globals(&request), origin);
 	let overlays = overlays();
 
 	// Everything past the cursor says nothing about the word being completed.
@@ -555,7 +568,7 @@ async fn renditions(ctx: &CompleteCtx<'_>) -> Option<moq_mux::catalog::hang::Cat
 	// `--broadcast`, so there it is the global or nothing.
 	let path = export
 		.and_then(|export| given(&export.broadcast))
-		.or(side.broadcast.as_deref())
+		.or(side.side.broadcast.as_deref())
 		.unwrap_or_default()
 		.to_string();
 
@@ -594,8 +607,15 @@ async fn catalog(
 /// The Hop ID is fresh and random rather than the pinned `--hop`: this
 /// session is not the publisher the user is about to start, and a shared id is
 /// what tells a relay two sessions carry the same content.
-async fn dial(side: &MoqSide, deadline: Instant) -> Option<(moq_net::origin::Producer, moq_tokio::Connection)> {
+async fn dial(
+	lookup: &Lookup,
+	deadline: Instant,
+) -> Option<(moq_net::origin::Producer, Option<moq_tokio::Connection>)> {
+	let side = &lookup.side;
 	let url = side.client.url.clone()?;
+	if let Some(origin) = &lookup.origin {
+		return Some((origin.clone(), None));
+	}
 	let origin = moq_tokio::origin::spawn();
 
 	// Building the client reads the TLS material off disk synchronously, so it goes on
@@ -619,7 +639,7 @@ async fn dial(side: &MoqSide, deadline: Instant) -> Option<(moq_net::origin::Pro
 		.await
 		.ok()?
 		.ok()?;
-	Some((origin, connection))
+	Some((origin, Some(connection)))
 }
 
 #[cfg(test)]
@@ -629,13 +649,17 @@ mod tests {
 
 	/// Answer a whole line, with the cursor at its end.
 	async fn complete(line: &str) -> Vec<String> {
+		complete_from(line, None).await
+	}
+
+	async fn complete_from(line: &str, origin: Option<moq_net::origin::Producer>) -> Vec<String> {
 		let argv: Vec<OsString> = ["__complete_word__", "--shell", "bash", "--line", line, "--cursor"]
 			.iter()
 			.map(OsString::from)
 			.chain(std::iter::once(OsString::from(line.len().to_string())))
 			.collect();
 
-		answer(&argv)
+		answer_from(&argv, origin)
 			.await
 			.unwrap_or_default()
 			.lines()
@@ -643,12 +667,22 @@ mod tests {
 			.collect()
 	}
 
+	/// The operation fixture keeps the full line parsing and deadlines, without sockets.
+	struct Fixture(moq_net::origin::Producer);
+
+	impl Fixture {
+		const CONNECT: &str = "--connect moqt://fixture --connect-tls-insecure";
+
+		async fn complete(&self, line: &str) -> Vec<String> {
+			complete_from(line, Some(self.0.clone())).await
+		}
+	}
+
 	/// A relay serving `origin`, and the `--connect` flags that reach it.
 	///
-	/// Self-signed, so the line has to say `--connect-tls-insecure`. That is also the
-	/// point: the completer builds its client from the same flags the invocation would
-	/// have, so a line that can connect completes and one that cannot does not.
-	fn relay(origin: &moq_net::origin::Producer) -> String {
+	/// Self-signed, so the line has to say `--connect-tls-insecure`. The transport
+	/// smoke test initializes its client from those flags, like the completer.
+	fn network_relay(origin: &moq_net::origin::Producer) -> String {
 		let _ = moq_tokio::crypto::install_default();
 
 		let mut config = moq_tokio::listen::Config::default();
@@ -662,11 +696,30 @@ mod tests {
 		format!("--connect moqt://127.0.0.1:{port} --connect-tls-insecure")
 	}
 
+	/// Client initialization and dialing still use the flags on the line.
+	#[tokio::test]
+	async fn a_real_relay_can_be_dialed() {
+		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
+		let origin = moq_tokio::origin::spawn();
+		let connect = network_relay(&origin);
+		let words: Vec<_> = connect.split_whitespace().collect();
+		let side =
+			MoqSide::from_argv(&words.iter().map(OsStr::new).collect::<Vec<_>>(), Environment::Ignore).expect("side");
+		let client = side.client.clone().init(side.quic).expect("client");
+		let connection = client
+			.with_reconnect(false)
+			.connect(side.client.url.unwrap())
+			.established()
+			.await
+			.expect("connect");
+		assert!(connection.connected());
+	}
+
 	/// A cursor in a later stage is completed against the stage grammar.
 	///
 	/// The root spec is the globals plus the first stage, so answering a later chunk
 	/// against it offers process-wide flags that the chunk refuses.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn retargets_to_the_active_stage() {
 		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
 		// A stage offers its own flags, and none of the globals it would refuse.
@@ -773,26 +826,30 @@ mod tests {
 	/// Completion must not turn a keystroke into a session with a relay the user never
 	/// typed (that URL can carry a `?jwt=`), and a local verb must not refuse to run
 	/// because the shell exports a relay for the publishing it usually does.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn the_environment_cannot_ask_for_a_moq_side() {
 		let origin = moq_tokio::origin::spawn();
 		let _alpha = origin.create_broadcast("alpha").expect("alpha");
 		_alpha.announce(Default::default()).expect("alpha");
-		let connect = relay(&origin);
+		let fixture = Fixture(origin.clone());
+		let connect = Fixture::CONNECT;
 
 		// The same reachable relay, named only by the environment.
 		let url = connect.split_whitespace().nth(1).expect("a --connect url").to_string();
 		let _env = EnvGuard::set(&[("MOQ_CONNECT", &url)]);
 
 		assert!(
-			complete("moq --connect-tls-insecure --broadcast ").await.is_empty(),
+			fixture
+				.complete("moq --connect-tls-insecure --broadcast ")
+				.await
+				.is_empty(),
 			"MOQ_CONNECT authorized a dial the line never asked for"
 		);
 
 		// The same relay named on the line still completes, so the gate is the URL's
 		// source and not the dial itself.
 		assert_eq!(
-			complete(&format!("moq {connect} --broadcast ")).await,
+			fixture.complete(&format!("moq {connect} --broadcast ")).await,
 			["alpha"],
 			"a typed --connect stopped working"
 		);
@@ -821,7 +878,7 @@ mod tests {
 	/// connection the user did not name. An overlay that runs and finds nothing still
 	/// suppresses the shell's path fallback, so an empty answer here is also evidence
 	/// that the completer fired at all.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn no_relay_on_the_line_means_no_dial() {
 		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
 		for line in [
@@ -864,7 +921,7 @@ mod tests {
 	}
 
 	/// `--broadcast` is answered from what the relay on the line announces.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_relay_on_the_line_answers_broadcast() {
 		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
 		let origin = moq_tokio::origin::spawn();
@@ -873,21 +930,24 @@ mod tests {
 		let _nested = origin.create_broadcast("room/beta").expect("beta");
 		_nested.announce(Default::default()).expect("beta");
 
-		let connect = relay(&origin);
-		let found = complete(&format!("moq {connect} --broadcast ")).await;
+		let fixture = Fixture(origin.clone());
+		let connect = Fixture::CONNECT;
+		let found = fixture.complete(&format!("moq {connect} --broadcast ")).await;
 		assert!(found.contains(&"alpha".to_string()), "{found:?}");
 		assert!(found.contains(&"room/beta".to_string()), "{found:?}");
 
 		// A cursor past a `--` is answered against the stage grammar, whose chunk holds
 		// no `--connect`: the completer still has to reach the relay the line named
 		// before the separator.
-		let staged = complete(&format!("moq {connect} import fmp4 -- export --broadcast ")).await;
+		let staged = fixture
+			.complete(&format!("moq {connect} import fmp4 -- export --broadcast "))
+			.await;
 		assert_eq!(staged, found, "a later stage lost the relay the globals named");
 	}
 
 	/// `--video-name` and `--audio-name` are answered from the catalog of the
 	/// broadcast the stage names, which overrides the process-wide one.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_stage_broadcast_picks_the_catalog_to_read() {
 		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
 		use hang::catalog::{AudioCodec, AudioConfig, H264, VideoConfig};
@@ -921,11 +981,12 @@ mod tests {
 
 		// The global names `other`; the stage overrides it, exactly as the invocation
 		// this line is on its way to becoming would.
-		let connect = relay(&origin);
+		let fixture = Fixture(origin.clone());
+		let connect = Fixture::CONNECT;
 		let line = format!("moq {connect} --broadcast other export --broadcast wanted");
 
-		assert_eq!(complete(&format!("{line} --video-name ")).await, ["hd"]);
-		assert_eq!(complete(&format!("{line} --audio-name ")).await, ["stereo"]);
+		assert_eq!(fixture.complete(&format!("{line} --video-name ")).await, ["hd"]);
+		assert_eq!(fixture.complete(&format!("{line} --audio-name ")).await, ["stereo"]);
 	}
 
 	/// The `--catalog-format` on the line decides which catalog track is read.
@@ -936,7 +997,7 @@ mod tests {
 	/// else, which is the one shape that tells the two apart: `moq-mux`'s catalog
 	/// producer emits hang and MSF from the same source, so an ordinary broadcast
 	/// answers either way and hides the bug.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn the_catalog_format_on_the_line_is_honored() {
 		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
 		let origin = moq_tokio::origin::spawn();
@@ -954,13 +1015,21 @@ mod tests {
 		let mut group = track.append_group().expect("group");
 		group.write_frame(moq_net::Timestamp::now(), catalog).expect("frame");
 
-		let connect = relay(&origin);
+		let fixture = Fixture(origin.clone());
+		let connect = Fixture::CONNECT;
 		let line = format!("moq {connect} --broadcast room");
 
 		// Nothing publishes a Hang catalog here, so the default finds no renditions.
-		assert!(complete(&format!("{line} export --video-name ")).await.is_empty());
+		assert!(
+			fixture
+				.complete(&format!("{line} export --video-name "))
+				.await
+				.is_empty()
+		);
 		assert_eq!(
-			complete(&format!("{line} export --catalog-format msf --video-name ")).await,
+			fixture
+				.complete(&format!("{line} export --catalog-format msf --video-name "))
+				.await,
 			["hd"],
 			"export ignored its own --catalog-format"
 		);
@@ -968,9 +1037,11 @@ mod tests {
 		// `play` declares a `--catalog-format` of its own, on a different command.
 		#[cfg(feature = "play")]
 		{
-			assert!(complete(&format!("{line} play --video-name ")).await.is_empty());
+			assert!(fixture.complete(&format!("{line} play --video-name ")).await.is_empty());
 			assert_eq!(
-				complete(&format!("{line} play --catalog-format msf --video-name ")).await,
+				fixture
+					.complete(&format!("{line} play --catalog-format msf --video-name "))
+					.await,
 				["hd"],
 				"play ignored its own --catalog-format"
 			);
