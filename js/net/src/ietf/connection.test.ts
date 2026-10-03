@@ -114,7 +114,7 @@ for (const [version, alpn] of [
 				expect(info.closeCode).toBe(SessionCode.ProtocolViolation);
 			} finally {
 				logged.mockRestore();
-				connection.close();
+				connection.abort();
 			}
 		});
 	}
@@ -145,7 +145,7 @@ test("SUBSCRIBE_TRACKS refuses only its request", async () => {
 			expect(refused.reasonPhrase).toBe("SUBSCRIBE_TRACKS is not supported");
 		}
 	} finally {
-		connection.close();
+		connection.abort();
 	}
 });
 
