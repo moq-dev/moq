@@ -29,5 +29,4 @@ names gain a trailing epoch segment.
 
 ## Required
 
-- [Epoch primitive](/quest/m1/epoch.md) - the shared `Epoch` type and path split
 - [Bounded stats aggregate](/quest/m1/stats-aggregate-bound.md) - retired nodes fold into a bounded total, which epochs churn

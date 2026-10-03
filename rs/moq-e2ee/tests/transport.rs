@@ -4,8 +4,9 @@ mod support;
 
 use std::time::Duration;
 
+use moq_e2ee::Credential;
 use moq_e2ee::credential::Config;
-use moq_e2ee::{Credential, Epoch};
+use moq_net::Epoch;
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
@@ -32,7 +33,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	})
 	.unwrap();
 	let generation = cred.generation(Epoch::mint());
-	let path = cred.path("meeting.hang").unwrap().join(generation.epoch().as_str());
+	let path = cred.path("meeting.hang").unwrap().join_epoch(Some(generation.epoch()));
 	let name = generation.name(track).unwrap();
 
 	let publisher = produce_origin(1);
@@ -50,7 +51,8 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	// The subscriber knows the opaque prefix and takes the epoch from the discovered path.
 	let consumer = consumer_origin.consume();
 	consumer.routed(&path).await.unwrap();
-	let epoch: Epoch = path.parts().last().unwrap().parse().unwrap();
+	let (_, epoch) = path.split_epoch();
+	let epoch = epoch.unwrap();
 	let generation = cred.generation(epoch);
 	let remote = consumer.request_broadcast(&path).await.unwrap();
 	let subscriber = remote

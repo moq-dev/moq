@@ -122,6 +122,25 @@ transport delivery, not that the peer application has finished processing it.
 IETF drafts 14 through 16 send their withdrawals on the shared control stream
 without waiting, since it has no FIN to acknowledge.
 
+### Publisher epochs
+
+An application can identify each publisher instance with a shared `Epoch` from
+`moq-net` or `@moq/net`. It is a lowercase hyphenated UUIDv7, ordered newest
+last, with its wall-clock creation time available as `Epoch::time()` in Rust
+or `Epoch.time(epoch)` in TypeScript. Minting is explicit; publishing does not
+add an epoch automatically.
+
+`Path::join_epoch(Some(&epoch))` and `Path.joinEpoch(name, epoch)` append an
+`@<uuidv7>` segment. `Path::split_epoch()` and `Path.splitEpoch(path)` return
+the name and optional epoch. Only the final segment and canonical UUIDv7 text
+count: `@alice`, bare UUIDs, uppercase UUIDs, and other UUID versions remain
+ordinary path segments. Existing path normalization still applies.
+
+The segment travels as part of the ordinary broadcast path on every supported
+wire version. Pattern grants still match the full path: `room/**` covers an
+epoch-qualified instance, while `room/camera` is an exact name. Epochs do not
+hide a broadcast; a leading `.` in a name segment still does.
+
 ### Hidden broadcasts
 
 A path segment starting with `.` hides a route from discovery, the way a
