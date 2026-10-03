@@ -1,7 +1,7 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
-import type { Effect } from "@moq/signals";
+import { Effect } from "@moq/signals";
 
 /**
  * A stable catalog producer that fans out to one or more network tracks.
@@ -19,8 +19,10 @@ import type { Effect } from "@moq/signals";
 export class CatalogProducer {
 	#value: Catalog.Root = { clock: pageClock() };
 	#outputs = new Set<Json.Snapshot.Producer<Catalog.Root>>();
+	#lastEstimate: number | undefined;
+	#pending: Effect | undefined;
 
-	/** Edit the catalog in place; the result is published to all current subscribers. */
+	/** Edit the catalog; estimate-only changes publish at most once a second with a trailing update. */
 	mutate(fn: (catalog: Catalog.Root) => void): void {
 		const value = structuredClone(this.#value);
 		fn(value);
@@ -36,8 +38,25 @@ export class CatalogProducer {
 				}
 			}
 		}
+		const estimateOnly = Json.deepEqual(structure(this.#value), structure(value));
+		const changed = !Json.deepEqual(this.#value, value);
 		this.#value = value;
-		for (const output of this.#outputs) output.update(value);
+		if (!changed || this.#outputs.size === 0) return;
+
+		const now = performance.now();
+		if (!estimateOnly || this.#lastEstimate === undefined || now >= this.#lastEstimate + 1000) {
+			this.#publish(estimateOnly || this.#pending !== undefined);
+		} else if (!this.#pending) {
+			this.#pending = new Effect();
+			this.#pending.timer(() => this.#publish(true), this.#lastEstimate + 1000 - now);
+		}
+	}
+
+	#publish(estimate: boolean): void {
+		this.#pending?.close();
+		this.#pending = undefined;
+		if (estimate) this.#lastEstimate = performance.now();
+		for (const output of this.#outputs) output.update(this.#value);
 	}
 
 	/**
@@ -58,8 +77,32 @@ export class CatalogProducer {
 		effect.cleanup(() => {
 			this.#outputs.delete(output);
 			output.finish();
+			if (this.#outputs.size === 0) {
+				this.#pending?.close();
+				this.#pending = undefined;
+				this.#lastEstimate = undefined;
+			}
 		});
 	}
+}
+
+// Strip only the schema's estimate fields, so config edits and arbitrary extension sections remain
+// immediate even when an extension happens to contain a property named jitter or delay.
+function structure(catalog: Catalog.Root): Catalog.Root {
+	const value = structuredClone(catalog);
+	for (const tracks of [
+		value.audio?.renditions,
+		value.video?.renditions,
+		value.text?.renditions,
+		value.json?.tracks,
+		value.binary?.tracks,
+	]) {
+		for (const config of Object.values(tracks ?? {})) {
+			delete config.jitter;
+			delete config.delay;
+		}
+	}
+	return value;
 }
 
 /** Every track's advertised `field`, by section and then track name. */
