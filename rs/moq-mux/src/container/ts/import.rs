@@ -713,8 +713,11 @@ impl<E: catalog::Catalog> Import<E> {
 	/// Refuse one damaged unit without changing any other PID or the program clock.
 	fn damage(&mut self, pid: Pid, err: &anyhow::Error) -> anyhow::Result<()> {
 		self.pending.remove(&pid);
-		if let Some(stream) = self.streams.get_mut(&pid) {
-			stream.lost()?;
+		match self.streams.get_mut(&pid) {
+			// Nothing is imported from it, so there is nothing to refuse or report.
+			Some(Stream::Ignored) => return Ok(()),
+			Some(stream) => stream.lost()?,
+			None => {}
 		}
 		*self.damaged.entry(pid.as_u16()).or_default() += 1;
 		tracing::warn!(pid = pid.as_u16(), error = %err, "dropped a damaged TS unit");
@@ -958,9 +961,12 @@ impl<E: catalog::Catalog> Import<E> {
 				.and_modify(|retired| retired.merge(&current))
 				.or_insert(current);
 		}
+		// A dedicated PCR PID routes no stream, so its damage gets a clock-only row.
+		for (&pid, &damaged) in &self.damaged {
+			streams.entry(pid).or_insert_with(|| StreamStats::new("")).damaged = damaged;
+		}
 		for (pid, stats) in &mut streams {
 			(stats.units, stats.quiet) = self.liveness.stream(*pid);
-			stats.damaged = self.damaged.get(pid).copied().unwrap_or_default();
 		}
 		let mut stats = Stats {
 			streams,
@@ -6181,6 +6187,7 @@ pub(super) mod test {
 		packet[5] = 0x90;
 		import.decode(&packet).unwrap();
 		assert!(import.last_pts.is_some(), "a malformed field reset the program clock");
+		assert_eq!(import.stats().streams[&PCR].damaged, 1);
 	}
 
 	/// A malformed unbounded PES drained at EOF is still refused and counted.
