@@ -2,8 +2,9 @@
 //! mapped into the HTTP/3 WebTransport code space, so other raw QUIC MoQ stacks
 //! read it.
 //!
-//! The peer here is a plain QUIC client. The server refuses a uni stream opened
+//! The peer here is a plain QUIC client. A moq-lite server refuses a uni stream opened
 //! ahead of the SETUP with STOP_SENDING, and the client reads that code off the wire.
+//! moq-transport holds such a stream instead, but its codes take the same raw session.
 
 #![cfg(feature = "noq")]
 
@@ -11,7 +12,7 @@ use std::{sync::Arc, time::Duration};
 
 use web_transport_moq::noq;
 
-/// moq-lite and moq-transport both send INTERNAL_ERROR (0x0) for a refused stream.
+/// moq-lite sends INTERNAL_ERROR (0x0) for a refused stream.
 const REFUSED: u32 = 0x0;
 
 struct Server {
@@ -89,7 +90,7 @@ async fn refused_code(server: &Server, alpn: &str) -> Option<noq::VarInt> {
 		.await
 		.expect("handshake");
 
-	// A group stream on moq-lite, and anything but SETUP on moq-transport.
+	// A group stream, which moq-lite refuses before the SETUP.
 	let mut send = conn.open_uni().await.expect("open");
 	send.write_all(&[0x00]).await.expect("write");
 
@@ -102,12 +103,5 @@ async fn refused_code(server: &Server, alpn: &str) -> Option<noq::VarInt> {
 #[tokio::test]
 async fn a_refused_stream_code_is_not_mapped() {
 	let server = serve().await;
-
-	for alpn in ["moq-lite-06", "moqt-17"] {
-		assert_eq!(
-			refused_code(&server, alpn).await,
-			Some(REFUSED.into()),
-			"{alpn} mapped the stream code"
-		);
-	}
+	assert_eq!(refused_code(&server, "moq-lite-06").await, Some(REFUSED.into()));
 }
