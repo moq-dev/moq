@@ -8,10 +8,13 @@ frame's timestamp. A front then reveals an idle track's hidden cache as soon as
 the next route answers, and every reader's budget judges that cache against the
 real live edge, even across a gap.
 
-Today a front decides from the route's resolved start alone (since
-[#4741](https://github.com/moq-dev/moq/pull/4741)): a start at most one past the
-cache's newest group brings the cache back, and a start past a gap leaves it
-fetch-only, because nothing bounds how old it is. A sparse track that delivers
+Today (since [#4741](https://github.com/moq-dev/moq/pull/4741)) a front brings a
+hidden group back only once the serving route delivers it again, which a route
+answering a subscription does at once for the group it is on: a quiet catalog
+or an open log returns, but older cached groups that a reader's budget would
+still accept stay fetch-only. The route's resolved start was tried as the
+signal and dropped: lite-05 answers before its SUBSCRIBE_START, and a shared
+copy reports an older subscription's start. A sparse track that delivers
 nothing for a while must still be judged on the answer, never on a frame.
 
 ## Plan
@@ -35,16 +38,16 @@ Decided in planning (2026-10-03):
   is absent, encoded the same way as an absent frame timestamp. A track whose
   frames are all untimed never reports one, and no receiver invents one.
 - **lite-07 only.** It is still WIP (`moq-lite-07-wip`), so the field is added
-  without negotiation. Older versions keep the start rule.
+  without negotiation. Older versions keep revealing only what is delivered again.
 - **API: `track::Subscriber::live().await`** resolves once the route answers the
   subscription, to `Live { start, latest: Option<Position>, time: Option<Timestamp> }`:
   the resolved start, the newest group/frame, and the live media time. Mirrored in
   js/net. The front's pump switches to it from the crate-private
   `track::Consumer::poll_start`, which is deleted.
-- **The front's unpark** reveals the hidden cache when the answer carries a live
-  time, and readers' budgets measure staleness against it instead of the
-  cache's frozen edge. Without one (untimed, older version), the start rule
-  stays.
+- **The front's unpark** reveals the whole hidden cache when the answer carries
+  a live time, and readers' budgets measure staleness against it instead of the
+  cache's frozen edge. Without one (untimed, older version), only groups the
+  route delivers again come back, as today.
 - **Independent of [Subscribe ranges](/quest/m1/subscribe-ranges/README.md)**,
   which rewrites the same messages: whichever lands second rebases.
 - `js/watch/src/sync.ts` stays as it is: its latency range (from #1620) is
