@@ -2,15 +2,13 @@
 
 ## Goal
 
-A moq-transport relay can join a cluster as a peer again, through an
-extended `draft-lcurley-moq-cluster`, and never splices one pool member's
-content onto another's.
+A moq-transport relay joins a cluster as a peer through an extended
+`draft-lcurley-moq-cluster`, and never splices one pool member's content onto
+another's.
 
 ## Plan
 
-Replaces the wildcard line's "Cluster origin reply" quest. Until this lands,
-moq-transport peers are plain clients
-([moq-transport peers are plain clients](/quest/m1/ietf-cluster-off.md)).
+Replaces the wildcard line's "Cluster origin reply" quest.
 
 The extension must carry what a lite cluster link carries by then:
 

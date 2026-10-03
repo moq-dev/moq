@@ -83,8 +83,7 @@ vector the 2026-09-30 cache-tiers audit kept:
 Kept from 2026-09-30: core links are configured and may skip PoPs; Warm and
 Cold collapse to one cost ([One route cost](/quest/m1/route-cost.md));
 epoch-qualified paths are a source's identity
-([Selection](/quest/m1/cluster-routing/selection.md)); cluster links are
-moq-lite only ([moq-transport peers are plain clients](/quest/m1/ietf-cluster-off.md));
+([Selection](/quest/m1/cluster-routing/selection.md));
 `--hop` removal and One route cost land on their own.
 Anything specific to moq.pro's deployment is planned in moq.pro.
 
