@@ -83,6 +83,30 @@ downstream sees it. A sparse stream such as SCTE-35 goes quiet between cues, so
 the line reports rather than alarms; `Import::stats` carries the same counters
 for a caller that sets its own limit.
 
+`import ts` also counts the ETSI TR 101 290 errors of the feed it receives, at
+that standard's fixed limits: `TS_sync_loss`, `Sync_byte_error`, `PAT_error`,
+`Continuity_count_error`, `PMT_error`, `Transport_error`, `CRC_error` (PAT and
+PMT), `PCR_repetition_error`, `PCR_discontinuity_indicator_error` and
+`PTS_error`. They are cumulative, logged with their totals in the sample after
+any of them moves, and carried on `Import::stats` stream-wide and per PID. They
+change nothing that is published. They grade the stream as it reached the
+importer, not the wire a receiver sees downstream, and the PCR checks grade
+consecutive PCR values rather than arrival times, so they speak for the encoder
+and not for the network in front of the importer. Table, PCR and PTS intervals
+run on the program clock, which starts at the first PCR after the PMT.
+`PID_error` is covered, more strictly, by the access-unit counts above.
+`PCR_accuracy_error` is not measured.
+
+A corrupt media packet, malformed PES header, or damaged codec access unit is
+refused whole and counted in the PID's cumulative `damaged` counter, beside
+`resyncs`, `discarded`, and `unconfirmed`. Ingest continues on every other PID.
+Video closes its group at the break and resumes at its next keyframe, as it does
+after a continuity-counter gap: the pictures in between may reference the lost
+one, so they are dropped rather than decoded with artefacts. Each break freezes
+video for up to one GOP. The shared TS stats log reports each counter increase,
+including at the end of input. Publishing, catalog, and clock errors still end
+the import.
+
 MPEG-TS import takes one program. A multi-program stream is refused before
 anything is published, naming its programs, rather than merged onto one clock;
 a PAT that adds a program mid-stream ends the import the same way.

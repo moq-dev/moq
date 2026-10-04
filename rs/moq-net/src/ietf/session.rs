@@ -1658,6 +1658,60 @@ mod tests {
 		}
 	}
 
+	/// The bidi dispatcher closes the session for an unknown full-width message type.
+	#[tokio::test(start_paused = true)]
+	async fn an_unknown_bidi_type_closes_the_session() {
+		for version in [
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			for kind in [0u64, 1 << 53] {
+				let mut payload = Vec::new();
+				kind.encode(&mut payload, version).unwrap();
+				0u16.encode(&mut payload, version).unwrap();
+				let session =
+					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![payload]);
+				let log = session.log.clone();
+				let (driver, _goaway) = start(Config {
+					runtime: crate::time::Clock::tokio(),
+					session,
+					setup: None,
+					request_id_max: None,
+					client: false,
+					publish: None,
+					subscribe: None,
+					peer_hop: None,
+					cost: None,
+					version,
+					path: None,
+					authority: None,
+					peer_setup_stream: None,
+					peer_declared: Some(peer::Peer::default()),
+					early_unis: Vec::new(),
+				})
+				.unwrap();
+
+				let err = tokio::time::timeout(std::time::Duration::from_secs(10), driver)
+					.await
+					.expect("unknown bidi type must end the session")
+					.expect_err("unknown bidi type must fail the session");
+				assert_eq!(
+					SessionError::from(&err),
+					SessionError::ProtocolViolation,
+					"{version:?}: {kind:#x}"
+				);
+				assert_eq!(
+					log.closes(),
+					vec![(SessionError::ProtocolViolation.to_code(), err.to_string())]
+				);
+			}
+		}
+	}
+
 	/// A peer's advertisement of `room/host`, then two namespace-keyed withdrawals of it.
 	/// The second has no advertisement left to name.
 	async fn publish_namespace_then_two_withdrawals(version: Version) -> Vec<u8> {

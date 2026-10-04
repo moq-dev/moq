@@ -65,4 +65,3 @@ subscribers end and resubscribe rather than splice.
 
 - [Upstream links](/quest/m1/cluster-routing/transit.md) - the edges and cores this spreads over
 - [Wildcard](/quest/m0/wildcard/README.md) - the longest-prefix rule, pool spread, and reply identity this builds on
-- [Epoch primitive](/quest/m1/epoch.md) - parses the `@<uuidv7>` segment that makes a path a source identity

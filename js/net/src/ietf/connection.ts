@@ -252,17 +252,18 @@ export class Connection implements Established {
 	 * Matches the lite module's runBidi pattern.
 	 */
 	async #runBidi(stream: Stream) {
-		const typeId = await stream.reader.u53();
+		// Full width, so unknown types above 2^53 still reach protocol classification.
+		const typeId = await stream.reader.u62();
 
 		switch (typeId) {
 			// Draft-18 SUBSCRIBE_NAMESPACE (0x50) and the legacy 0x11 message decode
 			// to the same request_id + namespace; the legacy options field is ignored.
-			case SubscribeNamespace.id: {
+			case BigInt(SubscribeNamespace.id): {
 				const msg = await SubscribeNamespace.decode(stream.reader, this.#session.version);
 				await this.#publisher.runSubscribeNamespace(msg, stream);
 				break;
 			}
-			case SubscribeNamespaceLegacy.id: {
+			case BigInt(SubscribeNamespaceLegacy.id): {
 				const legacy = await SubscribeNamespaceLegacy.decode(stream.reader, this.#session.version);
 				const msg = new SubscribeNamespace({
 					requestId: legacy.requestId,
@@ -272,18 +273,18 @@ export class Connection implements Established {
 				await this.#publisher.runSubscribeNamespace(msg, stream);
 				break;
 			}
-			case SubscribeUpdate.id: {
+			case BigInt(SubscribeUpdate.id): {
 				// REQUEST_UPDATE (0x02) is a follow-up, not a valid initial message
 				stream.abort(new Error("unexpected REQUEST_UPDATE as initial message"));
 				break;
 			}
 			// Publisher handles incoming requests
-			case Subscribe.id: {
+			case BigInt(Subscribe.id): {
 				const msg = await Subscribe.decode(stream.reader, this.#session.version);
 				await this.#publisher.runSubscribe(msg, stream);
 				break;
 			}
-			case SUBSCRIBE_TRACKS_ID: {
+			case BigInt(SUBSCRIBE_TRACKS_ID): {
 				// 0x51 is only a message from draft-18 on.
 				if (this.#session.version < Version.DRAFT_18) {
 					throw new ProtocolViolation("SUBSCRIBE_TRACKS before draft-18");
@@ -291,19 +292,19 @@ export class Connection implements Established {
 				await this.#publisher.runSubscribeTracks(stream);
 				break;
 			}
-			case TrackStatusRequest.id: {
+			case BigInt(TrackStatusRequest.id): {
 				const msg = await TrackStatusRequest.decode(stream.reader, this.#session.version);
 				await this.#publisher.runTrackStatusRequest(msg, stream);
 				break;
 			}
-			case Fetch.id: {
+			case BigInt(Fetch.id): {
 				const msg = await Fetch.decode(stream.reader, this.#session.version);
 				await this.#publisher.runFetch(msg, stream);
 				break;
 			}
 
 			// Subscriber handles incoming notifications
-			case PublishNamespace.id: {
+			case BigInt(PublishNamespace.id): {
 				const msg = await PublishNamespace.decode(
 					stream.reader,
 					this.#session.version,
@@ -332,15 +333,14 @@ export class Connection implements Established {
 				await this.#subscriber.runPublishNamespace(msg, stream);
 				break;
 			}
-			case Publish.id: {
+			case BigInt(Publish.id): {
 				const msg = await Publish.decode(stream.reader, this.#session.version);
 				await this.#subscriber.runPublish(msg, stream);
 				break;
 			}
 
 			default:
-				console.warn(`unexpected bidi stream type: 0x${typeId.toString(16)}`);
-				stream.abort(new Error("unexpected stream type"));
+				throw new ProtocolViolation(`unknown bidi stream type: 0x${typeId.toString(16)}`);
 		}
 	}
 

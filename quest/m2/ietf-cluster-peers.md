@@ -18,7 +18,7 @@ The extension must carry what a lite cluster link carries by then:
   Publishers of One Namespace" section changes with it.
 - The route layer of the [cluster routing line](/quest/m1/cluster-routing/README.md)
   (per-node ROUTEs with seqno and metric, path-less announces, the down-only
-  bit) and its selection, since cluster links are lite-only there.
+  bit) and its selection.
 
 Test: two workers behind a pool relay behind a moq-transport downstream relay;
 killing the serving worker ends the downstream subscription rather than
