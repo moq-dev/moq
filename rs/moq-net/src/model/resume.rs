@@ -226,6 +226,8 @@ struct Copy {
 	/// Held by every group handed out from this copy, so a replaced copy stays
 	/// subscribed while one is still read.
 	lease: Arc<()>,
+	/// A group taken from a replaced copy as it was let go, for the next group read.
+	held: Option<group::Consumer>,
 }
 
 enum Sub {
@@ -268,9 +270,10 @@ impl Copy {
 		Poll::Ready(Ok(sub))
 	}
 
-	/// Whether this copy is still needed: it serves, or a group read from it is still out.
+	/// Whether this copy is still needed: it serves, or a group read from it is still out
+	/// or held.
 	fn needed(&self, serving: bool) -> bool {
-		serving || (Arc::strong_count(&self.lease) > 1 && self.done.is_none())
+		serving || (self.done.is_none() && (Arc::strong_count(&self.lease) > 1 || self.held.is_some()))
 	}
 }
 
@@ -436,13 +439,39 @@ impl Reader {
 			datagrams_done: None,
 			datagrams_seen: self.datagram,
 			lease: Arc::new(()),
+			held: None,
 		});
 	}
 
 	/// Drop the replaced copies nothing is read from any more.
 	fn let_go(&mut self) {
 		let serving = self.generation;
+		for index in 0..self.copies.len() {
+			let copy = &self.copies[index];
+			if copy.done.is_none() && !copy.needed(Some(copy.generation) == serving) {
+				self.hold(index);
+			}
+		}
 		self.copies.retain(|copy| copy.needed(Some(copy.generation) == serving));
+	}
+
+	/// Take a group a replaced copy still has for the reader before letting it go: the
+	/// datagram channel lets go too, and must not drop what the group channel has yet to read.
+	fn hold(&mut self, index: usize) {
+		let groups = self.groups;
+		let waiter = kio::Waiter::noop();
+		loop {
+			let Poll::Ready(Ok(sub)) = self.copies[index].poll_ready(groups, &waiter) else {
+				return;
+			};
+			let Poll::Ready(Ok(Some(group))) = sub.poll_recv_group(&waiter) else {
+				return;
+			};
+			if self.deliverable(&self.copies[index], group.sequence) {
+				self.copies[index].held = Some(group);
+				return;
+			}
+		}
 	}
 
 	fn deliverable(&self, copy: &Copy, sequence: u64) -> bool {
@@ -502,6 +531,12 @@ impl Reader {
 			let copy = &mut self.copies[index];
 			if copy.done.is_some() {
 				continue;
+			}
+			if let Some(group) = copy.held.take()
+				&& self.deliverable(&self.copies[index], group.sequence)
+			{
+				let group = self.hand_out(index, group, ordered);
+				return Some(Poll::Ready(Ok(Some(group))));
 			}
 			loop {
 				let copy = &mut self.copies[index];
@@ -1450,6 +1485,30 @@ mod test {
 			sub.recv_datagram().now_or_never().unwrap().unwrap().unwrap().sequence,
 			1
 		);
+	}
+
+	/// Datagrams and groups are independent channels: reading datagrams first must not
+	/// release a replaced copy whose buffered groups the reader has yet to read.
+	#[test]
+	fn datagram_reads_keep_unread_groups_on_a_replaced_copy() {
+		for datagrams_first in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_secs(10));
+			assert!(sub.recv_datagram().now_or_never().is_none());
+			let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+			group.write_frame(ts(0), b"a0".as_ref()).unwrap();
+			let b = copy();
+			routes.serve(b.consume());
+			if datagrams_first {
+				assert!(sub.recv_datagram().now_or_never().is_none());
+			}
+			let mut next = recv(&mut sub);
+			assert_eq!(next.sequence, 0, "datagrams_first={datagrams_first}");
+			assert_eq!(read(&mut next), Some(b"a0".to_vec()));
+		}
 	}
 
 	#[test]
