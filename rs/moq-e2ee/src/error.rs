@@ -4,7 +4,7 @@
 #[derive(thiserror::Error, Debug, Clone)]
 #[non_exhaustive]
 pub enum Error {
-	/// An integer is outside the profile bounds, a `bytes` field exceeds 65535, an epoch is empty or contains `/`, or a name is not 22 base64url characters.
+	/// An integer is outside the profile bounds, a `bytes` field exceeds 65535, or a name is not 22 base64url characters.
 	#[error("identity")]
 	Identity,
 

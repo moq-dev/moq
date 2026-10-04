@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/moq-dev/moq/compare/moq-relay-v0.16.0...moq-relay-v0.17.0) - 2026-10-03
+
+### Added
+
+- *(relay)* drain sessions gracefully over GOAWAY ([#4132](https://github.com/moq-dev/moq/pull/4132))
+- *(tokio)* default QUIC idle timeout to 10s ([#4606](https://github.com/moq-dev/moq/pull/4606))
+- *(tokio)* deadline accepted handshakes and relay HTTP headers ([#4612](https://github.com/moq-dev/moq/pull/4612))
+
+### Fixed
+
+- *(net)* a subscriber hands its cursors off to a park's cache ([#4698](https://github.com/moq-dev/moq/pull/4698))
+- *(relay)* [**breaking**] remove cluster gossip discovery ([#4601](https://github.com/moq-dev/moq/pull/4601))
+
 ## [0.16.0](https://github.com/moq-dev/moq/compare/moq-relay-v0.15.8...moq-relay-v0.16.0) - 2026-09-30
 
 ### Added

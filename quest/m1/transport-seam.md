@@ -48,4 +48,3 @@ Wire: none.
 ## Related
 
 - [Sans-IO moq-net](/quest/m1/rs2ts/sans-io/README.md) - builds on the same seam
-- [Raw stream codes](/quest/m1/raw-stream-codes.md) - the trait bump that exposed this

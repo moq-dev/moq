@@ -6,7 +6,9 @@ import { Stream, Writer } from "../stream.ts";
 import { Connection } from "./connection.ts";
 import { Group } from "./object.ts";
 import { SetupOption, SetupOptions } from "./parameters.ts";
+import { RequestError } from "./request.ts";
 import { Setup } from "./setup.ts";
+import { SUBSCRIBE_TRACKS_ID } from "./subscribe_namespace.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 const PADDING = 0x132b3e28n;
@@ -78,6 +80,72 @@ test("an unknown uni stream type closes the session", async () => {
 			logged.mockRestore();
 			connection.abort();
 		}
+	}
+});
+
+/** Unknown bidi message types close the session, including full-width varints. */
+for (const [version, alpn] of [
+	[Version.DRAFT_17, ALPN.DRAFT_17],
+	[Version.DRAFT_18, ALPN.DRAFT_18],
+	[Version.DRAFT_19, ALPN.DRAFT_19],
+	[Version.DRAFT_20, ALPN.DRAFT_20],
+	[Version.DRAFT_21, ALPN.DRAFT_21],
+	[Version.DRAFT_22, ALPN.DRAFT_22],
+] as const) {
+	for (const type of [0n, 2n ** 53n]) {
+		test(`unknown bidi type 0x${type.toString(16)} closes ${alpn}`, async () => {
+			const logged = spyOn(console, "error").mockImplementation(() => void 0);
+			const pair = createMockTransportPair(alpn);
+			const control = await Stream.open(pair.server, { version });
+			const connection = new Connection({
+				url: new URL("https://example.com"),
+				quic: pair.server,
+				control,
+				maxRequestId: 100n,
+				version,
+				client: false,
+			});
+
+			try {
+				const stream = await Stream.open(pair.client, { version });
+				await stream.writer.u62(type);
+
+				const info = await pair.client.closed;
+				expect(info.closeCode).toBe(SessionCode.ProtocolViolation);
+			} finally {
+				logged.mockRestore();
+				connection.abort();
+			}
+		});
+	}
+}
+
+/** A defined but unsupported request is refused without closing the session. */
+test("SUBSCRIBE_TRACKS refuses only its request", async () => {
+	const version = Version.DRAFT_19;
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const control = await Stream.open(pair.server, { version });
+	const connection = new Connection({
+		url: new URL("https://example.com"),
+		quic: pair.server,
+		control,
+		maxRequestId: 100n,
+		version,
+		client: false,
+	});
+
+	try {
+		// A second refusal proves the first left the session usable.
+		for (let i = 0; i < 2; i++) {
+			const stream = await Stream.open(pair.client, { version });
+			await stream.writer.u62(BigInt(SUBSCRIBE_TRACKS_ID));
+			expect(await stream.reader.u53()).toBe(RequestError.id);
+			const refused = await RequestError.decode(stream.reader, version);
+			expect(refused.errorCode).toBe(0x3);
+			expect(refused.reasonPhrase).toBe("SUBSCRIBE_TRACKS is not supported");
+		}
+	} finally {
+		connection.abort();
 	}
 });
 

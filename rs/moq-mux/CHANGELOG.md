@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.10](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.9...moq-mux-v0.10.10) - 2026-10-03
+
+### Added
+
+- *(moq-mux)* per-program SI for a selected TS program ([#4580](https://github.com/moq-dev/moq/pull/4580))
+- *(mux)* implement catalog::Stream for Box<S> ([#4677](https://github.com/moq-dev/moq/pull/4677))
+- *(mux)* export clock::Anchor and clock::Lane ([#4667](https://github.com/moq-dev/moq/pull/4667))
+- *(mux)* report each TS elementary stream's access units at export ([#4577](https://github.com/moq-dev/moq/pull/4577))
+- *(moq-mux)* own the TS demux and reassemble PSI across packets ([#4584](https://github.com/moq-dev/moq/pull/4584))
+
+### Fixed
+
+- *(mux)* skip a blocked group by its reach, not its first frame ([#4652](https://github.com/moq-dev/moq/pull/4652))
+- *(hls)* an estimated framerate keeps the rendition ([#4641](https://github.com/moq-dev/moq/pull/4641))
+- *(moq-mux)* keep the TS export hold across a rewind ([#4618](https://github.com/moq-dev/moq/pull/4618))
+
 ## [0.10.9](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.8...moq-mux-v0.10.9) - 2026-09-30
 
 ### Added

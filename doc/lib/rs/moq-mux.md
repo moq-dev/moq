@@ -25,6 +25,15 @@ the inverse and skip stalled groups past a max age. Per-codec
 producers (`import::Opus`, H.264, and so on) are available for feeding frames
 you already have.
 
+MPEG-TS `Import::stats` returns cumulative per-PID `StreamStats`: delivered
+`units`, transport-clock `quiet` time, audio `resyncs`, scanned bytes `discarded`,
+frames `unconfirmed`, damaged units refused in `damaged`, and the PID's share of
+the TR 101 290 counters. A malformed media packet, PES header, or codec unit is
+dropped whole; only that PID loses sync, and video closes its group at the break
+and waits for its next keyframe. Publishing and catalog failures remain
+fatal. `ts::stats::Log` reports these counters for both the CLI and SRT gateway.
+The exporter's `damaged` count remains zero.
+
 fMP4 export emits one fragment per publisher group by default, including audio.
 A closed group flushes even if the live publisher pauses before its next frame.
 `fmp4::Export::with_fragment_duration` adds an explicit duration cap. A zero cap
@@ -42,8 +51,12 @@ retires the entry. Calling `modify` before the first `set` returns
 measure batch span or reorder delay for jitter. Locally encoded frames call
 `container::Producer::flush(timestamp, Instant::now())`; jitter is the spread
 above that track's own recent minimum lateness, and delay is how far that
-minimum trails the earliest track on the same catalog. Both are published as
-soon as they rise. `import::Track::discontinuity()` marks a source seek or
+minimum trails the earliest track on the same catalog. The first rise publishes
+the catalog at once; later rises within a second stay in the catalog and go out
+with the first frame after that second, or with any earlier structural edit.
+There is no timer, so a rise held when media stops waits for the next frame,
+and `finish` does not publish it.
+`import::Track::discontinuity()` marks a source seek or
 pause, clears partial input, and restarts the flush baseline without lowering
 advertised values. It forwards the container timeline marker, so resumed
 timestamps must continue forward on the broadcast clock. Generic imports remain

@@ -98,20 +98,24 @@ impl Programs {
 	/// Every program's counters in one map: PIDs are unique across a multiplex.
 	///
 	/// Every importer reads the same PAT, and programs sharing a PMT PID read the same PMT
-	/// sections, so a dropped section counts once however many read it.
+	/// sections, so a dropped section counts once however many read it. Every importer also
+	/// grades every packet of the multiplex, so each TR 101 290 error counts once too.
 	pub fn stats(&self) -> Stats {
 		let mut stats = Stats::default();
 		let mut crc_errors = BTreeMap::<u16, u64>::new();
+		let mut errors = super::health::Errors::default();
 		for program in &self.programs {
 			stats.streams.extend(program.import.stats().streams);
 			for (&pid, &count) in program.import.crc_errors() {
 				let merged = crc_errors.entry(pid).or_default();
 				*merged = (*merged).max(count);
 			}
+			errors.max(program.import.errors());
 		}
 		// The importers only see the PATs after the one that started them.
 		*crc_errors.entry(Pid::PAT).or_default() += self.scan.crc_error;
 		stats.crc_error = crc_errors.values().sum();
+		errors.report(&mut stats);
 		stats
 	}
 
