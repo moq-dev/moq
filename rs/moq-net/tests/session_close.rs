@@ -29,14 +29,14 @@ struct Setup {
 	_broadcast: moq_net::broadcast::Producer,
 }
 
-async fn setup() -> Setup {
+async fn setup(version: &str) -> Setup {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast.create_track("video", None).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let subscriber = produce_origin(2);
-	let mut options = MockConnectOptions::new("moq-lite-05".parse::<Version>().unwrap());
+	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 	options.client_publish = Some(publisher.consume());
 	options.server_subscribe = Some(subscriber.clone());
 	let pair = connect_mock(options).await;
@@ -88,9 +88,18 @@ async fn setup() -> Setup {
 /// close is requested before the session wrote them.
 #[tokio::test(start_paused = true)]
 async fn close_delivers_a_finished_track() {
+	close_delivers_a_finished_track_for("moq-lite-05").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn ietf_close_delivers_a_finished_track() {
+	close_delivers_a_finished_track_for("moq-transport-20").await;
+}
+
+async fn close_delivers_a_finished_track_for(version: &str) {
 	let Setup {
 		pair, track, reader, ..
-	} = setup().await;
+	} = setup(version).await;
 
 	let mut group = track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, b"last".as_slice()).unwrap();
@@ -119,9 +128,18 @@ async fn close_delivers_a_finished_track() {
 /// session closes anyway.
 #[tokio::test(start_paused = true)]
 async fn close_gives_up_on_a_live_track() {
+	close_gives_up_on_a_live_track_for("moq-lite-05").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn ietf_close_gives_up_on_a_live_track() {
+	close_gives_up_on_a_live_track_for("moq-transport-20").await;
+}
+
+async fn close_gives_up_on_a_live_track_for(version: &str) {
 	let Setup {
 		pair, track: _track, ..
-	} = setup().await;
+	} = setup(version).await;
 
 	let started = tokio::time::Instant::now();
 	let res = tokio::time::timeout(TIMEOUT, pair.client.close())
@@ -134,9 +152,18 @@ async fn close_gives_up_on_a_live_track() {
 /// An abort from another handle cuts a drain short.
 #[tokio::test(start_paused = true)]
 async fn abort_cuts_a_drain_short() {
+	abort_cuts_a_drain_short_for("moq-lite-05").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn ietf_abort_cuts_a_drain_short() {
+	abort_cuts_a_drain_short_for("moq-transport-20").await;
+}
+
+async fn abort_cuts_a_drain_short_for(version: &str) {
 	let Setup {
 		pair, track: _track, ..
-	} = setup().await;
+	} = setup(version).await;
 
 	let other = pair.client.clone();
 	let started = tokio::time::Instant::now();

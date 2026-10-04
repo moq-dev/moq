@@ -76,7 +76,16 @@ pub struct Config<S: crate::transport::poll::Session> {
 pub(crate) struct Driver {
 	pub(crate) withdrawal: crate::session::Withdrawal,
 	pub(crate) local_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
+	// Dispatched SUBSCRIBE and FETCH serves still owing the peer data.
+	owed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 	future: MaybeSendBox<'static, Result<(), Error>>,
+}
+
+impl Driver {
+	/// Whether withdrawals and dispatched serves have reached the peer.
+	pub(crate) fn drained(&self) -> bool {
+		self.withdrawal.drained() && self.owed.load(std::sync::atomic::Ordering::Relaxed) == 0
+	}
 }
 
 impl std::future::Future for Driver {
@@ -122,6 +131,8 @@ where
 	let withdrawing = withdrawal.clone();
 	let local_close = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 	let closing = local_close.clone();
+	let owed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+	let serving = owed.clone();
 	let driver = async move {
 		// Our own Hop ID, taken from whichever origin the caller actually supplied so
 		// every session out of this process stamps the same one and cross-session loop
@@ -171,6 +182,7 @@ where
 				);
 				let (tasks, mut task_set) = TaskSet::new();
 				publisher.withdrawal = withdrawing.clone();
+				publisher.owed = serving.clone();
 
 				let subscriber = Subscriber::new(
 					runtime.clone(),
@@ -338,6 +350,7 @@ where
 				);
 				let (tasks, mut task_set) = TaskSet::new();
 				publisher.withdrawal = withdrawing.clone();
+				publisher.owed = serving.clone();
 
 				let subscriber = Subscriber::new(
 					runtime.clone(),
@@ -483,6 +496,7 @@ where
 		Driver {
 			withdrawal,
 			local_close,
+			owed,
 			future: driver,
 		},
 		goaway_handle,

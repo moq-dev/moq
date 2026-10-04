@@ -170,8 +170,7 @@ impl Session {
 	/// is still live never finishes, so finish or abort tracks before closing.
 	///
 	/// Both protocols withdraw this session's announcements and wait for their
-	/// delivery. IETF drafts 14 through 16 send withdrawals without waiting, and
-	/// IETF media streams are not drained yet.
+	/// delivery. IETF drafts 14 through 16 send withdrawals without waiting.
 	pub async fn close(self) -> Result<(), Error> {
 		if let Ok(mut close) = self.close.write()
 			&& close.is_none()

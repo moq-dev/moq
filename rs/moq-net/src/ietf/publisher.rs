@@ -5,7 +5,7 @@ use std::{
 	ops::Bound,
 	sync::{
 		Arc,
-		atomic::{AtomicU64, Ordering},
+		atomic::{AtomicU64, AtomicUsize, Ordering},
 	},
 	task::{Poll, ready},
 	time::Duration,
@@ -330,6 +330,16 @@ pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	// Shared across request handlers; None marks a dispatched subscription still resolving.
 	joins: kio::Shared<HashMap<RequestId, Option<Joined>>>,
 	version: Version,
+	// Dispatched finite serves, including those not yet polled.
+	pub(super) owed: Arc<AtomicUsize>,
+}
+
+struct Serve(Arc<AtomicUsize>);
+
+impl Drop for Serve {
+	fn drop(&mut self) {
+		self.0.fetch_sub(1, Ordering::Relaxed);
+	}
 }
 
 /// The snapshot a joining FETCH inherits from its subscription.
@@ -386,6 +396,7 @@ where
 			peer_setup,
 			joins: Default::default(),
 			version,
+			owed: Default::default(),
 		}
 	}
 
@@ -470,6 +481,11 @@ where
 		stream: Stream<S, Version>,
 	) -> Result<MaybeSendBox<'static, ()>, Error> {
 		let this = self.clone();
+		// Count at dispatch so close cannot pass a request waiting for its first poll.
+		let serve = matches!(id, ietf::Subscribe::ID | ietf::Fetch::ID).then(|| {
+			self.owed.fetch_add(1, Ordering::Relaxed);
+			Serve(self.owed.clone())
+		});
 		let task = match id {
 			ietf::Subscribe::ID => {
 				let msg = ietf::Subscribe::decode_msg(&mut data, this.version)?;
@@ -479,6 +495,7 @@ where
 				tracing::debug!(message = ?msg, "received subscribe");
 				let task = this.run_subscribe_stream(stream, msg);
 				async move {
+					let _serve = serve;
 					if let Err(err) = task.await {
 						tracing::debug!(%err, "subscribe stream error");
 					}
@@ -492,6 +509,7 @@ where
 				}
 				tracing::debug!(message = ?msg, "received fetch");
 				async move {
+					let _serve = serve;
 					if let Err(err) = this.run_fetch_stream(stream, msg).await {
 						tracing::debug!(%err, "fetch stream error");
 					}
@@ -3323,6 +3341,64 @@ mod serve_tests {
 				group.finish().unwrap();
 				assert!(futures::poll!(run.as_mut()).is_pending());
 				assert_eq!(occurrences(&h.log, b"after FIN"), 1, "{version}");
+			}
+		}
+	}
+
+	/// A close must count requests before their first poll and release them even
+	/// when a dispatched task is cancelled or its message is refused.
+	#[tokio::test(start_paused = true)]
+	async fn drain_counts_dispatched_subscribe_and_fetch() {
+		for version in [Version::Draft14, Version::Draft19, Version::Draft20] {
+			let h = serve(version);
+			let mut subscribe_body = bytes::BytesMut::new();
+			subscribe(Filter::NextObject, None)
+				.encode_msg(&mut subscribe_body, version)
+				.unwrap();
+			let mut fetch_body = bytes::BytesMut::new();
+			ietf::Fetch {
+				request_id: FETCH_ID,
+				subscriber_priority: 128,
+				group_order: GroupOrder::Ascending,
+				// Draft-20 dropped the Fetch Type tag, leaving only the filtered form.
+				fetch_type: match version {
+					Version::Draft20 => FetchType::Filtered {
+						namespace: crate::Path::new("missing"),
+						track: "video".into(),
+						filter: Filter::Unfiltered,
+					},
+					_ => FetchType::Standalone {
+						namespace: crate::Path::new("missing"),
+						track: "video".into(),
+						start: Location { group: 0, object: 0 },
+						end: Location { group: 0, object: 1 },
+					},
+				},
+				range_filters: false,
+				fill_timeout: false,
+			}
+			.encode_msg(&mut fetch_body, version)
+			.unwrap();
+
+			for (id, body) in [
+				(ietf::Subscribe::ID, subscribe_body.freeze()),
+				(ietf::Fetch::ID, fetch_body.freeze()),
+			] {
+				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+				let task = h.publisher.handle_stream(id, body.clone(), stream).unwrap();
+				assert_eq!(h.publisher.owed.load(Ordering::Relaxed), 1, "count before polling");
+				drop(task);
+				assert_eq!(h.publisher.owed.load(Ordering::Relaxed), 0, "release a cancelled task");
+
+				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+				assert!(h.publisher.handle_stream(id, bytes::Bytes::new(), stream).is_err());
+				assert_eq!(h.publisher.owed.load(Ordering::Relaxed), 0, "release malformed input");
+
+				if id == ietf::Fetch::ID {
+					let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+					h.publisher.handle_stream(id, body, stream).unwrap().await;
+					assert_eq!(h.publisher.owed.load(Ordering::Relaxed), 0, "release a completed fetch");
+				}
 			}
 		}
 	}
