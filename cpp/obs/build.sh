@@ -36,16 +36,16 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_DIR="$2"
             shift 2
             ;;
-        --libmoq-release)
-            # Link a published libmoq release of this version instead of
-            # building rs/libmoq from source. CMake fetches the matching
-            # moq-<version>-<target> archive from the GitHub release and the
-            # plugin is versioned to match. Used by CI on a libmoq-v* tag.
+        --moq-c-release)
+            # Link a published moq-c release of this version instead of
+            # building rs/moq-c from source. CMake fetches the matching
+            # moq-c-<version>-<target> archive from the GitHub release and the
+            # plugin is versioned to match. Used by CI on a moq-c-v* tag.
             MOQ_RELEASE="$2"
             shift 2
             ;;
         -h | --help)
-            echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR] [--libmoq-release VERSION]"
+            echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR] [--moq-c-release VERSION]"
             exit 0
             ;;
         *)
@@ -55,7 +55,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# In libmoq-release mode the plugin version tracks the libmoq version.
+# In moq-c-release mode the plugin version tracks the moq-c version.
 if [[ -n "$MOQ_RELEASE" ]]; then
     VERSION="$MOQ_RELEASE"
 fi
@@ -112,7 +112,7 @@ if [[ -n "$MOQ_RELEASE" ]]; then
     # Empty MOQ_LOCAL forces CMake's release-download branch; MOQ_VERSION and
     # MOQ_TARGET steer it at this target's archive. MOQ_ARCHIVE is correct per
     # preset already.
-    echo "Linking libmoq release v$MOQ_RELEASE ($TARGET)"
+    echo "Linking moq-c release v$MOQ_RELEASE ($TARGET)"
     CONFIGURE_ARGS+=(-DMOQ_LOCAL= "-DMOQ_VERSION=$MOQ_RELEASE" "-DMOQ_TARGET=$TARGET")
 fi
 cmake --preset "$PRESET" ${CONFIGURE_ARGS[@]+"${CONFIGURE_ARGS[@]}"}

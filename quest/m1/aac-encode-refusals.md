@@ -8,8 +8,8 @@ refused, not logged and written as stereo, the way the ADTS writer refuses it.
 
 ## Plan
 
-- `encode` returns `Bytes` today, so refusing is a published API break: this
-  retargets to `dev`. Decide whether it returns a `Result` or whether a
+- `encode` returns `Bytes` today, so refusing is a published API break.
+  Decide whether it returns a `Result` or whether a
   constructor validates the count up front so encoding cannot fail.
 - A count a program config element could describe (7, or more than 8) is
   still refused unless the caller supplies a layout; guessing speaker

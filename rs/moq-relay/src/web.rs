@@ -173,6 +173,9 @@ pub(crate) struct WebState {
 	/// like a QUIC one.
 	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
 	pub(crate) sessions: crate::session::Registry,
+	/// How long a connection has to send its request headers, and a WebSocket its
+	/// MoQ SETUP; `None` waits forever.
+	pub(crate) timeout: Option<std::time::Duration>,
 }
 
 /// The bound addresses of the public web listeners.
@@ -214,6 +217,7 @@ impl Web {
 			conn_id: AtomicU64::new(0),
 			shutdown: crate::shutdown::Observer::disabled(),
 			sessions: crate::session::Registry::new(),
+			timeout: moq_tokio::listen::Config::default().resolved_timeout(),
 		});
 		Self {
 			state,
@@ -300,6 +304,18 @@ impl Web {
 		self
 	}
 
+	/// Bound how long a connection may take to send its HTTP request headers, and a
+	/// WebSocket its MoQ SETUP after the upgrade; `None`, or a timeout past the
+	/// clock's range, waits forever. Defaults to the
+	/// [`moq_tokio::listen::Config::resolved_timeout`] default.
+	pub fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+		let state = Arc::get_mut(&mut self.state).expect("with_timeout called after routes were built");
+		// hyper adds the header timeout to the clock unchecked, so an unreachable
+		// one would panic on every connection.
+		state.timeout = timeout.filter(|timeout| std::time::Instant::now().checked_add(*timeout).is_some());
+		self
+	}
+
 	/// Register WebSocket sessions in the node's live table so they can be listed
 	/// and nudged. Without it they are served but do not appear.
 	pub fn with_sessions(mut self, sessions: crate::session::Registry) -> Self {
@@ -360,6 +376,7 @@ impl Web {
 	/// passes that router to [`crate::Relay::with_web`] instead of calling this.
 	pub async fn serve(self, app: Router) -> anyhow::Result<()> {
 		let Web {
+			state,
 			config,
 			health,
 			http_listener,
@@ -374,7 +391,8 @@ impl Web {
 		let ws = config.resolved_ws();
 
 		let http = if let Some(listener) = http_listener {
-			let server = crate::listener::server(listener, health.clone(), WebAcceptor::plain(ws))?;
+			let mut server = crate::listener::server(listener, health.clone(), WebAcceptor::plain(ws))?;
+			header_timeout(&mut server, state.timeout);
 			Some(server.serve(app.clone()))
 		} else {
 			None
@@ -388,7 +406,8 @@ impl Web {
 				config.https.key,
 				config.https.root,
 			));
-			let server = crate::listener::server(listener, health.clone(), WebAcceptor::tls(rustls_config, ws))?;
+			let mut server = crate::listener::server(listener, health.clone(), WebAcceptor::tls(rustls_config, ws))?;
+			header_timeout(&mut server, state.timeout);
 			Some(server.serve(app))
 		} else {
 			None
@@ -449,6 +468,20 @@ async fn get_cors(request: axum::extract::Request, next: axum::middleware::Next)
 		);
 	}
 	response
+}
+
+/// Close an HTTP/1 connection that hasn't sent its full request headers within
+/// `timeout`, or never when `None`.
+///
+/// axum-server builds hyper without a timer, and hyper enforces no header deadline
+/// without one, so a client that trickles its headers would otherwise hold its
+/// connection forever.
+fn header_timeout<A>(server: &mut axum_server::Server<crate::listener::Peer, A>, timeout: Option<std::time::Duration>) {
+	server
+		.http_builder()
+		.http1()
+		.timer(hyper_util::rt::TokioTimer::new())
+		.header_read_timeout(timeout);
 }
 
 /// Build a [`rustls::ServerConfig`] for the HTTPS listener.
@@ -865,8 +898,8 @@ async fn serve_announced(
 	let mut announced = origin.consume().announced();
 	let mut broadcasts = Vec::new();
 
-	while let Some(update) = announced.try_next() {
-		if update.kind.is_active() {
+	while let Some(event) = announced.try_next() {
+		if let moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update) = event {
 			broadcasts.push(update.prefix);
 		}
 	}
@@ -1381,6 +1414,63 @@ mod tests {
 			"captured",
 			"the HTTPS listener must install the capturing acceptor"
 		);
+
+		serving.abort();
+	}
+
+	/// A timeout past the clock's range waits forever, rather than reaching hyper,
+	/// which would panic adding it to the clock on every connection.
+	#[tokio::test]
+	async fn unreachable_timeout_waits_forever() {
+		let auth_config = crate::auth::Config {
+			public_subscribe: vec![moq_auth::Pattern::all()],
+			..Default::default()
+		};
+		let auth = auth_config.init("test", &moq_tokio::tls::Connect::default()).unwrap();
+		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
+		let web = Web::new(auth, cluster, certificates, Config::default()).with_timeout(Some(std::time::Duration::MAX));
+		assert_eq!(web.state.timeout, None);
+	}
+
+	/// A client that never finishes its request headers is disconnected once the
+	/// timeout passes. Real sockets, so this runs on the wall clock and bounds the
+	/// close from below.
+	#[tokio::test]
+	async fn slow_request_headers_are_timed_out() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		let timeout = std::time::Duration::from_millis(200);
+		let mut config = Config::default();
+		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
+		let auth_config = crate::auth::Config {
+			public_subscribe: vec![moq_auth::Pattern::all()],
+			..Default::default()
+		};
+		let auth = auth_config.init("test", &moq_tokio::tls::Connect::default()).unwrap();
+		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
+		let web = Web::new(auth, cluster, certificates, config)
+			.with_timeout(Some(timeout))
+			.bind()
+			.unwrap();
+		let http = web.addrs().http.expect("the HTTP listener is configured");
+		let serving = tokio::spawn(web.serve(Router::new()));
+
+		let mut tcp = tokio::net::TcpStream::connect(http).await.unwrap();
+		let start = std::time::Instant::now();
+		tcp.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n").await.unwrap();
+
+		let mut rest = Vec::new();
+		tokio::time::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut rest))
+			.await
+			.expect("slow headers held the connection open")
+			.ok();
+		assert!(start.elapsed() >= timeout, "closed before the timeout");
 
 		serving.abort();
 	}

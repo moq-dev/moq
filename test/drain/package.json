@@ -1,0 +1,8 @@
+{
+	"name": "@moq/drain-test",
+	"private": true,
+	"type": "module",
+	"dependencies": {
+		"@moq/net": "workspace:*"
+	}
+}

@@ -1,0 +1,24 @@
+# A path that gets worse mid-run: 5ms for the first thirty seconds, then 60ms.
+#
+# An estimator that only ever converges downward passes every steady profile and
+# fails this one. It never recovers, which is what makes it the baseline a
+# recovery profile is read against.
+name = "step"
+seed = 4
+shared = true
+
+[up]
+delay = "5ms"
+jitter_model = "gaussian"
+
+[[up.steps]]
+at = "30s"
+delay = "60ms"
+
+[down]
+delay = "5ms"
+jitter_model = "gaussian"
+
+[[down.steps]]
+at = "30s"
+delay = "60ms"

@@ -25,7 +25,7 @@ wins until its route goes away).
 Decided:
 
 - The marker is a child segment `@<uuidv7>`, parsed into
-  `Option<Epoch>` by [the primitive](/quest/m1/epoch.md). Not a lite-07 flag:
+  `Option<Epoch>` by [the shared primitive](/doc/concept/moq-lite.md#publisher-epochs). Not a lite-07 flag:
   the path is the only carrier.
 - The broadcast-publish path mints an epoch unless the path already carries
   one. A caller who passes an explicit epoch, such as a redundant publisher,
@@ -58,10 +58,9 @@ This README owns:
 
 ## Required
 
-- [Epoch primitive](/quest/m1/epoch.md) - the shared `Epoch` type and path split
 - [Origin](/quest/m1/broadcast-epoch/origin.md) - moq-net publish mints an epoch, consumers follow the newest live one, and bare requests resolve to it on every version
 - [Apps](/quest/m1/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web publish under epochs and play bare names
 - [Gateways](/quest/m1/broadcast-epoch/gateways.md) - RTMP, SRT, and WHIP ingest mint an epoch per incoming connection, so an encoder reconnect is a clean takeover
-- [TS restart](/quest/m1/broadcast-epoch/ts-restart.md) - on dev, a signalled backward TS discontinuity finishes the broadcast and continues the same input under a fresh epoch
+- [TS restart](/quest/m1/broadcast-epoch/ts-restart.md) - a signalled backward TS discontinuity finishes the broadcast and continues the same input under a fresh epoch
 - [Bindings](/quest/m1/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and inherit the default
 - [GStreamer and OBS](/quest/m1/broadcast-epoch/gst-obs.md) - moqsink and the OBS plugin publish each run under a fresh epoch

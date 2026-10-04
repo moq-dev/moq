@@ -27,7 +27,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/8590d2a1ddd91c2f499adf37b78aad0d673e3228";
+      url = "github:kixelated/quest/362489bcf02833d8674cff339463b086442cf92d";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
       inputs.crane.follows = "crane";
@@ -158,6 +158,8 @@
             # time (bindgenHook above provides libclang). Linux-only; macOS uses
             # ScreenCaptureKit.
             pkgs.pipewire
+            # Isolated X11 server for SHM/GetImage capture measurements.
+            pkgs.xvfb-run
           ];
 
         # Where the shell's libasound looks for PCM plugins.
@@ -427,6 +429,8 @@
 
         # Apply our overlay to get the package definitions
         overlayPkgs = pkgs.extend self.overlays.default;
+
+        quest-cli = quest.packages.${system}.default;
       in
       {
         packages = (rec {
@@ -445,7 +449,7 @@
           # The package was `moq-cli` through 0.12.2. Refuse with the new name
           # so `nix run` and `nix profile upgrade` break instead of going stale.
           moq-cli = pkgs.writeShellScriptBin "moq" ''
-            echo "error: the moq-cli package is now moq: nix run github:moq-dev/moq#moq" >&2
+            echo "error: the moq-cli package is now moq: nix run github:moq-dev/moq/release#moq" >&2
             exit 1
           '';
 
@@ -454,11 +458,15 @@
             moq-relay
             moq-bench
             moq-boy
-            libmoq
+            moq-c
             moq-gst
             ;
 
           inherit uniffi-bindgen-dart;
+
+          # The quest CLI alone, so quest.yml can validate the tree without
+          # realising the whole dev shell.
+          quest = quest-cli;
 
           # Bundle of packaging + repo-publish tooling, pinned via flake.lock.
           # CI builds this and prepends its bin/ to $PATH so subsequent steps
@@ -504,7 +512,7 @@
             ++ goDeps
             ++ dartDeps
             ++ devTools
-            ++ [ quest.packages.${system}.default ];
+            ++ [ quest-cli ];
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).
