@@ -151,7 +151,7 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 			attach();
 			await current?.finish();
 			samples.push(sample());
-			recording?.close();
+			await recording?.close();
 		},
 		environment() {
 			const catalog = broadcast.out.catalog.peek();

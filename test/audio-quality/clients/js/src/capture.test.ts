@@ -85,13 +85,49 @@ test("the observer shares playback demand and closes without ending playback", a
 			.consume()
 			.track("audio")
 			.subscribe({ priority: Catalog.PRIORITY.audio, maxAge: Time.Milli(250) });
-		capture.close();
+		await capture.close();
 		expect(player.closed.peek()).toBeUndefined();
 		player.close();
 		await track.demand().unused();
 		expect(capture.error()).toBeUndefined();
 	} finally {
-		capture.close();
+		await capture.close();
+		source.close();
+		origin.close();
+	}
+});
+
+test("closing the observer waits for in-flight groups and keeps their decode failures", async () => {
+	const origin = new Origin.Producer();
+	const published = origin.createBroadcast(Path.from("tone.hang"));
+	const track = published.createTrack("audio");
+	published.announce();
+	const source = new Broadcast({ origin, name: Path.from("tone.hang"), announced: false, catalogFormat: "manual" });
+	const capture = new Capture({
+		broadcast: new Signal(source),
+		track: new Signal("audio"),
+		config: new Signal({
+			codec: "opus",
+			sampleRate: 48000,
+			numberOfChannels: 1,
+			container: { kind: "legacy" },
+		} as Catalog.AudioConfig),
+		maxAge: new Signal(Time.Milli(250)),
+	});
+	try {
+		while (!track.subscription.peek()) await track.subscription.changed();
+		const group = track.appendGroup();
+		group.writeFrame({
+			timestamp: Time.Timestamp.fromMicros(0),
+			payload: Legacy.encodeFrame(new Uint8Array([1]), Time.Micro(0)),
+		});
+		// Yield until the group's reader is in flight.
+		while (capture.drain().length === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+		group.writeFrame({ timestamp: Time.Timestamp.fromMicros(20_000), payload: new Uint8Array() });
+		await capture.close();
+		expect(capture.error()).toBe("Error: buffer is empty");
+	} finally {
+		await capture.close();
 		source.close();
 		origin.close();
 	}

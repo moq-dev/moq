@@ -19,6 +19,7 @@ export class Capture {
 	readonly #signals = new Effect();
 	readonly #arrivals: Arrival[] = [];
 	readonly #seen = new Set<string>();
+	readonly #readers = new Set<Promise<void>>();
 	#failure?: string;
 
 	constructor(input: Input) {
@@ -48,7 +49,9 @@ export class Capture {
 							const group = await effect.race(track.recvGroup());
 							if (!group) throw new Error("the captured track ended");
 							groups.add(group);
-							effect.spawn(async () => {
+							// Closing a group ends its reader cleanly after the buffered frames, so any
+							// error here is a real failure, even one surfacing during close.
+							const reader = (async () => {
 								try {
 									for await (const arrival of arrivals(group, decoder)) {
 										const key = `${group.sequence}:${arrival[1]}`;
@@ -57,11 +60,13 @@ export class Capture {
 										this.#arrivals.push(arrival);
 									}
 								} catch (error) {
-									if (!effect.abort.aborted) this.#failure ??= String(error);
+									this.#failure ??= String(error);
 								} finally {
 									groups.delete(group);
 								}
-							});
+							})();
+							this.#readers.add(reader);
+							void reader.then(() => this.#readers.delete(reader));
 						}
 					} catch (error) {
 						if (!effect.abort.aborted) this.#failure ??= String(error);
@@ -83,9 +88,10 @@ export class Capture {
 		return this.#failure;
 	}
 
-	/** Release the observer without closing the player's subscription. */
-	close(): void {
+	/** Release the observer without closing the player's subscription, once buffered frames are recorded. */
+	async close(): Promise<void> {
 		this.#signals.close();
+		await Promise.all(this.#readers);
 	}
 }
 
