@@ -83,14 +83,15 @@ async fn rejoin_recovers_the_group_reset_on_leave() {
 
 				let mut sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
 				let mut rejoined = Vec::new();
-				loop {
+				// Arrival order: the reset group comes back once the route delivers it again,
+				// which may be after a newer group.
+				let wanted: &[u64] = if advance { &[1, 2] } else { &[1] };
+				while !wanted.iter().all(|want| rejoined.iter().any(|(seq, _)| seq == want)) {
 					let mut group = sub.recv_group().await.unwrap().unwrap();
 					let sequence = group.sequence;
 					rejoined.push((sequence, read_all(&mut group).await));
-					if sequence == if advance { 2 } else { 1 } {
-						break;
-					}
 				}
+				rejoined.sort_by_key(|(seq, _)| *seq);
 				let reset = rejoined.iter().find(|(seq, _)| *seq == 1).expect("reset group");
 				// The reader asks for the group it is missing, so the reset group comes back
 				// whole even once the live edge has moved past it.
@@ -119,7 +120,13 @@ async fn rejoin_recovers_the_group_reset_on_leave() {
 /// the first frame says where the feed is.
 #[tokio::test(start_paused = true)]
 async fn rejoin_skips_a_cache_kept_by_another_handle() {
-	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
+	for version in [
+		"moq-lite-05",
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-19",
+		"moq-transport-22",
+	] {
 		tokio::time::timeout(TEST_TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let relay = produce_origin(2);

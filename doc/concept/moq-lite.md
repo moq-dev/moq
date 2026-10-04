@@ -299,12 +299,14 @@ budget behind the new route's live edge. A successor group with no timestamp
 leaves the preceding group's reach unbounded until its first frame arrives; if
 it is dropped first, the next group takes its place.
 
-A relay's copy of a track that is still held after its upstream subscription
-ended (by a reader fetching from it, say) is not live: readers get nothing from
-its cache until the source answers again, since how stale it is cannot be told.
-lite-07 answers with its largest position, and older lite versions say where
-their feed is with its first frame. A feed that has moved on past everything
-cached leaves the cache below it to fetches.
+A relay cancels its upstream subscription once nobody subscribes, but keeps its
+copy of the track for 30 seconds after the last reader leaves, so a returning
+reader or the next fetch finds its cache. That copy is not live meanwhile:
+readers get nothing from its cache until the source answers again, since how
+stale it is cannot be told. lite-07 and moq-transport answer with their largest
+position, and older lite versions are asked from the head of the newest cached
+group, so their first frame says where their feed is. A feed that has moved on
+past everything cached leaves the cache below it to fetches.
 
 The publisher may declare a retention window per track. Omission sets no limit;
 zero keeps only the live edge. The origin cache ceiling and cache pool may still

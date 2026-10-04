@@ -793,6 +793,15 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						// The subscription's end waits until this stream is read.
 						let reading = Reading::open(&entry.tail, Some(hdr.sequence), self.subscriber.runtime.now());
 
+						// A route's first group says where its live feed is, when its answer did
+						// not: even one the cache already holds, as an idle copy asked from its
+						// head gets back.
+						if !entry.producer.is_live() {
+							entry.producer.set_live(Some(Position {
+								group: hdr.sequence,
+								frame: hdr.frame_start,
+							}));
+						}
 						let group_info = group::Info { sequence: hdr.sequence };
 						// Stats (groups/frames/bytes) are counted in the model as the group
 						// is written, through the tagged `track::Producer`.
@@ -820,14 +829,6 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						// from where the publisher said they start so a front continuing the
 						// group across routes lines them up.
 						group.start_at(hdr.frame_start)?;
-						// The first frame a route delivers says where its live feed is, when
-						// its answer did not.
-						if !entry.producer.is_live() {
-							entry.producer.set_live(Some(Position {
-								group: hdr.sequence,
-								frame: hdr.frame_start,
-							}));
-						}
 						(group, entry.producer.clone(), entry.timescale, reading)
 					};
 
@@ -3410,6 +3411,12 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 				self.widen_frame_bounds(&mut subscription);
 				match sub {
 					Sub::None => {
+						// An idle copy is asked from the head of the newest group it cached when
+						// the subscriber has no start of its own: a quiet track (a catalog) sends
+						// that group again, which says the cache is current.
+						if subscription.start.is_none() {
+							subscription.start = producer.idle_newest().map(Position::group);
+						}
 						// Open an upstream SUBSCRIBE for the first subscriber.
 						Ok(Begin::Establish(self.prepare_establish(
 							producer,
@@ -3938,6 +3945,9 @@ struct ServeLoop<S: crate::transport::poll::Session> {
 	supports_fetch: bool,
 	timescale: Option<Timescale>,
 	mode: ServeMode<S>,
+	/// Armed while nobody holds the copy: it stays, cache and all, for a returning
+	/// reader until this fires.
+	linger: crate::runtime::Deadline<crate::time::Clock>,
 }
 
 // A state machine's enum is its storage: one transient instance per stream, so the
@@ -3984,6 +3994,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 			supports_fetch: serve.subscriber.version.has_track_stream(),
 			timescale,
 			mode: ServeMode::Select,
+			linger: crate::runtime::Deadline::new(&serve.subscriber.runtime),
 		}
 	}
 
@@ -4087,13 +4098,22 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					// (2) In-flight fetches; completions just retire.
 					let _ = self.fetches.poll(waiter);
 
-					// (3) Nobody reads this copy anymore: the origin dropped its source
-					// copy when demand ended, so drop it instead of holding the track
-					// state (and its TRACK_INFO) for a reader that may never return.
-					// In-flight fetches keep it alive: work already accepted still
-					// gets finished.
+					// (3) Nobody holds this copy anymore. Its upstream subscription already
+					// went with the last subscriber, so it lingers, cache and all, for a
+					// reader or fetch that asks again soon, then is dropped. In-flight
+					// fetches keep it alive: work already accepted still gets finished.
 					if self.fetches.is_empty() && self.demand.poll_unused(waiter).is_ready() {
-						return Poll::Ready(ServeEnd::Idle);
+						if self.linger.deadline().is_none() {
+							let now = serve.subscriber.runtime.now();
+							self.linger.set(now.checked_add(track::IDLE_LINGER));
+						}
+						if self.linger.poll(waiter).is_ready() {
+							return Poll::Ready(ServeEnd::Idle);
+						}
+						// A reader returning restarts the countdown when it next leaves.
+						let _ = self.demand.poll_used(waiter);
+					} else {
+						self.linger.set(None);
 					}
 
 					// (4) The upstream subscribe stream closed, or carried a START/END/DROP.

@@ -153,6 +153,11 @@ struct State {
 
 	// Each broadcast created by a PUBLISH_NAMESPACE message.
 	broadcasts: HashMap<PathOwned, BroadcastState>,
+
+	// Copies nobody subscribes to, kept for the linger with no subscription upstream:
+	// a session ending ends them too.
+	lingering: HashMap<u64, track::Producer>,
+	next_lingering: u64,
 }
 
 impl State {
@@ -172,6 +177,9 @@ impl State {
 				let _ = producer.clone().abort(err.clone());
 			}
 		}
+		for (_, producer) in self.lingering.drain() {
+			let _ = producer.abort_session(err.clone());
+		}
 	}
 	fn close(&mut self) {
 		for (_, mut track) in self.subscribes.drain() {
@@ -181,6 +189,9 @@ impl State {
 			if let Some(producer) = track.producer {
 				let _ = producer.close();
 			}
+		}
+		for (_, producer) in self.lingering.drain() {
+			let _ = producer.close();
 		}
 	}
 }
@@ -367,6 +378,49 @@ struct Accepted {
 	/// The largest Location in the track, absent when it has no content yet. That absence
 	/// is what says a fill we asked for is owed nothing.
 	largest: Option<ietf::Location>,
+}
+
+/// What a subscription is for: the origin's request, until the first SUBSCRIBE_OK
+/// accepts it, then the copy it became, subscribed again after lingering.
+enum Target {
+	Request(track::Request),
+	Resume(Idle),
+}
+
+impl Target {
+	/// The subscribers' aggregate demand.
+	fn subscription(&self) -> Option<track::Subscription> {
+		match self {
+			Self::Request(request) => request.subscription(),
+			Self::Resume(idle) => idle.track.subscription(),
+		}
+	}
+
+	fn producer(&self) -> Option<&track::Producer> {
+		match self {
+			Self::Request(_) => None,
+			Self::Resume(idle) => Some(&idle.track),
+		}
+	}
+
+	/// The subscription could not be made: the track fails with `err`.
+	fn fail(self, err: Error) {
+		match self {
+			Self::Request(request) => request.reject(err),
+			Self::Resume(idle) => {
+				let _ = idle.track.abort(err);
+			}
+		}
+	}
+}
+
+/// A copy with no subscription upstream, kept for fetches and a returning subscriber.
+struct Idle {
+	track: track::Producer,
+	/// Serves its cache misses with a group FETCH, subscribed or not.
+	dynamic: track::Dynamic,
+	demand: track::Demand,
+	timescale: Option<Timescale>,
 }
 
 struct TrackState {
@@ -1686,7 +1740,38 @@ where
 			return;
 		}
 
-		let subscription = request.subscription();
+		let track_name = request.name().to_owned();
+		// Group FETCHes for cache misses: standalone, so they outlive each subscription.
+		let mut group_fetches = TaskSet::owned();
+		let mut target = Target::Request(request);
+		loop {
+			let Some(idle) = self
+				.subscribe_once(&broadcast_path, &track_name, target, &mut group_fetches)
+				.await
+			else {
+				return;
+			};
+			let Some(next) = self
+				.linger(&broadcast_path, &track_name, idle, &mut group_fetches)
+				.await
+			else {
+				return;
+			};
+			target = Target::Resume(next);
+		}
+	}
+
+	/// Subscribe upstream for `target`, until the subscription ends: `Some` once nobody
+	/// subscribes any more, with the copy kept for [`Self::linger`], `None` once the track
+	/// ended or failed.
+	async fn subscribe_once(
+		&mut self,
+		broadcast_path: &Path<'_>,
+		track_name: &str,
+		target: Target,
+		group_fetches: &mut TaskSet,
+	) -> Option<Idle> {
+		let subscription = target.subscription();
 		let start = subscription.as_ref().and_then(|s| s.start);
 		// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest.
 		let live = start.is_none();
@@ -1697,16 +1782,16 @@ where
 		) {
 			Ok(join) => join,
 			Err(err) => {
-				request.reject(err);
-				return;
+				target.fail(err);
+				return None;
 			}
 		};
 
 		let request_id = match self.control.next_request_id(&self.runtime).await {
 			Ok(id) => id,
 			Err(err) => {
-				request.reject(err);
-				return;
+				target.fail(err);
+				return None;
 			}
 		};
 
@@ -1714,8 +1799,8 @@ where
 			Ok(s) => s,
 			Err(err) => {
 				tracing::debug!(%err, "failed to open subscribe stream");
-				request.reject(err);
-				return;
+				target.fail(err);
+				return None;
 			}
 		};
 
@@ -1735,36 +1820,43 @@ where
 						.as_ref()
 						.and_then(|s| s.start)
 						.filter(|start| start.frame != 0),
-					..TrackState::pending(request.name().to_owned(), broadcast_path.to_owned(), fill, joining)
+					// A resumed copy is the session's to abort from here on.
+					producer: target.producer().cloned(),
+					..TrackState::pending(track_name.to_owned(), broadcast_path.to_owned(), fill, joining)
 				},
 			);
 		}
 
-		// Write Subscribe message
+		// Write Subscribe message. The aggregate is read now: a subscriber can join while
+		// the request ID and stream were awaited, and nothing updates the priority after.
+		let priority = target.subscription().map(|s| s.priority).unwrap_or(0);
 		if let Err(err) = self
-			.write_subscribe(&mut stream, request_id, &broadcast_path, &request, join)
+			.write_subscribe(&mut stream, request_id, broadcast_path, track_name, priority, join)
 			.await
 		{
 			tracing::debug!(%err, "failed to write subscribe");
 			self.remove_subscribe(request_id);
-			request.reject(err);
-			return;
+			target.fail(err);
+			return None;
 		}
 
-		tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %request.name(), "subscribe started");
+		tracing::info!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "subscribe started");
 
 		// Park the origin request where a session abort can reject it. The producer
 		// does not exist until SUBSCRIBE_OK, and dropping this task would otherwise
 		// end the track as `Dropped`.
-		let track_name = request.name().to_owned();
-		{
-			let mut state = self.state.lock();
-			let Some(held) = state.subscribes.get_mut(&request_id) else {
-				request.reject(Error::Cancel);
-				return;
-			};
-			held.pending = Some(request);
-		}
+		let resumed = match target {
+			Target::Request(request) => {
+				let mut state = self.state.lock();
+				let Some(held) = state.subscribes.get_mut(&request_id) else {
+					request.reject(Error::Cancel);
+					return None;
+				};
+				held.pending = Some(request);
+				None
+			}
+			Target::Resume(idle) => Some(idle),
+		};
 
 		// A publisher can be serving before its SUBSCRIBE_OK reaches us, since the data
 		// streams are independent of the request stream. Waiting for the response alone would
@@ -1791,6 +1883,16 @@ where
 						return Poll::Ready(Setup::Response(res));
 					}
 					let mut state = self.state.lock();
+					if let Some(idle) = &resumed {
+						// A session abort drained the subscription, and the copy with it.
+						if !state.subscribes.contains_key(&request_id) {
+							return Poll::Ready(Setup::Gone);
+						}
+						return match idle.demand.poll_unused(waiter) {
+							Poll::Ready(_) => Poll::Ready(Setup::Unused),
+							Poll::Pending => Poll::Pending,
+						};
+					}
 					let Some(pending) = state
 						.subscribes
 						.get_mut(&request_id)
@@ -1808,6 +1910,8 @@ where
 				match setup {
 					Setup::Response(res) => break Some(res),
 					Setup::Gone => break None,
+					// Nobody holds the resumed copy any more: back to lingering.
+					Setup::Unused if resumed.is_some() => break None,
 					Setup::Unused => {
 						let mut state = self.state.lock();
 						let Some(pending) = state
@@ -1830,15 +1934,16 @@ where
 
 		let Some(response) = setup else {
 			tracing::info!(
-				broadcast = %self.origin.absolute(&broadcast_path),
+				broadcast = %self.origin.absolute(broadcast_path),
 				track = %track_name,
 				"subscribe abandoned before it was accepted"
 			);
 			// The publisher may already be serving before it answers. A session abort
 			// already rejected the parked request; dropping what remains is not a second one.
-			self.remove_subscribe(request_id);
+			let aborted = self.remove_subscribe(request_id).is_none();
 			self.cancel_subscribe(stream, request_id).await;
-			return;
+			// A resumed copy goes back to lingering, unless the session took it.
+			return resumed.filter(|_| !aborted);
 		};
 
 		// SUBSCRIBE_OK commits the model's immutable metadata before the alias releases
@@ -1850,15 +1955,21 @@ where
 					pending.reject(Error::UnexpectedMessage);
 				}
 				self.remove_subscribe(request_id);
-				return;
+				if let Some(idle) = resumed {
+					let _ = idle.track.abort(Error::UnexpectedMessage);
+				}
+				return None;
 			}
 			Err(err) => {
 				tracing::debug!(%err, "subscribe response error");
 				if let Some(pending) = self.take_pending(request_id) {
-					pending.reject(err);
+					pending.reject(err.clone());
 				}
 				self.remove_subscribe(request_id);
-				return;
+				if let Some(idle) = resumed {
+					let _ = idle.track.abort(err);
+				}
+				return None;
 			}
 		};
 		let Accepted {
@@ -1872,21 +1983,37 @@ where
 			.with_timescale(Timescale::MICRO)
 			.with_max_age(max_age)
 			.with_priority(super::priority::from_wire(priority.unwrap_or(128)));
-		// Declared before the track is released to readers, so a warm cache waiting on
-		// this copy judges itself against where the live feed actually starts.
-		let Some(request) = self.take_pending(request_id) else {
-			// Aborted while the answer was in hand. The parked request is already rejected.
-			self.remove_subscribe(request_id);
-			return;
+		let (mut track, dynamic) = match resumed {
+			// The copy already holds the track: it is current again up to the answer's
+			// Largest Location.
+			Some(idle) => {
+				if !self.state.lock().subscribes.contains_key(&request_id) {
+					// Aborted with the session while the answer was in hand.
+					return None;
+				}
+				let mut track = idle.track;
+				track.set_live(largest.map(|largest| track::Position {
+					group: largest.group,
+					frame: largest.object,
+				}));
+				(track, idle.dynamic)
+			}
+			None => {
+				let Some(request) = self.take_pending(request_id) else {
+					// Aborted while the answer was in hand. The parked request is already rejected.
+					self.remove_subscribe(request_id);
+					return None;
+				};
+				let request = match live {
+					true => request.resolving_start(),
+					false => request,
+				};
+				// Serves cache misses with a group FETCH. Registered before accepting, so a
+				// miss queued meanwhile waits for it rather than failing for want of a handler.
+				let dynamic = request.dynamic();
+				(request.accept(info), dynamic)
+			}
 		};
-		let request = match live {
-			true => request.resolving_start(),
-			false => request,
-		};
-		// Serves cache misses with a group FETCH. Registered before accepting, so a miss
-		// queued meanwhile waits for it rather than failing for want of a handler.
-		let dynamic = request.dynamic();
-		let mut track = request.accept(info);
 		// A live join starts at the publisher's edge; an absolute one where it asked.
 		let _ = match live {
 			true => track.start_at(largest.map(|largest| largest.group)),
@@ -1920,7 +2047,7 @@ where
 			}
 			self.remove_subscribe(request_id);
 			let _ = track.abort(err);
-			return;
+			return None;
 		}
 		if let Some(joining) = joining
 			&& largest.is_some()
@@ -1928,20 +2055,20 @@ where
 			fetching = self.start_joining_fetch(request_id, &track, joining).await;
 		}
 
-		// One event ends the subscription: the last consumer leaving, or the
+		// One event ends the subscription: the last subscriber leaving, or the
 		// publisher's PUBLISH_DONE. The broadcast ending does not: a retraction
 		// does not disturb subscriptions already in flight.
 		enum End {
-			Unused,
+			Idle,
 			Done(Result<u64, Error>),
 			Fetch(group::Request),
 		}
 
 		let mut fetch_done = fetching.is_none();
 		let demand = track.demand();
-		// Group FETCHes for cache misses, cancelled with the subscription.
-		let mut group_fetches = TaskSet::owned();
-		let cancelled = {
+		// Nobody subscribing at all (only fetches asked) needs no subscription.
+		let mut subscribed = track.subscription().is_some();
+		let idle = {
 			let mut done = std::pin::pin!(Self::read_publish_done(&mut stream.reader, self.version));
 			loop {
 				let end = kio::wait(|waiter| {
@@ -1956,8 +2083,13 @@ where
 						return Poll::Ready(End::Fetch(request));
 					}
 					let _ = group_fetches.poll(waiter);
-					if demand.poll_unused(waiter).is_ready() {
-						return Poll::Ready(End::Unused);
+					// The last subscriber left: the upstream subscription goes with it, as on
+					// lite, and the copy lingers for fetches and a returning subscriber.
+					while let Poll::Ready(Ok(subscription)) = track.poll_subscription_changed(waiter) {
+						subscribed = subscription.is_some();
+					}
+					if !subscribed || demand.poll_unused(waiter).is_ready() {
+						return Poll::Ready(End::Idle);
 					}
 					waiter.poll_future(done.as_mut()).map(End::Done)
 				})
@@ -1967,23 +2099,20 @@ where
 					End::Fetch(request) => {
 						let fetch = self.clone().run_group_fetch(
 							broadcast_path.to_owned(),
-							track_name.clone(),
+							track_name.to_owned(),
 							request,
 							timescale,
 						);
 						group_fetches.push(fetch);
 					}
-					End::Unused => match track.abort_unused(Error::Cancel) {
-						Ok(()) => {
-							tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track_name, "subscribe cancelled");
-							break true;
-						}
-						Err(used) => track = used,
-					},
+					End::Idle => {
+						tracing::info!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "subscribe cancelled (idle)");
+						break true;
+					}
 					End::Done(res) => {
 						match res {
 							Ok(count) => {
-								tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track_name, "subscribe complete");
+								tracing::info!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "subscribe complete");
 								// The publisher sends PUBLISH_DONE once every data stream it opened
 								// is closed, but QUIC does not order them, so some can still be on
 								// their way. Wait until Stream Count of their headers arrived and
@@ -2014,7 +2143,7 @@ where
 							}
 							Err(err) => {
 								tracing::debug!(%err, "subscribe ended with error");
-								let _ = track.abort(err);
+								let _ = track.clone().abort(err);
 							}
 						}
 						// The publisher already ended the request, so there is nothing to cancel.
@@ -2025,15 +2154,116 @@ where
 		};
 
 		// Clean up
-		self.remove_subscribe(request_id);
+		let aborted = self.remove_subscribe(request_id).is_none();
 
-		match cancelled {
+		match idle {
 			true => self.cancel_subscribe(stream, request_id).await,
 			// The publisher already ended the request, so a FIN is all we owe it.
 			false => {
 				stream.writer.finish().ok();
+				return None;
 			}
 		}
+		// A session abort took the copy too.
+		if aborted {
+			return None;
+		}
+		// What the copy cached goes stale from here.
+		track.set_idle();
+		Some(Idle {
+			demand: track.demand(),
+			track,
+			dynamic,
+			timescale,
+		})
+	}
+
+	/// Keep a copy nobody subscribes to, cache and all, for fetches and a subscriber
+	/// returning soon: `Some` once one does, to subscribe again, `None` once nobody held
+	/// it through the linger, or the session ended.
+	async fn linger(
+		&mut self,
+		broadcast_path: &Path<'_>,
+		track_name: &str,
+		mut idle: Idle,
+		group_fetches: &mut TaskSet,
+	) -> Option<Idle> {
+		// Registered so a session abort ends the copy with its error.
+		let id = {
+			let mut state = self.state.lock();
+			state.next_lingering += 1;
+			let id = state.next_lingering;
+			state.lingering.insert(id, idle.track.clone());
+			id
+		};
+		let mut linger = crate::runtime::Deadline::new(&self.runtime);
+		let mut subscribed = idle.track.subscription().is_some();
+		enum Step {
+			Fetch(group::Request),
+			Subscribe,
+			Expired,
+			Closed,
+		}
+		let resume = loop {
+			let step = kio::wait(|waiter| {
+				if idle.track.poll_closed(waiter).is_ready() {
+					return Poll::Ready(Step::Closed);
+				}
+				if let Poll::Ready(Ok(request)) = idle.dynamic.poll_requested_group(waiter) {
+					return Poll::Ready(Step::Fetch(request));
+				}
+				let _ = group_fetches.poll(waiter);
+				while let Poll::Ready(Ok(subscription)) = idle.track.poll_subscription_changed(waiter) {
+					subscribed = subscription.is_some();
+				}
+				if subscribed {
+					return Poll::Ready(Step::Subscribe);
+				}
+				// Nobody holds it: let it go after the linger. A reader waiting on a fetch holds
+				// it too. A holder returning restarts the countdown when it next leaves.
+				if idle.demand.poll_unused(waiter).is_ready() {
+					if linger.deadline().is_none() {
+						linger.set(self.runtime.now().checked_add(track::IDLE_LINGER));
+					}
+					if linger.poll(waiter).is_ready() {
+						return Poll::Ready(Step::Expired);
+					}
+					let _ = idle.demand.poll_used(waiter);
+				} else {
+					linger.set(None);
+				}
+				Poll::Pending
+			})
+			.await;
+
+			match step {
+				Step::Fetch(request) => {
+					let fetch = self.clone().run_group_fetch(
+						broadcast_path.to_owned(),
+						track_name.to_owned(),
+						request,
+						idle.timescale,
+					);
+					group_fetches.push(fetch);
+				}
+				Step::Subscribe => break true,
+				Step::Expired => match idle.track.abort_unused(Error::Cancel) {
+					Ok(()) => {
+						tracing::info!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track released (idle)");
+						self.state.lock().lingering.remove(&id);
+						return None;
+					}
+					Err(used) => {
+						idle.track = used;
+						linger.set(None);
+					}
+				},
+				Step::Closed => break false,
+			}
+		};
+		// The session's abort took it out of the registry already, or this does.
+		let registered = self.state.lock().lingering.remove(&id).is_some();
+		(resume && registered).then_some(idle)
 	}
 
 	/// Read the PUBLISH_DONE that ends an Established subscription, as the end it reports
@@ -2111,19 +2341,17 @@ where
 		stream: &mut Stream<S, Version>,
 		request_id: RequestId,
 		broadcast: &Path<'_>,
-		request: &track::Request,
+		track_name: &str,
+		priority: u8,
 		join: Join,
 	) -> Result<(), Error> {
-		// Read the aggregate now: a subscriber can join while the request ID and stream
-		// were awaited, and nothing updates the priority after SUBSCRIBE.
-		let priority = request.subscription().map(|s| s.priority).unwrap_or(0);
 		stream.writer.encode(&ietf::Subscribe::ID).await?;
 		stream
 			.writer
 			.encode(&ietf::Subscribe {
 				request_id,
 				track_namespace: broadcast.to_owned(),
-				track_name: request.name().into(),
+				track_name: track_name.into(),
 				subscriber_priority: super::priority::to_wire(priority),
 				group_order: GroupOrder::Descending,
 				filter: join.filter,
@@ -4867,12 +5095,13 @@ mod tests {
 			"{version:?}: alias 7 must be bound before we cancel",
 		);
 
-		// The last consumer leaves: nothing wants this track any more.
+		// The last consumer leaves: nothing wants this track any more. The upstream
+		// subscription is cancelled at once, and the copy lingers for a returning reader.
 		drop(subscription);
 		drop(track);
 		drop(consumer);
 
-		tokio::time::timeout(std::time::Duration::from_secs(1), serving)
+		tokio::time::timeout(crate::track::IDLE_LINGER * 2, serving)
 			.await
 			.expect("run_subscribe did not finish")
 			.unwrap();

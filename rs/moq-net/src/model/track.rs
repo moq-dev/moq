@@ -64,6 +64,16 @@ pub(super) struct ExpiryScan {
 	gc: bool,
 }
 
+/// How long a track nobody reads stays, with its cache, before it is let go.
+///
+/// Within the window a returning viewer, or the next of a run of back-to-back
+/// fetches, finds it: a front its verdicts, a session's copy the groups it cached,
+/// without another round trip upstream. Sized above the fetch cadence of a segmented
+/// consumer: HLS polls every `TARGETDURATION` seconds, commonly 6 or 10. A lingering
+/// track holds no upstream subscription, so waiting longer costs cached state, not a
+/// viewer.
+pub(crate) const IDLE_LINGER: Duration = Duration::from_secs(30);
+
 /// Publisher-side properties of a track.
 ///
 /// These are fixed by the publisher when the track is created and don't change
@@ -248,9 +258,12 @@ pub(crate) struct TrackState {
 	// creation, and only a session's copy goes idle: when its upstream subscription ends
 	// with the copy still held, until the route answers again.
 	live: bool,
-	// Readers start at this group: the route's live feed went on past everything cached,
-	// so nothing bounds how old the cache below it is.
+	// Readers start at this group: the route's live feed went on past a gap after
+	// everything cached, so nothing bounds how old the cache below it is.
 	live_floor: Option<u64>,
+	// The newest group cached when the track went idle: what the route's answer is
+	// judged against, whatever lands before it.
+	idle_newest: Option<u64>,
 
 	// Where production stopped, snapshotted when the open groups are released (an
 	// abort, or the last producer dropping). Computed live from the cache otherwise;
@@ -1178,21 +1191,28 @@ impl TrackState {
 	/// datagrams go too, since a reader returning later must not be handed them.
 	fn set_idle(&mut self) {
 		self.live = false;
+		self.idle_newest = self
+			.lookup
+			.iter()
+			.rev()
+			.find(|(_, slot)| slot.visible && !slot.group.is_aborted())
+			.map(|(sequence, _)| *sequence);
 		self.datagram_offset += self.datagrams.len();
 		self.datagrams.clear();
 	}
 
 	/// The route answered with its largest position (`None` for nothing yet): the cache
-	/// is current up to there. A feed that went on past everything cached leaves the
-	/// cache below it unjudgeable, so readers start at the feed's group.
+	/// is current up to there. A feed that went on past a gap after everything cached
+	/// leaves the cache unjudgeable, since nothing bounds how far an old group reached, so
+	/// readers skip it; whatever the feed delivers stays.
 	fn set_live(&mut self, largest: Option<Position>) {
 		if self.live {
 			return;
 		}
 		self.live = true;
-		let cached = self.newest().map(|(group, _)| group);
+		let cached = self.idle_newest.take();
 		self.live_floor = match (largest, cached) {
-			(Some(largest), Some(cached)) if largest.group > cached => Some(largest.group),
+			(Some(largest), Some(cached)) if largest.group > cached.saturating_add(1) => Some(cached + 1),
 			// The route has nothing, so whatever is cached is not its feed.
 			(None, Some(cached)) => Some(cached.saturating_add(1)),
 			_ => self.live_floor,
@@ -1596,6 +1616,13 @@ impl Producer {
 	/// Whether readers may take from the cache; see [`Self::set_idle`].
 	pub(crate) fn is_live(&self) -> bool {
 		self.state.read().live
+	}
+
+	/// While idle, the newest group cached when the track went idle: a route asked from
+	/// its head sends it again, and its first frame says whether the cache is current.
+	pub(crate) fn idle_newest(&self) -> Option<u64> {
+		let state = self.state.read();
+		state.idle_newest.filter(|_| !state.live)
 	}
 
 	/// Declare the floor a subscription asked for while the serving session has yet to

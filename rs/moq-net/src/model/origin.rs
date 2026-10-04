@@ -2211,19 +2211,6 @@ impl Drop for DriverState {
 	}
 }
 
-/// How long a front's track stays after its last reader leaves.
-///
-/// Within the window a returning viewer, or the next of a run of back-to-back
-/// fetches, finds the track with its info and its verdicts: an incompatible
-/// successor stays refused. After the window the track is forgotten, finished and
-/// aborted ones included, so a long-lived broadcast only holds the tracks read
-/// recently.
-///
-/// Sized above the fetch cadence of a segmented consumer: HLS polls every
-/// `TARGETDURATION` seconds, commonly 6 or 10. A lingering track holds no copy and
-/// no upstream subscription, so waiting longer costs a little state, not a viewer.
-const TRACK_IDLE_LINGER: Duration = Duration::from_secs(30);
-
 /// Everything [`run_front`] owns, queued by [`Consumer::request_broadcast`].
 struct FrontTask {
 	/// The route table the front selects from.
@@ -2249,8 +2236,9 @@ struct Asked {
 	info: Option<track::Info>,
 	/// Some sessions only learn a track's info by subscribing (moq-transport's
 	/// SUBSCRIBE_OK), and read the demand only then, so the readers' demand rides the
-	/// query. Dropped once spliced, which subscribes every reader on its own.
-	_sub: Option<kio::Pending<track::Subscribing>>,
+	/// query. Kept once spliced until the last reader leaves, so the copy is never left
+	/// with nobody subscribed while readers are still subscribing to it on their own.
+	sub: Option<kio::Pending<track::Subscribing>>,
 }
 
 /// The driver's side of one logical track: the handles behind the names the
@@ -2269,8 +2257,9 @@ struct TrackIo {
 	query: Option<(Asked, track::Querying)>,
 	/// The copy whose info resolved, waiting for the machine to splice it.
 	staged: Option<Asked>,
-	/// The source whose copy serves the track.
+	/// The source whose copy serves the track, and the subscription its query made.
 	copy: Option<(u64, track::Consumer)>,
+	held: Option<kio::Pending<track::Subscribing>>,
 	/// The last copy ended because its session closed locally: a close, not an
 	/// error, so the track ends cleanly if nothing takes over.
 	closed: bool,
@@ -2287,6 +2276,7 @@ impl TrackIo {
 		}
 		self.routes.serve(asked.copy.clone());
 		self.copy = Some((asked.source, asked.copy));
+		self.held = asked.sub;
 	}
 
 	/// End the track: cleanly with `Ok`, or failed for good. Readers drain what the
@@ -2295,6 +2285,7 @@ impl TrackIo {
 		self.query = None;
 		self.staged = None;
 		self.copy = None;
+		self.held = None;
 		match self.request.take() {
 			// Ended before any route served it: nothing to read.
 			Some(request) => request.reject(result.err().unwrap_or(Error::NotFound)),
@@ -2338,7 +2329,7 @@ async fn run_front(task: FrontTask) {
 	// The front serves its broadcast on demand: every track a reader names is
 	// handed here, and its readers read it from whichever source serves the path.
 	let mut dynamic = broadcast.dynamic();
-	let mut front = Front::new(TRACK_IDLE_LINGER);
+	let mut front = Front::new(track::IDLE_LINGER);
 	let mut sources: HashMap<u64, broadcast::Consumer> = HashMap::new();
 	let mut next_source = 0u64;
 	// The in-flight upstream request: the route and its pending channel.
@@ -2502,7 +2493,7 @@ async fn run_front(task: FrontTask) {
 										source,
 										copy,
 										info: None,
-										_sub: sub,
+										sub,
 									},
 									info,
 								));
@@ -2532,6 +2523,7 @@ async fn run_front(task: FrontTask) {
 						// reader gets a fresh one, so nothing cached can be stale.
 						io.routes.park();
 						io.copy = None;
+						io.held = None;
 					}
 					Action::Forget { track: name } => {
 						// A reader that looked the track up since the machine decided keeps
@@ -2640,6 +2632,15 @@ async fn run_front(task: FrontTask) {
 				{
 					return Poll::Ready(Step::Info(name.clone(), asked.source, result));
 				}
+				// The query's subscription goes with the last reader.
+				if io.held.is_some()
+					&& let Some(accepted) = &mut io.accepted
+				{
+					while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {}
+					if accepted.subscription().is_none() {
+						io.held = None;
+					}
+				}
 				// Settled once the copy closes: a group still open below a declared end is
 				// owed until then, and a session closing first means it never came.
 				if let Some((source, copy)) = &io.copy
@@ -2681,6 +2682,7 @@ async fn run_front(task: FrontTask) {
 						query: None,
 						staged: None,
 						copy: None,
+						held: None,
 						closed: false,
 						used: false,
 					},
@@ -2747,6 +2749,7 @@ async fn run_front(task: FrontTask) {
 				let closing = sources.get(&source).is_some_and(|s| s.is_closing());
 				let Some(io) = tracks.get_mut(&name) else { continue };
 				io.copy = None;
+				io.held = None;
 				io.closed = matches!(result, Err(Error::Closed));
 				Event::TrackEnded {
 					track: name,
@@ -5892,7 +5895,7 @@ mod tests {
 		);
 
 		// Paused time runs the front's earlier deadline before this sleep returns.
-		tokio::time::sleep(TRACK_IDLE_LINGER).await;
+		tokio::time::sleep(track::IDLE_LINGER).await;
 
 		let track = resolved.track("catalog").unwrap();
 		let _subscribing = tokio::spawn(async move { track.subscribe(None).await });
@@ -7682,7 +7685,7 @@ mod tests {
 	}
 
 	/// An origin front drops the source track as soon as its last reader leaves,
-	/// so the publisher's `unused()` resolves far below `TRACK_IDLE_LINGER`.
+	/// so the publisher's `unused()` resolves far below `track::IDLE_LINGER`.
 	/// Cached groups stay on the front for the linger; a returning reader
 	/// replays them and asks the source again for groups past that edge.
 	#[tokio::test]
@@ -7710,7 +7713,7 @@ mod tests {
 
 		tokio::time::timeout(Duration::from_secs(1), track.demand().unused())
 			.await
-			.expect("source unused should resolve far below TRACK_IDLE_LINGER")
+			.expect("source unused should resolve far below track::IDLE_LINGER")
 			.expect("source closed");
 
 		// Cached groups stay on the front for the linger; a returning reader
@@ -7817,7 +7820,7 @@ mod tests {
 	}
 
 	/// A front serving from another front still drops upstream on the unused edge,
-	/// so the publisher's `unused()` resolves far below `TRACK_IDLE_LINGER` through
+	/// so the publisher's `unused()` resolves far below `track::IDLE_LINGER` through
 	/// the whole chain, and a returning reader reaches the publisher's cache afresh.
 	#[tokio::test]
 	async fn chained_front_drops_the_source_when_unused() {
@@ -7858,7 +7861,7 @@ mod tests {
 
 		tokio::time::timeout(Duration::from_secs(5), track.demand().unused())
 			.await
-			.expect("chained unused should resolve far below TRACK_IDLE_LINGER")
+			.expect("chained unused should resolve far below track::IDLE_LINGER")
 			.expect("source closed");
 
 		// A budget spanning the cache, so the returning reader replays it.
@@ -7885,7 +7888,7 @@ mod tests {
 
 		tokio::time::timeout(Duration::from_secs(5), track.demand().unused())
 			.await
-			.expect("second chained unused should resolve far below TRACK_IDLE_LINGER")
+			.expect("second chained unused should resolve far below track::IDLE_LINGER")
 			.expect("source closed");
 
 		// A group the leaf produced while every front was parked: the fetch re-splices
