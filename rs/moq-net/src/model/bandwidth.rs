@@ -125,10 +125,7 @@ impl Producer {
 
 	/// Poll until there are no active consumers. Errors if the channel closes first.
 	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_unused(waiter).map(|used| match used {
-			Some(()) => Ok(()),
-			None => Err(self.close_error()),
-		})
+		self.state.poll_unused(waiter).map_err(|_| self.close_error())
 	}
 
 	/// Whether at least one active consumer exists right now.
@@ -143,10 +140,7 @@ impl Producer {
 
 	/// Poll until at least one active consumer exists. Errors if the channel closes first.
 	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_used(waiter).map(|used| match used {
-			Some(()) => Ok(()),
-			None => Err(self.close_error()),
-		})
+		self.state.poll_used(waiter).map_err(|_| self.close_error())
 	}
 
 	fn modify(&self) -> Result<kio::Mut<'_, State>> {

@@ -19,7 +19,7 @@
 //!   grant is asked for again rather than silently resumed.
 //! - Compositors only deliver frames on damage, so a static screen would starve
 //!   the encoder. A loop timer re-emits the last frame whenever a frame interval
-//!   passes without a fresh one, mirroring the Windows Desktop Duplication pacing.
+//!   passes without a fresh one.
 //!   Cameras deliver every interval, so their streams have no such timer.
 
 use std::borrow::Cow;

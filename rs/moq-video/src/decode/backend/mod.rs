@@ -7,7 +7,7 @@
 //! of each keyframe; AV1 backends take OBU temporal units directly.
 //!
 //! [`open`] picks the best backend for a [`Codec`] and [`Config`], trying
-//! hardware candidates (platform-gated: VideoToolbox on macOS, Media Foundation
+//! hardware candidates (platform-gated: VideoToolbox on macOS and iOS, Media Foundation
 //! / DXVA on Windows, MediaCodec on Android, NVDEC, VAAPI, then V4L2 on Linux) before
 //! the OpenH264 software fallback when this build enables it, exactly like the
 //! encode side. Only backends that support the requested codec are considered:
@@ -26,7 +26,7 @@ mod openh264;
 #[cfg(test)]
 pub(crate) mod probe;
 
-#[cfg(target_os = "macos")]
+#[cfg(apple)]
 mod videotoolbox;
 
 #[cfg(target_os = "windows")]
@@ -118,7 +118,7 @@ struct Candidate {
 /// Hardware backends, in priority order. Platform-gated so only the ones that
 /// could plausibly work on this target are even listed.
 const HARDWARE: &[Candidate] = &[
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	Candidate {
 		name: videotoolbox::NAME,
 		supports: |c| matches!(c, Codec::H264 | Codec::H265),
@@ -188,7 +188,7 @@ const NAMED_ONLY: &[Candidate] = &[
 		supports: |c| matches!(c, Codec::H264),
 		open: probe::Native::open,
 	},
-	#[cfg(not(target_os = "macos"))]
+	#[cfg(not(apple))]
 	Candidate {
 		name: probe::BLOCKING_FLUSH_NAME,
 		supports: |c| matches!(c, Codec::H264),

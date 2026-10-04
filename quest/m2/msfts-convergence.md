@@ -4,7 +4,9 @@
 
 A subscriber author can map this repository's demultiplexed TS lane
 (access units, Hang catalog `mpegts` section) onto MSFTS ES-level carriage
-without guessing. Transporting TS verbatim is a non-goal.
+without guessing. Transporting TS verbatim is out of scope here:
+[TS passthrough](/quest/m1/ts-passthrough.md) carries it in an `m2ts`
+catalog section that maps onto MSFTS's track fields.
 
 ## Plan
 
@@ -20,7 +22,9 @@ egress moved to msfts#37 (closed). Two differences remain:
   matter to a subscriber, and converge or document the mapping.
 
 Update `drafts/draft-lcurley-moq-mpegts.md` and `doc/concept` with whatever
-lands. Open TS PRs [#4577](https://github.com/moq-dev/moq/pull/4577) (per-ES
-access units at export), [#4579](https://github.com/moq-dev/moq/pull/4579)
-(export on the mux rate), and [#4580](https://github.com/moq-dev/moq/pull/4580)
-(per-program SI) touch the same area; land or rebase on them first.
+lands. [#4577](https://github.com/moq-dev/moq/pull/4577) (per-ES access
+units at export) has merged, and [#4579](https://github.com/moq-dev/moq/pull/4579)
+(export on the mux rate) closed in favour of the
+[T-STD line](/quest/m1/tstd/README.md).
+[#4580](https://github.com/moq-dev/moq/pull/4580) (per-program SI) is still
+open and touches the same area; land or rebase on it first.

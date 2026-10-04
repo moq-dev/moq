@@ -62,6 +62,19 @@ its FIN after settling the tail. A publisher closing gracefully waits for that
 FIN or a reset before closing the connection, within its close deadline.
 moq-lite 05 and 06 retain transport acknowledgement based draining.
 
+## Group reads across failover
+
+Rust origin readers can keep reading an in-flight group after its source fails.
+A group reader waiting on a replacement copy subscribes to it from the frame it
+needs, even when the caller is not polling for the next group, and holds that
+subscription until the group ends. If that copy refuses the subscription, the
+read ends with an error. The copy's declared start says whether the group is
+still coming, so a newer group overtaking it on the wire does not end the wait.
+A copy that declares no start (a local track) and has advanced past the group
+ends the read with an error. This also applies when waiting for the group's
+completion; no FETCH is issued. A replacement that later drops the group it is
+serving still needs SUBSCRIBE\_DROP support to resolve that wait.
+
 ## Discovery
 
 A session can ask for announcements matching a path prefix. The peer replies
@@ -104,6 +117,34 @@ moq-transport sessions behave the same when a namespace is withdrawn. A route
 update that changes its first hop, the original publisher, is not a retraction:
 subscriptions in flight drain the old publisher, and new requests resolve
 through the new one.
+
+A graceful session close withdraws its announcements and waits up to one
+second for transport acknowledgement before disconnecting. Rust uses
+`session.close().await`; JavaScript uses `await connection.close()` on an
+established connection. An abort skips the withdrawal and ends immediately.
+The source origin remains usable by other sessions. Acknowledgement confirms
+transport delivery, not that the peer application has finished processing it.
+IETF drafts 14 through 16 send their withdrawals on the shared control stream
+without waiting, since it has no FIN to acknowledge.
+
+### Publisher epochs
+
+An application can identify each publisher instance with a shared `Epoch` from
+`moq-net` or `@moq/net`. It is a lowercase hyphenated UUIDv7, ordered newest
+last, with its wall-clock creation time available as `Epoch::time()` in Rust
+or `Epoch.time(epoch)` in TypeScript. Minting is explicit; publishing does not
+add an epoch automatically.
+
+`Path::join_epoch(Some(&epoch))` and `Path.joinEpoch(name, epoch)` append an
+`@<uuidv7>` segment. `Path::split_epoch()` and `Path.splitEpoch(path)` return
+the name and optional epoch. Only the final segment and canonical UUIDv7 text
+count: `@alice`, bare UUIDs, uppercase UUIDs, and other UUID versions remain
+ordinary path segments. Existing path normalization still applies.
+
+The segment travels as part of the ordinary broadcast path on every supported
+wire version. Pattern grants still match the full path: `room/**` covers an
+epoch-qualified instance, while `room/camera` is an exact name. Epochs do not
+hide a broadcast; a leading `.` in a name segment still does.
 
 ### Hidden broadcasts
 
@@ -175,12 +216,20 @@ root. The pattern scope filters which prefixes are visible without changing a
 route's prefix. When several routes advertise one prefix, each reader sees the
 best route its scope can use, so a cheaper route scoped elsewhere never hides
 it. Announce events carry the covered path, captures, and what
-happened to it: Rust
-`announce::Update { prefix, captures: Option<Vec<Pattern>>, route, kind }` and
-TypeScript `Announce.Update { prefix, captures, route, kind }`, where the kind is
-announced, updated (a reprice in place), or retracted. Captures are present when
-the announced prefix pins every wildcard in the most-specific matching scope
-member. The Rust consumer is a `Stream` and the TypeScript one an async iterable.
+happened to it: Rust `announce::Event::{Start, Update, End}`, each
+holding an `announce::Announce { prefix, captures: Option<Vec<Pattern>>, route }`,
+and TypeScript `Announce.Event`, whose `kind` is `"start"`, `"update"`, or
+`"end"` alongside the same `Announce.Announce` fields. An update is a
+reprice in place. Captures are present when the announced prefix pins every
+wildcard in the most-specific matching scope member. The Rust consumer is a
+`Stream` and the TypeScript one an async iterable. Both, and every binding over
+moq-ffi or moq-c, also yield one `Live` marker (TypeScript `{ kind: "live" }`)
+once the routes live at subscribe time have all been delivered, including those
+a peer session was still sending: moq-lite-05+ counts them in `ANNOUNCE_OK`,
+moq-lite-01/02 send them in `ANNOUNCE_INIT`, Rust IETF draft-16+ sessions count
+them in `REQUEST_OK` when both sides speak
+[active-count](/draft/moq-active-count), and anything else waits for the
+stream to go quiet.
 
 Announcements are hints; requests are the authority. When a subscriber asks
 for a covered path the advertiser will not serve, the advertiser refuses that
@@ -254,9 +303,24 @@ unbounded until its first frame arrives; if it is dropped first, the next group
 takes its place. A cached open group's prefix remains
 readable across repeated takeovers and idle resumes.
 
-The publisher declares a retention window per track, which bounds how far back
-a fetch or late subscriber can reach. Media tracks default to 30 seconds so a
+The publisher may declare a retention window per track. Omission sets no limit;
+zero keeps only the live edge. The origin cache ceiling and cache pool may still
+evict content sooner. Relays preserve the publisher's declaration rather than
+substituting a local default. Media tracks explicitly use 30 seconds so a
 segmented egress can still find its segments.
+
+IETF carries this value as MAX\_CACHE\_DURATION, received on every supported draft
+and sent from draft 17 onward. A relay reads it from FETCH\_OK as well as SUBSCRIBE\_OK, so a track it
+only fetches still learns its window. Drafts 14–16 remain receive-only for compatibility
+with older implementations. This is an approximate mapping: IETF measures wall
+time, while max age uses media timestamps and always keeps the newest group.
+EXPIRES describes subscription lifetime and does not set retention.
+
+Lite-07 encodes a finite limit as milliseconds plus one, with zero meaning no limit.
+Lite-05/06 send no limit as `2^53 - 1` milliseconds so older JavaScript readers can
+parse it. New readers treat every value at or above that boundary as no limit;
+older readers treat it as a finite window of approximately 285,000 years. Their
+timer cap schedules periodic age checks and does not shorten that window.
 
 Put together, a conference might use:
 
@@ -299,7 +363,9 @@ codes as `moq_net::Error::Session(SessionError)` or `Error::Stream(StreamError)`
 JavaScript exposes `SessionError` and `StreamError`. Match the registry before
 interpreting the number. Native bindings expose scope, code, kind, and a diagnostic
 message; unknown and application codes retain their numeric value. Transport
-failures without a protocol code remain separate.
+failures without a protocol code remain separate. A deliberate local close ends
+received tracks cleanly after their delivered groups; a peer close ends tracks
+and open group readers with the session error.
 
 ## Local read limits
 

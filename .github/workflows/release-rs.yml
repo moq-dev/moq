@@ -12,7 +12,7 @@ concurrency:
 on:
   push:
     branches:
-      - main
+      - release
     # A run costs the better part of an hour and they serialize on the
     # concurrency group above, so a push that can't change a crate's version
     # or its API shouldn't queue one.
@@ -26,7 +26,8 @@ on:
       - "flake.lock"
       - ".release-plz.toml"
       - ".github/workflows/release-rs.yml"
-  # Releasing by hand, e.g. after a skipped push or a cold cache.
+  # Releasing by hand, e.g. after a skipped push or a cold cache. Dispatch it
+  # on `release`; the job refuses any other ref.
   workflow_dispatch:
 
 jobs:
@@ -34,7 +35,7 @@ jobs:
     name: Plz
 
     runs-on: ubuntu-latest
-    if: ${{ github.repository_owner == 'moq-dev' }}
+    if: ${{ github.repository_owner == 'moq-dev' && github.ref == 'refs/heads/release' }}
 
     env:
       # release-plz copies each crate into its own temp directory to compare it
@@ -83,7 +84,9 @@ jobs:
       # Its own scope rather than the shared store cache.yml warms: this holds
       # cargo-semver-checks rustdoc, not check and test artifacts, and mixing
       # the two would have each restoring a target tree built for the other.
-      # This workflow only runs on `main`, so it is the sole writer of its scope.
+      # This workflow only runs on `release`, so it is the sole writer of its scope.
+      # The cache action saves push runs only on the default branch, so pushes
+      # here restore without saving; a dispatch on `release` refreshes it.
       #
       # The action's shim is what gets mbx in here at all. release-plz spawns
       # Cargo and cargo-semver-checks itself, so no environment variable reaches

@@ -35,5 +35,10 @@ need the fork.
 
 ## Required
 
+- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
 - [Measure ECN on the backbone](/quest/m2/quic-ecn-measure.md) - the
   provider verdict this quest acts on
+
+## Related
+
+- [noq#814](https://github.com/n0-computer/noq/issues/814) - the L4S proposal to n0

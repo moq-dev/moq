@@ -955,6 +955,19 @@ pub struct Cluster {
 	_stats_publisher: Option<moq_stats::Producer>,
 }
 
+/// A gateway or network session admitted with its lease, scoped origins, and stats.
+#[non_exhaustive]
+pub struct Admitted {
+	/// The live authorization that must be held for the session's lifetime.
+	pub lease: auth::Lease,
+	/// Where an admitted publisher writes its broadcasts.
+	pub publisher: Option<origin::Producer>,
+	/// Where an admitted subscriber reads broadcasts.
+	pub subscriber: Option<origin::Consumer>,
+	/// The session's root and tier attribution.
+	pub stats: moq_net::stats::Session,
+}
+
 impl Cluster {
 	/// The origin ID used by this relay on the wire.
 	pub fn id(&self) -> u64 {
@@ -1013,6 +1026,64 @@ impl Cluster {
 			origin,
 			stats: moq_net::stats::Registry::disabled(),
 			_stats_publisher: None,
+		})
+	}
+
+	/// Admit a gateway session and scope both origin directions from its grant.
+	pub async fn admit(&self, auth: &auth::Auth, request: moq_auth::Request) -> Result<Admitted, auth::Error> {
+		if !matches!(request.event, moq_auth::Event::Connect) {
+			return Err(auth::Error::Request("admission requires a connect event".into()));
+		}
+		let lease = auth.admit(request.clone()).await?;
+		self.scope(lease, &request)
+	}
+
+	/// Resolve origin handles for a lease already admitted by a local relay rule.
+	pub(crate) fn scope(&self, lease: auth::Lease, request: &moq_auth::Request) -> Result<Admitted, auth::Error> {
+		let token = lease.token();
+		let publisher = self.publisher(token);
+		let subscriber = self.subscriber(token);
+		let allowed = match request.role {
+			Some(moq_auth::Role::Publisher) => publisher.is_some(),
+			Some(moq_auth::Role::Subscriber) => subscriber.is_some(),
+			None => publisher.is_some() || subscriber.is_some(),
+		};
+		if !allowed {
+			let wanted = match request.role {
+				Some(moq_auth::Role::Publisher) => "publisher",
+				Some(moq_auth::Role::Subscriber) => "subscriber",
+				None => "any",
+			};
+			return Err(auth::Error::Forbidden(format!(
+				"grant does not allow {wanted} access to {}",
+				token.root
+			)));
+		}
+
+		let stats = self.stats.tier(token.tier.clone()).session(&token.root);
+		tracing::info!(transport = %request.transport, ?request.role, tier = %token.tier, root = %token.root,
+			publish = ?publisher.as_ref().map(origin::Producer::allowed),
+			subscribe = ?subscriber.as_ref().map(origin::Producer::allowed),
+			"session accepted");
+		let publisher = match request.role {
+			Some(moq_auth::Role::Subscriber) => None,
+			_ => publisher.map(|origin| origin.with_stats(stats.clone())),
+		};
+		// An authenticated cluster peer (a verified client certificate or the LAN
+		// credential) discovers hidden routes whether or not it asks. A peer that
+		// predates the hidden opt-in (below moq-lite-07-wip, or moq-transport without
+		// MoQ Hidden) would otherwise lose every dot path during a rolling upgrade.
+		// TODO: drop the exemption once deployed peers all opt in.
+		let cluster_peer = request.tls.is_some() || Self::is_lan_path(&request.path);
+		let subscriber = match request.role {
+			Some(moq_auth::Role::Publisher) => None,
+			_ => subscriber.map(|origin| origin.consume().with_hidden(cluster_peer).with_stats(stats.clone())),
+		};
+		Ok(Admitted {
+			lease: lease.with_stats(stats.clone()),
+			publisher,
+			subscriber,
+			stats,
 		})
 	}
 
@@ -1651,7 +1722,7 @@ impl Cluster {
 		// Cluster dials use their configured stats tier. Cluster peers carry no auth
 		// root, so presence is keyed under the empty root within the cluster tier.
 		// The peer's routes entered the cluster elsewhere. A peer that predates the
-		// hidden opt-in still discovers our hidden routes; see `connection::authorize`.
+		// hidden opt-in still discovers our hidden routes; see `Cluster::scope`.
 		let origin = self.origin.clone().peer();
 		let mut client = client
 			.with_publisher(origin.consume().with_hidden(true))
@@ -1919,6 +1990,28 @@ where
 mod tests {
 	use super::*;
 	use crate::Config as RelayConfig;
+
+	/// The next route and whether it is active, skipping the caught-up marker.
+	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+		loop {
+			return match announced.next().await? {
+				moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+				moq_net::announce::Event::End(route) => Some((route, false)),
+				moq_net::announce::Event::Live => continue,
+			};
+		}
+	}
+
+	/// The next announcement without blocking, skipping the caught-up marker.
+	fn try_next_announced(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Announce> {
+		loop {
+			return match announced.try_next()? {
+				moq_net::announce::Event::Start(route) => Some(route),
+				moq_net::announce::Event::Live => continue,
+				other => panic!("expected an announcement: got {other:?}"),
+			};
+		}
+	}
 
 	fn new_cluster(config: Config) -> anyhow::Result<Cluster> {
 		Cluster::new(Options::new(config))
@@ -3033,7 +3126,7 @@ mod tests {
 		let _dial = fingerprint.dial_lan_target(&target).expect("dial");
 
 		let mut announced = fingerprint.origin.consume().announced();
-		let update = tokio::time::timeout(TIMEOUT, announced.next())
+		let (update, _) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
 			.await
 			.expect("timed out waiting for from-node")
 			.expect("origin closed");
@@ -3045,7 +3138,7 @@ mod tests {
 		_from_fp.announce(Default::default()).expect("announce");
 		let mut announced = node.origin.consume().announced();
 		loop {
-			let update = tokio::time::timeout(TIMEOUT, announced.next())
+			let (update, _) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
 				.await
 				.expect("timed out waiting for from-fingerprint")
 				.expect("origin closed");
@@ -3058,10 +3151,13 @@ mod tests {
 
 		// Each relay's local view holds only what it ingested itself.
 		let mut local = node.origin.consume().local().announced();
-		let update = local.try_next().expect("from-node is local");
+		let update = try_next_announced(&mut local).expect("from-node is local");
 		assert_eq!(update.prefix.as_str(), "from-node");
 		assert_eq!(update.route.source(), origin::Source::Local);
-		assert!(local.try_next().is_none(), "a peer's broadcast is not local");
+		assert!(
+			try_next_announced(&mut local).is_none(),
+			"a peer's broadcast is not local"
+		);
 	}
 
 	/// A grant naming a cluster peer marks the session's routes as a peer's, so the
@@ -3086,15 +3182,18 @@ mod tests {
 			.publish("forwarded", Default::default());
 
 		let mut announced = cluster.origin.consume().announced();
-		let forwarded = announced.try_next().expect("forwarded");
+		let forwarded = try_next_announced(&mut announced).expect("forwarded");
 		assert_eq!(forwarded.prefix.as_str(), "forwarded");
 		assert!(matches!(forwarded.route.source(), origin::Source::Peer(_)));
-		let ingest = announced.try_next().expect("ingest");
+		let ingest = try_next_announced(&mut announced).expect("ingest");
 		assert_eq!(ingest.route.source(), origin::Source::Local);
 
 		let mut local = cluster.origin.consume().local().announced();
-		assert_eq!(local.try_next().expect("ingest").prefix.as_str(), "ingest");
-		assert!(local.try_next().is_none());
+		assert_eq!(
+			try_next_announced(&mut local).expect("ingest").prefix.as_str(),
+			"ingest"
+		);
+		assert!(try_next_announced(&mut local).is_none());
 	}
 
 	/// A `/.cluster` request on a cluster without LAN discovery is refused.

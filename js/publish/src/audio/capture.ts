@@ -10,8 +10,9 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
-// Compiled and inlined as a blob URL via vite-plugin-worklet.
+import { hostedAssets } from "../assets";
 import { Fanout } from "../fanout";
+// A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import CaptureWorklet from "./capture-worklet.ts?worklet";
 import { isSampleSource, normalizeSource, type SampleSource, type Source, type SourceConfig } from "./types";
 
@@ -212,7 +213,12 @@ export class Capture {
 			// result, not `context.state`, because `AudioContext.close()` only flips `.state` to "closed"
 			// synchronously on Chrome (Firefox/Safari report "suspended").
 			try {
-				const ok = await effect.race(context.audioWorklet.addModule(CaptureWorklet).then(() => true));
+				const ok = await effect.race(
+					CaptureWorklet(hostedAssets()).then(async (url) => {
+						await context.audioWorklet.addModule(url);
+						return true;
+					}),
+				);
 				if (ok) loaded.set(true);
 			} catch (err) {
 				this.#fail(effect);

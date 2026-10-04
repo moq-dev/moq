@@ -79,12 +79,12 @@ func publish(ctx context.Context, url, broadcast string) error {
 	}
 	defer client.Close()
 
-	// Hold the producer for the lifetime of the publish loop; Finish unpublishes.
+	// Hold the producer for the lifetime of the publish loop; Close unpublishes.
 	producer, err := client.CreateBroadcast(broadcast)
 	if err != nil {
 		return err
 	}
-	defer producer.Finish()
+	defer producer.Close()
 
 	media, err := producer.PublishVideoStream(moq.VideoFormatAvc3)
 	if err != nil {
@@ -113,7 +113,7 @@ func publish(ctx context.Context, url, broadcast string) error {
 		publishTone(toneCtx, audio)
 	}()
 	// Let the tone unwind before any Finish, so no write races a finished
-	// producer. Runs before the deferred producer.Finish, and is a no-op once
+	// producer. Runs before the deferred producer.Close, and is a no-op once
 	// the happy path below has already stopped and joined it.
 	defer func() {
 		stopTone()

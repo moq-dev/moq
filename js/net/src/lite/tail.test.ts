@@ -165,22 +165,55 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		expect(await reader.closed).toBeNull();
 	});
 
-	test("a group that never arrives is given up on after the subscription's max age", async () => {
-		const { subscriber, reader, respond, fin } = await subscribed(version);
-		await respond({ start: new SubscribeStart(0) });
-		const group = groupStream(subscriber, 1);
-		group.write("1.0");
-		group.finish();
-		await respond({ end: new SubscribeEnd(2, 2) });
-		await fin();
+	test("readers end before a missing group's grace settles the subscription", async () => {
+		const realTimeout = globalThis.setTimeout;
+		const realNow = performance.now.bind(performance);
+		let now = 0;
+		performance.now = () => now;
+		let expire!: () => void;
+		let armed!: () => void;
+		const graceArmed = new Promise<void>((resolve) => (armed = resolve));
+		globalThis.setTimeout = ((callback: () => void, delay?: number) => {
+			if (delay !== GRACE) return realTimeout(callback, delay);
+			expire = callback;
+			armed();
+			// The test advances this clock explicitly, without a wall-clock timer.
+			return 0;
+		}) as typeof setTimeout;
 
-		// Group 0 was reset before its header arrived, so nothing ever accounts for it.
-		expect((await reader.recvGroup())?.sequence).toBe(1);
-		const started = performance.now();
-		expect(await reader.recvGroup()).toBeUndefined();
-		expect(performance.now() - started).toBeGreaterThanOrEqual(GRACE - 5);
-		expect(await reader.closed).toBeNull();
-		expect(reader.final()).toBe(2);
+		let subscriber: Subscriber | undefined;
+		try {
+			const sub = await subscribed(version);
+			subscriber = sub.subscriber;
+			const { reader, respond, fin } = sub;
+			const ordered = reader.fork({ maxAge: GRACE }).ordered();
+			await respond({ start: new SubscribeStart(0) });
+			const group = groupStream(subscriber, 1);
+			group.write("1.0");
+			group.finish();
+			await group.handled;
+			await respond({ end: new SubscribeEnd(2, 2) });
+			await fin();
+			await graceArmed;
+
+			// Group 0 has no header, so accounting still waits. Both reader cursors
+			// skip that hole and see the end as soon as the newest group reaches it.
+			expect((await reader.recvGroup())?.sequence).toBe(1);
+			expect(await reader.recvGroup()).toBeUndefined();
+			expect(await ordered.readString()).toBe("1.0");
+			expect(await ordered.readString()).toBeUndefined();
+			expect(reader.closed.peek()).toBeUndefined();
+			expect(reader.final()).toBe(2);
+
+			now = GRACE;
+			expire();
+			expect(await reader.closed).toBeNull();
+			ordered.close();
+		} finally {
+			globalThis.setTimeout = realTimeout;
+			performance.now = realNow;
+			subscriber?.close();
+		}
 	});
 
 	test.skipIf(version === Version.DRAFT_07)(

@@ -119,6 +119,107 @@ async fn drain_session_with_zero_timeout_closes_at_once_inner() {
 }
 
 #[test]
+fn cluster_continues_a_group_split_by_goaway() {
+	run_cluster_test(cluster_continues_a_group_split_by_goaway_inner());
+}
+
+/// A GOAWAY that lands mid-group hands the rest of the group to the reader already
+/// holding it, and the next group after it, never the split group a second time.
+async fn cluster_continues_a_group_split_by_goaway_inner() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let upstream_origin = moq_tokio::origin::spawn();
+	let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
+	broadcast.announce(Default::default()).expect("announce");
+	let track = broadcast.create_track("video", None).expect("create track");
+
+	let (port_a, mut accepted_a, _handle_a) = spawn_upstream(upstream_origin.clone()).await;
+	let (port_b, mut accepted_b, _handle_b) = spawn_upstream(upstream_origin.clone()).await;
+
+	let mut client_config = moq_tokio::connect::Config::default();
+	client_config.tls.insecure = Some(true);
+	client_config.goaway.handover = Duration::from_secs(2);
+	let client = client_config.init(Default::default()).expect("client init");
+
+	let mut cluster_config = cluster::Config::default();
+	cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port_a}/"))];
+	let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
+		.expect("cluster init")
+		.with_client(client);
+	let started = cluster.clone().start().await.expect("cluster start");
+	let cluster_run = tokio::spawn(started.run());
+
+	let session_a = within("A accepts", accepted_a.recv()).await.expect("A accepts");
+	let consumer = cluster.origin.consume();
+	within("routed via A", consumer.routed("cam")).await.expect("routed");
+	let bc = consumer.request_broadcast("cam").await.expect("broadcast resolves");
+	let mut sub = within("subscribe", bc.track("video").expect("track").subscribe(None))
+		.await
+		.expect("subscribe");
+
+	let write = |group: &mut moq_net::group::Producer, payload: &'static str| {
+		group
+			.write_frame(moq_net::Timestamp::ZERO, payload.as_bytes())
+			.expect("write frame");
+	};
+	// A group's sequence and its next frame, or `None` at its end.
+	async fn read(group: &mut moq_net::group::Consumer) -> (u64, Option<bytes::Bytes>) {
+		let frame = within("read frame", group.read_frame()).await.expect("read");
+		(group.sequence, frame.map(|frame| frame.payload))
+	}
+
+	// The first group is open, its first frame read, when A redirects to B.
+	let mut split = track.append_group().expect("append group");
+	write(&mut split, "a");
+	let mut reading = within("recv the split group", sub.recv_group())
+		.await
+		.expect("recv")
+		.expect("track ended");
+	assert_eq!(read(&mut reading).await, (0, Some("a".into())));
+
+	// The cursor replays A's route first. After the GOAWAY, A's re-prices to DRAIN, so
+	// the next route at any other cost is B's.
+	let mut announced = consumer.announced();
+	within("A's route", announced.next()).await.expect("announce update");
+	session_a
+		.drain()
+		.send(moq_net::goaway::Goaway::redirect(format!("tcp://127.0.0.1:{port_b}/")))
+		.expect("send goaway");
+	let _session_b = within("B accepts", accepted_b.recv()).await.expect("B accepts");
+	within("routed via B", async {
+		loop {
+			let event = announced.next().await.expect("announce update");
+			if let moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update) = event
+				&& update.route.cost != moq_net::origin::Cost::DRAIN
+			{
+				break;
+			}
+		}
+	})
+	.await;
+
+	write(&mut split, "b");
+	split.finish().expect("finish");
+	assert_eq!(read(&mut reading).await, (0, Some("b".into())));
+	assert_eq!(read(&mut reading).await, (0, None));
+
+	let mut after = track.append_group().expect("append group");
+	write(&mut after, "c");
+	after.finish().expect("finish");
+	let mut next = within("recv the next group", sub.recv_group())
+		.await
+		.expect("recv")
+		.expect("track ended");
+	assert_eq!(
+		read(&mut next).await,
+		(1, Some("c".into())),
+		"the split group came back"
+	);
+
+	cluster_run.abort();
+}
+
+#[test]
 fn cluster_reconnects_on_empty_uri_goaway() {
 	run_cluster_test(cluster_reconnects_on_empty_uri_goaway_inner());
 }
@@ -221,7 +322,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		// unannounce the path (metadata updates are expected: the drain
 		// re-prices the old route and the sibling announces its own).
 		let mut announcements = cluster.origin.consume().announced();
-		let first = announcements.next().await.expect("initial announce");
+		let (first, _) = next_update(&mut announcements).await.expect("initial announce");
 		assert_eq!(first.prefix.as_str(), "cam");
 
 		// ── sibling A drains with a redirect to sibling B ────────────────
@@ -259,9 +360,9 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		// updates (the drain re-pricing, the sibling's route) are expected and
 		// harmless; an inactive event means the path flapped.
 		loop {
-			match tokio::time::timeout(Duration::from_millis(500), announcements.next()).await {
+			match tokio::time::timeout(Duration::from_millis(500), next_update(&mut announcements)).await {
 				Err(_) => break,
-				Ok(Some(update)) if update.kind.is_active() => continue,
+				Ok(Some((_, true))) => continue,
 				Ok(event) => panic!("migration must not retract the path on the cluster origin: {event:?}"),
 			}
 		}
@@ -424,9 +525,12 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// Watch announcements for the whole test: the failover must never
 	// unannounce the broadcast under the subscriber.
 	let mut announcements = sub_origin.consume().announced();
-	let first = within("broadcast announced through the MID-A leg", announcements.next())
-		.await
-		.expect("origin closed before the announce");
+	let (first, _) = within(
+		"broadcast announced through the MID-A leg",
+		next_update(&mut announcements),
+	)
+	.await
+	.expect("origin closed before the announce");
 	assert_eq!(first.prefix.as_str(), "diamond");
 
 	let bc = within("broadcast resolves on the subscriber origin", async {
@@ -575,9 +679,9 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// ── announcement stability: the path never retracted under the swap ──
 	// Metadata updates (route re-pricing, the new leg's hops) are expected.
 	loop {
-		match tokio::time::timeout(Duration::from_millis(500), announcements.next()).await {
+		match tokio::time::timeout(Duration::from_millis(500), next_update(&mut announcements)).await {
 			Err(_) => break,
-			Ok(Some(update)) if update.kind.is_active() => continue,
+			Ok(Some((_, true))) => continue,
 			Ok(event) => panic!("failover must not retract the path under the subscriber: {event:?}"),
 		}
 	}
@@ -805,4 +909,15 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	);
 
 	drop(connection);
+}
+
+/// The next route and whether it is active, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	loop {
+		return match announced.next().await? {
+			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+			moq_net::announce::Event::End(route) => Some((route, false)),
+			moq_net::announce::Event::Live => continue,
+		};
+	}
 }

@@ -41,7 +41,7 @@ ships in no package.
 
 ## Required
 
-- A physical-NIC remote peer to measure zero-copy sends against
+- [A physical-NIC peer for the zero-copy sweep](/quest/m3/zero-copy-peer.md) - loopback only measures the forced copy
 
 ## Closes
 

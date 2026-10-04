@@ -41,7 +41,3 @@ stop here and write down why.
   group before dropping its write future).
 - Offer both the 0.32 port and the expected flag upstream to LiveKit and
   NordSecurity; the fork exists only until they tag.
-
-## Related
-
-- [C# generator](/quest/m3/cs/generator.md) - the same 0.32 port against NordSecurity's C# generator

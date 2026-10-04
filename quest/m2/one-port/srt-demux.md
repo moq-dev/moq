@@ -9,12 +9,12 @@ induction handshake.
 ## Plan
 
 `srt-tokio` 0.4 takes a `tokio::net::UdpSocket` in `bind_with_socket` and
-nothing more abstract. Preferred: an upstream PR giving `SrtListener` a
-socket trait (`poll_recv_from` and `poll_send_to`) that a real socket and our
-virtual socket both implement, then `moq_srt::Server` takes the virtual
-socket. Fallback if refused: `srt-protocol` is sans-io, so `moq-srt` drives
-its `Listen` and `Connection` state machines directly on fed packets, which
-is more code but removes the dependency on `srt-tokio`'s socket handling.
+nothing more abstract. Decided 2026-09-30: `srt-protocol` is sans-io, so
+`moq-srt` drives its `Listen` and `Connection` state machines directly on the
+demuxed packets. That is more code, but it removes the dependency on
+`srt-tokio`'s socket handling. An upstream socket trait was rejected:
+upstream (now rosalyntg/srt-rs) has not been pushed since 2024-05, and its
+maintainer said they do not actively support it.
 
 The demux side is the flow table from [UDP demux](/quest/m2/one-port/udp-demux.md):
 a 4-tuple already pinned to WebRTC (ICE succeeded) is never tested for SRT.
@@ -36,4 +36,3 @@ with a QUIC client active on the same port; a QUIC short header from a new
 ## Required
 
 - [UDP demux](/quest/m2/one-port/udp-demux.md)
-- srt-tokio accepts a caller-supplied socket abstraction upstream, or the sans-io fallback is chosen
