@@ -7,12 +7,12 @@
 //! [`Subscriber`]: nothing is copied, and with one route it is a passthrough.
 //!
 //! When the front switches, each reader subscribes to the new copy from the newest group
-//! it handed out, and keeps the replaced copy only for what it already handed out: the
-//! replaced subscription is bounded after that group, and dropped once no group read from
-//! it is left. A group carries on across the switch through its [`Recover`]: once its copy
-//! fails with its route, or stalls while a newer route serves, it continues from the
-//! serving route's copy of the same group at the same frame (and byte), found in that
-//! copy's cache or fetched from it.
+//! it handed out. It keeps replaced copies for unread groups they already had and groups
+//! still being read, bounds their subscriptions after their newest group at replacement,
+//! and drops them once neither needs them. A group carries on across the switch through
+//! its [`Recover`]: once its copy fails with its route, or stalls while a newer route
+//! serves, it continues from the serving route's copy of the same group at the same frame
+//! (and byte), found in that copy's cache or fetched from it.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -226,8 +226,6 @@ struct Copy {
 	/// Held by every group handed out from this copy, so a replaced copy stays
 	/// subscribed while one is still read.
 	lease: Arc<()>,
-	/// A group taken from a replaced copy as it was let go, for the next group read.
-	held: Option<group::Consumer>,
 }
 
 enum Sub {
@@ -270,10 +268,9 @@ impl Copy {
 		Poll::Ready(Ok(sub))
 	}
 
-	/// Whether this copy is still needed: it serves, or a group read from it is still out
-	/// or held.
+	/// Whether this copy is still needed: it serves, or a group read from it is still out.
 	fn needed(&self, serving: bool) -> bool {
-		serving || (self.done.is_none() && (Arc::strong_count(&self.lease) > 1 || self.held.is_some()))
+		serving || (self.done.is_none() && Arc::strong_count(&self.lease) > 1)
 	}
 }
 
@@ -329,6 +326,14 @@ impl Subscriber {
 	/// Cap local reads at `end`; see [`track::Subscriber::set_groups`].
 	pub(crate) fn end_at(&mut self, end: Cap) {
 		self.reader().end_at(end)
+	}
+
+	/// Whether any subscribed copy still has a group matching `unread`.
+	pub(crate) fn has_unread_group(&self, unread: &track::Unread<'_>) -> bool {
+		self.reader().copies.iter().any(|copy| match &copy.sub {
+			Sub::Ready(sub) => sub.has_unread_group(unread),
+			Sub::Pending(_) => false,
+		})
 	}
 
 	/// The newest sequence any copy has.
@@ -439,39 +444,35 @@ impl Reader {
 			datagrams_done: None,
 			datagrams_seen: self.datagram,
 			lease: Arc::new(()),
-			held: None,
 		});
 	}
 
-	/// Drop the replaced copies nothing is read from any more.
+	/// Drop replaced copies only once neither a handed-out nor an unread group needs them.
 	fn let_go(&mut self) {
 		let serving = self.generation;
-		for index in 0..self.copies.len() {
-			let copy = &self.copies[index];
-			if copy.done.is_none() && !copy.needed(Some(copy.generation) == serving) {
-				self.hold(index);
-			}
-		}
-		self.copies.retain(|copy| copy.needed(Some(copy.generation) == serving));
-	}
-
-	/// Take a group a replaced copy still has for the reader before letting it go: the
-	/// datagram channel lets go too, and must not drop what the group channel has yet to read.
-	fn hold(&mut self, index: usize) {
 		let groups = self.groups;
-		let waiter = kio::Waiter::noop();
-		loop {
-			let Poll::Ready(Ok(sub)) = self.copies[index].poll_ready(groups, &waiter) else {
-				return;
-			};
-			let Poll::Ready(Ok(Some(group))) = sub.poll_recv_group(&waiter) else {
-				return;
-			};
-			if self.deliverable(&self.copies[index], group.sequence) {
-				self.copies[index].held = Some(group);
-				return;
+		let ordered = self.ordered;
+		let delivered = &self.delivered;
+		self.copies.retain_mut(|copy| {
+			if copy.needed(Some(copy.generation) == serving) {
+				return true;
 			}
-		}
+			if copy.done.is_some() {
+				return false;
+			}
+			let until = copy.until;
+			let Poll::Ready(Ok(sub)) = copy.poll_ready(groups, &kio::Waiter::noop()) else {
+				return false;
+			};
+			// Inspect without moving either cursor: a later group poll still chooses its
+			// order and applies the current bounds and drift budget. Ignore the local
+			// cap here, since unread groups become eligible again when it rises.
+			sub.has_unread_group(&track::Unread {
+				start: groups.0.max(ordered.map_or(0, |last| last.saturating_add(1))),
+				end: until.and_then(|until| until.map_or(Some(0), |last| last.checked_add(1))),
+				delivered,
+			})
+		});
 	}
 
 	fn deliverable(&self, copy: &Copy, sequence: u64) -> bool {
@@ -531,12 +532,6 @@ impl Reader {
 			let copy = &mut self.copies[index];
 			if copy.done.is_some() {
 				continue;
-			}
-			if let Some(group) = copy.held.take()
-				&& self.deliverable(&self.copies[index], group.sequence)
-			{
-				let group = self.hand_out(index, group, ordered);
-				return Some(Poll::Ready(Ok(Some(group))));
 			}
 			loop {
 				let copy = &mut self.copies[index];
@@ -1508,6 +1503,92 @@ mod test {
 			let mut next = recv(&mut sub);
 			assert_eq!(next.sequence, 0, "datagrams_first={datagrams_first}");
 			assert_eq!(read(&mut next), Some(b"a0".to_vec()));
+		}
+	}
+
+	#[test]
+	fn datagram_retention_preserves_ordered_backlog() {
+		for ordered_first in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_secs(10));
+			assert!(sub.recv_datagram().now_or_never().is_none());
+			if ordered_first {
+				let _zero = a.create_group(group::Info { sequence: 0 }).unwrap();
+				assert_eq!(
+					kio::wait(|waiter| sub.poll_next_group(waiter))
+						.now_or_never()
+						.unwrap()
+						.unwrap()
+						.unwrap()
+						.sequence,
+					0
+				);
+			}
+			let _two = a.create_group(group::Info { sequence: 2 }).unwrap();
+			let _one = a.create_group(group::Info { sequence: 1 }).unwrap();
+			let b = copy();
+			routes.serve(b.consume());
+			assert!(sub.recv_datagram().now_or_never().is_none());
+			for sequence in [1, 2] {
+				assert_eq!(
+					kio::wait(|waiter| sub.poll_next_group(waiter))
+						.now_or_never()
+						.unwrap()
+						.unwrap()
+						.unwrap()
+						.sequence,
+					sequence
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn datagram_retention_obeys_changed_group_bounds() {
+		for ordered in [false, true] {
+			for raise_floor in [false, true] {
+				let routes = Producer::new();
+				let logical = logical(&routes);
+				let a = copy();
+				routes.serve(a.consume());
+				let mut sub = subscribe(&logical, Duration::from_secs(10));
+				assert!(sub.recv_datagram().now_or_never().is_none());
+				let _zero = a.create_group(group::Info { sequence: 0 }).unwrap();
+				let b = copy();
+				routes.serve(b.consume());
+				assert!(sub.recv_datagram().now_or_never().is_none());
+				if raise_floor {
+					sub.set_groups(1..);
+				} else {
+					sub.set_groups(..0);
+				}
+				assert!(
+					if ordered {
+						sub.poll_next_group(&kio::Waiter::noop())
+					} else {
+						sub.poll_recv_group(&kio::Waiter::noop())
+					}
+					.is_pending()
+				);
+				if !raise_floor {
+					sub.set_groups(..);
+					let next = if ordered {
+						sub.poll_next_group(&kio::Waiter::noop())
+					} else {
+						sub.poll_recv_group(&kio::Waiter::noop())
+					};
+					assert_eq!(
+						match next {
+							Poll::Ready(Ok(Some(group))) => group.sequence,
+							_ => panic!("a group"),
+						},
+						0
+					);
+				}
+			}
 		}
 	}
 

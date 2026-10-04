@@ -3112,6 +3112,13 @@ pub struct Subscriber {
 	_stats_sub: stats::Subscription,
 }
 
+/// Unread groups a logical reader can still take from a replaced copy.
+pub(crate) struct Unread<'a> {
+	pub start: u64,
+	pub end: Option<u64>,
+	pub delivered: &'a std::collections::BTreeSet<u64>,
+}
+
 /// How a [`Subscriber`] reads: its track's own cache, or a front's routes.
 enum Inner {
 	Plain(Cursor),
@@ -3649,6 +3656,37 @@ impl Subscriber {
 		};
 		self.count_stale(&meter);
 		res.map(|res| res.map(|group| group.map(|group| group.with_meter(meter))))
+	}
+
+	/// Whether an unread cached group needs this subscription, without moving its cursor.
+	pub(crate) fn has_unread_group(&self, unread: &Unread<'_>) -> bool {
+		let cursor = match &self.inner {
+			Inner::Plain(cursor) => cursor,
+			Inner::Resume(resume, _) => return resume.has_unread_group(unread),
+		};
+		let state = cursor.state.read();
+		let floor = cursor.min_sequence.max(state.live_floor.unwrap_or(0)).max(unread.start);
+		let eligible = |sequence: u64| {
+			sequence >= floor
+				&& super::subscription::before_end(sequence, unread.end)
+				&& !unread.delivered.contains(&sequence)
+		};
+		cursor
+			.parked
+			.iter()
+			.any(|(sequence, group)| eligible(*sequence) && !group.is_aborted())
+			|| (state.readable()
+				&& state
+					.arrival
+					.iter()
+					.skip(cursor.index.saturating_sub(state.offset))
+					.any(|(sequence, stamp)| {
+						eligible(*sequence)
+							&& state
+								.lookup
+								.get(sequence)
+								.is_some_and(|slot| slot.stamp == *stamp && !slot.group.is_aborted())
+					}))
 	}
 
 	/// Receive the next group in arrival order.
