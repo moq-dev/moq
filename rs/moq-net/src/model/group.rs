@@ -1121,7 +1121,8 @@ pub struct Consumer {
 pub(crate) trait Expiry: Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe {
 	/// Return whether the group is stale, registering `waiter` for anything that
 	/// could change the answer while the group remains live.
-	fn is_expired(&self, waiter: &kio::Waiter) -> bool;
+	/// A logical reader supplies its current budget after the original copy is gone.
+	fn is_expired(&self, max_age: Option<std::time::Duration>, waiter: &kio::Waiter) -> bool;
 
 	/// Keep the reader's budget and cap while following a replacement track's edge.
 	fn for_track(&self, track: &track::Consumer) -> Arc<dyn Expiry>;
@@ -1309,8 +1310,10 @@ impl Consumer {
 	pub(crate) fn poll_expired_while_pending(&mut self, waiter: &kio::Waiter, pending: bool) -> bool {
 		if !self.expired
 			&& (pending || self.expiry_pending())
-			&& self.expiry.as_ref().is_some_and(|expiry| expiry.is_expired(waiter))
-		{
+			&& self.expiry.as_ref().is_some_and(|expiry| {
+				let budget = self.recover.as_ref().and_then(|recover| recover.poll_budget(waiter));
+				expiry.is_expired(budget, waiter)
+			}) {
 			self.expired = true;
 			if !self.stale_counted.swap(true, Ordering::Relaxed) {
 				self.stats.stale(self.cursor.unread_content());

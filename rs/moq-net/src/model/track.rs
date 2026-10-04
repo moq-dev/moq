@@ -3157,11 +3157,14 @@ impl group::Expiry for GroupExpiry {
 		})
 	}
 
-	fn is_expired(&self, waiter: &kio::Waiter) -> bool {
-		let mut max_age = Duration::default();
-		let _ = self.subscription.poll(waiter, |subscription| {
-			max_age = subscription.max_age;
-			Poll::<()>::Pending
+	fn is_expired(&self, max_age: Option<Duration>, waiter: &kio::Waiter) -> bool {
+		let max_age = max_age.unwrap_or_else(|| {
+			let mut max_age = Duration::default();
+			let _ = self.subscription.poll(waiter, |subscription| {
+				max_age = subscription.max_age;
+				Poll::<()>::Pending
+			});
+			max_age
 		});
 
 		let mut cap = None;

@@ -384,15 +384,15 @@ impl Reader {
 	/// Follow the route: subscribe to a new copy, bound the ones it replaced, and mirror
 	/// the reader's preferences into each.
 	fn sync(&mut self, waiter: &kio::Waiter) {
-		// Wake on a preference change too, so it reaches the routes while the reader waits.
-		let mirrored = &self.mirrored;
-		let changed = match self.subscription.poll_ref(waiter, |sub| match **sub != *mirrored {
-			true => Poll::Ready((**sub).clone()),
-			false => Poll::Pending,
-		}) {
-			Poll::Ready(Ok(sub)) => Some(sub),
-			_ => None,
-		};
+		// Snapshot and re-arm together, including when a change was observed: another
+		// update must wake a reader that parks after applying this one.
+		let mut changed = None;
+		let _ = self.subscription.poll_ref(waiter, |sub| {
+			if **sub != self.mirrored {
+				changed = Some((**sub).clone());
+			}
+			Poll::<()>::Pending
+		});
 		if let Some(sub) = changed {
 			self.mirrored = sub;
 			for copy in &mut self.copies {
@@ -823,7 +823,7 @@ impl Recover {
 				}));
 			}
 			if res.is_pending()
-				&& let Some(budget) = self.budget()
+				&& let Some(budget) = self.poll_budget(waiter)
 				&& serving.poll_stale(self.sequence, budget, waiter).is_ready()
 			{
 				return Poll::Ready(Err(Error::Old));
@@ -902,9 +902,12 @@ impl Recover {
 
 	/// The reader's budget for a late group; `None` for a fetch, which has no live edge
 	/// to be late against.
-	fn budget(&self) -> Option<std::time::Duration> {
+	pub(crate) fn poll_budget(&self, waiter: &kio::Waiter) -> Option<std::time::Duration> {
 		let reader = self.reader.upgrade()?;
-		let reader = reader.lock().expect("reader poisoned");
+		let mut reader = reader.lock().expect("reader poisoned");
+		// A held group or frame may be the only thing being polled. Mirror and watch
+		// preferences here too, before judging its budget against the live edge.
+		reader.sync(waiter);
 		Some(reader.mirrored.max_age)
 	}
 
@@ -1500,5 +1503,276 @@ mod test {
 		let readers = routes.readers.lock().unwrap();
 		let reader = readers[0].upgrade().unwrap();
 		assert!(reader.lock().unwrap().copies.iter().any(|copy| copy.generation == 2));
+	}
+
+	#[test]
+	fn held_read_preferences_follow_the_reader() {
+		enum Read {
+			Group(Box<group::Consumer>),
+			Frame(crate::frame::Consumer),
+		}
+		impl Read {
+			fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+				match self {
+					Self::Group(group) => group
+						.poll_read_frame(waiter)
+						.map(|result| result.map(|frame| assert!(frame.is_none()))),
+					Self::Frame(frame) => frame
+						.poll_read_chunk(waiter)
+						.map(|result| result.map(|frame| assert!(frame.is_none()))),
+				}
+			}
+		}
+		for recovered in [false, true] {
+			for widen in [false, true] {
+				for chunked in [false, true] {
+					let routes = Producer::new();
+					let logical = logical(&routes);
+					let a = copy();
+					routes.serve(a.consume());
+					let mut sub = subscribe(&logical, Duration::from_secs(if widen { 2 } else { 10 }));
+					let b = copy();
+					// Both routes carry the same content, including the unfinished payload.
+					let mut writers = [&a, &b].map(|source| source.create_group(group::Info { sequence: 0 }).unwrap());
+					let _frames: Vec<_> = writers
+						.iter_mut()
+						.map(|group| {
+							group.write_frame(ts(0), b"first".as_ref()).unwrap();
+							chunked.then(|| {
+								let mut frame = group
+									.create_frame(crate::frame::Info {
+										size: 4,
+										timestamp: ts(1),
+									})
+									.unwrap();
+								frame.write(b"ab".as_ref()).unwrap();
+								frame
+							})
+						})
+						.collect();
+					let mut group = recv(&mut sub);
+					assert_eq!(read(&mut group), Some(b"first".to_vec()));
+					// Give both read APIs the same wake-driven schedule. A detached frame
+					// must observe preferences without its parent group being polled.
+					let mut reading = if chunked {
+						let mut frame = group.next_frame().now_or_never().unwrap().unwrap().unwrap();
+						assert_eq!(&frame.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..], b"ab");
+						drop(group);
+						Read::Frame(frame)
+					} else {
+						Read::Group(Box::new(group))
+					};
+					let source = if recovered {
+						routes.serve(b.consume());
+						&b
+					} else {
+						&a
+					};
+					let wake = Arc::new(Wake::default());
+					let waiter = kio::Waiter::new(wake.clone().into());
+					assert!(reading.poll(&waiter).is_pending());
+					if recovered {
+						// Retire the original copy so its preferences stop being mirrored.
+						assert!(sub.recv_group().now_or_never().is_none());
+						assert!(a.subscription().is_none());
+					}
+					wake.0.store(false, std::sync::atomic::Ordering::Relaxed);
+					sub.control()
+						.update(
+							Subscription::default()
+								.with_priority(7)
+								.with_max_age(Duration::from_secs(if widen { 10 } else { 2 })),
+						)
+						.unwrap();
+					assert!(
+						wake.0.load(std::sync::atomic::Ordering::Relaxed),
+						"recovered={recovered}, widen={widen}, chunked={chunked}: preference update did not wake the held read"
+					);
+					for sequence in 1..=4 {
+						let mut next = source.create_group(group::Info { sequence }).unwrap();
+						next.write_frame(ts(sequence * 1000), b"next".as_ref()).unwrap();
+						next.finish().unwrap();
+					}
+					let result = reading.poll(&waiter);
+					if widen {
+						assert!(
+							result.is_pending(),
+							"recovered={recovered}, chunked={chunked}: widened budget was ignored"
+						);
+					} else if chunked {
+						assert!(
+							matches!(result, Poll::Ready(Err(Error::Old))),
+							"recovered={recovered}: narrowed budget did not truncate the frame"
+						);
+					} else {
+						assert!(
+							matches!(result, Poll::Ready(Ok(()))),
+							"recovered={recovered}: narrowed budget did not end the drained group"
+						);
+					}
+					assert_eq!(source.subscription().unwrap().priority, 7);
+					if widen {
+						// Observing one change must re-arm the waiter for the next change.
+						wake.0.store(false, std::sync::atomic::Ordering::Relaxed);
+						sub.control()
+							.update(
+								Subscription::default()
+									.with_priority(8)
+									.with_max_age(Duration::from_secs(10)),
+							)
+							.unwrap();
+						assert!(
+							wake.0.load(std::sync::atomic::Ordering::Relaxed),
+							"recovered={recovered}, chunked={chunked}: second update did not wake the held read"
+						);
+						assert!(reading.poll(&waiter).is_pending());
+						assert_eq!(source.subscription().unwrap().priority, 8);
+					}
+				}
+			}
+		}
+	}
+
+	/// Replay every ordering of independent actions, with the return to A following
+	/// the switch to B. The payload is the oracle, independent of route bookkeeping.
+	#[test]
+	fn route_flap_interleavings_preserve_readers() {
+		#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+		enum Event {
+			SwitchToB,
+			ReturnToA,
+			FinishA,
+			FinishB,
+			Update,
+			Cancel,
+		}
+
+		fn run(events: &[Event], wake_only: bool) {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let copies = [copy(), copy()];
+			routes.serve(copies[0].consume());
+			let mut writers: Vec<_> = copies
+				.iter()
+				.map(|copy| Some(copy.create_group(group::Info { sequence: 0 }).unwrap()))
+				.collect();
+			writers[0]
+				.as_mut()
+				.unwrap()
+				.write_frame(ts(0), b"first".as_ref())
+				.unwrap();
+			let mut subscriptions = [
+				Some(subscribe(&logical, Duration::from_secs(10))),
+				Some(subscribe(&logical, Duration::from_secs(10))),
+			];
+			let control = subscriptions[1].as_ref().unwrap().control();
+			let mut groups = subscriptions.each_mut().map(|sub| Some(recv(sub.as_mut().unwrap())));
+			let wakes = [Arc::new(Wake::default()), Arc::new(Wake::default())];
+			let waiters = wakes.each_ref().map(|wake| kio::Waiter::new(wake.clone().into()));
+			let mut received: [Vec<Vec<u8>>; 2] = Default::default();
+			let mut ended = [false; 2];
+
+			let mut poll = |groups: &mut [Option<group::Consumer>; 2], initial: bool| {
+				for i in 0..2 {
+					let woken = wakes[i].0.swap(false, std::sync::atomic::Ordering::Relaxed);
+					if ended[i] || (!initial && wake_only && !woken) {
+						continue;
+					}
+					let Some(group) = &mut groups[i] else { continue };
+					loop {
+						match group.poll_read_frame(&waiters[i]) {
+							Poll::Ready(Ok(Some(frame))) => received[i].push(frame.payload.to_vec()),
+							Poll::Ready(Ok(None)) => {
+								ended[i] = true;
+								break;
+							}
+							Poll::Ready(Err(err)) => panic!("{events:?}, wake_only={wake_only}, reader={i}: {err}"),
+							Poll::Pending => break,
+						}
+					}
+				}
+			};
+			poll(&mut groups, true);
+			for event in events {
+				match event {
+					Event::SwitchToB => routes.serve(copies[1].consume()),
+					Event::ReturnToA => routes.serve(copies[0].consume()),
+					Event::FinishA | Event::FinishB => {
+						let index = usize::from(*event == Event::FinishB);
+						let mut writer = writers[index].take().unwrap();
+						if index == 1 {
+							writer.write_frame(ts(0), b"first".as_ref()).unwrap();
+						}
+						writer.write_frame(ts(1), b"second".as_ref()).unwrap();
+						writer.finish().unwrap();
+					}
+					Event::Update => control
+						.update(
+							Subscription::default()
+								.with_priority(7)
+								.with_max_age(Duration::from_secs(2)),
+						)
+						.unwrap(),
+					Event::Cancel => {
+						groups[0] = None;
+						subscriptions[0] = None;
+					}
+				}
+				poll(&mut groups, false);
+			}
+			assert_eq!(
+				received[1],
+				[b"first".to_vec(), b"second".to_vec()],
+				"{events:?}, wake_only={wake_only}"
+			);
+			assert!(ended[1], "{events:?}, wake_only={wake_only}: missing group end");
+			assert!(
+				[b"first".to_vec(), b"second".to_vec()].starts_with(&received[0]),
+				"{events:?}: cancelled reader replayed content"
+			);
+			assert!(
+				subscriptions[1].as_mut().unwrap().recv_group().now_or_never().is_none(),
+				"{events:?}: duplicate group"
+			);
+			let demand = copies[0].subscription().expect("surviving reader");
+			assert_eq!(demand.priority, 7, "{events:?}");
+			assert_eq!(demand.max_age, Duration::from_secs(2), "{events:?}");
+			drop(groups);
+			drop(subscriptions);
+			drop(control);
+			for copy in &copies {
+				assert!(copy.subscription().is_none(), "{events:?}: cancelled demand survived");
+			}
+		}
+
+		fn walk(events: &mut Vec<Event>, remaining: &[Event]) {
+			if remaining.is_empty() {
+				for wake_only in [false, true] {
+					run(events, wake_only);
+				}
+				return;
+			}
+			for (i, event) in remaining.iter().enumerate() {
+				if *event == Event::ReturnToA && !events.contains(&Event::SwitchToB) {
+					continue;
+				}
+				events.push(*event);
+				let mut next = remaining.to_vec();
+				next.remove(i);
+				walk(events, &next);
+				events.pop();
+			}
+		}
+		walk(
+			&mut Vec::new(),
+			&[
+				Event::SwitchToB,
+				Event::ReturnToA,
+				Event::FinishA,
+				Event::FinishB,
+				Event::Update,
+				Event::Cancel,
+			],
+		);
 	}
 }

@@ -488,9 +488,9 @@ const RELAY: [(usize, usize); 4] = [(1, 1), (1, 100), (100, 1), (10, 100)];
 const RELAY_FRAMES: usize = 10;
 
 /// Steady-state delivery through a front: one group of [`RELAY_FRAMES`] frames per
-/// track, read in full by every reader of the broadcast the front serves. Everything a
-/// route delivers passes through the front's writer once per track, so the cost per
-/// frame must not grow with the readers sharing it.
+/// track, read in full by every reader of the broadcast the front serves. Readers
+/// drain the serving route's shared group cache directly, so measure both the track
+/// and reader axes.
 fn bench_relay(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/relay");
 	for (tracks, readers) in RELAY {
@@ -544,6 +544,52 @@ fn bench_relay(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Re-poll stalled groups through a front, including their subscription budget.
+/// Sweep tracks and readers separately to expose unrelated table scans.
+fn bench_parked(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/parked");
+	for tracks in [1, 100] {
+		for readers in [1, 100] {
+			group.throughput(Throughput::Elements((tracks * readers) as u64));
+			group.bench_function(BenchmarkId::from_parameter(format!("{tracks}t_{readers}r")), |b| {
+				let runtime = tokio::runtime::Builder::new_current_thread()
+					.enable_all()
+					.build()
+					.unwrap();
+				let (producer, driver) = origin::Producer::new(origin::Config::default());
+				runtime.spawn(moq_net::time::run(driver));
+				let broadcast = producer.publish("room/live", origin::Route::default()).unwrap();
+				let sources: Vec<_> = (0..tracks)
+					.map(|i| broadcast.create_track(format!("{i}"), None).unwrap())
+					.collect();
+				let _writers: Vec<_> = sources.iter().map(|source| source.append_group().unwrap()).collect();
+				let (subscriptions, mut groups) = runtime.block_on(async {
+					let resolved = producer.consume().request_broadcast("room/live").await.unwrap();
+					let mut subscriptions = Vec::new();
+					let mut groups = Vec::new();
+					for i in 0..tracks {
+						let track = resolved.track(&format!("{i}")).unwrap();
+						for _ in 0..readers {
+							let mut sub = track.subscribe(None).await.unwrap();
+							groups.push(sub.recv_group().await.unwrap().unwrap());
+							subscriptions.push(sub);
+						}
+					}
+					(subscriptions, groups)
+				});
+				let waiter = kio::Waiter::noop();
+				b.iter(|| {
+					for group in &mut groups {
+						assert!(group.poll_read_frame(&waiter).is_pending());
+					}
+				});
+				drop(subscriptions);
+			});
+		}
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_announce,
@@ -556,6 +602,7 @@ criterion_group!(
 	bench_subscribe,
 	bench_request,
 	bench_handoff,
-	bench_relay
+	bench_relay,
+	bench_parked
 );
 criterion_main!(benches);
