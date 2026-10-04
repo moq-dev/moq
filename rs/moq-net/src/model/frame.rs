@@ -583,11 +583,6 @@ impl ProducerOwned {
 		self.raw.remaining()
 	}
 
-	/// Bytes written so far.
-	pub(crate) fn written(&self) -> usize {
-		self.raw.buf.written(Ordering::Acquire)
-	}
-
 	/// Write a chunk of payload *without* waking consumers; pair it with [`Self::notify`].
 	///
 	/// The wake is split out because the wire ingest drains every chunk the transport
@@ -681,6 +676,9 @@ pub struct Consumer {
 	// The parent subscription can expire after this frame handle is returned.
 	expiry: Option<Expiry>,
 	expired: bool,
+	// Read from a front's logical track: carries the read across route changes, with
+	// this frame's index in its group. Boxed: it is the rare case.
+	recover: Option<Box<(super::resume::Recover, u64)>>,
 }
 
 impl std::ops::Deref for Consumer {
@@ -701,6 +699,59 @@ impl Consumer {
 			stats: stats::Meter::default(),
 			expiry: None,
 			expired: false,
+			recover: None,
+		}
+	}
+
+	/// Carry this frame across a front's route changes; see [`super::resume`].
+	pub(crate) fn with_recover(mut self, recover: super::resume::Recover, index: u64) -> Self {
+		self.recover = Some(Box::new((recover, index)));
+		self
+	}
+
+	/// Run `read`, and once this copy fails with its route, or stalls while a newer route
+	/// serves, continue from the serving route's copy of the same frame, past the bytes
+	/// already read.
+	fn poll_resumed<T>(
+		&mut self,
+		waiter: &kio::Waiter,
+		mut read: impl FnMut(&mut Self, &kio::Waiter) -> Poll<Result<T>>,
+	) -> Poll<Result<T>> {
+		loop {
+			let res = read(self, waiter);
+			if self.expired {
+				return res;
+			}
+			let Some(recover) = self.recover.as_mut() else {
+				return res;
+			};
+			let failed = match &res {
+				Poll::Ready(Ok(_)) => return res,
+				Poll::Ready(Err(err)) => Some(err.clone()),
+				Poll::Pending => None,
+			};
+			let (recover, index) = &mut **recover;
+			if !recover.wants(failed.as_ref()) {
+				return res;
+			}
+			let mut group = match recover.poll(*index, failed.as_ref(), waiter) {
+				Poll::Ready(Ok(group)) => group,
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+				Poll::Pending => return Poll::Pending,
+			};
+			// The copy holds the frame's header at least, or it would not have been adopted.
+			let frame = match group.poll_next_frame(waiter) {
+				Poll::Ready(Ok(Some(frame))) => frame,
+				Poll::Ready(Ok(None)) => return Poll::Ready(Err(Error::WrongSize)),
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+				Poll::Pending => return Poll::Pending,
+			};
+			// Same name, same content: a different size is the routes disagreeing.
+			if frame.info.size != self.info.size {
+				return Poll::Ready(Err(Error::ProtocolViolation));
+			}
+			self.state = frame.state;
+			self.source = frame.source;
 		}
 	}
 
@@ -754,6 +805,13 @@ impl Consumer {
 	///
 	/// Returns `None` once the frame is finished and all bytes have been consumed.
 	pub fn poll_read_chunk(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
+		if self.recover.is_none() {
+			return self.poll_read_chunk_once(waiter);
+		}
+		self.poll_resumed(waiter, Self::poll_read_chunk_once)
+	}
+
+	fn poll_read_chunk_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
@@ -811,6 +869,13 @@ impl Consumer {
 
 	/// Poll for all remaining bytes, resolving once the frame is finished.
 	pub fn poll_read_all(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes>> {
+		if self.recover.is_none() {
+			return self.poll_read_all_once(waiter);
+		}
+		self.poll_resumed(waiter, Self::poll_read_all_once)
+	}
+
+	fn poll_read_all_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes>> {
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}

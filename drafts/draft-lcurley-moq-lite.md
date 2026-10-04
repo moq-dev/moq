@@ -1357,7 +1357,7 @@ The `Message Length` describes the payload size on the wire.
 ## moq-lite-07
 
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
-- Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it. Earlier versions carry no such position, so a subscriber asks them from the head of the group it holds and takes the first frame instead.
+- Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it. Earlier versions carry no such position, so a subscriber takes the first frame instead.
 - A path names one Broadcast whichever publisher serves it, and a publisher MUST NOT reuse a path for different content. A relay MAY move a subscription between any routes covering the path, continuing from the first frame the subscriber lacks instead of at a group boundary. Replaces the first-hop identity.
 
 - Assigned `moq-lite-07-wip` as this draft's protocol identifier until it is finalized as `moq-lite-07`.

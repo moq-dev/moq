@@ -17,9 +17,3 @@ The codec already decodes and encodes the draft-20 layout as
 FETCH carrying Range Filters stays refused.
 
 Update the draft-20 note in `doc/concept/standard.md`.
-
-A route change exercises this end to end: `rs/moq-net/tests/route_change.rs`
-`route_flaps` hangs on moq-transport 22, because the relay the track falls back
-to fills its group's missing frames with a FETCH upstream, which stays pending
-instead of being served or refused. Add `flaps_ietf_22` to `route_flap_tests!`
-once it passes.

@@ -859,12 +859,6 @@ impl Producer {
 		(state.committed > state.offset).then_some(state.committed)
 	}
 
-	/// One past the last frame fully written: where a replacement route resumes,
-	/// redelivering any frame still in flight.
-	pub(crate) fn committed_frame(&self) -> usize {
-		self.state.read().committed
-	}
-
 	/// Where the group starts in presentation time: its first frame's timestamp,
 	/// or `None` while no frame has been opened.
 	///
@@ -956,6 +950,7 @@ impl Producer {
 			expired: false,
 			ended: false,
 			stale_counted: Arc::default(),
+			recover: None,
 		}
 	}
 
@@ -1114,6 +1109,9 @@ pub struct Consumer {
 	// Cloned cursors are parallel views of one handed-out delivery. Whichever
 	// observes expiry first records its unread tail; the others must not repeat it.
 	stale_counted: Arc<AtomicBool>,
+	// Handed out from a front's logical track: carries the read across route changes.
+	// Boxed: it is the rare case.
+	recover: Option<Box<super::resume::Recover>>,
 }
 
 /// Subscriber-specific policy for expiring a group after it was handed out.
@@ -1173,6 +1171,7 @@ impl Clone for Consumer {
 			expired: self.expired,
 			ended: self.ended,
 			stale_counted: self.stale_counted.clone(),
+			recover: self.recover.clone(),
 		}
 	}
 }
@@ -1203,6 +1202,55 @@ impl Consumer {
 	pub(crate) fn with_expiry(mut self, expiry: Arc<dyn Expiry>) -> Self {
 		self.expiry = Some(expiry);
 		self
+	}
+
+	/// Carry this group across a front's route changes; see [`super::resume`].
+	pub(crate) fn with_recover(mut self, recover: super::resume::Recover) -> Self {
+		self.recover = Some(Box::new(recover));
+		self
+	}
+
+	/// Run `read`, and once this copy fails with its route, or stalls while a newer route
+	/// serves, continue from the serving route's copy at the same frame and read again.
+	fn poll_resumed<T>(
+		&mut self,
+		waiter: &kio::Waiter,
+		mut read: impl FnMut(&mut Self, &kio::Waiter) -> Poll<Result<Option<T>>>,
+	) -> Poll<Result<Option<T>>> {
+		loop {
+			let res = read(self, waiter);
+			// The reader's own budget gave up on it: that is no route's doing.
+			if self.expired || self.ended {
+				return res;
+			}
+			let Some(recover) = self.recover.as_mut() else {
+				return res;
+			};
+			let failed = match &res {
+				Poll::Ready(Ok(Some(_))) => return res,
+				// Read to its end: no route is needed for it any more.
+				Poll::Ready(Ok(None)) => {
+					self.recover = None;
+					return res;
+				}
+				Poll::Ready(Err(err)) => Some(err.clone()),
+				Poll::Pending => None,
+			};
+			if !recover.wants(failed.as_ref()) {
+				return res;
+			}
+			let group = match recover.poll(self.cursor.index as u64, failed.as_ref(), waiter) {
+				Poll::Ready(Ok(group)) => group,
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+				Poll::Pending => return Poll::Pending,
+			};
+			// Same frames by index, so only the channel changes; read progress and the
+			// cap stay this cursor's.
+			let (index, end) = (self.cursor.index, self.cursor.end);
+			self.cursor = group.cursor;
+			self.cursor.index = index;
+			self.cursor.end = end;
+		}
 	}
 
 	/// Check the parent subscription while a wire publisher drains detached payload.
@@ -1372,6 +1420,20 @@ impl Consumer {
 	/// Returns None if the group is finished and the index is out of range, or the cursor
 	/// passed the [`Self::set_frames`] cap.
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
+		if self.recover.is_none() {
+			return self.poll_next_frame_once(waiter);
+		}
+		let res = self.poll_resumed(waiter, Self::poll_next_frame_once);
+		match (res, &self.recover) {
+			// A frame read from a copy that may fail too carries on the same way.
+			(Poll::Ready(Ok(Some(frame))), Some(recover)) => {
+				Poll::Ready(Ok(Some(frame.with_recover((**recover).clone(), self.cursor.index as u64 - 1))))
+			}
+			(res, _) => res,
+		}
+	}
+
+	fn poll_next_frame_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
 		if self.ended {
 			return Poll::Ready(Ok(None));
 		}
@@ -1393,6 +1455,13 @@ impl Consumer {
 
 	/// Read the next frame (timestamp and payload) all at once, without blocking.
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
+		if self.recover.is_none() {
+			return self.poll_read_frame_once(waiter);
+		}
+		self.poll_resumed(waiter, Self::poll_read_frame_once)
+	}
+
+	fn poll_read_frame_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
 		if self.ended {
 			return Poll::Ready(Ok(None));
 		}
@@ -1468,6 +1537,14 @@ impl Consumer {
 
 	/// Poll until the group terminates, returning this cursor's next frame index.
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
+		if self.recover.is_none() {
+			return self.poll_finished_once(waiter);
+		}
+		let res = self.poll_resumed(waiter, |this, waiter| this.poll_finished_once(waiter).map(|res| res.map(Some)));
+		res.map(|res| res.map(|index| index.expect("finished with an index")))
+	}
+
+	fn poll_finished_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
 		if self.ended {
 			return Poll::Ready(Ok(self.index()));
 		}

@@ -16,8 +16,8 @@ Decided in planning (2026-10-03, from [#4741](https://github.com/moq-dev/moq/pul
   upstream) once no fetcher waits and no reader holds its group.
 - **Demand decides, per request type, unsplit.** A FETCH is canceled once its
   demand stays unused through the linger. A subscription's groups ignore group
-  demand: an origin front's pump still gives up a stale group a fetcher happens
-  to hold, as a relay's subscription would. Group demand is not split into fetch
+  demand: a front's reader still gives up a stale group a fetcher happens to
+  hold, as a relay's subscription would. Group demand is not split into fetch
   and subscription halves.
 - **A short fixed window**, around a second: enough to absorb a re-subscribe or
   a seek, far below the front's 30 s cache linger. A constant, measured during

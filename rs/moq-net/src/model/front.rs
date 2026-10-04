@@ -1,9 +1,9 @@
 //! The origin's failover as a state machine.
 //!
 //! A [`Front`] is one path served through one broadcast: it picks the source it
-//! serves from and splices each logical track from that source's copy (a pump
-//! writes it; see `super::pump`), re-splicing when the source is replaced and refusing what a source
-//! will not serve. Everything here is plain data: [`Front::step`] takes one
+//! serves from and splices each logical track from that source's copy (its readers
+//! read the copy; see `super::resume`), re-splicing when the source is replaced and
+//! refusing what a source will not serve. Everything here is plain data: [`Front::step`] takes one
 //! [`Event`] and returns the [`Action`]s to perform, without locks or waiters.
 //! The origin's driver task feeds events from the world (the route table, the
 //! sources, the tracks, the clock) and executes the actions; see
@@ -108,14 +108,14 @@ pub(super) enum Action {
 	/// Ask `source` for its copy of `track`; feed the answer back as
 	/// [`Event::TrackInfo`].
 	Query { track: Arc<str>, source: u64 },
-	/// Splice `source`'s copy of `track` in, resuming where the logical track stops.
+	/// Splice `source`'s copy of `track` in: each reader resumes on it where it stopped.
 	Splice { track: Arc<str>, source: u64 },
-	/// Drop the source copy of `track` but keep the delivered groups cached,
-	/// so resume stays seamless while nobody reads.
+	/// Drop the source copy of `track`: nobody reads it, and a returning reader gets a
+	/// fresh one.
 	Park { track: Arc<str> },
 	/// Remove `track` from the broadcast and drop everything behind it, unless a reader
-	/// arrived meanwhile: it went unread for the linger, or the source is local and
-	/// keeps its own cache. Feed back [`Event::Forgotten`] once it is gone.
+	/// arrived meanwhile: it went unread for the linger, or the source is local.
+	/// Feed back [`Event::Forgotten`] once it is gone.
 	Forget { track: Arc<str> },
 	/// The logical track completed.
 	Finish { track: Arc<str> },
@@ -132,15 +132,14 @@ pub(super) enum Action {
 /// Where a track stands with respect to its source copy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum TrackState {
-	/// No copy: nothing spliced, or the track keeps what a source that left
-	/// delivered.
+	/// No copy: nothing spliced, or the source that served it left.
 	Idle,
 	/// A source was asked for its copy.
 	Querying { source: u64 },
 	/// A source's copy is spliced in and being served.
 	Spliced { source: u64 },
-	/// Nobody reads it: the copy was dropped, and whatever the track delivered
-	/// stays cached until the linger expires and the track is forgotten.
+	/// Nobody reads it: the copy was dropped, and the track stays until the linger
+	/// expires and it is forgotten.
 	Parked { since: Instant },
 }
 
@@ -396,8 +395,8 @@ impl Front {
 		actions.push(Action::Reselect);
 	}
 
-	/// The serving source is going: a spliced copy keeps feeding its track (the pump reads
-	/// it until a replacement's is fed, or it runs out), and one still being asked for is
+	/// The serving source is going: a spliced copy keeps feeding its track (readers read it
+	/// until a replacement's is spliced, or it runs out), and one still being asked for is
 	/// dropped.
 	fn drain_copies(&mut self) {
 		for track in self.tracks.values_mut() {
@@ -571,9 +570,8 @@ impl Front {
 		// Nothing reads it, so a copy it still drains goes with the park.
 		track.draining = None;
 		match track.state {
-			// A local source keeps its own cache, so a cached copy would only be a staler
-			// duplicate of it: forget the track outright, and a returning reader
-			// re-splices the source and reads its cache against the real live edge.
+			// A local source is reached again for free: forget the track outright, and a
+			// returning reader re-splices the source.
 			TrackState::Spliced { source }
 				if self
 					.serving
@@ -582,18 +580,16 @@ impl Front {
 				track.state = TrackState::Idle;
 				actions.push(Action::Forget { track: name });
 			}
-			// Drop the copy so the source goes idle at once; the delivered
-			// groups stay cached for the linger.
+			// Drop the copy so the source goes idle at once; the track lingers.
 			TrackState::Spliced { .. } => {
 				track.state = TrackState::Parked { since: now };
 				actions.push(Action::Park { track: name });
 			}
 			TrackState::Parked { .. } => {}
-			// The pump still holds what earlier copies delivered: park it too, so a reader
-			// returning within the linger is not handed a cache no live route vouched for.
+			// A copy still being asked for is dropped with the park.
 			TrackState::Idle | TrackState::Querying { .. } => {
 				track.state = TrackState::Parked { since: now };
-				// An ended track's cache is the whole track: nothing is live to vouch for.
+				// An ended track has nothing to drop.
 				if !track.ended {
 					actions.push(Action::Park { track: name });
 				}

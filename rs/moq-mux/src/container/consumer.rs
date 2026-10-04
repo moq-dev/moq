@@ -1682,8 +1682,9 @@ mod tests {
 			.unwrap();
 
 		// Each cheaper route takes over beyond group 0 without holding its continuation,
-		// while the first route stays up but silent. The front gives the open group up once
-		// the track runs a full budget past it.
+		// while the first route stays up but silent. They carry the same broadcast, so each
+		// holds every group from 1 on. The open group is given up once the track runs a
+		// full budget past it.
 		let mut routes = Vec::new();
 		let mut sources = Vec::new();
 		for sequence in 1..=4 {
@@ -1702,7 +1703,9 @@ mod tests {
 			if sequence == 1 {
 				assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(0));
 			}
-			write_group(&mut track, sequence, &[ts(sequence * 1_000_000)]);
+			for sequence in 1..=sequence {
+				write_group(&mut track, sequence, &[ts(sequence * 1_000_000)]);
+			}
 			routes.push(route);
 			sources.push((source, track));
 		}

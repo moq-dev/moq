@@ -4095,7 +4095,7 @@ impl Interleave {
 
 	/// Write every audio frame that starts before `until` microseconds, one at a time,
 	/// polling `export` after each.
-	async fn audio_until(&mut self, until: u64, export: &mut Export, out: &mut Vec<Frame>) {
+	fn audio_until(&mut self, until: u64, export: &mut Export, out: &mut Vec<Frame>) {
 		while self.audio_index * AUDIO_US < until {
 			let index = self.audio_index;
 			self.audio
@@ -4107,7 +4107,7 @@ impl Interleave {
 				})
 				.unwrap();
 			self.audio_index += 1;
-			out.extend(poll_frames(export).await);
+			out.extend(poll_frames(export));
 		}
 	}
 
@@ -4117,17 +4117,9 @@ impl Interleave {
 	}
 }
 
-/// Runtime turns [`poll_frames`] gives the origin to relay what was just written.
-const RELAY_TURNS: usize = 4;
-
 /// Pull every frame an exporter can render without letting time pass, so a `max_age`
-/// wait lapses only where a test advances the clock itself. The origin's fronts relay
-/// each write on their own task, so they get their turns first: yielding runs them
-/// without advancing the paused clock.
-async fn poll_frames<E: tscat::Catalog>(export: &mut Export<E>) -> Vec<Frame> {
-	for _ in 0..RELAY_TURNS {
-		tokio::task::yield_now().await;
-	}
+/// wait lapses only where a test advances the clock itself.
+fn poll_frames<E: tscat::Catalog>(export: &mut Export<E>) -> Vec<Frame> {
 	let waiter = kio::Waiter::noop();
 	let mut out = Vec::new();
 	while let std::task::Poll::Ready(frame) = export.poll_next(&waiter) {
@@ -4162,8 +4154,8 @@ async fn lagging_audio(max_age: Duration) -> Vec<u64> {
 	let mut out = Vec::new();
 	for tick in 0..TICKS / 2 {
 		rig.video(tick);
-		out.extend(poll_frames(&mut export).await);
-		rig.audio_until(tick * VIDEO_US, &mut export, &mut out).await;
+		out.extend(poll_frames(&mut export));
+		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
 	}
 	rig.finish();
 	out.extend(drain_frames(&mut export).await);
@@ -4198,9 +4190,9 @@ async fn arrival_order_does_not_change_the_output() {
 	let (mut out_eager, mut out_batched) = (Vec::new(), Vec::new());
 	for tick in 0..TICKS / 2 {
 		rig.video(tick);
-		out_eager.extend(poll_frames(&mut eager).await);
-		rig.audio_until(tick * VIDEO_US, &mut eager, &mut out_eager).await;
-		out_batched.extend(poll_frames(&mut batched).await);
+		out_eager.extend(poll_frames(&mut eager));
+		rig.audio_until(tick * VIDEO_US, &mut eager, &mut out_eager);
+		out_batched.extend(poll_frames(&mut batched));
 	}
 	rig.finish();
 	out_eager.extend(drain_frames(&mut eager).await);
@@ -4222,18 +4214,15 @@ async fn quiet_track_is_emitted_around_then_rejoins() {
 	let mut out = Vec::new();
 
 	rig.video(0);
-	rig.audio_until(1, &mut export, &mut out).await;
+	rig.audio_until(1, &mut export, &mut out);
 
 	// Audio goes quiet while video runs on. Video waits for it, then goes around it.
 	for tick in 1..=10 {
 		rig.video(tick);
 	}
-	assert!(
-		poll_frames(&mut export).await.is_empty(),
-		"video waits for the quiet audio"
-	);
+	assert!(poll_frames(&mut export).is_empty(), "video waits for the quiet audio");
 	tokio::time::advance(max_age).await;
-	out.extend(poll_frames(&mut export).await);
+	out.extend(poll_frames(&mut export));
 	assert!(
 		pes_pts_in_order(&out)
 			.iter()
@@ -4243,11 +4232,11 @@ async fn quiet_track_is_emitted_around_then_rejoins() {
 
 	// Audio catches up with its backlog, then keeps lagging by a frame: the order
 	// resumes without the clock moving.
-	rig.audio_until(10 * VIDEO_US, &mut export, &mut out).await;
+	rig.audio_until(10 * VIDEO_US, &mut export, &mut out);
 	for tick in 11..TICKS / 2 {
 		rig.video(tick);
-		out.extend(poll_frames(&mut export).await);
-		rig.audio_until(tick * VIDEO_US, &mut export, &mut out).await;
+		out.extend(poll_frames(&mut export));
+		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
 	}
 	rig.finish();
 	out.extend(drain_frames(&mut export).await);
@@ -4267,11 +4256,11 @@ async fn tune_in_does_not_wait_on_dropped_audio() {
 	let mut rig = Interleave::new();
 	let mut export = rig.export(Duration::from_millis(500)).await;
 	let mut out = Vec::new();
-	rig.audio_until(3 * GOP * VIDEO_US, &mut export, &mut out).await;
+	rig.audio_until(3 * GOP * VIDEO_US, &mut export, &mut out);
 	for tick in GOP..2 * GOP {
 		rig.video(tick);
 	}
-	out.extend(poll_frames(&mut export).await);
+	out.extend(poll_frames(&mut export));
 	assert!(!out.is_empty(), "the tune-in waited on audio it had dropped");
 }
 
@@ -4285,23 +4274,20 @@ async fn rewind_keeps_an_expired_stall() {
 	let mut out = Vec::new();
 
 	rig.video(0);
-	rig.audio_until(1, &mut export, &mut out).await;
+	rig.audio_until(1, &mut export, &mut out);
 	for tick in 1..=5 {
 		rig.video(tick);
 	}
-	assert!(
-		poll_frames(&mut export).await.is_empty(),
-		"video waits for the quiet audio"
-	);
+	assert!(poll_frames(&mut export).is_empty(), "video waits for the quiet audio");
 	tokio::time::advance(max_age).await;
-	out.extend(poll_frames(&mut export).await);
+	out.extend(poll_frames(&mut export));
 	assert!(!out.is_empty(), "video went out around the quiet audio");
 
 	rig.video.discontinuity().unwrap();
 	for tick in 0..=5 {
 		rig.video(GOP + tick);
 	}
-	out.extend(poll_frames(&mut export).await);
+	out.extend(poll_frames(&mut export));
 	let after = pes_pts_in_order(&out)
 		.into_iter()
 		.filter(|&pts| pts >= GOP * VIDEO_US * 90 / 1_000)
@@ -4319,19 +4305,18 @@ async fn rewind_keeps_a_held_frame_waiting_time() {
 	let mut out = Vec::new();
 
 	rig.video(0);
-	rig.audio_until(1, &mut export, &mut out).await;
+	rig.audio_until(1, &mut export, &mut out);
 	for tick in 1..=5 {
 		rig.video(tick);
 	}
 	// Audio jumps past the coming break, so it is held waiting on the video.
 	rig.audio_index = (GOP + 3) * VIDEO_US / AUDIO_US;
-	rig.audio_until(rig.audio_index * AUDIO_US + 1, &mut export, &mut out)
-		.await;
+	rig.audio_until(rig.audio_index * AUDIO_US + 1, &mut export, &mut out);
 	tokio::time::advance(max_age).await;
 
 	rig.video.discontinuity().unwrap();
 	rig.video(GOP);
-	out.extend(poll_frames(&mut export).await);
+	out.extend(poll_frames(&mut export));
 	assert_eq!(export.discontinuity(), 1, "the held audio waited a second budget");
 }
 
@@ -4345,28 +4330,22 @@ async fn rewind_keeps_a_partial_stall() {
 	let mut out = Vec::new();
 
 	rig.video(0);
-	rig.audio_until(1, &mut export, &mut out).await;
+	rig.audio_until(1, &mut export, &mut out);
 	for tick in 1..=5 {
 		rig.video(tick);
 	}
-	assert!(
-		poll_frames(&mut export).await.is_empty(),
-		"video waits for the quiet audio"
-	);
+	assert!(poll_frames(&mut export).is_empty(), "video waits for the quiet audio");
 	tokio::time::advance(max_age / 2).await;
-	assert!(poll_frames(&mut export).await.is_empty(), "the hold lapsed early");
+	assert!(poll_frames(&mut export).is_empty(), "the hold lapsed early");
 
 	rig.video.discontinuity().unwrap();
 	for tick in 0..=5 {
 		rig.video(GOP + tick);
 	}
-	assert!(poll_frames(&mut export).await.is_empty(), "the rewind ended the hold");
+	assert!(poll_frames(&mut export).is_empty(), "the rewind ended the hold");
 
 	tokio::time::advance(max_age / 2).await;
-	assert!(
-		!poll_frames(&mut export).await.is_empty(),
-		"the rewind renewed the hold"
-	);
+	assert!(!poll_frames(&mut export).is_empty(), "the rewind renewed the hold");
 	assert_eq!(export.discontinuity(), 1);
 }
 
@@ -4382,23 +4361,20 @@ async fn repeated_rewinds_hold_once() {
 	let mut out = Vec::new();
 
 	rig.video(0);
-	rig.audio_until(1, &mut export, &mut out).await;
+	rig.audio_until(1, &mut export, &mut out);
 	for tick in 1..=5 {
 		rig.video(tick);
 	}
-	assert!(
-		poll_frames(&mut export).await.is_empty(),
-		"video waits for the quiet audio"
-	);
+	assert!(poll_frames(&mut export).is_empty(), "video waits for the quiet audio");
 	tokio::time::advance(max_age).await;
-	out.extend(poll_frames(&mut export).await);
+	out.extend(poll_frames(&mut export));
 
 	for generation in 1..=8 {
 		rig.video.discontinuity().unwrap();
 		for tick in 0..=5 {
 			rig.video(generation * GOP + tick);
 		}
-		out.extend(poll_frames(&mut export).await);
+		out.extend(poll_frames(&mut export));
 		assert_eq!(
 			export.discontinuity(),
 			generation,
@@ -5781,11 +5757,11 @@ async fn declared_reorder_sizes_the_decode_clock_from_the_first_frame() {
 	let (mut out_late, mut out_whole) = (Vec::new(), Vec::new());
 	for tick in 0..TICKS / 2 {
 		while rig.audio_before(tick + 2) {
-			out_late.extend(poll_frames(&mut late).await);
+			out_late.extend(poll_frames(&mut late));
 		}
 		rig.video(tick);
-		out_late.extend(poll_frames(&mut late).await);
-		out_whole.extend(poll_frames(&mut whole).await);
+		out_late.extend(poll_frames(&mut late));
+		out_whole.extend(poll_frames(&mut whole));
 	}
 	rig.finish();
 	out_late.extend(drain_frames(&mut late).await);
@@ -5998,6 +5974,10 @@ async fn resume_after(finish: bool) {
 	let (rest, end) = drain_to_end(&mut export).await;
 	before.extend(rest);
 	assert_eq!(end.is_ok(), finish, "a finish ends cleanly and a drop fails: {end:?}");
+
+	// The old broadcast ends before the publisher comes back: a path still routed is one
+	// broadcast, so a publisher back before then would resume it instead.
+	ended.closed().await;
 
 	// The returned catalog lists the track only in its second snapshot, and the restarted
 	// publisher's clock starts over.

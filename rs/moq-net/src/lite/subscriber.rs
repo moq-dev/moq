@@ -820,14 +820,14 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						// from where the publisher said they start so a front continuing the
 						// group across routes lines them up.
 						group.start_at(hdr.frame_start)?;
-						// The first frame a route delivers says where its live feed is, when
-						// its answer did not.
-						if !entry.producer.is_live() {
-							entry.producer.set_live(Some(Position {
-								group: hdr.sequence,
-								frame: hdr.frame_start,
-							}));
-						}
+					// The first frame a route delivers says where its live feed is, when
+					// its answer did not.
+					if !entry.producer.is_live() {
+						entry.producer.set_live(Some(Position {
+							group: hdr.sequence,
+							frame: hdr.frame_start,
+						}));
+					}
 						(group, entry.producer.clone(), entry.timescale, reading)
 					};
 
@@ -3460,6 +3460,8 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 					let _ = active.stream.writer.finish();
 					tracing::info!(track = %self.name, "subscribe canceled (idle)");
 					*sub = Sub::None;
+					// The copy is still held: what it cached goes stale from here.
+					producer.set_idle();
 				}
 				Ok(Begin::None)
 			}
@@ -3970,9 +3972,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 			true => request.resolving_start(),
 			false => request,
 		};
-		// Not live until the route answers with its largest position (lite-07) or delivers
-		// its first group: until then nothing says how current a cache built on it is.
-		let serving = request.not_live().accept(info);
+		let serving = request.accept(info);
 		Self {
 			demand: serving.demand(),
 			serving,
@@ -4138,12 +4138,10 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 									// signal, so a reader waiting on a skipped group
 									// fails over instead of stalling on a live route.
 									lite::SubscribeResponse::Start(start) => {
-										// Where the live feed is, on versions whose answer says.
-										if serve.subscriber.version.has_largest()
-											&& let Some(largest) = start.largest
-										{
-											self.serving.set_live(Some(largest));
-										}
+									// Where the live feed is, on versions whose answer says.
+									if serve.subscriber.version.has_largest() {
+										self.serving.set_live(start.largest);
+									}
 										// A START describes the demand the SUBSCRIBE carried.
 										// It applies only while the current start still matches
 										// that demand (updates get no fresh START, so an update

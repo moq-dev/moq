@@ -629,8 +629,8 @@ where
 				}
 			};
 
-			// A track that is not live (a relay's gone idle) cannot say where its live edge is
-			// until a route answers it; answering from its cache would advertise a stale one.
+			// A relay's copy that went idle cannot say where its live edge is until its route
+			// answers again; answering from its cache would advertise a stale one.
 			kio::wait(|waiter| track.poll_live(waiter)).await;
 
 			// The filter and any fill are relative to the live edge, so snapshot it once:
@@ -3776,8 +3776,6 @@ mod serve_tests {
 			}
 			assert!(buf.is_empty(), "FETCH delivered objects beyond the saved prefix");
 			let mark = h.log.writes.lock().unwrap().len();
-			// The origin's pump carries the new object to the subscription.
-			settle().await;
 			assert!(futures::poll!(serve.as_mut()).is_pending());
 			let mut tail = bytes::Bytes::from(h.log.writes.lock().unwrap()[mark..].to_vec());
 			assert_eq!(u64::decode(&mut tail, version).unwrap(), payloads.len() as u64);

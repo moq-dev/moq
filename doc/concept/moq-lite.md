@@ -292,21 +292,19 @@ anything on its own. Both ends apply it: the publisher skips a group rather
 than sending it, and the subscriber skips it again as it reads, since the
 publisher only ever sees the most tolerant budget across its subscribers.
 
-A route failover is invisible to max age: the reader reads one track whichever
-route feeds it, so buffered groups are judged against that track's live edge. A
-successor group with no timestamp leaves the preceding group's reach unbounded
-until its first frame arrives; if it is dropped first, the next group takes its
-place. A cached open group's prefix stays readable when its route changes or
-its track goes idle and returns.
+A route failover is invisible to max age: a group open across the change carries
+on from the new route at the frame where the old one stopped, and a group only a
+replaced route that went quiet still holds is given up once it falls a full
+budget behind the new route's live edge. A successor group with no timestamp
+leaves the preceding group's reach unbounded until its first frame arrives; if
+it is dropped first, the next group takes its place.
 
-A track whose cache may be stale is not live, and readers get nothing from its
-cache until it is. A relay's track goes not live when nobody reads it. When a
-reader returns, the relay asks its source from just past what it holds, and
-serves the cache again once the source says where its live feed is: lite-07 and
-moq-transport answer with their largest position, and older lite versions are
-asked from the head of the cached group, so their first frame says. A source
-whose live feed has moved past a gap in the cache leaves the groups below the
-gap to fetches, since nothing bounds how old they are.
+A relay's copy of a track that is still held after its upstream subscription
+ended (by a reader fetching from it, say) is not live: readers get nothing from
+its cache until the source answers again, since how stale it is cannot be told.
+lite-07 answers with its largest position, and older lite versions say where
+their feed is with its first frame. A feed that has moved on past everything
+cached leaves the cache below it to fetches.
 
 The publisher may declare a retention window per track. Omission sets no limit;
 zero keeps only the live edge. The origin cache ceiling and cache pool may still

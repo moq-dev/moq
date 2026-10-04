@@ -59,7 +59,6 @@ the rest.
 - [Lock wait](/quest/m1/perf/lock-wait.md) - each worker reports time blocked on cross-worker locks, deciding whether the shared model needs work
 - [One enter per turn](/quest/m1/perf/uring-one-enter.md) - a parking turn pays one io_uring_enter, submits flush deferred completions, and SQEs per enter is a counter
 - [Group cost](/quest/m1/perf/group-cost.md) - count and cut the allocations and time spent relaying one small group to one viewer
-- [Front hop](/quest/m1/perf/front-hop.md) - reading a track through an origin front costs about what reading it directly does for one reader
 - [Run to quiescence](/quest/m1/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
 - [Announce replay](/quest/m1/perf/announce-replay.md) - the initial announce set replays in linear time, so joins don't slow with the route count
 - [Ingest batch](/quest/m1/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per chunk burst instead of per chunk

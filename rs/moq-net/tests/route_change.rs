@@ -459,4 +459,5 @@ route_flap_tests! {
 	flaps_lite_05: "moq-lite-05",
 	flaps_lite_04: "moq-lite-04",
 	flaps_ietf_19: "moq-transport-19",
+	flaps_ietf_22: "moq-transport-22",
 }
