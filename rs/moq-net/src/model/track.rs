@@ -2706,7 +2706,6 @@ impl Consumer {
 		self.state.read().final_sequence
 	}
 
-
 	/// The frame-precise point a replacement route should resume from: one past the
 	/// last frame this copy produced. `None` if it produced nothing.
 	///
@@ -2767,7 +2766,10 @@ impl Subscribing {
 
 		let resume = self.state.read().routes.clone();
 		let inner = match resume {
-			Some(resume) => Inner::Resume(Box::new(resume.subscribe(self.subscription.clone())), self.state.clone()),
+			Some(resume) => Inner::Resume(
+				Box::new(resume.subscribe(self.subscription.clone())),
+				self.state.clone(),
+			),
 			None => Inner::Plain(Cursor::new(self.state.clone(), self.subscription.clone())),
 		};
 		Poll::Ready(Ok(Subscriber {
@@ -3089,7 +3091,10 @@ enum Inner {
 	/// A front's logical track, read straight from its routes' copies; see
 	/// [`super::resume`]. Holds the logical track so it counts as a reader.
 	/// Boxed: the plain cursor is the hot path.
-	Resume(Box<super::resume::Subscriber>, #[allow(dead_code)] kio::Consumer<TrackState>),
+	Resume(
+		Box<super::resume::Subscriber>,
+		#[allow(dead_code)] kio::Consumer<TrackState>,
+	),
 }
 
 /// One poll's view of how far this subscription may drift: the clamped budget and the

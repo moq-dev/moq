@@ -1429,9 +1429,9 @@ impl Consumer {
 		let res = self.poll_resumed(waiter, Self::poll_next_frame_once);
 		match (res, &self.recover) {
 			// A frame read from a copy that may fail too carries on the same way.
-			(Poll::Ready(Ok(Some(frame))), Some(recover)) => {
-				Poll::Ready(Ok(Some(frame.with_recover((**recover).clone(), self.cursor.index as u64 - 1))))
-			}
+			(Poll::Ready(Ok(Some(frame))), Some(recover)) => Poll::Ready(Ok(Some(
+				frame.with_recover((**recover).clone(), self.cursor.index as u64 - 1),
+			))),
 			(res, _) => res,
 		}
 	}
@@ -1543,7 +1543,9 @@ impl Consumer {
 		if self.recover.is_none() {
 			return self.poll_finished_once(waiter);
 		}
-		let res = self.poll_resumed(waiter, |this, waiter| this.poll_finished_once(waiter).map(|res| res.map(Some)));
+		let res = self.poll_resumed(waiter, |this, waiter| {
+			this.poll_finished_once(waiter).map(|res| res.map(Some))
+		});
 		res.map(|res| res.map(|index| index.expect("finished with an index")))
 	}
 

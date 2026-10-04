@@ -134,7 +134,16 @@ impl Consumer {
 		});
 		// Subscribed to the serving copy at once, so groups it has now are the reader's
 		// even if the route changes before the first read, and to each copy after.
-		self.readers.lock().expect("readers poisoned").push(Arc::downgrade(&reader));
+		{
+			let mut readers = self.readers.lock().expect("readers poisoned");
+			// Sweep the readers that left once the list fills, so it tracks the live count.
+			if readers.len() == readers.capacity() {
+				readers.retain(|reader| reader.strong_count() > 0);
+				let live = readers.len();
+				readers.reserve(live.max(1));
+			}
+			readers.push(Arc::downgrade(&reader));
+		}
 		reader.lock().expect("reader poisoned").sync(&kio::Waiter::noop());
 		Subscriber { reader, subscription }
 	}
@@ -151,12 +160,12 @@ impl Consumer {
 
 	/// Poll for the route state to move past `generation`, or the track to end.
 	fn poll_changed(&self, generation: u64, waiter: &kio::Waiter) -> Poll<()> {
-		match self
-			.state
-			.poll(waiter, |route| match route.generation != generation || route.end.is_some() {
+		match self.state.poll(waiter, |route| {
+			match route.generation != generation || route.end.is_some() {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
-			}) {
+			}
+		}) {
 			Poll::Pending => Poll::Pending,
 			Poll::Ready(_) => Poll::Ready(()),
 		}
@@ -437,7 +446,10 @@ impl Reader {
 	}
 
 	fn deliverable(&self, copy: &Copy, sequence: u64) -> bool {
-		if copy.until.is_some_and(|until| until.is_none_or(|until| sequence > until)) {
+		if copy
+			.until
+			.is_some_and(|until| until.is_none_or(|until| sequence > until))
+		{
 			return false;
 		}
 		match self.ordered {
@@ -478,7 +490,11 @@ impl Reader {
 
 	/// One pass over the copies; `None` when the route moved meanwhile and it is worth
 	/// another.
-	fn poll_group_once(&mut self, ordered: bool, waiter: &kio::Waiter) -> Option<Poll<Result<Option<group::Consumer>>>> {
+	fn poll_group_once(
+		&mut self,
+		ordered: bool,
+		waiter: &kio::Waiter,
+	) -> Option<Poll<Result<Option<group::Consumer>>>> {
 		self.sync(waiter);
 		let groups = self.groups;
 		// The serving copy first: it is the one that keeps delivering.
@@ -538,7 +554,10 @@ impl Reader {
 		waiter: &kio::Waiter,
 		done: impl Fn(&Copy) -> Option<Result<()>>,
 	) -> Option<Poll<Result<Option<T>>>> {
-		let serving = self.copies.last().filter(|copy| Some(copy.generation) == self.generation);
+		let serving = self
+			.copies
+			.last()
+			.filter(|copy| Some(copy.generation) == self.generation);
 		// The serving copy drained a complete track: that is its end, whichever route
 		// would serve it next. A copy that failed is the front's to replace.
 		if let Some(Some(Ok(()))) = serving.map(&done) {
@@ -751,7 +770,12 @@ impl Recover {
 	///
 	/// `failed` is the error the current copy ended with, if it did; a stall is `None`.
 	/// Returns the copy's error when nothing can continue the group.
-	pub(crate) fn poll(&mut self, index: u64, failed: Option<&Error>, waiter: &kio::Waiter) -> Poll<Result<group::Consumer>> {
+	pub(crate) fn poll(
+		&mut self,
+		index: u64,
+		failed: Option<&Error>,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<group::Consumer>> {
 		// Subscribe the reader to a new route from its newest group, which is this one or
 		// later, so that route's subscription delivers the rest of it.
 		if let Some(reader) = self.reader.upgrade() {
@@ -760,7 +784,12 @@ impl Recover {
 		loop {
 			let (generation, serving, end, closed) = {
 				let route = self.route.state.read();
-				(route.generation, route.copy.clone(), route.end.clone(), route.is_closed())
+				(
+					route.generation,
+					route.copy.clone(),
+					route.end.clone(),
+					route.is_closed(),
+				)
 			};
 			// Registered before looking, so a route change from here on wakes the reader.
 			if self.route.poll_changed(generation, waiter).is_ready() && end.is_none() && !closed {
@@ -952,11 +981,20 @@ mod test {
 
 	fn subscribe(logical: &track::Producer, max_age: Duration) -> track::Subscriber {
 		let subscription = Subscription::default().with_max_age(max_age);
-		logical.consume().subscribe(subscription).now_or_never().unwrap().unwrap()
+		logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap()
 	}
 
 	fn recv(sub: &mut track::Subscriber) -> group::Consumer {
-		sub.recv_group().now_or_never().expect("a group").unwrap().expect("track ended")
+		sub.recv_group()
+			.now_or_never()
+			.expect("a group")
+			.unwrap()
+			.expect("track ended")
 	}
 
 	fn read(group: &mut group::Consumer) -> Option<Vec<u8>> {
@@ -1011,7 +1049,10 @@ mod test {
 		assert_eq!(read(&mut reading), Some(b"c".to_vec()));
 		whole.finish().unwrap();
 		assert_eq!(read(&mut reading), None);
-		assert!(sub.recv_group().now_or_never().is_none(), "the group was handed out twice");
+		assert!(
+			sub.recv_group().now_or_never().is_none(),
+			"the group was handed out twice"
+		);
 	}
 
 	#[test]
@@ -1032,7 +1073,10 @@ mod test {
 		frame.write(b"ab".as_ref()).unwrap();
 		let mut reading = recv(&mut sub);
 		let mut chunks = reading.next_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(&chunks.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..], b"ab");
+		assert_eq!(
+			&chunks.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..],
+			b"ab"
+		);
 
 		// The route dies mid-frame, and the replacement holds the frame whole.
 		drop(frame);
@@ -1042,7 +1086,10 @@ mod test {
 		whole.write_frame(ts(0), b"abcd".as_ref()).unwrap();
 		routes.serve(b.consume());
 
-		assert_eq!(&chunks.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..], b"cd");
+		assert_eq!(
+			&chunks.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..],
+			b"cd"
+		);
 		assert!(chunks.read_chunk().now_or_never().unwrap().unwrap().is_none());
 	}
 
@@ -1136,7 +1183,8 @@ mod test {
 		}
 		b.insert_datagram(3, ts(3), b"d".as_ref()).unwrap();
 
-		let mut recv = |sub: &mut track::Subscriber| sub.recv_datagram().now_or_never().map(|d| d.unwrap().unwrap().sequence);
+		let recv =
+			|sub: &mut track::Subscriber| sub.recv_datagram().now_or_never().map(|d| d.unwrap().unwrap().sequence);
 		assert_eq!(recv(&mut sub), Some(1));
 		assert_eq!(recv(&mut sub), Some(2));
 		routes.serve(b.consume());

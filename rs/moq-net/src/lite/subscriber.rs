@@ -820,14 +820,14 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						// from where the publisher said they start so a front continuing the
 						// group across routes lines them up.
 						group.start_at(hdr.frame_start)?;
-					// The first frame a route delivers says where its live feed is, when
-					// its answer did not.
-					if !entry.producer.is_live() {
-						entry.producer.set_live(Some(Position {
-							group: hdr.sequence,
-							frame: hdr.frame_start,
-						}));
-					}
+						// The first frame a route delivers says where its live feed is, when
+						// its answer did not.
+						if !entry.producer.is_live() {
+							entry.producer.set_live(Some(Position {
+								group: hdr.sequence,
+								frame: hdr.frame_start,
+							}));
+						}
 						(group, entry.producer.clone(), entry.timescale, reading)
 					};
 
@@ -4138,10 +4138,10 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 									// signal, so a reader waiting on a skipped group
 									// fails over instead of stalling on a live route.
 									lite::SubscribeResponse::Start(start) => {
-									// Where the live feed is, on versions whose answer says.
-									if serve.subscriber.version.has_largest() {
-										self.serving.set_live(start.largest);
-									}
+										// Where the live feed is, on versions whose answer says.
+										if serve.subscriber.version.has_largest() {
+											self.serving.set_live(start.largest);
+										}
 										// A START describes the demand the SUBSCRIBE carried.
 										// It applies only while the current start still matches
 										// that demand (updates get no fresh START, so an update

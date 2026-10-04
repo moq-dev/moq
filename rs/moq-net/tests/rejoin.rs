@@ -159,7 +159,10 @@ async fn rejoin_skips_a_cache_kept_by_another_handle() {
 
 			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 			let group = sub.recv_group().await.unwrap().unwrap();
-			assert_eq!(group.sequence, 3, "{version}: the rejoining reader got the stale cache first");
+			assert_eq!(
+				group.sequence, 3,
+				"{version}: the rejoining reader got the stale cache first"
+			);
 		})
 		.await
 		.unwrap_or_else(|_| panic!("{version}: timed out"));
