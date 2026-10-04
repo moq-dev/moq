@@ -12,7 +12,7 @@ nothing changes.
 ## Plan
 
 Lands in `js/net`, reusing the GOAWAY handover the drain line shipped once
-[JS group-boundary handover](/quest/m1/js-group-handover.md) splices tracks
+[JS track handover](/quest/m1/js-group-handover.md) resumes tracks
 across it: dial the replacement while the old session keeps serving, swap the origin wiring once it is established, leave the old
 session to close on its own or at the handover cap. See the
 [questline](/quest/m1/transport-upgrade/README.md) for the shared decisions.
@@ -46,5 +46,5 @@ session to close on its own or at the handover cap. See the
 
 ## Required
 
-- [JS group-boundary handover](/quest/m1/js-group-handover.md) - tracks carry across the handover this upgrade reuses without a dropped group
+- [JS track handover](/quest/m1/js-group-handover.md) - tracks carry across the handover this upgrade reuses without a dropped group
 - [JS GOAWAY requests](/quest/m1/js-goaway-requests.md) - no new request opens on a session that is going away
