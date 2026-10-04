@@ -11,7 +11,8 @@
  * @module
  */
 import type MoqWatch from "@moq/watch/element";
-import { type Environment, SAMPLE_INTERVAL_MS, type Sample, SILENCE_RMS, type Stall } from "./schema.ts";
+import { Capture } from "./capture.ts";
+import { type Arrival, type Environment, SAMPLE_INTERVAL_MS, type Sample, SILENCE_RMS, type Stall } from "./schema.ts";
 import { type Tap, tap } from "./tap.ts";
 
 /** Chromium's render capacity surface, which is not in lib.dom. */
@@ -25,6 +26,10 @@ type RenderCapacity = {
 export type Probe = {
 	/** Samples taken since the last drain. */
 	drain(): Sample[];
+	/** Arrivals on the same session, before the container orders them, when capture is enabled. */
+	arrivals(): Arrival[];
+	/** The failure that stopped arrival capture, if any. */
+	error(): string | undefined;
 	/** End the measurement: take one last sample, with any gap still open closed into it. */
 	finish(): Promise<void>;
 	/** What the page is, once the catalog says the session is up. */
@@ -36,7 +41,7 @@ export type Probe = {
 };
 
 /** Start sampling `watch`, from before it has produced anything, so startup is on the record too. */
-export function probe(watch: MoqWatch): Probe {
+export function probe(watch: MoqWatch, capture = false): Probe {
 	const samples: Sample[] = [];
 	const notes: string[] = [];
 	const note = (line: string) => {
@@ -44,6 +49,14 @@ export function probe(watch: MoqWatch): Probe {
 	};
 
 	const { audio, sync, broadcast } = watch.player;
+	const recording = capture
+		? new Capture({
+				broadcast: audio.source.in.broadcast,
+				track: audio.source.out.track,
+				config: audio.source.out.config,
+				maxAge: sync.out.maxAge,
+			})
+		: undefined;
 
 	// Stall changes are taken as they happen: a re-stall shorter than the sample grid is exactly the
 	// one a 250 ms read would miss, and it is what tells a stall from an underrun.
@@ -105,6 +118,10 @@ export function probe(watch: MoqWatch): Probe {
 			timestamp: audio.out.timestamp.peek(),
 			stalled: audio.out.stalled.peek(),
 			delay: sync.out.delay.peek(),
+			rtt: watch.player.in.probe.peek()?.rtt,
+			networkJitter: sync.out.jitter.peek(),
+			jitter: audio.source.out.config.peek()?.jitter,
+			renditionDelay: audio.source.out.config.peek()?.delay,
 			outputLatency: context ? context.outputLatency * 1000 : undefined,
 			baseLatency: context ? context.baseLatency * 1000 : undefined,
 			renderLoad,
@@ -128,10 +145,13 @@ export function probe(watch: MoqWatch): Probe {
 
 	return {
 		drain: () => samples.splice(0, samples.length),
+		arrivals: () => recording?.drain() ?? [],
+		error: () => recording?.error(),
 		async finish() {
 			attach();
 			await current?.finish();
 			samples.push(sample());
+			await recording?.close();
 		},
 		environment() {
 			const catalog = broadcast.out.catalog.peek();
@@ -144,6 +164,7 @@ export function probe(watch: MoqWatch): Probe {
 				codec: config?.codec,
 				rate: config?.sampleRate,
 				jitter: config?.jitter,
+				config,
 				contextRate: audio.out.context.peek()?.sampleRate,
 			};
 		},

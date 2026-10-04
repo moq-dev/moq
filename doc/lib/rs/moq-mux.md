@@ -76,27 +76,26 @@ config through `AsMut`.
 ```rust
 #[derive(Serialize, Deserialize, Clone)]
 struct Mavlink {
-    #[serde(flatten)]
-    binary: hang::catalog::BinaryConfig, // mode, compression, bitrate, ...
+    config: hang::catalog::BinaryConfig, // mode, compression, bitrate, ...
     sysid: u8,
 }
 
 impl AsMut<hang::catalog::BinaryConfig> for Mavlink {
     fn as_mut(&mut self) -> &mut hang::catalog::BinaryConfig {
-        &mut self.binary
+        &mut self.config
     }
 }
 
 // Plus `RenditionConfig<Ext>` writing to `catalog.ext.mavlink`, a map
 // serialized under the `com.example.mavlink` root key.
-let binary = hang::catalog::BinaryConfig::new(hang::catalog::Mode::Stream);
-let mut telemetry = catalog.binary_stream(track, Mavlink { binary, sysid: 1 })?;
+let config = hang::catalog::BinaryConfig::new(hang::catalog::Mode::Stream);
+let mut telemetry = catalog.binary_stream(track, Mavlink { config, sysid: 1 })?;
 telemetry.append(packet)?;
 ```
 
 The producer sets the entry's `mode` and encodes the track with its
 `compression`. Read it back from `Catalog<Ext>` and subscribe with
-`catalog::Entry::new(name, &entry.binary)`.
+`catalog::Entry::new(name, &entry.config)`.
 
 A payload that knows when it was captured (a datagram's arrival, a sensor read)
 carries that `Instant`. The producer maps it onto the broadcast clock and writes

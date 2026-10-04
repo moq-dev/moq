@@ -12,6 +12,7 @@ just test audio-quality --profiles mild --codecs opus --duration 20
 just test audio-quality --rings plain                          # the production path only
 just test audio-quality --out ~/runs/after                     # keep the run directory
 just test audio-quality --enforce                              # fail on the budgets
+just test audio-quality --profiles bursty --capture --out ~/runs/burst # keep arrival evidence
 just test audio-quality --replays                              # the replays only, in seconds
 ```
 
@@ -69,6 +70,27 @@ The shaper carries UDP and nothing else. The page fetches `/certificate.sha256` 
 dials, so the driver answers that fetch with the relay's own hash (the certificate is pinned by
 hash, so a different port needs nothing more). With nothing listening on TCP there, the WebSocket
 fallback cannot connect: the session is WebTransport through the shaper, or the row is void.
+
+## Diagnosing live rows
+
+Every browser sample includes the current PROBE RTT, Sync's network buffer, and the selected
+rendition's advertised jitter and delay. These distinguish a target increase caused by the
+transport from one declared by the publisher. The final page environment keeps the full audio
+configuration.
+
+`--capture` also writes `<tag>.arrivals.ndjson`: `[at, timestamp, group]` on the same viewer clock as
+`<tag>.ndjson`, before the container orders or skips groups. The observer shares the player's
+connection and track, priority, and maximum age, so it adds no upstream subscription demand.
+Groups drain concurrently, so an earlier stalled group cannot hide a later arrival. Capture
+errors void the row. Capture adds local decoding and recording work; it is off by default and
+on in nightly so a failing run preserves the inputs for diagnosis.
+
+To replay a capture, put its arrivals and final environment configuration into the version 2
+`Trace` below, subtract the first arrival's `at` from every arrival and from the last sample's
+`at` for the duration, and supply the observed minimum RTT. Replay holds that RTT and configuration
+constant; compare the raw samples when either changed during the live run. The observer only
+records frames delivered under the player's maximum age, so a replay cannot recover groups the
+transport already discarded.
 
 ## Traces
 
