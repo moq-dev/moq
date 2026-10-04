@@ -52,7 +52,10 @@ on moq-lite.
 On drafts 14–19, the Rust publisher answers a standalone `FETCH` within one
 group from the cache. A relay fetches a missing group upstream with a `FETCH`
 of that one whole group, and an upstream refusal is the refusal the fetcher
-sees. A range touching several groups is refused with `NOT_SUPPORTED`, as is
+sees. Once its last reader leaves, the relay cancels the upstream fetch, even
+before `FETCH_OK`, and aborts an incomplete group instead of caching it as whole.
+Drafts 14–16 use `FETCH_CANCEL`; drafts 17–19 stop and reset the request stream.
+A range touching several groups is refused with `NOT_SUPPORTED`, as is
 any `FETCH` on draft-20 and later, which moved the range into
 `LOCATION_FILTER`. A standalone `FETCH`
 carries no timestamps, since no `SUBSCRIBE_OK` declared a timescale for it.

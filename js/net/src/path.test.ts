@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import * as Epoch from "./epoch.ts";
 import * as Path from "./path.ts";
 
 /** Brand a literal as a relative reference; the tests feed raw strings on purpose. */
@@ -325,4 +326,42 @@ test("encode enforces the max part count", () => {
 	const atLimit = Array.from({ length: Path.MAX_PARTS }, (_, i) => `${i}`).join("/") as Path.Valid;
 	expect(Path.encode(atLimit)).toBe(atLimit);
 	expect(() => Path.encode(`${atLimit}/extra` as Path.Valid)).toThrow();
+});
+
+// The Rust and JS path suites consume one fixture so parsing and ordering agree.
+const epochs = (await Bun.file(new URL("../../../rs/moq-net/src/path/epoch.json", import.meta.url)).json()) as {
+	valid: Array<{ text: string; unix_ms: number }>;
+	invalid: string[];
+	ordered: string[];
+	paths: Array<{ path: string; name: string; epoch: string | null }>;
+};
+
+test("shared epoch parse, reject, order and time vectors", () => {
+	for (const row of epochs.valid) {
+		const epoch = Epoch.parse(row.text);
+		expect(epoch).toBe(row.text as Epoch.Valid);
+		expect(Epoch.time(epoch).getTime()).toBe(row.unix_ms);
+	}
+	for (const text of epochs.invalid) expect(() => Epoch.parse(text)).toThrow(RangeError);
+	const ordered = epochs.ordered.map(Epoch.parse);
+	expect([...ordered].reverse().sort()).toEqual(ordered);
+});
+
+test("shared epoch path vectors", () => {
+	for (const row of epochs.paths) {
+		const path = Path.from(row.path);
+		const { name, epoch } = Path.splitEpoch(path);
+		expect(name).toBe(row.name as Path.Valid);
+		expect(epoch ?? null).toBe(row.epoch as Epoch.Valid | null);
+		expect(Path.joinEpoch(name, epoch)).toBe(path);
+	}
+});
+
+test("epoch segments are literal pattern components", () => {
+	const epoch = Epoch.parse(epochs.valid[1].text);
+	const path = Path.joinEpoch(Path.from("demo/video"), epoch);
+	expect(Path.Pattern.parse("demo/**").matches(path)).toBe(true);
+	expect(Path.Pattern.parse("demo/video/@*").matches(path)).toBe(true);
+	expect(Path.Pattern.parse("demo/video").matches(path)).toBe(false);
+	expect(Path.Pattern.parse(path).matches(path)).toBe(true);
 });

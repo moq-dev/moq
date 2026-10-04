@@ -21,7 +21,7 @@ timestamp](/quest/m1/lite-untimed.md)), and JS
 Decided (2026-10-01, maintainer): faithful absence on both the publish and
 the subscribe side. Today every receiver stamps local arrival time, as the
 timestamp draft mandates, and on lite-05 and later a relay forwards those
-stamps as if they were real. A failover to another first hop then changes
+stamps as if they were real. Any route failover then changes
 them, so the timeline jumps, and the "one clock per broadcast" property
 breaks. Rejected: first-hop arrival (the failover jump stays), 0 as a
 sentinel (collides with a real pts of 0), and `max_age` on max(wall, pts)
@@ -59,7 +59,7 @@ Things to look out for:
   `Option<Timestamp>` for media time only, so an open group and a group of
   untimed frames don't share one `None`.
 - The live edge skips unstamped groups. Reach and successor search
-  (`track.rs`, `resume.rs`) deliberately stop at the immediate successor and
+  (`track.rs`) deliberately stop at the immediate successor and
   leave the bound unknown while it is unstamped, because skipping ahead
   could expire content that is still valid. An untimed successor keeps that
   bound unknown for good, so the timed group before it is kept. Preserve

@@ -21,4 +21,4 @@ Decided in the 2026-09-30 audit: libmoq is frozen (renamed `rs/moq-c`), so C and
 
 ## Required
 
-- [Origin](/quest/m1/broadcast-epoch/origin.md) - the behavior the bindings surface
+- [Origin](/quest/m0/broadcast-epoch/origin.md) - the behavior the bindings surface

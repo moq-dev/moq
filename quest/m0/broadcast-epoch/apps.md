@@ -3,9 +3,11 @@
 ## Goal
 
 `moq-cli` publish and play, `@moq/publish`, `@moq/watch`, and `demo/web` use
-the origin default. Each publish run is a new epoch, and watching a bare name
-switches to a republish within an RTT rather than after the idle timeout.
-The UI and logs show the full epoch path, and a watch link can pin one.
+the origin default. Each publish run is a new epoch, so a restart while the
+old route lingers is a new broadcast rather than a resume into the old one,
+which stalls viewers until the new run's group sequence catches up. Watching
+a bare name switches to a republish within an RTT. The UI and logs show the
+full epoch path, and a watch link can pin one.
 
 ## Plan
 
@@ -18,4 +20,4 @@ The UI and logs show the full epoch path, and a watch link can pin one.
 
 ## Required
 
-- [Origin](/quest/m1/broadcast-epoch/origin.md) - the publish default and follow logic
+- [Origin](/quest/m0/broadcast-epoch/origin.md) - the publish default and follow logic

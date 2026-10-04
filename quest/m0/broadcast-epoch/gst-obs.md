@@ -16,5 +16,5 @@ audit: libmoq gets no new API). Update `doc/bin/gstreamer.md` and
 
 ## Required
 
-- [Bindings](/quest/m1/broadcast-epoch/bindings.md) - moq-ffi exposes epochs
+- [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi exposes epochs
 - [C++ through moq-ffi](/quest/m1/cpp/README.md) - OBS publishes through the generated C++
