@@ -24,7 +24,8 @@ Facts from the wildcard line (`rs/moq-net/src/model/origin.rs` there):
   below the prefix, so a woken front cannot tell what changed. Each re-runs
   `select` under the table read lock (`retain_routes`, then `best_route`,
   which hashes every pool member unless a serving front's route still
-  serves), then the driver polls every track and rescans deadlines.
+  serves; that `Pin::Stay` short-circuit goes with the follow-the-best-route
+  rule below), then the driver polls every track and rescans deadlines.
 - `route_order` is rendezvous-style: FNV over the path and hop ids, lowest
   wins. A join moves only paths the newcomer wins, a leave only paths the
   leaver was winning.
