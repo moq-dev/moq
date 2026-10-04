@@ -28,7 +28,7 @@ impl Log {
 	/// Compare a snapshot taken [`INTERVAL`](Self::INTERVAL) after the last.
 	///
 	/// Logs a stream whose access units did not advance since the last sample, once per
-	/// silence, any stream whose frame-sync counters moved, and PSI sections dropped since.
+	/// silence, any stream whose loss counters moved, and PSI sections dropped since.
 	pub fn sample(&mut self, latest: Stats) {
 		self.sync(&latest);
 		for (pid, stream) in &latest.streams {
@@ -56,8 +56,9 @@ impl Log {
 		self.sync(latest);
 	}
 
-	/// Report the streams whose frame-sync counters moved, one line each, the PSI sections
-	/// dropped for a bad CRC if that count moved, and the TR 101 290 counters if any moved.
+	/// Report the streams whose damage or frame-sync counters moved, one line each, the PSI
+	/// sections dropped for a bad CRC if that count moved, and the TR 101 290 counters if any
+	/// moved.
 	///
 	/// The importer already warns on each individual resync and dropped section; this is the
 	/// running total, which is what an operator turns into a rate.
@@ -86,6 +87,14 @@ impl Log {
 		let lost = |stream: &StreamStats| (stream.resyncs, stream.discarded, stream.unconfirmed);
 		for (pid, stream) in &latest.streams {
 			let previous = self.previous.as_ref().and_then(|previous| previous.streams.get(pid));
+			if previous.map_or(0, |previous| previous.damaged) != stream.damaged {
+				tracing::info!(
+					pid = *pid,
+					track = stream.track,
+					damaged = stream.damaged,
+					"damaged TS units refused"
+				);
+			}
 			if previous.map_or((0, 0, 0), lost) == lost(stream) {
 				continue;
 			}
@@ -235,6 +244,53 @@ mod test {
 					Ok(())
 				}
 				_ => Err(format!("expected one line per move, got {moved:?}")),
+			}
+		});
+	}
+
+	/// Damage is reported per PID when its cumulative count moves, including the final sample.
+	#[test]
+	#[tracing_test::traced_test]
+	fn reports_damaged_units_when_they_move() {
+		let sample = |damaged| {
+			let mut stats = Stats::default();
+			stats.streams.insert(
+				256,
+				StreamStats {
+					track: ".avc3",
+					damaged,
+					..Default::default()
+				},
+			);
+			stats.streams.insert(
+				257,
+				StreamStats {
+					track: ".mp2",
+					..Default::default()
+				},
+			);
+			stats
+		};
+		let mut log = Log::default();
+		log.sample(sample(0));
+		log.sample(sample(1));
+		log.sample(sample(1));
+		log.finish(&sample(2));
+		logs_assert(|lines: &[&str]| {
+			let refused: Vec<_> = lines
+				.iter()
+				.filter(|line| line.contains("damaged TS units refused"))
+				.collect();
+			match refused.as_slice() {
+				[first, second]
+					if first.contains("pid=256")
+						&& first.contains("damaged=1")
+						&& second.contains("pid=256")
+						&& second.contains("damaged=2") =>
+				{
+					Ok(())
+				}
+				_ => Err(format!("expected damage increases on the video PID, got {refused:?}")),
 			}
 		});
 	}

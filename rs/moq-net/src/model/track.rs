@@ -6625,6 +6625,34 @@ mod test {
 		assert!(done.is_none(), "track completes once the boundary is reached");
 	}
 
+	#[tokio::test]
+	async fn readers_end_at_the_boundary_with_missing_lower_groups() {
+		tokio::time::pause();
+		let mut producer = track_producer("test", None);
+		let mut arrival = producer.subscribe(None);
+		let mut ordered = producer.subscribe(None).ordered();
+		producer.finish_at(3).unwrap();
+		let _open = producer.create_group(group::Info { sequence: 2 }).unwrap();
+
+		// Missing lower groups do not hold either reader for the wire's grace.
+		// The last group's own stream remains open independently of the track end.
+		assert_eq!(arrival.assert_group().sequence, 2);
+		assert_eq!(ordered.next_group().await.unwrap().unwrap().sequence, 2);
+		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
+		assert!(ordered.next_group().now_or_never().unwrap().unwrap().is_none());
+
+		// Reaching the boundary did not settle the open group: an abort still wins.
+		producer.abort(Error::Timeout).unwrap();
+		assert!(matches!(
+			arrival.recv_group().now_or_never().unwrap(),
+			Err(Error::Timeout)
+		));
+		assert!(matches!(
+			ordered.next_group().now_or_never().unwrap(),
+			Err(Error::Timeout)
+		));
+	}
+
 	/// An abort before the declared end settled wins over it: the boundary was reached,
 	/// but a group below it was still open, so the track was cut off rather than ended.
 	#[tokio::test]
@@ -7596,6 +7624,15 @@ mod test {
 		assert!(fresh.poll_unused(&kio::Waiter::noop()).is_pending());
 		fresh.accept(None).unwrap().finish().unwrap();
 		assert_eq!(retry.await.unwrap().sequence, 5);
+	}
+
+	/// Dropping an auto trait from a published type is a semver break, so the group
+	/// consumer a cached fetch holds must not cost `Fetching` its unwind safety.
+	#[test]
+	fn fetching_is_unwind_safe() {
+		fn assert_unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+		assert_unwind_safe::<Fetching>();
+		assert_unwind_safe::<group::Consumer>();
 	}
 
 	/// A fetch that hits the cache holds the group until polled, so a handler that aborts

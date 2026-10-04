@@ -125,6 +125,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just js bench track
 
+      - name: JS catalog estimate fanout benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just js catalog-bench
+
       # Runs each moq-net Criterion routine once, so a bench that panics (an
       # unparsable version, a shape that deadlocks) fails here instead of on the
       # next manual run. Timing is not compared; nextest never runs a
@@ -133,6 +137,12 @@ jobs:
       - name: moq-net benchmark smoke
         if: ${{ !cancelled() }}
         run: nix develop --command cargo bench --locked -p moq-net --features fuzz --bench '*' -- --test
+
+      # The catalog bench asserts the estimate rate limit's publish counts, so one pass is
+      # the regression check.
+      - name: moq-mux catalog estimate fanout benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command cargo bench --locked -p moq-mux --bench catalog -- --test
 
       - name: RTMP chunk-stream benchmark smoke
         if: ${{ !cancelled() }}
