@@ -12,7 +12,8 @@
 //! WebTransport layering disabled, so native peers and browsers run the same
 //! machinery. Stream and session error codes map through the HTTP/3 error
 //! space ([`web_transport_proto::error_to_http3`]) in web mode and pass
-//! through untouched in raw mode.
+//! through untouched in raw mode, except that a received stream code in the
+//! HTTP/3 range is unmapped, since older raw peers send that form.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -317,7 +318,7 @@ impl Request {
 		let mut deadline = self.conn.owner().after(CLOSE_GRACE);
 		let send = &mut self.send;
 		kio::wait(|waiter| {
-			let mut cx = Context::from_waker(waiter.waker());
+			let mut cx = waiter.context();
 			if web_transport_trait::poll::SendStream::poll_closed(send, &mut cx).is_ready() {
 				return Poll::Ready(());
 			}
@@ -742,7 +743,7 @@ impl web_transport_trait::poll::Session for Session {
 		self.conn.owner().spawn(async move {
 			let mut offset = 0;
 			kio::wait(|waiter| {
-				let mut cx = Context::from_waker(waiter.waker());
+				let mut cx = waiter.context();
 
 				// Stop writing once the connection is gone; the deadline is the
 				// only other thing that ends this.
@@ -811,7 +812,7 @@ impl SendStream {
 	fn map(&self, err: Error) -> Error {
 		match self.web {
 			true => unmap_err(err),
-			false => err,
+			false => unmap_legacy(err),
 		}
 	}
 }
@@ -859,7 +860,7 @@ impl web_transport_trait::poll::SendStream for SendStream {
 		}
 	}
 
-	fn set_priority(&mut self, order: u8) {
+	fn set_priority(&mut self, order: i32) {
 		web_transport_trait::poll::SendStream::set_priority(&mut self.inner, order);
 	}
 
@@ -953,7 +954,7 @@ impl RecvStream {
 	fn map(&self, err: Error) -> Error {
 		match self.web {
 			true => unmap_err(err),
-			false => err,
+			false => unmap_legacy(err),
 		}
 	}
 }
@@ -995,6 +996,21 @@ impl Drop for RecvStream {
 impl std::fmt::Debug for RecvStream {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		self.inner.fmt(f)
+	}
+}
+
+/// Unmap a raw-QUIC stream code that arrived in the HTTP/3 code space.
+///
+/// Older `web-transport-moq` raw sessions map RESET_STREAM and STOP_SENDING
+/// codes as if they were WebTransport. No `u32` application code reaches that
+/// range, so a code in it can only be the mapped form. Anything else is the
+/// peer's own code and passes through.
+fn unmap_legacy(err: Error) -> Error {
+	let unmap = |code: u64| proto::error_from_http3(code).map_or(code, u64::from);
+	match err {
+		Error::Reset(code) => Error::Reset(unmap(code)),
+		Error::Stop(code) => Error::Stop(unmap(code)),
+		err => err,
 	}
 }
 
@@ -1472,6 +1488,31 @@ mod tests {
 		assert!(matches!(
 			unmap_err(Error::Stop(proto::error_to_http3(3))),
 			Error::Stop(3)
+		));
+	}
+
+	/// A raw session reads a plain stream code as is, and an older raw peer's
+	/// HTTP/3-mapped one as the code it stands for. Session closes are left alone.
+	#[test]
+	fn a_raw_session_unmaps_legacy_stream_codes() {
+		assert!(matches!(unmap_legacy(Error::Reset(5)), Error::Reset(5)));
+		assert!(matches!(unmap_legacy(Error::Stop(5)), Error::Stop(5)));
+		assert!(matches!(
+			unmap_legacy(Error::Reset(proto::error_to_http3(5))),
+			Error::Reset(5)
+		));
+		assert!(matches!(
+			unmap_legacy(Error::Stop(proto::error_to_http3(5))),
+			Error::Stop(5)
+		));
+
+		let code = proto::error_to_http3(5);
+		assert!(matches!(
+			unmap_legacy(Error::App {
+				code,
+				reason: String::new()
+			}),
+			Error::App { code: c, .. } if c == code
 		));
 	}
 

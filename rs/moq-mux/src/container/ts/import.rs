@@ -22,6 +22,7 @@ use mpeg2ts::ts::{Pid, TsPacket};
 
 use super::adts;
 use super::catalog;
+use super::health::{Continuation, Continuity, Health};
 use super::psi::{self, PesStart, Pmt};
 use crate::catalog::hang::CatalogExt;
 use crate::codec::{aac, ac3, eac3, h264, h265, legacy, mp2, opus};
@@ -69,16 +70,18 @@ pub struct Import<E: catalog::Catalog = ()> {
 	streams: HashMap<Pid, Stream<E>>,
 	/// Counters from routes a later PMT replaced, keyed by PID.
 	retired_stats: BTreeMap<u16, StreamStats>,
+	/// Damaged packets, PES, or access units refused, cumulative across PID remaps.
+	damaged: BTreeMap<u16, u64>,
 	/// Access units per elementary stream, timed on the program clock.
 	liveness: Liveness,
 	/// In-progress PES reassembly, keyed by elementary PID.
 	pending: HashMap<Pid, Pending>,
-	/// Per elementary-stream-PID TS continuity state.
-	continuity: HashMap<Pid, Continuity>,
+	/// The TR 101 290 checks, and the per-PID continuity state routing reads.
+	health: Health,
 	/// PID the PMT designates as carrying the program clock reference. An
 	/// adaptation-field `discontinuity_indicator` means a *system time-base*
 	/// discontinuity only here; on any other PID it says nothing but that the
-	/// continuity counter jumped ([`Continuity`]).
+	/// continuity counter jumped ([`Continuation::Broken`]).
 	pcr_pid: Option<Pid>,
 	/// The multiplex rate measured off the PCR PID, recorded in the `mpegts` section
 	/// while the source holds one. Only fed with `mpegts` catalog support.
@@ -121,15 +124,11 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// the PAT into the catalog service record yet (set once; the PAT is stable).
 	identity_recorded: bool,
 	/// Latest video PTS: the media clock used to timestamp private sections, which
-	/// carry no PES PTS of their own. Unwrapped independently of the video stream, and
-	/// shifted with it, so a wrap the video re-anchors moves the cues along with it.
+	/// carry no PES PTS of their own. Unwrapped independently of the video stream.
 	/// SPTS scope: one clock for the whole input. Under MPTS every program's video
 	/// advances it, so a cue could be stamped with another program's PTS.
 	last_pts: Option<Timestamp>,
 	media_unwrap: PtsUnwrap,
-	/// The source's mapping onto the broadcast clock, set by [`live`](Self::live). `None`
-	/// publishes the source's unwrapped PTS verbatim.
-	anchor: Option<crate::clock::Anchor>,
 	/// The program number chosen by [`with_program`](Self::with_program). `None` imports the
 	/// multiplex's only program and refuses a PAT that lists more than one.
 	program: Option<u16>,
@@ -156,9 +155,10 @@ impl<E: catalog::Catalog> Import<E> {
 			crc_errors: BTreeMap::new(),
 			streams: HashMap::new(),
 			retired_stats: BTreeMap::new(),
+			damaged: BTreeMap::new(),
 			liveness: Liveness::default(),
 			pending: HashMap::new(),
-			continuity: HashMap::new(),
+			health: Health::default(),
 			pcr_pid: None,
 			mux_rate: Default::default(),
 			published: false,
@@ -175,7 +175,6 @@ impl<E: catalog::Catalog> Import<E> {
 			identity_recorded: false,
 			last_pts: None,
 			media_unwrap: PtsUnwrap::default(),
-			anchor: None,
 			program: None,
 		}
 	}
@@ -189,18 +188,6 @@ impl<E: catalog::Catalog> Import<E> {
 	pub fn with_program(mut self, program: u16) -> Self {
 		self.program = Some(program);
 		self.si.select(program);
-		self
-	}
-
-	/// Publish on the broadcast clock rather than the source's own PTS.
-	///
-	/// For a live feed with its own zero: the first frame is live on arrival, every elementary
-	/// stream shares that one mapping, and a restart (a PTS rewind or a signalled time-base
-	/// discontinuity) continues forward after the real idle gap. Without this, the unwrapped PTS
-	/// is published verbatim, which suits a source already on the clock the catalog advertises
-	/// ([`Config::with_clock`](crate::catalog::Config::with_clock)).
-	pub fn live(mut self) -> Self {
-		self.anchor = Some(crate::clock::Anchor::new(self.catalog.clock()));
 		self
 	}
 
@@ -235,18 +222,36 @@ impl<E: catalog::Catalog> Import<E> {
 		// registered) before the packets that follow it in the same chunk route.
 		let mut off = 0;
 		while let Some(at) = self.framer.next(&self.scratch, &mut off) {
+			self.health.routed(&self.scratch, at);
 			let pkt: [u8; TsPacket::SIZE] = self.scratch[at..at + TsPacket::SIZE].try_into().unwrap();
 			let pid = (((pkt[1] & 0x1f) as u16) << 8) | pkt[2] as u16;
 			// Every packet paces the multiplex, null stuffing and retransmissions included.
 			if self.supports_mpegts {
 				self.mux_rate.packet();
 			}
+			// Every packet is graded, but only the media PIDs and the clock route on the
+			// verdict: PSI and section PIDs keep their reassemblers' own.
+			let continuation = self.health.packet(&pkt, self.liveness.now());
 			let continuation = Pid::new(pid)
 				.ok()
 				.filter(|pid| self.streams.contains_key(pid) || self.pcr_pid == Some(*pid))
-				.map(|pid| self.continuity.entry(pid).or_default().observe(&pkt));
+				.map(|_| continuation);
 			// A retransmitted payload must not repeat the clock reset it carried.
 			if matches!(continuation, Some(Continuation::Duplicate)) {
+				continue;
+			}
+			// A media or PCR packet whose adaptation field overruns itself is refused before
+			// its clock bits can reach the program clock. Its counter already joined the
+			// chain, so a gap in front of it still salvages what came before.
+			if let Ok(pid) = Pid::new(pid)
+				&& (self.streams.contains_key(&pid) || self.pcr_pid == Some(pid))
+				&& pkt[1] & 0x80 == 0
+				&& !adaptation_valid(&pkt)
+			{
+				if matches!(continuation, Some(Continuation::Broken)) {
+					self.salvage(pid)?;
+				}
+				self.damage(pid, &anyhow::anyhow!("malformed TS adaptation field"))?;
 				continue;
 			}
 			// Read the clock's own flag before routing, so the break lands between the media
@@ -260,6 +265,9 @@ impl<E: catalog::Catalog> Import<E> {
 					self.timebase_break()?;
 				} else if let Some(pcr) = pcr(&pkt) {
 					self.liveness.pcr(pcr);
+					if let Some(now) = self.liveness.now() {
+						self.health.tick(now);
+					}
 					if self.supports_mpegts && self.mux_rate.pcr(pcr) {
 						self.record_mux_rate()?;
 					}
@@ -289,10 +297,7 @@ impl<E: catalog::Catalog> Import<E> {
 					// Flagged corrupt, so the packet joins the partial rather than opening a
 					// new PES out of bytes the demodulator already disowned.
 					Continuation::Corrupt => {
-						self.pending.remove(&pid);
-						if let Some(stream) = self.streams.get_mut(&pid) {
-							stream.desync();
-						}
+						self.damage(pid, &anyhow::anyhow!("transport error indicator"))?;
 						continue;
 					}
 					Continuation::Broken => {
@@ -323,6 +328,7 @@ impl<E: catalog::Catalog> Import<E> {
 			}
 		}
 
+		self.health.drained(&self.scratch, off);
 		self.scratch.drain(..off);
 		// Cut the snapshot groups for whatever SI committed in this batch. Batching per
 		// decode call (plus the store's own host-clock debounce) coalesces a junction's
@@ -380,6 +386,7 @@ impl<E: catalog::Catalog> Import<E> {
 		// can be read as a timebase reset rather than a counter jump.
 		if self.pcr_pid != pmt.pcr_pid {
 			self.pcr_pid = pmt.pcr_pid;
+			self.health.pcr_pid(pmt.pcr_pid.map(|pid| pid.as_u16()));
 			// A new clock: the intervals straddling the switch measure nothing.
 			self.liveness.discontinuity();
 			if self.mux_rate.discontinuity() {
@@ -421,6 +428,8 @@ impl<E: catalog::Catalog> Import<E> {
 				self.ensure_stream(es.pid, es.stream_type, &es.descriptors)?;
 			}
 		}
+		let pids: Vec<u16> = pmt.streams.iter().map(|es| es.pid.as_u16()).collect();
+		self.health.pmt_streams(&pids);
 
 		// Every stream in the initial program is registered now; release the reservation
 		// so the catalog publishes once each rendition's config resolves, not before.
@@ -435,15 +444,18 @@ impl<E: catalog::Catalog> Import<E> {
 			Payload::Bytes(payload) => payload,
 			// No payload can be found in it, so like a corrupt packet it breaks the PES.
 			Payload::Malformed => {
-				self.pending.remove(&pid);
-				if let Some(stream) = self.streams.get_mut(&pid) {
-					stream.desync();
-				}
-				return Ok(());
+				return self.damage(pid, &anyhow::anyhow!("malformed TS adaptation field"));
 			}
 		};
 		if pkt[1] & 0x40 != 0 {
-			self.handle_pes_start(pid, PesStart::parse(payload)?)
+			match PesStart::parse(payload) {
+				Ok(pes) => self.handle_pes_start(pid, pes),
+				Err(err) => {
+					// The start still ends the PES before it, which is whole.
+					self.flush(pid)?;
+					self.damage(pid, &err)
+				}
+			}
 		} else {
 			self.handle_pes_continuation(pid, payload)
 		}
@@ -472,7 +484,6 @@ impl<E: catalog::Catalog> Import<E> {
 					split: h264::Split::new(),
 					import: Box::new(h264::Import::new(track, self.reserve(), self.video_hint())?),
 					unwrap: PtsUnwrap::default(),
-					reanchor: Reanchor::default(),
 				}
 			}
 			Some(StreamType::H265) => {
@@ -483,7 +494,6 @@ impl<E: catalog::Catalog> Import<E> {
 					split: h265::Split::new(),
 					import: Box::new(h265::Import::new(track, self.reserve(), self.video_hint())?),
 					unwrap: PtsUnwrap::default(),
-					reanchor: Reanchor::default(),
 				}
 			}
 			// Only ADTS-framed AAC (0x0F). 0x11 is LATM/LOAS, which uses a different
@@ -494,7 +504,6 @@ impl<E: catalog::Catalog> Import<E> {
 				reserved: Some(self.reserve()),
 				container: self.container.clone(),
 				unwrap: PtsUnwrap::default(),
-				reanchor: Reanchor::default(),
 				tail: Vec::new(),
 				tail_pts: None,
 				resync: Resync::new(pid.as_u16(), ".aac"),
@@ -521,7 +530,6 @@ impl<E: catalog::Catalog> Import<E> {
 				Stream::Opus(Box::new(OpusStream {
 					import: opus::Import::new(track, self.reserve(), config)?,
 					unwrap: PtsUnwrap::default(),
-					reanchor: Reanchor::default(),
 				}))
 			}
 			Some(StreamType::Mpeg1Video | StreamType::Mpeg2Video) => Stream::Clock,
@@ -560,7 +568,7 @@ impl<E: catalog::Catalog> Import<E> {
 			self.liveness.register(pid.as_u16());
 		}
 		self.streams.insert(pid, stream);
-		self.continuity.entry(pid).or_default();
+		self.health.restart(pid.as_u16());
 		Ok(())
 	}
 
@@ -575,7 +583,6 @@ impl<E: catalog::Catalog> Import<E> {
 			tail: Vec::new(),
 			tail_pts: None,
 			resync: Resync::new(pid.as_u16(), descriptor.track_suffix),
-			reanchor: Reanchor::default(),
 		}))
 	}
 
@@ -588,7 +595,7 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		// This PID is becoming section-framed; drop any partial PES a prior codec left pending.
 		self.pending.remove(&pid);
-		self.continuity.remove(&pid);
+		self.health.restart(pid.as_u16());
 		if !self.supports_mpegts {
 			// Always route to Ignored, replacing any prior codec on this PID (a later PMT
 			// can reassign it), so a private section is never PES-parsed. Warn once.
@@ -648,6 +655,11 @@ impl<E: catalog::Catalog> Import<E> {
 
 		let is_video = matches!(stream, Stream::H264 { .. } | Stream::H265 { .. } | Stream::Clock);
 		let is_clock = matches!(stream, Stream::Clock);
+		// Verbatim streams with no cadence (SCTE-35, DVB subtitles) are left ungraded
+		// rather than watched against an invented one.
+		if pes.pts.is_some() && !matches!(stream, Stream::Verbatim(_) | Stream::Ignored) {
+			self.health.pts(pid.as_u16(), self.liveness.now());
+		}
 		if is_video {
 			for stream in self.streams.values_mut() {
 				if let Stream::Aac(audio) = stream {
@@ -659,33 +671,16 @@ impl<E: catalog::Catalog> Import<E> {
 			// frame must be timestamped with this frame's PTS ("now"), not the
 			// previous one's.
 			if pes.pts.is_some() {
-				let pts = unwrap_pts(&mut self.media_unwrap, pes.pts, self.anchor.as_mut())?;
-				let video = match self.streams.get(&pid) {
-					Some(Stream::H264 { reanchor, import, .. }) => {
-						Some((reanchor, import.floor(false), import.floor(true)))
-					}
-					Some(Stream::H265 { reanchor, import, .. }) => {
-						Some((reanchor, import.floor(false), import.floor(true)))
-					}
-					_ => None,
-				};
-				self.last_pts = match (pts, video) {
-					(Some(pts), Some((reanchor, edge, floor))) => {
-						let pts = reanchor.shifted(pts)?;
-						// Below the live edge is a wrap or restart, which only a keyframe re-anchored to
-						// the floor continues. That write waits for this PES to end, so stamp sections
-						// arriving meanwhile there too rather than on the old timeline.
-						match floor {
-							Some(floor) if edge.is_some_and(|edge| pts.as_micros() < edge.as_micros()) => Some(floor),
-							_ => Some(pts),
-						}
-					}
-					(pts, _) => pts,
-				};
+				self.last_pts = unwrap_pts(&mut self.media_unwrap, pes.pts)?;
 			}
 		}
 
 		if is_clock {
+			// A clock-only stream never flushes, but sections are stamped with its PTS, so it
+			// anchors the catalog here like a flushed PES would.
+			if let Some(pts) = pes.pts {
+				self.catalog.anchor(Timestamp::from_scale(pts, 90_000)?)?;
+			}
 			// Nothing is published, but each PES is a picture the source delivered.
 			self.liveness.delivered(pid.as_u16(), 1);
 			return Ok(());
@@ -719,6 +714,20 @@ impl<E: catalog::Catalog> Import<E> {
 		Ok(())
 	}
 
+	/// Refuse one damaged unit without changing any other PID or the program clock.
+	fn damage(&mut self, pid: Pid, err: &anyhow::Error) -> anyhow::Result<()> {
+		self.pending.remove(&pid);
+		match self.streams.get_mut(&pid) {
+			// Nothing is imported from it, so there is nothing to refuse or report.
+			Some(Stream::Ignored) => return Ok(()),
+			Some(stream) => stream.lost()?,
+			None => {}
+		}
+		*self.damaged.entry(pid.as_u16()).or_default() += 1;
+		tracing::warn!(pid = pid.as_u16(), error = %err, "dropped a damaged TS unit");
+		Ok(())
+	}
+
 	fn flush(&mut self, pid: Pid) -> anyhow::Result<()> {
 		let Some(pending) = self.pending.remove(&pid) else {
 			return Ok(());
@@ -731,7 +740,15 @@ impl<E: catalog::Catalog> Import<E> {
 		let Some(stream) = self.streams.get_mut(&pid) else {
 			return Ok(());
 		};
-		let units = stream.write(pending, batched, self.anchor.as_mut())?;
+		// The first PES is live on arrival: its PTS needs no unwrap yet.
+		if let Some(pts) = pending.pts {
+			self.catalog.anchor(Timestamp::from_scale(pts, 90_000)?)?;
+		}
+		let units = match stream.write(pending, batched) {
+			Ok(units) => units,
+			Err(err) if err.is::<Damaged>() => return self.damage(pid, &err),
+			Err(err) => return Err(err),
+		};
 		self.published |= units > 0;
 		self.liveness.delivered(pid.as_u16(), units);
 
@@ -740,19 +757,25 @@ impl<E: catalog::Catalog> Import<E> {
 		self.record_media_track(pid)
 	}
 
-	/// The packet chain on `pid` was cut: salvage the truncated PES only where its bytes
-	/// stand on their own, drop whatever is left mid-unit, and require the next frame to
-	/// prove its boundary.
+	/// The packet chain on `pid` was cut: salvage the truncated PES, and treat the bytes
+	/// after it as [lost](Stream::lost).
 	fn broken(&mut self, pid: Pid) -> anyhow::Result<()> {
-		if self.streams.get(&pid).is_some_and(Stream::salvages_partial_pes) {
-			self.flush(pid)?;
-		} else {
-			self.pending.remove(&pid);
-		}
+		self.salvage(pid)?;
 		if let Some(stream) = self.streams.get_mut(&pid) {
-			stream.desync();
+			stream.lost()?;
 		}
 		Ok(())
+	}
+
+	/// Publish the truncated PES on `pid` only where its bytes stand on their own, and drop
+	/// whatever is left mid-unit.
+	fn salvage(&mut self, pid: Pid) -> anyhow::Result<()> {
+		if self.streams.get(&pid).is_some_and(Stream::salvages_partial_pes) {
+			self.flush(pid)
+		} else {
+			self.pending.remove(&pid);
+			Ok(())
+		}
 	}
 
 	/// A system time-base discontinuity: the PCR PID declared that the clock every
@@ -771,11 +794,13 @@ impl<E: catalog::Catalog> Import<E> {
 	fn timebase_break(&mut self) -> anyhow::Result<()> {
 		// The bytes still accumulating belong to the old clock, and their continuation is
 		// stamped on the new one, so cut every PES here rather than splicing across. This
-		// runs before the marker so a salvaged tail lands in the closing group.
+		// runs before the marker so a salvaged tail lands in the closing group, which the
+		// marker closes without guessing an end.
 		for pid in self.streams.keys().copied().collect::<Vec<_>>() {
-			self.broken(pid)?;
+			self.salvage(pid)?;
 		}
 		for stream in self.streams.values_mut() {
+			stream.desync();
 			stream.discontinuity(self.published)?;
 		}
 		for section in self.sections.values_mut() {
@@ -855,6 +880,7 @@ impl<E: catalog::Catalog> Import<E> {
 			},
 		};
 		self.pmt_sections.entry(entry.pmt_pid).or_default();
+		self.health.pmt_pids(&[entry.pmt_pid.as_u16()], self.liveness.now());
 		self.record_program_identity(pat.transport_stream_id, entry)
 	}
 
@@ -922,7 +948,7 @@ impl<E: catalog::Catalog> Import<E> {
 	}
 
 	/// Snapshot what every elementary stream has delivered, the audio frame sync lost on the
-	/// way, and the PAT and PMT sections dropped for a bad CRC.
+	/// way, damaged units refused, and the PAT and PMT sections dropped for a bad CRC.
 	///
 	/// Cheap: it reads counters the demuxer already keeps, so a caller can poll it per
 	/// chunk and report the delta.
@@ -939,13 +965,26 @@ impl<E: catalog::Catalog> Import<E> {
 				.and_modify(|retired| retired.merge(&current))
 				.or_insert(current);
 		}
+		// A dedicated PCR PID routes no stream, so its damage gets a clock-only row.
+		for (&pid, &damaged) in &self.damaged {
+			streams.entry(pid).or_insert_with(|| StreamStats::new("")).damaged = damaged;
+		}
 		for (pid, stats) in &mut streams {
 			(stats.units, stats.quiet) = self.liveness.stream(*pid);
 		}
-		Stats {
+		let mut stats = Stats {
 			streams,
 			crc_error: self.crc_errors.values().sum(),
-		}
+			..Default::default()
+		};
+		self.health.errors().report(&mut stats);
+		stats
+	}
+
+	/// The TR 101 290 counts behind [`Self::stats`], for merging importers that read the same
+	/// multiplex.
+	pub(super) fn errors(&self) -> &super::health::Errors {
+		self.health.errors()
 	}
 
 	/// [`Stats::crc_error`] per PID, for merging importers that read the same PSI.
@@ -988,17 +1027,23 @@ fn list_programs(programs: &[u16]) -> String {
 }
 
 /// What each demuxed elementary stream delivered, and the audio frame sync it lost or could
-/// not verify, keyed by elementary stream PID; and the PSI sections the stream as a whole
-/// lost to corruption.
+/// not verify, keyed by elementary stream PID; the PSI sections the stream as a whole lost to
+/// corruption; and its TR 101 290 errors.
 ///
 /// Snapshot it with [`Import::stats`]. Every count is cumulative for the life of the
 /// importer, so what an operator alarms on is the rate: a feed that resyncs once an hour is
 /// healthy, one that resyncs every second is losing audio, and one whose access units stop
 /// advancing while the mux keeps flowing has lost that stream.
 ///
+/// The fields named for ETSI TR 101 290 (V1.4.1) checks count them at that standard's fixed
+/// limits. They grade the stream as the importer received it, not the wire a receiver sees
+/// downstream. TR 101 290's `PID_error` is covered, more strictly, by each row's `units` and
+/// `quiet`: a dead video path behind a live mux still sends PCR-only packets on its PID, which
+/// a packet count reads as live. `PCR_accuracy_error` is not measured.
+///
 /// [`Export::stats`](super::Export::stats) returns the same rows for the streams it writes,
 /// so one schema reads both edges. Only `units` and `quiet` move there: the exporter builds
-/// every frame header itself, so it has no frame sync to lose.
+/// every frame header itself, so it has no frame sync to lose, and it grades nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Stats {
@@ -1009,14 +1054,50 @@ pub struct Stats {
 	/// PAT and PMT sections dropped because their CRC-32 did not match. Each one left the
 	/// table already in force standing, or, before any, delayed the program's start to the
 	/// next good repetition. Counted for the stream rather than per elementary stream, since
-	/// the PSI PIDs have no row of their own.
+	/// the PSI PIDs have no row of their own. TR 101 290 2.2 `CRC_error`, on the PAT and PMT
+	/// only: the reduced-SI set of its table 5.1b. Captured SI is not CRC-checked.
 	pub crc_error: u64,
+	/// 1.1 `TS_sync_loss`: sync lost after two consecutive corrupt sync bytes on the packet
+	/// grid, and acquired again after five correct ones (ISO/IEC 13818-1 G.1).
+	pub ts_sync_loss: u64,
+	/// 1.2 `Sync_byte_error`: a byte other than 0x47 where the grid expects a sync byte, while
+	/// in sync.
+	pub sync_byte_error: u64,
+	/// 1.3 `PAT_error_2`: each 0.5 s of program clock without a PAT section on PID 0, and each
+	/// packet on PID 0 that is scrambled or starts a section other than a PAT.
+	pub pat_error: u64,
+	/// 1.4 `Continuity_count_error`, on every PID but the null PID: a counter gap, or a third
+	/// copy of a packet. A gap declared by `discontinuity_indicator`, the one duplicate ISO/IEC
+	/// 13818-1 2.4.3.3 permits, and a payload-less packet repeating its counter are not errors.
+	/// A loss of exactly 16 packets leaves the counter in step, and only a byte comparison
+	/// tells a loss of 15 from a duplicate, so the count is a floor.
+	pub continuity_count_error: u64,
+	/// 1.5 `PMT_error_2`: each 0.5 s of program clock without a PMT section on a PMT PID the
+	/// PAT names for the imported program, and each scrambled packet on one.
+	pub pmt_error: u64,
+	/// 2.1 `Transport_error`: packets with `transport_error_indicator` set, on any PID. Such a
+	/// packet counts nothing else.
+	pub transport_error: u64,
+	/// 2.3a `PCR_repetition_error`: consecutive PCR values on the PCR PID more than 100 ms
+	/// apart. Graded on the values, not on arrival: that speaks for the encoder's insertion,
+	/// which is what ingest can, while the network in front of the importer re-times arrival.
+	/// The interval across a `discontinuity_indicator` is not graded.
+	pub pcr_repetition_error: u64,
+	/// 2.3b `PCR_discontinuity_indicator_error`: consecutive PCR values outside 0 to 100 ms
+	/// apart, backwards included, without `discontinuity_indicator`. On values a run of missing
+	/// PCRs and an unsignalled jump are the same difference, so a forward step over 100 ms
+	/// counts here and as a repetition error both.
+	pub pcr_discontinuity_indicator_error: u64,
+	/// 2.5 `PTS_error`: each 700 ms of program clock without a PTS on an elementary stream
+	/// that has carried one. Verbatim streams are not graded: SCTE-35 and subtitles have no
+	/// cadence to hold.
+	pub pts_error: u64,
 }
 
 impl Stats {
 	/// Whether no elementary stream has been registered yet and nothing has been lost.
 	pub fn is_empty(&self) -> bool {
-		self.streams.is_empty() && self.crc_error == 0
+		self.streams.is_empty() && self.crc_error == 0 && self.health() == [0; 9]
 	}
 }
 
@@ -1050,6 +1131,14 @@ pub struct StreamStats {
 	/// confirm it. That substitutes audio rather than leaving a gap, which is why it is
 	/// counted separately from a resync.
 	pub unconfirmed: u64,
+	/// Damaged packets, PES, or access units refused whole on this PID. Export stays zero.
+	pub damaged: u64,
+	/// This PID's share of [`Stats::continuity_count_error`].
+	pub continuity_count_error: u64,
+	/// This PID's share of [`Stats::transport_error`].
+	pub transport_error: u64,
+	/// This PID's share of [`Stats::pts_error`].
+	pub pts_error: u64,
 }
 
 impl StreamStats {
@@ -1061,7 +1150,7 @@ impl StreamStats {
 	}
 
 	/// Add a newer route's frame-sync counters while naming the route that is active now.
-	/// Delivery is kept per PID rather than per route, so it needs no merging.
+	/// Delivery and damage are kept per PID rather than per route, so they need no merging.
 	fn merge(&mut self, current: &Self) {
 		self.track = current.track;
 		self.resyncs += current.resyncs;
@@ -1226,8 +1315,7 @@ impl<E: catalog::Catalog> SectionStream<E> {
 
 	/// Publish one complete section as a frame in its own group.
 	///
-	/// The clock is already on the video's re-anchored timeline, so it only steps back by a
-	/// reorder: a B-frame presents before the P-frame decoded ahead of it. Such a cue lands on
+	/// The clock follows the video's PTS, so it only steps back by a reorder: a B-frame presents before the P-frame decoded ahead of it. Such a cue lands on
 	/// the edge rather than shifting every cue after it, which would drift the cue track off
 	/// the video by the reorder depth at each one.
 	fn emit(&mut self, section: Vec<u8>, pts: Option<Timestamp>) -> anyhow::Result<()> {
@@ -1277,7 +1365,6 @@ struct VerbatimStream<E: catalog::Catalog> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	entry: VerbatimEntry<E>,
 	unwrap: PtsUnwrap,
-	reanchor: Reanchor,
 	/// Whether the PES stream_id has been recorded into the catalog yet (once).
 	stream_id_recorded: bool,
 }
@@ -1306,14 +1393,13 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 			track,
 			entry,
 			unwrap: PtsUnwrap::default(),
-			reanchor: Reanchor::default(),
 			stream_id_recorded: false,
 		})
 	}
 
 	/// Publish one reassembled PES payload verbatim, in its own group, stamped with
 	/// its PTS (or the live edge when the PES carried none).
-	fn write(&mut self, pending: Pending, anchor: Option<&mut crate::clock::Anchor>) -> anyhow::Result<u64> {
+	fn write(&mut self, pending: Pending) -> anyhow::Result<u64> {
 		// Record the original PES stream_id once, from the first PES, so export
 		// re-emits the stream under its real id (e.g. 0xBD for teletext/DVB AC-3).
 		if !self.stream_id_recorded {
@@ -1326,11 +1412,10 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 			self.stream_id_recorded = true;
 		}
 
-		let edge = self.track.live_edge();
-		let pts = match unwrap_pts(&mut self.unwrap, pending.pts, anchor)? {
-			Some(pts) => self.reanchor.apply(pts, edge)?,
-			// No clock to shift, so land on the edge and leave the shift alone.
-			None => edge.unwrap_or(Timestamp::ZERO),
+		let pts = match unwrap_pts(&mut self.unwrap, pending.pts)? {
+			Some(pts) => pts,
+			// No clock of its own, so land on the edge.
+			None => self.track.live_edge().unwrap_or(Timestamp::ZERO),
 		};
 		let frame = crate::container::Frame {
 			timestamp: pts,
@@ -1345,7 +1430,6 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 
 	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
 		self.unwrap.discontinuity();
-		self.reanchor.discontinuity();
 		if published {
 			self.track.discontinuity()?;
 		}
@@ -1367,46 +1451,17 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 	}
 }
 
-/// Whether one PID's TS packets are still an unbroken chain, for whoever is accumulating
-/// bytes out of them.
-///
-/// Both reassemblers on this PID need the same answer: a section and a PES are equally
-/// meaningless when spliced onto bytes that didn't follow them. Keeping one implementation
-/// keeps a subtle rule (which packets advance the counter, which retransmissions to ignore)
-/// from drifting into two.
-#[derive(Default)]
-struct Continuity {
-	/// Last continuity_counter seen on a packet with payload, to spot gaps.
-	last_cc: Option<u8>,
-	/// Last payload packet, to identify ISO 13818-1 retransmissions.
-	last_pkt: Option<[u8; 188]>,
-}
-
-/// What one packet says about the bytes already accumulated for its PID.
-enum Continuation {
-	/// A retransmission, which may refresh PCR/OPCR. Ignore it entirely to avoid duplicate bytes.
-	Duplicate,
-	/// Contiguous with the previous payload packet.
-	Contiguous,
-	/// A counter gap or a declared discontinuity. Whatever was accumulating for this PID is
-	/// lost, but this packet's own payload is intact and still worth routing.
-	Broken,
-	/// The demodulator flagged this packet corrupt. The partial is lost like [`Broken`], and
-	/// so is the packet: nothing in it can be trusted.
-	Corrupt,
-}
-
 /// Whether a packet's adaptation field sets `discontinuity_indicator`.
 ///
 /// What that declares depends on the PID: a continuity-counter break on an elementary
 /// stream, and additionally a system time-base break on the program's PCR PID. It rides an
 /// adaptation-only packet (a clock packet with no payload) as readily as a payload one.
-fn discontinuity_indicator(pkt: &[u8; 188]) -> bool {
+pub(super) fn discontinuity_indicator(pkt: &[u8; 188]) -> bool {
 	pkt[3] & 0x20 != 0 && pkt[4] > 0 && pkt[5] & 0x80 != 0
 }
 
 /// The PCR a packet's adaptation field carries, in 27 MHz ticks.
-fn pcr(pkt: &[u8; 188]) -> Option<u64> {
+pub(super) fn pcr(pkt: &[u8; 188]) -> Option<u64> {
 	if pkt[3] & 0x20 == 0 || pkt[4] < 7 || pkt[5] & 0x10 == 0 {
 		return None;
 	}
@@ -1417,80 +1472,6 @@ fn pcr(pkt: &[u8; 188]) -> Option<u64> {
 		| (u64::from(pkt[10]) >> 7);
 	let ext = (u64::from(pkt[10] & 0x01) << 8) | u64::from(pkt[11]);
 	Some(base * 300 + ext)
-}
-
-/// Whether two packets differ only in the clock fields a retransmission may refresh.
-fn is_duplicate(last: &[u8; 188], pkt: &[u8; 188]) -> bool {
-	if last == pkt {
-		return true;
-	}
-
-	// A refreshed clock requires the same adaptation-field shape in both packets. Comparing
-	// through the flags byte also pins the PID, payload-unit start, counter, length, and every
-	// other header bit before any bytes are ignored.
-	let afc = (last[3] >> 4) & 0x3;
-	if afc & 0x2 == 0 || last[..6] != pkt[..6] {
-		return false;
-	}
-
-	let af_len = last[4] as usize;
-	let flags = last[5];
-	let clock_len = usize::from(flags & 0x10 != 0) * 6 + usize::from(flags & 0x08 != 0) * 6;
-	let clock_end = 6 + clock_len;
-	let adaptation_end = 5 + af_len;
-	if clock_len == 0 || clock_end > adaptation_end || adaptation_end > last.len() {
-		return false;
-	}
-
-	last[clock_end..] == pkt[clock_end..]
-}
-
-impl Continuity {
-	/// Classify one 188-byte packet, recording what the next call needs.
-	fn observe(&mut self, pkt: &[u8; 188]) -> Continuation {
-		// transport_error_indicator: the demodulator flagged this packet as corrupt, so its
-		// payload can't be trusted (and only a PAT or PMT has its CRC-32 checked). Forgetting the counter
-		// keeps the next clean packet from also looking like a gap.
-		if pkt[1] & 0x80 != 0 {
-			self.last_cc = None;
-			self.last_pkt = None;
-			return Continuation::Corrupt;
-		}
-
-		let afc = (pkt[3] >> 4) & 0x3;
-		let has_payload = afc & 0x1 != 0;
-		// Read the adaptation field before the no-payload case: a discontinuity can ride on
-		// an adaptation-only packet, and it counts just the same.
-		let discontinuity = discontinuity_indicator(pkt);
-
-		if !has_payload {
-			if discontinuity {
-				self.last_cc = None;
-				self.last_pkt = None;
-				return Continuation::Broken;
-			}
-			return Continuation::Contiguous;
-		}
-
-		// A retransmission repeats the counter, and so does a loss of exactly 15 packets.
-		// Only the bytes tell them apart, which is why the counter alone can't decide: taking
-		// every repeat for a duplicate would carry a partial straight across that loss and
-		// join it to unrelated bytes.
-		if self.last_pkt.as_ref().is_some_and(|last| is_duplicate(last, pkt)) {
-			return Continuation::Duplicate;
-		}
-		self.last_pkt = Some(*pkt);
-
-		// Only payload packets advance the counter, so this is the one place it moves.
-		let cc = pkt[3] & 0x0f;
-		let cc_gap = matches!(self.last_cc, Some(last) if cc != (last + 1) & 0x0f);
-		self.last_cc = Some(cc);
-		if discontinuity || cc_gap {
-			Continuation::Broken
-		} else {
-			Continuation::Contiguous
-		}
-	}
 }
 
 /// How long each elementary stream has gone without delivering an access unit.
@@ -1535,6 +1516,11 @@ impl Liveness {
 				*elapsed += step;
 			}
 		}
+	}
+
+	/// PCR ticks elapsed on the program clock since its first PCR, or `None` before one.
+	pub(super) fn now(&self) -> Option<u64> {
+		self.elapsed
 	}
 
 	/// The clock restarted or changed PID: the next interval measures nothing.
@@ -1660,8 +1646,32 @@ impl PatReader {
 	}
 }
 
+/// Whether every adaptation field fits inside the length its packet declares.
+fn adaptation_valid(pkt: &[u8; TsPacket::SIZE]) -> bool {
+	if pkt[3] & 0x20 == 0 {
+		return true;
+	}
+	let Some(field) = pkt.get(5..5 + usize::from(pkt[4])) else {
+		return false;
+	};
+	let Some(&flags) = field.first() else {
+		return true;
+	};
+	let mut off =
+		1 + usize::from(flags & 0x10 != 0) * 6 + usize::from(flags & 0x08 != 0) * 6 + usize::from(flags & 0x04 != 0);
+	for flag in [0x02, 0x01] {
+		if flags & flag != 0 {
+			let Some(&len) = field.get(off) else {
+				return false;
+			};
+			off += 1 + usize::from(len);
+		}
+	}
+	off <= field.len()
+}
+
 /// Where a packet's payload is.
-enum Payload<'a> {
+pub(super) enum Payload<'a> {
 	/// Adaptation field only, or reserved `adaptation_field_control`.
 	None,
 	Bytes(&'a [u8]),
@@ -1669,7 +1679,7 @@ enum Payload<'a> {
 	Malformed,
 }
 
-fn payload(pkt: &[u8; TsPacket::SIZE]) -> Payload<'_> {
+pub(super) fn payload(pkt: &[u8; TsPacket::SIZE]) -> Payload<'_> {
 	let afc = (pkt[3] >> 4) & 0x3;
 	if afc & 0x1 == 0 {
 		return Payload::None;
@@ -1796,19 +1806,50 @@ impl SectionReassembler {
 	}
 }
 
+/// A parse failure confined to a unit, distinguished from publishing and clock failures.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct Damaged(anyhow::Error);
+
+fn unit_error(err: crate::Error) -> anyhow::Error {
+	let damaged = matches!(
+		&err,
+		crate::Error::Annexb(_)
+			| crate::Error::H264(
+				h264::Error::NalTooShort
+					| h264::Error::ForbiddenZeroBit
+					| h264::Error::SpsTooShort
+					| h264::Error::SpsParse
+					| h264::Error::NotInitialized
+			) | crate::Error::Aac(
+			aac::Error::ProgramConfigMissing | aac::Error::ProgramConfigTruncated | aac::Error::ProgramConfigEmpty
+		) | crate::Error::H265(
+			h265::Error::NalTooShort
+				| h265::Error::ForbiddenZeroBit
+				| h265::Error::SpsParse
+				| h265::Error::MissingLevelIdc
+				| h265::Error::NotInitialized
+				| h265::Error::MissingSps
+		)
+	);
+	if damaged {
+		Damaged(err.into()).into()
+	} else {
+		err.into()
+	}
+}
+
 /// One elementary stream's codec importer plus PTS-unwrap state.
 enum Stream<E: catalog::Catalog = ()> {
 	H264 {
 		split: h264::Split,
 		import: Box<h264::Import>,
 		unwrap: PtsUnwrap,
-		reanchor: Reanchor,
 	},
 	H265 {
 		split: h265::Split,
 		import: Box<h265::Import>,
 		unwrap: PtsUnwrap,
-		reanchor: Reanchor,
 	},
 	Aac(Box<AacStream<E>>),
 	Opus(Box<OpusStream>),
@@ -1823,27 +1864,16 @@ enum Stream<E: catalog::Catalog = ()> {
 
 impl<E: catalog::Catalog> Stream<E> {
 	/// Route one reassembled PES, returning how many access units it published.
-	fn write(
-		&mut self,
-		pending: Pending,
-		batched: bool,
-		anchor: Option<&mut crate::clock::Anchor>,
-	) -> anyhow::Result<u64> {
+	fn write(&mut self, pending: Pending, batched: bool) -> anyhow::Result<u64> {
 		match self {
-			Stream::H264 {
-				split,
-				import,
-				unwrap,
-				reanchor,
-			} => {
+			Stream::H264 { split, import, unwrap } => {
 				let reorder = reorder_delay(pending.pts, pending.dts);
-				let pts = unwrap_pts(unwrap, pending.pts, anchor)?;
+				let pts = unwrap_pts(unwrap, pending.pts)?;
 				// Each PES is one access unit, so flush to emit it immediately.
-				let mut frames = split.decode(&pending.data, pts)?;
-				frames.extend(split.flush(pts)?);
+				let mut frames = split.decode(&pending.data, pts).map_err(unit_error)?;
+				frames.extend(split.flush(pts).map_err(unit_error)?);
 				let mut published = 0;
-				for mut frame in frames {
-					frame.timestamp = reanchor.apply(frame.timestamp, import.floor(frame.keyframe))?;
+				for frame in frames {
 					published += u64::from(skip_missing_keyframe(import.decode([frame]))?);
 				}
 				// After decode, so the track (and its catalog rendition) exists.
@@ -1852,20 +1882,14 @@ impl<E: catalog::Catalog> Stream<E> {
 				}
 				Ok(published)
 			}
-			Stream::H265 {
-				split,
-				import,
-				unwrap,
-				reanchor,
-			} => {
+			Stream::H265 { split, import, unwrap } => {
 				let reorder = reorder_delay(pending.pts, pending.dts);
-				let pts = unwrap_pts(unwrap, pending.pts, anchor)?;
+				let pts = unwrap_pts(unwrap, pending.pts)?;
 				// Each PES is one access unit, so flush to emit it immediately.
-				let mut frames = split.decode(&pending.data, pts)?;
-				frames.extend(split.flush(pts)?);
+				let mut frames = split.decode(&pending.data, pts).map_err(unit_error)?;
+				frames.extend(split.flush(pts).map_err(unit_error)?);
 				let mut published = 0;
-				for mut frame in frames {
-					frame.timestamp = reanchor.apply(frame.timestamp, import.floor(frame.keyframe))?;
+				for frame in frames {
 					published += u64::from(skip_missing_keyframe(import.decode([frame]))?);
 				}
 				if let Some(reorder) = reorder {
@@ -1873,10 +1897,10 @@ impl<E: catalog::Catalog> Stream<E> {
 				}
 				Ok(published)
 			}
-			Stream::Aac(stream) => stream.write(pending, batched, anchor),
-			Stream::Opus(stream) => stream.write(pending, anchor),
-			Stream::Legacy(stream) => stream.write(pending, anchor),
-			Stream::Verbatim(stream) => stream.write(pending, anchor),
+			Stream::Aac(stream) => stream.write(pending, batched),
+			Stream::Opus(stream) => stream.write(pending),
+			Stream::Legacy(stream) => stream.write(pending),
+			Stream::Verbatim(stream) => stream.write(pending),
 			Stream::Clock | Stream::Ignored => Ok(0),
 		}
 	}
@@ -1927,31 +1951,33 @@ impl<E: catalog::Catalog> Stream<E> {
 		}
 	}
 
+	/// Bytes were lost mid-stream: [`desync`](Self::desync), and close the open video group
+	/// where its content stops. Every picture until the next keyframe may reference what was
+	/// lost, so the producer refuses them until a keyframe opens the next group. Left open,
+	/// the group would close a GOP later at that keyframe, with an end past its content.
+	fn lost(&mut self) -> anyhow::Result<()> {
+		self.desync();
+		match self {
+			Stream::H264 { import, .. } => import.cut(None)?,
+			Stream::H265 { import, .. } => import.cut(None)?,
+			_ => {}
+		}
+		Ok(())
+	}
+
 	/// The program clock restarted: mark the break on this track and stop unwrapping the
 	/// next PTS against a sample from the timebase that just ended.
 	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
 		match self {
-			Stream::H264 {
-				import,
-				unwrap,
-				reanchor,
-				..
-			} => {
+			Stream::H264 { import, unwrap, .. } => {
 				unwrap.discontinuity();
-				reanchor.discontinuity();
 				if published {
 					import.discontinuity()?;
 				}
 				Ok(())
 			}
-			Stream::H265 {
-				import,
-				unwrap,
-				reanchor,
-				..
-			} => {
+			Stream::H265 { import, unwrap, .. } => {
 				unwrap.discontinuity();
-				reanchor.discontinuity();
 				if published {
 					import.discontinuity()?;
 				}
@@ -2270,7 +2296,6 @@ struct AacStream<E: CatalogExt = ()> {
 	/// The container this importer publishes decoded renditions with.
 	container: hang::catalog::Container,
 	unwrap: PtsUnwrap,
-	reanchor: Reanchor,
 	/// Partial frame left at the end of the previous PES. ISO 13818-1 doesn't require
 	/// audio frames to align with PES boundaries, so a legitimate mux can split one.
 	tail: Vec<u8>,
@@ -2283,13 +2308,8 @@ struct AacStream<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> AacStream<E> {
-	fn write(
-		&mut self,
-		pending: Pending,
-		batched: bool,
-		anchor: Option<&mut crate::clock::Anchor>,
-	) -> anyhow::Result<u64> {
-		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts, anchor)?;
+	fn write(&mut self, pending: Pending, batched: bool) -> anyhow::Result<u64> {
+		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts)?;
 
 		// Prepend the partial frame left by the previous PES, if any.
 		let carried = self.tail.len();
@@ -2305,11 +2325,7 @@ impl<E: CatalogExt> AacStream<E> {
 
 		// PTS for the next frame to emit. The tail frame keeps the PTS computed at its cut;
 		// the first frame that BEGINS in this PES takes the PES PTS (per ISO 13818-1).
-		let mut pts = if carried > 0 {
-			self.tail_pts.take()
-		} else {
-			self.reanchor(pes_base)?
-		};
+		let mut pts = if carried > 0 { self.tail_pts.take() } else { pes_base };
 		let mut in_tail = carried > 0;
 
 		// A single PES can carry several ADTS frames; split and feed each raw frame.
@@ -2321,7 +2337,7 @@ impl<E: CatalogExt> AacStream<E> {
 		let mut fallback = None;
 		while offset + adts::MIN_HEADER_LEN <= data.len() {
 			if in_tail && offset >= carried {
-				pts = self.reanchor(pes_base)?;
+				pts = pes_base;
 				in_tail = false;
 			}
 
@@ -2381,12 +2397,12 @@ impl<E: CatalogExt> AacStream<E> {
 							None => anyhow::Error::msg(context),
 						});
 					}
-					// Re-anchor only where the tail is actually abandoned: restoring a fallback
+					// Take the PES PTS only where the tail is actually abandoned: restoring a fallback
 					// keeps the candidate, so it keeps the timestamp it was found with.
 					match self.resync.recover(data, offset, &SyncWord::ADTS) {
 						Recover::At(next) => {
 							if in_tail {
-								pts = self.reanchor(pes_base)?;
+								pts = pes_base;
 								in_tail = false;
 							}
 							offset = next;
@@ -2404,7 +2420,7 @@ impl<E: CatalogExt> AacStream<E> {
 								}
 								None => {
 									if in_tail {
-										pts = self.reanchor(pes_base)?;
+										pts = pes_base;
 										in_tail = false;
 									}
 									offset = next;
@@ -2429,7 +2445,8 @@ impl<E: CatalogExt> AacStream<E> {
 						header.sample_rate,
 						header.channel_config,
 						&mut block,
-					)?;
+					)
+					.map_err(|err| unit_error(err.into()))?;
 					let mut config = aac::config(&asc)?;
 					config.container = self.container.clone();
 					// Consume the reservation held since the PMT: this resolves the gated rendition,
@@ -2468,7 +2485,7 @@ impl<E: CatalogExt> AacStream<E> {
 		// with the PTS it should carry.
 		if offset < data.len() {
 			if in_tail && offset >= carried {
-				pts = self.reanchor(pes_base)?;
+				pts = pes_base;
 			}
 			self.tail = data[offset..].to_vec();
 			self.tail_pts = pts;
@@ -2477,17 +2494,9 @@ impl<E: CatalogExt> AacStream<E> {
 		Ok(published)
 	}
 
-	/// The PES PTS on the published timeline. Resolved where each frame starts rather than
-	/// once per PES, so the frames a carried tail publishes first count toward the edge.
-	fn reanchor(&mut self, pts: Option<Timestamp>) -> anyhow::Result<Option<Timestamp>> {
-		let edge = self.import.as_ref().and_then(aac::Import::live_edge);
-		pts.map(|pts| self.reanchor.apply(pts, edge)).transpose()
-	}
-
 	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
 		self.desync();
 		self.unwrap.discontinuity();
-		self.reanchor.discontinuity();
 		if published && let Some(import) = &mut self.import {
 			import.discontinuity()?;
 		}
@@ -2523,7 +2532,7 @@ impl<E: CatalogExt> AacStream<E> {
 		if !self.tail.is_empty() && self.import.is_some() {
 			self.resync.drain();
 			// No PTS to translate, so no mapping needed.
-			drained = self.write(Pending::empty(), true, None)?;
+			drained = self.write(Pending::empty(), true)?;
 		}
 		// A partial frame at end of stream isn't emissible; drop it, but leave a trace for
 		// diagnosing truncated captures.
@@ -2555,27 +2564,17 @@ impl<E: CatalogExt> AacStream<E> {
 struct OpusStream {
 	import: opus::Import,
 	unwrap: PtsUnwrap,
-	reanchor: Reanchor,
 }
 
 impl OpusStream {
-	fn write(&mut self, pending: Pending, anchor: Option<&mut crate::clock::Anchor>) -> anyhow::Result<u64> {
-		let base = unwrap_pts(&mut self.unwrap, pending.pts, anchor)?;
-		let edge = self.import.live_edge();
-		let base = base.map(|base| self.reanchor.apply(base, edge)).transpose()?;
+	fn write(&mut self, pending: Pending) -> anyhow::Result<u64> {
+		let base = unwrap_pts(&mut self.unwrap, pending.pts)?;
 
-		let data = &pending.data;
-		let mut offset = 0;
+		let packets = opus_packets(&pending.data).map_err(Damaged)?;
 		let mut published = 0;
 		// 48 kHz samples elapsed since this PES's PTS, advancing each packet after the first.
 		let mut elapsed: u64 = 0;
-		while offset < data.len() {
-			let (header_len, size) = parse_opus_control_header(&data[offset..])?;
-			let start = offset + header_len;
-			let end = start + size;
-			anyhow::ensure!(end <= data.len(), "Opus access unit exceeds PES payload");
-			let packet = &data[start..end];
-
+		for packet in packets {
 			let pts = match base {
 				Some(base) if elapsed > 0 => {
 					let advance = Timestamp::from_scale(elapsed, 48_000)?;
@@ -2593,7 +2592,6 @@ impl OpusStream {
 			// Default to 20 ms (960 samples) if the TOC can't be read, so a malformed packet
 			// doesn't stall the timeline for the rest of the PES.
 			elapsed += opus::packet_samples(packet).unwrap_or(960) as u64;
-			offset = end;
 			published += 1;
 		}
 		Ok(published)
@@ -2601,7 +2599,6 @@ impl OpusStream {
 
 	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
 		self.unwrap.discontinuity();
-		self.reanchor.discontinuity();
 		if published {
 			self.import.discontinuity()?;
 		}
@@ -2657,6 +2654,21 @@ fn opus_config(descriptors: &[catalog::Descriptor]) -> crate::Result<opus::Confi
 		config.mapping = Some(mapping);
 	}
 	Ok(config)
+}
+
+/// Validate the complete PES before exposing any of its declared Opus units.
+fn opus_packets(mut data: &[u8]) -> anyhow::Result<Vec<&[u8]>> {
+	let mut packets = Vec::new();
+	while !data.is_empty() {
+		let (header_len, size) = parse_opus_control_header(data)?;
+		let end = header_len + size;
+		let packet = data
+			.get(header_len..end)
+			.context("Opus access unit exceeds PES payload")?;
+		packets.push(packet);
+		data = &data[end..];
+	}
+	Ok(packets)
 }
 
 /// Parse one Opus-in-TS access-unit control header, returning `(header_len, payload_size)`.
@@ -2723,13 +2735,12 @@ struct LegacyStream<E: CatalogExt = ()> {
 	/// only covers frames that begin in that PES.
 	tail_pts: Option<Timestamp>,
 	resync: Resync,
-	reanchor: Reanchor,
 }
 
 impl<E: CatalogExt> LegacyStream<E> {
-	fn write(&mut self, pending: Pending, anchor: Option<&mut crate::clock::Anchor>) -> anyhow::Result<u64> {
+	fn write(&mut self, pending: Pending) -> anyhow::Result<u64> {
 		let mut published = 0;
-		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts, anchor)?;
+		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts)?;
 
 		// Prepend the partial frame left by the previous PES, if any.
 		let carried = self.tail.len();
@@ -2748,11 +2759,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 		// ISO 13818-1, a PES PTS refers to the first access unit starting in it).
 		// After each frame it advances by that frame's duration (per frame, not
 		// `index * constant`: E-AC-3 varies the samples per frame).
-		let mut pts = if carried > 0 {
-			self.tail_pts.take()
-		} else {
-			self.reanchor(pes_base)?
-		};
+		let mut pts = if carried > 0 { self.tail_pts.take() } else { pes_base };
 		let mut in_tail = carried > 0;
 
 		let mut offset = 0;
@@ -2761,7 +2768,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 		let mut fallback = None;
 		while offset + self.descriptor.min_header_len <= data.len() {
 			if in_tail && offset >= carried {
-				pts = self.reanchor(pes_base)?;
+				pts = pes_base;
 				in_tail = false;
 			}
 
@@ -2838,7 +2845,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 					match self.resync.recover(data, offset, &self.descriptor.into()) {
 						Recover::At(next) => {
 							if in_tail {
-								pts = self.reanchor(pes_base)?;
+								pts = pes_base;
 								in_tail = false;
 							}
 							offset = next;
@@ -2856,7 +2863,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 								}
 								None => {
 									if in_tail {
-										pts = self.reanchor(pes_base)?;
+										pts = pes_base;
 										in_tail = false;
 									}
 									offset = next;
@@ -2905,7 +2912,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 		// PES, with the PTS it should carry.
 		if offset < data.len() {
 			if in_tail && offset >= carried {
-				pts = self.reanchor(pes_base)?;
+				pts = pes_base;
 			}
 			self.tail = data[offset..].to_vec();
 			self.tail_pts = pts;
@@ -2914,17 +2921,9 @@ impl<E: CatalogExt> LegacyStream<E> {
 		Ok(published)
 	}
 
-	/// The PES PTS on the published timeline. Resolved where each frame starts rather than
-	/// once per PES, so the frames a carried tail publishes first count toward the edge.
-	fn reanchor(&mut self, pts: Option<Timestamp>) -> anyhow::Result<Option<Timestamp>> {
-		let edge = self.import.as_ref().and_then(legacy::Import::live_edge);
-		pts.map(|pts| self.reanchor.apply(pts, edge)).transpose()
-	}
-
 	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
 		self.desync();
 		self.unwrap.discontinuity();
-		self.reanchor.discontinuity();
 		if published && let Some(import) = &mut self.import {
 			import.discontinuity()?;
 		}
@@ -2959,7 +2958,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 		if !self.tail.is_empty() && self.import.is_some() {
 			self.resync.drain();
 			// No PTS to translate, so no mapping needed.
-			drained = self.write(Pending::empty(), None)?;
+			drained = self.write(Pending::empty())?;
 		}
 		// A partial frame at end of stream isn't emissible verbatim; drop it, but
 		// leave a trace for diagnosing truncated captures.
@@ -2996,7 +2995,7 @@ fn skip_missing_keyframe(result: crate::Result<()>) -> anyhow::Result<bool> {
 	match result {
 		Ok(()) => Ok(true),
 		Err(crate::Error::MissingKeyframe(_)) => Ok(false),
-		Err(e) => Err(e.into()),
+		Err(e) => Err(unit_error(e)),
 	}
 }
 
@@ -3016,19 +3015,11 @@ fn advance_pts(pts: Option<Timestamp>, samples: u64, sample_rate: u32) -> anyhow
 
 /// Convert a raw 90 kHz PTS to a microsecond [`Timestamp`], unwrapping the
 /// 33-bit field. Returns `None` when the PES carried no PTS.
-fn unwrap_pts(
-	unwrap: &mut PtsUnwrap,
-	pts: Option<u64>,
-	anchor: Option<&mut crate::clock::Anchor>,
-) -> anyhow::Result<Option<Timestamp>> {
+fn unwrap_pts(unwrap: &mut PtsUnwrap, pts: Option<u64>) -> anyhow::Result<Option<Timestamp>> {
 	let Some(raw) = pts else {
 		return Ok(None);
 	};
-	let extended = Timestamp::from_scale(unwrap.unwrap(raw), 90_000)?;
-	Ok(Some(match anchor {
-		Some(anchor) => anchor.translate(&mut unwrap.lane, extended)?,
-		None => extended,
-	}))
+	Ok(Some(Timestamp::from_scale(unwrap.unwrap(raw), 90_000)?))
 }
 
 /// The reorder delay `PTS - DTS` for one PES, as a microsecond [`Timestamp`]. `None` unless
@@ -3053,8 +3044,6 @@ fn reorder_delay(pts: Option<u64>, dts: Option<u64>) -> Option<Timestamp> {
 struct PtsUnwrap {
 	last: Option<u64>,
 	offset: u64,
-	/// This stream's position on the source's broadcast-clock mapping, when publishing live.
-	lane: crate::clock::Lane,
 }
 
 impl PtsUnwrap {
@@ -3078,54 +3067,6 @@ impl PtsUnwrap {
 	/// whatever the source does with its clock next.
 	fn discontinuity(&mut self) {
 		self.last = None;
-		self.lane.restart();
-	}
-}
-
-/// Keeps one track's timeline at or past its live edge when the source clock steps back.
-///
-/// A content join, a playout loop wrap, or a restarted encoder lands a timestamp below what
-/// the track already published, and the producer refuses a rewind. TS ingest trusts its
-/// source, so it shifts forward instead, by just enough to reach the edge. The shift only
-/// grows: a looping source wraps again every period, and each wrap lands below the edge the
-/// last one reached. A timebase break clears it, since the new clock is measured against the
-/// edge afresh.
-#[derive(Default)]
-struct Reanchor {
-	shift: Option<Timestamp>,
-}
-
-impl Reanchor {
-	/// `pts` on the published timeline, as shifted so far.
-	fn shifted(&self, pts: Timestamp) -> anyhow::Result<Timestamp> {
-		Ok(match self.shift {
-			Some(shift) => pts.checked_add(shift.convert(pts.scale())?)?,
-			None => pts,
-		})
-	}
-
-	/// `pts` on the published timeline, at or past `edge`.
-	fn apply(&mut self, pts: Timestamp, edge: Option<Timestamp>) -> anyhow::Result<Timestamp> {
-		let scale = pts.scale();
-		let pts = self.shifted(pts)?;
-		let Some(edge) = edge.filter(|edge| pts.as_micros() < edge.as_micros()) else {
-			return Ok(pts);
-		};
-		// Round up to the source's scale: landing a tick short of the edge is still a rewind.
-		let mut target = Timestamp::new(u64::try_from(edge.as_scale(scale))?, scale)?;
-		if target.as_micros() < edge.as_micros() {
-			target = Timestamp::new(target.value() + 1, scale)?;
-		}
-		let grow = target.checked_sub(pts)?;
-		self.shift = Some(match self.shift {
-			Some(shift) => shift.convert(scale)?.checked_add(grow)?,
-			None => grow,
-		});
-		Ok(target)
-	}
-
-	fn discontinuity(&mut self) {
-		self.shift = None;
 	}
 }
 
@@ -3137,7 +3078,8 @@ pub(super) mod test {
 	use moq_net::Timestamp;
 	use mpeg2ts::es::StreamType;
 
-	use super::{Continuation, Continuity, SectionReassembler};
+	use super::{Continuation, Continuity, SectionReassembler, Stream};
+	use mpeg2ts::ts::{Pid, TsPacket};
 
 	/// A drift budget no test timeline comes close to, so the reader sees every group.
 	///
@@ -3224,7 +3166,9 @@ pub(super) mod test {
 		legacy.resync.recover(&[0; 10], 0, &codec);
 		legacy.resync.published(false);
 		import.streams.insert(pid, stream);
+		import.damage(pid, &anyhow::anyhow!("malformed PES")).unwrap();
 		let before = import.stats();
+		assert_eq!(before.streams[&pid.as_u16()].damaged, 1);
 
 		import
 			.ensure_section(pid, StreamType::Dts8ChannelLosslessAudio as u8, &[])
@@ -3679,6 +3623,31 @@ pub(super) mod test {
 		);
 	}
 
+	// MPEG-2 video only drives the section clock, so with nothing else to flush it must still
+	// anchor the catalog, or cues stamped with its PTS map to the construction-time clock.
+	#[test]
+	fn a_clock_only_stream_anchors_the_catalog() {
+		const VIDEO_PID: u16 = 0x0050;
+		const PTS_SECS: u64 = 3600;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		import
+			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, VIDEO_PID)], true))
+			.unwrap();
+		import
+			.decode(pes_packet(VIDEO_PID, PTS_SECS * 90_000).as_slice())
+			.unwrap();
+
+		let now = catalog.clock().now().as_micros() / 1_000_000;
+		assert!(
+			(PTS_SECS as u128..PTS_SECS as u128 + 5).contains(&now),
+			"catalog clock reads {now}s, not the first video PTS"
+		);
+	}
+
 	/// A PUSI TS packet on `pid`: a bounded audio PES (stream_id 0xC0) carrying
 	/// `payload` (whole codec frames or a fragment of one), sized exactly via
 	/// adaptation-field stuffing so the PES completes (and flushes) on this packet.
@@ -4014,18 +3983,14 @@ pub(super) mod test {
 		frames
 	}
 
-	// The production shape from #2729, on a real capture: a looping publisher plays part of
-	// a file and wraps to the top, so the audio PES open at the cut leaves a tail that
-	// splices onto the file's first frames. Every wrap used to end the session with
-	// "missing AC-3 sync word", which is what accumulated 216 restarts on the reporter's
-	// feed. AC-3 also exercises a different sync word and parser than the synthetic MP2
-	// and ADTS tests above.
+	// A looping publisher plays part of a file and wraps to the top (#2729). The wrap rewinds
+	// the audio PTS, which is an encoder restart, so the import ends and the caller publishes
+	// a new broadcast. Every frame published before it is still a whole AC-3 frame.
 	#[tokio::test(start_paused = true)]
-	async fn legacy_survives_a_looping_file_wrap() {
+	async fn legacy_refuses_a_looping_file_wrap() {
 		let data = include_bytes!("test_data/ac3.ts");
 
-		// Wrap mid-file on a packet boundary, so the TS layer stays aligned and the
-		// discontinuity lands squarely on the audio frame the last PES left open.
+		// Wrap mid-file on a packet boundary, so the TS layer stays aligned.
 		let cut = (data.len() / 2) / 188 * 188;
 		let mut looped = data[..cut].to_vec();
 		looped.extend_from_slice(data);
@@ -4034,46 +3999,16 @@ pub(super) mod test {
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
-		import
+		let err = import
 			.decode(&bytes::BytesMut::from(&looped[..]))
-			.expect("a loop wrap must not end the session");
-		import.finish().unwrap();
-		let looped_stats = import.stats();
+			.expect_err("a loop wrap is a restart");
+		assert!(is_rewind(&err), "{err:?}");
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
-		// Every frame published is still a whole AC-3 frame: resync lands on sync words,
-		// never mid-frame.
+		assert!(!frames.is_empty(), "the pass before the wrap published");
 		assert!(
 			frames.iter().all(|f| f.payload[0] == 0x0B && f.payload[1] == 0x77),
-			"resync published a frame that doesn't start at an AC-3 sync word"
-		);
-		// The wrap costs at most the frame it interrupted, not the rest of the stream.
-		let pristine = {
-			let mut broadcast = moq_net::broadcast::Info::new().produce();
-			let consumer = broadcast.consume();
-			let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-			let mut import = super::Import::new(broadcast, catalog.reserve());
-			import.decode(&bytes::BytesMut::from(&data[..])).unwrap();
-			import.finish().unwrap();
-			read_audio_frames(&consumer, &catalog).await.len()
-		};
-		// The wrap costs nothing after it: the whole second copy is published, on top of
-		// the frames the truncated first pass already delivered.
-		assert!(
-			frames.len() > pristine,
-			"the wrap swallowed frames: {} looped vs {pristine} pristine",
-			frames.len()
-		);
-		// Nothing to report on this shape: the continuity counter catches the wrap a packet
-		// before the codec would see spliced bytes, so the tail is dropped rather than
-		// scanned past, and the next PES starts a frame the one after it confirms. The
-		// counters exist for the shapes that don't get caught that early.
-		assert!(
-			looped_stats
-				.streams
-				.values()
-				.all(|s| s.resyncs == 0 && s.discarded == 0 && s.unconfirmed == 0),
-			"a wrap the continuity check absorbs should cost no frame sync: {looped_stats:?}"
+			"published a frame that doesn't start at an AC-3 sync word"
 		);
 	}
 
@@ -4301,6 +4236,7 @@ pub(super) mod test {
 					resyncs: 1,
 					discarded: 47,
 					unconfirmed: 0,
+					..Default::default()
 				}
 			)]),
 			"the resync left no trace an operator could alarm on"
@@ -4494,6 +4430,7 @@ pub(super) mod test {
 					resyncs: 1,
 					discarded: 72,
 					unconfirmed: 0,
+					..Default::default()
 				}
 			)]),
 			"the resync left no trace an operator could alarm on"
@@ -4603,15 +4540,14 @@ pub(super) mod test {
 		);
 	}
 
-	// #3533: a content join on a continuous transport timeline can land a PES PTS a few
-	// milliseconds below the extrapolated high-water mark. Re-anchor forward from the live
-	// edge instead of refusing the frame and aborting the import.
+	// #3533: a content join landed a PES PTS a millisecond below the last frame published. Each
+	// audio frame is its own group, so that group starts before the previous one: a restart,
+	// which ends the import rather than shifting it forward.
 	#[tokio::test(start_paused = true)]
-	async fn legacy_resync_below_the_live_edge_publishes_forward() {
+	async fn legacy_pes_below_the_live_edge_is_refused() {
 		const MP2_PID: u16 = 0x0061;
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
@@ -4628,26 +4564,11 @@ pub(super) mod test {
 		// A join a millisecond behind the live edge.
 		let mut join = mp2_frame(0xDD);
 		join.extend_from_slice(&mp2_frame(0xEE));
-		import
+		let err = import
 			.decode(audio_pes_packet(MP2_PID, 1, 89_910, &join).as_slice())
-			.expect("a PES PTS below the live edge must not abort the import");
-		import.finish().unwrap();
-
-		let frames = read_audio_frames(&consumer, &catalog).await;
-		assert!(
-			frames.len() >= 3,
-			"expected published frames after the join, got {}",
-			frames.len()
-		);
-		let mut last = 0;
-		for frame in &frames {
-			assert!(
-				frame.timestamp.as_micros() >= last,
-				"published a rewind: {last} then {}",
-				frame.timestamp.as_micros()
-			);
-			last = frame.timestamp.as_micros();
-		}
+			.and_then(|()| import.finish())
+			.expect_err("a PES PTS below the live edge is a restart");
+		assert!(is_rewind(&err), "{err:?}");
 	}
 
 	// Confirming a joined frame means holding it when the buffer ends too soon after it to
@@ -4697,6 +4618,7 @@ pub(super) mod test {
 					resyncs: 0,
 					discarded: 0,
 					unconfirmed: 1,
+					..Default::default()
 				}
 			)]),
 			"the drained frame was published without a trace"
@@ -5915,12 +5837,12 @@ pub(super) mod test {
 		}
 	}
 
-	/// A backwards restart is the same signal; only the timestamps differ. The unwrapper must
-	/// not read the step back as the 33-bit field wrapping, which would put the new timeline
-	/// 26 hours out.
+	/// A backwards restart is the same signal, but a rewind: a new broadcast, so the import
+	/// ends. The unwrapper must not read the step back as the 33-bit field wrapping, which
+	/// would put the new timeline 26 hours out and publish it.
 	#[tokio::test(start_paused = true)]
-	async fn a_backwards_restart_keeps_its_own_timestamps() {
-		let (consumer, catalog, mut import) = two_stream_import();
+	async fn a_flagged_backwards_restart_is_refused() {
+		let (_consumer, _catalog, mut import) = two_stream_import();
 
 		for pid in [PCR_PID, PEER_PID] {
 			import
@@ -5928,23 +5850,12 @@ pub(super) mod test {
 				.unwrap();
 		}
 		import.decode(clock_break_packet(PCR_PID).as_slice()).unwrap();
-		for pid in [PCR_PID, PEER_PID] {
-			import.decode(mp2_pes(pid, 1, 90_000, [0xCC, 0xDD]).as_slice()).unwrap();
-		}
-		import.finish().unwrap();
-
-		for (frames, breaks) in read_all_breaks(&consumer, &catalog).await {
-			// Backwards timestamps are a break a consumer can also derive for itself, so the
-			// marker need not be the only thing counted here. The exporter compares the
-			// counter across frames, so however many land between two frames are one reset.
-			assert!(breaks >= 1, "the timebase break did not reach this track");
-			let stamps: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
-			assert_eq!(stamps[0], 45_000_000, "the old timeline");
-			assert!(
-				stamps.last().is_some_and(|&last| last >= 45_000_000),
-				"the restarted clock rewound instead of continuing forward: {stamps:?}"
-			);
-		}
+		let err = [PCR_PID, PEER_PID]
+			.into_iter()
+			.try_for_each(|pid| import.decode(mp2_pes(pid, 1, 90_000, [0xCC, 0xDD]).as_slice()))
+			.and_then(|()| import.finish())
+			.expect_err("a restart below the live edge is a new broadcast");
+		assert!(is_rewind(&err), "{err:?}");
 	}
 
 	/// A 5-byte PES timestamp field with the 4-bit `prefix` (0b0010 PTS only, 0b0011 PTS of a
@@ -6084,18 +5995,41 @@ pub(super) mod test {
 
 	use crate::container::ts::catalog::Ext;
 
-	/// Every frame lands at or past the end of the groups before it, which is what the
-	/// producer demands. A group's first frame closes the one before, so it clears that
-	/// group too; later frames may present below it (B-frames).
+	/// Whether `err` is a refused timestamp rewind: the source restarted, which is a new
+	/// broadcast rather than a continuation.
+	fn is_rewind(err: &anyhow::Error) -> bool {
+		err.chain().any(|cause| {
+			matches!(
+				cause.downcast_ref::<crate::Error>(),
+				Some(crate::Error::TimestampRewind(_))
+			)
+		})
+	}
+
+	/// Import `data`, which must end in a refused rewind.
+	fn import_refused(data: &[u8]) {
+		let Err(err) = import_all(data) else {
+			panic!("the import accepted a rewind");
+		};
+		assert!(is_rewind(&err), "{err:?}");
+	}
+
+	/// Group starts never go backwards, and no frame sits below the start of the group before
+	/// its own, which is what the producer demands. Frames may still present below the previous
+	/// group's content (B-frames, an overlapping keyframe).
 	fn assert_forward(frames: &[crate::container::Frame]) {
-		let (mut edge, mut open) = (0, 0);
+		let (mut start, mut floor) = (None, None);
 		for frame in frames {
 			let ts = frame.timestamp.as_micros();
 			if frame.keyframe {
-				edge = edge.max(open);
+				assert!(
+					start.is_none_or(|start| ts >= start),
+					"a group started at {ts} before {start:?}"
+				);
+				floor = start;
+				start = Some(ts);
 			}
-			assert!(ts >= edge, "rewound to {ts} below the edge {edge}");
-			open = open.max(ts);
+			assert!(floor.is_none_or(|floor| ts >= floor), "rewound to {ts} below {floor:?}");
 		}
 	}
 
@@ -6107,10 +6041,378 @@ pub(super) mod test {
 
 	const VIDEO: u16 = 0x0050;
 
-	/// #3798's join: a new IDR presents below the last P-frame on a continuous clock, since
-	/// the B-frames before it presented earlier than the P-frame decoded ahead of them.
+	/// Damage on one PID refuses that unit and its dependent pictures while another PID
+	/// carries on. A later decode call resumes from the next keyframe.
+	async fn damaged_video_recovers(damage: &str) {
+		let peer = VIDEO + 1;
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::H264, VIDEO), (StreamType::H264, peer)], false),
+			..Default::default()
+		};
+		mux.gop(VIDEO, 90_000);
+		mux.gop(peer, 90_000);
+		let damaged_at = mux.out.len();
+		mux.gop(VIDEO, 90_000 + 4 * FRAME);
+		mux.gop(peer, 90_000 + 4 * FRAME);
+		let packet = &mut mux.out[damaged_at..damaged_at + TsPacket::SIZE];
+		let payload_at = 5 + usize::from(packet[4]);
+		match damage {
+			"pes" => packet[payload_at + 6..payload_at + 19].fill(0),
+			"nal" => {
+				let nal = packet
+					.windows(5)
+					.position(|bytes| bytes[..4] == [0, 0, 0, 1] && bytes[4] & 0x1f == 5)
+					.unwrap();
+				packet[nal + 4] |= 0x80;
+			}
+			"late-nal" => {
+				let mut au = annexb_au(true);
+				au.extend_from_slice(&[0, 0, 0, 1, 0xe1, 0x80]);
+				packet.copy_from_slice(&video_pes(VIDEO, 4, 90_000 + 5 * FRAME, Some(90_000 + 4 * FRAME), &au));
+			}
+			"queued" => {
+				// The AUD completes the IDR before the forbidden NAL fails, so the splitter
+				// has already queued it when the unit is refused.
+				let mut au = annexb_au(true);
+				au.extend_from_slice(&[0, 0, 0, 1, 0x09, 0xf0, 0, 0, 0, 1, 0xe1, 0x80, 0, 0, 0, 1, 0x41, 0x9a]);
+				packet.copy_from_slice(&video_pes(VIDEO, 4, 90_000 + 5 * FRAME, Some(90_000 + 4 * FRAME), &au));
+			}
+			"adaptation" => packet[4] = 255,
+			"adaptation-clock" => {
+				packet[4] = 1;
+				packet[5] = 0x90;
+			}
+			"tei" => packet[1] |= 0x80,
+			"clean" => {}
+			_ => unreachable!(),
+		}
+		assert_eq!(
+			packet[1] & 0x80 != 0,
+			damage == "tei",
+			"only flagged corruption sets TEI"
+		);
+		let resume_at = mux.out.len();
+		mux.gop(VIDEO, 90_000 + 8 * FRAME);
+		mux.gop(peer, 90_000 + 8 * FRAME);
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&mux.out[..resume_at])
+			.expect("damage must stay local to the unit");
+		assert!(import.scratch.is_empty(), "every damaged packet must be consumed");
+		assert!(
+			!import.pending.contains_key(&Pid::new(VIDEO).unwrap()),
+			"no damaged PES remains"
+		);
+		import
+			.decode(&mux.out[resume_at..])
+			.expect("next keyframe must recover");
+		import.finish().unwrap();
+		assert_eq!(import.stats().streams[&VIDEO].damaged, u64::from(damage != "clean"));
+		assert_eq!(import.stats().streams[&peer].damaged, 0);
+		for (pid, expected) in [(VIDEO, if damage == "clean" { 12 } else { 8 }), (peer, 12)] {
+			let Stream::H264 { import: video, .. } = &import.streams[&Pid::new(pid).unwrap()] else {
+				panic!("video route");
+			};
+			let frames = read_track(&consumer, video.name(), crate::container::Kind::Video).await;
+			assert_eq!(frames.len(), expected, "published pictures on PID {pid}");
+			if pid == VIDEO && damage != "clean" {
+				assert!(frames[4].keyframe, "recovery starts at a keyframe");
+				assert_eq!(
+					frames[4].timestamp.as_micros(),
+					u128::from(90_000 + 9 * FRAME) * 1_000_000 / 90_000
+				);
+			}
+		}
+	}
+
 	#[tokio::test(start_paused = true)]
-	async fn h264_join_below_a_p_frame_publishes_forward() {
+	async fn damaged_pes_header_recovers() {
+		damaged_video_recovers("pes").await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn damaged_h264_nal_recovers() {
+		damaged_video_recovers("nal").await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn damaged_trailing_nal_refuses_the_whole_access_unit() {
+		damaged_video_recovers("late-nal").await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn damaged_unit_drops_a_picture_the_splitter_queued() {
+		damaged_video_recovers("queued").await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn damaged_adaptation_recovers() {
+		damaged_video_recovers("adaptation").await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn damaged_adaptation_cannot_reset_the_program_clock() {
+		damaged_video_recovers("adaptation-clock").await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn damaged_tei_recovers() {
+		damaged_video_recovers("tei").await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn clean_video_has_no_damage() {
+		damaged_video_recovers("clean").await;
+	}
+
+	/// A dedicated PCR PID's malformed adaptation field cannot declare a timebase break.
+	#[test]
+	fn damaged_adaptation_on_a_dedicated_pcr_pid_keeps_the_clock() {
+		// Clear of the PMT PID and every stream, so only the clock-only row can carry it.
+		const PCR: u16 = 0x0200;
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
+			..Default::default()
+		};
+		mux.gop(VIDEO, 90_000);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import.decode(&mux.out).unwrap();
+		import.pcr_pid = Some(Pid::new(PCR).unwrap());
+		assert!(import.last_pts.is_some());
+
+		// The flag byte is the field's only byte, so the PCR it announces overruns it.
+		let mut packet = clock_break_packet(PCR);
+		packet[4] = 1;
+		packet[5] = 0x90;
+		import.decode(&packet).unwrap();
+		assert!(import.last_pts.is_some(), "a malformed field reset the program clock");
+		let stats = import.stats();
+		assert_eq!((stats.streams[&PCR].track, stats.streams[&PCR].damaged), ("", 1));
+	}
+
+	/// A damaged PES start refuses only its own unit: the unbounded PES before it ends there,
+	/// whole, and still publishes.
+	#[test]
+	fn damaged_pes_start_flushes_the_unit_before_it() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let unbounded = |cc, pts, keyframe| {
+			let mut packet = video_pes(VIDEO, cc, pts, None, &annexb_au(keyframe));
+			let start = 5 + usize::from(packet[4]);
+			packet[start + 4..start + 6].fill(0);
+			packet
+		};
+		let mut data = synth_pmt(&[(StreamType::H264, VIDEO)], false);
+		data.extend(unbounded(0, 90_000, true));
+		let mut damaged = unbounded(1, 90_000 + FRAME, false);
+		let start = 5 + usize::from(damaged[4]);
+		damaged[start + 6..start + 19].fill(0);
+		data.extend(damaged);
+		import.decode(&data).unwrap();
+		import.finish().unwrap();
+		assert_eq!(import.stats().streams[&VIDEO].damaged, 1);
+		assert_eq!(
+			import.stats().streams[&VIDEO].units,
+			1,
+			"the keyframe before the damage"
+		);
+	}
+
+	/// A malformed unbounded PES drained at EOF is still refused and counted.
+	#[test]
+	fn damaged_final_access_unit_is_refused() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let mut au = annexb_au(true);
+		let nal = au
+			.windows(5)
+			.position(|bytes| bytes[..4] == [0, 0, 0, 1] && bytes[4] & 0x1f == 5)
+			.unwrap();
+		au[nal + 4] |= 0x80;
+		let mut packet = video_pes(VIDEO, 0, 90_000, None, &au);
+		let start = 5 + usize::from(packet[4]);
+		packet[start + 4..start + 6].fill(0);
+		let mut data = synth_pmt(&[(StreamType::H264, VIDEO)], false);
+		data.extend(packet);
+		import.decode(&data).unwrap();
+		assert_eq!(import.stats().streams[&VIDEO].damaged, 0, "PES has not ended yet");
+		import.finish().unwrap();
+		assert_eq!(import.stats().streams[&VIDEO].damaged, 1);
+		assert_eq!(import.stats().streams[&VIDEO].units, 0);
+		assert!(catalog.snapshot().video.renditions.is_empty());
+	}
+
+	/// An invalid trailing Opus control header refuses the complete PES before its first
+	/// packet is published. Independently decodable packets in the next PES recover.
+	#[tokio::test(start_paused = true)]
+	async fn damaged_opus_pes_is_not_half_published() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.ensure_stream(
+				Pid::new(VIDEO).unwrap(),
+				0x06,
+				&[super::catalog::Descriptor {
+					tag: 0x05,
+					data: bytes::Bytes::from_static(b"Opus"),
+				}],
+			)
+			.unwrap();
+		let good = [0x7f, 0xe0, 3, 0xf8, 0xff, 0xfe];
+		let mut bad = good.to_vec();
+		bad.push(0x7f);
+		let mut data = Vec::new();
+		for (cc, payload) in [(0, good.as_slice()), (1, bad.as_slice()), (2, good.as_slice())] {
+			data.extend(video_pes(VIDEO, cc, 90_000 + u64::from(cc) * FRAME, None, payload));
+		}
+		import.decode(&data).unwrap();
+		import.finish().unwrap();
+		assert_eq!(import.stats().streams[&VIDEO].damaged, 1);
+		assert_eq!(import.stats().streams[&VIDEO].units, 2);
+		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
+		let frames = read_track(&consumer, &name, crate::container::Kind::Audio).await;
+		assert_eq!(frames.len(), 2, "no packet from the damaged PES is published");
+	}
+
+	/// An aborted track is a feed-wide publishing failure, never a damaged media unit.
+	#[test]
+	fn damaged_recovery_keeps_publishing_errors_fatal() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let video = crate::codec::h264::Import::new(track.clone(), catalog.reserve(), Default::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import.streams.insert(
+			Pid::new(VIDEO).unwrap(),
+			Stream::H264 {
+				split: crate::codec::h264::Split::new(),
+				import: Box::new(video),
+				unwrap: Default::default(),
+			},
+		);
+		track.abort(moq_net::Error::Closed).unwrap();
+		let mut data = Vec::new();
+		for cc in 0..3 {
+			data.extend(video_pes(
+				VIDEO,
+				cc,
+				90_000 + u64::from(cc) * FRAME,
+				None,
+				&annexb_au(true),
+			));
+		}
+		let err = import.decode(&data).expect_err("closed producer must end ingest");
+		assert!(
+			matches!(err.downcast_ref::<crate::Error>(), Some(crate::Error::Moq(_))),
+			"{err:?}"
+		);
+		assert!(import.damaged.is_empty(), "publishing failure is not local damage");
+		assert!(
+			!super::unit_error(crate::Error::H264(crate::codec::h264::Error::MissingTimestamp)).is::<super::Damaged>()
+		);
+	}
+
+	/// A break closes the video group where its content stops, not a GOP later at the next
+	/// keyframe. An open GOP's leading pictures present below that keyframe, so an end marker
+	/// there would sit past them and the exporter refused them as a rewind.
+	#[tokio::test(start_paused = true)]
+	async fn damaged_video_closes_its_group_at_the_break() {
+		use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
+
+		const MS: u64 = 90;
+		let at = |ms: u64| 90_000 + ms * MS;
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
+			..Default::default()
+		};
+		// A closed GOP whose third picture is damaged, then an open GOP whose leading B-frame
+		// presents below its IDR.
+		let pictures = [
+			(true, at(0), None),
+			(false, at(40), None),
+			(false, at(80), None),
+			(true, at(1200), Some(at(1000))),
+			(false, at(1040), None),
+			(false, at(1280), Some(at(1080))),
+		];
+		let mut damaged_at = 0;
+		for (i, (keyframe, pts, dts)) in pictures.into_iter().enumerate() {
+			if i == 2 {
+				damaged_at = mux.out.len();
+			}
+			let cc = mux.cc(VIDEO);
+			mux.out
+				.extend_from_slice(&video_pes(VIDEO, cc, pts, dts, &annexb_au(keyframe)));
+		}
+		mux.out[damaged_at + 1] |= 0x80;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import.decode(&mux.out).unwrap();
+		import.finish().unwrap();
+		assert_eq!(import.stats().streams[&VIDEO].damaged, 1);
+
+		// Each group as published, its empty end marker included.
+		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+		let subscription = moq_net::track::Subscription::default().with_max_age(Duration::from_secs(3600));
+		let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
+		let mut groups = Vec::new();
+		while let Some(mut group) = track.recv_group().await.unwrap() {
+			let mut frames = Vec::new();
+			while let Some(mut frame) = group.next_frame().await.unwrap() {
+				let frame = hang::container::Frame::decode(frame.read_all().await.unwrap()).unwrap();
+				frames.push((frame.timestamp.as_micros(), frame.payload.is_empty()));
+			}
+			groups.push(frames);
+		}
+		let us = |ms: u64| u128::from(at(ms)) * 1_000_000 / 90_000;
+		assert_eq!(
+			groups,
+			[
+				vec![(us(0), false), (us(40), false), (us(80), true)],
+				vec![(us(1200), false), (us(1040), false), (us(1280), false)],
+			],
+			"the first group ends at the break, one frame after its last picture"
+		);
+
+		let mut exporter = super::super::Export::new(crate::source::announced(&consumer))
+			.await
+			.unwrap()
+			.with_max_age(Duration::from_secs(30));
+		let mut ts = Vec::new();
+		while let Ok(res) = tokio::time::timeout(Duration::from_secs(1), exporter.next()).await {
+			let Some(frame) = res.expect("the exporter must take the open GOP after the break") else {
+				break;
+			};
+			ts.extend_from_slice(&frame.payload);
+		}
+		let mut reader = TsPacketReader::new(std::io::Cursor::new(ts));
+		let mut pictures = 0;
+		while let Some(packet) = reader.read_ts_packet().unwrap() {
+			pictures += usize::from(matches!(packet.payload, Some(TsPayload::PesStart(_))));
+		}
+		assert_eq!(pictures, 5, "every picture either side of the break is exported");
+	}
+
+	/// #3798's join: a new IDR presents below the last P-frame on a continuous clock, since
+	/// the B-frames before it presented earlier than the P-frame decoded ahead of them. It
+	/// still starts after the previous group did, so it overlaps rather than rewinds.
+	#[tokio::test(start_paused = true)]
+	async fn h264_join_below_a_p_frame_publishes() {
 		let mut mux = Mux {
 			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
 			..Default::default()
@@ -6124,9 +6426,9 @@ pub(super) mod test {
 	}
 
 	/// An encoder restart that declares the new clock on the PCR PID still restarts lower
-	/// than the live edge, which the break marker does not lower.
+	/// than the live edge: a new broadcast, not a continuation.
 	#[tokio::test(start_paused = true)]
-	async fn h264_flagged_backward_restart_publishes_forward() {
+	async fn h264_flagged_backward_restart_is_refused() {
 		let mut mux = Mux {
 			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
 			..Default::default()
@@ -6134,61 +6436,40 @@ pub(super) mod test {
 		mux.gops(VIDEO, 45 * 90_000, 2);
 		mux.out.extend_from_slice(&clock_break_packet(VIDEO));
 		mux.gops(VIDEO, 90_000, 2);
-		let frames = video_frames(&mux.out).await;
-		assert_eq!(frames.len(), 16);
-		assert_forward(&frames);
+		import_refused(&mux.out);
 	}
 
 	/// The same restart unflagged, as a looping playout wraps to the top of its file.
 	#[tokio::test(start_paused = true)]
-	async fn h264_unflagged_backward_restart_publishes_forward() {
+	async fn h264_unflagged_backward_restart_is_refused() {
 		let mut mux = Mux {
 			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
 			..Default::default()
 		};
 		mux.gops(VIDEO, 45 * 90_000, 2);
 		mux.gops(VIDEO, 90_000, 2);
+		import_refused(&mux.out);
+	}
+
+	/// A flagged break that leaps forward is not a rewind: the new timeline publishes.
+	#[tokio::test(start_paused = true)]
+	async fn h264_flagged_forward_restart_publishes() {
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
+			..Default::default()
+		};
+		mux.gops(VIDEO, 90_000, 2);
+		mux.out.extend_from_slice(&clock_break_packet(VIDEO));
+		// Inside the track's 30 s retention, so the reader still reaches the first pass.
+		mux.gops(VIDEO, 20 * 90_000, 2);
 		let frames = video_frames(&mux.out).await;
 		assert_eq!(frames.len(), 16);
 		assert_forward(&frames);
 	}
 
-	/// A loop wraps every period, so the shift that absorbed the first wrap leaves the second
-	/// one below the edge again unless it grows.
+	/// Legacy audio wrapping to the top of a looping file is a restart.
 	#[tokio::test(start_paused = true)]
-	async fn h264_survives_two_loop_wraps() {
-		let mut mux = Mux {
-			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
-			..Default::default()
-		};
-		for _ in 0..3 {
-			mux.gops(VIDEO, 90_000, 2);
-		}
-		let frames = video_frames(&mux.out).await;
-		assert_eq!(frames.len(), 24, "every pass publishes");
-		assert_forward(&frames);
-		// A pass keeps its own spacing, and each wrap lands the same distance past the last:
-		// the second wrap grew the shift by one more pass rather than reusing the first.
-		let stamps: Vec<u128> = frames
-			.iter()
-			.filter(|f| f.keyframe)
-			.map(|f| f.timestamp.as_micros())
-			.collect();
-		let gop = 4 * 1_000_000 * FRAME as u128 / 90_000;
-		let steps: Vec<u128> = stamps.windows(2).map(|pair| pair[1] - pair[0]).collect();
-		// Within a microsecond: the wire is in microseconds and the source in 90 kHz ticks.
-		let near = |a: u128, b: u128| a.abs_diff(b) <= 1;
-		assert!(
-			[steps[0], steps[2], steps[4]].iter().all(|&step| near(step, gop)),
-			"a pass was respaced: {stamps:?}"
-		);
-		assert!(near(steps[1], steps[3]), "the wraps landed differently: {stamps:?}");
-	}
-
-	/// The legacy audio path re-anchored before, but only once: a second wrap landed below
-	/// the edge again.
-	#[tokio::test(start_paused = true)]
-	async fn legacy_survives_two_loop_wraps() {
+	async fn legacy_loop_wrap_is_refused() {
 		const MP2_PID: u16 = 0x0061;
 		let mut mux = Mux {
 			out: synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false),
@@ -6196,25 +6477,20 @@ pub(super) mod test {
 		};
 		// One PES is two 72 ms MP2 frames.
 		const PES_TICKS: u64 = 2 * 72 * 90;
-		for _ in 0..3 {
+		for _ in 0..2 {
 			for i in 0..4 {
 				let cc = mux.cc(MP2_PID);
 				mux.out
 					.extend_from_slice(&mp2_pes(MP2_PID, cc, 90_000 + i * PES_TICKS, [0xAA, 0xBB]));
 			}
 		}
-		let (consumer, catalog, _import) = import_all(&mux.out).expect("a second wrap must not end the import");
-		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
-		let frames = read_track(&consumer, &name, crate::container::Kind::Audio).await;
-		assert!(frames.len() >= 20, "every pass publishes: {}", frames.len());
-		assert_forward(&frames);
+		import_refused(&mux.out);
 	}
 
-	/// A looping file whose audio runs past the loop period, so every wrap restarts a frame
-	/// below the last frame published. (The edge is that frame's start: audio frames carry no
-	/// duration, so a wrap exactly one frame short lands on it and passes.)
+	/// A looping file whose audio runs past the loop period restarts a frame below the last
+	/// frame published: a restart like any other.
 	#[tokio::test(start_paused = true)]
-	async fn aac_loop_overlapping_the_edge_publishes_forward() {
+	async fn aac_loop_overlapping_the_edge_is_refused() {
 		const AAC_PID: u16 = 0x0060;
 		// 1024 samples at 48 kHz, in 90 kHz ticks.
 		const AAC_FRAME: u64 = 1024 * 90_000 / 48_000;
@@ -6222,7 +6498,7 @@ pub(super) mod test {
 			out: synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false),
 			..Default::default()
 		};
-		for pass in 0..3u64 {
+		for pass in 0..2u64 {
 			for i in 0..4u64 {
 				let mut payload = adts_frame(17, 0xA0 | i as u8);
 				payload.extend_from_slice(&adts_frame(17, 0xB0 | i as u8));
@@ -6231,32 +6507,23 @@ pub(super) mod test {
 				mux.out.extend_from_slice(&audio_pes_packet(AAC_PID, cc, pts, &payload));
 			}
 		}
-		let (consumer, catalog, _import) = import_all(&mux.out).expect("an overlapping wrap must not end the import");
-		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
-		let frames = read_track(&consumer, &name, crate::container::Kind::Audio).await;
-		assert!(frames.len() >= 20, "every pass publishes: {}", frames.len());
-		assert_forward(&frames);
+		import_refused(&mux.out);
 	}
 
-	/// A PES-framed stream we carry verbatim steps back like any other.
+	/// A PES-framed stream we carry verbatim refuses a step back like any other.
 	#[tokio::test(start_paused = true)]
-	async fn verbatim_pes_below_the_edge_publishes_forward() {
+	async fn verbatim_pes_below_the_edge_is_refused() {
 		const DATA_PID: u16 = 0x0052;
 		let mut mux = Mux {
 			out: synth_pmt(&[(StreamType::Mpeg2PacketizedData, DATA_PID)], false),
 			..Default::default()
 		};
-		for pts in [45 * 90_000, 46 * 90_000, 90_000, 2 * 90_000, 90_000] {
+		for pts in [45 * 90_000, 46 * 90_000, 90_000] {
 			let cc = mux.cc(DATA_PID);
 			mux.out
 				.extend_from_slice(&audio_pes_packet(DATA_PID, cc, pts, &[0xDE, 0xAD]));
 		}
-		let (consumer, catalog, _import) =
-			import_all(&mux.out).expect("a verbatim PES below the edge must not end the import");
-		let name = catalog.snapshot().ext.mpegts.tracks.keys().next().unwrap().clone();
-		let frames = read_track(&consumer, &name, crate::container::Kind::Data).await;
-		assert_eq!(frames.len(), 5);
-		assert_forward(&frames);
+		import_refused(&mux.out);
 	}
 
 	/// A cue takes its time from the video it arrives with, and a B-frame decoded after a
@@ -6274,12 +6541,13 @@ pub(super) mod test {
 			),
 			..Default::default()
 		};
-		// Twice, the second an unflagged wrap to the top.
-		for _ in 0..2 {
+		// Two GOPs back to back.
+		for gop in 0..2 {
+			let base = 90_000 + gop * 4 * FRAME;
 			for (keyframe, pts, dts) in [
-				(true, 90_000 + FRAME, Some(90_000)),
-				(false, 90_000 + 4 * FRAME, Some(90_000 + FRAME)),
-				(false, 90_000 + 2 * FRAME, None),
+				(true, base + FRAME, Some(base)),
+				(false, base + 4 * FRAME, Some(base + FRAME)),
+				(false, base + 2 * FRAME, None),
 			] {
 				let cc = mux.cc(VIDEO);
 				mux.out
@@ -6294,56 +6562,11 @@ pub(super) mod test {
 		let frames = read_track(&consumer, &name, crate::container::Kind::Data).await;
 		assert_eq!(frames.len(), 6, "every cue publishes");
 		assert_forward(&frames);
-		// The cues follow the video across the wrap rather than piling up on the edge.
+		// The next GOP's cues follow the video rather than piling up on the edge.
 		assert!(
-			frames[4].timestamp.as_micros() > frames[2].timestamp.as_micros(),
-			"the cues after the wrap did not move with the video: {:?}",
+			frames[3].timestamp.as_micros() > frames[2].timestamp.as_micros(),
+			"the cues did not move with the video: {:?}",
 			frames.iter().map(|f| f.timestamp.as_micros()).collect::<Vec<_>>()
-		);
-	}
-
-	/// A cue arriving with the keyframe of an unflagged wrap lands with that keyframe, before
-	/// the write that grows the video shift has run.
-	#[tokio::test(start_paused = true)]
-	async fn section_with_a_wrap_keyframe_follows_it() {
-		const CUE_PID: u16 = 0x0021;
-		let mut mux = Mux {
-			out: synth_pmt(
-				&[
-					(StreamType::H264, VIDEO),
-					(StreamType::Dts8ChannelLosslessAudio, CUE_PID),
-				],
-				true,
-			),
-			..Default::default()
-		};
-		for _ in 0..2 {
-			let cc = mux.cc(VIDEO);
-			let idr = video_pes(VIDEO, cc, 90_000 + FRAME, Some(90_000), &annexb_au(true));
-			mux.out.extend_from_slice(&idr);
-			let cc = mux.cc(CUE_PID);
-			mux.out.extend_from_slice(&packet(true, cc, 0, &CUE));
-			for (pts, dts) in [
-				(90_000 + 4 * FRAME, Some(90_000 + FRAME)),
-				(90_000 + 2 * FRAME, None),
-				(90_000 + 3 * FRAME, None),
-			] {
-				let cc = mux.cc(VIDEO);
-				mux.out
-					.extend_from_slice(&video_pes(VIDEO, cc, pts, dts, &annexb_au(false)));
-			}
-			mux.gops(VIDEO, 90_000 + 4 * FRAME, 1);
-		}
-		let (consumer, catalog, _import) = import_all(&mux.out).expect("the import must survive the wrap");
-		let snapshot = catalog.snapshot();
-		let video = snapshot.video.renditions.keys().next().unwrap().clone();
-		let cues = snapshot.ext.mpegts.tracks.keys().find(|name| **name != video).unwrap();
-		let cues = read_track(&consumer, cues, crate::container::Kind::Data).await;
-		let video = read_track(&consumer, &video, crate::container::Kind::Video).await;
-		assert_eq!(cues.len(), 2);
-		assert_eq!(
-			cues[1].timestamp, video[8].timestamp,
-			"the cue left its keyframe behind"
 		);
 	}
 

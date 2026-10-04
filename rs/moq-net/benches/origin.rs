@@ -263,7 +263,10 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 				for cost in [INCUMBENT_COST - 1, INCUMBENT_COST + 1] {
 					route.update(peer_route(challenger, cost)).unwrap();
 					for cursor in &mut cursors {
-						let update = cursor.next().now_or_never().flatten().expect("winner changed");
+						let event = cursor.next().now_or_never().flatten().expect("winner changed");
+						let moq_net::announce::Event::Update(update) = event else {
+							panic!("expected an update: got {event:?}");
+						};
 						assert_eq!(update.route.cost, moq_net::origin::Cost::new(cost.min(INCUMBENT_COST)));
 					}
 				}
@@ -369,7 +372,7 @@ fn bench_subscribe(c: &mut Criterion) {
 			b.iter(|| {
 				let mut cursor = fleet.consumer.announced();
 				let mut replayed = 0;
-				while cursor.next().now_or_never().flatten().is_some() {
+				while let Some(announce::Event::Start(_)) = cursor.next().now_or_never().flatten() {
 					replayed += 1;
 				}
 				assert_eq!(replayed, publishers);

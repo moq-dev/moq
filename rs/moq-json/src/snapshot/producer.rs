@@ -51,16 +51,7 @@ impl<T> Producer<T> {
 		take(&self.inner).track.inner.subscribe(None)
 	}
 
-	/// Whether any consumer for the underlying track currently exists.
-	///
-	/// The demand signal for a producer serving on request: an unused track is
-	/// cached state nobody is watching, safe to drop and recreate on the next
-	/// request.
-	pub fn is_used(&self) -> bool {
-		take(&self.inner).track.inner.is_used()
-	}
-
-	/// A watch-only handle to the underlying track's subscriber demand, to wait for it to change.
+	/// A watch-only handle to the underlying track's subscriber demand.
 	///
 	/// Weak, so holding it neither keeps the track open nor contends with publishing.
 	pub fn demand(&self) -> moq_net::track::Demand {

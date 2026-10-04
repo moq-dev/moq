@@ -152,6 +152,9 @@ export class Encoder {
 	// other knob, or a bandwidth grant, doesn't re-probe the hardware.
 	#target: Computed<Target | undefined>;
 
+	// A keyframe asked for by {@link cut} and not yet encoded.
+	#cut = false;
+
 	// How many resolution runs threw for their current inputs (no supported codec, an invalid knob),
 	// so no config is coming until one reruns.
 	#failures = new Signal(0);
@@ -260,7 +263,7 @@ export class Encoder {
 			effect.subscribe(this.#ceiling, (ceiling) => {
 				if (ceiling === undefined) return;
 				if (!reservation) {
-					reservation = allocator.reserve(track, ceiling);
+					reservation = allocator.reserve(track.demand(), ceiling);
 					this.#reservation.set(reservation);
 				} else {
 					reservation.update(ceiling);
@@ -285,12 +288,12 @@ export class Encoder {
 		this.#lastCaptureWall = performance.now();
 
 		const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"));
-		// The broadcast owns this static track across demand gaps. When demand disappears, cut the
+		// The broadcast owns this static track across demand gaps. When demand disappears, close the
 		// current group, marking the break so a later subscriber resumes on the same track without
 		// the pre-gap group reading as live. A fatal encoder error still aborts the track through
 		// producer.close(err) below.
 		effect.cleanup(() => {
-			if (track.closed.peek() === undefined) producer.cut();
+			if (track.closed.peek() === undefined) producer.discontinuity();
 		});
 
 		let lastKeyframe: Time.Micro | undefined;
@@ -373,11 +376,17 @@ export class Encoder {
 
 							const interval = config?.keyframeInterval ?? Time.Milli.fromSecond(2 as Time.Second);
 
-							// Force a keyframe if this is the first frame (no group yet), or GOP elapsed.
+							// Force a keyframe if this is the first frame (no group yet), the GOP elapsed, or
+							// the caller asked for one and the last is old enough.
+							const since = lastKeyframe === undefined ? undefined : frame.timestamp - lastKeyframe;
 							const keyFrame =
-								!lastKeyframe || lastKeyframe + Time.Micro.fromMilli(interval) <= frame.timestamp;
+								since === undefined ||
+								since >= Time.Micro.fromMilli(interval) ||
+								(this.#cut && since >= Time.Micro.fromMilli(MIN_CUT_INTERVAL));
 							if (keyFrame) {
 								lastKeyframe = frame.timestamp as Time.Micro;
+								// Any keyframe serves an outstanding request.
+								this.#cut = false;
 							}
 
 							encoder.encode(frame, { keyFrame });
@@ -634,10 +643,26 @@ export class Encoder {
 		throw new Error("no supported codec");
 	}
 
+	/**
+	 * Request a keyframe, opening a new group at a frame no earlier than this call.
+	 *
+	 * For a resume, a recording cut, or a known tune-in moment; {@link Config.keyframeInterval} is the
+	 * cadence. Requests coalesce into the next keyframe, and forced keyframes land at least 500ms
+	 * apart so a caller in a loop cannot pin the encoder at all-keyframe. A request while not encoding
+	 * is served by the keyframe every encode starts with.
+	 */
+	cut(): void {
+		this.#cut = true;
+	}
+
 	close() {
 		this.#signals.close();
 	}
 }
+
+// The closest two requested keyframes may land. A keyframe costs several times a predicted frame,
+// and this stays well under the default two-second GOP so a request still beats the cadence.
+const MIN_CUT_INTERVAL = 500 as Time.Milli;
 
 // The source's nominal frame rate: what the capture device settled on, or what a frame stream
 // declared. Undefined when nothing reports one.

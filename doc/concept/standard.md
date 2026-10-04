@@ -46,7 +46,10 @@ on moq-lite.
 On drafts 14–19, the Rust publisher answers a standalone `FETCH` within one
 group from the cache. A relay fetches a missing group upstream with a `FETCH`
 of that one whole group, and an upstream refusal is the refusal the fetcher
-sees. A range touching several groups is refused with `NOT_SUPPORTED`, as is
+sees. Once its last reader leaves, the relay cancels the upstream fetch, even
+before `FETCH_OK`, and aborts an incomplete group instead of caching it as whole.
+Drafts 14–16 use `FETCH_CANCEL`; drafts 17–19 stop and reset the request stream.
+A range touching several groups is refused with `NOT_SUPPORTED`, as is
 any `FETCH` on draft-20 and later, which moved the range into
 `LOCATION_FILTER`. A standalone `FETCH`
 carries no timestamps, since no `SUBSCRIBE_OK` declared a timescale for it.
@@ -91,7 +94,9 @@ negotiated draft does not define still closes the session with
 Several project drafts extend the IETF wire without breaking it, since `SETUP`
 ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
 [solicit](/draft/moq-solicit) to make announcements opt-in,
-[hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery, and
+[hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery,
+[active-count](/draft/moq-active-count) to count the `NAMESPACE` messages
+before a `SUBSCRIBE_NAMESPACE` is caught up, and
 [probe](/draft/moq-probe) for bandwidth estimation.
 [moq-e2ee](/draft/moq-e2ee) is not a transport extension: it encrypts application
 payloads so relays still forward named tracks they cannot read.

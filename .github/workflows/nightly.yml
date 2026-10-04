@@ -43,6 +43,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  x11:
+    uses: ./.github/workflows/x11.yml
+
   nightly:
     name: Nightly
     runs-on: ubuntu-24.04-arm
@@ -122,6 +125,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just js bench track
 
+      - name: JS catalog estimate fanout benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just js catalog-bench
+
       # Runs each moq-net Criterion routine once, so a bench that panics (an
       # unparsable version, a shape that deadlocks) fails here instead of on the
       # next manual run. Timing is not compared; nextest never runs a
@@ -131,6 +138,16 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command cargo bench --locked -p moq-net --features fuzz --bench '*' -- --test
 
+      # The catalog bench asserts the estimate rate limit's publish counts, so one pass is
+      # the regression check.
+      - name: moq-mux catalog estimate fanout benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command cargo bench --locked -p moq-mux --bench catalog -- --test
+
+      - name: RTMP chunk-stream benchmark smoke
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs bench-rtmp --test
+
       - name: BBB rendition alignment
         if: ${{ !cancelled() }}
         run: nix develop --command just pub check-bbb
@@ -139,8 +156,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just rs audit
 
-      # The OBS plugin and libmoq's C fixtures are the only things that link
-      # libmoq.a from outside cargo, so a stale `rs/libmoq/native-libs/*.txt`
+      # The OBS plugin and moq-c's C fixtures are the only things that link
+      # libmoq.a from outside cargo, so a stale `rs/moq-c/native-libs/*.txt`
       # breaks them and nothing else. obs.yml lists the inputs that can do that,
       # but a list of paths can't be complete: a build script emitting
       # `cargo::rustc-link-lib` needs no manifest change, and widening that
@@ -151,7 +168,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop .#obs --command just obs ci
 
-      - name: libmoq C fixtures
+      - name: moq-c C fixtures
         if: ${{ !cancelled() }}
         run: nix develop --command just rs c-tests
 
@@ -208,6 +225,46 @@ jobs:
         env:
           NEXTEST_PROFILE: ci
           MOQ_STRICT: 1
+
+  # Instant/SystemTime ranges and native transport behavior differ by OS.
+  # The PR platform gate only compiles them; this job runs their tests nightly.
+  # Outside Nix like platform.yml, with no cache that would evict Linux's store.
+  platform-tests:
+    name: Tests (${{ matrix.recipe }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            recipe: rs windows-test
+          - os: macos-latest
+            recipe: rs macos-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      # aws-lc-rs assembles its x86_64 crypto with NASM on Windows.
+      - name: Install NASM
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm -y --no-progress
+          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - uses: ./.github/actions/just
+      - name: Install nextest
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: nextest@0.9.146
+      - name: Test
+        shell: bash
+        run: just ${{ matrix.recipe }}
+        env:
+          NEXTEST_PROFILE: ci
 
   # Plays the matrix in headless Chromium through moq-shaper and grades what the
   # listener heard against test/audio-quality/budgets.json. ARM64 like wasm.yml,
@@ -296,9 +353,9 @@ jobs:
       contents: write
       id-token: write
 
-  release-libmoq:
-    name: libmoq
-    uses: ./.github/workflows/libmoq.yml
+  release-moq-c:
+    name: moq-c
+    uses: ./.github/workflows/moq-c.yml
     permissions:
       contents: write
 

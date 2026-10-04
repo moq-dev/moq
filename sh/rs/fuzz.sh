@@ -36,5 +36,9 @@ mkdir -p rs/moq-net/fuzz/corpus/"$target"
 sysroot=$(rustup run nightly rustc --print sysroot)
 export PATH="$sysroot/bin:$PATH"
 
+# Nightly checks the trait solver's recursion depth while compiling the model.
+# Fail here before an overflow becomes a hard error on stable.
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D recursion_depth_exceeding_limit"
+
 cargo fuzz run --fuzz-dir rs/moq-net/fuzz "$target" \
     rs/moq-net/fuzz/corpus/"$target" rs/moq-net/fuzz/seeds/"$target" "$@"

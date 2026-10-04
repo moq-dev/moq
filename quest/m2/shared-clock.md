@@ -14,8 +14,7 @@ backwards, and `container::Producer::write` refuses a group below the last one
 ## Plan
 
 Follow-up of [#4668](https://github.com/moq-dev/moq/pull/4668), which moved
-data tracks onto the anchored clock. The anchor exists only on `dev`, so this
-targets `dev`.
+data tracks onto the anchored clock. The anchor is unreleased.
 
 Decided (2026-10-01):
 

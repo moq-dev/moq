@@ -1129,7 +1129,10 @@ pub struct Consumer {
 }
 
 /// Subscriber-specific policy for expiring a group after it was handed out.
-pub(crate) trait Expiry: Send + Sync {
+///
+/// Unwind safe so the [`Consumer`] holding it is, and so the published
+/// [`track::Fetching`] that holds a consumer stays unwind safe too.
+pub(crate) trait Expiry: Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe {
 	/// Return whether the group is stale, registering `waiter` for anything that
 	/// could change the answer while the group remains live.
 	fn is_expired(&self, waiter: &kio::Waiter) -> bool;
