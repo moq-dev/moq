@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import * as Catalog from "@moq/hang/catalog";
 import { Legacy } from "@moq/hang/container";
-import { Group, Origin, Path, Time } from "@moq/net";
+import { Group, Error as NetError, Origin, Path, Time } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Broadcast } from "../../../../../js/watch/src/broadcast.ts";
 import { arrivals, Capture, format } from "./capture.ts";
@@ -97,7 +97,8 @@ test("the observer shares playback demand and closes without ending playback", a
 	}
 });
 
-test("closing the observer waits for in-flight groups and keeps their decode failures", async () => {
+/** Capture a legacy track, then end its first group with `end` once that group's reader is in flight. */
+async function captureGroupEnd(end: (group: Group.Producer) => void): Promise<string | undefined> {
 	const origin = new Origin.Producer();
 	const published = origin.createBroadcast(Path.from("tone.hang"));
 	const track = published.createTrack("audio");
@@ -121,14 +122,25 @@ test("closing the observer waits for in-flight groups and keeps their decode fai
 			timestamp: Time.Timestamp.fromMicros(0),
 			payload: Legacy.encodeFrame(new Uint8Array([1]), Time.Micro(0)),
 		});
-		// Yield until the group's reader is in flight.
 		while (capture.drain().length === 0) await new Promise((resolve) => setTimeout(resolve, 0));
-		group.writeFrame({ timestamp: Time.Timestamp.fromMicros(20_000), payload: new Uint8Array() });
+		end(group);
 		await capture.close();
-		expect(capture.error()).toBe("Error: buffer is empty");
+		return capture.error();
 	} finally {
 		await capture.close();
 		source.close();
 		origin.close();
 	}
+}
+
+test("closing the observer waits for in-flight groups and keeps their decode failures", async () => {
+	const error = await captureGroupEnd((group) =>
+		group.writeFrame({ timestamp: Time.Timestamp.fromMicros(20_000), payload: new Uint8Array() }),
+	);
+	expect(error).toBe("Error: buffer is empty");
+});
+
+test("a reset group truncates its arrivals without failing capture", async () => {
+	const error = await captureGroupEnd((group) => group.close(new NetError.TooFarBehind()));
+	expect(error).toBeUndefined();
 });

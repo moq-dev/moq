@@ -1,7 +1,7 @@
 /** Capture arrivals before the player's container orders or skips them. @module */
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
-import { type Group, Time } from "@moq/net";
+import { type Group, Error as NetError, Time } from "@moq/net";
 import { Effect, type Getter } from "@moq/signals";
 import type { Broadcast } from "@moq/watch";
 import type { Arrival } from "./schema.ts";
@@ -50,16 +50,19 @@ export class Capture {
 							if (!group) throw new Error("the captured track ended");
 							groups.add(group);
 							// Closing a group ends its reader cleanly after the buffered frames, so any
-							// error here is a real failure, even one surfacing during close.
+							// other error here is a real failure, even one surfacing during close.
 							const reader = (async () => {
 								try {
 									for await (const arrival of arrivals(group, decoder)) {
+										// A resubscribe after a rerun re-delivers cached frames with a later stamp.
 										const key = `${group.sequence}:${arrival[1]}`;
 										if (this.#seen.has(key)) continue;
 										this.#seen.add(key);
 										this.#arrivals.push(arrival);
 									}
 								} catch (error) {
+									// A reset or lagging group truncates its tail, as it does for the player.
+									if (error instanceof NetError.Stream) return;
 									this.#failure ??= String(error);
 								} finally {
 									groups.delete(group);
