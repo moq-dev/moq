@@ -60,6 +60,7 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Open contract](/quest/m2/uring-open-contract.md) - settle concurrent ownership and backpressure before implementation
 - [#3129](/quest/m2/3129-moq-uring-write-the-webtransport-stream-header-at-open.md) - moq-uring: write the WebTransport stream header at open time, so finish() never owes one
 - [Cache shard](/quest/m2/cache-shard.md) - stop hammering one process-global cache line from every worker
+- [Send depth](/quest/m2/send-depth.md) - moq-net futures prove Send at the default recursion limit, so downstream crates see no nightly lint
 - [Encoder feedback](/quest/m2/stats-encoder-feedback.md) - a Rust encoder
   reads its viewers' feedback and adapts its bitrate
 - [Text availability](/quest/m2/text-schema.md) - a text track publishes its own coverage index instead of copying the media timeline

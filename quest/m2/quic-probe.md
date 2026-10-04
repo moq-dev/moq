@@ -7,6 +7,8 @@ unacceptable frame delay or excess traffic. Prefer already-buffered useful
 media; add opt-in redundant probing only where measurements justify it.
 Keep current goodput, historical capacity and its age, and the desired
 encoder rate distinct. Preserving an old estimate does not discover capacity.
+The same validated estimate lets a viewer whose receive rate is capped by the
+small rendition it plays select a larger one.
 
 ## Plan
 
@@ -47,6 +49,10 @@ retain the baseline and record why before exposing an ineffective option.
 ## Required
 
 - [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
+
+## Closes
+
+- [#4773](https://github.com/moq-dev/moq/issues/4773) - close this issue when the quest finishes
 
 ## Related
 

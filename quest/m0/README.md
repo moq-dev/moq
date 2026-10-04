@@ -55,6 +55,8 @@ a published `@moq/watch` break.
 - [Wildcard](/quest/m0/wildcard/README.md) - a relay resolves subscriptions against advertised prefixes, a service claims the prefix it could serve and refuses the rest instead of enumerating broadcasts, and the browser player treats a covering claim as availability
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh `@<uuidv7>` epoch, viewers follow the newest live one, and bare names still resolve on every version
 - [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
+- [Opus DTX](/quest/m0/opus-dtx.md) - voice audio publishes without DTX, so its timeline follows the capture clock through silence
+- [Delay rebuild](/quest/m0/watch-delay-rebuild.md) - a numeric audio delay change keeps the decoder and its ring
 
 ## Related
 

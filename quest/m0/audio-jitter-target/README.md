@@ -75,6 +75,7 @@ buffer against uneven arrivals.
 
 ## Required
 
+- [Opus DTX](/quest/m0/opus-dtx.md) - the acceptance run measures network jitter, not DTX drift
 - [Watch](/quest/m0/audio-jitter-target/watch.md) - js/watch and js/hang bring the #3954 estimator into conformance
 - [Native](/quest/m0/audio-jitter-target/native.md) - rs/moq-audio grows a measured jitter buffer from the same algorithm
 

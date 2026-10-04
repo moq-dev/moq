@@ -40,14 +40,24 @@ QUIC studies there on that rule.
 - [A moq-relay release refuses --cluster-mesh](/quest/m1/relay-mesh-refusal-release.md) - the release that lets the cluster flag shims go
 - [WebTransport close upstream](/quest/m1/wt-close-upstream.md) - web-transport-moq delivers the close capsule itself, and moq-tokio's `CLOSE_LINGER` is deleted
 - [moq announced](/quest/m1/cli-announced.md) - `moq ls` becomes a follow-only live view named `moq announced`, with local-only shell completion
+- [Leave out a role](/quest/m1/cli-no-role.md) - `moq export` and `moq play` accept `--no-video` and `--no-audio`
+- [fMP4 export tracks](/quest/m1/fmp4-export-tracks.md) - fMP4 export keeps audio from before the first keyframe and never writes a track id missing from moov
+- [TS export rewind](/quest/m1/ts-export-rewind.md) - TS export resets the PCR only on a real timebase break, not on a latency skip
 - [Delete the live marker](/quest/m1/announce-live-removal.md) - announce streams yield only route events; the `Live` marker and its hold machinery are gone
 - [Browser close code](/quest/m1/browser-close-code.md) - a playwright case proves the page reads a relay's close code and reason, on every web-transport backend
+- [JS dev mode](/quest/m1/js-dev-mode.md) - net and signals share one dev definition read key by key, the subscriber tripwire warns, and an origin holds one discovery subscription
+- [Stalled hysteresis](/quest/m1/stalled-hysteresis.md) - the catalog `stalled` flag changes only on a sustained stall or recovery, in JS and Rust
+- [Audio graph lifetime](/quest/m1/watch-audio-graph.md) - the watch audio graph survives a rendition leaving the catalog, so a publisher mute keeps the tail and the next start
+- [Audio publish hygiene](/quest/m1/audio-publish-hygiene.md) - audio capture teardown logs nothing, volume 0 mutes within a short ramp, and disabling the encoder ends its epoch
+- [Transient capture errors](/quest/m1/capture-transient-errors.md) - a busy or aborted getUserMedia spends the retry budget; refusals stay terminal
+- [Still screen share](/quest/m1/capture-still-frame.md) - video capture keeps its latest frame, so a still source reaches late joiners
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges in either order and replaces FETCH; relays fill misses by range, including over moq-transport
 - [Live media time](/quest/m1/subscribe-live-time.md) - a lite-07 SUBSCRIBE_OK carries the publisher's current media time, so readers judge a cache against the live edge
 - [Cross-relay bursts](/quest/m1/cross-relay-bursts.md) - bursty small-group tracks cross two relays without lost groups, unanswered FETCHes, or stalls
 - [Late lower groups](/quest/m1/lite-late-lower-group.md) - a moq-lite subscriber with a floor receives a group created below the first served one, as moq-transport does
 - [JS cache window](/quest/m1/js-prune-cache-window.md) - js/net ages idle groups on a cache window and keeps max_age as media-time staleness, as Rust does
+- [JSON stream budget](/quest/m1/json-stream-budget.md) - an oversized JSON stream record is refused without ending the log, and a late JS reader of an aborted track errors
 - [A watch and publish release ships assets()](/quest/m1/assets-release.md) - the release that lets the sites host the worklets
 - [Dogfood hosted worklets](/quest/m1/dogfood-assets.md) - moq.dev and the moq.pro dashboard host the worklets and call `assets()` after the release
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
@@ -122,6 +132,8 @@ QUIC studies there on that rule.
 - [IETF on the ring](/quest/m1/uring-ietf.md) - the io_uring workers serve moq-transport sessions too, so a uring relay drops no client protocol
 - [BBR ACK cleanup](/quest/m1/bbr-ack-cleanup.md) - packet bookkeeping scales with completed entries instead of scanning the flight on every ACK
 - [Perf](/quest/m1/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model
+- [Audio group duration](/quest/m1/audio-group-duration.md) - audio publishers in JS and Rust take a minimum group duration, default one frame
+- [JS group cancel](/quest/m1/js-group-cancel.md) - a JS group read to its FIN allocates no cancel error
 - [#2924](/quest/m1/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - every listener on both runtimes shares one reloadable served identity, so rotation is atomic and generate works with workers
 - [Benchmark regressions in CI](/quest/m1/bench-ci.md) - PRs get a non-blocking comparison of the Criterion benches they affect, and a nightly trend on main alerts on regressions
 - [Benchmark comparisons](/quest/m1/performance-comparisons.md) - retained evidence, repeated paired runs, and uncertainty for performance claims

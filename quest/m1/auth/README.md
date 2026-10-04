@@ -89,6 +89,7 @@ existing lite-06 ALPN.
 
 ## Required
 
+- [WebSocket refusal](/quest/m1/auth/ws-unauthorized.md) - a refused WebSocket token closes the session as Unauthorized, as QUIC does
 - [Lite stream](/quest/m1/auth/lite.md) - both sides of a lite-06 session
   exchange grants over AUTH streams, exposed as `Session::auth()`, and an
   out-of-scope announce aborts the session
