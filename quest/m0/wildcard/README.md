@@ -172,10 +172,11 @@ path, not with a route identity or a generation field.
   Wildcard routing invents neither a lease nor a generation. That quest is
   Required here (decided 2026-10-04), so this line cannot ship with workers
   that can be spliced mid-group.
-- **A serving front stays on its route.** It moves only on failover, never
-  to a cheaper covering route that joins or re-prices (confirmed 2026-10-04).
-  `main` still takes the cheaper route; this line changes that behavior and
-  its tests when it next merges `main`.
+- **A serving front follows the best route.** A join or re-price re-selects
+  every front below the prefix, and a front moves when another route now
+  wins: cheaper, or the rendezvous winner among equal costs (decided
+  2026-10-04, replacing Stay). This is safe because a path is one broadcast
+  and any covering route resumes it (#4741).
 - **No reply Origin.** The lite-07 `Origin` field in SUBSCRIBE_OK and FETCH_OK,
   and the rule that a relay MUST NOT splice across differing Origins, are
   dropped (decided 2026-10-03: nothing needs them for correctness). The line

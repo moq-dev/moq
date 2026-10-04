@@ -4,13 +4,16 @@
 
 A route change under a prefix (join, withdraw, re-price, restale) makes the
 origin driver act only on the fronts that could change their selection:
-fronts still waiting for a source, and fronts the changed route serves or is
-requesting through. Today it wakes every front below the prefix, so one
-equal-cost pool member joining or leaving a prefix that serves 10k paths
-costs the driver 100 to 600 ms of single-threaded work while no front
-switches (`origin/pool_churn`, #4607). A root claim, such as an archive's
-catch-all, makes every front on the relay pay for every change to it. Done
-when `origin/pool_churn` is flat in served paths.
+fronts still waiting for a source, fronts the changed route serves or is
+requesting through, and, on a join or re-price, the serving fronts the
+changed route could now win. Today it wakes every front below the prefix,
+so one equal-cost pool member joining or leaving a prefix that serves 10k
+paths costs the driver 100 to 600 ms of single-threaded work while few
+fronts switch (`origin/pool_churn`, #4607). A root claim, such as an
+archive's catch-all, makes every front on the relay pay for every change to
+it. Done when a leave in `origin/pool_churn` is flat in served paths, and a
+join or re-price costs one cheap rehash per front below the prefix, with
+no `select`, track poll, or deadline scan for a front that keeps its route.
 
 ## Plan
 
@@ -45,20 +48,21 @@ Decisions:
   them when it closes. The lookup walks descendants but skips subtrees whose
   waiting set is empty, keeping cost in woken fronts rather than served
   paths.
-- A serving front stays on its route while it serves, per the wildcard line's
-  Stay decision, so a join or re-price never wakes it; it moves only on
-  failover. (2026-09-30)
+- A serving front follows the best route, per the wildcard line (decided
+  2026-10-04, replacing Stay). A join or re-price must rehash every front
+  below the prefix, since rendezvous moves exactly the paths the changed
+  route now wins; only those fronts re-select. A leave wakes only the fronts
+  the leaver served or was requesting through.
 - Builds on shared-fronts' keying, so the index hangs off the final front
   identity. `origin-front-parks.md` replaces the `routed_broadcast` retry
   loop, one of the watch consumers here; whichever lands second adapts it.
   (2026-09-30)
 
-Verification: `origin/pool_churn` flat in served paths at every pool width
-it already sweeps, and a unit test that counts `select` calls per route
-change and asserts only affected fronts re-select, with zero serving fronts
-for an unrelated route's join and leave, and a parked waiter retrying when a
-deeper advertise-only claim over a served root is withdrawn. Keep
-`pool_resolve` unchanged.
+Verification: `origin/pool_churn` leaves flat in served paths at every pool
+width it already sweeps, and a unit test that counts `select` calls per
+route change: zero for an unrelated route's leave, only the won paths on a
+join, and a parked waiter retrying when a deeper advertise-only claim over a
+served root is withdrawn. Keep `pool_resolve` unchanged.
 
 Public API: none. Wire: none.
 
