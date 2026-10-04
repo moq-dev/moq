@@ -97,6 +97,16 @@ run on the program clock, which starts at the first PCR after the PMT.
 `PID_error` is covered, more strictly, by the access-unit counts above.
 `PCR_accuracy_error` is not measured.
 
+A corrupt media packet, malformed PES header, or damaged codec access unit is
+refused whole and counted in the PID's cumulative `damaged` counter, beside
+`resyncs`, `discarded`, and `unconfirmed`. Ingest continues on every other PID.
+Video closes its group at the break and resumes at its next keyframe, as it does
+after a continuity-counter gap: the pictures in between may reference the lost
+one, so they are dropped rather than decoded with artefacts. Each break freezes
+video for up to one GOP. The shared TS stats log reports each counter increase,
+including at the end of input. Publishing, catalog, and clock errors still end
+the import.
+
 MPEG-TS import takes one program. A multi-program stream is refused before
 anything is published, naming its programs, rather than merged onto one clock;
 a PAT that adds a program mid-stream ends the import the same way.

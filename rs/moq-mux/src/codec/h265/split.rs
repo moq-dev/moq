@@ -228,14 +228,16 @@ impl Split {
 		Ok(())
 	}
 
-	/// Drop any in-flight access unit.
+	/// Drop any in-flight access unit, and any frame completed but not yet returned.
 	///
 	/// Pre-reset NALs would otherwise leak into a later frame with the wrong
-	/// timestamp. The parameter-set cache is kept so subsequent keyframes stay
-	/// self-contained.
+	/// timestamp, and a frame queued before a failed [`decode`](Self::decode) would
+	/// surface on the next call. The parameter-set cache is kept so subsequent
+	/// keyframes stay self-contained.
 	pub fn reset(&mut self) {
 		self.current = Au::default();
 		self.tail.clear();
+		self.pending.clear();
 	}
 
 	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> Result<moq_net::Timestamp> {
