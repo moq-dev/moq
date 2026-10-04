@@ -2348,6 +2348,36 @@ test("requester FIN keeps a draft-19 subscription serving; STOP_SENDING cancels 
 	}
 });
 
+for (const version of [Version.DRAFT_17, Version.DRAFT_18] as const) {
+	test(`requester FIN cancels a ${version.toString(16)} subscription`, async () => {
+		const fx = fixture(version);
+		const track = fx.broadcast.createTrack("video");
+		const client = await Stream.open(fx.pair.client, { version: fx.version });
+		const server = await Stream.accept(fx.pair.server, fx.version);
+		if (!server) throw new Error("missing stream");
+		const serving = fx.pub.runSubscribe(
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 128,
+			}),
+			server,
+		);
+		try {
+			expect(await client.reader.u53()).toBe(SubscribeOk.id);
+			await SubscribeOk.decode(client.reader, fx.version);
+			client.writer.close();
+			await serving;
+			expect(track.subscription.peek()).toBeUndefined();
+		} finally {
+			client.close();
+			track.close();
+			fx.close();
+		}
+	});
+}
+
 test("REQUEST_UPDATE applies priority and preserves it when omitted", async () => {
 	const fx = fixture(Version.DRAFT_19);
 	const track = fx.broadcast.createTrack("video");
