@@ -1122,6 +1122,9 @@ pub(crate) trait Expiry: Send + Sync + std::panic::UnwindSafe + std::panic::RefU
 	/// Return whether the group is stale, registering `waiter` for anything that
 	/// could change the answer while the group remains live.
 	fn is_expired(&self, waiter: &kio::Waiter) -> bool;
+
+	/// Keep the reader's budget and cap while following a replacement track's edge.
+	fn for_track(&self, track: &track::Consumer) -> Arc<dyn Expiry>;
 }
 
 /// The read cursor over a [`Producer`]'s shared state.
@@ -1239,10 +1242,10 @@ impl Consumer {
 				Poll::Ready(Err(err)) => Some(err.clone()),
 				Poll::Pending => None,
 			};
-			if !recover.wants(failed.as_ref()) {
+			if !recover.wants(failed.as_ref(), waiter) {
 				return res;
 			}
-			let group = match recover.poll(self.cursor.index as u64, failed.as_ref(), waiter) {
+			let replacement = match recover.poll(self.cursor.index as u64, failed.as_ref(), waiter) {
 				Poll::Ready(Ok(group)) => group,
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 				Poll::Pending => return Poll::Pending,
@@ -1250,7 +1253,9 @@ impl Consumer {
 			// Same frames by index, so only the channel changes; read progress and the
 			// cap stay this cursor's.
 			let (index, end) = (self.cursor.index, self.cursor.end);
-			self.cursor = group.cursor;
+			recover.adopt(&replacement);
+			self.expiry = self.expiry.as_ref().map(|expiry| expiry.for_track(&replacement.copy));
+			self.cursor = replacement.group.cursor;
 			self.cursor.index = index;
 			self.cursor.end = end;
 		}

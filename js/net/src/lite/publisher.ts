@@ -819,6 +819,8 @@ export class Publisher {
 
 				// Exactly-once arrival-order serving. This synchronous package-internal pop
 				// and frameRange call are the operation's linearization point.
+				// Popping or filtering a group removes the subscriber's view of its edge.
+				const largest = !startSent && hasLargest(this.version) ? track.largest() : undefined;
 				const recv = hooks.tryRecvGroup(track);
 				switch (recv.kind) {
 					case "error":
@@ -829,7 +831,6 @@ export class Publisher {
 						// versions that carry it: a quiet track may not reach that start for a
 						// while, and the subscriber judges what it holds against the answer.
 						if (emitRange && !startSent && hasLargest(this.version) && bounds.startGroup !== undefined) {
-							const largest = track.largest();
 							const startFrame = bounds.startFrame;
 							if (
 								largest !== undefined &&
@@ -900,7 +901,7 @@ export class Publisher {
 						!(await controls.response(
 							encodeSubscribeResponse(
 								stream,
-								{ start: new SubscribeStart(group.sequence, track.largest()) },
+								{ start: new SubscribeStart(group.sequence, largest) },
 								this.version,
 							),
 						))

@@ -731,25 +731,35 @@ impl Consumer {
 				Poll::Pending => None,
 			};
 			let (recover, index) = &mut **recover;
-			if !recover.wants(failed.as_ref()) {
+			if !recover.wants(failed.as_ref(), waiter) {
 				return res;
 			}
-			let mut group = match recover.poll(*index, failed.as_ref(), waiter) {
+			let mut replacement = match recover.poll(*index, failed.as_ref(), waiter) {
 				Poll::Ready(Ok(group)) => group,
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 				Poll::Pending => return Poll::Pending,
 			};
-			// The copy holds the frame's header at least, or it would not have been adopted.
-			let frame = match group.poll_next_frame(waiter) {
+			// A cached group can precede this frame's header. Keep the old generation
+			// until the replacement frame is actually available.
+			if let Some(expiry) = &mut self.expiry {
+				expiry.policy = expiry.policy.for_track(&replacement.copy);
+			}
+			let frame = match replacement.group.poll_next_frame(waiter) {
 				Poll::Ready(Ok(Some(frame))) => frame,
 				Poll::Ready(Ok(None)) => return Poll::Ready(Err(Error::WrongSize)),
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-				Poll::Pending => return Poll::Pending,
+				Poll::Pending => {
+					return match self.poll_expired(waiter) {
+						true => Poll::Ready(Err(Error::Old)),
+						false => Poll::Pending,
+					};
+				}
 			};
 			// Same name, same content: a different size is the routes disagreeing.
 			if frame.info.size != self.info.size {
 				return Poll::Ready(Err(Error::ProtocolViolation));
 			}
+			recover.adopt(&replacement);
 			self.state = frame.state;
 			self.source = frame.source;
 		}

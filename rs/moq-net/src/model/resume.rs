@@ -219,7 +219,7 @@ struct Copy {
 	/// The group channel ran out.
 	done: Option<Result<()>>,
 	/// The datagram channel ran out.
-	datagrams_done: bool,
+	datagrams_done: Option<Result<()>>,
 	/// The newest datagram handed out before this copy was subscribed: a copy that
 	/// buffers datagrams replays them, and those were already handed out.
 	datagrams_seen: Option<u64>,
@@ -433,7 +433,7 @@ impl Reader {
 			floor,
 			until: None,
 			done: None,
-			datagrams_done: false,
+			datagrams_done: None,
 			datagrams_seen: self.datagram,
 			lease: Arc::new(()),
 		});
@@ -596,17 +596,18 @@ impl Reader {
 
 	fn poll_datagram_once(&mut self, waiter: &kio::Waiter) -> Option<Poll<Result<Option<Datagram>>>> {
 		self.sync(waiter);
+		self.let_go();
 		let groups = self.groups;
 		for index in (0..self.copies.len()).rev() {
 			loop {
 				let copy = &mut self.copies[index];
-				if copy.datagrams_done || copy.until.is_some() {
+				if copy.datagrams_done.is_some() || copy.until.is_some() {
 					break;
 				}
 				let sub = match copy.poll_ready(groups, waiter) {
 					Poll::Pending => break,
-					Poll::Ready(Err(_)) => {
-						copy.datagrams_done = true;
+					Poll::Ready(Err(err)) => {
+						copy.datagrams_done = Some(Err(err));
 						break;
 					}
 					Poll::Ready(Ok(sub)) => sub,
@@ -620,16 +621,21 @@ impl Reader {
 						self.datagram = self.datagram.max(Some(datagram.sequence));
 						return Some(Poll::Ready(Ok(Some(datagram))));
 					}
-					Poll::Ready(Ok(None) | Err(_)) => {
-						copy.datagrams_done = true;
+					Poll::Ready(Ok(None)) => {
+						copy.datagrams_done = Some(match copy.track.poll_complete(&kio::Waiter::noop()) {
+							Poll::Ready(end) => end,
+							Poll::Pending => Ok(()),
+						});
+						break;
+					}
+					Poll::Ready(Err(err)) => {
+						copy.datagrams_done = Some(Err(err));
 						break;
 					}
 				}
 			}
 		}
-		self.poll_end(waiter, |copy| {
-			copy.datagrams_done.then(|| copy.done.clone().unwrap_or(Ok(())))
-		})
+		self.poll_end(waiter, |copy| copy.datagrams_done.clone())
 	}
 
 	fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
@@ -749,7 +755,7 @@ impl Recover {
 	/// Whether to look past the copy being read: it stalled while a newer route serves, or
 	/// it failed without a verdict on the group. Only a route that serves can refuse a
 	/// group on purpose (it is too old, evicted, or the application said so).
-	pub(crate) fn wants(&self, err: Option<&Error>) -> bool {
+	pub(crate) fn wants(&self, err: Option<&Error>, waiter: &kio::Waiter) -> bool {
 		let verdict = err.is_some_and(|err| {
 			matches!(
 				StreamError::from(err),
@@ -758,12 +764,8 @@ impl Recover {
 		});
 		match err {
 			Some(_) if !verdict || copy_failed(&self.copy) => true,
-			_ => self.replaced(),
+			_ => self.route.poll_changed(self.generation, waiter).is_ready(),
 		}
-	}
-
-	fn replaced(&self) -> bool {
-		self.route.state.read().generation != self.generation
 	}
 
 	/// Poll for the serving route's copy of the group, positioned at frame `index`.
@@ -775,7 +777,7 @@ impl Recover {
 		index: u64,
 		failed: Option<&Error>,
 		waiter: &kio::Waiter,
-	) -> Poll<Result<group::Consumer>> {
+	) -> Poll<Result<Replacement>> {
 		// Subscribe the reader to a new route from its newest group, which is this one or
 		// later, so that route's subscription delivers the rest of it.
 		if let Some(reader) = self.reader.upgrade() {
@@ -794,6 +796,9 @@ impl Recover {
 			// Registered before looking, so a route change from here on wakes the reader.
 			if self.route.poll_changed(generation, waiter).is_ready() && end.is_none() && !closed {
 				continue;
+			}
+			if let Some(Err(err)) = &end {
+				return Poll::Ready(Err(err.clone()));
 			}
 			let Some(serving) = serving else {
 				// Nothing serves: a failed copy waits for a route, unless none will come.
@@ -817,6 +822,12 @@ impl Recover {
 					_ => err.clone(),
 				}));
 			}
+			if res.is_pending()
+				&& let Some(budget) = self.budget()
+				&& serving.poll_stale(self.sequence, budget, waiter).is_ready()
+			{
+				return Poll::Ready(Err(Error::Old));
+			}
 			return res;
 		}
 	}
@@ -829,14 +840,18 @@ impl Recover {
 		index: u64,
 		failed: Option<&Error>,
 		waiter: &kio::Waiter,
-	) -> Poll<Result<group::Consumer>> {
+	) -> Poll<Result<Replacement>> {
 		// A newer copy's subscription delivered it: continue from there. The copy that
 		// failed delivered it already, so its subscription will not again.
 		let same = generation == self.generation;
 		if !same && let Poll::Ready(Some(mut group)) = serving.poll_group(self.sequence, waiter) {
 			group.start_at(index);
 			if group.index() == index {
-				return Poll::Ready(Ok(self.adopt(generation, serving, group)));
+				return Poll::Ready(Ok(Replacement {
+					group,
+					generation,
+					copy: serving.clone(),
+				}));
 			}
 		}
 
@@ -856,7 +871,11 @@ impl Recover {
 				Ok(mut group) => {
 					group.start_at(index);
 					if group.index() == index {
-						return Poll::Ready(Ok(self.adopt(generation, serving, group)));
+						return Poll::Ready(Ok(Replacement {
+							group,
+							generation,
+							copy: serving.clone(),
+						}));
 					}
 					*fetch = Fetch::Refused(Error::NotFound);
 					Error::NotFound
@@ -877,13 +896,7 @@ impl Recover {
 		if failed.is_some() && (same || serving.poll_group(self.sequence, waiter).is_ready()) {
 			return Poll::Ready(Err(err));
 		}
-		// A replaced route that went quiet holds it until the reader would skip it anyway,
-		// judged against the serving route's live edge rather than the quiet one's.
-		if let Some(budget) = self.budget()
-			&& serving.poll_stale(self.sequence, budget, waiter).is_ready()
-		{
-			return Poll::Ready(Err(Error::Old));
-		}
+
 		Poll::Pending
 	}
 
@@ -895,14 +908,29 @@ impl Recover {
 		Some(reader.mirrored.max_age)
 	}
 
-	fn adopt(&mut self, generation: u64, copy: &track::Consumer, group: group::Consumer) -> group::Consumer {
-		self.generation = generation;
-		self.copy = copy.clone();
-		// The serving copy is subscribed anyway: the replaced one is no longer needed.
-		self.lease = None;
+	/// Commit the replacement only once the caller has acquired its cursor or frame.
+	pub(crate) fn adopt(&mut self, replacement: &Replacement) {
+		self.generation = replacement.generation;
+		self.copy = replacement.copy.clone();
+		// A later switch must keep this copy subscribed while the recovered group
+		// still reads it, just like a group handed out from that copy directly.
+		self.lease = self.reader.upgrade().and_then(|reader| {
+			let reader = reader.lock().expect("reader poisoned");
+			reader
+				.copies
+				.iter()
+				.find(|copy| copy.generation == replacement.generation)
+				.map(|copy| copy.lease.clone())
+		});
 		self.fetch = None;
-		group
 	}
+}
+
+/// A candidate cursor, committed only when the requested read can use it.
+pub(crate) struct Replacement {
+	pub(crate) group: group::Consumer,
+	pub(crate) copy: track::Consumer,
+	generation: u64,
 }
 
 /// A fetch of one group through whichever route serves the logical track.
@@ -933,11 +961,23 @@ impl kio::Task for Fetching {
 					}
 				};
 			};
+			if self.route.poll_changed(generation, waiter).is_ready() && self.route.end().is_none() {
+				continue;
+			}
 			if self.pending.as_ref().is_none_or(|(asked, _)| *asked != generation) {
 				self.pending = Some((generation, serving.fetch_group(self.sequence, self.options.clone())));
 			}
 			let (_, pending) = self.pending.as_mut().expect("asked above");
-			return match ready!(kio::Task::poll(&mut **pending, waiter)) {
+			let result = match kio::Task::poll(&mut **pending, waiter) {
+				Poll::Ready(result) => result,
+				Poll::Pending => {
+					return match self.route.end() {
+						Some(Some(Err(err))) => Poll::Ready(Err(err)),
+						_ => Poll::Pending,
+					};
+				}
+			};
+			return match result {
 				Ok(group) => Poll::Ready(Ok(group.with_recover(Recover {
 					sequence: self.sequence,
 					reader: Weak::new(),
@@ -1190,5 +1230,275 @@ mod test {
 		routes.serve(b.consume());
 		assert_eq!(recv(&mut sub), Some(3));
 		assert_eq!(recv(&mut sub), None);
+	}
+
+	#[derive(Default)]
+	struct Wake(std::sync::atomic::AtomicBool);
+
+	impl std::task::Wake for Wake {
+		fn wake(self: Arc<Self>) {
+			self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+		}
+	}
+
+	#[test]
+	fn a_parked_group_wakes_when_the_route_changes() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+		let _open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut reading = recv(&mut sub);
+		let wake = Arc::new(Wake::default());
+		let waiter = kio::Waiter::new(wake.clone().into());
+		assert!(reading.poll_read_frame(&waiter).is_pending());
+		let b = copy();
+		routes.serve(b.consume());
+		assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed));
+	}
+
+	#[test]
+	fn a_half_read_frame_waits_for_the_replacement_header() {
+		for arrives in [true, false] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_secs(10));
+			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+			let mut frame = open
+				.create_frame(crate::frame::Info {
+					size: 4,
+					timestamp: ts(0),
+				})
+				.unwrap();
+			frame.write(b"ab".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			let mut chunks = reading.next_frame().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(
+				&chunks.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..],
+				b"ab"
+			);
+
+			let b = copy();
+			let mut replacement = b.create_group(group::Info { sequence: 0 }).unwrap();
+			routes.serve(b.consume());
+			assert!(chunks.read_chunk().now_or_never().is_none());
+			if !arrives {
+				for sequence in 1..=4 {
+					let mut group = b.create_group(group::Info { sequence }).unwrap();
+					group.write_frame(ts(sequence * 10_000), b"new".as_ref()).unwrap();
+					group.finish().unwrap();
+				}
+				assert!(matches!(chunks.read_chunk().now_or_never(), Some(Err(Error::Old))));
+				continue;
+			}
+			replacement.write_frame(ts(0), b"abcd".as_ref()).unwrap();
+			assert_eq!(
+				&chunks
+					.read_chunk()
+					.now_or_never()
+					.expect("replacement header arrived")
+					.unwrap()
+					.unwrap()[..],
+				b"cd"
+			);
+		}
+	}
+
+	#[test]
+	fn recovered_groups_and_frames_expire_against_the_new_route() {
+		for partial in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_secs(2));
+			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+			let mut frame = open
+				.create_frame(crate::frame::Info {
+					size: 4,
+					timestamp: ts(0),
+				})
+				.unwrap();
+			frame.write(b"a".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			let mut chunks = reading.next_frame().now_or_never().unwrap().unwrap().unwrap();
+			assert!(chunks.read_chunk().now_or_never().unwrap().is_ok());
+
+			let b = copy();
+			let mut replacement = b.create_group(group::Info { sequence: 0 }).unwrap();
+			let mut replacement_frame = replacement
+				.create_frame(crate::frame::Info {
+					size: 4,
+					timestamp: ts(0),
+				})
+				.unwrap();
+			replacement_frame.write(b"ab".as_ref()).unwrap();
+			routes.serve(b.consume());
+			assert_eq!(&chunks.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..], b"b");
+			// Transfer the group cursor too, while its next frame is still pending.
+			assert!(reading.read_frame().now_or_never().is_none());
+			for sequence in 1..=4 {
+				let mut next = b.create_group(group::Info { sequence }).unwrap();
+				next.write_frame(ts(sequence * 1000), b"x".as_ref()).unwrap();
+				next.finish().unwrap();
+			}
+			if partial {
+				assert!(matches!(chunks.read_chunk().now_or_never(), Some(Err(Error::Old))));
+			} else {
+				assert!(matches!(reading.read_frame().now_or_never(), Some(Ok(None))));
+			}
+		}
+	}
+
+	#[test]
+	fn a_pending_fetch_wakes_and_moves_to_the_new_route() {
+		let routes = Producer::new();
+		let a = copy();
+		let dynamic = a.dynamic();
+		routes.serve(a.consume());
+		let mut fetching = routes.consume().fetch_group(0, group::Fetch::default());
+		let wake = Arc::new(Wake::default());
+		let waiter = kio::Waiter::new(wake.clone().into());
+		assert!(kio::Task::poll(&mut fetching, &waiter).is_pending());
+		let _request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		wake.0.store(false, std::sync::atomic::Ordering::Relaxed);
+		let b = copy();
+		let mut group = b.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(ts(0), b"b".as_ref()).unwrap();
+		group.finish().unwrap();
+		routes.serve(b.consume());
+		assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed));
+		assert!(matches!(kio::Task::poll(&mut fetching, &waiter), Poll::Ready(Ok(_))));
+	}
+
+	#[test]
+	fn a_pending_recovery_fetch_does_not_disable_expiry() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(2));
+		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		open.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+		let b = copy();
+		let _dynamic = b.dynamic();
+		routes.serve(b.consume());
+		assert!(reading.read_frame().now_or_never().is_none());
+		for sequence in 1..=4 {
+			let mut group = b.create_group(group::Info { sequence }).unwrap();
+			group.write_frame(ts(sequence * 1000), b"b".as_ref()).unwrap();
+			group.finish().unwrap();
+		}
+		assert!(matches!(reading.read_frame().now_or_never(), Some(Err(Error::Old))));
+	}
+
+	#[test]
+	fn a_fetched_group_wakes_when_the_route_changes() {
+		let routes = Producer::new();
+		let a = copy();
+		let _open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		routes.serve(a.consume());
+		let mut reading = kio::Pending::new(routes.consume().fetch_group(0, group::Fetch::default()))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		let wake = Arc::new(Wake::default());
+		let waiter = kio::Waiter::new(wake.clone().into());
+		assert!(reading.poll_read_frame(&waiter).is_pending());
+		routes.serve(copy().consume());
+		assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed));
+	}
+
+	#[test]
+	fn ending_the_front_releases_a_stalled_group() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+		let _open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut reading = recv(&mut sub);
+		assert!(reading.read_frame().now_or_never().is_none());
+		routes.end(Err(Error::Unroutable));
+		assert!(matches!(
+			reading.read_frame().now_or_never(),
+			Some(Err(Error::Unroutable))
+		));
+	}
+
+	#[test]
+	fn a_datagram_route_failure_waits_for_replacement() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+		a.abort(Error::Dropped).unwrap();
+		assert!(sub.recv_datagram().now_or_never().is_none());
+		let mut b = copy();
+		routes.serve(b.consume());
+		b.insert_datagram(1, ts(0), b"b".as_ref()).unwrap();
+		assert_eq!(
+			sub.recv_datagram().now_or_never().unwrap().unwrap().unwrap().sequence,
+			1
+		);
+	}
+
+	#[test]
+	fn datagram_readers_release_replaced_subscriptions() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+		let b = copy();
+		routes.serve(b.consume());
+		assert!(sub.recv_datagram().now_or_never().is_none());
+		let readers = routes.readers.lock().unwrap();
+		let reader = readers[0].upgrade().unwrap();
+		assert_eq!(reader.lock().unwrap().copies.len(), 1);
+	}
+
+	#[test]
+	fn ending_the_front_releases_a_pending_fetch() {
+		let routes = Producer::new();
+		let a = copy();
+		let _dynamic = a.dynamic();
+		routes.serve(a.consume());
+		let mut fetching = routes.consume().fetch_group(0, group::Fetch::default());
+		let waiter = kio::Waiter::noop();
+		assert!(kio::Task::poll(&mut fetching, &waiter).is_pending());
+		routes.end(Err(Error::Unroutable));
+		assert!(matches!(
+			kio::Task::poll(&mut fetching, &waiter),
+			Poll::Ready(Err(Error::Unroutable))
+		));
+	}
+
+	#[test]
+	fn a_recovered_group_keeps_its_new_copy_subscribed_during_another_switch() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+		let _open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut reading = recv(&mut sub);
+		let b = copy();
+		let mut replacement = b.create_group(group::Info { sequence: 0 }).unwrap();
+		replacement.write_frame(ts(0), b"b".as_ref()).unwrap();
+		routes.serve(b.consume());
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+		let c = copy();
+		routes.serve(c.consume());
+		assert!(sub.recv_group().now_or_never().is_none());
+		let readers = routes.readers.lock().unwrap();
+		let reader = readers[0].upgrade().unwrap();
+		assert!(reader.lock().unwrap().copies.iter().any(|copy| copy.generation == 2));
 	}
 }

@@ -3148,6 +3148,15 @@ struct GroupExpiry {
 }
 
 impl group::Expiry for GroupExpiry {
+	fn for_track(&self, track: &Consumer) -> Arc<dyn group::Expiry> {
+		Arc::new(Self {
+			state: track.state.weak(),
+			subscription: self.subscription.clone(),
+			cap: self.cap.clone(),
+			sequence: self.sequence,
+		})
+	}
+
 	fn is_expired(&self, waiter: &kio::Waiter) -> bool {
 		let mut max_age = Duration::default();
 		let _ = self.subscription.poll(waiter, |subscription| {
