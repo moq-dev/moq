@@ -27,7 +27,7 @@ BEGIN {
 	else { print "samples.sh: unknown language " lang > "/dev/stderr"; exit 2 }
 	comment = (lang == "python") ? "#" : "//"
 }
-FNR == 1 { inside = 0 }
+FNR == 1 { inside = 0; import_block = 0 }
 !inside && $0 ~ ("^```" lang "([ \t]|$)") {
 	inside = 1
 	skip = ($0 ~ /[ \t]ignore([ \t]|$)/)
@@ -39,7 +39,7 @@ FNR == 1 { inside = 0 }
 	next
 }
 inside && /^```/ {
-	inside = 0
+	inside = 0; import_block = 0
 	if (!skip) body[++nbody] = closer
 	next
 }
