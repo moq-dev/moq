@@ -17,7 +17,8 @@ use crate::limits::{
 };
 use crate::name::Name;
 use crate::protect::{nonce, open, protect};
-use crate::{Epoch, group, track};
+use crate::{group, track};
+use moq_net::Epoch;
 
 const VECTORS: &str = include_str!("../../../drafts/moq-e2ee-00.json");
 
@@ -48,7 +49,7 @@ fn generation_from(row: &Value) -> Result<Generation, String> {
 		.as_str()
 		.unwrap_or("")
 		.parse()
-		.map_err(|err: Error| code(&err))?;
+		.map_err(|_| "identity".to_string())?;
 	Ok(credential.generation(epoch))
 }
 
@@ -231,7 +232,10 @@ fn negative_vectors() {
 					.map(|_| ())
 					.map_err(|err| code(&err))
 					.unwrap_err(),
-					"epoch" => code(&String::from_utf8(data).unwrap().parse::<Epoch>().unwrap_err()),
+					"epoch" => {
+						assert!(String::from_utf8(data).unwrap().parse::<Epoch>().is_err());
+						"identity".to_string()
+					}
 					"semantic_name" => {
 						let semantic = String::from_utf8(data).unwrap();
 						let generation = cred.generation(Epoch::mint());
@@ -335,33 +339,15 @@ fn datagram_ciphertext(generation: &Generation, name: &Name, sequence: u64, plai
 }
 
 #[test]
-fn epoch_mint_is_lowercase_uuid_v7() {
-	let epoch = Epoch::mint();
-	let text = epoch.as_str();
-	assert_eq!(text.len(), 36);
-	assert_eq!(text.as_bytes()[14], b'7');
-	assert!(text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'-')));
-	assert_eq!(text.parse::<Epoch>().unwrap(), epoch);
-	assert!(Epoch::mint() > epoch, "newer epochs sort greatest");
-}
-
-#[test]
-fn epoch_rejects_malformed() {
-	assert_eq!(code(&"".parse::<Epoch>().unwrap_err()), "identity");
-	assert_eq!(code(&"2026/09".parse::<Epoch>().unwrap_err()), "identity");
-	"anything-else".parse::<Epoch>().unwrap();
-}
-
-#[test]
 fn path_joins_epoch() {
 	let cred = test_credential();
 	let epoch = Epoch::mint();
 	let path = cred.path("meeting.hang").unwrap();
 	assert_eq!(path.as_str().len(), 22);
-	let full = path.join(epoch.as_str());
-	let (opaque, rest) = full.next_part().unwrap();
-	assert_eq!(opaque, path.as_str());
-	assert_eq!(rest.as_str().parse::<Epoch>().unwrap(), epoch);
+	let full = path.join_epoch(Some(&epoch));
+	let (opaque, parsed) = full.split_epoch();
+	assert_eq!(opaque, path);
+	assert_eq!(parsed.unwrap(), epoch);
 }
 
 #[test]

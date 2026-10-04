@@ -41,6 +41,5 @@ its race still needs an owner.
 
 Public API: breaking in moq-net and `@moq/net`. Wire: none.
 
-## Related
-
-- [IETF FETCH abandonment](/quest/m1/ietf-fetch-abandonment.md) - first new consumer of group request demand; can ship on `poll_unused` without waiting for this
+Migrate the IETF FETCH cancellation's request watch from `poll_unused` to
+`demand().poll_unused` along with the other handlers.

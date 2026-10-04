@@ -8,7 +8,7 @@ repository = "https://github.com/moq-dev/moq"
 # src/rml/LICENSE and applies to that module regardless of which option you pick.
 license = "MIT OR Apache-2.0"
 
-version = "0.3.9"
+version = "0.3.10"
 edition = "2024"
 rust-version.workspace = true
 
@@ -53,9 +53,14 @@ tokio-rustls = { workspace = true, optional = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 # The RTMPS test borrows moq-tokio's self-signed cert generation to build a
 # `rustls::ServerConfig`. No transport feature: a QUIC backend here would be
 # unified into every other crate a `--workspace` build selects, which is exactly
 # what hid moq-tokio's backend-less build from the nightly feature matrix.
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["aws-lc-rs"] }
 tokio = { workspace = true, features = ["test-util"] }
+
+[[bench]]
+name = "chunk_interleaving"
+harness = false
