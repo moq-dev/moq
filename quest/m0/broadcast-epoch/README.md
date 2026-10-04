@@ -52,7 +52,9 @@ Decided:
   prefix route. Document this rather than promise it works.
 - Publishers on the default publish path, such as moq-boy and moq-room,
   inherit the epoch from Origin. moq-stats mints its own through
-  [Stats epochs](/quest/m1/stats-epoch.md).
+  [Stats epochs](/quest/m1/stats-epoch.md), which is outside the release
+  gate: until it lands, a restarted stats node under a reused name can stall
+  its viewers the same way.
 - Derived output mirrors the epoch it came from
   (`.pro/transcode/<pid>/foo.hang/@e`, per the
   [wildcard](/quest/m0/wildcard/README.md) line's derived-output layout), so

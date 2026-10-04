@@ -169,7 +169,9 @@ path, not with a route identity or a generation field.
   Two workers at one path are then one broadcast, and a relay moving between
   them does so at a group boundary (decided 2026-10-03: #4741 drops
   first-hop identity, so routing can no longer tell two workers apart).
-  Wildcard routing invents neither a lease nor a generation.
+  Wildcard routing invents neither a lease nor a generation. Ship-order
+  risk: until that m1 quest lands, two workers at one path can still be
+  spliced mid-group.
 - **No reply Origin.** The lite-07 `Origin` field in SUBSCRIBE_OK and FETCH_OK,
   and the rule that a relay MUST NOT splice across differing Origins, are
   dropped (decided 2026-10-03: nothing needs them for correctness). The line
