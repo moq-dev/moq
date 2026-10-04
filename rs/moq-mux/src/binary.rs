@@ -668,14 +668,13 @@ mod test {
 
 		#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 		struct Mavlink {
-			#[serde(flatten)]
-			binary: BinaryConfig,
+			config: BinaryConfig,
 			sysid: u8,
 		}
 
 		impl AsMut<BinaryConfig> for Mavlink {
 			fn as_mut(&mut self) -> &mut BinaryConfig {
-				&mut self.binary
+				&mut self.config
 			}
 		}
 
@@ -695,19 +694,19 @@ mod test {
 			}
 			fn estimate(&self) -> Estimate {
 				Estimate::default()
-					.with_bitrate(self.binary.bitrate)
-					.with_jitter(self.binary.jitter)
+					.with_bitrate(self.config.bitrate)
+					.with_jitter(self.config.jitter)
 			}
 			fn set_estimate(&mut self, estimate: Estimate) {
-				self.binary.bitrate = estimate.bitrate;
-				self.binary.jitter = estimate.jitter;
+				self.config.bitrate = estimate.bitrate;
+				self.config.jitter = estimate.jitter;
 			}
 		}
 
 		fn mavlink(sysid: u8) -> Mavlink {
-			let mut binary = BinaryConfig::new(Mode::Snapshot);
-			binary.compression = Some(Compression::Deflate);
-			Mavlink { binary, sysid }
+			let mut config = BinaryConfig::new(Mode::Snapshot);
+			config.compression = Some(Compression::Deflate);
+			Mavlink { config, sysid }
 		}
 
 		fn catalog() -> (moq_net::broadcast::Producer, crate::catalog::Producer<Ext>) {
@@ -733,11 +732,11 @@ mod test {
 			let published = consumer.next().await.unwrap().expect("catalog published");
 			let entry = published.ext.mavlink.get("telemetry").expect("missing entry");
 			assert_eq!(entry.sysid, 7, "the application's fields survive");
-			assert_eq!(entry.binary.mode, Mode::Stream, "the producer fixes the mode");
-			assert_eq!(entry.binary.compression, Some(Compression::Deflate));
+			assert_eq!(entry.config.mode, Mode::Stream, "the producer fixes the mode");
+			assert_eq!(entry.config.compression, Some(Compression::Deflate));
 			assert!(published.binary.tracks.is_empty(), "not listed in the binary section");
 
-			let mut reader = crate::catalog::Entry::new("telemetry", &entry.binary)
+			let mut reader = crate::catalog::Entry::new("telemetry", &entry.config)
 				.subscribe(&source)
 				.await
 				.unwrap();
@@ -780,7 +779,7 @@ mod test {
 		fn an_unknown_compression_is_refused() {
 			let (mut broadcast, catalog) = catalog();
 			let mut entry = mavlink(1);
-			entry.binary.compression = Some(Compression::Unknown("zstd".to_string()));
+			entry.config.compression = Some(Compression::Unknown("zstd".to_string()));
 
 			assert!(matches!(
 				catalog.binary_stream(track(&mut broadcast, "telemetry"), entry),
@@ -795,7 +794,7 @@ mod test {
 		fn a_broadcast_reference_is_refused() {
 			let (mut broadcast, catalog) = catalog();
 			let mut entry = mavlink(1);
-			entry.binary.broadcast = Some(moq_net::path::RelativeOwned::new("source"));
+			entry.config.broadcast = Some(moq_net::path::RelativeOwned::new("source"));
 
 			assert!(matches!(
 				catalog.binary_stream(track(&mut broadcast, "telemetry"), entry),
@@ -819,8 +818,8 @@ mod test {
 			}
 
 			let entry = &catalog.snapshot().ext.mavlink["telemetry"];
-			assert_eq!(entry.binary.bitrate, Some(1_000_000));
-			assert_eq!(entry.binary.jitter, None, "write spacing is not a flush delay");
+			assert_eq!(entry.config.bitrate, Some(1_000_000));
+			assert_eq!(entry.config.jitter, None, "write spacing is not a flush delay");
 		}
 
 		/// A supplied bitrate is authoritative, while a capture time still measures jitter and delay.
@@ -828,7 +827,7 @@ mod test {
 		fn a_supplied_bitrate_is_kept() {
 			let (mut broadcast, catalog) = catalog();
 			let mut entry = mavlink(1);
-			entry.binary.bitrate = Some(64_000);
+			entry.config.bitrate = Some(64_000);
 			let mut telemetry = catalog
 				.binary_stream(track(&mut broadcast, "telemetry"), entry)
 				.unwrap();
@@ -843,9 +842,9 @@ mod test {
 			}
 
 			let entry = &catalog.snapshot().ext.mavlink["telemetry"];
-			assert_eq!(entry.binary.bitrate, Some(64_000));
-			assert_eq!(entry.binary.jitter, Some(std::time::Duration::from_millis(10)));
-			assert_eq!(catalog.snapshot().ext.mavlink["telemetry"].binary.bitrate, Some(64_000));
+			assert_eq!(entry.config.bitrate, Some(64_000));
+			assert_eq!(entry.config.jitter, Some(std::time::Duration::from_millis(10)));
+			assert_eq!(catalog.snapshot().ext.mavlink["telemetry"].config.bitrate, Some(64_000));
 		}
 	}
 }

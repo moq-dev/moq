@@ -169,9 +169,14 @@ path, not with a route identity or a generation field.
   Two workers at one path are then one broadcast, and a relay moving between
   them does so at a group boundary (decided 2026-10-03: #4741 drops
   first-hop identity, so routing can no longer tell two workers apart).
-  Wildcard routing invents neither a lease nor a generation. Ship-order
-  risk: until that m1 quest lands, two workers at one path can still be
-  spliced mid-group.
+  Wildcard routing invents neither a lease nor a generation. That quest is
+  Required here (decided 2026-10-04), so this line cannot ship with workers
+  that can be spliced mid-group.
+- **A serving front follows the best route.** A join or re-price re-selects
+  every front below the prefix, and a front moves when another route now
+  wins: cheaper, or the rendezvous winner among equal costs (decided
+  2026-10-04, replacing Stay). This is safe because a path is one broadcast
+  and any covering route resumes it (#4741).
 - **No reply Origin.** The lite-07 `Origin` field in SUBSCRIBE_OK and FETCH_OK,
   and the rule that a relay MUST NOT splice across differing Origins, are
   dropped (decided 2026-10-03: nothing needs them for correctness). The line
@@ -210,13 +215,15 @@ announcement shadows it. A claim names no generation, so a client that must
 distinguish recording generations reads the catalog's archive entry
 ([archive](/quest/m1/archive/README.md)) rather than announce state.
 
+## Required
+
+- [Transcoders start at group boundaries](/quest/m1/transcode-group-start.md) - two claim workers at one path are one broadcast, so a relay never splices them mid-group
+
 ## Related
 
 - [archive](/quest/m1/archive/README.md) - an archive claims the root, and its
   catalog names the generations a claim cannot
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - derived output
   mirrors the source path, `@<epoch>` segment included
-- [Transcoders start at group boundaries](/quest/m1/transcode-group-start.md) -
-  what makes two claim workers at one path interchangeable
 - [Announcement shapes](/quest/m2/announce-shapes.md) - moq-lite-only exact,
   suffix, and prefix+suffix claims that survive relay hops

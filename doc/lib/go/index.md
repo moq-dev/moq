@@ -18,6 +18,8 @@ go get moq.dev/moq@latest
 ```
 
 ```go
+import "fmt"
+import "log"
 import "moq.dev/moq"
 
 // Subscribe. The iterator is live, so run it in its own goroutine.

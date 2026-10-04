@@ -83,6 +83,10 @@ jobs:
         env:
           NEXTEST_PROFILE: ci
 
+      - name: Audio mixer benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs bench-playback
+
       # A single route re-price should expose any slope over the route table or
       # over independent observers of the new live broadcast map.
       - name: JS origin broadcast map benchmark
@@ -297,7 +301,7 @@ jobs:
         run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
         shell: bash -leo pipefail {0}
       - name: Audio quality
-        run: nix develop --command just test audio-quality --enforce
+        run: nix develop --command just test audio-quality --enforce --capture
         shell: bash -leo pipefail {0}
         env:
           # Somewhere upload-artifact can reach; the harness default is under $TMPDIR.

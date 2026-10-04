@@ -2,9 +2,9 @@
 //! mapped into the HTTP/3 WebTransport code space, so other raw QUIC MoQ stacks
 //! read it.
 //!
-//! The peer here is a plain QUIC client. A moq-lite server refuses a uni stream opened
-//! ahead of the SETUP with STOP_SENDING, and the client reads that code off the wire.
-//! moq-transport holds such a stream instead, but its codes take the same raw session.
+//! The peer here is a plain QUIC client. A moq-lite server cancels a GROUP stream for a
+//! subscription it never made with STOP_SENDING, and the client reads that code off the
+//! wire. moq-transport codes take the same raw session.
 
 #![cfg(feature = "noq")]
 
@@ -12,8 +12,8 @@ use std::{sync::Arc, time::Duration};
 
 use web_transport_moq::noq;
 
-/// moq-lite sends INTERNAL_ERROR (0x0) for a refused stream.
-const REFUSED: u32 = 0x0;
+/// moq-lite sends CANCEL (0x1) for a group it has no subscription for.
+const CANCEL: u32 = 0x1;
 
 struct Server {
 	port: u16,
@@ -66,8 +66,8 @@ async fn serve() -> Server {
 	}
 }
 
-/// Dial the server over raw QUIC with `alpn`, open a uni stream that is not a SETUP,
-/// and return the code the server stopped it with.
+/// Dial the server over raw QUIC with `alpn`, send an empty SETUP and a GROUP for an
+/// unknown subscription, and return the code the server stopped the GROUP with.
 async fn refused_code(server: &Server, alpn: &str) -> Option<noq::VarInt> {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -90,9 +90,14 @@ async fn refused_code(server: &Server, alpn: &str) -> Option<noq::VarInt> {
 		.await
 		.expect("handshake");
 
-	// A group stream, which moq-lite refuses before the SETUP.
+	// SETUP type, then a one-byte message holding zero parameters.
+	let mut setup = conn.open_uni().await.expect("open");
+	setup.write_all(&[0x01, 0x01, 0x00]).await.expect("write");
+	setup.finish().expect("finish");
+
+	// GROUP type, then a three-byte header: subscribe 7, sequence 0, frame start 0.
 	let mut send = conn.open_uni().await.expect("open");
-	send.write_all(&[0x00]).await.expect("write");
+	send.write_all(&[0x00, 0x03, 0x07, 0x00, 0x00]).await.expect("write");
 
 	tokio::time::timeout(Duration::from_secs(10), send.stopped())
 		.await
@@ -103,5 +108,5 @@ async fn refused_code(server: &Server, alpn: &str) -> Option<noq::VarInt> {
 #[tokio::test]
 async fn a_refused_stream_code_is_not_mapped() {
 	let server = serve().await;
-	assert_eq!(refused_code(&server, "moq-lite-06").await, Some(REFUSED.into()));
+	assert_eq!(refused_code(&server, "moq-lite-06").await, Some(CANCEL.into()));
 }

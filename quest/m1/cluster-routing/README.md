@@ -81,8 +81,6 @@ vector the 2026-09-30 cache-tiers audit kept:
 
 Kept from 2026-09-30: core links are configured and may skip PoPs; Warm and
 Cold collapse to one cost ([One route cost](/quest/m1/route-cost.md));
-cluster links are moq-lite only
-([moq-transport peers are plain clients](/quest/m1/ietf-cluster-off.md));
 `--hop` removal and One route cost land on their own. Decided 2026-10-03: a
 concrete path is a source's identity, whoever serves it
 ([Selection](/quest/m1/cluster-routing/selection.md)).
