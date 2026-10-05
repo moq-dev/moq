@@ -2,16 +2,18 @@
 
 ## Goal
 
-`@moq/publish` can enable Opus DTX again: every encoded chunk is published at
-its input's capture time even when the encoder suppresses silent frames, and
-a listener plays it on that timeline, so voice saves bandwidth during silence
-without skewing jitter estimates.
+Opus DTX is correct in `@moq/publish` and on again by default for voice:
+every encoded chunk is published at its input's capture time even when the
+encoder suppresses silent frames, and a listener plays it on that timeline, so
+voice saves bandwidth during silence without skewing jitter estimates.
 
 ## Plan
 
 Chromium stamps encoder output as the first input timestamp plus the samples
-it emitted, so suppressed frames pull later chunks earlier. The
-[stopgap](/quest/m0/opus-dtx.md) removes DTX until this lands.
+it emitted, so suppressed frames pull later chunks earlier. DTX is off by
+default but still opt-in through `OpusConfig.usedtx` and the demo's checkbox,
+both of which drift today. Once the timeline holds, restore `usedtx: true` in
+the voice defaults (`opusKindDefaults`).
 
 Decided (2026-10-04):
 
@@ -28,7 +30,8 @@ Open for the research: whether silence is absent frames, as WebRTC sends, or
 the empty DTX frame every 20 ms that Rust publishes today. Absent frames save
 groups as well as bytes.
 
+Open for a no-go: whether `usedtx` then stays as a warned opt-in or is removed.
+
 ## Related
 
-- [Opus DTX stopgap](/quest/m0/opus-dtx.md) - removes DTX until this lands
 - [Opus backend](/quest/m2/audio-opus-backend.md) - DTX on the native side
