@@ -23,8 +23,27 @@ long-running broadcast.
 - Measure with a benchmark swept over viewers and broadcasts
   (`rs/moq-net/benches/origin.rs`): fronts and bytes per viewer before and
   after, plus reconnect churn.
+- #4799 is this leak, reported by an embedder (decided 2026-10-05 to fold it
+  in here, main only, no release backport). Measured on `2704e10e2` with a
+  counting allocator: the relay's live heap grows about 15.6 KB and 40
+  allocations per session that subscribes to a track, linearly through 16000
+  sessions, and survives `malloc_trim`. Connect, announce, and a bare
+  `request_broadcast` with no track stay flat. heaptrack attributes it to
+  the boxed `run_front` future on the origin's TaskSet and what it owns:
+  the front's `tracks` map, its `broadcast::Producer`, request channel and
+  track-request table, plus the origin's `fronts` WeakCache and per-path
+  watch list. Each dead front is also woken on every route change for its
+  path, so the CPU cost grows with sessions ever seen too.
+- Add a regression test in `model/origin.rs` with mocked time: N sessions
+  request, subscribe to, and drop a track through `excluding(Hop::random())`,
+  then the front count returns to baseline. A test is enough for the leak;
+  the benchmark above covers cost.
 
 Public API: none. Wire: none.
+
+## Closes
+
+- [#4799](https://github.com/moq-dev/moq/issues/4799) - relay memory grows with subscribers connecting and reconnecting
 
 ## Related
 
