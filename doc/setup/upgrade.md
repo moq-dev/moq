@@ -47,6 +47,13 @@ These land with the next breaking release, not the 2026-09-23 train.
   `producer.demand().used` and `.unused()`, as are `Group.Producer`'s, and
   `Allocator.reserve` takes `producer.demand()`, replacing the
   `Bandwidth.Demand` interface.
+- **The `"auto"` delay is measured, not derived from RTT** (#4162). It is sized
+  from how late frames arrive (see [audio jitter](/concept/audio-jitter)) in
+  `@moq/watch` and `moq play`, which now defaults `--delay` to `auto` instead of
+  `100ms`. A numeric `@moq/watch` delay is taken literally instead of having
+  the rendition's own delay added on top. `Sync.out.jitter` now always
+  equals `Sync.out.delay`, and `"auto"` with no decoder registered resolves to
+  0 rather than 100 ms.
 - **moq-mux has no clock translators.** `clock::Anchor`, `clock::Lane`, and
   `SourceMap` (#4667) are gone, along with the importers' `live()`. Publish the
   source's own timestamps and let the catalog clock map them to wall time;

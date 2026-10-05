@@ -2,11 +2,12 @@
 
 ## Goal
 
-A frame or datagram published without a timestamp reaches every subscriber
-without one, through any number of relays. moq-net's model carries
-`Option<Timestamp>`. No receiver fills in arrival time, and a relay forwards
-absence as absence. IETF objects on a track without TIMESCALE or without a
-Timestamp property, and lite-01 to lite-04 frames, arrive untimed. Covers
+A track published untimed reaches every subscriber untimed, through any
+number of relays, in the per-track shape [Typed
+timedness](/quest/m1/typed-timedness.md) settles. No receiver fills in
+arrival time, and a relay forwards an untimed track as untimed. IETF tracks
+accepted without TIMESCALE, every track on drafts 14-16, a standalone FETCH
+that learns no units, and lite-01 to lite-04 tracks arrive untimed. Covers
 moq-net, moq-relay, every in-repo caller of the model, and
 `drafts/draft-lcurley-moq-timestamp.md`.
 
@@ -17,6 +18,15 @@ timestamp](/quest/m1/lite-untimed.md)), and JS
 ([@moq/net carries untimed frames faithfully](/quest/m1/js-untimed-model.md)).
 
 ## Plan
+
+Decided (2026-10-05, maintainer): timedness is per track, not per frame.
+[#4822](https://github.com/moq-dev/moq/pull/4822) waits on [Typed
+timedness](/quest/m1/typed-timedness.md), whose mock-up settles the types,
+and then adapts to it, so contributors and callers take one breaking change
+instead of two. The track's property is learned when it is accepted, so the
+per-frame `Option<Timestamp>`, groups that mix timed and untimed frames, and
+object-scope timing on an untimed track are out. Notes below that assume
+them are superseded where they disagree.
 
 Decided (2026-10-01, maintainer): faithful absence on both the publish and
 the subscribe side. Today every receiver stamps local arrival time, as the
@@ -30,10 +40,10 @@ content out, and the pool's wall-clock expiry is the bound).
 
 Decided (2026-10-02, planning this split):
 
-- An IETF object that carries its own TIMESCALE and Timestamp properties is
-  timed, even when the track sent no TIMESCALE. The draft already allows an
-  object-scope TIMESCALE. Reading it is faithful, not invented. imquic's LOC
-  examples publish this way.
+- Superseded 2026-10-05: an IETF object carrying its own TIMESCALE and
+  Timestamp no longer makes it timed on a track accepted without TIMESCALE;
+  the track decides. imquic's LOC examples publish this way, so they arrive
+  untimed.
 - A legacy or LOC end marker (an empty frame) that arrives untimed is ignored.
   The group then ends without a precise end bound. Its frames still play
   from their payload timestamps, and only the last frame's duration is
@@ -61,33 +71,29 @@ Things to look out for:
 - The live edge skips unstamped groups. Reach and successor search
   (`track.rs`) deliberately stop at the immediate successor and
   leave the bound unknown while it is unstamped, because skipping ahead
-  could expire content that is still valid. An untimed successor keeps that
-  bound unknown for good, so the timed group before it is kept. Preserve
-  that, and check that an untimed track neither stalls a cursor nor replays
-  everything. Cover tracks that mix timed and untimed groups.
+  could expire content that is still valid. Preserve that, and check that an
+  untimed track neither stalls a cursor nor replays everything.
 - `track::Info.timescale` always has a value today. A relay subscribed to an
   IETF track without TIMESCALE currently announces one downstream. It must
-  not claim a timeline the source never had.
+  not claim a timeline the source never had. Typed timedness makes it an
+  `Option`.
 - Model docs that recommend `Timestamp::now` for untimed data
   (`model/{frame,group,track,subscription}.rs`) change with the type.
 - In-repo callers follow the type change:
   - moq-mux container consumers and end markers;
   - moq-e2ee;
   - libmoq;
-  - moq-ffi's frame and datagram records, whose `timestamp_us` becomes
-    optional;
+  - moq-ffi's frame and datagram records and track info;
   - the binding wrappers.
 
   Media consumers that need a time refuse an untimed frame, except for the
   end-marker rule above.
-- Only objects with neither track units nor object-level units are untimed.
-  A FETCH learns track units from SUBSCRIBE_OK (a joining or fill FETCH),
-  from TRACK_STATUS ([Fetch without SUBSCRIBE](/quest/m1/ietf-fetch-only.md)),
-  or from [FETCH_OK properties](/quest/m1/fetch-ok-properties.md), whichever
-  applies. Until those last two land, a standalone FETCH keeps timestamps
-  only on objects that carry their own units. Test that known units, from
-  the track or the object, still yield timestamps, alongside the untimed
-  cases.
+- A FETCH learns track units from SUBSCRIBE_OK (a joining or fill FETCH).
+  A standalone FETCH that learns none when it is accepted is untimed (decided
+  2026-10-05), until [FETCH_OK properties](/quest/m1/fetch-ok-properties.md)
+  or TRACK_STATUS ([Fetch without SUBSCRIBE](/quest/m1/ietf-fetch-only.md))
+  carry them. Test that a track accepted with units still yields
+  timestamps, alongside the untimed cases.
 
 Interop facts (2026-10-02):
 
@@ -108,9 +114,13 @@ forwarded as untimed.
 Tests: each receive path (lite before lite-05, IETF subgroup, fetch and
 datagram) yields an untimed frame, and a relay forwards one untimed.
 
-Public API: breaking (`Frame`, `Datagram` and track info
-timestamps become optional). Wire: no encoding change. Receive semantics on
+Public API: breaking, in the shape Typed timedness settles. Wire: no
+encoding change. Receive semantics on
 published drafts change as the timestamp draft says.
+
+## Required
+
+- [Typed timedness](/quest/m1/typed-timedness.md) - settles the per-track types this adapts to
 
 ## Related
 

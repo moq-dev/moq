@@ -16,6 +16,10 @@ drafts 14-16 carry timestamps without units. The Rust subscriber ignores them.
 Gate the Timestamp property on a timescale actually sent. Check js/net's
 `stamped` flag (`js/net/src/ietf/publisher.ts`) for the same gap.
 
+Confirmed 2026-10-05 by [Typed timedness](/quest/m1/typed-timedness.md):
+tracks on drafts 14-16 are untimed, so sending none there is the plan, not
+an object-scope TIMESCALE beside each Timestamp.
+
 Before landing, check whether an interop peer on draft-14 reads the Timestamp
 property without TIMESCALE. If one does, ask whether to keep it.
 

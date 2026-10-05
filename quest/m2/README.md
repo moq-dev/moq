@@ -19,6 +19,10 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [One port](/quest/m2/one-port/README.md) - a relay speaks QUIC and STUN on one UDP port and HTTP, RTMP, and RTMPS on one TCP port; WebRTC media is an embedder hook
 - [Ladder](/quest/m2/ladder/README.md) - a transcode ladder adapts to the uplink it publishes over, instead of encoding every live rung at its ceiling
 - [Processor](/quest/m2/processor/README.md) - a customer-run worker publishes an on-demand contribution under its own service prefix with scoped access
+- [Bitrate claim](/quest/m2/rate-claim.md) - tokens and auth grants cap a session's upload and download bitrate, refused where unenforced and always on HTTP
+- [QUIC caps](/quest/m2/rate-quic.md) - paced MAX_DATA credit in and a capped pacer out hold a QUIC session to its token's bitrate
+- [WebSocket caps](/quest/m2/rate-websocket.md) - paced reads and writes over bounded socket buffers hold WebSocket to the same caps
+- [Publishers learn their cap](/quest/m2/rate-grant.md) - the AUTH grant carries the caps and publishers clamp their encoder to them
 - [Synced data playback](/quest/m2/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
 - [Stream sessions](/quest/m2/uring-tcp/README.md) - serve WebSocket and HTTP from the io_uring workers, where io_uring pays off most
 - [Hitless TS legs](/quest/m2/ts-hitless.md) - two `--sync` export legs emit packet-identical TS for ST 2022-7
@@ -32,8 +36,6 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Browser archive](/quest/m2/archive-browser.md) - the same contract for browser-published broadcasts
 - [Paced replay](/quest/m2/archive-paced-replay.md) - a replay pushes its groups to live subscribers on one shared clock, so any live player plays it
 - [MP4 export](/quest/m2/mp4-export.md) - `moq export mp4 --output` records crash-safe fragments, then finishes a regular MP4 with moov at the end
-- [Install moq](/quest/m2/moq-installer.md) - one command installs or upgrades the released CLI on macOS and Linux
-- [Install URL](/quest/m2/moq-install-url.md) - moq.dev serves the canonical installer at /install.sh
 - [`moq relay`](/quest/m2/moq-relay-subcommand.md) - the relay runs under a `moq` verb with its own flags and TOML, while `moq-relay` stays a minimal binary
 - [Linux decoded frames](/quest/m2/obs-decode-linux.md) - present supported native decoded surfaces with visible CPU fallback
 - [Windows decoded frames](/quest/m2/obs-decode-windows.md) - present decoded D3D11 surfaces in OBS without CPU readback
@@ -66,6 +68,7 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
   reads its viewers' feedback and adapts its bitrate
 - [Text availability](/quest/m2/text-schema.md) - a text track publishes its own coverage index instead of copying the media timeline
 - [Closure counters](/quest/m2/closure-counters.md) - a departed node's return never regresses the closure counters a consumer already saw
+- [Refusal reasons](/quest/m2/refusal-reasons.md) - refused-session metrics tell an expired token from an invalid one, and count gateway admissions
 - [Bench coverage](/quest/m2/bench-coverage.md) - Criterion targets for moq-pattern matching first, then the stats producer, moq-mux containers, the hang catalog, and moq-auth
 - [Signed priority](/quest/m2/signed-priority.md) - every API priority is an `i8` with 0 as the unset midpoint, and hang's built-ins sit above it
 - [AV1 metadata separation](/quest/m2/av1-metadata.md) - retain metadata OBUs inline while evaluating separate delivery
@@ -111,8 +114,6 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Windows capture parity](/quest/m2/capture-windows.md) - system audio and a settled app-capture policy
 - [Linux capture parity](/quest/m2/capture-linux.md) - Wayland window/system-audio capture with explicit display-selection and app-capture limits
 - [Audio capture time](/quest/m2/audio-capture-time.md) - native audio stamps a buffer's capture instant, not when the driver reads it
-- [CMAF frame timestamp](/quest/m2/cmaf-frame-timestamp.md) - CMAF decoders time samples from the moq-lite frame timestamp, using `tfdt` only within the fragment
-- [Shared import clock](/quest/m2/shared-clock.md) - an importer joining a clock already in use offsets its PTS instead of moving it, so captures and imports share one timeline
 - [Interop graceful close](/quest/m2/interop-graceful-close.md) - successful runner publications withdraw before disconnecting; external repository approval required
 - [Egress profile](/quest/m2/quic-egress-profile.md) - measure relay send-path syscalls, pacing bursts, and allocations before optimizing any of them
 - [SEI separation study](/quest/m2/sei.md) - measure whether separating SEI saves enough, or has a metadata-only consumer, to justify a split
@@ -121,4 +122,10 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [moq-transport cluster peers](/quest/m2/ietf-cluster-peers.md) - an extended cluster draft lets moq-transport relays peer again, carrying the cluster route layer
 - [MSFTS convergence](/quest/m2/msfts-convergence.md) - the demultiplexed TS lane converges on MSFTS where the two still differ: program tables and the ES payload unit
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - H.265 encode and decode, pre-generated bindings, and pooled resize surfaces, including the moq-dev/vaapi release that carries them
+- [One external GPU image for every encoder](/quest/m2/gpu-surface.md) - a vendor-neutral `Surface::Vulkan` that `Kind::Auto` routes to whichever backend imports it on its device; NVENC imports internally
+- [Vulkan Video encode on AMD](/quest/m2/vulkan-encode.md) - H.264 and H.265 from an external Vulkan image on RADV, hand-rolled on ash, proven on an RX 9070
+- [VA-API encodes an external Vulkan image](/quest/m2/vaapi-vulkan-import.md) - an explicit-sync DMA-BUF reaches Intel's encoder, proven on Arrow Lake
+- [A release carries multi-vendor GPU input](/quest/m2/gpu-release.md) - `release` ships all three so a pinned consumer drops its vendor code
+- [Malformed moq-transport input](/quest/m2/ietf-malformed-close.md) - malformed draft-18 and draft-21 control input closes the session with the draft's code, or PROTOCOL_VIOLATION where a code is a real burden and the fallback is recorded in `doc/concept/standard.md`, in moq-net and js/net
+- [moq-transport request codes](/quest/m2/ietf-request-codes.md) - LARGEST_OBJECT, Range Filters (INVALID_FILTER), reserved namespaces, and RENDEZVOUS_TIMEOUT get the draft's answer, or a recorded fallback code, and the deliberate deviations are documented
 - [Dead worklet config](/quest/m2/worklet-dead-config.md) - delete moq-boy's unused worklet plugin and hang's unused `?worker&url` typings
