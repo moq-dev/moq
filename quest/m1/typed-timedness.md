@@ -1,4 +1,4 @@
-# [S] A track is all timed or all untimed
+# [M] A track is all timed or all untimed
 
 ## Goal
 
