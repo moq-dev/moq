@@ -765,6 +765,7 @@ impl Rendition {
 			return Ok(None);
 		};
 
+		let run = self.run();
 		let mut muxer = self.muxer()?;
 		// Accumulate every group's frames into ONE fragment, so duration inference sees each
 		// frame's true successor. A per-group fragment would mis-time the trailing sample of every
@@ -796,7 +797,13 @@ impl Rendition {
 		if frames.is_empty() {
 			return Ok(None);
 		}
-		Ok(Some(muxer.fragment(segment as u32, &frames)?))
+		let fragment = muxer.fragment(segment as u32, &frames)?;
+		// Inline codec metadata was already decoded from these completed groups.
+		// Reuse it instead of fetching a newer, possibly unfinished timeline tail.
+		if let Some(bytes) = muxer.init()? {
+			self.cache_init(run.epoch, bytes);
+		}
+		Ok(Some(fragment))
 	}
 }
 

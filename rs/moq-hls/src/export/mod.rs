@@ -945,6 +945,38 @@ mod tests {
 		(catalog, registration, media)
 	}
 
+	/// A completed segment already decoded its inline codec metadata. Finishing the
+	/// catalog can index a trailing group whose media producer is still live.
+	#[tokio::test(start_paused = true)]
+	async fn a_transmuxed_segment_keeps_its_init_with_an_unfinished_tail() {
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let (mut catalog, mut registration, _media) = publish_vp8(&mut broadcast);
+		registration
+			.set(hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8))
+			.unwrap();
+		broadcast.announce(moq_net::origin::Route::default()).unwrap();
+		settle().await;
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		broadcaster.ready().await;
+		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
+		let mut cursor = rendition.segments();
+		let segment = cursor.next().await.unwrap().expect("completed segment");
+		assert!(!segment.media.is_empty());
+
+		catalog.finish().unwrap();
+		while !rendition.snapshot().finished {
+			tokio::task::yield_now().await;
+		}
+		let init = tokio::time::timeout(Duration::from_secs(1), rendition.init())
+			.await
+			.expect("init must not wait for the unfinished trailing group")
+			.unwrap()
+			.expect("transmuxed segment has an init");
+		assert_eq!(&init[4..8], b"ftyp");
+	}
+
 	// A reconfigure that changes the init bytes changes the init URL, and the old URL stops
 	// resolving, so a cache can never hand a player the previous init under the new one.
 	#[tokio::test]
