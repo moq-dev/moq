@@ -43,9 +43,11 @@ Decided in the 2026-10-04 plan:
   unknown fields, so the cap must stay inside `publish`/`subscribe`.
 - **Refuse until enforced.** The relay admits a capped session only on a
   transport that enforces caps. Until [QUIC caps](/quest/m2/rate-quic.md) and
-  [TCP caps](/quest/m2/rate-websocket.md) land, every capped session
-  is refused with a clear error, on HTTP `/fetch` and `/announced` too
-  (`Transport::Http`), which [TCP caps](/quest/m2/rate-websocket.md) covers.
+  [WebSocket caps](/quest/m2/rate-websocket.md) land, every capped session
+  is refused with a clear error.
+- **HTTP refuses capped tokens, permanently.** `/fetch` and `/announced`
+  (`Transport::Http`) have no connection to scope a per-connection cap to, so
+  a capped token is refused there rather than metered per request.
   Embedders that run their own gateways
   (moq.pro's WHIP, SRT, RTMP, HLS) must check the cap themselves; the release
   notes call this out.
@@ -61,10 +63,10 @@ inline.
 Tests: the object form round-trips in both languages; a capped token never
 encodes as `put`/`get`; a published `moq-auth` reader refuses a capped token;
 a union's cap is the highest; a key scope with `rate` is refused; the relay
-refuses a capped session on every transport today.
+refuses a capped session on every transport today, and on HTTP for good.
 
 ## Related
 
 - [QUIC caps](/quest/m2/rate-quic.md) - the first transport to enforce it
-- [TCP caps](/quest/m2/rate-websocket.md) - WebSocket and HTTP enforce it
+- [WebSocket caps](/quest/m2/rate-websocket.md) - the WebSocket fallback enforces it
 - [In-band auth](/quest/m1/auth/README.md) - the token union the highest-cap rule follows

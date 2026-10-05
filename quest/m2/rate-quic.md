@@ -19,17 +19,22 @@ backpressure the peer cannot ignore, rather than metering and closing.
   flow-control limited (its congestion controller does not back off) and
   queues until [the grant](/quest/m2/rate-grant.md) clamps its encoder.
   Per-stream windows are unchanged; the connection credit is the cap.
-- **Datagrams draw from the same bucket.** DATAGRAM frames are not flow
+- **Datagrams draw from the same allowance.** DATAGRAM frames are not flow
   controlled, so credit alone does not bound them. Received datagram payload
-  is charged to the ingress bucket, and a datagram arriving with the bucket
-  empty closes the session, as on any transport without backpressure.
-- **Credit cannot be retracted** (RFC 9000 §4.1). Credit granted before
-  auth is bounded to what the handshake, CONNECT, and SETUP need, so a peer
-  cannot bank a full default window and spend it after a low cap arrives;
-  an uncapped session gets its normal window right after auth. A lowered cap
-  (revalidation, a union shrinking) treats unspent credit as debt: no new
-  credit until consumption catches up, so the overshoot is bounded by the
-  credit outstanding at the change and the test asserts that bound.
+  is charged to the same bucket that paces `MAX_DATA` credit, and a datagram
+  arriving with the bucket empty is dropped before routing, the same as
+  network loss. An honest publisher is never disconnected, so this does not
+  wait for [the grant](/quest/m2/rate-grant.md).
+- **Credit cannot be retracted** (RFC 9000 §4.1). Every session, capped or
+  not, starts with an `initial_max_data` shrunk to what the handshake,
+  CONNECT, SETUP, and in-band AUTH need, with no config knob, so a peer
+  cannot bank a full default window and spend it after a low cap arrives.
+  After auth the relay raises it through the `set_limits` seam: the normal
+  window for an uncapped session, paced credit for a capped one. A lowered
+  cap (revalidation, a union shrinking) uses the shrink-as-debt behavior
+  [peer limits](/quest/m1/quic/peer-limits.md) relies on, so the overshoot is
+  bounded by the credit outstanding at the change and the test asserts that
+  bound.
 - **Egress: cap the pacer.** The send rate is `min(controller rate, cap)`,
   so a subscriber below the broadcast's bitrate gets MoQ's normal group
   skipping, not a growing queue.
@@ -44,9 +49,10 @@ backpressure the peer cannot ignore, rather than metering and closing.
 
 Tests, on a simulated clock: a peer sending flat out is held to the cap
 within the burst; a peer that ignores credit is closed with a flow-control
-error; a peer sending datagrams flat out is closed past the bucket; a peer
-holding unspent pre-auth credit, and one whose cap drops with credit
-outstanding, stay within the stated bound; egress to a capped subscriber never exceeds the cap; raising and
+error; a datagram flood is held to the cap, excess dropped; a peer holding
+unspent pre-auth credit, and one whose cap drops with credit outstanding,
+stay within the stated bound; an uncapped session gets its normal window
+after auth; egress to a capped subscriber never exceeds the cap; raising and
 lowering the cap on a live connection takes effect; the io_uring path does
 the same.
 
