@@ -3,8 +3,10 @@
 ## Goal
 
 On draft-18 and draft-21, every malformed control input that the draft
-says ends the session does end it, with the draft's code, in both
-`rs/moq-net` and `js/net`. Today moq-net logs most of these and keeps
+says ends the session does end it, in both `rs/moq-net` and `js/net`.
+It closes with the draft's code, or with PROTOCOL_VIOLATION where a code
+is a real burden and the fallback is recorded in
+`doc/concept/standard.md`. Today moq-net logs most of these and keeps
 going. The cases come from Paul Gregoire's publisher validator
 (github.com/mondain/moq-contribution-interop-runner), run in observed mode
 against a client built on moq-net 0.17.0. Each case below gives the
@@ -21,8 +23,10 @@ runner's scenario name, where it has one:
 - An understood key-value with a bad serialization:
   KEY_VALUE_FORMATTING_ERROR
   (`receive-understood-key-value-invalid-serialization`).
-- A second GOAWAY on the control stream, a GOAWAY on a request stream, or a
-  New Session URI over 8192 bytes: PROTOCOL_VIOLATION.
+- A second GOAWAY on the control stream or on a single request stream, or
+  a New Session URI over 8192 bytes: PROTOCOL_VIOLATION. A first GOAWAY on
+  a request stream is legal (draft-18 §10.4, draft-21 §9.2) and leaves the
+  session up.
 - A draft-18 GOAWAY cutoff Request ID with the wrong parity:
   INVALID_REQUEST_ID, not a redirect.
 - A server SETUP carrying AUTHORITY or PATH: INVALID_AUTHORITY or
@@ -32,24 +36,30 @@ runner's scenario name, where it has one:
   `d21-grease-setup-options`). Only a repeated known option is a duplicate.
 - A server SETUP AUTHORIZATION TOKEN that is malformed closes with
   KEY_VALUE_FORMATTING_ERROR. A REGISTER that overflows our cache (size 0)
-  falls back to USE_VALUE, as draft-21 §9.1 requires.
+  falls back to USE_VALUE, as draft-21 §9.1.4 requires.
 - A SUBSCRIBE_TRACKS prefix with more than 32 fields or over 4096 bytes
   closes with PROTOCOL_VIOLATION, instead of being refused per request
   before it is decoded.
 
 ## Plan
 
-Decided with the maintainer on 2026-10-04:
+Decided with the maintainer on 2026-10-04 and 2026-10-05:
 
-- **Add the missing session codes.** INVALID_REQUEST_ID (0x4), INVALID_PATH
-  (0x8) and INVALID_AUTHORITY (0x19) become `SessionError` variants. Their
-  values are the same in drafts 18 and 21. Lite has no matching code, so it
-  sends PROTOCOL_VIOLATION for them. If a code turns out to be a real burden,
-  falling back to PROTOCOL_VIOLATION is acceptable; record the fallback in
-  `doc/concept/standard.md`.
+- **Add the missing session codes to the shared registry.**
+  INVALID_REQUEST_ID (0x4), INVALID_PATH (0x8) and INVALID_AUTHORITY
+  (0x19) become `SessionError` variants (`rs/moq-net/src/error.rs`) and
+  `SessionCode` entries (`js/net/src/error.ts`). Their values are the same
+  in drafts 18 and 21. That registry is moq-lite's too, and lite codes
+  below 32 carry moq-transport's meaning, so add the rows to the Session
+  Error Codes table in `drafts/draft-lcurley-moq-lite.md` and to
+  `session_codes_round_trip`. No per-version mapping. Where a code is a
+  real burden, the PROTOCOL_VIOLATION fallback in the Goal applies.
 - **Regression tests, not a CI job for the validator.** Add one session or
-  codec test per case, each failing without its fix. Run the external
-  runner once by hand before the PR is marked ready: observed mode,
+  codec test per case, each failing without its fix and asserting the
+  draft's code, or PROTOCOL_VIOLATION where the fallback is recorded in
+  `doc/concept/standard.md`. Include a positive case: a first GOAWAY on a
+  request stream keeps the session open. Run the external runner once by
+  hand before the PR is marked ready: observed mode,
   `--publisher-no-fetch`, one scenario per run, on a track of about
   150 kbps. A full-bitrate track floods the runner's event log and aborts
   the run.
@@ -61,14 +71,17 @@ Decided with the maintainer on 2026-10-04:
 Where each case lives, mapped on 2026-10-04 (paths under
 `rs/moq-net/src/`):
 
-- Most of the log-and-continue comes from one spawned SETUP/GOAWAY task,
-  `ietf/session.rs` `run_setup_stream` (around line 845). It logs its error
-  instead of closing the session. Closing with `SessionError::from(&err)`
-  there fixes the second GOAWAY, the oversize URI, and an unknown type on
-  that stream. On request streams, an error from a follow-up message is
-  only logged at debug in `ietf/publisher.rs` (around line 500). Use the
-  `is_protocol_violation` filter (`ietf/subscriber.rs`) to promote decode
-  errors to a session close, as elsewhere.
+- The SETUP/GOAWAY uni stream runs as a task spawned inline in `run_unis`
+  (`ietf/session.rs`, around lines 751-874). SETUP and SETUP-parameter
+  decode failures there already close the session; only `run_goaway`'s
+  error is just logged. Close on the errors `is_protocol_violation`
+  (`ietf/subscriber.rs`) marks as the peer's fault, not on every error: a
+  reset or transport failure on that stream must stay non-fatal, as
+  `died_before_header` keeps it elsewhere. That fixes the second GOAWAY,
+  the oversize URI, and an unknown type on that stream. On request
+  streams, an error from a follow-up message is only logged at debug in
+  `ietf/publisher.rs` (around line 500); promote decode errors there with
+  the same filter.
 - `died_before_header` (`ietf/session.rs`) treats a body cut short at FIN as
   the stream dying. A frame whose declared length passes FIN is malformed.
   Responses decoded at `ietf/publisher.rs` (about lines 1858 and 1937) lack
@@ -99,8 +112,9 @@ Test models: `an_unknown_uni_type_closes_the_session` and
 `ietf/subscribe.rs`. Add each new decode error to the `ietf_wire` fuzz
 regressions where it fits.
 
-Public API: new `SessionError` variants. Wire: none new; behaviour moves
-closer to the drafts.
+Public API: new `SessionError` variants and `SessionCode` entries. Wire:
+new moq-lite session codes, with moq-transport's values; moq-transport
+behaviour moves closer to the drafts.
 
 ## Related
 
