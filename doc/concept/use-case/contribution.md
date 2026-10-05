@@ -27,8 +27,8 @@ captions on.
 Because tracks are only pulled where they're needed, a publisher can open
 several connections that might be used. Primary and secondary ingest is two
 connections and no business logic: subscriptions ride the primary until it
-fails, then move. Two encoders sharing a Hop ID become interchangeable
-sources that relays fail over between at a group boundary; see
+fails, then move. Two encoders publishing the same broadcast name are
+interchangeable sources that relays fail over between mid-group; see
 [redundant publishers](/bin/cli#redundant-publishers).
 
 ## One protocol both ways

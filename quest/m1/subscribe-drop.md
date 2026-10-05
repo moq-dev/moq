@@ -32,8 +32,8 @@ Decided:
 - Datagram groups stay best effort. A publisher counts a datagram as
   delivered, so a lost one leaves an uncovered hole that waits out the tail
   grace, as today.
-- A resumed group ([Resumed groups](/quest/m1/resume-latest.md)) that is the
-  new copy's latest ends with the DROP's error when the copy drops it.
+- A resumed group that is the new copy's latest ends with the DROP's error
+  when the copy drops it.
 - A dropped or aborted group is visible to readers, not silently skipped.
   #4533 found the Rust model releases an aborted group's sequence and skips it,
   so a truncated first object is indistinguishable from a group never sent.
@@ -54,9 +54,6 @@ publisher skipped or never opened ends the track without waiting out the
 grace. Decided in the 2026-09-30 audit: the case moved here so the basic
 tail interop could land first.
 
-PR #4455 (`quest/m1/rs2ts/lite-leading-ones`) also edits the lite-07 wire
-(varints) and no quest tracks it; coordinate the draft's lite-07 changelog
-with it.
 
 ## Related
 

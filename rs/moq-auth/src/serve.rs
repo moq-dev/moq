@@ -20,16 +20,19 @@ use axum::routing::post;
 use axum::{Json, Router};
 use tokio::time::Instant;
 
-use crate::{Event, Grant, Key, KeyId, Permissions, Request, Token};
+use crate::{Event, Grant, Key, KeyId, KeySet, Permissions, Request, Token};
 
 /// Where the signing keys a `jwt` is verified against come from. Read per request,
 /// so a rotated file takes effect without a restart.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum Keys {
-	/// One key file; a token's `kid` is not checked against it.
+	/// One key file; the token's `kid` must match the key.
 	File(PathBuf),
 	/// A directory of `{kid}.jwk`, selected by the token's `kid`.
 	Dir(PathBuf),
+	/// A JWK Set file, selected by the token's `kid`.
+	Set(PathBuf),
 }
 
 /// Caps on live sessions, counted from `connect` and `end` events.
@@ -84,6 +87,8 @@ pub struct Policy {
 	pub revalidate: Option<Duration>,
 	/// How long a grant with no bound of its own lasts: an anonymous session, a token
 	/// without `exp`, a certificate without one. `None` leaves those unbounded.
+	/// A bound past the system clock's range is refused by [`Server::new`], and by
+	/// [`decide`](Self::decide) for each session it would bound.
 	pub expires: Option<Duration>,
 	/// Live session caps.
 	pub limits: Limits,
@@ -119,6 +124,8 @@ pub enum Refusal {
 	UnsupportedToken(u64),
 	#[error("both a JWT and a client certificate were presented; present one")]
 	TokenAndCertificate,
+	#[error("the policy's grant bound reaches past the system clock's range")]
+	ExpiresOutOfRange,
 }
 
 impl Policy {
@@ -129,8 +136,7 @@ impl Policy {
 			return Err(Refusal::TokenAndCertificate);
 		}
 		let (permissions, expires) = if let Some(jwt) = jwt {
-			let key = self.key(jwt).await?;
-			let claims = key.verify(jwt).map_err(|err| Refusal::InvalidToken(err.to_string()))?;
+			let claims = self.verify(jwt).await?;
 			let permissions = claims.authorize(&request.path).map_err(|err| match err {
 				crate::Error::RootMismatch(path) => Refusal::RootMismatch {
 					root: claims.root.clone(),
@@ -153,23 +159,44 @@ impl Policy {
 		};
 
 		let mut grant = Grant::new(permissions.publish, permissions.subscribe);
-		grant.expires = expires.or_else(|| self.expires.map(|bound| SystemTime::now() + bound));
+		grant.expires = match (expires, self.expires) {
+			(Some(expires), _) => Some(expires),
+			(None, Some(bound)) => Some(SystemTime::now().checked_add(bound).ok_or(Refusal::ExpiresOutOfRange)?),
+			(None, None) => None,
+		};
 		grant.revalidate = self.revalidate;
 		grant.tier = self.tier.clone();
 		Ok(grant)
 	}
 
-	async fn key(&self, jwt: &str) -> Result<Key, Refusal> {
-		let path = match self.keys.as_ref().ok_or(Refusal::NoKeys)? {
-			Keys::File(path) => path.clone(),
+	async fn verify(&self, jwt: &str) -> Result<crate::Claims, Refusal> {
+		let keys = self.keys.as_ref().ok_or(Refusal::NoKeys)?;
+		let claims = match keys {
+			Keys::File(path) => Key::from_file_async(path)
+				.await
+				.map_err(|_| Refusal::UnknownKey)?
+				.verify(jwt),
 			Keys::Dir(dir) => {
 				let header = jsonwebtoken::decode_header(jwt).map_err(|err| Refusal::InvalidToken(err.to_string()))?;
 				let kid = header.kid.ok_or(Refusal::MissingKeyId)?;
 				let kid = KeyId::decode(&kid).map_err(|_| Refusal::UnknownKey)?;
-				dir.join(format!("{kid}.jwk"))
+				Key::from_file_async(dir.join(format!("{kid}.jwk")))
+					.await
+					.map_err(|_| Refusal::UnknownKey)?
+					.verify(jwt)
+			}
+			Keys::Set(path) => {
+				let json = tokio::fs::read_to_string(path).await.map_err(|_| Refusal::UnknownKey)?;
+				KeySet::from_str(&json)
+					.map_err(|err| Refusal::InvalidToken(err.to_string()))?
+					.verify(jwt)
 			}
 		};
-		Key::from_file_async(&path).await.map_err(|_| Refusal::UnknownKey)
+		claims.map_err(|err| match err {
+			crate::Error::Key(crate::KeyError::MissingKid) => Refusal::MissingKeyId,
+			crate::Error::Key(crate::KeyError::KeyNotFound(_)) => Refusal::UnknownKey,
+			other => Refusal::InvalidToken(other.to_string()),
+		})
 	}
 }
 
@@ -237,7 +264,7 @@ impl Sessions {
 	fn sweep(&mut self, cadence: Duration) {
 		let now = Instant::now();
 		self.slots
-			.retain(|_, slot| now.saturating_duration_since(slot.seen) < 2 * cadence);
+			.retain(|_, slot| now.saturating_duration_since(slot.seen) < cadence.saturating_mul(2));
 	}
 
 	/// Admit a `connect`, refusing over the cap. A known id refreshes instead.
@@ -304,10 +331,17 @@ pub struct Server {
 
 impl Server {
 	/// A server answering with `policy`, refusing one that asks for a re-check without
-	/// a bound, or caps sessions without the re-check that ages out a dead relay's.
+	/// a bound, bounds grants past the clock's range, or caps sessions without the
+	/// re-check that ages out a dead relay's.
 	pub fn new(policy: Policy) -> crate::Result<Self> {
 		if policy.revalidate.is_some() && policy.expires.is_none() {
 			return Err(crate::Error::UnboundedRevalidate);
+		}
+		if policy
+			.expires
+			.is_some_and(|bound| SystemTime::now().checked_add(bound).is_none())
+		{
+			return Err(crate::Error::ExpiresOutOfRange);
 		}
 		let limited = policy.limits.token.is_some() || policy.limits.remote.is_some();
 		if limited && policy.revalidate.is_none() {
@@ -582,7 +616,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn a_single_key_file_ignores_the_kid() {
+	async fn a_single_key_file_checks_the_kid() {
 		let dir = tempfile::tempdir().unwrap();
 		let key = Key::generate(Algorithm::ES256, None).unwrap();
 		let path = dir.path().join("key.jwk");
@@ -593,6 +627,72 @@ mod tests {
 		};
 		let jwt = sign(&key, "demo", &["**"], &[], None);
 		assert!(policy.decide(&with_token(request("/demo"), &jwt)).await.is_ok());
+
+		let mut wrong = key.export();
+		wrong.kid = Some(KeyId::decode("unexpected").unwrap());
+		let wrong = wrong.import().unwrap();
+		let mismatched = sign(&wrong, "demo", &["**"], &[], None);
+		assert_eq!(
+			policy
+				.decide(&with_token(request("/demo"), &mismatched))
+				.await
+				.unwrap_err(),
+			Refusal::UnknownKey
+		);
+	}
+
+	#[tokio::test]
+	async fn a_key_set_selects_by_kid_and_refuses_a_mismatch() {
+		let dir = tempfile::tempdir().unwrap();
+		let key = Key::generate(Algorithm::HS256, Some(KeyId::decode("kid1").unwrap())).unwrap();
+		let other = Key::generate(Algorithm::HS256, Some(KeyId::decode("kid2").unwrap())).unwrap();
+		let set = KeySet {
+			keys: vec![Arc::new(key.clone()), Arc::new(other)],
+		};
+		let path = dir.path().join("keys.jwks");
+		set.to_file(&path).unwrap();
+		let policy = Policy {
+			keys: Some(Keys::Set(path)),
+			..Default::default()
+		};
+		let jwt = sign(&key, "demo", &["**"], &[], None);
+		assert!(policy.decide(&with_token(request("/demo"), &jwt)).await.is_ok());
+
+		let mut wrong = key.export();
+		wrong.kid = Some(KeyId::decode("kid2").unwrap());
+		let wrong = wrong.import().unwrap();
+		let mismatched = sign(&wrong, "demo", &["**"], &[], None);
+		assert!(matches!(
+			policy.decide(&with_token(request("/demo"), &mismatched)).await,
+			Err(Refusal::InvalidToken(_))
+		));
+	}
+
+	#[tokio::test]
+	async fn gateway_transports_count_toward_session_limits() {
+		let server = Server::new(Policy {
+			public: rules(&["**"], &[]),
+			limits: Limits {
+				remote: Some(1),
+				..Default::default()
+			},
+			..limited()
+		})
+		.unwrap();
+		for transport in [Transport::Rtmp, Transport::Srt, Transport::WebRtc] {
+			let mut first = request("/room");
+			first.transport = transport;
+			assert!(server.answer(&first).await.unwrap().is_some());
+			let mut second = request("/room");
+			second.transport = transport;
+			assert_eq!(server.answer(&second).await.unwrap_err(), Refusal::RemoteLimit);
+			first.event = Event::End {
+				reason: Reason::Shutdown,
+				duration: Duration::ZERO,
+				bytes: Bytes::default(),
+			};
+			assert!(server.answer(&first).await.unwrap().is_none());
+		}
 	}
 
 	fn with_setup_token(mut request: Request, kind: u64, value: &str) -> Request {
@@ -883,6 +983,41 @@ mod tests {
 			..Default::default()
 		};
 		assert!(matches!(Server::new(unbounded), Err(Error::UnboundedRevalidate)));
+	}
+
+	/// Regression: `--expires` past the system clock's range panicked every answer.
+	/// The server refuses it up front, and the policy alone refuses the session
+	/// rather than grant it no bound.
+	#[tokio::test]
+	async fn a_bound_past_the_clock_is_refused() {
+		let endless = Policy {
+			public: rules(&["**"], &["**"]),
+			expires: Some(Duration::MAX),
+			..Default::default()
+		};
+		assert_eq!(
+			endless.decide(&request("/")).await.unwrap_err(),
+			Refusal::ExpiresOutOfRange
+		);
+		assert!(matches!(Server::new(endless), Err(Error::ExpiresOutOfRange)));
+	}
+
+	/// Regression: `--revalidate` near `Duration::MAX` overflowed the two-cadence
+	/// sweep and panicked every answer once a limit kept a session table.
+	#[tokio::test]
+	async fn a_cadence_past_the_clock_keeps_every_slot() {
+		let server = Server::new(Policy {
+			public: rules(&["**"], &["**"]),
+			limits: Limits {
+				token: None,
+				remote: Some(1),
+			},
+			revalidate: Some(Duration::MAX),
+			..limited()
+		})
+		.unwrap();
+		server.answer(&request("/")).await.unwrap();
+		assert_eq!(server.answer(&request("/")).await.unwrap_err(), Refusal::RemoteLimit);
 	}
 
 	/// With no limit to count against, nothing is kept per session, so a relay that

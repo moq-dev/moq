@@ -26,10 +26,21 @@ maps everything else to "not supported" or a harmless equivalent. The
 [moq-lite page](/concept/moq-lite#what-moq-lite-leaves-out) lists the
 differences.
 
+On draft 19 and later, a requester can FIN its request stream while its
+subscription or namespace advertisement stays active. Cancellation uses
+`RESET_STREAM` or `STOP_SENDING`. Subscription `REQUEST_UPDATE` can change
+subscriber priority; other changes are refused with `NOT_SUPPORTED` and end
+the subscription with `UPDATE_FAILED`. Drafts 17 and 18 retain FIN cancellation.
+
 Rust and JavaScript subscribers accept object extension blocks up to 64 KiB.
 This is an implementation limit, not a limit in the IETF draft. A larger
 declared block stops its subgroup stream with `MALFORMED_TRACK` before reading
 the block; other groups and the session stay open.
+
+Rust and JavaScript read an incoming padding stream (draft-18 and later) to
+the end and discard it, without sending `STOP_SENDING`. A unidirectional stream type the negotiated draft does not
+define, or a `SUBGROUP_HEADER` type it marks invalid, closes the session with
+`PROTOCOL_VIOLATION`, as the draft requires.
 
 An IETF publisher declares the track's default priority in `SUBSCRIBE_OK` or
 `PUBLISH` when that draft carries track properties. Groups without a priority
@@ -41,7 +52,10 @@ on moq-lite.
 On drafts 14–19, the Rust publisher answers a standalone `FETCH` within one
 group from the cache. A relay fetches a missing group upstream with a `FETCH`
 of that one whole group, and an upstream refusal is the refusal the fetcher
-sees. A range touching several groups is refused with `NOT_SUPPORTED`, as is
+sees. Once its last reader leaves, the relay cancels the upstream fetch, even
+before `FETCH_OK`, and aborts an incomplete group instead of caching it as whole.
+Drafts 14–16 use `FETCH_CANCEL`; drafts 17–19 stop and reset the request stream.
+A range touching several groups is refused with `NOT_SUPPORTED`, as is
 any `FETCH` on draft-20 and later, which moved the range into
 `LOCATION_FILTER`. A standalone `FETCH`
 carries no timestamps, since no `SUBSCRIBE_OK` declared a timescale for it.
@@ -77,7 +91,8 @@ A legal request that is not served is refused on its own with `NOT_SUPPORTED`,
 leaving the session open: a `SUBSCRIBE` with `FORWARD=0`, a `SUBSCRIBE` or
 `FETCH` carrying Range Filters (no `MAX_FILTER_RANGES` is advertised), a
 `FETCH` carrying `FILL_TIMEOUT` (Timed-Out gaps are not written),
-`TRACK_STATUS`, and the `FETCH` forms above. `NEW_GROUP_REQUEST` is ignored, as
+`TRACK_STATUS`, `SUBSCRIBE_TRACKS` (draft-18 and later), and the `FETCH`
+forms above. `NEW_GROUP_REQUEST` is ignored, as
 the draft allows a publisher without dynamic groups to do. A parameter the
 negotiated draft does not define still closes the session with
 `PROTOCOL_VIOLATION`, as the draft requires.
@@ -85,7 +100,9 @@ negotiated draft does not define still closes the session with
 Several project drafts extend the IETF wire without breaking it, since `SETUP`
 ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
 [solicit](/draft/moq-solicit) to make announcements opt-in,
-[hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery, and
+[hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery,
+[active-count](/draft/moq-active-count) to count the `NAMESPACE` messages
+before a `SUBSCRIBE_NAMESPACE` is caught up, and
 [probe](/draft/moq-probe) for bandwidth estimation.
 [moq-e2ee](/draft/moq-e2ee) is not a transport extension: it encrypts application
 payloads so relays still forward named tracks they cannot read.

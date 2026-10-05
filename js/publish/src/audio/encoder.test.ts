@@ -4,10 +4,10 @@ import { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Baseline } from "../jitter";
 import type { AudioFrame, Format } from "./capture";
-import { Encoder, resolve } from "./encoder";
+import { type Codec, Encoder, resolve, toEncoderConfig } from "./encoder";
 
 // Bun does not load Vite's worklet URL imports from the public audio entrypoint.
-mock.module("./capture-worklet.ts?worklet", () => ({ default: "blob:fake-capture" }));
+mock.module("./capture-worklet.ts?worklet", () => ({ default: async () => "blob:fake-capture" }));
 
 const Audio = await import("./index");
 
@@ -55,6 +55,13 @@ describe("resolve", () => {
 	});
 });
 
+describe("toEncoderConfig", () => {
+	test("configures voice without DTX", () => {
+		const config = toEncoderConfig(resolve(captured, "opus"), "voice", {});
+		expect(config.opus).toEqual({ application: "voip", signal: "voice", frameDuration: 20_000 } as never);
+	});
+});
+
 // Like Chrome's Opus encoder, it holds the newest chunks until later input pushes them out, and
 // stamps each chunk from the first input's timestamp plus the audio encoded since, so a jump in
 // input timestamps never reaches the output.
@@ -62,7 +69,7 @@ class LaggingAudioEncoder {
 	static readonly LAG = 2;
 
 	// Called on configure; the encoder publishes its pipeline synchronously right after.
-	static onConfigure: (() => void) | undefined;
+	static onConfigure: ((config: AudioEncoderConfig) => void) | undefined;
 
 	state: CodecState = "unconfigured";
 	#output: EncodedAudioChunkOutputCallback;
@@ -74,9 +81,9 @@ class LaggingAudioEncoder {
 		this.#output = init.output;
 	}
 
-	configure(): void {
+	configure(config: AudioEncoderConfig): void {
 		this.state = "configured";
-		LaggingAudioEncoder.onConfigure?.();
+		LaggingAudioEncoder.onConfigure?.(config);
 	}
 
 	encode(data: AudioData): void {
@@ -186,8 +193,8 @@ class Feed {
 }
 
 // An Encoder wired to a fake capture feed, recording each written frame as [timestamp, payload bytes].
-async function setup(baseline = new Baseline()) {
-	const configured = new Promise<void>((resolve) => {
+async function setup(baseline = new Baseline(), codec?: Codec) {
+	const configured = new Promise<AudioEncoderConfig>((resolve) => {
 		LaggingAudioEncoder.onConfigure = resolve;
 	});
 
@@ -222,12 +229,14 @@ async function setup(baseline = new Baseline()) {
 	const encoder = new Encoder("audio", {
 		broadcast: { audio: () => rendition, baseline } as never,
 		capture: capture as never,
+		codec,
 	});
 
-	await configured;
+	const config = await configured;
 	LaggingAudioEncoder.onConfigure = undefined;
 
 	return {
+		config,
 		encoder,
 		track,
 		rendition,
@@ -299,6 +308,12 @@ test("a push completing several frames keeps the encoder running", async () => {
 		[58_700, 1],
 		[78_700, 1],
 	]);
+});
+
+test("passes an explicit Opus DTX request to the encoder", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup(new Baseline(), { mime: "opus", usedtx: true });
+	expect(env.config.opus?.usedtx).toBe(true);
 });
 
 // Another rendition on the same broadcast flushing with far less lateness leaves this one trailing

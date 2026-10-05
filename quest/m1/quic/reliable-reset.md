@@ -40,10 +40,9 @@ header. Callers must not calculate or pass the hidden WebTransport header
 length. Preserve WebTransport application error codes unchanged on send,
 receive, and intermediary forwarding.
 
-Use the same state machine from qmux. Because qmux runs over a reliable ordered
-transport, serialization acknowledges the committed prefix immediately, but
-the receiver must still delay the reset until that prefix is available. Remove
-the qmux prototype's local `RESET_STREAM_AT` state once the shared core owns it.
+qmux on this shared state machine is [qmux on the QUIC stream state
+machine](/quest/m2/quic-qmux.md)'s (moved to m2 in the 2026-09-30 audit);
+this quest is native QUIC and WebTransport only.
 
 Test negotiation on/off and 0-RTT, loss and reordering of both the frame and
 prefix data, shrinking Reliable Size, reset after FIN, flow-control blocking,
@@ -66,7 +65,7 @@ provisional codepoints if the document changes before release.
 
 ## Required
 
-- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic` on `dev`, not the frozen fork
+- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic`, not the frozen fork
 
 ## Related
 

@@ -30,7 +30,7 @@ in sync at the latency you ask for.
 | --- | --- |
 | `url`, `name` | Relay URL (with `?jwt=` if needed) and broadcast name. |
 | `paused`, `muted`, `volume` | The usual player controls, mirrored as reactive properties. |
-| `delay` | How far playback trails the live edge: `"auto"` (derived from RTT, the default), a duration like `"300ms"`, or `"instant"` to paint frames as they decode with no pacing at all. |
+| `delay` | How far playback trails the live edge: `"auto"` (the default, sized from how late frames actually arrive; see [audio jitter](/concept/audio-jitter)), a duration like `"300ms"`, or `"instant"` to paint frames as they decode with no pacing at all. |
 | `buffer` | Future-dated media held beyond the live edge before playback skips ahead, e.g. `"30s"`. Defaults to none. |
 | `captions` | The caption track to show, or absent for off. `el.text.out.available` lists the renditions for a picker. |
 | `visible` | Only subscribe to video while the element is on screen: a margin (`"20%"` default, `"200px"`), `"always"`, or `"never"`. |
@@ -44,6 +44,13 @@ Going offline or closing the player clears it.
 The overlay adds play/pause, volume, fullscreen, a quality selector, a
 buffering indicator, an unsupported-codec warning, and a stats panel.
 `<moq-watch-support>` shows what the browser can play.
+
+`el.broadcast.out.status` is `offline`, `loading`, `live`, or `error`. It is
+`error` when the origin refuses the broadcast, such as a `dynamic()` handler
+rejecting the request, and `el.broadcast.out.error` then holds the refusal's
+`Error`; the overlay shows its message in place of the offline notice. A
+refusal is final: only a new `name`, a new origin, a changed `announced`, or
+re-enabling asks again, which clears both back to `offline`.
 
 ## Binding from a framework
 
@@ -174,3 +181,20 @@ Durations need a unit; a bare number is rejected. Only the delay is held as
 decoded PCM; the buffer stays as encoded frames with backpressure on the
 decoder, so a large one is cheap. `el.reset()` flushes and re-anchors at the
 next frame, which is how a producer interrupts an utterance.
+
+## Strict CSP
+
+The audio worklet loads from a `blob:` URL by default, so it needs no hosted
+files but a CSP must allow `blob:` in `script-src`. For a CSP that refuses
+`blob:`, copy `node_modules/@moq/watch/assets/*` into a directory your origin
+serves, and point the package at it before playback starts:
+
+```ts
+import * as Watch from "@moq/watch";
+
+Watch.assets("/moq/");
+```
+
+The URL must end with `/`. Copy the files again on every upgrade: the worklet
+changes with the package. `@moq/room` and `@moq/boy` play through
+`@moq/watch`, so this one call covers them.

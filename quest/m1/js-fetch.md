@@ -1,23 +1,16 @@
-# [L] Serve on-demand groups and IETF FETCH in JavaScript
+# [M] Serve IETF FETCH in JavaScript
 
 ## Goal
 
-A JavaScript publisher serves requested groups that are no longer in its live
-cache, including IETF FETCH from a native subscriber. The capability is
-independent of archives and works for arbitrary track payloads.
+A JavaScript publisher answers IETF FETCH from a native subscriber, including
+groups that are no longer in its live cache, through the on-demand request
+surface `@moq/net` gains in [JS ranges](/quest/m1/subscribe-ranges/js.md).
 
 ## Plan
 
-Add the producer-side counterpart of `track::Consumer.fetchGroup`, matching
-Rust's `track::Dynamic` request ownership and accept/refuse lifecycle. Expose
-an owned request handle rather than a storage callback; dropping a request
-must refuse it rather than leave the subscriber waiting. Preserve group
-sequence, frame boundaries, payload bytes, and track properties. Storage,
-retention, and media catalog interpretation remain outside `js/net`.
-
-Use one logical dynamic track per broadcast/name. Keep cache-miss group
-requests distinct from creation of a new live track producer, and cover
-concurrent requests and cancellation without creating duplicate live producers.
+Decided in the 2026-10-05 audit: the producer-side request surface folded
+into [JS ranges](/quest/m1/subscribe-ranges/js.md), so it takes range
+requests from the start. This quest keeps only IETF FETCH dispatch onto it.
 
 Implement IETF FETCH dispatch and codecs across the supported draft versions.
 Cover standalone and relative joining requests, subscription lifetime
@@ -26,21 +19,18 @@ codes, cancellation, and clean stream finish. Match the existing Rust response
 contract, including saved object prefixes. Unsupported versions or request
 forms must receive the protocol's explicit refusal rather than hang.
 
-Use an in-memory application responder for verification, without OPFS or an
-archive writer. A browser publisher serves a native subscriber after a group
-is evicted or was never cached; verify exact group/frame replay, empty groups,
-missing groups, concurrent requests, and cancellation while awaiting a reply.
-Run the supported-draft matrix and `just test interop --all` through CI.
+Verify with an in-memory application responder: a browser publisher serves a
+native IETF subscriber after a group is evicted or was never cached. Run the
+supported-draft matrix and `just test interop --all` through CI.
 
-Public API: a producer-side on-demand group request surface in `@moq/net`,
-matching Rust's lifecycle. Wire: implement the existing supported IETF FETCH
-formats; update relevant documentation and any MoQ draft claims that change.
-A published API break, if the chosen shape requires one, goes through dev.
+Public API: none beyond JS ranges' surface. Wire: implement the existing
+supported IETF FETCH formats; update relevant documentation and any MoQ draft
+claims that change.
 
 ## Required
 
-- [Dynamic track identity](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - settles shared producer identity before adding on-demand group requests
+- [JS ranges](/quest/m1/subscribe-ranges/js.md) - the on-demand request surface this dispatches onto
 
 ## Related
 
-- [Browser archive](/quest/m2/archive-browser.md) - supplies memory or OPFS archive data through this generic request surface
+- [Browser archive](/quest/m3/archive-browser.md) - supplies memory or OPFS archive data through the same request surface

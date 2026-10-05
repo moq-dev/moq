@@ -221,7 +221,7 @@ fn concurrent_tracks_drain_a_shared_pool() {
 		for handle in handles {
 			handle.join().unwrap();
 		}
-		broadcast.finish();
+		broadcast.close();
 		drop(broadcast);
 
 		assert_eq!(pool.used(), 0, "the pool kept a charge after every group was dropped");
@@ -290,5 +290,43 @@ fn publisher_drop_resolves_a_parked_subscriber() {
 		let _ = block_on(subscriber.recv_group());
 
 		publisher.join().unwrap();
+	});
+}
+
+/// The last `fetch_group` caller leaving, racing a new fetch of the same group while
+/// the handler drops the request the moment it sees it unused.
+///
+/// The leaver withdraws the attempt under the fetch lock a join takes, so the new
+/// fetch either joined the live attempt (keeping its request wanted) or queued a fresh
+/// one. A fetch joining the withdrawn attempt and failing as its handler drops it is
+/// the bug, and shows up as `Err` here.
+#[test]
+fn a_fetch_never_joins_a_withdrawn_attempt() {
+	model(|| {
+		let broadcast = broadcast::Info::new().produce();
+		let track = broadcast.create_track("video", None).expect("create track");
+		let dynamic = track.dynamic();
+		let consumer = track.consume();
+
+		let first = consumer.fetch_group(5, None);
+		let request = block_on(dynamic.requested_group()).expect("requested");
+
+		let leaver = thread::spawn(move || {
+			drop(first);
+			request.demand().is_used().then_some(request)
+		});
+		let mut retry = consumer.fetch_group(5, None);
+		let request = match leaver.join().unwrap() {
+			Some(request) => request,
+			None => {
+				let polled = kio::Task::poll(&mut *retry, &kio::Waiter::noop());
+				if let std::task::Poll::Ready(Err(err)) = polled {
+					panic!("the retry joined a withdrawn attempt: {err}");
+				}
+				block_on(dynamic.requested_group()).expect("the retry queued a fresh request")
+			}
+		};
+		request.accept(None).expect("accept").finish().expect("finish");
+		block_on(retry).expect("the retry resolves");
 	});
 }

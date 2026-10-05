@@ -119,9 +119,6 @@ function createTile(name: string): WatchTile {
 	const watch = document.createElement("moq-watch") as MoqWatch;
 	watch.name = name;
 	watch.muted = true; // unmuted only while active (see below)
-	// Default to a fixed 100ms jitter buffer (instead of adaptive "auto") so
-	// the delay visualization has something to show. Drag it in the panel.
-	watch.setAttribute("delay", "100ms");
 	const canvas = document.createElement("canvas");
 	canvas.style.cssText = "width: 100%; height: auto;";
 	watch.appendChild(canvas);
@@ -176,8 +173,8 @@ function createTile(name: string): WatchTile {
 // ---------------------------------------------------------------------------
 //
 // Subscribe to announcements under the prefix and keep a live set of active broadcasts.
-// `announced.next()` drains the update stream, so we track membership ourselves: active=true adds the
-// path, active=false removes it. `Connection.announced()` spans reconnects (it retracts everything on
+// `announced.next()` drains the event stream, so we track membership ourselves: an announcement adds the
+// path, a retraction removes it. `Connection.announced()` spans reconnects (it retracts everything on
 // disconnect and re-announces on reconnect), so the set self-heals without any extra wiring here.
 const discovery = new Signals.Effect();
 discovery.run((effect) => {
@@ -188,14 +185,15 @@ discovery.run((effect) => {
 	const live = new Set<string>();
 	effect.spawn(async () => {
 		for (;;) {
-			const entry = await Promise.race([effect.cancel, announced.next()]);
+			const entry = await effect.race(announced.next());
 			if (!entry) break;
+			if (entry.kind === "live") continue;
 			const path = entry.prefix;
 			// Only catalog-backed broadcasts are watchable streams; this skips the relay's
 			// `.stats` broadcast (see the stats dashboard demo for that one).
 			if (!path.endsWith(".hang") && !path.endsWith(".msf")) continue;
-			if (Net.Announce.isActive(entry.kind)) live.add(path);
-			else live.delete(path);
+			if (entry.kind === "end") live.delete(path);
+			else live.add(path);
 			broadcasts.set([...live].sort());
 		}
 	});
@@ -293,11 +291,12 @@ ui.run((effect) => {
 	);
 });
 
-// Broadcast pill: Online when the active broadcast is live, else Loading/Offline.
+// Broadcast pill: Online when the active broadcast is live, else Loading/Refused/Offline.
 ui.run((effect) => {
 	const watch = effect.get(activeWatch);
-	const stream = watch ? effect.get(watch.broadcast.out.status) : "offline"; // offline | loading | live
+	const stream = watch ? effect.get(watch.broadcast.out.status) : "offline"; // offline | loading | live | error
 	if (stream === "live") setPill("bcast-status", "bcast-text", "Online", "ok");
+	else if (stream === "error") setPill("bcast-status", "bcast-text", "Refused", "bad");
 	else if (watch && stream === "loading") setPill("bcast-status", "bcast-text", "Loading", "wait");
 	else setPill("bcast-status", "bcast-text", "Offline", "bad");
 });
@@ -438,7 +437,7 @@ ui.run((effect) => {
 	effect.spawn(async () => {
 		try {
 			for (;;) {
-				const value = await Promise.race([effect.cancel, consumer.next()]);
+				const value = await effect.race(consumer.next());
 				if (value === undefined) break;
 				metaSignal.set(value);
 			}

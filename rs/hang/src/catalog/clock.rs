@@ -72,7 +72,10 @@ impl Clock {
 		let unix_millis = MOQ_EPOCH_UNIX_MILLIS as u128 + total * 1000 / scale.as_u64() as u128;
 		let unix_millis =
 			u64::try_from(unix_millis).map_err(|_| crate::Error::TimestampOverflow(moq_net::TimeOverflow))?;
-		Ok(std::time::UNIX_EPOCH + std::time::Duration::from_millis(unix_millis))
+		// Windows' `SystemTime` cannot reach the furthest wall a catalog carries.
+		std::time::UNIX_EPOCH
+			.checked_add(std::time::Duration::from_millis(unix_millis))
+			.ok_or(crate::Error::TimestampOverflow(moq_net::TimeOverflow))
 	}
 }
 
@@ -139,6 +142,18 @@ mod test {
 		serde_json::from_str::<Clock>(r#"{"wall":9007199254740992}"#).expect_err("a wall past 2^53-1 must not decode");
 		let wall = moq_net::Timestamp::new(MAX_SAFE_INTEGER + 1, moq_net::Timescale::MICRO).unwrap();
 		assert!(Clock::new(wall).is_err());
+	}
+
+	/// Regression: the furthest wall a catalog carries overflowed `SystemTime` on
+	/// Windows and panicked. Unix reaches it, so only Windows sees the error.
+	#[test]
+	fn wall_clock_past_the_system_clock_is_an_error() {
+		let wall = moq_net::Timestamp::new(MAX_SAFE_INTEGER, moq_net::Timescale::SECOND).unwrap();
+		let clock = Clock::new(wall).unwrap();
+		match clock.wall_clock(moq_net::Timestamp::ZERO) {
+			Ok(at) => assert!(at > std::time::UNIX_EPOCH + std::time::Duration::from_secs(MAX_SAFE_INTEGER)),
+			Err(err) => assert!(matches!(err, crate::Error::TimestampOverflow(_)), "{err}"),
+		}
 	}
 
 	#[test]

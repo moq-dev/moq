@@ -61,7 +61,10 @@ export type OpusConfig = {
 	complexity?: number; // 0-10, higher is better quality but more CPU
 	packetlossperc?: number; // 0-100, expected loss the encoder optimizes for
 	useinbandfec?: boolean; // in-band forward error correction
-	usedtx?: boolean; // discontinuous transmission (silence suppression)
+	// Discontinuous transmission (silence suppression), off by default. Chromium stamps Opus output by
+	// counting the samples emitted, so each frame DTX suppresses pulls later audio earlier and the
+	// published timeline drifts from the capture clock until that is fixed.
+	usedtx?: boolean;
 };
 
 /** Cumulative encoder output totals, measured from the chunks the encoder produces. */
@@ -309,7 +312,7 @@ export class Encoder {
 		});
 
 		// When demand disappears, end the epoch with a discontinuity marker (see
-		// Container.Legacy.Producer.cut) so a later subscriber resumes on the same track without the
+		// Container.Legacy.Producer.discontinuity) so a later subscriber resumes on the same track without the
 		// pre-gap frames reading as live. Its empty payload marks where the submitted media ends.
 		effect.run((effect) => {
 			const track = effect.get(rendition.track);
@@ -353,7 +356,7 @@ export class Encoder {
 			effect.subscribe(this.#config, (config) => {
 				const bitrate = config?.catalog.bitrate;
 				if (bitrate === undefined) return;
-				if (!reservation) reservation = allocator.reserve(track, bitrate);
+				if (!reservation) reservation = allocator.reserve(track.demand(), bitrate);
 				else reservation.update(bitrate);
 			});
 			effect.cleanup(() => reservation?.close());
@@ -669,14 +672,12 @@ interface OpusEncoderConfigExt extends OpusEncoderConfig {
 }
 
 // Opus settings implied by the audio kind. These are only defaults: any field set explicitly via
-// OpusConfig (carried in opusOptions) overrides them, so a caller can always opt out. DTX (silence
-// suppression) is enabled for voice, where speech has natural gaps that collapse to tiny
-// comfort-noise packets. Music has no useful silence to suppress, and "auto" leaves every knob to
-// the browser.
+// OpusConfig (carried in opusOptions) overrides them, so a caller can always opt out. "auto" leaves
+// every knob to the browser.
 function opusKindDefaults(kind: Kind): OpusEncoderConfigExt {
 	switch (kind) {
 		case "voice":
-			return { application: "voip", signal: "voice", usedtx: true };
+			return { application: "voip", signal: "voice" };
 		case "music":
 			return { application: "audio", signal: "music" };
 		default:
@@ -684,10 +685,13 @@ function opusKindDefaults(kind: Kind): OpusEncoderConfigExt {
 	}
 }
 
-// Build the WebCodecs encoder config from the catalog (decoder) config, a Kind hint, and any
-// Opus-only knobs. Those knobs are kept out of the catalog since they only affect encoding. AAC has
-// no such knobs, so it just uses the shared base fields (codec/sampleRate/channels/bitrate).
-function toEncoderConfig(resolved: Resolved, kind: Kind, opusOptions: OpusEncoderConfigExt): AudioEncoderConfig {
+/**
+ * Build the WebCodecs encoder config from the catalog (decoder) config, a Kind hint, and any
+ * Opus-only knobs. Those knobs are kept out of the catalog since they only affect encoding. AAC has
+ * no such knobs, so it just uses the shared base fields (codec/sampleRate/channels/bitrate).
+ * @internal
+ */
+export function toEncoderConfig(resolved: Resolved, kind: Kind, opusOptions: OpusEncoderConfigExt): AudioEncoderConfig {
 	const config = resolved.catalog;
 	const encoderConfig: AudioEncoderConfig = {
 		codec: config.codec,

@@ -8,7 +8,7 @@ A worker drive turn reads the clock once and hands that instant down, so
 
 ## Plan
 
-Profiling the io_uring relay (`dev` @ `fc57e0175`, `perf record -F 499`,
+Profiling the io_uring relay (`fc57e0175`, `perf record -F 499`,
 relay process only) shows `[vdso]` as a top-5 DSO, at roughly 3x its share on
 the tokio worker path:
 
@@ -45,14 +45,24 @@ every QUIC timeout re-arm is an O(log n) map removal and insertion with `Rc`
 traffic. The #2875 design note called for a timer wheel. Not urgent at these
 connection counts, but it is on the same hot path and grows with it.
 
-`moq_net::runtime::Runtime::now` (rs/moq-net/src/runtime.rs:128) is the
-natural place to hand the current turn's instant down instead of having each
-layer re-read it. Sample once per drive turn and pass it through `fire`, the
-`handle_timeout`, and `poll_transmit`.
+moq-net's runtime is crate-private now, and its drivers already receive the
+current instant from their owner (`Runtime::now`, "the latest instant
+supplied by the owner", in `rs/moq-net/src/runtime.rs`); moq-uring's worker
+passes `Instant::now()` to `driver.poll` once per poll
+(`rs/moq-uring/src/worker.rs`). Sample once per drive turn there and pass
+that instant through `fire`, the `handle_timeout`, and `poll_transmit`.
+
+Decided in the 2026-10-05 audit: this edits the QUIC connection driver the
+[hard fork](/quest/m1/quic/fork/README.md)'s switch renames and moves onto
+`moq-quic`, so it waits for the fork and is measured there.
 
 Acceptance: `[vdso]` share in the `perf` profile on both flavors, relay CPU
 via `just bench BASE` on Linux, and the existing keep-alive and idle-timeout
 tests unchanged.
+
+## Required
+
+- [Hard fork](/quest/m1/quic/fork/README.md) - the driver this edits moves onto `moq-quic`
 
 ## Closes
 

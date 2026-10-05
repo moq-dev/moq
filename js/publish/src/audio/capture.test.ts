@@ -3,7 +3,7 @@ import { Effect, Signal } from "@moq/signals";
 
 // The capture pulls its processor in as a `?worklet` blob URL, which the bun test loader can't
 // resolve. Stub it so the module imports; the value is only ever passed to our fake addModule.
-mock.module("./capture-worklet.ts?worklet", () => ({ default: "blob:fake-capture" }));
+mock.module("./capture-worklet.ts?worklet", () => ({ default: async () => "blob:fake-capture" }));
 
 const { Capture } = await import("./capture.ts");
 

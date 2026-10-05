@@ -3,11 +3,10 @@
 ## Goal
 
 A connection sends a PING only when its idle deadline is near, never on a
-fixed clock. An idle connection with a 30 s idle timeout costs one packet per
-roughly 30 s minus a few PTOs; a busy connection costs none. The
+fixed clock. An idle connection with a 10 s idle timeout costs one packet per
+roughly 10 s minus a few PTOs; a busy connection costs none. The
 `keep_alive` setting on `quic::Client` and `quic::Server` becomes an optional
-maximum, default none. Redefining it is a config and CLI break, so this
-targets `dev`.
+maximum, default none. Redefining it is a config and CLI break.
 
 ## Plan
 
@@ -30,6 +29,13 @@ sections, CLI flags, and env vars becomes that optional maximum, default none,
 documented in `doc/bin/relay/config.md` for NAT-sensitive deployments. The qmux WebSocket keep-alive (`qmux::ws::KeepAlive`,
 5 s ping and 30 s deadline) already has this shape; make its wording match.
 
+iroh stays on upstream noq, which the fork does not touch, and
+[Listener deadlines](/quest/m1/listener-deadlines.md) wires `quic.keep_alive`
+into iroh's fixed `keep_alive_interval`. Decided in the 2026-10-05 audit:
+when the maximum is `None`, iroh keeps a fixed interval derived from the idle
+timeout, so an iroh session never loses its keep-alive. Rejected: requiring
+an explicit maximum for iroh.
+
 Tests: an idle connection survives an idle timeout with exactly one PING per
 period; a busy connection sends none; a lost PING is probed before the
 deadline; the maximum knob shortens the period.
@@ -40,4 +46,5 @@ deadline; the maximum knob shortens the period.
 
 ## Related
 
+- [Listener deadlines](/quest/m1/listener-deadlines.md) - wires the same setting into iroh's fixed interval
 - [noq#810](https://github.com/n0-computer/noq/issues/810) - the proposal to n0; flub and matheus23 asked to keep a cap for NAT bindings, which the optional maximum covers

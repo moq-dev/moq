@@ -461,7 +461,7 @@ mod tests {
 	/// its native surface still delivers I420, and native output leaves the
 	/// surface alone.
 	///
-	/// Only macOS can build a native surface without a device, so this is
+	/// Only Apple platforms can build a native surface without a device, so this is
 	/// where the conversion is exercised; elsewhere the probe's pictures are
 	/// already CPU pixels and the assertion pins that native output does not
 	/// invent a download.
@@ -476,12 +476,12 @@ mod tests {
 		assert_eq!(cpu.size(), probe::SIZE);
 
 		let native = decode_native(crate::Output::Native, None);
-		#[cfg(target_os = "macos")]
+		#[cfg(apple)]
 		assert!(
 			matches!(native.surface, Surface::PixelBuffer(_)),
 			"native output downloaded the picture"
 		);
-		#[cfg(not(target_os = "macos"))]
+		#[cfg(not(apple))]
 		assert!(matches!(native.surface, Surface::I420(_)));
 	}
 
@@ -545,7 +545,7 @@ mod tests {
 		assert!(matches!(err, crate::Error::UnsupportedCodec(_)));
 	}
 
-	#[cfg(all(target_os = "macos", feature = "openh264"))]
+	#[cfg(all(apple, feature = "openh264"))]
 	#[test]
 	fn videotoolbox_round_trip() {
 		let decoder = backend::open(Codec::H264, &decode_config(super::Kind::Named("videotoolbox".into())))
@@ -555,7 +555,7 @@ mod tests {
 
 	/// Encode `count` gray frames and decode them, returning the decoded pictures.
 	/// The shared setup for the residency and re-encode tests below.
-	#[cfg(all(target_os = "macos", feature = "openh264"))]
+	#[cfg(all(apple, feature = "openh264"))]
 	fn decode_gray(count: u64) -> Vec<Frame> {
 		let mut encoder = h264_software_encoder(gray_size());
 		let mut decoder = backend::open(Codec::H264, &decode_config(super::Kind::Named("videotoolbox".into())))
@@ -580,7 +580,7 @@ mod tests {
 	/// the output callback, which is what leaves a render or re-encode path free of
 	/// a CPU round trip. `round_trip` above only checks the pixels, so it passes
 	/// either way: this is the test that pins the frame's residency.
-	#[cfg(all(target_os = "macos", feature = "openh264"))]
+	#[cfg(all(apple, feature = "openh264"))]
 	#[test]
 	fn videotoolbox_decode_stays_gpu_resident() {
 		for out in &decode_gray(3) {
@@ -594,7 +594,7 @@ mod tests {
 	/// The multi-rung transcode path stays on hardware through decode, resize, and
 	/// encode. The residency assertion catches a CPU fallback even when the pixels
 	/// and dimensions still look right.
-	#[cfg(all(target_os = "macos", feature = "openh264"))]
+	#[cfg(all(apple, feature = "openh264"))]
 	#[test]
 	fn videotoolbox_resized_surface_reencodes_in_place() {
 		let decoded = decode_gray(3);
@@ -639,7 +639,7 @@ mod tests {
 	/// both ends: hardware HEVC encode emitting hev1 (inline VPS/SPS/PPS) and
 	/// hardware HEVC decode. Skips cleanly on a Mac without HEVC hardware (older
 	/// Intel models predating the HEVC encoder).
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	#[test]
 	fn videotoolbox_hevc_round_trip() {
 		let encoder = Encoder::new(&EncodeConfig {

@@ -5,15 +5,14 @@
 Large BBR flights do not make every ACK scan all outstanding packets.
 Packet bookkeeping scales with acknowledged, lost, and expired entries while
 preserving bandwidth samples and congestion behavior. Ship the improvement
-through MoQ's published dependency chain without changing public APIs or wire
-behavior.
+in `moq-quic` without changing public APIs or wire behavior.
 
 ## Plan
 
-The fix lives in moq-dev/noq. The baseline is the current releases: the
-workspace pins moq-noq 1.3.2 and 2.0.0 is out. In both, `on_end_acks`
-(`noq-proto/src/congestion/bbr3/mod.rs:1845`) runs `retain` over all tracked
-packets, then scans them again to mark stale entries. Draining a flight with fixed-size ACK batches has quadratic total
+The fix lives in `moq-quic`'s BBR3, after [BBR3](/quest/m1/quic/fork/bbr3.md)
+re-ports it in the hard fork; moq-dev/noq is frozen. In the BBR3 it ports,
+`on_end_acks` (`noq-proto/src/congestion/bbr3/mod.rs`) runs `retain` over all
+tracked packets, then scans them again to mark stale entries. Draining a flight with fixed-size ACK batches has quadratic total
 cleanup work. [Google QUICHE](https://github.com/google/quiche/blob/c961965aa3ee8f2b6f05ebcac794f7854101adcd/quiche/quic/core/congestion_control/bandwidth_sampler.cc#L377)
 uses packet-number lookup and obsolete-prefix reclamation; use that as a
 reference without copying a TCP or single-space assumption into QUIC.
@@ -45,17 +44,16 @@ Acceptance is the removal of the whole-flight factor from per-ACK work,
 with measured scaling and bounded retained memory under reordering and loss.
 Report CPU time and memory across both benchmark axes, including small
 flights, and explain any remaining logarithmic or amortized cost. Keep the
-regressions in fork CI and the benchmark matrix at least nightly. Do not
+regressions in CI and the benchmark matrix at least nightly. Do not
 substitute one hardware-specific millisecond limit for the scaling check.
 
-Land the fix in the fork, offer it upstream or record why not, publish an
-immutable fork release, and pin the corrected dependency chain here before
-completing this quest. Do not wait for the broader QUIC stack release. Update internal packet-lifetime comments inline; no new user guide
-is needed.
+Offer the fix upstream to quinn or record why not. Update internal
+packet-lifetime comments inline; no new user guide is needed.
 
 ## Required
 
-- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic` on `dev`, not the frozen fork
+- [BBR3](/quest/m1/quic/fork/bbr3.md) - the `moq-quic` BBR3 this fixes
+- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic`, not the frozen fork
 
 ## Related
 

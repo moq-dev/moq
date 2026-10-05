@@ -23,6 +23,32 @@ naming `moqdev/moq` and `#moq`.
 
 Use `moq auth` for keys and tokens; installing `moq` includes it.
 
+## macOS and Linux
+
+The quickest way to install `moq`:
+
+```bash
+curl -fsSL https://moq.sh | sh
+```
+
+It installs the newest `moq` release into `~/.local/bin`, without sudo or Rust,
+on macOS (Apple Silicon) and Linux (x86\_64, aarch64, glibc 2.34+). It checks
+the download against the release's `SHA256SUMS` and never edits your shell
+profile; it prints the `PATH` line to add if needed. Run it again to upgrade.
+Pass options after `sh -s --`:
+
+```bash
+# A specific version, e.g. to pin or downgrade
+curl -fsSL https://moq.sh | sh -s -- --version 0.14.0
+
+# Another directory, required when HOME is unset
+curl -fsSL https://moq.sh | sh -s -- --dir ~/bin
+```
+
+It refuses to overwrite a `moq` that a package manager symlinked, so upgrade
+that one with its package manager. To uninstall, delete the binary:
+`rm ~/.local/bin/moq`. `moq-relay` and the plugins use the methods below.
+
 ## Any platform
 
 ```bash
@@ -32,9 +58,9 @@ cargo install moq-relay moq-cli
 # Homebrew (macOS and Linux)
 brew install moq-dev/tap/moq-relay moq-dev/tap/moq
 
-# Nix (pin a release tag to use the binary cache)
-nix run github:moq-dev/moq#moq-relay -- relay.toml
-nix run github:moq-dev/moq#moq -- --help
+# Nix (`release` builds from source; a release tag such as moq-relay-v0.12.4 uses the binary cache)
+nix run github:moq-dev/moq/release#moq-relay -- relay.toml
+nix run github:moq-dev/moq/release#moq -- --help
 
 # Docker (linux/amd64 and linux/arm64)
 docker run -p 4443:4443/udp -p 4443:4443/tcp -v "$PWD/relay.toml:/app/relay.toml:ro" moqdev/moq-relay /app/relay.toml
@@ -44,8 +70,8 @@ docker run -i moqdev/moq --help
 Static binaries for Linux (x86\_64, aarch64), macOS (Apple Silicon), and Windows
 (x64) are attached to every
 [GitHub release](https://github.com/moq-dev/moq/releases). The Nix cache at
-`kixelated.cachix.org` only holds tagged releases, so an unpinned
-`github:moq-dev/moq` builds from source.
+`kixelated.cachix.org` only holds tagged releases, so the `release` branch
+builds from source.
 
 ## Debian and Ubuntu
 

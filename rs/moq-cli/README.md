@@ -6,6 +6,10 @@ It works with FFmpeg for encoding and decoding.
 ## Install
 
 ```bash
+# macOS and Linux
+curl -fsSL https://moq.sh | sh
+
+# Or from source
 cargo install moq-cli
 ```
 

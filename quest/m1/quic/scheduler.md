@@ -27,8 +27,8 @@ integer.
 Use byte-accounted deficit round robin, or an equivalent bounded-quantum
 algorithm, between backlogged groups at equal priority. Round robin by stream
 count is insufficient because audio, video, and data streams have different
-sizes. Within the chosen group, order streams by the MoQ group order: newest
-first, fixed by the draft and never inverted. A blocked stream must not consume
+sizes. Within the chosen group, order streams by the subscription's group order
+(newest first by default). A blocked stream must not consume
 the group's turn, and opening newer groups must not reset its accumulated
 fair-share credit.
 
@@ -81,8 +81,7 @@ Record queue/lock work, CPU, throughput, latency, and byte fairness on the
 same congested workloads. Both equal-priority subscriptions must progress
 while a higher-priority subscription preempts them and each subscription
 sheds its own old backlog. Measure the full scope of trait and adapter changes
-before publishing the API; any published break targets dev under the normal
-release policy.
+before publishing the API.
 
 Retransmissions follow the same hierarchy. noq already re-queues a lost
 range through the stream's priority (`StreamsState::retransmit`), so a lost
@@ -104,7 +103,7 @@ where the new implementation makes it redundant.
 
 ## Required
 
-- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic` on `dev`, not the frozen fork
+- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic`, not the frozen fork
 
 ## Closes
 
@@ -116,7 +115,7 @@ where the new implementation makes it redundant.
 - [moq#3320](https://github.com/moq-dev/moq/pull/3320) - removes the current
   dense-rank queue from the wide scalar path and records why a scalar cannot
   provide this fairness level
-- [Ladder controller](/quest/m2/ladder/controller.md) - rendition priority is
+- [Ladder controller](/quest/m3/ladder/controller.md) - rendition priority is
   a policy consumer of the same hierarchy
 - [Scope track priority](/quest/m1/track-priority-scope.md) - owns the
   priority semantics this mechanism realizes, including the scheduling-domain

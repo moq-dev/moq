@@ -6,12 +6,12 @@ permissions:
 
 on:
   push:
-    branches: [main]
+    branches: [release]
     paths:
       - 'js/**'
       - '.github/workflows/release-js.yml'
   # Dry-run: builds, packs, and runs `deno publish --dry-run`, which catches
-  # JSR-only failures before they break a release on main.
+  # JSR-only failures before they break a release on `release`.
   pull_request:
     paths:
       - 'js/**'

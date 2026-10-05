@@ -27,7 +27,7 @@ mod openh264;
 #[cfg(test)]
 pub(crate) mod probe;
 
-#[cfg(target_os = "macos")]
+#[cfg(apple)]
 mod videotoolbox;
 
 #[cfg(target_os = "windows")]
@@ -47,7 +47,8 @@ mod vaapi;
 
 /// An opened video encoder. Feed it frames at the configured resolution; get
 /// back zero or more access units in the codec's wire framing, each stamped with
-/// the timestamp of the frame it came from.
+/// the timestamp of the frame it came from and marked when it is a keyframe,
+/// whether forced by `cut` or placed by the backend's own GOP cadence.
 pub(crate) trait Backend {
 	/// Encode one frame, opening a group at it (an IDR) when `cut` is set.
 	/// Backends place group boundaries on their own per [`Config::gop`], so this
@@ -95,6 +96,47 @@ pub(crate) trait Backend {
 	fn name(&self) -> &'static str;
 }
 
+/// Whether one NAL unit (header first, no start code) is a keyframe slice: an
+/// H.264 IDR (type 5), or an H.265 IRAP picture (BLA/IDR/CRA, types 16..=23).
+#[cfg(any(
+	apple,
+	target_os = "windows",
+	all(target_os = "linux", any(feature = "nvidia", feature = "vaapi", feature = "v4l2")),
+	test
+))]
+fn keyframe_nal(codec: Codec, nal: &[u8]) -> bool {
+	let Some(&header) = nal.first() else {
+		return false;
+	};
+	match codec {
+		Codec::H264 => header & 0x1f == 5,
+		Codec::H265 => (16..=23).contains(&((header >> 1) & 0x3f)),
+	}
+}
+
+/// Whether an Annex-B access unit is a keyframe, for a backend whose codec API
+/// hands back only the bytes. Decided by the first slice, since every slice of a
+/// picture shares its type; the parameter sets and SEI ahead of it are skipped.
+#[cfg(any(
+	target_os = "windows",
+	all(target_os = "linux", any(feature = "nvidia", feature = "vaapi", feature = "v4l2")),
+	test
+))]
+fn keyframe_annexb(codec: Codec, mut annexb: &[u8]) -> bool {
+	while let Some((at, len)) = moq_mux::codec::annexb::find_start_code(annexb) {
+		annexb = &annexb[at + len..];
+		let Some(&header) = annexb.first() else { break };
+		let slice = match codec {
+			Codec::H264 => (1..=5).contains(&(header & 0x1f)),
+			Codec::H265 => (header >> 1) & 0x3f < 32,
+		};
+		if slice {
+			return keyframe_nal(codec, annexb);
+		}
+	}
+	false
+}
+
 /// Every encoder backend this crate has a name for, on any platform.
 ///
 /// Platform-complete on purpose, where the candidate lists this module selects
@@ -126,7 +168,7 @@ struct Candidate {
 /// Hardware backends, in priority order. Platform-gated so only the ones that
 /// could plausibly work on this target are even listed.
 const HARDWARE: &[Candidate] = &[
-	#[cfg(target_os = "macos")]
+	#[cfg(apple)]
 	Candidate {
 		name: videotoolbox::NAME,
 		codecs: &[Codec::H264, Codec::H265],
@@ -582,6 +624,45 @@ mod tests {
 				"{} is compiled in but missing from NAMES",
 				candidate.name,
 			);
+		}
+	}
+
+	/// The keyframe is decided by the first slice, past the parameter sets and SEI
+	/// that lead an H.264 IDR, and by either start code length.
+	#[test]
+	fn an_h264_keyframe_is_its_idr_slice() {
+		let idr = [
+			0, 0, 0, 1, 0x67, 0x42, 0, 0, 1, 0x68, 0xce, 0, 0, 1, 0x06, 0x05, 0, 0, 1, 0x65, 0x88,
+		];
+		assert!(keyframe_annexb(Codec::H264, &idr));
+
+		let delta = [0, 0, 0, 1, 0x09, 0xf0, 0, 0, 0, 1, 0x41, 0x9a];
+		assert!(!keyframe_annexb(Codec::H264, &delta));
+
+		// Parameter sets with no slice are not a picture at all.
+		assert!(!keyframe_annexb(
+			Codec::H264,
+			&[0, 0, 1, 0x67, 0x42, 0, 0, 1, 0x68, 0xce]
+		));
+		assert!(!keyframe_annexb(Codec::H264, &[]));
+	}
+
+	/// Every H.265 IRAP type (BLA, IDR, CRA) is a keyframe; a trailing picture is not.
+	#[test]
+	fn an_h265_keyframe_is_any_irap_slice() {
+		// VPS (32), SPS (33), PPS (34), then the slice, each with a two-byte header.
+		let with_slice = |nal_type: u8| {
+			let mut annexb = Vec::new();
+			for header in [32, 33, 34, nal_type] {
+				annexb.extend_from_slice(&[0, 0, 0, 1, header << 1, 0x01, 0xaf]);
+			}
+			annexb
+		};
+		for irap in 16..=23 {
+			assert!(keyframe_annexb(Codec::H265, &with_slice(irap)), "type {irap}");
+		}
+		for trailing in [0, 1] {
+			assert!(!keyframe_annexb(Codec::H265, &with_slice(trailing)), "type {trailing}");
 		}
 	}
 }

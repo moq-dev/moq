@@ -249,6 +249,26 @@ export function hasStreamCount(version: Version): boolean {
 	}
 }
 
+/**
+ * Whether a served SUBSCRIBE completes only once the subscriber FINs or resets its half of the
+ * Subscribe Stream. Added in lite-07, where a subscriber FINs once its tail accounting settles,
+ * since a transport ACK does not say the application read the tail.
+ */
+export function waitsForSubscriberFin(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /** Whether ANNOUNCE_START and ANNOUNCE_UPDATE may copy a path head or hop-chain tail from a live announcement. Added in lite-07. */
 export function hasAnnounceCompression(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
@@ -298,4 +318,23 @@ const VERSION_NAMES: Record<number, string> = {
 
 export function versionName(v: Version): string {
 	return VERSION_NAMES[v] ?? `unknown(0x${v.toString(16)})`;
+}
+
+/**
+ * Whether SUBSCRIBE_START carries the publisher's largest (group, frame), which a subscriber
+ * takes as where the live feed is. Added in lite-07; an earlier answer says nothing about it.
+ */
+export function hasLargest(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
 }

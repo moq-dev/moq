@@ -8,7 +8,7 @@ regression test in the fork proves it.
 
 ## Plan
 
-moq-dev/noq#5 (in moq-noq 1.3.1; main pins 1.3.2) fixed the label bug this
+moq-dev/noq#5 (in moq-noq 1.3.1; `main` pins 2.0.1 and `release` 1.3.3) fixed the label bug this
 quest was opened for. The transport calls `Controller::on_app_limited` on
 every empty poll that nothing held back, and BBR marks starvation before the
 next send. Its tests cover streams, datagrams, batched ACKs, and backlogs
@@ -31,7 +31,7 @@ quest.
 
 ## Required
 
-- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic` on `dev`, not the frozen fork
+- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic`, not the frozen fork
 
 ## Closes
 

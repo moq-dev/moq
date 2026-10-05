@@ -49,7 +49,7 @@ study on a long-RTT profile measured command staleness more than twice as bad
 for QUIC reliable streams as for DDS best-effort: correct and useless.
 
 The split is a framing decision, not a subscription flag, and `moq-json` and
-`moq-binary` already implement both halves as their snapshot and stream
+`moq-flate` already implement both halves as their snapshot and stream
 modes. What that
 means for the primitive is in [robot](/quest/m2/teleop/robot.md), and what it
 means for a protocol multiplexing many message rates onto one link is in
@@ -109,5 +109,5 @@ stating plainly because it is what a builder is comparing against.
   SITL flown from a browser, parked with the bridge
 - [Browser teleoperation package](/quest/m3/teleop-browser-package.md) -
   `@moq/robot` mirroring the Rust crate, parked with the bridge
-- [Text schema](/quest/m2/text-schema.md) - non-media tracks in a catalog,
-  arrived at from the media side
+- [Text availability](/quest/m3/text-schema.md) - a text track publishes its
+  own availability index instead of copying the media timeline

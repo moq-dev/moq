@@ -37,7 +37,7 @@ out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 
 # One binary per source under test: each test file defines its own libobs and
-# libmoq stubs, so two of them can't share a link. Header-only helpers
+# moq-c stubs, so two of them can't share a link. Header-only helpers
 # (quality defaults) build as a third binary with no plugin source.
 for name in moq-output moq-source; do
     # shellcheck disable=SC2086

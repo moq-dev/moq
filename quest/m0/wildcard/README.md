@@ -40,9 +40,9 @@ still hold: the transcoder claims its service prefix
 ([Where derived output lives](#where-derived-output-lives)), and the archive
 claims the root and refuses what it does not have.
 Resolve and Demand are additive and land on main. Both are done on the line
-branch (#4050 re-resolves on a refusal; 9d059b1b9 lists and demands covered
-renditions in the browser player), so main no longer lists them; the line
-branch moves to `quest/m0/wildcard/README` to match this path.
+branch (9d059b1b9 lists and demands covered renditions in the browser
+player), so main no longer lists them; the line branch moves to
+`quest/m0/wildcard/README` to match this path.
 
 ### What already exists, and what does not
 
@@ -53,7 +53,7 @@ would have to start working (a cold transcoder)"
 `origin::Producer` gained versioned patterns on the
 [Auth](/quest/m1/auth/README.md) line, so tokens and filters reuse the
 same matcher; advertisements stay prefixes. `Cost { warm, cold }`
-(`rs/moq-net/src/model/origin.rs:426`) is the route cost since
+(`rs/moq-net/src/model/origin.rs:404`) is the route cost since
 [#2925](https://github.com/moq-dev/moq/pull/2925).
 
 [moq#3225](https://github.com/moq-dev/moq/pull/3225) moved a long way toward
@@ -75,14 +75,11 @@ itself exists: `moq_net::{Pattern, Patterns, Segment}` and `Path.Pattern` /
 `Path.Patterns` in `js/net/src/path.ts` own the shared matching, containment,
 specificity, and rebasing tokens and filters reuse.
 
-What is genuinely missing, beyond patterns themselves, is content identity.
-Announcement `Epoch` was specified into lite-06 by
-[#2611](https://github.com/moq-dev/moq/pull/2611), never implemented, and
-removed from the draft by #3225, which retired `draft-lcurley-moq-broadcast`
-with it. [moq#3312](https://github.com/moq-dev/moq/pull/3312) restored per-path identity
-from the route's first hop, reversing #3225's no-splice rule, and this
-questline builds its collision handling on that rather than on a generation
-field.
+Content identity is the path: it names one broadcast whoever serves it, and
+any covering route resumes a subscription from the first frame the subscriber
+lacks (#4741). The `@<epoch>` segment (#4706) is what makes a restart a new
+path. So this questline settles collisions with interchangeable output at one
+path, not with a route identity or a generation field.
 
 ### Decisions
 
@@ -98,8 +95,7 @@ field.
   pool that cost and the request hash order. A terminal refusal from the
   winning tier IS the answer and never falls through to a shorter prefix, so a
   transcoder refusing a path does not leak the request to the archive's
-  catch-all, and one unserved path still costs one round trip. The capacity
-  re-resolution below stays within the tier, refuser excluded. The accepted
+  catch-all, and one unserved path still costs one round trip. The accepted
   consequence: an offline derivative is not reachable through the catch-all
   while a longer prefix covers it.
 - **A claim is a POOL, not a competitor.** Several advertisers of one
@@ -139,7 +135,7 @@ field.
   refused. A prefix wider than the grant is accepted, but it only routes
   requests for paths the grant covers. Fleet-wide services use the cluster
   identity; a customer service serves only what its own v1 grant contains.
-  Until [Advertise-only authorization](/quest/m2/processor/advertise-auth.md)
+  Until [Advertise-only authorization](/quest/m3/processor/advertise-auth.md)
   lands, the publish scope stands in for advertising; a credential with its own
   advertise scope is checked against that instead.
 - **Claims are visible to subscribers.** A subscriber sees every advertised
@@ -152,45 +148,46 @@ field.
   `#isPathAnnounced` hides a catalog rendition with no exact-path
   announcement); demand makes a covering wildcard count as
   availability there.
-- **Refusal is a typed stream reset, with no negative cache.** An advertiser
-  resets a subscribe it will not serve, and the reset carries which KIND of
-  refusal it is (`Error::to_code` already puts a typed code on the wire; the
-  capacity code is NO_CAPACITY, 0x30, in moq-lite's own 48-63 range).
-
-  A capacity refusal is unavoidable: an advertiser's capacity and a relay's view
-  of it are separated by at least half a round trip, so a retraction and a
-  request for the slot it just gave away WILL cross, at a rate of request rate
-  times retraction rate times RTT. Only that code permits ONE re-resolution,
-  with the refusing advertiser excluded from it. The exclusion is what makes the
-  retry safe, NOT the retraction arriving first: the reset and the retraction
-  travel independently, so re-resolution may pick another advertiser, and may
-  equally find none and return unroutable. Both are correct outcomes.
-
-  Every other refusal is terminal and propagates: a path no rule covers, an
-  unauthorized one, one that does not exist. Scanning unserved paths therefore
-  still costs one round trip per path, and this is not a fallback list: there
-  is no walk down the candidates, only one re-resolution. Classification is
-  EXPLICIT, per the repository's retry policy: an unrecognized or bare reset is
-  permanent, so a new refusal mode surfaces instead of quietly joining a retry
-  loop. No negative cache either way; rate limiting stays with the advertiser
-  and the per-project auth gate.
-- **A double claim is settled by route identity, not by a lease.** Two relays
-  can hash one path to different workers before either concrete announcement
-  propagates, and both land at the SAME literal path. Whichever route wins
-  selection serves it, and a consumer moves between them only when the winner's
-  identity is preserved, per the first-hop resume rule ([moq#3312](https://github.com/moq-dev/moq/pull/3312)); two distinct workers are two identities,
-  so the loser's subscribers end and resubscribe rather than being spliced onto
-  another worker's frames mid-group. Wildcard routing invents neither a lease
-  nor a generation. This is weaker than the retired `Epoch` design, which could
-  declare two workers' output interchangeable and splice between them; a service
-  that needs that guarantee has to carry it in its own media contract, not in
-  routing.
+- **Every refusal is a terminal typed stream reset, with no negative cache.**
+  An advertiser resets a subscribe it will not serve, and the reset carries
+  which KIND of refusal it is (`Error::to_code` already puts a typed code on
+  the wire). Every refusal propagates: a path no rule covers, an unauthorized
+  one, one that does not exist, or one the advertiser has no capacity for.
+  There is no re-resolution (decided 2026-10-03: NO_CAPACITY is removed, so
+  no refusal is retryable). An advertiser sheds load by withdrawing or
+  re-pricing its claim; a request that crosses the retraction is refused, and
+  the client's ordinary resubscribe resolves again. Scanning unserved paths
+  costs one round trip per path. No negative cache; rate limiting stays with
+  the advertiser and the per-project auth gate.
+- **A double claim is settled by interchangeable output, not by route
+  identity or a lease.** Two relays can hash one path to different workers
+  before either concrete announcement propagates, and both land at the SAME
+  literal path. A path is one broadcast whoever serves it, so claim workers
+  mirror the source's epoch and group numbers, publish a deterministic
+  catalog, and start at group boundaries
+  ([Transcoders start at group boundaries](/quest/m0/wildcard/transcode-group-start.md)).
+  Two workers at one path are then one broadcast, and a relay moving between
+  them does so at a group boundary (decided 2026-10-03: #4741 drops
+  first-hop identity, so routing can no longer tell two workers apart).
+  Wildcard routing invents neither a lease nor a generation. That quest is
+  Required here (decided 2026-10-04), so this line cannot ship with workers
+  that can be spliced mid-group.
+- **A serving front follows the best route.** A join or re-price re-selects
+  every front below the prefix, and a front moves when another route now
+  wins: cheaper, or the rendezvous winner among equal costs (decided
+  2026-10-04, replacing Stay). This is safe because a path is one broadcast
+  and any covering route resumes it (#4741).
+- **No reply Origin.** The lite-07 `Origin` field in SUBSCRIBE_OK and FETCH_OK,
+  and the rule that a relay MUST NOT splice across differing Origins, are
+  dropped (decided 2026-10-03: nothing needs them for correctness). The line
+  branch carries code for Origin, `Identity`, and `Pin`, and #4050's
+  NO_CAPACITY re-resolution; remove it when the branch next merges main.
 - **Patterns are independent of clustering.** The `moq-pattern` crate owns
   the matching semantics tokens and filters share, with no draft of its own;
   no announce message carries a pattern on either protocol (AUTH grants on
-  lite-06 do, per the [Auth](/quest/m1/auth/README.md) line). moq-cluster adds hop
-  lists, costs, pool selection, and request resolution to prefix
-  advertisements.
+  the wip lite version do, per the [Auth](/quest/m1/auth/README.md) line).
+  moq-cluster adds hop lists, costs, pool selection, and request resolution
+  to prefix advertisements.
 
 ### Where derived output lives
 
@@ -218,11 +215,16 @@ announcement shadows it. A claim names no generation, so a client that must
 distinguish recording generations reads the catalog's archive entry
 ([archive](/quest/m1/archive/README.md)) rather than announce state.
 
+## Required
+
+- [Transcoders start at group boundaries](/quest/m0/wildcard/transcode-group-start.md) - two claim workers at one path are one broadcast, so a relay never splices them mid-group
+- [A standing refusal ends the front](/quest/m0/wildcard/refusal-final.md) - a refusal from the winning route ends the request instead of re-selecting a sibling or a shorter prefix
+
 ## Related
 
 - [archive](/quest/m1/archive/README.md) - an archive claims the root, and its
   catalog names the generations a claim cannot
-- [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - derived output
+- [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - derived output
   mirrors the source path, `@<epoch>` segment included
 - [Announcement shapes](/quest/m2/announce-shapes.md) - moq-lite-only exact,
   suffix, and prefix+suffix claims that survive relay hops

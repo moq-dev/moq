@@ -35,4 +35,5 @@ fronts' benchmark shows the retry loop's re-mint is noise.
 
 ## Required
 
+- [Wildcard](/quest/m0/wildcard/README.md) - `routed_broadcast`, `request_broadcast`, and the pool code this reworks exist only on its line branch
 - [Shared fronts](/quest/m0/shared-fronts.md) - reworks the same fronts, and its benchmark decides whether this stays in m1

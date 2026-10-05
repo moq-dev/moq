@@ -18,14 +18,18 @@ from whichever platform a user happened to be on.
   it measures anything. Settle which way out: a virtual display and software
   rendering in CI, or an audio-only mode in `moq play` that never opens a
   window. The second is worth having on its own, and it is the smaller
-  dependency to keep working. A real device callback is part of what is being
+  dependency to keep working. Recorded in the 2026-10-05 audit:
+  [Leave out a role](/quest/m1/cli-no-role.md) decided that `play --no-video`
+  shows a blank, closable window and left a headless audio-only path as later
+  work, so this quest owns that headless path, built on `--no-video`. A real device callback is part of what is being
   measured, so keep the real backend rather than substituting a fake clock, and
   accept that the timing noise it adds sets the floor for the native budgets.
   That floor is worth measuring on its own before the budgets are written.
 - `moq play` needs to emit the run's counters and stage timings as JSON for the
   analyzer. Add that output, and keep it useful outside the test: a user
   debugging their own latency wants the same dump.
-- Reuse the browser lane's analyzer and budget file, with the JSON field names
+- Reuse the browser lane's analyzer and budget file (`test/audio-quality/`, the
+  schema is `clients/js/src/schema.ts`), with the JSON field names
   and meanings matching its schema exactly. Native rows get their own budget
   values in the same file, keyed the same way, since the device floor differs;
   they do not get their own schema.
@@ -40,11 +44,10 @@ budget. Only then compare end-to-end totals, with the backend-dependent stages
 isolated: this lane deliberately accepts real device callback noise, so a
 difference in totals alone proves nothing about the estimator.
 
-Standalone in m1 rather than a child of the m0 [Audio quality
-harness](/quest/m0/audio-quality-harness/README.md) line (decided in the
-2026-09-28 quest audit): nothing in m0 waits on it. The native jitter target
+Standalone in m1 rather than a child of the m0 audio quality harness line
+(decided in the 2026-09-28 quest audit): nothing in m0 waits on it. The native jitter target
 it grades is done on the jitter target line.
 
-## Required
+## Related
 
-- [Browser](/quest/m0/audio-quality-harness/browser.md) - defines the metric schema, the budget file, and the extracted shaper
+- [Leave out a role](/quest/m1/cli-no-role.md) - `play --no-video`, which the headless audio-only path builds on

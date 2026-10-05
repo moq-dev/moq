@@ -13,15 +13,23 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
+import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
 import { nextMedia, subscribeMedia } from "../media";
 
 import type { Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
-import { type DecoderConfig, decoderConfig, type PlaybackIdentity, playbackIdentity } from "./config";
+import {
+	type DecoderConfig,
+	decoderConfig,
+	frameDuration,
+	type PlaybackIdentity,
+	packetDuration,
+	playbackIdentity,
+} from "./config";
 import { Handover } from "./handover";
-import { ringSamples } from "./latency";
-// Compiled and inlined as a blob URL via vite-plugin-worklet.
+import { AUTO_MAX_AGE, ringSamples, target } from "./latency";
+// A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
 import { type DecodedSpan, Terminal } from "./terminal";
@@ -58,6 +66,9 @@ type DecoderOutput = {
 	// Whether the audio buffer is stalled (waiting to fill)
 	stalled: Signal<boolean>;
 
+	// How many times the ring ran dry mid-playback, so the UI can show that the target is too low.
+	underruns: Signal<number>;
+
 	// Combined buffered ranges (network jitter + decode buffer)
 	buffered: Signal<Container.BufferedRanges>;
 };
@@ -85,6 +96,7 @@ export class Decoder {
 		stats: new Signal<Stats | undefined>(undefined),
 		timestamp: new Signal<Time.Milli | undefined>(undefined),
 		stalled: new Signal<boolean>(true),
+		underruns: new Signal<number>(0),
 		buffered: new Signal<Container.BufferedRanges>([]),
 	};
 	readonly out = readonlys(this.#out);
@@ -103,6 +115,15 @@ export class Decoder {
 
 	// Ordered discontinuity and endpoint state from the container consumer.
 	#terminal = new Terminal();
+
+	// The container consumer's arrival estimate, unset while nothing is subscribed.
+	#measured = new Signal<Time.Milli | undefined>(undefined);
+
+	// The subscription's max age: the shared budget, raised to the estimator's ceiling in "auto".
+	#subscribeMaxAge = new Signal<Time.Milli>(Time.Milli.zero);
+
+	// The codec's frame duration: the catalog constant, refined by each frame's own duration.
+	#frame = new Signal<Time.Milli | undefined>(undefined);
 
 	// Which subscription the ring's buffered samples came from. See #runDecoder.
 	#handover = new Handover();
@@ -123,7 +144,19 @@ export class Decoder {
 
 		this.source = props.source;
 		this.sync = props.sync;
-		this.#signals.cleanup(this.sync.register(this.source.out.jitter));
+		// The "auto" playout target this track needs, per doc/concept/audio-jitter.md.
+		const playout = this.#signals.computed((effect) => {
+			const measured = effect.get(this.#measured);
+			if (measured === undefined) return undefined;
+			const delay = effect.get(this.source.out.config)?.delay;
+			return target({
+				measured,
+				advertised: effect.get(this.source.out.jitter),
+				frame: effect.get(this.#frame),
+				delay: delay !== undefined ? Time.Milli(delay) : undefined,
+			});
+		});
+		this.#signals.cleanup(this.sync.register(playout));
 		this.#identity = this.#signals.computed((effect) => {
 			const config = effect.get(this.source.out.config);
 			return config ? playbackIdentity(config) : undefined;
@@ -133,10 +166,20 @@ export class Decoder {
 			return config ? decoderConfig(config) : undefined;
 		});
 
+		this.#signals.run(this.#runSubscribeMaxAge.bind(this));
 		this.#signals.run(this.#runWorklet.bind(this));
 		this.#signals.run(this.#runEnabled.bind(this));
 		this.#signals.run(this.#runLatency.bind(this));
 		this.#signals.run(this.#runDecoder.bind(this));
+	}
+
+	// A group the relay expires is never observed, so a subscription cut to the target would cap the
+	// estimate at the target it already holds. The container consumer keeps the shared budget as its
+	// local skip, since it observes each frame before applying it. See doc/concept/audio-jitter.md.
+	#runSubscribeMaxAge(effect: Effect): void {
+		const maxAge = effect.get(this.sync.out.maxAge);
+		const auto = effect.get(this.sync.in.delay) === "auto";
+		this.#subscribeMaxAge.set(auto ? Time.Milli.max(maxAge, AUTO_MAX_AGE) : maxAge);
 	}
 
 	#runWorklet(effect: Effect): void {
@@ -172,7 +215,12 @@ export class Decoder {
 			// abandoned, so building against its name would throw. Gate on the race result, not
 			// `context.state`, because `AudioContext.close()` only flips `.state` to "closed" synchronously
 			// on Chrome (Firefox/Safari report "suspended").
-			const loaded = await effect.race(context.audioWorklet.addModule(RenderWorklet).then(() => true));
+			const loaded = await effect.race(
+				RenderWorklet(hostedAssets()).then(async (url) => {
+					await context.audioWorklet.addModule(url);
+					return true;
+				}),
+			);
 			if (!loaded) return;
 
 			// Create the worklet node. outputChannelCount must be set explicitly
@@ -207,6 +255,9 @@ export class Decoder {
 			effect.run((inner) => {
 				this.#out.stalled.set(inner.get(ring.stalled));
 			});
+			effect.run((inner) => {
+				this.#out.underruns.set(inner.get(ring.underruns));
+			});
 
 			effect.set(this.#out.root, worklet);
 		});
@@ -215,7 +266,7 @@ export class Decoder {
 	#runEnabled(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
-		if (effect.get(this.sync.in.delay) === "instant") {
+		if (effect.get(this.sync.out.instant)) {
 			this.reset();
 			return;
 		}
@@ -239,7 +290,8 @@ export class Decoder {
 		if (!ring) return;
 
 		// A rise parks playback until the ring refills to the new floor, which is what keeps audio in
-		// step with video. A catalog's jitter estimate can rise a millisecond at a time.
+		// step with video. The measured target moves a bucket at a time, and a rise the buffered
+		// slack already covers costs no silence at all.
 		const delay = effect.get(this.sync.out.delay);
 		ring.setLatency(ringSamples(ring.rate, delay));
 	}
@@ -247,7 +299,7 @@ export class Decoder {
 	#runDecoder(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
-		if (effect.get(this.sync.in.delay) === "instant") return;
+		if (effect.get(this.sync.out.instant)) return;
 
 		const broadcast = effect.get(this.source.in.broadcast);
 		if (!broadcast) return;
@@ -259,6 +311,7 @@ export class Decoder {
 		if (!identity) return;
 
 		const config = identity.decoder;
+		this.#frame.set(frameDuration(config));
 
 		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
 		// broadcast instead of the catalog's own broadcast.
@@ -276,7 +329,7 @@ export class Decoder {
 			broadcast: active,
 			track,
 			priority: Catalog.PRIORITY.audio,
-			maxAge: this.sync.out.maxAge,
+			maxAge: this.#subscribeMaxAge,
 		});
 		if (!sub) return;
 
@@ -307,6 +360,11 @@ export class Decoder {
 			const decode = inner.get(this.#decodeBuffered);
 			this.#out.buffered.update(() => Container.mergeBufferedRanges(network, decode));
 		});
+
+		// Feed the arrival estimate into the playout target. Cleared on teardown so a departed track
+		// stops holding the buffer open.
+		effect.run((inner) => this.#measured.set(inner.get(consumer.spread)));
+		effect.cleanup(() => this.#measured.set(undefined));
 
 		effect.spawn(async () => {
 			const loaded = await Util.Libav.polyfill();
@@ -363,6 +421,9 @@ export class Decoder {
 				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
 				this.sync.received(timestamp, "audio");
 
+				const duration = packetDuration(config.codec, frame);
+				if (duration !== undefined) this.#frame.set(duration);
+
 				this.#out.stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
@@ -415,6 +476,11 @@ export class Decoder {
 			this.#out.buffered.update(() => Container.mergeBufferedRanges(network, decode));
 		});
 
+		// Feed the arrival estimate into the playout target. Cleared on teardown so a departed track
+		// stops holding the buffer open.
+		effect.run((inner) => this.#measured.set(inner.get(consumer.spread)));
+		effect.cleanup(() => this.#measured.set(undefined));
+
 		effect.spawn(async () => {
 			const loaded = await Util.Libav.polyfill();
 			if (!loaded) return; // cancelled
@@ -451,6 +517,9 @@ export class Decoder {
 
 				const timestamp = Time.Milli.fromMicro(frame.timestamp);
 				this.sync.received(timestamp, "audio");
+
+				const duration = packetDuration(config.codec, frame);
+				if (duration !== undefined) this.#frame.set(duration);
 
 				this.#out.stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,

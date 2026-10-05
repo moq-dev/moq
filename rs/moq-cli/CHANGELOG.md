@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0](https://github.com/moq-dev/moq/compare/moq-cli-v0.13.0...moq-cli-v0.14.0) - 2026-10-03
+
+### Added
+
+- *(mux)* report each TS elementary stream's access units at export ([#4577](https://github.com/moq-dev/moq/pull/4577))
+
+### Fixed
+
+- *(relay)* [**breaking**] remove cluster gossip discovery ([#4601](https://github.com/moq-dev/moq/pull/4601))
+
 ## [0.13.0](https://github.com/moq-dev/moq/compare/moq-cli-v0.12.8...moq-cli-v0.13.0) - 2026-09-30
 
 ### Added

@@ -60,15 +60,39 @@ order PTS 0, 120, 40, 80) loses nothing on a clean path. It must pass before
 the hold is deleted. Rerun the #4613 netem rig (10% loss, 120 s) and
 compare with #4618's numbers.
 
+Decided in the 2026-10-05 audit: TS export rewind folds in here, since
+#4645's jitter generations already keep the clock through a skipped group and
+flag a PCR break only on a declared restart. What it still owes is the
+backwards-time check: timestamps restarting within one broadcast are a
+publisher bug (a name always means the same content), so the export fails
+with an error rather than rewinding. The only input timestamp is the frame's
+PTS, which legally moves backwards in decode order with B-frames (0, 120, 40,
+80 ms), and the authored DTS cannot show a reset since `author_dts` clamps
+every backwards candidate to `prev + 1`. So the check runs on PTS before that
+clamp and is group-aware: a frame whose PTS is below the largest PTS of the
+track's previous group is a reset. Test: a source whose timestamps restart at
+zero after 10 s fails the export, while a B-frame sequence and open-GOP
+leading pictures are still accepted.
+
+#4645 also completes [TS byte schedule](/quest/m1/tstd/byte-schedule.md);
+delete both quests in it. It targets the retiring line branch, so retarget it
+to `main` once the line (#4640) lands, and merge `main` in.
+
 Update `doc/bin/cli.md` and the `moq export ts` examples.
 
 Public API: `ts::Export` takes the delay in place of its max age and loses the
-hold; breaking, on `dev`. Wire:
+hold; breaking. `Export::stats` returns `ts::stats::Export` (decided in the
+2026-10-05 audit, matching [TS stats module](/quest/m1/ts-stats-module.md)),
+not a new `ts::export::Stats`. Wire:
 none.
+
+## Closes
+
+- [#4767](https://github.com/moq-dev/moq/issues/4767) - TS export rewinds its clock on every generation change
 
 ## Related
 
 - [FLV export delay](/quest/m1/flv-export-delay.md) - adopts the release stage
 - [MKV export delay](/quest/m1/mkv-export-delay.md) - adopts the release stage
 - [TS byte schedule](/quest/m1/tstd/byte-schedule.md) - uses this delay as its mux-ahead buffer delay
-- [Plan: max-delay](/quest/m1/plan-max-delay.md) - whether `max_age` becomes `max_delay` everywhere else
+- [Subscriber max-delay](/quest/m1/subscriber-max-delay.md) - subscriber staleness is renamed; publisher retention stays `max_age`

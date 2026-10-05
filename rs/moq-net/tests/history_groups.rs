@@ -109,7 +109,7 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 		got
 	});
 
-	tokio::time::timeout(TIMEOUT, track.used())
+	tokio::time::timeout(TIMEOUT, track.demand().used())
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
@@ -230,7 +230,7 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 		read_history(&mut sub).await;
 		sub
 	});
-	track.used().await.unwrap();
+	track.demand().used().await.unwrap();
 	upstream.server_transport.hold_unis();
 	let mut old = track.create_group(moq_net::group::Info { sequence: 5 }).unwrap();
 	for _ in 0..3 {

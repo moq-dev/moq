@@ -33,7 +33,11 @@
  * const joined = Path.join(base, Path.from("users"));
  * console.log(joined); // "api/v1/users"
  * ```
+ * @module
  */
+import * as Epoch from "./epoch.ts";
+
+/** A normalized broadcast path. */
 export type Valid = string & { __brand: "Name" };
 
 /**
@@ -336,3 +340,23 @@ export {
 	type Segment,
 	type Specificity,
 } from "@moq/pattern";
+
+/** Split off a final `@<uuidv7>` segment, leaving all other paths unchanged. */
+export function splitEpoch(path: Valid): { name: Valid; epoch?: Epoch.Valid } {
+	const slash = path.lastIndexOf("/");
+	const segment = path.slice(slash + 1);
+	if (segment.startsWith("@")) {
+		try {
+			const epoch = Epoch.parse(segment.slice(1));
+			return { name: path.slice(0, Math.max(0, slash)) as Valid, epoch };
+		} catch {
+			// `@alice` and other application segments remain valid literal paths.
+		}
+	}
+	return { name: path };
+}
+
+/** Append an optional epoch as a final `@<uuidv7>` segment. */
+export function joinEpoch(name: Valid, epoch?: Epoch.Valid): Valid {
+	return epoch === undefined ? name : join(name, from(`@${epoch}`));
+}

@@ -20,7 +20,8 @@ export function hiddenIndicator(parent: Effect, watch: MoqWatch): HTMLElement {
 		const gated = !effect.get(watch.renderer.out.visible);
 		const playing = !effect.get(watch.controls.paused);
 		const video = effect.get(watch.video.source.out.catalog) !== undefined;
-		const online = effect.get(watch.broadcast.out.status) !== "offline";
+		const status = effect.get(watch.broadcast.out.status);
+		const online = status === "loading" || status === "live";
 		const supported = effect.get(watch.video.source.out.error) !== "unsupported";
 		// `never` is a deliberate choice, not a surprise worth explaining.
 		const chosen = effect.get(watch.controls.visible) === "never";

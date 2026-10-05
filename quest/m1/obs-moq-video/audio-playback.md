@@ -6,8 +6,8 @@ The MoQ source decodes subscribed audio with statically linked moq-audio instead
 
 ## Plan
 
-- Today the source already plays audio: `moq_source_subscribe_audio` in `cpp/obs/src/moq-source.cpp` receives encoded frames through libmoq's `moq_consume_audio`, and `moq_source_decode_audio_frame` decodes them with libavcodec before `obs_source_output_audio`. Replace that decode, not the playback path.
-- Decode through the generated C++ package with `MoqBroadcastConsumer::decode_audio` (a `MoqAudioConsumer` with a `next()` future per frame, cancel on drop), then feed its PCM to `obs_source_output_audio`. `decode_audio` accepts Opus and AAC-LC today; add PCM there rather than in the plugin. Keep device playback inside OBS; do not enable moq-audio device capture/playback features or open a second audio device.
+- Today the source already plays audio: `moq_source_subscribe_audio` in `cpp/obs/src/moq-source.cpp` receives encoded frames, through moq-c's `moq_consume_audio` on `main` and the generated C++'s `subscribe_media` once the C++ line lands, and `moq_source_decode_audio_frame` decodes them with libavcodec before `obs_source_output_audio`. Replace that decode, not the playback path.
+- Decode through the generated C++ package with the `audio` namespace's decoder that [Codecs](/quest/m1/ffi-shape/codec.md) moves `MoqBroadcastConsumer::decode_audio` into (a `next()` future per frame, cancel on drop), then feed its PCM to `obs_source_output_audio`. `decode_audio` accepts Opus and AAC-LC today; add PCM there rather than in the plugin. Keep device playback inside OBS; do not enable moq-audio device capture/playback features or open a second audio device.
 - Map catalog tracks, sample rates, channel layouts, and timestamps explicitly. Channel layouts: map each channel count to the default layout moq-audio uses, the WAVE convention (3 is 2.1, 4 is quad, 6 is 5.1, 8 is 7.1), picking the nearest OBS `speaker_layout`, and refuse counts OBS cannot place rather than guess. This replaces `audio_layout_to_speakers`, which maps from FFmpeg layouts, and absorbs the former m2 obs-wave-layout quest. Note the mapping in `doc/bin/obs.md`.
 - Share the source's media timebase with video, preserve reconnect and rendition changes, and bound audio buffering. `latency_max_ms` controls stalled-group skipping, not desired A/V playout delay.
 - Preserve OBS mixer, monitoring, mute, and volume behavior. Release every frame on output, conversion failure, stop, and late completion. Do not hold source state locks across callbacks into OBS.
@@ -19,6 +19,7 @@ Decided: the earlier receive branch (#3498, merged only into the stranded `codex
 ## Required
 
 - [OBS migration](/quest/m1/cpp/obs.md) - the plugin is on the generated C++ first
+- [Codecs](/quest/m1/ffi-shape/codec.md) - the encoder and decoder types land once, in the `audio` and `video` namespaces (decided in the 2026-10-05 audit)
 
 ## Related
 

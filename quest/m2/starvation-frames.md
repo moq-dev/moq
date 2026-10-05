@@ -17,7 +17,7 @@ frontier it reads moves. `Writer` in `rs/moq-net/src/coding/writer.rs` gains
 a monotonic written-offset counter, since every write funnels through it, so
 at each frame end the per-group serve task knows the stream offset and the
 frame timestamp. Record `(offset, timestamp, bytes, written_at)` and await
-`poll_acked(offset)` from the released `web-transport-trait` hook,
+`poll_acked(offset)` on moq-net's own `transport::poll::SendStream`,
 interleaved with the writes of later frames so a lagging ACK never stalls
 sending. One waiter per stream suffices: offsets are
 acknowledged in order for the purpose of this metric, so poll the oldest
@@ -56,5 +56,5 @@ unsupported.
 
 - [Starvation](/quest/m1/qos/starvation.md) - fixes the wire shape and the
   group-granularity fallback
-- [poll_acked in web-transport](/quest/m2/quic-ack-hook.md) - the released
+- [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - the
   hook this samples through
