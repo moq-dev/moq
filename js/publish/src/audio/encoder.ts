@@ -143,7 +143,7 @@ export class Encoder {
 
 	/** Linear gain applied before encoding, where 1 is unity. Each change ramps over {@link fade}. */
 	volume: Signal<number>;
-	/** How long a volume change ramps for, whatever its size. 0 steps at once; negative or NaN refuses the rendition. */
+	/** How long a volume change ramps for, whatever its size. 0 steps at once; a negative or non-finite fade refuses the rendition. */
 	fade: Signal<Time.Milli>;
 	/** The live-editable codec selection plus its encoder settings. */
 	codec: Signal<Codec>;
@@ -385,7 +385,8 @@ export class Encoder {
 	// the catalog, and a sample source keeps its format while muted rather than tearing down.
 	#runConfig(effect: Effect): void {
 		const fade = effect.get(this.fade);
-		if (!(fade >= 0)) throw new Error(`audio fade must be a non-negative number of ms: ${fade}`);
+		if (!Number.isFinite(fade) || fade < 0)
+			throw new Error(`audio fade must be a finite, non-negative number of ms: ${fade}`);
 		this.#fade = fade;
 
 		const capture = effect.get(this.in.capture);

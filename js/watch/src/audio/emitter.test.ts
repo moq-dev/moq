@@ -92,6 +92,12 @@ test("refuses an invalid fade", async () => {
 		await settle();
 		expect(node.calls.filter(([method]) => method === "ramp")).toEqual([]);
 		expect(error).toHaveBeenCalled();
+
+		error.mockClear();
+		emitter.fade.set(Time.Milli(Number.POSITIVE_INFINITY));
+		await settle();
+		expect(node.calls.filter(([method]) => method === "ramp")).toEqual([]);
+		expect(error).toHaveBeenCalled();
 	} finally {
 		emitter.close();
 		error.mockRestore();

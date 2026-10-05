@@ -35,7 +35,7 @@ export class Emitter {
 
 	readonly in: Readonlys<EmitterInput>;
 
-	/** How long a volume change ramps for. 0 steps at once; negative or NaN throws and leaves the volume as it was. */
+	/** How long a volume change ramps for. 0 steps at once; a negative or non-finite fade throws and leaves the volume as it was. */
 	fade: Signal<Time.Milli>;
 
 	readonly #out: EmitterOutput = {
@@ -99,7 +99,8 @@ export class Emitter {
 			});
 
 			const fade = effect.get(this.fade);
-			if (!(fade >= 0)) throw new Error(`audio fade must be a non-negative number of ms: ${fade}`);
+			if (!Number.isFinite(fade) || fade < 0)
+				throw new Error(`audio fade must be a finite, non-negative number of ms: ${fade}`);
 
 			// Linear, like the publisher's gain: an exponential ramp can't start from or reach silence.
 			const volume = effect.get(this.in.volume);

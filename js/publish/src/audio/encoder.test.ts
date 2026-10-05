@@ -455,6 +455,15 @@ test("refuses the rendition while the fade is invalid", async () => {
 		encoder.fade.set(Time.Milli(Number.NaN));
 		await settle();
 		expect(encoder.out.catalog.peek()).toBeUndefined();
+
+		encoder.fade.set(Time.Milli(0));
+		await settle();
+		expect(encoder.out.catalog.peek()).toBeDefined();
+
+		// An endless ramp would never finish a mute.
+		encoder.fade.set(Time.Milli(Number.POSITIVE_INFINITY));
+		await settle();
+		expect(encoder.out.catalog.peek()).toBeUndefined();
 	} finally {
 		encoder.close();
 		error.mockRestore();
