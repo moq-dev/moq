@@ -90,7 +90,5 @@ across nodes.
 
 ## Related
 
-- [Bounded stats aggregate](/quest/m0/broadcast-epoch/stats-aggregate-bound.md) - retired
-  nodes fold into a bounded total; per-epoch totals feed it
 - [Media stats](/quest/m1/stats/README.md) - publisher and viewer media stats
   stay hang tracks, separate from the relay's stats

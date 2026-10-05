@@ -28,3 +28,7 @@ tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
 [[bench]]
 name = "decode"
 harness = false
+
+[[bench]]
+name = "aggregate"
+harness = false

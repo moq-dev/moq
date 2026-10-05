@@ -63,5 +63,4 @@ as `stats.linger` / `--stats-linger` beside `--stats-enabled`. Wire: none.
 ## Related
 
 - [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md) - the name a lingering broadcast keeps
-- [Bounded stats aggregate](/quest/m0/broadcast-epoch/stats-aggregate-bound.md) - the aggregator's grace window for departed nodes
 - [moq.pro: stats linger](https://github.com/moq-dev/moq.pro/blob/main/quest/m0/stats-linger.md) - the fleet adoption and its measurements
