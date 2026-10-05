@@ -19,8 +19,16 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
 - **Totals.** Per group broadcast (`<prefix>[/<group>]/node/<node>/@<epoch>`),
   per tier and role, cumulative within the [stats epoch](/quest/m1/stats-epoch.md).
   A node starts a new epoch on every startup and counts from zero; nothing is
-  serialized to disk. `Registry` already keeps unpruned lifetime totals
-  (`rs/moq-net/src/stats.rs`); publish them per group.
+  serialized to disk. `Registry`'s unpruned lifetime totals
+  (`rs/moq-net/src/stats.rs`) are node-wide, per tier and role only, so they
+  can't be published as-is: keep the totals per group, folding an entry into
+  its group's total when it is pruned, or two projects sharing a tier would
+  merge.
+- A group's totals outlive its entries. Today a group broadcast disappears
+  when it has none (`rs/moq-stats/src/produce.rs`); its totals must survive
+  that, so a group that goes idle and returns in the same epoch continues
+  from where it stopped. Test two groups sharing a tier, and an idle group
+  returning.
 - **Per-broadcast tracks.** A reader that wants one broadcast subscribes to
   its track; nothing is produced for a broadcast no one requests. The track
   carries that broadcast's cumulative counters and finishes after its closing
