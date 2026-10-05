@@ -57,7 +57,7 @@ Use these references to evaluate the design:
 The design must work through examples of two operators using different scales,
 multiple entrances to one domain, asymmetric charges, mixed-provider nodes in
 one domain, unknown or untrusted peers, and a route leaving and re-entering a
-domain. Preserve publisher identity and loop safety across any metric rewrite.
+domain. Preserve loop safety across any metric rewrite.
 State tradeoffs, migration and
 mixed-version behavior, and the limits of any convergence claim.
 

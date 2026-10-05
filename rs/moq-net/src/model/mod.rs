@@ -18,7 +18,7 @@ mod bytes;
 pub(crate) mod clock;
 mod datagram;
 mod requests;
-pub(crate) mod resume;
+mod resume;
 mod subscription;
 mod time;
 mod timed;

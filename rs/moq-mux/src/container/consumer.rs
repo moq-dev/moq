@@ -1643,6 +1643,95 @@ mod tests {
 		assert!(frames.len() >= 4, "Expected >= 4 frames, got {}", frames.len());
 	}
 
+	#[tokio::test(start_paused = true)]
+	async fn truncated_resumed_group_skips_to_the_next_clean_group() {
+		let origin = crate::source::produce_origin();
+		let hops = moq_net::Hops::try_from(vec![moq_net::Hop::new(10).unwrap()]).unwrap();
+		let first_route = origin
+			.dynamic(
+				"live",
+				moq_net::origin::Route::default().with_hops(hops.clone()).with_cost(5),
+			)
+			.unwrap();
+		let pending = origin.consume().request_broadcast("live");
+		let first = moq_net::broadcast::Info::new().produce();
+		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
+		let first_track = first.create_track("video", info.clone()).unwrap();
+		first_route.requested_broadcast().await.unwrap().accept(&first);
+		let broadcast = pending.await.unwrap();
+		let track = broadcast
+			.track("video")
+			.unwrap()
+			.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(2)))
+			.await
+			.unwrap();
+		let format = Container::Legacy(crate::container::Kind::Data);
+		let mut consumer = Consumer::new(track, Container::Legacy(crate::container::Kind::Data));
+
+		let mut open = first_track.create_group(0u64.into()).unwrap();
+		format
+			.write(
+				&mut open,
+				&[Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: true,
+					duration: None,
+				}],
+			)
+			.unwrap();
+
+		// Each cheaper route takes over beyond group 0 without holding its continuation,
+		// while the first route stays up but silent. They carry the same broadcast, so each
+		// holds every group from 1 on. The open group is given up once the track runs a
+		// full budget past it.
+		let mut routes = Vec::new();
+		let mut sources = Vec::new();
+		for sequence in 1..=4 {
+			let route = origin
+				.dynamic(
+					"live",
+					moq_net::origin::Route::default()
+						.with_hops(hops.clone())
+						.with_cost(5 - sequence),
+				)
+				.unwrap();
+			let source = moq_net::broadcast::Info::new().produce();
+			let mut track = source.create_track("video", info.clone()).unwrap();
+			route.requested_broadcast().await.unwrap().accept(&source);
+			track.demand().used().await.unwrap();
+			if sequence == 1 {
+				assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(0));
+			}
+			for sequence in 1..=sequence {
+				write_group(&mut track, sequence, &[ts(sequence * 1_000_000)]);
+			}
+			routes.push(route);
+			sources.push((source, track));
+		}
+
+		let waiter = kio::Waiter::noop();
+
+		// The aborted group 0 skips straight to its successor; a short clean group emits
+		// GroupEnd.
+		let event = consumer.poll_event(&waiter);
+		let Poll::Ready(Ok(Some(Event::Frame(frame)))) = event else {
+			panic!(
+				"expected a successor frame, current={}; pending={}",
+				consumer.current,
+				event.is_pending()
+			);
+		};
+		assert_eq!(frame.timestamp, ts(1_000_000));
+		assert!(frame.keyframe);
+		assert_eq!(consumer.current, 1);
+		assert!(
+			matches!(consumer.poll_event(&waiter), Poll::Ready(Ok(Some(Event::GroupEnd)))),
+			"the complete successor still emits its clean boundary"
+		);
+		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(2_000_000));
+	}
+
 	// ---- Eviction recovery (pause/resume) ----
 
 	/// A group that aged out of the relay cache (aborted with `Error::Old`) while the

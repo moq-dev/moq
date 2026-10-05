@@ -18,12 +18,17 @@ state.
 Deferred to m2 in the 2026-09-30 audit: no named consumer for the
 publisher-side ladder.
 
-The catalog and player half already shipped in
-[moq#2865](https://github.com/moq-dev/moq/pull/2865): the optional `stalled`
-state exists in `rs/hang`, `js/hang`, `rs/moq-msf`, `js/msf`, the HANG draft
-and `moq_consume_video_stalled`; `@moq/watch` filters stalled renditions with
-the all-stalled lowest fallback; and routing, decoder, and presentation
-identities are split so a metadata-only change cannot rebuild WebCodecs.
+The catalog and player half is the rendition `enabled` flag
+([enabled flag](/quest/m1/catalog-enabled.md)), which replaced the `stalled`
+state shipped in [moq#2865](https://github.com/moq-dev/moq/pull/2865):
+`enabled: false` means no frames are coming and a viewer must not select the
+rendition. Routing, decoder, and presentation identities are split so a
+metadata-only change cannot rebuild WebCodecs.
+
+Decided (2026-10-04): a rung's `enabled` follows its last applied target. It
+is disabled, with encoding stopped, when its share falls below its boundary,
+and enabled once a target at or above the boundary is applied. Demand loss
+alone never changes the flag.
 
 What remains is the publisher side. The allocator
 ([moq#2854](https://github.com/moq-dev/moq/pull/2854)) divides a connection's
@@ -54,9 +59,9 @@ stall = (max + 2 * lower) / 3
 ```
 
 The lowest rendition takes `lower = 0`, so its boundary is `max / 3`. An
-encoder may adapt within `[stall, max]`; at the boundary it clamps and
-publishes `stalled: true`, cleared only once a target above the same boundary
-is successfully applied. Catalog state follows the last target the encoder
+encoder may adapt within `[stall, max]`; below the boundary the rung is
+disabled (`enabled: false`) and stops encoding, and it is enabled again only
+once a target at or above the same boundary is successfully applied. Catalog state follows the last target the encoder
 *accepted*, not the one the controller requested, so a transient rate-control
 failure retains the last applied target rather than lying.
 
@@ -68,7 +73,7 @@ catalog state flaps.
 ### Non-goals
 
 Per-viewer or per-session rendition state; rewriting the advertised maximum
-bitrate; closing or removing stalled tracks; an application-level
+bitrate; removing a disabled rung from the catalog; an application-level
 `unselectable` state; stall counters in the catalog (those are telemetry,
 [#2734](https://github.com/moq-dev/moq/issues/2734)); rebuilding unsupported
 encoders on every target change.
@@ -76,7 +81,7 @@ encoders on every target change.
 ## Required
 
 - [Controller](/quest/m2/ladder/controller.md) - one controller owns every
-  rung's share, target, stalled state, and send order
+  rung's share, target, enabled state, and send order
 - [Fetch and catalog](/quest/m2/ladder/fetch.md) - uncached FETCH encodes at
   the shared applied target, and rung state survives a source catalog refresh
 

@@ -4,13 +4,16 @@
 
 A route change under a prefix (join, withdraw, re-price, restale) makes the
 origin driver act only on the fronts that could change their selection:
-fronts still waiting for a source, fronts served by the changed route, and
-publisher-pinned fronts on its first hop. Today it wakes every front below
-the prefix, so one equal-cost pool member joining or leaving a prefix that
-serves 10k paths costs the driver 100 to 600 ms of single-threaded work
-while no front switches (`origin/pool_churn`, #4607). A root claim, such as
-an archive's catch-all, makes every front on the relay pay for every change
-to it. Done when `origin/pool_churn` is flat in served paths.
+fronts still waiting for a source, fronts the changed route serves or is
+requesting through, and, on a join or re-price, the serving fronts the
+changed route could now win. Today it wakes every front below the prefix,
+so one equal-cost pool member joining or leaving a prefix that serves 10k
+paths costs the driver 100 to 600 ms of single-threaded work while few
+fronts switch (`origin/pool_churn`, #4607). A root claim, such as an
+archive's catch-all, makes every front on the relay pay for every change to
+it. Done when a leave in `origin/pool_churn` is flat in served paths, and a
+join or re-price costs one cheap rehash per front below the prefix, with
+no `select`, track poll, or deadline scan for a front that keeps its route.
 
 ## Plan
 
@@ -20,23 +23,12 @@ Facts from the wildcard line (`rs/moq-net/src/model/origin.rs` there):
   `routes.poke_below(prefix)`. That bumps a counter-only `Watch` on every path
   below the prefix, so a woken front cannot tell what changed. Each re-runs
   `select` under the table read lock (`retain_routes`, then `best_route`,
-  which hashes every qualifying pool member unless a Stay front's route
-  still serves), then the driver polls every track and rescans deadlines.
+  which hashes every pool member unless a serving front's route still
+  serves; that `Pin::Stay` short-circuit goes with the follow-the-best-route
+  rule below), then the driver polls every track and rescans deadlines.
 - `route_order` is rendezvous-style: FNV over the path and hop ids, lowest
   wins. A join moves only paths the newcomer wins, a leave only paths the
   leaver was winning.
-- A front's `Pin` limits which routes it can take. `Stay` (an origin-named
-  front while serving) keeps its route while it serves; `Route` qualifies
-  only its own route; `Publisher` only routes whose first hop matches;
-  `Local` only local routes; `Any` (identity not yet known, or origin-named
-  and not serving) every route. Pool fronts in `origin/pool_churn` never
-  get an origin-naming reply, so they are `Publisher`, each on a different
-  member's hop. So on a join the fronts that can act are the `Any` ones,
-  `Publisher` ones on the new route's first hop, and `Local` ones for a
-  local route. On a leave, the fronts served by or requesting through that
-  route, plus those same pin sets: a deeper prefix appearing shadows
-  shallower routes for them, and one leaving can unshadow a broader route
-  for a waiter it never served.
 
 Decisions:
 
@@ -44,41 +36,34 @@ Decisions:
   the benchmark found it, but the wake is per prefix regardless of cost.
   (2026-09-30)
 - An index, not a payload filter on the watch: each route records the
-  fronts it serves, and each prefix node records only its non-Stay watches
-  (waiting fronts, publisher- and local-pinned fronts, `routed_broadcast`
-  waiters). A change wakes the ones it qualifies for (next decision) plus
-  the changed route's own fronts. A
-  payload filter would still walk every watch under the prefix, which stays
-  linear in paths. (2026-09-30)
-- The prefix node keys its watches by what they qualify for: `Any` and
-  `routed_broadcast` waiters in one set, `Publisher` by hop, `Local` in its
-  own set. `Route` fronts hang off their route only. A front moves its
-  entries when it selects, and drops them when it closes. Any change to a
-  route wakes the `Any` set, its first hop's `Publisher` set, the `Local`
-  set if local, and the fronts it serves or is requesting for, so an
-  unrelated publisher joining or leaving wakes no serving pool front. The
-  pin sets wake on a loss too: withdrawing a deeper claim can unshadow a
-  broader route for a parked waiter it never served. A withdrawal takes
-  the served set before dropping the record. Fronts sit at paths below the changed prefix, so the lookup
-  walks descendants but skips subtrees whose matching set is empty, keeping
-  cost in woken fronts rather than served paths. (2026-09-30)
-- A same-publisher join still wakes that hop's whole `Publisher` set, even
-  where the new route cannot win. Narrowing it to the paths the route wins
-  is left out: the `Publisher` pin goes with `--hop` removal in the cluster
-  routing line. (2026-09-30)
+  fronts it serves or is requesting through, and each prefix node records
+  only its waiting fronts and `routed_broadcast` waiters. A payload filter
+  would still walk every watch under the prefix, which stays linear in paths.
+  (2026-09-30)
+- No pin sets (decided 2026-10-03: #4741 deletes `Pin`, so any covering route
+  qualifies for a waiting front). Any change to a route wakes the waiting set
+  below it and the fronts it serves or is requesting through. Waiters wake on
+  a loss too: withdrawing a deeper claim can unshadow a broader route for a
+  parked waiter it never served. A withdrawal takes the served set before
+  dropping the record. A front moves its entries when it selects and drops
+  them when it closes. The lookup walks descendants but skips subtrees whose
+  waiting set is empty, keeping cost in woken fronts rather than served
+  paths.
+- A serving front follows the best route, per the wildcard line (decided
+  2026-10-04, replacing Stay). A join or re-price must rehash every front
+  below the prefix, since rendezvous moves exactly the paths the changed
+  route now wins; only those fronts re-select. A leave wakes only the fronts
+  the leaver served or was requesting through.
 - Builds on shared-fronts' keying, so the index hangs off the final front
   identity. `origin-front-parks.md` replaces the `routed_broadcast` retry
   loop, one of the watch consumers here; whichever lands second adapts it.
   (2026-09-30)
-- Stay fronts never need a join or re-price: the edge/core tiers decision
-  (2026-09-30) dropped route upgrades, so a serving front moves only on
-  failover.
 
-Verification: `origin/pool_churn` flat in served paths at every pool width
-it already sweeps, and a unit test that counts `select` calls per route
-change and asserts only affected fronts re-select, with zero for an
-unrelated publisher's join and leave, and a parked waiter retrying when a
-deeper advertise-only claim over a served root is withdrawn. Keep `pool_resolve` unchanged.
+Verification: `origin/pool_churn` leaves flat in served paths at every pool
+width it already sweeps, and a unit test that counts `select` calls per
+route change: zero for an unrelated route's leave, only the won paths on a
+join, and a parked waiter retrying when a deeper advertise-only claim over a
+served root is withdrawn. Keep `pool_resolve` unchanged.
 
 Public API: none. Wire: none.
 

@@ -62,6 +62,10 @@ The video and audio encoders measure how far their output falls behind the media
 clock when they flush frames. Catalog jitter is the spread above each
 rendition's own recent minimum lateness, so a constant encoder delay is not jitter.
 The advertised value only rises; frame duration alone does not set it.
+The first estimate rise publishes immediately. Later rises within a second
+coalesce into one update at the end of that window carrying the latest value.
+Track additions, removals, and configuration edits publish immediately,
+including any pending estimate.
 
 ## Clock
 

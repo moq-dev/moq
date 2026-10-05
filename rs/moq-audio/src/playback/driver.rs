@@ -239,6 +239,9 @@ impl Shared {
 	/// restart.
 	pub(super) fn sync(&self) -> bool {
 		let mut state = self.state.lock().unwrap();
+		for sink in &mut state.sinks {
+			sink.complete();
+		}
 		let Some(mixer) = state.mixer.clone() else {
 			// No stream to talk to. Registrations stay pending and `rebind`
 			// picks them up when one opens.
@@ -851,15 +854,24 @@ impl Driver {
 		// buffer the device asks for, the callback loops over this rather than
 		// resizing (allocating on the audio thread is the one thing it must
 		// never do).
-		let mut scratch = vec![0.0f32; SCRATCH_FRAMES * config.channels as usize];
+		let channels = config.channels as usize;
+		let sample_rate = config.sample_rate as f64;
+		let mut scratch = vec![0.0f32; SCRATCH_FRAMES * channels];
+		let mut epoch = None;
 
 		device
 			.build_output_stream::<T, _, _>(
 				config,
-				move |data, _| {
+				move |data, info| {
+					let timestamp = info.timestamp();
+					let epoch = *epoch.get_or_insert(timestamp.callback);
+					let now = timestamp.callback.saturating_duration_since(epoch);
+					let played_at = timestamp.playback.saturating_duration_since(epoch)
+						+ Duration::from_secs_f64((data.len() / channels) as f64 / sample_rate);
+					mixer.complete(now);
 					for chunk in data.chunks_mut(scratch.len()) {
 						let scratch = &mut scratch[..chunk.len()];
-						mixer.fill(scratch);
+						mixer.fill(scratch, played_at);
 						for (out, sample) in chunk.iter_mut().zip(scratch.iter()) {
 							*out = T::from_sample(*sample);
 						}
@@ -1023,6 +1035,25 @@ mod tests {
 
 	fn add(shared: &Arc<Shared>, handle: &Arc<super::super::Handle>) -> Result<Sink, Error> {
 		shared.add(|id, rate, bus| sink::new(id, rate, bus, Input::default(), shared.clone(), handle.clone()))
+	}
+
+	#[test]
+	fn a_completed_drain_survives_the_device_being_detached() {
+		let wired = wired(8);
+		let mut sink = add(&wired.shared, &wired.handle).unwrap();
+		let (retired, _rx) = sync_channel(8);
+		let mut mixer = Mixer::new(wired.mixer, retired, 48_000, Layout::Stereo).unwrap();
+		let mut out = vec![0.0; 4096 * 2];
+		mixer.fill(&mut out, Duration::ZERO);
+		let samples: Vec<_> = [0.25f32; 123 * 2].iter().flat_map(|s| s.to_le_bytes()).collect();
+		assert_eq!(sink.write(&samples).unwrap().accepted_sample_frames, 123);
+		let mut drain = std::pin::pin!(sink.finish());
+		mixer.fill(&mut out, Duration::from_millis(100));
+		mixer.complete(Duration::from_millis(100));
+		wired.shared.unbind();
+		assert!(wired.shared.sync());
+		let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+		assert!(drain.as_mut().poll(&mut cx).is_ready());
 	}
 
 	/// Long enough that only a lost wake, rather than a loaded machine, trips a

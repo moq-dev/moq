@@ -62,6 +62,32 @@ requests borderless access; denial keeps the border and does not fail capture.
 Older supported builds keep the border. Application capture and system audio
 are not provided by this backend.
 
+X11 display and window capture use MIT-SHM 1.2 fd-backed buffers on local Unix
+connections. Remote connections and servers without that support use
+`GetImage`. Shared-memory setup or read failures are reported rather than
+silently switching paths. RandR events refresh monitor geometry; window
+`ConfigureNotify` events update the captured size. A settled size or monitor
+change ends the stream so callers can reopen. Unmapped windows hold capture
+until viewable again. RGB conversion reuses its buffer.
+
+On Linux, `just rs x11-bench` compares the production SHM and `GetImage`
+capture paths on the current local X display, which must be at least 1920×1080
+and support MIT-SHM 1.2. It checks pixels for static and changing images at
+three sizes and records paired median frame times and their ratio. Timings
+include RGB and I420 conversion; capture pacing and fixture drawing are not
+measured. The GetImage baseline keeps the same event handling and buffer reuse,
+so it isolates transport rather than comparing the entire pre-quest backend.
+`just rs x11-rgb-bench` isolates conversion-buffer allocation.
+
+`just rs x11-bench-ci` runs both workloads with an isolated Xvfb server and
+writes `.scratch/x11-capture-benchmark.log` (override with `MOQ_X11_BENCH_LOG`).
+PR and nightly CI retain the log for 30 days, including the source commit,
+paired GetImage baseline and SHM/baseline ratios. Compare those
+records across runs to investigate regressions; timing has no hard threshold
+until runner variance is measured. Missing SHM support or incorrect pixels
+fails the test. Xvfb coverage does not replace real-desktop capture, lifecycle
+and before/after performance checks.
+
 With `pipewire` enabled, `capture::cameras` also lists PipeWire camera nodes as
 `pipewire:<node name>` after the V4L2 devices. V4L2 lists only devices offering
 YUYV or MJPEG. A PipeWire V4L2 node is hidden only when its device path was
@@ -148,3 +174,50 @@ runs on the device or returns an error.
 `just rs vulkan-cuda` runs the opt-in native Vulkan/CUDA/NVENC hardware
 exercise, including a three-view 1280x720 workload that reports per-stage
 latency and CPU time.
+
+## Intel QuickSync on Linux
+
+Enable the `vaapi` feature to use Intel QuickSync through VA-API. It is off by
+default because building `moq-vaapi` needs libclang. The backend currently
+encodes and decodes 8-bit H.264; HEVC and AV1 support in the Intel driver does
+not make those codecs available through this backend yet. No oneVPL or Media
+SDK installation is needed.
+
+At runtime, install libva and the Intel `iHD` media driver, and make sure your
+user can open the GPU's `/dev/dri/renderD*` node. On Ubuntu:
+
+```bash
+sudo apt install intel-media-va-driver-non-free vainfo
+vainfo --display drm --device /dev/dri/renderD128
+```
+
+Use the render node present on your machine. `vainfo` should report the Intel
+iHD driver with H.264 `VAEntrypointVLD`, `VAEntrypointEncSlice` or
+`VAEntrypointEncSliceLP`, and `VAEntrypointVideoProc`. Intel's
+[media driver documentation](https://github.com/intel/media-driver) lists
+supported GPUs and the differences between the full-feature and free-kernel
+packages.
+
+Automatic encoder and decoder selection uses VAAPI when it opens successfully,
+otherwise H.264 can fall back to openh264. Set `encode::Kind::Named("vaapi".into())`
+and `decode::Kind::Named("vaapi".into())` to require this backend and report an
+unavailable driver instead. `MOQ_VAAPI_DEVICE` selects a render node when
+multiple GPUs are present.
+
+Verified on Intel Core Ultra 7 270K Plus / Arrow Lake with iHD 26.2.4: CPU
+uploads, hardware decode, DMA-BUF re-encoding, GPU resize, live bitrate changes,
+color metadata, and Vulkan rendering with decoder surface reuse. To run the
+same checks from this repository:
+
+```bash
+just rs test -p moq-video --features vaapi,render --no-capture
+just rs test -p moq-video --features vaapi,render --run-ignored only --no-capture \
+  -E 'test(nv12_dmabuf) | test(i420_dmabuf) | test(decoded_frames_reach) | test(recycled_decoder_surfaces)'
+```
+
+Hardware tests can return early on a host without a usable driver. Check their
+output for `skipping:` before treating a passing run as hardware verification.
+Nix-built tests also need their runtime loaders and drivers to be discoverable:
+`LD_LIBRARY_PATH` for libva and Vulkan, `LIBVA_DRIVERS_PATH` for the Intel media
+driver, and `VK_DRIVER_FILES` for the Intel Vulkan ICD. Use matching Nix
+libraries and drivers to avoid mixing incompatible host dependencies.

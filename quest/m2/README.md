@@ -31,6 +31,7 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [CEA-608/708](/quest/m2/captions-cea.md) - captions carried inside video SEI become a real text rendition at import
 - [Browser archive](/quest/m2/archive-browser.md) - the same contract for browser-published broadcasts
 - [Paced replay](/quest/m2/archive-paced-replay.md) - a replay pushes its groups to live subscribers on one shared clock, so any live player plays it
+- [MP4 export](/quest/m2/mp4-export.md) - `moq export mp4 --output` records crash-safe fragments, then finishes a regular MP4 with moov at the end
 - [Install moq](/quest/m2/moq-installer.md) - one command installs or upgrades the released CLI on macOS and Linux
 - [Install URL](/quest/m2/moq-install-url.md) - moq.dev serves the canonical installer at /install.sh
 - [`moq relay`](/quest/m2/moq-relay-subcommand.md) - the relay runs under a `moq` verb with its own flags and TOML, while `moq-relay` stays a minimal binary
@@ -60,6 +61,7 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Open contract](/quest/m2/uring-open-contract.md) - settle concurrent ownership and backpressure before implementation
 - [#3129](/quest/m2/3129-moq-uring-write-the-webtransport-stream-header-at-open.md) - moq-uring: write the WebTransport stream header at open time, so finish() never owes one
 - [Cache shard](/quest/m2/cache-shard.md) - stop hammering one process-global cache line from every worker
+- [Send depth](/quest/m2/send-depth.md) - moq-net futures prove Send at the default recursion limit, so downstream crates see no nightly lint
 - [Encoder feedback](/quest/m2/stats-encoder-feedback.md) - a Rust encoder
   reads its viewers' feedback and adapts its bitrate
 - [Text availability](/quest/m2/text-schema.md) - a text track publishes its own coverage index instead of copying the media timeline
@@ -75,6 +77,7 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Android capture](/quest/m2/mobile-capture-android.md) - Rust captures through NDK/JNI on Android, reusing the existing codecs
 - [Mobile completion](/quest/m2/mobile-completion.md) - verify the selected native/mobile path before closing #700
 - [Opus implementation](/quest/m2/audio-opus-backend.md) - compare Opus codec quality, CPU, build cost, and the loss recovery each backend offers
+- [DTX timestamps](/quest/m2/opus-dtx-timestamps.md) - Opus DTX keeps the capture timeline, so voice can enable it again
 - [Latency ledger](/quest/m2/latency-ledger.md) - a session reports where its end-to-end audio delay went, stage by stage
 - [JS LOC duration marker](/quest/m2/js-loc-duration-marker.md) - `@moq/loc`'s producer ends each video group with the empty duration frame, as moq-mux does
 - [Media Foundation decode](/quest/m2/audio-decode-mediafoundation.md) - Windows decodes HE-AAC, multichannel AAC, and what else the MFTs offer
@@ -95,12 +98,12 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [QUIC I/O boundary](/quest/m2/quic-io-boundary.md) - moq-uring receives from the buffer ring and transmits into registered buffers with no copy, once a profile says where
 - [BBR media study](/quest/m2/quic-bbr-natural-drain.md) - whether bounded drain credit avoids ProbeRTT deadline interference, and where our BBR differs from Google's
 - [Discover media headroom](/quest/m2/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
+- [Viewer up-switch](/quest/m2/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up
 - [L4S on the backbone](/quest/m2/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m2/quic-careful-resume.md) - a redial starts at the previous connection's rate
 - [Keep-alive by deadline](/quest/m2/quic-keep-alive.md) - a PING only when the idle deadline nears, no fixed timer
 - [Socket close](/quest/m2/noq-socket-close.md) - `moq-quic` releases an endpoint's socket on close, so moq-tokio drops its wrapper
 - [GOP overhead](/quest/m2/gop-overhead.md) - price the I-frames a short GOP pays for, deciding whether a long GOP plus a keyframe request is worth designing
-- [TS import health](/quest/m2/ts-import-health.md) - `moq import ts` counts the TR 101 290 errors of the feed it receives, PCR and PTS graded on its own values
 - [TS health stats](/quest/m2/ts-health-stats.md) - the TS counters ride the stats plumbing beside the media counters
 - [TS stopped log: audio and video only](/quest/m2/ts-stopped-av-only.md) - sparse data PIDs like SCTE-35 stop logging "stopped delivering" every quiet second
 - [Teleoperation](/quest/m2/teleop/README.md) - MoQ carries robot video down and control up on one session as a library capability
@@ -111,13 +114,12 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Audio capture time](/quest/m2/audio-capture-time.md) - native audio stamps a buffer's capture instant, not when the driver reads it
 - [CMAF frame timestamp](/quest/m2/cmaf-frame-timestamp.md) - CMAF decoders time samples from the moq-lite frame timestamp, using `tfdt` only within the fragment
 - [Shared import clock](/quest/m2/shared-clock.md) - an importer joining a clock already in use offsets its PTS instead of moving it, so captures and imports share one timeline
-- [X11 capture transport](/quest/m2/x11-capture-shm.md) - move X11 capture to shared memory and RandR events instead of a per-frame socket copy
 - [Interop graceful close](/quest/m2/interop-graceful-close.md) - successful runner publications withdraw before disconnecting; external repository approval required
 - [Egress profile](/quest/m2/quic-egress-profile.md) - measure relay send-path syscalls, pacing bursts, and allocations before optimizing any of them
 - [SEI separation study](/quest/m2/sei.md) - measure whether separating SEI saves enough, or has a metadata-only consumer, to justify a split
 - [Compressed tracks](/quest/m2/flate.md) - moq-ffi and every wrapper expose flate tracks through a `flate` namespace like `json`
 - [Announcement shapes](/quest/m2/announce-shapes.md) - moq-lite announcements and interests carry prefix, exact, suffix, or prefix+suffix shapes that survive relay hops, benchmarked over the announce table
-- [moq-transport cluster peers](/quest/m2/ietf-cluster-peers.md) - an extended cluster draft lets moq-transport relays peer again, stitching failover on the reply's origin
+- [moq-transport cluster peers](/quest/m2/ietf-cluster-peers.md) - an extended cluster draft lets moq-transport relays peer again, carrying the cluster route layer
 - [MSFTS convergence](/quest/m2/msfts-convergence.md) - the demultiplexed TS lane converges on MSFTS where the two still differ: program tables and the ES payload unit
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - H.265 encode and decode, pre-generated bindings, and pooled resize surfaces, including the moq-dev/vaapi release that carries them
 - [Dead worklet config](/quest/m2/worklet-dead-config.md) - delete moq-boy's unused worklet plugin and hang's unused `?worker&url` typings

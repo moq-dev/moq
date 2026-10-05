@@ -33,19 +33,19 @@ Decided in planning interviews on 2026-10-01:
 - moq-transcode's rungs inherit their source's `preference`, so a ladder
   adapts within one tier even when the source is not at 0. `rung_entry`
   copies it like `optimize_for_latency`, and the per-snapshot refresh beside
-  `inherit_stalled` keeps it current when the source catalog changes.
+  the `enabled` inheritance keeps it current when the source catalog changes.
 - Named `preference`, higher wins, after DASH's `@selectionPriority` (strict
   across per-codec Adaptation Sets, higher preferred). Not `priority`, which
   already means track send priority. Signed, so a new preferred ladder is `1`
   without renumbering existing renditions, and a fallback is `-1`.
-- Video only. Optional on the wire, omitted when 0 (like `stalled`).
+- Video only. Optional on the wire, omitted when 0 (as `enabled` is omitted at its default).
   Additive, so older players ignore it.
-- Selection order in `js/watch/src/video/source.ts`: decode support, then
-  keep the highest preference among supported renditions, then `stalled`,
-  then the existing target and bitrate pick within what is left. Preference
-  is about decodability only: a stalled source does not move capable viewers
-  onto a lower tier, which is usually derived from it and likely stalled too.
-- A manual `target.name` still wins, as it does for `stalled`. The quality
+- Selection order in `js/watch/src/video/source.ts`: drop disabled
+  renditions ([enabled flag](/quest/m1/catalog-enabled.md)), then decode
+  support, then keep the highest preference among supported renditions, then
+  the existing target and bitrate pick within what is left. Preference is
+  about decodability only.
+- A manual `target.name` still wins over preference. The quality
   picker keeps listing every tier.
 - `Video::ranked` sorts by preference (highest first), then by picture and
   bitrate as today. RTMP play, FLV export, and moq-transcode take the first
@@ -57,11 +57,10 @@ Decided in planning interviews on 2026-10-01:
   fallback. Choose across every negotiated video codec so the highest
   supported preference wins.
 - Update `rs/hang` `VideoConfig`, `js/hang` `VideoConfigSchema`,
-  `drafts/draft-lcurley-moq-hang.md` (next to `stalled`, with a
+  `drafts/draft-lcurley-moq-hang.md` (next to `enabled`, with a
   source-plus-fallback example), and `doc/concept/hang.md`. No new docs page.
 - Tests: a supported source wins over a lower-preference rendition with a
-  higher bitrate, over a bitrate budget that fits only the lower one, and
-  while the source is stalled and the lower one is not; an unsupported
+  higher bitrate, and over a bitrate budget that fits only the lower one; an unsupported
   source selects the lower preference; three tiers resolve to the highest
   supported one; a manual `target.name` selects a lower preference; `ranked`
   orders a larger lower-preference rendition after a smaller source; a WHEP

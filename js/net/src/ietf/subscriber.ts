@@ -2,7 +2,16 @@ import { race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
-import { closeError, controlTimeout, error, ProtocolViolation, reason, sessionCause } from "../error.ts";
+import {
+	closeError,
+	controlTimeout,
+	error,
+	ProtocolViolation,
+	reason,
+	StreamCode,
+	Stream as StreamError,
+	sessionCause,
+} from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Route, randomHop, routesEqual, stampHops, UNKNOWN_HOP } from "../hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
@@ -28,6 +37,7 @@ import {
 	PublishNamespaceUpdate,
 } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
+import { finCancels } from "./request_stream.ts";
 import { joinFilter, Subscribe, SubscribeError, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import {
 	PublishBlocked,
@@ -259,15 +269,12 @@ export class Subscriber {
 	/**
 	 * Replace the stored route for a path that is already announced. A no-op when the
 	 * hops and cost did not change; otherwise consumers hear `update` so a forwarder
-	 * can reprice without retracting.
-	 *
-	 * A new first hop is a new publisher: holders keep their broadcast to drain, but the
-	 * next consume starts fresh rather than reusing the old publisher's cached track info.
+	 * can reprice without retracting. The path still names the same broadcast, whatever
+	 * the first hop now says, so the shared consume stays.
 	 */
 	#updateAnnounce(path: Path.Valid, route: Route) {
 		const existing = this.#announced.get(path);
 		if (existing === undefined || routesEqual(existing.route, route)) return;
-		if (existing.route.hops[0] !== route.hops[0]) this.#consumes.evict(path);
 		existing.route = route;
 		console.debug(`announced: broadcast=${path} rerouted`);
 		for (const [consumer, filter] of this.#announcedConsumers) {
@@ -911,8 +918,18 @@ export class Subscriber {
 			// is kept current, since an update carries only what changed.
 			let held = msg.cluster;
 			const done = version === Version.DRAFT_16 || legacy;
+			const stopped = !done
+				? stream.writer.closed.then(
+						() => true,
+						() => true,
+					)
+				: undefined;
 			for (;;) {
-				if (await stream.reader.done()) break;
+				if (await (stopped !== undefined ? race([stream.reader.done(), stopped]) : stream.reader.done())) {
+					if (!finCancels(version)) await stopped;
+					stream.reader.stop(new StreamError(StreamCode.Cancel));
+					break;
+				}
 
 				const typeId = await stream.reader.u53();
 				if (done && typeId === PublishNamespaceDone.id) {
