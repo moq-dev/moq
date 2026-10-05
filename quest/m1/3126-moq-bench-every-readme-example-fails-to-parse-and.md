@@ -35,4 +35,4 @@ moq-bench is 0.0.x, so this lands on main.
 
 ## Related
 
-- [Mergeable bench buckets](/quest/m1/bench-buckets.md) - the interval buckets these percentiles can be computed from
+- [Mergeable bench buckets](/quest/m1/bench-buckets.md) - emits this quest's interval delta in a mergeable layout, and backports both to `release`

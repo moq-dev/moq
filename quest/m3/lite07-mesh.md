@@ -15,3 +15,8 @@ ALPN, and moq.pro still has its lite-07 rollout quest open
 (`quest/m1/lite07.md` in moq-dev/moq.pro). That rollout waits on
 [Finalize moq-lite-07](/quest/m1/lite07-finalize.md), so this condition cannot
 clear before a release carries the final version.
+
+Decided 2026-10-05: [Cluster routing](/quest/m1/cluster-routing/README.md)'s
+route layer lands in lite-07, so the final lite-07 carries ROUTE and
+path-less ANNOUNCE instead of hop lists, and loses the `Hop Base`/`Hop Keep`
+announce compression. moq.pro's rollout must plan for that wire.

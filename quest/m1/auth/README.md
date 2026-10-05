@@ -74,8 +74,9 @@ Decisions settled while planning, recorded so review does not relitigate them:
   scoped grant because the caller is another relay.
 - **Client API.** Tokens live on `moq_tokio::connect::Config`, the
   dial-side config, and `Connection` exposes the live session's auth handle.
-- **Spec home.** The AUTH stream is lite-06 core in
-  `drafts/draft-lcurley-moq-lite.md`, the way routing is. moq-transport gets
+- **Spec home.** The AUTH stream is core in the wip lite version
+  (`moq-lite-07-wip` today) in `drafts/draft-lcurley-moq-lite.md`, the way
+  routing is. moq-transport gets
   `drafts/draft-lcurley-moq-auth.md`, a setup-option-negotiated extension with
   AUTH, AUTH_OK, and AUTH_ERROR control messages, mirroring how moq-cluster is
   the IETF binding of lite's routing.
@@ -83,18 +84,20 @@ Decisions settled while planning, recorded so review does not relitigate them:
   SUBSCRIBE_OK. Rust is `moq_net::auth` with `auth::Grant`, `auth::Handle`,
   `auth::Token`, and `auth::Request`; JS mirrors as `connection.auth`.
 
-Everything here is additive: `Session::auth()` is new, the relay derives the
-grant from the origin handles it already scopes, and AUTH is added to the
-existing lite-06 ALPN.
+Everything here is additive: `Session::auth()` is new, and the relay derives
+the grant from the origin handles it already scopes. Decided 2026-10-05: wire
+work targets the wip lite version until the maintainer cuts it, never a
+published version in place, so AUTH and its stream code land in
+`moq-lite-07-wip` (or whichever version is wip then), not lite-06.
 
 ## Required
 
 - [WebSocket refusal](/quest/m1/auth/ws-unauthorized.md) - the relay serves WebSocket through moq-tokio, so a refused token closes the session as Unauthorized, as QUIC does
-- [Lite stream](/quest/m1/auth/lite.md) - both sides of a lite-06 session
+- [Lite stream](/quest/m1/auth/lite.md) - both sides of a wip-version lite session
   exchange grants over AUTH streams, exposed as `Session::auth()`, and an
   out-of-scope announce aborts the session
 - [Interop grants](/quest/m1/auth/interop.md) - the interop matrix asserts
-  each lite-06 cell's grant and that a publish outside it fails loud
+  each AUTH-capable cell's grant and that a publish outside it fails loud
 - [Unauthorized reset](/quest/m1/auth/unauthorized.md) - a subscription that
   loses access resets with a dedicated UNAUTHORIZED stream code
 - [AUTH_OK preflight](/quest/m1/auth/auth-ok-preflight.md) - an unencodable IETF grant answers NOT_SUPPORTED with nothing written, as JS already does
@@ -118,7 +121,7 @@ existing lite-06 ALPN.
   binding through moq-ffi
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave
   the URL: a session starts on what the URL carried and its AUTH streams add
-  the rest, with the URL kept for peers below lite-06
+  the rest, with the URL kept for peers without the AUTH stream
 - [Peer grants](/quest/m1/auth/peer-grant.md) - the relay issues a hop-bound,
   asymmetrically signed grant a browser can verify; HS256 keys issue none
 

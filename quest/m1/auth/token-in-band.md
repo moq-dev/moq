@@ -6,8 +6,8 @@ A client's credentials can travel inside the session instead of the URL, and
 several of them can ride one connection. Every client in this repository
 takes tokens as configuration separate from the address, presents each on its
 own AUTH stream at setup, and the relay admits the session on what the URL
-carried and widens it as the streams are answered. Peers below lite-06 keep
-working unchanged: the client puts the first token in the URL whenever any
+carried and widens it as the streams are answered. Peers without the AUTH
+stream keep working unchanged: the client puts the first token in the URL whenever any
 version it offers has no AUTH stream, so nothing is refused and nothing goes
 silent, and the token leaves the URL for good only once the offered set is
 AUTH-capable.
@@ -42,8 +42,8 @@ AUTH can carry the full grant once the pattern-interest prerequisite lands.
 - Presenting: WebTransport negotiates the moq version as a subprotocol of
   the CONNECT request that carries the URL, so the client cannot wait to
   learn whether the peer speaks AUTH. The client copies the first configured
-  token into the URL query whenever any offered version lacks AUTH (today,
-  everything below lite-06), and omits it once every offered version has the
+  token into the URL query whenever any offered version lacks AUTH (every
+  published lite version, since AUTH lands in the wip one), and omits it once every offered version has the
   stream. A token that went into the URL or the setup option is the
   connection credential, and the empty-token stream is its one and only
   stream; every other configured token gets its own AUTH stream on an

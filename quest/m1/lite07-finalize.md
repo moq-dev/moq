@@ -2,11 +2,11 @@
 
 ## Goal
 
-moq-lite-07 is a published version: it negotiates as `moq-lite-07`, the
-`moq-lite-07-wip` identifier is gone, its draft revision describes the frozen
-wire, and the next cut of `main` into `release` ships it in Rust and JS. A
-deployment pinned to `release` can then roll lite-07 out without a wip wire
-changing under it. Wire work after that targets a new `moq-lite-08-wip`.
+When the maintainer says to cut it, moq-lite-07 becomes a published version:
+it negotiates as `moq-lite-07`, the `moq-lite-07-wip` identifier is gone, its
+draft revision describes the wire as it stands, and the next cut of `main`
+into `release` ships it in Rust and JS. A deployment pinned to `release` can
+then roll lite-07 out without a wip wire changing under it.
 
 ## Plan
 
@@ -17,48 +17,54 @@ mesh and customer rollouts waited on it and the
 waits on nothing outside the repository; the rollouts and the mesh condition
 follow it.
 
-"Final" means:
+Freeze policy, decided by the maintainer 2026-10-05: "just keep adding stuff
+to lite-07 until I say to cut it. quests should target the -wip release."
+Every wire quest targets the current wip version, and lite-07 keeps growing
+until the maintainer calls the cut. This quest is the mechanical rename and
+checks done at that call; the Required list is the work already known to land
+first, not a closed freeze set.
 
-- Every wire change listed under Required has landed, plus the cache bug
-  that only bites once lite-07 ships. That list is the whole freeze set: a
-  wire quest not on it, such as
-  [Routes and announces](/quest/m1/cluster-routing/routes.md), targets the
-  next wip version unless the maintainer adds it (open below).
-- The identifier becomes `moq-lite-07` in `rs/moq-net`, `js/net`, the draft
-  (whose text already names the rename), `doc/concept/moq-lite.md`, and the
-  CLI and relay docs. A wip peer and a final peer refuse each other by ALPN
+The route layer of [Cluster routing](/quest/m1/cluster-routing/README.md)
+(ROUTE_START/UPDATE/END, path-less ANNOUNCE, the hop list dropped) lands in
+lite-07, decided 2026-10-05. That removes lite-07's `Hop Base`/`Hop Keep`
+announce compression along with the hop list, and moq.pro's lite-07 rollout
+(moq.pro#2210) has to plan for a lite-07 without hop lists.
+
+The cut:
+
+- Every quest under Required has landed, including the cache bug that only
+  bites once lite-07 ships.
+- The identifier becomes `moq-lite-07` in `rs/moq-net` and `js/net`, in the
+  draft (whose text already names the rename), and at every site spelling
+  the wip ALPN: `rs/moq-tokio/src/connect.rs` and `listen.rs`,
+  `rs/moq-relay/src/cluster.rs`, `rs/moq-relay/tests/smoke.rs`,
+  `test/interop/bare-fin.ts`, `test/interop/lite-varint.ts`, and
+  `doc/concept/moq-lite.md`; grep for `moq-lite-07-wip` to catch new ones. A wip peer and a final peer refuse each other by ALPN
   rather than misparse; no compatibility shim.
 - The draft's lite-07 changelog matches the wire and `just drafts check`
-  passes. Later changes start `moq-lite-08-wip` instead of editing lite-07.
-- [Wire compatibility](/quest/m1/wire-compat.md) covers lite-07 once a
-  release carries it.
+  passes.
+
+Decided 2026-10-05: Rust's 64-bit `VarInt` is not required first. The draft
+already specifies 64 bits; Rust refusing values above 2^62-1 is an
+implementation limit that [VarInt codec](/quest/m1/rs2ts/varint-codec.md)
+fixes whenever it lands.
 
 Open, for the maintainer:
 
-- Whether [Routes and announces](/quest/m1/cluster-routing/routes.md)'s new
-  ROUTE and ANNOUNCE wire gates lite-07 or moves to lite-08. Recommended:
-  lite-08. It is [XL] and still in design, and holding lite-07 for it holds
-  announce compression for every mesh waiting on lite-07.
-
-- Whether a large in-flight change, such as subscribe ranges or live media
-  time, slips to lite-08 so lite-07 ships sooner. Recommended: keep the set
-  as planned, and revisit only if one of them stalls.
 - Whether released clients offer lite-07 first by default, or accept it while
   still offering lite-06 first for one release. Recommended: servers accept
   it by default and clients keep lite-06 first for one release, so a
   deployment rolls out on its own schedule.
-- Whether Rust's `VarInt` must carry the full 64 bits
-  ([VarInt codec](/quest/m1/rs2ts/varint-codec.md)) before final, since Rust
-  refuses lite-07 values above 2^62-1 today.
 
 Public API: the lite-07 version constant and ALPN lose `-wip`. Wire: lite-07
-is frozen; older versions are unchanged.
+is published; older versions are unchanged.
 
 ## Required
 
+- [Cluster routing](/quest/m1/cluster-routing/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
 - [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - lite-07 loses NO_CAPACITY and stamping
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - lite-07 restores SUBSCRIBE_DROP in place of `Stream Count`
-- [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - SUBSCRIBE carries ranges and an order, and lite FETCH is gone
+- [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
 - [Live media time](/quest/m1/subscribe-live-time.md) - SUBSCRIBE_OK carries the publisher's live media time
 - [Untimed lite-07](/quest/m1/lite-untimed.md) - an untimed track crosses the wire untimed
 - [One route cost](/quest/m1/route-cost.md) - ANNOUNCE carries one cost
@@ -67,4 +73,5 @@ is frozen; older versions are unchanged.
 ## Related
 
 - [The moq.pro mesh runs lite-07](/quest/m3/lite07-mesh.md) - the deployment condition that follows this
+- [Wire compatibility](/quest/m1/wire-compat.md) - the nightly covers lite-07 once a release carries it
 - [moq.pro: lite-07 on cluster dials](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/lite07.md) - the mesh rollout that adopts the finalized version, and the customer rollout after it
