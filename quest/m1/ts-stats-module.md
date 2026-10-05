@@ -31,8 +31,13 @@ Decided while planning the follow-ups of
 - Update moq-cli's `publish.rs`, the only consumer that names these types.
   moq-srt only uses `stats::Log`.
 - Main still adds fields under the old names: #4584 added `crc_error`, and
-  the TR 101 290 counters added more. `Export::stats`
-  (#4577) also returns the old `ts::Stats`. The rename carries those at merge time. Update the type names in the quests still open
+  the TR 101 290 counters added more. The rename carries those at merge time.
+- **One stats module for all TS stats** (decided in the 2026-10-05 audit).
+  `Export::stats` (#4577) returns the import's `ts::Stats` on `main`, and
+  [Fixed-delay release](/quest/m1/tstd/delay.md) (#4645) adds its own
+  `ts::export::Stats`. Both become `ts::stats::Export`, beside `Snapshot` and
+  `Stream`; whichever of #4645 and this quest lands second renames it.
+  Rejected: `ts::export::Stats` with this quest narrowed to the import. Update the type names in the quests still open
   when this lands, including [media stats schema](/quest/m1/stats/schema.md)
   and [Rust reporters](/quest/m1/stats/rust.md).
 

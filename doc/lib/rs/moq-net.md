@@ -178,3 +178,17 @@ subscription's upstream request.
 
 Inside a group, `set_frames(...)` applies the same range syntax to frame
 indices.
+
+## Subscriber demand
+
+Track producers, pending track requests, and dynamic track handlers return a
+`track::Demand` from `demand()`. Group producers and pending group requests
+return `group::Demand`; broadcast producers return `broadcast::Demand`.
+Watch `used()` / `unused()` (or `poll_used` / `poll_unused`) on these handles,
+or take a snapshot with `is_used()`. Demand handles cannot write or abort and
+do not keep a producer or request alive. A pending group request counts every
+caller sharing its fetch, so one caller leaving does not cancel the others.
+The last caller to leave withdraws the fetch, so a later fetch of that group
+starts a fresh request; a handler that sees the request unused just drops it.
+Use the producer's `abort_unused` to atomically end an idle track; observing
+unused demand alone does not protect against a new subscriber arriving.

@@ -46,9 +46,13 @@ async fn abandoned_request_reaches_the_publisher(version: &str, relays: u64) {
 
 	// The publisher never answers; the reader gives up.
 	drop(waiting);
-	tokio::time::timeout(Duration::from_secs(5), kio::wait(|waiter| request.poll_unused(waiter)))
-		.await
-		.unwrap_or_else(|_| panic!("{version:?} over {relays} relays: the publisher's request is still wanted"));
+	tokio::time::timeout(
+		Duration::from_secs(5),
+		kio::wait(|waiter| request.demand().poll_unused(waiter)),
+	)
+	.await
+	.unwrap_or_else(|_| panic!("{version:?} over {relays} relays: the publisher's request is still wanted"))
+	.expect("the pending request is still open");
 }
 
 #[tokio::test(start_paused = true)]

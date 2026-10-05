@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { type GetPromise, Once, Signal } from "@moq/signals";
+import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import { NotFound } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import { Route } from "./hop.ts";
@@ -34,6 +34,42 @@ class BroadcastState {
 	// Live consumer handles sharing this state (see {@link Consumer.clone}). The broadcast
 	// closes once the last one closes, so a shared consumer can be handed to several callers.
 	consumers = 0;
+	used = new Signal(false);
+	active = 0;
+	watched = new WeakSet<track.Producer>();
+	demandCleanup = new Set<Dispose>();
+}
+
+// Each track updates the aggregate on an edge, so a demand change touches only its track.
+function watchDemand(state: BroadcastState, producer: track.Producer): void {
+	if (state.watched.has(producer)) return;
+	state.watched.add(producer);
+	const demand = producer.demand();
+	let active = false;
+	const update = () => {
+		const used = state.closed.peek() === undefined && demand.closed.peek() === undefined && demand.used.peek();
+		if (active === used) return;
+		state.active += used ? 1 : -1;
+		active = used;
+		state.used.set(state.active > 0);
+	};
+	const disposeUsed = demand.used.subscribe(update);
+	const disposeClosed = demand.closed.subscribe(() => {
+		if (demand.closed.peek() === undefined) return;
+		cleanup();
+	});
+	const cleanup = () => {
+		disposeUsed();
+		disposeClosed();
+		if (active) {
+			state.active--;
+			active = false;
+			state.used.set(state.active > 0);
+		}
+		state.demandCleanup.delete(cleanup);
+	};
+	state.demandCleanup.add(cleanup);
+	update();
 }
 
 function dequeueRequest(state: BroadcastState): track.Request | undefined {
@@ -51,6 +87,7 @@ function dequeueRequest(state: BroadcastState): track.Request | undefined {
 function closeState(state: BroadcastState) {
 	if (state.closed.peek() !== undefined) return;
 	state.closed.set(null);
+	for (const cleanup of state.demandCleanup) cleanup();
 	for (const request of state.pending) request.reject();
 	state.requested.mutate((requests) => {
 		requests.length = 0;
@@ -81,6 +118,7 @@ function subscribe(
 	}
 
 	const producer = new track.Producer(name);
+	watchDemand(state, producer);
 	const subscriber = producer.subscribe(options);
 
 	if (register) {
@@ -110,6 +148,7 @@ async function resolveTrackInfo(state: BroadcastState, name: string): Promise<tr
 	}
 
 	const producer = new track.Producer(name);
+	watchDemand(state, producer);
 	state.requested.mutate((requested) => {
 		requested.push(hooks.makeRequest({ name, producer, sequences: state.sequences, pending: state.pending }));
 	});
@@ -154,6 +193,36 @@ async function fetchGroup(
 	}
 }
 
+let makeDemand: (state: BroadcastState) => Demand;
+
+/** A watch-only view of demand for any track in a broadcast. */
+export class Demand {
+	#state: BroadcastState;
+	private constructor(state: BroadcastState) {
+		this.#state = state;
+	}
+	static {
+		makeDemand = (state) => new Demand(state);
+	}
+
+	/** Whether any track currently has subscribers. */
+	get used(): Getter<boolean> {
+		return this.#state.used;
+	}
+
+	/** Wait until every track becomes unused or the broadcast closes. */
+	async unused(): Promise<void> {
+		while (this.#state.used.peek() && this.#state.closed.peek() === undefined) {
+			await Signal.race(this.#state.used, this.#state.closed);
+		}
+	}
+
+	/** The broadcast's clean close. */
+	get closed(): GetPromise<null> {
+		return this.#state.closed;
+	}
+}
+
 /**
  * The write side of a broadcast.
  *
@@ -161,6 +230,7 @@ async function fetchGroup(
  */
 export class Producer {
 	#state = new BroadcastState();
+	#demand = makeDemand(this.#state);
 	#announcer?: Announcer;
 	#path = Path.empty();
 
@@ -184,6 +254,11 @@ export class Producer {
 	 */
 	get closed(): GetPromise<null> {
 		return this.#state.closed;
+	}
+
+	/** Watch demand for the broadcast's tracks. */
+	demand(): Demand {
+		return this.#demand;
 	}
 
 	/** A read handle for this broadcast, named by the path the origin created it at. */
@@ -213,6 +288,7 @@ export class Producer {
 			throw new Error(`duplicate track: ${track.name}`);
 		}
 
+		watchDemand(this.#state, track);
 		this.#state.tracks.set(track.name, track);
 
 		void track.closed.then(() => {

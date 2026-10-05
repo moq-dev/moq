@@ -7,13 +7,19 @@ publisher's current media time, extrapolated to now rather than the newest
 frame's timestamp, so every reader's budget judges a cache against the real
 live edge, even across a gap.
 
-Today (since [#4741](https://github.com/moq-dev/moq/pull/4741)) a front caches
-nothing: its readers read the serving route's copy directly, and a track nobody
-reads drops that copy, so an idle cache is never served. lite-07 SUBSCRIBE_OK
-carries the largest position from the publisher's cache, which nothing reads yet.
-A budget judges a group by where its successor starts, so past a gap an old
-group's reach stays open. Re-scope before starting: the idle-cache case that
-motivated this is gone.
+Since [#4741](https://github.com/moq-dev/moq/pull/4741) the track model
+already reads lite-07 SUBSCRIBE_OK's largest position: `set_live`
+(`rs/moq-net/src/model/track.rs`, called from `lite/subscriber.rs`) marks a
+copy's cache current up to it, and when the feed went on past a gap after
+everything cached, readers skip the unjudgeable cache. That covers the
+idle-cache case that motivated this quest.
+
+Decided in the 2026-10-05 audit: re-scope against `set_live` before
+starting. What `set_live` does not give is a media time: a budget still judges
+a group by where its successor starts, so on a live track past a gap an old
+group's reach stays open until the next group arrives. Name the reader that
+needs the extrapolated live media time beyond that; if none remains, delete
+this quest instead.
 
 ## Plan
 

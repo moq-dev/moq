@@ -23,8 +23,11 @@ AUTH can carry the full grant once the pattern-interest prerequisite lands.
   `--connect-token` and `MOQ_CONNECT_TOKEN`, the default set for every dial
   the client makes. A `?jwt=` in the URL stays a member of the union, which is
   how cluster dial targets keep their per-peer credential, and per-dial
-  extras use the session's `auth().add()` once connected. moq-ffi
-  `MoqClient::set_tokens` (mirrored in the wrappers, and reaching the
+  extras use the session's `auth().add()` once connected. moq-ffi gains a
+  `tokens` field on the `MoqClientConfig` record that
+  [FFI shape](/quest/m1/ffi-shape/README.md) (#4697) puts in place of every
+  `MoqClient` setter, mirroring `moq_tokio::connect::Config`, not a new
+  `set_tokens` setter (mirrored in the wrappers, and reaching the
   generated C and C++ bindings and OBS through
   [C++ through moq-ffi](/quest/m1/cpp/README.md)) and `js/net`'s `connect`
   options field follow. Decided in the 2026-09-30 audit: no new libmoq API,

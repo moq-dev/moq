@@ -31,12 +31,22 @@ These land with the next breaking release, not the 2026-09-23 train.
   are `publish_flate_snapshot` / `publish_flate_stream`, taking
   `MoqFlateConfig` and returning `MoqFlateSnapshotProducer` /
   `MoqFlateStreamProducer`. The C `moq_publish_binary_*` calls are unchanged.
-- **Track demand is read through `demand()`.** In Rust, `track::Producer`'s
-  `is_used`, `used`, `unused`, and `poll_unused` are `producer.demand().X`.
+- **Demand is read through `demand()`.** In Rust, `track::Producer`'s
+  `is_used`, `used`, `unused`, and `poll_unused` are `producer.demand().X`,
+  and so are `group::Producer`'s `used` and `unused`.
+  `track::Request::poll_unused`, `track::Dynamic::poll_unused`, and
+  `group::Request::poll_unused` are `demand().poll_unused`, which returns
+  `Poll<Result<()>>` instead of `Poll<()>`: an `Err` means the request closed,
+  so treat it as unused too. A `group::Request` no longer needs polling to be
+  withdrawn; the last `fetch_group` caller leaving does it, so a handler that
+  sees it unused just drops it. A fetch arriving after that queues a fresh
+  request instead of joining the abandoned one, so a handler that keeps serving
+  without watching `demand()` may see its `accept` return `Error::Duplicate`.
   The moq-json snapshot and moq-flate `is_used()` is `demand().is_used()`.
   In TypeScript, `Track.Producer`'s `used` and `unused()` are
-  `producer.demand().used` and `.unused()`, and `Allocator.reserve` takes
-  `producer.demand()`, replacing the `Bandwidth.Demand` interface.
+  `producer.demand().used` and `.unused()`, as are `Group.Producer`'s, and
+  `Allocator.reserve` takes `producer.demand()`, replacing the
+  `Bandwidth.Demand` interface.
 - **The `"auto"` delay is measured, not derived from RTT** (#4162). It is sized
   from how late frames arrive (see [audio jitter](/concept/audio-jitter)) in
   `@moq/watch` and `moq play`, which now defaults `--delay` to `auto` instead of

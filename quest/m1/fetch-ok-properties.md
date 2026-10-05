@@ -1,4 +1,4 @@
-# [S] FETCH_OK carries the track's properties
+# [M] FETCH_OK carries the track's properties
 
 ## Goal
 
@@ -24,14 +24,30 @@ sends an empty block.
   Extension Headers / Properties associated with a track in FETCH_OK (d16
   §8.6, d22 §7.7). An empty block also misleads the reader: it infers
   Ascending order and priority 128 where SUBSCRIBE_OK says Descending.
-- Honour INCLUDE_PROPERTIES (0x35) on FETCH from draft 20. It defaults to
-  sending the properties; at 0 the block is present but empty. `fetch.rs`
-  decodes it on draft 20+ and drops it, so it is not honoured today.
+- FETCH preserves object properties, Timestamp included. Decided in the
+  2026-10-05 audit (maintainer: "FETCH must send stamped objects? It's not
+  legal to remove the property."): the standalone FETCH path sending its
+  objects unstamped because no SUBSCRIBE declared a timescale
+  (`ietf/publisher.rs`, around line 1346) is a bug to fix here. FETCH_OK declares the track's TIMESCALE, and every
+  fetched object keeps its Timestamp, so a fetch-only reader is timed exactly
+  when the track is, as [Typed timedness](/quest/m1/typed-timedness.md)
+  requires. Rejected: omitting timescale from FETCH_OK and leaving fetch-only
+  readers untimed.
+- Honour INCLUDE_PROPERTIES (0x35) on FETCH from draft 20, once
+  [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) serves draft-20 FETCH at
+  all (today our publisher refuses every one). It defaults to sending the
+  properties; at 0 the block is present but empty. `fetch.rs` decodes it on
+  draft 20+ and drops it, so it is not honoured today.
 - Test per draft range: FETCH_OK round-trips the properties SUBSCRIBE_OK would
-  carry, and INCLUDE_PROPERTIES = 0 empties the block.
+  carry, a standalone FETCH's objects arrive stamped, and
+  INCLUDE_PROPERTIES = 0 empties the block.
 
 Public API: none. Wire: FETCH_OK gains its properties on drafts that define
 the block. Interop: run `just test interop --all`.
+
+## Required
+
+- [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) - draft-20 FETCH is served at all, and edits the same `run_fetch_stream`
 
 ## Related
 
