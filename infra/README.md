@@ -7,10 +7,13 @@ infrastructure.
 | ----------- | --------------- | --------------- | --------------------------------------- |
 | `infra/apt` | `apt.moq.dev`   | `apt-moq-dev`   | Debian/Ubuntu package repository        |
 | `infra/rpm` | `rpm.moq.dev`   | `rpm-moq-dev`   | Fedora/RHEL package repository          |
+| `infra/moq-sh` | `moq.sh`     |                 | The `moq` installer script              |
 
 Each worker is a standalone bun package with a `wrangler.jsonc` and a
-small TypeScript handler that proxies GETs out of the R2 bucket with
-appropriate `Content-Type` and `Cache-Control` headers for the file kind.
+small TypeScript handler. The apt and rpm workers proxy GETs out of the R2
+bucket with appropriate `Content-Type` and `Cache-Control` headers for the
+file kind. The moq.sh worker serves `install.sh` from its bundle at every path,
+with the newest `moq-cli` release filled in as the default version.
 
 ## Deploying a worker
 
@@ -19,11 +22,19 @@ From the repo root:
 ```bash
 just infra apt deploy
 just infra rpm deploy
+just infra moq-sh deploy
 ```
 
 Each recipe runs `bun install` and `bun wrangler deploy`. The
 `custom_domain: true` route entry in the wrangler config auto-provisions
 the DNS record on first deploy.
+
+moq.sh also deploys from CI (`.github/workflows/moq-sh.yml`): on a push to
+`release` that touches `infra/moq-sh/`, and after every `moq-cli` release.
+Its `CLOUDFLARE_API_TOKEN` secret has the account-wide Workers Editor role,
+which can update an existing worker but not create one or change its route.
+So the first deploy, and any change to the custom domain, runs by hand under a
+maintainer's `wrangler login`.
 
 ## Bootstrapping a new package repository
 

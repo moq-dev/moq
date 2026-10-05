@@ -38,6 +38,7 @@ on:
       - moq-cli
       - moq-gst
       - moq-relay
+      - moq.sh
       - Nightly
       - OBS
       - Platform

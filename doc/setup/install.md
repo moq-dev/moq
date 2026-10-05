@@ -23,6 +23,32 @@ naming `moqdev/moq` and `#moq`.
 
 Use `moq auth` for keys and tokens; installing `moq` includes it.
 
+## macOS and Linux
+
+The quickest way to install `moq`:
+
+```bash
+curl -fsSL https://moq.sh | sh
+```
+
+It installs the newest `moq` release into `~/.local/bin`, without sudo or Rust,
+on macOS (Apple Silicon) and Linux (x86\_64, aarch64, glibc 2.34+). It checks
+the download against the release's `SHA256SUMS` and never edits your shell
+profile; it prints the `PATH` line to add if needed. Run it again to upgrade.
+Pass options after `sh -s --`:
+
+```bash
+# A specific version, e.g. to pin or downgrade
+curl -fsSL https://moq.sh | sh -s -- --version 0.14.0
+
+# Another directory
+curl -fsSL https://moq.sh | sh -s -- --dir ~/bin
+```
+
+It refuses to overwrite a `moq` that a package manager symlinked, so upgrade
+that one with its package manager. To uninstall, delete the binary:
+`rm ~/.local/bin/moq`. `moq-relay` and the plugins use the methods below.
+
 ## Any platform
 
 ```bash

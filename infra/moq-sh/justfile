@@ -1,0 +1,28 @@
+set fallback
+
+# Deploy moq.sh with the newest moq-cli release as the installer's default.
+deploy:
+    bun install --frozen-lockfile
+    bun wrangler deploy --var "VERSION:$(just latest)"
+
+# Print the newest published moq-cli version.
+latest:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version=$(gh release list --repo moq-dev/moq --exclude-drafts --exclude-pre-releases --limit 1000 --json tagName \
+        --jq '.[].tagName | select(startswith("moq-cli-v")) | ltrimstr("moq-cli-v")' | sort -V | tail -n1)
+    [[ -n "$version" ]] || { echo "no published moq-cli release" >&2; exit 1; }
+    echo "$version"
+
+# Test install.sh against fake releases, under sh and dash.
+test *shells:
+    ./install.test.sh {{ shells }}
+
+# Install the newest real release into a temporary directory, as moq.sh serves it.
+smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    sed "s/@MOQ_VERSION@/$(just latest)/" install.sh | sh -s -- --dir "$tmp/bin"
+    "$tmp/bin/moq" --version

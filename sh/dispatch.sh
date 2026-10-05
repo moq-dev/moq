@@ -55,7 +55,8 @@ fi
 declare -A scope=(
     [js]='^(js/|doc/|drafts/|demo/(boy|web)/|test/(audio-quality|interop)/clients/js|test/wasm/|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
     # Workers with lockfiles outside the Bun workspace.
-    [workers]='^(infra/apt/|infra/rpm/|demo/pub/|sh/js/workers\.sh$)'
+    [workers]='^(infra/apt/|infra/rpm/|infra/moq-sh/|demo/pub/|sh/js/workers\.sh$)'
+    [moq_sh]='^infra/moq-sh/'
     # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
     [rs]='^(rs/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
     [bench]='^bench/'
@@ -95,6 +96,7 @@ declare -A scope=(
 declare -A tools=(
     [js]='bun python3'
     [workers]='bun'
+    [moq_sh]='dash'
     [rs]='cargo jq'
     [bench]='cargo'
     [drafts]='bun kramdown-rfc xml2rfc'
@@ -117,7 +119,7 @@ declare -A tools=(
 )
 
 case "$action" in
-    check | ci-check) modules=(js workers drafts rs bench quest drill py kt swift go dart obs_compile obs flake markdown shell toml nix justfile gh) ;;
+    check | ci-check) modules=(js workers moq_sh drafts rs bench quest drill py kt swift go dart obs_compile obs flake markdown shell toml nix justfile gh) ;;
     fix) modules=(js rs py dart obs markdown shell toml nix justfile) ;;
     ci-test) modules=(js rs py) ;;
 esac
@@ -165,6 +167,7 @@ for module in "${selected[@]}"; do
     case "$verb:$module" in
         check:js) just js check ;;
         check:workers) just js workers ;;
+        check:moq_sh) just infra moq-sh test ;;
         # `check` lints Rust through its test build, so the crates compile once;
         # `ci-check` uses clippy, which is quicker when the tests run elsewhere.
         check:rs) if [[ "$action" == check ]]; then just rs check-test-changed "$rs_list"; else just rs check-changed "$rs_list"; fi ;;

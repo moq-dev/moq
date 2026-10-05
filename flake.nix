@@ -244,6 +244,8 @@
         # `cargo metadata` in `just rs check-changed`.
         devTools = with pkgs; [
           jq
+          # Runs the moq.sh installer tests under a strict POSIX shell.
+          dash
         ];
 
         # Linters / formatters used by `just check` and `just fix`, which
