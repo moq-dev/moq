@@ -82,8 +82,8 @@ impl From<AudioCodecArg> for AudioCodecKind {
 	}
 }
 
-/// Rendition selection flags for stdout container sinks and native playback.
-/// With no flags set, every rendition is kept.
+/// Rendition selection flags for the stdout container sinks that honor them and
+/// native playback. With no flags set, every rendition is kept.
 #[derive(usage::Args, Clone, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct SelectArgs {
@@ -95,6 +95,10 @@ pub struct SelectArgs {
 	#[usage(long, value_enum)]
 	pub video_codec: Option<VideoCodecArg>,
 
+	/// Leave video out (audio only).
+	#[usage(long, conflicts("--video-name", "--video-codec", "--no-audio"))]
+	pub no_video: bool,
+
 	/// Pick the audio rendition with this exact name.
 	#[usage(long)]
 	pub audio_name: Option<String>,
@@ -102,6 +106,10 @@ pub struct SelectArgs {
 	/// Keep only audio renditions whose codec family matches.
 	#[usage(long, value_enum)]
 	pub audio_codec: Option<AudioCodecArg>,
+
+	/// Leave audio out (video only).
+	#[usage(long, conflicts("--audio-name", "--audio-codec"))]
+	pub no_audio: bool,
 }
 
 impl SelectArgs {
@@ -110,23 +118,45 @@ impl SelectArgs {
 	/// `force` takes the place of `--video-codec`, for a sink whose format implies
 	/// one. Pass `None` to use the flag as given.
 	pub(crate) fn selection(&self, force: Option<VideoCodecKind>) -> select::Broadcast {
-		let mut video = select::Video::default();
-		if let Some(name) = &self.video_name {
-			video = video.name(name);
-		}
-		if let Some(codec) = force.or_else(|| self.video_codec.map(Into::into)) {
-			video = video.codec(codec);
+		let mut selection = select::Broadcast::default();
+
+		if !self.no_video {
+			let mut video = select::Video::default();
+			if let Some(name) = &self.video_name {
+				video = video.name(name);
+			}
+			if let Some(codec) = force.or_else(|| self.video_codec.map(Into::into)) {
+				video = video.codec(codec);
+			}
+			selection = selection.video(video);
 		}
 
-		let mut audio = select::Audio::default();
-		if let Some(name) = &self.audio_name {
-			audio = audio.name(name);
-		}
-		if let Some(codec) = self.audio_codec {
-			audio = audio.codec(codec.into());
+		if !self.no_audio {
+			let mut audio = select::Audio::default();
+			if let Some(name) = &self.audio_name {
+				audio = audio.name(name);
+			}
+			if let Some(codec) = self.audio_codec {
+				audio = audio.codec(codec.into());
+			}
+			selection = selection.audio(audio);
 		}
 
-		select::Broadcast::default().video(video).audio(audio)
+		selection
+	}
+
+	/// The first selection flag passed, to name it when a sink can't honor it.
+	pub(crate) fn flag(&self) -> Option<&'static str> {
+		[
+			(self.video_name.is_some(), "--video-name"),
+			(self.video_codec.is_some(), "--video-codec"),
+			(self.no_video, "--no-video"),
+			(self.audio_name.is_some(), "--audio-name"),
+			(self.audio_codec.is_some(), "--audio-codec"),
+			(self.no_audio, "--no-audio"),
+		]
+		.into_iter()
+		.find_map(|(given, flag)| given.then_some(flag))
 	}
 }
 
@@ -377,9 +407,11 @@ impl Subscribe {
 		// frame interleaved by timestamp. Avc3 sources are transcoded to avc1 shape
 		// internally (synthesizing avcC from inline parameter sets). Only H.264 video
 		// and AAC audio are supported; `fragment_duration` does not apply to FLV.
+		let select = self.args.selection()?;
 		let mut flv = moq_mux::container::flv::Export::with_catalog_format(self.source, self.catalog)
 			.await?
-			.with_max_age(self.args.max_age);
+			.with_max_age(self.args.max_age)
+			.with_select(select);
 
 		while let Some(chunk) = flv.next().await? {
 			stdout.write_all(&chunk).await?;

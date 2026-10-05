@@ -52,7 +52,3 @@ correctly.
 
 - [#4769](https://github.com/moq-dev/moq/issues/4769) - close this issue when the quest finishes
 - [#4770](https://github.com/moq-dev/moq/issues/4770) - close this issue when the quest finishes
-
-## Related
-
-- [Leave out a role](/quest/m1/cli-no-role.md) - how a caller avoids a role entirely
