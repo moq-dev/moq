@@ -16,6 +16,14 @@ example `track::Timed` and `track::Untimed`, and settle the shape that
 
 Mirror the shape in `@moq/net` and the bindings.
 
+The IETF receive path follows the same rule, and
+`drafts/draft-lcurley-moq-timestamp.md` says so:
+
+- On a track accepted without TIMESCALE, an object's own object-scope
+  TIMESCALE and Timestamp are ignored, and the track stays untimed.
+- On a track that declares TIMESCALE, an object without TIMESTAMP makes the
+  track malformed.
+
 ## Plan
 
 Decided (2026-10-05, maintainer):
@@ -32,13 +40,35 @@ Decided (2026-10-05, maintainer):
   breaking change instead of two. Folding `Timed`'s `T` in here, rather than
   a separate quest, keeps that to one break too.
 
+Decided (2026-10-05, maintainer, settling the open question on object
+stamps):
+
+- Timestamps are all-or-nothing per track on the wire too. On a track
+  accepted without TIMESCALE, objects that carry their own object-scope
+  TIMESCALE and Timestamp (imquic does) are ignored: the track stays untimed
+  and the stamps are dropped, so peers that play today keep playing.
+  Rejected: refusing them, and deferring the call to the mock-up.
+- On a track that declares TIMESCALE, an object with no TIMESTAMP is
+  malformed. The receiver handles it under moq-transport's malformed-track
+  rules rather than inventing a time. Rejected: repeating the latest
+  timestamp, and falling back to arrival time.
+- Object-scope TIMESCALE overrides are no longer applied on any track.
+- The draft changes ship in this quest's PR, with the implementation, not in
+  a separate draft PR first. In `drafts/draft-lcurley-moq-timestamp.md`,
+  three rules change: a publisher stamping every object on a TIMESCALE track
+  becomes a requirement rather than a SHOULD, a missing Timestamp is
+  malformed instead of falling back to arrival time, and receivers stop
+  applying object-scope TIMESCALE overrides. Check the lite draft's per-track
+  rule too, and update it if it differs.
+
 Look out for:
 
 - Where an untimed track's frames still need ordering or "has a frame"
   answers (group start, expiry, the live edge), without a timestamp to read.
-- What a receiver does with timing that arrives on a track it accepted as
-  untimed, such as an IETF object-scope TIMESCALE and Timestamp (imquic
-  publishes this way). Refusing would break peers that play today.
+- Which objects the malformed rule covers. Status-only objects (End of
+  Group, End of Track) and an empty LOC end marker carry no media time.
+  Before landing, check that our publishers and any interop peer that sends
+  TIMESCALE stamp every object the rule covers.
 - lite-05 and lite-06 always send a Timescale, so an untimed track goes out
   there as timed, with the encoder's send time, as
   [Untimed model](/quest/m1/untimed-model.md) decided.
@@ -46,5 +76,7 @@ Look out for:
   timestamp](/quest/m1/publish-timestamp.md), its JS mirror, and the data
   consumer quests.
 
-Public API: breaking (`track::Info.timescale`, `Timed`). Wire: none until
-the untimed quests use it.
+Public API: breaking (`track::Info.timescale`, `Timed`). Wire: no encoding
+change. Receive semantics on published IETF drafts change: object-scope
+stamps on an untimed track are ignored, and a TIMESCALE track missing a
+TIMESTAMP is malformed.
