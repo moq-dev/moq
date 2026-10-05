@@ -65,8 +65,5 @@ the same.
 ## Required
 
 - [Hard fork](/quest/m1/quic/fork/README.md) - the credit and pacer changes land in `moq-quic`
+- [Peer limits](/quest/m1/quic/peer-limits.md) - adds the runtime `set_limits(Limits)` seam and shrink-as-debt behavior this extends
 - [Bitrate claim](/quest/m2/rate-claim.md) - the cap this enforces
-
-## Related
-
-- [Peer limits](/quest/m1/quic/peer-limits.md) - the same runtime limits seam, raised for cluster peers

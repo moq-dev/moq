@@ -30,9 +30,10 @@ keeps the old session serving until it closes or overstays the handover cap,
 reports `Status::Migrating`, and `moq_net::Session::drain()` sends a GOAWAY on
 every version (a client may send one with an empty URI; only a redirect URI is
 forbidden to a moq-transport client). The origin's multi-route front prefers
-the newest of two equal routes, and #4741's pump (`model/pump.rs`) resumes each
-track from the new route at the first frame the subscriber lacks, cancelling
-the old session's subscription once the new one feeds it. The JavaScript
+the newest of two equal routes, and since #4741 a front resumes each track
+from the new route's copy at the first frame the subscriber lacks
+(`model/resume.rs`), cancelling the old session's subscription once the new
+one feeds it. The JavaScript
 GOAWAY handover landed with the drain line, but it does not resume tracks yet;
 the JS half requires [JS track handover](/quest/m1/js-group-handover.md) for
 that.
@@ -47,7 +48,7 @@ Shared decisions:
   narrowly beats QUIC would open two connections on every reconnect.
 - The old session gets `Goaway::new()` with the configured handover cap before
   it enters draining. The relay refuses new requests on it from then on; the
-  pump cancels its subscriptions once the new session feeds them.
+  front cancels its subscriptions once the new session feeds them.
 - One-shot `connect()` returns one session and never upgrades; every
   `Connection` upgrades, reconnecting or not.
 - Publishing over the old session is announced again over the new one; the

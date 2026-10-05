@@ -131,5 +131,5 @@ published drafts change as the timestamp draft says.
 - [IETF timestamp units](/quest/m1/ietf-timestamp-units.md) - drafts 14-16 stop sending timestamps without units, which then arrive untimed
 - [Fetch without SUBSCRIBE](/quest/m1/ietf-fetch-only.md) - opting out of properties today falls back to arrival time
 - [Publisher timeliness](/quest/m1/qos/publisher-timeliness.md) - relay ingest measures arrival minus timestamp, and must skip untimed frames
-- [Plan: cache age-out](/quest/m1/cache-wall-eviction.md) - whatever it decides, untimed groups age out only through the pool's expiry
+- [One max_age meaning](/quest/m1/cache-max-age.md) - whatever it decides, untimed groups age out only through the pool's expiry
 - [Translator](/quest/m1/rs2ts/translator.md) - flags the nested `Option` in first-start resolution this touches

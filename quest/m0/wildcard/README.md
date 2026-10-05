@@ -53,7 +53,7 @@ would have to start working (a cold transcoder)"
 `origin::Producer` gained versioned patterns on the
 [Auth](/quest/m1/auth/README.md) line, so tokens and filters reuse the
 same matcher; advertisements stay prefixes. `Cost { warm, cold }`
-(`rs/moq-net/src/model/origin.rs:426`) is the route cost since
+(`rs/moq-net/src/model/origin.rs:404`) is the route cost since
 [#2925](https://github.com/moq-dev/moq/pull/2925).
 
 [moq#3225](https://github.com/moq-dev/moq/pull/3225) moved a long way toward
@@ -136,7 +136,7 @@ identity or a generation field.
   refused. A prefix wider than the grant is accepted, but it only routes
   requests for paths the grant covers. Fleet-wide services use the cluster
   identity; a customer service serves only what its own v1 grant contains.
-  Until [Advertise-only authorization](/quest/m2/processor/advertise-auth.md)
+  Until [Advertise-only authorization](/quest/m3/processor/advertise-auth.md)
   lands, the publish scope stands in for advertising; a credential with its own
   advertise scope is checked against that instead.
 - **Claims are visible to subscribers.** A subscriber sees every advertised
@@ -165,7 +165,7 @@ identity or a generation field.
   either concrete announcement propagates. Two encoders' bytes differ, and a
   path is one broadcast whoever serves it (#4741 resumes mid-group from any
   covering route), so each worker publishes under an epoch it mints
-  ([Per-worker epochs](/quest/m1/transcode-group-start.md)). The two workers
+  ([Per-worker epochs](/quest/m0/wildcard/transcode-group-start.md)). The two workers
   are then two broadcasts, a viewer follows the newest like any epoch
   takeover, and a relay never splices them. Wildcard routing invents neither
   a lease nor a generation. That quest is Required here (decided 2026-10-04,
@@ -196,7 +196,7 @@ it (`<service>/foo.hang`, where `<service>` starts with a `.` segment) rather
 than publishing beneath the source. Each worker publishes under an epoch it
 mints, `<service>/foo.hang/@<worker>`, not the source's, and its catalog points
 at the exact source epoch it transcodes (decided 2026-10-05; see
-[Per-worker epochs](/quest/m1/transcode-group-start.md)). Every demand
+[Per-worker epochs](/quest/m0/wildcard/transcode-group-start.md)). Every demand
 capability follows the same rule, external processors included: each output
 path carries an epoch minted for that one worker. The source's catalog reaches
 the contribution through a cross-broadcast reference. moq.pro runs its
@@ -223,7 +223,8 @@ distinguish recording generations reads the catalog's archive entry
 
 ## Required
 
-- [Per-worker epochs](/quest/m1/transcode-group-start.md) - each transcode worker publishes under its own epoch, so a relay never splices two workers' output
+- [Per-worker epochs](/quest/m0/wildcard/transcode-group-start.md) - each transcode worker publishes under its own epoch, so a relay never splices two workers' output
+- [A standing refusal ends the front](/quest/m0/wildcard/refusal-final.md) - a refusal from the winning route ends the request instead of re-selecting a sibling or a shorter prefix
 
 ## Related
 

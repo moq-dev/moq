@@ -65,6 +65,10 @@ returns; a grant below the Opus floor disables the rendition, and recovered
 bandwidth enables it again even after the last viewer unsubscribed; a PCM Producer
 ignores every grant.
 
+## Required
+
+- [Enabled flag](/quest/m1/catalog-enabled.md) - defines the `enabled` field a disabled rendition sets
+
 ## Closes
 
 - [#2848](https://github.com/moq-dev/moq/issues/2848) - close this issue when the quest finishes

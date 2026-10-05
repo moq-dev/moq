@@ -62,8 +62,9 @@ vector the 2026-09-30 cache-tiers audit kept:
   version; a plain client with one link advertises only itself. Node ids are
   opaque randoms, so routes reveal no backbone addresses.
 - **Trust.** Cluster-peer links may advertise any node; a client link's node
-  ids stay scoped to its session. See
-  [Route trust](/quest/m1/cluster-routing/route-trust.md).
+  ids stay scoped to its session. Promoting them is
+  [Route trust](/quest/m3/route-trust.md), which moved beside P2P in the
+  2026-10-05 audit; this line finishes without it.
 - **Multi-CDN by link preference.** A node may rank its links (moq.pro
   primary, Cloudflare secondary) ahead of the metric, so metrics from
   different operators are never compared; a CDN that speaks no ROUTE is just
@@ -131,13 +132,13 @@ Once every child has landed:
 - [Multi-CDN endpoints](/quest/m1/cluster-routing/multi-cdn.md) - an endpoint holds sessions to several CDNs, uses its preferred one, and fails over to the next
 - [Simulate the split](/quest/m1/cluster-routing/sim.md) - moq.pro's simulator compares the route layer with path vector before the wire is written
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - ROUTE per origin node and path-less ANNOUNCE on one stream, loop-free by Babel feasibility
-- [Route trust](/quest/m1/cluster-routing/route-trust.md) - a peer grant lets a client link advertise the nodes behind it as one identity
 - [Link quality](/quest/m1/cluster-routing/link-quality.md) - a radio link's cost follows its measured quality without flapping routes
 
 ## Related
 
 - [Wildcard](/quest/m0/wildcard/README.md) - the longest-prefix rule and pool spread Selection builds on
-- [P2P](/quest/m2/p2p/README.md) - browser and native peers that become routing nodes over this layer
+- [P2P](/quest/m3/p2p/README.md) - browser and native peers that become routing nodes over this layer
+- [Route trust](/quest/m3/route-trust.md) - a peer grant lets a client link advertise the nodes behind it as one identity
 - [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - redundant publishers share an explicit `@<epoch>`
 - [One route cost](/quest/m1/route-cost.md) - Warm and Cold collapse to one static cost
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - the importer half of a redundant pair under one explicit epoch

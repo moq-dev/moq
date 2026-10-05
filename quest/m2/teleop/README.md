@@ -109,5 +109,5 @@ stating plainly because it is what a builder is comparing against.
   SITL flown from a browser, parked with the bridge
 - [Browser teleoperation package](/quest/m3/teleop-browser-package.md) -
   `@moq/robot` mirroring the Rust crate, parked with the bridge
-- [Text schema](/quest/m2/text-schema.md) - non-media tracks in a catalog,
-  arrived at from the media side
+- [Text availability](/quest/m3/text-schema.md) - a text track publishes its
+  own availability index instead of copying the media timeline
