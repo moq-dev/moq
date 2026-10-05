@@ -17,8 +17,8 @@ name: Alert
 on:
   workflow_run:
     # Matched by workflow `name:`, not filename. Every workflow that can run
-    # outside a pull request belongs here; the pull-request-only ones (Check,
-    # Android) are omitted so they don't spawn a skipped Alert run on every
+    # outside a pull request belongs here; the pull-request-only ones (Android)
+    # are omitted so they don't spawn a skipped Alert run on every
     # push to every PR. `just gh check` enforces both halves of that.
     #
     # Swift, OBS, and Platform are here despite also running on pull requests:
@@ -31,6 +31,7 @@ on:
       - Back-merge
       - Cache
       - Cachix
+      - Check
       - Docker
       - Interop
       - moq-c

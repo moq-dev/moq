@@ -30,20 +30,28 @@
 //! The catalog entry is written when the producer is created and removed when it drops, so a track
 //! is never advertised without a publisher behind it.
 //!
-//! A payload that carries the [`Instant`] it was captured is written at that
-//! time on the broadcast [`Clock`](crate::Clock), and the entry advertises how late payloads reach
-//! the transport as its `jitter` and `delay`, the way a media rendition does:
+//! A payload timed on the broadcast [`Clock`](crate::Clock) is written at that timestamp as given,
+//! and the entry advertises how late payloads reach the transport as its `jitter` and `delay`, the
+//! way a media rendition does. A capture [`Instant`](std::time::Instant) converts with
+//! [`Clock::capture`](crate::Clock::capture) on the catalog's clock, read at write time since an
+//! importer's first frame re-anchors it:
 //!
 //! ```no_run
 //! # fn example(
+//! #     catalog: &moq_mux::catalog::Producer,
 //! #     thumbnail: &mut moq_mux::binary::Snapshot,
 //! #     jpeg: bytes::Bytes,
 //! #     captured: std::time::Instant,
 //! # ) -> moq_mux::Result<()> {
-//! thumbnail.update(moq_net::Timed::from(jpeg).at(captured))?;
+//! let at = catalog.clock().capture(captured)?;
+//! thumbnail.update(moq_net::Timed::from(jpeg).at(at))?;
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! A timestamp carried over from elsewhere, such as a source's own timestamp or the `at` of a
+//! consumed [`Timed`] the payload was derived from, is published unchanged too. It lines up with
+//! media only on a broadcast sharing the source's clock mapping.
 //!
 //! Read one back off the catalog, naming it once:
 //!
@@ -63,7 +71,6 @@
 //! ```
 
 use std::marker::PhantomData;
-use std::time::Instant;
 
 use bytes::Bytes;
 use moq_net::Timed;
@@ -173,10 +180,10 @@ impl<E: CatalogExt> Snapshot<E> {
 
 	/// Publish a new payload, superseding the previous one.
 	///
-	/// A payload timed with its capture instant is written at that time and measures the entry's
-	/// `jitter` and `delay`; one ahead of now is refused before anything is written.
-	pub fn update(&mut self, payload: impl Into<Timed<Bytes, Instant>>) -> crate::Result<()> {
-		let (payload, captured) = self.listing.stamp(payload.into())?;
+	/// A payload timed on the broadcast clock is written at that timestamp and measures the entry's
+	/// `jitter` and `delay`; one ahead of now measures as zero delay.
+	pub fn update(&mut self, payload: impl Into<Timed<Bytes>>) -> crate::Result<()> {
+		let (payload, captured) = self.listing.stamp(payload.into());
 		let size = self.inner.update(payload)?;
 		self.listing.record(size, captured)
 	}
@@ -246,9 +253,9 @@ impl<E: CatalogExt> Stream<E> {
 	/// [`moq_flate::stream::Producer::append`]) and retires the catalog entry with it. A catalog
 	/// error publishing the measured bitrate is returned after the payload was written, so the track
 	/// stays open and a retry would duplicate it.
-	pub fn append(&mut self, payload: impl Into<Timed<Bytes, Instant>>) -> crate::Result<()> {
+	pub fn append(&mut self, payload: impl Into<Timed<Bytes>>) -> crate::Result<()> {
 		let (payload, captured) = match &mut self.listing {
-			Some(listing) => listing.stamp(payload.into())?,
+			Some(listing) => listing.stamp(payload.into()),
 			// A failed write already ended the log, which refuses this payload whatever its time.
 			None => (Timed::from(payload.into().value), None),
 		};
@@ -477,19 +484,73 @@ mod test {
 			.unwrap();
 
 		let captured = std::time::Instant::now();
-		telemetry.append(Timed::from(&b"now"[..]).at(captured)).unwrap();
-		let late = captured - std::time::Duration::from_secs(1);
+		let at = catalog.clock().capture(captured).unwrap();
+		telemetry.append(Timed::from(&b"now"[..]).at(at)).unwrap();
+		let late = catalog
+			.clock()
+			.capture(captured - std::time::Duration::from_secs(1))
+			.unwrap();
 		telemetry.append(Timed::from(&b"late"[..]).at(late)).unwrap();
-
-		// A capture ahead of now is refused before anything is written.
-		let ahead = std::time::Instant::now() + std::time::Duration::from_secs(1);
-		assert!(matches!(
-			telemetry.append(Timed::from(&b"ahead"[..]).at(ahead)),
-			Err(crate::Error::InvalidCapture)
-		));
 
 		let jitter = entry(&catalog, "telemetry").jitter.expect("a late capture is jitter");
 		assert!(jitter >= std::time::Duration::from_secs(1), "{jitter:?}");
+	}
+
+	/// A source's own timestamp, on a catalog clock anchored to that source, is the frame's
+	/// timestamp as given. One ahead of now (a source clock running fast) is published too.
+	#[test]
+	fn a_source_timestamp_is_published_unchanged() {
+		let (mut broadcast, mut catalog) = catalog();
+		let mut klv = catalog
+			.binary_stream(track(&mut broadcast, "klv"), Config::default())
+			.unwrap();
+		let mut subscriber = klv.consume();
+
+		let first = moq_net::Timestamp::from_secs(3600).unwrap();
+		catalog.anchor(first).unwrap();
+		let sample = moq_net::Timestamp::from_millis(3_600_040).unwrap();
+		klv.append(Timed::from(&b"sample"[..]).at(sample)).unwrap();
+		let ahead = moq_net::Timestamp::from_millis(3_700_000).unwrap();
+		klv.append(Timed::from(&b"ahead"[..]).at(ahead)).unwrap();
+
+		assert_eq!(stamps(&mut subscriber), [3_600_040, 3_700_000]);
+	}
+
+	/// A timestamp ahead of now counts as on time: its track advertises no delay, and another track
+	/// is measured against it as against any on-time track. Measured as given, it would undercut
+	/// every real flush and inflate the other track's delay by the hour it runs fast.
+	#[test]
+	fn an_ahead_timestamp_counts_as_on_time() {
+		let (mut broadcast, catalog) = catalog();
+		let mut slow = catalog
+			.binary_stream(track(&mut broadcast, "slow"), Config::default())
+			.unwrap();
+		let mut ahead = catalog
+			.binary_stream(track(&mut broadcast, "ahead"), Config::default())
+			.unwrap();
+
+		let anchor = std::time::Instant::now();
+		for i in 0..20u64 {
+			let now = moq_net::Timestamp::from_micros(i * 100_000).unwrap();
+			let at = |late: u64| anchor + std::time::Duration::from_millis(i * 100 + late);
+			let slow = slow.listing.as_mut().unwrap();
+			slow.record_at(now, 100, Some((now, at(200)))).unwrap();
+			// An hour fast, flushed the moment it was written.
+			let fast = moq_net::Timestamp::from_micros(i * 100_000 + 3_600_000_000).unwrap();
+			ahead
+				.listing
+				.as_mut()
+				.unwrap()
+				.record_at(now, 100, Some((fast, at(0))))
+				.unwrap();
+		}
+
+		assert_eq!(
+			entry(&catalog, "slow").delay,
+			Some(std::time::Duration::from_millis(200))
+		);
+		let ahead = entry(&catalog, "ahead");
+		assert_eq!((ahead.delay, ahead.jitter), (None, None));
 	}
 
 	/// An untimed payload is stamped on the broadcast clock too, so mixing it with captured payloads
@@ -505,7 +566,7 @@ mod test {
 		let before = catalog.clock().now();
 		telemetry.append(&b"untimed"[..]).unwrap();
 		telemetry
-			.append(Timed::from(&b"timed"[..]).at(std::time::Instant::now()))
+			.append(Timed::from(&b"timed"[..]).at(catalog.clock().now()))
 			.unwrap();
 		let after = catalog.clock().now();
 
@@ -536,7 +597,7 @@ mod test {
 		catalog.anchor(first).unwrap();
 		snapshot.update(&b"untimed"[..]).unwrap();
 		stream
-			.append(Timed::from(&b"timed"[..]).at(std::time::Instant::now()))
+			.append(Timed::from(&b"timed"[..]).at(catalog.clock().now()))
 			.unwrap();
 		let after = catalog.clock().now();
 
@@ -559,11 +620,11 @@ mod test {
 			.unwrap();
 
 		telemetry
-			.append(Timed::from(&b"before"[..]).at(std::time::Instant::now()))
+			.append(Timed::from(&b"before"[..]).at(catalog.clock().now()))
 			.unwrap();
 		catalog.anchor(moq_net::Timestamp::ZERO).unwrap();
 		telemetry
-			.append(Timed::from(&b"after"[..]).at(std::time::Instant::now()))
+			.append(Timed::from(&b"after"[..]).at(catalog.clock().now()))
 			.unwrap();
 
 		let jitter = entry(&catalog, "telemetry").jitter;

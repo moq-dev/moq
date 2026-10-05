@@ -37,10 +37,23 @@ These land with the next breaking release, not the 2026-09-23 train.
   In TypeScript, `Track.Producer`'s `used` and `unused()` are
   `producer.demand().used` and `.unused()`, and `Allocator.reserve` takes
   `producer.demand()`, replacing the `Bandwidth.Demand` interface.
+- **The `"auto"` delay is measured, not derived from RTT** (#4162). It is sized
+  from how late frames arrive (see [audio jitter](/concept/audio-jitter)) in
+  `@moq/watch` and `moq play`, which now defaults `--delay` to `auto` instead of
+  `100ms`. A numeric `@moq/watch` delay is taken literally instead of having
+  the rendition's own delay added on top. `Sync.out.jitter` now always
+  equals `Sync.out.delay`, and `"auto"` with no decoder registered resolves to
+  0 rather than 100 ms.
 - **moq-mux has no clock translators.** `clock::Anchor`, `clock::Lane`, and
   `SourceMap` (#4667) are gone, along with the importers' `live()`. Publish the
   source's own timestamps and let the catalog clock map them to wall time;
   pin that mapping with `Config::with_clock` when the source's zero is known.
+- **moq-mux data producers take a broadcast-clock `Timestamp`.** `json` and
+  `binary` `Snapshot::update` and `Stream::append` take `Timed<_, Timestamp>`
+  instead of `Timed<_, Instant>`, and publish it as given. Convert a capture
+  `Instant` with `.at(catalog.clock().capture(instant)?)`, reading
+  `catalog.clock()` at write time, since an importer's first frame re-anchors
+  it. A timestamp ahead of now is published rather than refused.
 
 ## Wire
 

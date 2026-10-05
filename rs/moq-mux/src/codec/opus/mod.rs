@@ -178,8 +178,8 @@ impl Config {
 ///
 /// MPEG-TS aggregates several Opus packets into one PES, so the importer advances each
 /// packet's timestamp by this. Opus timing is always reckoned at 48 kHz regardless of the
-/// encoder's internal bandwidth. Returns `None` for an empty packet or a code-3 packet
-/// missing its frame-count byte.
+/// encoder's internal bandwidth. Returns `None` for an empty packet, a code-3 packet
+/// missing its frame-count byte, or a packet outside the 1 frame and 120 ms RFC 6716 allows.
 pub(crate) fn packet_samples(packet: &[u8]) -> Option<u32> {
 	let toc = *packet.first()?;
 	let frames = match toc & 0b11 {
@@ -188,7 +188,9 @@ pub(crate) fn packet_samples(packet: &[u8]) -> Option<u32> {
 		// Code 3: the frame count is the low 6 bits of the following byte.
 		_ => (packet.get(1)? & 0b0011_1111) as u32,
 	};
-	Some(config_samples(toc >> 3) * frames)
+	let samples = config_samples(toc >> 3) * frames;
+	// RFC 6716 §3.2.5: a packet holds at most 120 ms of audio.
+	(frames > 0 && samples <= 5_760).then_some(samples)
 }
 
 /// 48 kHz samples per frame for an Opus TOC config index (0..=31), per RFC 6716 Table 1.
@@ -226,6 +228,11 @@ mod tests {
 		// config 1, code 3 with 4 frames -> 3840.
 		assert_eq!(packet_samples(&[(1 << 3) | 3, 4]), Some(3840));
 		assert_eq!(packet_samples(&[]), None);
+		// Code 3 with zero frames, and with 63 frames of 60 ms.
+		assert_eq!(packet_samples(&[(1 << 3) | 3, 0]), None);
+		assert_eq!(packet_samples(&[(3 << 3) | 3, 63]), None);
+		// Two 60 ms frames is the 120 ms maximum.
+		assert_eq!(packet_samples(&[(3 << 3) | 3, 2]), Some(5760));
 	}
 
 	#[test]

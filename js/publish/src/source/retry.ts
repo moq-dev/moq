@@ -4,8 +4,8 @@ import { type Effect, Signal } from "@moq/signals";
  * A budget for re-opening a `getUserMedia` capture that failed or died.
  *
  * A `MediaStreamTrack` ends when the device disappears, the OS revokes it, or another application
- * takes an exclusive device, and the reopen that follows can itself fail. Both spend budget, so a
- * device that never works stops being asked.
+ * takes an exclusive device, and the reopen that follows can itself fail. Transient open failures
+ * and ended tracks spend budget; other open failures are terminal immediately.
  *
  * Every outcome reruns the owning effect, including running out of budget. That rerun is what clears
  * `out.source` and stops the stream, via the cleanup the previous run registered, so no caller has to
@@ -69,14 +69,29 @@ export class Retry {
 		return true;
 	}
 
-	/** The attempt produced no usable track. Spends budget and reruns the effect. */
-	failed(): void {
+	/** Spends budget and reruns the effect, returning whether another attempt is allowed. */
+	failed(): boolean {
 		this.#failures += 1;
-		// Unlimited budget, so there is always a next delay.
+		const retry = this.#failures <= Retry.LIMIT;
 		// Equal jitter, so a page with several captures doesn't reopen them all on the same tick.
-		this.#wait = this.#delay * (0.5 + Math.random() / 2);
+		this.#wait = retry ? this.#delay * (0.5 + Math.random() / 2) : undefined;
 		this.#delay = Math.min(this.#delay * Retry.DELAY.multiplier, Retry.DELAY.max);
 		this.#rerun.update((rerun) => rerun + 1);
+		return retry;
+	}
+
+	/**
+	 * Classify a `getUserMedia` rejection, returning whether another attempt is allowed.
+	 *
+	 * Only a busy device (`NotReadableError`) or an aborted request (`AbortError`) spends budget;
+	 * anything else, including bad constraints, is terminal at once.
+	 */
+	rejected(error: unknown): boolean {
+		if (error instanceof Error && (error.name === "NotReadableError" || error.name === "AbortError")) {
+			return this.failed();
+		}
+		this.terminal();
+		return false;
 	}
 
 	/** Stop attempting this capture until its settings, device list, or permission changes. */
