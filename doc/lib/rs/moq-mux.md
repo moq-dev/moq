@@ -26,13 +26,15 @@ producers (`import::Opus`, H.264, and so on) are available for feeding frames
 you already have.
 
 MPEG-TS `Import::stats` returns cumulative per-PID `StreamStats`: delivered
-`units`, transport-clock `quiet` time, audio `resyncs`, scanned bytes `discarded`,
-frames `unconfirmed`, damaged units refused in `damaged`, and the PID's share of
-the TR 101 290 counters. A malformed media packet, PES header, or codec unit is
-dropped whole; only that PID loses sync, and video closes its group at the break
-and waits for its next keyframe. Publishing and catalog failures remain
-fatal. `ts::stats::Log` reports these counters for both the CLI and SRT gateway.
-The exporter's `damaged` count remains zero.
+`units`, transport-clock `quiet` time, a `class` of audio, video, or data, audio
+`resyncs`, scanned bytes `discarded`, frames `unconfirmed`, damaged units refused
+in `damaged`, and the PID's share of the TR 101 290 counters. A malformed media
+packet, PES header, or codec unit is dropped whole; only that PID loses sync, and
+video closes its group at the break and waits for its next keyframe. Publishing
+and catalog failures remain fatal. `ts::stats::Log` reports these counters for
+both the CLI and SRT gateway, and grades a stopped stream for audio and video
+only; a sparse data PID such as SCTE-35 stays in the row and is not logged for a
+quiet second. The exporter's `damaged` count remains zero.
 
 fMP4 export emits one fragment per publisher group by default, including audio.
 A closed group flushes even if the live publisher pauses before its next frame.
