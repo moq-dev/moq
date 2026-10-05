@@ -110,8 +110,8 @@ export class Microphone {
 				stream = await effect.race(media);
 			} catch (error) {
 				if (effect.abort.aborted) return;
+				if (this.#retry.rejected(error)) return;
 				this.#out.error.set(error instanceof Error ? error : new Error(String(error)));
-				this.#retry.terminal();
 				return;
 			}
 
@@ -125,7 +125,10 @@ export class Microphone {
 			effect.cleanup(this.device.capture(settings?.deviceId));
 
 			// A track that arrives dead already fired "ended", so nothing would ever rerun us.
-			if (!track || track.readyState === "ended") return this.#retry.failed();
+			if (!track || track.readyState === "ended") {
+				this.#retry.failed();
+				return;
+			}
 
 			this.#retry.succeeded(effect, track);
 			effect.set(this.#out.source, { audio: { track, kind: "voice" } });

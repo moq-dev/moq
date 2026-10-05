@@ -20,8 +20,11 @@ reuseport shard groups are a later consumer, not a blocker.
 
 ## Plan
 
-Deferred to m2 in the 2026-09-30 audit: the consumer is moq.pro's edge, SRT is
-blocked upstream on srt-tokio, and STUN's only consumer is P2P, also m2.
+Deferred to m2 in the 2026-09-30 audit: the consumer is moq.pro's edge, and
+STUN's only consumer is P2P, now in m3. SRT is not blocked upstream:
+[SRT demux](/quest/m2/one-port/srt-demux.md) decided on 2026-09-30 to drive
+sans-io `srt-protocol` directly instead of waiting on a socket abstraction in
+srt-tokio.
 
 ### Classifying a datagram
 
@@ -49,8 +52,10 @@ fanned into virtual sockets, one per stack, each with the `AsyncUdpSocket`
 shape. Sends go straight to the shared socket, so every stack answers from
 the same address and port. noq accepts the virtual socket through
 `new_with_abstract_socket`. `moq-rtc`'s `Mux` already demuxes STUN by ufrag internally and only
-needs a `feed` entry beside its `recv_from` loop. `srt-tokio` accepts a
-`tokio::net::UdpSocket` but no abstraction; that is its own quest.
+needs a `feed` entry beside its `recv_from` loop. SRT skips `srt-tokio`,
+which accepts a `tokio::net::UdpSocket` but no abstraction, and feeds
+datagrams to sans-io `srt-protocol` as [SRT demux](/quest/m2/one-port/srt-demux.md)
+decided.
 
 ### STUN
 
@@ -82,5 +87,5 @@ pre-accepted streams can stand behind.
 
 ## Related
 
-- [P2P](/quest/m2/p2p/README.md) - the client that names the relay as its STUN server
+- [P2P](/quest/m3/p2p/README.md) - the client that names the relay as its STUN server
 - [Stream sessions](/quest/m2/uring-tcp/README.md) - the io_uring workers that would host the same demux later

@@ -6,7 +6,7 @@ name: Back-merge
 #
 # It lands through a pull request as a merge commit, never a squash: a squash
 # leaves the merge base at the last cut, so a second publish before the next
-# cut would conflict.
+# cut would conflict. Check's `land` job merges it once Check and Test pass.
 
 on:
   push:

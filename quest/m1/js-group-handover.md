@@ -21,7 +21,7 @@ old relay drops its upstream pull, the new relay subscribes upstream from
 scratch at the live edge. A group boundary that lands inside that window loses
 the group in flight: about 1 run in 5 at 100 ms groups.
 
-Rust solves this with #4741's single-writer pump (`model/pump.rs`): each track a
+Rust solves this with #4741's single-writer pump (`model/resume.rs`): each track a
 front serves is one producer, a route change subscribes the new route from
 the first frame the logical track lacks (mid-group), an open group is
 continued in place, duplicates are dropped by frame index, and the old route
@@ -40,6 +40,10 @@ settle along the way:
   properties differ (timescale, retention, priority, order). Match it.
 - `js/watch` and `js/hang` consumers that re-subscribe on `active` changes.
   Check whether they still need to.
+- Giving up a resumed group no route continues. Mirror Rust's rule from
+  [Untimed failover](/quest/m1/untimed-failover.md): when media time can't
+  judge its drift, give it up once the new route holds a newer group and
+  nothing can still fill it.
 
 Add unit coverage at the origin level against stand-in sessions, then flip
 `test/drain` to zero budget (drop the resubscribe loop in `drain.ts` and the

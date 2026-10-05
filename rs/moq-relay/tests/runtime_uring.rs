@@ -559,6 +559,63 @@ async fn uring_workers_write_qlog_traces() {
 	}
 }
 
+/// A session the workers refuse reaches `/metrics` like one the shared runtime
+/// refuses, over WebTransport and raw QUIC alike.
+#[tokio::test]
+async fn uring_refusals_reach_metrics() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	if !supported() {
+		return;
+	}
+
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	let mut config = uring_config(&cert, &key);
+	config.auth.public = vec!["anon/**".parse().unwrap()];
+	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
+	let relay = Relay::load(config).await.expect("load relay");
+	let port = relay.addr().expect("workers bound an address").port();
+	let internal = relay.internal().addr().expect("internal listener bound");
+	let running = tokio::spawn(relay.run());
+
+	// `/rooms` is outside the public rules. A client may finish connecting before
+	// the verdict lands, so a session that closes promptly counts as refused.
+	// Scraped after each dial, so a miscount names the transport that made it.
+	for (want, url) in [
+		(1, format!("https://127.0.0.1:{port}/rooms")),
+		(2, format!("moql://127.0.0.1:{port}/rooms")),
+	] {
+		let url: url::Url = url.parse().expect("parse url");
+		let connected = tokio::time::timeout(
+			TIMEOUT,
+			client().with_reconnect(false).connect(url.clone()).established(),
+		)
+		.await
+		.expect("connect timeout");
+		if let Ok(connection) = connected {
+			let _ = tokio::time::timeout(TIMEOUT, connection.closed())
+				.await
+				.expect("the workers kept a session they should refuse");
+		}
+
+		let body = reqwest::get(format!("http://{internal}/metrics"))
+			.await
+			.expect("scrape")
+			.text()
+			.await
+			.expect("metrics body");
+		assert!(
+			body.contains(&format!(
+				"moq_relay_sessions_refused_total{{reason=\"refused\"}} {want}\n"
+			)),
+			"after {url}:\n{body}"
+		);
+	}
+
+	running.abort();
+	let _ = running.await;
+}
+
 /// A policy admitting verified certificates and nobody else.
 fn mtls_only() -> moq_auth::serve::Policy {
 	let mut policy = moq_auth::serve::Policy::default();

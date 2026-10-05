@@ -58,12 +58,13 @@ vector the 2026-09-30 cache-tiers audit kept:
   partitioned swarm's traffic to itself through the CDN (BGP's partitioned-AS
   problem). Folding a large customer cluster into one id at its boundary is
   [Routing cost domains](/quest/m3/routing-cost-domains.md)'s.
-- **Every session speaks it**, relays, apps, and browsers, in the wip lite
-  version; a plain client with one link advertises only itself. Node ids are
+- **Every session speaks it**, relays, apps, and browsers, in lite-07 (the
+  current wip version, decided 2026-10-05); a plain client with one link advertises only itself. Node ids are
   opaque randoms, so routes reveal no backbone addresses.
 - **Trust.** Cluster-peer links may advertise any node; a client link's node
-  ids stay scoped to its session. See
-  [Route trust](/quest/m1/cluster-routing/route-trust.md).
+  ids stay scoped to its session. Promoting them is
+  [Route trust](/quest/m3/route-trust.md), which moved beside P2P in the
+  2026-10-05 audit; this line finishes without it.
 - **Multi-CDN by link preference.** A node may rank its links (moq.pro
   primary, Cloudflare secondary) ahead of the metric, so metrics from
   different operators are never compared; a CDN that speaks no ROUTE is just
@@ -76,8 +77,11 @@ vector the 2026-09-30 cache-tiers audit kept:
   own ([Link quality](/quest/m1/cluster-routing/link-quality.md)).
 - **Topology now, wire later.** moq.pro's edge and core migration runs on
   today's lite-06 path vector with upstream links; the route layer lands in
-  the wip version afterwards with no re-layout, once
-  [the simulator](/quest/m1/cluster-routing/sim.md) has compared it.
+  lite-07 (the current wip version) afterwards with no re-layout, once
+  [the simulator](/quest/m1/cluster-routing/sim.md) has compared it. Decided
+  2026-10-05: this line gates
+  [Finalize moq-lite-07](/quest/m1/lite07-finalize.md), and lite-07 loses
+  its hop list and `Hop Base`/`Hop Keep` compression.
 
 Kept from 2026-09-30: core links are configured and may skip PoPs; Warm and
 Cold collapse to one cost ([One route cost](/quest/m1/route-cost.md));
@@ -131,13 +135,13 @@ Once every child has landed:
 - [Multi-CDN endpoints](/quest/m1/cluster-routing/multi-cdn.md) - an endpoint holds sessions to several CDNs, uses its preferred one, and fails over to the next
 - [Simulate the split](/quest/m1/cluster-routing/sim.md) - moq.pro's simulator compares the route layer with path vector before the wire is written
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - ROUTE per origin node and path-less ANNOUNCE on one stream, loop-free by Babel feasibility
-- [Route trust](/quest/m1/cluster-routing/route-trust.md) - a peer grant lets a client link advertise the nodes behind it as one identity
 - [Link quality](/quest/m1/cluster-routing/link-quality.md) - a radio link's cost follows its measured quality without flapping routes
 
 ## Related
 
 - [Wildcard](/quest/m0/wildcard/README.md) - the longest-prefix rule and pool spread Selection builds on
-- [P2P](/quest/m2/p2p/README.md) - browser and native peers that become routing nodes over this layer
+- [P2P](/quest/m3/p2p/README.md) - browser and native peers that become routing nodes over this layer
+- [Route trust](/quest/m3/route-trust.md) - a peer grant lets a client link advertise the nodes behind it as one identity
 - [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - redundant publishers share an explicit `@<epoch>`
 - [One route cost](/quest/m1/route-cost.md) - Warm and Cold collapse to one static cost
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - the importer half of a redundant pair under one explicit epoch

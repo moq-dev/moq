@@ -503,3 +503,45 @@ test("aborting a fetch rejects with the signal's reason", async () => {
 
 	broadcast.close();
 });
+
+test("broadcast demand watches static and pending tracks rather than broadcast handles", async () => {
+	const broadcast = new BroadcastProducer();
+	const demand = broadcast.demand();
+	const consumer = broadcast.consume();
+	expect(demand.used.peek()).toBe(false);
+	const video = broadcast.createTrack("video");
+	const first = video.subscribe();
+	await Promise.resolve();
+	expect(demand.used.peek()).toBe(true);
+	const second = consumer.track("audio").subscribe();
+	const request = await wireOf(broadcast).requested();
+	if (!request) throw new Error("expected request");
+	const requested = request.demand();
+	expect(requested.used.peek()).toBe(true);
+	first.close();
+	await Promise.resolve();
+	expect(demand.used.peek()).toBe(true);
+	second.close();
+	await requested.unused();
+	await demand.unused();
+	expect(demand.used.peek()).toBe(false);
+	request.reject();
+	video.close();
+	broadcast.close();
+	expect(await demand.closed).toBeNull();
+	consumer.close();
+});
+
+test("broadcast closure clears active demand and subscriptions", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video");
+	const subscriber = track.subscribe();
+	const demand = broadcast.demand();
+	await Promise.resolve();
+	expect(demand.used.peek()).toBe(true);
+	broadcast.close();
+	expect(demand.used.peek()).toBe(false);
+	await demand.unused();
+	subscriber.close();
+	track.close();
+});
