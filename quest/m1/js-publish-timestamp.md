@@ -21,6 +21,11 @@ the same type in
 Callers in the repository (js/hang catalog, js/publish, js/room) pass their
 clock's now explicitly. Update `doc/lib/js/{json,flate,net}.md`.
 
+Decided (2026-10-05): timedness is per track, in the shape [Typed
+timedness](/quest/m1/typed-timedness.md) mirrors into `@moq/net`. Where the
+2026-10-01 note above assumes a per-frame optional timestamp (an absent `at`
+marking an untimed frame), that shape wins.
+
 Public API: breaking. Wire: none.
 
 ## Required

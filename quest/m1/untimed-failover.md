@@ -25,20 +25,24 @@ Decided 2026-10-05 11:39 +0200:
   right after it.
 - The rule: when drift can't be measured (no timed live edge, or the
   successor is untimed), give up once the serving copy holds a newer group
-  and no route or recovery fetch can still fill this one. This applies to
-  mixed tracks too, so there is one rule. No clock is involved.
+  and no route or recovery fetch can still fill this one. No clock is
+  involved.
   Rejected: a wall-clock deadline of `max_age` after the stall, which stands
   wall time in for media time, the substitution the untimed model removed.
   Also rejected: leaving it and documenting it.
+
+Since 2026-10-05 timedness is per track ([Typed
+timedness](/quest/m1/typed-timedness.md)), so no track mixes timed and
+untimed groups. The rule applies to untimed tracks and to a timed track whose
+drift can't be measured yet.
 
 Settle what "nothing pending" means against the recovery fetch
 (`a_pending_recovery_fetch_does_not_disable_expiry`), so a fetch about to
 fill the group isn't cut short. A FETCH reader has no budget and stays as it
 is.
 
-Test: a model test in `resume.rs` failing over an all-untimed track with an
-abandoned group, plus one where the successor is untimed on a timed track.
-Both fail without the fix. Run each against a cold route and against one
+Test: a model test in `resume.rs` failing over an untimed track with an
+abandoned group. It fails without the fix. Run it against a cold route and against one
 whose copy already caches untimed groups past the resumed one, so a cursor
 that skips ahead can't hide the stall. #4822 is changing `Cursor::new` so an
 explicit start is honoured on untimed tracks; build on that, not on the
@@ -53,4 +57,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [JS track handover](/quest/m1/js-group-handover.md) - mirrors this rule in JS
-- [Wall-clock age-out](/quest/m1/cache-wall-eviction.md) - retention of untimed groups, not a blocked reader
+- [One max_age meaning](/quest/m1/cache-max-age.md) - retention of untimed groups, not a blocked reader

@@ -37,6 +37,9 @@ on `main`.
 
 ## Required
 
+- [Lag across a splice](/quest/m1/qos/lag-splice.md) - a route switch
+  neither loses pending lag weight nor keeps weighing a segment replaced
+  before its first frame; the line does not land until it is fixed
 - [Starvation](/quest/m1/qos/starvation.md) - per broadcast, how far behind
   the acknowledged frontier of its subscriptions is, in media time, plus the
   media dropped before it was acknowledged

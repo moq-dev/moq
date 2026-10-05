@@ -52,9 +52,17 @@ Decided:
   prefix route. Document this rather than promise it works.
 - Publishers on the default publish path, such as moq-boy and moq-room,
   inherit the epoch from Origin. moq-stats mints its own through
-  [Stats epochs](/quest/m1/stats-epoch.md), which also gates the release
+  [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md), which also gates the release
   (decided 2026-10-04): a restarted stats node under a reused name stalls its
   viewers the same way.
+- [Retracted demand release](/quest/m0/broadcast-epoch/unannounce-demand-release.md) also
+  gates the release (decided 2026-10-05): a regression from #4741 on main that
+  `release` lacks.
+- Decided in the 2026-10-05 audit: the m1 quests gating this line (stats
+  epochs, the bounded stats aggregate it requires, and retracted demand
+  release) moved under it, and the OBS half of GStreamer and OBS moved to m1
+  as [OBS publishes under epochs](/quest/m1/obs-epoch.md), so the release
+  gate no longer waits on m1 work.
 - Derived output mirrors the epoch it came from
   (`.pro/transcode/<pid>/foo.hang/@e`, per the
   [wildcard](/quest/m0/wildcard/README.md) line's derived-output layout), so
@@ -72,11 +80,13 @@ This README owns:
 
 ## Required
 
+- [Retracted demand release](/quest/m0/broadcast-epoch/unannounce-demand-release.md) - a retracted broadcast's track demand is released when its last subscriber leaves, as before #4741
 - [Origin](/quest/m0/broadcast-epoch/origin.md) - moq-net publish mints an epoch, consumers follow the newest live one, and bare requests resolve to it on every version
 - [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web publish under epochs and play bare names
 - [Gateways](/quest/m0/broadcast-epoch/gateways.md) - RTMP, SRT, and WHIP ingest mint an epoch per incoming connection, so an encoder reconnect is a clean takeover
 - [TS restart](/quest/m0/broadcast-epoch/ts-restart.md) - a signalled backward TS discontinuity finishes the broadcast and continues the same input under a fresh epoch
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and inherit the default
-- [GStreamer and OBS](/quest/m0/broadcast-epoch/gst-obs.md) - moqsink and the OBS plugin publish each run under a fresh epoch
-- [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - `moq` takes an optional `--epoch` instead of `--hop`, a plain publisher declares a random Hop ID, and the per-session hop stamp and NO_CAPACITY are gone
-- [Stats epochs](/quest/m1/stats-epoch.md) - moq-stats publishes each node under its own epoch, so a restarted node never stalls its viewers
+- [GStreamer](/quest/m0/broadcast-epoch/gst.md) - moqsink publishes each run under a fresh epoch
+- [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - `moq` takes an optional `--epoch` instead of `--hop`, a plain publisher declares a random Hop ID, and the per-session hop stamp is gone
+- [Bounded stats aggregate](/quest/m0/broadcast-epoch/stats-aggregate-bound.md) - the stats aggregator folds departed nodes into a retired total, so epoch churn stops growing its memory
+- [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md) - moq-stats publishes each node under its own epoch, so a restarted node never stalls its viewers

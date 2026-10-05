@@ -35,11 +35,16 @@ let
   # member. crane's dependency-only stage stubs every workspace crate down to an
   # empty lib.rs, so those registry crates no longer find kio's API and fail to
   # compile. Put kio's real source back into the dummy tree.
+  #
+  # Skip crane's check phase: `cargo test` runs a binary's tests as threads of
+  # one process, so tests that pass CI's nextest (a process per test) can
+  # interfere here, and CI already gates every commit.
   buildPackage =
     args:
     craneLib.buildPackage (
       args
       // {
+        doCheck = false;
         extraDummyScript = ''
           rm -rf $out/rs/kio
           cp -r ${kioSource} --no-target-directory $out/rs/kio
@@ -49,16 +54,7 @@ let
     );
 
   moqRelayArgs = crateInfo ../rs/moq-relay/Cargo.toml // {
-    # A config test `include_str!`s the packaged systemd unit so its ExecStart
-    # keeps parsing, and the default filter drops non-Cargo files.
-    src = final.lib.cleanSourceWith {
-      src = ../.;
-      name = "source";
-      filter =
-        path: type:
-        (final.lib.hasSuffix "/packaging/moq-relay/moq-relay.service" path)
-        || (filterCargoSources path type);
-    };
+    src = cleanCargoSource;
     cargoExtraArgs = "-p moq-relay --features jemalloc";
     # Enable frame pointers for profiling support (negligible overhead on x86_64).
     # This also ensures the CDN build matches what Cachix caches.
@@ -66,38 +62,16 @@ let
     # jemalloc's configure uses -O0 test builds, which conflict with
     # Nix's _FORTIFY_SOURCE hardening (requires -O).
     hardeningDisable = [ "fortify" ];
-    # Auth::new builds a rustls client config up front, which loads native
-    # roots and now errors when none are found. The build sandbox has no
-    # system trust store, so point rustls-native-certs at cacert's bundle
-    # for the check phase (even the http-only auth tests hit this path).
-    nativeBuildInputs = [ final.cacert ];
-    SSL_CERT_FILE = "${final.cacert}/etc/ssl/certs/ca-bundle.crt";
   };
 
   moqCliArgs = crateInfo ../rs/moq-cli/Cargo.toml // {
-    # moq-cli's tests `include_bytes!` a fixture that lives in ANOTHER crate
-    # (rs/moq-mux/src/container/ts/test_data/bbb.ts, since #1879 moved the TS
-    # verbatim coverage there). craneLib.cleanCargoSource's default filter keeps
-    # only Cargo/Rust sources, so the fixture never reaches the sandbox and the
-    # checkPhase fails to compile the test binary. Keep the test data so the
-    # tests still run here rather than switching this package to doCheck = false.
-    src = final.lib.cleanSourceWith {
-      src = ../.;
-      name = "source";
-      filter = path: type: (final.lib.hasInfix "/test_data/" path) || (filterCargoSources path type);
-    };
+    src = cleanCargoSource;
     cargoExtraArgs = "-p moq-cli --features jemalloc";
     # Enable frame pointers so jemalloc profiles resolve complete call stacks.
     RUSTFLAGS = "-C force-frame-pointers=yes";
     # jemalloc's configure uses -O0 test builds, which conflict with
     # Nix's _FORTIFY_SOURCE hardening (requires -O).
     hardeningDisable = [ "fortify" ];
-    # `cluster_connect_api_http_attaches_client_tls` builds the connect TLS
-    # config the way the relay's Auth does, which loads native roots and errors
-    # when none are found. Same fix as moq-relay: point rustls-native-certs at
-    # cacert's bundle for the check phase.
-    nativeBuildInputs = [ final.cacert ];
-    SSL_CERT_FILE = "${final.cacert}/etc/ssl/certs/ca-bundle.crt";
     # The crate is `moq-cli`, but its `[[bin]]` ships as `moq`.
     meta.mainProgram = "moq";
   };
@@ -141,7 +115,6 @@ let
   moqCArgs = moqCInfo // {
     src = cleanCargoSource;
     cargoExtraArgs = "-p moq-c";
-    doCheck = false;
     nativeBuildInputs = with final; [
       pkg-config
       # moq-c is the only nix-built package that pulls moq-video, and its `vaapi`
@@ -214,7 +187,6 @@ let
   moqGstPluginArgs = crateInfo ../rs/moq-gst/Cargo.toml // {
     src = cleanCargoSource;
     cargoExtraArgs = "-p moq-gst";
-    doCheck = false;
 
     nativeBuildInputs = with final; [ pkg-config ];
     buildInputs = with final; [
@@ -291,7 +263,7 @@ let
   # (`.github/actions/rust-cache`), not configured here.
   # ./target stays per-job -- the persistent CARGO_TARGET_DIR growth that the old
   # crane checks were introduced to fix doesn't recur.
-  # Release artifacts still build via crane `buildPackage` below.
+  # Release artifacts build via crane `buildPackage` below, which skips tests.
 in
 {
   moq-relay = buildPackage moqRelayArgs;

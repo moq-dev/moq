@@ -56,14 +56,17 @@ Interview paper trail (✅ marks the choice):
 Remaining:
 
 - Land each line's umbrella PR with `/quest-complete`, then delete its branch:
-  #4162 audio-jitter-target, #4403 wildcard, #4034 archive (with #4255 folded
-  in), #4039 auth, #4079 cpp, #4519 ffi-shape, #4080 obs-moq-video, #4133 qos,
-  #4437 rs2ts (with #4438 folded in), #4653 test-flakes-2, #4180
-  transport-upgrade, #4640 tstd.
+  #4403 wildcard, #4034 archive, #4039 auth, #4079 cpp, #4519 ffi-shape,
+  #4080 obs-moq-video, #4133 qos (held until
+  [Lag across a splice](/quest/m1/qos/lag-splice.md) is fixed), #4437 rs2ts,
+  #4653 test-flakes-2, #4180 transport-upgrade, #4640 tstd. #4162
+  (audio-jitter-target) landed, and #4438 folded into rs2ts.
+- Fold #4255 (archive/track-timeline) into the archive branch before #4034
+  lands; as of the 2026-10-05 audit it has not happened and #4034 is a draft.
+- Before a line lands and its branch is deleted, merge or retarget every child
+  PR still based on it, or GitHub closes it with the branch. As of the
+  2026-10-05 audit: #4645 (tstd/delay, retarget to `main` after #4640),
+  #4732 (ffi-shape/request-accept), and #4675 (auth/request-token).
 
 Done when `flake.nix` pins the new quest, no `quest/*README` branch remains,
 and `quest check` passes.
-
-## Related
-
-- [Merge queue](/quest/m1/merge-queue.md) - the other trunk workflow change
