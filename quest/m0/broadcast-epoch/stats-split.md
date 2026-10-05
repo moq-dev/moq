@@ -27,19 +27,24 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
   merge.
 - **Idle groups** (decided 2026-10-05). Today a group broadcast disappears
   the moment it has no entries (`rs/moq-stats/src/produce.rs`). Instead it
-  stays announced for the [stats linger](https://github.com/moq-dev/moq/pull/4843)
-  after its last entry ends, so a group that returns within the linger
+  stays announced for the stats linger (`quest/m0/stats-linger.md`, an m0
+  quest planned in [#4843](https://github.com/moq-dev/moq/pull/4843); list it
+  under Required once it lands) after its last entry ends, so a group that returns within the linger
   continues its totals. After the linger it unannounces and drops its
   totals; a return announces under a new [epoch](/quest/m0/broadcast-epoch/stats-epoch.md)
-  counted from zero. A reader that lags past the linger loses the increments
-  in the frames it missed; document that. Memory is bounded by active and
+  counted from zero. Totals are cumulative, so a missed middle frame costs
+  nothing, but a reader that misses a group's last frame before the
+  unannounce loses that epoch's tail; document that, and note that billing
+  relies on the aggregator's grace fold to cover it. Memory is bounded by active and
   lingering groups. Test two groups sharing a tier, a group returning within
   the linger (same epoch, totals continue), and one returning after it (new
   epoch from zero).
 - **Per-broadcast tracks.** A reader that wants one broadcast subscribes to
   its track; nothing is produced for a broadcast no one requests. The track
   carries that broadcast's cumulative counters and finishes after its closing
-  readout. Pick the track naming while implementing, but it must be
+  readout. A request after the closing readout gets the zeroed track below,
+  so a zeroed per-broadcast track is not authoritative; totals carry the
+  real sums. Pick the track naming while implementing, but it must be
   injective: tiers and broadcast paths both contain `/`, so no plain
   concatenation of the two parses back to one pair.
 - A broadcast's counters start at zero. A request for a broadcast with no
@@ -47,18 +52,24 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
   until one appears, as an unrecorded tier is today, and is reclaimed when
   its last consumer leaves.
 - The tier-sized caps (`MAX_REQUESTED_TRACKS` is 64) are too small for a page
-  of visible broadcasts. Give per-broadcast tracks their own cap, sized for
-  one page, and refuse requests beyond it so the reader sees an error rather
-  than a parked track.
+  of visible broadcasts. Give per-broadcast tracks their own cap per group
+  broadcast, sized (or configurable) for every reader the aggregator fans in,
+  not one page. Refuse requests beyond it with a typed error the reader
+  retries, rather than a parked track that reads as zero. Tier requests park
+  instead (`MAX_PARKED_REQUESTS`) because a collector treats a refusal as
+  final; per-broadcast readers must not.
 - **Sessions** (decided 2026-10-05). `sessions.json` is keyed by auth root
   and loses pruned roots the same way, so fold per-tier `Presence` into the
   totals (session counts) and serve per-root detail as a requested track,
   the same model as per-broadcast tracks.
 - **Retire the map tracks** (`publisher.json`, `subscriber.json`,
-  `sessions.json`, and their `.json.z` siblings) in the same release.
+  `sessions.json`, and their `.json.z` siblings) in the same release. Decide
+  while implementing whether totals and per-broadcast tracks keep `.json.z`
+  siblings.
 - Ship in the same breaking release as stats epochs, so consumers take one
   stats path and wire change, not two.
-- Update the aggregator and `doc/concept/stats.md` with the change. The
+- Update the aggregator, `doc/concept/stats.md`, and `demo/web/src/stats.ts`
+  (which reads the three maps) with the change. The
   aggregator merges totals across nodes, and merges one broadcast's track
   across nodes when a reader requests it, so a multi-node consumer serves the
   same format it reads.
