@@ -4,8 +4,8 @@
 
 `moq export ts` keeps its program clock running through gaps and sets the PCR
 `discontinuity_indicator` only when the clock really restarts: a `--linger`
-resume or a replaced broadcast. One resume flags once. A decode timeline that
-goes backwards within one broadcast fails the export.
+resume or a replaced broadcast. One resume flags once. A track whose timestamps
+restart within one broadcast fails the export.
 
 ## Plan
 
@@ -23,20 +23,24 @@ Decided (2026-10-04):
   export already emits null packets through quiet periods.
 - Restart the clock and set the flag only on a resume or a replaced
   broadcast.
-- A decode timeline going backwards within one broadcast is a publisher bug
-  (a name always means the same content), so the export fails with an error
-  rather than rewinding. Presentation timestamps legally move backwards in
-  decode order with B-frames (0, 120, 40, 80 ms), which the export already
-  handles; detect a reset on decode time beyond that reordering, never on
-  PTS.
+- Timestamps restarting within one broadcast are a publisher bug (a name
+  always means the same content), so the export fails with an error rather
+  than rewinding. The only input timestamp is the frame's PTS, and it legally
+  moves backwards in decode order with B-frames (0, 120, 40, 80 ms); the
+  authored DTS cannot show a reset, since `author_dts` clamps every backwards
+  candidate to `prev + 1`. So the check runs on PTS before that clamp, and is
+  group-aware: reordering, including open-GOP leading pictures, stays inside
+  a group, so a frame whose PTS is below the largest PTS of the track's
+  previous group is a reset.
 - No new public API: the generation-change handling lives behind the
   crate-private `ExportSource`.
 - [Fixed-delay release](/quest/m1/tstd/delay.md) rewrites the same release
   path and re-anchors on each rewind; land this inside or after it.
 
 Tests: a resume that walks gaps on two tracks sets the indicator once; a 10 s
-forward gap on one track keeps the PCR continuous with no flag; a backwards
-decode timeline fails the export; B-frame PTS reordering is still accepted.
+forward gap on one track keeps the PCR continuous with no flag; a source whose
+timestamps restart at zero after 10 s fails the export, while a B-frame
+sequence and open-GOP leading pictures are still accepted.
 
 ## Closes
 
