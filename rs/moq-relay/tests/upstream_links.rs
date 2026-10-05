@@ -257,8 +257,14 @@ async fn tiered_regions_inner() {
 	let paths: Vec<String> = (0..8).map(|i| format!("live/{i}")).collect();
 	let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
 	let _published: Vec<_> = paths.iter().map(|path| publish(&r.origin, path)).collect();
-	routes_when("both cores learn the far region", &c1.origin, |routes| has(routes, &paths)).await;
-	routes_when("both cores learn the far region", &c2.origin, |routes| has(routes, &paths)).await;
+	routes_when("both cores learn the far region", &c1.origin, |routes| {
+		has(routes, &paths)
+	})
+	.await;
+	routes_when("both cores learn the far region", &c2.origin, |routes| {
+		has(routes, &paths)
+	})
+	.await;
 
 	// A route is delivered before a later one: once an edge holds both cores'
 	// markers, it holds both cores' routes to the far region too.
@@ -285,7 +291,10 @@ async fn tiered_regions_inner() {
 	// Losing a core moves only its paths.
 	let on = |core_id: u64| -> Vec<&str> { paths.iter().copied().filter(|p| core(&at_e1, p) == core_id).collect() };
 	let (on_c1, on_c2) = (on(C1), on(C2));
-	assert!(!on_c1.is_empty() && !on_c2.is_empty(), "paths all on one core: {at_e1:?}");
+	assert!(
+		!on_c1.is_empty() && !on_c2.is_empty(),
+		"paths all on one core: {at_e1:?}"
+	);
 	drop(c1);
 	let after = routes_when("edge 1 drops the lost core", &e1.origin, |routes| {
 		has(routes, &paths) && routes.values().all(|hops| !hops.contains(&C1))

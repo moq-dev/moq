@@ -393,7 +393,10 @@ mod tests {
 				.connect(url.clone())
 		};
 		let untrusted = tokio::time::timeout(Duration::from_secs(5), dial(false).established()).await;
-		assert!(matches!(untrusted, Ok(Err(_))), "an untrusted certificate must be refused");
+		assert!(
+			matches!(untrusted, Ok(Err(_))),
+			"an untrusted certificate must be refused"
+		);
 		let _session = tokio::time::timeout(Duration::from_secs(5), dial(true).established())
 			.await
 			.expect("trusted dial timed out")

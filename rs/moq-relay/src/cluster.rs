@@ -2461,8 +2461,8 @@ mod tests {
 	/// and flipping it is a different configuration, so the API redials.
 	#[test]
 	fn peer_object_upstream() {
-		let object: Peer = serde_json::from_str(r#"{"url": "https://core.example/", "upstream": true}"#)
-			.expect("parse upstream peer");
+		let object: Peer =
+			serde_json::from_str(r#"{"url": "https://core.example/", "upstream": true}"#).expect("parse upstream peer");
 		assert_eq!(object, Peer::new("https://core.example/").with_upstream(true));
 		assert_eq!(
 			serde_json::to_string(&object).unwrap(),
