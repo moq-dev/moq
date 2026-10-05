@@ -129,3 +129,38 @@ jobs:
           CI_BASE: ${{ github.event.merge_group.base_sha }}
           MOQ_STRICT: 1
           NEXTEST_PROFILE: ci
+
+  # The release back-merge (sh/gh/back-merge.sh) must land as a merge commit, but
+  # the merge queue only squashes. Once Check and Test pass on its head, moq-bot
+  # merges it with --admin; the main ruleset lets moq-bot bypass only when
+  # merging a pull request. Gated on this repository's own branch, since a fork
+  # branch of the same name gets no secrets and must not land. --match-head-commit
+  # pins the merge to the commit the jobs above checked.
+  land:
+    name: Land back-merge
+    needs: [check, test]
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action != 'closed' &&
+      github.event.pull_request.head.ref == 'merge/release-into-main' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    permissions: {}
+
+    steps:
+      - name: Generate moq-bot token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        id: token
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Merge
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: gh pr merge --merge --admin --match-head-commit "$HEAD_SHA" "$PR_URL"

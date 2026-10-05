@@ -34,8 +34,9 @@ Enqueue a reviewed PR with `gh pr merge <number>`.
 A dequeued PR means the combination failed checks, timed out, or no longer meets the ruleset.
 Read the removal reason in the PR timeline and the merge group run, fix the cause, and enqueue again.
 
-Never bypass the queue with `--admin`, with one exception: the queue only squashes, so moq-bot merges the release back-merge with `--admin` as a merge commit once Check and Test pass on its head.
+Never bypass the queue with `--admin`, with one exception: the queue only squashes, so Check's `land` job has moq-bot merge the release back-merge with `--admin` as a merge commit once Check and Test pass on its head.
 moq-bot can bypass the queue only when merging a pull request, never on a direct push.
+The `land` job fires only for this repository's `merge/release-into-main` branch, so anyone with write access who pushes to that branch gets a passing head merged past the queue, unreviewed.
 
 # AI
 
