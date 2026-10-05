@@ -1,12 +1,17 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
+import { accept } from "../connection/accept.ts";
+import { connect } from "../connection/connect.ts";
 import { SessionCode } from "../error.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, type MockTransport } from "../mock.ts";
+import { Producer } from "../origin.ts";
+import * as Path from "../path.ts";
 import { Stream, Writer } from "../stream.ts";
 import { wireOf } from "../wire.ts";
 import { Connection, probeLevel } from "./connection.ts";
 import { Goaway } from "./goaway.ts";
 import { ProbeLevel, Setup } from "./setup.ts";
 import { DataType, StreamId } from "./stream.ts";
+import { decodeSubscribeResponse, Subscribe } from "./subscribe.ts";
 import { ALPN_04, ALPN_05, ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
 
 /** A transport whose `getStats` behaves as described, or is absent entirely. */
@@ -128,3 +133,211 @@ for (const [alpn, version] of [
 		}
 	});
 }
+
+// Hold the FIN acknowledgement of every unidirectional stream `transport` opens once enabled,
+// after the bytes and FIN reached the peer: a group stream whose tail is still in flight.
+function holdUniFins(transport: MockTransport) {
+	const reached = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	let enabled = false;
+	const create = transport.createUnidirectionalStream.bind(transport);
+	transport.createUnidirectionalStream = async (options) => {
+		const writer = (await create(options)).getWriter();
+		return new WritableStream<Uint8Array>({
+			write: (bytes) => writer.write(bytes),
+			abort: (reason) => writer.abort(reason),
+			async close() {
+				await writer.close();
+				if (!enabled) return;
+				reached.resolve();
+				await release.promise;
+			},
+		});
+	};
+	return {
+		reached: reached.promise,
+		enable: () => {
+			enabled = true;
+		},
+		release: release.resolve,
+	};
+}
+
+// Captures the one-second close deadline so a test fires it by hand instead of waiting.
+function mockDeadline() {
+	let expire: (() => void) | undefined;
+	const original = globalThis.setTimeout;
+	const timer = spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+		if (ms !== 1000) return original(fn, ms);
+		expire = fn;
+		return 0 as unknown as ReturnType<typeof setTimeout>;
+	}) as typeof setTimeout);
+	return {
+		expire: () => {
+			if (!expire) throw new Error("close armed no deadline");
+			expire();
+		},
+		restore: () => timer.mockRestore(),
+	};
+}
+
+/** Runs every task queued so far, so a test can assert that something is still pending. */
+async function settle() {
+	for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
+	// A publisher that finishes a track and closes must not cut the final group short.
+	test(`close delivers a finished track's final group over ${alpn}`, async () => {
+		const pair = createMockTransportPair(alpn);
+		const fin = holdUniFins(pair.server);
+		const origin = new Producer();
+		const broadcast = origin.createBroadcast(Path.from("room"));
+		broadcast.announce();
+		const producer = broadcast.createTrack("video");
+		const url = new URL("https://localhost/test");
+		const [client, server] = await Promise.all([
+			connect({ url, transport: pair.client }),
+			accept({ url, transport: pair.server, publish: origin.consume() }),
+		]);
+		const remote = wireOf(client).consume(Path.from("room"));
+		const track = remote.track("video").subscribe().ordered();
+		let closed = false;
+		void pair.server.closed.then(() => {
+			closed = true;
+		});
+		try {
+			producer.appendGroup().writeString("first");
+			expect(await (await track.nextGroup())?.readString()).toBe("first");
+
+			fin.enable();
+			const last = producer.appendGroup();
+			last.writeString("last");
+			last.close();
+			producer.close();
+			const closing = server.close();
+
+			expect(await (await track.nextGroup())?.readString()).toBe("last");
+			await fin.reached;
+			await settle();
+			expect(closed).toBe(false);
+
+			fin.release();
+			await closing;
+			expect(closed).toBe(true);
+		} finally {
+			fin.release();
+			track.close();
+			remote.close();
+			client.abort();
+			server.abort();
+			broadcast.close();
+			origin.close();
+		}
+	});
+}
+
+/** A lite-07 publisher serving a finished track to a raw subscriber that has read up to the FIN. */
+async function servedRawSubscription() {
+	const version = Version.DRAFT_07;
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new Producer();
+	const broadcast = origin.createBroadcast(Path.from("room"));
+	broadcast.announce();
+	const producer = broadcast.createTrack("video");
+	const server = new Connection({
+		url: new URL("https://relay.example/"),
+		quic: pair.server,
+		version,
+		publish: origin.consume(),
+	});
+
+	const group = producer.appendGroup();
+	group.writeString("last");
+	group.close();
+
+	const subscriber = await Stream.open(pair.client, { version });
+	await subscriber.writer.u53(StreamId.Subscribe);
+	await new Subscribe({
+		id: 0n,
+		broadcast: Path.from("room"),
+		track: "video",
+		priority: 0,
+		maxAge: 10_000,
+		startGroup: 0,
+	}).encode(subscriber.writer, version);
+
+	// Finish the track only once it is served: a track closed before anyone subscribed is gone.
+	expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
+	producer.close();
+	// SUBSCRIBE_END, then the publisher's FIN.
+	await subscriber.reader.readAll();
+
+	let closed = false;
+	void pair.server.closed.then(() => {
+		closed = true;
+	});
+	return {
+		server,
+		subscriber,
+		closed: () => closed,
+		cleanup: () => {
+			server.abort();
+			broadcast.close();
+			origin.close();
+		},
+	};
+}
+
+// The publisher's FIN says nothing about whether the subscriber read the tail; on lite-07 the
+// subscriber's FIN does, so close waits for it.
+test("a lite-07 subscriber withholding FIN holds close until the deadline", async () => {
+	const deadline = mockDeadline();
+	const served = await servedRawSubscription();
+	try {
+		const closing = served.server.close();
+		await settle();
+		expect(served.closed()).toBe(false);
+
+		deadline.expire();
+		await expect(closing).rejects.toThrow("session close timed out");
+		expect(served.closed()).toBe(true);
+	} finally {
+		deadline.restore();
+		served.cleanup();
+	}
+});
+
+test("a lite-07 subscriber FIN releases close", async () => {
+	const deadline = mockDeadline();
+	const served = await servedRawSubscription();
+	try {
+		const closing = served.server.close();
+		await settle();
+		expect(served.closed()).toBe(false);
+
+		served.subscriber.writer.close();
+		await closing;
+		expect(served.closed()).toBe(true);
+	} finally {
+		deadline.restore();
+		served.cleanup();
+	}
+});
+
+test("abort during the close drain ends the session at once", async () => {
+	const deadline = mockDeadline();
+	const served = await servedRawSubscription();
+	try {
+		const closing = served.server.close();
+		await settle();
+		expect(served.closed()).toBe(false);
+
+		served.server.abort();
+		await closing;
+		expect(served.closed()).toBe(true);
+	} finally {
+		deadline.restore();
+		served.cleanup();
+	}
+});
