@@ -32,7 +32,9 @@ added this quest):
   - the device and driver UUID, and the render node's `dev_t` (decided
     2026-10-05: the one device identity
     [VA-API import](/quest/m2/vaapi-vulkan-import.md) and
-    [GPU health](/quest/m2/gpu-health.md) key by);
+    [GPU health](/quest/m2/gpu-health.md) key by). A device without
+    `VK_EXT_physical_device_drm` or a render node carries none, and a
+    backend that needs it refuses the surface rather than guess;
   - the timeline: an `OPAQUE_FD` timeline semaphore handle, the value the
     producer signals when the image is ready, and the value the consumer
     signals when it is done reading. Both handles belong to the slot and live

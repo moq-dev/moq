@@ -35,8 +35,9 @@ Guidance, to be settled while building:
 
 - Inputs are the snapshot types from [the schema](/quest/m1/stats/schema.md):
   `transport` (rtt, rate, loss, sample age) and the per-rendition counters.
-  Counters are cumulative, so a sample is the delta of two snapshots over
-  their interval. A reset is detected by a counter decreasing or by the
+  Rendition rates come from cumulative counters, so a sample is the delta of
+  two snapshots over their interval; `transport` gauges (rtt, rate, loss)
+  are read as reported, never re-derived, so both languages agree. A reset is detected by a counter decreasing or by the
   reporting broadcast's path or epoch changing
   ([Broadcast epochs](/quest/m0/broadcast-epoch/README.md)); the sample then
   starts over rather than going negative.

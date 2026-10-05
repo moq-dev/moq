@@ -39,9 +39,9 @@ Guidance, to be settled while building:
   the window and reports the unannounce check as not observed, never as a
   failure.
 
-Prove a healthy publisher end to end against a publisher from
-[Rust reporters](/quest/m1/stats/rust.md), a publisher outliving the window,
-an intra-refresh source (no IDR keyframes) passing the sync point checks, and
+Prove, end to end, a clean report for a healthy publisher built on
+[Rust reporters](/quest/m1/stats/rust.md); a publisher outliving the window;
+an intra-refresh source (no IDR keyframes) passing the sync point checks; and
 deterministic failures for an invalid catalog, an unsupported codec, a
 missing first sync point, excessive A/V skew, and a media timestamp jump.
 Docs: `doc/bin/inspect.md` is the home, with the sink's flags in

@@ -7,7 +7,7 @@ congestion views need: how far behind viewers are according to what the
 network has acknowledged, how timely publishers are against their own media
 clock, and what publishers and viewers report for themselves through
 [media stats](/quest/m1/stats/README.md), with congestion visible for viewers
-in aggregate, the way CMSD does for HLS.
+in aggregate.
 
 ## Plan
 

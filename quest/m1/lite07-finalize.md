@@ -37,7 +37,8 @@ The cut:
 - The identifier becomes `moq-lite-07` in `rs/moq-net` and `js/net`, in the
   draft (whose text already names the rename), and at every site spelling
   the wip ALPN: `rs/moq-tokio/src/connect.rs` and `listen.rs`,
-  `rs/moq-relay/src/cluster.rs`, `rs/moq-relay/tests/smoke.rs`,
+  `rs/moq-tokio/tests/`, `rs/moq-relay/src/cluster.rs`,
+  `rs/moq-relay/tests/smoke.rs`,
   `test/interop/bare-fin.ts`, `test/interop/lite-varint.ts`, and
   `doc/concept/moq-lite.md`; grep for `moq-lite-07-wip` to catch new ones. A wip peer and a final peer refuse each other by ALPN
   rather than misparse; no compatibility shim.

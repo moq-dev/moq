@@ -42,7 +42,9 @@ Guidance, to be settled while building:
   Record which source backs each field per vendor, and whether each memory
   value is process-scoped or device-wide: `VK_EXT_memory_budget`'s
   `heapUsage` is this process's only, so device-wide usage needs a driver
-  source (DRM fdinfo per client, sysfs, or NVML).
+  source (sysfs or NVML). DRM fdinfo is per client: summing it covers only
+  the clients this process can see and may double-count shared buffers, so
+  report it as client-scoped unless building shows a sound device-wide sum.
 - Sessions moq-video opened itself are counted in process; device-wide counts
   come from the driver where it reports them, since several processes may
   share a GPU.

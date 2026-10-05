@@ -40,9 +40,11 @@ writes `EXT-X-GAP`). Fix only what a test shows missing:
 - **Bounded join.** Rendering for a new viewer reads at most the window's
   records from the timeline (`moq_json::window`; a new group repeats at most
   `CHECKPOINT_RECORDS = 256` recent records, in `moq-mux`'s `timeline.rs`),
-  never the whole history,
-  and never GETs or FETCHes media. A live publisher that never pops its
-  timeline must not make a join cost grow with broadcast age.
+  never the whole history, and never GETs or FETCHes media. A live publisher
+  that never pops its timeline must not make a join cost grow with broadcast
+  age. The window is bounded by duration, so very short segments still mean
+  many records per window: decide while building whether a record cap also
+  applies, and test dense input against it.
 - **Capped window, decided 2026-10-05.** A durable (store-backed) timeline
   still advertises a capped sliding window: a live playlist lists a bounded
   window even when the store retains more. A full VOD or EVENT listing is a
