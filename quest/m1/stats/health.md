@@ -27,8 +27,9 @@ deferring the model.
 The model reads the shapes this line settled after
 [#4510](https://github.com/moq-dev/moq/pull/4510): the publisher's `stats`
 track named in the catalog, keyed by rendition alias, and viewers' `.echo`
-broadcasts. moq.pro's plan predates that and read a `.stats` broadcast that no
-longer exists; do not revive it.
+broadcasts. moq.pro's plan predates that and read client stats from a
+`.stats` broadcast, which #4510 replaced with these tracks (the relay's own
+`.stats/node/<node>` is unchanged); do not revive the client one.
 
 Guidance, to be settled while building:
 

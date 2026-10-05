@@ -38,7 +38,9 @@ Start by auditing `rs/moq-hls/src/export` against each rule; much exists
 writes `EXT-X-GAP`). Fix only what a test shows missing:
 
 - **Bounded join.** Rendering for a new viewer reads at most the window's
-  records from the timeline (`moq_json::window`), never the whole history,
+  records from the timeline (`moq_json::window`; a new group repeats at most
+  `CHECKPOINT_RECORDS = 256` recent records, in `moq-mux`'s `timeline.rs`),
+  never the whole history,
   and never GETs or FETCHes media. A live publisher that never pops its
   timeline must not make a join cost grow with broadcast age.
 - **Capped window, decided 2026-10-05.** A durable (store-backed) timeline

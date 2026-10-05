@@ -32,8 +32,8 @@ announce compression along with the hop list, and moq.pro's lite-07 rollout
 
 The cut:
 
-- Every quest under Required has landed, plus the cache bug that only bites
-  once lite-07 ships.
+- Every quest under Required has landed, including the cache bug that only
+  bites once lite-07 ships.
 - The identifier becomes `moq-lite-07` in `rs/moq-net` and `js/net`, in the
   draft (whose text already names the rename), and at every site spelling
   the wip ALPN: `rs/moq-tokio/src/connect.rs` and `listen.rs`,

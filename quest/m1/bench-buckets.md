@@ -4,8 +4,9 @@
 
 Every `moq-bench` JSONL line carries that interval's latency histogram in a
 versioned, documented bucket layout, so the buckets from several bench
-processes on several hosts sum element-wise over any window into one
-distribution. A percentile computed once from the summed buckets matches one
+processes on several hosts sum element-wise over any window of whole report
+intervals into one distribution; a window cutting through an interval cannot
+separate that interval's samples. A percentile computed once from the summed buckets matches one
 computed from the concatenated samples binned by the same layout and overflow
 rule: the buckets are lossy, so the match is exact at bucket resolution, not
 at raw-sample precision.
