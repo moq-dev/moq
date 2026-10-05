@@ -27,9 +27,8 @@ QUIC studies there on that rule.
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - any node routes toward a broadcast's origin over CDN and P2P links alike, with per-origin routes and path-less announces
 - [Transcoders start at group boundaries](/quest/m1/transcode-group-start.md) - moq-transcode serves from a group boundary and mirrors its source's sequences, so two instances are interchangeable
 - [One route cost](/quest/m1/route-cost.md) - Warm and Cold collapse to one static route cost
-- [Delete removed cluster flags](/quest/m1/cluster-shims.md) - once a release has carried their refusals, `mesh` and `linger` leave `cluster::Config`
+- [Delete removed cluster flags](/quest/m1/cluster-shims.md) - `mesh` and `linger` leave `cluster::Config` and their flags become unknown
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
-- [JS close drain](/quest/m1/js-close-drain.md) - a JS `close()` waits for served subscriptions, and on lite-07 for the subscriber FIN, as Rust does
 - [Demand everywhere](/quest/m1/demand-everywhere.md) - requests and producers at every level watch subscribers through `demand()` alone, ahead of the bindings exposing it
 - [Request linger](/quest/m1/request-linger.md) - an upstream FETCH or SUBSCRIBE outlives its last reader by a short linger, so quick re-requests don't churn upstream
 - [Merge queue](/quest/m1/merge-queue.md) - the required checks run on `merge_group`, so a stale green check can no longer break main
@@ -38,7 +37,6 @@ QUIC studies there on that rule.
 - [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, flate, audio, and video namespaces built from the handle below
 - [moq-net owns its transport seam](/quest/m1/transport-seam.md) - moq-net names only its own transport traits, so a web-transport-trait or qmux major bump is a patch for it
-- [A moq-relay release refuses --cluster-mesh](/quest/m1/relay-mesh-refusal-release.md) - the release that lets the cluster flag shims go
 - [moq announced](/quest/m1/cli-announced.md) - `moq ls` becomes a follow-only live view named `moq announced`, with local-only shell completion
 - [Leave out a role](/quest/m1/cli-no-role.md) - `moq export` and `moq play` accept `--no-video` and `--no-audio`, and sinks that ignore selection refuse it
 - [fMP4 export tracks](/quest/m1/fmp4-export-tracks.md) - fMP4 export inits from the catalog, keeps early audio, and fails loudly instead of writing a track missing from moov
@@ -73,10 +71,10 @@ QUIC studies there on that rule.
 - [Audio capture without ALSA link](/quest/m1/capture-alsa-link.md) - moq-audio capture and playback build on Linux without linking libasound
 - [Capture by default](/quest/m1/capture-default.md) - moq-video and moq-audio build `capture` by default, so pre-merge checks test it and the capture gate goes away
 - [Ship capture and playback](/quest/m1/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
-- [Mux data timestamp](/quest/m1/mux-data-timestamp.md) - moq-mux JSON and binary producers take a broadcast-clock timestamp, with no ahead-of-now refusal
 - [Publishing never invents a timestamp](/quest/m1/publish-timestamp.md) - no Rust or binding publish API fills in a timestamp; an untimed payload goes out untimed
 - [JS publishing never invents a timestamp](/quest/m1/js-publish-timestamp.md) - the same in @moq/json, @moq/flate, and @moq/net
 - [Untimed model](/quest/m1/untimed-model.md) - moq-net frames and datagrams carry an absent timestamp to every subscriber; no receiver fills in arrival time
+- [Untimed failover](/quest/m1/untimed-failover.md) - a resumed group no route continues is given up even when media time can't judge its drift
 - [JS untimed model](/quest/m1/js-untimed-model.md) - the same in @moq/net
 - [Untimed lite-07](/quest/m1/lite-untimed.md) - lite-07 encodes an absent timestamp in both languages; lite-05/06 write send time
 - [Plan: untimed verbatim PES](/quest/m1/plan-ts-pes-untimed.md) - decide how a verbatim TS track carries a PES that has no PTS, then write the implementation quest

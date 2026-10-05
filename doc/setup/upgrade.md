@@ -41,6 +41,12 @@ These land with the next breaking release, not the 2026-09-23 train.
   `SourceMap` (#4667) are gone, along with the importers' `live()`. Publish the
   source's own timestamps and let the catalog clock map them to wall time;
   pin that mapping with `Config::with_clock` when the source's zero is known.
+- **moq-mux data producers take a broadcast-clock `Timestamp`.** `json` and
+  `binary` `Snapshot::update` and `Stream::append` take `Timed<_, Timestamp>`
+  instead of `Timed<_, Instant>`, and publish it as given. Convert a capture
+  `Instant` with `.at(catalog.clock().capture(instant)?)`, reading
+  `catalog.clock()` at write time, since an importer's first frame re-anchors
+  it. A timestamp ahead of now is published rather than refused.
 
 ## Wire
 

@@ -117,7 +117,12 @@ are [hidden](/concept/moq-lite#hidden-broadcasts) unless `announced(scope, { hid
 
 An established connection's `await connection.close()` withdraws its
 announcements and waits up to one second for delivery before disconnecting.
-It rejects if delivery fails or times out, and closes the transport either way.
+On moq-lite it also waits for the requests it serves: a subscription to a
+finished track delivers its remaining groups, and on moq-lite-07 waits for the
+subscriber's FIN, which says it read the tail. A live track never ends on its
+own, so its subscription holds the close until the deadline.
+It rejects if an announcement withdrawal fails or the deadline passes, and
+closes the transport either way.
 Use `connection.abort()` for immediate shutdown. Reconnecting connection
 handles keep their synchronous `close()` disposal behavior. IETF drafts 14
 through 16 send their withdrawals without waiting.
