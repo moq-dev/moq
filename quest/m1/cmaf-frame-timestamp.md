@@ -33,7 +33,9 @@ shifts `trun` data offsets.
 Open PR [#4826](https://github.com/moq-dev/moq/pull/4826) implements this. It
 lands after [#4822](https://github.com/moq-dev/moq/pull/4822)
 ([untimed model](/quest/m1/untimed-model.md)), which brings untimed frames to
-`main` and itself waits on a typed-timedness mock-up quest.
+`main` and itself waits on the [typed timedness](/quest/m1/typed-timedness.md)
+mock-up. Timedness is per track there, so the decoder can check the track
+rather than each frame.
 
 Test: in Rust and JS, a fragment whose `tfdt` disagrees with its frame
 timestamp decodes at the frame timestamp, with B-frame offsets preserved, and
