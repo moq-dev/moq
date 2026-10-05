@@ -2,17 +2,18 @@
 
 ## Goal
 
-`@moq/publish` can enable Opus DTX again: every encoded chunk is published at
-its input's capture time even when the encoder suppresses silent frames, and
-a listener plays it on that timeline, so voice saves bandwidth during silence
-without skewing jitter estimates.
+Opus DTX is correct in `@moq/publish` and on again by default for voice:
+every encoded chunk is published at its input's capture time even when the
+encoder suppresses silent frames, and a listener plays it on that timeline, so
+voice saves bandwidth during silence without skewing jitter estimates.
 
 ## Plan
 
 Chromium stamps encoder output as the first input timestamp plus the samples
-it emitted, so suppressed frames pull later chunks earlier. Until this lands,
-`@moq/publish` rejects `usedtx` and never enables DTX; restoring it brings
-back the option, the voice default, and the demo's checkbox.
+it emitted, so suppressed frames pull later chunks earlier. DTX is off by
+default but still opt-in through `OpusConfig.usedtx` and the demo's checkbox,
+both of which drift today. Once the timeline holds, restore `usedtx: true` in
+the voice defaults (`opusKindDefaults`).
 
 Decided (2026-10-04):
 

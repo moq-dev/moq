@@ -53,19 +53,22 @@ describe("resolve", () => {
 		expect(resolved.frameDuration).toBeUndefined();
 		expect(resolved.catalog.jitter).toBeUndefined();
 	});
-
-	// DTX makes the browser stamp later audio earlier, so asking for it fails instead of drifting.
-	test("rejects Opus DTX", () => {
-		for (const usedtx of [true, false]) {
-			expect(() => resolve(captured, { mime: "opus", usedtx } as never)).toThrow(/usedtx/);
-		}
-	});
 });
 
 describe("toEncoderConfig", () => {
 	test("configures voice without DTX", () => {
 		const config = toEncoderConfig(resolve(captured, "opus"), "voice", {});
 		expect(config.opus).toEqual({ application: "voip", signal: "voice", frameDuration: 20_000 } as never);
+	});
+
+	test("passes an explicit DTX request through", () => {
+		const config = toEncoderConfig(resolve(captured, "opus"), "voice", { usedtx: true });
+		expect(config.opus).toEqual({
+			application: "voip",
+			signal: "voice",
+			usedtx: true,
+			frameDuration: 20_000,
+		} as never);
 	});
 });
 

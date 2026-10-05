@@ -61,6 +61,10 @@ export type OpusConfig = {
 	complexity?: number; // 0-10, higher is better quality but more CPU
 	packetlossperc?: number; // 0-100, expected loss the encoder optimizes for
 	useinbandfec?: boolean; // in-band forward error correction
+	// Discontinuous transmission (silence suppression), off by default. Chromium stamps Opus output by
+	// counting the samples emitted, so each frame DTX suppresses pulls later audio earlier and the
+	// published timeline drifts from the capture clock until that is fixed.
+	usedtx?: boolean;
 };
 
 /** Cumulative encoder output totals, measured from the chunks the encoder produces. */
@@ -402,6 +406,7 @@ export class Encoder {
 		if (codec.complexity !== undefined) opus.complexity = codec.complexity;
 		if (codec.packetlossperc !== undefined) opus.packetlossperc = codec.packetlossperc;
 		if (codec.useinbandfec !== undefined) opus.useinbandfec = codec.useinbandfec;
+		if (codec.usedtx !== undefined) opus.usedtx = codec.usedtx;
 
 		return opus;
 	}
@@ -607,13 +612,6 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 				description: Util.Hex.fromBytes(Util.Aac.audioSpecificConfig(rate, captured.channelCount)),
 			},
 		};
-	}
-
-	// Browsers stamp Opus output by counting the samples emitted, so every frame DTX suppresses pulls
-	// later audio earlier and the published timeline drifts from the capture clock. TypeScript
-	// rejects the field, but a plain JS caller would otherwise lose it silently.
-	if ("usedtx" in codec) {
-		throw new Error("Audio.Encoder: Opus `usedtx` is unsupported; DTX skews the published timestamps");
 	}
 
 	const frameDuration = codec.frameDuration ?? OPUS_FRAME_DURATION;
