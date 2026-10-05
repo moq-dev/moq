@@ -2,9 +2,10 @@
 
 ## Goal
 
-A screen share whose content is not changing still shows its current picture
-to a viewer or recorder that subscribes later, because the restarted encoder
-has a frame to encode.
+A video source whose content is not changing still shows its current picture
+to a viewer or recorder that subscribes later, published at the time it is
+sent, so the encoder has a frame to encode and the jitter estimate is
+untouched.
 
 ## Plan
 
@@ -14,13 +15,20 @@ rebuilds per demand, so after a demand gap it waits for the next frame, which a
 still source never sends. `js/publish/src/video/capture.ts` keeps no latest
 frame.
 
-Decided (2026-10-04): `Video.Capture`'s fanout retains the latest frame and
-hands a clone to each new subscriber, so a restarted encoder emits a fresh
-keyframe at once. Most of the size is `VideoFrame` lifetime: the retained frame
-is closed when replaced or when capture stops.
+Decided (2026-10-04):
+
+- `Video.Capture` keeps the latest frame from every video source and hands a
+  copy to each new subscriber. Capture-specific, not a generic `Fanout`
+  option, because audio must never replay. It costs one held buffer from the
+  capture pool.
+- The copy is re-stamped to now. A kept frame re-encoded 90 s later would
+  otherwise publish 90 s late, and the jitter estimator keeps its maximum for
+  the life of the stream, the same failure as DTX.
+- The held frame is closed when replaced or when capture stops.
 
 Tests: a fake source that emits one frame, then a subscriber that attaches
-afterwards, produces a keyframe; no frame is leaked across replace and close.
+later, produces a keyframe stamped near the attach time; no frame is leaked
+across replace and close.
 
 ## Closes
 

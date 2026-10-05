@@ -1,29 +1,34 @@
-# [S] One JS dev mode, a warning tripwire, and one discovery subscription
+# [S] JS packages have no dev mode, and announced requests share no subscription
 
 ## Goal
 
-`@moq/net` and `@moq/signals` agree on what dev mode is and read it without
-pulling the whole `import.meta.env` object into a bundle. The signals
-subscriber tripwire warns, as `doc/lib/js/signals.md` says, instead of
-throwing. A server that issues hundreds of `origin.request({ announced: true })`
-keeps serving, in dev or not.
+`@moq/net` and `@moq/signals` stop reading `import.meta.env` at all, so no
+app environment variable can reach a bundle through them and no runtime
+counts as "dev". A server that issues hundreds of
+`origin.request({ announced: true })` keeps serving.
 
 ## Plan
 
-Decided (2026-10-04), one quest because #4774 and #4775 share the dev
-definition:
+`js/net/src/util/log.ts` reads `import.meta.env` whole, so Vite inlines every
+`VITE_*` variable, and `js/signals/src/index.ts` defines dev differently. The
+signals tripwire throws on the 100th subscriber in dev, and
+`js/net/src/origin.ts` subscribes every announced request to one shared
+discovery signal.
 
-- One shared helper reads `import.meta.env?.DEV`, `import.meta.env?.MODE`, and
-  `globalThis.process?.env?.NODE_ENV` property by property, so Vite inlines
-  only those keys. `js/net/src/util/log.ts` and `js/signals/src/index.ts` both
-  use it. The signals `typeof import.meta.env` check is a bare reference too.
-- The tripwire in `Signal.subscribe` logs a warning instead of throwing.
-- `js/net/src/origin.ts` subscribes each request to the shared discovery
-  signal. Use one discovery subscription per origin that recomputes across
-  its requests, so the count stops growing with requests.
+Decided (2026-10-04):
 
-Tests: 200 announced requests on one origin add one subscriber; a bundle built
-with an extra `VITE_*` variable does not contain it.
+- Delete `dev()` from @moq/net. It gates four log lines in `connect.ts`,
+  which become unconditional `console.debug`.
+- Delete the signals subscriber tripwire and its dev check. Leaked effects are
+  already caught by the FinalizationRegistry. Update `doc/lib/js/signals.md`,
+  which still describes the tripwire.
+- No discovery subscription per request: keep an `announced` count on the
+  request slot, compute blindness where requests are forwarded, and add
+  `sessions` to the origin's existing change race. That deletes a
+  subscription, a callback, and a lifecycle.
+
+Tests: 200 announced requests on one origin hold no subscriptions; a grep
+lint fails on `import.meta.env` under `js/net` and `js/signals`.
 
 ## Closes
 

@@ -31,6 +31,7 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [CEA-608/708](/quest/m2/captions-cea.md) - captions carried inside video SEI become a real text rendition at import
 - [Browser archive](/quest/m2/archive-browser.md) - the same contract for browser-published broadcasts
 - [Paced replay](/quest/m2/archive-paced-replay.md) - a replay pushes its groups to live subscribers on one shared clock, so any live player plays it
+- [MP4 export](/quest/m2/mp4-export.md) - `moq export mp4 --output` records crash-safe fragments, then finishes a regular MP4 with moov at the end
 - [Install moq](/quest/m2/moq-installer.md) - one command installs or upgrades the released CLI on macOS and Linux
 - [Install URL](/quest/m2/moq-install-url.md) - moq.dev serves the canonical installer at /install.sh
 - [`moq relay`](/quest/m2/moq-relay-subcommand.md) - the relay runs under a `moq` verb with its own flags and TOML, while `moq-relay` stays a minimal binary
@@ -76,6 +77,7 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Android capture](/quest/m2/mobile-capture-android.md) - Rust captures through NDK/JNI on Android, reusing the existing codecs
 - [Mobile completion](/quest/m2/mobile-completion.md) - verify the selected native/mobile path before closing #700
 - [Opus implementation](/quest/m2/audio-opus-backend.md) - compare Opus codec quality, CPU, build cost, and the loss recovery each backend offers
+- [DTX timestamps](/quest/m2/opus-dtx-timestamps.md) - Opus DTX keeps the capture timeline, so voice can enable it again
 - [Latency ledger](/quest/m2/latency-ledger.md) - a session reports where its end-to-end audio delay went, stage by stage
 - [JS LOC duration marker](/quest/m2/js-loc-duration-marker.md) - `@moq/loc`'s producer ends each video group with the empty duration frame, as moq-mux does
 - [Media Foundation decode](/quest/m2/audio-decode-mediafoundation.md) - Windows decodes HE-AAC, multichannel AAC, and what else the MFTs offer
@@ -96,6 +98,7 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [QUIC I/O boundary](/quest/m2/quic-io-boundary.md) - moq-uring receives from the buffer ring and transmits into registered buffers with no copy, once a profile says where
 - [BBR media study](/quest/m2/quic-bbr-natural-drain.md) - whether bounded drain credit avoids ProbeRTT deadline interference, and where our BBR differs from Google's
 - [Discover media headroom](/quest/m2/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
+- [Viewer up-switch](/quest/m2/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up
 - [L4S on the backbone](/quest/m2/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m2/quic-careful-resume.md) - a redial starts at the previous connection's rate
 - [Keep-alive by deadline](/quest/m2/quic-keep-alive.md) - a PING only when the idle deadline nears, no fixed timer

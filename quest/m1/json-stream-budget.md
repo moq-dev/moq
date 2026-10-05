@@ -2,31 +2,38 @@
 
 ## Goal
 
-A `@moq/json` or `moq-json` Stream write that would exceed the group budget
-(32 MiB or 8192 frames) throws `GroupTooLarge` and leaves the log intact. A JS
-reader that subscribes to a closed local track gets the close error at once,
-as Rust's does, instead of waiting forever.
+A `@moq/json` or `moq-json` Stream append that cannot fit the group budget
+(32 MiB or 8192 frames) throws `GroupTooLarge` and leaves the log intact,
+compressed or not. A JS subscriber to a track that is gone gets `NotFound`, as
+in Rust, instead of waiting forever.
 
 ## Plan
 
 Today `js/net/src/group.ts` wipes and closes the group on overflow and
 `js/json/src/stream/producer.ts` aborts the track, which ends the log for
-every reader. That ending is deliberate for a failed write
-(`rs/moq-json/src/stream/mod.rs`), but a refused record is not a hole, so it
-need not end anything.
+every reader. Ending the log is deliberate for a failed write
+(`rs/moq-json/src/stream/mod.rs`), but a refused record is not a hole.
 
 Decided (2026-10-04):
 
-- The Stream producer checks the remaining bytes and frames before writing and
-  throws without touching the group, in JS and Rust. A failure past that
+- Before encoding, check the record's raw size plus deflate's worst-case
+  overhead against the remaining budget. Encoding advances the DEFLATE window,
+  so a check after encoding would desync readers. The budget is tracked
+  inside @moq/json and moq-json, not exposed by moq-net. A failure past the
   check still aborts the track.
-- `js/net/src/broadcast.ts` drops a closed local producer and queues a request
-  nothing serves. A subscribe there surfaces the close error, matching the
-  Rust test `a_failed_write_aborts_the_track`.
+- The budget covers the whole log, so once it is spent every append throws.
+  The check spares the log from one oversized record; it does not extend a
+  full one, which still needs a new track.
+- Track lifetime, as Rust already behaves: a finished track stays cached and
+  new subscribers get it from the cache; only a dropped or aborted producer
+  removes it, after which a subscribe with no handler alive answers
+  `NotFound`. `js/net/src/broadcast.ts` queues an unserved request instead;
+  make it match, and check that JS keeps a finished track servable.
 - Document the budget in `doc/lib/js/json.md` and the Rust crate docs.
 
-Tests: an oversized record throws and the next record is readable; a late
-JS subscriber after an abort errors.
+Tests: an oversized record throws and the next record is readable, in both
+compression modes; a JS subscribe to an aborted local track errors with
+`NotFound`; a finished track is still served.
 
 ## Closes
 

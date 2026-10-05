@@ -9,18 +9,24 @@ without raising its own `recursion_limit`.
 
 ## Plan
 
-The depth comes from the type graph behind `kio::Shared<OriginState>`
-(`rs/moq-net/src/model/origin.rs`): the recursive `RouteNode` children map,
-the serve state, and the broadcast and track chain behind remote fronts.
-moq-net itself already needs `#![recursion_limit = "256"]` (#4746), which
-downstream crates do not inherit.
+moq-net itself needs `#![recursion_limit = "256"]` (#4746), which downstream
+crates do not inherit. Each `kio::Shared` adds about five levels to the
+auto-trait chain (Shared, Lock, Arc, Mutex, State), nested from origin to
+broadcast to track to group. The recursive `RouteNode` is a cycle the
+compiler closes, so flattening the route tree likely does not help.
 
-Decided (2026-10-04): m2, since it is a nightly warning today. Cut the deep
-branch (for example flatten the route tree into a map keyed by path) until a
-const assertion that these futures are `Send`, modelled on the one in
-`session.rs`, compiles at the default limit. Done when the `recursion_limit`
-line is deleted. Revisit the milestone if the lint becomes a hard error on
-stable.
+Decided (2026-10-04), in order:
+
+1. Measure: an integration test crate in `rs/moq-net/tests`, compiled at the
+   default limit, proves these futures are `Send`, and runs on nightly in CI
+   so the lint shows up. Settle whether it runs in `nightly.yml`.
+2. Shorten every chain in kio with `unsafe impl<T: Send> Send for Lock<T>`,
+   the same condition the compiler derives.
+3. If that is not enough, a zero-cost `SendCell<T>` whose only constructor
+   requires the bound, gated for wasm.
+
+Done when the `recursion_limit` line is deleted. Revisit the milestone if the
+lint becomes a hard error on stable.
 
 ## Closes
 

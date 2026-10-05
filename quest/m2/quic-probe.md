@@ -7,8 +7,6 @@ unacceptable frame delay or excess traffic. Prefer already-buffered useful
 media; add opt-in redundant probing only where measurements justify it.
 Keep current goodput, historical capacity and its age, and the desired
 encoder rate distinct. Preserving an old estimate does not discover capacity.
-The same validated estimate lets a viewer whose receive rate is capped by the
-small rendition it plays select a larger one.
 
 ## Plan
 
@@ -50,12 +48,9 @@ retain the baseline and record why before exposing an ineffective option.
 
 - [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
 
-## Closes
-
-- [#4773](https://github.com/moq-dev/moq/issues/4773) - close this issue when the quest finishes
-
 ## Related
 
+- [Viewer up-switch](/quest/m2/viewer-upswitch.md) - the viewer side, which requires this
 - [Natural media drains](/quest/m2/quic-bbr-natural-drain.md) - separate ProbeRTT policy experiment
 - [GCC egress experiment](/quest/m3/quic-gcc.md) - delay control changes what headroom means
 - [noq#811](https://github.com/n0-computer/noq/issues/811) - probing while app-limited, proposed to n0

@@ -1,26 +1,33 @@
-# [S] A refused WebSocket token closes the session as Unauthorized
+# [M] The relay serves WebSocket sessions through moq-tokio
 
 ## Goal
 
-A relay that refuses a client's token over WebSocket reports it the same way
-it does over QUIC: as a session-level `Unauthorized` close. The JS client then
-stops reconnecting and sets `connection.error`, instead of retrying forever on
-what looks like an outage.
+A relay refuses a WebSocket client the same way it refuses a QUIC one: as a
+session-level close with the same code, which the browser can read. A bad
+token over WebSocket ends in `Unauthorized`, the JS client stops
+reconnecting, and `connection.error` is set.
 
 ## Plan
 
-`rs/moq-relay/src/websocket.rs` answers a failed admit with HTTP 401 before
-the upgrade. Browsers do not expose an upgrade status, so the client sees a
-generic failure and treats it as retryable. Over QUIC the refusal is
-`request.reject(Reject::Unauthorized)` (`rs/moq-relay/src/connection.rs`).
+`rs/moq-relay/src/websocket.rs` admits before the upgrade and answers a
+refusal with HTTP 401, 403, or 502, which browsers hide, so the client sees a
+generic failure and retries. moq-tokio's own WebSocket listener already
+upgrades, reads SETUP, and then admits; the relay is the outlier.
 
-Decided (2026-10-04): on a refused admit or an empty grant, `serve_ws`
-completes the upgrade and closes the session with the code `Request::reject`
-uses. This deletes the HTTP-status branch and needs no JS change. Update
-`doc/bin/relay/auth.md` if it names the 401.
+Decided (2026-10-04): the relay hands the upgraded socket to moq-tokio's
+`Request`, so `Connection::run` serves WebSocket as it serves QUIC, and the
+relay's duplicate admit and supervise loop is deleted. Every refusal becomes
+an in-band close, mapped as the io_uring path does (403 to `Unauthorized`,
+502 to `App(502)`). It admits after SETUP, which
+[token in band](/quest/m1/auth/token-in-band.md) needs anyway. It needs a new
+public moq-tokio constructor for an already-upgraded socket; keep it minimal.
+
+Check that Rust clients, which treat HTTP 401 as terminal today, treat the
+session close the same way. The 401 in `doc/bin/relay/auth.md` describes the
+auth webhook, not the relay's answer; leave it.
 
 Tests: a WebSocket connect with a bad token ends in a JS `SessionError` with
-the unauthorized code, and the reload loop stops.
+the unauthorized code and the reload loop stops; a Rust client stops too.
 
 ## Closes
 
