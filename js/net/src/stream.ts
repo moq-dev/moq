@@ -1,5 +1,5 @@
 import { race } from "@moq/signals";
-import { fromTransport, StreamCode, StreamError, toStreamCode, toTransport } from "./error.ts";
+import { fromTransport, StreamCode, toStreamCode, toTransport } from "./error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version } from "./ietf/version.ts";
 import { Version as Lite, type Version as LiteVersion } from "./lite/version.ts";
@@ -230,7 +230,7 @@ export class Stream {
 		// A routine unsubscribe, so send CANCELLED. A bare Error would put 0 on the wire,
 		// which the stream registry reads as INTERNAL_ERROR: the peer would log a failure
 		// for every subscription we walk away from.
-		this.reader.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
+		this.reader.stop(StreamCode.Cancel);
 	}
 
 	abort(reason: Error) {
@@ -270,17 +270,24 @@ export class Reader {
 
 	// Adds more data to the buffer, returning true if more data was added.
 	async #fill(): Promise<boolean> {
-		if (!this.#reader) {
+		const reader = this.#reader;
+		if (!reader) {
 			return false;
 		}
 
 		// Every read of this stream funnels through here, so decoding the peer's reset code
 		// once is enough to keep the raw transport error out of every caller (and every app).
-		const result = await this.#reader.read().catch((err: unknown) => {
+		const result = await reader.read().catch((err: unknown) => {
 			throw fromTransport(err, { version: asIetf(this.version) });
 		});
 
 		if (result.done) {
+			// The transport already finished the stream. Drop the reader so a later stop
+			// neither builds a cancel error nor sends a reset the peer will ignore.
+			if (this.#reader === reader) {
+				this.#reader = undefined;
+				reader.releaseLock();
+			}
 			return false;
 		}
 
@@ -466,8 +473,15 @@ export class Reader {
 		return !(await this.#fill());
 	}
 
+	// A number is a stream code. The transport error is built only while the stream is
+	// still open; after a FIN the reader is gone, so this allocates nothing and sends nothing.
 	stop(reason: unknown) {
-		this.#reader?.cancel(withCode(reason, this.version)).catch(() => void 0);
+		const reader = this.#reader;
+		if (!reader) return;
+		this.#reader = undefined;
+		const coded =
+			typeof reason === "number" ? toTransport(reason as StreamCode, "cancel") : withCode(reason, this.version);
+		reader.cancel(coded).catch(() => void 0);
 	}
 
 	// Decoded like #fill: a caller racing this against a read must not get a different error

@@ -1091,7 +1091,7 @@ export class Subscriber {
 				if (track.closed.peek() !== undefined) {
 					// Subscription ended before the scale resolved; nothing to decode.
 					producer.close();
-					stream.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
+					stream.stop(StreamCode.Cancel);
 					return;
 				}
 				await Signal.race(timescale, track.closed);
@@ -1101,7 +1101,7 @@ export class Subscriber {
 			await readFrames(stream, producer, scale);
 
 			producer.close();
-			stream.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
+			stream.stop(StreamCode.Cancel);
 		} catch (err: unknown) {
 			const e = await sessionCause(this.#quic, err);
 			producer.close(e);
