@@ -1128,6 +1128,63 @@ mod tests {
 		drop(worker);
 	}
 
+	/// A route or driver that cannot segment fails a GSO train with `EIO` or
+	/// `EINVAL`. The train goes out again one datagram at a time, later sends
+	/// skip GSO, and the socket stays usable. `SO_NO_CHECK` makes Linux refuse
+	/// every `UDP_SEGMENT` send with `EINVAL` while plain sends still go out.
+	#[test]
+	fn rejected_gso_train_is_resent_unsegmented() {
+		let Some(mut worker) = worker() else { return };
+		let handle = worker.handle();
+		let io = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+		let one: libc::c_int = 1;
+		// SAFETY: a valid socket and a c_int option value.
+		let rc = unsafe {
+			libc::setsockopt(
+				std::os::fd::AsRawFd::as_raw_fd(&io),
+				libc::SOL_SOCKET,
+				libc::SO_NO_CHECK,
+				(&raw const one).cast(),
+				std::mem::size_of_val(&one) as libc::socklen_t,
+			)
+		};
+		assert_eq!(rc, 0, "SO_NO_CHECK: {}", std::io::Error::last_os_error());
+		let sock = handle.udp(io, udp::Config::default()).expect("socket");
+		let to = sock.local_addr().expect("addr");
+
+		// Two trains of two: the first is rejected and resent, the second
+		// never tries GSO.
+		for _ in 0..2 {
+			let deadline = Instant::now() + Duration::from_secs(5);
+			let mut received = 0;
+			let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+				panic!("the socket failed after a rejected train");
+			};
+			tx[..2 * 1200].fill(7);
+			tx.send(udp::Transmit {
+				to,
+				len: 2 * 1200,
+				segment: 1200,
+				ecn: None,
+			})
+			.expect("send");
+			while received < 2 * 1200 && Instant::now() < deadline {
+				let handle = handle.clone();
+				worker
+					.block_on(async move {
+						Deadline::after(&handle, Duration::from_millis(10)).wait().await;
+					})
+					.unwrap();
+				while let Poll::Ready(packet) = sock.poll_recv(&kio::Waiter::noop()) {
+					received += packet.expect("receive path failed").payload().len();
+				}
+			}
+			assert_eq!(received, 2 * 1200, "the train was dropped");
+		}
+		// One rejected train, then two single datagrams for each train.
+		assert_eq!(handle.metrics().snapshot().tx_sends, 5);
+	}
+
 	/// The counters an ops scrape reads have to move for real work, and a
 	/// handed-in [`Metrics`] has to be the same set the worker writes: reading
 	/// zeros off a worker that is busy is indistinguishable from a healthy idle
