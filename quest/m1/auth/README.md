@@ -99,6 +99,9 @@ existing lite-06 ALPN.
   loses access resets with a dedicated UNAUTHORIZED stream code
 - [AUTH_OK preflight](/quest/m1/auth/auth-ok-preflight.md) - an unencodable IETF grant answers NOT_SUPPORTED with nothing written, as JS already does
 - [AUTH endings](/quest/m1/auth/error-codes.md) - an out-of-range AUTH_ERROR code is refused, and both sides settle and recompute grants when a stream ends
+- [Malformed grant](/quest/m1/auth/malformed-grant.md) - a malformed or
+  non-canonical grant pattern, or an out-of-range `Expires`, closes the
+  session with PROTOCOL_VIOLATION in Rust and JS
 - [Origin narrowing](/quest/m1/auth/narrowing.md) - a live grant narrows in
   place: subscriptions outside it reset, publishes outside it abort, and relay
   revalidation stops closing the session
