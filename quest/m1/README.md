@@ -40,6 +40,7 @@ blocks. The quests that gated m0 lines moved under them.
 - [JS publishing never invents a timestamp](/quest/m1/js-publish-timestamp.md) - the same in @moq/json, @moq/flate, and @moq/net
 - [Hard fork](/quest/m1/quic/fork/README.md) - quinn hard-forked in-tree as `moq-quic`, ranked ahead of transport-seam and perf; the rest of the QUIC line follows it
 - [Stats linger](/quest/m1/stats-linger.md) - a grouped stats broadcast stays announced for a linger after its last session, so viewer churn stops re-announcing it across the mesh
+- [Snapshot producers choose their group sequence](/quest/m1/snapshot-sequence.md) - a recomposed or restarted snapshot or catalog producer resumes past cached groups instead of restarting at 0
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - any node routes toward a broadcast's origin over CDN and P2P links alike, with per-origin routes and path-less announces
 - [One route cost](/quest/m1/route-cost.md) - Warm and Cold collapse to one static route cost
 - [Delete removed cluster flags](/quest/m1/cluster-shims.md) - `mesh` and `linger` leave `cluster::Config` and their flags become unknown
