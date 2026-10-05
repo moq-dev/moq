@@ -3,8 +3,9 @@
 ## Goal
 
 A bounded test run against a published broadcast produces one report a person
-can act on: catalog validity, codec support, time to the first keyframe,
-bitrate and frame cadence per rendition, keyframe interval, audio/video skew,
+can act on: catalog validity, codec support, time to the first sync point
+(a group start a decoder can begin at), bitrate and frame cadence per
+rendition, sync point interval, audio/video skew,
 media timestamp continuity, the [health verdict](/quest/m1/stats/health.md)
 from the publisher's stats, and whether the broadcast ends with a clean
 unannounce (observed by the check; the publisher, which owns the
@@ -28,7 +29,7 @@ Guidance, to be settled while building:
   `moq` CLI sink that runs it for a bounded window and prints the report as
   JSON. The verb is the maintainer's call when the PR proposes it.
 - Reads only what the broadcast already carries: the catalog, media timestamps
-  and keyframe flags, and the `stats` track when the catalog names one. A
+  and group starts, and the `stats` track when the catalog names one. A
   broadcast without a stats track still gets the media checks, with health
   reported as unknown.
 - Codec support means "a stock player in this repo can decode it", checked
@@ -40,9 +41,11 @@ Guidance, to be settled while building:
 
 Prove a healthy publisher end to end against a publisher from
 [Rust reporters](/quest/m1/stats/rust.md), a publisher outliving the window,
-and deterministic failures for an invalid catalog, an unsupported codec, a
-missing first keyframe, excessive A/V skew, and a media timestamp jump. Docs:
-`doc/bin/inspect.md` is the home, with the sink's flags in `doc/bin/cli.md`.
+an intra-refresh source (no IDR keyframes) passing the sync point checks, and
+deterministic failures for an invalid catalog, an unsupported codec, a
+missing first sync point, excessive A/V skew, and a media timestamp jump.
+Docs: `doc/bin/inspect.md` is the home, with the sink's flags in
+`doc/bin/cli.md`.
 
 Public API: a preflight check and its report type, and a CLI sink. Wire: none.
 
@@ -54,5 +57,5 @@ Public API: a preflight check and its report type, and a CLI sink. Wire: none.
 ## Related
 
 - [Publisher timeliness](/quest/m1/qos/publisher-timeliness.md) - the relay's view of the same timestamp lateness and monotonicity
-- [Intra-refresh](/quest/m2/intra-refresh/README.md) - a stream without IDR keyframes, which the first-keyframe check must not fail
+- [Intra-refresh](/quest/m2/intra-refresh/README.md) - a stream without IDR keyframes, which the sync point checks must not fail
 - [moq.pro: stream preflight](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/qos-preflight.md) - the project-scoped target and dashboard flow built on these checks

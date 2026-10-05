@@ -30,13 +30,14 @@ first proposed, and make it configurable.
   until the linger elapses with the group still empty; a row returning
   within the linger re-arms it. While it lingers empty, its live gauges and
   session presence read zero, so a reader sees no stale live counters.
-- Under one epoch a path's cumulative totals never go backwards or count
-  twice. The producer drops a path's registry entry, and its totals, when
-  the path leaves (`flush` in `produce.rs`), and readers already treat a path
-  missing from a frame as restarted. So either the path drops out of frames
-  while the group lingers and its return reads as a restart, or the producer
-  carries its last totals forward and a returning entry resumes from them.
-  Pick while building and record why.
+- Under one epoch totals never go backwards or count twice. On `main`, #4846
+  (stats split, idle groups, decided 2026-10-05) settles it: a group
+  returning within the linger keeps its epoch and its totals continue, and
+  the per-path maps are gone. The `release` backport keeps today's per-path
+  map, which drops a path's entry and totals when it leaves (`flush` in
+  `produce.rs`); there, either the path drops out of frames while the group
+  lingers so its return reads as a restart, or the producer carries its last
+  totals forward. Pick while building the backport and record why.
 - Once the linger elapses, the group broadcast unannounces. A later return
   re-announces it under a new epoch, with its group sequence and totals
   counted from zero (decided 2026-10-05). This reverses stats epochs' one-epoch-per-producer

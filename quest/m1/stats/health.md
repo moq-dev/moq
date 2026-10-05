@@ -49,14 +49,14 @@ Guidance, to be settled while building:
   A browser publisher with only PROBE rtt yields unknown for what it cannot
   see, never a guess.
 - This quest classifies client reports only.
+- Lives beside the snapshot types in `hang` and `@moq/hang` unless building
+  it shows a better home.
 
 Open, for the maintainer (the same question is recorded in
 [QoS](/quest/m1/qos/README.md)): whether anything computes a per-broadcast
 verdict combining client reports, the relay's starvation, and publisher
 timeliness, and where it would live. Nothing here depends on the answer, and
 no quest promises it until it is decided.
-- Lives beside the snapshot types in `hang` and `@moq/hang` unless building
-  it shows a better home.
 
 Prove a degrading publisher self-report, a degrading viewer report, a stale
 report going unknown, and a counter reset by both a decrease and an epoch
