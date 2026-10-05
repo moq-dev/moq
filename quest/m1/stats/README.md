@@ -97,6 +97,12 @@ Decided in the 2026-09-30 audit: a Rust encoder adapting its bitrate to viewer
 feedback moved to [encoder feedback](/quest/m2/stats-encoder-feedback.md) (m2),
 along with its open questions. This line only publishes and reads the reports.
 
+Decided 2026-10-05 (moq.pro audit): the client health model and preflight
+media checks moq.pro planned against the pre-#4510 `.stats` broadcast are
+generic, so they join this line as [client health](/quest/m1/stats/health.md)
+and [preflight](/quest/m1/stats/preflight.md). moq.pro keeps the per-project
+connection view and the dashboard flow.
+
 ## Required
 
 - [Catalog track alias](/quest/m1/catalog-track-alias.md) - rendition keys
@@ -107,6 +113,10 @@ along with its open questions. This line only publishes and reads the reports.
   moq-mux remuxes publish stats and feedback
 - [Browser reporters](/quest/m1/stats/js.md) - `<moq-publish>` publishes
   stats and `<moq-watch>` publishes feedback
+- [Client health](/quest/m1/stats/health.md) - two snapshots become a
+  health sample and a verdict that names its observer, in Rust and JS
+- [Preflight](/quest/m1/stats/preflight.md) - a bounded test run over a
+  broadcast reports which media layer is broken and why
 
 ## Related
 

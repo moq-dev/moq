@@ -47,4 +47,3 @@ deleted when it goes stale; git history keeps it.
 - [NVENC refresh](/quest/m3/intra-refresh-nvenc.md) - the NVENC backend encodes refresh mode for H.264 and HEVC
 - [V4L2 refresh](/quest/m3/intra-refresh-v4l2.md) - the V4L2 backend encodes refresh mode
 - [Bindings](/quest/m3/intra-refresh-bindings.md) - moq-ffi and every wrapper expose refresh mode, additive on the ffi-shape `Gop` enum
-- [RTSP import](/quest/m3/rtsp-import.md) - `moq import rtsp` publishes an IP camera from its own network, through a reusable `moq-rtsp` crate

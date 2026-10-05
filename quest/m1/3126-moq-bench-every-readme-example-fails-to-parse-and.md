@@ -30,3 +30,7 @@ moq-bench is 0.0.x, so this lands on main.
 ## Closes
 
 - [#3126](https://github.com/moq-dev/moq/issues/3126) - close this issue when the quest finishes
+
+## Related
+
+- [Mergeable bench buckets](/quest/m1/bench-buckets.md) - the interval buckets these percentiles can be computed from

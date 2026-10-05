@@ -1,42 +1,67 @@
-# [L] Offline archive HLS
+# [M] Bounded HLS playlists
 
 ## Goal
 
-`moq-hls` serves ordinary HLS from a growing or static archive without a second
-stored media copy, and renders playlists without downloading media objects.
+A fresh viewer joins a days-old broadcast, live or archived, and `moq-hls`
+renders its playlists with work bounded by the advertised window, not by the
+broadcast's age. The media playlist lists a sliding window whose
+`EXT-X-MEDIA-SEQUENCE` every edge and every reload agree on. A span with no
+media in one rendition keeps its slot as a duration-preserving `EXT-X-GAP`
+without holding back later segments or sibling renditions. A video rendition
+is not advertised until its window holds a segment that starts on a
+keyframe, so a stock player is never sent to video it cannot start decoding.
+
+This is the generic renderer. Managed edges (moq.pro) only wire it to their
+projects, routes, and auth.
 
 ## Plan
 
-Use the archive catalog for rendition and initialization metadata, then reuse
-the live HLS renderer against the timeline. Segment number, PTS, duration,
-track ranges, gaps, and keyframe state provide everything needed for a media
-playlist. Playlist generation and reloads read the timeline only; a regression
-test must fail if they GET a media segment.
+Decided 2026-10-05, from moq.pro's
+[bounded live playlist](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/archive/playable.md):
+the windowed sequence, gap slots, and keyframe gating are renderer rules every
+`moq-hls` user needs, so they live here and moq.pro keeps only the edge
+wiring. Rejected: keeping them in moq.pro.
 
-When a player requests media, use the recording reader to GET only the selected
-range-named object and transmux its groups on demand. Switching between
-360p and 1080p must not download both rendition objects. Emit media URIs with
-the track and inclusive group bounds from the timeline record, so the handler
-can derive `groups/<largest>.<smallest>` directly without listing or a
-segment-ID lookup. HLS sequence numbers do not appear in storage keys. Keep
-one storage object per track per timeline segment; a MoQ group need not be an
-HLS segment, especially for one-group-per-frame audio. No LL-HLS parts.
+The offline archive HLS this quest used to describe is done on the archive
+line's branch (#4115, #4155), which deletes this file. When that branch next
+merges `main`, keep this quest. Its
+per-track timelines quest already derives segments at the edge from group
+timestamps and emits `EXT-X-GAP` for a rendition with no group start in a
+span; whichever lands second rebases onto the other, and the rules here hold
+for both shapes.
 
-Emit `EXT-X-ENDLIST` exactly when the timeline track the exporter reads
-finishes cleanly, as the live export already does
-(`rs/moq-hls/src/export/mod.rs:325-327`, `rendition.rs:243-246`). The store
-holds no completion marker: the reader finishes the replayed timeline track
-when its caller supplies finality out of band, so a standalone or BYOB archive
-without such a caller stays a reloadable playlist.
+Start by auditing `rs/moq-hls/src/export` against each rule; much exists
+(`segments.rs` numbers aligned segments and carries gap rows, `playlist.rs`
+writes `EXT-X-GAP`). Fix only what a test shows missing:
 
-Use the catalog supplied to the exporter. This quest does not establish which
-catalog update applies to a historic group; timestamps do not provide an
-explicit binding. Track immutability and update correlation belong to
-[Catalog track identity](/quest/m2/catalog-tracks.md), independently of DVR.
+- **Bounded join.** Rendering for a new viewer reads at most the window's
+  records from the timeline (`moq_json::Window`), never the whole history,
+  and never GETs or FETCHes media. A live publisher that never pops its
+  timeline must not make a join cost grow with broadcast age.
+- **Stable sequence.** `EXT-X-MEDIA-SEQUENCE` is the window's first segment
+  number, derived from the timeline, so two edges and a reload after a pop
+  agree.
+- **Gaps.** A record missing one track becomes a gap slot in that rendition
+  only; siblings keep listing, and a rendition switch after a gap lands on the
+  next real segment.
+- **Keyframe gating.** The multivariant playlist omits a video rendition
+  until its window holds a keyframe-started segment. A catalog that arrives
+  first may expose audio only, or answer unavailable.
 
-Prove aligned audio/video switching, missing track segments, discontinuities,
-caller-supplied finality, and bounded LRU reads.
+Prove: a fresh join after simulated days of publishing reads a bounded number
+of records (count them); catalog arrival before the first keyframe; gaps in
+one track; switching after a gap; healthy siblings keep their listing; two
+exporters over one timeline render identical sequence numbers. Tests mock
+time.
 
-## Required
+moq.pro pins `release`, so it adopts this through the next release that
+carries it.
 
-- [Recording reader](/quest/m1/archive/reader.md)
+Public API: none expected. Wire: none.
+
+Not blocked by the [recording reader](/quest/m1/archive/reader.md): the rules
+apply to live timelines first, and a replayed archive inherits them.
+
+## Related
+
+- [moq.pro: bounded live playlist](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/archive/playable.md) - the edge wiring that adopts this renderer

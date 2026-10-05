@@ -115,7 +115,7 @@ owned by that prerequisite, not duplicated in archive storage.
 - [Recording writer](/quest/m1/archive/writer.md) - feed the segmenter from a `broadcast::Consumer`, store each segment, then commit its record
 - [Recording reader](/quest/m1/archive/reader.md) - serve archived FETCH through a supplied `broadcast::Producer`
 - [Replay provenance](/quest/m1/archive/provenance.md) - a replay's catalog names its timeline, replay path, store URL, and format version
-- [Offline archive HLS](/quest/m1/archive/hls.md) - render playlists from the archive timeline and fetch segment media lazily
+- [Bounded HLS playlists](/quest/m1/archive/hls.md) - a fresh viewer's playlist work is bounded by the window, with a stable media sequence, gap slots, and no video before a keyframe
 - [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback
 - [Enrollment flake](/quest/m1/archive/enrollment-flake.md) - the opening-snapshot test waits for real enrollment, not the `.info` file
 - [Archive proof](/quest/m1/archive/proof.md) - prove persistence ordering, selective reads, exact FETCH replay, and timeline-only HLS generation

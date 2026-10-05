@@ -12,4 +12,6 @@ this quest and every `Required` entry that links it.
 
 As of 2026-09-30 lite-07 ships only as the off-by-default `moq-lite-07-wip`
 ALPN, and moq.pro still has its lite-07 rollout quest open
-(`quest/m1/lite07.md` in moq-dev/moq.pro).
+(`quest/m1/lite07.md` in moq-dev/moq.pro). That rollout waits on
+[Finalize moq-lite-07](/quest/m1/lite07-finalize.md), so this condition cannot
+clear before a release carries the final version.

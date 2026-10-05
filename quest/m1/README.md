@@ -25,6 +25,7 @@ QUIC studies there on that rule.
 - [Retracted demand release](/quest/m1/unannounce-demand-release.md) - a retracted broadcast's track demand is released when its last subscriber leaves, as before #4741
 - [Bounded stats aggregate](/quest/m1/stats-aggregate-bound.md) - the stats aggregator folds departed nodes into a retired total after a grace window, so its memory stops growing with node churn
 - [Stats epochs](/quest/m1/stats-epoch.md) - each stats producer publishes under `.../node/<node>/@<epoch>`, so a restarted node never reuses a name
+- [Stats linger](/quest/m1/stats-linger.md) - a grouped stats broadcast stays announced for a linger after its last session, so viewer churn stops re-announcing it across the mesh
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - any node routes toward a broadcast's origin over CDN and P2P links alike, with per-origin routes and path-less announces
 - [Transcoders start at group boundaries](/quest/m1/transcode-group-start.md) - moq-transcode serves from a group boundary and mirrors its source's sequences, so two instances are interchangeable
 - [One route cost](/quest/m1/route-cost.md) - Warm and Cold collapse to one static route cost
@@ -55,6 +56,7 @@ QUIC studies there on that rule.
 - [Live media time](/quest/m1/subscribe-live-time.md) - a lite-07 SUBSCRIBE_OK carries the publisher's current media time, so readers judge a cache against the live edge
 - [Cross-relay bursts](/quest/m1/cross-relay-bursts.md) - bursty small-group tracks cross two relays without lost groups, unanswered FETCHes, or stalls
 - [Fetched heads stay visible](/quest/m1/lite07-head-fetch-arrival.md) - on lite-07, a relay fetching the head of a group it receives mid-group still delivers that group to new subscribers
+- [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - lite-07 negotiates as `moq-lite-07` with a frozen wire, and the next release ships it
 - [Late lower groups](/quest/m1/lite-late-lower-group.md) - a moq-lite subscriber with a floor receives a group created below the first served one, as moq-transport does
 - [IETF rejoin keeps the open group](/quest/m1/ietf-rejoin-open-group.md) - on moq-transport-19/22, a reader that rejoins mid-group still receives the open group's later frames
 - [JS cache window](/quest/m1/js-prune-cache-window.md) - js/net ages idle groups on a cache window and keeps max_age as media-time staleness, as Rust does
@@ -128,7 +130,7 @@ QUIC studies there on that rule.
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
 - [QoS](/quest/m1/qos/README.md) - broadcast health: relay starvation and timeliness histograms
 - [Catalog track alias](/quest/m1/catalog-track-alias.md) - catalog rendition keys become aliases with an optional `track` name, so one catalog lists renditions from several broadcasts
-- [Media stats](/quest/m1/stats/README.md) - publishers announce a stats track in the catalog, viewers answer a soliciting catalog through a per-catalog `.echo` broadcast, and a Rust encoder adapts to them
+- [Media stats](/quest/m1/stats/README.md) - publishers announce a stats track in the catalog, viewers answer a soliciting catalog through a per-catalog `.echo` broadcast, and one model turns both into a health verdict and a preflight report
 - [JS track handover](/quest/m1/js-group-handover.md) - a JS track subscription resumes across a route swap from the first frame it lacks, so `test/drain` passes at zero latency budget
 - [JS GOAWAY requests](/quest/m1/js-goaway-requests.md) - after GOAWAY the JS client opens no new request on the old session, like Rust
 - [Drain handshakes](/quest/m1/drain-handshakes.md) - a drain GOAWAYs and waits for sessions still in their handshake instead of exiting under them
@@ -144,6 +146,7 @@ QUIC studies there on that rule.
 - [Benchmark regressions in CI](/quest/m1/bench-ci.md) - PRs get a non-blocking comparison of the Criterion benches they affect, and a nightly trend on main alerts on regressions
 - [Benchmark comparisons](/quest/m1/performance-comparisons.md) - retained evidence, repeated paired runs, and uncertainty for performance claims
 - [#3126](/quest/m1/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - moq-bench reports per-interval latency percentiles so the ramp leaves the steady state
+- [Mergeable bench buckets](/quest/m1/bench-buckets.md) - moq-bench emits per-interval latency buckets that sum across processes and hosts
 - [Relay session bench](/quest/m1/bench-relay.md) - the same scenario through moq-relay's own connection handling
 - [Relay profiling](/quest/m1/performance-profiles.md) - reproducible CPU and allocation captures under the existing workloads
 - [Browser benchmarks](/quest/m1/browser-benchmarks.md) - measure JS transport, container, decode, and render costs in an identified browser
