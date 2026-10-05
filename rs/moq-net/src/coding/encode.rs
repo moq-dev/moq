@@ -37,7 +37,7 @@ impl From<BoundsExceeded> for EncodeError {
 
 /// Write the value to an [`Encoder`] using the given version.
 pub trait Encode<V> {
-	/// Encode the value to the given encoder.
+	/// Encode the value to the given encoder, which may hold partial output on error.
 	fn encode(&self, w: &mut Encoder<'_>, version: V) -> Result<(), EncodeError>;
 
 	/// Encode the value into a fresh [Bytes] buffer.

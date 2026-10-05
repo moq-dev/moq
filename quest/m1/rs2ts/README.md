@@ -32,8 +32,9 @@ Decided in planning (2026-09-27), with the spike data in
   helpers with Promises. No second crate.
 - Values are plain `u64` in Rust, and varint is a wire encoding in the codec,
   not a type. The spec is not bounded to 2^53: the leading-ones form
-  (moq-transport draft-17+) carries all 64 bits, and the QUIC form (moq-lite,
-  drafts 14-16) refuses anything past 2^62 - 1 rather than truncating. Rust
+  (moq-lite 07, moq-transport draft-17+) carries all 64 bits, and the QUIC
+  form (moq-lite 01-06, drafts 14-16) refuses anything past 2^62 - 1 rather
+  than truncating. Rust
   `u64` maps to a TypeScript `U64` (two `u32` halves), generically, with
   checked conversion to and from `number`.
 - The generated TypeScript is committed and a CI lane regenerates it and

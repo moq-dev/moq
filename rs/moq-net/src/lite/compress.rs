@@ -292,6 +292,7 @@ impl AnnounceEncoder {
 
 	/// The wire form of `suffix`, sized from its parts so only the winner is built.
 	fn path_ref(&self, suffix: &PathOwned, next: u64) -> PathRef<'static> {
+		let form: Form = self.version.into();
 		let literal = || PathRef::literal(suffix.clone());
 		let Some((keep, id)) = self.heads.longest(suffix.parts()) else {
 			return literal();
@@ -303,8 +304,8 @@ impl AnnounceEncoder {
 
 		let base = next - id;
 		let keep = keep as u64;
-		let size = varint_size(base) + varint_size(keep) + string_size(&rest);
-		match size < varint_size(0) * 2 + string_size(suffix) {
+		let size = varint_size(base, form) + varint_size(keep, form) + string_size(&rest, form);
+		match size < varint_size(0, form) * 2 + string_size(suffix, form) {
 			true => PathRef { base, keep, rest },
 			false => literal(),
 		}
@@ -312,6 +313,7 @@ impl AnnounceEncoder {
 
 	/// The wire form of `hops`, sized from its parts so only the winner is built.
 	fn hops_ref(&self, hops: &Hops, next: u64) -> HopsRef {
+		let form: Form = self.version.into();
 		let literal = || HopsRef::literal(hops.clone());
 		let Some((keep, id)) = self.tails.longest(reversed(hops)) else {
 			return literal();
@@ -320,10 +322,11 @@ impl AnnounceEncoder {
 
 		let base = next - id;
 		let keep = keep as u64;
-		let chain =
-			|hops: &[Hop]| varint_size(hops.len() as u64) + hops.iter().map(|hop| varint_size(hop.id())).sum::<usize>();
-		let size = varint_size(base) + chain(head) + varint_size(keep);
-		match size < varint_size(0) * 2 + chain(hops.as_slice()) {
+		let chain = |hops: &[Hop]| {
+			varint_size(hops.len() as u64, form) + hops.iter().map(|hop| varint_size(hop.id(), form)).sum::<usize>()
+		};
+		let size = varint_size(base, form) + chain(head) + varint_size(keep, form);
+		match size < varint_size(0, form) * 2 + chain(hops.as_slice()) {
 			true => HopsRef {
 				base,
 				literal: Hops::try_from(head.to_vec()).expect("a prefix of a valid chain is valid"),
@@ -334,15 +337,15 @@ impl AnnounceEncoder {
 	}
 }
 
-/// The bytes `value` takes as a moq-lite varint.
-fn varint_size(value: u64) -> usize {
-	varint::size(value, Form::Quic).expect("sizing a value in varint range")
+/// The bytes `value` takes as a varint in `form`.
+fn varint_size(value: u64, form: Form) -> usize {
+	varint::size(value, form).expect("sizing a value in varint range")
 }
 
 /// The bytes `path` takes on the wire: a varint length, then the string.
-fn string_size(path: &Path<'_>) -> usize {
+fn string_size(path: &Path<'_>, form: Form) -> usize {
 	let len = path.as_str().len();
-	varint_size(len as u64) + len
+	varint_size(len as u64, form) + len
 }
 
 #[cfg(test)]
