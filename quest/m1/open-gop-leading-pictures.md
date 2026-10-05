@@ -21,6 +21,22 @@ drop belongs on the consumer: ingest cannot know whether a given viewer has the
 previous GOP, and dropping at ingest would degrade continuous playback for
 everyone.
 
+Measured through `<moq-watch>` in Chromium 153 on macOS, on the clip
+`just test ts --open-gop` generates (three leading pictures per recovery
+point) stretched to 120 s. Continuous playback decoded every leading picture
+on both decoder paths, with no errors, and the two paths' frames were
+identical. At a cold join the paths differ. VideoToolbox (the default there)
+outputs nothing for the orphaned leading pictures and raises no error, and
+every frame it does output matches the continuous decode, so a viewer merely
+starts at the keyframe. The software decoder (`prefer-software`, the path a
+browser without hardware H.264 takes; Linux was not measured) raises
+`EncodingError` in every join, and the watch then closes its decoder, so video
+stops. The same joins with the leading pictures removed from the stream decode
+cleanly in software, so the error is the leading pictures, not the non-IDR
+keyframe. A latency skip ("skipping slow group") orphans the next group's
+leading pictures in the same way. The trim therefore has to happen before
+decode, and the JS test should drive the software decoder.
+
 - In the JS consumer (`js/hang/src/container/consumer.ts` forces the first
   sample of a group to `keyframe`, and `js/watch/src/video/decoder.ts` submits
   it as `"key"`): for the first group after any non-continuous transition,
@@ -34,6 +50,11 @@ everyone.
   Every continuous group is passed through untouched.
 - The same rule in the Rust decode path (`moq-video` decode consumers), so
   native playback and the transcoder tune in the same way.
+- The same rule in `moq export ts`. Decided (2026-10-01): the fixed-delay
+  export (#4645) still sends a join's orphaned leading pictures, so 3 of 500
+  frames on the open-GOP fixture decode after they present
+  (`dts-before-pts`). Trim them at tune-in from the same signal, and make
+  `just test ts --open-gop` pass under `--strict`.
 - This quest owns the Rust non-continuous signal, which audio warmup and
   consumer warmup reuse rather than each adding one. Today
   `moq_mux::container::Consumer::poll_read` returns a bare frame, and
@@ -41,16 +62,12 @@ everyone.
   unproven delivered hole, or a latency skip, but not on the subscribe itself.
   Add the equivalent of JS `continuous`: false on the first frame after the
   subscribe and after every bump, true otherwise. It changes the moq-mux
-  consumer API, so pick main or dev by whether the shape is additive.
+  consumer API.
 - Tests: a synthetic group with a keyframe followed by two earlier-stamped
   deltas is trimmed on the first group and kept on the second; and a viewer
   that plays continuously, then latency-skips into a later open GOP, has that
   group's leading pictures trimmed too, so an implementation that only trims
   the initial group fails. Both cases in both languages.
-
-## Required
-
-- [#2067](/quest/m1/2067-test-open-gop-h-264-tune-in-end-to-end-leading-picture.md) - decides whether the glitch is dropped frames, corrupt frames, or a decoder error, which sets what this has to prove
 
 ## Related
 

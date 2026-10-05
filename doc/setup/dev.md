@@ -7,7 +7,8 @@ description: Build, test, and debug the MoQ repository
 
 The repository uses [Just](https://github.com/casey/just) as its command
 runner. Run commands inside the Nix dev shell (`nix develop`) so your tools
-match CI.
+match CI. `just check` and `just fix` refuse to run outside it; set
+`MOQ_ALLOW_HOST=1` to use the host toolchain anyway.
 
 | Command | Purpose |
 | --- | --- |
@@ -71,6 +72,11 @@ taskkill /IM moq.exe /F
 just fix
 just check
 ```
+
+These diff the branch against its upstream (or `origin/main`) and run only the
+modules the diff reaches. The map from paths to modules lives in
+`sh/dispatch.sh`. Recipes stay thin: any logic (conditionals, loops, traps)
+lives in a script under `sh/`.
 
 See [CONTRIBUTING.md](https://github.com/moq-dev/moq/blob/main/CONTRIBUTING.md)
 for branch targeting, commit messages, and reviews, and [Agent setup](/setup/agent)

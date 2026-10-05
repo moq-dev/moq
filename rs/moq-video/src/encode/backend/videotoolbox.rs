@@ -9,7 +9,7 @@
 //!
 //! Hand-written on the raw `objc2-video-toolbox` bindings; there's no
 //! higher-level crate we trust. The backend is `!Send` and a direct `Encoder` is
-//! thread-bound with it; only the macOS `Sink::Inner` keeps the serialized
+//! thread-bound with it; only the Apple `Sink::Inner` keeps the serialized
 //! `Send` wrapper, safe because `Sink` serializes every call.
 
 use std::ffi::{c_int, c_void};
@@ -191,7 +191,7 @@ impl Backend for VideoToolbox {
 		// Zero-copy when the capture handed us a surface; otherwise upload I420.
 		let pixel_buffer = match &frame.surface {
 			Surface::PixelBuffer(surface) => surface.buffer.clone(),
-			Surface::I420(i420) => crate::frame::macos::upload_i420(i420)?,
+			Surface::I420(i420) => crate::frame::apple::upload_i420(i420)?,
 		};
 		let image: &CVImageBuffer = &pixel_buffer;
 

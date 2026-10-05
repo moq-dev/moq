@@ -49,7 +49,16 @@ let
     );
 
   moqRelayArgs = crateInfo ../rs/moq-relay/Cargo.toml // {
-    src = cleanCargoSource;
+    # A config test `include_str!`s the packaged systemd unit so its ExecStart
+    # keeps parsing, and the default filter drops non-Cargo files.
+    src = final.lib.cleanSourceWith {
+      src = ../.;
+      name = "source";
+      filter =
+        path: type:
+        (final.lib.hasSuffix "/packaging/moq-relay/moq-relay.service" path)
+        || (filterCargoSources path type);
+    };
     cargoExtraArgs = "-p moq-relay --features jemalloc";
     # Enable frame pointers for profiling support (negligible overhead on x86_64).
     # This also ensures the CDN build matches what Cachix caches.

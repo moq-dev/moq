@@ -21,7 +21,7 @@
 //! discover a track nothing has encoded yet. That's what makes on-demand
 //! encoding possible at all.
 //!
-//! `CaptureOptions` / `Options` (with `capture`) / [`Kind`] / [`Config`] configure them. The decode/consume
+//! `Capture` / `Options` (with `capture`) / [`Kind`] / [`Config`] configure them. The decode/consume
 //! counterpart (mirror of `moq-audio`'s consumer) lives in the sibling
 //! [`decode`](crate::decode) module.
 //!
@@ -42,7 +42,7 @@ pub use encoded::Encoded;
 pub use encoder::{Codec, Config, Encoder, Gop, Kind};
 pub use producer::Producer;
 #[cfg(feature = "capture")]
-pub use producer::{CaptureOptions, Control, Driver, Options, publish_capture};
+pub use producer::{Capture, Control, Driver, Options, publish_capture};
 pub use sink::Sink;
 
 #[cfg(test)]

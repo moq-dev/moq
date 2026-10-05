@@ -22,6 +22,9 @@ pub(super) fn decode_size(r: &mut Decoder<'_>) -> Result<usize, DecodeError> {
 ///
 /// Lite messages use a varint size prefix.
 pub trait Message: Sized + std::fmt::Debug {
+	/// The largest body this receiver accepts for this message.
+	const MAX_SIZE: usize = MAX_MESSAGE_SIZE;
+
 	/// Encode this message body (without size prefix).
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError>;
 
@@ -34,6 +37,11 @@ impl<T: Message> Encode<Version> for T {
 		tracing::trace!(?self, "encoding");
 		let prefix = w.prefix_varint();
 		self.encode_msg(w, version)?;
+		// Never emit a body our own receiver would refuse.
+		if w.since(&prefix) > Self::MAX_SIZE {
+			w.discard(prefix);
+			return Err(EncodeError::TooLarge);
+		}
 		w.fill(prefix)
 	}
 }
@@ -41,12 +49,21 @@ impl<T: Message> Encode<Version> for T {
 impl<T: Message> Decode<Version> for T {
 	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let size = decode_size(r)?;
+		if size > Self::MAX_SIZE {
+			return Err(DecodeError::MessageTooLarge {
+				size,
+				max: Self::MAX_SIZE,
+			});
+		}
 		let mut body = r.sub(size)?;
 
-		let result = Self::decode_msg(&mut body, version).and_then(|msg| match body.is_empty() {
-			true => Ok(msg),
-			false => Err(DecodeError::Long),
-		});
+		// The body is complete, so running short inside it is malformed, not a wait for more.
+		let result = Self::decode_msg(&mut body, version)
+			.map_err(DecodeError::complete)
+			.and_then(|msg| match body.is_empty() {
+				true => Ok(msg),
+				false => Err(DecodeError::Long),
+			});
 
 		match &result {
 			Ok(msg) => tracing::trace!(?msg, "decoded"),

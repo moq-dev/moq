@@ -2,13 +2,22 @@ import { race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
-import { closeError, controlTimeout, error, ProtocolViolation, reason, sessionCause } from "../error.ts";
+import {
+	closeError,
+	controlTimeout,
+	error,
+	ProtocolViolation,
+	reason,
+	StreamCode,
+	Stream as StreamError,
+	sessionCause,
+} from "../error.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, type Route, randomHop, routesEqual, stampHops, UNKNOWN_HOP } from "../hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import type { Cursor, Reader, Stream } from "../stream.ts";
-import { TAIL_GRACE_MS, Tail } from "../tail.ts";
+import { Tail } from "../tail.ts";
 import { Milli, type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
@@ -28,6 +37,7 @@ import {
 	PublishNamespaceUpdate,
 } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
+import { finCancels } from "./request_stream.ts";
 import { joinFilter, Subscribe, SubscribeError, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import {
 	PublishBlocked,
@@ -52,6 +62,8 @@ type Subscription = {
 	// The group streams received, so the subscription can wait for the ones PUBLISH_DONE
 	// says are still owed.
 	tail: Tail;
+	// The track's exclusive end, once an END_OF_TRACK declares it.
+	end?: number;
 };
 
 // Out-parameter for #openSubscribe: lets the caller observe partial progress
@@ -96,6 +108,7 @@ function sees(filter: Filter, path: Path.Valid): boolean {
  */
 export class Subscriber {
 	#session: Session;
+	#localClose = false;
 
 	// The transport, so a request cut off by the session's close ends with the session's
 	// error. Optional for tests that drive a bare session.
@@ -117,6 +130,10 @@ export class Subscriber {
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
 	#consumes = new BroadcastCache();
 
+	// A random Hop ID of this connection's own, written as the first hop of any path that
+	// names no publisher, so a publisher that reconnects reads as a new one.
+	#stamp = randomHop();
+
 	// Paths with a legacy PUBLISH_NAMESPACE request in flight, reserved synchronously.
 	// The count below is only taken once the OK is written, and two requests that both
 	// got past the duplicate check before either attached would both take one.
@@ -136,6 +153,11 @@ export class Subscriber {
 
 	// Whether the peer understands the HIDDEN parameter (MoQ Hidden).
 	#hidden: boolean;
+
+	/** Marks this subscriber's deliberate local session close. @internal */
+	close() {
+		this.#localClose = true;
+	}
 
 	/**
 	 * Creates a new Subscriber instance.
@@ -175,10 +197,16 @@ export class Subscriber {
 		return advert !== undefined && this.#cluster !== undefined && Cluster.loops(advert, this.#cluster.self);
 	}
 
-	/** The route an advertisement carries; one without a path is anonymous and free. */
+	/**
+	 * The route an advertisement carries; one without a path is free. A path that names no
+	 * publisher, or none at all, gets this connection's stamp in front of a 0.
+	 */
 	#route(advert: Cluster.Advert | undefined): Route {
-		if (advert === undefined) return { hops: [UNKNOWN_HOP], cost: Cost.zero };
-		return { hops: advert.hops, cost: { warm: advert.cost, cold: advert.cost } };
+		if (advert === undefined) return { hops: [this.#stamp, UNKNOWN_HOP], cost: Cost.zero };
+		// A full chain, or a stamp colliding with an entry (a 1-in-2^53 draw), keeps the
+		// path as sent.
+		const hops = stampHops(advert.hops, this.#stamp) ?? [...advert.hops];
+		return { hops, cost: { warm: advert.cost, cold: advert.cost } };
 	}
 
 	/**
@@ -241,7 +269,8 @@ export class Subscriber {
 	/**
 	 * Replace the stored route for a path that is already announced. A no-op when the
 	 * hops and cost did not change; otherwise consumers hear `update` so a forwarder
-	 * can reprice without retracting.
+	 * can reprice without retracting. The path still names the same broadcast, whatever
+	 * the first hop now says, so the shared consume stays.
 	 */
 	#updateAnnounce(path: Path.Valid, route: Route) {
 		const existing = this.#announced.get(path);
@@ -650,7 +679,7 @@ export class Subscriber {
 			console.debug(`subscribe close: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			const e = await sessionCause(this.#quic, err);
-			producer.close(e);
+			producer.close(this.#localClose ? undefined : e);
 			stream.abort(e);
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
@@ -686,7 +715,7 @@ export class Subscriber {
 
 		const { tail, track } = subscription;
 		const complete = () => count > 0n && BigInt(tail.streams) >= count;
-		await tail.settle(complete, TAIL_GRACE_MS, track.closed);
+		await tail.settle(complete, track.closed);
 	}
 
 	/**
@@ -889,8 +918,18 @@ export class Subscriber {
 			// is kept current, since an update carries only what changed.
 			let held = msg.cluster;
 			const done = version === Version.DRAFT_16 || legacy;
+			const stopped = !done
+				? stream.writer.closed.then(
+						() => true,
+						() => true,
+					)
+				: undefined;
 			for (;;) {
-				if (await stream.reader.done()) break;
+				if (await (stopped !== undefined ? race([stream.reader.done(), stopped]) : stream.reader.done())) {
+					if (!finCancels(version)) await stopped;
+					stream.reader.stop(new StreamError(StreamCode.Cancel));
+					break;
+				}
 
 				const typeId = await stream.reader.u53();
 				if (done && typeId === PublishNamespaceDone.id) {
@@ -914,20 +953,7 @@ export class Subscriber {
 						throw new ProtocolViolation("cluster parameters on a session that negotiated none");
 					}
 				} else {
-					// A different original publisher is a different advertisement, which the
-					// draft has withdrawn and made again: its content is not continuous with
-					// what is held. Refusing the update closes the stream, which is that
-					// withdrawal.
-					if (update.update.hops !== undefined && update.update.hops[0] !== held.hops[0]) {
-						console.warn(`publish_namespace update changes the publisher: broadcast=${path}`);
-						await stream.writer.u53(RequestError.id);
-						await new RequestError({
-							errorCode: toRequestCode("not_supported", "publish_namespace", version),
-							reasonPhrase: "a new publisher is a new advertisement",
-						}).encode(stream.writer, version);
-						stream.close();
-						return;
-					}
+					// A different original publisher applies in place too, as it does inline.
 					held = Cluster.apply(held, update.update);
 				}
 
@@ -1017,7 +1043,7 @@ export class Subscriber {
 			// The control message establishing this alias can arrive after the data stream.
 			subscription = await this.#aliases.get(group.trackAlias);
 		} catch (err: unknown) {
-			const e = error(err);
+			const e = await sessionCause(this.#quic, err);
 			// Ours: we cancelled the subscription and the publisher has not stopped yet.
 			// Anything else on this alias is the publisher sending data for a track it never
 			// acknowledged, which is worth seeing.
@@ -1037,6 +1063,12 @@ export class Subscriber {
 		let producer: netGroup.Producer | undefined;
 		const open = () => {
 			if (!producer) {
+				// The publisher contradicted its own end, which no later group can repair.
+				if (subscription.end !== undefined && group.groupId >= subscription.end) {
+					throw new ProtocolViolation(
+						`group ${group.groupId} is at or past the declared end ${subscription.end}`,
+					);
+				}
 				producer = new netGroup.Producer(group.groupId);
 				track.writeGroup(producer);
 			}
@@ -1087,6 +1119,7 @@ export class Subscriber {
 					} catch (err: unknown) {
 						throw new ProtocolViolation(`invalid END_OF_TRACK: ${reason(error(err))}`);
 					}
+					subscription.end ??= end;
 					return;
 				}
 				if (frame.payload === undefined) break;
@@ -1097,7 +1130,7 @@ export class Subscriber {
 			// A group with no objects still exists.
 			open().close();
 		} catch (err: unknown) {
-			const e = error(err);
+			const e = await sessionCause(this.#quic, err);
 			if (e instanceof ProtocolViolation) {
 				// The publisher broke the track's end, which no later group can repair.
 				producer?.close(e);

@@ -141,9 +141,9 @@ client = moq.Client(
   - `await .accept() → Session`. Complete the handshake (hold the result to keep the connection alive).
   - `await .reject(code)`. Reject with an application error code; 401 and 403 map to unauthorized.
   - `.cancel()`. Cancel an in-flight `accept()`/`reject()` call.
-- **`Session`**. An established connection. Holding it keeps the connection alive; it is also an `async with` context manager that shuts down on exit.
+- **`Session`**. An established connection. Holding it keeps the connection alive; it is also an `async with` context manager that drains on a clean exit and cancels on an error.
   - `await .closed()`. Wait until the session closes.
-  - `.cancel(code)`, `.shutdown()`. Close with an error code, or gracefully (code 0).
+  - `.cancel(code)`, `await session.shutdown()`. Cancel immediately, or drain finished tracks within one second, raising on failure.
   - `.publish() → OriginProducer`, `.consume() → OriginConsumer`. The wired origin sides.
   - `.stats() → ConnectionStats`. Snapshot RTT, bandwidth estimates, and byte/packet counters.
   - `await .status() → ConnectionStatus`, `.epoch()`. Watch reconnects; the epoch counts connections, 1 on the first.
@@ -156,7 +156,7 @@ client = moq.Client(
   - `.publish_audio(format, init, *, label=None, track=None) → MediaProducer`. `init` is required: an OpusHead or AudioSpecificConfig resolves the whole rendition. `track` names the track; otherwise a unique name is derived from the format.
   - `.publish_video(format, init=b"", *, label=None, hint=None, track=None) → MediaProducer`. `init` may be empty for a format that resolves in band; a `VideoHint` pins catalog fields the stream can't reveal (bitrate) or publishes the catalog before the first keyframe. `track` names the track as in `publish_audio`.
   - `.encode_video(input, output, *, bandwidth=None) → VideoProducer`. Encode raw `VideoFrame`s inside the binding; `.write(frame)` each one.
-  - `.encode_audio(name, input, output, *, bandwidth=None) → AudioProducer`. Encode raw PCM `AudioFrame`s; the codec is `output.codec`, e.g. `AudioCodec.opus()`, with `output.frame_duration_us` setting the Opus frame length.
+  - `.encode_audio(name, input, output, *, bandwidth=None) → AudioProducer`. Encode raw PCM `AudioFrame`s; the codec is `output.codec`, e.g. `AudioCodec.opus()` or `AudioCodec.aac()`, with `output.frame_duration_us` setting the Opus frame length (0 takes the codec's own frame, which AAC needs).
   - `.close()` ends the broadcast for good; a second call is a no-op.
 - **`BroadcastDynamic`**. Async source of tracks requested by subscribers.
   - `await .requested_track() → TrackRequest`. Call `.accept()` on it for a `TrackProducer`, or `.abort(code)` to reject.
@@ -214,7 +214,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 - **`Catalog`**. `.audio: dict[str, Audio]`, `.video: dict[str, Video]`, `.display`, `.rotation`, `.flip`.
 - **`Frame`**. `.payload: bytes`, `.timestamp_us: int`. The unit of every write and every raw read.
 - **`MediaFrame`**. `.payload: bytes`, `.timestamp_us: int`, `.keyframe: bool`. Returned by media subscriptions. `keyframe` marks a group start or video keyframe; for audio it is true only at a group start.
-- **`Datagram`**. `.sequence: int`, `.timestamp_us: int`, `.payload: bytes`. Delivered only on datagram-capable transports and lite-05 or newer moq-lite.
+- **`Datagram`**. `.sequence: int`, `.timestamp_us: int`, `.payload: bytes`. Delivered only on datagram-capable transports with lite-05 or newer moq-lite, or moq-transport.
 - **`Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.description`.
 - **`Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.stalled`, `.framerate`, `.description`. A true `.stalled` recommends temporarily avoiding the rendition without making it unavailable.
 - **`Subscription`**. Subscriber delivery preferences: priority, staleness, and optional group range.

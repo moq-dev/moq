@@ -15,6 +15,7 @@ pub struct Client {
 	stats: stats::Session,
 	versions: Versions,
 	setup_path: Option<String>,
+	setup_authority: Option<String>,
 	cost: Option<u64>,
 	peer_hop: Option<crate::Hop>,
 }
@@ -77,6 +78,12 @@ impl Client {
 	/// versions with no in-band request path (lite 01-04).
 	pub fn with_path(mut self, path: impl Into<String>) -> Self {
 		self.setup_path = Some(path.into());
+		self
+	}
+
+	/// Set the URI authority to advertise in SETUP (moq-transport only)
+	pub fn with_authority(mut self, authority: impl Into<String>) -> Self {
+		self.setup_authority = Some(authority.into());
 		self
 	}
 
@@ -264,8 +271,10 @@ impl Client {
 					cost: self.cost,
 					version: draft,
 					path: self.setup_path.clone(),
+					authority: self.setup_authority.clone(),
 					peer_setup_stream: None,
 					peer_declared: None,
+					early_unis: Vec::new(),
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -339,6 +348,9 @@ impl Client {
 		if let Some(path) = &self.setup_path {
 			parameters.set_bytes(ietf::ParameterBytes::Path, path.clone().into_bytes());
 		}
+		if let Some(authority) = &self.setup_authority {
+			parameters.set_bytes(ietf::ParameterBytes::Authority, authority.clone().into_bytes());
+		}
 		ietf::solicit::into_setup(&mut parameters, ietf_encoding);
 		ietf::hidden::into_setup(&mut parameters, ietf_encoding);
 		ietf::active_count::into_setup(&mut parameters, ietf_encoding);
@@ -410,8 +422,10 @@ impl Client {
 					cost: self.cost,
 					version: v,
 					path: None,
+					authority: None,
 					peer_setup_stream: None,
 					peer_declared: Some(peer_declared),
+					early_unis: Vec::new(),
 				})?;
 				(None, crate::driver::Protocol::Ietf(protocol), goaway)
 			}
@@ -768,6 +782,38 @@ mod tests {
 		drop(driver);
 		drop(session);
 		assert!(matches!(next.await, Some(crate::announce::Event::Live)));
+	}
+
+	/// The client SETUP on the bidi control stream (the pre-draft-17 framing) carries the
+	/// AUTHORITY next to the PATH.
+	#[moq_net_sim::test]
+	async fn draft14_setup_carries_the_authority() {
+		let fake = FakeSession::new(Some(ALPN_LITE), mock_server_setup(Version::Lite(lite::Version::Lite01)));
+		let client = Client::new()
+			.with_versions(
+				[
+					Version::Lite(lite::Version::Lite01),
+					Version::Ietf(ietf::Version::Draft14),
+				]
+				.into(),
+			)
+			.with_path("/anon")
+			.with_authority("relay.example.com:4443");
+
+		let (_session, driver) = client.connect(moq_net_sim::now(), fake.clone()).await.unwrap();
+		moq_net_sim::spawn(crate::time::run_sim(driver));
+
+		let (setup, _) =
+			setup::Client::decode_slice(&fake.control_writes(), Version::Ietf(ietf::Version::Draft14)).unwrap();
+		let (parameters, _) = ietf::Parameters::decode_slice(&setup.parameters, ietf::Version::Draft14).unwrap();
+		assert_eq!(
+			parameters.get_bytes(ietf::ParameterBytes::Authority),
+			Some(b"relay.example.com:4443".as_ref())
+		);
+		assert_eq!(
+			parameters.get_bytes(ietf::ParameterBytes::Path),
+			Some(b"/anon".as_ref())
+		);
 	}
 
 	#[moq_net_sim::test]

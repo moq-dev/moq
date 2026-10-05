@@ -37,6 +37,10 @@ These land with the next breaking release, not the 2026-09-23 train.
   In TypeScript, `Track.Producer`'s `used` and `unused()` are
   `producer.demand().used` and `.unused()`, and `Allocator.reserve` takes
   `producer.demand()`, replacing the `Bandwidth.Demand` interface.
+- **moq-mux has no clock translators.** `clock::Anchor`, `clock::Lane`, and
+  `SourceMap` (#4667) are gone, along with the importers' `live()`. Publish the
+  source's own timestamps and let the catalog clock map them to wall time;
+  pin that mapping with `Config::with_clock` when the source's zero is known.
 
 ## Wire
 
@@ -72,6 +76,7 @@ variables follow the flag (`MOQ_SERVER_BIND` is `MOQ_LISTEN`).
 | TOML `listen`, `connect`, `failover_delay`, `reconnect`, `disable_verify` | `bind`, `url`, `race`, `once` (inverted), `insecure` |
 | `--cluster-linger` | removed; a broadcast closes when its last publisher is lost |
 | `--cluster-connect host:port` | a full URL, `https://host/?jwt=TOKEN` |
+| `--cluster-mesh`, TOML `mesh` | removed; list every peer with `--cluster-connect` or `--cluster-connect-api` |
 | `moq --origin`, `--name`, `--latency-max` | `--hop`, `--broadcast`, `--max-age` |
 | `moq publish`, `moq subscribe` | `moq import`, `moq export` |
 | `moq token`, the `moq-token` binary | `moq auth` |
@@ -121,9 +126,14 @@ Other changes to a deployment:
   the relay's client CA verifies, so keep that CA to cluster peers.
 - **`moq --listen` needs auth.** A CLI listener refuses to start without
   `--auth-url` or `--auth-public` instead of accepting everyone.
-- **Other 0.14 auth differences kept.** A 0.14 peer that dials with a
-  cluster JWT no longer sees `.internal/origins` gossip; peers identify by
-  certificate or LAN path. An auth server's `root` alias may have any depth.
+- **Gossip discovery is removed.** A relay dials only the peers it lists or
+  finds on the LAN, never a URL learned from an announcement, and no longer
+  announces `.internal/origins`. The `/nodes` endpoint lists only peers this
+  relay dialed. Until every relay that ran `--cluster-mesh` is upgraded, keep
+  client grants off `.internal/`: an older relay still dials any URL announced
+  there with `cluster.token`, and an upgraded peer still forwards it.
+- **Other 0.14 auth differences kept.** Peers identify by certificate or LAN
+  path. An auth server's `root` alias may have any depth.
   A path in `--cluster-connect` is not refused, although it shifts the mesh
   frame. `moq auth serve --key` takes a file, not an https or JWKS URL.
   `moq auth sign --root` is the token root and JS `verify --root` the dialed

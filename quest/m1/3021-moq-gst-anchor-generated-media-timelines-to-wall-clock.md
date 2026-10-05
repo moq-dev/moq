@@ -1,37 +1,36 @@
-# [M] GStreamer preserves the broadcast PTS-to-wall clock
+# [S] GStreamer picks the broadcast wall epoch
 
 ## Goal
 
-`moqsink` maps every media pad onto one continuous broadcast clock, exposing
-its fixed wall epoch through the shared Hang contract. Source restarts never
-change the interpretation of media already published.
+`moqsink` exposes one fixed wall epoch for the broadcast through the shared
+Hang clock contract, so every pad's timestamps relate to UTC the same way.
 
 ## Plan
 
-Use the current broadcast-wide segment timeline and clock contract, not the
-old per-rendition timeline or removed `set_wall` method. Map the buffer PTS
-through its TIME segment into the broadcast's running-time domain before
-publication, preserving valid within-group B-frame reordering.
+The PTS mapping already exists: `rs/moq-gst/src/sink/pad.rs` maps each
+buffer PTS through its TIME segment into the shared running-time domain
+(`rs/moq-gst/src/sink/timeline.rs`), and #4480 made rewinds drop frames. Only
+the wall-epoch choice remains.
 
-Choose the wall epoch once. Prefer GstReferenceTimestampMeta only when it
-names a recognized absolute clock domain; otherwise relate the pipeline clock,
-base time, running time, and local SystemTime. Account for the mapped PTS when
-computing PTS zero. An unidentified reference clock is not UTC. Every pad uses
-the same mapping rather than independently sampling a new epoch.
+Choose the wall epoch once per broadcast. Prefer GstReferenceTimestampMeta
+only when it names a recognized absolute clock domain; otherwise relate the
+pipeline clock, base time, running time, and local SystemTime. An unidentified
+reference clock is not UTC. Every pad uses the same epoch rather than sampling
+its own. Do not define a GStreamer-specific catalog shape.
 
-Keep that mapping through flushes, encoder restarts, and source PTS resets.
-Translate a restarted source forward on the existing clock, including idle
-gaps; refuse a source that cannot be mapped consistently. Discontinuity
-markers never change wall or retime retained records. Do not add per-record
-anchors or define a GStreamer-specific catalog shape.
+Decided in the 2026-09-30 audit: a restart is a new broadcast epoch, not a
+forward re-anchor on the old clock (per remove-live and
+[GStreamer and OBS](/quest/m0/broadcast-epoch/gst-obs.md)), and
+[#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md)
+handles the sink side.
 
-Test recognized reference metadata, deterministic local-clock fallback,
-delayed first buffers, multiple pads, timescale conversion, numeric limits,
-source restarts, idle gaps, and a system-clock adjustment. Existing timeline
-records remain unchanged. Consume the prerequisite's catalog format; no new
-transport TIMESTAMP/TIMESCALE semantics, synchronization protocol, or drift
-correction is introduced here. Run the GStreamer CI and `interop --all` lanes.
+Test recognized reference metadata, the deterministic local-clock fallback,
+delayed first buffers, and multiple pads sharing one epoch.
 
 ## Closes
 
 - [#3021](https://github.com/moq-dev/moq/issues/3021) - close this issue when the quest finishes
+
+## Related
+
+- [GStreamer and OBS](/quest/m0/broadcast-epoch/gst-obs.md) - a restarted pipeline publishes a new epoch

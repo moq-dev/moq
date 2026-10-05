@@ -20,10 +20,10 @@ landed on main; the line may still reshape both.
 ### Compatibility
 
 Decided (2026-09-28): the line may break the hang `archive` catalog entry and
-the recording format in place on `main`, without a version bump or a `dev`
-detour (for example the track-timeline rework in #4280). No archives exist
+the recording format in place on `main`, without a version bump
+(for example the track-timeline rework in #4280). No archives exist
 yet, so nothing recorded or published depends on either shape. This is an
-exception to the main/dev rule for this line only; once a release ships
+exception for this line only; once a release ships
 recordings, later format changes go through the entry's format version.
 
 ### Landed
@@ -114,9 +114,7 @@ owned by that prerequisite, not duplicated in archive storage.
 
 - [Recording writer](/quest/m1/archive/writer.md) - feed the segmenter from a `broadcast::Consumer`, store each segment, then commit its record
 - [Recording reader](/quest/m1/archive/reader.md) - serve archived FETCH through a supplied `broadcast::Producer`
-- [Paced replay](/quest/m1/archive/paced-replay.md) - a replay pushes its groups to live subscribers on one shared clock, so any live player plays it
 - [Replay provenance](/quest/m1/archive/provenance.md) - a replay's catalog names its timeline, replay path, store URL, and format version
-- [Browser archive](/quest/m1/archive/browser.md) - the same contract for browser-published broadcasts
 - [Offline archive HLS](/quest/m1/archive/hls.md) - render playlists from the archive timeline and fetch segment media lazily
 - [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback
 - [Enrollment flake](/quest/m1/archive/enrollment-flake.md) - the opening-snapshot test waits for real enrollment, not the `.info` file

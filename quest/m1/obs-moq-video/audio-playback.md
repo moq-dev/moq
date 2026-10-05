@@ -23,4 +23,4 @@ Decided: the earlier receive branch (#3498, merged only into the stranded `codex
 ## Related
 
 - [Video source replacement](/quest/m1/obs-moq-video/source.md) - coordinate the shared timestamp and source lifecycle without blocking audio rollout
-- [Channel layouts](/quest/m1/audio-codecs/layout.md) - the moq-audio layouts this mapping mirrors
+- [Channel layouts](https://github.com/moq-dev/moq/pull/4119) - the moq-audio layouts this mapping mirrors

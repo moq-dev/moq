@@ -56,8 +56,6 @@ func ExampleClient_CreateBroadcast() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// Closing ends the broadcast for good.
-	defer broadcast.Close()
 
 	media, err := broadcast.PublishAudio(moq.AudioFormatOpus, opusHead())
 	if err != nil {
@@ -68,6 +66,11 @@ func ExampleClient_CreateBroadcast() {
 	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame")}); err != nil {
 		log.Fatal(err)
 	}
+
+	// Finish before closing: Close drains, and a live track never drains.
+	_ = media.Finish()
+	// Closing ends the broadcast for good.
+	broadcast.Close()
 }
 
 // Connect with pinned TLS material and read a stats snapshot.

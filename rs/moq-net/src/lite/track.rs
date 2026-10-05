@@ -212,7 +212,7 @@ mod test {
 		assert_eq!(
 			buf,
 			[
-				0x0c, 0x00, 0x00, 0xc0, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x43, 0xe8
+				0x0c, 0x7f, 0x00, 0xc0, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x43, 0xe8
 			]
 		);
 	}
@@ -253,9 +253,10 @@ mod test {
 
 	#[test]
 	fn track_info_encode_rejects_max_age_past_varint() {
+		// Lite-07 varints carry the whole u64, and the age goes on the wire plus one.
 		let info = TrackInfo {
 			priority: 7,
-			max_age: Some(Duration::from_millis(1u64 << 62)),
+			max_age: Some(Duration::from_millis(u64::MAX)),
 			timescale: Timescale::MILLI,
 		};
 		// The partial bytes are the Writer's to drop; see `a_failed_encode_leaves_no_partial_bytes`.

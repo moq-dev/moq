@@ -27,9 +27,9 @@ function mockMonotonicTime(initial: number) {
 	};
 }
 
-test("priority reads the committed info and is 0 before accept", () => {
+test("priority reads the committed info and is the midpoint before accept", () => {
 	const producer = new TrackProducer("video");
-	expect(producer.priority).toBe(0);
+	expect(producer.priority).toBe(127);
 	producer.accept({ priority: 60 });
 	expect(producer.priority).toBe(60);
 });
@@ -1668,6 +1668,73 @@ test("finishAt declares an end ahead of the live edge without ending the track",
 	// A late subscriber sees the same end.
 	expect(producer.subscribe().final()).toBe(8);
 });
+
+for (const ordered of [false, true]) {
+	test(`a ${ordered ? "sequence" : "arrival"} reader ends at the declared boundary before closure`, async () => {
+		const producer = new TrackProducer("test");
+		const subscriber = producer.subscribe({ maxAge: Milli(60_000) });
+		const track = ordered ? subscriber.ordered() : subscriber;
+		const receive = () => ("nextGroup" in track ? track.nextGroup() : track.recvGroup());
+		try {
+			producer.finishAt(3);
+			const waiting = receive();
+			const group = new GroupProducer(2);
+			group.writeString("tail");
+			producer.writeGroup(group);
+			const received = await waiting;
+			expect(received?.sequence).toBe(2);
+			expect(await received?.readString()).toBe("tail");
+
+			// Groups 0 and 1 are missing and the last group is still open. Neither
+			// prevents a reader ending, but closure and its abort remain separate.
+			let ended = false;
+			const end = receive().then((value) => {
+				ended = true;
+				expect(value).toBeUndefined();
+			});
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(ended).toBe(true);
+			await end;
+			expect(track.closed.peek()).toBeUndefined();
+
+			const aborted = new Error("cut off");
+			producer.close(aborted);
+			await expect(receive()).rejects.toThrow("cut off");
+			await expect(received?.readString() ?? Promise.resolve()).rejects.toThrow("cut off");
+		} finally {
+			producer.close();
+			track.close();
+		}
+	});
+}
+
+for (const channel of ["group", "datagram"]) {
+	test(`a ${channel} reaching the end wakes both reader channels`, async () => {
+		const producer = new TrackProducer("test");
+		const track = producer.subscribe();
+		try {
+			producer.finishAt(3);
+			const groupRead = track.recvGroup();
+			const datagramRead = track.recvDatagram();
+			if (channel === "group") {
+				const group = new GroupProducer(2);
+				group.close();
+				producer.writeGroup(group);
+			} else {
+				producer.insertDatagram(2, Timestamp.fromMillis(0), enc.encode("tail"));
+			}
+			expect((await groupRead)?.sequence).toBe(channel === "group" ? 2 : undefined);
+			expect((await datagramRead)?.sequence).toBe(channel === "datagram" ? 2 : undefined);
+			expect(await track.recvGroup()).toBeUndefined();
+			expect(await track.recvDatagram()).toBeUndefined();
+			expect(track.closed.peek()).toBeUndefined();
+		} finally {
+			producer.close();
+			track.close();
+		}
+	});
+}
 
 test("finished rejects when the track aborts or closes without an end", async () => {
 	const aborted = new TrackProducer("test");

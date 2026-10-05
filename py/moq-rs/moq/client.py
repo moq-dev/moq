@@ -134,13 +134,21 @@ class Client:
     async def __aexit__(self, *exc) -> None:
         self._publisher = None
         self._consumer = None
-        if self._session is not None:
-            self._session.shutdown()
+        try:
+            if self._session is not None:
+                # A body error is the failure worth reporting. Draining behind it would
+                # wait out the deadline and replace it with a delivery timeout. Cancel
+                # rather than skip: dropping the last session closes the transport, so
+                # one the caller kept a reference to would otherwise stay open.
+                if exc[0] is None:
+                    await self._session.shutdown()
+                else:
+                    self._session.cancel(0)
+        finally:
             self._session = None
-        if self._inner is not None:
-            self._inner.cancel()
-            self._inner = None
-        self._session = None
+            if self._inner is not None:
+                self._inner.cancel()
+                self._inner = None
 
     def create_broadcast(self, path: str) -> BroadcastProducer:
         """Create an unannounced broadcast at ``path``, invisible until announced. Announce it after populating tracks.

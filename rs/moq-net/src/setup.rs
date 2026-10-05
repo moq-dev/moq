@@ -10,6 +10,9 @@ use crate::{
 	ietf, lite,
 };
 
+// SETUP only carries negotiation parameters. Bound it independently of control messages.
+pub(crate) const MAX_SETUP_SIZE: usize = 64 * 1024;
+
 const CLIENT_SETUP: u8 = 0x20;
 const SERVER_SETUP: u8 = 0x21;
 
@@ -139,7 +142,9 @@ impl Decode<Version> for Client {
 				// Draft15+: no versions list, parameters only.
 				coding::Versions::from([v.into()])
 			}
-			SetupVersion::Draft14 | SetupVersion::LiteLegacy => coding::Versions::decode(&mut msg, v)?,
+			SetupVersion::Draft14 | SetupVersion::LiteLegacy => {
+				coding::Versions::decode(&mut msg, v).map_err(DecodeError::complete)?
+			}
 			SetupVersion::Modern | SetupVersion::Unsupported => return Err(DecodeError::Version),
 		};
 
@@ -156,7 +161,7 @@ impl Encode<Version> for Client {
 		w.u8(CLIENT_SETUP);
 		let prefix = prefix_body(w, v)?;
 		self.encode_inner(w, v)?;
-		w.fill(prefix)
+		fill_body(w, prefix)
 	}
 }
 
@@ -167,6 +172,12 @@ fn decode_body<'a>(r: &mut Decoder<'a>, v: Version) -> Result<Decoder<'a>, Decod
 		SetupVersion::LiteLegacy => usize::try_from(r.varint()?).map_err(|_| DecodeError::BoundsExceeded)?,
 		SetupVersion::Modern | SetupVersion::Unsupported => return Err(DecodeError::Version),
 	};
+	if size > MAX_SETUP_SIZE {
+		return Err(DecodeError::MessageTooLarge {
+			size,
+			max: MAX_SETUP_SIZE,
+		});
+	}
 	r.sub(size)
 }
 
@@ -177,6 +188,15 @@ fn prefix_body(w: &mut Encoder<'_>, v: Version) -> Result<coding::Prefix, Encode
 		SetupVersion::LiteLegacy => Ok(w.prefix_varint()),
 		SetupVersion::Modern | SetupVersion::Unsupported => Err(EncodeError::Version),
 	}
+}
+
+/// Size a pre-draft-17 SETUP body, refusing one our own receiver would refuse.
+fn fill_body(w: &mut Encoder<'_>, prefix: coding::Prefix) -> Result<(), EncodeError> {
+	if w.since(&prefix) > MAX_SETUP_SIZE {
+		w.discard(prefix);
+		return Err(EncodeError::TooLarge);
+	}
+	w.fill(prefix)
 }
 
 /// Sent by the server in response to a client setup.
@@ -209,7 +229,7 @@ impl Encode<Version> for Server {
 		w.u8(SERVER_SETUP);
 		let prefix = prefix_body(w, v)?;
 		self.encode_inner(w, v)?;
-		w.fill(prefix)
+		fill_body(w, prefix)
 	}
 }
 
@@ -224,7 +244,9 @@ impl Decode<Version> for Server {
 		let mut msg = decode_body(r, v)?;
 		let version = match SetupVersion::from_version(v) {
 			SetupVersion::Draft15Plus => v.into(),
-			SetupVersion::Draft14 | SetupVersion::LiteLegacy => coding::Version::decode(&mut msg, v)?,
+			SetupVersion::Draft14 | SetupVersion::LiteLegacy => {
+				coding::Version::decode(&mut msg, v).map_err(DecodeError::complete)?
+			}
 			SetupVersion::Modern | SetupVersion::Unsupported => return Err(DecodeError::Version),
 		};
 
@@ -232,5 +254,37 @@ impl Decode<Version> for Server {
 			version,
 			parameters: Bytes::copy_from_slice(msg.rest()),
 		})
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Never emit a legacy SETUP our own receiver would refuse.
+	#[test]
+	fn encode_enforces_the_setup_limit() {
+		let v = Version::Lite(lite::Version::Lite01);
+		let parameters = Bytes::from(vec![0; MAX_SETUP_SIZE]);
+
+		let client = Client {
+			versions: coding::Versions::from([v.into()]),
+			parameters: parameters.clone(),
+		};
+		let mut buf = Vec::new();
+		assert!(matches!(
+			client.encode(&mut Encoder::new(&mut buf, v.into()), v),
+			Err(EncodeError::TooLarge)
+		));
+
+		let server = Server {
+			version: v.into(),
+			parameters,
+		};
+		let mut buf = Vec::new();
+		assert!(matches!(
+			server.encode(&mut Encoder::new(&mut buf, v.into()), v),
+			Err(EncodeError::TooLarge)
+		));
 	}
 }

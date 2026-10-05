@@ -23,7 +23,7 @@ async function main() {
 		// Do something with the broadcast
 	}
 
-	connection.close();
+	await connection.close();
 	origin.close();
 }
 

@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.10](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.9...moq-mux-v0.10.10) - 2026-10-03
+
+### Added
+
+- *(moq-mux)* per-program SI for a selected TS program ([#4580](https://github.com/moq-dev/moq/pull/4580))
+- *(mux)* implement catalog::Stream for Box<S> ([#4677](https://github.com/moq-dev/moq/pull/4677))
+- *(mux)* export clock::Anchor and clock::Lane ([#4667](https://github.com/moq-dev/moq/pull/4667))
+- *(mux)* report each TS elementary stream's access units at export ([#4577](https://github.com/moq-dev/moq/pull/4577))
+- *(moq-mux)* own the TS demux and reassemble PSI across packets ([#4584](https://github.com/moq-dev/moq/pull/4584))
+
+### Fixed
+
+- *(mux)* skip a blocked group by its reach, not its first frame ([#4652](https://github.com/moq-dev/moq/pull/4652))
+- *(hls)* an estimated framerate keeps the rendition ([#4641](https://github.com/moq-dev/moq/pull/4641))
+- *(moq-mux)* keep the TS export hold across a rewind ([#4618](https://github.com/moq-dev/moq/pull/4618))
+
+## [0.10.9](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.8...moq-mux-v0.10.9) - 2026-09-30
+
+### Added
+
+- *(srt)* select a program of a multi-program feed ([#4569](https://github.com/moq-dev/moq/pull/4569))
+- *(moq-mux)* estimate the catalog framerate ([#4576](https://github.com/moq-dev/moq/pull/4576))
+- *(cli)* linger export ts across a broadcast that leaves and returns ([#4504](https://github.com/moq-dev/moq/pull/4504))
+- *(ts)* import one program of a multiplex, or each as its own broadcast ([#4505](https://github.com/moq-dev/moq/pull/4505))
+- *(srt)* log the TS importer's per-stream counters on ingest ([#4506](https://github.com/moq-dev/moq/pull/4506))
+- *(mux)* report every TS elementary stream's access units and quiet time ([#4502](https://github.com/moq-dev/moq/pull/4502))
+
+### Fixed
+
+- *(moq-mux)* signal a new time base when the DTS reserve steps the PCR back ([#4574](https://github.com/moq-dev/moq/pull/4574))
+- *(mux)* publish the 48 kHz decoder rate for Opus imports ([#4443](https://github.com/moq-dev/moq/pull/4443))
+- *(mux)* follow the stream's reorder depth in TS export ([#4500](https://github.com/moq-dev/moq/pull/4500))
+- *(mux)* rebind single-track FLV export to a better rendition before the header ([#4445](https://github.com/moq-dev/moq/pull/4445))
+- *(mux)* LOC video groups end with the duration marker ([#4450](https://github.com/moq-dev/moq/pull/4450))
+
 ## [0.10.8](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.7...moq-mux-v0.10.8) - 2026-09-27
 
 ### Added

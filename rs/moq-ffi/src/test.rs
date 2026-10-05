@@ -530,6 +530,60 @@ async fn raw_audio_frame_durations() {
 	broadcast.close().unwrap();
 }
 
+/// A frame duration of 0 takes the codec's own frame, and AAC, which encodes only
+/// through a platform encoder, is refused where there is none.
+#[cfg(feature = "audio")]
+#[tokio::test]
+async fn raw_audio_codec_default_frame() {
+	use crate::audio::*;
+
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let input = || MoqAudioEncoderInput {
+		format: MoqAudioSampleFormat::F32,
+		sample_rate: 48_000,
+		channels: 2,
+	};
+	let output = |codec| MoqAudioEncoderOutput {
+		codec,
+		sample_rate: None,
+		channels: None,
+		bitrate: None,
+		frame_duration_us: 0,
+	};
+
+	let opus = broadcast
+		.encode_audio("opus".into(), input(), output(MoqAudioCodec::opus()), None)
+		.unwrap();
+	opus.finish().unwrap();
+
+	assert_eq!(MoqAudioCodec::aac().codec(), moq_audio::encode::Codec::Aac);
+	let aac = broadcast.encode_audio("aac".into(), input(), output(MoqAudioCodec::aac()), None);
+	let Err(MoqError::Audio(message)) = aac else {
+		panic!("no platform AAC encoder on this host");
+	};
+	assert!(message.contains("no aac audio encoder"), "{message}");
+
+	// 0 still means 1024 samples after an output-rate override, not the input rate.
+	let mut resampled = output(MoqAudioCodec::aac());
+	resampled.sample_rate = Some(48_000);
+	let aac = broadcast.encode_audio(
+		"aac-rate".into(),
+		MoqAudioEncoderInput {
+			format: MoqAudioSampleFormat::F32,
+			sample_rate: 44_100,
+			channels: 2,
+		},
+		resampled,
+		None,
+	);
+	let Err(MoqError::Audio(message)) = aac else {
+		panic!("no platform AAC encoder on this host");
+	};
+	assert!(message.contains("no aac audio encoder"), "{message}");
+
+	broadcast.close().unwrap();
+}
+
 #[tokio::test]
 async fn raw_track_datagram_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -2121,7 +2175,7 @@ async fn video_decode_frame_ownership() {
 		.await;
 	// A platform with no surface variant refuses the opt-in up front, rather than
 	// decoding to a surface the caller can neither view nor always download.
-	let retaining = if cfg!(target_os = "macos") {
+	let retaining = if cfg!(any(target_os = "macos", target_os = "ios")) {
 		Some(retaining.unwrap())
 	} else {
 		assert!(matches!(retaining, Err(MoqError::Unsupported)));
@@ -3409,7 +3463,7 @@ async fn server_client_roundtrip() {
 	// `cancel(code)` on the server side, so both shutdown paths run.
 	media.finish().unwrap();
 	broadcast.close().unwrap();
-	cs.shutdown();
+	cs.shutdown().await.unwrap();
 	server_session.cancel(0);
 	server.cancel();
 }
@@ -3480,7 +3534,7 @@ async fn server_client_roundtrip_auto_origin() {
 
 	media.finish().unwrap();
 	broadcast.close().unwrap();
-	cs.shutdown();
+	cs.shutdown().await.unwrap();
 	server_session.cancel(0);
 	server.cancel();
 }
@@ -4286,7 +4340,7 @@ async fn client_setters_apply_after_connect_returns() {
 		.await
 		.expect("accept timed out")
 		.expect("accept task panicked");
-	session.shutdown();
+	session.shutdown().await.unwrap();
 	server_session.cancel(0);
 	server.cancel();
 }
@@ -4646,4 +4700,105 @@ async fn data_track_names_cannot_collide() {
 		Some(hang::catalog::Mode::Snapshot)
 	);
 	first.finish().unwrap();
+}
+
+/// Real sockets exercise the FFI runtime and both accepted/client session handles.
+async fn shutdown_pair() -> (Arc<MoqServer>, Arc<MoqSession>, Arc<MoqSession>) {
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let addr = server.listen().await.unwrap();
+	let accepting = server.clone();
+	let accepted = tokio::spawn(async move { accepting.accept().await.unwrap().unwrap().accept().await.unwrap() });
+	let client = MoqClient::new();
+	client.set_tls_verify(false).unwrap();
+	client.set_bind("127.0.0.1:0".into()).unwrap();
+	client.set_reconnect(false).unwrap();
+	let connected = client.connect(format!("https://{addr}")).await.unwrap();
+	(server, connected, accepted.await.unwrap())
+}
+
+#[tokio::test]
+async fn shutdown_delivers_the_finished_track() {
+	for client_publishes in [false, true] {
+		let (server, client, accepted) = tokio::time::timeout(TIMEOUT, shutdown_pair()).await.expect("pair");
+		let (publisher, subscriber) = if client_publishes {
+			(&client, &accepted)
+		} else {
+			(&accepted, &client)
+		};
+		let broadcast = create_announced(&publisher.publish(), "tail");
+		let track = broadcast.publish_track("data".into(), None).unwrap();
+		let remote = await_announced(&subscriber.consume(), "tail").await;
+		let reader = tokio::time::timeout(TIMEOUT, remote.subscribe_track("data".into(), None))
+			.await
+			.expect("subscribe")
+			.unwrap();
+		let receiving = tokio::spawn(async move {
+			let frame = reader.read_frame().await?;
+			let end = reader.read_frame().await?;
+			Ok::<_, MoqError>((frame, end))
+		});
+		tokio::time::timeout(TIMEOUT, track.used())
+			.await
+			.expect("used")
+			.unwrap();
+		let closing = publisher.clone();
+		crate::ffi::detached(async move {
+			let group = track.append_group()?;
+			group.write_frame(MoqFrame {
+				timestamp_us: 0,
+				payload: b"last".to_vec(),
+			})?;
+			group.finish()?;
+			track.finish()?;
+			closing.shutdown().await?;
+			Ok::<(), MoqError>(())
+		})
+		.await
+		.unwrap();
+		let (frame, end) = tokio::time::timeout(TIMEOUT, receiving)
+			.await
+			.expect("read")
+			.unwrap()
+			.unwrap();
+		assert_eq!(frame.unwrap().payload, b"last");
+		assert!(end.is_none());
+		client.cancel(0);
+		accepted.cancel(0);
+		server.cancel();
+	}
+}
+
+#[tokio::test]
+async fn shutdown_times_out_on_an_unfinished_track() {
+	for client_publishes in [false, true] {
+		let (server, client, accepted) = shutdown_pair().await;
+		let (publisher, subscriber) = if client_publishes {
+			(&client, &accepted)
+		} else {
+			(&accepted, &client)
+		};
+		let broadcast = create_announced(&publisher.publish(), "live");
+		let track = broadcast.publish_track("data".into(), None).unwrap();
+		let remote = await_announced(&subscriber.consume(), "live").await;
+		let reader = remote.subscribe_track("data".into(), None).await.unwrap();
+		let receiving = tokio::spawn(async move { reader.read_frame().await });
+		tokio::time::timeout(TIMEOUT, track.used()).await.unwrap().unwrap();
+		let start = std::time::Instant::now();
+		let err = publisher.shutdown().await.expect_err("unfinished track must time out");
+		// The documented one second of draining, so an immediate bail still fails here.
+		assert!(
+			start.elapsed() >= Duration::from_secs(1),
+			"gave up draining after {:?}",
+			start.elapsed()
+		);
+		assert!(
+			matches!(err, MoqError::Protocol { details } if details.kind == crate::error::MoqProtocolKind::DeliveryTimeout)
+		);
+		let _ = tokio::time::timeout(TIMEOUT, receiving).await.unwrap().unwrap();
+		client.cancel(0);
+		accepted.cancel(0);
+		server.cancel();
+	}
 }

@@ -83,6 +83,9 @@ struct State {
 	now: Option<Instant>,
 	next: u64,
 	deadlines: BTreeMap<(Instant, u64), Arc<Mutex<kio::WaiterList>>>,
+	/// The driver's poll, woken when a deadline armed outside it becomes the earliest,
+	/// so the driver's sleep never outlasts a deadline it did not see.
+	driver: kio::WaiterList,
 }
 
 impl Clock {
@@ -125,6 +128,16 @@ impl Clock {
 			let mut ready = waiters.lock().unwrap().take();
 			ready.wake();
 		}
+	}
+
+	/// The latest supplied instant, or `None` before the first.
+	pub(crate) fn try_now(&self) -> Option<Instant> {
+		self.0.lock().unwrap().now
+	}
+
+	/// Register the driver's poll to be woken by a new earliest deadline.
+	pub(crate) fn register_driver(&self, waiter: &kio::Waiter) {
+		waiter.register(&mut self.0.lock().unwrap().driver);
 	}
 
 	/// The earliest armed deadline still in the future.
@@ -204,6 +217,15 @@ impl Deadline {
 			&& state.now.is_none_or(|now| at > now)
 		{
 			state.deadlines.insert((at, self.id), self.waiters.clone());
+			if state
+				.deadlines
+				.first_key_value()
+				.is_some_and(|(key, _)| *key == (at, self.id))
+			{
+				let mut driver = state.driver.take();
+				drop(state);
+				driver.wake();
+			}
 		}
 	}
 

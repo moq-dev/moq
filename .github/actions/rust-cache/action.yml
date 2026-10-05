@@ -12,6 +12,8 @@ inputs:
 runs:
   using: composite
   steps:
+    # The pinned action saves in a post step guarded by success(), so failed
+    # builds cannot publish a cache even when dispatch saving is enabled.
     - uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
       with:
         version: 1.10.0

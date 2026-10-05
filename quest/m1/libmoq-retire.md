@@ -15,4 +15,4 @@ for anyone still resolving the old name.
 
 ## Required
 
-- The final `libmoq` release, built from the `rs/libmoq` stub, is on crates.io
+- [The final libmoq release is the stub](/quest/m1/libmoq-final-release.md) - the published crate points at `moq-c` before the source goes

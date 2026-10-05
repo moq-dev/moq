@@ -45,8 +45,8 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_19]) {
 			]);
 		} finally {
 			announced.close();
-			client.close();
-			server.close();
+			client.abort();
+			server.abort();
 			for (const broadcast of broadcasts) broadcast.close();
 			source.close();
 			destination.close();

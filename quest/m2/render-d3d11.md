@@ -24,7 +24,7 @@ consumers land" comes due for `d3d11::Texture`: the renderer is that consumer,
 so whatever access it needs becomes public here rather than ahead of it.
 
 Worth doing on Windows specifically because 4K screen sharing is where the
-download plus re-upload costs most, and Desktop Duplication makes that the
+download plus re-upload costs most, and WGC screen capture makes that the
 common case.
 
 ## Related

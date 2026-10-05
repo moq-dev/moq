@@ -34,14 +34,14 @@ capture still pulls in `libav*`. This proposal replaces encode **and** capture.
 
 ### Scope (agreed)
 
-- Platforms: macOS (VideoToolbox), Linux NVIDIA (NVENC), Linux Intel/AMD (VAAPI).
+- Platforms: macOS and iOS (VideoToolbox), Linux NVIDIA (NVENC), Linux Intel/AMD (VAAPI).
 - Out of scope: Windows (AMF/QSV), iOS, HEVC/AV1. H.264 only.
 
 ## Crate selection
 
 | Backend | Crate | Role | Linking model |
 |---|---|---|---|
-| VideoToolbox (macOS) | [`objc2-video-toolbox`](https://docs.rs/objc2-video-toolbox/) + `objc2-core-media` / `objc2-core-video` | Raw FFI. We hand-write the `VTCompressionSession` glue. | System frameworks, always present. Zero external runtime deps. |
+| VideoToolbox (macOS, iOS) | [`objc2-video-toolbox`](https://docs.rs/objc2-video-toolbox/) + `objc2-core-media` / `objc2-core-video` | Raw FFI. We hand-write the `VTCompressionSession` glue. | System frameworks, always present. Zero external runtime deps. |
 | NVENC (NVIDIA) | `moq-nvenc` (in-tree `rs/moq-nvenc`; fork of [`nvidia-video-codec-sdk`](https://crates.io/crates/nvidia-video-codec-sdk) 0.4 trimmed to dlopen-only) | Safe `Encoder` wrapper. | NVENC API lives in the driver (`libnvidia-encode.so`), `dlopen`'d at runtime. No build-time SDK linking. |
 | VAAPI (Intel/AMD) | [`moq-vaapi`](https://crates.io/crates/moq-vaapi) `0.0.2` (published; vendored+trimmed from cros-libva + discord/cros-codecs) | VAAPI H.264 encoder (Google/ChromeOS, ships in crosvm). | As of 0.0.2 *links* `libva` (`NEEDED libva.so.2`), build needs libva-dev; `dlopen` (no NEEDED, no build dep) is intended but not yet realized, see #1837. |
 | Software fallback | [`openh264`](https://crates.io/crates/openh264) | Pure fallback when no GPU. | Vendored build -> static, zero runtime deps. |
@@ -103,7 +103,7 @@ encode/
                     # converter, exposes the unchanged encode_rgba / encode API
   backend/
     mod.rs          # Backend trait + open_backend(kind, config) fallback chain
-    videotoolbox.rs # cfg(target_os = "macos")
+    videotoolbox.rs # cfg(apple): macOS and iOS
     nvenc.rs        # cfg(target_os = "linux")
     vaapi.rs        # cfg(target_os = "linux")
     openh264.rs     # software fallback, all platforms
@@ -233,7 +233,7 @@ moq-vaapi = { version = "0.0.2", optional = true }      # standalone; vendored c
 openh264 = { version = "...", optional = true } # default software fallback
 ```
 
-Hardware encoders are cfg-gated on macOS and Windows (VideoToolbox, Media
+Hardware encoders are cfg-gated on macOS, iOS, and Windows (VideoToolbox, Media
 Foundation) and feature-gated on Linux (NVENC behind the default-on `nvidia`,
 VAAPI behind the opt-in `vaapi`); the runtime fallback chain skips whichever
 driver is absent. None is a build-time hard dep on the driver, so the binary
@@ -290,9 +290,9 @@ A backend "fails to open" (driver missing, no device) the same way an ffmpeg
 6. **VAAPI backend** (cros-codecs) last, behind its feature -- the GBM/DMA-buf
    plumbing is isolated and non-blocking once openh264 covers the fallback.
 
-This work (including the capture swap and ffmpeg removal) ships to `dev`, since
-it's a breaking change to `moq-video`'s public API and a dependency overhaul.
-It reaches `main` on the next `dev` -> `main` merge.
+This work (including the capture swap and ffmpeg removal) is a breaking change
+to `moq-video`'s public API and a dependency overhaul, so it ships in the next
+release cut.
 
 ## Risks / open questions
 

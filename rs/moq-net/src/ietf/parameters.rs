@@ -163,6 +163,42 @@ impl Encode<Version> for Parameters {
 }
 
 impl Parameters {
+	/// Consume a draft-14 message parameter block, returning its first MAX_CACHE_DURATION
+	/// (0x04), the one parameter we act on.
+	///
+	/// Draft-14 section 9.2 has a receiver ignore unrecognized parameters and allow their
+	/// duplicates, and lets AUTHORIZATION TOKEN repeat, so unlike [`Parameters::decode`],
+	/// which SETUP uses, a repeat is not refused.
+	pub fn skip(r: &mut Decoder<'_>) -> Result<Option<u64>, DecodeError> {
+		let count = r.varint()?;
+		if count > MAX_PARAMS {
+			return Err(DecodeError::TooMany);
+		}
+
+		let mut cache_duration = None;
+		for _ in 0..count {
+			// Parity frames a Key-Value-Pair: even is one varint, odd is length prefixed.
+			let kind = r.varint()?;
+			match kind % 2 {
+				0 => {
+					let value = r.varint()?;
+					if kind == 0x04 {
+						cache_duration.get_or_insert(value);
+					}
+				}
+				_ => {
+					let len = usize::try_from(r.varint()?).map_err(|_| DecodeError::BoundsExceeded)?;
+					if len > MAX_KVP_VALUE_LEN {
+						return Err(DecodeError::BoundsExceeded);
+					}
+					r.slice(len)?;
+				}
+			}
+		}
+
+		Ok(cache_duration)
+	}
+
 	pub fn get_varint(&self, kind: ParameterVarInt) -> Option<u64> {
 		self.vars.iter().find(|(k, _)| *k == kind).map(|(_, v)| *v)
 	}
@@ -202,6 +238,14 @@ pub trait Param: Sized {
 	/// Whether this parameter should be encoded. Returns false to skip.
 	fn param_present(&self) -> bool {
 		true
+	}
+
+	/// Fold a repeat of this parameter into the value already decoded.
+	///
+	/// A parameter may appear once unless its definition says otherwise, so the default
+	/// refuses the repeat.
+	fn param_repeat(self, _next: Self) -> Result<Self, DecodeError> {
+		Err(DecodeError::Duplicate)
 	}
 }
 
@@ -311,6 +355,13 @@ impl<T: Param> Param for Option<T> {
 		self.is_some()
 	}
 
+	fn param_repeat(self, next: Self) -> Result<Self, DecodeError> {
+		match (self, next) {
+			(Some(prev), Some(next)) => Ok(Some(prev.param_repeat(next)?)),
+			_ => Err(DecodeError::Duplicate),
+		}
+	}
+
 	fn param_encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		match self {
 			Some(v) => v.param_encode(w, version),
@@ -320,6 +371,45 @@ impl<T: Param> Param for Option<T> {
 
 	fn param_decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		Ok(Some(T::param_decode(r, version)?))
+	}
+}
+
+/// A parameter whose definition lets it repeat, such as AUTHORIZATION TOKEN (0x03) or a
+/// Range Filter (0x25-0x29). Every instance is kept, in wire order.
+impl<T: Param> Param for Vec<T> {
+	fn param_present(&self) -> bool {
+		!self.is_empty()
+	}
+
+	fn param_encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
+		// `encode_params!` writes the key once, so only a single instance fits behind it.
+		match self.as_slice() {
+			[value] => value.param_encode(w, version),
+			_ => Err(EncodeError::Unsupported),
+		}
+	}
+
+	fn param_decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		Ok(vec![T::param_decode(r, version)?])
+	}
+
+	fn param_repeat(mut self, next: Self) -> Result<Self, DecodeError> {
+		self.extend(next);
+		Ok(self)
+	}
+}
+
+/// A length-prefixed parameter value, consumed without being interpreted.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Opaque(pub Vec<u8>);
+
+impl Param for Opaque {
+	fn param_encode(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
+		w.bytes(&self.0)
+	}
+
+	fn param_decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+		Ok(Self(r.bytes()?.to_vec()))
 	}
 }
 
@@ -381,7 +471,8 @@ macro_rules! encode_params {
 /// for parameters where `T::default()` is an acceptable fallback.
 ///
 /// Unknown parameters cause `DecodeError::InvalidValue`.
-/// Duplicate parameters cause `DecodeError::Duplicate`.
+/// Duplicate parameters cause `DecodeError::Duplicate`, unless the type allows a repeat
+/// (see [`Param::param_repeat`]), such as `Vec<T>`.
 ///
 /// ```ignore
 /// decode_params!(r, version,
@@ -428,10 +519,11 @@ macro_rules! decode_params {
 				// the macro captures it as an expression, which is not a legal pattern.
 				$(
 					if _key == $key {
-						if $name.is_some() {
-							return Err($crate::coding::DecodeError::Duplicate);
-						}
-						$name = Some(<$ty as $crate::ietf::Param>::param_decode($r, _version)?);
+						let _value = <$ty as $crate::ietf::Param>::param_decode($r, _version)?;
+						$name = Some(match $name.take() {
+							None => _value,
+							Some(_prev) => $crate::ietf::Param::param_repeat(_prev, _value)?,
+						});
 						continue;
 					}
 				)*
@@ -926,5 +1018,48 @@ mod tests {
 				"expected Duplicate for {version}"
 			);
 		}
+	}
+
+	/// A parameter the draft lets repeat, such as AUTHORIZATION TOKEN, keeps every
+	/// instance instead of failing the message as a duplicate.
+	#[test]
+	fn test_param_repeat_allowed() {
+		for version in [Version::Draft15, Version::Draft16, Version::Draft17, Version::Draft20] {
+			let mut buf = Vec::new();
+			let mut w = Encoder::new(&mut buf, version.into());
+			w.varint(2).unwrap();
+			w.varint(0x03).unwrap();
+			Opaque(vec![0xAA]).param_encode(&mut w, version).unwrap();
+			// The second key: absolute before draft-16, a zero delta after.
+			let second: u64 = if version == Version::Draft15 { 0x03 } else { 0 };
+			w.varint(second).unwrap();
+			Opaque(vec![0xBB]).param_encode(&mut w, version).unwrap();
+
+			let mut r = Decoder::new(&buf, version.into());
+			let tokens = (|| -> Result<Vec<Opaque>, DecodeError> {
+				decode_params!(&mut r, version, 0x03 => tokens: Vec<Opaque>);
+				Ok(tokens)
+			})()
+			.unwrap_or_else(|e| panic!("{version}: {e}"));
+			assert_eq!(tokens, vec![Opaque(vec![0xAA]), Opaque(vec![0xBB])], "{version}");
+			assert!(r.is_empty(), "{version}");
+		}
+	}
+
+	/// Draft-14 lets AUTHORIZATION TOKEN repeat and has unknown parameters, duplicates
+	/// included, ignored. The block is consumed whole either way.
+	#[test]
+	fn test_skip_allows_draft14_repeats() {
+		#[rustfmt::skip]
+		let block = [
+			0x04, // Number of Parameters
+			0x03, 0x01, 0xAA, // AUTHORIZATION TOKEN
+			0x03, 0x01, 0xBB, // and again
+			0x3E, 0x05, // an unknown varint parameter
+			0x3E, 0x06, // and again
+		];
+		let mut r = Decoder::new(&block, Version::Draft14.into());
+		Parameters::skip(&mut r).unwrap();
+		assert!(r.is_empty());
 	}
 }

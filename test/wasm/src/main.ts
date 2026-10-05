@@ -178,7 +178,9 @@ async function withPublisher<T>(relay: RelayFixture, path: string, run: () => Pr
 		track.close();
 		missing.close();
 		broadcast.close();
-		connection.close();
+		// Teardown, not a graceful end: the case is over and the harness is not waiting
+		// on delivery, so skip the drain `close()` would spend up to a second on.
+		connection.abort();
 		origin.close();
 		await writer;
 		await rejecting;

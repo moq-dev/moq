@@ -129,8 +129,8 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 	announced.close();
 	prefixed.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 }
 
 test("integration: lite draft-01", async () => {
@@ -205,8 +205,8 @@ test("integration: lite subscription options and updates reach the publisher", a
 	remote.close();
 	broadcast.close();
 	await serving;
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: lite carries a fractional maxAge as a whole millisecond", async () => {
@@ -256,8 +256,8 @@ test("integration: lite carries a fractional maxAge as a whole millisecond", asy
 	broadcast.close();
 	await serving;
 	origin.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: lite applies initial and updated group bounds", async () => {
@@ -310,8 +310,8 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		subscriber.close();
 		remote.close();
 		broadcast.close();
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 	}
 });
 
@@ -363,8 +363,8 @@ test("integration: lite refuses an empty requested range on open and on update",
 	} finally {
 		remote.close();
 		broadcast.close();
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 	}
 });
 
@@ -415,8 +415,8 @@ test("integration: lite draft-06 announce lifecycle", async () => {
 	first.close();
 	secondAgain.close();
 	announced.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 /** Collect announced prefixes until `until` arrives. */
@@ -432,18 +432,20 @@ async function announcedUntil(announced: Announce.Consumer, until: string) {
 
 // A `.`-named broadcast is left out of discovery unless the request opts in or names the
 // dot segment. lite-06 cannot carry the opt-in, so its peer never lists the hidden path.
-for (const [protocol, carriesOptIn] of [
+for (const [protocol, carriesOptIn, version] of [
 	[Lite.ALPN_07_WIP, true],
 	[Lite.ALPN_06, false],
 	[Ietf.ALPN.DRAFT_19, true],
 	[Ietf.ALPN.DRAFT_16, true],
+	["", true, Ietf.Version.DRAFT_14],
+	[Ietf.ALPN.DRAFT_15, true],
 ] as const) {
 	test(`integration: ${protocol} hides dot paths from discovery`, async () => {
 		const pair = createMockTransportPair(protocol);
 		const origin = new OriginProducer();
 		const [client, server] = await Promise.all([
 			connect(url, { transport: pair.client }),
-			accept(pair.server, url, { publish: origin.consume() }),
+			accept(pair.server, url, { publish: origin.consume(), version }),
 		]);
 
 		// Published first, so a reader that may see it lists it before `visible`.
@@ -469,8 +471,8 @@ for (const [protocol, carriesOptIn] of [
 		opted.close();
 		hidden.close();
 		visible.close();
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 	});
 }
 
@@ -512,8 +514,8 @@ test("integration: lite draft-05 datagram delivery", async () => {
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: lite draft-05 datagrams not sent on a non-datagram transport", async () => {
@@ -561,8 +563,8 @@ test("integration: lite draft-05 datagrams not sent on a non-datagram transport"
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: lite draft-05 datagrams sent with standards-track createWritable", async () => {
@@ -600,8 +602,8 @@ test("integration: lite draft-05 datagrams sent with standards-track createWrita
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: lite draft-05 missing datagram writer does not close streams", async () => {
@@ -627,8 +629,8 @@ test("integration: lite draft-05 missing datagram writer does not close streams"
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: ietf does not deliver datagrams", async () => {
@@ -660,8 +662,8 @@ test("integration: ietf does not deliver datagrams", async () => {
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: lite draft-05 missing datagram reader does not close streams", async () => {
@@ -687,8 +689,8 @@ test("integration: lite draft-05 missing datagram reader does not close streams"
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 /** A stream reset as a transport delivers one: the peer's code, and nothing else useful. */
@@ -738,8 +740,8 @@ test("integration: a group reset carries the peer's code to the subscriber", asy
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: a locally raised group error reaches the peer as its own code", async () => {
@@ -781,8 +783,8 @@ test("integration: a locally raised group error reaches the peer as its own code
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: subscribing to an unserved broadcast is refused as NotFound", async () => {
@@ -806,8 +808,8 @@ test("integration: subscribing to an unserved broadcast is refused as NotFound",
 	expect((err as StreamError).code).toBe(StreamCode.NotFound);
 
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: a peer is served the cheaper route it was offered, not the local broadcast", async () => {
@@ -830,8 +832,8 @@ test("integration: a peer is served the cheaper route it was offered, not the lo
 
 	track.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	dynamic.close();
 	local.close();
 	origin.close();
@@ -876,8 +878,8 @@ test("integration: lite draft-05 fetches a cached group", async () => {
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test.each(["gap", "end"])("integration: lite fetch rejects coalesced misses at %s with NotFound", async (missing) => {
@@ -920,8 +922,8 @@ test.each(["gap", "end"])("integration: lite fetch rejects coalesced misses at %
 		broadcast.close();
 		await serving;
 		remote.close();
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 		origin.close();
 	}
 });
@@ -963,8 +965,8 @@ test.each(["frame", "FIN"])("integration: lite fetch waits for the publisher's f
 		group.close();
 		broadcast.close();
 		remote.close();
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 		origin.close();
 	}
 });
@@ -1009,8 +1011,8 @@ test("integration: lite draft-05 coalesces concurrent fetches of one group", asy
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: lite draft-05 fetches an in-progress group", async () => {
@@ -1048,8 +1050,8 @@ test("integration: lite draft-05 fetches an in-progress group", async () => {
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 // The publisher caches TRACK_INFO so it only asks the application once per track. The cache
@@ -1087,8 +1089,8 @@ test("integration: lite draft-05 track info follows a republished broadcast", as
 	first.close();
 	second.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 // FETCH reads the same cache to decide the timescale it serves frames in, so a stale entry
@@ -1128,8 +1130,8 @@ test("integration: lite draft-05 fetch uses the republished track's timescale", 
 	first.close();
 	second.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: ietf fetch group is unsupported", async () => {
@@ -1145,8 +1147,65 @@ test("integration: ietf fetch group is unsupported", async () => {
 	await expect(remote.track("video").fetchGroup(0)).rejects.toThrow("fetch group is not supported for moq-transport");
 
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
+});
+
+// Draft-18 defines SUBSCRIBE_TRACKS, so a limited endpoint answers NOT_SUPPORTED and the
+// subscription already on the session keeps going.
+test("integration: ietf SUBSCRIBE_TRACKS is refused per request", async () => {
+	// SUBSCRIBE_TRACKS, Length, Request ID, Track Namespace Prefix ("room"), no parameters.
+	const subscribeTracks = new Uint8Array([0x51, 0x00, 0x08, 0x01, 0x01, 0x04, 0x72, 0x6f, 0x6f, 0x6d, 0x00]);
+
+	for (const protocol of [
+		Ietf.ALPN.DRAFT_18,
+		Ietf.ALPN.DRAFT_19,
+		Ietf.ALPN.DRAFT_20,
+		Ietf.ALPN.DRAFT_21,
+		Ietf.ALPN.DRAFT_22,
+	]) {
+		const pair = createMockTransportPair(protocol);
+		const origin = new OriginProducer();
+
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+
+		const broadcast = publish(origin, Path.from("test"));
+		const served: TrackProducer[] = [];
+		const serving = (async () => {
+			for (;;) {
+				const req = await wireOf(broadcast).requested();
+				if (!req) break;
+				const track = req.accept();
+				track.writeString("before");
+				served.push(track);
+			}
+		})();
+
+		const remote = wireOf(client).consume(Path.from("test"));
+		const track = remote.track("video").subscribe().ordered();
+		expect(await track.readString()).toBe("before");
+
+		const bidi = await pair.client.createBidirectionalStream();
+		const writer = bidi.writable.getWriter();
+		await writer.write(subscribeTracks);
+		const reply: number[] = [];
+		for await (const chunk of bidi.readable as ReadableStream<Uint8Array>) reply.push(...chunk);
+		// REQUEST_ERROR (0x05), a two-byte length, then the error code: NOT_SUPPORTED (0x3).
+		expect(reply[0]).toBe(0x05);
+		expect(reply[3]).toBe(0x03);
+
+		for (const producer of served) producer.writeString("after");
+		expect(await track.readString()).toBe("after");
+
+		broadcast.close();
+		await serving;
+		remote.close();
+		client.close();
+		server.close();
+	}
 });
 
 test("integration: ietf draft-14", async () => {
@@ -1205,8 +1264,8 @@ async function runConsumeDedup(protocol: string, version?: number) {
 	expect(third.closed.peek()).toBeUndefined();
 	third.close();
 
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 }
 
 async function waitUntil(predicate: () => boolean): Promise<void> {
@@ -1245,8 +1304,8 @@ async function runSubscriberTeardown(protocol: string, version?: number) {
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 }
 
 test("integration: lite subscriber teardown on last unsubscribe", async () => {
@@ -1297,8 +1356,8 @@ test("integration: ietf draft-14 subscriber teardown on last unsubscribe", async
 	await serving;
 	announced.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 // A fetched group can stay open indefinitely (a catalog track, a JSON stream), so abandoning the
@@ -1331,8 +1390,8 @@ test("integration: lite fetch teardown when the reader abandons an open group", 
 	group.close();
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 // Older drafts have no TRACK stream or SUBSCRIBE_UPDATE, so the demand loop must still tear the
@@ -1374,8 +1433,8 @@ test("integration: lite fan-out keeps the upstream until the last subscriber lea
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 // Repeated subscribe/unsubscribe cycles must each tear down and re-open cleanly (the 40-toggle
@@ -1405,8 +1464,8 @@ test("integration: lite re-subscribe re-opens the upstream after each teardown",
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 // Coalesced fetches of one open group share a single FETCH stream: closing one keeps it flowing
@@ -1444,8 +1503,8 @@ test("integration: lite coalesced fetch stays until every reader abandons the op
 	group.close();
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 // A fetch that coalesces after the last reader left, but before the FETCH is cancelled, re-arms
@@ -1488,8 +1547,8 @@ test("integration: lite fetch re-armed by a late reader keeps every frame", asyn
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 // A finite group must still deliver every frame and end cleanly (the demand watch must not disturb
@@ -1519,8 +1578,8 @@ test("integration: lite fetch delivers every frame of a finite multi-frame group
 
 	broadcast.close();
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test("integration: lite consume dedup", async () => {
@@ -1560,8 +1619,8 @@ async function runSubscribeWithoutWarmup(version: number) {
 	broadcast.close();
 	await serving;
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 }
 
 test("integration: ietf draft-14 subscribe without announce warmup", async () => {
@@ -1596,8 +1655,8 @@ test("integration: subscribe to non-existent broadcast", async () => {
 		})(),
 	).rejects.toThrow();
 
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 // Resolves once `signal` satisfies `pred`, returning the matching value.
@@ -1661,8 +1720,8 @@ test("integration: an announced request waits for a late publisher", async () =>
 
 	second.close();
 	await servingSecond;
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	clientOrigin.close();
 });
 
@@ -1693,8 +1752,8 @@ test("integration: an announced request consumes blind without discovery", async
 	watched.close();
 	broadcast.close();
 	await serving;
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	clientOrigin.close();
 });
 
@@ -1745,8 +1804,8 @@ test("integration: a republish is not served from the previous generation's cach
 	watched.close();
 	second.close();
 	await servingSecond;
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	clientOrigin.close();
 });
 
@@ -1806,8 +1865,8 @@ async function runRepublishCycle(protocol: string, version?: number) {
 	watched.close();
 	origin.close();
 	clientOrigin.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 }
 
 test("integration: lite republish on one session swaps the handle every generation", async () => {
@@ -1852,8 +1911,8 @@ test("integration: a blind handle picks up a publisher that arrives late", async
 	watched.close();
 	producer.close();
 	await serving;
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	clientOrigin.close();
 });
 
@@ -1871,8 +1930,8 @@ test("integration: a blind handle goes offline when the session dies", async () 
 
 	// The gated path goes offline when the announcement stream ends with the session. There is
 	// no stream here, so the session itself is what has to clear it.
-	server.close();
-	client.close();
+	server.abort();
+	client.abort();
 	await waitFor(watched.active, (b) => b === undefined);
 
 	watched.close();
@@ -1912,8 +1971,8 @@ test("integration: ietf blind handle picks up a publisher that arrives late", as
 	watched.close();
 	producer.close();
 	await serving;
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	clientOrigin.close();
 });
 
@@ -1974,8 +2033,8 @@ async function runOriginFlow(protocol: string, version?: number) {
 	track.close();
 	remote.close();
 	announced.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	serverOrigin.close();
 	clientOrigin.close();
 }
@@ -2004,8 +2063,8 @@ test("origin: remote entries retract when the session dies, local ones survive",
 	const reader = clientOrigin.consume();
 	await until(() => wireOf(reader).routes(Path.from("remote")));
 
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 
 	// The session that fed the entry is gone, so the entry goes with it.
 	await until(() => !wireOf(reader).routes(Path.from("remote")));
@@ -2063,8 +2122,8 @@ test("origin: one origin on both directions consumes locally and never echoes", 
 	expect(wireOf(serverReader).routes(Path.from("from-server"))).toBe(false);
 
 	mine.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	shared.close();
 	serverSees.close();
 });
@@ -2107,8 +2166,8 @@ test("origin: a request resolves blind on a relay without discovery", async () =
 	request.close();
 	broadcast.close();
 	await serving;
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	serverOrigin.close();
 	clientOrigin.close();
 });
@@ -2190,8 +2249,8 @@ test("origin: a reactive handle follows announcements, republishes, and reconnec
 	await until(() => watch.active.peek() === undefined);
 
 	watch.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	serverOrigin.close();
 	clientOrigin.close();
 });
@@ -2226,8 +2285,8 @@ test("origin: overlapping sessions carrying one path fail over", async () => {
 	await until(() => wireOf(reader).routes(Path.from("redundant")));
 
 	// The newer session dies; the older one still carries the path and must keep serving.
-	second.client.close();
-	second.server.close();
+	second.client.abort();
+	second.server.abort();
 	await sleep(50);
 
 	const remote = await routed(reader, Path.from("redundant"));
@@ -2239,8 +2298,8 @@ test("origin: overlapping sessions carrying one path fail over", async () => {
 	remote.close();
 	first.broadcast.close();
 	await first.serving;
-	first.client.close();
-	first.server.close();
+	first.client.abort();
+	first.server.abort();
 	first.serverOrigin.close();
 	second.serverOrigin.close();
 	second.broadcast.close();
@@ -2280,8 +2339,8 @@ test("origin: a standby session re-answers a request when the answerer dies", as
 	// complete within one scheduler tick, so assert the front changed rather than racing
 	// to observe the vacant slot.
 	const before = request.active.peek();
-	answerer.client.close();
-	answerer.server.close();
+	answerer.client.abort();
+	answerer.server.abort();
 	await until(() => request.active.peek() !== undefined && request.active.peek() !== before);
 
 	const front = request.active.peek();
@@ -2293,8 +2352,8 @@ test("origin: a standby session re-answers a request when the answerer dies", as
 	request.close();
 	standby.broadcast.close();
 	await standby.serving;
-	standby.client.close();
-	standby.server.close();
+	standby.client.abort();
+	standby.server.abort();
 	standby.serverOrigin.close();
 	answerer.serverOrigin.close();
 	answerer.broadcast.close();
@@ -2322,8 +2381,8 @@ test("create then announce is discoverable on the wire", async () => {
 
 	announced.close();
 	broadcast.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	origin.close();
 });
 
@@ -2359,8 +2418,8 @@ test("a handle serves a request under live/** over the wire", async () => {
 	announced.close();
 	handle.close();
 	await serving;
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	origin.close();
 });
 
@@ -2371,7 +2430,11 @@ const DEATH = SessionCode(71);
  * Serve one track with a group left open, kill the publisher's session once the subscriber has
  * read into it, and return how the subscriber's track ended.
  */
-async function runSessionDeath(protocol: string, version?: number): Promise<Error | null> {
+async function runSessionDeath(
+	protocol: string,
+	version?: number,
+	local = false,
+): Promise<[Error | null, Error | null]> {
 	const pair = createMockTransportPair(protocol);
 	const origin = new OriginProducer();
 
@@ -2392,18 +2455,21 @@ async function runSessionDeath(protocol: string, version?: number): Promise<Erro
 	const remote = wireOf(client).consume(Path.from("test"));
 	const track = remote.track("video").subscribe();
 	const group = await track.recvGroup();
-	expect(await group?.readString()).toBe("head");
+	if (!group) throw new Error("missing group");
+	expect(await group.readString()).toBe("head");
 
-	pair.server.close({ closeCode: DEATH, reason: "killed" });
+	if (local) client.close();
+	else pair.server.close({ closeCode: DEATH, reason: "killed" });
+	const groupEnd = Promise.resolve(group.closed);
 	const closed = await withTimeout(Promise.resolve(track.closed), 2000, "the track never ended");
 
 	broadcast.close();
 	await serving;
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	origin.close();
-	return closed;
+	return [closed, await withTimeout(groupEnd, 2000, "the group never ended")];
 }
 
 for (const [name, protocol, version] of [
@@ -2413,9 +2479,15 @@ for (const [name, protocol, version] of [
 	["ietf draft-17", Ietf.ALPN.DRAFT_17, undefined],
 ] as const) {
 	test(`integration: ${name} ends a track with its session's error`, async () => {
-		const closed = await runSessionDeath(protocol, version);
+		const [closed, groupEnd] = await runSessionDeath(protocol, version);
 		expect(closed).toBeInstanceOf(SessionError);
 		expect((closed as SessionError).code).toBe(DEATH);
+		expect(groupEnd).toBeInstanceOf(SessionError);
+		expect((groupEnd as SessionError).code).toBe(DEATH);
+	});
+	test(`integration: ${name} ends a locally closed track cleanly`, async () => {
+		const [closed] = await runSessionDeath(protocol, version, true);
+		expect(closed).toBeNull();
 	});
 }
 
@@ -2456,8 +2528,8 @@ test("integration: lite draft-05 ends a track with the publisher's reset", async
 	broadcast.close();
 	await serving;
 	remote.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	origin.close();
 });
 
@@ -2488,8 +2560,8 @@ async function caughtUp(protocol: string, version: number | undefined, paths: st
 
 	announced.close();
 	for (const broadcast of broadcasts) broadcast.close();
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 	serverOrigin.close();
 	clientOrigin.close();
 	return seen.sort();

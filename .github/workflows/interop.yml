@@ -26,7 +26,7 @@ on:
       - "test/justfile"
       - "package.json"
       # The Go client builds against the modules this script stages.
-      - "go/scripts/**"
+      - "sh/go/**"
       - ".github/workflows/interop.yml"
 
 concurrency:
@@ -74,7 +74,6 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
-          cache-on-failure: true
           # A pull request's entry is scoped to its own branch, where no later
           # run reads it, while it spends the budget the shared store needs.
           save-if: ${{ github.event_name != 'pull_request' }}
@@ -125,6 +124,14 @@ jobs:
       # `export ts` output with TSDuck (tsp/tsanalyze from the nix devShell).
       - name: TS compliance
         run: nix develop --command just test ts
+        shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      # The same round-trip over an open-GOP clip: every leading picture after a
+      # recovery point must come back, in decode order.
+      - name: TS open GOP
+        run: nix develop --command just test ts --open-gop
         shell: bash -leo pipefail {0}
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs

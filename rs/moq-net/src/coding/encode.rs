@@ -139,6 +139,20 @@ impl<'a> Encoder<'a> {
 		}
 	}
 
+	/// The number of bytes written since `prefix` was reserved.
+	pub fn since(&self, prefix: &Prefix) -> usize {
+		self.buf.len() - prefix.body
+	}
+
+	/// Drop a reserved prefix and everything written since, as if neither was written.
+	pub fn discard(&mut self, prefix: Prefix) {
+		let start = match prefix.kind {
+			PrefixKind::Varint => prefix.body - 1,
+			PrefixKind::U16 => prefix.body - 2,
+		};
+		self.buf.truncate(start);
+	}
+
 	/// Size a reserved prefix to everything written since.
 	pub fn fill(&mut self, prefix: Prefix) -> Result<(), EncodeError> {
 		let body = prefix.body;

@@ -27,6 +27,10 @@ const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 // The cache scans at most this many times per retention window.
 const PRUNE_SLICES = 8;
 
+// The higher-first midpoint. IETF flips priority (lower first), so this goes out as 128, the
+// draft's usual publisher priority, while moq-lite carries 127 as written: one urgency on both.
+const DEFAULT_PRIORITY = 127;
+
 /** Maximum buffered datagrams per subscriber; mirrors Rust's bounded send buffer. */
 const MAX_DATAGRAMS = 64;
 
@@ -68,7 +72,7 @@ export interface Info {
 	 * or non-finite value and a result past `Number.MAX_SAFE_INTEGER`.
 	 */
 	maxAge?: Milli;
-	/** Tie-break priority between subscriptions of equal subscriber priority (`0..=255`). */
+	/** Tie-break priority between subscriptions of equal subscriber priority (`0..=255`, higher first). Defaults to `127`. */
 	priority: number;
 }
 
@@ -101,7 +105,7 @@ export function infoDefaults(info: Partial<Info> = {}): Info {
 	return {
 		timescale: Timescale(info.timescale ?? Timescale.MILLI),
 		maxAge: info.maxAge === undefined ? undefined : maxAgeMillis(info.maxAge),
-		priority: priorityByte(info.priority ?? 0),
+		priority: priorityByte(info.priority ?? DEFAULT_PRIORITY),
 	};
 }
 
@@ -241,6 +245,14 @@ export class Request {
 export interface FetchGroupOptions {
 	/** Delivery priority for the fetch stream. Defaults to `0`. */
 	priority?: number;
+
+	/**
+	 * Abandons this fetch, rejecting with the signal's reason. Concurrent fetches of the same
+	 * group share one stream, cancelled only once every caller has left. An already-aborted
+	 * signal rejects before anything is sent, and aborting after the group resolves has no
+	 * effect; close the group instead.
+	 */
+	signal?: AbortSignal;
 }
 
 /**
@@ -328,6 +340,8 @@ class TrackState {
 	/** Best-effort datagram channel, parallel to {@link groups}; a bounded send buffer per subscriber. */
 	datagrams = new Signal<Datagram[]>([]);
 	latest?: number;
+	// One past the highest group or datagram received, including evicted content.
+	received = new Signal(0);
 	/**
 	 * The exclusive final boundary, declared by {@link Producer.finishAt} or stamped by a
 	 * clean close as one past the highest sequence produced. Groups and datagrams share the
@@ -523,13 +537,13 @@ export class Producer {
 	}
 
 	/**
-	 * Publisher priority from the committed {@link Info}, or 0 before {@link accept}.
+	 * Publisher priority from the committed {@link Info}, or the default before {@link accept}.
 	 *
 	 * Higher is served first. Hang publishers set this from `Catalog.PRIORITY` so
 	 * audio outranks video on the wire and in the bandwidth allocator.
 	 */
 	get priority(): number {
-		return this.#state.info.peek()?.priority ?? 0;
+		return this.#state.info.peek()?.priority ?? DEFAULT_PRIORITY;
 	}
 
 	/**
@@ -629,6 +643,7 @@ export class Producer {
 		this.#prune();
 		for (const entry of this.#cache) this.#mirror(entry, sink);
 
+		sink.received.set(this.#received);
 		sink.final.set(this.#state.final.peek());
 		if (closed !== undefined) {
 			this.#release(sink);
@@ -662,6 +677,7 @@ export class Producer {
 		timelineInsert(sink.timeline, dst);
 		void dst.readable().then(() => sink.timelineChanged.update((revision) => revision + 1));
 		sink.latest = Math.max(sink.latest ?? 0, dst.sequence);
+		sink.received.set(Math.max(sink.received.peek(), dst.sequence + 1));
 		sink.groups.mutate((groups) => {
 			groups.push(dst);
 			groups.sort((a, b) => a.sequence - b.sequence);
@@ -841,6 +857,7 @@ export class Producer {
 	#publishDatagram(datagram: Datagram): void {
 		this.#received = Math.max(this.#received, datagram.sequence + 1);
 		for (const sink of this.#sinks) {
+			sink.received.set(this.#received);
 			sink.datagrams.mutate((list) => {
 				if (list.length === MAX_DATAGRAMS) list.shift();
 				list.push(datagram);
@@ -896,7 +913,8 @@ export class Producer {
 	 * `final` is the first sequence that will never be produced, so a track whose last group
 	 * is 89 finishes at 90. Groups and datagrams below it are still accepted; anything at or
 	 * above it is refused. Unlike {@link close} it is not terminal: call `close()` once the
-	 * remaining groups are written. Throws if the track is closed, already has an end, or
+	 * remaining groups are written. Readers end once the live edge reaches the boundary,
+	 * independently of closure. Throws if the track is closed, already has an end, or
 	 * `final` is at or below a sequence already produced.
 	 */
 	finishAt(final: number): void {
@@ -904,8 +922,8 @@ export class Producer {
 		if (!Number.isSafeInteger(final) || final < 0) throw new RangeError(`invalid track end: ${final}`);
 		const declared = this.#state.final.peek();
 		if (declared !== undefined) throw new Error(`track already ends at ${declared}`);
-		if (final < this.#sequence.next) {
-			throw new Error(`track end ${final} is below the next sequence ${this.#sequence.next}`);
+		if (final < this.#received) {
+			throw new Error(`track end ${final} is below the next sequence ${this.#received}`);
 		}
 		this.#declareFinal(final);
 	}
@@ -929,7 +947,7 @@ export class Producer {
 		if (this.#state.closed.peek() !== undefined) return;
 		if (abort && this.#settled()) abort = undefined;
 		if (abort === undefined && this.#state.final.peek() === undefined) {
-			this.#declareFinal(this.#sequence.next);
+			this.#declareFinal(this.#received);
 		}
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
@@ -1319,7 +1337,13 @@ export class Subscriber {
 			}
 
 			// Idle, or parked at the boundary waiting for the cap to rise.
-			await Signal.race(this.#state.groups, this.#cursor, this.#state.closed);
+			await Signal.race(
+				this.#state.groups,
+				this.#cursor,
+				this.#state.closed,
+				this.#state.final,
+				this.#state.received,
+			);
 		}
 	}
 
@@ -1347,10 +1371,17 @@ export class Subscriber {
 		const group = groups[0];
 		const closed = this.#state.closed.peek();
 		if (closed instanceof Error) return { kind: "error", error: closed };
-		if (closed === undefined) return { kind: "idle" };
+		if (closed === undefined && !this.#complete()) return { kind: "idle" };
 		// A group beyond the cap outlives a clean close: it becomes deliverable if
 		// the cap rises, so the track isn't over while any are held.
 		return group ? { kind: "boundary" } : { kind: "done" };
+	}
+
+	// Reader completion does not settle the tail: missing lower groups and open streams
+	// remain accounted for by the wire layer, and an abort still wins on the next read.
+	#complete(): boolean {
+		const final = this.#state.final.peek();
+		return final !== undefined && this.#state.received.peek() >= final;
 	}
 
 	// Package-internal readiness half of recvGroup. Each registration fires at most once, and
@@ -1362,6 +1393,7 @@ export class Subscriber {
 			this.#cursor.changed(fn),
 			this.#state.closed.changed(fn),
 			this.#state.final.changed(fn),
+			this.#state.received.changed(fn),
 		];
 		return () => {
 			for (const close of dispose) close();
@@ -1412,9 +1444,9 @@ export class Subscriber {
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
-			if (closed !== undefined) return undefined;
+			if (closed !== undefined || this.#complete()) return undefined;
 
-			await Signal.race(this.#state.datagrams, this.#state.closed);
+			await Signal.race(this.#state.datagrams, this.#state.closed, this.#state.final, this.#state.received);
 		}
 	}
 
@@ -1453,9 +1485,18 @@ export class Subscriber {
 			// A group parked above the cap stays deliverable even after a clean close
 			// (its frames remain buffered), so keep waiting for a cap raise. Only a
 			// drained track reports finished.
-			if (closed !== undefined && !groups[0]) return undefined;
+			const final = this.#state.final.peek();
+			if (!groups[0] && (closed !== undefined || this.#complete() || (final !== undefined && start >= final))) {
+				return undefined;
+			}
 
-			await Signal.race(this.#state.groups, this.#cursor, this.#state.closed);
+			await Signal.race(
+				this.#state.groups,
+				this.#cursor,
+				this.#state.closed,
+				this.#state.final,
+				this.#state.received,
+			);
 		}
 	}
 

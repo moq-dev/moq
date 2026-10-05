@@ -11,8 +11,8 @@ import kotlin.time.Duration
  * auto-created), so you can [createBroadcast] and iterate [announcements]
  * without touching the raw [Client] handle.
  *
- * [Moq] is [AutoCloseable]; `use { ... }` (or [close]) gracefully shuts down
- * the session and cancels the client.
+ * Call [shutdown] to drain finished tracks before disconnecting. [AutoCloseable]
+ * disposal through `use { ... }` or [close] cancels immediately.
  */
 class Moq internal constructor(
     /** The established session. Use it for [Session.closed]/[Session.shutdown]. */
@@ -74,9 +74,18 @@ class Moq internal constructor(
      */
     fun bandwidth(): Bandwidth = session.bandwidth()
 
-    /** Gracefully shut down the session and cancel the client, releasing the native handles. */
+    /** Drain finished tracks within one second, throwing if delivery times out. */
+    suspend fun shutdown() {
+        try {
+            session.shutdown()
+        } finally {
+            client.cancel()
+        }
+    }
+
+    /** Cancel immediately and release the client. */
     override fun close() {
-        session.shutdown()
+        session.cancel(0u)
         client.cancel()
     }
 

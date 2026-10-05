@@ -32,9 +32,9 @@ cargo install moq-relay moq-cli
 # Homebrew (macOS and Linux)
 brew install moq-dev/tap/moq-relay moq-dev/tap/moq
 
-# Nix (pin a release tag to use the binary cache)
-nix run github:moq-dev/moq#moq-relay -- relay.toml
-nix run github:moq-dev/moq#moq -- --help
+# Nix (`release` builds from source; a release tag such as moq-relay-v0.12.4 uses the binary cache)
+nix run github:moq-dev/moq/release#moq-relay -- relay.toml
+nix run github:moq-dev/moq/release#moq -- --help
 
 # Docker (linux/amd64 and linux/arm64)
 docker run -p 4443:4443/udp -p 4443:4443/tcp -v "$PWD/relay.toml:/app/relay.toml:ro" moqdev/moq-relay /app/relay.toml
@@ -44,8 +44,8 @@ docker run -i moqdev/moq --help
 Static binaries for Linux (x86\_64, aarch64), macOS (Apple Silicon), and Windows
 (x64) are attached to every
 [GitHub release](https://github.com/moq-dev/moq/releases). The Nix cache at
-`kixelated.cachix.org` only holds tagged releases, so an unpinned
-`github:moq-dev/moq` builds from source.
+`kixelated.cachix.org` only holds tagged releases, so the `release` branch
+builds from source.
 
 ## Debian and Ubuntu
 
@@ -64,7 +64,7 @@ sudo apt install moq-relay moq gstreamer1.0-moq
 Fedora 39+, RHEL 9, Rocky 9, AlmaLinux 9. On openSUSE use `zypper addrepo`.
 
 ```bash
-sudo dnf config-manager --add-repo https://rpm.moq.dev/moq.repo
+sudo curl -fsSL https://rpm.moq.dev/moq.repo -o /etc/yum.repos.d/moq.repo
 sudo dnf install moq-relay moq gstreamer1-moq
 ```
 

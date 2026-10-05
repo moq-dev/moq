@@ -491,8 +491,8 @@ pub struct moq_datagram {
 /// Publisher-side raw track properties.
 ///
 /// A null [moq_publish_track] `info` pointer uses the moq-net defaults.
-/// A zero-initialized struct also uses those defaults, except `priority` where
-/// zero is the default itself.
+/// A zero-initialized struct also uses those defaults, except `priority`, which
+/// has no presence flag: zero is the least urgent, and 127 is the moq-net default.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_track_info {
@@ -3652,7 +3652,7 @@ pub extern "C" fn moq_consume_track_cancel(track: u32) -> i32 {
 /// touched again, so release `user_data` there. The terminal callback fires even after
 /// [moq_consume_datagrams_cancel]. Read each datagram with [moq_consume_datagram] and release
 /// it with [moq_consume_datagram_free]. Datagrams arrive only over datagram-capable
-/// transports and lite-05 or newer moq-lite; there is no stream fallback.
+/// transports on moq-transport or lite-05 and newer moq-lite; there is no stream fallback.
 ///
 /// Returns a non-zero handle to the subscription on success, or a negative code on failure.
 ///

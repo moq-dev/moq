@@ -31,7 +31,7 @@ a Live/Offline toggle, and a per-session `live()`:
 
 Guidance:
 
-- The marker lives on `dev` only (Rust since #4059, JS since #4261, bindings
+- The marker is unreleased, on `main` only (Rust since #4059, JS since #4261, bindings
   since #4266), so this deletion breaks nothing published.
 - Look for code that only exists to produce the marker, and delete it rather
   than stubbing it: replay/landing counters in the origin, holds taken by the
@@ -44,7 +44,7 @@ Guidance:
 - Run `just test interop --all`.
 
 Public API: removes `AnnounceEvent::Live` / `{ kind: "live" }` /
-`MoqAnnounceEvent::Live` and the binding aliases, on `dev`. Wire: none.
+`MoqAnnounceEvent::Live` and the binding aliases. Wire: none.
 
 ## Required
 

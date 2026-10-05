@@ -49,10 +49,13 @@ impl<T: Message> Decode<Version> for T {
 		let size = r.u16()? as usize;
 		let mut body = r.sub(size)?;
 
-		let result = Self::decode_msg(&mut body, version).and_then(|msg| match body.is_empty() {
-			true => Ok(msg),
-			false => Err(DecodeError::Long),
-		});
+		// The body is complete, so running short inside it is malformed, not a wait for more.
+		let result = Self::decode_msg(&mut body, version)
+			.map_err(DecodeError::complete)
+			.and_then(|msg| match body.is_empty() {
+				true => Ok(msg),
+				false => Err(DecodeError::Long),
+			});
 
 		match &result {
 			Ok(msg) => tracing::trace!(?msg, "decoded"),

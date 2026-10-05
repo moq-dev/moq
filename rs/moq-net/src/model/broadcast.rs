@@ -8,7 +8,6 @@
 //! [Info] is the broadcast's static metadata, fixed for its lifetime.
 use crate::{cache, stats, track};
 use std::{
-	collections::{HashMap, VecDeque},
 	sync::Arc,
 	task::{Poll, ready},
 };
@@ -90,25 +89,9 @@ struct BroadcastState {
 	// coalescing onto it there).
 	requests: Requests<Arc<str>, track::Request>,
 
-	// Route-fed mode (a relay/origin "front"): tracks are spliced logical tracks
-	// joined across per-session tracks. `None` for an ordinary broadcast.
-	spliced: Option<SplicedState>,
-
 	// Set once the broadcast ends: `Producer::close()` or the last producer-side
 	// handle dropping. Every lookup after it answers `Unroutable`.
 	closing: bool,
-}
-
-/// The spliced (route-fed) half of a broadcast: logical tracks that outlive any
-/// single session, plus the queue of tracks awaiting a serving route.
-#[derive(Default)]
-struct SplicedState {
-	// Logical tracks by name, owned strongly: they live as long as the broadcast
-	// (the origin's front), not as long as any consumer.
-	tracks: HashMap<Arc<str>, super::resume::Producer>,
-
-	// Names awaiting assignment to a route, in request order.
-	pending: VecDeque<Arc<str>>,
 }
 
 impl BroadcastState {
@@ -137,12 +120,8 @@ impl BroadcastState {
 		}
 	}
 
-	/// Live demand: a subscribed spliced track (route-fed broadcast), or a
-	/// pending request / consumed track (ordinary broadcast). See [`Demand`].
+	/// Live demand: a pending request or a consumed track. See [`Demand`].
 	fn is_used(&self) -> bool {
-		if let Some(spliced) = &self.spliced {
-			return spliced.tracks.values().any(|track| track.is_used());
-		}
 		!self.requests.is_empty() || self.tracks.iter().any(|track| track.is_used())
 	}
 
@@ -151,15 +130,6 @@ impl BroadcastState {
 	/// state, so a watcher registered here alone would miss the edge. `want`
 	/// picks the direction; each channel only arms while its side is unmet.
 	fn register_demand(&self, waiter: &kio::Waiter, want: bool) {
-		if let Some(spliced) = &self.spliced {
-			for track in spliced.tracks.values() {
-				let _ = match want {
-					true => track.poll_used(waiter),
-					false => track.poll_unused(waiter),
-				};
-			}
-			return;
-		}
 		for track in self.tracks.iter() {
 			match want {
 				true => track.poll_used(waiter),
@@ -253,24 +223,6 @@ impl Producer {
 	/// back.
 	pub fn unannounce(&self) {
 		self.alive.unannounce();
-	}
-
-	/// Create a route-fed (spliced) broadcast: consumer track lookups mint logical
-	/// tracks that are spliced across per-session tracks, queued for a route to
-	/// serve. Used by the origin for broadcasts reached over the network.
-	pub(crate) fn new_spliced(info: Info) -> Self {
-		let state = kio::Shared::new(BroadcastState {
-			spliced: Some(SplicedState::default()),
-			..Default::default()
-		});
-		Self {
-			info: Arc::new(info),
-			alive: Alive::new(state.clone()),
-			state,
-			// The origin-owned spliced broadcast stays untagged: egress attribution is
-			// applied when a tagged `origin::Consumer` hands the consumer out.
-			stats: stats::Scope::default(),
-		}
 	}
 
 	/// The broadcast's static metadata, fixed when it was created.
@@ -381,64 +333,10 @@ impl Producer {
 		)
 	}
 
-	/// Poll for the next spliced track awaiting a serving route, returning its name
-	/// and logical producer. Route-fed broadcasts only.
-	pub(crate) fn poll_spliced_assigned(&self, waiter: &kio::Waiter) -> Poll<(Arc<str>, super::resume::Producer)> {
-		let mut state = ready!(self.state.poll(waiter, |state| {
-			match &state.spliced {
-				Some(spliced) if !spliced.pending.is_empty() => Poll::Ready(()),
-				_ => Poll::Pending,
-			}
-		}));
-
-		let spliced = state.spliced.as_mut().expect("predicate guaranteed spliced");
-		let name = spliced.pending.pop_front().expect("predicate guaranteed a request");
-		let producer = spliced.tracks.get(&name).expect("pending name without a track").clone();
-		Poll::Ready((name, producer))
-	}
-
-	/// Let go of every spliced track, aborting with `err` the ones never handed
-	/// out by [`Self::poll_spliced_assigned`]. Called when the broadcast ends:
-	/// whoever took the others decides how they end.
-	pub(crate) fn release_spliced(&self, err: Error) {
-		let mut state = self.state.lock();
-		if let Some(spliced) = state.spliced.as_mut() {
-			for name in std::mem::take(&mut spliced.pending) {
-				if let Some(producer) = spliced.tracks.get_mut(&name) {
-					let _ = producer.abort(err.clone());
-				}
-			}
-			spliced.tracks.clear();
-		}
-	}
-
-	/// Remove the spliced track `producer` from under `name`, unless it has a reader.
-	///
-	/// Returns false only when a reader holds it: lookups hand out readers under the
-	/// same lock, so one arriving after the caller decided is never cut off. Anything
-	/// else (removed, or already replaced under the name) is gone as far as the caller
-	/// is concerned.
-	pub(crate) fn forget_spliced(&self, name: &str, producer: &super::resume::Producer) -> bool {
-		let mut state = self.state.lock();
-		let Some(spliced) = state.spliced.as_mut() else {
-			return true;
-		};
-		match spliced.tracks.get(name) {
-			Some(current) if current.is_clone(producer) => {
-				if current.is_used() {
-					return false;
-				}
-				spliced.tracks.remove(name);
-				true
-			}
-			_ => true,
-		}
-	}
-
 	/// Create a consumer of this one publisher's broadcast.
 	///
 	/// A view of this broadcast object, not of its path: a new publisher at the same
-	/// path is never spliced into it, so it ends when this broadcast does. Go through
+	/// path never feeds it, so it ends when this broadcast does. Go through
 	/// an origin for a consumer that should not care which publisher serves the path.
 	pub fn consume(&self) -> Consumer {
 		Consumer {
@@ -783,41 +681,6 @@ impl Consumer {
 			return Err(Error::Unroutable);
 		}
 
-		// A route-fed broadcast mints spliced logical tracks: they outlive any
-		// session, and a route is asked (via the pending queue) to start serving.
-		if let Some(spliced) = state.spliced.as_mut() {
-			// An aborted logical track is a verdict from the sources attached at
-			// the time, not a property of the name: a publisher that had not yet
-			// created the track may have it now. Drop it so this request reaches a
-			// source again, exactly as the plain lookup below reclaims a closed
-			// entry. A *finished* one stays, since its cache is still readable,
-			// until the front forgets it after going unread for its linger.
-			//
-			// So a name, once finished, is never spliced onto again: a publisher
-			// that finishes a track and publishes it again is serving new content,
-			// not resuming this one, and a subscriber has to re-read the catalog and
-			// re-initialize rather than be spliced onto it. Resuming the same
-			// content across routes is the transparent case, and that is what
-			// `resume::Producer` already does. Publish new content under a new
-			// name.
-			if spliced.tracks.get(name).is_some_and(|track| track.is_aborted()) {
-				spliced.tracks.remove(name);
-			}
-			if let Some(producer) = spliced.tracks.get(name) {
-				return Ok(track::Consumer::spliced(
-					name.into(),
-					self.info.clone(),
-					producer.consume(),
-				));
-			}
-			let name: Arc<str> = name.into();
-			let producer = super::resume::Producer::new();
-			let consumer = producer.consume();
-			spliced.tracks.insert(name.clone(), producer);
-			spliced.pending.push_back(name.clone());
-			return Ok(track::Consumer::spliced(name, self.info.clone(), consumer));
-		}
-
 		// Reuse a live producer if one is already publishing the track. `get` drops a
 		// closed entry and returns `None`, so we fall through to a fresh request.
 		if let Some(weak) = state.tracks.get(name) {
@@ -951,8 +814,7 @@ impl super::WeakEntry for WeakConsumer {
 ///
 /// Obtained from [`Producer::demand`] or [`Consumer::demand`]; the broadcast-level sibling of
 /// [`track::Demand`](crate::track::Demand). Demand means live interest in the
-/// broadcast's content: a subscribed spliced track on a route-fed broadcast, or
-/// a pending track request / a consumed track on an ordinary one. A publisher
+/// broadcast's content: a pending track request or a consumed track. A publisher
 /// uses it to run expensive work only while someone is watching, and routing
 /// uses it to advertise a warm copy at zero cost.
 ///
@@ -1127,39 +989,13 @@ mod test {
 		assert!(matches!(demand.unused().await, Err(Error::Dropped)));
 	}
 
-	/// Demand on a spliced (route-fed) broadcast follows the logical tracks'
-	/// consumers, which is what flips a relay's advertised cost.
-	#[moq_net_sim::test]
-	async fn demand_spliced() {
-		let producer = Producer::new_spliced(Info::new());
-		let consumer = producer.consume();
-		let demand = producer.demand();
-		let watched = consumer.demand();
-
-		assert!(!demand.is_used());
-		assert!(!watched.is_used());
-		let track = consumer.track("video").unwrap();
-		assert!(demand.is_used());
-		assert!(watched.is_used());
-
-		// Dropping the only consumer wakes a parked `unused`, even though the
-		// logical track itself stays cached in the broadcast.
-		let (unused, ()) = futures::join!(expect(watched.unused()), async { drop(track) });
-		unused.unwrap();
-		assert!(!demand.is_used());
-		assert!(!watched.is_used());
-
-		// A repeat consumer for the cached track counts again.
-		let _track = consumer.track("video").unwrap();
-		assert!(demand.is_used());
-	}
-
 	/// A consumer demand handle distinguishes lost demand from a dropped producer.
 	#[moq_net_sim::test]
 	async fn consumer_demand_reports_dropped_producer() {
-		let producer = Producer::new_spliced(Info::new());
+		let producer = Info::new().produce();
 		let consumer = producer.consume();
 		let watched = consumer.demand();
+		let _video = producer.create_track("video", None).unwrap();
 
 		let track = consumer.track("video").unwrap();
 		assert!(watched.is_used());

@@ -47,8 +47,8 @@ Decisions settled while planning, recorded so review does not relitigate them:
   root, and every token in a union shares the connection's root. Unscoped
   permission is `**`; an empty union grants nothing. Legacy AUTH wire codecs
   explicitly convert representable prefix unions, where `[""]` means all,
-  and refuse patterns they cannot represent. [Pattern interest](/quest/m1/path-patterns.md)
-  upgrades AUTH and ANNOUNCE_REQUEST wire fields together without changing
+  and refuse patterns they cannot represent. Pattern interest (#4277, on this
+  line) upgrades AUTH and ANNOUNCE_REQUEST wire fields together without changing
   the public pattern-valued grant type.
 - **Fail loud by aborting the session.** A publisher whose origin announces a
   broadcast outside the union aborts the session with `Unauthorized`, naming
@@ -89,6 +89,7 @@ existing lite-06 ALPN.
 
 ## Required
 
+- [WebSocket refusal](/quest/m1/auth/ws-unauthorized.md) - the relay serves WebSocket through moq-tokio, so a refused token closes the session as Unauthorized, as QUIC does
 - [Lite stream](/quest/m1/auth/lite.md) - both sides of a lite-06 session
   exchange grants over AUTH streams, exposed as `Session::auth()`, and an
   out-of-scope announce aborts the session
@@ -111,7 +112,7 @@ existing lite-06 ALPN.
 - [Expired token error](/quest/m1/auth/expired-error.md) - an expired token
   reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
-  binding through moq-ffi and moq-c
+  binding through moq-ffi
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave
   the URL: a session starts on what the URL carried and its AUTH streams add
   the rest, with the URL kept for peers below lite-06
@@ -120,7 +121,6 @@ existing lite-06 ALPN.
 
 ## Related
 
-- [Pattern interest](/quest/m1/path-patterns.md) - moves AUTH's legacy grant prefixes to patterns; ANNOUNCE_REQUEST stays a prefix
-- [Expiring media grants](/quest/m1/processor/grant-lease.md) - a worker's
+- [Expiring media grants](/quest/m2/processor/grant-lease.md) - a worker's
   lease renewal is a new in-band token
-- [P2P](/quest/m1/p2p/README.md) - the first consumer of hop-bound peer grants
+- [P2P](/quest/m2/p2p/README.md) - the first consumer of hop-bound peer grants

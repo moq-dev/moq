@@ -23,6 +23,7 @@
 //!         eprintln!("dropped {} live audio frames", write.dropped_sample_frames);
 //!     }
 //! }
+//! sink.finish().await;
 //! # Ok(())
 //! # }
 //! ```
@@ -45,12 +46,12 @@ mod sink;
 use std::sync::Arc;
 
 pub use device::{Device, devices};
-pub use sink::{Control, Input, Sink, Write};
+pub use sink::{Control, Drain, Input, Sink, Write};
 
 #[cfg(feature = "aec")]
 pub(crate) use driver::Shared;
 #[cfg(feature = "aec")]
-pub(crate) use mixer::BUS_CHANNELS;
+pub(crate) use mixer::REFERENCE_CHANNELS;
 
 use crate::Error;
 
@@ -137,13 +138,14 @@ impl Engine {
 	/// Add a stream to the mix, taking PCM in the layout `input` describes.
 	///
 	/// Independent of the device: several sinks can play at different rates and
-	/// channel counts, and each is resampled on its way to the mix. One device
+	/// layouts, and each is resampled and remixed to the device's on its way to
+	/// the mix. One device
 	/// mixes up to 64 of them, past which this returns an error rather than
 	/// handing back a sink that plays nothing.
 	pub fn sink(&self, input: Input) -> Result<Sink, Error> {
 		let sink = self
 			.shared
-			.add(|id, rate| sink::new(id, rate, input, self.shared.clone(), self.handle.clone()))?;
+			.add(|id, rate, bus| sink::new(id, rate, bus, input, self.shared.clone(), self.handle.clone()))?;
 
 		// Covers the case where the mixer's command queue was momentarily full,
 		// so a sink is never left silently unmixed.

@@ -47,7 +47,7 @@ static GATE: Mutex<()> = Mutex::new(());
 ///
 /// Lets a test pin the codec mid-call, so a cancellation lands while the request
 /// is genuinely in flight rather than racing the encode thread for it.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(apple))]
 pub(crate) fn hold() -> std::sync::MutexGuard<'static, ()> {
 	GATE.lock().unwrap_or_else(|err| err.into_inner())
 }

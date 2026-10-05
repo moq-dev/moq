@@ -24,8 +24,11 @@ AUTH can carry the full grant once the pattern-interest prerequisite lands.
   the client makes. A `?jwt=` in the URL stays a member of the union, which is
   how cluster dial targets keep their per-peer credential, and per-dial
   extras use the session's `auth().add()` once connected. moq-ffi
-  `MoqClient::set_tokens`, moq-c `moq_client_set_tokens` (mirrored in the
-  wrappers and `cpp/obs/src`), and `js/net`'s `connect` options field follow.
+  `MoqClient::set_tokens` (mirrored in the wrappers, and reaching the
+  generated C and C++ bindings and OBS through
+  [C++ through moq-ffi](/quest/m1/cpp/README.md)) and `js/net`'s `connect`
+  options field follow. Decided in the 2026-09-30 audit: no new libmoq API,
+  since it gets no more feature work.
 - Credential refresh belongs with token presentation. Resolve the configured
   credential source before each dial. After an authorization refusal, resolve
   it once more and retry only when the credential changed; do not loop on a

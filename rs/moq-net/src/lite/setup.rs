@@ -185,6 +185,8 @@ pub struct Setup {
 }
 
 impl Message for Setup {
+	const MAX_SIZE: usize = crate::setup::MAX_SETUP_SIZE;
+
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_setup_stream() {
 			return Err(DecodeError::Version);
@@ -192,7 +194,7 @@ impl Message for Setup {
 
 		let params = Parameters::decode(r, version)?;
 		let probe = params
-			.get_varint(PARAM_PROBE)?
+			.get_varint(PARAM_PROBE, version)?
 			.map(ProbeLevel::from_code)
 			.unwrap_or_default();
 		let path = match params.get_bytes(PARAM_PATH) {
@@ -203,11 +205,13 @@ impl Message for Setup {
 			),
 			None => None,
 		};
-		let role = params.get_varint(PARAM_ROLE)?.and_then(Role::from_code);
-		let cost = params.get_varint(PARAM_COST)?;
+		let role = params.get_varint(PARAM_ROLE, version)?.and_then(Role::from_code);
+		let cost = params.get_varint(PARAM_COST, version)?;
 		// 0 is legal on the wire but carries no identity (it can't be excluded),
 		// so it decodes as "not declared" rather than an error.
-		let hop = params.get_varint(PARAM_HOP)?.and_then(|id| crate::Hop::new(id).ok());
+		let hop = params
+			.get_varint(PARAM_HOP, version)?
+			.and_then(|id| crate::Hop::new(id).ok());
 
 		Ok(Self {
 			probe,
@@ -226,7 +230,7 @@ impl Message for Setup {
 		let mut params = Parameters::default();
 		// None is the wire default, so omit it to keep the message empty when nothing is set.
 		if self.probe != ProbeLevel::None {
-			params.set_varint(PARAM_PROBE, self.probe.to_code());
+			params.set_varint(PARAM_PROBE, self.probe.to_code(), version)?;
 		}
 		if let Some(path) = &self.path {
 			params.set_bytes(PARAM_PATH, path.as_bytes().to_vec());
@@ -234,13 +238,13 @@ impl Message for Setup {
 		// Bidirectional is the wire default (absence of the parameter), so only a
 		// directional role is encoded.
 		if let Some(role) = self.role {
-			params.set_varint(PARAM_ROLE, role.to_code());
+			params.set_varint(PARAM_ROLE, role.to_code(), version)?;
 		}
 		if let Some(cost) = self.cost {
-			params.set_varint(PARAM_COST, cost);
+			params.set_varint(PARAM_COST, cost, version)?;
 		}
 		if let Some(hop) = self.hop {
-			params.set_varint(PARAM_HOP, hop.id());
+			params.set_varint(PARAM_HOP, hop.id(), version)?;
 		}
 
 		params.encode(w, version)
@@ -253,12 +257,30 @@ impl Message for Setup {
 /// stream) wait on this before deciding what to do. Cheap to clone: every handle
 /// shares the same slot.
 #[derive(Clone, Default)]
-pub(crate) struct PeerSetup(kio::Shared<Option<Setup>>);
+pub(crate) struct PeerSetup(kio::Shared<PeerSetupState>);
+
+#[derive(Default)]
+struct PeerSetupState {
+	seen: bool,
+	setup: Option<Setup>,
+}
 
 impl PeerSetup {
 	/// Record the peer's SETUP.
 	pub fn set(&self, setup: Setup) {
-		*self.0.lock() = Some(setup);
+		let mut state = self.0.lock();
+		state.seen = true;
+		state.setup = Some(setup);
+	}
+
+	/// Claim the Setup Stream before decoding its body, refusing any second stream.
+	pub fn claim(&self) -> Result<(), crate::Error> {
+		let mut state = self.0.lock();
+		if state.seen {
+			return Err(crate::Error::ProtocolViolation);
+		}
+		state.seen = true;
+		Ok(())
 	}
 
 	/// Poll for the peer's advertised probe level, waiting until its SETUP arrives.
@@ -285,13 +307,13 @@ impl PeerSetup {
 	/// driver.
 	fn poll_get<T>(&self, waiter: &kio::Waiter, f: impl FnOnce(&Setup) -> T) -> std::task::Poll<T> {
 		let slot = std::task::ready!(self.0.poll(waiter, |setup| {
-			if setup.is_some() {
+			if setup.setup.is_some() {
 				std::task::Poll::Ready(())
 			} else {
 				std::task::Poll::Pending
 			}
 		}));
-		std::task::Poll::Ready(f(slot.as_ref().expect("waited for Some")))
+		std::task::Poll::Ready(f(slot.setup.as_ref().expect("waited for Some")))
 	}
 }
 
@@ -364,6 +386,51 @@ mod tests {
 		}
 	}
 
+	/// Parameter values follow the session's varint codec, not a fixed one: a value that
+	/// takes the two-byte QUIC form on lite-06 fits one leading-ones byte on lite-07.
+	#[test]
+	fn parameter_values_use_the_version_codec() {
+		let msg = Setup {
+			cost: Some(100),
+			..Default::default()
+		};
+		for (version, wire) in [
+			(Version::Lite06, &[0x05, 0x01, 0x04, 0x02, 0x40, 0x64][..]),
+			(Version::Lite07, &[0x04, 0x01, 0x04, 0x01, 0x64][..]),
+		] {
+			let buf = msg.encode_bytes(version).unwrap();
+			assert_eq!(buf, wire, "{version}");
+			assert_eq!(
+				Setup::decode_slice(&buf, version).unwrap(),
+				(msg.clone(), buf.len()),
+				"{version}"
+			);
+		}
+	}
+
+	/// Never emit a SETUP our own receiver would refuse.
+	#[test]
+	fn encode_enforces_the_setup_limit() {
+		// Count, id, and a 4-byte length varint precede the path.
+		let at_limit = crate::setup::MAX_SETUP_SIZE - 6;
+		let msg = Setup {
+			path: Some("a".repeat(at_limit)),
+			..Default::default()
+		};
+		assert_eq!(round_trip(&msg), msg);
+
+		let msg = Setup {
+			path: Some("a".repeat(at_limit + 1)),
+			..Default::default()
+		};
+		let mut buf = Vec::new();
+		assert!(matches!(
+			msg.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05),
+			Err(EncodeError::TooLarge)
+		));
+		assert!(buf.is_empty());
+	}
+
 	#[test]
 	fn path_round_trip() {
 		let msg = Setup {
@@ -391,7 +458,7 @@ mod tests {
 
 		let version = Version::Lite05;
 		let mut params = Parameters::default();
-		params.set_varint(super::PARAM_HOP, 0);
+		params.set_varint(super::PARAM_HOP, 0, version).unwrap();
 		let mut body = Vec::new();
 		params
 			.encode(&mut Encoder::new(&mut body, version.into()), version)
@@ -435,7 +502,7 @@ mod tests {
 		// Frame a SETUP message carrying an unknown probe level (99) by hand: the
 		// parameters body, prefixed with its length (the lite Message size prefix).
 		let mut params = Parameters::default();
-		params.set_varint(PARAM_PROBE, 99);
+		params.set_varint(PARAM_PROBE, 99, Version::Lite05).unwrap();
 		let mut body = Vec::new();
 		params
 			.encode(&mut Encoder::new(&mut body, Version::Lite05.into()), Version::Lite05)
@@ -469,7 +536,7 @@ mod tests {
 		// server. The draft mandates this fallback.
 		for code in [0u64, 9, 250] {
 			let mut params = Parameters::default();
-			params.set_varint(PARAM_ROLE, code);
+			params.set_varint(PARAM_ROLE, code, Version::Lite05).unwrap();
 			let mut body = Vec::new();
 			params
 				.encode(&mut Encoder::new(&mut body, Version::Lite05.into()), Version::Lite05)

@@ -234,7 +234,7 @@ impl<O: Output> Media<O> {
 					decode.output.format = moq_audio::Format::F32;
 					match moq_audio::decode::Consumer::new(&rendition, &config, &name, decode).await {
 						Ok(consumer) => {
-							tracing::info!(track = name, "playing audio rendition");
+							tracing::info!(track = name, decoder = consumer.name(), "playing audio rendition");
 							if speaker.is_none() {
 								speaker = Some(self.output.speaker().await?);
 							}
@@ -405,17 +405,10 @@ async fn play_audio<O: Output>(
 /// Play out what a retired sink still holds, instead of cutting the tail off
 /// by dropping it. `latency` is the depth the sink was opened with.
 async fn drain(sink: impl Sink, latency: Duration) {
-	let drain = async {
-		// A partial period is left to the device: waiting on the last few
-		// milliseconds costs a wakeup per iteration and can never fully settle.
-		while let Some(remaining) = sink.buffered().checked_sub(Duration::from_millis(10)) {
-			tokio::time::sleep(remaining.max(Duration::from_millis(10))).await;
-		}
-	};
 	// A write tops the ring up to its latency and then adds a chunk, so that sum
 	// is the deepest it can be when the track ends, and draining it takes exactly
 	// that long in real time.
-	let _ = tokio::time::timeout(latency + AUDIO_CHUNK + AUDIO_DRAIN_GRACE, drain).await;
+	let _ = tokio::time::timeout(latency + AUDIO_CHUNK + AUDIO_DRAIN_GRACE, sink.finish()).await;
 }
 
 #[cfg(test)]
@@ -539,12 +532,38 @@ mod tests {
 		let played = recorder.played();
 		let old_end = played.iter().filter(|p| p.sample == OLD).map(|p| p.to).max().unwrap();
 		let new_start = played.iter().filter(|p| p.sample == NEW).map(|p| p.from).min().unwrap();
-		// The tail plays out while the replacement fills, so the two meet. What is
-		// left is the partial period `drain` leaves to the device, which dropping
-		// the sink cuts.
+		// Tokio rounds the replacement's pacing sleep to the next millisecond.
+		// The exact sample count below rules out any truncation within that tick.
 		let gap = new_start.saturating_duration_since(old_end);
-		assert!(gap < AUDIO_CHUNK, "the switch went silent for {gap:?}");
+		assert!(gap <= Duration::from_millis(1), "the switch went silent for {gap:?}");
+		let old_duration: Duration = played.iter().filter(|p| p.sample == OLD).map(|p| p.to - p.from).sum();
+		assert_eq!(old_duration, Duration::from_secs(1));
 	}
+	#[tokio::test]
+	async fn a_finite_audio_track_plays_its_final_samples() {
+		tokio::time::pause();
+		let origin = moq_tokio::origin::spawn();
+		let mut broadcast = origin.create_broadcast("room").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let mut catalog = catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let recorder = Recorder::default();
+		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
+		let mut audio = rendition(&broadcast, &catalog, "audio");
+		audio.write(packet(0, 0.25)).unwrap();
+		tokio::time::sleep(PACKET_DURATION).await;
+		audio.finish().unwrap();
+		drop(audio);
+		catalog.finish().unwrap();
+		player.await.unwrap();
+		match recorder.events().pop() {
+			Some(Event::Ended) => {}
+			Some(Event::Failed(err)) => panic!("playback failed: {err}"),
+			_ => panic!("playback never ended"),
+		}
+		let played: Duration = recorder.played().iter().map(|p| p.to - p.from).sum();
+		assert_eq!(played, PACKET_DURATION, "the finished track lost its tail");
+	}
+
 	/// The 61-frame tune-in burst from #3946 must reach the clock before the
 	/// window drains its first picture, regardless of the raw queue's capacity.
 	#[tokio::test]

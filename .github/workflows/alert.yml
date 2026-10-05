@@ -21,13 +21,14 @@ on:
     # Android) are omitted so they don't spawn a skipped Alert run on every
     # push to every PR. `just gh check` enforces both halves of that.
     #
-    # Swift and Platform are here despite also running on pull requests: Swift
-    # warms its own Rust cache on `main`, and Platform compiles every merge to
-    # `main` and `dev`. Those push runs are nobody's check, so a break in them
+    # Swift, OBS, and Platform are here despite also running on pull requests:
+    # Swift warms its own Rust cache on `main`, and OBS and Platform build every
+    # merge to `main` and `release`. Those push runs are nobody's check, so a break in them
     # would otherwise go unseen. The cost is a skipped Alert run per pull
     # request.
     workflows:
       - apt-repo
+      - Back-merge
       - Cache
       - Cachix
       - Docker
@@ -37,7 +38,9 @@ on:
       - moq-gst
       - moq-relay
       - Nightly
+      - OBS
       - Platform
+      - Quest
       - release-brew
       - Release Dart
       - Release Dart FFI
@@ -80,6 +83,8 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Post to Discord
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
@@ -90,4 +95,4 @@ jobs:
           RUN_REF: ${{ github.event.workflow_run.head_branch }}
           RUN_TITLE: ${{ github.event.workflow_run.display_title }}
           RUN_ACTOR: ${{ github.event.workflow_run.triggering_actor.login }}
-        run: .github/scripts/alert.sh discord
+        run: just gh alert discord

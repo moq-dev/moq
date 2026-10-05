@@ -17,12 +17,12 @@ pub use self::result::ClientSessionResult;
 pub use self::state::ClientState;
 
 use self::outstanding_transaction::{OutstandingTransaction, TransactionPurpose};
+use crate::rml::amf0::Amf0Value;
 use crate::rml::chunk_io::{ChunkDeserializer, ChunkSerializer, Packet};
 use crate::rml::messages::{RtmpMessage, UserControlEventType};
 use crate::rml::sessions::StreamMetadata;
 use crate::rml::time::RtmpTimestamp;
 use bytes::Bytes;
-use rml_amf0::Amf0Value;
 use std::collections::HashMap;
 use std::mem;
 use std::time::SystemTime;
@@ -155,6 +155,11 @@ impl ClientSession {
 						RtmpMessage::WindowAcknowledgement { size } => self.handle_window_ack_size(size)?,
 
 						RtmpMessage::SetChunkSize { size } => self.handle_set_chunk_size(size)?,
+
+						RtmpMessage::Abort { stream_id } => {
+							self.deserializer.abort(stream_id);
+							Vec::new()
+						}
 
 						_ => vec![ClientSessionResult::UnhandleableMessageReceived(payload)],
 					};

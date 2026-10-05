@@ -48,7 +48,9 @@ numbers for different media.
 `--listen-tls-cert`/`--listen-tls-key` or `--listen-tls-generate` serve HTTPS,
 and `--cors-origin` opens it to browsers.
 H.264/H.265 and AAC/Opus renditions are served. Import handles classic HLS;
-LL-HLS parts are not implemented yet. The library is
+LL-HLS parts are not implemented yet. It publishes the playlist's own media
+times, and the catalog clock maps the first imported segment to the time it
+arrived, one mapping for every rendition. The library is
 [`moq-hls`](https://docs.rs/moq-hls).
 
 ## Recording segments

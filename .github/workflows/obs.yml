@@ -7,7 +7,9 @@ name: OBS
 # Linux is the platform that needs no bundle at all -- nixpkgs has obs-studio,
 # Qt6 and ffmpeg, so the `.#obs` shell is the whole dependency set. The plugin is
 # platform-independent C++ over moq-c's C ABI, so a Linux compile catches the
-# breakage a macOS developer would otherwise ship uncompiled.
+# breakage a macOS developer would otherwise ship uncompiled. The macOS and
+# Windows release builds cover the rest: each platform's link line and the
+# obs-deps bundle.
 #
 # Narrow trigger, like swift.yml: the plugin's own sources, the moq-c header
 # they call through, and the flake that supplies the toolchain.
@@ -36,19 +38,35 @@ name: OBS
 # A list of paths still can't be complete here -- a vendored C source or a
 # .cargo/config.toml could do it too -- and `rs/**` would run this on nearly
 # every PR, which is the cost that removed the Windows and macOS gates (#2600).
-# So this filter covers the likely inputs at PR time and nightly.yml runs the
-# same recipe diff-independently to cover the rest.
+# So this filter covers the likely inputs at PR time, and pushes to `main` and
+# `release` rebuild on any Rust or plugin change to cover the rest. nightly.yml also
+# runs the Linux recipe diff-independently.
 
 permissions:
   contents: read
 
 on:
+  push:
+    branches: [main, release]
+    paths:
+      - "rs/**"
+      - "cpp/obs/**"
+      - "doc/lib/c/**"
+      - "doc/lib/samples.sh"
+      - ".cargo/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/obs.yml"
   pull_request:
     # `closed` is here only so merging/closing a PR cancels its in-flight run
     # via the concurrency group below; the job itself is skipped on close.
     types: [opened, synchronize, reopened, closed]
     paths:
       - "cpp/obs/**"
+      - "sh/obs/**"
       - "rs/moq-c/**"
       - "doc/lib/c/**"
       - "doc/lib/samples.sh"
@@ -61,9 +79,12 @@ on:
       - "flake.lock"
       - ".github/workflows/obs.yml"
 
+# Keyed and cancelled like platform.yml: a merged PR's `closed` run must not
+# cancel the push run it triggers, and `main` merges faster than a push run
+# finishes, so pushes queue rather than cancel.
 concurrency:
-  group: obs-${{ github.ref }}
-  cancel-in-progress: true
+  group: obs-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -108,3 +129,41 @@ jobs:
       # cargo step inside is a no-op and this is just a cc and a run.
       - name: moq-c C fixtures
         run: nix develop .#obs --command just rs c-tests
+
+  # The release build of the OBS plugin, minus the published moq-c: build.sh
+  # without `--moq-c-release` links the in-tree rs/moq-c instead, so a PR is
+  # checked against its own C ABI. The obs-deps bundle (libobs, Qt6, ffmpeg)
+  # comes from buildspec.json at configure time, same as a tag build.
+  release:
+    name: OBS (${{ matrix.name }})
+    if: github.event.action != 'closed'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            target: aarch64-apple-darwin
+            os: macos-latest
+          - name: Windows
+            target: x86_64-pc-windows-msvc
+            # The plugin preset uses the Visual Studio 17 2022 generator.
+            os: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: ./.github/actions/just
+
+      - name: Build
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: just obs package --target "$TARGET" --output "$RUNNER_TEMP/obs"

@@ -29,6 +29,7 @@ normative:
     date: false
   RFC3986:
   RFC6455:
+  RFC9000:
   RFC9002:
 
 informative:
@@ -115,8 +116,9 @@ Each client establishes a session with a CDN edge server, ideally the closest on
 Any broadcasts and subscriptions are transparently proxied by the CDN behind the scenes.
 
 ## Broadcast
-A Broadcast is a collection of Tracks from a single publisher.
+A Broadcast is a collection of Tracks named by a path.
 This corresponds to a MoqTransport's "track namespace".
+A path names one Broadcast whichever publisher serves it: a publisher MUST NOT reuse a path for different content, and publishes a new instance under a new path instead.
 
 A publisher advertises what it can serve via ANNOUNCE_START messages, each carrying a path prefix: a route covering every broadcast path beneath it.
 A route is the only shape an advertisement takes: a publisher that serves only some of the paths beneath a prefix, such as a transcoder for any broadcast's derivative, advertises the covering prefix and refuses the requests it will not serve (see [Resolution](#resolution)); no message narrows a route.
@@ -408,6 +410,9 @@ This is the only loop defense moq-lite requires, and it catches loops of any len
 A conforming sender never sends one (see below), so a receiver MAY instead close the session with a protocol violation; discarding is what keeps a mesh working when one member does not conform.
 A Hop ID of 0 means unknown and never matches anything; withholding an ID trades loop detection for privacy.
 A receiver MAY assign an identity of its own to a peer that declared 0, as local selection state for filtering that session; it MUST NOT forward that identity as a Hop ID.
+A relay that records an announcement whose reconstructed path starts with 0 MUST insert a random non-zero Hop ID in front of it, picked once for the session it arrived on; an empty path becomes that stamp followed by 0.
+Nothing on the wire says whether an unnamed publisher that reconnects is the same one, so its reconnect reads downstream as a new first hop, while an ANNOUNCE_UPDATE on the same session keeps the stamp.
+The 0 behind the stamp keeps the path ranked below fully identified ones.
 
 A publisher MUST NOT advertise a path whose entries contain the Hop ID the subscriber declared in its SETUP (see [Hop Parameter](#hop-parameter)).
 The receiver can only discard it, and acting on it would form a loop, so sending one is never useful.
@@ -420,10 +425,7 @@ Applying one rule to both advertisement and dispatch keeps advertised paths trut
 
 When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering route (see [Resolution](#resolution)), then a path that contains no 0 Hop ID over one that does, then the lowest Warm Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the lowest Cold Route Cost, then toward the shortest path, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
 
-A route's identity is its first hop: the endpoint that originated it (see [ANNOUNCE_START](#announce-start)).
-Two routes covering one path with the same non-zero first hop are the same origin reached different ways, and a relay MAY move a live subscription between them, resuming at a group boundary, so a route change the identity survives (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
-Across differing first hops, or where either is 0, the routes promise nothing about each other's content: a relay MUST NOT splice a live subscription across them, and when the serving session ends, in-flight subscriptions end with it (a reset) and the subscriber re-requests through the best remaining route.
-Equal first hops promise the same origin, not interchangeable bytes; what a resuming relay serves next is whatever that origin publishes next at the group boundary.
+Every route covering a path serves the same Broadcast, so a relay MAY move a live subscription between them, continuing from the first frame the subscriber lacks, and a route change (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
 
 #### Resolution {#resolution}
 A SUBSCRIBE, FETCH, or TRACK request names a path, and the receiver resolves it against the routes covering that path, after the per-subscriber exclusion above.
@@ -457,6 +459,7 @@ A subscriber opens Subscribe Streams to request a Track.
 The subscriber MUST start a Subscribe Stream with a SUBSCRIBE message followed by any number of SUBSCRIBE_UPDATE messages.
 The publisher replies with a SUBSCRIBE_OK message once the start group is resolved, followed by a SUBSCRIBE_END message once the subscription ends.
 For a live track the publisher MAY withhold SUBSCRIBE_OK until the first matching group resolves the start; if the track has already ended with no matching groups, it sends SUBSCRIBE_END with no preceding SUBSCRIBE_OK.
+A requested start past the publisher's largest position is the exception: the publisher MUST send SUBSCRIBE_OK without waiting, with `Group` set to the requested start group, so a subscriber resuming just past what it holds learns where the live feed is from the answer alone (a quiet track may not reach the start for a long time).
 A rejection is a stream reset: a publisher that cannot serve the subscription (no such track, an ended broadcast, or any other refusal) MUST promptly reset the stream rather than leave it pending, so a subscriber distinguishes "pending" from "refused" by the reset, not by a timeout.
 A route claims capability rather than inventory, so a subscription for a covered path that names nothing is refused this way too.
 
@@ -464,7 +467,9 @@ The track's immutable publisher properties are not carried here; they are fetche
 The subscriber needs the track's TRACK_INFO (notably its timescale) to interpret FRAME messages, and MAY open the Track and Subscribe streams concurrently, buffering frames until it arrives.
 
 The publisher sends SUBSCRIBE_OK once the absolute start position is resolved, and SUBSCRIBE_END once no further groups will be produced and every Group Stream it opens for the subscription has been opened (see [SUBSCRIBE_OK](#subscribe-ok) and [SUBSCRIBE_END](#subscribe-end)).
-The publisher closes the stream (FIN) after SUBSCRIBE_END, once every counted Group Stream has finished or been reset.
+The publisher closes its side of the stream (FIN) after SUBSCRIBE_END, once every counted Group Stream has finished or been reset.
+After reading the publisher's FIN, the subscriber MUST close its side (FIN) once its tail accounting has settled: every received Group Stream has been read to its FIN, reset, or dropped, and every remaining counted stream has arrived or exhausted the subscriber's grace period.
+A publisher closing its session gracefully MUST wait for the subscriber's FIN or reset on every Subscribe Stream before closing the connection; a transport acknowledgement alone does not confirm the subscriber read the tail.
 Unbounded subscriptions stay open until SUBSCRIBE_END, and either endpoint MAY reset the stream at any time.
 
 ### Fetch
@@ -679,6 +684,12 @@ A group whose frame does not fit is simply not eligible for datagram delivery.
 # Encoding
 This section covers the encoding of each message.
 
+## Variable-Length Integers {#varint}
+A field marked `(i)` is a variable-length integer.
+moq-lite-07 uses the leading-ones encoding of [moqt]: the number of leading 1 bits in the first byte gives the length, from 1 byte carrying 7 bits to 9 bytes carrying 64, and every length is valid.
+Earlier versions use the two-bit length prefix of [RFC9000], Section 16, which carries at most 2^62-1.
+A relay that cannot encode a value for a peer on an earlier version MUST NOT truncate it.
+
 ## Message Length
 Most messages are prefixed with a variable-length integer indicating the number of bytes in the message payload that follows.
 This length field does not include the length of the varint length itself.
@@ -717,6 +728,8 @@ Setup Parameter {
   Parameter Value (..)
 }
 ~~~
+
+The Message Length MUST NOT exceed 65,536 bytes; a receiver MUST treat a longer SETUP as a protocol violation and MAY reject it based on the length prefix alone.
 
 **Parameter Count**:
 The number of Setup Parameters that follow.
@@ -910,8 +923,8 @@ The responding publisher's own Hop ID is NOT included in the resolved list; it i
 When forwarding an announcement received from an upstream peer, a relay MUST append the upstream peer's ANNOUNCE_OK `Hop ID` to the resolved list, since that ID is no longer implicit downstream.
 The first entry of the reconstructed path identifies the endpoint that originated the route.
 A Hop ID value of 0 means the hop is unknown: either it was never assigned or a relay deliberately withholds it (see [Routing](#routing)).
-A received 0 is forwarded unchanged.
-When bridging an announcement from an upstream that sent no hop list, a relay writes 0 for that hop.
+A received 0 is forwarded unchanged, behind a stamp when it is the first entry (see [Routing](#routing)).
+When bridging an announcement from an upstream that sent no hop list, a relay writes its stamp followed by 0 for that hop.
 An identity a receiver assigned that upstream is local selection state and MUST NOT be forwarded as a Hop ID.
 
 A receiver MUST close the session with a PROTOCOL_VIOLATION if a non-zero Hop ID appears twice in the resolved list.
@@ -1128,13 +1141,15 @@ Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (
 A SUBSCRIBE_OK message confirms a subscription and resolves its absolute start position.
 It is the first message the publisher sends on the Subscribe Stream, once the start position is known.
 
-This is the trimmed-down counterpart of MoqTransport's SUBSCRIBE_OK: it retains the name and the role of the publisher's positive response, but carries only the resolved start position (all other per-track properties live in [TRACK_INFO](#track-info)).
+This is the trimmed-down counterpart of MoqTransport's SUBSCRIBE_OK: it retains the name and the role of the publisher's positive response, but carries only the resolved start position and the publisher's largest position (all other per-track properties live in [TRACK_INFO](#track-info)).
 
 ~~~
 SUBSCRIBE_OK Message {
   Type (i) = 0x0
   Message Length (i)
   Group (i)
+  Largest Group (i)
+  [Largest Frame (i)]
 }
 ~~~
 
@@ -1154,6 +1169,11 @@ The subscriber derives the start frame from `Group` and its own request:
 
 The second case is easy to get wrong, so to be explicit: a subscriber that requested group 5 frame 15 and receives `Group` = 6 starts at **frame 0** of group 6, not frame 15.
 The frame offset belonged to group 5 and is gone along with the rest of it; it does not carry forward to whichever group the publisher resolved to.
+
+**Largest Group** and **Largest Frame**:
+The largest position the publisher has for the track when it answers: the last frame that exists, like moq-transport's Largest Location.
+`Largest Group` is the group sequence plus one, and 0 means the track has nothing yet, in which case `Largest Frame` is absent.
+A subscriber takes it as where the live feed is: a relay holding groups from an earlier subscription serves them from cache only once this says they are current, which a publisher answering promptly lets it do without waiting for a frame.
 
 ## SUBSCRIBE_END {#subscribe-end}
 A SUBSCRIBE_END message is sent by the publisher to signal that no group at or after a given sequence will be produced.
@@ -1338,14 +1358,20 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
+- The subscriber FINs its Subscribe Stream after settling its tail; graceful session close waits for that FIN or reset.
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
+- Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it. Earlier versions carry no such position, so a subscriber takes the first frame instead.
+- A path names one Broadcast whichever publisher serves it, and a publisher MUST NOT reuse a path for different content. A relay MAY move a subscription between any routes covering the path, continuing from the first frame the subscriber lacks instead of at a group boundary. Replaces the first-hop identity.
 
 - Assigned `moq-lite-07-wip` as this draft's protocol identifier until it is finalized as `moq-lite-07`.
+- Switched every variable-length integer, including SETUP parameter values, from QUIC's two-bit length prefix to moq-transport's leading-ones encoding, widening the range to 64 bits.
 - Hid routes with a `.`-prefixed segment below the requested prefix from announce discovery, and added the ANNOUNCE_REQUEST `Hidden` field to opt in.
 - Added `Stream Count` to SUBSCRIBE_END: the number of Group Streams opened for the subscription. SUBSCRIBE_END is now sent once every counted Group Stream has opened, rather than as soon as the final group is known.
 - Removed SUBSCRIBE_DROP and its type 0x2; a group without a Group Stream is not counted.
 - The Subscribe Stream FIN now follows once every counted Group Stream has finished or been reset.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
+- Capped the SETUP Message Length at 65,536 bytes.
+- A relay puts a random Hop ID, picked per session, in front of an announcement whose reconstructed path starts with 0, and writes that stamp followed by 0 for an empty path.
 
 ## moq-lite-06
 

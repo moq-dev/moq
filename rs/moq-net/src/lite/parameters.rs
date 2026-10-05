@@ -27,23 +27,21 @@ impl Parameters {
 		self.0.iter().find(|(k, _)| *k == id).map(|(_, v)| v.as_slice())
 	}
 
-	/// Set a parameter to a varint value, replacing any existing entry.
-	///
-	/// Panics past [`crate::coding::varint::MAX_QUIC`], which no parameter we set comes near.
-	pub fn set_varint(&mut self, id: u64, value: u64) {
+	/// Set a parameter to a varint value in `version`'s encoding, replacing any existing entry.
+	pub fn set_varint(&mut self, id: u64, value: u64, version: Version) -> Result<(), EncodeError> {
 		let mut buf = Vec::new();
-		Encoder::new(&mut buf, Form::Quic)
-			.varint(value)
-			.expect("parameter varint in range");
+		Encoder::new(&mut buf, version.into()).varint(value)?;
 		self.set_bytes(id, buf);
+		Ok(())
 	}
 
-	/// Decode a parameter as a single varint, if present. Errors if trailing bytes remain.
-	pub fn get_varint(&self, id: u64) -> Result<Option<u64>, DecodeError> {
+	/// Decode a parameter as a single varint in `version`'s encoding, if present. Errors if
+	/// trailing bytes remain.
+	pub fn get_varint(&self, id: u64, version: Version) -> Result<Option<u64>, DecodeError> {
 		let Some(bytes) = self.get_bytes(id) else {
 			return Ok(None);
 		};
-		let mut r = Decoder::new(bytes, Form::Quic);
+		let mut r = Decoder::new(bytes, version.into());
 		let value = r.varint()?;
 		if !r.is_empty() {
 			return Err(DecodeError::Long);

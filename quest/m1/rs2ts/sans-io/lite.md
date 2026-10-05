@@ -25,4 +25,4 @@ Guidance:
 - Turn the session's async test bodies into synchronous `poll_*` tests with
   explicit instants as it is rewritten, so they translate with the code.
 
-Public API: breaks moq-net's session API; retargets to `dev`. Wire: none.
+Public API: breaks moq-net's session API. Wire: none.

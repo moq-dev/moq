@@ -18,7 +18,7 @@ mod bytes;
 pub(crate) mod clock;
 mod datagram;
 mod requests;
-pub(crate) mod resume;
+mod resume;
 mod subscription;
 mod time;
 mod timed;
@@ -41,7 +41,7 @@ pub use timed::Timed;
 /// Publishing broadcasts, announcing routes, and consuming both through an origin.
 pub mod origin {
 	pub use super::origin_impl::{
-		Config, Consumer, Cost, Driver, Dynamic, Producer, Request, Requesting, Route, Source,
+		Config, Consumer, Cost, DEFAULT_UPDATE_HOLD, Driver, Dynamic, Producer, Request, Requesting, Route, Source,
 	};
 }
 

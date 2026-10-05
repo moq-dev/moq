@@ -50,8 +50,11 @@ export interface Established {
 	 */
 	stats(): Promise<Stats>;
 
-	/** Close the session. */
-	close(): void;
+	/** Withdraw announcements and wait up to one second for delivery, then close the session. */
+	close(): Promise<void>;
+
+	/** End the session immediately without waiting for delivery. */
+	abort(): void;
 
 	/**
 	 * Resolves when the session closes: `null` for a clean close, an `Error.Session` when the

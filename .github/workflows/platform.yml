@@ -3,18 +3,15 @@ name: Platform
 # Compiles the workspace on Windows and macOS, the `#[cfg(...)]` code no Linux
 # job compiles at all: moq-video's Media Foundation and VideoToolbox backends,
 # their capture paths, moq-audio's ScreenCaptureKit capture, and the smaller
-# platform branches elsewhere. It also builds the OBS plugin against the
-# obs-deps bundle, which obs.yml can't do on Linux. Without this, a change that
-# breaks any of them (a moq-net type they consume, say) merges green and
-# compiles for the first time in a tag-triggered release build.
+# platform branches elsewhere. Without this, a change that breaks any of them
+# (a moq-net type they consume, say) merges green and compiles for the first
+# time in a tag-triggered release build.
 #
-# Filtered to the Rust workspace and the OBS plugin, rather than to each job's
-# exact dependency graph like android.yml: these are the slowest and most
-# expensive runners in CI, and a quest or docs PR has nothing for them to build.
-#
-# Pushes to `main` and `dev` catch the break two individually green PRs make
-# once both land, which is what the nightly run of these jobs used to cover.
-# `dev` never ran the nightly at all.
+# A pull request compiles only the crates it changed plus their dependents,
+# the same selection the Linux `check` job makes, because these are the
+# slowest and scarcest runners in CI. Pushes to `main` and `release` compile
+# everything, catching the break two individually green PRs make once both
+# land.
 #
 # Outside Nix, like android.yml: neither runner has it, so each installs the
 # runner-native toolchain. rust-toolchain.toml still pins the compiler, and the
@@ -29,15 +26,15 @@ permissions:
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, release]
     paths:
       - "rs/**"
-      - "cpp/**"
       - ".cargo/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "justfile"
+      - "sh/**"
       - ".github/workflows/platform.yml"
   pull_request:
     # `closed` is here only so merging/closing a PR cancels its in-flight run
@@ -45,12 +42,12 @@ on:
     types: [opened, synchronize, reopened, closed]
     paths:
       - "rs/**"
-      - "cpp/**"
       - ".cargo/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "justfile"
+      - "sh/**"
       - ".github/workflows/platform.yml"
 
 concurrency:
@@ -59,10 +56,10 @@ concurrency:
   # PR's `closed` run can report the base branch as its ref instead of the PR's
   # merge ref, and then wouldn't cancel the PR's in-flight run.
   group: platform-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
-env:
-  JUST_VERSION: 1.52.0
+  # Pushes queue instead: `main` merges faster than these jobs finish, so
+  # cancelling meant almost no push run ever reported. Actions keeps only the
+  # newest pending run, so queued merges still coalesce.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   windows:
@@ -76,6 +73,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Full history so a pull request can diff against its base.
+          fetch-depth: 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -87,16 +86,13 @@ jobs:
           choco install nasm -y --no-progress
           "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      # A checksummed release binary, where `cargo install` would spend ~2 minutes
-      # building just from source.
-      - name: Install just
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
-        with:
-          tool: just@${{ env.JUST_VERSION }}
+      - uses: ./.github/actions/just
 
       - name: Check
         shell: bash
-        run: just rs windows
+        env:
+          SCOPE: ${{ github.event_name == 'push' && '--all' || '' }}
+        run: just rs windows "$SCOPE"
 
   macos:
     name: macOS
@@ -109,50 +105,14 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - name: Install just
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
-        with:
-          tool: just@${{ env.JUST_VERSION }}
+      - uses: ./.github/actions/just
 
       - name: Check
-        run: just rs macos
-
-  # The release build of the OBS plugin, minus the published moq-c: build.sh
-  # without `--moq-c-release` links the in-tree rs/moq-c instead, so a PR is
-  # checked against its own C ABI. The obs-deps bundle (libobs, Qt6, ffmpeg)
-  # comes from buildspec.json at configure time, same as a tag build.
-  obs:
-    name: OBS (${{ matrix.name }})
-    if: github.event.action != 'closed'
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: macOS
-            target: aarch64-apple-darwin
-            os: macos-latest
-          - name: Windows
-            target: x86_64-pc-windows-msvc
-            # The plugin preset uses the Visual Studio 17 2022 generator.
-            os: windows-2022
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Build
-        shell: bash
         env:
-          TARGET: ${{ matrix.target }}
-        run: ./cpp/obs/build.sh --target "$TARGET" --output "$RUNNER_TEMP/obs"
+          SCOPE: ${{ github.event_name == 'push' && '--all' || '' }}
+        run: just rs macos "$SCOPE"

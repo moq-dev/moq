@@ -56,12 +56,22 @@ struct Outcome {
 	elapsed: Duration,
 }
 
-/// Publish a group below the declared end (or none for an empty track), hold its stream
-/// back until the subscription ends, then deliver or lose it.
-async fn round(version: &str, late: Late, final_sequence: u64) -> Outcome {
+/// A publisher and subscriber over the mock, with the subscriber holding `bcast`.
+struct Pair {
+	pair: support::harness::MockPair,
+	track: moq_net::track::Producer,
+	remote: moq_net::broadcast::Consumer,
+	_keep: (
+		moq_net::broadcast::Producer,
+		moq_net::origin::Producer,
+		moq_net::origin::Producer,
+	),
+}
+
+async fn connect(version: &str) -> Pair {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let mut track = broadcast.create_track("video", None).unwrap();
+	let track = broadcast.create_track("video", None).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let subscriber = produce_origin(2);
@@ -79,6 +89,24 @@ async fn round(version: &str, late: Late, final_sequence: u64) -> Outcome {
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
+
+	Pair {
+		pair,
+		track,
+		remote,
+		_keep: (broadcast, publisher, subscriber),
+	}
+}
+
+/// Publish a group below the declared end (or none for an empty track), hold its stream
+/// back until the subscription ends, then deliver or lose it.
+async fn round(version: &str, late: Late, final_sequence: u64) -> Outcome {
+	let Pair {
+		pair,
+		mut track,
+		remote,
+		_keep,
+	} = connect(version).await;
 
 	let reader = moq_net_sim::spawn(async move {
 		let subscription = moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0));
@@ -140,7 +168,7 @@ async fn round(version: &str, late: Late, final_sequence: u64) -> Outcome {
 		.await
 		.expect("the subscription never ended")
 		.expect("reader panicked");
-	drop((pair, broadcast, publisher, subscriber));
+	drop((pair, _keep));
 	Outcome {
 		frames,
 		err,
@@ -209,4 +237,127 @@ async fn lite07_zero_streams_end_without_the_grace() {
 	assert!(outcome.err.is_none());
 	assert!(outcome.frames.is_empty());
 	assert!(outcome.elapsed < GRACE / 10, "ended after {:?}", outcome.elapsed);
+}
+
+/// IETF drafts over the control stream adapter (14), on their own streams (17), and with
+/// subscription fills (20+).
+const IETF: &[&str] = &[
+	"moq-transport-14",
+	"moq-transport-17",
+	"moq-transport-20",
+	"moq-transport-22",
+];
+
+/// A subscriber that leaves while END_OF_TRACK waits for stream credit ends the publisher's
+/// request, instead of parking it until credit that may never come.
+#[moq_net_sim::test]
+async fn ietf_leaving_cancels_a_blocked_end_of_track() {
+	for version in IETF {
+		let Pair {
+			pair,
+			track,
+			remote,
+			_keep,
+		} = connect(version).await;
+
+		let subscription = moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0));
+		let mut sub = remote
+			.track("video")
+			.unwrap()
+			.subscribe(subscription)
+			.await
+			.expect("subscribe");
+		moq_net_sim::timeout(TIMEOUT, track.demand().used())
+			.await
+			.expect("no subscriber appeared")
+			.unwrap();
+
+		let mut group = track.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
+		group.finish().unwrap();
+		let mut group = moq_net_sim::timeout(TIMEOUT, sub.recv_group())
+			.await
+			.expect("group timeout")
+			.unwrap()
+			.expect("a group");
+		while group.read_frame().await.unwrap().is_some() {}
+
+		// Out of stream credit, so the marker cannot open.
+		pair.server_transport.withhold_unis();
+		track.finish().unwrap();
+		moq_net_sim::sleep(GRACE / 10).await;
+		assert!(
+			track.subscription().is_some(),
+			"{version}: the publisher is still ending the request"
+		);
+
+		// The request task holds the publisher's subscription until it ends.
+		drop((group, sub));
+		moq_net_sim::timeout(TIMEOUT, async {
+			while track.subscription().is_some() {
+				moq_net_sim::sleep(GRACE / 100).await;
+			}
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{version}: the publisher's request never ended"));
+		drop((pair, _keep));
+	}
+}
+
+/// A lost datagram is not owed. Nothing tells the subscriber its sequence was a datagram, so
+/// on the drafts that account for the owed range its hole keeps the subscription routable for
+/// the grace, like a stream reset before its header. A reader never waits on it: the track
+/// ends for readers once the live edge reaches the declared end.
+#[moq_net_sim::test]
+async fn a_lost_datagram_never_delays_the_end() {
+	for version in ["moq-lite-05", "moq-lite-07-wip"] {
+		let Pair {
+			pair,
+			mut track,
+			remote,
+			_keep,
+		} = connect(version).await;
+
+		let reader = moq_net_sim::spawn(async move {
+			let subscription = moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0));
+			let mut sub = remote
+				.track("video")
+				.unwrap()
+				.subscribe(subscription)
+				.await
+				.expect("subscribe");
+			let mut groups = Vec::new();
+			while let Some(group) = sub.recv_group().await.expect("track aborted") {
+				groups.push(group.sequence);
+			}
+			(groups, moq_net_sim::now())
+		});
+		moq_net_sim::timeout(TIMEOUT, track.demand().used())
+			.await
+			.expect("no subscriber appeared")
+			.unwrap();
+
+		for datagram in [false, true, false] {
+			if datagram {
+				pair.server_transport.lose_datagrams();
+				track.append_datagram(Timestamp::ZERO, PAYLOAD).unwrap();
+			} else {
+				let mut group = track.append_group().unwrap();
+				group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
+				group.finish().unwrap();
+			}
+			moq_net_sim::sleep(GRACE / 100).await;
+		}
+		let finished = moq_net_sim::now();
+		track.finish().unwrap();
+
+		let (groups, ended) = moq_net_sim::timeout(TIMEOUT, reader)
+			.await
+			.expect("the subscription never ended")
+			.expect("reader panicked");
+		assert_eq!(groups, [0, 2], "{version}");
+		let elapsed = ended - finished;
+		assert!(elapsed < GRACE / 10, "{version}: ended after {elapsed:?}");
+		drop((pair, _keep));
+	}
 }

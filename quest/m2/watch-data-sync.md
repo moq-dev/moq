@@ -14,11 +14,19 @@ releases it.
   (built-in section or an application section embedding the config), releases
   each payload when the playhead reaches its frame timestamp, and registers its
   `delay` and `jitter` with `Sync` like a media rendition.
-- Snapshot tracks release the newest value at or before the playhead; stream
-  tracks release every record in order.
-- Take this up when an application needs synchronized data playback; until
-  then, a raw consumer reads payloads as they arrive.
+- Snapshot tracks release the newest state at or before the playhead, picked
+  from the in-order states the consumer yields; stream tracks release every
+  record in order.
+- An untimed payload adds no timestamp wait of its own. On a stream track it
+  still waits for the records before it, so a timed record at 11s followed by
+  an untimed one releases both at an 11s playhead, in order. An untimed
+  snapshot state applies once the states before it have. Test both
+  sequences.
+- OneTooMany is the application this waited for (2026-10-01): their web
+  frontend holds KLV and MAVLink telemetry back to the video playhead with
+  its own sync code, which this replaces. In m2 rather than m1 because
+  they aren't blocked.
 
-## Related
+## Required
 
-- [Cross-track correlation](/quest/m2/teleop/correlation.md) - joins recordings on the broadcast clock rather than live playout
+- [JS data consumer timestamps](/quest/m1/js-data-consumer-timestamps.md) - the reader releases each value by the timestamp its consumer returns

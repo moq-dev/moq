@@ -47,7 +47,8 @@
 //! last producer signals consumers that no more updates are coming.
 //!
 //! ## Driving and time
-//! This library never spawns tasks or reads the clock. [`Client::connect`] and
+//! Session and origin drivers never spawn tasks or read the clock.
+//! Explicitly minting an [`Epoch`] uses the wall clock and secure randomness. [`Client::connect`] and
 //! [`Server::accept`] take an initial [`time::Instant`] and return
 //! `(Session, Driver)`. Poll the [`Driver`] with the current instant and a
 //! [`kio::Waiter`], then wake on external activity or at the deadline it
@@ -65,6 +66,8 @@
 //! instant.
 
 #![warn(missing_docs)]
+// Proving receive futures are Send traverses the shared origin/broadcast/track types.
+#![recursion_limit = "256"]
 // The browser transport is `!Send`, so on wasm the shared state behind these `Arc`s is
 // too and clippy suggests `Rc`. The same code is genuinely cross-thread on native, so
 // `Arc` stays and the lint is unactionable here.
@@ -73,6 +76,7 @@
 mod client;
 mod coding;
 mod driver;
+mod epoch;
 mod error;
 pub mod goaway;
 // Not part of the public API: compiled only for the crate's own tests and for the
@@ -101,6 +105,7 @@ pub mod transport;
 pub use client::*;
 pub use coding::{BoundsExceeded, DecodeError, EncodeError, varint};
 pub use driver::Driver;
+pub use epoch::{Epoch, InvalidEpoch};
 pub use error::*;
 /// The session direction a client advertises in its SETUP (moq-lite-05+).
 pub use lite::Role;

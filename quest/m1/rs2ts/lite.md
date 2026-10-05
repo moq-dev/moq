@@ -21,7 +21,7 @@ first-frame latency are no worse than the hand-written js/net.
 - Size budget: js/net's `lite/*` is 15 KB gzip today; keep generated output
   near it. Watch for std shims and fmt/tracing pulling in weight.
 
-Public API: breaks `@moq/net`; retargets to `dev`. Wire: none.
+Public API: breaks `@moq/net`. Wire: none.
 
 ## Required
 

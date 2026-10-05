@@ -11,14 +11,14 @@ crate that [Generated lite](/quest/m1/rs2ts/lite.md) translates.
 - The feature is on by default, so Rust callers see no change. JS
   reimplements the helpers with Promises over the poll API.
 - Generated lite needs the lite session and the model without the feature,
-  not IETF. Until the [Sans-IO IETF session](/quest/m1/rs2ts/sans-io/ietf.md)
+  not IETF. Until the [Sans-IO IETF session](/quest/m2/rs2ts-sans-io-ietf.md)
   lands, the IETF session can sit behind the feature too; that quest then
   moves it out.
 - The lane runs at least the tests that do not exercise the helpers; tests
   that do stay behind the feature.
 
 Public API: moq-net's async helpers move behind a default feature, so a
-`default-features = false` caller loses them; lands on `dev` with the line.
+`default-features = false` caller loses them; lands with the line.
 Wire: none.
 
 ## Required

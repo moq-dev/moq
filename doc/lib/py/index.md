@@ -68,6 +68,11 @@ async def main():
         status.update({"state": "live", "viewers": 42})
 
         broadcast.announce()
+        audio.finish()
+        video.finish()
+        events.finish()
+        status.finish()
+        broadcast.close()
 
 asyncio.run(main())
 ```
@@ -112,13 +117,22 @@ and a producer's `demand()`, a `TrackDemand` whose
 `used()`/`unused()` let capture idle when nobody is subscribed. `request.set_publish`/`set_consume` raise if the request is already
 answered, cancelled, or currently accepting. `session.bandwidth()` divides the connection's send estimate;
 pass it to `encode_video` / `encode_audio` or `reserve` a share for an
-app-owned track. `moq.is_auth(err)` and `moq.is_shutdown(err)` classify errors. `moq.protocol_error(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one. Catch `moq.Error.Busy` when a setter races an in-flight connect, listen, or accept.
+app-owned track. `moq.is_auth(err)` and `moq.is_shutdown(err)` classify errors. `moq.protocol_error(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one. `str(err)` is the Rust error message. Catch `moq.Error.Busy` when a setter races an in-flight connect, listen, or accept.
 Each server request reports a `moq.Transport` enum, including QUIC, Iroh,
 WebSocket, TCP, and Unix sockets.
 
 `encode_audio` encodes raw PCM inside the binding. Its codec is an object,
-`moq.AudioCodec.opus()`, and `AudioEncoderOutput.frame_duration_us` sets the
-Opus frame length: 2500, 5000, 10000, 20000 (the default), 40000, or 60000.
+`moq.AudioCodec.opus()` or `moq.AudioCodec.aac()`, and
+`AudioEncoderOutput.frame_duration_us` sets the Opus frame length: 2500, 5000,
+10000, 20000 (the default), 40000, or 60000. 0 takes the codec's own frame,
+which AAC needs. AAC-LC encodes through the platform's encoder, so a host
+without one refuses it.
+
+Audio `channels` also names the speaker layout, by the WAVE convention: 1 is
+mono, 2 stereo, 3 2.1, 4 quad, 5 5.0, 6 5.1, 7 6.1, and 8 7.1, interleaved
+front left, front right, center, LFE, back, then side. Decoding remixes to the
+count you ask for; past 8 channels the samples pass through but can't be
+remixed.
 
 Each frame from `decode_video` owns its decoded picture until it is released,
 including after the consumer is cancelled. `frame.pixels(format)` converts it on
@@ -153,3 +167,5 @@ not the same as zero.
 - Raw bindings: [`moq-ffi`](https://pypi.org/project/moq-ffi/) on PyPI, for the unwrapped API
 
 Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).
+
+Await `session.shutdown()` to drain finished tracks before disconnecting. It raises if delivery has not completed within one second. `cancel(code)` stays immediate. Session and client async context managers await shutdown on a clean exit and cancel on an error, so the body's exception survives; finish or abort live tracks first. IETF media streams are not drained yet.

@@ -32,8 +32,11 @@ Decided:
 - Datagram groups stay best effort. A publisher counts a datagram as
   delivered, so a lost one leaves an uncovered hole that waits out the tail
   grace, as today.
-- A resumed group ([Resumed groups](/quest/m1/resume-latest.md)) that is the
-  new copy's latest ends with the DROP's error when the copy drops it.
+- A resumed group that is the new copy's latest ends with the DROP's error
+  when the copy drops it.
+- A dropped or aborted group is visible to readers, not silently skipped.
+  #4533 found the Rust model releases an aborted group's sequence and skips it,
+  so a truncated first object is indistinguishable from a group never sent.
 
 Update `drafts/draft-lcurley-moq-lite.md` (SUBSCRIBE_DROP, SUBSCRIBE_END, the
 lite-07 changelog), `doc/concept/moq-lite.md`, and the Rust and JS lite
@@ -44,7 +47,17 @@ Regression tests: a publisher that expires a group, skips a sequence, and
 resets a stream before its header; on each version the subscriber settles
 without waiting out the grace.
 
+Add the lite-07 drop case to the tail interop harness from
+[track tail interop](/quest/m1/track-tail-interop.md): Rust and JS
+subscribers both settle on SUBSCRIBE_DROP through the relay, so a group the
+publisher skipped or never opened ends the track without waiting out the
+grace. Decided in the 2026-09-30 audit: the case moved here so the basic
+tail interop could land first.
+
+PR #4455 (`quest/m1/rs2ts/lite-leading-ones`) also edits the lite-07 wire
+(varints) and no quest tracks it; coordinate the draft's lite-07 changelog
+with it.
+
 ## Related
 
-- [Track tail hardening](/quest/m1/track-tail-hardening.md) - the same tail accounting, in both languages
-- [Track tail interop](/quest/m1/track-tail-interop.md) - the Rust-JS proof of the lite-07 drop case
+- [Track tail interop](/quest/m1/track-tail-interop.md) - the Rust-JS tail harness the lite-07 drop case extends

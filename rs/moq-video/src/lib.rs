@@ -15,8 +15,8 @@
 //!
 //! - `capture` describes a frame source and grabs frames per platform:
 //!   AVFoundation/ScreenCaptureKit on macOS, native V4L2 on Linux, native Media
-//!   Foundation (camera), DXGI Desktop Duplication (screen), and GDI (window) on
-//!   Windows, plus portal/PipeWire on Wayland and X11 capture on Linux. Use
+//!   Foundation (camera) and Windows.Graphics.Capture (display/window) on
+//!   Windows 10 2004+, plus portal/PipeWire on Wayland and X11 capture on Linux. Use
 //!   `capture::open` for an embeddable raw-frame stream or
 //!   `encode::publish_capture` for turnkey publication. It requires the opt-in
 //!   `capture` feature, which costs the build host nothing on any platform.
@@ -36,7 +36,7 @@
 //!     decoder, or your own pixels via [`Surface::rgba`]) and
 //!     [`encode::Producer`] publishes the results.
 //! - [`decode`] subscribes to an H.264, H.265, or AV1 track and decodes it to
-//!   raw frames with a native backend (VideoToolbox on macOS, Media Foundation /
+//!   raw frames with a native backend (VideoToolbox on macOS and iOS, Media Foundation /
 //!   DXVA on Windows, NVDEC, VAAPI, or an ARM SoC's V4L2 M2M decoder on Linux,
 //!   with the default `openh264` feature providing software H.264 fallback).
 //!   [`decode::Consumer`] is the mirror of `moq_audio::decode::Consumer`. An
@@ -88,10 +88,10 @@ pub mod frame;
 mod output;
 mod rate;
 mod size;
-// Only the threaded sinks use this, and both are compiled out on macOS, where
+// Only the threaded sinks use this, and both are compiled out on macOS and iOS, where
 // the codecs run inline (no COM apartment to confine). Ungated it is dead code
 // there, which `-D warnings` rejects.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(apple))]
 mod worker;
 
 #[cfg(target_os = "windows")]
@@ -118,12 +118,12 @@ pub use size::Size;
 pub use ndk;
 /// The CoreFoundation bindings owning the handle [`Surface::into_pixel_buffer`]
 /// returns, re-exported alongside [`objc2_core_video`] for the same reason.
-#[cfg(target_os = "macos")]
+#[cfg(apple)]
 pub use objc2_core_foundation;
 /// The CoreVideo bindings [`Surface::into_pixel_buffer`] hands back,
 /// re-exported so you name the exact version this crate links rather than guessing
 /// at a matching one. A major bump here is a breaking change for this crate.
-#[cfg(target_os = "macos")]
+#[cfg(apple)]
 pub use objc2_core_video;
 /// The Direct3D11 bindings [`frame::d3d11::Texture`] hands back, re-exported for
 /// the same reason as the Apple ones above: name the exact version this crate

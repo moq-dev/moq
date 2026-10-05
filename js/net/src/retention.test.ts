@@ -92,8 +92,8 @@ async function session(alpn: string) {
 		track.close();
 		remote.close();
 		broadcast.close();
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 	};
 	return { producer, track, close };
 }

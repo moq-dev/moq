@@ -10,10 +10,10 @@ subscribes to a broadcast and exposes one source pad per rendition.
 
 ```bash
 # Inspect (Nix bundles the plugin with gst-launch)
-nix shell github:moq-dev/moq#moq-gst --command gst-inspect-1.0 moq
+nix shell github:moq-dev/moq/release#moq-gst --command gst-inspect-1.0 moq
 
 # Play the public test broadcast
-nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -e \
+nix shell github:moq-dev/moq/release#moq-gst --command gst-launch-1.0 -e \
   moqsrc name=s url=https://cdn.moq.dev/demo broadcast=bbb.hang \
   s.video_0 ! queue ! decodebin3 ! videoconvert ! autovideosink \
   s.audio_0 ! queue ! decodebin3 ! audioconvert ! autoaudiosink
@@ -87,6 +87,12 @@ After a pause, flush, or changed TIME segment, the next media buffer starts a ne
 timeline epoch and resets the handoff baseline. The pause does not inflate
 advertised jitter, and previously measured maxima remain. Resumed timestamps
 must continue forward on the broadcast media clock.
+
+A video pad joining mid-GOP drops delta frames until its first keyframe. If a
+source rewinds below the producer's live edge without signalling a break, the
+pad drops that frame and waits for a keyframe at or beyond the live edge. It
+keeps the rendition alive and preserves the media timeline; it does not shift
+rewound timestamps forward.
 
 ## moqsrc
 

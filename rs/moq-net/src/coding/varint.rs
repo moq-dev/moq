@@ -37,8 +37,10 @@ impl From<lite::Version> for Form {
 			| lite::Version::Lite03
 			| lite::Version::Lite04
 			| lite::Version::Lite05
-			| lite::Version::Lite06
-			| lite::Version::Lite07 => Self::Quic,
+			| lite::Version::Lite06 => Self::Quic,
+			// Lite-07 is only reached through its ALPN, so the form is known before the
+			// first byte of any stream.
+			_ => Self::LeadingOnes { seven: true },
 		}
 	}
 }
@@ -472,6 +474,50 @@ mod tests {
 		}
 		let (decoded, _) = read(&bytes, DRAFT18).unwrap();
 		assert_eq!(decoded, value);
+	}
+
+	fn lite(value: u64, version: lite::Version) -> Vec<u8> {
+		encode(value, version.into()).unwrap()
+	}
+
+	/// Lite-01 through lite-06 keep the QUIC form byte for byte.
+	#[test]
+	fn lite06_keeps_quic_varints() {
+		for version in [lite::Version::Lite01, lite::Version::Lite05, lite::Version::Lite06] {
+			assert_eq!(lite(63, version), [0x3F]);
+			assert_eq!(lite(64, version), [0x40, 0x40]);
+			assert_eq!(lite(16_384, version), [0x80, 0x00, 0x40, 0x00]);
+		}
+	}
+
+	/// Lite-07 switches to leading-ones, including at every length boundary and past 62 bits.
+	#[test]
+	fn lite07_uses_leading_ones() {
+		let version = lite::Version::Lite07;
+		let cases: &[(u64, &[u8])] = &[
+			(0, &[0x00]),
+			(127, &[0x7F]),
+			(128, &[0x80, 0x80]),
+			((1 << 14) - 1, &[0xBF, 0xFF]),
+			(1 << 14, &[0xC0, 0x40, 0x00]),
+			((1 << 21) - 1, &[0xDF, 0xFF, 0xFF]),
+			(1 << 21, &[0xE0, 0x20, 0x00, 0x00]),
+			((1 << 56) - 1, &[0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]),
+			(1 << 56, &[0xFF, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+			(MAX_QUIC, &[0xFF, 0x3F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]),
+			(u64::MAX, &[0xFF; 9]),
+		];
+		for (value, wire) in cases {
+			assert_eq!(lite(*value, version), *wire, "encode {value}");
+			assert_eq!(read(wire, version.into()).unwrap(), (*value, &[][..]));
+		}
+	}
+
+	/// The 7-byte `1111110x` form is valid on lite-07, as on draft-18+.
+	#[test]
+	fn lite07_accepts_7_byte_varint() {
+		let wire = [0xFD, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD];
+		assert_eq!(read(&wire, lite::Version::Lite07.into()).unwrap().0, 0x1_2345_6789_ABCD);
 	}
 
 	/// The Buf-based helpers other crates use read and write the same bytes, even when

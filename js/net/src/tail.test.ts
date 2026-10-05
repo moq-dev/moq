@@ -1,11 +1,12 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
+import { Once } from "@moq/signals";
 import { accept, connect } from "./connection/index.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
-import { TAIL_GRACE_MS } from "./tail.ts";
+import { TAIL_GRACE_MS, Tail } from "./tail.ts";
 import { Milli } from "./time.ts";
 import type { Ordered } from "./track.ts";
 import { wireOf } from "./wire.ts";
@@ -35,8 +36,8 @@ async function session(protocol: string) {
 		close: () => {
 			broadcast.close();
 			remote.close();
-			client.close();
-			server.close();
+			client.abort();
+			server.abort();
 		},
 	};
 }
@@ -103,3 +104,74 @@ test.each([Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_20])(
 		}
 	},
 );
+
+describe("Tail", () => {
+	const GRACE = Milli(1000);
+
+	function tail() {
+		const clock = { now: 0 };
+		return { clock, tail: new Tail({ grace: () => GRACE, now: () => clock.now }) };
+	}
+
+	test("a gap older than the grace folds away", () => {
+		const { clock, tail: t } = tail();
+		t.account(0, 1);
+		t.account(2, 3);
+		clock.now = GRACE / 2;
+		t.account(4, 5);
+		expect(t.covers(0, 3)).toBe(false);
+
+		// Splitting the younger gap keeps it as late as it was.
+		t.account(6, 7);
+		clock.now = GRACE;
+		t.account(8, 9);
+		expect(t.covers(0, 3)).toBe(true);
+		expect(t.covers(0, 5)).toBe(false);
+	});
+
+	test("splitting a gap leaves both halves with its age", () => {
+		const { clock, tail: t } = tail();
+		t.account(0, 1);
+		t.account(9, 10);
+		clock.now = GRACE / 2;
+		t.account(5, 6);
+		expect(t.covers(0, 10)).toBe(false);
+
+		clock.now = GRACE;
+		t.account(9, 10);
+		expect(t.covers(0, 10)).toBe(true);
+	});
+
+	test("a lowered floor restarts the gap age", () => {
+		const { clock, tail: t } = tail();
+		t.account(3, 4);
+		t.account(9, 10);
+
+		clock.now = GRACE * 2;
+		t.demand(1, 3);
+		t.account(1, 2);
+		expect(t.covers(1, 4)).toBe(false);
+		// Only the gap the floor reached restarts.
+		expect(t.covers(3, 10)).toBe(true);
+
+		clock.now = GRACE * 3;
+		t.account(9, 10);
+		expect(t.covers(1, 10)).toBe(true);
+	});
+
+	test("the grace waits for a stream being read", async () => {
+		const t = new Tail({ grace: () => Milli(10) });
+		const read = t.open(0);
+		let settled = false;
+		const settling = t
+			.settle(() => false, new Once<unknown>())
+			.then(() => {
+				settled = true;
+			});
+
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(settled).toBe(false);
+		read();
+		await settling;
+	});
+});

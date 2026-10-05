@@ -12,7 +12,7 @@ use moq_mux::catalog::hang::CatalogExt;
 use super::producer::Reserved;
 use super::{Input, Options, Producer};
 use crate::capture;
-use crate::resample::{Resampler, remix, validate_remix};
+use crate::resample::{Remix, Resampler};
 use crate::{Error, Format, Frame, Layout as PcmLayout};
 
 /// Backoff bounds for reopening a capture source. The quick first retry covers
@@ -118,18 +118,19 @@ impl State {
 
 /// Capture and encode settings for [`Control::new`] and [`publish_capture`].
 ///
-/// `#[non_exhaustive]`: construct via [`CaptureOptions::default`] and set
+/// Samples are stamped on the catalog's [`clock`](moq_mux::catalog::Producer::clock), the one
+/// its consumers are told about, so a concurrent video capture on the same catalog stays aligned.
+///
+/// `#[non_exhaustive]`: construct via [`Capture::default`] and set
 /// fields, so new publication settings can be added without changing
 /// [`Control::new`].
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
-pub struct CaptureOptions {
+pub struct Capture {
 	/// The initial input and its capture processing.
 	pub capture: capture::Config,
 	/// The track's stable codec and encode settings.
 	pub encode: Options,
-	/// The shared clock used to align this track with concurrent media.
-	pub clock: moq_mux::Clock,
 }
 
 #[derive(Clone, Debug)]
@@ -197,7 +198,7 @@ impl Control {
 	pub fn new<E: CatalogExt>(
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<E>,
-		options: CaptureOptions,
+		options: Capture,
 	) -> Result<(Self, Driver<E>), Error> {
 		Self::build(broadcast, catalog, options, Supervisor::default())
 	}
@@ -205,9 +206,10 @@ impl Control {
 	fn build<E: CatalogExt>(
 		mut broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<E>,
-		options: CaptureOptions,
+		options: Capture,
 		supervisor: Supervisor,
 	) -> Result<(Self, Driver<E>), Error> {
+		let clock = catalog.clock();
 		let reserved = Reserved::new(&mut broadcast, catalog, &options.encode)?;
 		let track_name: Arc<str> = reserved.name().into();
 		let desired = Desired {
@@ -239,7 +241,7 @@ impl Control {
 			_reservation: None,
 			track: Some(Track::Reserved(reserved)),
 			encode: options.encode,
-			clock: options.clock,
+			clock,
 			supervisor,
 			desired: desired_tx.consume(),
 			state: state_tx,
@@ -341,6 +343,7 @@ pub struct Driver<E: CatalogExt = ()> {
 	track: Option<Track<E>>,
 	/// The codec settings the rendition is built from once the layout is known.
 	encode: Options,
+	/// The catalog's clock, so samples land on the mapping it advertises.
 	clock: moq_mux::Clock,
 	supervisor: Supervisor,
 	desired: kio::Consumer<Desired>,
@@ -445,7 +448,7 @@ impl<E: CatalogExt> Driver<E> {
 					None => continue,
 				},
 			};
-			let pcm_layout = match PcmLayout::from_channels(layout.channels) {
+			let pcm_layout = match device_layout(layout.channels) {
 				Ok(layout) => layout,
 				Err(err) => match self.failed(err, track, desired.revision).await {
 					Some(result) => return Some(result),
@@ -711,7 +714,7 @@ fn publish_state(
 pub async fn publish_capture<E: CatalogExt>(
 	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer<E>,
-	options: CaptureOptions,
+	options: Capture,
 ) -> Result<(), Error> {
 	// Held, not dropped: the driver ends as soon as the last control handle goes.
 	let (_control, driver) = Control::new(broadcast, catalog, options)?;
@@ -732,7 +735,7 @@ pub async fn publish_capture<E: CatalogExt>(
 fn assert_publish_capture_send(
 	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer,
-	options: CaptureOptions,
+	options: Capture,
 ) {
 	fn is_send<T: Send>(_: &T) {}
 	is_send(&publish_capture(broadcast, catalog, options));
@@ -888,23 +891,29 @@ impl<E: CatalogExt> EncoderOutput<'_, E> {
 	}
 }
 
+/// The layout of a capture device, which reports only a channel count. That names
+/// speakers for mono and stereo alone: a six-channel microphone array is not a
+/// 5.1 speaker layout, so it stays discrete rather than being remixed as one.
+fn device_layout(channels: u32) -> Result<PcmLayout, Error> {
+	match channels {
+		0..=2 => PcmLayout::from_channels(channels),
+		channels => Ok(PcmLayout::Discrete(channels)),
+	}
+}
+
 /// Converts one opened stream's native layout into the producer's fixed input
 /// layout. A new instance per open keeps filter state out of recovery gaps.
 struct Converter {
-	input: capture::Layout,
-	output: capture::Layout,
+	remix: Option<Remix>,
 	resampler: Option<Resampler>,
 	anchor_us: Option<u64>,
 }
 
 impl Converter {
 	fn new(input: capture::Layout, output: capture::Layout) -> Result<Self, Error> {
-		if input.channels != output.channels {
-			validate_remix(
-				PcmLayout::from_channels(input.channels)?,
-				PcmLayout::from_channels(output.channels)?,
-			)?;
-		}
+		let remix = (input.channels != output.channels)
+			.then(|| Remix::new(device_layout(input.channels)?, device_layout(output.channels)?))
+			.transpose()?;
 
 		let resampler = if input.sample_rate == output.sample_rate {
 			None
@@ -921,8 +930,7 @@ impl Converter {
 		};
 
 		Ok(Self {
-			input,
-			output,
+			remix,
 			resampler,
 			anchor_us: None,
 		})
@@ -953,10 +961,8 @@ impl Converter {
 			let data = resampler.process(&samples.data, moq_net::Timestamp::from_micros(timestamp_us)?)?;
 			samples.replace(data);
 		}
-		if self.input.channels != self.output.channels {
-			let input = PcmLayout::from_channels(self.input.channels)?;
-			let output = PcmLayout::from_channels(self.output.channels)?;
-			let data = remix(&samples.data, input, output)?;
+		if let Some(remix) = &self.remix {
+			let data = remix.process(&samples.data);
 			samples.replace(data);
 		}
 		if samples.data.is_empty() {
@@ -1441,7 +1447,7 @@ mod tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut options = CaptureOptions::default();
+		let mut options = Capture::default();
 		options.capture.source = capture::Source::Microphone(Some("first".into()));
 		options.encode.track = Some("audio".into());
 		let (control, driver) = Control::build(broadcast, catalog.clone(), options, Supervisor::exact()).unwrap();
@@ -1463,7 +1469,7 @@ mod tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut options = CaptureOptions::default();
+		let mut options = Capture::default();
 		options.capture.source = capture::Source::Microphone(Some("first".into()));
 		options.encode.track = Some("audio".into());
 		options.encode.settings.layout = PcmLayout::from_channels(channels).unwrap();
@@ -2035,6 +2041,42 @@ mod tests {
 		assert_eq!(drops.load(Ordering::SeqCst), 1);
 	}
 
+	/// Dropping the controls ends the driver even while a probe nobody answers is in flight.
+	#[tokio::test(start_paused = true)]
+	async fn dropping_the_controls_abandons_the_probe() {
+		let (control, driver, mut source, _subscription, _catalog) = setup_publication([]).await;
+		source.formats.clear();
+		let attempts = source.format_attempts.clone();
+		let run = driver.run_with(source);
+		tokio::pin!(run);
+
+		poll_pending(run.as_mut()).await;
+		assert_eq!(attempts.load(Ordering::SeqCst), 1);
+		drop(control);
+		tokio::time::timeout(Duration::from_secs(1), run)
+			.await
+			.expect("dropping the controls ends the driver")
+			.unwrap();
+	}
+
+	/// Dropping the controls ends the driver even while a subscriber's open never finishes.
+	#[tokio::test(start_paused = true)]
+	async fn dropping_the_controls_abandons_an_open() {
+		let (control, driver, source, _subscription, _catalog) = setup_publication([]).await;
+		let attempts = source.attempts.clone();
+		let run = driver.run_with(source);
+		tokio::pin!(run);
+
+		while attempts.load(Ordering::SeqCst) == 0 {
+			poll_pending(run.as_mut()).await;
+		}
+		drop(control);
+		tokio::time::timeout(Duration::from_secs(1), run)
+			.await
+			.expect("dropping the controls ends the driver")
+			.unwrap();
+	}
+
 	/// Clock fixtures: the real publication driver, fed by synthetic microphones against a
 	/// pinned broadcast clock, graded on the timestamps a subscriber reads back.
 	///
@@ -2074,10 +2116,8 @@ mod tests {
 					.with_clock(clock)
 					.with_max_age(RETAIN);
 				let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
-				let mut options = CaptureOptions::default();
+				let mut options = Capture::default();
 				options.encode.track = Some("audio".into());
-				// The broadcast's own clock, as `moq import capture` hands it.
-				options.clock = catalog.clock();
 				let (publication, driver) =
 					Control::build(broadcast, catalog.clone(), options, Supervisor::exact()).unwrap();
 				let task = tokio::spawn(driver.run_with(source(opens, false)));

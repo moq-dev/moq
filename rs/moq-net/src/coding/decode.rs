@@ -95,6 +95,16 @@ pub enum DecodeError {
 	Version,
 }
 
+impl DecodeError {
+	/// A complete frame cannot be extended by reading more stream bytes.
+	pub(crate) fn complete(self) -> Self {
+		match self {
+			Self::Short => Self::InvalidValue,
+			other => other,
+		}
+	}
+}
+
 impl From<BoundsExceeded> for DecodeError {
 	fn from(_: BoundsExceeded) -> Self {
 		Self::BoundsExceeded

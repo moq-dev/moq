@@ -11,9 +11,13 @@ name: Android
 # recipe is still `just rs android`, so a local run and this one compile the
 # same thing, and rust-toolchain.toml still pins the compiler.
 #
+# It also builds moq-ffi and asserts the `.so` imports `__android_log_*`, so a
+# build that stops linking logcat fails here.
+#
 # Narrow trigger, like wasm.yml. The filter is moq-video's in-repo dependency
-# graph (`cargo metadata`, normal dependencies), plus the files that decide how
-# it is built. A crate added to that graph has to be added here too.
+# graph (`cargo metadata`, normal dependencies), plus moq-ffi and moq-tokio, which
+# own the logcat link, and the files that decide how it is built. A crate added
+# to that graph has to be added here too.
 
 permissions:
   contents: read
@@ -25,6 +29,8 @@ on:
     types: [opened, synchronize, reopened, closed]
     paths:
       - "rs/moq-video/**"
+      - "rs/moq-ffi/**"
+      - "rs/moq-tokio/**"
       - "rs/moq-mux/**"
       - "rs/moq-net/**"
       - "rs/moq-nvenc/**"
@@ -49,7 +55,6 @@ concurrency:
 
 env:
   CARGO_NDK_VERSION: 4.1.2
-  JUST_VERSION: 1.52.0
 
 jobs:
   android:
@@ -73,15 +78,10 @@ jobs:
 
       # No Rust cache: this workflow only runs on pull requests, which may not
       # save one, so it would have nothing to restore.
+      - uses: ./.github/actions/just
+
       - name: Install cargo-ndk
         run: cargo install --locked "cargo-ndk@$CARGO_NDK_VERSION"
-
-      # A checksummed release binary, where `cargo install` would spend ~2 minutes
-      # building just from source.
-      - name: Install just
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
-        with:
-          tool: just@${{ env.JUST_VERSION }}
 
       - name: Check
         run: just rs android

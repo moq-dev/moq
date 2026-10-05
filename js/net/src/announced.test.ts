@@ -48,7 +48,7 @@ test("a same-name re-announce is a distinct update", async () => {
 
 	// The stream is a log, not a set: it carries a redundant announce as its own update rather
 	// than collapsing it. Deciding what a repeat means belongs to the session layer, which resolves
-	// a restart into either nothing (a route change) or an end + start (a new publisher).
+	// a restart into either nothing (an identical route) or an in-place update.
 	const route = Route.default;
 	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
 	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });

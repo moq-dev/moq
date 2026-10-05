@@ -11,7 +11,8 @@
 //!
 //! By default FLV carries a single video and a single audio stream, so only the
 //! best video rendition (see [`Video::ranked`](hang::catalog::Video::ranked)) and
-//! the first audio rendition are muxed and the rest are ignored. With
+//! the first audio rendition are muxed and the rest are ignored. The video pick
+//! follows the catalog until the stream header goes out, then stays. With
 //! [`with_multitrack`](Export::with_multitrack) every rendition is muxed instead,
 //! each as an enhanced-RTMP multitrack track addressed by its own track id (use
 //! this only for a player that advertised the `Multitrack` capability).
@@ -327,8 +328,8 @@ impl Export {
 		// Only bind before the header is emitted: the sequence-header (config) tags
 		// go out with the header, and there's no in-band way to introduce a new
 		// track's config mid-stream, so a rendition first seen afterward is left
-		// unmuxed rather than emitted as undecodable config-less frames. (This
-		// mirrors the single-track path ignoring extra renditions.)
+		// unmuxed rather than emitted as undecodable config-less frames. Until then a
+		// single-track stream rebinds to a better-ranked video rendition.
 		if !self.header_emitted {
 			self.bind_video(&catalog)?;
 			self.bind_audio(&catalog)?;
@@ -338,16 +339,10 @@ impl Export {
 			tracing::warn!("ignoring FLV rendition that appeared after the stream header");
 		}
 
-		// A bound track vanishing from the catalog is a layout change FLV can't express.
-		for track in self.tracks() {
-			let present = if is_video_flavor(track.flavor) {
-				catalog.video.renditions.contains_key(&track.name)
-			} else {
-				catalog.audio.renditions.contains_key(&track.name)
-			};
-			anyhow::ensure!(present, "FLV track '{}' removed mid-stream", track.name);
-		}
-
+		// A bound track leaving the catalog is read to its own end rather than refused. A
+		// publisher retires a rendition as its track finishes or drops, and the catalog
+		// update races that end on another stream, so only the track's end can say which it
+		// was: a finish ends it cleanly, and a drop is the error the export reports.
 		Ok(())
 	}
 
@@ -364,6 +359,16 @@ impl Export {
 			});
 			ranked
 		};
+
+		// Before the header, a single-track stream follows the best rendition, so a
+		// snapshot that lacks it doesn't fix the pick. Dropping the bound track
+		// unsubscribes it; nothing was emitted from it yet.
+		if !self.multitrack
+			&& let Some((best, _)) = renditions.first()
+			&& self.video.first().is_some_and(|t| &t.name != *best)
+		{
+			self.video.clear();
+		}
 
 		for (name, config) in renditions {
 			if !self.multitrack && !self.video.is_empty() {
@@ -683,10 +688,6 @@ fn ensure_legacy(container: &Container, kind: &str, name: &str) -> anyhow::Resul
 			unknown.kind().unwrap_or("<missing>")
 		),
 	}
-}
-
-fn is_video_flavor(flavor: Flavor) -> bool {
-	matches!(flavor, Flavor::Avc | Flavor::Hevc | Flavor::Av1 | Flavor::Vp9)
 }
 
 fn video_flavor(config: &hang::catalog::VideoConfig) -> anyhow::Result<Flavor> {
