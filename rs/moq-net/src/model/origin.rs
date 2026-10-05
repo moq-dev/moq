@@ -2351,7 +2351,7 @@ async fn run_front(task: FrontTask) {
 		*seen = watch.seen();
 		front.retain_routes(|route| table.routes.covers(&path.as_path(), route));
 		let best = table
-			.best_route(&path.as_path(), horizon, front.refused_routes())
+			.best_route(&path.as_path(), horizon, front.excluded_routes())
 			.map(|entry| Candidate {
 				route: entry.id,
 				local: entry.local,
@@ -3354,7 +3354,7 @@ impl OriginState {
 	}
 
 	/// The best served route covering `path` (absolute) for a requester seeing
-	/// `horizon`, skipping the `refused` entry ids.
+	/// `horizon`, skipping the `excluded` entry ids.
 	///
 	/// The most specific covering prefix wins outright, so a narrow advertise-only
 	/// announcement shadows a broad served one: requests under it resolve
@@ -3362,10 +3362,10 @@ impl OriginState {
 	/// prefix, the cheapest served one is picked by [`route_order`].
 	///
 	/// Only announced routes are candidates: an unannounced broadcast serves
-	/// nobody, and does not shadow anything either. Routes `refused` for the
+	/// nobody, and does not shadow anything either. Routes `excluded` for the
 	/// front's path are skipped. A broadcast published on this origin competes
 	/// on cost like any other route and wins a tie.
-	fn best_route(&self, path: &Path, horizon: Horizon, refused: &HashSet<u64>) -> Option<&RouteEntry> {
+	fn best_route(&self, path: &Path, horizon: Horizon, excluded: &HashSet<u64>) -> Option<&RouteEntry> {
 		// Covering prefixes of one path form a chain, so the deepest node with a
 		// candidate holds the unique longest prefix; walking down, the last such
 		// node decides.
@@ -3378,7 +3378,7 @@ impl OriginState {
 				.filter(|entry| entry.live())
 				.filter(|entry| entry.scope.matches(path.as_str()))
 				.filter(|entry| horizon.admits(entry))
-				.filter(|entry| !refused.contains(&entry.id))
+				.filter(|entry| !excluded.contains(&entry.id))
 				.peekable();
 			if candidates.peek().is_some() {
 				best = candidates
@@ -6841,6 +6841,33 @@ mod tests {
 		let served = broadcast::Info::new().produce();
 		request.accept(&served);
 		pending.await.expect("resolves");
+	}
+
+	/// A refusal from the longest prefix is the answer: neither a costlier advertiser of
+	/// that prefix nor a catch-all is asked instead.
+	#[tokio::test]
+	async fn refusal_never_falls_through() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let catch_all = producer.dynamic("", Route::default()).unwrap();
+		let winner = producer.dynamic("room", Route::default()).unwrap();
+		let sibling = producer.dynamic("room", Route::default().with_cost(2)).unwrap();
+
+		let mut pending = Box::pin(consumer.request_broadcast("room/alice"));
+		assert!((&mut pending).now_or_never().is_none());
+		queued(&winner).await.reject(Error::NotFound);
+		let mut result = None;
+		settle(|| {
+			result = (&mut pending).now_or_never();
+			result.is_some()
+		})
+		.await;
+		let err = result.unwrap().err().unwrap();
+		assert!(matches!(err, Error::NotFound), "unexpected end: {err}");
+
+		for other in [&sibling, &catch_all] {
+			assert!(other.poll_requested_broadcast(&kio::Waiter::noop()).is_pending());
+		}
 	}
 
 	/// `routed_broadcast` treats a handler's rejection as the table's verdict:

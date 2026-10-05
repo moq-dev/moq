@@ -165,12 +165,9 @@ class CoveringRoot {
  *
  * `handles` holds the `closed` of each open {@link Requesting} on the path.
  *
- * A refusal is terminal. With nothing serving, the slot ends: every handle closes with the
- * handler's error and the slot leaves the table, so the next request asks afresh. While
- * another source still serves (a better route was asked and said no), the refuser joins
- * `refused` and is skipped for as long as it stands (a reconnect is a fresh entry), so the
- * current source carries on. A refusal never falls through to a broader prefix or another
- * advertiser.
+ * A refusal is terminal, even while another source still serves: the slot ends, every handle
+ * closes with the handler's error, and the slot leaves the table, so the next request asks
+ * afresh. A refusal never falls through to a broader prefix or another advertiser.
  *
  * @internal
  */
@@ -178,7 +175,6 @@ export interface RequestSlot {
 	blind: number;
 	answer?: broadcast.Consumer;
 	readonly handles: Set<Once<Error | null>>;
-	readonly refused: Set<RouteEntry>;
 	readonly route: Signal<broadcast.Consumer | undefined>;
 }
 
@@ -479,21 +475,15 @@ class OriginState {
 	}
 
 	/**
-	 * `entry` refused `path` with `err`. A request still serving another source skips the
-	 * refuser; one with nothing serving ends with `err`.
+	 * `entry` refused `path` with `err`: the request ends with `err`, even while another
+	 * source serves, since asking the next candidate would turn one refusal into a request
+	 * per candidate.
 	 */
 	refuse(path: Path.Valid, entry: RouteEntry, err: Error): void {
 		const slot = this.requests.peek()?.get(path);
 		if (!slot) return;
 		// Only the route the request is waiting on speaks for it; a superseded one's answer is moot.
-		if (this.bestEntry(path, (candidate) => slot.refused.has(candidate)) !== entry) return;
-
-		const serving = slot.route.peek();
-		if (serving && serving.closed.peek() === undefined) {
-			slot.refused.add(entry);
-			slot.route.set(this.route(path, slot));
-			return;
-		}
+		if (this.bestEntry(path) !== entry) return;
 
 		this.requests.mutate((map) => {
 			if (map?.get(path) === slot) map.delete(path);
@@ -580,10 +570,10 @@ class OriginState {
 	 * Materialization is lazy and cached per path: the first request under a route opens
 	 * the providing session's subscription and repeats share it. A better route is made
 	 * before the old one breaks: the current front keeps serving until the new route
-	 * answers (then swaps) or refuses (then is skipped). A retracted route swaps at once.
+	 * answers (then swaps) or refuses (then the request ends). A retracted route swaps at once.
 	 */
-	route(path: Path.Valid, slot: Pick<RequestSlot, "answer" | "refused">): broadcast.Consumer | undefined {
-		const entry = this.bestEntry(path, (candidate) => slot.refused.has(candidate));
+	route(path: Path.Valid, slot: Pick<RequestSlot, "answer">): broadcast.Consumer | undefined {
+		const entry = this.bestEntry(path);
 		const local = this.local.peek()?.get(path);
 		if (local && this.localWins(path, entry)) {
 			// Nothing reads a remote front the local broadcast replaced, so close its session subscription.
@@ -860,8 +850,6 @@ export class Producer implements Table {
 				entries.splice(index, 1);
 				if (entries.length === 0) routes?.delete(prefix);
 			});
-			// A retracted entry can never be picked again, so the refusals pinned to it are dead weight.
-			for (const slot of this.#state.requests.peek()?.values() ?? []) slot.refused.delete(entry);
 			server.close();
 			this.#state.rebuildOriginated();
 			this.#state.refreshPrefix(prefix);
@@ -1262,12 +1250,10 @@ export class Consumer {
 			// value as the baseline the next change is compared against, and never flushes to
 			// clear it, so a seeded route retracting to undefined would look like no change and
 			// notify nobody.
-			const refused = new Set<RouteEntry>();
 			const created: RequestSlot = {
 				blind: 0,
 				handles: new Set(),
-				refused,
-				route: new Signal(this.#state.route(path, { refused })),
+				route: new Signal(this.#state.route(path, {})),
 			};
 			slot = created;
 			this.#state.requests.mutate((map) => {

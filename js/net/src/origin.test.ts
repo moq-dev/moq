@@ -1498,7 +1498,7 @@ test("a refusal is terminal, never falling through to a broader route", async ()
 	origin.close();
 });
 
-test("a better route's refusal leaves the serving route in place", async () => {
+test("a better route's refusal ends a served request", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const served = new BroadcastProducer();
@@ -1509,19 +1509,25 @@ test("a better route's refusal leaves the serving route in place", async () => {
 	const before = request.active.peek();
 	expect(before).toBeDefined();
 
-	// The narrower route is asked while the broad one keeps serving, then says no.
-	const narrow = origin.dynamic(Path.from("live"));
+	// The narrower route is asked while the broad one keeps serving, then says no. A
+	// costlier sibling at the same prefix could serve, but is never asked.
+	const narrow = origin.dynamic(Path.from("live"), { cost: 1n });
+	const sibling = origin.dynamic(Path.from("live"), { cost: 2n });
+	const siblingRequests = sibling.requested();
+	const siblingAsked = siblingRequests.next();
 	const { value: req } = await narrow.requested().next();
 	expect(request.active.peek()).toBe(before);
-	req?.reject(new Error("unserved"));
+	const err = new Error("unserved");
+	req?.reject(err);
 	await settle();
 
-	expect(request.active.peek()).toBe(before);
-	expect(before?.closed.peek()).toBeUndefined();
-	expect(request.closed.peek()).toBeUndefined();
+	expect(await request.closed).toBe(err);
+	expect(request.active.peek()).toBeUndefined();
+	expect(await Promise.race([siblingAsked.then(() => "asked"), settle().then(() => "idle")])).toBe("idle");
 
 	request.close();
-	expect(request.closed.peek()).toBeNull();
+	void siblingRequests.return?.();
+	sibling.close();
 	narrow.close();
 	disposeWide();
 	served.close();
