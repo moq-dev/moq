@@ -50,7 +50,7 @@ blocks. The quests that gated m0 lines moved under them.
 - [moq-net owns its transport seam](/quest/m1/transport-seam.md) - moq-net names only its own transport traits, so a web-transport-trait or qmux major bump is a patch for it
 - [moq announced](/quest/m1/cli-announced.md) - `moq ls` becomes a follow-only live view named `moq announced`, with local-only shell completion
 - [Leave out a role](/quest/m1/cli-no-role.md) - `moq export` and `moq play` accept `--no-video` and `--no-audio`, and sinks that ignore selection refuse it
-- [fMP4 export tracks](/quest/m1/fmp4-export-tracks.md) - fMP4 export inits from the catalog, keeps early audio, and fails loudly instead of writing a track missing from moov
+- [fMP4 init from the catalog](/quest/m1/fmp4-catalog-init.md) - fMP4 export writes avc3/hev1 entries from the catalog, so an Annex-B H.264 or H.265 init no longer waits for the first keyframe
 - [Delete the live marker](/quest/m1/announce-live-removal.md) - announce streams yield only route events; the `Live` marker and its hold machinery are gone
 - [Browser close code](/quest/m1/browser-close-code.md) - a playwright case proves the page reads a relay's close code and reason, on every web-transport backend
 - [JS dev mode](/quest/m1/js-dev-mode.md) - net and signals stop reading `import.meta.env`, the subscriber tripwire is deleted, and announced requests hold no subscription
@@ -120,6 +120,7 @@ blocks. The quests that gated m0 lines moved under them.
 - [FFI frame duration default](/quest/m1/ffi-frame-duration-default.md) - the binding audio encoder takes the codec's own frame by default, so `aac()` needs no explicit 0
 - [Opus mapping family](/quest/m1/opus-mapping-family.md) - the Opus head config keeps its mapping family only in `mapping`
 - [mp4-atom dOps mapping](/quest/m1/mp4-atom-dops-mapping.md) - a released mp4-atom reads and writes any `dOps` channel mapping family and table
+- [mp4-atom avc3](/quest/m1/mp4-atom-avc3.md) - a released mp4-atom reads and writes an `avc3` sample entry
 - [CMAF surround Opus](/quest/m1/cmaf-opus-surround.md) - fMP4 import and export carry an Opus channel mapping table
 - [A self-hosted NVIDIA runner is registered](/quest/m1/gpu-runner.md) - the maintainer registers the host that runs the NVIDIA tests
 - [GPU CI](/quest/m1/gpu-ci.md) - NVIDIA tests run nightly on a self-hosted GPU runner, and `just rs nvidia` runs them locally instead of skipping
