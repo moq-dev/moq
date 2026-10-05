@@ -150,6 +150,8 @@ impl Sink {
 	///
 	/// Await the returned handle to wait for the device; dropping it stops
 	/// immediately. A device that is unavailable keeps the drain pending.
+	/// The wait includes any silence queued behind the last sample: up to one
+	/// resampler block, or up to [`Input::latency`] if the ring had underflowed.
 	pub fn finish(self) -> Drain {
 		self.channel.lock().unwrap().flush();
 		self.completion.state.store(1, Ordering::Release);
