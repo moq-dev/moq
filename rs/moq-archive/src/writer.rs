@@ -347,11 +347,9 @@ impl<S: ObjectStore> Writer<S> {
 			delete(&shared.store, &shared.timeline, &mut pruned, expired).await;
 		}
 
-		// A broadcast end carries no cause; only the deprecated `abort` still reports one.
-		match source.closed().await {
-			moq_net::Error::Dropped => Ok(()),
-			err => Err(source_error(err)),
-		}
+		// A broadcast end carries no cause.
+		source.closed().await;
+		Ok(())
 	}
 }
 
@@ -1034,7 +1032,7 @@ mod tests {
 		let object = store.get_groups("video", 2..=2).await.unwrap();
 		assert_eq!(object.groups[0].frames[1].timestamp, 2500);
 		assert_eq!(object.groups[0].frames[1].payload, "2@2500");
-		assert_eq!(store.get_info("video").await.unwrap(), Info::new(0, 1000).unwrap());
+		assert_eq!(store.get_info("video").await.unwrap(), Info::new(127, 1000).unwrap());
 		store.get_info(TIMELINE).await.unwrap();
 		assert!(store.get_info("ignored").await.is_err());
 	}
@@ -1310,7 +1308,7 @@ mod tests {
 			control.pacing_track("video").await,
 			Err(Error::Priority {
 				existing: 7,
-				intended: 0
+				intended: 127
 			})
 		);
 	}
