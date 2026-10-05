@@ -48,7 +48,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [moq-bot may push workflow changes](/quest/m1/bot-workflows-permission.md) - condition: the maintainer grants moq-bot's GitHub App the `workflows` permission, so back-merges carrying workflow changes go through
 - [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
 - [moq-net owns its transport seam](/quest/m1/transport-seam.md) - moq-net names only its own transport traits, so a web-transport-trait or qmux major bump is a patch for it
-- [moq announced](/quest/m1/cli-announced.md) - `moq ls` becomes a follow-only live view named `moq announced`, with local-only shell completion
 - [Leave out a role](/quest/m1/cli-no-role.md) - `moq export` and `moq play` accept `--no-video` and `--no-audio`, and sinks that ignore selection refuse it
 - [fMP4 export tracks](/quest/m1/fmp4-export-tracks.md) - fMP4 export inits from the catalog, keeps early audio, and fails loudly instead of writing a track missing from moov
 - [Delete the live marker](/quest/m1/announce-live-removal.md) - announce streams yield only route events; the `Live` marker and its hold machinery are gone

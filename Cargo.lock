@@ -4300,7 +4300,6 @@ dependencies = [
  "moq-audio",
  "moq-auth",
  "moq-hls",
- "moq-msf",
  "moq-mux",
  "moq-relay",
  "moq-rtc",

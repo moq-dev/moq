@@ -2,7 +2,7 @@
 //!
 //! Grammar: `moq <MoQ side> <stage> [-- <stage>]...`, where a stage is
 //! `<import|export> <endpoint> [endpoint opts]`, plus `moq <MoQ side> play` for
-//! native playback, `moq <MoQ side> ls [prefix]` to list what is live, and
+//! native playback, `moq <MoQ side> announced [prefix]` to follow what is announced, and
 //! `moq <MoQ side> fetch <track>` to read one group.
 //!
 //! - The MoQ side (`--connect`, the `--listen*` transport binds, `--cluster-lan`,
@@ -158,8 +158,8 @@ impl std::error::Error for ParseError {}
 impl Invocation {
 	/// Parse the process arguments, exiting with Usage's rendered message on error.
 	///
-	/// Async because a completion request is answered first, and some completers
-	/// dial the relay the line already names (see [`crate::complete`]).
+	/// Async because a completion request is answered first, and the capture
+	/// completers enumerate devices asynchronously (see [`crate::complete`]).
 	pub async fn parse() -> Self {
 		let args: Vec<OsString> = std::env::args_os().collect();
 		// `#[usage(completion)]` installs the `__complete_word__` interception in the
@@ -303,7 +303,7 @@ impl Invocation {
 
 		// Only `import` and `export` share an Origin. The rest own the process: `play`
 		// drives a window on the main thread, `transcode` builds its own Origin, `fetch`
-		// and `ls` open their own session, and `auth` / `devices` never touch the network at all.
+		// and `announced` open their own session, and `auth` / `devices` never touch the network at all.
 		if let Some(command) = self.stages.iter().find(|command| !command.is_stageable()) {
 			anyhow::bail!(
 				"`{}` must be the only verb; it can't share a process with another `--` stage",
@@ -335,15 +335,6 @@ fn parse_error(
 		_ => ParseErrorKind::Other,
 	};
 	ParseError::new(kind, moq_tokio::cli::answer(spec, root, argv, err).message())
-}
-
-/// Whether [`MoqSide::from_argv`] lets the environment fill what the words left out.
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) enum Environment {
-	/// Apply the `MOQ_*` variables, as an ordinary parse does.
-	Read,
-	/// Read only what the words say, which is what "the user asked for this" means.
-	Ignore,
 }
 
 /// The MoQ attachment: a relay dial, a server listener, a LAN mesh, or any
@@ -522,32 +513,6 @@ impl MoqSide {
 		!(self.auth.public.is_empty() && self.auth.public_subscribe.is_empty() && self.auth.public_publish.is_empty())
 	}
 
-	/// Build a [`MoqSide`] from one chunk of a command line, leniently.
-	///
-	/// Stops at the first thing the grammar cannot take, because the caller is looking
-	/// at a half-typed line being completed. Whatever was understood before that point
-	/// is the answer.
-	pub(crate) fn from_argv(argv: &[&OsStr], environment: Environment) -> Option<Self> {
-		use usage::spec::CommandArgs;
-
-		let mut partial = <Self as CommandArgs>::start();
-		let mut parser = usage::Parser::new(Cli::command(), argv);
-		while let Some(event) = parser.next_event() {
-			match event {
-				Ok(event) => {
-					<Self as CommandArgs>::apply(&mut partial, &event);
-				}
-				Err(_) => break,
-			}
-		}
-
-		if environment == Environment::Read {
-			<Self as CommandArgs>::apply_env(&mut partial);
-		}
-		<Self as CommandArgs>::apply_defaults(&mut partial);
-		<Self as CommandArgs>::build(partial).ok()
-	}
-
 	/// The MoQ-side flags one chunk of a command line typed, each once, in order.
 	///
 	/// A flattened config's flags sit in this struct's table under the keys that
@@ -587,8 +552,8 @@ pub enum Command {
 	/// The released spelling of [`Self::Export`].
 	#[usage(hide = true)]
 	Subscribe(Export),
-	/// List the broadcasts live on a relay.
-	Ls(crate::ls::Args),
+	/// Follow the broadcasts announced on a relay as they start and end.
+	Announced(crate::announced::Args),
 	/// Write one group of a track to stdout.
 	Fetch(crate::fetch::Args),
 	/// Play a broadcast in a native window and speaker.
@@ -648,7 +613,7 @@ impl Command {
 		match self {
 			Self::Import(_) | Self::Publish(_) => "import",
 			Self::Export(_) | Self::Subscribe(_) => "export",
-			Self::Ls(_) => "ls",
+			Self::Announced(_) => "announced",
 			Self::Fetch(_) => "fetch",
 			#[cfg(feature = "play")]
 			Self::Play(_) => "play",
@@ -1577,6 +1542,27 @@ mod tests {
 			panic!("subscribe must not start a run");
 		};
 		assert!(err.to_string().contains("subscribe -> export"), "{err}");
+	}
+
+	/// An exported `MOQ_CONNECT` configures a MoQ side but does not ask for one, so a
+	/// local verb still runs in a shell that exports a relay for its usual publishing.
+	#[test]
+	fn the_environment_cannot_ask_for_a_moq_side() {
+		let url = "https://relay.example.com";
+		let _env = crate::test_env::EnvGuard::set(&[("MOQ_CONNECT", url)]);
+
+		let ambient = Invocation::try_parse_from(["moq", "auth", "generate"]).expect("parse");
+		assert!(
+			ambient.moq.client.url.is_some(),
+			"the resolved side should still pick the variable up"
+		);
+		assert!(
+			ambient.reject("auth").is_ok(),
+			"an exported MOQ_CONNECT was treated as a request"
+		);
+
+		let typed = Invocation::try_parse_from(["moq", "--connect", url, "auth", "generate"]).expect("parse");
+		assert!(typed.reject("auth").is_err(), "a typed --connect stopped being refused");
 	}
 
 	#[test]

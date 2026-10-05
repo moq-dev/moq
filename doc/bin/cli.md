@@ -24,7 +24,7 @@ Docker; see [Install](/setup/install).
 | `export` | `rtmp`, `srt`, `rtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
 | `play` | | Decode and play in a native window with sound. |
 | `transcode` | | Publish a just-in-time rendition ladder next to a broadcast. |
-| `ls` | `[prefix]` | List the broadcasts live on a relay. |
+| `announced` | `[prefix]` | Follow the broadcasts announced on a relay. |
 | `fetch` | `<track>` | Write one group of a track to stdout. |
 | `auth` | | Generate, sign, and verify relay JWTs. |
 | `devices` | | List capture sources and their ids. |
@@ -35,7 +35,7 @@ Docker; see [Install](/setup/install).
 moq <MoQ side> import <source> [options]
 moq <MoQ side> export <sink> [options]
 moq <MoQ side> play [options]
-moq <MoQ side> ls [prefix] [options]
+moq <MoQ side> announced [prefix] [options]
 moq <MoQ side> fetch <track> [options]
 ```
 
@@ -262,28 +262,29 @@ heights and bitrates must then increase strictly together. Duplicate heights or
 bitrates, inverted rankings, and zero-sized or zero-bitrate rungs are rejected
 before connecting.
 
-## List
+## Announced
 
 ```bash
-moq --connect https://relay.example.com/anon ls
-moq ... ls room --follow --json
+moq --connect https://relay.example.com/anon announced
+moq ... announced room --json
 ```
 
-Lists the broadcasts live on a relay over MoQ, with the session's own auth: the
-counterpart of the relay's HTTP `/announced/<prefix>`. It prints one path per
-line, relative to the `--connect` path, and exits once the relay has sent
-everything live under `prefix`. `--follow` keeps running: it prints `+ path`
-for each live broadcast, then `+ path` and `- path` as broadcasts come and go,
-and exits non-zero if the session ends. `--json` prints
-`{"path": "room/alice", "active": true}` per line instead, in either mode.
+Follows the broadcasts announced on a relay over MoQ, with the session's own
+auth: the live counterpart of the relay's HTTP `/announced/<prefix>`. Paths are
+relative to the `--connect` path. On a terminal it shows what is announced
+under `prefix` right now, redrawn as broadcasts start and end. Piped, it prints
+`+ path` for each broadcast already announced, then `+ path` and `- path` as
+broadcasts come and go. `--json` prints `{"path": "room/alice", "active": true}`
+per line instead, on a terminal or not. It runs until interrupted, and exits
+non-zero if the session ends.
 
-Like `/announced`, it lists announced prefixes, which by convention are
-broadcast paths. A new route to a path already live prints nothing. A name
-starting with `.` stays hidden unless `prefix` names it. `ls` only dials
+Like `/announced`, it follows announced prefixes, which by convention are
+broadcast paths. A new route to a path already announced prints nothing. A name
+starting with `.` stays hidden unless `prefix` names it. `announced` only dials
 `--connect`, and refuses any other MoQ-side flag.
 
-[Inspect a relay](/bin/inspect) walks through `ls` and `fetch` next to their
-`curl` equivalents, including reading the relay's stats.
+[Inspect a relay](/bin/inspect) walks through `announced` and `fetch` next to
+their `curl` equivalents, including reading the relay's stats.
 
 ## Fetch
 
@@ -416,7 +417,7 @@ way. Only `ts` can mark the restart, so the other formats refuse `--linger`.
 ## Debugging
 
 `RUST_LOG=debug` prints the negotiated version and every subscription.
-`moq --connect <url> ls`, or `curl http://relay:4443/announced`, confirms the
+`moq --connect <url> announced`, or `curl http://relay:4443/announced`, confirms the
 relay is reachable and shows what it holds; see [Inspect a relay](/bin/inspect). Connection refused means UDP isn't getting through; certificate
 errors on a dev relay want `--connect-tls-insecure` or the `http://`
 fingerprint flow.

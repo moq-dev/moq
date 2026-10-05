@@ -1,7 +1,8 @@
-//! `moq ls`: list the broadcasts live on a relay, the MoQ counterpart of the
-//! relay's HTTP `/announced/<prefix>`.
+//! `moq announced`: follow the broadcasts announced on a relay, the MoQ
+//! counterpart of the relay's HTTP `/announced/<prefix>`.
 
 use std::collections::BTreeSet;
+use std::io::IsTerminal;
 
 use anyhow::Context;
 use hang::moq_net::{self, announce::Event};
@@ -9,18 +10,14 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::args::MoqSide;
 
-/// List the broadcasts live on a relay.
+/// Follow the broadcasts announced on a relay as they start and end.
 #[derive(usage::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Args {
-	/// Only list paths under this prefix.
+	/// Only follow paths under this prefix.
 	pub prefix: Option<String>,
 
-	/// Keep running, printing `+ path` and `- path` as broadcasts come and go.
-	#[usage(long)]
-	pub follow: bool,
-
-	/// Print one JSON object per line instead of the bare paths.
+	/// Print each start and end as a line of JSON.
 	#[usage(long)]
 	pub json: bool,
 }
@@ -32,20 +29,42 @@ struct Line<'a> {
 	active: bool,
 }
 
-/// List what is live under the prefix `args` names and write it to stdout.
-pub async fn run(moq: MoqSide, args: Args, net: crate::Net) -> anyhow::Result<()> {
-	list(&moq, &args, &net, &mut tokio::io::stdout()).await
+/// How each start and end is written.
+enum Output {
+	/// Redraw the announced set in place, for a person watching a terminal.
+	View(View),
+	/// `+ path` / `- path`, one line per event.
+	Lines,
+	/// One [`Line`] per event.
+	Json,
 }
 
-async fn list(moq: &MoqSide, args: &Args, net: &crate::Net, out: &mut (impl AsyncWrite + Unpin)) -> anyhow::Result<()> {
+/// Follow what is announced under the prefix `args` names, writing to stdout until
+/// the session ends.
+pub async fn run(moq: MoqSide, args: Args, net: crate::Net) -> anyhow::Result<()> {
+	let output = match args.json {
+		true => Output::Json,
+		false if std::io::stdout().is_terminal() => Output::View(View::default()),
+		false => Output::Lines,
+	};
+	follow(&moq, args.prefix.as_deref(), &net, output, &mut tokio::io::stdout()).await
+}
+
+async fn follow(
+	moq: &MoqSide,
+	prefix: Option<&str>,
+	net: &crate::Net,
+	mut output: Output,
+	out: &mut (impl AsyncWrite + Unpin),
+) -> anyhow::Result<()> {
 	let url = moq
 		.client
 		.url
 		.clone()
-		.context("`ls` dials a relay: pass --connect <url>")?;
-	let prefix = args.prefix.as_deref().unwrap_or_default();
+		.context("`announced` dials a relay: pass --connect <url>")?;
+	let prefix = prefix.unwrap_or_default();
 
-	// Scoped to the prefix, so the session only asks the relay for what is listed.
+	// Scoped to the prefix, so the session only asks the relay for what is followed.
 	let pattern = moq_net::Pattern::subtree(prefix).with_context(|| format!("invalid prefix `{prefix}`"))?;
 	let origin = moq_tokio::origin::spawn()
 		.scope("", &moq_net::Patterns::from(pattern))
@@ -58,9 +77,7 @@ async fn list(moq: &MoqSide, args: &Args, net: &crate::Net, out: &mut (impl Asyn
 		.with_reconnect(false);
 	let connection = client.connect(url).established().await.context("failed to connect")?;
 
-	// Registered once the session has started, so `Live` waits for the relay's initial set.
 	let mut announced = origin.consume().announced();
-	let mut live = BTreeSet::new();
 
 	loop {
 		// Checked first: a closing session retracts every route, which is not news.
@@ -76,40 +93,60 @@ async fn list(moq: &MoqSide, args: &Args, net: &crate::Net, out: &mut (impl Asyn
 		let (announce, active) = match event {
 			Event::Start(announce) => (announce, true),
 			Event::End(announce) => (announce, false),
-			// A new route for a path already live changes nothing listed.
-			Event::Update(_) => continue,
-			Event::Live if args.follow => continue,
-			Event::Live => break,
+			// An `Update` is a new route for a path already announced, which changes
+			// nothing shown; nothing else names a path.
+			_ => continue,
 		};
 
 		let path = announce.prefix.as_str();
-		if args.follow {
-			let line = match args.json {
-				true => json(path, active)?,
-				false => format!("{} {path}", if active { '+' } else { '-' }),
-			};
-			out.write_all(format!("{line}\n").as_bytes()).await?;
-			out.flush().await?;
-		} else if active {
-			live.insert(path.to_owned());
-		} else {
-			live.remove(path);
-		}
-	}
-
-	for path in &live {
-		let line = match args.json {
-			true => json(path, true)?,
-			false => path.clone(),
+		let text = match &mut output {
+			Output::View(view) => match view.apply(path, active) {
+				Some(frame) => frame,
+				None => continue,
+			},
+			Output::Lines => format!("{} {path}\n", if active { '+' } else { '-' }),
+			Output::Json => format!("{}\n", serde_json::to_string(&Line { path, active })?),
 		};
-		out.write_all(format!("{line}\n").as_bytes()).await?;
+		out.write_all(text.as_bytes()).await?;
+		out.flush().await?;
 	}
-	out.flush().await?;
-	Ok(())
 }
 
-fn json(path: &str, active: bool) -> serde_json::Result<String> {
-	serde_json::to_string(&Line { path, active })
+/// The announced set, drawn below the cursor and redrawn in place on each change.
+#[derive(Default)]
+struct View {
+	announced: BTreeSet<String>,
+	/// Lines the last frame drew, which the next one moves back over.
+	drawn: usize,
+}
+
+impl View {
+	/// Apply one start or end, returning the frame that redraws the set when it changed.
+	///
+	/// Autowrap is off while drawing, so a path wider than the terminal is cut off
+	/// rather than wrapped onto a line the next frame would not move back over.
+	fn apply(&mut self, path: &str, active: bool) -> Option<String> {
+		let changed = match active {
+			true => self.announced.insert(path.to_owned()),
+			false => self.announced.remove(path),
+		};
+		if !changed {
+			return None;
+		}
+
+		let mut frame = String::from("\x1b[?7l");
+		if self.drawn > 0 {
+			// To the start of the first line drawn, then erase everything below it.
+			frame.push_str(&format!("\x1b[{}F\x1b[J", self.drawn));
+		}
+		for path in &self.announced {
+			frame.push_str(path);
+			frame.push('\n');
+		}
+		frame.push_str("\x1b[?7h");
+		self.drawn = self.announced.len();
+		Some(frame)
+	}
 }
 
 #[cfg(test)]
@@ -172,7 +209,7 @@ mod tests {
 				.await
 				.expect("publisher connects");
 
-			// Every broadcast is on the relay before anything lists it.
+			// Every broadcast is on the relay before anything follows it.
 			for (path, _) in &broadcasts {
 				tokio::time::timeout(TIMEOUT, relay.routed_broadcast(*path))
 					.await
@@ -188,19 +225,8 @@ mod tests {
 			}
 		}
 
-		/// Run `moq <connect> ls <args>` to completion, returning what it wrote.
-		async fn ls(&self, args: &[&str]) -> String {
-			let (moq, args) = parse(&self.connect, args);
-			let mut out = Vec::new();
-			tokio::time::timeout(TIMEOUT, list(&moq, &args, &net(), &mut out))
-				.await
-				.expect("ls exits once caught up")
-				.expect("ls");
-			String::from_utf8(out).expect("UTF-8")
-		}
-
-		/// Start `moq <connect> ls --follow <args>`, returning its lines as they come
-		/// and the running task.
+		/// Start `moq <connect> announced <args>` as if piped, returning its lines as
+		/// they come and the running task.
 		fn follow(
 			&self,
 			args: &[&str],
@@ -208,10 +234,14 @@ mod tests {
 			Lines<BufReader<DuplexStream>>,
 			tokio::task::JoinHandle<anyhow::Result<()>>,
 		) {
-			let args = ["--follow"].iter().chain(args).copied().collect::<Vec<_>>();
-			let (moq, args) = parse(&self.connect, &args);
+			let (moq, args) = parse(&self.connect, args);
+			let output = match args.json {
+				true => Output::Json,
+				false => Output::Lines,
+			};
 			let (mut writer, reader) = tokio::io::duplex(4096);
-			let task = tokio::spawn(async move { list(&moq, &args, &net(), &mut writer).await });
+			let task =
+				tokio::spawn(async move { follow(&moq, args.prefix.as_deref(), &net(), output, &mut writer).await });
 			(BufReader::new(reader).lines(), task)
 		}
 
@@ -221,7 +251,7 @@ mod tests {
 		}
 	}
 
-	/// The next line `--follow` prints.
+	/// The next line printed.
 	async fn next(lines: &mut Lines<BufReader<DuplexStream>>) -> String {
 		tokio::time::timeout(TIMEOUT, lines.next_line())
 			.await
@@ -230,18 +260,18 @@ mod tests {
 			.expect("a line")
 	}
 
-	/// Parse an ls invocation the way `main` does.
+	/// Parse an `announced` invocation the way `main` does.
 	fn parse(connect: &[String], args: &[&str]) -> (MoqSide, Args) {
 		let argv = ["moq"]
 			.into_iter()
 			.chain(connect.iter().map(String::as_str))
-			.chain(["ls"])
+			.chain(["announced"])
 			.chain(args.iter().copied());
 		let mut cli = Invocation::try_parse_from(argv).expect("parse");
-		cli.dial_only("ls", &[]).expect("only the dial");
+		cli.dial_only("announced", &[]).expect("only the dial");
 		match cli.stages.remove(0) {
-			Command::Ls(args) => (cli.moq, args),
-			_ => unreachable!("parsed an ls"),
+			Command::Announced(args) => (cli.moq, args),
+			_ => unreachable!("parsed an announced"),
 		}
 	}
 
@@ -253,20 +283,9 @@ mod tests {
 		}
 	}
 
-	/// Exactly the announced set under the prefix, one path per line.
+	/// What is already announced as `+` lines, then a `-` when a publisher leaves.
 	#[tokio::test]
-	async fn prints_the_live_set_and_exits() {
-		let _env = EnvGuard::clear(ENV);
-		let fixture = Fixture::new().await;
-
-		assert_eq!(fixture.ls(&[]).await, "demo/a\ndemo/b\nother/c\n");
-		assert_eq!(fixture.ls(&["demo"]).await, "demo/a\ndemo/b\n");
-		assert_eq!(fixture.ls(&["nothing"]).await, "");
-	}
-
-	/// The initial replay as `+` lines, then a `-` when a publisher leaves.
-	#[tokio::test]
-	async fn follow_prints_the_replay_then_changes() {
+	async fn prints_the_replay_then_changes() {
 		let _env = EnvGuard::clear(ENV);
 		let mut fixture = Fixture::new().await;
 
@@ -277,28 +296,15 @@ mod tests {
 
 		fixture.retract("demo/a");
 		assert_eq!(next(&mut lines).await, "- demo/a");
-		assert!(!task.is_finished(), "follow runs until interrupted");
+		assert!(!task.is_finished(), "runs until interrupted");
 		task.abort();
 	}
 
-	/// Each `--json` line is `{"path", "active"}`, in either mode.
+	/// Each `--json` line is `{"path", "active"}`.
 	#[tokio::test]
 	async fn json_lines_parse() {
 		let _env = EnvGuard::clear(ENV);
 		let mut fixture = Fixture::new().await;
-
-		let lines = fixture.ls(&["demo", "--json"]).await;
-		let lines: Vec<serde_json::Value> = lines
-			.lines()
-			.map(|line| serde_json::from_str(line).expect("a JSON line"))
-			.collect();
-		assert_eq!(
-			lines,
-			[
-				serde_json::json!({"path": "demo/a", "active": true}),
-				serde_json::json!({"path": "demo/b", "active": true}),
-			]
-		);
 
 		let (mut lines, task) = fixture.follow(&["other", "--json"]);
 		let line: serde_json::Value = serde_json::from_str(&next(&mut lines).await).expect("a JSON line");
@@ -309,9 +315,9 @@ mod tests {
 		task.abort();
 	}
 
-	/// `--follow` fails once the relay goes away rather than waiting forever.
+	/// It fails once the relay goes away rather than waiting forever.
 	#[tokio::test]
-	async fn follow_fails_when_the_session_ends() {
+	async fn fails_when_the_session_ends() {
 		let _env = EnvGuard::clear(ENV);
 		let fixture = Fixture::new().await;
 
@@ -321,18 +327,39 @@ mod tests {
 		fixture.shutdown.start();
 		let result = tokio::time::timeout(TIMEOUT, task)
 			.await
-			.expect("follow exits")
+			.expect("exits once the session ends")
 			.expect("task");
 		result.expect_err("a lost session is an error");
 	}
 
-	/// `ls` lists a prefix, so a `--broadcast` is refused rather than ignored.
+	/// Each change redraws the whole set over the previous frame; a no-op draws nothing.
+	#[test]
+	fn the_view_redraws_in_place() {
+		let mut view = View::default();
+		assert_eq!(view.apply("b", true).unwrap(), "\x1b[?7lb\n\x1b[?7h");
+		assert_eq!(view.apply("a", true).unwrap(), "\x1b[?7l\x1b[1F\x1b[Ja\nb\n\x1b[?7h");
+		assert_eq!(view.apply("a", true), None, "already shown");
+		assert_eq!(view.apply("c", false), None, "never shown");
+		assert_eq!(view.apply("b", false).unwrap(), "\x1b[?7l\x1b[2F\x1b[Ja\n\x1b[?7h");
+		assert_eq!(view.apply("a", false).unwrap(), "\x1b[?7l\x1b[1F\x1b[J\x1b[?7h");
+		assert_eq!(view.apply("a", true).unwrap(), "\x1b[?7la\n\x1b[?7h");
+	}
+
+	/// `announced` follows a prefix, so a `--broadcast` is refused rather than ignored.
 	#[test]
 	fn only_connect_is_accepted() {
 		let _env = EnvGuard::clear(ENV);
-		let cli = Invocation::try_parse_from(["moq", "--connect", "http://relay", "--broadcast", "demo", "ls"])
+		let cli = Invocation::try_parse_from(["moq", "--connect", "http://relay", "--broadcast", "demo", "announced"])
 			.expect("parse");
-		let err = cli.dial_only("ls", &[]).unwrap_err().to_string();
+		let err = cli.dial_only("announced", &[]).unwrap_err().to_string();
 		assert!(err.contains("--broadcast"), "{err}");
+	}
+
+	/// The one-shot listing is gone, with no alias or flag left behind for it.
+	#[test]
+	fn ls_and_follow_are_unknown() {
+		let _env = EnvGuard::clear(ENV);
+		assert!(Invocation::try_parse_from(["moq", "--connect", "http://relay", "ls"]).is_err());
+		assert!(Invocation::try_parse_from(["moq", "--connect", "http://relay", "announced", "--follow"]).is_err());
 	}
 }
