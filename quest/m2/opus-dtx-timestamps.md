@@ -10,8 +10,9 @@ without skewing jitter estimates.
 ## Plan
 
 Chromium stamps encoder output as the first input timestamp plus the samples
-it emitted, so suppressed frames pull later chunks earlier. The
-[stopgap](/quest/m0/opus-dtx.md) removes DTX until this lands.
+it emitted, so suppressed frames pull later chunks earlier. Until this lands,
+`@moq/publish` rejects `usedtx` and never enables DTX; restoring it brings
+back the option, the voice default, and the demo's checkbox.
 
 Decided (2026-10-04):
 
@@ -30,5 +31,4 @@ groups as well as bytes.
 
 ## Related
 
-- [Opus DTX stopgap](/quest/m0/opus-dtx.md) - removes DTX until this lands
 - [Opus backend](/quest/m2/audio-opus-backend.md) - DTX on the native side

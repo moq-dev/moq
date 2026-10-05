@@ -4,7 +4,7 @@ import { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Baseline } from "../jitter";
 import type { AudioFrame, Format } from "./capture";
-import { Encoder, resolve } from "./encoder";
+import { Encoder, resolve, toEncoderConfig } from "./encoder";
 
 // Bun does not load Vite's worklet URL imports from the public audio entrypoint.
 mock.module("./capture-worklet.ts?worklet", () => ({ default: async () => "blob:fake-capture" }));
@@ -52,6 +52,20 @@ describe("resolve", () => {
 		const resolved = resolve(captured, "aac");
 		expect(resolved.frameDuration).toBeUndefined();
 		expect(resolved.catalog.jitter).toBeUndefined();
+	});
+
+	// DTX makes the browser stamp later audio earlier, so asking for it fails instead of drifting.
+	test("rejects Opus DTX", () => {
+		for (const usedtx of [true, false]) {
+			expect(() => resolve(captured, { mime: "opus", usedtx } as never)).toThrow(/usedtx/);
+		}
+	});
+});
+
+describe("toEncoderConfig", () => {
+	test("configures voice without DTX", () => {
+		const config = toEncoderConfig(resolve(captured, "opus"), "voice", {});
+		expect(config.opus).toEqual({ application: "voip", signal: "voice", frameDuration: 20_000 } as never);
 	});
 });
 
