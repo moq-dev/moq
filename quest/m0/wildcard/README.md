@@ -185,9 +185,9 @@ path, not with a route identity or a generation field.
 - **Patterns are independent of clustering.** The `moq-pattern` crate owns
   the matching semantics tokens and filters share, with no draft of its own;
   no announce message carries a pattern on either protocol (AUTH grants on
-  lite-06 do, per the [Auth](/quest/m1/auth/README.md) line). moq-cluster adds hop
-  lists, costs, pool selection, and request resolution to prefix
-  advertisements.
+  the wip lite version do, per the [Auth](/quest/m1/auth/README.md) line).
+  moq-cluster adds hop lists, costs, pool selection, and request resolution
+  to prefix advertisements.
 
 ### Where derived output lives
 

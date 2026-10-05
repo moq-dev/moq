@@ -52,8 +52,8 @@ Candidate mechanics:
 - A refusal follows Wildcard's refusal rule: every refusal is terminal, and
   an origin sheds load by withdrawing or re-pricing its route instead.
 
-Wire: none expected; if one is needed it goes in the current wip lite
-version with the draft. Tests cover an HRW split across an equal-cost
+Wire: none expected; if one is needed it goes in lite-07 (the current wip
+version, where the route layer also lands) with the draft. Tests cover an HRW split across an equal-cost
 pool, a terminal refusal, and a same-path pair failing over mid-group with
 no timestamp rewind.
 

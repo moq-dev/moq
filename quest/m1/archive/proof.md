@@ -59,7 +59,8 @@ restart must finish this cleanup before accepting new groups.
 
 Finally render and reload HLS playlists while rejecting every media-object GET
 until a segment URI is requested. The range-bearing URI must resolve one
-object directly without any listing or separate index object.
+object directly without any listing or separate index object. This HLS step
+is done on the archive line branch (#4115, #4169).
 
 ## Required
 

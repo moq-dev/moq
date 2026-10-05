@@ -115,13 +115,13 @@ owned by that prerequisite, not duplicated in archive storage.
 - [Recording writer](/quest/m1/archive/writer.md) - feed the segmenter from a `broadcast::Consumer`, store each segment, then commit its record
 - [Recording reader](/quest/m1/archive/reader.md) - serve archived FETCH through a supplied `broadcast::Producer`
 - [Replay provenance](/quest/m1/archive/provenance.md) - a replay's catalog names its timeline, replay path, store URL, and format version
-- [Bounded HLS playlists](/quest/m1/archive/hls.md) - a fresh viewer's playlist work is bounded by the window, with a stable media sequence, gap slots, and no video before a keyframe
 - [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback
 - [Enrollment flake](/quest/m1/archive/enrollment-flake.md) - the opening-snapshot test waits for real enrollment, not the `.info` file
-- [Archive proof](/quest/m1/archive/proof.md) - prove persistence ordering, selective reads, exact FETCH replay, and timeline-only HLS generation
+- [Archive proof](/quest/m1/archive/proof.md) - prove persistence ordering, selective reads, and exact FETCH replay; its HLS step is done on the line branch
 
 ## Related
 
+- [Bounded HLS playlists](/quest/m1/hls-bounded.md) - the live renderer rules a replayed archive inherits, planned outside this line
 - [Catalog track identity](/quest/m2/catalog-tracks.md) - explore immutable definitions or explicit version binding independently of archives
 
 - [wildcard](/quest/m0/wildcard/README.md) - catch-all routing exposes an archive at its stable replay path

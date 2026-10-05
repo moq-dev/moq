@@ -8,9 +8,10 @@ feedback, it yields rates and loss as deltas over a stated interval, and
 classifies the connection and each rendition as unknown, healthy, degraded,
 or unhealthy, naming the observer of every number (the publisher's
 self-report, a viewer's report). Missing or stale reports are unknown, never
-healthy. Rust and JS compute the same verdict from the same fixtures, so the
-demo dashboard, `moq` CLI sinks, [preflight](/quest/m1/stats/preflight.md),
-and downstream dashboards share it.
+healthy. Rust and JS compute the same verdict from the same fixtures, so
+[preflight](/quest/m1/stats/preflight.md) and downstream dashboards share it.
+The demo dashboard and a `moq` CLI sink are possible consumers; wiring them
+is follow-up work, not this quest.
 
 Not here: per-project or per-connection inventories, dashboards, history, or
 any relay-side session table. Downstream (moq.pro) keeps its project view.
@@ -34,22 +35,31 @@ Guidance, to be settled while building:
 - Inputs are the snapshot types from [the schema](/quest/m1/stats/schema.md):
   `transport` (rtt, rate, loss, sample age) and the per-rendition counters.
   Counters are cumulative, so a sample is the delta of two snapshots over
-  their interval; a counter reset (a new epoch) starts over rather than going
-  negative.
+  their interval. A reset is detected by a counter decreasing or by the
+  reporting broadcast's path or epoch changing
+  ([Broadcast epochs](/quest/m0/broadcast-epoch/README.md)); the sample then
+  starts over rather than going negative.
+- Container sections such as `mpegts` are excluded from the verdict; their
+  counters are read by their own consumers
+  ([TS health counters](/quest/m2/ts-health-stats.md)).
 - Thresholds are a documented default the caller can override, not policy
   baked into the types. Start from a few measured cases rather than guesses.
 - A verdict carries its evidence: which inputs drove it and who observed them.
   A browser publisher with only PROBE rtt yields unknown for what it cannot
   see, never a guess.
-- The relay's [QoS](/quest/m1/qos/README.md) counters (starvation,
-  timeliness) are the other half of a broadcast verdict. Leave a seam to
-  combine them, but this quest classifies client reports only.
+- This quest classifies client reports only.
+
+Open, for the maintainer (the same question is recorded in
+[QoS](/quest/m1/qos/README.md)): whether anything computes a per-broadcast
+verdict combining client reports, the relay's starvation, and publisher
+timeliness, and where it would live. Nothing here depends on the answer, and
+no quest promises it until it is decided.
 - Lives beside the snapshot types in `hang` and `@moq/hang` unless building
   it shows a better home.
 
 Prove a degrading publisher self-report, a degrading viewer report, a stale
-report going unknown, and a counter reset, from shared fixtures in both
-languages. Docs: the media section of `doc/concept/stats.md`.
+report going unknown, and a counter reset by both a decrease and an epoch
+change, from shared fixtures in both languages. Docs: the media section of `doc/concept/stats.md`.
 
 Public API: new health types in `hang` and `@moq/hang`. Wire: none.
 
@@ -60,4 +70,6 @@ Public API: new health types in `hang` and `@moq/hang`. Wire: none.
 ## Related
 
 - [moq.pro: connection health](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/qos-connection-health.md) - the per-project view built on this model
-- [QoS](/quest/m1/qos/README.md) - the relay's delivery counters, the other half of a broadcast verdict
+- [QoS](/quest/m1/qos/README.md) - the relay's delivery counters, which a combined verdict would also read (open above)
+- [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a new epoch is one way a counter reset shows
+- [TS health counters](/quest/m2/ts-health-stats.md) - container counters kept out of the verdict
