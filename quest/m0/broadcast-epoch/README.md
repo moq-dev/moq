@@ -55,9 +55,6 @@ Decided:
   [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md), which also gates the release
   (decided 2026-10-04): a restarted stats node under a reused name stalls its
   viewers the same way.
-- [Retracted demand release](/quest/m0/broadcast-epoch/unannounce-demand-release.md) also
-  gates the release (decided 2026-10-05): a regression from #4741 on main that
-  `release` lacks.
 - Decided in the 2026-10-05 audit: the m1 quests gating this line (stats
   epochs, the bounded stats aggregate it requires, and retracted demand
   release) moved under it, and the OBS half of GStreamer and OBS moved to m1
@@ -80,7 +77,6 @@ This README owns:
 
 ## Required
 
-- [Retracted demand release](/quest/m0/broadcast-epoch/unannounce-demand-release.md) - a retracted broadcast's track demand is released when its last subscriber leaves, as before #4741
 - [Origin](/quest/m0/broadcast-epoch/origin.md) - moq-net publish mints an epoch, consumers follow the newest live one, and bare requests resolve to it on every version
 - [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web publish under epochs and play bare names
 - [Gateways](/quest/m0/broadcast-epoch/gateways.md) - RTMP, SRT, and WHIP ingest mint an epoch per incoming connection, so an encoder reconnect is a clean takeover
