@@ -112,8 +112,6 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Windows capture parity](/quest/m2/capture-windows.md) - system audio and a settled app-capture policy
 - [Linux capture parity](/quest/m2/capture-linux.md) - Wayland window/system-audio capture with explicit display-selection and app-capture limits
 - [Audio capture time](/quest/m2/audio-capture-time.md) - native audio stamps a buffer's capture instant, not when the driver reads it
-- [CMAF frame timestamp](/quest/m2/cmaf-frame-timestamp.md) - CMAF decoders time samples from the moq-lite frame timestamp, using `tfdt` only within the fragment
-- [Shared import clock](/quest/m2/shared-clock.md) - an importer joining a clock already in use offsets its PTS instead of moving it, so captures and imports share one timeline
 - [Interop graceful close](/quest/m2/interop-graceful-close.md) - successful runner publications withdraw before disconnecting; external repository approval required
 - [Egress profile](/quest/m2/quic-egress-profile.md) - measure relay send-path syscalls, pacing bursts, and allocations before optimizing any of them
 - [SEI separation study](/quest/m2/sei.md) - measure whether separating SEI saves enough, or has a metadata-only consumer, to justify a split

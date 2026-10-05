@@ -25,17 +25,27 @@ shifts `trun` data offsets.
   confirm with a test.
 - Check the TS exporter's verbatim carriage, which keeps PES PTS inside the
   payload. Rewrite those from the frame timestamp, or refuse a mismatch.
-- An untimed CMAF frame is refused once the frame timestamp is the
-  fragment's timeline (decided 2026-10-02, with
-  [moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md)).
+- An untimed CMAF frame decodes at its `tfdt` (decided 2026-10-05, replacing
+  the 2026-10-02 decision to refuse it). Rejected: refusing it, and parking
+  the quest.
 - `main`: a behavior fix with no API change.
 
+Open PR [#4826](https://github.com/moq-dev/moq/pull/4826) implements this. It
+lands after [#4822](https://github.com/moq-dev/moq/pull/4822)
+([untimed model](/quest/m1/untimed-model.md)), which brings untimed frames to
+`main` and itself waits on a typed-timedness mock-up quest.
+
 Test: in Rust and JS, a fragment whose `tfdt` disagrees with its frame
-timestamp decodes at the frame timestamp, with B-frame offsets preserved.
+timestamp decodes at the frame timestamp, with B-frame offsets preserved, and
+an untimed fragment decodes at its `tfdt`.
 
 Public API: none. Wire: none; this states what the frame timestamp already
 means.
 
+## Required
+
+- [Untimed model](/quest/m1/untimed-model.md) - untimed frames reach `main`, so the `tfdt` fallback has something to decode
+
 ## Related
 
-- [Shared clock](/quest/m2/shared-clock.md) - the first publisher to rely on it
+- [Shared clock](/quest/m1/shared-clock.md) - the first publisher to rely on it
