@@ -1,5 +1,6 @@
+/** Sweep observers against routes for one route update, and against tracks for one demand edge. */
+
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
-/** Sweep route and observer counts for a single touched-path route update. */
 import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
 

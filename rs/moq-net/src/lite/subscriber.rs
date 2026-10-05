@@ -4432,7 +4432,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 			// A fetch nobody waits on any more is cancelled upstream, so the publisher stops
 			// serving it (and a relay there releases its own FETCH). Ingest has its own check.
 			if let Some(request) = self.state.request()
-				&& request.poll_unused(waiter).is_ready()
+				&& request.demand().poll_unused(waiter).is_ready()
 			{
 				tracing::debug!(track = %self.serve.name, group = self.group, "fetch abandoned");
 				if let FetchRunState::Send { stream, .. } | FetchRunState::Answer { stream, .. } =

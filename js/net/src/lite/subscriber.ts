@@ -1288,7 +1288,13 @@ async function untilAbandoned<T>(group: netGroup.Producer, step: Promise<T>): Pr
 			]),
 		);
 		if (value !== idle) return value as T;
-		if (!group.demand().used.peek()) throw new StreamError(StreamCode.Cancel, { message: "cancel" });
+		if (!group.demand().used.peek()) {
+			// Close here rather than where the error lands, so no fetch coalesces onto the group
+			// in between only to fail with it.
+			const err = new StreamError(StreamCode.Cancel, { message: "cancel" });
+			group.close(err);
+			throw err;
+		}
 	}
 }
 

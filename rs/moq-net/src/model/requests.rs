@@ -102,7 +102,8 @@ impl<K: Clone + Eq + Hash, V> Requests<K, V> {
 	}
 
 	/// Remove the pending request for `key` if `f` says it's the caller's own,
-	/// leaving a newer entry that replaced it alone.
+	/// leaving a newer entry that replaced it alone. Purges a still-queued key as
+	/// [`Self::take`] does, so a handler never pops a withdrawn request.
 	pub fn remove_if<Q>(&mut self, key: &Q, f: impl FnOnce(&V) -> bool) -> Option<V>
 	where
 		K: Borrow<Q>,
@@ -111,7 +112,7 @@ impl<K: Clone + Eq + Hash, V> Requests<K, V> {
 		if !self.pending.get(key).is_some_and(f) {
 			return None;
 		}
-		self.pending.remove(key)
+		self.take(key)
 	}
 
 	/// Returns `true` if a queued (not yet popped) request exists.
@@ -202,6 +203,8 @@ mod test {
 		*requests.join(&1).unwrap() = "new";
 		assert_eq!(requests.remove_if(&1, |v| *v == "old"), None);
 		assert_eq!(requests.remove_if(&1, |v| *v == "new"), Some("new"));
+		// Still queued, so the removal also purged its queue entry.
+		assert!(!requests.has_queued());
 	}
 
 	#[test]

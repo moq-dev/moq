@@ -74,6 +74,5 @@ out its linger, not forever.
 
 ## Related
 
-- [Demand everywhere](/quest/m1/demand-everywhere.md) - the `demand()` handles this watches
 - [Request linger](/quest/m1/request-linger.md) - bounds how long an abandoned upstream request may outlive its readers
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - gates the release #4741 ships in
