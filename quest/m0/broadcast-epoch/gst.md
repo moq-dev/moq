@@ -18,6 +18,10 @@ longer waits on the C++ line. `moqsink` is Rust on moq-net and needs nothing
 from it. moq-c announces through `broadcast::Producer::announce`, so it only
 inherits an epoch if Origin mints one there; the OBS quest checks that.
 
+## Required
+
+- [Origin](/quest/m0/broadcast-epoch/origin.md) - the publish default moqsink takes
+
 ## Related
 
 - [OBS publishes under epochs](/quest/m1/obs-epoch.md) - the OBS plugin's half, after the C++ line

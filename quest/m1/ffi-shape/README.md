@@ -62,6 +62,7 @@ work no child does:
 
 ## Required
 
+- [Bindings](/quest/m0/broadcast-epoch/bindings.md) - lands first; this line adopts its epoch surface and the `session.epoch()` rename
 - [JSON](/quest/m1/ffi-shape/json.md) - the pilot: json and flate become their own namespaces wrapping a track in every binding and set the per-language pattern
 - [Net](/quest/m1/ffi-shape/net.md) - client and server take config records, snapshots are records, and the verbs match moq-net
 - [Media](/quest/m1/ffi-shape/media.md) - catalog, import, and container consume move under `media`

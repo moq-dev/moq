@@ -10,7 +10,7 @@ decode, and render stack.
 ## Plan
 
 Deferred in the 2026-09-30 audit and moved to m3 in the 2026-10-05 audit: no named consumer, and [`moq --listen`
-admission](/quest/m1/cli-serve.md) no longer waits on it.
+drain and stats](/quest/m1/cli-serve.md) no longer waits on it.
 
 `moq-relay` is lib+bin (`rs/moq-relay/Cargo.toml`), with a 15-line
 `main.rs` that installs the aws-lc-rs provider, optionally jemalloc, and calls
@@ -39,4 +39,4 @@ admission](/quest/m1/cli-serve.md) no longer waits on it.
 
 ## Related
 
-- [`moq --listen` admission](/quest/m1/cli-serve.md) - the CLI's listener is admitted through the same `serve`
+- [`moq --listen` drain and stats](/quest/m1/cli-serve.md) - the CLI's listener is admitted through the same `serve`

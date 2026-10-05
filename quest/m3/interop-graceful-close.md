@@ -14,3 +14,7 @@ Exercise successive runs against the same relay.
 
 The caller lives outside this repository. Obtain maintainer approval before
 posting to its repository; that approval has not been given.
+
+## Required
+
+- [The maintainer approves posting to moq-interop-runner](/quest/m3/interop-runner-approval.md) - the outstanding approval this waits on
