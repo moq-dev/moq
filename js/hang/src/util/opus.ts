@@ -88,8 +88,8 @@ export function toDOps(description: Uint8Array): Uint8Array {
  * Number of 48 kHz samples in an Opus packet, read from its TOC byte (RFC 6716 §3.1).
  *
  * Mirrors `packet_samples` in rs/moq-mux. Opus timing is always reckoned at 48 kHz regardless of the
- * encoder's internal bandwidth. Undefined for an empty packet or a code-3 packet missing its
- * frame-count byte.
+ * encoder's internal bandwidth. Undefined for an empty packet, a code-3 packet missing its
+ * frame-count byte, or a packet outside the 1 frame and 120 ms RFC 6716 allows.
  */
 export function packetSamples(packet: Uint8Array): number | undefined {
 	const toc = packet.at(0);
@@ -106,8 +106,13 @@ export function packetSamples(packet: Uint8Array): number | undefined {
 		frames = count & 0b11_1111;
 	}
 
-	return configSamples(toc >> 3) * frames;
+	const samples = configSamples(toc >> 3) * frames;
+	if (frames === 0 || samples > MAX_PACKET_SAMPLES) return undefined;
+	return samples;
 }
+
+// RFC 6716 §3.2.5: a packet holds at most 120 ms of audio.
+const MAX_PACKET_SAMPLES = 5_760;
 
 // 48 kHz samples per frame for a TOC config index (0..=31), per RFC 6716 Table 1.
 function configSamples(config: number): number {

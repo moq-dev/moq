@@ -58,6 +58,9 @@ should have measured go unplayed. In automatic mode both implementations
 subscribe with at least the ceiling, 2 s: `moq play --delay auto` through its
 age budget, and the browser through the audio subscription alone, since its
 container consumer observes each frame before applying the local budget.
+Browser video keeps the shared budget, because a longer one fetches whole stale
+groups, so a broadcast with no audio measures only the lateness that budget
+lets through.
 A frame the container will later discard *is* observed, which is also correct:
 it arrived, and when it arrived is the measurement.
 

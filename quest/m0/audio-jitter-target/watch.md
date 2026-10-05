@@ -41,7 +41,9 @@ about 22 s with skip-aheads on the way down.
 - Manual run against the public relay on Chrome and Safari, the two rows the
   issue measured, with a real microphone and 40 ms or more of added RTT. Watch
   the stats panel's audio underrun counter and the latency tab's auto readout,
-  on both the isolated and the postMessage ring paths. Re-record the
+  on both the isolated and the postMessage ring paths. Leave the publisher's
+  DTX off (the voice default since #4808) so the run measures network jitter
+  rather than DTX drift. Re-record the
   `relay-mic` trace in the same run (`just test audio-quality-record`); the
   checked-in one used Chromium's fake capture device. Measure the publisher's
   audio encoder input-to-output lag in the same run using the reporter's

@@ -100,4 +100,13 @@ describe("packetSamples", () => {
 		expect(packetSamples(new Uint8Array([]))).toBeUndefined();
 		expect(packetSamples(new Uint8Array([(1 << 3) | 3]))).toBeUndefined();
 	});
+
+	it("is undefined outside 1 frame and 120 ms", () => {
+		// Code 3 with zero frames.
+		expect(packetSamples(new Uint8Array([(1 << 3) | 3, 0]))).toBeUndefined();
+		// Code 3 with 63 frames of 60 ms.
+		expect(packetSamples(new Uint8Array([(3 << 3) | 3, 63]))).toBeUndefined();
+		// Code 3 with 2 frames of 60 ms is the 120 ms maximum.
+		expect(packetSamples(new Uint8Array([(3 << 3) | 3, 2]))).toBe(5760);
+	});
 });
