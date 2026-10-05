@@ -35,13 +35,14 @@ Decided 2026-10-01:
   above all (common on cameras), is skipped with one clear warning and the
   broadcast goes on video-only. Transcoding it waits for a customer who
   needs it.
-- Each camera session publishes a new broadcast under a fresh epoch, per
+- A reconnect publishes a new broadcast under a fresh epoch, per
   [Broadcast epochs](/quest/m0/broadcast-epoch/README.md), never spliced onto
-  the last one. A new session's RTP time restarts, so a reconnect finishes the
+  the last one. A new session's RTP time restarts, so the CLI finishes the
   old broadcast cleanly and builds a fresh catalog, tracks, and importers,
   starting on a keyframe. A timestamp jump inside one session (retina #64)
-  also ends that session's broadcast and starts a new one, instead of failing
-  the track. Decided 2026-10-02; shifting timestamps onto the existing
+  ends that library session and returns to its caller, which starts a new
+  broadcast, instead of failing the track. Separate URLs a library caller
+  publishes as renditions of one broadcast share its epoch and catalog. Decided 2026-10-02; shifting timestamps onto the existing
   catalog clock behind a `discontinuity()` marker was rejected, since a
   broadcast name always means the same content.
 - Credentials ride the URL's userinfo, as every RTSP tool takes them. retina

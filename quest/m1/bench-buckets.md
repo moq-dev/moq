@@ -4,9 +4,11 @@
 
 Every `moq-bench` JSONL line carries that interval's latency histogram in a
 versioned, documented bucket layout, so the buckets from several bench
-processes on several hosts sum element-wise over any window into one exact
+processes on several hosts sum element-wise over any window into one
 distribution. A percentile computed once from the summed buckets matches one
-computed from the concatenated samples.
+computed from the concatenated samples binned by the same layout and overflow
+rule: the buckets are lossy, so the match is exact at bucket resolution, not
+at raw-sample precision.
 
 ## Plan
 
@@ -28,7 +30,8 @@ so the bench emits mergeable buckets. Approved as recommended.
 - Publisher and subscriber stay on one host, so latency closes on one clock;
   `latency_clock_skew` keeps flagging a violation.
 - A test sums fixture buckets from two runs and checks the percentiles
-  against the concatenated samples. Update `rs/moq-bench/README.md`.
+  against the concatenated samples, binned by the same layout and the same
+  overflow bucket (60,000 ms and above today) before the percentile is taken. Update `rs/moq-bench/README.md`.
 
 moq-bench is 0.0.x, so this lands on main.
 

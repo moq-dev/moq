@@ -19,8 +19,11 @@ follow it.
 
 "Final" means:
 
-- Every lite-07 wire change planned in m0 and m1 has landed, listed under
-  Required, plus the cache bug that only bites once lite-07 ships.
+- Every wire change listed under Required has landed, plus the cache bug
+  that only bites once lite-07 ships. That list is the whole freeze set: a
+  wire quest not on it, such as
+  [Routes and announces](/quest/m1/cluster-routing/routes.md), targets the
+  next wip version unless the maintainer adds it (open below).
 - The identifier becomes `moq-lite-07` in `rs/moq-net`, `js/net`, the draft
   (whose text already names the rename), `doc/concept/moq-lite.md`, and the
   CLI and relay docs. A wip peer and a final peer refuse each other by ALPN
@@ -31,6 +34,11 @@ follow it.
   release carries it.
 
 Open, for the maintainer:
+
+- Whether [Routes and announces](/quest/m1/cluster-routing/routes.md)'s new
+  ROUTE and ANNOUNCE wire gates lite-07 or moves to lite-08. Recommended:
+  lite-08. It is [XL] and still in design, and holding lite-07 for it holds
+  announce compression for every mesh waiting on lite-07.
 
 - Whether a large in-flight change, such as subscribe ranges or live media
   time, slips to lite-08 so lite-07 ships sooner. Recommended: keep the set

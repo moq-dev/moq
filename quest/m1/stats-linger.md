@@ -26,15 +26,19 @@ first proposed, and make it configurable.
   `rs/moq-stats/src/produce.rs`). Keep it, and the epoch and group sequence it
   publishes under ([stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md)), until the
   linger elapses with the group still empty; a row returning re-arms it.
+  While it lingers empty, its live gauges and session presence read zero and
+  its cumulative traffic totals are kept, so a reader sees no stale live
+  counters.
 - Time decisions use `max(wall, pts)`; tests mock time.
 - Depth 0 already lives for the producer's life and is unchanged.
 
 moq.pro tracks the `release` branch, so once this lands on `main` it is
 backported to `release` (a cherry-pick PR).
 
-Test: a session closes and reopens within the linger with no unannounce; the
-group unannounces after the linger; the reported totals match a run without
-the linger.
+Test: a session closes and reopens within the linger with no unannounce;
+while the group lingers empty, live gauges and presence are zero and
+cumulative totals are unchanged; the group unannounces after the linger; the
+reported totals match a run without the linger.
 
 Public API: a linger knob on the stats producer config. Wire: none.
 

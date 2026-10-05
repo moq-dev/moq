@@ -30,7 +30,10 @@ Guidance, to be settled while building:
   evaluate: `VK_EXT_memory_budget` for memory, DRM fdinfo or sysfs engine
   busyness for utilization on amdgpu, i915, and xe, and NVML only where
   NVIDIA offers nothing neutral (encoder session limits on consumer cards).
-  Record which source backs each field per vendor.
+  Record which source backs each field per vendor, and whether each memory
+  value is process-scoped or device-wide: `VK_EXT_memory_budget`'s
+  `heapUsage` is this process's only, so device-wide usage needs a driver
+  source (DRM fdinfo per client, sysfs, or NVML).
 - Sessions moq-video opened itself are counted in process; device-wide counts
   come from the driver where it reports them, since several processes may
   share a GPU.

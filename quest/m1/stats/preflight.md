@@ -6,7 +6,9 @@ A bounded test run against a published broadcast produces one report a person
 can act on: catalog validity, codec support, time to the first keyframe,
 bitrate and frame cadence per rendition, keyframe interval, audio/video skew,
 timeline continuity, the [health verdict](/quest/m1/stats/health.md) from the
-publisher's stats, and a clean unannounce at the end. A failure names the
+publisher's stats, and whether the broadcast ends with a clean unannounce
+(observed by the check; the publisher, which owns the `broadcast::Producer`,
+does the unannounce). A failure names the
 broken layer and its evidence instead of one score, and the raw evidence is
 kept so two people reach the same diagnosis.
 

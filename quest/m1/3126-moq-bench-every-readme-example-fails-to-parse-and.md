@@ -18,7 +18,9 @@ first groups landed while the swarm was still connecting.
 
 - Emit per-interval percentiles (or the interval histogram) beside the
   cumulative ones: keep the previous snapshot's buckets, diff, and compute
-  p50/p90/p99 over the delta. `latency_samples` is already per-line.
+  p50/p90/p99 over the delta. Report that interval's sample count as the
+  sum of the delta's buckets: `latency_samples` comes from the cumulative
+  snapshot, so it must not be paired with interval percentiles.
 - Document the new fields and update the methodology paragraph.
 
 The README examples parse today (`--connect`, `README.md:66-71`; `--file` is
