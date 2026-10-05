@@ -33,8 +33,8 @@ Decided in planning (2026-10-03):
   every hop adds shows up honestly.
 - **Optional on the wire.** An untimed track (see
   [Untimed lite-07](/quest/m1/lite-untimed.md)) has no media time, so the field
-  is absent, encoded the same way as an absent frame timestamp. A track whose
-  frames are all untimed never reports one, and no receiver invents one.
+  is absent, as its frame timestamps are. An untimed track never reports one,
+  and no receiver invents one.
 - **lite-07 only.** It is still WIP (`moq-lite-07-wip`), so the field is added
   without negotiation. Older versions keep the gap rule.
 - **API: `track::Subscriber::live().await`** resolves once the route answered, to
