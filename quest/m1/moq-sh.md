@@ -64,13 +64,15 @@ since the script and its hosting now both live in this repository.
   concurrency split. Add `just infra moq-sh deploy` for manual use, and
   include it in the aggregate `just infra deploy` and `infra/README.md`.
 - CI deploys with the `CLOUDFLARE_API_TOKEN` Actions secret, which exists.
-  It has the Workers Editor role (Workers Scripts Edit is legacy) and no
+  It has the account-wide Workers Editor role (Workers Scripts Edit is
+  legacy), so it can deploy every worker in the account, and no
   Zone > Workers Routes access: Editor deploys new versions as long as a
-  deploy does not add, change, or remove a route or custom domain. So the
-  implementing agent deploys once by hand with `just infra moq-sh deploy`
-  under the maintainer's wrangler login, creating the worker and its
-  `moq.sh` custom domain, and verifies the public URL. A later domain change
-  is deployed by hand too.
+  deploy does not add, change, or remove a route or custom domain.
+- Editor cannot create a worker, so the first `just infra moq-sh deploy`
+  runs under the maintainer's wrangler login, creating the worker and its
+  `moq.sh` custom domain. An agent without that login stops once
+  `--dry-run` passes and hands the deploy to the maintainer. A later domain
+  change is deployed by hand too.
 
 ### Verification and docs
 
@@ -83,6 +85,11 @@ since the script and its hosting now both live in this repository.
   `sha256sum` and BSD `mktemp` and `tar`.
 - After deploying, run `curl -fsSL https://moq.sh | sh -s -- <tmp dir option>`
   and confirm `moq --version`.
+- Give the workflow `workflow_dispatch` and run it once after the manual
+  deploy, so the CI token is proven before the first release needs it.
+  Cloudflare says custom domains do not support per-Worker roles yet; if
+  the token is rejected on the custom domain, ask the maintainer to add
+  Zone > Workers Routes > Edit on `moq.sh`.
 - Document install, upgrade, version selection, directory override, and
   removal in `doc/setup/install.md`, leading with the one-liner. Add the
   worker to the table in `infra/README.md`.
