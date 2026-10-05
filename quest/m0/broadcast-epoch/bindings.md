@@ -19,6 +19,11 @@ reconnect counter `session.epoch()` is renamed so "epoch" has one meaning.
 
 Decided in the 2026-09-30 audit: libmoq is frozen (renamed `rs/moq-c`), so C and C++ consumers get epochs from moq-ffi.
 
+Decided in the 2026-10-05 audit: this lands before the
+[FFI shape](/quest/m1/ffi-shape/README.md) line (#4519), which reshapes the
+same wrappers and keeps `epoch()` today. It rebases onto this quest and
+adopts the epoch surface and the rename, so the wrappers break once each.
+
 ## Required
 
 - [Origin](/quest/m0/broadcast-epoch/origin.md) - the behavior the bindings surface

@@ -60,7 +60,7 @@ Direction to settle in the draft first, then the code:
 - Decide whether the publisher's `track::Info::priority` breaks a tie
   between equal subscriber priorities in `Priority::cmp`
   (`rs/moq-net/src/lite/priority.rs:48`). The
-  [ladder controller](/quest/m2/ladder/controller.md), now in m2, wants that
+  [ladder controller](/quest/m3/ladder/controller.md), now in m3, wants that
   tiebreak; this quest owns the answer so the controller only consumes it.
 - A per-session cap on distinct ranks is a scheduling detail; whatever replaces
   the 255-entry sort must stay O(log n) per group under chat-shaped churn.

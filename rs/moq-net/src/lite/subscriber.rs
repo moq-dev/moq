@@ -3881,7 +3881,7 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 					// otherwise hold this task, its TRACK stream, and the track for good.
 					// Dropping the fetch resets the stream.
 					let pending = request.as_ref().expect("request pending");
-					if pending.poll_unused(waiter).is_ready() {
+					if pending.demand().poll_unused(waiter).is_ready() {
 						if pending.reject_unused(Error::Cancel) {
 							self.state = TrackRunState::Done;
 							return Poll::Ready(());
@@ -4453,7 +4453,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 			// A fetch nobody waits on any more is cancelled upstream, so the publisher stops
 			// serving it (and a relay there releases its own FETCH). Ingest has its own check.
 			if let Some(request) = self.state.request()
-				&& request.poll_unused(waiter).is_ready()
+				&& request.demand().poll_unused(waiter).is_ready()
 			{
 				tracing::debug!(track = %self.serve.name, group = self.group, "fetch abandoned");
 				if let FetchRunState::Send { stream, .. } | FetchRunState::Answer { stream, .. } =

@@ -3981,7 +3981,7 @@ mod tests {
 				.expect("track requested")
 				.unwrap();
 			assert!(
-				track.poll_unused(&waiter).is_pending(),
+				track.demand().poll_unused(&waiter).is_pending(),
 				"{case}: nobody wants the track"
 			);
 			track
@@ -3991,7 +3991,10 @@ mod tests {
 		assert!(drive(&mut serve).await, "{case}: still serving");
 		drop(serve);
 		if let Some(track) = track {
-			let unused = moq_net_sim::timeout(Duration::from_millis(1), kio::wait(|waiter| track.poll_unused(waiter)));
+			let unused = moq_net_sim::timeout(
+				Duration::from_millis(1),
+				kio::wait(|waiter| track.demand().poll_unused(waiter)),
+			);
 			assert!(unused.await.is_ok(), "{case}: the track is still wanted");
 		}
 

@@ -175,3 +175,68 @@ async fn rejoin_skips_a_cache_kept_by_another_handle() {
 		.unwrap_or_else(|_| panic!("{version}: timed out"));
 	}
 }
+
+/// A reader rejoining an open group leaves the relay holding that group whole.
+///
+/// The client still holds the group's head when it rejoins, so it may ask the relay for
+/// only the rest. A later reader at the relay joins at the live edge and needs the group
+/// from its first frame, so the relay's copy must keep it.
+#[moq_net_sim::test]
+async fn rejoin_mid_group_keeps_the_head_for_later_readers() {
+	for version in [
+		"moq-lite-05",
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-19",
+		"moq-transport-22",
+	] {
+		moq_net_sim::timeout(TEST_TIMEOUT, async {
+			let publisher = produce_origin(1);
+			let relay = produce_origin(2);
+			let client = produce_origin(3);
+
+			let broadcast = publisher.create_broadcast("bench").unwrap();
+			let track = broadcast.create_track("video", None).unwrap();
+			broadcast.announce(Default::default()).unwrap();
+			// Left open, as a JSON snapshot group stays open for its deltas.
+			let mut group = track.append_group().unwrap();
+			group.write_frame(Timestamp::ZERO, b"a0".as_ref()).unwrap();
+
+			let version: Version = version.parse().unwrap();
+			let mut options = MockConnectOptions::new(version);
+			options.server_publish = Some(publisher.consume());
+			options.client_subscribe = Some(relay.clone());
+			let _upstream = connect_mock(options).await;
+			let mut options = MockConnectOptions::new(version);
+			options.server_publish = Some(relay.consume());
+			options.client_subscribe = Some(client.clone());
+			let _downstream = connect_mock(options).await;
+
+			let consumer = client.consume();
+			consumer.routed("bench").await.unwrap();
+			let remote = consumer.request_broadcast("bench").await.unwrap();
+			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
+			let mut group = sub.recv_group().await.unwrap().unwrap();
+			assert_eq!(group.read_frame().await.unwrap().unwrap().payload, b"a0".as_ref());
+			drop((group, sub));
+			track.demand().unused().await.unwrap();
+
+			let mut rejoined = remote.track("video").unwrap().subscribe(None).await.unwrap();
+			let mut group = rejoined.recv_group().await.unwrap().unwrap();
+			assert_eq!(group.read_frame().await.unwrap().unwrap().payload, b"a0".as_ref());
+			track.demand().used().await.unwrap();
+
+			let later = relay.consume().request_broadcast("bench").await.unwrap();
+			let mut sub = later.track("video").unwrap().subscribe(None).await.unwrap();
+			let mut group = sub.recv_group().await.unwrap().unwrap();
+			assert_eq!(group.sequence, 0, "{version}");
+			let frame = group.read_frame().await;
+			assert!(
+				matches!(&frame, Ok(Some(frame)) if frame.payload == b"a0".as_ref()),
+				"{version}: the later reader lost the group's head: {frame:?}"
+			);
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{version}: timed out"));
+	}
+}

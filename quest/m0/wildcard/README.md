@@ -53,7 +53,7 @@ would have to start working (a cold transcoder)"
 `origin::Producer` gained versioned patterns on the
 [Auth](/quest/m1/auth/README.md) line, so tokens and filters reuse the
 same matcher; advertisements stay prefixes. `Cost { warm, cold }`
-(`rs/moq-net/src/model/origin.rs:426`) is the route cost since
+(`rs/moq-net/src/model/origin.rs:404`) is the route cost since
 [#2925](https://github.com/moq-dev/moq/pull/2925).
 
 [moq#3225](https://github.com/moq-dev/moq/pull/3225) moved a long way toward
@@ -135,7 +135,7 @@ path, not with a route identity or a generation field.
   refused. A prefix wider than the grant is accepted, but it only routes
   requests for paths the grant covers. Fleet-wide services use the cluster
   identity; a customer service serves only what its own v1 grant contains.
-  Until [Advertise-only authorization](/quest/m2/processor/advertise-auth.md)
+  Until [Advertise-only authorization](/quest/m3/processor/advertise-auth.md)
   lands, the publish scope stands in for advertising; a credential with its own
   advertise scope is checked against that instead.
 - **Claims are visible to subscribers.** A subscriber sees every advertised
@@ -165,7 +165,7 @@ path, not with a route identity or a generation field.
   literal path. A path is one broadcast whoever serves it, so claim workers
   mirror the source's epoch and group numbers, publish a deterministic
   catalog, and start at group boundaries
-  ([Transcoders start at group boundaries](/quest/m1/transcode-group-start.md)).
+  ([Transcoders start at group boundaries](/quest/m0/wildcard/transcode-group-start.md)).
   Two workers at one path are then one broadcast, and a relay moving between
   them does so at a group boundary (decided 2026-10-03: #4741 drops
   first-hop identity, so routing can no longer tell two workers apart).
@@ -185,9 +185,9 @@ path, not with a route identity or a generation field.
 - **Patterns are independent of clustering.** The `moq-pattern` crate owns
   the matching semantics tokens and filters share, with no draft of its own;
   no announce message carries a pattern on either protocol (AUTH grants on
-  lite-06 do, per the [Auth](/quest/m1/auth/README.md) line). moq-cluster adds hop
-  lists, costs, pool selection, and request resolution to prefix
-  advertisements.
+  the wip lite version do, per the [Auth](/quest/m1/auth/README.md) line).
+  moq-cluster adds hop lists, costs, pool selection, and request resolution
+  to prefix advertisements.
 
 ### Where derived output lives
 
@@ -217,7 +217,8 @@ distinguish recording generations reads the catalog's archive entry
 
 ## Required
 
-- [Transcoders start at group boundaries](/quest/m1/transcode-group-start.md) - two claim workers at one path are one broadcast, so a relay never splices them mid-group
+- [Transcoders start at group boundaries](/quest/m0/wildcard/transcode-group-start.md) - two claim workers at one path are one broadcast, so a relay never splices them mid-group
+- [A standing refusal ends the front](/quest/m0/wildcard/refusal-final.md) - a refusal from the winning route ends the request instead of re-selecting a sibling or a shorter prefix
 
 ## Related
 

@@ -10,7 +10,8 @@ citations point at draft-06.
 ## Plan
 
 The lost-packet sample gap remains after the seven correctness fixes in
-`noq-proto/src/congestion/bbr3/mod.rs` in moq-dev/noq:
+BBR3 (`noq-proto/src/congestion/bbr3/mod.rs` today), which the
+[hard fork](/quest/m1/quic/fork/README.md) re-ports into `moq-quic`:
 
 - Loss handling reuses the shared ACK sample (`self.rs`) as scratch space,
   and skips the inflight-too-high check when a loss arrives before any ACK
@@ -25,8 +26,9 @@ requires. Preserve that behavior and its regression.
 While in the file, move the remaining draft-05 links and renamed pseudocode
 identifiers (such as `probe_up_acked_per_inc`) to draft-06; comment-only.
 
-Start from released 1.3.1 or newer, without waiting for the broader QUIC stack
-release. Add failing regressions on the shared test `Sim`: a loss before the
+Decided in the 2026-10-05 audit: this waits on the hard fork, which the
+maintainer prioritizes, and lands in `moq-quic`'s BBR3, not in the frozen
+moq-dev/noq. Add failing regressions on the shared test `Sim`: a loss before the
 first ACK sample, and a loss between ACKs that must not alter the next ACK's
 sample. Retain the spurious-loss undo coverage through Refill. Internal only;
 no `Controller` or wire change.

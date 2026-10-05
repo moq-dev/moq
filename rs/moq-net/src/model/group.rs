@@ -978,14 +978,12 @@ impl Producer {
 		self.state.poll_closed(waiter).map(|()| self.abort_reason())
 	}
 
-	/// Block until there is at least one active consumer.
-	pub async fn used(&self) -> Result<()> {
-		self.state.used().await.map_err(|_| self.abort_reason())
-	}
-
-	/// Block until there are no active consumers.
-	pub async fn unused(&self) -> Result<()> {
-		self.state.unused().await.map_err(|_| self.abort_reason())
+	/// Watch reader demand without keeping the group alive.
+	pub fn demand(&self) -> Demand {
+		Demand {
+			sequence: self.info.sequence,
+			state: DemandSource::Group(self.state.weak()),
+		}
 	}
 
 	/// Poll for the group becoming unused (every consumer dropped).
@@ -996,6 +994,86 @@ impl Producer {
 	/// The recorded abort reason, or [`Error::Dropped`] if the group closed without one.
 	fn abort_reason(&self) -> Error {
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)
+	}
+}
+
+/// A cloneable, watch-only handle to a group's readers or pending fetch callers.
+#[derive(Clone)]
+pub struct Demand {
+	sequence: u64,
+	state: DemandSource,
+}
+
+#[derive(Clone)]
+enum DemandSource {
+	Group(kio::ProducerWeak<GroupState>),
+	Fetch(kio::ProducerWeak<track::FetchOutcome>),
+}
+
+impl Demand {
+	pub(crate) fn fetch(sequence: u64, state: kio::ProducerWeak<track::FetchOutcome>) -> Self {
+		Self {
+			sequence,
+			state: DemandSource::Fetch(state),
+		}
+	}
+
+	/// The group sequence this handle watches.
+	pub fn sequence(&self) -> u64 {
+		self.sequence
+	}
+
+	/// Whether the group or fetch is open and has readers right now.
+	pub fn is_used(&self) -> bool {
+		match &self.state {
+			DemandSource::Group(state) => !state.is_closed() && state.is_used(),
+			DemandSource::Fetch(state) => !state.is_closed() && state.is_used(),
+		}
+	}
+
+	/// Wait until at least one reader needs the group.
+	pub async fn used(&self) -> Result<()> {
+		kio::wait(|waiter| self.poll_used(waiter)).await
+	}
+
+	/// Wait until no reader needs the group.
+	pub async fn unused(&self) -> Result<()> {
+		kio::wait(|waiter| self.poll_unused(waiter)).await
+	}
+
+	/// Poll until at least one reader needs the group.
+	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		match &self.state {
+			DemandSource::Group(state) => state.poll_used(waiter),
+			DemandSource::Fetch(state) => state.poll_used(waiter),
+		}
+		.map_err(|_| self.abort_reason())
+	}
+
+	/// Poll until no reader needs the group.
+	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		match &self.state {
+			DemandSource::Group(state) => state.poll_unused(waiter),
+			DemandSource::Fetch(state) => state.poll_unused(waiter),
+		}
+		.map_err(|_| self.abort_reason())
+	}
+
+	/// Wait until the group or fetch closes, returning its cause.
+	pub async fn closed(&self) -> Error {
+		match &self.state {
+			DemandSource::Group(state) => state.closed().await,
+			DemandSource::Fetch(state) => state.closed().await,
+		}
+		self.abort_reason()
+	}
+
+	fn abort_reason(&self) -> Error {
+		match &self.state {
+			DemandSource::Group(state) => state.read().abort.clone(),
+			DemandSource::Fetch(state) => state.read().rejected.clone(),
+		}
+		.unwrap_or(Error::Dropped)
 	}
 }
 
@@ -1821,6 +1899,24 @@ mod test {
 	use crate::model::test_tracing::count_drop_warnings;
 	use bytes::Bytes;
 	use futures::FutureExt;
+
+	#[test]
+	fn demand_watches_readers_without_keeping_the_group_alive() {
+		let producer = Info { sequence: 7 }.produce();
+		let demand = producer.demand();
+		assert_eq!(demand.sequence(), 7);
+		assert!(!demand.is_used());
+		let first = producer.consume();
+		let second = first.clone();
+		assert!(demand.is_used());
+		drop(first);
+		assert!(demand.poll_unused(&kio::Waiter::noop()).is_pending());
+		drop(second);
+		assert!(matches!(demand.poll_unused(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
+		drop(producer);
+		assert!(!demand.is_used());
+		assert!(matches!(demand.used().now_or_never(), Some(Err(Error::Dropped))));
+	}
 
 	/// [`FRAME_SLOTS`] is std's rounding, not ours, so measure it: a larger real value
 	/// would undercharge every cached group without touching a line of this crate.

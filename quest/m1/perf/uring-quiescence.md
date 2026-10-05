@@ -49,5 +49,6 @@ meaning with a budget of 1 and gains a sibling proving the budget bound.
 
 ## Required
 
+- [Hard fork](/quest/m1/quic/fork/README.md) - the noq driver this edits moves onto `moq-quic` (decided in the 2026-10-05 audit)
 - [One enter per turn](/quest/m1/perf/uring-one-enter.md) - the metrics and
   the submit placement this sweep is measured with

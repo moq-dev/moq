@@ -18,4 +18,12 @@ every binding. Opus still encodes 20 ms frames by default.
   the default, `py/moq-rs/README.md`, and `doc/lib/{py,swift,kt,go,dart}`.
   libmoq already reads 0 as the default.
 
+Decided in the 2026-10-05 audit: this lands after
+[Codecs](/quest/m1/ffi-shape/codec.md), which moves the same audio encoder
+surface, so callers take the default change on the reshaped type.
+
 Public API: breaking default in moq-ffi and every binding. Wire: none.
+
+## Required
+
+- [Codecs](/quest/m1/ffi-shape/codec.md) - reshapes the audio encoder output this default lives on

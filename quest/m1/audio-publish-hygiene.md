@@ -36,5 +36,6 @@ with a subscriber attached writes a marker.
 
 ## Related
 
+- [Enabled flag](/quest/m1/catalog-enabled.md) - builds its publisher pause on this quest's disable path, after it lands
 - [Audio group duration](/quest/m1/audio-group-duration.md) - builds on the shared producer
 - [LIFO cleanups](/quest/m1/signals-lifo.md) - the teardown error from the same capture
