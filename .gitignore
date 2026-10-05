@@ -7,15 +7,14 @@
 *.local.json
 
 # Claude Code scratch space. These are untracked working directories, and
-# `just _changed` counts untracked files, so leaving them visible pushes the
-# changed-file list past its cap and silently turns every scoped `just check`
-# into `check --all`. The worktrees also carry their own biome.jsonc, which the
+# `just check` counts untracked files, so leaving them visible would put their
+# whole tree in scope. The worktrees also carry their own biome.jsonc, which the
 # unscoped run then rejects as a nested root config.
 /.claude/cache/
 /.claude/tmp/
 /.claude/worktrees/
 
-# Per-worktree agent scratch (PR bodies, logs, notes); see the quest-start skill.
+# Per-worktree scratch output, such as benchmark logs and agent notes.
 /.scratch/
 
 # IDE

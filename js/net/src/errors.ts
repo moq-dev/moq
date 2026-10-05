@@ -8,6 +8,7 @@ export {
 	GroupTooLarge,
 	NotFound,
 	ProtocolViolation,
+	RefusedRedirect,
 	Session,
 	Stream,
 	type StreamOptions,

@@ -85,9 +85,9 @@ public final class BroadcastConsumer: Sendable {
     /// Subscribe to a video track and decode it inside the bindings.
     /// `catalogVideo` is the matching rendition from the catalog.
     ///
-    /// `output.format` picks the packed CPU layout every frame arrives in and
-    /// defaults to I420; each frame repeats the layout it was decoded to.
-    /// `output.resize` is best effort, so read each frame's own dimensions.
+    /// Each frame converts to a packed CPU layout on demand via
+    /// `pixels(format:)`. `output.resize` is best effort, so read each frame's
+    /// own dimensions.
     public func decodeVideo(
         name: String,
         catalogVideo: Video,
@@ -273,7 +273,7 @@ public final class BroadcastProducer: Sendable {
 
     /// Open a raw-audio track. PCM written via `AudioProducer.write` is encoded
     /// inside the FFI boundary per `input`/`output`. Select the codec with
-    /// `AudioCodec.opus()` (currently the only constructor), placed in `output`.
+    /// `AudioCodec.opus()` or `AudioCodec.aac()`, placed in `output`.
     ///
     /// Pass `bandwidth` to reserve this track's bitrate against the session's
     /// allocator so a co-resident video encoder sizes itself against what is left.
@@ -348,11 +348,6 @@ public final class BroadcastProducer: Sendable {
     ///
     /// Tracks already subscribed carry on to their own end. Closing again is a no-op.
     public func close() throws {
-        try ffi.close()
-    }
-
-    @available(*, deprecated, renamed: "close", message: "A broadcast end carries no cause.")
-    public func finish() throws {
         try ffi.close()
     }
 }

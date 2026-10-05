@@ -40,10 +40,13 @@ on:
   # Priming a cold cache by hand, e.g. after a toolchain bump rolls the key.
   workflow_dispatch:
 
-# Newest `main` wins; an older warm is worth less than the runner it holds.
+# Queue rather than cancel. A warm takes 30-50 minutes and `main` merges more
+# often than that, so cancelling meant no warm ever finished and every pull
+# request restored a store hours stale. Actions keeps only the newest pending
+# run per group, so merges that land mid-warm still coalesce into one.
 concurrency:
   group: cache-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   warm:

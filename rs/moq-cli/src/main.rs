@@ -12,6 +12,7 @@ mod devices;
 mod duration;
 mod fetch;
 mod hls;
+mod ls;
 mod moq;
 mod play;
 mod publish;
@@ -25,7 +26,7 @@ mod test_env;
 mod transcode;
 mod web;
 
-use args::{Command, Export, ExportSink, Import, ImportSource, Invocation, MoqSide};
+use args::{Command, Export, ExportSink, Import, ImportSource, Invocation, MoqSide, TsImport, TsProgram};
 use hang::moq_net;
 use publish::Publish;
 use subscribe::{Subscribe, SubscribeArgs};
@@ -317,10 +318,12 @@ async fn main() -> anyhow::Result<()> {
 		}
 	}
 
-	// `fetch` only dials, so an ambient listener or cluster setting it never uses
-	// is not validated either.
+	// `fetch` and `ls` only dial, so an ambient listener or cluster setting they
+	// never use is not validated either.
 	if let [Command::Fetch(_)] = stages.as_slice() {
-		cli.dial_only("fetch")?;
+		cli.dial_only("fetch", &["--broadcast"])?;
+	} else if let [Command::Ls(_)] = stages.as_slice() {
+		cli.dial_only("ls", &[])?;
 	} else {
 		cli.moq.validate()?;
 	}
@@ -342,6 +345,7 @@ async fn main() -> anyhow::Result<()> {
 		if stages.len() == 1 && !stages[0].is_stageable() {
 			match stages.remove(0) {
 				Command::Fetch(args) => return fetch::run(cli.moq, args, net).await,
+				Command::Ls(args) => return ls::run(cli.moq, args, net).await,
 				#[cfg(feature = "play")]
 				Command::Play(args) => return run_play(cli.moq, args, net).await,
 				#[cfg(feature = "transcode")]
@@ -387,7 +391,8 @@ impl Directions {
 /// hops it crossed, and our own Hop ID is one of them, so a broadcast we
 /// publish is never announced back to us.
 ///
-/// Returns an allocator over the uplink's bandwidth estimate, for the sources that
+/// Returns the dialed [`Connection`](moq_tokio::Connection), if any, for a graceful
+/// close, and an allocator over the uplink's bandwidth estimate, for the sources that
 /// share it. Capture encoders follow their slice; passthrough imports reserve
 /// their peak-hold bitrate so the encoder sees what is left. Only an outbound
 /// client has an estimate: a `--listen` publisher's sessions are inbound and
@@ -406,8 +411,9 @@ async fn spawn_moq(
 	cluster: moq_relay::cluster::Cluster,
 	directions: Directions,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
-) -> anyhow::Result<(moq_net::bandwidth::Allocator, moq_net::origin::Producer)> {
+) -> anyhow::Result<Attached> {
 	let mut bandwidth = moq_net::bandwidth::Allocator::unlimited();
+	let mut connection = None;
 	let cluster = cluster
 		.with_client(client.clone())
 		.with_client_tls(moq.client.tls.build()?)
@@ -431,7 +437,9 @@ async fn spawn_moq(
 		// survives reconnects, reading `None` while down, so it can be wired up before
 		// anything connects.
 		bandwidth = moq_net::bandwidth::Allocator::new(reconnect.send_bandwidth());
-		tasks.spawn(async move { Ok(reconnect.closed().await?) });
+		let closed = reconnect.clone();
+		tasks.spawn(async move { Ok(closed.closed().await?) });
+		connection = Some(reconnect);
 	}
 
 	let started =
@@ -440,7 +448,19 @@ async fn spawn_moq(
 		tasks.spawn(async move { started.run().await });
 	}
 
-	Ok((bandwidth, origin))
+	Ok(Attached {
+		bandwidth,
+		origin,
+		connection,
+	})
+}
+
+/// What [`spawn_moq`] attached to the MoQ network.
+struct Attached {
+	bandwidth: moq_net::bandwidth::Allocator,
+	origin: moq_net::origin::Producer,
+	/// The relay connection, when `--connect` dialed one.
+	connection: Option<moq_tokio::Connection>,
 }
 
 /// Report readiness only after every configured MoQ attachment initializes.
@@ -472,7 +492,7 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 		..Default::default()
 	};
 	let client = net.client(moq.client.clone())?;
-	let (_, origin) = spawn_moq(&moq, &net, client, cluster, directions, &mut tasks).await?;
+	let Attached { origin, .. } = spawn_moq(&moq, &net, client, cluster, directions, &mut tasks).await?;
 
 	play::run(origin.consume(), name, args, tasks)
 }
@@ -491,9 +511,14 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 	// The stage combinations were refused up front by `Invocation::validate`, before
 	// anything bound a port or dialed out.
 	let client = net.client(moq.client.clone())?;
+	let mut connection = None;
 	let result = async {
-		let (bandwidth, origin) =
-			spawn_moq(&moq, &net, client.clone(), cluster, Directions::of(&stages), &mut tasks).await?;
+		let Attached {
+			bandwidth,
+			origin,
+			connection: attached,
+		} = spawn_moq(&moq, &net, client.clone(), cluster, Directions::of(&stages), &mut tasks).await?;
+		connection = attached;
 
 		// stdin and stdout are one resource each, so two stages can't share them.
 		let mut stdin = None;
@@ -531,7 +556,13 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 	.await;
 
 	// The process exits next, even on a setup error, so the relay only hears we left
-	// if the close goes out now.
+	// if the close goes out now. The connection first delivers what it queued, such
+	// as the finished tracks at stdin EOF, since the client's close discards it.
+	if let Some(connection) = connection
+		&& let Err(err) = connection.close().await
+	{
+		tracing::warn!(%err, "closed before delivering everything");
+	}
 	client.close().await;
 	result
 }
@@ -604,11 +635,19 @@ fn spawn_import(
 
 	if let Some(format) = import.source.stdin_format() {
 		warn_if_missing_format(&name);
-		let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 		let config = moq_mux::catalog::Config::default()
 			.with_max_age(max_age)
 			.with_bandwidth(bandwidth.clone());
-		let publish = Publish::new(broadcast, &format, config)?;
+		let publish = if let ImportSource::Ts(TsImport {
+			program: Some(TsProgram::All),
+		}) = &import.source
+		{
+			let name = require_broadcast(name, "import ts --program all")?;
+			Publish::ts_programs(origin.clone(), name, config)
+		} else {
+			let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
+			Publish::new(broadcast, &format, config)?
+		};
 		publish.announce()?;
 		local = Some(publish);
 	} else {
@@ -626,11 +665,13 @@ fn spawn_import(
 				}
 			}
 			ImportSource::Srt(srt) => {
+				let program = srt.program();
+				let srt = srt.endpoint;
 				if let Some(addr) = srt.listen {
 					let name = require_broadcast(name, "import srt --listen")?;
-					tasks.spawn(srt::listen_import(target(name), addr, srt.latency.into_std()));
+					tasks.spawn(srt::listen_import(target(name), addr, srt.latency.into_std(), program));
 				} else if let Some(url) = srt.connect {
-					tasks.spawn(srt::connect_import(target(name), url, srt.latency.into_std()));
+					tasks.spawn(srt::connect_import(target(name), url, srt.latency.into_std(), program));
 				}
 			}
 			ImportSource::Rtc(rtc) => {
@@ -681,6 +722,7 @@ fn spawn_export(
 		let args = SubscribeArgs {
 			format: stdout.format,
 			max_age: stdout.max_age,
+			linger: stdout.linger,
 			fragment_duration: stdout.fragment_duration,
 			mux_rate: stdout.mux_rate,
 			catalog: export.catalog_format,

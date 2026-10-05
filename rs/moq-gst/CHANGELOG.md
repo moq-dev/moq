@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.10](https://github.com/moq-dev/moq/compare/moq-gst-v0.4.9...moq-gst-v0.4.10) - 2026-10-03
+
+### Added
+
+- *(tokio)* default QUIC idle timeout to 10s ([#4606](https://github.com/moq-dev/moq/pull/4606))
+
+### Other
+
+- publish only from release ([#4738](https://github.com/moq-dev/moq/pull/4738))
+
+## [0.4.9](https://github.com/moq-dev/moq/compare/moq-gst-v0.4.8...moq-gst-v0.4.9) - 2026-09-30
+
+### Fixed
+
+- *(gst)* recover from leading deltas and timestamp rewinds ([#4480](https://github.com/moq-dev/moq/pull/4480))
+- *(moq-gst)* moqsrc waits for its session to end on stop ([#4416](https://github.com/moq-dev/moq/pull/4416))
+- *(gst)* keep waiting for a keyframe after a header-only buffer ([#4356](https://github.com/moq-dev/moq/pull/4356))
+
+### Other
+
+- one rpm repo command that works on DNF4 and DNF5 ([#4567](https://github.com/moq-dev/moq/pull/4567))
+
 ## [0.4.8](https://github.com/moq-dev/moq/compare/moq-gst-v0.4.7...moq-gst-v0.4.8) - 2026-09-27
 
 ### Other

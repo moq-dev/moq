@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, mock, spyOn, test } from "bun:test";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
@@ -7,7 +7,7 @@ import type { AudioFrame, Format } from "./capture";
 import { Encoder, resolve } from "./encoder";
 
 // Bun does not load Vite's worklet URL imports from the public audio entrypoint.
-mock.module("./capture-worklet.ts?worklet", () => ({ default: "blob:fake-capture" }));
+mock.module("./capture-worklet.ts?worklet", () => ({ default: async () => "blob:fake-capture" }));
 
 const Audio = await import("./index");
 
@@ -216,6 +216,7 @@ async function setup(baseline = new Baseline()) {
 			format: new Signal<Format>({ sampleRate: 48_000, channelCount: 1 }),
 			frames: new Signal({ subscribe: () => feed.stream }),
 		},
+		blocked: new Signal(false),
 	};
 
 	const encoder = new Encoder("audio", {
@@ -323,3 +324,63 @@ test("a rendition trailing the broadcast's earliest advertises delay", async () 
 	expect(env.written.length).toBe(2);
 	expect(encoder.out.catalog.peek()?.delay).toBeGreaterThanOrEqual(100);
 });
+
+// Regression: codec settings that can't resolve left the encoder unsettled, so `<moq-publish>` never
+// announced and withheld every other rendition with it.
+test("settles when the codec settings can't resolve", async () => {
+	const error = spyOn(console, "error").mockImplementation(() => {});
+	const capture = {
+		in: { source: new Signal(undefined) },
+		out: {
+			root: new Signal(undefined),
+			format: new Signal<Format>({ sampleRate: 48_000, channelCount: 1 }),
+			frames: new Signal(undefined),
+		},
+		blocked: new Signal(false),
+	};
+	const encoder = new Encoder("audio", {
+		capture: capture as never,
+		codec: { mime: "opus", frameDuration: Time.Milli(15) },
+	});
+
+	try {
+		await settle();
+		expect(encoder.out.catalog.peek()).toBeUndefined();
+		expect(encoder.settled.peek()).toBe(true);
+		expect(error).toHaveBeenCalled();
+
+		// A valid duration resolves, and the config keeps it settled.
+		encoder.codec.set({ mime: "opus", frameDuration: Time.Milli(20) });
+		await settle();
+		expect(encoder.out.catalog.peek()).toBeDefined();
+		expect(encoder.settled.peek()).toBe(true);
+	} finally {
+		encoder.close();
+		error.mockRestore();
+	}
+});
+
+test("settles while the capture waits on a gesture", async () => {
+	const capture = {
+		in: { source: new Signal(undefined) },
+		out: { root: new Signal(undefined), format: new Signal(undefined), frames: new Signal(undefined) },
+		blocked: new Signal(true),
+	};
+	const encoder = new Encoder("audio", { capture: capture as never });
+
+	try {
+		await settle();
+		expect(encoder.settled.peek()).toBe(true);
+
+		// The gesture arrives, so a format is on its way: unsettled until it resolves.
+		capture.blocked.set(false);
+		await settle();
+		expect(encoder.settled.peek()).toBe(false);
+	} finally {
+		encoder.close();
+	}
+});
+
+async function settle(times = 5): Promise<void> {
+	for (let i = 0; i < times; i++) await new Promise<void>((resolve) => queueMicrotask(resolve));
+}

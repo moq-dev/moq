@@ -64,11 +64,16 @@ Track the unversioned draft during implementation. The planning baseline is
 draft 10, with transport parameter `0x1d` and frame type `0x24`; do not freeze
 provisional codepoints if the document changes before release.
 
+## Required
+
+- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic`, not the frozen fork
+
 ## Related
 
 - moq-net (`rs/moq-net/src/tail.rs`) and `@moq/net` (`js/net/src/tail.ts`) wait
   a grace for a group whose reset lost its header until this lands
-- [qmux on the QUIC stream state machine](/quest/m1/quic/qmux.md) - consumes
-  the same reset state without a parallel implementation
 - The removed quiche backend was the one stack that had this, so it is the
   known browser-compliance gap.
+- [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - consumes
+  the same reset state without a parallel implementation
+- [noq#809](https://github.com/n0-computer/noq/issues/809) - the RESET_STREAM_AT ask to n0

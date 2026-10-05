@@ -19,8 +19,8 @@ The contract is [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md), pro
 
 ### Epoch and identity
 
-- Every publisher instance mints an epoch, a UUIDv7 in lowercase text, and publishes at `<opaque>/@<epoch>`, where `<opaque>` derives from the credential and the semantic broadcast name without the epoch. The epoch is an input to every HKDF derivation, so a restart, takeover, or explicit group sequence cannot repeat a nonce under a key: nothing is persisted across instances and no generation counter is redistributed. The epoch is the shared [`Epoch`](/quest/m1/epoch.md) primitive. Subscribers discover instances under the `<opaque>/` prefix and take the greatest epoch, which sorts newest; a known full path carries its epoch in the last segment.
-- The epoch is untrusted and unauthenticated. A wrong epoch fails authentication and a withheld one denies service; neither can make a nonce repeat, because only the publisher instance chooses what it encrypts under. This is the same trust a cache needs to serve the right instance. Plaintext broadcasts adopt the same epoch by default through [broadcast epochs](/quest/m1/broadcast-epoch/README.md).
+- Every publisher instance mints an epoch, a UUIDv7 in lowercase text, and publishes at `<opaque>/@<epoch>`, where `<opaque>` derives from the credential and the semantic broadcast name without the epoch. The epoch is an input to every HKDF derivation, so a restart, takeover, or explicit group sequence cannot repeat a nonce under a key: nothing is persisted across instances and no generation counter is redistributed. The epoch is the shared [`Epoch`](/doc/concept/moq-lite.md#publisher-epochs) primitive. Subscribers discover instances under the `<opaque>/` prefix and take the greatest epoch, which sorts newest; a known full path carries its epoch in the last segment.
+- The epoch is untrusted and unauthenticated. A wrong epoch fails authentication and a withheld one denies service; neither can make a nonce repeat, because only the publisher instance chooses what it encrypts under. This is the same trust a cache needs to serve the right instance. Plaintext broadcasts adopt the same epoch by default through [broadcast epochs](/quest/m0/broadcast-epoch/README.md).
 - Nothing in the path says the bytes are encrypted. The format after decryption (`meeting.hang`) is inside the opaque name; a plaintext player, exporter, or matcher that opens a protected broadcast finds no catalog it can read and fails with its usual typed refusal, the same as for any format it does not support.
 - One 32-byte secret authorizes the whole broadcast; HKDF-SHA-256 derives separate AES-128-GCM keys for each physical track and for grouped-frame versus datagram domains. A grouped frame uses the 96-bit nonce `uint64_be(group) || uint32_be(frame)`; a datagram uses its sequence with frame zero under the datagram domain. Empty AAD: every immutable end-to-end field is in the HKDF info or the nonce.
 - Within an instance, group and datagram sequences are allocated monotonically and frames are numbered in write order, which is the whole reuse rule. There is no ciphertext retention or retransmission API: relays forward bytes unchanged, and an application that needs to resend encrypts nothing twice because it never gets the same identity twice.
@@ -40,7 +40,7 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 
 - Deterministic secret-derived physical names hide catalog, codec, role, quality, timeline, and custom-track semantics. Authorized clients derive the encrypted catalog track name, then learn the remaining opaque names from its decrypted contents. Every catalog representation is encrypted; Rust publishers must not emit a plaintext MSF catalog.
 - A platform that forwards and meters protected bytes must never preview, record, archive, transmux, transcode, transcribe, compose, or inspect them, rejecting those paths before opening a processing session or writing product state. Applications needing those operations terminate E2EE outside the platform. A platform classifies protected broadcasts by its own credential or product state, never by name; the moq.pro (downstream) exclusion classifier and dashboard work stay downstream.
-- The first proof covers browser TypeScript and native Rust publication and playback in both directions, with grouped audio and video over both moq-lite and MoQ Transport. Shared vectors cover groups and moq-lite datagrams; MoQ Transport has no datagram delivery.
+- The first proof covers browser TypeScript and native Rust publication and playback in both directions, with grouped audio and video over both moq-lite and MoQ Transport. Shared vectors cover groups and moq-lite datagrams; JavaScript has no MoQ Transport datagram delivery yet.
 
 ## Required
 
@@ -67,5 +67,4 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 
 ## Related
 
-- [Epoch primitive](/quest/m1/epoch.md) - the shared `Epoch` type the protected path ends in
 - [archive](/quest/m1/archive/README.md) - protected broadcasts are deliberately outside recording and replay formats

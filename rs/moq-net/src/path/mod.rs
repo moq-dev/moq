@@ -4,9 +4,9 @@
 //! segment-aware prefix operations. [`Pattern`] describes a set of paths with
 //! wildcards, and [`Patterns`] is a union of them reduced by containment. The
 //! grammar and algebra live in [`moq-pattern`](moq_pattern); this module
-//! re-exports them beside [`Path`] so grants, origin scopes, announce interests,
-//! and wildcard advertisements can share one dialect. Literal path construction
-//! and wire decoding retain their existing behavior.
+//! re-exports them beside [`Path`] so grants, origin scopes, and announce
+//! interests can share one dialect. Literal path construction and wire
+//! decoding retain their existing behavior.
 
 pub use moq_pattern::{InvalidPattern, Pattern, Patterns, Segment, Specificity};
 
@@ -350,6 +350,25 @@ impl<'a> Path<'a> {
 				buf: format!("{}/{}", self.as_str(), other.as_str()).into(),
 				start: 0,
 			})
+		}
+	}
+
+	/// Split off a final `@<uuidv7>` segment, leaving all other paths unchanged.
+	pub fn split_epoch(&self) -> (Path<'_>, Option<crate::Epoch>) {
+		let text = self.as_str();
+		let (name, segment) = text.rsplit_once('/').unwrap_or(("", text));
+		if let Some(epoch) = segment.strip_prefix('@').and_then(|text| text.parse().ok()) {
+			(Path::new(name), Some(epoch))
+		} else {
+			(self.borrow(), None)
+		}
+	}
+
+	/// Append an optional epoch as a final `@<uuidv7>` segment.
+	pub fn join_epoch(&self, epoch: Option<&crate::Epoch>) -> PathOwned {
+		match epoch {
+			Some(epoch) => self.join(format!("@{epoch}")),
+			None => self.to_owned(),
 		}
 	}
 
@@ -767,6 +786,49 @@ impl<'de> serde::Deserialize<'de> for Relative<'static> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn epoch_vectors() {
+		let vectors: serde_json::Value = serde_json::from_str(include_str!("epoch.json")).unwrap();
+		for row in vectors["valid"].as_array().unwrap() {
+			let text = row["text"].as_str().unwrap();
+			let epoch: crate::Epoch = text.parse().unwrap();
+			assert_eq!(epoch.as_str(), text);
+			assert_eq!(
+				epoch.time().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(),
+				row["unix_ms"].as_u64().unwrap() as u128
+			);
+		}
+		for row in vectors["invalid"].as_array().unwrap() {
+			assert!(row.as_str().unwrap().parse::<crate::Epoch>().is_err(), "{row}");
+		}
+		let ordered: Vec<crate::Epoch> = vectors["ordered"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.map(|row| row.as_str().unwrap().parse().unwrap())
+			.collect();
+		assert!(ordered.windows(2).all(|pair| pair[0] < pair[1]));
+		for row in vectors["paths"].as_array().unwrap() {
+			let path = Path::new(row["path"].as_str().unwrap());
+			let (name, epoch) = path.split_epoch();
+			assert_eq!(name.as_str(), row["name"].as_str().unwrap());
+			assert_eq!(epoch.as_ref().map(|epoch| epoch.as_str()), row["epoch"].as_str());
+			assert_eq!(name.join_epoch(epoch.as_ref()), path);
+			assert_eq!(path.is_hidden(), name.is_hidden());
+		}
+	}
+
+	#[test]
+	fn epoch_segments_are_literal_pattern_components() {
+		let epoch: crate::Epoch = "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f".parse().unwrap();
+		let path = Path::new("demo/video").join_epoch(Some(&epoch));
+		assert!("demo/**".parse::<Pattern>().unwrap().matches(path.as_str()));
+		assert!("demo/video/@*".parse::<Pattern>().unwrap().matches(path.as_str()));
+		assert!(!"demo/video".parse::<Pattern>().unwrap().matches(path.as_str()));
+		assert!(path.as_str().parse::<Pattern>().unwrap().matches(path.as_str()));
+		assert!(!path.is_hidden());
+	}
 
 	#[test]
 	fn test_has_prefix() {

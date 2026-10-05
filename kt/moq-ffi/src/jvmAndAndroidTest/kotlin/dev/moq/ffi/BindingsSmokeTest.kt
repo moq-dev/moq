@@ -6,6 +6,7 @@ import uniffi.moq.MoqException
 import uniffi.moq.MoqOriginConfig
 import uniffi.moq.MoqOriginProducer
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 
 /**
@@ -22,6 +23,12 @@ class BindingsSmokeTest {
                 client.connect("https://localhost:0/test")
             }
         }
+    }
+
+    @Test
+    fun `an exception prints the Rust error message`() {
+        assertEquals("closed", MoqException.Closed().toString())
+        assertEquals("transport: reset", MoqException.Transport("reset").toString())
     }
 
     @Test

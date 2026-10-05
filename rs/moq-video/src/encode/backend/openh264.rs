@@ -6,8 +6,8 @@
 use bytes::Bytes;
 use openh264::OpenH264API;
 use openh264::encoder::{
-	BitRate, Complexity, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, RateControlMode, TransferCharacteristics,
-	UsageType, VuiConfig,
+	BitRate, Complexity, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, RateControlMode,
+	TransferCharacteristics, UsageType, VuiConfig,
 };
 use openh264::formats::YUVSlices;
 use openh264_sys2::{ENCODER_OPTION_BITRATE, SBitrateInfo, SPATIAL_LAYER_ALL};
@@ -174,6 +174,7 @@ impl Backend for Openh264 {
 		// One Annex-B access unit per frame (low-delay, no B-frames). A skipped
 		// frame yields an empty bitstream.
 		let bytes = bitstream.to_vec();
+		let keyframe = bitstream.frame_type() == FrameType::IDR;
 
 		// The encode above built the underlying encoder, so any pending rate can
 		// be set from the next frame on.
@@ -182,7 +183,7 @@ impl Backend for Openh264 {
 		Ok(if bytes.is_empty() {
 			Vec::new()
 		} else {
-			vec![Encoded::new(Bytes::from(bytes), frame.timestamp)]
+			vec![Encoded::new(Bytes::from(bytes), frame.timestamp, keyframe)]
 		})
 	}
 
@@ -353,5 +354,36 @@ mod tests {
 			let i420 = frame.surface.to_i420().unwrap();
 			assert_eq!(i420.color(), Some(Color::infer(size)), "{size} converted pixels");
 		}
+	}
+
+	/// Every keyframe is flagged, the GOP cadence's as well as a forced one, and
+	/// the flag agrees with the bitstream.
+	#[test]
+	fn keyframes_are_flagged_on_the_cadence_and_on_a_cut() {
+		let framerate = crate::Rate::new(30, 1).unwrap();
+		let config = Config {
+			gop: Gop::keyframe_every(std::time::Duration::from_secs(1), framerate),
+			..config()
+		};
+		let mut enc = Openh264::new(&config).unwrap();
+
+		let mut keyframes = Vec::new();
+		for index in 0..50u64 {
+			let frame = Frame {
+				timestamp: moq_net::Timestamp::from_micros(index * 33_333).unwrap(),
+				..gray()
+			};
+			for unit in enc.encode(&frame, index == 45).unwrap() {
+				assert_eq!(
+					unit.keyframe,
+					super::super::keyframe_annexb(crate::encode::Codec::H264, &unit.payload),
+					"frame {index}"
+				);
+				if unit.keyframe {
+					keyframes.push(index);
+				}
+			}
+		}
+		assert_eq!(keyframes, vec![0, 30, 45], "the opening, cadence, and forced keyframes");
 	}
 }

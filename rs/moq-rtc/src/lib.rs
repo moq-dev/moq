@@ -75,6 +75,17 @@ pub use server::{Response, Server, whep, whip};
 mod tests {
 	use std::time::Duration;
 
+	/// The next route and whether it is active, skipping the caught-up marker.
+	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+		loop {
+			return match announced.next().await? {
+				moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+				moq_net::announce::Event::End(route) => Some((route, false)),
+				moq_net::announce::Event::Live => continue,
+			};
+		}
+	}
+
 	use axum::Router;
 	use bytes::Bytes;
 
@@ -85,6 +96,7 @@ mod tests {
 	const OPUS_PACKET: &[u8] = &[0xfc, 0xff, 0xfe];
 
 	#[tokio::test]
+	#[tracing_test::traced_test]
 	async fn whip_and_whep_round_trip_opus() {
 		let source_origin = moq_tokio::origin::spawn();
 		let source_consumer = source_origin.consume();
@@ -106,12 +118,12 @@ mod tests {
 			},
 		)
 		.expect("publish source packet");
-		let announcement = tokio::time::timeout(TIMEOUT, announcements.next())
+		let (announcement, announcement_active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 			.await
 			.expect("source announcement timed out")
 			.expect("source origin closed");
 		assert_eq!(announcement.prefix.as_str(), "source");
-		assert!(announcement.kind.is_active(), "source was unannounced");
+		assert!(announcement_active, "source was unannounced");
 		drop(announcements);
 
 		let server_origin = moq_tokio::origin::spawn();
@@ -126,7 +138,10 @@ mod tests {
 		let http = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve HTTP") });
 
 		let client = Client::new(client::Config::default());
-		let whip = format!("http://{address}/whip/ingested").parse().expect("WHIP URL");
+		// Credentials in the dialed URLs must never reach the client's connect logs.
+		let whip = format!("http://user:pass@{address}/whip/ingested?jwt=secret")
+			.parse()
+			.expect("WHIP URL");
 		tokio::time::timeout(TIMEOUT, client.publish(whip, source_consumer, "source"))
 			.await
 			.expect("WHIP negotiation timed out")
@@ -137,11 +152,19 @@ mod tests {
 			.create_broadcast("output")
 			.expect("create output broadcast");
 		let output_consumer = output.consume();
-		let whep = format!("http://{address}/whep/ingested").parse().expect("WHEP URL");
+		let whep = format!("http://user:pass@{address}/whep/ingested?jwt=secret")
+			.parse()
+			.expect("WHEP URL");
 		tokio::time::timeout(TIMEOUT, client.subscribe(whep, output))
 			.await
 			.expect("WHEP negotiation timed out")
 			.expect("WHEP negotiation failed");
+
+		assert!(logs_contain("whip client connected"));
+		assert!(logs_contain("whep client connected"));
+		for secret in ["jwt", "secret", "user:pass"] {
+			assert!(!logs_contain(secret), "client logs leaked {secret}");
+		}
 
 		let catalog_track = output_consumer
 			.track(hang::Catalog::DEFAULT_NAME)

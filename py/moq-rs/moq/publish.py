@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import warnings
 from typing import TYPE_CHECKING, Any
 
 from moq_ffi import (
@@ -754,8 +753,8 @@ class BroadcastProducer:
     ) -> AudioProducer:
         """Publish a raw-audio track with an in-process encoder.
 
-        Select the codec with ``moq.AudioCodec.opus()`` (currently the only
-        constructor), placed in ``output``.
+        Select the codec with ``moq.AudioCodec.opus()`` or
+        ``moq.AudioCodec.aac()``, placed in ``output``.
 
         Pass ``bandwidth`` to reserve this track's bitrate against the session's
         allocator so a co-resident video encoder sizes itself against what is left.
@@ -849,9 +848,4 @@ class BroadcastProducer:
 
         Tracks already subscribed carry on to their own end. Closing again is a no-op.
         """
-        self._inner.close()
-
-    def finish(self) -> None:
-        """Deprecated: use :meth:`close`. A broadcast end carries no cause."""
-        warnings.warn("use close(); a broadcast end carries no cause", DeprecationWarning, stacklevel=2)
         self._inner.close()

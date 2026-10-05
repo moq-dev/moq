@@ -1,4 +1,6 @@
 :root {
+	--moq-banner-height: 2.55rem;
+
 	/* Brand colors - green accent matching moq.dev */
 	--vp-c-brand-1: #16a34a;
 	--vp-c-brand-2: #15803d;
@@ -130,6 +132,11 @@
 	border-bottom-color: #334155;
 }
 
+/* The layout-top notice already clears the fixed navbar. */
+.Layout .VPContent {
+	padding-top: 0;
+}
+
 /* Community.vue is the GitHub/Discord pair in the desktop navbar. Keep the
    stock entries so the mobile overlay still has those links, and hide the
    duplicates here (VPNavBarExtra is also inside VPNavBar). */
@@ -143,9 +150,31 @@
 	background-color: #0f172a;
 }
 
+@media (min-width: 960px) {
+	.Layout .VPSidebar {
+		top: calc(var(--vp-nav-height) + var(--moq-banner-height));
+		height: calc(100vh - var(--vp-nav-height) - var(--moq-banner-height));
+		padding-top: 0;
+	}
+}
+
 /* Home hero styling */
 .VPHero .name {
 	color: #22c55e;
+}
+
+.vp-doc .language-icon {
+	width: 2rem;
+	height: 2rem;
+	object-fit: contain;
+	display: inline-block;
+	vertical-align: middle;
+	margin-right: 1rem;
+}
+
+.vp-doc td:has(.language-icon) {
+	white-space: nowrap;
+	min-width: 10rem;
 }
 
 /* Feature layout - emoji in top right corner */

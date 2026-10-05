@@ -1,7 +1,7 @@
 # Commits
 
 PRs into `main` are squash-merged, so the PR title becomes the commit subject and the PR description becomes the body in `git log`.
-PRs into any other branch (`dev`, a questline) use a merge commit, so their history survives until they land.
+PRs into any other branch (`release`, a questline) use a merge commit, so their history survives until they land.
 
 - Use conventional-commit subjects (`feat(watch): ...`, `fix: ...`, `chore: ...`, `docs: ...`)
 - AI commit attribution goes in a `Co-Authored-By:` trailer, not the commit body.
@@ -50,6 +50,10 @@ Wait for Codex to review the final head before merging.
 Merge only on its thumbs up, or once every Codex finding on the PR is fixed or replied to.
 Codex skips fork PRs; ask the maintainer to request one.
 
+# CI
+
+Workflow steps run `just` recipes, never a script path; `just gh check` enforces it.
+
 # Follow-ups
 
 If you encounter issues, or findings that are out of scope, create follow-up quests.
@@ -63,6 +67,14 @@ Its `moq-sync` workflow merges n0-computer/noq weekly as a PR; review it like an
 A carried change lists its upstream PR, or the reason it has none, in the fork PR.
 For an advisory against noq or Quinn, compare the pinned release's `PARENT` with the fixing upstream commit, then sync, release the fork, and bump the pin here.
 
+# Releases
+
+`main` is the trunk; `release` is what ships, and release-plz and every branch-triggered publish run only there.
+
+- A release is cut by hand: a PR merging `main` into `release`, with a merge commit.
+- An urgent fix between cuts lands on `main` first, then reaches `release` as a cherry-pick PR (a backport).
+- After every push to `release`, the Back-merge workflow opens a PR merging `release` into `main`, so trunk carries the published versions and CHANGELOGs. It lands as a merge commit; never squash it, or the next back-merge conflicts.
+
 # Versions
 
 Releases are cut separately; bump only when asked. Each package's version lives in one place:
@@ -72,4 +84,4 @@ Releases are cut separately; bump only when asked. Each package's version lives 
 - **Python**: `py/moq-rs/pyproject.toml`, plus the matching `moq-rs` entry in the root `uv.lock`; `py/moq-ffi` follows the `moq-ffi-v*` tag and Rust crate.
 - **Swift**: `swift/VERSION`. **Kotlin**: `moq.version` in `kt/gradle.properties`. **Dart**: `version` in `dart/moq/pubspec.yaml`. Their FFI counterparts track the Rust crate.
 - **Go**: `go/wrapper/VERSION` holds a human-owned `MAJOR.MINOR` line; CI derives the patch, so only edit it for a breaking API. Leave the placeholder FFI version in `go.mod` alone.
-- **OBS**: release builds take their version from the `libmoq-v*` tag that release-plz cuts for the `libmoq` crate (`cpp/obs/build.sh --libmoq-release`), not from any manifest, so there is nothing to bump.
+- **OBS**: release builds take their version from the `moq-c-v*` tag that release-plz cuts for the `moq-c` crate (`cpp/obs/build.sh --moq-c-release`), not from any manifest, so there is nothing to bump.

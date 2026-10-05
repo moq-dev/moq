@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.10](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.9...moq-ffi-v0.4.10) - 2026-10-03
+
+### Other
+
+- *(moxygen)* Moxygen compatibility ([#4253](https://github.com/moq-dev/moq/pull/4253))
+
+## [0.4.9](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.8...moq-ffi-v0.4.9) - 2026-09-30
+
+### Added
+
+- *(ffi)* Python, Go, and Dart print MoqError's Rust message ([#4433](https://github.com/moq-dev/moq/pull/4433))
+
+### Fixed
+
+- *(net)* an origin::Dynamic keeps its origin alive ([#4417](https://github.com/moq-dev/moq/pull/4417))
+
 ## [0.4.8](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.7...moq-ffi-v0.4.8) - 2026-09-27
 
 ### Added

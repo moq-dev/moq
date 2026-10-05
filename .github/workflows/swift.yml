@@ -14,6 +14,7 @@ on:
     branches: [main]
     paths:
       - "swift/**"
+      - "sh/swift/**"
       - "doc/lib/swift/**"
       - "doc/lib/samples.sh"
       - "rs/moq-ffi/**"
@@ -26,6 +27,7 @@ on:
     types: [opened, synchronize, reopened, closed]
     paths:
       - "swift/**"
+      - "sh/swift/**"
       - "doc/lib/swift/**"
       - "doc/lib/samples.sh"
       - "rs/moq-ffi/**"
@@ -53,6 +55,8 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -66,7 +70,6 @@ jobs:
           # none of which depend on the event, so a pull request restores what a
           # push saved.
           save-if: ${{ github.event_name == 'push' }}
-          cache-on-failure: true
 
       - name: Rust simulator check
         shell: bash
@@ -81,4 +84,4 @@ jobs:
           done
 
       - name: Swift check
-        run: ./swift/scripts/check.sh
+        run: just swift check

@@ -2,7 +2,8 @@
 #
 # Regenerate yum/dnf repo metadata and push to the rpm-moq-dev R2 bucket.
 # Pull the current pool, merge in new .rpm files from $ARTIFACTS_DIR,
-# rebuild repodata with createrepo_c, sign repomd.xml with GPG, and upload.
+# sign every package, rebuild repodata with createrepo_c, sign repomd.xml
+# with GPG, and upload.
 #
 # Required env:
 #   ARTIFACTS_DIR             directory containing new .rpm files to add
@@ -12,7 +13,7 @@
 #   SIGNING_KEY               ascii-armored GPG private key (shared with apt repo and maven publishing)
 #   SIGNING_PASSWORD          optional passphrase for SIGNING_KEY
 #
-# Required tools: rclone, createrepo_c, gpg.
+# Required tools: rclone, rpmsign, createrepo_c, gpg.
 
 set -euo pipefail
 
@@ -86,10 +87,23 @@ if [[ ${#KEY_IDS[@]} -ne 1 ]]; then
     exit 1
 fi
 KEY_ID="${KEY_IDS[0]}"
+# Read the passphrase from a file so it never appears in a process list.
 GPG_PASS_ARGS=()
 if [[ -n "${SIGNING_PASSWORD:-}" ]]; then
-    GPG_PASS_ARGS=(--pinentry-mode loopback --passphrase "$SIGNING_PASSWORD")
+    printf '%s' "$SIGNING_PASSWORD" >"$GNUPGHOME/passphrase"
+    GPG_PASS_ARGS=(--pinentry-mode loopback --passphrase-file "$GNUPGHOME/passphrase")
 fi
+
+# moq.repo sets gpgcheck=1, so dnf rejects any unsigned package. Sign the whole
+# merged pool, not just the new artifacts: packages published before signing
+# existed need it too. rpmsign skips any package already signed by this key,
+# so only new or unsigned packages change and get re-uploaded.
+echo ">> Sign packages..."
+mapfile -t POOL < <(find "$WORK/${DIST}" -name '*.rpm')
+rpmsign --addsign \
+    --define "_gpg_name ${KEY_ID}" \
+    --define "_gpg_sign_cmd_extra_args --batch ${GPG_PASS_ARGS[*]}" \
+    "${POOL[@]}"
 
 echo ">> Generate repodata per arch..."
 for arch in "${ARCHES[@]}"; do

@@ -131,12 +131,14 @@ public final class OriginConsumer: Sendable {
     }
 }
 
-/// A stream of route announcements and retractions. Iterate directly:
-/// `for try await announcement in announced { ... }`. The sequence ends when the
-/// origin closes; cancelling the consuming task cancels the subscription.
+/// A stream of announce events. Iterate directly:
+/// `for try await event in announced { ... }`. A `.live` event follows the routes
+/// live at subscribe time, so a loop can `break` there to list what is live.
+/// The sequence ends when the origin closes; cancelling the consuming task
+/// cancels the subscription.
 public final class AnnounceConsumer: AsyncSequence, Sendable {
-    /// The broadcast announcement emitted by this sequence.
-    public typealias Element = AnnounceUpdate
+    /// The announce event emitted by this sequence.
+    public typealias Element = AnnounceEvent
 
     let ffi: MoqAnnounceConsumer
 
@@ -144,9 +146,9 @@ public final class AnnounceConsumer: AsyncSequence, Sendable {
         self.ffi = ffi
     }
 
-    /// The next announcement, or `nil` once the origin closes.
-    public func next() async throws -> AnnounceUpdate? {
-        (try await ffi.next()).map(AnnounceUpdate.init)
+    /// The next announce event, or `nil` once the origin closes.
+    public func next() async throws -> AnnounceEvent? {
+        try await ffi.next()
     }
 
     /// Cancel all current and future `next()` calls.
@@ -155,44 +157,10 @@ public final class AnnounceConsumer: AsyncSequence, Sendable {
     }
 
     /// Create an iterator that cancels native reads when iteration ends.
-    public func makeAsyncIterator() -> AsyncThrowingStream<AnnounceUpdate, Swift.Error>.Iterator {
+    public func makeAsyncIterator() -> AsyncThrowingStream<AnnounceEvent, Swift.Error>.Iterator {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
-            (try await ffi.next()).map(AnnounceUpdate.init)
+            try await ffi.next()
         }.makeAsyncIterator()
-    }
-}
-
-/// A single route announcement or retraction.
-///
-/// A route claims that `prefix` and every path beneath it can be served; it
-/// carries no broadcast. Resolve a specific path with `OriginConsumer.requestBroadcast`.
-/// By convention a publisher announces each broadcast's exact path.
-public final class AnnounceUpdate: Sendable {
-    let ffi: MoqAnnounceUpdate
-
-    init(_ ffi: MoqAnnounceUpdate) {
-        self.ffi = ffi
-    }
-
-    /// The covered prefix, relative to the origin.
-    public var prefix: String {
-        ffi.prefix()
-    }
-
-    /// What each filter wildcard matched, or `nil` for a partial overlap.
-    public var captures: [String]? {
-        ffi.captures()
-    }
-
-    /// Whether the route is active (`true`) or was retracted (`false`). A
-    /// repeated active announcement for the same prefix is a metadata update.
-    public var active: Bool {
-        ffi.active()
-    }
-
-    /// The announced route: its prefix, relay hops, and costs.
-    public var route: Route {
-        ffi.route()
     }
 }
 

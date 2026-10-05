@@ -17,6 +17,10 @@ pub struct Config {
 	/// How the frames are compressed. Must match the encoder's
 	/// [`Config::compression`](super::Config::compression). Defaults to [`Compression::None`].
 	pub compression: Compression,
+
+	/// Maximum bytes in an inflated frame or the compact JSON of the reconstructed value.
+	/// Unset preserves the DEFLATE decoder's default frame cap and leaves state size unlimited.
+	pub max_size: Option<usize>,
 }
 
 /// Consumes a JSON value from a track, reconstructing it from snapshots and deltas.

@@ -1,7 +1,10 @@
+import { Once } from "@moq/signals";
 import { Mutex } from "async-mutex";
+import type { Drain } from "../connection/goaway.ts";
 import { error, ProtocolViolation } from "../error.ts";
 import { Reader, Stream, type Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
+import { GoAway } from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -91,6 +94,9 @@ export class ControlStreamAdapter implements Session {
 	#writeMutex = new Mutex();
 	readonly version: IetfVersion;
 
+	/** The peer's GOAWAY, which draft-14 to -16 carry on the shared control stream. */
+	readonly goaway = new Once<Drain>();
+
 	// Virtual streams keyed by requestId
 	#streams = new Map<bigint, StreamEntry>();
 
@@ -124,6 +130,9 @@ export class ControlStreamAdapter implements Session {
 
 	#closed = false;
 
+	// Whether this side opened the session. Only a server may name a redirect.
+	#client: boolean;
+
 	constructor(
 		quic: WebTransport,
 		controlStream: Stream,
@@ -139,6 +148,7 @@ export class ControlStreamAdapter implements Session {
 		this.version = version;
 		this.#maxRequestId = maxRequestId;
 		this.#requestId = client ? 0n : 1n;
+		this.#client = client;
 	}
 
 	/**
@@ -212,9 +222,7 @@ export class ControlStreamAdapter implements Session {
 			},
 		});
 
-		const stream = new Stream({ readable, writable: sendWritable });
-		stream.reader.version = this.version;
-		stream.writer.version = this.version;
+		const stream = new Stream({ readable, writable: sendWritable, version: this.version });
 		return stream;
 	}
 
@@ -269,8 +277,15 @@ export class ControlStreamAdapter implements Session {
 				const classified = await this.#classify(typeId, body);
 
 				if (classified.route === Route.GoAway) {
-					console.warn("received GOAWAY on control stream");
-					return;
+					// The session keeps serving: a GOAWAY asks us to migrate, not to stop reading.
+					const msg = await GoAway.decodeBody(body, this.version);
+					if (this.goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
+					// A client may leave, but only the server may name where to go.
+					if (!this.#client && msg.newSessionUri !== "") {
+						throw new ProtocolViolation("client GOAWAY must not name a redirect");
+					}
+					this.goaway.set(msg.drain());
+					continue;
 				}
 
 				const { route, requestId } = classified;
@@ -339,9 +354,7 @@ export class ControlStreamAdapter implements Session {
 
 		const sendWritable = this.#createSendWritable();
 
-		const stream = new Stream({ readable, writable: sendWritable });
-		stream.reader.version = this.version;
-		stream.writer.version = this.version;
+		const stream = new Stream({ readable, writable: sendWritable, version: this.version });
 
 		this.#streams.set(requestId, { controller });
 

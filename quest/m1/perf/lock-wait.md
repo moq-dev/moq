@@ -27,7 +27,6 @@ Below one percent, record it and close the quest. Above, open a quest with
 the measured hot locks named, and only then decide between submitting staged
 SQEs before a blocking acquire and shrinking the lock in the model.
 
-## Related
-
-- [Cache shard](/quest/m1/perf/cache-shard.md) - one of the shared cells the
-  wait would point at
+Decided in the 2026-09-30 audit: [Cache shard](/quest/m2/cache-shard.md)
+stays in m2 and is taken up only if this shows more than 1% contention on
+the pool line.

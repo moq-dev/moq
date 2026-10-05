@@ -14,7 +14,7 @@ Turns existing container formats into hang broadcasts and back. This is what
 | Format | Import | Export | Notes |
 | --- | --- | --- | --- |
 | fMP4 / CMAF | yes | yes | Passthrough as `cmaf` or repackaged as `legacy`. |
-| MPEG-TS | yes | yes | H.264/H.265; AAC, MP2, AC-3, E-AC-3; SCTE-35 and subtitle PIDs carried as tracks; service tables round-trip; signalled timebase discontinuities preserved; paced export. |
+| MPEG-TS | yes | yes | H.264/H.265; AAC, MP2, AC-3, E-AC-3, Opus up to 7.1; SCTE-35 and subtitle PIDs carried as tracks; service tables round-trip; signalled timebase discontinuities preserved; paced export. |
 | FLV / RTMP | yes | yes | Legacy H.264 + AAC + MP3, plus enhanced-RTMP HEVC, AV1, VP9, Opus, AC-3, E-AC-3, and multitrack. |
 | Matroska / WebM | yes | yes | |
 | Annex-B (H.264, H.265) | yes | yes | Parameter sets extracted to the catalog or re-injected per keyframe. |
@@ -24,6 +24,15 @@ Importers parse the bitstream to fill the catalog (resolution, codec string,
 the inverse and skip stalled groups past a max age. Per-codec
 producers (`import::Opus`, H.264, and so on) are available for feeding frames
 you already have.
+
+MPEG-TS `Import::stats` returns cumulative per-PID `StreamStats`: delivered
+`units`, transport-clock `quiet` time, audio `resyncs`, scanned bytes `discarded`,
+frames `unconfirmed`, damaged units refused in `damaged`, and the PID's share of
+the TR 101 290 counters. A malformed media packet, PES header, or codec unit is
+dropped whole; only that PID loses sync, and video closes its group at the break
+and waits for its next keyframe. Publishing and catalog failures remain
+fatal. `ts::stats::Log` reports these counters for both the CLI and SRT gateway.
+The exporter's `damaged` count remains zero.
 
 fMP4 export emits one fragment per publisher group by default, including audio.
 A closed group flushes even if the live publisher pauses before its next frame.
@@ -42,8 +51,12 @@ retires the entry. Calling `modify` before the first `set` returns
 measure batch span or reorder delay for jitter. Locally encoded frames call
 `container::Producer::flush(timestamp, Instant::now())`; jitter is the spread
 above that track's own recent minimum lateness, and delay is how far that
-minimum trails the earliest track on the same catalog. Both are published as
-soon as they rise. `import::Track::discontinuity()` marks a source seek or
+minimum trails the earliest track on the same catalog. The first rise publishes
+the catalog at once; later rises within a second stay in the catalog and go out
+with the first frame after that second, or with any earlier structural edit.
+There is no timer, so a rise held when media stops waits for the next frame,
+and `finish` does not publish it.
+`import::Track::discontinuity()` marks a source seek or
 pause, clears partial input, and restarts the flush baseline without lowering
 advertised values. It forwards the container timeline marker, so resumed
 timestamps must continue forward on the broadcast clock. Generic imports remain
@@ -63,27 +76,26 @@ config through `AsMut`.
 ```rust
 #[derive(Serialize, Deserialize, Clone)]
 struct Mavlink {
-    #[serde(flatten)]
-    binary: hang::catalog::BinaryConfig, // mode, compression, bitrate, ...
+    config: hang::catalog::BinaryConfig, // mode, compression, bitrate, ...
     sysid: u8,
 }
 
 impl AsMut<hang::catalog::BinaryConfig> for Mavlink {
     fn as_mut(&mut self) -> &mut hang::catalog::BinaryConfig {
-        &mut self.binary
+        &mut self.config
     }
 }
 
 // Plus `RenditionConfig<Ext>` writing to `catalog.ext.mavlink`, a map
 // serialized under the `com.example.mavlink` root key.
-let binary = hang::catalog::BinaryConfig::new(hang::catalog::Mode::Stream);
-let mut telemetry = catalog.binary_stream(track, Mavlink { binary, sysid: 1 })?;
+let config = hang::catalog::BinaryConfig::new(hang::catalog::Mode::Stream);
+let mut telemetry = catalog.binary_stream(track, Mavlink { config, sysid: 1 })?;
 telemetry.append(packet)?;
 ```
 
 The producer sets the entry's `mode` and encodes the track with its
 `compression`. Read it back from `Catalog<Ext>` and subscribe with
-`catalog::Entry::new(name, &entry.binary)`.
+`catalog::Entry::new(name, &entry.config)`.
 
 A payload that knows when it was captured (a datagram's arrival, a sensor read)
 carries that `Instant`. The producer maps it onto the broadcast clock and writes
@@ -96,13 +108,24 @@ keep it in the payload.
 telemetry.append(moq_net::Timed::from(packet).at(received_at))?;
 ```
 
-The fMP4, MPEG-TS, and FLV importers publish the source's own timestamps unless
-built with `live()`, which translates them onto the catalog's broadcast clock:
-the first frame is live on arrival, every track of the input shares that one
-mapping, and a source that restarts its timestamps continues forward after the
-real idle gap. fMP4 passthrough rewrites each fragment's `tfdt` to match. Use
-it for a live feed with its own zero; publish verbatim only when the catalog's
-clock (`Config::with_clock`) already names the source's zero.
+The fMP4, MPEG-TS, FLV, and MKV importers publish the source's own timestamps
+(MPEG-TS after unwrapping its 33-bit PTS; fMP4 passthrough keeps each `tfdt`)
+and anchor the catalog's broadcast clock instead: the first frame's timestamp
+maps to the time it arrived, and every track of the input, like every importer
+sharing the catalog, keeps that one mapping. Data tracks stamp on it too, even
+one created before that first frame, though anything it wrote earlier stays on
+the clock the catalog started with. A clock set with
+`Config::with_clock` is never re-anchored, for a recording whose zero names its
+real start.
+
+Group starts never go backwards. A group starting before the previous group's
+start ends the import with `TimestampRewind`, whose `timestamp` and `floor` fields
+name the refused frame and the previous group's start; the message gives both in
+microseconds. A restarted encoder or a looping file wrapping to the top does this,
+flagged MPEG-TS discontinuity or not; republish it as a new broadcast. Frames may
+still dip below the previous group's content:
+B-frames, and a keyframe overlapping the previous group's last frame. A flagged
+MPEG-TS discontinuity that jumps forward continues the broadcast.
 
 ```bash
 cargo add moq-mux
@@ -114,7 +137,7 @@ API: [docs.rs/moq-mux](https://docs.rs/moq-mux). Real-world usage:
 Container producers and consumers take a format configured from the track's audio
 or video catalog entry (`catalog::hang::Container::try_from(&config)`). For a raw
 track, supply `container::Kind` explicitly. `cut(Some(end))` flushes and closes the
-group immediately. Legacy video writes an empty timestamped frame at that end;
+group immediately. Legacy and LOC video write an empty timestamped frame at that end;
 audio and CMAF do not. With no explicit end, the producer uses a known sample
 duration or observed cadence, independently of batching and reorder jitter.
 Streaming consumers deliver frames immediately. The live fMP4 exporter receives

@@ -3,8 +3,28 @@
 from __future__ import annotations
 
 from moq_ffi import MoqError, MoqProtocolKind
+from moq_ffi._uniffi.moq import (
+    _uniffi_rust_call,
+    _UniffiFfiConverterString,
+    _UniffiFfiConverterTypeMoqError,
+    _UniffiLib,
+)
 
 from .types import ProtocolError
+
+
+def _display(self: MoqError) -> str:
+    # moq-ffi exports MoqError's Display, but upstream uniffi's Python template
+    # renders no traits on errors, so call the exported method directly.
+    return _UniffiFfiConverterString.lift(
+        _uniffi_rust_call(
+            _UniffiLib.uniffi_moq_ffi_fn_method_moqerror_uniffi_trait_display,
+            _UniffiFfiConverterTypeMoqError.lower(self),
+        )
+    )
+
+
+MoqError.__str__ = _display
 
 
 def is_shutdown(err: BaseException) -> bool:

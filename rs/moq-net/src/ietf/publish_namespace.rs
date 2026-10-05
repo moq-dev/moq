@@ -36,7 +36,24 @@ impl PublishNamespace<'_> {
 			let _required_request_id_delta = u64::decode(r, version)?;
 		}
 		let track_namespace = decode_namespace(r, version)?;
-		let cluster = decode_cluster_params(r, version, negotiated)?;
+
+		// The token is ignored: the session's grant is what authorizes the request.
+		decode_params!(r, version,
+			0x03 => _authorization_token: Vec<super::Opaque>,
+			cluster::HOP_PATH => hops: Option<cluster::HopPath>,
+			cluster::ROUTE_COST => cost: Option<u64>,
+		);
+
+		let cluster = match negotiated {
+			true => Some(cluster::Advert {
+				hops: hops.ok_or(DecodeError::InvalidValue)?,
+				cost: cost.unwrap_or(0),
+			}),
+			// An endpoint must not append these on a session that did not negotiate the
+			// extension, so either is a violation.
+			false if hops.is_some() || cost.is_some() => return Err(DecodeError::InvalidValue),
+			false => None,
+		};
 
 		Ok(Self {
 			request_id,
@@ -127,7 +144,9 @@ impl Message for PublishNamespaceUpdate {
 			}
 			_ => RequestId::decode(r, version)?,
 		};
+		// The token is ignored: the session's grant is what authorizes the request.
 		decode_params!(r, version,
+			0x03 => _authorization_token: Vec<super::Opaque>,
 			cluster::HOP_PATH => hops: Option<cluster::HopPath>,
 			cluster::ROUTE_COST => cost: Option<u64>,
 		);
@@ -157,28 +176,21 @@ pub(super) fn encode_cluster_params<W: bytes::BufMut>(
 	Ok(())
 }
 
-/// Read the Parameters field of an advertisement. See [`encode_cluster_params`].
+/// Read the Parameters field of a NAMESPACE on a session that negotiated the extension.
+/// See [`encode_cluster_params`].
 pub(super) fn decode_cluster_params<R: bytes::Buf>(
 	r: &mut R,
 	version: Version,
-	negotiated: bool,
-) -> Result<Option<cluster::Advert>, DecodeError> {
-	if !negotiated {
-		// An endpoint must not append these on a session that did not negotiate the
-		// extension, and we know no other parameter here, so any is a violation.
-		decode_params!(r, version,);
-		return Ok(None);
-	}
-
+) -> Result<cluster::Advert, DecodeError> {
 	decode_params!(r, version,
 		cluster::HOP_PATH => hops: Option<cluster::HopPath>,
 		cluster::ROUTE_COST => cost: Option<u64>,
 	);
 
-	Ok(Some(cluster::Advert {
+	Ok(cluster::Advert {
 		hops: hops.ok_or(DecodeError::InvalidValue)?,
 		cost: cost.unwrap_or(0),
-	}))
+	})
 }
 
 /// PublishNamespaceOk message (0x07)

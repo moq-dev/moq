@@ -3,7 +3,7 @@ import { Effect, Signal } from "@moq/signals";
 
 // The capture pulls its processor in as a `?worklet` blob URL, which the bun test loader can't
 // resolve. Stub it so the module imports; the value is only ever passed to our fake addModule.
-mock.module("./capture-worklet.ts?worklet", () => ({ default: "blob:fake-capture" }));
+mock.module("./capture-worklet.ts?worklet", () => ({ default: async () => "blob:fake-capture" }));
 
 const { Capture } = await import("./capture.ts");
 
@@ -240,7 +240,7 @@ test("rejects the removed source prop instead of publishing nothing", async () =
 
 // Models a browser that gates audio on a gesture: a context built without user activation starts
 // suspended, renders nothing, and `resume()` never settles until the page has been interacted with.
-function installGatedWebAudio() {
+function installGatedWebAudio(addModule: () => Promise<void> = () => Promise.resolve()) {
 	const page = new EventTarget();
 	let activated = false;
 	const contexts: GatedContext[] = [];
@@ -250,7 +250,7 @@ function installGatedWebAudio() {
 	class GatedContext extends EventTarget {
 		state: string = "suspended";
 		sampleRate: number;
-		audioWorklet = { addModule: () => Promise.resolve() };
+		audioWorklet = { addModule };
 		constructor(options?: AudioContextOptions) {
 			super();
 			this.sampleRate = options?.sampleRate ?? 48_000;
@@ -310,6 +310,13 @@ function installGatedWebAudio() {
 		MediaStream: class {},
 		MediaStreamAudioSourceNode: FakeGraphNode,
 		AudioWorkletNode: GatedWorklet,
+		navigator: {
+			userActivation: {
+				get hasBeenActive() {
+					return activated;
+				},
+			},
+		},
 	};
 
 	const originals = new Map<string, PropertyDescriptor | undefined>();
@@ -349,12 +356,15 @@ test("captures once a gesture resumes a context built before one", async () => {
 	expect(webaudio.contexts[0].state).toBe("suspended");
 	expect(webaudio.worklets.length).toBe(0);
 	expect(capture.out.format.peek()).toBeUndefined();
+	// Blocked, so `<moq-publish>` doesn't hold its announce for audio that may never come.
+	expect(capture.blocked.peek()).toBe(true);
 
 	const before = performance.now() * 1000;
 	webaudio.gesture();
 	await settle();
 
 	expect(webaudio.contexts[0].state).toBe("running");
+	expect(capture.blocked.peek()).toBe(false);
 	expect(webaudio.worklets.length).toBe(1);
 
 	// The worklet is anchored when the graph starts, not when the source appeared, so audio stays on
@@ -383,6 +393,8 @@ test("drops the format while the context is interrupted", async () => {
 	webaudio.contexts[0].transition("interrupted");
 	await settle();
 	expect(capture.out.format.peek()).toBeUndefined();
+	// The page was activated, so the context is expected back without another gesture.
+	expect(capture.blocked.peek()).toBe(false);
 	expect(capture.out.frames.peek()).toBeUndefined();
 	// The retired worklet is cut from the source, or it keeps posting alongside its replacement.
 	expect(webaudio.roots[0].outputs.size).toBe(0);
@@ -397,4 +409,56 @@ test("drops the format while the context is interrupted", async () => {
 
 	capture.close();
 	await settle();
+});
+
+// Regression: a worklet that failed to load left the capture unblocked on an activated page, so
+// `<moq-publish>` waited forever on audio that could never arrive, and every other rendition with it.
+test("blocks when the worklet fails to load", async () => {
+	using webaudio = installGatedWebAudio(() => Promise.reject(new Error("addModule failed")));
+	const error = spyOn(console, "error").mockImplementation(() => {});
+
+	webaudio.gesture();
+	const capture = new Capture({ enabled: true, source: new Signal(fakeSource()) as never });
+	await settle();
+
+	expect(webaudio.contexts[0].state).toBe("running");
+	expect(capture.blocked.peek()).toBe(true);
+	expect(capture.out.format.peek()).toBeUndefined();
+
+	capture.close();
+	await settle();
+	error.mockRestore();
+});
+
+// Any graph construction that throws blocks the same way, e.g. a channel count the node refuses.
+test("blocks when the worklet node can't be built, until its inputs change", async () => {
+	using webaudio = installGatedWebAudio();
+	const error = spyOn(console, "error").mockImplementation(() => {});
+	const Working = globalThis.AudioWorkletNode;
+	Object.defineProperty(globalThis, "AudioWorkletNode", {
+		configurable: true,
+		writable: true,
+		value: class {
+			constructor() {
+				throw new Error("NotSupportedError");
+			}
+		},
+	});
+
+	webaudio.gesture();
+	const capture = new Capture({ enabled: true, source: new Signal(fakeSource()) as never, channelCount: 64 });
+	await settle();
+	expect(webaudio.contexts[0].state).toBe("running");
+	expect(capture.blocked.peek()).toBe(true);
+
+	// A new channel count rebuilds the graph, so the failure no longer stands.
+	Object.defineProperty(globalThis, "AudioWorkletNode", { configurable: true, writable: true, value: Working });
+	capture.channelCount.set(1);
+	await settle();
+	expect(capture.blocked.peek()).toBe(false);
+	expect(webaudio.worklets.length).toBe(1);
+
+	capture.close();
+	await settle();
+	error.mockRestore();
 });

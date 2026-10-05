@@ -17,7 +17,12 @@ WASM against 6 KB for a hand-carved one.
 
 Guidance:
 
-- Keep the 62-bit range; the wire is not bounded to 2^53.
+- Widen `VarInt` to the full 64 bits that leading-ones carries on moq-lite-07
+  and moq-transport draft-17+, and never bound it to 2^53. QUIC varints still
+  refuse to encode past 2^62-1. On lite-07 this lets Rust delete the
+  `BoundsExceeded` arm in the lite dispatch and flips `lite_varint_interop` from
+  refusal to a round trip. Also revisit `MAX_COST`: costs saturate at 2^62-1 on
+  every version, but the draft caps them at the largest value a varint carries.
 - Message types keep a local trait; the primitives become inherent methods
   on concrete reader and writer types (`varint`, `string`, `bytes`, ...).
   Make the version a concrete type rather than a generic `V` where possible.
@@ -28,4 +33,4 @@ Guidance:
 - Benchmark the codec before and after (Criterion); it is on every message.
 
 Public API: breaks moq-net's `coding` module (Encode/Decode on primitives
-go away), so this retargets to `dev`. Wire: none.
+go away). Wire: none.

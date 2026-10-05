@@ -3,18 +3,18 @@
 // moq.dev/moq wrapper, which builds on this package.
 //
 // The exported API is generated from rs/moq-ffi via uniffi-bindgen-go and
-// dropped in alongside this file (moq.go) by scripts/package-ffi.sh; the in-tree
-// source therefore does not build on its own. Run scripts/check.sh to stage a
+// dropped in alongside this file (moq.go) by sh/go/package-ffi.sh; the in-tree
+// source therefore does not build on its own. Run sh/go/check.sh to stage a
 // complete copy into dist/ and exercise it.
 //
 // The per-platform static archive is loaded from moq/lib/<goos>_<goarch>/
-// inside the staged module, populated by scripts/package-ffi.sh from the release
+// inside the staged module, populated by sh/go/package-ffi.sh from the release
 // build matrix.
 package moq
 
 // A Rust staticlib does not carry the link options its dependencies declare, so
 // every system library has to be named here. The same list, for the same reason,
-// lives in rs/libmoq/native-libs/ for C consumers of libmoq; keep the two in step
+// lives in rs/moq-c/native-libs/ for C consumers of moq-c; keep the two in step
 // when moq-ffi gains a dependency. The moq-video / moq-audio entries cover
 // hardware H.264/H.265 encode and decode plus capture, and openh264 (the software
 // H.264 fallback) is C++.

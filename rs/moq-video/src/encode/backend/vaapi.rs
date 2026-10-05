@@ -39,8 +39,8 @@ use std::path::Path;
 use bytes::Bytes;
 use moq_vaapi::encode::{Config as VaapiConfig, Encoder};
 
-use super::super::encoder::{Applied, Config, Gop, Preset};
-use super::{Backend, Encoded};
+use super::super::encoder::{Applied, Codec, Config, Gop, Preset};
+use super::{Backend, Encoded, keyframe_annexb};
 use crate::frame::{DmaBuf, DrmFormat, I420, vaapi};
 use crate::{Error, Frame, Surface};
 
@@ -160,7 +160,9 @@ impl Backend for Vaapi {
 		Ok(if annexb.is_empty() {
 			Vec::new()
 		} else {
-			vec![Encoded::new(Bytes::from(annexb), frame.timestamp)]
+			// moq-vaapi places the IDRs but reports only the bytes.
+			let keyframe = keyframe_annexb(Codec::H264, &annexb);
+			vec![Encoded::new(Bytes::from(annexb), frame.timestamp, keyframe)]
 		})
 	}
 

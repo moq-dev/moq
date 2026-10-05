@@ -40,7 +40,7 @@ use objc2_video_toolbox::{
 };
 
 use super::{Backend, Codec, Config};
-use crate::frame::{Surface, macos::PixelBuffer};
+use crate::frame::{Surface, apple::PixelBuffer};
 use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "videotoolbox";

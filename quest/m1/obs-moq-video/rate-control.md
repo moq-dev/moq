@@ -14,7 +14,7 @@ configured rate.
 
 Uses the moq-ffi reservation surface through the generated C++ package
 (`MoqSession::bandwidth`, `MoqBandwidth::reserve`, `MoqReservation::grant`),
-not libmoq, since the plugin moves off libmoq first. Apply grants through
+not the hand-written moq-c, since the plugin moves off it first. Apply grants through
 the shape `moq_mux::rate::Control` uses (drops at once, raises ramp,
 hysteresis) rather than pushing every change into `obs_encoder_update`; whether
 that policy sits in moq-ffi behind the reservation or in the plugin depends on

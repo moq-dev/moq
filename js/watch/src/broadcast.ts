@@ -2,52 +2,10 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
-import { Announce, Error as NetError, Path } from "@moq/net";
+import { Error as NetError, Path } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
 import { toHang } from "./msf";
-
-/**
- * The name of the first rendition whose `broadcast` reference walks above the root, if any.
- *
- * The root is the consumer's authorized subtree, so such a reference names content this
- * consumer cannot reach. It rejects the whole catalog rather than the one rendition: a
- * publisher that emits one has a bug, and quietly serving the rest hides that while the
- * missing rendition resurfaces later as a track that never fills.
- */
-function broadcastRefs(
-	section: Record<string, { broadcast?: Path.Relative }> | undefined,
-): [string, Path.Relative | undefined][] {
-	return Object.entries(section ?? {}).map(([name, config]) => [name, config.broadcast]);
-}
-
-function findEscaping(base: Moq.Path.Valid, catalog: Catalog.Root): string | undefined {
-	// Every section carrying a `broadcast` reference must be listed here, including data
-	// tracks. One left out silently exempts its tracks from the containment check.
-	const refs = [
-		...broadcastRefs(catalog.video?.renditions),
-		...broadcastRefs(catalog.audio?.renditions),
-		...broadcastRefs(catalog.text?.renditions),
-		...broadcastRefs(catalog.json?.tracks),
-		...broadcastRefs(catalog.binary?.tracks),
-	];
-
-	for (const [name, rel] of refs) {
-		if (rel && Path.tryResolve(base, rel) === undefined) return name;
-	}
-
-	return undefined;
-}
-
-/** Throw if any rendition's `broadcast` reference escapes the root. */
-function assertResolvable(base: Moq.Path.Valid, catalog: Catalog.Root): Catalog.Root {
-	Catalog.checkRenditions(catalog);
-	const escaping = findEscaping(base, catalog);
-	if (escaping !== undefined) {
-		throw new Error(`rendition ${JSON.stringify(escaping)}: broadcast reference escapes the root ${base}`);
-	}
-	return catalog;
-}
 
 type ReferencedRendition = {
 	broadcast?: Path.Relative;
@@ -63,7 +21,7 @@ function filterRenditions<T extends ReferencedRendition>(
 	return Object.fromEntries(Object.entries(renditions).filter(([, config]) => usable(config.broadcast)));
 }
 
-// Every section carrying a `broadcast` reference must be listed here, same as `findEscaping`;
+// Every section carrying a `broadcast` reference must be listed here, same as `Catalog.checkResolvable`;
 // one left out silently exempts its tracks from the reachability filter.
 function filterCatalog(catalog: Catalog.Root, usable: (rel: Path.Relative | undefined) => boolean): Catalog.Root {
 	return {
@@ -91,7 +49,8 @@ function filterCatalog(catalog: Catalog.Root, usable: (rel: Path.Relative | unde
 export const CATALOG_FORMATS = [...Catalog.FORMATS, "hangz", "manual"] as const;
 export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
 
-type Status = "offline" | "loading" | "live";
+// "error" means the origin refused the broadcast; `out.error` says why.
+type Status = "offline" | "loading" | "live" | "error";
 
 // Signals the component reads. Whoever owns the backing Signal (the caller, or
 // another component whose output is wired in) does the writing.
@@ -126,6 +85,10 @@ type BroadcastOutput = {
 	status: Signal<Status>;
 	active: Signal<Moq.Broadcast.Consumer | undefined>;
 
+	// Why the origin refused the broadcast, while `status` is "error". A refusal is final:
+	// only a fresh request (a new `name`, `origin`, or `announced`, or re-enabling) clears it and asks again.
+	error: Signal<Error | undefined>;
+
 	// The effective catalog: the fetched one, or a copy of input.catalog in manual mode, minus
 	// any rendition this consumer can't use (see `#runFiltered`). A rendition referencing another
 	// broadcast appears once that broadcast is announced, so this can change without a new catalog.
@@ -139,6 +102,7 @@ export class Broadcast {
 	readonly #out: BroadcastOutput = {
 		status: new Signal<Status>("offline"),
 		active: new Signal<Moq.Broadcast.Consumer | undefined>(undefined),
+		error: new Signal<Error | undefined>(undefined),
 		catalog: new Signal<Catalog.Root | undefined>(undefined),
 	};
 	readonly out = readonlys(this.#out);
@@ -202,10 +166,11 @@ export class Broadcast {
 			for (;;) {
 				const entry = await effect.race(announced.next());
 				if (!entry) break;
+				if (entry.kind === "live") continue;
 				this.#announced.mutate((active) => {
 					if (!active) return;
-					if (Announce.isActive(entry.kind)) active.add(entry.prefix);
-					else active.delete(entry.prefix);
+					if (entry.kind === "end") active.delete(entry.prefix);
+					else active.add(entry.prefix);
 				});
 			}
 		});
@@ -250,9 +215,10 @@ export class Broadcast {
 		return effect.get(request.active);
 	}
 
-	// Subscribe to the broadcast, waiting for its announcement so we never race a publisher that
-	// comes online after us. @moq/net drives the re-consume on a same-name republish and the blind
-	// fallback on a relay without discovery; mirror its handle into `active`.
+	// Subscribe to the broadcast, by default waiting for its announcement so we never race a
+	// publisher that comes online after us. @moq/net drives the re-consume on a same-name republish
+	// and the blind fallback on a relay without discovery; mirror its handle into `active`, and its
+	// refusal into `error`.
 	#runBroadcast(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
@@ -261,24 +227,29 @@ export class Broadcast {
 		if (!origin) return;
 
 		const name = effect.get(this.in.name);
-
-		// No announcement gate: subscribe immediately.
-		if (!effect.get(this.in.announced)) {
-			effect.set(this.#out.active, this.#requestBroadcast(effect, origin, name), undefined);
-			return;
-		}
-
-		const announced = origin.request(name, { announced: true });
-		effect.cleanup(() => announced.close());
+		const request = origin.request(name, { announced: effect.get(this.in.announced) });
+		effect.cleanup(() => request.close());
 
 		effect.run((nested) => {
-			nested.set(this.#out.active, nested.get(announced.active), undefined);
+			nested.set(this.#out.active, nested.get(request.active), undefined);
+		});
+
+		effect.run((nested) => {
+			const closed = nested.get(request.closed);
+			if (closed) nested.set(this.#out.error, closed, undefined);
 		});
 	}
 
 	#runCatalog(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
+
+		// Even a manual catalog is unplayable once the origin refuses its media. `#runBroadcast`
+		// clears the error on a fresh request, and this run's cleanup drops back to "offline".
+		if (effect.get(this.#out.error)) {
+			effect.set(this.#out.status, "error", "offline");
+			return;
+		}
 
 		const catalogFormat = effect.get(this.in.catalogFormat);
 		const name = effect.get(this.in.name);
@@ -294,7 +265,7 @@ export class Broadcast {
 			const catalog = effect.get(this.in.catalog);
 			let accepted: Catalog.Root | undefined;
 			try {
-				accepted = catalog && assertResolvable(name, catalog);
+				accepted = catalog && Catalog.checkResolvable(Catalog.checkRenditions(catalog), name);
 			} catch (err) {
 				console.error("rejecting catalog", name, err);
 			}
@@ -340,7 +311,7 @@ export class Broadcast {
 
 					console.debug("received catalog", format, this.in.name.peek(), update);
 
-					this.#raw.set(assertResolvable(name, update), true);
+					this.#raw.set(Catalog.checkResolvable(Catalog.checkRenditions(update), name), true);
 					this.#out.status.set("live");
 				}
 			} catch (err) {

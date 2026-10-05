@@ -2,7 +2,7 @@
 //! DXVA.
 //!
 //! The inverse of the encode Media Foundation backend, and the Windows
-//! counterpart to the macOS VideoToolbox decode backend. Unlike encoders, the
+//! counterpart to the VideoToolbox decode backend. Unlike encoders, the
 //! GPU vendors (NVIDIA especially) don't ship standalone async hardware decoder
 //! MFTs; the portable hardware path is the Microsoft decoder MFT driven
 //! synchronously with a Direct3D11 device manager bound to it, which routes the

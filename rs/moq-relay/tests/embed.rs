@@ -5,7 +5,7 @@
 //! public API. Each runtime layout (shared Tokio, worker Tokio, Linux
 //! io_uring) mounts a custom HTTP route, clones the cluster origin, serves a
 //! live QUIC subscriber, then stops the owner through its shutdown trigger
-//! and proves `run` returned with the ports free.
+//! and proves `run` returned with its sockets closed.
 
 #![cfg(feature = "_quic")]
 
@@ -57,6 +57,74 @@ async fn assert_owner_stopped(quic: SocketAddr, http: SocketAddr) {
 	);
 }
 
+/// The socket inodes this process holds bound to `port`: every UDP socket, but
+/// only a TCP listener, since accepted connections are not the owner's to close.
+///
+/// Asked of this process's own descriptors, for two reasons. Rebinding the port
+/// races any concurrent process's ephemeral bind, which may take a freed port.
+/// And `/proc/net/udp` is served in chunks that skip entries while other
+/// processes churn sockets.
+#[cfg(target_os = "linux")]
+fn bound(port: u16) -> std::collections::HashSet<u64> {
+	use std::os::fd::FromRawFd;
+	use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+	let mut bound = std::collections::HashSet::new();
+	for entry in std::fs::read_dir("/proc/self/fd").expect("read /proc/self/fd") {
+		let entry = entry.expect("read /proc/self/fd");
+		let Some(fd) = entry.file_name().to_str().and_then(|name| name.parse().ok()) else {
+			continue;
+		};
+		// Duplicated rather than borrowed: another thread may close the original
+		// meanwhile, which fails the duplicate instead of pulling the descriptor
+		// out from under a borrow, and the copy pins the socket it names.
+		let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+		if dup < 0 {
+			continue;
+		}
+		// SAFETY: `dup` is a fresh descriptor that nothing else owns.
+		let file = std::fs::File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(dup) });
+		let Ok(meta) = file.metadata() else { continue };
+		if !meta.file_type().is_socket() {
+			continue;
+		}
+		let socket = socket2::SockRef::from(&file);
+		let owned = match socket.r#type() {
+			Ok(socket2::Type::DGRAM) => true,
+			Ok(socket2::Type::STREAM) => socket.is_listener().unwrap_or(false),
+			_ => false,
+		};
+		let on_port = socket
+			.local_addr()
+			.ok()
+			.and_then(|addr| addr.as_socket())
+			.map(|addr| addr.port())
+			== Some(port);
+		if owned && on_port {
+			bound.insert(meta.ino());
+		}
+	}
+	bound
+}
+
+/// The inode of the socket at a `/proc/self/fd` entry, or `None` for anything else.
+#[cfg(target_os = "linux")]
+fn socket_inode(path: &std::path::Path) -> Option<u64> {
+	use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+	let meta = std::fs::metadata(path).ok()?;
+	meta.file_type().is_socket().then(|| meta.ino())
+}
+
+/// The inodes of every socket this process has open.
+#[cfg(target_os = "linux")]
+fn open_sockets() -> std::collections::HashSet<u64> {
+	std::fs::read_dir("/proc/self/fd")
+		.expect("read /proc/self/fd")
+		.filter_map(|entry| socket_inode(&entry.ok()?.path()))
+		.collect()
+}
+
 /// Fire the embedder stop and wait for `run` to return: the join every
 /// worker thread and listener goes through, as opposed to aborting the task.
 async fn stop(trigger: moq_relay::shutdown::Trigger, running: tokio::task::JoinHandle<anyhow::Result<()>>) {
@@ -69,15 +137,14 @@ async fn stop(trigger: moq_relay::shutdown::Trigger, running: tokio::task::JoinH
 }
 
 /// Load, mount a custom route, clone the origin, run the owner, prove QUIC
-/// plus HTTP, then stop it through the trigger and rebind both ports with a
-/// replacement owner.
+/// plus HTTP, then stop it through the trigger and prove its sockets closed.
 async fn embed_and_stop(mut config: Config) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	// No drain window: the sessions are already gone by the time the owner
 	// stops, and the test should not wait out the default.
 	config.drain_timeout = Duration::ZERO;
-	let relay = Relay::load(config.clone()).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay");
 	let quic = relay.quic_addr().expect("quic listener bound");
 	let http = relay.web_addrs().http.expect("http listener bound");
 	assert_eq!(
@@ -85,9 +152,6 @@ async fn embed_and_stop(mut config: Config) {
 		Some(moq_tokio::quic::DEFAULT_MAX_STREAMS)
 	);
 	assert_eq!(relay.cluster().id(), relay.cluster().origin.hop().id());
-	// Pin the replacement to the same ports the `:0` first binds got.
-	config.listen.bind = Some(moq_tokio::listen::Bind::Addr(quic));
-	config.web.http.listen = Some(http);
 
 	// The application handles: in-process workers publish into the origin the
 	// QUIC sessions see, and the trigger stops the owner from any task. Both
@@ -213,12 +277,12 @@ async fn embed_and_stop(mut config: Config) {
 	.expect("connect timeout")
 	.expect("connect failed");
 
-	let update = tokio::time::timeout(TIMEOUT, announced.next())
+	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
-	assert!(update.kind.is_active(), "expected announce, got retraction");
+	assert!(active, "expected announce, got retraction");
 	let announced = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test"))
 		.await
 		.expect("request timeout")
@@ -245,22 +309,21 @@ async fn embed_and_stop(mut config: Config) {
 	drop(broadcast);
 	drop(subscriber);
 
-	stop(trigger, running).await;
-	assert_owner_stopped(quic, http).await;
+	#[cfg(target_os = "linux")]
+	let owned = {
+		let quic_sockets = bound(quic.port());
+		let http_sockets = bound(http.port());
+		assert!(!quic_sockets.is_empty(), "no QUIC socket found on {quic}");
+		assert!(!http_sockets.is_empty(), "no HTTP listener found on {http}");
+		&quic_sockets | &http_sockets
+	};
 
-	// A replacement owner can bind the same ports, so the workers joined.
-	let replacement = Relay::load(config).await.expect("rebind after stop");
-	assert_eq!(replacement.addr(), Some(quic), "replacement bound a different address");
-	let trigger = replacement.shutdown_trigger().clone();
-	let replacing = tokio::spawn(replacement.run());
-	let health = reqwest::get(format!("http://127.0.0.1:{}/health", http.port()))
-		.await
-		.expect("replacement health")
-		.text()
-		.await
-		.expect("replacement health body");
-	assert!(!health.is_empty(), "replacement HTTP did not serve");
-	stop(trigger, replacing).await;
+	stop(trigger, running).await;
+
+	// Every worker and listener joined before `run` returned, so none of the
+	// owner's sockets are still open.
+	#[cfg(target_os = "linux")]
+	assert!(owned.is_disjoint(&open_sockets()), "the owner's sockets outlived `run`");
 	assert_owner_stopped(quic, http).await;
 }
 
@@ -413,4 +476,15 @@ fn embedded_cli_merges_only_relay_settings() {
 		.unwrap();
 	assert_eq!(parsed.worker_name.as_deref(), Some("recorder"));
 	assert_eq!(parsed.relay.cluster.id, Some(9));
+}
+
+/// The next route and whether it is active, skipping the caught-up marker.
+async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+	loop {
+		return match announced.next().await? {
+			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+			moq_net::announce::Event::End(route) => Some((route, false)),
+			moq_net::announce::Event::Live => continue,
+		};
+	}
 }

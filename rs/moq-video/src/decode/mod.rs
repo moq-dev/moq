@@ -4,7 +4,7 @@
 //! The decode counterpart to [`encode`](crate::encode), and the mirror of
 //! `moq_audio::decode::Consumer`. [`Consumer`] subscribes to a moq-mux video
 //! track and hands back decoded [`Frame`](crate::Frame)s; a native backend does the work
-//! (VideoToolbox on macOS, Media Foundation / DXVA on Windows, NVDEC or VAAPI
+//! (VideoToolbox on macOS and iOS, Media Foundation / DXVA on Windows, NVDEC or VAAPI
 //! on Linux, OpenH264 as the optional software fallback for H.264, and libvpx as
 //! the optional software decoder for VP8 and VP9).
 //!
@@ -33,7 +33,7 @@ pub use sink::Sink;
 
 #[cfg(test)]
 mod tests {
-	/// Callers (libmoq, moq-transcode) hold these across `.await`s in spawned
+	/// Callers (moq-c, moq-transcode) hold these across `.await`s in spawned
 	/// tasks and share frames via `Arc` (the transcode fanout), so both must
 	/// stay `Send` and `Frame` also `Sync` even when a platform's frame wraps
 	/// a GPU handle. Compile-time check; fails per-platform if a variant

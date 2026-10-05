@@ -1,6 +1,10 @@
 import { Reader, Writer } from "../stream.ts";
 
-export async function encode(writer: Writer, f: (w: Writer) => Promise<void>) {
+/** The largest message body either side accepts, matching the Rust implementation. */
+const MAX_SIZE = 64 * 1024 * 1024;
+
+// Encodes a message with a varint size prefix, refusing a body the peer would reject.
+export async function encode(writer: Writer, f: (w: Writer) => Promise<void>, max = MAX_SIZE) {
 	let scratch = new Uint8Array();
 
 	const temp = new Writer(
@@ -27,11 +31,16 @@ export async function encode(writer: Writer, f: (w: Writer) => Promise<void>) {
 				}
 			},
 		}),
+		writer.version,
 	);
 
 	await f(temp);
 	temp.close();
 	await temp.closed;
+
+	if (scratch.byteLength > max) {
+		throw new Error(`message too large: ${scratch.byteLength} bytes (max ${max})`);
+	}
 
 	await writer.u53(scratch.byteLength);
 	if (scratch.byteLength > 0) {
@@ -39,12 +48,15 @@ export async function encode(writer: Writer, f: (w: Writer) => Promise<void>) {
 	}
 }
 
-// Reads a message with a varint size prefix.
-export async function decode<T>(reader: Reader, f: (r: Reader) => Promise<T>): Promise<T> {
+// Reads a message with a varint size prefix, refusing an oversized body before reading it.
+export async function decode<T>(reader: Reader, f: (r: Reader) => Promise<T>, max = MAX_SIZE): Promise<T> {
 	const size = await reader.u53();
+	if (size > max) {
+		throw new Error(`message too large: ${size} bytes (max ${max})`);
+	}
 	const data = await reader.read(size);
 
-	const limit = new Reader(undefined, data);
+	const limit = new Reader(undefined, data, reader.version);
 	const msg = await f(limit);
 
 	// Check that we consumed exactly the right number of bytes

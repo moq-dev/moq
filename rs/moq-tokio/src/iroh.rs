@@ -83,9 +83,13 @@ pub enum Error {
 	#[error("failed to decode ALPN")]
 	DecodeAlpn(#[from] std::string::FromUtf8Error),
 
-	/// The peer negotiated an ALPN this build does not speak.
+	/// The peer negotiated an ALPN outside the configured versions.
 	#[error("unsupported ALPN: {0}")]
 	UnsupportedAlpn(String),
+
+	/// The configured version list is empty, so there is no ALPN to offer.
+	#[error("no MoQ versions configured; iroh has no ALPN to offer")]
+	NoVersions,
 
 	/// The URL had no host, so there is no endpoint id to dial.
 	#[error("Invalid URL: missing host")]
@@ -190,6 +194,9 @@ pub struct Config {
 impl Config {
 	/// Bind the iroh endpoint, applying the per-connection [`crate::quic::Config`] knobs.
 	///
+	/// The endpoint accepts nothing until a [`crate::server::Server`] takes it, which
+	/// registers the ALPNs of its configured versions.
+	///
 	/// iroh is a single P2P endpoint shared by both roles, so it takes the client
 	/// section (the per-connection knobs are symmetric). It only honors the knobs
 	/// its transport-config builder exposes (stream limits, idle timeout, MTU
@@ -236,10 +243,6 @@ impl Config {
 			SecretKey::generate()
 		};
 
-		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
-		let mut alpns: Vec<Vec<u8>> = moq_net::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
-		alpns.push(web_transport_iroh::ALPN_H3.as_bytes().to_vec());
-
 		// MoQ opens a stream per group, so raise the low default; also carry the
 		// shared idle-timeout / MTU knobs onto iroh's own transport config.
 		let max_streams = iroh::endpoint::VarInt::from_u64(quic.max_streams).unwrap_or(iroh::endpoint::VarInt::MAX);
@@ -250,10 +253,10 @@ impl Config {
 		if !quic.mtu_discovery {
 			transport = transport.mtu_discovery_config(None);
 		}
-		if let Some(window) = quic.receive_window {
-			let window = iroh::endpoint::VarInt::from_u64(window).unwrap_or(iroh::endpoint::VarInt::MAX);
-			transport = transport.receive_window(window);
-		}
+		// iroh's connection window is unlimited, so apply ours when unset.
+		let window = quic.receive_window.unwrap_or(crate::quic::DEFAULT_RECEIVE_WINDOW);
+		let window = iroh::endpoint::VarInt::from_u64(window).unwrap_or(iroh::endpoint::VarInt::MAX);
+		transport = transport.receive_window(window);
 		if let Some(window) = quic.stream_receive_window {
 			let window = iroh::endpoint::VarInt::from_u64(window).unwrap_or(iroh::endpoint::VarInt::MAX);
 			transport = transport.stream_receive_window(window);
@@ -269,7 +272,6 @@ impl Config {
 			Endpoint::builder(iroh::endpoint::presets::N0)
 		}
 		.secret_key(secret_key)
-		.alpns(alpns)
 		.transport_config(transport.build());
 		if let Some(addr) = self.bind_v4 {
 			builder = builder.bind_addr(addr)?;
@@ -285,6 +287,22 @@ impl Config {
 	}
 }
 
+/// Register the ALPNs a listener accepts on `endpoint`, one per configured version.
+///
+/// Refuses an empty list rather than binding a listener no peer can reach.
+pub(crate) fn listen(endpoint: &Endpoint, versions: &moq_net::Versions) -> Result<()> {
+	let alpns = versions.alpns();
+	if alpns.is_empty() {
+		return Err(Error::NoVersions);
+	}
+
+	// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
+	let mut accepted: Vec<Vec<u8>> = alpns.iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
+	accepted.push(web_transport_iroh::ALPN_H3.as_bytes().to_vec());
+	endpoint.set_alpns(accepted);
+	Ok(())
+}
+
 /// Accept an iroh connection, negotiate WebTransport or raw QUIC, and complete the
 /// handshake. Returns the established session plus the request URL (raw QUIC carries
 /// none). iroh exposes no client-certificate identity, so the identity is always `None`,
@@ -292,6 +310,7 @@ impl Config {
 /// is always `None` too.
 pub(crate) async fn accept(
 	conn: iroh::endpoint::Incoming,
+	alpns: Vec<&'static str>,
 ) -> Result<crate::server::Accepted<web_transport_iroh::Session>> {
 	let conn = conn.accept()?.await?;
 	let alpn = String::from_utf8(conn.alpn().to_vec())?;
@@ -306,7 +325,7 @@ pub(crate) async fn accept(
 
 			let mut response = ConnectResponse::OK;
 			let mut link = crate::server::Link::default();
-			if let Some(protocol) = request.protocols.first() {
+			if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
 				response = response.with_protocol(protocol);
 				link.alpn = Some(protocol.clone());
 			}
@@ -323,7 +342,7 @@ pub(crate) async fn accept(
 			})
 		}
 		// Raw QUIC carries no request URL; the path rides the SETUP.
-		alpn if moq_net::ALPNS.contains(&alpn) => {
+		alpn if alpns.contains(&alpn) => {
 			let session = web_transport_iroh::QuicRequest::accept(conn).ok();
 			Ok(crate::server::Accepted {
 				session,
@@ -357,7 +376,11 @@ pub(crate) async fn connect(
 	endpoint: &Endpoint,
 	url: Url,
 	addrs: impl IntoIterator<Item = std::net::SocketAddr>,
+	versions: &moq_net::Versions,
 ) -> Result<(web_transport_iroh::Session, Binding)> {
+	let alpns = versions.alpns();
+	let (primary, rest) = alpns.split_first().ok_or(Error::NoVersions)?;
+
 	let host = url.host().ok_or(Error::MissingHost)?.to_string();
 	let endpoint_id: iroh::EndpointId = host
 		.parse()
@@ -371,15 +394,13 @@ pub(crate) async fn connect(
 
 	// We need to use this API to provide multiple ALPNs.
 	// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
-	let alpn = moq_net::ALPNS[0].as_bytes();
-	let mut additional: Vec<Vec<u8>> = moq_net::ALPNS[1..]
-		.iter()
-		.map(|alpn| alpn.as_bytes().to_vec())
-		.collect();
+	let mut additional: Vec<Vec<u8>> = rest.iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
 	additional.push(b"h3".to_vec());
 	let opts = iroh::endpoint::ConnectOptions::new().with_additional_alpns(additional);
 
-	let mut connecting = endpoint.connect_with_opts(endpoint_addr, alpn, opts).await?;
+	let mut connecting = endpoint
+		.connect_with_opts(endpoint_addr, primary.as_bytes(), opts)
+		.await?;
 	let alpn = connecting.alpn().await?;
 	let alpn = String::from_utf8(alpn)?;
 
@@ -389,7 +410,7 @@ pub(crate) async fn connect(
 			let url = url_set_scheme(url, "https")?;
 
 			let mut request = ConnectRequest::new(url);
-			for alpn in moq_net::ALPNS {
+			for alpn in &alpns {
 				request = request.with_protocol(alpn.to_string());
 			}
 
@@ -398,7 +419,7 @@ pub(crate) async fn connect(
 				Binding::H3,
 			)
 		}
-		alpn if moq_net::ALPNS.contains(&alpn) => {
+		alpn if alpns.contains(&alpn) => {
 			let conn = connecting.await?;
 			(web_transport_iroh::Session::raw(conn), Binding::Raw)
 		}

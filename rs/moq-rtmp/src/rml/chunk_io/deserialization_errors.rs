@@ -12,11 +12,29 @@ pub enum ChunkDeserializationError {
 	#[error("Received chunk with non-zero chunk type on csid {csid} prior to receiving a type 0 chunk")]
 	NoPreviousChunkOnStream { csid: u32 },
 
-	/// The max chunk size does not allow chunk sizes more than 2,147,483,647 (since it's encoded in only
-	/// 31 bytes of the SetChunkSize message), so this error occurs when a chunk size of greater than
-	/// this value is attempted to be set
-	#[error("Requested an invalid max chunk size of {chunk_size}.  The largest chunk size possible is 2147483647")]
+	/// Chunk sizes must fit in 31 bits and be at least one byte.
+	#[error("Requested an invalid max chunk size of {chunk_size}. Expected 1 through 2147483647")]
 	InvalidMaxChunkSize { chunk_size: usize },
+
+	/// The connection has exhausted its retained chunk-stream header slots.
+	#[error("RTMP connection exceeded 256 chunk stream IDs")]
+	ChunkStreamLimit,
+
+	/// The connection has exhausted its aggregate message reservation budget.
+	#[error("RTMP connection exceeded 64 MiB of incomplete message payloads")]
+	AssemblyLimit,
+
+	/// Undecoded input exceeds the connection's buffer budget.
+	#[error("RTMP connection exceeded 64 MiB of undecoded input")]
+	InputLimit,
+
+	/// A continuation changed an incomplete message's metadata.
+	#[error("RTMP chunk changed an incomplete message on csid {csid}")]
+	InconsistentMessage { csid: u32 },
+
+	/// An extended timestamp delta was smaller than its 24-bit marker.
+	#[error("RTMP extended timestamp {timestamp} is below 16777215")]
+	InvalidExtendedTimestamp { timestamp: u32 },
 
 	/// An I/O error occurred while reading the input buffer
 	#[error("{0}")]

@@ -45,9 +45,14 @@ pub struct Client {
 	/// The single resolved set of protocol versions, used to advertise moq ALPNs across
 	/// every transport (passed into the QUIC backend's `connect` and used directly for
 	/// raw TCP/UDS qmux and WebSocket). Resolved once in [`Client::new`] so the ALPN list
-	/// can't diverge between transports. iroh is the exception: it negotiates over the
-	/// full `moq_net::ALPNS` rather than the configured subset, so it reads nothing here.
-	#[cfg(any(feature = "noq", feature = "websocket", feature = "tcp", feature = "uds"))]
+	/// can't diverge between transports.
+	#[cfg(any(
+		feature = "noq",
+		feature = "iroh",
+		feature = "websocket",
+		feature = "tcp",
+		feature = "uds"
+	))]
 	versions: moq_net::Versions,
 	/// The URL from [`connect.url`](crate::connect::Config::url), dialed by [`Client::publish`] / [`Client::consume`].
 	connect: Option<Url>,
@@ -57,6 +62,9 @@ pub struct Client {
 	pub(crate) reconnect: bool,
 	pub(crate) backoff: Backoff,
 	pub(crate) goaway: Goaway,
+	/// Whether the TLS config pins a certificate fingerprint, which only verifies
+	/// the configured host, so a GOAWAY may not redirect elsewhere.
+	pub(crate) pinned: bool,
 	/// The resolved Happy Eyeballs timings, used by the `tcp://` dial here; the
 	/// QUIC backend captures its own copy from the config.
 	#[cfg(feature = "tcp")]
@@ -128,13 +136,20 @@ impl Client {
 
 		Ok(Self {
 			moq: moq_net::Client::new().with_versions(versions.clone()),
-			#[cfg(any(feature = "noq", feature = "websocket", feature = "tcp", feature = "uds"))]
+			#[cfg(any(
+				feature = "noq",
+				feature = "iroh",
+				feature = "websocket",
+				feature = "tcp",
+				feature = "uds"
+			))]
 			versions,
 			connect: config.url,
 			timeout,
 			reconnect: !config.once.unwrap_or(false),
 			backoff: config.backoff,
 			goaway: config.goaway,
+			pinned: !config.tls.fingerprint.is_empty(),
 			#[cfg(feature = "tcp")]
 			failover_delay,
 			#[cfg(feature = "tcp")]
@@ -243,6 +258,9 @@ impl Client {
 	/// Clones share one endpoint, so this closes theirs too. Dropping the connections
 	/// only queues the close, which nothing sends once the runtime stops: a process
 	/// that exits without this leaves each peer waiting out its idle timeout.
+	///
+	/// This closes at once, discarding stream data the peer has not acknowledged yet.
+	/// Call [`Connection::close`] on each connection first to deliver it.
 	///
 	/// Only the noq endpoint is closed. WebSocket, TCP, and UDS sessions end when their
 	/// [`Connection`] is dropped (the kernel closes the socket on exit), and an iroh
@@ -354,8 +372,12 @@ impl Client {
 		// SETUP instead; `setup_path` returns `None` for the ones that carry a URI, where
 		// sending it again is a protocol violation. An iroh-only build reads none of this:
 		// that dial waits for the negotiated binding and builds its own.
-		#[allow(unused_variables)]
 		let moq = self.moq_with_path(setup_path(&url));
+		#[allow(unused_variables)]
+		let moq = match setup_authority(&url) {
+			Some(authority) => moq.with_authority(authority),
+			None => moq,
+		};
 
 		// Plain TCP (qmux, no TLS). Explicit opt-in scheme; never raced against
 		// QUIC, which can't speak it. Use only on a trusted network.
@@ -389,7 +411,8 @@ impl Client {
 		if url.scheme() == "iroh" {
 			let endpoint = self.iroh.as_ref().ok_or(Error::IrohDisabled)?;
 			let target = request_target(&url);
-			let (session, binding) = crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied()).await?;
+			let (session, binding) =
+				crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied(), &self.versions).await?;
 
 			let moq = match binding {
 				crate::iroh::Binding::Raw => self.moq_with_path(target),
@@ -531,6 +554,30 @@ fn setup_path(url: &Url) -> Option<String> {
 		"moqt" | "moql" | "tcp" => request_target(url),
 		_ => None,
 	}
+}
+
+/// The URI authority to advertise in the SETUP, chosen by the dial URL's scheme.
+///
+/// A raw-QUIC `moqt://` client MUST send it (draft-ietf-moq-transport-21, 9.1.1). Built
+/// from the host and port so URL userinfo never goes on the wire. `None` for every other
+/// scheme, and when the URL has no host, since an empty authority is meaningless.
+#[cfg(any(
+	feature = "noq",
+	feature = "iroh",
+	feature = "websocket",
+	feature = "tcp",
+	feature = "uds"
+))]
+fn setup_authority(url: &Url) -> Option<String> {
+	if url.scheme() != "moqt" {
+		return None;
+	}
+
+	let host = url.host_str().filter(|host| !host.is_empty())?;
+	Some(match url.port() {
+		Some(port) => format!("{host}:{port}"),
+		None => host.to_owned(),
+	})
 }
 
 #[cfg(all(feature = "websocket", feature = "noq"))]
@@ -766,6 +813,43 @@ mod tests {
 		for (url, want) in cases {
 			let url = Url::parse(url).unwrap();
 			let got = setup_path(&url);
+			assert_eq!(got.as_deref(), want, "{url}");
+		}
+	}
+
+	#[cfg(any(
+		feature = "noq",
+		feature = "iroh",
+		feature = "websocket",
+		feature = "tcp",
+		feature = "uds"
+	))]
+	#[test]
+	fn setup_authority_is_only_for_raw_quic_moqt() {
+		let cases = [
+			("moqt://relay.example.com", Some("relay.example.com")),
+			("moqt://relay.example.com/anon?jwt=abc", Some("relay.example.com")),
+			("moqt://relay.example.com:4443/anon", Some("relay.example.com:4443")),
+			("moqt://[::1]:4443", Some("[::1]:4443")),
+			// Userinfo is a credential, and never goes on the wire.
+			(
+				"moqt://user:pass@relay.example.com:4443",
+				Some("relay.example.com:4443"),
+			),
+			// A hostless URL has no authority to send.
+			("moqt:///anon", None),
+			// Only the draft's `moqt://` scheme is required to send it.
+			("moql://relay.example.com", None),
+			("tcp://relay.example.com:4443", None),
+			("https://relay.example.com", None),
+			("wss://relay.example.com", None),
+			("unix:///run/moq.sock", None),
+			("iroh://k5lnrlndqpqcgh4d5nhbnbnhcyrgvw6ttxwrsvsu4nlt6foorxaa", None),
+		];
+
+		for (url, want) in cases {
+			let url = Url::parse(url).unwrap();
+			let got = setup_authority(&url);
 			assert_eq!(got.as_deref(), want, "{url}");
 		}
 	}

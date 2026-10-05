@@ -12,7 +12,7 @@ first-frame latency are no worse than the hand-written js/net.
 ## Plan
 
 - The `@moq/net` API may change where the generated shape is no worse to
-  use: disposable handles (`using`), `VarInt` for sequences and ids. Update
+  use: disposable handles (`using`), `U64` for sequences and ids. Update
   watch, publish, hang, room, and the demos in the same change, and the
   `doc/` pages for anything user-facing.
 - A forgotten `drop()` leaves a track open forever: add a debug-only
@@ -21,7 +21,7 @@ first-frame latency are no worse than the hand-written js/net.
 - Size budget: js/net's `lite/*` is 15 KB gzip today; keep generated output
   near it. Watch for std shims and fmt/tracing pulling in weight.
 
-Public API: breaks `@moq/net`; retargets to `dev`. Wire: none.
+Public API: breaks `@moq/net`. Wire: none.
 
 ## Required
 

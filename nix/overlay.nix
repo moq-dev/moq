@@ -49,7 +49,16 @@ let
     );
 
   moqRelayArgs = crateInfo ../rs/moq-relay/Cargo.toml // {
-    src = cleanCargoSource;
+    # A config test `include_str!`s the packaged systemd unit so its ExecStart
+    # keeps parsing, and the default filter drops non-Cargo files.
+    src = final.lib.cleanSourceWith {
+      src = ../.;
+      name = "source";
+      filter =
+        path: type:
+        (final.lib.hasSuffix "/packaging/moq-relay/moq-relay.service" path)
+        || (filterCargoSources path type);
+    };
     cargoExtraArgs = "-p moq-relay --features jemalloc";
     # Enable frame pointers for profiling support (negligible overhead on x86_64).
     # This also ensures the CDN build matches what Cachix caches.
@@ -98,15 +107,15 @@ let
     cargoExtraArgs = "-p moq-bench";
   };
 
-  libmoqInfo = crateInfo ../rs/libmoq/Cargo.toml;
+  moqCInfo = crateInfo ../rs/moq-c/Cargo.toml;
 
   # The native libraries an external linker must pass alongside libmoq.a.
-  # rs/libmoq/native-libs/ is the single source: rs/libmoq/CMakeLists.txt reads
+  # rs/moq-c/native-libs/ is the single source: rs/moq-c/CMakeLists.txt reads
   # it for in-tree consumers, and this installPhase substitutes it into the
-  # moq.pc and find_package templates directly rather than running CMake, so
+  # moq-c.pc and find_package templates directly rather than running CMake, so
   # format it the way each expects: `Libs.private` flags, and CMakeLists.txt's
   # MOQ_NATIVE_LIBS_QUOTED.
-  libmoqNativeLibs =
+  moqCNativeLibs =
     let
       platform =
         if final.stdenv.hostPlatform.isDarwin then
@@ -115,7 +124,7 @@ let
           "windows"
         else
           "linux";
-      lines = final.lib.splitString "\n" (builtins.readFile ../rs/libmoq/native-libs/${platform}.txt);
+      lines = final.lib.splitString "\n" (builtins.readFile ../rs/moq-c/native-libs/${platform}.txt);
       entries = builtins.filter (line: line != "" && !(final.lib.hasPrefix "#" line)) lines;
       framework = entry: "-framework ${final.lib.removePrefix "framework:" entry}";
       isFramework = final.lib.hasPrefix "framework:";
@@ -129,13 +138,13 @@ let
       ) entries;
     };
 
-  libmoqArgs = libmoqInfo // {
+  moqCArgs = moqCInfo // {
     src = cleanCargoSource;
-    cargoExtraArgs = "-p libmoq";
+    cargoExtraArgs = "-p moq-c";
     doCheck = false;
     nativeBuildInputs = with final; [
       pkg-config
-      # libmoq is the only nix-built package that pulls moq-video, and its `vaapi`
+      # moq-c is the only nix-built package that pulls moq-video, and its `vaapi`
       # feature brings moq-vaapi, whose build.rs runs bindgen over its vendored
       # libva headers. Sets LIBCLANG_PATH + BINDGEN_EXTRA_CLANG_ARGS so it finds
       # libclang and the libc headers, same as the devShell in flake.nix.
@@ -146,56 +155,56 @@ let
     # ~75 MB+. Thin LTO with a single codegen unit dead-strips the unused
     # monomorphizations Rust bakes into a staticlib, halving the artifact
     # with no source or ABI change, which keeps the release tarball and
-    # brew download small. Mirrors rs/libmoq/build.sh's Windows cargo path.
+    # brew download small. Mirrors rs/moq-c/build.sh's Windows cargo path.
     CARGO_PROFILE_RELEASE_LTO = "thin";
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS = "1";
 
-    # libmoq is a staticlib; crane's default install phase only handles
+    # moq-c is a staticlib; crane's default install phase only handles
     # binaries. Lay out the artifact tree the way release tarballs and
-    # downstream `find_package(moq)` consumers already expect.
+    # downstream `find_package(moq-c)` consumers already expect.
     installPhase = ''
       runHook preInstall
 
-      mkdir -p $out/lib/pkgconfig $out/include $out/lib/cmake/moq
+      mkdir -p $out/lib/pkgconfig $out/include $out/lib/cmake/moq-c
 
       # Ask cargo's build log where it put things instead of reconstructing the
       # paths, which a cross --target build moves. build.rs writes the header
       # to include/ under its OUT_DIR.
       jq=${final.lib.getExe final.jq}
       lib=$($jq -r 'select(.reason == "compiler-artifact") | .filenames[] | select(endswith("/libmoq.a"))' "$cargoBuildLog")
-      gen=$($jq -r 'select(.reason == "build-script-executed") | select(.package_id | test("libmoq")) | .out_dir' "$cargoBuildLog")
+      gen=$($jq -r 'select(.reason == "build-script-executed") | select(.package_id | test("/moq-c#")) | .out_dir' "$cargoBuildLog")
       cp "$lib" $out/lib/
       cp "$gen/include/moq.h" $out/include/
 
       # Rendered here rather than by build.rs: the template's paths are relative
       # to the .pc, which only holds once libmoq.a sits beside pkgconfig/.
-      pc=$out/lib/pkgconfig/moq.pc
-      substitute ${../rs/libmoq/moq.pc.in} "$pc" \
-        --subst-var-by VERSION "${libmoqInfo.version}" \
-        --subst-var-by LIBS_PRIVATE ${final.lib.escapeShellArg libmoqNativeLibs.pc}
+      pc=$out/lib/pkgconfig/moq-c.pc
+      substitute ${../rs/moq-c/moq-c.pc.in} "$pc" \
+        --subst-var-by VERSION "${moqCInfo.version}" \
+        --subst-var-by LIBS_PRIVATE ${final.lib.escapeShellArg moqCNativeLibs.pc}
       if grep -nE '@[A-Z_]+@' "$pc"; then
-        echo "unsubstituted placeholder in moq.pc (see above)" >&2
+        echo "unsubstituted placeholder in moq-c.pc (see above)" >&2
         exit 1
       fi
       # Resolve the paths the way a consumer's pkg-config will, so a template
       # whose libdir or includedir misses what this prefix ships fails here.
       for check in libdir:libmoq.a includedir:moq.h; do
-        dir=$(PKG_CONFIG_PATH=$out/lib/pkgconfig pkg-config --variable="''${check%%:*}" moq)
+        dir=$(PKG_CONFIG_PATH=$out/lib/pkgconfig pkg-config --variable="''${check%%:*}" moq-c)
         if [ ! -f "$dir/''${check#*:}" ]; then
-          echo "moq.pc ''${check%%:*} $dir has no ''${check#*:}" >&2
+          echo "moq-c.pc ''${check%%:*} $dir has no ''${check#*:}" >&2
           exit 1
         fi
       done
 
-      major_version="$(echo "${libmoqInfo.version}" | cut -d. -f1)"
-      substitute ${../rs/libmoq/cmake/moq-config.cmake.in} \
-        $out/lib/cmake/moq/moq-config.cmake \
+      major_version="$(echo "${moqCInfo.version}" | cut -d. -f1)"
+      substitute ${../rs/moq-c/cmake/moq-c-config.cmake.in} \
+        $out/lib/cmake/moq-c/moq-c-config.cmake \
         --subst-var-by LIB_FILE libmoq.a \
-        --subst-var-by VERSION "${libmoqInfo.version}" \
-        --subst-var-by MOQ_NATIVE_LIBS_QUOTED ${final.lib.escapeShellArg libmoqNativeLibs.cmake}
-      substitute ${../rs/libmoq/cmake/moq-config-version.cmake.in} \
-        $out/lib/cmake/moq/moq-config-version.cmake \
-        --subst-var-by VERSION "${libmoqInfo.version}" \
+        --subst-var-by VERSION "${moqCInfo.version}" \
+        --subst-var-by MOQ_NATIVE_LIBS_QUOTED ${final.lib.escapeShellArg moqCNativeLibs.cmake}
+      substitute ${../rs/moq-c/cmake/moq-c-config-version.cmake.in} \
+        $out/lib/cmake/moq-c/moq-c-config-version.cmake \
+        --subst-var-by VERSION "${moqCInfo.version}" \
         --subst-var-by MAJOR_VERSION "$major_version"
 
       runHook postInstall
@@ -310,7 +319,7 @@ in
     }
   );
 
-  libmoq = buildPackage libmoqArgs;
+  moq-c = buildPackage moqCArgs;
 
   moq-gst-plugin = buildPackage moqGstPluginArgs;
 

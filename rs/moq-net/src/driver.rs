@@ -34,7 +34,7 @@ pub struct Driver<S: crate::transport::poll::Session> {
 pub(crate) enum Protocol<S: crate::transport::poll::Session> {
 	/// Boxed for size only: a concrete box, so `Send` stays inferred.
 	Lite(Box<crate::lite::Driver<S>>),
-	Ietf(crate::util::MaybeSendBox<'static, Result<(), Error>>),
+	Ietf(crate::ietf::Driver),
 }
 
 /// Protocol and lifecycle work owned by the driver.
@@ -62,6 +62,7 @@ impl<S: crate::transport::poll::Session> Driver<S> {
 	/// Panics if `now` is earlier than the previous poll or construction time.
 	pub fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Result<Option<Instant>, Error> {
 		self.clock.advance(now);
+		self.clock.register_driver(waiter);
 		match self.state.poll(waiter) {
 			Poll::Ready(Ok(())) => Err(Error::Closed),
 			Poll::Ready(Err(err)) => Err(err),
@@ -71,10 +72,33 @@ impl<S: crate::transport::poll::Session> Driver<S> {
 }
 
 impl<S: crate::transport::poll::Session> Protocol<S> {
+	pub(crate) fn local_close(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+		match self {
+			Self::Lite(driver) => driver.local_close.clone(),
+			Self::Ietf(driver) => driver.local_close.clone(),
+		}
+	}
+
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		match self {
 			Self::Lite(driver) => driver.poll(waiter),
-			Self::Ietf(driver) => waiter.poll_future(driver.as_mut()),
+			Self::Ietf(driver) => waiter.poll_future(std::pin::Pin::new(driver)),
+		}
+	}
+
+	fn close(&self) {
+		match self {
+			Self::Lite(driver) => driver.close(),
+			Self::Ietf(driver) => driver.withdrawal.begin(),
+		}
+	}
+
+	/// Whether the protocol owes the peer no queued data, so a draining close can
+	/// proceed.
+	fn drained(&self) -> bool {
+		match self {
+			Self::Lite(driver) => driver.drained(),
+			Self::Ietf(driver) => driver.drained(),
 		}
 	}
 }
@@ -87,13 +111,26 @@ impl<S: crate::transport::poll::Session> State<S> {
 			self.supervisor = None;
 		}
 
-		if self.result.is_none()
-			&& let Poll::Ready(result) = self.protocol.poll(waiter)
-		{
-			self.result = Some(result);
-			// The protocol's last act was closing the transport, which wakes the
-			// supervisor's close watch; poll it now instead of waiting a turn.
-			if let Some(supervisor) = &mut self.supervisor
+		if self.supervisor.as_ref().is_some_and(|supervisor| supervisor.draining()) {
+			self.protocol.close();
+		}
+
+		if self.result.is_none() {
+			// The protocol's last act is closing the transport, and so is a drain
+			// once the protocol that just ran owes the peer nothing. Either wakes
+			// the supervisor's close watch; poll it now instead of waiting a turn.
+			let closed = match self.protocol.poll(waiter) {
+				Poll::Ready(result) => {
+					self.result = Some(result);
+					true
+				}
+				Poll::Pending => self
+					.supervisor
+					.as_mut()
+					.is_some_and(|supervisor| supervisor.poll_drain(self.protocol.drained(), waiter)),
+			};
+			if closed
+				&& let Some(supervisor) = &mut self.supervisor
 				&& supervisor.poll(waiter).is_ready()
 			{
 				self.supervisor = None;

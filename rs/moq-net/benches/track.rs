@@ -7,6 +7,15 @@
 //! `track_aborted_scan` isolates the other half of delivery: how much a cached
 //! prefix of aborted groups costs the scan that has to walk past it.
 //!
+//! `track_subscriber_churn` measures viewers joining and leaving beside steady ones:
+//! each departure wakes the producer's aggregate poll, which walks the subscription
+//! list, so departed entries left in the list show up as a slope over churn.
+//! `track_subscriber_churn_after_peak` runs the same churn after a departed audience,
+//! so entries walked in proportion to the old peak show up as a slope over it.
+//!
+//! `track_subscriber_join` measures a burst of viewers joining one track: each join
+//! registers in the subscription list, so any per-join walk of it shows up as a slope.
+//!
 //! Run with `cargo bench -p moq-net --bench track`.
 
 use std::hint::black_box;
@@ -15,7 +24,7 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_net::{Error, Timestamp, broadcast, cache, track};
 
 /// Fanout sizes spanning a direct viewer, a small room, and a large room.
@@ -29,6 +38,18 @@ const PAYLOAD: usize = 64;
 
 /// Small enough to reach steady-state eviction during Criterion warm-up.
 const CACHE_CAPACITY: u64 = 64 * 1024;
+
+/// Steady viewers that stay subscribed while others churn.
+const STEADY: [usize; 3] = [1, 8, 64];
+
+/// Viewers that join and leave, one at a time, during one measured run.
+const CHURN: [usize; 3] = [8, 64, 512];
+
+/// Viewers that join at once and stay, during one measured run.
+const JOIN: [usize; 3] = [64, 1024, 16384];
+
+/// Viewers that joined and left before the churn, leaving the list room for that many.
+const PEAK: [usize; 3] = [0, 1024, 16384];
 
 /// Concurrent publishers sharing one relay-style cache pool.
 const WRITERS: [usize; 4] = [1, 2, 4, 8];
@@ -123,6 +144,44 @@ impl AbortedScan {
 	}
 }
 
+/// Steady viewers on one track, with the producer's aggregate poll caught up.
+struct Churn {
+	_broadcast: broadcast::Producer,
+	track: track::Producer,
+	_steady: Vec<track::Subscriber>,
+	waiter: kio::Waiter,
+}
+
+impl Churn {
+	/// `peak` more viewers join and leave first, and the aggregate poll sees them go.
+	fn new(steady: usize, peak: usize) -> Self {
+		let broadcast = broadcast::Info::default().produce();
+		let mut track = broadcast.create_track("bench", None).unwrap();
+		let steady = (0..steady).map(|_| track.subscribe(None)).collect();
+		let peak: Vec<_> = (0..peak).map(|_| track.subscribe(None)).collect();
+		let waiter = kio::Waiter::noop();
+		assert!(track.poll_subscription_changed(&waiter).is_ready());
+		drop(peak);
+		assert!(track.poll_subscription_changed(&waiter).is_pending());
+
+		Self {
+			_broadcast: broadcast,
+			track,
+			_steady: steady,
+			waiter,
+		}
+	}
+
+	/// Join and leave `churn` times with the steady viewers' preferences, polling the
+	/// aggregate after each departure the way a relay forwarding demand upstream does.
+	fn run(&mut self, churn: usize) {
+		for _ in 0..churn {
+			drop(self.track.subscribe(None));
+			assert!(self.track.poll_subscription_changed(&self.waiter).is_pending());
+		}
+	}
+}
+
 fn bench_fanout(c: &mut Criterion) {
 	let mut group = c.benchmark_group("track_fanout_group");
 	for subscribers in FANOUT {
@@ -206,5 +265,109 @@ fn bench_aborted_scan(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, bench_fanout, bench_parallel_write, bench_aborted_scan);
+fn bench_subscriber_churn(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_subscriber_churn");
+	for steady in STEADY {
+		for churn in CHURN {
+			group.throughput(Throughput::Elements(churn as u64));
+			group.bench_with_input(
+				BenchmarkId::new(format!("steady_{steady}"), churn),
+				&churn,
+				|b, &churn| {
+					b.iter_batched_ref(
+						|| Churn::new(steady, 0),
+						|setup| setup.run(churn),
+						BatchSize::SmallInput,
+					);
+				},
+			);
+		}
+	}
+	group.finish();
+}
+
+fn bench_subscriber_churn_after_peak(c: &mut Criterion) {
+	const CHURN: usize = 512;
+	let mut group = c.benchmark_group("track_subscriber_churn_after_peak");
+	group.throughput(Throughput::Elements(CHURN as u64));
+	for peak in PEAK {
+		group.bench_with_input(BenchmarkId::from_parameter(peak), &peak, |b, &peak| {
+			b.iter_batched_ref(|| Churn::new(1, peak), |setup| setup.run(CHURN), BatchSize::SmallInput);
+		});
+	}
+	group.finish();
+}
+
+fn bench_subscriber_join(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_subscriber_join");
+	for join in JOIN {
+		group.throughput(Throughput::Elements(join as u64));
+		group.bench_with_input(BenchmarkId::from_parameter(join), &join, |b, &join| {
+			b.iter_batched(
+				|| {
+					let broadcast = broadcast::Info::default().produce();
+					let track = broadcast.create_track("bench", None).unwrap();
+					(broadcast, track)
+				},
+				|(broadcast, track)| {
+					let viewers: Vec<_> = (0..join).map(|_| track.subscribe(None)).collect();
+					(broadcast, track, viewers)
+				},
+				BatchSize::SmallInput,
+			);
+		});
+	}
+	group.finish();
+}
+
+/// Parked reads re-judge their reach, including the successor's abort waiter.
+/// Sweep readers and cached groups so added per-reader scans show up as a slope.
+fn bench_parked_read(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_parked_read");
+	for cached in [8, 64, 512] {
+		for readers in [1, 8, 64] {
+			let broadcast = broadcast::Info::default().produce();
+			let track = broadcast.create_track("bench", None).unwrap();
+			let mut head = track.append_group().unwrap();
+			head.write_frame(Timestamp::ZERO, Bytes::from_static(b"head")).unwrap();
+			for _ in 1..cached {
+				let mut next = track.append_group().unwrap();
+				next.write_frame(Timestamp::ZERO, Bytes::from_static(b"next")).unwrap();
+				next.finish().unwrap();
+			}
+			let waiters: Vec<_> = (0..readers).map(|_| kio::Waiter::noop()).collect();
+			let mut held: Vec<_> = waiters
+				.iter()
+				.map(|waiter| {
+					let mut sub = track.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(1)));
+					let Poll::Ready(Ok(Some(mut head))) = sub.poll_recv_group(waiter) else {
+						panic!("head is cached");
+					};
+					assert!(matches!(head.poll_read_frame(waiter), Poll::Ready(Ok(Some(_)))));
+					head
+				})
+				.collect();
+			group.throughput(Throughput::Elements(readers as u64));
+			group.bench_function(BenchmarkId::new(format!("cached_{cached}"), readers), |b| {
+				b.iter(|| {
+					for (head, waiter) in held.iter_mut().zip(&waiters) {
+						assert!(black_box(head.poll_read_frame(waiter)).is_pending());
+					}
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(
+	benches,
+	bench_fanout,
+	bench_parallel_write,
+	bench_aborted_scan,
+	bench_subscriber_churn,
+	bench_subscriber_churn_after_peak,
+	bench_subscriber_join,
+	bench_parked_read
+);
 criterion_main!(benches);

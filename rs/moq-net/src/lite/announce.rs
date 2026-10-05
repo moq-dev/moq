@@ -201,10 +201,13 @@ impl Decode<Version> for Cost {
 		if !version.has_route_cost() {
 			return Ok(Cost::UNKNOWN);
 		}
-		Ok(Cost {
+		// Costs saturate at 2^62-1 on every version, so a larger one (lite-07's varints
+		// reach 2^64-1) reads as the ceiling and still forwards to an older peer.
+		let cost = Cost {
 			warm: u64::decode(buf, version)?,
 			cold: u64::decode(buf, version)?,
-		})
+		};
+		Ok(cost.clamped())
 	}
 }
 
@@ -355,8 +358,8 @@ impl AnnounceBroadcast<'_> {
 			AnnounceStatus::Ended => Self::Ended { suffix, hops },
 			// On lite-05 a restart travels as a duplicate ANNOUNCE (a second `Active`), so accept
 			// the draft's explicit `restart` status and treat it the same. Either way the
-			// subscriber retires an already-announced path before republishing it; for an unknown
-			// path it's a fresh announce. Older versions never defined this status, so it's an
+			// subscriber re-prices an already-announced path in place; for an unknown path it's a
+			// fresh announce. Older versions never defined this status, so it's an
 			// invalid value there.
 			AnnounceStatus::Restart if restart_supported(version) => Self::Active {
 				suffix: PathRef::literal(suffix),
@@ -431,7 +434,7 @@ enum AnnounceStatus {
 	Ended = 0,
 	Active = 1,
 	/// The explicit restart status, accepted on decode for forward/cross-compatibility. We never
-	/// encode it: a replacement goes out as an `Ended` + `Active` pair.
+	/// encode it: a lite-05 restart goes out as a duplicate `Active`.
 	Restart = 2,
 }
 
@@ -783,15 +786,19 @@ mod tests {
 		);
 	}
 
-	// A peer may legally advertise the largest varint there is, and adding this
-	// link's price to it must not push the result out of range.
+	// Costs saturate at 2^62-1 on every version, lite-07's 64-bit varints included, so
+	// charging a link on top of the ceiling still re-encodes for a peer on any version.
 	#[test]
 	fn charged_cost_stays_encodable() {
-		let mut buf = Vec::new();
-		crate::origin::Cost::MAX
-			.charged(1)
-			.encode(&mut buf, Version::Lite06)
-			.expect("a charged cost must stay encodable");
+		let cost = Cost::new(u64::MAX).charged(1);
+		assert_eq!(cost, Cost::new((1 << 62) - 1));
+		assert_eq!(Cost::MAX.charged(1), cost);
+		for version in [Version::Lite06, Version::Lite07] {
+			let mut buf = Vec::new();
+			cost.encode(&mut buf, version)
+				.expect("a charged cost must stay encodable");
+			assert_eq!(Cost::decode(&mut &buf[..], version).unwrap(), cost, "{version}");
+		}
 	}
 
 	#[test]
