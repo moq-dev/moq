@@ -3,8 +3,9 @@
 ## Goal
 
 moq-hls import holds its first catalog until every rendition selected from
-the master playlist has reserved its tracks, so a consumer never sees a first
-catalog with only the first rendition.
+the master playlist that loads its init segment in the first pass has
+reserved its tracks, so a consumer never sees a first catalog with only the
+first rendition.
 
 Today each rendition's importer, and its `catalog.reserve()`, is created
 lazily in `TrackState::ensure_map` (`rs/moq-hls/src/import.rs`) while `step`
@@ -25,9 +26,11 @@ Guidance:
 - `step` already holds a pass-wide timeline reservation for the same reason
   ("a record flushed mid-pass would omit every rendition that hasn't loaded
   its init segment yet"). A catalog `Reserved` held the same way, at least
-  across the first pass, is the likely shape.
-- Don't let a hold outlive its pass. A rendition that fails at startup under
-  `OnError::Warn` must not withhold the catalog for the whole import, and a
+  across the first pass, is the likely shape: taken after `ensure_tracks`
+  and before the first `ingest`, beside the timeline reservation.
+- Don't let a hold outlive its pass. A rendition with no segments yet never
+  reaches `ensure_map`, and one whose init fetch fails under `OnError::Warn`
+  never reserves. Neither may withhold the catalog for the whole import, and a
   live `Reserved` withholds it (see [Shared import
   clock](/quest/m1/shared-clock.md), which rejected sharing offsets through
   one for that reason).
