@@ -4,8 +4,9 @@
 
 A customer runs a worker in its own environment, connects outbound to a MoQ
 deployment, reads only eligible source media, and publishes an on-demand
-contribution under the processor's own prefix, mirroring the source path
-(for example `.pro/<processor>/<source path>`, the
+contribution under the processor's own prefix, mirroring the source's bare
+name under an epoch minted for that one worker (for example
+`<processor prefix>/<source name>/@<worker>`, the
 [wildcard](/quest/m0/wildcard/README.md) line's derived-output layout). The
 platform supplies
 registration, scoped credentials, routing, demand, status, and usage
@@ -23,8 +24,10 @@ Decided: derived output follows [Wildcard](/quest/m0/wildcard/README.md)'s
 service-prefix layout, not `<source>/<processor>.pro`. Suffix routing is
 dropped everywhere, and a prefix claim needs the variable part of the path
 trailing, so the processor claims its prefix and mirrors the source path
-beneath it. The source's catalog reaches the output through a
-cross-broadcast reference ([media contract](/quest/m2/processor/media-contract.md)).
+beneath it. Each worker appends an epoch it mints (decided 2026-10-05, as for
+[transcode workers](/quest/m1/transcode-group-start.md)), so two workers'
+different output never shares a name. The source's catalog reaches the output
+through a cross-broadcast reference ([media contract](/quest/m2/processor/media-contract.md)).
 
 Deferred to m2 in the 2026-09-30 audit: no processor customer is committed,
 and its end-to-end proof (processor-vision) was deleted.

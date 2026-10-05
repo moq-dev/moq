@@ -191,22 +191,27 @@ identity or a generation field.
 ### Where derived output lives
 
 A prefix claim needs the variable part of a path trailing, so a fleet-wide
-service claims its own prefix and mirrors the source's bare name beneath it
-(`.pro/transcode/<pid>/foo.hang`, moq.pro's convention) rather than publishing
-beneath the source. Each worker publishes under its own epoch,
-`.pro/transcode/<pid>/foo.hang/@<worker>`, not the source's (decided
-2026-10-05; see [Per-worker epochs](/quest/m1/transcode-group-start.md)). The
-source's catalog reaches the contribution through a cross-broadcast reference.
+service claims its own hidden prefix and mirrors the source's bare name beneath
+it (`<service>/foo.hang`, where `<service>` starts with a `.` segment) rather
+than publishing beneath the source. Each worker publishes under an epoch it
+mints, `<service>/foo.hang/@<worker>`, not the source's, and its catalog points
+at the exact source epoch it transcodes (decided 2026-10-05; see
+[Per-worker epochs](/quest/m1/transcode-group-start.md)). Every demand
+capability follows the same rule, external processors included: each output
+path carries an epoch minted for that one worker. The source's catalog reaches
+the contribution through a cross-broadcast reference. moq.pro runs its
+transcode fleet at `.transcode/<pid>/foo.hang` and mounts it, so a customer
+sees `<pid>/.pro/transcode/foo.hang`.
 
 The leading `.` is deliberate. Existing customers on moq-lite-06 or older must
-never see `.pro/` broadcasts, which could confuse their business logic. Those
-versions cannot opt into hidden routes, so the relay never announces them
+never see hidden service broadcasts, which could confuse their business logic.
+Those versions cannot opt into hidden routes, so the relay never announces them
 there. Hidden routes are a moq-lite-07 feature, so the player's covering check
 (Demand, done on the line branch) opts into them and sees a claim only when
 lite-07 is negotiated. Finalizing lite-07 is a rollout condition, not a
 blocker for this line (decided in the 2026-09-30 audit), since the check works
 whenever lite-07 is negotiated. A customer who wants transcodes upgrades, or
-subscribes to the explicit `.pro/<service>/...` path, which works on any
+subscribes to the explicit hidden service path, which works on any
 version. Grants and metering are the deployment's; moq.pro's are in its
 [wildcard questline](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/wildcard/README.md).
 

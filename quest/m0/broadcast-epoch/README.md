@@ -59,7 +59,7 @@ Decided:
   gates the release (decided 2026-10-05): a regression from #4741 on main that
   `release` lacks.
 - Derived output mirrors the source's bare name under an epoch each worker
-  mints (`.pro/transcode/<pid>/foo.hang/@<worker>`, per the
+  mints (`<service>/foo.hang/@<worker>`, per the
   [wildcard](/quest/m0/wildcard/README.md) line's derived-output layout, decided
   2026-10-05), so two workers are two broadcasts and the service's prefix claim
   still covers both.

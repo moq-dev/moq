@@ -28,15 +28,19 @@ Decided 2026-10-05 by the maintainer:
 - Rejected: a moq-net `track::Info::whole_groups` serving policy (it never
   fires on the relay's own splice), resuming only at group boundaries, and
   byte-deterministic workers.
-- Layout: the derived name mirrors the source's bare name, and the worker
-  appends an epoch it mints: `.pro/transcode/<pid>/foo.hang/@<worker>`. The
+- Layout: the derived name mirrors the source's bare name under the
+  service's hidden prefix, and the worker appends an epoch it mints:
+  `<service>/foo.hang/@<worker>` (accepted 2026-10-05). The
   source's own epoch does not nest beneath it, because
   [Origin](/quest/m0/broadcast-epoch/origin.md) treats a path whose final
   segment is an epoch as pinned, so `foo.hang/@e/@w` could not be followed.
   The worker's catalog references the exact source epoch it transcodes, so
-  one derived broadcast is self-consistent, and a source restart is
-  transcoded under a newer worker epoch. The default CLI output
+  one derived broadcast is self-consistent. The default CLI output
   (`<source>/transcode.hang`) gains the same trailing epoch.
+- A worker finishes its output when its source epoch ends or is replaced by a
+  newer one (decided 2026-10-05), so a viewer of the bare derived name never
+  stays on a stale worker after a source restart. The restarted source is
+  transcoded under a newer worker epoch.
 - A caller may pass an explicit epoch; otherwise the worker mints one. The
   epoch segment adds a level to the catalog's relative source reference
   (`Config::source`).
@@ -47,8 +51,10 @@ requested index, and a test pins two instances fed one source publishing the
 same catalog and group sequences.
 
 Left: mint and append the worker epoch in moq-transcode or the CLI, fix the
-catalog's source reference, and test that two workers land on distinct paths
-and a viewer of the derived name follows the newer one. Update
+catalog's source reference, and finish the output when the source epoch ends
+or is replaced. Test that two workers land on distinct paths and a viewer of
+the derived name follows the newer one, and that a source restart finishes the
+old worker's output so the viewer moves to the new one. Update
 `doc/bin/cli.md` and `doc/bin/obs.md`, which give the output path.
 
 Public API: possibly an epoch on the transcode output config. Wire: none.
