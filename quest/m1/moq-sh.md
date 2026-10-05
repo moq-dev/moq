@@ -23,11 +23,15 @@ since the script and its hosting now both live in this repository.
 - POSIX sh, not Bash, so `| sh` works with dash and busybox. Check it with
   shellcheck in POSIX mode.
 - Live at `infra/moq-sh/install.sh`.
+- Put the whole script in a function called on the last line, like rustup,
+  so a download cut off mid-pipe runs nothing.
 - Download the archives `.github/workflows/release-binary.yml` already
   publishes; the installer needs no workflow change.
-- Default to the latest stable `moq-cli` release, with an explicit version
-  option. Resolve that product's tags, not the repository-wide latest
-  release: this repository publishes multiple independently versioned crates.
+- Default to the `moq-cli` version baked in when the worker was deployed,
+  with an explicit version option that builds the download URL from the
+  `moq-cli-v<version>` tag. The script makes no GitHub API calls: those are
+  limited to 60 per hour unauthenticated, which CI runners and shared NAT
+  exceed, and the repository-wide latest release is often another crate.
   Refuse missing versions, malformed input, and incomplete releases clearly.
 - Verify the selected archive against the release's `SHA256SUMS`, extract it
   into a temporary file in the destination directory, then atomically rename
@@ -53,9 +57,12 @@ since the script and its hosting now both live in this repository.
   browsers included, gets the script as `text/plain`, like sh.rustup.rs: no
   user-agent sniffing, so readers can audit what they pipe.
 - A new workflow deploys the worker on push to `release` touching
-  `infra/moq-sh/**`, so moq.sh always serves the released script. PRs touching
-  it run `wrangler deploy --dry-run`. Follow `release-js.yml`'s concurrency
-  split. Add `just infra moq-sh deploy` for manual use.
+  `infra/moq-sh/**`, and again after `release-binary.yml` finishes publishing
+  a `moq-cli-v*` release, baking that release in as the default version.
+  So moq.sh always serves the released script and the newest `moq-cli`.
+  PRs touching it run `wrangler deploy --dry-run`. Follow `release-js.yml`'s
+  concurrency split. Add `just infra moq-sh deploy` for manual use, and
+  include it in the aggregate `just infra deploy` and `infra/README.md`.
 - CI deploy needs [the Cloudflare secret](/quest/m1/moq-sh-secret.md). This
   quest does not wait for it: the implementing agent may deploy once by hand
   with `just infra moq-sh deploy` to verify the public URL.
@@ -66,7 +73,9 @@ since the script and its hosting now both live in this repository.
   explicit downgrade, product-specific latest selection, unsupported hosts,
   corrupt or missing assets, and a failure preserving the existing binary.
   Run the script against real release assets in a temporary directory and
-  run the installed `moq --version`.
+  run the installed `moq --version`. Run the tests under dash and on a macOS
+  runner (via `platform.yml`), since macOS has `shasum -a 256` rather than
+  `sha256sum` and BSD `mktemp` and `tar`.
 - After deploying, run `curl -fsSL https://moq.sh | sh -s -- <tmp dir option>`
   and confirm `moq --version`.
 - Document install, upgrade, version selection, directory override, and
