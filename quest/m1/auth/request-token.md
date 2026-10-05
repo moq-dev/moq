@@ -17,9 +17,14 @@ no longer fails the session; this quest gives it meaning.
 ## Plan
 
 - Decode with the SETUP option's structure and rules
-  (`rs/moq-net/src/ietf/token.rs`, `js/net/src/ietf/token.ts`): `USE_VALUE` yields the token, `REGISTER` is a value since we
-  advertise no `MAX_AUTH_TOKEN_CACHE_SIZE`, and `DELETE` or `USE_ALIAS`
-  closes with `PROTOCOL_VIOLATION`. Both decoder families change: the strict
+  (`rs/moq-net/src/ietf/token.rs`, `js/net/src/ietf/token.ts`): `USE_VALUE` yields the token. `REGISTER` closes the session with
+  `AUTH_TOKEN_CACHE_OVERFLOW` (0x13, a new `SessionError` variant): we
+  advertise no `MAX_AUTH_TOKEN_CACHE_SIZE`, so the limit is 0, and draft-21
+  §8.9 says overflowing it MUST close the session. Only SETUP falls back to
+  USE_VALUE. `DELETE` or `USE_ALIAS` closes with `PROTOCOL_VIOLATION`, and a
+  token structure that does not decode closes with
+  `KEY_VALUE_FORMATTING_ERROR`. Paul Gregoire's validator checks both codes
+  (decided 2026-10-04). Both decoder families change: the strict
   `decode_params!` path, where each request reads the repeatable key into an
   ignored `Vec<Opaque>`, and draft-14's `Parameters::skip`, which consumes it
   unread. `js/net` keeps every instance in `Parameters` and reads none.
