@@ -54,6 +54,13 @@ framerate, and bitrate are tunable through `el.video.config`; the audio
 encoder exposes its codec and volume. For simulcast or several renditions,
 drop the element and register your own encoders on a `Publish.Broadcast`.
 
+Every audio volume change ramps over `el.audio.fade`, 50ms by default, so
+`volume = 0` is silent once the fade passes. A fade of 0 steps at once; a
+negative or NaN fade drops the rendition until it is fixed.
+Disabling a rendition (`muted` on the element) ends the audio timeline with
+a marker, so a viewer that stays subscribed, or joins during the pause, never
+plays the audio before it as live.
+
 `el.video.cut()` asks for a keyframe on top of the `keyframeInterval` cadence,
 for a resume, a recording cut, or a known tune-in moment. Requests coalesce into
 the next keyframe, and forced keyframes land at least 500ms apart.

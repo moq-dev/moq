@@ -58,7 +58,6 @@ nothing; nothing in the tree writes `stalled`.
 ## Required
 
 - [Audio graph lifetime](/quest/m1/watch-audio-graph.md) - the viewer keeps its graph across an absence, which a disable reuses
-- [Audio publish hygiene](/quest/m1/audio-publish-hygiene.md) - lands first, so the publisher pause builds on the shared container producer's disable path
 
 ## Closes
 

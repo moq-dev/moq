@@ -1,8 +1,8 @@
+import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Decoder } from "./decoder";
 
-const MIN_GAIN = 0.001;
-const FADE_TIME = 0.2;
+const FADE = Time.Milli(200);
 
 export type EmitterInput = {
 	volume: Getter<number>;
@@ -19,6 +19,9 @@ export type EmitterInput = {
 export type EmitterProps = Inputs<EmitterInput> & {
 	/** Decoder supplying PCM. */
 	source: Decoder;
+
+	/** How long a volume change ramps for. Defaults to 200 ms; 0 steps at once. */
+	fade?: Time.Milli | Signal<Time.Milli>;
 };
 
 type EmitterOutput = {
@@ -31,6 +34,9 @@ export class Emitter {
 	readonly source: Decoder;
 
 	readonly in: Readonlys<EmitterInput>;
+
+	/** How long a volume change ramps for. 0 steps at once; negative or NaN throws and leaves the volume as it was. */
+	fade: Signal<Time.Milli>;
 
 	readonly #out: EmitterOutput = {
 		enabled: new Signal<boolean>(false),
@@ -49,6 +55,7 @@ export class Emitter {
 			muted: getter(props?.muted ?? false),
 			paused: getter(props?.paused ?? false),
 		};
+		this.fade = Signal.from(props.fade ?? FADE);
 
 		// Only download while playing audible audio. Pausing or muting stops it.
 		this.#signals.run((effect) => {
@@ -60,7 +67,9 @@ export class Emitter {
 			const root = effect.get(this.source.out.root);
 			if (!root) return;
 
-			const gain = new GainNode(root.context, { gain: effect.get(this.in.volume) });
+			// Seed the level without subscribing: rebuilding the node on a volume change would jump
+			// straight to the new level and skip the fade below.
+			const gain = new GainNode(root.context, { gain: this.in.volume.peek() });
 			root.connect(gain);
 
 			effect.set(this.#gain, gain);
@@ -80,16 +89,23 @@ export class Emitter {
 			const gain = effect.get(this.#gain);
 			if (!gain) return;
 
-			// Cancel any scheduled transitions on change.
-			effect.cleanup(() => gain.gain.cancelScheduledValues(gain.context.currentTime));
+			// On a change, hold wherever the ramp in progress has reached, so the next one starts from
+			// there. Cancelling alone would snap back to the level the ramp started from.
+			effect.cleanup(() => {
+				const now = gain.context.currentTime;
+				const level = gain.gain.value;
+				gain.gain.cancelScheduledValues(now);
+				gain.gain.setValueAtTime(level, now);
+			});
 
+			const fade = effect.get(this.fade);
+			if (!(fade >= 0)) throw new Error(`audio fade must be a non-negative number of ms: ${fade}`);
+
+			// Linear, like the publisher's gain: an exponential ramp can't start from or reach silence.
 			const volume = effect.get(this.in.volume);
-			if (volume < MIN_GAIN) {
-				gain.gain.exponentialRampToValueAtTime(MIN_GAIN, gain.context.currentTime + FADE_TIME);
-				gain.gain.setValueAtTime(0, gain.context.currentTime + FADE_TIME + 0.01);
-			} else {
-				gain.gain.exponentialRampToValueAtTime(volume, gain.context.currentTime + FADE_TIME);
-			}
+			const now = gain.context.currentTime;
+			if (fade === 0) gain.gain.setValueAtTime(volume, now);
+			else gain.gain.linearRampToValueAtTime(volume, now + Time.Milli.toSecond(fade));
 		});
 	}
 
