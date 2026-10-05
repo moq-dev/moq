@@ -39,7 +39,6 @@ QUIC studies there on that rule.
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, flate, audio, and video namespaces built from the handle below
 - [moq-net owns its transport seam](/quest/m1/transport-seam.md) - moq-net names only its own transport traits, so a web-transport-trait or qmux major bump is a patch for it
 - [A moq-relay release refuses --cluster-mesh](/quest/m1/relay-mesh-refusal-release.md) - the release that lets the cluster flag shims go
-- [WebTransport close upstream](/quest/m1/wt-close-upstream.md) - web-transport-moq delivers the close capsule itself, and moq-tokio's `CLOSE_LINGER` is deleted
 - [moq announced](/quest/m1/cli-announced.md) - `moq ls` becomes a follow-only live view named `moq announced`, with local-only shell completion
 - [Leave out a role](/quest/m1/cli-no-role.md) - `moq export` and `moq play` accept `--no-video` and `--no-audio`, and sinks that ignore selection refuse it
 - [fMP4 export tracks](/quest/m1/fmp4-export-tracks.md) - fMP4 export inits from the catalog, keeps early audio, and fails loudly instead of writing a track missing from moov
