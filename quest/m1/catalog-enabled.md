@@ -41,7 +41,7 @@ Decided (2026-10-04):
   until the grant recovers. A disabled rendition loses its subscribers, and
   the allocator grants nothing to an undemanded track, so recovery evaluates
   a hypothetical share against the current estimate instead of waiting for a
-  grant. The [ladder](/quest/m2/ladder/README.md) and
+  grant. The [ladder](/quest/m3/ladder/README.md) and
   [audio grant following](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md)
   adopt that rule; this quest only defines the field.
 - Everything else that names `stalled` moves to `enabled`: moq-transcode's
@@ -58,6 +58,7 @@ nothing; nothing in the tree writes `stalled`.
 ## Required
 
 - [Audio graph lifetime](/quest/m1/watch-audio-graph.md) - the viewer keeps its graph across an absence, which a disable reuses
+- [Audio publish hygiene](/quest/m1/audio-publish-hygiene.md) - lands first, so the publisher pause builds on the shared container producer's disable path
 
 ## Closes
 
@@ -66,5 +67,5 @@ nothing; nothing in the tree writes `stalled`.
 
 ## Related
 
-- [Ladder](/quest/m2/ladder/README.md) - disables a rung its grant cannot sustain
+- [Ladder](/quest/m3/ladder/README.md) - disables a rung its grant cannot sustain
 - [Rendition preference](/quest/m1/rendition-preference.md) - the other per-rendition selection field

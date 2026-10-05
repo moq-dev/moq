@@ -10,9 +10,9 @@ tells revocation apart from a session closing. Today it resets with
 ## Plan
 
 Assign `0x3A UNAUTHORIZED` in the lite draft's stream error table, the next
-code in the application block after `TIMESTAMP_MISMATCH`, on lite-06: a
-published lite-06 peer already maps an unknown stream code to a generic
-error, so the addition is compatible. Add the matching `StreamError`
+code in the application block after `TIMESTAMP_MISMATCH`, in the wip lite
+version that carries the AUTH stream (`moq-lite-07-wip` today), never a
+published one in place (decided 2026-10-05). Add the matching `StreamError`
 variant (the enum is non-exhaustive) in Rust and JS, send it from every
 revocation path the lite stream added, and cover it in the Rust and JS
 tests. Map it to the existing `Unauthorized` protocol kind in

@@ -3,7 +3,8 @@
 //! Create one [`Clock`] per broadcast and hand copies to every producer: because they share a
 //! timeline, frames captured at the same instant get the same timestamp, keeping concurrently
 //! produced tracks (e.g. audio and video capture on separate threads) in sync. It is `Copy`, so
-//! handing it out is cheap.
+//! handing it out is cheap. A copy is a snapshot, though: beside a container importer, which
+//! re-anchors the catalog's clock on its first frame, read the catalog's clock at write time instead.
 //!
 //! The clock also owns the broadcast's wall mapping, advertised at the catalog root as
 //! `clock: { wall, timescale }`: `wall` is the wall-clock time of PTS zero in
@@ -54,6 +55,11 @@ fn wall_clock(wall: SystemTime) -> crate::Result<hang::catalog::Clock> {
 ///
 /// Copies share the timeline and the wall mapping, so handing them to several producers keeps
 /// the broadcast on one clock.
+///
+/// A copy goes stale when a container importer's first frame re-anchors the catalog's clock (see
+/// [`Config::with_clock`](crate::catalog::Config::with_clock)): it keeps mapping onto the old
+/// timeline, misaligning everything it captures. To [`capture`](Self::capture) beside an importer,
+/// use [`catalog::Producer::clock`](crate::catalog::Producer::clock) read at write time.
 #[derive(Clone, Copy, Debug)]
 pub struct Clock {
 	/// A monotonic instant, and what the clock read then in micros.
@@ -121,7 +127,7 @@ impl Clock {
 	/// Refuses an instant ahead of now, which would claim the payload reached the transport before
 	/// it existed, and one before PTS zero, which no timestamp can name. Native capture instants
 	/// are unsupported in the browser.
-	pub(crate) fn capture(&self, at: Instant) -> crate::Result<moq_net::Timestamp> {
+	pub fn capture(&self, at: Instant) -> crate::Result<moq_net::Timestamp> {
 		let at = monotonic(at)?;
 		if at > web_async::time::Instant::now() {
 			return Err(crate::Error::InvalidCapture);
@@ -134,23 +140,6 @@ impl Clock {
 				.ok_or(crate::Error::InvalidCapture)?,
 		};
 		Ok(moq_net::Timestamp::from_micros(micros).expect("an instant elapsed duration fits in a timestamp"))
-	}
-
-	/// Map a payload's capture instant onto this clock, stamping an untimed payload now, so timed
-	/// and untimed writes share one timeline. Also returns the capture time, if there was one.
-	pub(crate) fn stamp<P>(
-		&self,
-		timed: moq_net::Timed<P, Instant>,
-	) -> crate::Result<(moq_net::Timed<P>, Option<moq_net::Timestamp>)> {
-		let captured = timed.at.map(|at| self.capture(at)).transpose()?;
-		let at = captured.unwrap_or_else(|| self.now());
-		Ok((
-			moq_net::Timed {
-				value: timed.value,
-				at: Some(at),
-			},
-			captured,
-		))
 	}
 
 	/// Units per second for [`wall`](Self::wall): [`TIMESCALE`](Self::TIMESCALE).

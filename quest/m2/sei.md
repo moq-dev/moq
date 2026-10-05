@@ -35,5 +35,5 @@ line without affecting captions or unrelated timed-metadata carriage.
 ## Related
 
 - [Catalog colour model](/quest/m2/color-catalog.md) - preserves display metadata semantics
-- [fMP4 emsg](/quest/m2/emsg.md) - independently settles carriage for metadata already outside video
-- [CEA-608/708](/quest/m2/captions-cea.md) - can read inline caption SEI without waiting for this experiment
+- [fMP4 emsg](/quest/m3/emsg.md) - independently settles carriage for metadata already outside video
+- [CEA-608/708](/quest/m3/captions-cea.md) - can read inline caption SEI without waiting for this experiment

@@ -29,3 +29,4 @@ was closed in favor of it); the clock the stretch converges toward is
 ## Required
 
 - [Watch](/quest/m0/audio-jitter-target/watch.md) - the recorded traces this replays, and the JS target it converges toward
+- [A/V clock](/quest/m1/av-clock.md) - the clock the stretch converges toward
