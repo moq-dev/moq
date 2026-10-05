@@ -25,6 +25,7 @@ QUIC studies there on that rule.
 - [Retracted demand release](/quest/m1/unannounce-demand-release.md) - a retracted broadcast's track demand is released when its last subscriber leaves, as before #4741
 - [Bounded stats aggregate](/quest/m1/stats-aggregate-bound.md) - the stats aggregator folds departed nodes into a retired total after a grace window, so its memory stops growing with node churn
 - [Stats epochs](/quest/m1/stats-epoch.md) - each stats producer publishes under `.../node/<node>/@<epoch>`, so a restarted node never reuses a name
+- [Stats totals and per-broadcast tracks](/quest/m1/stats-split.md) - each node publishes unpruned per-group totals and a per-broadcast track on request, so a lagging reader loses nothing
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - any node routes toward a broadcast's origin over CDN and P2P links alike, with per-origin routes and path-less announces
 - [Transcoders start at group boundaries](/quest/m1/transcode-group-start.md) - moq-transcode serves from a group boundary and mirrors its source's sequences, so two instances are interchangeable
 - [One route cost](/quest/m1/route-cost.md) - Warm and Cold collapse to one static route cost

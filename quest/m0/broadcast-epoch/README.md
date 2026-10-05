@@ -83,4 +83,5 @@ This README owns:
 - [GStreamer and OBS](/quest/m0/broadcast-epoch/gst-obs.md) - moqsink and the OBS plugin publish each run under a fresh epoch
 - [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - `moq` takes an optional `--epoch` instead of `--hop`, a plain publisher declares a random Hop ID, and the per-session hop stamp and NO_CAPACITY are gone
 - [Stats epochs](/quest/m1/stats-epoch.md) - moq-stats publishes each node under its own epoch, so a restarted node never stalls its viewers
+- [Stats totals and per-broadcast tracks](/quest/m1/stats-split.md) - the same release retires the per-path stats maps for totals and per-broadcast tracks (decided 2026-10-05)
 - [Retracted demand release](/quest/m1/unannounce-demand-release.md) - a retracted broadcast's track demand is released when its last subscriber leaves, as before #4741
