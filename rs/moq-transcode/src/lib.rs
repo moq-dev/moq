@@ -1316,7 +1316,11 @@ mod tests {
 		// The source publishes no live groups, so group 7 is a cache miss that
 		// reaches the rung's fetch handler.
 		let rung = consumer.track("video/120p").unwrap();
-		rung.query().await.unwrap();
+		// Which also makes a subscription starting mid-group begin at the next group.
+		assert!(
+			rung.query().await.unwrap().whole_groups,
+			"the rung serves partial groups"
+		);
 
 		let partial = rung
 			.fetch_group(7, moq_net::group::Fetch::default().with_frame_start(2))

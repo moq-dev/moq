@@ -2522,6 +2522,12 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 					if slice.until.is_some_and(|until| until <= slice.skip) {
 						continue;
 					}
+					// A whole-groups track never serves a tail: the subscription starts at
+					// the next group instead.
+					if slice.skip > 0 && group.whole_groups() {
+						tracing::debug!(subscribe = %self.request_id, sequence, "skipping a partial start group");
+						continue;
+					}
 
 					let msg = ietf::GroupHeader {
 						track_alias: self.request_id.0,
@@ -3247,6 +3253,53 @@ mod subscribe_cursor_test {
 
 		// `GroupServe` sets the priority once per stream it opens, so this counts groups served.
 		assert_eq!(log.priorities().len(), 1, "only group 3 should have been served");
+	}
+
+	/// A subscription asking a whole-groups track for the tail of a group skips that group
+	/// and starts at the next one, even though the group holds the requested object.
+	#[tokio::test]
+	async fn a_whole_groups_track_starts_a_partial_subscription_at_the_next_group() {
+		let log = Log::default();
+		let session = SinkSession::new(log.clone());
+
+		let info = track::Info::default().with_whole_groups(true);
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", info);
+		let start = track::Position { group: 5, frame: 2 };
+		let subscriber = track.subscribe(track::Subscription::default().with_start(start));
+
+		let mut serve = TrackServe::new(
+			session,
+			subscriber,
+			RequestId(1),
+			Version::Draft14,
+			ServeRange {
+				start: Some(Location { group: 5, object: 2 }),
+				end: None,
+			},
+			Some(Timescale::default()),
+		);
+		let mut serving = std::pin::pin!(kio::wait(move |waiter| serve.poll(waiter)));
+
+		// Group 5 holds the requested object, and is the newest when the serve looks at it.
+		let mut group = track.create_group(group::Info { sequence: 5 }).unwrap();
+		for _ in 0..4 {
+			group
+				.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())
+				.unwrap();
+		}
+		group.finish().unwrap();
+		assert!(futures::poll!(serving.as_mut()).is_pending());
+		assert!(log.priorities().is_empty(), "served the partial group");
+
+		let mut group = track.create_group(group::Info { sequence: 6 }).unwrap();
+		group
+			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())
+			.unwrap();
+		group.finish().unwrap();
+		track.finish().unwrap();
+		serving.await.unwrap();
+
+		assert_eq!(log.priorities().len(), 1, "only group 6 should have been served");
 	}
 }
 

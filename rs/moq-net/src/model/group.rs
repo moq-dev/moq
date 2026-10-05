@@ -1362,6 +1362,12 @@ impl Consumer {
 		self.track.timescale
 	}
 
+	/// Whether the parent track serves only whole groups; see
+	/// [`track::Info::whole_groups`].
+	pub(crate) fn whole_groups(&self) -> bool {
+		self.track.whole_groups
+	}
+
 	/// The index of the next frame this consumer will return.
 	///
 	/// Starts at 0, or at the group's first available frame once [`Self::set_frames`] has

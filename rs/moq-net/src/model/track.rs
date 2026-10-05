@@ -120,6 +120,14 @@ pub struct Info {
 	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).
 	/// Higher is more urgent. Defaults to 127, the midpoint.
 	pub priority: u8,
+	/// Serve only whole groups: a subscription or fetch that starts partway through a
+	/// group skips that group (or is refused) rather than receiving its tail.
+	///
+	/// For a publisher whose frames are only valid after the head it produced itself,
+	/// such as an encoder: another instance at the same path produces different bytes,
+	/// so its tail cannot continue a head someone else delivered. A local serving
+	/// policy, not carried in TRACK_INFO. Defaults to `false`.
+	pub whole_groups: bool,
 }
 
 impl Default for Info {
@@ -128,6 +136,7 @@ impl Default for Info {
 			timescale: Timescale::default(),
 			max_age: None,
 			priority: DEFAULT_PRIORITY,
+			whole_groups: false,
 		}
 	}
 }
@@ -151,6 +160,12 @@ impl Info {
 	/// Set the publisher's tie-break priority, returning `self` for chaining.
 	pub fn with_priority(mut self, priority: u8) -> Self {
 		self.priority = priority;
+		self
+	}
+
+	/// Set whether only whole groups are served, returning `self` for chaining.
+	pub fn with_whole_groups(mut self, whole_groups: bool) -> Self {
+		self.whole_groups = whole_groups;
 		self
 	}
 }
@@ -357,6 +372,11 @@ impl TrackState {
 	fn accept(&mut self, info: Info) {
 		self.published = true;
 		self.install(info);
+	}
+
+	/// Whether the publisher serves only whole groups; see [`Info::whole_groups`].
+	fn whole_groups(&self) -> bool {
+		self.info.as_ref().is_some_and(|info| info.whole_groups)
 	}
 
 	fn poll_info(&self) -> Poll<Result<Info>> {
@@ -651,6 +671,11 @@ impl TrackState {
 	/// end-of-stream. The handler side (a rejection, or no [`Dynamic`] at all) lives
 	/// in [`FetchState`]; [`Fetching`] polls both.
 	fn poll_fetch_cached(&self, sequence: u64, frame_start: u64) -> Poll<Result<group::Consumer>> {
+		// A tail of a whole-groups track is never served, cached or not.
+		if frame_start > 0 && self.whole_groups() {
+			return Poll::Ready(Err(Error::NotFound));
+		}
+
 		// A group aborted between the lookup and the consume (an abandoned fetch cut
 		// short) is a miss, not a hit that fails on its first read.
 		if let Some(group) = self.covering_group(sequence, frame_start)
@@ -1848,7 +1873,7 @@ fn poll_requested_group(
 	waiter: &kio::Waiter,
 ) -> Poll<Result<group::Request>> {
 	// Prefer serving a queued fetch, even if the track has since aborted.
-	if let Poll::Ready(mut guard) = fetch.poll(waiter, |fetch| {
+	while let Poll::Ready(mut guard) = fetch.poll(waiter, |fetch| {
 		if fetch.has_queued() {
 			Poll::Ready(())
 		} else {
@@ -1864,7 +1889,7 @@ fn poll_requested_group(
 		let frame_start = pending.frame_start;
 		let result = pending.result.clone();
 		drop(guard);
-		return Poll::Ready(Ok(group::Request {
+		let request = group::Request {
 			state: state.clone(),
 			fetch: fetch.clone(),
 			sequence,
@@ -1872,7 +1897,13 @@ fn poll_requested_group(
 			frame_start,
 			result,
 			done: false,
-		}));
+		};
+		// Queued before the track was accepted, so `fetch_group` could not refuse it.
+		if frame_start > 0 && state.read().whole_groups() {
+			request.reject(Error::NotFound);
+			continue;
+		}
+		return Poll::Ready(Ok(request));
 	}
 
 	// No fetch queued: surface a track abort so the handler loop can exit.
@@ -7875,6 +7906,63 @@ mod test {
 			served.read_frame().await.unwrap().unwrap().payload,
 			bytes::Bytes::from_static(b"head")
 		);
+	}
+
+	/// A whole-groups track refuses a fetch for a tail even when it holds the whole
+	/// group, and never hands one to its handler.
+	#[tokio::test]
+	async fn a_whole_groups_track_refuses_a_partial_fetch() {
+		let producer = track_producer("test", Info::default().with_whole_groups(true));
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+
+		let mut group = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		for payload in [b"a", b"b", b"c"] {
+			group
+				.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(payload))
+				.unwrap();
+		}
+		group.finish().unwrap();
+
+		// Cached: refused rather than positioned into the group.
+		let cached = consumer.fetch_group(0, group::Fetch::default().with_frame_start(1));
+		assert!(matches!(cached.now_or_never(), Some(Err(Error::NotFound))));
+		// The whole group still resolves from the cache.
+		let whole = consumer.fetch_group(0, None).now_or_never().expect("cached").unwrap();
+		assert_eq!(whole.index(), 0);
+
+		// Uncached: refused without queueing for the handler.
+		let missing = consumer.fetch_group(1, group::Fetch::default().with_frame_start(1));
+		assert!(matches!(missing.now_or_never(), Some(Err(Error::NotFound))));
+		assert!(
+			dynamic.requested_group().now_or_never().is_none(),
+			"queued a partial fetch"
+		);
+	}
+
+	/// A partial fetch queued before the track was accepted, when nothing could refuse it
+	/// yet, is refused once the accepted info says whole groups, and the handler never sees
+	/// it.
+	#[tokio::test]
+	async fn a_whole_groups_track_refuses_a_partial_fetch_queued_before_accept() {
+		let request = Request::new(Arc::new(broadcast::Info::default()), "test");
+		let consumer = request.consume();
+		let partial = consumer.fetch_group(3, group::Fetch::default().with_frame_start(2));
+		let whole = consumer.fetch_group(4, None);
+
+		let dynamic = request.dynamic();
+		let _producer = request.accept(Info::default().with_whole_groups(true));
+
+		let served = dynamic.requested_group().await.unwrap();
+		assert_eq!(
+			(served.sequence(), served.frame_start()),
+			(4, 0),
+			"handed out the partial fetch"
+		);
+		assert!(matches!(partial.await, Err(Error::NotFound)));
+
+		served.reject(Error::Cancel);
+		assert!(whole.await.is_err());
 	}
 
 	/// Joining a queued fetch widens its range, and a caller that arrives once the range

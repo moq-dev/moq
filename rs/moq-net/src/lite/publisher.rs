@@ -2124,12 +2124,17 @@ async fn recv_next(track: &mut track::Subscriber, datagrams: bool, emit_boundary
 /// Frame bounds qualify the start and end group only; everything in between is served
 /// whole. `false` means the group's head is missing and the subscriber never asked for a
 /// partial group, so it must be skipped: a group is the unit of decodability, and only
-/// the subscriber knows whether a partial one is any use to it.
+/// the subscriber knows whether a partial one is any use to it. A track that serves only
+/// whole groups ([`track::Info::whole_groups`]) skips a start group asked for partway
+/// through too, so the subscription resolves to the next one.
 fn position_group(group: &mut group::Consumer, start: Option<(u64, u64)>, end: Option<(u64, u64)>) -> bool {
 	let expected = match start {
 		Some((sequence, frame)) if sequence == group.sequence => frame,
 		_ => 0,
 	};
+	if expected > 0 && group.whole_groups() {
+		return false;
+	}
 
 	// `start_at` clamps up to the first frame the group still holds, so landing higher
 	// than asked means the frames below it are gone.
@@ -2955,6 +2960,32 @@ mod serve_group_test {
 		assert_eq!(consumer.index(), 0);
 	}
 
+	/// A whole-groups track holds the whole start group, yet still skips it for a
+	/// subscriber asking for its tail, and serves the next group whole.
+	#[test]
+	fn position_group_skips_a_partial_start_on_a_whole_groups_track() {
+		let info = track::Info::default().with_whole_groups(true);
+		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "video", info);
+		let mut group = track.create_group(group::Info { sequence: 3 }).unwrap();
+		for _ in 0..4 {
+			group.write_frame(Timestamp::ZERO, b"x".to_vec()).unwrap();
+		}
+
+		let mut consumer = group.consume();
+		assert!(!position_group(&mut consumer, Some((3, 2)), None));
+
+		// From its head it serves as usual.
+		let mut consumer = group.consume();
+		assert!(position_group(&mut consumer, Some((3, 0)), None));
+		assert_eq!(consumer.index(), 0);
+
+		// The next group is whole, so it serves.
+		let other = track.create_group(group::Info { sequence: 4 }).unwrap();
+		let mut consumer = other.consume();
+		assert!(position_group(&mut consumer, Some((3, 2)), None));
+		assert_eq!(consumer.index(), 0);
+	}
+
 	/// The end bound caps the end group and leaves the others whole.
 	#[test]
 	fn position_group_caps_the_end_group() {
@@ -3535,6 +3566,66 @@ mod serve_group_test {
 		relay.settle();
 		assert_eq!(relay.opened(), 1, "the held group is served");
 		assert!(relay.started_at(6), "named the skipped group");
+	}
+
+	/// A subscription asking a whole-groups track for the tail of a group starts at the
+	/// next group instead: SUBSCRIBE_START names it, and it is the only stream opened.
+	#[tokio::test]
+	async fn a_whole_groups_track_starts_a_partial_subscription_at_the_next_group() {
+		use crate::coding::Decode;
+
+		let info = track::Info::default().with_whole_groups(true);
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", info);
+		let start = track::Position { group: 5, frame: 2 };
+		let subscriber = track.subscribe(track::Subscription::default().with_start(start));
+
+		let log = Log::default();
+		let mut writer = Writer::new(SinkSend::new(log.clone()), Version::Lite07);
+		let track_priority = kio::Producer::new(0u8);
+		let ctx = Subscription {
+			session: SinkSession::new(Log::default()),
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			track_priority: track_priority.consume(),
+			track_priority_seen: 0,
+			version: Version::Lite07,
+			timescale: Some(crate::Timescale::default()),
+			opens: Default::default(),
+		};
+		let bounds = Bounds {
+			start_group: Some(5),
+			start_frame: 2,
+			end_group: None,
+			end_frame: None,
+		};
+		let mut run = TrackRun::new(ctx, subscriber, bounds, track_priority);
+		let mut run = std::pin::pin!(kio::wait(move |waiter| run.poll(&mut writer, waiter)));
+
+		// Group 5 holds the requested frame, and is the newest when the run looks at it.
+		let mut group = track.create_group(group::Info { sequence: 5 }).unwrap();
+		for millis in 0..4 {
+			group
+				.write_frame(Timestamp::from_millis(millis).unwrap(), b"x".as_slice())
+				.unwrap();
+		}
+		group.finish().unwrap();
+		assert!(futures::poll!(run.as_mut()).is_pending());
+
+		write_group(&mut track, 6, 6);
+		track.finish().unwrap();
+		run.await.unwrap();
+
+		let writes = log.writes.lock().unwrap();
+		let mut slice = writes.as_slice();
+		match lite::SubscribeResponse::decode(&mut slice, Version::Lite07) {
+			Ok(lite::SubscribeResponse::Start(start)) => assert_eq!(start.group, 6, "named the partial group"),
+			other => panic!("expected SUBSCRIBE_START, got {other:?}"),
+		}
+		match lite::SubscribeResponse::decode(&mut slice, Version::Lite07) {
+			Ok(lite::SubscribeResponse::End(end)) => assert_eq!(end.streams, 1, "served the partial group"),
+			other => panic!("expected SUBSCRIBE_END, got {other:?}"),
+		}
 	}
 
 	/// A track that ends without a group still ends the subscription, with no stream owed.
