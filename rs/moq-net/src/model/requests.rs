@@ -96,7 +96,9 @@ impl<K: Clone + Eq + Hash, V> Requests<K, V> {
 		K: Borrow<Q>,
 		Q: Eq + Hash + ?Sized,
 	{
-		self.pending.remove(key).map(|entry| entry.value)
+		let entry = self.pending.remove(key)?;
+		debug_assert!(!entry.queued, "remove of a queued request; take it instead");
+		Some(entry.value)
 	}
 
 	/// Remove and return the pending request for `key`, purging its queue entry
@@ -218,6 +220,20 @@ mod test {
 		assert_eq!(requests.remove_if(&1, |v| *v == "new"), Some("new"));
 		// Still queued, so the removal also purged its queue entry.
 		assert!(!requests.has_queued());
+	}
+
+	#[test]
+	fn take_after_pop_keeps_the_queue_order() {
+		let mut requests = Requests::<u64, &str>::default();
+		requests.add_handler();
+		for (key, value) in [(1, "a"), (2, "b"), (3, "c")] {
+			assert!(requests.insert(key, value).is_ok());
+		}
+		assert_eq!(requests.pop(), Some(1));
+		assert_eq!(requests.take(&1), Some("a"));
+		assert_eq!(requests.take(&2), Some("b"));
+		assert_eq!(requests.pop(), Some(3));
+		assert_eq!(requests.pop(), None);
 	}
 
 	#[test]

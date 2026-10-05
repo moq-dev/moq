@@ -2942,9 +2942,17 @@ impl group::Request {
 	/// Remove this attempt from the fetch state, unless a newer attempt for the same
 	/// sequence has already replaced it.
 	fn remove(&self) {
-		self.fetch
-			.lock()
-			.remove_if(&self.sequence, |pending| pending.result.same_channel(&self.result));
+		withdraw(&mut self.fetch.lock(), self.sequence, |pending| {
+			pending.result.same_channel(&self.result)
+		});
+	}
+}
+
+/// Remove the attempt for `sequence` if it is still `ours`. Reads first: the attempt is
+/// often already gone, and a write would wake every handler parked on the queue.
+fn withdraw(fetch: &mut kio::Mut<'_, FetchState>, sequence: u64, ours: impl Fn(&PendingFetch) -> bool + Copy) {
+	if fetch.get(&sequence).is_some_and(ours) {
+		fetch.remove_if(&sequence, ours);
 	}
 }
 
@@ -3015,11 +3023,10 @@ impl Drop for Fetching {
 		// rather than joining one its handler is about to drop.
 		let mut fetch = self.fetch.lock();
 		drop(outcome);
-		// Read before writing: the attempt is usually already resolved and gone, and a
-		// write would wake every handler parked on the queue for nothing.
-		let ours = |pending: &PendingFetch| pending.result.weak().same_channel(&attempt);
-		if !attempt.is_used() && fetch.get(&self.sequence).is_some_and(ours) {
-			fetch.remove_if(&self.sequence, ours);
+		if !attempt.is_used() {
+			withdraw(&mut fetch, self.sequence, |pending| {
+				pending.result.weak().same_channel(&attempt)
+			});
 		}
 	}
 }
