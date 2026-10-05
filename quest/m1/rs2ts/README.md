@@ -77,5 +77,4 @@ js/net it replaces, measured with the [browser benchmarks](/quest/m1/browser-ben
 
 ## Related
 
-- [#2850](/quest/m1/2850-js-net-give-reader-a-synchronous-decode-so-the-publisher.md) - caps hand-written js/net's subscription controls; generated lite replaces the rest
 - [Generated IETF](/quest/m2/rs2ts-ietf.md) - the IETF half, deferred to m2 until the lite go/no-go

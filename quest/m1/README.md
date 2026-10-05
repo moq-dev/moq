@@ -185,6 +185,5 @@ blocks. The quests that gated m0 lines moved under them.
 - [Kotlin JVM exit](/quest/m1/kt-jvm-exit.md) - a Kotlin/JVM program exits cleanly whatever the moq-ffi runtime thread is doing, like Python does since #3766
 - [Dart publish](/quest/m1/dart-publish.md) - a `moq-dart-v*` tag publishes `moq` to pub.dev unattended, as `moq_ffi`'s tags already do
 - [Dart codec parity](/quest/m1/dart-codecs.md) - Dart is the one binding that cannot originate media
-- [#2850](/quest/m1/2850-js-net-give-reader-a-synchronous-decode-so-the-publisher.md) - js/net caps the publisher's subscription controls so a flood cannot grow memory without bound
 - [`moq --listen` drain and stats](/quest/m1/cli-serve.md) - a listening CLI session, already admitted through the relay's auth, is counted and drained like a relay's
 - [#709](/quest/m1/709-automatic-letsencrypt-support.md) - the relay provisions and renews its own ACME certificate through rustls-acme over TLS-ALPN-01, persisted on disk
