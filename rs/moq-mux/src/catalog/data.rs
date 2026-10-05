@@ -80,19 +80,17 @@ impl Listing {
 		self.rendition.name()
 	}
 
-	/// Stamp a payload on the catalog's current clock, at its capture instant or else now. Also
-	/// returns the capture time, if there was one.
-	pub(crate) fn stamp<P>(
-		&mut self,
-		timed: moq_net::Timed<P, std::time::Instant>,
-	) -> crate::Result<(moq_net::Timed<P>, Option<moq_net::Timestamp>)> {
+	/// Stamp an untimed payload with the catalog's current clock reading, keeping a timed one as
+	/// given. Also returns the given time, if there was one.
+	pub(crate) fn stamp<P>(&mut self, timed: moq_net::Timed<P>) -> (moq_net::Timed<P>, Option<moq_net::Timestamp>) {
 		let clock = self.rendition.clock();
 		// A re-anchor moves this track's timeline, which measured across would read as jitter.
 		if clock.wall() != self.clock.wall() {
 			self.estimator.discontinuity();
 		}
 		self.clock = clock;
-		clock.stamp(timed)
+		let given = timed.at;
+		(timed.at(given.unwrap_or_else(|| clock.now())), given)
 	}
 
 	/// Measure a frame of `bytes` encoded bytes, just written, captured at `captured` on the
@@ -118,7 +116,11 @@ impl Listing {
 		// The spacing between writes is the application's cadence, not a flush delay, so only a
 		// capture time measures jitter and delay. Without one neither is advertised.
 		if let Some((captured, written)) = flush {
-			self.estimator.flush(captured, written);
+			// A source clock running slightly fast stamps ahead of now. Measured as given, its
+			// lateness would undercut every real flush and drag the broadcast's minimum down,
+			// inflating the delay of every other track. It was flushed no later than now, so it
+			// counts as zero delay.
+			self.estimator.flush(captured.min(now), written);
 		}
 		self.rendition.estimate(self.estimator.estimate())
 	}

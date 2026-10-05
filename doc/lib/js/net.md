@@ -117,7 +117,12 @@ are [hidden](/concept/moq-lite#hidden-broadcasts) unless `announced(scope, { hid
 
 An established connection's `await connection.close()` withdraws its
 announcements and waits up to one second for delivery before disconnecting.
-It rejects if delivery fails or times out, and closes the transport either way.
+On moq-lite it also waits for the requests it serves: a subscription to a
+finished track delivers its remaining groups, and on moq-lite-07 waits for the
+subscriber's FIN, which says it read the tail. A live track never ends on its
+own, so its subscription holds the close until the deadline.
+It rejects if an announcement withdrawal fails or the deadline passes, and
+closes the transport either way.
 Use `connection.abort()` for immediate shutdown. Reconnecting connection
 handles keep their synchronous `close()` disposal behavior. IETF drafts 14
 through 16 send their withdrawals without waiting.
@@ -126,3 +131,13 @@ Examples in
 [`js/net/examples/`](https://github.com/moq-dev/moq/tree/main/js/net/examples).
 Runs in the browser and, over WebSocket, in Node, Bun, and Deno; see
 [server-side](/lib/js/#server-side).
+
+## Subscriber demand
+
+Call `demand()` on a track producer or pending track request, a group producer,
+or a broadcast producer. The returned `Track.Demand`, `Group.Demand`, or
+`Broadcast.Demand` exposes a read-only `used` signal, `unused()`, and `closed`.
+A broadcast watches subscribers to its tracks; holding a broadcast consumer
+alone is not demand. A group's demand counts its mirror readers, preserving
+fetch coalescing: the shared download becomes unused only after every reader
+leaves. Demand handles cannot write or close the producer.

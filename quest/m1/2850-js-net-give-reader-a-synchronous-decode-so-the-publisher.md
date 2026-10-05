@@ -13,7 +13,12 @@ ahead of the serving loop so every buffered update applies before the next
 group pop. It keeps only the newest range for the loop, but the decoder runs
 on its own and calls `apply` for each update, so a peer can turn
 flow-controlled bytes into unbounded work and heap while the loop is stalled.
-First confirm what still grows on the current code, then cap the updates
+First confirm what still grows on the current code. The 2026-10-05 audit
+found the hole may already be closed: since #2820 `SubscriptionControls`
+coalesces to the newest update ("Coalescing bounds memory") and each `apply`
+is a single signal set, so per-update heap growth has no obvious source.
+Flood SUBSCRIBE_UPDATE during a stalled write and measure; if nothing grows,
+close #2850 and delete this quest instead. Otherwise cap the updates
 decoded between two drains by the loop and fail the session on overflow,
 matching Rust's refusal of malformed input. Test: a flood during a stalled
 write fails the session instead of growing.

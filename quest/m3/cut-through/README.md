@@ -74,6 +74,6 @@ stats field, which its quest documents inline.
 
 ## Related
 
-- [Unordered qmux](/quest/m2/p2p/unordered.md) - the same head-of-line problem on the data channel transport
+- [Unordered qmux](/quest/m3/p2p/unordered.md) - the same head-of-line problem on the data channel transport
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - orders streams; offset writes order ranges within one
 - [QoS](/quest/m1/qos/README.md) - the loss-delay counter follows its per-broadcast ingress row conventions

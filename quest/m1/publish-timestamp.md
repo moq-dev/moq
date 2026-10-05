@@ -21,19 +21,21 @@ removes every place that fills one in.
 
 Today `Timed.at: None` means "stamp when written": moq-json and moq-flate
 fill `Timestamp::now()` (moq-net's clock, not the broadcast's), and moq-mux's
-`Clock::stamp` fills the broadcast clock's `now()`. The FFI raw
+data producers fill the broadcast clock's `now()`. The FFI raw
 `MoqFrame.timestamp_us` and `MoqDatagram.timestamp_us` default to 0.
 
-- `moq_net::Timed<P, T>` keeps its name and its `at: Option<T>`; only the
-  meaning of `None` changes. The json/flate consumers return the same type
+- `moq_net::Timed` takes the shape [Typed
+  timedness](/quest/m1/typed-timedness.md) settles, without its clock
+  parameter `T`. Timedness is per track there (decided 2026-10-05), so an
+  untimed payload belongs on an untimed track, and one appended to a timed
+  track is refused. The json/flate consumers return the same type
   (see [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md)).
 - moq-json (snapshot, stream, and window, whose `push` always stamps now) and
   moq-flate producers take `Timed<_, Timestamp>` and write `None` as untimed.
 - moq-mux data producers already take `Timed<_, Timestamp>` on the broadcast
-  clock after [moq-mux data producers take a broadcast-clock timestamp](/quest/m1/mux-data-timestamp.md).
-  Here `None` stops meaning the clock's now and goes out untimed.
-  `Clock::stamp` is deleted. `catalog::data::Listing::record` samples `delay`
-  and `jitter` only for timed writes.
+  clock. Here `None` stops meaning the clock's now and goes out untimed.
+  `catalog::data::Listing::record` already samples `delay` and `jitter` only
+  for timed writes.
 - Publishers inside the repository (hang catalog snapshots, MSF, stats, room
   chat, examples) pass their clock's now explicitly.
 - moq-ffi: data producers take an optional timestamp in microseconds on the
@@ -51,16 +53,11 @@ fill `Timestamp::now()` (moq-net's clock, not the broadcast's), and moq-mux's
 - Docs: "stamped when written" in `doc/lib/rs/{moq-json,moq-flate}.md` and
   `rs/moq-net/src/model/timed.rs`, plus `doc/lib/{py,swift,kt,go,dart}`.
 
-The broadcast-clock input, requested by OneTooMany, was split out into
-[moq-mux data producers take a broadcast-clock timestamp](/quest/m1/mux-data-timestamp.md) (2026-10-02),
-because it needs neither blocker below.
-
 Public API: breaking. Wire: none here; absence on the wire lands
 with the untimed implementation quests.
 
 ## Required
 
-- [moq-mux data producers take a broadcast-clock timestamp](/quest/m1/mux-data-timestamp.md) - changes the same producers' input type first, so the two signature changes land in order
 - [JSON and flate namespaces](/quest/m1/ffi-shape/json.md) - moves the data producers this changes, so the two breaks land in order rather than colliding
 - [moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md) - the model must hold an untimed payload before producers stop filling in now; until lite-07 encodes absence, a lite encoder writes its send time, as producers effectively do today
 

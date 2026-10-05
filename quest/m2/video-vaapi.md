@@ -56,3 +56,7 @@ an NV12 DMA-BUF.
 Note what is already fine: a host with libva present but no usable VA driver
 already falls back cleanly, since `Encoder::new` returns `Err` and
 `backend::open` drops to openh264.
+
+## Related
+
+- [VA-API encodes an external Vulkan image](/quest/m2/vaapi-vulkan-import.md) - explicit-sync DMA-BUF input and render-node selection by device, H.264 only

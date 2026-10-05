@@ -53,8 +53,15 @@ decode, and the JS test should drive the software decoder.
 - The same rule in `moq export ts`. Decided (2026-10-01): the fixed-delay
   export (#4645) still sends a join's orphaned leading pictures, so 3 of 500
   frames on the open-GOP fixture decode after they present
-  (`dts-before-pts`). Trim them at tune-in from the same signal, and make
-  `just test ts --open-gop` pass under `--strict`.
+  (`dts-before-pts`). Trim them at tune-in from the same signal, on the
+  export's first group only, and make `just test ts --open-gop` pass under
+  `--strict`. Decided in the 2026-10-05 audit: the grader changes with it.
+  `test/ts/open-gop.py`'s decode-order check (a contiguous run of source
+  access units) and leading-pictures check, and the `test/ts/README.md` text
+  that says the round-trip must hand every leading picture on, both expect
+  every picture today; rewrite them to expect the first group's orphaned
+  leading pictures trimmed and every later group's kept. Rejected: dropping
+  this bullet and keeping the grader.
 - This quest owns the Rust non-continuous signal, which audio warmup and
   consumer warmup reuse rather than each adding one. Today
   `moq_mux::container::Consumer::poll_read` returns a bare frame, and
@@ -68,6 +75,10 @@ decode, and the JS test should drive the software decoder.
   that plays continuously, then latency-skips into a later open GOP, has that
   group's leading pictures trimmed too, so an implementation that only trims
   the initial group fails. Both cases in both languages.
+
+## Required
+
+- [Fixed-delay release](/quest/m1/tstd/delay.md) - the TS export this trims lands with #4645
 
 ## Related
 

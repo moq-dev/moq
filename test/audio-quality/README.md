@@ -87,8 +87,9 @@ on in nightly so a failing run preserves the inputs for diagnosis.
 
 To replay a capture, put its arrivals and final environment configuration into the version 2
 `Trace` below, subtract the first arrival's `at` from every arrival and from the last sample's
-`at` for the duration, and supply the observed minimum RTT. Replay holds that RTT and configuration
-constant; compare the raw samples when either changed during the live run. The observer only
+`at` for the duration, and supply the observed minimum RTT as a diagnostic. Replay measures the
+target from the arrivals and holds the configuration constant; compare the raw samples when it
+changed during the live run. The observer only
 records frames delivered under the player's maximum age, so a replay cannot recover groups the
 transport already discarded.
 
@@ -112,9 +113,9 @@ on the delay, so the replay decides those again.
 
 `replay.ts` plays a trace through the player's own `Container.Consumer` and rings on a simulated
 clock ([`js/watch/src/audio/replay.ts`](../../js/watch/src/audio/replay.ts)), at the "auto" delay a
-real `Sync` resolves for the recorded catalog and round trip, and reads each quantum through the
-tap's classifier. The consumer makes the player's group ordering, max age skips, and discontinuity
-resets again at that delay; a group's stream is taken to finish with its last recorded frame. Every
+real `Sync` resolves from the playout target that consumer measures, and reads each quantum through
+the tap's classifier. The consumer makes the player's group ordering, max age skips, and
+discontinuity resets again at that delay, and the ring follows the delay as it moves; a group's stream is taken to finish with its last recorded frame. Every
 frame is the trace's median spacing long, so a frame that never arrived stays missing audio, and
 rendering runs to the end of the observation, so an outage after the last arrival is heard. It
 writes the same samples a page does, so `analyze.ts` reduces both alike, and the shaper, transport,
