@@ -1272,9 +1272,8 @@ mod tests {
 	}
 
 	/// A fetch that starts partway through a group is refused rather than served.
-	/// Another instance at the same path encodes that group into different bytes,
-	/// so the tail this one would produce cannot continue the head a reader holds.
-	/// It is the relay's cue to give up on the group and move on to the next.
+	/// A fresh encode of that group need not match the bytes of the head a reader
+	/// holds, so its tail cannot continue it. The reader moves on to the next group.
 	#[tokio::test]
 	async fn a_mid_group_fetch_is_refused() {
 		let source = source_catalog(320, 240);
@@ -1336,9 +1335,9 @@ mod tests {
 		transcoder.abort();
 	}
 
-	/// Two transcoders fed the same source are one broadcast: the same catalog,
-	/// and groups that mirror the source's sequences and timestamps. That is what
-	/// lets a relay move a subscription between them at a group boundary.
+	/// Two transcoders fed the same source publish the same catalog, and groups
+	/// that mirror the source's sequences and timestamps rather than anything
+	/// numbered per instance.
 	#[tokio::test]
 	async fn two_instances_publish_the_same_broadcast() {
 		let source = source_broadcast(2, 5);

@@ -8,8 +8,8 @@
 //!   for group until the track goes `unused` again.
 //! - A fetch of a specific group (`requested_group`) fetches that same group
 //!   from the source and transcodes just that group with a fresh encoder. A
-//!   fetch that starts mid-group is refused: the frames are only valid after
-//!   the head this encoder produced.
+//!   fetch that starts mid-group is refused: a fresh encode's frames are only
+//!   valid after the head that same encode produced.
 //!
 //! Output groups mirror the source group sequence numbers 1:1, so a fetch for
 //! output group N maps to source group N and a player switching renditions
@@ -483,10 +483,10 @@ fn spawn_fetch(
 /// "the handler vanished" and hides the actual decode/encode/source failure from
 /// the waiting consumer.
 async fn fetch(rung: Rung, request: moq_net::group::Request) -> Result<(), Error> {
-	// Another instance encodes the same source group into different bytes, so a
-	// tail from this encoder cannot continue a head someone else produced. A
-	// partial group is not ours to serve; refuse it so the reader moves on to the
-	// next group boundary instead of decoding a splice.
+	// A fresh encode of this group need not match the bytes the reader's head
+	// came from (the live encoder, or an earlier fetch), so its tail cannot
+	// continue that head. Refuse it so the reader moves on to the next group
+	// boundary instead of decoding a splice.
 	if request.frame_start() != 0 {
 		tracing::debug!(
 			sequence = request.sequence(),
