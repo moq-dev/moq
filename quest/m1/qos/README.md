@@ -30,8 +30,8 @@ The counters and channels land here. The moq.pro (downstream) dashboard work,
 including the health badge, connection-health drill-down, and stream
 preflight, consumes them downstream.
 
-Decided (2026-09-28): the whole line targets `dev`, because its moq-stats
-changes break the published crate. Client stats left the line (2026-09-29)
+Decided (2026-09-28): the line's moq-stats changes break the published
+crate. Client stats left the line (2026-09-29)
 when media stats moved out of moq-stats onto hang tracks, which are additive
 on `main`.
 
@@ -44,9 +44,6 @@ on `main`.
   subscription records its last partial interval instead of losing it
 - [Lag dashboard](/quest/m1/qos/lag-dashboard.md) - the demo stats
   dashboard shows viewer lag percentiles and dropped media
-- [Starvation at frame granularity](/quest/m1/qos/starvation-frames.md) - the
-  acknowledged frontier moves at every frame boundary through `poll_acked`,
-  with a delivery-delay histogram for jitter
 - [Publisher timeliness](/quest/m1/qos/publisher-timeliness.md) - per
   broadcast, how late media arrives at the relay against the track's own
   clock, and whether timestamps stay monotonic
@@ -55,3 +52,5 @@ on `main`.
 
 - [Media stats](/quest/m1/stats/README.md) - publishers and viewers report
   their own media, transport, and playback health, the media half of a verdict
+- [Loss delay](/quest/m3/cut-through/loss-delay.md) - an ingress counter of
+  bytes a loss held back by at least one RTT, on the same rows

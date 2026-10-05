@@ -17,6 +17,7 @@ pub struct Client {
 	stats: stats::Session,
 	versions: Versions,
 	setup_path: Option<String>,
+	setup_authority: Option<String>,
 	cost: Option<u64>,
 	peer_hop: Option<crate::Hop>,
 }
@@ -79,6 +80,12 @@ impl Client {
 	/// versions with no in-band request path (lite 01-04).
 	pub fn with_path(mut self, path: impl Into<String>) -> Self {
 		self.setup_path = Some(path.into());
+		self
+	}
+
+	/// Set the URI authority to advertise in SETUP (moq-transport only)
+	pub fn with_authority(mut self, authority: impl Into<String>) -> Self {
+		self.setup_authority = Some(authority.into());
 		self
 	}
 
@@ -266,8 +273,10 @@ impl Client {
 					cost: self.cost,
 					version: draft,
 					path: self.setup_path.clone(),
+					authority: self.setup_authority.clone(),
 					peer_setup_stream: None,
 					peer_declared: None,
+					early_unis: Vec::new(),
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -341,8 +350,12 @@ impl Client {
 		if let Some(path) = &self.setup_path {
 			parameters.set_bytes(ietf::ParameterBytes::Path, path.clone().into_bytes());
 		}
+		if let Some(authority) = &self.setup_authority {
+			parameters.set_bytes(ietf::ParameterBytes::Authority, authority.clone().into_bytes());
+		}
 		ietf::solicit::into_setup(&mut parameters, ietf_encoding);
 		ietf::hidden::into_setup(&mut parameters, ietf_encoding);
+		ietf::active_count::into_setup(&mut parameters, ietf_encoding);
 		let parameters = parameters.encode_bytes(ietf_encoding)?;
 
 		let client = setup::Client {
@@ -393,6 +406,7 @@ impl Client {
 				let peer_declared = ietf::peer::Peer {
 					solicit: ietf::solicit::from_setup(&parameters, v)?,
 					hidden: ietf::hidden::from_setup(&parameters, v),
+					active_count: ietf::active_count::from_setup(&parameters, v),
 					..Default::default()
 				};
 
@@ -410,8 +424,10 @@ impl Client {
 					cost: self.cost,
 					version: v,
 					path: None,
+					authority: None,
 					peer_setup_stream: None,
 					peer_declared: Some(peer_declared),
+					early_unis: Vec::new(),
 				})?;
 				(None, crate::driver::Protocol::Ietf(protocol), goaway)
 			}
@@ -464,11 +480,17 @@ mod tests {
 	struct FakeSessionState {
 		protocol: Option<&'static str>,
 		control_stream: Mutex<Option<(FakeSendStream, FakeRecvStream)>>,
-		close_events: Mutex<Vec<(u32, String)>>,
-		closed: kio::Fan,
+		close_events: kio::Shared<Vec<(u32, String)>>,
 		control_writes: Arc<Mutex<Vec<u8>>>,
 		send_rate: Mutex<Option<u64>>,
 		bytes_sent: Mutex<Option<u64>>,
+	}
+
+	fn any_close(events: &kio::Ref<'_, Vec<(u32, String)>>) -> Poll<()> {
+		match events.is_empty() {
+			true => Poll::Pending,
+			false => Poll::Ready(()),
+		}
 	}
 
 	impl FakeSession {
@@ -481,8 +503,7 @@ mod tests {
 			let state = FakeSessionState {
 				protocol,
 				control_stream: Mutex::new(Some((send, recv))),
-				close_events: Mutex::new(Vec::new()),
-				closed: kio::Fan::default(),
+				close_events: kio::Shared::default(),
 				control_writes: writes,
 				send_rate: Mutex::new(None),
 				bytes_sent: Mutex::new(None),
@@ -506,14 +527,8 @@ mod tests {
 		}
 
 		async fn wait_for_first_close(&self) -> (u32, String) {
-			kio::wait(|waiter| {
-				self.state.closed.register(waiter);
-				match self.state.close_events.lock().unwrap().first().cloned() {
-					Some(close) => std::task::Poll::Ready(close),
-					None => std::task::Poll::Pending,
-				}
-			})
-			.await
+			let events = self.state.close_events.wait(any_close).await;
+			events[0].clone()
 		}
 	}
 
@@ -561,17 +576,12 @@ mod tests {
 		}
 
 		fn close(&mut self, code: u32, reason: &str) {
-			self.state.close_events.lock().unwrap().push((code, reason.to_string()));
-			self.state.closed.wake();
+			self.state.close_events.lock().push((code, reason.to_string()));
 		}
 
 		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
-			// Register before checking so a close racing this poll still wakes it.
-			self.state.closed.register(self.park.hold(cx));
-			match self.state.close_events.lock().unwrap().is_empty() {
-				false => Poll::Ready(FakeError),
-				true => Poll::Pending,
-			}
+			let _ = std::task::ready!(self.state.close_events.poll(self.park.hold(cx), any_close));
+			Poll::Ready(FakeError)
 		}
 
 		fn stats(&self) -> impl web_transport_trait::Stats {
@@ -610,7 +620,7 @@ mod tests {
 			Poll::Ready(Ok(buf.len()))
 		}
 
-		fn set_priority(&mut self, _order: u8) {}
+		fn set_priority(&mut self, _order: i32) {}
 
 		fn finish(&mut self) -> Result<(), Self::Error> {
 			Ok(())
@@ -739,6 +749,73 @@ mod tests {
 		.expect("connect failed");
 	}
 
+	/// A peer that never delivers its announce count cannot stall the live
+	/// marker past its session: dropping the session lands the source.
+	#[tokio::test(start_paused = true)]
+	async fn a_dead_session_does_not_hold_the_live_marker() {
+		let gate = kio::Producer::new(true);
+		let transport = crate::lite::test_transport::SinkSession::gated_bi(gate.consume())
+			.with_protocol(crate::version::ALPN_LITE_05);
+
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let client = Client::new()
+			.with_versions([Version::Lite(lite::Version::Lite05)].into())
+			.with_subscriber(origin.clone());
+		let (session, driver) = client
+			.connect(tokio::time::Instant::now().into_std(), transport)
+			.await
+			.expect("connect failed");
+
+		let mut announced = origin.consume().announced();
+		let mut next = std::pin::pin!(announced.next());
+		assert!(
+			tokio::time::timeout(std::time::Duration::from_secs(5), next.as_mut())
+				.await
+				.is_err(),
+			"live before the peer answered"
+		);
+
+		drop(driver);
+		drop(session);
+		assert!(matches!(next.await, Some(crate::announce::Event::Live)));
+	}
+
+	/// The client SETUP on the bidi control stream (the pre-draft-17 framing) carries the
+	/// AUTHORITY next to the PATH.
+	#[tokio::test(start_paused = true)]
+	async fn draft14_setup_carries_the_authority() {
+		let fake = FakeSession::new(Some(ALPN_LITE), mock_server_setup(Version::Lite(lite::Version::Lite01)));
+		let client = Client::new()
+			.with_versions(
+				[
+					Version::Lite(lite::Version::Lite01),
+					Version::Ietf(ietf::Version::Draft14),
+				]
+				.into(),
+			)
+			.with_path("/anon")
+			.with_authority("relay.example.com:4443");
+
+		let (_session, driver) = client
+			.connect(tokio::time::Instant::now().into_std(), fake.clone())
+			.await
+			.unwrap();
+		tokio::spawn(crate::time::run(driver));
+
+		let mut setup_bytes = Bytes::from(fake.control_writes());
+		let setup = setup::Client::decode(&mut setup_bytes, Version::Ietf(ietf::Version::Draft14)).unwrap();
+		let mut parameters = setup.parameters;
+		let parameters = ietf::Parameters::decode(&mut parameters, ietf::Version::Draft14).unwrap();
+		assert_eq!(
+			parameters.get_bytes(ietf::ParameterBytes::Authority),
+			Some(b"relay.example.com:4443".as_ref())
+		);
+		assert_eq!(
+			parameters.get_bytes(ietf::ParameterBytes::Path),
+			Some(b"/anon".as_ref())
+		);
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn alpn_lite_falls_back_to_draft14_and_switches_version_post_setup() {
 		run_alpn_lite_fallback_case(Some(ALPN_LITE)).await;
@@ -766,12 +843,9 @@ mod tests {
 		// The caller drops their only session clone; the machine observes the
 		// last handle going away and closes the transport.
 		drop(session);
-		assert!(fake.state.close_events.lock().unwrap().is_empty());
+		assert!(fake.state.close_events.read().is_empty());
 		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
-		assert_eq!(
-			fake.state.close_events.lock().unwrap()[0].0,
-			SessionError::Cancel.to_code()
-		);
+		assert_eq!(fake.state.close_events.read()[0].0, SessionError::Cancel.to_code());
 	}
 
 	// Clones share the connection: the transport closes on the LAST drop, and
@@ -788,16 +862,13 @@ mod tests {
 
 		// One clone dropping does nothing while another is alive.
 		drop(session);
-		assert!(fake.state.close_events.lock().unwrap().is_empty());
+		assert!(fake.state.close_events.read().is_empty());
 		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
-		assert!(fake.state.close_events.lock().unwrap().is_empty());
+		assert!(fake.state.close_events.read().is_empty());
 
 		clone.abort(Error::Cancel);
 		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
-		assert_eq!(
-			fake.state.close_events.lock().unwrap()[0].0,
-			SessionError::Cancel.to_code()
-		);
+		assert_eq!(fake.state.close_events.read()[0].0, SessionError::Cancel.to_code());
 
 		// And the machine publishes the transport's terminal error, which is
 		// what `closed()` reports.
@@ -805,10 +876,10 @@ mod tests {
 		futures::executor::block_on(clone.closed());
 
 		// The final drop requests no second close: the handle-side close is once.
-		let closes = fake.state.close_events.lock().unwrap().len();
+		let closes = fake.state.close_events.read().len();
 		drop(clone);
 		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
-		assert_eq!(fake.state.close_events.lock().unwrap().len(), closes);
+		assert_eq!(fake.state.close_events.read().len(), closes);
 	}
 
 	// Dropping the driver instead of running it tears the session
@@ -936,7 +1007,7 @@ mod tests {
 			self.inner.poll_write(cx, buf)
 		}
 
-		fn set_priority(&mut self, order: u8) {
+		fn set_priority(&mut self, order: i32) {
 			self.inner.set_priority(order);
 		}
 
@@ -991,10 +1062,7 @@ mod tests {
 
 		session.abort(Error::Cancel);
 		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
-		assert_eq!(
-			fake.state.close_events.lock().unwrap()[0].0,
-			SessionError::Cancel.to_code()
-		);
+		assert_eq!(fake.state.close_events.read()[0].0, SessionError::Cancel.to_code());
 	}
 
 	// The server-side twin: a `!Send` transport accepts a lite session whose
@@ -1014,12 +1082,9 @@ mod tests {
 		assert!(driver.poll(runtime.now(), &kio::Waiter::noop()).is_ok());
 
 		drop(session);
-		assert!(fake.state.close_events.lock().unwrap().is_empty());
+		assert!(fake.state.close_events.read().is_empty());
 		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
-		assert_eq!(
-			fake.state.close_events.lock().unwrap()[0].0,
-			SessionError::Cancel.to_code()
-		);
+		assert_eq!(fake.state.close_events.read()[0].0, SessionError::Cancel.to_code());
 	}
 
 	// The lite-only entry refuses everything that still needs the boxed ietf

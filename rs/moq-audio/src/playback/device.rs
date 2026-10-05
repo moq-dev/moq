@@ -11,10 +11,9 @@ use crate::Error;
 /// second choice.
 const RATES: &[u32] = &[48_000, 44_100];
 
-/// Channel counts to try, best first. The mixer produces stereo, and mono is
-/// the only other count worth naming: anything else is a surround layout we
-/// would be guessing the speaker order of.
-const CHANNELS: &[u16] = &[2, 1];
+/// The widest channel count with a well-known layout. Wider counts name no
+/// speaker positions to mix into, so they are never opened.
+const MAX_CHANNELS: u16 = 8;
 
 /// Sample formats we can write, best first: `f32` is what the mixer produces,
 /// and the rest are conversions on the way out.
@@ -129,16 +128,24 @@ pub(super) fn open(selector: Option<&str>) -> Result<cpal::Device, Error> {
 
 /// Pick the stream format to open `device` with.
 ///
-/// Only considers formats in [`FORMATS`], and prefers in that order: a channel
-/// count in [`CHANNELS`], a rate the pipeline already runs at, then a format we
-/// write without converting. Failing all of those it takes the highest rate the
-/// device supports, since resampling down is kinder than resampling up.
+/// Only considers formats in [`FORMATS`] and well-known layouts, and prefers in
+/// that order: the device's own channel count, the widest layout, a rate the
+/// pipeline already runs at, then a format we write without converting. Failing
+/// the rates it takes the highest the device supports, since resampling down is
+/// kinder than resampling up.
 pub(super) fn negotiate(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, Error> {
 	let supported = device
 		.supported_output_configs()
 		.map_err(|err| Error::Playback(format!("cannot enumerate output configs: {err}")))?;
 
-	choose(supported).ok_or_else(|| Error::Unsupported("output device offers no sample format we can write".into()))
+	// What the device is set up for: a 5.1 HDMI sink reports six channels and a
+	// headset two. Taken first because a sound server's plugin also accepts
+	// every count up to its limit, where the widest would upmix a headset.
+	let native = device.default_output_config().ok().map(|config| config.channels());
+
+	choose(supported, native).ok_or_else(|| {
+		Error::Unsupported("output device offers no sample format and speaker layout we can write".into())
+	})
 }
 
 /// Pick the best of the stream configurations a device reports.
@@ -146,10 +153,14 @@ pub(super) fn negotiate(device: &cpal::Device) -> Result<cpal::SupportedStreamCo
 /// Split out from [`negotiate`] so it can be tested without a device: the
 /// preference order is three levels deep and the outermost exists to fix an
 /// audible bug.
-fn choose(supported: impl Iterator<Item = cpal::SupportedStreamConfigRange>) -> Option<cpal::SupportedStreamConfig> {
+fn choose(
+	supported: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
+	native: Option<u16>,
+) -> Option<cpal::SupportedStreamConfig> {
 	supported
 		.filter(|config| FORMATS.contains(&config.sample_format()))
-		.min_by_key(preference)
+		.filter(|config| (1..=MAX_CHANNELS).contains(&config.channels()))
+		.min_by_key(|config| preference(config, native))
 		.map(|config| match preferred_rate(&config) {
 			Some(rate) => config.try_with_sample_rate(rate).expect("a rate the range covers"),
 			None => config.with_max_sample_rate(),
@@ -164,11 +175,11 @@ fn choose(supported: impl Iterator<Item = cpal::SupportedStreamConfigRange>) -> 
 /// and a pass per channel count that gave up when neither preferred rate matched
 /// would hand that to the mono device and downmix. The channel count leads
 /// because a downmix is audible where a resample is not.
-fn preference(config: &cpal::SupportedStreamConfigRange) -> (usize, usize, std::cmp::Reverse<u32>, usize) {
-	let channels = CHANNELS
-		.iter()
-		.position(|count| *count == config.channels())
-		.unwrap_or(CHANNELS.len());
+fn preference(
+	config: &cpal::SupportedStreamConfigRange,
+	native: Option<u16>,
+) -> ((bool, std::cmp::Reverse<u16>), usize, std::cmp::Reverse<u32>, usize) {
+	let channels = (native != Some(config.channels()), std::cmp::Reverse(config.channels()));
 	let rate = match preferred_rate(config) {
 		Some(rate) => (RATES.iter().position(|r| *r == rate).expect("from RATES"), rate),
 		// Nothing we asked for, so take the most the device offers: resampling
@@ -223,24 +234,60 @@ mod tests {
 	/// the way to a stereo sink.
 	#[test]
 	fn stereo_wins_even_when_the_device_lists_mono_first() {
-		let chosen = choose([range(1, 48_000, SampleFormat::F32), range(2, 48_000, SampleFormat::F32)].into_iter())
-			.expect("a config");
+		let chosen = choose(
+			[range(1, 48_000, SampleFormat::F32), range(2, 48_000, SampleFormat::F32)].into_iter(),
+			None,
+		)
+		.expect("a config");
 		assert_eq!(chosen.channels(), 2);
 	}
 
 	/// Preferring stereo must not refuse a device that has no stereo to offer.
 	#[test]
 	fn mono_is_taken_when_that_is_all_there_is() {
-		let chosen = choose([range(1, 48_000, SampleFormat::F32)].into_iter()).expect("a config");
+		let chosen = choose([range(1, 48_000, SampleFormat::F32)].into_iter(), None).expect("a config");
 		assert_eq!(chosen.channels(), 1);
 	}
 
-	/// Neither preferred count is offered, so the pass that accepts any count
-	/// has to catch it. Without it a surround-only sink would not open at all.
+	/// A surround-only sink opens at its own width rather than being refused.
 	#[test]
-	fn a_count_we_do_not_prefer_still_opens() {
-		let chosen = choose([range(6, 48_000, SampleFormat::F32)].into_iter()).expect("a config");
+	fn a_surround_only_device_opens() {
+		let chosen = choose([range(6, 48_000, SampleFormat::F32)].into_iter(), None).expect("a config");
 		assert_eq!(chosen.channels(), 6);
+	}
+
+	/// A 5.1 HDMI sink opens at six channels rather than being folded to stereo.
+	#[test]
+	fn six_channels_are_chosen_when_offered() {
+		let offered = || [range(2, 48_000, SampleFormat::F32), range(6, 48_000, SampleFormat::F32)].into_iter();
+		assert_eq!(choose(offered(), None).expect("a config").channels(), 6);
+		assert_eq!(choose(offered(), Some(6)).expect("a config").channels(), 6);
+	}
+
+	/// A sound server's plugin accepts every count up to its limit, so the
+	/// device's own count beats the widest: a headset stays at two rather than
+	/// being upmixed to 7.1 and folded back down by the server.
+	#[test]
+	fn the_native_count_beats_the_widest() {
+		let offered = (1..=8).map(|channels| range(channels, 48_000, SampleFormat::F32));
+		assert_eq!(choose(offered, Some(2)).expect("a config").channels(), 2);
+	}
+
+	/// Past 7.1 there is no convention naming the speakers, so there is nothing
+	/// to remix into.
+	#[test]
+	fn counts_without_a_layout_are_refused() {
+		assert!(choose([range(12, 48_000, SampleFormat::F32)].into_iter(), Some(12)).is_none());
+		let chosen = choose(
+			[
+				range(12, 48_000, SampleFormat::F32),
+				range(2, 48_000, SampleFormat::F32),
+			]
+			.into_iter(),
+			Some(12),
+		)
+		.expect("a config");
+		assert_eq!(chosen.channels(), 2);
 	}
 
 	/// Rate is preferred within a channel count, not across one: a stereo config
@@ -248,8 +295,11 @@ mod tests {
 	/// because resampling is inaudible and a downmix is not.
 	#[test]
 	fn channels_outrank_the_sample_rate() {
-		let chosen = choose([range(1, 48_000, SampleFormat::F32), range(2, 44_100, SampleFormat::F32)].into_iter())
-			.expect("a config");
+		let chosen = choose(
+			[range(1, 48_000, SampleFormat::F32), range(2, 44_100, SampleFormat::F32)].into_iter(),
+			None,
+		)
+		.expect("a config");
 		assert_eq!((chosen.channels(), chosen.sample_rate()), (2, 44_100));
 	}
 
@@ -257,8 +307,11 @@ mod tests {
 	/// produces rather than one that costs a conversion.
 	#[test]
 	fn f32_is_preferred_over_a_format_we_convert_to() {
-		let chosen = choose([range(2, 48_000, SampleFormat::I16), range(2, 48_000, SampleFormat::F32)].into_iter())
-			.expect("a config");
+		let chosen = choose(
+			[range(2, 48_000, SampleFormat::I16), range(2, 48_000, SampleFormat::F32)].into_iter(),
+			None,
+		)
+		.expect("a config");
 		assert_eq!(chosen.sample_format(), SampleFormat::F32);
 	}
 
@@ -266,8 +319,8 @@ mod tests {
 	/// stream that plays noise.
 	#[test]
 	fn a_device_we_cannot_write_to_is_rejected() {
-		assert!(choose([range(2, 48_000, SampleFormat::I8)].into_iter()).is_none());
-		assert!(choose(std::iter::empty()).is_none());
+		assert!(choose([range(2, 48_000, SampleFormat::I8)].into_iter(), None).is_none());
+		assert!(choose(std::iter::empty(), None).is_none());
 	}
 
 	/// Channels lead even when neither preferred rate is on offer.
@@ -278,8 +331,11 @@ mod tests {
 	/// downmix the whole preference exists to avoid.
 	#[test]
 	fn stereo_at_an_awkward_rate_beats_mono_at_a_preferred_one() {
-		let chosen = choose([range(1, 48_000, SampleFormat::F32), range(2, 96_000, SampleFormat::F32)].into_iter())
-			.expect("a config");
+		let chosen = choose(
+			[range(1, 48_000, SampleFormat::F32), range(2, 96_000, SampleFormat::F32)].into_iter(),
+			None,
+		)
+		.expect("a config");
 		assert_eq!((chosen.channels(), chosen.sample_rate()), (2, 96_000));
 	}
 
@@ -293,6 +349,7 @@ mod tests {
 				range(2, 96_000, SampleFormat::F32),
 			]
 			.into_iter(),
+			None,
 		)
 		.expect("a config");
 		assert_eq!((chosen.channels(), chosen.sample_rate()), (2, 96_000));
@@ -309,6 +366,7 @@ mod tests {
 				range(2, 32_000, SampleFormat::F32),
 			]
 			.into_iter(),
+			None,
 		)
 		.expect("a config");
 		assert_eq!(

@@ -114,12 +114,6 @@ impl Import {
 		self.track.name()
 	}
 
-	/// The lowest timestamp the track accepts next; see
-	/// [`Producer::floor`](crate::container::Producer::floor).
-	pub(crate) fn floor(&self, keyframe: bool) -> Option<moq_net::Timestamp> {
-		self.track.floor(keyframe)
-	}
-
 	/// A watch-only handle to this track's subscriber demand.
 	pub fn demand(&self) -> moq_net::track::Demand {
 		self.track.track().demand()
@@ -216,7 +210,7 @@ impl Import {
 			}
 
 			self.track.write(frame)?;
-			let demand = self.track.track().is_used();
+			let demand = self.track.demand().is_used();
 			self.catalog.on_frame(&mut self.track, demand)?;
 		}
 		Ok(())
@@ -230,7 +224,7 @@ impl Import {
 
 	/// Re-evaluate stall from source silence.
 	pub fn tick(&mut self) -> crate::Result<()> {
-		let demand = self.track.track().is_used();
+		let demand = self.track.demand().is_used();
 		self.catalog.tick(&mut self.track, demand)
 	}
 
@@ -241,7 +235,7 @@ impl Import {
 
 	/// Record the encode duration before publishing its frames so the catalog can report a stall.
 	pub fn observe_lag(&mut self, lag: std::time::Duration) -> crate::Result<()> {
-		let demand = self.track.track().is_used();
+		let demand = self.track.demand().is_used();
 		self.catalog.observe_lag(&mut self.track, demand, lag)
 	}
 }
@@ -273,6 +267,7 @@ fn config_from_avcc(avcc_bytes: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	});
 	config.coded_width = avcc.coded_width;
 	config.coded_height = avcc.coded_height;
+	config.framerate = avcc.sps.first().and_then(|sps| super::sps_framerate(sps));
 	config.description = Some(Bytes::copy_from_slice(avcc_bytes));
 	Ok(config)
 }
@@ -290,6 +285,7 @@ fn config_from_sps(sps_nal: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	});
 	config.coded_width = Some(sps.coded_width);
 	config.coded_height = Some(sps.coded_height);
+	config.framerate = super::sps_framerate(sps_nal);
 	Ok(config)
 }
 
@@ -323,6 +319,24 @@ mod tests {
 			.create_track(name, hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		(track, catalog)
+	}
+
+	/// Only a fixed-rate SPS states the frame rate; without `fixed_frame_rate_flag` its tick is a
+	/// ceiling, left for the catalog estimator to measure.
+	#[test]
+	fn config_takes_only_a_fixed_framerate() {
+		use crate::codec::h264::fixtures;
+
+		let fixed = super::super::build_avcc(
+			&[Bytes::from_static(fixtures::SPS_IPB)],
+			&[Bytes::from_static(fixtures::PPS)],
+		)
+		.unwrap();
+		assert_eq!(config(&fixed).unwrap().framerate, Some(25.0));
+
+		let mut inline = vec![0, 0, 0, 1];
+		inline.extend_from_slice(fixtures::SPS_IPB_VARIABLE);
+		assert_eq!(config(&inline).unwrap().framerate, None);
 	}
 
 	/// An avcC initializer resolves a config with the avcC stored as `description`.

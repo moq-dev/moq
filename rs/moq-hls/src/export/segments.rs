@@ -312,7 +312,7 @@ impl Producer {
 		Consumer {
 			state: self.state.consume(),
 			rendition,
-			position: Position::default(),
+			after: None,
 		}
 	}
 }
@@ -328,11 +328,14 @@ pub struct Segment {
 	pub duration: Duration,
 	/// Wall-clock start time, when the timeline advertises an anchor.
 	pub program_date_time: Option<SystemTime>,
-	/// The content timeline breaks before this segment (the source skipped or restarted), so a
-	/// recorder marks an `EXT-X-DISCONTINUITY` here. Every rendition marks the same breaks, as
-	/// HLS requires. Segments this cursor skipped (evicted, uncached, or gaps with no content
-	/// for this rendition) leave a hole on a continuous timeline, not a discontinuity.
-	pub discontinuity: bool,
+	/// The absolute timeline discontinuity sequence within this broadcaster.
+	///
+	/// Use the first retained segment's value as `EXT-X-DISCONTINUITY-SEQUENCE`, then write
+	/// `current - previous` `EXT-X-DISCONTINUITY` tags before each later segment; a skipped
+	/// epoch makes that more than one. Cursors share this sequence regardless of when
+	/// they start or which segments they skip. Recreating the broadcaster starts a new
+	/// namespace: start a new recording or map it into a recording-wide sequence.
+	pub discontinuity: u64,
 }
 
 /// A cursor over one rendition's segments, in timeline order.
@@ -343,33 +346,8 @@ pub struct Segment {
 pub struct Consumer {
 	state: kio::Consumer<State>,
 	rendition: Arc<Rendition>,
-	position: Position,
-}
-
-/// Where a [`Consumer`] is in the timeline. Only advanced once a segment is fetched or
-/// skipped, so a transient fetch error re-tries the same segment instead of losing it.
-#[derive(Default)]
-struct Position {
-	/// The number of the last segment passed; the cursor resumes strictly after it.
+	/// Last fetched or skipped segment; errors leave it unchanged so callers can retry.
 	after: Option<u64>,
-	/// The discontinuity sequence of the last segment passed.
-	discontinuity: Option<u64>,
-}
-
-impl Position {
-	/// Pass `row` without returning it. A skipped first row still sets the baseline, so a break
-	/// before this cursor's first fetch is reported, as a sibling that fetched it would.
-	fn skip(&mut self, row: &Row) {
-		self.after = Some(row.segment);
-		self.discontinuity.get_or_insert(row.discontinuity);
-	}
-
-	/// Pass `row` as returned, reporting whether it starts a new discontinuity.
-	fn emit(&mut self, row: &Row) -> bool {
-		self.after = Some(row.segment);
-		let previous = self.discontinuity.replace(row.discontinuity);
-		previous.is_some_and(|previous| previous != row.discontinuity)
-	}
 }
 
 impl Consumer {
@@ -390,29 +368,26 @@ impl Consumer {
 			let Some(row) = kio::wait(|waiter| self.poll_next(waiter)).await else {
 				return Ok(None);
 			};
-			match self.rendition.segment(row.segment).await? {
-				Some(media) => {
-					return Ok(Some(Segment {
-						segment: row.segment,
-						media,
-						duration: row.duration,
-						program_date_time: self.rendition.wall_clock(row.pts),
-						discontinuity: self.position.emit(&row),
-					}));
-				}
-				None => self.position.skip(&row),
+			let media = self.rendition.segment(row.segment).await?;
+			self.after = Some(row.segment);
+			if let Some(media) = media {
+				return Ok(Some(Segment {
+					segment: row.segment,
+					media,
+					duration: row.duration,
+					program_date_time: self.rendition.wall_clock(row.pts),
+					discontinuity: row.discontinuity,
+				}));
 			}
 		}
 	}
 
 	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<Option<Row>> {
-		let poll = self
-			.state
-			.poll(waiter, |state| match state.next_after(self.position.after) {
-				Next::Ready(row) => Poll::Ready(Some(row)),
-				Next::Ended => Poll::Ready(None),
-				Next::Pending => Poll::Pending,
-			});
+		let poll = self.state.poll(waiter, |state| match state.next_after(self.after) {
+			Next::Ready(row) => Poll::Ready(Some(row)),
+			Next::Ended => Poll::Ready(None),
+			Next::Pending => Poll::Pending,
+		});
 		match poll {
 			Poll::Ready(Ok(found)) => Poll::Ready(found),
 			// The producer closed without a clean end (broadcast dropped): no more segments.
@@ -514,27 +489,6 @@ mod tests {
 
 	fn secs(s: u64) -> Duration {
 		Duration::from_secs(s)
-	}
-
-	fn stamped(segment: u64, discontinuity: u64) -> Row {
-		Row {
-			discontinuity,
-			..row(segment, segment, segment * 2_000, 2_000)
-		}
-	}
-
-	#[test]
-	fn skipped_rows_do_not_hide_or_invent_breaks() {
-		// Skipping a row on a continuous timeline is a hole, not a discontinuity.
-		let mut position = Position::default();
-		assert!(!position.emit(&stamped(0, 0)), "a clean start");
-		position.skip(&stamped(1, 0));
-		assert!(!position.emit(&stamped(2, 0)));
-
-		// A break before the first fetch still counts: a sibling that fetched row 0 marks row 1.
-		let mut position = Position::default();
-		position.skip(&stamped(0, 0));
-		assert!(position.emit(&stamped(1, 1)));
 	}
 
 	#[test]

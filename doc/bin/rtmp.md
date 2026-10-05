@@ -29,6 +29,11 @@ the [`moq-rtmp`](https://docs.rs/moq-rtmp) library, which hands you each
 publish or play request to accept, map to a path, or reject. The CLI listener
 is unauthenticated; firewall it.
 
+Each push is its own broadcast. Import publishes the encoder's own timestamps
+and anchors the catalog clock on the first frame, so it names the wall time the
+push arrived. A group starting before the previous group's start, such as an
+encoder restarting its timestamps mid-push, ends that push with an error.
+
 A player that advertises enhanced-RTMP multitrack receives every rendition.
 Any other player receives one video rendition: the largest picture (then
 highest bitrate) in a codec it advertised. A push carries the largest one.
@@ -41,3 +46,27 @@ can arrive unencrypted. The embedder can set `plaintext` to `false` to serve
 is logged with the peer address. Refusing plaintext without a TLS config fails
 at startup. FLAC and MP3 enhanced-audio payloads are dropped because hang has no
 catalog codec for them.
+
+Incoming chunk streams are reassembled independently, including interleaved
+control, audio, and video messages. Each connection retains at most 256 chunk
+stream IDs, including completed streams' header history needed by compressed
+headers. Reusing an ID does not consume another slot; the connection releases
+all slots on teardown. A 257th distinct ID is refused, even if its numeric ID is
+small. The limit counts streams rather than constraining their numeric IDs.
+
+Incomplete messages reserve their declared payload lengths against a 64 MiB
+connection budget before allocation. Completion or an RTMP Abort releases that reservation;
+malformed input or exhaustion closes the connection and releases its parser
+state. The 24-bit RTMP message length still allows a payload up to 16 MiB minus
+one byte. Four maximal payloads fit, with exactly four bytes remaining.
+
+These internal limits leave room for the gateway's five chunk-stream roles
+and [FFmpeg's fixed control/audio/video channels](https://github.com/FFmpeg/FFmpeg/blob/master/libavformat/rtmppkt.h)
+as well as [OBS's control and media channels](https://github.com/obsproject/obs-studio/blob/master/plugins/obs-outputs/librtmp/rtmp.c).
+They bound retained state independently of chunk size and retain support for
+large keyframes. Undecoded input has a separate 64 MiB buffer limit.
+Connections exceeding these limits are unsupported.
+
+Run `just rs bench-rtmp` to compare decoding one active stream while 1, 16, 64,
+or 256 streams retain state, across 128-byte, 4 KiB, and 64 KiB messages with
+128-byte and 4 KiB chunks. The benchmark smoke runs nightly.

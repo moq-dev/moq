@@ -363,7 +363,7 @@ impl Producer {
 	/// "Reconfigured" means the media itself changed (see [`Rendition::matches_video`]). A
 	/// rendition whose entry only carries a revised estimate is kept as-is and just takes the
 	/// new advertised bitrate, since the publisher republishes the catalog every time its
-	/// measured bitrate or jitter moves.
+	/// measured bitrate, jitter, or framerate moves.
 	///
 	/// Renditions are only servable when the catalog advertises the broadcast's timeline (its
 	/// root `archive` entry): without one there is nothing to render playlists from, so the
@@ -416,8 +416,8 @@ impl Producer {
 			let key = (Kind::Video, name.clone());
 			if let Some(rendition) = current.get(&key) {
 				// Survived the stale pass, so it decodes the same: keep its window, its cached
-				// init segment and its media sequence, and just take the new advertised bitrate.
-				rendition.refresh(video.bitrate);
+				// init segment and its media sequence, and just take the new bitrate and framerate.
+				rendition.refresh(video.bitrate, video.framerate);
 				continue;
 			}
 			let rendition = match Rendition::video(name.clone(), video, upstream, section.clone(), clock) {
@@ -433,7 +433,7 @@ impl Producer {
 		for (name, audio) in &catalog.audio.renditions {
 			let key = (Kind::Audio, name.clone());
 			if let Some(rendition) = current.get(&key) {
-				rendition.refresh(audio.bitrate);
+				rendition.refresh(audio.bitrate, None);
 				continue;
 			}
 			let rendition = match Rendition::audio(name.clone(), audio, upstream, section.clone(), clock) {

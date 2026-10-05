@@ -20,10 +20,10 @@ landed on main; the line may still reshape both.
 ### Compatibility
 
 Decided (2026-09-28): the line may break the hang `archive` catalog entry and
-the recording format in place on `main`, without a version bump or a `dev`
-detour (for example the track-timeline rework in #4280). No archives exist
+the recording format in place on `main`, without a version bump
+(for example the track-timeline rework in #4280). No archives exist
 yet, so nothing recorded or published depends on either shape. This is an
-exception to the main/dev rule for this line only; once a release ships
+exception for this line only; once a release ships
 recordings, later format changes go through the entry's format version.
 
 ### Landed
@@ -146,8 +146,7 @@ owned by that prerequisite, not duplicated in archive storage.
 - [Per-track timelines](/quest/m1/archive/track-timeline/README.md) - every track segments and expires on its own timeline, and HLS is derived from group timestamps at the edge
 - [Replay catalog](/quest/m1/archive/replay-catalog.md) - `moq import archive` publishes the recorded catalog live with `store` set, so stock `moq export hls` serves the whole replay
 - [Idle flush](/quest/m1/archive/flush.md) - idle tracks are recorded within a bounded wall-clock delay, and `flush()` forces a track's pending record out
-- [Paced replay](/quest/m1/archive/paced-replay.md) - a replay pushes its groups to live subscribers on one shared clock, so any live player plays it
-- [Browser archive](/quest/m1/archive/browser.md) - the same contract for browser-published broadcasts
+- [Backward timestamps](/quest/m1/archive/backward-timestamps.md) - a resumed recording refuses a track whose timestamps go backward past the recovered timeline
 - [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback
 
 ## Related

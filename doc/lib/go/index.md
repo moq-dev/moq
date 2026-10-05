@@ -18,6 +18,8 @@ go get moq.dev/moq@latest
 ```
 
 ```go
+import "fmt"
+import "log"
 import "moq.dev/moq"
 
 // Subscribe. The iterator is live, so run it in its own goroutine.
@@ -32,14 +34,18 @@ announced, err := client.Announced(moq.AnnounceOptions{Prefix: "live/", Filter: 
 if err != nil {
     log.Fatal(err)
 }
-for ann, err := range announced.All(ctx) {
+for event, err := range announced.All(ctx) {
     if err != nil {
         if moq.IsShutdown(err) { break }
         log.Fatal(err)
     }
-    // Updates stay origin-relative; Captures reports what each wildcard matched.
-    fmt.Printf("captures: %v\n", ann.Captures())
-    broadcast, err := client.RequestBroadcast(ctx, ann.Prefix())
+    ann, ok := event.(moq.AnnounceEventStart)
+    if !ok {
+        continue // AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventLive
+    }
+    // Prefix stays origin-relative; Captures reports what each wildcard matched.
+    fmt.Printf("captures: %v\n", ann.Announce.Captures)
+    broadcast, err := client.RequestBroadcast(ctx, ann.Announce.Prefix)
     if err != nil {
         log.Fatal(err)
     }
@@ -66,6 +72,8 @@ video, _ := broadcast.EncodeVideo(
 )
 _ = video.Write(moq.VideoFrame{TimestampUs: pts, Data: rgba})
 _ = broadcast.Announce(moq.Route{})
+_ = audio.Finish()
+_ = video.Finish()
 broadcast.Close()    // keep the producer reachable while publishing, then close explicitly
 ```
 
@@ -77,12 +85,16 @@ The three advertising operations: `client.CreateBroadcast(path)` (or
 `origin.CreateBroadcast`) returns an unannounced producer, invisible to everyone;
 `broadcast.Announce(route)` / `broadcast.Unannounce()` own that exact-path
 advertisement, and `broadcast.Close()` ends the broadcast for good (a second
-call is a no-op; `Finish` is its deprecated alias); `origin.Dynamic(prefix, route)` claims `prefix` and every
+call is a no-op); `origin.Dynamic(prefix, route)` claims `prefix` and every
 path beneath it (`""` for everything). Hold the returned `OriginDynamic`
 while the claim should stay advertised, and reject the requests you will not
 serve. A route is a capability, not an inventory. `Announced(options)` combines
-a literal prefix with an optional relative pattern; `ann.Prefix()` stays
-relative to the origin and `ann.Captures()` reports the wildcard matches.
+a literal prefix with an optional relative pattern and yields an `AnnounceEvent`:
+`AnnounceEventStart`, `AnnounceEventUpdate`, or `AnnounceEventEnd`
+carrying an `Announce`, whose `Prefix` stays relative to the origin and whose
+`Captures` reports the wildcard matches, or `AnnounceEventLive` once every route
+live at subscribe time has been delivered. Break on `AnnounceEventLive` to list
+what is live and stop.
 Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless
 `Hidden: true`.
 
@@ -124,11 +136,27 @@ one: `FetchGroup`/`FetchMediaGroup`, `Dynamic()` with `Requests(ctx)`,
 `AppendDatagram`/`Datagrams(ctx)`, `SetCatalogSection`, `Demand()` for `Used`/`Unused`,
 `Session().Stats()`. `moq.IsAuthError` and `moq.IsShutdown` classify errors. `moq.ProtocolError(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one. `err.Error()` is the Rust error message.
 
-`DecodeVideo` picks the decoded CPU pixel layout: `VideoDecoderOutput.Format`
-is I420 when nil, or `VideoPixelFormatRgba` for four bytes a pixel, and every
-`VideoDecodedFrame` repeats the layout it was decoded to. `Resize` is best
-effort: only NVDEC has a built-in scaler, so read each frame's own `Width` and
-`Height` rather than assuming it took.
+`EncodeAudio` encodes raw PCM inside the binding. Its codec is `OpusAudioCodec()`
+or `AacAudioCodec()`, and `AudioEncoderOutput.FrameDurationUs` sets the Opus
+frame length: 2500, 5000, 10000, 20000 (the default), 40000, or 60000. 0 takes
+the codec's own frame, which AAC needs. AAC-LC encodes through the platform's
+encoder, so a host without one refuses it.
+
+Audio `Channels` also names the speaker layout, by the WAVE convention: 1 is
+mono, 2 stereo, 3 2.1, 4 quad, 5 5.0, 6 5.1, 7 6.1, and 8 7.1, interleaved
+front left, front right, center, LFE, back, then side. Decoding remixes to the
+count you ask for; past 8 channels the samples pass through but can't be
+remixed.
+
+Each `VideoDecodedFrame` from `DecodeVideo` owns its decoded picture until
+`Close`, including after the consumer is cancelled. `Pixels(format)` converts it
+on demand: `VideoPixelFormatI420`, or `VideoPixelFormatRgba` for four bytes a
+pixel. Close frames promptly, since held frames hold decoder buffers. `Resize`
+is best effort: only NVDEC has a built-in scaler, so read each frame's own
+`Width()` and `Height()` rather than assuming it took. `VideoDecoderOutput{Surface: true}`
+keeps the decoder's surface for `frame.Surface()` instead of downloading it: a
+`VideoSurfacePixelBuffer` whose `Pointer` is the `CVPixelBufferRef`, valid until
+`Close`. Only macOS has one, so `DecodeVideo` fails with `ErrUnsupported` elsewhere.
 
 ## Connection stats
 
@@ -152,3 +180,7 @@ available, which is not the same as zero.
 - API reference: [pkg.go.dev/moq.dev/moq](https://pkg.go.dev/moq.dev/moq)
 - Source: [`go/`](https://github.com/moq-dev/moq/tree/main/go); `just go check` builds and tests locally
 - Mirrors the vanity path resolves to: [moq-dev/moq-go](https://github.com/moq-dev/moq-go) (wrapper), [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) (raw bindings and static libraries)
+
+Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).
+
+`session.Shutdown(ctx)` drains finished tracks and returns a delivery error if the one-second deadline expires. Cancelling the context aborts immediately. `client.Close()` waits for shutdown and returns the same error; `session.Cancel(code)` remains immediate. Finish or abort live tracks before shutdown. IETF media streams are not drained yet.

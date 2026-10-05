@@ -10,7 +10,7 @@ description: Async sequences for iOS and macOS via the Moq package
 The `Moq` Swift package: de-prefixed types, `AsyncSequence` on every
 consumer, `Sendable` handles, and `Task` cancellation that reaches the native
 side. It depends on `MoqFFI`, which ships a prebuilt XCFramework with arm64
-slices for iOS 15+, the iOS Simulator, and macOS 12.3+.
+slices for iOS 16+, the iOS Simulator, and macOS 12.3+.
 
 ```swift ignore
 dependencies: [
@@ -28,8 +28,9 @@ import Moq
 let client = Client()
 let session = try await client.connect(to: "https://relay.example.com")
 
-for try await announcement in try session.consume.announced(prefix: "live/", filter: "*/camera") {
-    // Updates stay origin-relative; captures reports what each wildcard matched.
+for try await event in try session.consume.announced(prefix: "live/", filter: "*/camera") {
+    guard case .start(let announcement) = event else { continue } // .update, .end, or .live
+    // Prefixes stay origin-relative; captures reports what each wildcard matched.
     print(announcement.captures ?? [])
     let broadcast = try await session.consume.requestBroadcast(path: announcement.prefix)
     for try await catalog in try await broadcast.subscribeCatalog() {
@@ -51,8 +52,11 @@ let video = try broadcast.encodeVideo(
 )
 try video.write(VideoFrame(timestampUs: pts, data: rgba))
 try broadcast.announce()
+try audio.finish()
+try video.finish()
+try broadcast.close()
 
-session.shutdown()
+try await session.shutdown()
 ```
 
 For already-encoded live output, call `audio.flush(timestampUs:)` after `writeFrame` with the same broadcast-clock PTS. It measures catalog jitter at the transport handoff. File, pipe, and network imports should omit `flush`; built-in encoders observe their own output.
@@ -62,14 +66,15 @@ Call `audio.discontinuity()` when the source seeks, pauses, or changes its time 
 The three advertising operations: `session.publish.createBroadcast(path:)`
 returns an unannounced producer, invisible to everyone; `broadcast.announce(route:)` /
 `broadcast.unannounce()` own that exact-path advertisement, and
-`broadcast.close()` ends the broadcast for good (a second call is a no-op;
-`finish()` is its deprecated alias);
+`broadcast.close()` ends the broadcast for good (a second call is a no-op);
 `session.publish.dynamic(prefix:route:)` claims `prefix` and every path
 beneath it (`""` for everything). Hold the returned `OriginDynamic` while the
 claim should stay advertised, and reject the requests you will not serve. A
 route is a capability, not an inventory. `announced(prefix:filter:)` combines a
-literal root with an optional relative pattern; `announcement.prefix` stays
-relative to the origin and `captures` reports what the wildcards matched.
+literal root with an optional relative pattern and yields `AnnounceEvent`s:
+`.start`, `.update`, or `.end` carrying an `Announce`, whose `prefix`
+stays relative to the origin and whose `captures` reports what the wildcards
+matched, or `.live` once every route live at subscribe time has been delivered.
 Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless
 `hidden: true`.
 
@@ -100,14 +105,26 @@ divides the connection's send estimate; pass it to `encodeVideo` /
 the Rust error message.
 
 `encodeAudio` encodes raw PCM inside the binding. Its codec is an object,
-`AudioCodec.opus()`, and `AudioEncoderOutput.frameDurationUs` sets the Opus
-frame length: 2500, 5000, 10000, 20000 (the default), 40000, or 60000.
+`AudioCodec.opus()` or `AudioCodec.aac()`, and
+`AudioEncoderOutput.frameDurationUs` sets the Opus frame length: 2500, 5000,
+10000, 20000 (the default), 40000, or 60000. 0 takes the codec's own frame,
+which AAC needs. AAC-LC encodes through the platform's encoder, so a host
+without one refuses it.
 
-`decodeVideo` picks the decoded CPU pixel layout: `VideoDecoderOutput.format`
-is `.i420` when unset, or `.rgba` for four bytes a pixel, and every frame
-repeats the layout it was decoded to. `resize` is best effort: only NVDEC has a
-built-in scaler, and VideoToolbox is not it, so read each frame's own `width`
-and `height` rather than assuming it took.
+Audio `channels` also names the speaker layout, by the WAVE convention: 1 is
+mono, 2 stereo, 3 2.1, 4 quad, 5 5.0, 6 5.1, 7 6.1, and 8 7.1, interleaved
+front left, front right, center, LFE, back, then side. Decoding remixes to the
+count you ask for; past 8 channels the samples pass through but can't be
+remixed.
+
+Each frame from `decodeVideo` owns its decoded picture until it is released,
+including after the consumer is cancelled. `frame.pixels(format:)` converts it
+on demand: `.i420`, or `.rgba` for four bytes a pixel. Release frames promptly,
+since held frames hold decoder buffers. `resize` is best effort: only NVDEC has
+a built-in scaler, and VideoToolbox is not it, so read each frame's own
+`width()` and `height()` rather than assuming it took. `VideoDecoderOutput(surface: true)`
+keeps the decoder's surface for `frame.surface()` instead of downloading it. Only macOS
+has one, so `decodeVideo` fails as unsupported elsewhere.
 
 ## Connection stats
 
@@ -131,3 +148,7 @@ not the same as zero.
 - API reference: [Swift Package Index (DocC)](https://swiftpackageindex.com/moq-dev/moq-swift/documentation/moq)
 - Source: [`swift/`](https://github.com/moq-dev/moq/tree/main/swift); `just swift check` builds and tests on a Mac
 - Packages SPM resolves: [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift), [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi)
+
+Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).
+
+Use `try await session.shutdown()` to drain finished tracks before disconnecting. It throws if delivery has not completed within one second. `session.cancel(code: 0)` remains immediate. Finish or abort live tracks before shutdown. IETF media streams are not drained yet.

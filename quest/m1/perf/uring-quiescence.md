@@ -15,8 +15,8 @@ exhaustion, or to a quantum, before touching the ring.
 
 ## Plan
 
-Branch from dev: `kio`'s `Tasks::poll` changed only there (#4156 merged
-`Pollable` into `Task`), and the pass budget builds on that version. Keep the fairness the one-pass rule protects: a forward wake
+The pass budget builds on `kio`'s current `Tasks::poll` (#4156 merged
+`Pollable` into `Task`). Keep the fairness the one-pass rule protects: a forward wake
 chain must not starve the caller's other arms, and one connection's backlog
 must not starve the socket.
 
@@ -29,11 +29,17 @@ must not starve the socket.
   dispatch, then tasks to quiescence, then submit or park. That removes the
   stale first pass a park-returning turn runs today (worker.rs:180 polls on
   readiness the previous turn already consumed).
-- The egress driver's one-train-then-self-wake shape
-  (rs/moq-uring/src/quic/noq/connection.rs:743-751) interacts with the
-  budget: a deep backlog would consume every pass. Fold the
-  [egress requeue](/quest/m1/perf/egress-requeue.md) train budget into the
-  same sweep so trains per turn and passes per turn are measured together.
+- The egress driver stages one GSO train of `TRAIN_SEGMENTS = 63` segments
+  per turn and then wakes itself (`Driver::flush`,
+  rs/moq-uring/src/quic/noq/connection.rs:743-751), so a deep backlog pays a
+  whole turn per train and would consume every pass. That cadence is a
+  hardcoded fairness choice across connections sharing a socket. Make it a
+  trains-per-turn budget on `flush` and sweep 1, 2, and 4 together with the
+  pass budget, under the fanout and single-heavy-connection shapes, so trains
+  per turn and passes per turn are measured together. A no-win keeps 1 train.
+  The #3120 numbers are the deleted quiche driver's; re-profile on noq.
+  Decided in the 2026-09-30 audit: the egress requeue quest merged here, since
+  both budgets need the same sweep.
 - Add `passes` per turn to the metrics beside `turns`.
 
 Acceptance: turns and enters per received datagram on the chat shape
@@ -45,8 +51,3 @@ meaning with a budget of 1 and gains a sibling proving the budget bound.
 
 - [One enter per turn](/quest/m1/perf/uring-one-enter.md) - the metrics and
   the submit placement this sweep is measured with
-
-## Related
-
-- [Egress requeue](/quest/m1/perf/egress-requeue.md) - the train budget
-  measured in the same sweep

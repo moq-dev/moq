@@ -27,8 +27,9 @@ const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 // The cache scans at most this many times per retention window.
 const PRUNE_SLICES = 8;
 
-/** Default {@link Info.maxAge} window (milliseconds) when the publisher does not set one. */
-export const DEFAULT_MAX_AGE_MS = Milli(5000);
+// The higher-first midpoint. IETF flips priority (lower first), so this goes out as 128, the
+// draft's usual publisher priority, while moq-lite carries 127 as written: one urgency on both.
+const DEFAULT_PRIORITY = 127;
 
 /** Maximum buffered datagrams per subscriber; mirrors Rust's bounded send buffer. */
 const MAX_DATAGRAMS = 64;
@@ -65,12 +66,13 @@ export interface Info {
 	/**
 	 * Publisher Max Age: the maximum age (milliseconds) of a non-latest group before
 	 * the publisher evicts it. Reported in TRACK_INFO (Lite05+) so relays re-serve with the
-	 * same bound. The publisher-side half of the budget a subscriber sets for itself.
+	 * same bound. Omission sets no publisher limit; zero keeps only the live edge.
+	 * The publisher-side half of the budget a subscriber sets for itself.
 	 * Rounded up to a whole millisecond by {@link infoDefaults}, which refuses a negative
 	 * or non-finite value and a result past `Number.MAX_SAFE_INTEGER`.
 	 */
-	maxAge: Milli;
-	/** Tie-break priority between subscriptions of equal subscriber priority (`0..=255`). */
+	maxAge?: Milli;
+	/** Tie-break priority between subscriptions of equal subscriber priority (`0..=255`, higher first). Defaults to `127`. */
 	priority: number;
 }
 
@@ -102,8 +104,8 @@ function priorityByte(value: number): number {
 export function infoDefaults(info: Partial<Info> = {}): Info {
 	return {
 		timescale: Timescale(info.timescale ?? Timescale.MILLI),
-		maxAge: maxAgeMillis(info.maxAge ?? DEFAULT_MAX_AGE_MS),
-		priority: priorityByte(info.priority ?? 0),
+		maxAge: info.maxAge === undefined ? undefined : maxAgeMillis(info.maxAge),
+		priority: priorityByte(info.priority ?? DEFAULT_PRIORITY),
 	};
 }
 
@@ -243,6 +245,14 @@ export class Request {
 export interface FetchGroupOptions {
 	/** Delivery priority for the fetch stream. Defaults to `0`. */
 	priority?: number;
+
+	/**
+	 * Abandons this fetch, rejecting with the signal's reason. Concurrent fetches of the same
+	 * group share one stream, cancelled only once every caller has left. An already-aborted
+	 * signal rejects before anything is sent, and aborting after the group resolves has no
+	 * effect; close the group instead.
+	 */
+	signal?: AbortSignal;
 }
 
 /**
@@ -330,6 +340,8 @@ class TrackState {
 	/** Best-effort datagram channel, parallel to {@link groups}; a bounded send buffer per subscriber. */
 	datagrams = new Signal<Datagram[]>([]);
 	latest?: number;
+	// One past the highest group or datagram received, including evicted content.
+	received = new Signal(0);
 	/**
 	 * The exclusive final boundary, declared by {@link Producer.finishAt} or stamped by a
 	 * clean close as one past the highest sequence produced. Groups and datagrams share the
@@ -401,6 +413,57 @@ let ordered_: {
 	recvDatagram(subscriber: Subscriber): Promise<Datagram | undefined>;
 };
 
+// Constructs a Demand from within this module; assigned in the class's static block.
+let makeDemand: (name: string, used: Getter<boolean>, state: TrackState) => Demand;
+
+/**
+ * A watch-only view of a track's subscriber demand, from {@link Producer.demand}. Mirrors the
+ * Rust `Demand`.
+ *
+ * Lets a publisher gate work (on-demand capture or encoding) on whether anyone is subscribed,
+ * without the ability to write groups or close the track. The consumer wire watches it to tear an
+ * idle upstream subscription down instead of downloading to nobody.
+ */
+export class Demand {
+	/** The track name. */
+	readonly name: string;
+
+	#used: Getter<boolean>;
+	#state: TrackState;
+
+	private constructor(name: string, used: Getter<boolean>, state: TrackState) {
+		this.name = name;
+		this.#used = used;
+		this.#state = state;
+	}
+
+	static {
+		makeDemand = (name, used, state) => new Demand(name, used, state);
+	}
+
+	/** Whether the track currently has any subscribers. Watch it (`effect.get` / `.peek()`) to follow demand. */
+	get used(): Getter<boolean> {
+		return this.#used;
+	}
+
+	/** Resolves once the track has no subscribers (or has closed). Await it to react to demand ending. */
+	async unused(): Promise<void> {
+		while (this.#used.peek() && this.#state.closed.peek() === undefined) {
+			await Signal.race(this.#used, this.#state.closed);
+		}
+	}
+
+	/** Settles once the track closes: `null` on a clean close, or the abort {@link Error}. */
+	get closed(): GetPromise<Error | null> {
+		return this.#state.closed;
+	}
+
+	/** Publisher priority from the committed {@link Info}, or 0 before {@link Request.accept}. */
+	get priority(): number {
+		return this.#state.info.peek()?.priority ?? 0;
+	}
+}
+
 // Constructs a Subscriber from within this module without exposing a public
 // constructor that would leak the unexported TrackState. Assigned in the class's
 // static block.
@@ -450,12 +513,13 @@ export class Producer {
 	// One independent downstream state per live subscriber.
 	#sinks = new Set<TrackState>();
 
-	// Whether any subscriber is currently attached. Exposed as {@link used}; the consumer wire
-	// watches it to tear down an idle upstream, and a publisher can watch it for on-demand capture.
+	// Whether any subscriber is currently attached, watched through {@link demand}.
 	#used = new Signal<boolean>(false);
+	#demand: Demand;
 
 	constructor(name: string) {
 		this.name = name;
+		this.#demand = makeDemand(name, this.#used, this.#state);
 	}
 
 	static {
@@ -473,13 +537,13 @@ export class Producer {
 	}
 
 	/**
-	 * Publisher priority from the committed {@link Info}, or 0 before {@link accept}.
+	 * Publisher priority from the committed {@link Info}, or the default before {@link accept}.
 	 *
 	 * Higher is served first. Hang publishers set this from `Catalog.PRIORITY` so
 	 * audio outranks video on the wire and in the bandwidth allocator.
 	 */
 	get priority(): number {
-		return this.#state.info.peek()?.priority ?? 0;
+		return this.#state.info.peek()?.priority ?? DEFAULT_PRIORITY;
 	}
 
 	/**
@@ -523,22 +587,9 @@ export class Producer {
 		return makeSubscriber(this.name, sink);
 	}
 
-	/**
-	 * Whether the track currently has any subscribers.
-	 *
-	 * Watch it (`effect.get` / `.peek()`) to drive on-demand work: a publisher can start and stop
-	 * capture with demand, and the consumer wire watches it to tear an idle upstream subscription
-	 * down instead of downloading to nobody. Pairs with {@link unused}. Mirrors the Rust `Demand`.
-	 */
-	get used(): Getter<boolean> {
-		return this.#used;
-	}
-
-	/** Resolves once the track has no subscribers (or has closed). Await it to react to demand ending. */
-	async unused(): Promise<void> {
-		while (this.#used.peek() && this.#state.closed.peek() === undefined) {
-			await Signal.race(this.#used, this.#state.closed);
-		}
+	/** A watch-only view of this track's subscriber demand. */
+	demand(): Demand {
+		return this.#demand;
 	}
 
 	// Register a downstream sink: seed its info, replay the retained window, and (while
@@ -570,11 +621,10 @@ export class Producer {
 				this.#sinks.delete(sink);
 				this.#updateSubscription();
 				// Update demand: once the last subscriber leaves, the consumer wire (watching
-				// {@link unused}) tears the upstream down instead of downloading to nobody.
+				// {@link Demand.unused}) tears the upstream down instead of downloading to nobody.
 				this.#used.set(this.#sinks.size > 0);
-				// The producer closing every sink keeps its mirrors tracked, so what the sink
-				// still buffers ages out with the cache instead of staying pinned.
 				if (this.#state.closed.peek() !== undefined) {
+					this.#release(sink);
 					dispose();
 					return;
 				}
@@ -593,8 +643,20 @@ export class Producer {
 		this.#prune();
 		for (const entry of this.#cache) this.#mirror(entry, sink);
 
+		sink.received.set(this.#received);
 		sink.final.set(this.#state.final.peek());
-		if (closed !== undefined) closeTrackState(sink, closed instanceof Error ? closed : undefined);
+		if (closed !== undefined) {
+			this.#release(sink);
+			closeTrackState(sink, closed instanceof Error ? closed : undefined);
+		}
+	}
+
+	// A closed track leaves a sink's buffered mirrors readable. Bounded retention keeps them
+	// tracked so they age out with the cache; unlimited retention never ages anything out,
+	// so it leaves them to the reader.
+	#release(sink: TrackState): void {
+		if (this.#state.info.peek()?.maxAge !== undefined) return;
+		for (const entry of this.#cache) entry.mirrors.delete(sink);
 	}
 
 	// Recompute from every live sink because an update or close can narrow as well as widen
@@ -615,6 +677,7 @@ export class Producer {
 		timelineInsert(sink.timeline, dst);
 		void dst.readable().then(() => sink.timelineChanged.update((revision) => revision + 1));
 		sink.latest = Math.max(sink.latest ?? 0, dst.sequence);
+		sink.received.set(Math.max(sink.received.peek(), dst.sequence + 1));
 		sink.groups.mutate((groups) => {
 			groups.push(dst);
 			groups.sort((a, b) => a.sequence - b.sequence);
@@ -671,7 +734,8 @@ export class Producer {
 	// evicts a run of groups per scan instead of scanning everything to evict one per
 	// write. A group can outlive the window by up to one slice.
 	#prune(): void {
-		const maxAgeMs = this.#state.info.peek()?.maxAge ?? DEFAULT_MAX_AGE_MS;
+		const maxAgeMs = this.#state.info.peek()?.maxAge;
+		if (maxAgeMs === undefined) return;
 		const now = performance.now();
 		const slice = maxAgeMs / PRUNE_SLICES;
 		if (now < this.#pruned + slice) {
@@ -793,6 +857,7 @@ export class Producer {
 	#publishDatagram(datagram: Datagram): void {
 		this.#received = Math.max(this.#received, datagram.sequence + 1);
 		for (const sink of this.#sinks) {
+			sink.received.set(this.#received);
 			sink.datagrams.mutate((list) => {
 				if (list.length === MAX_DATAGRAMS) list.shift();
 				list.push(datagram);
@@ -848,7 +913,8 @@ export class Producer {
 	 * `final` is the first sequence that will never be produced, so a track whose last group
 	 * is 89 finishes at 90. Groups and datagrams below it are still accepted; anything at or
 	 * above it is refused. Unlike {@link close} it is not terminal: call `close()` once the
-	 * remaining groups are written. Throws if the track is closed, already has an end, or
+	 * remaining groups are written. Readers end once the live edge reaches the boundary,
+	 * independently of closure. Throws if the track is closed, already has an end, or
 	 * `final` is at or below a sequence already produced.
 	 */
 	finishAt(final: number): void {
@@ -1271,7 +1337,13 @@ export class Subscriber {
 			}
 
 			// Idle, or parked at the boundary waiting for the cap to rise.
-			await Signal.race(this.#state.groups, this.#cursor, this.#state.closed);
+			await Signal.race(
+				this.#state.groups,
+				this.#cursor,
+				this.#state.closed,
+				this.#state.final,
+				this.#state.received,
+			);
 		}
 	}
 
@@ -1299,10 +1371,17 @@ export class Subscriber {
 		const group = groups[0];
 		const closed = this.#state.closed.peek();
 		if (closed instanceof Error) return { kind: "error", error: closed };
-		if (closed === undefined) return { kind: "idle" };
+		if (closed === undefined && !this.#complete()) return { kind: "idle" };
 		// A group beyond the cap outlives a clean close: it becomes deliverable if
 		// the cap rises, so the track isn't over while any are held.
 		return group ? { kind: "boundary" } : { kind: "done" };
+	}
+
+	// Reader completion does not settle the tail: missing lower groups and open streams
+	// remain accounted for by the wire layer, and an abort still wins on the next read.
+	#complete(): boolean {
+		const final = this.#state.final.peek();
+		return final !== undefined && this.#state.received.peek() >= final;
 	}
 
 	// Package-internal readiness half of recvGroup. Each registration fires at most once, and
@@ -1314,6 +1393,7 @@ export class Subscriber {
 			this.#cursor.changed(fn),
 			this.#state.closed.changed(fn),
 			this.#state.final.changed(fn),
+			this.#state.received.changed(fn),
 		];
 		return () => {
 			for (const close of dispose) close();
@@ -1364,9 +1444,9 @@ export class Subscriber {
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
-			if (closed !== undefined) return undefined;
+			if (closed !== undefined || this.#complete()) return undefined;
 
-			await Signal.race(this.#state.datagrams, this.#state.closed);
+			await Signal.race(this.#state.datagrams, this.#state.closed, this.#state.final, this.#state.received);
 		}
 	}
 
@@ -1405,9 +1485,18 @@ export class Subscriber {
 			// A group parked above the cap stays deliverable even after a clean close
 			// (its frames remain buffered), so keep waiting for a cap raise. Only a
 			// drained track reports finished.
-			if (closed !== undefined && !groups[0]) return undefined;
+			const final = this.#state.final.peek();
+			if (!groups[0] && (closed !== undefined || this.#complete() || (final !== undefined && start >= final))) {
+				return undefined;
+			}
 
-			await Signal.race(this.#state.groups, this.#cursor, this.#state.closed);
+			await Signal.race(
+				this.#state.groups,
+				this.#cursor,
+				this.#state.closed,
+				this.#state.final,
+				this.#state.received,
+			);
 		}
 	}
 

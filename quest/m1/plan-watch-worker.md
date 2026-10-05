@@ -65,8 +65,8 @@ browser harness pieces instead of starting another.
 The rewritten implementation quest names the chosen model, the public handle
 shape of `Player` and `<moq-watch>`, what happens to the composable classes,
 the worker bundling (the publish capture worker's `?worker&inline` is the
-precedent; like it, the worker ships a lazy blob plus a hostable file under
-the package's assets base, per [strict CSP](/quest/m1/csp-assets.md)), and the follow-up
+precedent; like it, the worker loads through `?worklet`, a lazy blob plus a
+hostable file under the package's `assets()` base), and the follow-up
 quest for moving publish onto the same worker if the handle model wins. That
 follow-up wires the capture worklet to the encoder worker with a
 `MessageChannel` too, so captured PCM also skips main.
@@ -75,4 +75,4 @@ follow-up wires the capture worklet to the encoder worker with a
 
 - [Watch worker](/quest/m1/watch-worker.md) - the implementation this rewrites
 - [Browser benchmarks](/quest/m1/browser-benchmarks.md) - artifact conventions; may absorb the harness later
-- [A/V clock](/quest/m0/plan-av-clock.md) - the `Sync` shape the implementation moves; the prototype can pace against today's
+- [A/V clock](/quest/m1/av-clock.md) - the `Sync` shape the implementation moves; the prototype can pace against today's

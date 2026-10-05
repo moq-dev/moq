@@ -22,7 +22,7 @@ Decided in planning:
   needed.
 - Scope:
   - moq-ffi, default and `--no-default-features`, as cdylib and staticlib
-  - libmoq, moq-relay, and moq-cli
+  - moq-c, moq-relay, and moq-cli
   - the moq-wasm module, raw, gzip, and brotli
   - the consumer cost of the JS entries: `@moq/net`, `@moq/watch/element`
     with and without `/ui`, and `@moq/publish/element`. Measure them the way
@@ -39,8 +39,8 @@ Decided in planning:
   visible without a local rebuild. `cargo bloat` needs symbols, so build that
   pass with `CARGO_PROFILE_RELEASE_STRIP=none` and report stripped sizes
   separately.
-- Following the tooling questline, the work lives in a `sh/` script behind a
-  `just` recipe, and `nightly.yml` calls the recipe.
+- The work lives in a `sh/` script behind a `just` recipe, and `nightly.yml`
+  calls the recipe.
 
 Considered and declined (do not re-ask):
 

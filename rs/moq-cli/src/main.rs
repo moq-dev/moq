@@ -13,6 +13,7 @@ mod devices;
 mod duration;
 mod fetch;
 mod hls;
+mod ls;
 mod moq;
 mod play;
 mod publish;
@@ -318,10 +319,12 @@ async fn main() -> anyhow::Result<()> {
 		}
 	}
 
-	// `fetch` only dials, so an ambient listener or cluster setting it never uses
-	// is not validated either.
+	// `fetch` and `ls` only dial, so an ambient listener or cluster setting they
+	// never use is not validated either.
 	if let [Command::Fetch(_)] = stages.as_slice() {
-		cli.dial_only("fetch")?;
+		cli.dial_only("fetch", &["--broadcast"])?;
+	} else if let [Command::Ls(_)] = stages.as_slice() {
+		cli.dial_only("ls", &[])?;
 	} else {
 		cli.moq.validate()?;
 	}
@@ -343,6 +346,7 @@ async fn main() -> anyhow::Result<()> {
 		if stages.len() == 1 && !stages[0].is_stageable() {
 			match stages.remove(0) {
 				Command::Fetch(args) => return fetch::run(cli.moq, args, net).await,
+				Command::Ls(args) => return ls::run(cli.moq, args, net).await,
 				#[cfg(feature = "play")]
 				Command::Play(args) => return run_play(cli.moq, args, net).await,
 				#[cfg(feature = "transcode")]
@@ -662,11 +666,13 @@ fn spawn_import(
 				}
 			}
 			ImportSource::Srt(srt) => {
+				let program = srt.program();
+				let srt = srt.endpoint;
 				if let Some(addr) = srt.listen {
 					let name = require_broadcast(name, "import srt --listen")?;
-					tasks.spawn(srt::listen_import(target(name), addr, srt.latency.into_std()));
+					tasks.spawn(srt::listen_import(target(name), addr, srt.latency.into_std(), program));
 				} else if let Some(url) = srt.connect {
-					tasks.spawn(srt::connect_import(target(name), url, srt.latency.into_std()));
+					tasks.spawn(srt::connect_import(target(name), url, srt.latency.into_std(), program));
 				}
 			}
 			ImportSource::Rtc(rtc) => {

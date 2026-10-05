@@ -29,10 +29,10 @@ player survive the publication lifecycle. See [Media QA](#media-qa).
 |---|---|---|---|
 | Rust | `rs/moq-relay` + `rs/moq-cli` | `cargo build` | publish (video) + subscribe |
 | Python | `py/moq-rs` (+ `rs/moq-ffi`, import `moq`) | `uv build` wheels (maturin + hatchling), installed into a venv in the run directory | publish (video + audio) + subscribe |
-| Go | `go/wrapper` (+ `rs/moq-ffi`, import `moq-go/moq`) | `go/scripts/stage.sh` (uniffi-bindgen-go) + `go build` | publish (video + audio) + subscribe |
+| Go | `go/wrapper` (+ `rs/moq-ffi`, import `moq-go/moq`) | `sh/go/stage.sh` (uniffi-bindgen-go) + `go build` | publish (video + audio) + subscribe |
 | Browser | `js/watch` + `js/publish` | `vite build` + headless Chromium (Playwright) | publish (video + audio) + rendered playback |
 | Native JS | `js/net` + `js/hang` + the npm `@moq/web-transport` polyfill | `node` (tsx) and `bun` | subscribe |
-| C | `rs/libmoq` | `cargo build -p libmoq` + `cc` | subscribe |
+| C | `rs/moq-c` | `cargo build -p moq-c` + `cc` | subscribe |
 | GStreamer | `rs/moq-gst` (`moqsrc`) | `cargo build -p moq-gst` + `gst-launch-1.0` | subscribe |
 
 The browser, native JS, C, and GStreamer clients subscribe only by choice
@@ -40,7 +40,7 @@ The browser, native JS, C, and GStreamer clients subscribe only by choice
 intentionally minimal, and `moqsink` publishing needs request-pad muxing this
 client doesn't drive). Rust, Python, Go, and the browser publish.
 
-The Go client builds against the modules `go/scripts/stage.sh` assembles from
+The Go client builds against the modules `sh/go/stage.sh` assembles from
 this checkout: `moq-ffi` compiled for the host, bindings regenerated with
 `uniffi-bindgen-go`, and the `go/wrapper` module wired to them by a `replace`.
 That is the same staging `just go check` uses, so this cell covers the Go
@@ -180,7 +180,7 @@ clients/
     src/probe.ts          subscriber-side measurement, taken at the sinks
     src/instrument.ts     live counts of the platform resources the page holds
   js-native/subscribe.ts  subscribe via @moq/net + @moq/hang + the WebTransport polyfill
-  c/subscribe.c           subscribe via rs/libmoq
+  c/subscribe.c           subscribe via rs/moq-c
 ```
 
 ## CI
@@ -206,3 +206,10 @@ hands moq-net's QUIC and leading-ones encodings of each varint size boundary
 `varint.ts`. That script decodes them into js/net's `U64`, checks its
 `number` conversion, and returns js/net's own encodings, which Rust requires to
 match byte for byte and decode back to the same value.
+
+`lite_varint_interop` runs next to it and does the same through moq-lite's
+version dispatch: `lite-varint.ts` decodes Rust's lite-06 (QUIC) and lite-07
+(leading-ones) varints, a SETUP carrying a 62-bit Hop ID, a datagram, and a
+GROUP stream with frames, and re-encodes them byte for byte. Past 2^62-1 the
+range is per version: JS writes lite-07's 64-bit values, which Rust must refuse
+with a decode error until its `VarInt` widens, and JS refuses them on lite-06.

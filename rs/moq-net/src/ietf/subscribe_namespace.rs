@@ -15,9 +15,7 @@ use super::Version;
 ///
 /// moq-lite does not implement PUBLISH replication through a CDN, which is the
 /// only thing that SUBSCRIBE_TRACKS enables (subscribing to all tracks under a
-/// prefix). If a peer sends this we fail the session loudly rather than
-/// silently ignoring it, since ignoring would leave the peer waiting forever
-/// for a REQUEST_OK.
+/// prefix), so each one is refused with REQUEST_ERROR NOT_SUPPORTED.
 pub const SUBSCRIBE_TRACKS_ID: u64 = 0x51;
 
 /// True for the drafts that use the legacy 0x11 SUBSCRIBE_NAMESPACE message.
@@ -76,7 +74,11 @@ impl Message for SubscribeNamespace<'_> {
 		}
 		let request_id = RequestId::decode(r, version)?;
 		let namespace = decode_namespace(r, version)?;
-		decode_params!(r, version, HIDDEN_PARAM => hidden: Option<u64>);
+		// The token is ignored: the session's grant is what authorizes the request.
+		decode_params!(r, version,
+			0x03 => _authorization_token: Vec<super::Opaque>,
+			HIDDEN_PARAM => hidden: Option<u64>,
+		);
 
 		Ok(Self {
 			request_id,
@@ -135,7 +137,11 @@ impl Message for SubscribeNamespaceLegacy<'_> {
 			_ => 0x01,
 		};
 
-		decode_params!(r, version, HIDDEN_PARAM => hidden: Option<u64>);
+		// The token is ignored: the session's grant is what authorizes the request.
+		decode_params!(r, version,
+			0x03 => _authorization_token: Vec<super::Opaque>,
+			HIDDEN_PARAM => hidden: Option<u64>,
+		);
 
 		Ok(Self {
 			request_id,
@@ -241,7 +247,7 @@ impl Namespace<'_> {
 		// The base form has no Parameters field at all, so there is nothing to read
 		// (and nothing to reject) unless the extension is on.
 		let cluster = match negotiated {
-			true => super::publish_namespace::decode_cluster_params(r, version, true)?,
+			true => Some(super::publish_namespace::decode_cluster_params(r, version)?),
 			false => None,
 		};
 

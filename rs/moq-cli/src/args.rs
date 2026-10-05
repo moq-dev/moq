@@ -2,7 +2,8 @@
 //!
 //! Grammar: `moq <MoQ side> <stage> [-- <stage>]...`, where a stage is
 //! `<import|export> <endpoint> [endpoint opts]`, plus `moq <MoQ side> play` for
-//! native playback and `moq <MoQ side> fetch <track>` to read one group.
+//! native playback, `moq <MoQ side> ls [prefix]` to list what is live, and
+//! `moq <MoQ side> fetch <track>` to read one group.
 //!
 //! - The MoQ side (`--connect`, the `--listen*` transport binds, `--cluster-lan`,
 //!   and `--cluster-connect` / `--cluster-connect-api`; all optional, at least
@@ -188,12 +189,12 @@ impl Invocation {
 		Ok(())
 	}
 
-	/// Refuse every MoQ-side flag but the dial, on a verb that only reads from a
-	/// relay: a listener, cluster, or auth policy it would never serve is not
-	/// silently ignored. The dial is `--connect*`, the `--quic-*` and `--iroh-*`
-	/// settings it dials with, and `--broadcast`. Answered from the command line,
-	/// like [`Self::reject`].
-	pub fn dial_only(&self, command: &str) -> anyhow::Result<()> {
+	/// Refuse every MoQ-side flag but the dial and those in `allow`, on a verb that
+	/// only reads from a relay: a listener, cluster, or auth policy it would never
+	/// serve is not silently ignored. The dial is `--connect*` and the `--quic-*` and
+	/// `--iroh-*` settings it dials with. Answered from the command line, like
+	/// [`Self::reject`].
+	pub fn dial_only(&self, command: &str, allow: &[&str]) -> anyhow::Result<()> {
 		use usage::spec::CommandArgs;
 
 		fn owns<T: CommandArgs>(flag: &usage::Flag<'_>) -> bool {
@@ -206,7 +207,9 @@ impl Invocation {
 			}
 			owns::<moq_tokio::connect::Config>(flag)
 				|| owns::<moq_tokio::quic::Config>(flag)
-				|| flag.longs.contains(&"broadcast")
+				|| allow
+					.iter()
+					.any(|name| name.strip_prefix("--").is_some_and(|name| flag.longs.contains(&name)))
 		};
 
 		if let Some(flags) = Self::names(self.given.iter().filter(|flag| !dials(flag))) {
@@ -300,7 +303,7 @@ impl Invocation {
 
 		// Only `import` and `export` share an Origin. The rest own the process: `play`
 		// drives a window on the main thread, `transcode` builds its own Origin, `fetch`
-		// opens its own session, and `auth` / `devices` never touch the network at all.
+		// and `ls` open their own session, and `auth` / `devices` never touch the network at all.
 		if let Some(command) = self.stages.iter().find(|command| !command.is_stageable()) {
 			anyhow::bail!(
 				"`{}` must be the only verb; it can't share a process with another `--` stage",
@@ -584,6 +587,8 @@ pub enum Command {
 	/// The released spelling of [`Self::Export`].
 	#[usage(hide = true)]
 	Subscribe(Export),
+	/// List the broadcasts live on a relay.
+	Ls(crate::ls::Args),
 	/// Write one group of a track to stdout.
 	Fetch(crate::fetch::Args),
 	/// Play a broadcast in a native window and speaker.
@@ -643,6 +648,7 @@ impl Command {
 		match self {
 			Self::Import(_) | Self::Publish(_) => "import",
 			Self::Export(_) | Self::Subscribe(_) => "export",
+			Self::Ls(_) => "ls",
 			Self::Fetch(_) => "fetch",
 			#[cfg(feature = "play")]
 			Self::Play(_) => "play",
@@ -747,7 +753,7 @@ pub enum ImportSource {
 	/// RTMP: pull a remote play (`--connect`) or accept incoming publishes (`--listen`).
 	Rtmp(crate::rtmp::Args),
 	/// SRT: pull a remote stream (`--connect`) or accept incoming publishes (`--listen`).
-	Srt(crate::srt::Args),
+	Srt(crate::srt::ImportArgs),
 	/// WebRTC: WHEP client pulling a remote (`--connect`) or WHIP server accepting publishes (`--listen`).
 	Rtc(crate::rtc::Args),
 	/// Replay a recording from an object store, serving its groups on demand.
@@ -784,7 +790,7 @@ pub struct TsImport {
 	pub program: Option<TsProgram>,
 }
 
-/// An `import ts --program` value.
+/// An `import ts --program` or `import srt --program` value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TsProgram {
 	/// The program with this PAT program number.
@@ -1060,6 +1066,25 @@ mod tests {
 		assert_eq!(program("all"), Some(Some(TsProgram::All)));
 		assert_eq!(program("0"), None, "0 is the network PID");
 		assert_eq!(program("two"), None);
+	}
+
+	/// `import srt` takes the same `--program` as `import ts`; `export srt` has no program to pick.
+	#[test]
+	fn import_srt_takes_a_program() {
+		let cli =
+			Invocation::try_parse_from(["moq", "import", "srt", "--listen", "[::]:9000", "--program", "all"]).unwrap();
+		let Command::Import(import) = &cli.stages[0] else {
+			panic!("an import stage");
+		};
+		let ImportSource::Srt(args) = &import.source else {
+			panic!("an import srt stage");
+		};
+		assert_eq!(args.program(), Some(moq_srt::Program::All));
+		assert!(args.endpoint.listen.is_some());
+
+		assert!(
+			Invocation::try_parse_from(["moq", "export", "srt", "--listen", "[::]:9000", "--program", "2"]).is_err()
+		);
 	}
 
 	/// A released spelling is refused, and the error names what to write instead.
@@ -1587,9 +1612,11 @@ mod tests {
 			assert!(err.contains(reported), "{err}");
 		}
 
-		let cli = Invocation::try_parse_from(["moq", "--cluster-mesh", "auth", "generate"]).unwrap();
-		let err = cli.reject("auth").unwrap_err().to_string();
-		assert!(err.contains("--cluster-mesh"), "{err}");
+		// Gossip discovery is removed, so its flag is refused for every verb.
+		let Err(err) = Invocation::try_parse_from(["moq", "--cluster-mesh", "auth", "generate"]) else {
+			panic!("--cluster-mesh must be refused");
+		};
+		assert!(err.to_string().contains("--cluster-mesh"), "{err}");
 
 		#[cfg(unix)]
 		{
@@ -1679,14 +1706,14 @@ mod tests {
 
 		for flag in accept {
 			let err = parse(flag, &["fetch", "data"])
-				.dial_only("fetch")
+				.dial_only("fetch", &["--broadcast"])
 				.unwrap_err()
 				.to_string();
 			assert!(err.contains(flag[0]), "{flag:?}: {err}");
 		}
 		for flag in dial {
 			parse(flag, &["fetch", "data"])
-				.dial_only("fetch")
+				.dial_only("fetch", &["--broadcast"])
 				.unwrap_or_else(|err| panic!("{flag:?}: {err}"));
 		}
 	}

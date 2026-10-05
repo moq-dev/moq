@@ -14,5 +14,5 @@ that reaches a runtime or wall clock directly (`runtime::Deadline`, the cache
 pool's expiry, stats timers). Route time through one injectable clock, the
 seam the [mock-clock tests](/quest/m1/rs2ts/mock-clock.md) use.
 
-Public API: may break moq-net's model constructors; retargets to `dev`.
+Public API: may break moq-net's model constructors.
 Wire: none.

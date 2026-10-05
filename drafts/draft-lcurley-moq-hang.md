@@ -576,7 +576,10 @@ A consumer MUST NOT submit the marker to a decoder.
 Empty groups (zero objects) are permitted and mean nothing.
 After a discontinuity the timeline continues forward.
 A publisher that stops producing and may resume on the same track (e.g. an encoder idle for lack of demand) SHOULD publish a discontinuity marker when it stops, so the group before the pause does not reach across the gap and read as live.
-A group whose timestamps fall below the live edge earlier groups reached is malformed.
+The first timestamp of a group MUST NOT be lower than the first timestamp of any group with a lower sequence, and no frame of a group may be lower than the first timestamp of the group before it; a group that breaks either is malformed.
+A group MAY start at the same timestamp as the previous group.
+Frames MAY present below the previous group's content (B-frames, or a keyframe overlapping the previous group's last frame).
+A publisher whose source restarts below the previous group's start begins a new broadcast instead.
 A delivered sequence hole is a playhead event unless the boundary is contiguous within 1 ms.
 A consumer re-applies startup delay and skip at a playhead event; it does not reset codec state.
 
@@ -1106,6 +1109,7 @@ A publisher MAY estimate an unknown final duration from the frame cadence, but M
 - A marker group of one empty frame declares a discontinuity. Empty groups mean nothing. Timestamps only move forward; a group below the live edge is malformed. A delivered sequence hole is a playhead event unless contiguous within 1 ms.
 - A publisher that stops producing and may resume on the same track SHOULD publish a discontinuity marker when it stops.
 - An audio endpoint bounds only the terminal packets that follow it in its own group.
+- Replaced the live-edge floor with monotonic group starts: a group may overlap the previous group's content but not start before it.
 - Replaced the archive timeline `wall` field with a root `clock` section (`wall` plus `timescale`): one fixed broadcast mapping every track and the archive index convert into, independent of any archive. Zero timescales and walls past the JSON-safe integer range are refused.
 - Added optional `bitrate` and `jitter` fields to `json` and `binary` track entries.
 - Added the optional `delay` rendition field: how far a rendition's minimum flush lateness trails the broadcast's earliest rendition, never lowered once advertised and never subtracted across renditions.

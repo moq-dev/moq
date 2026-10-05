@@ -8,7 +8,7 @@ A worker drive turn reads the clock once and hands that instant down, so
 
 ## Plan
 
-Profiling the io_uring relay (`dev` @ `fc57e0175`, `perf record -F 499`,
+Profiling the io_uring relay (`fc57e0175`, `perf record -F 499`,
 relay process only) shows `[vdso]` as a top-5 DSO, at roughly 3x its share on
 the tokio worker path:
 
@@ -35,7 +35,7 @@ Where the reads are:
   `close` (rs/moq-uring/src/quic/noq/connection.rs:239), `handle_timeout`
   (:671), and `poll_transmit` (:786). The last one runs once per GSO train,
   since `flush` stages one train per turn (see
-  [Egress requeue](/quest/m1/perf/egress-requeue.md)).
+  [Run to quiescence](/quest/m1/perf/uring-quiescence.md)).
 
 The same profile shows the timer heap at ~1.6%:
 `<moq_uring::timer::Timer as moq_net::runtime::Timer>::set` 0.92% plus

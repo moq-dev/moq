@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.10](https://github.com/moq-dev/moq/compare/moq-rtmp-v0.3.9...moq-rtmp-v0.3.10) - 2026-10-03
+
+### Other
+
+- updated the following local packages: moq-net, hang, moq-mux
+
+## [0.3.9](https://github.com/moq-dev/moq/compare/moq-rtmp-v0.3.8...moq-rtmp-v0.3.9) - 2026-09-30
+
+### Added
+
+- *(rtmp)* let an RTMP listener refuse plaintext ([#4452](https://github.com/moq-dev/moq/pull/4452))
+
+### Fixed
+
+- *(rtmp)* bound AMF0 nesting ([#4471](https://github.com/moq-dev/moq/pull/4471))
+
 ## [0.3.8](https://github.com/moq-dev/moq/compare/moq-rtmp-v0.3.7...moq-rtmp-v0.3.8) - 2026-09-27
 
 ### Fixed

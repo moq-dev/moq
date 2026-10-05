@@ -6,7 +6,9 @@ An Opus track published through `moq_audio::encode::Producer` retunes to its
 share of the connection's estimate: a grant below the configured bitrate
 lowers the encoder at once, room coming back raises it gradually, and a link
 too small for the configured audio rate sheds audio bits instead of stalling.
-The reservation's ceiling stays the configured bitrate. PCM keeps reserve-only
+The reservation's ceiling stays the configured bitrate. A grant below the
+codec floor disables the rendition (`enabled: false`,
+[enabled flag](/quest/m1/catalog-enabled.md)) until it recovers. PCM keeps reserve-only
 usage: it claims its fixed rate and never reads the grant.
 
 The rate policy has one home shared by every sender, so audio and video back
@@ -33,20 +35,22 @@ grant; `Options::bandwidth` documents that
   their own loop; the capture driver's `_reservation` goes away. Public entry
   points for a manual ceiling stay `Producer::set_bitrate`
   and `Encoder::set_bitrate`.
-- The audio-codecs line branch moves the Opus encoder behind a backend seam:
-  the rate setter and its floor live in
-  `rs/moq-audio/src/encode/backend/libopus.rs` there, and
-  `Encoder::set_bitrate` dispatches through the backend. Target whichever
-  shape is on the base when this starts.
-- Floor: `set_opus_bitrate` refuses anything outside
+- The Opus encoder sits behind the encode backend seam: the rate setter and
+  its floor live in `rs/moq-audio/src/encode/backend/libopus.rs`, and
+  `Encoder::set_bitrate` dispatches through the backend.
+- Floor: the libopus backend's `set_bitrate` refuses anything outside
   `opus::bitrate_floor(codec_rate, frame_size).max(500)` to
-  `300_000 * channels` (`encoder.rs`, `rs/moq-audio/src/opus.rs`). `Policy::min` defaults to a tenth of
-  the ceiling (`rs/moq-mux/src/rate.rs`); for Opus it is the codec floor, so a
-  grant below it clamps there and never errors. The reservation's ceiling is
+  `300_000 * channels` (`backend/libopus.rs`, `rs/moq-audio/src/opus.rs`). `Policy::min` defaults to a tenth of
+  the ceiling (`rs/moq-mux/src/rate.rs`); for Opus it is the codec floor. A
+  grant below it disables the rendition until bandwidth recovers (decided
+  2026-10-04 with the enabled flag); the encoder never errors. Once viewers
+  deselect it, its demand and so its grant go away, so recovery evaluates a
+  hypothetical share against the current estimate, as the ladder controller
+  does. The reservation's ceiling is
   the configured bitrate; only the policy target moves.
 - PCM: `pcm::bitrate(sample_rate, channels)` is `pub(crate)`
   (`rs/moq-audio/src/pcm.rs`), `Settings::bitrate` is refused for it
-  and so is `set_bitrate` (`encoder.rs`). A PCM
+  and so is `set_bitrate` (`encoder.rs`, `backend/pcm.rs`). A PCM
   Producer reserves its fixed rate and runs no policy. That is the same
   reserve-only usage passthrough imports use, so nothing new is added for it.
 - Priority is unchanged: `PRIORITY` puts audio at 80 and video at 60
@@ -57,7 +61,8 @@ grant; `Options::bandwidth` documents that
 Tests: retain the shared `Control` tests; an Opus Producer whose
 grant drops below its configured bitrate reports the lower `bitrate()` after
 one policy step, holds it on a `None` grant, and ramps back when the grant
-returns; a grant below the Opus floor clamps at the floor; a PCM Producer
+returns; a grant below the Opus floor disables the rendition, and recovered
+bandwidth enables it again even after the last viewer unsubscribed; a PCM Producer
 ignores every grant.
 
 ## Closes

@@ -156,6 +156,32 @@ fn import_ac3_catalog() {
 	assert!(audio.description.is_none(), "verbatim AC-3 needs no description");
 }
 
+/// `aac_quad.ts` is an ffmpeg-authored audio-only AAC program in quad, which has no
+/// channelConfiguration, so its ADTS headers carry 0 and the first raw data block leads with a
+/// program config element. Regenerated with (ffmpeg 9.0.1):
+/// `ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.1
+/// -af "pan=quad|FL=c0|FR=c0|BL=c0|BR=c0" -c:a aac -b:a 128k -f mpegts aac_quad.ts`.
+#[test]
+fn import_aac_program_config_catalog() {
+	let data = include_bytes!("test_data/aac_quad.ts");
+	let catalog = import_ts(data);
+
+	assert_eq!(catalog.audio.renditions.len(), 1, "expected one AAC track");
+	let audio = catalog.audio.renditions.values().next().unwrap();
+	assert_eq!(audio.codec.to_string(), "mp4a.40.2");
+	assert_eq!(audio.sample_rate, 48_000);
+	assert_eq!(
+		audio.channel_count, 4,
+		"two channel pair elements, not a guessed stereo"
+	);
+
+	// The element moved into the description is byte-for-byte what ffmpeg itself writes as the
+	// AudioSpecificConfig for the same stream in MP4, minus the trailing SBR sync extension.
+	let mut expected = vec![0x11, 0x80, 0x04, 0xC4, 0x04, 0x00, 0x21, 0x10, 0x0C];
+	expected.extend_from_slice(b"Lavc63.1.101");
+	assert_eq!(audio.description.as_deref(), Some(expected.as_slice()));
+}
+
 /// `opus.ts` is an ffmpeg-authored audio-only Opus program (private stream_type 0x06
 /// plus the 'Opus' registration and DVB extension descriptors), generated with:
 /// `ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.5
@@ -172,6 +198,29 @@ fn import_opus_catalog() {
 	assert_eq!(audio.codec.to_string(), "opus");
 	assert_eq!(audio.sample_rate, 48_000, "Opus is always reckoned at 48 kHz");
 	assert_eq!(audio.channel_count, 2);
+}
+
+/// `opus_5_1.ts` is a 440 Hz center channel in 5.1, which ffmpeg's libopus
+/// encodes as family 1 and its muxer labels `channel_config_code` 6:
+/// `ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.5
+/// -ac 6 -c:a libopus -b:a 128k -f mpegts opus_5_1.ts`. The descriptor names only
+/// the channel count, so the importer must synthesize the Vorbis mapping table
+/// or the track has no OpusHead a decoder accepts.
+#[test]
+fn import_opus_surround_catalog() {
+	let data = include_bytes!("test_data/opus_5_1.ts");
+	let catalog = import_ts(data);
+
+	assert_eq!(catalog.audio.renditions.len(), 1, "expected one Opus track");
+	let audio = catalog.audio.renditions.values().next().unwrap();
+	assert_eq!(audio.channel_count, 6);
+
+	let head = crate::codec::opus::Config::parse(&mut audio.description.as_deref().expect("an OpusHead")).unwrap();
+	assert_eq!(head.channel_count, 6);
+	let mapping = head.mapping.expect("a family 1 mapping");
+	assert_eq!(mapping.family(), 1);
+	assert_eq!((mapping.streams(), mapping.coupled()), (4, 2));
+	assert_eq!(mapping.table(), &[0, 4, 1, 2, 3, 5]);
 }
 
 /// Opus frames from real ffmpeg output must decode: a non-empty run of Opus packets,
@@ -550,111 +599,118 @@ fn import_handles_unaligned_chunks() {
 	assert_eq!(snapshot.audio.renditions.len(), 1);
 }
 
-/// What a TS import published, plus the broadcast clock's reading around the first chunk.
-struct LiveImport {
-	published: std::collections::BTreeMap<String, Vec<u128>>,
-	before: u128,
-	after: u128,
+/// `data` with every PES PTS/DTS and PCR base moved `ticks` later on the 90 kHz clock, as an
+/// encoder that had been running that much longer would stamp it.
+fn shift_clock(data: &[u8], ticks: u64) -> Vec<u8> {
+	const FIELD: u64 = (1 << 33) - 1;
+	let mut out = data.to_vec();
+	for pkt in out.as_chunks_mut::<188>().0 {
+		assert_eq!(pkt[0], 0x47, "an aligned TS packet");
+		let mut payload = 4;
+		if pkt[3] & 0x20 != 0 {
+			let len = pkt[4] as usize;
+			if len >= 7 && pkt[5] & 0x10 != 0 {
+				let pcr = &mut pkt[6..11];
+				let base = (pcr[0] as u64) << 25
+					| (pcr[1] as u64) << 17
+					| (pcr[2] as u64) << 9
+					| (pcr[3] as u64) << 1
+					| (pcr[4] as u64) >> 7;
+				let base = (base + ticks) & FIELD;
+				pcr[0] = (base >> 25) as u8;
+				pcr[1] = (base >> 17) as u8;
+				pcr[2] = (base >> 9) as u8;
+				pcr[3] = (base >> 1) as u8;
+				pcr[4] = (pcr[4] & 0x7F) | ((base as u8 & 1) << 7);
+			}
+			payload += 1 + len;
+		}
+		// Only a payload-unit start with a payload can open a PES header.
+		if pkt[1] & 0x40 == 0 || pkt[3] & 0x10 == 0 || payload + 9 > 188 {
+			continue;
+		}
+		let pes = &mut pkt[payload..];
+		if pes[..3] != [0, 0, 1] {
+			continue;
+		}
+		let flags = pes[7] >> 6;
+		let mut at = 9;
+		for present in [flags & 0b10 != 0, flags == 0b11] {
+			if !present {
+				continue;
+			}
+			let t = &mut pes[at..at + 5];
+			let v = ((t[0] as u64 >> 1) & 0x07) << 30
+				| (t[1] as u64) << 22
+				| (t[2] as u64 >> 1) << 15
+				| (t[3] as u64) << 7
+				| t[4] as u64 >> 1;
+			let v = (v + ticks) & FIELD;
+			t[0] = (t[0] & 0xF1) | (((v >> 30) as u8 & 0x07) << 1);
+			t[1] = (v >> 22) as u8;
+			t[2] = ((((v >> 15) & 0x7F) as u8) << 1) | 1;
+			t[3] = (v >> 7) as u8;
+			t[4] = (((v & 0x7F) as u8) << 1) | 1;
+			at += 5;
+		}
+	}
+	out
 }
 
-/// Import `chunks` in order, idling `idle` between them, on a clock that began `ago` earlier.
-/// `live` translates onto that clock; otherwise the unwrapped PTS publishes verbatim.
-async fn live_import(chunks: &[&[u8]], live: bool, ago: std::time::Duration, idle: std::time::Duration) -> LiveImport {
+/// What a TS import published, and the wall-clock window it arrived in.
+struct Imported {
+	published: std::collections::BTreeMap<String, Vec<u128>>,
+	/// The root clock the catalog advertised.
+	clock: hang::catalog::Clock,
+	arrival: std::ops::RangeInclusive<std::time::SystemTime>,
+}
+
+/// Import `data` on a catalog with the default clock.
+async fn import_stream(data: &[u8]) -> Imported {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let config = crate::catalog::Config::default().with_clock(crate::container::test_util::late_clock(ago));
-	let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
-	let clock = catalog.clock();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	if live {
-		import = import.live();
-	}
 
-	let before = clock.now().as_micros();
-	let mut after = before;
-	for (i, chunk) in chunks.iter().enumerate() {
-		if i > 0 {
-			std::thread::sleep(idle);
-		}
-		import.decode(chunk).unwrap();
-		if i == 0 {
-			after = clock.now().as_micros();
-		}
-	}
+	let before = std::time::SystemTime::now();
+	import.decode(data).unwrap();
+	let after = std::time::SystemTime::now();
 	import.finish().unwrap();
 
-	LiveImport {
-		published: crate::container::test_util::published(&consumer, &catalog.snapshot()).await,
-		before,
-		after,
+	let snapshot = catalog.snapshot();
+	Imported {
+		published: crate::container::test_util::published(&consumer, &snapshot).await,
+		clock: snapshot.clock.expect("the catalog advertises a clock"),
+		arrival: before..=after,
 	}
 }
 
-/// A TS feed arriving 30s after the broadcast began publishes on the broadcast clock rather than
-/// its own PTS: the stream is live on arrival, and H.264 and AAC keep the one offset their PES
-/// headers gave them.
+/// A feed ten hours into its own PTS publishes those timestamps verbatim, H.264 and AAC keeping
+/// the offset their PES headers gave them, and the catalog clock maps it to the arrival time.
 #[tokio::test]
-async fn live_import_anchors_a_late_first_frame() {
+async fn import_publishes_stream_pts_on_an_arrival_clock() {
 	let data: &[u8] = include_bytes!("test_data/bbb_cbr.ts");
-	let ago = std::time::Duration::from_secs(30);
-	let verbatim = live_import(&[data], false, ago, std::time::Duration::ZERO).await;
-	let live = live_import(&[data], true, ago, std::time::Duration::ZERO).await;
+	let hours = std::time::Duration::from_secs(10 * 3600);
+	let original = import_stream(data).await;
+	let shifted = import_stream(&shift_clock(data, hours.as_secs() * 90_000)).await;
 
-	let offset = crate::container::test_util::common_offset(&verbatim.published, &live.published);
-	// The earliest PES anchors at its arrival, which frames muxed ahead of it may precede.
-	let earliest = verbatim.published.values().map(|t| t[0]).min().unwrap() as i128 + offset;
-	let skew = std::time::Duration::from_secs(2).as_micros() as i128;
+	let offset = crate::container::test_util::common_offset(&original.published, &shifted.published);
 	assert!(
-		live.before as i128 - skew <= earliest && earliest <= live.after as i128,
-		"the stream is live on arrival: {earliest} not near {}..={}",
-		live.before,
-		live.after
+		(offset - hours.as_micros() as i128).abs() <= 1_000,
+		"the source's own PTS: moved {offset}us"
 	);
-}
 
-/// The same feed played twice, as when an encoder restarts its PTS, continues forward after the
-/// real idle gap instead of rewinding.
-#[tokio::test]
-async fn live_import_restarts_forward_after_idle() {
-	let data: &[u8] = include_bytes!("test_data/bbb_cbr.ts");
-	let once = live_import(&[data], false, std::time::Duration::ZERO, std::time::Duration::ZERO).await;
-
-	// How much source time one pass covers, across every stream.
-	let starts = once.published.values().map(|t| *t.iter().min().unwrap());
-	let ends = once.published.values().map(|t| *t.iter().max().unwrap());
-	let span = (ends.max().unwrap() - starts.min().unwrap()) as i128;
-
-	for idle in [std::time::Duration::ZERO, std::time::Duration::from_millis(300)] {
-		let live = live_import(&[data, data], true, std::time::Duration::from_secs(30), idle).await;
-
-		// Each pass lands on one mapping for every stream: the first frames on the first, the last
-		// frames on the second.
-		let offset = |pick: fn(&Vec<u128>) -> u128| {
-			let deltas: Vec<i128> = live
-				.published
-				.iter()
-				.map(|(name, t)| pick(t) as i128 - pick(&once.published[name]) as i128)
-				.collect();
-			assert!(
-				deltas.iter().all(|d| (d - deltas[0]).abs() <= 1_000),
-				"every stream shares one mapping: {deltas:?}"
-			);
-			deltas[0]
-		};
-		let first = offset(|t| t[0]);
-		let second = offset(|t| *t.last().unwrap());
-
-		// The second pass continues after the first plus the real idle gap, not on top of it.
-		let shift = second - first;
-		assert!(
-			shift >= span + idle.as_micros() as i128,
-			"the restart resumes after the first pass and the idle gap: {shift} < {span} + {idle:?}"
-		);
-		assert!(
-			shift < span + (idle + std::time::Duration::from_secs(5)).as_micros() as i128,
-			"the restart is not pushed further: {shift}"
-		);
-	}
+	// The first PES anchors at its arrival, which frames muxed ahead of it may precede.
+	let earliest = shifted.published.values().map(|t| t[0]).min().unwrap();
+	let wall = shifted
+		.clock
+		.wall_clock(moq_net::Timestamp::from_micros(earliest as u64).unwrap())
+		.unwrap();
+	let skew = std::time::Duration::from_secs(2);
+	assert!(
+		*shifted.arrival.start() - skew <= wall && wall <= *shifted.arrival.end(),
+		"the stream is live on arrival"
+	);
 }
 
 /// The PCR a packet's adaptation field carries, in 27 MHz ticks.

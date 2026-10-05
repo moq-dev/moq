@@ -142,7 +142,7 @@ enum PublishDecoder {
 	// verbatim, so it uses the `mpegts` catalog extension rather than the media-only `()`.
 	Ts(Box<ts::Import<ts::Ext>>),
 	/// `import ts --program all`: one importer, broadcast, and catalog per program.
-	TsPrograms(Box<TsPrograms>),
+	TsPrograms(Box<ts::Programs>),
 	Flv(Box<flv::Import>),
 }
 
@@ -218,7 +218,7 @@ fn suggest_program(err: anyhow::Error) -> anyhow::Error {
 enum PublishCatalog {
 	Media(moq_mux::catalog::Producer),
 	Ts(moq_mux::catalog::Producer<ts::Ext>),
-	/// `import ts --program all`: each program's catalog, finished by [`TsPrograms::finish`].
+	/// `import ts --program all`: each program's catalog, finished by [`ts::Programs::finish`].
 	TsPrograms,
 }
 
@@ -246,122 +246,11 @@ fn ts_import(
 ) -> anyhow::Result<(ts::Import<ts::Ext>, moq_mux::catalog::Producer<ts::Ext>)> {
 	let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
 	let catalog = moq_mux::catalog::Producer::new(broadcast, config)?;
-	let mut import = ts::Import::new(broadcast.clone(), catalog.reserve()).live();
+	let mut import = ts::Import::new(broadcast.clone(), catalog.reserve());
 	if let Some(program) = program {
 		import = import.with_program(program);
 	}
 	Ok((import, catalog))
-}
-
-/// One program's broadcast under `import ts --program all`.
-struct ProgramImport {
-	/// Keeps the origin-created broadcast alive; the importer's clone doesn't.
-	_broadcast: moq_net::broadcast::Producer,
-	import: ts::Import<ts::Ext>,
-	catalog: moq_mux::catalog::Producer<ts::Ext>,
-}
-
-/// `import ts --program all`: every program the first PAT lists, each published as its own
-/// broadcast on its own clock and catalog.
-///
-/// Input ahead of that PAT is dropped, as a single importer drops media ahead of its PSI. A
-/// program a later PAT adds is not published; one it removes ends the import.
-struct TsPrograms {
-	origin: moq_net::origin::Producer,
-	name: String,
-	config: moq_mux::catalog::Config,
-	/// Input held until it contains a whole PAT.
-	pending: Vec<u8>,
-	/// Empty until the PAT arrives.
-	programs: Vec<ProgramImport>,
-}
-
-impl TsPrograms {
-	fn new(origin: moq_net::origin::Producer, name: String, config: moq_mux::catalog::Config) -> Self {
-		Self {
-			origin,
-			name,
-			config,
-			pending: Vec::new(),
-			programs: Vec::new(),
-		}
-	}
-
-	fn decode(&mut self, chunk: &[u8]) -> anyhow::Result<()> {
-		if !self.programs.is_empty() {
-			return self.feed(chunk);
-		}
-		self.pending.extend_from_slice(chunk);
-		let Some(programs) = ts::programs(&self.pending).filter(|programs| !programs.is_empty()) else {
-			// Only a packet's worth of tail can still hold the start of the PAT.
-			let keep = self.pending.len().saturating_sub(TS_PACKET_SIZE - 1);
-			self.pending.drain(..keep);
-			return Ok(());
-		};
-		for program in programs {
-			let name = program_broadcast(&self.name, program);
-			let mut broadcast = self
-				.origin
-				.create_broadcast(&name)
-				.with_context(|| format!("failed to create broadcast {name}"))?;
-			let (import, catalog) = ts_import(&mut broadcast, self.config.clone(), Some(program))?;
-			broadcast
-				.announce(Default::default())
-				.with_context(|| format!("failed to announce broadcast {name}"))?;
-			self.programs.push(ProgramImport {
-				_broadcast: broadcast,
-				import,
-				catalog,
-			});
-		}
-		let pending = std::mem::take(&mut self.pending);
-		self.feed(&pending)
-	}
-
-	fn feed(&mut self, chunk: &[u8]) -> anyhow::Result<()> {
-		for program in &mut self.programs {
-			program.import.decode(chunk)?;
-		}
-		Ok(())
-	}
-
-	/// Every program's counters in one map: PIDs are unique across a multiplex.
-	fn stats(&self) -> ts::Stats {
-		let mut stats = ts::Stats::default();
-		for program in &self.programs {
-			stats.streams.extend(program.import.stats().streams);
-		}
-		stats
-	}
-
-	/// Finish each program's tracks, then its catalog while it still lists them.
-	fn finish(&mut self) -> anyhow::Result<()> {
-		for program in &mut self.programs {
-			program.import.finish()?;
-			program.catalog.finish()?;
-		}
-		Ok(())
-	}
-
-	fn abort(self, err: moq_net::Error) {
-		for program in self.programs {
-			program.import.abort(err.clone());
-		}
-	}
-}
-
-const TS_PACKET_SIZE: usize = 188;
-
-/// The broadcast one program of `name` publishes on, keeping the catalog suffix last so format
-/// detection still sees it: `event.hang` becomes `event/2.hang`.
-fn program_broadcast(name: &str, program: u16) -> String {
-	match moq_mux::catalog::CatalogFormat::detect(name) {
-		Some(format) => {
-			let stem = &name[..name.len() - format.extension().len()];
-			format!("{stem}/{program}{}", format.extension())
-		}
-		None => format!("{name}/{program}"),
-	}
 }
 
 // Exactly one Source exists per process, so the size gap between the small
@@ -402,8 +291,8 @@ impl Publish {
 	/// the catalog tracks, so announcing after it lands the advertisement with
 	/// the tracks already in place.
 	///
-	/// Stdin is a live feed with its own zero, so the container importers translate its
-	/// timestamps onto the broadcast clock the catalog advertises (`live`).
+	/// Stdin is a live feed with its own zero: the container importers publish its timestamps
+	/// verbatim and anchor the catalog clock so the first frame is live on arrival.
 	pub fn new(
 		mut broadcast: moq_net::broadcast::Producer,
 		format: &PublishFormat,
@@ -433,12 +322,12 @@ impl Publish {
 				}
 			}
 			PublishFormat::Fmp4 => {
-				let fmp4 = fmp4::Import::new(broadcast.clone(), catalog.reserve()).live();
+				let fmp4 = fmp4::Import::new(broadcast.clone(), catalog.reserve());
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
 			PublishFormat::Ts { .. } => unreachable!("TS is handled above with the mpegts catalog extension"),
 			PublishFormat::Flv => {
-				let flv = flv::Import::new(broadcast.clone(), catalog.reserve()).live();
+				let flv = flv::Import::new(broadcast.clone(), catalog.reserve());
 				PublishDecoder::Flv(Box::new(flv))
 			}
 		};
@@ -460,7 +349,7 @@ impl Publish {
 	pub fn ts_programs(origin: moq_net::origin::Producer, name: String, config: moq_mux::catalog::Config) -> Self {
 		Self {
 			source: Source::Stream {
-				decoder: PublishDecoder::TsPrograms(Box::new(TsPrograms::new(origin, name, config))),
+				decoder: PublishDecoder::TsPrograms(Box::new(ts::Programs::new(origin, name, config))),
 				catalog: PublishCatalog::TsPrograms,
 			},
 			broadcast: None,
@@ -527,20 +416,22 @@ impl Publish {
 				audio,
 			} => {
 				// Each enabled medium publishes its own track onto the shared
-				// broadcast + catalog. Frames are stamped from the catalog's
-				// advertised clock so HLS/DASH wall times match the mapping on
+				// broadcast + catalog. Both stamp frames on the catalog's
+				// advertised clock, so HLS/DASH wall times match the mapping on
 				// the wire. Video encodes on demand (camera opens only while
 				// subscribed). Both run on this task rather than a spawn: on
 				// macOS the audio future holds ObjC handles across an await,
 				// so it is `!Send`.
-				let clock = catalog.clock();
 				let video_fut = {
 					let broadcast = broadcast.clone();
 					let catalog = catalog.clone();
 					async move {
 						match video {
 							Some((config, encode)) => {
-								moq_video::encode::publish_capture(broadcast, catalog, config, encode, clock)
+								let mut options = moq_video::encode::Capture::default();
+								options.capture = config;
+								options.encode = encode;
+								moq_video::encode::publish_capture(broadcast, catalog, options)
 									.await
 									.map_err(anyhow::Error::from)
 							}
@@ -551,10 +442,9 @@ impl Publish {
 				let audio_fut = async move {
 					match audio {
 						Some((config, encode)) => {
-							let mut options = moq_audio::encode::PublicationOptions::default();
+							let mut options = moq_audio::encode::Capture::default();
 							options.capture = config;
 							options.encode = encode;
-							options.clock = clock;
 							moq_audio::encode::publish_capture(broadcast, catalog, options)
 								.await
 								.map_err(anyhow::Error::from)
@@ -952,23 +842,20 @@ mod tests {
 		);
 	}
 
-	/// `moq import ts` publishes on the broadcast clock it advertises: a feed arriving a minute
-	/// after the broadcast began is live on arrival, not stamped with its own PTS (1.4s into bbb).
+	/// `moq import ts` publishes the feed's own PTS (1.4s into bbb) and anchors the catalog
+	/// clock on it, so the first frame is live on arrival.
 	#[tokio::test]
-	async fn ts_import_publishes_on_the_broadcast_clock() {
-		let ago = Duration::from_secs(60);
-		let clock = moq_mux::Clock::at(std::time::Instant::now() - ago, std::time::SystemTime::now() - ago).unwrap();
+	async fn ts_import_anchors_the_catalog_clock_on_arrival() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let config = moq_mux::catalog::Config::default().with_clock(clock);
-		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, config).unwrap();
+		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
 		#[allow(irrefutable_let_patterns)]
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
 		};
-		let before = clock.now();
+		let before = std::time::SystemTime::now();
 		decoder.decode_chunk(BBB).unwrap();
-		let after = clock.now();
+		let after = std::time::SystemTime::now();
 		decoder.finish().unwrap();
 
 		let catalog = hang::catalog::Catalog::<()>::subscribe(&consumer)
@@ -978,11 +865,7 @@ mod tests {
 			.await
 			.unwrap()
 			.expect("a catalog");
-		assert_eq!(
-			catalog.clock,
-			Some(clock.wall()),
-			"the advertised clock is the one stamped on"
-		);
+		let clock = catalog.clock.expect("the catalog advertises a clock");
 		let (name, config) = catalog.video.renditions.iter().next().expect("a video rendition");
 		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
 		let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
@@ -992,11 +875,16 @@ mod tests {
 			.unwrap()
 			.expect("a video frame")
 			.timestamp;
-		// The PES that anchors the mapping need not be this frame: the mux spaces them apart.
-		let skew = Duration::from_secs(2).as_micros();
 		assert!(
-			before.as_micros() - skew <= first.as_micros() && first.as_micros() <= after.as_micros() + skew,
-			"the first frame is live on arrival: {first:?} not in {before:?}..={after:?}"
+			first.as_micros() < Duration::from_secs(5).as_micros(),
+			"the feed's own PTS: {first:?}"
+		);
+		// The PES that anchors the mapping need not be this frame: the mux spaces them apart.
+		let skew = Duration::from_secs(2);
+		let wall = clock.wall_clock(first).unwrap();
+		assert!(
+			before - skew <= wall && wall <= after + skew,
+			"the first frame is live on arrival"
 		);
 	}
 
@@ -1029,13 +917,6 @@ mod tests {
 		let last = last.expect("a catalog");
 		assert_eq!(last.video.renditions.len(), 1, "the video rendition is still listed");
 		assert_eq!(last.audio.renditions.len(), 1, "the audio rendition is still listed");
-	}
-
-	#[test]
-	fn program_broadcasts_keep_the_catalog_suffix_last() {
-		assert_eq!(program_broadcast("event.hang", 2), "event/2.hang");
-		assert_eq!(program_broadcast("demo/event.msf", 7), "demo/event/7.msf");
-		assert_eq!(program_broadcast("event", 1), "event/1");
 	}
 
 	/// A PAT listing two programs, then one MP2 PES of each: program 1 on PID `0x61` at 1 s
@@ -1143,61 +1024,6 @@ mod tests {
 		};
 		let err = format!("{:#}", decoder.decode_chunk(&two_programs()).unwrap_err());
 		assert!(err.contains("--program") && err.contains("programs (1, 2)"), "{err}");
-	}
-
-	/// `import ts --program all` holds the input until the PAT is whole, then publishes each
-	/// program as its own broadcast carrying only that program, live on its own first frame
-	/// rather than an hour apart on one shared clock.
-	#[tokio::test]
-	async fn every_program_publishes_its_own_broadcast() {
-		let origin = moq_tokio::origin::spawn();
-		let ago = Duration::from_secs(60);
-		let clock = moq_mux::Clock::at(std::time::Instant::now() - ago, std::time::SystemTime::now() - ago).unwrap();
-		let config = moq_mux::catalog::Config::default().with_clock(clock);
-		let publish = Publish::ts_programs(origin.clone(), "event.hang".to_string(), config);
-		let Source::Stream {
-			decoder: PublishDecoder::TsPrograms(mut programs),
-			..
-		} = publish.source
-		else {
-			panic!("expected the per-program decoder");
-		};
-
-		let input = two_programs();
-		let before = clock.now();
-		programs.decode(&input[..100]).unwrap();
-		assert!(
-			programs.programs.is_empty(),
-			"no program is known before the PAT is whole"
-		);
-		programs.decode(&input[100..]).unwrap();
-		programs.finish().unwrap();
-		let after = clock.now();
-
-		for (path, fills) in [("event/1.hang", [0xAA, 0xBB]), ("event/2.hang", [0xCC, 0xDD])] {
-			let consumer = moq_mux::Source::new(origin.consume(), path).broadcast().await.unwrap();
-			let catalog = hang::catalog::Catalog::<()>::subscribe(&consumer)
-				.await
-				.unwrap()
-				.next()
-				.await
-				.unwrap()
-				.expect("a catalog");
-			let renditions: Vec<_> = catalog.audio.renditions.iter().collect();
-			assert_eq!(renditions.len(), 1, "{path} carries its own program's one stream");
-			let (name, config) = renditions[0];
-			let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
-			let container = Container::try_from(config).unwrap();
-			let frame = Consumer::new(track, container).read().await.unwrap().expect("a frame");
-			assert!(fills.contains(&frame.payload[4]), "{path} carries only its own program");
-			let skew = Duration::from_secs(2).as_micros();
-			assert!(
-				before.as_micros() - skew <= frame.timestamp.as_micros()
-					&& frame.timestamp.as_micros() <= after.as_micros() + skew,
-				"{path} is live on arrival: {:?} not in {before:?}..={after:?}",
-				frame.timestamp
-			);
-		}
 	}
 
 	/// Read the first frame of a verbatim track back as raw bytes.

@@ -22,8 +22,11 @@ import asyncio, moq
 
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
-        # The filter is relative to the literal prefix; updates stay origin-relative.
-        async for announcement in client.announced("live/", filter="*/camera"):
+        # The filter is relative to the literal prefix; prefixes stay origin-relative.
+        async for event in client.announced("live/", filter="*/camera"):
+            if not isinstance(event, moq.AnnounceEventStart):
+                continue  # AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventLive
+            announcement = event.announce
             print(announcement.captures)  # what * matched, or None for a partial overlap
             broadcast = await client.request_broadcast(announcement.prefix)
             catalog = await broadcast.catalog()
@@ -65,6 +68,11 @@ async def main():
         status.update({"state": "live", "viewers": 42})
 
         broadcast.announce()
+        audio.finish()
+        video.finish()
+        events.finish()
+        status.finish()
+        broadcast.close()
 
 asyncio.run(main())
 ```
@@ -77,14 +85,17 @@ The three advertising operations, as the other bindings spell them:
 `client.create_broadcast(path)` (or `OriginProducer.create_broadcast`) returns
 an unannounced producer, invisible to everyone; `broadcast.announce(route)` /
 `broadcast.unannounce()` own that exact-path advertisement, and
-`broadcast.close()` ends the broadcast for good (a second call is a no-op;
-`finish()` is its deprecated alias);
+`broadcast.close()` ends the broadcast for good (a second call is a no-op);
 `origin.dynamic(prefix, route)` claims `prefix` and every path beneath it
 (`""` for everything). Hold the returned handle while the claim should stay
 advertised, and reject the requests you will not serve. A route is a
 capability, not an inventory. `announced(prefix, filter=...)` combines a literal
-root with an optional relative pattern; each announcement `.prefix` stays
-relative to the origin and `.captures` reports what the pattern wildcards matched.
+root with an optional relative pattern and yields `AnnounceEvent`s:
+`AnnounceEventStart`, `AnnounceEventUpdate`, or `AnnounceEventEnd`
+carrying an `Announce` as `.announce`, whose `.prefix` stays relative to the
+origin and whose `.captures` reports what the pattern wildcards matched, or
+`AnnounceEventLive` once every route live at subscribe time has been delivered.
+Break on `AnnounceEventLive` to list what is live and stop.
 Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless
 `hidden=True`.
 
@@ -111,14 +122,26 @@ Each server request reports a `moq.Transport` enum, including QUIC, Iroh,
 WebSocket, TCP, and Unix sockets.
 
 `encode_audio` encodes raw PCM inside the binding. Its codec is an object,
-`moq.AudioCodec.opus()`, and `AudioEncoderOutput.frame_duration_us` sets the
-Opus frame length: 2500, 5000, 10000, 20000 (the default), 40000, or 60000.
+`moq.AudioCodec.opus()` or `moq.AudioCodec.aac()`, and
+`AudioEncoderOutput.frame_duration_us` sets the Opus frame length: 2500, 5000,
+10000, 20000 (the default), 40000, or 60000. 0 takes the codec's own frame,
+which AAC needs. AAC-LC encodes through the platform's encoder, so a host
+without one refuses it.
 
-`decode_video` picks the decoded CPU pixel layout: `VideoDecoderOutput.format`
-is `VideoPixelFormat.I420` when unset, or `VideoPixelFormat.RGBA` for four
-bytes a pixel, and every frame repeats the layout it was decoded to. `resize`
+Audio `channels` also names the speaker layout, by the WAVE convention: 1 is
+mono, 2 stereo, 3 2.1, 4 quad, 5 5.0, 6 5.1, 7 6.1, and 8 7.1, interleaved
+front left, front right, center, LFE, back, then side. Decoding remixes to the
+count you ask for; past 8 channels the samples pass through but can't be
+remixed.
+
+Each frame from `decode_video` owns its decoded picture until it is released,
+including after the consumer is cancelled. `frame.pixels(format)` converts it on
+demand: `VideoPixelFormat.I420`, or `VideoPixelFormat.RGBA` for four bytes a
+pixel. Drop frames promptly, since held frames hold decoder buffers. `resize`
 is best effort: only NVDEC has a built-in scaler, so read each frame's own
-`width` and `height` rather than assuming it took.
+`width()` and `height()` rather than assuming it took. `VideoDecoderOutput(surface=True)`
+keeps the decoder's surface for `frame.surface()` instead of downloading it. Only macOS
+has one, so `decode_video` fails as unsupported elsewhere.
 
 ## Connection stats
 
@@ -142,3 +165,7 @@ not the same as zero.
 - API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io)
 - Source and examples: [`py/moq-rs`](https://github.com/moq-dev/moq/tree/main/py/moq-rs)
 - Raw bindings: [`moq-ffi`](https://pypi.org/project/moq-ffi/) on PyPI, for the unwrapped API
+
+Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).
+
+Await `session.shutdown()` to drain finished tracks before disconnecting. It raises if delivery has not completed within one second. `cancel(code)` stays immediate. Session and client async context managers await shutdown on a clean exit and cancel on an error, so the body's exception survives; finish or abort live tracks first. IETF media streams are not drained yet.

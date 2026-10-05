@@ -27,7 +27,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/8590d2a1ddd91c2f499adf37b78aad0d673e3228";
+      url = "github:kixelated/quest/362489bcf02833d8674cff339463b086442cf92d";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
       inputs.crane.follows = "crane";
@@ -135,7 +135,7 @@
             # unification would otherwise hide a broken single-crate build.
             cargo-hack
             cargo-nextest
-            # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just wasm`).
+            # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just js wasm`).
             # wasm-bindgen-cli must match the `wasm-bindgen` crate version (the
             # crate is pinned to nixpkgs' CLI version); bump both together.
             wasm-bindgen-cli
@@ -158,6 +158,8 @@
             # time (bindgenHook above provides libclang). Linux-only; macOS uses
             # ScreenCaptureKit.
             pkgs.pipewire
+            # Isolated X11 server for SHM/GetImage capture measurements.
+            pkgs.xvfb-run
           ];
 
         # Where the shell's libasound looks for PCM plugins.
@@ -245,10 +247,9 @@
         ];
 
         # Linters / formatters used by `just check` and `just fix`, which
-        # guard each tool with `command -v` so they skip silently when the
-        # binary isn't on $PATH. CI sets MOQ_STRICT=1, which turns that skip
-        # into an error (see `_tools` in the root justfile), so this list and
-        # that one have to stay in step.
+        # skip a module whose tools aren't on $PATH. CI sets MOQ_STRICT=1,
+        # which turns that skip into an error (see the tools map in
+        # sh/dispatch.sh), so this list and that one have to stay in step.
         lintDeps = with pkgs; [
           shellcheck
           shfmt
@@ -277,8 +278,8 @@
         # dependency in rs/moq-ffi/Cargo.toml. Five other places name the same
         # generator version and must be bumped together: the repo and revision
         # in release-go-ffi.yml, and the `cargo install` line in
-        # rs/moq-ffi/build.sh, go/ffi/README.md, go/scripts/check.sh, and
-        # go/scripts/stage.sh.
+        # rs/moq-ffi/build.sh, go/ffi/README.md, sh/go/check.sh, and
+        # sh/go/stage.sh.
         #
         # This points at a fork rather than NordSecurity because upstream has no
         # uniffi 0.32 generator: the metadata encoding changed in 0.32 even
@@ -428,6 +429,8 @@
 
         # Apply our overlay to get the package definitions
         overlayPkgs = pkgs.extend self.overlays.default;
+
+        quest-cli = quest.packages.${system}.default;
       in
       {
         packages = (rec {
@@ -446,7 +449,7 @@
           # The package was `moq-cli` through 0.12.2. Refuse with the new name
           # so `nix run` and `nix profile upgrade` break instead of going stale.
           moq-cli = pkgs.writeShellScriptBin "moq" ''
-            echo "error: the moq-cli package is now moq: nix run github:moq-dev/moq#moq" >&2
+            echo "error: the moq-cli package is now moq: nix run github:moq-dev/moq/release#moq" >&2
             exit 1
           '';
 
@@ -455,11 +458,15 @@
             moq-relay
             moq-bench
             moq-boy
-            libmoq
+            moq-c
             moq-gst
             ;
 
           inherit uniffi-bindgen-dart;
+
+          # The quest CLI alone, so quest.yml can validate the tree without
+          # realising the whole dev shell.
+          quest = quest-cli;
 
           # Bundle of packaging + repo-publish tooling, pinned via flake.lock.
           # CI builds this and prepends its bin/ to $PATH so subsequent steps
@@ -505,7 +512,7 @@
             ++ goDeps
             ++ dartDeps
             ++ devTools
-            ++ [ quest.packages.${system}.default ];
+            ++ [ quest-cli ];
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).
@@ -531,6 +538,10 @@
           '';
 
           env = {
+            # What sh/dispatch.sh checks before a scoped `just check` or `just
+            # fix`. IN_NIX_SHELL would also pass inside another project's shell.
+            MOQ_DEV_SHELL = "1";
+
             # Where `just obs compile` and `just obs test` look for libobs. Set
             # on every platform so the plugin type-checks against the pinned OBS
             # release everywhere, rather than whatever the host happens to have.

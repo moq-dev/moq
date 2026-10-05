@@ -15,6 +15,33 @@ A released flag, environment variable, or config key that was renamed is
 refused at startup with its replacement named, rather than ignored. Fix what the
 error lists and rerun.
 
+## Unreleased
+
+These land with the next breaking release, not the 2026-09-23 train.
+
+- **moq-binary is moq-flate, and @moq/binary is @moq/flate.** The opaque
+  `snapshot` and `stream` tracks moved beside the codec; the wire and the
+  catalog's `binary` section are unchanged. In Rust, `moq_binary::X` is
+  `moq_flate::X`, and `moq_binary::Error::Flate(e)` is the matching
+  `moq_flate::Error` variant (`Decompress`, `TooLarge`). `moq_flate::Error`
+  now carries `moq_net::Error`, so it is no longer `PartialEq`. moq-mux's
+  `Error::Binary` is `Error::Flate`. In TypeScript, import `Snapshot` and
+  `Stream` from `@moq/flate`.
+- **moq-ffi flate tracks.** `publish_binary_snapshot` / `publish_binary_stream`
+  are `publish_flate_snapshot` / `publish_flate_stream`, taking
+  `MoqFlateConfig` and returning `MoqFlateSnapshotProducer` /
+  `MoqFlateStreamProducer`. The C `moq_publish_binary_*` calls are unchanged.
+- **Track demand is read through `demand()`.** In Rust, `track::Producer`'s
+  `is_used`, `used`, `unused`, and `poll_unused` are `producer.demand().X`.
+  The moq-json snapshot and moq-flate `is_used()` is `demand().is_used()`.
+  In TypeScript, `Track.Producer`'s `used` and `unused()` are
+  `producer.demand().used` and `.unused()`, and `Allocator.reserve` takes
+  `producer.demand()`, replacing the `Bandwidth.Demand` interface.
+- **moq-mux has no clock translators.** `clock::Anchor`, `clock::Lane`, and
+  `SourceMap` (#4667) are gone, along with the importers' `live()`. Publish the
+  source's own timestamps and let the catalog clock map them to wall time;
+  pin that mapping with `Config::with_clock` when the source's zero is known.
+
 ## Wire
 
 Older protocol versions still negotiate, so relays and clients can be upgraded
@@ -49,6 +76,7 @@ variables follow the flag (`MOQ_SERVER_BIND` is `MOQ_LISTEN`).
 | TOML `listen`, `connect`, `failover_delay`, `reconnect`, `disable_verify` | `bind`, `url`, `race`, `once` (inverted), `insecure` |
 | `--cluster-linger` | removed; a broadcast closes when its last publisher is lost |
 | `--cluster-connect host:port` | a full URL, `https://host/?jwt=TOKEN` |
+| `--cluster-mesh`, TOML `mesh` | removed; list every peer with `--cluster-connect` or `--cluster-connect-api` |
 | `moq --origin`, `--name`, `--latency-max` | `--hop`, `--broadcast`, `--max-age` |
 | `moq publish`, `moq subscribe` | `moq import`, `moq export` |
 | `moq token`, the `moq-token` binary | `moq auth` |
@@ -98,9 +126,14 @@ Other changes to a deployment:
   the relay's client CA verifies, so keep that CA to cluster peers.
 - **`moq --listen` needs auth.** A CLI listener refuses to start without
   `--auth-url` or `--auth-public` instead of accepting everyone.
-- **Other 0.14 auth differences kept.** A 0.14 peer that dials with a
-  cluster JWT no longer sees `.internal/origins` gossip; peers identify by
-  certificate or LAN path. An auth server's `root` alias may have any depth.
+- **Gossip discovery is removed.** A relay dials only the peers it lists or
+  finds on the LAN, never a URL learned from an announcement, and no longer
+  announces `.internal/origins`. The `/nodes` endpoint lists only peers this
+  relay dialed. Until every relay that ran `--cluster-mesh` is upgraded, keep
+  client grants off `.internal/`: an older relay still dials any URL announced
+  there with `cluster.token`, and an upgraded peer still forwards it.
+- **Other 0.14 auth differences kept.** Peers identify by certificate or LAN
+  path. An auth server's `root` alias may have any depth.
   A path in `--cluster-connect` is not refused, although it shifts the mesh
   frame. `moq auth serve --key` takes a file, not an https or JWKS URL.
   `moq auth sign --root` is the token root and JS `verify --root` the dialed
@@ -181,7 +214,7 @@ PRs, so a minor rename may be missing.
   is `Watch.Player({ origin: connection.origin, ... })`.
 - **@moq/publish** takes `origin: connection.origin` instead of a
   `connection` signal.
-- **@moq/json and @moq/binary** take one options object (#3640):
+- **@moq/json and @moq/binary** (now `@moq/flate`) take one options object (#3640):
   `new Json.Snapshot.Consumer({ track })` instead of `(track, config)`.
 - **@moq/hang** reads the catalog `archive` entry instead of `timeline`.
 

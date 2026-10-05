@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.19.19"
+version = "0.19.21"
 edition = "2024"
 rust-version.workspace = true
 
@@ -45,7 +45,6 @@ tcp = ["_transport", "dep:qmux", "dep:dns-lookup"]
 # inspection on accept. Pulls in `tcp` (shares qmux's stream transport).
 uds = ["tcp", "qmux/uds"]
 ring = ["_certs", "rustls/ring", "rcgen/ring", "web-transport-moq?/ring"]
-android-logcat = ["dep:tracing-android"]
 
 [dependencies]
 bytes = "1"
@@ -98,7 +97,7 @@ x509-parser = "0.18"
 # `tls::init_android`); jni is the bridge. Until init runs, verification falls
 # back to the bundled Mozilla roots.
 jni = "0.22"
-tracing-android = { version = "0.2", optional = true }
+tracing-android = "0.2"
 webpki-roots = "1"
 
 [target.'cfg(unix)'.dependencies]
