@@ -21,6 +21,14 @@ broadcast name or the group numbers a relay cached under it.
   instead of regressing the merged total.
 - MoQ Pro wants to share the same epoch with its storage stats, so expose it
   from `Producer`.
+- `release` carries a temporary seed instead
+  ([#4810](https://github.com/moq-dev/moq/pull/4810)): a producer's first group
+  number is wall-clock microseconds, so a restarted node numbers above its
+  previous run. Epochs replace it, so it never reaches `main`: release-to-main
+  back-merges keep `main`'s `rs/moq-stats` and `doc/concept/stats.md`. Drop the
+  seed and its `doc/concept/stats.md` sentence from `release` when this ships
+  there. MoQ Pro's VOD `storage.json` seeds the same way and moves to the
+  shared epoch with it.
 - demo/web stats keys include the epoch. Update `doc/concept/stats.md`,
   `doc/bin/relay/config.md`, and the relay stats config docs.
 

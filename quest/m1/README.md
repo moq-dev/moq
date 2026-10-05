@@ -19,16 +19,17 @@ A line with no named consumer waits in m3 until one appears; the 2026-10-05
 audit moved P2P, ladder, processor, and timed metadata there from m2.
 
 Decided in the 2026-10-05 audit: the clock chain ranks first (import at the
-first frame, typed timedness, the untimed models, CMAF frame timestamp, the
-shared clock, and the two publish-timestamp quests), with FFI shape pulled up
-inside it because publishing never invents a timestamp requires its JSON
-pilot. The hard fork follows, ahead of transport-seam and perf, and the rest
+first frame, the HLS first catalog, typed timedness, the untimed models,
+CMAF frame timestamp, the shared clock, and the two publish-timestamp
+quests), with FFI shape pulled up inside it because publishing never invents
+a timestamp requires its JSON pilot. The hard fork follows, ahead of transport-seam and perf, and the rest
 of the QUIC line follows the fork. Every blocker ranks above the work it
 blocks. The quests that gated m0 lines moved under them.
 
 ## Required
 
 - [Import at the first frame](/quest/m1/import-first-frame.md) - fMP4, MKV, and MPEG-TS imports publish the catalog at their first frame, so a lone importer's root clock never moves
+- [HLS first catalog](/quest/m1/hls-first-catalog.md) - moq-hls import's first catalog lists every rendition from the master playlist, not only the first
 - [Typed timedness](/quest/m1/typed-timedness.md) - a track is all timed or all untimed, `Info.timescale` is optional, and `Timed` loses its clock parameter, in Rust, JS, and the bindings
 - [Untimed model](/quest/m1/untimed-model.md) - an untimed moq-net track reaches every subscriber untimed; no receiver fills in arrival time
 - [JS untimed model](/quest/m1/js-untimed-model.md) - the same in @moq/net
