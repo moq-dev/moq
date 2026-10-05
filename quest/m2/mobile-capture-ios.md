@@ -7,6 +7,7 @@ through ReplayKit.
 
 ## Plan
 
+Rust owns capture and codecs on mobile, settled in the 2026-09-30 audit ([Mobile ownership](/quest/m1/mobile-ownership.md)).
 Not a new codec backend. VideoToolbox encode, decode, and the native
 PixelBuffer surface compile on iOS (the `apple` cfg in moq-video). Verify the
 runtime path on a device rather than assuming desktop behavior. The new work is
@@ -21,10 +22,6 @@ device when it stops, rather than assuming a session it opened stays valid.
 Reuse the `capture::Source` shape the other platforms use rather than growing
 an iOS-specific entry point, so device enumeration and selection behave the
 same everywhere.
-
-## Required
-
-- [Ownership boundary](/quest/m1/mobile-ownership.md) - decides whether Rust owns capture on mobile at all
 
 ## Related
 

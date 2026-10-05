@@ -67,6 +67,27 @@ media *args:
 drill *args:
     just rs test -p moq-relay --test drills "$@"
 
+# Plays a tone in headless Chromium through moq-shaper and grades what the listener
+# heard (underruns, skip-aheads, silence, the resolved delay) against
+# audio-quality/budgets.json. The full matrix is 24 rows at 60 s; nightly runs it with
+# --enforce. Narrow it with `--profiles mild --codecs opus --rings plain --duration 20`.
+# `--replays` grades only the recorded traces, in seconds, as PRs touching the player do.
+# See audio-quality/README.md.
+
+# Grade browser audio playout over an impaired path.
+[positional-arguments]
+audio-quality *args:
+    ./audio-quality/run.sh "$@"
+
+# Records the arrival traces under audio-quality/traces/ that the replay rows grade: the
+# public relay's bbb.hang, a local relay's AAC tone, and a browser microphone through the
+# public relay. Needs the network. Narrow it with `--lanes relay-bbb --duration 35`.
+
+# Re-record the audio quality arrival traces.
+[positional-arguments]
+audio-quality-record *args:
+    ./audio-quality/record.sh "$@"
+
 # Removes one recovery behavior at a time in a disposable copy of the tree and
 # requires the drill covering it to fail, for the reason the mutation names. The
 # checkout is never modified. `--list` shows the mutations.
@@ -95,6 +116,14 @@ ts *args:
 [positional-arguments]
 ts-eit *args:
     ./ts/eit-roundtrip.sh "$@"
+
+# A JS viewer watching a live track through a relay that drains (SIGTERM, after
+# a stand-in for DNS stops pointing at it) migrates to a second relay behind the
+# same name without a dropped group. See drain/README.md.
+
+# Relay drain migration, end to end.
+drain *args:
+    ./drain/run.sh {{ args }}
 
 # Runs the @moq/wasm bindings in headless Chromium against a real relay, one per
 # protocol flavour. The crate is `#![cfg(target_arch = "wasm32")]`, so nothing in

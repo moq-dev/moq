@@ -11,7 +11,7 @@ and verb maps to a Rust one. A docs page shows the layers in each language.
 ## Plan
 
 Lands after the release, as one binding break in Python, Go, Swift, and
-Kotlin (Dart is unpublished), so its PRs retarget to `dev`.
+Kotlin (Dart is unpublished).
 
 Settled shape:
 

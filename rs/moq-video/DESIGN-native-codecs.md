@@ -290,9 +290,9 @@ A backend "fails to open" (driver missing, no device) the same way an ffmpeg
 6. **VAAPI backend** (cros-codecs) last, behind its feature -- the GBM/DMA-buf
    plumbing is isolated and non-blocking once openh264 covers the fallback.
 
-This work (including the capture swap and ffmpeg removal) ships to `dev`, since
-it's a breaking change to `moq-video`'s public API and a dependency overhaul.
-It reaches `main` on the next `dev` -> `main` merge.
+This work (including the capture swap and ffmpeg removal) is a breaking change
+to `moq-video`'s public API and a dependency overhaul, so it ships in the next
+release cut.
 
 ## Risks / open questions
 

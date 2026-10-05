@@ -24,14 +24,13 @@ pub(crate) enum Event {
 ///
 /// Groups can arrive on the wire out of order. The consumer always reads frames *within*
 /// a group in arrival order, but across groups it advances by sequence number, skipping
-/// stalled or missing groups when the difference between the oldest pending timestamp
-/// and the newest available timestamp exceeds the configured max age. With the default
-/// max age of zero, the consumer skips aggressively. Any group that has a newer
-/// alternative is dropped. With a non-zero max age, slow groups are tolerated up to that
-/// budget before being skipped. A missing sequence gets the same tolerance: there is no
-/// way to tell a stream that lost the delivery race from one the cache evicted, so the
-/// consumer waits for it until everything it could still present (bounded by where the
-/// next group begins) falls a full budget behind the newest content.
+/// a stalled or missing group once everything it could still present (bounded by where
+/// the next group begins) falls a full budget behind the newest content, the same reach
+/// [`moq_net::track::Subscription::max_age`] measures. With the default max age of zero,
+/// the consumer skips aggressively: any group that has a newer alternative is dropped.
+/// With a non-zero max age, slow groups are tolerated up to that budget before being
+/// skipped. A missing sequence gets the same tolerance: there is no way to tell a stream
+/// that lost the delivery race from one the cache evicted.
 ///
 /// Delivery starts at the [`Subscription::start`](moq_net::track::Subscription::start)
 /// floor when one is named, waiting for that group under the budget; without one it
@@ -235,8 +234,10 @@ impl<F: Container> Consumer<F> {
 					Poll::Ready(Ok(Some(Event::Frame(frame)))) => {
 						let seq = group.group.sequence;
 						let ts = frame.timestamp;
-						if self.floor.is_some_and(|floor| ts.as_micros() < floor.as_micros()) {
-							return Poll::Ready(Err(TimestampRewind.into()));
+						if let Some(floor) = self.floor
+							&& ts.as_micros() < floor.as_micros()
+						{
+							return Poll::Ready(Err(TimestampRewind { timestamp: ts, floor }.into()));
 						}
 						if self.start.is_none_or(|(start, _)| start != seq) {
 							self.start = Some((seq, ts));
@@ -307,17 +308,16 @@ impl<F: Container> Consumer<F> {
 				}
 			}
 
-			// Get the current group's min timestamp (the reference for age
-			// comparison) and its furthest presentation point (timestamp + duration).
-			let (oldest_timestamp, current_end) = if let Some(current) = self.pending.front_mut()
+			// The current group's furthest presentation point (timestamp + duration).
+			let current_end = if let Some(current) = self.pending.front_mut()
 				&& current.sequence <= self.current
 			{
 				match current.poll_min_timestamp(waiter, &self.format) {
-					Poll::Ready(Ok(ts)) => (Some(std::time::Duration::from(ts)), current.max_end),
-					_ => (None, None),
+					Poll::Ready(Ok(_)) => current.max_end,
+					_ => None,
 				}
 			} else {
-				(None, None)
+				None
 			};
 
 			// Find the first newer group with data (our skip target) and where it starts.
@@ -369,24 +369,18 @@ impl<F: Container> Consumer<F> {
 				continue;
 			}
 
-			let should_skip = if let Some((_, next_start)) = next_group {
-				if let Some(oldest) = oldest_timestamp {
-					// Current group is blocking. Skip if newer groups have pulled past
-					// the max age budget, or if the current group has already presented
-					// up to where the next group begins (duration coverage) so there's
-					// nothing left worth waiting for.
-					let over_max_age = max_timestamp.saturating_sub(oldest) >= self.max_age;
-					let covered = current_end.is_some_and(|end| end >= next_start);
-					over_max_age || covered
-				} else {
-					// The current group has arrived but has no frame yet. Its content
-					// is bounded by where the next stamped group begins the same way a
-					// missing one's is, so give it the same budget before giving up.
-					max_timestamp.saturating_sub(next_start) >= self.max_age
-				}
-			} else {
-				false
-			};
+			// The current group is blocking. Everything it could still present ends
+			// where the next group begins, so skip once that reach falls a full budget
+			// behind the newest content, the same measure as a missing group. Its own
+			// first frame is no bound: a group longer than the budget would be cut
+			// short whenever it blocks behind a newer one, as a join's backlog does
+			// while the newer groups race ahead on their own streams. Skip early too
+			// once it has presented up to where the next group begins (duration
+			// coverage), since nothing is left worth waiting for.
+			let should_skip = next_group.is_some_and(|(_, next_start)| {
+				max_timestamp.saturating_sub(next_start) >= self.max_age
+					|| current_end.is_some_and(|end| end >= next_start)
+			});
 
 			if let Some((new_idx, next_start)) = next_group
 				&& should_skip
@@ -482,7 +476,7 @@ impl<F: Container> Consumer<F> {
 	// A later group with a media timestamp below the latest delivered group's start is malformed:
 	// group starts never go backwards. Markers have no media timestamp, so they are not this check.
 	fn poll_malformed(&mut self, waiter: &kio::Waiter) -> Result<(), F::Error> {
-		let Some((prev_group, edge)) = self.start else {
+		let Some((prev_group, floor)) = self.start else {
 			return Ok(());
 		};
 
@@ -491,9 +485,9 @@ impl<F: Container> Consumer<F> {
 				continue;
 			}
 			if let Poll::Ready(Ok(min)) = group.poll_min_timestamp(waiter, &self.format)
-				&& min.as_micros() < edge.as_micros()
+				&& min.as_micros() < floor.as_micros()
 			{
-				return Err(TimestampRewind.into());
+				return Err(TimestampRewind { timestamp: min, floor }.into());
 			}
 		}
 
@@ -1115,6 +1109,62 @@ mod tests {
 		finisher.await.expect("finisher task panicked");
 	}
 
+	/// A group longer than the budget that blocks for a moment behind a newer group is
+	/// not cut short while what it could still present (up to where the newer group
+	/// begins) is within the budget. A join's backlog does exactly this: the newer group
+	/// races ahead on its own stream while the older one is still arriving.
+	#[test]
+	fn a_long_group_blocked_behind_a_newer_one_is_not_cut_short() {
+		let waiter = kio::Waiter::noop();
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let mut consumer = container_max_age_only(track.subscribe(None), Duration::from_secs(2));
+		let write = |group: &mut moq_net::group::Producer, timestamp: Timestamp| {
+			let frame = Frame {
+				timestamp,
+				payload: Bytes::from_static(&[0xDE, 0xAD]),
+				keyframe: false,
+				duration: None,
+			};
+			Container::Legacy(crate::container::Kind::Data)
+				.write(group, &[frame])
+				.unwrap();
+		};
+		let read = |consumer: &mut Consumer<Container>| match consumer.poll_read(&waiter) {
+			Poll::Ready(Ok(Some(frame))) => Some(frame.timestamp),
+			Poll::Pending => None,
+			other => panic!(
+				"unexpected read: {:?}",
+				other.map(|r| r.map(|f| f.map(|f| f.timestamp)))
+			),
+		};
+
+		// A 2.5 s group, half arrived, and the next one already 0.5 s in.
+		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		write(&mut group0, ts(0));
+		write(&mut group0, ts(500_000));
+		let mut group1 = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		write(&mut group1, ts(2_500_000));
+		write(&mut group1, ts(3_000_000));
+
+		assert_eq!(read(&mut consumer), Some(ts(0)));
+		assert_eq!(read(&mut consumer), Some(ts(500_000)));
+		// Group 0's reach (2.5 s) is 0.5 s behind the newest frame: wait for it.
+		assert_eq!(read(&mut consumer), None, "cut group 0 short");
+		write(&mut group0, ts(1_000_000));
+		assert_eq!(read(&mut consumer), Some(ts(1_000_000)));
+		group0.finish().unwrap();
+		assert_eq!(read(&mut consumer), Some(ts(2_500_000)));
+
+		// Once the reach falls a full budget behind, the stalled group is skipped.
+		let mut group2 = track.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
+		write(&mut group2, ts(5_000_000));
+		write(&mut group2, ts(7_000_000));
+		assert_eq!(read(&mut consumer), Some(ts(3_000_000)));
+		assert_eq!(read(&mut consumer), Some(ts(5_000_000)));
+		group1.finish().unwrap();
+		group2.finish().unwrap();
+	}
+
 	// ---- Malformed rewind ----
 
 	#[tokio::test]
@@ -1126,7 +1176,15 @@ mod tests {
 		write_group(&mut track, 1, &[ts(0)]);
 		track.finish().unwrap();
 		let err = consumer.read().await.unwrap_err();
-		assert!(matches!(err, crate::Error::TimestampRewind(_)));
+		assert!(matches!(
+			err,
+			crate::Error::TimestampRewind(TimestampRewind { timestamp, floor })
+				if timestamp == ts(0) && floor == ts(100_000)
+		));
+		assert_eq!(
+			err.to_string(),
+			"frame timestamp 0 µs is below the previous group's start 100000 µs"
+		);
 	}
 
 	#[tokio::test]
@@ -1267,7 +1325,15 @@ mod tests {
 		track.finish().unwrap();
 		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(200_000));
 		let err = consumer.read().await.unwrap_err();
-		assert!(matches!(err, crate::Error::TimestampRewind(_)));
+		assert!(matches!(
+			err,
+			crate::Error::TimestampRewind(TimestampRewind { timestamp, floor })
+				if timestamp == ts(50_000) && floor == ts(100_000)
+		));
+		assert_eq!(
+			err.to_string(),
+			"frame timestamp 50000 µs is below the previous group's start 100000 µs"
+		);
 	}
 
 	// ---- Empty payloads ----
@@ -1575,6 +1641,95 @@ mod tests {
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert!(frames.len() >= 4, "Expected >= 4 frames, got {}", frames.len());
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn truncated_resumed_group_skips_to_the_next_clean_group() {
+		let origin = crate::source::produce_origin();
+		let hops = moq_net::Hops::try_from(vec![moq_net::Hop::new(10).unwrap()]).unwrap();
+		let first_route = origin
+			.dynamic(
+				"live",
+				moq_net::origin::Route::default().with_hops(hops.clone()).with_cost(5),
+			)
+			.unwrap();
+		let pending = origin.consume().request_broadcast("live");
+		let first = moq_net::broadcast::Info::new().produce();
+		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
+		let first_track = first.create_track("video", info.clone()).unwrap();
+		first_route.requested_broadcast().await.unwrap().accept(&first);
+		let broadcast = pending.await.unwrap();
+		let track = broadcast
+			.track("video")
+			.unwrap()
+			.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(2)))
+			.await
+			.unwrap();
+		let format = Container::Legacy(crate::container::Kind::Data);
+		let mut consumer = Consumer::new(track, Container::Legacy(crate::container::Kind::Data));
+
+		let mut open = first_track.create_group(0u64.into()).unwrap();
+		format
+			.write(
+				&mut open,
+				&[Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: true,
+					duration: None,
+				}],
+			)
+			.unwrap();
+
+		// Each cheaper route takes over beyond group 0 without holding its continuation,
+		// while the first route stays up but silent. They carry the same broadcast, so each
+		// holds every group from 1 on. The open group is given up once the track runs a
+		// full budget past it.
+		let mut routes = Vec::new();
+		let mut sources = Vec::new();
+		for sequence in 1..=4 {
+			let route = origin
+				.dynamic(
+					"live",
+					moq_net::origin::Route::default()
+						.with_hops(hops.clone())
+						.with_cost(5 - sequence),
+				)
+				.unwrap();
+			let source = moq_net::broadcast::Info::new().produce();
+			let mut track = source.create_track("video", info.clone()).unwrap();
+			route.requested_broadcast().await.unwrap().accept(&source);
+			track.demand().used().await.unwrap();
+			if sequence == 1 {
+				assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(0));
+			}
+			for sequence in 1..=sequence {
+				write_group(&mut track, sequence, &[ts(sequence * 1_000_000)]);
+			}
+			routes.push(route);
+			sources.push((source, track));
+		}
+
+		let waiter = kio::Waiter::noop();
+
+		// The aborted group 0 skips straight to its successor; a short clean group emits
+		// GroupEnd.
+		let event = consumer.poll_event(&waiter);
+		let Poll::Ready(Ok(Some(Event::Frame(frame)))) = event else {
+			panic!(
+				"expected a successor frame, current={}; pending={}",
+				consumer.current,
+				event.is_pending()
+			);
+		};
+		assert_eq!(frame.timestamp, ts(1_000_000));
+		assert!(frame.keyframe);
+		assert_eq!(consumer.current, 1);
+		assert!(
+			matches!(consumer.poll_event(&waiter), Poll::Ready(Ok(Some(Event::GroupEnd)))),
+			"the complete successor still emits its clean boundary"
+		);
+		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(2_000_000));
 	}
 
 	// ---- Eviction recovery (pause/resume) ----

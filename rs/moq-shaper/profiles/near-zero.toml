@@ -1,0 +1,7 @@
+# The control: the shaper sits in the path but treats nothing.
+#
+# Every other profile is graded against this one, and a harness asserting that an
+# impairment applied needs a profile where `delayed == 0` is the right answer.
+name = "near-zero"
+seed = 1
+shared = true

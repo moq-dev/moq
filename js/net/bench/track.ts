@@ -38,7 +38,11 @@ function receive(subscribers: Subscriber[]): GroupConsumer[] {
 	return received;
 }
 
-async function measure(retained: number, subscriberCount: number, held: number): Promise<number> {
+async function measure(
+	retained: number,
+	subscriberCount: number,
+	held: number,
+): Promise<{ publish: number; end: number }> {
 	// Held groups would age out too, so those rows keep everything instead.
 	const window = Milli(held > 0 ? 3_600_000 : retained);
 	const producer = new Producer("bench").accept({ maxAge: window });
@@ -78,23 +82,32 @@ async function measure(retained: number, subscriberCount: number, held: number):
 
 	for (const group of open) group.close();
 	await Promise.all(reads);
+	// Completion wakes every subscriber independently of producer closure.
+	const ending = subscribers.map((subscriber) => subscriber.recvGroup());
+	const endStart = now();
+	producer.finishAt(sequence);
+	for (const group of await Promise.all(ending)) {
+		if (group) throw new Error("track did not end at its declared boundary");
+	}
+	const end = (now() - endStart) * 1000;
 	producer.close();
-	return (elapsed * 1000) / groups;
+	return { publish: (elapsed * 1000) / groups, end };
 }
 
 // Warm the JIT so the first row isn't the slowest.
 await measure(100, 1, 0);
 
-console.log("retained,subscribers,held,publish_us");
+console.log("retained,subscribers,held,publish_us,end_us");
 for (const held of heldCounts) {
 	for (const subscriberCount of subscriberCounts) {
 		let baseline: number | undefined;
 		for (const retained of retainedCounts) {
-			const samples: number[] = [];
+			const samples: { publish: number; end: number }[] = [];
 			for (let rep = 0; rep < reps; rep++) samples.push(await measure(retained, subscriberCount, held));
 			// The fastest run is the one least disturbed by the rest of the machine.
-			const us = Math.min(...samples);
-			console.log(`${retained},${subscriberCount},${held},${us.toFixed(1)}`);
+			const us = Math.min(...samples.map((sample) => sample.publish));
+			const end = Math.min(...samples.map((sample) => sample.end));
+			console.log(`${retained},${subscriberCount},${held},${us.toFixed(1)},${end.toFixed(1)}`);
 
 			baseline ??= us;
 			if (us > baseline * maxSlope) {

@@ -15,4 +15,4 @@ The `/py` uv workspace. Extends the root `AGENTS.md` and `rs/moq-ffi/AGENTS.md`.
 - Keyword-only args with defaults (`*, ...`) instead of an options object; that is how Python extends additively.
 - The package ships `py.typed`: types and docstrings are the API, so document public symbols.
 - `just py <recipe>` for everything. Tests live under each package's `tests/`.
-- Releases: `moq-ffi` tracks `rs/moq-ffi` and publishes on `moq-ffi-v*` tags; `moq-rs` is versioned by hand and publishes on merge to `main` when the version isn't on PyPI yet.
+- Releases: `moq-ffi` tracks `rs/moq-ffi` and publishes on `moq-ffi-v*` tags; `moq-rs` is versioned by hand and publishes on merge to `release` when the version isn't on PyPI yet.

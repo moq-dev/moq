@@ -507,6 +507,29 @@ mod tests {
 		assert!(matches!(script.connect().await, Err(Error::GrantExpired)));
 	}
 
+	/// Regression: a cadence past the clock's range overflowed `Instant` and panicked
+	/// the driver, at connect and on each reply. It never fires; the grant expires.
+	#[tokio::test]
+	async fn a_cadence_past_the_clock_never_rechecks() {
+		tokio::time::pause();
+		let log = Log::default();
+		let script = Script::new(log.clone(), |_| {
+			Some(Ok(grant(
+				Some(Duration::from_secs(3)),
+				Some(Duration::from_secs(u64::MAX)),
+			)))
+		});
+
+		let consumer = script.connect().await.unwrap();
+		// A nudge's reply schedules the next re-check the same way.
+		consumer.revalidate();
+		let reason = tokio::time::timeout(Duration::from_secs(4), consumer.closed())
+			.await
+			.expect("closed at expires");
+		assert_eq!(reason, Reason::Expired);
+		assert_eq!(log.revalidates(), 1, "only the nudge re-checked");
+	}
+
 	/// An outage is evidence of nothing: the grant stands through failed re-checks
 	/// until `expires`, and closes then, not later.
 	#[tokio::test]

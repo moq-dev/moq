@@ -10,8 +10,11 @@ source (`--connect`); `moq export srt` serves SRT to players or pushes to a
 remote. The payload is MPEG-TS, so the same codecs as [`import ts`](/bin/cli)
 apply: H.264/H.265 video and AAC, MP2, AC-3, or E-AC-3 audio. Ingest logs the
 same per-stream lines as `import ts`, under an `srt{path=...}` span: an
-elementary stream that stopped delivering access units, and audio frame sync
-lost.
+elementary stream that stopped delivering access units, audio frame sync lost,
+damaged units refused on each PID, and the TR 101 290 counters when one moves.
+They grade the TS as SRT delivered it, after retransmission. Damage drops that
+unit and keeps the session alive; video closes its group at the break and
+resumes at its next keyframe, freezing for up to one GOP.
 
 ```bash
 # Accept a contribution feed and publish it

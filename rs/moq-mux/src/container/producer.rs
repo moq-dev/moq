@@ -403,17 +403,23 @@ where
 	///
 	/// Group starts never go backwards: a keyframe below the start of the previous group, or any
 	/// frame below the start of the group before its own, returns
-	/// [`TimestampRewind`](super::TimestampRewind) without writing, the way an oversized frame is
-	/// refused. That is a restart, which is a new broadcast. Frames may still dip below the
-	/// previous group's content: B-frames, open-GOP leading pictures, and a keyframe that
-	/// overlaps the previous group's last frame.
+	/// [`TimestampRewind`](super::TimestampRewind) with the refused timestamp and that start,
+	/// without writing, the way an oversized frame is refused. That is a restart, which is a new
+	/// broadcast. Frames may still dip below the previous group's content: B-frames, open-GOP
+	/// leading pictures, and a keyframe that overlaps the previous group's last frame.
 	pub fn write(&mut self, frame: Frame) -> crate::Result<()> {
 		let floor = match frame.keyframe {
 			true => self.start,
 			false => self.floor,
 		};
-		if floor.is_some_and(|floor| timestamp_lt(frame.timestamp, floor)) {
-			return Err(super::TimestampRewind.into());
+		if let Some(floor) = floor
+			&& timestamp_lt(frame.timestamp, floor)
+		{
+			return Err(super::TimestampRewind {
+				timestamp: frame.timestamp,
+				floor,
+			}
+			.into());
 		}
 
 		// A keyframe cuts the previous group, using its timestamp as the boundary where the

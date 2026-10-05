@@ -9,7 +9,7 @@ TypeScript runs the same tests under bun.
 ## Plan
 
 tokio is in moq-net's tests only for paused, advanceable time
-(`start_paused`, `advance`): 591 `tokio::test`s on dev, 86 of them paused.
+(`start_paused`, `advance`): 591 `tokio::test`s, 86 of them paused.
 Drive them from the model's injectable clock and a small synchronous
 executor instead.
 

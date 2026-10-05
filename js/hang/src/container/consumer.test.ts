@@ -100,12 +100,14 @@ test("LegacyFormat throws on empty input", () => {
 	expect(() => format.decode(new Uint8Array(0))).toThrow();
 });
 
-test("Legacy Producer refuses a group below the live edge", () => {
+test("Legacy Producer refuses a group below the previous group start", () => {
 	const track = new Track.Producer("test");
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
-	producer.encode(new Uint8Array([1]), 0 as Time.Micro, true);
+	producer.encode(new Uint8Array([1]), 20_000 as Time.Micro, true);
 	producer.encode(new Uint8Array([1]), 33_000 as Time.Micro, false);
-	expect(() => producer.encode(new Uint8Array([1]), 16_000 as Time.Micro, true)).toThrow("below the live edge");
+	expect(() => producer.encode(new Uint8Array([1]), 16_000 as Time.Micro, true)).toThrow(
+		"below the previous group start",
+	);
 	producer.close();
 });
 
@@ -241,7 +243,7 @@ test("Legacy Producer refuses a keyframe that rewinds the timeline", () => {
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	producer.encode(new Uint8Array([1]), 20_000 as Time.Micro, true);
 	producer.encode(new Uint8Array([2]), 30_000 as Time.Micro, false);
-	expect(() => producer.encode(new Uint8Array([3]), 0 as Time.Micro, true)).toThrow("below the live edge");
+	expect(() => producer.encode(new Uint8Array([3]), 0 as Time.Micro, true)).toThrow("below the previous group start");
 	producer.close();
 });
 
@@ -819,7 +821,7 @@ async function nextFrame(consumer: Consumer) {
 	}
 }
 
-test("Consumer aborts a group below the live edge", async () => {
+test("Consumer aborts a group below the previous group start", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), maxAge: 30_000 as Time.Milli });
 
@@ -828,7 +830,7 @@ test("Consumer aborts a group below the live edge", async () => {
 	await settle();
 
 	expect((await nextFrame(consumer))?.frame?.timestamp).toBe(10_000_000 as Time.Micro);
-	await expect(nextFrame(consumer)).rejects.toThrow("below the live edge");
+	await expect(nextFrame(consumer)).rejects.toThrow("below the previous group start");
 
 	consumer.close();
 });
@@ -846,13 +848,13 @@ test("Consumer aborts a rewind carried by a later arrival", async () => {
 	await settle();
 	writeGroupWithLegacyFrames(track, 1, [0 as Time.Micro, 100_000 as Time.Micro]);
 
-	await expect(pending).rejects.toThrow("below the live edge");
+	await expect(pending).rejects.toThrow("below the previous group start");
 
 	consumer.close();
 });
 
 // Decode order dips below presentation order inside every group with B-frames. That is not a
-// rewind, so the live edge the detector compares against has to be the group's own.
+// rewind, so the detector compares against the previous group's start.
 test("Consumer treats B-frame reordering within a group as continuous", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), maxAge: 30_000 as Time.Milli });

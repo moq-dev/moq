@@ -37,6 +37,10 @@ These land with the next breaking release, not the 2026-09-23 train.
   In TypeScript, `Track.Producer`'s `used` and `unused()` are
   `producer.demand().used` and `.unused()`, and `Allocator.reserve` takes
   `producer.demand()`, replacing the `Bandwidth.Demand` interface.
+- **moq-mux has no clock translators.** `clock::Anchor`, `clock::Lane`, and
+  `SourceMap` (#4667) are gone, along with the importers' `live()`. Publish the
+  source's own timestamps and let the catalog clock map them to wall time;
+  pin that mapping with `Config::with_clock` when the source's zero is known.
 
 ## Wire
 

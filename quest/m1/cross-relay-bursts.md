@@ -27,4 +27,4 @@ cluster-routing evidence, not this quest's scope.
 
 ## Related
 
-- [Cluster routing](/quest/m1/cluster-routing/README.md) - owns the stale and flapping announcements from the same report
+- [Routes and announces](/quest/m1/cluster-routing/routes.md) - owns the stale and flapping announcements from the same report

@@ -283,21 +283,18 @@ test("a restart updates the route in place, even from another publisher", async 
 		route: { hops: [PUBLISHER_B, PEER] },
 	});
 
-	// The holder keeps its broadcast to drain, but the next consume starts fresh rather
-	// than reusing the old publisher's cached track info.
-	const fresh = subscriber.consume(room);
-	expect(fresh.closed).not.toBe(held.closed);
+	// The path still names the same broadcast, so the next consume shares it.
+	expect(subscriber.consume(room).closed).toBe(held.closed);
 	expect(held.closed.peek()).toBeUndefined();
 
-	// A third publisher is another update. The one above has to leave its own publisher on
-	// record, or this one would not read as a change.
+	// A third publisher is another update, still the same broadcast.
 	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_C] }, Version.DRAFT_06));
 	expect(await announced.next()).toMatchObject({
 		prefix: room,
 		kind: "update",
 		route: { hops: [PUBLISHER_C, PEER] },
 	});
-	expect(subscriber.consume(room).closed).not.toBe(fresh.closed);
+	expect(subscriber.consume(room).closed).toBe(held.closed);
 
 	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, Version.DRAFT_06));
 	expect(await nextRoute(announced)).toMatchObject({ prefix: room, kind: "end" });
@@ -366,7 +363,7 @@ test("a lite-05 duplicate announce follows the same restart rule", async () => {
 // A responder that withholds its Hop ID sends the reserved 0, and an empty chain means it
 // originated the path itself, so the advertisement names nobody and the connection stamps it.
 // A restart on the same connection keeps that stamp, so it is a reprice that updates in place
-// and keeps the shared broadcast. Only a first hop that changes names a new publisher.
+// and keeps the shared broadcast, as does one that names a publisher.
 test("a restart from an unidentified publisher updates in place", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
 	const announced = subscriber.announced();
@@ -388,10 +385,10 @@ test("a restart from an unidentified publisher updates in place", async () => {
 	expect(await nextRoute(announced)).toMatchObject({ prefix: room, kind: "update" });
 	expect(subscriber.consume(room).closed).toBe(held.closed);
 
-	// Naming a publisher is a change of publisher: the next consume starts fresh.
+	// Naming a publisher changes the route, not the broadcast.
 	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_A] }, Version.DRAFT_06));
 	expect(await nextRoute(announced)).toMatchObject({ prefix: room, kind: "update" });
-	expect(subscriber.consume(room).closed).not.toBe(held.closed);
+	expect(subscriber.consume(room).closed).toBe(held.closed);
 
 	announced.close();
 	subscriber.close();
@@ -1005,6 +1002,30 @@ test.each([
 		const err = fromTransport(await streams[1].aborted) as StreamError;
 		expect(err.code).toBe(StreamCode.Cancel);
 	}
+
+	subscriber.close();
+});
+
+// A reader leaving partway through a fetched group cancels the FETCH: the truncated group
+// must not end clean, as a FIN would make it read whole.
+test("the last reader leaving mid-response cancels the fetch", async () => {
+	const { quic, streams } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+
+	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0);
+	await drainUntil(() => streams.length === 1);
+	await answerTrackInfo(streams[0]);
+	await drainUntil(() => streams.length === 2);
+	await streams[1].reading;
+
+	// One frame of the group: a zero timestamp delta, then the sized payload.
+	streams[1].inbound.enqueue(new Uint8Array([0, 4, ...new TextEncoder().encode("head")]));
+	const group = await fetch;
+	expect(new TextDecoder().decode((await group.readFrame())?.payload)).toBe("head");
+	group.close();
+
+	const err = fromTransport(await streams[1].aborted) as StreamError;
+	expect(err.code).toBe(StreamCode.Cancel);
 
 	subscriber.close();
 });

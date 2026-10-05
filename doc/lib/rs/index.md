@@ -104,7 +104,8 @@ quic.send_window = Some(32 << 20);          // unacknowledged data we may hold
 let client = moq_tokio::connect::Config::default().init(quic)?;
 ```
 
-Unset flow-control windows keep the transport defaults, and `init` errors on a
+Unset flow-control windows keep the transport defaults, except `receive_window`,
+which defaults to 64 MiB because the transport's is unlimited. `init` errors on a
 knob the transport cannot honor rather than dropping it: iroh cannot disable
 GSO. `quic::Resolved::default()` is what an
 untouched config resolves to, so read the defaults from there. The
