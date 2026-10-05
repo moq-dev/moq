@@ -29,8 +29,9 @@ group 0.
   that onto the shared producer and delete the duplicate writer, so one path
   numbers every snapshot track.
 - `catalog::Producer` (`rs/moq-mux/src/catalog/producer.rs`) builds two
-  snapshot producers (`hang` and `hangz`); pass the choice through to both so
-  their groups stay paired.
+  snapshot producers (`hang` and `hangz`). Each catalog update picks one
+  sequence and writes it to both, so their groups stay paired; a test checks
+  the pair shares a sequence.
 - JS: `js/json`'s snapshot producer gets the same option if it has the same
   `append_group` shape; mirror the name.
 - Tests: a seeded producer starts at the seed; a recreated producer seeded
