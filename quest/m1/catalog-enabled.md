@@ -14,8 +14,9 @@ instead of a removal.
 Decided (2026-10-04):
 
 - Wire: an optional `enabled` boolean on every rendition, audio and video,
-  written only when false. Writers stop writing `stalled`; readers treat a
-  legacy `stalled: true` as `enabled: false`. Update
+  written only when false. Writers stop writing `stalled`, and readers ignore
+  it: released publishers still flap it, and following it would keep #4772
+  alive for them. Update
   `drafts/draft-lcurley-moq-hang.md` (replacing the `stalled` section, with a
   changelog entry, since `stalled` shipped in -03), `doc/concept/hang.md`, and
   run `just drafts check`. MSF stops mirroring `stalled` and does not mirror
@@ -37,7 +38,10 @@ Decided (2026-10-04):
   graph ([audio graph lifetime](/quest/m1/watch-audio-graph.md)).
 - Bandwidth: a rendition is enabled only once its reservation is granted, and
   disabled, with encoding stopped, when the grant falls below its floor,
-  until the grant recovers. The [ladder](/quest/m2/ladder/README.md) and
+  until the grant recovers. A disabled rendition loses its subscribers, and
+  the allocator grants nothing to an undemanded track, so recovery evaluates
+  a hypothetical share against the current estimate instead of waiting for a
+  grant. The [ladder](/quest/m2/ladder/README.md) and
   [audio grant following](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md)
   adopt that rule; this quest only defines the field.
 - Everything else that names `stalled` moves to `enabled`: moq-transcode's
@@ -48,8 +52,8 @@ Decided (2026-10-04):
 
 Tests: disabling an audio rendition publishes a catalog with the same
 rendition and `enabled: false`, and a viewer deselects it and keeps one
-AudioContext across disable and enable; a legacy `stalled: true` reads as
-disabled; nothing in the tree writes `stalled`.
+AudioContext across disable and enable; a legacy `stalled: true` changes
+nothing; nothing in the tree writes `stalled`.
 
 ## Required
 

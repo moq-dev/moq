@@ -17,8 +17,9 @@ upgrades, reads SETUP, and then admits; the relay is the outlier.
 Decided (2026-10-04): the relay hands the upgraded socket to moq-tokio's
 `Request`, so `Connection::run` serves WebSocket as it serves QUIC, and the
 relay's duplicate admit and supervise loop is deleted. Every refusal becomes
-an in-band close, mapped as the io_uring path does (403 to `Unauthorized`,
-502 to `App(502)`). It admits after SETUP, which
+an in-band close, mapped as the io_uring path does: 401 and 403 to
+`Unauthorized`, 502 to `App(502)`. An expired token keeps its own
+`Error::Expired` path ([expired error](/quest/m1/auth/expired-error.md)). It admits after SETUP, which
 [token in band](/quest/m1/auth/token-in-band.md) needs anyway. It needs a new
 public moq-tokio constructor for an already-upgraded socket; keep it minimal.
 

@@ -26,11 +26,19 @@ Decided (2026-10-04):
 - A new `mp4` format that requires `--output` (it must seek); `export fmp4`
   stays a stream to stdout.
 
-Open for the PR: a graceful-finish path in `moq-cli` (today SIGINT drops the
-task set), and what a second Ctrl+C or SIGTERM does; edit lists or stretched
-durations for gaps and track start offsets; co64 and a 64-bit mdat header for
-files over 4 GB; whether a returning rendition with a new config gets an
-extra sample description.
+- Finishing is required, not best effort: the first SIGINT or SIGTERM
+  finalizes the file, which needs a graceful-finish path in `moq-cli` (today
+  SIGINT drops the task set). A second signal aborts at once and leaves the
+  crash-safe fragmented file.
+- No size limit: always write co64 chunk offsets and a 64-bit (largesize) mdat
+  header.
+
+Tests: SIGINT during a recording produces a regular MP4 that parses with its
+moov at the end; a second SIGINT leaves a playable fragmented file.
+
+Open for the PR: edit lists or stretched durations for gaps and track start
+offsets; whether a returning rendition with a new config gets an extra sample
+description.
 
 ## Related
 

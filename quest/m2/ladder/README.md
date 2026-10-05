@@ -25,10 +25,10 @@ state shipped in [moq#2865](https://github.com/moq-dev/moq/pull/2865):
 rendition. Routing, decoder, and presentation identities are split so a
 metadata-only change cannot rebuild WebCodecs.
 
-Decided (2026-10-04): a rung is enabled only once its reservation is granted
-at or above its boundary, and disabled, with encoding stopped, when the grant
-falls below it, until the grant recovers. Demand loss alone never changes the
-flag.
+Decided (2026-10-04): a rung's `enabled` follows its last applied target. It
+is disabled, with encoding stopped, when its share falls below its boundary,
+and enabled once a target at or above the boundary is applied. Demand loss
+alone never changes the flag.
 
 What remains is the publisher side. The allocator
 ([moq#2854](https://github.com/moq-dev/moq/pull/2854)) divides a connection's
@@ -61,7 +61,7 @@ stall = (max + 2 * lower) / 3
 The lowest rendition takes `lower = 0`, so its boundary is `max / 3`. An
 encoder may adapt within `[stall, max]`; below the boundary the rung is
 disabled (`enabled: false`) and stops encoding, and it is enabled again only
-once a target above the same boundary is successfully applied. Catalog state follows the last target the encoder
+once a target at or above the same boundary is successfully applied. Catalog state follows the last target the encoder
 *accepted*, not the one the controller requested, so a transient rate-control
 failure retains the last applied target rather than lying.
 

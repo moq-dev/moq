@@ -19,11 +19,14 @@ that is not in the moov, and ffprobe rejects the file.
 
 Decided (2026-10-04):
 
-- Init from the catalog: write avc3 and hev1 sample entries from the
-  catalog's profile and level, with SPS and PPS in-band, so the init is ready
-  at the first catalog and the wait disappears for H.264 and H.265. Apple
-  prefers hvc1 for HEVC and some editors handle avc3 poorly; that is the
-  accepted trade.
+- Init from the catalog: write avc3 and hev1 sample entries with SPS and PPS
+  in-band, so the init is ready at the first catalog and the wait disappears
+  for H.264 and H.265. Only when the catalog carries everything the entry's
+  configuration record needs: hvcC (and avcC for high profiles) also holds
+  chroma format and bit depths, which `build_hvcc` reads from the SPS and the
+  codec string does not carry. Otherwise the track waits for its SPS in the
+  bounded queue below. Apple prefers hvc1 for HEVC and some editors handle
+  avc3 poorly; that is the accepted trade.
 - For a codec whose entry still needs the bitstream, drain every ready track
   into a per-track fragment queue before the init, keeping fragment
   boundaries, and flush after the moov. The queue is bounded; exceeding it
@@ -41,7 +44,9 @@ Decided (2026-10-04):
 Tests: an H.264 Annex-B export whose audio starts 2 s before the first
 keyframe keeps that audio; a rendition removed and re-added after the init
 writes under its original id and the output parses; a new name, an
-incompatible config, and a backwards replay each fail the export.
+incompatible config, and a backwards replay each fail the export; a 10-bit
+HEVC source whose catalog lacks bit depth waits for its SPS and is described
+correctly.
 
 ## Closes
 
