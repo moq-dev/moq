@@ -228,12 +228,7 @@ mod tests {
 		);
 
 		let captured = (epoch + Duration::from_secs(2)).into_std();
-		let (timed, at) = clock.stamp(moq_net::Timed::from("payload").at(captured)).unwrap();
-		assert_eq!(timed.at, Some(us(2_000_000)));
-		assert_eq!(at, Some(us(2_000_000)));
-		let (untimed, at) = clock.stamp(moq_net::Timed::from("payload")).unwrap();
-		assert_eq!(untimed.at, Some(us(3_000_000)));
-		assert_eq!(at, None);
+		assert_eq!(clock.capture(captured).unwrap(), us(2_000_000));
 		assert!(matches!(
 			clock.capture((epoch + Duration::from_secs(4)).into_std()),
 			Err(crate::Error::InvalidCapture)
