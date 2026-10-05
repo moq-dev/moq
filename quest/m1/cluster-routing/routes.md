@@ -2,8 +2,8 @@
 
 ## Goal
 
-Routing info splits into two layers on the session's announce stream, in the
-wip lite version, for every session. A ROUTE advertises reachability of one
+Routing info splits into two layers on the session's announce stream, in
+lite-07 (the current wip version, decided 2026-10-05), for every session. A ROUTE advertises reachability of one
 origin node; an ANNOUNCE says a prefix lives at a route's node and carries no
 path. A link flap or relay loss sends one ROUTE change per origin whose best
 route changed, never a re-announce per broadcast; ending a broadcast reaches
@@ -27,7 +27,8 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
   route stays up. An announce never changes its Route ID: another origin
   serving the same path is another ANNOUNCE. An ANNOUNCE naming an unknown
   Route ID is a protocol violation, and ROUTE_END ends that stream's
-  ANNOUNCEs on the route. The hop list leaves this version.
+  ANNOUNCEs on the route. The hop list leaves lite-07, and with it the
+  `Hop Base`/`Hop Keep` compression.
 
   ```text
   ROUTE_START  node=0x7a3f seqno=41 metric=12   -> route 0

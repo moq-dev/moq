@@ -49,7 +49,6 @@ deferred for having no named consumer moved here.
 - [NVENC refresh](/quest/m3/intra-refresh-nvenc.md) - the NVENC backend encodes refresh mode for H.264 and HEVC
 - [V4L2 refresh](/quest/m3/intra-refresh-v4l2.md) - the V4L2 backend encodes refresh mode
 - [Bindings](/quest/m3/intra-refresh-bindings.md) - moq-ffi and every wrapper expose refresh mode, additive on the ffi-shape `Gop` enum
-- [RTSP import](/quest/m3/rtsp-import.md) - `moq import rtsp` publishes an IP camera from its own network, through a reusable `moq-rtsp` crate
 - [P2P](/quest/m3/p2p/README.md) - opted-in clients serve each other over data channels and iroh while the relay stays the rendezvous and the fallback, under application policy
 - [Route trust](/quest/m3/route-trust.md) - a peer grant lets a client link advertise the nodes behind it as one identity; P2P is its first consumer
 - [Ladder](/quest/m3/ladder/README.md) - a transcode ladder adapts to the uplink it publishes over, instead of encoding every live rung at its ceiling

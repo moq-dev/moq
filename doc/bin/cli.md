@@ -7,8 +7,9 @@ description: The moq media router, for publishing, playing, converting, and gate
 
 `moq` is a media router. One process connects to a relay (or hosts sessions
 itself) and moves media into MoQ from a source, out of MoQ to a sink, or plays
-it locally. Install it with `cargo install moq-cli`, brew, apt, dnf, winget,
-or Docker; see [Install](/setup/install).
+it locally. On macOS or Linux, install it with
+`curl -fsSL https://moq.sh | sh`, or use cargo, brew, apt, dnf, winget, or
+Docker; see [Install](/setup/install).
 
 ## What it does
 

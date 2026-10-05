@@ -40,13 +40,12 @@ sync_file import, so an explicit-sync producer races it.
   probes, or `MOQ_VAAPI_DEVICE`) in a `OnceLock`. The encoder, decoder, and
   resize share it so a DMA-BUF moves between them without a copy. Choosing a
   node per surface makes `device()` per-node, so keep decode, resize, and
-  encode on one node per DMA-BUF. Open:
-  - map the surface's UUID to a render node with
-    `VK_EXT_physical_device_drm`, which needs a Vulkan instance on the VA-API
-    side;
-  - have the producer put the render node's `dev_t` in the surface, read from
-    its own `VK_EXT_physical_device_drm`. This is recommended: it is simpler
-    and adds a field to the [surface](/quest/m2/gpu-surface.md).
+  encode on one node per DMA-BUF. Decided 2026-10-05: the producer puts the
+  render node's `dev_t` in the [surface](/quest/m2/gpu-surface.md), read from
+  its own `VK_EXT_physical_device_drm`, and VA-API opens that node. It is
+  the one device identity [GPU health](/quest/m2/gpu-health.md) keys by too.
+  Rejected: mapping the surface's UUID to a node on the VA-API side, which
+  needs a Vulkan instance there.
 
   On the test host the iGPU is `renderD128` and an AMD card is `renderD129`.
 - Import the DMA-BUF with its modifier, and convert BGRA or RGBA to NV12
@@ -66,5 +65,6 @@ Public API: none beyond the surface quest's. Wire: none.
 
 - [Vulkan Video encode on AMD](/quest/m2/vulkan-encode.md) - the AMD half of the same proof
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - H.265 encode on the same backend
+- [GPU capacity and health](/quest/m2/gpu-health.md) - reports per device keyed by the same render node `dev_t`
 - [Linux OBS GPU input](/quest/m3/obs-linux-gpu.md) - a DMA-BUF producer that needs the same explicit sync
 - [Video hardware validation](/quest/m3/video-hardware.md) - VA-API so far ran only on Meteor Lake
