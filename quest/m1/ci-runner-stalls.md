@@ -25,4 +25,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- A week of nightly interop runs on `main` after #4529, which adds the `delay` column these traces need
+- [A week of nightly interop after #4529](/quest/m1/interop-week.md) - the traces carry the `delay` column

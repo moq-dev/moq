@@ -47,3 +47,12 @@ pub trait Stream: kio::MaybeSend + 'static {
 		Select::new(self, selection)
 	}
 }
+
+/// A boxed stream forwards to the stream it holds, so `Box<dyn Stream<Ext = E>>` is a stream.
+impl<S: Stream + ?Sized> Stream for Box<S> {
+	type Ext = S::Ext;
+
+	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog<Self::Ext>>>> {
+		(**self).poll_next(waiter)
+	}
+}

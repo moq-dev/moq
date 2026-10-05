@@ -48,6 +48,11 @@ export function isDraft20(version: IetfVersion): boolean {
 	);
 }
 
+/** Whether the Range Filters (draft-19) exist on this draft. */
+export function hasRangeFilters(version: IetfVersion): boolean {
+	return isDraft20(version) || version === Version.DRAFT_19;
+}
+
 /**
  * Draft-17 replaced QUIC's two-bit-length varint with a leading-1-bits one. The two agree
  * below 64 and diverge above it, so getting this wrong is invisible until group or object

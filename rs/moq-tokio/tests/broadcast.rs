@@ -1232,10 +1232,10 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 		.expect("request timeout")
 		.expect("broadcast resolves");
 	let budget = moq_net::track::Subscription::default().with_max_age(Duration::from_millis(100));
-	async fn recv(sub: &mut moq_net::track::Subscriber) -> u64 {
+	async fn recv(sub: &mut moq_net::track::Subscriber, version: &str) -> u64 {
 		tokio::time::timeout(TIMEOUT, sub.recv_group())
 			.await
-			.expect("recv timeout")
+			.unwrap_or_else(|_| panic!("{version}: recv timeout"))
 			.expect("recv failed")
 			.expect("track ended")
 			.sequence
@@ -1247,7 +1247,7 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 		.subscribe(budget.clone())
 		.await
 		.expect("subscribe");
-	recv(&mut sub).await;
+	recv(&mut sub, version).await;
 	drop(sub);
 
 	// The front parks the track and cancels upstream, while the publisher moves on.
@@ -1265,14 +1265,14 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 		.subscribe(budget)
 		.await
 		.expect("resubscribe");
-	let first = recv(&mut sub).await;
+	let first = recv(&mut sub, version).await;
 	assert!(
 		first > 4,
 		"{version}: a rejoining reader was served the stale cache first: group {first}"
 	);
 	let mut sequence = first;
 	while sequence < 20 {
-		sequence = recv(&mut sub).await;
+		sequence = recv(&mut sub, version).await;
 		assert!(
 			sequence >= 4,
 			"{version}: a rejoining reader was served stale group {sequence}"

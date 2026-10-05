@@ -1512,7 +1512,7 @@ mod tests {
 				"{name} does not declare MUTABLE_READY"
 			);
 		}
-		for (name, value) in [("quic-idle-timeout", 30_000), ("quic-keep-alive", 5_000)] {
+		for (name, value) in [("quic-idle-timeout", 10_000), ("quic-keep-alive", 3_000)] {
 			assert_eq!(spec(&sink, name).value_type(), u64::static_type());
 			assert_eq!(sink.property::<u64>(name), value);
 		}

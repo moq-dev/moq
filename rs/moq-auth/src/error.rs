@@ -105,6 +105,9 @@ pub enum Error {
 	#[error("session limits need a revalidate cadence, which ages out the slots of a relay that died")]
 	LimitsWithoutRevalidate,
 
+	#[error("the grant bound reaches past the system clock's range")]
+	ExpiresOutOfRange,
+
 	#[error("grant asks to be revalidated at no interval")]
 	ZeroRevalidate,
 

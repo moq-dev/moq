@@ -53,7 +53,7 @@ fi
 # The impact map: a module is in scope when a changed path matches its
 # pattern. An empty pattern is a repository-wide lint that runs on every diff.
 declare -A scope=(
-    [js]='^(js/|doc/|drafts/|demo/(boy|web)/|test/interop/clients/js|test/wasm/|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
+    [js]='^(js/|doc/|drafts/|demo/(boy|web)/|test/(audio-quality|interop)/clients/js|test/wasm/|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
     # Workers with lockfiles outside the Bun workspace.
     [workers]='^(infra/apt/|infra/rpm/|demo/pub/|sh/js/workers\.sh$)'
     # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
@@ -71,8 +71,8 @@ declare -A scope=(
     [py]='^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|doc/lib/py/|doc/lib/samples\.sh$)'
     [kt]='^(kt/|sh/kt/|rs/moq-ffi/|doc/lib/kt/|doc/lib/samples\.sh$)'
     [swift]='^(swift/|sh/swift/|rs/moq-ffi/|doc/lib/swift/|doc/lib/samples\.sh$)'
-    [go]='^(go/|sh/go/|rs/moq-ffi/)'
-    [dart]='^(dart/|sh/dart/|rs/moq-ffi/)'
+    [go]='^(go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)'
+    [dart]='^(dart/|sh/dart/|rs/moq-ffi/|doc/lib/dart/|doc/lib/samples\.sh$)'
     # The plugin calls moq-c through its generated header, and flake.nix owns
     # the libobs headers it compiles against.
     [obs_compile]='^(cpp/obs/|sh/obs/|rs/moq-c/|flake\.nix$)'

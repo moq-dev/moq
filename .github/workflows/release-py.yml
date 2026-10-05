@@ -5,7 +5,7 @@ name: Release Py
 # depends on are built separately (release-py-ffi.yml).
 #
 # Versioned independently of the moq-ffi crate: bump `version` in
-# py/moq-rs/pyproject.toml by hand in a normal PR. On merge to main this reads
+# py/moq-rs/pyproject.toml by hand in a normal PR. On merge to `release` this reads
 # that version and publishes only if it isn't already on PyPI. That registry
 # check is the release gate (the same model release-plz uses for crates), so
 # there's no separate tag to remember. When wrapper and FFI changes land
@@ -15,7 +15,7 @@ name: Release Py
 on:
   push:
     branches:
-      - main
+      - release
     paths:
       - "py/moq-rs/**"
       - ".github/workflows/release-py.yml"

@@ -3,9 +3,11 @@
 ## Goal
 
 Settle how independently operated MoQ networks exchange reachability without
-adding incomparable costs, at the cluster boundaries where
-[Cluster routing](/quest/m1/cluster-routing/README.md) keeps path vector with cluster
-ids as hops. Cost inside one cluster is cluster-routing's. Produce a
+adding incomparable costs, at the boundaries between operators on the one node id space
+[Cluster routing](/quest/m1/cluster-routing/README.md) routes over. Cost inside
+one operator's network is cluster-routing's. This includes whether a boundary
+may fold a large customer cluster's nodes into one advertised node, and how
+that keeps loop safety. Produce a
 reviewed design and scoped implementation quests, not a protocol
 implementation. Cloudflare, moq.pro, and self-hosted relays can retain their
 own business policy; no RTT/loss-driven repricing or automatic performance
@@ -17,7 +19,18 @@ Costs reflect SKU, directional egress economics, provider affinity, and marginal
 transfer savings. A hosting provider is not necessarily a policy domain:
 moq.pro can coordinate one model across its OVH and Linode nodes. Domain
 membership must come from an operator-controlled trust boundary, not a peer's
-unverified assertion.
+unverified assertion. Whatever identifies a boundary must hold to these
+operator-safety constraints:
+
+- A boundary is an explicitly configured link with an expected remote
+  identity. A URL, an observed address, or the `peer` grant alone does not
+  make a link a boundary.
+- The identity is bound to the authenticated link, whichever side dialed,
+  never taken from a route or announcement.
+- A missing, malformed, or mismatched boundary identity is fatal: refuse it
+  at startup or drop the link.
+- `cluster.id` is never reused as a domain identity. It is one node's id, and
+  sharing it across nodes merges distinct origins.
 
 Investigate a shared cost model within a coordinating domain and explicit
 import/export policy at its boundaries. A remote number is not comparable to
@@ -44,9 +57,8 @@ Use these references to evaluate the design:
 The design must work through examples of two operators using different scales,
 multiple entrances to one domain, asymmetric charges, mixed-provider nodes in
 one domain, unknown or untrusted peers, and a route leaving and re-entering a
-domain. Preserve publisher identity and loop safety across any metric rewrite.
-Explain how warm-route marginal savings interact with border policy without
-pretending those savings erase upstream delay. State tradeoffs, migration and
+domain. Preserve loop safety across any metric rewrite.
+State tradeoffs, migration and
 mixed-version behavior, and the limits of any convergence claim.
 
 Reconcile with cluster-routing's configured link costs rather than creating
@@ -56,9 +68,11 @@ quests. Open wire/API choices belong to this design exercise.
 
 ## Required
 
-- [Routing between clusters](/quest/m1/cluster-routing/inter-cluster.md) - this designs on its inter-cluster path vector
+- [Cluster routing](/quest/m1/cluster-routing/README.md) - the route layer this designs policy on
 
 ## Related
 
 - [#3769](https://github.com/moq-dev/moq/pull/3769) - measurement-based pricing
   prompted the separation of measurement, operator policy, and protocol
+- [#4718](https://github.com/moq-dev/moq/pull/4718) - the dropped
+  cluster-domain hop plan the boundary constraints come from

@@ -15,8 +15,8 @@
 //!
 //! - `capture` describes a frame source and grabs frames per platform:
 //!   AVFoundation/ScreenCaptureKit on macOS, native V4L2 on Linux, native Media
-//!   Foundation (camera), DXGI Desktop Duplication (screen), and GDI (window) on
-//!   Windows, plus portal/PipeWire on Wayland and X11 capture on Linux. Use
+//!   Foundation (camera) and Windows.Graphics.Capture (display/window) on
+//!   Windows 10 2004+, plus portal/PipeWire on Wayland and X11 capture on Linux. Use
 //!   `capture::open` for an embeddable raw-frame stream or
 //!   `encode::publish_capture` for turnkey publication. It requires the opt-in
 //!   `capture` feature, which costs the build host nothing on any platform.

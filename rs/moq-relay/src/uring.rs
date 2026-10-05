@@ -21,7 +21,7 @@ use std::task::Poll;
 
 use anyhow::Context as _;
 
-use crate::{auth, cluster, shutdown};
+use crate::{auth, cluster, refusals::Refusal, shutdown};
 
 /// A stop signal a worker parks on, wakeable from the shared runtime.
 #[derive(Default)]
@@ -693,15 +693,18 @@ async fn serve_connection(
 			Some(presented) => match serve.cluster.verify_lan_credential(presented) {
 				Some(true) => serve.auth.admit_fixed("/", serve.cluster.lan_peer_grant()),
 				Some(false) => {
+					serve.cluster.refusals.record(Refusal::Lan);
 					request.close(moq_net::Error::Unauthorized);
 					anyhow::bail!("LAN peer did not present this listener's membership proof");
 				}
 				None => {
+					serve.cluster.refusals.record(Refusal::Lan);
 					request.close(moq_net::Error::Unauthorized);
 					anyhow::bail!("/.cluster request refused: LAN discovery is not enabled");
 				}
 			},
 			None => {
+				serve.cluster.refusals.record(Refusal::Lan);
 				request.close(moq_net::Error::Unauthorized);
 				anyhow::bail!("LAN peer did not present a membership proof");
 			}
@@ -709,6 +712,7 @@ async fn serve_connection(
 		match serve.cluster.scope(lease, &auth_request) {
 			Ok(admitted) => admitted,
 			Err(err) => {
+				serve.cluster.refusals.record((&err).into());
 				request.close(moq_net::Error::Unauthorized);
 				return Err(err.into());
 			}
@@ -734,6 +738,7 @@ async fn serve_connection(
 				admitted
 			}
 			Err(err) => {
+				serve.cluster.refusals.record((&err).into());
 				// The status is what separates "your credential is bad" from "the
 				// auth server is down". Collapsing both into Unauthorized tells a
 				// client to stop reconnecting through an outage it could have

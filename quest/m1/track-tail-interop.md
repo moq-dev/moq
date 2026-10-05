@@ -38,4 +38,3 @@ delivered and clean. The ordering race itself stays in the unit tests.
 
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - owns the lite-07 drop case on top of this harness
 - [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - keeps a reset stream's header, so the reset acts as a one-group drop
-- [Close waits for the tail](/quest/m1/close-tail.md) - the publisher-side fix this test proves across a real relay

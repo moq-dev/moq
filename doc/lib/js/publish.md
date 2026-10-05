@@ -62,6 +62,10 @@ The video and audio encoders measure how far their output falls behind the media
 clock when they flush frames. Catalog jitter is the spread above each
 rendition's own recent minimum lateness, so a constant encoder delay is not jitter.
 The advertised value only rises; frame duration alone does not set it.
+The first estimate rise publishes immediately. Later rises within a second
+coalesce into one update at the end of that window carrying the latest value.
+Track additions, removals, and configuration edits publish immediately,
+including any pending estimate.
 
 ## Clock
 
@@ -145,3 +149,23 @@ audio rendition stays out of the catalog until samples flow.
 
 Every input and output is a signal from [`@moq/signals`](/lib/js/signals).
 Load from a CDN (`https://esm.sh/@moq/publish/element`) for a no-build embed.
+
+## Strict CSP
+
+The audio worklet and the capture worker load from `blob:` URLs by default, so
+they need no hosted files but a CSP must allow `blob:` in `script-src` and
+`worker-src`. For a CSP that refuses `blob:`, copy
+`node_modules/@moq/publish/assets/*` into a directory your origin serves, and
+point the package at it before capture starts:
+
+```ts
+import * as Publish from "@moq/publish";
+
+Publish.assets("/moq/");
+```
+
+The URL must end with `/`. Copy the files again on every upgrade: they change
+with the package. The capture worker only runs where the main thread lacks
+`MediaStreamTrackProcessor` (Firefox and Safari); if the hosted file fails to
+load, capture errors instead of hiding the broken deploy. `@moq/room`
+publishes through `@moq/publish`, so this one call covers it.

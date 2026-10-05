@@ -17,9 +17,9 @@ them.
 ## Plan
 
 Start from `origin/quest/m0/3477-watch-auto-latency`, the branch of the closed
-PR #3517, two commits ahead of `dev`. Rebase it onto the base branch first, and
+PR #3517. Rebase it onto the base branch first, and
 expect conflicts: `sync.ts` on `main` has since replaced the `audio`/`video`
-inputs with a `register(jitter)` list. Nothing on `main` or `dev` has any of
+inputs with a `register(jitter)` list. Nothing on `main` or `release` has any of
 it: `js/watch/src/sync.ts:159` still sizes auto from `minRtt * 1.25`.
 
 What the branch already has, and this quest keeps:
@@ -74,13 +74,23 @@ against it is likely cheaper than patching the branch's:
   came up on the 100 ms chip, so something is restoring or overriding it. Pin
   that down: a stored preference silently winning over the default is its own
   bug, and it also means auto gets far less real exposure than it looks like.
-- Replay recorded traces rather than synthetic ones of the same shape. The
-  #3477 traces are gone, so record fresh ones with the [browser
-  harness](/quest/m0/audio-quality-harness/browser.md) (decided with the
-  maintainer instead of asking the reporter). Trim a copy into the repository
-  and replay it through both rings in `replay.test.ts`.
+- Replay recorded traces rather than synthetic ones of the same shape.
+  `test/audio-quality/traces/` holds fresh ones (the #3477 traces are gone),
+  and `js/watch/src/audio/replay.ts` already plays a trace through
+  `Container.Consumer` and both rings on a simulated clock at the delay `Sync`
+  resolves. Replay them in `replay.test.ts`, move the replay's target onto the
+  estimator (its 100 ms fallback covers the public relay's missing PROBE RTT
+  until then), and tighten the harness's exact replay budgets with it. The
+  checked-in `test/audio-quality/budgets.json` was recorded locally (#4426);
+  re-record it from the nightly runner's first runs on `main` before
+  tightening, since nightly only runs `main`'s code. The replay sizes every
+  frame as the trace's median spacing, which a trace missing most of its
+  frames defeats; once the container knows the codec's frame duration, record
+  it in the trace and replay that instead.
 - Manual run against the public relay on Chrome and Safari, the two rows the
-  issue measured. Measure the publisher's audio encoder input-to-output lag in
+  issue measured. Re-record the `relay-mic` trace in the same run with a real
+  microphone (`just test audio-quality-record`); the checked-in one used
+  Chromium's fake capture device. Measure the publisher's audio encoder input-to-output lag in
   the same run using the reporter's instrumented harness; #3518 fixed the known
   cause, so the 7.35 s lag and the 88 to 275 ms/s drift the issue reported
   stand unconfirmed. If drift survives, the suspects are `writeFrame` opening a
@@ -94,7 +104,3 @@ quest lands on `main`, so it adds the spread inputs beside `probe` and stops
 reading `probe`; removing it is part of the `SyncInput` reshape in
 [Plan: A/V clock](/quest/m1/av-clock.md). Land the estimator so
 that quest can adopt it without a second estimator change.
-
-## Required
-
-- [Browser harness](/quest/m0/audio-quality-harness/browser.md) - records the arrival traces this quest replays

@@ -103,12 +103,25 @@ test("an unsolicited announcement lands", async () => {
 	// namespace on the way out.
 	const peer = await nextStream(pair.client);
 	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream to close");
+	peer.writer.close();
+	await peer.writer.closed;
+	// A second advertisement is a processing barrier: the FIN must not retract the first.
+	const second = await Stream.open(pair.server, { version: VERSION });
+	const other = subscriber.runPublishNamespace(
+		new PublishNamespace({ requestId: 2n, trackNamespace: Path.from("sentinel") }),
+		second,
+	);
+	expect(await nextRoute(announced)).toMatchObject({ prefix: Path.from("sentinel"), kind: "start" });
 	peer.close();
 	await handler;
 	expect(await nextRoute(announced)).toMatchObject({
 		prefix: Path.from("surprise"),
 		kind: "end",
 	});
+	const secondPeer = await nextStream(pair.client);
+	if (!secondPeer) throw new Error("missing sentinel stream");
+	secondPeer.close();
+	await other;
 });
 
 /**
@@ -653,8 +666,8 @@ test("a PUBLISH_NAMESPACE repricing is acknowledged in place", async () => {
 
 /**
  * An update whose first Hop ID differs names a different publisher. It still updates the
- * advertisement in place and the stream stays open. A broadcast already held keeps
- * draining, while the next consume starts fresh.
+ * advertisement in place, the stream stays open, and the path names the same broadcast, so
+ * the next consume shares it.
  */
 test("a PUBLISH_NAMESPACE update that changes the publisher applies in place", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
@@ -694,8 +707,7 @@ test("a PUBLISH_NAMESPACE update that changes the publisher applies in place", a
 		route: { hops: [HopSchema.parse(8n), PEER] },
 	});
 
-	const fresh = subscriber.consume(Path.from("theirs"));
-	expect(fresh.closed).not.toBe(held.closed);
+	expect(subscriber.consume(Path.from("theirs")).closed).toBe(held.closed);
 	expect(held.closed.peek()).toBeUndefined();
 
 	// Still announced: the stream ending is what retracts it.

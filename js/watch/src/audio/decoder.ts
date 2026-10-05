@@ -13,6 +13,7 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
+import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
 import { nextMedia, subscribeMedia } from "../media";
 
@@ -21,7 +22,7 @@ import { type AudioBuffer, createAudioBuffer } from "./buffer";
 import { type DecoderConfig, decoderConfig, type PlaybackIdentity, playbackIdentity } from "./config";
 import { Handover } from "./handover";
 import { ringSamples } from "./latency";
-// Compiled and inlined as a blob URL via vite-plugin-worklet.
+// A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
 import { type DecodedSpan, Terminal } from "./terminal";
@@ -172,7 +173,12 @@ export class Decoder {
 			// abandoned, so building against its name would throw. Gate on the race result, not
 			// `context.state`, because `AudioContext.close()` only flips `.state` to "closed" synchronously
 			// on Chrome (Firefox/Safari report "suspended").
-			const loaded = await effect.race(context.audioWorklet.addModule(RenderWorklet).then(() => true));
+			const loaded = await effect.race(
+				RenderWorklet(hostedAssets()).then(async (url) => {
+					await context.audioWorklet.addModule(url);
+					return true;
+				}),
+			);
 			if (!loaded) return;
 
 			// Create the worklet node. outputChannelCount must be set explicitly
@@ -215,7 +221,7 @@ export class Decoder {
 	#runEnabled(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
-		if (effect.get(this.sync.in.delay) === "instant") {
+		if (effect.get(this.sync.out.instant)) {
 			this.reset();
 			return;
 		}
@@ -247,7 +253,7 @@ export class Decoder {
 	#runDecoder(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
-		if (effect.get(this.sync.in.delay) === "instant") return;
+		if (effect.get(this.sync.out.instant)) return;
 
 		const broadcast = effect.get(this.source.in.broadcast);
 		if (!broadcast) return;

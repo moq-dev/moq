@@ -3,7 +3,7 @@ import { Broadcast } from "../broadcast.ts";
 
 // Capture pulls the worker in as an inlined blob URL, which the bun test loader can't resolve. Stub
 // it so the module imports; nothing here spawns a worker.
-mock.module("./capture-worker.ts?worker&inline", () => ({ default: class {} }));
+mock.module("./capture-worker.ts?worklet", () => ({ default: async () => "blob:fake-worker" }));
 
 const { Encoder } = await import("./index.ts");
 
