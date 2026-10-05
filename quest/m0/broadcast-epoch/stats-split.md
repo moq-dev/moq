@@ -3,9 +3,10 @@
 ## Goal
 
 Each node's stats broadcast publishes per-group cumulative totals that are
-never pruned, plus one stats track per broadcast, served only when requested.
-The per-path map tracks are gone. A reader that misses a group loses nothing:
-the next totals frame still carries everything since the epoch began.
+never pruned while the group is announced, plus one stats track per broadcast, served only when requested.
+The per-path map tracks are gone. While a group stays announced, a reader
+that misses a frame loses nothing: the next totals frame still carries
+everything since the epoch began.
 
 ## Plan
 
@@ -18,20 +19,23 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
   readers like billing want only per-project sums.
 - **Totals.** Per group broadcast (`<prefix>[/<group>]/node/<node>/@<epoch>`),
   per tier and role, cumulative within the [stats epoch](/quest/m0/broadcast-epoch/stats-epoch.md).
-  A node starts a new epoch on every startup and counts from zero; nothing is
-  serialized to disk. `Registry`'s unpruned lifetime totals
+  Every group announcement, and so every restart, starts a new epoch counted
+  from zero; nothing is serialized to disk. `Registry`'s unpruned lifetime totals
   (`rs/moq-net/src/stats.rs`) are node-wide, per tier and role only, so they
   can't be published as-is: keep the totals per group, folding an entry into
   its group's total when it is pruned, or two projects sharing a tier would
   merge.
-- A group's totals outlive its entries. Today a group broadcast disappears
-  when it has none (`rs/moq-stats/src/produce.rs`); its totals must survive
-  that, so a group that goes idle and returns in the same epoch continues
-  from where it stopped. Test two groups sharing a tier, and an idle group
-  returning.
-- The totals map grows with every distinct group a node sees in its epoch.
-  Accept that: an entry is a few counters per tier and role, groups are
-  projects, and a restart starts a new epoch from empty.
+- **Idle groups** (decided 2026-10-05). Today a group broadcast disappears
+  the moment it has no entries (`rs/moq-stats/src/produce.rs`). Instead it
+  stays announced for the [stats linger](https://github.com/moq-dev/moq/pull/4843)
+  after its last entry ends, so a group that returns within the linger
+  continues its totals. After the linger it unannounces and drops its
+  totals; a return announces under a new [epoch](/quest/m0/broadcast-epoch/stats-epoch.md)
+  counted from zero. A reader that lags past the linger loses the increments
+  in the frames it missed; document that. Memory is bounded by active and
+  lingering groups. Test two groups sharing a tier, a group returning within
+  the linger (same epoch, totals continue), and one returning after it (new
+  epoch from zero).
 - **Per-broadcast tracks.** A reader that wants one broadcast subscribes to
   its track; nothing is produced for a broadcast no one requests. The track
   carries that broadcast's cumulative counters and finishes after its closing
@@ -46,30 +50,26 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
   of visible broadcasts. Give per-broadcast tracks their own cap, sized for
   one page, and refuse requests beyond it so the reader sees an error rather
   than a parked track.
-- **Retire the map tracks** (`publisher.json`, `subscriber.json`, and their
-  `.json.z` siblings) in the same release.
+- **Sessions** (decided 2026-10-05). `sessions.json` is keyed by auth root
+  and loses pruned roots the same way, so fold per-tier `Presence` into the
+  totals (session counts) and serve per-root detail as a requested track,
+  the same model as per-broadcast tracks.
+- **Retire the map tracks** (`publisher.json`, `subscriber.json`,
+  `sessions.json`, and their `.json.z` siblings) in the same release.
 - Ship in the same breaking release as stats epochs, so consumers take one
   stats path and wire change, not two.
-- Update the aggregator and `doc/concept/stats.md` with the change.
-
-Open:
-
-- **Idle groups.** A group broadcast still unannounces once it has no
-  entries, so a reader that misses its last totals frame lacks those
-  increments until the group returns, contradicting the Goal. Either keep a
-  group with nonzero totals announced for the whole epoch, or keep the
-  unannounce (after [#4843](https://github.com/moq-dev/moq/pull/4843)'s
-  linger) and soften the Goal.
-- **`sessions.json`.** It is keyed by auth root and loses pruned roots the
-  same way. Either fold per-tier `Presence` into the totals and retire it
-  with the other maps, or keep it as is.
+- Update the aggregator and `doc/concept/stats.md` with the change. The
+  aggregator merges totals across nodes, and merges one broadcast's track
+  across nodes when a reader requests it, so a multi-node consumer serves the
+  same format it reads.
 
 Public API: `moq-stats` producer and consumer types. Wire: stats track names
 and payloads.
 
 MoQ Pro adopts it when it pins the release: billing reads totals, its
-Broadcasts page subscribes per visible broadcast, and its `announced` probe
-reads totals only.
+Broadcasts page subscribes per visible broadcast, its `announced` probe
+reads totals only, and its customer stats feed serves this format summed
+across nodes.
 
 ## Required
 
