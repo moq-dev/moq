@@ -15,7 +15,12 @@ Both are invented times, which
 [moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md) rules
 out for moq-net itself.
 
-Making the moq-net timestamp optional isn't enough on its own. Verbatim
+Timedness is per track since 2026-10-05 ([Typed
+timedness](/quest/m1/typed-timedness.md)): a timed track refuses an untimed
+frame, so a PES without a PTS can only go out untimed on an untimed track.
+Weigh that in the carriage decision.
+
+An untimed track isn't enough on its own. Verbatim
 tracks use the legacy container, whose payload always starts with a
 timestamp, and its decoder reads the time from there, not from the frame. So
 the decision covers:

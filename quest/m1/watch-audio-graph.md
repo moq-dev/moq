@@ -39,5 +39,4 @@ first frame after return.
 ## Related
 
 - [Enabled flag](/quest/m1/catalog-enabled.md) - a publisher mute disables the rendition instead of removing it
-- [Delay rebuild](/quest/m0/watch-delay-rebuild.md) - the other needless audio teardown in this file
 - [Audio warmup](/quest/m1/audio-warmup.md) - the Opus pre-roll trim on the same path

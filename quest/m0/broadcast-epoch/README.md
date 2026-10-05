@@ -55,6 +55,9 @@ Decided:
   [Stats epochs](/quest/m1/stats-epoch.md), which also gates the release
   (decided 2026-10-04): a restarted stats node under a reused name stalls its
   viewers the same way.
+- [Retracted demand release](/quest/m1/unannounce-demand-release.md) also
+  gates the release (decided 2026-10-05): a regression from #4741 on main that
+  `release` lacks.
 - Derived output mirrors the epoch it came from
   (`.pro/transcode/<pid>/foo.hang/@e`, per the
   [wildcard](/quest/m0/wildcard/README.md) line's derived-output layout), so
@@ -80,3 +83,4 @@ This README owns:
 - [GStreamer and OBS](/quest/m0/broadcast-epoch/gst-obs.md) - moqsink and the OBS plugin publish each run under a fresh epoch
 - [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - `moq` takes an optional `--epoch` instead of `--hop`, a plain publisher declares a random Hop ID, and the per-session hop stamp and NO_CAPACITY are gone
 - [Stats epochs](/quest/m1/stats-epoch.md) - moq-stats publishes each node under its own epoch, so a restarted node never stalls its viewers
+- [Retracted demand release](/quest/m1/unannounce-demand-release.md) - a retracted broadcast's track demand is released when its last subscriber leaves, as before #4741

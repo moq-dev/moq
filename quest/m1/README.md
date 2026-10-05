@@ -16,7 +16,7 @@ JS Reader, audio playback, media containers and archive, bindings, worker
 transport, benchmark tooling); worktrees isolate commits, not semantics.
 
 A line with no named consumer waits in m2 until one appears. The 2026-09-30
-audit moved P2P, one-port, ladder, processor, timed metadata, the installer,
+audit moved P2P, one-port, ladder, processor, timed metadata,
 the OBS GPU paths, the IETF half of rs2ts, and the unmeasured io_uring and
 QUIC studies there on that rule.
 
@@ -32,13 +32,10 @@ QUIC studies there on that rule.
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
 - [Demand everywhere](/quest/m1/demand-everywhere.md) - requests and producers at every level watch subscribers through `demand()` alone, ahead of the bindings exposing it
 - [Request linger](/quest/m1/request-linger.md) - an upstream FETCH or SUBSCRIBE outlives its last reader by a short linger, so quick re-requests don't churn upstream
-- [Merge queue](/quest/m1/merge-queue.md) - the required checks run on `merge_group`, so a stale green check can no longer break main
 - [Flat questlines](/quest/m1/quest-flat-lines.md) - moq pins the current quest CLI, lands its questline branches on main, and retires them
-- [Resampler tail](/quest/m1/resampler-tail.md) - `moq play` plays a finite track to its last sample when its rate differs from the device's
 - [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, flate, audio, and video namespaces built from the handle below
 - [moq-net owns its transport seam](/quest/m1/transport-seam.md) - moq-net names only its own transport traits, so a web-transport-trait or qmux major bump is a patch for it
-- [WebTransport close upstream](/quest/m1/wt-close-upstream.md) - web-transport-moq delivers the close capsule itself, and moq-tokio's `CLOSE_LINGER` is deleted
 - [moq announced](/quest/m1/cli-announced.md) - `moq ls` becomes a follow-only live view named `moq announced`, with local-only shell completion
 - [Leave out a role](/quest/m1/cli-no-role.md) - `moq export` and `moq play` accept `--no-video` and `--no-audio`, and sinks that ignore selection refuse it
 - [fMP4 export tracks](/quest/m1/fmp4-export-tracks.md) - fMP4 export inits from the catalog, keeps early audio, and fails loudly instead of writing a track missing from moov
@@ -49,15 +46,17 @@ QUIC studies there on that rule.
 - [Enabled flag](/quest/m1/catalog-enabled.md) - one `enabled` rendition flag replaces `stalled` and pausing, and the flapping encoder-lag detector is deleted
 - [Audio graph lifetime](/quest/m1/watch-audio-graph.md) - the watch audio graph survives a rendition leaving the catalog, so a publisher mute keeps the tail and the next start
 - [Audio publish hygiene](/quest/m1/audio-publish-hygiene.md) - JS audio uses the shared container producer, so any stop ends its epoch, and volume ramps over a configurable `fade`
+- [DTX timestamps](/quest/m1/opus-dtx-timestamps.md) - Opus DTX keeps the capture timeline, so voice enables it by default again
 - [LIFO cleanups](/quest/m1/signals-lifo.md) - signals effects clean up last-in, first-out, so nested teardown runs first
-- [Transient capture errors](/quest/m1/capture-transient-errors.md) - a busy or aborted getUserMedia spends the retry budget; every other rejection stays terminal
 - [Still screen share](/quest/m1/capture-still-frame.md) - video capture keeps its latest frame and replays it, re-stamped, to late subscribers
+- [Spent capture budget errors](/quest/m1/capture-exhausted-error.md) - a camera or microphone that runs out of retries sets `out.error` instead of failing silently
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges in either order and replaces FETCH; relays fill misses by range, including over moq-transport
 - [Live media time](/quest/m1/subscribe-live-time.md) - a lite-07 SUBSCRIBE_OK carries the publisher's current media time, so readers judge a cache against the live edge
 - [Cross-relay bursts](/quest/m1/cross-relay-bursts.md) - bursty small-group tracks cross two relays without lost groups, unanswered FETCHes, or stalls
 - [Fetched heads stay visible](/quest/m1/lite07-head-fetch-arrival.md) - on lite-07, a relay fetching the head of a group it receives mid-group still delivers that group to new subscribers
 - [Late lower groups](/quest/m1/lite-late-lower-group.md) - a moq-lite subscriber with a floor receives a group created below the first served one, as moq-transport does
+- [IETF rejoin keeps the open group](/quest/m1/ietf-rejoin-open-group.md) - on moq-transport-19/22, a reader that rejoins mid-group still receives the open group's later frames
 - [JS cache window](/quest/m1/js-prune-cache-window.md) - js/net ages idle groups on a cache window and keeps max_age as media-time staleness, as Rust does
 - [JSON stream budget](/quest/m1/json-stream-budget.md) - an oversized JSON stream record is refused without ending the log, and a JS subscribe to a gone track answers NotFound
 - [A watch and publish release ships assets()](/quest/m1/assets-release.md) - the release that lets the sites host the worklets
@@ -74,12 +73,17 @@ QUIC studies there on that rule.
 - [Audio capture without ALSA link](/quest/m1/capture-alsa-link.md) - moq-audio capture and playback build on Linux without linking libasound
 - [Capture by default](/quest/m1/capture-default.md) - moq-video and moq-audio build `capture` by default, so pre-merge checks test it and the capture gate goes away
 - [Ship capture and playback](/quest/m1/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
+- [Install with moq.sh](/quest/m1/moq-sh.md) - `curl -fsSL https://moq.sh | sh` installs or upgrades the released `moq` on macOS and Linux
+- [Import at the first frame](/quest/m1/import-first-frame.md) - fMP4, MKV, and MPEG-TS imports publish the catalog at their first frame, so a lone importer's root clock never moves
+- [CMAF frame timestamp](/quest/m1/cmaf-frame-timestamp.md) - CMAF decoders time samples from the moq-lite frame timestamp, using `tfdt` only within the fragment
+- [Shared import clock](/quest/m1/shared-clock.md) - an importer joining a clock already in use offsets its PTS instead of moving it, so captures and imports share one timeline
 - [Publishing never invents a timestamp](/quest/m1/publish-timestamp.md) - no Rust or binding publish API fills in a timestamp; an untimed payload goes out untimed
 - [JS publishing never invents a timestamp](/quest/m1/js-publish-timestamp.md) - the same in @moq/json, @moq/flate, and @moq/net
-- [Untimed model](/quest/m1/untimed-model.md) - moq-net frames and datagrams carry an absent timestamp to every subscriber; no receiver fills in arrival time
+- [Typed timedness](/quest/m1/typed-timedness.md) - a track is all timed or all untimed, `Info.timescale` is optional, and `Timed` loses its clock parameter, in Rust, JS, and the bindings
+- [Untimed model](/quest/m1/untimed-model.md) - an untimed moq-net track reaches every subscriber untimed; no receiver fills in arrival time
 - [Untimed failover](/quest/m1/untimed-failover.md) - a resumed group no route continues is given up even when media time can't judge its drift
 - [JS untimed model](/quest/m1/js-untimed-model.md) - the same in @moq/net
-- [Untimed lite-07](/quest/m1/lite-untimed.md) - lite-07 encodes an absent timestamp in both languages; lite-05/06 write send time
+- [Untimed lite-07](/quest/m1/lite-untimed.md) - lite-07 carries an untimed track in both languages; lite-05/06 write send time
 - [Plan: untimed verbatim PES](/quest/m1/plan-ts-pes-untimed.md) - decide how a verbatim TS track carries a PES that has no PTS, then write the implementation quest
 - [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - json and binary consumers return each value's timestamp, in Rust and every binding; snapshots add `latest()` beside an in-order `next()`
 - [JS data consumer timestamps](/quest/m1/js-data-consumer-timestamps.md) - @moq/json and @moq/flate consumers return each value's timestamp, with snapshot `next()` and `latest()`
