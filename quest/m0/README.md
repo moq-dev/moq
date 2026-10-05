@@ -56,7 +56,6 @@ a published `@moq/watch` break.
 - [Cloudflare builds track release](/quest/m0/cloudflare-release.md) - condition: the maintainer points the docs and demo builds at `release`
 - [REQUEST_OK accepts LARGEST_OBJECT](/quest/m0/ietf-largest-object.md) - a conformant moq-transport peer's REQUEST_OK no longer closes the session, ahead of Seattle
 - [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
-- [noq reassembly cap](/quest/m0/noq-reassembly-cap.md) - iroh's upstream noq carries quinn's stream reassembly cap, once n0 releases it
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
 - [Shared fronts](/quest/m0/shared-fronts.md) - viewer sessions share a front, so fronts scale with peers, not viewers, and viewer churn no longer leaks fronts
 - [Stats linger](/quest/m0/stats-linger.md) - a grouped stats broadcast stays announced for a linger after its last session, so viewer churn stops re-announcing it across the mesh, backported to `release`
