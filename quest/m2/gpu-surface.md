@@ -25,8 +25,10 @@ added this quest):
   the producer renders into (it flips the producer's protocol), and offering
   both. `Surface::Vulkan` is no longer gated on `nvidia` and describes:
   - the memory handle: `OPAQUE_FD`, or `DMA_BUF` with a DRM format modifier;
-  - the format, size, and allocation size (an importer picks its own memory
-    type from the handle's properties);
+  - the format, size, and allocation size. For `OPAQUE_FD`, the exporter's
+    memory type index too: a Vulkan import must reuse both (VUID 01742),
+    and an `OPAQUE_FD` handle cannot be queried for its properties. A
+    `DMA_BUF` importer picks its memory type from the handle's properties;
   - the device and driver UUID;
   - the timeline: an `OPAQUE_FD` timeline semaphore handle, the value the
     producer signals when the image is ready, and the value the consumer
