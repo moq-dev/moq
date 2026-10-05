@@ -51,5 +51,4 @@ no timestamp rewind.
 
 ## Required
 
-- [Upstream links](/quest/m1/cluster-routing/transit.md) - the edges and cores this spreads over
 - [Wildcard](/quest/m0/wildcard/README.md) - the longest-prefix rule and pool spread this builds on
