@@ -26,6 +26,9 @@ Decided (2026-10-02): grace-window fold.
   only a same-instance return after a long outage), or whether some bounded
   per-path baseline reconciles it. Test exact totals across that return either
   way, not just monotonicity.
+- With an epoch per group announcement, a stats group returning from idle is
+  always a new path, so the grace re-arm covers only reconnects of a still
+  announced path, and the double-count above needs a same-epoch return.
 - Rejected: folding on depart double-counts a node that reconnects with its
   counters intact. TTL eviction without a fold makes merged totals regress.
 - Timers follow the repo rule: time decisions use `max(wall, pts)`. Tests mock
