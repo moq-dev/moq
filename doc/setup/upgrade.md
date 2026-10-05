@@ -41,6 +41,11 @@ These land with the next breaking release, not the 2026-09-23 train.
   `SourceMap` (#4667) are gone, along with the importers' `live()`. Publish the
   source's own timestamps and let the catalog clock map them to wall time;
   pin that mapping with `Config::with_clock` when the source's zero is known.
+- **`--cluster-mesh` and `--cluster-linger` are unknown flags.** moq-relay
+  0.17 refuses them by name; later relays reject them, and TOML `mesh` and
+  `linger`, like any unknown setting. `MOQ_CLUSTER_MESH` and
+  `MOQ_CLUSTER_LINGER` are no longer read, so drop them from the environment.
+  In Rust, `cluster::Config` has no `mesh` or `linger` field.
 
 ## Wire
 

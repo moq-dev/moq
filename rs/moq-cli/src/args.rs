@@ -1608,12 +1608,6 @@ mod tests {
 			assert!(err.contains(reported), "{err}");
 		}
 
-		// Gossip discovery is removed, so its flag is refused for every verb.
-		let Err(err) = Invocation::try_parse_from(["moq", "--cluster-mesh", "auth", "generate"]) else {
-			panic!("--cluster-mesh must be refused");
-		};
-		assert!(err.to_string().contains("--cluster-mesh"), "{err}");
-
 		#[cfg(unix)]
 		{
 			for (flag, value, reported) in [

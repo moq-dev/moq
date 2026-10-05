@@ -609,23 +609,6 @@ pub struct Config {
 	)]
 	pub node: Option<String>,
 
-	/// Released spelling of the removed gossip discovery, kept so
-	/// [`Self::deprecated`] can refuse it. Any value, boolean or the older URL
-	/// form, is refused.
-	#[doc(hidden)]
-	#[usage(
-		name = "cluster-mesh",
-		long = "cluster-mesh",
-		env = "MOQ_CLUSTER_MESH",
-		setting = "cluster.mesh",
-		default_missing = "true",
-		num_args = 0..=1,
-		require_equals = true,
-		hide = true,
-	)]
-	#[serde(default, deserialize_with = "deserialize_bool_or_string")]
-	pub mesh: Option<String>,
-
 	/// LAN discovery over mDNS (`[cluster.lan]`).
 	#[cfg(feature = "cluster-lan")]
 	#[usage(flatten)]
@@ -654,43 +637,12 @@ pub struct Config {
 		setting = "cluster.tier"
 	)]
 	pub tier: Option<String>,
-	/// Released spelling, kept so [`Self::deprecated`] can name that linger is gone.
-	#[doc(hidden)]
-	#[usage(skip)]
-	#[serde(with = "crate::duration::serde_option")]
-	pub linger: Option<std::time::Duration>,
-
-	#[usage(
-		name = "cluster-linger",
-		long = "cluster-linger",
-		env = "MOQ_CLUSTER_LINGER",
-		setting = "cluster.linger",
-		hide = true
-	)]
-	#[serde(default, rename = "__cli_linger", skip_serializing_if = "Option::is_none")]
-	linger_arg: Option<crate::duration::Duration>,
 }
 
 impl Config {
 	/// Released spellings this config was parsed from, each paired with what replaced it.
 	pub fn deprecated(&self) -> moq_tokio::cli::Deprecated {
 		let mut found = moq_tokio::cli::Deprecated::default();
-		if self.linger.is_some() || self.linger_arg.is_some() {
-			found.changed(
-				"--cluster-linger",
-				Some("MOQ_CLUSTER_LINGER"),
-				"(removed)",
-				"a broadcast closes as soon as its last publisher is lost",
-			);
-		}
-		if self.mesh.is_some() {
-			found.changed(
-				"--cluster-mesh",
-				Some("MOQ_CLUSTER_MESH"),
-				"--cluster-connect or --cluster-connect-api",
-				"gossip discovery is removed; list every peer this relay dials",
-			);
-		}
 		if self.connect.iter().any(|peer| is_legacy_peer(peer.url())) {
 			found.changed(
 				"--cluster-connect",
@@ -1961,31 +1913,6 @@ pub(crate) fn canonicalize_peer_key(peer: &str) -> String {
 	}
 }
 
-/// Deserialize a field that accepts either a TOML boolean or string into an
-/// `Option<String>` (booleans become `"true"` / `"false"`). Lets the removed
-/// `cluster.mesh` parse in both its released forms, `mesh = true` and
-/// `mesh = "<url>"`, so it is refused by name rather than as an unknown type.
-fn deserialize_bool_or_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-	D: serde::Deserializer<'de>,
-{
-	use serde::Deserialize as _;
-
-	#[derive(serde::Deserialize)]
-	#[serde(untagged)]
-	enum BoolOrString {
-		Bool(bool),
-		Str(String),
-	}
-
-	Ok(
-		Option::<BoolOrString>::deserialize(deserializer)?.map(|value| match value {
-			BoolOrString::Bool(value) => value.to_string(),
-			BoolOrString::Str(value) => value,
-		}),
-	)
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -2582,24 +2509,6 @@ mod tests {
 		task.abort();
 	}
 
-	/// Gossip discovery is removed, so every released `--cluster-mesh` form, the
-	/// boolean and the older self-URL, stops construction and names the
-	/// replacement instead of leaving a relay without the peers it expected.
-	#[tokio::test]
-	async fn removed_mesh_is_refused() {
-		for value in ["true", "false", "rendezvous.example.com:4443"] {
-			let err = new_cluster(Config {
-				mesh: Some(value.to_string()),
-				..Default::default()
-			})
-			.err()
-			.expect("mesh must be refused");
-			let msg = format!("{err}");
-			assert!(msg.contains("--cluster-mesh / MOQ_CLUSTER_MESH"), "{value}: {msg}");
-			assert!(msg.contains("--cluster-connect"), "{value}: {msg}");
-		}
-	}
-
 	/// A valid `cluster.id` is used verbatim as the relay's Hop ID, giving the
 	/// node a stable identity across restarts.
 	#[tokio::test]
@@ -2705,26 +2614,6 @@ mod tests {
 		);
 	}
 
-	/// A TOML `mesh` in either released type is refused by name at load, so a
-	/// config file that relied on gossip stops instead of starting without peers.
-	#[test]
-	fn toml_mesh_is_refused() {
-		// Usage reads the environment while parsing, so serialize with the tests
-		// that mutate it.
-		let _env = crate::test_env::EnvGuard::lock();
-
-		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		for (name, value) in [("bool", "true"), ("url", "\"us-east.example.com:4443\"")] {
-			let path = dir.join(format!("cluster-mesh-{name}-toml.toml"));
-			std::fs::write(&path, format!("[cluster]\nmesh = {value}\n")).unwrap();
-
-			let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-			let err = RelayConfig::parse_and_merge(args).expect_err("mesh must be refused");
-			assert!(err.to_string().contains("--cluster-mesh"), "{name}: {err}");
-		}
-	}
-
 	/// Static config accepts the object form beside bare URLs, through the same
 	/// type the connect API parses.
 	#[test]
@@ -2778,17 +2667,15 @@ mod tests {
 		assert!(!is_legacy_peer("https://cdn.example.com/?jwt=abc"));
 	}
 
-	/// Linger and a bare `--cluster-connect` host still parse so the process can
-	/// name what replaced them, but they configure nothing and must stop a run.
+	/// A bare `--cluster-connect` host still parses so the process can name what
+	/// replaced it, but it configures nothing and must stop a run.
 	#[test]
 	fn released_cluster_spellings_are_reported_not_applied() {
 		let config = Config {
-			linger: Some(std::time::Duration::from_secs(5)),
 			connect: vec![Peer::new("root.example.com:4443")],
 			..Default::default()
 		};
 		let reported = config.deprecated().to_string();
-		assert!(reported.contains("--cluster-linger / MOQ_CLUSTER_LINGER"), "{reported}");
 		assert!(
 			reported.contains("a full URL like https://host/?jwt=TOKEN"),
 			"{reported}"
