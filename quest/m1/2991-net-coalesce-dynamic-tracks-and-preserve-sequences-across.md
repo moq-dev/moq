@@ -19,18 +19,20 @@ subscription creates a fresh `track::Request` (`rs/moq-net/src/model/track.rs`),
 and `Request::new` creates a fresh `TrackState`. Because its `max_sequence`
 is empty, both `append_group` and `append_datagram` restart at sequence 0.
 
-That conflicts with the relay's logical track. The pump
-(`rs/moq-net/src/model/pump.rs`) resumes a replacement from the first frame
-the subscriber lacks, so groups from a restarted producer are skipped until
-its counter catches up, causing the same playback stall fixed for JavaScript
-in #2953. With #4741 this is the general hazard of restarting at 0 under one
+That conflicts with the relay's logical track. The pump this was written
+against is gone: #4741 resumes route changes by reading the routes' copies
+(`rs/moq-net/src/model/front.rs`, `resume.rs`, and `origin.rs`). Re-check
+first that a replacement restarting at sequence 0 still stalls under
+copy-based resume, the way groups from a restarted producer were skipped
+until its counter caught up (the playback stall fixed for JavaScript in
+#2953), and rewrite this section against what the code does now. With #4741 this is the general hazard of restarting at 0 under one
 name, which [broadcast epochs](/quest/m0/broadcast-epoch/README.md) fix for a
 restarted publisher. This quest covers what an epoch does not: one dynamic
 track replaced inside a live broadcast.
 
-The pump's route-change tests (`rs/moq-net/tests/route_change.rs`) are the
-ones to extend: none replaces a producer through `append_group()`, which would
-create group 0 and leave the subscriber stalled. Explicit group or datagram
+The route-change tests (`rs/moq-net/tests/route_change.rs`) are the ones to
+extend: none replaces a producer through `append_group()`, which would
+create group 0 and, if the stall still holds, leave the subscriber stalled. Explicit group or datagram
 writes can raise the old producer's shared sequence edge further, making the
 catch-up window longer.
 

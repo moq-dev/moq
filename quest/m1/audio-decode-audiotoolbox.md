@@ -32,8 +32,9 @@ alongside the `objc2-core-audio-types` the crate already carries.
   end up where `Layout` says).
 - iOS: the binding compiles into the moq-ffi iOS slice; runtime proof waits
   on a device like the rest of the mobile line.
-- Docs: `doc/bin/obs.md` drops the HE-AAC and multichannel caveat on macOS,
-  and the backend table names what this host decodes.
+- Docs: `doc/lib/rs/moq-audio.md` drops its caveat that multichannel AAC and
+  HE-AAC are refused on macOS and iOS, and its backend table names what this
+  host decodes.
 
 ## Related
 

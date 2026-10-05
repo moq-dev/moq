@@ -24,7 +24,7 @@ first proposed, and make it configurable.
 - `moq-stats`'s producer unpublishes a group broadcast on the drain where its
   group has no traffic or session rows (`publish` in
   `rs/moq-stats/src/produce.rs`). Keep it, and the epoch and group sequence it
-  publishes under ([stats epochs](/quest/m1/stats-epoch.md)), until the
+  publishes under ([stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md)), until the
   linger elapses with the group still empty; a row returning re-arms it.
 - Time decisions use `max(wall, pts)`; tests mock time.
 - Depth 0 already lives for the producer's life and is unchanged.
@@ -40,6 +40,6 @@ Public API: a linger knob on the stats producer config. Wire: none.
 
 ## Related
 
-- [Stats epochs](/quest/m1/stats-epoch.md) - the name a lingering broadcast keeps
-- [Bounded stats aggregate](/quest/m1/stats-aggregate-bound.md) - the aggregator's grace window for departed nodes
+- [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md) - the name a lingering broadcast keeps
+- [Bounded stats aggregate](/quest/m0/broadcast-epoch/stats-aggregate-bound.md) - the aggregator's grace window for departed nodes
 - [moq.pro: stats linger](https://github.com/moq-dev/moq.pro/blob/main/quest/m0/stats-linger.md) - the fleet adoption and its measurements
