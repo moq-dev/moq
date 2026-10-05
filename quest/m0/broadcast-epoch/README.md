@@ -63,11 +63,10 @@ Decided:
   release) moved under it, and the OBS half of GStreamer and OBS moved to m1
   as [OBS publishes under epochs](/quest/m1/obs-epoch.md), so the release
   gate no longer waits on m1 work.
-- Derived output mirrors the source's bare name under an epoch each worker
-  mints (`<service>/foo.hang/@<worker>`, per the
-  [wildcard](/quest/m0/wildcard/README.md) line's derived-output layout, decided
-  2026-10-05), so two workers are two broadcasts and the service's prefix claim
-  still covers both.
+- Derived output mirrors the epoch it came from
+  (`.pro/transcode/<pid>/foo.hang/@e`, per the
+  [wildcard](/quest/m0/wildcard/README.md) line's derived-output layout), so
+  the service's prefix claim still covers it.
 
 This README owns:
 

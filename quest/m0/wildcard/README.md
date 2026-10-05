@@ -78,9 +78,8 @@ specificity, and rebasing tokens and filters reuse.
 Content identity is the path: it names one broadcast whoever serves it, and
 any covering route resumes a subscription from the first frame the subscriber
 lacks (#4741). The `@<epoch>` segment (#4706) is what makes a restart a new
-path. So this questline settles collisions by giving each claim worker its own
-epoch, so different content never shares a path, rather than with a route
-identity or a generation field.
+path. So this questline settles collisions with interchangeable output at one
+path, not with a route identity or a generation field.
 
 ### Decisions
 
@@ -160,17 +159,19 @@ identity or a generation field.
   the client's ordinary resubscribe resolves again. Scanning unserved paths
   costs one round trip per path. No negative cache; rate limiting stays with
   the advertiser and the per-project auth gate.
-- **A double claim is settled by per-worker names, not by route identity or
-  a lease.** Two relays can hash one derived name to different workers before
-  either concrete announcement propagates. Two encoders' bytes differ, and a
-  path is one broadcast whoever serves it (#4741 resumes mid-group from any
-  covering route), so each worker publishes under an epoch it mints
-  ([Per-worker epochs](/quest/m0/wildcard/transcode-group-start.md)). The two workers
-  are then two broadcasts, a viewer follows the newest like any epoch
-  takeover, and a relay never splices them. Wildcard routing invents neither
-  a lease nor a generation. That quest is Required here (decided 2026-10-04,
-  revised 2026-10-05 from interchangeable output at one path, which a relay's
-  own mid-group resume defeats).
+- **A double claim is settled by interchangeable output, not by route
+  identity or a lease.** Two relays can hash one path to different workers
+  before either concrete announcement propagates, and both land at the SAME
+  literal path. A path is one broadcast whoever serves it, so claim workers
+  mirror the source's epoch and group numbers, publish a deterministic
+  catalog, and start at group boundaries
+  ([Transcoders start at group boundaries](/quest/m0/wildcard/transcode-group-start.md)).
+  Two workers at one path are then one broadcast, and a relay moving between
+  them does so at a group boundary (decided 2026-10-03: #4741 drops
+  first-hop identity, so routing can no longer tell two workers apart).
+  Wildcard routing invents neither a lease nor a generation. That quest is
+  Required here (decided 2026-10-04), so this line cannot ship with workers
+  that can be spliced mid-group.
 - **A serving front follows the best route.** A join or re-price re-selects
   every front below the prefix, and a front moves when another route now
   wins: cheaper, or the rendezvous winner among equal costs (decided
@@ -191,27 +192,20 @@ identity or a generation field.
 ### Where derived output lives
 
 A prefix claim needs the variable part of a path trailing, so a fleet-wide
-service claims its own hidden prefix and mirrors the source's bare name beneath
-it (`<service>/foo.hang`, where `<service>` starts with a `.` segment) rather
-than publishing beneath the source. Each worker publishes under an epoch it
-mints, `<service>/foo.hang/@<worker>`, not the source's, and its catalog points
-at the exact source epoch it transcodes (decided 2026-10-05; see
-[Per-worker epochs](/quest/m0/wildcard/transcode-group-start.md)). Every demand
-capability follows the same rule, external processors included: each output
-path carries an epoch minted for that one worker. The source's catalog reaches
-the contribution through a cross-broadcast reference. moq.pro runs its
-transcode fleet at `.transcode/<pid>/foo.hang` and mounts it, so a customer
-sees `<pid>/.pro/transcode/foo.hang`.
+service claims its own prefix and mirrors the source path beneath it
+(`.pro/transcode/<pid>/foo.hang`, moq.pro's convention) rather than publishing
+beneath the source. The source's catalog reaches the contribution through a
+cross-broadcast reference.
 
 The leading `.` is deliberate. Existing customers on moq-lite-06 or older must
-never see hidden service broadcasts, which could confuse their business logic.
-Those versions cannot opt into hidden routes, so the relay never announces them
+never see `.pro/` broadcasts, which could confuse their business logic. Those
+versions cannot opt into hidden routes, so the relay never announces them
 there. Hidden routes are a moq-lite-07 feature, so the player's covering check
 (Demand, done on the line branch) opts into them and sees a claim only when
 lite-07 is negotiated. Finalizing lite-07 is a rollout condition, not a
 blocker for this line (decided in the 2026-09-30 audit), since the check works
 whenever lite-07 is negotiated. A customer who wants transcodes upgrades, or
-subscribes to the explicit hidden service path, which works on any
+subscribes to the explicit `.pro/<service>/...` path, which works on any
 version. Grants and metering are the deployment's; moq.pro's are in its
 [wildcard questline](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/wildcard/README.md).
 
@@ -223,7 +217,7 @@ distinguish recording generations reads the catalog's archive entry
 
 ## Required
 
-- [Per-worker epochs](/quest/m0/wildcard/transcode-group-start.md) - each transcode worker publishes under its own epoch, so a relay never splices two workers' output
+- [Transcoders start at group boundaries](/quest/m0/wildcard/transcode-group-start.md) - two claim workers at one path are one broadcast, so a relay never splices them mid-group
 - [A standing refusal ends the front](/quest/m0/wildcard/refusal-final.md) - a refusal from the winning route ends the request instead of re-selecting a sibling or a shorter prefix
 
 ## Related
@@ -231,6 +225,6 @@ distinguish recording generations reads the catalog's archive entry
 - [archive](/quest/m1/archive/README.md) - an archive claims the root, and its
   catalog names the generations a claim cannot
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - derived output
-  mirrors the source's bare name under a worker-minted epoch
+  mirrors the source path, `@<epoch>` segment included
 - [Announcement shapes](/quest/m2/announce-shapes.md) - moq-lite-only exact,
   suffix, and prefix+suffix claims that survive relay hops

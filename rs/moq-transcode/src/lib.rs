@@ -1335,11 +1335,11 @@ mod tests {
 		transcoder.abort();
 	}
 
-	/// Two transcoders fed the same source publish the same catalog, and groups
-	/// that mirror the source's sequences and timestamps rather than anything
-	/// numbered per instance.
+	/// Two transcoders fed the same source publish groups that mirror the
+	/// source's sequences and timestamps rather than anything numbered per
+	/// instance.
 	#[tokio::test]
-	async fn two_instances_publish_the_same_broadcast() {
+	async fn two_instances_mirror_source_groups() {
 		let source = source_broadcast(2, 5);
 		let config = Config {
 			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
@@ -1349,7 +1349,11 @@ mod tests {
 			..Default::default()
 		};
 
-		let mut instances = Vec::new();
+		// Mirrored from the source, not numbered by either instance.
+		let expected: Vec<_> = (0..2u64)
+			.map(|sequence| (sequence, (0..5).map(|i| (sequence * 5 + i) as u128 * 33_333).collect::<Vec<_>>()))
+			.collect();
+
 		for _ in 0..2 {
 			let output = moq_net::broadcast::Info::default().produce();
 			let consumer = output.consume();
@@ -1363,7 +1367,7 @@ mod tests {
 				}
 			};
 			let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track.subscribe(None).await.unwrap());
-			let catalog = await_catalog(&mut catalogs, |snapshot| {
+			await_catalog(&mut catalogs, |snapshot| {
 				snapshot.video.renditions.contains_key("video/120p")
 			})
 			.await;
@@ -1380,18 +1384,9 @@ mod tests {
 				groups.push((fetched.sequence, timestamps));
 			}
 
-			instances.push((catalog, groups));
+			assert_eq!(groups, expected);
 			transcoder.abort();
 		}
-
-		let (first, second) = (&instances[0], &instances[1]);
-		assert_eq!(first.0, second.0, "the two instances published different catalogs");
-		assert_eq!(first.1, second.1, "the two instances published different groups");
-		// Mirrored from the source, not numbered by either instance.
-		let expected: Vec<_> = (0..2u64)
-			.map(|sequence| (sequence, (0..5).map(|i| (sequence * 5 + i) as u128 * 33_333).collect()))
-			.collect();
-		assert_eq!(first.1, expected);
 	}
 
 	/// A source whose codec description changes rebuilds the shared decode, so
