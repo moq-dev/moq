@@ -41,7 +41,7 @@ Pass options after `sh -s --`:
 # A specific version, e.g. to pin or downgrade
 curl -fsSL https://moq.sh | sh -s -- --version 0.14.0
 
-# Another directory
+# Another directory, required when HOME is unset
 curl -fsSL https://moq.sh | sh -s -- --dir ~/bin
 ```
 

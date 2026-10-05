@@ -104,7 +104,7 @@ main() {
                 shift 2
                 ;;
             --dir)
-                [ $# -ge 2 ] || die "--dir needs a value"
+                [ -n "${2:-}" ] || die "--dir needs a value"
                 dir=$2
                 shift 2
                 ;;
@@ -191,7 +191,7 @@ main() {
 
     found=$(command -v moq || true)
     if [ "$found" != "$dest" ]; then
-        case ":$PATH:" in
+        case ":${PATH:-}:" in
             *":$dir:"*) say "warning: $found comes first on PATH and runs instead" ;;
             *) say "add $dir to PATH, for example: export PATH=\"$dir:\$PATH\"" ;;
         esac
