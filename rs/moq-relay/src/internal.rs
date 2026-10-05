@@ -85,6 +85,7 @@ pub struct Internal {
 	config: Config,
 	stats: moq_net::stats::Registry,
 	nodes: Option<crate::nodes::Nodes>,
+	refusals: Option<crate::refusals::Refusals>,
 	sessions: crate::session::Registry,
 	health: moq_tokio::accept::Health,
 	listeners: Vec<moq_tokio::accept::Health>,
@@ -98,6 +99,7 @@ pub struct Internal {
 struct InternalState {
 	stats: moq_net::stats::Registry,
 	nodes: Option<crate::nodes::Nodes>,
+	refusals: Option<crate::refusals::Refusals>,
 	sessions: crate::session::Registry,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
@@ -122,6 +124,7 @@ impl Internal {
 			config,
 			stats,
 			nodes: None,
+			refusals: None,
 			sessions: crate::session::Registry::new(),
 			health,
 			listeners,
@@ -205,9 +208,11 @@ impl Internal {
 		self
 	}
 
-	/// Attach the relay cluster used to serve the `/nodes` topology snapshot.
+	/// Attach the relay cluster used to serve the `/nodes` topology snapshot and
+	/// the refused-session counts at `/metrics`.
 	pub fn with_cluster(mut self, cluster: &crate::cluster::Cluster) -> Self {
 		self.nodes = Some(cluster.nodes.clone());
+		self.refusals = Some(cluster.refusals.clone());
 		self
 	}
 
@@ -235,6 +240,7 @@ impl Internal {
 			.with_state(InternalState {
 				stats: self.stats.clone(),
 				nodes: self.nodes.clone(),
+				refusals: self.refusals.clone(),
 				sessions: self.sessions.clone(),
 				listeners: self.listeners.clone(),
 				uring: self.uring.clone(),
@@ -301,6 +307,9 @@ async fn serve_metrics(State(state): State<InternalState>) -> Response {
 	let mut body = render_metrics(&state.stats.snapshot(), &state.listeners, &state.uring);
 	if let Some(shutdown) = &state.shutdown {
 		render_drain(&mut body, shutdown.tally());
+	}
+	if let Some(refusals) = &state.refusals {
+		render_refusals(&mut body, refusals);
 	}
 	([(http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
 }
@@ -490,6 +499,28 @@ fn render_drain(out: &mut String, tally: crate::shutdown::Tally) {
 	);
 	let _ = writeln!(out, "# TYPE moq_relay_draining_sessions gauge");
 	let _ = writeln!(out, "moq_relay_draining_sessions {}", tally.draining);
+}
+
+/// Sessions admission turned away, one row per reason, every reason present from
+/// zero so a rate over it is defined from the first scrape. A refused session
+/// never reaches the traffic counters above.
+fn render_refusals(out: &mut String, refusals: &crate::refusals::Refusals) {
+	use crate::refusals::Refusal;
+	use std::fmt::Write as _;
+
+	let _ = writeln!(
+		out,
+		"# HELP moq_relay_sessions_refused_total Sessions admission refused, by reason."
+	);
+	let _ = writeln!(out, "# TYPE moq_relay_sessions_refused_total counter");
+	for &refusal in Refusal::ALL {
+		let _ = writeln!(
+			out,
+			"moq_relay_sessions_refused_total{{reason=\"{}\"}} {}",
+			refusal.as_str(),
+			refusals.count(refusal)
+		);
+	}
 }
 
 /// The accept-loop health of every listener on the node.
@@ -900,6 +931,7 @@ mod tests {
 		let state = InternalState {
 			stats: moq_net::stats::Registry::disabled(),
 			nodes: None,
+			refusals: None,
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
@@ -917,6 +949,7 @@ mod tests {
 		let state = InternalState {
 			stats: moq_net::stats::Registry::disabled(),
 			nodes: Some(nodes),
+			refusals: None,
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
@@ -925,6 +958,31 @@ mod tests {
 
 		let Json(snapshot) = serve_nodes(State(state)).await;
 		assert_eq!(snapshot.nodes[0].node, "https://relay-b.example/");
+	}
+
+	/// Every refusal reason renders from zero, so a rate over any of them is
+	/// defined before the first refusal.
+	#[test]
+	fn refusal_metrics_list_every_reason_from_zero() {
+		use crate::refusals::{Refusal, Refusals};
+
+		let refusals = Refusals::default();
+		refusals.record(Refusal::Unavailable);
+		let mut body = String::new();
+		render_refusals(&mut body, &refusals);
+
+		assert!(
+			body.contains("# TYPE moq_relay_sessions_refused_total counter"),
+			"type header:\n{body}"
+		);
+		for &refusal in Refusal::ALL {
+			let expected = u64::from(refusal == Refusal::Unavailable);
+			let row = format!(
+				"moq_relay_sessions_refused_total{{reason=\"{}\"}} {expected}",
+				refusal.as_str()
+			);
+			assert!(body.contains(&row), "missing {row}:\n{body}");
+		}
 	}
 
 	/// The `/metrics` renderer emits well-formed Prometheus exposition: a

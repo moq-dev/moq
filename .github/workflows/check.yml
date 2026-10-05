@@ -9,9 +9,12 @@ on:
     # `closed` is here only so merging/closing a PR cancels its in-flight run
     # via the concurrency group below; the job itself is skipped on close.
     types: [opened, synchronize, reopened, closed]
+  merge_group:
+    types: [checks_requested]
 
 # Cancel in-flight runs when a new commit lands on the same PR, or when the PR
 # is merged/closed (the close event shares this group and supersedes the build).
+# Each merge group has its own queue ref, separate from the PR ref.
 concurrency:
   group: check-${{ github.ref }}
   cancel-in-progress: true
@@ -36,7 +39,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Full history so `just ci check` can diff against origin/$GITHUB_BASE_REF.
+          # Full history so `just ci check` can diff against the PR or merge group base.
           fetch-depth: 0
 
       - name: Free disk space
@@ -66,8 +69,8 @@ jobs:
         uses: ./.github/actions/rust-cache
 
       # The same recipe a developer runs locally. It diffs against
-      # origin/$GITHUB_BASE_REF and touches only the packages this PR changed
-      # plus their dependents, so a one-crate PR compiles one crate and a
+      # the merge group base SHA (or origin/$GITHUB_BASE_REF for a PR) and touches
+      # only the changed packages plus their dependents, so a one-crate PR compiles one crate and a
       # quest-only PR runs only the lints. sh/dispatch.sh's impact map is the one
       # place that decides; the setup above always runs rather than keep a second
       # path map here.
@@ -77,8 +80,9 @@ jobs:
       # a green run that checked nothing, which is the failure mode worth
       # spending a preflight on.
       - name: Check
-        run: nix develop --command just ci check
+        run: nix develop --command just ci check "$CI_BASE"
         env:
+          CI_BASE: ${{ github.event.merge_group.base_sha }}
           MOQ_STRICT: 1
 
   test:
@@ -92,7 +96,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Full history so `just ci test` can diff against origin/$GITHUB_BASE_REF.
+          # Full history so `just ci test` can diff against the PR or merge group base.
           fetch-depth: 0
 
       - name: Free disk space
@@ -120,7 +124,43 @@ jobs:
       # NEXTEST_PROFILE picks up the longer hang timeout in .config/nextest.toml;
       # without it a runner under load could trip the local one.
       - name: Test
-        run: nix develop --command just ci test
+        run: nix develop --command just ci test "$CI_BASE"
         env:
+          CI_BASE: ${{ github.event.merge_group.base_sha }}
           MOQ_STRICT: 1
           NEXTEST_PROFILE: ci
+
+  # The release back-merge (sh/gh/back-merge.sh) must land as a merge commit, but
+  # the merge queue only squashes. Once Check and Test pass on its head, moq-bot
+  # merges it with --admin; the main ruleset lets moq-bot bypass only when
+  # merging a pull request. Gated on this repository's own branch, since a fork
+  # branch of the same name gets no secrets and must not land. --match-head-commit
+  # pins the merge to the commit the jobs above checked.
+  land:
+    name: Land back-merge
+    needs: [check, test]
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action != 'closed' &&
+      github.event.pull_request.head.ref == 'merge/release-into-main' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    permissions: {}
+
+    steps:
+      - name: Generate moq-bot token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        id: token
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Merge
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: gh pr merge --merge --admin --match-head-commit "$HEAD_SHA" "$PR_URL"

@@ -13,9 +13,9 @@ Per scenario (publish, end, link flap, relay loss and restart, uplink loss):
 messages and bytes by kind, convergence time, stale-path seconds, transient
 subscribe loops, and whether a two-uplink mesh ever carries CDN traffic.
 
-moq-dev/moq.pro#2136 rewrites that quest for the split; until it merges the
-moq.pro quest still asks the older path-vector question. To check: look for
-the report in a merged moq.pro PR. To advance: land #2136, then ask the
-maintainer to start the moq.pro quest. Delete this quest once the report is
+moq-dev/moq.pro#2136 rewrote that quest for the split (merged 2026-10-02),
+and moq-dev/moq.pro#2152 (open) measures the tiered route and mesh failures.
+To check: the report merges via moq.pro#2152. To advance: ask the maintainer
+to review and land #2152. Delete this quest once the report is
 in and [Routes and announces](/quest/m1/cluster-routing/routes.md) is
 confirmed or revised by it.

@@ -1,0 +1,12 @@
+{
+	"name": "moq-sh",
+	"private": true,
+	"scripts": {
+		"deploy": "wrangler deploy"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "^5",
+		"typescript": "7.0.2",
+		"wrangler": "^4"
+	}
+}

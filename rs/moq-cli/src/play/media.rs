@@ -16,7 +16,7 @@ use super::args::Args;
 use super::output::{Output, Sink, Speaker};
 use super::playback::{Kind, Playback, joined};
 use super::source::subscribe;
-use super::timeline::{AudioTimeline, Presentation, timestamp};
+use super::timeline::{AudioTimeline, Presentation, fit, timestamp};
 use super::video::Video;
 use super::window::Event;
 
@@ -25,20 +25,21 @@ use super::window::Event;
 /// network jitter, and one with no depth at all can never be read from.
 const AUDIO_BUFFER_MIN: Duration = Duration::from_millis(50);
 
-/// How much audio is handed to the speaker per write.
+/// How far the speaker may run over its target before a write skips back onto
+/// it.
 ///
-/// The playout delay lives in the sink, so every byte written past that depth
-/// overshoots it, and writing in slices keeps the overshoot under one slice
-/// however long a PCM frame is (an Opus packet caps at 120 ms, but a PCM one is
-/// only required to be sample-aligned). Pacing between the slices is also what
-/// stops `Sink::write`, which never blocks and drops whatever won't fit, from
-/// losing the tail of a burst.
-const AUDIO_CHUNK: Duration = Duration::from_millis(20);
+/// The level moves by a device period each time the speaker pulls and by a
+/// packet each time one lands, so a margin under that would skip on ordinary
+/// cadence. Anything over it is latency nobody asked for, since a live stream
+/// arrives as fast as it plays and never drains the excess on its own.
+const AUDIO_SLACK: Duration = Duration::from_millis(20);
 
-/// How much longer than the speaker could possibly hold to wait for it to
-/// drain. A device that never opens reports its queue as full forever, and a
-/// truncated tail beats hanging on the way out, but the budget has to cover the
-/// ring the delay asked for or every finite track loses its last `delay`.
+/// Silence written per slice when padding, so the buffer stays a fixed size.
+const AUDIO_SILENCE: Duration = Duration::from_millis(20);
+
+/// How much longer than the speaker holds to wait for it to drain. A device that
+/// never opens reports its queue as full forever, and a truncated tail beats
+/// hanging on the way out.
 const AUDIO_DRAIN_GRACE: Duration = Duration::from_secs(1);
 
 /// Everything the media task needs to fill the window and the speaker.
@@ -72,11 +73,6 @@ impl<O: Output> Media<O> {
 			.await
 			.context("failed to subscribe to the catalog")?;
 		let mut catalogs = catalog.select(self.args.select.selection(None));
-		// The floored depth, not the raw delay: the speaker holds at least
-		// AUDIO_BUFFER_MIN whatever was asked for, so a smaller budget would skip a
-		// group the playhead could still have reached, and would size the hole
-		// fill in `play_audio` to a playhead that does not exist.
-		let depth = self.args.delay.into_std().max(AUDIO_BUFFER_MIN);
 		let mut tasks = tokio::task::JoinSet::new();
 		let mut playback = Playback::default();
 		// Shared by an audio rendition and the retired tails still playing beside
@@ -113,7 +109,7 @@ impl<O: Output> Media<O> {
 							// the other, a rendition switch costs that delay in silence, so the
 							// tail plays out while the replacement fills.
 							if let Some(sink) = sink {
-								tails.spawn(drain(sink, depth));
+								tails.spawn(drain(sink));
 							}
 							kind
 						});
@@ -173,7 +169,15 @@ impl<O: Output> Media<O> {
 							continue;
 						}
 					};
-					let max_age = self.args.delay.into_std();
+					// Nothing older than the playhead is worth presenting, so the delay
+					// doubles as the staleness budget on the wire. With no speaker to
+					// follow, the playhead is video's own, so waiting on the audio
+					// estimate's budget would only freeze the picture.
+					let max_age = if snapshot.audio.renditions.is_empty() {
+						self.args.video_delay()
+					} else {
+						self.args.max_age()
+					};
 					let opened = async {
 						let decoder = moq_video::decode::Sink::open(&config, &Default::default()).await?;
 						let track = rendition.track(&name)?;
@@ -228,7 +232,12 @@ impl<O: Output> Media<O> {
 					};
 					let mut decode = moq_audio::decode::Options::new();
 					decode.start = moq_audio::decode::Start::Latest;
-					decode.max_age = depth;
+					// Floored: the speaker holds at least AUDIO_BUFFER_MIN whatever was
+					// asked for, so a smaller budget would skip a group the playhead could
+					// still have reached, and would size the hole fill below to a playhead
+					// that does not exist.
+					decode.max_age = self.args.max_age().max(AUDIO_BUFFER_MIN);
+					decode.delay = self.args.fixed_delay();
 					// The sink and the frame-duration math below both assume f32,
 					// so ask for it rather than inheriting the decoder default.
 					decode.output.format = moq_audio::Format::F32;
@@ -241,7 +250,7 @@ impl<O: Output> Media<O> {
 							let audio = AudioPlayback {
 								speaker: speaker.clone().expect("opened above"),
 								presentation: self.presentation.clone(),
-								depth,
+								latency: self.args.fixed_delay().unwrap_or_default().max(AUDIO_BUFFER_MIN),
 								changed: self.drained.clone(),
 								output: self.output.clone(),
 							};
@@ -272,7 +281,8 @@ struct AudioPlayback<O: Output> {
 	changed: Arc<tokio::sync::Notify>,
 	speaker: O::Speaker,
 	presentation: Arc<Mutex<Presentation>>,
-	depth: Duration,
+	/// The depth the sink opens on, which also sizes its ring.
+	latency: Duration,
 	output: O,
 }
 
@@ -286,16 +296,17 @@ async fn play_audio<O: Output>(
 		changed,
 		speaker,
 		presentation,
-		depth,
+		latency,
 		output,
 	} = playback;
 
-	// `depth` is how much the speaker holds: the playout delay, floored, and the
-	// same value the decoder's age budget was built from. The delay lives in the
-	// sink rather than in the throttle, since a sample handed over now sounds
-	// that much later and waiting for the delayed instant before writing would
-	// take it twice. The window schedules video against where the speaker
-	// actually is, which keeps the two together.
+	// The playout delay is the consumer's to size, from how unevenly packets arrive,
+	// and the sink is where it lives: a sample handed over now sounds that much
+	// later. That estimate times each packet when `read` hands it over, so this
+	// loop never waits on the speaker between reads. It writes everything as it
+	// comes and lets `fit` hold the sink on the target instead. The window
+	// schedules video against where the speaker actually is, which keeps the two
+	// together whatever the target does.
 	let sample_rate = consumer.sample_rate();
 	let layout = consumer.layout();
 	let channels = layout.channels();
@@ -303,20 +314,26 @@ async fn play_audio<O: Output>(
 	input.format = moq_audio::Format::F32;
 	input.sample_rate = sample_rate;
 	input.layout = layout;
-	input.latency = depth;
+	// The floor the sink opens on and pads an underflow back to, and what sizes
+	// its ring, so a fixed delay has to be it or the ring could not hold it. An
+	// estimated target moves, so it gets the floor, and `fit` steers the sink
+	// onto the target on every write.
+	input.latency = latency;
 	let mut sink = speaker.sink(input.clone())?;
+	let mut dry = true;
 
 	// One sample across every channel, the unit a write has to stay aligned to.
 	let stride = channels as usize * size_of::<f32>();
-	let chunk = ((AUDIO_CHUNK.as_secs_f64() * sample_rate as f64) as usize * stride).max(stride);
+	let samples = |duration: Duration| (duration.as_secs_f64() * sample_rate as f64).round() as u64;
+	let slack = samples(AUDIO_SLACK);
+	let silence = vec![0u8; samples(AUDIO_SILENCE).max(1) as usize * stride];
 
 	// The longest hole worth playing through, in samples. A hole this player would
 	// rather sit through is one it is already willing to buffer, which is what the
 	// decoder's latency budget says: anything longer is what that budget chose to
 	// skip, so playing it as silence would hand back the delay the skip avoided.
 	// Past it the sink skips the hole and the clock re-anchors, as it does today.
-	let fill_max = (consumer.max_age().as_secs_f64() * sample_rate as f64) as u64;
-	let silence = vec![0u8; chunk];
+	let fill_max = samples(consumer.max_age());
 
 	let mut timeline = AudioTimeline::default();
 
@@ -344,9 +361,9 @@ async fn play_audio<O: Output>(
 		};
 		dropping = false;
 
-		let samples = frame.data.len() / size_of::<f32>() / channels as usize;
+		let length = frame.data.len() / stride;
 		let start = timestamp(frame.timestamp);
-		let timing = timeline.push(start, samples, sample_rate, fill_max);
+		let timing = timeline.push(start, length, sample_rate, fill_max);
 
 		// A rewind or a hole too large to fill starts a new playback sink. The old
 		// sink has no media clock, so its buffered audio cannot be carried across a
@@ -355,35 +372,34 @@ async fn play_audio<O: Output>(
 			drop(sink);
 			presentation.lock().unwrap().restarted();
 			sink = speaker.sink(input.clone())?;
+			dry = true;
 		}
 
 		// A hole in the media is a hole in the audio, not a splice. Handing the next
 		// frame straight to the speaker shortens the track by the missing duration,
 		// which leaves it running ahead of media time until the clock below
-		// re-anchors, taking the video with it. Play the hole instead.
-		if timing.silence > 0 {
-			let mut remaining = usize::try_from(timing.silence)
-				.unwrap_or(usize::MAX / stride)
-				.saturating_mul(stride);
-			while remaining > 0 {
-				if let Some(excess) = sink.buffered().checked_sub(depth) {
-					tokio::time::sleep(excess).await;
-				}
-				let part = remaining.min(silence.len());
-				sink.write(&silence[..part])?;
-				remaining -= part;
-			}
-		}
+		// re-anchors, taking the video with it. So the hole goes in as silence ahead
+		// of the frame, and the pair is fitted to the target as one write.
+		let buffered = samples(sink.buffered());
+		dry |= buffered == 0;
+		// Capped at the age budget: audio older than it is skipped rather than held,
+		// so a deeper target could never fill. The advertised floor needs the cap,
+		// being a number the publisher declared about itself, unbounded. The budget
+		// is also what the sink's ring was sized to hold.
+		let target = samples(consumer.delay().min(consumer.max_age()).max(AUDIO_BUFFER_MIN));
+		let fit = fit(dry, buffered, target, slack, timing.silence + length as u64);
+		dry = false;
 
-		for part in frame.data.chunks(chunk) {
-			// Let the speaker drain back to the target depth before topping it up.
-			// This is what paces the whole task: the device drains in real time, so
-			// the writes end up on the media clock and the sink holds the delay.
-			if let Some(excess) = sink.buffered().checked_sub(depth) {
-				tokio::time::sleep(excess).await;
-			}
-			sink.write(part)?;
+		// Playback drops stay on the live timeline; retrying them would add latency,
+		// and the sink already reports them in its logs.
+		let mut quiet = fit.pad + timing.silence.saturating_sub(fit.skip);
+		while quiet > 0 {
+			let part = (quiet as usize * stride).min(silence.len());
+			let _ = sink.write(&silence[..part])?;
+			quiet -= (part / stride) as u64;
 		}
+		let skip = fit.skip.saturating_sub(timing.silence) as usize * stride;
+		let _ = sink.write(&frame.data[skip.min(frame.data.len())..])?;
 
 		// Anchor the playout clock on where the speaker has actually reached, which
 		// is the only half of the pipeline that cannot skip ahead. A move has to
@@ -403,12 +419,11 @@ async fn play_audio<O: Output>(
 }
 
 /// Play out what a retired sink still holds, instead of cutting the tail off
-/// by dropping it. `latency` is the depth the sink was opened with.
-async fn drain(sink: impl Sink, latency: Duration) {
-	// A write tops the ring up to its latency and then adds a chunk, so that sum
-	// is the deepest it can be when the track ends, and draining it takes exactly
-	// that long in real time.
-	let _ = tokio::time::timeout(latency + AUDIO_CHUNK + AUDIO_DRAIN_GRACE, sink.finish()).await;
+/// by dropping it.
+async fn drain(sink: impl Sink) {
+	// The estimated target moves, so the depth the sink was opened with says
+	// nothing about what it holds now: read it at retirement instead.
+	let _ = tokio::time::timeout(sink.buffered() + AUDIO_DRAIN_GRACE, sink.finish()).await;
 }
 
 #[cfg(test)]
@@ -418,6 +433,7 @@ mod tests {
 	use moq_mux::catalog::hang::Container;
 
 	use super::*;
+	use crate::play::args::Delay;
 	use crate::play::fake::Recorder;
 
 	const SAMPLE_RATE: u32 = 48_000;
@@ -463,7 +479,7 @@ mod tests {
 			broadcast: "room".to_string(),
 			args: Args {
 				catalog_format: None,
-				delay: delay.into(),
+				delay: Delay::Fixed(delay),
 				select: Default::default(),
 			},
 			video: Default::default(),

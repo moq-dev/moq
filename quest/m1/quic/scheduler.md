@@ -115,7 +115,7 @@ where the new implementation makes it redundant.
 - [moq#3320](https://github.com/moq-dev/moq/pull/3320) - removes the current
   dense-rank queue from the wide scalar path and records why a scalar cannot
   provide this fairness level
-- [Ladder controller](/quest/m2/ladder/controller.md) - rendition priority is
+- [Ladder controller](/quest/m3/ladder/controller.md) - rendition priority is
   a policy consumer of the same hierarchy
 - [Scope track priority](/quest/m1/track-priority-scope.md) - owns the
   priority semantics this mechanism realizes, including the scheduling-domain

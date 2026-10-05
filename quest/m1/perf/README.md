@@ -19,6 +19,10 @@ Quests branch from main unless they say otherwise.
 Planning quests can settle their contracts independently. Facts from the 2026-09
 hot-path survey, so quests don't re-litigate them:
 
+- Decided in the 2026-10-05 audit: perf quests that edit moq-uring's QUIC
+  driver (#3122, Run to quiescence) Require the
+  [hard fork](/quest/m1/quic/fork/README.md), so their before and after are
+  measured on `moq-quic` instead of being invalidated by the switch.
 - `moq-uring`'s only backend is noq. Every profile names its backend. The
   historical quiche-flavor numbers cited in
   [Run to quiescence](/quest/m1/perf/uring-quiescence.md) and
