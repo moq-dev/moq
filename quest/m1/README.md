@@ -50,7 +50,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [Delete the live marker](/quest/m1/announce-live-removal.md) - announce streams yield only route events; the `Live` marker and its hold machinery are gone
 - [WebTransport close backends](/quest/m1/wt-close-backends.md) - web-transport-noq and -quinn keep the session alive while closing, and iroh's client reads a capsule close
 - [Enabled flag](/quest/m1/catalog-enabled.md) - one `enabled` rendition flag replaces `stalled` and pausing, and the flapping encoder-lag detector is deleted
-- [Spent capture budget errors](/quest/m1/capture-exhausted-error.md) - a camera or microphone that runs out of retries sets `out.error` instead of failing silently
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
 - [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - one dynamic producer per track name in both languages, with the sequence namespace surviving a replacement
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges in either order and replaces FETCH; relays fill misses by range, including over moq-transport

@@ -9,7 +9,9 @@ import { type Effect, Signal } from "@moq/signals";
  *
  * Every outcome reruns the owning effect, including running out of budget. That rerun is what clears
  * `out.source` and stops the stream, via the cleanup the previous run registered, so no caller has to
- * remember to. Screen capture cannot use this: `getDisplayMedia` needs a user gesture to reopen.
+ * remember to. The same rerun is when {@link spent} holds the last error; the caller assigns it to
+ * `out.error`. A backoff rerun leaves it empty, so a retry stays quiet. Screen capture cannot use
+ * this: `getDisplayMedia` needs a user gesture to reopen.
  */
 export class Retry {
 	/** Consecutive failures tolerated before the capture is left alone. */
@@ -36,6 +38,9 @@ export class Retry {
 
 	// How long the next attempt still owes the backoff, set by `failed` and paid by `begin`.
 	#wait: DOMHighResTimeStamp | undefined;
+
+	// The cause of the latest failure. Only surfaced once the budget is spent, so a retry stays quiet.
+	#error: Error | undefined;
 
 	/**
 	 * Subscribe the capture effect and report whether an attempt is worth making right now.
@@ -70,7 +75,8 @@ export class Retry {
 	}
 
 	/** Spends budget and reruns the effect, returning whether another attempt is allowed. */
-	failed(): boolean {
+	failed(error: Error): boolean {
+		this.#error = error;
 		this.#failures += 1;
 		const retry = this.#failures <= Retry.LIMIT;
 		// Equal jitter, so a page with several captures doesn't reopen them all on the same tick.
@@ -81,15 +87,31 @@ export class Retry {
 	}
 
 	/**
+	 * The error from the attempt that spent the budget.
+	 * Undefined while another attempt is allowed, including during backoff.
+	 */
+	spent(): Error | undefined {
+		if (this.#failures <= Retry.LIMIT) return undefined;
+		return this.#error;
+	}
+
+	/** Spend budget because the track ended. Reported via {@link spent} once nothing remains. */
+	ended(): boolean {
+		return this.failed(new DOMException("The media track ended", "AbortError"));
+	}
+
+	/**
 	 * Classify a `getUserMedia` rejection, returning whether another attempt is allowed.
 	 *
 	 * Only a busy device (`NotReadableError`) or an aborted request (`AbortError`) spends budget;
 	 * anything else, including bad constraints, is terminal at once.
 	 */
 	rejected(error: unknown): boolean {
-		if (error instanceof Error && (error.name === "NotReadableError" || error.name === "AbortError")) {
-			return this.failed();
+		const cause = error instanceof Error ? error : new Error(String(error));
+		if (cause.name === "NotReadableError" || cause.name === "AbortError") {
+			return this.failed(cause);
 		}
+		this.#error = cause;
 		this.terminal();
 		return false;
 	}
@@ -107,7 +129,7 @@ export class Retry {
 			this.#clear();
 		}, Retry.SETTLED);
 
-		effect.event(track, "ended", () => this.failed());
+		effect.event(track, "ended", () => this.ended());
 	}
 
 	/** Refund the budget, because something changed that makes another attempt worth trying. */
@@ -123,5 +145,6 @@ export class Retry {
 		this.#failures = 0;
 		this.#wait = undefined;
 		this.#delay = Retry.DELAY.initial;
+		this.#error = undefined;
 	}
 }
