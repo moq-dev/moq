@@ -151,7 +151,7 @@ See [Authentication](/bin/relay/auth).
 
 ```toml
 [cluster]
-connect = ["https://us-east.example.com/?cost=10"]   # Peers to dial. ?cost prices the link, or use {url, cost, egress, token} objects.
+connect = ["https://us-east.example.com/?cost=10"]   # Peers to dial. ?cost prices the link, or use {url, cost, egress, token, upstream} objects.
 node = "https://us-west.example.com/"                 # This relay's own URL.
 connect_api = "https://api.example.com/peers"        # Or fetch the peer list (JSON array of URLs and/or objects) live.
 token = "cluster.jwt"                                 # JWT for dials without an inline ?jwt=.
