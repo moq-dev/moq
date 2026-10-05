@@ -16,4 +16,4 @@ it is unreleased.
 
 ## Related
 
-- [Per-track timelines](/quest/m1/archive/track-timeline/README.md) - reshapes the recovery this check reads
+- [Per-track timelines](/quest/m1/archive/track-timeline.md) - reshapes the recovery this check reads

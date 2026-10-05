@@ -51,7 +51,7 @@ numbers when the name moves from the live publisher to the archive.
 
 ## Required
 
-- [Per-track timelines](/quest/m1/archive/track-timeline/README.md) - seeks through per-track timelines
+- [Per-track timelines](/quest/m1/archive/track-timeline.md) - seeks through per-track timelines
 - [Replay catalog](/quest/m1/archive/replay-catalog.md) - the recording publishes its catalog live, so `moq-hls` finds it after the handover
 - [Wildcard](/quest/m0/wildcard/README.md) - the archive's root claim serves the source path once the live announcement ends
 

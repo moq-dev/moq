@@ -10,13 +10,12 @@ layout, and FETCH behavior as native `moq-archive` users.
 Port the archive contract to the JS packages with memory and OPFS storage. The
 application explicitly enrolls video, audio, catalog, or arbitrary data tracks;
 the archive does not infer them from Hang. Record against the per-track
-timelines from [JS per-track timelines](/quest/m1/archive/track-timeline/js.md).
+timelines from [JS per-track timelines](/quest/m1/archive/js-timelines.md).
 
 Commit each track independently: persist each stored span, including a frame
 range of a still-open group, then publish that track's timeline record. Match
 the object keys, envelope bytes, `.info` property values, and timeline
-discovery the Rust writer uses after
-[Rust per-track timelines](/quest/m1/archive/track-timeline/core.md), per the
+discovery the Rust writer uses, per the
 [Recording section](/drafts/draft-lcurley-moq-hang.md#recording), without
 inferring catalog-to-group applicability.
 [Catalog track identity](/quest/m2/catalog-tracks.md) addresses that separately.
@@ -37,5 +36,5 @@ lands first.
 ## Required
 
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - generic on-demand group serving and IETF FETCH support
-- [JS per-track timelines](/quest/m1/archive/track-timeline/js.md) - the timeline this archive records against
+- [JS per-track timelines](/quest/m1/archive/js-timelines.md) - the timeline this archive records against
 - [Archive](/quest/m1/archive/README.md) - the native writer, reader, and DVR contract this ports

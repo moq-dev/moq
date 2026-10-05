@@ -27,7 +27,3 @@ who joins late joins mid-replay.
   current group, and that two tracks stay aligned.
 - Deferred to m2 in the 2026-09-30 audit: no named consumer; FETCH replay
   already serves DVR and HLS.
-
-## Required
-
-- [Rust per-track timelines](/quest/m1/archive/track-timeline/core.md) - the reader's per-track index this paces
