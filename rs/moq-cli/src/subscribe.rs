@@ -151,9 +151,18 @@ impl SelectArgs {
 			(self.video_name.is_some(), "--video-name"),
 			(self.video_codec.is_some(), "--video-codec"),
 			(self.no_video, "--no-video"),
+			(self.no_audio, "--no-audio"),
+		]
+		.into_iter()
+		.find_map(|(given, flag)| given.then_some(flag))
+		.or_else(|| self.audio_flag())
+	}
+
+	/// The first flag passed that selects an audio rendition, for a sink with no audio.
+	pub(crate) fn audio_flag(&self) -> Option<&'static str> {
+		[
 			(self.audio_name.is_some(), "--audio-name"),
 			(self.audio_codec.is_some(), "--audio-codec"),
-			(self.no_audio, "--no-audio"),
 		]
 		.into_iter()
 		.find_map(|(given, flag)| given.then_some(flag))

@@ -294,10 +294,15 @@ impl Invocation {
 					stdout.linger.is_zero() || matches!(stdout.format, SubscribeFormat::Ts),
 					"--linger needs an output that can mark a restart, and only `export ts` can"
 				);
-				anyhow::ensure!(
-					!export.select.no_video || !matches!(stdout.format, SubscribeFormat::H264 | SubscribeFormat::H265),
-					"--no-video leaves nothing for a video elementary stream; pick a container format"
-				);
+				if matches!(stdout.format, SubscribeFormat::H264 | SubscribeFormat::H265) {
+					anyhow::ensure!(
+						!export.select.no_video,
+						"--no-video leaves nothing for a video elementary stream; pick a container format"
+					);
+					if let Some(flag) = export.select.audio_flag() {
+						anyhow::bail!("a video elementary stream has no audio; remove {flag}");
+					}
+				}
 			}
 			if let Some(sink) = export.sink.ignores_selection()
 				&& let Some(flag) = export.select.flag()
@@ -853,7 +858,7 @@ pub struct Export {
 	#[usage(long = "catalog-format", value_enum)]
 	pub catalog_format: Option<CatalogFormatArg>,
 
-	/// Rendition selection (`--video-name`, `--no-audio`, ...), refused by sinks that export every rendition.
+	/// Rendition selection (`--video-name`, `--no-audio`, ...), refused by sinks that don't apply it.
 	#[usage(flatten)]
 	pub select: crate::subscribe::SelectArgs,
 
@@ -909,7 +914,7 @@ pub enum ExportSink {
 }
 
 impl ExportSink {
-	/// The sink's name when it exports every rendition, so the selection flags would be ignored.
+	/// The sink's name when it doesn't apply selection, so the selection flags would be ignored.
 	fn ignores_selection(&self) -> Option<&'static str> {
 		Some(match self {
 			Self::Fmp4(_) | Self::Mkv(_) | Self::Flv(_) | Self::H264(_) | Self::H265(_) => return None,
@@ -1101,20 +1106,27 @@ mod tests {
 		assert!(!selection.has_audio());
 	}
 
-	/// A video elementary stream with no video is a contradiction, refused before dialing.
+	/// A video elementary stream refuses leaving video out or selecting audio, before dialing.
 	#[test]
 	fn elementary_streams_refuse_no_video() {
 		for format in ["h264", "h265"] {
 			let err = export(&["--no-video", format]).unwrap().validate().unwrap_err();
 			assert!(err.to_string().contains("--no-video"), "{format}: {err}");
 			export(&["--no-audio", format]).unwrap().validate().unwrap();
+			for flag in [["--audio-name", "stereo"], ["--audio-codec", "aac"]] {
+				let err = export(&[flag.as_slice(), &[format]].concat())
+					.unwrap()
+					.validate()
+					.unwrap_err();
+				assert!(err.to_string().contains(flag[0]), "{format} {flag:?}: {err}");
+			}
 		}
 		for format in ["fmp4", "mkv", "flv"] {
 			export(&["--no-video", format]).unwrap().validate().unwrap();
 		}
 	}
 
-	/// A sink that exports every rendition refuses the selection flags rather than
+	/// A sink that doesn't apply selection refuses the selection flags rather than
 	/// ignoring them.
 	#[test]
 	fn sinks_without_selection_refuse_it() {

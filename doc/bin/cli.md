@@ -147,8 +147,9 @@ VBR source records nothing, so export without either stays unpadded.
 The `fmp4`, `mkv`, `flv`, `h264`, and `h265` exports select renditions with
 flags before the sink: `--video-name` and `--audio-name` pick a rendition,
 `--video-codec` and `--audio-codec` keep a codec family, and `--no-video` or
-`--no-audio` leaves a role out. `h264` and `h265` refuse `--no-video`. `ts` and
-the gateways export every rendition, so they refuse these flags.
+`--no-audio` leaves a role out. `h264` and `h265` refuse `--no-video` and the
+audio selection flags. `ts` and the gateways don't apply selection, so they
+refuse these flags.
 
 ```bash
 moq ... export --no-video fmp4 > audio.mp4
