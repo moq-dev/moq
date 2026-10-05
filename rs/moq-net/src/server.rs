@@ -85,7 +85,7 @@ impl Server {
 		runtime: Clock,
 		session: S,
 		version: lite::Version,
-		client_setup: Option<lite::Setup>,
+		client_setup: Option<lite::AcceptedSetup<S>>,
 		peer_hop: Option<crate::Hop>,
 	) -> Result<(Session, crate::Driver<S>), Error>
 	where
@@ -180,9 +180,9 @@ impl Server {
 				// re-reading the (consumed) Setup Stream.
 				let client_setup = lite::accept_setup(&mut session, version).await?;
 				(
-					client_setup.path.clone(),
-					client_setup.role,
-					client_setup.hop,
+					client_setup.setup.path.clone(),
+					client_setup.setup.role,
+					client_setup.setup.hop,
 					PausedHandshake::LiteSetup {
 						session,
 						version,
@@ -465,7 +465,7 @@ enum PausedHandshake<S: crate::transport::poll::Session> {
 	LiteSetup {
 		session: S,
 		version: lite::Version,
-		client_setup: lite::Setup,
+		client_setup: lite::AcceptedSetup<S>,
 	},
 	/// An IETF (or legacy bidi-SETUP) handshake, boxed where its
 	/// thread-affinity bounds held. The boxing is what keeps [`Handshake`] and
@@ -535,6 +535,7 @@ where
 				authority: None,
 				peer_setup_stream: Some(peer_setup.stream),
 				peer_declared: Some(peer_setup.declared),
+				early_unis: peer_setup.early,
 			})?;
 			tracing::debug!(?version, "connected");
 			Ok(Session::new(
@@ -643,6 +644,7 @@ where
 						authority: None,
 						peer_setup_stream: None,
 						peer_declared: Some(peer_declared),
+						early_unis: Vec::new(),
 					})?;
 					(None, crate::driver::Protocol::Ietf(protocol), goaway)
 				}
@@ -844,6 +846,7 @@ mod tests {
 		uni: Arc<Mutex<VecDeque<Vec<u8>>>>,
 		bi: Arc<Mutex<VecDeque<Vec<u8>>>>,
 		closed: Arc<Mutex<Option<u32>>>,
+		stops: Arc<Mutex<Vec<u32>>>,
 	}
 
 	impl FakeSession {
@@ -853,6 +856,7 @@ mod tests {
 				uni: Arc::new(Mutex::new(uni.into_iter().collect())),
 				bi: Default::default(),
 				closed: Default::default(),
+				stops: Default::default(),
 			}
 		}
 
@@ -876,7 +880,11 @@ mod tests {
 			_cx: &mut std::task::Context<'_>,
 		) -> std::task::Poll<Result<Self::RecvStream, Self::Error>> {
 			match self.uni.lock().unwrap().pop_front() {
-				Some(data) => std::task::Poll::Ready(Ok(FakeRecv { data: data.into() })),
+				Some(data) => std::task::Poll::Ready(Ok(FakeRecv {
+					data: data.into(),
+					stops: self.stops.clone(),
+				})),
+				None if self.closed().is_some() => std::task::Poll::Ready(Err(FakeError)),
 				None => std::task::Poll::Pending,
 			}
 		}
@@ -885,7 +893,13 @@ mod tests {
 			_cx: &mut std::task::Context<'_>,
 		) -> std::task::Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 			match self.bi.lock().unwrap().pop_front() {
-				Some(data) => std::task::Poll::Ready(Ok((FakeSend, FakeRecv { data: data.into() }))),
+				Some(data) => std::task::Poll::Ready(Ok((
+					FakeSend,
+					FakeRecv {
+						data: data.into(),
+						stops: self.stops.clone(),
+					},
+				))),
 				None => std::task::Poll::Pending,
 			}
 		}
@@ -954,6 +968,7 @@ mod tests {
 
 	struct FakeRecv {
 		data: VecDeque<u8>,
+		stops: Arc<Mutex<Vec<u32>>>,
 	}
 	impl web_transport_trait::poll::RecvStream for FakeRecv {
 		type Error = FakeError;
@@ -971,7 +986,9 @@ mod tests {
 			}
 			std::task::Poll::Ready(Ok(Some(size)))
 		}
-		fn stop(&mut self, _code: u32) {}
+		fn stop(&mut self, code: u32) {
+			self.stops.lock().unwrap().push(code);
+		}
 		fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
 			std::task::Poll::Ready(Ok(()))
 		}
@@ -1191,18 +1208,43 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn accept_request_skips_uni_stream_before_setup() {
-		// A GROUP racing ahead of the SETUP is STOP_SENDING-ed and skipped; the gate
-		// keeps reading until it finds the SETUP.
+	async fn accept_request_holds_uni_stream_before_setup() {
 		let session = FakeSession::new(
 			ALPN_LITE_05,
 			[lite05_group(), lite05_setup(Some("/team/room"), None, None)],
 		);
+		let stops = session.stops.clone();
 		let request = Server::new()
-			.accept_request(tokio::time::Instant::now().into_std(), session)
+			.accept_request_lite(tokio::time::Instant::now().into_std(), session)
 			.await
 			.unwrap();
 		assert_eq!(request.path(), "/team/room");
+		assert!(stops.lock().unwrap().is_empty(), "the early stream must stay open");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn accept_request_reads_buffered_setup_after_transport_close() {
+		let mut session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/closed"), None, None)]);
+		web_transport_trait::poll::Session::close(&mut session, SessionError::Cancel.to_code(), "closed");
+		let request = Server::new()
+			.accept_request_lite(tokio::time::Instant::now().into_std(), session)
+			.await
+			.unwrap();
+		assert_eq!(request.path(), "/closed");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn accepted_lite_setup_refuses_a_second_setup_stream() {
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
+		let transport = session.clone();
+		let request = Server::new()
+			.accept_request_lite(tokio::time::Instant::now().into_std(), session)
+			.await
+			.unwrap();
+		let (_session, mut driver) = request.ok().await.unwrap();
+		transport.uni.lock().unwrap().push_back(vec![1]);
+		let _ = driver.poll(tokio::time::Instant::now().into_std(), &kio::Waiter::noop());
+		assert_eq!(transport.closed(), Some(SessionError::ProtocolViolation.to_code()));
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1245,6 +1287,7 @@ mod tests {
 						path: None,
 						token: None,
 						declared: ietf::peer::Peer::default(),
+						early: Vec::new(),
 					},
 				})),
 			}),

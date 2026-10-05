@@ -42,16 +42,12 @@ skipping inside the Nix shell.
   job gated to `refs/heads/main`, never `pull_request`; a dedicated label only
   this job selects; read-only `permissions`. Read GitHub's self-hosted runner
   hardening guidance before wiring it.
-- Share the runner with the io_uring one that #4132 plans
-  (`quest/m1/uring-runner.md` on the drain line, which wants a 6.12+ kernel on
-  the same host): one registration and one security posture, a label per
-  capability. Whichever quest lands second reuses the first's job shape.
 
 Public API: none. Wire: none.
 
 ## Required
 
-- A self-hosted runner is registered for moq-dev/moq on the maintainer's host, with the NVIDIA driver
+- [A self-hosted NVIDIA runner is registered](/quest/m1/gpu-runner.md) - the host the nightly job runs on
 
 ## Related
 

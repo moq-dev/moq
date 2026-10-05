@@ -30,7 +30,7 @@ relay bounds a sparse FETCH only if the model can request ranges:
   `request_groups` as a separate API was rejected. A publisher's
   `track::Dynamic` receives range requests for misses, replacing per-group
   `requested_group`, and `fetch_group` becomes a one-range subscription or is
-  removed. This breaks published moq-net APIs, so the line lands on `dev`.
+  removed. This breaks published moq-net APIs.
 - **moq-transport.** Some deployments use non-contiguous group numbers, so a
   relay never probes upstream one group at a time. Upstream, each run of
   locally missing groups becomes one standalone range FETCH, capped below the

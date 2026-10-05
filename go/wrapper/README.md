@@ -19,15 +19,18 @@ so `go get moq.dev/moq@latest` always pulls the latest native core.
 go get moq.dev/moq@latest
 ```
 
-```go
-import "moq.dev/moq"
-```
-
 `CGO_ENABLED=1` is required (the default on Unix); the prebuilt `libmoq_ffi.a` comes transitively from `moq.dev/moq-ffi`, so there is no Rust toolchain or shared-library setup.
 
 ## Quick start
 
 ```go
+import (
+	"context"
+	"fmt"
+	"log"
+	"moq.dev/moq"
+)
+
 ctx := context.Background()
 
 client, err := moq.Dial(ctx, "https://relay.example.com")

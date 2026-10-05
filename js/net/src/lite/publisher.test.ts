@@ -1642,3 +1642,43 @@ test("lite draft-05: a group that goes stale while its stream opens writes nothi
 		origin.close();
 	}
 });
+
+test.each([0, 1])("lite draft-07 reports the cached largest position when starting at group %s", async (startGroup) => {
+	const version = Version.DRAFT_07;
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("quiet"));
+	const track = broadcast.createTrack("video");
+	const group = new GroupProducer(0);
+	group.writeString("cached");
+	group.close();
+	track.writeGroup(group);
+	const client = await Stream.open(pair.client, { version });
+	const server = await Stream.accept(pair.server, version);
+	if (!server) throw new Error("missing subscribe stream");
+	const running = publisher.runSubscribe(
+		replaySubscribe({
+			id: 0n,
+			broadcast: Path.from("quiet"),
+			track: "video",
+			priority: 0,
+			startGroup,
+		}),
+		server,
+	);
+	try {
+		const response = await decodeSubscribeResponse(client.reader, version);
+		if (!("start" in response)) throw new Error("expected SUBSCRIBE_OK");
+		expect(response.start.group).toBe(startGroup);
+		expect(response.start.largest).toEqual({ group: 0, frame: 0 });
+	} finally {
+		client.close();
+		publisher.close();
+		broadcast.close();
+		origin.close();
+		pair.client.close();
+		pair.server.close();
+		await running;
+	}
+});

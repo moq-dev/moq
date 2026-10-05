@@ -55,7 +55,9 @@ split by `tier` and `role`, plus accept-loop counters per TCP listener. Alert
 on `moq_relay_accept_failures_total{class="exhausted"}`, which means the
 process ran out of a resource `accept` needs. Content dropped for drifting past
 a subscriber's budget is counted separately as `moq_relay_stale_bytes_total`
-and friends. Host CPU and memory belong to a node exporter.
+and friends. During a [shutdown drain](/bin/relay/config#shutdown),
+`moq_relay_draining_sessions` counts the sessions sent a GOAWAY that have not
+left yet. Host CPU and memory belong to a node exporter.
 
 Traffic and session counters accumulate for the node's lifetime, including
 broadcasts and sessions that have ended. The stats publishing prefix (normally

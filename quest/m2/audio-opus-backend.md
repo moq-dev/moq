@@ -40,7 +40,3 @@ tested only by reading the codec's control value.
 Retain fixtures and repeatable measurements in the existing CI/nightly audio
 harness. Public API and wire: no change for the study; validate compatibility
 before a separately scoped backend implementation.
-
-## Related
-
-- [Audio quality](/quest/m0/audio-quality-harness/README.md) - shared measurement infrastructure

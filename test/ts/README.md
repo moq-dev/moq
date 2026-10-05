@@ -7,8 +7,10 @@ runs [TSDuck](https://tsduck.io) plus a custom analyzer over it.
 
 This is a diagnostic gate, not just a pass/fail: the exporter
 ([`rs/moq-mux/src/container/ts/export.rs`](../../rs/moq-mux/src/container/ts/export.rs))
-pads to a constant rate only once the catalog carries the source's mux rate, so
-several broadcast-shape checks are expected to flag. The report quantifies exactly where
+pads with null packets to the multiplex rate the source recorded (or `--mux-rate`),
+leaves a source without one unpadded, never delays media to fit the rate, and
+puts a PCR on its own packet every 25 ms of media time, so several
+broadcast-shape checks are expected to flag. The report quantifies exactly where
 and by how much.
 
 Four instruments live here. `compliance.py` (via `run.sh`) grades a captured file
@@ -238,7 +240,7 @@ grades only how evenly the bytes are laid over the PCRs.
 |---|---|---|
 | `sync` | hard | no invalid sync bytes / transport-error packets (`--live` only) |
 | `continuity` | hard | no discontinuities, and a payload-less packet must not advance the counter (ISO 13818-1 2.4.3.3) (`--live` only) |
-| `pcr-value-interval` | hard | no interval above `--repetition-ms` (default 40, TR 101 290), within one time base |
+| `pcr-value-interval` | hard | no interval above `--repetition-ms` (default 100, TR 101 290 V1.4.1), within one time base |
 | `pcr-release-timing` | hard | no more than `--release-pct-max` of intervals arrive further than `--release-ms` from the interval their own values assert, and accumulated drift stays within `--drift-ms`, being the standing lag the sender is allowed to hold; a sample below `--live-min-pcr` PCRs or `--live-cover-pct` of the window is a failure, not a pass (`--live` only) |
 | `pcr-position` | shape | share of PCR packets within `--adjacent-packets` of the previous one |
 | `pcr-schedule` | shape | share of PCR intervals whose bytes are within `--schedule-tolerance-pct` (default 1) or one packet of what `--mux-rate` implies (estimated from the capture if not given); hard, at that share, when `--schedule-pct-min` is given |

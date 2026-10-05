@@ -15,8 +15,8 @@ exhaustion, or to a quantum, before touching the ring.
 
 ## Plan
 
-Branch from dev: `kio`'s `Tasks::poll` changed only there (#4156 merged
-`Pollable` into `Task`), and the pass budget builds on that version. Keep the fairness the one-pass rule protects: a forward wake
+The pass budget builds on `kio`'s current `Tasks::poll` (#4156 merged
+`Pollable` into `Task`). Keep the fairness the one-pass rule protects: a forward wake
 chain must not starve the caller's other arms, and one connection's backlog
 must not starve the socket.
 

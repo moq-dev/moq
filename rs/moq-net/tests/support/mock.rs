@@ -127,6 +127,9 @@ pub struct MockSendStream {
 	/// Acknowledge the FIN as soon as it is sent, for a stream the peer's transport holds
 	/// back from its application (see [`MockSession::hold_unis`]).
 	ack_fin: bool,
+	/// Drop this stream's FIN, as a peer that never completes it (see
+	/// [`MockSession::withhold_bidi_fins`]).
+	withhold_fin: Arc<AtomicBool>,
 	conn: Arc<ConnectionState>,
 }
 
@@ -157,11 +160,14 @@ impl poll::SendStream for MockSendStream {
 	fn set_priority(&mut self, _order: i32) {}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
+		if self.withhold_fin.load(Ordering::Relaxed) {
+			return Ok(());
+		}
 		if self.tx.is_some() {
 			// A FIN that never left must not look acknowledged: poll_closed
 			// trusts this signal ahead of the connection error.
 			let pushed = self.push(StreamChunk::Fin);
-			if pushed.is_ok() && self.ack_fin {
+			if pushed.is_ok() && (self.ack_fin || self.conn.ack_fins.load(Ordering::Relaxed)) {
 				self.closed.set(Ok(()));
 			}
 			self.tx = None;
@@ -337,6 +343,7 @@ fn new_stream_pair(conn: &Arc<ConnectionState>) -> (MockSendStream, MockRecvStre
 		closed: closed.clone(),
 		park: kio::Park::default(),
 		ack_fin: false,
+		withhold_fin: Arc::default(),
 		conn: conn.clone(),
 	};
 	let recv = MockRecvStream {
@@ -362,6 +369,8 @@ fn new_stream_pair(conn: &Arc<ConnectionState>) -> (MockSendStream, MockRecvStre
 struct ConnectionState {
 	finishes: AtomicUsize,
 	hold_fins: AtomicBool,
+	/// Acknowledge every FIN as soon as it is sent, before the peer reads it.
+	ack_fins: AtomicBool,
 	/// Set once by whichever side closes first.
 	/// Setting it wakes both sides.
 	close_state: kio::Shared<Option<(u32, String)>>,
@@ -407,6 +416,8 @@ struct SessionSide {
 	withheld: Mutex<bool>,
 	/// Whether the datagrams this side sends are lost.
 	lossy: Mutex<bool>,
+	/// Whether this side drops the FIN of the bidi streams it opens.
+	withhold_bidi_fins: Arc<AtomicBool>,
 }
 
 /// An in-memory mock WebTransport session.
@@ -461,7 +472,8 @@ impl poll::Session for MockSession {
 		_cx: &mut Context<'_>,
 	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 		// Create two stream pairs: one for each direction.
-		let (our_send, peer_recv) = new_stream_pair(&self.side.conn);
+		let (mut our_send, peer_recv) = new_stream_pair(&self.side.conn);
+		our_send.withhold_fin = self.side.withhold_bidi_fins.clone();
 		let (peer_send, our_recv) = new_stream_pair(&self.side.conn);
 
 		// Deliver (peer_send, peer_recv) to the peer's accept_bi.
@@ -548,6 +560,16 @@ impl MockSession {
 	/// Streams whose FIN was sent before the connection closed.
 	pub fn finished_streams(&self) -> usize {
 		self.side.conn.finishes.load(Ordering::Relaxed)
+	}
+
+	/// Drop the FIN of the bidi streams this side opens, keeping them open.
+	pub fn withhold_bidi_fins(&self) {
+		self.side.withhold_bidi_fins.store(true, Ordering::Relaxed);
+	}
+
+	/// Acknowledge every FIN as soon as it is sent, before the peer reads it, as QUIC does.
+	pub fn ack_fins(&self) {
+		self.side.conn.ack_fins.store(true, Ordering::Relaxed);
 	}
 
 	/// Withhold FIN acknowledgements while continuing to deliver stream data.
@@ -651,6 +673,7 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		held: Mutex::default(),
 		withheld: Mutex::default(),
 		lossy: Mutex::default(),
+		withhold_bidi_fins: Arc::default(),
 	});
 
 	let server_side = Arc::new(SessionSide {
@@ -665,6 +688,7 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		held: Mutex::default(),
 		withheld: Mutex::default(),
 		lossy: Mutex::default(),
+		withhold_bidi_fins: Arc::default(),
 	});
 
 	let new = |side| MockSession {

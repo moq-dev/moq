@@ -32,3 +32,7 @@ nightly.
 - [TS byte schedule](/quest/m1/tstd/byte-schedule.md) - PCRs sit on the byte grid the mux rate implies, paced against the fixed delay
 - [Send-ahead within the delay](/quest/m1/tstd/send-ahead.md) - total lag is `--delay`, send-ahead included, with a 1 s default
 - [Mux-rate hold](/quest/m1/tstd/mux-rate-hold.md) - import publishes its catalog once the mux rate is measured, so export is constant-rate from the start
+
+## Related
+
+- [TS passthrough](/quest/m1/ts-passthrough.md) - the passthrough lane named in the Goal

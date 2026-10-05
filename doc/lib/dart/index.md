@@ -38,6 +38,8 @@ moq.announcements(
   }
 });
 final broadcast = await moq.requestBroadcast('live/camera');
+final catalog = await broadcast.subscribeCatalog();
+print(await catalog.next());
 ```
 
 ```dart

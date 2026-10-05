@@ -595,7 +595,9 @@ def main():
     ap.add_argument("path", nargs="?", help="TS file; omit with --live to read stdin")
     ap.add_argument("--live", action="store_true", help="read stdin and stamp arrivals, grading release timing")
     ap.add_argument("--seconds", type=float, default=45.0, help="live capture window (default 45)")
-    ap.add_argument("--repetition-ms", type=float, default=40.0, help="max PCR value interval, TR 101 290 (default 40)")
+    ap.add_argument(
+        "--repetition-ms", type=float, default=100.0, help="max PCR value interval, TR 101 290 V1.4.1 (default 100)"
+    )
     ap.add_argument(
         "--release-ms",
         type=float,

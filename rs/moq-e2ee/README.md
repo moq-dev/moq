@@ -17,19 +17,19 @@ cargo add moq-e2ee
 ## Shape
 
 The application distributes a `Credential { context, kid, secret }` over its own
-authenticated channel. Every publisher instance mints an `Epoch` and binds it as a
+authenticated channel. Every publisher instance mints a shared `moq_net::Epoch` and binds it as a
 `Generation`, which derives the opaque track names and keys for that instance alone:
 
 ```rust
 let credential = Credential::new(credential::Config { context, kid, secret })?;
-let generation = credential.generation(Epoch::mint());
-let path = credential.path("meeting.hang")?.join(generation.epoch().as_str());
+let generation = credential.generation(moq_net::Epoch::mint());
+let path = credential.path("meeting.hang")?.join_epoch(Some(generation.epoch()));
 let name = generation.name("video")?;
 let producer = generation.produce(broadcast.create_track(name.as_str(), None)?)?;
 ```
 
 A subscriber discovers instances under `credential.path(semantic)`, takes the greatest
-epoch from the last path segment, binds the same generation, and calls
+epoch from the last `@<uuidv7>` path segment using `Path::split_epoch`, binds the same generation, and calls
 `generation.consume(subscriber)` on a track whose name it derived or read from the
 decrypted catalog. Nothing survives a publisher instance: a restart mints a new epoch.
 

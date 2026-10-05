@@ -156,6 +156,11 @@ impl ClientSession {
 
 						RtmpMessage::SetChunkSize { size } => self.handle_set_chunk_size(size)?,
 
+						RtmpMessage::Abort { stream_id } => {
+							self.deserializer.abort(stream_id);
+							Vec::new()
+						}
+
 						_ => vec![ClientSessionResult::UnhandleableMessageReceived(payload)],
 					};
 

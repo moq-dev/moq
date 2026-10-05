@@ -1506,6 +1506,101 @@ mod tests {
 			}
 		}
 
+		/// Drive cuts through the public control and read their group boundaries from the track.
+		async fn capture_cuts(cut_after_cadence: bool) -> Vec<usize> {
+			use moq_mux::container::Container as _;
+
+			// Off Apple, encoding waits on an OS thread. Keep Tokio from auto-advancing
+			// the paused clock to a stall deadline while that thread answers.
+			let (hold, released) = tokio::sync::oneshot::channel::<()>();
+			let clock = tokio::task::spawn_blocking(move || {
+				let _ = released.blocking_recv();
+			});
+			let started = tokio::time::Instant::now();
+			// Capture streams are !Send on macOS.
+			let groups = tokio::task::LocalSet::new()
+				.run_until(async {
+					let mut broadcast = moq_net::broadcast::Info::new().produce();
+					let consumer = broadcast.consume();
+					let catalog =
+						moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+					let mut options = Capture::default();
+					options.encode.kind = encoder::Kind::Software;
+					let (control, driver) = Control::new(broadcast.clone(), catalog, options).unwrap();
+
+					// Ten nominal fps makes the default two-second GOP twenty frames. Feed them
+					// 10ms apart in media time so cadence falls inside the 500ms cut spacing window.
+					let rate = crate::Rate::new(10, 1).unwrap();
+					let (_probe, probe) = Synthetic::open(crate::Size::new(320, 240), rate);
+					let (camera, stream) = Synthetic::open(crate::Size::new(320, 240), rate);
+					let run = tokio::task::spawn_local(driver.run_with(Streams::new([probe, stream])));
+					let mut catalog =
+						moq_mux::catalog::Consumer::<()>::new(&consumer, moq_mux::catalog::CatalogFormat::Hang)
+							.await
+							.unwrap();
+					let (mut subscriber, format) = loop {
+						let snapshot = catalog.next().await.unwrap().expect("a catalog");
+						if let Some((name, rendition)) = snapshot.video.renditions.iter().next() {
+							break (
+								consumer.track(name).unwrap().subscribe(None).await.unwrap(),
+								moq_mux::catalog::hang::Container::try_from(rendition).unwrap(),
+							);
+						}
+					};
+
+					let (published, mut received) = tokio::sync::mpsc::unbounded_channel();
+					let collect = tokio::task::spawn_local(async move {
+						let mut groups = Vec::new();
+						while let Some(mut group) = subscriber.recv_group().await.unwrap() {
+							let mut frames = 0;
+							while let Some(batch) =
+								kio::wait(|waiter| format.poll_read(&mut group, waiter)).await.unwrap()
+							{
+								for frame in batch {
+									// A duration marker closes the group but is not an encoded picture.
+									if format.end(&frame).is_none() {
+										frames += 1;
+										published.send(()).unwrap();
+									}
+								}
+							}
+							groups.push(frames);
+						}
+						groups
+					});
+
+					let timestamps = (0..=20).map(|frame| frame * 10).chain([201, 699, 700, 1200]);
+					for (frame, millis) in timestamps.enumerate() {
+						camera.push_native(surface(), us(millis * 1000));
+						// Wait for delivery before requesting a cut or replacing the capture's latest slot.
+						received.recv().await.expect("the frame reached the subscriber");
+						if frame == 0 || (frame == 20 && cut_after_cadence) {
+							control.cut().unwrap();
+						}
+					}
+					drop(control);
+					run.await.unwrap().unwrap();
+					collect.await.unwrap()
+				})
+				.await;
+			assert_eq!(started.elapsed(), Duration::ZERO);
+			drop(hold);
+			clock.await.unwrap();
+			groups
+		}
+
+		#[tokio::test(start_paused = true)]
+		async fn cadence_keyframe_serves_a_pending_capture_cut() {
+			// The keyframe at 200ms serves the pending cut. Passing 700ms must not force another.
+			assert_eq!(capture_cuts(false).await, [20, 5]);
+		}
+
+		#[tokio::test(start_paused = true)]
+		async fn capture_cut_after_cadence_waits_for_spacing() {
+			// A new cut after 200ms waits through 699ms, opens at 700ms, and fires only once.
+			assert_eq!(capture_cuts(true).await, [20, 3, 2]);
+		}
+
 		/// Drop the controls while the driver sits in its `opens`th open, which never finishes.
 		async fn abandon(
 			control: Control,

@@ -1,7 +1,9 @@
-import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { hasRangeFilters, isDraft20 } from "./filter.ts";
 import * as Message from "./message.ts";
-import type { IetfVersion } from "./version.ts";
+import * as Namespace from "./namespace.ts";
+import { Parameters } from "./parameters.ts";
+import { type IetfVersion, Version } from "./version.ts";
 
 /**
  * The header that begins a fetch stream (draft-20 section 11.4.4), naming the request it
@@ -29,49 +31,17 @@ export class FetchHeader {
 	}
 }
 
+/**
+ * A FETCH request. We serve none, so only what a refusal needs is kept; the rest is
+ * decoded so a legal request is refused rather than breaking the stream.
+ */
 export class Fetch {
 	static id = 0x16;
 
 	requestId: bigint;
-	trackNamespace: Path.Valid;
-	trackName: string;
-	subscriberPriority: number;
-	groupOrder: number;
-	startGroup: bigint;
-	startObject: bigint;
-	endGroup: bigint;
-	endObject: bigint;
 
-	constructor({
-		requestId,
-		trackNamespace,
-		trackName,
-		subscriberPriority,
-		groupOrder,
-		startGroup,
-		startObject,
-		endGroup,
-		endObject,
-	}: {
-		requestId: bigint;
-		trackNamespace: Path.Valid;
-		trackName: string;
-		subscriberPriority: number;
-		groupOrder: number;
-		startGroup: bigint;
-		startObject: bigint;
-		endGroup: bigint;
-		endObject: bigint;
-	}) {
+	constructor({ requestId }: { requestId: bigint }) {
 		this.requestId = requestId;
-		this.trackNamespace = trackNamespace;
-		this.trackName = trackName;
-		this.subscriberPriority = subscriberPriority;
-		this.groupOrder = groupOrder;
-		this.startGroup = startGroup;
-		this.startObject = startObject;
-		this.endGroup = endGroup;
-		this.endObject = endObject;
 	}
 
 	async #encode(_w: Writer): Promise<void> {
@@ -82,12 +52,52 @@ export class Fetch {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader, _version: IetfVersion): Promise<Fetch> {
-		return Message.decode(r, Fetch.#decode);
+	static async decode(r: Reader, version: IetfVersion): Promise<Fetch> {
+		return Message.decode(r, (mr) => Fetch.#decode(mr, version));
 	}
 
-	static async #decode(_r: Reader): Promise<Fetch> {
-		throw new Error("FETCH messages are not supported");
+	static async #decode(r: Reader, version: IetfVersion): Promise<Fetch> {
+		const requestId = await r.u62();
+		if (version === Version.DRAFT_17) {
+			await r.u62(); // required_request_id_delta
+		}
+
+		if (version === Version.DRAFT_14) {
+			await r.u8(); // subscriber_priority
+			await r.u8(); // group_order
+		}
+
+		if (isDraft20(version)) {
+			// Draft-20 names the track up front and moves the range into LOCATION_FILTER.
+			await Namespace.decode(r);
+			await r.string();
+		} else {
+			const fetchType = await r.u53();
+			switch (fetchType) {
+				case 0x1: // Standalone: namespace, name, start and end Locations
+					await Namespace.decode(r);
+					await r.string();
+					for (let i = 0; i < 4; i++) await r.u62();
+					break;
+				case 0x2: // Relative Joining: subscription, group offset
+				case 0x3: // Absolute Joining: subscription, group
+					await r.u62();
+					await r.u62();
+					break;
+				default:
+					throw new Error(`unknown fetch type: ${fetchType}`);
+			}
+		}
+
+		const params = await Parameters.decode(r, version);
+		if (params.rangeFilters && !hasRangeFilters(version)) {
+			throw new Error("Range Filters need draft-19");
+		}
+		if (params.trackPropertyFilter) {
+			throw new Error("TRACK_PROPERTY_FILTER is not allowed on FETCH");
+		}
+
+		return new Fetch({ requestId });
 	}
 }
 

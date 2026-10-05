@@ -66,7 +66,7 @@ Promote `tstd` in `test/ts/compliance.py` from shape to hard, so `just test
 ts` fails a round-trip the T-STD model rejects; it reports only until then.
 
 Public API: `ts::Export` takes the delay in place of its max age and loses the
-hold; breaking, on `dev`. Wire:
+hold; breaking. Wire:
 none.
 
 ## Related
@@ -74,4 +74,4 @@ none.
 - [FLV export delay](/quest/m1/flv-export-delay.md) - adopts the release stage
 - [MKV export delay](/quest/m1/mkv-export-delay.md) - adopts the release stage
 - [TS byte schedule](/quest/m1/tstd/byte-schedule.md) - uses this delay as its mux-ahead buffer delay
-- [Plan: max-delay](/quest/m1/plan-max-delay.md) - whether `max_age` becomes `max_delay` everywhere else
+- [Subscriber max-delay](/quest/m1/subscriber-max-delay.md) - subscriber staleness is renamed; publisher retention stays `max_age`

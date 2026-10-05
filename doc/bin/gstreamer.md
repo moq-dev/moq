@@ -10,10 +10,10 @@ subscribes to a broadcast and exposes one source pad per rendition.
 
 ```bash
 # Inspect (Nix bundles the plugin with gst-launch)
-nix shell github:moq-dev/moq#moq-gst --command gst-inspect-1.0 moq
+nix shell github:moq-dev/moq/release#moq-gst --command gst-inspect-1.0 moq
 
 # Play the public test broadcast
-nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -e \
+nix shell github:moq-dev/moq/release#moq-gst --command gst-launch-1.0 -e \
   moqsrc name=s url=https://cdn.moq.dev/demo broadcast=bbb.hang \
   s.video_0 ! queue ! decodebin3 ! videoconvert ! autovideosink \
   s.audio_0 ! queue ! decodebin3 ! audioconvert ! autoaudiosink

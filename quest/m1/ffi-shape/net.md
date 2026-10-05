@@ -20,8 +20,8 @@ are renamed.
   today.
 - The cpp line's client-config quest (`quest/m1/cpp/client-config.md` on
   branch `quest/m1/cpp/README`) ships this same `MoqClientConfig` record
-  additively on `main`. Decided in the 2026-09-30 audit: this quest then only
-  removes the fallible setters on `dev`, rather than designing the record
+  additively. Decided in the 2026-09-30 audit: this quest then only
+  removes the fallible setters, rather than designing the record
   twice.
 - Objects that are only getters become records (`AnnounceUpdate` today).
   Handles with verbs (`Request`, `TrackRequest`, `GroupRequest`) stay objects.

@@ -7,7 +7,8 @@
 # TSDuck + custom analyzer in compliance.py against the capture. The point is to
 # tell whether what the subscriber emits is something an Integrated
 # Receiver/Decoder would accept, and to quantify where it diverges (the exporter
-# pads to a constant rate only once the catalog carries the source's mux rate).
+# pads to the recorded multiplex rate but never delays media to fit it, and puts a
+# PCR every 25 ms of media time).
 #
 # Modes:
 #   ./run.sh                       # generate a clip, round-trip it, analyze

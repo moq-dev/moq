@@ -25,7 +25,7 @@ additive and target `main`: the native knob is a new field on a
 `#[non_exhaustive]` struct, and the browser estimator is a new module plus a
 new `spread` observation.
 
-Decided for landing: the line merges to `main`, not `dev`, with a changelog
+Decided for landing: the line merges to `main` with a changelog
 note for two behavior changes treated as fixes. `@moq/watch` `Sync` takes a
 numeric delay literally instead of adding the rendition delay on top
 ([#3954](https://github.com/moq-dev/moq/pull/3954)), and `moq play --delay`
@@ -35,14 +35,13 @@ was wrong, and both compile unchanged for existing callers. The line branch is
 about 200 commits behind `main` with conflicts in `js/watch/src/sync.ts` and
 `rs/moq-cli`; merge `main` in (never rebase the shared branch) before
 finishing the watch quest. The raw #3477 traces are gone, so record fresh
-traces with the [audio quality
-harness](/quest/m0/audio-quality-harness/README.md) instead of asking the
-reporter; they replace the #3477 traces wherever the quests name them.
+traces with the audio quality harness in `test/audio-quality/` instead of
+asking the reporter; they replace the #3477 traces wherever the quests name them.
 
 The algorithm is written down at `doc/concept/audio-jitter.md`, with a
 conformance corpus beside it that both implementations will read.
 
-Neither `main` nor `dev` has a measured estimator yet. `js/watch/src/sync.ts:159`
+Neither `main` nor `release` has a measured estimator yet. `js/watch/src/sync.ts:159`
 still computes `max(MIN_JITTER, minRtt * 1.25)` from the connection's PROBE,
 and `js/watch/src/audio/latency.ts` still exists. `sync.ts` also adds the
 advertised jitter to that term, where the document settles on a maximum.
@@ -76,7 +75,7 @@ buffer against uneven arrivals.
 
 ## Required
 
-- [Audio quality harness](/quest/m0/audio-quality-harness/README.md) - lands first, since both lines add `js/watch/src/audio/replay.test.ts`; it also records the traces the watch quest replays
+- [Opus DTX](/quest/m0/opus-dtx.md) - the acceptance run measures network jitter, not DTX drift
 - [Watch](/quest/m0/audio-jitter-target/watch.md) - js/watch and js/hang bring the #3954 estimator into conformance
 - [Native](/quest/m0/audio-jitter-target/native.md) - rs/moq-audio grows a measured jitter buffer from the same algorithm
 

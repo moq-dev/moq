@@ -4291,7 +4291,7 @@ fn zero_with_a_flag_set_is_a_real_value() {
 	// Without the flags the same zeroes mean nothing at all.
 	let defaults = parsed(&client_config());
 	assert_ne!(defaults.connect.backoff.timeout, std::time::Duration::ZERO);
-	assert_eq!(defaults.quic.keep_alive, std::time::Duration::from_secs(5));
+	assert_eq!(defaults.quic.keep_alive, std::time::Duration::from_secs(3));
 }
 
 #[test]

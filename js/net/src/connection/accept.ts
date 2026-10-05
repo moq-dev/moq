@@ -60,8 +60,9 @@ async function acceptInner(
 	url: URL,
 	props: Omit<AcceptProps, "transport" | "url">,
 ): Promise<Established> {
-	// @ts-expect-error - TODO: add protocol to WebTransport
-	const protocol: string | undefined = transport.protocol;
+	// The DOM lib has no `protocol` property yet. It is "" when none was negotiated, and
+	// undefined in a browser that predates subprotocols (Firefox before 155).
+	const protocol = (transport as { protocol?: string }).protocol;
 
 	const wiring: SessionProps = {
 		discovery: props.discovery ?? true,
@@ -114,7 +115,7 @@ async function acceptAlpn(
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
 ): Promise<Established> {
-	const { control, solicit, hidden, cluster } = await exchangeSetup(transport, version, "moq-lite-js");
+	const { control, early, solicit, hidden, cluster } = await exchangeSetup(transport, version, "moq-lite-js");
 
 	return new Ietf.Connection({
 		...wiring,
@@ -122,6 +123,7 @@ async function acceptAlpn(
 		url,
 		quic: transport,
 		control,
+		early,
 		solicit,
 		hidden,
 		cluster,
