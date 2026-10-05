@@ -27,17 +27,24 @@ long-running broadcast.
   in here, main only, no release backport). Measured on `2704e10e2` with a
   counting allocator: the relay's live heap grows about 15.6 KB and 40
   allocations per session that subscribes to a track, linearly through 16000
-  sessions, and survives `malloc_trim`. Connect, announce, and a bare
-  `request_broadcast` with no track stay flat. heaptrack attributes it to
+  sessions, and survives `malloc_trim`. Connect, announce, and a client-side
+  `request_broadcast` with no track stay flat, because only a SUBSCRIBE makes
+  the relay request the broadcast and mint a front. heaptrack attributes it to
   the boxed `run_front` future on the origin's TaskSet and what it owns:
   the front's `tracks` map, its `broadcast::Producer`, request channel and
   track-request table, plus the origin's `fronts` WeakCache and per-path
   watch list. Each dead front is also woken on every route change for its
   path, so the CPU cost grows with sessions ever seen too.
 - Add a regression test in `model/origin.rs` with mocked time: N sessions
-  request, subscribe to, and drop a track through `excluding(Hop::random())`,
-  then the front count returns to baseline. A test is enough for the leak;
-  the benchmark above covers cost.
+  request, subscribe to, and drop a track through `excluding(Hop::random())`.
+  The front count and the path's watch count are the same after N = 1 and
+  N = 1000 (the shared plain front outlives its viewers while the route
+  stands), and the front's `tracks` empty after `track::IDLE_LINGER`. A test
+  is enough for the leak; the benchmark above covers cost.
+- A hop that appears in a route chain still gets a filtered front that lives
+  as long as the route, so a peer that both publishes and subscribes, or
+  returns with a fresh hop, can still leave one behind. That scales with
+  peer sessions, not viewers, so it is out of scope here.
 
 Public API: none. Wire: none.
 
