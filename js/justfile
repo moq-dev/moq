@@ -18,10 +18,14 @@ default:
 # `common/deps.ts` runs first and cheaply: bundlers resolve an undeclared
 # workspace import through hoisting, so nothing else in `check` notices one.
 # doc/ is in scope, so the binding pages' stats fields are checked here too.
+#
+# No package reads `import.meta.env`, so no app environment variable can reach a
+# bundle through one: a bare reference makes Vite inline every `VITE_*` value.
 
 # Lint, type-check, biome-format, and build all packages.
 check:
     python3 ../sh/rs/stats-docs.py
+    ! grep -rn --include='*.ts' --include='*.tsx' --exclude-dir=node_modules --exclude-dir=dist 'import\.meta\.env' .
     bun install --frozen-lockfile
     bun common/deps.ts
     bun run --filter='*' --elide-lines=0 check
