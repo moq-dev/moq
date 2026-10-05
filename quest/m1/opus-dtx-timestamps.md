@@ -30,6 +30,8 @@ Open for the research: whether silence is absent frames, as WebRTC sends, or
 the empty DTX frame every 20 ms that Rust publishes today. Absent frames save
 groups as well as bytes.
 
+Open for a no-go: whether `usedtx` then stays as a warned opt-in or is removed.
+
 ## Related
 
 - [Opus backend](/quest/m2/audio-opus-backend.md) - DTX on the native side
