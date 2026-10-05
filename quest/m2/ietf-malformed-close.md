@@ -74,10 +74,14 @@ Where each case lives, mapped on 2026-10-04 (paths under
 - The SETUP/GOAWAY uni stream runs as a task spawned inline in `run_unis`
   (`ietf/session.rs`, around lines 751-874). SETUP and SETUP-parameter
   decode failures there already close the session; only `run_goaway`'s
-  error is just logged. Close on the errors `is_protocol_violation`
-  (`ietf/subscriber.rs`) marks as the peer's fault, not on every error: a
-  reset or transport failure on that stream must stay non-fatal, as
-  `died_before_header` keeps it elsewhere. That fixes the second GOAWAY,
+  error is just logged. The gated server accept, which reads SETUP early,
+  calls `run_goaway` a second time (`goaway_recv`, around line 375) and
+  does the opposite: any error, even a stream reset, ends the session.
+  Make both sites agree, ideally by filtering inside `run_goaway`. Close
+  on the errors `is_protocol_violation` (`ietf/subscriber.rs`) marks as
+  the peer's fault, not on every error: a reset or transport failure on
+  that stream must stay non-fatal, as `died_before_header` keeps it
+  elsewhere. That fixes the second GOAWAY,
   the oversize URI, and an unknown type on that stream. On request
   streams, an error from a follow-up message is only logged at debug in
   `ietf/publisher.rs` (around line 500); promote decode errors there with

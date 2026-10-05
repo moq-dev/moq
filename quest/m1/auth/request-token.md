@@ -25,7 +25,8 @@ no longer fails the session; this quest gives it meaning.
   `UNKNOWN_AUTH_TOKEN_ALIAS` (0x17): a cache size of 0 "prohibits the use
   of token Aliases" (§9.1.3), so no alias is ever registered. §8.9 says to
   reject the message, but 0x17 exists only as a Session Termination Code
-  (§12.2), not a Request Error Code. A token structure that does not
+  (§12.2), not a Request Error Code. Record that close as a deviation
+  under "moq-transport" in `doc/concept/standard.md`. A token structure that does not
   decode closes with `KEY_VALUE_FORMATTING_ERROR`. Paul Gregoire's
   validator checks the REGISTER and malformed-token codes (decided
   2026-10-04; aliases decided 2026-10-05). Both decoder families change: the strict

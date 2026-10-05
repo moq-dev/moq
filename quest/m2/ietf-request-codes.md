@@ -14,8 +14,8 @@ is worth and the fallback is recorded in `doc/concept/standard.md`:
 - **Range Filters** get REQUEST_ERROR INVALID_FILTER (0x36), not
   NOT_SUPPORTED (draft-19 and later). We advertise no MAX_FILTER_RANGES, so
   the default of 0 applies (draft-21 §9.1.6) and every Range Filter is over
-  the limit, matching the existing refusal in `ietf/publisher.rs` (around
-  line 605).
+  the limit. This covers SUBSCRIBE and FETCH alike: both refuse Range
+  Filters today (`ietf/publisher.rs`, around lines 605 and 1292).
 - **Draft-21 reserved namespaces:** draft-21 §2.4.2 and the `.session`
   rules (§6.5) ask for REQUEST_ERROR DOES_NOT_EXIST, without passing the
   request to the application, for:
