@@ -60,6 +60,7 @@ describe("delay and buffer", () => {
 	it("holds nothing when instant, whatever the buffer says", async () => {
 		const sync = new Sync({ delay: "instant", buffer: 30_000 as Time.Milli });
 		await flush();
+		expect(sync.out.instant.peek()).toBe(true);
 		expect(sync.out.buffered.peek()).toBe(false);
 		expect(sync.out.delay.peek()).toBe(0 as Time.Milli);
 		expect(sync.out.maxAge.peek()).toBe(0 as Time.Milli);

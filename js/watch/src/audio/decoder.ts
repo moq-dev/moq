@@ -221,7 +221,7 @@ export class Decoder {
 	#runEnabled(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
-		if (effect.get(this.sync.in.delay) === "instant") {
+		if (effect.get(this.sync.out.instant)) {
 			this.reset();
 			return;
 		}
@@ -253,7 +253,7 @@ export class Decoder {
 	#runDecoder(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
-		if (effect.get(this.sync.in.delay) === "instant") return;
+		if (effect.get(this.sync.out.instant)) return;
 
 		const broadcast = effect.get(this.source.in.broadcast);
 		if (!broadcast) return;
