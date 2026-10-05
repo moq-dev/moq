@@ -16,7 +16,7 @@ JS Reader, audio playback, media containers and archive, bindings, worker
 transport, benchmark tooling); worktrees isolate commits, not semantics.
 
 A line with no named consumer waits in m2 until one appears. The 2026-09-30
-audit moved P2P, one-port, ladder, processor, timed metadata, the installer,
+audit moved P2P, one-port, ladder, processor, timed metadata,
 the OBS GPU paths, the IETF half of rs2ts, and the unmeasured io_uring and
 QUIC studies there on that rule.
 
@@ -32,7 +32,6 @@ QUIC studies there on that rule.
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
 - [Demand everywhere](/quest/m1/demand-everywhere.md) - requests and producers at every level watch subscribers through `demand()` alone, ahead of the bindings exposing it
 - [Request linger](/quest/m1/request-linger.md) - an upstream FETCH or SUBSCRIBE outlives its last reader by a short linger, so quick re-requests don't churn upstream
-- [Merge queue](/quest/m1/merge-queue.md) - the required checks run on `merge_group`, so a stale green check can no longer break main
 - [Flat questlines](/quest/m1/quest-flat-lines.md) - moq pins the current quest CLI, lands its questline branches on main, and retires them
 - [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, flate, audio, and video namespaces built from the handle below
@@ -74,6 +73,7 @@ QUIC studies there on that rule.
 - [Audio capture without ALSA link](/quest/m1/capture-alsa-link.md) - moq-audio capture and playback build on Linux without linking libasound
 - [Capture by default](/quest/m1/capture-default.md) - moq-video and moq-audio build `capture` by default, so pre-merge checks test it and the capture gate goes away
 - [Ship capture and playback](/quest/m1/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
+- [Install with moq.sh](/quest/m1/moq-sh.md) - `curl -fsSL https://moq.sh | sh` installs or upgrades the released `moq` on macOS and Linux
 - [Import at the first frame](/quest/m1/import-first-frame.md) - fMP4, MKV, and MPEG-TS imports publish the catalog at their first frame, so a lone importer's root clock never moves
 - [HLS first catalog](/quest/m1/hls-first-catalog.md) - moq-hls import's first catalog lists every rendition from the master playlist, not only the first
 - [CMAF frame timestamp](/quest/m1/cmaf-frame-timestamp.md) - CMAF decoders time samples from the moq-lite frame timestamp, using `tfdt` only within the fragment

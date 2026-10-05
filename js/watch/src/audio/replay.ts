@@ -5,9 +5,10 @@
  * real `Container.Consumer` decides what to deliver, wait for, and skip, at the max age the delay
  * sets. Delivered frames go into the real ring, and a discontinuity resets it, the way the decoder
  * does. One render quantum is read every quantum's worth of that same clock, which is what the
- * AudioWorklet does. {@link target} resolves the delay with a real {@link Sync} fed the recorded
- * catalog config and connection RTT, and the ring is sized from it the way the decoder sizes it, so
- * a change to any of them moves what a replay hears. Decoding is taken as instant and sample exact.
+ * AudioWorklet does. A real {@link Sync} resolves the delay from the playout target the decoder
+ * registers, measured by that same consumer from the recorded catalog config, and the ring follows
+ * it the way the decoder resizes it, so a change to any of them moves what a replay hears. Decoding
+ * is taken as instant and sample exact.
  *
  * Deterministic, so the audio quality harness grades its output with no headroom, and a unit test
  * can assert exact counts.
@@ -17,10 +18,10 @@
 import type * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { Group, Time, Track } from "@moq/net";
-import { Signal } from "@moq/signals";
+import { Effect } from "@moq/signals";
 import { type Delay, Sync } from "../sync";
-import { playbackJitter } from "./config";
-import { ringSamples } from "./latency";
+import { frameDuration } from "./config";
+import { ringSamples, target } from "./latency";
 import { AudioRingBuffer } from "./ring-buffer";
 import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
 import { Terminal } from "./terminal";
@@ -47,48 +48,16 @@ export interface Arrival {
 	group: number;
 }
 
-/** What the player resolves its delay from. */
-export interface Target {
-	/** The configured delay, as the element takes it. "instant" plays no audio, so it has no target. */
-	delay: Exclude<Delay, "instant">;
-	/** The rendition as the catalog described it: its advertised jitter. */
-	config: Catalog.AudioConfig;
-	/** The connection's round trip, in ms, which "auto" sizes from. Unset is no PROBE. */
-	rtt?: number;
-}
-
-/** The delay a player resolves for `input`, in ms, from a real {@link Sync}. */
-export async function target(input: Target): Promise<Time.Milli> {
-	const sync = new Sync({
-		delay: input.delay,
-		probe: input.rtt === undefined ? undefined : { rtt: Time.Milli(input.rtt) },
-	});
-	const jitter = playbackJitter(input.config);
-	const unregister = sync.register(new Signal<Time.Milli | undefined>(jitter));
-	try {
-		// Sync's effects run on microtasks. The delay has settled once it holds this rendition's jitter
-		// on top of the resolved jitter, the only rendition registered.
-		while (sync.out.delay.peek() !== Time.Milli.add(sync.out.jitter.peek(), jitter)) {
-			await sync.out.delay.changed();
-		}
-		return sync.out.delay.peek();
-	} finally {
-		unregister();
-		sync.close();
-	}
-}
-
 /** What a replay plays through. */
 export interface Options {
 	/** `shared` is the SharedArrayBuffer ring a cross-origin isolated page runs; `post` is the rest. */
 	ring: "shared" | "post";
 	/** The sample rate, in Hz. */
 	rate: number;
-	/**
-	 * The resolved delay, in ms. See {@link target}. It sizes the ring and is the consumer's max age,
-	 * which `Sync` sets to the delay plus a lookahead a live viewer does not configure.
-	 */
-	delay: number;
+	/** The configured delay, as the element takes it. "instant" plays no audio, so it has no replay. */
+	delay: Exclude<Delay, "instant">;
+	/** The rendition as the catalog described it: its advertised jitter, delay, and codec. */
+	config: Catalog.AudioConfig;
 	/**
 	 * How long the trace observed, from its first arrival, in ms. Rendering runs to here, so an
 	 * outage after the last arrival is heard rather than cut off.
@@ -106,6 +75,8 @@ export interface Quantum {
 	stalled: boolean;
 	/** The playhead after this quantum, on the media clock, in ms. */
 	timestamp: number;
+	/** The delay `Sync` resolved as of this quantum, in ms: what sizes the ring. */
+	delay: number;
 }
 
 /** The two rings behind the calls the decoder and the worklet make on them. */
@@ -113,25 +84,43 @@ interface Ring {
 	insert(timestamp: Time.Micro, data: Float32Array[]): void;
 	read(output: Float32Array[]): number;
 	reset(): void;
+	setLatency(samples: number): void;
 	readonly stalled: boolean;
 	readonly timestamp: Time.Micro;
 }
 
-/** The shared ring, sized the way `SharedAudioBuffer` sizes it. */
+/** The shared ring, sized and grown the way `SharedAudioBuffer` sizes and grows it. */
 function shared(rate: number, latency: number): Ring {
-	const ring = new SharedRingBuffer(allocSharedRingBuffer(1, Math.max(rate, latency * 2), rate));
+	let ring = new SharedRingBuffer(allocSharedRingBuffer(1, Math.max(rate, latency * 2), rate));
 	ring.setLatency(latency);
-	return ring;
+	return {
+		insert: (timestamp, data) => ring.insert(timestamp, data),
+		read: (output) => ring.read(output),
+		reset: () => ring.reset(),
+		setLatency: (samples) => {
+			ring.setLatency(samples);
+			if (ring.capacity < samples * 1.5) ring = ring.resize(Math.max(rate, samples * 2));
+		},
+		get stalled() {
+			return ring.stalled;
+		},
+		get timestamp() {
+			return ring.timestamp;
+		},
+	};
 }
+
+/** Samples as the milliseconds `PostAudioBuffer` posts to the worklet. */
+const millis = (rate: number, samples: number) => Time.Milli.fromSecond((samples / rate) as Time.Second);
 
 /** The postMessage ring, sized the way `PostAudioBuffer` asks the worklet to size it. */
 function post(rate: number, latency: number): Ring {
-	const ms = Time.Milli.fromSecond((latency / rate) as Time.Second);
-	const ring = new AudioRingBuffer({ rate, channels: 1, latency: ms });
+	const ring = new AudioRingBuffer({ rate, channels: 1, latency: millis(rate, latency) });
 	return {
 		insert: (timestamp, data) => ring.write(timestamp, data),
 		read: (output) => ring.read(output),
 		reset: () => ring.reset(),
+		setLatency: (samples) => ring.resize(millis(rate, samples)),
 		get stalled() {
 			return ring.stalled;
 		},
@@ -151,7 +140,7 @@ const micros = (ms: number) => Math.round(ms * 1000) as Time.Micro;
  * frames tile the timeline exactly despite rounding. Any wider spacing is a frame that never
  * arrived, which stays missing audio rather than stretching the frame before it.
  */
-function frameSamples(trace: Arrival[], rate: number): Map<Time.Micro, number> {
+function frameSamples(trace: Arrival[], rate: number): { spans: Map<Time.Micro, number>; typical: number } {
 	const starts = [...new Set(trace.map((a) => a.timestamp))].sort((a, b) => a - b);
 	const sample = (ms: number) => Math.round((ms * rate) / 1000);
 	const gaps = starts.slice(1).map((next, i) => sample(next) - sample(starts[i]));
@@ -164,7 +153,7 @@ function frameSamples(trace: Arrival[], rate: number): Map<Time.Micro, number> {
 		const tiles = gap !== undefined && Math.abs(gap - typical) * 2 <= typical;
 		spans.set(micros(start), tiles ? gap : typical);
 	});
-	return spans;
+	return { spans, typical };
 }
 
 /**
@@ -190,9 +179,8 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	const end = first.at + options.duration;
 	if (end < last.at) throw new Error(`an arrival at ${last.at} ms is past the ${options.duration} ms observed`);
 
-	const { rate } = options;
-	const samples = frameSamples(trace, rate);
-	const ring = (options.ring === "shared" ? shared : post)(rate, ringSamples(rate, Time.Milli(options.delay)));
+	const { rate, config } = options;
+	const { spans: samples, typical } = frameSamples(trace, rate);
 
 	// Where each group's stream finishes.
 	const ends = new Map<number, number>();
@@ -200,11 +188,30 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 		ends.set(arrival.group, i);
 	});
 
+	const sync = new Sync({ delay: options.delay });
 	const track = new Track.Producer("audio");
 	const consumer = new Container.Consumer(track.subscribe({ maxAge: WIRE_MAX_AGE }), {
 		format: new Container.Legacy.Format("audio"),
-		maxAge: Time.Milli(options.delay),
+		maxAge: sync.out.maxAge,
 	});
+
+	// The decoder's "auto" target. A recorded frame has no payload to read an Opus duration from,
+	// so a codec without a constant one takes the trace's typical spacing.
+	const signals = new Effect();
+	const frame = frameDuration(config) ?? Time.Milli((typical * 1000) / rate);
+	const playout = signals.computed((effect) =>
+		target({
+			measured: effect.get(consumer.spread),
+			advertised: config.jitter !== undefined ? Time.Milli(config.jitter) : undefined,
+			frame,
+			delay: config.delay !== undefined ? Time.Milli(config.delay) : undefined,
+		}),
+	);
+	signals.cleanup(sync.register(playout));
+	await settle();
+
+	let delay = sync.out.delay.peek();
+	const ring = (options.ring === "shared" ? shared : post)(rate, ringSamples(rate, delay));
 
 	// The decoder's read loop, with the codec taken out. A failure is rethrown at the next quantum.
 	const terminal = new Terminal();
@@ -230,13 +237,26 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	const output = new Float32Array(QUANTUM);
 	let next = 0;
 
+	// The consumer stamps each arrival on the monotonic clock, which the estimator measures, so it
+	// reads the trace's clock instead until the replay finishes.
+	let clock = first.at;
+	const monotonic = performance.now;
+	performance.now = () => clock;
+
 	try {
 		for (let n = 1; first.at + (n - 1) * step <= end; n++) {
 			// The quantum ending at `now` renders once everything that arrived by then is delivered.
 			const now = first.at + n * step;
-			const written = next;
+			let stamped = next;
 			while (next < trace.length && trace[next].at <= now) {
 				const arrival = trace[next];
+				// The consumer stamps a frame as it reads it, so the clock moves on only once
+				// everything that arrived at the previous instant has been read.
+				if (arrival.at !== clock) {
+					if (next > stamped) await settle();
+					stamped = next;
+					clock = arrival.at;
+				}
 				let group = groups.get(arrival.group);
 				if (!group) {
 					group = new Group.Producer(arrival.group);
@@ -254,16 +274,26 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 				}
 				next++;
 			}
-			if (next > written) await settle();
+			if (next > stamped) await settle();
 			if (failure) throw failure.error;
+
+			// The decoder resizes the ring as the resolved delay moves, which only an arrival does.
+			const resolved = sync.out.delay.peek();
+			if (resolved !== delay) {
+				delay = resolved;
+				ring.setLatency(ringSamples(rate, delay));
+			}
 
 			output.fill(0);
 			ring.read([output]);
-			yield { at: now, output, stalled: ring.stalled, timestamp: Time.Milli.fromMicro(ring.timestamp) };
+			yield { at: now, output, stalled: ring.stalled, timestamp: Time.Milli.fromMicro(ring.timestamp), delay };
 		}
 	} finally {
 		consumer.close();
 		track.close();
 		await decode;
+		signals.close();
+		sync.close();
+		performance.now = monotonic;
 	}
 }

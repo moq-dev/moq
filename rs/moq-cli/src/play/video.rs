@@ -225,7 +225,11 @@ impl<O: Output> Video<O> {
 
 #[cfg(test)]
 mod tests {
-	use super::super::{args::Args, fake::Recorder, media::Media};
+	use super::super::{
+		args::{Args, Delay},
+		fake::Recorder,
+		media::Media,
+	};
 	use super::*;
 	use hang::moq_net;
 
@@ -276,7 +280,7 @@ mod tests {
 			origin: moq_tokio::origin::spawn().consume(),
 			broadcast: "room".into(),
 			args: Args {
-				delay: delay.into(),
+				delay: Delay::Fixed(delay),
 				catalog_format: None,
 				select: Default::default(),
 			},

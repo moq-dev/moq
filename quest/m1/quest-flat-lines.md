@@ -63,7 +63,3 @@ Remaining:
 
 Done when `flake.nix` pins the new quest, no `quest/*README` branch remains,
 and `quest check` passes.
-
-## Related
-
-- [Merge queue](/quest/m1/merge-queue.md) - the other trunk workflow change
