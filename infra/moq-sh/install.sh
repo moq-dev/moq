@@ -11,7 +11,8 @@ set -eu
 # moq.sh replaces this with the newest moq-cli release when it deploys.
 DEFAULT_VERSION="@MOQ_VERSION@"
 
-# Overridable for tests and mirrors.
+# Overridable for tests and mirrors. Plain HTTP would let anyone on the path
+# replace both SHA256SUMS and the archive.
 RELEASES_URL="${MOQ_RELEASES_URL:-https://github.com/moq-dev/moq/releases/download}"
 
 usage() {
@@ -120,6 +121,11 @@ main() {
         die "invalid version '$version'; expected x.y.z, such as 0.14.0"
     fi
 
+    case "$RELEASES_URL" in
+        https://* | file://*) ;;
+        *) die "MOQ_RELEASES_URL must be https:// or file://, not '$RELEASES_URL'" ;;
+    esac
+
     detect_target
     need curl
     need tar
@@ -168,15 +174,14 @@ main() {
     bin="$tmp/$tag-$target/bin/moq"
     [ -f "$bin" ] || die "$asset has no bin/moq"
 
-    # Stage beside the destination so the rename is atomic: a failure leaves
-    # the previous binary untouched.
-    staged="$dir/.moq.$$"
+    # Stage beside the destination so the rename is atomic, and run it first:
+    # any failure leaves the previous binary untouched.
+    staged=$(mktemp "$dir/.moq.XXXXXX" 2>/dev/null) || die "cannot write to $dir"
     cp "$bin" "$staged" || die "cannot write to $dir"
     chmod 755 "$staged"
+    installed=$("$staged" --version) || die "moq $version fails to run on this host; keeping the existing install"
     mv -f "$staged" "$dest" || die "cannot replace $dest"
     staged=
-
-    installed=$("$dest" --version) || die "installed $dest, but it fails to run"
     say "installed $installed to $dest"
 
     found=$(command -v moq || true)

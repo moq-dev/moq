@@ -63,6 +63,7 @@ release 1.1.0
 sed 's/@MOQ_VERSION@/1.1.0/' "$script" >"$tmp/served.sh"
 
 failures=0
+url=
 fail() {
     echo "FAIL [$shell] $*" >&2
     failures=$((failures + 1))
@@ -72,7 +73,7 @@ fail() {
 run() {
     file=$1
     shift
-    PATH="$tmp/fake:$PATH" MOQ_RELEASES_URL="file://$releases" \
+    PATH="$tmp/fake:$PATH" MOQ_RELEASES_URL="${url:-file://$releases}" \
         $shell "$file" "$@" >"$tmp/out" 2>&1
 }
 
@@ -167,6 +168,31 @@ suite() {
     refuse "corrupt archive" "checksum mismatch" "$tmp/served.sh" --dir "$dir" --version 1.3.0
     installed 1.0.0
     rm -rf "$releases/moq-cli-v1.2.0" "$releases/moq-cli-v1.3.0"
+
+    # A binary that can't run on this host never replaces a working one.
+    cp -R "$releases/moq-cli-v1.1.0" "$releases/moq-cli-v1.4.0"
+    (
+        cd "$releases/moq-cli-v1.4.0"
+        name=moq-cli-v1.4.0-x86_64-unknown-linux-gnu
+        mkdir -p "$tmp/broken/$name/bin"
+        printf '#!/bin/sh\nexit 1\n' >"$tmp/broken/$name/bin/moq"
+        chmod +x "$tmp/broken/$name/bin/moq"
+        rm -f ./*.tar.gz
+        tar -czf "$name.tar.gz" -C "$tmp/broken" "$name"
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$name.tar.gz"
+        else
+            shasum -a 256 "$name.tar.gz"
+        fi >SHA256SUMS
+    )
+    refuse "binary fails to run" "fails to run" "$tmp/served.sh" --dir "$dir" --version 1.4.0
+    installed 1.0.0
+    [ -z "$(find "$dir" -name '.moq.*')" ] || fail "staged file left behind"
+    rm -rf "$releases/moq-cli-v1.4.0"
+
+    url=http://example.com
+    refuse "plain http mirror" "must be https" "$tmp/served.sh" --dir "$dir"
+    url=
 
     host Linux aarch64 2.34
     ok "linux aarch64" "$tmp/served.sh" --dir "$dir"
