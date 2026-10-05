@@ -2034,6 +2034,47 @@ test("draft-20: an opt-out peer gets no track properties", async () => {
 });
 
 /**
+ * Drafts 14-16 cannot send TIMESCALE, so a subscribed group carries no Timestamp even though
+ * the track has units. Draft-17 declares the units and stamps the object.
+ */
+test("drafts 14-16 send no Timestamp without TIMESCALE", async () => {
+	for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16, Version.DRAFT_17] as const) {
+		const fx = fixture(version);
+		const track = fx.broadcast.createTrack("video");
+		const { client, ok } = await runSubscribe(
+			fx,
+			new Subscribe({
+				requestId: 7n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 0,
+			}),
+		);
+
+		const stamped = version >= Version.DRAFT_17;
+		expect(ok.properties.timescale !== undefined).toBe(stamped);
+
+		writeGroup(track, 1);
+		const served = await nextUni(fx.uni);
+		if (!served) throw new Error("the group was never served");
+		const reader = new Reader(served, undefined, version);
+		const header = await GroupMessage.decode(reader, version);
+		expect(header.flags.hasExtensions).toBe(stamped);
+
+		await reader.u53(); // object id delta
+		if (stamped) {
+			const length = await reader.u53();
+			expect(length).toBeGreaterThan(0);
+			await reader.read(length);
+		}
+		expect(await reader.read(await reader.u53())).toEqual(new TextEncoder().encode("0.0"));
+
+		fx.close();
+		client.close();
+	}
+});
+
+/**
  * A bounded filter does not end the subscription (draft-20 removed that), so the publisher
  * keeps serving until the track does. Groups published above the end are dropped rather
  * than held: parking them would leave the serving loop waiting for a cap that never rises,

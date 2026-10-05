@@ -163,9 +163,10 @@ interface RunGroup {
 	/**
 	 * Whether objects carry their presentation timestamp.
 	 *
-	 * False once the subscriber sends INCLUDE_PROPERTIES=0: that drops TIMESCALE from
-	 * SUBSCRIBE_OK, and a timestamp whose units were never declared is worse than none. Our
-	 * own reader discards it; another may read it as some default and time the media wrong.
+	 * False when SUBSCRIBE_OK carries no TIMESCALE: the subscriber sent INCLUDE_PROPERTIES=0,
+	 * or the draft (14-16) cannot send the property. A timestamp whose units were never
+	 * declared is worse than none. Our own reader discards it; another may read it as some
+	 * default and time the media wrong.
 	 */
 	stamped: boolean;
 
@@ -362,10 +363,11 @@ export class Publisher {
 		let cache: TrackSubscriber | undefined;
 
 		try {
-			// Declaring the timescale is what opts the track into timestamps; every object
-			// Timestamp below is in these units.
 			const info = await track.info();
 			const timescale = info.timescale;
+			// A Timestamp goes out only when this SUBSCRIBE_OK actually carries TIMESCALE.
+			// Drafts 14-16 never write that property, so their objects stay unstamped.
+			const stamped = msg.propertiesWanted && Properties.sendsTimescale(version);
 			// The model ranks higher-first, the IETF wire lower-first. Every group this
 			// subscription serves carries the same publisher priority, which is what lets a
 			// relay prefer catalog and audio over video when it has no subscriber preference
@@ -423,9 +425,8 @@ export class Publisher {
 						? { groupId: edge.largest.group, objectId: edge.largest.object }
 						: { groupId: edge.largest.group, objectId: 0n }),
 				properties: msg.propertiesWanted
-					? // Declaring the timescale is what opts the track into timestamps; every
-						// object Timestamp below is in these units. We serve the newest group
-						// first, matching moq-lite.
+					? // TIMESCALE is what opts the track into timestamps, on drafts that can
+						// send it. We serve the newest group first, matching moq-lite.
 						{
 							timescale,
 							priority: publisherPriority,
@@ -521,7 +522,7 @@ export class Publisher {
 						group,
 						timescale,
 						publisherPriority,
-						stamped: msg.propertiesWanted,
+						stamped,
 						slice: groupSlice(range, group.sequence),
 						unsubscribed,
 						streams,
@@ -541,7 +542,7 @@ export class Publisher {
 							fill,
 							cache,
 							timescale,
-							stamped: msg.propertiesWanted,
+							stamped,
 							unsubscribed,
 							streams,
 						})

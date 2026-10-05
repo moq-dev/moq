@@ -671,7 +671,12 @@ where
 				None => track::Position::after_group(end.group),
 			});
 			let _ = track.update(subscription);
-			let timescale = msg.properties_wanted.then(|| track.info().timescale);
+			// A Timestamp goes out only when this SUBSCRIBE_OK actually carries TIMESCALE.
+			// Drafts 14-16 never write that property, so their objects stay unstamped.
+			let timescale = msg
+				.properties_wanted
+				.then(|| track.info().timescale)
+				.filter(|_| ietf::Properties::sends_timescale(self.version));
 
 			// Draft-20 replaced joining FETCH with subscription fills. Older drafts save
 			// the same boundary used by the subscription so the two streams never overlap.
@@ -712,11 +717,12 @@ where
 					largest: edge.largest,
 					properties: match msg.properties_wanted {
 						// Declaring the timescale is what opts the track into timestamps; every
-						// object Timestamp below is in these units.
-						// We serve the newest group first, matching moq-lite.
+						// object Timestamp below is in these units. `timescale` is None when this
+						// version cannot send TIMESCALE. We serve the newest group first,
+						// matching moq-lite.
 						true => ietf::Properties {
 							max_cache_duration: track.info().max_age,
-							timescale: Some(track.info().timescale),
+							timescale,
 							priority: Some(super::priority::to_wire(track.info().priority)),
 							group_order: Some(GroupOrder::Descending),
 						},
@@ -1196,6 +1202,8 @@ where
 	) -> Result<(), Error> {
 		// An unstamped object has no properties at all, so the field is omitted rather
 		// than written empty: the track declared no units to read a timestamp in.
+		// Drafts 14-16 never declare TIMESCALE, so they never stamp either.
+		let timescale = timescale.filter(|_| ietf::Properties::sends_timescale(version));
 		let properties = match timescale {
 			Some(timescale) => {
 				let mut properties = Vec::new();
@@ -2449,6 +2457,10 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		}
 		track.end_at(range.end.map_or(Bound::Unbounded, |end| Bound::Included(end.group)));
 		let datagrams = session.max_datagram_size() > 0;
+		// A Timestamp whose units were not declared is worse than none. Drafts 14-16
+		// never write TIMESCALE, whatever the caller passed in, so datagrams and group
+		// objects on those drafts go out unstamped.
+		let timescale = timescale.filter(|_| ietf::Properties::sends_timescale(version));
 
 		Self {
 			datagrams,
@@ -2542,8 +2554,8 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						// model ranks higher-first and this wire field lower-first.
 						publisher_priority: super::priority::to_wire(self.track.info().priority),
 						// Carry per-object timestamps as extension headers (the Timestamp
-						// Object Property) so moq-transport peers get the real PTS. The
-						// units are the track's, declared once in SUBSCRIBE_OK.
+						// Object Property) only when TIMESCALE was declared for this version.
+						// Drafts 14-16 cannot, so the flag stays clear.
 						flags: ietf::GroupFlags {
 							has_extensions: self.timescale.is_some(),
 							first_object: slice.skip == 0,
@@ -3035,6 +3047,78 @@ mod group_priority_test {
 	async fn group_header_defaults_to_the_midpoint() {
 		let header = serve_group_header(track::Info::default()).await;
 		assert_eq!(header.publisher_priority, 128);
+	}
+
+	/// Drafts 14-16 cannot send TIMESCALE, so a group served with a track timescale still
+	/// carries no Timestamp. Draft-17 declares the units and stamps the object.
+	#[moq_net_sim::test]
+	async fn drafts_14_through_16_send_no_timestamp_without_timescale() {
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
+			let stamped = ietf::Properties::sends_timescale(version);
+			let (header, mut buf) = serve_group(version, Some(Timescale::default())).await;
+			assert_eq!(header.flags.has_extensions, stamped, "{version}");
+			assert_eq!(
+				crate::coding::decode_varint(&mut buf, version).unwrap(),
+				0,
+				"{version}: object id"
+			);
+			if stamped {
+				let ext = crate::coding::decode_buf(&mut buf, version, |r, _| Ok(r.bytes()?.to_vec())).unwrap();
+				let mut ext = bytes::Bytes::from(ext);
+				assert!(
+					crate::coding::decode_buf(&mut ext, version, |r, v| {
+						ietf::decode_object_time(r, Timescale::default(), v)
+					})
+					.unwrap()
+					.is_some(),
+					"{version}: Timestamp missing"
+				);
+			}
+			assert_eq!(
+				crate::coding::decode_varint(&mut buf, version).unwrap(),
+				b"hello".len() as u64,
+				"{version}"
+			);
+			assert_eq!(&buf[..b"hello".len()], b"hello");
+		}
+
+		// Opting out of the timescale stays unstamped on a draft that could carry one.
+		let (header, mut buf) = serve_group(Version::Draft17, None).await;
+		assert!(!header.flags.has_extensions);
+		assert_eq!(crate::coding::decode_varint(&mut buf, Version::Draft17).unwrap(), 0);
+		assert_eq!(
+			crate::coding::decode_varint(&mut buf, Version::Draft17).unwrap(),
+			b"hello".len() as u64
+		);
+	}
+
+	/// Serve one group at `version` with `timescale` and return the header plus what follows it.
+	async fn serve_group(version: Version, timescale: Option<Timescale>) -> (ietf::GroupHeader, bytes::Bytes) {
+		let log = crate::lite::test_transport::Log::default();
+		let session = SinkSession::new(log.clone());
+
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let subscriber = track.subscribe(None);
+
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"hello".as_slice()).unwrap();
+		group.finish().unwrap();
+		track.finish().unwrap();
+
+		let mut serve = TrackServe::new(
+			session,
+			subscriber,
+			RequestId(0),
+			version,
+			ServeRange::default(),
+			timescale,
+		);
+		kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
+
+		let written = log.writes.lock().unwrap().clone();
+		let mut buf = bytes::Bytes::from(written);
+		let header = crate::coding::decode_buf(&mut buf, version, ietf::GroupHeader::decode).expect("a group header");
+		(header, buf)
 	}
 
 	/// Serve one group of a track with `info` and decode the subgroup header it opens with.
@@ -4064,6 +4148,8 @@ mod serve_tests {
 					.request_id,
 				FETCH_ID
 			);
+			// Drafts 14-16 never declared TIMESCALE, so the prefix must not carry a Timestamp.
+			let stamped = ietf::Properties::sends_timescale(version);
 			for (index, payload) in payloads.iter().enumerate() {
 				if version == Version::Draft14 {
 					assert_eq!(crate::coding::decode_varint(&mut buf, version).unwrap(), LATEST);
@@ -4071,9 +4157,16 @@ mod serve_tests {
 					assert_eq!(crate::coding::decode_varint(&mut buf, version).unwrap(), index as u64);
 					assert_eq!(bytes::Buf::try_get_u8(&mut buf).unwrap(), 0);
 				} else {
+					let flags = match (index == 0, stamped) {
+						(true, true) => 0x3c,
+						(true, false) => 0x1c,
+						(false, true) => 0x20,
+						(false, false) => 0,
+					};
 					assert_eq!(
 						crate::coding::decode_varint(&mut buf, version).unwrap(),
-						if index == 0 { 0x3c } else { 0x20 }
+						flags,
+						"{version}"
 					);
 					if index == 0 {
 						assert_eq!(crate::coding::decode_varint(&mut buf, version).unwrap(), LATEST);
@@ -4081,7 +4174,16 @@ mod serve_tests {
 						assert_eq!(bytes::Buf::try_get_u8(&mut buf).unwrap(), 0);
 					}
 				}
-				let _properties = crate::coding::decode_buf(&mut buf, version, |r, _| Ok(r.bytes()?.to_vec())).unwrap();
+				let properties = if version == Version::Draft14 || stamped {
+					crate::coding::decode_buf(&mut buf, version, |r, _| Ok(r.bytes()?.to_vec())).unwrap()
+				} else {
+					Vec::new()
+				};
+				if stamped {
+					assert!(!properties.is_empty(), "{version}: missing Timestamp");
+				} else {
+					assert!(properties.is_empty(), "{version}: Timestamp without TIMESCALE");
+				}
 				let size = crate::coding::decode_varint(&mut buf, version).unwrap() as usize;
 				assert_eq!(size, payload.len());
 				if size == 0 && matches!(version, Version::Draft14 | Version::Draft15) {
