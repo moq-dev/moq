@@ -7,12 +7,9 @@
 //!   source track (mirroring the aggregate subscription) and transcodes group
 //!   for group until the track goes `unused` again.
 //! - A fetch of a specific group (`requested_group`) fetches that same group
-//!   from the source and transcodes just that group with a fresh encoder.
-//!
-//! A rung track serves whole groups only (`track::Info::whole_groups`): its
-//! frames are only valid after the head this encoder produced, so a
-//! subscription starting mid-group begins at the next group and a mid-group
-//! fetch is refused.
+//!   from the source and transcodes just that group with a fresh encoder. A
+//!   fetch that starts mid-group is refused: the frames are only valid after
+//!   the head this encoder produced.
 //!
 //! Output groups mirror the source group sequence numbers 1:1, so a fetch for
 //! output group N maps to source group N and a player switching renditions
@@ -135,10 +132,7 @@ pub(crate) async fn serve(rung: Rung, request: moq_net::track::Request) -> Resul
 	// Grab the group-request handle before accepting: a Request is dynamic from
 	// birth, so a fetch racing the acceptance queues instead of failing.
 	let dynamic = request.dynamic();
-	// Another instance encodes the same source group into different bytes, so a tail
-	// from this encoder cannot continue a head someone else delivered. A subscription
-	// asking for one starts at the next group instead, and such a fetch is refused.
-	let info = hang::container::track_info(hang::catalog::PRIORITY.video).with_whole_groups(true);
+	let info = hang::container::track_info(hang::catalog::PRIORITY.video);
 	let mut producer = request.accept(info);
 	let (finished, mut finishing) = tokio::sync::watch::channel(false);
 
@@ -489,8 +483,20 @@ fn spawn_fetch(
 /// "the handler vanished" and hides the actual decode/encode/source failure from
 /// the waiting consumer.
 async fn fetch(rung: Rung, request: moq_net::group::Request) -> Result<(), Error> {
-	// Always the whole group: the track serves whole groups only (see `serve`), so
-	// moq-net refuses a mid-group fetch before it gets here.
+	// Another instance encodes the same source group into different bytes, so a
+	// tail from this encoder cannot continue a head someone else produced. A
+	// partial group is not ours to serve; refuse it so the reader moves on to the
+	// next group boundary instead of decoding a splice.
+	if request.frame_start() != 0 {
+		tracing::debug!(
+			sequence = request.sequence(),
+			frame = request.frame_start(),
+			"refusing a fetch that starts mid-group"
+		);
+		request.reject(moq_net::Error::NotFound);
+		return Ok(());
+	}
+
 	let options = moq_net::group::Fetch::default().with_priority(request.priority());
 	let mut source = match rung.source.fetch_group(request.sequence(), options).await {
 		Ok(source) => source,
