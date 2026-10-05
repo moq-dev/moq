@@ -44,7 +44,7 @@ QUIC studies there on that rule.
 - [fMP4 export tracks](/quest/m1/fmp4-export-tracks.md) - fMP4 export inits from the catalog, keeps early audio, and fails loudly instead of writing a track missing from moov
 - [TS export rewind](/quest/m1/ts-export-rewind.md) - TS export keeps its clock through gaps, flags only a resume or a new broadcast, and fails on backwards time
 - [Delete the live marker](/quest/m1/announce-live-removal.md) - announce streams yield only route events; the `Live` marker and its hold machinery are gone
-- [Browser close code](/quest/m1/browser-close-code.md) - a playwright case proves the page reads a relay's close code and reason, on every web-transport backend
+- [WebTransport close backends](/quest/m1/wt-close-backends.md) - web-transport-noq and -quinn keep the session alive while closing, and iroh decides on the capsule
 - [JS dev mode](/quest/m1/js-dev-mode.md) - net and signals stop reading `import.meta.env`, the subscriber tripwire is deleted, and announced requests hold no subscription
 - [Enabled flag](/quest/m1/catalog-enabled.md) - one `enabled` rendition flag replaces `stalled` and pausing, and the flapping encoder-lag detector is deleted
 - [Audio graph lifetime](/quest/m1/watch-audio-graph.md) - the watch audio graph survives a rendition leaving the catalog, so a publisher mute keeps the tail and the next start
