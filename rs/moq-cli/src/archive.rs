@@ -313,18 +313,17 @@ mod tests {
 		assert!(err.contains("broadcast `source`"), "{err}");
 	}
 
-	/// Wait until the export has enrolled each of `tracks`.
+	/// Wait until the export's subscription has reached `track`.
 	///
-	/// A track's timeline `.info` is stored once its subscription landed, and the writer does not
-	/// end while that enrollment is still on its way, so the track may finish right after.
-	async fn enrolled(url: &Url, tracks: &[&str], recording: &tokio::task::JoinHandle<anyhow::Result<()>>) {
-		let store = super::open(url).unwrap();
-		for track in tracks {
-			// The store is real disk I/O, so this polls on the wall clock; nextest kills a hang.
-			while store.get_info(&hang::timeline::default_name(track)).await.is_err() {
-				assert!(!recording.is_finished(), "the export ended before it enrolled {track}");
-				tokio::time::sleep(Duration::from_millis(10)).await;
+	/// `.info` is written after that, while the enroll command is still being queued.
+	/// Finishing on the file races that command and the recording ends with "writer closed".
+	async fn subscribed(track: &mut track::Producer, recording: &mut tokio::task::JoinHandle<anyhow::Result<()>>) {
+		tokio::select! {
+			subscription = track.subscription_changed() => {
+				let subscription = subscription.expect("the rendition stays open until the export subscribes");
+				assert!(subscription.is_some(), "the export subscribed");
 			}
+			result = &mut *recording => panic!("the export ended before it subscribed: {result:?}"),
 		}
 	}
 
@@ -343,7 +342,7 @@ mod tests {
 		let info = track::Info::default()
 			.with_timescale(Timescale::MILLI)
 			.with_max_age(Duration::from_secs(3600));
-		let track = broadcast.create_track("audio", info).unwrap();
+		let mut track = broadcast.create_track("audio", info).unwrap();
 		catalog
 			.mutate(|catalog| {
 				catalog.audio.renditions.insert("audio".into(), audio());
@@ -356,7 +355,7 @@ mod tests {
 			retention: None,
 			retention_grace: None,
 		};
-		let recording = tokio::spawn(export(origin.consume(), "live.hang".into(), CatalogFormat::Hang, args));
+		let mut recording = tokio::spawn(export(origin.consume(), "live.hang".into(), CatalogFormat::Hang, args));
 
 		for sequence in 0..3 {
 			let mut group = track.create_group(group::Info { sequence }).unwrap();
@@ -367,7 +366,7 @@ mod tests {
 			group.finish().unwrap();
 		}
 
-		enrolled(&url, &["audio"], &recording).await;
+		subscribed(&mut track, &mut recording).await;
 		track.finish().unwrap();
 		catalog.finish().unwrap();
 		broadcast.close();
@@ -416,8 +415,8 @@ mod tests {
 		let info = track::Info::default()
 			.with_timescale(Timescale::MILLI)
 			.with_max_age(Duration::from_secs(3600));
-		let first = broadcast.create_track("audio", info.clone()).unwrap();
-		let second = broadcast.create_track("audio2", info).unwrap();
+		let mut first = broadcast.create_track("audio", info.clone()).unwrap();
+		let mut second = broadcast.create_track("audio2", info).unwrap();
 		for track in [&first, &second] {
 			for sequence in 0..3 {
 				let mut group = track.create_group(group::Info { sequence }).unwrap();
@@ -441,9 +440,10 @@ mod tests {
 			retention: None,
 			retention_grace: None,
 		};
-		let recording = tokio::spawn(export(origin.consume(), "live.hang".into(), CatalogFormat::Hang, args));
+		let mut recording = tokio::spawn(export(origin.consume(), "live.hang".into(), CatalogFormat::Hang, args));
 
-		enrolled(&url, &["audio", "audio2"], &recording).await;
+		subscribed(&mut first, &mut recording).await;
+		subscribed(&mut second, &mut recording).await;
 		first.finish().unwrap();
 		second.finish().unwrap();
 		catalog.finish().unwrap();
