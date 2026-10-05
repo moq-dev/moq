@@ -160,8 +160,6 @@ export const hooks: {
 	 * `setGroups`, which never rewinds.
 	 */
 	replaceGroups: (subscriber: Subscriber, groups: Groups) => void;
-	/** The lowest group sequence a serving cursor delivers, which datagrams bypass. */
-	groupFloor: (subscriber: Subscriber) => number;
 	/** Return a group's first timestamp, retained even after its first frame is read. */
 	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
@@ -200,9 +198,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	replaceGroups: () => {
-		throw new Error("track.ts not loaded");
-	},
-	groupFloor: () => {
 		throw new Error("track.ts not loaded");
 	},
 	groupTimestamp: () => {

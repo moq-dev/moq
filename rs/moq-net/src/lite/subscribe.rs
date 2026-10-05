@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use crate::{
-	Hop, Path,
+	Path,
 	coding::{Decode, DecodeError, Encode, EncodeError, Sizer},
 };
 
@@ -295,9 +295,9 @@ impl Message for SubscribeOk {
 #[derive(Clone, Debug)]
 pub struct SubscribeStart {
 	pub group: u64,
-	/// The origin serving the subscription: the Hop ID a relay stitches failover on.
-	/// [`Hop::UNKNOWN`] names nobody. Lite07+; older versions decode it as unknown.
-	pub origin: Hop,
+	/// The publisher's largest (group, frame) when it answered, `None` for a track with
+	/// nothing yet. Lite07+ only; not on the wire before, where it decodes as `None`.
+	pub largest: Option<crate::track::Position>,
 }
 
 impl Message for SubscribeStart {
@@ -306,11 +306,18 @@ impl Message for SubscribeStart {
 			return Err(DecodeError::Version);
 		}
 		let group = u64::decode(r, version)?;
-		let origin = match version.has_origin() {
-			true => Hop::from_wire(u64::decode(r, version)?)?,
-			false => Hop::UNKNOWN,
+		let largest = match version.has_largest() {
+			// Group + 1, so 0 is a track with nothing yet; the frame follows only otherwise.
+			true => match u64::decode(r, version)?.checked_sub(1) {
+				Some(group) => Some(crate::track::Position {
+					group,
+					frame: u64::decode(r, version)?,
+				}),
+				None => None,
+			},
+			false => None,
 		};
-		Ok(Self { group, origin })
+		Ok(Self { group, largest })
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
@@ -318,8 +325,18 @@ impl Message for SubscribeStart {
 			return Err(EncodeError::Version);
 		}
 		self.group.encode(w, version)?;
-		if version.has_origin() {
-			self.origin.id().encode(w, version)?;
+		if version.has_largest() {
+			match self.largest {
+				Some(largest) => {
+					largest
+						.group
+						.checked_add(1)
+						.ok_or(EncodeError::BoundsExceeded)?
+						.encode(w, version)?;
+					largest.frame.encode(w, version)?;
+				}
+				None => 0u64.encode(w, version)?,
+			}
 		}
 		Ok(())
 	}
@@ -590,7 +607,7 @@ mod test {
 	fn subscribe_start_roundtrips_on_lite05() {
 		let resp = SubscribeResponse::Start(SubscribeStart {
 			group: 42,
-			origin: Hop::UNKNOWN,
+			largest: None,
 		});
 		let mut buf = Vec::new();
 		resp.encode(&mut buf, Version::Lite05).unwrap();
@@ -599,6 +616,29 @@ mod test {
 			SubscribeResponse::Start(start) => assert_eq!(start.group, 42),
 			other => panic!("expected Start, got {other:?}"),
 		}
+	}
+
+	/// Lite-07 carries the publisher's largest position; earlier versions leave it off the
+	/// wire, so it decodes as `None` there.
+	#[test]
+	fn subscribe_start_carries_the_largest_position_on_lite07() {
+		for largest in [None, Some(crate::track::Position { group: 3, frame: 2 })] {
+			let resp = SubscribeResponse::Start(SubscribeStart { group: 4, largest });
+			let mut buf = Vec::new();
+			resp.encode(&mut buf, Version::Lite07).unwrap();
+			let mut slice = buf.as_slice();
+			match SubscribeResponse::decode(&mut slice, Version::Lite07).unwrap() {
+				SubscribeResponse::Start(start) => assert_eq!((start.group, start.largest), (4, largest)),
+				other => panic!("expected Start, got {other:?}"),
+			}
+		}
+		let resp = SubscribeResponse::Start(SubscribeStart {
+			group: 4,
+			largest: Some(crate::track::Position { group: 3, frame: 2 }),
+		});
+		let mut buf = Vec::new();
+		resp.encode(&mut buf, Version::Lite06).unwrap();
+		assert_eq!(buf, [0, 1, 4], "lite-06 has no largest position");
 	}
 
 	#[test]
@@ -612,31 +652,6 @@ mod test {
 		match SubscribeResponse::decode(&mut slice, Version::Lite05).unwrap() {
 			SubscribeResponse::End(end) => assert_eq!((end.group, end.streams), (7, 0)),
 			other => panic!("expected End, got {other:?}"),
-		}
-	}
-
-	#[test]
-	fn subscribe_start_carries_the_origin_on_lite07() {
-		let resp = SubscribeResponse::Start(SubscribeStart {
-			group: 7,
-			origin: Hop::new(42).unwrap(),
-		});
-		let mut buf = Vec::new();
-		resp.encode(&mut buf, Version::Lite07).unwrap();
-		// Type, length, group, origin.
-		assert_eq!(buf, [0, 2, 7, 42]);
-		match SubscribeResponse::decode(&mut buf.as_slice(), Version::Lite07).unwrap() {
-			SubscribeResponse::Start(start) => assert_eq!((start.group, start.origin), (7, Hop::new(42).unwrap())),
-			other => panic!("expected Start, got {other:?}"),
-		}
-
-		// Older versions have no room for it.
-		let mut buf = Vec::new();
-		resp.encode(&mut buf, Version::Lite06).unwrap();
-		assert_eq!(buf, [0, 1, 7]);
-		match SubscribeResponse::decode(&mut buf.as_slice(), Version::Lite06).unwrap() {
-			SubscribeResponse::Start(start) => assert_eq!(start.origin, Hop::UNKNOWN),
-			other => panic!("expected Start, got {other:?}"),
 		}
 	}
 

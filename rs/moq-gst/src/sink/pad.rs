@@ -29,12 +29,12 @@ enum PadState {
 
 /// Where a pad's buffers land: a codec importer, a subtitle track, or opaque data.
 ///
-/// Every payload is large (a codec importer, a container producer, a track producer), so
-/// each is boxed to keep the enum small.
+/// Both payloads are large (a codec importer, a container producer), so each is boxed to keep the
+/// enum small.
 enum Sink {
 	Media(Box<Media>),
 	Text(Box<Text>),
-	Opaque(Box<moq_net::track::Producer>),
+	Opaque(moq_net::track::Producer),
 }
 
 /// An audio or video pad, published through a codec importer.
@@ -321,9 +321,11 @@ impl Pad {
 			let request = broadcast
 				.reserve_track(name.clone())
 				.with_context(|| format!("cannot reserve track {name}"))?;
-			// Followed at the live edge, so it keeps the default retention the media helper raises.
-			let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
-			self.track = Some(Sink::Opaque(Box::new(request.accept(info))));
+			// Raw data keeps a short explicit window for subscribers that buffer its samples.
+			let info = moq_net::track::Info::default()
+				.with_timescale(moq_net::Timescale::MICRO)
+				.with_max_age(std::time::Duration::from_secs(5));
+			self.track = Some(Sink::Opaque(request.accept(info)));
 			self.caps = Some(caps.clone());
 			return Ok(name);
 		}
@@ -1229,7 +1231,7 @@ mod tests {
 	// The opaque track declares microseconds so the PTS maps 1:1, and keeps moq-net's retention: the
 	// media helper raises it to 30s for a segmented egress reading history, which a data track never is.
 	#[tokio::test]
-	async fn an_opaque_track_declares_micros_and_the_default_retention() {
+	async fn an_opaque_track_declares_micros_and_a_retention_window() {
 		gst::init().unwrap();
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
@@ -1249,8 +1251,8 @@ mod tests {
 		assert_eq!(subscriber.info().timescale, moq_net::Timescale::MICRO);
 		assert_eq!(
 			subscriber.info().max_age,
-			moq_net::track::DEFAULT_MAX_AGE,
-			"an opaque track keeps the default retention"
+			Some(std::time::Duration::from_secs(5)),
+			"an opaque track declares a short retention window"
 		);
 	}
 
@@ -1777,16 +1779,17 @@ mod tests {
 				pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None, now)
 					.unwrap()
 			};
-			assert_eq!(push(&mut pad, h264_keyframe_au(), 0), PushOutcome::Published);
-			assert_eq!(push(&mut pad, delta.clone(), 33), PushOutcome::Published);
-			assert_eq!(push(&mut pad, h264_keyframe_au(), 100), PushOutcome::Published);
-			assert_eq!(push(&mut pad, delta.clone(), 133), PushOutcome::Published);
+			assert_eq!(push(&mut pad, h264_keyframe_au(), 1000), PushOutcome::Published);
+			assert_eq!(push(&mut pad, delta.clone(), 1033), PushOutcome::Published);
+			assert_eq!(push(&mut pad, h264_keyframe_au(), 1100), PushOutcome::Published);
+			assert_eq!(push(&mut pad, delta.clone(), 1133), PushOutcome::Published);
+			// Below the previous group's start, so not a reordered frame the producer tolerates.
 			assert_eq!(push(&mut pad, rewind, 16), PushOutcome::Dropped);
 			assert!(!pad.is_failed());
-			assert_eq!(push(&mut pad, delta.clone(), 166), PushOutcome::Dropped);
-			assert_eq!(push(&mut pad, h264_keyframe_au(), 66), PushOutcome::Dropped);
-			assert_eq!(push(&mut pad, h264_keyframe_au(), 200), PushOutcome::Published);
-			assert_eq!(push(&mut pad, delta.clone(), 233), PushOutcome::Published);
+			assert_eq!(push(&mut pad, delta.clone(), 1166), PushOutcome::Dropped);
+			assert_eq!(push(&mut pad, h264_keyframe_au(), 1066), PushOutcome::Dropped);
+			assert_eq!(push(&mut pad, h264_keyframe_au(), 1200), PushOutcome::Published);
+			assert_eq!(push(&mut pad, delta.clone(), 1233), PushOutcome::Published);
 		}
 	}
 

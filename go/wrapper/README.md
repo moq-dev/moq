@@ -19,15 +19,18 @@ so `go get moq.dev/moq@latest` always pulls the latest native core.
 go get moq.dev/moq@latest
 ```
 
-```go
-import "moq.dev/moq"
-```
-
 `CGO_ENABLED=1` is required (the default on Unix); the prebuilt `libmoq_ffi.a` comes transitively from `moq.dev/moq-ffi`, so there is no Rust toolchain or shared-library setup.
 
 ## Quick start
 
 ```go
+import (
+	"context"
+	"fmt"
+	"log"
+	"moq.dev/moq"
+)
+
 ctx := context.Background()
 
 client, err := moq.Dial(ctx, "https://relay.example.com")
@@ -40,16 +43,20 @@ announced, err := client.Announced(moq.AnnounceOptions{Prefix: "demos/"})
 if err != nil {
 	log.Fatal(err)
 }
-for ann, err := range announced.All(ctx) {
+for event, err := range announced.All(ctx) {
 	if err != nil {
 		if moq.IsShutdown(err) {
 			break
 		}
 		log.Fatal(err)
 	}
-	// Prefix stays origin-relative; Captures reports wildcard matches.
-	fmt.Println("got broadcast", ann.Prefix())
-	fmt.Println("captures", ann.Captures())
+	switch event := event.(type) {
+	case moq.AnnounceEventStart:
+		// Prefix stays origin-relative; Captures reports wildcard matches.
+		fmt.Println("got broadcast", event.Announce.Prefix)
+	case moq.AnnounceEventLive:
+		fmt.Println("caught up; later events are live changes")
+	}
 }
 ```
 
@@ -110,7 +117,7 @@ Raw tracks support best-effort datagrams alongside groups: `TrackProducer.Append
 sends one `Frame` and returns its sequence number, while `TrackConsumer.RecvDatagram`
 and `TrackConsumer.Datagrams` receive them in arrival order. Payloads are capped at
 1200 bytes. Datagram delivery requires a datagram-capable transport and lite-05 or
-newer moq-lite; IETF moq-transport, pre-lite-05, WebSocket, and TCP paths do not
+newer moq-lite, or moq-transport; pre-lite-05, WebSocket, and TCP paths do not
 deliver them, and there is no stream fallback.
 
 ## Versioning

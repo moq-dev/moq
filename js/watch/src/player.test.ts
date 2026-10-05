@@ -2,7 +2,7 @@ import { expect, mock, test } from "bun:test";
 import { Signal } from "@moq/signals";
 
 // Bun does not run Vite's worklet loader; these tests never create an AudioContext.
-mock.module("./audio/render-worklet.ts?worklet", () => ({ default: "blob:fake-render" }));
+mock.module("./audio/render-worklet.ts?worklet", () => ({ default: async () => "blob:fake-render" }));
 
 const { Player } = await import("./player");
 

@@ -58,7 +58,7 @@ A bad shape costs a breaking change in every language, and the surface is huge.
 
 - Report the public API and wire impact of every change, in the PR description and whenever asked.
 - Keep things private until a consumer needs them. Scrutinize every new exported item.
-- Never add `foo_with_x`, `foo_checked`, or a compatibility shim. Make the breaking change to `foo` on `dev` instead. Additive changes stay on `main`.
+- Never add `foo_with_x`, `foo_checked`, or a compatibility shim. Make the breaking change to `foo` instead.
 - Let the type system make misuse unrepresentable
 - A broadcast, track, or group name always means the same content. MoQ has no ETag-style invalidation, so a publisher that reuses a name for different content (such as restarting group numbers) is a bug; publish a new broadcast instead of working around it.
 - Avoid callback parameters. Return a handle, an event, or a Producer/Consumer split.
@@ -67,20 +67,19 @@ A bad shape costs a breaking change in every language, and the surface is huge.
 - When a name or shape feels awkward, propose alternatives with a recommendation instead of shipping it.
 - Short names under a module namespace (`encode::Config`, not `EncoderConfig`). Mirror names across Rust, JS, and the bindings.
 - Document every exported symbol in one plain line, the way you'd say it out loud.
-- Prefer refactoring and simplification when working on the `dev` branch; many APIs have have not been published yet.
+- Prefer refactoring and simplification; many APIs have not been published yet.
 
 MoQ is split into many layers as part of the public API.
 The boundary between packages is extremely important to keep things modular and reusable.
 
 # Development
 
-PRs target `main`.
-`dev` is reserved for semver-breaking API changes, except for `0.0.x` and unpublished/private packages.
+PRs target `main`, the trunk, where breaking API changes are allowed.
+`release` is what ships; touch it only to cut a release or backport a fix (see `CONTRIBUTING.md`).
 Wire changes should be backwards compatible for any *published* drafts/versions.
 
 Before starting, `git fetch origin` and set the upstream to the base branch.
-If a published API break requires `dev`, retarget the PR to `dev`, set the upstream to `origin/dev`, then rebase onto it.
-Write scratch files (PR bodies, logs, notes) to the worktree's gitignored `.scratch/`, never a directory other agents share.
+Pass PR bodies to `gh` on stdin (`--body-file -`); never write to a directory other agents share.
 
 Use the Nix dev shell so tooling matches CI.
 direnv loads it automatically, but if not: `nix develop --command ...`.
@@ -92,15 +91,14 @@ just fix          # Auto-fix lint/formatting, same scope
 
 These diff the branch against its base and only run the affected packages.
 
-When work mentions a quest, run `quest guide` and follow it.
+Quests: when work mentions a quest, run `quest guide` and follow it.
 The `quest` binary comes from the kixelated/quest flake input and serves the quest skills; change them upstream and bump the input.
-A quest deleted on `dev` is done, even while `main` still lists it.
 
 # Cross-Package Sync
 
 | Change in | Also update |
 |---|---|
-| `rs/moq-ffi` | `rs/libmoq`, `{py,swift,kt,dart}/`, `go/wrapper/moq/*.go` (the `go/ffi` and `dart/moq_ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs` or `dart/moq`), `doc/lib/{py,swift,kt,go,dart,c}` |
+| `rs/moq-ffi` | `rs/moq-c`, `{py,swift,kt,dart}/`, `go/wrapper/moq/*.go` (the `go/ffi` and `dart/moq_ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs` or `dart/moq`), `doc/lib/{py,swift,kt,go,dart,c}` |
 | `rs/moq-net` wire/API | `js/net`, `doc/concept`, `drafts/draft-lcurley-moq-lite.md` (if the wire spec changes) |
 | `rs/hang` catalog/container | `js/hang`, `doc/concept`, `drafts/draft-lcurley-moq-hang.md` (if the format spec changes) |
 | `rs/moq-token` | `js/token` |
@@ -109,7 +107,7 @@ A quest deleted on `dev` is done, even while `main` still lists it.
 | `rs/moq-cli` | `doc/bin/cli.md` |
 | `rs/moq-token-cli` | `doc/bin/relay/auth.md`, `doc/lib/rs/moq-token.md`, `doc/lib/rs/index.md` |
 | `rs/moq-gst` | `doc/bin/gstreamer.md` |
-| `rs/libmoq` C ABI (`moq.h`) | `cpp/obs/src`, `doc/bin/obs.md` |
+| `rs/moq-c` C ABI (`moq.h`) | `cpp/obs/src`, `doc/bin/obs.md` |
 | `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
 | a kramdown-rfc construct new to `drafts/` | `doc/.vitepress/drafts.ts`, which translates the drafts into `/draft/` site pages |
 

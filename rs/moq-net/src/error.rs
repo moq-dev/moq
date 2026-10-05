@@ -378,10 +378,10 @@ pub enum Error {
 	Closed,
 
 	/// The reader asked for a frame the group never held: below
-	/// [`crate::group::Producer::start_at`], or skipped past a splice. Named from the
-	/// consumer's side; distinct from [`Self::GroupTooLarge`], which aborts the whole
-	/// group when a write exceeds the cache budget, and from [`Self::Evicted`], which
-	/// drops a whole group under the pool's memory pressure.
+	/// [`crate::group::Producer::start_at`]. Named from the consumer's side; distinct
+	/// from [`Self::GroupTooLarge`], which aborts the whole group when a write exceeds
+	/// the cache budget, and from [`Self::Evicted`], which drops a whole group under the
+	/// pool's memory pressure.
 	#[error("lagged")]
 	Lagged,
 

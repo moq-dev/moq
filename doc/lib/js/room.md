@@ -50,6 +50,10 @@ catalog extension. The JSON window chat track (`Chat`) uses `@moq/json` Window;
 hang.live's JSON chat (`hang/chat.json`) stays an extension of the same catalog
 `hang` section.
 
+Under a CSP that refuses `blob:`, host the worklets and worker as described
+for [watch](/lib/js/watch#strict-csp) and [publish](/lib/js/publish#strict-csp),
+then call both `Watch.assets()` and `Publish.assets()`.
+
 The native twin is [`moq-room`](/lib/rs/moq-room).
 
 See the package [README](https://github.com/moq-dev/moq/blob/main/js/room/README.md)

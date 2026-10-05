@@ -1,7 +1,10 @@
 //! [`Sink`]: one stream of PCM on its way to the speaker.
 
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use fixed_resample::{PushStatus, ResamplingChannelConfig, ResamplingCons, ResamplingProd, resampling_channel};
@@ -119,11 +122,14 @@ impl Write {
 
 /// One stream of PCM being played, mixed with every other sink on the device.
 ///
-/// Write decoded samples with [`write`](Self::write) and drop the sink to stop.
+/// Write decoded samples with [`write`](Self::write), then [`finish`](Self::finish)
+/// to play the tail or drop the sink to stop immediately.
 /// Writes are cheap and never block on the device: they remix to the device's
 /// layout and hand samples to a ring buffer that the audio thread drains on its
 /// own clock, resampling to the device rate on the way.
 pub struct Sink {
+	completion: Arc<Completion>,
+	drained: tokio::sync::oneshot::Receiver<()>,
 	id: u64,
 	input: Input,
 	channel: Arc<Mutex<Channel>>,
@@ -138,6 +144,17 @@ pub struct Sink {
 }
 
 impl Sink {
+	/// Play every queued sample before leaving the mix.
+	///
+	/// Await the returned handle to wait for the device; dropping it stops
+	/// immediately. A device that is unavailable keeps the drain pending.
+	/// When rates differ, this drains the output ring; the resampler's partial
+	/// input block cannot be flushed by the current channel implementation.
+	pub fn finish(self) -> Drain {
+		self.completion.state.store(1, Ordering::Release);
+		Drain { sink: Some(self) }
+	}
+
 	/// Play `samples`, in the layout this sink was built with.
 	///
 	/// Samples play back to back in write order. Nothing is scheduled against a
@@ -245,6 +262,52 @@ impl Drop for Sink {
 	}
 }
 
+/// A finished sink that stays in the mix until its queued samples have played.
+///
+/// Await it to release the sink after playback; dropping it stops immediately.
+#[must_use = "await the drain to play the sink's final samples"]
+pub struct Drain {
+	sink: Option<Sink>,
+}
+
+impl Future for Drain {
+	type Output = ();
+
+	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+		let Some(sink) = self.sink.as_mut() else {
+			return Poll::Ready(());
+		};
+		if Pin::new(&mut sink.drained).poll(cx).is_pending() {
+			return Poll::Pending;
+		}
+		self.sink.take();
+		Poll::Ready(())
+	}
+}
+
+/// Callback state is atomic; the driver delivers the async wake off the audio thread.
+pub(super) struct Completion {
+	// 0: writing, 1: finished, 2: played by the device.
+	state: AtomicU8,
+	commands: super::driver::Commands,
+}
+
+impl Completion {
+	pub(super) fn new(commands: super::driver::Commands) -> Self {
+		Self {
+			state: AtomicU8::new(0),
+			commands,
+		}
+	}
+
+	pub(super) fn played(&self, cons: &ResamplingCons<f32>) {
+		if self.state.load(Ordering::Acquire) == 1 && (!cons.input_stream_ready() || cons.occupied_seconds() == 0.0) {
+			self.state.store(2, Ordering::Release);
+			self.commands.sync();
+		}
+	}
+}
+
 /// A cheap, clonable handle to one [`Sink`]'s volume and level.
 ///
 /// Everything here is a lone atomic, so it is safe to poll from a UI frame loop
@@ -293,6 +356,8 @@ struct Channel {
 /// A sink as the driver sees it: enough to rebuild its channel when the device
 /// changes underneath it.
 pub(super) struct Registration {
+	completion: Arc<Completion>,
+	drained: Option<tokio::sync::oneshot::Sender<()>>,
 	pub(super) id: u64,
 	/// The caller's rate, layout, and latency: the input side of the channel.
 	input: Input,
@@ -304,6 +369,14 @@ pub(super) struct Registration {
 }
 
 impl Registration {
+	pub(super) fn complete(&mut self) {
+		if self.completion.state.load(Ordering::Acquire) == 2
+			&& let Some(reply) = self.drained.take()
+		{
+			let _ = reply.send(());
+		}
+	}
+
 	/// Whether the mixer has taken this sink's consumer.
 	pub(super) fn attached(&self) -> bool {
 		self.pending.is_none()
@@ -317,6 +390,7 @@ impl Registration {
 			id: self.id,
 			cons,
 			gain: self.gain.clone(),
+			completion: self.completion.clone(),
 		};
 
 		if let Err(err) = mixer.try_send(command) {
@@ -355,7 +429,11 @@ pub(super) fn new(
 	let channel = Arc::new(Mutex::new(channel));
 	let gain = Arc::new(Gain::new());
 
+	let completion = Arc::new(Completion::new(engine.commands.clone()));
+	let (reply, drained) = tokio::sync::oneshot::channel();
 	let sink = Sink {
+		completion: completion.clone(),
+		drained,
 		id,
 		input,
 		channel: channel.clone(),
@@ -366,6 +444,8 @@ pub(super) fn new(
 	};
 
 	let registration = Registration {
+		completion,
+		drained: Some(reply),
 		id,
 		input: sink.input.clone(),
 		channel,
@@ -419,6 +499,46 @@ mod tests {
 		});
 		let (sink, mut registration) = new(0, output_rate, bus, input, shared, engine).unwrap();
 		(sink, registration.pending.take().unwrap())
+	}
+
+	#[test]
+	fn finish_plays_the_partial_final_period_before_completing() {
+		let shared = Arc::new(Shared::default());
+		let engine = Arc::new(super::super::Handle {
+			commands: super::super::driver::Commands::default(),
+		});
+		let (mut sink, mut registration) = new(0, 48_000, Layout::Stereo, Input::default(), shared, engine).unwrap();
+		let (commands, rx) = std::sync::mpsc::sync_channel(8);
+		let (retired, _rx) = std::sync::mpsc::sync_channel(8);
+		let mut mixer = mixer::Mixer::new(rx, retired, 48_000, Layout::Stereo).unwrap();
+		registration.attach(&commands);
+		let mut out = [0.0; 960];
+		mixer.fill(&mut out, Duration::from_millis(100));
+		let samples = [0.25f32; 123 * 2];
+		let bytes: Vec<_> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+		assert_eq!(sink.write(&bytes).unwrap().accepted_sample_frames, 123);
+		let mut drain = sink.finish();
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		assert!(Pin::new(&mut drain).poll(&mut cx).is_pending());
+		let mut heard = 0;
+		while heard < 123 * 2 {
+			mixer.fill(&mut out, Duration::from_millis(100));
+			heard += out.iter().filter(|s| **s == 0.25).count();
+			registration.complete();
+			assert!(Pin::new(&mut drain).poll(&mut cx).is_pending());
+		}
+		assert_eq!(heard, 123 * 2);
+		// Another staging chunk in the same callback does not finish the drain.
+		mixer.fill(&mut out, Duration::from_millis(100));
+		registration.complete();
+		assert!(Pin::new(&mut drain).poll(&mut cx).is_pending());
+		// Later callbacks can still run before the device plays its queued tail.
+		mixer.complete(Duration::from_millis(99));
+		registration.complete();
+		assert!(Pin::new(&mut drain).poll(&mut cx).is_pending());
+		mixer.complete(Duration::from_millis(100));
+		registration.complete();
+		assert!(Pin::new(&mut drain).poll(&mut cx).is_ready());
 	}
 
 	/// Write `frame` repeated as `input` and read back what the bus got.

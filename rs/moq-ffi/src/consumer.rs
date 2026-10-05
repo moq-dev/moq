@@ -633,7 +633,7 @@ impl MoqTrackConsumer {
 	/// Receive the next best-effort datagram in arrival order.
 	///
 	/// Returns `None` when the track ends. Datagram delivery is unavailable over
-	/// IETF moq-transport, pre-lite-05 moq-lite, and stream-only transports.
+	/// pre-lite-05 moq-lite and stream-only transports.
 	/// Datagrams are a separate cursor from groups, so this works alongside either
 	/// group order, never commits the track to one, and progresses while a group
 	/// read is pending.

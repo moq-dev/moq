@@ -45,7 +45,6 @@ pub struct Log {
 	closes: Arc<Mutex<Vec<(u32, String)>>>,
 	bi_opens: Arc<AtomicUsize>,
 	priorities: Arc<Mutex<Vec<u8>>>,
-	datagrams: Arc<Mutex<Vec<(usize, bytes::Bytes)>>>,
 }
 
 impl Log {
@@ -80,20 +79,6 @@ impl Log {
 	/// requests were sent and not just what they said.
 	pub fn bi_opens(&self) -> usize {
 		self.bi_opens.load(Ordering::Relaxed)
-	}
-
-	/// The datagrams sent, each with how many stream bytes had been written before it, so a
-	/// test can tell what reached the transport ahead of it.
-	pub fn datagrams(&self) -> Vec<(usize, bytes::Bytes)> {
-		self.datagrams.lock().unwrap().clone()
-	}
-
-	fn send_datagram(&self, payload: &[u8]) {
-		let written = self.writes.lock().unwrap().len();
-		self.datagrams
-			.lock()
-			.unwrap()
-			.push((written, bytes::Bytes::copy_from_slice(payload)));
 	}
 }
 
@@ -152,7 +137,8 @@ impl poll::SendStream for SinkSend {
 		Poll::Ready(Ok(buf.len()))
 	}
 
-	fn set_priority(&mut self, order: u8) {
+	fn set_priority(&mut self, order: i32) {
+		let order = u8::try_from(order).expect("moq-net sends u8 send orders");
 		self.log.priorities.lock().unwrap().push(order);
 	}
 
@@ -194,13 +180,18 @@ impl poll::RecvStream for PendingRecv {
 	}
 }
 
-/// A reset with stream code 0, decoded as `Error::Stream(StreamError::Internal)`.
-#[derive(Debug, Clone, Default)]
-pub struct ResetError;
+/// A RESET_STREAM as the transport reports it. `Some(code)` decodes as
+/// `Error::Stream`; `None` is a code the transport could not place in the stream
+/// registry, which decodes as `Error::Transport`.
+#[derive(Debug, Clone, Copy)]
+pub struct ResetError(pub Option<u32>);
 
 impl std::fmt::Display for ResetError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(f, "stream reset by peer (code 0)")
+		match self.0 {
+			Some(code) => write!(f, "stream reset by peer (code {code})"),
+			None => write!(f, "stream reset by peer (unmapped code)"),
+		}
 	}
 }
 
@@ -212,27 +203,27 @@ impl web_transport_trait::Error for ResetError {
 	}
 
 	fn stream_error(&self) -> Option<u32> {
-		Some(0)
+		self.0
 	}
 }
 
 /// A stream that died before delivering a single byte: every read reports a
-/// code-0 RESET_STREAM ([`ResetError`]), the wire shape of a reset arriving
-/// ahead of any payload. QUIC does not order a reset behind the data, so this
-/// reaches an accept loop in normal operation, not just from a misbehaving peer.
-pub struct DeadRecv;
+/// RESET_STREAM ([`ResetError`]), the wire shape of a reset arriving ahead of any
+/// payload. QUIC does not order a reset behind the data, so this reaches an accept
+/// loop in normal operation, not just from a misbehaving peer.
+pub struct DeadRecv(ResetError);
 
 impl poll::RecvStream for DeadRecv {
 	type Error = ResetError;
 
 	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		Poll::Ready(Err(ResetError))
+		Poll::Ready(Err(self.0))
 	}
 
 	fn stop(&mut self, _code: u32) {}
 
 	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		Poll::Ready(Err(ResetError))
+		Poll::Ready(Err(self.0))
 	}
 }
 
@@ -245,6 +236,7 @@ pub struct DeadStreamSession {
 	pub log: Log,
 	unis: Arc<Mutex<usize>>,
 	bis: Arc<Mutex<usize>>,
+	reset: ResetError,
 }
 
 impl DeadStreamSession {
@@ -254,6 +246,7 @@ impl DeadStreamSession {
 			log: Log::default(),
 			unis: Arc::new(Mutex::new(count)),
 			bis: Arc::new(Mutex::new(0)),
+			reset: ResetError(Some(0)),
 		}
 	}
 
@@ -263,7 +256,15 @@ impl DeadStreamSession {
 			log: Log::default(),
 			unis: Arc::new(Mutex::new(0)),
 			bis: Arc::new(Mutex::new(count)),
+			reset: ResetError(Some(0)),
 		}
+	}
+
+	/// Reset with a code the transport cannot map, the way a raw QUIC moq-transport
+	/// peer's CANCELLED reads through the WebTransport code space.
+	pub fn unmapped(mut self) -> Self {
+		self.reset = ResetError(None);
+		self
 	}
 
 	fn take(counter: &Mutex<usize>) -> bool {
@@ -285,21 +286,21 @@ impl poll::Session for DeadStreamSession {
 
 	fn poll_accept_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
 		match Self::take(&self.unis) {
-			true => Poll::Ready(Ok(DeadRecv)),
+			true => Poll::Ready(Ok(DeadRecv(self.reset))),
 			false => Poll::Pending,
 		}
 	}
 
 	fn poll_accept_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		match Self::take(&self.bis) {
-			true => Poll::Ready(Ok((SinkSend::new(self.log.clone()), DeadRecv))),
+			true => Poll::Ready(Ok((SinkSend::new(self.log.clone()), DeadRecv(self.reset)))),
 			false => Poll::Pending,
 		}
 	}
 
 	fn poll_open_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
-		Poll::Ready(Ok((SinkSend::new(self.log.clone()), DeadRecv)))
+		Poll::Ready(Ok((SinkSend::new(self.log.clone()), DeadRecv(self.reset))))
 	}
 
 	fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
@@ -359,8 +360,6 @@ pub struct SinkSession {
 	/// with no congestion controller exposed. Shared and mutable so a test can
 	/// change it mid-session, the way a real transport's figures move.
 	stats: Arc<Mutex<SinkStats>>,
-	/// Set by [`Self::with_datagrams`]. Zero, a transport without datagrams, by default.
-	max_datagram_size: usize,
 }
 
 impl SinkSession {
@@ -387,12 +386,6 @@ impl SinkSession {
 	/// Change what the transport reports, mid-session.
 	pub fn set_stats(&self, stats: SinkStats) {
 		*self.stats.lock().unwrap() = stats;
-	}
-
-	/// Carry datagrams up to `max` bytes, recording each one sent in the [`Log`].
-	pub fn with_datagrams(mut self, max: usize) -> Self {
-		self.max_datagram_size = max;
-		self
 	}
 
 	/// Report `protocol` as the negotiated ALPN.
@@ -498,8 +491,7 @@ impl poll::Session for SinkSession {
 		Poll::Ready(Ok(send))
 	}
 
-	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		self.log.send_datagram(payload);
+	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
 		Poll::Ready(Ok(()))
 	}
 
@@ -508,7 +500,7 @@ impl poll::Session for SinkSession {
 	}
 
 	fn max_datagram_size(&self) -> usize {
-		self.max_datagram_size
+		0
 	}
 
 	fn protocol(&self) -> Option<&str> {
@@ -567,10 +559,16 @@ impl web_transport_trait::Stats for SinkStats {
 /// EOF would exit, and a test usually wants to assert against the loop still running.
 pub struct ScriptedRecv {
 	script: Arc<Mutex<Vec<u8>>>,
-	/// Report EOF once the script is exhausted rather than parking, so a test can drive
-	/// a read loop all the way through its exit path. See [`ScriptedSession::eof`].
-	eof: bool,
+	/// How the peer's send side ends once the script runs out; `None` parks.
+	close: Arc<Mutex<Option<Close>>>,
 	log: Log,
+}
+
+/// How a scripted peer closes its send side. See [`ScriptedSession::close`].
+#[derive(Clone, Copy, Debug)]
+pub enum Close {
+	Fin,
+	Reset,
 }
 
 impl poll::RecvStream for ScriptedRecv {
@@ -590,8 +588,11 @@ impl poll::RecvStream for ScriptedRecv {
 		};
 
 		match take {
-			0 if self.eof => Poll::Ready(Ok(None)),
-			0 => Poll::Pending,
+			0 => match *self.close.lock().unwrap() {
+				Some(Close::Fin) => Poll::Ready(Ok(None)),
+				Some(Close::Reset) => Poll::Ready(Err(SinkError)),
+				None => Poll::Pending,
+			},
 			take => Poll::Ready(Ok(Some(take))),
 		}
 	}
@@ -614,8 +615,8 @@ impl poll::RecvStream for ScriptedRecv {
 #[derive(Clone)]
 pub struct ScriptedSession {
 	pub log: Log,
-	/// Whether an exhausted script reports EOF instead of parking.
-	eof: bool,
+	/// Shared with every stream, like `script`. See [`Self::close`].
+	close: Arc<Mutex<Option<Close>>>,
 	script: Arc<Mutex<Vec<u8>>>,
 	/// Per-stream scripts popped by `open_bi` in order; `None` shares `script`
 	/// across every stream.
@@ -628,28 +629,21 @@ pub struct ScriptedSession {
 	/// Scripts the peer pushes at us on unidirectional streams, popped by `accept_uni`
 	/// in order. See [`Self::with_incoming_unis`].
 	incoming_unis: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
-	/// Set by [`Self::with_datagrams`]. Zero, a transport without datagrams, by default.
-	max_datagram_size: usize,
+	incoming_bidis: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
 }
 
 impl ScriptedSession {
 	pub fn new(script: Vec<u8>) -> Self {
 		Self {
 			log: Log::default(),
-			eof: false,
+			close: Default::default(),
 			script: Arc::new(Mutex::new(script)),
 			queue: None,
 			open_gate: None,
 			park: kio::Park::default(),
 			incoming_unis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
-			max_datagram_size: 0,
+			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 		}
-	}
-
-	/// Carry datagrams up to `max` bytes, recording each one sent in the [`Log`].
-	pub fn with_datagrams(mut self, max: usize) -> Self {
-		self.max_datagram_size = max;
-		self
 	}
 
 	/// Have the peer open one unidirectional stream per script, in order, each replaying
@@ -665,15 +659,20 @@ impl ScriptedSession {
 		self
 	}
 
+	/// Have the peer open one bidirectional stream per script, then go quiet.
+	pub fn with_incoming_bidis(mut self, scripts: Vec<Vec<u8>>) -> Self {
+		self.incoming_bidis = Arc::new(Mutex::new(scripts.into_iter().collect()));
+		self
+	}
+
 	/// Replay `script`, then close the stream instead of parking.
 	///
 	/// Parking is the right default for asserting that a loop is still running, but a
 	/// test for what a loop does on the way *out* needs the read to actually end.
 	pub fn eof(script: Vec<u8>) -> Self {
-		Self {
-			eof: true,
-			..Self::new(script)
-		}
+		let session = Self::new(script);
+		session.close(Close::Fin);
+		session
 	}
 
 	/// Each `open_bi` replays the next script in order. An exhausted queue (or an
@@ -688,16 +687,29 @@ impl ScriptedSession {
 	/// Like [`Self::per_stream`], but an exhausted script closes the stream instead of
 	/// parking, for a test that drives each stream to its end.
 	pub fn per_stream_eof(scripts: Vec<Vec<u8>>) -> Self {
-		Self {
-			eof: true,
-			..Self::per_stream(scripts)
-		}
+		let session = Self::per_stream(scripts);
+		session.close(Close::Fin);
+		session
+	}
+
+	/// Like [`Self::per_stream`], but an exhausted script resets the stream, as a peer
+	/// that fails after replying would.
+	pub fn per_stream_reset(scripts: Vec<Vec<u8>>) -> Self {
+		let session = Self::per_stream(scripts);
+		session.close(Close::Reset);
+		session
 	}
 
 	/// Append to the shared script: the peer sending more on a stream it already opened.
 	/// Nothing is woken, so the test re-polls the reader itself.
 	pub fn push(&self, bytes: &[u8]) {
 		self.script.lock().unwrap().extend_from_slice(bytes);
+	}
+
+	/// Close the peer's send side once the script runs out. Nothing is woken, so the
+	/// test re-polls the reader itself.
+	pub fn close(&self, close: Close) {
+		*self.close.lock().unwrap() = Some(close);
 	}
 
 	/// Answer each stream from `scripts`, but only once the gate opens: a peer that
@@ -721,13 +733,23 @@ impl poll::Session for ScriptedSession {
 		};
 		Poll::Ready(Ok(ScriptedRecv {
 			script: Arc::new(Mutex::new(script)),
-			eof: self.eof,
+			close: self.close.clone(),
 			log: self.log.clone(),
 		}))
 	}
 
 	fn poll_accept_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
-		Poll::Pending
+		let Some(script) = self.incoming_bidis.lock().unwrap().pop_front() else {
+			return Poll::Pending;
+		};
+		Poll::Ready(Ok((
+			SinkSend::new(self.log.clone()),
+			ScriptedRecv {
+				script: Arc::new(Mutex::new(script)),
+				close: self.close.clone(),
+				log: self.log.clone(),
+			},
+		)))
 	}
 
 	fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
@@ -752,7 +774,7 @@ impl poll::Session for ScriptedSession {
 			SinkSend::new(self.log.clone()),
 			ScriptedRecv {
 				script,
-				eof: self.eof,
+				close: self.close.clone(),
 				log: self.log.clone(),
 			},
 		)))
@@ -762,8 +784,7 @@ impl poll::Session for ScriptedSession {
 		Poll::Ready(Ok(SinkSend::new(self.log.clone())))
 	}
 
-	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		self.log.send_datagram(payload);
+	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
 		Poll::Ready(Ok(()))
 	}
 
@@ -772,7 +793,7 @@ impl poll::Session for ScriptedSession {
 	}
 
 	fn max_datagram_size(&self) -> usize {
-		self.max_datagram_size
+		0
 	}
 
 	fn protocol(&self) -> Option<&str> {

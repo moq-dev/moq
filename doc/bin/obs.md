@@ -30,10 +30,10 @@ OBS Studio install.
   video codec, encoder, and audio codec choices.
   **Stats** shows the active encoding, negotiated draft, dial scheme, and one
   minute of RTT, estimated send/receive bandwidth, packet loss, and bytes sent.
-  **About** lists plugin and libmoq versions, documentation links, and available
+  **About** lists plugin and moq-c versions, documentation links, and available
   video encoders.
 
-OBS reports each locally encoded packet's handoff to libmoq against the shared
+OBS reports each locally encoded packet's handoff to moq-c against the shared
 broadcast media clock. Each track's catalog `jitter` is the largest measured
 delay above that track's own recent minimum, and its `delay` is how far that
 minimum trails the earliest track, both rounded up to milliseconds.
@@ -85,5 +85,5 @@ BBR or loss-based CUBIC), stream limits and timeouts, qlog traces for
 diagnosing stalls, and the WebSocket fallback race. A rejected value stops the
 stream with the reason in the log rather than silently using a default.
 
-The plugin is C++ over [libmoq](/lib/c/)'s C ABI and ships with every libmoq
+The plugin is C++ over [moq-c](/lib/c/)'s C ABI and ships with every moq-c
 release.

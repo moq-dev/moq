@@ -20,7 +20,7 @@ expired grant is denied as it is today.
 Keep deadline enforcement in the relay authorization owner rather than a
 cooperative worker timer. Build on what exists: `Grant::deadline`
 (`rs/moq-auth/src/grant.rs`, #4237) already pins an accepted grant to a fixed
-deadline, and dev's `moq_auth::lease` (#3943) re-checks a session on cadence
+deadline, and `moq_auth::lease` (#3943) re-checks a session on cadence
 and reports why it ended. Extend those to the handles a grant opened rather
 than adding a second timer. No clock-skew grace: #4368 (merged) made expiry
 exact and dropped `CLOCK_SKEW`, so a deadline in the past is expired.

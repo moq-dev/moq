@@ -128,6 +128,8 @@ pub(crate) enum PublishDoneStatus {
 	Unauthorized,
 	/// The track is no longer being published.
 	TrackEnded,
+	/// A requested subscription update could not be applied.
+	UpdateFailed,
 }
 
 impl PublishDoneStatus {
@@ -148,6 +150,7 @@ impl PublishDoneStatus {
 				Self::InternalError => 0x0,
 				Self::Unauthorized => 0x1,
 				Self::TrackEnded => 0x2,
+				Self::UpdateFailed => 0x8,
 			},
 		}
 	}
@@ -309,7 +312,7 @@ impl Message for Publish<'_> {
 				};
 				let forward = bool::decode(r, version)?;
 				// parameters
-				let _params = Parameters::decode(r, version)?;
+				Parameters::skip(r, version)?;
 
 				Ok(Self {
 					request_id,
@@ -334,6 +337,7 @@ impl Message for Publish<'_> {
 				// letting the request reach its NOT_SUPPORTED response.
 				decode_params!(r, version,
 					0x02 => object_delivery_timeout: Option<u64>,
+					0x03 => _authorization_token: Vec<super::Opaque>,
 					0x06 => subgroup_delivery_timeout: Option<u64>,
 					0x08 => _expires: Option<u64>,
 					0x09 => largest_location: Option<Location>,
@@ -437,7 +441,7 @@ impl Message for PublishOk {
 				let filter = Filter::decode(r, version)?;
 
 				// no parameters
-				let _params = Parameters::decode(r, version)?;
+				Parameters::skip(r, version)?;
 
 				Ok(Self {
 					request_id,
@@ -833,6 +837,7 @@ mod tests {
 			largest_location: None,
 			forward: true,
 			properties: Properties {
+				max_cache_duration: None,
 				timescale: None,
 				priority: None,
 				group_order: Some(GroupOrder::Descending),
@@ -868,6 +873,7 @@ mod tests {
 			largest_location: None,
 			forward: true,
 			properties: Properties {
+				max_cache_duration: None,
 				timescale: None,
 				priority: None,
 				group_order: Some(GroupOrder::Descending),

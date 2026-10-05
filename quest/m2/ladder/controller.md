@@ -2,7 +2,7 @@
 
 ## Goal
 
-One controller owns every generated rung's share, encoder target, stalled
+One controller owns every generated rung's share, encoder target, enabled
 state, and send order for one output bandwidth domain, so a ladder adapts to
 its uplink instead of encoding every live rung at its ceiling, and transport
 shedding drops the top of the ladder first.
@@ -15,7 +15,7 @@ CLI's publisher session into it. `transcode` is not stageable
 (`rs/moq-cli/src/main.rs:236`, `rs/moq-cli/src/transcode.rs:130-140`) and
 that session is the whole bandwidth domain. Supplying no input preserves
 today's fixed-rate behavior exactly and never publishes congestion-induced
-`stalled` state, which is what keeps this additive.
+`enabled` state, which is what keeps this additive.
 
 The controller subdivides that estimate across the ladder and applies the
 band boundary from the [questline](/quest/m2/ladder/README.md), including the
@@ -50,13 +50,13 @@ send order as unrelated (`rs/moq-net/src/model/bandwidth.rs:229-238`).
   the last applied target and retries on a later material movement.
 - **`BitrateUnsupported` is an explicit fallback, not a silent one.** Mirror
   moq-video's handling (`rs/moq-video/src/encode/producer.rs:383-386`): such
-  an encoder keeps its configured maximum, publishes `stalled: true` whenever
-  the allocation is below it, and clears only when the full maximum fits
-  again. It reclaims no encoder work by design, and it must be visible in
+  an encoder keeps its configured maximum, is disabled (`enabled: false`)
+  whenever the allocation is below it, and is enabled only when the full
+  maximum fits again. It reclaims no encoder work by design, and it must be visible in
   logs and tests rather than pretending the target was applied.
 - **An idle rung must be able to recover.** Only demanded rungs consume
-  allocation, but a rung that loses all demand while stalled cannot be left
-  permanently stalled. Evaluate its hypothetical share against the current
+  allocation, but a rung that loses all demand while disabled cannot be left
+  permanently disabled. Evaluate its hypothetical share against the current
   estimate and active lower-priority reservations, without giving it a real
   share or encoding probe traffic.
 

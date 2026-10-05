@@ -1,8 +1,8 @@
-import { type Hop, HopSchema, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import type { Location } from "../track.ts";
 import * as Message from "./message.ts";
-import { hasFrameBounds, hasGroupOrder, hasOrigin, hasStreamCount, resolvesStart, Version } from "./version.ts";
+import { hasFrameBounds, hasGroupOrder, hasLargest, hasStreamCount, resolvesStart, Version } from "./version.ts";
 
 /**
  * Encode the `Group Start` field shared by SUBSCRIBE and SUBSCRIBE_UPDATE.
@@ -433,29 +433,39 @@ export class SubscribeOk {
  */
 export class SubscribeStart {
 	group: number;
-	/**
-	 * The origin serving the subscription: the Hop ID a relay stitches failover on.
-	 * {@link UNKNOWN_HOP} names nobody. Draft-07+; older versions decode it as unknown.
-	 */
-	origin: Hop;
 
-	constructor(group: number, origin: Hop = UNKNOWN_HOP) {
+	/**
+	 * The publisher's largest (group, frame) when it answered, or `undefined` for a track
+	 * with nothing yet. Draft-07+ only; not on the wire before, where it decodes as `undefined`.
+	 */
+	largest?: Location;
+
+	constructor(group: number, largest?: Location) {
 		this.group = group;
-		this.origin = origin;
+		this.largest = largest;
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		return Message.encode(w, async (w) => {
 			await w.u53(this.group);
-			if (hasOrigin(version)) await w.u62(this.origin);
+			if (!hasLargest(version)) return;
+			// Group + 1, so 0 is a track with nothing yet; the frame follows only otherwise.
+			if (this.largest === undefined) {
+				await w.u53(0);
+			} else {
+				await w.u53(this.largest.group + 1);
+				await w.u53(this.largest.frame);
+			}
 		});
 	}
 
 	static async decode(r: Reader, version: Version): Promise<SubscribeStart> {
 		return Message.decode(r, async (r) => {
 			const group = await r.u53();
-			const origin = hasOrigin(version) ? HopSchema.parse(await r.u62()) : UNKNOWN_HOP;
-			return new SubscribeStart(group, origin);
+			if (!hasLargest(version)) return new SubscribeStart(group);
+			const largest = await r.u53();
+			if (largest === 0) return new SubscribeStart(group);
+			return new SubscribeStart(group, { group: largest - 1, frame: await r.u53() });
 		});
 	}
 }

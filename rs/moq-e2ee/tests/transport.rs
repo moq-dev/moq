@@ -1,11 +1,12 @@
-//! Grouped tracks on moq-lite and MoQ Transport; datagrams on moq-lite.
+//! Grouped tracks and datagrams on moq-lite and MoQ Transport.
 
 mod support;
 
 use std::time::Duration;
 
+use moq_e2ee::Credential;
 use moq_e2ee::credential::Config;
-use moq_e2ee::{Credential, Epoch};
+use moq_net::Epoch;
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
@@ -32,7 +33,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	})
 	.unwrap();
 	let generation = cred.generation(Epoch::mint());
-	let path = cred.path("meeting.hang").unwrap().join(generation.epoch().as_str());
+	let path = cred.path("meeting.hang").unwrap().join_epoch(Some(generation.epoch()));
 	let name = generation.name(track).unwrap();
 
 	let publisher = produce_origin(1);
@@ -50,7 +51,8 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	// The subscriber knows the opaque prefix and takes the epoch from the discovered path.
 	let consumer = consumer_origin.consume();
 	consumer.routed(&path).await.unwrap();
-	let epoch: Epoch = path.parts().last().unwrap().parse().unwrap();
+	let (_, epoch) = path.split_epoch();
+	let epoch = epoch.unwrap();
 	let generation = cred.generation(epoch);
 	let remote = consumer.request_broadcast(&path).await.unwrap();
 	let subscriber = remote
@@ -104,10 +106,9 @@ async fn grouped_over_ietf() {
 	.expect("timed out");
 }
 
-#[tokio::test]
-async fn datagrams_over_lite() {
+async fn datagram_roundtrip(version: &str) {
 	tokio::time::timeout(TEST_TIMEOUT, async {
-		let mut fixture = connect_protected("moq-lite-05".parse().unwrap(), "audio").await;
+		let mut fixture = connect_protected(version.parse().unwrap(), "audio").await;
 		fixture
 			.producer
 			.append_datagram(Timestamp::from_millis(9).unwrap(), b"opus")
@@ -122,4 +123,14 @@ async fn datagrams_over_lite() {
 	})
 	.await
 	.expect("timed out");
+}
+
+#[tokio::test]
+async fn datagrams_over_lite() {
+	datagram_roundtrip("moq-lite-05").await;
+}
+
+#[tokio::test]
+async fn datagrams_over_ietf() {
+	datagram_roundtrip("moq-transport-21").await;
 }

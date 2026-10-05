@@ -1,7 +1,13 @@
 import { expect, test } from "bun:test";
-import { probeLevel } from "./connection.ts";
-import { ProbeLevel } from "./setup.ts";
-import { Version } from "./version.ts";
+import { SessionCode } from "../error.ts";
+import { createMockTransportPair } from "../mock.ts";
+import { Stream, Writer } from "../stream.ts";
+import { wireOf } from "../wire.ts";
+import { Connection, probeLevel } from "./connection.ts";
+import { Goaway } from "./goaway.ts";
+import { ProbeLevel, Setup } from "./setup.ts";
+import { DataType, StreamId } from "./stream.ts";
+import { ALPN_04, ALPN_05, ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
 
 /** A transport whose `getStats` behaves as described, or is absent entirely. */
 function transport(getStats?: () => Promise<unknown>): WebTransport {
@@ -45,3 +51,80 @@ test("a throwing getStats advertises None rather than propagating", async () => 
 	});
 	expect(await probeLevel(quic, Version.DRAFT_05)).toBe(ProbeLevel.None);
 });
+
+async function sendGoaway(server: WebTransport, uri: string): Promise<void> {
+	const stream = await Stream.open(server, { version: Version.DRAFT_04 });
+	await stream.writer.u53(StreamId.Goaway);
+	await new Goaway(uri).encode(stream.writer, Version.DRAFT_04);
+	stream.writer.close();
+}
+
+test("a lite GOAWAY keeps the session open, and a second one closes it", async () => {
+	const pair = createMockTransportPair(ALPN_04);
+	const connection = new Connection({
+		url: new URL("https://relay.example/"),
+		quic: pair.client,
+		version: Version.DRAFT_04,
+	});
+
+	let closed = false;
+	void connection.closed.then(() => {
+		closed = true;
+	});
+
+	try {
+		await sendGoaway(pair.server, "");
+		const drain = await wireOf(connection).goaway;
+		expect(drain.uri).toBe("");
+
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(closed).toBe(false);
+
+		await sendGoaway(pair.server, "https://other.example/");
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(closed).toBe(true);
+	} finally {
+		connection.abort();
+	}
+});
+
+for (const [alpn, version] of [
+	[ALPN_05, Version.DRAFT_05],
+	[ALPN_06, Version.DRAFT_06],
+	[ALPN_07_WIP, Version.DRAFT_07],
+] as const) {
+	for (const complete of [false, true]) {
+		test(`duplicate SETUP closes ${alpn} with PROTOCOL_VIOLATION (complete=${complete})`, async () => {
+			const pair = createMockTransportPair(alpn);
+			const connection = new Connection({ url: new URL("https://relay.example/"), quic: pair.client, version });
+			try {
+				for (let i = 0; i < 2; i++) {
+					const writer = await Writer.open(pair.server, { version });
+					await writer.u53(DataType.Setup);
+					if (complete && i === 0) {
+						await new Setup({}).encode(writer, version);
+						writer.close();
+					}
+				}
+				expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
+			} finally {
+				connection.abort();
+			}
+		});
+	}
+
+	// The Setup Stream is claimed before its body decodes, so a truncated one leaves
+	// nothing for SETUP-gated streams to wait on.
+	test(`truncated SETUP closes ${alpn} with PROTOCOL_VIOLATION`, async () => {
+		const pair = createMockTransportPair(alpn);
+		const connection = new Connection({ url: new URL("https://relay.example/"), quic: pair.client, version });
+		try {
+			const writer = await Writer.open(pair.server, { version });
+			await writer.u53(DataType.Setup);
+			writer.close();
+			expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
+		} finally {
+			connection.abort();
+		}
+	});
+}

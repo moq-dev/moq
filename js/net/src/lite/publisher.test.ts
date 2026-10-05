@@ -8,9 +8,7 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Milli, Timestamp } from "../time.ts";
-import { DEFAULT_MAX_AGE_MS } from "../track.ts";
 import { AnnounceRequest } from "./announce.ts";
-import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { sendOrder } from "./priority.ts";
@@ -575,7 +573,6 @@ async function servedSubscription(
 	const serving = publisher.runSubscribe(msg, server);
 
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
-	const datagrams = pair.client.datagrams.readable.getReader();
 
 	return {
 		client,
@@ -588,9 +585,6 @@ async function servedSubscription(
 			for (const frame of frames) group.writeString(frame);
 			group.close();
 			track.writeGroup(group);
-		},
-		datagram(sequence: number, bytes = 1) {
-			track.insertDatagram(sequence, Timestamp.fromMillis(sequence), new Uint8Array(bytes));
 		},
 		// The next group stream the publisher opened, drained, or undefined once it has gone
 		// idle. A group the publisher dropped then fails an assertion instead of hanging the
@@ -620,21 +614,9 @@ async function servedSubscription(
 		async servedSequence(): Promise<number | undefined> {
 			return (await this.servedGroup())?.sequence;
 		},
-		// The next datagram's sequence, or undefined once the publisher has gone idle.
-		async sentDatagram(): Promise<number | undefined> {
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			const idle = new Promise<undefined>((resolve) => {
-				timer = setTimeout(() => resolve(undefined), IDLE_MS);
-			});
-			const next = await Promise.race([datagrams.read(), idle]);
-			clearTimeout(timer);
-			if (!next || next.done) return undefined;
-			return (await DatagramMessage.decode(next.value, version)).sequence;
-		},
 		async close() {
 			// Settles any pending read as well as dropping the stream.
 			await opened.cancel();
-			await datagrams.cancel();
 			publisher.close();
 			client.close();
 		},
@@ -682,77 +664,6 @@ test("lite draft-05: a straggler below the announced start group is not served",
 		expect(await sub.servedSequence()).toBe(3);
 	} finally {
 		await sub.close();
-	}
-});
-
-// A datagram too large for the transport is never sent, so it must not resolve the start:
-// that would drop an older group below it for nothing.
-test("lite draft-05: a dropped datagram does not resolve the start", async () => {
-	const debug = spyOn(console, "debug");
-	const sub = await servedSubscription();
-	try {
-		sub.datagram(10, 2000);
-		while (!debug.mock.calls.some(([msg]) => String(msg).startsWith("dropping oversize datagram"))) await flush();
-
-		sub.serve(5);
-		expect(await sub.servedSequence()).toBe(5);
-		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_05);
-		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
-		expect(resp.start.group).toBe(5);
-	} finally {
-		debug.mockRestore();
-		await sub.close();
-	}
-});
-
-// SUBSCRIBE_START promises nothing below the start, so a datagram below it is dropped like a
-// group there would be.
-test("lite draft-05: a datagram below the announced start is not sent", async () => {
-	const sub = await servedSubscription();
-	try {
-		sub.serve(5);
-		expect(await sub.servedSequence()).toBe(5);
-		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_05);
-		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
-		expect(resp.start.group).toBe(5);
-
-		sub.datagram(3);
-		sub.datagram(6);
-		expect(await sub.sentDatagram()).toBe(6);
-	} finally {
-		await sub.close();
-	}
-});
-
-// The datagram and group loops race to claim SUBSCRIBE_START, and the START write runs a few
-// turns after the claim. Whichever loop wins, no group goes out below the start it announced,
-// even one popped before that write ran. Sweeping the group's arrival across those turns
-// covers the window without depending on how many microtasks each loop takes.
-test("lite draft-05: no group goes out below a datagram's start", async () => {
-	const debug = spyOn(console, "debug");
-	try {
-		for (let turns = 0; turns < 16; turns++) {
-			debug.mockClear();
-			const sub = await servedSubscription();
-			try {
-				// Both loops are parked, so the datagram and the groups race from here.
-				while (!debug.mock.calls.some(([msg]) => String(msg).startsWith("publish ok"))) await flush();
-				await flush();
-
-				sub.datagram(10);
-				for (let i = 0; i < turns; i++) await Promise.resolve();
-				sub.serve(5);
-				sub.serve(11);
-
-				const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_05);
-				if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
-				expect(await sub.servedSequence()).toBeGreaterThanOrEqual(resp.start.group);
-			} finally {
-				await sub.close();
-			}
-		}
-	} finally {
-		debug.mockRestore();
 	}
 });
 
@@ -1015,8 +926,8 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 
 		expect(sub.track.subscription.peek()).toEqual({
 			priority: 9,
-			maxAge: DEFAULT_MAX_AGE_MS,
-			groups: { end: { excluded: 6 } },
+			maxAge: TEST_MAX_AGE_MS,
+			groups: { start: undefined, end: { excluded: 6 } },
 		});
 		expect(ranges).not.toHaveBeenCalled();
 
@@ -1729,5 +1640,45 @@ test("lite draft-05: a group that goes stale while its stream opens writes nothi
 		client.close();
 		broadcast.close();
 		origin.close();
+	}
+});
+
+test.each([0, 1])("lite draft-07 reports the cached largest position when starting at group %s", async (startGroup) => {
+	const version = Version.DRAFT_07;
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("quiet"));
+	const track = broadcast.createTrack("video");
+	const group = new GroupProducer(0);
+	group.writeString("cached");
+	group.close();
+	track.writeGroup(group);
+	const client = await Stream.open(pair.client, { version });
+	const server = await Stream.accept(pair.server, version);
+	if (!server) throw new Error("missing subscribe stream");
+	const running = publisher.runSubscribe(
+		replaySubscribe({
+			id: 0n,
+			broadcast: Path.from("quiet"),
+			track: "video",
+			priority: 0,
+			startGroup,
+		}),
+		server,
+	);
+	try {
+		const response = await decodeSubscribeResponse(client.reader, version);
+		if (!("start" in response)) throw new Error("expected SUBSCRIBE_OK");
+		expect(response.start.group).toBe(startGroup);
+		expect(response.start.largest).toEqual({ group: 0, frame: 0 });
+	} finally {
+		client.close();
+		publisher.close();
+		broadcast.close();
+		origin.close();
+		pair.client.close();
+		pair.server.close();
+		await running;
 	}
 });

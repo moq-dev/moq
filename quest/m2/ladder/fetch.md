@@ -14,9 +14,9 @@ controller owns it.
 The FETCH path opens a new encoder per requested group at
 `Rung::bitrate`: `spawn_fetch` and `fetch`
 (`rs/moq-transcode/src/rung.rs:460-481`) call `encode`, which sets
-`config.bitrate = Some(self.info.bitrate)` (`:107-116`), so a stalled ladder
+`config.bitrate = Some(self.info.bitrate)` (`:107-116`), so a constrained ladder
 still burns full-rate encodes on demand. Make it read the controller's
-applied target and participate in the same allocation. A stalled rung stays
+applied target and participate in the same allocation. A disabled rung stays
 manually fetchable, and cache hits are untouched.
 
 Catalog mutations publish full HANG, HANGZ, and MSF snapshots today
@@ -26,7 +26,7 @@ later source catalog snapshot compose with current generated-rung state
 rather than overwrite it.
 
 Acceptance: a fresh FETCH using the shared applied target while a cache hit
-encodes nothing, and one source catalog refresh leaving stalled rung state
+encodes nothing, and one source catalog refresh leaving disabled rung state
 intact.
 
 ## Required

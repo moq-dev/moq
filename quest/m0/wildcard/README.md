@@ -23,8 +23,7 @@ is the catch-all `**`, a claim about every path at once.
 
 The cost of enumerating is real even though its last measurement is stale.
 One announcement measured 8.8 KB per relay plus 4.3 KB per additional route
-before prefix routes made a standby route a table entry;
-[Cluster routing's memory benchmark](/quest/m1/cluster-routing/memory.md) remeasures it. Whatever the current
+before prefix routes made a standby route a table entry. Whatever the current
 number, every relay that hears an announcement pays it whether or not anything
 there subscribes, so "workers times broadcasts" is that number multiplied
 across the fleet in resident memory.
@@ -62,23 +61,20 @@ Request resolution exists too. `Consumer::request_broadcast` mints a front per
 path (`rs/moq-net/src/model/front.rs`) that selects through `best_route`: a
 local broadcast first, then the longest covering prefix, filtered by the
 requester's excluded hop and ordered by `route_order`, whose hash is keyed on
-the requested path so one prefix's pool shares its paths. A refusal from that
-tier is final, a front resumes only onto a source whose SUBSCRIBE_OK names the
-same origin (the route's first hop on wires older than lite-07), and FETCH
-resolves the same way. The pattern matcher itself exists:
+the requested path so one prefix's pool shares its paths. A front follows the
+best route and resumes through any covering one, and FETCH resolves the same
+way. A standing refusal does not yet end the front: since #4741 the front skips
+the refuser and re-selects, which can reach a sibling advertiser or a shorter
+prefix, against the refusal decision below. The pattern matcher itself exists:
 `moq_net::{Pattern, Patterns, Segment}` and `Path.Pattern` /
 `Path.Patterns` in `js/net/src/path.ts` own the shared matching, containment,
 specificity, and rebasing tokens and filters reuse.
 
-What is genuinely missing, beyond patterns themselves, is content identity.
-Announcement `Epoch` was specified into lite-06 by
-[#2611](https://github.com/moq-dev/moq/pull/2611), never implemented, and
-removed from the draft by #3225, which retired `draft-lcurley-moq-broadcast`
-with it. [moq#3312](https://github.com/moq-dev/moq/pull/3312) restored per-path identity
-from the route's first hop, reversing #3225's no-splice rule, and lite-07 moved
-it to the origin a SUBSCRIBE_OK or FETCH_OK names, since a pool's one route labels
-many origins. This questline builds its collision handling on that rather than
-on a generation field.
+Content identity is the path: it names one broadcast whoever serves it, and
+any covering route resumes a subscription from the first frame the subscriber
+lacks (#4741). The `@<epoch>` segment (#4706) is what makes a restart a new
+path. So this questline settles collisions with interchangeable output at one
+path, not with a route identity or a generation field.
 
 ### Decisions
 
@@ -128,34 +124,52 @@ on a generation field.
   sender could serve, never that a given path exists. Refusal is how a specific
   path is denied. This is why an over-claiming advertisement is not a defect:
   claiming the root is legal, and answering "not that one" is the mechanism.
+- **Overlap with the publish scope is what authorization checks.** An
+  advertised prefix MUST overlap the sender's granted patterns or it is
+  refused. A prefix wider than the grant is accepted, but it only routes
+  requests for paths the grant covers. Fleet-wide services use the cluster
+  identity; a customer service serves only what its own v1 grant contains.
+  Until [Advertise-only authorization](/quest/m2/processor/advertise-auth.md)
+  lands, the publish scope stands in for advertising; a credential with its own
+  advertise scope is checked against that instead.
 - **Claims are visible to subscribers.** A claim is an ordinary prefix
   announcement, so it tells a client it may subscribe beneath it, and its
   withdrawal tells the client the capability is gone. The browser player's
   gate (`js/watch`'s `#isPathAnnounced`) lists a catalog rendition under any
   covering prefix, so a lazily-produced rendition is discoverable without an
   announcement that only demand would produce.
-- **Every refusal is terminal, and capacity lives in the route.** An
-  advertiser resets a request it will not serve, and the relay propagates it
-  without retrying another advertiser, on moq-lite and moq-transport alike,
-  so the protocols need no capacity code. An advertiser sheds load by
-  withdrawing or re-pricing its route before it runs out, leaving headroom
-  for requests already in flight, since a withdrawal and a request for the
-  slot it gave away can cross. A request that still loses the race fails,
-  and the subscriber re-requests against the updated table. No negative
-  cache; rate limiting stays with the advertiser and the per-project auth
-  gate.
-- **A double claim is settled by route identity, not by a lease.** Two relays
-  can hash one path to different workers before either concrete announcement
-  propagates, and both land at the SAME literal path. Whichever route wins
-  selection serves it, and a consumer moves between them only when the winner's
-  identity is preserved, per the resume rule (the origin a SUBSCRIBE_OK
-  names on lite-07, the route's first hop before it); two distinct workers are two identities,
-  so the loser's subscribers end and resubscribe rather than being spliced onto
-  another worker's frames mid-group. Claim routing invents neither a lease
-  nor a generation. This is weaker than the retired `Epoch` design, which could
-  declare two workers' output interchangeable and splice between them; a service
-  that needs that guarantee has to carry it in its own media contract, not in
-  routing.
+- **Every refusal is a terminal typed stream reset, with no negative cache.**
+  An advertiser resets a subscribe it will not serve, and the reset carries
+  which KIND of refusal it is (`Error::to_code` already puts a typed code on
+  the wire). Every refusal propagates: a path no rule covers, an unauthorized
+  one, one that does not exist, or one the advertiser has no capacity for.
+  There is no re-resolution (decided 2026-10-03: NO_CAPACITY is removed, so
+  no refusal is retryable). An advertiser sheds load by withdrawing or
+  re-pricing its claim; a request that crosses the retraction is refused, and
+  the client's ordinary resubscribe resolves again. Scanning unserved paths
+  costs one round trip per path. No negative cache; rate limiting stays with
+  the advertiser and the per-project auth gate.
+- **A double claim is settled by interchangeable output, not by route
+  identity or a lease.** Two relays can hash one path to different workers
+  before either concrete announcement propagates, and both land at the SAME
+  literal path. A path is one broadcast whoever serves it, so claim workers
+  mirror the source's epoch and group numbers, publish a deterministic
+  catalog, and start at group boundaries
+  ([Transcoders start at group boundaries](/quest/m1/transcode-group-start.md)).
+  Two workers at one path are then one broadcast, and a relay moving between
+  them does so at a group boundary (decided 2026-10-03: #4741 drops
+  first-hop identity, so routing can no longer tell two workers apart).
+  Wildcard routing invents neither a lease nor a generation. That quest is
+  Required here (decided 2026-10-04), so this line cannot ship with workers
+  that can be spliced mid-group.
+- **A serving front follows the best route.** A join or re-price re-selects
+  every front below the prefix, and a front moves when another route now
+  wins: cheaper, or the rendezvous winner among equal costs (decided
+  2026-10-04, replacing Stay). This is safe because a path is one broadcast
+  and any covering route resumes it (#4741).
+- **No reply Origin.** The lite-07 `Origin` field in SUBSCRIBE_OK and FETCH_OK,
+  and the rule that a relay MUST NOT splice across differing Origins, are
+  dropped (decided 2026-10-03: nothing needs them for correctness).
 - **Patterns are independent of clustering.** The `moq-pattern` crate owns
   the matching semantics tokens and filters share, with no draft of its own;
   no announce message carries a pattern on either protocol (AUTH grants on
@@ -189,13 +203,15 @@ announcement shadows it. A claim names no generation, so a client that must
 distinguish recording generations reads the catalog's archive entry
 ([archive](/quest/m1/archive/README.md)) rather than announce state.
 
+## Required
+
+- [Transcoders start at group boundaries](/quest/m1/transcode-group-start.md) - two claim workers at one path are one broadcast, so a relay never splices them mid-group
+
 ## Related
 
 - [archive](/quest/m1/archive/README.md) - an archive claims the root, and its
   catalog names the generations a claim cannot
-- [Cluster routing](/quest/m1/cluster-routing/README.md) - origin selection by cost
-  with an HRW tie-break, built on this line's longest-prefix rule
-- [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - derived output
+- [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - derived output
   mirrors the source path, `@<epoch>` segment included
 - [Announcement shapes](/quest/m2/announce-shapes.md) - moq-lite-only exact,
   suffix, and prefix+suffix claims that survive relay hops

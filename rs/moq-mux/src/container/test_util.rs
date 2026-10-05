@@ -129,11 +129,6 @@ pub(crate) fn raw_frame(timestamp_us: u64, payload: &'static [u8], keyframe: boo
 	}
 }
 
-/// A broadcast clock that began `ago` before now, so a first frame arriving now reads as late.
-pub(crate) fn late_clock(ago: std::time::Duration) -> crate::Clock {
-	crate::Clock::at(std::time::Instant::now() - ago, std::time::SystemTime::now() - ago).unwrap()
-}
-
 /// Every frame timestamp, in micros, that each media rendition in `catalog` published, by track.
 ///
 /// Reads through each rendition's own container, so an fMP4 timestamp comes from the fragment's
@@ -168,9 +163,9 @@ pub(crate) async fn published<E>(
 	out
 }
 
-/// The one offset every published timestamp moved by between a verbatim and a live import of the
-/// same input, within a tick of rounding: one mapping for every track, so A/V sync and B-frame
-/// order survive exactly.
+/// The one offset every published timestamp moved by between two imports of the same media,
+/// within a tick of rounding: one mapping for every track, so A/V sync and B-frame order survive
+/// exactly.
 pub(crate) fn common_offset(
 	verbatim: &std::collections::BTreeMap<String, Vec<u128>>,
 	live: &std::collections::BTreeMap<String, Vec<u128>>,

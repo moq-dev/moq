@@ -14,7 +14,7 @@ import { Derived, type Dispose, type GetPromise, type Getter, getter, Once, Sign
 import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
-import { type Hop, isAnonymous, Route, randomHop, routesEqual } from "./hop.ts";
+import { isAnonymous, Route, routesEqual } from "./hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps, spreadHash } from "./internal.ts";
 import * as Path from "./path.ts";
 import { type Advertised, type Advertisements, registerWire, wireOf } from "./wire.ts";
@@ -383,9 +383,6 @@ class OriginState {
 	// received entry back to a peer, which is what makes an origin shared by both
 	// directions echo-free.
 	created: Map<Path.Valid, broadcast.Consumer> | undefined = new Map();
-	// This origin's identity, which its replies name as the origin of what it serves. Shared by
-	// every session serving it, so a peer can fail over between them (Rust's `origin.hop()`).
-	readonly hop: Hop = randomHop();
 	local = new VersionedSignal<Map<Path.Valid, broadcast.Consumer> | undefined>(new Map());
 	advertisedLocal = new VersionedSignal<Map<Path.Valid, Route> | undefined>(new Map());
 	routes = new VersionedSignal<Map<Path.Valid, RouteEntry[]> | undefined>(new Map());
@@ -474,6 +471,11 @@ class OriginState {
 	// unroutable rather than merely unanswered, which is the whole difference between "wait,
 	// this is coming" and "nothing here can ever serve you".
 	answerers = new Signal(0);
+
+	// Sessions still replaying the peer's initial announce set into the table, each with the
+	// absolute paths it may announce under. An announcement stream opened while an
+	// overlapping one replays withholds its live marker until it lands.
+	replaying = new Signal<Set<{ scope: Path.Patterns }>>(new Set());
 
 	closed = new Once<Error | null>();
 
@@ -700,6 +702,7 @@ export class Producer implements Table {
 				this.#scope.allowed.overlaps(Path.Pattern.subtree(Path.join(this.#scope.root, prefix))),
 			attach: (discovery) => this.#attach(discovery),
 			expect: () => this.#expect(),
+			replaying: (prefix) => this.#replaying(prefix),
 			get requests() {
 				if (thisProducer.#scope === Scope.all) return thisProducer.#state.requests;
 				thisProducer.#requests ??= new Derived([thisProducer.#state.requests], (requests) =>
@@ -932,12 +935,39 @@ export class Producer implements Table {
 	}
 
 	/**
+	 * Register a session replaying the peer's initial announce set under `prefix`, relative
+	 * to this handle's root. Only announcement streams overlapping it wait. Returns the
+	 * release; call it once the set has landed, or the session dies. Idempotent.
+	 *
+	 * @internal
+	 */
+	#replaying(prefix: Path.Valid): Dispose {
+		let scope: Path.Patterns;
+		try {
+			scope = this.#scope.patterns(Path.Pattern.subtree(prefix));
+		} catch {
+			// A subtree too complex to intersect waits on the whole scope instead, like Rust.
+			scope = this.#scope.allowed ?? new Path.Patterns([Path.Pattern.all()]);
+		}
+		const source = { scope };
+		this.#state.replaying.mutate((sources) => {
+			sources.add(source);
+		});
+		return () => {
+			if (!this.#state.replaying.peek().has(source)) return;
+			this.#state.replaying.mutate((sources) => {
+				sources.delete(source);
+			});
+		};
+	}
+
+	/**
 	 * Resolves once anything a serving session scans changes: the open requests, or either
 	 * side of the routing table.
 	 *
 	 * @internal
 	 */
-	#changed(): Promise<unknown> {
+	#changed(): GetPromise<unknown> {
 		return Signal.race(this.#state.requests, this.#state.local, this.#state.routes, this.#state.advertisedLocal);
 	}
 
@@ -1150,7 +1180,6 @@ export class Consumer {
 			total === 0 ? undefined : discovery === total,
 		);
 		registerWire(this, {
-			hop: state.hop,
 			routes: (path) => this.#routes(scope.path(path)),
 			broadcasts:
 				scope === Scope.all ? state.local : new Derived([state.local], (local) => scope.projectPaths(local)),
@@ -1373,7 +1402,9 @@ export class Consumer {
 
 	/**
 	 * The announced routes matching `scope`, as a live stream: every currently advertised
-	 * route arrives first as active, then additions and retractions as they happen.
+	 * route arrives first as `start`, then the `live` marker, then changes as they
+	 * happen. The marker also waits for every session still replaying its peer's initial
+	 * set when the stream opened, so a caller listing what is live stops there.
 	 * Any pattern is accepted. A local broadcast appears once it announces, exactly as a
 	 * peer sees it. A dynamic or received route announces the prefix it covers when its
 	 * subtree overlaps the scope. The stream ends when the origin closes or the consumer is
@@ -1426,6 +1457,12 @@ export class Consumer {
 		// update.
 		let active = new Map<Path.Valid, Presented>();
 
+		// The sessions replaying into this stream's scope when it opened; the live marker
+		// follows the diff after the last of them lands. Undefined once it was delivered.
+		let waiting: Set<{ scope: Path.Patterns }> | undefined = new Set(
+			[...this.#state.replaying.peek()].filter(({ scope }) => [...scope].some((p) => patterns.overlaps(p))),
+		);
+
 		try {
 			for (;;) {
 				const local = this.#state.local.peek();
@@ -1441,7 +1478,7 @@ export class Consumer {
 						producer.append({
 							prefix: path,
 							captures: snap.captures,
-							kind: "retracted",
+							kind: "end",
 							route: snap.route,
 						});
 				}
@@ -1451,16 +1488,30 @@ export class Consumer {
 						producer.append({
 							prefix: path,
 							captures: snap.captures,
-							kind: "announced",
+							kind: "start",
 							route: snap.route,
 						});
 					} else if (!routesEqual(prev.route, snap.route)) {
-						producer.append({ prefix: path, captures: snap.captures, kind: "updated", route: snap.route });
+						producer.append({ prefix: path, captures: snap.captures, kind: "update", route: snap.route });
 					}
 				}
 				active = next;
 
-				await Signal.race(this.#state.local, this.#state.advertisedLocal, this.#state.routes, producer.closed);
+				if (waiting) {
+					const replaying = this.#state.replaying.peek();
+					for (const source of waiting) {
+						if (!replaying.has(source)) waiting.delete(source);
+					}
+					if (waiting.size === 0) {
+						producer.append({ kind: "live" });
+						waiting = undefined;
+					}
+				}
+
+				// Replay holds only matter until the marker is out; past it, a reconnect's holds
+				// must not rescan the table for every stream already live.
+				const table = [this.#state.local, this.#state.advertisedLocal, this.#state.routes, producer.closed];
+				await (waiting ? Signal.race(...table, this.#state.replaying) : Signal.race(...table));
 				if (producer.closed.peek() !== undefined) return;
 			}
 		} catch {

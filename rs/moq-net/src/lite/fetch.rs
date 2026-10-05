@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use crate::{
-	Hop, Path,
+	Path,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 };
 
@@ -81,33 +81,6 @@ impl Message for Fetch<'_> {
 	}
 }
 
-/// The publisher's answer on a Fetch Stream, ahead of the FRAME messages: the
-/// origin serving the group, which a relay stitches failover on.
-///
-/// Lite07+ only; older versions answer with the frames alone.
-#[derive(Clone, Debug)]
-pub struct FetchOk {
-	/// [`Hop::UNKNOWN`] names nobody.
-	pub origin: Hop,
-}
-
-impl Message for FetchOk {
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		if !version.has_origin() {
-			return Err(DecodeError::Version);
-		}
-		let origin = Hop::from_wire(u64::decode(r, version)?)?;
-		Ok(Self { origin })
-	}
-
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		if !version.has_origin() {
-			return Err(EncodeError::Version);
-		}
-		self.origin.id().encode(w, version)
-	}
-}
-
 #[cfg(test)]
 mod test {
 	use super::*;
@@ -128,21 +101,6 @@ mod test {
 		msg.encode_msg(&mut buf, version).unwrap();
 		let mut slice = buf.as_slice();
 		Fetch::decode_msg(&mut slice, version).unwrap()
-	}
-
-	#[test]
-	fn fetch_ok_names_the_origin_on_lite07() {
-		let msg = FetchOk {
-			origin: Hop::new(42).unwrap(),
-		};
-		let mut buf = Vec::new();
-		msg.encode(&mut buf, Version::Lite07).unwrap();
-		assert_eq!(buf, [1, 42]);
-		let got = FetchOk::decode(&mut buf.as_slice(), Version::Lite07).unwrap();
-		assert_eq!(got.origin, msg.origin);
-
-		// Older versions answer with the frames alone.
-		assert!(msg.encode(&mut Vec::new(), Version::Lite06).is_err());
 	}
 
 	#[test]

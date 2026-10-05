@@ -1,10 +1,10 @@
 import { resolve } from "path";
 import { defineConfig } from "vite";
 import solidPlugin from "vite-plugin-solid";
-import { workletInline } from "../common/vite-plugin-worklet";
+import { worklet } from "../common/vite-plugin-worklet";
 
 export default defineConfig({
-	plugins: [solidPlugin(), workletInline()],
+	plugins: [solidPlugin(), worklet()],
 	build: {
 		lib: {
 			entry: {

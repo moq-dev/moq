@@ -249,22 +249,6 @@ export function hasStreamCount(version: Version): boolean {
 	}
 }
 
-/** Whether SUBSCRIBE_OK and FETCH_OK name the origin serving the request, which relays stitch failover on. Added in lite-07, with FETCH_OK itself. */
-export function hasOrigin(version: Version): boolean {
-	// Explicitly list older versions so future versions keep the lite-07+ behavior.
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-		case Version.DRAFT_05:
-		case Version.DRAFT_06:
-			return false;
-		default:
-			return true;
-	}
-}
-
 /** Whether ANNOUNCE_START and ANNOUNCE_UPDATE may copy a path head or hop-chain tail from a live announcement. Added in lite-07. */
 export function hasAnnounceCompression(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
@@ -314,4 +298,23 @@ const VERSION_NAMES: Record<number, string> = {
 
 export function versionName(v: Version): string {
 	return VERSION_NAMES[v] ?? `unknown(0x${v.toString(16)})`;
+}
+
+/**
+ * Whether SUBSCRIBE_START carries the publisher's largest (group, frame), which a subscriber
+ * takes as where the live feed is. Added in lite-07; an earlier answer says nothing about it.
+ */
+export function hasLargest(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
 }

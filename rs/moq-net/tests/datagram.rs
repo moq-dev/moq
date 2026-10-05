@@ -1,4 +1,4 @@
-//! MoQ Lite datagram delivery over the in-memory mock transport.
+//! Datagram delivery over the in-memory mock transport, on moq-lite and moq-transport.
 //!
 //! Covers the whole receive path end to end: publisher encoding, the transport's
 //! datagram channel, the subscriber's receive loop and `route_datagram`, and
@@ -9,7 +9,6 @@ mod support;
 
 use std::time::Duration;
 
-use futures::FutureExt as _;
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
@@ -35,10 +34,6 @@ struct Fixture {
 /// A publisher and a subscriber joined over the mock transport, sharing one
 /// datagram-carrying track.
 async fn connect_datagram_track() -> Fixture {
-	connect_datagram_track_on("moq-lite-05").await
-}
-
-async fn connect_datagram_track_on(version: &str) -> Fixture {
 	let publisher = produce_origin(1);
 	let consumer_origin = produce_origin(2);
 
@@ -46,7 +41,7 @@ async fn connect_datagram_track_on(version: &str) -> Fixture {
 	let producer = broadcast.create_track("datagrams", None).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
-	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+	let mut options = MockConnectOptions::new("moq-lite-05".parse::<Version>().unwrap());
 	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(consumer_origin.clone());
 	let pair = connect_mock(options).await;
@@ -114,85 +109,77 @@ async fn datagrams_reach_the_subscriber_in_order() {
 	.expect("timed out");
 }
 
-/// Lite-07 holds a subscription's content until SUBSCRIBE_OK names its origin, so a
-/// track that only ever sends datagrams must still send SUBSCRIBE_OK for any to arrive.
-/// Datagrams racing ahead of it are dropped, so this keeps sending until one lands.
+/// MoQ Transport carries a datagram as an OBJECT_DATAGRAM at object 0, so it arrives as a
+/// datagram with its sequence, alongside the groups on streams.
 #[tokio::test]
-async fn datagram_only_track_names_its_origin_on_lite07() {
-	tokio::time::timeout(TEST_TIMEOUT, async {
-		let mut fixture = connect_datagram_track_on("moq-lite-07-wip").await;
-
-		for sequence in 0.. {
-			fixture
-				.producer
-				.insert_datagram(
-					sequence,
-					Timestamp::from_millis(sequence).unwrap(),
-					bytes::Bytes::from_static(PAYLOAD),
-				)
-				.unwrap();
-			let arrived = tokio::time::timeout(Duration::from_millis(10), fixture.subscriber.recv_datagram()).await;
-			if let Ok(datagram) = arrived {
-				assert_eq!(&datagram.unwrap().unwrap().payload[..], PAYLOAD);
-				break;
-			}
-		}
-	})
-	.await
-	.expect("no datagram arrived: SUBSCRIBE_OK never named the origin");
+async fn ietf_delivers_datagrams() {
+	for version in [
+		"moq-transport-14",
+		"moq-transport-16",
+		"moq-transport-17",
+		"moq-transport-20",
+	] {
+		tokio::time::timeout(TEST_TIMEOUT, ietf_delivers_datagrams_on(version))
+			.await
+			.unwrap_or_else(|_| panic!("{version}: timed out"));
+	}
 }
 
-/// MoQ Transport has no datagram mapping: groups still flow, inserted datagrams do not.
-#[tokio::test]
-async fn ietf_does_not_deliver_datagrams() {
-	tokio::time::timeout(TEST_TIMEOUT, async {
-		let publisher = produce_origin(1);
-		let consumer_origin = produce_origin(2);
+async fn ietf_delivers_datagrams_on(version: &str) {
+	let publisher = produce_origin(1);
+	let consumer_origin = produce_origin(2);
 
-		let broadcast = publisher.create_broadcast("bench").unwrap();
-		let mut producer = broadcast.create_track("datagrams", None).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher.create_broadcast("bench").unwrap();
+	let mut producer = broadcast.create_track("datagrams", None).unwrap();
+	broadcast.announce(Default::default()).unwrap();
 
-		let mut options = MockConnectOptions::new("moq-transport-19".parse::<Version>().unwrap());
-		options.server_publish = Some(publisher.consume());
-		options.client_subscribe = Some(consumer_origin.clone());
-		let _pair = connect_mock(options).await;
+	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(consumer_origin.clone());
+	let _pair = connect_mock(options).await;
 
-		let consumer = consumer_origin.consume();
-		consumer.routed("bench").await.unwrap();
-		let remote = consumer.request_broadcast("bench").await.unwrap();
-		let mut subscriber = remote.track("datagrams").unwrap().subscribe(None).await.unwrap();
+	let consumer = consumer_origin.consume();
+	consumer.routed("bench").await.unwrap();
+	let remote = consumer.request_broadcast("bench").await.unwrap();
+	let mut subscriber = remote.track("datagrams").unwrap().subscribe(None).await.unwrap();
 
-		producer
-			.write_frame(Timestamp::from_millis(0).unwrap(), &b"before"[..])
-			.unwrap();
-		let before = subscriber.recv_group().await.unwrap().unwrap();
-		assert_eq!(before.sequence, 0);
+	// A group first, so the subscription's alias is bound before any datagram lands.
+	producer
+		.write_frame(Timestamp::from_millis(0).unwrap(), &b"before"[..])
+		.unwrap();
+	let mut before = subscriber.recv_group().await.unwrap().unwrap();
+	assert_eq!(before.sequence, 0, "{version}");
+	// Drafts without a track timescale stamp objects on arrival, datagrams included.
+	let stamped = before.next_frame().await.unwrap().unwrap().timestamp.value() == 0;
 
-		producer
-			.insert_datagram(
-				0,
-				Timestamp::from_millis(7).unwrap(),
-				bytes::Bytes::from_static(PAYLOAD),
-			)
-			.unwrap();
-		producer
-			.write_frame(Timestamp::from_millis(1).unwrap(), &b"after"[..])
-			.unwrap();
-		let after = subscriber.recv_group().await.unwrap().unwrap();
-		assert_eq!(after.sequence, 1);
-
-		assert!(
-			subscriber.recv_datagram().now_or_never().is_none(),
-			"MoQ Transport must not map datagrams"
+	producer
+		.insert_datagram(
+			5,
+			Timestamp::from_millis(7).unwrap(),
+			bytes::Bytes::from_static(PAYLOAD),
+		)
+		.unwrap();
+	let datagram = subscriber.recv_datagram().await.unwrap().unwrap();
+	assert_eq!(datagram.sequence, 5, "{version}: the relay must not renumber");
+	assert_eq!(&datagram.payload[..], PAYLOAD, "{version}");
+	if stamped {
+		let expected = Timestamp::from_millis(7).unwrap();
+		assert_eq!(
+			datagram.timestamp.convert(expected.scale()).unwrap(),
+			expected,
+			"{version}"
 		);
-	})
-	.await
-	.expect("timed out");
+	}
+
+	// The group sequence continues past the datagram.
+	producer
+		.write_frame(Timestamp::from_millis(8).unwrap(), &b"after"[..])
+		.unwrap();
+	let after = subscriber.recv_group().await.unwrap().unwrap();
+	assert_eq!(after.sequence, 6, "{version}");
 }
 
-/// Explicit insert keeps the origin sequence on the lite wire, including a gap. The first
-/// datagram resolves SUBSCRIBE_START, so the later one is above it (one below is dropped).
+/// Explicit insert keeps the origin sequence on the lite wire, including a gap.
 #[tokio::test]
 async fn inserted_sequences_survive_the_lite_wire() {
 	tokio::time::timeout(TEST_TIMEOUT, async {
@@ -201,32 +188,32 @@ async fn inserted_sequences_survive_the_lite_wire() {
 		fixture
 			.producer
 			.insert_datagram(
-				2,
-				Timestamp::from_millis(2).unwrap(),
+				5,
+				Timestamp::from_millis(5).unwrap(),
 				bytes::Bytes::from_static(PAYLOAD),
 			)
 			.unwrap();
 		fixture
 			.producer
 			.insert_datagram(
-				5,
-				Timestamp::from_millis(5).unwrap(),
+				2,
+				Timestamp::from_millis(2).unwrap(),
 				bytes::Bytes::from_static(PAYLOAD),
 			)
 			.unwrap();
 
 		let first = fixture.subscriber.recv_datagram().await.unwrap().unwrap();
-		assert_eq!(first.sequence, 2);
+		assert_eq!(first.sequence, 5);
 		assert_eq!(
 			first.timestamp,
-			Timestamp::from_millis(2).unwrap(),
+			Timestamp::from_millis(5).unwrap(),
 			"timestamp did not survive the wire"
 		);
 		assert_eq!(&first.payload[..], PAYLOAD);
 
 		let second = fixture.subscriber.recv_datagram().await.unwrap().unwrap();
-		assert_eq!(second.sequence, 5);
-		assert_eq!(second.timestamp, Timestamp::from_millis(5).unwrap());
+		assert_eq!(second.sequence, 2);
+		assert_eq!(second.timestamp, Timestamp::from_millis(2).unwrap());
 		assert_eq!(&second.payload[..], PAYLOAD);
 	})
 	.await

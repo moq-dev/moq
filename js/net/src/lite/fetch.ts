@@ -1,8 +1,7 @@
-import { type Hop, HopSchema } from "../hop.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
-import { hasFrameBounds, hasOrigin, Version } from "./version.ts";
+import { hasFrameBounds, Version } from "./version.ts";
 
 function guardFetch(version: Version) {
 	switch (version) {
@@ -101,28 +100,5 @@ export class Fetch {
 	static async decode(r: Reader, version: Version): Promise<Fetch> {
 		guardFetch(version);
 		return Message.decode(r, (r) => Fetch.#decode(r, version));
-	}
-}
-
-/**
- * FETCH_OK: the publisher's answer on a Fetch Stream, ahead of the frames, naming the
- * origin serving the group (the Hop ID a relay stitches failover on). Draft-07+ only;
- * older versions answer with the frames alone.
- */
-export class FetchOk {
-	origin: Hop;
-
-	constructor(origin: Hop) {
-		this.origin = origin;
-	}
-
-	async encode(w: Writer, version: Version): Promise<void> {
-		if (!hasOrigin(version)) throw new Error("FETCH_OK not supported for this version");
-		return Message.encode(w, (w) => w.u62(this.origin));
-	}
-
-	static async decode(r: Reader, version: Version): Promise<FetchOk> {
-		if (!hasOrigin(version)) throw new Error("FETCH_OK not supported for this version");
-		return Message.decode(r, async (r) => new FetchOk(HopSchema.parse(await r.u62())));
 	}
 }

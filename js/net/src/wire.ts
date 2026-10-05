@@ -7,10 +7,11 @@
  *
  * @module
  */
-import type { Dispose, Getter } from "@moq/signals";
+import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type * as broadcast from "./broadcast.ts";
+import type { Drain } from "./connection/goaway.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
-import type { Hop, Route } from "./hop.ts";
+import type { Route } from "./hop.ts";
 import type * as origin from "./origin.ts";
 import type * as Path from "./path.ts";
 import type * as track from "./track.ts";
@@ -35,16 +36,19 @@ export interface OriginProducer {
 	): origin.Dynamic;
 	attach(discovery: boolean): Dispose;
 	expect(): Dispose;
+	/**
+	 * Hold the live marker of announcement streams opened now that overlap `prefix`, until the
+	 * peer's initial set under it lands.
+	 */
+	replaying(prefix: Path.Valid): Dispose;
 	readonly requests: Getter<ReadonlyMap<Path.Valid, origin.RequestSlot> | undefined>;
-	changed(): Promise<unknown>;
+	changed(): GetPromise<unknown>;
 	answer(path: Path.Valid, front: broadcast.Consumer): Dispose | undefined;
 	routes(path: Path.Valid): boolean;
 }
 
 /** The protocol-facing operations behind an origin consumer. */
 export interface OriginConsumer {
-	/** The origin's identity, named in SUBSCRIBE_START and FETCH_OK for everything it serves. */
-	readonly hop: Hop;
 	routes(path: Path.Valid): boolean;
 	readonly broadcasts: Getter<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>;
 	readonly advertised: Getter<Advertisements | undefined>;
@@ -67,9 +71,11 @@ export interface Advertised {
  */
 export type Advertisements = ReadonlyMap<Path.Valid, readonly Advertised[]>;
 
-/** The protocol-facing operation behind an established session. */
+/** The protocol-facing operations behind an established session. */
 export interface Established {
 	consume(path: Path.Valid): broadcast.Consumer;
+	/** Settles with the peer's GOAWAY; the session keeps serving until it closes. */
+	readonly goaway: GetPromise<Drain>;
 }
 
 type View = Broadcast | OriginProducer | OriginConsumer | Established;

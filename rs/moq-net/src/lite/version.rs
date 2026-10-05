@@ -39,6 +39,18 @@ impl Version {
 		}
 	}
 
+	/// Whether SUBSCRIBE_OK carries the publisher's largest (group, frame), which a
+	/// subscriber takes as where the live feed is. Added in lite-07; an earlier answer
+	/// says nothing about the live edge.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_largest(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether the version has lite-05's dedicated TRACK stream and related stream
 	/// layout changes.
 	///
@@ -184,6 +196,15 @@ impl Version {
 		}
 	}
 
+	/// Whether subscription completion waits for the subscriber's FIN.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn waits_for_subscriber_fin(self) -> bool {
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether ANNOUNCE_REQUEST carries the hidden opt-in. Added in lite-07; older
 	/// requests decode as not opted in.
 	#[allow(clippy::match_like_matches_macro)]
@@ -200,18 +221,6 @@ impl Version {
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_announce_compression(self) -> bool {
 		// Match form so future versions default forward (AGENTS.md convention).
-		match self {
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
-			_ => true,
-		}
-	}
-
-	/// Whether SUBSCRIBE_OK and FETCH_OK name the origin serving the request, which is
-	/// what a relay stitches a failover on. Added in lite-07 (with FETCH_OK itself);
-	/// older versions leave a relay the route's first hop.
-	#[allow(clippy::match_like_matches_macro)]
-	pub(crate) fn has_origin(self) -> bool {
-		// Match form so future versions default forward (CLAUDE.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
 			_ => true,

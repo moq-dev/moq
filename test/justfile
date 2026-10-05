@@ -29,7 +29,7 @@ harness:
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
 # sanity check). `interop --all` runs the full matrix: rust + python + go +
-# browser publish; everyone subscribes (incl. native node/bun JS, the C libmoq
+# browser publish; everyone subscribes (incl. native node/bun JS, the moq-c C
 # client, and the GStreamer moqsrc plugin). Other flags pass through, e.g.
 # `just test interop --publishers rust,python --subscribers rust,c`.
 # Both runs first check js/net's varints against moq-net's encoder at every size boundary,
@@ -67,6 +67,27 @@ media *args:
 drill *args:
     just rs test -p moq-relay --test drills "$@"
 
+# Plays a tone in headless Chromium through moq-shaper and grades what the listener
+# heard (underruns, skip-aheads, silence, the resolved delay) against
+# audio-quality/budgets.json. The full matrix is 24 rows at 60 s; nightly runs it with
+# --enforce. Narrow it with `--profiles mild --codecs opus --rings plain --duration 20`.
+# `--replays` grades only the recorded traces, in seconds, as PRs touching the player do.
+# See audio-quality/README.md.
+
+# Grade browser audio playout over an impaired path.
+[positional-arguments]
+audio-quality *args:
+    ./audio-quality/run.sh "$@"
+
+# Records the arrival traces under audio-quality/traces/ that the replay rows grade: the
+# public relay's bbb.hang, a local relay's AAC tone, and a browser microphone through the
+# public relay. Needs the network. Narrow it with `--lanes relay-bbb --duration 35`.
+
+# Re-record the audio quality arrival traces.
+[positional-arguments]
+audio-quality-record *args:
+    ./audio-quality/record.sh "$@"
+
 # Removes one recovery behavior at a time in a disposable copy of the tree and
 # requires the drill covering it to fail, for the reason the mutation names. The
 # checkout is never modified. `--list` shows the mutations.
@@ -96,6 +117,14 @@ ts *args:
 ts-eit *args:
     ./ts/eit-roundtrip.sh "$@"
 
+# A JS viewer watching a live track through a relay that drains (SIGTERM, after
+# a stand-in for DNS stops pointing at it) migrates to a second relay behind the
+# same name without a dropped group. See drain/README.md.
+
+# Relay drain migration, end to end.
+drain *args:
+    ./drain/run.sh {{ args }}
+
 # Runs the @moq/wasm bindings in headless Chromium against a real relay, one per
 # protocol flavour. The crate is `#![cfg(target_arch = "wasm32")]`, so nothing in
 # `just check` or `just rs wasm` gets past compiling it. See wasm/README.md.
@@ -104,6 +133,10 @@ ts-eit *args:
 [positional-arguments]
 wasm *args:
     ./wasm/run.sh "$@"
+
+# Optional publisher retention across Rust/JS sessions through a Rust relay.
+max-age:
+    cargo nextest run --locked -p moq-tokio --test max_age --run-ignored all
 
 # Cross-language subscription termination over in-memory transports.
 bare-fin:
