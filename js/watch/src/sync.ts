@@ -294,7 +294,7 @@ export class Sync {
 			};
 			const timer = setTimeout(() => wake(true), ms);
 			const disposes = [
-				this.#out.instant.changed(() => wake(false)),
+				this.in.delay.changed(() => wake(false)),
 				this.#out.delay.changed(() => wake(false)),
 				this.#out.reference.changed(() => wake(false)),
 			];
