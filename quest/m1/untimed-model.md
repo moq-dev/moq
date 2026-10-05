@@ -40,10 +40,11 @@ content out, and the pool's wall-clock expiry is the bound).
 
 Decided (2026-10-02, planning this split):
 
-- Superseded 2026-10-05: an IETF object carrying its own TIMESCALE and
-  Timestamp no longer makes it timed on a track accepted without TIMESCALE;
-  the track decides. imquic's LOC examples publish this way, so they arrive
-  untimed.
+- Superseded 2026-10-05 by [Typed timedness](/quest/m1/typed-timedness.md):
+  on a track accepted without TIMESCALE, an object's own object-scope
+  TIMESCALE and Timestamp are ignored, and the track stays untimed. imquic's
+  LOC examples publish this way, so they arrive untimed and keep playing.
+  Object-scope units are never applied, on any track.
 - A legacy or LOC end marker (an empty frame) that arrives untimed is ignored.
   The group then ends without a precise end bound. Its frames still play
   from their payload timestamps, and only the last frame's duration is
@@ -101,14 +102,17 @@ Interop facts (2026-10-02):
 - In the community runner:
   - moxygen sends neither TIMESCALE nor Timestamp, so all its objects become
     untimed.
-  - imquic uses the object scope.
+  - imquic uses the object scope, which is ignored, so its objects arrive
+    untimed.
   - libquicr sends neither.
   - MOQtail is undetermined.
 
-Draft: rewrite the arrival-time mandates in
-`draft-lcurley-moq-timestamp.md` (no TIMESCALE, before track properties
-arrive, an object without a Timestamp) as "untimed". An untimed object has no
-media time, is never media-stale, starts at the latest group, and is
+Draft: [Typed timedness](/quest/m1/typed-timedness.md) rewrites the
+per-object rules in `draft-lcurley-moq-timestamp.md` (every object on a
+TIMESCALE track is stamped, a missing Timestamp is malformed, object-scope
+TIMESCALE is ignored). Rewrite the remaining arrival-time mandates (no
+TIMESCALE, before track properties arrive) as "untimed". An untimed object
+has no media time, is never media-stale, starts at the latest group, and is
 forwarded as untimed.
 
 Tests: each receive path (lite before lite-05, IETF subgroup, fetch and

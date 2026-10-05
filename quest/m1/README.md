@@ -75,6 +75,7 @@ QUIC studies there on that rule.
 - [Ship capture and playback](/quest/m1/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
 - [Install with moq.sh](/quest/m1/moq-sh.md) - `curl -fsSL https://moq.sh | sh` installs or upgrades the released `moq` on macOS and Linux
 - [Import at the first frame](/quest/m1/import-first-frame.md) - fMP4, MKV, and MPEG-TS imports publish the catalog at their first frame, so a lone importer's root clock never moves
+- [HLS first catalog](/quest/m1/hls-first-catalog.md) - moq-hls import's first catalog lists every rendition from the master playlist, not only the first
 - [CMAF frame timestamp](/quest/m1/cmaf-frame-timestamp.md) - CMAF decoders time samples from the moq-lite frame timestamp, using `tfdt` only within the fragment
 - [Shared import clock](/quest/m1/shared-clock.md) - an importer joining a clock already in use offsets its PTS instead of moving it, so captures and imports share one timeline
 - [Publishing never invents a timestamp](/quest/m1/publish-timestamp.md) - no Rust or binding publish API fills in a timestamp; an untimed payload goes out untimed
