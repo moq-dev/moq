@@ -80,6 +80,20 @@ export class Retry {
 		return retry;
 	}
 
+	/**
+	 * Classify a `getUserMedia` rejection, returning whether another attempt is allowed.
+	 *
+	 * Only a busy device (`NotReadableError`) or an aborted request (`AbortError`) spends budget;
+	 * anything else, including bad constraints, is terminal at once.
+	 */
+	rejected(error: unknown): boolean {
+		if (error instanceof Error && (error.name === "NotReadableError" || error.name === "AbortError")) {
+			return this.failed();
+		}
+		this.terminal();
+		return false;
+	}
+
 	/** Stop attempting this capture until its settings, device list, or permission changes. */
 	terminal(): void {
 		this.#failures = Retry.LIMIT + 1;

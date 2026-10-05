@@ -110,11 +110,7 @@ export class Microphone {
 				stream = await effect.race(media);
 			} catch (error) {
 				if (effect.abort.aborted) return;
-				if (error instanceof Error && (error.name === "NotReadableError" || error.name === "AbortError")) {
-					if (this.#retry.failed()) return;
-				} else {
-					this.#retry.terminal();
-				}
+				if (this.#retry.rejected(error)) return;
 				this.#out.error.set(error instanceof Error ? error : new Error(String(error)));
 				return;
 			}
