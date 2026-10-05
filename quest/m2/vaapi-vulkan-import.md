@@ -18,21 +18,37 @@ added this quest): Intel uses VA-API, since ANV on Arrow Lake has no Vulkan
 encode on Mesa 26.0.8 (it is in 26.2 behind `ANV_DEBUG`). H.264 is enough for
 the proof; H.265 on VA-API belongs to [VAAPI encode and decode](/quest/m2/video-vaapi.md).
 
-Today `encode/backend/vaapi.rs` takes a `Surface::DmaBuf` and waits for the
-producer through an implicit-fence poll with a 500 ms timeout. It has no
-timeline or sync_file import, so an explicit-sync producer races it.
+Today the VA-API encoder takes a `Surface::DmaBuf` and waits for the producer
+through an implicit-fence poll with a 500 ms timeout (`DMA_BUF_FENCE_TIMEOUT`
+in `frame.rs`, reached through `frame/vaapi.rs`). It has no timeline or
+sync_file import, so an explicit-sync producer races it.
 
 - Synchronization: wait on the producer's ready value before VA-API reads the
   buffer, and signal the done value once the encode has read it, so slots
-  recycle as they do for NVENC. Two candidates: a `vkWaitSemaphores` on a
-  Vulkan device on the same GPU, or a sync_file exported from the timeline and
-  imported into the DMA-BUF (`DMA_BUF_IOCTL_IMPORT_SYNC_FILE`) so the existing
-  implicit path holds. Pick by what the test shows; neither may time out into
-  an encode of a half-written buffer.
-- Device: VA-API has no device UUID. Map the surface's UUID to a render node
-  through `VK_EXT_physical_device_drm`, instead of moq-vaapi's default of the
-  first render node (`MOQ_VAAPI_DEVICE` stays an override). On the test host
-  the iGPU is `renderD128` and an AMD card is `renderD129`.
+  recycle as they do for NVENC. Two candidates:
+  - a `vkWaitSemaphores` on a Vulkan device on the same GPU;
+  - a sync_file imported into the DMA-BUF (`DMA_BUF_IOCTL_IMPORT_SYNC_FILE`),
+    so the existing implicit path holds. A timeline cannot export `SYNC_FD`
+    (VUID-VkSemaphoreGetFdInfoKHR-handleType-03253), so this submits a wait on
+    the ready value that signals an exportable binary semaphore, and exports
+    that.
+
+  Pick by what the test shows. Neither may time out into an encode of a
+  half-written buffer.
+- Device: VA-API has no device UUID, and today moq-video's
+  `frame::vaapi::device()` picks one process-wide render node (the first that
+  probes, or `MOQ_VAAPI_DEVICE`) in a `OnceLock`. The encoder, decoder, and
+  resize share it so a DMA-BUF moves between them without a copy. Choosing a
+  node per surface makes `device()` per-node, so keep decode, resize, and
+  encode on one node per DMA-BUF. Open:
+  - map the surface's UUID to a render node with
+    `VK_EXT_physical_device_drm`, which needs a Vulkan instance on the VA-API
+    side;
+  - have the producer put the render node's `dev_t` in the surface, read from
+    its own `VK_EXT_physical_device_drm`. This is recommended: it is simpler
+    and adds a field to the [surface](/quest/m2/gpu-surface.md).
+
+  On the test host the iGPU is `renderD128` and an AMD card is `renderD129`.
 - Import the DMA-BUF with its modifier, and convert BGRA or RGBA to NV12
   through VPP. Refuse a modifier VA-API will not import rather than download.
 

@@ -31,10 +31,9 @@ added this quest):
     the value the consumer signals when it is done reading.
 - Each backend imports the image itself: CUDA for NVENC,
   [Vulkan for RADV](/quest/m2/vulkan-encode.md), and
-  [VA-API through a DMA-BUF](/quest/m2/vaapi-vulkan-import.md). An import is
-  done once per slot and cached by the backend. The slot and completion
-  recycling in `frame/vulkan.rs` stays: a slot returns to the producer only
-  after the encoder's GPU work on it has finished.
+  [VA-API through a DMA-BUF](/quest/m2/vaapi-vulkan-import.md). The slot and
+  completion recycling in `frame/vulkan.rs` stays: a slot returns to the
+  producer only after the encoder's GPU work on it has finished.
 - Selection is automatic by the surface's device. `Kind::Auto` opens the first
   backend that can import the surface on its device, matched by device and
   driver UUID. `Kind::Named` stays for overrides and tests. Rejected: the
@@ -48,7 +47,33 @@ added this quest):
   one costs.
 - Docs are rustdoc, inline. No doc.moq.dev page.
 
-What moves: `vulkan::Importer::new(cuda_ordinal)`, `cuda::Converter`, and the
+Open, found in review:
+
+- Where `Kind::Auto` learns the device. `Encoder::new` opens its backend
+  eagerly from `Config` alone, and `Config::probe` feeds a throwaway encoder a
+  synthetic I420 frame. So no surface exists at selection time, and on a host
+  with two GPUs `Auto` would open whichever backend comes first in
+  `HARDWARE`. Options:
+  - a `Config` field naming the input device by device and driver UUID
+    (recommended: `probe` and fail-fast open keep working);
+  - deferring the open to the first frame, which breaks `probe`'s
+    advertise-before-the-first-frame contract.
+
+  Either is a public API change, so record it here. The refusal test must
+  cover `Encoder::new` and `probe` as well as a frame.
+- Slot identity. Today a `Slot` exists only through the CUDA
+  `vulkan::Importer::import`, and `Slot::publish` and `Completion` wait on
+  CUDA. Lift slot identity and completion out of the CUDA importer so a
+  producer publishes a slot before any backend has imported it. Each backend
+  caches its import by that slot identity, never by fd, since a fresh or
+  dup'd fd cannot identify a slot.
+- `DmaBuf::new` takes an `Arc<dyn DmaBufFrame>`, a trait kept `pub(crate)` so
+  backend lifetimes stay private. Decide what an external producer passes
+  instead (an `OwnedFd` plus a release guard, say), and refuse
+  `download_i420` on an external buffer as `Surface::Vulkan` already refuses
+  readback.
+
+What moves: `vulkan::Importer::new(ordinal, capacity)`, `cuda::Converter`, and the
 caller's `Surface::Cuda` construction go behind the NVENC backend for this
 path. Keep public only what another consumer still needs (NVDEC output stays
 `Surface::Cuda`). This is a breaking change on `main`; see
@@ -56,8 +81,9 @@ path. Keep public only what another consumer still needs (NVDEC output stays
 
 Tests:
 
-- Unit-test selection without a GPU: a surface whose device no backend can
-  import is refused with an error naming the device, never a CPU fallback.
+- Unit-test selection without a GPU: a device no backend can import is
+  refused with an error naming the device, never a CPU fallback, at
+  `Encoder::new` and `probe` as well as at encode.
 - The existing `vulkan_cuda_` hardware tests move onto the new surface,
   `#[ignore = "requires ..."]`, following [GPU CI](/quest/m1/gpu-ci.md)'s
   convention.
