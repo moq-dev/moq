@@ -24,11 +24,14 @@ added this quest):
 - The surface is a neutral external image. Rejected: an encoder-owned input
   the producer renders into (it flips the producer's protocol), and offering
   both. `Surface::Vulkan` is no longer gated on `nvidia` and describes:
-  - the handle type: `OPAQUE_FD`, or `DMA_BUF` with a DRM format modifier;
-  - the format and size;
+  - the memory handle: `OPAQUE_FD`, or `DMA_BUF` with a DRM format modifier;
+  - the format, size, and allocation size (an importer picks its own memory
+    type from the handle's properties);
   - the device and driver UUID;
-  - the timeline: the value the producer signals when the image is ready and
-    the value the consumer signals when it is done reading.
+  - the timeline: an `OPAQUE_FD` timeline semaphore handle, the value the
+    producer signals when the image is ready, and the value the consumer
+    signals when it is done reading. Both handles belong to the slot and live
+    as long as it does, as `vulkan::Handles` do today.
 - Each backend imports the image itself: CUDA for NVENC,
   [Vulkan for RADV](/quest/m2/vulkan-encode.md), and
   [VA-API through a DMA-BUF](/quest/m2/vaapi-vulkan-import.md). The slot and
