@@ -49,17 +49,14 @@ them:
   [QUIC quests](/quest/m1/quic/README.md) wait for this line and land
   in-tree.
 
-This README's own work: delete moq-dev/noq's `moq-sync.yml`, mark its README
-frozen, and document advisory triage in `rs/moq-quic/README.md`. `cargo audit`
-cannot match renamed crates, so the triage is: watch quinn-rs/quinn's security
-advisories and releases, check each fix against `moq-quic`, and port it with
-its regression test. Every carried change in moq-dev/noq's `CHANGELOG-MOQ.md`
+This README's own work: delete moq-dev/noq's `moq-sync.yml` and mark its
+README frozen. Advisory triage is documented in `rs/moq-quic/README.md`.
+Every carried change in moq-dev/noq's `CHANGELOG-MOQ.md`
 is either ported by a child quest or recorded as not applicable in the
 [switch](/quest/m1/quic/fork/switch.md) PR.
 
 ## Required
 
-- [Import quinn](/quest/m1/quic/fork/import.md) - quinn's three crates build and test in-tree as `moq-quic*`, verbatim at a recorded commit, with no consumer yet
 - [Port BBR3](/quest/m1/quic/fork/bbr3.md) - the fork's corrected BBR3 and controller callbacks run on `moq-quic` as the default controller
 - [Lazy stream slots](/quest/m1/quic/fork/stream-slots.md) - relay memory on `moq-quic` matches `moq-noq`
 - [Switch](/quest/m1/quic/fork/switch.md) - `web-transport-moq`, moq-tokio, and moq-uring run on `moq-quic`, and `moq-noq*` is gone

@@ -27,6 +27,5 @@ ported (with its quest) or not applicable (with the reason).
 
 ## Required
 
-- [Import quinn](/quest/m1/quic/fork/import.md)
 - [Port BBR3](/quest/m1/quic/fork/bbr3.md)
 - [Lazy stream slots](/quest/m1/quic/fork/stream-slots.md)
