@@ -70,7 +70,7 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
   (extending the `upstream` link mark in `doc/bin/relay/cluster.md`).
 - A plain client with one link advertises a ROUTE for itself and the
   ANNOUNCEs it publishes; its node id is scoped to its session (shared
-  identity across sessions is [Route trust](/quest/m1/cluster-routing/route-trust.md)).
+  identity across sessions is [Route trust](/quest/m3/route-trust.md)).
   A relay advertising routes to a client sends them as usual; node ids reveal
   nothing about the backbone.
 - Every hop re-selects; SUBSCRIBE names no origin, and the reply names none
@@ -107,7 +107,7 @@ refused.
 
 Wire: `drafts/draft-lcurley-moq-lite.md` in the same PR, and `js/net`
 encodes, decodes, and resolves it (JS transit stays in
-[P2P](/quest/m2/p2p/README.md)). Public API: the route-change surface on
+[P2P](/quest/m3/p2p/README.md)). Public API: the route-change surface on
 `broadcast::Route` and its bindings will likely change; report it. This may
 split at start (Rust and draft, then JS), as long as both land in one
 release.

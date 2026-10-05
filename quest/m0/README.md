@@ -20,10 +20,12 @@ done. moq.pro pins this repository's `release` line, so the release gate below
 also keeps #4741 from reaching it early.
 The Pronto GPU integration lives in moq.pro.
 
-The branch flip ranks first: it is a short cutover that every later PR
-targets. Relay hardening: IETF interop leads the rest, since only those
-quests block Seattle. IETF stream types came from m1 in the 2026-09-30 audit
-because a session ended by legal input is exactly what Seattle would hit. The DoS hardening
+The branch flip is done except its #4605 backport to `release`; the
+Cloudflare switch waits on the maintainer as a condition quest. Relay
+hardening: [REQUEST_OK accepts LARGEST_OBJECT](/quest/m0/ietf-largest-object.md)
+leads the rest, since it is the one known case left of legal moq-transport
+input closing a session, which Seattle would hit. The 2026-10-05 audit split
+it from the m2 validator findings, which block nothing. The DoS hardening
 from an external review on 2026-09-29, verified against `main`, stays in m0
 as security work. Its quests describe fixes, not exploits.
 
@@ -48,15 +50,15 @@ a published `@moq/watch` break.
 ## Required
 
 - [Branch flip](/quest/m0/branch-flip.md) - `dev` becomes the default `main` trunk and today's `main` becomes `release`, where publishing runs
+- [Cloudflare builds track release](/quest/m0/cloudflare-release.md) - condition: the maintainer points the docs and demo builds at `release`
+- [REQUEST_OK accepts LARGEST_OBJECT](/quest/m0/ietf-largest-object.md) - a conformant moq-transport peer's REQUEST_OK no longer closes the session, ahead of Seattle
 - [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
 - [noq reassembly cap](/quest/m0/noq-reassembly-cap.md) - iroh's upstream noq carries quinn's stream reassembly cap, once n0 releases it
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
-- [Shared fronts](/quest/m0/shared-fronts.md) - viewer sessions share a front, so fronts scale with peers, not viewers
+- [Shared fronts](/quest/m0/shared-fronts.md) - viewer sessions share a front, so fronts scale with peers, not viewers, and viewer churn no longer leaks fronts
 - [Wildcard](/quest/m0/wildcard/README.md) - a relay resolves subscriptions against advertised prefixes, a service claims the prefix it could serve and refuses the rest instead of enumerating broadcasts, and the browser player treats a covering claim as availability
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh `@<uuidv7>` epoch, viewers follow the newest live one, and bare names still resolve on every version
 - [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
-- [Opus DTX](/quest/m0/opus-dtx.md) - voice audio publishes without DTX, so its timeline follows the capture clock through silence
-- [Delay rebuild](/quest/m0/watch-delay-rebuild.md) - a numeric audio delay change keeps the decoder and its ring
 
 ## Related
 

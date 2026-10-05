@@ -100,7 +100,7 @@ routes independently of Rust. The slopes decide between a reversed-segment
 index and dropping suffix shapes from the quest.
 
 A non-prefix advertisement needs authorizing:
-[advertise auth](/quest/m2/processor/advertise-auth.md) scopes are prefix-only
+[advertise auth](/quest/m3/processor/advertise-auth.md) scopes are prefix-only
 today, and this quest extends them to the new shapes. Token patterns
 (`moq-pattern`, `moq_auth::Claims`) already match suffixes and do not change.
 

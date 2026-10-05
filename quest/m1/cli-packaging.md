@@ -49,4 +49,5 @@ its remaining work was one release feature flag and a doc note.
 
 ## Required
 
+- [Capture by default](/quest/m1/capture-default.md) - also changes moq-cli's `capture` feature; land it first
 - [Audio capture without runtime system libraries](/quest/m1/capture-alsa-link.md) - the microphone path must start without system audio libraries before every distribution can ship it

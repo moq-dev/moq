@@ -68,9 +68,13 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 	match stage {
 		Stage::Unanswered => {
 			drop(waiting);
-			tokio::time::timeout(Duration::from_secs(5), kio::wait(|waiter| request.poll_unused(waiter)))
-				.await
-				.unwrap_or_else(|_| panic!("{ctx}: the publisher's fetch is still wanted"));
+			tokio::time::timeout(
+				Duration::from_secs(5),
+				kio::wait(|waiter| request.demand().poll_unused(waiter)),
+			)
+			.await
+			.unwrap_or_else(|_| panic!("{ctx}: the publisher's fetch is still wanted"))
+			.expect("the pending fetch is still open");
 		}
 		Stage::MidResponse => {
 			let mut group = request.accept(None).unwrap();
@@ -82,7 +86,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 			drop(fetched);
 
 			// The publisher stops serving the group: nobody reads it any more.
-			tokio::time::timeout(Duration::from_secs(5), group.unused())
+			tokio::time::timeout(Duration::from_secs(5), group.demand().unused())
 				.await
 				.unwrap_or_else(|_| panic!("{ctx}: the publisher still serves the fetch"))
 				.unwrap();

@@ -1917,7 +1917,7 @@ where
 					else {
 						return Poll::Ready(Setup::Gone);
 					};
-					if pending.poll_unused(waiter).is_ready() {
+					if pending.demand().poll_unused(waiter).is_ready() {
 						return Poll::Ready(Setup::Unused);
 					}
 					Poll::Pending
@@ -3456,7 +3456,7 @@ where
 					if let Poll::Ready(res) = waiter.poll_future(response.as_mut()) {
 						return Poll::Ready(Some(res));
 					}
-					request.poll_unused(waiter).map(|()| None)
+					request.demand().poll_unused(waiter).map(|_| None)
 				})
 				.await
 			}

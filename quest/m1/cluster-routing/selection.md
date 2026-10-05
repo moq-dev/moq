@@ -26,6 +26,14 @@ Decided:
   per [Wildcard](/quest/m0/wildcard/README.md)'s double-claim rule. So a
   relay never needs to tell claim output from a redundant pair.
 
+Recorded in the 2026-10-05 audit: part of this is already built. The
+wildcard line's `route_order` hash is keyed on the requested path, the HRW
+spread below, and #4741 made a concrete path one source with mid-group
+resume. Once [Wildcard](/quest/m0/wildcard/README.md) (#4403) lands, cut this
+quest down to what remains: terminal refusal (see its
+[refusal child](/quest/m0/wildcard/refusal-final.md)), the HRW split test,
+the same-path failover test, and upstream-link spread.
+
 Candidate mechanics:
 
 - Route selection stays `route_order` over the routes a relay holds: longest

@@ -46,7 +46,12 @@ making the whole QUIC connection public.
 
 `RESET_STREAM_AT` is a QUIC extension, not a qmux-specific frame. Once the
 reliable-reset quest lands, make qmux drive that shared send and receive state
-instead of retaining the prototype's local parsing and transitions.
+instead of retaining the prototype's local parsing and transitions. Because
+qmux runs over a reliable ordered transport, serialization acknowledges the
+committed prefix immediately, but the receiver must still delay the reset
+until that prefix is available. Remove the qmux prototype's local
+`RESET_STREAM_AT` state once the shared core owns it (moved here from
+reliable reset in the 2026-10-05 audit).
 
 Carry the hierarchical send groups from the scheduler quest into qmux's
 record writer. Qmux over TCP, TLS, WebSocket, Unix sockets, and in-memory
