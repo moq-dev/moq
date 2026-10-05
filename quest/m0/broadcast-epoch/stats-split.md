@@ -29,13 +29,15 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
   the moment it has no entries (`rs/moq-stats/src/produce.rs`). Instead it
   stays announced for the stats linger (`quest/m0/stats-linger.md`, an m0
   quest planned in [#4843](https://github.com/moq-dev/moq/pull/4843); list it
-  under Required once it lands) after its last entry ends, so a group that returns within the linger
-  continues its totals. After the linger it unannounces and drops its
+  under Related once it lands, not Required, so it does not gate the release)
+  after its last entry ends, so a group that returns within the linger
+  continues its totals. A zero linger is valid: a returning group then always
+  takes a new epoch. After the linger it unannounces and drops its
   totals; a return announces under a new [epoch](/quest/m0/broadcast-epoch/stats-epoch.md)
-  counted from zero. Totals are cumulative, so a missed middle frame costs
-  nothing, but a reader that misses a group's last frame before the
-  unannounce loses that epoch's tail; document that, and note that billing
-  relies on the aggregator's grace fold to cover it. Memory is bounded by active and
+  counted from zero. Totals are cumulative and a lingering group's frames all
+  repeat its final totals, so a reader that misses every frame across the
+  linger loses that epoch's tail; billing under-bills by that tail,
+  consistent with the 0-bill baseline. Document that. Memory is bounded by active and
   lingering groups. Test two groups sharing a tier, a group returning within
   the linger (same epoch, totals continue), and one returning after it (new
   epoch from zero).

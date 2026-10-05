@@ -17,7 +17,8 @@ a broadcast name or the group numbers a relay cached under it.
   counted from zero. Why: a producer never holds an idle group's state, so its
   memory is bounded by active and lingering groups, and readers see every
   reset as a new path rather than detecting one. The cost: a reader that
-  misses a group's last frame before the unannounce loses those increments.
+  misses every frame across the linger loses that epoch's tail; billing
+  under-bills by that tail, consistent with the 0-bill baseline.
   At depth 0 the single broadcast never unannounces, so its epoch still lasts
   the producer's life.
 - [#4739](https://github.com/moq-dev/moq/pull/4739)'s original commits are
