@@ -134,15 +134,15 @@ for (const [alpn, version] of [
 	});
 }
 
-// Hold the FIN acknowledgement of every unidirectional stream `transport` opens once enabled,
-// after the bytes and FIN reached the peer: a group stream whose tail is still in flight.
-function holdUniFins(transport: MockTransport) {
+// Once enabled, hold the FIN acknowledgement of every stream `transport` writes on (unidirectional
+// streams it opens, or bidirectional streams the peer opens) after the bytes and FIN reached the
+// peer: a group stream or withdrawal whose tail is still in flight.
+function holdFins(transport: MockTransport, streams: "uni" | "incoming-bidi") {
 	const reached = Promise.withResolvers<void>();
 	const release = Promise.withResolvers<void>();
 	let enabled = false;
-	const create = transport.createUnidirectionalStream.bind(transport);
-	transport.createUnidirectionalStream = async (options) => {
-		const writer = (await create(options)).getWriter();
+	const wrap = (writable: WritableStream<Uint8Array>) => {
+		const writer = writable.getWriter();
 		return new WritableStream<Uint8Array>({
 			write: (bytes) => writer.write(bytes),
 			abort: (reason) => writer.abort(reason),
@@ -154,6 +154,20 @@ function holdUniFins(transport: MockTransport) {
 			},
 		});
 	};
+	if (streams === "uni") {
+		const create = transport.createUnidirectionalStream.bind(transport);
+		transport.createUnidirectionalStream = async (options) => wrap(await create(options));
+	} else {
+		Object.defineProperty(transport, "incomingBidirectionalStreams", {
+			value: transport.incomingBidirectionalStreams.pipeThrough(
+				new TransformStream<WebTransportBidirectionalStream, WebTransportBidirectionalStream>({
+					transform(stream, controller) {
+						controller.enqueue({ readable: stream.readable, writable: wrap(stream.writable) });
+					},
+				}),
+			),
+		});
+	}
 	return {
 		reached: reached.promise,
 		enable: () => {
@@ -190,7 +204,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 	// A publisher that finishes a track and closes must not cut the final group short.
 	test(`close delivers a finished track's final group over ${alpn}`, async () => {
 		const pair = createMockTransportPair(alpn);
-		const fin = holdUniFins(pair.server);
+		const fin = holdFins(pair.server, "uni");
 		const origin = new Producer();
 		const broadcast = origin.createBroadcast(Path.from("room"));
 		broadcast.announce();
@@ -339,5 +353,72 @@ test("abort during the close drain ends the session at once", async () => {
 	} finally {
 		deadline.restore();
 		served.cleanup();
+	}
+});
+
+// A request that arrives while the withdrawals are still in flight is owed too, even though
+// nothing was owed when close began.
+test("close waits for a request served while withdrawals are in flight", async () => {
+	const deadline = mockDeadline();
+	const version = Version.DRAFT_07;
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const fin = holdFins(pair.server, "incoming-bidi");
+	const source = new Producer();
+	const destination = new Producer();
+	const broadcast = source.createBroadcast(Path.from("room"));
+	broadcast.announce();
+	const producer = broadcast.createTrack("video");
+	const group = producer.appendGroup();
+	group.writeString("last");
+	group.close();
+	const url = new URL("https://localhost/test");
+	const [client, server] = await Promise.all([
+		connect({ url, transport: pair.client, consume: destination }),
+		accept({ url, transport: pair.server, publish: source.consume() }),
+	]);
+	const announced = destination.announced();
+	let closed = false;
+	void pair.server.closed.then(() => {
+		closed = true;
+	});
+	try {
+		expect((await announced.next())?.kind).toBe("start");
+		expect((await announced.next())?.kind).toBe("live");
+
+		fin.enable();
+		const closing = server.close();
+		await fin.reached;
+
+		const subscriber = await Stream.open(pair.client, { version });
+		await subscriber.writer.u53(StreamId.Subscribe);
+		await new Subscribe({
+			id: 0n,
+			broadcast: Path.from("room"),
+			track: "video",
+			priority: 0,
+			maxAge: 10_000,
+			startGroup: 0,
+		}).encode(subscriber.writer, version);
+		expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
+		producer.close();
+		await subscriber.reader.readAll();
+
+		// The withdrawal completes, but the subscription still waits for the subscriber's FIN.
+		fin.release();
+		await settle();
+		expect(closed).toBe(false);
+
+		subscriber.writer.close();
+		await closing;
+		expect(closed).toBe(true);
+	} finally {
+		deadline.restore();
+		fin.release();
+		client.abort();
+		server.abort();
+		announced.close();
+		broadcast.close();
+		source.close();
+		destination.close();
 	}
 });

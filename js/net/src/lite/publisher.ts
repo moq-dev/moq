@@ -1296,10 +1296,10 @@ export class Publisher {
 	 * @internal
 	 */
 	async drain(): Promise<void> {
-		const settle = async () => {
-			while (this.#owed.size > 0) await Promise.allSettled(this.#owed);
-		};
-		const [withdrawn] = await Promise.allSettled([this.#withdrawal.close(), settle()]);
+		const [withdrawn] = await Promise.allSettled([this.#withdrawal.close()]);
+		// Only after the withdrawals, so a request that arrived while they were in flight is
+		// waited for too. Owed requests run on their own meanwhile, so this adds no delay.
+		while (this.#owed.size > 0) await Promise.allSettled(this.#owed);
 		if (withdrawn.status === "rejected") throw withdrawn.reason;
 	}
 
