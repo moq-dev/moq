@@ -1563,6 +1563,33 @@ test("a refusal from a superseded route does not end the request", async () => {
 	origin.close();
 });
 
+test("a refusal from a route a local broadcast superseded does not end the request", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const wide = origin.dynamic(Path.from("live"));
+	const wideRequests = wide.requested();
+
+	const request = consumer.request(Path.from("live/cam"));
+	const { value: stale } = await wideRequests.next();
+
+	// The exact local broadcast takes over before the broad route answers.
+	const local = publish(origin, Path.from("live/cam"));
+	await settle();
+	const active = request.active.peek();
+	expect(active).toBeDefined();
+
+	stale?.reject(new Error("unserved"));
+	await settle();
+	expect(request.closed.peek()).toBeUndefined();
+	expect(request.active.peek()).toBe(active);
+
+	request.close();
+	void wideRequests.return?.();
+	wide.close();
+	local.close();
+	origin.close();
+});
+
 test("close rejects queued requests with NoCapacity", async () => {
 	const origin = new Producer();
 	const handle = origin.dynamic(Path.from("live"));

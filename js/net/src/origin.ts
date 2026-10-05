@@ -482,8 +482,9 @@ class OriginState {
 	refuse(path: Path.Valid, entry: RouteEntry, err: Error): void {
 		const slot = this.requests.peek()?.get(path);
 		if (!slot) return;
-		// Only the route the request is waiting on speaks for it; a superseded one's answer is moot.
-		if (this.bestEntry(path) !== entry) return;
+		// Only the route the request is waiting on speaks for it; one superseded by another
+		// route or a local broadcast has a moot answer.
+		if (this.bestEntry(path) !== entry || this.localWins(path, entry)) return;
 
 		this.requests.mutate((map) => {
 			if (map?.get(path) === slot) map.delete(path);
