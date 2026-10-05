@@ -1,7 +1,7 @@
 # Commits
 
 PRs into `main` are squash-merged, so the PR title becomes the commit subject and the PR description becomes the body in `git log`.
-PRs into any other branch (`release`) use a merge commit, so their history survives until they land.
+PRs into `release` use a merge commit, so their history survives until they land.
 
 - Use conventional-commit subjects (`feat(watch): ...`, `fix: ...`, `chore: ...`, `docs: ...`)
 - AI commit attribution goes in a `Co-Authored-By:` trailer, not the commit body.

@@ -12,11 +12,11 @@ branches reaches `main`, and those branches retire.
 kixelated/quest#44 dropped questline branches, `quest branch`, and
 `quest ready --remote`; kixelated/quest#51 changed the import skill to treat a
 report's fix as a claim and plan each issue fully. moq pins kixelated/quest
-`0cb952c`, which includes both; `quest check` passed on the tree unchanged.
+`677f8d1`, which includes both; `quest check` passed on the tree unchanged.
 
 Decided 2026-10-04:
 
-- A quest of its own, not a routine pin bump, because 16 questline branches
+- A quest of its own, not a routine pin bump, because questline branches
   carried merged child work that is not on `main`.
 - Goal confirmed: questlines become planning groups whose children PR straight
   to `main`. Finishing any line's remaining children is a non-goal.
@@ -27,14 +27,13 @@ Decided 2026-10-04:
   `main` in is less churn than re-cutting each child, and finishing a line
   first would keep its branch alive.
 - Code-free lines (quic #3975, cluster-routing #4654, broadcast-epoch #4805)
-  are closed and their branches deleted; their children PR to `main`. Nothing
+  close and their branches are deleted; their children PR to `main`. Nothing
   on them needs landing.
 - Nested lines (rs2ts/sans-io #4438, archive/track-timeline #4255) fold into
   their parent branch, then close, so each tree lands through one PR.
 - The quest CLI's PR-adoption skill is installed as `quest-iterate` and
-  replaces the `takeover` skill, so one skill covers it. The CLI still calls it
-  `takeover`, so the stub runs `quest skill takeover` until kixelated/quest#52
-  renames it.
+  replaces the `takeover` skill, so one skill covers it. kixelated/quest#52
+  renamed it upstream to match.
 - `CONTRIBUTING.md` drops ", a questline" so the merge-commit rule names only
   `release`.
 
@@ -61,8 +60,7 @@ Remaining:
   in), #4039 auth, #4079 cpp, #4519 ffi-shape, #4080 obs-moq-video, #4133 qos,
   #4437 rs2ts (with #4438 folded in), #4653 test-flakes-2, #4180
   transport-upgrade, #4640 tstd.
-- Once kixelated/quest#52 merges, bump the `quest` input and point the
-  `quest-iterate` stub at `quest skill iterate`.
+- Delete the `quest/m1/cluster-routing/README` branch; #4654 is closed.
 
 Done when `flake.nix` pins the new quest, no `quest/*README` branch remains,
 and `quest check` passes.

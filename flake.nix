@@ -27,7 +27,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/0cb952c2d8fdf2b6e0ec0a9ac2c0ab605876193d";
+      url = "github:kixelated/quest/677f8d11aa2fb71828ac7760bfa4bbf9d4165594";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
       inputs.crane.follows = "crane";
