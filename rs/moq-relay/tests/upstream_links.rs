@@ -2,9 +2,10 @@
 //! one upstream link to another, whichever side dialed, and everything else
 //! still transits.
 //!
-//! Each relay is a [`cluster::Cluster`] serving accepted sessions through an
-//! embedded auth decider that reads the dialed path: `/upstream` admits the
-//! dialer as an upstream peer, `/peer` as a plain one.
+//! Each relay is a [`cluster::Cluster`] serving qmux over TLS on TCP (`tls://`),
+//! the way edge links run, through an embedded auth decider that reads the
+//! dialed path: `/upstream` admits the dialer as an upstream peer, `/peer` as a
+//! plain one.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -59,7 +60,7 @@ impl Node {
 	/// asks this node to admit the dialer as its upstream.
 	fn dial(&self, upstream: bool, as_upstream: bool) -> Peer {
 		let path = if as_upstream { "upstream" } else { "peer" };
-		Peer::new(format!("tcp://127.0.0.1:{}/{path}", self.port)).with_upstream(upstream)
+		Peer::new(format!("tls://127.0.0.1:{}/{path}", self.port)).with_upstream(upstream)
 	}
 }
 
@@ -80,6 +81,8 @@ async fn node(id: u64, connect: Vec<Peer>) -> Node {
 
 	let mut listen = moq_tokio::listen::Config::default();
 	listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
+	listen.tcp.tls = Some(true);
+	listen.tls.generate = vec!["localhost".into()];
 	let mut listener = listen
 		.init(Default::default())
 		.expect("server init")

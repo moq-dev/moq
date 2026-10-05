@@ -29,6 +29,7 @@ root = ["peer-ca.pem"]               # Optional: CAs for client certs (mTLS), re
 
 [listen.tcp]                         # Plaintext qmux over TCP for trusted local workers.
 bind = "127.0.0.1:4444"
+# tls = true                         # Or: qmux over TLS (tls://) with the listen certificate, no client certs.
 
 [listen.unix]                        # Plaintext qmux over a Unix socket, gated by peer credentials.
 bind = "/run/moq/internal.sock"

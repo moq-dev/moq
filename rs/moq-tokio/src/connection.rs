@@ -272,14 +272,14 @@ impl Redirect {
 /// Whether this scheme's dial installs the Rustls verifier, so a configured
 /// fingerprint actually checked the peer. Plain and non-Rustls transports do not.
 fn fingerprint_pins(scheme: &str) -> bool {
-	matches!(scheme, "https" | "wss" | "moqt" | "moql")
+	matches!(scheme, "https" | "wss" | "moqt" | "moql" | "tls")
 }
 
 /// Rank a scheme so a peer-supplied redirect cannot silently drop encryption.
 /// Unknown schemes rank lowest, so a forgotten classification is refused.
 fn scheme_tier(scheme: &str) -> u8 {
 	match scheme {
-		"https" | "moqt" | "moql" | "wss" | "iroh" => 2,
+		"https" | "moqt" | "moql" | "wss" | "iroh" | "tls" => 2,
 		"tcp" | "ws" | "http" => 1,
 		// `unix` lands here deliberately: local IPC is not an upgrade over a
 		// network transport, it is a different reachability class (see `is_local`).
@@ -1553,7 +1553,7 @@ mod tests {
 	/// forgot to add is refused rather than trusted.
 	#[test]
 	fn scheme_tiers_rank_encrypted_above_plaintext() {
-		for scheme in ["https", "moqt", "moql", "wss", "iroh"] {
+		for scheme in ["https", "moqt", "moql", "wss", "iroh", "tls"] {
 			assert_eq!(scheme_tier(scheme), 2, "{scheme} is encrypted");
 		}
 		for scheme in ["tcp", "ws", "http"] {
@@ -1703,7 +1703,7 @@ mod tests {
 	/// must not inherit the pin.
 	#[test]
 	fn a_fingerprint_pin_only_covers_rustls_schemes() {
-		for scheme in ["https", "wss", "moqt", "moql"] {
+		for scheme in ["https", "wss", "moqt", "moql", "tls"] {
 			assert!(fingerprint_pins(scheme), "{scheme}");
 		}
 		for scheme in ["http", "ws", "tcp", "unix", "iroh"] {

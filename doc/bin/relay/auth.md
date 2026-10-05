@@ -385,7 +385,12 @@ bind = "/run/moq/internal.sock"
 allow.uid = [1001]
 ```
 
-Bind TCP to loopback or a private interface; it carries no peer identity. The
-Unix socket is created mode `0666`, so gate it with a restrictive parent
-directory or an explicit allowlist.
+Bind plaintext TCP to loopback or a private interface; it carries no peer
+identity. The Unix socket is created mode `0666`, so gate it with a restrictive
+parent directory or an explicit allowlist.
 These are native-only paths for gateways and stats publishers on the same host.
+
+`listen.tcp.tls = true` serves the TCP listener over TLS with the listen
+certificate instead, for `tls://` dials such as [cluster links](/bin/relay/cluster#tls-links)
+that need neither QUIC nor a WebSocket. It still carries no peer identity: it
+asks for no client certificate, so a peer on it presents a token, not mTLS.
