@@ -20,8 +20,8 @@ Neither Playwright Firefox nor Playwright WebKit ships WebTransport, and
 WebKit also lacks the WebCodecs encoder, so neither can publish and neither
 can play over QUIC. What they can do is play over the WebSocket fallback.
 Real Firefox does use WebTransport; only Playwright's build lacks it, so a
-fallback run covers the player, not Firefox's transport path (see open PR
-[#4460](https://github.com/moq-dev/moq/pull/4460)).
+fallback run covers the player, not Firefox's transport path (see
+[#4460](https://github.com/moq-dev/moq/pull/4460), merged 2026-10-01).
 
 - Split the harness's publisher and subscriber roles so an engine can take
   one side: a Chromium fixture with a Firefox or WebKit player over the

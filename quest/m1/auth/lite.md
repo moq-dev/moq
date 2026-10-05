@@ -2,7 +2,8 @@
 
 ## Goal
 
-Both sides of a moq-lite-06 session learn what they may publish and subscribe
+Both sides of a session on the wip lite version (`moq-lite-07-wip` today)
+learn what they may publish and subscribe
 to. Right after SETUP each side opens an AUTH stream carrying an empty token
 and receives its grant; `Session::auth()` exposes the union of every grant and
 lets the app present more tokens, each on its own stream. A publisher whose
@@ -45,7 +46,7 @@ opener withdraws a token by closing or resetting its stream. A stream reset
 before any reply, which is what a peer does with a stream type it does not
 understand (the existing rule at the STREAM_TYPE section), leaves the opener
 with no grant for that token, and the client reports it as `Unsupported`
-rather than a refusal. Record it in the lite-06 changelog. Run
+rather than a refusal. Record it in the wip version's changelog. Run
 `just drafts check`.
 
 ### Model
@@ -112,10 +113,10 @@ before publishing what that token unlocks. On a miss, abort the session with
 teardown already formats one; log it at error level too, since `Error`
 carries no payload).
 
-Gate everything on `Version::Lite06`; older versions never open the stream
-and `auth().grant()` stays `None` there. Land the accept side and the
-`Unsupported` handling before any build opens the stream, since
-`moq-lite-06` is one ALPN with no sub-version.
+Gate everything on the wip version (`Version::Lite07` while lite-07 is wip);
+published versions never open the stream and `auth().grant()` stays `None`
+there. Decided 2026-10-05: wire work targets the wip release, never a
+published version in place.
 
 ### JavaScript
 

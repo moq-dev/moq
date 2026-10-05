@@ -1,0 +1,27 @@
+{
+	// Cloudflare Wrangler configuration for the moq.sh installer worker.
+	// `just infra moq-sh deploy` sets VERSION to the newest moq-cli release.
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "moq-sh",
+	"main": "src/worker.ts",
+	"compatibility_date": "2025-07-09",
+	"account_id": "dd618f5dbd5da77b8296f1613c301f5c",
+	"workers_dev": false,
+	"route": {
+		"pattern": "moq.sh",
+		"custom_domain": true
+	},
+	// Bundle install.sh as a string.
+	"rules": [
+		{
+			"type": "Text",
+			"globs": ["**/*.sh"],
+			"fallthrough": false
+		}
+	],
+	"observability": {
+		"logs": {
+			"enabled": true
+		}
+	}
+}

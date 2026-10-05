@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.10](https://github.com/moq-dev/moq/compare/moq-net-v0.3.9...moq-net-v0.3.10) - 2026-10-05
+
+### Fixed
+
+- *(net)* widen only frame-bounded starts to the head; pin the peer's own read
+- *(net)* a relay resuming mid-group asks upstream for the group's head
+
+### Other
+
+- *(net)* cover a frame-precise resume arriving at the relay itself
+
 ## [0.3.9](https://github.com/moq-dev/moq/compare/moq-net-v0.3.8...moq-net-v0.3.9) - 2026-10-03
 
 ### Fixed

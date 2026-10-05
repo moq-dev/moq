@@ -54,4 +54,4 @@ Binding round trip against one bound port. `moq-relay` docs list the port once.
 
 ## Related
 
-- [P2P](/quest/m2/p2p/README.md) - the client side of the STUN answer
+- [P2P](/quest/m3/p2p/README.md) - the client side of the STUN answer
