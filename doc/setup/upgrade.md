@@ -39,7 +39,9 @@ These land with the next breaking release, not the 2026-09-23 train.
   `Poll<Result<()>>` instead of `Poll<()>`: an `Err` means the request closed,
   so treat it as unused too. A `group::Request` no longer needs polling to be
   withdrawn; the last `fetch_group` caller leaving does it, so a handler that
-  sees it unused just drops it.
+  sees it unused just drops it. A fetch arriving after that queues a fresh
+  request instead of joining the abandoned one, so a handler that keeps serving
+  without watching `demand()` may see its `accept` return `Error::Duplicate`.
   The moq-json snapshot and moq-flate `is_used()` is `demand().is_used()`.
   In TypeScript, `Track.Producer`'s `used` and `unused()` are
   `producer.demand().used` and `.unused()`, as are `Group.Producer`'s, and

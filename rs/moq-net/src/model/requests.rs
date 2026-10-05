@@ -22,11 +22,18 @@ use std::{
 /// [`Self::drain_queued`] when the last handler leaves.
 pub(crate) struct Requests<K, V> {
 	// Every pending request: queued or already handed to a handler.
-	pending: HashMap<K, V>,
+	pending: HashMap<K, Entry<V>>,
 	// The queued (not yet popped) subset, FIFO. Every key here is in `pending`.
 	order: VecDeque<K>,
 	// Live handler count; gates `insert`.
 	handlers: usize,
+}
+
+/// A pending request, and whether its key still waits in `order`.
+struct Entry<V> {
+	value: V,
+	// Cleared by `pop`, so removing a popped entry skips scanning the queue.
+	queued: bool,
 }
 
 impl<K, V> Default for Requests<K, V> {
@@ -46,7 +53,7 @@ impl<K: Clone + Eq + Hash, V> Requests<K, V> {
 		K: Borrow<Q>,
 		Q: Eq + Hash + ?Sized,
 	{
-		self.pending.get_mut(key)
+		self.pending.get_mut(key).map(|entry| &mut entry.value)
 	}
 
 	/// Queue a new request, handing `value` back when no handler is alive to
@@ -58,7 +65,7 @@ impl<K: Clone + Eq + Hash, V> Requests<K, V> {
 		if self.handlers == 0 {
 			return Err(value);
 		}
-		let prev = self.pending.insert(key.clone(), value);
+		let prev = self.pending.insert(key.clone(), Entry { value, queued: true });
 		debug_assert!(prev.is_none(), "insert over a pending request; join it instead");
 		self.order.push_back(key);
 		Ok(())
@@ -67,7 +74,11 @@ impl<K: Clone + Eq + Hash, V> Requests<K, V> {
 	/// Pop the next queued key for a handler to serve. The entry stays pending
 	/// (joinable) until removed.
 	pub fn pop(&mut self) -> Option<K> {
-		self.order.pop_front()
+		let key = self.order.pop_front()?;
+		if let Some(entry) = self.pending.get_mut(&key) {
+			entry.queued = false;
+		}
+		Some(key)
 	}
 
 	/// The pending request for `key`, if any.
@@ -76,7 +87,7 @@ impl<K: Clone + Eq + Hash, V> Requests<K, V> {
 		K: Borrow<Q>,
 		Q: Eq + Hash + ?Sized,
 	{
-		self.pending.get(key)
+		self.pending.get(key).map(|entry| &entry.value)
 	}
 
 	/// Remove and return the pending request for `key`, if any.
@@ -85,7 +96,7 @@ impl<K: Clone + Eq + Hash, V> Requests<K, V> {
 		K: Borrow<Q>,
 		Q: Eq + Hash + ?Sized,
 	{
-		self.pending.remove(key)
+		self.pending.remove(key).map(|entry| entry.value)
 	}
 
 	/// Remove and return the pending request for `key`, purging its queue entry
@@ -96,9 +107,11 @@ impl<K: Clone + Eq + Hash, V> Requests<K, V> {
 		K: Borrow<Q>,
 		Q: Eq + Hash + ?Sized,
 	{
-		let value = self.pending.remove(key)?;
-		self.order.retain(|k| k.borrow() != key);
-		Some(value)
+		let entry = self.pending.remove(key)?;
+		if entry.queued {
+			self.order.retain(|k| k.borrow() != key);
+		}
+		Some(entry.value)
 	}
 
 	/// Remove the pending request for `key` if `f` says it's the caller's own,
@@ -109,7 +122,7 @@ impl<K: Clone + Eq + Hash, V> Requests<K, V> {
 		K: Borrow<Q>,
 		Q: Eq + Hash + ?Sized,
 	{
-		if !self.pending.get(key).is_some_and(f) {
+		if !self.get(key).is_some_and(f) {
 			return None;
 		}
 		self.take(key)
@@ -147,7 +160,7 @@ impl<K: Clone + Eq + Hash, V> Requests<K, V> {
 	pub fn drain_queued(&mut self) -> Vec<V> {
 		self.order
 			.drain(..)
-			.filter_map(|key| self.pending.remove(&key))
+			.filter_map(|key| self.pending.remove(&key).map(|entry| entry.value))
 			.collect()
 	}
 
@@ -155,7 +168,7 @@ impl<K: Clone + Eq + Hash, V> Requests<K, V> {
 	/// handler, so the caller can reject them all on a terminal teardown.
 	pub fn drain_all(&mut self) -> Vec<V> {
 		self.order.clear();
-		self.pending.drain().map(|(_, value)| value).collect()
+		self.pending.drain().map(|(_, entry)| entry.value).collect()
 	}
 }
 

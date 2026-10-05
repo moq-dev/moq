@@ -2861,7 +2861,8 @@ impl group::Request {
 	/// Watch the callers waiting for this fetch without keeping the attempt alive.
 	///
 	/// The last caller to leave withdraws the attempt, so a later fetch of the group
-	/// queues a fresh request rather than joining this one: once unused, drop it.
+	/// queues a fresh request rather than joining this one: once unused, demand never
+	/// returns, so drop the request.
 	pub fn demand(&self) -> group::Demand {
 		group::Demand::fetch(self.sequence, self.result.weak())
 	}
@@ -3014,8 +3015,11 @@ impl Drop for Fetching {
 		// rather than joining one its handler is about to drop.
 		let mut fetch = self.fetch.lock();
 		drop(outcome);
-		if !attempt.is_used() {
-			fetch.remove_if(&self.sequence, |pending| pending.result.weak().same_channel(&attempt));
+		// Read before writing: the attempt is usually already resolved and gone, and a
+		// write would wake every handler parked on the queue for nothing.
+		let ours = |pending: &PendingFetch| pending.result.weak().same_channel(&attempt);
+		if !attempt.is_used() && fetch.get(&self.sequence).is_some_and(ours) {
+			fetch.remove_if(&self.sequence, ours);
 		}
 	}
 }
