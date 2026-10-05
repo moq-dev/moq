@@ -27,7 +27,7 @@ Decided 2026-10-04:
   `main` in is less churn than re-cutting each child, and finishing a line
   first would keep its branch alive.
 - Code-free lines (quic #3975, cluster-routing #4654, broadcast-epoch #4805)
-  close and their branches are deleted; their children PR to `main`. Nothing
+  are closed and their branches deleted; their children PR to `main`. Nothing
   on them needs landing.
 - Nested lines (rs2ts/sans-io #4438, archive/track-timeline #4255) fold into
   their parent branch, then close, so each tree lands through one PR.
@@ -60,7 +60,6 @@ Remaining:
   in), #4039 auth, #4079 cpp, #4519 ffi-shape, #4080 obs-moq-video, #4133 qos,
   #4437 rs2ts (with #4438 folded in), #4653 test-flakes-2, #4180
   transport-upgrade, #4640 tstd.
-- Delete the `quest/m1/cluster-routing/README` branch; #4654 is closed.
 
 Done when `flake.nix` pins the new quest, no `quest/*README` branch remains,
 and `quest check` passes.
