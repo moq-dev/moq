@@ -64,9 +64,10 @@ class Render extends AudioWorkletProcessor {
 		} else {
 			if (this.#short) {
 				// Fade back in from the silence the shortfall left behind.
+				const ramp = Math.min(RAMP, samplesRead);
 				for (const channel of output) {
-					for (let i = 0; i < Math.min(RAMP, samplesRead); i++) {
-						channel[i] *= (i + 1) / RAMP;
+					for (let i = 0; i < ramp; i++) {
+						channel[i] *= (i + 1) / ramp;
 					}
 				}
 				this.#short = false;
