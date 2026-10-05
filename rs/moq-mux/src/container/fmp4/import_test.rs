@@ -1405,3 +1405,60 @@ async fn seek_keeps_the_decode_time_until_a_discontinuity() {
 	fmp4.decode(&live_session(0, 5))
 		.expect("a signalled discontinuity starts a new timeline");
 }
+
+/// The catalog is first published at the first fragment, carrying the clock that fragment
+/// anchors, rather than at the moov on a provisional clock a copy-once reader would keep.
+#[tokio::test]
+async fn first_catalog_carries_the_anchored_clock() {
+	let (init, _, _) = bbb_init();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let provisional = catalog.clock().wall();
+	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+
+	fmp4.decode(&init).unwrap();
+	assert_eq!(clocks.drain(), vec![], "the moov alone publishes nothing");
+
+	fmp4.decode(&live_session(3_600_000_000, 20)).unwrap();
+	let anchored = catalog.clock().wall();
+	assert_ne!(anchored, provisional, "the first fragment anchors the clock");
+	let published = clocks.drain();
+	assert!(!published.is_empty(), "the first fragment publishes the catalog");
+	assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
+
+	fmp4.finish().unwrap();
+	assert!(clocks.drain().iter().all(|clock| *clock == Some(anchored)));
+}
+
+/// A second moov is refused before the first fragment too, while the reservation is still held.
+#[test]
+fn a_second_moov_is_refused() {
+	let (init, _, _) = bbb_init();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+
+	fmp4.decode(&init).unwrap();
+	let err = fmp4.decode(&init).unwrap_err();
+	assert!(
+		matches!(err, crate::Error::Cmaf(crate::container::fmp4::Error::DuplicateMoov)),
+		"{err:?}"
+	);
+}
+
+/// A moov with every track deselected publishes at once, since no fragment will ever anchor.
+#[tokio::test]
+async fn a_moov_with_nothing_selected_publishes() {
+	let (init, _, _) = bbb_init();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve())
+		.with_select(crate::select::Broadcast::default());
+
+	fmp4.decode(&init).unwrap();
+	assert_eq!(clocks.drain().len(), 1, "the catalog publishes without a fragment");
+}

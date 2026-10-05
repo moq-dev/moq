@@ -64,6 +64,12 @@ These land with the next breaking release, not the 2026-09-23 train.
   `Instant` with `.at(catalog.clock().capture(instant)?)`, reading
   `catalog.clock()` at write time, since an importer's first frame re-anchors
   it. A timestamp ahead of now is published rather than refused.
+- **moq-mux importers publish the catalog at their first frame.** The fMP4,
+  MKV, and MPEG-TS importers used to publish it at their init segment (`moov`,
+  `Tracks`, or the first PMT) on a provisional clock, then re-anchor it on the
+  first frame. They now hold it until that frame, as FLV already did, so the
+  first snapshot carries the final root `clock`. A reader waiting for the
+  catalog now waits for media, not just the init segment.
 
 ## Wire
 

@@ -277,8 +277,9 @@ impl<E: CatalogExt> Config<E> {
 	///
 	/// The clock's wall mapping is advertised at the catalog root and fixed for the broadcast.
 	/// Without this, the catalog starts a fresh clock, and a container importer (fMP4, MPEG-TS,
-	/// FLV, MKV) re-anchors it on its first timestamp, before writing any frame, so the stream's own
-	/// timestamps map to the arrival time. Pass one whose PTS zero names the content's real start
+	/// FLV, MKV) anchors it on its first frame's timestamp, so the stream's own timestamps map to
+	/// the arrival time. The importer withholds the catalog until then, so its first snapshot
+	/// already carries the anchored clock. Pass one whose PTS zero names the content's real start
 	/// when importing a recording.
 	pub fn with_clock(mut self, clock: crate::Clock) -> Self {
 		self.clock = Some(clock);
@@ -470,7 +471,10 @@ impl<E: CatalogExt> Producer<E> {
 	///
 	/// Container importers publish their stream's timestamps verbatim and call this before
 	/// writing each frame: the first call places the wall mapping so `pts` is live on arrival,
-	/// and every later call, from any track or importer sharing this catalog, is a no-op.
+	/// and every later call, from any track or importer sharing this catalog, is a no-op. An
+	/// importer holds its initial reservation until this first call, so a catalog it feeds is
+	/// first published on the anchored clock. One already published by another producer still
+	/// moves here.
 	pub(crate) fn anchor(&mut self, pts: moq_net::Timestamp) -> crate::Result<()> {
 		if take(&self.current).anchored {
 			return Ok(());
