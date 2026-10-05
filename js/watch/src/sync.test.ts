@@ -119,6 +119,12 @@ describe("delay and buffer", () => {
 });
 
 describe("wait", () => {
+	it("returns at once when constructed instant, before effects flush", async () => {
+		const sync = new Sync({ delay: "instant" });
+		await sync.wait(Time.Milli.zero);
+		sync.close();
+	});
+
 	it("wakes a sleeping wait when the delay switches to instant", async () => {
 		const delay = new Signal<Delay>(10_000 as Time.Milli);
 		const sync = new Sync({ delay });

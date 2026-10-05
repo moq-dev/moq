@@ -252,7 +252,8 @@ export class Sync {
 	async wait(timestamp: Time.Milli): Promise<void> {
 		// A zero delay still sleeps: the sleep comes from the reference, which holds an early frame
 		// until its timestamp comes up. "instant" is the only thing that skips the wait itself.
-		if (this.#out.instant.peek()) return;
+		// Peek the input, not `out.instant`, which lags a same-turn change until effects flush.
+		if (this.in.delay.peek() === "instant") return;
 
 		const reference = this.#out.reference.peek();
 		if (reference === undefined) {
@@ -261,7 +262,7 @@ export class Sync {
 
 		for (;;) {
 			// Switching to "instant" wakes the sleep below, so frames parked here leave.
-			if (this.#out.instant.peek()) return;
+			if (this.in.delay.peek() === "instant") return;
 
 			// Sleep until it's time to decode the next frame.
 			// NOTE: This function runs in parallel for each frame.
