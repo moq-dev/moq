@@ -858,9 +858,8 @@ struct RouteEntry {
 	/// Whether this is a broadcast published on this origin, which wins a cost tie and
 	/// keeps its own cache.
 	local: bool,
-	/// Whether a handle marked [`Producer::peer`] inserted the entry, so it
-	/// entered from a cluster peer rather than here.
-	peer: bool,
+	/// The link the entry arrived on, from the handle that inserted it.
+	link: Link,
 	/// The queue requests under this route are served from, when the announcer
 	/// serves content on demand (a [`Dynamic`]). `None` for an advertise-only
 	/// announcement ([`Producer::announce`]) and for a local broadcast.
@@ -897,9 +896,9 @@ impl RouteEntry {
 
 	/// Where the entry entered this origin.
 	fn entered(&self) -> Source {
-		match self.peer {
-			true => Source::Peer(self.via),
-			false => Source::Local,
+		match self.link {
+			Link::Local => Source::Local,
+			Link::Peer | Link::Upstream => Source::Peer(self.via),
 		}
 	}
 
@@ -977,13 +976,31 @@ struct Horizon {
 	exclude: Option<Hop>,
 	/// Hide the routes that entered from a cluster peer ([`Consumer::local`]).
 	local: bool,
+	/// Hide the routes learned on an upstream link, because this reader is one
+	/// ([`Producer::upstream`]): a relay never transits between two upstreams.
+	upstream: bool,
 }
 
 impl Horizon {
 	/// Whether `entry` may be observed or served through this horizon.
 	fn admits(&self, entry: &RouteEntry) -> bool {
-		!(self.local && entry.peer) && entry.visible_to(self.exclude)
+		!(self.local && entry.link != Link::Local)
+			&& !(self.upstream && entry.link == Link::Upstream)
+			&& entry.visible_to(self.exclude)
 	}
+}
+
+/// The link a handle's routes arrive on; see [`Producer::peer`] and
+/// [`Producer::upstream`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+enum Link {
+	/// Here: an in-process producer or a client session.
+	#[default]
+	Local,
+	/// A cluster peer.
+	Peer,
+	/// A cluster peer marked upstream.
+	Upstream,
 }
 
 /// One remotely-served front in [`OriginState::fronts`]: the shared broadcast at a
@@ -1407,9 +1424,9 @@ pub struct Producer {
 	// session tagged this handle via [`Self::with_stats`].
 	stats: stats::Session,
 
-	// Whether routes announced through this handle entered from a cluster peer
-	// (see [`Self::peer`]).
-	peer: bool,
+	// The link routes announced through this handle arrive on (see
+	// [`Self::peer`] and [`Self::upstream`]).
+	link: Link,
 
 	// Submission handle to the origin's [`Driver`]: source watchers, fronts, and
 	// serve tasks queued here run when the driver is polled. Closed once the
@@ -1441,7 +1458,7 @@ impl Producer {
 			pool: config.pool,
 			cache_duration: config.cache_duration,
 			stats: stats::Session::default(),
-			peer: false,
+			link: Link::Local,
 			tasks,
 			timers: timers.clone(),
 		};
@@ -1473,7 +1490,22 @@ impl Producer {
 	/// entered here from what a peer forwarded. The hop chain cannot: a client
 	/// and a peer each append one hop.
 	pub fn peer(mut self) -> Self {
-		self.peer = true;
+		if self.link == Link::Local {
+			self.link = Link::Peer;
+		}
+		self
+	}
+
+	/// Mark this handle (and any handle derived from it) as an upstream peer's:
+	/// a [`Self::peer`] whose routes are never offered to another upstream.
+	/// A [`Consumer`] taken from it hides every route an upstream handle
+	/// announced, so this origin never carries traffic between two upstreams.
+	///
+	/// Hand it to a session with a peer that should reach everything here
+	/// without this relay carrying its traffic to other upstreams, such as an
+	/// edge's link to a core or a drone's link to its CDN.
+	pub fn upstream(mut self) -> Self {
+		self.link = Link::Upstream;
 		self
 	}
 
@@ -1508,7 +1540,7 @@ impl Producer {
 			pool: cache::Pool::default(),
 			cache_duration: Duration::MAX,
 			stats: stats::Session::default(),
-			peer: false,
+			link: Link::Local,
 			tasks,
 			timers: Clock::default(),
 		}
@@ -1575,7 +1607,7 @@ impl Producer {
 			prefixes: vec![(full.clone(), claim)],
 			scope: self.scope.allowed.clone(),
 			local: true,
-			peer: self.peer,
+			link: self.link,
 			stats: self.stats.clone(),
 		};
 		let info = broadcast::Info {
@@ -1731,7 +1763,7 @@ impl Producer {
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
 			stats: self.stats.clone(),
-			peer: self.peer,
+			link: self.link,
 			tasks: self.tasks.clone(),
 			timers: self.timers.clone(),
 		})
@@ -1843,8 +1875,8 @@ struct Announcing {
 	/// The absolute paths the producer is authorized to serve.
 	scope: Patterns,
 	local: bool,
-	/// Whether the producer was marked [`Producer::peer`].
-	peer: bool,
+	/// The link the producer's routes arrive on.
+	link: Link,
 	stats: stats::Session,
 }
 
@@ -1866,7 +1898,7 @@ impl Announcing {
 			prefixes: vec![(requested, claim)],
 			scope: producer.scope.allowed.clone(),
 			local: false,
-			peer: producer.peer,
+			link: producer.link,
 			stats: producer.stats.clone(),
 		})
 	}
@@ -1898,7 +1930,7 @@ impl Announcing {
 				cost: route.cost,
 				via,
 				local: self.local,
-				peer: self.peer,
+				link: self.link,
 				server: serving.server.clone(),
 				source: serving.source.clone(),
 				advertised: serving.advertised,
@@ -3827,7 +3859,8 @@ pub struct Consumer {
 	// Split horizon: routes whose hop chain or announcing session (`via`) is the
 	// excluded peer are invisible to `announced` and skipped by
 	// `request_broadcast`, so a peer is never served (or advertised) its own
-	// content back. A local view (`Self::local`) hides peer routes the same way.
+	// content back. A local view (`Self::local`) hides peer routes the same way,
+	// and a view taken from an upstream handle hides upstream routes.
 	horizon: Horizon,
 
 	// Which routes beneath a hidden (`.`-prefixed) segment `announced` reports.
@@ -3856,7 +3889,10 @@ impl Consumer {
 			root: producer.root.clone(),
 			shared: producer.shared.clone(),
 			stats,
-			horizon: Horizon::default(),
+			horizon: Horizon {
+				upstream: producer.link == Link::Upstream,
+				..Horizon::default()
+			},
 			hidden: Hidden::default(),
 			pool: producer.pool.clone(),
 			cache_duration: producer.cache_duration,
@@ -3883,7 +3919,7 @@ impl Consumer {
 	}
 
 	/// A view of the routes that entered here: every route a handle marked
-	/// [`Producer::peer`] announced is hidden from [`Self::announced`] and never
+	/// [`Producer::peer`] or [`Producer::upstream`] announced is hidden from [`Self::announced`] and never
 	/// resolved by [`Self::request_broadcast`].
 	///
 	/// On a relay, this is what the relay ingests itself, from clients and
@@ -6810,6 +6846,70 @@ mod tests {
 			producer
 				.consume()
 				.request_broadcast("remote/alice")
+				.now_or_never()
+				.is_none()
+		);
+	}
+
+	/// An upstream link is offered what entered here and what other peers
+	/// forwarded, but never a route learned on another upstream link, and the
+	/// best route it sees skips a better upstream one.
+	#[tokio::test]
+	async fn upstream_view_hides_upstream_routes() {
+		let producer = origin(1).produce();
+		let peer = producer.clone().peer();
+		let core = producer.clone().upstream();
+		let mut toward_core = core.consume().announced();
+		let mut everyone = producer.consume().announced();
+
+		let _core = core
+			.dynamic("core", Route::default().with_hops(hops(&[7])).with_via(origin(7)))
+			.unwrap();
+		assert_eq!(everyone.assert_next_active("core").source(), Source::Peer(origin(7)));
+		toward_core.assert_next_wait();
+
+		let _mesh = peer
+			.dynamic("mesh", Route::default().with_hops(hops(&[8])).with_via(origin(8)))
+			.unwrap();
+		assert_eq!(toward_core.assert_next_active("mesh").source(), Source::Peer(origin(8)));
+
+		// A path both an upstream and a mesh peer reach: the upstream route is
+		// cheaper, yet the upstream view selects the mesh peer's.
+		let _cheap = core
+			.dynamic("both", Route::default().with_hops(hops(&[7])).with_via(origin(7)))
+			.unwrap();
+		let mesh = peer
+			.dynamic(
+				"both",
+				Route::default().with_hops(hops(&[8])).with_via(origin(8)).with_cost(9),
+			)
+			.unwrap();
+		assert_eq!(toward_core.assert_next_active("both").source(), Source::Peer(origin(8)));
+		drop(mesh);
+		toward_core.assert_next_ended("both");
+
+		// `peer` never demotes an upstream handle.
+		let _still = core
+			.clone()
+			.peer()
+			.dynamic("again", Route::default().with_hops(hops(&[7])).with_via(origin(7)))
+			.unwrap();
+		toward_core.assert_next_wait();
+
+		// Resolution agrees with the cursor: an upstream-only path is unroutable
+		// toward an upstream, while the full view queues it on the core's route.
+		let err = core
+			.consume()
+			.request_broadcast("core/alice")
+			.now_or_never()
+			.expect("unroutable")
+			.err()
+			.unwrap();
+		assert!(matches!(err, Error::Unroutable));
+		assert!(
+			producer
+				.consume()
+				.request_broadcast("core/alice")
 				.now_or_never()
 				.is_none()
 		);

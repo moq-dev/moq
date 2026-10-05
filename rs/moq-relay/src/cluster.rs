@@ -34,9 +34,10 @@ const CONNECT_API_POLL_INTERVAL: Duration = Duration::from_secs(30);
 ///
 /// Accepts a URL string or an object with `url` plus
 /// policy: `cost` prices the link, `egress` declares this relay's own price to
-/// the peer, and `token` carries the peer's credential. `egress` defaults to
-/// `cost`; a different effective value is rejected until asymmetric routing
-/// lands. An object `token` behaves exactly like an inline `?jwt=` and is
+/// the peer, `token` carries the peer's credential, and `upstream` marks the
+/// link upstream, so it is never offered a route learned on another upstream
+/// link. `egress` defaults to `cost`; a different effective value is rejected
+/// until asymmetric routing lands. An object `token` behaves exactly like an inline `?jwt=` and is
 /// redacted the same way. Unknown object fields are rejected, as is an object
 /// that sets policy while its `url` still carries `?cost=` or `?jwt=`.
 #[derive(Clone, PartialEq, Eq)]
@@ -46,6 +47,7 @@ pub struct Peer {
 	cost: Option<u64>,
 	egress: Option<u64>,
 	token: Option<String>,
+	upstream: bool,
 }
 
 impl std::fmt::Debug for Peer {
@@ -57,6 +59,7 @@ impl std::fmt::Debug for Peer {
 			.field("cost", &self.cost)
 			.field("egress", &self.egress)
 			.field("token", &self.token.as_ref().map(|_| "..."))
+			.field("upstream", &self.upstream)
 			.finish()
 	}
 }
@@ -69,6 +72,7 @@ impl Peer {
 			cost: None,
 			egress: None,
 			token: None,
+			upstream: false,
 		}
 	}
 
@@ -94,6 +98,12 @@ impl Peer {
 		self.token.as_deref()
 	}
 
+	/// Whether the link is upstream: it is never offered a route learned on
+	/// another upstream link.
+	pub fn upstream(&self) -> bool {
+		self.upstream
+	}
+
 	/// Price the link this peer is dialed on.
 	pub fn with_cost(mut self, cost: u64) -> Self {
 		self.cost = Some(cost);
@@ -109,6 +119,12 @@ impl Peer {
 	/// Present this credential instead of an inline `?jwt=`.
 	pub fn with_token(mut self, token: impl Into<String>) -> Self {
 		self.token = Some(token.into());
+		self
+	}
+
+	/// Mark the link upstream.
+	pub fn with_upstream(mut self, upstream: bool) -> Self {
+		self.upstream = upstream;
 		self
 	}
 }
@@ -134,6 +150,8 @@ struct PeerObject {
 	egress: Option<u64>,
 	#[serde(default)]
 	token: Option<String>,
+	#[serde(default)]
+	upstream: bool,
 }
 
 /// A bare string is the URL form; a map is the object form. Dispatching on the
@@ -150,7 +168,7 @@ impl<'de> serde::Deserialize<'de> for Peer {
 			type Value = Peer;
 
 			fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-				f.write_str("a peer URL string or an object with url, cost, egress, token")
+				f.write_str("a peer URL string or an object with url, cost, egress, token, upstream")
 			}
 
 			fn visit_str<E: serde::de::Error>(self, url: &str) -> Result<Peer, E> {
@@ -165,6 +183,7 @@ impl<'de> serde::Deserialize<'de> for Peer {
 					cost: object.cost,
 					egress: object.egress,
 					token: object.token,
+					upstream: object.upstream,
 				})
 			}
 		}
@@ -178,7 +197,7 @@ impl serde::Serialize for Peer {
 	where
 		S: serde::Serializer,
 	{
-		if self.cost.is_none() && self.egress.is_none() && self.token.is_none() {
+		if self.cost.is_none() && self.egress.is_none() && self.token.is_none() && !self.upstream {
 			return serializer.serialize_str(&self.url);
 		}
 		use serde::ser::SerializeStruct as _;
@@ -192,6 +211,9 @@ impl serde::Serialize for Peer {
 		if self.token.is_some() {
 			len += 1;
 		}
+		if self.upstream {
+			len += 1;
+		}
 		let mut state = serializer.serialize_struct("Peer", len)?;
 		state.serialize_field("url", &self.url)?;
 		if let Some(cost) = &self.cost {
@@ -202,6 +224,9 @@ impl serde::Serialize for Peer {
 		}
 		if let Some(token) = &self.token {
 			state.serialize_field("token", token)?;
+		}
+		if self.upstream {
+			state.serialize_field("upstream", &true)?;
 		}
 		state.end()
 	}
@@ -222,6 +247,8 @@ struct DialTarget {
 	/// Present the mDNS credential on `/.cluster/<credential>` and skip
 	/// [`Config::token`]. LAN only.
 	lan: bool,
+	/// Never offer this peer a route learned on another upstream link.
+	upstream: bool,
 }
 
 impl DialTarget {
@@ -276,6 +303,7 @@ impl DialTarget {
 			cost,
 			fingerprint: None,
 			lan: false,
+			upstream: peer.upstream,
 		})
 	}
 
@@ -310,6 +338,7 @@ impl DialTarget {
 			cost,
 			fingerprint: peer.fingerprint.clone(),
 			lan: true,
+			upstream: false,
 		})
 	}
 }
@@ -555,7 +584,7 @@ pub struct Config {
 
 	/// Connect to one or more other cluster nodes. Each entry is a full URL, e.g.
 	/// `https://host/?jwt=TOKEN`, or an object with `url`, `cost`, `egress`,
-	/// and `token`; see [`Peer`]. A bare host or `host:port` is refused; pass the
+	/// `token`, and `upstream`; see [`Peer`]. A bare host or `host:port` is refused; pass the
 	/// full URL instead. Accepts a comma-separated list on the CLI or repeat the
 	/// flag; in config files use a TOML array of URLs and/or objects.
 	///
@@ -579,7 +608,7 @@ pub struct Config {
 	/// Fetch the list of peers to dial from an HTTP(S) URL or a local file,
 	/// reloading at runtime without a restart. The source returns a JSON array
 	/// of peers: bare URL strings and/or objects with `url`, `cost`, `egress`,
-	/// and `token`, exactly as [`Self::connect`] accepts, e.g.
+	/// `token`, and `upstream`, exactly as [`Self::connect`] accepts, e.g.
 	/// `["https://a.pop.example/?cost=1", {"url": "https://b.pop.example/", "cost": 2}]`.
 	/// An http(s) URL is re-checked on a fixed cadence, with caching, conditional revalidation
 	/// (`ETag` / `Last-Modified`), and stale-if-error handled by the shared HTTP
@@ -1158,26 +1187,29 @@ impl Cluster {
 	/// Returns an [`origin::Producer`] scoped to this session's subscribe permissions.
 	///
 	/// Passed by reference to [`moq_net::Server::with_publisher`] (or the
-	/// equivalent per-request setter), which derives the read handle.
+	/// equivalent per-request setter), which derives the read handle. On an
+	/// upstream grant that handle never sees a route learned from another upstream.
 	pub fn subscriber(&self, token: &auth::Token) -> Option<origin::Producer> {
 		self.mounted(token)?.scope(&token.root, &token.subscribe).ok()
 	}
 
 	/// Returns an [`origin::Producer`] scoped to this session's publish permissions,
-	/// marked [`origin::Producer::peer`] when the grant names a cluster peer.
+	/// marked [`origin::Producer::peer`] when the grant names a cluster peer and
+	/// [`origin::Producer::upstream`] when that peer is upstream.
 	/// Nothing is published beneath the grant's mounts.
 	pub fn publisher(&self, token: &auth::Token) -> Option<origin::Producer> {
-		let publisher = self.mounted(token)?.scope(&token.root, &token.publish).ok()?;
-		Some(match token.peer {
-			true => publisher.peer(),
-			false => publisher,
-		})
+		self.mounted(token)?.scope(&token.root, &token.publish).ok()
 	}
 
-	/// The origin with the grant's mounts applied, before it is scoped to the
-	/// session. A mount the origin refuses (overlapping another) admits nothing.
+	/// The origin marked with the grant's link and with its mounts applied,
+	/// before it is scoped to the session. A mount the origin refuses
+	/// (overlapping another) admits nothing.
 	fn mounted(&self, token: &auth::Token) -> Option<origin::Producer> {
-		let mut origin = self.origin.clone();
+		let mut origin = match (token.upstream, token.peer) {
+			(true, _) => self.origin.clone().upstream(),
+			(false, true) => self.origin.clone().peer(),
+			(false, false) => self.origin.clone(),
+		};
 		for (at, target) in &token.mounts {
 			origin = match origin.mount(token.root.join(at), target) {
 				Ok(origin) => origin,
@@ -1634,7 +1666,6 @@ impl Cluster {
 	#[tracing::instrument("remote", skip_all, err, fields(remote = %target.key))]
 	async fn run_remote(self, target: &DialTarget, token: String) -> anyhow::Result<()> {
 		let mut urls = target.addrs();
-		let cost = target.cost;
 		// Apply the shared cluster token unless the URL already carries its own
 		// non-empty `?jwt=` (a per-peer inline token or object `token` wins; the
 		// shared token still covers peers that have none). An empty
@@ -1661,9 +1692,7 @@ impl Cluster {
 
 		loop {
 			let started = tokio::time::Instant::now();
-			let result = self
-				.run_remote_once(&addrs, cost, target.lan, target.fingerprint.as_deref())
-				.await;
+			let result = self.run_remote_once(&addrs, target).await;
 			let elapsed = started.elapsed();
 
 			match result {
@@ -1682,37 +1711,25 @@ impl Cluster {
 		}
 	}
 
-	async fn run_remote_once(
-		&self,
-		addrs: &moq_tokio::Addrs,
-		cost: Option<u64>,
-		lan: bool,
-		fingerprint: Option<&str>,
-	) -> anyhow::Result<()> {
+	/// One session to `target` over `addrs`, which carry any credential.
+	async fn run_remote_once(&self, addrs: &moq_tokio::Addrs, target: &DialTarget) -> anyhow::Result<()> {
 		// Each attempt is its own session, so it gets its own id. Matches the span an
 		// accepted connection runs under, so both directions log the same way.
 		let id = self.next_connection_id();
-		self.run_remote_session(id, addrs, cost, lan, fingerprint)
+		self.run_remote_session(id, addrs, target)
 			.instrument(tracing::info_span!("conn", id))
 			.await
 	}
 
-	async fn run_remote_session(
-		&self,
-		id: u64,
-		addrs: &moq_tokio::Addrs,
-		cost: Option<u64>,
-		lan: bool,
-		fingerprint: Option<&str>,
-	) -> anyhow::Result<()> {
+	async fn run_remote_session(&self, id: u64, addrs: &moq_tokio::Addrs, target: &DialTarget) -> anyhow::Result<()> {
 		// The peer URL may carry the cluster JWT in its query, so neither the log
 		// line nor the node label below may show the raw URL.
 		let first = addrs.as_slice().first().expect("Addrs is non-empty").url();
 		let redacted = moq_tokio::RedactedUrl::new(first);
 		tracing::info!(url = %redacted, "dialing cluster peer");
 
-		let client = if lan {
-			self.lan_client(fingerprint)?
+		let client = if target.lan {
+			self.lan_client(target.fingerprint.as_deref())?
 		} else {
 			self.client
 				.clone()
@@ -1721,14 +1738,18 @@ impl Cluster {
 
 		// Cluster dials use their configured stats tier. Cluster peers carry no auth
 		// root, so presence is keyed under the empty root within the cluster tier.
-		// The peer's routes entered the cluster elsewhere. A peer that predates the
-		// hidden opt-in still discovers our hidden routes; see `Cluster::scope`.
-		let origin = self.origin.clone().peer();
+		// The peer's routes entered the cluster elsewhere, and an upstream peer is
+		// never offered another upstream's. A peer that predates the hidden opt-in
+		// still discovers our hidden routes; see `Cluster::scope`.
+		let origin = match target.upstream {
+			true => self.origin.clone().upstream(),
+			false => self.origin.clone().peer(),
+		};
 		let mut client = client
 			.with_publisher(origin.consume().with_hidden(true))
 			.with_subscriber(origin)
 			.with_stats(self.stats.tier(self.cluster_tier()).session(""));
-		if let Some(cost) = cost {
+		if let Some(cost) = target.cost {
 			client = client.with_cost(cost);
 		}
 		// The GOAWAY lifecycle lives in the reconnect loop: on an upstream GOAWAY it
@@ -2160,6 +2181,7 @@ mod tests {
 			cost: None,
 			fingerprint: None,
 			lan: false,
+			upstream: false,
 		}
 	}
 
@@ -2432,6 +2454,28 @@ mod tests {
 				.any(|(key, value)| key == "jwt" && value == "secret"),
 			"the credential must reach the dial URL: {}",
 			inline.url
+		);
+	}
+
+	/// `upstream` is object-only policy: it round-trips, reaches the dial target,
+	/// and flipping it is a different configuration, so the API redials.
+	#[test]
+	fn peer_object_upstream() {
+		let object: Peer = serde_json::from_str(r#"{"url": "https://core.example/", "upstream": true}"#)
+			.expect("parse upstream peer");
+		assert_eq!(object, Peer::new("https://core.example/").with_upstream(true));
+		assert_eq!(
+			serde_json::to_string(&object).unwrap(),
+			r#"{"url":"https://core.example/","upstream":true}"#
+		);
+		let upstream = DialTarget::from_peer(&object).unwrap();
+		assert!(upstream.upstream);
+		let plain = DialTarget::from_peer(&Peer::new("https://core.example/")).unwrap();
+		assert_eq!(upstream.key, plain.key);
+		assert_ne!(upstream, plain);
+		assert_eq!(
+			serde_json::to_string(&Peer::new("https://core.example/")).unwrap(),
+			r#""https://core.example/""#
 		);
 	}
 
@@ -2733,7 +2777,7 @@ mod tests {
 		// that mutate it.
 		let _env = crate::test_env::EnvGuard::lock();
 
-		let toml = "[cluster]\nconnect = [\"https://a.example/?cost=1\", { url = \"https://b.example/\", cost = 2, egress = 2, token = \"secret\" }]\n";
+		let toml = "[cluster]\nconnect = [\"https://a.example/?cost=1\", { url = \"https://b.example/\", cost = 2, egress = 2, token = \"secret\", upstream = true }]\n";
 		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
 		std::fs::create_dir_all(&dir).unwrap();
 		let path = dir.join("cluster-connect-object-toml.toml");
@@ -2748,7 +2792,8 @@ mod tests {
 				Peer::new("https://b.example/")
 					.with_cost(2)
 					.with_egress(2)
-					.with_token("secret"),
+					.with_token("secret")
+					.with_upstream(true),
 			]
 		);
 		// The object normalizes exactly like its URL spellings.
@@ -3122,6 +3167,7 @@ mod tests {
 			cost: None,
 			fingerprint: Some(fp),
 			lan: true,
+			upstream: false,
 		};
 		let _dial = fingerprint.dial_lan_target(&target).expect("dial");
 
@@ -3194,6 +3240,48 @@ mod tests {
 			"ingest"
 		);
 		assert!(try_next_announced(&mut local).is_none());
+	}
+
+	/// An upstream grant's session is a peer that never reads another upstream's
+	/// routes: two accepted cores never transit through this relay.
+	#[tokio::test]
+	async fn upstream_grant_hides_other_upstreams() {
+		let cluster = new_cluster(Config::default()).expect("cluster");
+		let all: moq_net::Patterns = [moq_net::Pattern::all()].into_iter().collect();
+
+		let client = auth::Token::new("/", &moq_auth::Grant::new(all.clone(), all.clone()));
+		let mut grant = moq_auth::Grant::new(all.clone(), all);
+		grant.peer = true;
+		let peer = auth::Token::new("/", &grant);
+		grant.upstream = true;
+		let core = auth::Token::new("/", &grant);
+
+		let _ingest = cluster
+			.publisher(&client)
+			.expect("client")
+			.publish("ingest", Default::default());
+		let _mesh = cluster
+			.publisher(&peer)
+			.expect("peer")
+			.publish("mesh", Default::default());
+		let _core = cluster
+			.publisher(&core)
+			.expect("core")
+			.publish("core", Default::default());
+
+		let mut everyone = cluster.subscriber(&client).expect("client").consume().announced();
+		let mut prefixes = std::iter::from_fn(|| try_next_announced(&mut everyone))
+			.map(|announce| announce.prefix.to_string())
+			.collect::<Vec<_>>();
+		prefixes.sort();
+		assert_eq!(prefixes, ["core", "ingest", "mesh"]);
+
+		let mut toward_core = cluster.subscriber(&core).expect("core").consume().announced();
+		let mut prefixes = std::iter::from_fn(|| try_next_announced(&mut toward_core))
+			.map(|announce| announce.prefix.to_string())
+			.collect::<Vec<_>>();
+		prefixes.sort();
+		assert_eq!(prefixes, ["ingest", "mesh"]);
 	}
 
 	/// A `/.cluster` request on a cluster without LAN discovery is refused.
