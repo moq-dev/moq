@@ -94,7 +94,7 @@ kind.
   `drafts/draft-lcurley-moq-hang.md` specs the wire.
 
 Decided in the 2026-09-30 audit: a Rust encoder adapting its bitrate to viewer
-feedback moved to [encoder feedback](/quest/m2/stats-encoder-feedback.md) (m2),
+feedback moved to [encoder feedback](/quest/m3/stats-encoder-feedback.md) (m3),
 along with its open questions. This line only publishes and reads the reports.
 
 ## Required
@@ -112,5 +112,5 @@ along with its open questions. This line only publishes and reads the reports.
 
 - [QoS](/quest/m1/qos/README.md) - the relay's delivery counters, the other
   half of a health verdict
-- [Encoder feedback](/quest/m2/stats-encoder-feedback.md) - a Rust encoder
+- [Encoder feedback](/quest/m3/stats-encoder-feedback.md) - a Rust encoder
   adapts its bitrate to what its viewers report

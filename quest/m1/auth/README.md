@@ -121,6 +121,6 @@ existing lite-06 ALPN.
 
 ## Related
 
-- [Expiring media grants](/quest/m2/processor/grant-lease.md) - a worker's
+- [Expiring media grants](/quest/m3/processor/grant-lease.md) - a worker's
   lease renewal is a new in-band token
-- [P2P](/quest/m2/p2p/README.md) - the first consumer of hop-bound peer grants
+- [P2P](/quest/m3/p2p/README.md) - the first consumer of hop-bound peer grants

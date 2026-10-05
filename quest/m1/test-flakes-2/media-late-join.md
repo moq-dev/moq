@@ -20,3 +20,11 @@ compared with `<=`) fails the same way on `main`: 16 frames behind with a
 15-frame GOP on 09-24, 09-25, 09-28, and in
 [#4577](https://github.com/moq-dev/moq/pull/4577). It samples `live` just
 before the page opens. Treat it as the same flake (decided 2026-10-01).
+
+Recorded in the 2026-10-05 audit: on the test-flakes-2 line,
+[#4719](https://github.com/moq-dev/moq/pull/4719) replaced
+`MAX_LATE_JOIN_LAG_FRAMES` in the interop browser check with a
+published-keyframe check: the latecomer's presented timestamp must be at or
+after the published track's newest keyframe. That fixes the browser lane's
+sampling. The original 16-frame failure was never reproduced, so what remains
+is the Rust `just test media` late join under load.

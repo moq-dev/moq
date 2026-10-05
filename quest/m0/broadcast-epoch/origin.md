@@ -32,9 +32,11 @@ any wire change.
   exclusion and the per-path fronts from #3312 stay intact.
 - Benchmark resolution swept over epochs per name and names per origin, so
   following does not scan the table.
-- Open: does a catalog `broadcast` reference by bare name pin the epoch its
-  catalog came from, or follow the newest? Settle it with
-  [Catalog track alias](/quest/m1/catalog-track-alias.md).
+- Settle here, in this m0 quest, whether a catalog `broadcast` reference by
+  bare name pins the epoch its catalog came from or follows the newest
+  (decided in the 2026-10-05 audit: it is not handed to
+  [Catalog track alias](/quest/m1/catalog-track-alias.md), an m1 quest that
+  never mentions epochs). Record the answer in the line README.
 - Update `doc/concept` and `drafts/draft-lcurley-moq-lite.md` wherever they
   describe resolution or takeover. The rule is a relay behavior, so state it
   in the draft even though no field changes.

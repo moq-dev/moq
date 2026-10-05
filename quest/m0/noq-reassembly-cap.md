@@ -15,8 +15,10 @@ and released, then bump `noq` / `noq-proto` (directly or through `iroh`) on
 ## Plan
 
 `moq-noq` already carries the cap (2.0.1 on `main`, 1.3.3 on `release`), and
-`moq-tokio` defaults the connection receive window to 64 MiB on noq and iroh,
-so only this pin remains.
+`moq-tokio` on `main` defaults the connection receive window to 64 MiB on noq
+and iroh (#4605). `release` lacks that default until the
+[branch flip](/quest/m0/branch-flip.md)'s backport of #4605 lands, so the bump
+on `release` goes in after it.
 
 ## Related
 

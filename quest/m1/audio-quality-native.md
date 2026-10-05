@@ -18,7 +18,10 @@ from whichever platform a user happened to be on.
   it measures anything. Settle which way out: a virtual display and software
   rendering in CI, or an audio-only mode in `moq play` that never opens a
   window. The second is worth having on its own, and it is the smaller
-  dependency to keep working. A real device callback is part of what is being
+  dependency to keep working. Recorded in the 2026-10-05 audit:
+  [Leave out a role](/quest/m1/cli-no-role.md) decided that `play --no-video`
+  shows a blank, closable window and left a headless audio-only path as later
+  work, so this quest owns that headless path, built on `--no-video`. A real device callback is part of what is being
   measured, so keep the real backend rather than substituting a fake clock, and
   accept that the timing noise it adds sets the floor for the native budgets.
   That floor is worth measuring on its own before the budgets are written.
@@ -44,3 +47,7 @@ difference in totals alone proves nothing about the estimator.
 Standalone in m1 rather than a child of the m0 audio quality harness line
 (decided in the 2026-09-28 quest audit): nothing in m0 waits on it. The native jitter target
 it grades is done on the jitter target line.
+
+## Related
+
+- [Leave out a role](/quest/m1/cli-no-role.md) - `play --no-video`, which the headless audio-only path builds on
