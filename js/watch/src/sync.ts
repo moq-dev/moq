@@ -21,8 +21,7 @@ import {
  * `"instant"` drops the buffer and the pacing together: nothing is held, and {@link Sync.wait}
  * returns without sleeping, so a frame presents as soon as it exists. It also overrides
  * {@link SyncInput.buffer}, since holding a lookahead would contradict holding nothing. Audio is
- * the owner's business: a ring with no depth underruns, so whoever wants this mode is expected to
- * turn audio off.
+ * off: a ring with no depth underruns, so the audio decoder unsubscribes and flushes its ring.
  */
 export type Delay = "instant" | "auto" | Time.Milli;
 
@@ -45,6 +44,10 @@ export type SyncInput = {
 };
 
 type SyncOutput = {
+	// Derived: whether the delay is "instant". Numeric and "auto" delays share `false`, so readers
+	// that only care about the mode don't rerun when the number changes.
+	instant: Signal<boolean>;
+
 	// The earliest time we've received a frame, relative to its timestamp.
 	// This will keep being updated as we catch up to the live playhead then will be relatively static.
 	reference: Signal<Time.Milli | undefined>;
@@ -73,6 +76,7 @@ export class Sync {
 	readonly in: Readonlys<SyncInput>;
 
 	readonly #out: SyncOutput = {
+		instant: new Signal<boolean>(false),
 		reference: new Signal<Time.Milli | undefined>(undefined),
 		delay: new Signal<Time.Milli>(Time.Milli.zero),
 		jitter: new Signal<Time.Milli>(Time.Milli.zero),
@@ -96,6 +100,7 @@ export class Sync {
 			probe: getter(props?.probe),
 		};
 
+		this.#signals.run(this.#runInstant.bind(this));
 		this.#signals.run(this.#runDelay.bind(this));
 		this.#signals.run(this.#runMaxAge.bind(this));
 	}
@@ -107,11 +112,15 @@ export class Sync {
 		return () => this.#media.update((media) => media.filter((candidate) => candidate !== registered));
 	}
 
+	#runInstant(effect: Effect): void {
+		this.#out.instant.set(effect.get(this.in.delay) === "instant");
+	}
+
 	// Derive `buffered` / `maxAge` from the resolved delay and the configured lookahead.
 	#runMaxAge(effect: Effect): void {
 		const delay = effect.get(this.#out.delay);
 		// "instant" holds nothing, so a configured lookahead doesn't apply.
-		const buffer = effect.get(this.in.delay) === "instant" ? Time.Milli.zero : effect.get(this.in.buffer);
+		const buffer = effect.get(this.#out.instant) ? Time.Milli.zero : effect.get(this.in.buffer);
 
 		this.#out.buffered.set(buffer > 0);
 		this.#out.maxAge.set(Time.Milli.add(delay, buffer));
@@ -204,6 +213,7 @@ export class Sync {
 	async wait(timestamp: Time.Milli): Promise<void> {
 		// A zero delay still sleeps: the sleep comes from the reference, which holds an early frame
 		// until its timestamp comes up. "instant" is the only thing that skips the wait itself.
+		// Peek the input, not `out.instant`, which lags a same-turn change until effects flush.
 		if (this.in.delay.peek() === "instant") return;
 
 		const reference = this.#out.reference.peek();

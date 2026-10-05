@@ -53,7 +53,6 @@ harness budgets is [Audio quality native](/quest/m1/audio-quality-native.md).
 
 ## Required
 
-- [Opus DTX](/quest/m0/opus-dtx.md) - the acceptance run measures network jitter, not DTX drift
 - [Watch](/quest/m0/audio-jitter-target/watch.md) - the browser's measured target, proven on Chrome and Safari against the public relay
 
 ## Closes

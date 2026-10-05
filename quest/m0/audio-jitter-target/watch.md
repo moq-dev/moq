@@ -53,5 +53,4 @@ about 22 s with skip-aheads on the way down.
 
 ## Related
 
-- [Delay rebuild](/quest/m0/watch-delay-rebuild.md) - lands first, so preset steps stop rebuilding the decoder
 - [A/V clock](/quest/m1/av-clock.md) - reshapes `SyncInput` around the per-track target this line produces

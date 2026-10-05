@@ -49,6 +49,7 @@ import {
 	hasStreamCount,
 	restartSupported,
 	Version,
+	waitsForSubscriberFin,
 } from "./version.ts";
 
 // Bound on how long stream-open plus the first response (SUBSCRIBE_OK on older
@@ -625,7 +626,7 @@ export class Subscriber {
 			producer.close();
 			// A settled lite07 tail acknowledges completion with FIN, without cancelling
 			// the publisher's already-finished receive half.
-			if (tailSettled && this.version === Version.DRAFT_07) stream.writer.close();
+			if (tailSettled && waitsForSubscriberFin(this.version)) stream.writer.close();
 			else stream.close();
 			console.debug(`subscribe close: id=${id} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
