@@ -1271,6 +1271,130 @@ mod tests {
 		transcoder.abort();
 	}
 
+	/// A fetch that starts partway through a group is refused rather than served.
+	/// Another instance at the same path encodes that group into different bytes,
+	/// so the tail this one would produce cannot continue the head a reader holds.
+	/// It is the relay's cue to give up on the group and move on to the next.
+	#[tokio::test]
+	async fn a_mid_group_fetch_is_refused() {
+		let source = source_catalog(320, 240);
+		// Serve any source group on demand, so a fetch that is not refused has
+		// something to transcode and resolves.
+		let source_fetches = source._track.dynamic();
+		let server = tokio::spawn(async move {
+			while let Ok(request) = source_fetches.requested_group().await {
+				let mut group = request.accept(None).unwrap();
+				write_keyframe(&mut group);
+				group.finish().unwrap();
+			}
+		});
+
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let catalog = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
+		await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
+
+		// The source publishes no live groups, so group 7 is a cache miss that
+		// reaches the rung's fetch handler.
+		let rung = consumer.track("video/120p").unwrap();
+		rung.query().await.unwrap();
+
+		let partial = rung
+			.fetch_group(7, moq_net::group::Fetch::default().with_frame_start(2))
+			.await;
+		match partial {
+			Err(moq_net::Error::NotFound) => {}
+			Err(err) => panic!("expected a NotFound refusal, got {err}"),
+			Ok(_) => panic!("served a fetch that starts mid-group"),
+		}
+
+		// The whole group still serves.
+		let mut whole = rung.fetch_group(7, None).await.unwrap();
+		while whole.read_frame().await.unwrap().is_some() {}
+		assert!(whole.finished().await.unwrap() > 0, "the whole group had no frames");
+
+		server.abort();
+		transcoder.abort();
+	}
+
+	/// Two transcoders fed the same source are one broadcast: the same catalog,
+	/// and groups that mirror the source's sequences and timestamps. That is what
+	/// lets a relay move a subscription between them at a group boundary.
+	#[tokio::test]
+	async fn two_instances_publish_the_same_broadcast() {
+		let source = source_broadcast(2, 5);
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+
+		let mut instances = Vec::new();
+		for _ in 0..2 {
+			let output = moq_net::broadcast::Info::default().produce();
+			let consumer = output.consume();
+			let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config.clone()));
+
+			let track = loop {
+				match consumer.track(hang::Catalog::DEFAULT_NAME) {
+					Ok(track) => break track,
+					Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+					Err(err) => panic!("catalog track: {err}"),
+				}
+			};
+			let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track.subscribe(None).await.unwrap());
+			let catalog = await_catalog(&mut catalogs, |snapshot| {
+				snapshot.video.renditions.contains_key("video/120p")
+			})
+			.await;
+
+			let rung = consumer.track("video/120p").unwrap();
+			let mut groups = Vec::new();
+			for sequence in 0..2 {
+				let mut fetched = rung.fetch_group(sequence, None).await.unwrap();
+				let mut timestamps = Vec::new();
+				while let Some(payload) = fetched.read_frame().await.unwrap() {
+					let frame = hang::container::Frame::decode(payload.payload).unwrap();
+					timestamps.push(frame.timestamp.as_micros());
+				}
+				groups.push((fetched.sequence, timestamps));
+			}
+
+			instances.push((catalog, groups));
+			transcoder.abort();
+		}
+
+		let (first, second) = (&instances[0], &instances[1]);
+		assert_eq!(first.0, second.0, "the two instances published different catalogs");
+		assert_eq!(first.1, second.1, "the two instances published different groups");
+		// Mirrored from the source, not numbered by either instance.
+		let expected: Vec<_> = (0..2u64)
+			.map(|sequence| (sequence, (0..5).map(|i| (sequence * 5 + i) as u128 * 33_333).collect()))
+			.collect();
+		assert_eq!(first.1, expected);
+	}
+
 	/// A source whose codec description changes rebuilds the shared decode, so
 	/// every rung retires with it. The picture may not have moved at all, so shape
 	/// alone would hand the replacements the names that just ended. They have to be
