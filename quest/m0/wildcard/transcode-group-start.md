@@ -19,7 +19,11 @@ config.
   defaults) leaks into the catalog.
 - Tests: a subscription and a FETCH that start mid-group, and two instances
   fed the same source that publish the same catalog and group sequences.
-- Done in [#4812](https://github.com/moq-dev/moq/pull/4812): the rung refuses a mid-group FETCH; the rest waits on [#4817](https://github.com/moq-dev/moq/pull/4817)'s bare-path rule.
+- Done in [#4812](https://github.com/moq-dev/moq/pull/4812): the rung refuses a
+  mid-group FETCH, and two instances mirror the source's group sequences and
+  timestamps. The two-instance catalog check is dropped until
+  [#4817](https://github.com/moq-dev/moq/pull/4817) decides whether the catalog
+  must be deterministic; the rest waits on its bare-path rule.
 
 Public API: none. Wire: none.
 

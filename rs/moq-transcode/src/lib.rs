@@ -1351,7 +1351,12 @@ mod tests {
 
 		// Mirrored from the source, not numbered by either instance.
 		let expected: Vec<_> = (0..2u64)
-			.map(|sequence| (sequence, (0..5).map(|i| (sequence * 5 + i) as u128 * 33_333).collect::<Vec<_>>()))
+			.map(|sequence| {
+				(
+					sequence,
+					(0..5).map(|i| (sequence * 5 + i) as u128 * 33_333).collect::<Vec<_>>(),
+				)
+			})
 			.collect();
 
 		for _ in 0..2 {
