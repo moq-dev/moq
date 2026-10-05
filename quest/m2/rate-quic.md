@@ -23,9 +23,12 @@ backpressure the peer cannot ignore, rather than metering and closing.
   controlled, so credit alone does not bound them. Received datagram payload
   is charged to the same allowance that paces `MAX_DATA` credit, and a
   datagram past the cap plus burst is dropped before routing, the same as
-  network loss. Unspent stream credit must not starve datagrams: a publisher
-  mixing both under the cap loses none. An honest publisher is never
-  disconnected, so this does not wait for [the grant](/quest/m2/rate-grant.md).
+  network loss. Charge on receipt (stream bytes consumed plus datagram
+  payload), so datagram bytes withhold the next credit extension: unspent
+  stream credit does not starve datagrams, a publisher mixing both under the
+  cap loses none, and mixed traffic overshoots by at most one window. An
+  honest publisher is never disconnected, so this does not wait for
+  [the grant](/quest/m2/rate-grant.md).
 - **Credit cannot be retracted** (RFC 9000 §4.1). Every session, capped or
   not, starts with an `initial_max_data` shrunk to what the handshake,
   CONNECT, SETUP, and in-band AUTH need, with no config knob, so a peer
