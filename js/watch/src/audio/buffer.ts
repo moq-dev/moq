@@ -21,7 +21,7 @@ class Backpressure {
 		this.#headroom = headroom;
 	}
 
-	// Move the gate as the floor changes (e.g. "real-time" jitter tracking RTT).
+	// Move the gate as the floor changes (e.g. "auto" tracking the measured arrival spread).
 	setHeadroom(headroom: Time.Micro): void {
 		this.#headroom = headroom;
 	}
@@ -100,6 +100,9 @@ export interface AudioBuffer {
 	/** Whether the buffer is stalled (waiting to fill). */
 	readonly stalled: Getter<boolean>;
 
+	/** How many times the ring has run dry mid-playback, cumulative. */
+	readonly underruns: Getter<number>;
+
 	/** Release any resources (event listeners, intervals, etc.). */
 	close(): void;
 }
@@ -148,6 +151,9 @@ class SharedAudioBuffer implements AudioBuffer {
 	readonly #stalled = new Signal<boolean>(true);
 	readonly stalled: Getter<boolean> = this.#stalled;
 
+	readonly #underruns = new Signal<number>(0);
+	readonly underruns: Getter<number> = this.#underruns;
+
 	#backpressure: Backpressure;
 
 	#signals = new Effect();
@@ -174,6 +180,7 @@ class SharedAudioBuffer implements AudioBuffer {
 			const stalled = this.#ring.stalled;
 			this.#timestamp.set(this.#ring.timestamp);
 			this.#stalled.set(stalled);
+			this.#underruns.set(this.#ring.underruns);
 			// While stalled the playhead is parked, so release the decode loop to refill the floor;
 			// once playing, hold it to ~the floor ahead.
 			if (stalled) this.#backpressure.flush();
@@ -212,7 +219,10 @@ class SharedAudioBuffer implements AudioBuffer {
 	}
 
 	wait(timestamp: Time.Micro): Promise<void> {
-		// Stalled = still filling the floor (bootstrap or underflow): let frames through to refill.
+		// Stalled = still filling the floor (bootstrap, an underrun the reader re-stalled on, or an
+		// explicit reset): let frames through so the ring refills to the floor. This is the single
+		// re-buffer path; the ring un-stalls itself on the insert that reaches the floor, so the
+		// gate closes again within one frame rather than draining the whole lookahead.
 		if (this.#ring.stalled) return Promise.resolve();
 		return this.#backpressure.wait(timestamp, this.#ring.timestamp);
 	}
@@ -234,6 +244,9 @@ class PostAudioBuffer implements AudioBuffer {
 
 	readonly #stalled = new Signal<boolean>(true);
 	readonly stalled: Getter<boolean> = this.#stalled;
+
+	readonly #underruns = new Signal<number>(0);
+	readonly underruns: Getter<number> = this.#underruns;
 
 	// Backpressure runs off the playhead the worklet reports in its state messages.
 	#backpressure: Backpressure;
@@ -257,6 +270,7 @@ class PostAudioBuffer implements AudioBuffer {
 			if (data?.type === "state") {
 				this.#timestamp.set(data.timestamp);
 				this.#stalled.set(data.stalled);
+				this.#underruns.set(data.underruns);
 				// While stalled the playhead is parked, so release the decode loop to refill the floor;
 				// once playing, hold it to ~the floor ahead.
 				if (data.stalled) this.#backpressure.flush();
@@ -297,7 +311,8 @@ class PostAudioBuffer implements AudioBuffer {
 	}
 
 	wait(timestamp: Time.Micro): Promise<void> {
-		// Stalled = still filling the floor (bootstrap or underflow): let frames through to refill.
+		// Stalled = still filling the floor (bootstrap, an underrun the reader re-stalled on, or an
+		// explicit reset): let frames through so the ring refills to the floor. See SharedAudioBuffer.
 		if (this.#stalled.peek()) return Promise.resolve();
 		// Uses the worklet-reported playhead, which lags by a state-message interval; the floor's
 		// headroom covers that. The worklet still drops the oldest if a frame slips through.

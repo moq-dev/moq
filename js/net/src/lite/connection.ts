@@ -152,9 +152,16 @@ export class Connection implements Established {
 		void this.#run();
 	}
 
-	/** Withdraw announcements and wait up to one second for delivery before closing. */
+	/**
+	 * Withdraw announcements and finish the requests this session serves, waiting up to one
+	 * second for delivery before closing.
+	 *
+	 * A served subscription first delivers its remaining group streams, and on lite-07 also
+	 * waits for the subscriber's FIN, which says it read the tail. A live track never ends on
+	 * its own, so it holds the close until the deadline.
+	 */
 	close(): Promise<void> {
-		this.#closing ??= withTimeout(this.#publisher.withdraw(), 1000, "session close timed out").finally(() =>
+		this.#closing ??= withTimeout(this.#publisher.drain(), 1000, "session close timed out").finally(() =>
 			this.abort(),
 		);
 		return this.#closing;
@@ -271,14 +278,27 @@ export class Connection implements Established {
 			const msg = await AnnounceRequest.decode(stream.reader, this.#version);
 			await this.#publisher.runAnnounce(msg, stream);
 		} else if (typ === StreamId.Subscribe) {
-			const msg = await Subscribe.decode(stream.reader, this.#version);
-			await this.#publisher.runSubscribe(msg, stream);
+			// Owed from dispatch, so a close that lands mid-decode still waits for the request.
+			await this.#publisher.owe(
+				(async () => {
+					const msg = await Subscribe.decode(stream.reader, this.#version);
+					await this.#publisher.runSubscribe(msg, stream);
+				})(),
+			);
 		} else if (typ === StreamId.Fetch) {
-			const msg = await Fetch.decode(stream.reader, this.#version);
-			await this.#publisher.runFetch(msg, stream);
+			await this.#publisher.owe(
+				(async () => {
+					const msg = await Fetch.decode(stream.reader, this.#version);
+					await this.#publisher.runFetch(msg, stream);
+				})(),
+			);
 		} else if (typ === StreamId.Track) {
-			const msg = await TrackMessage.decode(stream.reader, this.#version);
-			await this.#publisher.runTrackInfo(msg, stream);
+			await this.#publisher.owe(
+				(async () => {
+					const msg = await TrackMessage.decode(stream.reader, this.#version);
+					await this.#publisher.runTrackInfo(msg, stream);
+				})(),
+			);
 		} else if (typ === StreamId.Probe) {
 			await this.#publisher.runProbe(stream);
 		} else if (typ === StreamId.Goaway) {

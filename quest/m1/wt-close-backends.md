@@ -2,9 +2,9 @@
 
 ## Goal
 
-Every `moq-dev/web-transport` backend that speaks WebTransport (noq, quinn, iroh)
+Every `moq-dev/web-transport` backend that speaks WebTransport over HTTP/3 (noq, quinn)
 delivers the close capsule when a server closes and drops its session, proven by
-a regression test, and any that doesn't is fixed upstream.
+a regression test, and iroh's client reads a peer's capsule close.
 
 ## Plan
 
@@ -17,8 +17,8 @@ a regression test, and any that doesn't is fixed upstream.
   last session handle ends the HTTP/3 control and QPACK streams under the
   capsule. moq-dev/noq#23 and its `close_capsule.rs` test should port almost
   verbatim. moq consumes neither crate, so no pin bump follows.
-- `web-transport-iroh` sends no capsule, only a QUIC close. Browsers cannot dial
-  an iroh endpoint, so decide whether native peers want one. Its client also
+- `web-transport-iroh` keeps sending no capsule, only a QUIC close (decided with
+  the maintainer: browsers cannot dial an iroh endpoint). Fix its client, which
   reads capsules without the HTTP/3 DATA framing the other backends send, so a
   peer's capsule close surfaces as `(0, "stream closed")`.
 - `Request::reject` (an HTTP status instead of 200) drops the control stream and
@@ -28,4 +28,4 @@ a regression test, and any that doesn't is fixed upstream.
   too; it survives only because the capsule reader keeps the session state
   alive. Worth making structural while here.
 
-Public API: none. Wire: none, unless iroh starts sending the capsule.
+Public API: none. Wire: none.

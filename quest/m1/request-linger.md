@@ -22,9 +22,6 @@ Decided in planning (2026-10-03, from [#4741](https://github.com/moq-dev/moq/pul
 - **A short fixed window**, around a second: enough to absorb a re-subscribe or
   a seek, far below the front's 30 s cache linger. A constant, measured during
   the quest.
-- Watches demand through the `demand()` handles
-  [Demand everywhere](/quest/m1/demand-everywhere.md) plumbs.
-
-## Required
-
-- [Demand everywhere](/quest/m1/demand-everywhere.md) - requests and producers at every level watch subscribers through `demand()` alone
+- Watches demand through the `demand()` handles. The last `fetch_group`
+  caller leaving withdraws its fetch at once, so a reader returning within the
+  linger starts a fresh request; the linger has to defer that withdrawal too.

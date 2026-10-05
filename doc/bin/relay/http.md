@@ -59,6 +59,36 @@ and friends. During a [shutdown drain](/bin/relay/config#shutdown),
 `moq_relay_draining_sessions` counts the sessions sent a GOAWAY that have not
 left yet. Host CPU and memory belong to a node exporter.
 
+`moq_relay_sessions_refused_total` counts the session attempts admission turned
+away, by `reason`:
+
+- `refused`: the decider said no (the auth server, the public rules, or an
+  embedder).
+- `unavailable`: the decider could not answer, so the client is told to retry
+  (the auth server was unreachable or answered with neither a grant nor a
+  refusal, a decider sent a grant the relay cannot use, or an embedder did not
+  answer).
+- `request`: an embedder refused the request as one it cannot decide.
+- `forbidden`: the grant allows nothing the session asked for, or an embedder
+  refused the session as forbidden.
+- `lan`: a LAN peer's membership proof was missing or wrong, or LAN discovery
+  is off.
+
+Only sessions are counted. The HTTP routes admit through the same decider but
+open no session, so like `moq_relay_sessions_opened_total` this leaves them out,
+and a refusal earlier in the handshake, such as TLS, never reaches admission. A
+rise in `unavailable` points at the auth server; a rise in `refused` at the
+credentials clients present.
+
+Each attempt counts once, so this is refused attempts, not refused clients, and
+one connect can be refused more than once. A client that races WebSocket against
+QUIC can be refused on both when its WebSocket upgrade goes out before QUIC
+connects; the browser client starts WebSocket after a head start, or at once for
+a URL where WebSocket won before. A client that cannot tell a refusal from a
+failure retries, and each retry counts: a browser refused over WebSocket sees no
+status and retries until its reconnect window closes, while a credential refusal
+over QUIC closes the session as unauthorized, which stops it.
+
 Traffic and session counters accumulate for the node's lifetime, including
 broadcasts and sessions that have ended. The stats publishing prefix (normally
 `.stats`) is excluded to avoid counting the feed's own traffic.
