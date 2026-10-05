@@ -1,6 +1,6 @@
 import { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type { Data, InitPost, InitShared, Latency, Reset, Stall, State, Truncate } from "./render";
+import type { Data, InitPost, InitShared, Latency, Reset, State, Truncate } from "./render";
 import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
 
 /**
@@ -76,14 +76,6 @@ export interface AudioBuffer {
 
 	/** Flush buffered samples and re-stall, ready to anchor the next utterance (buffered mode). */
 	reset(): void;
-
-	/**
-	 * Hold playback until the ring holds the target again, keeping everything buffered.
-	 *
-	 * Used when the target deepens: `setLatency` alone only raises the bar a future refill has to
-	 * clear, so a ring already playing keeps draining at its old depth.
-	 */
-	stall(): void;
 
 	/**
 	 * Drop buffered samples at or after `timestamp`, keeping what is already due.
@@ -203,16 +195,17 @@ class SharedAudioBuffer implements AudioBuffer {
 	setLatency(samples: number): void {
 		this.#backpressure.setHeadroom(samplesToMicro(samples, this.rate));
 
+		// Park the current ring before any resize: the worklet keeps reading it until `init-shared`
+		// lands, and `resize` carries the floor and the park over to the copy.
+		this.#ring.setLatency(samples);
+
 		// Grow the ring (preserving the unread window) if it's too small for the new latency.
 		if (this.#ring.capacity < samples * 1.5) {
 			const newCapacity = Math.max(this.rate, samples * 2);
 			this.#ring = this.#ring.resize(newCapacity);
-			this.#ring.setLatency(samples);
 
 			const msg: InitShared = { type: "init-shared", ...this.#ring.init };
 			this.#worklet.port.postMessage(msg);
-		} else {
-			this.#ring.setLatency(samples);
 		}
 	}
 
@@ -223,11 +216,6 @@ class SharedAudioBuffer implements AudioBuffer {
 	reset(): void {
 		this.#ring.reset();
 		this.#backpressure.flush(); // the old timeline is gone; let the decode loop re-anchor
-	}
-
-	stall(): void {
-		this.#ring.stall();
-		this.#backpressure.flush(); // let the decode loop fill the deeper target
 	}
 
 	wait(timestamp: Time.Micro): Promise<void> {
@@ -320,15 +308,6 @@ class PostAudioBuffer implements AudioBuffer {
 		const msg: Reset = { type: "reset" };
 		this.#worklet.port.postMessage(msg);
 		this.#backpressure.flush(); // the old timeline is gone; let the decode loop re-anchor
-	}
-
-	stall(): void {
-		const msg: Stall = { type: "stall" };
-		this.#worklet.port.postMessage(msg);
-		// Mirror it locally rather than waiting for the worklet's next state message, so `wait()`
-		// releases the decode loop now.
-		this.#stalled.set(true);
-		this.#backpressure.flush(); // let the decode loop fill the deeper target
 	}
 
 	wait(timestamp: Time.Micro): Promise<void> {

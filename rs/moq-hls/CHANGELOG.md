@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.10](https://github.com/moq-dev/moq/compare/moq-hls-v0.5.9...moq-hls-v0.5.10) - 2026-10-03
+
+### Fixed
+
+- *(hls)* an estimated framerate keeps the rendition ([#4641](https://github.com/moq-dev/moq/pull/4641))
+
+## [0.5.9](https://github.com/moq-dev/moq/compare/moq-hls-v0.5.8...moq-hls-v0.5.9) - 2026-09-30
+
+### Fixed
+
+- *(hls,auth)* redact credentials from URLs in errors ([#4536](https://github.com/moq-dev/moq/pull/4536))
+
 ## [0.5.8](https://github.com/moq-dev/moq/compare/moq-hls-v0.5.7...moq-hls-v0.5.8) - 2026-09-27
 
 ### Other

@@ -42,9 +42,6 @@ class Render extends AudioWorkletProcessor {
 			} else if (msg.type === "reset") {
 				// Only meaningful in post mode; shared mode resets via the control array.
 				if (this.#backend instanceof AudioRingBuffer) this.#backend.reset();
-			} else if (msg.type === "stall") {
-				// Only meaningful in post mode; shared mode stalls via the control array.
-				if (this.#backend instanceof AudioRingBuffer) this.#backend.stall();
 			}
 		};
 	}

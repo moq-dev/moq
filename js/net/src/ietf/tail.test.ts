@@ -178,6 +178,20 @@ test("END_OF_TRACK at object 0 ends the track before its group, which never exis
 	expect(reader.final()).toBe(2);
 });
 
+test("a group at or past the END_OF_TRACK aborts the track", async () => {
+	const { subscriber, reader } = await subscribed();
+	const end = groupStream(subscriber, 2);
+	end.write(END_OF_TRACK);
+	end.finish();
+	expect(await reader.finished()).toBe(2);
+
+	const late = groupStream(subscriber, 2);
+	late.write(object("2.0"));
+	late.finish();
+	await late.handled;
+	expect(await reader.closed).toBeInstanceOf(ProtocolViolation);
+});
+
 test("a bare FIN without PUBLISH_DONE aborts the track", async () => {
 	const { reader, fin } = await subscribed();
 	await fin();

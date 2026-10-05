@@ -39,19 +39,7 @@ jobs:
           # Full history so `just ci check` can diff against origin/$GITHUB_BASE_REF.
           fetch-depth: 0
 
-      # Quests, agent config, and root Markdown compile nothing, so a diff of only
-      # those skips the disk cleanup and Rust cache that exist for the build.
-      - name: Scope
-        id: scope
-        run: |
-          base=$(git merge-base "origin/$GITHUB_BASE_REF" HEAD)
-          files=$(git diff --name-only "$base")
-          if grep -qvE '^(quest/|\.claude/|[^/]+\.md$)' <<< "$files"; then
-            echo build=true >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Free disk space
-        if: steps.scope.outputs.build
         uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
         with:
           tool-cache: false
@@ -75,20 +63,19 @@ jobs:
       # scope such an entry to the PR's own branch anyway, where no later PR
       # could read it while it ate the repository's 10 GB budget.
       - name: Rust cache
-        if: steps.scope.outputs.build
         uses: ./.github/actions/rust-cache
 
       # The same recipe a developer runs locally. It diffs against
       # origin/$GITHUB_BASE_REF and touches only the packages this PR changed
-      # plus their dependents, so a one-crate PR compiles one crate.
+      # plus their dependents, so a one-crate PR compiles one crate and a
+      # quest-only PR runs only the lints. sh/dispatch.sh's impact map is the one
+      # place that decides; the setup above always runs rather than keep a second
+      # path map here.
       #
       # MOQ_STRICT turns every "tool missing, skipping" guard into an error.
       # Locally an absent formatter means less gets checked; here it would mean
       # a green run that checked nothing, which is the failure mode worth
       # spending a preflight on.
-      - name: Test direnv hook
-        run: bash .claude/hooks/direnv.test.sh
-
       - name: Check
         run: nix develop --command just ci check
         env:
@@ -108,26 +95,12 @@ jobs:
           # Full history so `just ci test` can diff against origin/$GITHUB_BASE_REF.
           fetch-depth: 0
 
-      # Same scope as the `check` job. No test covers those files either, so the
-      # job skips everything and reports green instead of spending a minute of
-      # setup to run nothing.
-      - name: Scope
-        id: scope
-        run: |
-          base=$(git merge-base "origin/$GITHUB_BASE_REF" HEAD)
-          files=$(git diff --name-only "$base")
-          if grep -qvE '^(quest/|\.claude/|[^/]+\.md$)' <<< "$files"; then
-            echo build=true >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Free disk space
-        if: steps.scope.outputs.build
         uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
         with:
           tool-cache: false
 
-      - if: steps.scope.outputs.build
-        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
           # Trust the flake's cachix substituter. `nixConfig` in flake.nix is
@@ -142,13 +115,11 @@ jobs:
 
       # Restore only, same as the `check` job above.
       - name: Rust cache
-        if: steps.scope.outputs.build
         uses: ./.github/actions/rust-cache
 
       # NEXTEST_PROFILE picks up the longer hang timeout in .config/nextest.toml;
       # without it a runner under load could trip the local one.
       - name: Test
-        if: steps.scope.outputs.build
         run: nix develop --command just ci test
         env:
           MOQ_STRICT: 1

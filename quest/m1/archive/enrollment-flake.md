@@ -22,5 +22,5 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [More tests hold up under load](/quest/m1/test-flakes-2.md) - the same
+- [More tests hold up under load](/quest/m1/test-flakes-2/README.md) - the same
   round of load-only failures on `main`

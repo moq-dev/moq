@@ -144,6 +144,202 @@ impl Sps {
 	}
 }
 
+/// The reordering an SPS NAL unit declares in its VUI: `max_num_reorder_frames` from the
+/// bitstream restriction, and the frame period when `fixed_frame_rate_flag` is set.
+///
+/// `None` when the SPS carries no VUI or no bitstream restriction, or fails to parse.
+pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
+	let vui = sps_vui(nal)?;
+	Some(crate::codec::video::Reorder {
+		depth: vui.depth?,
+		period: vui.period,
+	})
+}
+
+/// The frame rate an SPS NAL unit fixes with `fixed_frame_rate_flag`.
+///
+/// Without the flag the VUI tick only bounds the rate from above, so it is left to measurement.
+/// A field-capable SPS is left out too: `pic_struct` in the slice header then decides whether a
+/// tick counts a field or a frame (ITU-T H.264 E.2.1, Table E-6), and only measurement settles it.
+pub(crate) fn sps_framerate(nal: &[u8]) -> Option<f64> {
+	let vui = sps_vui(nal)?;
+	if !vui.frame_only {
+		return None;
+	}
+	let (units, scale) = vui.period?;
+	Some(scale as f64 / units as f64)
+}
+
+/// What an SPS VUI declares about picture timing.
+struct Vui {
+	/// `frame_mbs_only_flag`: every picture is a frame, so two ticks are one frame.
+	frame_only: bool,
+	/// One frame's duration as `(units, scale)` when `fixed_frame_rate_flag` is set.
+	period: Option<(u64, u64)>,
+	/// `max_num_reorder_frames`, when the bitstream restriction is present.
+	depth: Option<u32>,
+}
+
+/// `None` when the SPS carries no VUI or fails to parse.
+fn sps_vui(nal: &[u8]) -> Option<Vui> {
+	if nal.len() < 4 {
+		return None;
+	}
+	let rbsp = h264_parser::nal::ebsp_to_rbsp(&nal[1..]);
+	let sps = h264_parser::Sps::parse(&rbsp).ok()?;
+	if !sps.vui_parameters_present_flag {
+		return None;
+	}
+	vui(&rbsp).ok().flatten()
+}
+
+/// Walk an SPS RBSP to its VUI (ITU-T H.264 7.3.2.1.1, E.1.1). `h264_parser` stops at
+/// `vui_parameters_present_flag` without exposing its position, so this re-reads the fields
+/// before it.
+fn vui(rbsp: &[u8]) -> h264_parser::Result<Option<Vui>> {
+	use h264_parser::bitreader::BitReader;
+	use h264_parser::eg::{read_se, read_ue};
+
+	let mut r = BitReader::new(rbsp);
+	let profile_idc = r.read_u8()?;
+	r.skip_bits(16)?; // constraint flags, reserved bits, level_idc
+	read_ue(&mut r)?; // seq_parameter_set_id
+	if matches!(
+		profile_idc,
+		100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135
+	) {
+		let chroma_format_idc = read_ue(&mut r)?;
+		if chroma_format_idc == 3 {
+			r.skip_bits(1)?; // separate_colour_plane_flag
+		}
+		read_ue(&mut r)?; // bit_depth_luma_minus8
+		read_ue(&mut r)?; // bit_depth_chroma_minus8
+		r.skip_bits(1)?; // qpprime_y_zero_transform_bypass_flag
+		if r.read_flag()? {
+			let lists = if chroma_format_idc == 3 { 12 } else { 8 };
+			for i in 0..lists {
+				if r.read_flag()? {
+					let size = if i < 6 { 16 } else { 64 };
+					let (mut last, mut next) = (8i32, 8i32);
+					for _ in 0..size {
+						if next != 0 {
+							next = (last + read_se(&mut r)?).rem_euclid(256);
+						}
+						if next != 0 {
+							last = next;
+						}
+					}
+				}
+			}
+		}
+	}
+	read_ue(&mut r)?; // log2_max_frame_num_minus4
+	match read_ue(&mut r)? {
+		0 => {
+			read_ue(&mut r)?; // log2_max_pic_order_cnt_lsb_minus4
+		}
+		1 => {
+			r.skip_bits(1)?; // delta_pic_order_always_zero_flag
+			read_se(&mut r)?; // offset_for_non_ref_pic
+			read_se(&mut r)?; // offset_for_top_to_bottom_field
+			for _ in 0..read_ue(&mut r)? {
+				read_se(&mut r)?; // offset_for_ref_frame
+			}
+		}
+		_ => {}
+	}
+	read_ue(&mut r)?; // max_num_ref_frames
+	r.skip_bits(1)?; // gaps_in_frame_num_value_allowed_flag
+	read_ue(&mut r)?; // pic_width_in_mbs_minus1
+	read_ue(&mut r)?; // pic_height_in_map_units_minus1
+	let frame_only = r.read_flag()?; // frame_mbs_only_flag
+	if !frame_only {
+		r.skip_bits(1)?; // mb_adaptive_frame_field_flag
+	}
+	r.skip_bits(1)?; // direct_8x8_inference_flag
+	if r.read_flag()? {
+		for _ in 0..4 {
+			read_ue(&mut r)?; // frame_crop_*_offset
+		}
+	}
+	if !r.read_flag()? {
+		return Ok(None);
+	}
+
+	// vui_parameters()
+	if r.read_flag()? && r.read_u8()? == 255 {
+		r.skip_bits(32)?; // sar_width, sar_height
+	}
+	if r.read_flag()? {
+		r.skip_bits(1)?; // overscan_appropriate_flag
+	}
+	if r.read_flag()? {
+		r.skip_bits(4)?; // video_format, video_full_range_flag
+		if r.read_flag()? {
+			r.skip_bits(24)?; // colour_primaries, transfer_characteristics, matrix_coefficients
+		}
+	}
+	if r.read_flag()? {
+		read_ue(&mut r)?; // chroma_sample_loc_type_top_field
+		read_ue(&mut r)?; // chroma_sample_loc_type_bottom_field
+	}
+	let mut period = None;
+	if r.read_flag()? {
+		let units = r.read_bits(32)?;
+		let scale = r.read_bits(32)?;
+		// With a fixed rate, a frame lasts two ticks (E.2.1).
+		if r.read_flag()? && units > 0 && scale > 0 {
+			period = Some((2 * u64::from(units), u64::from(scale)));
+		}
+	}
+	let nal_hrd = r.read_flag()?;
+	if nal_hrd {
+		skip_hrd(&mut r)?;
+	}
+	let vcl_hrd = r.read_flag()?;
+	if vcl_hrd {
+		skip_hrd(&mut r)?;
+	}
+	if nal_hrd || vcl_hrd {
+		r.skip_bits(1)?; // low_delay_hrd_flag
+	}
+	r.skip_bits(1)?; // pic_struct_present_flag
+	if !r.read_flag()? {
+		return Ok(Some(Vui {
+			frame_only,
+			period,
+			depth: None,
+		}));
+	}
+	r.skip_bits(1)?; // motion_vectors_over_pic_boundaries_flag
+	for _ in 0..4 {
+		read_ue(&mut r)?; // max_bytes_per_pic_denom .. log2_max_mv_length_vertical
+	}
+	let depth = read_ue(&mut r)?; // max_num_reorder_frames
+	Ok(Some(Vui {
+		frame_only,
+		period,
+		depth: Some(depth),
+	}))
+}
+
+/// Skip `hrd_parameters()` (ITU-T H.264 E.1.2).
+fn skip_hrd(r: &mut h264_parser::bitreader::BitReader) -> h264_parser::Result<()> {
+	use h264_parser::eg::read_ue;
+
+	let cpb_cnt_minus1 = read_ue(r)?;
+	if cpb_cnt_minus1 > 31 {
+		return Err(h264_parser::Error::MalformedSps("cpb_cnt_minus1 out of range".into()));
+	}
+	r.skip_bits(8)?; // bit_rate_scale, cpb_size_scale
+	for _ in 0..=cpb_cnt_minus1 {
+		read_ue(r)?; // bit_rate_value_minus1
+		read_ue(r)?; // cpb_size_value_minus1
+		r.skip_bits(1)?; // cbr_flag
+	}
+	r.skip_bits(20) // four delay/offset lengths
+}
+
 /// Parsed AVCDecoderConfigurationRecord (ISO/IEC 14496-15 §5.3.3.1.2).
 ///
 /// Just the codec-config fields that the hang catalog records. The original
@@ -469,11 +665,89 @@ fn process_nal(
 	}
 }
 
+/// Real SPS NAL units from 64x64, 25 fps x264 encodes (High profile, 50 Hz VUI tick), for
+/// tests that need a VUI with a bitstream restriction.
+#[cfg(test)]
+pub(crate) mod fixtures {
+	/// `bframes=1:force-cfr=1`: one B-frame per reference (`max_num_reorder_frames` 1) with
+	/// `fixed_frame_rate_flag` set.
+	pub(crate) const SPS_IPB: &[u8] = &[
+		0x67, 0x64, 0x00, 0x0a, 0xac, 0xe4, 0x10, 0x9b, 0x01, 0x10, 0x00, 0x00, 0x03, 0x00, 0x10, 0x00, 0x00, 0x03,
+		0x03, 0x28, 0xf1, 0x22, 0x51, 0x20,
+	];
+	/// `bframes=3:b-pyramid=2:force-cfr=1`: a B-pyramid (`max_num_reorder_frames` 2) with
+	/// `fixed_frame_rate_flag` set.
+	pub(crate) const SPS_PYRAMID: &[u8] = &[
+		0x67, 0x64, 0x00, 0x0a, 0xac, 0xd9, 0x44, 0x26, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x03,
+		0x00, 0xca, 0x3c, 0x48, 0x96, 0x58,
+	];
+	/// `bframes=1` at x264's default: `max_num_reorder_frames` 1 without `fixed_frame_rate_flag`.
+	pub(crate) const SPS_IPB_VARIABLE: &[u8] = &[
+		0x67, 0x64, 0x00, 0x0a, 0xac, 0xe4, 0x10, 0x9b, 0x01, 0x10, 0x00, 0x00, 0x03, 0x00, 0x10, 0x00, 0x00, 0x03,
+		0x03, 0x20, 0xf1, 0x22, 0x51, 0x20,
+	];
+	/// `interlaced=1:tff=1:bframes=0` at 320x240, with `fixed_frame_rate_flag` forced on: the same
+	/// 50 Hz tick, but `frame_mbs_only_flag` 0 leaves `pic_struct` to the slice header.
+	pub(crate) const SPS_FIELD: &[u8] = &[
+		0x67, 0xf4, 0x00, 0x15, 0x91, 0x9d, 0x02, 0x82, 0x1f, 0x89, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00,
+		0x00, 0x03, 0x00, 0xca, 0x7c, 0x50, 0xaa, 0x80,
+	];
+	pub(crate) const PPS: &[u8] = &[0x68, 0xeb, 0xe3, 0xcb, 0x22, 0xc0];
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
 
 	const SC4: &[u8] = &[0, 0, 0, 1];
+
+	#[test]
+	fn sps_reorder_reads_the_vui() {
+		use crate::codec::video::Reorder;
+
+		let fixed = Some((2, 50));
+		assert_eq!(
+			sps_reorder(fixtures::SPS_IPB),
+			Some(Reorder {
+				depth: 1,
+				period: fixed
+			})
+		);
+		assert_eq!(
+			sps_reorder(fixtures::SPS_PYRAMID),
+			Some(Reorder {
+				depth: 2,
+				period: fixed
+			})
+		);
+		assert_eq!(
+			sps_reorder(fixtures::SPS_IPB_VARIABLE),
+			Some(Reorder { depth: 1, period: None })
+		);
+		// The field-capable SPS still declares its depth and tick; only the frame rate needs
+		// `pic_struct` to read it.
+		assert_eq!(
+			sps_reorder(fixtures::SPS_FIELD),
+			Some(Reorder {
+				depth: 0,
+				period: Some((2, 50))
+			})
+		);
+		// Baseline with no VUI declares nothing.
+		assert_eq!(sps_reorder(&[0x67, 0x42, 0xc0, 0x1f, 0xde]), None);
+		// A VUI cut short is no declaration rather than a wrong one.
+		assert_eq!(sps_reorder(&fixtures::SPS_IPB[..fixtures::SPS_IPB.len() - 3]), None);
+	}
+
+	#[test]
+	fn sps_framerate_needs_a_fixed_rate() {
+		assert_eq!(sps_framerate(fixtures::SPS_IPB), Some(25.0));
+		// The same 50 Hz tick without `fixed_frame_rate_flag` is only a ceiling.
+		assert_eq!(sps_framerate(fixtures::SPS_IPB_VARIABLE), None);
+		// A field-capable SPS makes the tick a field or a frame depending on `pic_struct`.
+		assert_eq!(sps_framerate(fixtures::SPS_FIELD), None);
+		assert_eq!(sps_framerate(&[0x67, 0x42, 0xc0, 0x1f, 0xde]), None);
+	}
 
 	fn annexb_frame(nals: &[&[u8]]) -> Bytes {
 		let mut buf = BytesMut::new();

@@ -60,13 +60,13 @@ fn apply_transport(transport: &mut noq::TransportConfig, quic: &Resolved) {
 	transport.congestion_controller_factory(congestion_factory(quic.congestion()));
 }
 
-/// Apply the flow-control windows, leaving each at the backend default when unset.
+/// Apply the flow-control windows. The connection window defaults to ours, since the
+/// backend's is unlimited; the others stay at the backend default when unset.
 fn apply_windows(transport: &mut noq::TransportConfig, quic: &Resolved) {
 	// Saturating rather than erroring: `Config::validate` already rejects a window
 	// past the varint, so this only bites a `Resolved` built without it.
-	if let Some(window) = quic.receive_window {
-		transport.receive_window(noq::VarInt::from_u64(window).unwrap_or(noq::VarInt::MAX));
-	}
+	let window = quic.receive_window.unwrap_or(crate::quic::DEFAULT_RECEIVE_WINDOW);
+	transport.receive_window(noq::VarInt::from_u64(window).unwrap_or(noq::VarInt::MAX));
 	if let Some(window) = quic.stream_receive_window {
 		transport.stream_receive_window(noq::VarInt::from_u64(window).unwrap_or(noq::VarInt::MAX));
 	}
@@ -343,7 +343,11 @@ impl NoqClient {
 		let mut config = tls.clone();
 
 		let target = url.host().ok_or(Error::InvalidDnsName)?;
-		let host = target.to_string();
+		// URL brackets delimit IPv6 literals, but aren't part of the TLS server name.
+		let host = match &target {
+			url::Host::Ipv6(ip) => ip.to_string(),
+			_ => target.to_string(),
+		};
 		let port = url.port().unwrap_or(443);
 
 		// Resolve, adapted to the local socket's family; the dial below races the
@@ -983,15 +987,69 @@ mod tests {
 	use super::*;
 	use url::Url;
 
+	#[tokio::test]
+	async fn pinned_ipv6_connection() {
+		pinned_connection("[::1]:0", None).await;
+	}
+
+	#[tokio::test]
+	async fn pinned_ipv4_connection() {
+		pinned_connection("127.0.0.1:0", None).await;
+	}
+
+	#[tokio::test]
+	async fn pinned_ipv6_connection_with_host_override() {
+		pinned_connection("[::1]:0", Some("localhost")).await;
+	}
+
+	async fn pinned_connection(bind: &str, host_name: Option<&str>) {
+		let quic = crate::quic::Config::default();
+		let server = NoqServer::new(
+			listen::Config {
+				bind: Some(bind.parse().unwrap()),
+				tls: crate::tls::Listen {
+					generate: vec!["localhost".into()],
+					..Default::default()
+				},
+				..Default::default()
+			},
+			&quic,
+			None,
+		)
+		.expect("server init");
+		let addr = server.local_addr().expect("local addr");
+		let mut tls_config = crate::tls::Connect::default();
+		tls_config.fingerprint = server.certificates().fingerprints();
+		assert!(!tls_config.fingerprint.is_empty());
+		tls_config.host_name = host_name.map(str::to_owned);
+		let config = connect::Config {
+			bind: Some(bind.parse().unwrap()),
+			tls: tls_config,
+			..Default::default()
+		};
+		let tls = config.tls.build().expect("tls config");
+		let client = NoqClient::new(&config, &quic).expect("client init");
+		let url: Url = format!("moqt://{addr}/.cluster/test").parse().unwrap();
+		let versions = moq_net::Versions::default();
+		let dial = client.connect(&tls, url.into(), &versions);
+		let accept = async {
+			let incoming = server.accept().await.expect("incoming connection");
+			super::accept(incoming, versions.alpns()).await
+		};
+		let result = tokio::time::timeout(Duration::from_secs(5), async { tokio::try_join!(dial, accept) })
+			.await
+			.expect("handshake timed out");
+		let (_client, _server) = result.expect("pinned connection failed");
+	}
+
 	/// noq exposes no getters for the flow-control windows, but its `Debug` prints
-	/// them, which is enough to prove each one reached the transport config and that
-	/// an unset knob leaves noq's own default in place.
+	/// them, which is enough to prove each one reached the transport config, that an
+	/// unset connection window gets our finite default instead of noq's unlimited one,
+	/// and that the other unset knobs leave noq's own defaults in place.
 	#[test]
 	fn apply_windows_writes_each_field() {
-		let defaults = format!("{:?}", noq::TransportConfig::default());
-
 		let mut quic = crate::quic::Config::default();
-		quic.receive_window = Some(64 << 20);
+		quic.receive_window = Some(128 << 20);
 		quic.stream_receive_window = Some(8 << 20);
 		quic.send_window = Some(32 << 20);
 
@@ -1000,7 +1058,7 @@ mod tests {
 		let applied = format!("{:?}", transport);
 
 		for field in [
-			format!("receive_window: {}", 64 << 20),
+			format!("receive_window: {}", 128 << 20),
 			format!("stream_receive_window: {}", 8 << 20),
 			format!("send_window: {}", 32 << 20),
 		] {
@@ -1009,7 +1067,14 @@ mod tests {
 
 		let mut untouched = noq::TransportConfig::default();
 		apply_windows(&mut untouched, &crate::quic::Config::default().resolve());
-		assert_eq!(format!("{:?}", untouched), defaults);
+		let mut expected = noq::TransportConfig::default();
+		expected.receive_window(noq::VarInt::from_u64(crate::quic::DEFAULT_RECEIVE_WINDOW).unwrap());
+		assert_eq!(format!("{:?}", untouched), format!("{:?}", expected));
+		assert_ne!(
+			format!("{:?}", untouched),
+			format!("{:?}", noq::TransportConfig::default()),
+			"noq's own connection window is unlimited, so ours must replace it"
+		);
 	}
 
 	/// Build a controller from each family's factory and downcast it to the

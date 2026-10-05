@@ -11,8 +11,8 @@ does not cover it, by the token on the request; with neither it is refused
 `UNAUTHORIZED`. The token's grant covers only the request it rode on and
 lives exactly as long as that request, and a REQUEST_UPDATE carrying a new
 token replaces it, which is how a peer refreshes. It scopes by path, never
-by method. Today the strict decoder on newer drafts fails the whole message
-on the unknown key, and the legacy drafts silently ignore it.
+by method. Every request already decodes the key and ignores it, so a token
+no longer fails the session; this quest gives it meaning.
 
 ## Plan
 
@@ -20,8 +20,9 @@ on the unknown key, and the legacy drafts silently ignore it.
   (`rs/moq-net/src/ietf/token.rs`, `js/net/src/ietf/token.ts`): `USE_VALUE` yields the token, `REGISTER` is a value since we
   advertise no `MAX_AUTH_TOKEN_CACHE_SIZE`, and `DELETE` or `USE_ALIAS`
   closes with `PROTOCOL_VIOLATION`. Both decoder families change: the strict
-  `decode_params!` path, which rejects the key today, and the generic KVP
-  path the legacy drafts use, which ignores it.
+  `decode_params!` path, where each request reads the repeatable key into an
+  ignored `Vec<Opaque>`, and draft-14's `Parameters::skip`, which consumes it
+  unread. `js/net` keeps every instance in `Parameters` and reads none.
 - Fallback only: a request the session grant already covers is served
   without verifying its token. Otherwise its token becomes an
   `auth::Request` on the session's `auth::Handle`, the seam an AUTH stream's
@@ -47,9 +48,8 @@ on the unknown key, and the legacy drafts silently ignore it.
   connection's id, and the auth server treats that as one more grant on the
   session that never POSTs `end`, so a request token would widen the whole
   connection for its life. The per-request call carries the token in
-  `moq_auth::Request.token` with its kind (a CAT reaches the CAT verifier,
-  not the JWT one) and the request's path, is never counted as a session
-  grant, and ends when the request ends. Two requests carrying the same bytes
+  `moq_auth::Request.token` with its kind and the request's path, is never
+  counted as a session grant, and ends when the request ends. Two requests carrying the same bytes
   get two leases. The request is resolved against the origin with the path
   checked against that lease's grant, not through the session's scoped
   origin handle. Name the call while implementing.

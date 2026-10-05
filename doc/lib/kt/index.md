@@ -25,10 +25,11 @@ import dev.moq.*
 
 // Subscribe. The Flow is live, so run it in its own coroutine.
 Moq.connect("https://relay.example.com", tlsRoots = listOf("ca.pem")).use { moq ->
-    moq.announcements(AnnounceConfig(prefix = "live/", filter = "*/camera")).collect { announcement ->
-        // Updates stay origin-relative; captures reports what each wildcard matched.
-        println(announcement.captures())
-        val broadcast = moq.requestBroadcast(announcement.prefix())
+    moq.announcements(AnnounceConfig(prefix = "live/", filter = "*/camera")).collect { event ->
+        if (event !is AnnounceEventStart) return@collect // Update, End, or Live
+        // Prefixes stay origin-relative; captures reports what each wildcard matched.
+        println(event.announce.captures)
+        val broadcast = moq.requestBroadcast(event.announce.prefix)
         println(broadcast.catalog())
     }
 }
@@ -48,6 +49,10 @@ Moq.connect("https://relay.example.com").use { moq ->
     )
     video.write(VideoFrame(timestampUs = pts, data = rgba))
     broadcast.announce(Route())
+    audio.finish()
+    video.finish()
+    broadcast.end()
+    moq.shutdown()
 }
 ```
 
@@ -58,14 +63,17 @@ Call `media.discontinuity()` when the source seeks, pauses, or changes its time 
 The three advertising operations: `moq.createBroadcast(path)` (or
 `origin.createBroadcast`) returns an unannounced producer, invisible to everyone;
 `broadcast.announce(route)` / `broadcast.unannounce()` own that exact-path
-advertisement; `broadcast.end()` ends the broadcast for good, while
-`broadcast.close()` (or `use { }`) only releases the handle, ending the
-broadcast once no `dynamic()` handle remains; `origin.dynamic(prefix, route)` claims `prefix` and every
+advertisement, and `broadcast.end()` ends the broadcast for good (a second call
+is a no-op; Kotlin spells it `end` because `close()`, or `use { }`, releases the
+handle, which ends the broadcast only once no `dynamic()` handle remains); `origin.dynamic(prefix, route)` claims `prefix` and every
 path beneath it (`""` for everything). Hold the returned `OriginDynamic`
 while the claim should stay advertised, and reject the requests you will not
 serve. A route is a capability, not an inventory. `announcements(config)` takes
-a literal prefix plus an optional relative pattern; `announcement.prefix()`
-stays origin-relative and `captures()` reports the wildcard matches. Paths with
+a literal prefix plus an optional relative pattern and yields `AnnounceEvent`s:
+`AnnounceEventStart`, `AnnounceEventUpdate`, or `AnnounceEventEnd`
+carrying an `Announce`, whose `prefix` stays origin-relative and whose
+`captures` reports the wildcard matches, or `AnnounceEventLive` once every route
+live at subscribe time has been delivered. Paths with
 a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless `hidden = true`.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
@@ -91,18 +99,31 @@ connection's send estimate; pass it to `encodeVideo` / `encodeAudio` or
 `reserve` a share for an app-owned track. `MoqException.isAuth` and
 `isShutdown` classify errors. Microsecond fields read back as a
 `kotlin.time.Duration`: `stats.rtt`, `backoff.initial`, `frame.timestamp`. `protocolError` is the structured protocol failure
-(scope, verbatim code, kind) when the peer sent one. Cancelling the collecting coroutine cancels the
-native side.
+(scope, verbatim code, kind) when the peer sent one. An exception's `toString()` is the Rust error message.
+Cancelling the collecting coroutine cancels the native side.
 
 `encodeAudio` encodes raw PCM inside the binding. Its codec is an object,
-`AudioCodec.opus()`, and `AudioEncoderOutput.frameDurationUs` sets the Opus
-frame length: 2500, 5000, 10000, 20000 (the default), 40000, or 60000.
+`AudioCodec.opus()` or `AudioCodec.aac()`, and
+`AudioEncoderOutput.frameDurationUs` sets the Opus frame length: 2500, 5000,
+10000, 20000 (the default), 40000, or 60000. 0 takes the codec's own frame,
+which AAC needs. AAC-LC encodes through the platform's encoder, so a host
+without one refuses it.
 
-`decodeVideo` picks the decoded CPU pixel layout: `VideoDecoderOutput.format`
-is `VideoPixelFormat.I420` when null, or `VideoPixelFormat.RGBA` for four bytes
-a pixel, and every frame repeats the layout it was decoded to. `resize` is best
-effort: only NVDEC has a built-in scaler, and MediaCodec is not it, so read each
-frame's own `width` and `height` rather than assuming it took.
+Audio `channels` also names the speaker layout, by the WAVE convention: 1 is
+mono, 2 stereo, 3 2.1, 4 quad, 5 5.0, 6 5.1, 7 6.1, and 8 7.1, interleaved
+front left, front right, center, LFE, back, then side. Decoding remixes to the
+count you ask for; past 8 channels the samples pass through but can't be
+remixed.
+
+Each frame from `decodeVideo` owns its decoded picture until `close()` (or
+`use {}`), including after the consumer is cancelled. `frame.pixels(format)`
+converts it on demand: `VideoPixelFormat.I420`, or `VideoPixelFormat.RGBA` for
+four bytes a pixel. Close frames promptly, since held frames hold decoder
+buffers. `resize` is best effort: only NVDEC has a built-in scaler, and
+MediaCodec is not it, so read each frame's own `width()` and `height()` rather
+than assuming it took. `VideoDecoderOutput(surface = true)` keeps the decoder's
+surface for `frame.surface()` instead of downloading it. Only macOS has one, so
+`decodeVideo` fails as unsupported elsewhere.
 
 ## Connection stats
 
@@ -127,3 +148,7 @@ reads it as a `kotlin.time.Duration`.
 - API reference: [javadoc.io/doc/dev.moq/moq](https://javadoc.io/doc/dev.moq/moq)
 - Source: [`kt/`](https://github.com/moq-dev/moq/tree/main/kt); `just kt check` builds and tests locally
 - Artifacts: [dev.moq:moq](https://central.sonatype.com/artifact/dev.moq/moq), [dev.moq:moq-ffi](https://central.sonatype.com/artifact/dev.moq/moq-ffi)
+
+Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).
+
+Call suspending `session.shutdown()` or `moq.shutdown()` to drain finished tracks before disconnecting. They throw if delivery has not completed within one second. Finish or abort live tracks first. `cancel(0u)` and synchronous `Moq.close()` remain immediate; `use { }` therefore cancels on exit. IETF media streams are not drained yet.

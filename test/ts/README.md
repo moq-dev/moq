@@ -7,16 +7,20 @@ runs [TSDuck](https://tsduck.io) plus a custom analyzer over it.
 
 This is a diagnostic gate, not just a pass/fail: the exporter
 ([`rs/moq-mux/src/container/ts/export.rs`](../../rs/moq-mux/src/container/ts/export.rs))
-is VBR, inserts no null packets, and paces PCR once per media frame, so several
+pads with null packets to the multiplex rate the source recorded (or `--mux-rate`),
+leaves a source without one unpadded, never delays media to fit the rate, and
+puts a PCR on its own packet every 25 ms of media time, so several
 broadcast-shape checks are expected to flag. The report quantifies exactly where
 and by how much.
 
-Three instruments live here. `compliance.py` (via `run.sh`) grades a captured file
+Four instruments live here. `compliance.py` (via `run.sh`) grades a captured file
 against the IRD model. [`pcr-timing.py`](#pcr-timing-pcr-timingpy) grades a live
 pipe, which is the only way to see *when* the exporter released each PCR.
 [`table-anchor.py`](#table-anchoring-table-anchorpy) grades two exporters of one
 broadcast against each other, which is the only way to see whether a table's
 emission points come from the media or from the exporter's own clock.
+[`open-gop.py`](#open-gop-open-goppy) grades an open-GOP capture against its
+source, access unit by access unit.
 
 ## Running
 
@@ -28,6 +32,7 @@ just test ts --strict           # also fail on broadcast-shape warnings
 just test ts --with-eit         # add a synthetic EPG first, report which SI survived
 just test ts --live             # grade PCR release timing off the live pipe
 just test ts --pair             # two exporters of one broadcast, grade table anchoring
+just test ts --open-gop         # open-GOP clip; its leading pictures must survive
 ```
 
 `--live` swaps the analyzer, not the rig: the same round-trip runs, but the
@@ -35,7 +40,13 @@ subscriber's stdout goes straight into `pcr-timing.py` instead of a capture file
 That is the only arm that can see release timing at all, and it is what nightly
 runs (see [CI](#ci)).
 
-The arm passes only when the grader's verdict *and* the publisher's exit status
+The default arm runs `pcr-timing.py` over its capture too, after `compliance.py`,
+for the one thing the IRD model does not grade: whether the bytes between
+consecutive PCRs are the ones the mux rate implies
+([`pcr-schedule`](#byte-schedule)). It is a shape check, so it reports without
+gating unless `--strict`.
+
+The live arm passes only when the grader's verdict *and* the publisher's exit status
 are clean. The grader can only speak for what reached it, and the sample floor
 rejects a window that came up short, so a publisher dying late in the run leaves
 enough behind to pass every check: a broken round-trip reported as a good one.
@@ -69,9 +80,9 @@ Severities: **hard** checks fail the run by default; **shape** checks report as
 | `psi-crc` | hard | no section dropped for a bad CRC |
 | `continuity` | hard | no continuity-counter discontinuities |
 | `pcr-presence` | hard | a PCR PID is declared and carries PCR |
-| `pcr-monotonic` | hard | PCR strictly increases (one 33-bit wrap tolerated) |
+| `pcr-monotonic` | hard | PCR strictly increases (one 33-bit wrap tolerated), except into a PCR that signals `discontinuity_indicator` |
 | `duration-fidelity` | hard | exported PCR span tracks the source's duration (round-trip only) |
-| `pcr-repetition` | shape | consecutive PCRs within the limit (default 40 ms) |
+| `pcr-repetition` | shape | consecutive PCRs within the limit (default 100 ms, TR 101 290 V1.4.1) |
 | `pcr-jitter` | shape | per-interval PCR jitter vs the nominal bitrate (pcrverify model) |
 | `null-ratio` | shape | null/stuffing fraction (flags only a pathological excess) |
 | `service-descriptors` | shape | an SDT naming the service is present |
@@ -109,13 +120,17 @@ also means it cannot grade `release`: a change to *when* the exporter hands byte
 over is invisible to any harness that does not stamp arrivals.
 `pcr-timing.py` reads a pipe and grades all three in one pass.
 
+A constant-rate stream makes a fourth claim, graded by `pcr-schedule`: that the
+bytes between consecutive PCRs are the bytes the mux rate implies for that
+interval.
+
 ```bash
-# live: all three domains, reading the exporter directly
+# live: every domain, reading the exporter directly
 moq --connect http://localhost:4443 --broadcast live.hang export ts \
   | ./pcr-timing.py --live --seconds 45
 
-# offline: value and position only (a file has no release timing left in it)
-./pcr-timing.py capture.ts
+# offline: value, position and schedule (a file has no release timing left in it)
+./pcr-timing.py capture.ts --mux-rate 10000000
 ```
 
 It needs only `python3`, with no TSDuck, no source file and no declared mux rate,
@@ -123,16 +138,20 @@ because every check is graded against the stream's **own** PCR values. If two
 consecutive PCRs are 25 ms apart in value then they must be ~25 ms apart in
 arrival, whatever clock rate the stream is running at. The price of that basis is
 the same one `compliance.py` pays: a PCR emitted at the wrong rate stays
-internally consistent, so absolute rate is not what this grades.
+internally consistent, so absolute rate is not what this grades. `pcr-schedule`
+is the exception when it is given `--mux-rate`, which pins the rate the way
+`duration-fidelity` does; without it, it estimates the rate from the capture and
+grades only how evenly the bytes are laid over the PCRs.
 
 | Check | Severity | What it verifies |
 |---|---|---|
 | `sync` | hard | no invalid sync bytes / transport-error packets |
 | `continuity` | hard | no discontinuities, and a payload-less packet must not advance the counter (ISO 13818-1 2.4.3.3) |
 | `pcr-single-pid` | hard | every PCR rides one PID |
-| `pcr-value-interval` | hard | no interval above `--repetition-ms` (default 40, TR 101 290), within one time base |
+| `pcr-value-interval` | hard | no interval above `--repetition-ms` (default 100, TR 101 290 V1.4.1), within one time base |
 | `pcr-release-timing` | hard | no more than `--release-pct-max` of intervals arrive further than `--release-ms` from the interval their own values assert, and accumulated drift stays within `--drift-ms`, being the standing lag the sender is allowed to hold; a sample below `--live-min-pcr` PCRs or `--live-cover-pct` of the window is a failure, not a pass (`--live` only) |
 | `pcr-position` | shape | share of PCR packets within `--adjacent-packets` of the previous one |
+| `pcr-schedule` | shape | share of PCR intervals, on the busiest PCR PID, whose bytes are within `--schedule-tolerance-pct` (default 1) or one packet of what `--mux-rate` implies (estimated from the capture if not given); hard, at that share, when `--schedule-pct-min` is given |
 
 Accumulated drift has two shapes and only one is a defect, so the check bounds
 the total and reports the rate over the tail of the sample beside it. A sender
@@ -183,8 +202,46 @@ Two invariants failing on the *same* PCRs is one cause rather than two, which tw
 aggregate percentages cannot show. It is report-only: it explains a failure, it
 does not define one.
 
+### Byte schedule
+
+A census of the whole capture reports the average rate, and an exporter padding to
+a declared rate gets that right. A receiver recovering its clock from packet
+arrival needs something narrower: the rate over every PCR interval.
+`pcr-schedule` takes consecutive PCRs on one PID and compares the bytes between
+them with what the mux rate implies for the interval between their values,
+reporting the relative error's p1, median, p99 and worst, and the share within
+tolerance. PCRs from different PIDs are never pooled: two PIDs on offset grids
+pool into a grid of half the interval that neither of them keeps.
+
+One packet is always allowed. PCR packets sit on packet boundaries, so a mux whose
+PCR values are on a time grid is up to a packet off at every interval even when its
+schedule is exact, and below ~19 kB per interval one packet is more than 1 %. A
+correct 2 Mb/s stream on a 25 ms grid reads −0.74 % and +2.27 % on alternate
+intervals, which a percentage alone would fail.
+
+Give the rate whenever it is known. The estimate is total bytes over total time,
+so a transient biases every interval by the same amount: over a 20 s live window,
+the exporter's unpadded first half-second pulled it ~3 % low and read every padded
+interval after it as off schedule. `run.sh` passes the generated clip's rate
+(`--bitrate`), and lets the grader estimate for `--source`.
+
+The generated clip is a weak fixture for this check. It compresses to almost
+nothing, so padding dominates and no keyframe outgrows its slot: measured against
+the exporter this check was written for, 92-97 % of intervals were on schedule
+over three 20 s runs, the misses being near-empty intervals from the unpadded
+start. A real constant-rate capture is the case that
+discriminates. A 60 s cut of a 9.95 Mb/s broadcast clip round-tripped through the
+same harness came back with a median of 1,316 B between PCRs against 31,081 B
+nominal and 3.1 % of intervals within tolerance, while its aggregate rate was
+within 16 b/s of nominal:
+
+```bash
+just test ts --source cap.ts --duration 60 # reports the schedule, estimating the rate
+./pcr-timing.py sub.ts --mux-rate 9945951 --schedule-pct-min 99 # gates on it
+```
+
 `--report-json <path>` writes the full report, and `--strict` promotes the shape
-check to hard.
+checks to hard.
 
 ## Table anchoring (`table-anchor.py`)
 
@@ -258,6 +315,38 @@ rather than leaving a percentage to interpret:
                     both legs emit every 2.000s, 0.480s out of phase
                     -> a timer started with the exporter, not an anchor in the media
 ```
+
+## Open GOP (`open-gop.py`)
+
+Broadcast contribution encoders commonly send open GOP: after the first IDR, each
+keyframe is a non-IDR I picture flagged by a recovery-point SEI, and the B pictures
+that follow it in decode order but are presented before it (its leading pictures)
+reference the previous GOP. Only a viewer that already holds that GOP can decode
+them. Dropping them is right at a tune-in, which the transport cannot see, so the
+round-trip has to hand every one of them on, in decode order.
+
+`--open-gop` swaps the generated clip for an x264 `open-gop=1` encode whose 24-frame
+GOP and fixed B placement put three leading pictures behind every recovery point,
+round-trips it, and runs `open-gop.py` on the source and capture before the
+compliance report. With `--source`, it grades a real capture instead, and fails if
+that capture has no leading pictures to grade.
+
+```bash
+./open-gop.py source.ts capture.ts
+```
+
+Access units are matched by their slice data, so the comparison ignores the
+parameter sets and delimiters the round-trip may re-insert and the timestamp
+rebase.
+
+| Check | Severity | What it verifies |
+|---|---|---|
+| `fixture` | hard | the source has at least two non-IDR recovery points with leading pictures |
+| `decode-order` | hard | the capture is one contiguous run of the source's access units from a random-access point, with DTS strictly increasing |
+| `leading-pictures` | hard | every leading picture in that run is there and keeps the presentation offset the source gave it |
+| `random-access-indicator` | shape | the exporter flags exactly the random-access access units |
+| `recovery-point-sei` | shape | each recovery point keeps its SEI |
+| `dts-before-pts` | shape | no access unit is stamped to decode after it presents |
 
 ## EIT fixtures
 
@@ -356,9 +445,10 @@ exporter re-emits SI on its own repetition cadence rather than the source's.
 
 ## CI
 
-`.github/workflows/interop.yml` runs `just test ts` and then `just test ts-eit`
-after the interop matrix (nightly, on demand, and on PRs touching `test/ts/`).
-The second recipe is `eit-roundtrip.sh`: it builds the sparse-schedule and
+`.github/workflows/interop.yml` runs `just test ts`, `just test ts --open-gop`,
+and `just test ts-eit` after the interop matrix (nightly, on demand, and on PRs
+touching `test/ts/`).
+`ts-eit` is `eit-roundtrip.sh`: it builds the sparse-schedule and
 pending-version fixtures from a generated clip, round-trips them through a
 relay, and censuses the capture, so a break in the generators or in the SI
 carriage they pin fails a PR instead of landing silently. TSDuck comes from the

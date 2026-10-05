@@ -19,8 +19,8 @@ import (
 const testTimeout = 10 * time.Second
 
 // newOrigin returns an origin that lasts the whole test. An OriginProducer has
-// no Close: the collector ends its origin once nothing reaches the producer,
-// even while consumers and dynamic handles made from it are still in use.
+// no Close: the collector ends its origin once nothing reaches an owner, even
+// while consumers made from it are still in use.
 func newOrigin(t *testing.T) *moq.OriginProducer {
 	origin := moq.NewOriginProducer()
 	t.Cleanup(func() { runtime.KeepAlive(origin) })
@@ -265,15 +265,21 @@ func TestVideoPropertiesUseDefaultedFields(t *testing.T) {
 	}
 }
 
-// TestDecodeVideoFormat pins the decode side picking its CPU layout: an unset
-// Format is I420, and RGBA is four bytes a pixel, with each frame naming the
-// layout it was decoded to.
-func TestDecodeVideoFormat(t *testing.T) {
+// TestDecodeVideoFrame pins a decoded frame owning its picture: it converts to
+// either CPU layout on demand and stays readable after its consumer is
+// cancelled, until Close. A surface decode also exposes the platform surface,
+// and is refused where no surface variant exists.
+func TestDecodeVideoFrame(t *testing.T) {
+	t.Run("cpu", func(t *testing.T) { testDecodeVideoFrame(t, false) })
+	t.Run("surface", func(t *testing.T) { testDecodeVideoFrame(t, true) })
+}
+
+func testDecodeVideoFrame(t *testing.T, surface bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
 	origin := newOrigin(t)
-	broadcast, err := origin.CreateBroadcast("video-decode-format")
+	broadcast, err := origin.CreateBroadcast("video-decode-frame")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +311,7 @@ func TestDecodeVideoFormat(t *testing.T) {
 		}
 	}
 
-	bc, err := origin.Consume().RequestBroadcast(ctx, "video-decode-format")
+	bc, err := origin.Consume().RequestBroadcast(ctx, "video-decode-frame")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,57 +324,60 @@ func TestDecodeVideoFormat(t *testing.T) {
 		t.Fatalf("catalog has no %q rendition: %v", track, catalog.Video)
 	}
 
-	// Two subscribers over one publication, so the same encoded frames are read
-	// twice and only the requested layout differs.
-	i420, err := bc.DecodeVideo(ctx, track, rendition, moq.VideoDecoderOutput{})
+	decoder, err := bc.DecodeVideo(ctx, track, rendition, moq.VideoDecoderOutput{Surface: surface})
+	if surface && runtime.GOOS != "darwin" {
+		if !errors.Is(err, moq.ErrUnsupported) {
+			t.Fatalf("surface decode off macOS: err = %v, want ErrUnsupported", err)
+		}
+		return
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer i420.Cancel()
-	format := moq.VideoPixelFormatRgba
-	packed, err := bc.DecodeVideo(ctx, track, rendition, moq.VideoDecoderOutput{Format: &format})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer packed.Cancel()
 
-	// Keep the encoder fed so both decoders see frames after they joined.
+	// Keep the encoder fed so the decoder sees frames after it joined.
 	for i := 10; i < 40; i++ {
 		if err := video.Write(moq.VideoFrame{TimestampUs: uint64(i) * 33333, Data: rgba}); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	frame, err := i420.Next(ctx)
+	frame, err := decoder.Next(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if frame == nil {
-		t.Fatal("expected an I420 frame")
+		t.Fatal("expected a frame")
 	}
-	if frame.Format != moq.VideoPixelFormatI420 {
-		t.Fatalf("format = %v, want I420", frame.Format)
-	}
-	if want := int(frame.Width) * int(frame.Height) * 3 / 2; len(frame.Data) != want {
-		t.Fatalf("I420 length = %d, want %d", len(frame.Data), want)
+	defer frame.Close()
+	decoder.Cancel()
+
+	if !surface {
+		if got := frame.Surface(); got != nil {
+			t.Fatalf("CPU decode surface = %#v, want nil", got)
+		}
+	} else if pb, ok := frame.Surface().(moq.VideoSurfacePixelBuffer); !ok || pb.Pointer == 0 {
+		t.Fatalf("surface = %#v, want a non-null VideoSurfacePixelBuffer", frame.Surface())
 	}
 
-	frame, err = packed.Next(ctx)
+	i420, err := frame.Pixels(moq.VideoPixelFormatI420)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frame == nil {
-		t.Fatal("expected an RGBA frame")
+	if want := int(frame.Width()) * int(frame.Height()) * 3 / 2; len(i420) != want {
+		t.Fatalf("I420 length = %d, want %d", len(i420), want)
 	}
-	if frame.Format != moq.VideoPixelFormatRgba {
-		t.Fatalf("format = %v, want RGBA", frame.Format)
+
+	packed, err := frame.Pixels(moq.VideoPixelFormatRgba)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if want := int(frame.Width) * int(frame.Height) * 4; len(frame.Data) != want {
-		t.Fatalf("RGBA length = %d, want %d", len(frame.Data), want)
+	if want := int(frame.Width()) * int(frame.Height()) * 4; len(packed) != want {
+		t.Fatalf("RGBA length = %d, want %d", len(packed), want)
 	}
-	for i := 3; i < len(frame.Data); i += 4 {
-		if frame.Data[i] != 0xFF {
-			t.Fatalf("RGBA alpha at %d = %#x, want 0xff", i, frame.Data[i])
+	for i := 3; i < len(packed); i += 4 {
+		if packed[i] != 0xFF {
+			t.Fatalf("RGBA alpha at %d = %#x, want 0xff", i, packed[i])
 		}
 	}
 
@@ -494,24 +503,15 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	}
 	defer announced.Cancel()
 
-	ann, err := announced.Next(ctx)
-	if err != nil {
-		t.Fatal(err)
+	ann := nextAnnounced(t, ctx, announced)
+	if ann.Prefix != "live" {
+		t.Fatalf("prefix = %q, want %q", ann.Prefix, "live")
 	}
-	if ann == nil {
-		t.Fatal("expected an announcement")
-	}
-	if ann.Prefix() != "live" {
-		t.Fatalf("prefix = %q, want %q", ann.Prefix(), "live")
-	}
-	if !ann.Active() {
-		t.Fatal("expected an active announcement")
-	}
-	if route := ann.Route(); len(route.Hops) != 0 {
-		t.Fatalf("route hops = %v, want empty for local origin", route.Hops)
+	if len(ann.Route.Hops) != 0 {
+		t.Fatalf("route hops = %v, want empty for local origin", ann.Route.Hops)
 	}
 
-	bc, err := consumer.RequestBroadcast(ctx, ann.Prefix())
+	bc, err := consumer.RequestBroadcast(ctx, ann.Prefix)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1337,17 +1337,16 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 	}
 	defer announced.Cancel()
 
-	ann, err := announced.Next(ctx)
-	if err != nil || ann == nil || ann.Prefix() != "live" || !ann.Active() || ann.Route().Cost != 3 {
-		t.Fatalf("announce: ann=%+v err=%v", ann, err)
+	if ann := nextAnnounced(t, ctx, announced); ann.Prefix != "live" || ann.Route.Cost != 3 {
+		t.Fatalf("announce: ann=%+v", ann)
 	}
 
 	if err := broadcast.Unannounce(); err != nil {
 		t.Fatal(err)
 	}
-	ann, err = announced.Next(ctx)
-	if err != nil || ann == nil || ann.Prefix() != "live" || ann.Active() {
-		t.Fatalf("unannounce: ann=%+v err=%v", ann, err)
+	event := nextRoute(t, ctx, announced)
+	if retracted, ok := event.(moq.AnnounceEventEnd); !ok || retracted.Announce.Prefix != "live" {
+		t.Fatalf("unannounce: event=%+v", event)
 	}
 	if _, err := consumer.RequestBroadcast(ctx, "live"); err == nil {
 		t.Fatal("an unannounced broadcast must be unroutable")
@@ -1356,10 +1355,7 @@ func TestBroadcastIsReachableOnlyWhileAnnounced(t *testing.T) {
 	if err := broadcast.Announce(moq.Route{}); err != nil {
 		t.Fatal(err)
 	}
-	ann, err = announced.Next(ctx)
-	if err != nil || ann == nil || !ann.Active() {
-		t.Fatalf("reannounce: ann=%+v err=%v", ann, err)
-	}
+	nextAnnounced(t, ctx, announced)
 	if _, err := consumer.RequestBroadcast(ctx, "live"); err != nil {
 		t.Fatal(err)
 	}
@@ -1395,16 +1391,12 @@ func TestAnnouncedPatternCaptures(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	update, err := announced.Next(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if update == nil || update.Prefix() != "room/alice/chat" {
+	update := nextAnnounced(t, ctx, announced)
+	if update.Prefix != "room/alice/chat" {
 		t.Fatalf("update = %+v, want room/alice/chat", update)
 	}
-	captures := update.Captures()
-	if len(captures) != 1 || captures[0] != "alice" {
-		t.Fatalf("captures = %v, want [alice]", captures)
+	if update.Captures == nil || len(*update.Captures) != 1 || (*update.Captures)[0] != "alice" {
+		t.Fatalf("captures = %v, want [alice]", update.Captures)
 	}
 }
 
@@ -1430,16 +1422,101 @@ func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	update, err := announced.Next(ctx)
+	update := nextAnnounced(t, ctx, announced)
+	if update.Prefix != "room/alice/chat" {
+		t.Fatalf("update = %+v, want room/alice/chat", update)
+	}
+	if update.Captures == nil || len(*update.Captures) != 0 {
+		t.Fatalf("captures = %#v, want a non-nil empty slice", update.Captures)
+	}
+}
+
+// Live marks the end of the routes live at subscribe time: at once on an empty
+// origin, and after the existing routes otherwise, so an app can list and stop.
+func TestAnnouncedYieldsLiveOnceCaughtUp(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	origin := newOrigin(t)
+	consumer := origin.Consume()
+
+	empty, err := consumer.Announced(moq.AnnounceOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if update == nil || update.Prefix() != "room/alice/chat" {
-		t.Fatalf("update = %+v, want room/alice/chat", update)
+	defer empty.Cancel()
+	if event, err := empty.Next(ctx); err != nil || event != (moq.AnnounceEventLive{}) {
+		t.Fatalf("empty origin: event=%+v err=%v, want Live", event, err)
 	}
-	if captures := update.Captures(); captures == nil || len(captures) != 0 {
-		t.Fatalf("captures = %#v, want a non-nil empty slice", captures)
+
+	broadcast, err := origin.CreateBroadcast("cam")
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer func() { _ = broadcast.Close() }()
+	if err := broadcast.Announce(moq.Route{}); err != nil {
+		t.Fatal(err)
+	}
+	available, err := consumer.AnnouncedBroadcast("cam")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer available.Cancel()
+	if _, err := available.Available(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	announced, err := consumer.Announced(moq.AnnounceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer announced.Cancel()
+
+	var listed []string
+	for event, err := range announced.All(ctx) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a, ok := event.(moq.AnnounceEventStart); ok {
+			listed = append(listed, a.Announce.Prefix)
+		}
+		if _, ok := event.(moq.AnnounceEventLive); ok {
+			break
+		}
+	}
+	if len(listed) != 1 || listed[0] != "cam" {
+		t.Fatalf("listed = %v, want [cam]", listed)
+	}
+}
+
+// nextRoute returns the next announce event that is not Live, skipping Live wherever it lands.
+func nextRoute(t *testing.T, ctx context.Context, announced *moq.AnnounceConsumer) moq.AnnounceEvent {
+	t.Helper()
+
+	for {
+		event, err := announced.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event == nil {
+			t.Fatal("announcement stream ended")
+		}
+		if _, live := event.(moq.AnnounceEventLive); !live {
+			return event
+		}
+	}
+}
+
+// nextAnnounced returns the next newly announced route, skipping Live.
+func nextAnnounced(t *testing.T, ctx context.Context, announced *moq.AnnounceConsumer) moq.Announce {
+	t.Helper()
+
+	event := nextRoute(t, ctx, announced)
+	announcedEvent, ok := event.(moq.AnnounceEventStart)
+	if !ok {
+		t.Fatalf("expected an announcement, got %+v", event)
+	}
+	return announcedEvent.Announce
 }
 
 func TestDynamicServesARequestUnderAPrefix(t *testing.T) {

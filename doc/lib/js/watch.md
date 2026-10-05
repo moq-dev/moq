@@ -37,9 +37,20 @@ in sync at the latency you ask for.
 | `announced` | Wait for the broadcast to be announced before subscribing (default on), so a player can be mounted before the stream exists. |
 | `catalog-format` | `hang` (default, from the `.hang` suffix), `hangz` (compressed), `msf`, or `manual` to supply the catalog yourself. |
 
+Video holds its last picture while paused, out of view, or waiting for a
+resumed rendition's first frame. Its reported timestamp stays with that picture.
+Going offline or closing the player clears it.
+
 The overlay adds play/pause, volume, fullscreen, a quality selector, a
 buffering indicator, an unsupported-codec warning, and a stats panel.
 `<moq-watch-support>` shows what the browser can play.
+
+`el.broadcast.out.status` is `offline`, `loading`, `live`, or `error`. It is
+`error` when the origin refuses the broadcast, such as a `dynamic()` handler
+rejecting the request, and `el.broadcast.out.error` then holds the refusal's
+`Error`; the overlay shows its message in place of the offline notice. A
+refusal is final: only a new `name`, a new origin, a changed `announced`, or
+re-enabling asks again, which clears both back to `offline`.
 
 ## Binding from a framework
 
@@ -170,3 +181,20 @@ Durations need a unit; a bare number is rejected. Only the delay is held as
 decoded PCM; the buffer stays as encoded frames with backpressure on the
 decoder, so a large one is cheap. `el.reset()` flushes and re-anchors at the
 next frame, which is how a producer interrupts an utterance.
+
+## Strict CSP
+
+The audio worklet loads from a `blob:` URL by default, so it needs no hosted
+files but a CSP must allow `blob:` in `script-src`. For a CSP that refuses
+`blob:`, copy `node_modules/@moq/watch/assets/*` into a directory your origin
+serves, and point the package at it before playback starts:
+
+```ts
+import * as Watch from "@moq/watch";
+
+Watch.assets("/moq/");
+```
+
+The URL must end with `/`. Copy the files again on every upgrade: the worklet
+changes with the package. `@moq/room` and `@moq/boy` play through
+`@moq/watch`, so this one call covers them.

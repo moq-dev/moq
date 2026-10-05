@@ -66,7 +66,7 @@ impl Log {
 
 		// On Android, route logs to logcat so they can be inspected via ADB/Android Studio.
 		// Everywhere else, format to stderr.
-		#[cfg(all(target_os = "android", feature = "android-logcat"))]
+		#[cfg(target_os = "android")]
 		let registry = {
 			let logcat_layer = tracing_android::layer("MoQNative")
 				.map_err(|e| crate::Error::Logcat(std::sync::Arc::new(e)))?
@@ -74,7 +74,7 @@ impl Log {
 			registry.with(logcat_layer)
 		};
 
-		#[cfg(not(all(target_os = "android", feature = "android-logcat")))]
+		#[cfg(not(target_os = "android"))]
 		let registry = {
 			let fmt_layer = tracing_subscriber::fmt::layer()
 				.with_writer(std::io::stderr)

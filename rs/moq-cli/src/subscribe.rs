@@ -139,6 +139,9 @@ pub struct SubscribeArgs {
 	/// How far playback may drift from the live edge before skipping groups.
 	pub max_age: Duration,
 
+	/// How long to wait for the broadcast to come back after it ends (TS only).
+	pub linger: Duration,
+
 	/// Cap the output duration: publisher groups by default for fMP4, video GOPs for MKV.
 	pub fragment_duration: Option<Duration>,
 
@@ -300,6 +303,8 @@ impl Subscribe {
 		// is re-framed as ADTS. `fragment_duration` does not apply to TS. `with_ts`
 		// selects the `mpegts` catalog extension so undecoded elementary streams
 		// (SCTE-35, teletext, DVB AC-3, ...) are re-emitted verbatim on their PIDs.
+		let source = self.source.clone();
+		let mut broadcast = source.broadcast().await?;
 		let mut ts = moq_mux::container::ts::Export::with_ts(self.source, self.catalog)
 			.await?
 			.with_max_age(self.args.max_age);
@@ -316,23 +321,53 @@ impl Subscribe {
 		// bounded; it needs to know whether each frame was waited for, hence the
 		// hand-rolled poll instead of `ts.next()`.
 		let mut delivery = Delivery::new(self.args.max_age);
+		let linger = self.args.linger;
+		// Reports a track that stops reaching the output while the rest keeps flowing,
+		// the way `publish` reports one that stops arriving.
+		let mut log = moq_mux::container::ts::stats::Log::default();
+		let mut sampled = tokio::time::Instant::now();
 		loop {
-			let mut waited = false;
-			let frame = hang::moq_net::kio::wait(|waiter| match ts.poll_next(waiter) {
-				std::task::Poll::Pending => {
-					waited = true;
-					std::task::Poll::Pending
+			let end = loop {
+				let mut waited = false;
+				let frame = hang::moq_net::kio::wait(|waiter| match ts.poll_next(waiter) {
+					std::task::Poll::Pending => {
+						waited = true;
+						std::task::Poll::Pending
+					}
+					ready => ready,
+				})
+				.await;
+
+				let frame = match frame {
+					Ok(Some(frame)) => frame,
+					Ok(None) => break Ok(()),
+					Err(err) => break Err(err),
+				};
+				delivery.update(&frame, ts.discontinuity());
+				delivery.deliver(&frame, waited, &mut stdout).await?;
+
+				if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
+					sampled = tokio::time::Instant::now();
+					log.sample(ts.stats());
 				}
-				ready => ready,
-			})
-			.await?;
+			};
 
-			let Some(frame) = frame else { break };
-			delivery.update(&frame, ts.discontinuity());
-			delivery.deliver(&frame, waited, &mut stdout).await?;
+			// Any end waits out the linger, and on expiry the last one is the result: a
+			// clean catalog finish exits 0, a drop or any other failure exits 1.
+			if linger.is_zero() {
+				return Ok(end?);
+			}
+			match &end {
+				Ok(()) => tracing::info!(?linger, "broadcast finished, waiting for it to return"),
+				Err(err) => tracing::warn!(%err, ?linger, "broadcast ended, waiting for it to return"),
+			}
+			let Some(returned) = resume_within(&source, &broadcast, &mut ts, linger).await? else {
+				tracing::info!(?linger, "broadcast did not return");
+				return Ok(end?);
+			};
+			broadcast = returned;
+			tracing::info!("broadcast returned, resuming");
 		}
-
-		Ok(())
 	}
 
 	async fn run_flv(self) -> anyhow::Result<()> {
@@ -352,6 +387,28 @@ impl Subscribe {
 		}
 
 		Ok(())
+	}
+}
+
+/// Wait up to `linger` for the `ended` broadcast to return and `ts` to resume on it.
+///
+/// The linger bounds the whole return, catalog subscription included: a returned
+/// broadcast whose catalog never resolves must not hold the export past it. `None`
+/// when it did not return in time.
+async fn resume_within(
+	source: &moq_mux::Source,
+	ended: &hang::moq_net::broadcast::Consumer,
+	ts: &mut moq_mux::container::ts::Export<moq_mux::container::ts::Ext>,
+	linger: Duration,
+) -> anyhow::Result<Option<hang::moq_net::broadcast::Consumer>> {
+	let resume = async {
+		let returned = source.returned(ended).await?;
+		ts.resume().await?;
+		anyhow::Ok(returned)
+	};
+	match tokio::time::timeout(linger, resume).await {
+		Ok(returned) => Ok(Some(returned?)),
+		Err(_) => Ok(None),
 	}
 }
 
@@ -674,5 +731,32 @@ mod tests {
 		delivery.update(&next, 1);
 		delivery.deliver(&next, false, &mut out).await.unwrap();
 		assert_eq!(now.elapsed(), Duration::from_millis(40));
+	}
+
+	/// A broadcast that returns but never serves its catalog gives up at the linger,
+	/// rather than waiting on the catalog past it.
+	#[tokio::test(start_paused = true)]
+	async fn a_return_without_a_catalog_expires_with_the_linger() {
+		let (origin, driver) = hang::moq_net::origin::Producer::new(Default::default());
+		tokio::spawn(hang::moq_net::time::run(driver));
+		let source = moq_mux::Source::new(origin.consume(), "live");
+
+		let mut first = origin.publish("live", Default::default()).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut first, Default::default()).unwrap();
+		let ended = source.broadcast().await.unwrap();
+		let mut ts = moq_mux::container::ts::Export::with_ts(source.clone(), CatalogFormat::Hang)
+			.await
+			.unwrap();
+		drop((first, catalog));
+
+		// Back, but its catalog request is never answered.
+		let second = origin.publish("live", Default::default()).unwrap();
+		let _unanswered = second.dynamic();
+
+		let linger = Duration::from_secs(10);
+		let start = tokio::time::Instant::now();
+		let resumed = resume_within(&source, &ended, &mut ts, linger).await.unwrap();
+		assert!(resumed.is_none(), "a return that never resumes is no return");
+		assert_eq!(start.elapsed(), linger);
 	}
 }

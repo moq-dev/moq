@@ -5,25 +5,25 @@
 A service claims the prefix it could serve rather than enumerating every
 broadcast under it; the client library filters that claim against the
 pattern interest the caller asked for, so nothing on the wire spells a
-wildcard. A claim is priced at what starting the work would cost. Specificity wins first: a concrete
-claim shadows a wildcard regardless of cost, and prices compete within the
-same specificity tier. A terminal concrete refusal does not fall through to
-a catch-all; its claim must be withdrawn. Retracting a wildcard stops new
-work without shedding what is already running.
+wildcard. A claim is priced at what starting the work would cost. The longest
+covering prefix wins first: a concrete announcement shadows a broader claim
+regardless of cost, and prices compete only among claims of the same prefix.
+A terminal concrete refusal does not fall through to a catch-all; its claim
+must be withdrawn. Retracting a claim stops new work without shedding what is
+already running.
 
-Three workloads need this, and they are the three pattern shapes. A transcode
+Three workloads need this. A transcode
 worker today announces a standby derivative for every matching live broadcast,
-so announcements scale as workers times broadcasts; with a suffix pattern
-`**/transcode.pro` it advertises once for the whole fleet. A chat backend
+so announcements scale as workers times broadcasts; claiming one service
+prefix, it advertises once for the whole fleet. A chat backend
 cannot enumerate at all: rooms exist independently of any broadcast, and the
 subtree pattern `<pid>/chat/**` expresses them. An archive serving recordings
 over FETCH wants to say "if nobody is publishing this live, I have it", which
 is the catch-all `**`, a claim about every path at once.
 
 The cost of enumerating is real even though its last measurement is stale.
-[relay-memory](/quest/m1/relay-memory.md) measured one announcement at 8.8 KB
-per relay plus 4.3 KB per additional route before prefix routes made a
-standby route a table entry, and owns remeasuring it. Whatever the current
+One announcement measured 8.8 KB per relay plus 4.3 KB per additional route
+before prefix routes made a standby route a table entry. Whatever the current
 number, every relay that hears an announcement pays it whether or not anything
 there subscribes, so "workers times broadcasts" is that number multiplied
 across the fleet in resident memory.
@@ -33,15 +33,16 @@ across the fleet in resident memory.
 Decided in [#3770](https://github.com/moq-dev/moq/pull/3770): publishing is
 prefix-only on every wire and patterns never leave the token or the client library.
 `dynamic(prefix, route)`
-advertises a prefix; a suffix or catch-all claim is expressed as the
-widest prefix that covers it (`**` is the root) and the request is the
-authority, so the advertise half of this questline is re-scoped to prefix
-claims resolved against pattern interest. The three workloads above still
-hold: the transcoder claims the root and refuses what it will not serve.
+advertises a prefix; the catch-all claim is the root prefix, and the request
+is the authority, so the advertise half of this questline is re-scoped to
+prefix claims resolved against pattern interest. The three workloads above
+still hold: the transcoder claims its service prefix
+([Where derived output lives](#where-derived-output-lives)), and the archive
+claims the root and refuses what it does not have.
 Resolve and Demand are additive and land on main. Both are done on the line
-branch (#4050 re-resolves on a refusal; 9d059b1b9 lists and demands covered
-renditions in the browser player), so main no longer lists them; the line
-branch moves to `quest/m0/wildcard/README` to match this path.
+branch (9d059b1b9 lists and demands covered renditions in the browser
+player), so main no longer lists them; the line branch moves to
+`quest/m0/wildcard/README` to match this path.
 
 ### What already exists, and what does not
 
@@ -49,17 +50,16 @@ Route cost already names this case: "The original publisher seeds it with its
 production cost: zero for a live publish, something large for a standby that
 would have to start working (a cold transcoder)"
 (`drafts/draft-lcurley-moq-lite.md`). `moq_auth::Claims.publish` and
-`origin::Producer` gain versioned patterns through
-[Path patterns](/quest/m1/path-patterns.md), so advertisements reuse the
-same exact containment check. `Cost { warm, cold }`
+`origin::Producer` gained versioned patterns on the
+[Auth](/quest/m1/auth/README.md) line, so tokens and filters reuse the
+same matcher; advertisements stay prefixes. `Cost { warm, cold }`
 (`rs/moq-net/src/model/origin.rs:426`) is the route cost since
 [#2925](https://github.com/moq-dev/moq/pull/2925).
 
 [moq#3225](https://github.com/moq-dev/moq/pull/3225) moved a long way toward
-this. An announcement carries a `Pattern` covering a set of paths. Rust
-`announce::Update.pattern` and TypeScript `Announce.Update.pattern` use the
-matcher directly, so callers explicitly select prefix-shaped claims when
-they need a concrete broadcast path.
+this, and #3770 settled the wire: an announcement carries a path prefix on
+every protocol, and a consumer filters announced paths against its pattern
+interest locally.
 
 The routing table exists too. `Consumer::request_broadcast` resolves a local
 broadcast first, then `best_server`: the longest covering prefix, filtered by
@@ -69,62 +69,55 @@ announced it and cached per prefix in `ServeState.served` (`:764`). That is the 
 lookup the old `origin::Dynamic` could not provide, and it is what
 resolve extends rather than replaces.
 
-Request resolution, by contrast, is still prefix-only (`best_server` in
-`rs/moq-net/src/model/origin.rs`). The pattern matcher itself exists:
-`moq_net::{Pattern, Patterns, Segment}` and `Path.Pattern` /
+Request resolution is prefix-only (`best_server` in
+`rs/moq-net/src/model/origin.rs`) and stays that way. The pattern matcher
+itself exists: `moq_net::{Pattern, Patterns, Segment}` and `Path.Pattern` /
 `Path.Patterns` in `js/net/src/path.ts` own the shared matching, containment,
-specificity, and rebasing advertisements reuse.
+specificity, and rebasing tokens and filters reuse.
 
-What is genuinely missing, beyond patterns themselves, is content identity.
-Announcement `Epoch` was specified into lite-06 by
-[#2611](https://github.com/moq-dev/moq/pull/2611), never implemented, and
-removed from the draft by #3225, which retired `draft-lcurley-moq-broadcast`
-with it. [moq#3312](https://github.com/moq-dev/moq/pull/3312) restored per-path identity
-from the route's first hop, reversing #3225's no-splice rule, and this
-questline builds its collision handling on that rather than on a generation
-field.
+Content identity is the path: it names one broadcast whoever serves it, and
+any covering route resumes a subscription from the first frame the subscriber
+lacks (#4741). The `@<epoch>` segment (#4706) is what makes a restart a new
+path. So this questline settles collisions with interchangeable output at one
+path, not with a route identity or a generation field.
 
 ### Decisions
 
 - **One prefix on the wire, one pattern in the token and the filter.** An
-  advertisement is a path prefix; the [path-patterns](/quest/m1/path-patterns.md)
-  dialect is what tokens and the consume-side filter use, matched by the
+  advertisement is a path prefix; the pattern dialect from the
+  [Auth](/quest/m1/auth/README.md) line is what tokens and the consume-side filter use, matched by the
   shared matcher, so nothing resembles a second grammar and nothing on the
   wire spells a wildcard.
-- **Most specific pattern wins, and its refusal is final.** This is the rule
+- **Longest prefix wins, and its refusal is final.** This is the rule
   routing already follows: `best_server` filters to the longest covering prefix
   before it compares cost, and the lite draft says the same, matching
-  longest-prefix-match wherever it appears. When several patterns match one
-  path, only the tier selected by the matcher's shared structural specificity is
-  consulted; equal-specificity patterns
-  form one pool that cost and the request hash order. A terminal refusal from
-  the winning tier IS the answer and never falls through to a less specific
-  pattern, so a transcoder refusing a path does not leak the request to the
-  archive's catch-all, and one unserved path still costs one round trip. The
-  capacity re-resolution below stays within the tier, refuser excluded. The
-  accepted consequence: an offline derivative (a recording of
-  `foo.hang/transcode.pro`) is not reachable through the catch-all, because
-  the more specific transcode pattern shadows it.
-- **A wildcard is a POOL, not a competitor.** Several advertisers of one
-  pattern is the normal state, not a hazard: every transcode worker advertises
-  `**/transcode.pro` and takes a share. What distributes them is a
+  longest-prefix-match wherever it appears. Advertisers of one prefix form one
+  pool that cost and the request hash order. A terminal refusal from the
+  winning tier IS the answer and never falls through to a shorter prefix, so a
+  transcoder refusing a path does not leak the request to the archive's
+  catch-all, and one unserved path still costs one round trip. The accepted
+  consequence: an offline derivative is not reachable through the catch-all
+  while a longer prefix covers it.
+- **A claim is a POOL, not a competitor.** Several advertisers of one
+  prefix is the normal state, not a hazard: every transcode worker claims the
+  same prefix and takes a share. What distributes them is a
   deterministic hash of the REQUESTED path against each advertiser, so distinct
-  paths spread rather than one advertiser winning the whole pattern.
+  paths spread rather than one advertiser winning the whole prefix.
   Distribution is the requirement, not any particular pair: a correct hash may
   legitimately rank the same advertiser first for two given paths, so what must
   hold is that a large path set spreads and that one path always resolves the
   same way. Cost orders the pool first, which keeps work local and makes a
   distant advertiser the overflow rather than an equal peer.
-- **A wildcard is priced, not special-cased.** Within a tier, route selection
-  stays one comparison on one metric. Concrete-versus-wildcard is not decided
-  by price at all: a concrete claim is maximally specific, so "most specific
-  wins" above already shadows every pattern behind it at any cost. The
+- **A claim is priced, not special-cased.** Within a tier, route selection
+  stays one comparison on one metric. Concrete-versus-claim is not decided
+  by price at all: a concrete announcement is the longest prefix, so "longest
+  prefix wins" above already shadows every claim behind it at any cost. The
   accepted consequence follows from that rule's finality: a live session's
-  concrete claim shadows a healthy wildcard pool even when its service is
+  concrete claim shadows a healthy pool even when its service is
   broken, its terminal refusal does not fall through, and the shadow lasts
   exactly as long as the claiming session that carries it.
-  The seed still has a floor, because standby and running claims of equal
-  specificity do meet: a standby concrete claim (`with_cost(1000)` is the
+  The seed still has a floor, because standby and running claims of the same
+  prefix do meet: a standby concrete claim (`with_cost(1000)` is the
   existing per-broadcast convention) shares a tier with a running publisher's
   concrete announcement. The
   floor MUST exceed the deployment's enforced maximum charged-link count
@@ -133,23 +126,21 @@ field.
   mesh starts a second encode of a stream it is already serving. That floor
   replaces the ad-hoc standby bias the moq.pro (downstream) transcode worker
   carries today.
-- **One cost varint, not the pair.** `Cost` is `{ warm, cold }` because a relay
-  that is carrying a broadcast discounts the warm half. A wildcard carries
-  nothing and can never be warm, so the two halves are provably equal and the
-  message carries one value. `From<u64>` already means exactly this.
 - **A wildcard is a capability, not an inventory.** It advertises what the
   sender could serve, never that a given path exists. Refusal is how a specific
   path is denied. This is why an over-claiming advertisement is not a defect:
   the catch-all `**` is legal, and answering "not that one" is the mechanism.
-- **Containment against the publish scope is what authorization checks.** An
-  advertised pattern MUST be contained by the sender's granted patterns (the
-  matcher's containment check). This handles literal-headed and leading-star
-  patterns identically and refuses any attempted widening rather than clamping
-  it. Fleet-wide services use the cluster identity; a customer service may
-  advertise only the exact set its own v1 grant contains.
-- **Wildcards are visible to subscribers.** A subscriber sees every pattern
-  matching under its scope, rebased by the matcher's exact set-valued operation,
-  and duplicates combine into one. That is the point: it tells a client it may subscribe to
+- **Overlap with the publish scope is what authorization checks.** An
+  advertised prefix MUST overlap the sender's granted patterns or it is
+  refused. A prefix wider than the grant is accepted, but it only routes
+  requests for paths the grant covers. Fleet-wide services use the cluster
+  identity; a customer service serves only what its own v1 grant contains.
+  Until [Advertise-only authorization](/quest/m2/processor/advertise-auth.md)
+  lands, the publish scope stands in for advertising; a credential with its own
+  advertise scope is checked against that instead.
+- **Claims are visible to subscribers.** A subscriber sees every advertised
+  prefix under its scope, filtered locally like any other announcement. That
+  is the point: it tells a client it may subscribe to
   matching paths, and its withdrawal tells the client the capability is gone.
   This is what makes a lazily-produced rendition discoverable without the
   composer waiting for an announcement that only demand would produce. The
@@ -157,113 +148,82 @@ field.
   `#isPathAnnounced` hides a catalog rendition with no exact-path
   announcement); demand makes a covering wildcard count as
   availability there.
-- **Refusal is a typed stream reset, with no negative cache.** An advertiser
-  resets a subscribe it will not serve, and the reset carries which KIND of
-  refusal it is (`Error::to_code` already puts a typed code on the wire; the
-  capacity code is NO_CAPACITY, 0x30, in moq-lite's own 48-63 range).
-
-  A capacity refusal is unavoidable: an advertiser's capacity and a relay's view
-  of it are separated by at least half a round trip, so a retraction and a
-  request for the slot it just gave away WILL cross, at a rate of request rate
-  times retraction rate times RTT. Only that code permits ONE re-resolution,
-  with the refusing advertiser excluded from it. The exclusion is what makes the
-  retry safe, NOT the retraction arriving first: the reset and the retraction
-  travel independently, so re-resolution may pick another advertiser, and may
-  equally find none and return unroutable. Both are correct outcomes.
-
-  Every other refusal is terminal and propagates: a path no rule covers, an
-  unauthorized one, one that does not exist. Scanning unserved paths therefore
-  still costs one round trip per path, and this is not a fallback list: there
-  is no walk down the candidates, only one re-resolution. Classification is
-  EXPLICIT, per the repository's retry policy: an unrecognized or bare reset is
-  permanent, so a new refusal mode surfaces instead of quietly joining a retry
-  loop. No negative cache either way; rate limiting stays with the advertiser
-  and the per-project auth gate.
-- **A double claim is settled by route identity, not by a lease.** Two relays
-  can hash one path to different workers before either concrete announcement
-  propagates, and both land at the SAME literal path. Whichever route wins
-  selection serves it, and a consumer moves between them only when the winner's
-  identity is preserved, per the first-hop resume rule ([moq#3312](https://github.com/moq-dev/moq/pull/3312)); two distinct workers are two identities,
-  so the loser's subscribers end and resubscribe rather than being spliced onto
-  another worker's frames mid-group. Wildcard routing invents neither a lease
-  nor a generation. This is weaker than the retired `Epoch` design, which could
-  declare two workers' output interchangeable and splice between them; a service
-  that needs that guarantee has to carry it in its own media contract, not in
-  routing.
+- **Every refusal is a terminal typed stream reset, with no negative cache.**
+  An advertiser resets a subscribe it will not serve, and the reset carries
+  which KIND of refusal it is (`Error::to_code` already puts a typed code on
+  the wire). Every refusal propagates: a path no rule covers, an unauthorized
+  one, one that does not exist, or one the advertiser has no capacity for.
+  There is no re-resolution (decided 2026-10-03: NO_CAPACITY is removed, so
+  no refusal is retryable). An advertiser sheds load by withdrawing or
+  re-pricing its claim; a request that crosses the retraction is refused, and
+  the client's ordinary resubscribe resolves again. Scanning unserved paths
+  costs one round trip per path. No negative cache; rate limiting stays with
+  the advertiser and the per-project auth gate.
+- **A double claim is settled by interchangeable output, not by route
+  identity or a lease.** Two relays can hash one path to different workers
+  before either concrete announcement propagates, and both land at the SAME
+  literal path. A path is one broadcast whoever serves it, so claim workers
+  mirror the source's epoch and group numbers, publish a deterministic
+  catalog, and start at group boundaries
+  ([Transcoders start at group boundaries](/quest/m1/transcode-group-start.md)).
+  Two workers at one path are then one broadcast, and a relay moving between
+  them does so at a group boundary (decided 2026-10-03: #4741 drops
+  first-hop identity, so routing can no longer tell two workers apart).
+  Wildcard routing invents neither a lease nor a generation. That quest is
+  Required here (decided 2026-10-04), so this line cannot ship with workers
+  that can be spliced mid-group.
+- **A serving front follows the best route.** A join or re-price re-selects
+  every front below the prefix, and a front moves when another route now
+  wins: cheaper, or the rendezvous winner among equal costs (decided
+  2026-10-04, replacing Stay). This is safe because a path is one broadcast
+  and any covering route resumes it (#4741).
+- **No reply Origin.** The lite-07 `Origin` field in SUBSCRIBE_OK and FETCH_OK,
+  and the rule that a relay MUST NOT splice across differing Origins, are
+  dropped (decided 2026-10-03: nothing needs them for correctness). The line
+  branch carries code for Origin, `Identity`, and `Pin`, and #4050's
+  NO_CAPACITY re-resolution; remove it when the branch next merges main.
 - **Patterns are independent of clustering.** The `moq-pattern` crate owns
   the matching semantics tokens and filters share, with no draft of its own;
   no announce message carries a pattern on either protocol (AUTH grants on
-  lite-06 do, per [Path patterns](/quest/m1/path-patterns.md)). moq-cluster adds hop
+  lite-06 do, per the [Auth](/quest/m1/auth/README.md) line). moq-cluster adds hop
   lists, costs, pool selection, and request resolution to prefix
   advertisements.
 
 ### Where derived output lives
 
-Suffix matching lets a contribution be published where it is addressed, a
-descendant of its source. This is the moq.pro (downstream) deployment shape,
-and it is what the suffix pattern form exists for:
+A prefix claim needs the variable part of a path trailing, so a fleet-wide
+service claims its own prefix and mirrors the source path beneath it
+(`.pro/transcode/<pid>/foo.hang`, moq.pro's convention) rather than publishing
+beneath the source. The source's catalog reaches the contribution through a
+cross-broadcast reference.
 
-```text
-pid/foo.hang                     source
-pid/foo.hang/catalog.pro         combined catalog, edge-composed
-pid/foo.hang/transcode.pro       the transcode contribution
-pid/foo.hang/transcribe.pro      the transcription contribution
-```
+The leading `.` is deliberate. Existing customers on moq-lite-06 or older must
+never see `.pro/` broadcasts, which could confuse their business logic. Those
+versions cannot opt into hidden routes, so the relay never announces them
+there. Hidden routes are a moq-lite-07 feature, so the player's covering check
+(Demand, done on the line branch) opts into them and sees a claim only when
+lite-07 is negotiated. Finalizing lite-07 is a rollout condition, not a
+blocker for this line (decided in the 2026-09-30 audit), since the check works
+whenever lite-07 is negotiated. A customer who wants transcodes upgrades, or
+subscribes to the explicit `.pro/<service>/...` path, which works on any
+version. Grants and metering are the deployment's; moq.pro's are in its
+[wildcard questline](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/wildcard/README.md).
 
-The `.pro` segment suffix is both the routed pattern and the platform-output
-marker: `**/transcode.pro` routes every project's transcode demand to the
-worker pool, and a segment ending in `.pro` is the one predicate every source
-rule matcher excludes, so platform output is never recursively transcoded or
-recorded.
+The archive serves the source path itself: a recording IS the broadcast,
+served from storage through the root claim, and a live publisher's concrete
+announcement shadows it. A claim names no generation, so a client that must
+distinguish recording generations reads the catalog's archive entry
+([archive](/quest/m1/archive/README.md)) rather than announce state.
 
-The rejected alternative publishes contributions at mirrored paths in reserved
-namespaces (`.transcode/<pid>/...`) hidden by an origin-consumer overlay,
-because prefix-only matching needs the variable part of a path trailing. That
-overlay is not a view transform: `pid/foo` and `.transcode/pid/foo` are
-separate tree leaves with separate broadcast fronts, so it has to build a
-logical front across roots that re-owns route selection, content identity, the
-split-horizon guard, and splicing. The suffix pattern needs none of it while
-keeping what the mirror buys:
+## Required
 
-- **The grant needs no transform.** The customer addresses
-  `foo.hang/transcode.pro`, a descendant of `foo.hang`, so an existing grant
-  covers it by ordinary segment-aware prefix. No companion-grant rule, no
-  atomic `.pro/` scope, and nothing minted differently, which matters because
-  customer-issued tokens are minted by integrations the platform does not
-  control.
-- **Metering is untouched.** The published path is rooted at `pid`, so the
-  platform's egress metering sees the customer path with no special case at
-  all.
-- **The wildcard is fleet-wide.** The suffix is project-agnostic, so a worker
-  advertises once for every project rather than once per project, which is what
-  removes project discovery entirely.
-- **Takeover is single-front.** A worker's concrete announcement lands at the
-  literal path the wildcard served, so wildcard-versus-concrete and
-  worker-versus-worker collisions are ordinary route selection at one tree node,
-  not a cross-root front.
-
-What the mirror buys and this deliberately gives up: a customer holding
-`publish: ["pid/"]` CAN publish `foo.hang/transcode.pro` themselves, competing
-with or forging platform output. Both then resolve at one path, cost decides,
-and a live customer broadcast beats the worker's standby seed. That is confined
-to their own namespace, self-sabotage of their own catalog, never another
-project's, and is cheaper to allow and document than a reserved-name registry
-or a token transform. The mirror's SUBSCRIBE-only overlay asymmetry existed to
-prevent exactly this and goes with it.
-
-The archive is the same shape at the source path itself: a recording IS the
-broadcast, served from storage through the catch-all pattern. A wildcard names
-no generation, so a client that must distinguish recording generations reads
-the catalog's archive entry ([archive](/quest/m1/archive/README.md)) rather
-than announce state.
+- [Transcoders start at group boundaries](/quest/m1/transcode-group-start.md) - two claim workers at one path are one broadcast, so a relay never splices them mid-group
 
 ## Related
 
-- [path-patterns](/quest/m1/path-patterns.md) - owns the pattern dialect
-  and the shared matcher advertisements reuse
-- [archive](/quest/m1/archive/README.md) - an archive advertises the catch-all
-  pattern, and its catalog names the generations a wildcard cannot
-- [Cluster routing](/quest/m1/cluster-routing.md) - origin selection by cost
-  with an HRW tie-break, built on this line's specificity
-- [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - derived output moves under the
-  source's `@<epoch>` segment, which the suffix patterns still match
+- [archive](/quest/m1/archive/README.md) - an archive claims the root, and its
+  catalog names the generations a claim cannot
+- [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - derived output
+  mirrors the source path, `@<epoch>` segment included
+- [Announcement shapes](/quest/m2/announce-shapes.md) - moq-lite-only exact,
+  suffix, and prefix+suffix claims that survive relay hops

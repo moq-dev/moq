@@ -1,8 +1,18 @@
 import * as Util from "@moq/hang/util";
 import type { Time } from "@moq/net";
-import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
-// Compiled and inlined as a blob URL via vite-plugin-worklet.
+import {
+	type Computed,
+	Effect,
+	type Getter,
+	getter,
+	type Inputs,
+	type Readonlys,
+	readonlys,
+	Signal,
+} from "@moq/signals";
+import { hostedAssets } from "../assets";
 import { Fanout } from "../fanout";
+// A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import CaptureWorklet from "./capture-worklet.ts?worklet";
 import { isSampleSource, normalizeSource, type SampleSource, type Source, type SourceConfig } from "./types";
 
@@ -89,6 +99,19 @@ export class Capture {
 	};
 	readonly out = readonlys(this.#out);
 
+	// Whether the track's context is suspended until the page's first click or keypress.
+	readonly #waiting = new Signal(false);
+
+	// How many graph-building runs threw for their current inputs, so no format is coming until one
+	// reruns.
+	readonly #failures = new Signal(0);
+
+	/**
+	 * @internal Whether a track's format can't arrive until something outside the capture changes: the
+	 * page's first click or keypress, or new inputs after its graph failed to build.
+	 */
+	readonly blocked: Computed<boolean>;
+
 	#signals = new Effect();
 
 	constructor(props?: CaptureProps) {
@@ -98,8 +121,27 @@ export class Capture {
 		};
 		this.sampleRate = Signal.from<number | undefined>(props?.sampleRate);
 		this.channelCount = Signal.from<number | undefined>(props?.channelCount);
+		this.blocked = this.#signals.computed((effect) => effect.get(this.#failures) > 0 || effect.get(this.#waiting));
 
-		this.#signals.run(this.#run.bind(this));
+		this.#signals.run(this.#guard(this.#run.bind(this)));
+	}
+
+	// Count a throw from `fn` as a failure until its effect reruns, so a graph that can't build
+	// reports blocked instead of leaving the encoder waiting on a format forever.
+	#guard(fn: (effect: Effect) => void): (effect: Effect) => void {
+		return (effect) => {
+			try {
+				fn(effect);
+			} catch (err) {
+				this.#fail(effect);
+				throw err;
+			}
+		};
+	}
+
+	#fail(effect: Effect): void {
+		this.#failures.update((n) => n + 1);
+		effect.cleanup(() => this.#failures.update((n) => n - 1));
 	}
 
 	#run(effect: Effect): void {
@@ -150,6 +192,13 @@ export class Capture {
 		// load. A context built then starts suspended and renders nothing until one arrives.
 		const running = Util.Gesture.unlock(effect, context);
 
+		// A context starts suspended even after a gesture, until it resumes a moment later; only one
+		// still waiting on the page's first gesture may wait indefinitely.
+		effect.run((inner) => {
+			const waiting = !inner.get(running) && !navigator.userActivation?.hasBeenActive;
+			inner.set(this.#waiting, waiting, false);
+		});
+
 		const root = new MediaStreamAudioSourceNode(context, {
 			mediaStream: new MediaStream([source.track]),
 		});
@@ -163,41 +212,53 @@ export class Capture {
 			// module registration was abandoned, so building against its name would throw. Gate on the race
 			// result, not `context.state`, because `AudioContext.close()` only flips `.state` to "closed"
 			// synchronously on Chrome (Firefox/Safari report "suspended").
-			const ok = await effect.race(context.audioWorklet.addModule(CaptureWorklet).then(() => true));
-			if (ok) loaded.set(true);
+			try {
+				const ok = await effect.race(
+					CaptureWorklet(hostedAssets()).then(async (url) => {
+						await context.audioWorklet.addModule(url);
+						return true;
+					}),
+				);
+				if (ok) loaded.set(true);
+			} catch (err) {
+				this.#fail(effect);
+				throw err;
+			}
 		});
 
 		// Only capture while the graph runs. The worklet stamps frames from when it is built, so one built
 		// while suspended would lag the wall clock by however long the page waited for a gesture. And a
 		// suspended graph carries nothing, so it has no format: the encoder announces no audio until
 		// samples actually flow, and drops it again if Safari interrupts the context.
-		effect.run((inner) => {
-			if (!inner.get(loaded) || !inner.get(running)) return;
+		effect.run(
+			this.#guard((inner) => {
+				if (!inner.get(loaded) || !inner.get(running)) return;
 
-			const channelCount = requestedChannels ?? settings.channelCount ?? root.channelCount;
-			const worklet = new AudioWorkletNode(context, "capture", {
-				numberOfInputs: 1,
-				numberOfOutputs: 0,
-				channelCount,
-				// "explicit" forces Web Audio to (down)mix the input to channelCount before the
-				// worklet sees it. The default "max" just follows the input, which is the unreliable
-				// path on macOS. Only force it when we actually have a requested count to honor.
-				channelCountMode: requestedChannels !== undefined ? "explicit" : "max",
-				// Stamp audio against the same wall clock as video (see video/processor.ts), so both
-				// tracks share an epoch and stay in sync.
-				processorOptions: { zero: performance.now() * 1000 },
-			});
-			// The edge originates at root, so only root can remove it; the worklet has no outputs.
-			root.connect(worklet);
-			inner.cleanup(() => root.disconnect(worklet));
+				const channelCount = requestedChannels ?? settings.channelCount ?? root.channelCount;
+				const worklet = new AudioWorkletNode(context, "capture", {
+					numberOfInputs: 1,
+					numberOfOutputs: 0,
+					channelCount,
+					// "explicit" forces Web Audio to (down)mix the input to channelCount before the
+					// worklet sees it. The default "max" just follows the input, which is the unreliable
+					// path on macOS. Only force it when we actually have a requested count to honor.
+					channelCountMode: requestedChannels !== undefined ? "explicit" : "max",
+					// Stamp audio against the same wall clock as video (see video/processor.ts), so both
+					// tracks share an epoch and stay in sync.
+					processorOptions: { zero: performance.now() * 1000 },
+				});
+				// The edge originates at root, so only root can remove it; the worklet has no outputs.
+				root.connect(worklet);
+				inner.cleanup(() => root.disconnect(worklet));
 
-			const fanout = new Fanout(this.#drain(worklet, context.sampleRate, inner), { queue: QUEUE });
-			inner.cleanup(() => fanout.close());
-			inner.cleanup(() => this.#out.format.set(undefined));
+				const fanout = new Fanout(this.#drain(worklet, context.sampleRate, inner), { queue: QUEUE });
+				inner.cleanup(() => fanout.close());
+				inner.cleanup(() => this.#out.format.set(undefined));
 
-			inner.set(this.#out.root, root);
-			inner.set(this.#out.frames, fanout);
-		});
+				inner.set(this.#out.root, root);
+				inner.set(this.#out.frames, fanout);
+			}),
+		);
 	}
 
 	// Turn the quanta the worklet pushes into a stream. The audio thread can't be asked to wait, so

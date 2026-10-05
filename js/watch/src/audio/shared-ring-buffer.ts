@@ -220,14 +220,14 @@ export class SharedRingBuffer {
 	}
 
 	/**
-	 * Step the epoch by one, leaving the playhead wherever the reader has taken it.
+	 * Step the epoch by `by`, leaving the playhead wherever the reader has taken it.
 	 *
 	 * Retries while the word changes under it: only the epoch half is the writer's to move.
 	 */
-	#step(): void {
+	#step(by: number): void {
 		for (;;) {
 			const state = Atomics.load(this.#state, 0);
-			const next = pack((epochOf(state) + 1) | 0, readOf(state));
+			const next = pack((epochOf(state) + by) | 0, readOf(state));
 			if (Atomics.compareExchange(this.#state, 0, state, next) === state) return;
 		}
 	}
@@ -323,11 +323,15 @@ export class SharedRingBuffer {
 		// Advance WRITE (only forward)
 		Atomics.store(this.#control, WRITE, i32Max(Atomics.load(this.#control, WRITE), end));
 
-		// Un-stall: if buffered data >= LATENCY
-		const currentRead = readOf(Atomics.load(this.#state, 0));
-		const currentWrite = Atomics.load(this.#control, WRITE);
+		this.#resume();
+	}
+
+	// Un-stall once the buffered data covers LATENCY.
+	#resume(): void {
+		const read = readOf(Atomics.load(this.#state, 0));
+		const write = Atomics.load(this.#control, WRITE);
 		const latency = Atomics.load(this.#control, LATENCY);
-		if (((currentWrite - currentRead) | 0) >= latency && latency > 0) {
+		if (((write - read) | 0) >= latency && latency > 0) {
 			Atomics.store(this.#control, STALLED, 0);
 		}
 	}
@@ -411,9 +415,28 @@ export class SharedRingBuffer {
 		return count;
 	}
 
-	/** Update the target latency in samples. */
+	/**
+	 * Update the target latency in samples. Main thread only.
+	 *
+	 * A deeper floor parks playback until it refills. Video holds the extra delay on its own, so
+	 * audio that kept draining at the old depth would run ahead by the difference. Parking keeps
+	 * what is buffered, so a rise costs only its own size in silence, and none if the buffer
+	 * already covers the new floor.
+	 */
 	setLatency(samples: number): void {
-		Atomics.store(this.#control, LATENCY, samples);
+		const previous = Atomics.exchange(this.#control, LATENCY, samples);
+		if (previous > 0 && samples > previous) {
+			Atomics.store(this.#control, STALLED, 1);
+			// A reader already past the STALLED check would still publish its quantum. Moving the
+			// word fails its exchange, and one that snapshots after this sees STALLED. Two keeps the
+			// epoch even, since odd belongs to `truncate`.
+			this.#step(2);
+		}
+
+		// Parked, the playhead holds still, so this measures exactly what is buffered. It also
+		// resumes a refill that a shallower floor has already covered, which `insert` would only
+		// notice on the next frame, never for a source that has stopped.
+		this.#resume();
 	}
 
 	/**
@@ -429,7 +452,7 @@ export class SharedRingBuffer {
 
 		// Bracket the retreat with epoch steps, so a reader is never left holding a WRITE this
 		// dropped the tail of. See `epochOf`.
-		this.#step();
+		this.#step(1);
 		for (;;) {
 			const write = Atomics.load(this.#control, WRITE);
 			// Never retreat past the playhead: those samples are already due. The worklet can still
@@ -441,24 +464,7 @@ export class SharedRingBuffer {
 			if (((write - clamped) | 0) <= 0) break;
 			if (Atomics.compareExchange(this.#control, WRITE, write, clamped) === write) break;
 		}
-		this.#step();
-	}
-
-	/**
-	 * Hold playback until the ring holds the target again, keeping everything buffered.
-	 * Main thread only.
-	 *
-	 * Used when the target deepens: `setLatency` alone only raises the bar a future refill has to
-	 * clear, so a ring already playing keeps draining at its old depth and audio runs that much
-	 * ahead of video. Parking the playhead spends exactly the deficit as silence and resumes on the
-	 * same timeline, where `reset` would throw the buffer away and re-anchor. A ring that already
-	 * holds the target has no deficit, and parking it would only wait on an insert that may never
-	 * come. Main thread only, like `insert`, so WRITE is exact and a concurrent read only shrinks
-	 * what is buffered.
-	 */
-	stall(): void {
-		const buffered = (Atomics.load(this.#control, WRITE) - readOf(Atomics.load(this.#state, 0))) | 0;
-		if (buffered < Atomics.load(this.#control, LATENCY)) Atomics.store(this.#control, STALLED, 1);
+		this.#step(1);
 	}
 
 	/**

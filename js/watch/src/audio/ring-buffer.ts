@@ -79,10 +79,24 @@ export class AudioRingBuffer {
 	}
 
 	resize(latency: Time.Milli): void {
-		this.#latencySamples = Math.ceil(this.rate * Time.Second.fromMilli(latency));
+		const latencySamples = Math.ceil(this.rate * Time.Second.fromMilli(latency));
+
+		// A deeper floor parks playback until it refills. Video holds the extra delay on its own, so
+		// audio that kept draining at the old depth would run ahead by the difference. Parking keeps
+		// what is buffered, so a rise costs only its own size in silence, and none if the buffer
+		// already covers the new floor.
+		if (latencySamples > this.#latencySamples) this.#stalled = true;
+		this.#latencySamples = latencySamples;
 
 		const newCapacity = this.#capacityFor(this.#latencySamples);
-		if (newCapacity === this.capacity) return;
+		if (newCapacity !== this.capacity) this.#reallocate(newCapacity);
+
+		// Resume a refill that the buffer already covers, which `write` would only notice on the
+		// next frame, never for a source that has stopped.
+		if (latencySamples > 0 && this.length >= latencySamples) this.#stalled = false;
+	}
+
+	#reallocate(newCapacity: number): void {
 		if (newCapacity === 0) throw new Error("empty buffer");
 
 		const newBuffer: Float32Array[] = [];
@@ -209,19 +223,6 @@ export class AudioRingBuffer {
 		if (target >= this.#writeIndex) return;
 		// Never retreat past the playhead: those samples are already due.
 		this.#writeIndex = Math.max(target, this.#readIndex);
-	}
-
-	/**
-	 * Hold playback until the ring holds the target again, keeping everything buffered.
-	 *
-	 * Used when the target deepens: `resize` alone only raises the bar a future refill has to clear,
-	 * so a ring already playing keeps draining at its old depth and audio runs that much ahead of
-	 * video. Parking the playhead spends exactly the deficit as silence and resumes on the same
-	 * timeline, where `reset` would throw the buffer away and re-anchor. A ring that already holds
-	 * the target has no deficit, and parking it would only wait on an insert that may never come.
-	 */
-	stall(): void {
-		if (this.length < this.#latencySamples) this.#stalled = true;
 	}
 
 	// Flush all buffered samples and re-stall, ready to anchor the next utterance.

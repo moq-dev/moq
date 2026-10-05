@@ -4,7 +4,10 @@
 //!
 //! Vendored from the unmaintained `rml_rtmp` 0.8.0
 //! (github.com/KallDrexx/rust-media-libs, MIT, Copyright (c) Matthew Shapiro;
-//! see LICENSE in this directory), with a small set of local patches:
+//! see LICENSE in this directory). The `amf0` module vendors rml_amf0 0.3.0
+//! from the same project and license. Local patches include:
+//! - a 64-level AMF0 container nesting limit and a nonzero incoming chunk size.
+//! - independent per-CSID message assembly with bounded connection state.
 //! - `sessions::ServerSession::set_connect_response_properties`, so the gateway
 //!   can advertise enhanced-RTMP capabilities in the connect `_result`.
 //! - guards against two reachable panics on malformed untrusted input (short
@@ -20,7 +23,7 @@
 #![allow(clippy::nursery)]
 #![allow(rustdoc::all)]
 
-pub use rml_amf0;
+pub mod amf0;
 
 #[cfg(test)]
 #[macro_use]

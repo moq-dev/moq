@@ -27,13 +27,12 @@ minutes, send 250 KB, and assert the pacing rate stays at or above about
 If it still stalls, find the remaining cause, such as ProbeRTT entered during
 the idle or a stale `bw_shortterm`, and fix it in the fork. Dropping the
 estimate after a long idle is a policy change for the m2 study, not this
-quest. The `iroh` feature uses upstream noq, which lacks #5; offering it
-there belongs to the upstream quest.
+quest.
+
+## Required
+
+- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic`, not the frozen fork
 
 ## Closes
 
 - [#4219](https://github.com/moq-dev/moq/issues/4219) - the first send after an idle period is paced at a trickle
-
-## Related
-
-- [Upstream the fork](/quest/m1/quic/upstream.md) - offer the starvation fix upstream

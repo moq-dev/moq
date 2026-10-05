@@ -19,7 +19,7 @@ use rand::RngExt;
 
 use super::mixer::{self, Mixer};
 use super::sink::{Registration, Sink};
-use crate::Error;
+use crate::{Error, Layout};
 
 /// Backoff bounds for reopening a device that failed. The first retry is quick because the common
 /// case is a device that came right back (a USB re-enumerate, a sample-rate change); the ceiling
@@ -78,6 +78,9 @@ struct State {
 	/// Rate the device is running at, which is what sinks resample to. Zero
 	/// until the first stream opens.
 	rate: u32,
+	/// Layout the device is running in, which is what sinks remix to. Stereo
+	/// stands in until the first stream opens.
+	layout: Layout,
 	/// Registration channel to the live mixer, replaced every time the stream is
 	/// rebuilt. `None` while no stream is running.
 	mixer: Option<SyncSender<mixer::Command>>,
@@ -108,13 +111,14 @@ struct State {
 impl Shared {
 	/// Build a sink, register it, and start mixing it.
 	///
-	/// `build` is handed the sink's id and the rate its channel should target.
+	/// `build` is handed the sink's id and the rate and layout its channel should
+	/// target.
 	/// It runs with no device open too: the registration waits for the next
 	/// restart, so a device that is briefly missing doesn't become an error the
 	/// caller has to retry.
 	pub(super) fn add<F>(&self, build: F) -> Result<Sink, Error>
 	where
-		F: FnOnce(u64, u32) -> Result<(Sink, Registration), Error>,
+		F: FnOnce(u64, u32, Layout) -> Result<(Sink, Registration), Error>,
 	{
 		let mut state = self.state.lock().unwrap();
 
@@ -131,7 +135,7 @@ impl Shared {
 		// 48 kHz stands in until a device opens and the channel is rebuilt at
 		// the real rate.
 		let rate = if state.rate == 0 { 48_000 } else { state.rate };
-		let (sink, mut registration) = build(state.next_id, rate)?;
+		let (sink, mut registration) = build(state.next_id, rate, state.layout)?;
 		state.next_id += 1;
 
 		if let Some(mixer) = &state.mixer {
@@ -235,6 +239,9 @@ impl Shared {
 	/// restart.
 	pub(super) fn sync(&self) -> bool {
 		let mut state = self.state.lock().unwrap();
+		for sink in &mut state.sinks {
+			sink.complete();
+		}
 		let Some(mixer) = state.mixer.clone() else {
 			// No stream to talk to. Registrations stay pending and `rebind`
 			// picks them up when one opens.
@@ -270,11 +277,11 @@ impl Shared {
 	}
 
 	/// Point every sink at a freshly opened stream: rebuild each channel at
-	/// `rate` and hand the new consumers to `mixer`.
-	fn rebind(&self, rate: u32, mixer: SyncSender<mixer::Command>) {
+	/// `rate` and `layout` and hand the new consumers to `mixer`.
+	fn rebind(&self, rate: u32, layout: Layout, mixer: SyncSender<mixer::Command>) {
 		let mut state = self.state.lock().unwrap();
 		for sink in &mut state.sinks {
-			sink.rebuild(rate);
+			sink.rebuild(rate, layout);
 			sink.attach(&mixer);
 		}
 
@@ -289,6 +296,7 @@ impl Shared {
 		}
 
 		state.rate = rate;
+		state.layout = layout;
 		state.mixer = Some(mixer);
 		// The old mixer is gone, and with it every sink it was told about.
 		state.detaching.clear();
@@ -787,7 +795,8 @@ impl Driver {
 		// a full retirement channel is the one case where the mixer has to free
 		// on the audio thread after all.
 		let (retired_tx, retired_rx) = sync_channel(COMMAND_QUEUE);
-		let mixer = Mixer::new(rx, retired_tx, rate, channels);
+		let layout = Layout::from_channels(channels as u32)?;
+		let mixer = Mixer::new(rx, retired_tx, rate, layout)?;
 
 		let failures = Arc::new(Failures::default());
 		let reporter = FailureReporter {
@@ -799,7 +808,7 @@ impl Driver {
 			.play()
 			.map_err(|err| Error::Playback(format!("cannot start output stream: {err}")))?;
 
-		self.shared.rebind(rate, tx);
+		self.shared.rebind(rate, layout, tx);
 		self.stream = Some(stream);
 		self.failures = Some(failures);
 		// Replaces the previous receiver, dropping anything the old stream
@@ -807,7 +816,7 @@ impl Driver {
 		self.retired = Some(retired_rx);
 		self.retry = RETRY_MIN;
 
-		tracing::info!(rate, channels, ?format, "opened audio output");
+		tracing::info!(rate, ?layout, ?format, "opened audio output");
 		Ok(())
 	}
 
@@ -845,15 +854,24 @@ impl Driver {
 		// buffer the device asks for, the callback loops over this rather than
 		// resizing (allocating on the audio thread is the one thing it must
 		// never do).
-		let mut scratch = vec![0.0f32; SCRATCH_FRAMES * config.channels as usize];
+		let channels = config.channels as usize;
+		let sample_rate = config.sample_rate as f64;
+		let mut scratch = vec![0.0f32; SCRATCH_FRAMES * channels];
+		let mut epoch = None;
 
 		device
 			.build_output_stream::<T, _, _>(
 				config,
-				move |data, _| {
+				move |data, info| {
+					let timestamp = info.timestamp();
+					let epoch = *epoch.get_or_insert(timestamp.callback);
+					let now = timestamp.callback.saturating_duration_since(epoch);
+					let played_at = timestamp.playback.saturating_duration_since(epoch)
+						+ Duration::from_secs_f64((data.len() / channels) as f64 / sample_rate);
+					mixer.complete(now);
 					for chunk in data.chunks_mut(scratch.len()) {
 						let scratch = &mut scratch[..chunk.len()];
-						mixer.fill(scratch);
+						mixer.fill(scratch, played_at);
 						for (out, sample) in chunk.iter_mut().zip(scratch.iter()) {
 							*out = T::from_sample(*sample);
 						}
@@ -1005,7 +1023,7 @@ mod tests {
 		let handle = Arc::new(super::super::Handle { commands });
 
 		let (tx, mixer) = sync_channel(depth);
-		shared.rebind(48_000, tx);
+		shared.rebind(48_000, Layout::Stereo, tx);
 
 		Wired {
 			shared,
@@ -1016,7 +1034,26 @@ mod tests {
 	}
 
 	fn add(shared: &Arc<Shared>, handle: &Arc<super::super::Handle>) -> Result<Sink, Error> {
-		shared.add(|id, rate| sink::new(id, rate, Input::default(), shared.clone(), handle.clone()))
+		shared.add(|id, rate, bus| sink::new(id, rate, bus, Input::default(), shared.clone(), handle.clone()))
+	}
+
+	#[test]
+	fn a_completed_drain_survives_the_device_being_detached() {
+		let wired = wired(8);
+		let mut sink = add(&wired.shared, &wired.handle).unwrap();
+		let (retired, _rx) = sync_channel(8);
+		let mut mixer = Mixer::new(wired.mixer, retired, 48_000, Layout::Stereo).unwrap();
+		let mut out = vec![0.0; 4096 * 2];
+		mixer.fill(&mut out, Duration::ZERO);
+		let samples: Vec<_> = [0.25f32; 123 * 2].iter().flat_map(|s| s.to_le_bytes()).collect();
+		assert_eq!(sink.write(&samples).unwrap().accepted_sample_frames, 123);
+		let mut drain = std::pin::pin!(sink.finish());
+		mixer.fill(&mut out, Duration::from_millis(100));
+		mixer.complete(Duration::from_millis(100));
+		wired.shared.unbind();
+		assert!(wired.shared.sync());
+		let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+		assert!(drain.as_mut().poll(&mut cx).is_ready());
 	}
 
 	/// Long enough that only a lost wake, rather than a loaded machine, trips a

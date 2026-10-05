@@ -51,16 +51,15 @@ struct Media {
 	encoder: bool,
 	/// Apply a timeline break before the next valid frame, using the normal write error path.
 	discontinuity: bool,
-	/// A video break closed the group, and a pause resumes mid-GOP, so deltas drop until a keyframe
-	/// opens the next one. Stays set once armed: a successful decode may publish nothing (a
-	/// header-only buffer), and a delta only misses its keyframe while no group is open, which for
-	/// video means after a break.
+	/// Video can start or resume mid-GOP, so deltas drop until a keyframe opens a group. Stays set:
+	/// a successful decode may publish nothing (a header-only buffer), and a delta only misses its
+	/// keyframe while no group is open.
 	keyframe: bool,
 }
 
 impl Media {
 	/// Publish one frame at `micros` on the media clock, handed over at `now`. Returns false when a
-	/// delta frame is dropped while waiting for the keyframe after a break.
+	/// frame is dropped while waiting for a keyframe at or beyond the live edge.
 	fn write(&mut self, data: &Bytes, micros: u64, now: Instant) -> Result<bool> {
 		if std::mem::take(&mut self.discontinuity) {
 			self.track.discontinuity()?;
@@ -69,6 +68,12 @@ impl Media {
 		let ts = hang::container::Timestamp::from_micros(micros).ok();
 		match self.track.decode(data, ts) {
 			Err(moq_mux::Error::MissingKeyframe(_)) if self.keyframe => return Ok(false),
+			Err(moq_mux::Error::TimestampRewind(_)) => {
+				// A rejected delta leaves its group open; later deltas cannot decode across that gap.
+				self.track.cut(None)?;
+				self.keyframe = !self.audio;
+				return Ok(false);
+			}
 			result => result?,
 		}
 		// One group (one QUIC stream) per audio packet, so the relay forwards it without waiting for
@@ -316,8 +321,10 @@ impl Pad {
 			let request = broadcast
 				.reserve_track(name.clone())
 				.with_context(|| format!("cannot reserve track {name}"))?;
-			// Followed at the live edge, so it keeps the default retention the media helper raises.
-			let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
+			// Raw data keeps a short explicit window for subscribers that buffer its samples.
+			let info = moq_net::track::Info::default()
+				.with_timescale(moq_net::Timescale::MICRO)
+				.with_max_age(std::time::Duration::from_secs(5));
 			self.track = Some(Sink::Opaque(request.accept(info)));
 			self.caps = Some(caps.clone());
 			return Ok(name);
@@ -484,7 +491,7 @@ impl Pad {
 			audio,
 			encoder,
 			discontinuity: false,
-			keyframe: false,
+			keyframe: !audio,
 		})));
 		self.caps = Some(caps.clone());
 		Ok(name)
@@ -706,7 +713,10 @@ impl Pad {
 				let result: Result<()> = match self.track.as_mut().expect("track present") {
 					Sink::Media(media) => match media.write(&data, micros, now) {
 						Ok(false) => {
-							gst::debug!(CAT, "dropping delta frame until the keyframe after a break");
+							gst::debug!(
+								CAT,
+								"dropping frame until the next decodable frame at or beyond the live edge"
+							);
 							return Ok(PushOutcome::Dropped);
 						}
 						result => result.map(|_| ()),
@@ -1221,7 +1231,7 @@ mod tests {
 	// The opaque track declares microseconds so the PTS maps 1:1, and keeps moq-net's retention: the
 	// media helper raises it to 30s for a segmented egress reading history, which a data track never is.
 	#[tokio::test]
-	async fn an_opaque_track_declares_micros_and_the_default_retention() {
+	async fn an_opaque_track_declares_micros_and_a_retention_window() {
 		gst::init().unwrap();
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
@@ -1241,8 +1251,8 @@ mod tests {
 		assert_eq!(subscriber.info().timescale, moq_net::Timescale::MICRO);
 		assert_eq!(
 			subscriber.info().max_age,
-			moq_net::track::DEFAULT_MAX_AGE,
-			"an opaque track keeps the default retention"
+			Some(std::time::Duration::from_secs(5)),
+			"an opaque track declares a short retention window"
 		);
 	}
 
@@ -1732,6 +1742,54 @@ mod tests {
 				before,
 				"boundary={boundary}"
 			);
+		}
+	}
+
+	#[test]
+	fn video_start_drops_deltas_until_the_first_keyframe() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("video")));
+		pad.observe_segment(time_segment());
+		let delta = Bytes::from_static(&[0, 0, 0, 1, 0x61, 0xe0, 0x12, 0x34]);
+		let now = Instant::now();
+		let push = |pad: &mut Pad, data: Bytes, pts: u64| {
+			pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None, now)
+				.unwrap()
+		};
+		assert_eq!(push(&mut pad, delta.clone(), 0), PushOutcome::Dropped);
+		assert!(!pad.is_failed());
+		assert_eq!(push(&mut pad, delta.clone(), 33), PushOutcome::Dropped);
+		assert_eq!(push(&mut pad, h264_keyframe_au(), 66), PushOutcome::Published);
+		assert_eq!(push(&mut pad, delta, 100), PushOutcome::Published);
+	}
+
+	#[test]
+	fn video_rewind_drops_deltas_until_a_keyframe_clears_the_live_edge() {
+		gst::init().unwrap();
+		let delta = Bytes::from_static(&[0, 0, 0, 1, 0x61, 0xe0, 0x12, 0x34]);
+		for rewind in [delta.clone(), h264_keyframe_au()] {
+			let (broadcast, catalog) = producers();
+			let mut pad = Pad::new();
+			pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("video")));
+			pad.observe_segment(time_segment());
+			let now = Instant::now();
+			let push = |pad: &mut Pad, data: Bytes, pts: u64| {
+				pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None, now)
+					.unwrap()
+			};
+			assert_eq!(push(&mut pad, h264_keyframe_au(), 1000), PushOutcome::Published);
+			assert_eq!(push(&mut pad, delta.clone(), 1033), PushOutcome::Published);
+			assert_eq!(push(&mut pad, h264_keyframe_au(), 1100), PushOutcome::Published);
+			assert_eq!(push(&mut pad, delta.clone(), 1133), PushOutcome::Published);
+			// Below the previous group's start, so not a reordered frame the producer tolerates.
+			assert_eq!(push(&mut pad, rewind, 16), PushOutcome::Dropped);
+			assert!(!pad.is_failed());
+			assert_eq!(push(&mut pad, delta.clone(), 1166), PushOutcome::Dropped);
+			assert_eq!(push(&mut pad, h264_keyframe_au(), 1066), PushOutcome::Dropped);
+			assert_eq!(push(&mut pad, h264_keyframe_au(), 1200), PushOutcome::Published);
+			assert_eq!(push(&mut pad, delta.clone(), 1233), PushOutcome::Published);
 		}
 	}
 

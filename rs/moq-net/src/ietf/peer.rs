@@ -19,6 +19,10 @@ pub(crate) struct Peer {
 	/// MoQ Hidden: whether the peer understands the HIDDEN parameter on
 	/// SUBSCRIBE_NAMESPACE, so we may send it.
 	pub hidden: bool,
+
+	/// MoQ Active Count: whether the REQUEST_OK answering SUBSCRIBE_NAMESPACE counts the
+	/// NAMESPACE messages before the subscription is caught up, in both directions.
+	pub active_count: bool,
 }
 
 /// Shared slot for [`Peer`], filled when the peer's SETUP is read.
@@ -78,6 +82,7 @@ mod tests {
 			},
 			solicit: None,
 			hidden: false,
+			active_count: false,
 		};
 
 		let slot = PeerSetup::default();
@@ -89,6 +94,7 @@ mod tests {
 			},
 			solicit: Some(true),
 			hidden: true,
+			active_count: true,
 		});
 
 		assert_eq!(slot.get().await, first);

@@ -8,8 +8,10 @@ tests live in each language's own justfile.
 | [interop](interop/README.md) | `just test interop` | every client built from this checkout interoperates |
 | [wasm](wasm/README.md) | `just test wasm` | the `@moq/wasm` bindings work in a real browser |
 | [ts](ts/README.md) | `just test ts` | the subscriber's `export ts` output is IRD-compliant |
+| [audio-quality](audio-quality/README.md) | `just test audio-quality` | browser audio playout stays within budget over an impaired path |
+| [drain](drain/README.md) | `just test drain` | a JS viewer migrates off a draining relay without a dropped group |
 
-All three stand up a `moq-relay` and clients, so two of them running at once, or
+All five stand up a `moq-relay` and clients, so two of them running at once, or
 the same one running from two worktrees, would otherwise collide. `lib/harness.sh`
 is what keeps them apart.
 
@@ -88,25 +90,3 @@ with the `rm -rf` the run prints; nothing expires it for you.
 
 In CI the harness writes under `MOQ_TEST_RUNS`, and `interop.yml` and `wasm.yml`
 upload that directory as a short-lived artifact when the job fails.
-
-## Worktrees
-
-`just worktree` reports what a checkout can actually do before anything is built:
-its base and how stale that base is, and whether the Git metadata is reachable for
-fetch, branch creation, and rebase. A linked worktree keeps its shared metadata
-under `--git-common-dir`, inside the main repository, so write access to the
-source tree does not imply any of the three.
-
-```bash
-just worktree          # report, change nothing
-just worktree setup    # fetch, set the branch upstream, record the base SHA
-```
-
-`setup` never resets, rebases, or cleans, so it is safe to run against a checkout
-with work in progress.
-
-The upstream is the only place the base survives, so `setup BASE` fails when it
-cannot be written -- a detached HEAD has no branch to hang it on, and the shared
-config may be read-only. Left as a warning, `just check` would go on scoping
-against `origin/main` while setup reported success. Without a `BASE`, that
-fallback is what would have been written anyway, so it warns instead.

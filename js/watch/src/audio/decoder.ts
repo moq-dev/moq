@@ -13,6 +13,7 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
+import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
 import { nextMedia, subscribeMedia } from "../media";
 
@@ -27,16 +28,12 @@ import {
 	playbackIdentity,
 } from "./config";
 import { Handover } from "./handover";
-import { AUTO_MAX_AGE, reanchor, ringSamples, target } from "./latency";
-// Compiled and inlined as a blob URL via vite-plugin-worklet.
+import { AUTO_MAX_AGE, ringSamples, target } from "./latency";
+// A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
 import { type DecodedSpan, Terminal } from "./terminal";
 import { Warmup } from "./warmup";
-
-// How long the latency target must hold steady before a floor increase re-anchors. Coalesces a
-// slider drag (many small steps) into a single re-anchor once the user settles on a value.
-const LATENCY_REANCHOR_DEBOUNCE_MS = 150;
 
 const LEGACY_WARMUP_CALLBACKS = 3;
 
@@ -128,10 +125,6 @@ export class Decoder {
 	// The codec's frame duration: the catalog constant, refined by each frame's own duration.
 	#frame = new Signal<Time.Milli | undefined>(undefined);
 
-	// The derived target as of the last settled change, to detect a *deepening* (which needs the
-	// ring to refill) versus a decrease. See #runLatencyReanchor.
-	#prevTarget?: Time.Milli;
-
 	// Which subscription the ring's buffered samples came from. See #runDecoder.
 	#handover = new Handover();
 
@@ -177,7 +170,6 @@ export class Decoder {
 		this.#signals.run(this.#runWorklet.bind(this));
 		this.#signals.run(this.#runEnabled.bind(this));
 		this.#signals.run(this.#runLatency.bind(this));
-		this.#signals.run(this.#runLatencyReanchor.bind(this));
 		this.#signals.run(this.#runDecoder.bind(this));
 	}
 
@@ -223,7 +215,12 @@ export class Decoder {
 			// abandoned, so building against its name would throw. Gate on the race result, not
 			// `context.state`, because `AudioContext.close()` only flips `.state` to "closed" synchronously
 			// on Chrome (Firefox/Safari report "suspended").
-			const loaded = await effect.race(context.audioWorklet.addModule(RenderWorklet).then(() => true));
+			const loaded = await effect.race(
+				RenderWorklet(hostedAssets()).then(async (url) => {
+					await context.audioWorklet.addModule(url);
+					return true;
+				}),
+			);
 			if (!loaded) return;
 
 			// Create the worklet node. outputChannelCount must be set explicitly
@@ -292,43 +289,11 @@ export class Decoder {
 		const ring = this.#ring;
 		if (!ring) return;
 
+		// A rise parks playback until the ring refills to the new floor, which is what keeps audio in
+		// step with video. The measured target moves a bucket at a time, and a rise the buffered
+		// slack already covers costs no silence at all.
 		const delay = effect.get(this.sync.out.delay);
 		ring.setLatency(ringSamples(ring.rate, delay));
-	}
-
-	// Park playback when the target *deepens*, so the ring refills to it. Video rebuilds a deeper
-	// cushion implicitly (its per-frame sync.wait() reads the live buffer, so it just holds longer),
-	// but the audio ring keeps draining at its old depth: setLatency only raises the bar a future
-	// refill has to clear, so a ring already playing never gets deeper and audio runs ahead of video
-	// (the "raise latency, only video re-buffers" desync). Stalling spends the deficit as silence,
-	// once, instead of leaving it to the underrun that the shallow buffer eventually causes anyway.
-	//
-	// The derived delay, not the user's setting, since the arrival estimator moves it too. Only a
-	// deepening worth more than a frame counts, so the estimator's small refinements ride through,
-	// and the debounce coalesces a slider drag or a converging estimate into a single stall.
-	// Decreases are left to natural catch-up.
-	#runLatencyReanchor(effect: Effect): void {
-		const target = effect.get(this.sync.out.delay);
-		const step = effect.get(this.#frame) ?? Time.Milli.zero;
-		if (this.#prevTarget === undefined) {
-			// Startup: the initial fill already builds the cushion; just record the baseline.
-			this.#prevTarget = target;
-			return;
-		}
-		// A decrease lands at once: `#runLatency` has already let the ring shrink to it, so a rise
-		// that follows within the debounce has to be measured from there.
-		if (target < this.#prevTarget) {
-			this.#prevTarget = target;
-			return;
-		}
-		// When the timer fires, the target read above is still current: any change would have rerun
-		// this effect (tearing down the timer), so compare it against the pre-change baseline directly.
-		const baseline = this.#prevTarget;
-		effect.timer(() => {
-			const next = reanchor(baseline, target, step);
-			if (next.stall) this.#ring?.stall();
-			this.#prevTarget = next.baseline;
-		}, LATENCY_REANCHOR_DEBOUNCE_MS);
 	}
 
 	#runDecoder(effect: Effect): void {

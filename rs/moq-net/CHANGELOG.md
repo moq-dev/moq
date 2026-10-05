@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.9](https://github.com/moq-dev/moq/compare/moq-net-v0.3.8...moq-net-v0.3.9) - 2026-10-03
+
+### Fixed
+
+- *(net)* keep track::Fetching unwind safe
+- *(net)* a subscriber hands its cursors off to a park's cache ([#4698](https://github.com/moq-dev/moq/pull/4698))
+- *(ietf)* refuse SUBSCRIBE_TRACKS per request with NOT_SUPPORTED ([#4685](https://github.com/moq-dev/moq/pull/4685))
+- *(net)* cancel an abandoned lite FETCH upstream, before or after the answer ([#4691](https://github.com/moq-dev/moq/pull/4691))
+- *(net)* a truncated spliced group fails instead of ending cleanly ([#4689](https://github.com/moq-dev/moq/pull/4689))
+- *(moq-net)* hold IETF uni streams that arrive before SETUP ([#4686](https://github.com/moq-dev/moq/pull/4686))
+- *(net)* a group-only reader subscribes to its replacement copy ([#4491](https://github.com/moq-dev/moq/pull/4491))
+- *(net)* preserve session close outcomes for tracks and groups ([#4663](https://github.com/moq-dev/moq/pull/4663))
+- *(net)* a takeover keeps the open group's head for later readers ([#4655](https://github.com/moq-dev/moq/pull/4655))
+- *(net)* end a lite SUBSCRIBE or FETCH once the requester leaves ([#4531](https://github.com/moq-dev/moq/pull/4531))
+- *(ietf)* discard padding streams and close on unknown uni types ([#4603](https://github.com/moq-dev/moq/pull/4603))
+- *(net)* a spliced group's end is asked from the seam, not frame 0 ([#4651](https://github.com/moq-dev/moq/pull/4651))
+- *(ietf)* decode every legal request and refuse per request ([#4610](https://github.com/moq-dev/moq/pull/4610))
+- *(moq-net)* back received frame buffers by bytes received ([#4609](https://github.com/moq-dev/moq/pull/4609))
+- *(moq-net)* hold route updates so a withdrawal retracts once ([#4642](https://github.com/moq-dev/moq/pull/4642))
+- *(net)* prune departed subscribers on every aggregate wake ([#4633](https://github.com/moq-dev/moq/pull/4633))
+- *(net)* prune departed subscribers only when the list would grow ([#4627](https://github.com/moq-dev/moq/pull/4627))
+- *(net)* prune departed subscribers when registering a new one ([#4604](https://github.com/moq-dev/moq/pull/4604))
+- *(moq-net)* a stream reset with an unmapped code no longer ends an IETF session ([#4602](https://github.com/moq-dev/moq/pull/4602))
+
+### Other
+
+- *(net)* share route ranking across announcement cursors ([#4634](https://github.com/moq-dev/moq/pull/4634))
+- *(moxygen)* Moxygen compatibility ([#4253](https://github.com/moq-dev/moq/pull/4253))
+
+## [0.3.8](https://github.com/moq-dev/moq/compare/moq-net-v0.3.7...moq-net-v0.3.8) - 2026-09-30
+
+### Added
+
+- *(lite)* moq-lite-07 switches to 64-bit leading-ones varints ([#4455](https://github.com/moq-dev/moq/pull/4455))
+- *(net)* BigInt-free varint codec, internal U64, and checked Varint.decode ([#4454](https://github.com/moq-dev/moq/pull/4454))
+- *(net)* drain queued stream data before a graceful close ([#4430](https://github.com/moq-dev/moq/pull/4430))
+- *(net)* read a subtree through an origin mount ([#4271](https://github.com/moq-dev/moq/pull/4271))
+
+### Fixed
+
+- *(net)* send the AUTHORITY setup option from moqt:// clients ([#4578](https://github.com/moq-dev/moq/pull/4578))
+- *(net)* re-resolve a splice successor on every judgment
+- *(net)* preserve cached history for late relay subscribers ([#4472](https://github.com/moq-dev/moq/pull/4472))
+- *(net)* align IETF object extension limits ([#4475](https://github.com/moq-dev/moq/pull/4475))
+- *(net)* cancel an unwanted lite track still waiting on TRACK_INFO ([#4494](https://github.com/moq-dev/moq/pull/4494))
+- *(net)* skip announce updates the peer cannot tell apart ([#4423](https://github.com/moq-dev/moq/pull/4423))
+- *(net)* an origin::Dynamic keeps its origin alive ([#4417](https://github.com/moq-dev/moq/pull/4417))
+- *(net)* resolve a relayed subscription's start from its source ([#4387](https://github.com/moq-dev/moq/pull/4387))
+- *(moq-net)* hide routes through a peer that withdrew the prefix ([#4399](https://github.com/moq-dev/moq/pull/4399))
+- *(net)* forget spliced tracks unread for the linger, finished ones included ([#4361](https://github.com/moq-dev/moq/pull/4361))
+- *(net)* select scoped routes after filtering, not before ([#4363](https://github.com/moq-dev/moq/pull/4363))
+- *(net)* refuse chained and wildcard origin mounts in any order ([#4362](https://github.com/moq-dev/moq/pull/4362))
+- *(net)* keep an aborted track's finished groups, expire ended tracks ([#4378](https://github.com/moq-dev/moq/pull/4378))
+- *(net)* keep a settled track's groups when it is aborted ([#4351](https://github.com/moq-dev/moq/pull/4351))
+
+### Other
+
+- *(moq-net)* watch mesh_withdraw's cursor from its own task ([#4564](https://github.com/moq-dev/moq/pull/4564))
+- Merge pull request #4561 from moq-dev/quest/m1/cluster-publisher-in-place
+- Merge pull request #4484 from moq-dev/quest/m1/splice-edges
+- Merge remote-tracking branch 'origin/main' into quest/m1/splice-edges
+- *(quest)* drop suffix-based routing from the plans ([#4382](https://github.com/moq-dev/moq/pull/4382))
+
 ## [0.3.7](https://github.com/moq-dev/moq/compare/moq-net-v0.3.6...moq-net-v0.3.7) - 2026-09-27
 
 ### Added

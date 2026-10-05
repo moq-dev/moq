@@ -118,7 +118,7 @@ async fn round(drop_session: bool) -> (usize, Option<moq_net::Error>) {
 		.await
 		.expect("publisher session");
 
-	tokio::time::timeout(TIMEOUT, track.used())
+	tokio::time::timeout(TIMEOUT, track.demand().used())
 		.await
 		.expect("no subscriber appeared")
 		.expect("track closed");

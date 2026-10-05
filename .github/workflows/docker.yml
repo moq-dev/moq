@@ -39,6 +39,8 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - id: parse
         env:
           CRATE: ${{ inputs.package }}
@@ -58,7 +60,7 @@ jobs:
             *) package="$crate" ;;
           esac
           echo "package=${package}" >> "$GITHUB_OUTPUT"
-          .github/scripts/release.sh parse-version "$crate"
+          just gh release parse-version "$crate"
 
   build:
     name: Build ${{ matrix.platform }}

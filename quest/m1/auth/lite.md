@@ -144,8 +144,3 @@ app-added token does not suspend the check; a reset AUTH stream reports
 cross-language harness.
 
 On main, additive.
-
-## Related
-
-- [Pattern interest](/quest/m1/path-patterns.md) - moves the prefix
-  fields here and in ANNOUNCE_REQUEST to patterns together

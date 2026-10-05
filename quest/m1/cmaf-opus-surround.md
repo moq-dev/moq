@@ -19,4 +19,3 @@ its table intact.
 ## Required
 
 - [mp4-atom dOps mapping](/quest/m1/mp4-atom-dops-mapping.md) - `Dops` carries the mapping family and table
-- [Audio codecs](/quest/m1/audio-codecs/README.md) - `opus::Mapping` and a `Config::encode` that writes any family's table

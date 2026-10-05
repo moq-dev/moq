@@ -270,10 +270,11 @@ class AudioConsumer:
 class VideoConsumer:
     """Async iterator of decoded video frames.
 
-    Built via :meth:`BroadcastConsumer.decode_video`. Each frame is
-    tightly packed in its own ``format`` and carries its own ``width``
-    and ``height``: ``output.resize`` is best effort, so read the frame
-    rather than assuming it took.
+    Built via :meth:`BroadcastConsumer.decode_video`. Each frame owns its
+    decoded picture until it is garbage collected; ``frame.pixels(format)``
+    converts it to tightly packed CPU pixels. Each carries its own
+    ``width()`` and ``height()``: ``output.resize`` is best effort, so read
+    the frame rather than assuming it took.
     """
 
     def __init__(self, inner: MoqVideoConsumer) -> None:
@@ -530,9 +531,8 @@ class BroadcastConsumer:
         An unrecognized codec raises here; a recognized one no native backend
         handles raises when the decoder opens, both before the first frame.
 
-        ``output.format`` picks the packed CPU layout frames arrive in and
-        defaults to :attr:`VideoPixelFormat.I420`, which is what a decoder
-        produces natively; each frame repeats the layout it was decoded to.
+        Each frame converts to a packed CPU layout on demand with
+        ``frame.pixels(format)``.
 
         ``output.resize`` asks the decoder for a different size and is best
         effort, so read each frame's own dimensions.

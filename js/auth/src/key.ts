@@ -6,9 +6,10 @@ import { type Claims, ClaimsSchema, ScopeSchema, scopeAllows } from "./claims.ts
 import { encodeGrants } from "./wire.ts";
 
 /**
- * A validated key identifier (kid). Only alphanumeric, hyphens, and underscores.
+ * A validated key identifier (kid). At most 128 alphanumeric, hyphen, or underscore characters.
  */
 export const KeyIdSchema = z.string().check(
+	z.maxLength(128),
 	z.refine((value) => /^[A-Za-z0-9_-]+$/.test(value), {
 		message: "Key ID must contain only alphanumeric characters, hyphens, and underscores",
 	}),
@@ -209,29 +210,30 @@ async function sign(key: Key, claims: Claims): Promise<string> {
 	return jwt;
 }
 
-/**
- * Verify a token's signature with this key and return its claims.
- *
- * Rejects an expired token (the `exp` claim). Scoping the claims to a connection path
- * is a separate step; see {@link authorize}.
- */
-async function verify(key: PublicKey | SymmetricKey, token: string): Promise<Claims> {
+/** Decode a signed token, checking only signature, algorithm, and key ID. The payload is unvalidated. */
+async function decode(key: PublicKey | SymmetricKey, token: string): Promise<unknown> {
 	ensureOperationSupported(key, "verify");
 	const joseKey = await importJoseKey(key);
-	const { payload } = await jose.jwtVerify(token, joseKey, {
+	const { payload, protectedHeader } = await jose.compactVerify(token, joseKey, {
 		algorithms: [key.alg],
 	});
+	if (protectedHeader.kid !== key.kid) throw new Error("Token kid does not match key");
+	return JSON.parse(new TextDecoder().decode(payload));
+}
 
+/** Verify a token's signature and this crate's strict claims, expiry, not-before, and key scope. */
+async function verify(key: PublicKey | SymmetricKey, token: string): Promise<Claims> {
+	const payload = await decode(key, token);
 	let claims: Claims;
 	try {
 		claims = ClaimsSchema.parse(payload);
 	} catch (error) {
 		throw new Error(`Failed to parse token claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
-
-	// Re-check on the way in, so a scope cannot be stripped by re-signing elsewhere.
+	const now = Date.now() / 1000;
+	if (claims.exp !== undefined && claims.exp <= now) throw new Error("Token has expired");
+	if (claims.nbf !== undefined && claims.nbf > now) throw new Error("Token is not yet valid");
 	ensureClaimsWithinScope(key, claims);
-
 	return claims;
 }
 
@@ -407,7 +409,9 @@ export const Key = {
 	public: toPublic,
 	/** Sign the claims with this key, returning the encoded token. */
 	sign,
-	/** Verify a token's signature with this key and return its claims. */
+	/** Decode a signed token with no payload policy. */
+	decode,
+	/** Verify a token's signature and this crate's claims policy. */
 	verify,
 	/** Generate a key for the given algorithm. A random key ID is assigned if none is provided. */
 	generate,

@@ -5,7 +5,7 @@
 JSON tracks live under `json` and opaque tracks under `flate` in moq-ffi and
 every wrapper, constructed from a track producer or consumer as in `moq-json`
 and `moq-flate`, and `BroadcastProducer`/`BroadcastConsumer` lose
-`publish_json_*`/`subscribe_json_*` and `publish_binary_*`. The per-language
+`publish_json_*`/`subscribe_json_*` and `publish_flate_*`. The per-language
 namespace pattern this sets is what the other children copy.
 
 ## Plan
@@ -26,10 +26,8 @@ keep doing so, and the rest may follow.
 Watch for Go import cycles: a subpackage takes the root's broadcast handle, so
 the root must not import it back.
 
-`flate` is the same shape over opaque bytes: moq-ffi's `binary.rs`
-(`publish_binary_snapshot`, `publish_binary_stream`, #4137) moves under it,
-mirroring `moq_flate::{snapshot, stream}` once
-[moq-binary folds into moq-flate](/quest/m1/flate-binary.md). If that fold has
-not landed, name the namespace `flate` anyway rather than `binary`.
+`flate` is the same shape over opaque bytes: moq-ffi's `flate.rs`
+(`publish_flate_snapshot`, `publish_flate_stream`) moves under it, mirroring
+`moq_flate::{snapshot, stream}`.
 
 Public API: breaking in every binding. Wire: none.

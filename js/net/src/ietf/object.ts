@@ -1,6 +1,10 @@
-import { type Cursor, type Reader, Writer } from "../stream.ts";
+import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
+import { asIetf, type Cursor, type Reader, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { type IetfVersion, Version } from "./version.ts";
+
+// Implementation limit for object extension blocks, independent of the IETF draft.
+const MAX_OBJECT_EXTENSIONS = 64 * 1024;
 
 const GROUP_END = 0x03;
 const END_OF_TRACK = 0x04;
@@ -43,12 +47,7 @@ function hasDeltaObjectPropertyTypes(version: IetfVersion | undefined): boolean 
 	}
 }
 
-async function encodeObjectPropertyType(
-	w: Writer,
-	id: bigint,
-	prev: bigint,
-	version: IetfVersion | undefined,
-): Promise<void> {
+async function encodeObjectPropertyType(w: Writer, id: bigint, prev: bigint, version: IetfVersion): Promise<void> {
 	const encoded = hasDeltaObjectPropertyTypes(version) ? id - prev : id;
 	await w.u62(encoded);
 }
@@ -61,7 +60,7 @@ async function encodeObjectTime(
 	w: Writer,
 	timestamp: Timestamp,
 	timescale: Timescale,
-	version: IetfVersion | undefined,
+	version: IetfVersion,
 ): Promise<void> {
 	const value = Math.round((timestamp.value * timescale) / timestamp.scale);
 	await encodeObjectPropertyType(w, PROP_TIMESTAMP, 0n, version);
@@ -71,7 +70,7 @@ async function encodeObjectTime(
 async function encodeObjectExtensions(
 	timestamp: Timestamp | undefined,
 	timescale: Timescale,
-	version: IetfVersion | undefined,
+	version: IetfVersion,
 ): Promise<Uint8Array> {
 	if (timestamp === undefined) {
 		return new Uint8Array();
@@ -108,7 +107,7 @@ function decodeObjectTime(c: Cursor, timescale: Timescale): Timestamp | undefine
 
 	while (c.remaining > 0) {
 		const step = c.u62();
-		const id = !hasDeltaObjectPropertyTypes(c.version) || first ? step : prevType + step;
+		const id = !hasDeltaObjectPropertyTypes(asIetf(c.version)) || first ? step : prevType + step;
 		first = false;
 		prevType = id;
 
@@ -214,8 +213,9 @@ export class Group {
 		}
 	}
 
-	static async decode(r: Reader, version: IetfVersion): Promise<Group> {
-		const raw = await r.u53();
+	/** Decode a SUBGROUP_HEADER. Pass `type` when the caller already read it to classify the stream. */
+	static async decode(r: Reader, version: IetfVersion, type?: number): Promise<Group> {
+		const raw = type ?? (await r.u53());
 		// Strip the draft-18 FIRST_OBJECT bit before the range check, but keep the value:
 		// it is the only signal that a subgroup starts partway through. Drafts that predate
 		// it carry no such signal, so they are taken at their word.
@@ -223,17 +223,16 @@ export class Group {
 		const firstObject = legacy || (raw & FIRST_OBJECT_BIT) !== 0;
 		const id = legacy ? raw : raw & ~FIRST_OBJECT_BIT;
 
-		let hasPriority: boolean;
-		let baseId: number;
-		if (id >= 0x10 && id <= 0x1f) {
-			hasPriority = true;
-			baseId = id;
-		} else if (id >= 0x30 && id <= 0x3f) {
-			hasPriority = false;
-			baseId = id - (0x30 - 0x10);
-		} else {
-			throw new Error(`Unsupported group type: ${id}`);
+		// An invalid type MUST close the session, including the reserved SUBGROUP_ID_MODE
+		// 0b11 (draft-21 section 11.3.1).
+		const known = (id >= 0x10 && id <= 0x1f) || (id >= 0x30 && id <= 0x3f);
+		if (!known || (id & 0x06) === 0x06) {
+			throw new ProtocolViolation(`Unsupported group type: ${raw}`);
 		}
+
+		// 0x30-0x3F omit the priority and inherit it from the control message.
+		const hasPriority = id < 0x30;
+		const baseId = hasPriority ? id : id - (0x30 - 0x10);
 
 		const flags: GroupFlags = {
 			hasExtensions: (baseId & 0x01) !== 0,
@@ -281,7 +280,7 @@ export class Frame {
 	 * `idDelta` is the first object's absolute Object ID and zero for every later one, so a
 	 * group whose head was trimmed by a filter still puts the true numbering on the wire.
 	 */
-	async encode(w: Writer, flags: GroupFlags, timescale: Timescale, version = w.version, idDelta = 0): Promise<void> {
+	async encode(w: Writer, flags: GroupFlags, timescale: Timescale, version: IetfVersion, idDelta = 0): Promise<void> {
 		await w.u53(idDelta);
 
 		if (flags.hasExtensions) {
@@ -321,6 +320,9 @@ export class Frame {
 		let timestamp: Timestamp | undefined;
 		if (flags.hasExtensions) {
 			const extensionsLength = c.u53();
+			if (extensionsLength > MAX_OBJECT_EXTENSIONS) {
+				throw new StreamError(StreamCode.MalformedTrack, { message: "object extensions exceed 64 KiB" });
+			}
 			// A track that declared no timescale opted out of timestamps, so its objects
 			// are stamped on arrival even if one carries a Timestamp we cannot interpret.
 			if (timescale !== undefined) {
@@ -391,7 +393,7 @@ export class FetchFrame {
 	}
 
 	/** Encode this object at `position`, stamping it in the track's timescale. */
-	async encode(w: Writer, position: FetchPosition, timescale: Timescale, version = w.version): Promise<void> {
+	async encode(w: Writer, position: FetchPosition, timescale: Timescale, version: IetfVersion): Promise<void> {
 		if (position.first) {
 			// Include the priority too: "same as the prior object" has no prior to refer to.
 			const properties = this.timestamp !== undefined ? FETCH_PROPERTIES : 0;

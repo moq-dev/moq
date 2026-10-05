@@ -708,6 +708,62 @@ mod tests {
 		assert_eq!(video.bandwidth(), 2_000_000);
 	}
 
+	// The estimator also measures the framerate and publishes it once it settles, so an
+	// imported source gains one about a second in. Rebuilding for it would re-time the fMP4
+	// (its timescale derives from the framerate) and churn every recording cursor mid-stream.
+	#[tokio::test]
+	async fn estimated_framerate_keeps_the_rendition() {
+		let origin = produce_origin();
+		let _broadcast = origin.create_broadcast("live").expect("publish allowed");
+		_broadcast.announce(Default::default()).expect("publish allowed");
+		settle().await;
+		let upstream = empty_upstream(&origin, "live").await;
+
+		let mut catalog = catalog_with_both();
+		catalog.video.renditions.get_mut("video0").unwrap().framerate = None;
+		let renditions = renditions::Producer::new(Config::default().window);
+		let mut cursor = renditions.subscribe();
+		renditions.sync(&upstream, &catalog);
+		let video = renditions.get(Kind::Video, "video0").expect("video rendition");
+		while next_event(&mut cursor).await.is_some() {}
+
+		for framerate in [Some(30.0), Some(60.0)] {
+			catalog.video.renditions.get_mut("video0").unwrap().framerate = framerate;
+			renditions.sync(&upstream, &catalog);
+			assert!(
+				Arc::ptr_eq(&video, &renditions.get(Kind::Video, "video0").unwrap()),
+				"the video rendition survives a framerate estimate of {framerate:?}"
+			);
+			assert!(next_event(&mut cursor).await.is_none(), "no rendition churn");
+		}
+
+		// The settled estimate still reaches the fallback cadence of a duration-less frame,
+		// at the timescale the rendition was built with (90 kHz without a framerate).
+		let muxer = video.muxer().unwrap();
+		assert_eq!(muxer.timescale().as_u64(), 90_000);
+		let fragment = muxer.fragment(0, &[vp8_frame(0, true)]).unwrap();
+		assert_eq!(first_sample_duration(&fragment), Some(1_500), "16.7 ms at 90 kHz");
+
+		// An NTSC estimate is 1501.5 ticks at 90 kHz: it snaps to whole ticks and still muxes.
+		catalog.video.renditions.get_mut("video0").unwrap().framerate = Some(60_000.0 / 1001.0);
+		renditions.sync(&upstream, &catalog);
+		let fragment = video.muxer().unwrap().fragment(0, &[vp8_frame(0, true)]).unwrap();
+		assert_eq!(first_sample_duration(&fragment), Some(1_502));
+	}
+
+	/// The `trun` duration of a fragment's first sample.
+	fn first_sample_duration(fragment: &bytes::Bytes) -> Option<u32> {
+		use moq_mux::container::fmp4::mp4_atom::{self, DecodeMaybe};
+
+		let mut cursor = std::io::Cursor::new(fragment.as_ref());
+		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+			if let mp4_atom::Any::Moof(moof) = atom {
+				return moof.traf[0].trun[0].entries[0].duration;
+			}
+		}
+		panic!("no moof in fragment");
+	}
+
 	#[tokio::test]
 	async fn estimate_before_first_init_reaches_aac_descriptor() {
 		let origin = produce_origin();
@@ -1645,11 +1701,10 @@ mod tests {
 		(rendition, watcher)
 	}
 
-	// A same-path republish takes the origin leaf over with a brand new broadcast (an ordinary
-	// publisher is `Hop::UNKNOWN`, which never counts as the same publisher, so even a plain
-	// reconnect qualifies). Renditions derived from the old broadcast's catalog must not serve the
-	// replacement's media: its group numbering restarts, so those bytes would be served under the
-	// replaced broadcast's segment number, duration, and PROGRAM-DATE-TIME.
+	// A path published again after its broadcast ended is a brand new broadcast. Renditions
+	// derived from the old broadcast's catalog must not serve the replacement's media: its group
+	// numbering restarts, so those bytes would be served under the replaced broadcast's segment
+	// number, duration, and PROGRAM-DATE-TIME.
 	#[tokio::test]
 	async fn a_replacement_publisher_is_not_served_under_the_replaced_catalog() {
 		const OLD: &[u8] = b"OLDOLDOLDOLDOLDO";
@@ -1697,10 +1752,13 @@ mod tests {
 			source,
 		};
 
-		// The publisher reconnects before the catalog snapshot is reconciled. That gap is wide in
-		// practice: `watch_catalog` retries a not-yet-written catalog track with backoff, so
-		// seconds can pass between resolving the broadcast and syncing its first snapshot.
+		// The publisher goes away and comes back before the catalog snapshot is reconciled. That
+		// gap is wide in practice: `watch_catalog` retries a not-yet-written catalog track with
+		// backoff, so seconds can pass between resolving the broadcast and syncing its first
+		// snapshot. The old broadcast ends first: a path still routed is one broadcast, so a
+		// publisher back before then would resume it instead.
 		drop(old);
+		settle().await;
 		let (new, _) = publish(&origin, NEW);
 		settle().await;
 
@@ -1809,9 +1867,10 @@ mod tests {
 			.await
 			.expect("the timeline reaches the rendition");
 
-		// The media publisher reconnects before any segment is requested, taking the origin leaf
-		// over with a brand new broadcast whose group numbering restarts from zero.
+		// The media publisher goes away and comes back before any segment is requested, as a
+		// brand new broadcast whose group numbering restarts from zero.
 		drop(old_media);
+		settle().await;
 		let new_media = publish_media(&origin, NEW, None);
 		settle().await;
 
@@ -1869,8 +1928,8 @@ mod tests {
 		moq_net::origin::Route::default().with_hops(hops(&[first]))
 	}
 
-	/// A standalone media publisher (not an origin leaf) so the sibling is served through a
-	/// routed front whose first hop can change.
+	/// A standalone media publisher (not an origin leaf), so the sibling is served through a
+	/// routed front.
 	fn write_routed_media(
 		broadcast: &mut moq_net::broadcast::Producer,
 		payload: &'static [u8],
@@ -1915,12 +1974,13 @@ mod tests {
 		}
 	}
 
-	// A bound sibling whose publisher is replaced through a different first hop ends with
-	// Dropped. The exporter must drop rows listed for the old publisher, re-bind, and list
-	// only rows that arrive after the new bind resolves: fetching an old row from the
+	// A bound sibling whose route goes away ends with Dropped, and a new publisher may serve
+	// the path afterwards. The exporter must drop rows listed for the old publisher, re-bind,
+	// and list only rows that arrive after the new bind resolves: fetching an old row from the
 	// replacement would serve restarted groups under the previous publisher's segment numbers.
 	#[tokio::test]
-	async fn a_replaced_first_hop_sibling_drops_old_rows_and_rebinds() {
+	async fn a_replaced_sibling_drops_old_rows_and_rebinds() {
+		tokio::time::pause();
 		const OLD: &[u8] = b"OLDOLDOLDOLDOLDO";
 		const NEW: &[u8] = b"NEWNEWNEWNEWNEWN";
 
@@ -1943,7 +2003,15 @@ mod tests {
 		let mut config = video_config();
 		config.broadcast = Some(moq_net::path::Relative::new("media").to_owned());
 
-		let (rendition, watcher) = export(&upstream, &config);
+		let mut snapshot = moq_mux::catalog::hang::Catalog::default();
+		snapshot.video.renditions.insert("video0".to_string(), config.clone());
+		let archive = hang::catalog::Archive::new(hang::timeline::DEFAULT_NAME);
+		snapshot.archive = Some(archive.clone());
+		let renditions = renditions::Producer::new(Config::default().window);
+		renditions.sync(&upstream, &snapshot);
+		let fanout = renditions.fanout();
+		let watcher = tokio::spawn(watch_timeline(upstream.broadcast.clone(), archive, fanout.clone()));
+		let rendition = renditions.get(Kind::Video, "video0").unwrap();
 		accept_sibling(&old_server, &old_media).await;
 		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
 			.await
@@ -1955,16 +2023,21 @@ mod tests {
 			.expect("the original sibling is servable");
 		assert!(contains(&served, OLD), "the first hop serves the original publisher");
 		assert!(!rendition.snapshot().segments.is_empty());
+		let mut early = rendition.segments();
+		assert_eq!(early.next().await.unwrap().unwrap().discontinuity, 0);
 
-		// The replacement is already announced before the incumbent is dropped, matching a
-		// rival publisher that appears while the current first hop is still serving.
-		let new_server = origin.dynamic("media", sibling_route(11)).unwrap();
 		drop((old_server, old_media, _old_track));
 		until_empty(&rendition).await;
 		assert!(
 			rendition.segment(0).await.unwrap().is_none(),
 			"a row listed for the old publisher answers 404 after replacement"
 		);
+
+		// A publisher still routed when the incumbent goes would resume its broadcast
+		// instead: a path is one broadcast, whoever serves it. The bind failed while nothing
+		// served the path, so the next poll re-issues it.
+		let new_server = origin.dynamic("media", sibling_route(11)).unwrap();
+		let _ = rendition.snapshot();
 
 		let mut new_media = moq_net::broadcast::Info::new().produce();
 		accept_sibling(&new_server, &new_media).await;
@@ -1975,6 +2048,9 @@ mod tests {
 			.expect("the rebound sibling resolves")
 			.expect("the replacement is routable");
 		let recorder = catalog.enroll_test("video0").unwrap();
+		// Model source records lost during the outage: every rendition must carry the
+		// same new timeline sequence, including a recorder that starts after this rebind.
+		fanout.skip();
 		let _new_track = write_routed_media(&mut new_media, NEW, recorder, 6_000_000);
 		let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 		loop {
@@ -2004,6 +2080,15 @@ mod tests {
 			"rows after the new bind come from the replacement"
 		);
 		assert!(!contains(&served, OLD));
+		let mut late = rendition.segments();
+		let early = early.next().await.unwrap().unwrap();
+		let late = late.next().await.unwrap().unwrap();
+		assert_eq!(early.segment, late.segment);
+		assert!(early.discontinuity > 0, "the replacement starts after a timeline break");
+		assert_eq!(
+			late.discontinuity, early.discontinuity,
+			"cursor creation cannot reset the baseline"
+		);
 		assert!(
 			rendition.segment(0).await.unwrap().is_none(),
 			"a row listed for the old publisher is not served from the replacement"
@@ -2285,11 +2370,11 @@ mod tests {
 		assert_eq!(first.segment, 0);
 		assert_eq!(&first.media[4..8], b"moof", "the segment carries its transmuxed media");
 		assert_eq!(first.duration, Duration::from_secs(2));
-		assert!(!first.discontinuity, "a clean start is not a discontinuity");
+		assert_eq!(first.discontinuity, 0, "a clean start is not a discontinuity");
 
 		let second = segments.next().await.unwrap().expect("second segment");
 		assert_eq!(second.segment, 1);
-		assert!(!second.discontinuity, "consecutive segments are continuous");
+		assert_eq!(second.discontinuity, 0, "consecutive segments are continuous");
 
 		// Tear down the publisher mid-group. The track ends abruptly (the cursor drains the
 		// segments it already saw and ends; the still-open live-edge group is NOT finalized,

@@ -3,10 +3,10 @@
 ## Goal
 
 A `moq_tokio::Connection` that came up over the WebSocket fallback migrates to
-QUIC once the QUIC dial completes: live tracks hand over at a group boundary,
-the WebSocket session receives a GOAWAY and drains within the handover cap,
-`Status::Migrating` is observable across the swap, and the "WebSocket won"
-memo forgets the URL. When QUIC wins the race nothing changes.
+QUIC once the QUIC dial completes: live tracks resume on QUIC from the first
+frame they lack, the WebSocket session receives a GOAWAY and drains within the
+handover cap, `Status::Migrating` is observable across the swap, and the
+"WebSocket won" memo forgets the URL. When QUIC wins the race nothing changes.
 
 ## Plan
 

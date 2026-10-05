@@ -213,6 +213,23 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		Poll::Ready(Ok(self.buffer.split_to(size).freeze()))
 	}
 
+	/// Poll to discard `remaining` bytes, counting it down as they arrive. Nothing is
+	/// buffered past what one read brings, so a peer cannot make a skipped payload cost
+	/// memory.
+	pub(crate) fn poll_skip(&mut self, cx: &mut Context<'_>, remaining: &mut usize) -> Poll<Result<(), Error>> {
+		loop {
+			let skipped = self.buffer.len().min(*remaining);
+			self.buffer.advance(skipped);
+			*remaining -= skipped;
+			if *remaining == 0 {
+				return Poll::Ready(Ok(()));
+			}
+			if !ready!(self.poll_read_more(cx))? {
+				return Poll::Ready(Err(DecodeError::Short.into()));
+			}
+		}
+	}
+
 	/// Read exactly the given number of bytes from the stream.
 	pub async fn read_exact(&mut self, size: usize) -> Result<Bytes, Error> {
 		std::future::poll_fn(|cx| self.poll_read_exact(cx, size)).await
@@ -367,10 +384,13 @@ mod tests {
 		let mut group = crate::group::Info { sequence: 0 }.produce();
 		let mut consumer = group.consume();
 		let frame = group
-			.create_frame_owned(crate::frame::Info {
-				size: size as u64,
-				timestamp: crate::Timestamp::ZERO,
-			})
+			.create_frame_owned(
+				crate::frame::Info {
+					size: size as u64,
+					timestamp: crate::Timestamp::ZERO,
+				},
+				&Default::default(),
+			)
 			.unwrap();
 
 		let payload = consumer.next_frame().now_or_never().unwrap().unwrap().unwrap();
@@ -408,6 +428,132 @@ mod tests {
 		fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 			Poll::Pending
 		}
+	}
+
+	/// A skipped payload is discarded across reads, leaving what follows it, and a skip
+	/// waiting on more has counted down what it already discarded.
+	#[test]
+	fn skip_discards_across_reads() {
+		let chunks = [b"abc".as_slice(), b"defg", b"hi"];
+		let mut reader = Reader::new(Chunks(chunks.into()), crate::lite::Version::Lite05);
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+
+		let mut remaining = 6;
+		assert!(matches!(reader.poll_skip(&mut cx, &mut remaining), Poll::Ready(Ok(()))));
+		assert_eq!(&reader.read_exact(3).now_or_never().unwrap().unwrap()[..], b"ghi");
+
+		let mut reader = Reader::new(Chunks([b"ab".as_slice(), b"cd"].into()), crate::lite::Version::Lite05);
+		let mut remaining = 5;
+		assert!(reader.poll_skip(&mut cx, &mut remaining).is_pending());
+		assert_eq!(remaining, 1);
+		assert!(reader.buffer.is_empty(), "nothing skipped is kept");
+	}
+
+	fn refuses_frame<T: Decode<V> + Debug, V: StreamCodes + Clone>(prefix: &[u8], version: V, oversized: bool) {
+		let mut reader = Reader::new(Chunks([b"following bytes".as_slice()].into()), version);
+		reader.buffer.extend_from_slice(prefix);
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		let result = reader.poll_decode::<T>(&mut cx);
+		if oversized {
+			assert!(
+				matches!(
+					result,
+					Poll::Ready(Err(Error::Decode(DecodeError::MessageTooLarge { .. })))
+				),
+				"{result:?}"
+			);
+		} else {
+			assert!(
+				matches!(result, Poll::Ready(Err(Error::Decode(DecodeError::InvalidValue)))),
+				"{result:?}"
+			);
+		}
+		assert_eq!(reader.buffer.len(), prefix.len());
+		assert_eq!(reader.stream.0.len(), 1, "read past the complete frame");
+	}
+
+	#[test]
+	fn malformed_complete_frames_are_refused() {
+		use crate::{Version, ietf, lite, setup};
+		refuses_frame::<lite::Setup, _>(&[0], lite::Version::Lite05, false);
+		refuses_frame::<lite::Goaway, _>(&[0], lite::Version::Lite05, false);
+		refuses_frame::<ietf::GoAway, _>(&[0, 0], ietf::Version::Draft20, false);
+		for version in [
+			Version::Lite(lite::Version::Lite01),
+			Version::Lite(lite::Version::Lite02),
+			Version::Ietf(ietf::Version::Draft14),
+		] {
+			let prefix = if version.is_lite() {
+				&[0x20, 0][..]
+			} else {
+				&[0x20, 0, 0][..]
+			};
+			refuses_frame::<setup::Client, _>(prefix, version, false);
+			let prefix = if version.is_lite() {
+				&[0x21, 0][..]
+			} else {
+				&[0x21, 0, 0][..]
+			};
+			refuses_frame::<setup::Server, _>(prefix, version, false);
+		}
+	}
+
+	#[test]
+	fn oversized_setup_is_refused_at_the_prefix() {
+		use crate::{Version, lite, setup};
+		for version in [lite::Version::Lite01, lite::Version::Lite02] {
+			for size in [65537u64, (1 << 40) + 1] {
+				let mut prefix = vec![0x20];
+				size.encode(&mut prefix, version).unwrap();
+				refuses_frame::<setup::Client, _>(&prefix, Version::Lite(version), true);
+				prefix[0] = 0x21;
+				refuses_frame::<setup::Server, _>(&prefix, Version::Lite(version), true);
+			}
+		}
+		for version in [lite::Version::Lite05, lite::Version::Lite06] {
+			let mut prefix = Vec::new();
+			65537u64.encode(&mut prefix, version).unwrap();
+			refuses_frame::<lite::Setup, _>(&prefix, version, true);
+		}
+	}
+
+	#[test]
+	fn setup_at_the_limit_waits_for_its_body() {
+		use crate::{Version, lite, setup};
+		for version in [lite::Version::Lite01, lite::Version::Lite02] {
+			let mut prefix = vec![0x20];
+			65536u64.encode(&mut prefix, version).unwrap();
+			assert!(matches!(
+				setup::Client::decode(&mut prefix.as_slice(), Version::Lite(version)),
+				Err(DecodeError::Short)
+			));
+			prefix[0] = 0x21;
+			assert!(matches!(
+				setup::Server::decode(&mut prefix.as_slice(), Version::Lite(version)),
+				Err(DecodeError::Short)
+			));
+		}
+		for version in [lite::Version::Lite05, lite::Version::Lite06] {
+			let mut prefix = Vec::new();
+			65536u64.encode(&mut prefix, version).unwrap();
+			assert!(matches!(
+				lite::Setup::decode(&mut prefix.as_slice(), version),
+				Err(DecodeError::Short)
+			));
+		}
+	}
+
+	#[test]
+	fn fragmented_setup_waits_for_its_body() {
+		let mut reader = Reader::new(Chunks([b"\x01".as_slice()].into()), crate::lite::Version::Lite05);
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		assert!(reader.poll_decode::<crate::lite::Setup>(&mut cx).is_pending());
+		reader.stream.0.push_back(b"\x00");
+		assert!(matches!(
+			reader.poll_decode::<crate::lite::Setup>(&mut cx),
+			Poll::Ready(Ok(_))
+		));
+		assert!(reader.buffer.is_empty());
 	}
 
 	/// A consumer parked on the group cannot run until this task yields, so a burst of

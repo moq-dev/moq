@@ -12,5 +12,4 @@ Unit-test the offer, a multi-block NV12 buffer, and a multi-block I420 buffer, w
 
 ## Related
 
-- [Validate PipeWire cameras on a portal and a Pi](/quest/m3/pipewire-camera-hardware.md) - the pass that shows whether a real Pi or portal camera delivers separate planes
 - [PipeWire DMA-BUFs into Vulkan](/quest/m2/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - the hardware validation of the DMA-BUF path

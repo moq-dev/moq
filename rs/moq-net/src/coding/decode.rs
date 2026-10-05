@@ -83,6 +83,16 @@ pub enum DecodeError {
 	Version,
 }
 
+impl DecodeError {
+	/// A complete frame cannot be extended by reading more stream bytes.
+	pub(crate) fn complete(self) -> Self {
+		match self {
+			Self::Short => Self::InvalidValue,
+			other => other,
+		}
+	}
+}
+
 impl<V> Decode<V> for bool {
 	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		match u8::decode(r, version)? {
