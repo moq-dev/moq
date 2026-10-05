@@ -8,7 +8,7 @@ STOP_SENDING, so a long-lived session never stalls on MAX_DATA. `close()`
 delivers its APPLICATION_CLOSE frame before the transport drops, so a TCP or
 WebSocket peer sees the close code whenever the transport stays writable
 within the close bound. Both hold on the 0.5 line that
-`main` pins and the 0.6 line `dev` uses.
+`release` pins and the 0.6 line `main` uses.
 
 ## Plan
 
@@ -28,7 +28,11 @@ Facts from moq-dev/web-transport `rs/qmux/src/session.rs` (0.5.1 and main):
   writer that is mid-write treats that as interrupted and drops the frame.
   0.6 made `close()` idempotent and keeps the first reason, but not the order.
 
-Work:
+Work, drafted upstream as
+[web-transport#412](https://github.com/moq-dev/web-transport/pull/412) (0.6,
+targets `main`) and
+[web-transport#413](https://github.com/moq-dev/web-transport/pull/413) (0.5,
+targets `qmux-v0.5.x`):
 
 - Consume credit for unread bytes on drop, for STREAM data and the RESET
   final-size gap after STOP_SENDING (keep enough of a retired stream's state
@@ -38,11 +42,11 @@ Work:
 - Tests in `rs/qmux`: a session that drops many unread streams keeps
   delivering past its initial window, and a peer reads the close code after a
   close issued mid-write.
-- Release on both lines (0.5.x after 0.5.2 from
-  [qmux reset race](/quest/m0/qmux-reset-race.md), and 0.6.x), then bump
-  `main`'s pin to that 0.5.x. `main` stays on 0.5: 0.6 needs
-  web-transport-trait 0.5, a breaking change that belongs on `dev`, which
-  picks up 0.6.x.
+
+Remaining: merge both, release patched 0.5.x (after 0.5.2) and 0.6.x
+containing them, then bump `main` to that 0.6.x and backport `release`'s pin
+to that 0.5.x. `release` stays on 0.5: 0.6 needs web-transport-trait 0.5, a
+breaking change.
 
 Why m0: the WebSocket fallback and the planned edge-to-core `tls://` links
 both run on qmux, and MoQ drops streams constantly.
@@ -51,5 +55,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [qmux reset race](/quest/m0/qmux-reset-race.md) - same file and release train; lands first
 - [qmux on noq-proto](/quest/m2/quic-qmux.md) - replaces these stream maps later

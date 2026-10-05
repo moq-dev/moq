@@ -26,6 +26,9 @@ The announcement listing names each announced route by the prefix it covers;
 by convention a publisher announces each broadcast's exact path, so the list
 reads as broadcast names.
 
+`moq ls` and `moq fetch` answer the same questions over MoQ; see
+[Inspect a relay](/bin/inspect).
+
 A relay configured with more than one certificate has no single fingerprint to
 publish, and this endpoint answers for the first. The others are reachable over
 `https://`, which selects a certificate by SNI at the handshake.

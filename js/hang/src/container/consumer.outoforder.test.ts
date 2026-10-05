@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { Group, Time, Track, Varint } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
@@ -110,4 +110,43 @@ test("a below-cursor group still downloading is not truncated", async () => {
 	live.close();
 	track.close();
 	consumer.close();
+});
+
+// The floor belongs to the latest group, not to delayed history within max age.
+test("delayed older groups survive a floor established by two newer groups", async () => {
+	const clock = spyOn(performance, "now").mockReturnValue(200);
+	const track = new Track.Producer("test").accept({ maxAge: Time.Milli(30_000) });
+	const consumer = new Consumer(track.subscribe({ maxAge: Time.Milli(5000) }), {
+		format: new LegacyFormat("data"),
+		maxAge: Time.Milli(5000),
+	});
+	async function nextFrame() {
+		for (;;) {
+			const next = await consumer.next();
+			if (!next || next.frame) return next;
+		}
+	}
+	try {
+		publish(track, 3, 30);
+		expect((await nextFrame())?.group).toBe(3);
+
+		const latest = new Group.Producer(4);
+		track.writeGroup(latest);
+		publishFrame(latest, 40, 4);
+		expect((await nextFrame())?.group).toBe(4);
+
+		// Group 1's 10ms frame is valid history, below group 4's 30ms floor.
+		publish(track, 1, 10);
+		const backlog = await nextFrame();
+		expect(backlog?.group).toBe(1);
+		expect(backlog?.frame?.timestamp).toBe(Time.Micro(10_000));
+
+		// Delivering the backlog must not erase the floor for group 4 itself.
+		publishFrame(latest, 29, 5);
+		await expect(nextFrame()).rejects.toThrow("below the previous group start");
+	} finally {
+		consumer.close();
+		track.close();
+		clock.mockRestore();
+	}
 });

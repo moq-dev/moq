@@ -67,3 +67,4 @@ Additive.
 ## Related
 
 - [Signaling and policy](/quest/m2/p2p/signal.md) - the first consumer
+- [Route trust](/quest/m1/cluster-routing/route-trust.md) - extends the grant with the node ids its holder may advertise routes for, a second purpose beside serving paths

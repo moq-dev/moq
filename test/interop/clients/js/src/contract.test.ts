@@ -40,14 +40,14 @@ test("late join uses the published GOP when painting is ahead of capture", async
 		expect(lateJoinStartsLive(gop, 4199)).toBe(true);
 		expect(lateJoinStartsLive(gop, 3000)).toBe(false);
 		expect(lateJoinStartsLive(gop, undefined)).toBe(false);
-		expect(track.used.peek()).toBe(true);
+		expect(track.demand().used.peek()).toBe(true);
 		const viewed = await viewer.recvGroup();
 		expect((await viewed?.readFrame())?.payload).toEqual(new Uint8Array([2]));
 		expect((await viewed?.readFrame())?.payload).toEqual(new Uint8Array([3]));
 		viewed?.close();
 		viewer.close();
-		await track.unused();
-		expect(track.used.peek()).toBe(false);
+		await track.demand().unused();
+		expect(track.demand().used.peek()).toBe(false);
 	} finally {
 		broadcast.close();
 	}

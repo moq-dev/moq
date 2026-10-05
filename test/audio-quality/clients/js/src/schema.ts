@@ -360,6 +360,14 @@ export type Sample = {
 	stalled?: boolean;
 	/** `sync.out.delay`: the resolved playout target. */
 	delay?: Ms;
+	/** The current connection PROBE round trip, before Sync keeps its minimum. */
+	rtt?: Ms;
+	/** `sync.out.jitter`: the network portion in auto mode, or the configured fixed delay. */
+	networkJitter?: Ms;
+	/** The selected rendition's advertised jitter at this sample. */
+	jitter?: Ms;
+	/** The selected rendition's advertised delay at this sample. */
+	renditionDelay?: Ms;
 
 	/** `AudioContext.outputLatency`. */
 	outputLatency?: Ms;
@@ -390,6 +398,8 @@ export type Environment = {
 	rate?: number;
 	/** The publisher's declared flush span: the `publish_flush` stage. */
 	jitter?: Ms;
+	/** The full audio configuration needed to replay a captured live row. */
+	config?: Trace["config"];
 	/** The AudioContext's rate, Hz, which the render clock counts in. */
 	contextRate?: number;
 };

@@ -29,7 +29,7 @@ harness:
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
 # sanity check). `interop --all` runs the full matrix: rust + python + go +
-# browser publish; everyone subscribes (incl. native node/bun JS, the C libmoq
+# browser publish; everyone subscribes (incl. native node/bun JS, the moq-c C
 # client, and the GStreamer moqsrc plugin). Other flags pass through, e.g.
 # `just test interop --publishers rust,python --subscribers rust,c`.
 # Both runs first check js/net's varints against moq-net's encoder at every size boundary,
@@ -133,6 +133,10 @@ drain *args:
 [positional-arguments]
 wasm *args:
     ./wasm/run.sh "$@"
+
+# Optional publisher retention across Rust/JS sessions through a Rust relay.
+max-age:
+    cargo nextest run --locked -p moq-tokio --test max_age --run-ignored all
 
 # Cross-language subscription termination over in-memory transports.
 bare-fin:

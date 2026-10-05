@@ -6,6 +6,7 @@
 
 #[macro_use]
 mod parameters;
+pub mod active_count;
 mod adapter;
 pub mod cluster;
 mod control;
@@ -26,6 +27,7 @@ mod publish;
 mod publish_namespace;
 mod publisher;
 mod request;
+mod request_stream;
 mod session;
 pub mod solicit;
 mod subscribe;

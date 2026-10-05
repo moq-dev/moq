@@ -137,7 +137,8 @@ impl poll::SendStream for SinkSend {
 		Poll::Ready(Ok(buf.len()))
 	}
 
-	fn set_priority(&mut self, order: u8) {
+	fn set_priority(&mut self, order: i32) {
+		let order = u8::try_from(order).expect("moq-net sends u8 send orders");
 		self.log.priorities.lock().unwrap().push(order);
 	}
 
@@ -628,6 +629,7 @@ pub struct ScriptedSession {
 	/// Scripts the peer pushes at us on unidirectional streams, popped by `accept_uni`
 	/// in order. See [`Self::with_incoming_unis`].
 	incoming_unis: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
+	incoming_bidis: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
 }
 
 impl ScriptedSession {
@@ -640,6 +642,7 @@ impl ScriptedSession {
 			open_gate: None,
 			park: kio::Park::default(),
 			incoming_unis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 		}
 	}
 
@@ -653,6 +656,12 @@ impl ScriptedSession {
 	/// more to open.
 	pub fn with_incoming_unis(mut self, scripts: Vec<Vec<u8>>) -> Self {
 		self.incoming_unis = Arc::new(Mutex::new(scripts.into_iter().collect()));
+		self
+	}
+
+	/// Have the peer open one bidirectional stream per script, then go quiet.
+	pub fn with_incoming_bidis(mut self, scripts: Vec<Vec<u8>>) -> Self {
+		self.incoming_bidis = Arc::new(Mutex::new(scripts.into_iter().collect()));
 		self
 	}
 
@@ -730,7 +739,17 @@ impl poll::Session for ScriptedSession {
 	}
 
 	fn poll_accept_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
-		Poll::Pending
+		let Some(script) = self.incoming_bidis.lock().unwrap().pop_front() else {
+			return Poll::Pending;
+		};
+		Poll::Ready(Ok((
+			SinkSend::new(self.log.clone()),
+			ScriptedRecv {
+				script: Arc::new(Mutex::new(script)),
+				close: self.close.clone(),
+				log: self.log.clone(),
+			},
+		)))
 	}
 
 	fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {

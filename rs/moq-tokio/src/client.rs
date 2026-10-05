@@ -1416,9 +1416,15 @@ mod tests {
 		websocket_handle.abort();
 		let _ = websocket_handle.await;
 
-		let update = announcements.next().await.expect("origin closed");
+		// Skip the caught-up marker; the first route event must be the announcement.
+		let update = loop {
+			match announcements.next().await.expect("origin closed") {
+				moq_net::announce::Event::Live => continue,
+				moq_net::announce::Event::Start(update) => break update,
+				event => panic!("expected announcement, got {event:?}"),
+			}
+		};
 		assert_eq!(update.prefix.as_str(), "test");
-		assert!(update.kind.is_active(), "expected announcement");
 		let broadcast = sub_consumer
 			.request_broadcast("test")
 			.await

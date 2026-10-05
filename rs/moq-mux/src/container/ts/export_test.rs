@@ -1920,7 +1920,7 @@ async fn read_si_groups(consumer: &moq_net::broadcast::Consumer, name: &str) -> 
 		.subscribe(
 			moq_net::track::Subscription::default()
 				.with_start(moq_net::track::Position::group(0))
-				.with_max_age(moq_net::track::DEFAULT_MAX_AGE),
+				.with_max_age(Duration::from_secs(5)),
 		)
 		.await
 		.unwrap();
@@ -5975,6 +5975,10 @@ async fn resume_after(finish: bool) {
 	before.extend(rest);
 	assert_eq!(end.is_ok(), finish, "a finish ends cleanly and a drop fails: {end:?}");
 
+	// The old broadcast ends before the publisher comes back: a path still routed is one
+	// broadcast, so a publisher back before then would resume it instead.
+	ended.closed().await;
+
 	// The returned catalog lists the track only in its second snapshot, and the restarted
 	// publisher's clock starts over.
 	let (mut broadcast, mut catalog) = publish();
@@ -6111,6 +6115,9 @@ async fn export_stats_skip_output_a_failure_discards() {
 	assert_eq!(units(export.stats()), pes_count(&frames));
 
 	drop((broadcast, catalog, track));
+	// The old broadcast ends before the publisher comes back: a path still routed is one
+	// broadcast, so a publisher back before then would resume it instead.
+	ended.closed().await;
 	let (mut broadcast, mut catalog) = publish();
 	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
 	source.returned(&ended).await.unwrap();

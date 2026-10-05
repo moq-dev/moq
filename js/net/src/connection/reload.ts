@@ -350,7 +350,7 @@ export class Reload {
 		let current: Established | undefined;
 		effect.cleanup(() => {
 			if (current) {
-				current.close();
+				current.abort();
 				if (this.established.peek() === current) this.established.set(undefined);
 				current = undefined;
 			}
@@ -387,7 +387,7 @@ export class Reload {
 
 					// Hand the connection to the effect, which closes it now if this run is already over.
 					if (signal.aborted) {
-						connection.close();
+						connection.abort();
 						return;
 					}
 					current = connection;
@@ -453,7 +453,7 @@ export class Reload {
 			// The peer is leaving and named somewhere we won't go: redialing the old address
 			// would ignore it, so stop here.
 			console.warn("GOAWAY redirect refused:", err);
-			connection.close();
+			connection.abort();
 			this.established.set(undefined);
 			this.status.set("disconnected");
 			this.#giveUp(error(err));
@@ -567,8 +567,9 @@ export class Reload {
 	 * Subscribe to broadcast announcements matching `scope`, spanning reconnects.
 	 *
 	 * The same {@link Announce.Consumer} stream as {@link Established.announced}, but everything active
-	 * is retracted (a `retracted` update) whenever the connection drops and re-announced on
+	 * is retracted (an `end` event) whenever the connection drops and re-announced on
 	 * reconnect, so a consumer draining `next()` never clings to a dead route across a reconnect.
+	 * The `live` marker comes once, from the first session.
 	 *
 	 * Stays empty while the relay lacks {@link Established.discovery}.
 	 */
@@ -594,15 +595,16 @@ export class Reload {
 
 			// Track what this connection announced so we can retract it if the connection
 			// drops; the last event rides along for the retraction.
-			const active = new Map<Path.Valid, Announce.Update>();
+			const active = new Map<Path.Valid, Announce.Announce>();
 
 			effect.spawn(async () => {
 				try {
 					for (;;) {
 						const entry = await effect.race(upstream.next());
 						if (!entry) break;
-						if (Announce.isActive(entry.kind)) active.set(entry.prefix, entry);
-						else active.delete(entry.prefix);
+						if (entry.kind === "end") active.delete(entry.prefix);
+						else if (entry.kind !== "live") active.set(entry.prefix, entry);
+						// The stream delivers the marker once; a later session's is dropped.
 						producer.append(entry);
 					}
 				} catch {
@@ -612,7 +614,7 @@ export class Reload {
 					// watcher tears down instead of clinging to the dead route.
 					if (consumer.closed.peek() === undefined) {
 						for (const entry of active.values()) {
-							producer.append({ ...entry, kind: "retracted" });
+							producer.append({ ...entry, kind: "end" });
 						}
 					}
 				}
@@ -666,7 +668,7 @@ class Draining {
 		if (this.#retired) return;
 		this.#retired = true;
 		clearTimeout(this.#timer);
-		this.#connection.close();
+		this.#connection.abort();
 		this.#onRetire();
 	}
 }

@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use base64::Engine;
+use hang::moq_net;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::time::{Instant, timeout_at};
 
@@ -60,8 +61,14 @@ async fn fetch(
 		.context("`fetch` dials a relay: pass --connect <url>")?;
 	let broadcast = moq.broadcast.clone().unwrap_or_default();
 
+	// Scoped to the broadcast, so the relay announces it by name even when a hidden
+	// segment such as `.stats` would keep it out of an unscoped listing.
+	let pattern = moq_net::Pattern::subtree(&broadcast).with_context(|| format!("invalid broadcast `{broadcast}`"))?;
+	let origin = moq_tokio::origin::spawn()
+		.scope("", &moq_net::Patterns::from(pattern))
+		.with_context(|| format!("failed to scope to `{broadcast}`"))?;
+
 	// Subscribe-only: this session reads and never publishes.
-	let origin = moq_tokio::origin::spawn();
 	let client = net
 		.client(moq.client.clone())?
 		.with_subscriber(origin.clone())
@@ -92,7 +99,7 @@ struct Request<'a> {
 /// Keep setup and all reads under the caller's one absolute deadline.
 async fn fetch_from<C>(
 	request: Request<'_>,
-	setup: impl std::future::Future<Output = anyhow::Result<(hang::moq_net::origin::Producer, C)>>,
+	setup: impl std::future::Future<Output = anyhow::Result<(moq_net::origin::Producer, C)>>,
 	out: &mut (impl AsyncWrite + Unpin),
 ) -> anyhow::Result<()> {
 	let Request { args, path, deadline } = request;
@@ -150,7 +157,6 @@ mod tests {
 	use super::*;
 	use crate::args::{Command, Invocation};
 	use crate::test_env::EnvGuard;
-	use hang::moq_net;
 
 	/// The frames of each finished group on the `data` track.
 	fn frames(sequence: u64) -> [Vec<u8>; 2] {
@@ -197,7 +203,7 @@ mod tests {
 		}
 
 		async fn fetch(&self, args: &[&str], timeout: Duration) -> (anyhow::Result<()>, Vec<u8>) {
-			let (_, args) = parse(&[], args);
+			let (_, args) = parse(&[], "demo", args);
 			let mut out = Vec::new();
 			let result = fetch_from(
 				Request {
@@ -213,20 +219,39 @@ mod tests {
 		}
 	}
 
-	/// A running relay with a publisher attached and its HTTP address.
+	/// A running relay with a publisher attached, and the flags that reach it.
 	struct NetworkFixture {
+		/// `--connect` and the TLS pin for the relay's generated certificate.
+		connect: [String; 4],
 		/// The relay's HTTP listener, for comparing against `/fetch`.
 		http: std::net::SocketAddr,
 		/// Kept so the published broadcast, its tracks, and the open group stay live.
 		_publisher: (moq_tokio::Connection, Fixture),
+		/// Kept so the relay's hidden broadcast and its track stay live.
+		_hidden: (moq_net::broadcast::Producer, moq_net::track::Producer),
 	}
 
 	impl NetworkFixture {
-		/// Publish `demo` with three finished groups on `data`, no group on `empty`,
-		/// and one frame of a group that never finishes on `live`.
+		/// Publish [`Fixture`]'s `demo` through a relay that also holds `.hidden`.
 		async fn new() -> Self {
 			let _ = moq_tokio::crypto::install_default();
 			let fixture = moq_relay::test_relay().await.expect("test relay");
+			// A dot-prefixed broadcast on the relay itself, like its `.stats`, which
+			// announce listings hide unless asked for by name.
+			let hidden = fixture
+				.relay
+				.cluster()
+				.origin
+				.create_broadcast(".hidden")
+				.expect("hidden broadcast");
+			hidden.announce(Default::default()).expect("announce hidden");
+			let secret = hidden.create_track("data", None).expect("hidden track");
+			let mut group = secret.append_group().expect("group");
+			group
+				.write_frame(moq_net::Timestamp::ZERO, b"secret".as_ref())
+				.expect("frame");
+			group.finish().expect("finish");
+
 			let ready = fixture.relay.ready();
 			tokio::spawn(fixture.relay.run());
 			ready.wait().await.expect("relay ready");
@@ -240,7 +265,7 @@ mod tests {
 
 			let publisher = Fixture::new().await;
 
-			let (moq, _) = parse(&connect, &[]);
+			let (moq, _) = parse(&connect, "demo", &[]);
 			let connection = net()
 				.client(moq.client.clone())
 				.expect("client")
@@ -252,9 +277,20 @@ mod tests {
 				.expect("publisher connects");
 
 			Self {
+				connect,
 				http: fixture.http,
 				_publisher: (connection, publisher),
+				_hidden: (hidden, secret),
 			}
+		}
+
+		/// Run `moq <connect> --broadcast <broadcast> fetch <args>` with `timeout`,
+		/// returning the outcome and what it wrote.
+		async fn fetch(&self, broadcast: &str, args: &[&str], timeout: Duration) -> (anyhow::Result<()>, Vec<u8>) {
+			let (moq, args) = parse(&self.connect, broadcast, args);
+			let mut out = Vec::new();
+			let result = super::fetch(&moq, &args, &net(), Instant::now() + timeout, &mut out).await;
+			(result, out)
 		}
 
 		/// The relay's HTTP `/fetch` status and body for the same group.
@@ -268,15 +304,15 @@ mod tests {
 	}
 
 	/// Parse a fetch invocation the way `main` does.
-	fn parse(connect: &[String], args: &[&str]) -> (MoqSide, Args) {
+	fn parse(connect: &[String], broadcast: &str, args: &[&str]) -> (MoqSide, Args) {
 		let argv = ["moq"]
 			.into_iter()
 			.chain(connect.iter().map(String::as_str))
-			.chain(["--broadcast", "demo", "fetch"])
+			.chain(["--broadcast", broadcast, "fetch"])
 			.chain(args.iter().copied())
 			.chain(args.is_empty().then_some("data"));
 		let mut cli = Invocation::try_parse_from(argv).expect("parse");
-		cli.dial_only("fetch").expect("only the dial");
+		cli.dial_only("fetch", &["--broadcast"]).expect("only the dial");
 		match cli.stages.remove(0) {
 			Command::Fetch(args) => (cli.moq, args),
 			_ => unreachable!("parsed a fetch"),
@@ -313,6 +349,18 @@ mod tests {
 		let (result, out) = fixture.fetch(&["data"], TIMEOUT).await;
 		result.expect("fetch");
 		assert_eq!(out, frames(2).concat());
+	}
+
+	/// A hidden broadcast such as `.stats` is fetched by name from a real relay, as
+	/// `/fetch` serves it: the relay's announce scoping is what hides it.
+	#[tokio::test]
+	async fn a_hidden_broadcast_is_fetched_by_name() {
+		let _env = EnvGuard::clear(ENV);
+		let fixture = NetworkFixture::new().await;
+
+		let (result, out) = fixture.fetch(".hidden", &["data"], Duration::from_secs(5)).await;
+		result.expect("fetch");
+		assert_eq!(out, b"secret");
 	}
 
 	/// A missing sequence fails the lookup itself, before any output, as `/fetch`
@@ -358,7 +406,7 @@ mod tests {
 	async fn setup_and_reads_share_one_deadline() {
 		let _env = EnvGuard::clear(ENV);
 		let fixture = Fixture::new().await;
-		let (_, args) = parse(&[], &["live", "--group", "0"]);
+		let (_, args) = parse(&[], "demo", &["live", "--group", "0"]);
 		let started = Instant::now();
 		let mut out = Vec::new();
 		let result = fetch_from(
@@ -384,7 +432,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn setup_is_bounded() {
 		let _env = EnvGuard::clear(ENV);
-		let (_, args) = parse(&[], &["data"]);
+		let (_, args) = parse(&[], "demo", &["data"]);
 		let started = Instant::now();
 		let result = fetch_from::<()>(
 			Request {
@@ -460,7 +508,7 @@ mod tests {
 			"data",
 		])
 		.expect("parse");
-		let err = cli.dial_only("fetch").unwrap_err().to_string();
+		let err = cli.dial_only("fetch", &["--broadcast"]).unwrap_err().to_string();
 		assert!(err.contains("--listen-tcp-bind"), "{err}");
 	}
 }

@@ -30,5 +30,5 @@ none.
 
 ## Related
 
-- [TS stats module](/quest/m1/ts-stats-module.md) - renames these types on dev
+- [TS stats module](/quest/m1/ts-stats-module.md) - renames these types
 - [TS health stats](/quest/m2/ts-health-stats.md) - publishes the same per-PID liveness

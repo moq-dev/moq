@@ -10,7 +10,7 @@
 #          libobs/Qt6/ffmpeg via buildspec.json (obs-deps).
 # Windows: needs Visual Studio 2022; same buildspec download (run from Git Bash).
 #
-# libmoq is built from the in-tree crate (rs/libmoq) via cargo. MOQ_LOCAL points
+# moq-c is built from the in-tree crate (rs/moq-c) via cargo. MOQ_LOCAL points
 # CMake at the repo root by default, so there's no prebuilt release to download.
 
 set quiet
@@ -20,7 +20,7 @@ default:
     just --list
 
 # Configure via CMake presets. MOQ_LOCAL defaults to the repo root inside
-# CMakeLists.txt (so libmoq builds from rs/libmoq); pass `path=/some/moq` to
+# CMakeLists.txt (so moq-c builds from rs/moq-c); pass `path=/some/moq` to
 # override it.
 setup preset="" path="":
     cmake --preset "$(../../sh/obs/preset.sh '{{ preset }}')" {{ if path == "" { "" } else { "-DMOQ_LOCAL=" + quote(path) } }}
@@ -38,14 +38,14 @@ compile:
 # Compile and link the plugin the way CI does, against the `.#obs` shell's own
 # libobs/Qt6/ffmpeg, then run the unit tests. Linux-only in practice: it's the
 # one platform where nixpkgs has obs-studio. The Debug build type reuses the
-# dev-profile Rust artifacts CI restores, where a release libmoq would rebuild
+# dev-profile Rust artifacts CI restores, where a release moq-c would rebuild
 # its whole dependency tree.
 ci preset="":
     cmake --preset "$(../../sh/obs/preset.sh '{{ preset }}' ci)" -DCMAKE_BUILD_TYPE=Debug
     cmake --build --preset "$(../../sh/obs/preset.sh '{{ preset }}' ci)"
     ../../sh/obs/unit.sh
 
-# Unit-test the plugin sources against stubbed libobs/libmoq/ffmpeg, under
+# Unit-test the plugin sources against stubbed libobs/moq-c/ffmpeg, under
 # ThreadSanitizer. Manual; `just obs ci` runs them without the sanitizer.
 test:
     ../../sh/obs/test.sh

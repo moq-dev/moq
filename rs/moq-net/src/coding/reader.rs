@@ -213,6 +213,23 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		Poll::Ready(Ok(self.buffer.split_to(size).freeze()))
 	}
 
+	/// Poll to discard `remaining` bytes, counting it down as they arrive. Nothing is
+	/// buffered past what one read brings, so a peer cannot make a skipped payload cost
+	/// memory.
+	pub(crate) fn poll_skip(&mut self, cx: &mut Context<'_>, remaining: &mut usize) -> Poll<Result<(), Error>> {
+		loop {
+			let skipped = self.buffer.len().min(*remaining);
+			self.buffer.advance(skipped);
+			*remaining -= skipped;
+			if *remaining == 0 {
+				return Poll::Ready(Ok(()));
+			}
+			if !ready!(self.poll_read_more(cx))? {
+				return Poll::Ready(Err(DecodeError::Short.into()));
+			}
+		}
+	}
+
 	/// Read exactly the given number of bytes from the stream.
 	pub async fn read_exact(&mut self, size: usize) -> Result<Bytes, Error> {
 		std::future::poll_fn(|cx| self.poll_read_exact(cx, size)).await
@@ -411,6 +428,25 @@ mod tests {
 		fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 			Poll::Pending
 		}
+	}
+
+	/// A skipped payload is discarded across reads, leaving what follows it, and a skip
+	/// waiting on more has counted down what it already discarded.
+	#[test]
+	fn skip_discards_across_reads() {
+		let chunks = [b"abc".as_slice(), b"defg", b"hi"];
+		let mut reader = Reader::new(Chunks(chunks.into()), crate::lite::Version::Lite05);
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+
+		let mut remaining = 6;
+		assert!(matches!(reader.poll_skip(&mut cx, &mut remaining), Poll::Ready(Ok(()))));
+		assert_eq!(&reader.read_exact(3).now_or_never().unwrap().unwrap()[..], b"ghi");
+
+		let mut reader = Reader::new(Chunks([b"ab".as_slice(), b"cd"].into()), crate::lite::Version::Lite05);
+		let mut remaining = 5;
+		assert!(reader.poll_skip(&mut cx, &mut remaining).is_pending());
+		assert_eq!(remaining, 1);
+		assert!(reader.buffer.is_empty(), "nothing skipped is kept");
 	}
 
 	fn refuses_frame<T: Decode<V> + Debug, V: StreamCodes + Clone>(prefix: &[u8], version: V, oversized: bool) {

@@ -61,7 +61,7 @@ bidirectional interoperability against the last web-transport `qmux` release (0.
 the TypeScript qmux/WebSocket peer used by `js/net`. Preserve rejection of
 prohibited QUIC frames, params-first setup, record-size validation, close and
 reset semantics (the first recorded close wins, as close codes #4262
-settled on dev), keep-alive behavior, and bounded flow-control tests.
+settled), keep-alive behavior, and bounded flow-control tests.
 
 There must be one stream state machine in the dependency graph.
 

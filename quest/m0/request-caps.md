@@ -34,7 +34,3 @@ Announces and subscriptions per session are capped as well.
 
 Public API: possibly caps on the session config; propose the shape in the PR.
 Wire: behaviour within the drafts' existing limits. No format change.
-
-## Required
-
-- [IETF FIN semantics](/quest/m0/ietf-fin-not-cancel.md) - MAX_REQUEST_ID refills as requests close, and that change decides when a request closes

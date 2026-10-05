@@ -709,36 +709,35 @@ fn session(header: bool, start_ms: u32, frames: u32) -> Vec<u8> {
 	out
 }
 
-/// What an FLV import published, plus the broadcast clock's reading around the first chunk.
+/// What an FLV import published, and the wall-clock window its first chunk arrived in.
 struct Imported {
 	published: std::collections::BTreeMap<String, Vec<u128>>,
 	video: String,
-	before: u128,
-	after: u128,
+	/// The root clock the catalog advertised.
+	clock: hang::catalog::Clock,
+	arrival: std::ops::RangeInclusive<std::time::SystemTime>,
+	/// Why a chunk was refused, if one was.
+	refused: Option<crate::Error>,
 }
 
-/// Import `chunks` in order, idling `idle` between them, on a clock that began `ago` earlier.
-/// `live` translates onto that clock; otherwise tag timestamps publish verbatim.
-async fn import(chunks: &[Vec<u8>], live: bool, ago: Duration, idle: Duration) -> Imported {
+/// Import `chunks` in order on a catalog with the default clock, stopping at the first refused
+/// chunk.
+async fn import(chunks: &[Vec<u8>]) -> Imported {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let config = crate::catalog::Config::default().with_clock(crate::container::test_util::late_clock(ago));
-	let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
-	let clock = catalog.clock();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut importer = Import::new(broadcast, catalog.reserve());
-	if live {
-		importer = importer.live();
-	}
 
-	let before = clock.now().as_micros();
+	let before = std::time::SystemTime::now();
 	let mut after = before;
+	let mut refused = None;
 	for (i, chunk) in chunks.iter().enumerate() {
-		if i > 0 {
-			tokio::time::advance(idle).await;
+		if let Err(err) = importer.decode(chunk) {
+			refused = Some(err);
+			break;
 		}
-		importer.decode(chunk).unwrap();
 		if i == 0 {
-			after = clock.now().as_micros();
+			after = std::time::SystemTime::now();
 		}
 	}
 	importer.finish().unwrap();
@@ -747,63 +746,45 @@ async fn import(chunks: &[Vec<u8>], live: bool, ago: Duration, idle: Duration) -
 	Imported {
 		published: crate::container::test_util::published(&consumer, &snapshot).await,
 		video: snapshot.video.renditions.keys().next().unwrap().clone(),
-		before,
-		after,
+		clock: snapshot.clock.expect("the catalog advertises a clock"),
+		arrival: before..=after,
+		refused,
 	}
 }
 
-/// A feed an hour into its own timeline, arriving 30s after the broadcast began, publishes on the
-/// broadcast clock: the first frame is live on arrival, and audio and video keep the one offset
-/// their tags gave them, B-frame reordering included.
+/// A feed an hour into its own timeline publishes its tag timestamps verbatim, and the catalog
+/// clock maps its first frame to the arrival time.
 #[tokio::test]
-async fn live_import_anchors_a_late_first_frame() {
-	let input = [session(true, 3_600_000, 50)];
-	let ago = Duration::from_secs(30);
-	let verbatim = import(&input, false, ago, Duration::ZERO).await;
-	let live = import(&input, true, ago, Duration::ZERO).await;
+async fn import_publishes_tag_timestamps_on_an_arrival_clock() {
+	let start_ms = 3_600_000;
+	let import = import(&[session(true, start_ms, 50)]).await;
+	assert!(import.refused.is_none());
 
-	crate::container::test_util::common_offset(&verbatim.published, &live.published);
-	let first = live.published[&live.video][0];
+	// The first video frame presents 40ms after its decode time.
+	let first = import.published[&import.video][0];
+	assert_eq!(first, (start_ms as u128 + 40) * 1000, "the source's own timestamp");
+
+	let tick = Duration::from_millis(1);
+	let wall = import
+		.clock
+		.wall_clock(moq_net::Timestamp::from_micros(first as u64).unwrap())
+		.unwrap();
 	assert!(
-		(live.before..=live.after).contains(&first),
-		"the first frame is live on arrival: {first} not in {}..={}",
-		live.before,
-		live.after
+		*import.arrival.start() - tick <= wall && wall <= *import.arrival.end() + tick,
+		"the first frame is live on arrival"
 	);
 }
 
-/// An encoder restarting its timestamps at zero continues the broadcast forward: after the real
-/// idle gap, and with every track moving onto the one new mapping.
-#[tokio::test(start_paused = true)]
-async fn live_import_restarts_forward_after_idle() {
-	for idle in [Duration::ZERO, Duration::from_millis(300)] {
-		let input = [session(true, 5_000, 50), session(false, 0, 50)];
-		let live = import(&input, true, Duration::from_secs(30), idle).await;
-
-		let last_before = live
-			.published
-			.values()
-			.map(|t| t[..50].iter().max().unwrap())
-			.max()
-			.unwrap();
-		let video = &live.published[&live.video];
-		let gap = video[50] as i128 - *last_before as i128;
-		assert!(
-			gap >= idle.as_micros() as i128,
-			"the restart lands after the idle gap: {gap}us after {idle:?}"
-		);
-		assert!(
-			gap < (idle + Duration::from_secs(5)).as_micros() as i128,
-			"the restart is not pushed further: {gap}us"
-		);
-
-		// The second session keeps its own A/V relationship on the new mapping.
-		let verbatim = import(&[session(true, 0, 50)], false, Duration::ZERO, Duration::ZERO).await;
-		let second = live
-			.published
-			.iter()
-			.map(|(name, t)| (name.clone(), t[50..].to_vec()))
-			.collect();
-		crate::container::test_util::common_offset(&verbatim.published, &second);
-	}
+/// An encoder restarting its timestamps is a new epoch: the import refuses the rewind rather than
+/// re-anchoring it forward, keeping everything published before it.
+#[tokio::test]
+async fn import_refuses_a_restart() {
+	let import = import(&[session(true, 5_000, 50), session(false, 0, 50)]).await;
+	let err = import.refused.expect("the restart is refused");
+	assert!(matches!(err, crate::Error::TimestampRewind(_)), "{err:?}");
+	assert_eq!(
+		import.published[&import.video].len(),
+		50,
+		"the first session stays published"
+	);
 }

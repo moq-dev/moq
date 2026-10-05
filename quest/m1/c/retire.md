@@ -8,8 +8,8 @@ it are deleted. `doc/setup/upgrade.md` tells C users how to move.
 
 ## Plan
 
-- #4288 renamed libmoq to `moq-c` on dev and left a code-free `rs/libmoq` stub
-  whose last release points at `moq-c`; dev's
+- #4288 renamed libmoq to `moq-c` and left a code-free `rs/libmoq` stub
+  whose last release points at `moq-c`;
   `quest/m1/libmoq-retire.md` deletes that stub. This quest retires the
   hand-written `rs/moq-c` itself, so fold in or delete that quest, whichever
   is still open.

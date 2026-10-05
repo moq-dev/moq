@@ -20,5 +20,6 @@ apart from `Unauthorized`.
 
 ## Required
 
+- [WebSocket refusal](/quest/m1/auth/ws-unauthorized.md) - both transports refuse a token at the session level
 - [Lite stream](/quest/m1/auth/lite.md) - the lite AUTH streams that carry `Expired`
 - [moq-transport](/quest/m1/auth/moq-transport.md) - the extension that carries `EXPIRED_AUTH_TOKEN`

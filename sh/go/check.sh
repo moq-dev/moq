@@ -41,6 +41,14 @@ bash "$SCRIPT_DIR/check-errors.sh" \
     "$GO_DIR/wrapper/errors.go" \
     "$GO_DIR/wrapper/errors_test.go"
 
+# Keep extracted samples in the staged module so they compile against this
+# checkout without becoming part of the published wrapper.
+mkdir -p "$WRAPPER_PKG/docs"
+cp "$SCRIPT_DIR/doc_prelude.go" "$WRAPPER_PKG/docs/prelude.go"
+bash "$WORKSPACE_DIR/doc/lib/samples.sh" go \
+    "$WORKSPACE_DIR/doc/lib/go/"*.md "$GO_DIR/wrapper/README.md" \
+    >"$WRAPPER_PKG/docs/samples.go"
+
 cd "$WRAPPER_PKG"
 export CGO_ENABLED=1 GOFLAGS=-mod=mod
 echo "go check: go vet ./..."

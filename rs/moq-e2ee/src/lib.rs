@@ -6,7 +6,7 @@
 //! [draft-lcurley-moq-e2ee]: https://datatracker.ietf.org/doc/draft-lcurley-moq-e2ee/
 //!
 //! A [`Credential`] is what the application distributes out of band. Each publisher
-//! instance mints an [`Epoch`] and binds it as a [`Generation`], which derives opaque
+//! instance mints an [`moq_net::Epoch`] and binds it as a [`Generation`], which derives opaque
 //! track names and protects `moq-net` tracks. Subscribers discover the epoch from the
 //! broadcast path and bind the same generation.
 //!
@@ -20,7 +20,6 @@ pub mod datagram;
 pub mod group;
 pub mod track;
 
-mod epoch;
 mod error;
 mod generation;
 mod key;
@@ -30,7 +29,6 @@ mod protect;
 mod window;
 
 pub use credential::Credential;
-pub use epoch::Epoch;
 pub use error::{Error, Result};
 pub use generation::Generation;
 pub use limits::{MAX_DATAGRAM_PLAINTEXT, MAX_GROUPED_PLAINTEXT, SECRET_LEN};
