@@ -1,4 +1,4 @@
-# [L] Vulkan Video encode on AMD
+# [XL] Vulkan Video encode on AMD
 
 ## Goal
 
@@ -21,53 +21,63 @@ added this quest):
   another `VkDevice` on the same driver and device UUID imports into ours.
   VA-API on radeonsi would need a DMA-BUF export plus explicit sync, and one
   report says AMD's VA encoder refuses external input.
-- Built on the [gpu-video](https://crates.io/crates/gpu-video) crate (Software
-  Mansion, MIT, formerly vk-video): H.264 and H.265 encode, CBR, forced IDR, an
-  RGBA-to-NV12 wgpu compute helper, and a shared wgpu device. Rejected:
-  hand-rolling on ash through wgpu-hal (about 1.5-2k lines to own), and
-  pixelforge (git ash only, not on crates.io). No intra refresh; refresh mode
-  is refused on this backend, which is acceptable.
+- Hand-rolled on ash, about 1.5-2k lines of Vulkan Video. Rejected:
+  - patching gpu-video upstream. It creates its own `VkDevice`, enables no
+    external semaphore, and has no import API.
+  - forking gpu-video into moq-dev.
+  - pixelforge, which needs git ash and is not on crates.io.
+
+  Why: moq-video owns device creation, so it enables
+  `VK_KHR_external_memory_fd` and `VK_KHR_external_semaphore_fd` itself. That
+  lets it import the producer's `OPAQUE_FD` BGRA image as a dedicated
+  allocation with create info identical to the exporter's. It also leaves
+  intra refresh and AV1 possible later.
 - H.264 and H.265. AV1 is out of scope.
 - The bar is no CPU round trip; GPU-side copies are allowed.
 
-How the import works, verified 2026-10-05 against gpu-video 0.4.0 and master:
+Building it:
 
-- gpu-video creates its own `VkDevice`
-  (`VideoAdapterExt::request_device_with_video_support`), but the caller picks
-  the `wgpu::Adapter`: match the producer's device and driver UUID through
-  `adapter.as_hal::<Vulkan>()` and `VkPhysicalDeviceIDProperties`.
-- wgpu-hal 30 enables `VK_KHR_external_memory_fd` when the driver supports it,
-  so the image imports: a dedicated allocation with create info identical to
-  the exporter's (BGRA8, as rendered), wrapped with `texture_from_raw` and
-  `create_texture_from_hal`. A compute pass writes the encoder's own NV12
-  input from it, so the encode profile never has to be on the producer's
-  image. Scaling per rendition happens in that pass.
-- The timeline cannot import today: nothing enables
-  `VK_KHR_external_semaphore_fd` on gpu-video's device, and its device
-  descriptor has no extension hook. Once imported, the wait stays on the GPU
-  through the hal queue's `add_wait_semaphore`.
-- Open, for the maintainer: patch gpu-video upstream (an extra device
-  extensions field, about 10 lines), fork it into moq-dev, or hand-roll on
-  ash. A CPU wait on a helper device on the same GPU (`vkWaitSemaphores`)
-  works without a patch, at one host sync per frame.
-- gpu-video 0.4.0 is on wgpu 29 while moq-video's `render` is on wgpu 30.
-  Master is on wgpu 30 with an unreleased API overhaul (#2039), so build
-  against the release that follows it.
+- Device: pick the physical device whose device and driver UUID match the
+  surface. Enable the video encode queue, H.264 and H.265 encode, external
+  memory, and external semaphore extensions. Import the timeline and wait on
+  the producer's ready value on the GPU. Signal its done value once the
+  encode has read the image, so slots recycle.
+- Input: one compute pass reads the imported BGRA image and writes each
+  rendition's NV12 encode input picture, converting and scaling in one step.
+- Low latency is reachable with:
+  - CBR with `virtualBufferSizeInMs`;
+  - tuning mode `LOW_LATENCY` or `ULTRA_LOW_LATENCY`;
+  - `consecutiveBFrameCount` 0;
+  - IDRs placed by the app, for `Encoder::cut` and `Gop`.
+- ash: crates.io's newest is 0.38 (Vulkan 1.3.281), checked 2026-10-05.
+  - It carries the final `VK_KHR_video_encode_queue`, `_h264`, `_h265`, and
+    `VK_KHR_video_maintenance1`, with the tuning, buffer, and B-frame fields
+    above.
+  - It lacks `VK_KHR_video_encode_intra_refresh`, `_quantization_map`, and
+    `_av1`. Those need a newer ash and are out of scope; refresh mode is
+    refused on this backend.
+  - moq-video uses ash 0.38 only as a dev-dependency (the Vulkan/CUDA test
+    producer, through the workspace's `ash = "0.38"`). wgpu-hal 30, under
+    `render`, depends on the same 0.38. Make it a normal optional dependency
+    of this backend's feature.
+- Packaging: Fedora's stock Mesa omits the H.264 and H.265 encoders. A device
+  without the extensions is refused with an error naming them, and the
+  hardware recipe reports them as missing instead of failing obscurely.
 
 Test: an ignored hardware test in `just rs gpu`'s AMD branch renders on one
-`VkDevice`, exports `OPAQUE_FD` memory and timeline, and encodes H.264 and
-H.265 at two sizes; the output decodes, and the slots recycle. Gate the
-backend behind its own feature; default-on only if it costs nothing beyond
-cargo, per the rule in `rs/moq-video/Cargo.toml`.
+`VkDevice` and exports `OPAQUE_FD` memory and a timeline. It encodes H.264
+and H.265 at two sizes, checks that the output decodes, and checks that the
+slots recycle. Gate the backend behind its own feature. Turn it on by default
+only if it costs nothing beyond cargo, per the rule in
+`rs/moq-video/Cargo.toml`.
 
 Public API: a new encoder backend and feature. Wire: none.
 
 ## Required
 
 - [One external GPU image for every encoder](/quest/m2/gpu-surface.md) - the surface this backend imports
-- [gpu-video releases on wgpu 30](/quest/m2/gpu-video-wgpu30.md) - the crate release this builds on
 
 ## Related
 
-- [VA-API from an external Vulkan image](/quest/m2/vaapi-vulkan-import.md) - the Intel half of the same proof
-- [Intra-refresh GOPs](/quest/m2/intra-refresh/README.md) - refresh mode this backend refuses
+- [VA-API encodes an external Vulkan image](/quest/m2/vaapi-vulkan-import.md) - the Intel half of the same proof
+- [Intra-refresh GOPs](/quest/m2/intra-refresh/README.md) - refresh mode this backend refuses until ash carries the extension
