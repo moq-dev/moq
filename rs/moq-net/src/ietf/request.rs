@@ -2,8 +2,8 @@ use std::borrow::Cow;
 
 use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder};
 
-use super::Message;
 use super::active_count::ACTIVE_COUNT_PARAM;
+use super::{Location, Message};
 
 use super::Version;
 
@@ -113,8 +113,12 @@ impl Message for RequestOk {
 			None
 		};
 		// A REQUEST_UPDATE_OK may refresh EXPIRES, which is ignored like SUBSCRIBE_OK's.
+		// LARGEST_OBJECT is a MUST on a REQUEST_UPDATE_OK or TRACK_STATUS_OK once the track
+		// has objects. We send neither request, so nothing reads it, but rejecting it would
+		// close the session over a parameter a compliant peer is required to send.
 		decode_params!(r, version,
 			0x08 => _expires: Option<u64>,
+			0x09 => _largest: Option<Location>,
 			ACTIVE_COUNT_PARAM => active: Option<u64>,
 		);
 		Ok(Self { request_id, active })
@@ -209,6 +213,31 @@ mod tests {
 
 		let decoded: RequestOk = decode_message(&bytes, Version::Draft16).unwrap();
 		assert_eq!(decoded.request_id, Some(RequestId(7)));
+	}
+
+	/// A REQUEST_UPDATE_OK or TRACK_STATUS_OK carries LARGEST_OBJECT; it is ignored rather
+	/// than rejected. Draft-14 has no REQUEST_OK, and the Location is length-prefixed until
+	/// draft-17.
+	#[test]
+	fn test_request_ok_ignores_largest_object() {
+		for version in [
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			let bytes: &[u8] = match version {
+				Version::Draft15 | Version::Draft16 => &[0x07, 0x01, 0x09, 0x02, 0x05, 0x03],
+				_ => &[0x01, 0x09, 0x05, 0x03],
+			};
+			let mut buf = Decoder::new(bytes, version.into());
+			RequestOk::decode_msg(&mut buf, version).unwrap_or_else(|e| panic!("{version}: {e}"));
+			assert!(buf.is_empty(), "{version}: trailing bytes");
+		}
 	}
 
 	#[test]
