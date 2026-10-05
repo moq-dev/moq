@@ -8,6 +8,7 @@ import * as Path from "../path.ts";
 import { Stream, Writer } from "../stream.ts";
 import { wireOf } from "../wire.ts";
 import { Connection, probeLevel } from "./connection.ts";
+import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
 import { ProbeLevel, Setup } from "./setup.ts";
 import { DataType, StreamId } from "./stream.ts";
@@ -353,6 +354,56 @@ test("abort during the close drain ends the session at once", async () => {
 	} finally {
 		deadline.restore();
 		served.cleanup();
+	}
+});
+
+// A served FETCH stays owed until the peer acknowledges its FIN, so close cannot discard its tail.
+test("close waits for a served FETCH to be acknowledged", async () => {
+	const deadline = mockDeadline();
+	const version = Version.DRAFT_05;
+	const pair = createMockTransportPair(ALPN_05);
+	const fin = holdFins(pair.server, "incoming-bidi");
+	const origin = new Producer();
+	const broadcast = origin.createBroadcast(Path.from("room"));
+	broadcast.announce();
+	const producer = broadcast.createTrack("video");
+	const group = producer.appendGroup();
+	group.writeString("last");
+	group.close();
+	const server = new Connection({
+		url: new URL("https://relay.example/"),
+		quic: pair.server,
+		version,
+		publish: origin.consume(),
+	});
+	let closed = false;
+	void pair.server.closed.then(() => {
+		closed = true;
+	});
+	try {
+		fin.enable();
+		const fetch = await Stream.open(pair.client, { version });
+		await fetch.writer.u53(StreamId.Fetch);
+		await new Fetch({ broadcast: Path.from("room"), track: "video", priority: 0, group: 0 }).encode(
+			fetch.writer,
+			version,
+		);
+		await fetch.reader.readAll();
+		await fin.reached;
+
+		const closing = server.close();
+		await settle();
+		expect(closed).toBe(false);
+
+		fin.release();
+		await closing;
+		expect(closed).toBe(true);
+	} finally {
+		deadline.restore();
+		fin.release();
+		server.abort();
+		broadcast.close();
+		origin.close();
 	}
 });
 
