@@ -89,4 +89,5 @@ This README owns:
 - [GStreamer](/quest/m0/broadcast-epoch/gst.md) - moqsink publishes each run under a fresh epoch
 - [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - `moq` takes an optional `--epoch` instead of `--hop`, a plain publisher declares a random Hop ID, and the per-session hop stamp is gone
 - [Bounded stats aggregate](/quest/m0/broadcast-epoch/stats-aggregate-bound.md) - the stats aggregator folds departed nodes into a retired total, so epoch churn stops growing its memory
-- [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md) - moq-stats publishes each node under its own epoch, so a restarted node never stalls its viewers
+- [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md) - moq-stats publishes each group announcement under its own epoch, so neither a restarted node nor a returning idle group stalls its viewers
+- [Stats totals and per-broadcast tracks](/quest/m0/broadcast-epoch/stats-split.md) - the same release retires the per-path stats maps for totals and per-broadcast tracks (decided 2026-10-05)
