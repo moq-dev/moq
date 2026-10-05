@@ -124,8 +124,12 @@ export class Camera {
 				stream = await effect.race(media);
 			} catch (error) {
 				if (effect.abort.aborted) return;
+				if (error instanceof Error && (error.name === "NotReadableError" || error.name === "AbortError")) {
+					if (this.#retry.failed()) return;
+				} else {
+					this.#retry.terminal();
+				}
 				this.#out.error.set(error instanceof Error ? error : new Error(String(error)));
-				this.#retry.terminal();
 				return;
 			}
 
@@ -138,7 +142,10 @@ export class Camera {
 			effect.cleanup(this.device.capture(source?.getSettings().deviceId));
 
 			// A track that arrives dead already fired "ended", so nothing would ever rerun us.
-			if (!source || source.readyState === "ended") return this.#retry.failed();
+			if (!source || source.readyState === "ended") {
+				this.#retry.failed();
+				return;
+			}
 
 			this.#retry.succeeded(effect, source);
 			effect.set(this.#out.source, { video: source });
