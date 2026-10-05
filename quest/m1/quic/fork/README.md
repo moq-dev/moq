@@ -58,8 +58,7 @@ is either ported by a child quest or recorded as not applicable in the
 ## Required
 
 - [Port BBR3](/quest/m1/quic/fork/bbr3.md) - the fork's corrected BBR3 and controller callbacks run on `moq-quic` as the default controller
-- [Lazy stream slots](/quest/m1/quic/fork/stream-slots.md) - relay memory on `moq-quic` matches `moq-noq`
-- [Switch](/quest/m1/quic/fork/switch.md) - `web-transport-moq`, moq-tokio, and moq-uring run on `moq-quic`, and `moq-noq*` is gone
+- [Switch](/quest/m1/quic/fork/switch.md) - `web-transport-moq`, moq-tokio, and moq-uring run on `moq-quic`, `moq-noq*` is gone, and relay memory matches `moq-noq`
 
 ## Related
 
