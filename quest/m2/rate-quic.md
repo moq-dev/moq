@@ -21,18 +21,20 @@ backpressure the peer cannot ignore, rather than metering and closing.
   Per-stream windows are unchanged; the connection credit is the cap.
 - **Datagrams draw from the same allowance.** DATAGRAM frames are not flow
   controlled, so credit alone does not bound them. Received datagram payload
-  is charged to the same bucket that paces `MAX_DATA` credit, and a datagram
-  arriving with the bucket empty is dropped before routing, the same as
-  network loss. An honest publisher is never disconnected, so this does not
-  wait for [the grant](/quest/m2/rate-grant.md).
+  is charged to the same allowance that paces `MAX_DATA` credit, and a
+  datagram past the cap plus burst is dropped before routing, the same as
+  network loss. Unspent stream credit must not starve datagrams: a publisher
+  mixing both under the cap loses none. An honest publisher is never
+  disconnected, so this does not wait for [the grant](/quest/m2/rate-grant.md).
 - **Credit cannot be retracted** (RFC 9000 §4.1). Every session, capped or
   not, starts with an `initial_max_data` shrunk to what the handshake,
   CONNECT, SETUP, and in-band AUTH need, with no config knob, so a peer
   cannot bank a full default window and spend it after a low cap arrives.
   After auth the relay raises it through the `set_limits` seam: the normal
   window for an uncapped session, paced credit for a capped one. A lowered
-  cap (revalidation, a union shrinking) uses the shrink-as-debt behavior
-  [peer limits](/quest/m1/quic/peer-limits.md) relies on, so the overshoot is
+  cap (revalidation, a union shrinking) uses noq-proto's shrink-as-debt
+  `set_receive_window` behavior, described in
+  [peer limits](/quest/m1/quic/peer-limits.md), so the overshoot is
   bounded by the credit outstanding at the change and the test asserts that
   bound.
 - **Egress: cap the pacer.** The send rate is `min(controller rate, cap)`,
@@ -49,7 +51,8 @@ backpressure the peer cannot ignore, rather than metering and closing.
 
 Tests, on a simulated clock: a peer sending flat out is held to the cap
 within the burst; a peer that ignores credit is closed with a flow-control
-error; a datagram flood is held to the cap, excess dropped; a peer holding
+error; a datagram flood is held to the cap, excess dropped; a mixed stream
+and datagram publisher under the cap loses no datagrams; a peer holding
 unspent pre-auth credit, and one whose cap drops with credit outstanding,
 stay within the stated bound; an uncapped session gets its normal window
 after auth; egress to a capped subscriber never exceeds the cap; raising and

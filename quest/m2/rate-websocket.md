@@ -14,7 +14,9 @@ excess:
 
 - **The bucket sits under the protocol**, as an IO wrapper on the upgraded
   socket (`rs/moq-relay/src/websocket.rs`, an HTTP/1.1 upgrade on its own
-  socket), with a cap handle set after `admit`. A bucket
+  socket), with a cap handle set after `admit`. A capped WebSocket over h2
+  extended CONNECT (RFC 8441), should the listener ever enable it, shares a
+  socket and is refused. A bucket
   at the WebSocket message layer would accept a whole message (up to
   `max_message_size`) before charging it, so the burst would be one message,
   not about a second of `rate`.
