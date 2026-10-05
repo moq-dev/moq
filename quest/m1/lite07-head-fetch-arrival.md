@@ -35,11 +35,16 @@ let _ = tokio::time::timeout(Duration::from_millis(500), group.read_frame()).awa
 
 // A fresh reader on R wants the latest group from its snapshot.
 let mut sub = remote.track("catalog.json").unwrap().subscribe(None).await.unwrap();
-let group = tokio::time::timeout(Duration::from_secs(5), sub.recv_group()).await;
+let mut group = tokio::time::timeout(Duration::from_secs(5), sub.recv_group())
+	.await.expect("no group").unwrap().unwrap();
+assert_eq!(group.sequence, sequence);
+assert_eq!(group.read_frame().await.unwrap().unwrap().payload, b"snapshot".as_ref());
 ```
 
-Inferred cause, unverified: lite-07 has frame bounds, so R's upstream
-subscription starts G at frame 1. M's fetch reaches
+Inferred cause, unverified: a lite-07 SUBSCRIBE_OK carries the publisher's
+largest position, so `TrackServe::widen_frame_bounds`
+(`rs/moq-net/src/lite/subscriber.rs`) trusts it and keeps M's mid-group start:
+R's upstream subscription starts G at frame 1. M's fetch reaches
 `TrackState::insert_group_request` (`rs/moq-net/src/model/track.rs`), whose
 `claim_sequence` drops that headless live slot because it can't answer from
 frame 0, then commits the fetched group invisible. G's arrival entry keeps the
@@ -47,9 +52,11 @@ old stamp, so `poll_recv_group` skips it, and the live copy R keeps filling
 from P is no longer in its cache. Settle whether a fetch may replace a live,
 visible slot at all, or must keep it arrival-visible and still writable.
 
-Only bites once lite-07 ships: on lite-06, `TrackServe::widen_frame_bounds`
-(`rs/moq-net/src/lite/subscriber.rs`) already asks upstream for the head of the
-group, so R never holds a headless G.
+Only bites once lite-07 ships. lite-06 has frame bounds too, but no largest
+(`Version::has_largest`), so `widen_frame_bounds` rounds the start to the head
+of the group and R never holds a headless G. Widening on lite-07 too would hide
+the bug at the cost of what the largest position is for; the fix belongs in the
+cache.
 
 ## Related
 

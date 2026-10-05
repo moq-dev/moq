@@ -10,7 +10,8 @@ stays used forever while the producer lives.
 In a relay this keeps every demand-driven emit loop (stats, overlays) and its
 upstream subscription running after an unannounce, for nobody. moq.pro's
 billing-meter test `a_reannounced_node_is_read_once` fails on `main` because of
-it.
+it. `release` doesn't have the regression, so this lands before the next
+release cut.
 
 ## Plan
 
@@ -62,8 +63,12 @@ async fn unannounced() { case(true, false).await }
 async fn unannounced_settled() { case(true, true).await }
 ```
 
-Also cover a remote source (a relay pulling the broadcast over a session), so
-the upstream subscription is shown to end too. If
+Also cover a remote source, the case a relay hits (`rs/moq-net/tests`, the mock
+harness, every version): publisher origin P announces the broadcast, relay R
+pulls it over `connect_mock`, and a reader subscribes to the track on R. P
+unannounces and the retraction settles. Drop R's reader, then assert P's
+`track.demand().unused()` resolves, which shows R's upstream SUBSCRIBE was
+cancelled. If
 [Request linger](/quest/m1/request-linger.md) lands first, the release waits
 out its linger, not forever.
 
