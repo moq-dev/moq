@@ -306,16 +306,7 @@ pub(super) fn before_end(sequence: u64, end: Option<u64>) -> bool {
 // family silently narrows or widens what the publisher sends, so the suffix, not the
 // `min`/`max`, is the part to read.
 
-/// The lower of two optional bounds, `None` neutral. Pairs with [`max_some`].
-pub(super) fn min_some<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
-	match (a, b) {
-		(Some(a), Some(b)) => Some(a.min(b)),
-		(Some(a), None) | (None, Some(a)) => Some(a),
-		(None, None) => None,
-	}
-}
-
-/// The higher of two optional bounds, `None` neutral. Pairs with [`min_some`].
+/// The higher of two optional bounds, `None` neutral.
 pub(super) fn max_some<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 	match (a, b) {
 		(Some(a), Some(b)) => Some(a.max(b)),

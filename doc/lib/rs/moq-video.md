@@ -174,3 +174,50 @@ runs on the device or returns an error.
 `just rs vulkan-cuda` runs the opt-in native Vulkan/CUDA/NVENC hardware
 exercise, including a three-view 1280x720 workload that reports per-stage
 latency and CPU time.
+
+## Intel QuickSync on Linux
+
+Enable the `vaapi` feature to use Intel QuickSync through VA-API. It is off by
+default because building `moq-vaapi` needs libclang. The backend currently
+encodes and decodes 8-bit H.264; HEVC and AV1 support in the Intel driver does
+not make those codecs available through this backend yet. No oneVPL or Media
+SDK installation is needed.
+
+At runtime, install libva and the Intel `iHD` media driver, and make sure your
+user can open the GPU's `/dev/dri/renderD*` node. On Ubuntu:
+
+```bash
+sudo apt install intel-media-va-driver-non-free vainfo
+vainfo --display drm --device /dev/dri/renderD128
+```
+
+Use the render node present on your machine. `vainfo` should report the Intel
+iHD driver with H.264 `VAEntrypointVLD`, `VAEntrypointEncSlice` or
+`VAEntrypointEncSliceLP`, and `VAEntrypointVideoProc`. Intel's
+[media driver documentation](https://github.com/intel/media-driver) lists
+supported GPUs and the differences between the full-feature and free-kernel
+packages.
+
+Automatic encoder and decoder selection uses VAAPI when it opens successfully,
+otherwise H.264 can fall back to openh264. Set `encode::Kind::Named("vaapi".into())`
+and `decode::Kind::Named("vaapi".into())` to require this backend and report an
+unavailable driver instead. `MOQ_VAAPI_DEVICE` selects a render node when
+multiple GPUs are present.
+
+Verified on Intel Core Ultra 7 270K Plus / Arrow Lake with iHD 26.2.4: CPU
+uploads, hardware decode, DMA-BUF re-encoding, GPU resize, live bitrate changes,
+color metadata, and Vulkan rendering with decoder surface reuse. To run the
+same checks from this repository:
+
+```bash
+just rs test -p moq-video --features vaapi,render --no-capture
+just rs test -p moq-video --features vaapi,render --run-ignored only --no-capture \
+  -E 'test(nv12_dmabuf) | test(i420_dmabuf) | test(decoded_frames_reach) | test(recycled_decoder_surfaces)'
+```
+
+Hardware tests can return early on a host without a usable driver. Check their
+output for `skipping:` before treating a passing run as hardware verification.
+Nix-built tests also need their runtime loaders and drivers to be discoverable:
+`LD_LIBRARY_PATH` for libva and Vulkan, `LIBVA_DRIVERS_PATH` for the Intel media
+driver, and `VK_DRIVER_FILES` for the Intel Vulkan ICD. Use matching Nix
+libraries and drivers to avoid mixing incompatible host dependencies.

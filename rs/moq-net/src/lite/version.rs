@@ -39,6 +39,18 @@ impl Version {
 		}
 	}
 
+	/// Whether SUBSCRIBE_OK carries the publisher's largest (group, frame), which a
+	/// subscriber takes as where the live feed is. Added in lite-07; an earlier answer
+	/// says nothing about the live edge.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_largest(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether the version has lite-05's dedicated TRACK stream and related stream
 	/// layout changes.
 	///
@@ -180,6 +192,15 @@ impl Version {
 		// Match form so future versions default forward (AGENTS.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 => false,
+			_ => true,
+		}
+	}
+
+	/// Whether subscription completion waits for the subscriber's FIN.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn waits_for_subscriber_fin(self) -> bool {
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
 			_ => true,
 		}
 	}

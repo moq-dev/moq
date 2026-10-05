@@ -31,7 +31,7 @@ Decided 2026-10-01:
   than exiting for a supervisor to restart. This deliberately differs from
   Pronto's truck, which exits so a supervisor surfaces half-dead sessions.
 - Each camera session publishes a new broadcast under a fresh epoch, per
-  [Broadcast epochs](/quest/m1/broadcast-epoch/README.md), never spliced onto
+  [Broadcast epochs](/quest/m0/broadcast-epoch/README.md), never spliced onto
   the last one. A new session's RTP time restarts, so a reconnect finishes the
   old broadcast cleanly and builds a fresh catalog, tracks, and importers,
   starting on a keyframe. A timestamp jump inside one session (retina #64)
@@ -59,5 +59,5 @@ Wire: none.
 
 ## Related
 
-- [Broadcast epoch primitive](/quest/m1/epoch.md) - the epoch each camera session's broadcast publishes under
+- [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - the epoch each camera session's broadcast publishes under
 - [moq.pro's Pronto truck](https://github.com/moq-dev/moq.pro/blob/main/pronto/truck/src/camera.rs) - the prior art this generalizes, and the first consumer

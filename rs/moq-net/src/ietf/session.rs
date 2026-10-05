@@ -76,7 +76,16 @@ pub struct Config<S: crate::transport::poll::Session> {
 pub(crate) struct Driver {
 	pub(crate) withdrawal: crate::session::Withdrawal,
 	pub(crate) local_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
+	// Dispatched SUBSCRIBE and FETCH serves still owing the peer data.
+	owed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 	future: MaybeSendBox<'static, Result<(), Error>>,
+}
+
+impl Driver {
+	/// Whether withdrawals and dispatched serves have reached the peer.
+	pub(crate) fn drained(&self) -> bool {
+		self.withdrawal.drained() && self.owed.load(std::sync::atomic::Ordering::Relaxed) == 0
+	}
 }
 
 impl std::future::Future for Driver {
@@ -122,6 +131,8 @@ where
 	let withdrawing = withdrawal.clone();
 	let local_close = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 	let closing = local_close.clone();
+	let owed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+	let serving = owed.clone();
 	let driver = async move {
 		// Our own Hop ID, taken from whichever origin the caller actually supplied so
 		// every session out of this process stamps the same one and cross-session loop
@@ -171,6 +182,7 @@ where
 				);
 				let (tasks, mut task_set) = TaskSet::new();
 				publisher.withdrawal = withdrawing.clone();
+				publisher.owed = serving.clone();
 
 				let subscriber = Subscriber::new(
 					runtime.clone(),
@@ -338,6 +350,7 @@ where
 				);
 				let (tasks, mut task_set) = TaskSet::new();
 				publisher.withdrawal = withdrawing.clone();
+				publisher.owed = serving.clone();
 
 				let subscriber = Subscriber::new(
 					runtime.clone(),
@@ -483,6 +496,7 @@ where
 		Driver {
 			withdrawal,
 			local_close,
+			owed,
 			future: driver,
 		},
 		goaway_handle,
@@ -1655,6 +1669,60 @@ mod tests {
 			};
 			assert_eq!(SessionError::from(&err), SessionError::ProtocolViolation, "{version:?}");
 			assert!(log.stops().is_empty(), "{version:?}: stopped {:?}", log.stops());
+		}
+	}
+
+	/// The bidi dispatcher closes the session for an unknown full-width message type.
+	#[tokio::test(start_paused = true)]
+	async fn an_unknown_bidi_type_closes_the_session() {
+		for version in [
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			for kind in [0u64, 1 << 53] {
+				let mut payload = Vec::new();
+				kind.encode(&mut payload, version).unwrap();
+				0u16.encode(&mut payload, version).unwrap();
+				let session =
+					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![payload]);
+				let log = session.log.clone();
+				let (driver, _goaway) = start(Config {
+					runtime: crate::time::Clock::tokio(),
+					session,
+					setup: None,
+					request_id_max: None,
+					client: false,
+					publish: None,
+					subscribe: None,
+					peer_hop: None,
+					cost: None,
+					version,
+					path: None,
+					authority: None,
+					peer_setup_stream: None,
+					peer_declared: Some(peer::Peer::default()),
+					early_unis: Vec::new(),
+				})
+				.unwrap();
+
+				let err = tokio::time::timeout(std::time::Duration::from_secs(10), driver)
+					.await
+					.expect("unknown bidi type must end the session")
+					.expect_err("unknown bidi type must fail the session");
+				assert_eq!(
+					SessionError::from(&err),
+					SessionError::ProtocolViolation,
+					"{version:?}: {kind:#x}"
+				);
+				assert_eq!(
+					log.closes(),
+					vec![(SessionError::ProtocolViolation.to_code(), err.to_string())]
+				);
+			}
 		}
 	}
 

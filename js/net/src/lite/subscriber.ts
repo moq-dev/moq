@@ -49,6 +49,7 @@ import {
 	hasStreamCount,
 	restartSupported,
 	Version,
+	waitsForSubscriberFin,
 } from "./version.ts";
 
 // Bound on how long stream-open plus the first response (SUBSCRIBE_OK on older
@@ -249,16 +250,11 @@ export class Subscriber {
 			// per path is current, and every announce on this stream shares `prefix`).
 			//
 			// An advertisement skipped locally as a reflected loop is recorded with
-			// `publisher: undefined` and `live: false`: the peer numbered it and will retract
-			// it regardless of what we made of it, so its path is not free. Dropping it from
-			// the map instead would let a later announce take the path, and the skipped one's
-			// `endedId` would then retract that one's state.
-			//
-			// `publisher` is what lets a restart tell a route change (same publisher) from a
-			// new publisher on the route, whose content the next consume must not share
-			// with the old one's.
+			// `live: false`: the peer numbered it and will retract it regardless of what we
+			// made of it, so its path is not free. Dropping it from the map instead would let
+			// a later announce take the path, and the skipped one's `endedId` would then
+			// retract that one's state.
 			type Advertisement = {
-				publisher: Hop | undefined;
 				live: boolean;
 				route: Route;
 				captures: Path.Pattern[] | undefined;
@@ -275,7 +271,7 @@ export class Subscriber {
 					// they go on record and obey the same one-per-path rule: the initial set
 					// naming a path twice is the same violation as two ANNOUNCE_STARTs for it,
 					// and the record is what catches either. Draft01/02 carry no hop ids and no
-					// ANNOUNCE_OK, so this connection's stamp names the publisher.
+					// ANNOUNCE_OK, so this connection's stamp is the first hop.
 					for (const suffix of init.suffixes) {
 						const path = Path.join(prefix, suffix);
 						if (advertised.has(path)) {
@@ -284,7 +280,7 @@ export class Subscriber {
 						const route = { hops: [this.#stamp, UNKNOWN_HOP], cost: Cost.zero };
 						const live = visible(path);
 						const captures = scopeCaptures(scope, path);
-						advertised.set(path, { publisher: this.#stamp, live, route, captures });
+						advertised.set(path, { live, route, captures });
 						if (!live) continue;
 						console.debug(`announced: broadcast=${path} active=true`);
 						announced.append({ prefix: path, captures, kind: "start", route });
@@ -414,7 +410,6 @@ export class Subscriber {
 						// resolves here.
 						retract();
 						advertised.set(path, {
-							publisher: undefined,
 							live: false,
 							route: { hops: full, cost: Cost.zero },
 							captures: undefined,
@@ -428,9 +423,9 @@ export class Subscriber {
 					continue;
 				}
 
-				// The first hop identifies the original publisher; an empty chain means the
-				// peer itself originated it. One that names nobody (lite-01..03, or a peer
-				// reporting 0) gets this connection's stamp in front of its 0.
+				// The first hop is the original publisher; an empty chain means the peer itself
+				// originated it. One that names nobody (lite-01..03, or a peer reporting 0)
+				// gets this connection's stamp in front of its 0.
 				const fullHops = stampHops(
 					hops !== undefined && responderOrigin !== undefined
 						? [...hops, responderOrigin]
@@ -442,18 +437,16 @@ export class Subscriber {
 				if (fullHops === undefined || fullHops.length > MAX_HOPS) {
 					console.debug(`announced: broadcast=${path} dropped (hop chain at MAX_HOPS)`);
 					advertised.set(path, {
-						publisher: undefined,
 						live: false,
 						route: { hops: [], cost: Cost.zero },
 						captures: undefined,
 					});
 					continue;
 				}
-				const publisher = fullHops[0];
 				const route: Route = { hops: fullHops, cost: cost ?? Cost.zero };
 				const captures = scopeCaptures(scope, path);
 				if (!visible(path)) {
-					advertised.set(path, { publisher, live: false, route, captures });
+					advertised.set(path, { live: false, route, captures });
 					continue;
 				}
 
@@ -462,11 +455,9 @@ export class Subscriber {
 				// route in place, so a forwarder re-prices without retracting.
 				const previous = advertised.get(path);
 				if (previous?.live) {
-					// A different publisher took the path. Subscriptions already open drain
-					// the old copy, but the next consume starts fresh rather than reusing the
-					// old publisher's cached track info.
-					if (previous.publisher !== publisher) this.#consumes.evict(path);
-					advertised.set(path, { publisher, live: true, route, captures });
+					// Even from another publisher: the path still names the same broadcast, so
+					// the shared consume stays.
+					advertised.set(path, { live: true, route, captures });
 					console.debug(`announced: broadcast=${path} rerouted`);
 					if (!routesEqual(previous.route, route)) {
 						announced.append({ prefix: path, captures, kind: "update", route });
@@ -474,7 +465,7 @@ export class Subscriber {
 					continue;
 				}
 
-				advertised.set(path, { publisher, live: true, route, captures });
+				advertised.set(path, { live: true, route, captures });
 
 				console.debug(`announced: broadcast=${path} active=true`);
 				announced.append({ prefix: path, captures, kind: "start", route });
@@ -601,7 +592,11 @@ export class Subscriber {
 			const responses = supportsTrackStream(this.version)
 				? this.#runResponses(stream, entry)
 				: stream.reader.closed;
-			const closed = responses.then(() => this.#settleTail(entry));
+			let tailSettled = false;
+			const closed = responses.then(async () => {
+				await this.#settleTail(entry);
+				tailSettled = true;
+			});
 			// A reset that lands after the race below settled is moot; the race observes one before.
 			closed.catch(() => {});
 			const subscriptionUpdates =
@@ -629,7 +624,10 @@ export class Subscriber {
 			}
 
 			producer.close();
-			stream.close();
+			// A settled lite07 tail acknowledges completion with FIN, without cancelling
+			// the publisher's already-finished receive half.
+			if (tailSettled && waitsForSubscriberFin(this.version)) stream.writer.close();
+			else stream.close();
 			console.debug(`subscribe close: id=${id} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			const e = await sessionCause(this.#quic, err);

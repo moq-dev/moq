@@ -19,22 +19,20 @@ subscription creates a fresh `track::Request` (`rs/moq-net/src/model/track.rs`),
 and `Request::new` creates a fresh `TrackState`. Because its `max_sequence`
 is empty, both `append_group` and `append_datagram` restart at sequence 0.
 
-That conflicts with the relay's logical track splicing.
-`resume::Producer::takeover` (`rs/moq-net/src/model/resume.rs`) retains
-the previous live edge and starts a replacement at `latest + 1`. Groups from a
-restarted producer are therefore filtered until its counter catches up,
-causing the same playback stall fixed for JavaScript in #2953.
+That conflicts with the relay's logical track. The pump
+(`rs/moq-net/src/model/pump.rs`) resumes a replacement from the first frame
+the subscriber lacks, so groups from a restarted producer are skipped until
+its counter catches up, causing the same playback stall fixed for JavaScript
+in #2953. With #4741 this is the general hazard of restarting at 0 under one
+name, which [broadcast epochs](/quest/m0/broadcast-epoch/README.md) fix for a
+restarted publisher. This quest covers what an epoch does not: one dynamic
+track replaced inside a live broadcast.
 
-The takeover tests in `resume.rs` (`takeover_computes_boundary`,
-`takeover_splices_mid_group`,
-`takeover_splices_a_replacement_that_resends_the_head`,
-`takeover_rolls_past_a_finished_group`,
-`takeover_after_empty_segment_keeps_live_edge`) create their
-replacement groups with explicit sequences, so none of them exercises
-`append_group()` on a restarted producer; using it there would create group 0
-and leave the subscriber stalled. Those are the tests to extend. Explicit group
-or datagram writes can raise the old producer's shared sequence edge further,
-making the catch-up window longer.
+The pump's route-change tests (`rs/moq-net/tests/route_change.rs`) are the
+ones to extend: none replaces a producer through `append_group()`, which would
+create group 0 and leave the subscriber stalled. Explicit group or datagram
+writes can raise the old producer's shared sequence edge further, making the
+catch-up window longer.
 
 ### JavaScript permits concurrent same-name dynamic producers
 
@@ -78,16 +76,11 @@ the closed producer's cache or terminal state.
 - Rust and JavaScript: close a dynamic producer after group and datagram
   sequences have advanced, re-request the same name, and verify the
   replacement appends at the next sequence.
-- Rust relay model: extend the `resume.rs` takeover tests above so a
-  replacement produced with `append_group()` is delivered immediately rather
-  than filtered until catch-up.
+- Rust relay model: extend the route-change tests above so a replacement
+  produced with `append_group()` is delivered immediately rather than skipped
+  until catch-up.
 - Both implementations: verify a separate broadcast generation starts at 0.
 
 ## Closes
 
 - [#2991](https://github.com/moq-dev/moq/issues/2991) - close this issue when the quest finishes
-
-## Related
-
-- [#4491](https://github.com/moq-dev/moq/pull/4491) - edits `resume.rs` and its takeover tests
-- [Parked reads wake](/quest/m1/parked-read-wakes.md) - edits the same `resume.rs` wakeups

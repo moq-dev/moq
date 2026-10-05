@@ -820,14 +820,13 @@ mod test {
 		);
 	}
 
-	/// An application lists a data track in its own section by flattening a data config beside its
-	/// own fields, so the reading rules and the application's fields share one entry.
+	/// An application lists a data track in its own section with a nested data config, keeping config
+	/// fields separate from the application's own fields.
 	#[test]
-	fn a_data_config_flattens_into_an_application_entry() {
+	fn a_data_config_nests_in_an_application_entry() {
 		#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 		struct Mavlink {
-			#[serde(flatten)]
-			binary: BinaryConfig,
+			config: BinaryConfig,
 			sysid: u8,
 		}
 
@@ -837,17 +836,13 @@ mod test {
 			mavlink: BTreeMap<String, Mavlink>,
 		}
 
-		let encoded = r#"{"video":{"renditions":{}},"audio":{"renditions":{}},"com.example.mavlink":{"telemetry":{"mode":"stream","compression":"deflate","sysid":1}}}"#;
+		let encoded = r#"{"video":{"renditions":{}},"audio":{"renditions":{}},"com.example.mavlink":{"telemetry":{"config":{"mode":"stream","compression":"deflate"},"sysid":1}}}"#;
 
 		let catalog = Catalog::<Ext>::from_str(encoded).unwrap();
 		let entry = &catalog.ext.mavlink["telemetry"];
 		assert_eq!(entry.sysid, 1);
-		assert_eq!(entry.binary.mode, Mode::Stream);
-		assert_eq!(entry.binary.compression, Some(Compression::Deflate));
-		assert!(
-			entry.binary.extra.is_empty(),
-			"the application's own fields are not unknown data-track fields"
-		);
+		assert_eq!(entry.config.mode, Mode::Stream);
+		assert_eq!(entry.config.compression, Some(Compression::Deflate));
 		assert_eq!(catalog.to_json().unwrap(), encoded);
 	}
 

@@ -104,4 +104,3 @@ quest lands on `main`, so it adds the spread inputs beside `probe` and stops
 reading `probe`; removing it is part of the `SyncInput` reshape in
 [Plan: A/V clock](/quest/m1/av-clock.md). Land the estimator so
 that quest can adopt it without a second estimator change.
-

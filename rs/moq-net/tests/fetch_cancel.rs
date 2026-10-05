@@ -152,3 +152,67 @@ async fn abandoned_fetch_reaches_the_publisher_lite05() {
 async fn abandoned_fetch_reaches_the_publisher_lite06() {
 	abandoned_fetches_reach_the_publisher("moq-lite-06").await;
 }
+
+/// A group fetched through a relay is still there for the next fetch shortly after the
+/// track went unread: the relay's copy lingers with its cache, so a segmented reader
+/// (HLS fetching each segment) does not go upstream again for every request.
+async fn a_refetch_within_the_linger_stays_on_the_relay(version: &str) {
+	let version: Version = version.parse().unwrap();
+	let publisher = produce_origin(1);
+	let relay = produce_origin(2);
+	let _pair = peer(version, &publisher, &relay).await;
+
+	let broadcast = publisher.create_broadcast("room").unwrap();
+	let mut dynamic = broadcast.dynamic();
+	broadcast.announce(Default::default()).unwrap();
+	tokio::time::sleep(Duration::from_secs(1)).await;
+
+	let consumer = relay.consume().request_broadcast("room").await.unwrap();
+	let mut waiting = Box::pin(consumer.track("video").unwrap().fetch_group(0, None));
+	let request = tokio::select! {
+		request = dynamic.requested_track() => request.expect("the track request reaches the publisher"),
+		_ = &mut waiting => panic!("nothing answered the track"),
+	};
+	let groups = request.dynamic();
+	let _track = request.accept(track::Info::default());
+	let request = tokio::select! {
+		request = groups.requested_group() => request.expect("the fetch reaches the publisher"),
+		_ = &mut waiting => panic!("nothing answered the fetch"),
+	};
+	let mut group = request.accept(None).unwrap();
+	group
+		.write_frame(Timestamp::ZERO, Bytes::from_static(b"segment"))
+		.unwrap();
+	group.finish().unwrap();
+	let mut fetched = waiting.await.unwrap();
+	assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"segment");
+	drop(fetched);
+	// The publisher lets the group go, so only another FETCH would bring it back.
+	group.abort(moq_net::Error::Cancel).unwrap();
+
+	// The track goes unread between segments, well inside the linger.
+	tokio::time::sleep(Duration::from_secs(5)).await;
+
+	let mut refetch = Box::pin(consumer.track("video").unwrap().fetch_group(0, None));
+	let mut fetched = tokio::select! {
+		fetched = &mut refetch => fetched.expect("the relay serves the group again"),
+		_ = dynamic.requested_track() => panic!("{version}: the relay asked for the track again"),
+		_ = groups.requested_group() => panic!("{version}: the relay fetched the group again"),
+	};
+	assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"segment");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refetch_within_the_linger_stays_on_the_relay_lite06() {
+	a_refetch_within_the_linger_stays_on_the_relay("moq-lite-06").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refetch_within_the_linger_stays_on_the_relay_lite07() {
+	a_refetch_within_the_linger_stays_on_the_relay("moq-lite-07-wip").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refetch_within_the_linger_stays_on_the_relay_ietf19() {
+	a_refetch_within_the_linger_stays_on_the_relay("moq-transport-19").await;
+}

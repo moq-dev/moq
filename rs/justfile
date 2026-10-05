@@ -89,6 +89,10 @@ tokio-features:
 windows $BASE="":
     sh/rs/platform.sh "$BASE"
 
+# Test the platform-sensitive crates nightly on Windows, independent of the diff.
+windows-test:
+    just rs test -p moq-auth -p hang -p moq-tokio
+
 # Compile and test the io_uring relay path, which is off the default feature set.
 # Linux-only, and the tests below the 6.12 kernel floor skip themselves.
 [positional-arguments]
@@ -109,6 +113,10 @@ uring-check *args:
 # Compile what the branch changed since BASE on a macOS host, or everything with `--all`.
 macos $BASE="":
     sh/rs/platform.sh "$BASE"
+
+# Test the platform-sensitive crates nightly on macOS, independent of the diff.
+macos-test:
+    just rs test -p moq-auth -p hang -p moq-tokio
 
 # Compile and lint the capture feature, which the default check skips.
 [positional-arguments]
@@ -326,3 +334,12 @@ package-gst *args:
 [positional-arguments]
 gst-smoke *args:
     rs/moq-gst/smoke.sh "$@"
+
+# Device-free mixer cost, swept over sink count and frames per callback.
+bench-playback:
+    cargo nextest run --locked --release -p moq-audio --features playback --run-ignored only -E 'test(benchmark_mixer_callbacks)' --success-output immediate
+
+# Sweep retained RTMP chunk-stream IDs independently of message and chunk sizes.
+[positional-arguments]
+bench-rtmp *args:
+    cargo bench --locked -p moq-rtmp --bench chunk_interleaving -- "$@"

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.10](https://github.com/moq-dev/moq/compare/hang-v0.21.9...hang-v0.21.10) - 2026-10-03
+
+### Fixed
+
+- *(auth,hang)* out-of-range auth durations and catalog walls no longer panic ([#4600](https://github.com/moq-dev/moq/pull/4600))
+
 ## [0.21.9](https://github.com/moq-dev/moq/compare/hang-v0.21.8...hang-v0.21.9) - 2026-09-30
 
 ### Other

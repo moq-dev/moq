@@ -1,10 +1,9 @@
-//! A publisher on a wire with no hop ids, reconnecting through a relay, is a new source
-//! downstream.
+//! A publisher on a wire with no hop ids, reconnecting through a relay, is a new first
+//! hop downstream.
 //!
 //! moq-transport without the Cluster extension names no publisher, so the relay it
 //! connects to stamps each connection with a random Hop ID of its own. A reconnect is a
-//! new connection and so a new first hop, which a downstream relay reads as a new
-//! source rather than splicing it onto the old one.
+//! new connection and so a new first hop.
 
 mod support;
 

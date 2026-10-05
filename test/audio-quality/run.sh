@@ -33,6 +33,7 @@ SEED=7
 OUT=""
 LIST=0
 ENFORCE=0
+CAPTURE=0
 PROFILE="${AQ_PROFILE:-debug}"
 
 split() {
@@ -90,6 +91,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --list)
             LIST=1
+            shift
+            ;;
+        --capture)
+            CAPTURE=1
             shift
             ;;
         --enforce)
@@ -299,6 +304,8 @@ if [[ ${#ROWS[@]} -gt 0 ]]; then
         done
 
         status=0
+        capture_args=()
+        [[ $CAPTURE -eq 0 ]] || capture_args=(--capture)
         harness_spawn "driver-$tag" "$HARNESS_RUN/driver-$tag.log" bun "$CLIENT/driver.ts" \
             --url "http://127.0.0.1:$SHAPER_PORT" \
             --fingerprint "$RELAY_URL/certificate.sha256" \
@@ -308,7 +315,7 @@ if [[ ${#ROWS[@]} -gt 0 ]]; then
             --delay "$(delay_of "$profile")" \
             --duration "$DURATION" \
             --tag "$tag" \
-            --out "$HARNESS_RUN"
+            --out "$HARNESS_RUN" "${capture_args[@]}"
         harness_wait "$HARNESS_PID" || status=$?
         if [[ $status -ne 0 ]]; then
             failed=1

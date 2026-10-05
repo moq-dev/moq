@@ -257,12 +257,30 @@ impl Message for Setup {
 /// stream) wait on this before deciding what to do. Cheap to clone: every handle
 /// shares the same slot.
 #[derive(Clone, Default)]
-pub(crate) struct PeerSetup(kio::Shared<Option<Setup>>);
+pub(crate) struct PeerSetup(kio::Shared<PeerSetupState>);
+
+#[derive(Default)]
+struct PeerSetupState {
+	seen: bool,
+	setup: Option<Setup>,
+}
 
 impl PeerSetup {
 	/// Record the peer's SETUP.
 	pub fn set(&self, setup: Setup) {
-		*self.0.lock() = Some(setup);
+		let mut state = self.0.lock();
+		state.seen = true;
+		state.setup = Some(setup);
+	}
+
+	/// Claim the Setup Stream before decoding its body, refusing any second stream.
+	pub fn claim(&self) -> Result<(), crate::Error> {
+		let mut state = self.0.lock();
+		if state.seen {
+			return Err(crate::Error::ProtocolViolation);
+		}
+		state.seen = true;
+		Ok(())
 	}
 
 	/// Poll for the peer's advertised probe level, waiting until its SETUP arrives.
@@ -289,13 +307,13 @@ impl PeerSetup {
 	/// driver.
 	fn poll_get<T>(&self, waiter: &kio::Waiter, f: impl FnOnce(&Setup) -> T) -> std::task::Poll<T> {
 		let slot = std::task::ready!(self.0.poll(waiter, |setup| {
-			if setup.is_some() {
+			if setup.setup.is_some() {
 				std::task::Poll::Ready(())
 			} else {
 				std::task::Poll::Pending
 			}
 		}));
-		std::task::Poll::Ready(f(slot.as_ref().expect("waited for Some")))
+		std::task::Poll::Ready(f(slot.setup.as_ref().expect("waited for Some")))
 	}
 }
 

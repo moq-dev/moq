@@ -29,23 +29,31 @@ has usually removed the other stale routes too, and the relay sends one
 retraction instead of advertising each stale path in turn. Requests still
 follow the current best route immediately; only the announcement waits.
 
+A path names one broadcast, whoever publishes it. When the route serving a
+broadcast dies, withdraws, or is beaten by a cheaper route, each subscription
+continues on the new route from the first frame its readers lack, so they see
+every frame once, mid-group included. A route that is still up finishes the
+groups it has open, overlapping the new one. A group neither route delivers is
+dropped once the readers' max age has passed it. A route through the subscribing peer
+itself is never used. A publisher whose groups restart, such as an encoder
+restarting from group 0, must publish under a new broadcast name; resumed under
+the old one, readers wait for its sequence to catch up.
+
 Failover routes must carry copies of the same broadcast. For each track, the
 relay requires matching timescale, retention window, publisher priority, and
-group ordering. A source with different properties is refused before its groups
-are spliced in. If no compatible source remains, the track fails with
+group ordering. A source with different properties is refused before it serves
+the track. If no compatible source remains, the track fails with
 `Unsupported`. New immutable properties require a new track name or broadcast
-identity.
+name.
 
 A route whose original publisher (its first hop) changes is updated in place on
-both wire protocols, so the broadcast never briefly vanishes downstream.
-Subscriptions already in flight keep draining the old publisher until it ends
-and are never spliced onto the new one. New requests resolve through the updated
-route as a fresh broadcast, without the old publisher's track properties.
+both wire protocols, so the broadcast never briefly vanishes downstream, and
+subscriptions in flight carry on through it.
 
 A publisher whose protocol names no hop (moq-transport without the cluster
 extension, moq-lite 01 through 03, or a peer that sends 0) gets a random first
 hop from the relay it connects to, fresh for each connection, followed by a 0.
-Its reconnect is therefore a new publisher downstream, a reprice on the same
+Its reconnect is therefore a new first hop downstream, a reprice on the same
 connection stays in place, and the 0 keeps it ranked as anonymous.
 
 ## Topology

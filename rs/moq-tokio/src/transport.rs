@@ -18,11 +18,6 @@ use web_transport_trait::poll as wt_poll;
 /// plain boxed flavor suffices.
 type OpBox<T> = futures::future::BoxFuture<'static, T>;
 
-/// The longest [`Session::close`] keeps a handle to the backend while it
-/// finishes closing. web-transport-moq force-closes after max(3 RTT, 100ms), so
-/// this only bounds a backend whose `closed()` never resolves.
-const CLOSE_LINGER: std::time::Duration = std::time::Duration::from_secs(10);
-
 /// Adapts a transport that only implements the async interface
 /// ([`web_transport_trait::Session`]) to the poll interface this crate requires.
 ///
@@ -55,16 +50,8 @@ const CLOSE_LINGER: std::time::Duration = std::time::Duration::from_secs(10);
 ///   watch parks until the caller's reads drain the backlog, deliberately
 ///   trading watch liveness on an undrained flooding stream for a memory
 ///   bound (every driver in this crate drains its reads alongside the watch).
-///   A send stream only
-///   starts the real watch once `finish` or `reset` makes it terminal; before
-///   that a closure surfaces as an error on the next write instead of waking an
-///   idle watch. The send-side gap this leaves: a peer that resets a stream
-///   sitting idle (no pending write, not finished) does not wake a parked
-///   `poll_closed`, so a driver waiting on "next frame or peer close" learns of
-///   the closure only when the next write fails. The drivers' other arms keep
-///   the session making progress; the stream itself lingers until then. A
-///   native poll implementation observes closure without owning the stream,
-///   which is why a backend that has one is not wrapped.
+///   Send-side watches are interruptible, so an idle watch can observe peer
+///   cancellation while later writes reclaim the stream.
 pub struct Session<S: web_transport_trait::Session> {
 	session: S,
 	accept_uni: OpSlot<Result<S::RecvStream, S::Error>>,
@@ -193,18 +180,6 @@ where
 
 	fn close(&mut self, code: u32, reason: &str) {
 		self.session.close(code, reason);
-
-		// web-transport-moq sends the CLOSE_WEBTRANSPORT_SESSION capsule from a
-		// background task, but the HTTP/3 control and QPACK streams live in the
-		// session. Dropping the last handle would FIN them alongside the capsule,
-		// a connection error under RFC 9114, and the browser would lose the code
-		// and reason. Keep a handle until the connection is gone.
-		if let Ok(handle) = tokio::runtime::Handle::try_current() {
-			let session = self.session.clone();
-			handle.spawn(async move {
-				let _ = tokio::time::timeout(CLOSE_LINGER, session.closed()).await;
-			});
-		}
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
@@ -231,9 +206,6 @@ pub struct SendStream<S: web_transport_trait::SendStream + 'static> {
 	priority: Option<i32>,
 	finish: bool,
 	reset: Option<u32>,
-	/// Whether `finish` or `reset` has been observed, so no further writes can
-	/// come and the closed() watch may safely take ownership of the stream.
-	terminal: bool,
 	/// Bytes already transmitted but not yet reported to the caller: a write the
 	/// stored future finished (possibly inside
 	/// [`poll_closed`](wt_poll::SendStream::poll_closed)) while the caller held a
@@ -273,7 +245,6 @@ impl<S: web_transport_trait::SendStream + 'static> SendStream<S> {
 			priority: None,
 			finish: false,
 			reset: None,
-			terminal: false,
 			completed: Bytes::new(),
 			interrupt: None,
 		}
@@ -374,17 +345,22 @@ impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for SendS
 						}
 					}
 				},
-				SendState::Closing(mut fut) => match fut.as_mut().poll(cx) {
-					Poll::Pending => {
-						*self.state.get_mut().unwrap() = Some(SendState::Closing(fut));
-						return Poll::Pending;
+				SendState::Closing(mut fut) => {
+					if let Some(tx) = self.interrupt.take() {
+						let _ = tx.send(());
 					}
-					Poll::Ready((mut stream, _res)) => {
-						self.interrupt = None;
-						self.settle(&mut stream);
-						*self.state.get_mut().unwrap() = Some(SendState::Idle(stream));
+					match fut.as_mut().poll(cx) {
+						Poll::Pending => {
+							*self.state.get_mut().unwrap() = Some(SendState::Closing(fut));
+							return Poll::Pending;
+						}
+						Poll::Ready((mut stream, _res)) => {
+							self.interrupt = None;
+							self.settle(&mut stream);
+							*self.state.get_mut().unwrap() = Some(SendState::Idle(stream));
+						}
 					}
-				},
+				}
 			}
 		}
 	}
@@ -405,18 +381,21 @@ impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for SendS
 	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
-		self.terminal = true;
 		match self.state.get_mut().unwrap().as_mut() {
 			Some(SendState::Idle(stream)) => stream.finish(),
 			_ => {
 				self.finish = true;
+				if matches!(self.state.get_mut().unwrap(), Some(SendState::Closing(_)))
+					&& let Some(tx) = self.interrupt.take()
+				{
+					let _ = tx.send(());
+				}
 				Ok(())
 			}
 		}
 	}
 
 	fn reset(&mut self, code: u32) {
-		self.terminal = true;
 		match self.state.get_mut().unwrap().as_mut() {
 			Some(SendState::Idle(stream)) => stream.reset(code),
 			_ => {
@@ -435,14 +414,6 @@ impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for SendS
 			match self.state.get_mut().unwrap().take().expect("in-flight") {
 				SendState::Idle(mut stream) => {
 					self.settle(&mut stream);
-					// Only a finished (or reset) stream starts the real closed()
-					// watch: that future owns the stream, and a stream the caller
-					// may still write to must stay reclaimable. Before that,
-					// closure surfaces as an error on the next operation instead.
-					if !self.terminal {
-						*self.state.get_mut().unwrap() = Some(SendState::Idle(stream));
-						return Poll::Pending;
-					}
 					// Interruptible like a write: a late reset (the group machines
 					// cancel a finished stream this way) must not wait for a FIN
 					// acknowledgement that may never come.
@@ -839,6 +810,7 @@ mod tests {
 		resets: Arc<Mutex<Vec<u32>>>,
 		/// The peer never acknowledges the FIN: closed() stays pending forever.
 		never_ack: Arc<AtomicBool>,
+		stopped: Arc<AtomicBool>,
 	}
 
 	impl web_transport_trait::SendStream for FakeSend {
@@ -871,10 +843,16 @@ mod tests {
 		}
 
 		async fn closed(&mut self) -> Result<(), Self::Error> {
-			match self.finished.load(Ordering::SeqCst) && !self.never_ack.load(Ordering::SeqCst) {
-				true => Ok(()),
-				false => std::future::pending().await,
-			}
+			std::future::poll_fn(|_| {
+				if self.stopped.load(Ordering::SeqCst) {
+					return Poll::Ready(Err(FakeError));
+				}
+				match self.finished.load(Ordering::SeqCst) && !self.never_ack.load(Ordering::SeqCst) {
+					true => Poll::Ready(Ok(())),
+					false => Poll::Pending,
+				}
+			})
+			.await
 		}
 	}
 
@@ -931,12 +909,22 @@ mod tests {
 		let mut send = SendStream::new(fake.clone());
 		let mut cx = cx();
 
-		// A pre-terminal closed watch stays pending without consuming the stream.
+		// An idle closed watch stays pending until the peer cancels.
 		assert!(send.poll_closed(&mut cx).is_pending());
 
 		// The write proceeds; the old ownership-transfer watch deadlocked here.
 		assert_eq!(send.poll_write(&mut cx, b"hello"), Poll::Ready(Ok(5)));
 		assert_eq!(fake.writes.lock().unwrap().as_slice(), b"hello");
+	}
+
+	#[test]
+	fn send_closed_observes_stop_while_idle() {
+		let fake = FakeSend::default();
+		let mut send = SendStream::new(fake.clone());
+		let mut cx = cx();
+		assert!(send.poll_closed(&mut cx).is_pending());
+		fake.stopped.store(true, Ordering::SeqCst);
+		assert!(matches!(send.poll_closed(&mut cx), Poll::Ready(Err(_))));
 	}
 
 	// After finish() the real closed() watch runs and resolves.
@@ -1218,102 +1206,5 @@ mod tests {
 		assert_eq!(recv.poll_read(&mut cx, &mut dst), Poll::Ready(Ok(Some(4))));
 		assert_eq!(&dst, b"tail");
 		assert_eq!(recv.poll_read(&mut cx, &mut dst), Poll::Ready(Ok(None)));
-	}
-
-	/// An async-interface session that only closes when told to. `alive` counts
-	/// the live handles, standing in for the HTTP/3 streams a handle keeps open.
-	#[derive(Clone)]
-	struct FakeSession {
-		alive: Arc<()>,
-		closed: tokio::sync::watch::Receiver<bool>,
-	}
-
-	impl web_transport_trait::Session for FakeSession {
-		type SendStream = FakeSend;
-		type RecvStream = FakeRecv;
-		type Error = FakeError;
-
-		async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
-			std::future::pending().await
-		}
-
-		async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-			std::future::pending().await
-		}
-
-		async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-			std::future::pending().await
-		}
-
-		async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
-			std::future::pending().await
-		}
-
-		fn send_datagram(&self, _payload: Bytes) -> Result<(), Self::Error> {
-			Ok(())
-		}
-
-		async fn recv_datagram(&self) -> Result<Bytes, Self::Error> {
-			std::future::pending().await
-		}
-
-		fn max_datagram_size(&self) -> usize {
-			0
-		}
-
-		fn close(&self, _code: u32, _reason: &str) {}
-
-		async fn closed(&self) -> Self::Error {
-			let _ = self.closed.clone().wait_for(|closed| *closed).await;
-			FakeError
-		}
-	}
-
-	fn fake_session() -> (FakeSession, tokio::sync::watch::Sender<bool>) {
-		let (tx, rx) = tokio::sync::watch::channel(false);
-		let session = FakeSession {
-			alive: Arc::new(()),
-			closed: rx,
-		};
-		(session, tx)
-	}
-
-	// Dropping the last handle right after close() must not tear down what the
-	// backend's close still needs (web-transport-moq's H3 control stream).
-	#[tokio::test(start_paused = true)]
-	async fn close_keeps_the_session_until_it_closes() {
-		let (fake, closed) = fake_session();
-		let alive = fake.alive.clone();
-
-		let mut session = Session::new(fake);
-		wt_poll::Session::close(&mut session, 2, "unauthorized");
-		drop(session);
-		tokio::task::yield_now().await;
-		assert_eq!(Arc::strong_count(&alive), 2, "close() dropped the session early");
-
-		closed.send(true).unwrap();
-		tokio::time::timeout(std::time::Duration::from_secs(1), async {
-			while Arc::strong_count(&alive) > 1 {
-				tokio::task::yield_now().await;
-			}
-		})
-		.await
-		.expect("the session outlived its close");
-	}
-
-	// A backend whose close never completes is let go after CLOSE_LINGER.
-	#[tokio::test(start_paused = true)]
-	async fn close_lets_go_after_the_linger() {
-		let (fake, _closed) = fake_session();
-		let alive = fake.alive.clone();
-
-		let mut session = Session::new(fake);
-		wt_poll::Session::close(&mut session, 2, "unauthorized");
-		drop(session);
-
-		tokio::time::sleep(CLOSE_LINGER - std::time::Duration::from_millis(1)).await;
-		assert_eq!(Arc::strong_count(&alive), 2);
-		tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-		assert_eq!(Arc::strong_count(&alive), 1);
 	}
 }

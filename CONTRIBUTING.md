@@ -1,7 +1,8 @@
 # Commits
 
-PRs into `main` merge through the queue and are squash-merged, so the PR title becomes the commit subject and the PR description becomes the body in `git log`.
-PRs into any other branch (`release`, a questline) use a merge commit, so their history survives until they land.
+PRs into `main` are squash-merged through the merge queue, so the PR title becomes the commit subject and the PR description becomes the body in `git log`.
+The one exception is the release back-merge, which lands as a merge commit (see [Merge queue](#merge-queue)).
+PRs into `release` use a merge commit, so their history survives until they land.
 
 - Use conventional-commit subjects (`feat(watch): ...`, `fix: ...`, `chore: ...`, `docs: ...`)
 - AI commit attribution goes in a `Co-Authored-By:` trailer, not the commit body.
@@ -27,11 +28,14 @@ Fix any merge conflicts and failing CI checks.
 
 # Merge queue
 
-After the workflow support lands on `main`, a maintainer enables **Require merge queue** in the `main` ruleset, chooses **Squash**, and keeps **Check** and **Test** required.
+PRs into `main` land through a merge queue, which re-runs **Check** and **Test** on the PR combined with the latest `main` and the PRs queued ahead of it.
+Enqueue a reviewed PR with `gh pr merge <number>`.
 
-Enqueue a reviewed PR with `gh pr merge <number>`; GitHub checks it against the latest `main` and the PRs ahead of it before merging. Do not bypass the queue with `--admin`.
+A dequeued PR means the combination failed checks, timed out, or no longer meets the ruleset.
+Read the removal reason in the PR timeline and the merge group run, fix the cause, and enqueue again.
 
-A dequeued PR can mean the combined changes failed checks, timed out, or no longer meet branch protection. Read the removal reason in its timeline and the merge group run, fix the cause, and enqueue again.
+Never bypass the queue with `--admin`, with one exception: the queue only squashes, so moq-bot merges the release back-merge with `--admin` as a merge commit once Check and Test pass on its head.
+moq-bot can bypass the queue only when merging a pull request, never on a direct push.
 
 # AI
 
@@ -81,7 +85,7 @@ For an advisory against noq or Quinn, compare the pinned release's `PARENT` with
 
 - A release is cut by hand: a PR merging `main` into `release`, with a merge commit.
 - An urgent fix between cuts lands on `main` first, then reaches `release` as a cherry-pick PR (a backport).
-- After every push to `release`, the Back-merge workflow opens a PR merging `release` into `main`, so trunk carries the published versions and CHANGELOGs. It lands as a merge commit; never squash it, or the next back-merge conflicts.
+- After every push to `release`, the Back-merge workflow opens a PR merging `release` into `main`, so trunk carries the published versions and CHANGELOGs. It lands as a merge commit, outside the merge queue; never squash it, or the next back-merge conflicts.
 
 # Versions
 

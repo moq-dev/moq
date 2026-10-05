@@ -1,2 +1,5 @@
 **/.dart_tool/
 **/build/
+
+# Extracted by sh/dart/check.sh.
+moq/test/docs/samples.dart

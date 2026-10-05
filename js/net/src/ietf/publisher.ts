@@ -18,7 +18,9 @@ import * as Cluster from "./cluster.ts";
 import { type RequestKind, requestReason, toRequestCode } from "./error.ts";
 import { type Fetch, FetchError, FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
+import * as Message from "./message.ts";
 import { FetchFrame, Frame, Group as GroupMessage } from "./object.ts";
+import { Parameters } from "./parameters.ts";
 import { fromWire, toWire } from "./priority.ts";
 import * as Properties from "./properties.ts";
 import { PublishDone, PublishDoneStatus } from "./publish.ts";
@@ -29,6 +31,7 @@ import {
 	PublishNamespaceUpdate,
 } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
+import { cancelled, finCancels } from "./request_stream.ts";
 import { type Subscribe, SubscribeError, SubscribeOk } from "./subscribe.ts";
 import {
 	type SubscribeNamespace,
@@ -442,7 +445,47 @@ export class Publisher {
 			const unsubscribed = new Promise<void>((resolve) => {
 				unsubscribe = resolve;
 			});
-			void stream.reader.closed.then(
+			const updates = (async () => {
+				if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16)
+					return stream.reader.closed;
+				for (;;) {
+					if (await stream.reader.done()) {
+						if (finCancels(version)) return;
+						return stream.writer.closed;
+					}
+					if ((await stream.reader.u53()) !== 0x02) throw new Error("unexpected message on subscribe stream");
+					const params = await Message.decode(stream.reader, async (r) => {
+						await r.u62();
+						if (version === Version.DRAFT_17) await r.u62();
+						return Parameters.decode(r, version);
+					});
+					const unsupported =
+						params.forward === false ||
+						params.bytes.size > 0 ||
+						params.rangeFilters ||
+						params.trackPropertyFilter ||
+						[...params.vars.keys()].some((key) => key !== 0x10n && key !== 0x20n);
+					if (unsupported) {
+						await stream.writer.u53(RequestError.id);
+						await new RequestError({
+							requestId: undefined,
+							errorCode: toRequestCode("not_supported", "subscribe", version),
+							reasonPhrase: "REQUEST_UPDATE parameters not supported",
+						}).encode(stream.writer, version);
+						throw new UpdateFailed();
+					}
+					// update() replaces every option, so carry the rest over as Rust does.
+					if (params.subscriberPriority !== undefined)
+						track.update({ ...track.subscription.peek(), priority: fromWire(params.subscriberPriority) });
+					await stream.writer.u53(RequestOk.id);
+					await new RequestOk({ requestId: undefined }).encode(stream.writer, version);
+				}
+			})();
+			const requestEnded =
+				version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
+					? updates
+					: race([updates, stream.writer.closed]);
+			void requestEnded.then(
 				() => {
 					if (!finished) unsubscribe();
 				},
@@ -455,7 +498,7 @@ export class Publisher {
 			const groups = new Set<Promise<void>>();
 			const streams: StreamCount = { opened: 0 };
 
-			// Serve track groups, racing with stream close (= Unsubscribe)
+			// Serve groups until the track ends or the requester cancels.
 			const serving = (async () => {
 				for (;;) {
 					const group = await track.recvGroup();
@@ -506,8 +549,7 @@ export class Publisher {
 			let ended = false;
 			try {
 				const served = Symbol("served");
-				ended =
-					(await race([Promise.all([serving, filling]).then(() => served), stream.reader.closed])) === served;
+				ended = (await race([Promise.all([serving, filling]).then(() => served), requestEnded])) === served;
 			} catch (err: unknown) {
 				publishError = error(err);
 			}
@@ -544,18 +586,26 @@ export class Publisher {
 						version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
 							? msg.requestId
 							: undefined,
-					statusCode: publishError ? PublishDoneStatus.INTERNAL_ERROR : PublishDoneStatus.TRACK_ENDED,
+					statusCode:
+						publishError instanceof UpdateFailed
+							? PublishDoneStatus.UPDATE_FAILED
+							: publishError
+								? PublishDoneStatus.INTERNAL_ERROR
+								: PublishDoneStatus.TRACK_ENDED,
 					streamCount: BigInt(streams.opened),
-					reasonPhrase: publishError ? "internal error" : "track ended",
+					reasonPhrase:
+						publishError instanceof UpdateFailed
+							? "update failed"
+							: publishError
+								? "internal error"
+								: "track ended",
 				});
 				await done.encode(stream.writer, version);
 			} catch {
 				// Stream might already be closed by peer.
 			}
 
-			// Only now is the close below ours. Claiming it any earlier would read a peer FIN
-			// that lands while PublishDone is still going out as our own completion, leaving
-			// queued groups to open for a subscriber that has already left.
+			// Our close follows PUBLISH_DONE; it must not cancel data still queued for delivery.
 			finished = true;
 			stream.close();
 		} catch (err: unknown) {
@@ -832,6 +882,7 @@ export class Publisher {
 			}
 		};
 
+		const ending = cancelled(stream, version);
 		try {
 			// Send OK response
 			if (version === Version.DRAFT_14) {
@@ -904,13 +955,8 @@ export class Publisher {
 
 				// Wait for the next change, or for the peer to unsubscribe.
 				const next = await (retry
-					? race([
-							changed,
-							this.#withdrawal.closing,
-							stream.reader.closed,
-							retryAfter(retry).then(() => advertised),
-						])
-					: race([changed, this.#withdrawal.closing, stream.reader.closed]));
+					? race([changed, this.#withdrawal.closing, ending, retryAfter(retry).then(() => advertised)])
+					: race([changed, this.#withdrawal.closing, ending]));
 				dispose();
 				if (!next || next === true) break;
 			}
@@ -1596,4 +1642,10 @@ function fillRange(fill: Filter.Fill, subscription: Filter.Filter, largest?: Loc
 		skip: start.object,
 		until: end.object === undefined ? undefined : end.object + 1n,
 	};
+}
+
+class UpdateFailed extends Error {
+	constructor() {
+		super("subscription update failed");
+	}
 }
