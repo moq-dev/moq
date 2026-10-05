@@ -34,7 +34,9 @@ moq.sh also deploys from CI (`.github/workflows/moq-sh.yml`): on a push to
 Its `CLOUDFLARE_API_TOKEN` secret has the account-wide Workers Editor role,
 which can update an existing worker but not create one or change its route.
 So the first deploy, and any change to the custom domain, runs by hand under a
-maintainer's `wrangler login`.
+maintainer's `wrangler login`. Whether Editor alone passes wrangler's
+custom-domain check on every deploy is unproven until the first `release`
+run; [the deploy quest](../quest/m1/moq-sh-deploy.md) tracks it.
 
 ## Bootstrapping a new package repository
 

@@ -148,6 +148,11 @@ suite() {
     refuse "missing version" "not found" "$tmp/served.sh" --dir "$dir" --version 9.9.9
     refuse "unknown option" "unknown option" "$tmp/served.sh" --nope
     refuse "missing value" "needs a value" "$tmp/served.sh" --dir
+    home=$HOME
+    unset HOME
+    refuse "no HOME" "HOME is not set" "$tmp/served.sh"
+    ok "no HOME with --dir" "$tmp/served.sh" --dir "$dir" --version 1.0.0
+    HOME=$home
     installed 1.0.0
 
     # A release whose SHA256SUMS lacks this target is incomplete.

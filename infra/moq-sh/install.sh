@@ -94,7 +94,7 @@ check_glibc() {
 main() {
     version=$DEFAULT_VERSION
     explicit=
-    dir="$HOME/.local/bin"
+    dir=
     while [ $# -gt 0 ]; do
         case "$1" in
             --version)
@@ -115,6 +115,11 @@ main() {
             *) die "unknown option '$1'; see --help" ;;
         esac
     done
+
+    if [ -z "$dir" ]; then
+        [ -n "${HOME:-}" ] || die "HOME is not set; pass --dir"
+        dir="$HOME/.local/bin"
+    fi
 
     if ! valid_version "$version"; then
         [ -n "$explicit" ] || die "this copy of the installer has no default version; pass --version x.y.z"
@@ -162,11 +167,11 @@ main() {
     base="$RELEASES_URL/$tag"
 
     say "downloading moq $version for $target"
-    curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" ||
+    curl -fsSL --proto-redir =https "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" ||
         die "moq-cli $version not found; see https://github.com/moq-dev/moq/releases"
     expected=$(awk -v f="$asset" '$2 == f { print $1 }' "$tmp/SHA256SUMS")
     [ -n "$expected" ] || die "release $tag has no $asset"
-    curl -fsSL "$base/$asset" -o "$tmp/$asset" || die "cannot download $base/$asset"
+    curl -fsSL --proto-redir =https "$base/$asset" -o "$tmp/$asset" || die "cannot download $base/$asset"
     actual=$($sha256 "$tmp/$asset" | awk '{ print $1 }')
     [ "$actual" = "$expected" ] || die "checksum mismatch for $asset; refusing to install it"
 
