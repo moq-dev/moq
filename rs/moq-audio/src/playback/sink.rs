@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use fixed_resample::{PushStatus, ResamplingChannelConfig, ResamplingCons, ResamplingProd, resampling_channel};
+use fixed_resample::{
+	PushStatus, ResamplerConfig, ResamplingChannelConfig, ResamplingCons, ResamplingProd, resampling_channel,
+};
 
 use super::driver::Shared;
 use super::mixer::{self, Gain};
@@ -148,9 +150,8 @@ impl Sink {
 	///
 	/// Await the returned handle to wait for the device; dropping it stops
 	/// immediately. A device that is unavailable keeps the drain pending.
-	/// When rates differ, this drains the output ring; the resampler's partial
-	/// input block cannot be flushed by the current channel implementation.
 	pub fn finish(self) -> Drain {
+		self.channel.lock().unwrap().flush();
 		self.completion.state.store(1, Ordering::Release);
 		Drain { sink: Some(self) }
 	}
@@ -209,6 +210,7 @@ impl Sink {
 				requested_sample_frames
 			}
 		};
+		channel.fed += accepted_sample_frames as u64;
 
 		Ok(Write::from_accepted(requested_sample_frames, accepted_sample_frames))
 	}
@@ -345,12 +347,44 @@ impl Control {
 	}
 }
 
+/// Input frames the channel's resampler converts at a time. Set explicitly so
+/// [`Channel::flush`] knows how much input a partial block is short.
+const BLOCK: usize = 512;
+
 /// The ring into the mixer and the remix that fills it, swapped together when
 /// the device changes rate or layout.
 struct Channel {
 	prod: ResamplingProd<f32>,
 	/// Converts the sink's layout to the device's, when they differ.
 	remix: Option<Remix>,
+	/// Input frames pushed so far, which places the end of the input within the
+	/// resampler's current block. 64 bits so a long session can't wrap it.
+	fed: u64,
+	/// Input frames the resampler holds behind its output: its filter delay.
+	delay: u64,
+}
+
+impl Channel {
+	/// Push silence until the resampler has emitted every frame it was fed.
+	///
+	/// The resampler only converts whole blocks and its filter lags the input, so
+	/// the end of a track sits in its buffer until more input arrives. Nothing
+	/// else will, so pad the final block out and let the mixer play the silence
+	/// behind the tail.
+	fn flush(&mut self) {
+		if self.fed == 0 || !self.prod.is_resampling() {
+			return;
+		}
+
+		let pad = (self.fed + self.delay).next_multiple_of(BLOCK as u64) - self.fed;
+		let silence = vec![0.0; pad as usize * self.prod.num_channels()];
+		if let PushStatus::OverflowOccurred { num_frames_pushed } = self.prod.push_interleaved(&silence) {
+			tracing::warn!(
+				num_frames_pushed,
+				"audio playback overflow, cutting the final samples short"
+			);
+		}
+	}
 }
 
 /// A sink as the driver sees it: enough to rebuild its channel when the device
@@ -477,11 +511,23 @@ fn channel(input: &Input, rate: u32, bus: Layout) -> (Channel, ResamplingCons<f3
 			// that is slightly off doesn't tick audibly.
 			underflow_autocorrect_percent_threshold: Some(25.0),
 			overflow_autocorrect_percent_threshold: Some(75.0),
+			resampler_config: ResamplerConfig {
+				chunk_size: BLOCK,
+				..Default::default()
+			},
 			..Default::default()
 		},
 	);
 
-	(Channel { prod, remix }, cons)
+	// The delay is in output frames; round up so the padding covers all of it.
+	let delay = (cons.resampler_output_delay() as u64 * input.sample_rate as u64).div_ceil(rate as u64);
+	let channel = Channel {
+		prod,
+		remix,
+		fed: 0,
+		delay,
+	};
+	(channel, cons)
 }
 
 #[cfg(test)]
@@ -539,6 +585,63 @@ mod tests {
 		mixer.complete(Duration::from_millis(100));
 		registration.complete();
 		assert!(Pin::new(&mut drain).poll(&mut cx).is_ready());
+	}
+
+	/// The resampler only converts whole blocks and its filter lags the input, so
+	/// a track whose rate differs from the device's must have its tail pushed
+	/// through on finish: both a partial final block and one that ends exactly on
+	/// a block boundary, where only the filter delay is owed.
+	#[test]
+	fn finish_plays_the_resampled_tail_before_completing() {
+		for frames in [1000, 2 * BLOCK] {
+			let want = frames * 48_000 / 44_100;
+			let heard = play_resampled(frames);
+			assert!(heard.abs_diff(want) <= 1, "{frames} frames: heard {heard}, want {want}");
+		}
+	}
+
+	/// Write `frames` of a 44.1 kHz tone into a 48 kHz mixer, finish, and count
+	/// the frames heard before the drain completes.
+	fn play_resampled(frames: usize) -> usize {
+		let shared = Arc::new(Shared::default());
+		let engine = Arc::new(super::super::Handle {
+			commands: super::super::driver::Commands::default(),
+		});
+		let input = Input {
+			sample_rate: 44_100,
+			..Default::default()
+		};
+		let (mut sink, mut registration) = new(0, 48_000, Layout::Stereo, input, shared, engine).unwrap();
+		let (commands, rx) = std::sync::mpsc::sync_channel(8);
+		let (retired, _rx) = std::sync::mpsc::sync_channel(8);
+		let mut mixer = mixer::Mixer::new(rx, retired, 48_000, Layout::Stereo).unwrap();
+		registration.attach(&commands);
+		let mut out = [0.0; 960];
+		mixer.fill(&mut out, Duration::ZERO);
+
+		let bytes: Vec<_> = [0.25f32]
+			.repeat(frames * 2)
+			.iter()
+			.flat_map(|s| s.to_le_bytes())
+			.collect();
+		assert_eq!(sink.write(&bytes).unwrap().accepted_sample_frames, frames);
+		let mut drain = sink.finish();
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+
+		// Count frames past half amplitude, where the resampled edges cross, so
+		// the count is the tone's duration at the device rate.
+		let mut heard = 0;
+		for period in 1..100 {
+			let now = Duration::from_millis(10 * period);
+			mixer.fill(&mut out, now);
+			mixer.complete(now);
+			registration.complete();
+			heard += out.iter().step_by(2).filter(|left| **left > 0.125).count();
+			if Pin::new(&mut drain).poll(&mut cx).is_ready() {
+				return heard;
+			}
+		}
+		panic!("the drain never completed, after {heard} frames");
 	}
 
 	/// Write `frame` repeated as `input` and read back what the bus got.
