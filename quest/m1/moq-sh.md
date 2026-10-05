@@ -63,9 +63,11 @@ since the script and its hosting now both live in this repository.
   PRs touching it run `wrangler deploy --dry-run`. Follow `release-js.yml`'s
   concurrency split. Add `just infra moq-sh deploy` for manual use, and
   include it in the aggregate `just infra deploy` and `infra/README.md`.
-- CI deploy needs [the Cloudflare secret](/quest/m1/moq-sh-secret.md). This
-  quest does not wait for it: the implementing agent may deploy once by hand
-  with `just infra moq-sh deploy` to verify the public URL.
+- CI deploy needs [the Cloudflare secret](/quest/m1/moq-sh-secret.md), which
+  is scoped to the worker and so follows this quest. The implementing agent
+  deploys once by hand with `just infra moq-sh deploy` under the maintainer's
+  wrangler login, creating the worker and its `moq.sh` custom domain, and
+  verifies the public URL.
 
 ### Verification and docs
 
