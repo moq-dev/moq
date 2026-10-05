@@ -29,6 +29,13 @@ sections, CLI flags, and env vars becomes that optional maximum, default none,
 documented in `doc/bin/relay/config.md` for NAT-sensitive deployments. The qmux WebSocket keep-alive (`qmux::ws::KeepAlive`,
 5 s ping and 30 s deadline) already has this shape; make its wording match.
 
+iroh stays on upstream noq, which the fork does not touch, and
+[Listener deadlines](/quest/m1/listener-deadlines.md) wires `quic.keep_alive`
+into iroh's fixed `keep_alive_interval`. Decided in the 2026-10-05 audit:
+when the maximum is `None`, iroh keeps a fixed interval derived from the idle
+timeout, so an iroh session never loses its keep-alive. Rejected: requiring
+an explicit maximum for iroh.
+
 Tests: an idle connection survives an idle timeout with exactly one PING per
 period; a busy connection sends none; a lost PING is probed before the
 deadline; the maximum knob shortens the period.
@@ -39,4 +46,5 @@ deadline; the maximum knob shortens the period.
 
 ## Related
 
+- [Listener deadlines](/quest/m1/listener-deadlines.md) - wires the same setting into iroh's fixed interval
 - [noq#810](https://github.com/n0-computer/noq/issues/810) - the proposal to n0; flub and matheus23 asked to keep a cap for NAT bindings, which the optional maximum covers

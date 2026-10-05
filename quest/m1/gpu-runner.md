@@ -14,5 +14,4 @@ this quest and every `Required` entry that links it.
 
 As of 2026-09-30 `gh api repos/moq-dev/moq/actions/runners` lists none.
 Register it with the dedicated label and hardening that
-[GPU CI](/quest/m1/gpu-ci.md) describes, and share the registration with the
-io_uring runner the drain line plans.
+[GPU CI](/quest/m1/gpu-ci.md) describes.

@@ -7,10 +7,6 @@ the way the drafts say, without closing the session. Each answer uses the
 draft's code, or an existing code where the exact one costs more than it
 is worth and the fallback is recorded in `doc/concept/standard.md`:
 
-- **LARGEST_OBJECT (0x09) in REQUEST_OK and REQUEST_UPDATE_OK** is
-  accepted. The draft makes it a MUST when objects exist. Today
-  `ietf/request.rs` allows only 0x08 and ACTIVE_COUNT, so a conformant
-  peer's reply closes the session with PROTOCOL_VIOLATION.
 - **Range Filters** get REQUEST_ERROR INVALID_FILTER (0x36), not
   NOT_SUPPORTED (draft-19 and later). We advertise no MAX_FILTER_RANGES, so
   the default of 0 applies (draft-21 §9.1.6) and every Range Filter is over
@@ -39,6 +35,11 @@ is worth and the fallback is recorded in `doc/concept/standard.md`:
 
 Decided with the maintainer on 2026-10-04 and 2026-10-05:
 
+- **LARGEST_OBJECT moved to m0.** Decided in the 2026-10-05 audit: a
+  REQUEST_OK carrying it closes the session today, which Seattle interop
+  would hit, so [REQUEST_OK accepts
+  LARGEST_OBJECT](/quest/m0/ietf-largest-object.md) owns it.
+
 - **Deliberate deviations stay.** DUPLICATE_SUBSCRIPTION and PREFIX_OVERLAP
   are never sent, because moq-net deduplicates. OBJECT_DELIVERY_TIMEOUT and
   SUBGROUP_DELIVERY_TIMEOUT never drop an object or reset a subgroup: they
@@ -64,4 +65,5 @@ drafts.
 
 ## Related
 
+- [REQUEST_OK accepts LARGEST_OBJECT](/quest/m0/ietf-largest-object.md) - the case split out ahead of Seattle
 - [Malformed moq-transport input](/quest/m2/ietf-malformed-close.md) - the session-level half of the same validator report

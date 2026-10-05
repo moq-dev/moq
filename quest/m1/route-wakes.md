@@ -69,6 +69,7 @@ Public API: none. Wire: none.
 
 ## Required
 
+- [Wildcard](/quest/m0/wildcard/README.md) - `sync_route`, `poke_below`, and the `origin/pool_churn` bench this reworks exist only on its line branch
 - [Viewer sessions share a front](/quest/m0/shared-fronts.md) - re-keys fronts, which this index hangs off; it lands after the wildcard line, which is where the pool code lives
 
 ## Related

@@ -98,5 +98,5 @@ since the script and its hosting now both live in this repository.
 
 - [Ship capture and playback](/quest/m1/cli-packaging.md) - decides what the
   released binary this installs can do
-- [`moq relay`](/quest/m2/moq-relay-subcommand.md) - relay functionality joins
+- [`moq relay`](/quest/m3/moq-relay-subcommand.md) - relay functionality joins
   the same executable independently of its installation method

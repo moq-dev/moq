@@ -1,4 +1,4 @@
-# [S] Trunk is main, releases ship from release
+# [XS] Trunk is main, releases ship from release
 
 ## Goal
 
@@ -89,14 +89,19 @@ its ruleset has no linear history, the `release` ruleset exists, and the `dev`
 ruleset is gone. The first back-merge ran during the rename window and 404ed;
 its re-run opened #4742.
 
+Done (verified in the 2026-10-05 audit): #4742 landed on `main` as a merge
+commit, release-plz #4596 ran on `release`, and the back-merges #4762, #4797,
+and #4831 landed on `main`.
+
 Remaining:
 
-- The maintainer points the Cloudflare docs (`moq-doc`) and demo builds'
-  production branch at `release`.
-- Once #4605 merges on `main`, cherry-pick it into `release` as a backport PR.
-- Verify: #4742 lands on `main` as a merge commit; release-plz runs on
-  `release`; a chained publish builds `release` while trunk differs; the
-  back-merges of two patch publishes on `release`, without a cut between,
-  both land on `main`.
+- #4605 merged on `main` (275af9352, 2026-10-03), but `release` still lacks
+  its 64 MiB default receive window. Cherry-pick it into `release` as a
+  backport PR.
 
 Public API: none. Wire: none. Contributors see the new branch model.
+
+## Related
+
+- [Cloudflare builds track release](/quest/m0/cloudflare-release.md) - the maintainer's dashboard step, waiting on its own condition
+- [noq reassembly cap](/quest/m0/noq-reassembly-cap.md) - the rest of the cap on `release`

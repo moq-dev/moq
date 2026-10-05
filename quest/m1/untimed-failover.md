@@ -57,4 +57,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [JS track handover](/quest/m1/js-group-handover.md) - mirrors this rule in JS
-- [Wall-clock age-out](/quest/m1/cache-wall-eviction.md) - retention of untimed groups, not a blocked reader
+- [One max_age meaning](/quest/m1/cache-max-age.md) - retention of untimed groups, not a blocked reader

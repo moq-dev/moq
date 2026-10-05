@@ -88,7 +88,7 @@ Decided (2026-10-05):
   downstream can recover the offset: the section's frame timestamp is the video
   clock at arrival plus that same offset. The field keeps its size and is clear
   even in an encrypted section, so TS export and the typed cues of
-  [#2279](/quest/m2/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md)
+  [#2279](/quest/m3/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md)
   read splice times on the broadcast timeline with no change of their own.
 - Rejected for SCTE-35: recording the offset in the `mpegts` catalog section for
   TS export to add (a new catalog field every typed consumer would also have to

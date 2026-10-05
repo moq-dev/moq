@@ -1380,12 +1380,12 @@ test("integration: lite fetch teardown when the reader abandons an open group", 
 	expect(await fetched.readString()).toBe("hello");
 
 	// The publisher is now serving the still-open group.
-	await waitUntil(() => group.used.peek());
+	await waitUntil(() => group.demand().used.peek());
 
 	// Abandoning the fetch cancels the FETCH stream, so the publisher stops serving instead of
 	// pumping an open group to a reader that left.
 	fetched.close();
-	await waitUntil(() => !group.used.peek());
+	await waitUntil(() => !group.demand().used.peek());
 
 	group.close();
 	broadcast.close();
@@ -1488,17 +1488,17 @@ test("integration: lite coalesced fetch stays until every reader abandons the op
 	const f2 = await remote.track("video").fetchGroup(group.sequence);
 	expect(await f1.readString()).toBe("hello");
 	expect(await f2.readString()).toBe("hello");
-	await waitUntil(() => group.used.peek());
+	await waitUntil(() => group.demand().used.peek());
 
 	// Closing one coalesced reader keeps the shared FETCH flowing for the other.
 	f1.close();
 	group.writeString("more");
 	expect(await f2.readString()).toBe("more");
-	expect(group.used.peek()).toBe(true);
+	expect(group.demand().used.peek()).toBe(true);
 
 	// The last abandon cancels the FETCH.
 	f2.close();
-	await waitUntil(() => !group.used.peek());
+	await waitUntil(() => !group.demand().used.peek());
 
 	group.close();
 	broadcast.close();
