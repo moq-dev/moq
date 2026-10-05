@@ -63,11 +63,14 @@ since the script and its hosting now both live in this repository.
   PRs touching it run `wrangler deploy --dry-run`. Follow `release-js.yml`'s
   concurrency split. Add `just infra moq-sh deploy` for manual use, and
   include it in the aggregate `just infra deploy` and `infra/README.md`.
-- CI deploy needs [the Cloudflare secret](/quest/m1/moq-sh-secret.md), which
-  is scoped to the worker and so follows this quest. The implementing agent
-  deploys once by hand with `just infra moq-sh deploy` under the maintainer's
-  wrangler login, creating the worker and its `moq.sh` custom domain, and
-  verifies the public URL.
+- CI deploys with the `CLOUDFLARE_API_TOKEN` Actions secret, which exists.
+  It has the Workers Editor role (Workers Scripts Edit is legacy) and no
+  Zone > Workers Routes access: Editor deploys new versions as long as a
+  deploy does not add, change, or remove a route or custom domain. So the
+  implementing agent deploys once by hand with `just infra moq-sh deploy`
+  under the maintainer's wrangler login, creating the worker and its
+  `moq.sh` custom domain, and verifies the public URL. A later domain change
+  is deployed by hand too.
 
 ### Verification and docs
 
@@ -86,8 +89,6 @@ since the script and its hosting now both live in this repository.
 
 ## Related
 
-- [CI secret](/quest/m1/moq-sh-secret.md) - lets the release workflow deploy
-  the worker
 - [Ship capture and playback](/quest/m1/cli-packaging.md) - decides what the
   released binary this installs can do
 - [`moq relay`](/quest/m2/moq-relay-subcommand.md) - relay functionality joins

@@ -75,7 +75,6 @@ QUIC studies there on that rule.
 - [Capture by default](/quest/m1/capture-default.md) - moq-video and moq-audio build `capture` by default, so pre-merge checks test it and the capture gate goes away
 - [Ship capture and playback](/quest/m1/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
 - [Install with moq.sh](/quest/m1/moq-sh.md) - `curl -fsSL https://moq.sh | sh` installs or upgrades the released `moq` on macOS and Linux
-- [moq.sh CI secret](/quest/m1/moq-sh-secret.md) - a maintainer adds the Cloudflare token the moq.sh release deploy needs
 - [Import at the first frame](/quest/m1/import-first-frame.md) - fMP4, MKV, and MPEG-TS imports publish the catalog at their first frame, so a lone importer's root clock never moves
 - [CMAF frame timestamp](/quest/m1/cmaf-frame-timestamp.md) - CMAF decoders time samples from the moq-lite frame timestamp, using `tfdt` only within the fragment
 - [Shared import clock](/quest/m1/shared-clock.md) - an importer joining a clock already in use offsets its PTS instead of moving it, so captures and imports share one timeline
