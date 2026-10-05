@@ -2,8 +2,8 @@
 
 ## Goal
 
-Routing info splits into two layers on the session's announce stream, in the
-wip lite version, for every session. A ROUTE advertises reachability of one
+Routing info splits into two layers on the session's announce stream, in
+lite-07 (the current wip version, decided 2026-10-05), for every session. A ROUTE advertises reachability of one
 origin node; an ANNOUNCE says a prefix lives at a route's node and carries no
 path. A link flap or relay loss sends one ROUTE change per origin whose best
 route changed, never a re-announce per broadcast; ending a broadcast reaches
@@ -27,7 +27,8 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
   route stays up. An announce never changes its Route ID: another origin
   serving the same path is another ANNOUNCE. An ANNOUNCE naming an unknown
   Route ID is a protocol violation, and ROUTE_END ends that stream's
-  ANNOUNCEs on the route. The hop list leaves this version.
+  ANNOUNCEs on the route. The hop list leaves lite-07, and with it the
+  `Hop Base`/`Hop Keep` compression.
 
   ```text
   ROUTE_START  node=0x7a3f seqno=41 metric=12   -> route 0
@@ -70,7 +71,7 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
   ([Upstream links](/quest/m1/cluster-routing/transit.md)).
 - A plain client with one link advertises a ROUTE for itself and the
   ANNOUNCEs it publishes; its node id is scoped to its session (shared
-  identity across sessions is [Route trust](/quest/m1/cluster-routing/route-trust.md)).
+  identity across sessions is [Route trust](/quest/m3/route-trust.md)).
   A relay advertising routes to a client sends them as usual; node ids reveal
   nothing about the backbone.
 - Every hop re-selects; SUBSCRIBE names no origin, and the reply names none
@@ -107,7 +108,7 @@ refused.
 
 Wire: `drafts/draft-lcurley-moq-lite.md` in the same PR, and `js/net`
 encodes, decodes, and resolves it (JS transit stays in
-[P2P](/quest/m2/p2p/README.md)). Public API: the route-change surface on
+[P2P](/quest/m3/p2p/README.md)). Public API: the route-change surface on
 `broadcast::Route` and its bindings will likely change; report it. This may
 split at start (Rust and draft, then JS), as long as both land in one
 release.

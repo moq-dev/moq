@@ -1278,11 +1278,12 @@ mod session_tests {
 			.block_on(async {
 				tokio::time::timeout(
 					Duration::from_secs(10),
-					moq_net::kio::wait(|waiter| request.poll_unused(waiter)),
+					moq_net::kio::wait(|waiter| request.demand().poll_unused(waiter)),
 				)
 				.await
 			})
-			.expect("the cancelled pump never dropped its subscription");
+			.expect("the cancelled pump never dropped its subscription")
+			.expect("the pending request is still open");
 
 		// Only now answer it. The pump is gone and its state is terminal, so no later scheduling
 		// can produce a pad.

@@ -34,7 +34,7 @@ formula *args:
 install-formula *args:
     python3 sh/gh/install-formula.py "$@"
 
-# Open the pull request that merges `release` back into `main`, queued to land as a merge commit.
+# Open the pull request that merges `release` back into `main`; Check's `land` job merges it.
 back-merge:
     sh/gh/back-merge.sh
 

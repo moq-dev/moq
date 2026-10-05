@@ -17,6 +17,10 @@ Guidance:
   request needs a rule. For example, the union of ranges, and desc wins when
   orders conflict. Decide it and write it down.
 - Replace `requested_group` and `fetch_group` rather than keep both. Update
-  every caller (relay, moq-archive, hls, the ladder) in the same PR.
+  every caller (relay, moq-archive, hls, the ladder) in the same PR, plus the
+  published surfaces built on them, per the cross-package table: moq-ffi
+  (`fetch_group`, `requested_group`), moq-c (`poll_requested_group`), every
+  binding wrapper and its `doc/lib` page, and `moq fetch` through
+  `moq_relay::fetch_group` (added in the 2026-10-05 audit).
 - Max Age caps every range.
 - Benchmark range count and span as separate axes (AGENTS.md fan-out rule).

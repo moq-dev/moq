@@ -15,3 +15,4 @@ MoQ publishing can encode OBS's mixed audio with moq-audio Opus while preserving
 ## Required
 
 - [C++ through moq-ffi](/quest/m1/cpp/README.md) - the plugin is on the generated C++ first
+- [Codecs](/quest/m1/ffi-shape/codec.md) - the encoder and decoder types land once, in the `audio` and `video` namespaces (decided in the 2026-10-05 audit)
