@@ -67,6 +67,13 @@ Remaining:
   PR still based on it, or GitHub closes it with the branch. As of the
   2026-10-05 audit: #4645 (tstd/delay, retarget to `main` after #4640),
   #4732 (ffi-shape/request-accept), and #4675 (auth/request-token).
+- Retiring the auth branch reconciles `quest/m1/auth/` with `main`'s copy
+  (decided 2026-10-05). Drop the children the branch finished or moved (lite,
+  interop, unauthorized, auth-ok-preflight, error-codes, narrowing, peer-grant,
+  moq-transport), keep the branch's new ones (not-supported, violations,
+  js-fetch-watch), fold violations' lite decode gap into
+  [malformed grant](/quest/m1/auth/malformed-grant.md), and retarget the
+  branch's lite-06 wire text at the current `-wip` lite version.
 
 Done when `flake.nix` pins the new quest, no `quest/*README` branch remains,
 and `quest check` passes.

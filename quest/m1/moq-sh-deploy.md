@@ -4,11 +4,10 @@
 
 `curl -fsSL https://moq.sh | sh` installs `moq`, and CI keeps it deployed.
 
-1. Once the installer is on `main`, run `just infra moq-sh deploy` by hand
-   under the maintainer's `wrangler login`. This creates the worker and its
-   `moq.sh` custom domain, which the CI token cannot do. Then run
-   `curl -fsSL https://moq.sh | sh -s -- --dir "$(mktemp -d)"` and check the
-   installed `moq --version`.
+1. Done 2026-10-05: `just infra moq-sh deploy` under the maintainer's
+   `wrangler login` created the worker and its `moq.sh` custom domain
+   (version 217dc477), and `curl -fsSL https://moq.sh | sh -s -- --dir
+   "$(mktemp -d)"` installed `moq 0.14.0`.
 2. The first `moq.sh` workflow run on `release` deploys with the
    `CLOUDFLARE_API_TOKEN` secret. It runs once a release cut brings
    `.github/workflows/moq-sh.yml` to `release`, either from the push or from

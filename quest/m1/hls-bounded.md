@@ -50,7 +50,10 @@ writes `EXT-X-GAP`). Fix only what a test shows missing:
   window even when the store retains more. A full VOD or EVENT listing is a
   separate, explicit replay mode. This conflicts with #4155's durable listing
   on the archive line branch, which lists the whole durable timeline without
-  the live window; reconcile it there when that branch next merges `main`.
+  the live window. This quest owns the reconciliation (decided 2026-10-05):
+  when the archive line lands on `main`, its durable listing becomes this
+  capped window and the full listing becomes the explicit replay mode. It is
+  not a Required link, so the live rules land without waiting for the line.
 - **Stable sequence.** `EXT-X-MEDIA-SEQUENCE` is the window's first segment
   number, derived from the timeline, so two edges and a reload after a pop
   agree.

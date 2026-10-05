@@ -25,6 +25,13 @@ benchmark swept over requesters and route-table churn would show whether the
 re-mint is a real slope or noise, and it is the same benchmark that would
 show the replacement is cheaper.
 
+Also reclaim a filtered front left behind for a hop that appears in a route
+chain: one can outlive its peer session today, once per session (found while
+landing #4832, which fixed the per-viewer case in
+[shared fronts](/quest/m0/shared-fronts.md)). Test that the front count
+returns to the plain fronts after the peer session closes. Folded in
+2026-10-05.
+
 Public API: no signature change expected. `routed_broadcast` and
 `request_broadcast` keep their contracts; only where the waiting happens
 changes.
