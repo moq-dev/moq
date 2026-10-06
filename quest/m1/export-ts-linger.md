@@ -2,9 +2,9 @@
 
 ## Goal
 
-`moq export ts --linger` keeps waiting for a live broadcast when the export
-itself fails, instead of treating that failure as the broadcast ending and
-starting the linger countdown (`rs/moq-cli/src/subscribe.rs`).
+`moq export ts --linger` reports an export failure while the broadcast is
+still live as a failure, instead of treating it as the broadcast ending and
+waiting out the linger (`rs/moq-cli/src/subscribe.rs`).
 
 ## Plan
 
