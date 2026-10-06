@@ -94,7 +94,7 @@ windows $BASE="":
 
 # Test the platform-sensitive crates nightly on Windows, independent of the diff.
 windows-test:
-    just rs test -p moq-auth -p hang -p moq-tokio
+    just rs test -p moq-auth -p hang -p moq-tokio -p moq-sock
 
 # Compile and test the io_uring relay path, which is off the default feature set.
 # Linux-only, and the tests below the 6.12 kernel floor skip themselves.
@@ -119,7 +119,8 @@ macos $BASE="":
 
 # Test the platform-sensitive crates nightly on macOS, independent of the diff.
 macos-test:
-    just rs test -p moq-auth -p hang -p moq-tokio
+    just rs test -p moq-auth -p hang -p moq-tokio -p moq-sock
+    just rs test -p moq-sock --features fast-apple-datapath
 
 # Compile and lint the capture feature, which the default check skips.
 [positional-arguments]
