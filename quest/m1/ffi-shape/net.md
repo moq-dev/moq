@@ -30,6 +30,11 @@ are renamed.
   Kotlin, Dart, and Python, whatever the generated name. Swift keeps its
   generated `<Enum>.<variant>` cases, since it cannot alias a case.
 - `TrackProducer` drops `name`/`is_used`/`used`/`unused` for `demand()`.
+- `GroupRequest` gains `demand()` too, in moq-ffi, moq-c, and every wrapper,
+  so a binding's fetch handler can tell when every caller left and drop the
+  request (decided 2026-10-05, from #4708, which moved Rust's
+  `group::Request` onto `demand()` and withdraws an abandoned fetch on the
+  last caller's drop).
 - The renames no additive change could make:
   - `subscribe` to `consume` on Python `Client`/`connect`, Kotlin
     `Moq.connect`/`Server.listen`, Dart `ConnectOptions`/`ListenOptions`, and Go

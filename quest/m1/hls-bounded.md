@@ -25,13 +25,13 @@ wiring. Rejected: keeping them in moq.pro. Also decided 2026-10-05: this
 quest lives at the m1 root on `main`, outside the archive line, since live
 timelines need it first.
 
-The offline archive HLS that `quest/m1/archive/hls.md` used to describe is
-done on the archive line's branch (#4115, #4155, #4169). The per-track gap
-behaviour lives on that line's
-[Per-track timelines](/quest/m1/archive/track-timeline.md) (#4280, `spans.rs`), which
-derives segments at the edge from group timestamps and emits `EXT-X-GAP` for
-a rendition with no group start in a span. Whichever lands second rebases
-onto the other, and the rules here hold for both shapes.
+The offline archive HLS that `quest/m1/archive/hls.md` used to describe
+landed on `main` with the archive line (#4034: #4115, #4155, #4169). So did
+the per-track gap behaviour from
+[Per-track timelines](/quest/m1/archive/track-timeline.md) (#4280, `spans.rs`),
+which derives segments at the edge from group timestamps and emits
+`EXT-X-GAP` for a rendition with no group start in a span. The rules here
+apply to that shape.
 
 Start by auditing `rs/moq-hls/src/export` against each rule; much exists
 (`segments.rs` numbers aligned segments and carries gap rows, `playlist.rs`
@@ -48,9 +48,13 @@ writes `EXT-X-GAP`). Fix only what a test shows missing:
 - **Capped window, decided 2026-10-05.** A durable (store-backed) timeline
   still advertises a capped sliding window: a live playlist lists a bounded
   window even when the store retains more. A full VOD or EVENT listing is a
-  separate, explicit replay mode. This conflicts with #4155's durable listing
-  on the archive line branch, which lists the whole durable timeline without
-  the live window; reconcile it there when that branch next merges `main`.
+  separate, explicit replay mode. This reverses #4155, now on `main`: a
+  durable timeline (`durable()` in `export/mod.rs`) lists everything it
+  retains, past `Config::window`, and
+  `a_durable_timeline_lists_past_the_window` pins it. This quest owns the
+  reconciliation (decided 2026-10-05): the durable listing becomes this
+  capped window, the full listing becomes the explicit replay mode, and that
+  test and the `Config::window` docs change with it.
 - **Stable sequence.** `EXT-X-MEDIA-SEQUENCE` is the window's first segment
   number, derived from the timeline, so two edges and a reload after a pop
   agree.
