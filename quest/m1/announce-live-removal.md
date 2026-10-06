@@ -14,7 +14,7 @@ Decided 2026-09-29 by the maintainer, after walking through a page-load fix,
 a Live/Offline toggle, and a per-session `live()`:
 
 - The marker answers "has the initial list arrived?" Only one-shot listing
-  (`moq ls`, shell completion) uses it, and no app does: room, watch, and the
+  (`moq ls`, shell completion, both since removed) used it, and no app does: room, watch, and the
   demo skip it. An origin merges many sessions and local publishers, so
   "caught up" there needs aggregation across connections that start, fail,
   and reconnect independently. That produced the page-load race, the special
@@ -45,7 +45,3 @@ Guidance:
 
 Public API: removes `AnnounceEvent::Live` / `{ kind: "live" }` /
 `MoqAnnounceEvent::Live` and the binding aliases. Wire: none.
-
-## Required
-
-- [moq announced](/quest/m1/cli-announced.md) - the CLI stops reading the marker first

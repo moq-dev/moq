@@ -45,4 +45,3 @@ Public API: none expected beyond a possible grace-window knob on
 
 - [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md) - every restarted node gets a new name, so retired entries churn faster
 - [Binary delta stats](/quest/m2/stats-delta.md) - also sweeps the aggregate over node count
-- [Stats linger](/quest/m0/stats-linger.md) - a group's node broadcast outlives a short gap instead of churning an aggregate entry

@@ -88,7 +88,6 @@ across nodes.
 
 ## Related
 
-- [Stats linger](/quest/m0/stats-linger.md) - the idle-group window these totals continue across
 - [Bounded stats aggregate](/quest/m0/broadcast-epoch/stats-aggregate-bound.md) - retired
   nodes fold into a bounded total; per-epoch totals feed it
 - [Media stats](/quest/m1/stats/README.md) - publisher and viewer media stats

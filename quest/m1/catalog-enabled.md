@@ -34,8 +34,8 @@ Decided (2026-10-04):
   black keyframe, so a viewer released before this field shows black rather
   than a frozen picture. Older viewers otherwise keep selecting a disabled
   rendition; that degradation is accepted and noted in the changelog.
-- Viewer: `@moq/watch` deselects a disabled rendition and keeps its audio
-  graph ([audio graph lifetime](/quest/m1/watch-audio-graph.md)).
+- Viewer: `@moq/watch` deselects a disabled rendition, and its audio graph
+  outlives the absence as it does for a removed one.
 - Bandwidth: a rendition is enabled only once its reservation is granted, and
   disabled, with encoding stopped, when the grant falls below its floor,
   until the grant recovers. A disabled rendition loses its subscribers, and
@@ -54,10 +54,6 @@ Tests: disabling an audio rendition publishes a catalog with the same
 rendition and `enabled: false`, and a viewer deselects it and keeps one
 AudioContext across disable and enable; a legacy `stalled: true` changes
 nothing; nothing in the tree writes `stalled`.
-
-## Required
-
-- [Audio graph lifetime](/quest/m1/watch-audio-graph.md) - the viewer keeps its graph across an absence, which a disable reuses
 
 ## Closes
 
