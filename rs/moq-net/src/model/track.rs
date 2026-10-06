@@ -186,7 +186,8 @@ pub(crate) struct TrackState {
 	// Publisher-produced groups in arrival order as (sequence, stamp), walked by
 	// subscriptions; an entry only resolves while its stamp matches the slot's.
 	// Fetched backfill (`insert_group_request`) is deliberately absent: it is
-	// served by sequence, never replayed to arrival-order subscribers.
+	// served by sequence, never replayed to arrival-order subscribers. A fetched
+	// head of a live group is the exception, served through that group's entry.
 	arrival: VecDeque<(u64, u32)>,
 
 	// Eviction order under memory pressure as (sequence, stamp): every cached
@@ -308,6 +309,35 @@ struct Slot {
 	// Whether this incarnation came from the live publisher and can replace older
 	// subscription content. Fetch-only backfill stays cached but never anchors drift.
 	visible: bool,
+
+	// A fetched copy of a live `group` that the feed started past the frames a fetch
+	// asked for. It runs to the end of the group too, so it is served in the live
+	// group's place while it lasts; `group` stays the slot, still written by the feed,
+	// so an abandoned fetch leaves the group servable rather than gone. Boxed: rare.
+	head: Option<Box<group::Producer>>,
+}
+
+impl Slot {
+	/// Whether the live feed's group still holds this slot.
+	fn is_live(&self) -> bool {
+		self.visible && !self.group.is_aborted()
+	}
+
+	/// The copy to hand readers: the fetched head while it lasts, else the live group.
+	fn serving(&self) -> &group::Producer {
+		match &self.head {
+			Some(head) if !head.is_aborted() => head,
+			_ => &self.group,
+		}
+	}
+
+	/// Abort every copy this slot holds.
+	fn abort(&self, err: Error) {
+		if let Some(head) = &self.head {
+			let _ = (**head).clone().abort(err.clone());
+		}
+		let _ = self.group.clone().abort(err);
+	}
 }
 
 /// Heap the track keeps per cached group, excluding the group itself
@@ -390,9 +420,9 @@ impl TrackState {
 			if *sequence >= min_sequence
 				&& let Some(slot) = self.lookup.get(sequence)
 				&& slot.stamp == *stamp
-				&& !slot.group.is_aborted()
+				&& !slot.serving().is_aborted()
 			{
-				return Poll::Ready(Ok(Some((slot.group.clone(), self.offset + i))));
+				return Poll::Ready(Ok(Some((slot.serving().clone(), self.offset + i))));
 			}
 		}
 
@@ -480,7 +510,7 @@ impl TrackState {
 			.lookup
 			.range(next_sequence.max(self.live_floor.unwrap_or(0))..)
 			.filter(|_| self.readable())
-			.map(|(_, slot)| &slot.group)
+			.map(|(_, slot)| slot.serving())
 			.take_while(|group| super::subscription::before_end(group.sequence, end_sequence))
 			.find(|group| !group.is_aborted());
 
@@ -513,8 +543,11 @@ impl TrackState {
 	/// is a miss instead, so the fetch goes upstream for the frames that are missing.
 	fn covering_group(&self, sequence: u64, frame_start: u64) -> Option<&group::Producer> {
 		let slot = self.lookup.get(&sequence)?;
-		let first = slot.group.live_first_frame()?;
-		(first as u64 <= frame_start).then_some(&slot.group)
+		std::iter::once(&slot.group).chain(slot.head.as_deref()).find(|group| {
+			group
+				.live_first_frame()
+				.is_some_and(|first| first as u64 <= frame_start)
+		})
 	}
 
 	/// The local retention bound, or `None` when unknown or unlimited.
@@ -782,7 +815,7 @@ impl TrackState {
 					.cache_accessed_tick(scan.gc.then_some(scan.now))
 					.is_some_and(|tick| scan.now.saturating_sub(tick) > scan.max_ticks)
 			{
-				let _ = slot.group.clone().abort(Error::Old);
+				slot.abort(Error::Old);
 			}
 		}
 	}
@@ -826,8 +859,7 @@ impl TrackState {
 				// Take the group out of the cache and abort it, so any consumer
 				// still reading surfaces `Error::Old` instead of blocking forever
 				// on a frame that will never arrive.
-				let slot = self.lookup.remove(&sequence).unwrap();
-				let _ = slot.group.abort(Error::Old);
+				self.lookup.remove(&sequence).unwrap().abort(Error::Old);
 			}
 		}
 
@@ -976,6 +1008,7 @@ impl TrackState {
 				group: group.clone(),
 				stamp,
 				visible,
+				head: None,
 			},
 		);
 		if visible {
@@ -1101,8 +1134,7 @@ impl TrackState {
 
 			self.debt -= size;
 			paid = paid.saturating_add(size);
-			let slot = self.lookup.remove(&sequence).unwrap();
-			let _ = slot.group.abort(Error::Evicted);
+			self.lookup.remove(&sequence).unwrap().abort(Error::Evicted);
 		}
 	}
 
@@ -1278,8 +1310,16 @@ impl TrackState {
 		}
 		let info = self.info.clone().unwrap();
 
-		// An evicted sequence can be re-fetched; a live one is a duplicate.
-		self.claim_sequence(sequence, frame_start)?;
+		// A live group the feed started past `frame_start` keeps its slot: subscribers
+		// walk it in arrival order and the feed keeps writing it. The fetch fills its
+		// head instead. Anything else that can't answer from `frame_start` (evicted,
+		// aborted, or narrower backfill) is replaced; a group that can is a duplicate.
+		if self.covering_group(sequence, frame_start).is_some() {
+			return Err(Error::Duplicate);
+		}
+		if !self.lookup.get(&sequence).is_some_and(Slot::is_live) {
+			self.claim_sequence(sequence, frame_start)?;
+		}
 
 		let mut group = group::Producer::new(group::Info { sequence }, info, self.cache.clone());
 		// Start where the request did before the group is visible: a fetch looking it up
@@ -1288,10 +1328,17 @@ impl TrackState {
 		group.start_at(frame_start)?;
 		// A backfill exists because someone is fetching it right now: stamp that
 		// access so the eviction walk can't kill it before the fetch resolves.
-		// It is also invisible to arrival-order subscribers: fetched on demand,
-		// not produced live by the publisher.
 		group.cache_refresh();
-		self.commit_group(&group, false);
+
+		// Settled first, like `commit_group`, which may evict the live slot itself.
+		self.charge_debt();
+		match self.lookup.get_mut(&sequence).filter(|slot| slot.is_live()) {
+			Some(slot) => slot.head = Some(Box::new(group.clone())),
+			// Invisible to arrival-order subscribers: fetched on demand, not produced
+			// live by the publisher.
+			None => self.insert_group(&group, false),
+		}
+		self.evict_expired();
 		Ok(group)
 	}
 }
@@ -2542,7 +2589,7 @@ impl Consumer {
 			.lookup
 			.range(..sequence)
 			.rev()
-			.map(|(_, slot)| &slot.group)
+			.map(|(_, slot)| slot.serving())
 			.find(|group| !group.is_aborted())
 			.map(|group| group.consume())
 	}
@@ -2553,11 +2600,11 @@ impl Consumer {
 	/// miss.
 	pub(crate) fn peek_group(&self, sequence: u64) -> Option<group::Consumer> {
 		let state = self.state.read();
-		let slot = state.lookup.get(&sequence)?;
-		if slot.group.is_aborted() {
+		let group = state.lookup.get(&sequence)?.serving();
+		if group.is_aborted() {
 			return None;
 		}
-		Some(slot.group.consume())
+		Some(group.consume())
 	}
 
 	/// Poll for group `sequence` the way the live feed delivers it: `Some` once it is
@@ -2566,9 +2613,9 @@ impl Consumer {
 	pub(crate) fn poll_group(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<Option<group::Consumer>> {
 		let res = self.state.poll(waiter, |state| {
 			if let Some(slot) = state.lookup.get(&sequence)
-				&& !slot.group.is_aborted()
+				&& !slot.serving().is_aborted()
 			{
-				return Poll::Ready(Some(slot.group.consume()));
+				return Poll::Ready(Some(slot.serving().consume()));
 			}
 			let passed = state.max_sequence.is_some_and(|newest| newest > sequence)
 				|| state.start_sequence.is_some_and(|start| start > sequence)
@@ -3725,7 +3772,7 @@ impl Subscriber {
 							&& state
 								.lookup
 								.get(sequence)
-								.is_some_and(|slot| slot.stamp == *stamp && !slot.group.is_aborted())
+								.is_some_and(|slot| slot.stamp == *stamp && !slot.serving().is_aborted())
 					}))
 	}
 
@@ -7994,6 +8041,52 @@ mod test {
 		assert_eq!(
 			served.read_frame().await.unwrap().unwrap().payload,
 			bytes::Bytes::from_static(b"head")
+		);
+	}
+
+	/// A fetch for the head of a live group the feed started partway into keeps that group
+	/// in arrival order: subscribers get the fetched copy while it lasts, and the live
+	/// group again once the fetch is gone.
+	#[tokio::test]
+	async fn fetch_fills_the_head_of_a_live_group() {
+		let producer = track_producer("test", None);
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(1).unwrap();
+		live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta"))
+			.unwrap();
+
+		let fetch = consumer.fetch_group(0, None);
+		let request = dynamic.requested_group().await.unwrap();
+		let mut head = request.accept(None).unwrap();
+		for payload in [&b"snapshot"[..], b"delta"] {
+			head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(payload))
+				.unwrap();
+		}
+		assert_eq!(fetch.await.unwrap().index(), 0);
+
+		// Arrival order hands out the fetched copy, from its first frame.
+		let mut sub = producer.subscribe(None);
+		let mut group = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(
+			group.read_frame().await.unwrap().unwrap().payload,
+			bytes::Bytes::from_static(b"snapshot")
+		);
+
+		// An abandoned fetch leaves the live group in its slot, still written by the feed.
+		head.abort(Error::Cancel).unwrap();
+		live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta2"))
+			.unwrap();
+		let mut sub = producer.subscribe(None);
+		let mut group = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		// Positioning at the start clamps up to the live group's first frame.
+		group.start_at(0);
+		assert_eq!(group.index(), 1);
+		assert_eq!(
+			group.read_frame().await.unwrap().unwrap().payload,
+			bytes::Bytes::from_static(b"delta")
 		);
 	}
 
