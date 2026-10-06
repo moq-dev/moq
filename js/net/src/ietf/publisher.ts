@@ -132,8 +132,8 @@ interface Namespaces {
 	/** What the peer refused, and whether coming back is worth anything. */
 	refused: Map<Path.Valid, Refused>;
 
-	/** The identity each refusal was about, so a republish at the same path clears it. */
-	offered: Map<Path.Valid, object>;
+	/** The advertisement each refusal was about, so a republish or new epoch at the same path clears it. */
+	offered: Map<Path.Valid, Advertised>;
 }
 
 /** Where one announce loop sends its advertisements. */
@@ -1095,7 +1095,9 @@ export class Publisher {
 		// by rebuilding the watched entry.
 		for (const key of [...ns.refused.keys()]) {
 			const snap = updated.get(key);
-			if (snap === undefined || ns.offered.get(key) !== snap.identity) {
+			const offered = ns.offered.get(key);
+			// A new epoch is another broadcast too, even from the same front.
+			if (snap === undefined || offered?.identity !== snap.identity || offered.route.epoch !== snap.route.epoch) {
 				ns.refused.delete(key);
 				ns.offered.delete(key);
 			}
@@ -1130,7 +1132,7 @@ export class Publisher {
 				held.delete(key);
 				if (answer !== "dropped") {
 					ns.refused.set(key, answer);
-					ns.offered.set(key, snap.identity);
+					ns.offered.set(key, snap);
 				}
 			}
 		}
