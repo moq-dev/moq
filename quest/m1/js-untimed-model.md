@@ -16,9 +16,11 @@ long-running and would stall the JS timestamp quests. Whichever lands second
 absorbs the other. The semantics, the end-marker rule and the reasons are in
 the Rust quest; keep the two in step.
 
-Decided (2026-10-05): timedness is per track, in the shape [Typed
-timedness](/quest/m1/typed-timedness.md) mirrors into `@moq/net`. Where the
-notes below assume a per-frame optional timestamp, that shape wins.
+Decided (2026-10-05, types settled 2026-10-06): timedness is per track, as
+the [untimed model](/quest/m1/untimed-model.md) decided and `@moq/net`
+mirrors: `timescale` is optional, frames keep an optional timestamp, and a
+frame whose timedness doesn't match its track is refused. Where the
+notes below assume groups that mix timed and untimed frames, this wins.
 
 Things to look out for:
 
@@ -42,10 +44,6 @@ Test: an untimed frame survives a JS subscribe on each receive path. Run
 
 Public API: breaking. Wire: none beyond what IETF timestamp units
 changes.
-
-## Required
-
-- [Typed timedness](/quest/m1/typed-timedness.md) - the per-track types this mirrors
 
 ## Related
 

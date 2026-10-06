@@ -24,9 +24,10 @@ fill `Timestamp::now()` (moq-net's clock, not the broadcast's), and moq-mux's
 data producers fill the broadcast clock's `now()`. The FFI raw
 `MoqFrame.timestamp_us` and `MoqDatagram.timestamp_us` default to 0.
 
-- `moq_net::Timed` takes the shape [Typed
-  timedness](/quest/m1/typed-timedness.md) settles, without its clock
-  parameter `T`. Timedness is per track there (decided 2026-10-05), so an
+- `moq_net::Timed` drops its unused clock parameter `T` (decided 2026-10-06:
+  here rather than in #4822, which is already large). That's a breaking
+  change and gets an upgrade note. Timedness is per track
+  ([untimed model](/quest/m1/untimed-model.md), decided 2026-10-05), so an
   untimed payload belongs on an untimed track, and one appended to a timed
   track is refused. The json/flate consumers return the same type
   (see [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md)).
