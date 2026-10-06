@@ -3304,10 +3304,15 @@ impl group::Expiry for GroupExpiry {
 			loop {
 				// An abort can change reach even after the successor is stamped.
 				// Register before judging, so a racing abort is observed or wakes us.
-				let successor = state.first_servable(self.sequence.saturating_add(1), cap);
-				if let Some(group) = successor {
-					let _ = group.poll_closed(waiter);
-				}
+				// An abort only closes the group, never touching the track, so one that
+				// landed before registering must re-select or the replacement goes unwatched.
+				let successor = loop {
+					let successor = state.first_servable(self.sequence.saturating_add(1), cap);
+					match successor {
+						Some(group) if group.poll_closed(waiter).is_ready() && group.is_aborted() => continue,
+						successor => break successor,
+					}
+				};
 				let edge = state.drift_edge(cap);
 				expired = state.is_stale(self.sequence, &edge, budget);
 				if expired {
