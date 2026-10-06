@@ -29,6 +29,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
+use web_async::time::Instant;
+
 use bytes::Bytes;
 use moq_net::Timestamp;
 
@@ -213,8 +215,8 @@ struct Entry {
 	/// The entry appears in the catalog's `mpegts.si` map: exactly while it is
 	/// `populated`, so a subscriber never finds an empty track.
 	advertised: bool,
-	/// Host-clock micros of the last cut ([`DEBOUNCE`]); `None` until the first.
-	last_cut: Option<u128>,
+	/// Host-clock instant of the last cut ([`DEBOUNCE`]); `None` until the first.
+	last_cut: Option<Instant>,
 }
 
 impl Entry {
@@ -345,7 +347,7 @@ impl Entry {
 		broadcast: &moq_net::broadcast::Producer,
 		(pid, table_id): (u16, u8),
 		pts: Timestamp,
-		now: u128,
+		now: Instant,
 	) -> anyhow::Result<()> {
 		let frames: Vec<Vec<u8>> = self
 			.active
@@ -389,8 +391,6 @@ pub(super) struct Capture<E: catalog::Catalog> {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: crate::catalog::Producer<E>,
 	entries: BTreeMap<(u16, u8), Entry>,
-	/// Host clock driving the cut debounce (see [`DEBOUNCE`]).
-	clock: crate::Clock,
 	/// The selected program_number, which is the service_id of the only service
 	/// carried; `None` captures every service.
 	program: Option<u16>,
@@ -402,7 +402,6 @@ impl<E: catalog::Catalog> Capture<E> {
 			broadcast,
 			catalog,
 			entries: BTreeMap::new(),
-			clock: crate::Clock::new(),
 			program: None,
 		}
 	}
@@ -467,14 +466,14 @@ impl<E: catalog::Catalog> Capture<E> {
 	/// the host clock ([`DEBOUNCE`]), and a first snapshot is never delayed. `force`
 	/// overrides the debounce, for end of stream.
 	pub fn flush(&mut self, pts: Timestamp, force: bool) -> anyhow::Result<()> {
-		let now = self.clock.now().as_micros();
+		let now = Instant::now();
 		for (key, entry) in self.entries.iter_mut() {
 			if !entry.dirty {
 				continue;
 			}
 			if !force
 				&& let Some(last) = entry.last_cut
-				&& now.saturating_sub(last) < DEBOUNCE.as_micros()
+				&& now.saturating_duration_since(last) < DEBOUNCE
 			{
 				continue;
 			}

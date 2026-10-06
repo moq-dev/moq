@@ -49,6 +49,11 @@ impl Audio {
 	pub fn remove(&mut self, name: &str) -> Option<AudioConfig> {
 		self.renditions.remove(name)
 	}
+
+	/// True when there are no renditions, so the section can be omitted from the catalog.
+	pub fn is_empty(&self) -> bool {
+		self.renditions.is_empty()
+	}
 }
 
 /// Audio decoder configuration based on WebCodecs AudioDecoderConfig.

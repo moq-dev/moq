@@ -423,6 +423,10 @@ impl Config {
 
 	#[cfg(feature = "_transport")]
 	pub(crate) fn validate(&self) -> crate::Result<()> {
+		#[cfg(feature = "tcp")]
+		if self.tcp.tls == Some(true) && self.tcp.bind.is_none() {
+			return Err(crate::Error::NoBackend("--listen-tcp-tls requires --listen-tcp-bind"));
+		}
 		Ok(())
 	}
 

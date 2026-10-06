@@ -43,8 +43,10 @@ connection (`wss://`) and keep whichever wins. A small multiplexer,
 everywhere but cannot escape TCP head-of-line blocking, so priority and resets
 only help once bytes leave the TCP queue. The fallback is automatic in every
 client; the relay enables it with `[web.https]`. A native Rust client that lands on
-WebSocket keeps dialing QUIC and moves the session onto it once the relay admits the QUIC
-session, staying on WebSocket if the relay refuses it.
+WebSocket keeps dialing QUIC and moves the session onto it once the QUIC
+session receives the peer's SETUP, staying on WebSocket if the relay refuses it
+before SETUP. This crate's relays send SETUP after admission; other servers may
+still refuse afterward.
 
 ## Raw QUIC (native)
 

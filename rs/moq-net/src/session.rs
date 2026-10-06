@@ -35,9 +35,9 @@ struct StatsState {
 	demanded: bool,
 }
 
-/// How [`Session::accepted`] learns that the peer's SETUP arrived.
+/// How [`Session::setup`] learns that the peer's SETUP arrived.
 #[derive(Clone)]
-pub(crate) enum Accepted {
+pub(crate) enum Setup {
 	/// The handshake read it before the session started.
 	Read,
 	/// The lite driver records it from the peer's Setup Stream.
@@ -48,7 +48,7 @@ pub(crate) enum Accepted {
 	Never,
 }
 
-impl Accepted {
+impl Setup {
 	/// `Ready(true)` once the SETUP arrived, `Ready(false)` if it never will.
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<bool> {
 		match self {
@@ -126,7 +126,7 @@ pub struct Session {
 	send_bandwidth: Option<bandwidth::Consumer>,
 	recv_bandwidth: Option<bandwidth::Consumer>,
 	goaway: Arc<goaway::Handle>,
-	accepted: Accepted,
+	setup: Setup,
 }
 
 impl Session {
@@ -242,7 +242,7 @@ impl Session {
 		}
 	}
 
-	/// Wait until the peer accepts the session, or return its close reason if it refuses.
+	/// Wait for the peer's SETUP, or return the session's close reason.
 	///
 	/// Resolves when the peer's SETUP arrives. This crate's servers send it only once
 	/// they admit the client, but neither protocol requires that ordering, so another
@@ -251,7 +251,7 @@ impl Session {
 	/// moq-transport draft 17+. Older versions read it during the handshake and resolve
 	/// at once, except moq-lite-03 and -04, which carry none and return
 	/// [`Error::Unsupported`]. A session that already closed returns its close reason.
-	pub async fn accepted(&self) -> Result<(), Error> {
+	pub async fn setup(&self) -> Result<(), Error> {
 		kio::wait(|waiter| {
 			match self.closed.poll(waiter, |state| match &**state {
 				Some(ended) => Poll::Ready(ended.err.clone()),
@@ -262,7 +262,7 @@ impl Session {
 				Poll::Ready(Err(_)) => return Poll::Ready(Err(Error::Cancel)),
 				Poll::Pending => {}
 			}
-			match self.accepted.poll(waiter) {
+			match self.setup.poll(waiter) {
 				Poll::Ready(true) => Poll::Ready(Ok(())),
 				Poll::Ready(false) => Poll::Ready(Err(Error::Unsupported)),
 				Poll::Pending => Poll::Pending,
@@ -310,7 +310,7 @@ impl Session {
 		recv_bandwidth: Option<bandwidth::Consumer>,
 		protocol: crate::driver::Protocol<S>,
 		goaway: goaway::Handle,
-		accepted: Accepted,
+		setup: Setup,
 	) -> (Self, crate::Driver<S>)
 	where
 		S: crate::transport::poll::Session,
@@ -354,7 +354,7 @@ impl Session {
 			send_bandwidth,
 			recv_bandwidth,
 			goaway: Arc::new(goaway),
-			accepted,
+			setup,
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),
@@ -401,7 +401,7 @@ enum Drain {
 	/// Nobody asked for one.
 	Idle,
 	/// Requested: close once drained, or at the deadline.
-	Waiting(crate::runtime::Deadline<crate::time::Clock>),
+	Waiting(crate::time::Deadline),
 	/// The drain closed the transport, with this outcome.
 	Done(Result<(), Error>),
 }
@@ -410,9 +410,7 @@ enum SamplerMode {
 	/// Nobody wants stats; sampling is paused.
 	Idle,
 	/// Someone does; sample when the deadline elapses.
-	Polling {
-		deadline: crate::runtime::Deadline<crate::time::Clock>,
-	},
+	Polling { deadline: crate::time::Deadline },
 }
 
 impl<S: crate::transport::poll::Session> Supervisor<S> {
@@ -472,7 +470,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 				}
 				Close::Drain => {
 					if !draining {
-						self.drain = Drain::Waiting(crate::runtime::Deadline::after(&self.runtime, CLOSE_TIMEOUT));
+						self.drain = Drain::Waiting(crate::time::Deadline::after(&self.runtime, CLOSE_TIMEOUT));
 					}
 					// No handle is left to abort.
 					if last {
@@ -527,7 +525,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 		stats.demanded = false;
 		drop(stats);
 		self.mode = SamplerMode::Polling {
-			deadline: crate::runtime::Deadline::after(&self.runtime, Self::POLL_INTERVAL),
+			deadline: crate::time::Deadline::after(&self.runtime, Self::POLL_INTERVAL),
 		};
 	}
 

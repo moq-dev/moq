@@ -20,8 +20,6 @@ done. moq.pro pins this repository's `release` line, so the release gate below
 also keeps #4741 from reaching it early.
 The Pronto GPU integration lives in moq.pro.
 
-The branch flip is done except its #4605 backport to `release`; the
-Cloudflare switch waits on the maintainer as a condition quest.
 The DoS hardening from an external review on 2026-09-29, verified against `main`, stays in m0
 as security work. Its quests describe fixes, not exploits.
 
@@ -45,8 +43,6 @@ a published `@moq/watch` break.
 
 ## Required
 
-- [Branch flip](/quest/m0/branch-flip.md) - `dev` becomes the default `main` trunk and today's `main` becomes `release`, where publishing runs
-- [Cloudflare builds track release](/quest/m0/cloudflare-release.md) - condition: the maintainer points the docs and demo builds at `release`
 - [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
 - [Shared fronts](/quest/m0/shared-fronts.md) - viewer sessions share a front, so fronts scale with peers, not viewers, and viewer churn no longer leaks fronts

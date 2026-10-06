@@ -9,16 +9,15 @@ layout, and FETCH behavior as native `moq-archive` users.
 
 Port the archive contract to the JS packages with memory and OPFS storage. The
 application explicitly enrolls video, audio, catalog, or arbitrary data tracks;
-the archive does not infer them from Hang. The JS timeline already publishes
-through the Window (`js/hang/src/timeline.ts`, its `Consumer` and `Producer`, backed by
-`js/json/src/window/`) with pacing tracks and application-driven cuts; add the
-deferred commit Rust has (`Producer::deferred`,
-`rs/moq-mux/src/timeline.rs:917`).
+the archive does not infer them from Hang. Record against the per-track
+timelines from [JS per-track timelines](/quest/m1/archive/js-timelines.md).
 
-Persist one range-named object per track per segment after its groups complete,
-then publish the archive timeline record. Match the 19-digit group-bound keys,
-ascending delta-encoded IDs, and sequential timeline discovery used by Rust. A typical audio segment contains many
-one-group-per-frame audio groups. Match the Rust binary envelope bytes and `.info` property values, per the [Recording section](/drafts/draft-lcurley-moq-hang.md#recording), without inferring catalog-to-group applicability.
+Commit each track independently: persist each stored span, including a frame
+range of a still-open group, then publish that track's timeline record. Match
+the object keys, envelope bytes, `.info` property values, and timeline
+discovery the Rust writer uses, per the
+[Recording section](/drafts/draft-lcurley-moq-hang.md#recording), without
+inferring catalog-to-group applicability.
 [Catalog track identity](/quest/m2/catalog-tracks.md) addresses that separately.
 
 Use [JS ranges](/quest/m1/subscribe-ranges/js.md)'s on-demand range requests to
@@ -38,4 +37,5 @@ lands first.
 
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - generic on-demand range serving in `@moq/net`
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - IETF FETCH dispatch onto it
+- [JS per-track timelines](/quest/m1/archive/js-timelines.md) - the timeline this archive records against
 - [Archive](/quest/m1/archive/README.md) - the native writer, reader, and DVR contract this ports

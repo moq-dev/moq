@@ -5,6 +5,7 @@
 //! plus every stage's endpoint.
 
 mod announced;
+mod archive;
 mod args;
 mod auth;
 mod complete;
@@ -690,6 +691,11 @@ fn spawn_import(
 					tasks.spawn(rtc::connect_import(target(name), url));
 				}
 			}
+			ImportSource::Archive(args) => {
+				// A replay serves the retention the recording was made with.
+				anyhow::ensure!(max_age.is_none(), "`--max-age` does not apply to `import archive`");
+				tasks.spawn(archive::import(origin.clone(), name, args));
+			}
 			#[cfg(feature = "capture")]
 			ImportSource::Capture(capture) => {
 				warn_if_missing_format(&name);
@@ -769,6 +775,14 @@ fn spawn_export(
 				} else if let Some(url) = rtc.connect {
 					tasks.spawn(rtc::connect_export(origin.consume(), url, name));
 				}
+			}
+			ExportSink::Archive(args) => {
+				let format = export
+					.catalog_format
+					.map(Into::into)
+					.or_else(|| moq_mux::catalog::CatalogFormat::detect(&name))
+					.unwrap_or_default();
+				tasks.spawn(archive::export(origin.consume(), name, format, args));
 			}
 			_ => unreachable!("container formats are handled by stdout_format above"),
 		}

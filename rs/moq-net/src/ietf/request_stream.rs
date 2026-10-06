@@ -39,21 +39,18 @@ pub(super) struct Update {
 }
 
 impl crate::coding::Decode<Version> for Update {
-	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, crate::coding::DecodeError> {
+	fn decode(r: &mut crate::coding::Decoder<'_>, version: Version) -> Result<Self, crate::coding::DecodeError> {
 		use super::{Fill, Filter, Opaque, RequestId};
 		use crate::coding::DecodeError;
-		if u64::decode(r, version)? != 0x02 {
+		if r.varint()? != 0x02 {
 			return Err(DecodeError::InvalidValue);
 		}
-		let size = u16::decode(r, version)? as usize;
-		if r.remaining() < size {
-			return Err(DecodeError::Short);
-		}
-		let mut data = r.copy_to_bytes(size);
+		let size = r.u16()? as usize;
+		let mut data = r.sub(size)?;
 		let result = (|| {
 			let _id = RequestId::decode(&mut data, version)?;
 			if version == Version::Draft17 {
-				u64::decode(&mut data, version)?;
+				data.varint()?;
 			}
 			decode_params!(&mut data, version,
 				0x02 => object_timeout: Option<u64>,
@@ -90,12 +87,6 @@ impl crate::coding::Decode<Version> for Update {
 			})
 		})();
 		// The complete frame is present; a short field inside it is malformed.
-		result.map_err(|err| {
-			if matches!(err, DecodeError::Short) {
-				DecodeError::InvalidValue
-			} else {
-				err
-			}
-		})
+		result.map_err(DecodeError::complete)
 	}
 }

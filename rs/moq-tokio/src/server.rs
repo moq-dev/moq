@@ -329,7 +329,11 @@ impl Server {
 		let mut stream_binds = Vec::new();
 		#[cfg(feature = "tcp")]
 		if let Some(addr) = config.tcp.bind.filter(|_| build_streams) {
-			stream_binds.push(StreamBind::Tcp(addr));
+			let tls = match config.tcp.tls == Some(true) {
+				true => Some(TcpTls::new(&config, &versions)?),
+				false => None,
+			};
+			stream_binds.push(StreamBind::Tcp(addr, tls));
 		}
 		#[cfg(all(feature = "uds", unix))]
 		if let Some(path) = config.unix.bind.clone().filter(|_| build_streams) {
@@ -800,7 +804,7 @@ impl Listener {
 		self.server.websocket_local_addr()
 	}
 
-	/// The address the plain TCP (qmux) listener bound to, if one was configured.
+	/// The address the TCP (qmux) listener bound to, if one was configured.
 	#[cfg(feature = "tcp")]
 	pub fn tcp_local_addr(&self) -> Option<net::SocketAddr> {
 		self.server.streams.tcp_local_addr
@@ -990,10 +994,65 @@ fn stream_versions(base: &moq_net::Versions) -> moq_net::Versions {
 /// A configured stream listener (`--listen-tcp-bind` / `--listen-unix-bind`).
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 enum StreamBind {
+	/// With its TLS when the listener serves `tls://`.
 	#[cfg(feature = "tcp")]
-	Tcp(net::SocketAddr),
+	Tcp(net::SocketAddr, Option<TcpTls>),
 	#[cfg(all(feature = "uds", unix))]
 	Unix(PathBuf),
+}
+
+/// The TLS a `--listen-tcp-tls` listener serves, reloading its certificate
+/// while this lives.
+#[cfg(feature = "tcp")]
+struct TcpTls {
+	config: std::sync::Arc<rustls::ServerConfig>,
+	#[cfg(all(feature = "watch", feature = "_certs"))]
+	_reload: crate::tls::ReloadingServerConfig,
+}
+
+#[cfg(all(feature = "tcp", feature = "_certs"))]
+impl TcpTls {
+	/// Serve the listen certificate, accepting each stream version as a
+	/// `qmux-01.<alpn>` TLS ALPN.
+	///
+	/// Asks for no client certificate: qmux's TLS accept keeps no peer identity
+	/// for the auth server to read, so neither a `tls.root` nor pinned `peers`
+	/// meant for QUIC apply, and a peer on this listener authenticates with a token.
+	fn new(config: &crate::listen::Config, versions: &moq_net::Versions) -> crate::Result<Self> {
+		let mut listen = config.tls.clone();
+		listen.root.clear();
+		listen.peers = None;
+		let alpn = stream_versions(versions)
+			.alpns()
+			.iter()
+			.map(|alpn| format!("{}{alpn}", qmux::Version::QMux01.prefix()).into_bytes())
+			.collect();
+		Self::serve(&listen, alpn)
+	}
+
+	#[cfg(feature = "watch")]
+	fn serve(listen: &crate::tls::Listen, alpn: Vec<Vec<u8>>) -> crate::Result<Self> {
+		let reload = listen.server_config_reloading(alpn)?;
+		Ok(Self {
+			config: reload.config(),
+			_reload: reload,
+		})
+	}
+
+	#[cfg(not(feature = "watch"))]
+	fn serve(listen: &crate::tls::Listen, alpn: Vec<Vec<u8>>) -> crate::Result<Self> {
+		Ok(Self {
+			config: listen.server_config(alpn)?,
+		})
+	}
+}
+
+#[cfg(all(feature = "tcp", not(feature = "_certs")))]
+impl TcpTls {
+	/// Without a crypto provider there is no certificate to serve.
+	fn new(_config: &crate::listen::Config, _versions: &moq_net::Versions) -> crate::Result<Self> {
+		Err(Error::NoBackend("--listen-tcp-tls requires a crypto provider feature"))
+	}
 }
 
 /// A bound stream listener, before its accept loop is spawned.
@@ -1011,7 +1070,7 @@ impl StreamBind {
 	fn name(&self) -> &'static str {
 		match self {
 			#[cfg(feature = "tcp")]
-			Self::Tcp(_) => "tcp",
+			Self::Tcp(..) => "tcp",
 			#[cfg(all(feature = "uds", unix))]
 			Self::Unix(_) => "unix",
 		}
@@ -1027,6 +1086,9 @@ impl StreamBind {
 /// stopped when the [`Listener`] closes or drops, so no socket lingers.
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 struct StreamListeners {
+	/// Keeps the TCP listener's TLS certificate reloading while it serves.
+	#[cfg(feature = "tcp")]
+	_tcp_tls: Option<TcpTls>,
 	binds: Vec<StreamBind>,
 	/// One per entry in `binds`, in the same order, and created up front rather than
 	/// with the listener: an owner registering these with a metrics endpoint does so
@@ -1059,6 +1121,8 @@ impl StreamListeners {
 			.map(|bind| crate::accept::Health::new(bind.name()))
 			.collect();
 		Self {
+			#[cfg(feature = "tcp")]
+			_tcp_tls: None,
 			binds,
 			health,
 			versions,
@@ -1088,16 +1152,21 @@ impl StreamListeners {
 			let alpns = self.versions.alpns();
 			match bind {
 				#[cfg(feature = "tcp")]
-				StreamBind::Tcp(addr) => {
-					if !addr.ip().is_loopback() {
+				StreamBind::Tcp(addr, tls) => {
+					if tls.is_none() && !addr.ip().is_loopback() {
 						tracing::warn!(%addr, "tcp listener bound to a non-loopback address; qmux is UNENCRYPTED, ensure the network is trusted");
 					}
-					let listener = crate::tcp::Listener::bind(addr)
+					let mut listener = crate::tcp::Listener::bind(addr)
 						.await?
 						.with_protocols(alpns)
 						.with_accept_health(health);
+					let encrypted = tls.is_some();
+					if let Some(tls) = tls {
+						listener = listener.with_tls(tls.config.clone());
+						self._tcp_tls = Some(tls);
+					}
 					let local = listener.local_addr()?;
-					tracing::info!(addr = %local, "listening (tcp)");
+					tracing::info!(addr = %local, tls = encrypted, "listening (tcp)");
 					self.tcp_local_addr = Some(local);
 					pending.push(BoundListener::Tcp(listener));
 				}

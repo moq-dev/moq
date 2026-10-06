@@ -19,7 +19,7 @@ The reference implementation. Every crate is on
 | [moq-uring](https://docs.rs/moq-uring) | Experimental Linux io\_uring worker: one pinned thread per ring serving moq-lite over its own QUIC stack. |
 | [hang](/lib/rs/hang) | The media layer: catalog, containers, ordered frame delivery. |
 | [moq-mux](/lib/rs/moq-mux) | Import and export fMP4/CMAF, MPEG-TS, Matroska, FLV, and Annex-B. |
-| [moq-archive](https://docs.rs/moq-archive) | Versioned hang recordings on any `object_store` backend: track layout, `.info` JSON, and segment objects. |
+| [moq-archive](https://docs.rs/moq-archive) | Versioned hang recordings on any `object_store` backend: track layout, `.info` JSON, per-track timelines, and span objects. |
 | [moq-video](/lib/rs/moq-video) | Native capture, hardware encode/decode (Apple, Windows, NVIDIA, VAAPI, V4L2, Android), and GPU rendering. |
 | [moq-v4l](https://docs.rs/moq-v4l) | Safe Video4Linux 2 bindings with the kernel headers checked in, so a build needs no libclang. |
 | [moq-audio](/lib/rs/moq-audio) | Microphone and speaker, Opus/PCM/AAC codecs, echo cancellation. |

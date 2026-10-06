@@ -2132,7 +2132,7 @@ mod test {
 			drop(writer);
 			drop(producer);
 		});
-		assert!(warns >= 1, "unfinished drop must emit unfinished-producer WARN");
+		assert_eq!(warns, 1, "unfinished drop must emit one unfinished-producer WARN");
 	}
 
 	#[test]
@@ -2151,8 +2151,8 @@ mod test {
 		assert_eq!(frame.payload, Bytes::from_static(b"data"));
 	}
 
-	#[tokio::test]
-	async fn pending_then_ready() {
+	#[test]
+	fn pending_then_ready() {
 		let mut producer = Info { sequence: 0 }.produce();
 		let mut consumer = producer.consume();
 
@@ -2262,7 +2262,7 @@ mod test {
 		let (producer, mut consumer) = prefetched_consumer(&pool, std::time::Duration::MAX);
 		let before = producer.cache_accessed();
 
-		crate::model::clock::advance(std::time::Duration::from_millis(600));
+		pool.step(std::time::Duration::from_millis(600));
 		consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
 
 		assert!(producer.cache_accessed() > before, "the pool cadence is used");
@@ -2275,7 +2275,7 @@ mod test {
 		let (producer, mut consumer) = prefetched_consumer(&pool, std::time::Duration::from_secs(1));
 		let before = producer.cache_accessed();
 
-		crate::model::clock::advance(std::time::Duration::from_millis(600));
+		pool.step(std::time::Duration::from_millis(600));
 		consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
 
 		assert!(producer.cache_accessed() > before, "the track cadence remains in force");
@@ -2433,7 +2433,7 @@ mod test {
 	/// a write guard was mutably accessed, so `frame_notify` must mark the guard
 	/// modified; a guard dropped untouched wakes nobody and the reader would
 	/// stall until the frame completed.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn chunk_write_wakes_parked_reader() {
 		let mut producer = Info { sequence: 0 }.produce();
 		let mut consumer = producer.consume();
@@ -2444,11 +2444,11 @@ mod test {
 			})
 			.unwrap();
 		let mut f = consumer.next_frame().await.unwrap().unwrap();
-		let handle = tokio::spawn(async move { f.read_chunk().await });
+		let handle = moq_net_sim::spawn(async move { f.read_chunk().await });
 		// Let the reader park on the empty partial before the chunk lands.
-		tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+		moq_net_sim::sleep(std::time::Duration::from_millis(50)).await;
 		frame.write(Bytes::from_static(b"foo")).unwrap();
-		let chunk = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+		let chunk = moq_net_sim::timeout(std::time::Duration::from_secs(2), handle)
 			.await
 			.expect("parked chunk reader was never woken by the chunk write")
 			.unwrap()
@@ -2477,8 +2477,8 @@ mod test {
 	}
 
 	/// An explicit current timestamp is converted to the group's scale.
-	#[tokio::test]
-	async fn create_frame_converts_current_timestamp() {
+	#[test]
+	fn create_frame_converts_current_timestamp() {
 		use crate::Timescale;
 
 		let mut producer = Producer::new(

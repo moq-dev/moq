@@ -50,7 +50,7 @@ Prefer poll. New logic is a `poll_*` with an `async` helper, not the other way a
 
 # Testing
 
-- Tests are inline `#[cfg(test)] mod tests`. Time-dependent async tests call `tokio::time::pause()` first, unless they cross real networking that can't be mocked (sockets, smoke tests); those run on the wall clock and assert lower bounds.
+- Tests are inline `#[cfg(test)] mod tests`. Time-dependent async tests call `tokio::time::pause()` first (moq-net uses `#[moq_net_sim::test]` instead), unless they cross real networking that can't be mocked (sockets, smoke tests); those run on the wall clock and assert lower bounds.
 - Run tests through `just` (nextest), not `cargo test`: nextest kills a wedged test as TIMEOUT, cargo hangs forever. A test flagged SLOW is a bug to fix, not a threshold to raise.
 - `just check` compiles default features only, like CI. `just rs features` (nightly) covers `--all-features` / `--no-default-features`. Keep a feature gate around the dependency, not the logic, so the logic's tests stay in the merge gate.
 - Local checks compile only the host platform; PR CI runs `just rs windows` / `macos` on those hosts, and `just rs wasm` covers `moq-wasm`.

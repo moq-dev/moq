@@ -52,9 +52,10 @@ refuses the grant),
 `expires`
 (optional unix seconds; the session closes then), `revalidate` (optional
 seconds until the relay asks again), `tier` (optional label handed to
-[stats](/bin/relay/config#stats)), and `peer` (optional; `true` marks another
+[stats](/bin/relay/config#stats)), `peer` (optional; `true` marks another
 relay, so what it announces counts as entering the cluster elsewhere, not as
-ingest here). A 2xx with a grant admits. A 401 or 403 refuses.
+ingest here), and `upstream` (optional; `true` marks that peer as an
+[upstream link](/bin/relay/cluster#upstream-links), and requires `peer`). A 2xx with a grant admits. A 401 or 403 refuses.
 Anything else at connect, a timeout, a 5xx, or an unparseable body, refuses and
 logs an error; nothing is admitted because the server was down. A grant that
 names nothing refuses, and one with `revalidate` but no `expires` is refused
@@ -66,7 +67,7 @@ clock, so later polls, outages, and wall-clock adjustments do not restart it.
 **Revalidate and outage.** On the cadence the relay POSTs `revalidate` with the
 same request. A grant applies: a changed `root` or `mounts`, or one that no longer covers
 what the session holds closes it with `Unauthorized` (the live session is not
-resized in place), and so does a flipped `peer`; a changed `tier` keeps the
+resized in place), and so does a flipped `peer` or `upstream`; a changed `tier` keeps the
 session and moves its stats: its presence counts under the new tier from then
 on, as does each group and subscription it starts afterwards, while one already
 in flight finishes where it began. A 401 or 403 closes the session now, as does a 2xx
@@ -384,7 +385,12 @@ bind = "/run/moq/internal.sock"
 allow.uid = [1001]
 ```
 
-Bind TCP to loopback or a private interface; it carries no peer identity. The
-Unix socket is created mode `0666`, so gate it with a restrictive parent
-directory or an explicit allowlist.
+Bind plaintext TCP to loopback or a private interface; it carries no peer
+identity. The Unix socket is created mode `0666`, so gate it with a restrictive
+parent directory or an explicit allowlist.
 These are native-only paths for gateways and stats publishers on the same host.
+
+`listen.tcp.tls = true` serves the TCP listener over TLS with the listen
+certificate instead, for `tls://` dials such as [cluster links](/bin/relay/cluster#tls-links)
+that need neither QUIC nor a WebSocket. It still carries no peer identity: it
+asks for no client certificate, so a peer on it presents a token, not mTLS.

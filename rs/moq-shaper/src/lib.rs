@@ -30,14 +30,20 @@ use std::{
 	time::Duration,
 };
 
+#[cfg(test)]
+mod mem;
 mod preset;
 
 pub use preset::Preset;
 
 use anyhow::Context;
+#[cfg(test)]
+use mem::UdpSocket;
 use rand::{RngExt, SeedableRng, rngs::Xoshiro256PlusPlus};
 use serde::{Deserialize, Serialize};
-use tokio::{net::UdpSocket, sync::mpsc, task::JoinSet, time::Instant};
+#[cfg(not(test))]
+use tokio::net::UdpSocket;
+use tokio::{sync::mpsc, task::JoinSet, time::Instant};
 
 /// How one direction of the path treats each datagram.
 ///
@@ -995,7 +1001,7 @@ mod tests {
 		got
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn forwards_both_ways_untouched() {
 		let (shaper, client) = setup(1, Profile::default(), Profile::default()).await;
 		let got = round_trip(&client, 50).await;
@@ -1022,7 +1028,7 @@ mod tests {
 		assert_eq!(start.elapsed(), Duration::ZERO);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn the_seed_reproduces_the_losses() {
 		let lossy = Profile {
 			loss: 0.3,
@@ -1042,7 +1048,7 @@ mod tests {
 		assert_eq!(first_got.len() as u64, 200 - first.stats().up.lost);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn reorder_and_jitter_overtake() {
 		let shuffled = Profile {
 			delay: Duration::from_millis(20),
@@ -1062,7 +1068,7 @@ mod tests {
 		assert!(stats.up.reordered > 0, "{stats}");
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn the_rate_limit_queues_then_drops() {
 		// 100 datagrams of 4 bytes is 3200 bits: at 8 kbit/s they need 400ms,
 		// and the queue only holds 100ms of it.
@@ -1085,7 +1091,7 @@ mod tests {
 		assert!(got.windows(2).all(|pair| pair[0] < pair[1]), "{got:?}");
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_rate_limit_wider_than_the_traffic_passes_everything() {
 		let wide = Profile {
 			rate: Some(Rate {
@@ -1102,7 +1108,7 @@ mod tests {
 		assert_eq!(shaper.verify().unwrap().up.overflowed, 0);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn the_burst_counts_the_datagram_itself() {
 		// A burst of one datagram lets the first out at once and holds the second.
 		let one = Profile {
@@ -1184,7 +1190,7 @@ mod tests {
 		assert_eq!(unapplied(&phases, &stats), ["loss"]);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn an_invalid_profile_is_refused() {
 		let refused = |bad: Profile, why: &'static str| async move {
 			let err = Shaper::bind(Config {
@@ -1268,7 +1274,7 @@ mod tests {
 		steps: Vec::new(),
 	};
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn only_the_gaussian_model_keeps_the_order() {
 		let jittery = Profile {
 			delay: Duration::from_millis(20),
@@ -1387,7 +1393,7 @@ mod tests {
 		assert!(first_counters.lost > 0 && first_counters.reordered > 0);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_gaussian_sigma_may_exceed_the_delay() {
 		// The uniform model refuses this; a gaussian clamps its draw at zero.
 		let wide = Profile {
@@ -1457,7 +1463,7 @@ mod tests {
 		got
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_shared_path_keeps_the_order_across_clients() {
 		let jittery = Profile {
 			delay: Duration::from_millis(20),
@@ -1530,7 +1536,7 @@ mod tests {
 		}
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_batch_releases_on_count_and_on_the_window() {
 		let socket = Arc::new(UdpSocket::bind(LOCALHOST).await.unwrap());
 		let ms = |ms| Duration::from_millis(ms);
@@ -1609,7 +1615,7 @@ mod tests {
 		assert_eq!(tally.batched.load(Ordering::Relaxed), 0);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_batch_releases_datagrams_together() {
 		let (shaper, client) = shaped(|config| Setup {
 			up: batched(7, Duration::from_millis(160)),
@@ -1644,7 +1650,7 @@ mod tests {
 		);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn the_window_releases_a_batch_that_never_fills() {
 		let (shaper, client) = shaped(|config| Setup {
 			up: batched(100, Duration::from_millis(80)),
@@ -1659,7 +1665,7 @@ mod tests {
 		assert_eq!(shaper.verify().unwrap().up.delayed, 3);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_shared_batch_fills_from_every_client() {
 		// Three datagrams from each of two clients, into batches of six: only a
 		// shared path fills one, and separate links wait out the window.
@@ -1684,7 +1690,7 @@ mod tests {
 		}
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_batch_needs_a_count_and_a_window() {
 		let refused = |options: Options, why: &'static str| async move {
 			let config = Config {
@@ -1812,7 +1818,7 @@ mod tests {
 		assert_eq!(lost(start + secs(60)), 0, "the step back never cleared");
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_step_gets_worse_part_way_through() {
 		let ms = Duration::from_millis;
 		let (shaper, client) = shaped(|config| Setup {
@@ -1849,7 +1855,7 @@ mod tests {
 		shaper.verify().unwrap();
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_step_the_run_never_reached_is_unapplied() {
 		let (shaper, client) = shaped(|config| Setup {
 			down: stepped(vec![Step {
@@ -1866,8 +1872,7 @@ mod tests {
 		assert!(format!("{err:#}").contains("the down step at 60s"), "{err:#}");
 	}
 
-	// Real sockets, so the wall clock: a paused one could jump past a step while a datagram is still in the kernel.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_step_no_datagram_saw_is_unapplied() {
 		let ms = Duration::from_millis;
 		let (shaper, client) = shaped(|config| Setup {
@@ -1909,7 +1914,7 @@ mod tests {
 		assert!(!err.contains("the up step at 200ms"), "{err}");
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_profile_no_datagram_saw_before_its_step_is_unapplied() {
 		let ms = Duration::from_millis;
 		let (shaper, client) = shaped(|config| Setup {
@@ -1954,7 +1959,7 @@ mod tests {
 		assert_eq!(owed(&mut link, start + Duration::from_secs(1), &[16]), [Duration::ZERO]);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn steps_that_would_be_skipped_or_do_nothing_are_refused() {
 		let refused = |steps: Vec<Step>, why: &'static str| async move {
 			let config = Config {

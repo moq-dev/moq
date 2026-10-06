@@ -49,6 +49,12 @@ pub struct Grant {
 	/// the cluster elsewhere, not here.
 	#[serde(skip_serializing_if = "std::ops::Not::not")]
 	pub peer: bool,
+
+	/// The cluster peer is upstream: the relay never offers it a route learned
+	/// from another upstream peer, so it never carries traffic between two.
+	/// Requires `peer`.
+	#[serde(skip_serializing_if = "std::ops::Not::not")]
+	pub upstream: bool,
 }
 
 impl Grant {
@@ -69,11 +75,14 @@ impl Grant {
 		tokio::time::Instant::now().checked_add(remaining)
 	}
 
-	/// Refuse a grant that admits nothing, asks to be revalidated without a bound or
-	/// at no interval, or has already expired.
+	/// Refuse a grant that admits nothing, marks a non-peer upstream, asks to be
+	/// revalidated without a bound or at no interval, or has already expired.
 	pub fn validate(&self) -> crate::Result<()> {
 		if self.publish.is_empty() && self.subscribe.is_empty() {
 			return Err(crate::Error::UselessGrant);
+		}
+		if self.upstream && !self.peer {
+			return Err(crate::Error::UpstreamWithoutPeer);
 		}
 		if self.revalidate.is_some() && self.expires.is_none() {
 			return Err(crate::Error::UnboundedRevalidate);
@@ -108,12 +117,14 @@ mod tests {
 			revalidate: Some(Duration::from_secs(60)),
 			tier: Some("websocket".into()),
 			peer: true,
+			upstream: true,
 		};
 		let json = serde_json::to_value(&grant).unwrap();
 		assert_eq!(json["expires"], 4_102_444_800_i64);
 		assert_eq!(json["revalidate"], 60);
 		assert_eq!(json["publish"], serde_json::json!(["alice/**"]));
 		assert_eq!(json["peer"], true);
+		assert_eq!(json["upstream"], true);
 		assert_eq!(serde_json::from_value::<Grant>(json).unwrap(), grant);
 	}
 
@@ -130,10 +141,11 @@ mod tests {
 			revalidate: Some(Duration::from_secs(60)),
 			tier: Some("websocket".into()),
 			peer: true,
+			upstream: true,
 		};
 		assert_eq!(
 			serde_json::to_string(&grant).unwrap(),
-			r#"{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","peer":true}"#
+			r#"{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","peer":true,"upstream":true}"#
 		);
 	}
 
@@ -175,6 +187,15 @@ mod tests {
 
 		grant.revalidate = Some(Duration::ZERO);
 		assert!(matches!(grant.validate(), Err(crate::Error::ZeroRevalidate)));
+	}
+
+	#[test]
+	fn validate_refuses_an_upstream_that_is_not_a_peer() {
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
+		grant.upstream = true;
+		assert!(matches!(grant.validate(), Err(crate::Error::UpstreamWithoutPeer)));
+		grant.peer = true;
+		grant.validate().unwrap();
 	}
 
 	#[cfg(feature = "tokio")]

@@ -13,8 +13,6 @@
 //! its earlier data is read.
 
 use std::{
-	future::Future,
-	pin::Pin,
 	sync::{
 		Arc, Mutex,
 		atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -117,7 +115,7 @@ impl ClosedSignal {
 }
 
 /// A chunk in flight: readable by the peer once the link latency has passed.
-type Flight = (tokio::time::Instant, StreamChunk);
+type Flight = (std::time::Instant, StreamChunk);
 
 /// A mock send stream backed by a queue to the peer's reader.
 pub struct MockSendStream {
@@ -142,7 +140,7 @@ impl MockSendStream {
 			return Err(err);
 		}
 		let tx = self.tx.as_ref().ok_or_else(MockError::closed)?;
-		let arrival = tokio::time::Instant::now() + self.conn.latency();
+		let arrival = super::harness::now() + self.conn.latency();
 		tx.try_push((arrival, chunk)).map_err(|_| MockError::closed())
 	}
 }
@@ -213,8 +211,8 @@ pub struct MockRecvStream {
 	rx: kio::Queue<Flight>,
 	/// The next chunk, popped but still crossing the link.
 	flight: Option<Flight>,
-	/// Wakes the reader when `flight` lands.
-	landing: Option<Pin<Box<tokio::time::Sleep>>>,
+	/// The arrival a wake is already scheduled for, so each flight schedules one.
+	landing: Option<std::time::Instant>,
 	/// Buffered bytes from a chunk that was partially consumed.
 	buf: Bytes,
 	/// Whether we hit FIN or reset.
@@ -241,12 +239,18 @@ impl MockRecvStream {
 			}
 		}
 		let (arrival, _) = self.flight.as_ref().expect("flight set above");
-		if *arrival > tokio::time::Instant::now() {
-			let landing = self
-				.landing
-				.get_or_insert_with(|| Box::pin(tokio::time::sleep_until(*arrival)));
-			landing.as_mut().reset(*arrival);
-			std::task::ready!(landing.as_mut().poll(cx));
+		let arrival = *arrival;
+		if arrival > super::harness::now() {
+			// Only a test sets a latency, so the flight lands on the simulated clock.
+			if self.landing != Some(arrival) {
+				self.landing = Some(arrival);
+				let waker = cx.waker().clone();
+				drop(moq_net_sim::spawn(async move {
+					moq_net_sim::sleep_until(arrival).await;
+					waker.wake();
+				}));
+			}
+			return Poll::Pending;
 		}
 		Poll::Ready(self.flight.take().map(|(_, chunk)| chunk))
 	}
@@ -629,7 +633,7 @@ impl MockSession {
 	}
 
 	/// Delay stream data sent from now on by `latency` in each direction, keeping
-	/// each stream in order. Measured on tokio's clock, so paused-time tests advance
+	/// each stream in order. Measured on the simulated clock, so tests advance
 	/// through it without sleeping.
 	pub fn set_latency(&self, latency: Duration) {
 		*self.side.conn.latency.lock().unwrap() = latency;

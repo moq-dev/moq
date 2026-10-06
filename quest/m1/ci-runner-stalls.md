@@ -22,7 +22,3 @@ runner was doing (CPU steal, GC, disk). Decided with the maintainer: diagnose
 first from real nightlies rather than assume a runner stall.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [A week of nightly interop after #4529](/quest/m1/interop-week.md) - the traces carry the `delay` column

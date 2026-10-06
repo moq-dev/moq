@@ -31,10 +31,9 @@ Things to look out for:
   a track that never declared one must not claim a timeline downstream.
 - A FETCH is timed only when it learns the track's units when accepted.
 - Tracks on drafts 14-16, where SUBSCRIBE_OK can't carry TIMESCALE, are
-  untimed (decided 2026-10-05), so the publisher sends no Timestamp there, as
-  [IETF timestamp units](/quest/m1/ietf-timestamp-units.md) plans. This
-  replaces the earlier plan to write an object-scope TIMESCALE beside each
-  Timestamp.
+  untimed (decided 2026-10-05), so the publisher sends no Timestamp there.
+  This replaces the earlier plan to write an object-scope TIMESCALE beside
+  each Timestamp.
 - Update callers in js/hang and js/loc (end markers) and anything in
   js/watch that reads frame timestamps.
 

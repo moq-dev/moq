@@ -18,13 +18,20 @@ through to the next host when it is missing, so a build with the feature on
 still links and starts driverless.
 
 `capture` and `playback` pull cpal with ALSA always linked; the host flags
-alone no longer activate it. If cpal cannot load ALSA at runtime in-tree, split that half into its own upstream quest holding the cpal
-release as a plain-text `Required` condition, and this quest requires it.
+alone no longer activate it. cpal cannot load ALSA at runtime in-tree (no
+release offers it, and the in-tree routes are hacks), so this waits on
+[the cpal release](/quest/m1/cpal-alsa-runtime.md). Once it ships, bump cpal,
+enable whatever it needs, and update the moq-audio and moq-cli feature
+comments that call libasound a build-time link.
 
 Verify by building in the Nix shell, then running the shipped binary on a
 host without libasound: it starts, lists devices, and captures where a
 backend exists. Inspect the binary to prove no load-time requirement on
 libasound. The PR 3850 capture gate keeps the coverage.
+
+## Required
+
+- [cpal loads libasound at runtime](/quest/m1/cpal-alsa-runtime.md) - condition: a cpal release whose Linux build carries no load-time libasound requirement
 
 ## Related
 

@@ -738,7 +738,7 @@ export class Subscriber {
 	#toModelInfo(info: TrackInfo): track.Info {
 		return {
 			timescale: Time.Timescale(info.timescale),
-			// Publisher Max Age rides on the wire, so the local retention window
+			// Publisher Max Age rides on the wire, so the local media-time budget
 			// matches what the upstream advertises (relays re-serve with the same bound).
 			maxAge: info.maxAge === undefined ? undefined : Time.Milli(info.maxAge),
 			priority: info.priority,
@@ -1091,7 +1091,7 @@ export class Subscriber {
 				if (track.closed.peek() !== undefined) {
 					// Subscription ended before the scale resolved; nothing to decode.
 					producer.close();
-					stream.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
+					stream.stop(StreamCode.Cancel);
 					return;
 				}
 				await Signal.race(timescale, track.closed);
@@ -1101,7 +1101,7 @@ export class Subscriber {
 			await readFrames(stream, producer, scale);
 
 			producer.close();
-			stream.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
+			stream.stop(StreamCode.Cancel);
 		} catch (err: unknown) {
 			const e = await sessionCause(this.#quic, err);
 			producer.close(e);

@@ -83,7 +83,7 @@ mod tests {
 	/// The announce loops read the peer's declaration once and hold it, while
 	/// subscription serving re-reads it. A second SETUP overwriting the identity would
 	/// split those two apart, so the first write is the one that counts.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn first_write_wins() {
 		let first = Peer {
 			cluster: cluster::Peer {

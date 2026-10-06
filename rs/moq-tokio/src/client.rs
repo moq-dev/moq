@@ -67,12 +67,16 @@ pub struct Client {
 	/// Whether the TLS config pins a certificate fingerprint, which only verifies
 	/// the configured host, so a GOAWAY may not redirect elsewhere.
 	pub(crate) pinned: bool,
-	/// The resolved Happy Eyeballs timings, used by the `tcp://` dial here; the
-	/// QUIC backend captures its own copy from the config.
+	/// The resolved Happy Eyeballs timings, used by the `tcp://` and `tls://`
+	/// dials here; the QUIC backend captures its own copy from the config.
 	#[cfg(feature = "tcp")]
 	failover_delay: std::time::Duration,
 	#[cfg(feature = "tcp")]
 	resolution_delay: std::time::Duration,
+	/// The TLS settings a `tls://` dial builds from when it runs, so a client
+	/// that only dials plaintext `tcp://` never needs a crypto provider.
+	#[cfg(feature = "tcp")]
+	tcp_tls: crate::tls::Connect,
 	#[cfg(feature = "websocket")]
 	websocket: crate::websocket::Config,
 	/// The TLS server name override used by the WebSocket fallback.
@@ -132,6 +136,8 @@ impl Client {
 		let failover_delay = resolved.race;
 		#[cfg(feature = "tcp")]
 		let resolution_delay = resolved.resolution_delay;
+		#[cfg(feature = "tcp")]
+		let tcp_tls = config.tls.clone();
 		#[cfg(feature = "websocket")]
 		let tls_host_name = config.tls.host_name.clone();
 		let timeout = resolved.timeout;
@@ -156,6 +162,8 @@ impl Client {
 			failover_delay,
 			#[cfg(feature = "tcp")]
 			resolution_delay,
+			#[cfg(feature = "tcp")]
+			tcp_tls,
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
 			#[cfg(feature = "websocket")]
@@ -399,6 +407,21 @@ impl Client {
 			return Ok(Dialed::new(session, crate::Transport::Tcp));
 		}
 
+		// Qmux over TLS over TCP, for links that need neither QUIC nor a WebSocket.
+		#[cfg(feature = "tcp")]
+		if url.scheme() == "tls" {
+			let session = crate::tcp::connect_tls(
+				url,
+				&self.versions.alpns(),
+				&self.tcp_tls,
+				self.failover_delay,
+				self.resolution_delay,
+			)
+			.await?;
+			let session = connect_session(&moq, crate::transport::Session::new(session)).await?;
+			return Ok(Dialed::new(session, crate::Transport::Tcp));
+		}
+
 		// Unix domain socket (qmux, no TLS). Same-host only; the server can
 		// authenticate us by uid/gid via SO_PEERCRED.
 		#[cfg(all(feature = "uds", unix))]
@@ -551,9 +574,10 @@ impl Client {
 						let quic = quic.await?;
 						Ok(Box::pin(async move {
 							let session = connect_session(&moq, quic).await?;
-							// The WebSocket session is only drained once the peer admits this one.
+							// Wait for the peer's SETUP before draining WebSocket. This crate's servers
+							// send SETUP after admission; other servers may still refuse afterward.
 							// A refusal, or a version with no SETUP to wait on, keeps WebSocket.
-							session.accepted().await?;
+							session.setup().await?;
 							// A session already told to leave would hand straight back out of QUIC.
 							if session.draining().peek().is_some() {
 								return Err(Error::ConnectFailed);
@@ -620,7 +644,7 @@ fn setup_path(url: &Url) -> Option<String> {
 			.filter(|path| !path.is_empty()),
 		// Raw QUIC and qmux over TCP negotiate an ALPN and nothing else, so the whole
 		// request target travels in the SETUP.
-		"moqt" | "moql" | "tcp" => request_target(url),
+		"moqt" | "moql" | "tcp" | "tls" => request_target(url),
 		_ => None,
 	}
 }
@@ -692,7 +716,7 @@ enum Stage {
 pub(crate) enum Step {
 	/// The QUIC transport is up; the MoQ handshake has started on it.
 	Handshaking,
-	/// The peer admitted the MoQ session over QUIC, which is ready to take over on this transport.
+	/// The peer's SETUP arrived over QUIC, which is ready to take over on this transport.
 	Done(moq_net::Session, crate::Transport),
 }
 
@@ -713,7 +737,7 @@ impl Upgrade {
 	}
 
 	/// Drive the dial: `Ready(Ok(Step::Handshaking))` once when the QUIC transport
-	/// comes up, then `Ready(Ok(Step::Done))` once the peer admits the session on it. Not
+	/// comes up, then `Ready(Ok(Step::Done))` once the peer's SETUP arrives. Not
 	/// polled again after `Done` or an error.
 	pub(crate) fn poll(&mut self, waiter: &moq_net::kio::Waiter) -> Poll<crate::Result<Step>> {
 		if let Some((sleep, timeout)) = &mut self.deadline
@@ -867,7 +891,7 @@ async fn connect_session<S: moq_net::transport::poll::Boxable>(
 mod tests {
 	use super::*;
 
-	/// A QUIC session the peer never admits gives up at the connect deadline, so the
+	/// A QUIC session whose peer never sends SETUP gives up at the connect deadline, so the
 	/// WebSocket session keeps serving instead of waiting on the upgrade forever.
 	#[tokio::test(start_paused = true)]
 	async fn a_stalled_upgrade_gives_up_at_the_deadline() {
@@ -1002,6 +1026,8 @@ mod tests {
 			("tcp://localhost:4443/room", Some("/room")),
 			("tcp://localhost:4443/room?jwt=abc", Some("/room?jwt=abc")),
 			("tcp://localhost:4443", None),
+			("tls://localhost:4443/room?jwt=abc", Some("/room?jwt=abc")),
+			("tls://localhost:4443", None),
 			// Raw QUIC: the URL is ours alone, so the path and query have to ride the
 			// SETUP or the server never sees them.
 			("moqt://relay.example.com/anon", Some("/anon")),
@@ -1580,6 +1606,121 @@ mod tests {
 		assert_eq!(dialed.transport, crate::Transport::WebTransport);
 		drop(dialed);
 		accepted.await.unwrap().expect("server handshake failed");
+	}
+
+	/// QUIC wins while the fallback handshake is held until QUIC connects.
+	/// Each transport owns its ephemeral port; this exercises the same race as
+	/// connect_inner without depending on which real handshake runs faster.
+	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[tracing_test::traced_test]
+	#[tokio::test]
+	async fn broadcast_race_quic_wins() {
+		let pub_origin = crate::origin::spawn();
+		let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+		broadcast
+			.announce(Default::default())
+			.expect("failed to create broadcast");
+		let track = broadcast.create_track("video", None).expect("failed to create track");
+		let mut group = track.append_group().expect("failed to append group");
+		group
+			.write_frame(crate::moq_net::Timestamp::ZERO, b"hello".as_ref())
+			.expect("failed to write frame");
+		group.finish().expect("failed to finish group");
+
+		let ws_listener = crate::websocket::Listener::bind("[::]:0".parse().unwrap())
+			.await
+			.expect("failed to bind WebSocket listener");
+		let ws_port = ws_listener.local_addr().expect("failed to get ws addr").port();
+		let (connected, quic_connected) = tokio::sync::oneshot::channel();
+		let websocket_handle = tokio::spawn(async move {
+			quic_connected.await.expect("QUIC connected");
+			ws_listener.accept().await
+		});
+
+		let mut server_config = crate::listen::Config {
+			bind: Some("[::]:0".parse().unwrap()),
+			..Default::default()
+		};
+		server_config.tls.generate = vec!["localhost".into()];
+		let server = server_config.init(Default::default()).expect("failed to init server");
+		let mut server = server.listen().await.expect("failed to listen");
+		let quic_port = server.local_addr().expect("failed to get QUIC addr").port();
+
+		let sub_origin = crate::origin::spawn();
+		let sub_consumer = sub_origin.consume();
+		let mut announcements = sub_consumer.announced();
+		let mut client_config = crate::connect::Config::default();
+		client_config.tls.insecure = Some(true);
+		// Dial both arms immediately; the fallback handshake is gated by QUIC.
+		client_config.websocket.delay = std::time::Duration::ZERO;
+
+		let client = client_config.init(Default::default()).expect("failed to init client");
+		let quic_addr: crate::connect::Addr = Url::parse(&format!("https://localhost:{quic_port}")).unwrap().into();
+		let ws_addr: crate::connect::Addr = Url::parse(&format!("http://localhost:{ws_port}")).unwrap().into();
+
+		// Keep this aligned with the newest default Lite version, as in tests/broadcast.rs.
+		let expected_version: moq_net::Version = "moq-lite-06".parse().expect("invalid version");
+
+		let server_handle = tokio::spawn(async move {
+			let request = server.accept().await.expect("no incoming connection");
+			assert_eq!(
+				request.transport(),
+				crate::Transport::WebTransport,
+				"expected the QUIC listener",
+			);
+			let session = request.with_publisher(&pub_origin).ok().await?;
+			assert_eq!(session.version(), expected_version, "server negotiated stale version");
+			let _broadcast = broadcast;
+			let _track = track;
+			let _ = session.closed().await;
+			Ok::<_, anyhow::Error>(())
+		});
+
+		let client = client.with_subscriber(sub_origin);
+		let dialer = client.clone();
+		let quic = Box::pin(async move {
+			let noq = dialer.noq.as_ref().expect("QUIC backend");
+			let session = noq.connect(&dialer.tls, quic_addr, &dialer.versions).await?;
+			connected.send(()).expect("fallback listener alive");
+			Ok::<_, crate::Error>(crate::transport::Session::new(session))
+		});
+		let cc = client
+			.race_moq_connect(&client.moq, ws_addr, quic)
+			.await
+			.expect("client connect failed");
+
+		assert_eq!(cc.session.version(), expected_version, "client negotiated stale version");
+		websocket_handle.abort();
+		let _ = websocket_handle.await;
+
+		// Skip the caught-up marker; the first route event must be the announcement.
+		let update = loop {
+			match announcements.next().await.expect("origin closed") {
+				moq_net::announce::Event::Live => continue,
+				moq_net::announce::Event::Start(update) => break update,
+				event => panic!("expected announcement, got {event:?}"),
+			}
+		};
+		assert_eq!(update.prefix.as_str(), "test");
+		let broadcast = sub_consumer
+			.request_broadcast("test")
+			.await
+			.expect("broadcast resolves");
+		let mut track = broadcast
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.expect("subscribe");
+		let mut group = track.recv_group().await.expect("receive group").expect("track open");
+		let frame = group.read_frame().await.expect("read frame").expect("group open");
+		assert_eq!(&frame.payload[..], b"hello");
+
+		drop(cc);
+		server_handle
+			.await
+			.expect("server task panicked")
+			.expect("server task failed");
 	}
 
 	#[cfg(all(feature = "websocket", feature = "noq"))]
