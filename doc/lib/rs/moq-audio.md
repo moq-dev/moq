@@ -28,7 +28,8 @@ policy. Decoding likewise separates low-level `decode::Config`, PCM
 `encode::Settings::with_preset` applies an `encode::Preset` without touching
 codec, rate, layout, bitrate, or DTX. `LowLatency` (the default preset) packs
 10 ms of audio per packet, `Balanced` and `Quality` 20 ms, which is also what
-`Settings` defaults to without a preset. That is packetization, not a delay
+`Settings` defaults to without a preset. AAC frames are fixed at 1024 samples,
+so a preset leaves AAC's frame duration alone. That is packetization, not a delay
 guarantee: Opus adds its 6.5 ms lookahead either way. libopus already runs at
 full complexity, where a 10 ms stereo packet takes about 0.1 ms to encode, so
 Quality has nothing further to spend and matches Balanced.

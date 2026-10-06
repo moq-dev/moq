@@ -188,7 +188,12 @@ impl Settings {
 	}
 
 	/// Apply `preset`'s packetization, keeping every other setting.
+	///
+	/// AAC frames are always 1024 samples, so AAC keeps its frame duration.
 	pub fn with_preset(mut self, preset: Preset) -> Self {
+		if self.codec == Codec::Aac {
+			return self;
+		}
 		self.frame_duration = match preset {
 			Preset::LowLatency => Duration::from_millis(10),
 			Preset::Balanced | Preset::Quality => Duration::from_millis(20),
@@ -673,6 +678,14 @@ mod tests {
 			// SAFETY: a non-empty packet from the encoder above; the TOC is its first byte.
 			let coded = unsafe { unsafe_libopus::opus_packet_get_samples_per_frame(packet.payload.as_ptr(), 48_000) };
 			assert_eq!(coded as usize, samples, "{preset:?} packet");
+
+			let input = Input::new(48_000, Layout::Stereo);
+			let aac = Settings::from_input(Codec::Aac, &input).with_preset(preset);
+			assert_eq!(
+				aac.frame_duration,
+				Settings::from_input(Codec::Aac, &input).frame_duration
+			);
+			assert_eq!(aac.frame_size().unwrap(), AAC_FRAME_SIZE, "{preset:?} aac");
 		}
 	}
 
