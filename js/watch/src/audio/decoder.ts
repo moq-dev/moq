@@ -131,6 +131,9 @@ export class Decoder {
 	// Which subscription the ring's buffered samples came from. See #runDecoder.
 	#handover = new Handover();
 
+	// The broadcast instance the ring's timeline belongs to. See #runDecoder.
+	#instance?: Moq.Broadcast.Consumer["closed"];
+
 	#signals = new Effect();
 
 	// The catalog fields that require a replacement subscription or decoder.
@@ -325,6 +328,16 @@ export class Decoder {
 		// broadcast instead of the catalog's own broadcast.
 		const active = broadcast.relativeBroadcast(effect, identity.broadcast);
 		if (!active) return;
+
+		// Another broadcast (a new name, or a republish) brings its own timeline, which a ring anchored
+		// on the previous one would discard as already played. A return to the same instance keeps the
+		// anchor, so the relay's redelivered last group is still dropped as old. Every handle to one
+		// instance shares `closed`, so it identifies the instance where the handle itself does not.
+		if (this.#instance !== undefined && this.#instance !== active.closed) {
+			this.#ring.peek()?.reset();
+			this.#decodeBuffered.set([]);
+		}
+		this.#instance = active.closed;
 
 		// The ring outlives this effect (it's keyed on the sample rate and channel count), so a
 		// replacement subscription (a rendition swap, a republished broadcast, a reconnect) inherits

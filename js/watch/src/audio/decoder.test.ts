@@ -181,8 +181,8 @@ async function play(initial: Delay) {
 	const reset = spyOn(SharedRingBuffer.prototype, "reset");
 	const insert = spyOn(SharedRingBuffer.prototype, "insert");
 
-	const producer = new Moq.Broadcast.Producer();
-	const consumer = producer.consume();
+	let producer = new Moq.Broadcast.Producer();
+	let consumer = producer.consume();
 	const relativeBroadcast = mock(() => consumer);
 	const audio = Catalog.AudioConfigSchema.parse({
 		codec: "opus",
@@ -221,6 +221,14 @@ async function play(initial: Delay) {
 		remove: () => catalog.set({}),
 		restore: (patch: Record<string, unknown> = {}) =>
 			catalog.set({ audio: { renditions: { audio: Catalog.AudioConfigSchema.parse({ ...audio, ...patch }) } } }),
+		// Serve another broadcast from the next subscription, its timeline starting over.
+		replace: () => {
+			consumer.close();
+			producer.close();
+			producer = new Moq.Broadcast.Producer();
+			consumer = producer.consume();
+			frameTimestamp = 0;
+		},
 		// The rings written to, and the timestamps of every frame that reached one.
 		rings: () => [...new Set(insert.mock.contexts)] as SharedRingBuffer[],
 		inserted: () => insert.mock.calls.map(([timestamp]) => timestamp as number),
@@ -340,6 +348,29 @@ describe("Decoder across a rendition's absence", () => {
 			expect(playback.subscriptions()).toBe(2);
 			expect(playback.rings()).toEqual([ring]);
 			expect(playback.inserted().slice(before)).toEqual(timestamps.slice(3));
+		} finally {
+			playback.close();
+		}
+	});
+
+	it("plays a different broadcast whose timeline starts behind the playhead", async () => {
+		const playback = await play(Time.Milli(100));
+		try {
+			await playback.play(12);
+			const [ring] = playback.rings();
+			expect(drain(ring)).toBeGreaterThan(0);
+
+			playback.remove();
+			await microtasks();
+			playback.replace();
+			playback.restore();
+			await microtasks();
+			await playback.play(12);
+
+			// The ring re-anchors on the new broadcast rather than discarding it as already played.
+			expect(drain(ring)).toBeGreaterThan(0);
+			expect(contexts).toHaveLength(1);
+			expect(playback.rings()).toEqual([ring]);
 		} finally {
 			playback.close();
 		}
