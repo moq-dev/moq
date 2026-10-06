@@ -50,7 +50,9 @@ pub(crate) struct Representation {
 	pub ended: bool,
 	/// The init segment's content hash (`init.{init}.mp4`).
 	pub init: String,
-	/// The publisher run every segment URL carries (`seg/{generation}.t$Time$.m4s`).
+	/// The [`tag`](super::segments::tag) of the reference numbering the segments.
+	pub tag: String,
+	/// The publisher run every segment URL carries (`seg/{generation}.{tag}.t$Time$.m4s`).
 	pub generation: Option<Arc<str>>,
 }
 
@@ -141,6 +143,7 @@ fn render_representation(out: &mut String, rep: &Representation, suffix: &str) {
 	let kind = rep.kind.as_str();
 	let name = escape(&rep.name);
 	let init = escape(&rep.init);
+	let tag = escape(&rep.tag);
 	let generation = rep
 		.generation
 		.as_deref()
@@ -172,7 +175,7 @@ fn render_representation(out: &mut String, rep: &Representation, suffix: &str) {
 
 	let _ = writeln!(
 		out,
-		"        <SegmentTemplate timescale=\"{}\" initialization=\"{kind}/{name}/init.{init}.mp4{suffix}\" media=\"{kind}/{name}/seg/{generation}t$Time$.m4s{suffix}\">",
+		"        <SegmentTemplate timescale=\"{}\" initialization=\"{kind}/{name}/init.{init}.mp4{suffix}\" media=\"{kind}/{name}/seg/{generation}{tag}.t$Time$.m4s{suffix}\">",
 		rep.timescale.max(1)
 	);
 	let _ = writeln!(out, "          <SegmentTimeline>");
@@ -303,6 +306,7 @@ mod tests {
 			segments,
 			ended,
 			init: "0123abcd".into(),
+			tag: "ab12cd34".into(),
 			generation: None,
 		}
 	}
@@ -322,6 +326,7 @@ mod tests {
 			segments,
 			ended,
 			init: "4567cdef".into(),
+			tag: "ab12cd34".into(),
 			generation: None,
 		}
 	}
@@ -359,7 +364,7 @@ mod tests {
 			"<AudioChannelConfiguration schemeIdUri=\"urn:mpeg:dash:23003:3:audio_channel_configuration:2011\" value=\"2\"/>"
 		));
 		assert!(out.contains(
-			"<SegmentTemplate timescale=\"1000\" initialization=\"video/video0/init.0123abcd.mp4\" media=\"video/video0/seg/t$Time$.m4s\">"
+			"<SegmentTemplate timescale=\"1000\" initialization=\"video/video0/init.0123abcd.mp4\" media=\"video/video0/seg/ab12cd34.t$Time$.m4s\">"
 		));
 		assert!(out.contains("<S t=\"0\" d=\"2000\"/>"));
 		assert!(out.contains("<S t=\"2000\" d=\"2000\"/>"));
@@ -403,7 +408,7 @@ mod tests {
 
 		let out = render_manifest(&manifest, Some("jwt=abc.def&x=1"));
 		assert!(out.contains("initialization=\"video/video0/init.0123abcd.mp4?jwt=abc.def&amp;x=1\""));
-		assert!(out.contains("media=\"video/video0/seg/t$Time$.m4s?jwt=abc.def&amp;x=1\""));
+		assert!(out.contains("media=\"video/video0/seg/ab12cd34.t$Time$.m4s?jwt=abc.def&amp;x=1\""));
 	}
 
 	#[test]
@@ -421,7 +426,7 @@ mod tests {
 
 		let out = render_manifest(&manifest, None);
 		assert!(out.contains("initialization=\"video/video0/init.0123abcd.mp4\""));
-		assert!(out.contains("media=\"video/video0/seg/run-7.t$Time$.m4s\""));
+		assert!(out.contains("media=\"video/video0/seg/run-7.ab12cd34.t$Time$.m4s\""));
 	}
 
 	#[test]

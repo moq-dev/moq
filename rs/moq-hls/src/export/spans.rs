@@ -82,9 +82,8 @@ impl Spans {
 		}
 	}
 
-	/// Append a record, evicting records that end before `window` (plus the snapping tolerance)
-	/// of the newest content. With no `window`, only source pops remove records.
-	pub fn push(&self, entry: Entry, window: Option<Duration>) {
+	/// Append a record. Only [`trim`](Self::trim) and source pops remove records.
+	pub fn push(&self, entry: Entry) {
 		let Ok(mut state) = self.state.write() else {
 			return;
 		};
@@ -97,11 +96,17 @@ impl Spans {
 			state.records.clear();
 		}
 		state.records.push_back(entry);
-		let Some(window) = window else {
+	}
+
+	/// Evict records that end before `oldest`, the start of the oldest listed segment, less the
+	/// snapping tolerance. Tied to the listed segments rather than this timeline's own newest
+	/// content, so a rendition running ahead of a stalled reference never drops a record a listed
+	/// segment still resolves to.
+	pub fn trim(&self, oldest: Duration) {
+		let Ok(mut state) = self.state.write() else {
 			return;
 		};
-		let newest = state.records.back().expect("just pushed").end_time();
-		while state.records.len() >= 2 && state.records[0].end_time() + window + 2 * TOLERANCE < newest {
+		while state.records.len() >= 2 && state.records[0].end_time() + 2 * TOLERANCE < oldest {
 			state.records.pop_front();
 		}
 	}
@@ -368,11 +373,12 @@ mod tests {
 	}
 
 	#[test]
-	fn the_window_keeps_records_a_snap_may_need() {
+	fn a_trim_keeps_records_a_snap_may_need() {
 		let spans = Spans::new();
 		for entry in gops(&[0, 2_000, 4_000, 6_000, 8_000, 10_000], 12_000) {
-			spans.push(entry, Some(secs(4.0)));
+			spans.push(entry);
 		}
+		spans.trim(secs(8.0));
 		let state = spans.state.read();
 		assert_eq!(state.records.front().unwrap().sequence, 2);
 	}
@@ -381,7 +387,7 @@ mod tests {
 	fn a_failed_timeline_resolves_only_what_its_records_cover() {
 		let spans = Spans::new();
 		for entry in gops(&[0, 2_000, 4_000], 6_000) {
-			spans.push(entry, None);
+			spans.push(entry);
 		}
 		// Waiting on a keyframe that could still land near the boundary.
 		assert_eq!(spans.resolve(true, secs(4.0)..secs(6.0)), Content::Pending);

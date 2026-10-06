@@ -136,9 +136,9 @@ pub async fn import(origin: moq_net::origin::Producer, name: String, args: Impor
 			tokio::time::sleep(interval).await;
 			// A rendition the recording enrolled after the replay started.
 			for (track, timeline) in listing.timelines().await? {
-				if !timelines.contains_key(&track) {
-					reader.track(&track, &timeline).await?;
-					timelines.insert(track, timeline);
+				if let std::collections::btree_map::Entry::Vacant(entry) = timelines.entry(track) {
+					reader.track(entry.key(), &timeline).await?;
+					entry.insert(timeline);
 				}
 			}
 			reader.refresh().await?;

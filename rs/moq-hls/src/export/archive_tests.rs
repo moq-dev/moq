@@ -405,7 +405,7 @@ async fn playlists_read_only_timelines_and_segments_their_own_objects() {
 		] {
 			let playlist = replay.playlist(kind, name).await;
 			for segment in 0..3 {
-				let line = format!("seg/{segment}.m4s\n");
+				let line = format!("seg/29b1cd67.{segment}.m4s\n");
 				assert_eq!(playlist.contains(&line), segment < listed, "{name}: {playlist}");
 			}
 			assert!(!playlist.contains("#EXT-X-ENDLIST"), "no finality was supplied");
@@ -422,7 +422,7 @@ async fn playlists_read_only_timelines_and_segments_their_own_objects() {
 	let lists = recording.store.inner().lists();
 
 	// Switching renditions downloads only the selected rendition's object.
-	let low = replay.rendition(Kind::Video, "360p").segment(1).await.unwrap().unwrap();
+	let low = replay.rendition(Kind::Video, "360p").listed_segment(1).await.unwrap().unwrap();
 	assert_eq!(&low[4..8], b"moof");
 	assert_eq!(
 		recording.gets(),
@@ -430,7 +430,7 @@ async fn playlists_read_only_timelines_and_segments_their_own_objects() {
 	);
 	let high = replay
 		.rendition(Kind::Video, "1080p")
-		.segment(2)
+		.listed_segment(2)
 		.await
 		.unwrap()
 		.unwrap();
@@ -443,7 +443,7 @@ async fn playlists_read_only_timelines_and_segments_their_own_objects() {
 	// An audio segment spans four groups but still costs one object GET.
 	let audio = replay
 		.rendition(Kind::Audio, "audio")
-		.segment(1)
+		.listed_segment(1)
 		.await
 		.unwrap()
 		.unwrap();
@@ -454,7 +454,7 @@ async fn playlists_read_only_timelines_and_segments_their_own_objects() {
 	);
 
 	// A repeated request hits the reader's cache, including the immutable `.info`.
-	replay.rendition(Kind::Video, "360p").segment(1).await.unwrap().unwrap();
+	replay.rendition(Kind::Video, "360p").listed_segment(1).await.unwrap().unwrap();
 	assert_eq!(recording.gets(), Vec::<String>::new());
 	assert_eq!(recording.store.inner().lists(), lists, "segments never list");
 }
@@ -470,7 +470,7 @@ async fn a_bounded_cache_rereads_evicted_objects() {
 	// Each of the segment's four groups misses the cache and GETs the same object again.
 	let audio = replay
 		.rendition(Kind::Audio, "audio")
-		.segment(1)
+		.listed_segment(1)
 		.await
 		.unwrap()
 		.unwrap();
@@ -497,24 +497,24 @@ async fn missing_rendition_segments_are_gaps_and_time_jumps_are_discontinuities(
 		.playlist_until(Kind::Video, "360p", |playlist| playlist.contains("#EXT-X-ENDLIST"))
 		.await;
 	let expected = concat!(
-		"#EXTINF:2.00000,\nseg/0.m4s\n",
-		"#EXT-X-GAP\n#EXTINF:2.00000,\nseg/1.m4s\n",
-		"#EXT-X-DISCONTINUITY\n#EXTINF:2.00000,\nseg/2.m4s\n",
+		"#EXTINF:2.00000,\nseg/29b1cd67.0.m4s\n",
+		"#EXT-X-GAP\n#EXTINF:2.00000,\nseg/29b1cd67.1.m4s\n",
+		"#EXT-X-DISCONTINUITY\n#EXTINF:2.00000,\nseg/29b1cd67.2.m4s\n",
 	);
 	assert!(low.contains(expected), "{low}");
 	let high = replay.playlist(Kind::Video, "1080p").await;
 	assert!(!high.contains("#EXT-X-GAP"), "{high}");
 	assert!(
-		high.contains("#EXT-X-DISCONTINUITY\n#EXTINF:2.00000,\nseg/2.m4s\n"),
+		high.contains("#EXT-X-DISCONTINUITY\n#EXTINF:2.00000,\nseg/29b1cd67.2.m4s\n"),
 		"{high}"
 	);
 
 	// A gap is never fetched.
 	recording.gets();
 	let rendition = replay.rendition(Kind::Video, "360p");
-	assert!(rendition.segment(1).await.unwrap().is_none());
+	assert!(rendition.listed_segment(1).await.unwrap().is_none());
 	assert!(!recording.gets().iter().any(|path| is_media(path)));
-	let after = rendition.segment(2).await.unwrap().unwrap();
+	let after = rendition.listed_segment(2).await.unwrap().unwrap();
 	assert_eq!(&after[4..8], b"moof");
 }
 
@@ -530,10 +530,10 @@ async fn a_growing_recording_ends_only_on_caller_finality() {
 	let mut reader = replay.reader.take().unwrap();
 	reader.refresh().await.unwrap();
 	let playlist = replay
-		.playlist_until(Kind::Video, "1080p", |playlist| playlist.contains("seg/3.m4s\n"))
+		.playlist_until(Kind::Video, "1080p", |playlist| playlist.contains("seg/29b1cd67.3.m4s\n"))
 		.await;
 	assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:1\n"), "{playlist}");
-	assert!(!playlist.contains("seg/0.m4s"), "{playlist}");
+	assert!(!playlist.contains("seg/29b1cd67.0.m4s"), "{playlist}");
 	assert!(
 		!playlist.contains("#EXT-X-ENDLIST"),
 		"a recording without finality stays live"
@@ -549,7 +549,7 @@ async fn a_growing_recording_ends_only_on_caller_finality() {
 	let playlist = replay
 		.playlist_until(Kind::Video, "1080p", |playlist| playlist.contains("#EXT-X-ENDLIST"))
 		.await;
-	assert!(playlist.contains("seg/3.m4s\n#EXT-X-ENDLIST\n"), "{playlist}");
+	assert!(playlist.contains("seg/29b1cd67.3.m4s\n#EXT-X-ENDLIST\n"), "{playlist}");
 }
 
 /// A durable timeline lists the whole recording past the default 16s window, and DASH offers
@@ -560,10 +560,10 @@ async fn a_durable_timeline_lists_past_the_window() {
 	let recording = segments(12).await;
 	let replay = Replay::open(&recording, 64 * 1024 * 1024, durable()).await;
 	let playlist = replay
-		.playlist_until(Kind::Video, "1080p", |playlist| playlist.contains("seg/11.m4s\n"))
+		.playlist_until(Kind::Video, "1080p", |playlist| playlist.contains("seg/29b1cd67.11.m4s\n"))
 		.await;
 	assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:0\n"), "{playlist}");
-	assert!(playlist.contains("seg/0.m4s\n"), "{playlist}");
+	assert!(playlist.contains("seg/29b1cd67.0.m4s\n"), "{playlist}");
 
 	for (kind, name) in [(Kind::Video, "360p"), (Kind::Video, "1080p"), (Kind::Audio, "audio")] {
 		replay.rendition(kind, name).init().await.unwrap();
@@ -576,8 +576,8 @@ async fn a_durable_timeline_lists_past_the_window() {
 	for archive in [live(), elsewhere] {
 		let live = Replay::open(&recording, 64 * 1024 * 1024, archive).await;
 		let playlist = live
-			.playlist_until(Kind::Video, "1080p", |playlist| playlist.contains("seg/11.m4s\n"))
+			.playlist_until(Kind::Video, "1080p", |playlist| playlist.contains("seg/29b1cd67.11.m4s\n"))
 			.await;
-		assert!(!playlist.contains("seg/0.m4s\n"), "{playlist}");
+		assert!(!playlist.contains("seg/29b1cd67.0.m4s\n"), "{playlist}");
 	}
 }

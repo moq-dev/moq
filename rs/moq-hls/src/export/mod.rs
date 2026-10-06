@@ -161,7 +161,7 @@ impl Broadcaster {
 	/// broadcast carries now, or stop versioning with `None` (the default).
 	///
 	/// A restarted publisher is spliced into the same broadcast and restarts its segment
-	/// numbers, so `seg/0.m4s` would name different bytes on each run. Supply a new generation
+	/// numbers, so `seg/{reference}.0.m4s` would name different bytes on each run. Supply a new generation
 	/// before the new run's media flows. Replacing one drops every listed segment and every
 	/// init built from the old run's media, while the first only labels the run already flowing. A segment URL carrying any other generation
 	/// is refused. Init URLs need none: they carry a hash of their bytes.
@@ -1079,7 +1079,7 @@ mod tests {
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let unversioned = rendition.media_playlist(None).expect("playable");
-		assert!(unversioned.contains("\nseg/0.m4s\n"));
+		assert!(unversioned.contains("\nseg/656e3d1b.0.m4s\n"));
 
 		assert!(matches!(
 			broadcaster.set_generation(Some("run.1")),
@@ -1091,15 +1091,15 @@ mod tests {
 		let labeled = rendition
 			.media_playlist(None)
 			.expect("the first generation keeps the rows");
-		assert!(labeled.contains("\nseg/run-1.0.m4s\n"));
-		assert!(labeled.contains("\nseg/run-1.1.m4s\n"));
+		assert!(labeled.contains("\nseg/run-1.656e3d1b.0.m4s\n"));
+		assert!(labeled.contains("\nseg/run-1.656e3d1b.1.m4s\n"));
 		assert_eq!(
 			init_hash(&labeled),
 			init_hash(&unversioned),
 			"the init needs no generation"
 		);
 		let manifest = broadcaster.manifest(None).expect("manifest");
-		assert!(manifest.contains("media=\"video/video0/seg/run-1.t$Time$.m4s\""));
+		assert!(manifest.contains("media=\"video/video0/seg/run-1.656e3d1b.t$Time$.m4s\""));
 
 		broadcaster.set_generation(Some("run-2")).unwrap();
 		assert!(
@@ -1110,7 +1110,7 @@ mod tests {
 		media.write(vp8_frame(6_000_000, true)).unwrap();
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
 		let restarted = rendition.media_playlist(None).expect("the new run lists");
-		assert!(restarted.contains("\nseg/run-2.2.m4s\n"));
+		assert!(restarted.contains("\nseg/run-2.656e3d1b.2.m4s\n"));
 		assert!(!restarted.contains("run-1"));
 
 		broadcaster.set_generation(None).unwrap();
@@ -1234,22 +1234,22 @@ mod tests {
 
 		let rendered = rendition.media_playlist(None).expect("playable");
 		let hash = init_hash(&rendered);
-		assert!(rendered.contains("seg/0.m4s\n"));
-		assert!(rendered.contains("seg/1.m4s\n"));
+		assert!(rendered.contains("seg/656e3d1b.0.m4s\n"));
+		assert!(rendered.contains("seg/656e3d1b.1.m4s\n"));
 		assert_eq!(rendition.init_versioned(hash).await.unwrap(), Some(init));
 		assert!(rendition.init_versioned("0000000000000000").await.unwrap().is_none());
 
 		// The same render, but carrying a credential into every child URL.
 		let signed = rendition.media_playlist(Some("jwt=abc.def")).expect("playable");
 		assert!(signed.contains(&format!("#EXT-X-MAP:URI=\"init.{hash}.mp4?jwt=abc.def\"\n")));
-		assert!(signed.contains("seg/0.m4s?jwt=abc.def\n"));
+		assert!(signed.contains("seg/656e3d1b.0.m4s?jwt=abc.def\n"));
 
-		let segment = rendition.segment(0).await.unwrap().expect("segment fetched on demand");
+		let segment = rendition.listed_segment(0).await.unwrap().expect("segment fetched on demand");
 		assert_eq!(&segment[4..8], b"moof", "a fetched group transmuxes to moof+mdat");
 
 		// The live-edge group isn't a segment yet, and unknown groups miss.
-		assert!(rendition.segment(2).await.unwrap().is_none());
-		assert!(rendition.segment(99).await.unwrap().is_none());
+		assert!(rendition.listed_segment(2).await.unwrap().is_none());
+		assert!(rendition.listed_segment(99).await.unwrap().is_none());
 
 		// Keep the publisher alive for the whole test.
 		drop((media, registration, broadcast));
@@ -1289,7 +1289,7 @@ mod tests {
 			.expect("rendition discovered from the catalog");
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
 
-		let segment = rendition.segment(0).await.unwrap().expect("segment fetched on demand");
+		let segment = rendition.listed_segment(0).await.unwrap().expect("segment fetched on demand");
 		assert_eq!(&segment[4..8], b"moof");
 		drop((media, registration, broadcast));
 	}
@@ -1358,7 +1358,7 @@ mod tests {
 		);
 		assert!(manifest.contains("id=\"video/video0\""));
 		assert!(manifest.contains("id=\"audio/audio0\""));
-		assert!(manifest.contains("media=\"video/video0/seg/t$Time$.m4s\""));
+		assert!(manifest.contains("media=\"video/video0/seg/656e3d1b.t$Time$.m4s\""));
 		// Both renditions list the same aligned segment spans (the live edge is not listed).
 		assert_eq!(manifest.matches("<S t=\"0\" d=\"2000\"/>").count(), 2);
 		assert_eq!(manifest.matches("<S t=\"2000\" d=\"2000\"/>").count(), 2);
@@ -1369,17 +1369,17 @@ mod tests {
 		let hash = between(&signed, "initialization=\"video/video0/init.", ".mp4?jwt=abc.def\"");
 		let init = video_rendition.init().await.unwrap().expect("init segment");
 		assert_eq!(video_rendition.init_versioned(hash).await.unwrap(), Some(init));
-		assert!(signed.contains("media=\"video/video0/seg/t$Time$.m4s?jwt=abc.def\""));
+		assert!(signed.contains("media=\"video/video0/seg/656e3d1b.t$Time$.m4s?jwt=abc.def\""));
 
 		// $Time$ resolves to the same bytes the aligned number does; unknown times miss.
 		let by_time = video_rendition
-			.segment_at(2_000)
+			.listed_segment_at(2_000)
 			.await
 			.unwrap()
 			.expect("segment fetched by pts");
-		let by_number = video_rendition.segment(1).await.unwrap().expect("segment by number");
+		let by_number = video_rendition.listed_segment(1).await.unwrap().expect("segment by number");
 		assert_eq!(by_time, by_number);
-		assert!(video_rendition.segment_at(999).await.unwrap().is_none());
+		assert!(video_rendition.listed_segment_at(999).await.unwrap().is_none());
 
 		drop((video, audio, video_registration, audio_registration, broadcast));
 	}
@@ -1681,7 +1681,7 @@ mod tests {
 		let snapped = broadcaster
 			.rendition(Kind::Video, "video1")
 			.unwrap()
-			.segment(1)
+			.listed_segment(1)
 			.await
 			.unwrap()
 			.expect("the snapped segment is served");
@@ -1694,7 +1694,7 @@ mod tests {
 			"nothing to serve before the rendition starts"
 		);
 		let video2 = broadcaster.rendition(Kind::Video, "video2").unwrap();
-		assert!(video2.segment(0).await.unwrap().is_none(), "a gap is never fetched");
+		assert!(video2.listed_segment(0).await.unwrap().is_none(), "a gap is never fetched");
 
 		drop((producers, registrations, broadcast));
 	}
@@ -1745,7 +1745,7 @@ mod tests {
 			vec![0, 1, 2]
 		);
 		assert_eq!(playlist.segments[0].duration, Duration::from_secs(2));
-		let segment = rendition.segment(1).await.unwrap().expect("audio segment");
+		let segment = rendition.listed_segment(1).await.unwrap().expect("audio segment");
 		assert_eq!(&segment[4..8], b"moof");
 
 		drop((audio, registration, broadcast));
@@ -1868,13 +1868,13 @@ mod tests {
 
 		// The same URI names the same span of content time on either rendition.
 		let rendered = audio_rendition.media_playlist(None).expect("playable");
-		assert!(rendered.contains("seg/0.m4s\n"));
-		assert!(rendered.contains("seg/1.m4s\n"));
+		assert!(rendered.contains("seg/656e3d1b.0.m4s\n"));
+		assert!(rendered.contains("seg/656e3d1b.1.m4s\n"));
 
 		// A video segment is one group; the matching audio segment transmuxes its four groups.
-		let video_segment = video_rendition.segment(1).await.unwrap().expect("video segment");
+		let video_segment = video_rendition.listed_segment(1).await.unwrap().expect("video segment");
 		assert_eq!(&video_segment[4..8], b"moof");
-		let audio_segment = audio_rendition.segment(1).await.unwrap().expect("audio segment");
+		let audio_segment = audio_rendition.listed_segment(1).await.unwrap().expect("audio segment");
 		assert_eq!(&audio_segment[4..8], b"moof");
 		assert!(
 			audio_segment.len() > video_segment.len(),
@@ -2040,7 +2040,7 @@ mod tests {
 
 		let (rendition, watcher) = export(&upstream, &config);
 		let _ = tokio::time::timeout(Duration::from_secs(1), rendition.playable()).await;
-		let served = rendition.segment(0).await.unwrap();
+		let served = rendition.listed_segment(0).await.unwrap();
 		if let Some(served) = &served {
 			assert!(
 				!contains(served, NEW),
@@ -2066,7 +2066,7 @@ mod tests {
 			.await
 			.expect("the new publisher's timeline arrives");
 		let served = rendition
-			.segment(0)
+			.listed_segment(0)
 			.await
 			.unwrap()
 			.expect("the new publisher is servable on its own catalog");
@@ -2151,7 +2151,7 @@ mod tests {
 		settle().await;
 
 		let served = rendition
-			.segment(0)
+			.listed_segment(0)
 			.await
 			.expect("a replaced sibling is an unavailable group, not a server error");
 		if let Some(served) = &served {
@@ -2179,7 +2179,7 @@ mod tests {
 			.await
 			.expect("the timeline reaches the fresh rendition");
 		let served = rendition
-			.segment(0)
+			.listed_segment(0)
 			.await
 			.unwrap()
 			.expect("the new publisher is servable on a freshly bound rendition");
@@ -2299,7 +2299,7 @@ mod tests {
 			.await
 			.expect("the timeline reaches the rendition");
 		let served = rendition
-			.segment(0)
+			.listed_segment(0)
 			.await
 			.unwrap()
 			.expect("the original sibling is servable");
@@ -2311,7 +2311,7 @@ mod tests {
 		drop((old_server, old_media, _old_track));
 		until_empty(&rendition).await;
 		assert!(
-			rendition.segment(0).await.unwrap().is_none(),
+			rendition.listed_segment(0).await.unwrap().is_none(),
 			"a row listed for the old publisher answers 404 after replacement"
 		);
 
@@ -2353,7 +2353,7 @@ mod tests {
 			.expect("a non-gap row after the new bind")
 			.segment;
 		let served = rendition
-			.segment(listed)
+			.listed_segment(listed)
 			.await
 			.unwrap()
 			.expect("the rebound sibling is servable");
@@ -2372,7 +2372,7 @@ mod tests {
 			"cursor creation cannot reset the baseline"
 		);
 		assert!(
-			rendition.segment(0).await.unwrap().is_none(),
+			rendition.listed_segment(0).await.unwrap().is_none(),
 			"a row listed for the old publisher is not served from the replacement"
 		);
 		watcher.abort();
@@ -2410,7 +2410,7 @@ mod tests {
 			.await
 			.expect("the timeline reaches the rendition");
 		let served = rendition
-			.segment(0)
+			.listed_segment(0)
 			.await
 			.unwrap()
 			.expect("the sibling present at export start is servable");
@@ -2451,13 +2451,13 @@ mod tests {
 		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
 			.await
 			.expect("the timeline reaches the rendition");
-		assert!(rendition.segment(0).await.unwrap().is_some());
+		assert!(rendition.listed_segment(0).await.unwrap().is_some());
 
 		drop((old_server, old_media, _old_track));
 		until_empty(&rendition).await;
 		for _ in 0..4 {
 			assert!(rendition.snapshot().segments.is_empty());
-			assert!(rendition.segment(0).await.unwrap().is_none());
+			assert!(rendition.listed_segment(0).await.unwrap().is_none());
 		}
 
 		let new_server = origin.dynamic("media", sibling_route(11)).unwrap();
@@ -2489,12 +2489,12 @@ mod tests {
 			.expect("a non-gap row after the new bind")
 			.segment;
 		let served = rendition
-			.segment(listed)
+			.listed_segment(listed)
 			.await
 			.unwrap()
 			.expect("the rebound sibling is servable after an unroutable gap");
 		assert!(contains(&served, NEW));
-		assert!(rendition.segment(0).await.unwrap().is_none());
+		assert!(rendition.listed_segment(0).await.unwrap().is_none());
 		watcher.abort();
 		drop((new_media, _new_track, new_server, catalog, live));
 	}
@@ -2840,8 +2840,80 @@ mod tests {
 
 		cut(track, video0);
 		assert_eq!(numbers(&test.finished("video0").await), [0, 1, 2, 3]);
-		test.finished("video1").await;
+		// video1's timeline hasn't passed the last segment yet, so ending its playlist now would
+		// stop players before that segment is listed.
+		let pending = test.rendition("video1").snapshot();
+		assert_eq!(numbers(&pending), [0, 1, 2]);
+		assert!(!pending.finished, "a pending tail holds back EXT-X-ENDLIST");
+		video1.push(&gop(4)).unwrap();
+		assert_eq!(numbers(&test.finished("video1").await), [0, 1, 2, 3]);
 		test.drain("video0").await;
+	}
+
+	// A rendition running far ahead of a stalled reference keeps the records its listed segments
+	// resolve to, so a listed segment never turns into a gap.
+	#[tokio::test(start_paused = true)]
+	async fn a_rendition_ahead_of_the_reference_keeps_listed_segments() {
+		let test = Failing::new();
+		let (_track0, mut video0) = test.publish("video0");
+		let (_track1, mut video1) = test.publish("video1");
+		// The reference stalls at 20s while video1 runs on to 80s, far past the 16s window.
+		for sequence in 0..10 {
+			video0.push(&gop(sequence)).unwrap();
+		}
+		for sequence in 0..40 {
+			video1.push(&gop(sequence)).unwrap();
+		}
+		let listed = test.listed("video1", 9).await;
+		assert!(!listed.segments.is_empty());
+		assert!(
+			listed.segments.iter().all(|s| !s.gap),
+			"every listed segment still resolves: {:?}",
+			numbers(&listed)
+		);
+	}
+
+	// A new reference numbers segments from its own records, so its URLs carry its own tag and
+	// never reuse one the old reference listed for other content.
+	#[tokio::test(start_paused = true)]
+	async fn a_reference_switch_never_reuses_a_segment_url() {
+		let mut test = Failing::new();
+		let (_track0, mut video0) = test.publish("video0");
+		let (_track1, mut video1) = test.publish("video1");
+		for sequence in 0..4 {
+			video0.push(&gop(sequence)).unwrap();
+		}
+		// video1's records are numbered from 0 but start 3s later, so its segment 0 is other content.
+		for sequence in 0..4 {
+			video1
+				.push(&hang::timeline::Record::new(
+					sequence,
+					sequence * 2_000 + 3_000,
+					2_000,
+					hang::timeline::Position::group(sequence),
+					hang::timeline::Position::group(sequence + 1),
+				))
+				.unwrap();
+		}
+		let before = test.listed("video0", 2).await;
+		let old = segments::tag(&(Kind::Video, "video0".to_string()));
+		assert!(before.segments.iter().all(|s| s.tag == old));
+
+		// Switch the reference the way `watch_catalog` does.
+		test.watcher.abort();
+		test.renditions.fanout().skip();
+		test.watcher = tokio::spawn(watch_timeline(
+			test.broadcast.consume(),
+			archive(&["video0", "video1"]),
+			Arc::new((Kind::Video, "video1".to_string())),
+			test.renditions.fanout(),
+		));
+		let after = test.listed("video1", 2).await;
+		let new = segments::tag(&(Kind::Video, "video1".to_string()));
+		assert_eq!(numbers(&after)[0], 0, "the new reference numbers from its own records");
+		assert!(after.segments.iter().all(|s| s.tag == new && s.tag != old));
+		let video0 = test.rendition("video0");
+		assert!(video0.segment(&old, 0).await.unwrap().is_none(), "the old URL is no longer served");
 	}
 
 	// A malformed reference timeline fails the same way.

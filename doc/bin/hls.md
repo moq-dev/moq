@@ -43,9 +43,15 @@ broadcast by path:
 /{broadcast}/manifest.mpd
 /{broadcast}/{video|audio}/{rendition}/media.m3u8
 /{broadcast}/{video|audio}/{rendition}/init.{hash}.mp4
-/{broadcast}/{video|audio}/{rendition}/seg/{segment}.m4s
-/{broadcast}/{video|audio}/{rendition}/seg/t{pts}.m4s
+/{broadcast}/{video|audio}/{rendition}/seg/{reference}.{segment}.m4s
+/{broadcast}/{video|audio}/{rendition}/seg/{reference}.t{pts}.m4s
 ```
+
+Segment boundaries come from one reference rendition's timeline, and its records
+number the segments. `{reference}` is a short hash of that rendition's kind and
+name, so every edge derives the same URL, and a reference that changes (a new
+first video rendition) starts a new numbering under new URLs rather than reusing
+the old ones for other content.
 
 A [`moq-archive`](https://docs.rs/moq-archive) recording replayed through its
 `Reader` is served the same way, with no second stored copy. Playlists come
@@ -63,7 +69,7 @@ declares the recording finished; the store holds no completion marker.
 The init URL carries a hash of its bytes, so a reconfigured rendition gets a
 new one. An embedder of the library can also label the publisher's run with
 `Broadcaster::set_generation`. Every segment URL then carries it
-(`seg/{generation}.{segment}.m4s`), since a restarted publisher reuses segment
+(`seg/{generation}.{reference}.{segment}.m4s`), since a restarted publisher reuses segment
 numbers for different media.
 
 `--window` sets the live playlist duration (default 16 s) and caps segment

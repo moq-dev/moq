@@ -349,7 +349,7 @@ impl Producer {
 	fn register(&self, rendition: &Arc<Rendition>) {
 		let mut feed = self.fanout.feed.lock().unwrap();
 		rendition.label(feed.generation.clone());
-		rendition.watch(feed.window);
+		rendition.watch();
 		for (index, entry, reference, discontinuity) in &feed.history {
 			rendition.push(*index, entry, reference, *discontinuity, feed.window);
 		}

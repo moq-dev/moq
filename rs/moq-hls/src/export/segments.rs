@@ -12,9 +12,11 @@
 //!   order, exactly once. `next()` waits for the next resolved row, FETCHes and transmuxes its
 //!   frames (via [`Rendition`]), and yields the CMAF bytes.
 //!
-//! A segment is addressed by its number everywhere (the `seg/{segment}.m4s` URI,
-//! `EXT-X-MEDIA-SEQUENCE`, the recorder cursor), and the same number names the same span of
-//! content time on every rendition, on every edge, and after every reload.
+//! A segment is addressed by its reference's [`tag`] and its number (the `seg/{tag}.{segment}.m4s`
+//! URI); the number alone is its `EXT-X-MEDIA-SEQUENCE` and the recorder cursor's position. The
+//! same URI names the same span of content time on every rendition, on every edge, and after
+//! every reload. Each reference numbers segments by its own records, so a new reference starts a
+//! new numbering under its own tag rather than reusing the old one's URIs.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -22,6 +24,7 @@ use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
+use sha2::{Digest, Sha256};
 
 use super::{Kind, Rendition};
 use crate::Result;
@@ -82,12 +85,20 @@ impl Discontinuities {
 /// The rendition a broadcast's segment boundaries come from.
 pub(crate) type Reference = Arc<(Kind, String)>;
 
+/// The URI tag naming `reference`'s segment numbering: a hash of its kind and name, so every edge
+/// derives the same one and it never contains a URI separator.
+pub(crate) fn tag(reference: &(Kind, String)) -> String {
+	let digest = Sha256::digest(format!("{}/{}", reference.0.as_str(), reference.1));
+	// 32 bits: the tag only has to tell apart the references one broadcast ever switches between.
+	digest[..4].iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// One playlist segment: its number, timing, and the reference record's frames.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Row {
 	/// The reference timeline's record index, used to mirror exact window trims.
 	pub index: u64,
-	/// The segment number (its URI: `seg/{segment}.m4s`), shared across renditions.
+	/// The segment number (its URI: `seg/{tag}.{segment}.m4s`), shared across renditions.
 	pub segment: u64,
 	/// The rendition the boundaries come from.
 	pub reference: Reference,
@@ -140,14 +151,15 @@ impl State {
 		}
 	}
 
-	/// The first segment numbered past `after`, for a cursor.
+	/// The first segment past `after`, for a cursor.
 	///
 	/// Rows are complete the moment they arrive. Segments evicted from the front of the
 	/// window before the cursor reached them are skipped: the cursor resumes at the oldest
-	/// row still in the window.
-	fn next_after(&self, after: Option<u64>) -> Next {
+	/// row still in the window. A row from another reference starts a new numbering, so it
+	/// follows `after` whatever its number.
+	fn next_after(&self, after: Option<&(Reference, u64)>) -> Next {
 		let next = self.rows.iter().find(|r| match after {
-			Some(after) => r.segment > after,
+			Some((reference, after)) => r.reference != *reference || r.segment > *after,
 			None => true,
 		});
 		match next {
@@ -251,10 +263,15 @@ impl Producer {
 		self.state.read().window()
 	}
 
-	/// Segment `segment`'s row, or `None` if it isn't in the window.
-	pub fn row(&self, segment: u64) -> Option<Row> {
+	/// The row of segment `segment` numbered by the reference tagged `tag`, or `None` if it isn't
+	/// in the window.
+	pub fn row(&self, tag: &str, segment: u64) -> Option<Row> {
 		let state = self.state.read();
-		state.rows.iter().find(|r| r.segment == segment).cloned()
+		state
+			.rows
+			.iter()
+			.find(|r| r.segment == segment && self::tag(&r.reference) == tag)
+			.cloned()
 	}
 
 	/// The number of the segment whose `pts` is exactly `time` in the timeline's timescale
@@ -262,12 +279,12 @@ impl Producer {
 	/// safe because the rendered `S@t` and this lookup convert the same [`Row::pts`] the same
 	/// way.
 	#[cfg_attr(not(feature = "server"), allow(dead_code))]
-	pub fn segment_number_at(&self, time: u64, timescale: moq_net::Timescale) -> Option<u64> {
+	pub fn segment_number_at(&self, tag: &str, time: u64, timescale: moq_net::Timescale) -> Option<u64> {
 		let state = self.state.read();
 		state
 			.rows
 			.iter()
-			.find(|row| row.pts.as_scale(timescale) == time as u128)
+			.find(|row| row.pts.as_scale(timescale) == time as u128 && self::tag(&row.reference) == tag)
 			.map(|row| row.segment)
 	}
 
@@ -321,7 +338,7 @@ impl Producer {
 
 /// A segment with its transmuxed media, yielded by a [`Consumer`].
 pub struct Segment {
-	/// The aligned segment number (also its `seg/{segment}.m4s` URI stem), shared across the
+	/// The aligned segment number (its URI is `seg/{reference}.{segment}.m4s`), shared across the
 	/// broadcast's renditions.
 	pub segment: u64,
 	/// The transmuxed CMAF fragment (`moof`+`mdat`), fetched on demand by [`Consumer::next`].
@@ -348,8 +365,9 @@ pub struct Segment {
 pub struct Consumer {
 	state: kio::Consumer<State>,
 	rendition: Arc<Rendition>,
-	/// Last fetched or skipped segment; errors leave it unchanged so callers can retry.
-	after: Option<u64>,
+	/// Last fetched or skipped segment, with the reference numbering it; errors leave it unchanged
+	/// so callers can retry.
+	after: Option<(Reference, u64)>,
 }
 
 impl Consumer {
@@ -377,7 +395,7 @@ impl Consumer {
 				return Ok(None);
 			}
 			let media = self.rendition.fetch(&row).await?;
-			self.after = Some(row.segment);
+			self.after = Some((row.reference.clone(), row.segment));
 			if let Some(media) = media {
 				return Ok(Some(Segment {
 					segment: row.segment,
@@ -391,7 +409,7 @@ impl Consumer {
 	}
 
 	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<Option<Row>> {
-		let poll = self.state.poll(waiter, |state| match state.next_after(self.after) {
+		let poll = self.state.poll(waiter, |state| match state.next_after(self.after.as_ref()) {
 			Next::Ready(row) => Poll::Ready(Some(row)),
 			Next::Ended => Poll::Ready(None),
 			Next::Pending => Poll::Pending,
@@ -544,12 +562,14 @@ mod tests {
 			window,
 		);
 
+		let video = (Kind::Video, "video".to_string());
+		let tag = tag(&video);
 		assert_eq!(
-			live.row(0).unwrap().frames,
+			live.row(&tag, 0).unwrap().frames,
 			hang::timeline::Position::group(0)..hang::timeline::Position::group(1)
 		);
-		assert_eq!(live.row(7), None, "unknown segments miss");
-		let video = (Kind::Video, "video".to_string());
+		assert_eq!(live.row(&tag, 7), None, "unknown segments miss");
+		assert_eq!(live.row("00000000", 0), None, "another reference's numbering misses");
 		assert_eq!(
 			live.latest_keyframe_group(&video),
 			Some(0),
@@ -586,16 +606,42 @@ mod tests {
 			panic!("expected a segment");
 		};
 		assert_eq!(first.segment, 0);
-		let Next::Ready(second) = live.state.read().next_after(Some(0)) else {
+		let after = |segment| Some((first.reference.clone(), segment));
+		let Next::Ready(second) = live.state.read().next_after(after(0).as_ref()) else {
 			panic!("expected a segment");
 		};
 		assert_eq!(second.segment, 1);
 		assert!(
-			matches!(live.state.read().next_after(Some(1)), Next::Pending),
+			matches!(live.state.read().next_after(after(1).as_ref()), Next::Pending),
 			"nothing further while live"
 		);
 
 		live.end();
-		assert!(matches!(live.state.read().next_after(Some(1)), Next::Ended));
+		assert!(matches!(live.state.read().next_after(after(1).as_ref()), Next::Ended));
+	}
+
+	/// A new reference numbers segments from its own records, so a cursor past a higher number of
+	/// the old reference still yields the new reference's rows.
+	#[test]
+	fn a_new_reference_restarts_the_cursor() {
+		let live = Producer::new();
+		let window = Some(Duration::from_secs(30));
+		live.push(row(5, 5, 10_000, 2_000), window);
+		let Next::Ready(old) = live.state.read().next_after(None) else {
+			panic!("expected a segment");
+		};
+
+		live.clear();
+		let switched = Row {
+			reference: Arc::new((Kind::Video, "other".to_string())),
+			..row(0, 0, 0, 2_000)
+		};
+		live.push(switched, window);
+		let after = Some((old.reference.clone(), old.segment));
+		let Next::Ready(next) = live.state.read().next_after(after.as_ref()) else {
+			panic!("the new reference's first row follows");
+		};
+		assert_eq!(next.segment, 0);
+		assert_ne!(tag(&next.reference), tag(&old.reference), "its URLs carry another tag");
 	}
 }
