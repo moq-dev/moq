@@ -96,6 +96,11 @@ struct Path {
 
 impl Path {
 	async fn start(lane: Lane, relay: &RelayHost) -> Self {
+		Self::shaped(lane, relay, impairment()).await
+	}
+
+	/// [`Self::start`], treating the impaired lane to `profile` both ways.
+	async fn shaped(lane: Lane, relay: &RelayHost, profile: moq_shaper::Profile) -> Self {
 		let Lane::Impaired = lane else {
 			return Self {
 				url: relay.url(),
@@ -113,8 +118,8 @@ impl Path {
 			bind: "127.0.0.1:0".parse().unwrap(),
 			target: format!("127.0.0.1:{}", relay.port).parse().unwrap(),
 			seed,
-			up: impairment(),
-			down: impairment(),
+			up: profile.clone(),
+			down: profile,
 		})
 		.await
 		.expect("start the shaper");
@@ -160,19 +165,10 @@ struct RelayHost {
 }
 
 impl RelayHost {
-	/// Bind a relay and wait for it to be ready to accept.
-	async fn start(requested_port: Option<u16>) -> Self {
+	/// Bind a relay running `config` and wait for it to be ready to accept.
+	async fn start(config: Config) -> Self {
 		// Process-global; every drill in this binary races to be first.
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
-		let mut config = Config::default();
-		config.listen.bind = Some(
-			format!("127.0.0.1:{}", requested_port.unwrap_or_default())
-				.parse()
-				.unwrap(),
-		);
-		config.listen.tls.generate = vec!["localhost".into()];
-		config.auth.public = vec![moq_auth::Pattern::all()];
 
 		let runtime = tokio::runtime::Builder::new_multi_thread()
 			.worker_threads(2)
@@ -199,9 +195,6 @@ impl RelayHost {
 			.expect("relay task vanished during startup")
 			.expect("relay failed to load");
 		let port = addr.expect("relay did not bind UDP").port();
-		if let Some(requested_port) = requested_port {
-			assert_eq!(port, requested_port, "relay bound the wrong port");
-		}
 
 		Self {
 			port,
@@ -229,6 +222,15 @@ impl RelayHost {
 	}
 }
 
+/// A public relay on loopback with a generated certificate, on `port` or an ephemeral one.
+fn relay_config(port: Option<u16>) -> Config {
+	let mut config = Config::default();
+	config.listen.bind = Some(format!("127.0.0.1:{}", port.unwrap_or_default()).parse().unwrap());
+	config.listen.tls.generate = vec!["localhost".into()];
+	config.auth.public = vec![moq_auth::Pattern::all()];
+	config
+}
+
 impl Drop for RelayHost {
 	fn drop(&mut self) {
 		// A drill that ends (or panics) with the relay still up must not leave
@@ -245,12 +247,11 @@ impl Drop for RelayHost {
 /// path, and a silent fallback would grade a different transport than the one
 /// under test.
 fn client(url: &url::Url) -> moq_tokio::Client {
-	let mut config = moq_tokio::connect::Config::default();
-	config.url = Some(url.clone());
-	config.bind = Some("127.0.0.1:0".parse().expect("parse client bind"));
-	config.tls.insecure = Some(true);
-	config.websocket.enabled = Some(false);
+	client_over(url, quic())
+}
 
+/// The drills' QUIC tuning for a client.
+fn quic() -> moq_tokio::quic::Config {
 	// A killed relay sends no CONNECTION_CLOSE, so the idle timeout is the only
 	// thing that ever tells a client it is gone. The 30s default would put that
 	// discovery past every budget here. The keep-alive is an eighth of it, so a
@@ -259,6 +260,16 @@ fn client(url: &url::Url) -> moq_tokio::Client {
 	let mut quic = moq_tokio::quic::Config::default();
 	quic.idle_timeout = Duration::from_secs(2);
 	quic.keep_alive = Duration::from_millis(250);
+	quic
+}
+
+/// [`client`], with `quic` as its transport tuning.
+fn client_over(url: &url::Url, quic: moq_tokio::quic::Config) -> moq_tokio::Client {
+	let mut config = moq_tokio::connect::Config::default();
+	config.url = Some(url.clone());
+	config.bind = Some("127.0.0.1:0".parse().expect("parse client bind"));
+	config.tls.insecure = Some(true);
+	config.websocket.enabled = Some(false);
 
 	// Fast enough to keep a relay bounce inside the drill's budget, paced enough
 	// that the loop is still a backoff.
@@ -370,7 +381,7 @@ async fn subscribe(origin: &moq_net::origin::Consumer, path: &str) -> Reader {
 /// keeps being served. The rejoin below is the half of that behavior worth
 /// grading here.
 async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
-	let relay = RelayHost::start(None).await;
+	let relay = RelayHost::start(relay_config(None)).await;
 	let path = Path::start(lane, &relay).await;
 	let url = path.url.clone();
 
@@ -492,7 +503,7 @@ lanes!(cancel_under_backpressure_releases_the_reader);
 /// restore service: the dead session's broadcast closes with it, and a fresh
 /// subscribe through the same origin resumes once the relay returns.
 async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
-	let mut relay = RelayHost::start(None).await;
+	let mut relay = RelayHost::start(relay_config(None)).await;
 	let port = relay.port;
 	let path = Path::start(lane, &relay).await;
 	let url = path.url.clone();
@@ -544,7 +555,8 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 	expect_status(&mut subscribe_loop, moq_tokio::Status::Disconnected, "subscriber").await;
 	expect_status(&mut publish_loop, moq_tokio::Status::Disconnected, "publisher").await;
 
-	let relay = RelayHost::start(Some(port)).await;
+	let relay = RelayHost::start(relay_config(Some(port))).await;
+	assert_eq!(relay.port, port, "relay bound the wrong port");
 
 	expect_status(&mut subscribe_loop, moq_tokio::Status::Connected, "subscriber").await;
 	expect_status(&mut publish_loop, moq_tokio::Status::Connected, "publisher").await;
@@ -597,7 +609,7 @@ async fn expect_status(reconnect: &mut moq_tokio::Connection, want: moq_tokio::S
 /// subscriber that re-consumes the same name after a republish gets what the
 /// new publisher is sending, never the previous one's cache.
 async fn interrupted_publisher_republishes_new_content(lane: Lane) {
-	let relay = RelayHost::start(None).await;
+	let relay = RelayHost::start(relay_config(None)).await;
 	let path = Path::start(lane, &relay).await;
 	let url = path.url.clone();
 
@@ -706,6 +718,292 @@ async fn expect_announce(announced: &mut moq_net::announce::Consumer, path: &str
 	}
 }
 
+/// How many bursts the cross-relay drill sends, and how many one-frame groups
+/// each holds: a control channel firing messages back to back.
+const BURSTS: u64 = 4;
+const BURST_GROUPS: u64 = 30;
+
+/// Each cross-relay group's payload size, about what a small control message is.
+const PAYLOAD: usize = 256;
+
+/// How long a cross-relay group may take, from being written, to arrive. Several
+/// times the slowest group seen on the impaired path, and a third of the 30s
+/// stalls of #4349.
+const SETTLE: Duration = Duration::from_secs(10);
+
+/// The cross-relay drill's link: the drills' impairment behind a bottleneck a
+/// burst overruns, so its tail waits in the queue or is dropped from it.
+fn bursty() -> moq_shaper::Profile {
+	moq_shaper::Profile {
+		rate: Some(moq_shaper::Rate {
+			bits_per_second: 1_000_000,
+			burst: 1500,
+			queue: Duration::from_millis(50),
+		}),
+		..impairment()
+	}
+}
+
+/// QUIC credit tighter than a burst on the impaired lane: fewer concurrent
+/// streams than a burst has groups (each group is a stream, each FETCH another),
+/// and receive windows of a few groups, so senders wait on MAX_STREAMS and
+/// MAX_DATA mid-burst, over a path that loses the frames granting them.
+fn credit(lane: Lane, mut quic: moq_tokio::quic::Config) -> moq_tokio::quic::Config {
+	if let Lane::Impaired = lane {
+		quic.max_streams = Some(16);
+		quic.receive_window = Some(4 * PAYLOAD as u64);
+		quic.stream_receive_window = Some(2 * PAYLOAD as u64);
+	}
+	quic
+}
+
+/// How a cross-relay group reached the subscriber, or why it never did.
+#[derive(Debug)]
+enum Outcome {
+	/// The live subscription delivered it.
+	Live,
+	/// A FETCH recovered it after the subscription skipped or lost it.
+	Fetched,
+	/// The FETCH failed, with this error.
+	Failed(String),
+	/// The FETCH got no answer within [`SETTLE`].
+	Unanswered,
+	/// The live subscription opened it but its frame never came within [`SETTLE`].
+	Stalled,
+}
+
+/// One thing the cross-relay subscriber waits on.
+enum Step {
+	/// The live subscription's next group.
+	Group(Box<moq_net::Result<Option<moq_net::group::Consumer>>>),
+	/// A group read or FETCH finished.
+	Settled(u64, Outcome),
+}
+
+/// Read the one frame of group `sequence`, checking it is the payload written there.
+async fn read_payload(mut group: moq_net::group::Consumer, sequence: u64) -> Result<(), String> {
+	match group.read_frame().await {
+		Ok(Some(frame)) if frame.payload == payload(sequence) => Ok(()),
+		Ok(Some(_)) => panic!("group {sequence} carried another group's payload"),
+		Ok(None) => Err("finished with no frame".to_string()),
+		Err(err) => Err(err.to_string()),
+	}
+}
+
+/// The payload of group `sequence`: its number, padded to [`PAYLOAD`].
+fn payload(sequence: u64) -> Vec<u8> {
+	format!("{sequence:>PAYLOAD$}").into_bytes()
+}
+
+/// Drill: bursts of one-frame groups cross a two-relay cluster.
+///
+/// A publisher on an origin relay sends bursts of tens of single-frame groups.
+/// A subscriber on an edge relay, which reaches the origin as a cluster peer,
+/// reads them with the default subscription (only the newest group) and FETCHes
+/// every group below it that the subscription skipped or reset, the way a
+/// control channel that must apply every message recovers. In the impaired lane
+/// every hop (publisher, peer link, subscriber) runs through a shaper that a
+/// burst overruns, and every endpoint grants less QUIC credit than a burst needs.
+///
+/// Nothing is evicted and no link goes down, so every group has to arrive within
+/// [`SETTLE`] of being written; one that does not fails the drill by name, with
+/// how it was lost: a FETCH that failed, a FETCH nobody answered, or a live group
+/// that stalled. The newest group has to come over the live subscription, since
+/// nothing newer can replace it.
+async fn bursts_cross_a_cluster(lane: Lane) {
+	let mut config = relay_config(None);
+	config.quic = credit(lane, config.quic);
+	let origin = RelayHost::start(config).await;
+	let peer = Path::shaped(lane, &origin, bursty()).await;
+
+	// The edge relay dials the origin as a cluster peer, through its own path.
+	let mut peer_url = peer.url.clone();
+	peer_url.set_path("/");
+	let mut config = relay_config(None);
+	config.quic = credit(lane, config.quic);
+	config.connect.bind = Some("127.0.0.1:0".parse().unwrap());
+	config.connect.tls.insecure = Some(true);
+	config.connect.websocket.enabled = Some(false);
+	config.cluster.connect = vec![moq_relay::cluster::Peer::new(peer_url.to_string())];
+	let edge = RelayHost::start(config).await;
+
+	let publish_path = Path::shaped(lane, &origin, bursty()).await;
+	let subscribe_path = Path::shaped(lane, &edge, bursty()).await;
+
+	let publisher = moq_tokio::origin::spawn();
+	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
+	broadcast.announce(Default::default()).expect("announce broadcast");
+	let mut track = broadcast.create_track(TRACK, None).expect("create track");
+	let url = publish_path.url.clone();
+	let publish_session = tokio::time::timeout(
+		TIMEOUT,
+		client_over(&url, credit(lane, quic()))
+			.with_publisher(&publisher)
+			.with_reconnect(false)
+			.connect(url)
+			.established(),
+	)
+	.await
+	.expect("publisher connect timed out")
+	.expect("publisher connect failed");
+
+	let subscriber = moq_tokio::origin::spawn();
+	let subscribed = subscriber.consume();
+	let url = subscribe_path.url.clone();
+	let subscribe_session = tokio::time::timeout(
+		TIMEOUT,
+		client_over(&url, credit(lane, quic()))
+			.with_subscriber(subscriber)
+			.with_reconnect(false)
+			.connect(url)
+			.established(),
+	)
+	.await
+	.expect("subscriber connect timed out")
+	.expect("subscriber connect failed");
+
+	// Subscribed before the first burst, as an app watching a control channel is.
+	let mut reader = subscribe(&subscribed, "live").await;
+
+	let total = BURSTS * BURST_GROUPS;
+	let mut written = Vec::new();
+	let burst = |track: &mut moq_net::track::Producer, written: &mut Vec<tokio::time::Instant>| {
+		for _ in 0..BURST_GROUPS {
+			let sequence = written.len() as u64;
+			write_group(track, &payload(sequence));
+			written.push(tokio::time::Instant::now());
+		}
+	};
+	burst(&mut track, &mut written);
+
+	// Each group is claimed once, by the subscription or by a FETCH, and settles
+	// in `pending`. A live group that fails is a gap like any other, so it is
+	// FETCHed in turn.
+	let mut claimed = std::collections::BTreeSet::new();
+	let mut live = std::collections::BTreeSet::new();
+	let mut outcomes = std::collections::BTreeMap::new();
+	let mut pending = tokio::task::JoinSet::new();
+	let mut resets = Vec::new();
+	let mut slowest = (Duration::ZERO, 0);
+	let fetch = |pending: &mut tokio::task::JoinSet<_>, track: &moq_net::track::Consumer, sequence: u64| {
+		let fetching = track.fetch_group(sequence, None);
+		pending.spawn(async move {
+			let fetched = tokio::time::timeout(SETTLE, async {
+				let group = fetching.await.map_err(|err| err.to_string())?;
+				read_payload(group, sequence).await
+			});
+			let outcome = match fetched.await {
+				Ok(Ok(())) => Outcome::Fetched,
+				Ok(Err(err)) => Outcome::Failed(err),
+				Err(_) => Outcome::Unanswered,
+			};
+			(sequence, outcome)
+		});
+	};
+
+	while (outcomes.len() as u64) < total {
+		let step = tokio::time::timeout(SETTLE, async {
+			tokio::select! {
+				group = reader.groups.recv_group() => Step::Group(Box::new(group)),
+				Some(settled) = pending.join_next() => {
+					let (sequence, outcome) = settled.expect("settle task panicked");
+					Step::Settled(sequence, outcome)
+				}
+			}
+		})
+		.await
+		.unwrap_or_else(|_| {
+			let missing: Vec<u64> = (0..total).filter(|sequence| !outcomes.contains_key(sequence)).collect();
+			panic!(
+				"stalled: nothing arrived within {SETTLE:?}, {} of {total} groups missing: {missing:?}",
+				missing.len()
+			)
+		});
+
+		match step {
+			Step::Settled(sequence, Outcome::Failed(err)) if live.remove(&sequence) => {
+				resets.push((sequence, err));
+				fetch(&mut pending, &reader.track, sequence);
+			}
+			Step::Settled(sequence, outcome) => {
+				live.remove(&sequence);
+				let late = written[sequence as usize].elapsed();
+				slowest = slowest.max((late, sequence));
+				outcomes.insert(sequence, outcome);
+			}
+			Step::Group(group) => {
+				let group = (*group)
+					.unwrap_or_else(|err| panic!("the subscription aborted: {err}"))
+					.unwrap_or_else(|| panic!("the subscription finished"));
+				let sequence = group.sequence;
+
+				// Every unclaimed group below this one is a gap the subscription
+				// skipped: FETCH it now rather than wait.
+				for gap in 0..sequence {
+					if claimed.insert(gap) {
+						fetch(&mut pending, &reader.track, gap);
+					}
+				}
+				if claimed.insert(sequence) {
+					live.insert(sequence);
+					pending.spawn(async move {
+						let outcome = match tokio::time::timeout(SETTLE, read_payload(group, sequence)).await {
+							Ok(Ok(())) => Outcome::Live,
+							Ok(Err(err)) => Outcome::Failed(err),
+							Err(_) => Outcome::Stalled,
+						};
+						(sequence, outcome)
+					});
+				}
+
+				// The next burst leaves once this one starts arriving, so recovery
+				// overlaps fresh data the way a busy control channel's does.
+				if sequence + BURST_GROUPS >= written.len() as u64 && (written.len() as u64) < total {
+					burst(&mut track, &mut written);
+				}
+			}
+		}
+	}
+
+	let fetched = outcomes
+		.values()
+		.filter(|outcome| matches!(outcome, Outcome::Fetched))
+		.count();
+	println!(
+		"fault activated: {fetched} of {total} groups recovered by FETCH, live groups reset {resets:?}, slowest group {} after {:?}",
+		slowest.1, slowest.0
+	);
+	assert!(fetched > 0, "every group came live, so no FETCH recovery was exercised");
+
+	let lost: Vec<_> = outcomes
+		.iter()
+		.filter(|(_, outcome)| !matches!(outcome, Outcome::Live | Outcome::Fetched))
+		.collect();
+	assert!(lost.is_empty(), "groups lost: {lost:?}");
+	assert!(
+		slowest.0 <= SETTLE,
+		"group {} took {:?} to arrive, past {SETTLE:?}",
+		slowest.1,
+		slowest.0
+	);
+	assert!(
+		matches!(outcomes.get(&(total - 1)), Some(Outcome::Live)),
+		"the newest group came by {:?}, not the live subscription",
+		outcomes.get(&(total - 1))
+	);
+
+	drop(reader);
+	drop(subscribe_session);
+	drop(publish_session);
+	drop(edge);
+	drop(origin);
+	peer.verify();
+	publish_path.verify();
+	subscribe_path.verify();
+}
+
+lanes!(bursts_cross_a_cluster);
+
 /// Negative control: with nothing publishing, the drills' delivery assertions
 /// have to fail.
 ///
@@ -713,7 +1011,7 @@ async fn expect_announce(announced: &mut moq_net::announce::Consumer, path: &str
 /// harness with no publisher and requires that no announcement and no broadcast
 /// ever arrive, so "the frame showed up" cannot be a harness artifact.
 async fn no_publisher_never_delivers(lane: Lane) {
-	let relay = RelayHost::start(None).await;
+	let relay = RelayHost::start(relay_config(None)).await;
 	let path = Path::start(lane, &relay).await;
 	let url = path.url.clone();
 
