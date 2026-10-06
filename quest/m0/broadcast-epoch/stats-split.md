@@ -42,20 +42,40 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
   epoch from zero).
 - **Prefix tracks** (decided 2026-10-05, replacing per-broadcast tracks).
   Routing is by prefix, and with epochs a broadcast is `<name>/@<epoch>`, so
-  a reader requests any prefix within a group, down to `Path::MAX_PARTS`
-  segments, and gets one track: the prefix's rollup plus a one-level map of
+  a reader requests any prefix of a member path (so its depth is bounded by
+  `Path::MAX_PARTS` less the group's own segments) and gets one track: the prefix's rollup plus a one-level map of
   each direct child's rollup (a broadcast's epochs, a channel's broadcasts).
   Nothing is produced for a prefix no one holds. The relay's `--stats-depth`
   only places the group broadcasts; requests are not capped by it.
-- A prefix track counts from zero when first held and folds in members that
-  end while it is held; a request for a prefix with no members is held open
-  at zero and reclaimed when its last consumer leaves. Its absolute values
-  are not authoritative, so readers take differences within one
-  subscription; the group totals carry the real sums. Track names must stay
-  injective: tiers and paths both contain `/`.
+- Flow counters (bytes, frames, groups, fetches) count from zero when the
+  prefix is first held and fold in members that end while it is held. Their
+  absolute values are not authoritative, so readers take differences within
+  one subscription; the group totals carry the real sums.
+- Started/ended pairs (announces, broadcasts, subscriptions, sessions) are
+  seeded at registration: `started` with each current member's
+  `started - ended`, `ended` at zero, so every `active` derived from a pair
+  stays exact for a prefix held mid-stream. Test a prefix held while 300
+  subscriptions are live, then watch them leave.
+- A request for a prefix with no members is held open at zero and reclaimed
+  when its last consumer leaves. Track names must stay injective: tiers and
+  paths both contain `/`.
+- A child leaves the one-level map after the frame carrying its closing
+  readout; its tail stays in the parent's rollup. So the map holds live and
+  just-ended children, not every child the prefix has ever seen. Decide
+  while implementing whether a map with hundreds of children needs a cap or
+  paging.
+- The aggregator merges a prefix track across nodes with a baseline per
+  upstream (node, epoch) hold, and treats a decrease as that upstream's
+  reset: a node restart, a new group epoch, or the aggregator re-holding the
+  prefix. A merged prefix track then never regresses within one downstream
+  subscription. Test a join, a leave, and a restart under a held prefix.
 - Keep the hot path lock-free: a held prefix registers atomic accumulators,
-  each entry caches its held ancestors', and an update bumps them in a loop.
-  Benchmark across held-prefix count and depth.
+  each entry caches its held ancestors' (and the matching child slot in
+  each), and an update bumps them in a loop, about twice the held depth per
+  update. Registration and release reach existing entries without a lock or
+  a walk of every entry, for example an `ArcSwap` ancestor list or a
+  generation counter rechecked on bump. Benchmark across held-prefix count
+  and depth.
 - Held prefixes get their own cap per group broadcast, sized (or
   configurable) for every reader the aggregator fans in. Refuse requests
   beyond it with a typed error the reader retries, rather than a parked
