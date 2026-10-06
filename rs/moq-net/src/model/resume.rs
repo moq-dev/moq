@@ -47,9 +47,10 @@ type Readers = Arc<Mutex<Vec<Weak<Mutex<Reader>>>>>;
 
 /// The front's side of a logical track: which copy serves it, and how it ends.
 ///
-/// Dropping it concludes the track and lets go of the serving copy: readers already on
-/// it follow it to its end, and nothing else keeps its route subscribed, however long
-/// the logical track's state stays allocated.
+/// Dropping it concludes the track: readers follow the last copy to its end, since no
+/// front is left to replace it. [`Producer::release`] also lets go of that copy, so it
+/// stops keeping its route subscribed however long the logical track's state stays
+/// allocated.
 pub(crate) struct Producer {
 	state: kio::Producer<Route>,
 	readers: Readers,
@@ -106,19 +107,18 @@ impl Producer {
 		}
 	}
 
+	/// Let go of the serving copy once no front will replace it and nobody reads the
+	/// track. Same generation: a reader on the copy keeps it as the serving one.
+	pub(crate) fn release(self) {
+		if let Ok(mut route) = self.state.write() {
+			route.copy = None;
+		}
+	}
+
 	pub(crate) fn consume(&self) -> Consumer {
 		Consumer {
 			state: self.state.consume(),
 			readers: self.readers.clone(),
-		}
-	}
-}
-
-impl Drop for Producer {
-	fn drop(&mut self) {
-		// Same generation: a reader on the copy keeps it as the serving one.
-		if let Ok(mut route) = self.state.write() {
-			route.copy = None;
 		}
 	}
 }

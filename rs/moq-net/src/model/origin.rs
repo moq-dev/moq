@@ -2311,10 +2311,13 @@ async fn run_front(task: FrontTask, origin: TasksWeak) {
 		if origin.poll_orphaned(waiter).is_ready() {
 			return Poll::Ready(());
 		}
-		in_flight.retain(|io| {
+		for io in std::mem::take(&mut in_flight) {
 			io.weak.poll_unused(waiter);
-			io.weak.is_used()
-		});
+			match io.weak.is_used() {
+				true => in_flight.push(io),
+				false => io.routes.release(),
+			}
+		}
 		match in_flight.is_empty() {
 			true => Poll::Ready(()),
 			false => Poll::Pending,
@@ -2609,6 +2612,11 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 									true => Ok(()),
 									false => Err(err.clone()),
 								});
+								// An unread track the front has not parked yet still holds
+								// its copy, which would keep its source subscribed.
+								if !used {
+									io.routes.release();
+								}
 								continue;
 							}
 							io.routes.conclude();
@@ -8350,6 +8358,61 @@ mod tests {
 			.unwrap();
 		drop(sub);
 		drop(track);
+	}
+
+	/// A subscriber that asked before the retraction but was not polled yet still finds
+	/// the copy after the origin is orphaned and its driver finishes.
+	#[tokio::test(start_paused = true)]
+	async fn an_orphaned_front_keeps_the_copy_for_a_pending_subscriber() {
+		let (producer, driver) = Producer::new(Config::new(origin(1)));
+		let run = tokio::spawn(crate::time::run(driver));
+		let consumer = producer.consume();
+		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
+		let mut track = broadcast.create_track("video", None).unwrap();
+		let resolved = consumer.request_broadcast("room/alice").await.expect("resolves");
+		let sub = resolved.track("video").unwrap().subscribe(None).await.unwrap();
+		let pending = resolved.track("video").unwrap().subscribe(None);
+
+		broadcast.unannounce();
+		settle(|| resolved.is_closed()).await;
+		drop(broadcast);
+		drop(producer);
+		tokio::time::timeout(Duration::from_secs(5), run)
+			.await
+			.expect("driver must finish once the producers are gone")
+			.unwrap();
+		track.write_frame(crate::Timestamp::ZERO, b"late".as_ref()).unwrap();
+		let mut late = pending.await.expect("subscribes");
+		let mut group = late.recv_group().await.expect("recv").expect("the source's group");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"late");
+		drop(sub);
+	}
+
+	/// A track whose last reader leaves as its broadcast ends, before the front parks it,
+	/// lets go of its copy: the source is not kept subscribed for nobody.
+	#[tokio::test(start_paused = true)]
+	async fn a_track_unread_as_its_broadcast_ends_releases_its_source() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
+		let track = broadcast.create_track("video", None).unwrap();
+		let resolved = consumer.request_broadcast("room/alice").await.expect("resolves");
+		let sub = resolved.track("video").unwrap().subscribe(None).await.unwrap();
+		tokio::time::timeout(Duration::from_secs(1), track.demand().used())
+			.await
+			.expect("the front subscribed the source")
+			.unwrap();
+
+		// The source closing wakes the front before the reader leaving does, so it ends
+		// with the track unread and its copy not parked yet.
+		drop(sub);
+		drop(broadcast);
+		settle(|| resolved.is_closed()).await;
+
+		tokio::time::timeout(Duration::from_secs(5), track.demand().unused())
+			.await
+			.expect("the ended copy must not keep the source subscribed")
+			.unwrap();
 	}
 
 	#[test]
