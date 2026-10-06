@@ -131,12 +131,20 @@ impl Path {
 	/// Fail the drill unless the impairment it ran under actually acted.
 	///
 	/// A profile that silently did nothing would turn this lane into a second
-	/// loopback run that passes for free. Returns what the shaper did, if any.
-	fn verify(mut self) -> Option<moq_shaper::Stats> {
-		let shaper = self.shaper.take()?;
-		let stats = shaper.verify().unwrap_or_else(|err| panic!("impaired: {err:#}"));
-		println!("impaired: {stats}");
-		Some(stats)
+	/// loopback run that passes for free.
+	fn verify(mut self) {
+		if let Some(shaper) = self.shaper.take() {
+			let stats = shaper.verify().unwrap_or_else(|err| panic!("impaired: {err:#}"));
+			println!("impaired: {stats}");
+		}
+	}
+
+	/// Datagrams the shaper has dropped from a full rate-limit queue so far, both ways.
+	fn overflowed(&self) -> u64 {
+		self.shaper.as_ref().map_or(0, |shaper| {
+			let stats = shaper.stats();
+			stats.up.overflowed + stats.down.overflowed
+		})
 	}
 }
 
@@ -747,7 +755,8 @@ const SETTLE: Duration = Duration::from_secs(10);
 /// burst overruns, so its tail waits in the queue or is dropped from it. It is
 /// slower than [`credit`]'s receive window lets a sender go (about 1 KiB per
 /// round trip, some 160 kbit/s), or the window would bind first and the queue
-/// would never fill.
+/// would never fill. The window keeps a burst's datagrams small, so the 50ms
+/// queue holds one or two of them before it drops the rest.
 fn bursty() -> moq_shaper::Profile {
 	moq_shaper::Profile {
 		rate: Some(moq_shaper::Rate {
@@ -881,6 +890,10 @@ async fn bursts_cross_a_cluster(lane: Lane) {
 	// Subscribed before the first burst, as an app watching a control channel is.
 	let mut reader = subscribe(&subscribed, "live").await;
 
+	// What connecting and subscribing overflowed, so only the bursts are graded.
+	let paths = [&peer, &publish_path, &subscribe_path];
+	let setup_overflowed: u64 = paths.iter().map(|path| path.overflowed()).sum();
+
 	let total = BURSTS * BURST_GROUPS;
 	let mut written = Vec::new();
 	let burst = |track: &mut moq_net::track::Producer, written: &mut Vec<tokio::time::Instant>| {
@@ -985,16 +998,21 @@ async fn bursts_cross_a_cluster(lane: Lane) {
 	}
 
 	// Fault activation: the subscription skipped or reset groups, so the FETCH
-	// recovery below had something to recover.
+	// recovery below had something to recover, and in the impaired lane the
+	// bursts overflowed a bottleneck.
 	let gaps = outcomes
 		.values()
 		.filter(|outcome| !matches!(outcome, Outcome::Live))
 		.count();
+	let overflowed = paths.iter().map(|path| path.overflowed()).sum::<u64>() - setup_overflowed;
 	println!(
-		"fault activated: {gaps} of {total} groups missed the live subscription (reset: {resets:?}), slowest group {} after {:?}",
+		"fault activated: {gaps} of {total} groups missed the live subscription (reset: {resets:?}), {overflowed} datagrams overflowed a bottleneck during the bursts, slowest group {} after {:?}",
 		slowest.1, slowest.0
 	);
 	assert!(gaps > 0, "every group came live, so no FETCH recovery was exercised");
+	if let Lane::Impaired = lane {
+		assert!(overflowed > 0, "no burst overran a bottleneck, so none was exercised");
+	}
 
 	let lost: Vec<_> = outcomes
 		.iter()
@@ -1018,14 +1036,9 @@ async fn bursts_cross_a_cluster(lane: Lane) {
 	drop(publish_session);
 	drop(edge);
 	drop(origin);
-	let overflowed: u64 = [peer, publish_path, subscribe_path]
-		.into_iter()
-		.filter_map(Path::verify)
-		.map(|stats| stats.up.overflowed + stats.down.overflowed)
-		.sum();
-	if let Lane::Impaired = lane {
-		assert!(overflowed > 0, "no burst overran a bottleneck, so none was exercised");
-	}
+	peer.verify();
+	publish_path.verify();
+	subscribe_path.verify();
 }
 
 lanes!(bursts_cross_a_cluster);
