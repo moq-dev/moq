@@ -3304,7 +3304,8 @@ impl group::Expiry for GroupExpiry {
 			loop {
 				// An abort can change reach even after the successor is stamped.
 				// Register before judging, so a racing abort is observed or wakes us.
-				if let Some(group) = state.first_servable(self.sequence.saturating_add(1), cap) {
+				let successor = state.first_servable(self.sequence.saturating_add(1), cap);
+				if let Some(group) = successor {
 					let _ = group.poll_closed(waiter);
 				}
 				let edge = state.drift_edge(cap);
@@ -3316,8 +3317,11 @@ impl group::Expiry for GroupExpiry {
 				// A first timestamp can change the verdict without mutating the track:
 				// on a group past the edge (a new edge), or on the candidate's
 				// unstamped immediate successor (a reach where there was none).
-				// Register on the candidate and every unstamped servable group above
-				// it. If one raced this scan, resolve the edge again before Pending.
+				// Register on the candidate, its successor, and every servable group
+				// past the edge. If one raced this scan, resolve the edge again before
+				// Pending. Groups between the successor and the edge can move neither,
+				// and walking them would cost each of N parked serves the whole
+				// backlog, O(N^2) per track change.
 				let mut timestamp_raced = false;
 				if let Some(slot) = state.lookup.get(&self.sequence) {
 					let group = &slot.group;
@@ -3328,17 +3332,18 @@ impl group::Expiry for GroupExpiry {
 						timestamp_raced = true;
 					}
 				}
-				for (_, slot) in state
+				let past = edge
+					.presentation
+					.map_or(self.sequence, |live| live.sequence.max(self.sequence));
+				let beyond = state
 					.lookup
-					.range((std::ops::Bound::Excluded(self.sequence), std::ops::Bound::Unbounded))
-				{
-					let group = &slot.group;
-					if !super::subscription::before_end(group.sequence, cap) {
-						break;
-					}
-					if slot.visible
-						&& !group.is_aborted()
-						&& group.timestamp().is_none()
+					.range((std::ops::Bound::Excluded(past), std::ops::Bound::Unbounded))
+					.map(|(_, slot)| slot)
+					.take_while(|slot| super::subscription::before_end(slot.group.sequence, cap))
+					.filter(|slot| slot.visible && !slot.group.is_aborted())
+					.map(|slot| &slot.group);
+				for group in successor.into_iter().chain(beyond) {
+					if group.timestamp().is_none()
 						&& group.poll_timestamp(waiter).is_ready()
 						&& group.timestamp().is_some()
 					{
@@ -5825,6 +5830,54 @@ mod test {
 		// Drained, so the budget ends the group rather than truncating it.
 		let result = pending.await.unwrap();
 		assert!(matches!(result, Ok(None)), "the held group ends: {result:?}");
+	}
+
+	/// A parked read registers only where a first timestamp can change its verdict: its
+	/// immediate successor and the groups past the edge. Walking every group between them
+	/// costs each parked publisher stream the whole backlog, enough for a 2s audio backlog
+	/// at 400 groups/s to pin a publisher's runtime and starve its connection.
+	#[test]
+	fn a_parked_read_ignores_first_frames_between_its_successor_and_the_edge() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(10)));
+		let mut head = producer.append_group().unwrap();
+		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
+			.unwrap();
+		append_at(&mut producer, 1000); // the successor bounds the head's reach
+		let mut between = producer.append_group().unwrap();
+		append_at(&mut producer, 3000); // the edge
+
+		let mut held = subscriber
+			.recv_group()
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.expect("head group");
+		assert_eq!(held.sequence, 0);
+		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
+
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waker = futures::task::waker(Arc::new(FlagWake(woken.clone())));
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(held.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+
+		between
+			.write_frame(Timestamp::from_millis(2000).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		assert!(
+			!woken.load(Ordering::SeqCst),
+			"a first frame below the edge moves neither the reach nor the edge"
+		);
+
+		// Control: a first frame past the edge is still observed.
+		let mut beyond = producer.append_group().unwrap();
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+		woken.store(false, Ordering::SeqCst);
+		beyond
+			.write_frame(Timestamp::from_millis(4000).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		assert!(woken.load(Ordering::SeqCst), "a new edge wakes the parked read");
 	}
 
 	/// The ordinary live case, at the default real-time budget: 2s GOPs produced one at
