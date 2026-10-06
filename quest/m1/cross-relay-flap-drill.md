@@ -13,7 +13,3 @@ Extend `bursts_cross_a_cluster` (#4920, `rs/moq-relay/tests/drills.rs`) rather
 than adding a harness: flap the shaped peer link during a burst, keep strict
 grading, and add a drill mutation proving the flap is graded. A moq-transport
 peer link variant is optional; add it only if it is cheap here.
-
-## Required
-
-- [Two-relay drill](/quest/m1/cross-relay-drill.md) - #4920 provides bursts_cross_a_cluster and its shaped peer link

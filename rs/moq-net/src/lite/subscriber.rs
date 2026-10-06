@@ -4466,8 +4466,6 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 
 			match &mut self.state {
 				FetchRunState::Open { request } => {
-					tracing::info!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, group = self.group, "fetch started");
-
 					// A peer that sent GOAWAY told us to stop opening streams on this session.
 					if self.serve.subscriber.going_away.is_set() {
 						request.take().expect("request pending").reject(Error::GoingAway);
@@ -4488,6 +4486,10 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 							return Poll::Ready(());
 						}
 					};
+
+					// Only once the stream opens: the open parks on stream credit and
+					// re-polls this state, so logging before it repeats per poll.
+					tracing::info!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, group = self.group, "fetch started");
 
 					let request = request.take().expect("request pending");
 
