@@ -1,5 +1,6 @@
 import { race } from "@moq/signals";
 import { fromTransport, StreamCode, toStreamCode, toTransport } from "./error.ts";
+import { sharedStreamCode } from "./ietf/error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version } from "./ietf/version.ts";
 import { Version as Lite, type Version as LiteVersion } from "./lite/version.ts";
@@ -21,8 +22,13 @@ import {
 
 // Decode raw transport errors before mapping so they cannot bypass the negotiated
 // registry. Ordinary errors already send 0 and retain their local identity.
+// A bare stream code takes the same check, without building a StreamError first.
 function withCode(reason: unknown, stream: StreamVersion): unknown {
 	const version = asIetf(stream);
+	if (typeof reason === "number") {
+		const code = version === undefined || sharedStreamCode(reason, version) ? reason : StreamCode.Internal;
+		return toTransport(code as StreamCode, "cancel");
+	}
 	const decoded = fromTransport(reason, { version });
 	const code = toStreamCode(decoded, { version });
 	return code === StreamCode.Internal && decoded === reason ? reason : toTransport(code, decoded.message);
@@ -473,15 +479,13 @@ export class Reader {
 		return !(await this.#fill());
 	}
 
-	// A number is a stream code. The transport error is built only while the stream is
-	// still open; after a FIN the reader is gone, so this allocates nothing and sends nothing.
+	// The transport error is built only while the stream is still open. After a FIN the
+	// reader is gone, so this allocates nothing and sends nothing.
 	stop(reason: unknown) {
 		const reader = this.#reader;
 		if (!reader) return;
 		this.#reader = undefined;
-		const coded =
-			typeof reason === "number" ? toTransport(reason as StreamCode, "cancel") : withCode(reason, this.version);
-		reader.cancel(coded).catch(() => void 0);
+		reader.cancel(withCode(reason, this.version)).catch(() => void 0);
 	}
 
 	// Decoded like #fill: a caller racing this against a read must not get a different error

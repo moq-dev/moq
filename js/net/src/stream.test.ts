@@ -561,8 +561,10 @@ test("stop after FIN allocates nothing and sends nothing", async () => {
 	for (let i = 0; i < 32; i++) reader.stop(reason);
 	for (let i = 0; i < 32; i++) reader.stop(StreamCode.Cancel);
 	const after = heapStats().objectTypeCounts;
-	expect(after.Error ?? 0).toBe(before.Error ?? 0);
-	expect(after.Promise ?? 0).toBe(before.Promise ?? 0);
+	// A collection between the snapshots can only lower a live count. The regression
+	// retains an error and a promise per stop, which still shows up as a rise.
+	expect(after.Error ?? 0).toBeLessThanOrEqual(before.Error ?? 0);
+	expect(after.Promise ?? 0).toBeLessThanOrEqual(before.Promise ?? 0);
 	expect(cancelled).toEqual([]);
 	await reader.closed;
 });
@@ -583,6 +585,30 @@ test("stop mid-stream still cancels with the code", async () => {
 	reader.stop(StreamCode.Cancel);
 	const stopped = await cancelled.promise;
 	expect((stopped as { streamErrorCode?: number }).streamErrorCode).toBe(StreamCode.Cancel);
+});
+
+test("a numeric stop sends only a code the negotiated draft shares", async () => {
+	const stop = (version: StreamVersion, code: StreamCode) => {
+		const cancelled = Promise.withResolvers<unknown>();
+		const reader = new Reader(
+			new ReadableStream<Uint8Array>({
+				start(controller) {
+					controller.enqueue(new Uint8Array([1]));
+				},
+				cancel: cancelled.resolve,
+			}),
+			undefined,
+			version,
+		);
+		reader.stop(code);
+		return cancelled.promise;
+	};
+
+	// 0x4 is GOING_AWAY here, but UNKNOWN_OBJECT_STATUS on draft-16.
+	const draft16 = await stop(Version.DRAFT_16, StreamCode.GoingAway);
+	expect((draft16 as { streamErrorCode?: number }).streamErrorCode).toBe(StreamCode.Internal);
+	const draft18 = await stop(Version.DRAFT_18, StreamCode.GoingAway);
+	expect((draft18 as { streamErrorCode?: number }).streamErrorCode).toBe(StreamCode.GoingAway);
 });
 
 // Deadlines for the stalled fixtures below: one they always blow through, and one they
