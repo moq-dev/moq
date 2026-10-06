@@ -961,7 +961,11 @@ impl<E: catalog::Catalog> Import<E> {
 			.streams
 			.iter()
 			.filter_map(|(pid, stream)| Some((pid.as_u16(), stream.stats()?)))
-			.chain(self.sections.keys().map(|&pid| (pid, StreamStats::new(".ts"))));
+			.chain(
+				self.sections
+					.keys()
+					.map(|&pid| (pid, StreamStats::new(".ts", StreamClass::Data))),
+			);
 		for (pid, current) in routes {
 			streams
 				.entry(pid)
@@ -970,7 +974,10 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		// A dedicated PCR PID routes no stream, so its damage gets a clock-only row.
 		for (&pid, &damaged) in &self.damaged {
-			streams.entry(pid).or_insert_with(|| StreamStats::new("")).damaged = damaged;
+			streams
+				.entry(pid)
+				.or_insert_with(|| StreamStats::new("", StreamClass::Data))
+				.damaged = damaged;
 		}
 		for (pid, stats) in &mut streams {
 			(stats.units, stats.quiet) = self.liveness.stream(*pid);
@@ -1046,7 +1053,8 @@ fn list_programs(programs: &[u16]) -> String {
 ///
 /// [`Export::stats`](super::Export::stats) returns the same rows for the streams it writes,
 /// so one schema reads both edges. Only `units` and `quiet` move there: the exporter builds
-/// every frame header itself, so it has no frame sync to lose, and it grades nothing.
+/// every frame header itself, so it has no frame sync to lose and it runs no TR 101 290
+/// checks. The stopped-stream log still grades an audio or video row whose `units` stay still.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Stats {
@@ -1104,6 +1112,30 @@ impl Stats {
 	}
 }
 
+/// Audio, video, or other data, as import or export already resolved the PID.
+///
+/// Not the PMT `stream_type`. `0x86` is DTS audio or, with a CUEI registration, an SCTE-35
+/// section, and those take different routes. The stopped-stream log grades audio and video
+/// only; a sparse data PID stays counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StreamClass {
+	/// Undecoded or sparse data (SCTE-35, ID3, private sections, verbatim PES), or a PCR PID
+	/// that carries no elementary stream. A quiet second is not a stall.
+	#[default]
+	Data,
+	/// Continuous audio.
+	Audio,
+	/// Continuous video, including MPEG-1/2 video read only for its clock.
+	Video,
+}
+
+impl StreamClass {
+	/// Audio and video have a cadence. Data does not, so a quiet second is not a stall.
+	pub(super) fn graded(self) -> bool {
+		matches!(self, Self::Audio | Self::Video)
+	}
+}
+
 /// What one elementary stream delivered, lost, or could not verify. See [`Stats`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1112,6 +1144,8 @@ pub struct StreamStats {
 	/// or empty for MPEG-1/2 video, which is read for its clock and not published. At export,
 	/// the suffix an import of the output would give the PID.
 	pub track: &'static str,
+	/// How this PID was classified. See [`StreamClass`].
+	pub class: StreamClass,
 	/// Access units the stream delivered: frames published for decoded media, PES payloads or
 	/// sections carried verbatim, and PES read on MPEG-1/2 video. At export, the PES or
 	/// sections written for each frame.
@@ -1145,9 +1179,10 @@ pub struct StreamStats {
 }
 
 impl StreamStats {
-	fn new(track: &'static str) -> Self {
+	fn new(track: &'static str, class: StreamClass) -> Self {
 		Self {
 			track,
+			class,
 			..Default::default()
 		}
 	}
@@ -1156,6 +1191,7 @@ impl StreamStats {
 	/// Delivery and damage are kept per PID rather than per route, so they need no merging.
 	fn merge(&mut self, current: &Self) {
 		self.track = current.track;
+		self.class = current.class;
 		self.resyncs += current.resyncs;
 		self.discarded += current.discarded;
 		self.unconfirmed += current.unconfirmed;
@@ -2045,11 +2081,11 @@ impl<E: catalog::Catalog> Stream<E> {
 		Some(match self {
 			Stream::Aac(stream) => stream.resync.stats(),
 			Stream::Legacy(stream) => stream.resync.stats(),
-			Stream::H264 { .. } => StreamStats::new(".avc3"),
-			Stream::H265 { .. } => StreamStats::new(".hev1"),
-			Stream::Opus(_) => StreamStats::new(".opus"),
-			Stream::Verbatim(_) => StreamStats::new(".ts"),
-			Stream::Clock => StreamStats::new(""),
+			Stream::H264 { .. } => StreamStats::new(".avc3", StreamClass::Video),
+			Stream::H265 { .. } => StreamStats::new(".hev1", StreamClass::Video),
+			Stream::Opus(_) => StreamStats::new(".opus", StreamClass::Audio),
+			Stream::Verbatim(_) => StreamStats::new(".ts", StreamClass::Data),
+			Stream::Clock => StreamStats::new("", StreamClass::Video),
 			Stream::Ignored => return None,
 		})
 	}
@@ -2121,7 +2157,7 @@ impl Resync {
 			// count from it for the life of the broadcast.
 			unconfirmed: true,
 			draining: false,
-			stats: StreamStats::new(track),
+			stats: StreamStats::new(track, StreamClass::Audio),
 		}
 	}
 
@@ -3559,6 +3595,65 @@ pub(super) mod test {
 		);
 	}
 
+	/// A CUEI-marked 0x86 section is data, not audio, so a quiet second is not logged.
+	/// The video PID beside it, stalled with the same frozen count, is.
+	#[test]
+	#[tracing_test::traced_test]
+	fn sparse_cuei_pid_beside_a_stalled_video_is_not_logged() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+
+		// Not 0x100: `synth_pmt` puts the PMT there, and a later packet on that PID is PSI.
+		const VIDEO: u16 = 0x110;
+		const CUE_PID: u16 = 0x21;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let mut bytes = bytes::BytesMut::new();
+		bytes.extend_from_slice(&synth_pmt(
+			&[
+				(StreamType::Mpeg2Video, VIDEO),
+				(StreamType::Dts8ChannelLosslessAudio, CUE_PID),
+			],
+			true,
+		));
+		bytes.extend_from_slice(&pes_packet(VIDEO, 90_000));
+		bytes.extend_from_slice(&packet(true, 0, 0, &CUE));
+		import.decode(&bytes).unwrap();
+
+		let stats = import.stats();
+		assert_eq!(stats.streams[&VIDEO].class, super::StreamClass::Video);
+		assert_eq!(stats.streams[&VIDEO].track, "");
+		assert!(
+			stats.streams[&VIDEO].units >= 1,
+			"the video PID delivered before it stalled"
+		);
+		assert_eq!(stats.streams[&CUE_PID].class, super::StreamClass::Data, "{stats:?}");
+		assert_eq!(stats.streams[&CUE_PID].track, ".ts");
+		assert!(stats.streams[&CUE_PID].units >= 1, "the cue section was counted");
+
+		let mut log = crate::container::ts::stats::Log::default();
+		log.sample(stats);
+		log.sample(import.stats());
+
+		logs_assert(|lines: &[&str]| {
+			let stopped: Vec<_> = lines
+				.iter()
+				.filter(|line| line.contains("stopped delivering access units"))
+				.collect();
+			match stopped.as_slice() {
+				[line] if line.contains("pid=272 ") && !line.contains("pid=33 ") => Ok(()),
+				_ => Err(format!("expected only the stalled video PID, got {stopped:?}")),
+			}
+		});
+	}
+
 	/// A PUSI TS packet on `pid` carrying a minimal PES with `pts` (90 kHz) and a
 	/// 1-byte dummy payload, for streams we observe only for their PTS.
 	fn pes_packet(pid: u16, pts: u64) -> Vec<u8> {
@@ -4232,6 +4327,7 @@ pub(super) mod test {
 				AAC_PID,
 				super::StreamStats {
 					track: ".aac",
+					class: super::StreamClass::Audio,
 					units: 4,
 					quiet: None,
 					resyncs: 1,
@@ -4426,6 +4522,7 @@ pub(super) mod test {
 				MP2_PID,
 				super::StreamStats {
 					track: ".mp2",
+					class: super::StreamClass::Audio,
 					units: 4,
 					quiet: None,
 					resyncs: 1,
@@ -4614,6 +4711,7 @@ pub(super) mod test {
 				MP2_PID,
 				super::StreamStats {
 					track: ".mp2",
+					class: super::StreamClass::Audio,
 					units: 2,
 					quiet: None,
 					resyncs: 0,

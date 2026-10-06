@@ -1020,6 +1020,76 @@ mod tests {
 		(catalog, registration, media)
 	}
 
+	/// A completed segment already decoded its inline codec metadata. Finishing the
+	/// catalog can index a trailing group whose media producer is still live.
+	#[tokio::test(start_paused = true)]
+	async fn a_transmuxed_segment_keeps_its_init_with_an_unfinished_tail() {
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let (mut catalog, mut registration, _media) = publish_vp8(&mut broadcast);
+		registration
+			.set(hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8))
+			.unwrap();
+		broadcast.announce(moq_net::origin::Route::default()).unwrap();
+		settle().await;
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		broadcaster.ready().await;
+		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
+		let mut cursor = rendition.segments();
+		let segment = cursor.next().await.unwrap().expect("completed segment");
+		assert!(!segment.media.is_empty());
+
+		catalog.finish().unwrap();
+		while !rendition.snapshot().finished {
+			tokio::task::yield_now().await;
+		}
+		let init = tokio::time::timeout(Duration::from_secs(1), rendition.init())
+			.await
+			.expect("init must not wait for the unfinished trailing group")
+			.unwrap()
+			.expect("transmuxed segment has an init");
+		assert_eq!(&init[4..8], b"ftyp");
+	}
+
+	/// An init bootstrap already blocked on the unfinished tail must not hold back a later
+	/// request once a completed segment has cached the init.
+	#[tokio::test(start_paused = true)]
+	async fn a_blocked_init_bootstrap_does_not_hide_a_cached_init() {
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let (mut catalog, mut registration, _media) = publish_vp8(&mut broadcast);
+		registration
+			.set(hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8))
+			.unwrap();
+		broadcast.announce(moq_net::origin::Route::default()).unwrap();
+		settle().await;
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		broadcaster.ready().await;
+		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
+
+		catalog.finish().unwrap();
+		while !rendition.snapshot().finished {
+			tokio::task::yield_now().await;
+		}
+		let mut blocked = std::pin::pin!(rendition.init());
+		assert!(
+			tokio::time::timeout(Duration::from_millis(10), blocked.as_mut())
+				.await
+				.is_err(),
+			"the bootstrap reads the unfinished trailing group"
+		);
+
+		let segment = rendition.segments().next().await.unwrap().expect("completed segment");
+		assert!(!segment.media.is_empty());
+		tokio::time::timeout(Duration::from_secs(1), rendition.init())
+			.await
+			.expect("init must not wait behind the blocked bootstrap")
+			.unwrap()
+			.expect("transmuxed segment has an init");
+	}
+
 	// A reconfigure that changes the init bytes changes the init URL, and the old URL stops
 	// resolving, so a cache can never hand a player the previous init under the new one.
 	#[tokio::test]
@@ -2393,6 +2463,74 @@ mod tests {
 		);
 		watcher.abort();
 		drop((new_media, _new_track, new_server, catalog, live));
+	}
+
+	// A restart can land while a segment request waits for its media broadcast. The init
+	// decoded from the old run's groups must not be cached for the new run.
+	#[tokio::test]
+	async fn a_segment_straddling_a_restart_keeps_its_init_out_of_the_new_run() {
+		tokio::time::pause();
+		// A VP8 keyframe whose 320x240 geometry is only known inline.
+		const KEYFRAME: &[u8] = &[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00];
+
+		let origin = produce_origin();
+		let mut live = origin.create_broadcast("live").expect("publish allowed");
+		live.announce(Default::default()).expect("publish allowed");
+		let catalog = moq_mux::catalog::Producer::new(&mut live, moq_mux::catalog::Config::default()).unwrap();
+		let recorder = catalog.enroll_test("video0").unwrap();
+
+		let mut media = moq_net::broadcast::Info::new().produce();
+		let _track = write_routed_media(&mut media, KEYFRAME, recorder, 0);
+		let server = origin.dynamic("media", sibling_route(10)).unwrap();
+		settle().await;
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let upstream = Upstream {
+			broadcast: source.broadcast().await.unwrap(),
+			source,
+		};
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.broadcast = Some(moq_net::path::Relative::new("media").to_owned());
+
+		let mut snapshot = moq_mux::catalog::hang::Catalog::default();
+		snapshot.video.renditions.insert("video0".to_string(), config);
+		let archive = archive(&["video0"]);
+		snapshot.archive = Some(archive.clone());
+		let renditions = renditions::Producer::new(Config::default().window);
+		renditions.sync(&upstream, &snapshot);
+		let fanout = renditions.fanout();
+		let reference = Arc::new((Kind::Video, "video0".to_string()));
+		let watcher = tokio::spawn(watch_timeline(
+			upstream.broadcast.clone(),
+			archive,
+			reference,
+			fanout.clone(),
+		));
+		let rendition = renditions.get(Kind::Video, "video0").unwrap();
+		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
+			.await
+			.expect("the timeline reaches the rendition");
+
+		// The sibling request is unanswered, so the segment waits for its media broadcast.
+		let mut segment = std::pin::pin!(rendition.listed_segment(0));
+		assert!(
+			tokio::time::timeout(Duration::from_millis(10), segment.as_mut())
+				.await
+				.is_err()
+		);
+		fanout.set_generation(Some("run-1".into()));
+		fanout.set_generation(Some("run-2".into()));
+
+		accept_sibling(&server, &media).await;
+		segment
+			.await
+			.unwrap()
+			.expect("the old run's rows were captured before the restart");
+		assert!(
+			rendition.init().await.unwrap().is_none(),
+			"the new run has no media of its own yet"
+		);
+		watcher.abort();
 	}
 
 	// A replacement already present when the export starts is the sibling the request

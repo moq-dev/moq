@@ -442,6 +442,18 @@ impl Kind {
 			Kind::Verbatim { .. } => ".ts",
 		}
 	}
+
+	/// The classification [`Import`](super::Import) would give this PID, so a row is graded
+	/// alike at both edges.
+	fn class(&self) -> super::StreamClass {
+		match self {
+			Kind::Video(_) => super::StreamClass::Video,
+			Kind::Aac { .. } | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3 => {
+				super::StreamClass::Audio
+			}
+			Kind::Verbatim { .. } => super::StreamClass::Data,
+		}
+	}
 }
 
 /// The null stuffing owed to the multiplex rate ([`Export::stuff`]).
@@ -1325,6 +1337,7 @@ impl<E: catalog::Catalog> Export<E> {
 			let (units, quiet) = self.liveness.stream(track.pid);
 			let row = super::StreamStats {
 				track: track.kind.suffix(),
+				class: track.kind.class(),
 				units,
 				quiet,
 				..Default::default()

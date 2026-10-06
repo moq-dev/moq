@@ -462,12 +462,15 @@ impl Rendition {
 		self.run.lock().expect("run lock poisoned").generation = generation;
 	}
 
-	/// Start a new publisher run labeled `generation`, dropping the previous run's rows and init.
+	/// Start a new publisher run labeled `generation`, dropping the previous run's rows, records,
+	/// and init.
 	///
 	/// The rows go first: renders read the run before the rows, so one that sees the new label
 	/// never lists the old run's segments under it.
 	pub(crate) fn restart(&self, generation: Option<Arc<str>>) {
 		self.live.clear();
+		// The old run's own records would bootstrap an inline init from its media.
+		self.spans.clear();
 		let mut run = self.run.lock().expect("run lock poisoned");
 		*run = Run {
 			generation,
@@ -781,6 +784,11 @@ impl Rendition {
 
 	async fn load_init(&self) -> Result<Option<Arc<Init>>> {
 		let binding = self.media.sync(&self.live);
+		// A transmuxed segment can cache the init while another bootstrap holds `building`,
+		// blocked on an unfinished group.
+		if let Some(init) = self.run().init {
+			return Ok(Some(init));
+		}
 		let _building = self.building.lock().await;
 		let run = self.run();
 		if let Some(init) = run.init {
@@ -837,6 +845,9 @@ impl Rendition {
 	/// Fetch and transmux `row`'s frames on this rendition; see [`segment`](Self::segment).
 	pub(crate) async fn fetch(&self, row: &segments::Row) -> Result<Option<Bytes>> {
 		let binding = self.media.sync(&self.live);
+		// Read the run before resolving the row (see `restart`), so an init decoded from its
+		// groups is never cached for a run that started while they were being fetched.
+		let run = self.run();
 		let Content::Frames { ranges, filter } = self.resolve(row) else {
 			return Ok(None);
 		};
@@ -900,7 +911,13 @@ impl Rendition {
 		if frames.is_empty() {
 			return Ok(None);
 		}
-		Ok(Some(muxer.fragment(row.segment as u32, &frames)?))
+		let fragment = muxer.fragment(row.segment as u32, &frames)?;
+		// Inline codec metadata was already decoded from these completed groups.
+		// Reuse it instead of fetching a newer, possibly unfinished timeline tail.
+		if let Some(bytes) = muxer.init()? {
+			self.cache_init(run.epoch, bytes);
+		}
+		Ok(Some(fragment))
 	}
 }
 

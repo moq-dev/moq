@@ -188,11 +188,12 @@ moq ... play --no-video             # audio only
 
 Decodes H.264, H.265, and AV1 video using the platform hardware decoder where
 available, and Opus, PCM, and AAC-LC (mono or stereo) audio in software. The
-log names the decoder each track opened. `--video-name` and `--audio-name`
-pick a rendition, and `--no-video` or `--no-audio` leaves a role out.
-`--no-video` still opens a window, which stays blank; closing it stops
-playback. HE-AAC signaled only in band (implicit SBR, as over MPEG-TS) plays as
-its half-rate AAC-LC core.
+opt-in `vpx` feature adds software VP8 and VP9 (8-bit 4:2:0) through libvpx,
+which the build host must provide. The log names the decoder each track
+opened. `--video-name` and `--audio-name` pick a rendition, and `--no-video` or
+`--no-audio` leaves a role out. `--no-video` still opens a window, which stays
+blank; closing it stops playback. HE-AAC signaled only in band (implicit SBR, as
+over MPEG-TS) plays as its half-rate AAC-LC core.
 
 Playback runs on a clock it owns. `--delay` is how far it trails the live
 edge: the jitter a late frame may absorb. The default, `auto`, measures how
