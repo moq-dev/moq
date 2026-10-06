@@ -10,9 +10,9 @@ up.
 
 ## Plan
 
-`create_broadcast` already mints an epoch, so check that each gateway creates
-a broadcast per connection (`moq-rtmp`, `moq-srt`, `moq-rtc`, and the relay
-wiring) rather than reusing one across reconnects. Test a reconnect under the
+Mint an epoch per incoming connection and announce it on the broadcast's
+route (`moq-rtmp`, `moq-srt`, `moq-rtc`, and the relay wiring); nothing mints
+by default. Test a reconnect under the
 same key with the stale connection still open. Update `doc/bin/relay/` where it
 describes ingest paths.
 

@@ -30,18 +30,20 @@ Decided:
   replacing the `@<uuidv7>` segment: a path suffix changes the name old
   clients subscribe to). It is a lite-07 field on ANNOUNCE_START, TRACK,
   SUBSCRIBE, and FETCH, with no negotiation and nothing on published versions.
-- `create_broadcast` mints an epoch; a replica passes an explicit one through
-  its announce. A prefix route (`dynamic`) carries none, so claims such as a
-  transcoder's stay on the worker that first served a subscription and are
-  never stitched to another worker's output.
+- The route's epoch is taken as given: nothing mints one by default (decided
+  2026-10-06). Each first-party publisher mints one per run and announces it;
+  a replica announces a shared one. A route without one, such as a
+  transcoder's prefix claim, stays on the worker that first served a
+  subscription and is never stitched to another worker's output.
 - The newest epoch wins a prefix ahead of cost (decided 2026-10-06), and
   replaces the old one with a hard switch: subscriptions in flight end with
   `Unroutable`. When it goes and an older one is still live, the older one
   wins again as a new broadcast.
 - A catalog `broadcast` reference by name follows the newest epoch, since a
   path cannot name one.
-- Publishers on the default publish path, such as moq-boy and moq-room,
-  inherit the epoch from Origin. moq-stats mints one per group announcement
+- Every first-party publisher that can restart mints its own: the apps,
+  moq-boy, and moq-room through [Apps](/quest/m0/broadcast-epoch/apps.md), the
+  ingest gateways, moqsink, and the bindings below. moq-stats mints one per group announcement
   through [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md), which
   also gates the release (decided 2026-10-04).
 - The m1 quests gating this line moved under it in the 2026-10-05 audit, and
@@ -69,7 +71,7 @@ timeout, and killing the newest epoch falls back to a still-live older one.
 - [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web restart into a new epoch and reset on the switch
 - [Gateways](/quest/m0/broadcast-epoch/gateways.md) - RTMP, SRT, and WHIP ingest mint an epoch per incoming connection, so an encoder reconnect is a clean takeover
 - [TS restart](/quest/m0/broadcast-epoch/ts-restart.md) - a signalled backward TS discontinuity finishes the broadcast and continues the same input under a fresh epoch
-- [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and inherit the default
+- [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
 - [GStreamer](/quest/m0/broadcast-epoch/gst.md) - moqsink publishes each run under a fresh epoch
 - [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - `moq` takes an optional `--epoch` instead of `--hop`, a plain publisher declares a random Hop ID, and the per-session hop stamp is gone
 - [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md) - moq-stats publishes each group announcement under its own epoch, so neither a restarted node nor a returning idle group stalls its viewers

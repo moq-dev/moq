@@ -740,7 +740,9 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 
 	let upstream_origin = moq_tokio::origin::spawn();
 	let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
+	broadcast
+		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.expect("create broadcast");
 	let track = broadcast.create_track("video", None).expect("create track");
 
 	let (port, mut accepted, _handle) = spawn_upstream(upstream_origin.clone()).await;

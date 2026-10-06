@@ -1590,11 +1590,11 @@ impl Producer {
 	/// Create a broadcast at `path`, fed through the returned producer.
 	///
 	/// This is how local content enters an origin. The returned
-	/// [`broadcast::Producer`] is a source under a freshly minted [`Route::epoch`],
-	/// so it is a new broadcast: a newer one at the same path replaces it, and
-	/// consumers of the old one end rather than resume into different content.
-	/// Replicas of the same content share an epoch by announcing it
-	/// ([`Route::with_epoch`]), and resume across each other.
+	/// [`broadcast::Producer`] is a source. Announce it with a [`Route::epoch`]
+	/// ([`Epoch::mint`](crate::Epoch::mint) per run, or a replica's shared one) so a
+	/// restart replaces it rather than resuming into different content, and so
+	/// routes with that epoch resume across each other. Without one it never
+	/// resumes elsewhere.
 	///
 	/// The broadcast exists for nobody until [`broadcast::Producer::announce`]:
 	/// until then no announce cursor lists it and a request for its path fails
@@ -1657,9 +1657,8 @@ impl Producer {
 			path: full,
 		};
 		let source = info.produce().with_stats(ingress.clone());
-		let epoch = crate::Epoch::mint();
 		let entry = announcing.announce(
-			Route::default().with_epoch(epoch.clone()),
+			Route::default(),
 			Serving {
 				server: None,
 				source: Some(source.consume()),
@@ -1668,7 +1667,6 @@ impl Producer {
 		)?;
 		Ok(source.with_announcer(Announcer {
 			entry,
-			epoch,
 			ingress,
 			_keepalive: self.tasks.keepalive(),
 		}))
@@ -2014,9 +2012,6 @@ struct Serving {
 /// broadcast has none and cannot announce.
 pub(crate) struct Announcer {
 	entry: AnnounceProducer,
-	/// The publisher instance the broadcast advertises: minted at creation, or the
-	/// one an announce named.
-	epoch: crate::Epoch,
 	/// The ingress counters an advertised interval's announce guard comes from.
 	ingress: stats::Scope,
 	/// A published broadcast is lifecycle work: the origin's driver keeps
@@ -2026,10 +2021,8 @@ pub(crate) struct Announcer {
 }
 
 impl Announcer {
-	/// Advertise the broadcast's path with `route`, or re-price it in place. A route
-	/// without an epoch keeps the broadcast's current one.
-	pub(crate) fn announce(&mut self, mut route: Route) -> Result<(), Error> {
-		self.epoch = route.epoch.get_or_insert_with(|| self.epoch.clone()).clone();
+	/// Advertise the broadcast's path with `route`, or re-price it in place.
+	pub(crate) fn announce(&mut self, route: Route) -> Result<(), Error> {
 		self.entry.update(route)?;
 		if self.entry.guard.is_none() {
 			self.entry.guard = Some(self.ingress.announce());
@@ -7810,13 +7803,23 @@ mod tests {
 	async fn a_newer_epoch_ends_the_broadcast_in_flight() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let old = producer.publish("room/alice", Route::default().with_cost(1)).unwrap();
+		let old = producer
+			.publish(
+				"room/alice",
+				Route::default().with_epoch(crate::Epoch::mint()).with_cost(1),
+			)
+			.unwrap();
 		let old_track = old.create_track("video", None).unwrap();
 		let resolved = consumer.request_broadcast("room/alice").await.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		deliver(&old_track, &mut subscription, b"old").await;
 
-		let new = producer.publish("room/alice", Route::default().with_cost(9)).unwrap();
+		let new = producer
+			.publish(
+				"room/alice",
+				Route::default().with_epoch(crate::Epoch::mint()).with_cost(9),
+			)
+			.unwrap();
 		let new_track = new.create_track("video", None).unwrap();
 		assert!(matches!(next_group(&mut subscription).await, Err(Error::Unroutable)));
 
@@ -7832,12 +7835,22 @@ mod tests {
 	async fn the_newest_epoch_is_announced_as_a_new_broadcast() {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().announced();
-		let _old = producer.publish("room/alice", Route::default().with_cost(1)).unwrap();
-		let old = announced.assert_next_active("room/alice").epoch.expect("minted");
+		let _old = producer
+			.publish(
+				"room/alice",
+				Route::default().with_epoch(crate::Epoch::mint()).with_cost(1),
+			)
+			.unwrap();
+		let old = announced.assert_next_active("room/alice").epoch.expect("announced");
 
-		let new = producer.publish("room/alice", Route::default().with_cost(9)).unwrap();
+		let new = producer
+			.publish(
+				"room/alice",
+				Route::default().with_epoch(crate::Epoch::mint()).with_cost(9),
+			)
+			.unwrap();
 		announced.assert_next_ended("room/alice");
-		let newest = announced.assert_next_active("room/alice").epoch.expect("minted");
+		let newest = announced.assert_next_active("room/alice").epoch.expect("announced");
 		assert!(newest > old);
 
 		// The older one still stands, so it comes back once the newer one goes.

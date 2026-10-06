@@ -91,7 +91,9 @@ impl Topology {
 
 		let broadcast = publisher.create_broadcast("live").unwrap();
 		let track = broadcast.create_track("video", None).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast
+			.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+			.unwrap();
 
 		let p_to_a = link(version, &publisher, &relay_a).await;
 		let p_to_b = link(version, &publisher, &relay_b).await;
@@ -444,7 +446,9 @@ async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<(u64, m
 	);
 	let broadcast = p.create_broadcast("live").unwrap();
 	let track = broadcast.create_track("video", None).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast
+		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.unwrap();
 	let p_a = lagged(version, &p, &a, Duration::from_millis(300)).await;
 	let p_b = lagged(version, &p, &b, Duration::ZERO).await;
 	let a_r = lagged(version, &a, &r, Duration::ZERO).await;

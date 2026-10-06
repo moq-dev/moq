@@ -13,7 +13,7 @@
 import { Derived, type Dispose, type GetPromise, type Getter, getter, Once, Signal } from "@moq/signals";
 import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
-import * as Epoch from "./epoch.ts";
+import type * as Epoch from "./epoch.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { isAnonymous, Route, routesEqual } from "./hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps, spreadHash } from "./internal.ts";
@@ -768,9 +768,9 @@ export class Producer implements Table {
 	 *
 	 * Close the producer to drop it. Creating a path again supersedes the previous
 	 * broadcast: the origin drops its handle on the old one, which closes it unless the
-	 * application still holds a consumer clone. Each broadcast announces under a freshly
-	 * minted {@link Route.epoch} unless its announce names one, so a newer publisher at the
-	 * path wins over an older remote one; at the same epoch it competes on cost, winning ties.
+	 * application still holds a consumer clone. Announce with a {@link Route.epoch}
+	 * (`Epoch.mint()` per run) so a restart replaces the old broadcast rather than resuming
+	 * into it; at the same epoch, a local broadcast competes on cost and wins ties.
 	 */
 	createBroadcast(path: Path.Valid): broadcast.Producer {
 		path = this.#scope.path(path);
@@ -781,13 +781,8 @@ export class Producer implements Table {
 		hooks.stampPath(producer, path);
 		const front = producer.consume();
 
-		// Every broadcast is a new publisher instance unless an announce names its epoch.
-		let epoch = Epoch.mint();
 		hooks.attachAnnouncer(producer, {
-			announce: (route) => {
-				epoch = route.epoch ?? epoch;
-				this.#advertiseExact(path, front, { ...route, epoch });
-			},
+			announce: (route) => this.#advertiseExact(path, front, route),
 			unannounce: () => this.#retractExact(path, front),
 		});
 

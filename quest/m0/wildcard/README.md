@@ -164,8 +164,8 @@ and is never stitched to another worker's output.
   Required here (decided 2026-10-04), so this line cannot ship with workers
   that can be spliced mid-group.
   Reopened 2026-10-06 by [route epochs](/quest/m0/broadcast-epoch/README.md):
-  a worker's concrete broadcast mints its own epoch, so two workers are never
-  spliced, and the newer one wins the path with a hard switch. Mirroring the
+  a worker that announces its concrete broadcast with its own epoch is never
+  spliced with another, and the newer one wins the path with a hard switch. Mirroring the
   source's epoch is only needed for a seamless move between workers. Decide
   whether that is worth the deterministic-output requirement, or whether the
   group-start quest drops out. Either way, a worker announcing its concrete

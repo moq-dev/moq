@@ -1943,7 +1943,7 @@ test("the newest epoch wins the path over a cheaper one and arrives as a new bro
 	const announced = consumer.announced();
 
 	const old = origin.createBroadcast(path);
-	old.announce({ cost: 1n });
+	old.announce({ epoch: Epoch.mint(), cost: 1n });
 	expect(await nextRoute(announced)).toMatchObject({ prefix: path, kind: "start" });
 
 	// Minted after the local broadcast's, so it is the newer publisher despite the cost.

@@ -142,11 +142,11 @@ Rust or `Epoch.time(epoch)` in TypeScript. A path and an epoch name one
 broadcast. The path never changes, so authorization, patterns, and hidden
 names work exactly as without one.
 
-- **Publishing** a broadcast (`create_broadcast` / `createBroadcast`) mints a
-  fresh epoch, so a restarted publisher is a new broadcast. Replicas of the same
-  content share one by announcing it explicitly (`Route::with_epoch`, or
-  `announce({ epoch })`). A prefix route (`dynamic`) carries none unless given
-  one.
+- **Publishing**: the epoch is whatever the route names, and nothing is minted
+  for you. A publisher mints one per run (`Epoch::mint()` with
+  `Route::with_epoch`, or `announce({ epoch: Epoch.mint() })`), so a restart is
+  a new broadcast. Replicas of the same content announce the same one. A route
+  without an epoch, such as a prefix claim, names no instance.
 - **Resolution** ranks the newest epoch first among routes at the same prefix,
   ahead of cost, and a route without an epoch last.
 - **Resume**: a subscription moves between routes with the same epoch without a

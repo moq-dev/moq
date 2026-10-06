@@ -2,8 +2,7 @@
 
 ## Goal
 
-`moq-ffi` and the py, swift, kt, go, and dart wrappers publish under the
-default epoch like Rust. The generated C and C++
+`moq-ffi` and the py, swift, kt, go, and dart wrappers can announce an epoch like Rust, with a minting helper. The generated C and C++
 bindings pick it up from moq-ffi; libmoq gets no new API. The epoch on an announced route is
 readable, and a publisher can pass an explicit one. The
 reconnect counter `session.epoch()` is renamed so "epoch" has one meaning.
