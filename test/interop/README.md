@@ -19,6 +19,12 @@ subscriber checks end-to-end: the browser encodes fake microphone audio, and the
 Python and Go clients encode a synthetic tone through `moq-ffi` at a 2.5 ms frame
 duration, so the matrix covers the FFI audio path with a non-default codec config.
 
+Whenever the browser subscriber is in the run, the matrix ends with a close-code
+case: Chromium dials the relay with a token its public rules refuse, and
+`WebTransport.closed` must carry the relay's code and reason. Chromium treats a
+server's HTTP/3 control stream ending as fatal, so a server that ends it under
+the close capsule loses both; no Rust peer is that strict.
+
 `just test media` is a separate, browser-only run that asks a harder
 question: is the media a viewer gets actually advancing and in sync, and does the
 player survive the publication lifecycle. See [Media QA](#media-qa).
@@ -175,6 +181,7 @@ clients/
   go/main.go              publish/subscribe via go/wrapper (import moq-go/moq)
   js/                     headless-Chromium publish/subscribe via @moq/watch + @moq/publish
     driver.ts             the interop matrix's browser publisher/subscriber
+    close.ts              the refused session's close code and reason
     media.ts              the media output + lifecycle checks
     harness.ts            shared Playwright plumbing
     src/contract.ts       what the page and its drivers agree on, free of browser imports
@@ -182,6 +189,7 @@ clients/
     src/pattern.ts        how that fixture encodes itself into the picture and the audio
     src/probe.ts          subscriber-side measurement, taken at the sinks
     src/instrument.ts     live counts of the platform resources the page holds
+    src/close.ts          the refused session, read off `WebTransport.closed`
   js-native/subscribe.ts  subscribe via @moq/net + @moq/hang + the WebTransport polyfill
   c/subscribe.c           subscribe via rs/moq-c
 ```
