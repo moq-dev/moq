@@ -119,6 +119,11 @@ Things to look out for:
   or TRACK_STATUS ([Fetch without SUBSCRIBE](/quest/m1/ietf-fetch-only.md))
   carry them. Test that a track accepted with units still yields
   timestamps, alongside the untimed cases.
+- Which objects the malformed rule covers. Status-only objects (End of
+  Group, End of Track), an empty LOC end marker, and the keep-alives and gap
+  markers the draft exempts today carry no media time. Before landing, check
+  that our publishers and any interop peer that sends TIMESCALE stamp every
+  object the rule covers.
 
 Interop facts (2026-10-02):
 
@@ -130,12 +135,6 @@ Interop facts (2026-10-02):
     untimed.
   - libquicr sends neither.
   - MOQtail is undetermined.
-
-- Which objects the malformed rule covers. Status-only objects (End of
-  Group, End of Track), an empty LOC end marker, and the keep-alives and gap
-  markers the draft exempts today carry no media time. Before landing, check
-  that our publishers and any interop peer that sends TIMESCALE stamp every
-  object the rule covers.
 
 Draft: the changes to `draft-lcurley-moq-timestamp.md` ship in this PR, with
 the implementation. Four per-object rules change: a publisher stamping every

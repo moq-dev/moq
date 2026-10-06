@@ -26,6 +26,13 @@ Decided (2026-10-06, maintainer):
 - The wall clock starts when the group's successor arrives at this hop, the
   wall-clock twin of media time's reach (bounded by the immediate
   successor). A group with no successor never ages.
+- "Successor" is the group `reach` uses: `first_servable` above it, so
+  publisher-produced (not fetched backfill), not aborted, and below the
+  subscriber's `set_groups` cap (retention has no cap). The clock is that
+  group's arrival, re-read like reach rather than latched. If N+2 arrives
+  before N+1, N's clock starts at N+2's arrival, and restarts at N+1's
+  arrival once N+1 shows up. If the successor aborts, the clock falls to the
+  next servable successor's arrival, or stops if there is none.
 - Accepted: during a total upstream stall, a reader still on a superseded
   group is skipped forward after `max_age`, where media time alone would let
   it wait. That reader is `max_age` of real time behind live, and the newest
@@ -37,13 +44,24 @@ Decided (2026-10-06, maintainer):
   max(wall, pts), whose worry was a congestion stall (answered by starting the
   clock at the successor), and the retired untimed-failover quest's no-clock
   rule, which this rule replaces.
+- Blocked readers need a deadline wake. `TrackState::poll_stale` re-checks
+  only when the track state changes, and after a failover the successor may
+  be the last change, so a lazily checked wall term never fires for a reader
+  parked in `Recover::poll` or a subscriber waiting on a superseded group.
+  Arm a wake at successor arrival + budget on those reader paths, re-armed
+  when the successor changes.
 - The swept benchmark measures cost and picks between evaluating the wall
-  term on a timer and evaluating it lazily on access. It no longer decides
-  the semantics.
+  term on a timer and evaluating it lazily on access, for retention only. It
+  no longer decides the semantics.
 - Ranked in the clock chain right after the untimed model, because that
   model ships the failover regression below until this lands.
 - Docs update inline: `track::Info::max_age` and `Subscription` docs,
-  `doc/concept`, and the relay config docs. No new guide.
+  js/net's `Info.maxAge` doc, `doc/concept`, the relay config docs, the
+  Expiration section and Max Age field definitions in
+  `drafts/draft-lcurley-moq-lite.md` (which today exclude wall-clock
+  reclamation from the rule), and the untimed text in
+  `drafts/draft-lcurley-moq-timestamp.md` that the untimed model adds
+  ("never media-stale, starts at the latest group"). No new guide.
 
 Facts, and work carried over:
 
@@ -53,12 +71,12 @@ Facts, and work carried over:
   groups past `max_age` until the pool's idle expiry (`Pool::gc`, driven by
   the origin driver without a write) or byte pressure reclaims them.
   `max_age_does_not_drive_wall_eviction` pins that behaviour and changes here.
-- JS does the opposite on `main`: `#prune` in `js/net/src/track.ts` evicts a
-  group once it has been idle on the wall clock (`performance.now`) past
-  `maxAge`, on its own timer. [#4659](https://github.com/moq-dev/moq/pull/4659),
-  which moves JS to media-time `maxAge` with a private 30 s idle window, is
-  reworked to this rule or closed. js/net gets a cache window of its own for
-  idle eviction, as Rust's pool has (kept private).
+- JS matches Rust's media-time rule since
+  [#4659](https://github.com/moq-dev/moq/pull/4659): `#reach` and the drift
+  check in `js/net/src/track.ts` mirror `track.rs`, and a private
+  `CACHE_WINDOW_MS` idle window drives `#prune`, as Rust's pool does. The
+  remaining JS work is the wall term, and rewriting `Info.maxAge`'s doc,
+  which says a congestion stall cannot age content out.
   [Generated @moq/net](/quest/m1/rs2ts/README.md) replaces the JS model later;
   the maintainer chose to fix it by hand first.
 - Bench in `rs/moq-net/benches/track.rs`, swept over tracks (1 to 10k) and
@@ -88,11 +106,12 @@ Tests, with mocked time:
 - A model test in `resume.rs` fails over an untimed track with an abandoned
   group, against a cold route and against one whose copy already caches
   untimed groups past the resumed one, so a cursor that skips ahead can't
-  hide the stall. It fails without the fix.
+  hide the stall. Nothing writes after the successor arrives, so only the
+  deadline wake can release the reader. It fails without the fix.
 - An untimed subscriber starts at the oldest group that isn't stale.
 
-Public API: none unless the JS window becomes configurable; `max_age`
-behaviour changes. Wire: none.
+Public API: no signature change; `max_age` behaviour changes. Wire: no
+encoding change; Max Age semantics in the lite draft change.
 
 ## Required
 
