@@ -35,6 +35,31 @@ struct StatsState {
 	demanded: bool,
 }
 
+/// How [`Session::accepted`] learns that the peer's SETUP arrived.
+#[derive(Clone)]
+pub(crate) enum Accepted {
+	/// The handshake read it before the session started.
+	Read,
+	/// The lite driver records it from the peer's Setup Stream.
+	Lite(crate::lite::PeerSetup),
+	/// The moq-transport driver records it from the peer's SETUP stream.
+	Ietf(crate::ietf::peer::PeerSetup),
+	/// The version carries no SETUP from the peer.
+	Never,
+}
+
+impl Accepted {
+	/// `Ready(true)` once the SETUP arrived, `Ready(false)` if it never will.
+	fn poll(&self, waiter: &kio::Waiter) -> Poll<bool> {
+		match self {
+			Self::Read => Poll::Ready(true),
+			Self::Lite(setup) => setup.poll_seen(waiter).map(|()| true),
+			Self::Ietf(setup) => setup.poll_seen(waiter).map(|()| true),
+			Self::Never => Poll::Ready(false),
+		}
+	}
+}
+
 /// A snapshot of connection statistics for a [`Session`].
 ///
 /// Every field is optional: availability depends on the transport backend (native QUIC
@@ -101,6 +126,7 @@ pub struct Session {
 	send_bandwidth: Option<bandwidth::Consumer>,
 	recv_bandwidth: Option<bandwidth::Consumer>,
 	goaway: Arc<goaway::Handle>,
+	accepted: Accepted,
 }
 
 impl Session {
@@ -216,6 +242,33 @@ impl Session {
 		}
 	}
 
+	/// Wait until the peer accepts the session, or return its close reason if it refuses.
+	///
+	/// The peer's SETUP is its acceptance: a server sends one only once it admits the
+	/// client. [`crate::Client::connect`] returns before that on moq-lite-05+ and
+	/// moq-transport draft 17+, so a request made meanwhile may still be refused with the
+	/// session. Older versions read the SETUP during the handshake and resolve at once,
+	/// except moq-lite-03 and -04, which carry none and return [`Error::Unsupported`].
+	pub async fn accepted(&self) -> Result<(), Error> {
+		kio::wait(|waiter| {
+			match self.accepted.poll(waiter) {
+				Poll::Ready(true) => return Poll::Ready(Ok(())),
+				Poll::Ready(false) => return Poll::Ready(Err(Error::Unsupported)),
+				Poll::Pending => {}
+			}
+			match self.closed.poll(waiter, |state| match &**state {
+				Some(ended) => Poll::Ready(ended.err.clone()),
+				None => Poll::Pending,
+			}) {
+				Poll::Ready(Ok(err)) => Poll::Ready(Err(err)),
+				// The driver was dropped before it could observe the close.
+				Poll::Ready(Err(_)) => Poll::Ready(Err(Error::Cancel)),
+				Poll::Pending => Poll::Pending,
+			}
+		})
+		.await
+	}
+
 	/// Drain the peer gracefully: the handle for sending this session's single
 	/// GOAWAY.
 	///
@@ -255,6 +308,7 @@ impl Session {
 		recv_bandwidth: Option<bandwidth::Consumer>,
 		protocol: crate::driver::Protocol<S>,
 		goaway: goaway::Handle,
+		accepted: Accepted,
 	) -> (Self, crate::Driver<S>)
 	where
 		S: crate::transport::poll::Session,
@@ -298,6 +352,7 @@ impl Session {
 			send_bandwidth,
 			recv_bandwidth,
 			goaway: Arc::new(goaway),
+			accepted,
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),

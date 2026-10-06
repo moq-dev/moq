@@ -42,6 +42,11 @@ Shared decisions:
 
 - The race returns the winner plus the still-pending QUIC dial when WebSocket
   wins. The attempt's connect deadline bounds that dial; no extra deadline.
+- The swap waits for the server to admit the QUIC session
+  (`moq_net::Session::accepted`, its SETUP) within that same deadline; until
+  then the WebSocket session gets no GOAWAY. A refused or stalled QUIC session
+  is dropped and WebSocket keeps serving. moq-lite-03 and -04 carry no server
+  SETUP, so they never upgrade.
 - On a successful upgrade the "WebSocket won" memo (`WEBSOCKET_WON` in
   `moq-tokio`, `websocketWon` in `js/net`) forgets the URL: QUIC works on this
   network, so the head start comes back. Otherwise a network where WebSocket

@@ -549,7 +549,13 @@ impl Client {
 					let moq = moq.clone();
 					let dial = Box::pin(async move {
 						let quic = quic.await?;
-						Ok(Box::pin(async move { Ok(connect_session(&moq, quic).await?) }) as Handshake)
+						Ok(Box::pin(async move {
+							let session = connect_session(&moq, quic).await?;
+							// The WebSocket session is only drained once the peer admits this one.
+							// A refusal, or a version with no SETUP to wait on, keeps WebSocket.
+							session.accepted().await?;
+							Ok(session)
+						}) as Handshake)
 					});
 					Upgrade::new(dial, transport)
 				});
@@ -682,7 +688,7 @@ enum Stage {
 pub(crate) enum Step {
 	/// The QUIC transport is up; the MoQ handshake has started on it.
 	Handshaking,
-	/// The MoQ session over QUIC is ready to take over, running on this transport.
+	/// The peer admitted the MoQ session over QUIC, which is ready to take over on this transport.
 	Done(moq_net::Session, crate::Transport),
 }
 
@@ -703,7 +709,7 @@ impl Upgrade {
 	}
 
 	/// Drive the dial: `Ready(Ok(Step::Handshaking))` once when the QUIC transport
-	/// comes up, then `Ready(Ok(Step::Done))` when the handshake on it completes. Not
+	/// comes up, then `Ready(Ok(Step::Done))` once the peer admits the session on it. Not
 	/// polled again after `Done` or an error.
 	pub(crate) fn poll(&mut self, waiter: &moq_net::kio::Waiter) -> Poll<crate::Result<Step>> {
 		if let Some((sleep, timeout)) = &mut self.deadline
@@ -856,6 +862,26 @@ async fn connect_session<S: moq_net::transport::poll::Boxable>(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A QUIC session the peer never admits gives up at the connect deadline, so the
+	/// WebSocket session keeps serving instead of waiting on the upgrade forever.
+	#[tokio::test(start_paused = true)]
+	async fn a_stalled_upgrade_gives_up_at_the_deadline() {
+		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+		let waiter = moq_net::kio::Waiter::noop();
+		let handshake: Handshake = Box::pin(std::future::pending());
+		let mut upgrade = Upgrade::new(Box::pin(async move { Ok(handshake) }), crate::Transport::WebTransport)
+			.until(tokio::time::Instant::now() + TIMEOUT, TIMEOUT);
+
+		assert!(matches!(upgrade.poll(&waiter), Poll::Ready(Ok(Step::Handshaking))));
+		assert!(upgrade.poll(&waiter).is_pending());
+
+		tokio::time::advance(TIMEOUT).await;
+		assert!(matches!(
+			upgrade.poll(&waiter),
+			Poll::Ready(Err(Error::ConnectTimeout(TIMEOUT)))
+		));
+	}
 
 	#[cfg(feature = "noq")]
 	#[tokio::test]

@@ -49,6 +49,16 @@ impl PeerSetup {
 		}
 	}
 
+	/// Poll until the peer's SETUP arrives.
+	pub fn poll_seen(&self, waiter: &kio::Waiter) -> std::task::Poll<()> {
+		self.0
+			.poll(waiter, |peer| match peer.is_some() {
+				true => std::task::Poll::Ready(()),
+				false => std::task::Poll::Pending,
+			})
+			.map(|_| ())
+	}
+
 	/// Await the peer's SETUP.
 	///
 	/// The peer MUST send exactly one, so this resolves once that stream is read. Waits

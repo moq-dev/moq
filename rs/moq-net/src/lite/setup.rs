@@ -283,6 +283,11 @@ impl PeerSetup {
 		Ok(())
 	}
 
+	/// Poll until the peer's SETUP arrives.
+	pub fn poll_seen(&self, waiter: &kio::Waiter) -> std::task::Poll<()> {
+		self.poll_get(waiter, |_| ())
+	}
+
 	/// Poll for the peer's advertised probe level, waiting until its SETUP arrives.
 	pub fn poll_probe_level(&self, waiter: &kio::Waiter) -> std::task::Poll<ProbeLevel> {
 		self.poll_get(waiter, |setup| setup.probe)

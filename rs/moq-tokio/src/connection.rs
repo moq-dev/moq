@@ -1435,7 +1435,7 @@ async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>, shared
 ///
 /// `upgrade` is a QUIC dial still in flight after the WebSocket fallback won. It reports
 /// [`Status::Migrating`] once the QUIC transport is up and returns [`Next::Upgraded`] once
-/// the handshake on it completes. A failure leaves this session serving. It is dropped with
+/// the peer admits the session on it. A failure leaves this session serving. It is dropped with
 /// the session otherwise: the redial races QUIC again.
 async fn run_session(
 	shared: &Shared,
@@ -1478,7 +1478,7 @@ async fn run_session(
 	.await
 }
 
-/// Drive a pending upgrade, `Ready` with the QUIC session once its handshake completes.
+/// Drive a pending upgrade, `Ready` with the QUIC session once the peer admits it.
 fn poll_upgrade(
 	shared: &Shared,
 	upgrade: &mut Option<crate::client::Upgrade>,
@@ -2247,6 +2247,8 @@ mod tests {
 		url: Url,
 		forwarder: Forwarder,
 		accepted: tokio::sync::mpsc::UnboundedReceiver<(crate::Transport, moq_net::Session)>,
+		/// QUIC requests held unanswered in [`Quic::Refused`] mode.
+		held: tokio::sync::mpsc::UnboundedReceiver<crate::server::Request>,
 	}
 
 	/// When a [`Fallback`] lets QUIC through.
@@ -2260,6 +2262,9 @@ mod tests {
 		/// Once the WebSocket fallback has closed its first session mid-handshake. No
 		/// MoQ server sits behind the fallback in this mode.
 		AfterWebSocketFails,
+		/// Once the test calls [`Forwarder::open`], like `Held`, and the server leaves
+		/// each QUIC request for the test to answer, as a session limit would refuse it.
+		Refused,
 	}
 
 	#[cfg(all(feature = "websocket", feature = "noq"))]
@@ -2318,9 +2323,14 @@ mod tests {
 			}
 
 			let (tx, accepted) = tokio::sync::mpsc::unbounded_channel();
+			let (hold, held) = tokio::sync::mpsc::unbounded_channel();
 			tokio::spawn(async move {
 				while let Some(request) = server.accept().await {
 					let transport = request.transport();
+					if quic == Quic::Refused && transport != crate::Transport::WebSocket {
+						let _ = hold.send(request);
+						continue;
+					}
 					if let Ok(session) = request.ok().await {
 						let _ = tx.send((transport, session));
 					}
@@ -2331,7 +2341,16 @@ mod tests {
 				url: url(&format!("http://127.0.0.1:{port}/")),
 				forwarder,
 				accepted,
+				held,
 			}
+		}
+
+		/// The next QUIC request held in [`Quic::Refused`] mode.
+		async fn held(&mut self) -> crate::server::Request {
+			tokio::time::timeout(UPGRADE_WAIT, self.held.recv())
+				.await
+				.expect("the QUIC request never reached the server")
+				.expect("the server stopped")
 		}
 
 		async fn accept(&mut self) -> (crate::Transport, moq_net::Session) {
@@ -2557,6 +2576,74 @@ mod tests {
 		assert_eq!(connection.transport(), Some(crate::Transport::WebTransport));
 		// The GOAWAY got through, so its sender has nothing to warn about.
 		assert!(!logs_contain("failed to send goaway"));
+	}
+
+	/// A QUIC session the server refuses after its transport came up, as a session
+	/// limit would while the WebSocket session holds the slot, leaves the WebSocket
+	/// session serving: no GOAWAY, no disconnect, and the next group arrives over it.
+	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[tokio::test]
+	async fn a_refused_upgrade_keeps_websocket() {
+		let origin = crate::origin::spawn();
+		let broadcast = origin.create_broadcast("cam").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let track = broadcast.create_track("video", None).unwrap();
+		let write = |payload: &'static [u8]| {
+			let mut group = track.append_group().unwrap();
+			group.write_frame(moq_net::Timestamp::ZERO, payload).unwrap();
+			group.finish().unwrap();
+		};
+
+		let mut fallback = Fallback::start(&origin, Quic::Refused).await;
+
+		let subscriber = crate::origin::spawn();
+		let mut config = crate::connect::Config::default();
+		config.tls.insecure = Some(true);
+		let client = config
+			.init(Default::default())
+			.unwrap()
+			.with_subscriber(subscriber.clone());
+		let mut connection = tokio::time::timeout(UPGRADE_WAIT, client.connect(fallback.url.clone()).established())
+			.await
+			.expect("never connected")
+			.unwrap();
+		assert_eq!(connection.transport(), Some(crate::Transport::WebSocket));
+		assert_eq!(connection.status().await.unwrap(), Status::Connected);
+		let (_, websocket) = fallback.accept().await;
+
+		let cam = tokio::time::timeout(UPGRADE_WAIT, subscriber.consume().routed_broadcast("cam"))
+			.await
+			.unwrap()
+			.unwrap();
+		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
+		write(b"g0");
+		assert_eq!(next_group(&mut sub).await, 0);
+
+		// The QUIC transport comes up and its MoQ handshake reaches the server, which
+		// holds the request: the WebSocket session must not be drained yet.
+		fallback.forwarder.open();
+		let request = fallback.held().await;
+		assert_eq!(connection.transport(), Some(crate::Transport::WebSocket));
+		assert!(!connection.connected(), "swapped onto QUIC before it was admitted");
+		let status = tokio::time::timeout(UPGRADE_WAIT, connection.status()).await.unwrap();
+		assert_eq!(status.unwrap(), Status::Migrating);
+		assert!(
+			websocket.draining().peek().is_none(),
+			"drained before QUIC was admitted"
+		);
+
+		request.reject(crate::server::Reject::Forbidden).await.unwrap();
+		let status = tokio::time::timeout(UPGRADE_WAIT, connection.status()).await.unwrap();
+		assert_eq!(status.unwrap(), Status::Connected);
+		assert_eq!(connection.transport(), Some(crate::Transport::WebSocket));
+		assert_eq!(connection.epoch(), 1);
+		assert!(
+			websocket.draining().peek().is_none(),
+			"the refused upgrade drained WebSocket"
+		);
+
+		write(b"g1");
+		assert_eq!(next_group(&mut sub).await, 1);
 	}
 
 	/// When WebSocket wins the race but its MoQ handshake fails, the attempt falls back

@@ -52,6 +52,14 @@ let (session, driver) = client.connect(now, transport).await?;
 tokio::spawn(moq_net::time::run(driver));
 ```
 
+On moq-lite-05+ and moq-transport draft 17+, `Client::connect` returns before
+the server has admitted the session, so a request made at once may still be
+refused along with it. `session.accepted().await` waits for the server's SETUP,
+which it sends only once it admits the client, and returns the close reason
+instead if the server refuses. Older versions read that SETUP during the
+handshake and resolve at once, except moq-lite-03 and -04, which carry none and
+return `Error::Unsupported`.
+
 A custom event loop calls `driver.poll(now, waiter)` with a nondecreasing
 `moq_net::time::Instant`. `Ok(Some(at))` asks to be polled again by `at` or
 on external activity, `Ok(None)` only on external activity, and `Err` is the
