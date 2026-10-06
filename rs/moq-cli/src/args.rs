@@ -951,6 +951,7 @@ pub struct Container {
 
 	/// How long to wait for the broadcast to come back once it ends (e.g. `10s`).
 	/// `ts` only; the output stops while it is gone and resumes flagged as a break.
+	/// An export that fails while the broadcast is still up exits without waiting.
 	#[usage(long, default = "0s")]
 	pub linger: crate::duration::Duration,
 

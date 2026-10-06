@@ -391,9 +391,17 @@ impl Subscribe {
 				}
 			};
 
-			// Any end waits out the linger, and on expiry the last one is the result: a
+			// An end waits out the linger, and on expiry the last one is the result: a
 			// clean catalog finish exits 0, a drop or any other failure exits 1.
 			if linger.is_zero() {
+				return Ok(end?);
+			}
+			// A failure ends the broadcast only if the broadcast goes too. One that stays
+			// up cannot return, so the failure is the export's own and exits now.
+			if let Err(err) = &end
+				&& !closes_within(&broadcast, CLOSE_GRACE.min(linger)).await
+			{
+				tracing::warn!(%err, "export failed with the broadcast still up, so not lingering");
 				return Ok(end?);
 			}
 			match &end {
@@ -429,6 +437,17 @@ impl Subscribe {
 
 		Ok(())
 	}
+}
+
+/// How long an export failure waits for its broadcast to close before it counts as the export's own.
+///
+/// A killed publisher's tracks can error just before its broadcast closes, so the two need not
+/// land together.
+const CLOSE_GRACE: Duration = Duration::from_secs(1);
+
+/// Whether `broadcast` closes within `grace`.
+async fn closes_within(broadcast: &hang::moq_net::broadcast::Consumer, grace: Duration) -> bool {
+	tokio::time::timeout(grace, broadcast.closed()).await.is_ok()
 }
 
 /// Wait up to `linger` for the `ended` broadcast to return and `ts` to resume on it.
@@ -772,6 +791,37 @@ mod tests {
 		delivery.update(&next, 1);
 		delivery.deliver(&next, false, &mut out).await.unwrap();
 		assert_eq!(now.elapsed(), Duration::from_millis(40));
+	}
+
+	/// A broadcast that stays up is not closing, however long the grace.
+	#[tokio::test(start_paused = true)]
+	async fn a_live_broadcast_does_not_close_within_the_grace() {
+		let (origin, driver) = hang::moq_net::origin::Producer::new(Default::default());
+		tokio::spawn(hang::moq_net::time::run(driver));
+		let _live = origin.publish("live", Default::default()).unwrap();
+		let broadcast = origin.consume().request_broadcast("live").await.unwrap();
+
+		let start = tokio::time::Instant::now();
+		assert!(!closes_within(&broadcast, CLOSE_GRACE).await);
+		assert_eq!(start.elapsed(), CLOSE_GRACE);
+	}
+
+	/// A broadcast that closes just after its tracks fail is still an end.
+	#[tokio::test(start_paused = true)]
+	async fn a_close_just_after_the_failure_is_an_end() {
+		let (origin, driver) = hang::moq_net::origin::Producer::new(Default::default());
+		tokio::spawn(hang::moq_net::time::run(driver));
+		let live = origin.publish("live", Default::default()).unwrap();
+		let broadcast = origin.consume().request_broadcast("live").await.unwrap();
+
+		let gap = CLOSE_GRACE / 4;
+		tokio::spawn(async move {
+			tokio::time::sleep(gap).await;
+			drop(live);
+		});
+		let start = tokio::time::Instant::now();
+		assert!(closes_within(&broadcast, CLOSE_GRACE).await);
+		assert_eq!(start.elapsed(), gap);
 	}
 
 	/// A broadcast that returns but never serves its catalog gives up at the linger,
