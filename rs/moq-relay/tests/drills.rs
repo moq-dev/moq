@@ -98,11 +98,12 @@ struct Path {
 
 impl Path {
 	async fn start(lane: Lane, relay: &RelayHost) -> Self {
-		Self::shaped(lane, relay, impairment()).await
+		Self::shaped(lane, relay, impairment(), seed(lane)).await
 	}
 
-	/// [`Self::start`], treating the impaired lane to `profile` both ways.
-	async fn shaped(lane: Lane, relay: &RelayHost, profile: moq_shaper::Profile) -> Self {
+	/// [`Self::start`], treating the impaired lane to `profile` both ways with
+	/// the shaper seeded by `seed`.
+	async fn shaped(lane: Lane, relay: &RelayHost, profile: moq_shaper::Profile, seed: u64) -> Self {
 		let Lane::Impaired = lane else {
 			return Self {
 				url: relay.url(),
@@ -110,12 +111,6 @@ impl Path {
 			};
 		};
 
-		// A fresh seed each run explores more of the decision space; the one
-		// printed below replays a failure's decisions.
-		let seed = match std::env::var("MOQ_SHAPER_SEED") {
-			Ok(seed) => seed.parse().expect("MOQ_SHAPER_SEED is not a u64"),
-			Err(_) => rand::random(),
-		};
 		let shaper = moq_shaper::Shaper::bind(moq_shaper::Config {
 			bind: "127.0.0.1:0".parse().unwrap(),
 			target: format!("127.0.0.1:{}", relay.port).parse().unwrap(),
@@ -125,7 +120,7 @@ impl Path {
 		})
 		.await
 		.expect("start the shaper");
-		println!("impaired: MOQ_SHAPER_SEED={seed}, profile {:?}", shaper.config().up);
+		println!("impaired: seed {seed}, profile {:?}", shaper.config().up);
 
 		Self {
 			url: format!("https://{}/drill", shaper.addr()).parse().unwrap(),
@@ -136,13 +131,28 @@ impl Path {
 	/// Fail the drill unless the impairment it ran under actually acted.
 	///
 	/// A profile that silently did nothing would turn this lane into a second
-	/// loopback run that passes for free.
-	fn verify(mut self) {
-		if let Some(shaper) = self.shaper.take() {
-			let stats = shaper.verify().unwrap_or_else(|err| panic!("impaired: {err:#}"));
-			println!("impaired: {stats}");
-		}
+	/// loopback run that passes for free. Returns what the shaper did, if any.
+	fn verify(mut self) -> Option<moq_shaper::Stats> {
+		let shaper = self.shaper.take()?;
+		let stats = shaper.verify().unwrap_or_else(|err| panic!("impaired: {err:#}"));
+		println!("impaired: {stats}");
+		Some(stats)
 	}
+}
+
+/// A drill's base shaper seed, printed in the impaired lane. A fresh seed each
+/// run explores more of the decision space; `MOQ_SHAPER_SEED` set to the
+/// printed one replays a failure's decisions. A drill with several paths seeds
+/// each one off it.
+fn seed(lane: Lane) -> u64 {
+	let seed = match std::env::var("MOQ_SHAPER_SEED") {
+		Ok(seed) => seed.parse().expect("MOQ_SHAPER_SEED is not a u64"),
+		Err(_) => rand::random(),
+	};
+	if let Lane::Impaired = lane {
+		println!("impaired: MOQ_SHAPER_SEED={seed}");
+	}
+	seed
 }
 
 impl Drop for Path {
@@ -734,11 +744,14 @@ const PAYLOAD: usize = 256;
 const SETTLE: Duration = Duration::from_secs(10);
 
 /// The cross-relay drill's link: the drills' impairment behind a bottleneck a
-/// burst overruns, so its tail waits in the queue or is dropped from it.
+/// burst overruns, so its tail waits in the queue or is dropped from it. It is
+/// slower than [`credit`]'s receive window lets a sender go (about 1 KiB per
+/// round trip, some 160 kbit/s), or the window would bind first and the queue
+/// would never fill.
 fn bursty() -> moq_shaper::Profile {
 	moq_shaper::Profile {
 		rate: Some(moq_shaper::Rate {
-			bits_per_second: 1_000_000,
+			bits_per_second: 100_000,
 			burst: 1500,
 			queue: Duration::from_millis(50),
 		}),
@@ -816,7 +829,8 @@ async fn bursts_cross_a_cluster(lane: Lane) {
 	let mut config = relay_config(None);
 	config.quic = credit(lane, config.quic);
 	let origin = RelayHost::start(config).await;
-	let peer = Path::shaped(lane, &origin, bursty()).await;
+	let seed = seed(lane);
+	let peer = Path::shaped(lane, &origin, bursty(), seed).await;
 
 	// The edge relay dials the origin as a cluster peer, through its own path.
 	let mut peer_url = peer.url.clone();
@@ -829,8 +843,8 @@ async fn bursts_cross_a_cluster(lane: Lane) {
 	config.cluster.connect = vec![moq_relay::cluster::Peer::new(peer_url.to_string())];
 	let edge = RelayHost::start(config).await;
 
-	let publish_path = Path::shaped(lane, &origin, bursty()).await;
-	let subscribe_path = Path::shaped(lane, &edge, bursty()).await;
+	let publish_path = Path::shaped(lane, &origin, bursty(), seed.wrapping_add(1)).await;
+	let subscribe_path = Path::shaped(lane, &edge, bursty(), seed.wrapping_add(2)).await;
 
 	let publisher = moq_tokio::origin::spawn();
 	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
@@ -903,8 +917,11 @@ async fn bursts_cross_a_cluster(lane: Lane) {
 		});
 	};
 
+	// A margin past each settle task's own [`SETTLE`] timeout, so a group that
+	// times out is reported by name rather than as a generic stall.
+	let step_timeout = SETTLE + Duration::from_secs(1);
 	while (outcomes.len() as u64) < total {
-		let step = tokio::time::timeout(SETTLE, async {
+		let step = tokio::time::timeout(step_timeout, async {
 			tokio::select! {
 				group = reader.groups.recv_group() => Step::Group(Box::new(group)),
 				Some(settled) = pending.join_next() => {
@@ -917,7 +934,7 @@ async fn bursts_cross_a_cluster(lane: Lane) {
 		.unwrap_or_else(|_| {
 			let missing: Vec<u64> = (0..total).filter(|sequence| !outcomes.contains_key(sequence)).collect();
 			panic!(
-				"stalled: nothing arrived within {SETTLE:?}, {} of {total} groups missing: {missing:?}",
+				"stalled: nothing arrived within {step_timeout:?}, {} of {total} groups missing: {missing:?}",
 				missing.len()
 			)
 		});
@@ -1001,9 +1018,14 @@ async fn bursts_cross_a_cluster(lane: Lane) {
 	drop(publish_session);
 	drop(edge);
 	drop(origin);
-	peer.verify();
-	publish_path.verify();
-	subscribe_path.verify();
+	let overflowed: u64 = [peer, publish_path, subscribe_path]
+		.into_iter()
+		.filter_map(Path::verify)
+		.map(|stats| stats.up.overflowed + stats.down.overflowed)
+		.sum();
+	if let Lane::Impaired = lane {
+		assert!(overflowed > 0, "no burst overran a bottleneck, so none was exercised");
+	}
 }
 
 lanes!(bursts_cross_a_cluster);

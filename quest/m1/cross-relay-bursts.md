@@ -28,9 +28,9 @@ used and against `main`:
 - **Not reproduced.** Unanswered FETCHes and the 30 s `Stream(Old)` stalls
   showed up on no build, nor in the real-QUIC drill
   `rs/moq-relay/tests/drills.rs::bursts_cross_a_cluster` (bursts of 30
-  across two clustered relays, every hop with 5% loss, delay, a 1 Mbit/s
-  bottleneck, and 16-stream QUIC credit): every group arrives within about
-  3 s, and the occasional live `Old` reset is recovered by FETCH. Several
+  across two clustered relays, every hop with 5% loss, delay, a 100 kbit/s
+  bottleneck that each burst overflows, and 16-stream QUIC credit): every
+  group arrives within about 3.5 s, and the occasional live `Old` reset is recovered by FETCH. Several
   30 s timers of that era have since been removed or shortened (#4606, #4741).
 - **Queueing.** FETCHes beyond a session's stream credit wait for it, one
   cross-relay round trip per slot, so with tight credit a gap's FETCH can

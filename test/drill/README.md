@@ -75,11 +75,13 @@ forwards each datagram, both ways, after applying the same profile:
 
 `bursts_cross_a_cluster` shapes all three hops, the publisher's, the peer link
 between the relays, and the subscriber's, each with that profile behind a
-1 Mbit/s bottleneck with a 50ms queue, which a burst overruns. Its impaired lane
-also grants less QUIC credit than a burst needs at every endpoint: 16 concurrent
-streams (each group is a stream, each FETCH another) and receive windows of a
-few groups, so senders wait on `MAX_STREAMS` and `MAX_DATA` that the path can
-lose. Its loopback lane keeps the defaults.
+100 kbit/s bottleneck with a 50ms queue, which a burst overruns. Its impaired
+lane also grants less QUIC credit than a burst needs at every endpoint: 16
+concurrent streams (each group is a stream, each FETCH another) and receive
+windows of a few groups, so senders wait on `MAX_STREAMS` and `MAX_DATA` that
+the path can lose. The bottleneck sits below the rate those windows allow, so
+both bind, and the drill fails unless some burst overflowed a queue. Its
+loopback lane keeps the defaults.
 
 It is a datagram relay, not an HTTP or TCP proxy, neither of which can impair
 QUIC. It needs no capabilities, works the same on macOS and Linux, and touches
@@ -88,9 +90,10 @@ The shaper runs on the test's runtime rather than the relay's, so killing the
 relay leaves the path up, the way a network outlives the server behind it.
 
 Every decision the shaper makes comes from one seed. Each run picks a fresh one
-and prints it, with the profile, as `impaired: MOQ_SHAPER_SEED=...`; setting that
-variable replays the same decisions. Kernel scheduling still varies delivery
-timing, so the seed makes the decisions reproducible, not the clock. Each client
+and prints it as `impaired: MOQ_SHAPER_SEED=...`; setting that variable replays
+the same decisions. A drill with several paths seeds each one off that base.
+Kernel scheduling still varies delivery timing, so the seed makes the decisions
+reproducible, not the clock. Each client
 draws from its own stream, numbered in the order clients first send, so
 concurrent clients that race to connect can swap streams between runs.
 
