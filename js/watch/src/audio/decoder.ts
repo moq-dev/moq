@@ -189,9 +189,11 @@ export class Decoder {
 		const config = effect.get(this.source.out.config);
 		if (!config) return;
 
-		// The same advertised shape keeps the rate #emit learned from the decoder.
+		// A rendition matching either the advertised or the decoded rate keeps the graph, and with it the
+		// rate #emit learned from the decoder.
 		const shape = this.#shape.peek();
-		if (shape?.catalog === config.sampleRate && shape.channels === config.numberOfChannels) return;
+		const rate = shape?.catalog === config.sampleRate || shape?.sampleRate === config.sampleRate;
+		if (rate && shape?.channels === config.numberOfChannels) return;
 
 		this.#shape.set({
 			catalog: config.sampleRate,
@@ -340,8 +342,8 @@ export class Decoder {
 		this.#instance = active.closed;
 
 		// The ring outlives this effect (it's keyed on the sample rate and channel count), so a
-		// replacement subscription (a rendition swap, a republished broadcast, a reconnect) inherits
-		// whatever its predecessor decoded. Samples are timestamp indexed, so the replacement
+		// replacement subscription on the same broadcast (a rendition swap, a return from an absence)
+		// inherits whatever its predecessor decoded. Samples are timestamp indexed, so the replacement
 		// overwrites the slots it lands on, but a publisher writing ahead of real-time leaves seconds
 		// of tail beyond them. Drop that once the replacement's first frame says where it starts.
 		this.#handover.opened();

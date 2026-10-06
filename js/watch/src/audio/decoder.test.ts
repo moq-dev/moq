@@ -405,6 +405,24 @@ describe("Decoder across a rendition's absence", () => {
 		}
 	});
 
+	it("keeps the graph for a rendition at the rate the decoder already outputs", async () => {
+		const playback = await play(Time.Milli(100));
+		try {
+			// Advertised at 24 kHz but decoded at 48 kHz (Opus on Chrome), so the graph settles at 48 kHz.
+			playback.restore({ sampleRate: 24_000 });
+			await microtasks();
+			await playback.play();
+			const built = contexts.length;
+			expect(contexts.at(-1)?.sampleRate).toBe(48_000);
+
+			playback.restore({ sampleRate: 48_000 });
+			await microtasks();
+			expect(contexts).toHaveLength(built);
+		} finally {
+			playback.close();
+		}
+	});
+
 	it("decodes the frames that arrive before the worklet loads", async () => {
 		let load = () => {};
 		moduleLoaded = new Promise((resolve) => {
