@@ -73,6 +73,7 @@ blocks. The quests that gated m0 lines moved under them.
 - [Auth client CA](/quest/m1/relay-auth-client-ca.md) - `auth::Config::validate` and `init` take the client-CA flag, so no caller can skip the check
 - [TS stats module](/quest/m1/ts-stats-module.md) - the TS stats types move under `ts::stats` as `Snapshot` and `Stream`, with an owned `track`
 - [Audio capture without ALSA link](/quest/m1/capture-alsa-link.md) - moq-audio capture and playback build on Linux without linking libasound
+- [Remove Opus DTX](/quest/m1/opus-usedtx-removal.md) - `@moq/publish` drops `usedtx`, since Chromium shifts the capture timeline under DTX
 - [Capture by default](/quest/m1/capture-default.md) - moq-video and moq-audio build `capture` by default, so pre-merge checks test it and the capture gate goes away
 - [Ship capture and playback](/quest/m1/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
 - [Deploy moq.sh](/quest/m1/moq-sh-deploy.md) - the first manual deploy serves the installer at moq.sh, and the first `release` run proves the CI token
