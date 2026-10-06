@@ -4961,7 +4961,6 @@ dependencies = [
  "libc",
  "moq-net",
  "moq-noq-proto",
- "moq-noq-udp",
  "moq-sock",
  "moq-tokio",
  "nix",
