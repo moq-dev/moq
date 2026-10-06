@@ -36,6 +36,11 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 A nested `<video>` gets the raw capture stream; a `<canvas>` is drawn by the
 element. `<moq-publish-support>` shows what the browser can encode.
 
+File demuxers load when decoding a file whose MIME type is empty or does not
+start with `image/`. Camera, screen, and files identified as images do not
+load them. The file picker opens synchronously, before any decoder module
+is loaded.
+
 Camera and microphone failures are readable through the element's
 `el.sources.video` and `el.sources.audio` signals. When these hold a
 `Publish.Source.Camera` or `Publish.Source.Microphone`, their `out.error` signal
@@ -54,9 +59,21 @@ framerate, and bitrate are tunable through `el.video.config`; the audio
 encoder exposes its codec and volume. For simulcast or several renditions,
 drop the element and register your own encoders on a `Publish.Broadcast`.
 
+Every audio volume change ramps over `el.audio.fade`, 50ms by default, so
+`volume = 0` is silent once the fade passes. A fade of 0 steps at once; a
+negative or non-finite fade drops the rendition until it is fixed.
+Disabling a rendition (`muted` on the element) ends the audio timeline with
+a marker, so a viewer that stays subscribed, or joins during the pause, never
+plays the audio before it as live.
+
 `el.video.cut()` asks for a keyframe on top of the `keyframeInterval` cadence,
 for a resume, a recording cut, or a known tune-in moment. Requests coalesce into
 the next keyframe, and forced keyframes land at least 500ms apart.
+
+A still source, such as a screen share of an unchanging slide, delivers a frame
+only when its picture changes. `Video.Capture` holds the newest frame and opens
+every new reader with a copy stamped at the moment it attaches, so a viewer or
+recorder that subscribes later still gets the current picture as a keyframe.
 
 The video and audio encoders measure how far their output falls behind the media
 clock when they flush frames. Catalog jitter is the spread above each

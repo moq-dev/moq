@@ -26,13 +26,15 @@ producers (`import::Opus`, H.264, and so on) are available for feeding frames
 you already have.
 
 MPEG-TS `Import::stats` returns cumulative per-PID `StreamStats`: delivered
-`units`, transport-clock `quiet` time, audio `resyncs`, scanned bytes `discarded`,
-frames `unconfirmed`, damaged units refused in `damaged`, and the PID's share of
-the TR 101 290 counters. A malformed media packet, PES header, or codec unit is
-dropped whole; only that PID loses sync, and video closes its group at the break
-and waits for its next keyframe. Publishing and catalog failures remain
-fatal. `ts::stats::Log` reports these counters for both the CLI and SRT gateway.
-The exporter's `damaged` count remains zero.
+`units`, transport-clock `quiet` time, a `class` of audio, video, or data, audio
+`resyncs`, scanned bytes `discarded`, frames `unconfirmed`, damaged units refused
+in `damaged`, and the PID's share of the TR 101 290 counters. A malformed media
+packet, PES header, or codec unit is dropped whole; only that PID loses sync, and
+video closes its group at the break and waits for its next keyframe. Publishing
+and catalog failures remain fatal. `ts::stats::Log` reports these counters for
+both the CLI and SRT gateway, and grades a stopped stream for audio and video
+only; a sparse data PID such as SCTE-35 stays in the row and is not logged for a
+quiet second. The exporter's `damaged` count remains zero.
 
 fMP4 export emits one fragment per publisher group by default, including audio.
 A closed group flushes even if the live publisher pauses before its next frame.
@@ -42,6 +44,17 @@ timestamp or endpoint marker. Audio and samples with explicit durations remain
 immediate. CMAF audio
 samples are always encoded as sync samples; the decoded `Frame::keyframe` marks
 only the first audio sample of a MoQ group.
+
+`fmp4::Export` writes its init segment once every rendition can be described,
+queueing other tracks' fragments (up to 30 seconds) behind it. The track set is
+then fixed. A rendition that returns with the same sample entry reuses its track
+id; `fmp4::Error::TrackAdded`, `TrackChanged`, and `TrackRewound` end the export
+for a new rendition, a changed sample entry, or a replay of media already
+written, and `TrackUndescribed` names a track that never delivered its codec
+configuration. An Opus entry synthesized without a catalog `description` guesses
+its pre-skip and input sample rate, so a later OpusHead that agrees on everything
+else settles it instead of changing it. An OpusHead whose channel count
+contradicts its catalog entry fails with `fmp4::Error::OpusChannelCount`.
 
 Each catalog track constructor returns one `container::Producer` that owns the
 media stream and its catalog entry. `set` publishes or replaces its config,
@@ -103,7 +116,8 @@ telemetry lagging its video shows up as `delay`. A capture `Instant` (a
 datagram's arrival, a sensor read) converts with `Clock::capture` on the
 catalog's clock, which refuses an instant ahead of now. A timestamp ahead of now
 is published anyway and measured as zero delay, so a source clock running
-slightly fast is not rejected.
+slightly fast is not rejected. Capture inputs stay `std::time::Instant` on
+native; browser targets refuse these native instants.
 
 ```rust
 let at = catalog.clock().capture(received_at)?;
@@ -120,11 +134,14 @@ The fMP4, MPEG-TS, FLV, and MKV importers publish the source's own timestamps
 (MPEG-TS after unwrapping its 33-bit PTS; fMP4 passthrough keeps each `tfdt`)
 and anchor the catalog's broadcast clock instead: the first frame's timestamp
 maps to the time it arrived, and every track of the input, like every importer
-sharing the catalog, keeps that one mapping. Data tracks stamp on it too, even
-one created before that first frame, though anything it wrote earlier stays on
-the clock the catalog started with. A clock set with
+sharing the catalog, keeps that one mapping. Each importer withholds the
+catalog until that first frame, so its first snapshot already carries the
+anchored root `clock` for readers that copy it once. Data tracks stamp on the
+clock too, even one created before that first frame, though anything it wrote
+earlier stays on the clock the catalog started with. A clock set with
 `Config::with_clock` is never re-anchored, for a recording whose zero names its
-real start.
+real start. The broadcast clock uses the async runtime's monotonic time, so
+native tests can pause and advance it with Tokio; its wall mapping stays fixed.
 
 Group starts never go backwards. A group starting before the previous group's
 start ends the import with `TimestampRewind`, whose `timestamp` and `floor` fields

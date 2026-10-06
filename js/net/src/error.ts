@@ -92,8 +92,8 @@ export const StreamCode = Object.freeze(
 		Evicted: 0x35 as StreamCode,
 		/** A frame declared a payload larger than the receiver accepts. */
 		FrameTooLarge: 0x38 as StreamCode,
-		/** The publisher could serve this request but has no capacity for it now. */
-		NoCapacity: 0x30 as StreamCode,
+		/** The broadcast is neither announced nor served, so there is no route to it. */
+		Unroutable: 0x36 as StreamCode,
 		/** A group grew past its cache budget and was aborted. */
 		GroupTooLarge: 0x32 as StreamCode,
 	} as const),

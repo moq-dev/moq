@@ -10,9 +10,9 @@ mod support;
 
 use std::time::Duration;
 
+use futures::{StreamExt, channel::mpsc};
 use moq_net::{Error, Hop, Timestamp, Version, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
-use tokio::sync::mpsc;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -21,7 +21,7 @@ const FRAMES: u64 = 4;
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(support::harness::run(driver));
+	support::harness::spawn(driver);
 	producer
 }
 
@@ -39,7 +39,7 @@ fn payload(group: u64, frame: u64) -> Vec<u8> {
 
 /// Let every task settle. Time is paused, so this returns once the runtime is idle.
 async fn settle() {
-	tokio::time::sleep(Duration::from_millis(500)).await;
+	moq_net_sim::sleep(Duration::from_millis(500)).await;
 }
 
 /// How the serving route goes away (or is beaten).
@@ -149,27 +149,27 @@ impl Topology {
 
 /// Read every group in full, reporting each frame as it arrives.
 fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<(u64, moq_net::Result<Vec<u8>>)> {
-	let (tx, rx) = mpsc::unbounded_channel();
-	tokio::spawn(async move {
+	let (tx, rx) = mpsc::unbounded();
+	moq_net_sim::spawn(async move {
 		loop {
 			let mut group = match sub.recv_group().await {
 				Ok(Some(group)) => group,
 				Ok(None) => return,
 				Err(err) => {
-					let _ = tx.send((u64::MAX, Err(err)));
+					let _ = tx.unbounded_send((u64::MAX, Err(err)));
 					return;
 				}
 			};
 			loop {
 				match group.read_frame().await {
 					Ok(Some(frame)) => {
-						if tx.send((group.sequence, Ok(frame.payload.to_vec()))).is_err() {
+						if tx.unbounded_send((group.sequence, Ok(frame.payload.to_vec()))).is_err() {
 							return;
 						}
 					}
 					Ok(None) => break,
 					Err(err) => {
-						let _ = tx.send((group.sequence, Err(err)));
+						let _ = tx.unbounded_send((group.sequence, Err(err)));
 						break;
 					}
 				}
@@ -181,7 +181,7 @@ fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<(u64, moq_net::Re
 
 /// Wait for the next frame the reader reports, failing on an error or a hang.
 async fn next(rx: &mut mpsc::UnboundedReceiver<(u64, moq_net::Result<Vec<u8>>)>) -> (u64, Vec<u8>) {
-	let (group, frame) = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+	let (group, frame) = moq_net_sim::timeout(Duration::from_secs(10), rx.next())
 		.await
 		.expect("reader hung")
 		.expect("reader ended");
@@ -291,37 +291,37 @@ macro_rules! route_change_tests {
 				use super::*;
 
 				async fn run(trigger: Trigger, position: Position) {
-					tokio::time::timeout(TEST_TIMEOUT, route_change($version, trigger, position))
+					moq_net_sim::timeout(TEST_TIMEOUT, route_change($version, trigger, position))
 						.await
 						.expect("timed out");
 				}
 
-				#[tokio::test(start_paused = true)]
+				#[moq_net_sim::test]
 				async fn disconnect_between_groups() {
 					run(Trigger::Disconnect, Position::BetweenGroups).await;
 				}
 
-				#[tokio::test(start_paused = true)]
+				#[moq_net_sim::test]
 				async fn disconnect_mid_group() {
 					run(Trigger::Disconnect, Position::MidGroup).await;
 				}
 
-				#[tokio::test(start_paused = true)]
+				#[moq_net_sim::test]
 				async fn unannounce_between_groups() {
 					run(Trigger::Unannounce, Position::BetweenGroups).await;
 				}
 
-				#[tokio::test(start_paused = true)]
+				#[moq_net_sim::test]
 				async fn unannounce_mid_group() {
 					run(Trigger::Unannounce, Position::MidGroup).await;
 				}
 
-				#[tokio::test(start_paused = true)]
+				#[moq_net_sim::test]
 				async fn better_route_between_groups() {
 					run(Trigger::BetterRoute, Position::BetweenGroups).await;
 				}
 
-				#[tokio::test(start_paused = true)]
+				#[moq_net_sim::test]
 				async fn better_route_mid_group() {
 					run(Trigger::BetterRoute, Position::MidGroup).await;
 				}
@@ -407,7 +407,7 @@ async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<(u64, m
 	a_r.server.abort(Error::Cancel);
 	a_r.client.abort(Error::Cancel);
 	settle().await;
-	tokio::spawn(async move {
+	moq_net_sim::spawn(async move {
 		let _keep = (broadcast, track, group, p_a, p_b, b_w, b_r, warm, a_r, p, a, b, r, w);
 		std::future::pending::<()>().await
 	});
@@ -416,7 +416,7 @@ async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<(u64, m
 
 /// Lite carries the resume point upstream, so the rest of the group and the next one
 /// arrive in order.
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn lite_resumes_after_a_lagging_route_dies() {
 	for version in ["moq-lite-05", "moq-lite-06"] {
 		let version: Version = version.parse().unwrap();
@@ -430,7 +430,7 @@ async fn lite_resumes_after_a_lagging_route_dies() {
 /// Before draft 20 the resume rides a joining FETCH from group 1 through Largest, which
 /// a moq-rs publisher refuses for spanning several groups, so the subscription joins
 /// live instead. The rest of group 1 is still fetched on its own.
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn an_older_ietf_draft_still_resumes_the_open_group() {
 	let version: Version = "moq-transport-19".parse().unwrap();
 	let mut rx = lagging_route_dies(version).await;
@@ -443,9 +443,9 @@ async fn an_older_ietf_draft_still_resumes_the_open_group() {
 macro_rules! route_flap_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
-			#[tokio::test(start_paused = true)]
+			#[moq_net_sim::test]
 			async fn $name() {
-				tokio::time::timeout(TEST_TIMEOUT, route_flaps($version))
+				moq_net_sim::timeout(TEST_TIMEOUT, route_flaps($version))
 					.await
 					.expect("timed out");
 			}

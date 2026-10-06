@@ -117,8 +117,8 @@ impl Args {
 		use crate::subscribe::VideoCodecArg;
 
 		anyhow::ensure!(
-			!matches!(self.select.video_codec, Some(VideoCodecArg::Vp8 | VideoCodecArg::Vp9)),
-			"`play` cannot decode vp8 or vp9; pass --video-codec h264, h265, or av1"
+			cfg!(feature = "vpx") || !matches!(self.select.video_codec, Some(VideoCodecArg::Vp8 | VideoCodecArg::Vp9)),
+			"`play` was built without the `vpx` feature, so it cannot decode vp8 or vp9; pass --video-codec h264, h265, or av1"
 		);
 		// The delay is the speaker's ring depth, so a value it cannot hold is
 		// refused here rather than after the pipeline has opened a device.
@@ -153,9 +153,33 @@ mod tests {
 		parse(&["--video-codec", "h264"]).validate().unwrap();
 		parse(&["--video-codec", "av1"]).validate().unwrap();
 
-		let err = parse(&["--video-codec", "vp9"]).validate().unwrap_err().to_string();
-		assert!(err.contains("vp8 or vp9"), "{err}");
-		assert!(parse(&["--video-codec", "vp8"]).validate().is_err());
+		// VP8 and VP9 decode only through the opt-in libvpx backend.
+		for codec in ["vp8", "vp9"] {
+			let result = parse(&["--video-codec", codec]).validate();
+			if cfg!(feature = "vpx") {
+				result.unwrap();
+			} else {
+				let err = result.unwrap_err().to_string();
+				assert!(err.contains("vp8 or vp9"), "{err}");
+			}
+		}
+	}
+
+	/// Playback can leave a role out, but not both, and not one it also narrows.
+	#[test]
+	fn a_role_can_be_left_out() {
+		let selection = parse(&["--no-video"]).select.selection(None);
+		assert!(!selection.has_video());
+		assert!(selection.has_audio());
+
+		for refused in [
+			["--no-video", "--no-audio"].as_slice(),
+			&["--no-video", "--video-codec", "h264"],
+			&["--no-audio", "--audio-name", "stereo"],
+		] {
+			let argv: Vec<&std::ffi::OsStr> = refused.iter().map(std::ffi::OsStr::new).collect();
+			assert!(Cli::parse_from(&argv).is_err(), "{refused:?} parsed");
+		}
 	}
 
 	/// A fixed delay is the playout offset and the staleness budget at once.

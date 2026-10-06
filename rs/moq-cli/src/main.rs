@@ -4,6 +4,8 @@
 //! grammar; this module orchestrates the shared Origin and spawns the MoQ side
 //! plus every stage's endpoint.
 
+mod announced;
+mod archive;
 mod args;
 mod auth;
 mod complete;
@@ -12,7 +14,6 @@ mod devices;
 mod duration;
 mod fetch;
 mod hls;
-mod ls;
 mod moq;
 mod play;
 mod publish;
@@ -252,9 +253,9 @@ async fn serve_client(
 }
 
 /// Whether ordinary clients may use this transport on the shared LAN server.
-fn is_public_transport(transport: moq_tokio::server::Transport, public_quic: bool) -> bool {
+fn is_public_transport(transport: moq_tokio::Transport, public_quic: bool) -> bool {
 	match transport {
-		moq_tokio::server::Transport::Tcp | moq_tokio::server::Transport::Unix => true,
+		moq_tokio::Transport::Tcp | moq_tokio::Transport::Unix => true,
 		_ => public_quic,
 	}
 }
@@ -318,12 +319,12 @@ async fn main() -> anyhow::Result<()> {
 		}
 	}
 
-	// `fetch` and `ls` only dial, so an ambient listener or cluster setting they
+	// `fetch` and `announced` only dial, so an ambient listener or cluster setting they
 	// never use is not validated either.
 	if let [Command::Fetch(_)] = stages.as_slice() {
 		cli.dial_only("fetch", &["--broadcast"])?;
-	} else if let [Command::Ls(_)] = stages.as_slice() {
-		cli.dial_only("ls", &[])?;
+	} else if let [Command::Announced(_)] = stages.as_slice() {
+		cli.dial_only("announced", &[])?;
 	} else {
 		cli.moq.validate()?;
 	}
@@ -345,7 +346,7 @@ async fn main() -> anyhow::Result<()> {
 		if stages.len() == 1 && !stages[0].is_stageable() {
 			match stages.remove(0) {
 				Command::Fetch(args) => return fetch::run(cli.moq, args, net).await,
-				Command::Ls(args) => return ls::run(cli.moq, args, net).await,
+				Command::Announced(args) => return announced::run(cli.moq, args, net).await,
 				#[cfg(feature = "play")]
 				Command::Play(args) => return run_play(cli.moq, args, net).await,
 				#[cfg(feature = "transcode")]
@@ -690,6 +691,11 @@ fn spawn_import(
 					tasks.spawn(rtc::connect_import(target(name), url));
 				}
 			}
+			ImportSource::Archive(args) => {
+				// A replay serves the retention the recording was made with.
+				anyhow::ensure!(max_age.is_none(), "`--max-age` does not apply to `import archive`");
+				tasks.spawn(archive::import(origin.clone(), name, args));
+			}
 			#[cfg(feature = "capture")]
 			ImportSource::Capture(capture) => {
 				warn_if_missing_format(&name);
@@ -769,6 +775,14 @@ fn spawn_export(
 				} else if let Some(url) = rtc.connect {
 					tasks.spawn(rtc::connect_export(origin.consume(), url, name));
 				}
+			}
+			ExportSink::Archive(args) => {
+				let format = export
+					.catalog_format
+					.map(Into::into)
+					.or_else(|| moq_mux::catalog::CatalogFormat::detect(&name))
+					.unwrap_or_default();
+				tasks.spawn(archive::export(origin.consume(), name, format, args));
 			}
 			_ => unreachable!("container formats are handled by stdout_format above"),
 		}
@@ -1017,9 +1031,9 @@ mod tests {
 
 	#[test]
 	fn explicit_stream_listeners_are_public_without_exposing_mesh_quic() {
-		assert!(is_public_transport(moq_tokio::server::Transport::Tcp, false));
-		assert!(is_public_transport(moq_tokio::server::Transport::Unix, false));
-		assert!(!is_public_transport(moq_tokio::server::Transport::Quic, false));
-		assert!(is_public_transport(moq_tokio::server::Transport::Quic, true));
+		assert!(is_public_transport(moq_tokio::Transport::Tcp, false));
+		assert!(is_public_transport(moq_tokio::Transport::Unix, false));
+		assert!(!is_public_transport(moq_tokio::Transport::Quic, false));
+		assert!(is_public_transport(moq_tokio::Transport::Quic, true));
 	}
 }

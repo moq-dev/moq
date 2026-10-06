@@ -3,6 +3,7 @@ import { getter, Once, race, Signal } from "@moq/signals";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { HopSchema, Route, stampHops } from "./hop.ts";
+import { spreadHash } from "./internal.ts";
 import type { Consumer, Table } from "./origin.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -826,6 +827,47 @@ test("discovery reflects the attached sessions", async () => {
 	origin.close();
 });
 
+test("announced requests share no subscription and follow discovery", () => {
+	const origin = new Producer();
+	const wire = wireOf(origin);
+
+	const subscribers = new Map<Signal<unknown>, number>();
+	const subscribe = Signal.prototype.subscribe;
+	const spy = spyOn(Signal.prototype, "subscribe").mockImplementation(function (
+		this: Signal<unknown>,
+		fn: (value: unknown) => void,
+	) {
+		subscribers.set(this, (subscribers.get(this) ?? 0) + 1);
+		return subscribe.call(this, fn);
+	});
+
+	const requests = [];
+	try {
+		for (let i = 0; i < 200; i++) requests.push(origin.request(Path.from(`user${i}`), { announced: true }));
+	} finally {
+		spy.mockRestore();
+	}
+
+	// Each request follows its own path's route, and nothing shared between them.
+	expect(Math.max(...subscribers.values())).toBe(1);
+
+	const slots = [...(wire.requests.peek()?.values() ?? [])];
+	expect(slots.length).toBe(200);
+
+	// Gated with no session attached and with full discovery; blind once one session cannot announce.
+	expect(slots.some((slot) => wire.blind(slot))).toBe(false);
+	const seeing = wire.attach(true);
+	expect(slots.some((slot) => wire.blind(slot))).toBe(false);
+	const silent = wire.attach(false);
+	expect(slots.every((slot) => wire.blind(slot))).toBe(true);
+	silent();
+	expect(slots.some((slot) => wire.blind(slot))).toBe(false);
+
+	for (const request of requests) request.close();
+	seeing();
+	origin.close();
+});
+
 test("the exposed getters are wirable as component inputs", () => {
 	const origin = new Producer();
 	const path = Path.from("wired");
@@ -1290,7 +1332,7 @@ test("reject surfaces the error from demand", async () => {
 	const it = handle.requested();
 	const pending = wireOf(consumer).demand(Path.from("live/cam"));
 	const { value: req } = await it.next();
-	const err = new StreamError(StreamCode.NoCapacity, { message: "full" });
+	const err = new StreamError(StreamCode.NotFound, { message: "not here" });
 	req?.reject(err);
 	await expect(pending).rejects.toBe(err);
 
@@ -1386,7 +1428,7 @@ test("advancing requested without settling rejects the previous request", async 
 	const second = await it.next();
 	expect(second.value?.path).toBe(Path.from("live/other"));
 
-	await expect(firstDemand).rejects.toMatchObject({ code: StreamCode.NoCapacity });
+	await expect(firstDemand).rejects.toMatchObject({ code: StreamCode.Unroutable });
 	const produced = new BroadcastProducer();
 	second.value?.accept(produced);
 	await expect(secondDemand).resolves.toBeDefined();
@@ -1498,7 +1540,7 @@ test("a refusal is terminal, never falling through to a broader route", async ()
 	origin.close();
 });
 
-test("a better route's refusal leaves the serving route in place", async () => {
+test("a better route's refusal ends a served request", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const served = new BroadcastProducer();
@@ -1509,19 +1551,25 @@ test("a better route's refusal leaves the serving route in place", async () => {
 	const before = request.active.peek();
 	expect(before).toBeDefined();
 
-	// The narrower route is asked while the broad one keeps serving, then says no.
-	const narrow = origin.dynamic(Path.from("live"));
+	// The narrower route is asked while the broad one keeps serving, then says no. A
+	// costlier sibling at the same prefix could serve, but is never asked.
+	const narrow = origin.dynamic(Path.from("live"), { cost: 1n });
+	const sibling = origin.dynamic(Path.from("live"), { cost: 2n });
+	const siblingRequests = sibling.requested();
+	const siblingAsked = siblingRequests.next();
 	const { value: req } = await narrow.requested().next();
 	expect(request.active.peek()).toBe(before);
-	req?.reject(new Error("unserved"));
+	const err = new Error("unserved");
+	req?.reject(err);
 	await settle();
 
-	expect(request.active.peek()).toBe(before);
-	expect(before?.closed.peek()).toBeUndefined();
-	expect(request.closed.peek()).toBeUndefined();
+	expect(await request.closed).toBe(err);
+	expect(request.active.peek()).toBeUndefined();
+	expect(await Promise.race([siblingAsked.then(() => "asked"), settle().then(() => "idle")])).toBe("idle");
 
 	request.close();
-	expect(request.closed.peek()).toBeNull();
+	void siblingRequests.return?.();
+	sibling.close();
 	narrow.close();
 	disposeWide();
 	served.close();
@@ -1557,7 +1605,34 @@ test("a refusal from a superseded route does not end the request", async () => {
 	origin.close();
 });
 
-test("close rejects queued requests with NoCapacity", async () => {
+test("a refusal from a route a local broadcast superseded does not end the request", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const wide = origin.dynamic(Path.from("live"));
+	const wideRequests = wide.requested();
+
+	const request = consumer.request(Path.from("live/cam"));
+	const { value: stale } = await wideRequests.next();
+
+	// The exact local broadcast takes over before the broad route answers.
+	const local = publish(origin, Path.from("live/cam"));
+	await settle();
+	const active = request.active.peek();
+	expect(active).toBeDefined();
+
+	stale?.reject(new Error("unserved"));
+	await settle();
+	expect(request.closed.peek()).toBeUndefined();
+	expect(request.active.peek()).toBe(active);
+
+	request.close();
+	void wideRequests.return?.();
+	wide.close();
+	local.close();
+	origin.close();
+});
+
+test("close rejects queued requests as unroutable", async () => {
 	const origin = new Producer();
 	const handle = origin.dynamic(Path.from("live"));
 	const waiting = handle.requested().next();
@@ -1573,7 +1648,6 @@ test("close rejects queued requests with NoCapacity", async () => {
 	req?.accept(new BroadcastProducer());
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
-	expect(Number(new StreamError(StreamCode.NoCapacity).code)).toBe(0x30);
 
 	request.close();
 	origin.close();
@@ -1592,6 +1666,62 @@ test("announced filters by arbitrary patterns and reports captures", async () =>
 	announced.close();
 	broadcast.close();
 	origin.close();
+});
+
+test("the spread hash matches rs/moq-net byte for byte", () => {
+	expect(spreadHash("pool/job-0", [10n])).toBe(0xefb5e20a66101c32n);
+	expect(spreadHash("pool/job-0", [11n])).toBe(0x0eb0a91370ff6653n);
+});
+
+test("an equal-cost pool spreads its paths the same way on every node", async () => {
+	const workers = [10n, 11n, 12n, 13n].map((id) => HopSchema.parse(id));
+	const paths = Array.from({ length: 64 }, (_, i) => Path.from(`pool/job-${i}`));
+
+	// The worker each path resolves to on an origin whose pool arrived in `order`.
+	async function winners(order: typeof workers): Promise<bigint[]> {
+		const origin = new Producer();
+		const served = new Map<Path.Valid, bigint>();
+		const handles = order.map((hop) => {
+			const handle = wireOf(origin).receive(Path.from("pool"), { hops: [hop], cost: 3n });
+			void (async () => {
+				for await (const request of handle.requested()) {
+					served.set(request.path, hop);
+					request.accept(new BroadcastProducer());
+				}
+			})();
+			return handle;
+		});
+		const requests = paths.map((path) => origin.request(path));
+		await settle();
+		for (const request of requests) request.close();
+		for (const handle of handles) handle.close();
+		origin.close();
+		return paths.map((path) => served.get(path) ?? -1n);
+	}
+
+	const forward = await winners(workers);
+	const reverse = await winners([...workers].reverse());
+	expect(reverse).toEqual(forward);
+
+	// Not an assertion about any two paths, which a correct hash may put on one worker:
+	// only that the set does not pile onto a few.
+	for (const worker of workers) {
+		expect(forward.filter((hop) => hop === worker).length).toBeGreaterThanOrEqual(paths.length / 16);
+	}
+});
+
+test("an equal-cost pool advertises the same member whatever order it arrived in", () => {
+	const prefix = Path.from("pool");
+	const workers = [10n, 11n].map((id) => HopSchema.parse(id));
+	const expected = spreadHash(prefix, [workers[0]]) < spreadHash(prefix, [workers[1]]) ? workers[0] : workers[1];
+
+	for (const order of [workers, [...workers].reverse()]) {
+		const origin = new Producer();
+		const handles = order.map((hop) => wireOf(origin).receive(prefix, { hops: [hop], cost: 3n }));
+		expect(origin.consume().broadcasts().peek().get(prefix)?.hops).toEqual([expected]);
+		for (const handle of handles) handle.close();
+		origin.close();
+	}
 });
 
 test("a serving session closing releases quiet origin change listeners", async () => {
@@ -1617,7 +1747,7 @@ test("a serving session closing releases quiet origin change listeners", async (
 		for (let i = 0; i < 10; i++) {
 			const closed = new Once<null>();
 			const pending = race([wireOf(origin).changed(), closed]);
-			expect(listeners).toBe(4);
+			expect(listeners).toBe(5);
 			closed.set(null);
 			expect(await pending).toBeNull();
 			expect(listeners).toBe(0);

@@ -53,9 +53,9 @@ pub struct Import<E: catalog::Catalog = ()> {
 	catalog: crate::catalog::Producer<E>,
 	container: hang::catalog::Container,
 
-	/// Held while the first PMT is parsed so the catalog is withheld from the broadcast until every
-	/// stream in the initial program has reserved its rendition. Dropped once the PMT is fully
-	/// processed, so a one-shot muxer (fMP4, TS re-export) sees the complete track list in the first
+	/// Held until the first PES anchors the clock, so the catalog is withheld from the broadcast
+	/// until every stream in the initial program has reserved its rendition and the root `clock` is
+	/// final. A one-shot muxer (fMP4, TS re-export) sees the complete track list in the first
 	/// snapshot rather than a half-converged one. See [`Reserved`](crate::catalog::Reserved).
 	initial_reservation: Option<crate::catalog::Reserved<E>>,
 
@@ -138,7 +138,7 @@ impl<E: catalog::Catalog> Import<E> {
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
 		let container = hang::catalog::Container::default();
 		// A long-lived producer handle for catalog edits (mpegts sections, later PMTs); the passed
-		// reservation gates the initial publish and is dropped once the first PMT is parsed.
+		// reservation gates the initial publish and is dropped once the first PES anchors.
 		let catalog = reserved.producer();
 		// Sample the real catalog once at construction, not E::default(): an extension
 		// may carry the section by value, and a snapshot clones under the mutex (no publish).
@@ -430,10 +430,6 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		let pids: Vec<u16> = pmt.streams.iter().map(|es| es.pid.as_u16()).collect();
 		self.health.pmt_streams(&pids);
-
-		// Every stream in the initial program is registered now; release the reservation
-		// so the catalog publishes once each rendition's config resolves, not before.
-		self.initial_reservation = None;
 		Ok(())
 	}
 
@@ -680,6 +676,7 @@ impl<E: catalog::Catalog> Import<E> {
 			// anchors the catalog here like a flushed PES would.
 			if let Some(pts) = pes.pts {
 				self.catalog.anchor(Timestamp::from_scale(pts, 90_000)?)?;
+				self.initial_reservation = None;
 			}
 			// Nothing is published, but each PES is a picture the source delivered.
 			self.liveness.delivered(pid.as_u16(), 1);
@@ -740,9 +737,13 @@ impl<E: catalog::Catalog> Import<E> {
 		let Some(stream) = self.streams.get_mut(&pid) else {
 			return Ok(());
 		};
-		// The first PES is live on arrival: its PTS needs no unwrap yet.
+		// The first PES is live on arrival: its PTS needs no unwrap yet. Anchor before releasing
+		// the reservation, so the first snapshot carries the final clock: an Opus config comes
+		// from the PMT and would otherwise publish first. Every stream in the initial program
+		// reserved at its PMT, so any stream's PES releases it.
 		if let Some(pts) = pending.pts {
 			self.catalog.anchor(Timestamp::from_scale(pts, 90_000)?)?;
+			self.initial_reservation = None;
 		}
 		let units = match stream.write(pending, batched) {
 			Ok(units) => units,
@@ -936,6 +937,8 @@ impl<E: catalog::Catalog> Import<E> {
 		for pid in pids {
 			self.flush(pid)?;
 		}
+		// No frame follows to anchor the clock, so publish the declared track set now.
+		self.initial_reservation = None;
 		for (pid, stream) in &mut self.streams {
 			let units = stream.finish()?;
 			self.liveness.delivered(pid.as_u16(), units);
@@ -958,7 +961,11 @@ impl<E: catalog::Catalog> Import<E> {
 			.streams
 			.iter()
 			.filter_map(|(pid, stream)| Some((pid.as_u16(), stream.stats()?)))
-			.chain(self.sections.keys().map(|&pid| (pid, StreamStats::new(".ts"))));
+			.chain(
+				self.sections
+					.keys()
+					.map(|&pid| (pid, StreamStats::new(".ts", StreamClass::Data))),
+			);
 		for (pid, current) in routes {
 			streams
 				.entry(pid)
@@ -967,7 +974,10 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		// A dedicated PCR PID routes no stream, so its damage gets a clock-only row.
 		for (&pid, &damaged) in &self.damaged {
-			streams.entry(pid).or_insert_with(|| StreamStats::new("")).damaged = damaged;
+			streams
+				.entry(pid)
+				.or_insert_with(|| StreamStats::new("", StreamClass::Data))
+				.damaged = damaged;
 		}
 		for (pid, stats) in &mut streams {
 			(stats.units, stats.quiet) = self.liveness.stream(*pid);
@@ -1043,7 +1053,8 @@ fn list_programs(programs: &[u16]) -> String {
 ///
 /// [`Export::stats`](super::Export::stats) returns the same rows for the streams it writes,
 /// so one schema reads both edges. Only `units` and `quiet` move there: the exporter builds
-/// every frame header itself, so it has no frame sync to lose, and it grades nothing.
+/// every frame header itself, so it has no frame sync to lose and it runs no TR 101 290
+/// checks. The stopped-stream log still grades an audio or video row whose `units` stay still.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Stats {
@@ -1101,6 +1112,30 @@ impl Stats {
 	}
 }
 
+/// Audio, video, or other data, as import or export already resolved the PID.
+///
+/// Not the PMT `stream_type`. `0x86` is DTS audio or, with a CUEI registration, an SCTE-35
+/// section, and those take different routes. The stopped-stream log grades audio and video
+/// only; a sparse data PID stays counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StreamClass {
+	/// Undecoded or sparse data (SCTE-35, ID3, private sections, verbatim PES), or a PCR PID
+	/// that carries no elementary stream. A quiet second is not a stall.
+	#[default]
+	Data,
+	/// Continuous audio.
+	Audio,
+	/// Continuous video, including MPEG-1/2 video read only for its clock.
+	Video,
+}
+
+impl StreamClass {
+	/// Audio and video have a cadence. Data does not, so a quiet second is not a stall.
+	pub(super) fn graded(self) -> bool {
+		matches!(self, Self::Audio | Self::Video)
+	}
+}
+
 /// What one elementary stream delivered, lost, or could not verify. See [`Stats`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1109,6 +1144,8 @@ pub struct StreamStats {
 	/// or empty for MPEG-1/2 video, which is read for its clock and not published. At export,
 	/// the suffix an import of the output would give the PID.
 	pub track: &'static str,
+	/// How this PID was classified. See [`StreamClass`].
+	pub class: StreamClass,
 	/// Access units the stream delivered: frames published for decoded media, PES payloads or
 	/// sections carried verbatim, and PES read on MPEG-1/2 video. At export, the PES or
 	/// sections written for each frame.
@@ -1142,9 +1179,10 @@ pub struct StreamStats {
 }
 
 impl StreamStats {
-	fn new(track: &'static str) -> Self {
+	fn new(track: &'static str, class: StreamClass) -> Self {
 		Self {
 			track,
+			class,
 			..Default::default()
 		}
 	}
@@ -1153,6 +1191,7 @@ impl StreamStats {
 	/// Delivery and damage are kept per PID rather than per route, so they need no merging.
 	fn merge(&mut self, current: &Self) {
 		self.track = current.track;
+		self.class = current.class;
 		self.resyncs += current.resyncs;
 		self.discarded += current.discarded;
 		self.unconfirmed += current.unconfirmed;
@@ -2042,11 +2081,11 @@ impl<E: catalog::Catalog> Stream<E> {
 		Some(match self {
 			Stream::Aac(stream) => stream.resync.stats(),
 			Stream::Legacy(stream) => stream.resync.stats(),
-			Stream::H264 { .. } => StreamStats::new(".avc3"),
-			Stream::H265 { .. } => StreamStats::new(".hev1"),
-			Stream::Opus(_) => StreamStats::new(".opus"),
-			Stream::Verbatim(_) => StreamStats::new(".ts"),
-			Stream::Clock => StreamStats::new(""),
+			Stream::H264 { .. } => StreamStats::new(".avc3", StreamClass::Video),
+			Stream::H265 { .. } => StreamStats::new(".hev1", StreamClass::Video),
+			Stream::Opus(_) => StreamStats::new(".opus", StreamClass::Audio),
+			Stream::Verbatim(_) => StreamStats::new(".ts", StreamClass::Data),
+			Stream::Clock => StreamStats::new("", StreamClass::Video),
 			Stream::Ignored => return None,
 		})
 	}
@@ -2118,7 +2157,7 @@ impl Resync {
 			// count from it for the life of the broadcast.
 			unconfirmed: true,
 			draining: false,
-			stats: StreamStats::new(track),
+			stats: StreamStats::new(track, StreamClass::Audio),
 		}
 	}
 
@@ -2649,9 +2688,7 @@ fn opus_config(descriptors: &[catalog::Descriptor]) -> crate::Result<opus::Confi
 
 	let mut config = opus::Config::new(48_000, channels);
 	if channels > 2 {
-		let mapping = opus::Mapping::vorbis(channels as u8)?;
-		config.mapping_family = mapping.family();
-		config.mapping = Some(mapping);
+		config.mapping = Some(opus::Mapping::vorbis(channels as u8)?);
 	}
 	Ok(config)
 }
@@ -3558,6 +3595,65 @@ pub(super) mod test {
 		);
 	}
 
+	/// A CUEI-marked 0x86 section is data, not audio, so a quiet second is not logged.
+	/// The video PID beside it, stalled with the same frozen count, is.
+	#[test]
+	#[tracing_test::traced_test]
+	fn sparse_cuei_pid_beside_a_stalled_video_is_not_logged() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+
+		// Not 0x100: `synth_pmt` puts the PMT there, and a later packet on that PID is PSI.
+		const VIDEO: u16 = 0x110;
+		const CUE_PID: u16 = 0x21;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let mut bytes = bytes::BytesMut::new();
+		bytes.extend_from_slice(&synth_pmt(
+			&[
+				(StreamType::Mpeg2Video, VIDEO),
+				(StreamType::Dts8ChannelLosslessAudio, CUE_PID),
+			],
+			true,
+		));
+		bytes.extend_from_slice(&pes_packet(VIDEO, 90_000));
+		bytes.extend_from_slice(&packet(true, 0, 0, &CUE));
+		import.decode(&bytes).unwrap();
+
+		let stats = import.stats();
+		assert_eq!(stats.streams[&VIDEO].class, super::StreamClass::Video);
+		assert_eq!(stats.streams[&VIDEO].track, "");
+		assert!(
+			stats.streams[&VIDEO].units >= 1,
+			"the video PID delivered before it stalled"
+		);
+		assert_eq!(stats.streams[&CUE_PID].class, super::StreamClass::Data, "{stats:?}");
+		assert_eq!(stats.streams[&CUE_PID].track, ".ts");
+		assert!(stats.streams[&CUE_PID].units >= 1, "the cue section was counted");
+
+		let mut log = crate::container::ts::stats::Log::default();
+		log.sample(stats);
+		log.sample(import.stats());
+
+		logs_assert(|lines: &[&str]| {
+			let stopped: Vec<_> = lines
+				.iter()
+				.filter(|line| line.contains("stopped delivering access units"))
+				.collect();
+			match stopped.as_slice() {
+				[line] if line.contains("pid=272 ") && !line.contains("pid=33 ") => Ok(()),
+				_ => Err(format!("expected only the stalled video PID, got {stopped:?}")),
+			}
+		});
+	}
+
 	/// A PUSI TS packet on `pid` carrying a minimal PES with `pts` (90 kHz) and a
 	/// 1-byte dummy payload, for streams we observe only for their PTS.
 	fn pes_packet(pid: u16, pts: u64) -> Vec<u8> {
@@ -4231,6 +4327,7 @@ pub(super) mod test {
 				AAC_PID,
 				super::StreamStats {
 					track: ".aac",
+					class: super::StreamClass::Audio,
 					units: 4,
 					quiet: None,
 					resyncs: 1,
@@ -4425,6 +4522,7 @@ pub(super) mod test {
 				MP2_PID,
 				super::StreamStats {
 					track: ".mp2",
+					class: super::StreamClass::Audio,
 					units: 4,
 					quiet: None,
 					resyncs: 1,
@@ -4613,6 +4711,7 @@ pub(super) mod test {
 				MP2_PID,
 				super::StreamStats {
 					track: ".mp2",
+					class: super::StreamClass::Audio,
 					units: 2,
 					quiet: None,
 					resyncs: 0,
@@ -5308,6 +5407,45 @@ pub(super) mod test {
 			.unwrap()
 			.expect("a published verbatim frame");
 		assert_eq!(&frame.payload[..], &payload[..], "verbatim PES payload round-trips");
+	}
+
+	/// A program of only verbatim PIDs reserves no rendition, so the held reservation alone keeps
+	/// its PMT from publishing the catalog before the first PES anchors the clock.
+	#[tokio::test]
+	async fn verbatim_only_program_publishes_at_the_first_pes() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+
+		const DATA_PID: u16 = 0x0052;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let provisional = catalog.clock().wall();
+		let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		import
+			.decode(&synth_pmt(&[(StreamType::Mpeg2PacketizedData, DATA_PID)], false))
+			.unwrap();
+		assert_eq!(catalog.snapshot().ext.mpegts.tracks.len(), 1, "the PMT was read");
+		assert_eq!(clocks.drain(), vec![], "the PMT alone publishes nothing");
+
+		import
+			.decode(&audio_pes_packet(DATA_PID, 0, 3_600 * 90_000, &[0xDE, 0xAD]))
+			.unwrap();
+		let anchored = catalog.clock().wall();
+		assert_ne!(anchored, provisional, "the first PES anchors the clock");
+		let published = clocks.drain();
+		assert!(!published.is_empty(), "the first PES publishes the catalog");
+		assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
+
+		import.finish().unwrap();
+		assert!(clocks.drain().iter().all(|clock| *clock == Some(anchored)));
 	}
 
 	/// A TS packet on `pid` carrying only an adaptation field (no payload) that sets

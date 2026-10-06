@@ -24,7 +24,7 @@ harness:
     ./lib/harness.test.sh
     cd .. && bun install --frozen-lockfile
     cd interop/clients/js && bunx playwright install chromium
-    cd interop/clients/js && bun test ./harness.browser.ts
+    cd interop/clients/js && bun test ./harness.browser.ts ./src/contract.test.ts
 
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
@@ -98,8 +98,8 @@ drill-sensitivity *args:
     ./drill/sensitivity.sh "$@"
 
 # Round-trips a PCR-paced TS through a relay and checks the subscriber's `export
-# ts` output with TSDuck plus a custom analyzer (PCR jitter/repetition,
-# burstiness, instantaneous bitrate, T-STD). Flags: `--analyze-only file.ts`
+# ts` output with TSDuck plus a custom analyzer (the T-STD buffer model, PCR
+# spacing and byte schedule). Flags: `--analyze-only file.ts`
 # (skip the round-trip), `--strict` (fail on shape warnings), `--source file.ts`
 # (use a real capture), `--live` (grade PCR release timing and byte position off
 # the pipe instead, which a capture cannot carry; nightly runs this arm),
@@ -116,6 +116,11 @@ ts *args:
 [positional-arguments]
 ts-eit *args:
     ./ts/eit-roundtrip.sh "$@"
+
+# The T-STD model's controls: a broadcast capture must pass, and the same capture
+# delivered too slowly, too early, or in a burst must fail. Needs only TSDuck.
+ts-tstd:
+    ./ts/tstd-controls.py
 
 # A JS viewer watching a live track through a relay that drains (SIGTERM, after
 # a stand-in for DNS stops pointing at it) migrates to a second relay behind the

@@ -192,21 +192,34 @@ class Feed {
 	}
 }
 
+// Resolves on the next AudioEncoder configure; the encoder publishes its pipeline synchronously after.
+function configured(): Promise<AudioEncoderConfig> {
+	return new Promise((resolve) => {
+		LaggingAudioEncoder.onConfigure = (config) => {
+			LaggingAudioEncoder.onConfigure = undefined;
+			resolve(config);
+		};
+	});
+}
+
 // An Encoder wired to a fake capture feed, recording each written frame as [timestamp, payload bytes].
 async function setup(baseline = new Baseline(), codec?: Codec) {
-	const configured = new Promise<AudioEncoderConfig>((resolve) => {
-		LaggingAudioEncoder.onConfigure = resolve;
-	});
+	const configuring = configured();
 
 	const track = new Moq.Track.Producer("audio").accept();
 	const written: [number, number][] = [];
 	const writes = { onWrite: undefined as (() => void) | undefined };
-	const writeFrame = track.writeFrame.bind(track);
-	track.writeFrame = (frame) => {
-		const [timestamp, payload] = Moq.Varint.decode(frame.payload);
-		written.push([timestamp, payload.byteLength]);
-		writeFrame(frame);
-		writes.onWrite?.();
+	const appendGroup = track.appendGroup.bind(track);
+	track.appendGroup = () => {
+		const group = appendGroup();
+		const writeFrame = group.writeFrame.bind(group);
+		group.writeFrame = (frame) => {
+			const [timestamp, payload] = Moq.Varint.decode(frame.payload);
+			written.push([timestamp, payload.byteLength]);
+			writeFrame(frame);
+			writes.onWrite?.();
+		};
+		return group;
 	};
 
 	const rendition = {
@@ -226,18 +239,20 @@ async function setup(baseline = new Baseline(), codec?: Codec) {
 		blocked: new Signal(false),
 	};
 
+	const enabled = new Signal(true);
 	const encoder = new Encoder("audio", {
 		broadcast: { audio: () => rendition, baseline } as never,
 		capture: capture as never,
+		enabled,
 		codec,
 	});
 
-	const config = await configured;
-	LaggingAudioEncoder.onConfigure = undefined;
+	const config = await configuring;
 
 	return {
 		config,
 		encoder,
+		enabled,
 		track,
 		rendition,
 		feed,
@@ -289,6 +304,66 @@ test("a demand gap marks where submitted audio ends and drops the chunks held ac
 	]);
 });
 
+// A pause with a subscriber attached breaks the timeline just as losing demand does: a subscriber
+// that stays across it, or joins during it, must not read the audio before it as live.
+test("disabling with a subscriber attached marks where submitted audio ends", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup();
+	const { enabled, feed, written, writes } = env;
+
+	let index = 0;
+	const push = async (count: number) => {
+		for (let i = 0; i < count; i++, index++) {
+			await feed.push({ timestamp: Time.Micro(20_000 + index * 20_000), channels: [new Float32Array(960)] });
+		}
+		await feed.drain();
+	};
+
+	await push(4); // two written, two held
+
+	const marked = new Promise<void>((resolve) => {
+		writes.onWrite = resolve;
+	});
+	enabled.set(false);
+	await marked;
+	writes.onWrite = undefined;
+
+	await push(2); // nothing publishing
+	const resumed = configured();
+	enabled.set(true);
+	await resumed;
+	await push(3); // a fresh AudioEncoder, so one written and two held
+
+	expect(written).toEqual([
+		[20_000, 1],
+		[40_000, 1],
+		[100_000, 0],
+		[140_000, 1],
+	]);
+});
+
+// Closing tears down the subscription and the pipeline, which both end the epoch; cleanups run
+// last-in, first-out, so the marker lands once and before the rendition closes the track.
+test("closing with a subscriber attached marks the end once before the track closes", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup();
+	const { encoder, track, feed, written } = env;
+
+	for (let i = 0; i < 4; i++) {
+		await feed.push({ timestamp: Time.Micro(20_000 + i * 20_000), channels: [new Float32Array(960)] });
+	}
+	await feed.drain(); // two written, two held
+
+	encoder.close();
+
+	expect(written).toEqual([
+		[20_000, 1],
+		[40_000, 1],
+		[100_000, 0],
+	]);
+	expect(track.closed.peek()).toBeDefined();
+});
+
 // A push that completes several frames is still one continuous stream, so it must not restart the
 // encoder and drop the chunks it holds.
 test("a push completing several frames keeps the encoder running", async () => {
@@ -310,34 +385,45 @@ test("a push completing several frames keeps the encoder running", async () => {
 	]);
 });
 
-test("passes an explicit Opus DTX request to the encoder", async () => {
+// Chromium stamps Opus output by counting the samples emitted, so every frame DTX suppresses pulls
+// later audio earlier. A plain-JS caller passing the old knob must not reach the encoder.
+test("never enables Opus DTX", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	using env = await setup(new Baseline(), { mime: "opus", usedtx: true });
-	expect(env.config.opus?.usedtx).toBe(true);
+	using env = await setup(new Baseline(), { mime: "opus", usedtx: true } as Codec);
+	expect(env.config.opus?.usedtx).toBeUndefined();
 });
 
 // Another rendition on the same broadcast flushing with far less lateness leaves this one trailing
 // it, which the catalog advertises as `delay`.
 test("a rendition trailing the broadcast's earliest advertises delay", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	const baseline = new Baseline();
-	using env = await setup(baseline);
-	const { encoder, feed } = env;
+	const clock = spyOn(performance, "now").mockReturnValue(200);
 
-	expect(encoder.out.catalog.peek()?.delay).toBeUndefined();
+	try {
+		const baseline = new Baseline();
+		using env = await setup(baseline);
+		const { encoder, feed } = env;
 
-	// A sibling that flushes each frame the instant it is captured.
-	baseline.observe(0, performance.now() * 1000);
+		expect(encoder.out.catalog.peek()?.delay).toBeUndefined();
 
-	// Captured 100ms ago, so this rendition flushes at least that late.
-	const start = performance.now() * 1000 - 100_000;
-	for (let index = 0; index < 4; index++) {
-		await feed.push({ timestamp: Time.Micro(start + index * 20_000), channels: [new Float32Array(960)] });
+		// A sibling that flushes each frame the instant it is captured.
+		baseline.observe(0, performance.now() * 1000);
+
+		// Captured 100ms ago, with a clock origin that keeps timestamps nonnegative.
+		const start = performance.now() * 1000 - 100_000;
+		for (let index = 0; index < 4; index++) {
+			await feed.push({ timestamp: Time.Micro(start + index * 20_000), channels: [new Float32Array(960)] });
+		}
+		await feed.drain();
+
+		expect(env.written).toEqual([
+			[100_000, 1],
+			[120_000, 1],
+		]);
+		expect(encoder.out.catalog.peek()).toMatchObject({ delay: 100 });
+	} finally {
+		clock.mockRestore();
 	}
-	await feed.drain();
-
-	expect(env.written.length).toBe(2);
-	expect(encoder.out.catalog.peek()?.delay).toBeGreaterThanOrEqual(100);
 });
 
 // Regression: codec settings that can't resolve left the encoder unsettled, so `<moq-publish>` never
@@ -369,6 +455,48 @@ test("settles when the codec settings can't resolve", async () => {
 		await settle();
 		expect(encoder.out.catalog.peek()).toBeDefined();
 		expect(encoder.settled.peek()).toBe(true);
+	} finally {
+		encoder.close();
+		error.mockRestore();
+	}
+});
+
+// A fade the gain can't ramp over is refused like any other bad setting, rather than ramping wrong.
+test("refuses the rendition while the fade is invalid", async () => {
+	const error = spyOn(console, "error").mockImplementation(() => {});
+	const capture = {
+		in: { source: new Signal(undefined) },
+		out: {
+			root: new Signal(undefined),
+			format: new Signal<Format>({ sampleRate: 48_000, channelCount: 1 }),
+			frames: new Signal(undefined),
+		},
+		blocked: new Signal(false),
+	};
+	const encoder = new Encoder("audio", { capture: capture as never, fade: Time.Milli(-1) });
+
+	try {
+		await settle();
+		expect(encoder.out.catalog.peek()).toBeUndefined();
+		expect(encoder.settled.peek()).toBe(true);
+		expect(error).toHaveBeenCalled();
+
+		encoder.fade.set(Time.Milli(0));
+		await settle();
+		expect(encoder.out.catalog.peek()).toBeDefined();
+
+		encoder.fade.set(Time.Milli(Number.NaN));
+		await settle();
+		expect(encoder.out.catalog.peek()).toBeUndefined();
+
+		encoder.fade.set(Time.Milli(0));
+		await settle();
+		expect(encoder.out.catalog.peek()).toBeDefined();
+
+		// An endless ramp would never finish a mute.
+		encoder.fade.set(Time.Milli(Number.POSITIVE_INFINITY));
+		await settle();
+		expect(encoder.out.catalog.peek()).toBeUndefined();
 	} finally {
 		encoder.close();
 		error.mockRestore();

@@ -14,7 +14,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(support::harness::run(driver));
+	support::harness::spawn(driver);
 	producer
 }
 
@@ -25,11 +25,11 @@ async fn close_then_lookup(publisher: moq_net::origin::Producer, reader: moq_net
 	broadcast.announce(Default::default()).unwrap();
 
 	let consumer = reader.consume();
-	tokio::time::timeout(TIMEOUT, consumer.routed("bcast"))
+	moq_net_sim::timeout(TIMEOUT, consumer.routed("bcast"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let handle = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("bcast"))
+	let handle = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast"))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -37,7 +37,7 @@ async fn close_then_lookup(publisher: moq_net::origin::Producer, reader: moq_net
 
 	broadcast.close();
 
-	tokio::time::timeout(TIMEOUT, handle.closed())
+	moq_net_sim::timeout(TIMEOUT, handle.closed())
 		.await
 		.expect("the handle never closed");
 	assert!(matches!(handle.track("video"), Err(Error::Unroutable)));
@@ -49,16 +49,14 @@ async fn close_then_lookup(publisher: moq_net::origin::Producer, reader: moq_net
 	assert!(matches!(broadcast.announce(Default::default()), Err(Error::Closed)));
 }
 
-#[tokio::test]
+#[moq_net_sim::test]
 async fn close_ends_a_local_consumer() {
-	tokio::time::pause();
 	let origin = produce_origin(1);
 	close_then_lookup(origin.clone(), origin).await;
 }
 
-#[tokio::test]
+#[moq_net_sim::test]
 async fn close_ends_a_remote_consumer() {
-	tokio::time::pause();
 	for version in ["moq-lite-05", "moq-transport-14", "moq-transport-19"] {
 		let publisher = produce_origin(1);
 		let subscriber = produce_origin(2);

@@ -11,17 +11,6 @@ use moq_tokio::worker::{self, Workers};
 
 const WORKERS: u16 = 4;
 
-/// A UDP port nothing is bound to.
-///
-/// Only for the port-lock tests, where the first group names its port.
-/// Everything else binds `:0` and reads it back.
-fn free_udp_port() -> u16 {
-	let probe = UdpSocket::bind("127.0.0.1:0").expect("bind probe");
-	let port = probe.local_addr().expect("local addr").port();
-	drop(probe);
-	port
-}
-
 /// The socket inodes this process holds bound to `addr`, of which there must be
 /// at least one: every UDP socket, but only a TCP listener.
 ///
@@ -330,10 +319,9 @@ async fn an_occupied_port_is_refused() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let port = free_udp_port();
-
 	let workers =
-		bind_workers(listen_config(&cert, &key, port), Default::default(), config(WORKERS)).expect("bind workers");
+		bind_workers(listen_config(&cert, &key, 0), Default::default(), config(WORKERS)).expect("bind workers");
+	let port = workers.local_addr().port();
 
 	let err = bind_workers(listen_config(&cert, &key, port), Default::default(), config(WORKERS))
 		.expect_err("a second group must not join the first");
@@ -360,11 +348,10 @@ async fn the_other_wildcard_spelling_is_refused() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let port = free_udp_port();
-
-	let mut v4 = listen_config(&cert, &key, port);
-	v4.bind = Some(format!("0.0.0.0:{port}").parse().unwrap());
+	let mut v4 = listen_config(&cert, &key, 0);
+	v4.bind = Some("0.0.0.0:0".parse().unwrap());
 	let workers = bind_workers(v4, Default::default(), config(WORKERS)).expect("bind v4 wildcard workers");
+	let port = workers.local_addr().port();
 
 	let mut v6 = listen_config(&cert, &key, port);
 	v6.bind = Some(format!("[::]:{port}").parse().unwrap());
@@ -390,10 +377,9 @@ async fn a_shared_port_is_refused_across_addresses() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let port = free_udp_port();
-
 	let workers =
-		bind_workers(listen_config(&cert, &key, port), Default::default(), config(WORKERS)).expect("bind workers");
+		bind_workers(listen_config(&cert, &key, 0), Default::default(), config(WORKERS)).expect("bind workers");
+	let port = workers.local_addr().port();
 
 	// A distinct loopback address: no bind conflict with 127.0.0.1, only the
 	// shared port.

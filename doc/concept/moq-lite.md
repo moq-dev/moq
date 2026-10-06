@@ -38,8 +38,9 @@ Rust and TypeScript speak moq-lite 01 through 06 and moq-transport drafts
 still in progress: it negotiates as `moq-lite-07-wip`, and only when both
 sides explicitly enable it. moq-lite 07 also switches every varint from QUIC's
 two-bit length prefix to moq-transport's leading-ones form, so values up to 127
-take one byte instead of up to 63, and the range widens from 62 to 64 bits. Rust
-still refuses lite-07 values above 2^62-1 until its `VarInt` widens.
+take one byte instead of up to 63, and the range widens from 62 to 64 bits.
+A relay cannot forward a value past 2^62 - 1 to an older peer, so it fails
+that subscription or group and keeps the session.
 
 ## Subscription completion
 
@@ -115,7 +116,8 @@ can be neither discovered nor requested. A broadcast published locally
 competes with remote routes to its path on cost like any other route, winning
 only a tie. Retracting a route (an unannounce, or the peer's `ANNOUNCE_END`)
 stops new requests from resolving through it but leaves subscriptions already
-in flight alone: each track runs to its own end or failure. On moq-lite 05 and
+in flight alone: each track runs to its own end or failure, or until its last
+subscriber leaves, which cancels it upstream. On moq-lite 05 and
 newer, a clean end requires `SUBSCRIBE_END` before the publisher's FIN. A FIN
 without that declaration fails the subscription with `ProtocolViolation`; older
 moq-lite versions use FIN alone. moq-transport requires `PUBLISH_DONE` before FIN.

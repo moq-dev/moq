@@ -75,6 +75,58 @@ For a full mesh, list every other relay, or serve the list from `connect_api`.
 A session carries both directions, so one dial per pair is enough; listing a
 pair on both sides opens a redundant second session.
 
+## Upstream links
+
+Mark a link `upstream` and this relay never offers it a route learned on
+another upstream link. Everything else still transits, and clients still see
+every route the relay knows. An edge marks its region's cores upstream, so it
+reaches every core and every core reaches its clients, but it never carries
+traffic from one core to another. A drone marks its CDN uplink upstream, so its
+mesh reaches the CDN and the CDN reaches the mesh, but the drone never carries
+traffic between CDN relays.
+
+```toml
+# edge.toml
+[cluster]
+connect = [
+  { url = "https://core-a.example.com/", upstream = true },
+  { url = "https://core-b.example.com/", upstream = true },
+]
+```
+
+The mark belongs to the link, whichever side dialed. A peer this relay dials
+is upstream when its `connect` or `connect_api` entry says so. A peer that
+dials in is upstream when its [grant](/bin/relay/auth#the-contract) sets
+`"upstream": true` beside `"peer": true`, so an edge whose auth server grants
+that to core certificates treats a core that dials it as upstream too. A
+relay that predates the mark treats every link as transit, so a cluster
+migrates one region at a time.
+
+Which relay dials which is still the peer list's job: there are no roles and
+no topology check, so whatever generates the list applies the layout's rules.
+Hiding a core from clients is admission, not routing: its auth refuses any
+session that is not a cluster peer.
+
+## TLS links
+
+A link inside a region is rarely congested, so it can skip QUIC: a `tls://`
+peer URL dials qmux over TLS on TCP, verified with the same `connect.tls`
+settings as any other dial. The accepting relay serves it from its TCP
+listener with TLS on. That listener asks for no client certificate, so a peer
+on it authenticates with a token (`cluster.token`, `token`, or `?jwt=`), not
+mTLS.
+
+```toml
+# core.toml
+[listen.tcp]
+bind = "[::]:4443"
+tls = true
+
+# edge.toml
+[cluster]
+connect = [{ url = "tls://core-a.internal:4443/", upstream = true }]
+```
+
 ## Link costs
 
 Add `?cost=N` to a peer URL to route by price instead of hop count. An unpriced
@@ -90,10 +142,14 @@ for paths the grant covers.
 
 Routing prefers the longest covering prefix, then a fully identified hop list
 over one that holds a 0 (an anonymous hop) at any depth, then the lowest cost,
-then the shortest hop list, breaking any remaining tie toward the newest
-announcement so a reconnecting publisher isn't outranked by the session it
-replaced. An assigned identity for an anonymous peer is local selection state
-and is never written into the hop list.
+then the shortest hop list, then a hash of the requested path and the hop list,
+breaking any remaining tie toward the newest announcement so a reconnecting
+publisher isn't outranked by the session it replaced. Hashing the requested
+path spreads equal-cost advertisers of one prefix, such as a transcode pool,
+across its paths instead of sending every path to one of them, and every relay
+that holds the same routes picks the same one for a given path. An assigned
+identity for an anonymous peer is local selection state and is never written
+into the hop list.
 
 ```toml
 [cluster]
@@ -101,7 +157,7 @@ connect = ["https://sibling.same-dc/?cost=0", "https://us-east.example.com/?cost
 ```
 
 The same policy reads as an object, which is the only form that accepts
-`egress` and `token`. A bare URL stays valid, and an object whose `url` still
+`egress`, `token`, and [`upstream`](#upstream-links). A bare URL stays valid, and an object whose `url` still
 carries `?cost=` or `?jwt=` alongside those fields is rejected rather than
 given a precedence a migration could silently get wrong.
 

@@ -56,24 +56,23 @@ Interview paper trail (✅ marks the choice):
 Remaining:
 
 - Land each line's umbrella PR with `/quest-complete`, then delete its branch:
-  #4403 wildcard, #4034 archive, #4039 auth, #4079 cpp, #4519 ffi-shape,
-  #4080 obs-moq-video, #4133 qos (held until
-  [Lag across a splice](/quest/m1/qos/lag-splice.md) is fixed), #4437 rs2ts,
-  #4653 test-flakes-2, #4180 transport-upgrade, #4640 tstd. #4162
-  (audio-jitter-target) landed, and #4438 folded into rs2ts.
-- Fold #4255 (archive/track-timeline) into the archive branch before #4034
-  lands; as of the 2026-10-05 audit it has not happened and #4034 is a draft.
+  #4039 auth, #4079 cpp, #4519 ffi-shape, and #4133 qos (held until
+  [Lag across a splice](/quest/m1/qos/lag-splice.md) is fixed). As of
+  2026-10-06, #4162 (audio-jitter-target), #4180 (transport-upgrade), #4403
+  (wildcard), #4034 (archive, with #4255 folded in), #4080 (obs-moq-video),
+  #4640 (tstd), #4437 (rs2ts, with #4438 folded in), and #4653 (test-flakes-2)
+  landed. The `quest/m1/transport-upgrade/README` branch outlived #4180;
+  delete it.
 - Before a line lands and its branch is deleted, merge or retarget every child
-  PR still based on it, or GitHub closes it with the branch. As of the
-  2026-10-05 audit: #4645 (tstd/delay, retarget to `main` after #4640),
-  #4732 (ffi-shape/request-accept), and #4675 (auth/request-token).
+  PR still based on it, or GitHub closes it with the branch. As of
+  2026-10-06: #4675 (auth/request-token).
 - Retiring the auth branch reconciles `quest/m1/auth/` with `main`'s copy
   (decided 2026-10-05). Drop the children the branch finished or moved (lite,
   interop, unauthorized, auth-ok-preflight, error-codes, narrowing, peer-grant,
-  moq-transport), keep the branch's new ones (not-supported, violations,
-  js-fetch-watch), fold violations' lite decode gap into
-  [malformed grant](/quest/m1/auth/malformed-grant.md), and retarget the
-  branch's lite-06 wire text at the current `-wip` lite version.
+  moq-transport), keep the branch's new ones (wip-version, not-supported,
+  violations, js-fetch-watch), and fold violations' lite decode gap into
+  [malformed grant](/quest/m1/auth/malformed-grant.md). The branch's
+  wip-version quest moves its lite-06 wire text to `moq-lite-07-wip`.
 
 Done when `flake.nix` pins the new quest, no `quest/*README` branch remains,
 and `quest check` passes.

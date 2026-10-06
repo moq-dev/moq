@@ -21,7 +21,8 @@ Check: `git show origin/release:sh/gh/back-merge.sh` no longer runs
 `gh pr merge --auto`, and
 `gh api repos/moq-dev/moq/rulesets/2420853` lists a `merge_queue` rule with
 merge method `SQUASH` and a moq-bot bypass actor with `bypass_mode`
-`pull_request`. Delete this quest once both hold.
+`pull_request`. Delete this quest once both hold and the Dependabot check
+below is done.
 
 ## Plan
 
@@ -29,8 +30,12 @@ Decided in #4619 (2026-10-05): a squash queue with a pull_request-only bot
 bypass for the back-merge, landed by the `land` job; the back-merge may land
 against a `main` that moved during its CI run, accepted.
 
-Known risk: the Dependabot workflow mints the same moq-bot app token, so a
-Dependabot merge could also skip the queue once moq-bot is a bypass actor.
+Check once both settings are on: `.github/workflows/dependabot.yml` merges
+with the same moq-bot app token through `gh pr merge --auto --squash`, without
+`--admin`, so its merges may still enqueue rather than bypass. On the next
+Dependabot PR, see whether it went through the queue or skipped it as a
+bypass actor, and record the result in the PR that deletes this quest. If it
+skipped the queue, ask the maintainer whether that is acceptable.
 
 ## Related
 

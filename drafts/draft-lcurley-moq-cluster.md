@@ -242,14 +242,13 @@ The expected update is a ROUTE_COST change, which is how a relay signals that it
 # Path Selection {#selection}
 A receiver resolving a SUBSCRIBE, FETCH, or track-status request consults only the most specific advertisements covering it: the longest prefix.
 A refusal never falls through to a less specific tier.
+Nor is it retried at another advertisement of the same prefix.
 
 Within that tier, a receiver SHOULD prefer a HOP_PATH that contains no 0 entry over one that does, then the lowest ROUTE_COST, breaking ties toward the shorter HOP_PATH and then toward the most recently received.
 This is advisory: a receiver MAY apply local policy, such as measured RTT, instead.
 
-NO_CAPACITY ({{iana}}) refuses a request the publisher could serve but has no capacity for now.
-It permits ONE re-resolution within the same tier, excluding the refusing advertiser: every route with its non-zero first Hop ID, or its session when that ID is 0.
-A receiver that has spent its retry, or has no other candidate, MUST refuse downstream with a code other than NO_CAPACITY, so retries cannot compound hop by hop.
-Every other refusal, including an unrecognized code, is terminal.
+Every refusal, including an unrecognized code, is terminal.
+A publisher signals capacity through its advertisement alone: it withdraws or re-prices it before it runs out, leaving headroom for requests already in flight, since a withdrawal and a request for the slot it gave away can cross.
 A receiver SHOULD NOT cache refusals.
 
 A relay MUST NOT advertise a namespace merely because it resolved it: the covering advertisement stays the only one until the publisher advertises the concrete namespace, which it SHOULD do once producing, so a later request finds the running content by its exact namespace instead of resolving a second producer.
@@ -271,7 +270,7 @@ Under this extension an advertisement is a path, so a session advertises a names
 
 A namespace names one broadcast whichever publisher serves it, so several publishers of it are redundant copies: their groups are one sequence, and a subscription moves between them without a gap.
 A publisher MUST NOT reuse a namespace for different content, and publishes a new instance under a new namespace instead.
-A refusal moves to another publisher only as {{selection}} allows: once, and only for NO_CAPACITY.
+A refusal never moves to another publisher ({{selection}}).
 A relay that moves to another publisher MUST update its advertisement to the new path ({{updating}}).
 
 
@@ -284,7 +283,7 @@ Because a relay only appends to HOP_PATH, it cannot make a competing path look s
 ROUTE_COST has no such protection: it is a single value the sender chooses, so a relay can advertise 0 for content it is not carrying and attract subscriptions it then has to fetch.
 Both cost only a suboptimal path choice, and the latter is self-limiting, since the traffic won this way must then be served.
 
-Implementations SHOULD bound the work started by requests beneath a broad advertisement, using NO_CAPACITY when capacity is exhausted.
+Implementations SHOULD bound the work started by requests beneath a broad advertisement, withdrawing it before capacity is exhausted.
 
 A receiver MUST NOT make security decisions based on Hop IDs, and a deployment spanning a trust boundary SHOULD treat a peer's ROUTE_COST as a hint to clamp or ignore rather than an accounting figure.
 
@@ -315,14 +314,6 @@ Both are carried in PUBLISH_NAMESPACE, in REQUEST_UPDATE of a PUBLISH_NAMESPACE 
 
 The Key-Value-Pair parity is load-bearing: HOP_PATH is odd, so its value is a length-prefixed byte string, while HOP_ID, RELAY_COST, and ROUTE_COST are even, so their values are bare varints.
 
-## MOQT Error Codes
-
-This document requests one registration in the "REQUEST_ERROR Codes" registry.
-
-| Value   | Name        | Reference     |
-|:--------|:------------|:--------------|
-| 0x40B5A | NO_CAPACITY | This Document |
-
 
 --- back
 
@@ -330,7 +321,7 @@ This document requests one registration in the "REQUEST_ERROR Codes" registry.
 
 ## moq-cluster-02
 - A namespace names one broadcast whichever publisher serves it, and a publisher MUST NOT reuse one for different content. A receiver MAY fail a subscription over between any of its advertisements, continuing from the first object the subscriber lacks instead of at a group boundary. Replaces the first-Hop-ID publisher identity.
-- Defined request resolution against the longest covering prefix and the NO_CAPACITY refusal with its single re-resolution; any other refusal is terminal, including between several publishers of one namespace.
+- Defined request resolution against the longest covering prefix; every refusal is terminal, including between several publishers of one namespace, and capacity is signaled only by withdrawing or re-pricing the advertisement.
 - A relay does not advertise a namespace because it resolved it; the publisher advertises the concrete namespace once producing.
 - A change of original publisher is an ordinary update instead of a withdrawal and a new advertisement.
 - A relay puts a random Hop ID, picked per session, in front of an advertisement whose first HOP_PATH entry is 0, and writes that stamp followed by 0 for one with no HOP_PATH.

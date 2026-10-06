@@ -28,8 +28,8 @@ a broadcast name or the group numbers a relay cached under it.
 - Decide what an unset node becomes once the epoch follows it (#4739 used
   `local`).
 - The aggregator treats a new epoch as a new node: its counters add to the
-  retired total from the [bounded aggregate](/quest/m0/broadcast-epoch/stats-aggregate-bound.md)
-  instead of regressing the merged total.
+  merged total instead of regressing it, and the old epoch folds into the
+  retired total once `aggregate::Config::grace` elapses. Test it.
 - Expose each group broadcast's epoch (a per-group accessor replacing
   #4739's `Producer::epoch()`) so a consumer can tell epochs apart.
   MoQ Pro's VOD `storage.json` mints its own epoch rather than sharing a
@@ -47,7 +47,3 @@ a broadcast name or the group numbers a relay cached under it.
 
 Public API: path shape change for every stats consumer. Wire: stats broadcast
 names gain a trailing epoch segment.
-
-## Required
-
-- [Bounded stats aggregate](/quest/m0/broadcast-epoch/stats-aggregate-bound.md) - retired nodes fold into a bounded total, which epochs churn

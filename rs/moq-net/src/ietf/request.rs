@@ -1,9 +1,9 @@
 use std::borrow::Cow;
 
-use crate::coding::{Decode, DecodeError, Encode, EncodeError};
+use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder};
 
-use super::Message;
 use super::active_count::ACTIVE_COUNT_PARAM;
+use super::{Location, Message};
 
 use super::Version;
 
@@ -29,15 +29,15 @@ impl std::fmt::Display for RequestId {
 }
 
 impl Encode<Version> for RequestId {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		self.0.encode(w, version)?;
+	fn encode(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
+		w.varint(self.0)?;
 		Ok(())
 	}
 }
 
 impl Decode<Version> for RequestId {
-	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let request_id = u64::decode(r, version)?;
+	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+		let request_id = r.varint()?;
 		Ok(Self(request_id))
 	}
 }
@@ -50,12 +50,12 @@ pub struct MaxRequestId {
 impl Message for MaxRequestId {
 	const ID: u64 = 0x15;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		Ok(Self { request_id })
 	}
@@ -69,12 +69,12 @@ pub struct RequestsBlocked {
 impl Message for RequestsBlocked {
 	const ID: u64 = 0x1a;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		Ok(Self { request_id })
 	}
@@ -94,7 +94,7 @@ pub struct RequestOk {
 impl Message for RequestOk {
 	const ID: u64 = 0x07;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			self.request_id
 				.expect("request_id required for draft14-16")
@@ -106,15 +106,19 @@ impl Message for RequestOk {
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			Some(RequestId::decode(r, version)?)
 		} else {
 			None
 		};
 		// A REQUEST_UPDATE_OK may refresh EXPIRES, which is ignored like SUBSCRIBE_OK's.
+		// LARGEST_OBJECT is a MUST on a REQUEST_UPDATE_OK or TRACK_STATUS_OK once the track
+		// has objects. We send neither request, so nothing reads it, but rejecting it would
+		// close the session over a parameter a compliant peer is required to send.
 		decode_params!(r, version,
 			0x08 => _expires: Option<u64>,
+			0x09 => _largest: Option<Location>,
 			ACTIVE_COUNT_PARAM => active: Option<u64>,
 		);
 		Ok(Self { request_id, active })
@@ -136,7 +140,7 @@ pub struct RequestError<'a> {
 impl Message for RequestError<'_> {
 	const ID: u64 = 0x05;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			self.request_id
 				.expect("request_id required for draft14-16")
@@ -144,26 +148,26 @@ impl Message for RequestError<'_> {
 		} else {
 			assert!(self.request_id.is_none(), "request_id must be None for draft17+");
 		}
-		self.error_code.encode(w, version)?;
+		w.varint(self.error_code)?;
 		if !matches!(version, Version::Draft14 | Version::Draft15) {
-			self.retry_interval.encode(w, version)?;
+			w.varint(self.retry_interval)?;
 		}
-		self.reason_phrase.encode(w, version)?;
+		w.string(&self.reason_phrase)?;
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			Some(RequestId::decode(r, version)?)
 		} else {
 			None
 		};
-		let error_code = u64::decode(r, version)?;
+		let error_code = r.varint()?;
 		let retry_interval = match version {
 			Version::Draft14 | Version::Draft15 => 0,
-			_ => u64::decode(r, version)?,
+			_ => r.varint()?,
 		};
-		let reason_phrase = Cow::<str>::decode(r, version)?;
+		let reason_phrase = Cow::Owned(r.string()?);
 		Ok(Self {
 			request_id,
 			error_code,
@@ -176,17 +180,17 @@ impl Message for RequestError<'_> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bytes::BytesMut;
 
 	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
-		let mut buf = BytesMut::new();
-		msg.encode_msg(&mut buf, version).unwrap();
+		let mut buf = Vec::new();
+		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
+			.unwrap();
 		buf.to_vec()
 	}
 
 	fn decode_message<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {
 		let mut buf = bytes::Bytes::from(bytes.to_vec());
-		M::decode_msg(&mut buf, version)
+		crate::coding::decode_buf(&mut buf, version, M::decode_msg)
 	}
 
 	#[test]
@@ -209,6 +213,31 @@ mod tests {
 
 		let decoded: RequestOk = decode_message(&bytes, Version::Draft16).unwrap();
 		assert_eq!(decoded.request_id, Some(RequestId(7)));
+	}
+
+	/// A REQUEST_UPDATE_OK or TRACK_STATUS_OK carries LARGEST_OBJECT; it is ignored rather
+	/// than rejected. Draft-14 has no REQUEST_OK, and the Location is length-prefixed until
+	/// draft-17.
+	#[test]
+	fn test_request_ok_ignores_largest_object() {
+		for version in [
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			let bytes: &[u8] = match version {
+				Version::Draft15 | Version::Draft16 => &[0x07, 0x01, 0x09, 0x02, 0x05, 0x03],
+				_ => &[0x01, 0x09, 0x05, 0x03],
+			};
+			let mut buf = Decoder::new(bytes, version.into());
+			RequestOk::decode_msg(&mut buf, version).unwrap_or_else(|e| panic!("{version}: {e}"));
+			assert!(buf.is_empty(), "{version}: trailing bytes");
+		}
 	}
 
 	#[test]

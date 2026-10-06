@@ -120,9 +120,13 @@ pub enum Error {
 	#[error("duplicate moof")]
 	DuplicateMoof,
 
-	/// A second moov would re-declare the track set the first one already published.
+	/// A second moov would re-declare the track set the first one already declared.
 	#[error("duplicate moov")]
 	DuplicateMoov,
+
+	/// A moov arrived after `finish()`, so the tracks it declares could never finish.
+	#[error("moov after finish")]
+	MoovAfterFinish,
 
 	#[error("missing trun")]
 	MissingTrun,
@@ -133,15 +137,9 @@ pub enum Error {
 	#[error("video codec {0} needs a description (codec config record) to synthesize a CMAF init")]
 	MissingVideoDescription(String),
 
-	#[error("video track {0} missing in catalog")]
-	MissingVideoTrack(String),
-
 	/// A synthesized video track has no usable encoded dimensions.
 	#[error("missing video dimensions for codec: {0}")]
 	MissingVideoDimensions(String),
-
-	#[error("audio track {0} missing in catalog")]
-	MissingAudioTrack(String),
 
 	#[error("invalid data offset")]
 	InvalidDataOffset,
@@ -155,14 +153,15 @@ pub enum Error {
 	#[error("track sample range {start}..{end} is out of bounds of mdat (len {len})")]
 	SampleRangeOutOfBounds { start: usize, end: usize, len: usize },
 
-	#[error("no catalog snapshot")]
-	NoCatalogSnapshot,
-
 	#[error("encode_fragment called with no frames")]
 	NoFrames,
 
 	#[error("audio codec {0} needs a description (AudioSpecificConfig) to synthesize a CMAF init")]
 	MissingAudioDescription(String),
+
+	/// An Opus catalog entry whose OpusHead contradicts its channel count.
+	#[error("Opus head has {head} channels but the catalog declares {catalog}")]
+	OpusChannelCount { catalog: u32, head: u32 },
 
 	#[error("multi-sample fragment has a non-final sample with no duration; DTS is unrecoverable")]
 	MissingSampleDuration,
@@ -209,6 +208,31 @@ pub enum Error {
 		/// The preceding fragment's decode time in the track's timescale.
 		previous: moq_net::Timestamp,
 	},
+
+	/// The init segment fixes the track set, so a rendition that joins later can't be written.
+	#[error("rendition {0} joined after the init segment; restart the export to include it")]
+	TrackAdded(String),
+
+	/// A rendition's sample entry no longer matches the one the init segment declared.
+	#[error("rendition {0} changed its codec configuration after it was declared")]
+	TrackChanged(String),
+
+	/// A rendition restarted at or before media already written for it, such as a
+	/// resubscription replaying cached groups.
+	#[error("rendition {track} went back in time: a fragment starts at {start:?}, after {written:?} was written")]
+	TrackRewound {
+		/// The rendition name.
+		track: String,
+		/// The rejected fragment's presentation time.
+		start: std::time::Duration,
+		/// The latest presentation time already written for the rendition.
+		written: std::time::Duration,
+	},
+
+	/// The init segment waited too long, or the broadcast ended, before these renditions
+	/// delivered the codec configuration their track needs.
+	#[error("renditions {0:?} never delivered their codec configuration")]
+	TrackUndescribed(Vec<String>),
 }
 
 impl From<mp4_atom::Error> for Error {
@@ -719,8 +743,14 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 				Some(description) => {
 					let head = crate::codec::opus::Config::parse(&mut description.as_ref())?;
 					// dOps shares OpusHead's family 0 layout; a mapping table would need writing too.
-					if head.mapping_family != 0 {
-						return Err(crate::codec::opus::Error::UnsupportedMappingFamily(head.mapping_family).into());
+					if let Some(mapping) = head.mapping {
+						return Err(crate::codec::opus::Error::UnsupportedMappingFamily(mapping.family()).into());
+					}
+					if head.channel_count != config.channel_count {
+						return Err(Error::OpusChannelCount {
+							catalog: config.channel_count,
+							head: head.channel_count,
+						});
 					}
 					head
 				}

@@ -1,0 +1,2 @@
+# quinn's formatting (rustfmt defaults) rather than rs/.rustfmt.toml, so
+# upstream fixes cherry-pick without whitespace conflicts.

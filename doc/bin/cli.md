@@ -19,12 +19,14 @@ Docker; see [Install](/setup/install).
 | `import` | `capture` | Capture a camera, display, window, or app plus a microphone, and encode natively. |
 | `import` | `hls <url>` | Pull a remote HLS playlist. |
 | `import` | `rtmp`, `srt`, `rtc` | Accept pushes (`--listen`) or pull from a remote (`--connect`). |
+| `import` | `archive <url>` | Replay a recording from an object store. |
 | `export` | `fmp4`, `mkv`, `ts`, `flv`, `h264`, `h265` | Write a container to stdout. |
 | `export` | `hls --listen` | Serve the broadcast as HLS over HTTP. |
 | `export` | `rtmp`, `srt`, `rtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
+| `export` | `archive <url>` | Record the broadcast into an object store. |
 | `play` | | Decode and play in a native window with sound. |
 | `transcode` | | Publish a just-in-time rendition ladder next to a broadcast. |
-| `ls` | `[prefix]` | List the broadcasts live on a relay. |
+| `announced` | `[prefix]` | Follow the broadcasts announced on a relay. |
 | `fetch` | `<track>` | Write one group of a track to stdout. |
 | `auth` | | Generate, sign, and verify relay JWTs. |
 | `devices` | | List capture sources and their ids. |
@@ -35,7 +37,7 @@ Docker; see [Install](/setup/install).
 moq <MoQ side> import <source> [options]
 moq <MoQ side> export <sink> [options]
 moq <MoQ side> play [options]
-moq <MoQ side> ls [prefix] [options]
+moq <MoQ side> announced [prefix] [options]
 moq <MoQ side> fetch <track> [options]
 ```
 
@@ -144,24 +146,54 @@ rate instead, including for a broadcast that recorded none. Media is never delay
 or dropped to fit: a source that sustains more than the rate overruns it, and a
 VBR source records nothing, so export without either stays unpadded.
 
+The `fmp4`, `mkv`, `flv`, `h264`, and `h265` exports select renditions with
+flags before the sink: `--video-name` and `--audio-name` pick a rendition,
+`--video-codec` and `--audio-codec` keep a codec family, and `--no-video` or
+`--no-audio` leaves a role out. `h264` and `h265` refuse `--no-video` and the
+audio selection flags. `ts`, `archive`, and the gateways don't apply selection, so they
+refuse these flags.
+
+```bash
+moq ... export --no-video fmp4 > audio.mp4
+moq ... export --video-name hd --no-audio mkv > hd.mkv
+```
+
 fMP4 export writes one fragment per publisher group on each track. Audio follows
 the publisher's cuts; video normally follows GOPs. Closing a group flushes it
 even when the live publisher pauses. `--fragment-duration 2s` caps
 the fragment span as frames arrive, including audio whose publisher never cuts.
 MKV uses the same flag to cap clusters, which otherwise follow video GOPs.
 
+The fMP4 init segment declares every rendition in the catalog, so it waits until
+each can be described. An Annex-B H.264 or H.265 track, or video whose catalog
+leaves out its dimensions, waits for its first keyframe; the other tracks keep
+reading meanwhile and their fragments follow the init. A track that is still
+waiting once another has queued 30 seconds fails the export. After the init the
+track set is fixed: a rendition that leaves and returns with the same codec
+configuration is written under its original track, while a new rendition, a
+changed configuration, or a return that replays media already written ends the
+export with an error naming it. Restart the export to pick up a new rendition.
+An Opus rendition declared without its OpusHead gets a guessed pre-skip. A
+head that arrives later with the same channel count, decode rate, and gain is
+accepted even if its pre-skip and input rate differ. An init already written
+keeps the guess, and later heads must match the first one.
+
 ## Play
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
 moq ... play --delay 500ms          # fix the delay instead of measuring it
+moq ... play --no-video             # audio only
 ```
 
 Decodes H.264, H.265, and AV1 video using the platform hardware decoder where
 available, and Opus, PCM, and AAC-LC (mono or stereo) audio in software. The
-log names the decoder each track opened. `--video-name` and `--audio-name`
-pick a rendition. HE-AAC signaled only in band (implicit SBR, as over MPEG-TS)
-plays as its half-rate AAC-LC core.
+opt-in `vpx` feature adds software VP8 and VP9 (8-bit 4:2:0) through libvpx,
+which the build host must provide. The log names the decoder each track
+opened. `--video-name` and `--audio-name` pick a rendition, and `--no-video` or
+`--no-audio` leaves a role out. `--no-video` still opens a window, which stays
+blank; closing it stops playback. HE-AAC signaled only in band (implicit SBR, as
+over MPEG-TS) plays as its half-rate AAC-LC core.
 
 Playback runs on a clock it owns. `--delay` is how far it trails the live
 edge: the jitter a late frame may absorb. The default, `auto`, measures how
@@ -262,28 +294,30 @@ heights and bitrates must then increase strictly together. Duplicate heights or
 bitrates, inverted rankings, and zero-sized or zero-bitrate rungs are rejected
 before connecting.
 
-## List
+## Announced
 
 ```bash
-moq --connect https://relay.example.com/anon ls
-moq ... ls room --follow --json
+moq --connect https://relay.example.com/anon announced
+moq ... announced room --json
 ```
 
-Lists the broadcasts live on a relay over MoQ, with the session's own auth: the
-counterpart of the relay's HTTP `/announced/<prefix>`. It prints one path per
-line, relative to the `--connect` path, and exits once the relay has sent
-everything live under `prefix`. `--follow` keeps running: it prints `+ path`
-for each live broadcast, then `+ path` and `- path` as broadcasts come and go,
-and exits non-zero if the session ends. `--json` prints
-`{"path": "room/alice", "active": true}` per line instead, in either mode.
+Follows the broadcasts announced on a relay over MoQ, with the session's own
+auth: the live counterpart of the relay's HTTP `/announced/<prefix>`. Paths are
+relative to the `--connect` path. On a terminal it shows what is announced
+under `prefix` right now, redrawn as broadcasts start and end, and a list
+taller than the terminal ends in a count of the rest. Piped, it prints
+`+ path` for each broadcast already announced, then `+ path` and `- path` as
+broadcasts come and go. `--json` prints `{"path": "room/alice", "active": true}`
+per line instead, on a terminal or not. It runs until interrupted, and exits
+non-zero if the session ends.
 
-Like `/announced`, it lists announced prefixes, which by convention are
-broadcast paths. A new route to a path already live prints nothing. A name
-starting with `.` stays hidden unless `prefix` names it. `ls` only dials
+Like `/announced`, it follows announced prefixes, which by convention are
+broadcast paths. A new route to a path already announced prints nothing. A name
+starting with `.` stays hidden unless `prefix` names it. `announced` only dials
 `--connect`, and refuses any other MoQ-side flag.
 
-[Inspect a relay](/bin/inspect) walks through `ls` and `fetch` next to their
-`curl` equivalents, including reading the relay's stats.
+[Inspect a relay](/bin/inspect) walks through `announced` and `fetch` next to
+their `curl` equivalents, including reading the relay's stats.
 
 ## Fetch
 
@@ -306,6 +340,41 @@ refuses any listener, cluster, auth, or `--hop` flag. It gives up after 30
 seconds, as `/fetch` does, and exits non-zero when the broadcast or group is not
 found (before writing anything), the relay refuses, or the deadline passes.
 
+## Archive
+
+```bash
+# Record a broadcast until it ends
+moq --connect https://relay.example.com/anon --broadcast event.hang export archive s3://recordings/event
+
+# Replay it under another name
+moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event
+```
+
+`export archive` records one broadcast with
+[moq-archive](https://docs.rs/moq-archive), reading its catalog as it changes.
+Every track gets its own timeline, stored in spans cut at group boundaries
+between 2s and 10s. The catalog and every text, JSON, and binary track are
+sparse data, so each of their groups is stored as soon as it finishes, and a
+group that never closes is stored in pieces as it grows. It refuses a rendition served
+from another broadcast, and one that returns after the catalog dropped it. The
+stage ends once the broadcast does. A store URL that already holds a
+recording is continued: each track resumes after its newest stored span. `--retention 1h` keeps only the last hour (a DVR),
+deleting expired objects, and timeline objects no longer needed to recover it,
+`--retention-grace` (default 30s) after the timeline stops needing them. Every
+track keeps at least its newest span, so a catalog that never changes outlives
+the video it was published with.
+
+`import archive` republishes a recording: each track's timeline replays as a
+live track and every track's groups are served on request, one object GET per
+stored span. By default it replays what is stored and ends the timelines there;
+`--follow 2s` keeps checking for new spans, and newly recorded tracks, of a
+recording still being made.
+
+Store URLs are `file:///absolute/path`, `s3://bucket/prefix`,
+`gs://bucket/prefix`, or `az://container/prefix`. Cloud credentials come from
+the usual `AWS_*`, `GOOGLE_*`, and `AZURE_*` environment variables. The `s3`,
+`gcs`, and `azure` cargo features are on by default.
+
 ## Multiple stages
 
 Separate stages with `--` to bridge several broadcasts, or both directions,
@@ -314,7 +383,8 @@ over one connection:
 ```bash
 moq --connect https://relay.example.com/anon \
     import --broadcast event.hang srt --listen 0.0.0.0:9000 \
-    -- export --broadcast event.hang hls --listen 0.0.0.0:8080
+    -- export --broadcast event.hang hls --listen 0.0.0.0:8080 \
+    -- export --broadcast event.hang archive file:///recordings/event
 ```
 
 ## Redundant publishers
@@ -416,7 +486,7 @@ way. Only `ts` can mark the restart, so the other formats refuse `--linger`.
 ## Debugging
 
 `RUST_LOG=debug` prints the negotiated version and every subscription.
-`moq --connect <url> ls`, or `curl http://relay:4443/announced`, confirms the
+`moq --connect <url> announced`, or `curl http://relay:4443/announced`, confirms the
 relay is reachable and shows what it holds; see [Inspect a relay](/bin/inspect). Connection refused means UDP isn't getting through; certificate
 errors on a dev relay want `--connect-tls-insecure` or the `http://`
 fingerprint flow.

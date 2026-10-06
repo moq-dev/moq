@@ -33,7 +33,7 @@ workers versus io_uring workers, with the existing profiling captures:
 
 Then, only where the profile shows a cost:
 
-- `sendmmsg` in `moq-noq-udp` behind the existing GSO path, submitting every
+- `sendmmsg` in `moq_sock::udp` behind the existing GSO path, submitting every
   train ready across connections in one call, falling back to per-train
   `sendmsg` on partial failure the way the GSO fallback does.
 - A `BufFactory`-style seam on `SendBuffer` in the fork that takes buffers

@@ -19,6 +19,18 @@ use std::time::{Duration, Instant, SystemTime};
 
 use hang::catalog::{MAX_SAFE_INTEGER, MOQ_EPOCH_UNIX_MILLIS};
 
+/// Native capture inputs use the same epoch as the async clock.
+fn monotonic(at: Instant) -> crate::Result<web_async::time::Instant> {
+	#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+	return Ok(web_async::time::Instant::from_std(at));
+
+	#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+	{
+		let _ = at;
+		Err(anyhow::anyhow!("std::time::Instant inputs are unsupported in the browser").into())
+	}
+}
+
 /// The catalog clock for PTS zero at `wall`.
 fn wall_clock(wall: SystemTime) -> crate::Result<hang::catalog::Clock> {
 	let unix_micros = wall
@@ -51,7 +63,7 @@ fn wall_clock(wall: SystemTime) -> crate::Result<hang::catalog::Clock> {
 #[derive(Clone, Copy, Debug)]
 pub struct Clock {
 	/// A monotonic instant, and what the clock read then in micros.
-	instant: Instant,
+	instant: web_async::time::Instant,
 	reading: u64,
 	wall: hang::catalog::Clock,
 }
@@ -78,10 +90,10 @@ impl Clock {
 	/// Start a clock at an explicit monotonic epoch and wall time: PTS zero at both.
 	///
 	/// The deterministic constructor: synthetic sources and fixtures pin both ends instead of
-	/// sampling. Refuses an unrepresentable wall.
+	/// sampling. Refuses an unrepresentable wall or a browser target without native instants.
 	pub fn at(epoch: Instant, wall: SystemTime) -> crate::Result<Self> {
 		Ok(Self {
-			instant: epoch,
+			instant: monotonic(epoch)?,
 			reading: 0,
 			wall: wall_clock(wall)?,
 		})
@@ -92,7 +104,7 @@ impl Clock {
 	/// Refuses a `since` so large that PTS zero lands before the moq epoch (2020), which the wall
 	/// mapping cannot name.
 	pub(crate) fn arrival(since: Duration) -> crate::Result<Self> {
-		let (instant, now) = (Instant::now(), SystemTime::now());
+		let (instant, now) = (web_async::time::Instant::now(), SystemTime::now());
 		let unmappable = || crate::Error::UnmappableTimestamp(format!("{since:?} puts PTS zero before 2020"));
 		let zero = now.checked_sub(since).ok_or_else(unmappable)?;
 		Ok(Self {
@@ -113,9 +125,11 @@ impl Clock {
 	/// Map the instant a payload was captured (a datagram's arrival, a sensor read) onto this clock.
 	///
 	/// Refuses an instant ahead of now, which would claim the payload reached the transport before
-	/// it existed, and one before PTS zero, which no timestamp can name.
+	/// it existed, and one before PTS zero, which no timestamp can name. Native capture instants
+	/// are unsupported in the browser.
 	pub fn capture(&self, at: Instant) -> crate::Result<moq_net::Timestamp> {
-		if at > Instant::now() {
+		let at = monotonic(at)?;
+		if at > web_async::time::Instant::now() {
 			return Err(crate::Error::InvalidCapture);
 		}
 		let micros = match at.checked_duration_since(self.instant) {
@@ -192,6 +206,35 @@ mod tests {
 		));
 		assert!(matches!(
 			clock.capture(now - Duration::from_secs(6)),
+			Err(crate::Error::InvalidCapture)
+		));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn paused_clock_preserves_native_boundaries() {
+		let epoch = tokio::time::Instant::now();
+		let clock = Clock::at(epoch.into_std(), moq_epoch()).unwrap();
+		let fresh = Clock::new();
+		let before = fresh.now();
+		let wall = clock.wall();
+
+		tokio::time::advance(Duration::from_secs(3)).await;
+		assert_eq!(clock.now(), us(3_000_000));
+		assert_eq!(fresh.now().as_micros() - before.as_micros(), 3_000_000);
+		assert_eq!(clock.wall(), wall);
+		assert_eq!(
+			clock.wall_clock(clock.now()).unwrap(),
+			moq_epoch() + Duration::from_secs(3)
+		);
+
+		let captured = (epoch + Duration::from_secs(2)).into_std();
+		assert_eq!(clock.capture(captured).unwrap(), us(2_000_000));
+		assert!(matches!(
+			clock.capture((epoch + Duration::from_secs(4)).into_std()),
+			Err(crate::Error::InvalidCapture)
+		));
+		assert!(matches!(
+			clock.capture((epoch - Duration::from_secs(1)).into_std()),
 			Err(crate::Error::InvalidCapture)
 		));
 	}

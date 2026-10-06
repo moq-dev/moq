@@ -27,15 +27,17 @@ impl Log {
 
 	/// Compare a snapshot taken [`INTERVAL`](Self::INTERVAL) after the last.
 	///
-	/// Logs a stream whose access units did not advance since the last sample, once per
-	/// silence, any stream whose loss counters moved, and PSI sections dropped since.
+	/// Logs an audio or video stream whose access units did not advance since the last
+	/// sample, once per silence. Sparse data (SCTE-35, ID3, other verbatim PIDs) is counted
+	/// and not graded. Also logs any stream whose loss counters moved, and PSI sections
+	/// dropped since.
 	pub fn sample(&mut self, latest: Stats) {
 		self.sync(&latest);
 		for (pid, stream) in &latest.streams {
 			let previous = self.previous.as_ref().and_then(|previous| previous.streams.get(pid));
 			if previous.is_none_or(|previous| previous.units != stream.units) {
 				self.quiet.remove(pid);
-			} else if self.quiet.insert(*pid) {
+			} else if stream.class.graded() && self.quiet.insert(*pid) {
 				tracing::info!(
 					pid = *pid,
 					track = stream.track,
@@ -112,6 +114,7 @@ impl Log {
 
 #[cfg(test)]
 mod test {
+	use super::super::StreamClass;
 	use super::*;
 
 	/// A stream whose count stops across a sample is logged once, with its silence, and again
@@ -124,9 +127,13 @@ mod test {
 		const AUDIO: u16 = 0x101;
 		let sample = |video: u64, audio: u64| {
 			let mut stats = Stats::default();
-			for (pid, track, units) in [(VIDEO, ".avc3", video), (AUDIO, ".mp2", audio)] {
+			for (pid, track, class, units) in [
+				(VIDEO, ".avc3", StreamClass::Video, video),
+				(AUDIO, ".mp2", StreamClass::Audio, audio),
+			] {
 				let stream = StreamStats {
 					track,
+					class,
 					units,
 					quiet: Some(std::time::Duration::from_millis(40)),
 					..Default::default()
@@ -154,6 +161,56 @@ mod test {
 		assert!(!logs_contain("audio frame sync lost"), "nothing lost frame sync");
 	}
 
+	/// A CUEI-marked 0x86 section is sparse data. A second without a section is not a stall,
+	/// even beside a video PID whose access units stopped.
+	#[test]
+	#[tracing_test::traced_test]
+	fn sparse_data_pid_beside_a_stalled_video_is_not_logged() {
+		const VIDEO: u16 = 0x100;
+		const CUE: u16 = 0x21;
+		let sample = |video: u64, cue: u64| {
+			let mut stats = Stats::default();
+			stats.streams.insert(
+				VIDEO,
+				StreamStats {
+					track: ".avc3",
+					class: StreamClass::Video,
+					units: video,
+					quiet: Some(std::time::Duration::from_secs(1)),
+					..Default::default()
+				},
+			);
+			stats.streams.insert(
+				CUE,
+				StreamStats {
+					track: ".ts",
+					class: StreamClass::Data,
+					units: cue,
+					quiet: Some(std::time::Duration::from_secs(1)),
+					..Default::default()
+				},
+			);
+			stats
+		};
+
+		let mut log = Log::default();
+		log.sample(sample(4, 1));
+		log.sample(sample(4, 1));
+		log.sample(sample(4, 2));
+		log.sample(sample(4, 2));
+
+		logs_assert(|lines: &[&str]| {
+			let stopped: Vec<_> = lines
+				.iter()
+				.filter(|line| line.contains("stopped delivering access units"))
+				.collect();
+			match stopped.as_slice() {
+				[line] if line.contains("pid=256") && !line.contains("pid=33") => Ok(()),
+				_ => Err(format!("expected only the stalled video PID, got {stopped:?}")),
+			}
+		});
+	}
+
 	/// A resync is reported on the sample that saw it, and the end of input still reports one
 	/// the last partial interval found.
 	#[test]
@@ -162,6 +219,7 @@ mod test {
 		let sample = |resyncs: u64, units: u64| {
 			let stream = StreamStats {
 				track: ".mp2",
+				class: StreamClass::Audio,
 				units,
 				resyncs,
 				..Default::default()

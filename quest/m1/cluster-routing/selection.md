@@ -30,9 +30,8 @@ Recorded in the 2026-10-05 audit: part of this is already built. The
 wildcard line's `route_order` hash is keyed on the requested path, the HRW
 spread below, and #4741 made a concrete path one source with mid-group
 resume. Once [Wildcard](/quest/m0/wildcard/README.md) (#4403) lands, cut this
-quest down to what remains: terminal refusal (see its
-[refusal child](/quest/m0/wildcard/refusal-final.md)), the HRW split test,
-the same-path failover test, and upstream-link spread.
+quest down to what remains: the HRW split test, the same-path failover
+test, and upstream-link spread. Terminal refusal already landed.
 
 Candidate mechanics:
 
@@ -59,5 +58,4 @@ no timestamp rewind.
 
 ## Required
 
-- [Upstream links](/quest/m1/cluster-routing/transit.md) - the edges and cores this spreads over
 - [Wildcard](/quest/m0/wildcard/README.md) - the longest-prefix rule and pool spread this builds on
