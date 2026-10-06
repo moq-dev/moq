@@ -739,6 +739,9 @@ mod tests {
 
 	/// Dial `wss://{url_host}` on loopback, optionally pinned to fixed addresses, and
 	/// check the TLS name and HTTP `Host` the server sees.
+	///
+	/// Stays on the wall clock. A paused clock auto-advances while the real dial
+	/// waits, so a timer on this path can fire before loopback delivers.
 	async fn check_tls_authority(url_host: &str, fixed: bool, tls_name: Option<&str>) {
 		let ipv6 = url_host.starts_with('[');
 		let name = tls_name.unwrap_or(url_host.trim_start_matches('[').trim_end_matches(']'));
