@@ -122,6 +122,7 @@ owned by that prerequisite, not duplicated in archive storage.
 - [Replay catalog](/quest/m1/archive/replay-catalog.md) - `moq import archive` publishes the recorded catalog live with `store` set, so stock `moq export hls` serves the whole replay
 - [Idle flush](/quest/m1/archive/flush.md) - idle tracks are recorded within a bounded wall-clock delay, and `flush()` forces a track's pending record out
 - [Backward timestamps](/quest/m1/archive/backward-timestamps.md) - a resumed recording refuses a restarted source instead of dropping its groups or overlapping media time
+- [HLS media sequence](/quest/m1/archive/hls-media-sequence.md) - `EXT-X-MEDIA-SEQUENCE` never decreases when the reference rendition switches
 - [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback
 
 ## Related
