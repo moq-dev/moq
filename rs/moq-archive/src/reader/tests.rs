@@ -475,7 +475,10 @@ async fn a_track_enrolled_after_opening_is_followed() {
 	let timelines = archive.store.timelines().await.unwrap();
 	assert_eq!(timelines.keys().collect::<Vec<_>>(), ["audio", "video"]);
 	reader.track("video", &timelines["video"]).await.unwrap();
-	assert!(reader.track("video", &timelines["video"]).await.is_err(), "a served track is refused");
+	assert!(
+		reader.track("video", &timelines["video"]).await.is_err(),
+		"a served track is refused"
+	);
 	reader.refresh().await.unwrap();
 
 	assert_eq!(

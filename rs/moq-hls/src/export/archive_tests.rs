@@ -422,7 +422,12 @@ async fn playlists_read_only_timelines_and_segments_their_own_objects() {
 	let lists = recording.store.inner().lists();
 
 	// Switching renditions downloads only the selected rendition's object.
-	let low = replay.rendition(Kind::Video, "360p").listed_segment(1).await.unwrap().unwrap();
+	let low = replay
+		.rendition(Kind::Video, "360p")
+		.listed_segment(1)
+		.await
+		.unwrap()
+		.unwrap();
 	assert_eq!(&low[4..8], b"moof");
 	assert_eq!(
 		recording.gets(),
@@ -454,7 +459,12 @@ async fn playlists_read_only_timelines_and_segments_their_own_objects() {
 	);
 
 	// A repeated request hits the reader's cache, including the immutable `.info`.
-	replay.rendition(Kind::Video, "360p").listed_segment(1).await.unwrap().unwrap();
+	replay
+		.rendition(Kind::Video, "360p")
+		.listed_segment(1)
+		.await
+		.unwrap()
+		.unwrap();
 	assert_eq!(recording.gets(), Vec::<String>::new());
 	assert_eq!(recording.store.inner().lists(), lists, "segments never list");
 }
@@ -530,7 +540,9 @@ async fn a_growing_recording_ends_only_on_caller_finality() {
 	let mut reader = replay.reader.take().unwrap();
 	reader.refresh().await.unwrap();
 	let playlist = replay
-		.playlist_until(Kind::Video, "1080p", |playlist| playlist.contains("seg/29b1cd67.3.m4s\n"))
+		.playlist_until(Kind::Video, "1080p", |playlist| {
+			playlist.contains("seg/29b1cd67.3.m4s\n")
+		})
 		.await;
 	assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:1\n"), "{playlist}");
 	assert!(!playlist.contains("seg/29b1cd67.0.m4s"), "{playlist}");
@@ -560,7 +572,9 @@ async fn a_durable_timeline_lists_past_the_window() {
 	let recording = segments(12).await;
 	let replay = Replay::open(&recording, 64 * 1024 * 1024, durable()).await;
 	let playlist = replay
-		.playlist_until(Kind::Video, "1080p", |playlist| playlist.contains("seg/29b1cd67.11.m4s\n"))
+		.playlist_until(Kind::Video, "1080p", |playlist| {
+			playlist.contains("seg/29b1cd67.11.m4s\n")
+		})
 		.await;
 	assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:0\n"), "{playlist}");
 	assert!(playlist.contains("seg/29b1cd67.0.m4s\n"), "{playlist}");
@@ -576,7 +590,9 @@ async fn a_durable_timeline_lists_past_the_window() {
 	for archive in [live(), elsewhere] {
 		let live = Replay::open(&recording, 64 * 1024 * 1024, archive).await;
 		let playlist = live
-			.playlist_until(Kind::Video, "1080p", |playlist| playlist.contains("seg/29b1cd67.11.m4s\n"))
+			.playlist_until(Kind::Video, "1080p", |playlist| {
+				playlist.contains("seg/29b1cd67.11.m4s\n")
+			})
 			.await;
 		assert!(!playlist.contains("seg/29b1cd67.0.m4s\n"), "{playlist}");
 	}

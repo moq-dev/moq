@@ -907,7 +907,9 @@ impl Rendition {
 /// The tag of the reference numbering `rows`, empty when none are listed. A reference switch
 /// clears every row, so the listed rows share one.
 fn listed_tag(rows: &[segments::Row]) -> String {
-	rows.first().map(|row| segments::tag(&row.reference)).unwrap_or_default()
+	rows.first()
+		.map(|row| segments::tag(&row.reference))
+		.unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -934,12 +936,7 @@ fn last_group(range: &std::ops::Range<hang::timeline::Position>) -> u64 {
 }
 
 /// Follow `track`'s own timeline into `spans` until it ends, then mark nothing pending.
-async fn watch_spans(
-	broadcast: moq_net::broadcast::Consumer,
-	section: Archive,
-	track: String,
-	spans: Arc<Spans>,
-) {
+async fn watch_spans(broadcast: moq_net::broadcast::Consumer, section: Archive, track: String, spans: Arc<Spans>) {
 	let result: Result<()> = async {
 		let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(&broadcast, &section, &track).await?;
 		while let Some(event) = timeline.next().await? {

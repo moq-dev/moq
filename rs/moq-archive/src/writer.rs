@@ -1436,7 +1436,9 @@ mod tests {
 
 		assert_eq!(
 			writer.run().await,
-			Err(Error::Source("track video group 3: timestamp 1200 precedes 1500".into()))
+			Err(Error::Source(
+				"track video group 3: timestamp 1200 precedes 1500".into()
+			))
 		);
 		let records = window(&store, "video").await;
 		assert_eq!(groups(&records), vec![(0, 0), (1, 2)]);
@@ -1461,7 +1463,10 @@ mod tests {
 		writer.run().await.unwrap();
 		let records = window(&store, "video").await;
 		check_objects(&store, "video", &records).await;
-		assert!(control.track("audio", media()).await.is_err(), "a stopped recording refuses enrollment");
+		assert!(
+			control.track("audio", media()).await.is_err(),
+			"a stopped recording refuses enrollment"
+		);
 		drop(source);
 	}
 

@@ -1,8 +1,8 @@
 use std::num::NonZeroUsize;
 
 use bytes::Bytes;
-use futures::stream::BoxStream;
 use futures::StreamExt;
+use futures::stream::BoxStream;
 use object_store::list::{PaginatedListOptions, PaginatedListResult, PaginatedListStore};
 use object_store::path::Path;
 use object_store::{ListResult, ObjectMeta, ObjectStore, ObjectStoreExt, PutMode, PutPayload};
@@ -202,7 +202,9 @@ impl<T: ObjectStore> Store<T> {
 		let listed = self.inner.list_with_delimiter(self.list_path(None).as_ref()).await?;
 		let mut timelines = std::collections::BTreeMap::new();
 		for directory in listed.common_prefixes {
-			let encoded = directory.filename().ok_or_else(|| Error::Directory(directory.to_string()))?;
+			let encoded = directory
+				.filename()
+				.ok_or_else(|| Error::Directory(directory.to_string()))?;
 			let track = crate::path::decode_track(encoded)?;
 			if let Some(indexed) = track.strip_suffix(hang::timeline::SUFFIX) {
 				timelines.insert(indexed.to_string(), track);

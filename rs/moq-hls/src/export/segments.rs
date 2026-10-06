@@ -409,11 +409,13 @@ impl Consumer {
 	}
 
 	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<Option<Row>> {
-		let poll = self.state.poll(waiter, |state| match state.next_after(self.after.as_ref()) {
-			Next::Ready(row) => Poll::Ready(Some(row)),
-			Next::Ended => Poll::Ready(None),
-			Next::Pending => Poll::Pending,
-		});
+		let poll = self
+			.state
+			.poll(waiter, |state| match state.next_after(self.after.as_ref()) {
+				Next::Ready(row) => Poll::Ready(Some(row)),
+				Next::Ended => Poll::Ready(None),
+				Next::Pending => Poll::Pending,
+			});
 		match poll {
 			Poll::Ready(Ok(found)) => Poll::Ready(found),
 			// The producer closed without a clean end (broadcast dropped): no more segments.

@@ -1244,7 +1244,11 @@ mod tests {
 		assert!(signed.contains(&format!("#EXT-X-MAP:URI=\"init.{hash}.mp4?jwt=abc.def\"\n")));
 		assert!(signed.contains("seg/656e3d1b.0.m4s?jwt=abc.def\n"));
 
-		let segment = rendition.listed_segment(0).await.unwrap().expect("segment fetched on demand");
+		let segment = rendition
+			.listed_segment(0)
+			.await
+			.unwrap()
+			.expect("segment fetched on demand");
 		assert_eq!(&segment[4..8], b"moof", "a fetched group transmuxes to moof+mdat");
 
 		// The live-edge group isn't a segment yet, and unknown groups miss.
@@ -1289,7 +1293,11 @@ mod tests {
 			.expect("rendition discovered from the catalog");
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
 
-		let segment = rendition.listed_segment(0).await.unwrap().expect("segment fetched on demand");
+		let segment = rendition
+			.listed_segment(0)
+			.await
+			.unwrap()
+			.expect("segment fetched on demand");
 		assert_eq!(&segment[4..8], b"moof");
 		drop((media, registration, broadcast));
 	}
@@ -1377,7 +1385,11 @@ mod tests {
 			.await
 			.unwrap()
 			.expect("segment fetched by pts");
-		let by_number = video_rendition.listed_segment(1).await.unwrap().expect("segment by number");
+		let by_number = video_rendition
+			.listed_segment(1)
+			.await
+			.unwrap()
+			.expect("segment by number");
 		assert_eq!(by_time, by_number);
 		assert!(video_rendition.listed_segment_at(999).await.unwrap().is_none());
 
@@ -1694,7 +1706,10 @@ mod tests {
 			"nothing to serve before the rendition starts"
 		);
 		let video2 = broadcaster.rendition(Kind::Video, "video2").unwrap();
-		assert!(video2.listed_segment(0).await.unwrap().is_none(), "a gap is never fetched");
+		assert!(
+			video2.listed_segment(0).await.unwrap().is_none(),
+			"a gap is never fetched"
+		);
 
 		drop((producers, registrations, broadcast));
 	}
@@ -2913,7 +2928,10 @@ mod tests {
 		assert_eq!(numbers(&after)[0], 0, "the new reference numbers from its own records");
 		assert!(after.segments.iter().all(|s| s.tag == new && s.tag != old));
 		let video0 = test.rendition("video0");
-		assert!(video0.segment(&old, 0).await.unwrap().is_none(), "the old URL is no longer served");
+		assert!(
+			video0.segment(&old, 0).await.unwrap().is_none(),
+			"the old URL is no longer served"
+		);
 	}
 
 	// A malformed reference timeline fails the same way.

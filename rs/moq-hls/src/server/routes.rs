@@ -692,7 +692,10 @@ mod tests {
 			StatusCode::NOT_FOUND
 		);
 
-		assert_eq!(status(&app, "/live/video/video0/seg/run-1.656e3d1b.0.m4s").await, StatusCode::OK);
+		assert_eq!(
+			status(&app, "/live/video/video0/seg/run-1.656e3d1b.0.m4s").await,
+			StatusCode::OK
+		);
 		assert_eq!(
 			status(&app, "/live/video/video0/seg/run-1.656e3d1b.t0.m4s").await,
 			StatusCode::OK
