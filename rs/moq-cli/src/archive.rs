@@ -85,9 +85,18 @@ pub async fn export(
 	notify_ready();
 
 	// The writer decides when the recording is over; the catalog only feeds it tracks.
+	let run = writer.run();
+	tokio::pin!(run);
 	tokio::select! {
-		result = writer.run() => result.context("recording failed"),
-		Err(err) = enroll(control, catalog) => Err(err),
+		result = &mut run => result.context("recording failed"),
+		Err(err) = enroll(control.clone(), catalog) => {
+			// Store what already arrived before failing, so the recording stays readable.
+			control.stop()?;
+			if let Err(stopped) = run.await {
+				tracing::warn!(%stopped, "recording failed while stopping");
+			}
+			Err(err)
+		}
 	}
 }
 

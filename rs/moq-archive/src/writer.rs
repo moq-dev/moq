@@ -129,6 +129,7 @@ enum Command<S> {
 	Enroll(Box<Track<S>>),
 	Cut(Timestamp),
 	Remove(String),
+	Stop,
 }
 
 impl<S: ObjectStore> Writer<S> {
@@ -183,12 +184,14 @@ impl<S: ObjectStore> Writer<S> {
 		self.control.clone()
 	}
 
-	/// Record until the source broadcast closes and every enrolled track ends.
+	/// Record until the source broadcast closes and every enrolled track ends, or [`Control::stop`].
 	///
 	/// Then flush each track's final record and finish its timeline. Fails when a timeline cannot
-	/// be committed or stored, or an enrolled track delivers a frame the recording cannot
-	/// represent: the recording stops at each track's last durable timeline object. Returns the
-	/// source's error, after finishing, when the broadcast aborted.
+	/// be committed or stored: the recording stops at each track's last durable timeline object.
+	/// Also fails when an enrolled track delivers a frame the recording cannot represent, but only
+	/// after stopping every track and committing what each already reported, so the recording
+	/// stays readable up to the bad frame. Returns the source's error, after finishing, when the
+	/// broadcast aborted.
 	pub async fn run(self) -> Result<()> {
 		let Self {
 			control,
@@ -209,14 +212,19 @@ impl<S: ObjectStore> Writer<S> {
 		let mut closed = false;
 		// Cleared once the channel yields nothing more: every sender dropped, or it closed and drained.
 		let mut accepting = true;
-		// The track the last event touched. Each event touches at most one, so the loop never scans
-		// the whole table.
-		let mut touched: Option<String> = None;
+		// Every track was stopped, by `Control::stop` or malformed input, so `run` ends once flushed.
+		let mut stopped = false;
+		// Malformed source input, returned once every track flushed.
+		let mut failed: Option<Error> = None;
+		// The tracks the last event touched. An event touches at most one, except a failure, so the
+		// loop never scans the whole table in steady state.
+		let mut touched: Vec<String> = Vec::new();
 
 		loop {
-			if let Some(name) = touched.take()
-				&& let Some(track) = tracks.get_mut(&name)
-			{
+			for name in std::mem::take(&mut touched) {
+				let Some(track) = tracks.get_mut(&name) else {
+					continue;
+				};
 				if let Some(commit) = track.commit()? {
 					commits.push(commit);
 				}
@@ -225,7 +233,7 @@ impl<S: ObjectStore> Writer<S> {
 				}
 			}
 
-			let idle = closed && tracks.is_empty() && commits.is_empty();
+			let idle = (closed || stopped) && tracks.is_empty() && commits.is_empty();
 			if idle && *enrolling.borrow_and_update() == 0 {
 				// Refuse late commands, so an enrollment racing the end fails instead of vanishing.
 				commands.close();
@@ -241,8 +249,12 @@ impl<S: ObjectStore> Writer<S> {
 					None => accepting = false,
 					Some(Command::Enroll(mut track)) => {
 						let subscriber = track.subscriber.take().expect("an enrolling track carries its subscriber");
+						// A stopped recording takes no new content; the track just finishes its timeline.
+						if stopped {
+							track.remove();
+						}
 						reads.push(guard(track.cancelled.clone(), recv(track.name.clone(), subscriber)).boxed());
-						touched = Some(track.name.clone());
+						touched.push(track.name.clone());
 						tracks.insert(track.name.clone(), track);
 					}
 					Some(Command::Cut(pts)) => {
@@ -253,17 +265,29 @@ impl<S: ObjectStore> Writer<S> {
 					Some(Command::Remove(name)) => {
 						if let Some(track) = tracks.get_mut(&name) {
 							track.remove();
-							touched = Some(name);
+							touched.push(name);
 						}
 					}
+					Some(Command::Stop) => {
+						stopped = true;
+						touched.extend(stop(&mut tracks));
+						commands.close();
+					}
 				},
-				Some(read) = reads.next(), if !reads.is_empty() => {
-					touched = handle(read, &mut tracks, &mut reads)?;
-				}
+				Some(read) = reads.next(), if !reads.is_empty() => match handle(read, &mut tracks, &mut reads) {
+					Ok(name) => touched.extend(name),
+					Err(err) => {
+						tracing::error!(%err, "malformed source input; flushing every track and stopping");
+						failed.get_or_insert(err);
+						stopped = true;
+						touched.extend(stop(&mut tracks));
+						commands.close();
+					}
+				},
 				Some((name, committer, result)) = commits.next(), if !commits.is_empty() => {
 					if let Some(track) = tracks.get_mut(&name) {
 						track.committer = Some(committer);
-						touched = Some(name);
+						touched.push(name);
 					}
 					let expired = result?;
 					if let Some(grace) = grace && !expired.is_empty() {
@@ -286,6 +310,12 @@ impl<S: ObjectStore> Writer<S> {
 			delete(&shared.store, &mut pruned, expired).await;
 		}
 
+		if let Some(err) = failed {
+			return Err(err);
+		}
+		if stopped {
+			return Ok(());
+		}
 		// A broadcast end carries no cause.
 		source.closed().await;
 		Ok(())
@@ -310,6 +340,12 @@ impl<S: ObjectStore> Control<S> {
 			self.shared.enrolled.lock().unwrap().remove(name);
 		}
 		result
+	}
+
+	/// Stop recording every track: store what already arrived, finish each timeline, and end
+	/// [`run`](Writer::run) without waiting for the source. Later commands are refused.
+	pub fn stop(&self) -> Result<()> {
+		self.send(Command::Stop)
 	}
 
 	/// Declare a boundary at `pts` on every enrolled track; see [`Segmenter::cut`].
@@ -577,6 +613,17 @@ async fn recv(name: String, mut subscriber: Box<track::Subscriber>) -> Read {
 async fn frame(name: String, mut group: Box<group::Consumer>) -> Read {
 	let result = group.read_frame().await;
 	Read::Frame { name, group, result }
+}
+
+/// Stop reading every track, returning their names so each flushes and finishes.
+fn stop<S: ObjectStore>(tracks: &mut HashMap<String, Box<Track<S>>>) -> Vec<String> {
+	tracks
+		.iter_mut()
+		.map(|(name, track)| {
+			track.remove();
+			name.clone()
+		})
+		.collect()
 }
 
 /// Resolve to [`Read::Cancelled`] once the track stops reading.
@@ -1366,6 +1413,56 @@ mod tests {
 			writer.run().await,
 			Err(Error::Source("track video group 1: timestamp 500 precedes 1000".into()))
 		);
+	}
+
+	/// A malformed group fails the recording only after committing everything reported before
+	/// it, including the open record, so the archive stays readable up to the bad frame.
+	#[tokio::test]
+	async fn a_failed_recording_flushes_what_was_reported() {
+		let source = broadcast::Info::new().produce();
+		let video = track(&source, "video");
+
+		let store = Store::new(InMemory::new(), "rec");
+		let writer = Writer::new(store.clone(), source.consume(), Config::default())
+			.await
+			.unwrap();
+		writer.control().track("video", media()).await.unwrap();
+
+		group(&video, 0, &[0]);
+		group(&video, 1, &[1000]);
+		// Under the minimum, so groups 1 and 2 share the record still open at the failure.
+		group(&video, 2, &[1500]);
+		group(&video, 3, &[1200]);
+
+		assert_eq!(
+			writer.run().await,
+			Err(Error::Source("track video group 3: timestamp 1200 precedes 1500".into()))
+		);
+		let records = window(&store, "video").await;
+		assert_eq!(groups(&records), vec![(0, 0), (1, 2)]);
+		check_objects(&store, "video", &records).await;
+	}
+
+	/// Stopping a recording whose source is still live finishes every timeline and ends `run`.
+	#[tokio::test]
+	async fn stopping_ends_without_the_source() {
+		let source = broadcast::Info::new().produce();
+		let video = track(&source, "video");
+
+		let store = Store::new(InMemory::new(), "rec");
+		let writer = Writer::new(store.clone(), source.consume(), Config::default())
+			.await
+			.unwrap();
+		let control = writer.control();
+		control.track("video", media()).await.unwrap();
+		group(&video, 0, &[0]);
+		control.stop().unwrap();
+
+		writer.run().await.unwrap();
+		let records = window(&store, "video").await;
+		check_objects(&store, "video", &records).await;
+		assert!(control.track("audio", media()).await.is_err(), "a stopped recording refuses enrollment");
+		drop(source);
 	}
 
 	#[tokio::test]
