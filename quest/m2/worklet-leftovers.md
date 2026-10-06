@@ -12,7 +12,11 @@ Decided while completing #4848 (2026-10-05):
 - Rejected: drop the hang dependency and leave moq-boy's include.
 - Rejected: delete the shared declaration and update every consumer.
 
-`js/hang` has no source that names `AudioWorklet` or `?worklet` after #4848. Remove that devDependency. `js/moq-boy/src/game.test.ts` mocks a `?worklet` URL so Bun can load the game without the audio decoder. If removing the include makes that mock fail to typecheck, declare that one module in the test file. Do not put the package include back.
+`js/hang` has no source that names `AudioWorklet` or `?worklet` after #4848. Remove that devDependency.
+
+moq-boy imports `@moq/watch`, whose entry re-exports `./audio`, and `decoder.ts` imports `./render-worklet.ts?worklet`. moq-boy's `tsc` follows that source. The shared include is the only `*?worklet` declaration in that program, so removing it breaks the watch import, not the test mock. A `declare module` in `game.test.ts` cannot cover `decoder.ts`, because that file is already a module.
+
+✅ Add `js/moq-boy/src/worklet.d.ts` with `declare module "*?worklet"`. `include: ["src"]` already picks it up. Then drop the shared include. Require `tsc --noEmit` and `tsc -p tsconfig.build.json` in moq-boy to pass. Do not put the shared include back.
 
 Confirm with `just check` for the packages touched.
 
