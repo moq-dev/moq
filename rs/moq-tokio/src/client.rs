@@ -1332,6 +1332,120 @@ mod tests {
 		accepted.await.unwrap().expect("server handshake failed");
 	}
 
+	/// QUIC wins while the fallback handshake is held until QUIC connects.
+	/// Each transport owns its ephemeral port; this exercises the same race as
+	/// connect_inner without depending on which real handshake runs faster.
+	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[tracing_test::traced_test]
+	#[tokio::test]
+	async fn broadcast_race_quic_wins() {
+		let pub_origin = crate::origin::spawn();
+		let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+		broadcast
+			.announce(Default::default())
+			.expect("failed to create broadcast");
+		let track = broadcast.create_track("video", None).expect("failed to create track");
+		let mut group = track.append_group().expect("failed to append group");
+		group
+			.write_frame(crate::moq_net::Timestamp::ZERO, b"hello".as_ref())
+			.expect("failed to write frame");
+		group.finish().expect("failed to finish group");
+
+		let ws_listener = crate::websocket::Listener::bind("[::]:0".parse().unwrap())
+			.await
+			.expect("failed to bind WebSocket listener");
+		let ws_port = ws_listener.local_addr().expect("failed to get ws addr").port();
+		let (connected, quic_connected) = tokio::sync::oneshot::channel();
+		let websocket_handle = tokio::spawn(async move {
+			quic_connected.await.expect("QUIC connected");
+			ws_listener.accept().await
+		});
+
+		let mut server_config = crate::listen::Config {
+			bind: Some("[::]:0".parse().unwrap()),
+			..Default::default()
+		};
+		server_config.tls.generate = vec!["localhost".into()];
+		let server = server_config.init(Default::default()).expect("failed to init server");
+		let mut server = server.listen().await.expect("failed to listen");
+		let quic_port = server.local_addr().expect("failed to get QUIC addr").port();
+
+		let sub_origin = crate::origin::spawn();
+		let sub_consumer = sub_origin.consume();
+		let mut announcements = sub_consumer.announced();
+		let mut client_config = crate::connect::Config::default();
+		client_config.tls.insecure = Some(true);
+		// Dial both arms immediately; the fallback handshake is gated by QUIC.
+		client_config.websocket.delay = std::time::Duration::ZERO;
+
+		let client = client_config.init(Default::default()).expect("failed to init client");
+		let quic_addr: crate::connect::Addr = Url::parse(&format!("https://localhost:{quic_port}")).unwrap().into();
+		let ws_addr: crate::connect::Addr = Url::parse(&format!("http://localhost:{ws_port}")).unwrap().into();
+
+		// Keep this aligned with the newest default Lite version, as in tests/broadcast.rs.
+		let expected_version: moq_net::Version = "moq-lite-06".parse().expect("invalid version");
+
+		let server_handle = tokio::spawn(async move {
+			let request = server.accept().await.expect("no incoming connection");
+			assert_eq!(
+				request.transport(),
+				crate::server::Transport::Quic,
+				"expected the QUIC listener",
+			);
+			let session = request.with_publisher(&pub_origin).ok().await?;
+			assert_eq!(session.version(), expected_version, "server negotiated stale version");
+			let _broadcast = broadcast;
+			let _track = track;
+			let _ = session.closed().await;
+			Ok::<_, anyhow::Error>(())
+		});
+
+		let client = client.with_subscriber(sub_origin);
+		let noq = client.noq.as_ref().expect("QUIC backend");
+		let quic = async {
+			let session = noq.connect(&client.tls, quic_addr, &client.versions).await?;
+			connected.send(()).expect("fallback listener alive");
+			Ok::<_, crate::Error>(crate::transport::Session::new(session))
+		};
+		let cc = client
+			.race_moq_connect(&client.moq, ws_addr, quic)
+			.await
+			.expect("client connect failed");
+
+		assert_eq!(cc.version(), expected_version, "client negotiated stale version");
+		websocket_handle.abort();
+		let _ = websocket_handle.await;
+
+		// Skip the caught-up marker; the first route event must be the announcement.
+		let update = loop {
+			match announcements.next().await.expect("origin closed") {
+				moq_net::announce::Event::Live => continue,
+				moq_net::announce::Event::Start(update) => break update,
+				event => panic!("expected announcement, got {event:?}"),
+			}
+		};
+		assert_eq!(update.prefix.as_str(), "test");
+		let broadcast = sub_consumer
+			.request_broadcast("test")
+			.await
+			.expect("broadcast resolves");
+		let mut track = broadcast
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.expect("subscribe");
+		let mut group = track.recv_group().await.expect("receive group").expect("track open");
+		let frame = group.read_frame().await.expect("read frame").expect("group open");
+		assert_eq!(&frame.payload[..], b"hello");
+
+		drop(cc);
+		server_handle
+			.await
+			.expect("server task panicked")
+			.expect("server task failed");
+	}
+
 	#[cfg(all(feature = "websocket", feature = "noq"))]
 	#[tokio::test]
 	async fn race_transport_connect_reports_auth_when_both_refuse() {

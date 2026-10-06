@@ -372,7 +372,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 #[tokio::test]
 async fn broadcast_moq_lite_05_fetch_webtransport() {
 	// Exercises the WebTransport path; lite-05 is forced via config on both ends.
-	// The raw-QUIC ALPN path is covered by broadcast_race_quic_wins.
+	// The raw-QUIC ALPN path is covered by client::tests::broadcast_race_quic_wins.
 	lite05_fetch_roundtrip("https").await;
 }
 
@@ -2331,86 +2331,6 @@ async fn broadcast_websocket_uses_newest_version() {
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
 		assert_eq!(request.transport(), moq_tokio::server::Transport::WebSocket);
-		let session = request.with_publisher(&pub_origin).ok().await?;
-		assert_eq!(session.version(), expected_version, "server negotiated stale version");
-		let _broadcast = broadcast;
-		let _track = track;
-		let _ = session.closed().await;
-		Ok::<_, anyhow::Error>(())
-	});
-
-	let client = client.with_subscriber(sub_origin);
-	let (_client, cc) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
-		.await
-		.expect("client connect timed out")
-		.expect("client connect failed");
-
-	assert_eq!(cc.version(), Some(expected_version), "client negotiated stale version");
-
-	drop(cc);
-	server_handle
-		.await
-		.expect("server task panicked")
-		.expect("server task failed");
-}
-
-/// Regression guard for the QUIC vs WebSocket race. With both transports
-/// reachable at the same URL, QUIC must win, since it's lower-latency and
-/// has direct ALPN negotiation. A WebSocket win here means QUIC silently
-/// regressed (and would also tend to drag the version down to Lite02 on
-/// older relays). We bind WebSocket TCP and QUIC UDP to the same port,
-/// then disable the head start so the race is genuine.
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_race_quic_wins() {
-	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
-	broadcast
-		.announce(Default::default())
-		.expect("failed to create broadcast");
-	let track = broadcast.create_track("video", None).expect("failed to create track");
-	let mut group = track.append_group().expect("failed to append group");
-	group
-		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"hello".as_ref())
-		.expect("failed to write frame");
-	group.finish().expect("failed to finish group");
-
-	// Bind WebSocket TCP first to pick a random port, then bind QUIC UDP to
-	// the same port. UDP and TCP live in separate kernel namespaces, so this
-	// works on every supported platform.
-	let ws_listener = moq_tokio::websocket::Listener::bind("[::]:0".parse().unwrap())
-		.await
-		.expect("failed to bind WebSocket listener");
-	let port = ws_listener.local_addr().expect("failed to get ws addr").port();
-
-	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some(format!("[::]:{port}").parse().unwrap());
-	server_config.tls.generate = vec!["localhost".into()];
-
-	let mut config = moq_tokio::server::Config::default();
-	config.listen = server_config;
-	config.websocket = Some(ws_listener);
-	let server = config.init().expect("failed to init server");
-	let mut server = server.listen().await.expect("failed to listen");
-
-	let sub_origin = moq_tokio::origin::spawn();
-	let mut client_config = moq_tokio::connect::Config::default();
-	client_config.tls.insecure = Some(true);
-	// Zero head start: QUIC has to win on its own merit, not by penalising WS.
-	client_config.websocket.delay = Duration::ZERO;
-
-	let client = client_config.init(Default::default()).expect("failed to init client");
-	let url: url::Url = format!("https://localhost:{port}").parse().unwrap();
-
-	let expected_version: moq_net::Version = NEWEST_LITE.parse().expect("invalid version");
-
-	let server_handle = tokio::spawn(async move {
-		let request = server.accept().await.expect("no incoming connection");
-		assert_eq!(
-			request.transport(),
-			moq_tokio::server::Transport::Quic,
-			"QUIC lost the race to WebSocket with both reachable",
-		);
 		let session = request.with_publisher(&pub_origin).ok().await?;
 		assert_eq!(session.version(), expected_version, "server negotiated stale version");
 		let _broadcast = broadcast;

@@ -6785,7 +6785,7 @@ mod test {
 			drop(writer);
 			drop(producer);
 		});
-		assert!(warns >= 1, "unfinished drop must emit unfinished-producer WARN");
+		assert_eq!(warns, 1, "unfinished drop must emit one unfinished-producer WARN");
 	}
 
 	#[test]

@@ -132,7 +132,10 @@ Each run covers, against a real local relay:
   The fake device is not physical hardware, and the headless permission decision
   is not a person clicking a browser prompt.
 - **pause and resume**, **unsubscribe and rejoin**, **detach and reattach**,
-  **publisher stop and same-path republish**, and **late join**.
+  **publisher stop and same-path republish**, and **late join**. The late join
+  must present the newest published GOP or a newer one. Its lower bound is the
+  encoded keyframe timestamp sampled before the existing viewer closes, since
+  painting the canvas does not mean capture and encoding have finished.
 - **resources return to baseline** - the page wraps `WebTransport`, `WebSocket`,
   `AudioContext`, and `Worker` to count live instances, so a detach that leaks a
   session is visible rather than merely invisible.
