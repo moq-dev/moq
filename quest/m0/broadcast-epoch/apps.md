@@ -11,9 +11,9 @@ switches to a republish within an RTT. Logs show the epoch.
 
 ## Plan
 
-- Publish sides mint with `Epoch::mint()` / `Epoch.mint()` and announce it on
-  the route; nothing mints by default. Mint per run, not per process, where a
-  publisher can restart its content without restarting.
+- Publish sides mint per run as of #4942: moq-cli publish, HLS import,
+  archive replay, WHEP import, and transcode output; moq-boy; `@moq/publish`,
+  the clock, and moq-boy's viewer feedback. What remains is below.
 - Watch sides handle "the broadcast changed" as a fresh catalog and decoder
   reset. Test a republish mid-playback in the browser and native players.
 - Update `doc/bin/cli.md` and every example invocation that shows a published
