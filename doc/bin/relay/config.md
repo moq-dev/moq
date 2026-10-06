@@ -224,6 +224,7 @@ prefix = ".stats"                    # Broadcasts appear under <prefix>/node/<no
 interval = 1                         # Seconds between snapshots.
 node = "sjc/1"                       # Disambiguates relays sharing a cluster.
 depth = 1                            # Also bucket by the first N path segments (per tenant).
+linger = "5m"                        # Keep an empty group's broadcast announced this long. Default.
 ```
 
 Each node publishes `publisher.json`, `subscriber.json`, and `sessions.json`
