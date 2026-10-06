@@ -509,6 +509,8 @@ export class Producer {
 	#cached = new Map<number, CachedGroup>();
 	// When the cache was last scanned. See #prune.
 	#pruned = Number.NEGATIVE_INFINITY;
+	// When the track closed, which restarts the former newest group's idle window. See #prune.
+	#closedAt = Number.NEGATIVE_INFINITY;
 
 	// Wakeup for the next entry due to age out. Writes settle retention inline, but a
 	// publisher that stalls stops writing, so without this an abandoned group (and any
@@ -715,13 +717,14 @@ export class Producer {
 		this.#cached.delete(entry.group.sequence);
 	}
 
-	// A live track's newest group remains replayable even after its group closes:
-	// a catalog can publish one snapshot for the broadcast's whole lifetime.
-	// Closing the track removes that protection so every idle entry can be reclaimed.
-	#liveEdge(): GroupProducer | undefined {
+	// The newest group remains replayable while the track is live, even after the group
+	// closes: a catalog can publish one snapshot for the broadcast's whole lifetime. An
+	// aborted one holds nothing worth replaying, so it ages out like any other.
+	#edge(): GroupProducer | undefined {
 		const latest = this.#state.latest;
-		if (this.#state.closed.peek() !== undefined || latest === undefined) return undefined;
-		return this.#cached.get(latest)?.group;
+		if (latest === undefined) return undefined;
+		const group = this.#cached.get(latest)?.group;
+		return group?.closed.peek() instanceof Error ? undefined : group;
 	}
 
 	// Evict cached groups idle for longer than the cache window. Idle means nothing
@@ -742,16 +745,21 @@ export class Producer {
 		this.#pruned = now;
 
 		const cutoff = now - CACHE_WINDOW_MS;
-		const live = this.#liveEdge();
+		const edge = this.#edge();
+		const live = this.#state.closed.peek() === undefined;
 
 		let oldest: number | undefined;
 		const retained: CachedGroup[] = [];
 		for (const entry of this.#cache) {
-			if (entry.group === live) {
+			// Once the track closes, the former edge ages from the close instead, so close()
+			// never reclaims a group its subscribers have yet to drain.
+			const activity =
+				entry.group === edge ? Math.max(entry.group.activity, this.#closedAt) : entry.group.activity;
+			if (entry.group === edge && live) {
 				retained.push(entry);
-			} else if (entry.group.activity >= cutoff) {
+			} else if (activity >= cutoff) {
 				retained.push(entry);
-				if (oldest === undefined || entry.group.activity < oldest) oldest = entry.group.activity;
+				if (oldest === undefined || activity < oldest) oldest = activity;
 			} else {
 				this.#cached.delete(entry.group.sequence);
 				this.#evict(entry);
@@ -958,6 +966,7 @@ export class Producer {
 			closeTrackState(sink, abort);
 		}
 		this.#sinks.clear();
+		this.#closedAt = performance.now();
 		this.#prune();
 	}
 

@@ -1856,6 +1856,52 @@ test("an omitted publisher limit still ages idle groups out", async () => {
 	}
 });
 
+test("a live track does not pin an aborted newest group", () => {
+	const clock = mockMonotonicTime(10_000);
+	const producer = new TrackProducer("test").accept();
+	try {
+		const good = producer.appendGroup();
+		good.writeString("snapshot");
+		good.close();
+		const reset = producer.appendGroup();
+		reset.writeString("partial");
+		reset.close(new Error("reset"));
+
+		clock.set(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
+		const late = producer.subscribe({ maxAge: Milli(100_000) });
+		expect(late.tryRecvGroup()).toBeUndefined();
+		late.close();
+	} finally {
+		producer.close();
+		clock.restore();
+	}
+});
+
+test("closing a track keeps an idle newest group for subscribers to drain", async () => {
+	const clock = mockMonotonicTime(10_000);
+	try {
+		const producer = new TrackProducer("catalog").accept();
+		const subscriber = producer.subscribe({ maxAge: Milli(100_000) });
+		const snapshot = producer.appendGroup();
+		snapshot.writeString("snapshot");
+		snapshot.close();
+
+		// Idle well past the window, but protected while the track is live.
+		clock.set(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
+		producer.close();
+		expect(await (await subscriber.recvGroup())?.readString()).toBe("snapshot");
+		expect(await subscriber.recvGroup()).toBeUndefined();
+
+		// The close restarted its window, which now runs out like any other.
+		clock.set(10_000 + 2 * (CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8));
+		const late = producer.subscribe({ maxAge: Milli(100_000) });
+		expect(late.tryRecvGroup()).toBeUndefined();
+		late.close();
+	} finally {
+		clock.restore();
+	}
+});
+
 test("a late subscriber to a closed unlimited track is released once the cache ages out", async () => {
 	const clock = mockMonotonicTime(10_000);
 	try {
