@@ -30,8 +30,9 @@ readers, so `js/net/src/track.ts` keeps its fold.
 - Bench first, in `rs/moq-net/benches/track.rs` (decided 2026-10-06): make
   `track_subscriber_join` and `track_subscriber_churn` measure per-operation
   cost swept over the readers already on the track (1, 100, 1k, 10k), and add a
-  preference-update sweep over the same axis. `viewers.rs` `viewer_join` is
-  the end-to-end check.
+  preference-update sweep over the same axis, including a leave by the reader
+  that holds a field's extreme. `viewers.rs` `viewer_join` is the end-to-end
+  check.
 - A unit test checks the counted aggregate against a full fold across random
   subscribe, update, and drop sequences.
 
@@ -40,3 +41,4 @@ Public API: none expected. Wire: none.
 ## Related
 
 - [Front deadlines](/quest/m1/front-deadline-index.md) - the per-track half of a front's cost; this is the per-reader half
+- [Subscribe ranges](/quest/m1/subscribe-ranges/model.md) - changes what the aggregate holds; whichever lands second adapts

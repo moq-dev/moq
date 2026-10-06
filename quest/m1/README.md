@@ -149,7 +149,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [One max_age meaning](/quest/m1/cache-max-age.md) - a swept benchmark decides whether the track cache ages groups out on wall time without a write, then Rust and js/net both implement it
 - [Frame slot charge](/quest/m1/frame-slot-charge.md) - a group's frame slots past the first four count against the cache pool, including capacity a released group keeps
 - [Front deadlines](/quest/m1/front-deadline-index.md) - a front's per-event cost stops growing with its track count: an expiry index and per-track wakes, proven by a churn benchmark
-- [Incremental track demand](/quest/m1/track-demand-incremental.md) - a subscribe or leave costs the same at one reader or ten thousand
 - [Listener deadlines](/quest/m1/listener-deadlines.md) - io_uring, HTTP/2, and the internal listener bound slow handshakes and headers, and iroh honors `quic.keep_alive`
 - [Papercuts](/quest/m1/papercuts.md) - JS refuses to serve a broadcast it did not produce, and a uring test stops sleeping
 - [Front parking](/quest/m1/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
