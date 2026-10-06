@@ -31,6 +31,6 @@ and per node like the existing counters.
 
 Public API: none. Wire: none.
 
-## Related
+## Required
 
 - [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the totals and prefix tracks the dashboard reads lag from

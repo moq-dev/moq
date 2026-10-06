@@ -52,9 +52,12 @@ stall and no drift for frames it never sent; a regression across groups is
 counted while intra-group reordering is not; a track without a timescale is
 excluded.
 
+## Required
+
+- [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the totals and prefix tracks the drift histogram lands on
+
 ## Related
 
 - [Untimed model](/quest/m1/untimed-model.md) - pre-lite-05 tracks arrive untimed instead of stamped on arrival
-- [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the totals and prefix tracks the drift histogram lands on
 - [Media stats](/quest/m1/stats/schema.md) - the publisher's own view
   of the same uplink, in the transport section of its stats track
