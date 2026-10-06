@@ -23,8 +23,11 @@ fed one encoded stream. Capture is out: two encoders never align.
   not a per-process counter. Decide how both processes agree across a
   timestamp wrap (TS PTS wraps every 26.5 h) when they started on opposite
   sides of it.
-- Frame timestamps derive from the input alone too. Importers publish the
-  stream's own timestamps and refuse a rewind, so nothing shifts them.
+- Frame timestamps derive from the input alone too, and importers refuse a
+  rewind. Any offset [Shared import clock](/quest/m1/shared-clock.md)
+  applies is input-derived for a same-epoch importer, never from
+  `clock.now()` (decided in the 2026-10-06 audit), so two instances shift
+  identically.
 - The catalog's root `clock` must agree too. Today each importer anchors it
   to its own first-frame arrival (`Clock::arrival` in
   `rs/moq-mux/src/catalog/producer.rs`), which is also the first published
@@ -32,7 +35,8 @@ fed one encoded stream. Capture is out: two encoders never align.
   offsets a joining importer by its arrival time. Decided in the 2026-10-05
   audit: redundant importers derive the wall anchor from the input (its PTS
   or PCR) or from the shared epoch, never from arrival, so two catalogs of
-  one stream are identical. Rejected: narrowing the contract to exclude the
+  one stream are identical. They pass it through Shared import clock's
+  `Input`/offset API rather than a second anchoring path (2026-10-06 audit). Rejected: narrowing the contract to exclude the
   catalog clock.
 - An importer announces only once it knows its tracks, so it never refuses a
   track the incumbent serves.
@@ -46,6 +50,7 @@ issues' 1+1 setup (one relay, two `import ts` sharing one `--epoch`, two
 
 ## Required
 
+- [Shared import clock](/quest/m1/shared-clock.md) - the `Input`/offset API this supplies an input-derived anchor through
 - [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - the shared `--epoch` this keys a redundant pair on
 
 ## Closes
@@ -56,4 +61,3 @@ issues' 1+1 setup (one relay, two `import ts` sharing one `--epoch`, two
 ## Related
 
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a redundant pair shares one epoch
-- [Shared import clock](/quest/m1/shared-clock.md) - the clock and offset rules an importer joining an existing clock follows

@@ -59,9 +59,9 @@ with the untimed implementation quests.
 
 ## Required
 
-- [JSON and flate namespaces](/quest/m1/ffi-shape/json.md) - moves the data producers this changes, so the two breaks land in order rather than colliding
 - [moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md) - the model must hold an untimed payload before producers stop filling in now; until lite-07 encodes absence, a lite encoder writes its send time, as producers effectively do today
 
 ## Related
 
 - [JS publishing never invents a timestamp](/quest/m1/js-publish-timestamp.md) - the same change in the JS packages
+- [FFI shape](/quest/m1/ffi-shape/README.md) - moves the data producers this changes into `json` and `flate` namespaces in the same merge, so this is ready once #4519 lands rather than waiting on the codec child (2026-10-06 audit)

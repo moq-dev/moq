@@ -114,3 +114,4 @@ across nodes.
 
 - [Media stats](/quest/m1/stats/README.md) - publisher and viewer media stats
   stay hang tracks, separate from the relay's stats
+- [QoS](/quest/m1/qos/README.md) - stats-split lands first, then #4133 rebases its lag and drift histograms onto the totals and prefix tracks

@@ -27,8 +27,7 @@ timelines need it first.
 
 The offline archive HLS that `quest/m1/archive/hls.md` used to describe
 landed on `main` with the archive line (#4034: #4115, #4155, #4169). So did
-the per-track gap behaviour from
-[Per-track timelines](/quest/m1/archive/track-timeline.md) (#4280, `spans.rs`),
+the per-track gap behaviour from per-track timelines (#4280, `spans.rs`),
 which derives segments at the edge from group timestamps and emits
 `EXT-X-GAP` for a rendition with no group start in a span. The rules here
 apply to that shape.

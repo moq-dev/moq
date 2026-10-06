@@ -26,7 +26,7 @@ CI on Windows, macOS, and Linux.
 
 ## Required
 
-- [Package](/quest/m1/cpp/package.md) - the release tarballs the port fetches
+- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the release tarballs the port fetches
 
 ## Related
 

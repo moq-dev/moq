@@ -52,5 +52,6 @@ session to close on its own or at the handover cap. See the
 
 ## Required
 
+- [JS qmux finish](/quest/m1/transport-upgrade/js-qmux-finish.md) - the GOAWAY this sends over the WebSocket session must not read as a failure
 - [JS track handover](/quest/m1/js-group-handover.md) - tracks carry across the handover this upgrade reuses without a dropped group
 - [JS GOAWAY requests](/quest/m1/js-goaway-requests.md) - no new request opens on a session that is going away

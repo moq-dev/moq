@@ -19,7 +19,3 @@ Build on #4812, which landed first and made the same `fetch()` refuse a
 mid-group start before it fetches the source.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Transcoders start at group boundaries](/quest/m0/wildcard/transcode-group-start.md) - #4812 changed the same `fetch()`

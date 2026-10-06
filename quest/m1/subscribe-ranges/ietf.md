@@ -16,6 +16,16 @@ one stream. Absent sequences between the FETCH's groups become drops, and a
 group already cached is discarded as a duplicate. Cap a downstream FETCH at
 the Largest Object, as the moq-transport drafts require.
 
+Serving downstream lifts the one-group refusal ("FETCH spanning several
+groups not supported") in `run_fetch_stream`
+(`rs/moq-net/src/ietf/publisher.rs`) for every draft, including draft-20's
+`FetchType::Filtered` once [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md)
+serves it.
+
 ## Required
 
 - [Model ranges](/quest/m1/subscribe-ranges/model.md) - the range requests this answers
+
+## Related
+
+- [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) - serves draft-20 FETCH through the same group-span path this widens
