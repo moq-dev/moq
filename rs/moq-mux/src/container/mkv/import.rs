@@ -261,7 +261,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			// A second Tracks element would redeclare a published track set.
 			MatroskaSpec::Tracks(Master::Full(children)) if !self.tracks_seen => {
-				self.handle_tracks(children)?;
+				// Only `finish()` releases the reservation before Tracks, since a block needs a track.
+				let reserved = self.initial_reservation.clone().ok_or(Error::TracksAfterFinish)?;
+				self.handle_tracks(&reserved, children)?;
 				self.tracks_seen = true;
 				// The reservation stays held until the first block anchors the clock, unless no track
 				// was declared: then no block ever will.
@@ -302,10 +304,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Err(Error::MissingDocType.into())
 	}
 
-	fn handle_tracks(&mut self, entries: Vec<MatroskaSpec>) -> Result<()> {
+	fn handle_tracks(&mut self, reserved: &crate::catalog::Reserved<E>, entries: Vec<MatroskaSpec>) -> Result<()> {
 		for entry in entries {
 			if let MatroskaSpec::TrackEntry(Master::Full(children)) = entry
-				&& let Err(e) = self.add_track(children)
+				&& let Err(e) = self.add_track(reserved, children)
 			{
 				tracing::warn!(error = ?e, "skipping MKV track");
 			}
@@ -313,7 +315,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	fn add_track(&mut self, children: Vec<MatroskaSpec>) -> Result<()> {
+	fn add_track(&mut self, reserved: &crate::catalog::Reserved<E>, children: Vec<MatroskaSpec>) -> Result<()> {
 		let mut track_number: Option<u64> = None;
 		let mut track_type: Option<u64> = None;
 		let mut codec_id: Option<String> = None;
@@ -365,18 +367,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			TrackKind::Video => {
 				let mut config = build_video_config(&codec_id, codec_private.as_ref(), video_children.as_deref())?;
 				config.container = self.container.clone();
-				Media::Video(match &self.initial_reservation {
-					Some(reserved) => reserved.video(track, wire, config)?,
-					None => self.catalog.video(track, wire, config)?,
-				})
+				Media::Video(reserved.video(track, wire, config)?)
 			}
 			TrackKind::Audio => {
 				let mut config = build_audio_config(&codec_id, codec_private.as_ref(), audio_children.as_deref())?;
 				config.container = self.container.clone();
-				Media::Audio(match &self.initial_reservation {
-					Some(reserved) => reserved.audio(track, wire, config)?,
-					None => self.catalog.audio(track, wire, config)?,
-				})
+				Media::Audio(reserved.audio(track, wire, config)?)
 			}
 		};
 

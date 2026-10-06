@@ -1463,18 +1463,44 @@ async fn a_moov_with_nothing_selected_publishes() {
 	assert_eq!(clocks.drain().len(), 1, "the catalog publishes without a fragment");
 }
 
-/// A moov decoded after `finish()` released the reservation still declares its tracks.
-#[tokio::test]
-async fn a_moov_after_finish_publishes() {
+/// A moov after `finish()` is refused: its tracks would be declared but never finished.
+#[test]
+fn a_moov_after_finish_is_refused() {
 	let (init, _, _) = bbb_init();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+
+	fmp4.finish().unwrap();
+	let err = fmp4.decode(&init).unwrap_err();
+	assert!(
+		matches!(err, crate::Error::Cmaf(crate::container::fmp4::Error::MoovAfterFinish)),
+		"{err:?}"
+	);
+	let snapshot = catalog.snapshot();
+	assert!(snapshot.video.renditions.is_empty() && snapshot.audio.renditions.is_empty());
+}
+
+/// The catalog waits for a selected track's fragment: a deselected track's fragment is skipped,
+/// so it doesn't release the reservation even when it arrives first.
+#[tokio::test]
+async fn a_deselected_fragment_does_not_publish() {
+	use crate::select::{Broadcast, Video};
+
+	let (init, (video_id, video_scale), (audio_id, audio_scale)) = bbb_init();
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
-	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
-
-	fmp4.finish().unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve())
+		.with_select(Broadcast::default().video(Video::default()));
 	fmp4.decode(&init).unwrap();
-	assert!(!catalog.snapshot().video.renditions.is_empty(), "the moov was read");
-	assert!(!clocks.drain().is_empty(), "the catalog publishes");
+
+	let audio = super::encode_fragment(info(audio_id, audio_scale, 0), &[sample(0, true, Some(100_000))]).unwrap();
+	fmp4.decode(&audio).unwrap();
+	assert_eq!(clocks.drain(), vec![], "a deselected fragment publishes nothing");
+
+	let video = super::encode_fragment(info(video_id, video_scale, 0), &[sample(0, true, Some(100_000))]).unwrap();
+	fmp4.decode(&video).unwrap();
+	assert_eq!(clocks.drain().len(), 1, "the selected track's first fragment publishes");
 }
