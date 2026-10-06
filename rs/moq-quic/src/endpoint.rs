@@ -1375,7 +1375,7 @@ impl IncomingImproperDropWarner {
 impl Drop for IncomingImproperDropWarner {
     fn drop(&mut self) {
         warn!(
-            "quinn_proto::Incoming dropped without passing to Endpoint::accept/refuse/retry/ignore \
+            "moq_quic::Incoming dropped without passing to Endpoint::accept/refuse/retry/ignore \
                (may cause memory leak and eventual inability to accept new connections)"
         );
     }
@@ -1393,7 +1393,7 @@ impl AcceptDropGuard {
 impl Drop for AcceptDropGuard {
     fn drop(&mut self) {
         warn!(
-            "quinn_proto::Accepting or Accepted dropped before reaching Endpoint::finish_accept \
+            "moq_quic::Accepting or Accepted dropped before reaching Endpoint::finish_accept \
              (leaks connection IDs and buffered datagrams, and may cause eventual inability to \
              accept new connections)"
         );
