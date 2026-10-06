@@ -101,7 +101,8 @@ impl Default for Config {
 /// contribution, so a relay that returns within [`Config::grace`] with its
 /// boot-lifetime counters intact never looks like new traffic. After the grace,
 /// a departed node's contribution folds into one retired total and the node is
-/// forgotten, so memory follows live nodes, not every node ever seen. A node
+/// forgotten, so memory follows live nodes and the keys ever reported, not
+/// every node ever seen. A node
 /// returning within the grace with a lower counter (a restarted relay)
 /// regresses the merged counter, the same reset contract a single node's own
 /// restart follows. Presence is not sticky: a departed node stops counting

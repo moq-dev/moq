@@ -85,7 +85,6 @@ async fn measure(live: usize, departed: usize, grace: Duration) -> Duration {
 		total += 1;
 		read_until(&mut traffic, total).await;
 	}
-	tokio::time::advance(GRACE * 2).await;
 
 	let mut nodes: Vec<Node> = (0..live)
 		.map(|index| Node::new(&origin, &format!("live-{index}")))
@@ -95,6 +94,9 @@ async fn measure(live: usize, departed: usize, grace: Duration) -> Duration {
 		total += 1;
 		read_until(&mut traffic, total).await;
 	}
+	// Advance only after a read has seen the last departure, so every departed
+	// node is past its grace.
+	tokio::time::advance(GRACE * 2).await;
 
 	let mut elapsed = Duration::ZERO;
 	for frame in 0..=FRAMES {
