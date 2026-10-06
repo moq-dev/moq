@@ -193,7 +193,9 @@ impl<T: ObjectStore> Store<T> {
 
 	/// Each recorded track's timeline track, found by listing the track directories a [`Writer`]
 	/// creates: a timeline is named by [`hang::timeline::default_name`]. One listing of the
-	/// prefix's directories, so following a long recording doesn't list its objects.
+	/// prefix's directories plus a HEAD per timeline, so following a long recording doesn't list
+	/// its objects. A timeline whose `.info` isn't stored yet, such as one still enrolling, is left
+	/// out until it is.
 	///
 	/// For replaying a recording without its catalog; a catalog's `archive` entry names the same map.
 	///
@@ -206,9 +208,14 @@ impl<T: ObjectStore> Store<T> {
 				.filename()
 				.ok_or_else(|| Error::Directory(directory.to_string()))?;
 			let track = crate::path::decode_track(encoded)?;
-			if let Some(indexed) = track.strip_suffix(hang::timeline::SUFFIX) {
-				timelines.insert(indexed.to_string(), track);
-			}
+			let Some(indexed) = track.strip_suffix(hang::timeline::SUFFIX) else {
+				continue;
+			};
+			match self.inner.head(&self.path(&Key::info(&track)?)?).await {
+				Ok(_) => timelines.insert(indexed.to_string(), track),
+				Err(object_store::Error::NotFound { .. }) => continue,
+				Err(err) => return Err(err.into()),
+			};
 		}
 		Ok(timelines)
 	}

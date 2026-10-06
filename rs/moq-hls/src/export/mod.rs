@@ -251,7 +251,8 @@ impl Broadcaster {
 		if representations().all(|rep| rep.segments.is_empty()) {
 			return None;
 		}
-		let finished = representations().any(|rep| rep.ended);
+		// Static only once every representation is final, so none stops being refreshed early.
+		let finished = representations().all(|rep| rep.ended);
 		if !finished {
 			// A dynamic presentation needs pts 0 anchored to the wall clock. The fallback is
 			// set whenever a record has been pushed, which listing a segment implies.
@@ -2860,6 +2861,9 @@ mod tests {
 		let pending = test.rendition("video1").snapshot();
 		assert_eq!(numbers(&pending), [0, 1, 2]);
 		assert!(!pending.finished, "a pending tail holds back EXT-X-ENDLIST");
+		// DASH alike: the manifest turns static only once every representation ended.
+		assert!(test.rendition("video0").representation().unwrap().ended);
+		assert!(!test.rendition("video1").representation().unwrap().ended);
 		video1.push(&gop(4)).unwrap();
 		assert_eq!(numbers(&test.finished("video1").await), [0, 1, 2, 3]);
 		test.drain("video0").await;

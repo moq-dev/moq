@@ -125,6 +125,23 @@ struct Shared<S> {
 	enrolling: watch::Sender<usize>,
 }
 
+/// One [`Control::track`] in flight: drops its count, and its name unless it enrolled, however
+/// the call ends.
+struct Enrolling<'a, S> {
+	shared: &'a Shared<S>,
+	name: &'a str,
+	enrolled: bool,
+}
+
+impl<S> Drop for Enrolling<'_, S> {
+	fn drop(&mut self) {
+		self.shared.enrolling.send_modify(|count| *count -= 1);
+		if !self.enrolled {
+			self.shared.enrolled.lock().unwrap().remove(self.name);
+		}
+	}
+}
+
 enum Command<S> {
 	Enroll(Box<Track<S>>),
 	Cut(Timestamp),
@@ -295,7 +312,8 @@ impl<S: ObjectStore> Writer<S> {
 					}
 				}
 				_ = source.closed(), if !closed => closed = true,
-				_ = enrolling.changed(), if idle && accepting => {}
+				// Also once commands closed: an enrollment in flight still settles its count.
+				_ = enrolling.changed(), if idle => {}
 				_ = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
 					let (_, expired) = deletions.pop_front().unwrap();
 					delete(&shared.store, &mut pruned, expired).await;
@@ -334,12 +352,15 @@ impl<S: ObjectStore> Control<S> {
 			return Err(Error::Enrolled(name.to_string()));
 		}
 		self.shared.enrolling.send_modify(|count| *count += 1);
-		let result = self.subscribe(name, config).await;
-		self.shared.enrolling.send_modify(|count| *count -= 1);
-		if result.is_err() {
-			self.shared.enrolled.lock().unwrap().remove(name);
-		}
-		result
+		// Settles the count and the name even if this future is dropped mid-enrollment.
+		let mut enrolling = Enrolling {
+			shared: &self.shared,
+			name,
+			enrolled: false,
+		};
+		self.subscribe(name, config).await?;
+		enrolling.enrolled = true;
+		Ok(())
 	}
 
 	/// Stop recording every track: store what already arrived, finish each timeline, and end
@@ -1896,6 +1917,40 @@ mod tests {
 			Ok(_) => panic!("expected recovery to fail"),
 		}
 		assert_eq!(stored(&store).await, before);
+	}
+
+	/// An enrollment dropped mid-flight still settles its count, so stopping the recording ends it.
+	#[tokio::test(start_paused = true)]
+	async fn a_cancelled_enrollment_does_not_block_the_end() {
+		let source = broadcast::Info::new().produce();
+		let mut audio = track(&source, "audio");
+
+		let mock = Mock::memory();
+		mock.hold_puts("audio/.info");
+		let store = Store::new(mock.clone(), "rec");
+		let writer = Writer::new(store, source.consume(), Config::default()).await.unwrap();
+		let control = writer.control();
+		let run = tokio::spawn(writer.run());
+		let enrolling = {
+			let control = control.clone();
+			tokio::spawn(async move { control.track("audio", media()).await })
+		};
+		assert!(
+			audio.subscription_changed().await.unwrap().is_some(),
+			"enrollment subscribed"
+		);
+		enrolling.abort();
+		let _ = enrolling.await;
+
+		control.stop().unwrap();
+		tokio::time::timeout(Duration::from_secs(5), run)
+			.await
+			.expect("the recording ends")
+			.unwrap()
+			.unwrap();
+		// The cancelled name was never enrolled, so it isn't taken.
+		mock.release();
+		drop(source);
 	}
 
 	/// The publisher already has the subscriber, and the broadcast ends while `.info` is written.

@@ -12,7 +12,7 @@
 //!   order, exactly once. `next()` waits for the next resolved row, FETCHes and transmuxes its
 //!   frames (via [`Rendition`]), and yields the CMAF bytes.
 //!
-//! A segment is addressed by its reference's [`tag`] and its number (the `seg/{tag}.{segment}.m4s`
+//! A segment is addressed by its reference's tag and its number (the `seg/{tag}.{segment}.m4s`
 //! URI); the number alone is its `EXT-X-MEDIA-SEQUENCE` and the recorder cursor's position. The
 //! same URI names the same span of content time on every rendition, on every edge, and after
 //! every reload. Each reference numbers segments by its own records, so a new reference starts a
@@ -255,6 +255,11 @@ impl Producer {
 	/// [`end`](Self::end) when the timeline is over, or on its own when a rendition is retired.
 	pub fn close(&self) {
 		let _ = self.state.close();
+	}
+
+	/// The start of the oldest listed segment, without copying the window.
+	pub fn oldest(&self) -> Option<Duration> {
+		self.state.read().rows.front().map(|row| row.pts.into())
 	}
 
 	/// Snapshot the current window (serve path).

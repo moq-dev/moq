@@ -489,6 +489,20 @@ async fn a_track_enrolled_after_opening_is_followed() {
 	assert!(timeline.subscribe(None).await.is_ok(), "the late timeline replays");
 }
 
+/// A timeline directory without its `.info`, such as one interrupted mid-enrollment, isn't
+/// advertised, so following the recording doesn't fail on it.
+#[tokio::test]
+async fn a_timeline_without_info_is_not_listed() {
+	let mut archive = Archive::new().await;
+	archive.add("audio", 0..2, 1).await;
+	archive
+		.raw(&Key::segments(timeline("video"), 0).unwrap(), b"partial")
+		.await;
+
+	let timelines = archive.store.timelines().await.unwrap();
+	assert_eq!(timelines.keys().collect::<Vec<_>>(), ["audio"]);
+}
+
 #[tokio::test]
 async fn a_missing_timeline_segment_recovers_from_the_next_checkpoint() {
 	let mut archive = Archive::new().await;

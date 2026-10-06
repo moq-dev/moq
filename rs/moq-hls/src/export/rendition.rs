@@ -414,8 +414,8 @@ impl Rendition {
 
 	/// Drop this rendition's own records that no listed segment can resolve to anymore.
 	fn trim(&self) {
-		if let Some(oldest) = self.live.window().segments.first() {
-			self.spans.trim(oldest.pts.into());
+		if let Some(oldest) = self.live.oldest() {
+			self.spans.trim(oldest);
 		}
 	}
 
