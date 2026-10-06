@@ -67,8 +67,8 @@ impl Subscriber for Warns {
 	}
 
 	fn max_level_hint(&self) -> Option<LevelFilter> {
-		// `None` is treated as "may enable every level", which would turn trace on for the rest
-		// of the process. This subscriber only records WARN.
+		// `None` leaves the global max level at TRACE, so every level check falls through to
+		// the callsite cache. This subscriber only records WARN.
 		Some(LevelFilter::WARN)
 	}
 
@@ -118,7 +118,6 @@ impl Visit for Msg<'_> {
 	}
 }
 
-#[cfg(test)]
 mod tests {
 	use super::count_drop_warnings;
 
