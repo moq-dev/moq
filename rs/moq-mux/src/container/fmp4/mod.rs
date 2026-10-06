@@ -745,7 +745,7 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 			mp4_atom::Codec::from(mp4_atom::Opus {
 				audio,
 				dops: mp4_atom::Dops {
-					output_channel_count: config.channel_count as u8,
+					output_channel_count: head.channel_count as u8,
 					pre_skip: head.pre_skip,
 					input_sample_rate: head.sample_rate,
 					output_gain: head.output_gain,

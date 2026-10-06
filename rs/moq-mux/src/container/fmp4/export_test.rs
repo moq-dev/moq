@@ -1460,6 +1460,106 @@ async fn a_changed_sample_entry_fails() {
 	);
 }
 
+/// An OpusHead for `channels` channels with `pre_skip`, as a catalog description.
+fn opus_head(channels: u32, pre_skip: u16) -> Bytes {
+	crate::codec::opus::Config::new(48_000, channels)
+		.with_pre_skip(pre_skip)
+		.encode()
+		.unwrap()
+}
+
+/// Set the catalog description of the audio rendition `name`.
+fn describe_audio(live: &mut Live, name: &str, description: Bytes) {
+	live.catalog
+		.modify()
+		.unwrap()
+		.audio
+		.renditions
+		.get_mut(name)
+		.unwrap()
+		.description = Some(description);
+}
+
+/// The pre-skip of the Opus sample entry in `init`.
+fn init_pre_skip(init: &Bytes) -> u16 {
+	let mut cursor = Cursor::new(init.as_ref());
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode init") {
+		let mp4_atom::Any::Moov(moov) = atom else {
+			continue;
+		};
+		for trak in &moov.trak {
+			if let mp4_atom::Codec::Opus(opus) = &trak.mdia.minf.stbl.stsd.codecs[0] {
+				return opus.dops.pre_skip;
+			}
+		}
+	}
+	panic!("no Opus trak in the init");
+}
+
+/// A browser declares Opus before its encoder reports the OpusHead. The head that follows
+/// settles the guessed pre-skip rather than failing the export, and binds it from then on.
+#[tokio::test(start_paused = true)]
+async fn a_later_opus_head_settles_the_guess() {
+	let (mut live, mut audio) = live_av();
+	let name = audio.name().to_string();
+	live.track.write(video_frame(0, true)).unwrap();
+	write_audio(&mut audio, 0, 6);
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	let init = chunk_now(&mut exporter).await.init().expect("init");
+	assert_eq!(init_pre_skip(&init), 0, "the init carries the guess");
+	drain_now(&mut exporter).await;
+
+	describe_audio(&mut live, &name, opus_head(2, 312));
+	write_audio(&mut audio, 120_000, 5);
+	assert!(!drain_now(&mut exporter).await.is_empty(), "the audio keeps flowing");
+
+	describe_audio(&mut live, &name, opus_head(2, 120));
+	let err = error_now(&mut exporter).await;
+	assert!(
+		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackChanged(changed)) if *changed == name),
+		"{err:?}"
+	);
+}
+
+/// An OpusHead that settles the guess before the init is written lands in the init.
+#[tokio::test(start_paused = true)]
+async fn an_opus_head_before_the_init_is_written() {
+	let (mut live, mut audio) = live_av();
+	let name = audio.name().to_string();
+	write_audio(&mut audio, 0, 6);
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	assert!(
+		tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk())
+			.await
+			.is_err(),
+		"the init waits for the video"
+	);
+
+	describe_audio(&mut live, &name, opus_head(2, 312));
+	live.track.write(video_frame(0, true)).unwrap();
+	let init = chunk_now(&mut exporter).await.init().expect("init");
+	assert_eq!(init_pre_skip(&init), 312);
+}
+
+/// An OpusHead with another channel count is a different track, not a settled guess.
+#[tokio::test(start_paused = true)]
+async fn an_opus_head_that_disagrees_fails() {
+	let (mut live, mut audio) = live_av();
+	let name = audio.name().to_string();
+	live.track.write(video_frame(0, true)).unwrap();
+	write_audio(&mut audio, 0, 6);
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	chunk_now(&mut exporter).await.init().expect("init");
+	drain_now(&mut exporter).await;
+
+	describe_audio(&mut live, &name, opus_head(1, 312));
+	let err = error_now(&mut exporter).await;
+	assert!(
+		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackChanged(changed)) if *changed == name),
+		"{err:?}"
+	);
+}
+
 /// An AAC catalog's `bitrate` lands in the esds as a hint decoders ignore, so changing it
 /// keeps the track.
 #[tokio::test(start_paused = true)]

@@ -181,6 +181,9 @@ struct Declaration {
 	trex: mp4_atom::Trex,
 	/// The source init's ftyp, for a CMAF rendition.
 	ftyp: Option<mp4_atom::Ftyp>,
+	/// An Opus sample entry synthesized without the catalog's OpusHead, so its pre-skip
+	/// and output gain are guesses a later description may correct.
+	provisional: bool,
 }
 
 struct Fmp4Track {
@@ -190,7 +193,7 @@ struct Fmp4Track {
 	config: Rendition,
 
 	/// The `trak` from the first time the track could be described. A later description
-	/// must keep its sample entry.
+	/// must keep its sample entry, except to settle a provisional one.
 	declaration: Option<Declaration>,
 
 	/// The current subscription has been checked against `declaration`. Until then its
@@ -301,11 +304,19 @@ impl Fmp4Track {
 		let Some(declaration) = self.declaration()? else {
 			return Ok(());
 		};
-		match &self.declaration {
-			Some(declared) if sample_entry(&declared.trak) != sample_entry(&declaration.trak) => {
-				return Err(Error::TrackChanged(name.to_string()).into());
+		match &mut self.declaration {
+			Some(declared) => {
+				let guessed = declared.provisional || declaration.provisional;
+				if sample_entry(&declared.trak, guessed) != sample_entry(&declaration.trak, guessed) {
+					return Err(Error::TrackChanged(name.to_string()).into());
+				}
+				// The OpusHead settles a guessed entry. An init already written keeps its
+				// guessed pre-skip: a few milliseconds of untrimmed encoder delay cost less
+				// than restarting the file mid-stream.
+				if declared.provisional && !declaration.provisional {
+					*declared = declaration;
+				}
 			}
-			Some(_) => {}
 			None => self.declaration = Some(declaration),
 		}
 		self.described = true;
@@ -346,7 +357,9 @@ impl Fmp4Track {
 				Container::Cmaf { init, .. } => init,
 				Container::Legacy | Container::Loc => {
 					let trak = super::synthesize_audio_trak(self.track_id, self.timescale, config)?;
-					return Ok(Some(Declaration::synthesized(trak)));
+					let mut declaration = Declaration::synthesized(trak);
+					declaration.provisional = matches!(config.codec, AudioCodec::Opus) && config.description.is_none();
+					return Ok(Some(declaration));
 				}
 				Container::Unknown(unknown) => return Err(crate::Error::unsupported_container(unknown)),
 			},
@@ -365,7 +378,12 @@ impl Fmp4Track {
 		// init for the same rendition may not share.
 		trak.mdia.mdhd.timescale = super::mdhd_timescale(self.timescale)?;
 		let trex = trexs.pop().unwrap_or_else(|| default_trex(self.track_id));
-		Ok(Some(Declaration { trak, trex, ftyp }))
+		Ok(Some(Declaration {
+			trak,
+			trex,
+			ftyp,
+			provisional: false,
+		}))
 	}
 }
 
@@ -375,19 +393,28 @@ impl Declaration {
 			trex: default_trex(trak.tkhd.track_id),
 			trak,
 			ftyp: None,
+			provisional: false,
 		}
 	}
 }
 
 /// The `stsd` a returning or reconfigured rendition must keep, without the AAC bitrate
-/// hints a catalog's `bitrate` churns: decoders ignore them.
-fn sample_entry(trak: &mp4_atom::Trak) -> mp4_atom::Stsd {
+/// hints a catalog's `bitrate` churns: decoders ignore them. With `guessed`, one side's
+/// Opus pre-skip and gain were made up without an OpusHead, so only the rest must agree.
+fn sample_entry(trak: &mp4_atom::Trak, guessed: bool) -> mp4_atom::Stsd {
 	let mut stsd = trak.mdia.minf.stbl.stsd.clone();
 	for codec in &mut stsd.codecs {
-		if let mp4_atom::Codec::Mp4a(mp4a) = codec {
-			mp4a.esds.es_desc.dec_config.max_bitrate = 0;
-			mp4a.esds.es_desc.dec_config.avg_bitrate = 0;
-			mp4a.btrt = None;
+		match codec {
+			mp4_atom::Codec::Mp4a(mp4a) => {
+				mp4a.esds.es_desc.dec_config.max_bitrate = 0;
+				mp4a.esds.es_desc.dec_config.avg_bitrate = 0;
+				mp4a.btrt = None;
+			}
+			mp4_atom::Codec::Opus(opus) if guessed => {
+				opus.dops.pre_skip = 0;
+				opus.dops.output_gain = 0;
+			}
+			_ => {}
 		}
 	}
 	stsd
