@@ -6904,6 +6904,32 @@ mod tests {
 		assert!(result.unwrap().is_ok(), "the superseded refusal ended the request");
 	}
 
+	/// The same holds for a more specific remote route: the beaten route's refusal is
+	/// moot, and the new winner is asked instead.
+	#[tokio::test]
+	async fn refusal_from_a_beaten_route_asks_the_new_winner() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let stale = producer.dynamic("room", Route::default()).unwrap();
+
+		let mut pending = Box::pin(consumer.request_broadcast("room/alice"));
+		assert!((&mut pending).now_or_never().is_none());
+		let request = queued(&stale).await;
+
+		let winner = producer.dynamic("room/alice", Route::default()).unwrap();
+		request.reject(Error::NotFound);
+		let source = broadcast::Info::new().produce();
+		queued(&winner).await.accept(&source);
+
+		let mut result = None;
+		settle(|| {
+			result = (&mut pending).now_or_never();
+			result.is_some()
+		})
+		.await;
+		assert!(result.unwrap().is_ok(), "the beaten route's refusal ended the request");
+	}
+
 	/// `routed_broadcast` treats a handler's rejection as the table's verdict:
 	/// it waits for the table to move instead of re-asking the same route.
 	#[tokio::test]

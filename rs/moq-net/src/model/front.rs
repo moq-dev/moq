@@ -37,9 +37,9 @@ pub(super) struct Candidate {
 #[derive(Clone, Debug)]
 pub(super) struct Refusal {
 	pub err: Error,
-	/// Whether the route is still in the table. A refusal from a standing route
-	/// is the handler's answer and is never re-asked; one from a retracted route
-	/// only means the table moved.
+	/// Whether the route still wins the path. A refusal from a standing route
+	/// is the path's answer and ends the front; one from a route that retracted
+	/// or was beaten while pending only means the table moved.
 	pub standing: bool,
 }
 
@@ -331,8 +331,9 @@ impl Front {
 				self.upstream = None;
 				self.attach(source, upstream, actions);
 			}
-			// The route retracted before serving: the table already reflects
-			// it, so the next selection retries the survivor.
+			// The route retracted or was beaten before serving: the table already
+			// reflects it, so the next selection asks the new winner. Its own error
+			// is moot, so a front left with nothing reports the path unroutable.
 			Err(Refusal { standing: false, .. }) => {
 				self.upstream = None;
 				self.last_err = Some(Error::Unroutable);
