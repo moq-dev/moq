@@ -41,7 +41,7 @@ that.
 Shared decisions:
 
 - The race returns the winner plus the still-pending QUIC dial when WebSocket
-  wins. The QUIC handshake timeout bounds that dial; no extra deadline.
+  wins. The attempt's connect deadline bounds that dial; no extra deadline.
 - On a successful upgrade the "WebSocket won" memo (`WEBSOCKET_WON` in
   `moq-tokio`, `websocketWon` in `js/net`) forgets the URL: QUIC works on this
   network, so the head start comes back. Otherwise a network where WebSocket

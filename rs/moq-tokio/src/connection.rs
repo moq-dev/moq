@@ -809,9 +809,7 @@ impl Connection {
 		let pacing = Pacing::new(&backoff);
 		let timeout = CliDuration::resolve(backoff.timeout_arg, backoff.timeout);
 		let initial = pacing.initial;
-		let mut delay = initial;
-		let mut retry_start = tokio::time::Instant::now();
-		let mut last_error: Option<Error> = None;
+		let mut retry = Retry::new(initial);
 		// Sticky across migrations: a redirect is an assignment, not a detour, so a
 		// later drop redials wherever we were last sent. Scoped to this loop, so a
 		// fresh Connection starts from the configured addresses again.
@@ -820,11 +818,11 @@ impl Connection {
 		let mut draining: Option<Draining> = None;
 
 		loop {
-			if !timeout.is_zero() && retry_start.elapsed() >= timeout {
-				return Err(timeout_error(timeout, last_error.as_ref()));
+			if !timeout.is_zero() && retry.start.elapsed() >= timeout {
+				return Err(timeout_error(timeout, retry.last_error.as_ref()));
 			}
 
-			let budget = retry_budget(client.reconnect, retry_start, timeout);
+			let budget = retry_budget(client.reconnect, retry.start, timeout);
 
 			match Self::dial_any(shared, &client, &addrs, &mut draining, budget).await {
 				Ok((addr, dialed)) => {
@@ -863,6 +861,10 @@ impl Connection {
 									old.retire();
 								}
 								draining = Some(Draining::new(old, goaway.handover, &shared.state));
+								// Score the WebSocket tenure like any session's, so a QUIC session that
+								// drops right away retries in a fresh window, not one that opened
+								// before WebSocket served.
+								retry.settle(connected, initial);
 								connected = tokio::time::Instant::now();
 							}
 						}
@@ -870,7 +872,7 @@ impl Connection {
 
 					// A session that stayed up past the initial backoff is healthy; one that
 					// ended sooner counts as a failed attempt however it ended.
-					let healthy = connected.elapsed() >= initial;
+					let healthy = retry.settle(connected, initial);
 
 					// The connected target owns the policy, including in one-shot mode. A
 					// refused redirect is terminal: the peer is leaving and named somewhere we
@@ -926,11 +928,8 @@ impl Connection {
 						// status finds it and honors its handover deadline.
 						shared.migrating();
 
+						// No backoff sleep: a handover off a healthy session is not a failure.
 						if healthy {
-							delay = initial;
-							retry_start = tokio::time::Instant::now();
-							last_error = None;
-							// No backoff sleep: a handover off a healthy session is not a failure.
 							continue;
 						}
 
@@ -938,15 +937,15 @@ impl Connection {
 						// failed attempt so two peers bouncing us between them escalate
 						// through backoff and eventually give up. The old session serves
 						// across the sleep, so the redirect loop costs time, not data.
-						last_error = Some(Error::Reconnect("peer redirected immediately".to_string()));
-						let Some(wait) = retry_wait(delay, retry_start, timeout) else {
-							return Err(timeout_error(timeout, last_error.as_ref()));
+						retry.last_error = Some(Error::Reconnect("peer redirected immediately".to_string()));
+						let Some(wait) = retry_wait(retry.delay, retry.start, timeout) else {
+							return Err(timeout_error(timeout, retry.last_error.as_ref()));
 						};
 						tracing::warn!(peer = %Endpoint(&url), ?wait, "peer redirected immediately; retrying after backoff");
 						// Keep the handover bounded across the sleep: nothing else polls the
 						// predecessor while the loop is between connections.
 						sleep_draining(wait, &mut draining, shared).await;
-						delay = pacing.next(delay);
+						retry.delay = pacing.next(retry.delay);
 						continue;
 					}
 
@@ -974,11 +973,8 @@ impl Connection {
 					}
 
 					if healthy {
-						// Reset the backoff window so a one-off drop reconnects promptly.
+						// The backoff window was reset, so a one-off drop reconnects promptly.
 						tracing::warn!(peer = %Endpoint(&url), "session closed, reconnecting");
-						delay = initial;
-						retry_start = tokio::time::Instant::now();
-						last_error = None;
 					} else {
 						// Connected then dropped almost immediately (e.g. the server accepts then
 						// resets, or redirects us straight back out). Treat it as a failed
@@ -1002,7 +998,7 @@ impl Connection {
 						match err {
 							Some(err) => {
 								tracing::warn!(peer = %Endpoint(&url), %err, "session severed immediately, retrying");
-								last_error = Some(err);
+								retry.last_error = Some(err);
 							}
 							None => tracing::warn!(peer = %Endpoint(&url), "session severed immediately, retrying"),
 						}
@@ -1017,12 +1013,12 @@ impl Connection {
 					{
 						return Err(err);
 					}
-					last_error = Some(err);
+					retry.last_error = Some(err);
 				}
 			}
 
-			let Some(wait) = retry_wait(delay, retry_start, timeout) else {
-				return Err(timeout_error(timeout, last_error.as_ref()));
+			let Some(wait) = retry_wait(retry.delay, retry.start, timeout) else {
+				return Err(timeout_error(timeout, retry.last_error.as_ref()));
 			};
 			// No URL here: with several candidates there isn't one to name, and each
 			// attempt already logged the address it tried.
@@ -1033,7 +1029,7 @@ impl Connection {
 			// until some later dial succeeded, holding an upstream that asked to drain
 			// open for the whole retry window, or forever with `--backoff-timeout=0`.
 			sleep_draining(wait, &mut draining, shared).await;
-			delay = pacing.next(delay);
+			retry.delay = pacing.next(retry.delay);
 		}
 	}
 
@@ -1262,6 +1258,36 @@ impl Connection {
 			state: self.state.clone(),
 			last_presence: moq_net::stats::Presence::default(),
 		}
+	}
+}
+
+/// The reconnect loop's backoff window across a run of failed attempts.
+struct Retry {
+	/// The wait before the next attempt, before jitter.
+	delay: Duration,
+	/// When this run of failures began; the give-up timeout counts from here.
+	start: tokio::time::Instant,
+	/// The latest failure, so giving up reports a real cause.
+	last_error: Option<Error>,
+}
+
+impl Retry {
+	fn new(initial: Duration) -> Self {
+		Self {
+			delay: initial,
+			start: tokio::time::Instant::now(),
+			last_error: None,
+		}
+	}
+
+	/// Score a session live since `connected`: one that outlived `initial` was healthy,
+	/// so the window starts over. Returns whether it was healthy.
+	fn settle(&mut self, connected: tokio::time::Instant, initial: Duration) -> bool {
+		let healthy = connected.elapsed() >= initial;
+		if healthy {
+			*self = Self::new(initial);
+		}
+		healthy
 	}
 }
 
@@ -1908,6 +1934,25 @@ mod tests {
 		assert_eq!(pacing.next(Duration::from_millis(100)), Duration::from_millis(200));
 		assert_eq!(pacing.next(Duration::from_millis(200)), Duration::from_millis(400));
 		assert_eq!(pacing.next(Duration::from_millis(400)), Duration::from_millis(400));
+	}
+
+	/// A WebSocket session that served for longer than the retry window before QUIC
+	/// took over leaves no stale window behind: a QUIC session that drops at once is
+	/// a failed attempt, but one that still gets retried.
+	#[tokio::test(start_paused = true)]
+	async fn a_healthy_tenure_before_an_upgrade_starts_a_fresh_window() {
+		const INITIAL: Duration = Duration::from_secs(1);
+		const TIMEOUT: Duration = Duration::from_secs(10);
+		let mut retry = Retry::new(INITIAL);
+
+		let websocket = tokio::time::Instant::now();
+		tokio::time::advance(TIMEOUT * 2).await;
+		assert!(retry.settle(websocket, INITIAL));
+
+		let quic = tokio::time::Instant::now();
+		tokio::time::advance(INITIAL / 2).await;
+		assert!(!retry.settle(quic, INITIAL));
+		assert!(retry_wait(retry.delay, retry.start, TIMEOUT).is_some());
 	}
 
 	#[test]

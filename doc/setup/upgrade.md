@@ -78,6 +78,12 @@ These land with the next breaking release, not the 2026-09-23 train.
   broadcast that ends with media queued behind an undescribed track is an error
   rather than an empty `Ok(None)`. Restart the export to pick up a new
   rendition.
+- **moq-tokio's `Transport` names WebTransport.** `moq_tokio::server::Transport`
+  is `moq_tokio::Transport`, with no re-export. A WebTransport session reports
+  `Transport::WebTransport` (`"webtransport"` in logs) instead of `Quic`, which
+  now means raw QUIC only, and `Connection::transport()` reports the live
+  transport. The bindings' `MoqTransport` gains a `WebTransport` case, so an
+  exhaustive `switch` or `when` needs one more arm.
 
 ## Wire
 
