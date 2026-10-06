@@ -8,7 +8,6 @@
 /** Cancels a subscription, effect, or other registration when called. */
 export type Dispose = () => void;
 
-/** Placeholder for a teardown slot that was cancelled while it was being drained. */
 const noop: Dispose = () => {};
 
 type Subscriber<T> = (value: T) => void;
@@ -600,11 +599,10 @@ export class Effect {
 	#fn?: (effect: Effect) => void;
 	#dispose?: Dispose[] = [];
 
-	// The teardown list a drain is walking, and how far it has got. Shared by the rerun and close
-	// paths so a `close` landing inside a rerun's drain continues that pass instead of starting a
-	// second one over callbacks that already ran. Set only while a drain is running.
+	// The teardown list a drain is popping. Shared by the rerun and close paths so a `close`
+	// landing inside a rerun's drain continues that pass instead of starting a second one. Set
+	// only while a drain is running.
 	#draining?: Dispose[];
-	#drained = 0;
 	#unwatch: Dispose[] = [];
 	#async = new Set<Promise<void>>();
 
@@ -668,7 +666,6 @@ export class Effect {
 		// A cleanup may have closed the effect, which drained the rest of the list and finished
 		// teardown already. There is no next run to open.
 		if (this.#dispose === undefined) return;
-		dispose.length = 0;
 
 		// Wait for every task this run spawned. Opening the next run while one is still in flight
 		// would hand that task's cleanup registrations, and its `abort` signal, to a run it never
@@ -890,15 +887,10 @@ export class Effect {
 			effect.close();
 
 			// Drop our disposer from the parent so repeated run()/dispose() cycles don't pile up.
+			// Safe mid-drain too: the drain pops from the end, so every entry left is still pending.
 			const disposers = this.#dispose;
 			const index = disposers?.indexOf(dispose) ?? -1;
-			if (disposers === undefined || index === -1) return;
-
-			// Removing shifts every later entry down, which would step an active drain's cursor
-			// straight over a cleanup that has not run yet. Blank the slot while one is running
-			// and let the drain skip it; the list is cleared when that drain finishes anyway.
-			if (this.#draining === disposers) disposers[index] = noop;
-			else disposers.splice(index, 1);
+			if (disposers !== undefined && index !== -1) disposers.splice(index, 1);
 		};
 	}
 
@@ -1021,30 +1013,20 @@ export class Effect {
 	}
 
 	/**
-	 * Registers a function to run when the effect reruns or closes.
-	 *
-	 * Runs `fn` immediately if the run that registered it is already over, which is what an
-	 * {@link spawn} task resuming after a rerun or close sees. Registering teardown is
-	 * therefore enough to own a resource, with no staleness check needed first.
-	 */
-	/**
-	 * Run every callback in `list` exactly once, including ones registered while draining.
+	 * Pop and run every callback in `list` exactly once, newest first. One registered while
+	 * draining is the newest, so it runs next.
 	 *
 	 * Iterative, so a cascade of any depth stays flat rather than nesting a stack frame per link.
-	 * Re-entrant: a `close` from inside a rerun's teardown resumes this pass at the cursor instead
-	 * of replaying it. A callback that throws is reported and the rest still run, since teardown
-	 * that stops half way leaks whatever the remaining callbacks owned.
+	 * Re-entrant: a `close` from inside a rerun's teardown keeps popping the same list instead of
+	 * replaying it. A callback that throws is reported and the rest still run, since teardown that
+	 * stops half way leaks whatever the remaining callbacks owned.
 	 */
 	#drain(list: Dispose[]): void {
-		const owner = this.#draining !== list;
-		if (owner) {
-			this.#draining = list;
-			this.#drained = 0;
-		}
+		const outer = this.#draining;
+		this.#draining = list;
 
 		try {
-			while (this.#drained < list.length) {
-				const fn = list[this.#drained++];
+			for (let fn = list.pop(); fn !== undefined; fn = list.pop()) {
 				try {
 					fn();
 				} catch (error) {
@@ -1052,10 +1034,22 @@ export class Effect {
 				}
 			}
 		} finally {
-			if (owner) this.#draining = undefined;
+			this.#draining = outer;
 		}
 	}
 
+	/**
+	 * Registers a function to run when the effect reruns or closes.
+	 *
+	 * Teardown runs last-in, first-out, like `DisposableStack` or Rust's drop order, so something
+	 * registered later (a nested {@link run} built on an earlier resource) is released before what
+	 * it depends on. Every scoped helper registers here too: {@link set}, {@link run},
+	 * {@link computed}, and the timers.
+	 *
+	 * Runs `fn` immediately if the run that registered it is already over, which is what an
+	 * {@link spawn} task resuming after a rerun or close sees. Registering teardown is
+	 * therefore enough to own a resource, with no staleness check needed first.
+	 */
 	cleanup(fn: Dispose): void {
 		if (this.#dispose === undefined || this.#stale) {
 			// Teardown that cascades joins the drain in progress rather than running nested inside
