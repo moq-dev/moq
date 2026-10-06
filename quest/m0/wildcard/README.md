@@ -128,10 +128,9 @@ path, not with a route identity or a generation field.
   advertised prefix MUST overlap the sender's granted patterns or it is
   refused. A prefix wider than the grant is accepted, but it only routes
   requests for paths the grant covers. Fleet-wide services use the cluster
-  identity; a customer service serves only what its own v1 grant contains.
-  Until [Advertise-only authorization](/quest/m3/processor/advertise-auth.md)
-  lands, the publish scope stands in for advertising; a credential with its own
-  advertise scope is checked against that instead.
+  identity; a customer service serves only what its own grant contains.
+  The publish scope authorizes advertising; there is no separate advertise
+  scope (dropped with the processor questline in the 2026-10-06 audit).
 - **Claims are visible to subscribers.** A claim is an ordinary prefix
   announcement, so it tells a client it may subscribe beneath it, and its
   withdrawal tells the client the capability is gone. The browser player's

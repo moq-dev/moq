@@ -37,8 +37,8 @@ playlists keep serving for rewind and for players finishing the last
 segments. The fall-through needs the recording to publish its catalog live,
 since `moq-hls` subscribes to it rather than FETCHing it. Decided (09-29):
 that republishing moves into `moq-archive`, so any host of the archive
-behind the root claim does it, not only `moq-cli`; update [Replay
-catalog](/quest/m1/archive/replay-catalog.md) to match.
+behind the root claim does it, not only `moq-cli`, as [Replay
+catalog](/quest/m1/archive/replay-catalog.md) now plans.
 
 During live, rewind needs no handover: a recorded broadcast's live timeline
 is durable, and every group it lists is promised available, so a seek past
@@ -51,10 +51,12 @@ numbers when the name moves from the live publisher to the archive.
 
 ## Required
 
-- [Per-track timelines](/quest/m1/archive/track-timeline.md) - seeks through per-track timelines
 - [Replay catalog](/quest/m1/archive/replay-catalog.md) - the recording publishes its catalog live, so `moq-hls` finds it after the handover
-- [Wildcard](/quest/m0/wildcard/README.md) - the archive's root claim serves the source path once the live announcement ends
 
 ## Closes
 
 - [#2275](https://github.com/moq-dev/moq/issues/2275) - close this issue when the quest finishes
+
+## Related
+
+- [Wildcard](/quest/m0/wildcard/README.md) - landed (#4403) the root claim that serves the source path once the live announcement ends

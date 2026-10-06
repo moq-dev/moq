@@ -54,7 +54,5 @@ unsupported.
 
 ## Required
 
-- [Starvation](/quest/m1/qos/starvation.md) - fixes the wire shape and the
-  group-granularity fallback
 - [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - the
   hook this samples through

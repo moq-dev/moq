@@ -10,8 +10,8 @@ cooperation.
 
 ## Plan
 
-This is the ingress mirror of [starvation](/quest/m1/qos/starvation.md) and
-needs no acknowledgments: the relay is the receiver, and a frame is measured
+This is the ingress mirror of the egress `lag` histogram (#4298, on the QoS
+line) and needs no acknowledgments: the relay is the receiver, and a frame is measured
 when its last byte arrives, because a partial frame is not useful.
 
 Frame timestamps are relative and jittered with no epoch, so measure each
@@ -26,9 +26,11 @@ hour. The window bounds both directions to window length times skew, a few
 milliseconds, and the re-anchor happens on its own as old minima expire.
 Document the window length beside the bucket edges.
 
-Aggregate as a byte-weighted cumulative histogram of drift on the
-`Role::Subscriber` (ingress) rows, with the same bucket edges and the same
-monotonic contract as the starvation histogram. Beside it keep two cumulative
+Aggregate as a byte-weighted cumulative histogram of drift on the ingress
+(`Role::Subscriber`) side of [stats totals and prefix
+tracks](/quest/m0/broadcast-epoch/stats-split.md), which lands first and
+retires the per-path rows (decided in the 2026-10-06 audit), with the same
+bucket edges and the same monotonic contract as the egress `lag` histogram. Beside it keep two cumulative
 counters: `timestamp_regressions`, frames whose timestamp is below the
 previous group's newest timestamp, and `stalls`, gaps between complete frames
 longer than a documented threshold. Compare only across group boundaries for
@@ -53,8 +55,6 @@ excluded.
 ## Related
 
 - [Untimed model](/quest/m1/untimed-model.md) - pre-lite-05 tracks arrive untimed instead of stamped on arrival
-
-- [Starvation](/quest/m1/qos/starvation.md) - the egress half, same
-  histogram shape
+- [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the totals and prefix tracks the drift histogram lands on
 - [Media stats](/quest/m1/stats/schema.md) - the publisher's own view
   of the same uplink, in the transport section of its stats track

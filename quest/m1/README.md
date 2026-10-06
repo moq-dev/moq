@@ -18,8 +18,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 A line with no named consumer waits in m3 until one appears; the 2026-10-05
 audit moved P2P, ladder, processor, and timed metadata there from m2.
 
-Decided in the 2026-10-05 audit: the clock chain ranks first (import at the
-first frame, the HLS first catalog, typed timedness, the untimed models,
+Decided in the 2026-10-05 audit: the clock chain ranks first (the untimed models,
 CMAF frame timestamp, the shared clock, and the two publish-timestamp
 quests), with FFI shape pulled up inside it because publishing never invents
 a timestamp requires its JSON pilot. The hard fork follows, ahead of transport-seam and perf, and the rest
@@ -47,9 +46,10 @@ blocks. The quests that gated m0 lines moved under them.
 - [main merges through a squash queue](/quest/m1/merge-queue-settings.md) - condition: once `release` carries the new back-merge script, the maintainer enables the squash merge queue and moq-bot's pull_request bypass together
 - [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
 - [moq-net owns its transport seam](/quest/m1/transport-seam.md) - moq-net names only its own transport traits, so a web-transport-trait or qmux major bump is a patch for it
+- [Bump mp4-atom for avc3](/quest/m1/mp4-atom-avc3-bump.md) - this repository depends on mp4-atom 0.16.2, which reads and writes an `avc3` sample entry
 - [fMP4 init from the catalog](/quest/m1/fmp4-catalog-init.md) - fMP4 export writes avc3/hev1 entries from the catalog, so an Annex-B H.264 or H.265 init no longer waits for the first keyframe
 - [Delete the live marker](/quest/m1/announce-live-removal.md) - announce streams yield only route events; the `Live` marker and its hold machinery are gone
-- [WebTransport close backends](/quest/m1/wt-close-backends.md) - web-transport-noq and -quinn keep the session alive while closing, and iroh's client reads a capsule close
+- [WebTransport close backends](/quest/m1/wt-close-backends.md) - iroh's client reads a peer's capsule close, and moq-uring's HTTP/3 close task keeps the session alive until the capsule is sent
 - [Enabled flag](/quest/m1/catalog-enabled.md) - one `enabled` rendition flag replaces `stalled` and pausing, and the flapping encoder-lag detector is deleted
 - [Hang changelog](/quest/m1/hang-changelog-04.md) - the hang draft lists under -03 only what -03 published
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
@@ -117,7 +117,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [TS AAC PCE joins](/quest/m1/ts-aac-pce-join.md) - PCE-described AAC over TS plays after a mid-stream join or resume, and a missing PCE silences only its track
 - [FFI frame duration default](/quest/m1/ffi-frame-duration-default.md) - the binding audio encoder takes the codec's own frame by default, so `aac()` needs no explicit 0
 - [mp4-atom dOps mapping](/quest/m1/mp4-atom-dops-mapping.md) - a released mp4-atom reads and writes any `dOps` channel mapping family and table
-- [Bump mp4-atom for avc3](/quest/m1/mp4-atom-avc3-bump.md) - this repository depends on mp4-atom 0.16.2, which reads and writes an `avc3` sample entry
 - [CMAF surround Opus](/quest/m1/cmaf-opus-surround.md) - fMP4 import and export carry an Opus channel mapping table
 - [A self-hosted NVIDIA runner is registered](/quest/m1/gpu-runner.md) - the maintainer registers the host that runs the NVIDIA tests
 - [GPU CI](/quest/m1/gpu-ci.md) - NVIDIA tests run nightly on a self-hosted GPU runner, and `just rs nvidia` runs them locally instead of skipping
@@ -129,7 +128,7 @@ blocks. The quests that gated m0 lines moved under them.
 - [io_uring flow control](/quest/m1/uring-flow-control-windows.md) - the relay's io_uring workers honor the QUIC flow-control windows instead of refusing them
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
 - [QoS](/quest/m1/qos/README.md) - broadcast health: relay starvation and timeliness histograms
-- [Catalog track alias](/quest/m1/catalog-track-alias.md) - catalog rendition keys become aliases with an optional `track` name, so one catalog lists renditions from several broadcasts
+- [Catalog rendition IDs](/quest/m1/catalog-track-alias.md) - catalog rendition keys become IDs unique across video and audio, with an optional `track` name, so one catalog lists renditions from several broadcasts
 - [Media stats](/quest/m1/stats/README.md) - publishers announce a stats track in the catalog, viewers answer a soliciting catalog through a per-catalog `.echo` broadcast, and one model turns both into a health verdict and a preflight report
 - [JS track handover](/quest/m1/js-group-handover.md) - a JS track subscription resumes across a route swap from the first frame it lacks, so `test/drain` passes at zero latency budget
 - [JS GOAWAY requests](/quest/m1/js-goaway-requests.md) - after GOAWAY the JS client opens no new request on the old session, like Rust

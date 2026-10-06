@@ -37,4 +37,4 @@ routed, and cached like any other.
 
 ## Required
 
-- [JSON](/quest/m1/ffi-shape/json.md) - sets the `json` and `flate` namespace pattern this follows
+- [FFI shape](/quest/m1/ffi-shape/README.md) - lands the `json` namespace pattern and the `MoqFlate*Producer` constructors this follows

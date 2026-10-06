@@ -16,7 +16,3 @@ there with a regression test, release, and bump `@moq/qmux` in `js/net`. If
 not, note that in the PR that deletes this quest.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [JavaScript upgrade](/quest/m1/transport-upgrade/js.md) - sends a GOAWAY over the WebSocket session on every upgrade
