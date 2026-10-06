@@ -15,9 +15,10 @@ use std::ptr;
 use bytes::Bytes;
 use moq_net::Timestamp;
 use vpx_sys::{
-	VPX_DECODER_ABI_VERSION, vpx_codec_ctx_t, vpx_codec_dec_cfg_t, vpx_codec_dec_init_ver, vpx_codec_decode,
-	vpx_codec_destroy, vpx_codec_err_t, vpx_codec_err_to_string, vpx_codec_error_detail, vpx_codec_get_frame,
-	vpx_codec_iter_t, vpx_codec_vp8_dx, vpx_codec_vp9_dx, vpx_color_range, vpx_color_space, vpx_image_t, vpx_img_fmt,
+	VPX_DECODER_ABI_VERSION, vp8_dec_control_id, vpx_codec_control_, vpx_codec_ctx_t, vpx_codec_dec_cfg_t,
+	vpx_codec_dec_init_ver, vpx_codec_decode, vpx_codec_destroy, vpx_codec_err_t, vpx_codec_err_to_string,
+	vpx_codec_error_detail, vpx_codec_get_frame, vpx_codec_iter_t, vpx_codec_vp8_dx, vpx_codec_vp9_dx, vpx_color_range,
+	vpx_color_space, vpx_image_t, vpx_img_fmt,
 };
 
 use super::{Backend, Codec, Config};
@@ -92,6 +93,29 @@ impl Vpx {
 			(!detail.is_null()).then(|| CStr::from_ptr(detail).to_string_lossy().into_owned())
 		};
 		describe(err, detail)
+	}
+
+	/// Whether the picture the last decode showed is corrupt.
+	///
+	/// libvpx accepts a truncated frame and returns `VPX_CODEC_OK`, flagging the
+	/// picture (and every later one built on it) as corrupt instead.
+	fn corrupted(&mut self) -> Result<bool, Error> {
+		let mut corrupted: std::ffi::c_int = 0;
+		// SAFETY: the context is initialized, and this control writes one int.
+		let err = unsafe {
+			vpx_codec_control_(
+				&mut self.ctx,
+				vp8_dec_control_id::VP8D_GET_FRAME_CORRUPTED as std::ffi::c_int,
+				&mut corrupted as *mut std::ffi::c_int,
+			)
+		};
+		if err != vpx_codec_err_t::VPX_CODEC_OK {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"{NAME} corruption check: {}",
+				self.error(err)
+			)));
+		}
+		Ok(corrupted != 0)
 	}
 
 	/// Records a frame the decoder refused, or one dropped while waiting for a
@@ -215,6 +239,10 @@ impl Backend for Vpx {
 				return Err(Error::Codec(anyhow::anyhow!("{NAME} decode: {reason}")));
 			}
 			self.picture_lost(&reason);
+			return Ok(Vec::new());
+		}
+		if self.corrupted()? {
+			self.picture_lost("corrupt frame");
 			return Ok(Vec::new());
 		}
 
@@ -477,6 +505,27 @@ mod tests {
 
 			let indices: Vec<usize> = pictures.iter().map(|(index, _)| *index).collect();
 			assert_eq!(indices, [0, 4], "{} decoded across the damage", vector.name);
+			for (index, frame) in &pictures {
+				assert_reference(vector, *index, frame);
+			}
+		}
+	}
+
+	/// A truncated delta frame decodes without an error but leaves a corrupt
+	/// picture, which is dropped along with everything built on it.
+	#[test]
+	fn a_truncated_frame_recovers_at_the_next_keyframe() {
+		for vector in VECTORS {
+			let truncated = 1;
+			let pictures = decode(&mut open(vector.codec), vector, |index, frame| {
+				match index == truncated {
+					true => frame.slice(..frame.len() / 7),
+					false => frame,
+				}
+			});
+
+			let indices: Vec<usize> = pictures.iter().map(|(index, _)| *index).collect();
+			assert_eq!(indices, [0, 4], "{} decoded across the truncation", vector.name);
 			for (index, frame) in &pictures {
 				assert_reference(vector, *index, frame);
 			}
