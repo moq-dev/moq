@@ -2414,13 +2414,15 @@ async fn run_front(task: FrontTask) {
 						let mut serve = server.lock();
 						if serve.closed {
 							// Retracted under us, or its handler dropped while the
-							// announcement stands: it cannot serve.
+							// announcement stands: it cannot serve. A retraction
+							// leaves the table before it closes the server, so the
+							// table tells the two apart.
 							drop(serve);
 							events.push_back(Event::Resolved {
 								route,
 								result: Err(Refusal {
 									err: Error::Unroutable,
-									standing: true,
+									standing: shared.read().routes.covers(&path.as_path(), route),
 								}),
 							});
 							continue;
@@ -2450,7 +2452,7 @@ async fn run_front(task: FrontTask) {
 											route,
 											result: Err(Refusal {
 												err: Error::Unroutable,
-												standing: true,
+												standing: shared.read().routes.covers(&path.as_path(), route),
 											}),
 										});
 										continue;
@@ -2702,11 +2704,13 @@ async fn run_front(task: FrontTask) {
 						Event::Resolved { route, result: Ok(id) }
 					}
 					Err(err) => {
-						// A retraction and a handler's rejection resolve alike, so
-						// the table tells them apart: an `Unroutable` from a route
-						// that still stands is the handler's answer.
-						let standing =
-							!matches!(err, Error::Unroutable) || shared.read().routes.covers(&path.as_path(), route);
+						// Only the current winner's answer is final. A retraction
+						// resolves like a rejection, and a route beaten while it was
+						// pending speaks for nobody, so either one re-selects.
+						let standing = shared
+							.read()
+							.best_route(&path.as_path(), horizon, front.excluded_routes())
+							.is_some_and(|best| best.id == route);
 						Event::Resolved {
 							route,
 							result: Err(Refusal { err, standing }),
@@ -6868,6 +6872,32 @@ mod tests {
 		for other in [&sibling, &catch_all] {
 			assert!(other.poll_requested_broadcast(&kio::Waiter::noop()).is_pending());
 		}
+	}
+
+	/// A refusal from a route a local broadcast superseded while it was pending is moot:
+	/// the request resolves to the local broadcast instead of ending.
+	#[tokio::test]
+	async fn superseded_refusal_does_not_end_the_request() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let stale = producer.dynamic("room", Route::default()).unwrap();
+
+		let mut pending = Box::pin(consumer.request_broadcast("room/alice"));
+		assert!((&mut pending).now_or_never().is_none());
+		let request = queued(&stale).await;
+
+		// The local broadcast wins before the front sees the rejection.
+		let local = producer.create_broadcast("room/alice").unwrap();
+		local.announce(Route::default()).unwrap();
+		request.reject(Error::NotFound);
+
+		let mut result = None;
+		settle(|| {
+			result = (&mut pending).now_or_never();
+			result.is_some()
+		})
+		.await;
+		assert!(result.unwrap().is_ok(), "the superseded refusal ended the request");
 	}
 
 	/// `routed_broadcast` treats a handler's rejection as the table's verdict:
