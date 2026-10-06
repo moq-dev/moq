@@ -25,13 +25,11 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
   can't be published as-is: keep the totals per group, folding an entry into
   its group's total when it is pruned, or two projects sharing a tier would
   merge.
-- **Idle groups** (decided 2026-10-05). Today a group broadcast disappears
-  the moment it has no entries (`rs/moq-stats/src/produce.rs`). Instead it
-  stays announced for the stats linger (`quest/m0/stats-linger.md`, an m0
-  quest planned in [#4843](https://github.com/moq-dev/moq/pull/4843); list it
-  under Related once it lands, not Required, so it does not gate the release)
-  after its last entry ends, so a group that returns within the linger
-  continues its totals. A zero linger is valid: a returning group then always
+- **Idle groups** (decided 2026-10-05). A group broadcast already stays
+  announced for the stats linger (`produce::Config::linger`, landed in
+  [#4871](https://github.com/moq-dev/moq/pull/4871)) after its last entry
+  ends. Today a path that left drops out of frames while the group lingers;
+  with totals, a group that returns within the linger continues its totals. A zero linger is valid: a returning group then always
   takes a new epoch. After the linger it unannounces and drops its
   totals; a return announces under a new [epoch](/quest/m0/broadcast-epoch/stats-epoch.md)
   counted from zero. Totals are cumulative and a lingering group's frames all
@@ -90,6 +88,7 @@ across nodes.
 
 ## Related
 
+- [Stats linger](/quest/m0/stats-linger.md) - the idle-group window these totals continue across
 - [Bounded stats aggregate](/quest/m0/broadcast-epoch/stats-aggregate-bound.md) - retired
   nodes fold into a bounded total; per-epoch totals feed it
 - [Media stats](/quest/m1/stats/README.md) - publisher and viewer media stats
