@@ -80,6 +80,9 @@ to `main` once the line (#4640) lands, and merge `main` in.
 
 Update `doc/bin/cli.md` and the `moq export ts` examples.
 
+Promote `tstd` in `test/ts/compliance.py` from shape to hard, so `just test
+ts` fails a round-trip the T-STD model rejects; it reports only until then.
+
 Public API: `ts::Export` takes the delay in place of its max age and loses the
 hold; breaking. `Export::stats` returns `ts::stats::Export` (decided in the
 2026-10-05 audit, matching [TS stats module](/quest/m1/ts-stats-module.md)),

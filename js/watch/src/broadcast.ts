@@ -158,7 +158,9 @@ export class Broadcast {
 		const origin = effect.get(this.in.origin);
 		if (!origin) return;
 
-		const announced = origin.announced();
+		// Hidden routes count: a service claim under a `.`-named prefix is kept out of listings, but
+		// it still covers the renditions it would produce, and this set is never shown to anyone.
+		const announced = origin.announced(Path.Pattern.all(), { hidden: true });
 		effect.cleanup(() => announced.close());
 		this.#announced.set(new Set());
 
@@ -188,7 +190,9 @@ export class Broadcast {
 
 	// Whether `path` is covered by an announced route, for `relativeBroadcast`'s
 	// cross-broadcast refs. Announcements are prefix routes, so a route at "room/" covers
-	// "room/alice/cam.hang" without naming it. Opens the announcement stream on first use.
+	// "room/alice/cam.hang" without naming it. That is how a rendition produced only on demand
+	// gets selected: its service claims a covering prefix, and nothing announces the exact path
+	// until this subscribes. Opens the announcement stream on first use.
 	// The blind cases (announcement gate off, no discovery) never reach here; see `#relativeTarget`.
 	#isPathAnnounced(effect: Effect, path: Moq.Path.Valid): boolean {
 		this.#wantAnnounced.set(true);

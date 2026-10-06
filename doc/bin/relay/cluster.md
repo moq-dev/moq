@@ -90,10 +90,14 @@ for paths the grant covers.
 
 Routing prefers the longest covering prefix, then a fully identified hop list
 over one that holds a 0 (an anonymous hop) at any depth, then the lowest cost,
-then the shortest hop list, breaking any remaining tie toward the newest
-announcement so a reconnecting publisher isn't outranked by the session it
-replaced. An assigned identity for an anonymous peer is local selection state
-and is never written into the hop list.
+then the shortest hop list, then a hash of the requested path and the hop list,
+breaking any remaining tie toward the newest announcement so a reconnecting
+publisher isn't outranked by the session it replaced. Hashing the requested
+path spreads equal-cost advertisers of one prefix, such as a transcode pool,
+across its paths instead of sending every path to one of them, and every relay
+that holds the same routes picks the same one for a given path. An assigned
+identity for an anonymous peer is local selection state and is never written
+into the hop list.
 
 ```toml
 [cluster]
