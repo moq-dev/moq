@@ -39,6 +39,8 @@ A `.rustfmt.toml` in each imported directory keeps quinn's formatting; `cargo fm
 Changes on top of the upstream commit, besides the renames:
 
 - [quinn#2724](https://github.com/quinn-rs/quinn/pull/2724) (`moq_sock::udp`): when the kernel rejects a GSO batch with `EIO` or `EINVAL`, the socket halts GSO and resends the batch as individual datagrams instead of dropping it.
+  We extend it to resend batches built before GSO was halted too, which upstream's version drops, and to log only the first rejection.
+  A `WouldBlock` partway through the resend makes the caller retry the whole batch, duplicating the datagrams already sent; QUIC drops the duplicates.
   Drop it if upstream lands [quinn#2748](https://github.com/quinn-rs/quinn/pull/2748) and we cherry-pick that.
 
 ### Advisory triage

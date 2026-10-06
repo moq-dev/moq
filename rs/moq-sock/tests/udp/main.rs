@@ -317,6 +317,54 @@ fn gso_rejected_batch_is_resent() {
     );
 }
 
+/// A GSO batch built before offload was halted is resent like the batch that halted it.
+///
+/// Another connection on the endpoint may have prepared its batch while GSO was still on, so
+/// the second rejection must not fall through to the `IP_TOS` fallback and drop the batch.
+#[test]
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn gso_stale_batch_is_resent() {
+    let send = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let recv = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let one: libc::c_int = 1;
+    let rc = unsafe {
+        libc::setsockopt(
+            std::os::fd::AsRawFd::as_raw_fd(&send),
+            libc::SOL_SOCKET,
+            libc::SO_NO_CHECK,
+            (&raw const one).cast(),
+            size_of_val(&one) as libc::socklen_t,
+        )
+    };
+    assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+    let state = UdpSocketState::new((&send).into()).unwrap();
+    assert!(
+        state.max_gso_segments() > 1,
+        "GSO unsupported, so there is no batch to reject"
+    );
+    UdpSockRef::from(&send).set_nonblocking(false).unwrap();
+    recv.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+
+    const SEGMENT_SIZE: usize = 128;
+    let msg = vec![0xEF; SEGMENT_SIZE * 2];
+    let transmit = Transmit {
+        destination: recv.local_addr().unwrap(),
+        ecn: None,
+        contents: &msg,
+        segment_size: Some(SEGMENT_SIZE),
+        src_ip: None,
+    };
+    state.try_send((&send).into(), &transmit).unwrap();
+    assert_eq!(state.max_gso_segments(), 1);
+    // Built while GSO was still on, so it still asks for segmentation.
+    state.try_send((&send).into(), &transmit).unwrap();
+
+    let mut buf = [0; SEGMENT_SIZE * 2];
+    for _ in 0..4 {
+        assert_eq!(recv.recv(&mut buf).unwrap(), SEGMENT_SIZE);
+    }
+}
+
 #[test]
 fn socket_buffers() {
     const BUFFER_SIZE: usize = 123456;

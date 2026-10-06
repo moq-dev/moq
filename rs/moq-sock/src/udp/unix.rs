@@ -557,21 +557,20 @@ fn send(
                 // when we try to actually send datagrams using it.
                 #[cfg(any(target_os = "linux", target_os = "android"))]
                 if let Some(libc::EIO) | Some(libc::EINVAL) = e.raw_os_error() {
-                    // Prevent new transmits from being scheduled using GSO. Existing GSO transmits
-                    // may already be in the pipeline, so we need to tolerate additional failures.
-                    if state.max_gso_segments() > 1 {
+                    // Prevent new transmits from being scheduled using GSO.
+                    if state.max_gso_segments.swap(1, Ordering::Relaxed) > 1 {
                         crate::udp::log::info!(
                             "`libc::sendmsg` failed with {e}; halting segmentation offload"
                         );
-                        state.max_gso_segments.store(1, Ordering::Relaxed);
+                    }
 
-                        // Immediately retry this batch as individual datagrams rather than waiting
-                        // for the upper layer to time out and retransmit. These sends run with GSO
-                        // now disabled, so a repeated failure falls through here instead of
-                        // recursing.
-                        if let Some(segment_size) = transmit.segment_size {
-                            return send_individual_datagrams(state, io, transmit, segment_size);
-                        }
+                    // Immediately retry this batch as individual datagrams rather than waiting
+                    // for the upper layer to time out and retransmit. This includes GSO batches
+                    // built before offload was halted. The individual sends carry no
+                    // `UDP_SEGMENT`, so a repeated failure falls through below instead of
+                    // recursing.
+                    if let Some(segment_size) = transmit.effective_segment_size() {
+                        return send_individual_datagrams(state, io, transmit, segment_size);
                     }
                 }
 
