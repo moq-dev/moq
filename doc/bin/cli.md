@@ -150,6 +150,16 @@ even when the live publisher pauses. `--fragment-duration 2s` caps
 the fragment span as frames arrive, including audio whose publisher never cuts.
 MKV uses the same flag to cap clusters, which otherwise follow video GOPs.
 
+The fMP4 init segment declares every rendition in the catalog, so it waits until
+each can be described. An Annex-B H.264 or H.265 track, or video whose catalog
+leaves out its dimensions, waits for its first keyframe; the other tracks keep
+reading meanwhile and their fragments follow the init. A track that is still
+waiting once another has queued 30 seconds fails the export. After the init the
+track set is fixed: a rendition that leaves and returns with the same codec
+configuration is written under its original track, while a new rendition, a
+changed configuration, or a return that replays media already written ends the
+export with an error naming it. Restart the export to pick up a new rendition.
+
 ## Play
 
 ```bash

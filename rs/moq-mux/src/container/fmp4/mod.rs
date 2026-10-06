@@ -133,15 +133,9 @@ pub enum Error {
 	#[error("video codec {0} needs a description (codec config record) to synthesize a CMAF init")]
 	MissingVideoDescription(String),
 
-	#[error("video track {0} missing in catalog")]
-	MissingVideoTrack(String),
-
 	/// A synthesized video track has no usable encoded dimensions.
 	#[error("missing video dimensions for codec: {0}")]
 	MissingVideoDimensions(String),
-
-	#[error("audio track {0} missing in catalog")]
-	MissingAudioTrack(String),
 
 	#[error("invalid data offset")]
 	InvalidDataOffset,
@@ -154,9 +148,6 @@ pub enum Error {
 
 	#[error("track sample range {start}..{end} is out of bounds of mdat (len {len})")]
 	SampleRangeOutOfBounds { start: usize, end: usize, len: usize },
-
-	#[error("no catalog snapshot")]
-	NoCatalogSnapshot,
 
 	#[error("encode_fragment called with no frames")]
 	NoFrames,
@@ -209,6 +200,31 @@ pub enum Error {
 		/// The preceding fragment's decode time in the track's timescale.
 		previous: moq_net::Timestamp,
 	},
+
+	/// The init segment fixes the track set, so a rendition that joins later can't be written.
+	#[error("rendition {0} joined after the init segment; restart the export to include it")]
+	TrackAdded(String),
+
+	/// A rendition's sample entry no longer matches the one the init segment declared.
+	#[error("rendition {0} changed its codec configuration after it was declared")]
+	TrackChanged(String),
+
+	/// A rendition restarted at or before media already written for it, such as a
+	/// resubscription replaying cached groups.
+	#[error("rendition {track} went back in time: a fragment starts at {start:?}, after {written:?} was written")]
+	TrackRewound {
+		/// The rendition name.
+		track: String,
+		/// The rejected fragment's presentation time.
+		start: std::time::Duration,
+		/// The latest presentation time already written for the rendition.
+		written: std::time::Duration,
+	},
+
+	/// The init segment waited too long, or the broadcast ended, before these renditions
+	/// delivered the codec configuration their track needs.
+	#[error("renditions {0:?} never delivered their codec configuration")]
+	TrackUndescribed(Vec<String>),
 }
 
 impl From<mp4_atom::Error> for Error {

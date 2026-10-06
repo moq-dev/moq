@@ -88,6 +88,5 @@ across nodes.
 
 ## Related
 
-- [Stats linger](/quest/m0/stats-linger.md) - the idle-group window these totals continue across
 - [Media stats](/quest/m1/stats/README.md) - publisher and viewer media stats
   stay hang tracks, separate from the relay's stats
