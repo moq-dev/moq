@@ -6946,8 +6946,8 @@ mod tests {
 	/// An upstream link is offered what entered here and what other peers
 	/// forwarded, but never a route learned on another upstream link, and the
 	/// best route it sees skips a better upstream one.
-	#[tokio::test]
-	async fn upstream_view_hides_upstream_routes() {
+	#[test]
+	fn upstream_view_hides_upstream_routes() {
 		let producer = origin(1).produce();
 		let peer = producer.clone().peer();
 		let core = producer.clone().upstream();
