@@ -16,18 +16,14 @@ and grows on later updates. Reported by Dryvnt in
 
 ## Plan
 
-Decided (2026-10-05, maintainer): m1, [XS], ranked right after [Import at the
-first frame](/quest/m1/import-first-frame.md). That quest moves each
-importer's release to its first frame, which still lands before the next
-rendition is reserved.
+Decided (2026-10-05, maintainer): m1, [XS]. Each importer now releases its
+reservation at its first frame, which still lands before the next rendition
+is reserved.
 
 Guidance:
 
-- `step` already holds a pass-wide timeline reservation for the same reason
-  ("a record flushed mid-pass would omit every rendition that hasn't loaded
-  its init segment yet"). A catalog `Reserved` held the same way, at least
-  across the first pass, is the likely shape: taken after `ensure_tracks`
-  and before the first `ingest`, beside the timeline reservation.
+- A catalog `Reserved` held across at least the first pass is the likely
+  shape: taken after `ensure_tracks` and before the first `ingest`.
 - Don't let a hold outlive its pass. A rendition with no segments yet never
   reaches `ensure_map`, and one whose init fetch fails under `OnError::Warn`
   never reserves. Neither may withhold the catalog for the whole import, and a
@@ -44,5 +40,4 @@ lists every rendition instead of only the first.
 
 ## Related
 
-- [Import at the first frame](/quest/m1/import-first-frame.md) - moves each importer's catalog release to its first frame
 - [Shared import clock](/quest/m1/shared-clock.md) - moq-hls renditions share one `catalog::Input`, whose `reserve()` this hold may use

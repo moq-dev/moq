@@ -1,8 +1,8 @@
 /**
  * Tracks whether the audio ring still holds samples from a superseded subscription.
  *
- * The ring outlives the subscription that fills it, so reopening one (a rendition swap, a
- * republished broadcast, a reconnect) leaves the previous subscription's decoded audio buffered.
+ * The ring outlives the subscription that fills it, so reopening one on the same broadcast (a
+ * rendition swap, a return from an absence) leaves the previous subscription's decoded audio buffered.
  * The replacement is the authority from its first frame onwards, so everything the ring holds past
  * that timestamp is stale and has to go.
  */

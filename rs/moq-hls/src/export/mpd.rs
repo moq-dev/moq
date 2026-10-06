@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime};
 
 use super::Kind;
 
-/// One DASH representation: master-level metadata plus its slice of the shared timeline.
+/// One DASH representation: master-level metadata plus its segment timeline.
 pub(crate) struct Representation {
 	/// Rendition name (the `<name>` in its `<kind>/<name>/...` paths).
 	pub name: String,

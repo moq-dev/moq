@@ -549,3 +549,51 @@ async fn import_refuses_a_restart() {
 	assert!(matches!(err, crate::Error::TimestampRewind(_)), "{err:?}");
 	assert_eq!(import.published.values().next().unwrap().len(), 2);
 }
+
+/// The catalog is first published at the first block, carrying the clock that block anchors,
+/// rather than at the Tracks element on a provisional clock a copy-once reader would keep.
+#[tokio::test]
+async fn first_catalog_carries_the_anchored_clock() {
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![
+			track_entry_video_vp9(1, 16, 16),
+			track_entry_audio_opus(2, 48_000.0, 2),
+		])
+		.cluster(3_600_000, || {
+			vec![simple_block(2, 0, true, b"a0"), simple_block(1, 0, true, b"k0")]
+		})
+		.segment_end()
+		.build();
+	// The writer sizes the Segment at its end, so split at the Cluster's element ID.
+	const CLUSTER_ID: [u8; 4] = [0x1F, 0x43, 0xB6, 0x75];
+	let split = data.windows(4).position(|w| w == CLUSTER_ID).expect("a cluster");
+	let (header, cluster) = data.split_at(split);
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let provisional = catalog.clock().wall();
+	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
+	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
+
+	mkv.decode(header).unwrap();
+	assert_eq!(
+		catalog.snapshot().video.renditions.len(),
+		1,
+		"the Tracks element was read"
+	);
+	assert_eq!(clocks.drain(), vec![], "the Tracks element alone publishes nothing");
+
+	mkv.decode(cluster).unwrap();
+	let anchored = catalog.clock().wall();
+	assert_ne!(anchored, provisional, "the first block anchors the clock");
+	let published = clocks.drain();
+	assert!(!published.is_empty(), "the first block publishes the catalog");
+	assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
+
+	mkv.finish().unwrap();
+	assert!(clocks.drain().iter().all(|clock| *clock == Some(anchored)));
+}

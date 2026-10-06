@@ -33,9 +33,9 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	/// The catalog being produced
 	catalog: crate::catalog::Producer<E>,
 
-	/// Held until the moov's track set is declared, so the catalog is withheld from the broadcast
-	/// until every rendition is in (and, when composed with other importers, until they finish too).
-	/// Dropped in [`init`](Self::init).
+	/// Held until the first fragment anchors the clock, so the catalog is withheld from the broadcast
+	/// until every rendition is in and its root `clock` is final (and, when composed with other
+	/// importers, until they release theirs too).
 	initial_reservation: Option<crate::catalog::Reserved<E>>,
 
 	// Which track roles to publish. `None` imports every supported track.
@@ -253,9 +253,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	fn init(&mut self, moov: Moov) -> Result<()> {
-		// Held from construction until the track set is declared, so a second moov would be
-		// re-declaring a track set the catalog already published.
-		let reserved = self.initial_reservation.clone().ok_or(Error::DuplicateMoov)?;
+		// A second moov would re-declare a track set the catalog already advertises.
+		if self.moov.is_some() {
+			return Err(Error::DuplicateMoov.into());
+		}
+		// `finish()` may have released the initial reservation already; a fresh one publishes at
+		// the end of this call.
+		let reserved = self
+			.initial_reservation
+			.clone()
+			.unwrap_or_else(|| self.catalog.reserve());
 
 		for trak in &moov.trak {
 			let track_id = trak.tkhd.track_id;
@@ -321,9 +328,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			);
 		}
 
-		// The moov's full track set is declared now; release the reservation so the catalog publishes.
-		drop(reserved);
-		self.initial_reservation = None;
+		// The reservation stays held until the first fragment anchors the clock, unless no track
+		// was declared: then no fragment ever will.
+		if self.tracks.is_empty() {
+			self.initial_reservation = None;
+		}
 
 		self.moov = Some(moov);
 
@@ -876,8 +885,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// in the track's native timescale. The relay reads it off the wire; the
 			// consumer still drives playback from the fragment's internal timing.
 			let timestamp = min_timestamp.ok_or(Error::MissingTrun)?;
-			// The first fragment of the import is live on arrival.
+			// The first fragment of the import is live on arrival. Anchor before releasing the
+			// reservation, so the first snapshot carries the final clock; the moov declared every
+			// track, so any track's fragment releases it.
 			self.catalog.anchor(timestamp)?;
+			self.initial_reservation = None;
 
 			// Write the per-track fragment as a single MoQ frame (passthrough). The group rolls
 			// once per segment, so a group is a segment and the fragments inside it are frames.
@@ -951,6 +963,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> Result<()> {
+		// No frame follows to anchor the clock, so publish the declared track set now.
+		self.initial_reservation = None;
 		for track in self.tracks.values_mut() {
 			track.estimator.cut(None);
 			track.publish_estimate()?;

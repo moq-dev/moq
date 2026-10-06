@@ -93,7 +93,6 @@ The moq.pro guide link below resolves once moq.pro#2210 merges.
 ## Related
 
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - the fresh epoch a caller and the CLI mint for each restarted broadcast
-- [Import at the first frame](/quest/m1/import-first-frame.md) - a lone session's catalog publishes at its first frame
 - [moq.pro's Pronto truck](https://github.com/moq-dev/moq.pro/blob/main/pronto/truck/src/camera.rs) - the prior art this generalizes
 - [moq.pro: Pronto truck on moq-rtsp](https://github.com/moq-dev/moq.pro/blob/main/quest/m3/truck-rtsp.md) - runs the library entry point under its own supervisor
 - [moq.pro: Camera (RTSP) guide](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/rtsp-guide.md) - documents `moq import rtsp` for customers once a release ships it

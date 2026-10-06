@@ -49,7 +49,7 @@ const ANCHOR_SEGMENTS: usize = 3;
 /// How many consecutive failed steps retire a rendition (see [`TrackState::evict`]).
 ///
 /// Enough to ride out a transient fetch error or a stale playlist, short enough that a
-/// genuinely dead variant stops holding the broadcast's timeline back within a few seconds.
+/// genuinely dead variant leaves the catalog within a few seconds.
 const MAX_RENDITION_FAILURES: usize = 3;
 
 /// Configuration for the HLS import loop.
@@ -364,11 +364,9 @@ impl TrackState {
 
 	/// Give up on this rendition's current importer generation after repeated failures.
 	///
-	/// An enrolled track gates *every* segment record until it reports past the boundary, so a
-	/// rendition that stopped making progress freezes the whole broadcast's timeline rather
-	/// than just its own playlist. Dropping the importer closes its recorders (and retires its
-	/// catalog entries), letting the healthy renditions publish again; a later successful step
-	/// rebuilds it from the init segment.
+	/// Dropping the importer closes its recorders and retires its catalog entries, so players
+	/// stop selecting a rendition that no longer advances; a later successful step rebuilds it
+	/// from the init segment.
 	fn evict(&mut self) {
 		self.importer = None;
 		self.map = None;
@@ -1398,10 +1396,8 @@ mod tests {
 		assert_eq!(import.video[0].next_sequence, Some(2));
 	}
 
-	/// An enrolled track gates every timeline record until it reports past the boundary, so a
-	/// rendition that has stopped making progress would otherwise freeze the whole broadcast's
-	/// timeline (and every healthy rendition's playlist with it). After a few consecutive
-	/// failures its importer is dropped, which closes its recorders.
+	/// A rendition that has stopped making progress is dropped after a few consecutive
+	/// failures, which closes its recorders and retires its catalog entries.
 	#[tokio::test]
 	async fn a_persistently_failing_rendition_is_evicted() {
 		let (init, fragments) = fmp4_parts(2);
@@ -1435,7 +1431,7 @@ mod tests {
 		import.step(OnError::Warn).await.unwrap();
 		assert!(
 			import.video[0].importer.is_none(),
-			"the dead rendition stops gating the broadcast's timeline"
+			"the dead rendition is retired"
 		);
 	}
 

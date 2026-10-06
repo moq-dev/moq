@@ -620,8 +620,8 @@ impl Rendition {
 		self.live.is_playable()
 	}
 
-	/// This rendition's DASH representation: its master-level metadata plus its slice of the
-	/// shared timeline as `(t, d)` pairs in the timeline's own timescale (the record values
+	/// This rendition's DASH representation: its master-level metadata plus its track's
+	/// timeline as `(t, d)` pairs in the timeline's own timescale (the record values
 	/// verbatim, so `$Time$` addressing resolves exactly). `None` until the init is known, as
 	/// for [`media_playlist`](Self::media_playlist).
 	pub(crate) fn representation(&self) -> Option<mpd::Representation> {

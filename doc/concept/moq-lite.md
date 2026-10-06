@@ -115,7 +115,8 @@ can be neither discovered nor requested. A broadcast published locally
 competes with remote routes to its path on cost like any other route, winning
 only a tie. Retracting a route (an unannounce, or the peer's `ANNOUNCE_END`)
 stops new requests from resolving through it but leaves subscriptions already
-in flight alone: each track runs to its own end or failure. On moq-lite 05 and
+in flight alone: each track runs to its own end or failure, or until its last
+subscriber leaves, which cancels it upstream. On moq-lite 05 and
 newer, a clean end requires `SUBSCRIBE_END` before the publisher's FIN. A FIN
 without that declaration fails the subscription with `ProtocolViolation`; older
 moq-lite versions use FIN alone. moq-transport requires `PUBLISH_DONE` before FIN.

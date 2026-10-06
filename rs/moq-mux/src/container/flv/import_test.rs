@@ -790,3 +790,32 @@ async fn import_refuses_a_restart() {
 		"the first session stays published"
 	);
 }
+
+/// The catalog is first published at the first frame, carrying the clock that frame anchors,
+/// rather than at the sequence headers on a provisional clock a copy-once reader would keep.
+#[tokio::test]
+async fn first_catalog_carries_the_anchored_clock() {
+	let start_ms = 3_600_000;
+	let data = session(true, start_ms, 10);
+	let (headers, frames) = data.split_at(session(true, start_ms, 0).len());
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let provisional = catalog.clock().wall();
+	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
+	let mut importer = Import::new(broadcast, catalog.reserve());
+
+	importer.decode(headers).unwrap();
+	assert_eq!(clocks.drain(), vec![], "the sequence headers alone publish nothing");
+
+	importer.decode(frames).unwrap();
+	let anchored = catalog.clock().wall();
+	assert_ne!(anchored, provisional, "the first frame anchors the clock");
+	let published = clocks.drain();
+	assert!(!published.is_empty(), "the first frame publishes the catalog");
+	assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
+
+	importer.finish().unwrap();
+	assert!(clocks.drain().iter().all(|clock| *clock == Some(anchored)));
+}

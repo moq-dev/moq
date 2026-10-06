@@ -43,6 +43,17 @@ immediate. CMAF audio
 samples are always encoded as sync samples; the decoded `Frame::keyframe` marks
 only the first audio sample of a MoQ group.
 
+`fmp4::Export` writes its init segment once every rendition can be described,
+queueing other tracks' fragments (up to 30 seconds) behind it. The track set is
+then fixed. A rendition that returns with the same sample entry reuses its track
+id; `fmp4::Error::TrackAdded`, `TrackChanged`, and `TrackRewound` end the export
+for a new rendition, a changed sample entry, or a replay of media already
+written, and `TrackUndescribed` names a track that never delivered its codec
+configuration. An Opus entry synthesized without a catalog `description` guesses
+its pre-skip and input sample rate, so a later OpusHead that agrees on everything
+else settles it instead of changing it. An OpusHead whose channel count
+contradicts its catalog entry fails with `fmp4::Error::OpusChannelCount`.
+
 Each catalog track constructor returns one `container::Producer` that owns the
 media stream and its catalog entry. `set` publishes or replaces its config,
 `modify` edits the published config through a guard, and dropping the producer
@@ -120,9 +131,11 @@ The fMP4, MPEG-TS, FLV, and MKV importers publish the source's own timestamps
 (MPEG-TS after unwrapping its 33-bit PTS; fMP4 passthrough keeps each `tfdt`)
 and anchor the catalog's broadcast clock instead: the first frame's timestamp
 maps to the time it arrived, and every track of the input, like every importer
-sharing the catalog, keeps that one mapping. Data tracks stamp on it too, even
-one created before that first frame, though anything it wrote earlier stays on
-the clock the catalog started with. A clock set with
+sharing the catalog, keeps that one mapping. Each importer withholds the
+catalog until that first frame, so its first snapshot already carries the
+anchored root `clock` for readers that copy it once. Data tracks stamp on the
+clock too, even one created before that first frame, though anything it wrote
+earlier stays on the clock the catalog started with. A clock set with
 `Config::with_clock` is never re-anchored, for a recording whose zero names its
 real start.
 
