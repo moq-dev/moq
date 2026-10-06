@@ -175,7 +175,10 @@ class CoveringRoot {
  * @internal
  */
 export interface RequestSlot {
+	/** Open handles that always take a blind answer. */
 	blind: number;
+	/** Open announcement-gated handles, which take a blind answer only while discovery is incomplete. */
+	announced: number;
 	answer?: broadcast.Consumer;
 	readonly handles: Set<Once<Error | null>>;
 	readonly refused: Set<RouteEntry>;
@@ -479,6 +482,18 @@ class OriginState {
 	}
 
 	/**
+	 * Whether sessions should answer `slot` with a blind subscription. An announcement-gated
+	 * handle falls back to one only while at least one attached session cannot announce, and
+	 * stays gated with no session attached.
+	 */
+	blind(slot: RequestSlot): boolean {
+		if (slot.blind > 0) return true;
+		if (slot.announced === 0) return false;
+		const { total, discovery } = this.sessions.peek();
+		return discovery < total;
+	}
+
+	/**
 	 * `entry` refused `path` with `err`. A request still serving another source skips the
 	 * refuser; one with nothing serving ends with `err`.
 	 */
@@ -696,6 +711,7 @@ export class Producer implements Table {
 				return thisProducer.#requests;
 			},
 			changed: () => this.#changed(),
+			blind: (slot) => this.#state.blind(slot),
 			answer: (path, front) => this.#answer(this.#scope.path(path), front),
 			routes: (path) => wireOf(this.#reader).routes(path),
 		});
@@ -947,13 +963,19 @@ export class Producer implements Table {
 	}
 
 	/**
-	 * Resolves once anything a serving session scans changes: the open requests, or either
-	 * side of the routing table.
+	 * Resolves once anything a serving session scans changes: the open requests, either
+	 * side of the routing table, or the attached sessions that decide which requests are blind.
 	 *
 	 * @internal
 	 */
 	#changed(): GetPromise<unknown> {
-		return Signal.race(this.#state.requests, this.#state.local, this.#state.routes, this.#state.advertisedLocal);
+		return Signal.race(
+			this.#state.requests,
+			this.#state.local,
+			this.#state.routes,
+			this.#state.advertisedLocal,
+			this.#state.sessions,
+		);
 	}
 
 	/**
@@ -1265,6 +1287,7 @@ export class Consumer {
 			const refused = new Set<RouteEntry>();
 			const created: RequestSlot = {
 				blind: 0,
+				announced: 0,
 				handles: new Set(),
 				refused,
 				route: new Signal(this.#state.route(path, { refused })),
@@ -1276,22 +1299,11 @@ export class Consumer {
 		}
 		const closed = new Once<Error | null>();
 		slot.handles.add(closed);
-		let blind = !options.announced || this.#discovery.peek() === false;
-		if (blind) slot.blind += 1;
+		// Counted, not subscribed: serving sessions decide blindness from the live discovery state.
+		const announced = options.announced === true;
+		if (announced) slot.announced += 1;
+		else slot.blind += 1;
 		this.#state.requests.mutate(() => {});
-
-		// An announcement-gated request falls back to a blind subscription only while at
-		// least one attached session cannot announce. It returns to the gate if discovery
-		// becomes complete again, and remains gated with no session attached.
-		const unsubscribeDiscovery = options.announced
-			? this.#discovery.subscribe((discovery) => {
-					const next = discovery === false;
-					if (next === blind) return;
-					blind = next;
-					slot.blind += next ? 1 : -1;
-					this.#state.requests.mutate(() => {});
-				})
-			: () => {};
 
 		// Hand out a handle of the request's own rather than the table's. Closing a consumer
 		// closes the broadcast once it was the last one, and the table often holds the only
@@ -1337,7 +1349,6 @@ export class Consumer {
 		return makeRequesting(relative, active, unroutable, closed, () => {
 			// Releases this request's handle; the route itself belongs to the table.
 			released = true;
-			unsubscribeDiscovery();
 			unsubscribe();
 			handle?.close();
 			handle = undefined;
@@ -1345,7 +1356,8 @@ export class Consumer {
 
 			taken.handles.delete(closed);
 			if (closed.peek() === undefined) closed.set(null);
-			if (blind) taken.blind -= 1;
+			if (announced) taken.announced -= 1;
+			else taken.blind -= 1;
 			this.#state.requests.mutate(() => {});
 			if (taken.handles.size > 0) return;
 

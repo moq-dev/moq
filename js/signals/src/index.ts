@@ -13,9 +13,6 @@ const noop: Dispose = () => {};
 
 type Subscriber<T> = (value: T) => void;
 
-// @ts-ignore - Some environments don't recognize import.meta.env
-const DEV = typeof import.meta.env !== "undefined" && import.meta.env?.MODE !== "production";
-
 // Symbols to identify our instances across different package versions.
 // SIGNAL_BRAND is Signal only (it implies a write side); GETTER_BRAND is every readable we ship.
 const SIGNAL_BRAND = Symbol.for("@moq/signals");
@@ -178,9 +175,6 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 	/** Calls `fn` every time the value changes. Returns a function to unsubscribe. */
 	subscribe(fn: Subscriber<T>): Dispose {
 		this.#subscribers.add(fn);
-		if (DEV && this.#subscribers.size >= 100 && Number.isInteger(Math.log10(this.#subscribers.size))) {
-			throw new Error("signal has too many subscribers; may be leaking");
-		}
 		return () => this.#subscribers.delete(fn);
 	}
 
@@ -598,9 +592,9 @@ type Truthy<T> = Exclude<T, Falsy>;
  */
 // TODO Make this a single instance of an Effect, so close() can work correctly from async code.
 export class Effect {
-	// Sanity check to make sure roots are being disposed on dev.
-	static #finalizer = new FinalizationRegistry<string>((debugInfo) => {
-		console.warn(`Signals was garbage collected without being closed:\n${debugInfo}`);
+	// Catches effects that are garbage collected without being closed.
+	static #finalizer = new FinalizationRegistry<Error>((origin) => {
+		console.warn(`Signals was garbage collected without being closed:\n${origin.stack}`);
 	});
 
 	#fn?: (effect: Effect) => void;
@@ -614,7 +608,11 @@ export class Effect {
 	#unwatch: Dispose[] = [];
 	#async = new Set<Promise<void>>();
 
-	#stack?: string;
+	// Captured eagerly but formatted only when a diagnostic prints it, which keeps creation cheap.
+	#origin = new Error("created here:");
+	get #stack(): string | undefined {
+		return this.#origin.stack;
+	}
 	#scheduled = false;
 
 	#closed: PromiseWithResolvers<void>;
@@ -628,16 +626,9 @@ export class Effect {
 
 	/** If a function is provided, it runs immediately and reruns whenever a tracked signal changes. */
 	constructor(fn?: (effect: Effect) => void) {
-		if (DEV) {
-			const debug = new Error("created here:").stack ?? "No stack";
-			Effect.#finalizer.register(this, debug, this);
-		}
+		Effect.#finalizer.register(this, this.#origin, this);
 
 		this.#fn = fn;
-
-		if (DEV) {
-			this.#stack = new Error().stack;
-		}
 
 		this.#closed = Promise.withResolvers();
 
@@ -685,18 +676,13 @@ export class Effect {
 		// so anything that observes cancellation unwinds from here.
 		if (this.#async.size > 0) {
 			// Diagnostic only: a task that ignores cancellation stalls the rerun, so name it.
-			const warn = DEV
-				? setTimeout(() => {
-						// A close() racing the timer disarms it, but the callback can already be
-						// queued by then. There is nothing to warn about once the effect is gone.
-						if (this.#dispose === undefined) return;
+			const warn = setTimeout(() => {
+				// A close() racing the timer disarms it, but the callback can already be
+				// queued by then. There is nothing to warn about once the effect is gone.
+				if (this.#dispose === undefined) return;
 
-						console.warn(
-							"spawn is still running after 5s; the effect cannot rerun until it settles",
-							this.#stack,
-						);
-					}, 5000)
-				: undefined;
+				console.warn("spawn is still running after 5s; the effect cannot rerun until it settles", this.#stack);
+			}, 5000);
 
 			try {
 				// A task can spawn another as it unwinds, so drain until nothing new is queued.
@@ -713,7 +699,7 @@ export class Effect {
 				console.error("async effect error", error);
 				if (this.#stack) console.error("stack", this.#stack);
 			} finally {
-				if (warn !== undefined) clearTimeout(warn);
+				clearTimeout(warn);
 			}
 		}
 
@@ -733,7 +719,6 @@ export class Effect {
 			this.#fn(this);
 
 			if (
-				DEV &&
 				this.#dispose !== undefined &&
 				this.#unwatch.length === 0 &&
 				this.#dispose.length === 0 &&
@@ -748,9 +733,7 @@ export class Effect {
 	/** Reads a signal and tracks it, rerunning the effect whenever it changes. */
 	get<T>(signal: Getter<T>): T {
 		if (this.#dispose === undefined) {
-			if (DEV) {
-				console.warn("Effect.get called when closed, returning current value");
-			}
+			console.warn("Effect.get called when closed, returning current value");
 			return signal.peek();
 		}
 
@@ -774,9 +757,7 @@ export class Effect {
 		...args: undefined extends SetterType<S> ? [cleanup?: SetterType<S>] : [cleanup: SetterType<S>]
 	): void {
 		if (this.#dispose === undefined) {
-			if (DEV) {
-				console.warn("Effect.set called when closed, ignoring");
-			}
+			console.warn("Effect.set called when closed, ignoring");
 			return;
 		}
 
@@ -792,9 +773,7 @@ export class Effect {
 	// TODO: Add effect for another layer of nesting
 	spawn(fn: () => Promise<void>) {
 		if (this.#dispose === undefined) {
-			if (DEV) {
-				console.warn("Effect.spawn called when closed");
-			}
+			console.warn("Effect.spawn called when closed");
 
 			return;
 		}
@@ -818,9 +797,7 @@ export class Effect {
 	/** Runs `fn` after `ms` milliseconds, unless the effect reruns or closes first. */
 	timer(fn: () => void, ms: DOMHighResTimeStamp) {
 		if (this.#dispose === undefined) {
-			if (DEV) {
-				console.warn("Effect.timer called when closed, ignoring");
-			}
+			console.warn("Effect.timer called when closed, ignoring");
 			return;
 		}
 
@@ -840,9 +817,7 @@ export class Effect {
 	 */
 	timeout(fn: (effect: Effect) => void, ms: DOMHighResTimeStamp) {
 		if (this.#dispose === undefined) {
-			if (DEV) {
-				console.warn("Effect.timeout called when closed, ignoring");
-			}
+			console.warn("Effect.timeout called when closed, ignoring");
 			return;
 		}
 
@@ -864,9 +839,7 @@ export class Effect {
 	/** Runs `fn` on the next animation frame, unless the effect reruns or closes first. */
 	animate(fn: (now: DOMHighResTimeStamp) => void) {
 		if (this.#dispose === undefined) {
-			if (DEV) {
-				console.warn("Effect.animate called when closed, ignoring");
-			}
+			console.warn("Effect.animate called when closed, ignoring");
 			return;
 		}
 
@@ -882,9 +855,7 @@ export class Effect {
 	/** Runs `fn` every `ms` milliseconds until the effect reruns or closes. */
 	interval(fn: () => void, ms: DOMHighResTimeStamp) {
 		if (this.#dispose === undefined) {
-			if (DEV) {
-				console.warn("Effect.interval called when closed, ignoring");
-			}
+			console.warn("Effect.interval called when closed, ignoring");
 			return;
 		}
 
@@ -907,9 +878,7 @@ export class Effect {
 	 */
 	run(fn: (effect: Effect) => void): Dispose {
 		if (this.#dispose === undefined) {
-			if (DEV) {
-				console.warn("Effect.run called when closed, ignoring");
-			}
+			console.warn("Effect.run called when closed, ignoring");
 			return () => {};
 		}
 
@@ -956,9 +925,7 @@ export class Effect {
 	/** Runs `fn` with the signal's value now and again whenever it changes, scoped to this effect. */
 	subscribe<T>(signal: Getter<T>, fn: (value: T) => void) {
 		if (this.#dispose === undefined) {
-			if (DEV) {
-				console.warn("Effect.subscribe called when closed, running once");
-			}
+			console.warn("Effect.subscribe called when closed, running once");
 			fn(signal.peek());
 			return;
 		}
@@ -1037,9 +1004,7 @@ export class Effect {
 		options?: boolean | AddEventListenerOptions,
 	): void {
 		if (this.#dispose === undefined) {
-			if (DEV) {
-				console.warn("Effect.eventListener called when closed, ignoring");
-			}
+			console.warn("Effect.eventListener called when closed, ignoring");
 			return;
 		}
 
@@ -1129,9 +1094,7 @@ export class Effect {
 
 		this.#async.clear();
 
-		if (DEV) {
-			Effect.#finalizer.unregister(this);
-		}
+		Effect.#finalizer.unregister(this);
 	}
 
 	/** Resolves when the effect is closed. */

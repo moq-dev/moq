@@ -58,6 +58,11 @@ drop the element and register your own encoders on a `Publish.Broadcast`.
 for a resume, a recording cut, or a known tune-in moment. Requests coalesce into
 the next keyframe, and forced keyframes land at least 500ms apart.
 
+A still source, such as a screen share of an unchanging slide, delivers a frame
+only when its picture changes. `Video.Capture` holds the newest frame and opens
+every new reader with a copy stamped at the moment it attaches, so a viewer or
+recorder that subscribes later still gets the current picture as a keyframe.
+
 The video and audio encoders measure how far their output falls behind the media
 clock when they flush frames. Catalog jitter is the spread above each
 rendition's own recent minimum lateness, so a constant encoder delay is not jitter.
