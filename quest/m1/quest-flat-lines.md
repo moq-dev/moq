@@ -55,18 +55,32 @@ Interview paper trail (✅ marks the choice):
 
 Remaining:
 
-- Land each line's umbrella PR with `/quest-complete`, then delete its branch:
-  #4403 wildcard, #4034 archive, #4039 auth, #4079 cpp, #4519 ffi-shape,
-  #4080 obs-moq-video, #4133 qos (held until
-  [Lag across a splice](/quest/m1/qos/lag-splice.md) is fixed), #4437 rs2ts,
-  #4653 test-flakes-2, #4180 transport-upgrade, #4640 tstd. #4162
-  (audio-jitter-target) landed, and #4438 folded into rs2ts.
-- Fold #4255 (archive/track-timeline) into the archive branch before #4034
-  lands; as of the 2026-10-05 audit it has not happened and #4034 is a draft.
-- Before a line lands and its branch is deleted, merge or retarget every child
-  PR still based on it, or GitHub closes it with the branch. As of the
-  2026-10-05 audit: #4645 (tstd/delay, retarget to `main` after #4640),
-  #4732 (ffi-shape/request-accept), and #4675 (auth/request-token).
+- Land each line's umbrella PR with `/quest-complete`, then delete its branch.
+  As of 2026-10-05 every line has `main` merged in and its umbrella is ready
+  for review, except qos: #4403 wildcard, #4034 archive, #4039 auth, #4079
+  cpp, #4519 ffi-shape, #4080 obs-moq-video, #4437 rs2ts, #4653
+  test-flakes-2, #4180 transport-upgrade, #4640 tstd. #4255
+  (archive/track-timeline) folded into the archive line and lands through
+  #4034; #4438 folded into rs2ts.
+- Lines that wait before landing:
+  - #4133 qos is held until
+    [Lag across a splice](/quest/m1/qos/lag-splice.md) is fixed. Its `main`
+    merge is not pushed yet: `lag-splice.md` links the line's finished
+    `final-lag-sample.md`, so the merge must drop that Related link.
+  - #4519 ffi-shape waits on
+    [Bindings](/quest/m0/broadcast-epoch/bindings.md), per the 2026-10-05
+    audit.
+  - #4039 auth waits on its new `wip-version.md` child: AUTH still turns on
+    for lite-06, but wire work belongs on the wip version.
+  - #4079 cpp fails OBS (macOS) until its `generated-newline.md` fork tag is
+    cut.
+- Child PRs still based on a line merge into it first, or GitHub closes them
+  with the branch. #4732 (ffi-shape/request-accept) and #4675
+  (auth/request-token) need the updated line merged in. #4645 (tstd/delay)
+  retargets to `main` after #4640 lands, then merges `main`. #4863
+  (archive/enrollment-flake) edits the shared-timeline writer the fold
+  replaced; after #4034 lands, keep only its tests and rework them against
+  `main`.
 
 Done when `flake.nix` pins the new quest, no `quest/*README` branch remains,
 and `quest check` passes.
