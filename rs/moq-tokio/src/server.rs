@@ -1014,11 +1014,12 @@ impl TcpTls {
 	/// `qmux-01.<alpn>` TLS ALPN.
 	///
 	/// Asks for no client certificate: qmux's TLS accept keeps no peer identity
-	/// for the auth server to read, so a `tls.root` meant for QUIC peers does not
-	/// apply, and a peer on this listener authenticates with a token.
+	/// for the auth server to read, so neither a `tls.root` nor pinned `peers`
+	/// meant for QUIC apply, and a peer on this listener authenticates with a token.
 	fn new(config: &crate::listen::Config, versions: &moq_net::Versions) -> crate::Result<Self> {
 		let mut listen = config.tls.clone();
 		listen.root.clear();
+		listen.peers = None;
 		let alpn = stream_versions(versions)
 			.alpns()
 			.iter()

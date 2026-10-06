@@ -357,17 +357,28 @@ mod tests {
 	}
 
 	/// A `tls://` dial carries qmux and the request target over TLS, and a client
-	/// that does not trust the certificate is refused.
+	/// that does not trust the certificate is refused. Client-certificate policy
+	/// meant for QUIC (CA roots or pinned peers) never makes the TCP listener ask
+	/// for one, so a token-only client still gets through.
 	#[cfg(feature = "aws-lc-rs")]
 	#[tokio::test]
 	async fn tls_carries_qmux_and_refuses_an_untrusted_certificate() {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-		let mut listen = crate::listen::Config::default();
-		listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
-		listen.tcp.tls = Some(true);
-		listen.tls.generate = vec!["localhost".into()];
-		// A client CA meant for QUIC peers does not make the TCP listener ask for one.
-		listen.tls.root = vec!["/nonexistent/client-ca.pem".into()];
+		for pinned in [false, true] {
+			let mut listen = crate::listen::Config::default();
+			listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+			listen.tcp.tls = Some(true);
+			listen.tls.generate = vec!["localhost".into()];
+			match pinned {
+				true => listen.tls.peers = Some(crate::tls::Peers::new()),
+				false => listen.tls.root = vec!["/nonexistent/client-ca.pem".into()],
+			}
+			tls_round_trip(listen).await;
+		}
+	}
+
+	#[cfg(feature = "aws-lc-rs")]
+	async fn tls_round_trip(listen: crate::listen::Config) {
 		let mut server = listen.init(Default::default()).unwrap().listen().await.unwrap();
 		let port = server.tcp_local_addr().unwrap().port();
 		let url: Url = format!("tls://localhost:{port}/room?jwt=credential").parse().unwrap();
