@@ -331,12 +331,48 @@ impl Slot {
 		}
 	}
 
+	/// Every copy this slot holds, the live group first.
+	fn copies(&self) -> impl Iterator<Item = &group::Producer> {
+		std::iter::once(&self.group).chain(self.head.as_deref())
+	}
+
+	/// Whether every copy is gone, so the slot has nothing left to serve.
+	fn is_aborted(&self) -> bool {
+		self.serving().is_aborted()
+	}
+
+	/// The latest access to any copy still held: readers may be on either one.
+	fn cache_accessed(&self) -> u64 {
+		self.copies()
+			.filter(|group| !group.is_aborted())
+			.map(group::Producer::cache_accessed)
+			.max()
+			.unwrap_or(0)
+	}
+
+	/// The bytes every copy holds, all freed together.
+	fn cache_size(&self) -> u64 {
+		self.copies().map(group::Producer::cache_size).sum()
+	}
+
+	/// Whether every copy still held sat idle past the scan's expiry window. Asks
+	/// each one, so a cleanup scan dates them all.
+	fn is_expired(&self, scan: &ExpiryScan) -> bool {
+		self.copies()
+			.filter(|group| !group.is_aborted())
+			.fold(true, |expired, group| {
+				let idle = group
+					.cache_accessed_tick(scan.gc.then_some(scan.now))
+					.is_some_and(|tick| scan.now.saturating_sub(tick) > scan.max_ticks);
+				expired && idle
+			})
+	}
+
 	/// Abort every copy this slot holds.
 	fn abort(&self, err: Error) {
-		if let Some(head) = &self.head {
-			let _ = (**head).clone().abort(err.clone());
+		for group in self.copies() {
+			let _ = group.clone().abort(err.clone());
 		}
-		let _ = self.group.clone().abort(err);
 	}
 }
 
@@ -420,7 +456,7 @@ impl TrackState {
 			if *sequence >= min_sequence
 				&& let Some(slot) = self.lookup.get(sequence)
 				&& slot.stamp == *stamp
-				&& !slot.serving().is_aborted()
+				&& !slot.is_aborted()
 			{
 				return Poll::Ready(Ok(Some((slot.serving().clone(), self.offset + i))));
 			}
@@ -542,8 +578,7 @@ impl TrackState {
 	/// it to someone who asked for the whole group would silently hand back a tail. It
 	/// is a miss instead, so the fetch goes upstream for the frames that are missing.
 	fn covering_group(&self, sequence: u64, frame_start: u64) -> Option<&group::Producer> {
-		let slot = self.lookup.get(&sequence)?;
-		std::iter::once(&slot.group).chain(slot.head.as_deref()).find(|group| {
+		self.lookup.get(&sequence)?.copies().find(|group| {
 			group
 				.live_first_frame()
 				.is_some_and(|first| first as u64 <= frame_start)
@@ -607,7 +642,7 @@ impl TrackState {
 	fn holds(&self, sequence: u64, stamp: u32) -> bool {
 		self.lookup
 			.get(&sequence)
-			.is_some_and(|slot| slot.stamp == stamp && !slot.group.is_aborted())
+			.is_some_and(|slot| slot.stamp == stamp && !slot.is_aborted())
 	}
 
 	/// The furthest presentation time the group at `sequence` could still reach: where
@@ -774,13 +809,7 @@ impl TrackState {
 				if slot.stamp != stamp {
 					continue;
 				}
-				if slot.group.is_aborted()
-					|| (!self.protects(sequence)
-						&& slot
-							.group
-							.cache_accessed_tick(scan.gc.then_some(scan.now))
-							.is_some_and(|tick| scan.now.saturating_sub(tick) > scan.max_ticks))
-				{
+				if slot.is_aborted() || (!self.protects(sequence) && slot.is_expired(&scan)) {
 					return true;
 				}
 				retained += 1;
@@ -808,13 +837,7 @@ impl TrackState {
 			let Some(slot) = self.lookup.get(sequence) else {
 				continue;
 			};
-			if slot.stamp == *stamp
-				&& !slot.group.is_aborted()
-				&& slot
-					.group
-					.cache_accessed_tick(scan.gc.then_some(scan.now))
-					.is_some_and(|tick| scan.now.saturating_sub(tick) > scan.max_ticks)
-			{
+			if slot.stamp == *stamp && !slot.is_aborted() && slot.is_expired(&scan) {
 				slot.abort(Error::Old);
 			}
 		}
@@ -838,16 +861,11 @@ impl TrackState {
 				}
 				// Already aborted: the frames are gone, reclaim the slot so a
 				// later fetch can serve the sequence again.
-				if slot.group.is_aborted() {
+				if slot.is_aborted() {
 					self.lookup.remove(&sequence);
 					continue;
 				}
-				if self.protects(sequence)
-					|| slot
-						.group
-						.cache_accessed_tick(scan.gc.then_some(scan.now))
-						.is_none_or(|tick| scan.now.saturating_sub(tick) <= scan.max_ticks)
-				{
+				if self.protects(sequence) || !slot.is_expired(&scan) {
 					// Writes keep their scan bounded. Cleanup visits the entire
 					// queue to date pending accesses and find idle entries behind them.
 					retained += 1;
@@ -920,7 +938,8 @@ impl TrackState {
 	/// keep the finished ones for readers still draining. A consumer that already
 	/// pulled an open group keeps its own handle and ends with it.
 	fn drop_open_groups(&mut self) {
-		self.lookup.retain(|_, slot| slot.group.is_finished());
+		self.lookup
+			.retain(|_, slot| slot.copies().any(group::Producer::is_finished));
 	}
 
 	/// Attach the publisher's immutable metadata without replacing it with local cache policy.
@@ -954,19 +973,11 @@ impl TrackState {
 	/// request from there, so the wider producer takes the slot. Readers already
 	/// draining the old one keep their own handle.
 	fn claim_sequence(&mut self, sequence: u64, frame_start: u64) -> Result<()> {
-		if let Some(slot) = self.lookup.get(&sequence) {
-			// The same question `covering_group` asks: can this slot still answer from
-			// `frame_start`? If it can, the sequence is taken; if it can't, it is dead
-			// and the caller gets to replace it.
-			if slot
-				.group
-				.live_first_frame()
-				.is_some_and(|first| first as u64 <= frame_start)
-			{
-				return Err(Error::Duplicate);
-			}
-			self.lookup.remove(&sequence);
+		// Either copy that can still answer from `frame_start` takes the sequence.
+		if self.covering_group(sequence, frame_start).is_some() {
+			return Err(Error::Duplicate);
 		}
+		self.lookup.remove(&sequence);
 		Ok(())
 	}
 
@@ -1071,7 +1082,7 @@ impl TrackState {
 		let Some(slot) = self.lookup.get(sequence) else {
 			return false;
 		};
-		slot.stamp == *stamp && !slot.group.is_aborted() && slot.group.cache_accessed() <= average
+		slot.stamp == *stamp && !slot.is_aborted() && slot.cache_accessed() <= average
 	}
 
 	/// Abort this track's stalest groups until the outstanding debt is paid, or
@@ -1105,7 +1116,7 @@ impl TrackState {
 				// A historical hint; the live entry is elsewhere in the queue.
 				continue;
 			}
-			if slot.group.is_aborted() {
+			if slot.is_aborted() {
 				// Aborted upstream: the frames are already gone, reclaim the slot.
 				self.lookup.remove(&sequence);
 				continue;
@@ -1120,13 +1131,13 @@ impl TrackState {
 			// Protected: accessed more recently than the average (a fresh insert,
 			// an active reader, or a FETCH hit, which also covers a backfill still
 			// being filled). Rotate to the back.
-			if slot.group.cache_accessed() > average {
+			if slot.cache_accessed() > average {
 				self.evict.push_back((sequence, stamp));
 				continue;
 			}
 			// The full footprint including overhead, so even empty groups repay
 			// their share of the budget when evicted.
-			let size = slot.group.cache_size();
+			let size = slot.cache_size();
 			if size > self.debt {
 				self.evict.push_front((sequence, stamp));
 				return;
@@ -1314,10 +1325,11 @@ impl TrackState {
 		// walk it in arrival order and the feed keeps writing it. The fetch fills its
 		// head instead. Anything else that can't answer from `frame_start` (evicted,
 		// aborted, or narrower backfill) is replaced; a group that can is a duplicate.
-		if self.covering_group(sequence, frame_start).is_some() {
-			return Err(Error::Duplicate);
-		}
-		if !self.lookup.get(&sequence).is_some_and(Slot::is_live) {
+		if self.lookup.get(&sequence).is_some_and(Slot::is_live) {
+			if self.covering_group(sequence, frame_start).is_some() {
+				return Err(Error::Duplicate);
+			}
+		} else {
 			self.claim_sequence(sequence, frame_start)?;
 		}
 
@@ -2613,7 +2625,7 @@ impl Consumer {
 	pub(crate) fn poll_group(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<Option<group::Consumer>> {
 		let res = self.state.poll(waiter, |state| {
 			if let Some(slot) = state.lookup.get(&sequence)
-				&& !slot.serving().is_aborted()
+				&& !slot.is_aborted()
 			{
 				return Poll::Ready(Some(slot.serving().consume()));
 			}
@@ -3772,7 +3784,7 @@ impl Subscriber {
 							&& state
 								.lookup
 								.get(sequence)
-								.is_some_and(|slot| slot.stamp == *stamp && !slot.serving().is_aborted())
+								.is_some_and(|slot| slot.stamp == *stamp && !slot.is_aborted())
 					}))
 	}
 
@@ -8088,6 +8100,63 @@ mod test {
 			group.read_frame().await.unwrap().unwrap().payload,
 			bytes::Bytes::from_static(b"delta")
 		);
+	}
+
+	/// A live group with a fetched head: group 0, fed from frame 1, plus a two-frame head.
+	async fn live_group_with_head(producer: &Producer) -> (group::Producer, group::Producer) {
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(1).unwrap();
+		live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta"))
+			.unwrap();
+
+		let fetch = consumer.fetch_group(0, None);
+		let request = dynamic.requested_group().await.unwrap();
+		let mut head = request.accept(None).unwrap();
+		for payload in [&b"snapshot"[..], b"delta"] {
+			head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(payload))
+				.unwrap();
+		}
+		head.finish().unwrap();
+		assert_eq!(fetch.await.unwrap().index(), 0);
+		(live, head)
+	}
+
+	/// The live copy ending early (its subscription went away) leaves a fetched head
+	/// that still holds the whole group servable, instead of reclaiming the slot.
+	#[tokio::test]
+	async fn aborted_live_group_keeps_its_fetched_head() {
+		let producer = track_producer("test", None);
+		let (live, _head) = live_group_with_head(&producer).await;
+
+		live.abort(Error::Cancel).unwrap();
+		// The next group demotes 0 into the eviction order and runs an expiry scan.
+		producer.create_group(group::Info { sequence: 1 }).unwrap();
+
+		let mut group = producer.consume().peek_group(0).expect("the head still serves group 0");
+		assert_eq!(
+			group.read_frame().await.unwrap().unwrap().payload,
+			bytes::Bytes::from_static(b"snapshot")
+		);
+	}
+
+	/// Reads land on the fetched head, so they keep the slot from expiring even though
+	/// the live copy beside it sits idle.
+	#[tokio::test]
+	async fn reading_the_head_keeps_the_slot_from_expiring() {
+		let producer = track_producer("test", None);
+		let (live, _head) = live_group_with_head(&producer).await;
+		live.finish().unwrap();
+		producer.create_group(group::Info { sequence: 1 }).unwrap();
+
+		crate::model::clock::advance(cache::DEFAULT_EXPIRY + Duration::from_secs(1));
+		// A fetch hit on the head, past the window the live copy was last written in.
+		producer.consume().fetch_group(0, None).await.unwrap();
+		producer.create_group(group::Info { sequence: 2 }).unwrap();
+
+		assert!(producer.consume().peek_group(0).is_some(), "a read head keeps its slot");
 	}
 
 	/// Joining a queued fetch widens its range, and a caller that arrives once the range
