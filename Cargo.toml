@@ -22,6 +22,8 @@ members = [
     "rs/moq-native",
     "rs/moq-net",
     "rs/moq-net/fuzz",
+    "rs/moq-net/sim",
+    "rs/moq-net/sim/macros",
     "rs/moq-nvenc",
     "rs/moq-pattern",
     "rs/moq-quic",

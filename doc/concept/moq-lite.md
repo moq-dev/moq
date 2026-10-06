@@ -38,8 +38,9 @@ Rust and TypeScript speak moq-lite 01 through 06 and moq-transport drafts
 still in progress: it negotiates as `moq-lite-07-wip`, and only when both
 sides explicitly enable it. moq-lite 07 also switches every varint from QUIC's
 two-bit length prefix to moq-transport's leading-ones form, so values up to 127
-take one byte instead of up to 63, and the range widens from 62 to 64 bits. Rust
-still refuses lite-07 values above 2^62-1 until its `VarInt` widens.
+take one byte instead of up to 63, and the range widens from 62 to 64 bits.
+A relay cannot forward a value past 2^62 - 1 to an older peer, so it fails
+that subscription or group and keeps the session.
 
 ## Subscription completion
 

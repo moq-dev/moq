@@ -18,10 +18,9 @@ use super::{
 };
 use crate::{
 	AsPath, Error, InvalidPattern, Path, PathOwned, Pattern, Patterns,
-	coding::{BoundsExceeded, Decode, DecodeError, Encode, EncodeError},
+	coding::{BoundsExceeded, Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
 	path::Segment,
-	runtime::{Instant, Timers},
-	time::Clock,
+	time::{Clock, Instant},
 	util::{Keepalive, TaskSet, Tasks, TasksWeak},
 };
 
@@ -173,21 +172,16 @@ impl fmt::Display for Hop {
 	}
 }
 
-impl<V: Copy> Encode<V> for Hop
-where
-	u64: Encode<V>,
-{
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
-		self.id.encode(w, version)
+impl<V> Encode<V> for Hop {
+	fn encode(&self, w: &mut Encoder<'_>, _: V) -> Result<(), EncodeError> {
+		w.varint(self.id)?;
+		Ok(())
 	}
 }
 
-impl<V: Copy> Decode<V> for Hop
-where
-	u64: Decode<V>,
-{
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		Self::from_wire(u64::decode(r, version)?)
+impl<V> Decode<V> for Hop {
+	fn decode(r: &mut Decoder<'_>, _: V) -> Result<Self, DecodeError> {
+		Self::from_wire(r.varint()?)
 	}
 }
 
@@ -349,13 +343,9 @@ impl<'a> IntoIterator for &'a Hops {
 	}
 }
 
-impl<V: Copy> Encode<V> for Hops
-where
-	u64: Encode<V>,
-	Hop: Encode<V>,
-{
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
-		(self.0.len() as u64).encode(w, version)?;
+impl<V: Copy> Encode<V> for Hops {
+	fn encode(&self, w: &mut Encoder<'_>, version: V) -> Result<(), EncodeError> {
+		w.varint(self.0.len() as u64)?;
 		for origin in &self.0 {
 			origin.encode(w, version)?;
 		}
@@ -363,13 +353,9 @@ where
 	}
 }
 
-impl<V: Copy> Decode<V> for Hops
-where
-	u64: Decode<V>,
-	Hop: Decode<V>,
-{
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		let count = u64::decode(r, version)? as usize;
+impl<V: Copy> Decode<V> for Hops {
+	fn decode(r: &mut Decoder<'_>, version: V) -> Result<Self, DecodeError> {
+		let count = r.varint()? as usize;
 		if count > MAX_HOPS {
 			return Err(DecodeError::BoundsExceeded);
 		}
@@ -2403,7 +2389,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 	// The in-flight upstream request: the route and its pending channel.
 	let mut upstream: Option<(u64, kio::Consumer<PendingBroadcast>)> = None;
 	let mut tracks: HashMap<Arc<str>, TrackIo> = HashMap::new();
-	let mut deadline = crate::runtime::Deadline::new(&timers);
+	let mut deadline = crate::time::Deadline::new(&timers);
 	// The watch generation the last selection saw.
 	let mut seen = 0;
 	let mut events: VecDeque<Event> = VecDeque::new();
@@ -3507,7 +3493,7 @@ impl Drop for Replaying {
 /// A peer writes its whole set back to back, so the first announcement gets a
 /// round trip's grace and each one after it only has to beat its siblings.
 pub(crate) struct Quiet {
-	deadline: crate::runtime::Deadline<Clock>,
+	deadline: crate::time::Deadline,
 	clock: Clock,
 }
 
@@ -3520,14 +3506,14 @@ impl Quiet {
 	/// Start counting from now.
 	pub(crate) fn new(clock: &Clock) -> Self {
 		Self {
-			deadline: crate::runtime::Deadline::after(clock, Self::FIRST),
+			deadline: crate::time::Deadline::after(clock, Self::FIRST),
 			clock: clock.clone(),
 		}
 	}
 
 	/// An announcement arrived: the set is still landing.
 	pub(crate) fn heard(&mut self) {
-		let now = crate::runtime::Timers::now(&self.clock);
+		let now = self.clock.now();
 		self.deadline.set(now.checked_add(Self::GAP));
 	}
 
@@ -4454,7 +4440,7 @@ pub struct AnnounceConsumer {
 	update_hold: Duration,
 	held: HashMap<PathOwned, Held>,
 	timers: Clock,
-	hold: crate::runtime::Deadline<Clock>,
+	hold: crate::time::Deadline,
 }
 
 impl AnnounceConsumer {
@@ -4495,7 +4481,7 @@ impl AnnounceConsumer {
 			park: kio::Park::default(),
 			update_hold,
 			held: HashMap::new(),
-			hold: crate::runtime::Deadline::new(&timers),
+			hold: crate::time::Deadline::new(&timers),
 			timers,
 		}
 	}
@@ -4739,8 +4725,8 @@ impl AnnounceConsumer {
 }
 
 /// Test-only construction shorthand: build the producer and spawn its driver on
-/// the ambient tokio runtime, mirroring what `moq_tokio::origin::spawn` does
-/// for applications.
+/// the test executor, mirroring what `moq_tokio::origin::spawn` does for
+/// applications.
 #[cfg(test)]
 pub(crate) trait ProduceTest {
 	fn produce(self) -> Producer;
@@ -4750,8 +4736,8 @@ pub(crate) trait ProduceTest {
 impl ProduceTest for Config {
 	fn produce(self) -> Producer {
 		let (producer, driver) = Producer::new(self);
-		if tokio::runtime::Handle::try_current().is_ok() {
-			tokio::spawn(crate::time::run(driver));
+		if moq_net_sim::is_running() {
+			moq_net_sim::spawn(crate::time::run_sim(driver));
 		} else {
 			// A sync test: nothing polls the driver, and dropping it would tear
 			// the origin down, so leak it and rely on the synchronous half.
@@ -4816,7 +4802,7 @@ mod tests {
 			if check() {
 				return;
 			}
-			tokio::task::yield_now().await;
+			moq_net_sim::yield_now().await;
 		}
 		panic!("condition never settled");
 	}
@@ -4849,8 +4835,8 @@ mod tests {
 		next.unwrap()
 	}
 
-	#[tokio::test]
-	async fn announce_and_retract() {
+	#[test]
+	fn announce_and_retract() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let mut announced = consumer.announced();
@@ -4869,8 +4855,8 @@ mod tests {
 
 	/// A `.`-prefixed segment below the requested prefix hides a route from
 	/// discovery unless the reader opts in; one inside the prefix does not.
-	#[tokio::test]
-	async fn hidden_routes_need_an_opt_in() {
+	#[test]
+	fn hidden_routes_need_an_opt_in() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let _visible = producer.announce("room/alice", Route::default()).unwrap();
@@ -4918,7 +4904,7 @@ mod tests {
 	}
 
 	/// Hiding narrows discovery only: an exact request resolves without an opt-in.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn hidden_broadcast_resolves_by_path() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -4943,7 +4929,7 @@ mod tests {
 
 	/// A request through a mount is a request for the target path: it joins the
 	/// one front there, so the fleet-wide claim is asked once for both readers.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn mount_resolves_on_the_target_front() {
 		let producer = origin(1).produce();
 		let server = producer.dynamic(".svc", Route::default()).unwrap();
@@ -4967,7 +4953,7 @@ mod tests {
 
 	/// Routes under the target, and the claim covering it, present under the
 	/// mount; what the origin holds at the mounted path itself does not.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn mount_presents_target_routes_under_the_mount() {
 		let producer = origin(1).produce();
 		let _claim = producer.announce(".svc", Route::default()).unwrap();
@@ -5009,7 +4995,7 @@ mod tests {
 
 	/// The handle's own patterns authorize a path through the mount, named as the
 	/// handle names it.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn mount_authorizes_the_named_path() {
 		let producer = origin(1).produce();
 		let _foo = producer.publish(".svc/p1/foo", Route::default()).unwrap();
@@ -5043,8 +5029,8 @@ mod tests {
 
 	/// A wildcard spanning the mount point captures the path as the handle names
 	/// it, so capture-keyed consumers key a mounted route like any other.
-	#[tokio::test]
-	async fn mount_captures_the_named_path() {
+	#[test]
+	fn mount_captures_the_named_path() {
 		let producer = origin(1).produce();
 		let _foo = producer.publish(".svc/p1/foo", Route::default()).unwrap();
 		let project = mounted(&producer, "p1", &["**"]).with_hidden(true);
@@ -5065,7 +5051,7 @@ mod tests {
 
 	/// A target at the maximum depth still presents its exact path: the `**` a
 	/// wildcard scope carries past it can only match nothing there.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn mount_keeps_a_max_depth_target() {
 		let producer = origin(1).produce();
 		let deep = vec!["d"; Path::MAX_PARTS].join("/");
@@ -5091,8 +5077,8 @@ mod tests {
 
 	/// A mount point deeper than its target never presents a route whose name
 	/// through the mount is past the depth limit, and a mount point past it is refused.
-	#[tokio::test]
-	async fn mount_bounds_the_named_path() {
+	#[test]
+	fn mount_bounds_the_named_path() {
 		let producer = origin(1).produce();
 		let _near = producer.publish("t/x", Route::default()).unwrap();
 		let deep = format!("t/{}", vec!["d"; Path::MAX_PARTS - 1].join("/"));
@@ -5116,8 +5102,8 @@ mod tests {
 	}
 
 	/// Nothing is published at or beneath a mount.
-	#[tokio::test]
-	async fn mount_is_read_only() {
+	#[test]
+	fn mount_is_read_only() {
 		let producer = origin(1).produce();
 		let project = producer
 			.mount("p1/.svc", ".svc/p1")
@@ -5178,7 +5164,7 @@ mod tests {
 
 	/// Egress through a mount counts under the path the reader named, so it
 	/// attributes to the reader's root rather than the fleet-wide target.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn mount_egress_counts_under_the_named_path() {
 		let registry = stats::Registry::new(stats::Config::new());
 		let producer = origin(1).produce();
@@ -5202,8 +5188,8 @@ mod tests {
 	}
 
 	/// A route that turns up later is filtered the same way as the replay.
-	#[tokio::test]
-	async fn hidden_route_announced_later_stays_hidden() {
+	#[test]
+	fn hidden_route_announced_later_stays_hidden() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let mut announced = consumer.announced();
@@ -5218,8 +5204,8 @@ mod tests {
 		opted.assert_next_ended(".stats/node");
 	}
 
-	#[tokio::test]
-	async fn an_empty_origin_is_live_at_once() {
+	#[test]
+	fn an_empty_origin_is_live_at_once() {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().announced();
 		announced.assert_next_live();
@@ -5231,8 +5217,8 @@ mod tests {
 		assert!(announced.next().now_or_never().is_none());
 	}
 
-	#[tokio::test]
-	async fn live_follows_the_replayed_routes() {
+	#[test]
+	fn live_follows_the_replayed_routes() {
 		let producer = origin(1).produce();
 		let _b = producer.announce("b", Route::default()).unwrap();
 		let _c = producer.announce("c", Route::default()).unwrap();
@@ -5255,8 +5241,8 @@ mod tests {
 		);
 	}
 
-	#[tokio::test]
-	async fn a_replayed_route_retracted_before_delivery_does_not_hold_live() {
+	#[test]
+	fn a_replayed_route_retracted_before_delivery_does_not_hold_live() {
 		let producer = origin(1).produce();
 		let alice = producer.announce("alice", Route::default()).unwrap();
 		let mut announced = producer.consume().announced();
@@ -5265,8 +5251,8 @@ mod tests {
 		announced.assert_next_wait();
 	}
 
-	#[tokio::test]
-	async fn a_replaying_source_withholds_live_until_it_lands() {
+	#[test]
+	fn a_replaying_source_withholds_live_until_it_lands() {
 		let producer = origin(1).produce();
 		let room = producer.scope("", &scopes(&["room"])).unwrap();
 		let replaying = room.replaying("room/alice");
@@ -5300,7 +5286,7 @@ mod tests {
 		later.assert_next_live();
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn broadcast_announces_its_own_path() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -5341,8 +5327,8 @@ mod tests {
 		announced.assert_next_wait();
 	}
 
-	#[tokio::test]
-	async fn broadcast_announcement_retracts_with_the_last_producer() {
+	#[test]
+	fn broadcast_announcement_retracts_with_the_last_producer() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let mut announced = consumer.announced();
@@ -5359,24 +5345,24 @@ mod tests {
 		announced.assert_next_ended("room/alice");
 	}
 
-	#[tokio::test]
-	async fn publish_creates_and_announces_together() {
+	#[test]
+	fn publish_creates_and_announces_together() {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().announced();
 		let _broadcast = producer.publish("room/alice", Route::default()).unwrap();
 		announced.assert_next_active("room/alice");
 	}
 
-	#[tokio::test]
-	async fn standalone_broadcast_cannot_announce() {
+	#[test]
+	fn standalone_broadcast_cannot_announce() {
 		let broadcast = broadcast::Info::new().produce();
 		assert!(matches!(broadcast.announce(Route::default()), Err(Error::Closed)));
 		// Harmless without an advertisement to retract.
 		broadcast.unannounce();
 	}
 
-	#[tokio::test]
-	async fn announce_replays_to_late_cursor() {
+	#[test]
+	fn announce_replays_to_late_cursor() {
 		let producer = origin(1).produce();
 		let _a = producer.announce("room/alice", Route::default()).unwrap();
 		let _b = producer.announce("room/bob", Route::default()).unwrap();
@@ -5388,8 +5374,8 @@ mod tests {
 		announced.assert_next_wait();
 	}
 
-	#[tokio::test]
-	async fn announce_keeps_its_prefix_under_a_producer_scope() {
+	#[test]
+	fn announce_keeps_its_prefix_under_a_producer_scope() {
 		let producer = origin(1).produce();
 		let scoped = producer.scope("", &scopes(&["room"])).unwrap();
 
@@ -5405,8 +5391,8 @@ mod tests {
 		));
 	}
 
-	#[tokio::test]
-	async fn cursor_keeps_an_overlapping_prefix_above_its_scope() {
+	#[test]
+	fn cursor_keeps_an_overlapping_prefix_above_its_scope() {
 		let producer = origin(1).produce();
 		let _a = producer.announce("", Route::default()).unwrap();
 
@@ -5415,8 +5401,8 @@ mod tests {
 		announced.assert_next_active("");
 	}
 
-	#[tokio::test]
-	async fn cursor_root_strips_prefix() {
+	#[test]
+	fn cursor_root_strips_prefix() {
 		let producer = origin(1).produce();
 		let _a = producer.announce("room/alice", Route::default()).unwrap();
 
@@ -5428,8 +5414,8 @@ mod tests {
 		announced.assert_next_active("alice");
 	}
 
-	#[tokio::test]
-	async fn best_route_wins_and_fails_over() {
+	#[test]
+	fn best_route_wins_and_fails_over() {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().announced();
 
@@ -5466,8 +5452,8 @@ mod tests {
 	/// Equal-cost advertisers of one prefix share its paths: a set of requested
 	/// paths spreads across the pool, and one path always resolves to the same
 	/// advertiser, whatever order the routes arrived in.
-	#[tokio::test]
-	async fn equal_cost_pool_spreads_paths() {
+	#[test]
+	fn equal_cost_pool_spreads_paths() {
 		const WORKERS: [u64; 4] = [10, 11, 12, 13];
 		const PATHS: usize = 64;
 
@@ -5506,8 +5492,8 @@ mod tests {
 		}
 	}
 
-	#[tokio::test]
-	async fn identical_reannounce_is_invisible() {
+	#[test]
+	fn identical_reannounce_is_invisible() {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().announced();
 
@@ -5530,8 +5516,8 @@ mod tests {
 		announced.assert_next_wait();
 	}
 
-	#[tokio::test]
-	async fn exclude_hides_routes_through_the_peer() {
+	#[test]
+	fn exclude_hides_routes_through_the_peer() {
 		let producer = origin(1).produce();
 		let _a = producer
 			.announce("room", Route::default().with_hops(hops(&[7])))
@@ -5544,8 +5530,8 @@ mod tests {
 		visible.assert_next_active("room");
 	}
 
-	#[tokio::test]
-	async fn exclude_matches_via_when_the_chain_is_anonymous() {
+	#[test]
+	fn exclude_matches_via_when_the_chain_is_anonymous() {
 		let producer = origin(1).produce();
 		let assigned = origin(777);
 		let _echoed = producer
@@ -5560,8 +5546,8 @@ mod tests {
 		hidden.assert_next_wait();
 	}
 
-	#[tokio::test]
-	async fn anonymous_route_loses_to_identified_at_any_cost() {
+	#[test]
+	fn anonymous_route_loses_to_identified_at_any_cost() {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().announced();
 
@@ -5582,7 +5568,7 @@ mod tests {
 
 	/// A stamped route names its session but keeps the 0 behind the stamp, so it still
 	/// loses to a fully identified route of the same length, however cheap it is.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn a_stamped_route_ranks_below_an_identified_one() {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().announced();
@@ -5620,8 +5606,8 @@ mod tests {
 		assert_eq!(full.stamp(origin(5)), Err(InvalidHop::TooMany));
 	}
 
-	#[tokio::test]
-	async fn anonymous_routes_order_by_cost() {
+	#[test]
+	fn anonymous_routes_order_by_cost() {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().announced();
 
@@ -5642,8 +5628,8 @@ mod tests {
 		announced.assert_next_wait();
 	}
 
-	#[tokio::test]
-	async fn anonymous_chain_from_identified_peer_still_ranks_last() {
+	#[test]
+	fn anonymous_chain_from_identified_peer_still_ranks_last() {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().announced();
 
@@ -5666,7 +5652,7 @@ mod tests {
 		assert_eq!(route.cost, Cost::new(5));
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn request_prefers_identified_over_cheaper_anonymous() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -5687,8 +5673,8 @@ mod tests {
 		);
 	}
 
-	#[tokio::test]
-	async fn update_reprices_in_place() {
+	#[test]
+	fn update_reprices_in_place() {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().announced();
 
@@ -5700,8 +5686,8 @@ mod tests {
 		assert_eq!(route.cost, Cost::new(9));
 	}
 
-	#[tokio::test]
-	async fn retract_after_undelivered_reprice_still_delivered() {
+	#[test]
+	fn retract_after_undelivered_reprice_still_delivered() {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().announced();
 
@@ -5717,8 +5703,8 @@ mod tests {
 		announced.assert_next_wait();
 	}
 
-	#[tokio::test]
-	async fn scoped_cursor_advertises_most_specific_covering_route() {
+	#[test]
+	fn scoped_cursor_advertises_most_specific_covering_route() {
 		let producer = origin(1).produce();
 		// Broad and cheap; narrow and expensive. Both present relative to a cursor
 		// rooted below them, and the narrow one is what a request there resolves.
@@ -5735,8 +5721,8 @@ mod tests {
 		announced.assert_next_wait();
 	}
 
-	#[tokio::test]
-	async fn capture_change_retracts_before_reannouncing_a_presented_prefix() {
+	#[test]
+	fn capture_change_retracts_before_reannouncing_a_presented_prefix() {
 		let producer = origin(1).produce();
 		let _broad = producer.announce("room", Route::default()).unwrap();
 		let exact = producer.announce("room/alice", Route::default()).unwrap();
@@ -5767,7 +5753,7 @@ mod tests {
 		assert_eq!(replacement.captures, None);
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn routed_broadcast_resolves_once_announced() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -5779,7 +5765,7 @@ mod tests {
 		// Creating is not announcing: still parked.
 		let broadcast = producer.create_broadcast("room/alice").unwrap();
 		for _ in 0..20 {
-			tokio::task::yield_now().await;
+			moq_net_sim::yield_now().await;
 		}
 		assert!((&mut resolving).now_or_never().is_none());
 
@@ -5791,7 +5777,7 @@ mod tests {
 
 	/// A local broadcast competes on its announced cost: a cheaper route at the
 	/// same path wins, for cursors and requests alike.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn cheaper_remote_route_beats_a_local_broadcast() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -5817,7 +5803,7 @@ mod tests {
 
 	/// A cheaper route that appears after a front was minted takes the front over: the
 	/// path is one broadcast whoever serves it, so a newcomer joins the front.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn cheaper_route_after_a_front_takes_it_over() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -5842,7 +5828,7 @@ mod tests {
 	/// At equal cost the local broadcast wins even over a route with no hops of its
 	/// own, such as a later claim on this origin: locality is the tie-break after
 	/// cost, not the newest entry.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn local_broadcast_wins_a_tie_with_a_hopless_route() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -5851,7 +5837,7 @@ mod tests {
 		let server = producer.dynamic("room/alice", Route::default()).unwrap();
 
 		// Were the claim to win, the request would park on its handler forever.
-		let resolved = tokio::time::timeout(Duration::from_secs(1), consumer.request_broadcast("room/alice"))
+		let resolved = moq_net_sim::timeout(Duration::from_secs(1), consumer.request_broadcast("room/alice"))
 			.await
 			.expect("the newer hopless route won the tie")
 			.expect("resolves");
@@ -5861,8 +5847,8 @@ mod tests {
 
 	/// Ingress announce stats count advertised intervals, not the broadcast's
 	/// lifetime: nothing while hidden, one per announce, none for a re-price.
-	#[tokio::test]
-	async fn announce_stats_follow_the_advertisement() {
+	#[test]
+	fn announce_stats_follow_the_advertisement() {
 		let registry = stats::Registry::new(stats::Config::new());
 		let producer = origin(1)
 			.produce()
@@ -5895,7 +5881,7 @@ mod tests {
 	}
 
 	/// At equal cost the local broadcast wins.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn local_broadcast_wins_a_cost_tie() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -5911,14 +5897,14 @@ mod tests {
 		let resolved = consumer.request_broadcast("room/alice").await.expect("resolves");
 		assert_eq!(resolved.info().path.as_str(), "room/alice");
 		for _ in 0..20 {
-			tokio::task::yield_now().await;
+			moq_net_sim::yield_now().await;
 		}
 		assert!(server.poll_requested_broadcast(&kio::Waiter::noop()).is_pending());
 	}
 
 	/// Unannouncing ends the front the origin served from the broadcast and
 	/// refuses new requests at once, even before the front acts on it.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn unannounce_ends_the_front() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -5941,7 +5927,7 @@ mod tests {
 	/// A subscriber still waiting on the source's track info is in flight too:
 	/// unannouncing leaves it on the copy it asked for, which the source can
 	/// still answer and finish.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn unannounce_keeps_a_track_awaiting_its_info() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -5950,8 +5936,8 @@ mod tests {
 		let mut dynamic = broadcast.dynamic();
 		let resolved = consumer.request_broadcast("room/alice").await.expect("resolves");
 		let track = resolved.track("video").unwrap();
-		let subscribing = tokio::spawn(async move { track.subscribe(None).await });
-		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+		let subscribing = moq_net_sim::spawn(async move { track.subscribe(None).await });
+		let request = moq_net_sim::timeout(Duration::from_secs(1), dynamic.requested_track())
 			.await
 			.expect("the front asked the source")
 			.expect("request");
@@ -5990,13 +5976,13 @@ mod tests {
 	/// A finished track stays readable from the front while it is read and for the
 	/// linger after, then leaves the broadcast so it stops pinning its cache: the next
 	/// reader asks the source afresh.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn finished_track_is_forgotten_after_the_linger() {
 		let (_server, _upstream, mut dynamic, resolved) = served_front().await;
 
 		let track = resolved.track("catalog").unwrap();
-		let subscribing = tokio::spawn(async move { track.subscribe(None).await });
-		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+		let subscribing = moq_net_sim::spawn(async move { track.subscribe(None).await });
+		let request = moq_net_sim::timeout(Duration::from_secs(1), dynamic.requested_track())
 			.await
 			.expect("the front asked the source")
 			.expect("request");
@@ -6031,18 +6017,18 @@ mod tests {
 		assert!(next_group(&mut subscription).await.unwrap().is_none());
 		drop(subscription);
 		assert!(
-			tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+			moq_net_sim::timeout(Duration::from_secs(1), dynamic.requested_track())
 				.await
 				.is_err(),
 			"a finished track within the linger asked the source again"
 		);
 
 		// Paused time runs the front's earlier deadline before this sleep returns.
-		tokio::time::sleep(track::IDLE_LINGER).await;
+		moq_net_sim::sleep(track::IDLE_LINGER).await;
 
 		let track = resolved.track("catalog").unwrap();
-		let _subscribing = tokio::spawn(async move { track.subscribe(None).await });
-		tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+		let _subscribing = moq_net_sim::spawn(async move { track.subscribe(None).await });
+		moq_net_sim::timeout(Duration::from_secs(1), dynamic.requested_track())
 			.await
 			.expect("the finished track outlived the linger")
 			.expect("request");
@@ -6054,9 +6040,8 @@ mod tests {
 	/// whether the old route dies before the new one takes over (a reconnect) or after
 	/// (a cheaper route preempting it). A reader joining mid-outage gets it too, and the
 	/// reader already mid-group is not handed it a second time.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn a_takeover_serves_the_open_group_head_to_later_readers() {
-		tokio::time::pause();
 		for dies_first in [true, false] {
 			takeover_keeps_the_open_group_head(dies_first).await;
 		}
@@ -6074,7 +6059,7 @@ mod tests {
 		let resolved = pending.await.unwrap();
 
 		async fn read(group: &mut crate::group::Consumer) -> Vec<u8> {
-			let frame = tokio::time::timeout(Duration::from_secs(1), group.read_frame())
+			let frame = moq_net_sim::timeout(Duration::from_secs(1), group.read_frame())
 				.await
 				.expect("frame")
 				.unwrap()
@@ -6084,7 +6069,7 @@ mod tests {
 
 		// A reader is mid-way through the open group when the route changes.
 		let track = resolved.track("log").unwrap();
-		let subscribing = tokio::spawn(async move { track.subscribe(None).await });
+		let subscribing = moq_net_sim::spawn(async move { track.subscribe(None).await });
 		let source = dynamic.requested_track().await.unwrap().accept(None);
 		let mut group = source.create_group(0u64.into()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"a".as_ref()).unwrap();
@@ -6104,7 +6089,7 @@ mod tests {
 			// the front give up on a path with no route left before the replacement lands.
 			assert!(futures::FutureExt::now_or_never(subscription.recv_group()).is_none());
 			let track = resolved.track("log").unwrap();
-			joining = Some(tokio::spawn(async move {
+			joining = Some(moq_net_sim::spawn(async move {
 				let mut joined = track.subscribe(None).await.unwrap();
 				let group = joined.recv_group().await.unwrap().expect("track ended");
 				(joined, group)
@@ -6117,7 +6102,7 @@ mod tests {
 		let replacement = broadcast::Info::new().produce();
 		let mut replacement_dynamic = replacement.dynamic();
 		queued(&replacement_server).await.accept(&replacement);
-		let request = tokio::time::timeout(Duration::from_secs(1), replacement_dynamic.requested_track())
+		let request = moq_net_sim::timeout(Duration::from_secs(1), replacement_dynamic.requested_track())
 			.await
 			.expect("the front asked the replacement")
 			.unwrap();
@@ -6125,7 +6110,7 @@ mod tests {
 		let fetches = request.dynamic();
 		let fetched = Arc::new(std::sync::Mutex::new(Vec::<crate::group::Producer>::new()));
 		let serving = fetched.clone();
-		let _fetching = tokio::spawn(async move {
+		let _fetching = moq_net_sim::spawn(async move {
 			while let Ok(request) = fetches.requested_group().await {
 				let mut group = request.accept(None).unwrap();
 				for frame in [b"a", b"b", b"c"] {
@@ -6153,11 +6138,11 @@ mod tests {
 		drop(first);
 
 		let track = resolved.track("log").unwrap();
-		let mut later = tokio::time::timeout(Duration::from_secs(1), track.subscribe(None))
+		let mut later = moq_net_sim::timeout(Duration::from_secs(1), track.subscribe(None))
 			.await
 			.expect("subscribe")
 			.unwrap();
-		let mut late = tokio::time::timeout(Duration::from_secs(1), later.recv_group())
+		let mut late = moq_net_sim::timeout(Duration::from_secs(1), later.recv_group())
 			.await
 			.unwrap_or_else(|_| panic!("dies_first={dies_first}: the later reader never got the group"))
 			.unwrap()
@@ -6168,7 +6153,7 @@ mod tests {
 		}
 		let mut joined = None;
 		if let Some(joining) = joining {
-			let (subscription, mut group) = tokio::time::timeout(Duration::from_secs(1), joining)
+			let (subscription, mut group) = moq_net_sim::timeout(Duration::from_secs(1), joining)
 				.await
 				.expect("the reader joining mid-outage never got the group")
 				.unwrap();
@@ -6181,7 +6166,7 @@ mod tests {
 
 		// The reader that was mid-group already has it.
 		assert!(
-			tokio::time::timeout(Duration::from_secs(1), subscription.recv_group())
+			moq_net_sim::timeout(Duration::from_secs(1), subscription.recv_group())
 				.await
 				.is_err(),
 			"dies_first={dies_first}: the group was handed out twice"
@@ -6213,7 +6198,7 @@ mod tests {
 
 	/// The same holds for a reader returning to a parked track: its warm cache
 	/// does not stand in for the copy it is waiting on.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn unannounce_keeps_a_returning_reader_awaiting_its_info() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -6222,8 +6207,8 @@ mod tests {
 		let mut dynamic = broadcast.dynamic();
 		let resolved = consumer.request_broadcast("room/alice").await.expect("resolves");
 		let track = resolved.track("video").unwrap();
-		let subscribing = tokio::spawn(async move { track.subscribe(None).await });
-		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+		let subscribing = moq_net_sim::spawn(async move { track.subscribe(None).await });
+		let request = moq_net_sim::timeout(Duration::from_secs(1), dynamic.requested_track())
 			.await
 			.expect("the front asked the source")
 			.expect("request");
@@ -6237,14 +6222,14 @@ mod tests {
 
 		// Parked: the source copy goes, the delivered group stays warm. The source
 		// then tears its idle track down, so a returning reader asks it afresh.
-		tokio::time::timeout(Duration::from_secs(1), source.demand().unused())
+		moq_net_sim::timeout(Duration::from_secs(1), source.demand().unused())
 			.await
 			.expect("parked")
 			.expect("source open");
 		drop(source);
 		let track = resolved.track("video").unwrap();
-		let subscribing = tokio::spawn(async move { track.subscribe(None).await });
-		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
+		let subscribing = moq_net_sim::spawn(async move { track.subscribe(None).await });
+		let request = moq_net_sim::timeout(Duration::from_secs(1), dynamic.requested_track())
 			.await
 			.expect("the front asked the source again")
 			.expect("request");
@@ -6269,7 +6254,7 @@ mod tests {
 
 	/// A re-announce that lands before the front acts on the retraction reuses
 	/// the same route entry, so the front carries on.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn reannounce_before_the_front_acts_keeps_it() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -6280,14 +6265,14 @@ mod tests {
 		broadcast.unannounce();
 		broadcast.announce(Route::default()).unwrap();
 		for _ in 0..20 {
-			tokio::task::yield_now().await;
+			moq_net_sim::yield_now().await;
 		}
 		assert!(!resolved.is_closed(), "the front ended across a reannouncement");
 		let again = consumer.request_broadcast("room/alice").await.expect("resolves");
 		assert!(again.is_clone(&resolved));
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn local_broadcast_resolves_once_announced() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -6329,8 +6314,8 @@ mod tests {
 		));
 	}
 
-	#[tokio::test]
-	async fn duplicate_routes_aggregate_until_the_last_leaves() {
+	#[test]
+	fn duplicate_routes_aggregate_until_the_last_leaves() {
 		let producer = origin(1).produce();
 		let first = producer.dynamic("live", Route::default().with_cost(3)).unwrap();
 		let second = producer.dynamic("live", Route::default().with_cost(1)).unwrap();
@@ -6372,7 +6357,7 @@ mod tests {
 		));
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn dynamic_route_keeps_its_producer_scope() {
 		let producer = origin(1).produce();
 		let scope = Patterns::from("*/chat".parse::<Pattern>().unwrap());
@@ -6405,8 +6390,8 @@ mod tests {
 		assert_eq!(request.path().as_str(), "room/chat");
 	}
 
-	#[tokio::test]
-	async fn scoped_cursor_selects_among_the_routes_it_can_see() {
+	#[test]
+	fn scoped_cursor_selects_among_the_routes_it_can_see() {
 		let producer = origin(1).produce();
 		let scoped = |pattern: &str| {
 			producer
@@ -6424,7 +6409,7 @@ mod tests {
 		assert_eq!(video.assert_next_active("").cost, Cost::new(5));
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn route_changes_preserve_each_cursors_visible_winner() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -6474,7 +6459,7 @@ mod tests {
 		video.assert_next_ended("room/live");
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn root_cursor_keeps_the_more_specific_covering_route() {
 		let producer = origin(1).produce();
 		let broad = producer.dynamic("room", Route::default().with_cost(1)).unwrap();
@@ -6494,7 +6479,7 @@ mod tests {
 		assert_eq!(announced.assert_next_active("").cost, Cost::new(0));
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn dynamic_accepts_a_max_depth_prefix() {
 		let producer = origin(1).produce();
 		let path = (0..Path::MAX_PARTS)
@@ -6511,8 +6496,8 @@ mod tests {
 		assert_eq!(request.path().as_str(), path);
 	}
 
-	#[tokio::test]
-	async fn dynamic_exclusion_skips_routes_through_the_subscriber() {
+	#[test]
+	fn dynamic_exclusion_skips_routes_through_the_subscriber() {
 		let producer = origin(1).produce();
 		let _server = producer
 			.dynamic("live", Route::default().with_hops(hops(&[7])))
@@ -6526,8 +6511,8 @@ mod tests {
 	}
 
 	/// The consumer is a `Stream` of the same updates as `next`.
-	#[tokio::test]
-	async fn announce_consumer_is_a_stream() {
+	#[test]
+	fn announce_consumer_is_a_stream() {
 		use futures::StreamExt;
 		let producer = origin(1).produce();
 		let server = producer.dynamic("live", Route::default()).unwrap();
@@ -6543,8 +6528,8 @@ mod tests {
 		assert!(matches!(next(), Some(Some(AnnounceEvent::End(_)))));
 	}
 
-	#[tokio::test]
-	async fn dynamic_retracts() {
+	#[test]
+	fn dynamic_retracts() {
 		let producer = origin(1).produce();
 		let server = producer.dynamic("live", Route::default()).unwrap();
 		let mut announced = producer.consume().announced();
@@ -6561,8 +6546,8 @@ mod tests {
 		assert_eq!(second, Cost { warm: 7, cold: 7 });
 	}
 
-	#[tokio::test]
-	async fn local_broadcast_is_invisible_until_announced() {
+	#[test]
+	fn local_broadcast_is_invisible_until_announced() {
 		let producer = origin(1).produce();
 		let mut local = producer.consume().announced();
 		let mut peer = producer.consume().excluding(Hop::UNKNOWN).announced();
@@ -6579,7 +6564,7 @@ mod tests {
 		peer.assert_next_ended("room/alice");
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn served_route_materializes_on_demand() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -6602,7 +6587,7 @@ mod tests {
 		assert!(again.is_clone(&resolved));
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn served_requests_coalesce() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -6623,7 +6608,7 @@ mod tests {
 		assert!(first.is_clone(&second));
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn retract_rejects_pending_requests() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -6645,7 +6630,7 @@ mod tests {
 		assert!(matches!(err, Error::Unroutable));
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn routed_broadcast_survives_serving_route_retraction() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -6677,8 +6662,8 @@ mod tests {
 		assert_eq!(resolved.info().path.as_str(), "room/alice");
 	}
 
-	#[tokio::test]
-	async fn split_horizon_skips_routes_through_the_requester() {
+	#[test]
+	fn split_horizon_skips_routes_through_the_requester() {
 		let producer = origin(1).produce();
 		let _server = producer
 			.dynamic("room", Route::default().with_hops(hops(&[7])))
@@ -6700,8 +6685,8 @@ mod tests {
 		assert!(pending.now_or_never().is_none());
 	}
 
-	#[tokio::test]
-	async fn routes_report_where_they_entered() {
+	#[test]
+	fn routes_report_where_they_entered() {
 		let producer = origin(1).produce();
 		let peer = producer.clone().peer();
 		let mut announced = producer.consume().announced();
@@ -6733,13 +6718,13 @@ mod tests {
 	/// A caller that only polls with `try_next` still gets a held update once its
 	/// hold passes. Nothing else wakes the idle driver, so the hold's own timer
 	/// must, or the origin's clock never reaches the deadline.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn try_next_delivers_a_held_update() {
 		// Let paused time pass and every task woken by it run.
 		async fn step(by: Duration) {
-			tokio::time::advance(by).await;
+			moq_net_sim::advance(by).await;
 			for _ in 0..10 {
-				tokio::task::yield_now().await;
+				moq_net_sim::yield_now().await;
 			}
 		}
 
@@ -6766,13 +6751,13 @@ mod tests {
 
 	/// A new route and a removal are delivered at once. A change of the best route
 	/// waits out the update hold, and a newer change during the wait replaces it.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn a_changed_route_waits_out_the_hold() {
 		let producer = origin(1).produce();
 		let peer = producer.clone().peer();
 		let mut announced = producer.consume().announced();
 		// Holds count on the driver's clock, which starts at its first poll.
-		tokio::time::sleep(Duration::from_millis(1)).await;
+		moq_net_sim::sleep(Duration::from_millis(1)).await;
 
 		let route = |chain: &[u64], via| Route::default().with_hops(hops(chain)).with_via(origin(via));
 		let near = peer.dynamic("room", route(&[9, 2], 2)).unwrap();
@@ -6781,7 +6766,7 @@ mod tests {
 		// The best route changes twice; the consumer sees only the last, once.
 		let far = peer.dynamic("room", route(&[9, 3, 4], 4)).unwrap();
 		let farther = peer.dynamic("room", route(&[9, 5, 6, 7], 7)).unwrap();
-		let start = tokio::time::Instant::now();
+		let start = moq_net_sim::now();
 		drop(near);
 		drop(far);
 		let update = loop {
@@ -6794,7 +6779,7 @@ mod tests {
 			AnnounceEvent::Update(update) => assert_eq!(update.route.hops, hops(&[9, 5, 6, 7])),
 			other => panic!("should be an update: got {other:?}"),
 		}
-		assert_eq!(start.elapsed(), DEFAULT_UPDATE_HOLD);
+		assert_eq!(moq_net_sim::now() - start, DEFAULT_UPDATE_HOLD);
 		announced.assert_next_wait();
 
 		// The last route goes: retracted at once.
@@ -6805,8 +6790,8 @@ mod tests {
 	/// A peer withdrawing a prefix hides the routes there through it, so the next
 	/// best is never a path derived from the one withdrawn. Announcing again
 	/// revives them, and nothing is remembered once no route passes through it.
-	#[tokio::test]
-	async fn withdrawn_peer_hides_routes_through_it() {
+	#[test]
+	fn withdrawn_peer_hides_routes_through_it() {
 		let producer = origin(1).produce();
 		let peer = producer.clone().peer();
 		let mut announced = producer.consume().announced();
@@ -6838,8 +6823,8 @@ mod tests {
 	}
 
 	/// Overlapping sessions are independent claims, regardless of announcement order.
-	#[tokio::test]
-	async fn old_session_withdrawal_keeps_newer_route() {
+	#[test]
+	fn old_session_withdrawal_keeps_newer_route() {
 		for restart in [false, true] {
 			let producer = origin(1).produce();
 			let peer = producer.clone().peer();
@@ -6866,8 +6851,8 @@ mod tests {
 		}
 	}
 
-	#[tokio::test]
-	async fn withdrawn_route_no_longer_covers_requests() {
+	#[test]
+	fn withdrawn_route_no_longer_covers_requests() {
 		let producer = origin(1).produce();
 		let peer = producer.clone().peer();
 		let direct = peer.dynamic("room", Route::default().with_hops(hops(&[9, 2]))).unwrap();
@@ -6890,8 +6875,8 @@ mod tests {
 
 	/// A change of source alone is delivered: the same chain and cost arriving
 	/// from a peer instead of a client is a different fact for the consumer.
-	#[tokio::test]
-	async fn source_change_is_an_update() {
+	#[test]
+	fn source_change_is_an_update() {
 		let producer = origin(1).produce();
 		let peer = producer.clone().peer();
 		let mut announced = producer.consume().announced();
@@ -6911,8 +6896,8 @@ mod tests {
 		assert_eq!(announced.assert_next_active("room").source(), Source::Peer(origin(7)));
 	}
 
-	#[tokio::test]
-	async fn local_view_hides_peer_routes() {
+	#[test]
+	fn local_view_hides_peer_routes() {
 		let producer = origin(1).produce();
 		let peer = producer.clone().peer();
 		let mut local = producer.consume().local().announced();
@@ -7025,7 +7010,7 @@ mod tests {
 	/// A handler that rejects a path with `Unroutable` while its route stands
 	/// gives the requester that answer; the front must not re-ask the same route
 	/// forever, which would spin the origin driver.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn handler_rejection_is_final() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -7034,7 +7019,7 @@ mod tests {
 		let pending = consumer.request_broadcast("room/alice");
 		let request = queued(&server).await;
 		request.reject(Error::Unroutable);
-		let err = tokio::time::timeout(Duration::from_secs(5), pending)
+		let err = moq_net_sim::timeout(Duration::from_secs(5), pending)
 			.await
 			.expect("the front must give up, not spin")
 			.err()
@@ -7052,7 +7037,7 @@ mod tests {
 
 	/// A refusal from the longest prefix is the answer: neither a costlier advertiser of
 	/// that prefix nor a catch-all is asked instead.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn refusal_never_falls_through() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -7079,7 +7064,7 @@ mod tests {
 
 	/// A refusal from a route a local broadcast superseded while it was pending is moot:
 	/// the request resolves to the local broadcast instead of ending.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn superseded_refusal_does_not_end_the_request() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -7105,7 +7090,7 @@ mod tests {
 
 	/// The same holds for a more specific remote route: the beaten route's refusal is
 	/// moot, and the new winner is asked instead.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn refusal_from_a_beaten_route_asks_the_new_winner() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -7131,7 +7116,7 @@ mod tests {
 
 	/// `routed_broadcast` treats a handler's rejection as the table's verdict:
 	/// it waits for the table to move instead of re-asking the same route.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn routed_broadcast_waits_out_a_rejection() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -7144,7 +7129,7 @@ mod tests {
 
 		// Parked: the route stands, so nothing changed that a retry could use.
 		for _ in 0..20 {
-			tokio::task::yield_now().await;
+			moq_net_sim::yield_now().await;
 		}
 		assert!((&mut resolving).now_or_never().is_none());
 		assert!(server.poll_requested_broadcast(&kio::Waiter::noop()).is_pending());
@@ -7160,7 +7145,7 @@ mod tests {
 
 	/// Teardown rejects a parked request with `Dropped`, but a destroyed origin
 	/// is `Closed` to `routed_broadcast`'s callers.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn routed_broadcast_reports_teardown_as_closed() {
 		let (producer, driver) = Producer::new(Config::new(origin(1)));
 		let consumer = producer.consume();
@@ -7172,7 +7157,7 @@ mod tests {
 
 		drop(driver);
 
-		let err = tokio::time::timeout(Duration::from_secs(5), resolving)
+		let err = moq_net_sim::timeout(Duration::from_secs(5), resolving)
 			.await
 			.expect("teardown resolves the wait")
 			.err()
@@ -7182,7 +7167,7 @@ mod tests {
 
 	/// A local broadcast announcing at the exact path is a table change too: a
 	/// requester parked on a handler's rejection resolves to it.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn routed_broadcast_wakes_for_a_local_broadcast() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -7192,7 +7177,7 @@ mod tests {
 		assert!((&mut resolving).now_or_never().is_none());
 		queued(&server).await.reject(Error::Unroutable);
 		for _ in 0..20 {
-			tokio::task::yield_now().await;
+			moq_net_sim::yield_now().await;
 		}
 		assert!((&mut resolving).now_or_never().is_none());
 
@@ -7205,7 +7190,7 @@ mod tests {
 
 	/// A track first subscribed after the front is already serving another still
 	/// replays what its source holds, like the first track did.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn late_track_on_a_served_front_replays() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -7233,7 +7218,7 @@ mod tests {
 				.subscribe(budget.clone())
 				.await
 				.expect("subscribe");
-			let mut group = tokio::time::timeout(Duration::from_secs(5), subscription.recv_group())
+			let mut group = moq_net_sim::timeout(Duration::from_secs(5), subscription.recv_group())
 				.await
 				.expect("the late track must replay, not park")
 				.expect("recv group")
@@ -7243,7 +7228,7 @@ mod tests {
 		}
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn most_specific_prefix_shadows() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -7267,7 +7252,7 @@ mod tests {
 		assert_eq!(request.path().as_str(), "room/alice");
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn root_dynamic_serves_any_path() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -7302,8 +7287,8 @@ mod tests {
 	/// `scope` is authoritative, so an out-of-scope path is unauthorized before
 	/// routing can send a request to the handler. A `Request` carries only a path,
 	/// so the handler cannot tell who asked.
-	#[tokio::test]
-	async fn out_of_scope_request_never_reaches_the_dynamic_handler() {
+	#[test]
+	fn out_of_scope_request_never_reaches_the_dynamic_handler() {
 		let producer = origin(1).produce();
 		let dynamic = producer.dynamic("", Route::default()).unwrap();
 		let scoped = producer.consume().scope("", &scopes(&["tenant-a"])).unwrap();
@@ -7323,8 +7308,8 @@ mod tests {
 		}
 	}
 
-	#[tokio::test]
-	async fn routed_waits_for_coverage() {
+	#[test]
+	fn routed_waits_for_coverage() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 
@@ -7344,8 +7329,8 @@ mod tests {
 			.expect("routed");
 	}
 
-	#[tokio::test]
-	async fn routed_ignores_deeper_routes() {
+	#[test]
+	fn routed_ignores_deeper_routes() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 
@@ -7358,8 +7343,8 @@ mod tests {
 		fut.now_or_never().expect("covered").expect("routed");
 	}
 
-	#[tokio::test]
-	async fn routed_accepts_a_max_depth_path() {
+	#[test]
+	fn routed_accepts_a_max_depth_path() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let path = (0..Path::MAX_PARTS)
@@ -7378,8 +7363,8 @@ mod tests {
 		fut.now_or_never().expect("covered").expect("routed");
 	}
 
-	#[tokio::test]
-	async fn teardown_ends_everything() {
+	#[test]
+	fn teardown_ends_everything() {
 		let (producer, driver) = Producer::new(Config::new(origin(1)));
 		let consumer = producer.consume();
 		let _announcement = producer.announce("room", Route::default()).unwrap();
@@ -7510,13 +7495,13 @@ mod tests {
 
 	/// The driver's completion contract: it resolves once every producer handle
 	/// drops, however many read handles remain.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn driver_resolves_with_live_consumers() {
 		let (producer, driver) = Producer::new(Config::new(origin(1)));
 		let consumer = producer.consume();
 		let run = crate::time::run(driver);
 		drop(producer);
-		tokio::time::timeout(Duration::from_secs(5), run)
+		moq_net_sim::timeout(Duration::from_secs(5), run)
 			.await
 			.expect("driver must finish once the producers are gone");
 		drop(consumer);
@@ -7525,7 +7510,7 @@ mod tests {
 	/// A source claiming the same content cannot change immutable track metadata:
 	/// the successor is refused instead of the subscriber's samples being read on
 	/// a different grid, and the verdict outlives the aborted logical track.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn incompatible_successor_is_refused() {
 		for replacement in [
 			track::Info::default().with_timescale(crate::Timescale::MICRO),
@@ -7564,7 +7549,7 @@ mod tests {
 	/// A path is one broadcast whoever publishes it: when the serving route dies, the
 	/// subscription resumes through another route, whatever its first hop, or with
 	/// none at all.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn any_route_at_the_path_resumes_the_subscription() {
 		let cases = [
 			(&[10][..], &[10, 20][..]),
@@ -7586,7 +7571,7 @@ mod tests {
 
 	/// A route updated in place to a new first hop still serves the same broadcast:
 	/// the subscription carries on through it, and a new request joins the front.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn a_first_hop_update_keeps_serving() {
 		for first in [&[][..], &[0][..], &[10][..]] {
 			let (mut rig, server, _source) = ResumeRig::new(first).await;
@@ -7615,7 +7600,7 @@ mod tests {
 	/// A session never subscribes to itself: when the route serving a peer dies, its
 	/// front never resumes onto a route through that peer, even one from the same
 	/// publisher. A reader that can see the route resumes there.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn resume_never_routes_through_the_requester() {
 		for peer in [Some(origin(7)), None] {
 			let producer = origin(1).produce();
@@ -7684,7 +7669,7 @@ mod tests {
 	///
 	/// The front closes with its last source, so the newcomer attaches a fresh
 	/// one and the subscriber resolves it without parking.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn anonymous_handoff_serves_the_newcomer_immediately() {
 		let producer = origin(1).produce();
 
@@ -7780,7 +7765,7 @@ mod tests {
 		);
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn reprice_is_invisible_to_the_subscription() {
 		let (rig, incumbent, source) = ResumeRig::new(&[10]).await;
 
@@ -7811,7 +7796,7 @@ mod tests {
 		assert_eq!(&frame.payload[..], b"steady");
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn drain_reprice_migrates_before_the_session_dies() {
 		let (mut rig, incumbent, source) = ResumeRig::new(&[10]).await;
 		let standby_server = rig.standby(&[10, 20]);
@@ -7830,7 +7815,7 @@ mod tests {
 		drop(source);
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn local_sources_splice_newest_first() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -7861,7 +7846,7 @@ mod tests {
 	///
 	/// The runtime is single-threaded and the publisher's whole ending has no await in
 	/// it, so the outcome does not depend on timing.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn a_finished_broadcast_concludes_in_flight_subscriptions() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -7903,7 +7888,7 @@ mod tests {
 	/// must still conclude normally. moq-lite, ANNOUNCE_END: "Retraction does not
 	/// disturb subscriptions already in flight, which conclude normally with
 	/// SUBSCRIBE_END."
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn a_retracted_route_concludes_in_flight_subscriptions() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -7951,7 +7936,7 @@ mod tests {
 
 	/// A standing route outlives the source it produced: the front ends instead of
 	/// asking that route for the broadcast that just closed.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn a_closed_source_is_not_requested_again_from_its_standing_route() {
 		let producer = origin(1).produce();
 		let server = producer
@@ -7974,7 +7959,7 @@ mod tests {
 	/// so the publisher's `unused()` resolves far below `track::IDLE_LINGER`.
 	/// Cached groups stay on the front for the linger; a returning reader
 	/// replays them and asks the source again for groups past that edge.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn origin_front_drops_the_source_when_unused() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -7997,7 +7982,7 @@ mod tests {
 		drop(group);
 		drop(subscription);
 
-		tokio::time::timeout(Duration::from_secs(1), track.demand().unused())
+		moq_net_sim::timeout(Duration::from_secs(1), track.demand().unused())
 			.await
 			.expect("source unused should resolve far below track::IDLE_LINGER")
 			.expect("source closed");
@@ -8010,14 +7995,14 @@ mod tests {
 			.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(3600)))
 			.await
 			.expect("resubscribe");
-		let mut group = tokio::time::timeout(Duration::from_secs(1), again.recv_group())
+		let mut group = moq_net_sim::timeout(Duration::from_secs(1), again.recv_group())
 			.await
 			.expect("cached group is still on the front")
 			.expect("recv group")
 			.expect("track ended early");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"cached");
 
-		tokio::time::timeout(Duration::from_secs(1), track.demand().used())
+		moq_net_sim::timeout(Duration::from_secs(1), track.demand().used())
 			.await
 			.expect("returning reader re-splices the source")
 			.expect("source closed");
@@ -8025,7 +8010,7 @@ mod tests {
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
 		group.finish().unwrap();
-		let mut group = tokio::time::timeout(Duration::from_secs(1), again.recv_group())
+		let mut group = moq_net_sim::timeout(Duration::from_secs(1), again.recv_group())
 			.await
 			.expect("groups past the cached edge come from the re-splice")
 			.expect("recv group")
@@ -8036,7 +8021,7 @@ mod tests {
 	/// A reader still holding an open group after its track goes unread gets the rest
 	/// of the group: parking the track reads no new group, but the upstream stays
 	/// subscribed until the held one ends.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn a_held_group_continues_after_its_track_goes_unread() {
 		let producer = origin(1).produce();
 		let server = producer
@@ -8055,19 +8040,19 @@ mod tests {
 		assert_eq!(&reading.read_frame().await.unwrap().unwrap().payload[..], b"head");
 
 		drop(subscription);
-		tokio::time::sleep(Duration::from_millis(10)).await;
+		moq_net_sim::sleep(Duration::from_millis(10)).await;
 		writing.write_frame(crate::Timestamp::ZERO, b"tail".as_ref()).unwrap();
 		writing.finish().unwrap();
 
-		let tail = tokio::time::timeout(Duration::from_secs(1), reading.read_frame())
+		let tail = moq_net_sim::timeout(Duration::from_secs(1), reading.read_frame())
 			.await
 			.expect("the held group lost its source")
 			.unwrap()
 			.expect("the group ended early");
 		assert_eq!(&tail.payload[..], b"tail");
-		let end = tokio::time::timeout(Duration::from_secs(1), reading.read_frame()).await;
+		let end = moq_net_sim::timeout(Duration::from_secs(1), reading.read_frame()).await;
 		assert!(matches!(end, Ok(Ok(None))), "the group should finish: {end:?}");
-		tokio::time::timeout(Duration::from_secs(1), track.demand().unused())
+		moq_net_sim::timeout(Duration::from_secs(1), track.demand().unused())
 			.await
 			.expect("the front lets the source go once the held group ends")
 			.expect("source closed");
@@ -8076,7 +8061,7 @@ mod tests {
 	/// A source that aborts one group while its track carries on ends that group for
 	/// the reader too, rather than leaving it waiting for a route change that never
 	/// comes.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn a_group_the_source_aborts_ends_while_the_track_lives() {
 		let producer = origin(1).produce();
 		let broadcast = producer.publish("live", Route::default()).unwrap();
@@ -8090,14 +8075,14 @@ mod tests {
 		assert_eq!(&reading.read_frame().await.unwrap().unwrap().payload[..], b"head");
 		aborted.abort(Error::Cancel).unwrap();
 
-		let end = tokio::time::timeout(Duration::from_secs(1), reading.read_frame()).await;
+		let end = moq_net_sim::timeout(Duration::from_secs(1), reading.read_frame()).await;
 		assert!(matches!(end, Ok(Err(_))), "the group should fail: {end:?}");
 
 		// The track carries on.
 		let mut next = track.append_group().unwrap();
 		next.write_frame(crate::Timestamp::ZERO, b"next".as_ref()).unwrap();
 		next.finish().unwrap();
-		let mut group = tokio::time::timeout(Duration::from_secs(1), subscription.recv_group())
+		let mut group = moq_net_sim::timeout(Duration::from_secs(1), subscription.recv_group())
 			.await
 			.expect("the next group")
 			.unwrap()
@@ -8108,7 +8093,7 @@ mod tests {
 	/// A front serving from another front still drops upstream on the unused edge,
 	/// so the publisher's `unused()` resolves far below `track::IDLE_LINGER` through
 	/// the whole chain, and a returning reader reaches the publisher's cache afresh.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn chained_front_drops_the_source_when_unused() {
 		let leaf = origin(1).produce();
 		let leaf_consumer = leaf.consume();
@@ -8145,7 +8130,7 @@ mod tests {
 		drop(group);
 		drop(subscription);
 
-		tokio::time::timeout(Duration::from_secs(5), track.demand().unused())
+		moq_net_sim::timeout(Duration::from_secs(5), track.demand().unused())
 			.await
 			.expect("chained unused should resolve far below track::IDLE_LINGER")
 			.expect("source closed");
@@ -8157,7 +8142,7 @@ mod tests {
 			.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(3600)))
 			.await
 			.expect("resubscribe");
-		tokio::time::timeout(Duration::from_secs(5), track.demand().used())
+		moq_net_sim::timeout(Duration::from_secs(5), track.demand().used())
 			.await
 			.expect("resubscribe should reach the leaf")
 			.expect("source open");
@@ -8172,7 +8157,7 @@ mod tests {
 		drop(group);
 		drop(subscription);
 
-		tokio::time::timeout(Duration::from_secs(5), track.demand().unused())
+		moq_net_sim::timeout(Duration::from_secs(5), track.demand().unused())
 			.await
 			.expect("second chained unused should resolve far below track::IDLE_LINGER")
 			.expect("source closed");
@@ -8185,11 +8170,11 @@ mod tests {
 		let fetch = edge_resolved.track("video").unwrap().fetch_group(2, None);
 		let mut fetch = std::pin::pin!(fetch);
 		assert!(futures::poll!(fetch.as_mut()).is_pending(), "fetch should re-splice");
-		tokio::time::timeout(Duration::from_secs(5), track.demand().used())
+		moq_net_sim::timeout(Duration::from_secs(5), track.demand().used())
 			.await
 			.expect("fetch should reach the leaf")
 			.expect("source open");
-		let mut group = tokio::time::timeout(Duration::from_secs(5), fetch)
+		let mut group = moq_net_sim::timeout(Duration::from_secs(5), fetch)
 			.await
 			.expect("re-spliced source should answer the fetch")
 			.expect("fetch succeeds");
@@ -8199,7 +8184,7 @@ mod tests {
 	/// A newer local source wins dispatch the moment it attaches, but one whose copy
 	/// of the track carries different metadata is refused: the incumbent keeps
 	/// serving, and the refusal is never retried once the incumbent leaves.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn incompatible_local_source_keeps_the_incumbent() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -8225,7 +8210,7 @@ mod tests {
 			.create_track("video", track::Info::default().with_timescale(crate::Timescale::MICRO))
 			.unwrap();
 		for _ in 0..10 {
-			tokio::task::yield_now().await;
+			moq_net_sim::yield_now().await;
 		}
 
 		// Still spliced to the incumbent, still delivering.
@@ -8271,20 +8256,20 @@ mod tests {
 	/// A local newcomer takes over while its answer for "video" is pending, so the track
 	/// drains the incumbent. The reader leaves: the incumbent's copy is dropped at once,
 	/// like any unread track's, not held until the linger.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn an_unread_draining_track_releases_the_old_source() {
 		let (producer, _server, _upstream, old, subscription) = remote_front().await;
 
 		let newcomer = producer.create_broadcast("room/alice").unwrap();
 		let mut handler = newcomer.dynamic();
 		newcomer.announce(Route::default()).unwrap();
-		let _unanswered = tokio::time::timeout(Duration::from_secs(1), handler.requested_track())
+		let _unanswered = moq_net_sim::timeout(Duration::from_secs(1), handler.requested_track())
 			.await
 			.expect("the front asked the newcomer")
 			.expect("request");
 
 		drop(subscription);
-		tokio::time::timeout(Duration::from_secs(1), old.demand().unused())
+		moq_net_sim::timeout(Duration::from_secs(1), old.demand().unused())
 			.await
 			.expect("the draining source stays subscribed with nobody reading")
 			.expect("open");
@@ -8294,7 +8279,7 @@ mod tests {
 	/// (the park drops the incumbent's copy), a third source that also lacks the track
 	/// takes over, and the reader returns: it gets an outcome rather than waiting on the
 	/// dropped copy.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn a_returning_reader_is_not_stranded_on_a_dropped_copy() {
 		let (producer, _server, upstream, old, mut subscription) = remote_front().await;
 		let resolved = producer.consume().request_broadcast("room/alice").await.unwrap();
@@ -8302,7 +8287,7 @@ mod tests {
 		// No handler and no track: refuses "video" with NotFound.
 		let _second = producer.publish("room/alice", Route::default()).unwrap();
 		for _ in 0..10 {
-			tokio::task::yield_now().await;
+			moq_net_sim::yield_now().await;
 		}
 		let mut group = old.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"draining".as_ref()).unwrap();
@@ -8312,21 +8297,21 @@ mod tests {
 		drop(group);
 
 		drop(subscription);
-		tokio::time::timeout(Duration::from_secs(1), old.demand().unused())
+		moq_net_sim::timeout(Duration::from_secs(1), old.demand().unused())
 			.await
 			.expect("parked")
 			.expect("open");
 
 		let _third = producer.publish("room/alice", Route::default()).unwrap();
 		for _ in 0..10 {
-			tokio::task::yield_now().await;
+			moq_net_sim::yield_now().await;
 		}
 
 		let mut again = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = old.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"after".as_ref()).unwrap();
 		group.finish().unwrap();
-		let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+		let outcome = moq_net_sim::timeout(Duration::from_secs(5), async {
 			loop {
 				match again.recv_group().await {
 					Ok(Some(mut group)) => {
@@ -8346,7 +8331,7 @@ mod tests {
 
 	/// A newer local source's copy of "video" is refused for its metadata while the
 	/// incumbent keeps serving: the refused copy is let go, not kept subscribed.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn a_refused_copy_is_not_kept_subscribed() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -8365,7 +8350,7 @@ mod tests {
 			.create_track("video", track::Info::default().with_timescale(crate::Timescale::MICRO))
 			.unwrap();
 		for _ in 0..10 {
-			tokio::task::yield_now().await;
+			moq_net_sim::yield_now().await;
 		}
 		assert!(!incompatible.demand().is_used(), "the refused copy is still subscribed");
 
@@ -8378,7 +8363,7 @@ mod tests {
 	/// As above, the newer source's copy was refused and the incumbent keeps serving.
 	/// Then both withdraw and the front ends: the track in flight carries on with the
 	/// incumbent, never the refused copy.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn the_end_never_feeds_a_refused_copy() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -8398,7 +8383,7 @@ mod tests {
 			.create_track("video", track::Info::default().with_timescale(crate::Timescale::MICRO))
 			.unwrap();
 		for _ in 0..10 {
-			tokio::task::yield_now().await;
+			moq_net_sim::yield_now().await;
 		}
 
 		first.unannounce();
@@ -8429,7 +8414,7 @@ mod tests {
 	/// The track drains the incumbent while a newer source's answer is pending, then both
 	/// withdraw and the front ends: the track carries on with the incumbent's copy rather
 	/// than the unanswered one.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn the_end_keeps_the_copy_still_serving() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -8447,7 +8432,7 @@ mod tests {
 		let second = producer.create_broadcast("room/alice").unwrap();
 		let mut handler = second.dynamic();
 		second.announce(Route::default()).unwrap();
-		let request = tokio::time::timeout(Duration::from_secs(1), handler.requested_track())
+		let request = moq_net_sim::timeout(Duration::from_secs(1), handler.requested_track())
 			.await
 			.expect("the front asked the newcomer")
 			.expect("request");
@@ -8468,8 +8453,8 @@ mod tests {
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"still");
 	}
 
-	#[tokio::test]
-	async fn multiple_scopes_present_one_broad_prefix() {
+	#[test]
+	fn multiple_scopes_present_one_broad_prefix() {
 		let producer = origin(1).produce();
 		let _a = producer.announce("", Route::default()).unwrap();
 
@@ -8560,10 +8545,10 @@ mod tests {
 
 	/// A handler holding only its `Dynamic` keeps serving once every producer
 	/// handle drops, and the driver finishes once the handler is gone too.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn a_dynamic_keeps_the_driver_running() {
 		let (producer, driver) = Producer::new(Config::new(origin(1)));
-		let run = tokio::spawn(crate::time::run(driver));
+		let run = moq_net_sim::spawn(crate::time::run_sim(driver));
 		let consumer = producer.consume();
 		let server = producer.dynamic("room", Route::default()).unwrap();
 		drop(producer);
@@ -8577,7 +8562,7 @@ mod tests {
 		drop(resolved);
 		drop(source);
 		drop(server);
-		tokio::time::timeout(Duration::from_secs(5), run)
+		moq_net_sim::timeout(Duration::from_secs(5), run)
 			.await
 			.expect("driver must finish once the dynamic is gone")
 			.unwrap();
@@ -8586,10 +8571,10 @@ mod tests {
 
 	/// A reader still on a retracted broadcast's track keeps its front draining, but
 	/// never keeps the driver from finishing once nothing owns the origin.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn a_retracted_reader_never_holds_the_driver() {
 		let (producer, driver) = Producer::new(Config::new(origin(1)));
-		let run = tokio::spawn(crate::time::run(driver));
+		let run = moq_net_sim::spawn(crate::time::run_sim(driver));
 		let consumer = producer.consume();
 		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
 		let track = broadcast.create_track("video", None).unwrap();
@@ -8600,7 +8585,7 @@ mod tests {
 		settle(|| resolved.is_closed()).await;
 		drop(broadcast);
 		drop(producer);
-		tokio::time::timeout(Duration::from_secs(5), run)
+		moq_net_sim::timeout(Duration::from_secs(5), run)
 			.await
 			.expect("driver must finish once the producers are gone")
 			.unwrap();
@@ -8610,10 +8595,10 @@ mod tests {
 
 	/// A subscriber that asked before the retraction but was not polled yet still finds
 	/// the copy after the origin is orphaned and its driver finishes.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn an_orphaned_front_keeps_the_copy_for_a_pending_subscriber() {
 		let (producer, driver) = Producer::new(Config::new(origin(1)));
-		let run = tokio::spawn(crate::time::run(driver));
+		let run = moq_net_sim::spawn(crate::time::run_sim(driver));
 		let consumer = producer.consume();
 		let broadcast = producer.publish("room/alice", Route::default()).unwrap();
 		let mut track = broadcast.create_track("video", None).unwrap();
@@ -8625,7 +8610,7 @@ mod tests {
 		settle(|| resolved.is_closed()).await;
 		drop(broadcast);
 		drop(producer);
-		tokio::time::timeout(Duration::from_secs(5), run)
+		moq_net_sim::timeout(Duration::from_secs(5), run)
 			.await
 			.expect("driver must finish once the producers are gone")
 			.unwrap();
@@ -8638,7 +8623,7 @@ mod tests {
 
 	/// A track whose last reader leaves as its broadcast ends, before the front parks it,
 	/// lets go of its copy: the source is not kept subscribed for nobody.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn a_track_unread_as_its_broadcast_ends_releases_its_source() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
@@ -8646,7 +8631,7 @@ mod tests {
 		let track = broadcast.create_track("video", None).unwrap();
 		let resolved = consumer.request_broadcast("room/alice").await.expect("resolves");
 		let sub = resolved.track("video").unwrap().subscribe(None).await.unwrap();
-		tokio::time::timeout(Duration::from_secs(1), track.demand().used())
+		moq_net_sim::timeout(Duration::from_secs(1), track.demand().used())
 			.await
 			.expect("the front subscribed the source")
 			.unwrap();
@@ -8657,7 +8642,7 @@ mod tests {
 		drop(broadcast);
 		settle(|| resolved.is_closed()).await;
 
-		tokio::time::timeout(Duration::from_secs(5), track.demand().unused())
+		moq_net_sim::timeout(Duration::from_secs(5), track.demand().unused())
 			.await
 			.expect("the ended copy must not keep the source subscribed")
 			.unwrap();
@@ -8801,8 +8786,8 @@ mod tests {
 		drop(broadcast);
 	}
 
-	#[tokio::test]
-	async fn wildcard_scope_filters_announcements_and_reports_captures() {
+	#[test]
+	fn wildcard_scope_filters_announcements_and_reports_captures() {
 		let producer = origin(1).produce();
 		let consumer = producer
 			.consume()
@@ -8834,8 +8819,8 @@ mod tests {
 		drop(alice);
 	}
 
-	#[tokio::test]
-	async fn local_broadcast_wins_announcement_ties() {
+	#[test]
+	fn local_broadcast_wins_announcement_ties() {
 		let producer = origin(1).produce();
 		let remote = producer.announce("room/alice", Route::default().with_cost(9)).unwrap();
 		let local = producer.create_broadcast("room/alice").unwrap();
@@ -8880,7 +8865,7 @@ mod tests {
 	/// A publisher that stalls with a group still open runs no write path, so the
 	/// track's own write-driven expiry never fires and a reader parked in that group
 	/// is never told. The driver's wall-clock sweep is the bound.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn stalled_publisher_open_group_is_reclaimed() {
 		let expiry = Duration::from_secs(1);
 		let origin = expiring_origin(expiry);
@@ -8897,12 +8882,10 @@ mod tests {
 		let mut reading = stalled.consume();
 		assert!(reading.read_frame().await.unwrap().is_some());
 
-		// Production goes quiet: nothing writes to this track again.
-		crate::model::clock::advance(expiry * 2);
-
-		// Bounded so a regression fails rather than parking forever, which is the
-		// bug itself. Time is virtual, so the wait costs nothing.
-		let reclaimed = tokio::time::timeout(Duration::from_secs(60), reading.read_frame()).await;
+		// Production goes quiet: nothing writes to this track again. Bounded so a
+		// regression fails rather than parking forever, which is the bug itself. Time
+		// is simulated, so the wait costs nothing.
+		let reclaimed = moq_net_sim::timeout(Duration::from_secs(60), reading.read_frame()).await;
 		assert!(
 			matches!(reclaimed, Ok(Err(Error::Old))),
 			"the sweep must reclaim an idle open group and surface the gap, got {reclaimed:?}"
@@ -8911,7 +8894,7 @@ mod tests {
 
 	/// Reclamation is the pool's policy, not the origin's: a pool with no expiry
 	/// window keeps idle content until byte pressure takes it, sweep or no sweep.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn sweep_respects_a_disabled_expiry() {
 		let origin = Config {
 			pool: cache::Pool::unbounded(),
@@ -8928,8 +8911,7 @@ mod tests {
 		let mut reading = stalled.consume();
 		assert!(reading.read_frame().await.unwrap().is_some());
 
-		crate::model::clock::advance(Duration::from_secs(3600));
-		tokio::time::advance(Duration::from_secs(3600)).await;
+		moq_net_sim::advance(Duration::from_secs(3600)).await;
 
 		assert!(
 			reading.read_frame().now_or_never().is_none(),
@@ -8943,9 +8925,8 @@ mod tests {
 	fn drain_cost_is_encodable() {
 		use crate::coding::Encode;
 
-		let mut buf = Vec::new();
 		Cost::DRAIN
-			.encode(&mut buf, crate::lite::Version::Lite06)
+			.encode_bytes(crate::lite::Version::Lite06)
 			.expect("a draining route is still forwarded, so its cost must encode");
 	}
 }

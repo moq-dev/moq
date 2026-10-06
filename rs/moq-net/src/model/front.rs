@@ -23,7 +23,7 @@ use std::{
 	time::Duration,
 };
 
-use crate::{Error, runtime::Instant, track};
+use crate::{Error, time::Instant, track};
 
 /// A route the table selected for the front: the entry id, and whether it is a
 /// broadcast published on this origin.

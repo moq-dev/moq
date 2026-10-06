@@ -30,9 +30,13 @@ Decided in planning (2026-09-27), with the spike data in
   and bytes out, no runtime. The async helper methods move behind an `async`
   cargo feature; rs2ts reads the crate without it and JS reimplements the
   helpers with Promises. No second crate.
-- Varints are not bounded to 2^53 on the wire: 62 bits in QUIC form, 64 in
-  leading-ones form. JS holds any `u64` as a `U64` with checked conversion to
-  and from `number`; varints are only its wire encoding.
+- Values are plain `u64` in Rust, and varint is a wire encoding in the codec,
+  not a type. The spec is not bounded to 2^53: the leading-ones form
+  (moq-lite 07, moq-transport draft-17+) carries all 64 bits, and the QUIC
+  form (moq-lite 01-06, drafts 14-16) refuses anything past 2^62 - 1 rather
+  than truncating. Rust
+  `u64` maps to a TypeScript `U64` (two `u32` halves), generically, with
+  checked conversion to and from `number`.
 - The generated TypeScript is committed and a CI lane regenerates it and
   fails on drift, so JS contributors and npm publishing never need the
   nightly toolchain Charon pins. It lives inside js/net and `@moq/net` stays
@@ -41,7 +45,8 @@ Decided in planning (2026-09-27), with the spike data in
   is no worse to use; watch, publish, hang, and the demos update in the same
   change.
 - Parity: `just test interop --all`, plus moq-net's own tests translated with
-  the code once they run on a mock clock instead of tokio.
+  the code. They run on simulated time with no runtime (`moq-net-sim`), so the
+  async-free ones translate as they stand.
 - The Rust refactors break moq-net's published API, and the translator and
   generated code build on them.
 - Hand-written js/net fixes keep landing until the generated path replaces
@@ -50,9 +55,7 @@ Decided in planning (2026-09-27), with the spike data in
 Decided in the 2026-09-30 audit: the lite half stays in m1 with an explicit
 go/no-go after the no-downgrade report below; a no-go stops the line before
 anything else is generated. The IETF half (the sans-IO IETF session,
-generated IETF, and the IETF parameters quest on this line's branch) moved to
-m2 and waits on that go.
-
+generated IETF, and IETF parameters) moved to m2 and waits on that go.
 
 This README's own work is the no-downgrade report once generated lite ships:
 bundle size, per-frame CPU, and first-frame latency against the hand-written
@@ -61,11 +64,8 @@ js/net it replaces, measured with the [browser benchmarks](/quest/m1/browser-ben
 ## Required
 
 - [Browser benchmarks](/quest/m1/browser-benchmarks.md) - the harness the no-downgrade report uses
-
-- [VarInt codec](/quest/m1/rs2ts/varint-codec.md) - moq-net encodes through a `VarInt` newtype and a concrete slice-based codec, not generic traits on primitives
 - [rs2ts](/quest/m1/rs2ts/translator.md) - a Charon-based translator emits readable TypeScript for moq-net's lite codec, committed and checked for drift in CI
 - [Sans-IO moq-net](/quest/m1/rs2ts/sans-io/README.md) - moq-net builds and runs without a runtime; async helpers sit behind an `async` feature
-- [Mock-clock tests](/quest/m1/rs2ts/mock-clock.md) - moq-net's tests run on the sans-IO clock instead of tokio, so they translate with the code
 - [Generated lite](/quest/m1/rs2ts/lite.md) - @moq/net's lite session and model layer are generated from moq-net
 - [Remove moq-wasm](/quest/m1/rs2ts/remove-wasm.md) - the WASM experiment is deleted once generated lite ships
 

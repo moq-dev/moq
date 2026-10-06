@@ -16,7 +16,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 ignored = ["getrandom"]
 
 [features]
-# Exposes the wire codecs to the `fuzz/` harness and the announce, varint, and frame benches
+# Exposes the wire codecs to the `fuzz/` harness and the announce, codec, varint, and frame benches
 # through the hidden `fuzz` module. Off by default and hidden from the docs.
 fuzz = []
 
@@ -38,10 +38,12 @@ web-transport-trait = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+# The tests' executor, with simulated time.
+moq-net-sim = { path = "sim" }
 serde_json = { workspace = true }
-# test-util (tokio::time::pause/advance) is test-only and is NOT supported on
-# wasm, so it must not leak into the normal dependency feature set.
-tokio = { workspace = true, features = ["macros", "io-util", "sync", "test-util", "time", "rt"] }
+# The benches run on tokio. test-util (tokio::time::pause/advance) is test-only and
+# is NOT supported on wasm, so it must not leak into the normal dependency feature set.
+tokio = { workspace = true, features = ["rt", "test-util", "time"] }
 
 # Model checks for the kio-backed model layer (tests/loom.rs). `cfg(loom)` is only
 # set by `just rs loom`, and the whole test file compiles away without it.
@@ -73,6 +75,12 @@ harness = false
 # Reaches the private announce codec through the hidden `fuzz` module.
 [[bench]]
 name = "announce"
+harness = false
+required-features = ["fuzz"]
+
+# Reaches the private message codecs through the hidden `fuzz` module.
+[[bench]]
+name = "codec"
 harness = false
 required-features = ["fuzz"]
 

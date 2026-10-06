@@ -9,7 +9,7 @@ use moq_net::{Error, Hop, Timestamp};
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(support::harness::run(driver));
+	support::harness::spawn(driver);
 	producer
 }
 
@@ -70,19 +70,19 @@ fn assert_whole((got, err): (Vec<u64>, Option<Error>), what: &str) {
 }
 
 /// The groups a settled track holds outlive an abort: a late reader gets all of them.
-#[tokio::test]
+#[moq_net_sim::test]
 async fn an_abort_after_the_end_settled_keeps_the_groups_for_a_late_reader() {
 	assert_whole(round(true, false).await, "arrival order, aborted after the end settled");
 }
 
 /// The same in sequence order: the ordered cursor ends clean too, not with the abort.
-#[tokio::test]
+#[moq_net_sim::test]
 async fn an_abort_after_the_end_settled_keeps_the_groups_for_a_late_ordered_reader() {
 	assert_whole(round(true, true).await, "sequence order, aborted after the end settled");
 }
 
 /// Control: with no abort the same late reader gets every group, then the clean end.
-#[tokio::test]
+#[moq_net_sim::test]
 async fn a_settled_track_delivers_every_group_to_a_late_reader() {
 	assert_whole(round(false, false).await, "arrival order, no abort");
 	assert_whole(round(false, true).await, "sequence order, no abort");

@@ -87,6 +87,11 @@ These land with the next breaking release, not the 2026-09-23 train.
   broadcast that ends with media queued behind an undescribed track is an error
   rather than an empty `Ok(None)`. Restart the export to pick up a new
   rendition.
+- **moq-net has no `VarInt`.** Varints are plain `u64`s:
+  `VarInt::decode_quic(buf)?.into_inner()` is `moq_net::varint::decode_quic(buf)?`,
+  and `VarInt::try_from(v)?.encode_quic(buf)` is
+  `moq_net::varint::encode_quic(v, buf)`, which fails past
+  `varint::MAX_QUIC` (2^62 - 1).
 - **Opus mapping family lives only on `mapping`.**
   `moq_mux::codec::opus::Config::mapping_family` is gone. Family 0 is
   `mapping: None`; any other family is the mapping's own (`mapping.family()`).

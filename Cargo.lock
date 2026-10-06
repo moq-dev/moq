@@ -4599,6 +4599,7 @@ dependencies = [
  "getrandom 0.4.3",
  "kio 0.6.2",
  "loom",
+ "moq-net-sim",
  "moq-pattern",
  "num_enum",
  "rand 0.10.3",
@@ -4621,6 +4622,19 @@ dependencies = [
  "libfuzzer-sys",
  "moq-net",
 ]
+
+[[package]]
+name = "moq-net-sim"
+version = "0.0.0"
+dependencies = [
+ "futures",
+ "kio 0.6.2",
+ "moq-net-sim-macros",
+]
+
+[[package]]
+name = "moq-net-sim-macros"
+version = "0.0.0"
 
 [[package]]
 name = "moq-noq"
