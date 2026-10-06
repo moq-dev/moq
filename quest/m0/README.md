@@ -45,7 +45,6 @@ a published `@moq/watch` break.
 
 ## Required
 
-- [Branch flip](/quest/m0/branch-flip.md) - `dev` becomes the default `main` trunk and today's `main` becomes `release`, where publishing runs
 - [Cloudflare builds track release](/quest/m0/cloudflare-release.md) - condition: the maintainer points the docs and demo builds at `release`
 - [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
