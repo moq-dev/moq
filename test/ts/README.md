@@ -151,7 +151,8 @@ the stream's own timing is not modelled, so that layout is refused. Video decode
 times must strictly increase.
 
 Audio bytes enter B as they leave TB, so a frame that ends partway through a packet
-is complete once its own last byte has left, not the packet's. Video keeps one
+is complete once its own last byte has left, not the packet's, and B is checked
+just before each removal as well as after each packet. Video keeps one
 simplification, toward strictness: a packet's bytes reach MB when its last byte
 leaves TB, at most one packet's drain time later than byte by byte.
 
@@ -196,10 +197,13 @@ a PCR packet between them. Each case fails without the handling it names:
 | an access unit's first packet sent twice | pass |
 | the PMT declares a PCR PID that carries no PCR | `pcr-presence` fails |
 
-A synthetic MPEG audio stream packs four 576-byte frames per PES, so frames end
-partway through packets, and decodes each PES's first frame 0.3 ms after its last
-byte leaves TB, before the rest of that packet has. It must pass, its last frame
-cut off by the end of the capture.
+Synthetic MPEG audio streams pack several 576-byte frames per PES, so frames end
+partway through packets, and the last is cut off by the end of the capture:
+
+| Case | Expected |
+|---|---|
+| four frames per PES, the first decoded 0.3 ms after its last byte leaves TB, before the rest of that packet has | pass |
+| seven frames per PES, the first decoded as B passes its size partway through a packet | B overflow |
 
 The ffmpeg clip `run.sh` generates is not a positive control: its muxer sends
 audio 0.7 s ahead by default (`-muxdelay`), which overflows the 3,584-byte ADTS

@@ -33,6 +33,8 @@ just after its last byte leaves TB, but before the rest of that packet has; its
 last frame is cut off by the end of the capture:
 
     straddling audio    as built                                      must pass
+    mid-packet overflow seven frames per PES, the first decoded as    B overflow
+                        B passes its size partway through a packet
 
 A model that passes everything, or fails everything, cannot tell these apart.
 """
@@ -154,8 +156,9 @@ def synthetic(path: str, layout: str) -> None:
         handle.write(b"".join(out))
 
 
-def synthetic_audio(path: str) -> None:
-    """MPEG-1 Layer II at 192 kb/s, four 576-byte frames per PES, each PES decoded tight."""
+def synthetic_audio(path: str, frames: int, decode_s: float) -> None:
+    """MPEG-1 Layer II at 192 kb/s, `frames` 576-byte frames per PES, the first decoded
+    `decode_s` after its PES starts arriving."""
     audio_pid, pcr_pid = 0x101, 0x102
     pat = section(0x00, 1, (1).to_bytes(2, "big") + (0xE000 | PMT_PID).to_bytes(2, "big"))
     pmt = section(0x02, 1, bytes([0xE1, 0x02, 0xF0, 0x00, 0x03, 0xE1, 0x01, 0xF0, 0x00]))
@@ -166,14 +169,11 @@ def synthetic_audio(path: str) -> None:
     cc = 0
     out: list[bytes] = []
     for n in range(20):
-        begin = round(n * 0.096 / SLOT_S)
+        begin = round(n * frames * 0.024 / SLOT_S)
         while len(out) < begin:
             out.append(packet(0x1FFF, 0, b"\xff" * 184))
-        # Frame 0 ends at PES byte 14 + 576 = 590: byte 41 of the fourth packet. Decode it
-        # 0.3 ms after that byte leaves TB, 0.28 ms before the packet's last one does.
-        done = 1.0 + (begin + 3 * every) * SLOT_S + 42 * 8 / compliance.AUDIO_RX
-        ticks = round((done + 0.0003) * compliance.PTS_HZ)
-        data = bytes.fromhex("000001c0 0000 8080 05") + stamp(2, ticks) + frame * 4
+        ticks = round((1.0 + begin * SLOT_S + decode_s) * compliance.PTS_HZ)
+        data = bytes.fromhex("000001c0 0000 8080 05") + stamp(2, ticks) + frame * frames
         chunks = [data[at : at + 184] for at in range(0, len(data), 184)]
         if n == 19:
             chunks = chunks[:-1]  # the capture ends inside the last frame
@@ -187,7 +187,7 @@ def synthetic_audio(path: str) -> None:
         pcr = round((1.0 + len(out) * SLOT_S) * compliance.PCR_HZ)
         field = bytes([0x10]) + ((pcr // 300) << 15 | 0x7E00 | pcr % 300).to_bytes(6, "big")
         out.append(packet(pcr_pid, 0, adaptation=field))
-    while len(out) < round(20 * 0.096 / SLOT_S):
+    while len(out) < round(20 * frames * 0.024 / SLOT_S):
         out.append(packet(0x1FFF, 0, b"\xff" * 184))
     with open(path, "wb") as handle:
         handle.write(b"".join(out))
@@ -218,10 +218,25 @@ def built(layout: str):
     return build
 
 
-def audio(path: str) -> str:
-    """A builder for the straddling audio stream."""
-    synthetic_audio(path)
-    return path
+def audio(frames: int, decode_s: float):
+    """A builder for one synthetic audio stream."""
+
+    def build(path: str) -> str:
+        synthetic_audio(path, frames, decode_s)
+        return path
+
+    return build
+
+
+# A packet's byte j leaves an empty TB (j + 1) x 4 us after the packet starts arriving.
+BYTE_S = 8 / compliance.AUDIO_RX
+# Frame 0 ends at PES byte 14 + 576 = 590, byte 41 of the fourth packet: decode it 0.3 ms
+# after that byte leaves TB, 0.28 ms before the packet's last one does.
+STRADDLE_S = 3 * 6 * SLOT_S + 42 * BYTE_S + 0.0003
+# Seven frames fill 22 packets, 4046 B. Decoding frame 0 once 100 bytes of the 20th have
+# left TB finds 3592 B in B, over its 3584; whole packets alone peak at 3496 B before and
+# 3470 B after.
+MID_PACKET_S = 19 * 6 * SLOT_S + 100 * BYTE_S
 
 
 # (name, builder, expected): violations that must all appear, "pass", a refusal's text,
@@ -237,7 +252,8 @@ CASES = [
     ("adaptation burst", built("adaptation burst"), {"TB overflow"}),
     ("duplicate packet", built("duplicate packet"), "pass"),
     ("PCR PID mismatch", built("PCR PID mismatch"), ("fails", "pcr-presence")),
-    ("straddling audio", audio, "pass"),
+    ("straddling audio", audio(4, STRADDLE_S), "pass"),
+    ("mid-packet overflow", audio(7, MID_PACKET_S), {"B overflow"}),
 ]
 
 def grade(path: str) -> dict[str, compliance.Check]:

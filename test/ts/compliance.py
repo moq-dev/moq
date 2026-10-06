@@ -981,6 +981,12 @@ def simulate(
             j = 188 - body + pos - offset
             return max(start + (j + 1) * pace, free + (j + 1) * drain)
 
+        def left_by(delivery: tuple, t: float) -> int:
+            # How many of a packet's 188 bytes have left TB by `t`, inverting the above.
+            _leave, _header, _body, _offset, start, pace, free = delivery
+            k = min((t - start) / pace if pace > 0 else 188, (t - free) / drain)
+            return min(188, max(0, int(k + eps)))
+
         # Once the stream's last packet is in, every unit it completed is graded through
         # its decoding time, however long after the capture that falls. Before a signalled
         # discontinuity, the next time base takes over.
@@ -1012,8 +1018,8 @@ def simulate(
         # order. EB/B is tracked by ES offset: everything below `into` has reached it and
         # everything below `out` has been removed, so an access unit whose bytes arrive
         # after its decoding time passes through as underflow rather than lingering as fill.
-        # Audio bytes enter B as they leave TB (`arrival`), but the fill is only checked
-        # once each packet is in, where removals between packets leave it highest.
+        # Audio bytes enter B as they leave TB (`arrival`), so B peaks either as a packet
+        # finishes or just before a removal, with part of the next packet already in.
         into = out = deliveries[0][3] if deliveries else 0
         delivered = into  # ES offset past the last payload byte to reach MB
         mb: deque[list[float]] = deque()  # [header, payload] per delivered packet, FIFO
@@ -1023,6 +1029,12 @@ def simulate(
         b_header = 0
         now = float("-inf")
         late: deque[tuple[int, float]] = deque()  # video: (ES end, decoding time) of underflowed units
+        taken = 0  # deliveries walked so far
+
+        def check_b(fill: float) -> None:
+            grade.peak("B", fill, params.b)
+            if fill > params.b + 0.5:
+                grade.flag("B overflow")
 
         def leak(until: float) -> None:
             nonlocal into, mb_header, mb_payload, now
@@ -1066,6 +1078,7 @@ def simulate(
         for t, kind, n in events:
             leak(t)
             if kind == 1:
+                taken += 1
                 _t, header, body, offset, *_timing = deliveries[n]
                 if params.video:
                     mb.append([header, body])
@@ -1081,10 +1094,7 @@ def simulate(
                         headers.append((offset, header))
                         b_header += header
                     into += body
-                    fill = max(0, into - out) + b_header
-                    grade.peak("B", fill, params.b)
-                    if fill > params.b + 0.5:
-                        grade.flag("B overflow")
+                    check_b(max(0, into - out) + b_header)
                 continue
             _t, unit = removals[n]
             grade.graded_units += 1
@@ -1096,6 +1106,15 @@ def simulate(
                     grade.flag("EB underflow")
                     late.append((unit.end, t))
             else:
+                # What of the next packet is already in B: its PES header, then payload.
+                partial = 0
+                if taken < len(deliveries):
+                    _leave, header, body, offset, *_timing = deliveries[taken]
+                    k = left_by(deliveries[taken], t)
+                    partial = max(0, k - (188 - body))
+                    if offset >= out:  # else the header left B with the unit after it
+                        partial += max(0, min(header, k - (188 - body - header)))
+                check_b(max(0, into - out) + b_header + partial)
                 done = arrival(unit.end - 1)
                 if done is None or done > t + eps:
                     grade.flag("B underflow")
