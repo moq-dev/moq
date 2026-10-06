@@ -29,7 +29,11 @@ any wire change.
   silent switch. Choose the code so existing clients resubscribe rather than
   give up.
 - A nested epoch (`name/@e/derived/@f`) resolves per level. Split-horizon
-  exclusion and the per-path fronts from #3312 stay intact.
+  exclusion and the per-path fronts from #3312 stay intact, keyed by effective
+  exclusion (`Horizon::effective`, #4922, decided 2026-10-06): a requester's
+  hop that no covering route chain names excludes nothing, so viewers share
+  one front per epoch path and only a peer in a chain gets a filtered one.
+  Following a bare name computes it over the epoch route it selects.
 - Benchmark resolution swept over epochs per name and names per origin, so
   following does not scan the table.
 - Settle here, in this m0 quest, whether a catalog `broadcast` reference by

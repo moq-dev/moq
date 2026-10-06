@@ -1,4 +1,4 @@
-# [L] Wildcard advertisements
+# [S] Wildcard advertisements
 
 ## Goal
 
@@ -39,10 +39,6 @@ prefix claims resolved against pattern interest. The three workloads above
 still hold: the transcoder claims its service prefix
 ([Where derived output lives](#where-derived-output-lives)), and the archive
 claims the root and refuses what it does not have.
-Resolve and Demand are additive and land on main. Both are done on the line
-branch (9d059b1b9 lists and demands covered renditions in the browser
-player), so main no longer lists them; the line branch moves to
-`quest/m0/wildcard/README` to match this path.
 
 ### What already exists, and what does not
 
@@ -61,17 +57,16 @@ this, and #3770 settled the wire: an announcement carries a path prefix on
 every protocol, and a consumer filters announced paths against its pattern
 interest locally.
 
-The routing table exists too. `Consumer::request_broadcast` resolves a local
-broadcast first, then `best_server`: the longest covering prefix, filtered by
-the requester's excluded hop, ordered by `route_order`
-(`rs/moq-net/src/model/origin.rs:633`), served on demand by the session that
-announced it and cached per prefix in `ServeState.served` (`:764`). That is the split-horizon-safe
-lookup the old `origin::Dynamic` could not provide, and it is what
-resolve extends rather than replaces.
-
-Request resolution is prefix-only (`best_server` in
-`rs/moq-net/src/model/origin.rs`) and stays that way. The pattern matcher
-itself exists: `moq_net::{Pattern, Patterns, Segment}` and `Path.Pattern` /
+Request resolution exists too. `Consumer::request_broadcast` mints a front per
+path (`rs/moq-net/src/model/front.rs`) that selects through `best_route`: a
+local broadcast first, then the longest covering prefix, filtered by the
+requester's effective excluded hop (ignored unless a covering chain names it,
+so viewers share a front) and ordered by `route_order`, whose hash is keyed on
+the requested path so one prefix's pool shares its paths. A front follows the
+best route and resumes through any covering one, and FETCH resolves the same
+way. A standing refusal ends the front (#4875), so it never reaches a sibling
+advertiser or a shorter prefix. The pattern matcher itself exists:
+`moq_net::{Pattern, Patterns, Segment}` and `Path.Pattern` /
 `Path.Patterns` in `js/net/src/path.ts` own the shared matching, containment,
 specificity, and rebasing tokens and filters reuse.
 
@@ -88,16 +83,15 @@ path, not with a route identity or a generation field.
   [Auth](/quest/m1/auth/README.md) line is what tokens and the consume-side filter use, matched by the
   shared matcher, so nothing resembles a second grammar and nothing on the
   wire spells a wildcard.
-- **Longest prefix wins, and its refusal is final.** This is the rule
-  routing already follows: `best_server` filters to the longest covering prefix
-  before it compares cost, and the lite draft says the same, matching
-  longest-prefix-match wherever it appears. Advertisers of one prefix form one
-  pool that cost and the request hash order. A terminal refusal from the
-  winning tier IS the answer and never falls through to a shorter prefix, so a
-  transcoder refusing a path does not leak the request to the archive's
-  catch-all, and one unserved path still costs one round trip. The accepted
-  consequence: an offline derivative is not reachable through the catch-all
-  while a longer prefix covers it.
+- **Longest prefix wins, and its refusal is final.** `best_route` filters to
+  the longest covering prefix before it compares cost, and the lite and
+  cluster drafts say the same. Advertisers of one prefix form one pool that
+  cost and the request hash order. A refusal from the winning tier IS the
+  answer and never falls through to a shorter prefix or to another
+  advertiser, so a transcoder refusing a path does not leak the request to
+  the archive's catch-all, and one unserved path costs one round trip. The
+  accepted consequence: an offline derivative is not reachable through the
+  catch-all while a longer prefix covers it.
 - **A claim is a POOL, not a competitor.** Several advertisers of one
   prefix is the normal state, not a hazard: every transcode worker claims the
   same prefix and takes a share. What distributes them is a
@@ -119,17 +113,17 @@ path, not with a route identity or a generation field.
   The seed still has a floor, because standby and running claims of the same
   prefix do meet: a standby concrete claim (`with_cost(1000)` is the
   existing per-broadcast convention) shares a tier with a running publisher's
-  concrete announcement. The
+  concrete announcement and with warm-advertise's exact-path warm routes. The
   floor MUST exceed the deployment's enforced maximum charged-link count
   times its enforced maximum link cost (32 links at cost at most 5 gives
   a bound of 160, with producing origins seeded at 0), or a nearby standby outranks a distant running copy and the
   mesh starts a second encode of a stream it is already serving. That floor
   replaces the ad-hoc standby bias the moq.pro (downstream) transcode worker
   carries today.
-- **A wildcard is a capability, not an inventory.** It advertises what the
+- **A claim is a capability, not an inventory.** It advertises what the
   sender could serve, never that a given path exists. Refusal is how a specific
   path is denied. This is why an over-claiming advertisement is not a defect:
-  the catch-all `**` is legal, and answering "not that one" is the mechanism.
+  claiming the root is legal, and answering "not that one" is the mechanism.
 - **Overlap with the publish scope is what authorization checks.** An
   advertised prefix MUST overlap the sender's granted patterns or it is
   refused. A prefix wider than the grant is accepted, but it only routes
@@ -138,16 +132,12 @@ path, not with a route identity or a generation field.
   Until [Advertise-only authorization](/quest/m3/processor/advertise-auth.md)
   lands, the publish scope stands in for advertising; a credential with its own
   advertise scope is checked against that instead.
-- **Claims are visible to subscribers.** A subscriber sees every advertised
-  prefix under its scope, filtered locally like any other announcement. That
-  is the point: it tells a client it may subscribe to
-  matching paths, and its withdrawal tells the client the capability is gone.
-  This is what makes a lazily-produced rendition discoverable without the
-  composer waiting for an announcement that only demand would produce. The
-  browser player currently enforces the opposite (`js/watch`'s
-  `#isPathAnnounced` hides a catalog rendition with no exact-path
-  announcement); demand makes a covering wildcard count as
-  availability there.
+- **Claims are visible to subscribers.** A claim is an ordinary prefix
+  announcement, so it tells a client it may subscribe beneath it, and its
+  withdrawal tells the client the capability is gone. The browser player's
+  gate (`js/watch`'s `#isPathAnnounced`) lists a catalog rendition under any
+  covering prefix, so a lazily-produced rendition is discoverable without an
+  announcement that only demand would produce.
 - **Every refusal is a terminal typed stream reset, with no negative cache.**
   An advertiser resets a subscribe it will not serve, and the reset carries
   which KIND of refusal it is (`Error::to_code` already puts a typed code on
@@ -179,9 +169,7 @@ path, not with a route identity or a generation field.
   and any covering route resumes it (#4741).
 - **No reply Origin.** The lite-07 `Origin` field in SUBSCRIBE_OK and FETCH_OK,
   and the rule that a relay MUST NOT splice across differing Origins, are
-  dropped (decided 2026-10-03: nothing needs them for correctness). The line
-  branch carries code for Origin, `Identity`, and `Pin`, and #4050's
-  NO_CAPACITY re-resolution; remove it when the branch next merges main.
+  dropped (decided 2026-10-03: nothing needs them for correctness).
 - **Patterns are independent of clustering.** The `moq-pattern` crate owns
   the matching semantics tokens and filters share, with no draft of its own;
   no announce message carries a pattern on either protocol (AUTH grants on
@@ -201,8 +189,8 @@ The leading `.` is deliberate. Existing customers on moq-lite-06 or older must
 never see `.pro/` broadcasts, which could confuse their business logic. Those
 versions cannot opt into hidden routes, so the relay never announces them
 there. Hidden routes are a moq-lite-07 feature, so the player's covering check
-(Demand, done on the line branch) opts into them and sees a claim only when
-lite-07 is negotiated. Finalizing lite-07 is a rollout condition, not a
+opts into them and sees a claim only when lite-07 is negotiated; the token's
+scope must still reach them. Finalizing lite-07 is a rollout condition, not a
 blocker for this line (decided in the 2026-09-30 audit), since the check works
 whenever lite-07 is negotiated. A customer who wants transcodes upgrades, or
 subscribes to the explicit `.pro/<service>/...` path, which works on any

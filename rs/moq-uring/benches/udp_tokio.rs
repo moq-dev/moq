@@ -13,7 +13,7 @@ mod linux {
 	use std::time::{Duration, Instant};
 
 	use criterion::{BenchmarkId, Criterion, Throughput};
-	use moq_noq_udp::{RecvMeta, Transmit, UdpSocketState};
+	use moq_sock::udp::{RecvMeta, Transmit, UdpSocketState};
 	use nix::sys::socket::{
 		ControlMessageOwned, MsgFlags, getsockopt, recvmsg, setsockopt,
 		sockopt::{RcvBuf, UdpGroSegment},
@@ -70,8 +70,8 @@ mod linux {
 		send_messages: Box<[libc::mmsghdr; BURST_SEGMENTS]>,
 		_send_iovecs: Box<[libc::iovec; BURST_SEGMENTS]>,
 		single_buffer: Vec<u8>,
-		batch_buffers: Box<[Vec<u8>; moq_noq_udp::BATCH_SIZE]>,
-		batch_meta: [RecvMeta; moq_noq_udp::BATCH_SIZE],
+		batch_buffers: Box<[Vec<u8>; moq_sock::udp::BATCH_SIZE]>,
+		batch_meta: [RecvMeta; moq_sock::udp::BATCH_SIZE],
 	}
 
 	#[derive(Default)]
@@ -103,18 +103,18 @@ mod linux {
 
 			if config.gso {
 				anyhow::ensure!(
-					send_state.max_gso_segments().get() >= BURST_SEGMENTS,
+					send_state.max_gso_segments() >= BURST_SEGMENTS,
 					"kernel reports fewer than {BURST_SEGMENTS} UDP GSO segments"
 				);
 			}
 			if config.gro {
 				anyhow::ensure!(
-					recv_state.gro_segments().get() <= MAX_GRO_SEGMENTS,
+					recv_state.gro_segments() <= MAX_GRO_SEGMENTS,
 					"kernel reports more than {MAX_GRO_SEGMENTS} UDP GRO segments"
 				);
 			}
 
-			let batch_buffers = (0..moq_noq_udp::BATCH_SIZE)
+			let batch_buffers = (0..moq_sock::udp::BATCH_SIZE)
 				.map(|_| vec![0; MAX_RECV_SIZE])
 				.collect::<Vec<_>>()
 				.into_boxed_slice()
@@ -144,7 +144,7 @@ mod linux {
 				_send_iovecs: send_iovecs,
 				single_buffer: vec![0; MAX_RECV_SIZE],
 				batch_buffers,
-				batch_meta: [RecvMeta::default(); moq_noq_udp::BATCH_SIZE],
+				batch_meta: [RecvMeta::default(); moq_sock::udp::BATCH_SIZE],
 			})
 		}
 
@@ -307,7 +307,7 @@ mod linux {
 
 		fn recv_buffer_len(&self) -> usize {
 			if self.config.gro {
-				SEGMENT_SIZE * self.recv_state.gro_segments().get()
+				SEGMENT_SIZE * self.recv_state.gro_segments()
 			} else {
 				SEGMENT_SIZE
 			}

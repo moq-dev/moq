@@ -14,7 +14,7 @@ use std::borrow::Cow;
 use std::fmt::{self, Display};
 use std::sync::Arc;
 
-use crate::coding::{Decode, DecodeError, Encode, EncodeError};
+use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder};
 
 /// An owned version of [`Path`] with a `'static` lifetime.
 pub type PathOwned = Path<'static>;
@@ -598,12 +598,9 @@ impl Display for Path<'_> {
 	}
 }
 
-impl<V: Copy> Decode<V> for Path<'_>
-where
-	String: Decode<V>,
-{
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		let path: Path = String::decode(r, version)?.into();
+impl<V> Decode<V> for Path<'_> {
+	fn decode(r: &mut Decoder<'_>, _: V) -> Result<Self, DecodeError> {
+		let path: Path = r.string()?.into();
 		if path.parts().count() > Path::MAX_PARTS {
 			return Err(DecodeError::BoundsExceeded);
 		}
@@ -611,16 +608,12 @@ where
 	}
 }
 
-impl<V: Copy> Encode<V> for Path<'_>
-where
-	for<'a> &'a str: Encode<V>,
-{
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+impl<V> Encode<V> for Path<'_> {
+	fn encode(&self, w: &mut Encoder<'_>, _: V) -> Result<(), EncodeError> {
 		if self.parts().count() > Path::MAX_PARTS {
 			return Err(EncodeError::BoundsExceeded);
 		}
-		self.as_str().encode(w, version)?;
-		Ok(())
+		w.string(self.as_str())
 	}
 }
 
@@ -1313,22 +1306,26 @@ mod tests {
 		let too_deep = format!("{ok}/extra");
 
 		// Encode enforces the limit.
-		let mut buf = bytes::BytesMut::new();
-		Path::new(&ok).encode(&mut buf, Version::Lite04).unwrap();
+		let mut buf = Vec::new();
+		Path::new(&ok)
+			.encode(&mut Encoder::new(&mut buf, Version::Lite04.into()), Version::Lite04)
+			.unwrap();
 		assert!(matches!(
-			Path::new(&too_deep).encode(&mut bytes::BytesMut::new(), Version::Lite04),
+			Path::new(&too_deep).encode_bytes(Version::Lite04),
 			Err(EncodeError::BoundsExceeded)
 		));
 
 		// Decode round-trips at the limit.
-		let decoded = Path::decode(&mut buf.freeze(), Version::Lite04).unwrap();
+		let decoded = crate::coding::decode_buf(&mut bytes::Bytes::from(buf), Version::Lite04, Path::decode).unwrap();
 		assert_eq!(decoded.as_str(), ok);
 
 		// Decode enforces the limit on a raw string that encode would have refused.
-		let mut buf = bytes::BytesMut::new();
-		too_deep.as_str().encode(&mut buf, Version::Lite04).unwrap();
+		let mut buf = Vec::new();
+		Encoder::new(&mut buf, Version::Lite04.into())
+			.string(too_deep.as_str())
+			.unwrap();
 		assert!(matches!(
-			Path::decode(&mut buf.freeze(), Version::Lite04),
+			crate::coding::decode_buf(&mut bytes::Bytes::from(buf), Version::Lite04, Path::decode),
 			Err(DecodeError::BoundsExceeded)
 		));
 	}

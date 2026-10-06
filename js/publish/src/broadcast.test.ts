@@ -203,8 +203,8 @@ test("keeps the current catalog snapshot for a reconnecting viewer", async () =>
 		expect((await new Json.Snapshot.Consumer<Catalog.Root>({ track: first }).next())?.video).toBeDefined();
 		first.close();
 
-		// The default track retention is five seconds. A reconnect after it must still receive
-		// the catalog's sole snapshot instead of waiting forever for an edit that may never come.
+		// A reconnect past the idle cache window must still receive the live track's newest
+		// snapshot instead of waiting forever for an edit that may never come.
 		now += 60_000;
 		const second = net.track(Broadcast.CATALOG_TRACK).subscribe();
 		expect((await new Json.Snapshot.Consumer<Catalog.Root>({ track: second }).next())?.video).toBeDefined();

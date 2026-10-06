@@ -17,7 +17,7 @@ pub struct Info {
 }
 
 impl Info {
-	/// Format version 1 with `priority` and `timescale`.
+	/// The current format version with `priority` and `timescale`.
 	pub fn new(priority: u8, timescale: u64) -> Result<Self> {
 		let info = Self {
 			version: VERSION,
@@ -62,16 +62,16 @@ mod tests {
 	fn roundtrip() {
 		let info = Info::new(0, 1_000_000).unwrap();
 		let bytes = info.encode().unwrap();
-		assert_eq!(bytes.as_ref(), br#"{"version":1,"priority":0,"timescale":1000000}"#);
+		assert_eq!(bytes.as_ref(), br#"{"version":2,"priority":0,"timescale":1000000}"#);
 		assert_eq!(Info::decode(&bytes).unwrap(), info);
 	}
 
 	#[test]
 	fn whitespace_and_member_order_do_not_affect_equality() {
-		let info = Info::decode(br#"{"timescale":1000,"priority":7,"version":1}"#).unwrap();
+		let info = Info::decode(br#"{"timescale":1000,"priority":7,"version":2}"#).unwrap();
 		assert_eq!(
 			info,
-			Info::decode(br#"{ "version": 1, "priority": 7, "timescale": 1000 }"#).unwrap()
+			Info::decode(br#"{ "version": 2, "priority": 7, "timescale": 1000 }"#).unwrap()
 		);
 		assert_eq!(info.priority, 7);
 		assert_eq!(info.timescale, 1000);
@@ -79,10 +79,10 @@ mod tests {
 
 	#[test]
 	fn unknown_version_is_refused() {
-		assert!(matches!(
-			Info::decode(br#"{"version":2,"priority":0,"timescale":1000}"#),
-			Err(Error::Version(2))
-		));
+		for version in [1, 3] {
+			let json = format!(r#"{{"version":{version},"priority":0,"timescale":1000}}"#);
+			assert!(matches!(Info::decode(json.as_bytes()), Err(Error::Version(v)) if v == version));
+		}
 	}
 
 	#[test]
@@ -96,11 +96,11 @@ mod tests {
 	#[test]
 	fn unknown_members_and_missing_fields_are_refused() {
 		assert!(matches!(
-			Info::decode(br#"{"version":1,"priority":0,"timescale":1,"extra":true}"#),
+			Info::decode(br#"{"version":2,"priority":0,"timescale":1,"extra":true}"#),
 			Err(Error::Json(_))
 		));
 		assert!(matches!(
-			Info::decode(br#"{"version":1,"priority":0}"#),
+			Info::decode(br#"{"version":2,"priority":0}"#),
 			Err(Error::Json(_))
 		));
 	}

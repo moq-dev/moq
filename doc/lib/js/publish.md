@@ -36,6 +36,11 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 A nested `<video>` gets the raw capture stream; a `<canvas>` is drawn by the
 element. `<moq-publish-support>` shows what the browser can encode.
 
+File demuxers load when decoding a file whose MIME type is empty or does not
+start with `image/`. Camera, screen, and files identified as images do not
+load them. The file picker opens synchronously, before any decoder module
+is loaded.
+
 Camera and microphone failures are readable through the element's
 `el.sources.video` and `el.sources.audio` signals. When these hold a
 `Publish.Source.Camera` or `Publish.Source.Microphone`, their `out.error` signal

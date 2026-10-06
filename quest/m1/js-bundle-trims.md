@@ -40,5 +40,4 @@ Guidance:
 
 ## Related
 
-- [Publish lazy file source](/quest/m1/publish-lazy-file.md) - the largest JS saving, landed separately
 - [Size report](/quest/m1/size-report.md) - tracks these entries nightly

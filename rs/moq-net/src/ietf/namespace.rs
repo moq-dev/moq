@@ -1,7 +1,5 @@
 use crate::{Path, coding::*};
 
-use super::Version;
-
 fn to_tuple(namespace: &Path) -> Vec<String> {
 	let path = namespace.as_str();
 	if path.is_empty() {
@@ -49,7 +47,7 @@ fn from_tuple(parts: &[String]) -> Path<'static> {
 }
 
 /// Helper function to encode namespace as tuple of strings
-pub fn encode_namespace<W: bytes::BufMut>(w: &mut W, namespace: &Path, version: Version) -> Result<(), EncodeError> {
+pub fn encode_namespace(w: &mut Encoder<'_>, namespace: &Path) -> Result<(), EncodeError> {
 	let parts = to_tuple(namespace);
 
 	// The IETF draft limits namespaces to 32 parts.
@@ -57,16 +55,16 @@ pub fn encode_namespace<W: bytes::BufMut>(w: &mut W, namespace: &Path, version: 
 		return Err(BoundsExceeded.into());
 	}
 
-	(parts.len() as u64).encode(w, version)?;
+	w.varint(parts.len() as u64)?;
 	for part in parts {
-		part.encode(w, version)?;
+		w.string(&part)?;
 	}
 	Ok(())
 }
 
 /// Helper function to decode namespace from tuple of strings
-pub fn decode_namespace<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Path<'static>, DecodeError> {
-	let count = u64::decode(r, version)?;
+pub fn decode_namespace(r: &mut Decoder<'_>) -> Result<Path<'static>, DecodeError> {
+	let count = r.varint()?;
 
 	if count == 0 {
 		return Ok(Path::from(String::new()));
@@ -80,7 +78,7 @@ pub fn decode_namespace<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Pa
 	let count = count as usize;
 	let mut parts = Vec::with_capacity(count);
 	for _ in 0..count {
-		let part = String::decode(r, version)?;
+		let part = r.string()?;
 		parts.push(part);
 	}
 
@@ -90,30 +88,32 @@ pub fn decode_namespace<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Pa
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bytes::BytesMut;
+	use crate::coding::Form;
+
+	const FORM: Form = Form::LeadingOnes { seven: false };
 
 	fn encode_ns(path: &str) -> Vec<u8> {
 		encode_path(&Path::from(path.to_string()))
 	}
 
 	fn encode_path(path: &Path<'_>) -> Vec<u8> {
-		let mut buf = BytesMut::new();
-		encode_namespace(&mut buf, path, Version::Draft17).unwrap();
-		buf.to_vec()
+		let mut buf = Vec::new();
+		encode_namespace(&mut Encoder::new(&mut buf, FORM), path).unwrap();
+		buf
 	}
 
 	fn decode_ns(bytes: &[u8]) -> Path<'static> {
-		let mut buf = bytes::Bytes::from(bytes.to_vec());
-		decode_namespace(&mut buf, Version::Draft17).unwrap()
+		decode_namespace(&mut Decoder::new(bytes, FORM)).unwrap()
 	}
 
 	fn encode_tuple(parts: &[&str]) -> Vec<u8> {
-		let mut buf = BytesMut::new();
-		(parts.len() as u64).encode(&mut buf, Version::Draft17).unwrap();
+		let mut buf = Vec::new();
+		let mut w = Encoder::new(&mut buf, FORM);
+		w.varint(parts.len() as u64).unwrap();
 		for part in parts {
-			(*part).encode(&mut buf, Version::Draft17).unwrap();
+			w.string(part).unwrap();
 		}
-		buf.to_vec()
+		buf
 	}
 
 	#[test]

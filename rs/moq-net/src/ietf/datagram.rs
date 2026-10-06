@@ -5,9 +5,9 @@
 //! ID 0 maps onto it. The Type is a set of flags on every draft; draft-14 lacks the
 //! DEFAULT_PRIORITY bit and a status with an omitted Object ID.
 
-use bytes::{Buf, BufMut, Bytes};
+use bytes::Bytes;
 
-use crate::coding::{Decode, DecodeError, Encode, EncodeError};
+use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder};
 
 use super::Version;
 
@@ -59,7 +59,7 @@ impl ObjectDatagram {
 }
 
 impl Encode<Version> for ObjectDatagram {
-	fn encode<W: BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		let mut kind = 0;
 		if self.properties.is_some() {
 			kind |= flag::PROPERTIES;
@@ -80,21 +80,21 @@ impl Encode<Version> for ObjectDatagram {
 			return Err(EncodeError::InvalidState);
 		}
 
-		kind.encode(w, version)?;
-		self.track_alias.encode(w, version)?;
-		self.group_id.encode(w, version)?;
+		w.varint(kind)?;
+		w.varint(self.track_alias)?;
+		w.varint(self.group_id)?;
 		if let Some(object_id) = self.object_id {
-			object_id.encode(w, version)?;
+			w.varint(object_id)?;
 		}
 		if let Some(priority) = self.publisher_priority {
-			priority.encode(w, version)?;
+			w.u8(priority);
 		}
 		if let Some(properties) = &self.properties {
 			// A present but empty block is a protocol violation for the peer.
 			if properties.is_empty() {
 				return Err(EncodeError::InvalidState);
 			}
-			properties.encode(w, version)?;
+			w.bytes(properties)?;
 		}
 
 		match &self.body {
@@ -104,14 +104,11 @@ impl Encode<Version> for ObjectDatagram {
 				if !legacy && *status != 0 && self.properties.is_some() {
 					return Err(EncodeError::InvalidState);
 				}
-				status.encode(w, version)?
+				w.varint(*status)?
 			}
 			DatagramBody::Payload(payload) => {
 				// Runs to the datagram boundary: written raw, no length prefix.
-				if w.remaining_mut() < payload.len() {
-					return Err(EncodeError::Short);
-				}
-				w.put_slice(payload);
+				w.slice(payload);
 			}
 		}
 		Ok(())
@@ -119,25 +116,25 @@ impl Encode<Version> for ObjectDatagram {
 }
 
 impl Decode<Version> for ObjectDatagram {
-	fn decode<R: Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let kind = u64::decode(r, version)?;
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		let kind = r.varint()?;
 		if !Self::valid(kind, version) {
 			return Err(DecodeError::InvalidValue);
 		}
 
-		let track_alias = u64::decode(r, version)?;
-		let group_id = u64::decode(r, version)?;
+		let track_alias = r.varint()?;
+		let group_id = r.varint()?;
 		let object_id = match kind & flag::ZERO_OBJECT_ID != 0 {
 			true => None,
-			false => Some(u64::decode(r, version)?),
+			false => Some(r.varint()?),
 		};
 		let publisher_priority = match kind & flag::DEFAULT_PRIORITY != 0 {
 			true => None,
-			false => Some(u8::decode(r, version)?),
+			false => Some(r.u8()?),
 		};
 		let properties = match kind & flag::PROPERTIES != 0 {
 			true => {
-				let properties = Vec::<u8>::decode(r, version)?;
+				let properties = r.bytes()?.to_vec();
 				if properties.is_empty() {
 					return Err(DecodeError::InvalidValue);
 				}
@@ -148,18 +145,18 @@ impl Decode<Version> for ObjectDatagram {
 
 		let body = match kind & flag::STATUS != 0 {
 			true => {
-				let status = u64::decode(r, version)?;
+				let status = r.varint()?;
 				// Draft-17 on: only a Normal Object may carry Properties.
 				let legacy = matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16);
 				if !legacy && status != 0 && properties.is_some() {
 					return Err(DecodeError::InvalidValue);
 				}
-				if r.has_remaining() {
+				if !r.is_empty() {
 					return Err(DecodeError::TrailingBytes);
 				}
 				DatagramBody::Status(status)
 			}
-			false => DatagramBody::Payload(r.copy_to_bytes(r.remaining())),
+			false => DatagramBody::Payload(Bytes::copy_from_slice(r.rest())),
 		};
 
 		Ok(Self {
@@ -177,6 +174,12 @@ impl Decode<Version> for ObjectDatagram {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	fn decode(buf: &[u8], version: Version) -> Result<ObjectDatagram, DecodeError> {
+		let (datagram, used) = ObjectDatagram::decode_slice(buf, version)?;
+		assert_eq!(used, buf.len(), "a datagram runs to its end");
+		Ok(datagram)
+	}
 
 	const ALL: [Version; 9] = [
 		Version::Draft14,
@@ -206,11 +209,9 @@ mod tests {
 	fn roundtrip_every_draft() {
 		for version in ALL {
 			let datagram = single(Some(7));
-			let mut buf = datagram.encode_bytes(version).unwrap();
+			let buf = datagram.encode_bytes(version).unwrap();
 			assert_eq!(buf[0], 0x07, "{version}: properties, end of group, object 0");
-			let decoded = ObjectDatagram::decode(&mut buf, version).unwrap();
-			assert_eq!(decoded, datagram, "{version}");
-			assert!(!buf.has_remaining());
+			assert_eq!(decode(&buf, version).unwrap(), datagram, "{version}");
 		}
 	}
 
@@ -220,14 +221,11 @@ mod tests {
 			single(None).encode_bytes(Version::Draft14),
 			Err(EncodeError::InvalidState)
 		));
-		assert!(ObjectDatagram::decode(&mut &[0x0C, 0x01, 0x02][..], Version::Draft14).is_err());
+		assert!(decode(&[0x0C, 0x01, 0x02], Version::Draft14).is_err());
 
-		let mut buf = single(None).encode_bytes(Version::Draft16).unwrap();
+		let buf = single(None).encode_bytes(Version::Draft16).unwrap();
 		assert_eq!(buf[0], 0x0F);
-		assert_eq!(
-			ObjectDatagram::decode(&mut buf, Version::Draft16).unwrap(),
-			single(None)
-		);
+		assert_eq!(decode(&buf, Version::Draft16).unwrap(), single(None));
 	}
 
 	#[test]
@@ -242,9 +240,9 @@ mod tests {
 			body: DatagramBody::Status(0),
 		};
 		for version in ALL {
-			let mut buf = datagram.encode_bytes(version).unwrap();
+			let buf = datagram.encode_bytes(version).unwrap();
 			assert_eq!(buf[0], 0x20, "{version}");
-			assert_eq!(ObjectDatagram::decode(&mut buf, version).unwrap(), datagram);
+			assert_eq!(decode(&buf, version).unwrap(), datagram);
 		}
 	}
 
@@ -253,10 +251,12 @@ mod tests {
 		for version in ALL {
 			// A status that ends the group, the reserved bit, and a bit past the defined ones.
 			for kind in [0x22u64, 0x10, 0x40] {
-				let mut bytes = kind.encode_bytes(version).unwrap().to_vec();
-				bytes.extend_from_slice(&[0x01, 0x02, 0x03, 0x04]);
+				let mut bytes = Vec::new();
+				let mut w = Encoder::new(&mut bytes, version.into());
+				w.varint(kind).unwrap();
+				w.slice(&[0x01, 0x02, 0x03, 0x04]);
 				assert!(
-					ObjectDatagram::decode(&mut &bytes[..], version).is_err(),
+					ObjectDatagram::decode_slice(&bytes, version).is_err(),
 					"{version}: {kind:#x}"
 				);
 			}
@@ -277,9 +277,9 @@ mod tests {
 		for version in ALL {
 			let legacy = matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16);
 			match datagram.encode_bytes(version) {
-				Ok(mut buf) => {
+				Ok(buf) => {
 					assert!(legacy, "{version}");
-					assert_eq!(ObjectDatagram::decode(&mut buf, version).unwrap(), datagram);
+					assert_eq!(decode(&buf, version).unwrap(), datagram);
 				}
 				Err(err) => {
 					assert!(!legacy, "{version}");
@@ -294,7 +294,7 @@ mod tests {
 		// PROPERTIES and ZERO_OBJECT_ID, alias 1, group 2, priority 0, empty block.
 		let bytes = [0x05, 0x01, 0x02, 0x00, 0x00, b'x'];
 		assert!(matches!(
-			ObjectDatagram::decode(&mut &bytes[..], Version::Draft16),
+			ObjectDatagram::decode_slice(&bytes, Version::Draft16),
 			Err(DecodeError::InvalidValue)
 		));
 	}

@@ -135,7 +135,7 @@ pub enum Transport {
 	Iroh,
 	/// A WebSocket connection using qmux framing.
 	WebSocket,
-	/// A plaintext TCP connection using qmux framing.
+	/// A TCP connection using qmux framing, plaintext or TLS.
 	Tcp,
 	/// A Unix domain socket using qmux framing.
 	Unix,

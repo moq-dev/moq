@@ -10,7 +10,7 @@ use support::harness::{MockConnectOptions, connect_mock};
 
 fn produce_origin(hop: Hop) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(hop));
-	tokio::spawn(support::harness::run(driver));
+	support::harness::spawn(driver);
 	producer
 }
 
@@ -51,7 +51,7 @@ async fn caught_up(version: &str, paths: &[&str]) -> (Vec<String>, Duration) {
 	options.server_publish = Some(published.consume());
 	options.client_subscribe = Some(subscribed.clone());
 	let _pair = connect_mock(options).await;
-	let start = tokio::time::Instant::now();
+	let start = moq_net_sim::now();
 
 	let mut announced = subscribed.consume().announced();
 	let mut live = Vec::new();
@@ -64,11 +64,11 @@ async fn caught_up(version: &str, paths: &[&str]) -> (Vec<String>, Duration) {
 			}
 		}
 	};
-	tokio::time::timeout(Duration::from_secs(10), read)
+	moq_net_sim::timeout(Duration::from_secs(10), read)
 		.await
 		.unwrap_or_else(|_| panic!("{version}: never caught up"));
 
-	let elapsed = start.elapsed();
+	let elapsed = moq_net_sim::now() - start;
 
 	drop(broadcasts);
 	live.sort();
@@ -77,7 +77,7 @@ async fn caught_up(version: &str, paths: &[&str]) -> (Vec<String>, Duration) {
 
 // Paused, so time only moves when every task waits on a timer: a counted set lands
 // without one, and a quiet one has to wait out the gap.
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn the_marker_follows_the_whole_initial_set() {
 	for version in COUNTED.iter().chain(QUIET) {
 		let (live, elapsed) = caught_up(version, &["a", "b", "c"]).await;
@@ -90,7 +90,7 @@ async fn the_marker_follows_the_whole_initial_set() {
 	}
 }
 
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn an_empty_peer_is_caught_up() {
 	for version in COUNTED.iter().chain(QUIET) {
 		let (live, elapsed) = caught_up(version, &[]).await;
