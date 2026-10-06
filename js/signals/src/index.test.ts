@@ -82,6 +82,17 @@ describe("Signal", () => {
 		expect(seen).toEqual([{ a: 2 }]);
 		dispose();
 	});
+
+	test("any number of subscribers is legitimate", async () => {
+		const signal = new Signal(0);
+		let notified = 0;
+		const disposes = Array.from({ length: 1000 }, () => signal.subscribe(() => notified++));
+
+		signal.set(1);
+		await settle();
+		expect(notified).toBe(1000);
+		for (const dispose of disposes) dispose();
+	});
 });
 
 describe("Effect", () => {

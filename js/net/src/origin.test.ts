@@ -826,6 +826,47 @@ test("discovery reflects the attached sessions", async () => {
 	origin.close();
 });
 
+test("announced requests share no subscription and follow discovery", () => {
+	const origin = new Producer();
+	const wire = wireOf(origin);
+
+	const subscribers = new Map<Signal<unknown>, number>();
+	const subscribe = Signal.prototype.subscribe;
+	const spy = spyOn(Signal.prototype, "subscribe").mockImplementation(function (
+		this: Signal<unknown>,
+		fn: (value: unknown) => void,
+	) {
+		subscribers.set(this, (subscribers.get(this) ?? 0) + 1);
+		return subscribe.call(this, fn);
+	});
+
+	const requests = [];
+	try {
+		for (let i = 0; i < 200; i++) requests.push(origin.request(Path.from(`user${i}`), { announced: true }));
+	} finally {
+		spy.mockRestore();
+	}
+
+	// Each request follows its own path's route, and nothing shared between them.
+	expect(Math.max(...subscribers.values())).toBe(1);
+
+	const slots = [...(wire.requests.peek()?.values() ?? [])];
+	expect(slots.length).toBe(200);
+
+	// Gated with no session attached and with full discovery; blind once one session cannot announce.
+	expect(slots.some((slot) => wire.blind(slot))).toBe(false);
+	const seeing = wire.attach(true);
+	expect(slots.some((slot) => wire.blind(slot))).toBe(false);
+	const silent = wire.attach(false);
+	expect(slots.every((slot) => wire.blind(slot))).toBe(true);
+	silent();
+	expect(slots.some((slot) => wire.blind(slot))).toBe(false);
+
+	for (const request of requests) request.close();
+	seeing();
+	origin.close();
+});
+
 test("the exposed getters are wirable as component inputs", () => {
 	const origin = new Producer();
 	const path = Path.from("wired");
@@ -1650,7 +1691,7 @@ test("a serving session closing releases quiet origin change listeners", async (
 		for (let i = 0; i < 10; i++) {
 			const closed = new Once<null>();
 			const pending = race([wireOf(origin).changed(), closed]);
-			expect(listeners).toBe(4);
+			expect(listeners).toBe(5);
 			closed.set(null);
 			expect(await pending).toBeNull();
 			expect(listeners).toBe(0);
