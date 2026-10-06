@@ -23,4 +23,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [Transcoders start at group boundaries](/quest/m0/wildcard/transcode-group-start.md) - #4812 changed the same `fetch()`
-- [Request linger](/quest/m1/request-linger.md) - its linger also delays the fetch withdrawal this relies on

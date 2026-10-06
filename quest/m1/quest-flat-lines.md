@@ -55,17 +55,24 @@ Interview paper trail (✅ marks the choice):
 
 Remaining:
 
-- Land each line's umbrella PR with `/quest-complete`, then delete its branch:
-  #4039 auth, #4079 cpp, #4519 ffi-shape, and #4133 qos (held until
-  [Lag across a splice](/quest/m1/qos/lag-splice.md) is fixed). As of
-  2026-10-06, #4162 (audio-jitter-target), #4180 (transport-upgrade), #4403
-  (wildcard), #4034 (archive, with #4255 folded in), #4080 (obs-moq-video),
-  #4640 (tstd), #4437 (rs2ts, with #4438 folded in), and #4653 (test-flakes-2)
-  landed. The `quest/m1/transport-upgrade/README` branch outlived #4180;
-  delete it.
-- Before a line lands and its branch is deleted, merge or retarget every child
-  PR still based on it, or GitHub closes it with the branch. As of
-  2026-10-06: #4675 (auth/request-token).
+- Land each line's umbrella PR with `/quest-complete`, then delete its branch.
+  Landed so far: #4403 wildcard, #4034 archive (with #4255 folded in), #4080
+  obs-moq-video, #4162 audio-jitter-target, #4180 transport-upgrade, #4437
+  rs2ts (with #4438 folded in), #4640 tstd, and #4653 test-flakes-2. As of
+  2026-10-06 four lines remain, each waiting before it lands:
+  - #4039 auth waits on its `wip-version.md` child: AUTH still turns on for
+    lite-06, but wire work belongs on the wip version.
+  - #4079 cpp waits on its `cpp-generated-newline.md` child: `OBS (macOS)`
+    fails until the generated-newline fork tag is cut.
+  - #4519 ffi-shape waits on
+    [Bindings](/quest/m0/broadcast-epoch/bindings.md).
+  - #4133 qos waits on [Lag across a splice](/quest/m1/qos/lag-splice.md).
+    When it merges `main`, the merge drops `lag-splice.md`'s Related link to
+    the line's finished `final-lag-sample.md`.
+- Child PRs still based on a line merge into it first, or GitHub closes them
+  with the branch: #4675 (auth/request-token) needs the updated auth line
+  merged in. #4645 (tstd/delay) now targets `main`; #4732 and #4863
+  landed.
 - Retiring the auth branch reconciles `quest/m1/auth/` with `main`'s copy
   (decided 2026-10-05). Drop the children the branch finished or moved (lite,
   interop, unauthorized, auth-ok-preflight, error-codes, narrowing, peer-grant,
