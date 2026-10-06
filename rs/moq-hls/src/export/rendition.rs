@@ -738,6 +738,9 @@ impl Rendition {
 	/// cache.
 	pub async fn segment(&self, segment: u64) -> Result<Option<Bytes>> {
 		let binding = self.media.sync(&self.live);
+		// Read the run before the rows (see `restart`), so an init decoded from them is never
+		// cached for a run that started while they were being fetched.
+		let run = self.run();
 		let Some(ranges) = self.live.segment_ranges(segment) else {
 			return Ok(None);
 		};
@@ -765,7 +768,6 @@ impl Rendition {
 			return Ok(None);
 		};
 
-		let run = self.run();
 		let mut muxer = self.muxer()?;
 		// Accumulate every group's frames into ONE fragment, so duration inference sees each
 		// frame's true successor. A per-group fragment would mis-time the trailing sample of every

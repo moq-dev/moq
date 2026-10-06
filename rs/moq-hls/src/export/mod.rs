@@ -2184,6 +2184,68 @@ mod tests {
 		drop((new_media, _new_track, new_server, catalog, live));
 	}
 
+	// A restart can land while a segment request waits for its media broadcast. The init
+	// decoded from the old run's groups must not be cached for the new run.
+	#[tokio::test]
+	async fn a_segment_straddling_a_restart_keeps_its_init_out_of_the_new_run() {
+		tokio::time::pause();
+		// A VP8 keyframe whose 320x240 geometry is only known inline.
+		const KEYFRAME: &[u8] = &[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00];
+
+		let origin = produce_origin();
+		let mut live = origin.create_broadcast("live").expect("publish allowed");
+		live.announce(Default::default()).expect("publish allowed");
+		let catalog = moq_mux::catalog::Producer::new(&mut live, moq_mux::catalog::Config::default()).unwrap();
+		let recorder = catalog.enroll_test("video0").unwrap();
+
+		let mut media = moq_net::broadcast::Info::new().produce();
+		let _track = write_routed_media(&mut media, KEYFRAME, recorder, 0);
+		let server = origin.dynamic("media", sibling_route(10)).unwrap();
+		settle().await;
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let upstream = Upstream {
+			broadcast: source.broadcast().await.unwrap(),
+			source,
+		};
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.broadcast = Some(moq_net::path::Relative::new("media").to_owned());
+
+		let mut snapshot = moq_mux::catalog::hang::Catalog::default();
+		snapshot.video.renditions.insert("video0".to_string(), config);
+		let archive = hang::catalog::Archive::new(hang::timeline::DEFAULT_NAME);
+		snapshot.archive = Some(archive.clone());
+		let renditions = renditions::Producer::new(Config::default().window);
+		renditions.sync(&upstream, &snapshot);
+		let fanout = renditions.fanout();
+		let watcher = tokio::spawn(watch_timeline(upstream.broadcast.clone(), archive, fanout.clone()));
+		let rendition = renditions.get(Kind::Video, "video0").unwrap();
+		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
+			.await
+			.expect("the timeline reaches the rendition");
+
+		// The sibling request is unanswered, so the segment waits for its media broadcast.
+		let mut segment = std::pin::pin!(rendition.segment(0));
+		assert!(
+			tokio::time::timeout(Duration::from_millis(10), segment.as_mut())
+				.await
+				.is_err()
+		);
+		fanout.set_generation(Some("run-1".into()));
+		fanout.set_generation(Some("run-2".into()));
+
+		accept_sibling(&server, &media).await;
+		segment
+			.await
+			.unwrap()
+			.expect("the old run's rows were captured before the restart");
+		assert!(
+			rendition.init().await.unwrap().is_none(),
+			"the new run has no media of its own yet"
+		);
+		watcher.abort();
+	}
+
 	// A replacement already present when the export starts is the sibling the request
 	// resolves to: it is served, not treated as a stale epoch.
 	#[tokio::test]
