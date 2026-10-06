@@ -10,8 +10,8 @@ DTS untouched, so the only thing that changes is when the bytes arrive:
     as captured     the broadcast itself                       must pass
     restamped 1x    PCRs rewritten at the capture's own rate   must pass (the rewrite is not the fault)
     0.7x            delivered too slowly                       EB and B underflow
-    4x              delivered too early                        TB and B overflow
-    15x             delivered in a burst                       TB and B overflow
+    4x              delivered too early                        TB and B overflow, audio held over 1 s
+    15x             delivered in a burst                       TB and B overflow, audio held over 1 s
 
 The video TB drains at 1.2x the bit rate the SPS's NAL HRD declares (1.935 Mb/s),
 so any delivery well above real time overflows it. MB holds the level's whole CPB
@@ -26,6 +26,13 @@ with each AU in its own PES, a PCR packet between AUs and nulls elsewhere.
     two AUs, one PES    an AU without its own timestamp               refused
     adaptation burst    four payload-less packets after an AU         TB overflow (they cost TB)
     duplicate packet    one AU's first packet sent twice (2.4.3.3)    must pass (TB only, not MB)
+    PCR PID mismatch    the PMT declares a PID that carries no PCR    pcr-presence fails
+
+and an MPEG audio stream whose frames end partway through a packet, each decoded
+just after its last byte leaves TB, but before the rest of that packet has; its
+last frame is cut off by the end of the capture:
+
+    straddling audio    as built                                      must pass
 
 A model that passes everything, or fails everything, cannot tell these apart.
 """
@@ -96,7 +103,8 @@ def stamp(prefix: int, ticks: int) -> bytes:
 def synthetic(path: str, layout: str) -> None:
     """Write a compliant 2 s stream, bent into `layout` at one access unit."""
     pat = section(0x00, 1, (1).to_bytes(2, "big") + (0xE000 | PMT_PID).to_bytes(2, "big"))
-    pmt = section(0x02, 1, bytes([0xE1, 0x00, 0xF0, 0x00, 0x1B, 0xE1, 0x00, 0xF0, 0x00]))
+    pcr_pid = 0x1FF if layout == "PCR PID mismatch" else VIDEO_PID
+    pmt = section(0x02, 1, (0xE000 | pcr_pid).to_bytes(2, "big") + bytes([0xF0, 0x00, 0x1B, 0xE1, 0x00, 0xF0, 0x00]))
     cc: dict[int, int] = {}
     out: list[bytes] = []
 
@@ -146,6 +154,45 @@ def synthetic(path: str, layout: str) -> None:
         handle.write(b"".join(out))
 
 
+def synthetic_audio(path: str) -> None:
+    """MPEG-1 Layer II at 192 kb/s, four 576-byte frames per PES, each PES decoded tight."""
+    audio_pid, pcr_pid = 0x101, 0x102
+    pat = section(0x00, 1, (1).to_bytes(2, "big") + (0xE000 | PMT_PID).to_bytes(2, "big"))
+    pmt = section(0x02, 1, bytes([0xE1, 0x02, 0xF0, 0x00, 0x03, 0xE1, 0x01, 0xF0, 0x00]))
+    frame = bytes([0xFF, 0xFD, 0xA4, 0x00]) + b"\xaa" * 572
+    # An audio packet every six slots, past TB's 0.75 ms drain, so each one meets an
+    # empty TB and its byte j leaves (j + 1) x 4 us after it starts arriving.
+    every = 6
+    cc = 0
+    out: list[bytes] = []
+    for n in range(20):
+        begin = round(n * 0.096 / SLOT_S)
+        while len(out) < begin:
+            out.append(packet(0x1FFF, 0, b"\xff" * 184))
+        # Frame 0 ends at PES byte 14 + 576 = 590: byte 41 of the fourth packet. Decode it
+        # 0.3 ms after that byte leaves TB, 0.28 ms before the packet's last one does.
+        done = 1.0 + (begin + 3 * every) * SLOT_S + 42 * 8 / compliance.AUDIO_RX
+        ticks = round((done + 0.0003) * compliance.PTS_HZ)
+        data = bytes.fromhex("000001c0 0000 8080 05") + stamp(2, ticks) + frame * 4
+        chunks = [data[at : at + 184] for at in range(0, len(data), 184)]
+        if n == 19:
+            chunks = chunks[:-1]  # the capture ends inside the last frame
+        for k, chunk in enumerate(chunks):
+            while len(out) < begin + k * every:
+                out.append(packet(0x1FFF, 0, b"\xff" * 184))
+            out.append(packet(audio_pid, cc, chunk, pusi=k == 0))
+            cc = (cc + 1) & 0x0F
+        out.append(packet(0, n & 0x0F, b"\x00" + pat, pusi=True))
+        out.append(packet(PMT_PID, n & 0x0F, b"\x00" + pmt, pusi=True))
+        pcr = round((1.0 + len(out) * SLOT_S) * compliance.PCR_HZ)
+        field = bytes([0x10]) + ((pcr // 300) << 15 | 0x7E00 | pcr % 300).to_bytes(6, "big")
+        out.append(packet(pcr_pid, 0, adaptation=field))
+    while len(out) < round(20 * 0.096 / SLOT_S):
+        out.append(packet(0x1FFF, 0, b"\xff" * 184))
+    with open(path, "wb") as handle:
+        handle.write(b"".join(out))
+
+
 def restamp(scale: float):
     """A builder that restamps the Kyrion capture's PCRs at `scale` times its own rate."""
 
@@ -171,24 +218,31 @@ def built(layout: str):
     return build
 
 
-# (name, builder, expected): violations that must all appear, or "pass", or a refusal's text.
+def audio(path: str) -> str:
+    """A builder for the straddling audio stream."""
+    synthetic_audio(path)
+    return path
+
+
+# (name, builder, expected): violations that must all appear, "pass", a refusal's text,
+# or ("fails", check) for a check other than tstd that must fail.
 CASES = [
     ("as captured", lambda _path: FIXTURE, "pass"),
     ("restamped 1x", restamp(1.0), "pass"),
     ("0.7x", restamp(0.7), {"EB underflow", "B underflow"}),
-    ("4x", restamp(4.0), {"TB overflow", "B overflow"}),
-    ("15x", restamp(15.0), {"TB overflow", "B overflow"}),
+    ("4x", restamp(4.0), {"TB overflow", "B overflow", "held over 1 s"}),
+    ("15x", restamp(15.0), {"TB overflow", "B overflow", "held over 1 s"}),
     ("synthetic", built("synthetic"), "pass"),
     ("two AUs, one PES", built("two AUs, one PES"), "several access units"),
     ("adaptation burst", built("adaptation burst"), {"TB overflow"}),
     ("duplicate packet", built("duplicate packet"), "pass"),
+    ("PCR PID mismatch", built("PCR PID mismatch"), ("fails", "pcr-presence")),
+    ("straddling audio", audio, "pass"),
 ]
 
-
-def grade(path: str) -> compliance.Check:
-    """compliance.py's tstd verdict on one file."""
-    size = compliance.detect_packet_size(compliance.run_tsanalyze(path))
-    return compliance.check_tstd(path, size, compliance.scan_packets(path, size))
+def grade(path: str) -> dict[str, compliance.Check]:
+    """compliance.py's verdicts on one file, by check name."""
+    return {check.name: check for check in compliance.analyze(path)}
 
 
 def main() -> int:
@@ -196,18 +250,24 @@ def main() -> int:
     failed = 0
     with tempfile.TemporaryDirectory() as tmp:
         for n, (name, build, expected) in enumerate(CASES):
-            check = grade(build(os.path.join(tmp, f"{n}.ts")))
+            checks = grade(build(os.path.join(tmp, f"{n}.ts")))
+            check = checks["tstd"]
             streams = check.metrics.get("streams", {})
             seen = {v for s in streams.values() for v in s["violations"]}
             if expected == "pass":
                 # Not vacuous: every stream must have had access units to grade.
                 ok = check.status == compliance.Status.PASS and all(s["access_units"] for s in streams.values())
+                ok = ok and checks["pcr-presence"].status == compliance.Status.PASS
+            elif isinstance(expected, tuple):
+                check = checks[expected[1]]
+                ok = check.status == compliance.Status.FAIL
             elif isinstance(expected, str):
                 ok = any(expected in why for why in check.metrics.get("refused", {}).values())
             else:
                 ok = expected <= seen
             failed += not ok
-            want = expected if isinstance(expected, str) else ", ".join(sorted(expected))
+            want = " ".join(reversed(expected)) if isinstance(expected, tuple) else expected
+            want = want if isinstance(want, str) else ", ".join(sorted(want))
             print(f"  {'ok  ' if ok else 'FAIL'}  {name:<18} want {want:<40} got {check.detail}")
     if failed:
         print(f"tstd controls: {failed} of {len(CASES)} cases wrong", file=sys.stderr)

@@ -29,6 +29,7 @@ import bisect
 import json
 import subprocess
 import sys
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -280,13 +281,19 @@ def check_continuity(analysis: dict) -> Check:
 
 
 def check_pcr_presence(analysis: dict, clock_by_pid: dict[int, PcrClock]) -> Check:
-    """A PCR PID must be declared and actually carry PCR samples."""
-    pcr_pids = [s.get("pcr-pid") for s in analysis.get("services", []) if s.get("pcr-pid") is not None]
-    carrying = [pid for pid, clock in clock_by_pid.items() if clock.idx]
+    """Every program's declared PCR PID must carry PCR samples.
+
+    PCR_PID 0x1FFF declares a program without one (2.4.4.9), so it needs none.
+    """
+    pcr_pids = sorted({s["pcr-pid"] for s in analysis.get("services", []) if s.get("pcr-pid") not in (None, 0x1FFF)})
+    carrying = sorted(pid for pid, clock in clock_by_pid.items() if clock.idx)
     metrics = {"pcr_pids": pcr_pids, "pcr_carrying_pids": carrying}
-    if pcr_pids and carrying:
-        return Check("pcr-presence", Severity.HARD, Status.PASS, f"PCR on PID {carrying}", metrics)
-    return Check("pcr-presence", Severity.HARD, Status.FAIL, "no PCR samples found", metrics)
+    if not pcr_pids:
+        return Check("pcr-presence", Severity.HARD, Status.FAIL, "no program declares a PCR PID", metrics)
+    missing = [pid for pid in pcr_pids if pid not in carrying]
+    if missing:
+        return Check("pcr-presence", Severity.HARD, Status.FAIL, f"declared PCR PID {missing} carries no PCR", metrics)
+    return Check("pcr-presence", Severity.HARD, Status.PASS, f"PCR on PID {pcr_pids}", metrics)
 
 
 def check_pcr_monotonic(scan: Scan) -> Check:
@@ -352,6 +359,9 @@ TB_SIZE = 512
 TB_EMPTY_S = 1.0
 # PTS/DTS are 33 bits at 90 kHz.
 STAMP_WRAP_S = (1 << 33) / PTS_HZ
+# EB fill is tracked by ES offset, past 2^28 B within hours, where a double resolves
+# only ~6e-8 B, so an access unit counts as complete within a bit of its last byte.
+BIT = 1 / 8
 
 # H.264 Table A-1: level_idc -> (MaxBR, MaxCPB) as tabulated. H.222.0 2.14.3.1
 # scales both by 1200 bits for the buffers, and Rx by the profile's cpbBrNalFactor.
@@ -912,6 +922,7 @@ class Grade:
     worst_late_ms: float = 0.0
     worst_delay_s: float = 0.0
     graded_units: int = 0
+    truncated_units: int = 0
 
     def flag(self, name: str) -> None:
         self.violations[name] = self.violations.get(name, 0) + 1
@@ -930,20 +941,24 @@ def simulate(
     """
     grade = Grade(stream.pid, params.label)
     eps = 1e-9
+    drain = 8 / params.rx  # seconds for one byte to leave TB
+    indices = [entry[0] for entry in stream.packets]
     for clock, lo, hi in segments:
-        # TB: packet i arrives over [t(i), t(i+1)] and leaves at Rx. `leave` is when its
-        # last byte does; the bytes still in TB as the packet finishes arriving are its
-        # peak, and a stretch where TB never empties may not exceed a second.
-        deliveries: list[tuple[float, int, int, int]] = []
+        packets = stream.packets[bisect.bisect_left(indices, lo) : bisect.bisect_left(indices, hi)]
+        # TB: packet i arrives over [t(i), t(i+1)], a byte every `pace`, and drains at Rx
+        # once the packet ahead of it has (at `free`), so its byte j (0-187) leaves at
+        # max(t(i) + (j+1) pace, free + (j+1) drain). The bytes still in TB as the packet
+        # finishes arriving are its peak, and a stretch where TB never empties may not
+        # exceed a second.
+        deliveries: list[tuple[float, int, int, int, float, float, float]] = []
         leave = float("-inf")
         busy_since = None
-        for index, header, body, offset in stream.packets:
-            if not lo <= index < hi:
-                continue
+        for index, header, body, offset in packets:
             start, end = clock.time_at(index), clock.time_at(index + 1)
             if leave <= start:
                 busy_since = start
-            leave = max(end, max(leave, start) + 188 * 8 / params.rx)
+            free = max(leave, start)
+            leave = max(end, free + 188 * drain)
             fill = (leave - end) * params.rx / 8
             grade.peak("TB", fill, TB_SIZE)
             if fill > TB_SIZE + 0.5:
@@ -952,14 +967,34 @@ def simulate(
                 grade.flag("TB not emptied within 1 s")
                 busy_since = None
             if header or body:
-                deliveries.append((leave, header, body, offset))
+                deliveries.append((leave, header, body, offset, start, (end - start) / 188, free))
+        carrying = [d for d in deliveries if d[2]]
+        carried_at = [d[3] for d in carrying]
 
+        def arrival(pos: int) -> float | None:
+            # When ES byte `pos` leaves TB: PES payload ends each packet, so it is byte
+            # 188 - body + (pos - offset) of the one that carries it.
+            k = bisect.bisect_right(carried_at, pos) - 1
+            if k < 0 or pos >= carried_at[k] + carrying[k][2]:
+                return None
+            _leave, _header, body, offset, start, pace, free = carrying[k]
+            j = 188 - body + pos - offset
+            return max(start + (j + 1) * pace, free + (j + 1) * drain)
+
+        # Once the stream's last packet is in, every unit it completed is graded through
+        # its decoding time, however long after the capture that falls. Before a signalled
+        # discontinuity, the next time base takes over.
+        last = not indices or indices[-1] < hi
         horizon = clock.time_at(hi)
         removals: list[tuple[float, AccessUnit]] = []
         td = None
         for unit in units:
             if not lo <= unit.first_packet < hi:
                 continue
+            if unit.end > stream.es_len:
+                # Cut off by the end of the capture: bytes never received, not late ones.
+                grade.truncated_units += 1
+                break
             if unit.stamp is not None:
                 base = unit.stamp / PTS_HZ
                 stamped = base + round((clock.time_at(unit.first_packet) - base) / STAMP_WRAP_S) * STAMP_WRAP_S
@@ -968,7 +1003,7 @@ def simulate(
                 td = max(stamped, removals[-1][0]) if removals else stamped
             elif td is None:
                 continue  # an audio frame ahead of the first timestamp has no decoding time
-            if td > horizon:
+            if td > horizon and not last:
                 break
             removals.append((td, unit))
             td += unit.duration_s
@@ -977,20 +1012,17 @@ def simulate(
         # order. EB/B is tracked by ES offset: everything below `into` has reached it and
         # everything below `out` has been removed, so an access unit whose bytes arrive
         # after its decoding time passes through as underflow rather than lingering as fill.
+        # Audio bytes enter B as they leave TB (`arrival`), but the fill is only checked
+        # once each packet is in, where removals between packets leave it highest.
         into = out = deliveries[0][3] if deliveries else 0
-        mb: list[list[int]] = []  # [header, payload] per delivered packet, FIFO
-        mb_header = mb_payload = 0
-        headers: list[tuple[int, int]] = []  # audio: (ES offset, bytes) of PES headers held in B
+        delivered = into  # ES offset past the last payload byte to reach MB
+        mb: deque[list[float]] = deque()  # [header, payload] per delivered packet, FIFO
+        mb_header = 0
+        mb_payload = 0.0
+        headers: deque[tuple[int, int]] = deque()  # audio: (ES offset, bytes) of PES headers held in B
         b_header = 0
         now = float("-inf")
-        late: list[tuple[int, float]] = []
-
-        def settle(t: float, moved_from: int, rate: float) -> None:
-            # Record how late each underflowed unit finished arriving.
-            while late and into >= late[0][0]:
-                end, td = late.pop(0)
-                done = t if rate <= 0 else now + (end - moved_from) * 8 / rate
-                grade.worst_late_ms = max(grade.worst_late_ms, (done - td) * 1000)
+        late: deque[tuple[int, float]] = deque()  # video: (ES end, decoding time) of underflowed units
 
         def leak(until: float) -> None:
             nonlocal into, mb_header, mb_payload, now
@@ -998,21 +1030,33 @@ def simulate(
                 now = max(now, until)
                 return
             room = params.eb - max(0, into - out) + max(0, out - into)
-            amount = min(params.rbx * (until - now) / 8, mb_payload, room)
-            before = into
-            remaining = amount
-            while remaining > eps and mb:
-                head = mb[0]
-                mb_header -= head[0]
-                head[0] = 0
-                take = min(head[1], remaining)
-                head[1] -= take
-                remaining -= take
-                if head[1] <= eps:
-                    mb.pop(0)
-            mb_payload -= amount
-            into += amount
-            settle(until, before, params.rbx)
+            amount = min(params.rbx * (until - now) / 8, room)
+            moved_from = into
+            if amount >= mb_payload:
+                # MB empties: land on the exact offset, so float error cannot build up.
+                amount = mb_payload
+                mb.clear()
+                mb_header = 0
+                mb_payload = 0.0
+                into = delivered
+            else:
+                remaining = amount
+                while remaining > eps and mb:
+                    head = mb[0]
+                    mb_header -= head[0]
+                    head[0] = 0
+                    take = min(head[1], remaining)
+                    head[1] -= take
+                    remaining -= take
+                    if head[1] <= eps:
+                        mb.popleft()
+                mb_payload -= amount
+                into += amount
+            # Record how late each underflowed unit finished arriving.
+            while late and into + BIT >= late[0][0]:
+                end, deadline = late.popleft()
+                done = now + (end - moved_from) * 8 / params.rbx
+                grade.worst_late_ms = max(grade.worst_late_ms, (done - deadline) * 1000)
             grade.peak("EB", max(0, into - out), params.eb)
             now = until
 
@@ -1022,20 +1066,21 @@ def simulate(
         for t, kind, n in events:
             leak(t)
             if kind == 1:
-                _t, header, body, offset = deliveries[n]
+                _t, header, body, offset, *_timing = deliveries[n]
                 if params.video:
                     mb.append([header, body])
                     mb_header += header
                     mb_payload += body
+                    delivered = offset + body
                     grade.peak("MB", mb_header + mb_payload, params.mb)
                     if mb_header + mb_payload > params.mb + 0.5:
                         grade.flag("MB overflow")
                 else:
-                    if header:
+                    # A header ahead of a unit already decoded left B with it.
+                    if header and offset >= out:
                         headers.append((offset, header))
                         b_header += header
                     into += body
-                    settle(t, into, 0)
                     fill = max(0, into - out) + b_header
                     grade.peak("B", fill, params.b)
                     if fill > params.b + 0.5:
@@ -1046,12 +1091,19 @@ def simulate(
             grade.worst_delay_s = max(grade.worst_delay_s, t - clock.time_at(unit.first_packet))
             if t - clock.time_at(unit.first_packet) > params.max_delay_s:
                 grade.flag(f"held over {params.max_delay_s:g} s")
-            if into + eps < unit.end:
-                grade.flag("EB underflow" if params.video else "B underflow")
-                late.append((unit.end, t))
+            if params.video:
+                if into + BIT < unit.end:
+                    grade.flag("EB underflow")
+                    late.append((unit.end, t))
+            else:
+                done = arrival(unit.end - 1)
+                if done is None or done > t + eps:
+                    grade.flag("B underflow")
+                    if done is not None:
+                        grade.worst_late_ms = max(grade.worst_late_ms, (done - t) * 1000)
             out = max(out, unit.end)
             while headers and headers[0][0] < unit.end:
-                b_header -= headers.pop(0)[1]
+                b_header -= headers.popleft()[1]
     return grade
 
 
@@ -1110,6 +1162,7 @@ def check_tstd(ts_path: str, packet_size: int, scan: Scan) -> Check:
             str(g.pid): {
                 "type": g.label,
                 "access_units": g.graded_units,
+                "truncated_units": g.truncated_units,
                 "violations": g.violations,
                 "peak_fill_pct": {k: round(v * 100, 1) for k, v in g.peaks.items()},
                 "worst_underflow_late_ms": round(g.worst_late_ms, 1),

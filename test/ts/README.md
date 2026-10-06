@@ -79,7 +79,7 @@ Severities: **hard** checks fail the run by default; **shape** checks report as
 | `pat` / `pmt` | hard | valid PAT mapping programs to a PMT that lists the elementary streams |
 | `psi-crc` | hard | no section dropped for a bad CRC |
 | `continuity` | hard | no continuity-counter discontinuities |
-| `pcr-presence` | hard | a PCR PID is declared and carries PCR |
+| `pcr-presence` | hard | every program's declared PCR PID carries PCR (0x1FFF declares none) |
 | `pcr-monotonic` | hard | PCR strictly increases (one 33-bit wrap tolerated), except into a PCR that signals `discontinuity_indicator` |
 | `duration-fidelity` | hard | exported PCR span tracks the source's duration (round-trip only) |
 | `service-descriptors` | shape | an SDT naming the service is present |
@@ -150,9 +150,17 @@ carry several, but only the first takes its timestamp, and deriving the rest fro
 the stream's own timing is not modelled, so that layout is refused. Video decode
 times must strictly increase.
 
-One simplification, toward strictness: a packet's bytes reach MB/B when its last
-byte leaves TB, up to one packet's drain time (0.75 ms for audio) later than
-byte-by-byte, so underflow is judged that much stricter.
+Audio bytes enter B as they leave TB, so a frame that ends partway through a packet
+is complete once its own last byte has left, not the packet's. Video keeps one
+simplification, toward strictness: a packet's bytes reach MB when its last byte
+leaves TB, at most one packet's drain time later than byte by byte.
+
+Once a stream's last packet is in, every access unit it completed is still graded
+through its decoding time, however long after the capture that falls, so a burst
+that arrives far ahead is held over the delay bound rather than missed. The last
+access unit is usually cut off by the end of the capture; it is counted as
+`truncated_units` and not graded, since its missing bytes were never sent rather
+than late.
 
 ### Controls
 
@@ -170,8 +178,8 @@ changes:
 | as captured | pass |
 | PCRs restamped at the capture's own rate | pass |
 | delivered at 0.7x | EB and B underflow |
-| delivered at 4x | TB and B overflow |
-| delivered at 15x (a burst) | TB and B overflow |
+| delivered at 4x | TB and B overflow, audio held over 1 s |
+| delivered at 15x (a burst) | TB and B overflow, audio held over 1 s |
 
 No restamp can overflow the video MB: it holds the level's whole CPB less the
 declared one, about 3.6 MB, more than the 4 s capture carries.
@@ -186,6 +194,12 @@ a PCR packet between them. Each case fails without the handling it names:
 | two access units in one PES | refused |
 | four adaptation-only packets after an access unit | TB overflow |
 | an access unit's first packet sent twice | pass |
+| the PMT declares a PCR PID that carries no PCR | `pcr-presence` fails |
+
+A synthetic MPEG audio stream packs four 576-byte frames per PES, so frames end
+partway through packets, and decodes each PES's first frame 0.3 ms after its last
+byte leaves TB, before the rest of that packet has. It must pass, its last frame
+cut off by the end of the capture.
 
 The ffmpeg clip `run.sh` generates is not a positive control: its muxer sends
 audio 0.7 s ahead by default (`-muxdelay`), which overflows the 3,584-byte ADTS

@@ -119,8 +119,6 @@ ts-eit *args:
 
 # The T-STD model's controls: a broadcast capture must pass, and the same capture
 # delivered too slowly, too early, or in a burst must fail. Needs only TSDuck.
-
-# Prove the T-STD model passes a compliant stream and fails broken ones.
 ts-tstd:
     ./ts/tstd-controls.py
 
