@@ -45,7 +45,6 @@ a published `@moq/watch` break.
 
 ## Required
 
-- [Cloudflare builds track release](/quest/m0/cloudflare-release.md) - condition: the maintainer points the docs and demo builds at `release`
 - [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
 - [Shared fronts](/quest/m0/shared-fronts.md) - viewer sessions share a front, so fronts scale with peers, not viewers, and viewer churn no longer leaks fronts
