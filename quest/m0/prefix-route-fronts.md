@@ -9,9 +9,9 @@ bound is refused rather than queued.
 
 ## Plan
 
-Found while landing shared fronts (#4922): viewers now share one front per
-path, but an optimistic resolve under a prefix route still mints a front for
-every distinct requested path while the route stands. That cost is per path,
+Found while landing shared fronts (#4922, merged): viewers share one front
+per path, but an optimistic resolve under a prefix route still mints a front
+for every distinct requested path while the route stands. That cost is per path,
 not per viewer, so a single session can amplify it by naming paths.
 
 - Decide the bound (per route, per session, or both) and what a refusal looks
@@ -24,4 +24,3 @@ not per viewer, so a single session can amplify it by naming paths.
 ## Required
 
 - [Request caps](/quest/m0/request-caps.md) - settles the refusal shapes reused here
-- [Shared fronts](/quest/m0/shared-fronts.md) - #4922 provides the per-path front model

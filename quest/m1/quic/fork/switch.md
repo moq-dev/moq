@@ -13,7 +13,7 @@ Decided 2026-10-06: `moq-quic` (quinn-proto) is the only crate the fork adds.
 quinn's async layer is imported into moq-tokio as a module rather than a
 `moq-quic-tokio` crate, tokio-only: drop quinn's `Runtime` abstraction and
 its smol and async-io implementations instead of carrying them. Its UDP
-sockets come from `moq_sock::udp` ([udp](/quest/m1/quic/fork/udp.md)).
+sockets come from `moq_sock::udp`.
 Keep the first commit verbatim from upstream (quinn's `quinn/src`) so a
 reviewer can diff it, and extend the cherry-pick recipe in
 `rs/moq-quic/README.md` to map `quinn/src/` onto the module.
@@ -46,5 +46,4 @@ near the former.
 
 ## Required
 
-- [Import quinn-udp](/quest/m1/quic/fork/udp.md)
 - [Port BBR3](/quest/m1/quic/fork/bbr3.md)

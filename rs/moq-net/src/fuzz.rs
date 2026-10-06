@@ -218,6 +218,11 @@ impl AnnounceWriter {
 	}
 }
 
+/// `origin` as a session connected to `peer` serves it, for the viewers bench.
+pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::origin::Consumer {
+	origin.excluding(peer)
+}
+
 /// Encode `announced` as a fresh [`AnnounceWriter`] stream.
 pub fn encode_announces(announced: &[Announced], compress: bool) -> Vec<u8> {
 	let mut writer = AnnounceWriter::new(compress);

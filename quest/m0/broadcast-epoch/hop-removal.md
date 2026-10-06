@@ -21,6 +21,11 @@ publisher's hop chain.
   `js/net/src/hop.ts` and its callers in `js/net/src/{lite,ietf}/subscriber.ts`,
   and their tests, including `rs/moq-net/tests/legacy_reconnect.rs`. Keep the
   leading 0, so an unnamed chain still ranks anonymous.
+- Keep request-time exclusion (decided 2026-10-06): the relay still serves
+  each session through `excluding` its declared or assigned hop. Dropping it
+  would let a shared front hairpin through a peer in a cluster. Viewers share
+  a front anyway, because `Horizon::effective` ignores a hop no route chain
+  names (#4922).
 - NO_CAPACITY's removal (decided 2026-10-03: every refusal is terminal)
   lands with the [wildcard](/quest/m0/wildcard/README.md) line, whose branch
   already deletes it from js/net, moq-net, and both drafts (found in the

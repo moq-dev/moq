@@ -75,7 +75,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [TS stats module](/quest/m1/ts-stats-module.md) - the TS stats types move under `ts::stats` as `Snapshot` and `Stream`, with an owned `track`
 - [cpal loads libasound at runtime](/quest/m1/cpal-alsa-runtime.md) - condition: a cpal release whose Linux build carries no load-time libasound requirement
 - [Audio capture without ALSA link](/quest/m1/capture-alsa-link.md) - moq-audio capture and playback build on Linux without linking libasound
-- [Remove Opus DTX](/quest/m1/opus-usedtx-removal.md) - `@moq/publish` drops `usedtx`, since Chromium shifts the capture timeline under DTX
 - [Capture by default](/quest/m1/capture-default.md) - moq-video and moq-audio build `capture` by default, so pre-merge checks test it and the capture gate goes away
 - [Ship capture and playback](/quest/m1/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
 - [moq.sh deploys from CI](/quest/m1/moq-sh-deploy.md) - the first `release` run of the moq.sh workflow deploys with the Workers Editor token

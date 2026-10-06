@@ -325,3 +325,58 @@ async fn rejoin_goes_live_without_the_join_head() {
 		.unwrap_or_else(|_| panic!("{version}: timed out"));
 	}
 }
+
+/// A reader rejoining while the relay is still cancelling upstream is not handed the stale cache.
+///
+/// Cancelling waits on the publisher, a round trip on a slow link, but the publisher stops
+/// serving as soon as the cancel lands. A reader returning in between must already find the
+/// copy idle, or it takes the cached group as the live edge.
+#[moq_net_sim::test]
+async fn rejoin_during_the_cancel_skips_the_cache() {
+	for version in Version::names() {
+		moq_net_sim::timeout(TEST_TIMEOUT, async {
+			let publisher = produce_origin(1);
+			let relay = produce_origin(2);
+
+			let broadcast = publisher.create_broadcast("bench").unwrap();
+			let track = broadcast.create_track("video", None).unwrap();
+			broadcast.announce(Default::default()).unwrap();
+
+			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+			options.server_publish = Some(publisher.consume());
+			options.client_subscribe = Some(relay.clone());
+			options.latency = Duration::from_millis(50);
+			let _pair = connect_mock(options).await;
+
+			let consumer = relay.consume();
+			consumer.routed("bench").await.unwrap();
+			let remote = consumer.request_broadcast("bench").await.unwrap();
+			let ts = |ms| Timestamp::from_millis(ms).unwrap();
+
+			let mut group = track.append_group().unwrap();
+			group.write_frame(ts(0), b"old".as_ref()).unwrap();
+			group.finish().unwrap();
+			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
+			let mut group = sub.recv_group().await.unwrap().unwrap();
+			assert_eq!(read_all(&mut group).await.unwrap(), [b"old".to_vec()], "{version}");
+			drop((group, sub));
+			track.demand().unused().await.unwrap();
+
+			// The publisher moves on while the relay's cancel is still in flight.
+			for sequence in 1..=3u64 {
+				let mut group = track.append_group().unwrap();
+				group.write_frame(ts(sequence * 1000), b"new".as_ref()).unwrap();
+				group.finish().unwrap();
+			}
+
+			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
+			let group = sub.recv_group().await.unwrap().unwrap();
+			assert_eq!(
+				group.sequence, 3,
+				"{version}: the rejoining reader got the stale cache first"
+			);
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{version}: timed out"));
+	}
+}

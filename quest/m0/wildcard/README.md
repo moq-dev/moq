@@ -60,7 +60,8 @@ interest locally.
 Request resolution exists too. `Consumer::request_broadcast` mints a front per
 path (`rs/moq-net/src/model/front.rs`) that selects through `best_route`: a
 local broadcast first, then the longest covering prefix, filtered by the
-requester's excluded hop and ordered by `route_order`, whose hash is keyed on
+requester's effective excluded hop (ignored unless a covering chain names it,
+so viewers share a front) and ordered by `route_order`, whose hash is keyed on
 the requested path so one prefix's pool shares its paths. A front follows the
 best route and resumes through any covering one, and FETCH resolves the same
 way. A standing refusal ends the front (#4875), so it never reaches a sibling

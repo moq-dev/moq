@@ -3975,7 +3975,7 @@ class LiveMoqAnnounceEvent extends MoqAnnounceEvent {
   }
 }
 
-enum MoqTransport { quic, iroh, webSocket, tcp, unix }
+enum MoqTransport { quic, iroh, webSocket, tcp, unix, webTransport }
 
 class FfiConverterMoqTransport {
   static LiftRetVal<MoqTransport> read(Uint8List buf) {
@@ -3991,6 +3991,8 @@ class FfiConverterMoqTransport {
         return LiftRetVal(MoqTransport.tcp, 4);
       case 5:
         return LiftRetVal(MoqTransport.unix, 4);
+      case 6:
+        return LiftRetVal(MoqTransport.webTransport, 4);
       default:
         throw UniffiInternalError(
           UniffiInternalError.unexpectedEnumCase,

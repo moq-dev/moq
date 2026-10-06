@@ -2221,20 +2221,22 @@ where
 		// Clean up
 		let aborted = self.remove_subscribe(request_id).is_none();
 
-		match idle {
-			true => self.cancel_subscribe(stream, request_id).await,
+		if !idle {
 			// The publisher already ended the request, so a FIN is all we owe it.
-			false => {
-				stream.writer.finish().ok();
-				return None;
-			}
+			stream.writer.finish().ok();
+			return None;
 		}
+		// What the copy cached goes stale from here. Marked before the cancel, which waits
+		// on the publisher: it stops serving as soon as the cancel lands, and a reader
+		// returning in between must not take the cache as the live edge.
+		if !aborted {
+			track.set_idle();
+		}
+		self.cancel_subscribe(stream, request_id).await;
 		// A session abort took the copy too.
 		if aborted {
 			return None;
 		}
-		// What the copy cached goes stale from here.
-		track.set_idle();
 		Some(Idle {
 			demand: track.demand(),
 			track,

@@ -41,7 +41,13 @@ that.
 Shared decisions:
 
 - The race returns the winner plus the still-pending QUIC dial when WebSocket
-  wins. The QUIC handshake timeout bounds that dial; no extra deadline.
+  wins. The attempt's connect deadline bounds that dial; no extra deadline.
+- The swap waits for the peer's SETUP on the QUIC session
+  (`moq_net::Session::setup`) within that same deadline; until
+  then the WebSocket session gets no GOAWAY. A refused or stalled QUIC session
+  is dropped and WebSocket keeps serving. moq-lite-03 and -04 carry no server
+  SETUP, so they never upgrade. This crate's servers send SETUP after admission;
+  other servers may send it before admission and still refuse afterward.
 - On a successful upgrade the "WebSocket won" memo (`WEBSOCKET_WON` in
   `moq-tokio`, `websocketWon` in `js/net`) forgets the URL: QUIC works on this
   network, so the head start comes back. Otherwise a network where WebSocket
@@ -58,5 +64,6 @@ Shared decisions:
 
 ## Required
 
-- [Rust](/quest/m1/transport-upgrade/rust.md) - moq-tokio keeps the QUIC dial after WebSocket wins and migrates through the existing Draining path
 - [JavaScript](/quest/m1/transport-upgrade/js.md) - js/net keeps the WebTransport dial after WebSocket wins and migrates through the client-goaway handover
+- [Closed fallback](/quest/m1/transport-upgrade/closed-fallback.md) - a WebSocket session that closes right after connecting falls back to the pending QUIC dial instead of redialing
+- [JS qmux finish](/quest/m1/transport-upgrade/js-qmux-finish.md) - `@moq/qmux` reports a cleanly finished send stream as closed without error
