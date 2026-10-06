@@ -4,8 +4,9 @@
 
 A Rust peer can make any number of requests over one JS session on
 moq-transport drafts 14 to 16. Today `js/net` advertises
-`MAX_REQUEST_ID = 42069` (`js/net/src/connection/accept.ts`) and never grants
-more, so the peer stalls after about 21k requests.
+`MaxRequestId = 42069` in SETUP, as a server (`js/net/src/connection/accept.ts`)
+and as a client (`js/net/src/connection/connect.ts`), and never grants more,
+so the peer stalls after about 21k requests.
 
 ## Plan
 

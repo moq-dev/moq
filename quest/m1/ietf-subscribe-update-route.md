@@ -15,6 +15,8 @@ fixed independently. Route updates by their second field on drafts 14 to
 that field as `subscription_request_id` on all three affected drafts.
 Land a regression test for each affected draft with distinct update and
 target IDs, proving the update reaches the named request and failing without
-the fix.
+the fix. Rewrite the existing `test_classify_subscribe_update_followup` the
+same way rather than keep it beside them: its body carries a single ID, so it
+locks in the current routing.
 
 Public API: none. Wire: behaviour within the drafts; no format change.
