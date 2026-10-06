@@ -44,9 +44,10 @@ The cut:
   rather than misparse; no compatibility shim.
 - The draft's lite-07 changelog matches the wire and `just drafts check`
   passes.
-- The SETUP section's own 65,536-byte cap sentence is dropped if the general
-  Message Length cap from request caps (#4820) has landed, since it then
-  repeats that rule.
+- Preserve SETUP's MUST reject rule for a Message Length above 65,536 bytes.
+  The general cap proposed by request caps (#4820) only permits rejection
+  (MAY), so it does not replace SETUP's stronger requirement. Remove the
+  SETUP sentence only if the general rule requires the same rejection.
 
 Rust's lite-07 varints already carry the full 64 bits the draft specifies,
 so no codec work waits on the cut.
