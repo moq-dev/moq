@@ -97,7 +97,7 @@ impl UdpSocketState {
             && let Err(_err) =
                 set_socket_option(&*io, libc::IPPROTO_IP, libc::IP_RECVTOS, OPTION_ON)
         {
-            crate::log::debug!("Ignoring error setting IP_RECVTOS on socket: {_err:?}");
+            crate::udp::log::debug!("Ignoring error setting IP_RECVTOS on socket: {_err:?}");
         }
 
         let mut may_fragment = false;
@@ -144,7 +144,9 @@ impl UdpSocketState {
             if let Err(_err) =
                 set_socket_option(&*io, libc::SOL_SOCKET, libc::SO_TIMESTAMPNS, OPTION_ON)
             {
-                crate::log::debug!("Ignoring error setting SO_TIMESTAMPNS on socket: {_err:?}");
+                crate::udp::log::debug!(
+                    "Ignoring error setting SO_TIMESTAMPNS on socket: {_err:?}"
+                );
             }
         }
         #[cfg(any(target_os = "freebsd", apple))]
@@ -383,7 +385,7 @@ impl UdpSocketState {
     pub fn set_send_buffer_size(&self, socket: UdpSockRef<'_>, bytes: usize) -> io::Result<()> {
         #[cfg(apple)]
         let bytes = if bytes < Self::MIN_SAFE_SNDBUF {
-            crate::log::debug!(
+            crate::udp::log::debug!(
                 "raising requested SO_SNDBUF from {bytes} to {}",
                 Self::MIN_SAFE_SNDBUF
             );
@@ -495,7 +497,9 @@ impl UdpSocketState {
         let needed = resid.saturating_add(hdr.control_len());
         let sndbuf = self.send_buffer_size.load(Ordering::Relaxed);
         if needed > sndbuf {
-            crate::log::debug!("EMSGSIZE for {needed}-byte send: exceeds SO_SNDBUF ({sndbuf})");
+            crate::udp::log::debug!(
+                "EMSGSIZE for {needed}-byte send: exceeds SO_SNDBUF ({sndbuf})"
+            );
             return Err(io::Error::from_raw_os_error(libc::EMSGSIZE));
         }
         Ok(())
@@ -556,7 +560,7 @@ fn send(
                     // Prevent new transmits from being scheduled using GSO. Existing GSO transmits
                     // may already be in the pipeline, so we need to tolerate additional failures.
                     if state.max_gso_segments() > 1 {
-                        crate::log::info!(
+                        crate::udp::log::info!(
                             "`libc::sendmsg` failed with {e}; halting segmentation offload"
                         );
                         state.max_gso_segments.store(1, Ordering::Relaxed);

@@ -8,7 +8,7 @@ use std::{
 
 use socket2::SockRef;
 
-use crate::{
+use crate::udp::{
     TransportError, TransportErrorPayload, cmsg,
     imp::{decode_socket_addr, retry_if_interrupted, set_socket_option},
 };
@@ -130,7 +130,7 @@ impl LinuxError {
 #[cfg(any(target_os = "linux", target_os = "android"))]
 impl From<LinuxError> for TransportError {
     fn from(raw: LinuxError) -> Self {
-        crate::log::trace!(
+        crate::udp::log::trace!(
             "decoding Linux socket error: ee_origin={} ee_type={} ee_code={} ee_errno={} ee_info={}",
             raw.ee.ee_origin,
             raw.ee.ee_type,
@@ -196,7 +196,7 @@ pub(super) mod gso {
                 64
             }
             Err(_e) => {
-                crate::log::debug!(
+                crate::udp::log::debug!(
                     "failed to set `UDP_SEGMENT` socket option ({_e}); setting `max_gso_segments = 1`"
                 );
 
@@ -219,20 +219,22 @@ pub(super) mod gso {
         let kernel_version_string = match kernel_version_string() {
             Ok(kernel_version_string) => kernel_version_string,
             Err(_e) => {
-                crate::log::warn!("GSO disabled: uname returned {_e}");
+                crate::udp::log::warn!("GSO disabled: uname returned {_e}");
                 return false;
             }
         };
 
         let Some(kernel_version) = KernelVersion::from_str(&kernel_version_string) else {
-            crate::log::warn!(
+            crate::udp::log::warn!(
                 "GSO disabled: failed to parse kernel version ({kernel_version_string})"
             );
             return false;
         };
 
         if kernel_version < SUPPORTED_SINCE {
-            crate::log::info!("GSO disabled: kernel too old ({kernel_version_string}); need 4.18+",);
+            crate::udp::log::info!(
+                "GSO disabled: kernel too old ({kernel_version_string}); need 4.18+",
+            );
             return false;
         }
 

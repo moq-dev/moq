@@ -14,7 +14,7 @@ use std::{
 use libc::{c_int, c_uint};
 use windows_sys::Win32::Networking::WinSock;
 
-use crate::{
+use crate::udp::{
     EcnCodepoint, IO_ERROR_LOG_INTERVAL, RecvMeta, Transmit, UdpSockRef,
     cmsg::{self, CMsgHdr},
     log::debug,

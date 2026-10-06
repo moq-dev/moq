@@ -48,6 +48,8 @@ check-test *args:
 _lint *args:
     python3 sh/rs/stats-docs.py
     cargo fmt --all --check
+    # quinn-udp keeps quinn's formatting; cargo fmt skips it (see moq-sock's lib.rs).
+    rustfmt --edition 2024 --check rs/moq-sock/src/udp/mod.rs
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps "$@"
     cargo shear
     cargo sort --workspace --check --no-format
@@ -57,6 +59,7 @@ _lint *args:
 fix *args:
     cargo clippy --locked --fix --allow-staged --allow-dirty --all-targets "$@"
     cargo fmt --all
+    rustfmt --edition 2024 rs/moq-sock/src/udp/mod.rs
     cargo shear --fix
     cargo sort --workspace --no-format
 

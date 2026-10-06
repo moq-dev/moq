@@ -18,8 +18,8 @@ use std::{
 };
 
 #[cfg(not(target_os = "wasi"))]
-use quinn_udp::EcnCodepoint;
-use quinn_udp::{RecvMeta, Transmit, UdpSockRef, UdpSocketState};
+use moq_sock::udp::EcnCodepoint;
+use moq_sock::udp::{RecvMeta, Transmit, UdpSockRef, UdpSocketState};
 #[cfg(apple)]
 use socket2::MsgHdr;
 use socket2::Socket;
@@ -496,7 +496,7 @@ fn apple_fast_datapath() {
     );
     assert_eq!(
         send_state.max_gso_segments(),
-        quinn_udp::BATCH_SIZE,
+        moq_sock::udp::BATCH_SIZE,
         "max_gso_segments should be BATCH_SIZE after enabling fast path"
     );
 
@@ -708,7 +708,10 @@ fn recv_transport_error() {
     let err = received.expect("ICMP Port Unreachable was not received");
 
     assert!(
-        matches!(err.payload, quinn_udp::TransportErrorPayload::Unreachable),
+        matches!(
+            err.payload,
+            moq_sock::udp::TransportErrorPayload::Unreachable
+        ),
         "expected ICMP destination unreachable transport error"
     );
     assert_eq!(
@@ -770,7 +773,7 @@ fn recv_transport_error_ipv6() {
 
     assert!(matches!(
         err.payload,
-        quinn_udp::TransportErrorPayload::Unreachable
+        moq_sock::udp::TransportErrorPayload::Unreachable
     ));
 
     assert_eq!(err.raw_errno, libc::ECONNREFUSED);

@@ -7,7 +7,7 @@ use std::{
 
 use socket2::SockRef;
 
-use crate::{
+use crate::udp::{
     RecvMeta, Transmit, UdpSocketState,
     cmsg::{self, MsgHdr},
     imp::{BATCH_SIZE, IpTosTy, decode_recv, recv_single, retry_if_interrupted, send_single},

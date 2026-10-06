@@ -1,9 +1,12 @@
 //! Uniform interface to send and receive UDP packets with advanced features useful for QUIC
 //!
-//! This crate exposes kernel UDP stack features available on most modern systems which are required
+//! A hard fork of [quinn-udp](https://github.com/quinn-rs/quinn); all credit goes to the quinn
+//! developers. See `rs/moq-quic/README.md` for the upstream commit and carried changes.
+//!
+//! This module exposes kernel UDP stack features available on most modern systems which are required
 //! for an efficient and conformant QUIC implementation. As of this writing, these are not available
 //! in std or major async runtimes, and their niche character and complexity are a barrier to adding
-//! them. Hence, a dedicated crate.
+//! them.
 //!
 //! Exposed features include:
 //!
@@ -19,7 +22,7 @@
 //!
 //! Some features are unavailable in some environments. This can be due to an outdated operating
 //! system or drivers. Some operating systems may not implement desired features at all, or may not
-//! yet be supported by the crate. When support is unavailable, functionality will gracefully
+//! yet be supported by the module. When support is unavailable, functionality will gracefully
 //! degrade.
 //!
 //! [RFC 8981]: https://www.rfc-editor.org/rfc/rfc8981.html
@@ -68,27 +71,11 @@ mod imp;
 #[path = "wasi.rs"]
 mod imp;
 
-#[allow(unused_imports, unused_macros)]
+// moq-sock always logs through `tracing`, so quinn-udp's `log` and no-op
+// backends are not carried.
+#[allow(unused_imports)]
 mod log {
-    #[cfg(all(feature = "log", not(feature = "tracing-log")))]
-    pub(crate) use log::{debug, error, info, trace, warn};
-
-    #[cfg(feature = "tracing-log")]
     pub(crate) use tracing::{debug, error, info, trace, warn};
-
-    #[cfg(not(any(feature = "log", feature = "tracing-log")))]
-    mod no_op {
-        macro_rules! trace    ( ($($tt:tt)*) => {{}} );
-        macro_rules! debug    ( ($($tt:tt)*) => {{}} );
-        macro_rules! info     ( ($($tt:tt)*) => {{}} );
-        macro_rules! log_warn ( ($($tt:tt)*) => {{}} );
-        macro_rules! error    ( ($($tt:tt)*) => {{}} );
-
-        pub(crate) use {debug, error, info, log_warn as warn, trace};
-    }
-
-    #[cfg(not(any(feature = "log", feature = "tracing-log")))]
-    pub(crate) use no_op::*;
 }
 
 #[cfg(not(wasm_browser))]
@@ -268,7 +255,7 @@ const IO_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(60);
 ///
 /// Logging will only be performed if at least [`IO_ERROR_LOG_INTERVAL`]
 /// has elapsed since the last error was logged.
-#[cfg(all(not(wasm_browser), any(feature = "tracing-log", feature = "log")))]
+#[cfg(not(wasm_browser))]
 fn log_sendmsg_error(
     last_send_error: &Mutex<Instant>,
     err: impl core::fmt::Debug,
@@ -289,10 +276,6 @@ fn log_sendmsg_error(
         );
     }
 }
-
-// No-op
-#[cfg(not(any(wasm_browser, feature = "tracing-log", feature = "log")))]
-fn log_sendmsg_error(_: &Mutex<Instant>, _: impl core::fmt::Debug, _: &Transmit<'_>) {}
 
 /// A borrowed UDP socket
 ///
