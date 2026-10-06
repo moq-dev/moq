@@ -40,8 +40,3 @@ generic.
 ## Required
 
 - [fMP4 emsg](/quest/m3/emsg.md) - settles the shared timed-metadata contract this builds on, which needs maintainer agreement first
-
-## Related
-
-- [SEI sidecars](/quest/m2/sei.md) - the separate codec metadata
-  contract

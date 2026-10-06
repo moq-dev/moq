@@ -59,8 +59,6 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Refusal reasons](/quest/m2/refusal-reasons.md) - refused-session metrics tell an expired token from an invalid one, and count gateway admissions
 - [Bench coverage](/quest/m2/bench-coverage.md) - Criterion targets for moq-pattern matching first, then the stats producer, moq-mux containers, the hang catalog, and moq-auth
 - [Signed priority](/quest/m2/signed-priority.md) - every API priority is an `i8` with 0 as the unset midpoint, and hang's built-ins sit above it
-- [SEI separation study](/quest/m2/sei.md) - measure whether separating SEI saves enough, or has a metadata-only consumer, to justify a split
-- [AV1 metadata separation](/quest/m2/av1-metadata.md) - retain metadata OBUs inline while evaluating separate delivery
 - [Catalog track identity](/quest/m2/catalog-tracks.md) - a changed track configuration becomes a new track name or epoch, never a mutated definition
 - [Catalog colour model](/quest/m2/color-catalog.md) - the catalog describes a rendition's colour and HDR properties once a renderer consumes them
 - [Archive S3 wire proof](/quest/m2/archive-s3.md) - the archive proof also runs through the S3 client against an in-process S3-compatible server
