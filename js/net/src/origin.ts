@@ -784,6 +784,10 @@ export class Producer implements Table {
 		hooks.attachAnnouncer(producer, {
 			announce: (route) => this.#advertiseExact(path, front, route),
 			unannounce: () => this.#retractExact(path, front),
+			route: () =>
+				this.#state.local.peek()?.get(path) === front
+					? this.#state.advertisedLocal.peek()?.get(path)
+					: undefined,
 		});
 
 		const previous = created.get(path);
@@ -1590,6 +1594,9 @@ export class Consumer {
 		server.demanding.set(path, (server.demanding.get(path) ?? 0) + 1);
 		try {
 			for (;;) {
+				// The route may name another instance by the time its handler answers.
+				if (epoch !== undefined && this.#state.bestEntry(path, received)?.route.peek().epoch !== epoch)
+					throw unroutable();
 				const served = server.served.get(path);
 				if (served && served.closed.peek() === undefined) return served;
 				const rejected = server.rejected.get(path);
@@ -1642,7 +1649,17 @@ export class Dynamic {
 		makeDynamic = (prefix, entry, state, retract) => new Dynamic(prefix, entry, state, retract);
 	}
 
-	/** Re-price the route in place. The prefix is fixed at announce time. */
+	/** The route this handle advertises. */
+	get route(): Route {
+		return this.#entry.route.peek();
+	}
+
+	/**
+	 * Replace the route in place. The prefix is fixed at announce time.
+	 *
+	 * The route is taken as given, epoch included: another epoch (or none) names another
+	 * publisher instance, so re-price from the current one, `update({ ...dynamic.route, cost })`.
+	 */
 	update(route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint }): void {
 		if (this.#closed) throw new Error("dynamic is closed");
 		this.#entry.route.set(Route.normalize(route));

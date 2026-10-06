@@ -137,9 +137,13 @@ Three operations, on an origin:
   invisible and unroutable, for local consumers and peers alike, until
   `broadcast.announce(route)`.
 - `broadcast.announce(route)` / `broadcast.unannounce()` own that
-  advertisement. Announcing again re-prices the standing route, which competes
-  on cost with remote routes at the same path (a tie goes to the local
-  broadcast). The route retracts on `unannounce()`, `close()`, or the last
+  advertisement. Announcing again replaces the standing route as given, epoch
+  included, so re-price from the current one
+  (`broadcast.announce(broadcast.route().unwrap_or_default().with_cost(c))`);
+  another epoch, or none, announces a new broadcast; `origin::Dynamic` has the
+  same `route()` and `update(route)`. The route competes with
+  remote routes at the same path: the newest epoch wins, then the cheapest (a
+  tie goes to the local broadcast). The route retracts on `unannounce()`, `close()`, or the last
   producer dropping; tracks already in flight carry on to their own end.
 - `broadcast.close()` ends the broadcast for good: it retracts, leaves local
   discovery, and answers every later track lookup with `Unroutable`. Tracks

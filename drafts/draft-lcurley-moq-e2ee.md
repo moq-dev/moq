@@ -139,7 +139,6 @@ The path carries no format or protection marker; for example, the semantic name 
 A plaintext consumer that opens the protected broadcast fails because it cannot find the plaintext catalog it expects, not because of a path naming rule.
 Subscribers resolve `<opaque>` and take the epoch from its route, where relays rank the newest first.
 On a wire that cannot carry the route's epoch, the application supplies it over its own authenticated channel.
-A subscriber that already knows the full path parses the epoch from its last segment after removing `@`.
 
 The epoch and the path are not secret and are not authenticated.
 A relay that presents a wrong epoch causes authentication failure; a relay that withholds a newer instance denies service.
@@ -147,7 +146,7 @@ Neither can cause a nonce to repeat, because only the publisher instance chooses
 
 A restart or replacement of a publisher is a new instance and mints a new epoch.
 Transport sequence numbers therefore restart freely without any coordination between instances.
-Ended instances remain readable at their own path for as long as relays or archives retain them.
+An ended instance stays readable only for as long as relays or archives retain it under its epoch; once a newer epoch wins the shared path, subscribers resolve the newer one.
 
 
 # Canonical Encoding {#encoding}

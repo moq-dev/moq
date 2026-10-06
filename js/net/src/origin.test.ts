@@ -1957,6 +1957,42 @@ test("the newest epoch wins the path over a cheaper one and arrives as a new bro
 	origin.close();
 });
 
+test("demand naming an epoch is refused when the route changes instance while it waits", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const handle = origin.dynamic(Path.from("live"), { epoch: EPOCH });
+	const it = handle.requested();
+	const pending = wireOf(consumer).demand(Path.from("live/cam"), EPOCH);
+	const { value: req } = await it.next();
+
+	// Another instance now serves the route; its answer is not the one the peer named.
+	handle.update({ ...handle.route, epoch: Epoch.mint() });
+	req?.accept(new BroadcastProducer().consume());
+	await expect(pending).rejects.toThrow("unroutable");
+
+	handle.close();
+	origin.close();
+});
+
+test("re-pricing from the current route keeps the epoch", () => {
+	const origin = new Producer();
+	const handle = origin.dynamic(Path.from("live"), { epoch: EPOCH, cost: 5n });
+	handle.update({ ...handle.route, cost: 1n });
+	expect(handle.route).toEqual(Route.normalize({ epoch: EPOCH, cost: 1n }));
+
+	const broadcast = origin.createBroadcast(Path.from("room"));
+	expect(broadcast.route).toBeUndefined();
+	broadcast.announce({ epoch: EPOCH, cost: 5n });
+	broadcast.announce({ ...broadcast.route, cost: 1n });
+	expect(broadcast.route).toEqual(Route.normalize({ epoch: EPOCH, cost: 1n }));
+	broadcast.unannounce();
+	expect(broadcast.route).toBeUndefined();
+
+	broadcast.close();
+	handle.close();
+	origin.close();
+});
+
 test("a peer naming another epoch is refused rather than served a different instance", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();

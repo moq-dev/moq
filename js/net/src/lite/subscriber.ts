@@ -408,6 +408,10 @@ export class Subscriber {
 					});
 				};
 
+				// A restart keeps the epoch its announcement named, even through a placeholder
+				// below: a later restart that is not reflected still names that instance.
+				epoch ??= advertised.get(path)?.route.epoch;
+
 				// In Lite05+ the sender's origin arrives via AnnounceOk, not in each hop
 				// list, so fold it back in before checking.
 				if (hops !== undefined) {
@@ -420,7 +424,7 @@ export class Subscriber {
 						retract();
 						advertised.set(path, {
 							live: false,
-							route: { hops: full, cost: Cost.zero },
+							route: { epoch, hops: full, cost: Cost.zero },
 							captures: undefined,
 						});
 						continue;
@@ -447,13 +451,11 @@ export class Subscriber {
 					console.debug(`announced: broadcast=${path} dropped (hop chain at MAX_HOPS)`);
 					advertised.set(path, {
 						live: false,
-						route: { hops: [], cost: Cost.zero },
+						route: { epoch, hops: [], cost: Cost.zero },
 						captures: undefined,
 					});
 					continue;
 				}
-				// A restart keeps the epoch its announcement named.
-				epoch ??= advertised.get(path)?.route.epoch;
 				const route: Route = { epoch, hops: fullHops, cost: cost ?? Cost.zero };
 				const captures = scopeCaptures(scope, path);
 				if (!visible(path)) {

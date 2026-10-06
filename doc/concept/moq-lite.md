@@ -113,8 +113,10 @@ compresses when it helps; TypeScript decodes it but always sends literally.
 A broadcast exists only while it is announced, for consumers in the same
 process and across a session alike: one that is created but never announced
 can be neither discovered nor requested. A broadcast published locally
-competes with remote routes to its path like any other route, winning only a
-tie. Retracting a route (an unannounce, or the peer's `ANNOUNCE_END`)
+competes with remote routes to its path like any other route: a newer epoch
+beats it whatever the cost, so a local broadcast without an epoch loses to any
+remote route that carries one, and among equal epochs it wins a cost tie.
+Retracting a route (an unannounce, or the peer's `ANNOUNCE_END`)
 stops new requests from resolving through it but leaves subscriptions already
 in flight alone: each track runs to its own end or failure, or until its last
 subscriber leaves, which cancels it upstream. On moq-lite 05 and
@@ -148,7 +150,14 @@ names work exactly as without one.
   a new broadcast. Replicas of the same content announce the same one. A route
   without an epoch, such as a prefix claim, names no instance.
 - **Resolution** ranks the newest epoch first among routes at the same prefix,
-  ahead of cost, and a route without an epoch last.
+  ahead of cost, and a route without an epoch last. Newest means the latest
+  UUIDv7 timestamp, so ordering instances minted on different hosts trusts
+  their clocks: a restart on a host whose clock runs behind loses to the old
+  instance until that one retracts.
+- **Re-pricing**: announcing again (or `update` on a dynamic route) replaces
+  the whole route, epoch included. Start from the current route, as in
+  `broadcast.route()` or `dynamic.route()`, and change the cost, or the update
+  names another instance.
 - **Resume**: a subscription moves between routes with the same epoch without a
   seam, continuing from the first frame it lacks. A route without an epoch
   names no instance, so its subscriptions stay on that route (a transcoder
@@ -162,7 +171,11 @@ The epoch travels on moq-lite 07 in `ANNOUNCE_START`, and relays fill it into
 the `TRACK`, `SUBSCRIBE`, and `FETCH` they send upstream; a publisher refuses a
 request naming another epoch. Older moq-lite versions and moq-transport cannot
 carry it: their routes have no epoch, so they keep their subscriptions on one
-route and see a replacement as an ordinary end and start at the same path.
+route and see a replacement as an ordinary end and start at the same path. In
+a mixed deployment, where the same content reaches a relay over both an older
+link (no epoch) and a moq-lite 07 link (with one), the epoch-carrying route
+supersedes the other each time it appears, so a flapping moq-lite 07 link cuts
+the viewers resolved through the older one.
 
 ### Hidden broadcasts
 

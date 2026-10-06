@@ -92,7 +92,11 @@ Three operations, on an origin:
   invisible and unreachable, for local consumers and peers alike, until
   `broadcast.announce()`.
 - `broadcast.announce(route)` / `broadcast.unannounce()` own that
-  advertisement. Announcing again re-prices the standing route.
+  advertisement. Announcing again replaces the standing route as given, epoch
+  included, so re-price from the current one
+  (`broadcast.announce({ ...broadcast.route, cost })`); another epoch, or
+  none, announces a new broadcast. `Origin.Dynamic` has the same `route` and
+  `update(route)`.
 - `origin.dynamic(prefix, route)` claims `prefix` and every path beneath it
   (`""` claims everything). Hold the returned `Origin.Dynamic` while the
   claim should stay advertised; `close()` retracts it. A request beneath it

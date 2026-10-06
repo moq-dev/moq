@@ -40,8 +40,12 @@ itself is never used. A publisher whose groups restart, such as an encoder
 restarting from group 0, publishes under a new epoch, which replaces the old
 broadcast instead of resuming it. A route without an epoch, including every
 route on moq-lite 06 and older or moq-transport, keeps its subscriptions until it
-goes. Epochs travel only on moq-lite 07, which cluster links must opt into for
-seamless failover.
+goes. Seamless failover needs both: a publisher that announces an epoch, and
+moq-lite 07 on every link the route crosses, since epochs travel on nothing
+older. A cluster that mixes moq-lite 06 and 07 links to the same content has a
+second cost: the route that carries the epoch supersedes the one that does not
+each time it appears, so a flapping moq-lite 07 link cuts the viewers resolved
+through the older one.
 
 Failover routes must carry copies of the same broadcast. For each track, the
 relay requires matching timescale, retention window, publisher priority, and
