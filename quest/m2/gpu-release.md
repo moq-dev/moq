@@ -12,7 +12,7 @@ Release all three together: the VA-API and AMD proofs are what show the
 surface is right, and shipping it before them risks a second breaking change.
 
 The surface is a breaking `moq-video` change on `main`, and releases are
-patch-only for now. Open, for the
+patch-only for now (decided 2026-10-02). Open, for the
 maintainer at release time:
 
 - Backport the moq-video change set onto `release` as a moq-video minor bump

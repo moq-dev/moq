@@ -20,8 +20,6 @@ done. moq.pro pins this repository's `release` line, so the release gate below
 also keeps #4741 from reaching it early.
 The Pronto GPU integration lives in moq.pro.
 
-The branch flip is done except its #4605 backport to `release`; the
-Cloudflare switch waits on the maintainer as a condition quest.
 The DoS hardening from an external review on 2026-09-29, verified against `main`, stays in m0
 as security work. Its quests describe fixes, not exploits.
 
