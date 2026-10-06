@@ -211,6 +211,10 @@ impl Drop for State {
 /// fill carries the objects already published when we subscribed, and the subscription
 /// carries everything after them. The model has one producer per group, so the fill owns it
 /// while it writes the head and hands it over here for the live tail to append to.
+///
+/// A publisher that promises a fill and never delivers one costs only the fill's own stream
+/// and the group it heads: the tail waiting on it ends with the subscription, and a resumed
+/// copy goes live once a group past the answer's Largest arrives, head or not.
 enum Fill {
 	/// Requested, waiting on SUBSCRIBE_OK: it declares the timescale the fill's own object
 	/// timestamps are in, and the fetch stream can arrive before it does.
@@ -240,17 +244,23 @@ enum Fill {
 		producer: group::Producer,
 	},
 
-	/// No head is coming: none was requested, the fill failed, or the tail already claimed
-	/// it. A subgroup stream that starts mid-group is then unstitchable and gets dropped,
-	/// which degrades the join to the next group boundary.
+	/// No head is coming: none was requested, the fill failed, the tail already claimed it,
+	/// or we stopped reading. A subgroup stream that starts mid-group is then unstitchable
+	/// and gets dropped, which degrades the join to the next group boundary.
 	Done,
+
+	/// The publisher ended the subscription cleanly, so no tail is coming. Unlike
+	/// [`Fill::Done`], a head still being written is the whole group once it lands: a
+	/// pre-draft-20 joining FETCH is not in PUBLISH_DONE's Stream Count, so the settle can
+	/// end before it does.
+	Ended,
 }
 
 impl Fill {
 	/// Whether a head might still arrive or is waiting to be claimed, which is what makes a
 	/// subgroup stream worth peeking before its group is created.
 	fn outstanding(&self) -> bool {
-		!matches!(self, Fill::Done)
+		!matches!(self, Fill::Done | Fill::Ended)
 	}
 
 	/// Take the head for `sequence`, if this is one and it ends where the tail begins.
@@ -282,16 +292,15 @@ impl Fill {
 
 	/// Install the head a finished fetch stream produced.
 	///
-	/// [`Fill::Done`] is terminal: the subscription ended while the head was being written,
-	/// and its teardown could not reach a producer the fetch stream still owned. Cancel the
-	/// head rather than installing it for a tail that is never coming, or it outlives the
-	/// subscription unfinished.
+	/// [`Fill::Done`] and [`Fill::Ended`] are terminal: the subscription ended while the
+	/// head was being written, and its teardown could not reach a producer the fetch stream
+	/// still owned. Settle the head as that teardown would have rather than installing it
+	/// for a tail that is never coming, or it outlives the subscription unfinished.
 	fn install(&mut self, head: Fill) {
+		let mut head = head;
 		match self {
-			Fill::Done => {
-				let mut head = head;
-				head.cancel();
-			}
+			Fill::Done => head.cancel(),
+			Fill::Ended => head.release(),
 			_ => *self = head,
 		}
 	}
@@ -308,13 +317,25 @@ impl Fill {
 		}
 	}
 
+	/// The publisher ended the subscription cleanly: release the head, and any still being
+	/// written when it lands.
+	fn end(&mut self) {
+		self.release();
+		*self = Fill::Ended;
+	}
+
 	/// Abort a head nothing claimed because we stopped reading, not because its group ended.
 	///
 	/// The group may still be open upstream, so finishing it would cut it short for good: a
 	/// rejoin could not replace the cached group, and its readers would see it end early.
+	/// A clean end already settled the head, so [`Fill::Ended`] stays.
 	fn cancel(&mut self) {
-		if let Fill::Ready { producer, .. } = std::mem::replace(self, Fill::Done) {
-			let _ = producer.abort(Error::Cancel);
+		match std::mem::replace(self, Fill::Done) {
+			Fill::Ready { producer, .. } => {
+				let _ = producer.abort(Error::Cancel);
+			}
+			Fill::Ended => *self = Fill::Ended,
+			_ => {}
 		}
 	}
 }
@@ -2012,7 +2033,8 @@ where
 			.with_max_age(max_age)
 			.with_priority(super::priority::from_wire(priority.unwrap_or(128)));
 		// The copy already holds the track: it is current again up to the answer's Largest
-		// Location once the join's head lands, since leaving cut the group it was in.
+		// Location once the join's head lands or a newer group does, since leaving cut the
+		// group it was in.
 		let mut resuming = resumed.is_some().then(|| {
 			largest.map(|largest| track::Position {
 				group: largest.group,
@@ -2112,8 +2134,11 @@ where
 						return Poll::Ready(End::Fetch(request));
 					}
 					let _ = group_fetches.poll(waiter);
+					// A group past the answer's Largest also makes the copy current, so a join
+					// whose head never arrives cannot hold every later group back.
 					if let Some(largest) = resuming
-						&& poll_headed(&fill, waiter).is_ready()
+						&& (poll_headed(&fill, waiter).is_ready()
+							|| largest.is_some_and(|largest| track.poll_past(largest.group, waiter).is_ready()))
 					{
 						track.set_live(largest);
 						resuming = None;
@@ -2173,9 +2198,9 @@ where
 									})
 									.await;
 									// The publisher ended without a tail for the head, so the head
-									// is the whole group.
+									// is the whole group, even one that lands after this.
 									if let Ok(mut fill) = fill.write() {
-										fill.release();
+										fill.end();
 									}
 								}
 								// A no-op once an END_OF_TRACK declared the end.
@@ -3001,7 +3026,7 @@ where
 
 			let settled = fill.poll(waiter, |fill| match **fill {
 				Fill::Requested | Fill::Serving(_) | Fill::Active => Poll::Pending,
-				Fill::Ready { .. } | Fill::Done => Poll::Ready(()),
+				Fill::Ready { .. } | Fill::Done | Fill::Ended => Poll::Ready(()),
 			});
 
 			match settled {
@@ -3919,7 +3944,7 @@ fn poll_settled(settle: &mut Settle, waiter: &kio::Waiter, fill: &kio::Producer<
 fn poll_headed(fill: &kio::Producer<Fill>, waiter: &kio::Waiter) -> Poll<()> {
 	let headed = fill.poll(waiter, |fill| match **fill {
 		Fill::Requested | Fill::Serving(_) | Fill::Active => Poll::Pending,
-		Fill::Ready { .. } | Fill::Done => Poll::Ready(()),
+		Fill::Ready { .. } | Fill::Done | Fill::Ended => Poll::Ready(()),
 	});
 	match headed {
 		Poll::Pending => Poll::Pending,
@@ -8373,6 +8398,85 @@ mod joining_fetch_tests {
 				run.subscriber.state.lock().subscribes.values().next().is_some(),
 				"{version}: the subscription continues live"
 			);
+		}
+	}
+
+	/// A joining FETCH is not one of the subscription's counted streams, so a clean
+	/// PUBLISH_DONE can settle while its head is still being written. The head is then the
+	/// whole group, as it is when it lands first, rather than cut short as on a leave.
+	#[tokio::test(start_paused = true)]
+	async fn a_head_landing_after_a_clean_end_finishes_its_group() {
+		let largest = Some(ietf::Location { group: 4, object: 0 });
+		for version in JOINING_DRAFTS {
+			let mut ok = subscribe_ok(version, largest);
+			ok.extend(message_bytes(
+				ietf::PublishDone::ID,
+				&ietf::PublishDone {
+					request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+						.then_some(RequestId(1)),
+					status_code: ietf::PublishDoneStatus::TrackEnded.code(version),
+					stream_count: 0,
+					reason_phrase: "done".into(),
+				},
+				version,
+			));
+			let mut run = JoinRun::start(version, None, ok, fetch_ok(version)).await;
+			let fetch_id = *run
+				.subscriber
+				.state
+				.lock()
+				.fetches
+				.keys()
+				.next()
+				.expect("joining FETCH");
+
+			// The head's first object arrives, but not its end.
+			let mut objects = Vec::new();
+			ietf::FetchHeader::TYPE.encode(&mut objects, version).unwrap();
+			ietf::FetchHeader { request_id: fetch_id }
+				.encode(&mut objects, version)
+				.unwrap();
+			if version == Version::Draft14 {
+				4u64.encode(&mut objects, version).unwrap(); // group
+				0u64.encode(&mut objects, version).unwrap(); // subgroup
+				0u64.encode(&mut objects, version).unwrap(); // object
+				0u8.encode(&mut objects, version).unwrap(); // priority
+				Vec::<u8>::new().encode(&mut objects, version).unwrap();
+			} else {
+				ietf::FetchObject::Object {
+					subgroup: ietf::FetchSubgroup::Zero,
+					group: Some(4),
+					object: Some(0),
+					priority: Some(0),
+					properties: None,
+				}
+				.encode(&mut objects, version)
+				.unwrap();
+			}
+			1u64.encode(&mut objects, version).unwrap();
+			objects.push(b'x');
+			let data = ScriptedSession::new(objects);
+			let (_, recv) = data.clone().open_bi().await.unwrap();
+			let mut reader = Reader::new(recv, version);
+			let mut receiving = run.subscriber.clone();
+			let mut fill = Box::pin(receiving.recv_fill(&mut reader));
+			assert!(futures::poll!(fill.as_mut()).is_pending());
+
+			let mut subscriber = (&mut run._hold.2).await.expect("subscribed");
+			let mut group = subscriber.recv_group().await.unwrap().unwrap();
+			assert_eq!(group.sequence, 4, "{version}");
+			assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"x");
+
+			// The grace runs out with the head still being written, ending the subscription.
+			(&mut run.serving).await.unwrap();
+
+			data.close(crate::lite::test_transport::Close::Fin);
+			assert!(
+				matches!(futures::poll!(fill.as_mut()), Poll::Ready(Ok(()))),
+				"{version}"
+			);
+			let end = group.read_frame().await;
+			assert!(matches!(end, Ok(None)), "{version}: the head was cut short: {end:?}");
 		}
 	}
 

@@ -254,3 +254,74 @@ async fn rejoin_mid_group_keeps_the_head_for_later_readers() {
 		.unwrap_or_else(|_| panic!("{version}: timed out"));
 	}
 }
+
+/// A rejoin whose join head never arrives still goes live once a newer group does.
+///
+/// The publisher accepts the join, but its stream is lost before its header. The open group
+/// is gone for this copy, but the groups after it must still reach readers, local and
+/// downstream, rather than wait on a head that is never coming.
+#[tokio::test(start_paused = true)]
+async fn rejoin_goes_live_without_the_join_head() {
+	for version in ["moq-transport-19", "moq-transport-22"] {
+		tokio::time::timeout(TEST_TIMEOUT, async {
+			let publisher = produce_origin(1);
+			let relay = produce_origin(2);
+			let client = produce_origin(3);
+
+			let broadcast = publisher.create_broadcast("bench").unwrap();
+			let track = broadcast.create_track("video", None).unwrap();
+			broadcast.announce(Default::default()).unwrap();
+			let mut open = track.append_group().unwrap();
+			open.write_frame(Timestamp::ZERO, b"a0".as_ref()).unwrap();
+
+			let version: Version = version.parse().unwrap();
+			let mut options = MockConnectOptions::new(version);
+			options.server_publish = Some(publisher.consume());
+			options.client_subscribe = Some(relay.clone());
+			let upstream = connect_mock(options).await;
+			let mut options = MockConnectOptions::new(version);
+			options.server_publish = Some(relay.consume());
+			options.client_subscribe = Some(client.clone());
+			let _downstream = connect_mock(options).await;
+
+			let consumer = client.consume();
+			consumer.routed("bench").await.unwrap();
+			let remote = consumer.request_broadcast("bench").await.unwrap();
+			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
+			let mut group = sub.recv_group().await.unwrap().unwrap();
+			assert_eq!(group.read_frame().await.unwrap().unwrap().payload, b"a0".as_ref());
+			drop((group, sub));
+			track.demand().unused().await.unwrap();
+
+			// The rejoin's join stream is lost before its header.
+			upstream.server_transport.hold_unis();
+			let rejoin = tokio::spawn(async move {
+				let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
+				loop {
+					let mut group = sub.recv_group().await.unwrap().unwrap();
+					if group.sequence == 1 {
+						return read_all(&mut group).await.unwrap();
+					}
+				}
+			});
+			track.demand().used().await.unwrap();
+			tokio::time::sleep(Duration::from_millis(100)).await;
+			upstream.server_transport.drop_unis();
+
+			let mut next = track.append_group().unwrap();
+			next.write_frame(Timestamp::from_millis(1000).unwrap(), b"b0".as_ref())
+				.unwrap();
+			next.finish().unwrap();
+
+			let local = relay.consume().request_broadcast("bench").await.unwrap();
+			let mut sub = local.track("video").unwrap().subscribe(None).await.unwrap();
+			let mut group = sub.recv_group().await.unwrap().unwrap();
+			assert_eq!(group.sequence, 1, "{version}");
+			assert_eq!(read_all(&mut group).await.unwrap(), [b"b0".to_vec()], "{version}");
+
+			assert_eq!(rejoin.await.unwrap(), [b"b0".to_vec()], "{version}");
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{version}: timed out"));
+	}
+}
