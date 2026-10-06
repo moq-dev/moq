@@ -2,10 +2,10 @@
 
 ## Goal
 
-MoQ's QUIC stack lives in `rs/` as `moq-quic` (the sans-IO core),
-`moq-quic-udp`, `moq-quic-tokio`, and `web-transport-moq`, forked from
-quinn-rs/quinn `main`. Every MoQ QUIC path (moq-tokio and moq-uring) runs on
-it, the `moq-noq*` dependencies are gone, and a QUIC change lands in the same
+MoQ's QUIC stack lives in `rs/`, forked from quinn-rs/quinn `main`:
+`moq-quic` (the sans-IO core), quinn-udp in `moq-sock`, and quinn's async
+layer and `web-transport-moq` in moq-tokio. Every MoQ QUIC path (moq-tokio
+and moq-uring) runs on it, the `moq-noq*` dependencies are gone, and a QUIC change lands in the same
 PR as the MoQ code that needs it.
 
 Out of scope: iroh keeps upstream noq (the `iroh` feature still compiles it for
@@ -35,9 +35,12 @@ them:
 - **In-tree**, so `just check` and CI cover the stack, one PR spans the core
   and its consumers, and `release` and `main` each carry their own copy instead of
   double-landing fixes on the 1.3 and 2.0 fork lines.
-- **Named by role**: `moq-quic`, `moq-quic-udp`, `moq-quic-tokio`;
-  `web-transport-moq` keeps its name. Each crate's README and license credit
-  quinn and noq.
+- **One new crate, named by role**: `moq-quic`. Decided 2026-10-06:
+  quinn-udp becomes a `moq-sock` module, since both runtimes consume it, and
+  quinn's async layer and `web-transport-moq` become moq-tokio modules,
+  tokio-only, rather than `moq-quic-udp` and `moq-quic-tokio` crates. Each
+  import's first commit stays verbatim from upstream for diffability. The
+  imported code's README and license credit quinn and noq.
 - **A break.** moq-tokio exposes `noq::Endpoint`,
   `noq::TransportConfig`, and `noq::Incoming` publicly, so the crate swap is
   a break.
@@ -49,20 +52,17 @@ them:
   [QUIC quests](/quest/m1/quic/README.md) wait for this line and land
   in-tree.
 
-This README's own work: delete moq-dev/noq's `moq-sync.yml`, mark its README
-frozen, and document advisory triage in `rs/moq-quic/README.md`. `cargo audit`
-cannot match renamed crates, so the triage is: watch quinn-rs/quinn's security
-advisories and releases, check each fix against `moq-quic`, and port it with
-its regression test. Every carried change in moq-dev/noq's `CHANGELOG-MOQ.md`
+This README's own work: delete moq-dev/noq's `moq-sync.yml` and mark its
+README frozen. Advisory triage is documented in `rs/moq-quic/README.md`.
+Every carried change in moq-dev/noq's `CHANGELOG-MOQ.md`
 is either ported by a child quest or recorded as not applicable in the
 [switch](/quest/m1/quic/fork/switch.md) PR.
 
 ## Required
 
-- [Import quinn](/quest/m1/quic/fork/import.md) - quinn's three crates build and test in-tree as `moq-quic*`, verbatim at a recorded commit, with no consumer yet
 - [Port BBR3](/quest/m1/quic/fork/bbr3.md) - the fork's corrected BBR3 and controller callbacks run on `moq-quic` as the default controller
-- [Lazy stream slots](/quest/m1/quic/fork/stream-slots.md) - relay memory on `moq-quic` matches `moq-noq`
-- [Switch](/quest/m1/quic/fork/switch.md) - `web-transport-moq`, moq-tokio, and moq-uring run on `moq-quic`, and `moq-noq*` is gone
+- [Import quinn-udp](/quest/m1/quic/fork/udp.md) - quinn-udp is a `moq-sock` module carrying the GSO resend fix, replacing `moq-noq-udp`
+- [Switch](/quest/m1/quic/fork/switch.md) - quinn's async layer and `web-transport-moq` join moq-tokio, both runtimes run on `moq-quic`, `moq-noq*` is gone, and relay memory matches `moq-noq`
 
 ## Related
 
