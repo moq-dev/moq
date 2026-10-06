@@ -43,8 +43,9 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	catalog: crate::catalog::Producer<E>,
 	container: hang::catalog::Container,
 
-	/// Held until the Tracks element is processed, so the catalog is withheld from the broadcast
-	/// until every rendition is in (and, when composed with other importers, until they finish too).
+	/// Held until the first block anchors the clock, so the catalog is withheld from the broadcast
+	/// until every rendition is in and its root `clock` is final (and, when composed with other
+	/// importers, until they release theirs too).
 	initial_reservation: Option<crate::catalog::Reserved<E>>,
 
 	/// Accumulated unparsed input.
@@ -262,8 +263,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			MatroskaSpec::Tracks(Master::Full(children)) if !self.tracks_seen => {
 				self.handle_tracks(children)?;
 				self.tracks_seen = true;
-				// The full track set is declared now; release the reservation so the catalog publishes.
-				self.initial_reservation = None;
+				// The reservation stays held until the first block anchors the clock, unless no track
+				// was declared: then no block ever will.
+				if self.tracks.is_empty() {
+					self.initial_reservation = None;
+				}
 			}
 			MatroskaSpec::Cluster(Master::Start) => {
 				self.cluster_timestamp = 0;
@@ -430,8 +434,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			.checked_mul(self.timestamp_scale_ns)
 			.ok_or(Error::TimestampOverflow)?;
 		let timestamp = Timestamp::from_nanos(pts_ns)?;
-		// The first block is live on arrival.
+		// The first block is live on arrival. Anchor before releasing the reservation, so the
+		// first snapshot carries the final clock; Tracks declared every track, so any track's
+		// block releases it.
 		self.catalog.anchor(timestamp)?;
+		self.initial_reservation = None;
 
 		// Audio tracks: always treat as keyframes (matches fmp4 behavior).
 		let keyframe = matches!(track.kind, TrackKind::Audio) || keyframe;
@@ -473,6 +480,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> Result<()> {
+		// No frame follows to anchor the clock, so publish the declared track set now.
+		self.initial_reservation = None;
 		for track in self.tracks.values_mut() {
 			if let Some(g) = track.group.take() {
 				g.finish()?;

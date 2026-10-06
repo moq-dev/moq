@@ -7,7 +7,9 @@ that wants to hear from its viewers can solicit feedback there too. The
 publisher's `stats` track is one snapshot of what it sent, per rendition and
 for its connection. A viewer publishes one `.echo` broadcast per soliciting
 catalog it reads, carrying what it received and played, per rendition, and
-its own connection. A dashboard reads both the same way a publisher does. Stats and
+its own connection. A dashboard reads both the same way a publisher does. One
+shared model turns either report into a health verdict, and a bounded
+preflight run reports which media layer of a broadcast is broken. Stats and
 feedback cost nothing on the network unless someone subscribes. Not here: the
 relay's `moq-stats` layout, which stays as it is; clock synchronization; any
 requirement that a client report; and feedback as an input to billing,
@@ -94,8 +96,15 @@ kind.
   `drafts/draft-lcurley-moq-hang.md` specs the wire.
 
 Decided in the 2026-09-30 audit: a Rust encoder adapting its bitrate to viewer
-feedback moved to [encoder feedback](/quest/m2/stats-encoder-feedback.md) (m2),
-along with its open questions. This line only publishes and reads the reports.
+feedback moved to [encoder feedback](/quest/m3/stats-encoder-feedback.md) (m3),
+along with its open questions. This line publishes, reads, and classifies the
+reports; no encoder acts on them here.
+
+Decided 2026-10-05 (moq.pro audit): the client health model and preflight
+media checks moq.pro planned against the pre-#4510 `.stats` broadcast are
+generic, so they join this line as [client health](/quest/m1/stats/health.md)
+and [preflight](/quest/m1/stats/preflight.md). moq.pro keeps the per-project
+connection view and the dashboard flow.
 
 ## Required
 
@@ -107,10 +116,15 @@ along with its open questions. This line only publishes and reads the reports.
   moq-mux remuxes publish stats and feedback
 - [Browser reporters](/quest/m1/stats/js.md) - `<moq-publish>` publishes
   stats and `<moq-watch>` publishes feedback
+- [Client health](/quest/m1/stats/health.md) - two snapshots become a
+  health sample and a verdict that names its observer, in Rust and JS
+- [Preflight](/quest/m1/stats/preflight.md) - a bounded test run over a
+  broadcast reports which media layer is broken and why
 
 ## Related
 
-- [QoS](/quest/m1/qos/README.md) - the relay's delivery counters, the other
-  half of a health verdict
-- [Encoder feedback](/quest/m2/stats-encoder-feedback.md) - a Rust encoder
+- [QoS](/quest/m1/qos/README.md) - the relay's delivery counters; whether a
+  combined per-broadcast verdict reads both is open in
+  [client health](/quest/m1/stats/health.md)
+- [Encoder feedback](/quest/m3/stats-encoder-feedback.md) - a Rust encoder
   adapts its bitrate to what its viewers report

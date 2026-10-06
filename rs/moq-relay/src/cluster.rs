@@ -878,6 +878,10 @@ pub struct Cluster {
 	lan_auth: Arc<std::sync::OnceLock<LanAuth>>,
 	pub(crate) nodes: crate::nodes::Nodes,
 
+	/// Sessions admission turned away, by reason. Shared by every listener and
+	/// runtime so `/metrics` sees every refusal on the node.
+	pub(crate) refusals: crate::refusals::Refusals,
+
 	/// Hands out the `conn` id every session logs under, inbound and outbound
 	/// alike, so one id space covers the whole process and an id in the `/nodes`
 	/// view always points at the same session in the logs.
@@ -973,6 +977,7 @@ impl Cluster {
 			#[cfg(feature = "cluster-lan")]
 			lan_auth: Arc::new(std::sync::OnceLock::new()),
 			nodes,
+			refusals: Default::default(),
 			connection_ids: Arc::default(),
 			client_tls: None,
 			origin,

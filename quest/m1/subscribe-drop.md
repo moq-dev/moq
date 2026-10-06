@@ -54,9 +54,6 @@ publisher skipped or never opened ends the track without waiting out the
 grace. Decided in the 2026-09-30 audit: the case moved here so the basic
 tail interop could land first.
 
-PR #4455 (`quest/m1/rs2ts/lite-leading-ones`) also edits the lite-07 wire
-(varints) and no quest tracks it; coordinate the draft's lite-07 changelog
-with it.
 
 ## Related
 

@@ -71,6 +71,10 @@ Decided in planning interviews on 2026-10-01:
   the field. moq-transcode producing same-size codec fallbacks; the consumer
   publishes its own.
 
+## Required
+
+- [Enabled flag](/quest/m1/catalog-enabled.md) - the `enabled` field selection filters on first
+
 ## Related
 
 - [JS rendition ranking](/quest/m1/js-ranked.md) - mirrors `Video::ranked` in `@moq/hang`, which sorts by preference first once this quest lands

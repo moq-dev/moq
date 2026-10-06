@@ -34,14 +34,14 @@ Decided (2026-10-04):
   black keyframe, so a viewer released before this field shows black rather
   than a frozen picture. Older viewers otherwise keep selecting a disabled
   rendition; that degradation is accepted and noted in the changelog.
-- Viewer: `@moq/watch` deselects a disabled rendition and keeps its audio
-  graph ([audio graph lifetime](/quest/m1/watch-audio-graph.md)).
+- Viewer: `@moq/watch` deselects a disabled rendition, and its audio graph
+  outlives the absence as it does for a removed one.
 - Bandwidth: a rendition is enabled only once its reservation is granted, and
   disabled, with encoding stopped, when the grant falls below its floor,
   until the grant recovers. A disabled rendition loses its subscribers, and
   the allocator grants nothing to an undemanded track, so recovery evaluates
   a hypothetical share against the current estimate instead of waiting for a
-  grant. The [ladder](/quest/m2/ladder/README.md) and
+  grant. The [ladder](/quest/m3/ladder/README.md) and
   [audio grant following](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md)
   adopt that rule; this quest only defines the field.
 - Everything else that names `stalled` moves to `enabled`: moq-transcode's
@@ -55,10 +55,6 @@ rendition and `enabled: false`, and a viewer deselects it and keeps one
 AudioContext across disable and enable; a legacy `stalled: true` changes
 nothing; nothing in the tree writes `stalled`.
 
-## Required
-
-- [Audio graph lifetime](/quest/m1/watch-audio-graph.md) - the viewer keeps its graph across an absence, which a disable reuses
-
 ## Closes
 
 - [#4772](https://github.com/moq-dev/moq/issues/4772) - close this issue when the quest finishes
@@ -66,5 +62,5 @@ nothing; nothing in the tree writes `stalled`.
 
 ## Related
 
-- [Ladder](/quest/m2/ladder/README.md) - disables a rung its grant cannot sustain
+- [Ladder](/quest/m3/ladder/README.md) - disables a rung its grant cannot sustain
 - [Rendition preference](/quest/m1/rendition-preference.md) - the other per-rendition selection field

@@ -34,8 +34,12 @@ generate more stats.
   group segment literally named `node` is ambiguous; don't use one.
 
 At depth 0 the broadcast stays announced for the producer's life. At depth
-1 or more, a group's broadcast is announced while that group has entries and
-unannounced once it has none. Group numbers keep increasing across recreated
+1 or more, a group's broadcast is announced while that group has entries, and
+for a linger (five minutes by default) after its last one leaves. A group that
+returns within the linger keeps its broadcast, so viewer churn doesn't
+unannounce and re-announce it across the mesh; while it lingers empty, its
+tracks hold `{}`. Once the linger elapses with the group still empty, the
+broadcast is unannounced. Group numbers keep increasing across recreated
 tracks and group broadcasts for the producer's life; they may have gaps. A
 recreated compressed track starts a new group with a full snapshot, never a
 delta whose compression state belonged to its previous writer.
