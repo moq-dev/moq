@@ -182,7 +182,7 @@ struct Declaration {
 	/// The source init's ftyp, for a CMAF rendition.
 	ftyp: Option<mp4_atom::Ftyp>,
 	/// An Opus sample entry synthesized without the catalog's OpusHead, so its pre-skip
-	/// and output gain are guesses a later description may correct.
+	/// is a guess a later description may correct.
 	provisional: bool,
 }
 
@@ -400,7 +400,8 @@ impl Declaration {
 
 /// The `stsd` a returning or reconfigured rendition must keep, without the AAC bitrate
 /// hints a catalog's `bitrate` churns: decoders ignore them. With `guessed`, one side's
-/// Opus pre-skip and gain were made up without an OpusHead, so only the rest must agree.
+/// Opus pre-skip was made up without an OpusHead, so only the rest must agree. Its gain
+/// was not: a wrong gain changes every sample, so a nonzero one fails.
 fn sample_entry(trak: &mp4_atom::Trak, guessed: bool) -> mp4_atom::Stsd {
 	let mut stsd = trak.mdia.minf.stbl.stsd.clone();
 	for codec in &mut stsd.codecs {
@@ -410,10 +411,7 @@ fn sample_entry(trak: &mp4_atom::Trak, guessed: bool) -> mp4_atom::Stsd {
 				mp4a.esds.es_desc.dec_config.avg_bitrate = 0;
 				mp4a.btrt = None;
 			}
-			mp4_atom::Codec::Opus(opus) if guessed => {
-				opus.dops.pre_skip = 0;
-				opus.dops.output_gain = 0;
-			}
+			mp4_atom::Codec::Opus(opus) if guessed => opus.dops.pre_skip = 0,
 			_ => {}
 		}
 	}

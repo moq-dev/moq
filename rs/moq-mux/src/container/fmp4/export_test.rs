@@ -1541,9 +1541,24 @@ async fn an_opus_head_before_the_init_is_written() {
 	assert_eq!(init_pre_skip(&init), 312);
 }
 
-/// An OpusHead with another channel count is a different track, not a settled guess.
+/// An OpusHead with another channel count or gain is a different track, not a settled
+/// guess: the gain changes every sample, so a written init can't keep a guessed one.
 #[tokio::test(start_paused = true)]
 async fn an_opus_head_that_disagrees_fails() {
+	for head in [opus_head(1, 312), opus_head_gain(-1536)] {
+		an_opus_head_fails(head).await;
+	}
+}
+
+/// An OpusHead for stereo with `output_gain`.
+fn opus_head_gain(output_gain: i16) -> Bytes {
+	let mut head = crate::codec::opus::Config::new(48_000, 2).with_pre_skip(312);
+	head.output_gain = output_gain;
+	head.encode().unwrap()
+}
+
+/// Declare stereo Opus without a head, write the init, then fail on `head`.
+async fn an_opus_head_fails(head: Bytes) {
 	let (mut live, mut audio) = live_av();
 	let name = audio.name().to_string();
 	live.track.write(video_frame(0, true)).unwrap();
@@ -1552,7 +1567,7 @@ async fn an_opus_head_that_disagrees_fails() {
 	chunk_now(&mut exporter).await.init().expect("init");
 	drain_now(&mut exporter).await;
 
-	describe_audio(&mut live, &name, opus_head(1, 312));
+	describe_audio(&mut live, &name, head);
 	let err = error_now(&mut exporter).await;
 	assert!(
 		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackChanged(changed)) if *changed == name),
