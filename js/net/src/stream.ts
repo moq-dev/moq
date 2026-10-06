@@ -22,16 +22,21 @@ import {
 
 // Decode raw transport errors before mapping so they cannot bypass the negotiated
 // registry. Ordinary errors already send 0 and retain their local identity.
-// A bare stream code takes the same check, without building a StreamError first.
 function withCode(reason: unknown, stream: StreamVersion): unknown {
 	const version = asIetf(stream);
-	if (typeof reason === "number") {
-		const code = version === undefined || sharedStreamCode(reason, version) ? reason : StreamCode.Internal;
-		return toTransport(code as StreamCode, "cancel");
-	}
 	const decoded = fromTransport(reason, { version });
 	const code = toStreamCode(decoded, { version });
 	return code === StreamCode.Internal && decoded === reason ? reason : toTransport(code, decoded.message);
+}
+
+// A bare number is a stream code, and only Reader.stop takes one. Writer.reset stays on
+// withCode, which reads a number as a non-stream error and sends Internal.
+function stopReason(reason: unknown, stream: StreamVersion): unknown {
+	if (typeof reason !== "number") return withCode(reason, stream);
+	const version = asIetf(stream);
+	const code =
+		version === undefined || sharedStreamCode(reason, version) ? (reason as StreamCode) : StreamCode.Internal;
+	return toTransport(code, "cancel");
 }
 
 const MAX_U31 = 2 ** 31 - 1;
@@ -485,7 +490,7 @@ export class Reader {
 		const reader = this.#reader;
 		if (!reader) return;
 		this.#reader = undefined;
-		reader.cancel(withCode(reason, this.version)).catch(() => void 0);
+		reader.cancel(stopReason(reason, this.version)).catch(() => void 0);
 	}
 
 	// Decoded like #fill: a caller racing this against a read must not get a different error

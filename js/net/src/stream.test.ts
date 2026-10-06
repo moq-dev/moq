@@ -611,6 +611,14 @@ test("a numeric stop sends only a code the negotiated draft shares", async () =>
 	expect((draft18 as { streamErrorCode?: number }).streamErrorCode).toBe(StreamCode.GoingAway);
 });
 
+test("Writer reset still reads a bare number as Internal", async () => {
+	const aborted = Promise.withResolvers<unknown>();
+	const writer = new Writer(new WritableStream({ abort: aborted.resolve }), Version.DRAFT_18);
+	writer.reset(StreamCode.GoingAway);
+	const reason = await aborted.promise;
+	expect((reason as { streamErrorCode?: number }).streamErrorCode).toBe(StreamCode.Internal);
+});
+
 // Deadlines for the stalled fixtures below: one they always blow through, and one they
 // never reach because the slot frees first. Neither is a delay any test waits out.
 const EXPIRES_MS = 10;
