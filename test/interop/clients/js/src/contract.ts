@@ -152,6 +152,15 @@ export type Sample = {
 	resources: Resources;
 };
 
+// ── the refused session ─────────────────────────────────────────────────────
+
+/** How a refused session ended, as `WebTransport.closed` reported it to the page. */
+export type CloseState =
+	/** `closed` resolved: the close capsule arrived. */
+	| { closeCode: number; reason: string }
+	/** `closed` rejected, or the relay admitted the session: the close never said why. */
+	| { error: string };
+
 // ── the command channel ─────────────────────────────────────────────────────
 
 /**
