@@ -2306,8 +2306,12 @@ impl TrackIo {
 async fn run_front(task: FrontTask, origin: TasksWeak) {
 	let mut in_flight = serve_front(task).await;
 	// Each keeps its copy for the readers still on their way, then lets go as an unread
-	// track parks, so the copy never keeps its source subscribed for nobody.
+	// track parks, so the copy never keeps its source subscribed for nobody. A plain
+	// `is_used` suffices: the front closed its broadcast, which refuses every lookup, so
+	// no reader can arrive once the last one left.
 	kio::wait(|waiter| {
+		// Dropped without a release, so a reader on its way keeps the copy; it stays held
+		// only while the logical track's state does, for an origin nobody owns.
 		if origin.poll_orphaned(waiter).is_ready() {
 			return Poll::Ready(());
 		}
@@ -8403,8 +8407,8 @@ mod tests {
 			.expect("the front subscribed the source")
 			.unwrap();
 
-		// The source closing wakes the front before the reader leaving does, so it ends
-		// with the track unread and its copy not parked yet.
+		// The front looks at a closed source before demand edges, so it ends with the
+		// track unread and its copy not parked yet.
 		drop(sub);
 		drop(broadcast);
 		settle(|| resolved.is_closed()).await;
