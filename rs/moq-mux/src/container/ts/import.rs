@@ -2652,9 +2652,7 @@ fn opus_config(descriptors: &[catalog::Descriptor]) -> crate::Result<opus::Confi
 
 	let mut config = opus::Config::new(48_000, channels);
 	if channels > 2 {
-		let mapping = opus::Mapping::vorbis(channels as u8)?;
-		config.mapping_family = mapping.family();
-		config.mapping = Some(mapping);
+		config.mapping = Some(opus::Mapping::vorbis(channels as u8)?);
 	}
 	Ok(config)
 }

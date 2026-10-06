@@ -109,7 +109,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [GStreamer surround Opus](/quest/m1/gst-opus-surround.md) - the moq-gst sink publishes 3 to 8 channel Opus with the OpusHead its caps describe
 - [TS AAC PCE joins](/quest/m1/ts-aac-pce-join.md) - PCE-described AAC over TS plays after a mid-stream join or resume, and a missing PCE silences only its track
 - [FFI frame duration default](/quest/m1/ffi-frame-duration-default.md) - the binding audio encoder takes the codec's own frame by default, so `aac()` needs no explicit 0
-- [Opus mapping family](/quest/m1/opus-mapping-family.md) - the Opus head config keeps its mapping family only in `mapping`
 - [mp4-atom dOps mapping](/quest/m1/mp4-atom-dops-mapping.md) - a released mp4-atom reads and writes any `dOps` channel mapping family and table
 - [mp4-atom avc3](/quest/m1/mp4-atom-avc3.md) - a released mp4-atom reads and writes an `avc3` sample entry
 - [CMAF surround Opus](/quest/m1/cmaf-opus-surround.md) - fMP4 import and export carry an Opus channel mapping table

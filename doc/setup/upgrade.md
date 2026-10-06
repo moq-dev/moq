@@ -83,6 +83,11 @@ These land with the next breaking release, not the 2026-09-23 train.
   and `VarInt::try_from(v)?.encode_quic(buf)` is
   `moq_net::varint::encode_quic(v, buf)`, which fails past
   `varint::MAX_QUIC` (2^62 - 1).
+- **Opus mapping family lives only on `mapping`.**
+  `moq_mux::codec::opus::Config::mapping_family` is gone. Family 0 is
+  `mapping: None`; any other family is the mapping's own (`mapping.family()`).
+  Set `mapping` alone when building a surround head. The OpusHead bytes are
+  unchanged.
 
 ## Wire
 
