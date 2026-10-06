@@ -873,6 +873,19 @@ fn synthesize_opus_trak_preserves_pre_skip() {
 	assert_eq!(opus.dops.pre_skip, 312);
 }
 
+/// An OpusHead that contradicts the catalog's channel count is refused rather than
+/// written beside it, so the sample entry and dOps can't disagree.
+#[test]
+fn synthesize_opus_trak_refuses_a_contradicting_head() {
+	use hang::catalog::{AudioCodec, AudioConfig};
+
+	let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+	config.description = Some(crate::codec::opus::Config::new(48_000, 1).encode().unwrap());
+
+	let err = super::synthesize_audio_trak(1, 48_000, &config).unwrap_err();
+	assert!(matches!(err, super::Error::OpusChannelCount { catalog: 2, head: 1 }));
+}
+
 /// dOps has nowhere to put a channel mapping table, so a family 1 head is refused rather
 /// than written as family 0 without it.
 #[test]
@@ -1546,9 +1559,37 @@ async fn an_opus_head_before_the_init_is_written() {
 /// guess: the gain changes every sample, so a written init can't keep a guessed one.
 #[tokio::test(start_paused = true)]
 async fn an_opus_head_that_disagrees_fails() {
-	for head in [opus_head(1, 312), opus_head_gain(-1536)] {
-		an_opus_head_fails(head).await;
-	}
+	an_opus_head_fails(1, opus_head(1, 312)).await;
+	an_opus_head_fails(2, opus_head_gain(-1536)).await;
+}
+
+/// A browser that reconnects returns without its head, then sends the same head again.
+/// The settled entry holds through both.
+#[tokio::test(start_paused = true)]
+async fn a_settled_opus_head_survives_a_return() {
+	let (mut live, mut audio) = live_av();
+	let name = audio.name().to_string();
+	live.track.write(video_frame(0, true)).unwrap();
+	write_audio(&mut audio, 0, 6);
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	chunk_now(&mut exporter).await.init().expect("init");
+	describe_audio(&mut live, &name, opus_head(2, 312));
+	drain_now(&mut exporter).await;
+
+	let mut config = live.catalog.modify().unwrap().audio.renditions.remove(&name).unwrap();
+	drain_now(&mut exporter).await;
+	write_audio(&mut audio, 1_000_000, 5);
+	config.description = None;
+	live.catalog
+		.modify()
+		.unwrap()
+		.audio
+		.renditions
+		.insert(name.clone(), config);
+	drain_now(&mut exporter).await;
+	describe_audio(&mut live, &name, opus_head(2, 312));
+	write_audio(&mut audio, 1_100_000, 5);
+	assert!(!drain_now(&mut exporter).await.is_empty(), "the audio keeps flowing");
 }
 
 /// An OpusHead for stereo with `output_gain`.
@@ -1558,8 +1599,8 @@ fn opus_head_gain(output_gain: i16) -> Bytes {
 	head.encode().unwrap()
 }
 
-/// Declare stereo Opus without a head, write the init, then fail on `head`.
-async fn an_opus_head_fails(head: Bytes) {
+/// Declare stereo Opus without a head, write the init, then fail on `head` for `channels`.
+async fn an_opus_head_fails(channels: u32, head: Bytes) {
 	let (mut live, mut audio) = live_av();
 	let name = audio.name().to_string();
 	live.track.write(video_frame(0, true)).unwrap();
@@ -1568,7 +1609,11 @@ async fn an_opus_head_fails(head: Bytes) {
 	chunk_now(&mut exporter).await.init().expect("init");
 	drain_now(&mut exporter).await;
 
-	describe_audio(&mut live, &name, head);
+	let mut catalog = live.catalog.modify().unwrap();
+	let config = catalog.audio.renditions.get_mut(&name).unwrap();
+	config.channel_count = channels;
+	config.description = Some(head);
+	drop(catalog);
 	let err = error_now(&mut exporter).await;
 	assert!(
 		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackChanged(changed)) if *changed == name),

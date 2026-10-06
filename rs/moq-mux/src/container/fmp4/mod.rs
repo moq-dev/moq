@@ -155,6 +155,10 @@ pub enum Error {
 	#[error("audio codec {0} needs a description (AudioSpecificConfig) to synthesize a CMAF init")]
 	MissingAudioDescription(String),
 
+	/// An Opus catalog entry whose OpusHead contradicts its channel count.
+	#[error("Opus head has {head} channels but the catalog declares {catalog}")]
+	OpusChannelCount { catalog: u32, head: u32 },
+
 	#[error("multi-sample fragment has a non-final sample with no duration; DTS is unrecoverable")]
 	MissingSampleDuration,
 
@@ -738,6 +742,12 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 					if head.mapping_family != 0 {
 						return Err(crate::codec::opus::Error::UnsupportedMappingFamily(head.mapping_family).into());
 					}
+					if head.channel_count != config.channel_count {
+						return Err(Error::OpusChannelCount {
+							catalog: config.channel_count,
+							head: head.channel_count,
+						});
+					}
 					head
 				}
 				None => crate::codec::opus::Config::new(config.sample_rate, config.channel_count),
@@ -745,7 +755,7 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 			mp4_atom::Codec::from(mp4_atom::Opus {
 				audio,
 				dops: mp4_atom::Dops {
-					output_channel_count: head.channel_count as u8,
+					output_channel_count: config.channel_count as u8,
 					pre_skip: head.pre_skip,
 					input_sample_rate: head.sample_rate,
 					output_gain: head.output_gain,

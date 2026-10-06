@@ -171,9 +171,10 @@ track set is fixed: a rendition that leaves and returns with the same codec
 configuration is written under its original track, while a new rendition, a
 changed configuration, or a return that replays media already written ends the
 export with an error naming it. Restart the export to pick up a new rendition.
-An Opus rendition declared without its OpusHead gets a guessed pre-skip; a
-head that arrives later with the same channels and sample rate is accepted, and
-an init already written keeps the guess.
+An Opus rendition declared without its OpusHead gets a guessed pre-skip. A
+head that arrives later with the same channel count, decode rate, and gain is
+accepted even if its pre-skip and input rate differ. An init already written
+keeps the guess, and later heads must match the first one.
 
 ## Play
 
