@@ -342,6 +342,28 @@ test("disabling with a subscriber attached marks where submitted audio ends", as
 	]);
 });
 
+// Closing tears down the subscription and the pipeline, which both end the epoch; cleanups run
+// last-in, first-out, so the marker lands once and before the rendition closes the track.
+test("closing with a subscriber attached marks the end once before the track closes", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup();
+	const { encoder, track, feed, written } = env;
+
+	for (let i = 0; i < 4; i++) {
+		await feed.push({ timestamp: Time.Micro(20_000 + i * 20_000), channels: [new Float32Array(960)] });
+	}
+	await feed.drain(); // two written, two held
+
+	encoder.close();
+
+	expect(written).toEqual([
+		[20_000, 1],
+		[40_000, 1],
+		[100_000, 0],
+	]);
+	expect(track.closed.peek()).toBeDefined();
+});
+
 // A push that completes several frames is still one continuous stream, so it must not restart the
 // encoder and drop the chunks it holds.
 test("a push completing several frames keeps the encoder running", async () => {
