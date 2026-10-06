@@ -64,6 +64,14 @@ These land with the next breaking release, not the 2026-09-23 train.
   `Instant` with `.at(catalog.clock().capture(instant)?)`, reading
   `catalog.clock()` at write time, since an importer's first frame re-anchors
   it. A timestamp ahead of now is published rather than refused.
+- **fMP4 export fixes its track set at the init segment.** moq-mux's
+  `fmp4::Error` drops `MissingVideoTrack`, `MissingAudioTrack`, and
+  `NoCatalogSnapshot`, and adds `TrackAdded`, `TrackChanged`, `TrackRewound`,
+  and `TrackUndescribed`. `fmp4::Export` and `moq export fmp4` now end with one
+  of these where they used to write a track missing from the moov, and a
+  broadcast that ends with media queued behind an undescribed track is an error
+  rather than an empty `Ok(None)`. Restart the export to pick up a new
+  rendition.
 
 ## Wire
 

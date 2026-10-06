@@ -31,10 +31,14 @@ const MAX_DELIVERED: usize = 1024;
 struct Route {
 	/// Bumped whenever `copy` changes, so a reader can tell a replacement apart.
 	generation: u64,
-	/// The serving route's copy; `None` while nobody reads the track, or between routes.
+	/// The serving route's copy; `None` while nobody reads the track, between routes, or
+	/// once the front let go.
 	copy: Option<track::Consumer>,
 	/// How the track ended, once the front decided.
 	end: Option<Result<()>>,
+	/// No front is left to replace the copy, though one may still hold it for readers
+	/// on their way: readers follow it to its end.
+	concluded: bool,
 }
 
 /// Every reader of a logical track, so a new copy subscribes them all as it is served:
@@ -44,7 +48,9 @@ type Readers = Arc<Mutex<Vec<Weak<Mutex<Reader>>>>>;
 /// The front's side of a logical track: which copy serves it, and how it ends.
 ///
 /// Dropping it concludes the track: readers follow the last copy to its end, since no
-/// front is left to replace it.
+/// front is left to replace it. [`Producer::release`] also lets go of that copy, so it
+/// stops keeping its route subscribed however long the logical track's state stays
+/// allocated.
 pub(crate) struct Producer {
 	state: kio::Producer<Route>,
 	readers: Readers,
@@ -90,6 +96,22 @@ impl Producer {
 			&& route.end.is_none()
 		{
 			route.end = Some(result);
+		}
+	}
+
+	/// No front will replace the serving copy: readers follow it to its end, while this
+	/// still holds it for the readers on their way.
+	pub(crate) fn conclude(&self) {
+		if let Ok(mut route) = self.state.write() {
+			route.concluded = true;
+		}
+	}
+
+	/// Let go of the serving copy once no front will replace it and nobody reads the
+	/// track. Same generation: a reader on the copy keeps it as the serving one.
+	pub(crate) fn release(self) {
+		if let Ok(mut route) = self.state.write() {
+			route.copy = None;
 		}
 	}
 
@@ -161,7 +183,7 @@ impl Consumer {
 	/// Poll for the route state to move past `generation`, or the track to end.
 	fn poll_changed(&self, generation: u64, waiter: &kio::Waiter) -> Poll<()> {
 		match self.state.poll(waiter, |route| {
-			match route.generation != generation || route.end.is_some() {
+			match route.generation != generation || route.end.is_some() || route.concluded {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			}
@@ -176,7 +198,7 @@ impl Consumer {
 	/// decision.
 	fn end(&self) -> Option<Option<Result<()>>> {
 		let route = self.state.read();
-		match (&route.end, route.is_closed()) {
+		match (&route.end, route.concluded || route.is_closed()) {
 			(Some(end), _) => Some(Some(end.clone())),
 			(None, true) => Some(None),
 			(None, false) => None,
@@ -820,7 +842,7 @@ impl Recover {
 					route.generation,
 					route.copy.clone(),
 					route.end.clone(),
-					route.is_closed(),
+					route.concluded || route.is_closed(),
 				)
 			};
 			// Registered before looking, so a route change from here on wakes the reader.
