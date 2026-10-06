@@ -1460,6 +1460,123 @@ async fn a_changed_sample_entry_fails() {
 	);
 }
 
+/// An AAC catalog's `bitrate` lands in the esds as a hint decoders ignore, so changing it
+/// keeps the track.
+#[tokio::test(start_paused = true)]
+async fn aac_bitrate_churn_keeps_the_track() {
+	use hang::catalog::{AAC, AudioConfig};
+
+	let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
+	config.description = Some(
+		crate::codec::aac::Config {
+			profile: 2,
+			sample_rate: 44100,
+			channel_count: 2,
+		}
+		.encode(),
+	);
+	let mut live = Live::audio(config);
+	let name = live.track.name().to_string();
+	live.track.write(raw_frame(0, &[0x01, 0x02, 0x03, 0x04], true)).unwrap();
+	let mut exporter =
+		crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await).with_max_age(RECORDING_MAX_AGE);
+	chunk_now(&mut exporter).await.init().expect("init");
+
+	live.catalog
+		.modify()
+		.unwrap()
+		.audio
+		.renditions
+		.get_mut(&name)
+		.unwrap()
+		.bitrate = Some(64_000);
+	live.track
+		.write(raw_frame(23_000, &[0x01, 0x02, 0x03, 0x04], true))
+		.unwrap();
+	live.track
+		.write(raw_frame(46_000, &[0x01, 0x02, 0x03, 0x04], true))
+		.unwrap();
+	assert!(!drain_now(&mut exporter).await.is_empty(), "the audio keeps flowing");
+}
+
+/// An out-of-band H.264 rendition whose catalog swaps its avcC would write samples the
+/// moov misdescribes, so the export fails.
+#[tokio::test(start_paused = true)]
+async fn a_changed_catalog_description_fails() {
+	use hang::catalog::{Container, H264, VideoConfig};
+
+	let avcc = |pps: &'static [u8]| {
+		crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(pps)]).unwrap()
+	};
+	let mut live = Live::new(".avc1", |catalog, name| {
+		let mut config = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: false,
+		});
+		config.container = Container::Legacy;
+		config.description = Some(avcc(PPS));
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		catalog.modify().unwrap().video.renditions.insert(name, config);
+	});
+	let name = live.track.name().to_string();
+	live.track
+		.write(raw_frame(0, &[0, 0, 0, 4, 0x65, 0x88, 0x84, 0x21], true))
+		.unwrap();
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	chunk_now(&mut exporter).await.init().expect("init");
+
+	live.catalog
+		.modify()
+		.unwrap()
+		.video
+		.renditions
+		.get_mut(&name)
+		.unwrap()
+		.description = Some(avcc(&[0x68, 0xce, 0x3c, 0x81]));
+	let err = error_now(&mut exporter).await;
+	assert!(
+		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackChanged(changed)) if *changed == name),
+		"{err:?}"
+	);
+}
+
+/// An Annex-B keyframe with new parameter sets changes the avcC the moov declared, so the
+/// export fails instead of writing it.
+#[tokio::test(start_paused = true)]
+async fn a_changed_parameter_set_fails() {
+	let mut live = Live::avc3();
+	let name = live.track.name().to_string();
+	live.track.write(video_frame(0, true)).unwrap();
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	chunk_now(&mut exporter).await.init().expect("init");
+
+	let mut keyframe = BytesMut::new();
+	for nal in [
+		&[0x67, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xee][..],
+		PPS,
+		crate::container::test_util::IDR,
+	] {
+		keyframe.extend_from_slice(&[0, 0, 0, 1]);
+		keyframe.extend_from_slice(nal);
+	}
+	live.track
+		.write(crate::container::Frame {
+			timestamp: moq_net::Timestamp::from_micros(33_000).unwrap(),
+			payload: keyframe.freeze(),
+			keyframe: true,
+			duration: None,
+		})
+		.unwrap();
+	let err = error_now(&mut exporter).await;
+	assert!(
+		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackChanged(changed)) if *changed == name),
+		"{err:?}"
+	);
+}
+
 /// A returning rendition whose sample entry differs can't reuse its track.
 #[tokio::test(start_paused = true)]
 async fn an_incompatible_return_fails() {
@@ -1531,6 +1648,40 @@ async fn a_track_that_never_describes_itself_fails() {
 	let err = loop {
 		assert!(second < 40, "the queue outgrew its bound");
 		write_audio(&mut audio, second * 1_000_000, 50);
+		second += 1;
+		match tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await {
+			Err(_) => continue,
+			Ok(Ok(chunk)) => panic!("a chunk before the video could be described: {chunk:?}"),
+			Ok(Err(err)) => break err,
+		}
+	};
+	assert!(
+		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackUndescribed(names)) if *names == [video]),
+		"{err:?}"
+	);
+}
+
+/// Audio held in one open group is buffered rather than queued as fragments, and still
+/// counts against the bound while another track waits for its keyframe.
+#[tokio::test(start_paused = true)]
+async fn an_uncut_audio_backlog_is_bounded() {
+	const IDR_ONLY: &[u8] = &[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x21];
+
+	let (mut live, mut audio) = live_av();
+	let video = live.track.name().to_string();
+	live.track.write(raw_frame(0, IDR_ONLY, true)).unwrap();
+	let mut exporter =
+		crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await).with_max_age(RECORDING_MAX_AGE);
+
+	// One audio group that never closes, one second at a time.
+	let mut second = 0;
+	let err = loop {
+		assert!(second < 40, "the buffer outgrew the bound");
+		for i in 0..50u64 {
+			audio
+				.write(raw_frame(second * 1_000_000 + i * 20_000, OPUS, second == 0 && i == 0))
+				.unwrap();
+		}
 		second += 1;
 		match tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await {
 			Err(_) => continue,

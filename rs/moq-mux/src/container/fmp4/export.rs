@@ -228,6 +228,10 @@ struct Fmp4Track {
 	/// instead of writing the track's history twice.
 	written: Option<Duration>,
 
+	/// The first presentation time read before the init segment, which bounds how much
+	/// media queues behind it.
+	backlog: Option<Duration>,
+
 	track_id: u32,
 	/// Kept from the first catalog entry, so a later framerate change doesn't move the
 	/// track off the timescale its fragments are already written in.
@@ -254,6 +258,7 @@ impl Fmp4Track {
 			finished: false,
 			group_finished: false,
 			written: None,
+			backlog: None,
 			track_id,
 			timescale,
 		})
@@ -297,7 +302,7 @@ impl Fmp4Track {
 			return Ok(());
 		};
 		match &self.declaration {
-			Some(declared) if declared.trak.mdia.minf.stbl.stsd != declaration.trak.mdia.minf.stbl.stsd => {
+			Some(declared) if sample_entry(&declared.trak) != sample_entry(&declaration.trak) => {
 				return Err(Error::TrackChanged(name.to_string()).into());
 			}
 			Some(_) => {}
@@ -323,14 +328,16 @@ impl Fmp4Track {
 					if !source.header_ready() || !source.video_geometry_ready(config) {
 						return Ok(None);
 					}
-					// H.264/H.265 need a synthesized config record here; VP8 has none.
+					// H.264/H.265 need a synthesized config record here; VP8 has none. The
+					// catalog's own record wins, since the source kept the one it subscribed with.
+					let description = config
+						.description
+						.as_ref()
+						.filter(|d| !d.is_empty())
+						.or(source.description())
+						.map(|d| d.as_ref());
 					let config = source.video_config(config).unwrap_or_else(|| config.clone());
-					let trak = super::synthesize_video_trak(
-						self.track_id,
-						self.timescale,
-						&config,
-						source.description().map(|d| d.as_ref()),
-					)?;
+					let trak = super::synthesize_video_trak(self.track_id, self.timescale, &config, description)?;
 					return Ok(Some(Declaration::synthesized(trak)));
 				}
 				Container::Unknown(unknown) => return Err(crate::Error::unsupported_container(unknown)),
@@ -370,6 +377,20 @@ impl Declaration {
 			ftyp: None,
 		}
 	}
+}
+
+/// The `stsd` a returning or reconfigured rendition must keep, without the AAC bitrate
+/// hints a catalog's `bitrate` churns: decoders ignore them.
+fn sample_entry(trak: &mp4_atom::Trak) -> mp4_atom::Stsd {
+	let mut stsd = trak.mdia.minf.stbl.stsd.clone();
+	for codec in &mut stsd.codecs {
+		if let mp4_atom::Codec::Mp4a(mp4a) = codec {
+			mp4a.esds.es_desc.dec_config.max_bitrate = 0;
+			mp4a.esds.es_desc.dec_config.avg_bitrate = 0;
+			mp4a.btrt = None;
+		}
+	}
+	stsd
 }
 
 fn default_trex(track_id: u32) -> mp4_atom::Trex {
@@ -493,7 +514,8 @@ impl<S: Stream> Export<S> {
 				while let Some(source) = track.source.as_mut() {
 					match source.poll_event(waiter)? {
 						Poll::Ready(Some(Event::Frame(frame))) => {
-							if !track.described {
+							// A keyframe may carry new parameter sets, so check it still matches.
+							if !track.described || frame.keyframe {
 								track.describe(name)?;
 								if !track.described {
 									continue;
@@ -556,7 +578,7 @@ impl<S: Stream> Export<S> {
 				track.group_finished = false;
 				let frames = std::mem::take(&mut track.buffer);
 				let fragment = emit_fragment(&name, track, &mut self.sequence_number, frames, None)?;
-				if let Some(chunk) = self.deliver(name, fragment)? {
+				if let Some(chunk) = self.deliver(name, fragment) {
 					return Poll::Ready(Ok(Some(chunk)));
 				}
 				continue;
@@ -580,6 +602,13 @@ impl<S: Stream> Export<S> {
 				let frag = self.fragment_duration;
 				let track = self.tracks.get_mut(&name).unwrap();
 				let frame = track.pending.take().unwrap();
+				// Everything a track reads before the init is queued or buffered behind it.
+				if !self.init_emitted {
+					let start = *track.backlog.get_or_insert(frame.timestamp.into());
+					if Duration::from(frame.timestamp).saturating_sub(start) > INIT_QUEUE {
+						return Poll::Ready(Err(Error::TrackUndescribed(self.undescribed()).into()));
+					}
+				}
 				// A zero cap emits one sample at a time. Unknown video duration still
 				// needs a successor timestamp or endpoint before it can be encoded.
 				let fragment = if frag == Some(Duration::ZERO) {
@@ -613,7 +642,7 @@ impl<S: Stream> Export<S> {
 					// Frame appended to buffer; go round again to look for more work or a flush.
 					continue;
 				};
-				if let Some(chunk) = self.deliver(name, fragment)? {
+				if let Some(chunk) = self.deliver(name, fragment) {
 					return Poll::Ready(Ok(Some(chunk)));
 				}
 				continue;
@@ -641,7 +670,7 @@ impl<S: Stream> Export<S> {
 				track.group_finished = false;
 				let frames = std::mem::take(&mut track.buffer);
 				let fragment = emit_fragment(&name, track, &mut self.sequence_number, frames, None)?;
-				if let Some(chunk) = self.deliver(name, fragment)? {
+				if let Some(chunk) = self.deliver(name, fragment) {
 					return Poll::Ready(Ok(Some(chunk)));
 				}
 				continue;
@@ -661,22 +690,12 @@ impl<S: Stream> Export<S> {
 
 	/// Hand a fragment to the caller, or queue it behind the init segment that has yet
 	/// to go out.
-	fn deliver(&mut self, name: String, fragment: Fragment) -> Result<Option<Chunk>> {
+	fn deliver(&mut self, name: String, fragment: Fragment) -> Option<Chunk> {
 		if self.init_emitted {
-			return Ok(Some(Chunk::Fragment(fragment)));
-		}
-		let queued: Duration = self
-			.queued
-			.iter()
-			.filter(|(queued, _)| *queued == name)
-			.map(|(_, fragment)| fragment.duration)
-			.sum::<Duration>()
-			+ fragment.duration;
-		if queued > INIT_QUEUE {
-			return Err(Error::TrackUndescribed(self.undescribed()).into());
+			return Some(Chunk::Fragment(fragment));
 		}
 		self.queued.push_back((name, fragment));
-		Ok(None)
+		None
 	}
 
 	/// The renditions holding up the init segment, by name.
