@@ -43,6 +43,8 @@ export interface OriginProducer {
 	replaying(prefix: Path.Valid): Dispose;
 	readonly requests: Getter<ReadonlyMap<Path.Valid, origin.RequestSlot> | undefined>;
 	changed(): GetPromise<unknown>;
+	/** Whether sessions should answer the request with a blind subscription right now. */
+	blind(slot: origin.RequestSlot): boolean;
 	answer(path: Path.Valid, front: broadcast.Consumer): Dispose | undefined;
 	routes(path: Path.Valid): boolean;
 }
