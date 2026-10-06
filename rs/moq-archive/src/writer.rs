@@ -1897,4 +1897,37 @@ mod tests {
 		}
 		assert_eq!(stored(&store).await, before);
 	}
+
+	/// The publisher already has the subscriber, and the broadcast ends while `.info` is written.
+	///
+	/// The enroll command is queued only after that write. The recording stays up across the gap,
+	/// so the track is kept instead of failing with the writer closed.
+	#[tokio::test]
+	async fn a_track_that_ends_during_enrollment_is_kept() {
+		let source = broadcast::Info::new().produce();
+		let mut audio = track(&source, "audio");
+		group(&audio, 0, &[0, 500]);
+
+		let mock = Mock::memory();
+		mock.hold_puts("audio/.info");
+		let store = Store::new(mock.clone(), "rec");
+		let writer = Writer::new(store.clone(), source.consume(), Config::default())
+			.await
+			.unwrap();
+		let control = writer.control();
+		let run = tokio::spawn(writer.run());
+		let enrolling = tokio::spawn(async move { control.track("audio", media()).await });
+
+		let subscription = audio.subscription_changed().await.unwrap();
+		assert!(subscription.is_some(), "enrollment subscribed");
+		audio.finish().unwrap();
+		source.close();
+		mock.release();
+
+		enrolling.await.unwrap().unwrap();
+		run.await.unwrap().unwrap();
+
+		let records = window(&store, "audio").await;
+		assert_eq!(groups(&records), vec![(0, 0)]);
+	}
 }
