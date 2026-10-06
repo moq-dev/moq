@@ -279,10 +279,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		if self.moov.is_some() {
 			return Err(Error::DuplicateMoov.into());
 		}
+		// `finish()` may have released the initial reservation already; a fresh one publishes at
+		// the end of this call.
 		let reserved = self
 			.initial_reservation
 			.clone()
-			.expect("held until the first fragment, which follows the moov");
+			.unwrap_or_else(|| self.catalog.reserve());
 		let timeline = self.catalog.timeline();
 
 		// The tracks below enroll in the timeline, so advertise it in the same catalog update

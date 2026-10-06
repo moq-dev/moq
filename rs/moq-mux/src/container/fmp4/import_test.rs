@@ -1462,3 +1462,19 @@ async fn a_moov_with_nothing_selected_publishes() {
 	fmp4.decode(&init).unwrap();
 	assert_eq!(clocks.drain().len(), 1, "the catalog publishes without a fragment");
 }
+
+/// A moov decoded after `finish()` released the reservation still declares its tracks.
+#[tokio::test]
+async fn a_moov_after_finish_publishes() {
+	let (init, _, _) = bbb_init();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+
+	fmp4.finish().unwrap();
+	fmp4.decode(&init).unwrap();
+	assert!(!catalog.snapshot().video.renditions.is_empty(), "the moov was read");
+	assert!(!clocks.drain().is_empty(), "the catalog publishes");
+}
