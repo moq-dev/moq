@@ -37,6 +37,9 @@ in sync at the latency you ask for.
 | `announced` | Wait for the broadcast to be announced before subscribing (default on), so a player can be mounted before the stream exists. |
 | `catalog-format` | `hang` (default, from the `.hang` suffix), `hangz` (compressed), `msf`, or `manual` to supply the catalog yourself. |
 
+A volume change ramps over `el.emitter.fade`, 200ms by default; 0 steps at
+once.
+
 Video holds its last picture while paused, out of view, or waiting for a
 resumed rendition's first frame. Its reported timestamp stays with that picture.
 Going offline or closing the player clears it.
