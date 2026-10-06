@@ -1710,6 +1710,20 @@ test("an equal-cost pool spreads its paths the same way on every node", async ()
 	}
 });
 
+test("an equal-cost pool advertises the same member whatever order it arrived in", () => {
+	const prefix = Path.from("pool");
+	const workers = [10n, 11n].map((id) => HopSchema.parse(id));
+	const expected = spreadHash(prefix, [workers[0]]) < spreadHash(prefix, [workers[1]]) ? workers[0] : workers[1];
+
+	for (const order of [workers, [...workers].reverse()]) {
+		const origin = new Producer();
+		const handles = order.map((hop) => wireOf(origin).receive(prefix, { hops: [hop], cost: 3n }));
+		expect(origin.consume().broadcasts().peek().get(prefix)?.hops).toEqual([expected]);
+		for (const handle of handles) handle.close();
+		origin.close();
+	}
+});
+
 test("a serving session closing releases quiet origin change listeners", async () => {
 	const origin = new Producer();
 	const changed = Signal.prototype.changed;

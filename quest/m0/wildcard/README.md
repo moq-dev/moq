@@ -63,9 +63,8 @@ local broadcast first, then the longest covering prefix, filtered by the
 requester's excluded hop and ordered by `route_order`, whose hash is keyed on
 the requested path so one prefix's pool shares its paths. A front follows the
 best route and resumes through any covering one, and FETCH resolves the same
-way. A standing refusal does not yet end the front: since #4741 the front skips
-the refuser and re-selects, which can reach a sibling advertiser or a shorter
-prefix, against the refusal decision below. The pattern matcher itself exists:
+way. A standing refusal ends the front (#4875), so it never reaches a sibling
+advertiser or a shorter prefix. The pattern matcher itself exists:
 `moq_net::{Pattern, Patterns, Segment}` and `Path.Pattern` /
 `Path.Patterns` in `js/net/src/path.ts` own the shared matching, containment,
 specificity, and rebasing tokens and filters reuse.

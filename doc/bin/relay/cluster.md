@@ -95,8 +95,9 @@ breaking any remaining tie toward the newest announcement so a reconnecting
 publisher isn't outranked by the session it replaced. Hashing the requested
 path spreads equal-cost advertisers of one prefix, such as a transcode pool,
 across its paths instead of sending every path to one of them, and every relay
-picks the same one for a given path. An assigned identity for an anonymous peer
-is local selection state and is never written into the hop list.
+that holds the same routes picks the same one for a given path. An assigned
+identity for an anonymous peer is local selection state and is never written
+into the hop list.
 
 ```toml
 [cluster]

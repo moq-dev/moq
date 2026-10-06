@@ -243,6 +243,7 @@ test("the code tables match the spec", () => {
 	expect(Number(StreamCode.NotFound)).toBe(0x33);
 	expect(Number(StreamCode.Old)).toBe(0x34);
 	expect(Number(StreamCode.Evicted)).toBe(0x35);
+	expect(Number(StreamCode.Unroutable)).toBe(0x36);
 	expect(Number(StreamCode.FrameTooLarge)).toBe(0x38);
 
 	// The spaces are disjoint: 0 ends a session cleanly but fails a stream.
@@ -364,6 +365,7 @@ test("toStreamCode and fromTransport agree on what a code means", () => {
 		StreamCode.NotFound,
 		StreamCode.Old,
 		StreamCode.Evicted,
+		StreamCode.Unroutable,
 		StreamCode.FrameTooLarge,
 		StreamCode(70),
 	]) {
@@ -395,6 +397,7 @@ test("toStreamCode: lite-only codes do not reach an IETF peer", () => {
 		StreamCode.Old,
 		StreamCode.Evicted,
 		StreamCode.GroupTooLarge,
+		StreamCode.Unroutable,
 		StreamCode.FrameTooLarge,
 	]) {
 		expect(toStreamCode(new StreamError(code), { version: Version.DRAFT_20 })).toBe(StreamCode.Internal);

@@ -206,13 +206,19 @@ interface Candidate extends Advertised {
 	readonly exact: boolean;
 }
 
-/** Orders advertisements at one prefix: the better route, then a local broadcast on a tie, then fewer hops. */
-function compareCandidates(a: Candidate, b: Candidate): number {
-	return (
+/**
+ * Orders advertisements at `prefix`: the better route, then a local broadcast on a tie, then
+ * fewer hops, then the lower {@link spreadHash} of the prefix, matching `route_order` in rs/moq-net.
+ */
+function compareCandidates(prefix: Path.Valid, a: Candidate, b: Candidate): number {
+	const order =
 		compareRoutes(a.route, b.route) ||
 		Number(b.exact) - Number(a.exact) ||
-		a.route.hops.length - b.route.hops.length
-	);
+		a.route.hops.length - b.route.hops.length;
+	if (order !== 0) return order;
+	const ha = spreadHash(prefix, a.route.hops);
+	const hb = spreadHash(prefix, b.route.hops);
+	return ha < hb ? -1 : ha > hb ? 1 : 0;
 }
 
 /** Orders two routes by preference: identified before anonymous, then lower warm cost, then lower cold cost. */
@@ -439,9 +445,9 @@ class OriginState {
 			if (list) list.push(local);
 			else out.set(path, [local]);
 		}
-		for (const list of out.values()) {
+		for (const [prefix, list] of out) {
 			// Stable, so equal routes keep the table's newest-first order.
-			if (list.length > 1) list.sort(compareCandidates);
+			if (list.length > 1) list.sort((a, b) => compareCandidates(prefix, a, b));
 		}
 		return out;
 	}
