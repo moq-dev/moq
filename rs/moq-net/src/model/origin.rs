@@ -2363,6 +2363,16 @@ async fn run_front(task: FrontTask) {
 		Event::Selected { best, serving_closing }
 	};
 
+	// Whether a route's refusal is the answer: only the current winner speaks for the
+	// path. A retraction resolves like a rejection, and a route beaten while its
+	// request was pending speaks for nobody, so either one re-selects instead.
+	let standing = |front: &Front, route: u64| {
+		shared
+			.read()
+			.best_route(&path.as_path(), horizon, front.excluded_routes())
+			.is_some_and(|best| best.id == route)
+	};
+
 	events.push_back(select(&mut front, &sources, &mut seen));
 
 	loop {
@@ -2406,7 +2416,7 @@ async fn run_front(task: FrontTask) {
 								route,
 								result: Err(Refusal {
 									err: Error::Unroutable,
-									standing: true,
+									standing: standing(&front, route),
 								}),
 							});
 							continue;
@@ -2415,14 +2425,14 @@ async fn run_front(task: FrontTask) {
 						if serve.closed {
 							// Retracted under us, or its handler dropped while the
 							// announcement stands: it cannot serve. A retraction
-							// leaves the table before it closes the server, so the
-							// table tells the two apart.
+							// leaves the table before it closes the server, under
+							// the same lock, so the table tells the two apart.
 							drop(serve);
 							events.push_back(Event::Resolved {
 								route,
 								result: Err(Refusal {
 									err: Error::Unroutable,
-									standing: shared.read().routes.covers(&path.as_path(), route),
+									standing: standing(&front, route),
 								}),
 							});
 							continue;
@@ -2452,7 +2462,7 @@ async fn run_front(task: FrontTask) {
 											route,
 											result: Err(Refusal {
 												err: Error::Unroutable,
-												standing: shared.read().routes.covers(&path.as_path(), route),
+												standing: standing(&front, route),
 											}),
 										});
 										continue;
@@ -2703,19 +2713,13 @@ async fn run_front(task: FrontTask) {
 						sources.insert(id, source);
 						Event::Resolved { route, result: Ok(id) }
 					}
-					Err(err) => {
-						// Only the current winner's answer is final. A retraction
-						// resolves like a rejection, and a route beaten while it was
-						// pending speaks for nobody, so either one re-selects.
-						let standing = shared
-							.read()
-							.best_route(&path.as_path(), horizon, front.excluded_routes())
-							.is_some_and(|best| best.id == route);
-						Event::Resolved {
-							route,
-							result: Err(Refusal { err, standing }),
-						}
-					}
+					Err(err) => Event::Resolved {
+						route,
+						result: Err(Refusal {
+							err,
+							standing: standing(&front, route),
+						}),
+					},
 				}
 			}
 			Step::SourceClosed(source) => Event::SourceClosed { source },
