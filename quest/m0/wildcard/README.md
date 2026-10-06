@@ -206,7 +206,6 @@ distinguish recording generations reads the catalog's archive entry
 ## Required
 
 - [Transcoders start at group boundaries](/quest/m0/wildcard/transcode-group-start.md) - two claim workers at one path are one broadcast, so a relay never splices them mid-group
-- [A standing refusal ends the front](/quest/m0/wildcard/refusal-final.md) - a refusal from the winning route ends the request instead of re-selecting a sibling or a shorter prefix
 
 ## Related
 

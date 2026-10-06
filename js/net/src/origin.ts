@@ -165,20 +165,19 @@ class CoveringRoot {
  *
  * `handles` holds the `closed` of each open {@link Requesting} on the path.
  *
- * A refusal is terminal. With nothing serving, the slot ends: every handle closes with the
- * handler's error and the slot leaves the table, so the next request asks afresh. While
- * another source still serves (a better route was asked and said no), the refuser joins
- * `refused` and is skipped for as long as it stands (a reconnect is a fresh entry), so the
- * current source carries on. A refusal never falls through to a broader prefix or another
- * advertiser.
+ * A refusal is terminal, even while another source still serves: the slot ends, every handle
+ * closes with the handler's error, and the slot leaves the table, so the next request asks
+ * afresh. A refusal never falls through to a broader prefix or another advertiser.
  *
  * @internal
  */
 export interface RequestSlot {
+	/** Open handles that always take a blind answer. */
 	blind: number;
+	/** Open announcement-gated handles, which take a blind answer only while discovery is incomplete. */
+	announced: number;
 	answer?: broadcast.Consumer;
 	readonly handles: Set<Once<Error | null>>;
-	readonly refused: Set<RouteEntry>;
 	readonly route: Signal<broadcast.Consumer | undefined>;
 }
 
@@ -493,21 +492,28 @@ class OriginState {
 	}
 
 	/**
-	 * `entry` refused `path` with `err`. A request still serving another source skips the
-	 * refuser; one with nothing serving ends with `err`.
+	 * Whether sessions should answer `slot` with a blind subscription. An announcement-gated
+	 * handle falls back to one only while at least one attached session cannot announce, and
+	 * stays gated with no session attached.
+	 */
+	blind(slot: RequestSlot): boolean {
+		if (slot.blind > 0) return true;
+		if (slot.announced === 0) return false;
+		const { total, discovery } = this.sessions.peek();
+		return discovery < total;
+	}
+
+	/**
+	 * `entry` refused `path` with `err`: the request ends with `err`, even while another
+	 * source serves, since asking the next candidate would turn one refusal into a request
+	 * per candidate.
 	 */
 	refuse(path: Path.Valid, entry: RouteEntry, err: Error): void {
 		const slot = this.requests.peek()?.get(path);
 		if (!slot) return;
-		// Only the route the request is waiting on speaks for it; a superseded one's answer is moot.
-		if (this.bestEntry(path, (candidate) => slot.refused.has(candidate)) !== entry) return;
-
-		const serving = slot.route.peek();
-		if (serving && serving.closed.peek() === undefined) {
-			slot.refused.add(entry);
-			slot.route.set(this.route(path, slot));
-			return;
-		}
+		// Only the route the request is waiting on speaks for it; one superseded by another
+		// route or a local broadcast has a moot answer.
+		if (this.bestEntry(path) !== entry || this.localWins(path, entry)) return;
 
 		this.requests.mutate((map) => {
 			if (map?.get(path) === slot) map.delete(path);
@@ -595,10 +601,10 @@ class OriginState {
 	 * Materialization is lazy and cached per path: the first request under a route opens
 	 * the providing session's subscription and repeats share it. A better route is made
 	 * before the old one breaks: the current front keeps serving until the new route
-	 * answers (then swaps) or refuses (then is skipped). A retracted route swaps at once.
+	 * answers (then swaps) or refuses (then the request ends). A retracted route swaps at once.
 	 */
-	route(path: Path.Valid, slot: Pick<RequestSlot, "answer" | "refused">): broadcast.Consumer | undefined {
-		const entry = this.bestEntry(path, (candidate) => slot.refused.has(candidate));
+	route(path: Path.Valid, slot: Pick<RequestSlot, "answer">): broadcast.Consumer | undefined {
+		const entry = this.bestEntry(path);
 		const local = this.local.peek()?.get(path);
 		if (local && this.localWins(path, entry)) {
 			// Nothing reads a remote front the local broadcast replaced, so close its session subscription.
@@ -711,6 +717,7 @@ export class Producer implements Table {
 				return thisProducer.#requests;
 			},
 			changed: () => this.#changed(),
+			blind: (slot) => this.#state.blind(slot),
 			answer: (path, front) => this.#answer(this.#scope.path(path), front),
 			routes: (path) => wireOf(this.#reader).routes(path),
 		});
@@ -875,8 +882,6 @@ export class Producer implements Table {
 				entries.splice(index, 1);
 				if (entries.length === 0) routes?.delete(prefix);
 			});
-			// A retracted entry can never be picked again, so the refusals pinned to it are dead weight.
-			for (const slot of this.#state.requests.peek()?.values() ?? []) slot.refused.delete(entry);
 			server.close();
 			this.#state.rebuildOriginated();
 			this.#state.refreshPrefix(prefix);
@@ -962,13 +967,19 @@ export class Producer implements Table {
 	}
 
 	/**
-	 * Resolves once anything a serving session scans changes: the open requests, or either
-	 * side of the routing table.
+	 * Resolves once anything a serving session scans changes: the open requests, either
+	 * side of the routing table, or the attached sessions that decide which requests are blind.
 	 *
 	 * @internal
 	 */
 	#changed(): GetPromise<unknown> {
-		return Signal.race(this.#state.requests, this.#state.local, this.#state.routes, this.#state.advertisedLocal);
+		return Signal.race(
+			this.#state.requests,
+			this.#state.local,
+			this.#state.routes,
+			this.#state.advertisedLocal,
+			this.#state.sessions,
+		);
 	}
 
 	/**
@@ -1277,12 +1288,11 @@ export class Consumer {
 			// value as the baseline the next change is compared against, and never flushes to
 			// clear it, so a seeded route retracting to undefined would look like no change and
 			// notify nobody.
-			const refused = new Set<RouteEntry>();
 			const created: RequestSlot = {
 				blind: 0,
+				announced: 0,
 				handles: new Set(),
-				refused,
-				route: new Signal(this.#state.route(path, { refused })),
+				route: new Signal(this.#state.route(path, {})),
 			};
 			slot = created;
 			this.#state.requests.mutate((map) => {
@@ -1291,22 +1301,11 @@ export class Consumer {
 		}
 		const closed = new Once<Error | null>();
 		slot.handles.add(closed);
-		let blind = !options.announced || this.#discovery.peek() === false;
-		if (blind) slot.blind += 1;
+		// Counted, not subscribed: serving sessions decide blindness from the live discovery state.
+		const announced = options.announced === true;
+		if (announced) slot.announced += 1;
+		else slot.blind += 1;
 		this.#state.requests.mutate(() => {});
-
-		// An announcement-gated request falls back to a blind subscription only while at
-		// least one attached session cannot announce. It returns to the gate if discovery
-		// becomes complete again, and remains gated with no session attached.
-		const unsubscribeDiscovery = options.announced
-			? this.#discovery.subscribe((discovery) => {
-					const next = discovery === false;
-					if (next === blind) return;
-					blind = next;
-					slot.blind += next ? 1 : -1;
-					this.#state.requests.mutate(() => {});
-				})
-			: () => {};
 
 		// Hand out a handle of the request's own rather than the table's. Closing a consumer
 		// closes the broadcast once it was the last one, and the table often holds the only
@@ -1352,7 +1351,6 @@ export class Consumer {
 		return makeRequesting(relative, active, unroutable, closed, () => {
 			// Releases this request's handle; the route itself belongs to the table.
 			released = true;
-			unsubscribeDiscovery();
 			unsubscribe();
 			handle?.close();
 			handle = undefined;
@@ -1360,7 +1358,8 @@ export class Consumer {
 
 			taken.handles.delete(closed);
 			if (closed.peek() === undefined) closed.set(null);
-			if (blind) taken.blind -= 1;
+			if (announced) taken.announced -= 1;
+			else taken.blind -= 1;
 			this.#state.requests.mutate(() => {});
 			if (taken.handles.size > 0) return;
 

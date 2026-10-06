@@ -25,4 +25,23 @@ describe("SharedAudioBuffer", () => {
 			buffer.close();
 		}
 	});
+
+	// A decode loop can reach `wait` on a buffer a shape change already closed. Nothing advances a
+	// closed buffer, so a gated wait would never settle and would hold the decoder effect's rerun.
+	it("does not gate a wait on a closed buffer", async () => {
+		const worklet = { port: { postMessage: () => {} } } as unknown as AudioWorkletNode;
+		const buffer = createAudioBuffer(worklet, 1, 1000, 100, true);
+		buffer.insert(0 as Time.Micro, [new Float32Array(200)]);
+		const settles = (wait: Promise<void>) =>
+			Promise.race([
+				wait.then(() => true),
+				new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 0)),
+			]);
+
+		// Open, a frame this far ahead of the playhead is held.
+		expect(await settles(buffer.wait(10_000_000 as Time.Micro))).toBe(false);
+
+		buffer.close();
+		expect(await settles(buffer.wait(10_000_000 as Time.Micro))).toBe(true);
+	});
 });
