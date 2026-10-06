@@ -151,14 +151,15 @@ async fn a_clean_finish_exits_zero_once_the_linger_expires() {
 	let (mut publisher, feeding) = import(&relay);
 	let stdin = feeding.await.unwrap();
 	output_past(&output, 0).await;
+	// The linger can't start before stdin closes, but it can before the publisher exits.
+	let closed = Instant::now();
 	drop(stdin);
 	assert!(wait(&mut publisher).await.success());
-	let finished = Instant::now();
 
 	let status = wait(&mut export).await;
 	assert!(status.success(), "a clean finish exits 0, got {status}");
 	assert!(
-		finished.elapsed() >= Duration::from_millis(900),
+		closed.elapsed() >= Duration::from_millis(900),
 		"the export waited out its linger"
 	);
 }

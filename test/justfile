@@ -24,7 +24,7 @@ harness:
     ./lib/harness.test.sh
     cd .. && bun install --frozen-lockfile
     cd interop/clients/js && bunx playwright install chromium
-    cd interop/clients/js && bun test ./harness.browser.ts
+    cd interop/clients/js && bun test ./harness.browser.ts ./src/contract.test.ts
 
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
