@@ -135,4 +135,16 @@ mod tests {
 		});
 		assert_eq!(warns, 1);
 	}
+
+	/// A panic inside the capture must clear the slot, or the next capture on this thread looks nested.
+	#[test]
+	fn an_unwind_clears_the_capture() {
+		let panicked = std::panic::catch_unwind(|| {
+			count_drop_warnings("test_tracing probe", || panic!("unwind the capture"));
+		});
+		assert!(panicked.is_err());
+
+		let warns = count_drop_warnings("test_tracing probe", probe);
+		assert_eq!(warns, 1);
+	}
 }
