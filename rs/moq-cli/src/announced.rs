@@ -100,7 +100,7 @@ async fn follow(
 
 		let path = announce.prefix.as_str();
 		let text = match &mut output {
-			Output::View(view) => match view.apply(path, active) {
+			Output::View(view) => match view.apply(path, active, rows()) {
 				Some(frame) => frame,
 				None => continue,
 			},
@@ -110,6 +110,11 @@ async fn follow(
 		out.write_all(text.as_bytes()).await?;
 		out.flush().await?;
 	}
+}
+
+/// The terminal's height, read on each frame so a resize takes effect on the next change.
+fn rows() -> usize {
+	terminal_size::terminal_size().map_or(usize::MAX, |(_, height)| height.0.into())
 }
 
 /// The announced set, drawn below the cursor and redrawn in place on each change.
@@ -123,9 +128,11 @@ struct View {
 impl View {
 	/// Apply one start or end, returning the frame that redraws the set when it changed.
 	///
-	/// Autowrap is off while drawing, so a path wider than the terminal is cut off
-	/// rather than wrapped onto a line the next frame would not move back over.
-	fn apply(&mut self, path: &str, active: bool) -> Option<String> {
+	/// The frame fits in `rows`, the terminal's height, because the cursor cannot move
+	/// back up to a line that scrolled off the top: a longer set ends in a count of
+	/// the paths left out. Autowrap is off while drawing for the same reason, so a
+	/// path wider than the terminal is cut off rather than wrapped.
+	fn apply(&mut self, path: &str, active: bool, rows: usize) -> Option<String> {
 		let changed = match active {
 			true => self.announced.insert(path.to_owned()),
 			false => self.announced.remove(path),
@@ -139,12 +146,23 @@ impl View {
 			// To the start of the first line drawn, then erase everything below it.
 			frame.push_str(&format!("\x1b[{}F\x1b[J", self.drawn));
 		}
-		for path in &self.announced {
+		// The cursor rests on the line below the frame, which takes a row too.
+		let fits = rows.saturating_sub(1);
+		let shown = match self.announced.len() > fits {
+			true => fits.saturating_sub(1),
+			false => self.announced.len(),
+		};
+		for path in self.announced.iter().take(shown) {
 			frame.push_str(path);
 			frame.push('\n');
 		}
+		self.drawn = shown;
+		let hidden = self.announced.len() - shown;
+		if hidden > 0 {
+			frame.push_str(&format!("({hidden} more)\n"));
+			self.drawn += 1;
+		}
 		frame.push_str("\x1b[?7h");
-		self.drawn = self.announced.len();
 		Some(frame)
 	}
 }
@@ -336,13 +354,43 @@ mod tests {
 	#[test]
 	fn the_view_redraws_in_place() {
 		let mut view = View::default();
-		assert_eq!(view.apply("b", true).unwrap(), "\x1b[?7lb\n\x1b[?7h");
-		assert_eq!(view.apply("a", true).unwrap(), "\x1b[?7l\x1b[1F\x1b[Ja\nb\n\x1b[?7h");
-		assert_eq!(view.apply("a", true), None, "already shown");
-		assert_eq!(view.apply("c", false), None, "never shown");
-		assert_eq!(view.apply("b", false).unwrap(), "\x1b[?7l\x1b[2F\x1b[Ja\n\x1b[?7h");
-		assert_eq!(view.apply("a", false).unwrap(), "\x1b[?7l\x1b[1F\x1b[J\x1b[?7h");
-		assert_eq!(view.apply("a", true).unwrap(), "\x1b[?7la\n\x1b[?7h");
+		assert_eq!(view.apply("b", true, 24).unwrap(), "\x1b[?7lb\n\x1b[?7h");
+		assert_eq!(
+			view.apply("a", true, 24).unwrap(),
+			"\x1b[?7l\x1b[1F\x1b[Ja\nb\n\x1b[?7h"
+		);
+		assert_eq!(view.apply("a", true, 24), None, "already shown");
+		assert_eq!(view.apply("c", false, 24), None, "never shown");
+		assert_eq!(view.apply("b", false, 24).unwrap(), "\x1b[?7l\x1b[2F\x1b[Ja\n\x1b[?7h");
+		assert_eq!(view.apply("a", false, 24).unwrap(), "\x1b[?7l\x1b[1F\x1b[J\x1b[?7h");
+		assert_eq!(view.apply("a", true, 24).unwrap(), "\x1b[?7la\n\x1b[?7h");
+	}
+
+	/// A set taller than the terminal ends in a count, and stays at the top of the
+	/// screen through changes and a shrink rather than scrolling away.
+	#[test]
+	fn the_view_fits_the_terminal() {
+		let mut term = vt100::Parser::new(4, 20, 0);
+		let mut view = View::default();
+		// What a tty does to each `\n` on its way to the screen.
+		let draw = |term: &mut vt100::Parser, frame: String| term.process(frame.replace('\n', "\r\n").as_bytes());
+
+		for path in ["a", "b", "c", "d", "e", "f"] {
+			draw(&mut term, view.apply(path, true, 4).unwrap());
+		}
+		assert_eq!(term.screen().contents(), "a\nb\n(4 more)");
+
+		draw(&mut term, view.apply("a", false, 4).unwrap());
+		assert_eq!(term.screen().contents(), "b\nc\n(3 more)");
+
+		term.screen_mut().set_size(3, 20);
+		draw(&mut term, view.apply("b", false, 3).unwrap());
+		assert_eq!(term.screen().contents(), "c\n(3 more)");
+
+		for path in ["c", "d"] {
+			draw(&mut term, view.apply(path, false, 3).unwrap());
+		}
+		assert_eq!(term.screen().contents(), "e\nf");
 	}
 
 	/// `announced` follows a prefix, so a `--broadcast` is refused rather than ignored.

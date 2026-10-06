@@ -113,6 +113,7 @@ reqwest = { workspace = true, features = ["rustls", "json"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
+terminal_size = "0.4.4"
 tokio = { workspace = true, features = ["full"] }
 tower-http = { workspace = true }
 tracing = { workspace = true }
@@ -132,6 +133,8 @@ tempfile = { workspace = true }
 # `test-util` enables `tokio::time::pause` so the TS round-trip test simulates the
 # exporter drain timeouts instantly instead of waiting on the wall clock.
 tokio = { workspace = true, features = ["test-util"] }
+# Plays the `announced` view's frames on a virtual terminal, scrolling included.
+vt100 = "0.16.2"
 
 [[bench]]
 name = "play_buffer"

@@ -272,7 +272,8 @@ moq ... announced room --json
 Follows the broadcasts announced on a relay over MoQ, with the session's own
 auth: the live counterpart of the relay's HTTP `/announced/<prefix>`. Paths are
 relative to the `--connect` path. On a terminal it shows what is announced
-under `prefix` right now, redrawn as broadcasts start and end. Piped, it prints
+under `prefix` right now, redrawn as broadcasts start and end, and a list
+taller than the terminal ends in a count of the rest. Piped, it prints
 `+ path` for each broadcast already announced, then `+ path` and `- path` as
 broadcasts come and go. `--json` prints `{"path": "room/alice", "active": true}`
 per line instead, on a terminal or not. It runs until interrupted, and exits
