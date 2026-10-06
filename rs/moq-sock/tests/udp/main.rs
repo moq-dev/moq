@@ -273,6 +273,50 @@ fn large_single_datagram_is_not_segmented() {
     );
 }
 
+/// A GSO batch the kernel rejects is resent as individual datagrams instead of dropped.
+///
+/// `SO_NO_CHECK` makes Linux refuse every `UDP_SEGMENT` send with `EINVAL` while plain
+/// sends still go through, standing in for a driver without segmentation offload.
+#[test]
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn gso_rejected_batch_is_resent() {
+    let send = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let recv = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let one: libc::c_int = 1;
+    let rc = unsafe {
+        libc::setsockopt(
+            std::os::fd::AsRawFd::as_raw_fd(&send),
+            libc::SOL_SOCKET,
+            libc::SO_NO_CHECK,
+            (&raw const one).cast(),
+            size_of_val(&one) as libc::socklen_t,
+        )
+    };
+    assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+    assert!(
+        UdpSocketState::new((&send).into())
+            .unwrap()
+            .max_gso_segments()
+            > 1,
+        "GSO unsupported, so there is no batch to reject"
+    );
+
+    const SEGMENT_SIZE: usize = 128;
+    let msg = vec![0xEF; SEGMENT_SIZE * 2];
+    let dst_addr = recv.local_addr().unwrap();
+    test_send_recv(
+        &send.into(),
+        &recv.into(),
+        Transmit {
+            destination: dst_addr,
+            ecn: None,
+            contents: &msg,
+            segment_size: Some(SEGMENT_SIZE),
+            src_ip: None,
+        },
+    );
+}
+
 #[test]
 fn socket_buffers() {
     const BUFFER_SIZE: usize = 123456;

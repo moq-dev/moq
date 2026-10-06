@@ -36,7 +36,10 @@ A `.rustfmt.toml` in each imported directory keeps quinn's formatting; `cargo fm
 
 ### Carried changes
 
-None besides the crate rename.
+Changes on top of the upstream commit, besides the renames:
+
+- [quinn#2724](https://github.com/quinn-rs/quinn/pull/2724) (`moq_sock::udp`): when the kernel rejects a GSO batch with `EIO` or `EINVAL`, the socket halts GSO and resends the batch as individual datagrams instead of dropping it.
+  Drop it if upstream lands [quinn#2748](https://github.com/quinn-rs/quinn/pull/2748) and we cherry-pick that.
 
 ### Advisory triage
 
