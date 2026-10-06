@@ -271,6 +271,20 @@ impl<V: Mergeable> Node<V> {
 		}
 		changed
 	}
+
+	/// Fold the last frame into `retired` if the node departed at least `grace`
+	/// before `now`, leaving the merged view unchanged. Returns whether it
+	/// folded. A grace too long to represent never folds.
+	fn fold_expired(&mut self, retired: &mut BTreeMap<String, V>, grace: Duration, now: Instant) -> bool {
+		let Some(departed) = self.departed else { return false };
+		if departed.checked_add(grace).is_none_or(|at| at > now) {
+			return false;
+		}
+		for (key, value) in self.last.take().into_iter().flatten() {
+			V::merge(retired.entry(key).or_default(), value);
+		}
+		true
+	}
 }
 
 /// Watches a group's node announces and folds one track across all of them.
@@ -349,15 +363,7 @@ impl<V: Mergeable> Merged<V> {
 		let retired = &mut self.retired;
 		self.nodes.retain(|_, node| {
 			changed |= advance(node, origin, config, name, waiter);
-			// A grace too long to represent never folds.
-			let Some(departed) = node.departed else { return true };
-			if departed.checked_add(grace).is_none_or(|at| at > now) {
-				return true;
-			}
-			for (key, value) in node.last.take().into_iter().flatten() {
-				V::merge(retired.entry(key).or_default(), value);
-			}
-			false
+			!node.fold_expired(retired, grace, now)
 		});
 		// Release a churn peak's buckets: walking a map costs its capacity, so a
 		// map that once held thousands of nodes would slow every frame.
@@ -397,6 +403,9 @@ impl<V: Mergeable> Merged<V> {
 			match self.nodes.entry(absolute) {
 				Entry::Occupied(mut entry) => {
 					let node = entry.get_mut();
+					// A return after the grace starts over, even when this announce
+					// is the first poll since the grace elapsed.
+					node.fold_expired(&mut self.retired, self.grace, Instant::now());
 					node.departed = None;
 					if matches!(node.reader, Reader::Ended) {
 						node.reader = resolve(&self.origin, &node.path);
@@ -946,14 +955,15 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn restart_after_grace_adds_to_the_total() {
 		// A node returning after the grace with fresh counters (it restarted)
-		// adds to the retired total instead of regressing it.
+		// adds to the retired total instead of regressing it. No poll runs
+		// between the grace elapsing and the return, so the return itself must
+		// fold the expired entry.
 		let origin = produce_origin();
 		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1).with_grace(GRACE));
 		let mut traffic = agg.traffic(&Tier::default(), Role::Publisher);
 		let (_frame, _node_b) = depart_node_a(&origin, &mut traffic).await;
 
 		tokio::time::advance(GRACE).await;
-		settle(&mut traffic).await;
 
 		let mut node_a = NodeBroadcast::new(&origin, "acme", "a");
 		node_a.publish("acme/room", 30);
