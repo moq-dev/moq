@@ -77,6 +77,19 @@ pub struct Config {
 		setting = "stats.depth"
 	)]
 	pub depth: usize,
+
+	/// How long a group's stats broadcast stays announced after the group's
+	/// last session and traffic leave, e.g. "5m" or "30s". Defaults to 5
+	/// minutes. A group that returns within it keeps its broadcast, so viewer
+	/// churn doesn't unannounce and re-announce it across the mesh. Only applies
+	/// at `depth` 1 or more. See [`moq_stats::produce::Config::linger`].
+	#[usage(skip)]
+	#[serde(with = "crate::duration::serde_option")]
+	pub linger: Option<Duration>,
+
+	#[usage(long = "stats-linger", env = "MOQ_STATS_LINGER", setting = "stats.linger")]
+	#[serde(default, rename = "__cli_linger", skip_serializing_if = "Option::is_none")]
+	pub(crate) linger_arg: Option<crate::duration::Duration>,
 }
 
 impl Default for Config {
@@ -87,11 +100,18 @@ impl Default for Config {
 			interval: 1,
 			node: None,
 			depth: 0,
+			linger: None,
+			linger_arg: None,
 		}
 	}
 }
 
 impl Config {
+	/// The linger after command-line overrides; `None` keeps the producer's default.
+	pub(crate) fn linger(&self) -> Option<Duration> {
+		self.linger_arg.map(crate::duration::Duration::into_std).or(self.linger)
+	}
+
 	/// Build a [`moq_stats::Producer`] from this config, publishing on `origin`.
 	///
 	/// Returns a no-op producer when [`Self::enabled`] is false, so the relay can
@@ -107,13 +127,17 @@ impl Config {
 		let interval = Duration::from_secs(self.interval.max(1));
 		let node = self.node.clone().map(PathOwned::from);
 		let depth = self.depth;
-		tracing::info!(prefix, interval_secs = interval.as_secs(), node = ?node, depth, "stats publishing enabled");
-		let config = moq_stats::produce::Config::new()
+		let linger = self.linger();
+		tracing::info!(prefix, interval_secs = interval.as_secs(), node = ?node, depth, ?linger, "stats publishing enabled");
+		let mut config = moq_stats::produce::Config::new()
 			.with_origin(origin)
 			.with_prefix(prefix)
 			.with_interval(interval)
 			.with_node(node)
 			.with_depth(depth);
+		if let Some(linger) = linger {
+			config = config.with_linger(linger);
+		}
 		moq_stats::Producer::new(config)
 	}
 }

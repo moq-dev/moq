@@ -12,8 +12,8 @@ backwards, and `container::Producer::write` refuses a group below the last one
 (`TimestampRewind`), even across a discontinuity.
 
 The catalog's root `clock` is also final from the first snapshot a consumer
-sees. [import-first-frame](/quest/m1/import-first-frame.md) covers a lone
-importer; a container set up after a data track or catalog section has
+sees. A lone importer already holds its catalog until its first frame
+anchors; a container set up after a data track or catalog section has
 published (any order moq-c and moq-ffi allow) still re-anchors it after
 copy-once readers (moq-hls export, derived broadcasts) took the old one.
 
@@ -136,7 +136,6 @@ Wire: none.
 
 ## Required
 
-- [Import at the first frame](/quest/m1/import-first-frame.md) - a lone importer anchors before the first publish, so the publish rule doesn't offset it
 - [CMAF frame timestamp](/quest/m1/cmaf-frame-timestamp.md) - decoders honour an offset frame timestamp on passthrough tracks
 
 ## Related

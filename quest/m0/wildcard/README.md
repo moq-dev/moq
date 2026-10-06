@@ -185,9 +185,9 @@ path, not with a route identity or a generation field.
 - **Patterns are independent of clustering.** The `moq-pattern` crate owns
   the matching semantics tokens and filters share, with no draft of its own;
   no announce message carries a pattern on either protocol (AUTH grants on
-  lite-06 do, per the [Auth](/quest/m1/auth/README.md) line). moq-cluster adds hop
-  lists, costs, pool selection, and request resolution to prefix
-  advertisements.
+  the wip lite version do, per the [Auth](/quest/m1/auth/README.md) line).
+  moq-cluster adds hop lists, costs, pool selection, and request resolution
+  to prefix advertisements.
 
 ### Where derived output lives
 
@@ -218,7 +218,6 @@ distinguish recording generations reads the catalog's archive entry
 ## Required
 
 - [Transcoders start at group boundaries](/quest/m0/wildcard/transcode-group-start.md) - two claim workers at one path are one broadcast, so a relay never splices them mid-group
-- [A standing refusal ends the front](/quest/m0/wildcard/refusal-final.md) - a refusal from the winning route ends the request instead of re-selecting a sibling or a shorter prefix
 
 ## Related
 

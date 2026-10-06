@@ -6,9 +6,8 @@ Publishers, relays, and viewers report the telemetry that broadcast health and
 congestion views need: how far behind viewers are according to what the
 network has acknowledged, how timely publishers are against their own media
 clock, and what publishers and viewers report for themselves through
-[media stats](/quest/m1/stats/README.md). Together they can drive an
-unknown/healthy/degraded/unhealthy verdict per broadcast with congestion
-visible for viewers in aggregate, the way CMSD does for HLS.
+[media stats](/quest/m1/stats/README.md), with congestion visible for viewers
+in aggregate.
 
 ## Plan
 
@@ -26,9 +25,17 @@ histograms, which stay monotonic and merge-patch friendly, and which any
 consumer can diff into a distribution. Clients report for themselves through
 hang stats and `.echo` feedback tracks, planned in their own line on `main`.
 
-The counters and channels land here. The moq.pro (downstream) dashboard work,
-including the health badge, connection-health drill-down, and stream
-preflight, consumes them downstream.
+The counters and channels land here. Client health and preflight are
+[client health](/quest/m1/stats/health.md) and
+[preflight](/quest/m1/stats/preflight.md) in the media stats line. The
+moq.pro (downstream) dashboard work, including the health badge and the
+connection-health drill-down, consumes both.
+
+Open, for the maintainer (the same question is recorded in
+[client health](/quest/m1/stats/health.md)): whether anything computes a
+per-broadcast verdict combining client reports, the relay's starvation, and
+publisher timeliness, and where it would live. This line only reports the
+counters.
 
 Decided (2026-09-28): the line's moq-stats changes break the published
 crate. Client stats left the line (2026-09-29)

@@ -1412,6 +1412,30 @@ test("RequestOk v18: no requestId (regression: don't treat Draft18 as legacy)", 
 	expect(decoded.requestId).toBe(undefined);
 });
 
+// A REQUEST_UPDATE_OK or TRACK_STATUS_OK must carry LARGEST_OBJECT once the track has
+// objects, so a REQUEST_OK with one decodes. The Location is length-prefixed until draft-17.
+test("RequestOk: accepts LARGEST_OBJECT", async () => {
+	const versions = [
+		Version.DRAFT_15,
+		Version.DRAFT_16,
+		Version.DRAFT_17,
+		Version.DRAFT_18,
+		Version.DRAFT_19,
+		Version.DRAFT_20,
+		Version.DRAFT_21,
+		Version.DRAFT_22,
+	] as const;
+	for (const version of versions) {
+		const body =
+			version === Version.DRAFT_15 || version === Version.DRAFT_16
+				? [0x07, 0x01, 0x09, 0x02, 0x05, 0x03]
+				: [0x01, 0x09, 0x05, 0x03];
+		const bytes = new Uint8Array([0x00, body.length, ...body]);
+		const decoded = await decodeVersioned(bytes, RequestOk.decode, version);
+		expect(decoded.parameters.largest).toEqual({ groupId: 5n, objectId: 3n });
+	}
+});
+
 test("RequestError v18: no requestId, retry_interval still present", async () => {
 	const msg = new RequestError({
 		errorCode: 500,

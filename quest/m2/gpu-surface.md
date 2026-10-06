@@ -29,7 +29,12 @@ added this quest):
     memory type index too: a Vulkan import must reuse both (VUID 01742),
     and an `OPAQUE_FD` handle cannot be queried for its properties. A
     `DMA_BUF` importer picks its memory type from the handle's properties;
-  - the device and driver UUID;
+  - the device and driver UUID, and the render node's `dev_t` (decided
+    2026-10-05: the one device identity
+    [VA-API import](/quest/m2/vaapi-vulkan-import.md) and
+    [GPU health](/quest/m2/gpu-health.md) key by). A device without
+    `VK_EXT_physical_device_drm` or a render node carries none, and a
+    backend that needs it refuses the surface rather than guess;
   - the timeline: an `OPAQUE_FD` timeline semaphore handle, the value the
     producer signals when the image is ready, and the value the consumer
     signals when it is done reading. Both handles belong to the slot and live

@@ -32,7 +32,7 @@ publisher's hop chain.
   and "the first entry identifies the endpoint that originated the route". In
   `drafts/draft-lcurley-moq-cluster.md`: the unknown-publisher stamping text,
   the relay behavior that stamps, and the changelog bullets.
-- CLI: `rs/moq-cli/src/{args,complete,fetch,ls}.rs`. Relays keep `cluster.id`
+- CLI: `rs/moq-cli/src/{args,complete,fetch,announced}.rs`. Relays keep `cluster.id`
   as their node id.
 - Docs: `doc/bin/cli.md` ("Redundant publishers" uses `--epoch`), the
   migration row in `doc/setup/upgrade.md`, the stamping paragraph in
