@@ -1397,7 +1397,8 @@ fn a_second_moov_is_refused() {
 	);
 }
 
-/// A moov with every track deselected publishes at once, since no fragment will ever anchor.
+/// A moov with every track deselected releases its reservation at once, since no fragment will
+/// ever anchor: the catalog's next change publishes without one.
 #[tokio::test]
 async fn a_moov_with_nothing_selected_publishes() {
 	let (init, _, _) = bbb_init();
@@ -1409,6 +1410,7 @@ async fn a_moov_with_nothing_selected_publishes() {
 		.with_select(crate::select::Broadcast::default());
 
 	fmp4.decode(&init).unwrap();
+	catalog.clone().anchor(moq_net::Timestamp::ZERO).unwrap();
 	assert_eq!(clocks.drain().len(), 1, "the catalog publishes without a fragment");
 }
 

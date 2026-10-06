@@ -121,7 +121,7 @@ owned by that prerequisite, not duplicated in archive storage.
 - [Per-track timelines](/quest/m1/archive/track-timeline.md) - every track segments and expires on its own timeline, and HLS is derived from group timestamps at the edge
 - [Replay catalog](/quest/m1/archive/replay-catalog.md) - `moq import archive` publishes the recorded catalog live with `store` set, so stock `moq export hls` serves the whole replay
 - [Idle flush](/quest/m1/archive/flush.md) - idle tracks are recorded within a bounded wall-clock delay, and `flush()` forces a track's pending record out
-- [Backward timestamps](/quest/m1/archive/backward-timestamps.md) - a resumed recording refuses a track whose timestamps go backward past the recovered timeline
+- [Backward timestamps](/quest/m1/archive/backward-timestamps.md) - a resumed recording refuses a restarted source instead of dropping its groups or overlapping media time
 - [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback
 
 ## Related

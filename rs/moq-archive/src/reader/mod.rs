@@ -414,15 +414,24 @@ async fn serve_group<T: ObjectStore>(
 		}
 
 		let complete = spans.last().is_some_and(|span| span.end.group > sequence);
-		if complete || *changed.borrow_and_update() {
+		if complete {
 			let _ = producer.finish();
 			return;
 		}
-		// The reader dropping ends the recording as surely as finishing it.
-		if changed.changed().await.is_err() {
-			let _ = producer.finish();
-			return;
+		// A change that landed while objects loaded is unseen, so the spans above predate it:
+		// reload before finishing or waiting, or its records would never be served.
+		if !changed.has_changed().unwrap_or(false) {
+			// The caller finished the recording, and these spans are its final index.
+			if *changed.borrow() {
+				let _ = producer.finish();
+				return;
+			}
+			if changed.changed().await.is_err() {
+				let _ = producer.finish();
+				return;
+			}
 		}
+		changed.mark_unchanged();
 		spans = shared.index.lock().unwrap().group(&track, sequence);
 	}
 }

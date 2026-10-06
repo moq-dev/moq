@@ -31,8 +31,8 @@ Decisions:
 - The catalog's root `archive` entry maps each track to its timeline, including
   the catalog track itself. `replay`, `store`, and `version` stay beside it.
 - Each track cuts on its own by one rule: at a group boundary between a
-  minimum and maximum duration (a 4s minimum and a multiple of the declared
-  duration, a zero minimum only for sparse data such as the catalog),
+  minimum and maximum duration (a 2s minimum today; 4s and a multiple of the declared
+  duration once its declared-duration child lands; a zero minimum only for sparse data such as the catalog),
   splitting a long-lived group by frame at the maximum. Manual cuts stay as an optimization, such as a
   video keyframe cutting audio so derived segments need fewer objects.
 - A stored object may hold a frame range of a group, not only whole groups.

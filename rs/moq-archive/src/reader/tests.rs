@@ -311,6 +311,41 @@ async fn an_open_group_grows_as_records_commit() {
 	assert!(group.read_frame().await.unwrap().is_none());
 }
 
+/// A refresh that lands while a growing group loads an object is still served, not swallowed
+/// by the wait for the next one.
+#[tokio::test(start_paused = true)]
+async fn a_refresh_during_an_object_load_is_served() {
+	let mut archive = Archive::new().await;
+	let head = archive.record("log", Position::group(0), Position::new(0, 2), 0).await;
+	archive.commit("log", &head, 0).await;
+
+	let (broadcast, mut reader) = open(&archive).await;
+	let mock = archive.store.inner().clone();
+	mock.take();
+	let gate = mock.stall_gets("log/segments/");
+	let track = broadcast.consume().track("log").unwrap();
+	let fetch = tokio::spawn(async move { track.fetch_group(0, group::Fetch::default()).await });
+
+	// Wait until the head object's GET is in flight, then commit the tail behind it.
+	while !mock.gets().iter().any(|path| path.contains("log/segments/")) {
+		tokio::task::yield_now().await;
+	}
+	let more = archive.record("log", Position::new(0, 2), Position::new(0, 3), 0).await;
+	archive.commit("log", &more, 0).await;
+	reader.refresh().await.unwrap();
+	gate.add_permits(16);
+
+	let mut group = fetch.await.unwrap().unwrap();
+	for index in 0..3 {
+		let frame = tokio::time::timeout(Duration::from_secs(1), group.read_frame())
+			.await
+			.expect("the refreshed tail is served")
+			.unwrap()
+			.unwrap();
+		assert_eq!(frame.payload, frame_payload("log", 0, index));
+	}
+}
+
 fn frame_payload(track: &str, sequence: u64, index: u64) -> Bytes {
 	frame(track, sequence, index).payload
 }

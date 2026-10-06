@@ -1429,10 +1429,7 @@ mod tests {
 		}
 
 		import.step(OnError::Warn).await.unwrap();
-		assert!(
-			import.video[0].importer.is_none(),
-			"the dead rendition is retired"
-		);
+		assert!(import.video[0].importer.is_none(), "the dead rendition is retired");
 	}
 
 	/// A live window longer than `ANCHOR_SEGMENTS` is joined mid-playlist, which means the
