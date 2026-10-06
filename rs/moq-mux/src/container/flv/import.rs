@@ -643,6 +643,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Finish every track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
+		// No frame follows to anchor the clock, so publish the declared track set now.
+		self.initial_reservation = None;
 		for stream in self.video.values_mut() {
 			stream.track.finish()?;
 		}
