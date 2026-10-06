@@ -436,6 +436,8 @@ struct Live {
 	segmenter: Segmenter,
 	/// `None` once a publish failed: the timeline is an optional sidecar, so it stops instead.
 	output: Option<Producer>,
+	/// Whether a [`Recorder`] owns the segmenter, so a second enrollment can't share it.
+	recording: bool,
 }
 
 impl Live {
@@ -497,8 +499,9 @@ impl Timelines {
 	/// Enroll the track `name`, its records cut by `config`.
 	///
 	/// Creates its timeline track, named by [`hang::timeline::default_name`], on first enrollment.
-	/// Enrolling a name again continues its timeline's numbering for a new producer, cut by the new
-	/// `config`. Errors when the timeline track name is taken or the timelines finished.
+	/// Enrolling a name again after its recorder dropped continues its timeline's numbering for a new
+	/// producer, cut by the new `config`. Errors when the name's recorder is still alive, the timeline
+	/// track name is taken, or the timelines finished.
 	pub fn track(&self, name: &str, config: Config) -> crate::Result<Recorder> {
 		let mut registry = self.registry.lock().unwrap();
 		if registry.finished {
@@ -508,6 +511,10 @@ impl Timelines {
 			// A re-enrolled track is a new producer whose group sequences may restart, so it gets a
 			// fresh segmenter continuing the record numbering.
 			let mut live = existing.lock().unwrap();
+			if live.recording {
+				return Err(moq_net::Error::Duplicate.into());
+			}
+			live.recording = true;
 			live.segmenter.flush();
 			live.publish();
 			let sequence = live.segmenter.sequence();
@@ -522,6 +529,7 @@ impl Timelines {
 		let live = Arc::new(Mutex::new(Live {
 			segmenter: Segmenter::new(config),
 			output: Some(Producer::new(track)),
+			recording: true,
 		}));
 		registry.tracks.insert(name.to_string(), (timeline, live.clone()));
 		Ok(Recorder { live })
@@ -610,7 +618,10 @@ impl Recorder {
 
 impl Drop for Recorder {
 	fn drop(&mut self) {
-		self.report(Segmenter::flush);
+		let mut live = self.live.lock().unwrap();
+		live.segmenter.flush();
+		live.publish();
+		live.recording = false;
 	}
 }
 
@@ -1095,6 +1106,22 @@ mod test {
 			entries.iter().map(|entry| entry.sequence).collect::<Vec<_>>(),
 			vec![0, 1]
 		);
+	}
+
+	/// Two live recorders would share one segmenter, each resetting or closing the other's
+	/// timeline, so a name is enrolled once at a time.
+	#[tokio::test]
+	async fn enrolling_an_active_track_is_refused() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let timelines = Timelines::new(&broadcast);
+		let mut first = timelines.track("video0", Config::default()).unwrap();
+		assert!(timelines.track("video0", Config::default()).is_err());
+
+		// The live recorder is untouched by the refusal.
+		first.frame(at(0), ms(0), true);
+		first.frame(at(1), ms(2_000), true);
+		drop(first);
+		assert!(timelines.track("video0", Config::default()).is_ok());
 	}
 
 	#[test]
