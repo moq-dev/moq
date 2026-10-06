@@ -35,11 +35,6 @@ is worth and the fallback is recorded in `doc/concept/standard.md`:
 
 Decided with the maintainer on 2026-10-04 and 2026-10-05:
 
-- **LARGEST_OBJECT moved to m0.** Decided in the 2026-10-05 audit: a
-  REQUEST_OK carrying it closes the session today, which Seattle interop
-  would hit, so [REQUEST_OK accepts
-  LARGEST_OBJECT](/quest/m0/ietf-largest-object.md) owns it.
-
 - **Deliberate deviations stay.** DUPLICATE_SUBSCRIPTION and PREFIX_OVERLAP
   are never sent, because moq-net deduplicates. OBJECT_DELIVERY_TIMEOUT and
   SUBGROUP_DELIVERY_TIMEOUT never drop an object or reset a subgroup: they
@@ -65,5 +60,4 @@ drafts.
 
 ## Related
 
-- [REQUEST_OK accepts LARGEST_OBJECT](/quest/m0/ietf-largest-object.md) - the case split out ahead of Seattle
 - [Malformed moq-transport input](/quest/m2/ietf-malformed-close.md) - the session-level half of the same validator report
