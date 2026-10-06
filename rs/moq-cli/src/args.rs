@@ -286,13 +286,28 @@ impl Invocation {
 	/// no side effects to unwind.
 	pub fn validate(&self) -> anyhow::Result<()> {
 		for command in &self.stages {
-			if let Command::Export(export) = command
-				&& let Some(stdout) = export.sink.stdout()
-			{
+			let Command::Export(export) = command else {
+				continue;
+			};
+			if let Some(stdout) = export.sink.stdout() {
 				anyhow::ensure!(
 					stdout.linger.is_zero() || matches!(stdout.format, SubscribeFormat::Ts),
 					"--linger needs an output that can mark a restart, and only `export ts` can"
 				);
+				if matches!(stdout.format, SubscribeFormat::H264 | SubscribeFormat::H265) {
+					anyhow::ensure!(
+						!export.select.no_video,
+						"--no-video leaves nothing for a video elementary stream; pick a container format"
+					);
+					if let Some(flag) = export.select.audio_flag() {
+						anyhow::bail!("a video elementary stream has no audio; remove {flag}");
+					}
+				}
+			}
+			if let Some(sink) = export.sink.ignores_selection()
+				&& let Some(flag) = export.select.flag()
+			{
+				anyhow::bail!("`export {sink}` can't select renditions; remove {flag}");
 			}
 		}
 
@@ -808,7 +823,7 @@ pub struct Export {
 	#[usage(long = "catalog-format", value_enum)]
 	pub catalog_format: Option<CatalogFormatArg>,
 
-	/// Rendition selection (`--video-name`, `--video-codec`, `--audio-name`, `--audio-codec`).
+	/// Rendition selection (`--video-name`, `--no-audio`, ...), refused by sinks that don't apply it.
 	#[usage(flatten)]
 	pub select: crate::subscribe::SelectArgs,
 
@@ -864,6 +879,18 @@ pub enum ExportSink {
 }
 
 impl ExportSink {
+	/// The sink's name when it doesn't apply selection, so the selection flags would be ignored.
+	fn ignores_selection(&self) -> Option<&'static str> {
+		Some(match self {
+			Self::Fmp4(_) | Self::Mkv(_) | Self::Flv(_) | Self::H264(_) | Self::H265(_) => return None,
+			Self::Ts(_) => "ts",
+			Self::Hls(_) => "hls",
+			Self::Rtmp(_) => "rtmp",
+			Self::Srt(_) => "srt",
+			Self::Rtc(_) => "rtc",
+		})
+	}
+
 	/// Whether this sink writes to stdout (the container formats).
 	pub fn is_stdout(&self) -> bool {
 		self.stdout().is_some()
@@ -1007,6 +1034,87 @@ mod tests {
 				parse(format, "0s").validate().is_ok(),
 				"{format}: no linger is always fine"
 			);
+		}
+	}
+
+	fn export(flags: &[&str]) -> Result<Invocation, ParseError> {
+		let argv = ["moq", "--connect", "http://relay", "--broadcast", "room", "export"];
+		Invocation::try_parse_from(argv.iter().chain(flags).copied())
+	}
+
+	/// Leaving a role out can't be combined with narrowing it, or with leaving the
+	/// other role out too.
+	#[test]
+	fn leaving_a_role_out_conflicts_with_selecting_it() {
+		for flags in [
+			["--no-video", "--video-name", "hd"].as_slice(),
+			&["--video-codec", "h264", "--no-video"],
+			&["--no-audio", "--audio-name", "stereo"],
+			&["--audio-codec", "opus", "--no-audio"],
+			&["--no-video", "--no-audio"],
+			&["--no-audio", "--no-video"],
+		] {
+			let flags = [flags, &["fmp4"]].concat();
+			assert!(export(&flags).is_err(), "{flags:?} must be refused");
+		}
+	}
+
+	#[test]
+	fn no_audio_selects_no_audio_role() {
+		let cli = export(&["--no-audio", "fmp4"]).unwrap();
+		cli.validate().unwrap();
+		let Command::Export(export) = &cli.stages[0] else {
+			panic!("an export stage");
+		};
+		let selection = export.select.selection(None);
+		assert!(selection.has_video());
+		assert!(!selection.has_audio());
+	}
+
+	/// A video elementary stream refuses leaving video out or selecting audio, before dialing.
+	#[test]
+	fn elementary_streams_refuse_no_video() {
+		for format in ["h264", "h265"] {
+			let err = export(&["--no-video", format]).unwrap().validate().unwrap_err();
+			assert!(err.to_string().contains("--no-video"), "{format}: {err}");
+			export(&["--no-audio", format]).unwrap().validate().unwrap();
+			for flag in [["--audio-name", "stereo"], ["--audio-codec", "aac"]] {
+				let err = export(&[flag.as_slice(), &[format]].concat())
+					.unwrap()
+					.validate()
+					.unwrap_err();
+				assert!(err.to_string().contains(flag[0]), "{format} {flag:?}: {err}");
+			}
+		}
+		for format in ["fmp4", "mkv", "flv"] {
+			export(&["--no-video", format]).unwrap().validate().unwrap();
+		}
+	}
+
+	/// A sink that doesn't apply selection refuses the selection flags rather than
+	/// ignoring them.
+	#[test]
+	fn sinks_without_selection_refuse_it() {
+		let sinks = [
+			["ts"].as_slice(),
+			&["hls", "--listen", "127.0.0.1:8080"],
+			&["rtmp", "--listen", "127.0.0.1:1935"],
+			&["srt", "--listen", "127.0.0.1:9000"],
+			&["rtc", "--listen", "127.0.0.1:8443"],
+		];
+		for sink in sinks {
+			export(sink).unwrap().validate().unwrap();
+			for flag in [
+				["--video-name", "hd"].as_slice(),
+				&["--video-codec", "h264"],
+				&["--no-video"],
+				&["--audio-name", "stereo"],
+				&["--audio-codec", "aac"],
+				&["--no-audio"],
+			] {
+				let err = export(&[flag, sink].concat()).unwrap().validate().unwrap_err();
+				assert!(err.to_string().contains(flag[0]), "{sink:?} {flag:?}: {err}");
+			}
 		}
 	}
 

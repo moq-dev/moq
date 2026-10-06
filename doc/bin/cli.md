@@ -144,24 +144,49 @@ rate instead, including for a broadcast that recorded none. Media is never delay
 or dropped to fit: a source that sustains more than the rate overruns it, and a
 VBR source records nothing, so export without either stays unpadded.
 
+The `fmp4`, `mkv`, `flv`, `h264`, and `h265` exports select renditions with
+flags before the sink: `--video-name` and `--audio-name` pick a rendition,
+`--video-codec` and `--audio-codec` keep a codec family, and `--no-video` or
+`--no-audio` leaves a role out. `h264` and `h265` refuse `--no-video` and the
+audio selection flags. `ts` and the gateways don't apply selection, so they
+refuse these flags.
+
+```bash
+moq ... export --no-video fmp4 > audio.mp4
+moq ... export --video-name hd --no-audio mkv > hd.mkv
+```
+
 fMP4 export writes one fragment per publisher group on each track. Audio follows
 the publisher's cuts; video normally follows GOPs. Closing a group flushes it
 even when the live publisher pauses. `--fragment-duration 2s` caps
 the fragment span as frames arrive, including audio whose publisher never cuts.
 MKV uses the same flag to cap clusters, which otherwise follow video GOPs.
 
+The fMP4 init segment declares every rendition in the catalog, so it waits until
+each can be described. An Annex-B H.264 or H.265 track, or video whose catalog
+leaves out its dimensions, waits for its first keyframe; the other tracks keep
+reading meanwhile and their fragments follow the init. A track that is still
+waiting once another has queued 30 seconds fails the export. After the init the
+track set is fixed: a rendition that leaves and returns with the same codec
+configuration is written under its original track, while a new rendition, a
+changed configuration, or a return that replays media already written ends the
+export with an error naming it. Restart the export to pick up a new rendition.
+
 ## Play
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
 moq ... play --delay 500ms          # fix the delay instead of measuring it
+moq ... play --no-video             # audio only
 ```
 
 Decodes H.264, H.265, and AV1 video using the platform hardware decoder where
 available, and Opus, PCM, and AAC-LC (mono or stereo) audio in software. The
 log names the decoder each track opened. `--video-name` and `--audio-name`
-pick a rendition. HE-AAC signaled only in band (implicit SBR, as over MPEG-TS)
-plays as its half-rate AAC-LC core.
+pick a rendition, and `--no-video` or `--no-audio` leaves a role out.
+`--no-video` still opens a window, which stays blank; closing it stops
+playback. HE-AAC signaled only in band (implicit SBR, as over MPEG-TS) plays as
+its half-rate AAC-LC core.
 
 Playback runs on a clock it owns. `--delay` is how far it trails the live
 edge: the jitter a late frame may absorb. The default, `auto`, measures how

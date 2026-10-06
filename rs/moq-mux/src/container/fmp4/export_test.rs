@@ -1279,3 +1279,487 @@ async fn video_cut_preserves_the_exact_duration_without_a_successor() {
 	assert_eq!(traf_samples(&fragment.data), vec![(1, 2)]);
 	assert!(drain_now(&mut exporter).await.is_empty());
 }
+
+/// A 20 ms Opus packet (TOC config 1, one frame).
+const OPUS: &[u8] = &[0x08, 0xaa, 0xbb, 0xcc];
+
+/// Write `count` 20 ms Opus packets from `start_us`, in 100 ms groups.
+fn write_audio(audio: &mut crate::container::Producer<crate::catalog::hang::Container>, start_us: u64, count: u64) {
+	for i in 0..count {
+		audio.write(raw_frame(start_us + i * 20_000, OPUS, i % 5 == 0)).unwrap();
+	}
+}
+
+/// The samples each track id carries across `fragments`.
+fn samples_per_track(fragments: &[crate::container::fmp4::Fragment]) -> std::collections::BTreeMap<u32, usize> {
+	let mut samples = std::collections::BTreeMap::new();
+	for fragment in fragments {
+		for (id, count) in traf_samples(&fragment.data) {
+			*samples.entry(id).or_default() += count;
+		}
+	}
+	samples
+}
+
+/// The first error the exporter returns, skipping any chunks before it.
+async fn error_now(exporter: &mut crate::container::fmp4::Export<crate::catalog::Consumer>) -> crate::Error {
+	loop {
+		match tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk())
+			.await
+			.expect("the exporter stalled instead of failing")
+		{
+			Ok(Some(_)) => continue,
+			Ok(None) => panic!("the export ended instead of failing"),
+			Err(err) => return err,
+		}
+	}
+}
+
+/// An Annex-B H.264 track is described only at its first keyframe, so the init waits
+/// for it. Audio published meanwhile is read as it arrives and written right after the
+/// init, rather than parked on one packet until the max age skips the rest
+/// (moq-dev/moq#4770).
+#[tokio::test(start_paused = true)]
+async fn audio_before_the_first_keyframe_is_kept() {
+	let (mut live, mut audio) = live_av();
+	// The CLI's default max age: a parked reader falls behind it within a second.
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await)
+		.with_max_age(std::time::Duration::from_millis(500));
+
+	// Two seconds of audio, published live with no video yet.
+	for i in 0..20u64 {
+		write_audio(&mut audio, i * 100_000, 5);
+		let pending = tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await;
+		assert!(pending.is_err(), "a chunk before the video could be described");
+	}
+	live.track.write(video_frame(2_000_000, true)).unwrap();
+	write_audio(&mut audio, 2_000_000, 1);
+
+	let init = chunk_now(&mut exporter).await.init().expect("init");
+	let (_, audio_id) = track_ids(&init);
+	let fragments = drain_now(&mut exporter).await;
+	assert_each_track_ascends(&init, &fragments);
+	assert_ascending_sequence_numbers(&fragments);
+
+	let starts = fragment_starts(&init, &fragments);
+	assert_eq!(
+		starts.first(),
+		Some(&(audio_id, 0.0)),
+		"the file starts with the first audio"
+	);
+	assert_eq!(
+		samples_per_track(&fragments)[&audio_id],
+		100,
+		"every closed audio group is written"
+	);
+}
+
+/// A rendition that leaves the catalog after the init and returns with the same sample
+/// entry is written under the track the moov declared (moq-dev/moq#4769). The video goes
+/// first in the moov, so a fresh id for it would be one the moov never declared.
+#[tokio::test(start_paused = true)]
+async fn returning_rendition_keeps_its_track_id() {
+	let (mut live, mut audio) = live_av();
+	let name = live.track.name().to_string();
+	for i in 0..3u64 {
+		live.track.write(video_frame(i * 33_000, i == 0)).unwrap();
+	}
+	write_audio(&mut audio, 0, 6);
+
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	let init = chunk_now(&mut exporter).await.init().expect("init");
+	let (video_id, audio_id) = track_ids(&init);
+	let mut fragments = drain_now(&mut exporter).await;
+
+	// The camera turns off, then back on a second later.
+	let config = live.catalog.modify().unwrap().video.renditions.remove(&name).unwrap();
+	fragments.extend(drain_now(&mut exporter).await);
+	live.track.write(video_frame(1_000_000, true)).unwrap();
+	live.catalog.modify().unwrap().video.renditions.insert(name, config);
+	fragments.extend(drain_now(&mut exporter).await);
+	live.track.write(video_frame(1_033_000, false)).unwrap();
+	live.track.write(video_frame(1_066_000, true)).unwrap();
+	fragments.extend(drain_now(&mut exporter).await);
+
+	assert_each_track_ascends(&init, &fragments);
+	assert_ascending_sequence_numbers(&fragments);
+	let starts = fragment_starts(&init, &fragments);
+	assert!(
+		starts.iter().all(|(id, _)| [video_id, audio_id].contains(id)),
+		"every fragment belongs to a declared track: {starts:?}"
+	);
+	assert!(
+		starts.contains(&(video_id, 1.0)),
+		"the returning video is written: {starts:?}"
+	);
+}
+
+/// Add an Opus rendition to `live`, returning its producer and name.
+fn add_opus(live: &mut Live) -> (crate::container::Producer<crate::catalog::hang::Container>, String) {
+	use hang::catalog::{AudioCodec, AudioConfig, Container};
+
+	let audio = live.add_track(".opus", |catalog, name| {
+		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		config.container = Container::Legacy;
+		catalog.modify().unwrap().audio.renditions.insert(name, config);
+	});
+	let name = audio.name().to_string();
+	(audio, name)
+}
+
+/// The moov is out, so a rendition that joins later has no track to write to.
+#[tokio::test(start_paused = true)]
+async fn a_rendition_joining_after_the_init_fails() {
+	let mut live = Live::avc3();
+	live.track.write(video_frame(0, true)).unwrap();
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	chunk_now(&mut exporter).await.init().expect("init");
+
+	let (_audio, name) = add_opus(&mut live);
+	let err = error_now(&mut exporter).await;
+	assert!(
+		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackAdded(added)) if *added == name),
+		"{err:?}"
+	);
+}
+
+/// Catalog hints that don't reach the sample entry may churn; a change that does fails
+/// the export instead of writing samples the moov misdescribes.
+#[tokio::test(start_paused = true)]
+async fn a_changed_sample_entry_fails() {
+	let (mut live, mut audio) = live_av();
+	let name = audio.name().to_string();
+	live.track.write(video_frame(0, true)).unwrap();
+	write_audio(&mut audio, 0, 6);
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	chunk_now(&mut exporter).await.init().expect("init");
+	drain_now(&mut exporter).await;
+
+	live.catalog
+		.modify()
+		.unwrap()
+		.audio
+		.renditions
+		.get_mut(&name)
+		.unwrap()
+		.bitrate = Some(64_000);
+	drain_now(&mut exporter).await;
+
+	live.catalog
+		.modify()
+		.unwrap()
+		.audio
+		.renditions
+		.get_mut(&name)
+		.unwrap()
+		.channel_count = 1;
+	let err = error_now(&mut exporter).await;
+	assert!(
+		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackChanged(changed)) if *changed == name),
+		"{err:?}"
+	);
+}
+
+/// An AAC catalog's `bitrate` lands in the esds as a hint decoders ignore, so changing it
+/// keeps the track.
+#[tokio::test(start_paused = true)]
+async fn aac_bitrate_churn_keeps_the_track() {
+	use hang::catalog::{AAC, AudioConfig};
+
+	let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
+	config.description = Some(
+		crate::codec::aac::Config {
+			profile: 2,
+			sample_rate: 44100,
+			channel_count: 2,
+		}
+		.encode(),
+	);
+	let mut live = Live::audio(config);
+	let name = live.track.name().to_string();
+	live.track.write(raw_frame(0, &[0x01, 0x02, 0x03, 0x04], true)).unwrap();
+	let mut exporter =
+		crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await).with_max_age(RECORDING_MAX_AGE);
+	chunk_now(&mut exporter).await.init().expect("init");
+
+	live.catalog
+		.modify()
+		.unwrap()
+		.audio
+		.renditions
+		.get_mut(&name)
+		.unwrap()
+		.bitrate = Some(64_000);
+	live.track
+		.write(raw_frame(23_000, &[0x01, 0x02, 0x03, 0x04], true))
+		.unwrap();
+	live.track
+		.write(raw_frame(46_000, &[0x01, 0x02, 0x03, 0x04], true))
+		.unwrap();
+	assert!(!drain_now(&mut exporter).await.is_empty(), "the audio keeps flowing");
+}
+
+/// An out-of-band H.264 rendition whose catalog swaps its avcC would write samples the
+/// moov misdescribes, so the export fails.
+#[tokio::test(start_paused = true)]
+async fn a_changed_catalog_description_fails() {
+	use hang::catalog::{Container, H264, VideoConfig};
+
+	let avcc = |pps: &'static [u8]| {
+		crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(pps)]).unwrap()
+	};
+	let mut live = Live::new(".avc1", |catalog, name| {
+		let mut config = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: false,
+		});
+		config.container = Container::Legacy;
+		config.description = Some(avcc(PPS));
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		catalog.modify().unwrap().video.renditions.insert(name, config);
+	});
+	let name = live.track.name().to_string();
+	live.track
+		.write(raw_frame(0, &[0, 0, 0, 4, 0x65, 0x88, 0x84, 0x21], true))
+		.unwrap();
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	chunk_now(&mut exporter).await.init().expect("init");
+
+	live.catalog
+		.modify()
+		.unwrap()
+		.video
+		.renditions
+		.get_mut(&name)
+		.unwrap()
+		.description = Some(avcc(&[0x68, 0xce, 0x3c, 0x81]));
+	let err = error_now(&mut exporter).await;
+	assert!(
+		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackChanged(changed)) if *changed == name),
+		"{err:?}"
+	);
+}
+
+/// An Annex-B keyframe with new parameter sets changes the avcC the moov declared, so the
+/// export fails instead of writing it.
+#[tokio::test(start_paused = true)]
+async fn a_changed_parameter_set_fails() {
+	let mut live = Live::avc3();
+	let name = live.track.name().to_string();
+	live.track.write(video_frame(0, true)).unwrap();
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	chunk_now(&mut exporter).await.init().expect("init");
+
+	let mut keyframe = BytesMut::new();
+	for nal in [
+		&[0x67, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xee][..],
+		PPS,
+		crate::container::test_util::IDR,
+	] {
+		keyframe.extend_from_slice(&[0, 0, 0, 1]);
+		keyframe.extend_from_slice(nal);
+	}
+	live.track
+		.write(crate::container::Frame {
+			timestamp: moq_net::Timestamp::from_micros(33_000).unwrap(),
+			payload: keyframe.freeze(),
+			keyframe: true,
+			duration: None,
+		})
+		.unwrap();
+	let err = error_now(&mut exporter).await;
+	assert!(
+		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackChanged(changed)) if *changed == name),
+		"{err:?}"
+	);
+}
+
+/// A returning rendition whose sample entry differs can't reuse its track.
+#[tokio::test(start_paused = true)]
+async fn an_incompatible_return_fails() {
+	let (mut live, mut audio) = live_av();
+	let name = audio.name().to_string();
+	live.track.write(video_frame(0, true)).unwrap();
+	write_audio(&mut audio, 0, 6);
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	chunk_now(&mut exporter).await.init().expect("init");
+
+	let mut config = live.catalog.modify().unwrap().audio.renditions.remove(&name).unwrap();
+	drain_now(&mut exporter).await;
+	config.sample_rate = 24_000;
+	live.catalog
+		.modify()
+		.unwrap()
+		.audio
+		.renditions
+		.insert(name.clone(), config);
+	let err = error_now(&mut exporter).await;
+	assert!(
+		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackChanged(changed)) if *changed == name),
+		"{err:?}"
+	);
+}
+
+/// A resubscription that replays groups already written would write the track's history
+/// twice under one id, so it fails the export.
+#[tokio::test(start_paused = true)]
+async fn a_replayed_return_fails() {
+	let (mut live, mut audio) = live_av();
+	let name = audio.name().to_string();
+	live.track.write(video_frame(0, true)).unwrap();
+	write_audio(&mut audio, 0, 11);
+	let mut exporter =
+		crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await).with_max_age(RECORDING_MAX_AGE);
+	chunk_now(&mut exporter).await.init().expect("init");
+	drain_now(&mut exporter).await;
+
+	let config = live.catalog.modify().unwrap().audio.renditions.remove(&name).unwrap();
+	drain_now(&mut exporter).await;
+	live.catalog
+		.modify()
+		.unwrap()
+		.audio
+		.renditions
+		.insert(name.clone(), config);
+	let err = error_now(&mut exporter).await;
+	assert!(
+		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackRewound { track, .. }) if *track == name),
+		"{err:?}"
+	);
+}
+
+/// A source that never sends its parameter sets can't hold the other tracks' media
+/// forever: once their queue passes its bound the export fails, naming the track.
+#[tokio::test(start_paused = true)]
+async fn a_track_that_never_describes_itself_fails() {
+	const IDR_ONLY: &[u8] = &[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x21];
+
+	let (mut live, mut audio) = live_av();
+	let video = live.track.name().to_string();
+	live.track.write(raw_frame(0, IDR_ONLY, true)).unwrap();
+	let mut exporter =
+		crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await).with_max_age(RECORDING_MAX_AGE);
+
+	// Live audio, one second at a time, until the export gives up on the video.
+	let mut second = 0;
+	let err = loop {
+		assert!(second < 40, "the queue outgrew its bound");
+		write_audio(&mut audio, second * 1_000_000, 50);
+		second += 1;
+		match tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await {
+			Err(_) => continue,
+			Ok(Ok(chunk)) => panic!("a chunk before the video could be described: {chunk:?}"),
+			Ok(Err(err)) => break err,
+		}
+	};
+	assert!(
+		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackUndescribed(names)) if *names == [video]),
+		"{err:?}"
+	);
+}
+
+/// Audio held in one open group is buffered rather than queued as fragments, and still
+/// counts against the bound while another track waits for its keyframe.
+#[tokio::test(start_paused = true)]
+async fn an_uncut_audio_backlog_is_bounded() {
+	const IDR_ONLY: &[u8] = &[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x21];
+
+	let (mut live, mut audio) = live_av();
+	let video = live.track.name().to_string();
+	live.track.write(raw_frame(0, IDR_ONLY, true)).unwrap();
+	let mut exporter =
+		crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await).with_max_age(RECORDING_MAX_AGE);
+
+	// One audio group that never closes, one second at a time.
+	let mut second = 0;
+	let err = loop {
+		assert!(second < 40, "the buffer outgrew the bound");
+		for i in 0..50u64 {
+			audio
+				.write(raw_frame(second * 1_000_000 + i * 20_000, OPUS, second == 0 && i == 0))
+				.unwrap();
+		}
+		second += 1;
+		match tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await {
+			Err(_) => continue,
+			Ok(Ok(chunk)) => panic!("a chunk before the video could be described: {chunk:?}"),
+			Ok(Err(err)) => break err,
+		}
+	};
+	assert!(
+		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackUndescribed(names)) if *names == [video]),
+		"{err:?}"
+	);
+}
+
+/// An HEVC Main 10 source: the catalog's codec string carries no chroma format or bit
+/// depth, so the track waits for its SPS and declares the depth the SPS states.
+#[tokio::test(start_paused = true)]
+async fn hevc_main10_is_described_from_its_sps() {
+	use hang::catalog::{Container, H265, VideoConfig};
+
+	// One keyframe of a 64x64 4:2:0 10-bit stream from x265 (`-profile:v main10`).
+	const VPS: &[u8] = &[
+		0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x02, 0x20, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00,
+		0x03, 0x00, 0x1e, 0x95, 0x98, 0x09,
+	];
+	const SPS: &[u8] = &[
+		0x42, 0x01, 0x01, 0x02, 0x20, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x1e,
+		0xa0, 0x20, 0x81, 0x04, 0xd9, 0x65, 0x66, 0x92, 0x4c, 0xaf, 0x01, 0x68, 0x08, 0x00, 0x00, 0x03, 0x00, 0x08,
+		0x00, 0x00, 0x03, 0x00, 0xf0, 0x40,
+	];
+	const PPS: &[u8] = &[0x44, 0x01, 0xc1, 0x72, 0xb4, 0x22, 0x40];
+	const IDR: &[u8] = &[0x28, 0x01, 0xaf, 0x08, 0x60, 0xf9, 0x2a, 0x5c, 0xf3, 0x65, 0x62, 0xe8];
+
+	let mut live = Live::new(".hevc", |catalog, name| {
+		let mut config = VideoConfig::new(H265 {
+			in_band: true,
+			profile_space: 0,
+			profile_idc: 2,
+			profile_compatibility_flags: [0x20, 0, 0, 0],
+			tier_flag: false,
+			level_idc: 0x1e,
+			constraint_flags: [0x90, 0, 0, 0, 0, 0],
+		});
+		config.container = Container::Legacy;
+		catalog.modify().unwrap().video.renditions.insert(name, config);
+	});
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	let pending = tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await;
+	assert!(pending.is_err(), "an init before the SPS: {pending:?}");
+
+	let mut keyframe = BytesMut::new();
+	for nal in [VPS, SPS, PPS, IDR] {
+		keyframe.extend_from_slice(&[0, 0, 0, 1]);
+		keyframe.extend_from_slice(nal);
+	}
+	live.track
+		.write(crate::container::Frame {
+			timestamp: moq_net::Timestamp::from_micros(0).unwrap(),
+			payload: keyframe.freeze(),
+			keyframe: true,
+			duration: None,
+		})
+		.unwrap();
+
+	let init = chunk_now(&mut exporter).await.init().expect("init");
+	let mut cursor = Cursor::new(init.as_ref());
+	let mut moov = None;
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode init") {
+		if let mp4_atom::Any::Moov(value) = atom {
+			moov = Some(value);
+		}
+	}
+	let trak = &moov.expect("init segment missing moov").trak[0];
+	let mp4_atom::Codec::Hev1(hev1) = &trak.mdia.minf.stbl.stsd.codecs[0] else {
+		panic!("expected an hev1 sample entry");
+	};
+	assert_eq!((hev1.visual.width, hev1.visual.height), (64, 64));
+	assert_eq!(hev1.hvcc.general_profile_idc, 2, "Main 10");
+	assert_eq!(hev1.hvcc.chroma_format_idc, 1, "4:2:0");
+	assert_eq!(hev1.hvcc.bit_depth_luma_minus8, 2, "10-bit luma");
+	assert_eq!(hev1.hvcc.bit_depth_chroma_minus8, 2, "10-bit chroma");
+}
