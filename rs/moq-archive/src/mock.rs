@@ -44,12 +44,16 @@ struct State {
 	fail_lists: bool,
 	/// Streaming listings yield entries in descending order, like a backend that promises none.
 	unordered: bool,
+	/// PUTs whose path contains any of these wait until [`Mock::release`].
+	holds: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct Mock {
 	inner: Arc<dyn ObjectStore>,
 	state: Arc<Mutex<State>>,
+	/// Wakes PUTs blocked in [`Self::hold_puts`].
+	hold: Arc<tokio::sync::Notify>,
 }
 
 impl Mock {
@@ -57,6 +61,7 @@ impl Mock {
 		Self {
 			inner: Arc::new(inner),
 			state: Default::default(),
+			hold: Arc::new(tokio::sync::Notify::new()),
 		}
 	}
 
@@ -69,6 +74,7 @@ impl Mock {
 		Self {
 			inner: self.inner.clone(),
 			state: Default::default(),
+			hold: Arc::new(tokio::sync::Notify::new()),
 		}
 	}
 
@@ -120,6 +126,18 @@ impl Mock {
 		self
 	}
 
+	/// Hold PUTs whose path contains `pattern` until [`release`](Self::release).
+	pub fn hold_puts(&self, pattern: &str) -> &Self {
+		self.state().holds.push(pattern.to_string());
+		self
+	}
+
+	/// Unblock every PUT [`hold_puts`](Self::hold_puts) is waiting on.
+	pub fn release(&self) {
+		self.state().holds.clear();
+		self.hold.notify_waiters();
+	}
+
 	/// Clear every injected failure.
 	pub fn heal(&self) {
 		let mut state = self.state();
@@ -128,6 +146,27 @@ impl Mock {
 		state.stall_gets.clear();
 		state.fail_deletes.clear();
 		state.fail_lists = false;
+		state.holds.clear();
+		drop(state);
+		self.hold.notify_waiters();
+	}
+
+	/// Wait out a [`hold_puts`](Self::hold_puts) gate.
+	///
+	/// The waiter is armed before the check, so a `release` in between is not missed.
+	async fn wait_held(&self, location: &Path) {
+		loop {
+			let notified = self.hold.notified();
+			let held = self
+				.state()
+				.holds
+				.iter()
+				.any(|pattern| location.as_ref().contains(pattern));
+			if !held {
+				return;
+			}
+			notified.await;
+		}
 	}
 
 	fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -196,6 +235,7 @@ impl ObjectStore for Mock {
 		if self.state().fail_puts.iter().any(|p| location.as_ref().contains(p)) {
 			return Err(unsupported("put"));
 		}
+		self.wait_held(location).await;
 		self.inner.put_opts(location, payload, opts).await
 	}
 
