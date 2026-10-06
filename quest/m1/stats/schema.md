@@ -58,7 +58,7 @@ and the hang draft specs both. Nothing produces them yet.
 
 ## Required
 
-- [Catalog rendition IDs](/quest/m1/catalog-track-alias.md) - the rendition
+- [Catalog rendition IDs](/quest/m1/catalog-track-id.md) - the rendition
   ID both snapshots key by
 
 ## Related
