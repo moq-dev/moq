@@ -16,10 +16,9 @@ and grows on later updates. Reported by Dryvnt in
 
 ## Plan
 
-Decided (2026-10-05, maintainer): m1, [XS], ranked right after [Import at the
-first frame](/quest/m1/import-first-frame.md). That quest moves each
-importer's release to its first frame, which still lands before the next
-rendition is reserved.
+Decided (2026-10-05, maintainer): m1, [XS]. Each importer now releases its
+reservation at its first frame, which still lands before the next rendition
+is reserved.
 
 Guidance:
 
@@ -44,5 +43,4 @@ lists every rendition instead of only the first.
 
 ## Related
 
-- [Import at the first frame](/quest/m1/import-first-frame.md) - moves each importer's catalog release to its first frame
 - [Shared import clock](/quest/m1/shared-clock.md) - moq-hls renditions share one `catalog::Input`, whose `reserve()` this hold may use

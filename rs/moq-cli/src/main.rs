@@ -4,6 +4,7 @@
 //! grammar; this module orchestrates the shared Origin and spawns the MoQ side
 //! plus every stage's endpoint.
 
+mod announced;
 mod args;
 mod auth;
 mod complete;
@@ -12,7 +13,6 @@ mod devices;
 mod duration;
 mod fetch;
 mod hls;
-mod ls;
 mod moq;
 mod play;
 mod publish;
@@ -318,12 +318,12 @@ async fn main() -> anyhow::Result<()> {
 		}
 	}
 
-	// `fetch` and `ls` only dial, so an ambient listener or cluster setting they
+	// `fetch` and `announced` only dial, so an ambient listener or cluster setting they
 	// never use is not validated either.
 	if let [Command::Fetch(_)] = stages.as_slice() {
 		cli.dial_only("fetch", &["--broadcast"])?;
-	} else if let [Command::Ls(_)] = stages.as_slice() {
-		cli.dial_only("ls", &[])?;
+	} else if let [Command::Announced(_)] = stages.as_slice() {
+		cli.dial_only("announced", &[])?;
 	} else {
 		cli.moq.validate()?;
 	}
@@ -345,7 +345,7 @@ async fn main() -> anyhow::Result<()> {
 		if stages.len() == 1 && !stages[0].is_stageable() {
 			match stages.remove(0) {
 				Command::Fetch(args) => return fetch::run(cli.moq, args, net).await,
-				Command::Ls(args) => return ls::run(cli.moq, args, net).await,
+				Command::Announced(args) => return announced::run(cli.moq, args, net).await,
 				#[cfg(feature = "play")]
 				Command::Play(args) => return run_play(cli.moq, args, net).await,
 				#[cfg(feature = "transcode")]
