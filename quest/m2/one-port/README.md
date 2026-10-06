@@ -90,8 +90,8 @@ pre-accepted streams can stand behind.
 
 ## Required
 
-- [Steer only QUIC by connection ID](/quest/m2/one-port/shard-steering.md) - the reuseport filter leaves RTP, SRT, and STUN flows on one shard each
-- [UDP demux](/quest/m2/one-port/udp-demux.md) - one socket carries QUIC and STUN answers, with greasing off and a WebRTC hook for embedders
+- [Steer only QUIC by connection ID](/quest/m2/one-port/shard-steering.md) - QUIC-bit greasing goes off and the reuseport filter leaves RTP, SRT, and STUN flows on one shard each
+- [UDP demux](/quest/m2/one-port/udp-demux.md) - one socket carries QUIC and STUN answers, with a WebRTC hook for embedders
 - [WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md) - `moq-rtc` serves WHIP and WHEP media from the WebRTC hook and pins ICE tuples
 - [TCP acceptor](/quest/m2/one-port/tcp-demux.md) - one listener carries TLS-terminated HTTP, RTMP, and RTMPS
 - [SRT on the shared socket](/quest/m2/one-port/srt-demux.md) - moq-srt drives `srt-protocol` on demuxed packets and the flow table pins its 4-tuples

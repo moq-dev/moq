@@ -3,8 +3,7 @@
 ## Goal
 
 `moq-relay` reads one UDP socket and serves QUIC and STUN Binding answers from
-it. A P2P client can list `stun:<relay>:<port>`, and the tokio backend has
-QUIC-bit greasing off so a short header is always recognizable. The WebRTC
+it. A P2P client can list `stun:<relay>:<port>`. The WebRTC
 media path is an embedder hook: the demux hands its class to an embedder such
 as moq.pro's edge, which feeds it to `moq-rtc`, since `moq-relay` serves no
 WHIP or WHEP.
@@ -25,10 +24,8 @@ one. Bound queues per stack with a per-source drop rather than unbounded
 growth; report drops as a counter.
 
 QUIC: `moq-tokio`'s noq server takes the virtual socket through
-`new_with_abstract_socket`. Set the grease-QUIC-bit transport parameter off,
-with a test that decodes a sent short-header
-packet and asserts the fixed bit. `moq-uring`'s config is
-[the io_uring demux](/quest/m2/uring-demux.md)'s.
+`new_with_abstract_socket`. QUIC-bit greasing is already off, from
+[shard steering](/quest/m2/one-port/shard-steering.md).
 
 STUN: a `stun` virtual socket answered by a small responder in `moq-sock`,
 Binding request to Binding success with XOR-MAPPED-ADDRESS, str0m's
@@ -46,7 +43,7 @@ Off by default in `moq-relay`, on with `--stun`.
 WebRTC: DTLS, RTP, and USERNAME-carrying STUN go to a `webrtc` hook that
 `moq-relay` leaves unconsumed and an embedder takes: the datagrams, a send
 path through the shared socket, and a way to pin a 4-tuple to WebRTC in the
-flow table. [WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md)
+flow table and release it. [WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md)
 makes `moq-rtc` consume it.
 
 Decided in the 2026-09-30 audit: narrowed to QUIC plus STUN in the relay,

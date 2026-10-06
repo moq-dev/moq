@@ -5,7 +5,7 @@
 `moq-uring`'s workers host the one-port demux, so a relay on the ring serves
 everything the tokio backend does on its one UDP port: QUIC on the worker,
 and STUN, WebRTC media, and SRT reaching their tokio stacks from the same
-socket. The ring's QUIC config has QUIC-bit greasing off.
+socket.
 
 ## Plan
 
@@ -37,8 +37,8 @@ does.
 
 Tests: the existing uring relay integration test gains a STUN Binding round
 trip and a WebRTC-class datagram echoed back through the remote-send path,
-both on the QUIC port with a QUIC session active, and a short header the
-worker sends has the fixed bit set.
+both on the QUIC port with a QUIC session active. QUIC-bit greasing is
+already off on the ring, from shard steering.
 
 ## Required
 

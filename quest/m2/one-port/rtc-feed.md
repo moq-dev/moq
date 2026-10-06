@@ -31,7 +31,7 @@ pub enum Socket {
     Fed {
         recv: mpsc::Receiver<(Bytes, SocketAddr)>,
         send: Arc<dyn Transmit>,
-        advertised: SocketAddr,
+        advertised: Vec<SocketAddr>,
         pinned: mpsc::Sender<SocketAddr>,
     },
 }
@@ -40,10 +40,17 @@ pub enum Socket {
 The mux and each session hold `Arc<dyn Transmit>` instead of
 `Arc<UdpSocket>`, and `UdpSocket` implements `Transmit`, so the bound case
 behaves as today. Candidates come from `advertised` instead of the bound
-socket's local address, and the session's address-family check uses it too.
+socket's local address; it is a list, like `ice_candidates`, so a dual-stack
+peer still gets a same-family candidate. Address-family mapping follows the
+real socket, not the advertisement: a dual-stack socket bound to `[::]` may
+advertise a public IPv4 address, so the `Transmit` impl owns the IPv4-mapped
+conversion the session applies today. Received and pinned addresses use the
+same canonical form the demux's flow table keys on, or no pin ever matches.
 When ICE selects a pair, the remote address goes out on `pinned`, so the
 demux routes that tuple to WebRTC before any SRT test (see the
-[questline README](/quest/m2/one-port/README.md)).
+[questline README](/quest/m2/one-port/README.md)). A pin also has to be
+released when its session ends or ICE moves to another pair: either an
+unpin message or idle expiry in the flow table, as SRT's pins have.
 
 Things to watch: the server config is `Clone` today and a receiver is not, so
 the fed socket may belong in the server's constructor rather than the
@@ -51,8 +58,9 @@ config. The fed mux has nothing to bind lazily, and a dropped feed should
 fail the server loudly rather than idle.
 
 Tests: a fed mux completes ICE and DTLS with a client through an in-memory
-`Transmit`, and reports the selected tuple on `pinned`. The existing bound
-tests keep passing.
+`Transmit`, reports the selected tuple on `pinned`, and releases it when the
+session closes. A fed dual-stack socket serves an IPv4 peer. The existing
+bound tests keep passing.
 
 ## Required
 
