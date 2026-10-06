@@ -61,7 +61,6 @@ is either ported by a child quest or recorded as not applicable in the
 ## Required
 
 - [Port BBR3](/quest/m1/quic/fork/bbr3.md) - the fork's corrected BBR3 and controller callbacks run on `moq-quic` as the default controller
-- [Import quinn-udp](/quest/m1/quic/fork/udp.md) - quinn-udp is a `moq-sock` module carrying the GSO resend fix, replacing `moq-noq-udp`
 - [Switch](/quest/m1/quic/fork/switch.md) - quinn's async layer and `web-transport-moq` join moq-tokio, both runtimes run on `moq-quic`, `moq-noq*` is gone, and relay memory matches `moq-noq`
 
 ## Related
