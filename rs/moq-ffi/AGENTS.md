@@ -1,5 +1,9 @@
 The UniFFI core every non-Rust binding is generated from. Proc-macro based (`#[uniffi::Object]`, `#[uniffi::export]`), no `.udl`.
 
+# Mobile
+
+Rust owns capture, codecs, and rendering. Bridge native surfaces as opaque handles (`CVPixelBuffer` on iOS, Android `HardwareBuffer` or `Surface`). Do not add a Swift or Kotlin codec, capture, or render stack beside the Rust one. The default `audio` and `video` features are how the bindings carry those codecs.
+
 # Changing the surface
 
 Mirror every change in the same PR:
