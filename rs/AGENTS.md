@@ -46,7 +46,7 @@ Prefer poll. New logic is a `poll_*` with an `async` helper, not the other way a
 
 - Don't add `#[non_exhaustive]` by default. It earns its keep on error enums, enums that will gain variants, and `Config`-style structs with `pub` fields plus a `Default`/constructor. Builders with private fields don't need it.
 - Append new variants to the end of a public fieldless enum with implicit discriminants; inserting reorders `as` values.
-- A deprecated item gets `#[doc(hidden)]` and `#[deprecated(note)]`. A renamed flag or env var stays as a hidden arg recorded in `moq_tokio::Deprecated`, which refuses to start and names the replacement rather than honoring the old spelling. Never advertise the dead name in docs or `--help`.
+- A deprecated item gets `#[doc(hidden)]` and `#[deprecated(note)]`. A renamed flag or env var stays as a hidden arg with its original `env`, reported by the section's `deprecated()` into `moq_tokio::cli::Deprecated`; callers must reject startup when the collection is non-empty and name the replacement rather than honor the old spelling. Never advertise the dead name in docs or `--help`.
 
 # Testing
 
