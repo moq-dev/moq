@@ -242,6 +242,7 @@ The expected update is a ROUTE_COST change, which is how a relay signals that it
 # Path Selection {#selection}
 A receiver resolving a SUBSCRIBE, FETCH, or track-status request consults only the most specific advertisements covering it: the longest prefix.
 A refusal never falls through to a less specific tier.
+Nor is it retried at another advertisement of the same prefix, except for the one re-resolution NO_CAPACITY permits below.
 
 Within that tier, a receiver SHOULD prefer a HOP_PATH that contains no 0 entry over one that does, then the lowest ROUTE_COST, breaking ties toward the shorter HOP_PATH and then toward the most recently received.
 This is advisory: a receiver MAY apply local policy, such as measured RTT, instead.

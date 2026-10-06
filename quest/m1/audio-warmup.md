@@ -18,6 +18,10 @@ frames decode independently and set nothing; HE-AAC is out of scope.
   non-continuous signal (added in Rust by the open-GOP quest), and the
   subscription's maximum age grows by `warmup` as the video consumer quest
   does. `js/watch` audio mirrors it.
+- The trim replaces `LEGACY_WARMUP_CALLBACKS` in `js/watch/src/audio/decoder.ts`,
+  which drops the first three decoded frames of every legacy or LOC
+  subscription, CMAF excepted. That is the start loss left on a rendition's
+  return after an absence: 60 ms of 20 ms Opus.
 - Tests in both languages: a mid-stream join discards exactly the warmup span
   and a continuous listener loses nothing.
 

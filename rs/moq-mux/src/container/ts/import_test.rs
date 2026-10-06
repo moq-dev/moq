@@ -269,6 +269,36 @@ async fn import_opus_frames() {
 	}
 }
 
+/// An Opus config comes from the PMT, before any PES, yet the catalog is first published at the
+/// first PES, carrying the clock it anchors rather than a provisional one a copy-once reader
+/// would keep.
+#[tokio::test]
+async fn opus_catalog_carries_the_anchored_clock() {
+	// An hour in, so the anchored clock lands far from the provisional one.
+	let data = shift_clock(include_bytes!("test_data/opus.ts"), 3_600 * 90_000);
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let provisional = catalog.clock().wall();
+	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+
+	// Packet by packet, so a snapshot published at the PMT is seen before the PES replaces it.
+	let mut published = Vec::new();
+	for pkt in data.chunks(188) {
+		import.decode(pkt).unwrap();
+		published.extend(clocks.drain());
+	}
+	import.finish().unwrap();
+	published.extend(clocks.drain());
+
+	let anchored = catalog.clock().wall();
+	assert_ne!(anchored, provisional, "the first PES anchors the clock");
+	assert!(!published.is_empty(), "the catalog publishes");
+	assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
+}
+
 /// `eac3.ts` is an ffmpeg-authored audio-only ATSC E-AC-3 program (stream_type
 /// 0x87 plus the 'EAC3' registration descriptor), regenerated with:
 /// `ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.5
