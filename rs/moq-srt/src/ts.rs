@@ -375,13 +375,41 @@ mod tests {
 		seal(s)
 	}
 
-	/// The PSI of a two-program multiplex, each program carrying one private PES stream
-	/// (carried verbatim, so the catalog lists it without waiting on media): program 1's on
-	/// PID 0x101, program 2's on 0x201.
+	/// One TS packet carrying a whole private PES with a PTS, stuffed in its adaptation field
+	/// so the PES ends exactly at its declared length.
+	fn pes_packet(pid: u16, pts: u64) -> Vec<u8> {
+		let mut pes = vec![0x00, 0x00, 0x01, 0xbd, 0x00, 10, 0x80, 0x80, 0x05];
+		pes.extend_from_slice(&[
+			0x21 | (((pts >> 30) & 0x07) << 1) as u8,
+			(pts >> 22) as u8,
+			0x01 | (((pts >> 15) & 0x7f) << 1) as u8,
+			(pts >> 7) as u8,
+			0x01 | ((pts & 0x7f) << 1) as u8,
+		]);
+		pes.extend_from_slice(&[0xde, 0xad]);
+		let stuffing = 188 - 4 - pes.len();
+		let mut p = vec![
+			0x47,
+			0x40 | (pid >> 8) as u8,
+			pid as u8,
+			0x30,
+			(stuffing - 1) as u8,
+			0x00,
+		];
+		p.resize(4 + stuffing, 0xff);
+		p.extend_from_slice(&pes);
+		p
+	}
+
+	/// A two-program multiplex, each program carrying one private PES stream (carried
+	/// verbatim) and its first PES, which anchors the clock and so publishes the catalog:
+	/// program 1's on PID 0x101, program 2's on 0x201.
 	fn two_programs() -> Bytes {
 		let mut ts = psi_packet(0x0000, &pat(&[(1, 0x0100), (2, 0x0200)]));
 		ts.extend_from_slice(&psi_packet(0x0100, &pmt(1, 0x06, 0x0101)));
 		ts.extend_from_slice(&psi_packet(0x0200, &pmt(2, 0x06, 0x0201)));
+		ts.extend_from_slice(&pes_packet(0x0101, 90_000));
+		ts.extend_from_slice(&pes_packet(0x0201, 90_000));
 		ts.into()
 	}
 

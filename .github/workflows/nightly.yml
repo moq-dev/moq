@@ -133,6 +133,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just js catalog-bench
 
+      # Times Effect create and close beside a bare `new Error()`. No threshold: it only
+      # has to keep running, and its numbers track the creation stack's cost.
+      - name: JS signals effect benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just js signals-bench
+
       # Runs each moq-net Criterion routine once, so a bench that panics (an
       # unparsable version, a shape that deadlocks) fails here instead of on the
       # next manual run. Timing is not compared; nextest never runs a

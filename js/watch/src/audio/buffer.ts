@@ -12,7 +12,7 @@ import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
  * (Atomics poll vs worklet state messages). A no-op when not buffered (the ring bounds itself).
  */
 class Backpressure {
-	readonly #enabled: boolean;
+	#enabled: boolean;
 	#headroom: Time.Micro;
 	#waiters: Array<{ timestamp: Time.Micro; resolve: () => void }> = [];
 
@@ -47,6 +47,12 @@ class Backpressure {
 	flush(): void {
 		for (const { resolve } of this.#waiters) resolve();
 		this.#waiters = [];
+	}
+
+	// Stop gating for good. Nothing advances a closed buffer, so a later wait would never settle.
+	close(): void {
+		this.#enabled = false;
+		this.flush();
 	}
 }
 
@@ -228,7 +234,7 @@ class SharedAudioBuffer implements AudioBuffer {
 	}
 
 	close(): void {
-		this.#backpressure.flush(); // never leave a decode loop awaiting a closed buffer
+		this.#backpressure.close(); // never leave a decode loop awaiting a closed buffer
 		this.#signals.close();
 	}
 }
@@ -320,7 +326,7 @@ class PostAudioBuffer implements AudioBuffer {
 	}
 
 	close(): void {
-		this.#backpressure.flush(); // never leave a decode loop awaiting a closed buffer
+		this.#backpressure.close(); // never leave a decode loop awaiting a closed buffer
 		this.#signals.close();
 	}
 }

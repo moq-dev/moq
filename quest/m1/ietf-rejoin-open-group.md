@@ -21,5 +21,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Fetched heads stay visible](/quest/m1/lite07-head-fetch-arrival.md) - another mid-group join that loses part of a group
 - [Rejoin after the copy goes idle](/quest/m1/test-flakes-2/rejoin-idle-race.md) - a different IETF rejoin bug, serving a stale cache

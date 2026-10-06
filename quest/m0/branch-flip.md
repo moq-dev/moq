@@ -104,4 +104,3 @@ Public API: none. Wire: none. Contributors see the new branch model.
 ## Related
 
 - [Cloudflare builds track release](/quest/m0/cloudflare-release.md) - the maintainer's dashboard step, waiting on its own condition
-- [noq reassembly cap](/quest/m0/noq-reassembly-cap.md) - the rest of the cap on `release`
