@@ -25,12 +25,12 @@ quinn-udp, from the same commit, is the `udp` module of [moq-sock](../moq-sock/R
 Its patches map onto the module the same way:
 
 ```sh
-git -C ../quinn format-patch -1 --stdout <sha> -- quinn-udp \
+git -C ../quinn format-patch -1 --stdout <sha> -- quinn-udp/src quinn-udp/tests/tests.rs \
   | sed -E 's#([ab])/quinn-udp/src/lib\.rs#\1/rs/moq-sock/src/udp/mod.rs#g; s#([ab])/quinn-udp/src/#\1/rs/moq-sock/src/udp/#g; s#([ab])/quinn-udp/tests/tests\.rs#\1/rs/moq-sock/tests/udp/main.rs#g; s/crate::/crate::udp::/g; s/quinn_udp::/moq_sock::udp::/g' \
   | git am -3
 ```
 
-Its `Cargo.toml` and `build.rs` hunks go into moq-sock's by hand, and its benchmark is not carried (moq-uring's `udp_tokio` covers it).
+Changes to its `Cargo.toml` and `build.rs` go into moq-sock's by hand, and its benchmark is not carried (moq-uring's `udp_tokio` covers it).
 The module logs through `tracing` only, so quinn-udp's `log` feature and no-op logger are dropped.
 A `.rustfmt.toml` in each imported directory keeps quinn's formatting; `cargo fmt` cannot apply it to a submodule, so moq-sock skips `udp` and `just rs fix` formats it separately.
 
@@ -42,6 +42,7 @@ Changes on top of the upstream commit, besides the renames:
   We extend it to resend batches built before GSO was halted too, which upstream's version drops, and to log only the first rejection.
   A `WouldBlock` partway through the resend makes the caller retry the whole batch, duplicating the datagrams already sent; QUIC drops the duplicates.
   Drop it if upstream lands [quinn#2748](https://github.com/quinn-rs/quinn/pull/2748) and we cherry-pick that.
+- Apple fast-path fallback preserves the segmentation of batches prepared before the fast path was disabled, including when a private symbol is unavailable.
 
 ### Advisory triage
 

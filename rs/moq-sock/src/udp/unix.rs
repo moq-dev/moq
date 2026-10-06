@@ -598,8 +598,8 @@ fn send(
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn send_individual_datagrams(
+#[cfg(any(target_os = "linux", target_os = "android", apple_fast))]
+pub(super) fn send_individual_datagrams(
     state: &UdpSocketState,
     io: SockRef<'_>,
     transmit: &Transmit<'_>,
@@ -609,17 +609,17 @@ fn send_individual_datagrams(
 
     for contents in transmit.contents.chunks(segment_size) {
         let io = SockRef::from(&*io);
-        send(
-            state,
-            io,
-            &Transmit {
-                destination: transmit.destination,
-                ecn: transmit.ecn,
-                contents,
-                segment_size: None,
-                src_ip: transmit.src_ip,
-            },
-        )?;
+        let transmit = Transmit {
+            destination: transmit.destination,
+            ecn: transmit.ecn,
+            contents,
+            segment_size: None,
+            src_ip: transmit.src_ip,
+        };
+        #[cfg(apple_fast)]
+        send_single(state, io, &transmit)?;
+        #[cfg(not(apple_fast))]
+        send(state, io, &transmit)?;
     }
 
     Ok(())
@@ -1074,6 +1074,40 @@ pub(crate) fn retry_if_interrupted(mut f: impl FnMut() -> isize) -> io::Result<i
 mod tests {
     use super::*;
     use std::{net::UdpSocket, sync::mpsc, thread};
+
+    #[test]
+    #[cfg(apple_fast)]
+    fn missing_apple_fast_symbol_preserves_pending_segments() {
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let state = UdpSocketState::new((&sender).into()).unwrap();
+        // No private API is called: force symbol resolution to fail before sending.
+        unsafe { state.set_apple_fast_path() };
+        assert!(state.resolve_apple_fast_fn::<()>(|| None).is_none());
+        assert!(!state.is_apple_fast_path_enabled());
+        assert_eq!(state.max_gso_segments(), 1);
+        let contents = [1, 1, 1, 1, 2, 2, 2, 2, 3, 3];
+        state
+            .try_send(
+                (&sender).into(),
+                &Transmit {
+                    destination: receiver.local_addr().unwrap(),
+                    ecn: None,
+                    contents: &contents,
+                    segment_size: Some(4),
+                    src_ip: None,
+                },
+            )
+            .unwrap();
+        let mut buffer = [0; 16];
+        for expected in contents.chunks(4) {
+            let len = receiver.recv(&mut buffer).unwrap();
+            assert_eq!(&buffer[..len], expected);
+        }
+    }
 
     #[test]
     fn recv_single_after_truncation_returns_would_block_instead_of_spin() {

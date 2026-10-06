@@ -10,7 +10,10 @@ use socket2::SockRef;
 use crate::udp::{
     RecvMeta, Transmit, UdpSocketState,
     cmsg::{self, MsgHdr},
-    imp::{BATCH_SIZE, IpTosTy, decode_recv, recv_single, retry_if_interrupted, send_single},
+    imp::{
+        BATCH_SIZE, IpTosTy, decode_recv, recv_single, retry_if_interrupted,
+        send_individual_datagrams, send_single,
+    },
 };
 
 pub(crate) fn send(
@@ -20,6 +23,9 @@ pub(crate) fn send(
 ) -> io::Result<()> {
     if state.is_apple_fast_path_enabled() {
         send_via_sendmsg_x(state, io, transmit)
+    } else if let Some(segment_size) = transmit.effective_segment_size() {
+        // A batch may have been prepared before the fast path was disabled.
+        send_individual_datagrams(state, io, transmit, segment_size)
     } else {
         send_single(state, io, transmit)
     }
@@ -64,7 +70,7 @@ fn send_via_sendmsg_x(
         cnt += 1;
     }
     let Some(sendmsg_x) = state.resolve_apple_fast_fn(sendmsg_x_fn) else {
-        return send_single(state, io, transmit);
+        return send(state, io, transmit);
     };
     retry_if_interrupted(|| unsafe { sendmsg_x(io.as_raw_fd(), hdrs.as_ptr(), cnt as u32, 0) })?;
     Ok(())
