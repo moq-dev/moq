@@ -33,3 +33,4 @@ Public API: none. Wire: none.
 - [Subscription cut by disconnect](/quest/m1/test-flakes-2/subscription-cut.md) - a publisher disconnect never ends a subscription clean
 - [Media late join](/quest/m1/test-flakes-2/media-late-join.md) - `just test media` late join stays within one GOP, or the regression is fixed
 - [Rejoin after idle](/quest/m1/test-flakes-2/rejoin-idle-race.md) - an IETF rejoin never gets the stale warm cache first, because the copy goes idle before the cancel
+- [Import catalog finish](/quest/m1/test-flakes-2/import-catalog-finish.md) - `moq-cli`'s EOF catalog-finish import test runs on a paused clock or in-memory fixture

@@ -44,6 +44,9 @@ The cut:
   rather than misparse; no compatibility shim.
 - The draft's lite-07 changelog matches the wire and `just drafts check`
   passes.
+- The SETUP section's own 65,536-byte cap sentence is dropped if the general
+  Message Length cap from request caps (#4820) has landed, since it then
+  repeats that rule.
 
 Rust's lite-07 varints already carry the full 64 bits the draft specifies,
 so no codec work waits on the cut.

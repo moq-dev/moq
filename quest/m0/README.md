@@ -43,6 +43,7 @@ a published `@moq/watch` break.
 
 ## Required
 
+- [Expiry wakes](/quest/m0/expiry-wakes.md) - an appended group wakes only the parked reads it expires, so a 2.5 ms-frame publisher with 2 s of parked serves stays near idle and the Python and Go interop rows pass
 - [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
 - [Shared fronts](/quest/m0/shared-fronts.md) - viewer sessions share a front, so fronts scale with peers, not viewers, and viewer churn no longer leaks fronts

@@ -85,6 +85,11 @@ blocks. The quests that gated m0 lines moved under them.
 - [Datagrams are live-only](/quest/m1/datagram-unfetchable.md) - no FETCH, replay to a new subscriber, or cache fill ever returns a datagram group
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [Bounded HLS playlists](/quest/m1/hls-bounded.md) - `moq-hls` renders a capped sliding window for a fresh viewer, with a stable media sequence, gap slots, and no video before a sync point
+- [SUBSCRIBE_UPDATE routing](/quest/m1/ietf-subscribe-update-route.md) - on drafts 14 to 16 an update reaches the subscription it names, not its own request ID
+- [JS request window](/quest/m1/js-request-window.md) - @moq/net grants MAX_REQUEST_ID as requests close, so a peer never stalls after ~21k requests
+- [Relay session limits](/quest/m1/relay-session-limits.md) - moq-relay sets per-session request limits, tighter for clients than peers, and the bindings name a refused request
+- [Churn with held subscriptions](/quest/m1/session-churn-held.md) - opening and closing a request costs the same with 1 or 1,024 held subscriptions
+- [Wide varint tests](/quest/m1/varint-test-gaps.md) - wide sequences and both varint forms are tested where they differ
 - [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; the catalog entry and format may break in place, since no archives exist
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
 - [Dropped sources](/quest/m1/dropped-sources.md) - track consumers see the producer's real error on every end path, never `Dropped`

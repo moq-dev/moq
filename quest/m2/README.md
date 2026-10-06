@@ -60,6 +60,8 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Bench coverage](/quest/m2/bench-coverage.md) - Criterion targets for moq-pattern matching first, then the stats producer, moq-mux containers, the hang catalog, and moq-auth
 - [Signed priority](/quest/m2/signed-priority.md) - every API priority is an `i8` with 0 as the unset midpoint, and hang's built-ins sit above it
 - [SEI separation study](/quest/m2/sei.md) - measure whether separating SEI saves enough, or has a metadata-only consumer, to justify a split
+- [mTLS on tls://](/quest/m2/tls-listener-mtls.md) - a `tls://` listener can identify a cluster peer by its client certificate
+- [One transport adapter](/quest/m2/transport-adapter-dedup.md) - the poll transport adapter exists once, and its read cap is tested
 - [AV1 metadata separation](/quest/m2/av1-metadata.md) - retain metadata OBUs inline while evaluating separate delivery
 - [Catalog track identity](/quest/m2/catalog-tracks.md) - a changed track configuration becomes a new track name or epoch, never a mutated definition
 - [Catalog colour model](/quest/m2/color-catalog.md) - the catalog describes a rendition's colour and HDR properties once a renderer consumes them
