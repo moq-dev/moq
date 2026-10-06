@@ -59,7 +59,7 @@ Remaining:
   #4403 wildcard, #4034 archive, #4039 auth, #4079 cpp, #4519 ffi-shape,
   #4080 obs-moq-video, #4133 qos (held until
   [Lag across a splice](/quest/m1/qos/lag-splice.md) is fixed),
-  #4180 transport-upgrade, #4640 tstd. #4162 (audio-jitter-target), #4437 rs2ts
+  #4640 tstd. #4162 (audio-jitter-target), #4180 (transport-upgrade), #4437 rs2ts
   (with #4438 folded in), and #4653 (test-flakes-2) landed.
 - Fold #4255 (archive/track-timeline) into the archive branch before #4034
   lands; as of the 2026-10-05 audit it has not happened and #4034 is a draft.
