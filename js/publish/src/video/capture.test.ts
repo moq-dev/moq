@@ -159,6 +159,27 @@ test("the held frame is closed when replaced, when an unread copy is dropped, an
 	expect(open()).toEqual([]);
 });
 
+test("closing the capture releases a copy its reader never read", async () => {
+	using input = frameSource();
+	const capture = new Capture({ source: input.source });
+	const effect = new Effect();
+
+	try {
+		input.push(1_000);
+		await flush();
+
+		const reader = capture.out.frames.peek()?.subscribe(effect).getReader();
+		if (!reader) throw new Error("no fanout");
+
+		// The reader outlives the capture, like the fanout's own queued frames.
+		capture.close();
+		expect(open()).toEqual([]);
+		expect((await reader.read()).done).toBe(true);
+	} finally {
+		effect.close();
+	}
+});
+
 // https://github.com/moq-dev/moq/issues/4778
 test("an encoder resuming on a still source encodes a keyframe of the current picture, stamped now", async () => {
 	using input = frameSource();

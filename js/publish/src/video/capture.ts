@@ -93,6 +93,9 @@ class Frames extends Fanout<VideoFrame> {
 	// it is built before super().
 	readonly #held: Held;
 
+	// Copies handed to new readers and not yet read, released on close like the fanout's own queues.
+	readonly #unread = new Set<VideoFrame>();
+
 	constructor(source: ReadableStream<VideoFrame>) {
 		const held: Held = { closed: false };
 		const hold = new TransformStream<VideoFrame, VideoFrame>({
@@ -122,8 +125,9 @@ class Frames extends Fanout<VideoFrame> {
 		// would deliver it that late, a delay the jitter estimate keeps for the life of the stream.
 		const at = Time.Micro.fromMilli(performance.now() as Time.Milli);
 		let first: VideoFrame | undefined = new VideoFrame(held, { timestamp: at });
+		this.#unread.add(first);
 		const release = () => {
-			first?.close();
+			if (first && this.#unread.delete(first)) first.close();
 			first = undefined;
 		};
 		effect.cleanup(release);
@@ -132,9 +136,11 @@ class Frames extends Fanout<VideoFrame> {
 		return new ReadableStream<VideoFrame>(
 			{
 				pull: async (controller) => {
-					if (first) {
-						controller.enqueue(first);
-						first = undefined;
+					const copy = first;
+					first = undefined;
+					// Already released if the capture closed first.
+					if (copy && this.#unread.delete(copy)) {
+						controller.enqueue(copy);
 						return;
 					}
 
@@ -169,6 +175,9 @@ class Frames extends Fanout<VideoFrame> {
 		this.#held.closed = true;
 		this.#held.frame?.close();
 		this.#held.frame = undefined;
+
+		for (const frame of this.#unread) frame.close();
+		this.#unread.clear();
 	}
 }
 
