@@ -14,8 +14,8 @@ Delete this quest once a deploy job succeeds.
 ## Plan
 
 The maintainer's manual deploy on 2026-10-05 created the `moq-sh` worker and
-its `moq.sh` custom domain; `curl -fsSL https://moq.sh | sh` installs moq
-0.14.0.
+its `moq.sh` custom domain; `curl -fsSL https://moq.sh | sh` installs the
+newest moq-cli.
 
 The token has the account-wide Workers Editor role and no Zone access.
 Cloudflare says custom domains do not support per-Worker roles yet, and
