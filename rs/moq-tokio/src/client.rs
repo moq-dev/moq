@@ -554,6 +554,10 @@ impl Client {
 							// The WebSocket session is only drained once the peer admits this one.
 							// A refusal, or a version with no SETUP to wait on, keeps WebSocket.
 							session.accepted().await?;
+							// A session already told to leave would hand straight back out of QUIC.
+							if session.draining().peek().is_some() {
+								return Err(Error::ConnectFailed);
+							}
 							Ok(session)
 						}) as Handshake)
 					});
