@@ -24,8 +24,8 @@ import * as Container from "@moq/hang/container";
 `Catalog.EscapingBroadcast` for a `broadcast` reference that walks above the
 handle's `path`. Run the same checks on a catalog from another source with
 `Catalog.checkRenditions(root)` and `Catalog.checkResolvable(root, base)`.
-`Hang.Timeline.Consumer.subscribe(broadcast, root.archive)` reads segment
-`push`, `pop`, and `skip` events when a root advertises an archive.
+`Hang.Timeline.Consumer.subscribe(broadcast, root.archive, track)` reads one
+track's timeline as record `push`, `pop`, and `skip` events when a root advertises it.
 
 Most apps never import it directly; the elements and `Broadcast` classes in
 the watch and publish packages do. Reach for it when hand-rolling a catalog

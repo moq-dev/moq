@@ -63,7 +63,7 @@ leaves two handles on one segmenter
 ## Required
 
 - [Timelines declare their segment duration](/quest/m1/archive/declared-duration.md) - each timeline entry declares its segment duration (reported or estimated by the publisher), replacing the root `durationMax`
-- [JS per-track timelines](/quest/m1/archive/js-timelines.md) - `@moq/hang` publishes and reads the same per-track timelines as Rust
+- [JS per-track timelines](/quest/m1/archive/js-timelines.md) - `@moq/hang` publishes the same per-track timelines as Rust (it already reads them)
 - [Fixed HLS target duration](/quest/m1/archive/hls-target.md) - one `EXT-X-TARGETDURATION` for the run, from the reference timeline's declared duration; an overrun is listed with a warning
 
 ## Related

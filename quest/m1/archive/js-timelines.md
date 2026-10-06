@@ -3,14 +3,20 @@
 ## Goal
 
 `@moq/hang` publishes one timeline per track with the same records, cuts, and
-catalog `archive` map as Rust, and parses them identically.
+catalog `archive` map as Rust.
 
 ## Plan
 
-Port the landed Rust shape to `js/hang/src/timeline.ts` and its catalog schema,
-replacing the aligned timeline and cross-track pacing rather than keeping both.
-Cover the same cut rules and a static catalog outliving other tracks' records,
-and check the records against Rust output in the interop suite.
+The read side landed with the archive line (#4034): the catalog schema parses
+the `timelines` map and `Timeline.Consumer` reads one track's records. The
+aligned multi-track producer was deleted rather than kept beside it, so JS
+publishes no timeline today.
+
+Port the Rust segmenter, producer, and enrollment
+(`rs/moq-mux/src/timeline.rs`) to `js/hang/src/timeline.ts`, and have the
+legacy container report its groups again. Cover the same cut rules and a
+static catalog outliving other tracks' records, and check the records against
+Rust output in the interop suite.
 
 ## Required
 

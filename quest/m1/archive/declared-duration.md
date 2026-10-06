@@ -18,7 +18,9 @@ the catalog declares a usable target:
   the archive `timescale`. The root `durationMax` goes away. This is a break in
   place on this line, with no compatibility path. Update `rs/hang`,
   `drafts/draft-lcurley-moq-hang.md`, and every `durationMax` reference
-  (grep it, including `doc/`). The JS port happens in
+  (grep it, including `doc/`), and the JS catalog schema
+  (`js/hang/src/catalog/archive.ts`) in the same PR, since `@moq/watch` refuses
+  a catalog it cannot parse. The rest of the JS port happens in
   [JS per-track timelines](/quest/m1/archive/js-timelines.md).
 - **A 4s minimum.** `duration_min` defaults to 4s (from 2s), so an archive
   doesn't write a stream of tiny objects to S3. A record still ends at the
