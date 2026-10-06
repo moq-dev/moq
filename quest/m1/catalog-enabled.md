@@ -55,10 +55,6 @@ rendition and `enabled: false`, and a viewer deselects it and keeps one
 AudioContext across disable and enable; a legacy `stalled: true` changes
 nothing; nothing in the tree writes `stalled`.
 
-## Required
-
-- [Audio publish hygiene](/quest/m1/audio-publish-hygiene.md) - lands first, so the publisher pause builds on the shared container producer's disable path
-
 ## Closes
 
 - [#4772](https://github.com/moq-dev/moq/issues/4772) - close this issue when the quest finishes

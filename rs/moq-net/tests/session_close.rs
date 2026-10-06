@@ -1,7 +1,7 @@
 //! `Session::close` delivers what the session queued before closing, within a deadline,
 //! while `abort` still closes at once.
 //!
-//! Deterministic: paused time and a single-threaded runtime over the mock transport.
+//! Deterministic: simulated time over the mock transport.
 
 mod support;
 
@@ -14,7 +14,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(support::harness::run(driver));
+	support::harness::spawn(driver);
 	producer
 }
 
@@ -25,7 +25,7 @@ type Read = (Vec<Vec<u8>>, Result<(), Error>);
 struct Setup {
 	pair: MockPair,
 	track: moq_net::track::Producer,
-	reader: tokio::task::JoinHandle<Read>,
+	reader: moq_net_sim::JoinHandle<Read>,
 	_broadcast: moq_net::broadcast::Producer,
 }
 
@@ -42,17 +42,17 @@ async fn setup(version: &str) -> Setup {
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	tokio::time::timeout(TIMEOUT, consumer.routed("bcast"))
+	moq_net_sim::timeout(TIMEOUT, consumer.routed("bcast"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("bcast"))
+	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast"))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
 	// The publisher only learns of a subscription once the subscriber polls it.
-	let reader = tokio::spawn(async move {
+	let reader = moq_net_sim::spawn(async move {
 		let mut sub = remote.track("video").unwrap().subscribe(None).await.expect("subscribe");
 		let mut got = Vec::new();
 		loop {
@@ -71,7 +71,7 @@ async fn setup(version: &str) -> Setup {
 		}
 	});
 
-	tokio::time::timeout(TIMEOUT, track.demand().used())
+	moq_net_sim::timeout(TIMEOUT, track.demand().used())
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
@@ -86,12 +86,12 @@ async fn setup(version: &str) -> Setup {
 
 /// A finished track's last group and FIN reach the subscriber, even though the
 /// close is requested before the session wrote them.
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn close_delivers_a_finished_track() {
 	close_delivers_a_finished_track_for("moq-lite-05").await;
 }
 
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn ietf_close_delivers_a_finished_track() {
 	close_delivers_a_finished_track_for("moq-transport-20").await;
 }
@@ -106,17 +106,17 @@ async fn close_delivers_a_finished_track_for(version: &str) {
 	group.finish().unwrap();
 	track.finish().unwrap();
 
-	let started = tokio::time::Instant::now();
-	tokio::time::timeout(TIMEOUT, pair.client.close())
+	let started = moq_net_sim::now();
+	moq_net_sim::timeout(TIMEOUT, pair.client.close())
 		.await
 		.expect("close timed out")
 		.expect("the close drains");
 	assert!(
-		started.elapsed() < Duration::from_secs(1),
+		(moq_net_sim::now() - started) < Duration::from_secs(1),
 		"drained before the deadline"
 	);
 
-	let (got, end) = tokio::time::timeout(TIMEOUT, reader)
+	let (got, end) = moq_net_sim::timeout(TIMEOUT, reader)
 		.await
 		.expect("reader timed out")
 		.unwrap();
@@ -126,12 +126,12 @@ async fn close_delivers_a_finished_track_for(version: &str) {
 
 /// A track that never finishes holds the drain until the deadline, then the
 /// session closes anyway.
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn close_gives_up_on_a_live_track() {
 	close_gives_up_on_a_live_track_for("moq-lite-05").await;
 }
 
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn ietf_close_gives_up_on_a_live_track() {
 	close_gives_up_on_a_live_track_for("moq-transport-20").await;
 }
@@ -141,21 +141,21 @@ async fn close_gives_up_on_a_live_track_for(version: &str) {
 		pair, track: _track, ..
 	} = setup(version).await;
 
-	let started = tokio::time::Instant::now();
-	let res = tokio::time::timeout(TIMEOUT, pair.client.close())
+	let started = moq_net_sim::now();
+	let res = moq_net_sim::timeout(TIMEOUT, pair.client.close())
 		.await
 		.expect("close timed out");
 	assert!(matches!(res, Err(Error::Timeout)), "{res:?}");
-	assert_eq!(started.elapsed(), Duration::from_secs(1));
+	assert_eq!((moq_net_sim::now() - started), Duration::from_secs(1));
 }
 
 /// An abort from another handle cuts a drain short.
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn abort_cuts_a_drain_short() {
 	abort_cuts_a_drain_short_for("moq-lite-05").await;
 }
 
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn ietf_abort_cuts_a_drain_short() {
 	abort_cuts_a_drain_short_for("moq-transport-20").await;
 }
@@ -166,24 +166,24 @@ async fn abort_cuts_a_drain_short_for(version: &str) {
 	} = setup(version).await;
 
 	let other = pair.client.clone();
-	let started = tokio::time::Instant::now();
-	let close = tokio::spawn(pair.client.close());
-	tokio::time::sleep(Duration::from_millis(100)).await;
+	let started = moq_net_sim::now();
+	let close = moq_net_sim::spawn(pair.client.close());
+	moq_net_sim::sleep(Duration::from_millis(100)).await;
 	other.abort(Error::Cancel);
 
-	let res = tokio::time::timeout(TIMEOUT, close)
+	let res = moq_net_sim::timeout(TIMEOUT, close)
 		.await
 		.expect("close timed out")
 		.unwrap();
 	assert!(res.is_err() && !matches!(res, Err(Error::Timeout)), "{res:?}");
 	assert!(
-		started.elapsed() < Duration::from_secs(1),
+		(moq_net_sim::now() - started) < Duration::from_secs(1),
 		"{res:?} after {:?}",
-		started.elapsed()
+		(moq_net_sim::now() - started)
 	);
 }
 
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn close_withdraws_announcements_before_closing_the_transport() {
 	for version in ["moq-lite-01", "moq-lite-07-wip", "moq-transport-17", "moq-transport-22"] {
 		let publisher = produce_origin(1);
@@ -204,7 +204,7 @@ async fn close_withdraws_announcements_before_closing_the_transport() {
 	}
 }
 
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn close_times_out_waiting_for_announcement_acknowledgements() {
 	for version in ["moq-lite-01", "moq-lite-07-wip", "moq-transport-17", "moq-transport-22"] {
 		let publisher = produce_origin(1);
@@ -217,14 +217,14 @@ async fn close_times_out_waiting_for_announcement_acknowledgements() {
 		let pair = connect_mock(options).await;
 		subscriber.consume().routed("bcast").await.unwrap();
 		pair.client_transport.hold_fin_acknowledgements();
-		let started = tokio::time::Instant::now();
+		let started = moq_net_sim::now();
 		assert!(matches!(pair.client.close().await, Err(Error::Timeout)), "{version}");
-		assert_eq!(started.elapsed(), Duration::from_secs(1));
+		assert_eq!(moq_net_sim::now() - started, Duration::from_secs(1));
 	}
 }
 
 /// A transport ACK is not proof the subscriber read the final group.
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn close_tail() {
 	let Setup {
 		pair, track, reader, ..
@@ -235,8 +235,8 @@ async fn close_tail() {
 	group.write_frame(Timestamp::ZERO, b"last".as_slice()).unwrap();
 	group.finish().unwrap();
 	track.finish().unwrap();
-	let close = tokio::spawn(pair.client.close());
-	tokio::time::sleep(Duration::from_millis(100)).await;
+	let close = moq_net_sim::spawn(pair.client.close());
+	moq_net_sim::sleep(Duration::from_millis(100)).await;
 	assert!(
 		!close.is_finished(),
 		"close must wait for the subscriber, not the transport ACK"
@@ -252,7 +252,7 @@ async fn close_tail() {
 }
 
 /// A lite07 peer that never acknowledges the track end cannot report a successful close.
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn close_requires_subscriber_fin() {
 	let Setup {
 		pair,
@@ -266,13 +266,13 @@ async fn close_requires_subscriber_fin() {
 	group.write_frame(Timestamp::ZERO, b"last".as_slice()).unwrap();
 	group.finish().unwrap();
 	track.finish().unwrap();
-	let started = tokio::time::Instant::now();
+	let started = moq_net_sim::now();
 	assert!(matches!(pair.client.close().await, Err(Error::Timeout)));
-	assert_eq!(started.elapsed(), Duration::from_secs(1));
+	assert_eq!(moq_net_sim::now() - started, Duration::from_secs(1));
 }
 
 /// Released drafts retain ACK-based close even when application delivery is delayed.
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn older_lite_close_keeps_ack_drain() {
 	for version in ["moq-lite-05", "moq-lite-06"] {
 		let Setup {

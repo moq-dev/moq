@@ -53,6 +53,11 @@ allow = [
     "Unlicense",
     "Zlib",
 ]
+exceptions = [
+    # AWS-LC's FIPS build still carries OpenSSL-licensed code. Reachable only
+    # through moq-quic's opt-in `aws-lc-rs-fips` feature, kept from quinn.
+    { crate = "aws-lc-fips-sys", allow = ["OpenSSL"] },
+]
 
 [bans]
 multiple-versions = "warn"

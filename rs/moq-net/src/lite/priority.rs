@@ -754,7 +754,7 @@ mod tests {
 		assert_eq!(low_track_high_group.current(), 4); // track=50, group=100
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn test_watch_notification_on_overflow_promotion() {
 		let queue = PriorityQueue::default();
 
@@ -766,10 +766,10 @@ mod tests {
 		assert_eq!(overflow_item.current(), u8::MAX);
 
 		// Spawn task to wait for promotion from overflow
-		let task = tokio::spawn(async move { overflow_item.next().await });
+		let task = moq_net_sim::spawn(async move { overflow_item.next().await });
 
 		// Give the task time to start waiting
-		tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+		moq_net_sim::sleep(std::time::Duration::from_millis(10)).await;
 
 		// Drop highest priority item, which should promote from overflow
 		fillers.remove(0);
@@ -871,7 +871,7 @@ mod tests {
 		assert_eq!(handles[1].current(), 0);
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn test_notification_on_demotion_to_overflow() {
 		let queue = PriorityQueue::default();
 
@@ -883,9 +883,9 @@ mod tests {
 		assert_eq!(at_edge.current(), 254);
 
 		// Spawn task to wait for demotion notification
-		let task = tokio::spawn(async move { at_edge.next().await });
+		let task = moq_net_sim::spawn(async move { at_edge.next().await });
 
-		tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+		moq_net_sim::sleep(std::time::Duration::from_millis(10)).await;
 
 		// Insert very high priority item, kicking at_edge to overflow
 		let _high = queue.insert(live(255, 1000));
@@ -938,7 +938,7 @@ mod tests {
 		assert_eq!(s1_g1.current(), 3);
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn test_set_track_notifies_other_handles() {
 		let queue = PriorityQueue::default();
 
@@ -949,8 +949,8 @@ mod tests {
 		assert_eq!(h_low.current(), 1);
 
 		// Wait for a change notification on h_low while another handle's set_track runs.
-		let task = tokio::spawn(async move { h_low.next().await });
-		tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+		let task = moq_net_sim::spawn(async move { h_low.next().await });
+		moq_net_sim::sleep(std::time::Duration::from_millis(10)).await;
 
 		// Demote h_high below h_low.
 		h_high.set_track(10);
@@ -1048,9 +1048,8 @@ mod tests {
 		assert_eq!(low.current(), 2);
 	}
 
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn test_set_track_notifies_swapped_overflow_item() {
-		tokio::time::pause();
 		let queue = PriorityQueue::default();
 
 		// Fill vec, then insert top, kicking f1 (filler at group=1) into overflow.
@@ -1062,8 +1061,8 @@ mod tests {
 		let mut f1 = fillers.remove(0);
 		assert_eq!(f1.current(), u8::MAX);
 
-		let task = tokio::spawn(async move { f1.next().await });
-		tokio::task::yield_now().await;
+		let task = moq_net_sim::spawn(async move { f1.next().await });
+		moq_net_sim::yield_now().await;
 
 		// Demoting top below every filler swaps it with f1 in overflow.
 		top.set_track(0);

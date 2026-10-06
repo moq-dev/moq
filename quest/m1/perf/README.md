@@ -65,6 +65,7 @@ the rest.
 - [Group cost](/quest/m1/perf/group-cost.md) - count and cut the allocations and time spent relaying one small group to one viewer
 - [Run to quiescence](/quest/m1/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
 - [Announce replay](/quest/m1/perf/announce-replay.md) - the initial announce set replays in linear time, so joins don't slow with the route count
+- [Demand aggregate](/quest/m1/perf/demand-aggregate.md) - a track subscribe, leave, or preference update no longer walks every reader of the track
 - [Ingest batch](/quest/m1/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per chunk burst instead of per chunk
 - [#3122](/quest/m1/perf/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md) - moq-uring: ~2.5% of relay CPU is vdso clock reads; the drive loop and its callers each re-read Instant::now()
 - [#3199](/quest/m1/perf/3199-moq-uring-remove-sq-indirection-and-per-enter-ring-fd.md) - moq-uring: remove SQ indirection and per-enter ring fd lookup

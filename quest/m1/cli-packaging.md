@@ -44,6 +44,10 @@ without NVENC; Pi 4, CM4, Zero 2 W, and Orin NX and above encode. RK3588
 encodes through rkmpp in a vendor kernel, not V4L2, so it stays on the
 `moq-gst` route.
 
+`pipewire` stays off in shipped builds (decided 2026-10-06): it needs
+libpipewire-0.3 to load, the same load-time requirement
+[ALSA](/quest/m1/capture-alsa-link.md) removes.
+
 Decided in the 2026-09-30 audit: the v4l2 encode quest folded in here, since
 its remaining work was one release feature flag and a doc note.
 

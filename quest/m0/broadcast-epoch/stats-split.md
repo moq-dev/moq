@@ -1,9 +1,10 @@
-# [L] Stats totals and per-broadcast tracks
+# [L] Stats totals and prefix tracks
 
 ## Goal
 
 Each node's stats broadcast publishes per-group cumulative totals that are
-never pruned while the group is announced, plus one stats track per broadcast, served only when requested.
+never pruned while the group is announced, plus a stats track for any
+prefix within the group, served only when requested.
 The per-path map tracks are gone. While a group stays announced, a reader
 that misses a frame loses nothing: the next totals frame still carries
 everything since the epoch began.
@@ -39,46 +40,69 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
   lingering groups. Test two groups sharing a tier, a group returning within
   the linger (same epoch, totals continue), and one returning after it (new
   epoch from zero).
-- **Per-broadcast tracks.** A reader that wants one broadcast subscribes to
-  its track; nothing is produced for a broadcast no one requests. The track
-  carries that broadcast's cumulative counters and finishes after its closing
-  readout. A request after the closing readout gets the zeroed track below,
-  so a zeroed per-broadcast track is not authoritative; totals carry the
-  real sums. Pick the track naming while implementing, but it must be
-  injective: tiers and broadcast paths both contain `/`, so no plain
-  concatenation of the two parses back to one pair.
-- A broadcast's counters start at zero. A request for a broadcast with no
-  entry (never seen, or already pruned) is held open with zeroed counters
-  until one appears, as an unrecorded tier is today, and is reclaimed when
-  its last consumer leaves.
-- The tier-sized caps (`MAX_REQUESTED_TRACKS` is 64) are too small for a page
-  of visible broadcasts. Give per-broadcast tracks their own cap per group
-  broadcast, sized (or configurable) for every reader the aggregator fans in,
-  not one page. Refuse requests beyond it with a typed error the reader
-  retries, rather than a parked track that reads as zero. Tier requests park
-  instead (`MAX_PARKED_REQUESTS`) because a collector treats a refusal as
-  final; per-broadcast readers must not.
+- **Prefix tracks** (decided 2026-10-05, replacing per-broadcast tracks).
+  Routing is by prefix, and with epochs a broadcast is `<name>/@<epoch>`, so
+  a reader requests any prefix of a member path (so its depth is bounded by
+  `Path::MAX_PARTS` less the group's own segments) and gets one track: the prefix's rollup plus a one-level map of
+  each direct child's rollup (a broadcast's epochs, a channel's broadcasts).
+  Nothing is produced for a prefix no one holds. The relay's `--stats-depth`
+  only places the group broadcasts; requests are not capped by it.
+- Flow counters (bytes, frames, groups, fetches) count from zero when the
+  prefix is first held and fold in members that end while it is held. Their
+  absolute values are not authoritative, so readers take differences within
+  one subscription; the group totals carry the real sums.
+- Started/ended pairs (announces, broadcasts, subscriptions, sessions) are
+  seeded at registration: `started` with each current member's
+  `started - ended`, `ended` at zero, so every `active` derived from a pair
+  stays exact for a prefix held mid-stream. Test a prefix held while 300
+  subscriptions are live, then watch them leave.
+- A request for a prefix with no members is held open at zero and reclaimed
+  when its last consumer leaves. Track names must stay injective: tiers and
+  paths both contain `/`.
+- A child leaves the one-level map after the frame carrying its closing
+  readout; its tail stays in the parent's rollup. So the map holds live and
+  just-ended children, not every child the prefix has ever seen. Decide
+  while implementing whether a map with hundreds of children needs a cap or
+  paging.
+- The aggregator merges a prefix track across nodes with a baseline per
+  upstream (node, epoch) hold, and treats a decrease as that upstream's
+  reset: a node restart, a new group epoch, or the aggregator re-holding the
+  prefix. A merged prefix track then never regresses within one downstream
+  subscription. Test a join, a leave, and a restart under a held prefix.
+- Keep the hot path lock-free: a held prefix registers atomic accumulators,
+  each entry caches its held ancestors' (and the matching child slot in
+  each), and an update bumps them in a loop, about twice the held depth per
+  update. Registration and release reach existing entries without a lock or
+  a walk of every entry, for example an `ArcSwap` ancestor list or a
+  generation counter rechecked on bump. Benchmark across held-prefix count
+  and depth.
+- Held prefixes get their own cap per group broadcast, sized (or
+  configurable) for every reader the aggregator fans in. Refuse requests
+  beyond it with a typed error the reader retries, rather than a parked
+  track that reads as zero. Tier requests park instead
+  (`MAX_PARKED_REQUESTS`) because a collector treats a refusal as final;
+  prefix readers must not.
 - **Sessions** (decided 2026-10-05). `sessions.json` is keyed by auth root
   and loses pruned roots the same way, so fold per-tier `Presence` into the
   totals (session counts) and serve per-root detail as a requested track,
-  the same model as per-broadcast tracks.
+  the same model as prefix tracks.
 - **Retire the map tracks** (`publisher.json`, `subscriber.json`,
   `sessions.json`, and their `.json.z` siblings) in the same release. Decide
-  while implementing whether totals and per-broadcast tracks keep `.json.z`
+  while implementing whether totals and prefix tracks keep `.json.z`
   siblings.
 - Ship in the same breaking release as stats epochs, so consumers take one
   stats path and wire change, not two.
 - Update the aggregator, `doc/concept/stats.md`, and `demo/web/src/stats.ts`
   (which reads the three maps) with the change. The
-  aggregator merges totals across nodes, and merges one broadcast's track
-  across nodes when a reader requests it, so a multi-node consumer serves the
+  aggregator merges totals across nodes, and merges a prefix track across
+  nodes when a reader requests it, so a multi-node consumer serves the
   same format it reads.
 
 Public API: `moq-stats` producer and consumer types. Wire: stats track names
 and payloads.
 
 MoQ Pro adopts it when it pins the release: billing reads totals, its
-Broadcasts page subscribes per visible broadcast, its `announced` probe
+Broadcasts page reads one prefix per visible row and group header, its `announced` probe
 reads totals only, and its customer stats feed serves this format summed
 across nodes.
 
@@ -88,7 +112,5 @@ across nodes.
 
 ## Related
 
-- [Bounded stats aggregate](/quest/m0/broadcast-epoch/stats-aggregate-bound.md) - retired
-  nodes fold into a bounded total; per-epoch totals feed it
 - [Media stats](/quest/m1/stats/README.md) - publisher and viewer media stats
   stay hang tracks, separate from the relay's stats

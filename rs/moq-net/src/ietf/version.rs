@@ -60,13 +60,16 @@ mod tests {
 
 	fn message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
 		let mut buf = Vec::new();
-		msg.encode_msg(&mut buf, version).expect("encode");
+		msg.encode_msg(&mut crate::coding::Encoder::new(&mut buf, version.into()), version)
+			.expect("encode");
 		buf
 	}
 
 	fn field<E: Encode<Version>>(value: &E, version: Version) -> Vec<u8> {
 		let mut buf = Vec::new();
-		value.encode(&mut buf, version).expect("encode");
+		value
+			.encode(&mut crate::coding::Encoder::new(&mut buf, version.into()), version)
+			.expect("encode");
 		buf
 	}
 

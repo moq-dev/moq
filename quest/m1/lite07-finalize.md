@@ -45,10 +45,8 @@ The cut:
 - The draft's lite-07 changelog matches the wire and `just drafts check`
   passes.
 
-Decided 2026-10-05: Rust's 64-bit `VarInt` is not required first. The draft
-already specifies 64 bits; Rust refusing values above 2^62-1 is an
-implementation limit that [VarInt codec](/quest/m1/rs2ts/varint-codec.md)
-fixes whenever it lands.
+Rust's lite-07 varints already carry the full 64 bits the draft specifies,
+so no codec work waits on the cut.
 
 Open, for the maintainer:
 
@@ -69,7 +67,6 @@ is published; older versions are unchanged.
 - [Live media time](/quest/m1/subscribe-live-time.md) - SUBSCRIBE_OK carries the publisher's live media time
 - [Untimed lite-07](/quest/m1/lite-untimed.md) - an untimed track crosses the wire untimed
 - [One route cost](/quest/m1/route-cost.md) - ANNOUNCE carries one cost
-- [Fetched heads stay visible](/quest/m1/lite07-head-fetch-arrival.md) - a lite-07 relay still delivers a group whose head it fetched
 
 ## Related
 

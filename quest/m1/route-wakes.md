@@ -54,7 +54,7 @@ Decisions:
   below the prefix, since rendezvous moves exactly the paths the changed
   route now wins; only those fronts re-select. A leave wakes only the fronts
   the leaver served or was requesting through.
-- Builds on shared-fronts' keying, so the index hangs off the final front
+- Builds on fronts keyed by effective exclusion, so the index hangs off the final front
   identity. `origin-front-parks.md` replaces the `routed_broadcast` retry
   loop, one of the watch consumers here; whichever lands second adapts it.
   (2026-09-30)
@@ -70,7 +70,6 @@ Public API: none. Wire: none.
 ## Required
 
 - [Wildcard](/quest/m0/wildcard/README.md) - `sync_route`, `poke_below`, and the `origin/pool_churn` bench this reworks exist only on its line branch
-- [Viewer sessions share a front](/quest/m0/shared-fronts.md) - re-keys fronts, which this index hangs off; it lands after the wildcard line, which is where the pool code lives
 
 ## Related
 

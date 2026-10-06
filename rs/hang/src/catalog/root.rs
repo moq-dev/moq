@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
 ///
 /// The base catalog carries the media sections (`video`, `audio`, `text`), the optional
-/// `archive` (the segment index and any durable recording), the optional `clock` (the
+/// `archive` (each track's timeline and any durable recording), the optional `clock` (the
 /// broadcast's one wall-clock mapping), and the data sections
 /// (`json`, `binary`) for application tracks that aren't media.
 /// Applications extend it with their own root sections (e.g. `scte35`) through `E`. The catalog
@@ -31,25 +31,27 @@ pub struct Catalog<E = ()> {
 	/// Video track information with multiple renditions.
 	///
 	/// Contains a map of video track renditions that the viewer can choose from
-	/// based on their preferences (resolution, bitrate, codec, etc).
-	#[serde(default)]
+	/// based on their preferences (resolution, bitrate, codec, etc). Omitted from the
+	/// wire when it has no renditions.
+	#[serde(default, skip_serializing_if = "Video::is_empty")]
 	pub video: Video,
 
 	/// Audio track information with multiple renditions.
 	///
 	/// Contains a map of audio track renditions that the viewer can choose from
-	/// based on their preferences (codec, bitrate, language, etc).
-	#[serde(default)]
+	/// based on their preferences (codec, bitrate, language, etc). Omitted from the
+	/// wire when it has no renditions.
+	#[serde(default, skip_serializing_if = "Audio::is_empty")]
 	pub audio: Audio,
 
-	/// The broadcast's segment index and any durable archive, if the publisher offers one.
+	/// Each track's timeline and any durable archive, if the publisher offers them.
 	/// See [`Archive`](crate::catalog::Archive) and the [`timeline`](crate::timeline) module.
 	pub archive: Option<crate::catalog::Archive>,
 
 	/// The broadcast's one continuous clock, if the publisher exposes one.
 	///
 	/// `wall` is the wall-clock time of PTS zero in `timescale` units since the moq epoch
-	/// (2020-01-01); every media track and the archive index refer to this mapping after
+	/// (2020-01-01); every media track and every timeline refer to this mapping after
 	/// timescale conversion. Independent of [`archive`](Self::archive): a live-only publisher
 	/// exposes its clock without creating a segment index. See
 	/// [`Clock`](crate::catalog::Clock).
@@ -540,11 +542,40 @@ mod test {
 
 	#[test]
 	fn empty_text_section_omitted() {
-		// A catalog without captions must stay byte-identical to before the text section existed:
-		// the empty section is skipped, unlike the always-present video/audio sections.
+		// A catalog without captions omits the text section, as it does for empty video and audio.
 		let catalog = Catalog::<()>::default();
 		let output = catalog.to_json().expect("failed to encode");
 		assert!(!output.contains("text"), "empty text section leaked: {output}");
+	}
+
+	#[test]
+	fn empty_video_and_audio_sections_omitted() {
+		// A data-only broadcast must not advertise media it does not have. An old publisher's
+		// empty objects still decode, and a republish drops them.
+		assert_eq!(Catalog::<()>::default().to_json().expect("failed to encode"), "{}");
+
+		let mut audio_only = Catalog::<()>::default();
+		audio_only
+			.audio
+			.insert("audio", AudioConfig::new(Opus, 48_000, 2))
+			.unwrap();
+		let output = audio_only.to_json().expect("failed to encode");
+		assert!(output.contains("\"audio\""), "audio section missing: {output}");
+		assert!(!output.contains("\"video\""), "empty video section leaked: {output}");
+
+		let mut video_only = Catalog::<()>::default();
+		video_only.video.display = Some(crate::catalog::Display { width: 16, height: 9 });
+		assert_eq!(
+			video_only.to_json().expect("failed to encode"),
+			"{}",
+			"display without a rendition must not keep an empty video section"
+		);
+
+		let legacy = Catalog::<()>::from_str(r#"{"video":{"renditions":{}},"audio":{"renditions":{}}}"#)
+			.expect("failed to decode");
+		assert!(legacy.video.is_empty());
+		assert!(legacy.audio.is_empty());
+		assert_eq!(legacy.to_json().expect("failed to encode"), "{}");
 	}
 
 	#[test]
@@ -612,6 +643,8 @@ mod test {
 			encoded.contains(r#""role":"commentary""#),
 			"unknown role was not preserved: {encoded}"
 		);
+		assert!(!encoded.contains("\"video\""), "empty video section leaked: {encoded}");
+		assert!(!encoded.contains("\"audio\""), "empty audio section leaked: {encoded}");
 	}
 
 	/// A section name is only reserved from the version that defines it, and `json` and `binary` are
@@ -644,10 +677,9 @@ mod test {
 
 	#[test]
 	fn data_sections_stay_off_the_wire_when_empty() {
-		// A media-only catalog must serialize exactly as it did before the data sections existed,
-		// or every existing publisher's bytes change.
+		// Empty sections stay off the wire, video and audio included.
 		let output = Catalog::<()>::default().to_json().expect("failed to encode");
-		assert_eq!(output, r#"{"video":{"renditions":{}},"audio":{"renditions":{}}}"#);
+		assert_eq!(output, "{}");
 	}
 
 	#[test]
@@ -669,9 +701,9 @@ mod test {
 
 	#[test]
 	fn clock_stays_off_the_wire_when_absent() {
-		// A catalog without a clock serializes exactly as before the section existed.
+		// Absent clock stays off the wire. Empty video and audio are omitted as well.
 		let output = Catalog::<()>::default().to_json().expect("failed to encode");
-		assert_eq!(output, r#"{"video":{"renditions":{}},"audio":{"renditions":{}}}"#);
+		assert_eq!(output, "{}");
 	}
 
 	#[test]
@@ -685,7 +717,7 @@ mod test {
 		assert_eq!(clock.wall.scale().as_u64(), 1_000_000);
 
 		let archive = catalog.archive.expect("the fixture carries an archive");
-		assert_eq!(archive.track, "timeline.z");
+		assert_eq!(archive.timelines["video"], "video.timeline.z");
 		assert_eq!(archive.timescale, 1000);
 
 		// Archive PTS 2000 (ms) lands 2s after the wall epoch, whatever the track timescale.
@@ -701,7 +733,10 @@ mod test {
 
 	#[test]
 	fn archive_roundtrips_at_the_root() {
-		let mut archive = crate::catalog::Archive::new("timeline.z");
+		let mut archive = crate::catalog::Archive::new();
+		archive
+			.timelines
+			.insert("video".to_string(), "video.timeline.z".to_string());
 		archive.duration_max = Some(2000);
 		archive.replay = Some(moq_net::path::RelativeOwned::new("recordings/clip"));
 		archive.version = Some(crate::catalog::Archive::VERSION);
@@ -712,7 +747,10 @@ mod test {
 		};
 
 		let json = catalog.to_json().expect("failed to encode");
-		assert!(json.contains(r#""archive":{"track":"timeline.z""#), "{json}");
+		assert!(
+			json.contains(r#""archive":{"timelines":{"video":"video.timeline.z"}"#),
+			"{json}"
+		);
 		assert!(
 			!json.contains(r#""timeline":"#),
 			"the old root key must not appear: {json}"
@@ -734,8 +772,6 @@ mod test {
 	#[test]
 	fn data_tracks_roundtrip() {
 		let mut encoded = r#"{
-			"video": {"renditions": {}},
-			"audio": {"renditions": {}},
 			"json": {
 				"tracks": {
 					"chat": {
@@ -787,7 +823,7 @@ mod test {
 	/// media.
 	#[test]
 	fn data_track_bitrate_and_jitter() {
-		let encoded = r#"{"video":{"renditions":{}},"audio":{"renditions":{}},"json":{"tracks":{"gps":{"mode":"stream","bitrate":8000,"jitter":100,"delay":250}}},"binary":{"tracks":{"frames":{"mode":"snapshot","bitrate":64000,"jitter":34}}}}"#;
+		let encoded = r#"{"json":{"tracks":{"gps":{"mode":"stream","bitrate":8000,"jitter":100,"delay":250}}},"binary":{"tracks":{"frames":{"mode":"snapshot","bitrate":64000,"jitter":34}}}}"#;
 
 		let mut gps = JsonConfig::new(Mode::Stream);
 		gps.bitrate = Some(8_000);
@@ -836,7 +872,8 @@ mod test {
 			mavlink: BTreeMap<String, Mavlink>,
 		}
 
-		let encoded = r#"{"video":{"renditions":{}},"audio":{"renditions":{}},"com.example.mavlink":{"telemetry":{"config":{"mode":"stream","compression":"deflate"},"sysid":1}}}"#;
+		let encoded =
+			r#"{"com.example.mavlink":{"telemetry":{"config":{"mode":"stream","compression":"deflate"},"sysid":1}}}"#;
 
 		let catalog = Catalog::<Ext>::from_str(encoded).unwrap();
 		let entry = &catalog.ext.mavlink["telemetry"];

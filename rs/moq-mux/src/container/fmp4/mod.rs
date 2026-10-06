@@ -120,9 +120,13 @@ pub enum Error {
 	#[error("duplicate moof")]
 	DuplicateMoof,
 
-	/// A second moov would re-declare the track set the first one already published.
+	/// A second moov would re-declare the track set the first one already declared.
 	#[error("duplicate moov")]
 	DuplicateMoov,
+
+	/// A moov arrived after `finish()`, so the tracks it declares could never finish.
+	#[error("moov after finish")]
+	MoovAfterFinish,
 
 	#[error("missing trun")]
 	MissingTrun,
@@ -154,6 +158,10 @@ pub enum Error {
 
 	#[error("audio codec {0} needs a description (AudioSpecificConfig) to synthesize a CMAF init")]
 	MissingAudioDescription(String),
+
+	/// An Opus catalog entry whose OpusHead contradicts its channel count.
+	#[error("Opus head has {head} channels but the catalog declares {catalog}")]
+	OpusChannelCount { catalog: u32, head: u32 },
 
 	#[error("multi-sample fragment has a non-final sample with no duration; DTS is unrecoverable")]
 	MissingSampleDuration,
@@ -735,8 +743,14 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 				Some(description) => {
 					let head = crate::codec::opus::Config::parse(&mut description.as_ref())?;
 					// dOps shares OpusHead's family 0 layout; a mapping table would need writing too.
-					if head.mapping_family != 0 {
-						return Err(crate::codec::opus::Error::UnsupportedMappingFamily(head.mapping_family).into());
+					if let Some(mapping) = head.mapping {
+						return Err(crate::codec::opus::Error::UnsupportedMappingFamily(mapping.family()).into());
+					}
+					if head.channel_count != config.channel_count {
+						return Err(Error::OpusChannelCount {
+							catalog: config.channel_count,
+							head: head.channel_count,
+						});
 					}
 					head
 				}

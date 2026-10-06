@@ -9,7 +9,7 @@ port.
 
 ## Plan
 
-In `moq-quic-tokio`, add an endpoint operation that closes the endpoint, waits
+In moq-tokio's imported quinn endpoint, add an endpoint operation that closes the endpoint, waits
 until each connection has sent its close, and then releases the socket. Later
 sends are dropped and receives end. Test it there and replace moq-tokio's wrapper with it in the same PR. The Go
 `TestReconnectAcrossRelayRestart` and moq-tokio's

@@ -41,10 +41,10 @@ That is the only arm that can see release timing at all, and it is what nightly
 runs (see [CI](#ci)).
 
 The default arm runs `pcr-timing.py` over its capture too, after `compliance.py`,
-for the one thing the IRD model does not grade: whether the bytes between
-consecutive PCRs are the ones the mux rate implies
-([`pcr-schedule`](#byte-schedule)). It is a shape check, so it reports without
-gating unless `--strict`.
+for the PCR checks `compliance.py` leaves to it: the value interval (hard), and
+whether the bytes between consecutive PCRs are the ones the mux rate implies
+([`pcr-schedule`](#byte-schedule), a shape check that reports without gating
+unless `--strict`).
 
 The live arm passes only when the grader's verdict *and* the publisher's exit status
 are clean. The grader can only speak for what reached it, and the sample floor
@@ -59,7 +59,7 @@ moq --connect http://localhost:4443 --broadcast live.hang export ts > sub.ts
 ./run.sh --analyze-only sub.ts
 ```
 
-Requirements: `tsp` and `tsanalyze` (TSDuck) and `python3` for every mode; the
+Requirements: `tsp`, `tsanalyze` and `tstables` (TSDuck) and `python3` for every mode; the
 round-trip modes also need `cargo`, `ffmpeg`, `curl`, and `timeout`.
 
 ## Checks
@@ -79,17 +79,11 @@ Severities: **hard** checks fail the run by default; **shape** checks report as
 | `pat` / `pmt` | hard | valid PAT mapping programs to a PMT that lists the elementary streams |
 | `psi-crc` | hard | no section dropped for a bad CRC |
 | `continuity` | hard | no continuity-counter discontinuities |
-| `pcr-presence` | hard | a PCR PID is declared and carries PCR |
+| `pcr-presence` | hard | every program's declared PCR PID carries PCR (0x1FFF declares none) |
 | `pcr-monotonic` | hard | PCR strictly increases (one 33-bit wrap tolerated), except into a PCR that signals `discontinuity_indicator` |
 | `duration-fidelity` | hard | exported PCR span tracks the source's duration (round-trip only) |
-| `pcr-repetition` | shape | consecutive PCRs within the limit (default 100 ms, TR 101 290 V1.4.1) |
-| `pcr-jitter` | shape | per-interval PCR jitter vs the nominal bitrate (pcrverify model) |
-| `null-ratio` | shape | null/stuffing fraction (flags only a pathological excess) |
 | `service-descriptors` | shape | an SDT naming the service is present |
-| `bitrate-consistency` | shape | instantaneous-bitrate spread over 1 ms / 10 ms windows (CBR-ness) |
-| `burstiness` | shape | peak/mean of windowed delivery |
-| `inter-arrival` | shape | packet inter-arrival spread on the PCR clock (informational) |
-| `tstd` | shape | transport-buffer smoothing (TB fills on arrival, leaks at Rx) |
+| `tstd` | shape | the full T-STD buffer model: no TB, MB, EB or B overflow, no access unit incomplete at its decoding time (see [T-STD](#t-std)) |
 
 Every timing check reads the stream's own PCR, so a PCR emitted on the wrong
 clock rate stays internally consistent and passes them all. `duration-fidelity`
@@ -98,10 +92,129 @@ independent duration, which pins the absolute rate. It runs only on a round-trip
 (where a source exists); `run.sh` passes the source automatically, and
 `--analyze-only` skips it.
 
-Thresholds are CLI flags forwarded through `run.sh` (e.g.
-`--pcr-repetition-ms`, `--pcr-jitter-us`, `--bitrate-cov-max`, `--burstiness-max`,
-`--tb-size-bytes`, `--video-leak-bps`, `--audio-leak-bps`). `--report-json <path>`
-writes the full machine-readable report.
+`compliance.py` grades what TSDuck parses and the T-STD model, and leaves PCR
+spacing, byte schedule and release timing to `pcr-timing.py`, which honours
+signalled discontinuities. `--report-json <path>` writes the full
+machine-readable report.
+
+## T-STD
+
+`tstd` runs every audio and video stream through the ISO 13818-1 system target
+decoder (2.4.2; Rec. ITU-T H.222.0, whose 10/2014 edition is a free download),
+fed on the stream's own PCR clock:
+
+```text
+video (AVC 2.14.3.1, HEVC 2.17.2)   TB --Rx--> MB --Rbx (leak)--> EB --DTS--> decoder
+audio (2.4.2.3)                     TB --Rx--> B  ----------------PTS--> decoder
+```
+
+It fails a stream where TB, MB, EB or B overflows, where TB stays occupied for a
+second, where an access unit is not wholly in EB/B at its decoding time
+(underflow), or where a byte waits longer than the STD delay bound (1 s, 10 s for
+AVC/HEVC). The report gives each stream's peak fill per buffer, how late the worst
+underflowed access unit finished arriving, and the longest any access unit waited.
+
+No maintained tool implements this. TSDuck has no T-STD analyzer, and nothing else
+in nixpkgs does either, so the model is hand-rolled and its parameters are
+transcribed from the specs: H.264 Table A-1 and H.265 Table A.8 for the level, the
+ADTS and "other audio" rates and sizes in H.222.0 2.4.2.3, and ATSC A/52 and A/53
+Part 5 for AC-3 and E-AC-3. TSDuck does the parsing: `tstables` decodes the PMT
+and `tsp -P pes --avc-access-unit` the SPS, AVC and HEVC alike.
+
+Video takes its buffers from the HRD the SPS declares, as H.222.0 2.14.3.1
+(AVC) and 2.17.2 (HEVC) specify. A NAL HRD sets Rx from its bit rate and EB to
+its CPB size, and MB grows by whatever the level's CPB leaves over; Rbx stays the
+level's. Without one, the level's limits stand in. A VCL HRD describes the VCL
+alone, not the byte stream EB holds, so a stream declaring only that takes the
+level defaults too. An `AVC_timing_and_HRD_descriptor` or
+`HEVC_timing_and_HRD_descriptor` with `hrd_management_valid` switches MB-to-EB
+transfer to the HRD's own schedule, which is not modelled, so such a stream is
+refused.
+
+Opus is graded against ADTS's buffers for the same channel count: the Opus-in-TS
+draft gives Rx (2 Mb/s for 1-2 channels, matching ADTS) but leaves the buffer size
+unset, so that size is borrowed rather than specified. A stream with no parameters
+at all is refused by name rather than skipped, which fails the check: MPEG-1/2
+video, DVB E-AC-3, and HEVC beyond Main/Main 10. Sections and private data
+(SCTE-35, teletext) have no elementary-stream buffers and are listed as not
+graded. A signalled PCR discontinuity starts fresh buffers, since the timestamps
+on either side of it are on different clocks.
+
+Every packet on an elementary stream's PID enters TB, including adaptation-only
+ones (a PCR, stuffing) and legal duplicates (2.4.3.3: the same counter and
+payload twice); only PES bytes of a first copy go on to MB/B. Video access units
+are read from the ES rather than taken from PES boundaries: one opens at the first
+delimiter, parameter set or SEI after the previous picture's slices (H.264
+7.4.1.2.3, H.265 7.4.2.4.4), and H.222.0 requires a delimiter in each. A PES may
+carry several, but only the first takes its timestamp, and deriving the rest from
+the stream's own timing is not modelled, so that layout is refused. Video decode
+times must strictly increase.
+
+Audio bytes enter B as they leave TB, so a frame that ends partway through a packet
+is complete once its own last byte has left, not the packet's, and B is checked
+just before each removal as well as after each packet. Video keeps one
+simplification, toward strictness: a packet's bytes reach MB when its last byte
+leaves TB, at most one packet's drain time later than byte by byte.
+
+Once a stream's last packet is in, every access unit it completed is still graded
+through its decoding time, however long after the capture that falls, so a burst
+that arrives far ahead is held over the delay bound rather than missed. The last
+access unit is usually cut off by the end of the capture; it is counted as
+`truncated_units` and not graded, since its missing bytes were never sent rather
+than late.
+
+### Controls
+
+`just test ts-tstd` (`tstd-controls.py`) proves the model can tell a compliant
+stream from a broken one. The positive control is a real broadcast encoder's
+output (`kyrion_dirtystart.ts` from the `moq-mux` test data: AVC High@4.0 with a
+1.935 Mb/s CBR NAL HRD and a 755 kbit CPB, plus two MPEG-1 Layer II tracks), which
+passes against its own declared buffer, filling EB to the brim as a CBR stream
+should. The negatives restamp its PCRs with
+`tsp -P pcradjust`, leaving every PES and timestamp alone, so only delivery
+changes:
+
+| Case | Expected |
+|---|---|
+| as captured | pass |
+| PCRs restamped at the capture's own rate | pass |
+| delivered at 0.7x | EB and B underflow |
+| delivered at 4x | TB and B overflow, audio held over 1 s |
+| delivered at 15x (a burst) | TB and B overflow, audio held over 1 s |
+
+No restamp can overflow the video MB: it holds the level's whole CPB less the
+declared one, about 3.6 MB, more than the 4 s capture carries.
+
+The packet layouts a capture cannot be edited into are built synthetically: a
+10 Mb/s single-video stream carrying the Kyrion SPS, one access unit per PES, with
+a PCR packet between them. Each case fails without the handling it names:
+
+| Case | Expected |
+|---|---|
+| as built | pass |
+| two access units in one PES | refused |
+| four adaptation-only packets after an access unit | TB overflow |
+| an access unit's first packet sent twice | pass |
+| the PMT declares a PCR PID that carries no PCR | `pcr-presence` fails |
+
+Synthetic MPEG audio streams pack several 576-byte frames per PES, so frames end
+partway through packets, and the last is cut off by the end of the capture:
+
+| Case | Expected |
+|---|---|
+| four frames per PES, the first decoded 0.3 ms after its last byte leaves TB, before the rest of that packet has | pass |
+| seven frames per PES, the first decoded as B passes its size partway through a packet | B overflow |
+
+The ffmpeg clip `run.sh` generates is not a positive control: its muxer sends
+audio 0.7 s ahead by default (`-muxdelay`), which overflows the 3,584-byte ADTS
+buffer, and even at 0.1 s a four-packet audio burst overflows TB.
+
+### Gate
+
+`tstd` is a shape check, so `just test ts` reports it without failing. `export
+ts` output does not pass yet: some video access units arrive after their DTS, and
+audio runs far enough ahead, in bursts, to overflow both TB and B. The change that
+makes the exporter release on a fixed delay promotes `tstd` to a hard check.
 
 ## PCR timing (`pcr-timing.py`)
 
@@ -114,11 +227,9 @@ cannot see the other two:
 | release | the bytes carrying a PCR were handed over when that PCR asserts | arrival stamps |
 | position | a PCR packet sits among the media bytes it describes | packet offsets |
 
-`compliance.py` grades `value` from a file, deterministically and with no
-wall-clock capture, which is the right basis for the model math it does. That
-also means it cannot grade `release`: a change to *when* the exporter hands bytes
-over is invisible to any harness that does not stamp arrivals.
-`pcr-timing.py` reads a pipe and grades all three in one pass.
+`pcr-timing.py` grades `value` and `position` from a file, and all three from a
+pipe. A file carries no arrival stamps, so a change to *when* the exporter hands
+bytes over is invisible to any harness that does not stamp them.
 
 A constant-rate stream makes a fourth claim, graded by `pcr-schedule`: that the
 bytes between consecutive PCRs are the bytes the mux rate implies for that
@@ -145,13 +256,19 @@ grades only how evenly the bytes are laid over the PCRs.
 
 | Check | Severity | What it verifies |
 |---|---|---|
-| `sync` | hard | no invalid sync bytes / transport-error packets |
-| `continuity` | hard | no discontinuities, and a payload-less packet must not advance the counter (ISO 13818-1 2.4.3.3) |
-| `pcr-single-pid` | hard | every PCR rides one PID |
+| `sync` | hard | no invalid sync bytes / transport-error packets (`--live` only) |
+| `continuity` | hard | no discontinuities, and a payload-less packet must not advance the counter (ISO 13818-1 2.4.3.3) (`--live` only) |
 | `pcr-value-interval` | hard | no interval above `--repetition-ms` (default 100, TR 101 290 V1.4.1), within one time base |
 | `pcr-release-timing` | hard | no more than `--release-pct-max` of intervals arrive further than `--release-ms` from the interval their own values assert, and accumulated drift stays within `--drift-ms`, being the standing lag the sender is allowed to hold; a sample below `--live-min-pcr` PCRs or `--live-cover-pct` of the window is a failure, not a pass (`--live` only) |
 | `pcr-position` | shape | share of PCR packets within `--adjacent-packets` of the previous one |
-| `pcr-schedule` | shape | share of PCR intervals, on the busiest PCR PID, whose bytes are within `--schedule-tolerance-pct` (default 1) or one packet of what `--mux-rate` implies (estimated from the capture if not given); hard, at that share, when `--schedule-pct-min` is given |
+| `pcr-schedule` | shape | share of PCR intervals whose bytes are within `--schedule-tolerance-pct` (default 1) or one packet of what `--mux-rate` implies (estimated from the capture if not given); hard, at that share, when `--schedule-pct-min` is given |
+
+A stream carrying several PCR PIDs (one per program) is graded on the busiest,
+since two correct grids offset from one another pool into one that neither keeps.
+`sync` and `continuity` run only under `--live`: on a file, `compliance.py`
+grades both through TSDuck's `tsanalyze`, which also catches a payload-less
+packet advancing the counter. A pipe cannot go through TSDuck first without
+rebuffering the arrivals `release` stamps.
 
 Accumulated drift has two shapes and only one is a defect, so the check bounds
 the total and reports the rate over the tail of the sample beside it. A sender
@@ -446,8 +563,8 @@ exporter re-emits SI on its own repetition cadence rather than the source's.
 ## CI
 
 `.github/workflows/interop.yml` runs `just test ts`, `just test ts --open-gop`,
-and `just test ts-eit` after the interop matrix (nightly, on demand, and on PRs
-touching `test/ts/`).
+`just test ts-eit`, and `just test ts-tstd` after the interop matrix (nightly, on
+demand, and on PRs touching `test/ts/`).
 `ts-eit` is `eit-roundtrip.sh`: it builds the sparse-schedule and
 pending-version fixtures from a generated clip, round-trips them through a
 relay, and censuses the capture, so a break in the generators or in the SI
@@ -471,6 +588,3 @@ that from a pipe running slow.
 - Wall-clock delivery jitter/burstiness is out of scope *for `compliance.py`*:
   all of its timing is derived from the stream's PCR, not from arrival times.
   `pcr-timing.py --live` covers that axis separately, by stamping a pipe.
-- `tstd` models only the transport-buffer (TB) smoothing stage of the ISO 13818-1
-  T-STD, not the full multiplex/elementary decode buffers. Its leak rates are
-  defaults, not level-derived, so treat overflow as a smell rather than proof.

@@ -8,6 +8,9 @@ import { infoDefaults, Producer as TrackProducer } from "./track.ts";
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
+// Matches the private idle cache window and Rust cache::DEFAULT_EXPIRY.
+const CACHE_WINDOW_MS = 30_000;
+
 /** Let every pending microtask and timer callback run, so a parked read gets a turn. */
 function settle(): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, 0));
@@ -23,6 +26,39 @@ function mockMonotonicTime(initial: number) {
 		},
 		restore: () => {
 			performance.now = real;
+		},
+	};
+}
+
+function mockCacheTime(initial: number) {
+	const clock = mockMonotonicTime(initial);
+	let now = initial;
+	const realSet = globalThis.setTimeout;
+	const realClear = globalThis.clearTimeout;
+	const armed = new Map<object, { at: number; fire: () => void }>();
+	// @ts-expect-error a stub, not a full setTimeout
+	globalThis.setTimeout = (fire: () => void, delay: number) => {
+		const handle = { unref: () => {} };
+		armed.set(handle, { at: now + delay, fire });
+		return handle;
+	};
+	// @ts-expect-error a stub, not a full clearTimeout
+	globalThis.clearTimeout = (handle: object) => armed.delete(handle);
+	return {
+		deadline: () => Math.min(...[...armed.values()].map((timer) => timer.at)),
+		advance: (value: number) => {
+			now = value;
+			clock.set(value);
+			for (const [handle, timer] of [...armed]) {
+				if (timer.at > now) continue;
+				armed.delete(handle);
+				timer.fire();
+			}
+		},
+		restore: () => {
+			globalThis.setTimeout = realSet;
+			globalThis.clearTimeout = realClear;
+			clock.restore();
 		},
 	};
 }
@@ -911,6 +947,47 @@ test("a drained group finishes cleanly after the live edge advances", async () =
 	expect(group.done).toBe(true);
 });
 
+test("a stalled track retains cached groups past its media maxAge", async () => {
+	const clock = mockMonotonicTime(10_000);
+	const producer = new TrackProducer("test").accept({ maxAge: Milli(100) });
+	try {
+		for (const value of ["first", "second"]) {
+			producer.writeFrame({ payload: enc.encode(value), timestamp: Timestamp.fromMillis(0) });
+		}
+		// Media time has not advanced, even though wall-clock idleness exceeded maxAge.
+		clock.set(10_200);
+		const replay = producer.subscribe({ maxAge: Milli(100) });
+		expect(replay.tryRecvGroup()?.sequence).toBe(0);
+		expect(replay.tryRecvGroup()?.sequence).toBe(1);
+		replay.close();
+	} finally {
+		producer.close();
+		clock.restore();
+	}
+});
+
+test("a live track retains its newest closed group through idle expiry", () => {
+	const clock = mockCacheTime(10_000);
+	const producer = new TrackProducer("test").accept({ maxAge: Milli(100) });
+	try {
+		// A late older group must not replace the protected newest snapshot.
+		for (const sequence of [2, 1]) {
+			const group = new GroupProducer(sequence);
+			group.writeFrame({ payload: enc.encode("snapshot"), timestamp: Timestamp.fromMillis(0) });
+			group.close();
+			producer.writeGroup(group);
+		}
+		clock.advance(10_000 + CACHE_WINDOW_MS + 200);
+		const replay = producer.subscribe({ maxAge: Milli(100) });
+		expect(replay.tryRecvGroup()?.sequence).toBe(2);
+		expect(replay.tryRecvGroup()).toBeUndefined();
+		replay.close();
+	} finally {
+		producer.close();
+		clock.restore();
+	}
+});
+
 // Retention is the wall-clock half of the split: it reclaims idle content on its own
 // schedule, and a reader that loses unread frames to it sees a gap. The subscription
 // budget is timestamp-only and says nothing here (the empty successor has no timestamp
@@ -929,7 +1006,7 @@ test("retention eviction surfaces as a gap for a handed-out group", async () => 
 		if (!group) throw new Error("missing group");
 		expect(new TextDecoder().decode((await group.readFrame())?.payload)).toBe("first");
 
-		clock.set(10_200);
+		clock.set(10_000 + CACHE_WINDOW_MS + 200);
 		producer.appendGroup();
 
 		await expect(group.readFrame()).rejects.toThrow(TooFarBehind);
@@ -938,7 +1015,7 @@ test("retention eviction surfaces as a gap for a handed-out group", async () => 
 	}
 });
 
-test("retention pruning aborts a held mirror without a new live edge", async () => {
+test("idle expiry reclaims an ended track's held mirror", async () => {
 	const clock = mockMonotonicTime(10_000);
 	try {
 		const producer = new TrackProducer("test").accept({ maxAge: Milli(100) });
@@ -952,7 +1029,8 @@ test("retention pruning aborts a held mirror without a new live edge", async () 
 		if (!group) throw new Error("missing group");
 		expect(new TextDecoder().decode((await group.readFrame())?.payload)).toBe("first");
 
-		clock.set(10_200);
+		producer.close();
+		clock.set(10_000 + CACHE_WINDOW_MS + 200);
 		producer.subscribe({ maxAge: Milli(100) });
 
 		await expect(group.readFrame()).rejects.toBeInstanceOf(TooFarBehind);
@@ -976,7 +1054,7 @@ test("retention reclaims a group the publisher abandoned open", async () => {
 		if (!group) throw new Error("missing group");
 		expect(await group.readString()).toBe("first");
 
-		clock.set(10_200);
+		clock.set(10_000 + CACHE_WINDOW_MS + 200);
 		producer.subscribe({ maxAge: Milli(100) });
 
 		// A gap, not a clean finish: the publisher never ended this group.
@@ -999,12 +1077,12 @@ test("an idle live edge ages out once a newer group arrives", async () => {
 		expect(await group.readString()).toBe("first");
 
 		// A prune while it is still the live edge keeps it, and finds nothing else to age out.
-		clock.set(10_200);
+		clock.set(10_000 + CACHE_WINDOW_MS + 200);
 		producer.subscribe({ maxAge: Milli(100) });
 
 		// A successor ends the exemption, and the group is long past the window, so the
 		// write evicts it rather than a later wakeup.
-		clock.set(10_300);
+		clock.set(10_000 + CACHE_WINDOW_MS + 4_000);
 		producer.appendGroup();
 		const read = group.readFrame().then(
 			() => "clean end",
@@ -1017,50 +1095,39 @@ test("an idle live edge ages out once a newer group arrives", async () => {
 });
 
 test("an abandoned open group ages out with no further write", async () => {
-	// Real time, since this is about the wakeup: nothing writes to the track again, so
-	// without a timer the read below parks forever.
+	const clock = mockCacheTime(10_000);
 	const producer = new TrackProducer("test").accept({ maxAge: Milli(30) });
-	const track = producer.subscribe({ maxAge: Milli(30) });
-	const stalled = producer.appendGroup();
-	stalled.writeString("first");
-	producer.appendGroup();
-
-	const group = await track.recvGroup();
-	if (!group) throw new Error("missing group");
-	expect(await group.readString()).toBe("first");
-
-	const read = group.readFrame().then(
-		() => "clean end",
-		(err: unknown) => err,
-	);
-	const timeout = new Promise((resolve) => setTimeout(() => resolve("still parked"), 1000));
-	expect(await Promise.race([read, timeout])).toBeInstanceOf(TooFarBehind);
-});
-
-test("the prune wakeup never exceeds the setTimeout limit", () => {
-	// A window past 2^31 ms truncates the delay to a signed 32-bit int, so the wakeup
-	// fires immediately and re-arms the same oversized delay: a millisecond timer loop
-	// instead of a wakeup. Capped, it just wakes early and finds nothing due.
-	const real = globalThis.setTimeout;
-	const delays: number[] = [];
-	// @ts-expect-error a stub, not a full setTimeout
-	globalThis.setTimeout = (_fn: () => void, delay: number) => {
-		delays.push(delay);
-		return { unref: () => {} };
-	};
-
 	try {
-		const producer = new TrackProducer("test").accept({ maxAge: Milli(2 ** 31 + 10_000) });
+		const track = producer.subscribe({ maxAge: Milli(30) });
 		const stalled = producer.appendGroup();
 		stalled.writeString("first");
-		producer.appendGroup(); // the live edge, so the stalled group is prunable
-		producer.close();
-	} finally {
-		globalThis.setTimeout = real;
-	}
+		producer.appendGroup();
 
-	expect(delays.length).toBeGreaterThan(0);
-	for (const delay of delays) expect(delay).toBeLessThanOrEqual(2 ** 31 - 1);
+		const group = await track.recvGroup();
+		if (!group) throw new Error("missing group");
+		expect(await group.readString()).toBe("first");
+		const read = group.readFrame();
+		clock.advance(10_000 + CACHE_WINDOW_MS + 1);
+		await expect(read).rejects.toBeInstanceOf(TooFarBehind);
+	} finally {
+		producer.close();
+		clock.restore();
+	}
+});
+
+test("publisher maxAge does not change the idle cache deadline", () => {
+	for (const maxAge of [Milli(30), Milli(2 ** 31 + 10_000)]) {
+		const clock = mockCacheTime(10_000);
+		const producer = new TrackProducer("test").accept({ maxAge });
+		try {
+			producer.writeString("cached");
+			producer.appendGroup();
+			expect(clock.deadline()).toBe(10_000 + CACHE_WINDOW_MS / 8);
+		} finally {
+			producer.close();
+			clock.restore();
+		}
+	}
 });
 
 test("retention pruning preserves clean EOF for a drained mirror", async () => {
@@ -1077,7 +1144,8 @@ test("retention pruning preserves clean EOF for a drained mirror", async () => {
 		expect(await group.readString()).toBe("only");
 		expect(await group.readFrame()).toBeUndefined();
 
-		clock.set(10_200);
+		producer.close();
+		clock.set(10_000 + CACHE_WINDOW_MS + 200);
 		producer.subscribe({ maxAge: Milli(100) });
 
 		expect(await group.readFrame()).toBeUndefined();
@@ -1761,53 +1829,115 @@ test("publisher max age is absent unless explicitly declared", () => {
 	expect(infoDefaults({ maxAge: Milli(30_000) }).maxAge).toBe(Milli(30_000));
 });
 
-test("an omitted publisher limit retains old groups", async () => {
+// Rust applies the pool's idle expiry with `max_age: None` too: omitting the publisher
+// limit only removes the media-time clamp, never the wall-clock bound on memory.
+test("an omitted publisher limit still ages idle groups out", async () => {
 	const clock = mockMonotonicTime(10_000);
 	const producer = new TrackProducer("unlimited").accept();
 	try {
 		const source = producer.appendGroup();
 		source.writeString("old");
 		source.close();
-		clock.set(100_000);
+		clock.set(10_000 + CACHE_WINDOW_MS - 1_000);
 		producer.appendGroup();
-		const subscriber = producer.subscribe({ maxAge: Milli(100_000) });
-		const cached = await subscriber.recvGroup();
-		expect(await cached?.readString()).toBe("old");
-		subscriber.close();
+		const within = producer.subscribe({ maxAge: Milli(100_000) });
+		expect(await (await within.recvGroup())?.readString()).toBe("old");
+		within.close();
+
+		// A scan runs at most once per slice of the window, so step past the next one.
+		clock.set(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
+		const after = producer.subscribe({ maxAge: Milli(100_000) });
+		expect(after.tryRecvGroup()?.sequence).toBe(1);
+		expect(after.tryRecvGroup()).toBeUndefined();
+		after.close();
 	} finally {
 		producer.close();
 		clock.restore();
 	}
 });
 
-test("a late subscriber to a closed unlimited track is not held by the producer", async () => {
-	const producer = new TrackProducer("unlimited").accept();
-	const source = producer.appendGroup();
-	source.writeString("last");
-	source.close();
-	producer.close();
-
-	// Counts the map entries subscribing leaves behind, rather than the heap: nothing ages an
-	// unlimited track's cache out, so any entry keyed by the subscriber would outlive it.
-	const added: [Map<unknown, unknown>, unknown][] = [];
-	const set = Map.prototype.set;
-	const spy = spyOn(Map.prototype, "set").mockImplementation(function (this: Map<unknown, unknown>, key, value) {
-		added.push([this, key]);
-		return set.call(this, key, value);
-	});
-	let subscriber: ReturnType<TrackProducer["subscribe"]>;
+test("a live track does not pin an aborted newest group", () => {
+	const clock = mockMonotonicTime(10_000);
+	const producer = new TrackProducer("test").accept();
 	try {
-		subscriber = producer.subscribe();
+		const good = producer.appendGroup();
+		good.writeString("snapshot");
+		good.close();
+		const reset = producer.appendGroup();
+		reset.writeString("partial");
+		reset.close(new Error("reset"));
+
+		clock.set(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
+		const late = producer.subscribe({ maxAge: Milli(100_000) });
+		expect(late.tryRecvGroup()).toBeUndefined();
+		late.close();
 	} finally {
-		spy.mockRestore();
+		producer.close();
+		clock.restore();
 	}
+});
 
-	const group = await subscriber.recvGroup();
-	expect(await group?.readString()).toBe("last");
-	expect(await subscriber.recvGroup()).toBeUndefined();
-	subscriber.close();
+test("closing a track keeps an idle newest group for subscribers to drain", async () => {
+	const clock = mockMonotonicTime(10_000);
+	try {
+		const producer = new TrackProducer("catalog").accept();
+		const subscriber = producer.subscribe({ maxAge: Milli(100_000) });
+		const snapshot = producer.appendGroup();
+		snapshot.writeString("snapshot");
+		snapshot.close();
 
-	expect(added.filter(([map, key]) => map.has(key)).length).toBe(0);
+		// Idle well past the window, but protected while the track is live.
+		clock.set(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
+		producer.close();
+		expect(await (await subscriber.recvGroup())?.readString()).toBe("snapshot");
+		expect(await subscriber.recvGroup()).toBeUndefined();
+
+		// The close restarted its window, which now runs out like any other.
+		clock.set(10_000 + 2 * (CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8));
+		const late = producer.subscribe({ maxAge: Milli(100_000) });
+		expect(late.tryRecvGroup()).toBeUndefined();
+		late.close();
+	} finally {
+		clock.restore();
+	}
+});
+
+test("a late subscriber to a closed unlimited track is released once the cache ages out", async () => {
+	const clock = mockMonotonicTime(10_000);
+	try {
+		const producer = new TrackProducer("unlimited").accept();
+		const source = producer.appendGroup();
+		source.writeString("last");
+		source.close();
+		producer.close();
+
+		// Counts the map entries subscribing leaves behind, rather than the heap: any entry
+		// keyed by the subscriber that outlives the cache window would pin it.
+		const added: [Map<unknown, unknown>, unknown][] = [];
+		const set = Map.prototype.set;
+		const spy = spyOn(Map.prototype, "set").mockImplementation(function (this: Map<unknown, unknown>, key, value) {
+			added.push([this, key]);
+			return set.call(this, key, value);
+		});
+		let subscriber: ReturnType<TrackProducer["subscribe"]>;
+		try {
+			subscriber = producer.subscribe();
+		} finally {
+			spy.mockRestore();
+		}
+
+		const group = await subscriber.recvGroup();
+		expect(await group?.readString()).toBe("last");
+		expect(await subscriber.recvGroup()).toBeUndefined();
+		subscriber.close();
+
+		// A closed track protects nothing, so the next scan past the window reclaims it all.
+		clock.set(10_000 + CACHE_WINDOW_MS + 200);
+		producer.subscribe().close();
+		expect(added.filter(([map, key]) => map.has(key)).length).toBe(0);
+	} finally {
+		clock.restore();
+	}
 });
 
 test("an abort keeps finished groups for a slow reader, then reports it", async () => {
@@ -1862,45 +1992,24 @@ test("an abort after the declared end reached by a datagram ends clean", () => {
 });
 
 test("an ended track's buffered groups age out for a stale subscriber", () => {
-	// Nothing writes after the close, so only the prune wakeup can reclaim them. Stub the
-	// timers so the test fires exactly the wakeups still armed, at a mocked time.
-	const clock = mockMonotonicTime(10_000);
-	const realSet = globalThis.setTimeout;
-	const realClear = globalThis.clearTimeout;
-	const armed = new Map<object, () => void>();
-	// @ts-expect-error a stub, not a full setTimeout
-	globalThis.setTimeout = (fn: () => void) => {
-		const handle = { unref: () => {} };
-		armed.set(handle, fn);
-		return handle;
-	};
-	// @ts-expect-error a stub, not a full clearTimeout
-	globalThis.clearTimeout = (handle: object) => armed.delete(handle);
-
-	try {
-		for (const abort of [undefined, new Error("boom")]) {
-			clock.set(10_000);
-			armed.clear();
-			const producer = new TrackProducer("test").accept({ maxAge: Milli(30) });
+	for (const abort of [undefined, new Error("boom")]) {
+		const clock = mockCacheTime(10_000);
+		const producer = new TrackProducer("test").accept({ maxAge: Milli(30) });
+		try {
 			const stale = producer.subscribe({ maxAge: Milli(30) });
 			const group = producer.appendGroup();
 			group.writeString("x");
 			group.close();
 			producer.close(abort);
 
-			clock.set(10_100);
-			for (const [handle, fire] of [...armed]) {
-				armed.delete(handle);
-				fire();
-			}
-			// Nothing buffered is left: the subscriber sees only how the track ended.
+			// Nothing writes after close, so only the scheduled cache cleanup runs.
+			clock.advance(10_000 + CACHE_WINDOW_MS + 100);
 			if (abort) expect(() => stale.tryRecvGroup()).toThrow(abort);
 			else expect(stale.tryRecvGroup()).toBeUndefined();
+		} finally {
+			producer.close();
+			clock.restore();
 		}
-	} finally {
-		globalThis.setTimeout = realSet;
-		globalThis.clearTimeout = realClear;
-		clock.restore();
 	}
 });
 

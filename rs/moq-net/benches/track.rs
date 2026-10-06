@@ -7,6 +7,9 @@
 //! `track_aborted_scan` isolates the other half of delivery: how much a cached
 //! prefix of aborted groups costs the scan that has to walk past it.
 //!
+//! `track_gc` is the cache's clock-driven half: the per-poll [`cache::Pool::gc`]
+//! call every origin driver makes, and the due expiry pass it runs over every track.
+//!
 //! `track_subscriber_churn` measures viewers joining and leaving beside steady ones:
 //! each departure wakes the producer's aggregate poll, which walks the subscription
 //! list, so departed entries left in the list show up as a slope over churn.
@@ -53,6 +56,9 @@ const PEAK: [usize; 3] = [0, 1024, 16384];
 
 /// Concurrent publishers sharing one relay-style cache pool.
 const WRITERS: [usize; 4] = [1, 2, 4, 8];
+
+/// Tracks sharing one expiring pool: the table a due collection pass walks.
+const SWEPT: [usize; 4] = [1, 64, 1_024, 16_384];
 
 /// Keeps the ownership chain alive around the track and its subscribers.
 struct Fanout {
@@ -144,6 +150,45 @@ impl AbortedScan {
 	}
 }
 
+/// Live tracks with one cached group each, sharing an expiring pool.
+///
+/// Each track's only group is its live latest, which expiry never reclaims, so
+/// every pass walks the same table instead of emptying it.
+struct Swept {
+	_broadcast: broadcast::Producer,
+	_tracks: Vec<track::Producer>,
+	pool: cache::Pool,
+	now: Instant,
+}
+
+impl Swept {
+	fn new(tracks: usize) -> Self {
+		let mut info = broadcast::Info::default();
+		info.pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
+		let pool = info.pool.clone();
+		let broadcast = broadcast::Producer::new(info);
+		let payload = Bytes::from_static(&[0; PAYLOAD]);
+		let tracks = (0..tracks)
+			.map(|i| {
+				let track = broadcast.create_track(format!("bench{i}"), None).unwrap();
+				let mut group = track.append_group().unwrap();
+				group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+				group.finish().unwrap();
+				track
+			})
+			.collect();
+		// The first call starts the pool's clock and runs its first pass.
+		let now = Instant::now();
+		pool.gc(now);
+		Self {
+			_broadcast: broadcast,
+			_tracks: tracks,
+			pool,
+			now,
+		}
+	}
+}
+
 /// Steady viewers on one track, with the producer's aggregate poll caught up.
 struct Churn {
 	_broadcast: broadcast::Producer,
@@ -180,6 +225,30 @@ impl Churn {
 			assert!(self.track.poll_subscription_changed(&self.waiter).is_pending());
 		}
 	}
+}
+
+fn bench_gc(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_gc");
+	for tracks in SWEPT {
+		// Between passes, which is every origin poll: should stay flat as tracks grow.
+		group.throughput(Throughput::Elements(1));
+		group.bench_with_input(BenchmarkId::new("idle", tracks), &tracks, |b, &tracks| {
+			let swept = Swept::new(tracks);
+			b.iter(|| black_box(swept.pool.gc(swept.now)));
+		});
+		// A due pass, stepping one sweep interval per call.
+		group.throughput(Throughput::Elements(tracks as u64));
+		group.bench_with_input(BenchmarkId::new("sweep", tracks), &tracks, |b, &tracks| {
+			let swept = Swept::new(tracks);
+			let interval = cache::DEFAULT_EXPIRY / 2;
+			let mut now = swept.now;
+			b.iter(|| {
+				now += interval;
+				black_box(swept.pool.gc(now))
+			});
+		});
+	}
+	group.finish();
 }
 
 fn bench_fanout(c: &mut Criterion) {
@@ -365,6 +434,7 @@ criterion_group!(
 	bench_fanout,
 	bench_parallel_write,
 	bench_aborted_scan,
+	bench_gc,
 	bench_subscriber_churn,
 	bench_subscriber_churn_after_peak,
 	bench_subscriber_join,

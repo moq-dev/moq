@@ -19,9 +19,11 @@ Docker; see [Install](/setup/install).
 | `import` | `capture` | Capture a camera, display, window, or app plus a microphone, and encode natively. |
 | `import` | `hls <url>` | Pull a remote HLS playlist. |
 | `import` | `rtmp`, `srt`, `rtc` | Accept pushes (`--listen`) or pull from a remote (`--connect`). |
+| `import` | `archive <url>` | Replay a recording from an object store. |
 | `export` | `fmp4`, `mkv`, `ts`, `flv`, `h264`, `h265` | Write a container to stdout. |
 | `export` | `hls --listen` | Serve the broadcast as HLS over HTTP. |
 | `export` | `rtmp`, `srt`, `rtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
+| `export` | `archive <url>` | Record the broadcast into an object store. |
 | `play` | | Decode and play in a native window with sound. |
 | `transcode` | | Publish a just-in-time rendition ladder next to a broadcast. |
 | `announced` | `[prefix]` | Follow the broadcasts announced on a relay. |
@@ -148,7 +150,7 @@ The `fmp4`, `mkv`, `flv`, `h264`, and `h265` exports select renditions with
 flags before the sink: `--video-name` and `--audio-name` pick a rendition,
 `--video-codec` and `--audio-codec` keep a codec family, and `--no-video` or
 `--no-audio` leaves a role out. `h264` and `h265` refuse `--no-video` and the
-audio selection flags. `ts` and the gateways don't apply selection, so they
+audio selection flags. `ts`, `archive`, and the gateways don't apply selection, so they
 refuse these flags.
 
 ```bash
@@ -171,6 +173,10 @@ track set is fixed: a rendition that leaves and returns with the same codec
 configuration is written under its original track, while a new rendition, a
 changed configuration, or a return that replays media already written ends the
 export with an error naming it. Restart the export to pick up a new rendition.
+An Opus rendition declared without its OpusHead gets a guessed pre-skip. A
+head that arrives later with the same channel count, decode rate, and gain is
+accepted even if its pre-skip and input rate differ. An init already written
+keeps the guess, and later heads must match the first one.
 
 ## Play
 
@@ -182,11 +188,12 @@ moq ... play --no-video             # audio only
 
 Decodes H.264, H.265, and AV1 video using the platform hardware decoder where
 available, and Opus, PCM, and AAC-LC (mono or stereo) audio in software. The
-log names the decoder each track opened. `--video-name` and `--audio-name`
-pick a rendition, and `--no-video` or `--no-audio` leaves a role out.
-`--no-video` still opens a window, which stays blank; closing it stops
-playback. HE-AAC signaled only in band (implicit SBR, as over MPEG-TS) plays as
-its half-rate AAC-LC core.
+opt-in `vpx` feature adds software VP8 and VP9 (8-bit 4:2:0) through libvpx,
+which the build host must provide. The log names the decoder each track
+opened. `--video-name` and `--audio-name` pick a rendition, and `--no-video` or
+`--no-audio` leaves a role out. `--no-video` still opens a window, which stays
+blank; closing it stops playback. HE-AAC signaled only in band (implicit SBR, as
+over MPEG-TS) plays as its half-rate AAC-LC core.
 
 Playback runs on a clock it owns. `--delay` is how far it trails the live
 edge: the jitter a late frame may absorb. The default, `auto`, measures how
@@ -333,6 +340,41 @@ refuses any listener, cluster, auth, or `--hop` flag. It gives up after 30
 seconds, as `/fetch` does, and exits non-zero when the broadcast or group is not
 found (before writing anything), the relay refuses, or the deadline passes.
 
+## Archive
+
+```bash
+# Record a broadcast until it ends
+moq --connect https://relay.example.com/anon --broadcast event.hang export archive s3://recordings/event
+
+# Replay it under another name
+moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event
+```
+
+`export archive` records one broadcast with
+[moq-archive](https://docs.rs/moq-archive), reading its catalog as it changes.
+Every track gets its own timeline, stored in spans cut at group boundaries
+between 2s and 10s. The catalog and every text, JSON, and binary track are
+sparse data, so each of their groups is stored as soon as it finishes, and a
+group that never closes is stored in pieces as it grows. It refuses a rendition served
+from another broadcast, and one that returns after the catalog dropped it. The
+stage ends once the broadcast does. A store URL that already holds a
+recording is continued: each track resumes after its newest stored span. `--retention 1h` keeps only the last hour (a DVR),
+deleting expired objects, and timeline objects no longer needed to recover it,
+`--retention-grace` (default 30s) after the timeline stops needing them. Every
+track keeps at least its newest span, so a catalog that never changes outlives
+the video it was published with.
+
+`import archive` republishes a recording: each track's timeline replays as a
+live track and every track's groups are served on request, one object GET per
+stored span. By default it replays what is stored and ends the timelines there;
+`--follow 2s` keeps checking for new spans, and newly recorded tracks, of a
+recording still being made.
+
+Store URLs are `file:///absolute/path`, `s3://bucket/prefix`,
+`gs://bucket/prefix`, or `az://container/prefix`. Cloud credentials come from
+the usual `AWS_*`, `GOOGLE_*`, and `AZURE_*` environment variables. The `s3`,
+`gcs`, and `azure` cargo features are on by default.
+
 ## Multiple stages
 
 Separate stages with `--` to bridge several broadcasts, or both directions,
@@ -341,7 +383,8 @@ over one connection:
 ```bash
 moq --connect https://relay.example.com/anon \
     import --broadcast event.hang srt --listen 0.0.0.0:9000 \
-    -- export --broadcast event.hang hls --listen 0.0.0.0:8080
+    -- export --broadcast event.hang hls --listen 0.0.0.0:8080 \
+    -- export --broadcast event.hang archive file:///recordings/event
 ```
 
 ## Redundant publishers

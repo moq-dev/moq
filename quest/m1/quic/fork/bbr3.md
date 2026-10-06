@@ -26,10 +26,6 @@ which the [switch](/quest/m1/quic/fork/switch.md) reads for
 Verify with the fork's BBR tests and the benchmark matrix against `moq-noq`
 1.3.x on the same workloads; report any throughput or latency difference.
 
-## Required
-
-- [Import quinn](/quest/m1/quic/fork/import.md)
-
 ## Related
 
 - [noq#819](https://github.com/n0-computer/noq/issues/819) - BBR3 as the default, proposed to n0; their sims often favor Cubic

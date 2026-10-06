@@ -307,8 +307,6 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x12  | MALFORMED_TRACK | The track's content could not be parsed. |
 | ------- | ------------- | ----------- |
-|  0x30  | NO_CAPACITY | The publisher could serve this request but has no capacity for it now. Permits one re-resolution (see [Resolution](#resolution)); elsewhere it is terminal like any refusal. Bridges to NO_CAPACITY in {{I-D.lcurley-moq-cluster}}. |
-| ------- | ------------- | ----------- |
 |  0x31  | CONTROL_TIMEOUT | The peer took too long to answer a control request. Distinct from DELIVERY_TIMEOUT, which is content that missed its deadline; it has no moq-transport value and bridges to INTERNAL_ERROR. |
 | ------- | ------------- | ----------- |
 |  0x32  | GROUP_TOO_LARGE | The group grew past the publisher's cache budget and was aborted. |
@@ -423,7 +421,11 @@ The per-subscriber winner changing travels as an ANNOUNCE_UPDATE; the last quali
 When serving a subscription, a publisher MUST select the source by that same exclusion; if only excluded sources remain, the subscription is unroutable.
 Applying one rule to both advertisement and dispatch keeps advertised paths truthful, which is what prevents subscription cycles of any length.
 
-When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering route (see [Resolution](#resolution)), then a path that contains no 0 Hop ID over one that does, then the lowest Warm Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the lowest Cold Route Cost, then toward the shortest path, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
+When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering route (see [Resolution](#resolution)), then a path that contains no 0 Hop ID over one that does, then the lowest Warm Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the lowest Cold Route Cost, then toward the shortest path, then toward the lowest Spread Hash, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
+
+The Spread Hash is the 64-bit FNV-1a hash, with offset basis `0x420C0DECB00B` and the standard FNV-64 prime, of the requested path's UTF-8 bytes followed by each Hop ID of the route's path, oldest first, as 8 little-endian bytes.
+It is keyed on the requested path rather than the route's prefix, so equal-cost advertisers of one prefix share its paths instead of the first one taking them all, while one path resolves to the same advertiser on every relay that holds the same routes.
+When choosing which route to advertise for a prefix, the requested path is the prefix itself.
 
 Every route covering a path serves the same Broadcast, so a relay MAY move a live subscription between them, continuing from the first frame the subscriber lacks, and a route change (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
 
@@ -433,6 +435,7 @@ A SUBSCRIBE, FETCH, or TRACK request names a path, and the receiver resolves it 
 Only the most specific covering routes are consulted: those with the longest prefix.
 A route strictly inside another's paths always ranks above it, and a broadcast's exact path is the most specific route there is, so a concrete announcement shadows every broader route covering it at any cost; routes over the same prefix form one tier.
 The winning tier is the whole answer: a refusal from it never falls through to a less specific route, so a service refusing a path does not leak the request to a catch-all, and one unserved path costs one round trip rather than a walk down the candidates.
+Nor is a refusal retried at another route of the same prefix.
 
 Within the tier, cost and the tie-breaks of [Routing](#routing) order the routes.
 
@@ -446,11 +449,8 @@ A seed of `2^32` is RECOMMENDED only when `H * C < 2^32`; otherwise the deployme
 Unknown, out-of-budget, and saturated routes are outside this guarantee; a receiver MUST NOT infer that they outrank standby capacity merely because they might already carry content.
 
 An advertiser that will not serve a resolved request resets the request stream with a typed code (see [Error Codes](#error-codes)).
-A NO_CAPACITY reset permits the receiver ONE re-resolution, within the same tier and excluding every route whose advertiser is the refusing one.
-The exclusion is what makes the retry safe, not the retraction arriving first: an advertiser's capacity and a receiver's view of it are at least half a round trip apart, so a retraction and a request for the slot it gave away necessarily cross.
-Re-resolution may find no other route, and the request is then unroutable; that is a correct outcome, not a fallback list.
-A receiver that has spent its re-resolution, or has nothing to spend it on, MUST reset the downstream request with a code other than NO_CAPACITY, so the single retry cannot compound hop by hop.
-Every other code, and any unrecognized one, is terminal and propagates without re-resolution, so probing unserved paths costs one round trip per path.
+Every refusal is terminal and propagates without re-resolution, so probing unserved paths costs one round trip per path.
+An advertiser signals capacity through its route alone: it withdraws or re-prices the route before it runs out, leaving headroom for requests already in flight, since a withdrawal and a request for the slot it gave away can cross.
 A receiver SHOULD NOT cache refusals; rate limiting is the advertiser's concern.
 
 ### Subscribe
@@ -1359,6 +1359,7 @@ The `Message Length` describes the payload size on the wire.
 ## moq-lite-07
 
 - The subscriber FINs its Subscribe Stream after settling its tail; graceful session close waits for that FIN or reset.
+- A refusal is not retried at another route of the same prefix either.
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
 - Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it. Earlier versions carry no such position, so a subscriber takes the first frame instead.
 - A path names one Broadcast whichever publisher serves it, and a publisher MUST NOT reuse a path for different content. A relay MAY move a subscription between any routes covering the path, continuing from the first frame the subscriber lacks instead of at a group boundary. Replaces the first-hop identity.
@@ -1369,6 +1370,7 @@ The `Message Length` describes the payload size on the wire.
 - Added `Stream Count` to SUBSCRIBE_END: the number of Group Streams opened for the subscription. SUBSCRIBE_END is now sent once every counted Group Stream has opened, rather than as soon as the final group is known.
 - Removed SUBSCRIBE_DROP and its type 0x2; a group without a Group Stream is not counted.
 - The Subscribe Stream FIN now follows once every counted Group Stream has finished or been reset.
+- Added the Spread Hash tie-break after the shortest path: a hash of the requested path and the route's Hop IDs, so equal-cost advertisers of one prefix share its paths.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
 - Capped the SETUP Message Length at 65,536 bytes.
 - A relay puts a random Hop ID, picked per session, in front of an announcement whose reconstructed path starts with 0, and writes that stamp followed by 0 for an empty path.
@@ -1384,7 +1386,7 @@ The `Message Length` describes the payload size on the wire.
 - Corrected SUBSCRIBE_END `Group` to an exclusive bound: the first sequence that will never be delivered, with 0 meaning no groups were produced. It was previously specified as the inclusive last group, which could not distinguish an empty track from one whose only group was 0.
 - Split ANNOUNCE_BROADCAST into three typed messages: ANNOUNCE_START (0x0), ANNOUNCE_END (0x1), and ANNOUNCE_UPDATE (0x2), each prefixed with a Type discriminator like the subscribe stream's responses.
 - Specified resolution of a request against the routes covering its path: only the most specific tier, the longest prefix, is consulted, so a concrete path shadows every broader route; a refusal never falls through, and cost and the existing tie-breaks order the tier. A route is always a prefix, and no message narrows one: an advertiser that serves only some of the paths beneath its prefix refuses the rest. A relay never announces a path because it resolved it; the advertiser announces the concrete path once producing. Standby ordering requires enforced deployment bounds on charged link count and cost; 2^32 is a recommended seed only when it exceeds their product.
-- Split the reserved stream error range: 32 through 47 stays reserved, and 48 through 63 is moq-lite's own, assigned by the tables and mapped rather than forwarded across a bridge. Assigned 0x30 NO_CAPACITY there: it permits one re-resolution within the tier excluding the refusing advertiser, and a receiver that has spent or lacks that retry resets downstream with another code. Assigned 0x32 GROUP_TOO_LARGE: a group that grew past the publisher's cache budget is aborted. Every other code is terminal.
+- Split the reserved stream error range: 32 through 47 stays reserved, and 48 through 63 is moq-lite's own, assigned by the tables and mapped rather than forwarded across a bridge. Assigned 0x32 GROUP_TOO_LARGE: a group that grew past the publisher's cache budget is aborted. Every code is terminal.
 - Assigned 0x33 NOT_FOUND, 0x34 OLD, and 0x35 EVICTED in the stream error table: a group the publisher cannot serve because it was never here, has been superseded, or was dropped under memory pressure.
 - Assigned 0x36 UNROUTABLE, 0x37 WRONG_SIZE, 0x38 FRAME_TOO_LARGE, and 0x39 TIMESTAMP_MISMATCH in the stream error table, moving them out of the reserved 32 through 47 range, which no longer carries provisional placeholders.
 - Assigned 0x31 CONTROL_TIMEOUT in the stream error table: a request stream torn down because the peer never answered, which DELIVERY_TIMEOUT described as late content. It has no moq-transport value and bridges to INTERNAL_ERROR.
@@ -1546,7 +1548,7 @@ GOAWAY carries an optional New Session URI that asks the peer to reconnect elsew
 Hop IDs (see [ANNOUNCE_OK](#announce-ok) and [ANNOUNCE_START](#announce-start)) expose the relay path of a broadcast, which may reveal internal topology. A relay that does not wish to disclose its position MAY use the reserved value 0 ("unknown") instead of a stable identifier, at the cost of losing loop detection through itself (see [Routing](#routing)). The Hop ID announcement filter (see [Hop Parameter](#hop-parameter)) exists for loop avoidance, not access control: a subscriber cannot verify that a publisher honored it, so it MUST NOT be relied upon to hide a broadcast from a peer that declared its Hop ID.
 
 ## Resource Exhaustion
-A peer can open many streams (subscriptions, announcements, fetches), request large announce prefixes, or advertise broad routes. Implementations SHOULD bound the number of concurrent subscriptions, announce matches, and cached groups, and SHOULD rely on QUIC flow control and stream limits to backpressure a misbehaving peer (see [ANNOUNCE_REQUEST](#announce-request)). Expiration (see [Expiration](#expiration)) bounds how long stale groups consume memory and flow control. A broad route invites a request for any covered path, each of which may start work: an advertiser SHOULD bound the work it starts and refuse beyond that with NO_CAPACITY, and a receiver re-resolves at most once per request, so a flood of requests costs the mesh one round trip each rather than a search (see [Resolution](#resolution)).
+A peer can open many streams (subscriptions, announcements, fetches), request large announce prefixes, or advertise broad routes. Implementations SHOULD bound the number of concurrent subscriptions, announce matches, and cached groups, and SHOULD rely on QUIC flow control and stream limits to backpressure a misbehaving peer (see [ANNOUNCE_REQUEST](#announce-request)). Expiration (see [Expiration](#expiration)) bounds how long stale groups consume memory and flow control. A broad route invites a request for any covered path, each of which may start work: an advertiser SHOULD bound the work it starts, withdrawing its route before it runs out, and every refusal is terminal, so a flood of requests costs the mesh one round trip each rather than a search (see [Resolution](#resolution)).
 
 ## Datagram Injection
 Datagrams are routed to a subscription solely by Subscribe ID and carry no per-group authentication beyond that of the QUIC connection. On an unmodified QUIC/WebTransport connection this is sufficient, since datagrams are protected by the transport. A subscriber MUST silently drop any datagram with an unknown Subscribe ID and MUST deduplicate against groups received on streams (see [Datagrams](#datagrams)).
