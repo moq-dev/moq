@@ -74,7 +74,11 @@ These land with the next breaking release, not the 2026-09-23 train.
   `Tracks`, or the first PMT) on a provisional clock, then re-anchor it on the
   first frame. They now hold it until that frame, as FLV already did, so the
   first snapshot carries the final root `clock`. A reader waiting for the
-  catalog now waits for media, not just the init segment.
+  catalog now waits for media of a selected track, not just the init segment:
+  a track `with_select` deselects doesn't release it, even if its media
+  arrives first. A `moov` or `Tracks` decoded after `finish()` is refused with
+  `fmp4::Error::MoovAfterFinish` or `mkv::Error::TracksAfterFinish`, since the
+  tracks it declares could never finish.
 - **fMP4 export fixes its track set at the init segment.** moq-mux's
   `fmp4::Error` drops `MissingVideoTrack`, `MissingAudioTrack`, and
   `NoCatalogSnapshot`, and adds `TrackAdded`, `TrackChanged`, `TrackRewound`,

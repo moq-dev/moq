@@ -1599,16 +1599,21 @@ mod tests {
 		let mut import = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve());
 		import.decode(&init).unwrap();
 
-		// Watch before the first fragment, as a live viewer would, and let it read whatever the
-		// moov published, so a provisional clock would stick.
+		// Watch before the first fragment, as a live viewer would, so a catalog the moov
+		// published on a provisional clock would stick.
 		let source = moq_mux::Source::new(origin.consume(), "live");
 		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
-		let _ = next_event(&mut broadcaster.renditions()).await;
+		assert!(
+			next_event(&mut broadcaster.renditions()).await.is_none(),
+			"the moov alone lists no rendition"
+		);
 
 		import.decode(&fragments).unwrap();
 		let anchored = catalog.snapshot().clock.expect("the catalog advertises a clock");
 
-		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		tokio::time::timeout(Duration::from_secs(5), broadcaster.ready())
+			.await
+			.expect("a rendition becomes playable");
 		let video = catalog
 			.snapshot()
 			.video
