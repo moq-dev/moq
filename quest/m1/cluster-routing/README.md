@@ -146,5 +146,5 @@ Once every child has landed:
 - [One route cost](/quest/m1/route-cost.md) - Warm and Cold collapse to one static cost
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - the importer half of a redundant pair under one explicit epoch
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a redundant pair shares one epoch
-- [Cross-relay delivery under bursts](/quest/m1/cross-relay-bursts.md) - its #4349 report shows closed broadcasts announced for up to 229 s
+- [Cross-relay bursts re-run](/quest/m1/cross-relay-bursts.md) - its #4349 report shows closed broadcasts announced for up to 229 s
 - [Routing cost domains](/quest/m3/routing-cost-domains.md) - policy and aggregation at boundaries between operators
