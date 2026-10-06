@@ -1053,7 +1053,8 @@ fn list_programs(programs: &[u16]) -> String {
 ///
 /// [`Export::stats`](super::Export::stats) returns the same rows for the streams it writes,
 /// so one schema reads both edges. Only `units` and `quiet` move there: the exporter builds
-/// every frame header itself, so it has no frame sync to lose, and it grades nothing.
+/// every frame header itself, so it has no frame sync to lose and it runs no TR 101 290
+/// checks. The stopped-stream log still grades an audio or video row whose `units` stay still.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Stats {
