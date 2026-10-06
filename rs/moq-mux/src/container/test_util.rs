@@ -163,6 +163,33 @@ pub(crate) async fn published<E>(
 	out
 }
 
+/// The root clocks a broadcast's catalog snapshots carry, read off its `catalog.json` track.
+pub(crate) struct Clocks(crate::catalog::hang::Consumer);
+
+impl Clocks {
+	/// Subscribe before importing, so the first snapshot is not missed.
+	pub(crate) async fn subscribe(consumer: &moq_net::broadcast::Consumer) -> Self {
+		let track = consumer
+			.track(hang::Catalog::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		Self(crate::catalog::hang::Consumer::new(track))
+	}
+
+	/// The clock of every snapshot published since the last call, without waiting.
+	pub(crate) fn drain(&mut self) -> Vec<Option<hang::catalog::Clock>> {
+		let waiter = kio::Waiter::noop();
+		let mut clocks = Vec::new();
+		while let std::task::Poll::Ready(catalog) = self.0.poll_next(&waiter) {
+			let Some(catalog) = catalog.unwrap() else { break };
+			clocks.push(catalog.clock);
+		}
+		clocks
+	}
+}
+
 /// The one offset every published timestamp moved by between two imports of the same media,
 /// within a tick of rounding: one mapping for every track, so A/V sync and B-frame order survive
 /// exactly.

@@ -25,6 +25,15 @@ fed one encoded stream. Capture is out: two encoders never align.
   sides of it.
 - Frame timestamps derive from the input alone too. Importers publish the
   stream's own timestamps and refuse a rewind, so nothing shifts them.
+- The catalog's root `clock` must agree too. Today each importer anchors it
+  to its own first-frame arrival (`Clock::arrival` in
+  `rs/moq-mux/src/catalog/producer.rs`), which is also the first published
+  clock, since each importer holds its catalog until that frame, and [Shared import clock](/quest/m1/shared-clock.md)
+  offsets a joining importer by its arrival time. Decided in the 2026-10-05
+  audit: redundant importers derive the wall anchor from the input (its PTS
+  or PCR) or from the shared epoch, never from arrival, so two catalogs of
+  one stream are identical. Rejected: narrowing the contract to exclude the
+  catalog clock.
 - An importer announces only once it knows its tracks, so it never refuses a
   track the incumbent serves.
 - Docs (`doc/bin/cli.md` "Redundant publishers", the `--epoch` doc comment)
@@ -47,3 +56,4 @@ issues' 1+1 setup (one relay, two `import ts` sharing one `--epoch`, two
 ## Related
 
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a redundant pair shares one epoch
+- [Shared import clock](/quest/m1/shared-clock.md) - the clock and offset rules an importer joining an existing clock follows

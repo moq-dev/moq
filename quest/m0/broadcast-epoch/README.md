@@ -52,12 +52,14 @@ Decided:
   prefix route. Document this rather than promise it works.
 - Publishers on the default publish path, such as moq-boy and moq-room,
   inherit the epoch from Origin. moq-stats mints its own through
-  [Stats epochs](/quest/m1/stats-epoch.md), which also gates the release
+  [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md), which also gates the release
   (decided 2026-10-04): a restarted stats node under a reused name stalls its
   viewers the same way.
-- [Retracted demand release](/quest/m1/unannounce-demand-release.md) also
-  gates the release (decided 2026-10-05): a regression from #4741 on main that
-  `release` lacks.
+- Decided in the 2026-10-05 audit: the m1 quests gating this line (stats
+  epochs, the bounded stats aggregate it requires, and retracted demand
+  release) moved under it, and the OBS half of GStreamer and OBS moved to m1
+  as [OBS publishes under epochs](/quest/m1/obs-epoch.md), so the release
+  gate no longer waits on m1 work.
 - Derived output mirrors the epoch it came from
   (`.pro/transcode/<pid>/foo.hang/@e`, per the
   [wildcard](/quest/m0/wildcard/README.md) line's derived-output layout), so
@@ -80,7 +82,7 @@ This README owns:
 - [Gateways](/quest/m0/broadcast-epoch/gateways.md) - RTMP, SRT, and WHIP ingest mint an epoch per incoming connection, so an encoder reconnect is a clean takeover
 - [TS restart](/quest/m0/broadcast-epoch/ts-restart.md) - a signalled backward TS discontinuity finishes the broadcast and continues the same input under a fresh epoch
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and inherit the default
-- [GStreamer and OBS](/quest/m0/broadcast-epoch/gst-obs.md) - moqsink and the OBS plugin publish each run under a fresh epoch
-- [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - `moq` takes an optional `--epoch` instead of `--hop`, a plain publisher declares a random Hop ID, and the per-session hop stamp and NO_CAPACITY are gone
-- [Stats epochs](/quest/m1/stats-epoch.md) - moq-stats publishes each node under its own epoch, so a restarted node never stalls its viewers
-- [Retracted demand release](/quest/m1/unannounce-demand-release.md) - a retracted broadcast's track demand is released when its last subscriber leaves, as before #4741
+- [GStreamer](/quest/m0/broadcast-epoch/gst.md) - moqsink publishes each run under a fresh epoch
+- [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - `moq` takes an optional `--epoch` instead of `--hop`, a plain publisher declares a random Hop ID, and the per-session hop stamp is gone
+- [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md) - moq-stats publishes each group announcement under its own epoch, so neither a restarted node nor a returning idle group stalls its viewers
+- [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the same release retires the per-path stats maps for totals and on-demand prefix tracks (decided 2026-10-05)

@@ -25,8 +25,11 @@ pre-merge `just check` never runs moq-video's `capture` tests:
   capture branch in `sh/rs/select.sh`) once default
   `just check` covers it. Keep the platform jobs (`just rs macos`,
   `just rs windows`).
-- Update the Cargo feature comments, moq-cli's `capture` feature (it may
-  become redundant), and `doc/` wherever capture is described as opt-in.
+- Update the Cargo feature comments and `doc/` wherever capture is described
+  as opt-in. moq-cli's `capture` feature stays: the root manifest pins
+  moq-video and moq-audio to `default-features = false` for every workspace
+  consumer, and [Ship capture and playback](/quest/m1/cli-packaging.md) makes
+  it default-on and droppable.
 
 Verify: `just check` on a moq-video or moq-audio change runs the capture
 tests, and a `default-features = false` consumer (for example

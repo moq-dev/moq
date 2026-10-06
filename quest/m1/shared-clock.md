@@ -12,8 +12,8 @@ backwards, and `container::Producer::write` refuses a group below the last one
 (`TimestampRewind`), even across a discontinuity.
 
 The catalog's root `clock` is also final from the first snapshot a consumer
-sees. [import-first-frame](/quest/m1/import-first-frame.md) covers a lone
-importer; a container set up after a data track or catalog section has
+sees. A lone importer already holds its catalog until its first frame
+anchors; a container set up after a data track or catalog section has
 published (any order moq-c and moq-ffi allow) still re-anchors it after
 copy-once readers (moq-hls export, derived broadcasts) took the old one.
 
@@ -88,7 +88,7 @@ Decided (2026-10-05):
   downstream can recover the offset: the section's frame timestamp is the video
   clock at arrival plus that same offset. The field keeps its size and is clear
   even in an encrypted section, so TS export and the typed cues of
-  [#2279](/quest/m2/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md)
+  [#2279](/quest/m3/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md)
   read splice times on the broadcast timeline with no change of their own.
 - Rejected for SCTE-35: recording the offset in the `mpegts` catalog section for
   TS export to add (a new catalog field every typed consumer would also have to
@@ -136,7 +136,6 @@ Wire: none.
 
 ## Required
 
-- [Import at the first frame](/quest/m1/import-first-frame.md) - a lone importer anchors before the first publish, so the publish rule doesn't offset it
 - [CMAF frame timestamp](/quest/m1/cmaf-frame-timestamp.md) - decoders honour an offset frame timestamp on passthrough tracks
 
 ## Related

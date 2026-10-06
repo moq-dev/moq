@@ -53,9 +53,6 @@ anything else is generated. The IETF half (the sans-IO IETF session,
 generated IETF, and the IETF parameters quest on this line's branch) moved to
 m2 and waits on that go.
 
-PR #4455 (branch `quest/m1/rs2ts/lite-leading-ones`) changes the lite-07
-varint wire and no quest tracks it; it coordinates with
-[subscribe drop](/quest/m1/subscribe-drop.md)'s lite-07 edits.
 
 This README's own work is the no-downgrade report once generated lite ships:
 bundle size, per-frame CPU, and first-frame latency against the hand-written

@@ -7,7 +7,7 @@ camera, MediaProjection for the screen, and MediaCodec for encode and decode.
 
 ## Plan
 
-Rust owns capture and codecs on mobile, settled in the 2026-09-30 audit ([Mobile ownership](/quest/m1/mobile-ownership.md)). MediaCodec encode/decode already exist in moq-video. Reuse them rather than
+Rust owns capture and codecs on mobile, settled in the 2026-09-30 audit. MediaCodec encode/decode already exist in moq-video. Reuse them rather than
 planning a second backend family. The remaining capture and native Surface
 integration needs NDK/JNI lifecycle, synchronization, and actual device proof.
 

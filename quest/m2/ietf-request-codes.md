@@ -7,10 +7,6 @@ the way the drafts say, without closing the session. Each answer uses the
 draft's code, or an existing code where the exact one costs more than it
 is worth and the fallback is recorded in `doc/concept/standard.md`:
 
-- **LARGEST_OBJECT (0x09) in REQUEST_OK and REQUEST_UPDATE_OK** is
-  accepted. The draft makes it a MUST when objects exist. Today
-  `ietf/request.rs` allows only 0x08 and ACTIVE_COUNT, so a conformant
-  peer's reply closes the session with PROTOCOL_VIOLATION.
 - **Range Filters** get REQUEST_ERROR INVALID_FILTER (0x36), not
   NOT_SUPPORTED (draft-19 and later). We advertise no MAX_FILTER_RANGES, so
   the default of 0 applies (draft-21 §9.1.6) and every Range Filter is over

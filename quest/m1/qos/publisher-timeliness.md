@@ -37,10 +37,11 @@ inside a group, and that is not a broken timeline.
 
 Sample where the relay completes a frame: the moq-lite subscriber's
 `run_group` in `rs/moq-net/src/lite/subscriber.rs` (which already decodes the
-zigzag timestamp delta) and the IETF subscriber's object path. Pre-lite-05
-peers without a timescale stamp frames with `Timestamp::now()`, which would
-read as perfectly on time; leave those tracks out of the histogram rather than
-report a fiction. Update the stats section of `doc/bin/relay/config.md`.
+zigzag timestamp delta) and the IETF subscriber's object path. Leave untimed
+tracks out of the histogram rather than report a fiction: today pre-lite-05
+peers without a timescale are stamped with `Timestamp::now()` on arrival,
+which would read as perfectly on time, and after
+[Untimed model](/quest/m1/untimed-model.md) they arrive untimed. Update the stats section of `doc/bin/relay/config.md`.
 
 Tests: a paced publisher lands in the lowest bucket; publishers whose clocks
 run 100 ppm slow and 100 ppm fast both stay in the lowest bucket over a
@@ -50,6 +51,8 @@ counted while intra-group reordering is not; a track without a timescale is
 excluded.
 
 ## Related
+
+- [Untimed model](/quest/m1/untimed-model.md) - pre-lite-05 tracks arrive untimed instead of stamped on arrival
 
 - [Starvation](/quest/m1/qos/starvation.md) - the egress half, same
   histogram shape

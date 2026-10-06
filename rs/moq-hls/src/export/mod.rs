@@ -1452,6 +1452,61 @@ mod tests {
 		drop((media, registration, broadcast));
 	}
 
+	// The playlist copies the root clock when it first sees a rendition, so an fMP4 import must
+	// not publish its catalog on a provisional clock that the first fragment then re-anchors.
+	#[tokio::test(start_paused = true)]
+	async fn fmp4_import_times_playlists_by_the_anchored_clock() {
+		// An hour into the encoder's own timeline, a keyframe every 2s.
+		let start = 3_600_000_000;
+		let muxer = moq_mux::container::fmp4::Muxer::video(&video_config()).unwrap();
+		let init = muxer.init().unwrap().expect("a VP8 init from the coded size");
+		let mut fragments = Vec::new();
+		for i in 0..6u64 {
+			let frame = vp8_frame(start + i * 1_000_000, i % 2 == 0);
+			fragments.extend_from_slice(&muxer.fragment(i as u32, &[frame]).unwrap());
+		}
+
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		broadcast.announce(Default::default()).expect("publish allowed");
+		settle().await;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut import = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve());
+		import.decode(&init).unwrap();
+
+		// Watch before the first fragment, as a live viewer would, and let it read whatever the
+		// moov published, so a provisional clock would stick.
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let _ = next_event(&mut broadcaster.renditions()).await;
+
+		import.decode(&fragments).unwrap();
+		let anchored = catalog.snapshot().clock.expect("the catalog advertises a clock");
+
+		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let video = catalog
+			.snapshot()
+			.video
+			.renditions
+			.into_keys()
+			.next()
+			.expect("a video rendition");
+		let rendition = broadcaster.rendition(Kind::Video, &video).expect("video discovered");
+		let playlist = tokio::time::timeout(Duration::from_secs(5), rendition.playlist(None))
+			.await
+			.expect("a listed segment")
+			.unwrap()
+			.expect("playlist renders");
+
+		let first = anchored
+			.wall_clock(moq_net::Timestamp::from_micros(start).unwrap())
+			.unwrap();
+		let expected = format!("#EXT-X-PROGRAM-DATE-TIME:{}\n", humantime::format_rfc3339_millis(first));
+		assert!(playlist.contains(&expected), "{expected} in {playlist}");
+
+		drop((import, catalog));
+	}
+
 	// A finished broadcast renders a static presentation, offset to its first listed segment.
 	#[tokio::test]
 	async fn dash_manifest_turns_static_when_finished() {
