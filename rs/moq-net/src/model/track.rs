@@ -368,6 +368,14 @@ impl Slot {
 			})
 	}
 
+	/// Enter every copy into the evictable population, so the pool's access average
+	/// samples whichever one readers use.
+	fn cache_demote(&self) {
+		for group in self.copies() {
+			group.cache_demote();
+		}
+	}
+
 	/// Abort every copy this slot holds.
 	fn abort(&self, err: Error) {
 		for group in self.copies() {
@@ -929,7 +937,7 @@ impl TrackState {
 		if let Some(latest) = self.latest_group
 			&& let Some(slot) = self.lookup.get(&latest)
 		{
-			slot.group.cache_demote();
+			slot.cache_demote();
 			self.evict.push_back((latest, slot.stamp));
 		}
 	}
@@ -1002,7 +1010,7 @@ impl TrackState {
 				&& sequence > latest
 				&& let Some(prev) = self.lookup.get(&latest)
 			{
-				prev.group.cache_demote();
+				prev.cache_demote();
 				self.evict.push_back((latest, prev.stamp));
 			}
 			self.latest_group = Some(sequence);
@@ -1344,8 +1352,15 @@ impl TrackState {
 
 		// Settled first, like `commit_group`, which may evict the live slot itself.
 		self.charge_debt();
+		let protected = self.protects(sequence);
 		match self.lookup.get_mut(&sequence).filter(|slot| slot.is_live()) {
-			Some(slot) => slot.head = Some(Box::new(group.clone())),
+			Some(slot) => {
+				// Joins the slot's standing: demoted already unless it is the live edge.
+				if !protected {
+					group.cache_demote();
+				}
+				slot.head = Some(Box::new(group.clone()));
+			}
 			// Invisible to arrival-order subscribers: fetched on demand, not produced
 			// live by the publisher.
 			None => self.insert_group(&group, false),
@@ -8157,6 +8172,34 @@ mod test {
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
 
 		assert!(producer.consume().peek_group(0).is_some(), "a read head keeps its slot");
+	}
+
+	/// A head left alone in its slot (the live copy aborted) still joins the pool's
+	/// access average when the slot is demoted, so memory pressure can evict it even
+	/// when nothing else is evictable.
+	#[tokio::test]
+	async fn a_head_only_slot_yields_to_memory_pressure() {
+		let (producer, _pool) = pooled_producer(10_000);
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(1).unwrap();
+		let fetch = consumer.fetch_group(0, None);
+		let mut head = dynamic.requested_group().await.unwrap().accept(None).unwrap();
+		head.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 10_000]))
+			.unwrap();
+		head.finish().unwrap();
+		drop(fetch.await.unwrap());
+		live.abort(Error::Cancel).unwrap();
+
+		// The latest group is protected, so the head is the only evictable content.
+		let mut next = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		for _ in 0..30 {
+			next.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 10_000]))
+				.unwrap();
+		}
+		assert!(consumer.peek_group(0).is_none(), "pressure evicts the head");
 	}
 
 	/// Joining a queued fetch widens its range, and a caller that arrives once the range
