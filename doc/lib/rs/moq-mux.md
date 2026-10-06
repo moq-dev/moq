@@ -50,8 +50,8 @@ id; `fmp4::Error::TrackAdded`, `TrackChanged`, and `TrackRewound` end the export
 for a new rendition, a changed sample entry, or a replay of media already
 written, and `TrackUndescribed` names a track that never delivered its codec
 configuration. An Opus entry synthesized without a catalog `description` guesses
-its pre-skip, so a later OpusHead that agrees on everything else settles it
-instead of changing it.
+its pre-skip and input sample rate, so a later OpusHead that agrees on everything
+else settles it instead of changing it.
 
 Each catalog track constructor returns one `container::Producer` that owns the
 media stream and its catalog entry. `set` publishes or replaces its config,

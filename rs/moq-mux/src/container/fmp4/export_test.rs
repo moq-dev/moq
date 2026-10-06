@@ -1460,9 +1460,10 @@ async fn a_changed_sample_entry_fails() {
 	);
 }
 
-/// An OpusHead for `channels` channels with `pre_skip`, as a catalog description.
+/// An OpusHead for `channels` channels with `pre_skip`, as a catalog description. Its
+/// input rate is 44.1 kHz: metadata the 48 kHz guess has no way to know.
 fn opus_head(channels: u32, pre_skip: u16) -> Bytes {
-	crate::codec::opus::Config::new(48_000, channels)
+	crate::codec::opus::Config::new(44_100, channels)
 		.with_pre_skip(pre_skip)
 		.encode()
 		.unwrap()
@@ -1552,7 +1553,7 @@ async fn an_opus_head_that_disagrees_fails() {
 
 /// An OpusHead for stereo with `output_gain`.
 fn opus_head_gain(output_gain: i16) -> Bytes {
-	let mut head = crate::codec::opus::Config::new(48_000, 2).with_pre_skip(312);
+	let mut head = crate::codec::opus::Config::new(44_100, 2).with_pre_skip(312);
 	head.output_gain = output_gain;
 	head.encode().unwrap()
 }
