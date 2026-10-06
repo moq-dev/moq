@@ -5885,6 +5885,56 @@ mod test {
 		assert!(woken.load(Ordering::SeqCst), "a new edge wakes the parked read");
 	}
 
+	/// An aborted successor hands the reach to the next group, which sits below the edge
+	/// and so is watched only because the read re-selects its successor.
+	#[test]
+	fn a_parked_read_watches_the_replacement_for_an_aborted_successor() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_millis(500)));
+		let mut head = producer.append_group().unwrap();
+		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
+			.unwrap();
+		let successor = producer.append_group().unwrap();
+		let mut replacement = producer.append_group().unwrap();
+		append_at(&mut producer, 20_000); // the edge
+
+		let mut held = subscriber
+			.recv_group()
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.expect("head group");
+		assert_eq!(held.sequence, 0, "an unstamped successor leaves the reach unbounded");
+		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
+
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waker = futures::task::waker(Arc::new(FlagWake(woken.clone())));
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(held.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+
+		successor.abort(Error::Cancel).unwrap();
+		assert!(
+			woken.load(Ordering::SeqCst),
+			"the successor's abort wakes the parked read"
+		);
+		woken.store(false, Ordering::SeqCst);
+		assert!(
+			next.as_mut().poll(&mut cx).is_pending(),
+			"the unstamped replacement leaves the reach unbounded"
+		);
+
+		replacement
+			.write_frame(Timestamp::from_millis(1000).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		assert!(
+			woken.load(Ordering::SeqCst),
+			"the replacement's first frame bounds the reach"
+		);
+		let result = next.as_mut().poll(&mut cx);
+		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
 	/// The ordinary live case, at the default real-time budget: 2s GOPs produced one at
 	/// a time and read as they arrive. The budget must take the live edge without
 	/// shortening the group the reader is already on, so every frame of every group is
