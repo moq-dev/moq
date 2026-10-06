@@ -17,7 +17,7 @@ ignored = ["getrandom"]
 
 [features]
 # Exposes the wire codecs to the `fuzz/` harness and the announce, varint, and frame benches,
-# and session views of an origin to the origin bench, through the hidden `fuzz` module. Off by
+# and session views of an origin to the viewers bench, through the hidden `fuzz` module. Off by
 # default and hidden from the docs.
 fuzz = []
 
@@ -70,6 +70,12 @@ required-features = ["fuzz"]
 [[bench]]
 name = "origin"
 harness = false
+
+# Reaches the crate-private session view of an origin through the hidden `fuzz` module.
+[[bench]]
+name = "viewers"
+harness = false
+required-features = ["fuzz"]
 
 # Reaches the private announce codec through the hidden `fuzz` module.
 [[bench]]

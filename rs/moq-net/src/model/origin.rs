@@ -6105,6 +6105,37 @@ mod tests {
 		assert_eq!(fronts(), 2, "a viewer left the plain front");
 	}
 
+	/// The hairpin the per-request choice accepts ends on its own. A peer still on the
+	/// plain front when the only route left runs through it gets that route, but its own
+	/// view withdraws the path, so it stops serving the path back to us.
+	#[tokio::test]
+	async fn a_hairpin_through_the_plain_front_is_withdrawn() {
+		let producer = origin(1).produce();
+		let peer = producer.consume().excluding(origin(7));
+		let mut view = peer.announced();
+		let incumbent = producer
+			.dynamic("room", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+		view.assert_next_active("room");
+
+		let pending = peer.request_broadcast("room/alice");
+		let source = broadcast::Info::new().produce();
+		queued(&incumbent).await.accept(&source);
+		let resolved = pending.await.expect("resolves through the incumbent");
+
+		// The same publisher, now also reached through the peer, outlives the incumbent.
+		let echo = producer
+			.dynamic("room", Route::default().with_hops(hops(&[10, 7])))
+			.unwrap();
+		drop(incumbent);
+		drop(source);
+
+		let replacement = broadcast::Info::new().produce();
+		queued(&echo).await.accept(&replacement);
+		resolved.assert_not_closed();
+		view.assert_next_ended("room");
+	}
+
 	/// A route that ends abruptly releases its open groups, and the next route may
 	/// deliver only the frames past the break. The reader mid-group carries on from
 	/// there, and a reader arriving afterwards fetches the whole group from that route:

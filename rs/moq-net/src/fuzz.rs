@@ -217,7 +217,7 @@ impl AnnounceWriter {
 	}
 }
 
-/// `origin` as a session connected to `peer` serves it, for the origin bench's viewers.
+/// `origin` as a session connected to `peer` serves it, for the viewers bench.
 pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::origin::Consumer {
 	origin.excluding(peer)
 }
