@@ -31,6 +31,7 @@ normative:
   RFC6455:
   RFC9000:
   RFC9002:
+  RFC9562:
 
 informative:
   I-D.lcurley-moq-cluster:
@@ -118,7 +119,9 @@ Any broadcasts and subscriptions are transparently proxied by the CDN behind the
 ## Broadcast
 A Broadcast is a collection of Tracks named by a path.
 This corresponds to a MoqTransport's "track namespace".
-A path names one Broadcast whichever publisher serves it: a publisher MUST NOT reuse a path for different content, and publishes a new instance under a new path instead.
+A publisher instance is identified by an Epoch, carried on its routes (see [ANNOUNCE_START](#announce-start)): a path and an Epoch name one Broadcast, and a publisher MUST NOT serve different content under the same pair.
+A restarted publisher mints a new Epoch rather than reusing the path's old one, while replicas of the same content MAY share one.
+A route without an Epoch names no instance: nothing says another route serves the same bytes.
 
 A publisher advertises what it can serve via ANNOUNCE_START messages, each carrying a path prefix: a route covering every broadcast path beneath it.
 A route is the only shape an advertisement takes: a publisher that serves only some of the paths beneath a prefix, such as a transcoder for any broadcast's derivative, advertises the covering prefix and refuses the requests it will not serve (see [Resolution](#resolution)); no message narrows a route.
@@ -421,13 +424,16 @@ The per-subscriber winner changing travels as an ANNOUNCE_UPDATE; the last quali
 When serving a subscription, a publisher MUST select the source by that same exclusion; if only excluded sources remain, the subscription is unroutable.
 Applying one rule to both advertisement and dispatch keeps advertised paths truthful, which is what prevents subscription cycles of any length.
 
-When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering route (see [Resolution](#resolution)), then a path that contains no 0 Hop ID over one that does, then the lowest Warm Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the lowest Cold Route Cost, then toward the shortest path, then toward the lowest Spread Hash, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
+When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering route (see [Resolution](#resolution)), then the newest Epoch, ranking a route without one last, then a path that contains no 0 Hop ID over one that does, then the lowest Warm Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the lowest Cold Route Cost, then toward the shortest path, then toward the lowest Spread Hash, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
 
 The Spread Hash is the 64-bit FNV-1a hash, with offset basis `0x420C0DECB00B` and the standard FNV-64 prime, of the requested path's UTF-8 bytes followed by each Hop ID of the route's path, oldest first, as 8 little-endian bytes.
 It is keyed on the requested path rather than the route's prefix, so equal-cost advertisers of one prefix share its paths instead of the first one taking them all, while one path resolves to the same advertiser on every relay that holds the same routes.
 When choosing which route to advertise for a prefix, the requested path is the prefix itself.
 
-Every route covering a path serves the same Broadcast, so a relay MAY move a live subscription between them, continuing from the first frame the subscriber lacks, and a route change (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
+Routes with the same Epoch serve the same Broadcast, so a relay MAY move a live subscription between them, continuing from the first frame the subscriber lacks, and a route change (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
+A relay MUST NOT move a subscription to a route with a different Epoch, or between routes without one: it stays on its route and ends with it.
+When a newer Epoch wins the path, the relay SHOULD end subscriptions to the older one, even ones in flight, with UNROUTABLE, so subscribers request the new Broadcast rather than stall on one that was replaced.
+Epochs compare as their 16 bytes, which for a UUIDv7 orders them by creation time.
 
 #### Resolution {#resolution}
 A SUBSCRIBE, FETCH, or TRACK request names a path, and the receiver resolves it against the routes covering that path, after the per-subscriber exclusion above.
@@ -884,6 +890,7 @@ ANNOUNCE_START Message {
   Path Base (i),
   Path Keep (i),
   Route Prefix Suffix (s),
+  Epoch (b),
   Hops (..),
   Warm Route Cost (i),
   Cold Route Cost (i),
@@ -906,6 +913,12 @@ The suffix begins with the first `Path Keep` segments of the suffix advertised b
 **Route Prefix Suffix**:
 The remaining segments of the suffix, which is combined with the requested prefix to form the route's full prefix.
 An empty suffix advertises the requested prefix itself, which is how a route covering more than the request presents (see [Announce](#announce)).
+
+**Epoch**:
+The publisher instance the route serves: 16 bytes holding a UUIDv7 [RFC9562], or empty when unknown.
+Any other length, or a UUID of another version or variant, is a PROTOCOL_VIOLATION.
+A relay forwards the Epoch unchanged and MUST NOT invent one for a route that arrived without one.
+The Epoch is fixed for the advertisement's lifetime: a publisher replacing it sends ANNOUNCE_END and a new ANNOUNCE_START, and ANNOUNCE_UPDATE never changes it.
 
 **Hop Base** and **Hop Keep**:
 The Hop ID list ends with the last `Hop Keep` entries of the list advertised by the base that `Hop Base` names (see [Compression](#announce-compression)), following the literal `Hop ID` entries.
@@ -1000,6 +1013,7 @@ SUBSCRIBE Message {
   Message Length (i)
   Subscribe ID (i)
   Broadcast Path (s)
+  Epoch (b)
   Track Name (s)
   Subscriber Priority (8)
   Subscriber Max Age (i)
@@ -1085,12 +1099,18 @@ It is the first message on a Track Stream (0x6).
 TRACK Message {
   Message Length (i)
   Broadcast Path (s)
+  Epoch (b)
   Track Name (s)
 }
 ~~~
 
 **Broadcast Path**:
 The broadcast path of the track.
+
+**Epoch**:
+The publisher instance the subscriber expects, encoded as in [ANNOUNCE_START](#announce-start), or empty for whichever wins the path.
+A publisher MUST refuse a request with UNROUTABLE when the route it would serve from has another Epoch, so a request is never answered by a different instance than the one it named.
+A relay fills in the Epoch of the route it resolved when forwarding a request upstream; SUBSCRIBE and FETCH carry it the same way.
 
 **Track Name**:
 The name of the track.
@@ -1211,6 +1231,7 @@ FETCH is sent by a subscriber to request a single group from a track.
 FETCH Message {
   Message Length (i)
   Broadcast Path (s)
+  Epoch (b)
   Track Name (s)
   Subscriber Priority (8)
   Group Sequence (i)
@@ -1362,7 +1383,7 @@ The `Message Length` describes the payload size on the wire.
 - A refusal is not retried at another route of the same prefix either.
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
 - Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it. Earlier versions carry no such position, so a subscriber takes the first frame instead.
-- A path names one Broadcast whichever publisher serves it, and a publisher MUST NOT reuse a path for different content. A relay MAY move a subscription between any routes covering the path, continuing from the first frame the subscriber lacks instead of at a group boundary. Replaces the first-hop identity.
+- Added `Epoch` to ANNOUNCE_START, SUBSCRIBE, TRACK, and FETCH: a UUIDv7 naming the publisher instance, or empty. A path and an Epoch name one Broadcast. A relay MAY move a subscription between routes with the same Epoch, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between routes with different Epochs or none. The newest Epoch wins a path and ends subscriptions to the older one. Replaces the first-hop identity.
 
 - Assigned `moq-lite-07-wip` as this draft's protocol identifier until it is finalized as `moq-lite-07`.
 - Switched every variable-length integer, including SETUP parameter values, from QUIC's two-bit length prefix to moq-transport's leading-ones encoding, widening the range to 64 bits.

@@ -70,11 +70,12 @@ advertiser or a shorter prefix. The pattern matcher itself exists:
 `Path.Patterns` in `js/net/src/path.ts` own the shared matching, containment,
 specificity, and rebasing tokens and filters reuse.
 
-Content identity is the path: it names one broadcast whoever serves it, and
-any covering route resumes a subscription from the first frame the subscriber
-lacks (#4741). The `@<epoch>` segment (#4706) is what makes a restart a new
-path. So this questline settles collisions with interchangeable output at one
-path, not with a route identity or a generation field.
+Content identity is the path plus the epoch on its route: only routes with the
+same epoch resume a subscription from the first frame the subscriber lacks,
+and a route without one keeps its subscriptions until it goes
+([broadcast epochs](/quest/m0/broadcast-epoch/README.md)). A claim carries no
+epoch by default, so a subscription stays on the worker that first served it
+and is never stitched to another worker's output.
 
 ### Decisions
 
@@ -162,6 +163,15 @@ path, not with a route identity or a generation field.
   Wildcard routing invents neither a lease nor a generation. That quest is
   Required here (decided 2026-10-04), so this line cannot ship with workers
   that can be spliced mid-group.
+  Reopened 2026-10-06 by [route epochs](/quest/m0/broadcast-epoch/README.md):
+  a worker's concrete broadcast mints its own epoch, so two workers are never
+  spliced, and the newer one wins the path with a hard switch. Mirroring the
+  source's epoch is only needed for a seamless move between workers. Decide
+  whether that is worth the deterministic-output requirement, or whether the
+  group-start quest drops out. Either way, a worker announcing its concrete
+  path with an epoch hard-switches the viewers that resolved through its
+  claim (a known epoch supersedes a front pinned to a claim); announcing it
+  without one keeps them on the claim's copy.
 - **A serving front follows the best route.** A join or re-price re-selects
   every front below the prefix, and a front moves when another route now
   wins: cheaper, or the rendezvous winner among equal costs (decided
@@ -211,7 +221,7 @@ distinguish recording generations reads the catalog's archive entry
 
 - [archive](/quest/m1/archive/README.md) - an archive claims the root, and its
   catalog names the generations a claim cannot
-- [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - derived output
-  mirrors the source path, `@<epoch>` segment included
+- [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - route epochs
+  decide what resumes across workers
 - [Announcement shapes](/quest/m2/announce-shapes.md) - moq-lite-only exact,
   suffix, and prefix+suffix claims that survive relay hops

@@ -2,7 +2,7 @@
 
 ## Goal
 
-Nothing names a publisher's identity outside its path. `moq` loses `--hop`,
+Nothing names a publisher's identity outside its epoch. `moq` loses `--hop`,
 `MOQ_HOP`, and the hidden `--origin` alias; an optional `--epoch` takes their
 place for publishing. Omitted, each run gets a fresh epoch (the origin
 default); a redundant pair passes the same value. A plain publisher declares
@@ -53,6 +53,3 @@ Public API: removes `--hop`, `MOQ_HOP`, and `--origin`, adds `--epoch`, and
 `--cluster-id` stops reading `--hop`.
 Wire: relays stop stamping.
 
-## Required
-
-- [Origin](/quest/m0/broadcast-epoch/origin.md) - the default mint `--epoch` falls back to

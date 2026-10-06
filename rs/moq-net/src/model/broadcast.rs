@@ -198,7 +198,8 @@ impl Producer {
 	}
 
 	/// Advertise this broadcast's exact path as a route, or re-price the standing
-	/// advertisement in place.
+	/// advertisement in place. A route without an epoch keeps the broadcast's
+	/// current one, minted at creation; naming another announces a new broadcast.
 	///
 	/// Until this is called the broadcast exists for nobody: announce cursors do
 	/// not list it and requests for its path fail with [`Error::Unroutable`], for

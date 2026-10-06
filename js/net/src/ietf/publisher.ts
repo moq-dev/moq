@@ -73,6 +73,8 @@ function change(
 	next: Advertised | undefined,
 ): "same" | "restart" | Reprice {
 	if (held === undefined || next === undefined || held.identity !== next.identity) return "restart";
+	// A new epoch is another broadcast, even from the same entry.
+	if (held.route.epoch !== next.route.epoch) return "restart";
 	const from = clusterFor(base, held.route);
 	const to = clusterFor(base, next.route);
 	if (from === undefined || to === undefined) return from === to ? "same" : "restart";

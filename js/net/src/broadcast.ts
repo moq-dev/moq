@@ -332,7 +332,9 @@ export class Producer {
 	 * {@link unannounce} or {@link close}. Throws if this producer was not created through an
 	 * origin, or if the broadcast is already closed.
 	 */
-	announce(route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default): void {
+	announce(
+		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
+	): void {
 		if (this.#state.closed.peek() !== undefined) {
 			throw new Error("broadcast is closed");
 		}

@@ -132,12 +132,13 @@ Each instance of a broadcast MUST mint an epoch that no other instance under the
 Two instances MUST NOT share an epoch: they would derive the same keys and collide on nonces.
 Its leading 48-bit timestamp makes epochs sort by creation time and its random bits make collisions negligible.
 
-A protected broadcast is published at `<opaque>/@<epoch>`, where `<opaque>` is the 22-character base64url segment derived from the credential and the application's semantic broadcast name according to {{derive}}, and `<epoch>` is the UUID text.
-The `@` marker is part of the path segment only; the HKDF `bytes(epoch)` input remains the UUID text without `@`.
-The opaque derivation does not include the epoch, so every instance of the same semantic broadcast shares a discovery prefix.
+A protected broadcast is published at `<opaque>`, the 22-character base64url segment derived from the credential and the application's semantic broadcast name according to {{derive}}.
+Each instance announces its epoch as the route's moq-lite Epoch; the HKDF `bytes(epoch)` input is the UUID text.
+The opaque derivation does not include the epoch, so every instance of the same semantic broadcast shares one path.
 The path carries no format or protection marker; for example, the semantic name `meeting.hang` appears only as an input to the opaque derivation.
 A plaintext consumer that opens the protected broadcast fails because it cannot find the plaintext catalog it expects, not because of a path naming rule.
-Subscribers discover instances by the `<opaque>/` prefix and select the greatest epoch, where greatest is newest.
+Subscribers resolve `<opaque>` and take the epoch from its route, where relays rank the newest first.
+On a wire that cannot carry the route's epoch, the application supplies it over its own authenticated channel.
 A subscriber that already knows the full path parses the epoch from its last segment after removing `@`.
 
 The epoch and the path are not secret and are not authenticated.
@@ -364,8 +365,8 @@ This document requests no registrations.
 ## draft-lcurley-moq-e2ee-00
 {:numbered="false"}
 
-- Require canonical UUIDv7 epochs and carry them in `@<epoch>` path segments, leaving HKDF UUID inputs unchanged.
-- Initial `moq-e2ee-00` profile: out-of-band credential, opaque broadcast path with a publisher-minted epoch as its last segment, HKDF physical names and keys, AES-128-GCM payloads, identity bounds, typed failures, and shared primitive vectors.
+- Require canonical UUIDv7 epochs, carried on the route rather than in the path, leaving HKDF UUID inputs unchanged.
+- Initial `moq-e2ee-00` profile: out-of-band credential, opaque broadcast path with a publisher-minted epoch on its route, HKDF physical names and keys, AES-128-GCM payloads, identity bounds, typed failures, and shared primitive vectors.
 
 
 # Acknowledgments

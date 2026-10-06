@@ -7,8 +7,8 @@ moq-transport input never fails a session ahead of Seattle interop on
 2026-10-12, every resource a peer can make the relay hold is bounded by what
 it sent or by a budget, and no peer input panics the process. Routing: a
 service claims the prefix it could serve instead of enumerating broadcasts.
-Identity: nothing treats who published a route as what it carries; a path,
-with its `@epoch`, is the only content identity, and every first-party
+Identity: nothing treats who published a route as what it carries; a path and
+the epoch on its route are the only content identity, and every first-party
 publisher that can restart mints a fresh epoch, so #4741 stalls nobody.
 Audio playout: the target is a measured estimate of arrival timing in both
 languages, and a browser regression fails a nightly run.
@@ -46,7 +46,7 @@ a published `@moq/watch` break.
 - [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
 - [Wildcard](/quest/m0/wildcard/README.md) - a relay resolves subscriptions against advertised prefixes, a service claims the prefix it could serve and refuses the rest instead of enumerating broadcasts, and the browser player treats a covering claim as availability
-- [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh `@<uuidv7>` epoch, viewers follow the newest live one, and bare names still resolve on every version
+- [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
 - [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
 
 ## Related

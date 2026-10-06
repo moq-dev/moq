@@ -17,10 +17,9 @@ release gate waits only on `moqsink`.
   now moq-c, gets no new API).
 - First check whether the plugin already inherits it: today it announces
   through moq-c's `moq_publish_announce`, which calls
-  `broadcast::Producer::announce`. If Origin mints the epoch on that path,
-  the plugin needs no code, only a test.
-- Show the full epoch path in the dock, and update `doc/bin/obs.md` if it
-  shows paths.
+  `broadcast::Producer::announce` on a broadcast from `create_broadcast`,
+  which mints the epoch, so the plugin likely needs no code, only a test.
+- Show the epoch in the dock, and update `doc/bin/obs.md` if it shows it.
 
 ## Required
 

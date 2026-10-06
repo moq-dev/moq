@@ -2,83 +2,71 @@
 
 ## Goal
 
-A path, with its `@epoch`, is the only content identity, and no first-party
-publisher reuses one for different content. With #4741, any route covering a
-path resumes its subscriptions from the first frame the subscriber lacks,
-whoever serves it. So epochs are a correctness requirement: a publisher that
-restarts its group numbering at 0 under an un-epoched name, while its old
-route lingers, is resumed into the old broadcast and stalls viewers until its
-sequence catches up.
+A path and the epoch on its route are the only content identity, and no
+first-party publisher reuses a pair for different content. Only routes with
+the same epoch resume a subscription from the first frame it lacks; a route
+without one keeps its subscriptions until it goes. So epochs are what make
+failover seamless, and a restart is a new epoch at the same path: the newest
+epoch wins and ends subscriptions to the old one, so viewers re-request
+rather than stall on a replaced broadcast.
 
-By default, each publish of `demo/BBB.hang` goes out as
-`demo/BBB.hang/@<uuidv7>`, so a restart is a new broadcast. A viewer of the
-bare name follows the newest live epoch as soon as it is announced. Moving to
-a new epoch is a clean boundary (a fresh catalog and tracks, never resumed
-across), and each run stays addressable by its full path.
+The epoch rides moq-lite 07 announcements and requests as metadata, so the
+path never changes and every older version and moq-transport keeps working:
+their routes carry no epoch, stay on one route, and see a restart as an end
+and start at the same path.
 
-The epoch rides in the path, so it survives any moq-transport relay, and no
-wire message changes. At an epoch-aware relay, a request for a bare name
-resolves to its newest live epoch on every protocol version.
-
-Non-goals: pooling, which needs nothing here, since every publisher of one
-path is already one source; a redundant pair shares an explicit epoch through
-[`--hop` removal](/quest/m0/broadcast-epoch/hop-removal.md). Also out of
-scope: trusting the publisher's clock (a far-future epoch wins until its
-route goes away).
+Non-goals: pooling, which needs nothing here; a redundant pair shares an
+explicit epoch through [`--hop` removal](/quest/m0/broadcast-epoch/hop-removal.md).
+Also out of scope: trusting the publisher's clock (a far-future epoch wins
+until its route goes away).
 
 ## Plan
 
 Decided:
 
-- This line gates the next release (decided 2026-10-03: #4741 can merge to
-  main, but without epochs every restarting first-party publisher stalls its
-  viewers).
-- The marker is a child segment `@<uuidv7>`, parsed into
-  `Option<Epoch>` by [the shared primitive](/doc/concept/moq-lite.md#publisher-epochs). Not a lite-07 flag:
-  the path is the only carrier.
-- The broadcast-publish path mints an epoch unless the path already carries
-  one. A caller who passes an explicit epoch, such as a redundant publisher,
-  keeps it. The prefix-route `announce(prefix, route)` stays raw, and that is
-  the opt-out. So prefix vs broadcast is an API distinction, not a wire flag.
-- Viewers follow the greatest epoch with a live route. When it goes away and an
-  older one is still live, they fall back to it.
-- A bare request with no route of its own resolves to that same epoch on every
-  version, so lite-06 and IETF clients keep working through an epoch-aware
-  relay. When a newer epoch appears, the bare subscription ends with a typed
-  reset, and the client's normal resubscribe lands on the new one.
-- An unmodified third-party relay routes `foo/@<epoch>` but never resolves a
-  bare `foo`, since a route covers its descendants, not its parent. A
-  bare-name viewer behind one needs a publisher that opts out with the raw
-  prefix route. Document this rather than promise it works.
+- This line gates the next release (decided 2026-10-03: without epochs every
+  restarting first-party publisher stalls its viewers).
+- The epoch is route metadata, not a path segment (decided 2026-10-06,
+  replacing the `@<uuidv7>` segment: a path suffix changes the name old
+  clients subscribe to). It is a lite-07 field on ANNOUNCE_START, TRACK,
+  SUBSCRIBE, and FETCH, with no negotiation and nothing on published versions.
+- `create_broadcast` mints an epoch; a replica passes an explicit one through
+  its announce. A prefix route (`dynamic`) carries none, so claims such as a
+  transcoder's stay on the worker that first served a subscription and are
+  never stitched to another worker's output.
+- The newest epoch wins a prefix ahead of cost (decided 2026-10-06), and
+  replaces the old one with a hard switch: subscriptions in flight end with
+  `Unroutable`. When it goes and an older one is still live, the older one
+  wins again as a new broadcast.
+- A catalog `broadcast` reference by name follows the newest epoch, since a
+  path cannot name one.
 - Publishers on the default publish path, such as moq-boy and moq-room,
-  inherit the epoch from Origin. moq-stats mints its own through
-  [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md), which also gates the release
-  (decided 2026-10-04): a restarted stats node under a reused name stalls its
-  viewers the same way.
-- Decided in the 2026-10-05 audit: the m1 quests gating this line (stats
-  epochs, the bounded stats aggregate it requires, and retracted demand
-  release) moved under it, and the OBS half of GStreamer and OBS moved to m1
-  as [OBS publishes under epochs](/quest/m1/obs-epoch.md), so the release
-  gate no longer waits on m1 work.
-- Derived output mirrors the epoch it came from
-  (`.pro/transcode/<pid>/foo.hang/@e`, per the
-  [wildcard](/quest/m0/wildcard/README.md) line's derived-output layout), so
-  the service's prefix claim still covers it.
+  inherit the epoch from Origin. moq-stats mints one per group announcement
+  through [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md), which
+  also gates the release (decided 2026-10-04).
+- The m1 quests gating this line moved under it in the 2026-10-05 audit, and
+  the OBS half moved to m1 as [OBS publishes under epochs](/quest/m1/obs-epoch.md).
 
-This README owns:
+- Until lite-07 is offered by default, default sessions (lite-06) carry no
+  epoch, so a cluster GOAWAY redial or a standby takeover ends subscriptions
+  instead of resuming them (accepted 2026-10-06 over negotiating the field on
+  lite-06). A release that needs seamless failover promotes lite-07 first.
 
-- An end-to-end relay test: republish a name while the old publisher's session
-  stays open. A new-API viewer and a lite-06 or IETF bare-path viewer both
-  reach the new epoch within one RTT-scale bound rather than the idle timeout.
-  Killing the newest epoch falls back to a still-live older one.
-- A `doc/concept` page on broadcast naming: what an epoch is, publish and
-  consume behavior, takeover and fallback, bare-path resolution, and the
-  prefix-route opt-out.
+Open:
+
+- Older versions and moq-transport lose cross-route resume, since their routes
+  have no epoch. The IETF joining-FETCH resume and the lite-05/06 resume
+  points are unreachable for them now; delete them or keep them for a future
+  moq-transport epoch extension.
+
+This README owns an end-to-end relay test: republish a name while the old
+publisher's session stays open. A lite-07 viewer and a lite-06 or IETF viewer
+both reach the new epoch within one RTT-scale bound rather than the idle
+timeout, and killing the newest epoch falls back to a still-live older one.
 
 ## Required
 
-- [Origin](/quest/m0/broadcast-epoch/origin.md) - moq-net publish mints an epoch, consumers follow the newest live one, and bare requests resolve to it on every version
-- [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web publish under epochs and play bare names
+- [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web restart into a new epoch and reset on the switch
 - [Gateways](/quest/m0/broadcast-epoch/gateways.md) - RTMP, SRT, and WHIP ingest mint an epoch per incoming connection, so an encoder reconnect is a clean takeover
 - [TS restart](/quest/m0/broadcast-epoch/ts-restart.md) - a signalled backward TS discontinuity finishes the broadcast and continues the same input under a fresh epoch
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and inherit the default

@@ -18,7 +18,7 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
   ends inside a group a reader missed shows in no later frame, so a lagging
   reader undercounts. The maps also grow with every live broadcast, and
   readers like billing want only per-project sums.
-- **Totals.** Per group broadcast (`<prefix>[/<group>]/node/<node>/@<epoch>`),
+- **Totals.** Per group broadcast (`<prefix>[/<group>]/node/<node>`),
   per tier and role, cumulative within the [stats epoch](/quest/m0/broadcast-epoch/stats-epoch.md).
   Every group announcement, and so every restart, starts a new epoch counted
   from zero; nothing is serialized to disk. `Registry`'s unpruned lifetime totals
@@ -41,10 +41,10 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
   the linger (same epoch, totals continue), and one returning after it (new
   epoch from zero).
 - **Prefix tracks** (decided 2026-10-05, replacing per-broadcast tracks).
-  Routing is by prefix, and with epochs a broadcast is `<name>/@<epoch>`, so
-  a reader requests any prefix of a member path (so its depth is bounded by
-  `Path::MAX_PARTS` less the group's own segments) and gets one track: the prefix's rollup plus a one-level map of
-  each direct child's rollup (a broadcast's epochs, a channel's broadcasts).
+  Routing is by prefix, so a reader requests any prefix of a member path (so
+  its depth is bounded by `Path::MAX_PARTS` less the group's own segments) and
+  gets one track: the prefix's rollup plus a one-level map of each direct
+  child's rollup (a channel's broadcasts).
   Nothing is produced for a prefix no one holds. The relay's `--stats-depth`
   only places the group broadcasts; requests are not capped by it.
 - Flow counters (bytes, frames, groups, fetches) count from zero when the

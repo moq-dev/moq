@@ -16,11 +16,8 @@ Decided in the 2026-10-05 audit: the OBS half moved to
 [OBS publishes under epochs](/quest/m1/obs-epoch.md), so the release gate no
 longer waits on the C++ line. `moqsink` is Rust on moq-net and needs nothing
 from it. moq-c announces through `broadcast::Producer::announce`, so it only
-inherits an epoch if Origin mints one there; the OBS quest checks that.
+inherits one, since Origin mints it at `create_broadcast`; the OBS quest checks that.
 
-## Required
-
-- [Origin](/quest/m0/broadcast-epoch/origin.md) - the publish default moqsink takes
 
 ## Related
 
