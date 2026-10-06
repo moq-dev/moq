@@ -1,12 +1,24 @@
-use std::{borrow::Cow, string::FromUtf8Error};
+use std::string::FromUtf8Error;
 use thiserror::Error;
 
-/// Read the from the buffer using the given version.
+use super::{BoundsExceeded, Form, varint};
+
+/// Read the value from a [`Decoder`] using the given version.
 ///
 /// If [DecodeError::Short] is returned, the caller should try again with more data.
 pub trait Decode<V>: Sized {
-	/// Decode the value from the given buffer.
-	fn decode<B: bytes::Buf>(buf: &mut B, version: V) -> Result<Self, DecodeError>;
+	/// Decode the value from the front of the decoder.
+	fn decode(r: &mut Decoder<'_>, version: V) -> Result<Self, DecodeError>;
+
+	/// Decode the value from the front of `buf`, returning it and the bytes it took.
+	fn decode_slice(buf: &[u8], version: V) -> Result<(Self, usize), DecodeError>
+	where
+		V: Into<Form> + Copy,
+	{
+		let mut r = Decoder::new(buf, version.into());
+		let value = Self::decode(&mut r, version)?;
+		Ok((value, buf.len() - r.remaining()))
+	}
 }
 
 /// A decode error.
@@ -41,7 +53,7 @@ pub enum DecodeError {
 	#[error("too many")]
 	TooMany,
 
-	/// An integer was too large for the QUIC varint range.
+	/// An integer was too large for the field it was read into.
 	#[error("bounds exceeded")]
 	BoundsExceeded,
 
@@ -93,119 +105,123 @@ impl DecodeError {
 	}
 }
 
-impl<V> Decode<V> for bool {
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		match u8::decode(r, version)? {
+impl From<BoundsExceeded> for DecodeError {
+	fn from(_: BoundsExceeded) -> Self {
+		Self::BoundsExceeded
+	}
+}
+
+/// Reads wire primitives from the front of a byte slice.
+///
+/// A read either consumes exactly what it returns or fails and consumes nothing, so a
+/// [`DecodeError::Short`] can be retried once more bytes arrive.
+#[derive(Debug, Clone)]
+pub struct Decoder<'a> {
+	buf: &'a [u8],
+	form: Form,
+}
+
+impl<'a> Decoder<'a> {
+	/// Read `buf`, with varints in the given form.
+	pub fn new(buf: &'a [u8], form: Form) -> Self {
+		Self { buf, form }
+	}
+
+	/// The varint form this decoder reads.
+	pub fn form(&self) -> Form {
+		self.form
+	}
+
+	/// The number of unread bytes.
+	pub fn remaining(&self) -> usize {
+		self.buf.len()
+	}
+
+	/// Whether every byte has been read.
+	pub fn is_empty(&self) -> bool {
+		self.buf.is_empty()
+	}
+
+	/// Read `len` raw bytes.
+	pub fn slice(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
+		let Some((head, rest)) = self.buf.split_at_checked(len) else {
+			return Err(DecodeError::Short);
+		};
+		self.buf = rest;
+		Ok(head)
+	}
+
+	/// Read every remaining byte.
+	pub fn rest(&mut self) -> &'a [u8] {
+		std::mem::take(&mut self.buf)
+	}
+
+	/// Split off the next `len` bytes as their own decoder, e.g. a size-prefixed body.
+	pub fn sub(&mut self, len: usize) -> Result<Self, DecodeError> {
+		Ok(Self::new(self.slice(len)?, self.form))
+	}
+
+	/// Read a single byte.
+	pub fn u8(&mut self) -> Result<u8, DecodeError> {
+		Ok(self.slice(1)?[0])
+	}
+
+	/// Read a big-endian `u16`.
+	pub fn u16(&mut self) -> Result<u16, DecodeError> {
+		let b = self.slice(2)?;
+		Ok(u16::from_be_bytes([b[0], b[1]]))
+	}
+
+	/// Read a byte that must be 0 or 1.
+	pub fn bool(&mut self) -> Result<bool, DecodeError> {
+		match self.u8()? {
 			0 => Ok(false),
 			1 => Ok(true),
 			_ => Err(DecodeError::InvalidValue),
 		}
 	}
-}
 
-impl<V> Decode<V> for u8 {
-	fn decode<R: bytes::Buf>(r: &mut R, _: V) -> Result<Self, DecodeError> {
-		match r.has_remaining() {
-			true => Ok(r.get_u8()),
-			false => Err(DecodeError::Short),
-		}
+	/// Read a varint.
+	#[cfg_attr(target_arch = "wasm32", inline)]
+	#[cfg_attr(not(target_arch = "wasm32"), inline(always))]
+	pub fn varint(&mut self) -> Result<u64, DecodeError> {
+		let (value, rest) = varint::read(self.buf, self.form)?;
+		self.buf = rest;
+		Ok(value)
+	}
+
+	/// Read an optional varint: 0 is `None`, and `n + 1` is `Some(n)`.
+	pub fn varint_opt(&mut self) -> Result<Option<u64>, DecodeError> {
+		Ok(self.varint()?.checked_sub(1))
+	}
+
+	/// Read a varint length, then that many raw bytes.
+	pub fn bytes(&mut self) -> Result<&'a [u8], DecodeError> {
+		let start = self.buf;
+		let len = usize::try_from(self.varint()?).map_err(|_| DecodeError::BoundsExceeded)?;
+		self.slice(len).inspect_err(|_| self.buf = start)
+	}
+
+	/// Read a varint length, then that many bytes of UTF-8.
+	pub fn string(&mut self) -> Result<String, DecodeError> {
+		Ok(String::from_utf8(self.bytes()?.to_vec())?)
 	}
 }
 
-impl<V> Decode<V> for u16 {
-	fn decode<R: bytes::Buf>(r: &mut R, _: V) -> Result<Self, DecodeError> {
-		match r.remaining() >= 2 {
-			true => Ok(r.get_u16()),
-			false => Err(DecodeError::Short),
-		}
-	}
-}
+#[cfg(test)]
+mod tests {
+	use super::*;
 
-impl<V: Copy> Decode<V> for String
-where
-	usize: Decode<V>,
-{
-	/// Decode a string with a varint length prefix.
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		let v = Vec::<u8>::decode(r, version)?;
-		let str = String::from_utf8(v)?;
+	/// A short read must leave the decoder where it was, or a retry with more bytes
+	/// would start mid-value.
+	#[test]
+	fn short_consumes_nothing() {
+		let mut r = Decoder::new(&[0x05, b'a', b'b'], Form::Quic);
+		assert!(matches!(r.bytes(), Err(DecodeError::Short)));
+		assert_eq!(r.remaining(), 3);
 
-		Ok(str)
-	}
-}
-
-impl<V: Copy> Decode<V> for Vec<u8>
-where
-	usize: Decode<V>,
-{
-	fn decode<B: bytes::Buf>(buf: &mut B, version: V) -> Result<Self, DecodeError> {
-		let size = usize::decode(buf, version)?;
-
-		if buf.remaining() < size {
-			return Err(DecodeError::Short);
-		}
-
-		let bytes = buf.copy_to_bytes(size);
-		Ok(bytes.to_vec())
-	}
-}
-
-impl<V> Decode<V> for i8 {
-	fn decode<R: bytes::Buf>(r: &mut R, _: V) -> Result<Self, DecodeError> {
-		if !r.has_remaining() {
-			return Err(DecodeError::Short);
-		}
-
-		// This is not the usual way of encoding negative numbers.
-		// i8 doesn't exist in the draft, but we use it instead of u8 for priority.
-		// A default of 0 is more ergonomic for the user than a default of 128.
-		Ok(((r.get_u8() as i16) - 128) as i8)
-	}
-}
-
-impl<V: Copy> Decode<V> for bytes::Bytes
-where
-	usize: Decode<V>,
-{
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		let len = usize::decode(r, version)?;
-		if r.remaining() < len {
-			return Err(DecodeError::Short);
-		}
-		let bytes = r.copy_to_bytes(len);
-		Ok(bytes)
-	}
-}
-
-// TODO Support borrowed strings.
-impl<V: Copy> Decode<V> for Cow<'_, str>
-where
-	usize: Decode<V>,
-{
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		let s = String::decode(r, version)?;
-		Ok(Cow::Owned(s))
-	}
-}
-
-impl<V: Copy> Decode<V> for Option<u64>
-where
-	u64: Decode<V>,
-{
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		match u64::decode(r, version)? {
-			0 => Ok(None),
-			value => Ok(Some(value - 1)),
-		}
-	}
-}
-
-impl<V: Copy> Decode<V> for std::time::Duration
-where
-	u64: Decode<V>,
-{
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		let value = u64::decode(r, version)?;
-		Ok(Self::from_millis(value))
+		let mut r = Decoder::new(&[0x40], Form::Quic);
+		assert!(matches!(r.varint(), Err(DecodeError::Short)));
+		assert_eq!(r.remaining(), 1);
 	}
 }

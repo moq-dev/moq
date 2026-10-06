@@ -64,7 +64,7 @@ export class Group {
 	}
 }
 
-/** Decode an unsigned zigzag varint back to a signed delta (mirrors Rust `VarInt::to_zigzag`). */
+/** Decode an unsigned zigzag varint back to a signed delta (mirrors Rust `varint::unzigzag`). */
 function unzigzag(v: bigint): bigint {
 	return (v >> 1n) ^ -(v & 1n);
 }

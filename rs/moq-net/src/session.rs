@@ -344,7 +344,7 @@ enum Drain {
 	/// Nobody asked for one.
 	Idle,
 	/// Requested: close once drained, or at the deadline.
-	Waiting(crate::runtime::Deadline<crate::time::Clock>),
+	Waiting(crate::time::Deadline),
 	/// The drain closed the transport, with this outcome.
 	Done(Result<(), Error>),
 }
@@ -353,9 +353,7 @@ enum SamplerMode {
 	/// Nobody wants stats; sampling is paused.
 	Idle,
 	/// Someone does; sample when the deadline elapses.
-	Polling {
-		deadline: crate::runtime::Deadline<crate::time::Clock>,
-	},
+	Polling { deadline: crate::time::Deadline },
 }
 
 impl<S: crate::transport::poll::Session> Supervisor<S> {
@@ -415,7 +413,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 				}
 				Close::Drain => {
 					if !draining {
-						self.drain = Drain::Waiting(crate::runtime::Deadline::after(&self.runtime, CLOSE_TIMEOUT));
+						self.drain = Drain::Waiting(crate::time::Deadline::after(&self.runtime, CLOSE_TIMEOUT));
 					}
 					// No handle is left to abort.
 					if last {
@@ -470,7 +468,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 		stats.demanded = false;
 		drop(stats);
 		self.mode = SamplerMode::Polling {
-			deadline: crate::runtime::Deadline::after(&self.runtime, Self::POLL_INTERVAL),
+			deadline: crate::time::Deadline::after(&self.runtime, Self::POLL_INTERVAL),
 		};
 	}
 

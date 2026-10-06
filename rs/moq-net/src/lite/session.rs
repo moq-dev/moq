@@ -72,7 +72,7 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 		}
 		let mut index = 0;
 		while index < pending.len() {
-			let kind = match pending[index].poll_decode_peek::<u64>(&mut cx) {
+			let kind = match pending[index].poll_varint_peek(&mut cx) {
 				Poll::Pending => {
 					index += 1;
 					continue;
@@ -621,19 +621,23 @@ mod tests {
 	use super::*;
 	use crate::coding::Encode;
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn accept_setup_does_not_wait_on_an_early_stream_header() {
 		let version = Version::Lite05;
 		let mut setup = Vec::new();
-		DataType::Setup.encode(&mut setup, version).unwrap();
-		Setup::default().encode(&mut setup, version).unwrap();
+		DataType::Setup
+			.encode(&mut crate::coding::Encoder::new(&mut setup, version.into()), version)
+			.unwrap();
+		Setup::default()
+			.encode(&mut crate::coding::Encoder::new(&mut setup, version.into()), version)
+			.unwrap();
 		let mut session =
 			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![Vec::new(), setup]);
 		let accepted = accept_setup(&mut session, version).await.unwrap();
 		assert_eq!(accepted.early.len(), 1);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn accept_setup_refuses_two_incomplete_setup_streams() {
 		use futures::FutureExt;
 		let mut session =
@@ -644,20 +648,24 @@ mod tests {
 		));
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn duplicate_setup_closes_the_session() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			for complete in [false, true] {
 				let mut first = Vec::new();
-				DataType::Setup.encode(&mut first, version).unwrap();
+				DataType::Setup
+					.encode(&mut crate::coding::Encoder::new(&mut first, version.into()), version)
+					.unwrap();
 				if complete {
-					Setup::default().encode(&mut first, version).unwrap();
+					Setup::default()
+						.encode(&mut crate::coding::Encoder::new(&mut first, version.into()), version)
+						.unwrap();
 				}
 				let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
 					.with_incoming_unis(vec![first.clone(), first]);
 				let log = session.log.clone();
 				let mut started = start(Config {
-					runtime: crate::time::Clock::tokio(),
+					runtime: crate::time::Clock::sim(),
 					session,
 					setup_stream: None,
 					publish: None,
@@ -681,16 +689,21 @@ mod tests {
 
 	/// A SETUP that ends before its body decodes leaves nothing to wait on, since the
 	/// Setup Stream is already claimed.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn truncated_setup_closes_the_session() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let mut truncated = Vec::new();
-			DataType::Setup.encode(&mut truncated, version).unwrap();
+			DataType::Setup
+				.encode(
+					&mut crate::coding::Encoder::new(&mut truncated, version.into()),
+					version,
+				)
+				.unwrap();
 			let session =
 				crate::lite::test_transport::ScriptedSession::eof(Vec::new()).with_incoming_unis(vec![truncated]);
 			let log = session.log.clone();
 			let mut started = start(Config {
-				runtime: crate::time::Clock::tokio(),
+				runtime: crate::time::Clock::sim(),
 				session,
 				setup_stream: None,
 				publish: None,

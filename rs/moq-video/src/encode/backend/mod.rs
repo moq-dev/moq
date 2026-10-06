@@ -17,7 +17,7 @@
 //! considered, hardware (platform-gated) before the OpenH264 software fallback
 //! when this build enables it.
 
-use super::encoder::{Codec, Config, Kind};
+use super::encoder::{Applied, Codec, Config, Kind};
 use crate::encode::Encoded;
 use crate::{Error, Frame};
 
@@ -94,6 +94,15 @@ pub(crate) trait Backend {
 
 	/// The encoder name in use, e.g. `"videotoolbox"` (for logging and errors).
 	fn name(&self) -> &'static str;
+
+	/// The latency and compression controls this backend applied at open for
+	/// [`Config::preset`](super::Config::preset).
+	///
+	/// The default claims nothing, which is the honest answer for a backend that
+	/// has not confirmed its controls took effect.
+	fn applied(&self) -> Applied {
+		Applied::default()
+	}
 }
 
 /// Whether one NAL unit (header first, no start code) is a keyframe slice: an

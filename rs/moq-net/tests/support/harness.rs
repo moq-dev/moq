@@ -11,10 +11,23 @@ use moq_net::{Client, Server, Session, Version, origin};
 
 use super::mock::{MockSession, create_mock_session_pair};
 
-pub use moq_net::time::run;
-
+/// The current instant: simulated under `moq_net_sim`, tokio's in the benches.
 pub fn now() -> moq_net::time::Instant {
-	tokio::time::Instant::now().into_std()
+	match moq_net_sim::is_running() {
+		true => moq_net_sim::now(),
+		false => tokio::time::Instant::now().into_std(),
+	}
+}
+
+/// Run a protocol driver in the background: on `moq_net_sim` in tests, on tokio in
+/// the benches.
+pub fn spawn<D: moq_net::time::Driver + Send + Unpin + 'static>(mut driver: D) {
+	match moq_net_sim::is_running() {
+		true => drop(moq_net_sim::spawn(moq_net_sim::drive(move |now, waiter| {
+			driver.poll(now, waiter)
+		}))),
+		false => drop(tokio::spawn(moq_net::time::run(driver))),
+	}
 }
 
 /// Options for [`connect_mock`].
@@ -98,7 +111,7 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 			.connect(now(), client_transport)
 			.await
 			.expect("client handshake failed");
-		tokio::spawn(run(driver));
+		spawn(driver);
 		session
 	};
 	let server_fut = async {
@@ -106,10 +119,10 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 			.accept(now(), server_transport)
 			.await
 			.expect("server handshake failed");
-		tokio::spawn(run(driver));
+		spawn(driver);
 		session
 	};
-	let (client_session, server_session) = tokio::join!(client_fut, server_fut);
+	let (client_session, server_session) = futures::join!(client_fut, server_fut);
 
 	MockPair {
 		client: client_session,

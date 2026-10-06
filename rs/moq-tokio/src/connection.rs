@@ -207,19 +207,6 @@ pub enum Redirect {
 }
 
 impl Redirect {
-	/// Resolve the URL to dial after a GOAWAY, falling back to `current` when the
-	/// redirect is empty ("reconnect to me"), malformed, or refused by policy.
-	///
-	/// Lenient on purpose, for a caller that only wants somewhere to dial. A
-	/// [`Connection`] is stricter: it ends with [`Error::RefusedRedirect`] rather
-	/// than redialing after a malformed or refused URI.
-	pub fn resolve(&self, uri: &str, current: &Url) -> Url {
-		self.target(uri, current, false)
-			.ok()
-			.flatten()
-			.unwrap_or_else(|| current.clone())
-	}
-
 	/// The URL a GOAWAY assigns. `Ok(None)` keeps the current address list (the
 	/// peer named no URI, or the policy ignores a URI it could parse), `Ok(Some)`
 	/// replaces it, and `Err` is an explicit URI this policy refuses. A malformed
@@ -272,14 +259,14 @@ impl Redirect {
 /// Whether this scheme's dial installs the Rustls verifier, so a configured
 /// fingerprint actually checked the peer. Plain and non-Rustls transports do not.
 fn fingerprint_pins(scheme: &str) -> bool {
-	matches!(scheme, "https" | "wss" | "moqt" | "moql")
+	matches!(scheme, "https" | "wss" | "moqt" | "moql" | "tls")
 }
 
 /// Rank a scheme so a peer-supplied redirect cannot silently drop encryption.
 /// Unknown schemes rank lowest, so a forgotten classification is refused.
 fn scheme_tier(scheme: &str) -> u8 {
 	match scheme {
-		"https" | "moqt" | "moql" | "wss" | "iroh" => 2,
+		"https" | "moqt" | "moql" | "wss" | "iroh" | "tls" => 2,
 		"tcp" | "ws" | "http" => 1,
 		// `unix` lands here deliberately: local IPC is not an upgrade over a
 		// network transport, it is a different reachability class (see `is_local`).
@@ -1541,9 +1528,16 @@ mod tests {
 		// A public endpoint may not redirect us inward, but a local one may stay local.
 		let public: Url = "https://relay.example/".parse().unwrap();
 		let localhost: Url = "https://127.0.0.1:4443/".parse().unwrap();
-		assert_eq!(Redirect::Follow.resolve("https://[::ffff:127.0.0.1]/", &public), public);
+		assert!(matches!(
+			Redirect::Follow.target("https://[::ffff:127.0.0.1]/", &public, false),
+			Err(Error::RefusedRedirect(_))
+		));
 		assert_eq!(
-			Redirect::Follow.resolve("https://127.0.0.1:9999/", &localhost).port(),
+			Redirect::Follow
+				.target("https://127.0.0.1:9999/", &localhost, false)
+				.unwrap()
+				.unwrap()
+				.port(),
 			Some(9999)
 		);
 	}
@@ -1553,7 +1547,7 @@ mod tests {
 	/// forgot to add is refused rather than trusted.
 	#[test]
 	fn scheme_tiers_rank_encrypted_above_plaintext() {
-		for scheme in ["https", "moqt", "moql", "wss", "iroh"] {
+		for scheme in ["https", "moqt", "moql", "wss", "iroh", "tls"] {
 			assert_eq!(scheme_tier(scheme), 2, "{scheme} is encrypted");
 		}
 		for scheme in ["tcp", "ws", "http"] {
@@ -1566,38 +1560,35 @@ mod tests {
 		}
 	}
 
-	/// A redirect may hold the scheme or improve it, never weaken it.
+	/// A redirect may hold the scheme or improve it, never weaken it. A downgrade
+	/// is a refusal, not a reason to redial the address the peer is leaving.
 	#[test]
-	fn resolve_refuses_a_scheme_downgrade() {
+	fn target_refuses_a_scheme_downgrade() {
 		let secure: Url = "https://relay.example/".parse().unwrap();
 		let plain: Url = "http://relay.example/".parse().unwrap();
 
-		// Downgrades fall back to the current URL rather than being followed.
-		assert_eq!(Redirect::Follow.resolve("http://other.example/", &secure), secure);
-		assert_eq!(Redirect::Follow.resolve("unix:///tmp/moq.sock", &secure), secure);
+		assert!(matches!(
+			Redirect::Follow.target("http://other.example/", &secure, false),
+			Err(Error::RefusedRedirect(_))
+		));
+		assert!(matches!(
+			Redirect::Follow.target("unix:///tmp/moq.sock", &secure, false),
+			Err(Error::RefusedRedirect(_))
+		));
 
 		// Same tier and upgrades are followed.
 		let same: Url = "https://other.example/".parse().unwrap();
-		assert_eq!(Redirect::Follow.resolve("https://other.example/", &secure), same);
-		assert_eq!(Redirect::Follow.resolve("https://other.example/", &plain), same);
-	}
-
-	/// `resolve` is the lenient form: every way a redirect can fail to assign a
-	/// new URL, refusals included, lands back on the current one.
-	#[test]
-	fn resolve_falls_back_to_the_current_url() {
-		let current: Url = "https://relay.example/".parse().unwrap();
-
 		assert_eq!(
-			Redirect::Follow.resolve("", &current),
-			current,
-			"empty means 'reconnect to me'"
+			Redirect::Follow
+				.target("https://other.example/", &secure, false)
+				.unwrap(),
+			Some(same.clone())
 		);
-		assert_eq!(Redirect::Follow.resolve("not a url", &current), current);
 		assert_eq!(
-			Redirect::Ignore.resolve("https://other.example/", &current),
-			current,
-			"Ignore never leaves the configured URL"
+			Redirect::Follow
+				.target("https://other.example/", &plain, false)
+				.unwrap(),
+			Some(same)
 		);
 	}
 
@@ -1618,9 +1609,11 @@ mod tests {
 		}
 
 		let public: Url = "moqt://relay.example/".parse().unwrap();
-		assert_eq!(
-			Redirect::Follow.resolve("moqt://169.254.169.254/", &public),
-			public,
+		assert!(
+			matches!(
+				Redirect::Follow.target("moqt://169.254.169.254/", &public, false),
+				Err(Error::RefusedRedirect(_))
+			),
 			"a literal local target is refused whatever the scheme"
 		);
 	}
@@ -1639,16 +1632,18 @@ mod tests {
 		let rebindable: Url = "https://rebind.attacker.example/".parse().unwrap();
 		assert!(!is_local(&rebindable), "a hostname is never classified as local");
 		assert_eq!(
-			Redirect::Follow.resolve(rebindable.as_str(), &public),
-			rebindable,
+			Redirect::Follow.target(rebindable.as_str(), &public, false).unwrap(),
+			Some(rebindable.clone()),
 			"Follow is explicit trust: it dials the name the peer chose"
 		);
 
 		// So the default refuses the host change instead of trying to judge it.
 		assert_eq!(Redirect::default(), Redirect::SameHost);
-		assert_eq!(
-			Redirect::default().resolve(rebindable.as_str(), &public),
-			public,
+		assert!(
+			matches!(
+				Redirect::default().target(rebindable.as_str(), &public, false),
+				Err(Error::RefusedRedirect(_))
+			),
 			"a peer-named host is refused without resolving it"
 		);
 		assert_eq!(
@@ -1703,7 +1698,7 @@ mod tests {
 	/// must not inherit the pin.
 	#[test]
 	fn a_fingerprint_pin_only_covers_rustls_schemes() {
-		for scheme in ["https", "wss", "moqt", "moql"] {
+		for scheme in ["https", "wss", "moqt", "moql", "tls"] {
 			assert!(fingerprint_pins(scheme), "{scheme}");
 		}
 		for scheme in ["http", "ws", "tcp", "unix", "iroh"] {
@@ -1730,16 +1725,21 @@ mod tests {
 	/// `SameHost` lets a peer move us between ports or schemes on the endpoint we
 	/// already chose, but not onto a different host.
 	#[test]
-	fn resolve_same_host_pins_the_authority() {
+	fn same_host_follows_a_port_not_a_host() {
 		let current: Url = "https://relay.example:4443/".parse().unwrap();
 
-		assert_eq!(
-			Redirect::SameHost.resolve("https://elsewhere.example/", &current),
-			current,
+		assert!(
+			matches!(
+				Redirect::SameHost.target("https://elsewhere.example/", &current, false),
+				Err(Error::RefusedRedirect(_))
+			),
 			"another host is refused"
 		);
 
-		let moved = Redirect::SameHost.resolve("https://relay.example:5443/", &current);
+		let moved = Redirect::SameHost
+			.target("https://relay.example:5443/", &current, false)
+			.unwrap()
+			.unwrap();
 		assert_eq!(
 			moved.port(),
 			Some(5443),

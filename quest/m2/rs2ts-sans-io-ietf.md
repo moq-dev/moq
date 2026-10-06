@@ -13,6 +13,8 @@ twice (for `Session` and `ControlStreamAdapter<Session>`); collapse that while
 here.
 If the [async feature](/quest/m1/rs2ts/sans-io/async-feature.md) landed
 first with the IETF session behind it, move the session out.
+Turn the session's async test bodies into synchronous `poll_*` tests with
+explicit instants as it is rewritten, like lite.
 
 Public API: breaks moq-net's IETF session API. Wire: none.
 

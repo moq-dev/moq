@@ -1,7 +1,6 @@
 use super::MAX_AGE;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use derive_more::Debug;
-use moq_net::VarInt;
 
 use crate::Error;
 
@@ -9,7 +8,7 @@ pub use moq_net::{Timescale, Timestamp};
 
 /// Canonical timescale for the hang legacy wire format: microseconds.
 ///
-/// The legacy container's on-wire timestamp is a single VarInt with no scale tag,
+/// The legacy container's on-wire timestamp is a single varint with no scale tag,
 /// so encoders normalize to this scale and decoders attach it.
 pub const TIMESCALE: Timescale = Timescale::MICRO;
 
@@ -67,7 +66,7 @@ pub struct Frame {
 }
 
 impl Frame {
-	/// Encode the frame: VarInt timestamp prefix followed by the raw codec payload.
+	/// Encode the frame: varint timestamp prefix followed by the raw codec payload.
 	///
 	/// The timestamp is normalized to [`TIMESCALE`] (microseconds) so peers using a
 	/// different source scale (e.g. nanoseconds from MKV) can decode without knowing
@@ -78,12 +77,12 @@ impl Frame {
 		Ok(())
 	}
 
-	/// Decode a frame from raw bytes (VarInt timestamp prefix + payload).
+	/// Decode a frame from raw bytes (varint timestamp prefix + payload).
 	///
 	/// Attaches [`TIMESCALE`] (microseconds) to the decoded timestamp, matching what
 	/// [`Self::encode`] writes. Inverse of [`Self::encode`].
 	pub fn decode(mut buf: impl Buf) -> Result<Self, Error> {
-		let value: u64 = VarInt::decode_quic(&mut buf).map_err(moq_net::Error::from)?.into();
+		let value: u64 = moq_net::varint::decode_quic(&mut buf).map_err(moq_net::Error::from)?;
 		let timestamp = Timestamp::new(value, TIMESCALE)?;
 		let payload = buf.copy_to_bytes(buf.remaining());
 
@@ -117,11 +116,10 @@ impl Frame {
 		Ok(())
 	}
 
-	/// Write the VarInt timestamp prefix, normalized to [`TIMESCALE`].
+	/// Write the varint timestamp prefix, normalized to [`TIMESCALE`].
 	fn encode_header(&self, buf: &mut impl BufMut) -> Result<(), Error> {
 		let timestamp = self.timestamp.convert(TIMESCALE)?;
-		let value = VarInt::try_from(timestamp.value()).map_err(moq_net::Error::from)?;
-		value.encode_quic(buf).map_err(moq_net::Error::from)?;
+		moq_net::varint::encode_quic(timestamp.value(), buf).map_err(moq_net::Error::from)?;
 
 		Ok(())
 	}

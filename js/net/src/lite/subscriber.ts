@@ -738,7 +738,7 @@ export class Subscriber {
 	#toModelInfo(info: TrackInfo): track.Info {
 		return {
 			timescale: Time.Timescale(info.timescale),
-			// Publisher Max Age rides on the wire, so the local retention window
+			// Publisher Max Age rides on the wire, so the local media-time budget
 			// matches what the upstream advertises (relays re-serve with the same bound).
 			maxAge: info.maxAge === undefined ? undefined : Time.Milli(info.maxAge),
 			priority: info.priority,

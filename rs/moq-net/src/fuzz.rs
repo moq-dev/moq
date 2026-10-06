@@ -10,11 +10,11 @@
 //! Compiled only under `cfg(test)` or the `fuzz` feature, so none of this is part of
 //! the published API. See `fuzz/README.md` for the workflow.
 
-use bytes::Buf;
+use bytes::Bytes;
 
 use crate::{
 	Hops, Path, PathOwned, Pattern, broadcast, cache, coding,
-	coding::{Decode, Encode, VarInt},
+	coding::{Decode, Decoder, Encode, Encoder, Form, varint},
 	frame, group, ietf, lite,
 	path::Relative,
 	track,
@@ -79,17 +79,13 @@ fn select(data: &[u8], versions: usize) -> Option<(usize, u8, &[u8])> {
 /// at a version that cannot express it again (a duration past the varint range, a
 /// message a later draft dropped). What is never legitimate is emitting bytes we then
 /// refuse, or refuse to consume in full, since the peer's decoder is this same code.
-///
-/// `stable` asks for the stronger check that the second encoding matches the first,
-/// byte for byte. It is off wherever a parameter map reaches the wire, because those
-/// encoders walk a `HashMap`, whose iteration order differs per instance.
-fn roundtrip<T, V>(data: &[u8], version: V, stable: bool) -> bool
+/// The second encoding must also match the first byte for byte.
+fn roundtrip<T, V>(data: &[u8], version: V) -> bool
 where
 	T: Decode<V> + Encode<V>,
-	V: Copy,
+	V: Copy + Into<Form>,
 {
-	let mut buf = data;
-	let Ok(decoded) = T::decode(&mut buf, version) else {
+	let Ok((decoded, _)) = T::decode_slice(data, version) else {
 		return false;
 	};
 
@@ -97,21 +93,29 @@ where
 		return true;
 	};
 
-	let mut echo = first.clone();
-	let decoded = T::decode(&mut echo, version).expect("could not decode our own encoding");
-	assert!(
-		!echo.has_remaining(),
-		"our own encoding left {} bytes",
-		echo.remaining()
-	);
+	let (decoded, used) = T::decode_slice(&first, version).expect("could not decode our own encoding");
+	assert_eq!(used, first.len(), "our own encoding left {} bytes", first.len() - used);
 
 	let Ok(second) = decoded.encode_bytes(version) else {
 		panic!("could not re-encode what we just encoded");
 	};
+	assert_eq!(first, second, "encoding is not stable");
 
-	if stable {
-		assert_eq!(first, second, "encoding is not stable");
-	}
+	true
+}
+
+/// [`roundtrip`] for a datagram body, which runs to the end of its buffer.
+fn datagram(data: &[u8], version: lite::Version) -> bool {
+	let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version) else {
+		return false;
+	};
+
+	let Ok(first) = decoded.encode_bytes(version) else {
+		return true;
+	};
+
+	let echo = lite::Datagram::decode(first, version).expect("could not decode our own encoding");
+	assert_eq!(echo, decoded, "datagram did not survive a round trip");
 
 	true
 }
@@ -127,31 +131,28 @@ pub fn lite_wire(data: &[u8]) -> bool {
 	let version = LITE_VERSIONS[version];
 	let kind = kind % LITE_KINDS;
 
-	// SETUP is a parameter map, and so is the map itself.
-	let stable = !matches!(kind, 0 | 20);
-
 	match kind {
-		0 => roundtrip::<lite::Setup, _>(rest, version, stable),
-		1 => roundtrip::<lite::SessionInfo, _>(rest, version, stable),
-		2 => roundtrip::<lite::AnnounceInit<'static>, _>(rest, version, stable),
-		3 => roundtrip::<lite::AnnounceRequest<'static>, _>(rest, version, stable),
-		4 => roundtrip::<lite::AnnounceOk, _>(rest, version, stable),
-		5 => roundtrip::<lite::AnnounceBroadcast<'static>, _>(rest, version, stable),
-		6 => roundtrip::<lite::Subscribe<'static>, _>(rest, version, stable),
-		7 => roundtrip::<lite::SubscribeOk, _>(rest, version, stable),
-		8 => roundtrip::<lite::SubscribeStart, _>(rest, version, stable),
-		9 => roundtrip::<lite::SubscribeEnd, _>(rest, version, stable),
-		10 => roundtrip::<lite::SubscribeUpdate, _>(rest, version, stable),
-		11 => roundtrip::<lite::SubscribeDrop, _>(rest, version, stable),
-		12 => roundtrip::<lite::SubscribeResponse, _>(rest, version, stable),
-		13 => roundtrip::<lite::Fetch<'static>, _>(rest, version, stable),
-		14 => roundtrip::<lite::Group, _>(rest, version, stable),
-		15 => roundtrip::<lite::Goaway<'static>, _>(rest, version, stable),
-		16 => roundtrip::<lite::Track<'static>, _>(rest, version, stable),
-		17 => roundtrip::<lite::TrackInfo, _>(rest, version, stable),
-		18 => roundtrip::<lite::Probe, _>(rest, version, stable),
-		19 => roundtrip::<lite::Datagram, _>(rest, version, stable),
-		20 => roundtrip::<lite::Parameters, _>(rest, version, stable),
+		0 => roundtrip::<lite::Setup, _>(rest, version),
+		1 => roundtrip::<lite::SessionInfo, _>(rest, version),
+		2 => roundtrip::<lite::AnnounceInit<'static>, _>(rest, version),
+		3 => roundtrip::<lite::AnnounceRequest<'static>, _>(rest, version),
+		4 => roundtrip::<lite::AnnounceOk, _>(rest, version),
+		5 => roundtrip::<lite::AnnounceBroadcast<'static>, _>(rest, version),
+		6 => roundtrip::<lite::Subscribe<'static>, _>(rest, version),
+		7 => roundtrip::<lite::SubscribeOk, _>(rest, version),
+		8 => roundtrip::<lite::SubscribeStart, _>(rest, version),
+		9 => roundtrip::<lite::SubscribeEnd, _>(rest, version),
+		10 => roundtrip::<lite::SubscribeUpdate, _>(rest, version),
+		11 => roundtrip::<lite::SubscribeDrop, _>(rest, version),
+		12 => roundtrip::<lite::SubscribeResponse, _>(rest, version),
+		13 => roundtrip::<lite::Fetch<'static>, _>(rest, version),
+		14 => roundtrip::<lite::Group, _>(rest, version),
+		15 => roundtrip::<lite::Goaway<'static>, _>(rest, version),
+		16 => roundtrip::<lite::Track<'static>, _>(rest, version),
+		17 => roundtrip::<lite::TrackInfo, _>(rest, version),
+		18 => roundtrip::<lite::Probe, _>(rest, version),
+		19 => datagram(rest, version),
+		20 => roundtrip::<lite::Parameters, _>(rest, version),
 		_ => unreachable!("kind is taken modulo LITE_KINDS"),
 	}
 }
@@ -212,7 +213,7 @@ impl AnnounceWriter {
 				lite::AnnounceBroadcast::EndedId { id: *id }
 			}
 		};
-		msg.encode(data, self.version)
+		msg.encode(&mut Encoder::new(data, self.version.into()), self.version)
 			.expect("could not encode an announcement");
 	}
 }
@@ -235,8 +236,9 @@ pub fn encode_announces(announced: &[Announced], compress: bool) -> Vec<u8> {
 /// Decode and resolve an announce stream, as [`encode_announces`] writes it, stopping
 /// at the first message that fails to decode or resolve: a subscriber closes the
 /// session there.
-pub fn decode_announces(mut data: &[u8], compress: bool) -> Vec<Announced> {
+pub fn decode_announces(data: &[u8], compress: bool) -> Vec<Announced> {
 	let version = announce_version(compress);
+	let mut data = Decoder::new(data, version.into());
 	let mut decoder = lite::AnnounceDecoder::default();
 	let mut resolved = Vec::new();
 	while let Ok(msg) = lite::AnnounceBroadcast::decode(&mut data, version) {
@@ -307,11 +309,12 @@ impl LiteSample {
 	pub fn encode(self, version: crate::Version) -> Vec<u8> {
 		let version = lite::Version::try_from(version).expect("a moq-lite version");
 		let mut buf = Vec::new();
+		let w = &mut Encoder::new(&mut buf, version.into());
 		match self {
 			Self::Video | Self::Audio => {
 				for (delta, size) in self.frames() {
-					VarInt::from_zigzag(delta).unwrap().encode(&mut buf, version).unwrap();
-					size.encode(&mut buf, version).unwrap();
+					w.varint(varint::zigzag(delta)).unwrap();
+					w.varint(size).unwrap();
 				}
 			}
 			Self::Group => lite::Group {
@@ -319,7 +322,7 @@ impl LiteSample {
 				sequence: 1_234,
 				frame_start: 0,
 			}
-			.encode(&mut buf, version)
+			.encode(w, version)
 			.unwrap(),
 			Self::Subscribe => lite::Subscribe {
 				id: 3,
@@ -332,7 +335,7 @@ impl LiteSample {
 				start_frame: 0,
 				end_frame: None,
 			}
-			.encode(&mut buf, version)
+			.encode(w, version)
 			.unwrap(),
 			Self::Datagram => lite::Datagram {
 				subscribe: 3,
@@ -340,7 +343,7 @@ impl LiteSample {
 				timestamp: 1_234_567_890,
 				payload: bytes::Bytes::new(),
 			}
-			.encode(&mut buf, version)
+			.encode(w, version)
 			.unwrap(),
 			Self::Setup => lite::Setup {
 				probe: lite::ProbeLevel::Report,
@@ -348,30 +351,32 @@ impl LiteSample {
 				hop: Some(crate::Hop::new(0x1d_2c3b_4a59_6877).unwrap()),
 				..Default::default()
 			}
-			.encode(&mut buf, version)
+			.encode(w, version)
 			.unwrap(),
 		}
 		buf
 	}
 
 	/// Decode what [`Self::encode`] wrote at `version`, returning how many objects it read.
-	pub fn decode(self, version: crate::Version, mut data: &[u8]) -> usize {
+	pub fn decode(self, version: crate::Version, data: &[u8]) -> usize {
 		let version = lite::Version::try_from(version).expect("a moq-lite version");
-		let data = &mut data;
+		let r = &mut Decoder::new(data, version.into());
 		match self {
 			Self::Video | Self::Audio => {
 				let mut frames = 0;
-				while !data.is_empty() {
-					VarInt::decode(data, version).unwrap();
-					u64::decode(data, version).unwrap();
+				while !r.is_empty() {
+					r.varint().unwrap();
+					r.varint().unwrap();
 					frames += 1;
 				}
 				frames
 			}
-			Self::Group => lite::Group::decode(data, version).map(|_| 1).unwrap(),
-			Self::Subscribe => lite::Subscribe::decode(data, version).map(|_| 1).unwrap(),
-			Self::Datagram => lite::Datagram::decode(data, version).map(|_| 1).unwrap(),
-			Self::Setup => lite::Setup::decode(data, version).map(|_| 1).unwrap(),
+			Self::Group => lite::Group::decode(r, version).map(|_| 1).unwrap(),
+			Self::Subscribe => lite::Subscribe::decode(r, version).map(|_| 1).unwrap(),
+			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version)
+				.map(|_| 1)
+				.unwrap(),
+			Self::Setup => lite::Setup::decode(r, version).map(|_| 1).unwrap(),
 		}
 	}
 }
@@ -398,51 +403,47 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 	let version = IETF_VERSIONS[version];
 	let kind = kind % IETF_KINDS;
 
-	// Draft-14 and draft-15 write a parameter map straight out of a `HashMap`; every
-	// later draft sorts by key first, so only these two are order-dependent.
-	let stable = !matches!(version, ietf::Version::Draft14 | ietf::Version::Draft15);
-
 	match kind {
-		0 => roundtrip::<ietf::GoAway<'static>, _>(rest, version, stable),
-		1 => roundtrip::<ietf::Fetch<'static>, _>(rest, version, stable),
-		2 => roundtrip::<ietf::FetchOk, _>(rest, version, stable),
-		3 => roundtrip::<ietf::FetchError<'static>, _>(rest, version, stable),
-		4 => roundtrip::<ietf::FetchCancel, _>(rest, version, stable),
-		5 => roundtrip::<ietf::FetchHeader, _>(rest, version, stable),
-		6 => roundtrip::<ietf::FetchType<'static>, _>(rest, version, stable),
-		7 => roundtrip::<ietf::PublishNamespace<'static>, _>(rest, version, stable),
-		8 => roundtrip::<ietf::PublishNamespaceOk, _>(rest, version, stable),
-		9 => roundtrip::<ietf::PublishNamespaceError<'static>, _>(rest, version, stable),
-		10 => roundtrip::<ietf::PublishNamespaceDone<'static>, _>(rest, version, stable),
-		11 => roundtrip::<ietf::PublishNamespaceCancel<'static>, _>(rest, version, stable),
-		12 => roundtrip::<ietf::TrackStatus<'static>, _>(rest, version, stable),
-		13 => roundtrip::<ietf::Publish<'static>, _>(rest, version, stable),
-		14 => roundtrip::<ietf::PublishOk, _>(rest, version, stable),
-		15 => roundtrip::<ietf::PublishError<'static>, _>(rest, version, stable),
-		16 => roundtrip::<ietf::PublishDone<'static>, _>(rest, version, stable),
-		17 => roundtrip::<ietf::PublishBlocked<'static>, _>(rest, version, stable),
-		18 => roundtrip::<ietf::Subscribe<'static>, _>(rest, version, stable),
-		19 => roundtrip::<ietf::SubscribeOk, _>(rest, version, stable),
-		20 => roundtrip::<ietf::SubscribeError<'static>, _>(rest, version, stable),
-		21 => roundtrip::<ietf::SubscribeUpdate, _>(rest, version, stable),
-		22 => roundtrip::<ietf::Unsubscribe, _>(rest, version, stable),
-		23 => roundtrip::<ietf::SubscribeNamespace<'static>, _>(rest, version, stable),
-		24 => roundtrip::<ietf::SubscribeNamespaceLegacy<'static>, _>(rest, version, stable),
-		25 => roundtrip::<ietf::SubscribeNamespaceOk, _>(rest, version, stable),
-		26 => roundtrip::<ietf::SubscribeNamespaceError<'static>, _>(rest, version, stable),
-		27 => roundtrip::<ietf::UnsubscribeNamespace, _>(rest, version, stable),
-		28 => roundtrip::<ietf::Namespace<'static>, _>(rest, version, stable),
-		29 => roundtrip::<ietf::NamespaceDone<'static>, _>(rest, version, stable),
-		30 => roundtrip::<ietf::MaxRequestId, _>(rest, version, stable),
-		31 => roundtrip::<ietf::RequestsBlocked, _>(rest, version, stable),
-		32 => roundtrip::<ietf::RequestOk, _>(rest, version, stable),
-		33 => roundtrip::<ietf::RequestError<'static>, _>(rest, version, stable),
-		34 => roundtrip::<ietf::GroupHeader, _>(rest, version, stable),
-		35 => roundtrip::<ietf::Parameters, _>(rest, version, stable),
-		36 => roundtrip::<ietf::Location, _>(rest, version, stable),
-		37 => roundtrip::<ietf::FetchObject, _>(rest, version, stable),
-		38 => roundtrip::<ietf::PublishNamespaceUpdate, _>(rest, version, stable),
-		39 => roundtrip::<ietf::ObjectDatagram, _>(rest, version, stable),
+		0 => roundtrip::<ietf::GoAway<'static>, _>(rest, version),
+		1 => roundtrip::<ietf::Fetch<'static>, _>(rest, version),
+		2 => roundtrip::<ietf::FetchOk, _>(rest, version),
+		3 => roundtrip::<ietf::FetchError<'static>, _>(rest, version),
+		4 => roundtrip::<ietf::FetchCancel, _>(rest, version),
+		5 => roundtrip::<ietf::FetchHeader, _>(rest, version),
+		6 => roundtrip::<ietf::FetchType<'static>, _>(rest, version),
+		7 => roundtrip::<ietf::PublishNamespace<'static>, _>(rest, version),
+		8 => roundtrip::<ietf::PublishNamespaceOk, _>(rest, version),
+		9 => roundtrip::<ietf::PublishNamespaceError<'static>, _>(rest, version),
+		10 => roundtrip::<ietf::PublishNamespaceDone<'static>, _>(rest, version),
+		11 => roundtrip::<ietf::PublishNamespaceCancel<'static>, _>(rest, version),
+		12 => roundtrip::<ietf::TrackStatus<'static>, _>(rest, version),
+		13 => roundtrip::<ietf::Publish<'static>, _>(rest, version),
+		14 => roundtrip::<ietf::PublishOk, _>(rest, version),
+		15 => roundtrip::<ietf::PublishError<'static>, _>(rest, version),
+		16 => roundtrip::<ietf::PublishDone<'static>, _>(rest, version),
+		17 => roundtrip::<ietf::PublishBlocked<'static>, _>(rest, version),
+		18 => roundtrip::<ietf::Subscribe<'static>, _>(rest, version),
+		19 => roundtrip::<ietf::SubscribeOk, _>(rest, version),
+		20 => roundtrip::<ietf::SubscribeError<'static>, _>(rest, version),
+		21 => roundtrip::<ietf::SubscribeUpdate, _>(rest, version),
+		22 => roundtrip::<ietf::Unsubscribe, _>(rest, version),
+		23 => roundtrip::<ietf::SubscribeNamespace<'static>, _>(rest, version),
+		24 => roundtrip::<ietf::SubscribeNamespaceLegacy<'static>, _>(rest, version),
+		25 => roundtrip::<ietf::SubscribeNamespaceOk, _>(rest, version),
+		26 => roundtrip::<ietf::SubscribeNamespaceError<'static>, _>(rest, version),
+		27 => roundtrip::<ietf::UnsubscribeNamespace, _>(rest, version),
+		28 => roundtrip::<ietf::Namespace<'static>, _>(rest, version),
+		29 => roundtrip::<ietf::NamespaceDone<'static>, _>(rest, version),
+		30 => roundtrip::<ietf::MaxRequestId, _>(rest, version),
+		31 => roundtrip::<ietf::RequestsBlocked, _>(rest, version),
+		32 => roundtrip::<ietf::RequestOk, _>(rest, version),
+		33 => roundtrip::<ietf::RequestError<'static>, _>(rest, version),
+		34 => roundtrip::<ietf::GroupHeader, _>(rest, version),
+		35 => roundtrip::<ietf::Parameters, _>(rest, version),
+		36 => roundtrip::<ietf::Location, _>(rest, version),
+		37 => roundtrip::<ietf::FetchObject, _>(rest, version),
+		38 => roundtrip::<ietf::PublishNamespaceUpdate, _>(rest, version),
+		39 => roundtrip::<ietf::ObjectDatagram, _>(rest, version),
 		_ => unreachable!("kind is taken modulo IETF_KINDS"),
 	}
 }
@@ -453,10 +454,8 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 /// 14-16 use the QUIC two-bit length tag, while lite-07 and draft-17+ count leading
 /// ones, and the two disagree about which byte sequences are even legal.
 ///
-/// The decoded value is deliberately not asserted to be within [`VarInt::MAX`]: on the
-/// IETF wire the leading-ones form spans the full `u64` by design, so a 9-byte encoding
-/// decodes above the 62-bit ceiling. Lite-07 allows the same range, but refuses it at
-/// decode until `VarInt` widens to 64 bits.
+/// The leading-ones form spans the full `u64`, while the QUIC form stops at
+/// [`crate::coding::varint::MAX_QUIC`]; a value always re-encodes in the form it was read in.
 pub fn varint(data: &[u8]) -> bool {
 	let Some((&selector, rest)) = data.split_first() else {
 		return false;
@@ -468,32 +467,187 @@ pub fn varint(data: &[u8]) -> bool {
 		_ => IETF_VERSIONS[(selector as usize / 2) % IETF_VERSIONS.len()].into(),
 	};
 
-	let mut buf = rest;
-	let Ok(value) = VarInt::decode(&mut buf, version) else {
+	let Ok(value) = Decoder::new(rest, version.into()).varint() else {
 		return false;
 	};
 
-	// Zigzag is a pure mapping on top of the wire value, so it must round-trip
-	// whenever the signed value is back in range.
-	let signed = value.to_zigzag();
-	if let Ok(mapped) = VarInt::from_zigzag(signed) {
-		assert_eq!(mapped.to_zigzag(), signed, "zigzag is not its own inverse");
-	}
+	// Zigzag is a bijection on top of the wire value, so it must round-trip.
+	let signed = varint::unzigzag(value);
+	assert_eq!(varint::zigzag(signed), value, "zigzag is not its own inverse");
 
-	let Ok(encoded) = value.encode_bytes(version) else {
-		return true;
-	};
-
-	let mut echo = encoded.clone();
-	let again = VarInt::decode(&mut echo, version).expect("could not decode our own encoding");
-	assert!(
-		!echo.has_remaining(),
-		"our own encoding left {} bytes",
-		echo.remaining()
-	);
+	let mut encoded = Vec::new();
+	Encoder::new(&mut encoded, version.into())
+		.varint(value)
+		.expect("a varint re-encodes in the form it was read in");
+	let mut echo = Decoder::new(&encoded, version.into());
+	let again = echo.varint().expect("could not decode our own encoding");
+	assert!(echo.is_empty(), "our own encoding left {} bytes", echo.remaining());
 	assert_eq!(value, again, "varint did not survive a round trip");
 
 	true
+}
+
+/// A fixed mix of control and data-stream messages, for the codec benchmark.
+///
+/// Encoding appends every message to a buffer; decoding reads them back in the same
+/// order. The mix leans on the messages every subscription pays for.
+pub struct Messages {
+	lite_subscribe: lite::Subscribe<'static>,
+	lite_update: lite::SubscribeUpdate,
+	lite_start: lite::SubscribeResponse,
+	lite_info: lite::TrackInfo,
+	lite_group: lite::Group,
+	ietf_subscribe: ietf::Subscribe<'static>,
+	ietf_ok: ietf::SubscribeOk,
+	ietf_group: ietf::GroupHeader,
+}
+
+impl Default for Messages {
+	fn default() -> Self {
+		use std::time::Duration;
+
+		Self {
+			lite_subscribe: lite::Subscribe {
+				id: 7,
+				broadcast: Path::new("room/alice"),
+				track: "video".into(),
+				priority: 3,
+				max_age: Duration::from_millis(500),
+				start_group: Some(1_000),
+				end_group: None,
+				start_frame: 0,
+				end_frame: None,
+			},
+			lite_update: lite::SubscribeUpdate {
+				priority: 4,
+				max_age: Duration::from_millis(500),
+				start_group: Some(1_000),
+				end_group: Some(2_000),
+				start_frame: 0,
+				end_frame: None,
+			},
+			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
+				group: 1_234,
+				largest: None,
+			}),
+			lite_info: lite::TrackInfo {
+				priority: 1,
+				max_age: Some(Duration::from_secs(10)),
+				timescale: crate::Timescale::MICRO,
+			},
+			lite_group: lite::Group {
+				subscribe: 7,
+				sequence: 123_456,
+				frame_start: 0,
+			},
+			ietf_subscribe: ietf::Subscribe {
+				request_id: ietf::RequestId(2),
+				track_namespace: Path::new("room/alice"),
+				track_name: "video".into(),
+				subscriber_priority: 128,
+				group_order: ietf::GroupOrder::Descending,
+				filter: ietf::Filter::NextObject,
+				fill: None,
+				properties_wanted: false,
+				forward: true,
+				range_filters: false,
+			},
+			// Draft-17+ carries the request id in the control message framing instead.
+			ietf_ok: ietf::SubscribeOk {
+				request_id: None,
+				track_alias: 5,
+				largest: Some(ietf::Location {
+					group: 1_000,
+					object: 3,
+				}),
+				properties: Default::default(),
+			},
+			ietf_group: ietf::GroupHeader {
+				track_alias: 5,
+				group_id: 1_000,
+				sub_group_id: 0,
+				publisher_priority: 128,
+				flags: Default::default(),
+			},
+		}
+	}
+}
+
+/// The moq-lite version the [`Messages`] mix is encoded at.
+const BENCH_LITE: lite::Version = lite::Version::Lite06;
+
+/// The moq-transport draft the [`Messages`] mix is encoded at: a leading-ones varint draft.
+const BENCH_IETF: ietf::Version = ietf::Version::Draft20;
+
+impl Messages {
+	/// Append the moq-lite messages to `out`.
+	pub fn encode_lite(&self, out: &mut Vec<u8>) {
+		let v = BENCH_LITE;
+		let w = &mut Encoder::new(out, v.into());
+		self.lite_subscribe.encode(w, v).unwrap();
+		self.lite_update.encode(w, v).unwrap();
+		self.lite_start.encode(w, v).unwrap();
+		self.lite_info.encode(w, v).unwrap();
+		self.lite_group.encode(w, v).unwrap();
+	}
+
+	/// Decode what [`Self::encode_lite`] wrote.
+	pub fn decode_lite(&self, data: &[u8]) {
+		let v = BENCH_LITE;
+		let r = &mut Decoder::new(data, v.into());
+		lite::Subscribe::decode(r, v).unwrap();
+		lite::SubscribeUpdate::decode(r, v).unwrap();
+		lite::SubscribeResponse::decode(r, v).unwrap();
+		lite::TrackInfo::decode(r, v).unwrap();
+		lite::Group::decode(r, v).unwrap();
+		assert!(r.is_empty());
+	}
+
+	/// Append the moq-transport messages to `out`.
+	pub fn encode_ietf(&self, out: &mut Vec<u8>) {
+		let v = BENCH_IETF;
+		let w = &mut Encoder::new(out, v.into());
+		self.ietf_subscribe.encode(w, v).unwrap();
+		self.ietf_ok.encode(w, v).unwrap();
+		self.ietf_group.encode(w, v).unwrap();
+	}
+
+	/// Decode what [`Self::encode_ietf`] wrote.
+	pub fn decode_ietf(&self, data: &[u8]) {
+		let v = BENCH_IETF;
+		let r = &mut Decoder::new(data, v.into());
+		ietf::Subscribe::decode(r, v).unwrap();
+		ietf::SubscribeOk::decode(r, v).unwrap();
+		ietf::GroupHeader::decode(r, v).unwrap();
+		assert!(r.is_empty());
+	}
+}
+
+/// The varint form of moq-lite (`ietf == false`) or of a leading-ones moq-transport draft.
+fn bench_form(ietf: bool) -> Form {
+	match ietf {
+		false => BENCH_LITE.into(),
+		true => BENCH_IETF.into(),
+	}
+}
+
+/// Append `values` as varints in the wire form of moq-lite (`ietf == false`) or of a
+/// leading-ones moq-transport draft.
+pub fn encode_varints(values: &[u64], ietf: bool, out: &mut Vec<u8>) {
+	let mut w = Encoder::new(out, bench_form(ietf));
+	for value in values {
+		w.varint(*value).unwrap();
+	}
+}
+
+/// Sum the varints [`encode_varints`] wrote.
+pub fn decode_varints(data: &[u8], ietf: bool) -> u64 {
+	let mut r = Decoder::new(data, bench_form(ietf));
+	let mut sum = 0u64;
+	while !r.is_empty() {
+		sum = sum.wrapping_add(r.varint().unwrap());
+	}
+	sum
 }
 
 /// Exercise the [`Path`] invariants against arbitrary text.
@@ -553,12 +707,12 @@ pub fn path(data: &[u8]) -> bool {
 	// The wire form is the same path back, whenever the path is expressible at all.
 	let version = lite::Version::Lite05;
 	if let Ok(encoded) = target.encode_bytes(version) {
-		let mut echo = encoded;
-		let decoded = Path::decode(&mut echo, version).expect("could not decode our own encoding");
-		assert!(
-			!echo.has_remaining(),
+		let (decoded, used) = Path::decode_slice(&encoded, version).expect("could not decode our own encoding");
+		assert_eq!(
+			used,
+			encoded.len(),
 			"our own encoding left {} bytes",
-			echo.remaining()
+			encoded.len() - used
 		);
 		assert_eq!(decoded, target, "path did not survive a round trip");
 	}

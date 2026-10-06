@@ -15,7 +15,7 @@ use tracing::Level;
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_container_kind {
-	/// A QUIC VarInt timestamp prefix followed by the raw codec payload.
+	/// A QUIC varint timestamp prefix followed by the raw codec payload.
 	/// Timestamps are in microseconds.
 	MOQ_CONTAINER_KIND_LEGACY = 0,
 	/// Fragmented MP4: each frame is a complete moof+mdat fragment, described by

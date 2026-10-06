@@ -695,6 +695,11 @@ impl Rendition {
 
 	async fn load_init(&self) -> Result<Option<Arc<Init>>> {
 		let binding = self.media.sync(&self.live);
+		// A transmuxed segment can cache the init while another bootstrap holds `building`,
+		// blocked on an unfinished group.
+		if let Some(init) = self.run().init {
+			return Ok(Some(init));
+		}
 		let _building = self.building.lock().await;
 		let run = self.run();
 		if let Some(init) = run.init {
@@ -738,6 +743,9 @@ impl Rendition {
 	/// cache.
 	pub async fn segment(&self, segment: u64) -> Result<Option<Bytes>> {
 		let binding = self.media.sync(&self.live);
+		// Read the run before the rows (see `restart`), so an init decoded from them is never
+		// cached for a run that started while they were being fetched.
+		let run = self.run();
 		let Some(ranges) = self.live.segment_ranges(segment) else {
 			return Ok(None);
 		};
@@ -796,7 +804,13 @@ impl Rendition {
 		if frames.is_empty() {
 			return Ok(None);
 		}
-		Ok(Some(muxer.fragment(segment as u32, &frames)?))
+		let fragment = muxer.fragment(segment as u32, &frames)?;
+		// Inline codec metadata was already decoded from these completed groups.
+		// Reuse it instead of fetching a newer, possibly unfinished timeline tail.
+		if let Some(bytes) = muxer.init()? {
+			self.cache_init(run.epoch, bytes);
+		}
+		Ok(Some(fragment))
 	}
 }
 

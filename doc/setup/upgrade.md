@@ -58,6 +58,11 @@ These land with the next breaking release, not the 2026-09-23 train.
   `SourceMap` (#4667) are gone, along with the importers' `live()`. Publish the
   source's own timestamps and let the catalog clock map them to wall time;
   pin that mapping with `Config::with_clock` when the source's zero is known.
+- **`--cluster-mesh` and `--cluster-linger` are unknown flags.** moq-relay
+  0.17 refuses them by name; later relays reject them, and TOML `mesh` and
+  `linger`, like any unknown setting. `MOQ_CLUSTER_MESH` and
+  `MOQ_CLUSTER_LINGER` are no longer read, so drop them from the environment.
+  In Rust, `cluster::Config` has no `mesh` or `linger` field.
 - **moq-mux data producers take a broadcast-clock `Timestamp`.** `json` and
   `binary` `Snapshot::update` and `Stream::append` take `Timed<_, Timestamp>`
   instead of `Timed<_, Instant>`, and publish it as given. Convert a capture
@@ -69,7 +74,11 @@ These land with the next breaking release, not the 2026-09-23 train.
   `Tracks`, or the first PMT) on a provisional clock, then re-anchor it on the
   first frame. They now hold it until that frame, as FLV already did, so the
   first snapshot carries the final root `clock`. A reader waiting for the
-  catalog now waits for media, not just the init segment.
+  catalog now waits for media of a selected track, not just the init segment:
+  a track `with_select` deselects doesn't release it, even if its media
+  arrives first. A `moov` or `Tracks` decoded after `finish()` is refused with
+  `fmp4::Error::MoovAfterFinish` or `mkv::Error::TracksAfterFinish`, since the
+  tracks it declares could never finish.
 - **fMP4 export fixes its track set at the init segment.** moq-mux's
   `fmp4::Error` drops `MissingVideoTrack`, `MissingAudioTrack`, and
   `NoCatalogSnapshot`, and adds `TrackAdded`, `TrackChanged`, `TrackRewound`,
@@ -78,6 +87,16 @@ These land with the next breaking release, not the 2026-09-23 train.
   broadcast that ends with media queued behind an undescribed track is an error
   rather than an empty `Ok(None)`. Restart the export to pick up a new
   rendition.
+- **moq-net has no `VarInt`.** Varints are plain `u64`s:
+  `VarInt::decode_quic(buf)?.into_inner()` is `moq_net::varint::decode_quic(buf)?`,
+  and `VarInt::try_from(v)?.encode_quic(buf)` is
+  `moq_net::varint::encode_quic(v, buf)`, which fails past
+  `varint::MAX_QUIC` (2^62 - 1).
+- **Opus mapping family lives only on `mapping`.**
+  `moq_mux::codec::opus::Config::mapping_family` is gone. Family 0 is
+  `mapping: None`; any other family is the mapping's own (`mapping.family()`).
+  Set `mapping` alone when building a surround head. The OpusHead bytes are
+  unchanged.
 
 ## Wire
 
