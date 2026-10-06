@@ -341,13 +341,17 @@ impl Slot {
 		self.serving().is_aborted()
 	}
 
-	/// The latest access to any copy still held: readers may be on either one.
+	/// The mean access over copies still held, weighed the way each one samples the
+	/// pool's average: a maximum would sit above the mean forever, so a lone slot with
+	/// two copies could never be evicted.
 	fn cache_accessed(&self) -> u64 {
-		self.copies()
+		let (sum, count) = self
+			.copies()
 			.filter(|group| !group.is_aborted())
-			.map(group::Producer::cache_accessed)
-			.max()
-			.unwrap_or(0)
+			.fold((0u128, 0u128), |(sum, count), group| {
+				(sum + group.cache_accessed() as u128, count + 1)
+			});
+		(sum / count.max(1)) as u64
 	}
 
 	/// The bytes every copy holds, all freed together.
@@ -8174,32 +8178,49 @@ mod test {
 		assert!(producer.consume().peek_group(0).is_some(), "a read head keeps its slot");
 	}
 
-	/// A head left alone in its slot (the live copy aborted) still joins the pool's
-	/// access average when the slot is demoted, so memory pressure can evict it even
-	/// when nothing else is evictable.
-	#[tokio::test]
-	async fn a_head_only_slot_yields_to_memory_pressure() {
+	/// Fill group 0 as a live copy plus a fetched head written after it, optionally
+	/// abort the live copy, then write past capacity into a protected latest group, so
+	/// slot 0 is the only evictable content. Returns whether pressure evicted it.
+	async fn pressure_evicts_a_headed_slot(abort_live: bool) -> bool {
 		let (producer, _pool) = pooled_producer(10_000);
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
 
 		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
 		live.start_at(1).unwrap();
+		live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta"))
+			.unwrap();
+		live.finish().unwrap();
 		let fetch = consumer.fetch_group(0, None);
 		let mut head = dynamic.requested_group().await.unwrap().accept(None).unwrap();
 		head.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 10_000]))
 			.unwrap();
 		head.finish().unwrap();
 		drop(fetch.await.unwrap());
-		live.abort(Error::Cancel).unwrap();
+		if abort_live {
+			live.abort(Error::Cancel).unwrap();
+		}
 
-		// The latest group is protected, so the head is the only evictable content.
 		let mut next = producer.create_group(group::Info { sequence: 1 }).unwrap();
 		for _ in 0..30 {
 			next.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 10_000]))
 				.unwrap();
 		}
-		assert!(consumer.peek_group(0).is_none(), "pressure evicts the head");
+		consumer.peek_group(0).is_none()
+	}
+
+	/// A head left alone in its slot still joins the pool's access average when the
+	/// slot is demoted, so memory pressure can evict it.
+	#[tokio::test]
+	async fn a_head_only_slot_yields_to_memory_pressure() {
+		assert!(pressure_evicts_a_headed_slot(true).await);
+	}
+
+	/// A slot weighs its copies the way the pool's average samples them, so two copies
+	/// with different access stamps can't keep it above the average on their own.
+	#[tokio::test]
+	async fn a_two_copy_slot_yields_to_memory_pressure() {
+		assert!(pressure_evicts_a_headed_slot(false).await);
 	}
 
 	/// Joining a queued fetch widens its range, and a caller that arrives once the range
