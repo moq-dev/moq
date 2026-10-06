@@ -461,6 +461,31 @@ async fn refresh_follows_new_records_and_pops() {
 	assert_eq!(archive.store.inner().gets(), Vec::<String>::new());
 }
 
+/// A track the recording enrolled after the reader opened is found by listing the store again,
+/// then served and followed like the rest.
+#[tokio::test]
+async fn a_track_enrolled_after_opening_is_followed() {
+	let mut archive = Archive::new().await;
+	archive.add("audio", 0..2, 1).await;
+
+	let (broadcast, mut reader) = open(&archive).await;
+	not_found(fetch(&broadcast, "video", 0, 0).await);
+
+	archive.add("video", 0..2, 2).await;
+	let timelines = archive.store.timelines().await.unwrap();
+	assert_eq!(timelines.keys().collect::<Vec<_>>(), ["audio", "video"]);
+	reader.track("video", &timelines["video"]).await.unwrap();
+	assert!(reader.track("video", &timelines["video"]).await.is_err(), "a served track is refused");
+	reader.refresh().await.unwrap();
+
+	assert_eq!(
+		fetch(&broadcast, "video", 1, 0).await.unwrap(),
+		expected("video", 1, 0..2)
+	);
+	let timeline = broadcast.consume().track(&timeline("video")).unwrap();
+	assert!(timeline.subscribe(None).await.is_ok(), "the late timeline replays");
+}
+
 #[tokio::test]
 async fn a_missing_timeline_segment_recovers_from_the_next_checkpoint() {
 	let mut archive = Archive::new().await;

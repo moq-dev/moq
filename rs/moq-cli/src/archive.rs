@@ -106,12 +106,14 @@ pub async fn export(
 /// request.
 pub async fn import(origin: moq_net::origin::Producer, name: String, args: ImportArgs) -> anyhow::Result<()> {
 	let store = open(&args.store)?;
+	// A second handle lists the recording's timelines while the reader owns the first.
+	let listing = open(&args.store)?;
 	let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
-	let timelines = store
+	let mut timelines = store
 		.timelines()
 		.await
 		.with_context(|| format!("failed to list the recording at {}", args.store))?;
-	let config = moq_archive::reader::Config::new(timelines);
+	let config = moq_archive::reader::Config::new(timelines.clone());
 	let mut reader = moq_archive::Reader::open(store, &broadcast, config)
 		.await
 		.with_context(|| format!("no readable recording at {}", args.store))?;
@@ -132,6 +134,13 @@ pub async fn import(origin: moq_net::origin::Producer, name: String, args: Impor
 	let refresh = async {
 		loop {
 			tokio::time::sleep(interval).await;
+			// A rendition the recording enrolled after the replay started.
+			for (track, timeline) in listing.timelines().await? {
+				if !timelines.contains_key(&track) {
+					reader.track(&track, &timeline).await?;
+					timelines.insert(track, timeline);
+				}
+			}
 			reader.refresh().await?;
 		}
 	};

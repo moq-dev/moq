@@ -25,7 +25,7 @@
 
 mod index;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
@@ -71,6 +71,7 @@ impl Config {
 /// Serves an archive through a [`broadcast::Producer`] and follows its timelines.
 pub struct Reader<T> {
 	shared: Arc<Shared<T>>,
+	broadcast: broadcast::Producer,
 	dynamic: broadcast::Dynamic,
 	timelines: Vec<Timeline>,
 }
@@ -91,6 +92,8 @@ struct Shared<T> {
 	cache: quick_cache::sync::Cache<Key, Arc<Object>, Weight>,
 	/// Each track's `.info`, which is immutable, so a re-requested track costs no GET.
 	infos: Mutex<HashMap<String, track::Info>>,
+	/// The tracks a timeline indexes, which are the only ones served.
+	served: Mutex<HashSet<String>>,
 	/// Notified whenever the index changes; holds whether the caller declared the recording ended.
 	changed: watch::Sender<bool>,
 }
@@ -101,17 +104,6 @@ impl<T: ObjectStore> Reader<T> {
 	/// Fails if a timeline's `.info` is missing or invalid, a timeline track already exists, or the
 	/// store cannot list a timeline.
 	pub async fn open(store: Store<T>, broadcast: &broadcast::Producer, config: Config) -> Result<Self> {
-		let mut timelines = Vec::new();
-		for (track, timeline) in config.timelines {
-			let info = track_info(&store.get_info(&timeline).await?)?;
-			timelines.push(Timeline {
-				track,
-				producer: broadcast.create_track(timeline, info)?,
-				decoder: window::Decoder::new(window::ConsumerConfig::default().with_compression(true)),
-				cursor: None,
-			});
-		}
-
 		let items = usize::try_from(config.cache / (1024 * 1024))
 			.unwrap_or(usize::MAX)
 			.max(16);
@@ -120,16 +112,45 @@ impl<T: ObjectStore> Reader<T> {
 			index: Mutex::default(),
 			cache: quick_cache::sync::Cache::with_weighter(items, config.cache, Weight),
 			infos: Mutex::default(),
+			served: Mutex::default(),
 			changed: watch::Sender::new(false),
 		});
 
 		let mut reader = Self {
 			shared,
+			broadcast: broadcast.clone(),
 			dynamic: broadcast.dynamic(),
-			timelines,
+			timelines: Vec::new(),
 		};
+		for (track, timeline) in config.timelines {
+			reader.add(track, timeline).await?;
+		}
 		reader.refresh().await?;
 		Ok(reader)
+	}
+
+	/// Serve and follow `track`, whose timeline is the track `timeline`, such as one a recording
+	/// enrolled after this reader opened. Its timeline replays on the next [`refresh`](Self::refresh).
+	///
+	/// Fails if the timeline's `.info` is missing or invalid, or `track` is already served.
+	pub async fn track(&mut self, track: &str, timeline: &str) -> Result<()> {
+		self.add(track.to_string(), timeline.to_string()).await
+	}
+
+	async fn add(&mut self, track: String, timeline: String) -> Result<()> {
+		if self.shared.served.lock().unwrap().contains(&track) {
+			return Err(moq_net::Error::Duplicate.into());
+		}
+		let info = track_info(&self.shared.store.get_info(&timeline).await?)?;
+		let producer = self.broadcast.create_track(timeline, info)?;
+		self.shared.served.lock().unwrap().insert(track.clone());
+		self.timelines.push(Timeline {
+			track,
+			producer,
+			decoder: window::Decoder::new(window::ConsumerConfig::default().with_compression(true)),
+			cursor: None,
+		});
+		Ok(())
 	}
 
 	/// Replay timeline objects committed since the last refresh.
@@ -165,8 +186,7 @@ impl<T: ObjectStore> Reader<T> {
 	where
 		T: 'static,
 	{
-		let tracks = self.timelines.iter().map(|timeline| timeline.track.clone()).collect();
-		serve(self.shared.clone(), self.dynamic.clone(), tracks)
+		serve(self.shared.clone(), self.dynamic.clone())
 	}
 }
 
@@ -259,13 +279,13 @@ impl Timeline {
 }
 
 /// Serve requested tracks until the broadcast closes.
-async fn serve<T: ObjectStore>(shared: Arc<Shared<T>>, mut dynamic: broadcast::Dynamic, tracks: Vec<String>) {
+async fn serve<T: ObjectStore>(shared: Arc<Shared<T>>, mut dynamic: broadcast::Dynamic) {
 	let mut serving = kio::Tasks::new();
 	kio::wait(|waiter| {
 		loop {
 			match dynamic.poll_requested_track(waiter) {
 				Poll::Ready(Ok(request)) => {
-					let known = tracks.iter().any(|track| track == request.name());
+					let known = shared.served.lock().unwrap().contains(request.name());
 					serving.push(task(Box::pin(serve_track(shared.clone(), request, known))))
 				}
 				Poll::Ready(Err(_)) => return Poll::Ready(()),

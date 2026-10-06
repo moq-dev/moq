@@ -366,7 +366,8 @@ the video it was published with.
 `import archive` republishes a recording: each track's timeline replays as a
 live track and every track's groups are served on request, one object GET per
 stored span. By default it replays what is stored and ends the timelines there;
-`--follow 2s` keeps checking for new spans of a recording still being made.
+`--follow 2s` keeps checking for new spans, and newly recorded tracks, of a
+recording still being made.
 
 Store URLs are `file:///absolute/path`, `s3://bucket/prefix`,
 `gs://bucket/prefix`, or `az://container/prefix`. Cloud credentials come from
