@@ -39,7 +39,7 @@ so the bench emits mergeable buckets. Approved as recommended.
   taken. Update `rs/moq-bench/README.md`.
 
 Lands on main, then is backported to `release` as an additive cherry-pick
-PR, like [Stats linger](/quest/m0/stats-linger.md), since moq.pro's load
+PR, like [#4882](https://github.com/moq-dev/moq/pull/4882), since moq.pro's load
 harness tracks `release` (decided 2026-10-05). The backport carries #3126's
 delta along if `release` does not have it yet.
 
