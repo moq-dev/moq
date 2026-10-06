@@ -1689,7 +1689,11 @@ mod tests {
 			.await
 			.expect("client connect failed");
 
-		assert_eq!(cc.session.version(), expected_version, "client negotiated stale version");
+		assert_eq!(
+			cc.session.version(),
+			expected_version,
+			"client negotiated stale version"
+		);
 		websocket_handle.abort();
 		let _ = websocket_handle.await;
 

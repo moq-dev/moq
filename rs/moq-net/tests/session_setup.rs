@@ -110,10 +110,7 @@ async fn setup_reports_a_refusal() {
 	for name in LATE {
 		let (session, request) = dial(version(name)).await;
 		request.close(Error::Unauthorized);
-		let err = setup(&session)
-			.await
-			.expect("the refusal never arrived")
-			.unwrap_err();
+		let err = setup(&session).await.expect("the refusal never arrived").unwrap_err();
 		assert!(
 			matches!(err, Error::Session(SessionError::Unauthorized)),
 			"{name}: {err:?}"
