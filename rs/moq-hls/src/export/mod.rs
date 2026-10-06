@@ -977,6 +977,44 @@ mod tests {
 		assert_eq!(&init[4..8], b"ftyp");
 	}
 
+	/// An init bootstrap already blocked on the unfinished tail must not hold back a later
+	/// request once a completed segment has cached the init.
+	#[tokio::test(start_paused = true)]
+	async fn a_blocked_init_bootstrap_does_not_hide_a_cached_init() {
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let (mut catalog, mut registration, _media) = publish_vp8(&mut broadcast);
+		registration
+			.set(hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8))
+			.unwrap();
+		broadcast.announce(moq_net::origin::Route::default()).unwrap();
+		settle().await;
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		broadcaster.ready().await;
+		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
+
+		catalog.finish().unwrap();
+		while !rendition.snapshot().finished {
+			tokio::task::yield_now().await;
+		}
+		let mut blocked = std::pin::pin!(rendition.init());
+		assert!(
+			tokio::time::timeout(Duration::from_millis(10), blocked.as_mut())
+				.await
+				.is_err(),
+			"the bootstrap reads the unfinished trailing group"
+		);
+
+		let segment = rendition.segments().next().await.unwrap().expect("completed segment");
+		assert!(!segment.media.is_empty());
+		tokio::time::timeout(Duration::from_secs(1), rendition.init())
+			.await
+			.expect("init must not wait behind the blocked bootstrap")
+			.unwrap()
+			.expect("transmuxed segment has an init");
+	}
+
 	// A reconfigure that changes the init bytes changes the init URL, and the old URL stops
 	// resolving, so a cache can never hand a player the previous init under the new one.
 	#[tokio::test]

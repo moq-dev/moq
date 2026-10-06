@@ -695,6 +695,11 @@ impl Rendition {
 
 	async fn load_init(&self) -> Result<Option<Arc<Init>>> {
 		let binding = self.media.sync(&self.live);
+		// A transmuxed segment can cache the init while another bootstrap holds `building`,
+		// blocked on an unfinished group.
+		if let Some(init) = self.run().init {
+			return Ok(Some(init));
+		}
 		let _building = self.building.lock().await;
 		let run = self.run();
 		if let Some(init) = run.init {
