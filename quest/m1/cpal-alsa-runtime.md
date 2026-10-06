@@ -7,12 +7,17 @@ libasound a load-time requirement, either by loading it at runtime (dlopen)
 or by putting the ALSA host behind a feature that the PulseAudio host can
 replace.
 
-Check: build `moq-cli --features capture` against that release and confirm
-`readelf -d` lists no `libasound.so.2` under `NEEDED`.
+Check: build a capture and playback `moq-cli` against that release (with
+runtime loading, `--features capture`; with an optional host, cpal's ALSA
+host off and `pulseaudio` on) and confirm `readelf -d` lists no
+`libasound.so.2` under `NEEDED`. A clean `readelf` is not enough on its own:
+the binary must also start, list devices, and play on a host without
+libasound, as [capture-alsa-link](/quest/m1/capture-alsa-link.md) verifies.
 
 Advance it by proposing the change upstream (RustAudio/cpal, and
-diwic/alsa-sys if the loading lives there); posting there needs maintainer
-approval. Once the release is out, delete this quest.
+diwic/alsa-sys if the loading lives there). Posting there needs maintainer
+approval, which is pending: on 2026-10-06 the maintainer chose not to post
+yet. Once the release is out, delete this quest.
 
 ## Plan
 
@@ -37,6 +42,11 @@ Two upstream shapes, either of which unblocks
 
 Runtime loading matches the vaapi and nvidia pattern and the quest's
 fall-through goal, so prefer it.
+
+Fallback if upstream declines: fork `cpal`, `alsa`, and `alsa-sys` as
+published crates, as moq-v4l was. It is the only in-tree route that reaches
+`cargo install moq-cli`, at the cost of carrying three forks for one library;
+the maintainer decides if it comes to that.
 
 Rejected in-tree routes, for whoever retries this: a `[patch.crates-io]` fork
 of `alsa-sys` does not reach `cargo install moq-cli` or crates.io consumers
