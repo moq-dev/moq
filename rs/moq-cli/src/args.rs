@@ -2,7 +2,7 @@
 //!
 //! Grammar: `moq <MoQ side> <stage> [-- <stage>]...`, where a stage is
 //! `<import|export> <endpoint> [endpoint opts]`, plus `moq <MoQ side> play` for
-//! native playback, `moq <MoQ side> ls [prefix]` to list what is live, and
+//! native playback, `moq <MoQ side> announced [prefix]` to follow what is announced, and
 //! `moq <MoQ side> fetch <track>` to read one group.
 //!
 //! - The MoQ side (`--connect`, the `--listen*` transport binds, `--cluster-lan`,
@@ -158,8 +158,8 @@ impl std::error::Error for ParseError {}
 impl Invocation {
 	/// Parse the process arguments, exiting with Usage's rendered message on error.
 	///
-	/// Async because a completion request is answered first, and some completers
-	/// dial the relay the line already names (see [`crate::complete`]).
+	/// Async because a completion request is answered first, and the capture
+	/// completers enumerate devices asynchronously (see [`crate::complete`]).
 	pub async fn parse() -> Self {
 		let args: Vec<OsString> = std::env::args_os().collect();
 		// `#[usage(completion)]` installs the `__complete_word__` interception in the
@@ -286,13 +286,28 @@ impl Invocation {
 	/// no side effects to unwind.
 	pub fn validate(&self) -> anyhow::Result<()> {
 		for command in &self.stages {
-			if let Command::Export(export) = command
-				&& let Some(stdout) = export.sink.stdout()
-			{
+			let Command::Export(export) = command else {
+				continue;
+			};
+			if let Some(stdout) = export.sink.stdout() {
 				anyhow::ensure!(
 					stdout.linger.is_zero() || matches!(stdout.format, SubscribeFormat::Ts),
 					"--linger needs an output that can mark a restart, and only `export ts` can"
 				);
+				if matches!(stdout.format, SubscribeFormat::H264 | SubscribeFormat::H265) {
+					anyhow::ensure!(
+						!export.select.no_video,
+						"--no-video leaves nothing for a video elementary stream; pick a container format"
+					);
+					if let Some(flag) = export.select.audio_flag() {
+						anyhow::bail!("a video elementary stream has no audio; remove {flag}");
+					}
+				}
+			}
+			if let Some(sink) = export.sink.ignores_selection()
+				&& let Some(flag) = export.select.flag()
+			{
+				anyhow::bail!("`export {sink}` can't select renditions; remove {flag}");
 			}
 		}
 
@@ -303,7 +318,7 @@ impl Invocation {
 
 		// Only `import` and `export` share an Origin. The rest own the process: `play`
 		// drives a window on the main thread, `transcode` builds its own Origin, `fetch`
-		// and `ls` open their own session, and `auth` / `devices` never touch the network at all.
+		// and `announced` open their own session, and `auth` / `devices` never touch the network at all.
 		if let Some(command) = self.stages.iter().find(|command| !command.is_stageable()) {
 			anyhow::bail!(
 				"`{}` must be the only verb; it can't share a process with another `--` stage",
@@ -335,15 +350,6 @@ fn parse_error(
 		_ => ParseErrorKind::Other,
 	};
 	ParseError::new(kind, moq_tokio::cli::answer(spec, root, argv, err).message())
-}
-
-/// Whether [`MoqSide::from_argv`] lets the environment fill what the words left out.
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) enum Environment {
-	/// Apply the `MOQ_*` variables, as an ordinary parse does.
-	Read,
-	/// Read only what the words say, which is what "the user asked for this" means.
-	Ignore,
 }
 
 /// The MoQ attachment: a relay dial, a server listener, a LAN mesh, or any
@@ -522,32 +528,6 @@ impl MoqSide {
 		!(self.auth.public.is_empty() && self.auth.public_subscribe.is_empty() && self.auth.public_publish.is_empty())
 	}
 
-	/// Build a [`MoqSide`] from one chunk of a command line, leniently.
-	///
-	/// Stops at the first thing the grammar cannot take, because the caller is looking
-	/// at a half-typed line being completed. Whatever was understood before that point
-	/// is the answer.
-	pub(crate) fn from_argv(argv: &[&OsStr], environment: Environment) -> Option<Self> {
-		use usage::spec::CommandArgs;
-
-		let mut partial = <Self as CommandArgs>::start();
-		let mut parser = usage::Parser::new(Cli::command(), argv);
-		while let Some(event) = parser.next_event() {
-			match event {
-				Ok(event) => {
-					<Self as CommandArgs>::apply(&mut partial, &event);
-				}
-				Err(_) => break,
-			}
-		}
-
-		if environment == Environment::Read {
-			<Self as CommandArgs>::apply_env(&mut partial);
-		}
-		<Self as CommandArgs>::apply_defaults(&mut partial);
-		<Self as CommandArgs>::build(partial).ok()
-	}
-
 	/// The MoQ-side flags one chunk of a command line typed, each once, in order.
 	///
 	/// A flattened config's flags sit in this struct's table under the keys that
@@ -587,8 +567,8 @@ pub enum Command {
 	/// The released spelling of [`Self::Export`].
 	#[usage(hide = true)]
 	Subscribe(Export),
-	/// List the broadcasts live on a relay.
-	Ls(crate::ls::Args),
+	/// Follow the broadcasts announced on a relay as they start and end.
+	Announced(crate::announced::Args),
 	/// Write one group of a track to stdout.
 	Fetch(crate::fetch::Args),
 	/// Play a broadcast in a native window and speaker.
@@ -648,7 +628,7 @@ impl Command {
 		match self {
 			Self::Import(_) | Self::Publish(_) => "import",
 			Self::Export(_) | Self::Subscribe(_) => "export",
-			Self::Ls(_) => "ls",
+			Self::Announced(_) => "announced",
 			Self::Fetch(_) => "fetch",
 			#[cfg(feature = "play")]
 			Self::Play(_) => "play",
@@ -843,7 +823,7 @@ pub struct Export {
 	#[usage(long = "catalog-format", value_enum)]
 	pub catalog_format: Option<CatalogFormatArg>,
 
-	/// Rendition selection (`--video-name`, `--video-codec`, `--audio-name`, `--audio-codec`).
+	/// Rendition selection (`--video-name`, `--no-audio`, ...), refused by sinks that don't apply it.
 	#[usage(flatten)]
 	pub select: crate::subscribe::SelectArgs,
 
@@ -899,6 +879,18 @@ pub enum ExportSink {
 }
 
 impl ExportSink {
+	/// The sink's name when it doesn't apply selection, so the selection flags would be ignored.
+	fn ignores_selection(&self) -> Option<&'static str> {
+		Some(match self {
+			Self::Fmp4(_) | Self::Mkv(_) | Self::Flv(_) | Self::H264(_) | Self::H265(_) => return None,
+			Self::Ts(_) => "ts",
+			Self::Hls(_) => "hls",
+			Self::Rtmp(_) => "rtmp",
+			Self::Srt(_) => "srt",
+			Self::Rtc(_) => "rtc",
+		})
+	}
+
 	/// Whether this sink writes to stdout (the container formats).
 	pub fn is_stdout(&self) -> bool {
 		self.stdout().is_some()
@@ -1042,6 +1034,87 @@ mod tests {
 				parse(format, "0s").validate().is_ok(),
 				"{format}: no linger is always fine"
 			);
+		}
+	}
+
+	fn export(flags: &[&str]) -> Result<Invocation, ParseError> {
+		let argv = ["moq", "--connect", "http://relay", "--broadcast", "room", "export"];
+		Invocation::try_parse_from(argv.iter().chain(flags).copied())
+	}
+
+	/// Leaving a role out can't be combined with narrowing it, or with leaving the
+	/// other role out too.
+	#[test]
+	fn leaving_a_role_out_conflicts_with_selecting_it() {
+		for flags in [
+			["--no-video", "--video-name", "hd"].as_slice(),
+			&["--video-codec", "h264", "--no-video"],
+			&["--no-audio", "--audio-name", "stereo"],
+			&["--audio-codec", "opus", "--no-audio"],
+			&["--no-video", "--no-audio"],
+			&["--no-audio", "--no-video"],
+		] {
+			let flags = [flags, &["fmp4"]].concat();
+			assert!(export(&flags).is_err(), "{flags:?} must be refused");
+		}
+	}
+
+	#[test]
+	fn no_audio_selects_no_audio_role() {
+		let cli = export(&["--no-audio", "fmp4"]).unwrap();
+		cli.validate().unwrap();
+		let Command::Export(export) = &cli.stages[0] else {
+			panic!("an export stage");
+		};
+		let selection = export.select.selection(None);
+		assert!(selection.has_video());
+		assert!(!selection.has_audio());
+	}
+
+	/// A video elementary stream refuses leaving video out or selecting audio, before dialing.
+	#[test]
+	fn elementary_streams_refuse_no_video() {
+		for format in ["h264", "h265"] {
+			let err = export(&["--no-video", format]).unwrap().validate().unwrap_err();
+			assert!(err.to_string().contains("--no-video"), "{format}: {err}");
+			export(&["--no-audio", format]).unwrap().validate().unwrap();
+			for flag in [["--audio-name", "stereo"], ["--audio-codec", "aac"]] {
+				let err = export(&[flag.as_slice(), &[format]].concat())
+					.unwrap()
+					.validate()
+					.unwrap_err();
+				assert!(err.to_string().contains(flag[0]), "{format} {flag:?}: {err}");
+			}
+		}
+		for format in ["fmp4", "mkv", "flv"] {
+			export(&["--no-video", format]).unwrap().validate().unwrap();
+		}
+	}
+
+	/// A sink that doesn't apply selection refuses the selection flags rather than
+	/// ignoring them.
+	#[test]
+	fn sinks_without_selection_refuse_it() {
+		let sinks = [
+			["ts"].as_slice(),
+			&["hls", "--listen", "127.0.0.1:8080"],
+			&["rtmp", "--listen", "127.0.0.1:1935"],
+			&["srt", "--listen", "127.0.0.1:9000"],
+			&["rtc", "--listen", "127.0.0.1:8443"],
+		];
+		for sink in sinks {
+			export(sink).unwrap().validate().unwrap();
+			for flag in [
+				["--video-name", "hd"].as_slice(),
+				&["--video-codec", "h264"],
+				&["--no-video"],
+				&["--audio-name", "stereo"],
+				&["--audio-codec", "aac"],
+				&["--no-audio"],
+			] {
+				let err = export(&[flag, sink].concat()).unwrap().validate().unwrap_err();
+				assert!(err.to_string().contains(flag[0]), "{sink:?} {flag:?}: {err}");
+			}
 		}
 	}
 
@@ -1577,6 +1650,27 @@ mod tests {
 			panic!("subscribe must not start a run");
 		};
 		assert!(err.to_string().contains("subscribe -> export"), "{err}");
+	}
+
+	/// An exported `MOQ_CONNECT` configures a MoQ side but does not ask for one, so a
+	/// local verb still runs in a shell that exports a relay for its usual publishing.
+	#[test]
+	fn the_environment_cannot_ask_for_a_moq_side() {
+		let url = "https://relay.example.com";
+		let _env = crate::test_env::EnvGuard::set(&[("MOQ_CONNECT", url)]);
+
+		let ambient = Invocation::try_parse_from(["moq", "auth", "generate"]).expect("parse");
+		assert!(
+			ambient.moq.client.url.is_some(),
+			"the resolved side should still pick the variable up"
+		);
+		assert!(
+			ambient.reject("auth").is_ok(),
+			"an exported MOQ_CONNECT was treated as a request"
+		);
+
+		let typed = Invocation::try_parse_from(["moq", "--connect", url, "auth", "generate"]).expect("parse");
+		assert!(typed.reject("auth").is_err(), "a typed --connect stopped being refused");
 	}
 
 	#[test]

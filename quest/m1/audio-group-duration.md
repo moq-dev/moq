@@ -23,8 +23,8 @@ Decided (2026-10-04):
 - Default 0. A caller raises it, for example when its viewers already buffer
   for jitter. A longer Opus `frameDuration` (60 ms) is the no-code
   alternative; document both.
-- JS builds on the shared `Container.Legacy.Producer` from
-  [audio publish hygiene](/quest/m1/audio-publish-hygiene.md).
+- JS builds on the shared `Container.Legacy.Producer` that
+  `js/publish/src/audio/encoder.ts` already writes through.
 - Measure relay cost and loss concealment at 0, 100, and 200 ms with the
   existing relay bench, and record the numbers here. Longer groups also make
   a viewer's group skipping coarser; note it in the docs.
@@ -33,10 +33,6 @@ Follow-up decision after the measurement: whether the minimum should be
 derived from a viewer latency or jitter hint instead of set by hand. Grouping
 adds no delay normally, since frames forward within a group, and costs
 head-of-line blocking only on loss, which a buffer an RTT deep absorbs.
-
-## Required
-
-- [Audio publish hygiene](/quest/m1/audio-publish-hygiene.md) - moves JS audio onto the shared container producer
 
 ## Closes
 

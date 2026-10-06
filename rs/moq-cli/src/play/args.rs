@@ -165,6 +165,23 @@ mod tests {
 		}
 	}
 
+	/// Playback can leave a role out, but not both, and not one it also narrows.
+	#[test]
+	fn a_role_can_be_left_out() {
+		let selection = parse(&["--no-video"]).select.selection(None);
+		assert!(!selection.has_video());
+		assert!(selection.has_audio());
+
+		for refused in [
+			["--no-video", "--no-audio"].as_slice(),
+			&["--no-video", "--video-codec", "h264"],
+			&["--no-audio", "--audio-name", "stereo"],
+		] {
+			let argv: Vec<&std::ffi::OsStr> = refused.iter().map(std::ffi::OsStr::new).collect();
+			assert!(Cli::parse_from(&argv).is_err(), "{refused:?} parsed");
+		}
+	}
+
 	/// A fixed delay is the playout offset and the staleness budget at once.
 	#[test]
 	fn a_fixed_delay_sets_the_staleness_budget() {
