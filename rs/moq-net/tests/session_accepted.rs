@@ -86,6 +86,25 @@ async fn accepted_waits_for_the_server_to_admit() {
 	}
 }
 
+/// A session that closed after its SETUP arrived is no longer accepted: a caller that
+/// checks only now must not take over a dead session.
+#[tokio::test(start_paused = true)]
+async fn accepted_reports_a_close_after_the_setup() {
+	for name in LATE {
+		let (session, request) = dial(version(name)).await;
+		let (server, driver) = request.ok().await.expect("server accept failed");
+		tokio::spawn(run(driver));
+		assert!(matches!(accepted(&session).await, Some(Ok(()))), "{name}");
+
+		server.abort(Error::Unauthorized);
+		tokio::time::timeout(TIMEOUT, session.closed())
+			.await
+			.expect("the close never arrived");
+		let res = session.accepted().await;
+		assert!(res.is_err(), "{name}: a closed session reported accepted");
+	}
+}
+
 #[tokio::test(start_paused = true)]
 async fn accepted_reports_a_refusal() {
 	for name in LATE {

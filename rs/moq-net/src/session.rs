@@ -244,25 +244,27 @@ impl Session {
 
 	/// Wait until the peer accepts the session, or return its close reason if it refuses.
 	///
-	/// The peer's SETUP is its acceptance: a server sends one only once it admits the
-	/// client. [`crate::Client::connect`] returns before that on moq-lite-05+ and
-	/// moq-transport draft 17+, so a request made meanwhile may still be refused with the
-	/// session. Older versions read the SETUP during the handshake and resolve at once,
-	/// except moq-lite-03 and -04, which carry none and return [`Error::Unsupported`].
+	/// Resolves when the peer's SETUP arrives. This crate's servers send it only once
+	/// they admit the client, but neither protocol requires that ordering, so another
+	/// server may send SETUP and still refuse the session afterward.
+	/// [`crate::Client::connect`] returns before the SETUP on moq-lite-05+ and
+	/// moq-transport draft 17+. Older versions read it during the handshake and resolve
+	/// at once, except moq-lite-03 and -04, which carry none and return
+	/// [`Error::Unsupported`]. A session that already closed returns its close reason.
 	pub async fn accepted(&self) -> Result<(), Error> {
 		kio::wait(|waiter| {
-			match self.accepted.poll(waiter) {
-				Poll::Ready(true) => return Poll::Ready(Ok(())),
-				Poll::Ready(false) => return Poll::Ready(Err(Error::Unsupported)),
-				Poll::Pending => {}
-			}
 			match self.closed.poll(waiter, |state| match &**state {
 				Some(ended) => Poll::Ready(ended.err.clone()),
 				None => Poll::Pending,
 			}) {
-				Poll::Ready(Ok(err)) => Poll::Ready(Err(err)),
+				Poll::Ready(Ok(err)) => return Poll::Ready(Err(err)),
 				// The driver was dropped before it could observe the close.
-				Poll::Ready(Err(_)) => Poll::Ready(Err(Error::Cancel)),
+				Poll::Ready(Err(_)) => return Poll::Ready(Err(Error::Cancel)),
+				Poll::Pending => {}
+			}
+			match self.accepted.poll(waiter) {
+				Poll::Ready(true) => Poll::Ready(Ok(())),
+				Poll::Ready(false) => Poll::Ready(Err(Error::Unsupported)),
 				Poll::Pending => Poll::Pending,
 			}
 		})
