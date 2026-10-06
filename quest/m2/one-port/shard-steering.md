@@ -2,8 +2,9 @@
 
 ## Goal
 
-The reuseport steering filter steers QUIC by connection ID and leaves every
-other datagram to the kernel's 4-tuple hash, so an RTP, SRT, or STUN flow
+The reuseport steering filter steers a datagram by connection ID only when
+it is recognizably QUIC, and leaves every other datagram to the kernel's
+4-tuple hash, so an RTP, SRT, or STUN flow
 lands on one shard for its whole life and the demux on that shard sees all
 of it. Both reuseport groups, moq-tokio's workers and moq-uring's, get this
 from the one filter they share.
@@ -22,22 +23,37 @@ Decided 2026-10-05: its own quest, required by the
 per shard. Folding it into [the io_uring demux](/quest/m2/uring-demux.md) was
 rejected: moq-tokio's group has the same exposure.
 
-The filter tests the first byte against the QUIC ranges in the
-[questline README](/quest/m2/one-port/README.md) and returns an out-of-range
-index for anything else, which the kernel answers with its 4-tuple hash.
+Decided 2026-10-05: classify on more than the first byte and stay [S].
+Rejected: re-sizing the quest to [M] for flow state, and a userspace hand-off
+of datagrams between shards. A first byte cannot separate an SRT data packet
+whose sequence number starts in 0x40 to 0x7F from a QUIC short header, and
+that is half the initial sequence numbers an encoder may pick, but a few more
+bytes can:
 
-Open: an SRT data packet whose sequence number starts in 0x40 to 0x7F looks
-like a QUIC short header, and the byte alone cannot tell them apart. That is
-half of the initial sequence numbers an encoder may pick, so it needs flow
-state, not a better byte test. Options include a `SK_REUSEPORT` eBPF program
-with a 4-tuple map the demux fills when it pins a flow, or a shard handing a
-pinned flow's datagrams to its owner. Pick by measured cost; if neither fits
-an [S], split it out rather than shipping SRT that breaks on half its flows.
+- Long header (0x80 set): steer as QUIC only when bytes 1 to 4 are a
+  supported QUIC version (v1 `0x00000001`, v2 `0x6b3343cf`). RTP and RTCP
+  (0x80 to 0xBF) never match.
+- Short header (0x40 set, 0x80 clear): steer as QUIC only when the
+  destination connection ID carries a fixed relay magic of N bytes beside the
+  existing shard byte. This is a CID-format change: every CID the relay
+  issues, the initial source CID and every NEW_CONNECTION_ID, embeds the
+  magic. Its owner is the shard CID generator (moq-tokio's and moq-uring's
+  today, `moq-quic`'s once [quic/shard](/quest/m1/quic/shard.md) replaces
+  them). An SRT data packet false-matches with probability about 2^-8N per
+  packet (about 1e-9 for 4 bytes); a false match lands on the wrong shard
+  and is dropped, and SRT's ARQ recovers it.
+- Everything else returns an out-of-range index, which the kernel answers
+  with its 4-tuple hash.
 
-Tests: per-flow shard stability for an RTP flow, an SRT flow (including a
-sequence number in the QUIC-shaped range), and a STUN flow, each across many
-packets, through both moq-tokio's group and the `moq-sock` group directly.
-QUIC steering by connection ID is unchanged.
+Fallback: if the CID length, or a future QUIC-LB format, cannot fit the
+magic, split out `one-port/shard-flows.md` [M], an `SK_REUSEPORT` eBPF
+program with a 4-tuple map the demux fills when it pins an SRT flow,
+required by [SRT on the shared socket](/quest/m2/one-port/srt-demux.md).
+
+Tests: an RTP flow, an SRT data flow whose first byte is in 0x40 to 0x7F, a
+STUN flow, and a DTLS flow each stay on one shard across many packets,
+through both moq-tokio's group and the `moq-sock` group directly. QUIC v1
+and v2 long headers and short headers still reach their CID's shard.
 
 ## Related
 

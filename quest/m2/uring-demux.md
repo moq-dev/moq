@@ -13,6 +13,11 @@ Decided 2026-10-05: the uring workers host the demux. Rejected: keeping
 non-QUIC traffic on a separate tokio socket or port on uring nodes, which
 reverses the [one-port line](/quest/m2/one-port/README.md)'s point.
 
+Decided 2026-10-05: it ranks in m2 below the bitrate caps, not right after
+one-port. The uring rollout is a performance change and the caps are a
+customer feature, and moq.pro already ranks one-port above its uring
+rollout.
+
 Each worker's endpoint receives a batch and feeds every segment straight to
 the QUIC endpoint. The classifier and flow table from the
 [UDP demux](/quest/m2/one-port/udp-demux.md), split there into a
