@@ -6054,7 +6054,7 @@ mod tests {
 	/// Every viewer session excludes a hop of its own that no route chain names, so
 	/// they all share the plain front instead of each minting one that outlives them
 	/// for as long as the route stands (#4799). Its tracks still go with the linger.
-	#[tokio::test(start_paused = true)]
+	#[moq_net_sim::test]
 	async fn viewer_sessions_share_the_plain_front() {
 		let producer = origin(1).produce();
 		// A prefix route, which resolves any path beneath it optimistically.
@@ -6097,14 +6097,14 @@ mod tests {
 		// The front outlives its viewers while the route stands, but not their track.
 		let front = front.unwrap();
 		assert_eq!(front.open_tracks(), 1, "the unread track lingers");
-		tokio::time::sleep(track::IDLE_LINGER).await;
+		moq_net_sim::sleep(track::IDLE_LINGER).await;
 		settle(|| front.open_tracks() == 0).await;
 	}
 
 	/// A requester excluding a peer that a covering route passes through gets a front
 	/// of its own. Decided per request: a peer whose hop joins a chain after it joined
 	/// the plain front gets the filtered one on its next request.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn a_hop_in_a_chain_gets_its_own_front() {
 		let producer = origin(1).produce();
 		let _incumbent = producer
@@ -6130,7 +6130,7 @@ mod tests {
 	/// The hairpin the per-request choice accepts ends on its own. A peer still on the
 	/// plain front when the only route left runs through it gets that route, but its own
 	/// view withdraws the path, so it stops serving the path back to us.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn a_hairpin_through_the_plain_front_is_withdrawn() {
 		let producer = origin(1).produce();
 		let peer = producer.consume().excluding(origin(7));
