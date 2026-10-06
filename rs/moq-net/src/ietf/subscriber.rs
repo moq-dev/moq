@@ -229,7 +229,7 @@ enum Fill {
 	/// The tail is what ends the group, and a publisher serving the subscription's range
 	/// opens a stream for it even when the group ended at the join point, since that empty
 	/// stream is how the group ends. One that opens none instead leaves this head unfinished
-	/// until the subscription ends, which is what publishes it.
+	/// until the publisher ends the subscription, which is what publishes it.
 	///
 	/// Nothing shorter is safe to infer. A later group arriving looks like proof that no
 	/// tail is coming, but streams are independent: the tail's own can still be behind it.
@@ -283,14 +283,14 @@ impl Fill {
 	/// Install the head a finished fetch stream produced.
 	///
 	/// [`Fill::Done`] is terminal: the subscription ended while the head was being written,
-	/// and its teardown could not reach a producer the fetch stream still owned. Publish
-	/// what the head carried rather than installing it for a tail that is never coming, or
-	/// it outlives the subscription unfinished.
+	/// and its teardown could not reach a producer the fetch stream still owned. Cancel the
+	/// head rather than installing it for a tail that is never coming, or it outlives the
+	/// subscription unfinished.
 	fn install(&mut self, head: Fill) {
 		match self {
 			Fill::Done => {
 				let mut head = head;
-				head.release();
+				head.cancel();
 			}
 			_ => *self = head,
 		}
@@ -299,12 +299,22 @@ impl Fill {
 	/// Release a head nothing claimed, publishing the objects it did carry.
 	///
 	/// The tail is what normally ends the group, so this is the fallback for when none is
-	/// coming: the subscription ended, or the tail that arrived could not be stitched.
-	/// Finishing rather than aborting, because the head is a valid prefix of the group: it
-	/// starts at the group's first object and has no holes.
+	/// coming: the publisher ended the subscription, or the tail that arrived could not be
+	/// stitched. Finishing rather than aborting, because the head is a valid prefix of the
+	/// group: it starts at the group's first object and has no holes.
 	fn release(&mut self) {
 		if let Fill::Ready { producer, .. } = std::mem::replace(self, Fill::Done) {
 			let _ = producer.finish();
+		}
+	}
+
+	/// Abort a head nothing claimed because we stopped reading, not because its group ended.
+	///
+	/// The group may still be open upstream, so finishing it would cut it short for good: a
+	/// rejoin could not replace the cached group, and its readers would see it end early.
+	fn cancel(&mut self) {
+		if let Fill::Ready { producer, .. } = std::mem::replace(self, Fill::Done) {
+			let _ = producer.abort(Error::Cancel);
 		}
 	}
 }
@@ -816,9 +826,10 @@ where
 			retire_track_alias(&state.aliases, alias, request_id);
 		}
 		// The subscription is over, so the tail a fill's head was waiting for is never
-		// coming. Publish what it did carry rather than dropping the producer unfinished.
+		// coming. A publisher's clean end already published the head, so what is left was
+		// cut short by us or a failure: cancel it rather than drop the producer unfinished.
 		if let Ok(mut fill) = track.fill.write() {
-			fill.release();
+			fill.cancel();
 		}
 		Some(track)
 	}
@@ -1839,7 +1850,7 @@ where
 						.filter(|start| start.frame != 0),
 					// A resumed copy is the session's to abort from here on.
 					producer: target.producer().cloned(),
-					..TrackState::pending(track_name.to_owned(), broadcast_path.to_owned(), fill, joining)
+					..TrackState::pending(track_name.to_owned(), broadcast_path.to_owned(), fill.clone(), joining)
 				},
 			);
 		}
@@ -2000,20 +2011,21 @@ where
 			.with_timescale(Timescale::MICRO)
 			.with_max_age(max_age)
 			.with_priority(super::priority::from_wire(priority.unwrap_or(128)));
+		// The copy already holds the track: it is current again up to the answer's Largest
+		// Location once the join's head lands, since leaving cut the group it was in.
+		let mut resuming = resumed.is_some().then(|| {
+			largest.map(|largest| track::Position {
+				group: largest.group,
+				frame: largest.object,
+			})
+		});
 		let (mut track, dynamic) = match resumed {
-			// The copy already holds the track: it is current again up to the answer's
-			// Largest Location.
 			Some(idle) => {
 				if !self.state.lock().subscribes.contains_key(&request_id) {
 					// Aborted with the session while the answer was in hand.
 					return None;
 				}
-				let mut track = idle.track;
-				track.set_live(largest.map(|largest| track::Position {
-					group: largest.group,
-					frame: largest.object,
-				}));
-				(track, idle.dynamic)
+				(idle.track, idle.dynamic)
 			}
 			None => {
 				let Some(request) = self.take_pending(request_id) else {
@@ -2100,6 +2112,12 @@ where
 						return Poll::Ready(End::Fetch(request));
 					}
 					let _ = group_fetches.poll(waiter);
+					if let Some(largest) = resuming
+						&& poll_headed(&fill, waiter).is_ready()
+					{
+						track.set_live(largest);
+						resuming = None;
+					}
 					// The last subscriber left: the upstream subscription goes with it, as on
 					// lite, and the copy lingers for fetches and a returning subscriber.
 					while let Poll::Ready(Ok(subscription)) = track.poll_subscription_changed(waiter) {
@@ -2154,6 +2172,11 @@ where
 										poll_settled(&mut settle, waiter, &fill, count)
 									})
 									.await;
+									// The publisher ended without a tail for the head, so the head
+									// is the whole group.
+									if let Ok(mut fill) = fill.write() {
+										fill.release();
+									}
 								}
 								// A no-op once an END_OF_TRACK declared the end.
 								let _ = track.finish();
@@ -3168,7 +3191,7 @@ where
 			// The subscription is gone entirely, so nothing is left to hand it to.
 			Err(_) => {
 				let mut head = head;
-				head.release();
+				head.cancel();
 				return Err(Error::Dropped);
 			}
 		}
@@ -3890,6 +3913,18 @@ fn poll_settled(settle: &mut Settle, waiter: &kio::Waiter, fill: &kio::Producer<
 	// Read before the tail: Done is terminal, so the answer cannot go stale.
 	let filled = !fill.read().outstanding();
 	settle.poll(waiter, |tail| filled && count > 0 && tail.streams() >= count)
+}
+
+/// Ready once a join's head is in the copy, or none is coming.
+fn poll_headed(fill: &kio::Producer<Fill>, waiter: &kio::Waiter) -> Poll<()> {
+	let headed = fill.poll(waiter, |fill| match **fill {
+		Fill::Requested | Fill::Serving(_) | Fill::Active => Poll::Pending,
+		Fill::Ready { .. } | Fill::Done => Poll::Ready(()),
+	});
+	match headed {
+		Poll::Pending => Poll::Pending,
+		Poll::Ready(_) => Poll::Ready(()),
+	}
 }
 
 /// The track a joining FETCH serves, and the group its subscription starts at should the
@@ -7416,18 +7451,18 @@ mod stitch_tests {
 
 	/// The subscription can end while the fetch stream is still writing, and that teardown
 	/// cannot reach a producer the fetch stream still owns. The handoff has to settle it, or
-	/// the head outlives the subscription unfinished and a consumer blocks on it.
+	/// the head outlives the subscription unfinished and a consumer blocks on it. It is
+	/// cancelled rather than finished, since nothing says the group ended there.
 	#[tokio::test]
-	async fn a_head_finishing_after_teardown_is_published_not_installed() {
+	async fn a_head_finishing_after_teardown_is_cancelled_not_installed() {
 		let track = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
 			"video",
 			track::Info::default().with_timescale(Timescale::MICRO),
 		);
-		let mut consumer = track.subscribe(None);
-
 		let mut producer = track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
 		producer.write_frame(timestamp(0), b"head-0".as_slice()).unwrap();
+		let mut group = producer.consume();
 
 		// `remove_subscribe` got there first.
 		let mut fill = Fill::Done;
@@ -7438,9 +7473,27 @@ mod stitch_tests {
 		});
 		assert!(matches!(fill, Fill::Done), "Done is terminal");
 
-		let (sequence, frames) = read_group(&mut consumer).await;
-		assert_eq!(sequence, SEQUENCE);
-		assert_eq!(frames.len(), 1, "published rather than left unfinished");
+		assert!(matches!(group.read_frame().await, Err(Error::Cancel)));
+	}
+
+	/// Leaving a track while its head waits for the tail cancels that group rather than
+	/// finishing it: the group may still be open upstream, and a finished copy would cut it
+	/// short for a rejoin.
+	#[tokio::test]
+	async fn an_unclaimed_head_is_cancelled_when_the_subscription_goes() {
+		let h = Harness::new(
+			Fill::Serving(Some(Timescale::MICRO)),
+			vec![fill_stream(SEQUENCE, &[b"head-0"])],
+		);
+		let mut consumer = h.track.subscribe(None);
+
+		let mut fill = h.stream().await;
+		h.subscriber.clone().recv_fill(&mut fill).await.expect("fill");
+		let mut group = consumer.recv_group().await.unwrap().unwrap();
+		assert_eq!(group.sequence, SEQUENCE);
+
+		h.subscriber.remove_subscribe(REQUEST).expect("subscribed");
+		assert!(matches!(group.read_frame().await, Err(Error::Cancel)));
 	}
 
 	/// A publisher that serves a head and then opens a whole group for the same sequence

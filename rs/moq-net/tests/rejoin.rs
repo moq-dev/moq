@@ -176,7 +176,7 @@ async fn rejoin_skips_a_cache_kept_by_another_handle() {
 	}
 }
 
-/// A reader rejoining an open group leaves the relay holding that group whole.
+/// A reader rejoining an open group keeps reading it, and leaves the relay holding it whole.
 ///
 /// The client still holds the group's head when it rejoins, so it may ask the relay for
 /// only the rest. A later reader at the relay joins at the live edge and needs the group
@@ -199,8 +199,8 @@ async fn rejoin_mid_group_keeps_the_head_for_later_readers() {
 			let track = broadcast.create_track("video", None).unwrap();
 			broadcast.announce(Default::default()).unwrap();
 			// Left open, as a JSON snapshot group stays open for its deltas.
-			let mut group = track.append_group().unwrap();
-			group.write_frame(Timestamp::ZERO, b"a0".as_ref()).unwrap();
+			let mut open = track.append_group().unwrap();
+			open.write_frame(Timestamp::ZERO, b"a0".as_ref()).unwrap();
 
 			let version: Version = version.parse().unwrap();
 			let mut options = MockConnectOptions::new(version);
@@ -222,8 +222,8 @@ async fn rejoin_mid_group_keeps_the_head_for_later_readers() {
 			track.demand().unused().await.unwrap();
 
 			let mut rejoined = remote.track("video").unwrap().subscribe(None).await.unwrap();
-			let mut group = rejoined.recv_group().await.unwrap().unwrap();
-			assert_eq!(group.read_frame().await.unwrap().unwrap().payload, b"a0".as_ref());
+			let mut rejoined = rejoined.recv_group().await.unwrap().unwrap();
+			assert_eq!(rejoined.read_frame().await.unwrap().unwrap().payload, b"a0".as_ref());
 			track.demand().used().await.unwrap();
 
 			let later = relay.consume().request_broadcast("bench").await.unwrap();
@@ -234,6 +234,20 @@ async fn rejoin_mid_group_keeps_the_head_for_later_readers() {
 			assert!(
 				matches!(&frame, Ok(Some(frame)) if frame.payload == b"a0".as_ref()),
 				"{version}: the later reader lost the group's head: {frame:?}"
+			);
+
+			// The group stays open, so both readers get the frames written after they joined.
+			open.write_frame(Timestamp::from_millis(33).unwrap(), b"a1".as_ref())
+				.unwrap();
+			let frame = rejoined.read_frame().await;
+			assert!(
+				matches!(&frame, Ok(Some(frame)) if frame.payload == b"a1".as_ref()),
+				"{version}: the rejoined reader lost the open group: {frame:?}"
+			);
+			let frame = group.read_frame().await;
+			assert!(
+				matches!(&frame, Ok(Some(frame)) if frame.payload == b"a1".as_ref()),
+				"{version}: the later reader lost the open group: {frame:?}"
 			);
 		})
 		.await
