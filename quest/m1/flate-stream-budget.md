@@ -4,12 +4,23 @@
 
 `moq-flate` and `@moq/flate` `stream` mode refuse an append that cannot fit
 the group budget with `GroupTooLarge` and leave the log intact, compressed or
-not, as JSON streams do after #4911.
+not, as JSON streams do after #4911. A payload beyond the decoder's frame
+size limit is also refused before encoding without ending the log.
 
 ## Plan
 
 Flate's stream mode rides one group, like JSON's, so it has the same hole.
-Move the DEFLATE worst-case bound (`deflateBound`, private in each json
-package after #4911) into the flate packages and have json reuse it, so the
-bound and its tests live in one place per language. Mirror #4911's tests in
-both compression modes.
+Move the DEFLATE worst-case bound (`deflateBound` / `deflate_bound`) from json
+into flate and have json reuse it, so the bound and its tests live in one
+place per language. Rust's helper is private; JS's is exported from its
+encoder module, so expose only what json needs from flate.
+
+Check both limits before mutating the compression window. A refusal leaves
+prior records readable and allows a later fitting append; a failed write
+after encoding still aborts, as JSON does. Mirror #4911's tests in both
+compression modes, including the decoder-size refusal, and document the
+budget and refusal behavior in the flate library docs.
+
+## Required
+
+- [JSON stream budget](/quest/m1/json-stream-budget.md) - #4911 provides the preflight budget model and DEFLATE bound

@@ -21,6 +21,7 @@ not per viewer, so a single session can amplify it by naming paths.
   the front count stays bounded, and extend the origin benchmark with a
   distinct-path axis.
 
-## Related
+## Required
 
-- [Request caps](/quest/m0/request-caps.md) - bounds per-session requests; this bounds what one route can mint from them
+- [Request caps](/quest/m0/request-caps.md) - settles the refusal shapes reused here
+- [Shared fronts](/quest/m0/shared-fronts.md) - #4922 provides the per-path front model

@@ -9,7 +9,7 @@ no QUIC listener, and `web.https.root` without `web.https.listen`.
 
 ## Plan
 
-Same class of bug as the listener client CA that #4912 now refuses in
+Same class of bug as the listener client CA that #4912 proposes refusing in
 `moq_tokio::Server::build`. Audit the other TLS and listener options for
 settings that only take effect on a listener that may not exist, and refuse
 each where the config is assembled. TOML cannot express clap's `requires`, so
