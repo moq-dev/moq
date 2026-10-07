@@ -20,9 +20,9 @@ deadline yet, and Recover's entry lives in the serving copy's index (a
 different track from the one holding the group), so it moves when the route
 changes.
 
-Tests: #4950's `a_group_no_route_continues_wakes_when_its_successor_is_stamped`
-in `resume.rs`, which fails today. Extend it to the successor aborting and a
-newer group stamping the edge.
+Tests: add #4950's `a_group_no_route_continues_wakes_when_its_successor_is_stamped`
+to `resume.rs` (it would fail today), and extend it to the successor aborting
+and a newer group stamping the edge.
 
 Public API: none. Wire: none.
 
