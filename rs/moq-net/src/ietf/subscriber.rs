@@ -2763,13 +2763,12 @@ fn end_track(track: &mut track::Producer, end: u64) -> Result<(), Error> {
 	if track.final_sequence().is_some() {
 		return Ok(());
 	}
-	if let Err(err) = track.finish_at(end) {
+	// Lower groups may still be on the wire, behind the one that carried the end.
+	if let Err(err) = track.finish_at_pending(end) {
 		tracing::warn!(%err, end, "invalid END_OF_TRACK");
 		let _ = track.clone().abort(Error::ProtocolViolation);
 		return Err(Error::ProtocolViolation);
 	}
-	// Lower groups may still be on the wire, behind the one that carried the end.
-	track.set_tail_pending(true);
 	Ok(())
 }
 

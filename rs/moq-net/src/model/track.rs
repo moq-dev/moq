@@ -1696,6 +1696,17 @@ impl Producer {
 		self.modify()?.set_final(final_sequence)
 	}
 
+	/// [`Self::finish_at`] for a wire subscription that may still owe groups below the end.
+	///
+	/// The boundary and the pending tail land in one write: a reader that saw the end
+	/// without the tail would end at a hole the wire is still filling.
+	pub(crate) fn finish_at_pending(&mut self, final_sequence: u64) -> Result<()> {
+		let mut state = self.modify()?;
+		state.set_final(final_sequence)?;
+		state.tail_pending = true;
+		Ok(())
+	}
+
 	/// Whether a wire subscription still owes group streams below the declared end.
 	///
 	/// While pending, readers do not end at the boundary: a lower group's stream may
@@ -7093,8 +7104,7 @@ mod test {
 		let mut arrival = producer.subscribe(None);
 		// The wire declares where the feed starts.
 		producer.start_at(0).unwrap();
-		producer.finish_at(3).unwrap();
-		producer.set_tail_pending(true);
+		producer.finish_at_pending(3).unwrap();
 		let _high = producer.create_group(group::Info { sequence: 2 }).unwrap();
 		assert_eq!(arrival.assert_group().sequence, 2);
 		assert!(arrival.recv_group().now_or_never().is_none(), "held at the hole");
@@ -7111,8 +7121,7 @@ mod test {
 		let mut producer = track_producer("test", None);
 		let mut arrival = producer.subscribe(None);
 		producer.start_at(0).unwrap();
-		producer.finish_at(2).unwrap();
-		producer.set_tail_pending(true);
+		producer.finish_at_pending(2).unwrap();
 		let _high = producer.create_group(group::Info { sequence: 1 }).unwrap();
 		assert_eq!(arrival.assert_group().sequence, 1);
 		assert!(arrival.recv_group().now_or_never().is_none());
@@ -7123,11 +7132,36 @@ mod test {
 		let mut producer = track_producer("test", None);
 		let mut arrival = producer.subscribe(None);
 		producer.start_at(0).unwrap();
-		producer.finish_at(2).unwrap();
-		producer.set_tail_pending(true);
+		producer.finish_at_pending(2).unwrap();
 		let _high = producer.create_group(group::Info { sequence: 1 }).unwrap();
 		assert_eq!(arrival.assert_group().sequence, 1);
 		drop(producer);
+		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// The wire's end can land after the highest group, with lower groups still owed. A
+	/// reader already past that group stays held at the hole: the end never shows without
+	/// its pending tail.
+	#[moq_net_sim::test]
+	async fn an_end_after_the_highest_group_holds_the_reader() {
+		let mut producer = track_producer("test", None);
+		let mut arrival = producer.subscribe(None);
+		producer.start_at(0).unwrap();
+		let _high = producer.create_group(group::Info { sequence: 2 }).unwrap();
+		assert_eq!(arrival.assert_group().sequence, 2);
+		assert!(arrival.recv_group().now_or_never().is_none());
+
+		producer.finish_at_pending(3).unwrap();
+		assert!(arrival.recv_group().now_or_never().is_none(), "held at the hole");
+		assert!(
+			matches!(producer.finish_at_pending(2), Err(Error::Closed)),
+			"a second end is refused without touching the first"
+		);
+
+		for sequence in [0, 1] {
+			let _low = producer.create_group(group::Info { sequence }).unwrap();
+			assert_eq!(arrival.assert_group().sequence, sequence);
+		}
 		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
 	}
 
