@@ -19,9 +19,9 @@ above ([hang](/lib/rs/hang)); relays and CDNs implement only this.
 - **Broadcasts** are created unannounced and invisible to everyone, then announced as an exact route, or served below a prefix with `dynamic`. A consumer of the same origin sees exactly what a peer sees. Discovery accepts pattern unions; events carry the advertised prefix and captures for a complete match.
 - **Epochs** identify publisher instances with a canonical UUIDv7 carried on each route (`Route::epoch`): the newest wins a path, and only routes with the same epoch resume a subscription; see [publisher epochs](/concept/moq-lite#publisher-epochs).
 - **Patterns** (`Pattern`, `Patterns`) are re-exported from [`moq-pattern`](https://docs.rs/moq-pattern). Literal `Path` stays a coordinate.
-- **Tracks** carry groups with a priority, an optional publisher retention window (`Info::max_age`), and a timescale. Subscribers set their own priority and max age and can change them live.
+- **Tracks** carry groups with a priority, an optional publisher retention window (`Info::max_age`), and a timescale. Subscribers set their own priority and max delay and can change them live.
 - **Groups** are written frame by frame and delivered on independent streams. Old groups are cached for fetch-by-sequence; stale groups are skipped per the subscriber's budget.
-- **Track ends**: `finish()` ends a track at its live edge, while `finish_at(n)` declares the exclusive end ahead of it and still accepts the groups below. A subscriber awaits it with `finished()`. A remote track ends only once every group below its end has arrived or was dropped; one reset before its header arrived is skipped after the subscription's max age on moq-lite (one second without one), or after one second on IETF.
+- **Track ends**: `finish()` ends a track at its live edge, while `finish_at(n)` declares the exclusive end ahead of it and still accepts the groups below. A subscriber awaits it with `finished()`. A remote track ends only once every group below its end has arrived or was dropped; one reset before its header arrived is skipped after the subscription's max delay on moq-lite (one second without one), or after one second on IETF.
 - **Datagrams** send a single small frame unreliably on moq-lite 05+ and moq-transport.
 - **Routes** record the relay hops and a cost, which is what the relay [cluster](/bin/relay/cluster) routes on. A hop of 0 marks the chain anonymous: `Route::is_anonymous()` is true, and that route ranks below every fully identified one. `Route::source()` says where a delivered route entered: `Source::Local`, or `Source::Peer(hop)` when a handle marked `origin::Producer::peer()` announced it. `origin::Consumer::local()` sees only the local ones. A handle marked `origin::Producer::upstream()` announces as a peer, and a consumer taken from it never sees a route another upstream handle announced, so a relay never transits between two upstream links.
 - **Stats** counters per broadcast and session, drained by [`moq-stats`](https://docs.rs/moq-stats).
@@ -182,7 +182,7 @@ for hidden routes, so each local consumer decides.
 
 Use `Subscription::default().with_groups(2..=5)` to request only groups 2
 through 5. `2..5` excludes group 5, and `..` leaves both ends unbounded.
-The range limits the data eligible under the subscription's max-age budget;
+The range limits the data eligible under the subscription's max delay budget;
 it does not fetch historical data by itself.
 
 A reader's `set_groups(2..=5)` applies a local limit. It preserves read

@@ -20,7 +20,7 @@ use crate::container::test_util::{IDR, Live, PPS, SPS, raw_frame, video_frame};
 /// export it, which the exporter's default
 /// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) collapses to the live edge:
 /// completeness has to be asked for, exactly as a real recorder does.
-const RECORDING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+const RECORDING_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[tokio::test(start_paused = true)]
 async fn export_header_roundtrip_vp9_opus() {
@@ -377,7 +377,7 @@ async fn export_emits_blocks_for_each_frame() {
 		// Use per-frame clustering so each frame is observable as its own
 		// Cluster chunk; batching is exercised in a dedicated test below.
 		.with_fragment_duration(std::time::Duration::ZERO)
-		.with_max_age(RECORDING_MAX_AGE);
+		.with_max_delay(RECORDING_MAX_DELAY);
 	let mut exported: Vec<u8> = Vec::new();
 
 	let mut importer = Some(importer);
@@ -616,7 +616,7 @@ async fn export_fragment_duration_batches_blocks() {
 		.expect("catalog consumer");
 	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer), catalog_stream)
 		.with_fragment_duration(std::time::Duration::from_secs(2))
-		.with_max_age(RECORDING_MAX_AGE);
+		.with_max_delay(RECORDING_MAX_DELAY);
 	let mut exported: Vec<u8> = Vec::new();
 
 	let mut importer = Some(importer);

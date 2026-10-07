@@ -1,5 +1,5 @@
 //! A subscriber with an explicit floor receives a group created below the first group
-//! that was served, while it is still inside `max_age`.
+//! that was served, while it is still inside `max_delay`.
 //!
 //! An unfloored pre-06 subscribe joins where the publisher starts, so that same group
 //! is dropped. Lite-06 and later encode a floor of group 0 as 0, which is the only
@@ -105,7 +105,7 @@ async fn session(version: &str, relay: bool, start: Option<Position>) -> Vec<(u6
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
-	let subscription = Subscription::default().with_max_age(BUDGET).with_start(start);
+	let subscription = Subscription::default().with_max_delay(BUDGET).with_start(start);
 	let reader = moq_net_sim::spawn(async move {
 		let mut sub = remote
 			.track("late")
@@ -142,7 +142,7 @@ async fn in_process(start: Option<Position>) -> Vec<(u64, usize)> {
 	let track = broadcast
 		.create_track("late", Info::default().with_max_age(FOREVER))
 		.unwrap();
-	let subscription = Subscription::default().with_max_age(BUDGET).with_start(start);
+	let subscription = Subscription::default().with_max_delay(BUDGET).with_start(start);
 	let mut sub = track.subscribe(subscription);
 	let reader = moq_net_sim::spawn(async move { read_all(&mut sub).await });
 	moq_net_sim::sleep(Duration::from_millis(10)).await;
@@ -225,7 +225,7 @@ async fn a_relayed_explicit_floor_survives_an_unfloored_subscriber() {
 		.expect("announce timeout")
 		.unwrap();
 	let remote = consumer.request_broadcast("bcast").await.unwrap();
-	let unfloored_sub = Subscription::default().with_max_age(BUDGET);
+	let unfloored_sub = Subscription::default().with_max_delay(BUDGET);
 	let reader = moq_net_sim::spawn(async move {
 		let mut sub = remote.track("late").unwrap().subscribe(unfloored_sub).await.unwrap();
 		let mut group = moq_net_sim::timeout(TIMEOUT, sub.recv_group())
@@ -258,7 +258,7 @@ async fn a_relayed_explicit_floor_survives_an_unfloored_subscriber() {
 	consumer.routed("bcast").await.unwrap();
 	let remote = consumer.request_broadcast("bcast").await.unwrap();
 	let floored_sub = Subscription::default()
-		.with_max_age(BUDGET)
+		.with_max_delay(BUDGET)
 		.with_start(Position::group(0));
 	let floored_reader = moq_net_sim::spawn(async move {
 		let mut sub = remote.track("late").unwrap().subscribe(floored_sub).await.unwrap();

@@ -7,7 +7,7 @@ import { Milli } from "./time.ts";
  *
  * A group reset before its header arrived leaves no trace, and QUIC does not order streams,
  * so a stream opened before the end can still be in flight after it. This bounds the wait on
- * IETF, and on moq-lite when the subscription has no max age to bound it with.
+ * IETF, and on moq-lite when the subscription has no max delay to bound it with.
  */
 export const TAIL_GRACE_MS = Milli(1000);
 
