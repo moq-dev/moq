@@ -47,9 +47,9 @@ pub struct Config {
 
 	/// How long a play's FLV muxer waits for a stalled group before skipping to a
 	/// newer one (the moq-level frame-drop latency). Defaults to
-	/// [`DEFAULT_MAX_AGE`](crate::DEFAULT_MAX_AGE); set [`Duration::ZERO`]
+	/// [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY); set [`Duration::ZERO`]
 	/// to drop stale groups aggressively. Only affects egress (plays); ingest ignores it.
-	pub export_max_age: Duration,
+	pub export_max_delay: Duration,
 
 	/// How long relays keep a non-latest group of an ingested media track fetchable, or
 	/// `None` for hang's own default.
@@ -89,7 +89,7 @@ impl Default for Config {
 		Self {
 			listen: None,
 			prefix: Path::empty().to_owned(),
-			export_max_age: crate::DEFAULT_MAX_AGE,
+			export_max_delay: crate::DEFAULT_MAX_DELAY,
 			import_max_age: None,
 			#[cfg(feature = "tls")]
 			tls: None,
@@ -147,7 +147,7 @@ pub async fn run(origin: origin::Producer, config: Config) -> Result<()> {
 	// listeners share the same claim table.
 	let active = config.active.clone();
 	let prefix = config.prefix;
-	let export_max_age = config.export_max_age;
+	let export_max_delay = config.export_max_delay;
 	let import_max_age = config.import_max_age;
 	// Players are served out of the same origin the publishers write into.
 	let consumer = origin.consume();
@@ -191,7 +191,7 @@ pub async fn run(origin: origin::Producer, config: Config) -> Result<()> {
 						let _ = play.reject("missing broadcast path (RTMP app/key)").await;
 						return;
 					};
-					if let Err(err) = play.with_max_age(export_max_age).accept(&consumer, &path).await {
+					if let Err(err) = play.with_max_delay(export_max_delay).accept(&consumer, &path).await {
 						tracing::warn!(%peer, %path, %err, "RTMP play ended with error");
 					}
 				});

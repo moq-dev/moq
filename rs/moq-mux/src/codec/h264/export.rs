@@ -26,7 +26,7 @@ use crate::container::ExportSource;
 pub struct Export<S: Stream> {
 	source: crate::Source,
 	catalog: Option<S>,
-	max_age: std::time::Duration,
+	max_delay: std::time::Duration,
 	track: Option<H264Track>,
 }
 
@@ -60,18 +60,18 @@ impl<S: Stream> Export<S> {
 		Self {
 			source,
 			catalog: Some(catalog),
-			max_age: std::time::Duration::ZERO,
+			max_delay: std::time::Duration::ZERO,
 			track: None,
 		}
 	}
 
-	/// Set the max age for the per-track source.
+	/// Set the max delay for the per-track source.
 	///
 	/// See [`Consumer`](crate::container::Consumer) for the per-track skip behavior.
 	/// Defaults to
 	/// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) (skip aggressively).
-	pub fn with_max_age(mut self, max_age: std::time::Duration) -> Self {
-		self.max_age = max_age;
+	pub fn with_max_delay(mut self, max_delay: std::time::Duration) -> Self {
+		self.max_delay = max_delay;
 		self
 	}
 
@@ -153,7 +153,7 @@ impl<S: Stream> Export<S> {
 			return Ok(());
 		}
 
-		let Some(source) = ExportSource::for_video_raw(&self.source, name, config, self.max_age)? else {
+		let Some(source) = ExportSource::for_video_raw(&self.source, name, config, self.max_delay)? else {
 			unreachable!("invalid broadcast references were removed above");
 		};
 		let convert = match config.description.as_ref().filter(|d| !d.is_empty()) {
@@ -294,7 +294,7 @@ mod tests {
 		// The whole track is written before the exporter runs, so it needs a budget
 		// wide enough to read it: the default skips everything but the live edge.
 		let mut export = Export::new(crate::source::announced(&consumer), Once(Some(catalog)))
-			.with_max_age(std::time::Duration::from_secs(30));
+			.with_max_delay(std::time::Duration::from_secs(30));
 
 		let frame0 = export.next().await.unwrap().expect("first frame");
 		let frame1 = export.next().await.unwrap().expect("second frame");

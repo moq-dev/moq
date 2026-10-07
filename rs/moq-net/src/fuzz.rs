@@ -344,7 +344,7 @@ impl LiteSample {
 				broadcast: Path::new("room/alice"),
 				track: "video".into(),
 				priority: 2,
-				max_age: std::time::Duration::from_secs(10),
+				max_delay: std::time::Duration::from_secs(10),
 				start_group: None,
 				end_group: None,
 				start_frame: 0,
@@ -528,7 +528,7 @@ impl Default for Messages {
 				broadcast: Path::new("room/alice"),
 				track: "video".into(),
 				priority: 3,
-				max_age: Duration::from_millis(500),
+				max_delay: Duration::from_millis(500),
 				start_group: Some(1_000),
 				end_group: None,
 				start_frame: 0,
@@ -536,7 +536,7 @@ impl Default for Messages {
 			},
 			lite_update: lite::SubscribeUpdate {
 				priority: 4,
-				max_age: Duration::from_millis(500),
+				max_delay: Duration::from_millis(500),
 				start_group: Some(1_000),
 				end_group: Some(2_000),
 				start_frame: 0,
@@ -1111,7 +1111,7 @@ struct Chunks {
 	ready: bool,
 }
 
-impl web_transport_trait::poll::RecvStream for Chunks {
+impl crate::transport::poll::RecvStream for Chunks {
 	type Error = NoError;
 
 	fn poll_read(
@@ -1164,7 +1164,7 @@ impl std::fmt::Display for NoError {
 
 impl std::error::Error for NoError {}
 
-impl web_transport_trait::Error for NoError {
+impl crate::transport::Error for NoError {
 	fn session_error(&self) -> Option<(u32, String)> {
 		None
 	}

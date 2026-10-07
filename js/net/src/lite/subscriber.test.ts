@@ -1,15 +1,16 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import * as Epoch from "../epoch.ts";
 import { error, fromTransport, reason, StreamCode, StreamError } from "../error.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
-import { Writer } from "../stream.ts";
+import { type Reader, Writer } from "../stream.ts";
 import * as Time from "../time.ts";
 import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
+import { Group } from "./group.ts";
 import { Probe } from "./probe.ts";
-import { Subscriber } from "./subscriber.ts";
+import { SUBSCRIBE_SETUP_TIMEOUT_MS, Subscriber } from "./subscriber.ts";
 import { TrackInfo } from "./track.ts";
 import { Version } from "./version.ts";
 
@@ -785,6 +786,8 @@ interface FakeStream {
 	// Resolves once the subscriber waits on a read the test has not answered.
 	reading: Promise<void>;
 	aborted: Promise<unknown>;
+	// Every chunk the subscriber wrote.
+	written: Uint8Array[];
 	// Hands the stream to the subscriber, for an open the session was told to park.
 	release: () => void;
 }
@@ -811,10 +814,14 @@ function fakeSession(park: number[] = []) {
 				},
 				{ highWaterMark: 0 },
 			);
-			const writable = new WritableStream<Uint8Array>({ abort: (reason) => void onAbort(reason) });
+			const written: Uint8Array[] = [];
+			const writable = new WritableStream<Uint8Array>({
+				write: (chunk) => void written.push(chunk),
+				abort: (reason) => void onAbort(reason),
+			});
 			const opened = new Promise((resolve) => (release = () => resolve({ readable, writable })));
 			if (!park.includes(streams.length)) release();
-			streams.push({ inbound, reading, aborted, release });
+			streams.push({ inbound, reading, aborted, written, release });
 			return opened;
 		},
 	} as unknown as WebTransport;
@@ -880,6 +887,86 @@ test.each([
 	const stuck = streams[stage === "track" ? 0 : 1];
 	stuck.release();
 	await stuck.aborted;
+});
+
+// A setup that outlived its deadline is over: its TRACK stream is reset, even one still waiting for a
+// slot, and the subscription is neither registered again nor sent as a SUBSCRIBE.
+test.each([
+	["lite-05 subscribe waiting on the TRACK_INFO", Version.DRAFT_05, false],
+	["lite-06 subscribe waiting on the TRACK_INFO", Version.DRAFT_06, false],
+	["lite-07 subscribe waiting on the TRACK_INFO", Version.DRAFT_07, false],
+	["lite-05 subscribe waiting on a stream slot for the TRACK", Version.DRAFT_05, true],
+] as const)("a %s that times out leaves nothing behind", async (_, version, parked) => {
+	jest.useFakeTimers();
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const { quic, streams } = fakeSession(parked ? [0] : []);
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	try {
+		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+		await drainUntil(() => streams.length === 1);
+		if (!parked) await streams[0].reading;
+
+		jest.advanceTimersByTime(SUBSCRIBE_SETUP_TIMEOUT_MS);
+		await drainUntil(() => track.closed.peek() !== undefined);
+
+		let aborted = false;
+		void streams[0].aborted.then(() => {
+			aborted = true;
+		});
+		if (parked) streams[0].release();
+		await drainUntil(() => aborted);
+		expect(aborted).toBe(true);
+		expect(streams.length).toBe(1);
+
+		// A GROUP for a forgotten id is ignored without touching its stream.
+		const touched: PropertyKey[] = [];
+		const reader = new Proxy({} as Reader, {
+			get: (_, key) => {
+				touched.push(key);
+				return () => {};
+			},
+		});
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0 }), reader);
+		expect(touched).toEqual([]);
+	} finally {
+		subscriber.close();
+		warn.mockRestore();
+		jest.useRealTimers();
+	}
+});
+
+// The SUBSCRIBE stream can open after the deadline too; it is reset without carrying a SUBSCRIBE.
+test("a lite subscribe that times out waiting on a stream slot for the SUBSCRIBE sends nothing on it", async () => {
+	jest.useFakeTimers();
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const { quic, streams } = fakeSession([1]);
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	try {
+		const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+		await drainUntil(() => streams.length === 1);
+		await streams[0].reading;
+		// TRACK_INFO lands halfway, so the SUBSCRIBE open's own deadline is still ahead when the
+		// setup deadline fires.
+		jest.advanceTimersByTime(SUBSCRIBE_SETUP_TIMEOUT_MS / 2);
+		await answerTrackInfo(streams[0]);
+		await drainUntil(() => streams.length === 2);
+
+		jest.advanceTimersByTime(SUBSCRIBE_SETUP_TIMEOUT_MS / 2);
+		await drainUntil(() => track.closed.peek() !== undefined);
+
+		let aborted = false;
+		void streams[1].aborted.then(() => {
+			aborted = true;
+		});
+		streams[1].release();
+		await drainUntil(() => aborted);
+		expect(aborted).toBe(true);
+		expect(streams[1].written).toEqual([]);
+	} finally {
+		subscriber.close();
+		warn.mockRestore();
+		jest.useRealTimers();
+	}
 });
 
 test("a fetch started after the subscriber closes rejects without opening a stream", async () => {

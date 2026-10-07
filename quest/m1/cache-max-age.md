@@ -119,7 +119,7 @@ encoding change; Max Age semantics in the lite draft change.
 
 ## Related
 
-- [Subscriber max-delay](/quest/m1/subscriber-max-delay.md) - renames the subscriber budget to `max_delay`; the rule applies under either name
+- [Subscriber max-delay](https://github.com/moq-dev/moq/pull/4917) - renames the subscriber budget to `max_delay`; the rule applies under either name
 - [JS track handover](/quest/m1/js-group-handover.md) - mirrors the failover rule in JS
 - [Cache expiry growth](/quest/m1/cache-expiry-growth.md) - relay memory past the expiry window, in the same cache
 - [Cache shard](/quest/m2/cache-shard.md) - the pool's shared counters under many workers
