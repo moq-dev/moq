@@ -60,6 +60,17 @@ any `FETCH` on draft-20 and later, which moved the range into
 `LOCATION_FILTER`. A standalone `FETCH`
 carries no timestamps, since no `SUBSCRIBE_OK` declared a timescale for it.
 
+A Rust subscriber learns a track that is only fetched, never subscribed, from
+`TRACK_STATUS` instead of a `SUBSCRIBE`, so a finished track stays fetchable
+and a relay puts no live subscription upstream to race its fetches. A
+publisher that refuses `TRACK_STATUS` with `NOT_SUPPORTED` gets the
+`SUBSCRIBE` instead. The Rust publisher answers `TRACK_STATUS` with what its
+`SUBSCRIBE_OK` would carry, as far as the draft's answer has room: the Largest
+Location on every draft, and the Track Properties from draft-18, when the
+answer gained them. A `SUBSCRIBE` that sets `INCLUDE_PROPERTIES` to 0 gets an
+empty properties block, but its objects keep their Timestamps, whose units
+`TRACK_STATUS` reports.
+
 On drafts 14–19, the Rust publisher also serves relative and absolute joining
 `FETCH` requests for `NextObject` subscriptions, for the subscription group's
 saved prefix only, while the subscription delivers later objects. One reaching
@@ -91,7 +102,7 @@ A legal request that is not served is refused on its own with `NOT_SUPPORTED`,
 leaving the session open: a `SUBSCRIBE` with `FORWARD=0`, a `SUBSCRIBE` or
 `FETCH` carrying Range Filters (no `MAX_FILTER_RANGES` is advertised), a
 `FETCH` carrying `FILL_TIMEOUT` (Timed-Out gaps are not written),
-`TRACK_STATUS`, `SUBSCRIBE_TRACKS` (draft-18 and later), and the `FETCH`
+`TRACK_STATUS` to a JavaScript publisher, `SUBSCRIBE_TRACKS` (draft-18 and later), and the `FETCH`
 forms above. `NEW_GROUP_REQUEST` is ignored, as
 the draft allows a publisher without dynamic groups to do. A parameter the
 negotiated draft does not define still closes the session with

@@ -51,4 +51,4 @@ the block. Interop: run `just test interop --all`.
 
 ## Related
 
-- [Fetch without SUBSCRIBE](/quest/m1/ietf-fetch-only.md) - asks TRACK_STATUS for the same properties when a publisher omits them
+- [Properties opt-out](/quest/m1/ietf-properties-opt-out.md) - our subscriber opting out of these properties, to learn them from TRACK_STATUS instead

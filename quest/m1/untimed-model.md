@@ -113,10 +113,10 @@ Things to look out for:
 
   Media consumers that need a time refuse an untimed frame, except for the
   end-marker rule above.
-- A FETCH learns track units from SUBSCRIBE_OK (a joining or fill FETCH).
-  A standalone FETCH that learns none when it is accepted is untimed (decided
+- A FETCH learns track units from SUBSCRIBE_OK (a joining or fill FETCH), and
+  fetch-only demand from the TRACK_STATUS_OK its track is accepted with. A
+  standalone FETCH that learns none when it is accepted is untimed (decided
   2026-10-05), until [FETCH_OK properties](/quest/m1/fetch-ok-properties.md)
-  or TRACK_STATUS ([Fetch without SUBSCRIBE](/quest/m1/ietf-fetch-only.md))
   carry them. Test that a track accepted with units still yields
   timestamps, alongside the untimed cases.
 - Which objects the malformed rule covers. Status-only objects (End of
@@ -157,7 +157,6 @@ published drafts change as the timestamp draft says.
 
 ## Related
 
-- [Fetch without SUBSCRIBE](/quest/m1/ietf-fetch-only.md) - opting out of properties today falls back to arrival time
 - [Publisher timeliness](/quest/m1/qos/publisher-timeliness.md) - relay ingest measures arrival minus timestamp, and must skip untimed frames
 - [One max_age meaning](/quest/m1/cache-max-age.md) - gives untimed groups a wall-clock staleness rule, fixes the failover stall this introduces, and replaces the latest-group start
 - [Translator](/quest/m1/rs2ts/translator.md) - flags the nested `Option` in first-start resolution this touches
