@@ -30,4 +30,4 @@ catalog-derived record, so an encoder that restarts with a new SPS can return.
 
 ## Required
 
-- [mp4-atom avc3](/quest/m1/mp4-atom-avc3.md) - mp4-atom can encode an avc3 sample entry
+- [Bump mp4-atom for avc3](/quest/m1/mp4-atom-avc3-bump.md) - mp4-atom can encode an avc3 sample entry

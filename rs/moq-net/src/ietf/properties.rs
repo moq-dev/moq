@@ -56,18 +56,23 @@ pub struct Properties {
 }
 
 impl Properties {
+	/// Whether [`Self::encode`] writes a TIMESCALE on this version.
+	///
+	/// Drafts 14-16 do not. 14 and 15 have no properties block, and 16's Track Extensions
+	/// predate the TIMESCALE registration; an older peer rejects trailing bytes it does not
+	/// parse. A Timestamp on those drafts would have no units. Draft-16 is still read, so a
+	/// peer that sends the block is understood.
+	pub(crate) fn sends_timescale(version: Version) -> bool {
+		!matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+	}
+
 	/// Write the block, which is the final field of the message: no count and no length,
 	/// so the caller must not append anything after it.
 	///
 	/// Properties are serialized in ascending order by type, delta-encoded.
 	pub fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		// Draft-16 carries the same block under the name Track Extensions, but we only write it
-		// from draft-17 on: a draft-16 peer running an older build of this crate rejects any
-		// trailing bytes it doesn't parse, and draft-16 never registered TIMESCALE (0x08). We
-		// still read the block on draft-16, so a peer that sends one is understood.
-		match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => return Ok(()),
-			_ => {}
+		if !Self::sends_timescale(version) {
+			return Ok(());
 		}
 
 		let mut prev_type = 0;
@@ -295,6 +300,26 @@ mod tests {
 		let properties = crate::coding::decode_buf(&mut bytes, Version::Draft16, Properties::decode).unwrap();
 		assert_eq!(properties.group_order, Some(GroupOrder::Descending));
 		assert!(bytes.is_empty());
+	}
+
+	/// Drafts 14-16 cannot carry TIMESCALE, so the block (and any Timestamp that would
+	/// depend on it) stays off the wire. Draft-17 is the first version that writes it.
+	#[test]
+	fn drafts_14_through_16_write_no_timescale() {
+		let properties = Properties {
+			max_cache_duration: None,
+			timescale: Some(Timescale::MILLI),
+			priority: None,
+			group_order: None,
+		};
+
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
+			let mut buf = Vec::new();
+			properties
+				.encode(&mut Encoder::new(&mut buf, version.into()), version)
+				.unwrap();
+			assert_eq!(!buf.is_empty(), Properties::sends_timescale(version), "{version}");
+		}
 	}
 
 	/// The group order property is delta-encoded against the timescale that precedes it,

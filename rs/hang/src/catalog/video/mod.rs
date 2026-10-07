@@ -106,6 +106,13 @@ impl Video {
 		self.renditions.remove(name)
 	}
 
+	/// True when there are no renditions, so the section can be omitted from the catalog.
+	///
+	/// Display, rotation, and flip ride this section, so they are omitted too when nothing is published.
+	pub fn is_empty(&self) -> bool {
+		self.renditions.is_empty()
+	}
+
 	/// Iterate the renditions best first: enabled, then largest picture, then highest bitrate.
 	///
 	/// A consumer that carries one rendition takes the first it supports, so the

@@ -91,8 +91,10 @@ pub struct Info {
 	///
 	/// Every track is timed; this defaults to [`Timescale::MILLI`]. On Lite05+ it is
 	/// reported in TRACK_INFO and the publisher zigzag-delta encodes per-frame
-	/// timestamps at this scale on the wire. Protocols whose wire can't carry it
-	/// (pre-Lite05 moq-lite, IETF moq-transport) fall back to local monotonic milliseconds.
+	/// timestamps at this scale on the wire. IETF draft-17 and later carry the same
+	/// value as the TIMESCALE track property, and object Timestamps use these units.
+	/// A wire that cannot carry it (pre-Lite05 moq-lite, IETF drafts 14-16) sends no
+	/// timestamps, and the receiver falls back to local monotonic milliseconds.
 	pub timescale: Timescale,
 	/// How far behind the live edge a group may fall, in media timestamps, before it
 	/// is stale. The newest group is always retained.

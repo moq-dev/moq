@@ -22,7 +22,11 @@ Use different names for these different roles rather than rename both.
 - Rename subscriber/export staleness CLI flags from `--max-age` to
   `--max-delay`, except T-STD export, whose own quest unifies presentation
   and staleness under `--delay`. Keep `moq play --delay` unchanged.
-  Publisher/import retention remains `--max-age`.
+  Publisher/import retention remains `--max-age`. flv and mkv take the
+  rename here and move to `--delay` later, in
+  [FLV export delay](/quest/m1/flv-export-delay.md) and
+  [MKV export delay](/quest/m1/mkv-export-delay.md) (decided in the
+  2026-10-06 audit).
 - Keep the wire field identifiers, encoding, and interpretation unchanged.
   Describe subscriber staleness consistently in the matching draft and docs;
   a terminology edit must not accidentally rename the publisher's field.

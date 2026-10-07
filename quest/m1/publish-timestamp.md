@@ -24,9 +24,10 @@ fill `Timestamp::now()` (moq-net's clock, not the broadcast's), and moq-mux's
 data producers fill the broadcast clock's `now()`. The FFI raw
 `MoqFrame.timestamp_us` and `MoqDatagram.timestamp_us` default to 0.
 
-- `moq_net::Timed` takes the shape [Typed
-  timedness](/quest/m1/typed-timedness.md) settles, without its clock
-  parameter `T`. Timedness is per track there (decided 2026-10-05), so an
+- `moq_net::Timed` drops its unused clock parameter `T` (decided 2026-10-06:
+  here rather than in #4822, which is already large). That's a breaking
+  change and gets an upgrade note. Timedness is per track
+  ([untimed model](/quest/m1/untimed-model.md), decided 2026-10-05), so an
   untimed payload belongs on an untimed track, and one appended to a timed
   track is refused. The json/flate consumers return the same type
   (see [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md)).
@@ -58,9 +59,9 @@ with the untimed implementation quests.
 
 ## Required
 
-- [JSON and flate namespaces](/quest/m1/ffi-shape/json.md) - moves the data producers this changes, so the two breaks land in order rather than colliding
 - [moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md) - the model must hold an untimed payload before producers stop filling in now; until lite-07 encodes absence, a lite encoder writes its send time, as producers effectively do today
 
 ## Related
 
 - [JS publishing never invents a timestamp](/quest/m1/js-publish-timestamp.md) - the same change in the JS packages
+- [FFI shape](/quest/m1/ffi-shape/README.md) - moves the data producers this changes into `json` and `flate` namespaces in the same merge, so this is ready once #4519 lands rather than waiting on the codec child (2026-10-06 audit)

@@ -31,15 +31,17 @@ pub struct Catalog<E = ()> {
 	/// Video track information with multiple renditions.
 	///
 	/// Contains a map of video track renditions that the viewer can choose from
-	/// based on their preferences (resolution, bitrate, codec, etc).
-	#[serde(default)]
+	/// based on their preferences (resolution, bitrate, codec, etc). Omitted from the
+	/// wire when it has no renditions.
+	#[serde(default, skip_serializing_if = "Video::is_empty")]
 	pub video: Video,
 
 	/// Audio track information with multiple renditions.
 	///
 	/// Contains a map of audio track renditions that the viewer can choose from
-	/// based on their preferences (codec, bitrate, language, etc).
-	#[serde(default)]
+	/// based on their preferences (codec, bitrate, language, etc). Omitted from the
+	/// wire when it has no renditions.
+	#[serde(default, skip_serializing_if = "Audio::is_empty")]
 	pub audio: Audio,
 
 	/// Each track's timeline and any durable archive, if the publisher offers them.
@@ -541,11 +543,40 @@ mod test {
 
 	#[test]
 	fn empty_text_section_omitted() {
-		// A catalog without captions must stay byte-identical to before the text section existed:
-		// the empty section is skipped, unlike the always-present video/audio sections.
+		// A catalog without captions omits the text section, as it does for empty video and audio.
 		let catalog = Catalog::<()>::default();
 		let output = catalog.to_json().expect("failed to encode");
 		assert!(!output.contains("text"), "empty text section leaked: {output}");
+	}
+
+	#[test]
+	fn empty_video_and_audio_sections_omitted() {
+		// A data-only broadcast must not advertise media it does not have. An old publisher's
+		// empty objects still decode, and a republish drops them.
+		assert_eq!(Catalog::<()>::default().to_json().expect("failed to encode"), "{}");
+
+		let mut audio_only = Catalog::<()>::default();
+		audio_only
+			.audio
+			.insert("audio", AudioConfig::new(Opus, 48_000, 2))
+			.unwrap();
+		let output = audio_only.to_json().expect("failed to encode");
+		assert!(output.contains("\"audio\""), "audio section missing: {output}");
+		assert!(!output.contains("\"video\""), "empty video section leaked: {output}");
+
+		let mut video_only = Catalog::<()>::default();
+		video_only.video.display = Some(crate::catalog::Display { width: 16, height: 9 });
+		assert_eq!(
+			video_only.to_json().expect("failed to encode"),
+			"{}",
+			"display without a rendition must not keep an empty video section"
+		);
+
+		let legacy = Catalog::<()>::from_str(r#"{"video":{"renditions":{}},"audio":{"renditions":{}}}"#)
+			.expect("failed to decode");
+		assert!(legacy.video.is_empty());
+		assert!(legacy.audio.is_empty());
+		assert_eq!(legacy.to_json().expect("failed to encode"), "{}");
 	}
 
 	#[test]
@@ -613,6 +644,8 @@ mod test {
 			encoded.contains(r#""role":"commentary""#),
 			"unknown role was not preserved: {encoded}"
 		);
+		assert!(!encoded.contains("\"video\""), "empty video section leaked: {encoded}");
+		assert!(!encoded.contains("\"audio\""), "empty audio section leaked: {encoded}");
 	}
 
 	/// A section name is only reserved from the version that defines it, and `json` and `binary` are
@@ -645,10 +678,9 @@ mod test {
 
 	#[test]
 	fn data_sections_stay_off_the_wire_when_empty() {
-		// A media-only catalog must serialize exactly as it did before the data sections existed,
-		// or every existing publisher's bytes change.
+		// Empty sections stay off the wire, video and audio included.
 		let output = Catalog::<()>::default().to_json().expect("failed to encode");
-		assert_eq!(output, r#"{"video":{"renditions":{}},"audio":{"renditions":{}}}"#);
+		assert_eq!(output, "{}");
 	}
 
 	#[test]
@@ -670,9 +702,9 @@ mod test {
 
 	#[test]
 	fn clock_stays_off_the_wire_when_absent() {
-		// A catalog without a clock serializes exactly as before the section existed.
+		// Absent clock stays off the wire. Empty video and audio are omitted as well.
 		let output = Catalog::<()>::default().to_json().expect("failed to encode");
-		assert_eq!(output, r#"{"video":{"renditions":{}},"audio":{"renditions":{}}}"#);
+		assert_eq!(output, "{}");
 	}
 
 	#[test]
@@ -741,8 +773,6 @@ mod test {
 	#[test]
 	fn data_tracks_roundtrip() {
 		let mut encoded = r#"{
-			"video": {"renditions": {}},
-			"audio": {"renditions": {}},
 			"json": {
 				"tracks": {
 					"chat": {
@@ -794,7 +824,7 @@ mod test {
 	/// media.
 	#[test]
 	fn data_track_bitrate_and_jitter() {
-		let encoded = r#"{"video":{"renditions":{}},"audio":{"renditions":{}},"json":{"tracks":{"gps":{"mode":"stream","bitrate":8000,"jitter":100,"delay":250}}},"binary":{"tracks":{"frames":{"mode":"snapshot","bitrate":64000,"jitter":34}}}}"#;
+		let encoded = r#"{"json":{"tracks":{"gps":{"mode":"stream","bitrate":8000,"jitter":100,"delay":250}}},"binary":{"tracks":{"frames":{"mode":"snapshot","bitrate":64000,"jitter":34}}}}"#;
 
 		let mut gps = JsonConfig::new(Mode::Stream);
 		gps.bitrate = Some(8_000);
@@ -843,7 +873,8 @@ mod test {
 			mavlink: BTreeMap<String, Mavlink>,
 		}
 
-		let encoded = r#"{"video":{"renditions":{}},"audio":{"renditions":{}},"com.example.mavlink":{"telemetry":{"config":{"mode":"stream","compression":"deflate"},"sysid":1}}}"#;
+		let encoded =
+			r#"{"com.example.mavlink":{"telemetry":{"config":{"mode":"stream","compression":"deflate"},"sysid":1}}}"#;
 
 		let catalog = Catalog::<Ext>::from_str(encoded).unwrap();
 		let entry = &catalog.ext.mavlink["telemetry"];

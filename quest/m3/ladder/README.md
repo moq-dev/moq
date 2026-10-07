@@ -38,12 +38,10 @@ alone. Send order is a different number today: `Priority::cmp`
 (`rs/moq-net/src/lite/priority.rs`) ranks first by `Priority.track`, which is
 the subscriber's priority from SUBSCRIBE (`msg.priority` in
 `rs/moq-net/src/lite/publisher.rs`), not the publisher's `Info::priority`.
-The controller quest makes the publisher's number the tiebreak after it, so
-the same number decides what to produce and, among equal subscriber
-priorities, what to send first;
-[Scope track priority](/quest/m1/track-priority-scope.md) settles what that
-ranking means on the first mile versus a cluster session before the
-controller depends on it.
+[Scope track priority](/quest/m1/track-priority-scope.md) owns making the
+publisher's number the tiebreak after it, so the same number decides what to
+produce and, among equal subscriber priorities, what to send first; the
+controller only consumes that tiebreak.
 
 
 ### Adaptive bands
