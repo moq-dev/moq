@@ -480,6 +480,9 @@ pub struct AnnounceInit<'a> {
 }
 
 impl Message for AnnounceInit<'_> {
+	// Published lite01/02 carry the whole initial set in one message.
+	const MAX_SIZE: usize = 64 * 1024 * 1024;
+
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {}
