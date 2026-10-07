@@ -18,7 +18,7 @@ and the hang draft specs both. Nothing produces them yet.
   the root refuses the catalog. Shared fixtures pin both in both languages. Additive on main.
 - `rs/hang/src/stats.rs`: the publisher snapshot,
   `Snapshot<E = ()> { transport, renditions: BTreeMap<String, Track>, #[serde(flatten)] ext: E }`.
-  The generic lets moq-mux flatten `{ mpegts: ts::Stats }` in beside it, the
+  The generic lets moq-mux flatten `{ mpegts: ts::stats::Snapshot }` in beside it, the
   way `Catalog<E>` takes `ts::Ext`. `Track` holds sent frames, sent bytes,
   keyframes, skipped frames, and the target bitrate as a gauge.
 - `rs/hang/src/echo.rs`:

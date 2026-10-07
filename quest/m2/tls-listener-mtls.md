@@ -23,14 +23,10 @@ leaving it open.
 Keep the token path working on the same listener, and keep pinned peers and
 CA roots meaning the same as on QUIC.
 
-[Relay client-CA validation](/quest/m1/relay-auth-client-ca.md) refuses a
-listener TLS client CA on a stream-only relay (the `NoBackend` case in
-`rs/moq-relay/src/relay.rs`), since nothing checks it there. Once a `tls://`
+[Relay client-CA validation](https://github.com/moq-dev/moq/pull/4912) refuses a
+listener TLS client CA on a stream-only relay (the `MtlsUnsupported` case in
+`rs/moq-tokio/src/server.rs`), since nothing checks it there. Once a `tls://`
 listener verifies the certificate, this quest lifts that refusal for a relay
 with a `tls://` listener and updates the refusal's test.
 
 Public API: relay config may gain a listener option. Wire: none.
-
-## Required
-
-- [Relay client-CA validation](/quest/m1/relay-auth-client-ca.md) - adds the stream-only client-CA refusal this lifts for `tls://`

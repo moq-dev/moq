@@ -1120,7 +1120,7 @@ async fn broadcast_route_migration() {
 	// Resolve and subscribe: the cheaper route (A) serves the track.
 	let subscription = moq_net::track::Subscription::default()
 		.with_start(moq_net::track::Position::group(1))
-		.with_max_age(Duration::from_secs(10));
+		.with_max_delay(Duration::from_secs(10));
 	let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
 		.expect("request timeout")
@@ -1247,7 +1247,7 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 		.await
 		.expect("request timeout")
 		.expect("broadcast resolves");
-	let budget = moq_net::track::Subscription::default().with_max_age(Duration::from_millis(100));
+	let budget = moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(100));
 	async fn recv(sub: &mut moq_net::track::Subscriber, version: &str) -> u64 {
 		tokio::time::timeout(TIMEOUT, sub.recv_group())
 			.await
@@ -3764,13 +3764,10 @@ async fn abort_carries_its_code_to_the_peer() {
 	server_handle.abort();
 }
 
-/// The next route and whether it is active, skipping the caught-up marker.
+/// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-	loop {
-		return match announced.next().await? {
-			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
-			moq_net::announce::Event::End(route) => Some((route, false)),
-			moq_net::announce::Event::Live => continue,
-		};
+	match announced.next().await? {
+		moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

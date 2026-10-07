@@ -337,7 +337,7 @@ async fn subscribe(
 			update = announced.next() => {
 				let update = match update {
 					Some(moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update)) => update,
-					Some(moq_net::announce::Event::End(_) | moq_net::announce::Event::Live) => continue,
+					Some(moq_net::announce::Event::End(_)) => continue,
 					None => break,
 				};
 				let path = update.prefix.to_string();
@@ -363,7 +363,7 @@ async fn subscribe(
 	while selected < want {
 		let update = match announced.next().await {
 			Some(moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update)) => update,
-			Some(moq_net::announce::Event::End(_) | moq_net::announce::Event::Live) => continue,
+			Some(moq_net::announce::Event::End(_)) => continue,
 			None => break,
 		};
 		let path = update.prefix.to_string();
@@ -591,7 +591,7 @@ mod tests {
 	}
 
 	fn replay() -> track::Subscription {
-		track::Subscription::default().with_max_age(Duration::from_secs(30))
+		track::Subscription::default().with_max_delay(Duration::from_secs(30))
 	}
 
 	/// A produced group must start with the JSON keyframe describing the rolled

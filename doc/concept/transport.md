@@ -87,3 +87,15 @@ gives a page a connection, not an endpoint.
 
 The relay opts in with `[iroh] enabled = true` and a persisted `secret` so the
 endpoint id survives restarts. See the [config reference](/bin/relay/config#iroh).
+
+## Custom Rust transports
+
+`moq-net` owns the poll traits a transport implements: sessions open and accept
+streams, outgoing streams write and reset, and incoming streams read and stop.
+Transport errors keep session-close codes separate from stream-reset codes.
+
+`moq-tokio` and `moq-wasm` adapt their backends at the connection boundary;
+`moq-uring::transport::Session::new` wraps a thread-local poll backend. A custom
+transport can implement moq-net's traits directly. Backend trait upgrades then
+change the adapter without changing moq-net's public transport bounds. See the
+[moq-net API](/lib/rs/moq-net).

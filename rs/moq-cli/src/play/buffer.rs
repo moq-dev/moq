@@ -44,7 +44,7 @@ impl Buffer {
 		Some(frame)
 	}
 
-	pub fn push(&mut self, frame: Frame, max_age: Duration) {
+	pub fn push(&mut self, frame: Frame, max_delay: Duration) {
 		let edge = *self.edge.get_or_insert(frame.timestamp);
 		self.edge = Some(edge.max(frame.timestamp));
 		if frame.keyframe {
@@ -64,7 +64,7 @@ impl Buffer {
 		self.frames.push_back(frame);
 		let edge = self.edge.unwrap();
 		let stale =
-			|oldest: &moq_net::Timestamp| edge.as_micros().saturating_sub(oldest.as_micros()) > max_age.as_micros();
+			|oldest: &moq_net::Timestamp| edge.as_micros().saturating_sub(oldest.as_micros()) > max_delay.as_micros();
 		if self.oldest.front().is_some_and(stale) {
 			// Dropping a reference picture invalidates the rest of its GOP. Resume
 			// only at a retained keyframe, never feed a broken chain to the codec.

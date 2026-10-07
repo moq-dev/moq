@@ -33,8 +33,6 @@ moq.announcements(
   if (event is AnnounceEventStart) {
     print(event.announce.prefix);
     print(event.announce.captures);
-  } else if (event is AnnounceEventLive) {
-    print('caught up; what follows is live');
   }
 });
 final broadcast = await moq.requestBroadcast('live/camera');
@@ -84,8 +82,7 @@ route is a capability, not an inventory. `announcements(options:)` takes a
 literal prefix plus an optional relative pattern and yields `AnnounceEvent`s:
 `AnnounceEventStart`, `AnnounceEventUpdate`, or `AnnounceEventEnd`
 carrying an `Announce`, whose `prefix` stays origin-relative and whose
-`captures` reports the wildcard matches, or `AnnounceEventLive` once every route
-live at subscribe time has been delivered. Paths with
+`captures` reports the wildcard matches. Paths with
 a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless `hidden: true`.
 
 Sessions reconnect with backoff when the transport drops and re-announce local

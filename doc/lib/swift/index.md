@@ -29,7 +29,7 @@ let client = Client()
 let session = try await client.connect(to: "https://relay.example.com")
 
 for try await event in try session.consume.announced(prefix: "live/", filter: "*/camera") {
-    guard case .start(let announcement) = event else { continue } // .update, .end, or .live
+    guard case .start(let announcement) = event else { continue } // .update or .end
     // Prefixes stay origin-relative; captures reports what each wildcard matched.
     print(announcement.captures ?? [])
     let broadcast = try await session.consume.requestBroadcast(path: announcement.prefix)
@@ -74,7 +74,7 @@ route is a capability, not an inventory. `announced(prefix:filter:)` combines a
 literal root with an optional relative pattern and yields `AnnounceEvent`s:
 `.start`, `.update`, or `.end` carrying an `Announce`, whose `prefix`
 stays relative to the origin and whose `captures` reports what the wildcards
-matched, or `.live` once every route live at subscribe time has been delivered.
+matched.
 Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless
 `hidden: true`.
 

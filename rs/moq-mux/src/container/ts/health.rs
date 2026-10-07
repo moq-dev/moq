@@ -16,10 +16,10 @@ use std::collections::{BTreeMap, HashMap};
 
 use mpeg2ts::ts::{Pid, TsPacket};
 
-use super::Stats;
 use super::import::{Payload, discontinuity_indicator, payload, pcr};
 use super::mux_rate::PCR_WRAP;
 use super::psi::PMT_TABLE_ID;
+use super::stats::Snapshot;
 
 const PCR_HZ: u64 = 27_000_000;
 /// `PAT_error_2` and `PMT_error_2`: each table recurs at least every 0.5 s.
@@ -78,7 +78,7 @@ impl Errors {
 
 	/// Write the stream-wide totals into `stats`, and each elementary stream's own counts into
 	/// its row.
-	pub(super) fn report(&self, stats: &mut Stats) {
+	pub(super) fn report(&self, stats: &mut Snapshot) {
 		stats.ts_sync_loss = self.ts_sync_loss;
 		stats.sync_byte_error = self.sync_byte_error;
 		stats.pat_error = self.pat_error;
@@ -503,7 +503,7 @@ impl Continuity {
 	}
 }
 
-impl Stats {
+impl Snapshot {
 	/// The stream-wide TR 101 290 counters in the order of the checks, less `crc_error`, which
 	/// predates them and is reported on its own.
 	pub(super) fn health(&self) -> [u64; 9] {
@@ -525,7 +525,7 @@ impl Stats {
 mod test {
 	use std::collections::HashMap;
 
-	use super::super::{Import, Programs, Stats, psi};
+	use super::super::{Import, Programs, psi, stats::Snapshot};
 	use super::PCR_WRAP;
 
 	const PMT_PID: u16 = 0x0100;
@@ -693,7 +693,7 @@ mod test {
 		}
 
 		/// Import the feed in `chunk`-byte pieces.
-		fn import(&self, chunk: usize) -> Stats {
+		fn import(&self, chunk: usize) -> Snapshot {
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
 			let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 			let mut import = Import::new(broadcast, catalog.reserve());
@@ -705,7 +705,7 @@ mod test {
 
 		/// The counts, the same whether the feed arrives in whole packets or in pieces that
 		/// split them.
-		fn stats(&self) -> Stats {
+		fn stats(&self) -> Snapshot {
 			let stats = self.import(188 * 7);
 			assert_eq!(stats, self.import(100), "the counts depend on how the input was split");
 			stats
