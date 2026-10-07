@@ -153,15 +153,16 @@ impl<S: ObjectStore> Writer<S> {
 	/// Start a recording under `store`'s prefix, reading tracks from `source`, or resume the one
 	/// already there.
 	///
-	/// Resuming replays each track's retained timeline, and a re-enrolled track continues at its
-	/// next record, refusing anything at or before the end of its newest committed one. A source
-	/// whose group sequences restarted therefore needs a new prefix. Objects a crash left before
-	/// their commit are deleted now, since the resumed records reuse their keys. A DVR also
-	/// deletes, one grace period after recovery, every object its retained records do not
-	/// reference, such as interrupted expirations, and every timeline object older than the
-	/// checkpoint it recovered from. The writer must own the prefix exclusively.
-	/// Fails, deleting nothing, when the recording cannot be listed or a timeline cannot be
-	/// replayed.
+	/// Resuming replays each track's retained timeline, and a re-enrolled track continues after
+	/// its newest committed record. The first group at or below that end, or a first timestamp
+	/// before the record's end, fails the recording: the source restarted and needs a new
+	/// prefix. The partially recorded tail group resumes instead, skipping frames already
+	/// stored. Objects a crash left before their commit are deleted now, since the resumed
+	/// records reuse their keys. A DVR also deletes, one grace period after recovery, every
+	/// object its retained records do not reference, such as interrupted expirations, and every
+	/// timeline object older than the checkpoint it recovered from. The writer must own the
+	/// prefix exclusively. Fails, deleting nothing, when the recording cannot be listed or a
+	/// timeline cannot be replayed.
 	pub async fn new(store: Store<S>, source: broadcast::Consumer, config: Config) -> Result<Self> {
 		let recovery = recover(&store, config.retention.is_some()).await?;
 		for key in &recovery.uncommitted {
@@ -205,10 +206,12 @@ impl<S: ObjectStore> Writer<S> {
 	///
 	/// Then flush each track's final record and finish its timeline. Fails when a timeline cannot
 	/// be committed or stored: the recording stops at each track's last durable timeline object.
-	/// Also fails when an enrolled track delivers a frame the recording cannot represent, but only
-	/// after stopping every track and committing what each already reported, so the recording
-	/// stays readable up to the bad frame. Returns the source's error, after finishing, when the
-	/// broadcast aborted.
+	/// Also fails when an enrolled track's source restarted, or delivers a frame the recording
+	/// cannot represent, but only after stopping every track and committing what each already
+	/// reported, so the recording stays readable up to the bad frame. A restart is a first group
+	/// at or below the recovered end, or a first timestamp before that record's end; the caller
+	/// starts a new prefix. Returns the source's error, after finishing, when the broadcast
+	/// aborted.
 	pub async fn run(self) -> Result<()> {
 		let Self {
 			control,
@@ -412,13 +415,22 @@ impl<S: ObjectStore> Control<S> {
 		shared.store.put_info(&timeline, &info).await?;
 
 		let resume = shared.recovered.lock().unwrap().remove(name);
-		let (output, segmenter, window, checkpoints, offset, floor) = match resume {
+		let (output, segmenter, window, checkpoints, offset, floor, recovered_pts) = match resume {
 			Some(resume) => {
 				let floor = resume.floor();
+				let recovered_pts = recorded_end(&resume, timescale)?;
 				let output = timeline::Producer::resume(output, &resume.checkpoint).map_err(timeline_error)?;
 				let segmenter = Segmenter::new(config).with_sequence(resume.checkpoint.range.end);
 				let window = resume.checkpoint.records.into();
-				(output, segmenter, window, resume.checkpoints, resume.sequence, floor)
+				(
+					output,
+					segmenter,
+					window,
+					resume.checkpoints,
+					resume.sequence,
+					floor,
+					recovered_pts,
+				)
 			}
 			None => (
 				timeline::Producer::new(output),
@@ -426,6 +438,7 @@ impl<S: ObjectStore> Control<S> {
 				VecDeque::new(),
 				VecDeque::new(),
 				0,
+				None,
 				None,
 			),
 		};
@@ -436,8 +449,11 @@ impl<S: ObjectStore> Control<S> {
 			timescale,
 			segmenter,
 			floor,
+			// Later groups cannot overlap the recovered end, including one that arrives after a
+			// tail resumed mid-group, whose own first frame is not index zero.
+			recovered_pts,
 			largest: None,
-			reported: None,
+			reported: recovered_pts,
 			accepted: BTreeMap::new(),
 			frames: VecDeque::new(),
 			records: VecDeque::new(),
@@ -483,9 +499,13 @@ struct Track<S> {
 	segmenter: Segmenter,
 	/// A resumed track's committed end; earlier content is already stored.
 	floor: Option<Position>,
+	/// Where that record's content time ended, in this track's timescale. The first frame a
+	/// resume stores must not precede it. Cleared once that frame is checked.
+	recovered_pts: Option<u64>,
 	/// The newest accepted group; later groups must exceed it.
 	largest: Option<u64>,
 	/// The first-frame timestamp of the newest reported group; later groups must not precede it.
+	/// A resumed track starts at the recorded end.
 	reported: Option<u64>,
 	/// Accepted groups in sequence order. Reported front first, so a later group's frames wait
 	/// for every earlier accepted group to finish.
@@ -676,7 +696,21 @@ fn handle<S: ObjectStore>(
 			match result {
 				Ok(Some(group)) => {
 					let sequence = group.sequence;
-					let stored = track.floor.is_some_and(|floor| Position::group(sequence + 1) <= floor);
+					// The first group is the source's start. One at or below the committed tail
+					// means the source restarted; dropping it would record nothing, then overlap
+					// once later sequences passed the tail. The tail group itself is not stored
+					// whole, so a writer that rejoins a source still running resumes it.
+					if track.largest.is_none()
+						&& let Some(floor) = track.floor
+						&& stored_group(sequence, floor)
+					{
+						return Err(malformed(
+							&name,
+							sequence,
+							format!("restarts at or below recorded end group {}", floor.group),
+						));
+					}
+					let stored = track.floor.is_some_and(|floor| stored_group(sequence, floor));
 					if track.largest.is_some_and(|largest| sequence <= largest) || stored {
 						tracing::debug!(track = %name, sequence, "refusing a duplicate, decreasing, or stored group");
 					} else {
@@ -721,6 +755,17 @@ fn handle<S: ObjectStore>(
 					crate::path::check_id(timestamp).map_err(|err| malformed(&name, sequence, err))?;
 					// A resumed track already stored the head of the group it stopped inside.
 					if track.floor.is_none_or(|floor| Position::new(sequence, index) >= floor) {
+						// Index zero of a new group is checked again in `report`. A tail resumed
+						// mid-group stores a later frame first, which that check never sees.
+						if let Some(end) = track.recovered_pts.take()
+							&& timestamp < end
+						{
+							return Err(malformed(
+								&name,
+								sequence,
+								format!("timestamp {timestamp} precedes recorded {end}"),
+							));
+						}
 						let frame = Frame {
 							timestamp,
 							payload: frame.payload,
@@ -958,6 +1003,26 @@ fn source_error(err: moq_net::Error) -> Error {
 
 fn malformed(track: &str, sequence: u64, err: impl std::fmt::Display) -> Error {
 	Error::Source(format!("track {track} group {sequence}: {err}"))
+}
+
+/// Whether `sequence` ends at or before `floor`, so the resumed recording already stored it.
+///
+/// The group the floor sits inside is not included: that tail may be only partly stored, and a
+/// writer restarted against a source that kept running resumes it.
+fn stored_group(sequence: u64, floor: Position) -> bool {
+	sequence
+		.checked_add(1)
+		.is_some_and(|next| Position::group(next) <= floor)
+}
+
+/// The content time the newest committed record reached, in `timescale`.
+fn recorded_end(resume: &Resume, timescale: Timescale) -> Result<Option<u64>> {
+	let Some(record) = resume.checkpoint.records.last() else {
+		return Ok(None);
+	};
+	let millis = record.pts.checked_add(record.duration).ok_or(Error::Overflow)?;
+	let end = Timestamp::new(millis, TIMESCALE).map_err(|_| Error::Id(millis))?;
+	Ok(Some(end.convert(timescale).map_err(|_| Error::Overflow)?.value()))
 }
 
 #[cfg(test)]
@@ -1605,8 +1670,8 @@ mod tests {
 	async fn a_restarted_writer_resumes_the_recording() {
 		let store = Store::new(InMemory::new(), "rec");
 		record(&store, Config::default(), 0..3).await;
-		// The source's cache replays groups the recording already holds.
-		record(&store, Config::default(), 0..6).await;
+		// The source kept running: the first group is the next one, not a restart.
+		record(&store, Config::default(), 3..6).await;
 
 		let records = window(&store, "video").await;
 		assert_eq!(sequences(&records), (0..6).collect::<Vec<_>>());
@@ -1620,6 +1685,91 @@ mod tests {
 			numbers.extend(object.groups.iter().map(|group| group.sequence));
 		}
 		assert!(numbers.windows(2).all(|pair| pair[0] < pair[1]), "{numbers:?}");
+	}
+
+	/// A source that starts over at group 0 is a new session. Dropping those groups and
+	/// recording once they pass the old tail would overlap media time.
+	#[tokio::test]
+	async fn a_restart_from_group_zero_is_refused() {
+		let store = Store::new(InMemory::new(), "rec");
+		record(&store, Config::default(), 0..3).await;
+
+		let source = broadcast::Info::new().produce();
+		let video = track(&source, "video");
+		let writer = Writer::new(store.clone(), source.consume(), Config::default())
+			.await
+			.unwrap();
+		writer.control().track("video", media()).await.unwrap();
+		group(&video, 0, &[0, 500]);
+		group(&video, 1, &[1000, 1500]);
+		video.finish().unwrap();
+		source.close();
+
+		assert_eq!(
+			writer.run().await,
+			Err(Error::Source(
+				"track video group 0: restarts at or below recorded end group 3".into()
+			))
+		);
+		let records = window(&store, "video").await;
+		assert_eq!(
+			groups(&records),
+			(0..3).map(|sequence| (sequence, sequence)).collect::<Vec<_>>()
+		);
+		check_objects(&store, "video", &records).await;
+	}
+
+	/// The group sequence continued, but content time jumped back before the recorded end.
+	#[tokio::test]
+	async fn a_backward_timestamp_is_refused() {
+		let store = Store::new(InMemory::new(), "rec");
+		record(&store, Config::default(), 0..3).await;
+
+		let source = broadcast::Info::new().produce();
+		let video = track(&source, "video");
+		let writer = Writer::new(store.clone(), source.consume(), Config::default())
+			.await
+			.unwrap();
+		writer.control().track("video", media()).await.unwrap();
+		// Group 3 is the next one. Its timestamp is behind the last frame, at 2500.
+		group(&video, 3, &[500]);
+		video.finish().unwrap();
+		source.close();
+
+		assert_eq!(
+			writer.run().await,
+			Err(Error::Source(
+				"track video group 3: timestamp 500 precedes recorded 2500".into()
+			))
+		);
+		let records = window(&store, "video").await;
+		assert_eq!(
+			groups(&records),
+			(0..3).map(|sequence| (sequence, sequence)).collect::<Vec<_>>()
+		);
+		check_objects(&store, "video", &records).await;
+	}
+
+	/// A source that jumped forward, in both group sequence and content time, keeps recording.
+	#[tokio::test]
+	async fn a_forward_restart_keeps_recording() {
+		let store = Store::new(InMemory::new(), "rec");
+		record(&store, Config::default(), 0..3).await;
+
+		let source = broadcast::Info::new().produce();
+		let video = track(&source, "video");
+		let writer = Writer::new(store.clone(), source.consume(), Config::default())
+			.await
+			.unwrap();
+		writer.control().track("video", media()).await.unwrap();
+		group(&video, 10, &[10_000, 10_500]);
+		video.finish().unwrap();
+		source.close();
+		writer.run().await.unwrap();
+
+		let records = window(&store, "video").await;
+		assert_eq!(groups(&records), vec![(0, 0), (1, 1), (2, 2), (10, 10)]);
+		check_objects(&store, "video", &records).await;
 	}
 
 	#[tokio::test]
@@ -1646,7 +1796,8 @@ mod tests {
 		let _ = run.await;
 		drop(open);
 
-		// The restarted source replays the whole group; the stored head is skipped.
+		// The restarted writer sees the partially recorded tail group first. That resumes;
+		// the stored head is skipped rather than refused as a restart.
 		let source = broadcast::Info::new().produce();
 		let log = track(&source, "log");
 		let writer = Writer::new(store.clone(), source.consume(), config).await.unwrap();
@@ -1747,8 +1898,9 @@ mod tests {
 		assert_eq!(segments(&store, "video").await, (0..=4).collect::<Vec<_>>());
 
 		writer.control().track("video", media()).await.unwrap();
-		// The source replays groups the recording already holds; they are refused.
-		for sequence in 4..9 {
+		// The source kept running. Group 4 is the committed tail; the first group is the
+		// one the crash left open, which resumes.
+		for sequence in 5..9 {
 			group(&video, sequence, &[sequence * 1000, sequence * 1000 + 500]);
 		}
 		video.finish().unwrap();
