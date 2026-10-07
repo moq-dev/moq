@@ -300,7 +300,10 @@ impl Invocation {
 					_ => {}
 				}
 			}
-			anyhow::ensure!(publishes, "--epoch names what this process publishes, but nothing here publishes");
+			anyhow::ensure!(
+				publishes,
+				"--epoch names what this process publishes, but nothing here publishes"
+			);
 		}
 
 		for command in &self.stages {
@@ -405,11 +408,6 @@ pub struct MoqSide {
 	#[usage(long, env = "MOQ_EPOCH", help_heading = "MoQ")]
 	pub epoch: Option<hang::moq_net::Epoch>,
 
-	/// The released redundant-publisher identity, kept in the parser only so a
-	/// process that still passes it is told what to pass instead.
-	#[usage(name = "hop", long = "hop", env = "MOQ_HOP", hide = true)]
-	hop: Option<u64>,
-
 	/// MoQ client config (`--connect`, `--connect-bind`, `--connect-tls-*`, ...).
 	#[usage(flatten)]
 	pub client: moq_tokio::connect::Config,
@@ -449,14 +447,6 @@ impl MoqSide {
 		found.extend(self.server.deprecated());
 		found.extend(self.cluster.deprecated());
 		found.extend(self.auth.deprecated());
-		if self.hop.is_some() {
-			found.changed(
-				"--hop",
-				Some("MOQ_HOP"),
-				"--epoch / MOQ_EPOCH",
-				"a UUIDv7 that redundant publishers share; --cluster-id still names a node",
-			);
-		}
 		if self.name.is_some() {
 			found.flag("--name", None, "--broadcast");
 		}
@@ -1222,34 +1212,6 @@ mod tests {
 		] {
 			assert!(reported.contains(line), "missing {line:?} from {reported}");
 		}
-	}
-
-	/// `moq-cli`'s own retired flag rides the same refusal as the flags it flattens
-	/// from `moq-tokio`, and lands in the same message.
-	///
-	/// A redundant pair that still passes `--hop` would otherwise mint an epoch each and
-	/// stop failing over seamlessly, and the migration has to name the environment
-	/// variable too, since a deployment that sets `MOQ_HOP` never typed the flag.
-	#[test]
-	fn the_released_hop_spelling_is_refused_with_a_migration() {
-		let _env = crate::test_env::EnvGuard::clear(&["MOQ_HOP", "MOQ_EPOCH"]);
-		let Err(err) = Invocation::try_parse_from([
-			"moq",
-			"--hop",
-			"42",
-			"--connect",
-			"http://relay/anon",
-			"import",
-			"fmp4",
-		]) else {
-			panic!("--hop must not start a run");
-		};
-
-		let reported = err.to_string();
-		assert!(
-			reported.contains("--hop / MOQ_HOP -> --epoch / MOQ_EPOCH"),
-			"missing the migration from {reported}"
-		);
 	}
 
 	/// `--epoch` reaches the stages that announce once per run, and is refused where

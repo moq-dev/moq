@@ -405,7 +405,12 @@ mod tests {
 			store: url,
 			follow: None,
 		};
-		let serving = tokio::spawn(import(replay.clone(), "replay.hang".into(), args, moq_net::Epoch::mint()));
+		let serving = tokio::spawn(import(
+			replay.clone(),
+			"replay.hang".into(),
+			args,
+			moq_net::Epoch::mint(),
+		));
 
 		let consumer = replay.consume().routed_broadcast("replay.hang").await.unwrap();
 		let audio = consumer.track("audio").unwrap();

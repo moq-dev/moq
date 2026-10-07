@@ -405,6 +405,9 @@ moq --connect https://relay.example.com/anon --broadcast event.hang --epoch "$EP
 `--epoch` applies to the sources announced once per run. The RTMP, SRT, and
 WHIP ingests and `import ts --program all` announce their own, so they refuse it.
 
+`--epoch` replaces the removed `--hop`. `MOQ_HOP` is no longer read, so drop it
+from any deployment and pass `MOQ_EPOCH` instead.
+
 ## Cluster
 
 The CLI reads the same `--cluster-*` flags as `moq-relay`, LAN and WAN alike,
