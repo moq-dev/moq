@@ -87,7 +87,9 @@ pub struct Config {
 	///
 	/// The listing starts at the records the timeline restates when this exporter joins (a
 	/// `moq-mux` publisher restates at most 256), so it reaches the start of a longer recording
-	/// only if the exporter followed it from there.
+	/// only if the exporter followed it from there. For the same reason, edges that joined at
+	/// different times can list different `EXT-X-MEDIA-SEQUENCE` values: only the window keeps
+	/// every edge agreeing.
 	pub history: bool,
 }
 
@@ -168,6 +170,12 @@ impl Broadcaster {
 	/// the caller's policy: wrap this in a timeout (or select against it) as needed.
 	pub async fn ready(&self) {
 		self.renditions.ready().await;
+	}
+
+	/// Resolve once the master playlist lists at least one rendition.
+	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	pub(crate) async fn advertised(&self) {
+		self.renditions.advertised().await;
 	}
 
 	/// Version every segment URL with `generation`, a label for the publisher run the
@@ -3222,7 +3230,10 @@ mod tests {
 					.unwrap();
 			}
 			let read = fresh_join_reads(&early, "video0").await;
-			assert!(read <= bound, "day {day}: a fresh join read {read} records");
+			assert!(
+				(segments::MAX_SEGMENTS..=bound).contains(&read),
+				"day {day}: a fresh join read {read} records"
+			);
 		}
 
 		let last = 3 * DAY - 1;
@@ -3312,11 +3323,28 @@ mod tests {
 		test.listed("audio0", 2).await;
 		assert_eq!(advertised(&test.renditions), ["audio0"]);
 
+		// The master route long-polls on this: it must wake on the first sync start.
+		let renditions = test.renditions.clone();
+		let video = tokio::spawn(async move {
+			kio::wait(|waiter| {
+				let snapshot = renditions.snapshot();
+				let video0 = snapshot.iter().find(|rendition| rendition.name == "video0").unwrap();
+				video0.poll_advertised(waiter)
+			})
+			.await
+		});
+		tokio::time::sleep(Duration::from_secs(1)).await;
+		assert!(!video.is_finished(), "video0 has no sync start yet");
+
 		for sequence in 4..7 {
 			video0.push(&gop(sequence)).unwrap();
 			video1.push(&gop(sequence)).unwrap();
 			audio0.push(&gop(sequence)).unwrap();
 		}
+		tokio::time::timeout(Duration::from_secs(5), video)
+			.await
+			.expect("the wait wakes on the first sync start")
+			.unwrap();
 		test.listed("video1", 4).await;
 		assert_eq!(advertised(&test.renditions), ["video0", "video1", "audio0"]);
 	}

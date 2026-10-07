@@ -354,6 +354,15 @@ impl Producer {
 		}
 	}
 
+	/// Poll `f` over the listed rows, waking on the next window change while it is pending. A
+	/// closed window stays pending: no new row can make `f` ready.
+	pub fn poll_rows(&self, waiter: &kio::Waiter, mut f: impl FnMut(&VecDeque<Row>) -> Poll<()>) -> Poll<()> {
+		match self.state.poll_ref(waiter, |state| f(&state.rows)) {
+			Poll::Ready(Ok(())) => Poll::Ready(()),
+			_ => Poll::Pending,
+		}
+	}
+
 	/// A cursor over segments, starting from the oldest still in the window.
 	pub fn subscribe(&self, rendition: Arc<Rendition>) -> Consumer {
 		Consumer {

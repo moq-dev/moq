@@ -641,17 +641,33 @@ impl Rendition {
 	/// so it waits until a listed segment begins at one rather than send a stock player to
 	/// media it cannot decode.
 	pub(crate) fn is_advertised(&self) -> bool {
-		if !self.is_playable() {
-			return false;
-		}
+		self.poll_advertised(&kio::Waiter::noop()).is_ready()
+	}
+
+	/// Poll until [`is_advertised`](Self::is_advertised), for the master route's long-poll.
+	pub(crate) fn poll_advertised(&self, waiter: &kio::Waiter) -> Poll<()> {
 		if self.kind == Kind::Audio {
-			return true;
+			return self.poll_playable(waiter);
 		}
-		let window = self.live.window();
-		self.resolved(&window.segments).any(|(row, content)| match content {
-			// Another rendition's boundary only resolves to frames by snapping to a sync start.
-			Content::Frames { .. } => !self.is(&row.reference) || row.starts_sync(),
-			_ => false,
+		self.media.sync(&self.live);
+		self.live.poll_rows(waiter, |rows| {
+			for row in rows {
+				let mut content = self.resolve(row);
+				if content == Content::Pending {
+					// Wake when the oldest unresolved row resolves, since it may be the sync start.
+					if self.poll_resolved(waiter, row).is_pending() {
+						return Poll::Pending;
+					}
+					content = self.resolve(row);
+				}
+				match content {
+					// Another rendition's boundary only resolves to frames by snapping to a sync start.
+					Content::Frames { .. } if !self.is(&row.reference) || row.starts_sync() => return Poll::Ready(()),
+					Content::Failed => return Poll::Pending,
+					_ => {}
+				}
+			}
+			Poll::Pending
 		})
 	}
 

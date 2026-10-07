@@ -346,6 +346,25 @@ impl Producer {
 		.await;
 	}
 
+	/// Resolve once at least one rendition is [advertised](Rendition::is_advertised), so a master
+	/// playlist can list it.
+	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	pub(crate) async fn advertised(&self) {
+		let _ = kio::wait(|waiter| {
+			self.state.poll_ref(waiter, |current| {
+				if current
+					.values()
+					.any(|rendition| rendition.poll_advertised(waiter).is_ready())
+				{
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
+			})
+		})
+		.await;
+	}
+
 	/// Enroll a freshly-created rendition in the timeline feed, replaying the recent history
 	/// (and the ended/closed markers) so its window matches its siblings', and start following its
 	/// own timeline.

@@ -234,8 +234,9 @@ async fn master(server: &Server, broadcast: &str, query: Option<&str>) -> Respon
 	let Some(broadcaster) = server.broadcaster(broadcast).await else {
 		return not_found();
 	};
-	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.ready()).await;
-	// A master listing no variant is unplayable: answer unavailable until one can start.
+	// A master listing no variant is unplayable: wait for one that can start, else answer
+	// unavailable.
+	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.advertised()).await;
 	let (video, audio) = broadcaster.variants(query);
 	if video.is_empty() && audio.is_empty() {
 		return not_found();
