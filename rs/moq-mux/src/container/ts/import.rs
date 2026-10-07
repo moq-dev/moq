@@ -2527,7 +2527,8 @@ fn registration_format(descriptors: &[catalog::Descriptor]) -> Option<[u8; 4]> {
 /// and the Vorbis family 1 mapping above it. The packet shape of code 0 is one coupled
 /// stream either way, so this keeps the family 0 head those streams already imported with.
 ///
-/// 0x80 and 0x82..=0x88 are the other named layouts in ETSI TS 103 491 Table 4-3: two
+/// 0x80 and 0x82..=0x88 are the other named layouts in Table 4-3 of the Opus-in-TS draft
+/// (Xiph's "ETSI TS opus" v0.1.3, never published by ETSI): two
 /// independent mono streams, and the uncoupled family 1 tables ffmpeg writes as
 /// `0x80 | channels` and then does not read back. 0x81 carries the layout in the
 /// descriptor (channel count, mapping family, then the stream counts and table,
@@ -2586,12 +2587,17 @@ fn mapped(channels: u32, family: u8, streams: u8, coupled: u8, table: &[u8]) -> 
 	Ok(config)
 }
 
-/// The bit-packed layout after `channel_config_code` 0x81 (ETSI TS 103 491 Table 4-2).
+/// The bit-packed layout after `channel_config_code` 0x81 (Opus-in-TS draft Table 4-2).
 ///
 /// `channel_count` and `mapping_family` are bytes. Family 0 stops there. Otherwise
 /// `stream_count - 1`, `coupled_stream_count`, and each `channel_mapping` entry follow
 /// at `ceil(log2(...))` bits, MSB first, then zero pad to a byte. The all-ones mapping
 /// value is silence, which an OpusHead stores as 255.
+///
+/// gstreamer sizes each field with `g_bit_storage(n)`, one bit wider than the draft
+/// whenever `n` is a power of two. Those descriptors fail the trailing or pad check and
+/// are refused. Retrying with gstreamer's widths could misread a descriptor written to
+/// the draft, so there is no fallback.
 fn explicit_layout(data: &[u8]) -> anyhow::Result<opus::Config> {
 	let (&channel_count, rest) = data.split_first().context("truncated Opus channel configuration")?;
 	let (&family, rest) = rest.split_first().context("truncated Opus channel configuration")?;
@@ -7046,7 +7052,7 @@ pub(super) mod test {
 		)
 	}
 
-	/// Codes at 0x80 and above are the ETSI TS 103 491 table, not a stereo guess.
+	/// Codes at 0x80 and above are the Opus-in-TS draft table, not a stereo guess.
 	/// The 6-channel 0x81 body is the descriptor gstreamer writes for family 255
 	/// (`[0x81, 6, 255, 160, 20, 229]`); the other bodies are hand-built from that table.
 	#[test]
@@ -7117,6 +7123,8 @@ pub(super) mod test {
 		assert!(err(&[0x80, 0x81, 2, 255, 0x1f]).contains("reserved bits"));
 		// Mapping index 2 with only two coded channels, and not the silence value.
 		assert!(err(&[0x80, 0x81, 2, 255, 0x84]).contains("mapping"));
+		// gstreamer's 4 uncoupled channels: `g_bit_storage` widths at a power of two.
+		assert!(err(&[0x80, 0x81, 4, 255, 0x60, 0x14, 0xc0]).contains("trailing"));
 	}
 
 	/// PAT/PMT for an MP2 PID plus an Opus PID whose extension body is `extension`.
