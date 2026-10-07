@@ -895,7 +895,8 @@ mod tests {
 			sample_rate: 48_000,
 			channel_count: 2,
 		}
-		.into();
+		.try_into()
+		.unwrap();
 		config.jitter = Some(Duration::ZERO);
 		assert!(crate::codec::aac::Import::new(track, reserved, config).is_err());
 		assert!(catalog.snapshot().audio.renditions.is_empty());

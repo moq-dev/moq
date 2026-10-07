@@ -83,6 +83,10 @@ jobs:
         env:
           NEXTEST_PROFILE: ci
 
+      - name: Audio grouping relay benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just bench-audio
+
       - name: Audio mixer benchmark
         if: ${{ !cancelled() }}
         run: nix develop --command just rs bench-playback

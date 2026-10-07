@@ -1049,7 +1049,7 @@ impl FrameRecv {
 				let mut group = track.append_group().unwrap();
 				let info = frame::Info {
 					size: size as u64,
-					timestamp: crate::Timestamp::ZERO,
+					timestamp: Some(crate::Timestamp::ZERO),
 				};
 				let frame = group.create_frame_owned(info, &budget).unwrap();
 				groups.push(group);

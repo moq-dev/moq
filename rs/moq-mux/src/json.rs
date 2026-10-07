@@ -550,7 +550,7 @@ mod test {
 			let mut stamps = Vec::new();
 			while let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) {
 				while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
-					stamps.push(frame.timestamp.as_millis());
+					stamps.push(frame.timestamp.unwrap().as_millis());
 				}
 			}
 			assert_eq!(stamps.len(), 1);

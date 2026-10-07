@@ -8,7 +8,7 @@ When a TS feed rewinds its time base and signals it
 the rest of the same input as a new broadcast under a fresh epoch, in the same
 process and connection. This covers an encoder restart or source switch behind
 a gateway that keeps its connection up, and a looping playout server, none of
-which makes a new connection for [Gateways](/quest/m0/broadcast-epoch/gateways.md)
+which makes a new connection for the ingest gateways
 to turn into an epoch. An unsignalled rewind stays fatal, as #4543 decided.
 
 ## Plan
