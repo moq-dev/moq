@@ -54,8 +54,8 @@ covered. A grant is a union of [path patterns](#path-patterns), so `room/*/cam`
 or the exact broadcast `room/alice` arrives as issued rather than widened to a
 prefix. A subscription or fetch that loses access resets with the
 `UNAUTHORIZED` stream code, so the peer can tell it apart from the session
-closing. Older lite versions have no such code and reset with
-`INTERNAL_ERROR`.
+closing. The code dates from moq-lite 06, since a relay can narrow a session
+that has no Auth stream.
 
 A client that publishes a broadcast outside its grant closes the session with
 `UNAUTHORIZED` and names the path in the close reason, rather than waiting

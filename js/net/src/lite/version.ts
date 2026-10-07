@@ -67,7 +67,7 @@ export function hasDatagrams(version: Version): boolean {
 
 /**
  * Whether either endpoint may open an Auth Stream (0x7) to present a token and learn its
- * grant, and reset a request with UNAUTHORIZED (0x3A). Added in lite-07.
+ * grant. Added in lite-07.
  */
 export function hasAuth(version: Version): boolean {
 	// Explicitly list older versions so future versions default to carrying AUTH.

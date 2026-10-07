@@ -2109,8 +2109,7 @@ mod tests {
 			session: session.clone(),
 			origin,
 			recv_bandwidth: None,
-			// The version with UNAUTHORIZED; an older one resets with INTERNAL_ERROR.
-			version: Version::Lite07,
+			version: VERSION,
 			peer_setup: Default::default(),
 			peer_hop: None,
 			cost: None,

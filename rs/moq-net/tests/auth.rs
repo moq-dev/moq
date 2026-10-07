@@ -1112,28 +1112,10 @@ fn speaks_auth(version: &str) -> bool {
 	matches!(version, LITE_07 | MOQT_17 | MOQT_22)
 }
 
-/// The code a lite session resets a request it no longer allows with: UNAUTHORIZED
-/// where the version has it, otherwise INTERNAL_ERROR.
-fn unauthorized_reset(version: &str) -> u32 {
-	match speaks_auth(version) {
-		true => StreamError::Unauthorized.to_code(),
-		false => StreamError::Internal.to_code(),
-	}
-}
-
 /// A revocation as the reader sees it: the local gate's own error, or the peer's
 /// UNAUTHORIZED reset relayed across the splice.
 fn unauthorized(err: &Error) -> bool {
 	matches!(err, Error::Unauthorized | Error::Stream(StreamError::Unauthorized))
-}
-
-/// A revocation the peer made, as `version` carries it: a lite version without
-/// UNAUTHORIZED resets with INTERNAL_ERROR.
-fn revoked(version: &str, err: &Error) -> bool {
-	match version.starts_with("moq-lite") && !speaks_auth(version) {
-		true => matches!(err, Error::Stream(StreamError::Internal)),
-		false => unauthorized(err),
-	}
 }
 
 /// Read groups until the subscription ends, returning how it ended.
@@ -1187,7 +1169,7 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 		pair.server.auth().authorize(&grant(&[], &["room/alice/video"]));
 
 		let err = ended(&mut audio_sub).await;
-		assert!(revoked(version, &err), "{err:?}");
+		assert!(unauthorized(&err), "{err:?}");
 		wait_announced(&received.consume(), "room/alice/audio", false).await;
 
 		// The sibling keeps flowing.
@@ -1196,11 +1178,12 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 		let group = video_sub.recv_group().await.unwrap().expect("video still flows");
 		assert_eq!(group.sequence, 1);
 
-		// The relay enforced it, not the client: moq-lite resets the subscription, and
-		// neither side closed the session.
+		// The relay enforced it, not the client: moq-lite resets the subscription with
+		// UNAUTHORIZED, even on a version without the Auth Stream, and neither side
+		// closed the session.
 		if version.starts_with("moq-lite") {
 			let resets = pair.server_transport.resets();
-			assert!(resets.contains(&unauthorized_reset(version)), "{resets:x?}");
+			assert!(resets.contains(&StreamError::Unauthorized.to_code()), "{resets:x?}");
 		}
 		assert_eq!(pair.client_transport.close_reason(), None);
 
@@ -1316,7 +1299,7 @@ async fn a_narrowing_resets_a_fetch_in_flight(version: &'static str) {
 		// the revocation regardless.
 		assert!(unauthorized(&err) || matches!(err, moq_net::Error::Dropped), "{err:?}");
 		let resets = pair.server_transport.resets();
-		assert!(resets.contains(&unauthorized_reset(version)), "{resets:x?}");
+		assert!(resets.contains(&StreamError::Unauthorized.to_code()), "{resets:x?}");
 		drop(group);
 	})
 	.await
@@ -1362,7 +1345,7 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 
 		pair.server.auth().authorize(&grant(&[], &["room/alice/video"]));
 		let err = ended(&mut sub).await;
-		assert!(revoked(version, &err), "{err:?}");
+		assert!(unauthorized(&err), "{err:?}");
 		wait_announced(&received.consume(), "room/alice/audio", false).await;
 		drop((sub, remote));
 
