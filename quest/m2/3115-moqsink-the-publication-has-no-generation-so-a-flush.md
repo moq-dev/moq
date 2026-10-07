@@ -24,6 +24,8 @@ globally (a fresh `CompletionHandle`, broadcast, catalog, and producers);
 every other pad joins that generation on its next buffer rather than each pad
 opening its own, so aggregate EOS membership is one set per generation.
 
+- Each generation is a new broadcast at the same path, so it announces a
+  freshly minted publisher epoch, as `Session::start` does per run.
 - Separate "the producers were finalized" from "the EOS message was posted";
   the per-pad lifecycle from #2998 already distinguishes them for pads, and
   the element-level latch (`eos_delivered`) needs the same split so a
