@@ -16,7 +16,3 @@ feature, or one backend re-exporting it to the others), or record why the
 copies stay. Add the `poll_read_buf` cap test either way.
 
 Public API: possibly a feature-gated module. Wire: none.
-
-## Required
-
-- [Transport seam](/quest/m1/transport-seam.md) - the owned transport traits and backend adapters exist on main

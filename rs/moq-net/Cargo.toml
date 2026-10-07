@@ -35,7 +35,6 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["js"] }
 web-async = { workspace = true }
-web-transport-trait = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
