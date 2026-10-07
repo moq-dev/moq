@@ -773,37 +773,6 @@ mod tests {
 		.expect("connect failed");
 	}
 
-	/// A peer that never delivers its announce count cannot stall the live
-	/// marker past its session: dropping the session lands the source.
-	#[moq_net_sim::test]
-	async fn a_dead_session_does_not_hold_the_live_marker() {
-		let gate = kio::Producer::new(true);
-		let transport = crate::lite::test_transport::SinkSession::gated_bi(gate.consume())
-			.with_protocol(crate::version::ALPN_LITE_05);
-
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let client = Client::new()
-			.with_versions([Version::Lite(lite::Version::Lite05)].into())
-			.with_subscriber(origin.clone());
-		let (session, driver) = client
-			.connect(moq_net_sim::now(), transport)
-			.await
-			.expect("connect failed");
-
-		let mut announced = origin.consume().announced();
-		let mut next = std::pin::pin!(announced.next());
-		assert!(
-			moq_net_sim::timeout(std::time::Duration::from_secs(5), next.as_mut())
-				.await
-				.is_err(),
-			"live before the peer answered"
-		);
-
-		drop(driver);
-		drop(session);
-		assert!(matches!(next.await, Some(crate::announce::Event::Live)));
-	}
-
 	/// The client SETUP on the bidi control stream (the pre-draft-17 framing) carries the
 	/// AUTHORITY next to the PATH.
 	#[moq_net_sim::test]

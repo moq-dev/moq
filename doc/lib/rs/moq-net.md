@@ -183,10 +183,8 @@ refused locally. A disjoint route is `Unauthorized`.
 `announce::Announce` with `prefix`, the covered prefix relative to the
 consumer's root; `captures`, what the most specific matching scope member's
 wildcards stood for when the prefix pins them; and `route`, its hops and cost
-(on a retraction, its last values). A single `Event::Live` follows
-the routes live at subscribe time, including every route a connected peer
-was still sending, so a caller listing what is live stops there. The
-consumer is also a `futures::Stream`. A prefix is not a broadcast name;
+(on a retraction, its last values). The consumer is also a
+`futures::Stream`. A prefix is not a broadcast name;
 sessions request each scope member's literal head and filter locally. Routes
 with a `.`-prefixed segment below that head are [hidden](/concept/moq-lite#hidden-broadcasts)
 unless `with_hidden(true)` opts the consumer in. Sessions always ask the peer

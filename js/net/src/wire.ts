@@ -37,11 +37,6 @@ export interface OriginProducer {
 	): origin.Dynamic;
 	attach(discovery: boolean): Dispose;
 	expect(): Dispose;
-	/**
-	 * Hold the live marker of announcement streams opened now that overlap `prefix`, until the
-	 * peer's initial set under it lands.
-	 */
-	replaying(prefix: Path.Valid): Dispose;
 	readonly requests: Getter<ReadonlyMap<Path.Valid, origin.RequestSlot> | undefined>;
 	changed(): GetPromise<unknown>;
 	/** Whether sessions should answer the request with a blind subscription right now. */

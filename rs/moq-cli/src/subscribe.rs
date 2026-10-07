@@ -387,7 +387,7 @@ impl Subscribe {
 
 				if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
 					sampled = tokio::time::Instant::now();
-					log.sample(ts.stats());
+					log.sample(ts.stats().into());
 				}
 			};
 
