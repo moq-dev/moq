@@ -279,10 +279,12 @@ URL, `token` on a peer object, or a shared `cluster.token` file for every
 listed peer). The
 accepting relay admits a peer through the same lease as any client: its
 certificate is reported to the auth server, which grants it, so a mesh needs
-`moq auth serve --mtls-publish '**' --mtls-subscribe '**'` (or a server of
-your own that grants the cluster CA) behind `--auth-url`. A relay on
-`--auth-public '**'` admits peers through that grant instead, as long as they
-send no `cluster.token`: public rules refuse a token. LAN peers
+`moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-peer` (or a
+server of your own that grants the cluster CA with `peer: true`) behind
+`--auth-url`. A relay on `--auth-public '**'` admits peers through that grant
+instead, as long as they send no `cluster.token`: public rules refuse a token.
+Such a peer is admitted as a client, so what it forwards counts as ingested
+here. LAN peers
 authenticate with the mDNS credential on `/.cluster/<credential>`, a secret
 the relay minted for itself and checks locally, and never receive
 `cluster.token`. Dials retry forever with capped backoff, so a rejected peer
@@ -291,9 +293,9 @@ is loud in the logs rather than fatal. See [Authentication](/bin/relay/auth#mtls
 A relay records whether each route entered here or came from a peer, which the
 hop list alone cannot say: a client and a peer each add one hop. Routes over a
 dial this relay made, and over an accepted LAN peer, count as a peer's. An
-accepted peer counts only when its grant sets `peer: true`; otherwise it looks
-like a client ingesting here. An embedder reads this as `Route::source()` and
-filters with `origin::Consumer::local()`.
+accepted peer counts only when its grant sets `peer: true`, as `--mtls-peer`
+does; otherwise it looks like a client ingesting here. An embedder reads this
+as `Route::source()` and filters with `origin::Consumer::local()`.
 
 The `/nodes` [internal endpoint](/bin/relay/http#get-nodes) lists the peers
 this relay dialed and holds a session with.

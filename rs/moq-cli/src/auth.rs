@@ -387,6 +387,10 @@ pub struct Serve {
 	#[usage(long)]
 	mtls_subscribe: Vec<Pattern>,
 
+	/// Mark sessions with a verified certificate as cluster peers: relays forwarding what entered elsewhere.
+	#[usage(long)]
+	mtls_peer: bool,
+
 	/// The tier label stamped on every grant, handed to the relay's stats.
 	#[usage(long)]
 	tier: Option<String>,
@@ -426,6 +430,9 @@ impl Serve {
 				"--limit-token and --limit-remote need --revalidate, which ages out the slots of dead relays"
 			);
 		}
+		if self.mtls_peer && self.mtls_publish.is_empty() && self.mtls_subscribe.is_empty() {
+			anyhow::bail!("--mtls-peer needs --mtls-publish or --mtls-subscribe, or every certificate is refused");
+		}
 		// 0.14 read `anon` as the prefix `anon/`, and a pattern reads it as exactly the
 		// broadcast `anon`, so either silent reading would mislead someone upgrading.
 		let flags = [
@@ -460,6 +467,7 @@ impl Serve {
 		};
 		policy.public = rules(&self.public_publish, &self.public_subscribe);
 		policy.mtls = rules(&self.mtls_publish, &self.mtls_subscribe);
+		policy.mtls_peer = self.mtls_peer;
 		policy.tier = self.tier.clone();
 		policy.revalidate = revalidate;
 		policy.expires = expires;
@@ -653,6 +661,7 @@ mod tests {
 			"**",
 			"--mtls-subscribe",
 			"**",
+			"--mtls-peer",
 			"--tier",
 			"internal",
 			"--revalidate",
@@ -673,6 +682,7 @@ mod tests {
 		);
 		assert!(policy.public.publish.is_empty());
 		assert_eq!(policy.mtls.publish, ["**".parse().unwrap()].into_iter().collect());
+		assert!(policy.mtls_peer);
 		assert_eq!(policy.tier.as_deref(), Some("internal"));
 		assert_eq!(policy.revalidate, Some(std::time::Duration::from_secs(30)));
 		assert_eq!(policy.expires, Some(std::time::Duration::from_secs(7200)));
@@ -694,6 +704,7 @@ mod tests {
 		let bare = serve(&["moq", "auth", "serve"]).policy().unwrap();
 		assert!(bare.keys.is_none());
 		assert!(bare.public.is_empty() && bare.mtls.is_empty());
+		assert!(!bare.mtls_peer);
 		assert_eq!(bare.revalidate, None);
 		assert_eq!(bare.expires, None);
 
@@ -705,6 +716,8 @@ mod tests {
 			// Only a re-check keeps a slot alive.
 			(&["--limit-token", "3"], "need --revalidate"),
 			(&["--limit-remote", "3", "--expires", "1h"], "need --revalidate"),
+			// A peer marking with nothing granted to certificates marks nobody.
+			(&["--mtls-peer"], "--mtls-peer needs"),
 		] {
 			let argv: Vec<&str> = ["moq", "auth", "serve"].iter().chain(args).copied().collect();
 			let err = serve(&argv).policy().unwrap_err().to_string();

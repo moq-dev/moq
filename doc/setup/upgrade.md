@@ -230,8 +230,8 @@ Other changes to a deployment:
 - **`moq auth serve` never re-checks or expires by default**, as 0.14 never
   did. `--revalidate` needs `--expires`, and `--limit-*` needs `--revalidate`.
 - **mTLS admits nothing on its own.** A verified client certificate is reported
-  to the auth server, which grants it. `moq auth serve --mtls-publish '**' --mtls-subscribe '**'` restores the old full access for every certificate
-  the relay's client CA verifies, so keep that CA to cluster peers.
+  to the auth server, which grants it. `moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-peer` restores the old full access for every certificate
+  the relay's client CA verifies, as a cluster peer, so keep that CA to cluster peers.
 - **`moq --listen` needs auth.** A CLI listener refuses to start without
   `--auth-url` or `--auth-public` instead of accepting everyone.
 - **Gossip discovery is removed.** A relay dials only the peers it lists or
