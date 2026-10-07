@@ -31,9 +31,8 @@ shifts `trun` data offsets.
 - `main`: a behavior fix with no API change.
 
 Open PR [#4826](https://github.com/moq-dev/moq/pull/4826) implements this. It
-lands after [#4822](https://github.com/moq-dev/moq/pull/4822)
-([untimed model](/quest/m1/untimed-model.md)), which brings untimed frames to
-`main`. Timedness is per track there, so the decoder can check the track
+lands after [#4822](https://github.com/moq-dev/moq/pull/4822) (the untimed
+model), which brings untimed frames to `main`. Timedness is per track there, so the decoder can check the track
 rather than each frame.
 
 Test: in Rust and JS, a fragment whose `tfdt` disagrees with its frame
@@ -42,10 +41,6 @@ an untimed fragment decodes at its `tfdt`.
 
 Public API: none. Wire: none; this states what the frame timestamp already
 means.
-
-## Required
-
-- [Untimed model](/quest/m1/untimed-model.md) - untimed frames reach `main`, so the `tfdt` fallback has something to decode
 
 ## Related
 

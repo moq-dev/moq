@@ -15,6 +15,20 @@ Run every Criterion target plus the local relay workloads:
 nix develop --command just bench
 ```
 
+Measure audio grouping at 0, 100 and 200 ms with 50 fps, 200-byte frames:
+
+```bash
+nix develop --command just bench-audio
+```
+
+This sweeps room connections (16, 32) and subscriptions per connection (2, 8)
+independently, plus one publisher serving 64 and 200 subscribers. It uses the
+normal relay sampler and runs nightly. Each shape reports delivered frames,
+p99 latency, relay CPU and RSS; the group-size suffix is the number of frames
+after the keyframe (0, 4, 9), so each group carries 1, 5 or 10 frames. These
+synthetic payloads measure group overhead; they do not measure codec loss
+concealment.
+
 Compare the current tree with another revision:
 
 ```bash
@@ -43,6 +57,8 @@ interval, and output paths so every runtime receives the same load.
 - `fanout`: light one-to-many traffic.
 - `video-heavy`: multicore many-to-many video traffic.
 - `fanout-heavy`: multicore one-to-many traffic near saturation.
+- `audio` and `audio-fanout`: small, 50 fps audio-shaped frames; `bench-audio`
+  sweeps grouping and load shape through command-line overrides.
 
 The runtime matrix rotates execution order between rounds, then reports the
 median throughput, loss, latency, CPU split, context switches, RSS, and thread
