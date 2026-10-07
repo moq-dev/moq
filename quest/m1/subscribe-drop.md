@@ -53,10 +53,12 @@ Learned from the shelved [#4998](https://github.com/moq-dev/moq/pull/4998)
   sealed/closed check must not return a clean end before looking for a cut.
 - Fetched backfill that is abandoned, and a `DeliveryTimeout` reset, are
   deliberate holes, not cuts, like old, evicted, and lagged groups.
+- A cut above a reader's group cap is skipped for good, so a reader whose cap
+  `set_groups` later raises over it must still see the cut, not a clean end.
 - moq-tokio's
   `subscription_end_integrity::a_subscription_cut_by_the_publisher_disconnecting_does_not_end_clean`
-  flakes under load (`Ok(None)` with 10 of 20 frames, #4332). It keeps the
-  clean-end behavior until this lands; it should pass reliably after.
+  flakes under load (`Ok(None)` with 10 of 20 frames, #4332): the code can
+  still end it clean until this lands, and it should pass reliably after.
 
 Update `drafts/draft-lcurley-moq-lite.md` (SUBSCRIBE_DROP, SUBSCRIBE_END, the
 lite-07 changelog), `doc/concept/moq-lite.md`, and the Rust and JS lite
