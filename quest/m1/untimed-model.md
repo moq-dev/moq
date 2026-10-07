@@ -17,8 +17,8 @@ moq-net, moq-relay, every in-repo caller of the model, and
 Out of scope: publishers that fill in now
 ([Publishing never invents a timestamp](/quest/m1/publish-timestamp.md)), the
 lite-07 encoding of absence ([lite-07 encodes an absent
-timestamp](/quest/m1/lite-untimed.md)), and JS
-([@moq/net carries untimed frames faithfully](/quest/m1/js-untimed-model.md)).
+timestamp](/quest/m1/lite-untimed.md)), and JS, where `@moq/net` already
+carries untimed tracks this way.
 
 ## Plan
 

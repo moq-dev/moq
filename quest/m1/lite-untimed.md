@@ -51,4 +51,3 @@ Public API: none. Wire: lite-07-wip only, which is unpublished.
 ## Required
 
 - [moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md) - the Rust model must hold an absent timestamp before the wire can carry one
-- [@moq/net carries untimed frames faithfully](/quest/m1/js-untimed-model.md) - the same for JS
