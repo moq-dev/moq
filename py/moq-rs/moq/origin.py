@@ -32,8 +32,8 @@ each broadcast's exact path, so subscribers can enumerate broadcasts from routes
 
 AnnounceEvent = MoqAnnounceEvent
 """What :class:`AnnounceConsumer` yields: :data:`AnnounceEventStart`,
-:data:`AnnounceEventUpdate`, or :data:`AnnounceEventEnd` carrying an
-:data:`Announce` as ``announce``, or :data:`AnnounceEventLive`.
+:data:`AnnounceEventUpdate`, or :data:`AnnounceEventEnd`, each carrying an
+:data:`Announce` as ``announce``.
 """
 
 AnnounceEventStart = MoqAnnounceEvent.START
@@ -45,16 +45,12 @@ AnnounceEventUpdate = MoqAnnounceEvent.UPDATE
 AnnounceEventEnd = MoqAnnounceEvent.END
 """No route covers the prefix any more; carries its last route."""
 
-AnnounceEventLive = MoqAnnounceEvent.LIVE
-"""Every route live at subscribe time has been delivered; what follows is live changes."""
-
 
 class AnnounceConsumer:
     """Async-iterable stream of :data:`AnnounceEvent` as they arrive.
 
     Usable as an async context manager; iterate with ``async for`` and it keeps
-    yielding events until cancelled. Break on :data:`AnnounceEventLive` to list
-    what is live and stop.
+    yielding events until cancelled.
     """
 
     def __init__(self, inner: MoqAnnounceConsumer) -> None:

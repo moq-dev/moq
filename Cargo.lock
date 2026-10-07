@@ -1640,9 +1640,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "03bb0e1cc970d482d121d9a1744999169b69a07470b3d644a7894e53fcaf4574"
 dependencies = [
  "cmov",
  "subtle",
@@ -2102,7 +2102,7 @@ dependencies = [
  "elliptic-curve",
  "rfc6979",
  "signature 3.0.0",
- "spki 0.8.0",
+ "spki 0.8.1",
  "zeroize",
 ]
 
@@ -3948,7 +3948,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmoq"
-version = "0.6.11"
+version = "0.6.12"
 
 [[package]]
 name = "libredox"
@@ -4325,7 +4325,7 @@ dependencies = [
 
 [[package]]
 name = "moq-boy"
-version = "0.5.11"
+version = "0.5.12"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -4369,7 +4369,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -4431,7 +4431,7 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "bytes",
  "getrandom 0.4.3",
@@ -4468,7 +4468,7 @@ dependencies = [
 
 [[package]]
 name = "moq-gst"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4752,7 +4752,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -4811,7 +4811,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtc"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -4903,7 +4903,7 @@ dependencies = [
 
 [[package]]
 name = "moq-stats"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "futures",
  "moq-json",
@@ -4936,7 +4936,7 @@ dependencies = [
 
 [[package]]
 name = "moq-tokio"
-version = "0.19.22"
+version = "0.19.23"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6745,7 +6745,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "451913da69c775a56034ea8d9003d27ee8948e12443eae7c038ba100a4f21cb7"
 dependencies = [
  "der 0.8.2",
- "spki 0.8.0",
+ "spki 0.8.1",
 ]
 
 [[package]]
@@ -8469,9 +8469,9 @@ dependencies = [
 
 [[package]]
 name = "spki"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d9efca8738c78ee9484207732f728b1ef517bbb1833d6fc0879ca898a522f6f"
+checksum = "7ef958a98b9d5da290cfc78946e9f3e61e1e62a18db0d92cac0b83cc161491a9"
 dependencies = [
  "base64ct",
  "der 0.8.2",
@@ -9828,9 +9828,9 @@ dependencies = [
 
 [[package]]
 name = "want"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfa7760aed19e106de2c7c0b581b509f2f25d3dacaf737cb82ac61bc6d760b0e"
+checksum = "ec4cdd0dd910afe868b7ef477227d8d538b46b3075031afee8a9f2acb0a2ed0b"
 dependencies = [
  "try-lock",
 ]
@@ -11177,18 +11177,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.59"
+version = "0.8.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6df92bf3d9227be3d53173901ddbffac2babc27ae50f397776ffd6dc33f800cb"
+checksum = "6400fc4bb7426f6faac3fb07566122bb18622e3022bd2c36426a92ed489b1dbe"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.59"
+version = "0.8.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac4f328cf2f05d084e496c3e9c3f33ed0a183656a16e1fcec4d464d8373aec82"
+checksum = "99c27cc7525bad4df59a45e073c45b2c2aa820efb588234cc23a547ec69a34db"
 dependencies = [
  "proc-macro2",
  "quote",
