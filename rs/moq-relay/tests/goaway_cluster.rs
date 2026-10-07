@@ -395,7 +395,7 @@ async fn spawn_relay_with_upstream(
 	let mut auth_config = auth::Config::default();
 	auth_config.public = vec![moq_auth::Pattern::all()];
 	let auth = auth_config
-		.init("test", &moq_tokio::tls::Connect::default())
+		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init");
 
 	let mut cluster_config = cluster::Config::default();
@@ -559,7 +559,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		"subscribe to the video track",
 		bc.track("video")
 			.expect("track handle")
-			.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(60))),
+			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60))),
 	)
 	.await
 	.expect("subscribe");
@@ -922,13 +922,10 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	drop(connection);
 }
 
-/// The next route and whether it is active, skipping the caught-up marker.
+/// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-	loop {
-		return match announced.next().await? {
-			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
-			moq_net::announce::Event::End(route) => Some((route, false)),
-			moq_net::announce::Event::Live => continue,
-		};
+	match announced.next().await? {
+		moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

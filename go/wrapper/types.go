@@ -51,7 +51,7 @@ type (
 	// [OriginConsumer.RequestBroadcast].
 	Announce = ffi.MoqAnnounce
 	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventStart,
-	// AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventLive.
+	// AnnounceEventUpdate, or AnnounceEventEnd.
 	AnnounceEvent = ffi.MoqAnnounceEvent
 	// AnnounceEventStart reports a route now covering a prefix that had none.
 	AnnounceEventStart = ffi.MoqAnnounceEventStart
@@ -59,10 +59,7 @@ type (
 	AnnounceEventUpdate = ffi.MoqAnnounceEventUpdate
 	// AnnounceEventEnd reports that no route covers a prefix any more, carrying its last route.
 	AnnounceEventEnd = ffi.MoqAnnounceEventEnd
-	// AnnounceEventLive reports that every route live at subscribe time has been
-	// delivered; what follows is live changes. Yielded once.
-	AnnounceEventLive = ffi.MoqAnnounceEventLive
-	// Subscription holds subscriber-side delivery preferences: priority, ordering, max age, and group range.
+	// Subscription holds subscriber-side delivery preferences: priority, ordering, max delay, and group range.
 	Subscription = ffi.MoqSubscription
 	// TrackInfo holds publisher-side track properties: priority, ordering, max age, and timescale.
 	// A zero Priority is the least urgent, not the default; set 127 for the midpoint a nil TrackInfo uses.
@@ -71,7 +68,7 @@ type (
 	Video = ffi.MoqVideo
 	// VideoHint supplies catalog fields a video stream can't reveal itself, such as bitrate, filling only the gaps.
 	VideoHint = ffi.MoqVideoHint
-	// VideoDecoderOutput configures what DecodeVideo delivers: an optional resize, a max age, and whether frames keep the decoder's surface (macOS only; refused elsewhere).
+	// VideoDecoderOutput configures what DecodeVideo delivers: an optional resize, a max delay, and whether frames keep the decoder's surface (macOS only; refused elsewhere).
 	VideoDecoderOutput = ffi.MoqVideoDecoderOutput
 	// VideoSurface is a decoded frame's platform surface, from VideoDecodedFrame.Surface: VideoSurfacePixelBuffer on macOS and iOS.
 	VideoSurface = ffi.MoqVideoSurface

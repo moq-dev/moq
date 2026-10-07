@@ -41,14 +41,14 @@ pub struct Options {
 	pub decoder: Config,
 	/// PCM output conversion.
 	pub output: Output,
-	/// Maximum media age accepted from the subscription.
-	pub max_age: std::time::Duration,
+	/// How far a group may fall behind the live edge before the subscription skips it.
+	pub max_delay: std::time::Duration,
 	/// Initial cached-group policy.
 	pub start: Start,
 	/// A fixed playout delay, or `None` to estimate it from arrival timing.
 	///
 	/// The jitter buffer a player holds ahead of the playhead, reported by
-	/// [`Consumer::delay`]. Distinct from [`max_age`](Self::max_age), which is
+	/// [`Consumer::delay`]. Distinct from [`max_delay`](Self::max_delay), which is
 	/// the live-edge skip budget and adds no buffering. A fixed delay beyond the
 	/// track's retention is refused.
 	pub delay: Option<Duration>,
@@ -75,7 +75,7 @@ pub struct Consumer {
 	/// Converts the decoded layout to the output's, when they differ.
 	remix: Option<Remix>,
 	options: Options,
-	max_age: std::time::Duration,
+	max_delay: std::time::Duration,
 	resolved_sample_rate: u32,
 	resolved_layout: Layout,
 	/// Where the next packet's timestamp should land: the last packet's timestamp
@@ -148,7 +148,7 @@ impl Consumer {
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.audio)
-					.with_max_age(options.max_age),
+					.with_max_delay(options.max_delay),
 			)
 			.await?;
 		// A decoder often opens on a track that is already cached: a replacement
@@ -172,7 +172,7 @@ impl Consumer {
 		}
 		let track = subscriber;
 		let retention = track.info().max_age;
-		let max_age = options.max_age.min(retention.unwrap_or(Duration::MAX));
+		let max_delay = options.max_delay.min(retention.unwrap_or(Duration::MAX));
 		// Holding more than the publisher keeps would wait on media it has already
 		// discarded, so the caller asked for something impossible.
 		if let (Some(delay), Some(retention)) = (options.delay, retention)
@@ -195,7 +195,7 @@ impl Consumer {
 			resampler,
 			remix,
 			options,
-			max_age,
+			max_delay,
 			resolved_sample_rate: sample_rate,
 			resolved_layout: layout,
 			next_start: None,
@@ -222,9 +222,9 @@ impl Consumer {
 		&self.options
 	}
 
-	/// The effective age budget after clamping to the publisher's retention window.
-	pub fn max_age(&self) -> std::time::Duration {
-		self.max_age
+	/// The effective delay budget after clamping to the publisher's retention window.
+	pub fn max_delay(&self) -> std::time::Duration {
+		self.max_delay
 	}
 
 	/// The playout delay to hold ahead of the playhead right now: the fixed
@@ -715,7 +715,7 @@ mod tests {
 					sample_rate: Some(48_000),
 					..Output::default()
 				},
-				max_age: std::time::Duration::from_secs(1),
+				max_delay: std::time::Duration::from_secs(1),
 				..Options::new()
 			},
 		)
@@ -849,7 +849,7 @@ mod tests {
 					sample_rate: Some(44_100),
 					..Output::default()
 				},
-				max_age: std::time::Duration::from_secs(1),
+				max_delay: std::time::Duration::from_secs(1),
 				..Options::new()
 			},
 		)
@@ -932,7 +932,7 @@ mod tests {
 					sample_rate: Some(out_rate),
 					..Output::default()
 				},
-				max_age: std::time::Duration::from_secs(1),
+				max_delay: std::time::Duration::from_secs(1),
 				..Options::new()
 			},
 		)
@@ -1175,7 +1175,7 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_age: std::time::Duration::from_secs(1),
+				max_delay: std::time::Duration::from_secs(1),
 				..Options::new()
 			},
 		)
@@ -1384,7 +1384,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn max_age_is_clamped_to_publisher_retention() {
+	async fn max_delay_is_clamped_to_publisher_retention() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let info = hang::container::track_info(hang::catalog::PRIORITY.audio)
 			.with_max_age(std::time::Duration::from_millis(100));
@@ -1397,14 +1397,14 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_age: std::time::Duration::from_millis(500),
+				max_delay: std::time::Duration::from_millis(500),
 				..Options::new()
 			},
 		)
 		.await
 		.unwrap();
 
-		assert_eq!(consumer.max_age(), std::time::Duration::from_millis(100));
+		assert_eq!(consumer.max_delay(), std::time::Duration::from_millis(100));
 	}
 
 	/// Opus pre-skip is padding before the decoded epoch, not missing media after
@@ -1434,7 +1434,7 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_age: std::time::Duration::from_secs(1),
+				max_delay: std::time::Duration::from_secs(1),
 				..Options::new()
 			},
 		)
@@ -1486,7 +1486,7 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_age: std::time::Duration::from_secs(1),
+				max_delay: std::time::Duration::from_secs(1),
 				..Options::new()
 			},
 		)
@@ -1539,19 +1539,19 @@ mod tests {
 			track,
 			moq_mux::catalog::hang::Container::Loc(moq_mux::container::Kind::Audio),
 		);
-		let max_age = std::time::Duration::from_millis(250);
+		let max_delay = std::time::Duration::from_millis(250);
 		let mut consumer = Consumer::new(
 			&subscriber,
 			&catalog,
 			"audio",
 			Options {
-				max_age,
+				max_delay,
 				..Options::new()
 			},
 		)
 		.await
 		.unwrap();
-		assert_eq!(observed.subscription().unwrap().max_age, max_age);
+		assert_eq!(observed.subscription().unwrap().max_delay, max_delay);
 
 		let samples = [0.25f32, -0.5, 0.75, -1.0];
 		let payload: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();

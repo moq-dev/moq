@@ -632,7 +632,7 @@ mod tests {
 				&decoder_config,
 				"audio",
 				DecodeOptions {
-					max_age: Duration::from_secs(1),
+					max_delay: Duration::from_secs(1),
 					..DecodeOptions::new()
 				},
 			)
@@ -683,7 +683,7 @@ mod tests {
 			consumer
 				.track("audio")
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
+				.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
 				.await
 				.unwrap(),
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
@@ -810,7 +810,7 @@ mod tests {
 			&decoder_config,
 			"audio",
 			DecodeOptions {
-				max_age: Duration::from_millis(500),
+				max_delay: Duration::from_millis(500),
 				..DecodeOptions::new()
 			},
 		)
@@ -1063,7 +1063,7 @@ mod tests {
 			let track = consumer
 				.track("audio")
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
+				.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
 				.await
 				.unwrap();
 			let mut reader = moq_mux::container::Consumer::new(
@@ -1114,7 +1114,7 @@ mod tests {
 		let track = consumer
 			.track("audio")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
+			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
 			.await
 			.unwrap();
 		let mut reader =
