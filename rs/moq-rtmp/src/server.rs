@@ -714,8 +714,8 @@ pub struct Play<S = Conn> {
 	tc_url: Option<String>,
 	peer: SocketAddr,
 	/// How long the FLV muxer waits for a stalled group before skipping to a newer
-	/// one. Defaults to [`DEFAULT_MAX_AGE`](crate::DEFAULT_MAX_AGE); override with
-	/// [`with_max_age`](Self::with_max_age).
+	/// one. Defaults to [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY); override with
+	/// [`with_max_delay`](Self::with_max_delay).
 	latency: Duration,
 	/// Enhanced-RTMP capabilities advertised by the player in its connect object.
 	capabilities: ClientCapabilities,
@@ -748,11 +748,11 @@ impl<S: Stream> Play<S> {
 
 	/// Set how long the FLV muxer waits for a stalled group before skipping to a
 	/// newer one (the moq-level frame-drop latency). Defaults to
-	/// [`DEFAULT_MAX_AGE`](crate::DEFAULT_MAX_AGE). RTMP is unpaced (tags go out as
+	/// [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY). RTMP is unpaced (tags go out as
 	/// fast as the socket accepts them), so this bounds buffering, not the wire
 	/// rate. Pass [`Duration::ZERO`] to drop stale groups
 	/// aggressively.
-	pub fn with_max_age(mut self, latency: Duration) -> Self {
+	pub fn with_max_delay(mut self, latency: Duration) -> Self {
 		self.latency = latency;
 		self
 	}
@@ -831,7 +831,7 @@ impl<S: Stream> Play<S> {
 		let mut export = FlvExport::new(moq_mux::Source::new(origin.consume(), path.as_str()))
 			.await
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
-			.with_max_age(self.latency)
+			.with_max_delay(self.latency)
 			.with_multitrack(self.capabilities.multitrack)
 			.with_select(select);
 
@@ -1155,7 +1155,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							stream_key,
 							tc_url,
 							peer,
-							latency: crate::DEFAULT_MAX_AGE,
+							latency: crate::DEFAULT_MAX_DELAY,
 							capabilities: client_capabilities.clone(),
 						})));
 					}

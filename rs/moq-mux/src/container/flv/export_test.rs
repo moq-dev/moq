@@ -17,7 +17,7 @@ use super::{Export, Import};
 /// and only then export it, which the
 /// exporter's default [`Duration::ZERO`] collapses to the
 /// live edge: completeness has to be asked for, exactly as a real recorder does.
-const RECORDING_MAX_AGE: Duration = Duration::from_secs(30);
+const RECORDING_MAX_DELAY: Duration = Duration::from_secs(30);
 
 /// A minimal `AVCDecoderConfigurationRecord` (profile 0x42, level 0x1f, one SPS + PPS).
 fn avcc() -> Vec<u8> {
@@ -180,7 +180,7 @@ async fn export_emits_sequence_headers_and_frames() {
 	let exporter = Export::new(crate::source::announced(&consumer))
 		.await
 		.unwrap()
-		.with_max_age(RECORDING_MAX_AGE);
+		.with_max_delay(RECORDING_MAX_DELAY);
 	let exported = drain_export(exporter, importer).await;
 
 	let tags = parse_tags(&exported);
@@ -1146,7 +1146,7 @@ async fn a_track_leaving_the_catalog_is_read_to_its_end() {
 	let mut exporter = Export::new(crate::source::announced(&consumer))
 		.await
 		.unwrap()
-		.with_max_age(RECORDING_MAX_AGE);
+		.with_max_delay(RECORDING_MAX_DELAY);
 	let mut exported = Vec::new();
 	assert!(drain_until_idle(&mut exporter, &mut exported).await.is_none());
 

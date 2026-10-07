@@ -591,7 +591,7 @@ mod tests {
 	}
 
 	fn replay() -> track::Subscription {
-		track::Subscription::default().with_max_age(Duration::from_secs(30))
+		track::Subscription::default().with_max_delay(Duration::from_secs(30))
 	}
 
 	/// A produced group must start with the JSON keyframe describing the rolled
