@@ -148,6 +148,16 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command cargo bench --locked -p moq-net --features fuzz --bench '*' -- --test
 
+      # One relay's stats tick (drain plus plain and compressed encode), swept
+      # over held paths, tiers, and how many of those paths changed, plus the
+      # decode table. `--test` runs each routine once, so a panic (a plain
+      # frame past the cache cap, a drain that drops a held path) fails here
+      # instead of on the next manual run. Timing is not compared. `bench`
+      # exposes the hidden producer hook; without it the tick target is skipped.
+      - name: moq-stats producer tick and decode benchmarks
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs bench-stats --test
+
       # The catalog bench asserts the estimate rate limit's publish counts, so one pass is
       # the regression check.
       - name: moq-mux catalog estimate fanout benchmark

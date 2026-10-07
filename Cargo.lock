@@ -4905,6 +4905,7 @@ dependencies = [
 name = "moq-stats"
 version = "0.2.12"
 dependencies = [
+ "criterion",
  "futures",
  "moq-json",
  "moq-net",

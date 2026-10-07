@@ -106,10 +106,6 @@ maintainer's call; ask before writing one.
 Public API impact: additive on moq-stats unless the helpers change. Wire
 impact: new on-demand tracks; existing tracks unchanged.
 
-## Required
-
-- [Benchmark the moq-stats producer](/quest/m2/stats-producer-bench.md) - the moq-json snapshot encoder profile the gate needs
-
 ## Related
 
 - [Stats format page](/doc/concept/stats.md) - where the new flavor is documented
