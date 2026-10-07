@@ -13,6 +13,7 @@
 import { Derived, type Dispose, type GetPromise, type Getter, getter, Once, Signal } from "@moq/signals";
 import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
+import type * as Epoch from "./epoch.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { isAnonymous, Route, routesEqual } from "./hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps, spreadHash } from "./internal.ts";
@@ -221,8 +222,15 @@ function compareCandidates(prefix: Path.Valid, a: Candidate, b: Candidate): numb
 	return ha < hb ? -1 : ha > hb ? 1 : 0;
 }
 
-/** Orders two routes by preference: identified before anonymous, then lower warm cost, then lower cold cost. */
+/** Orders two routes by preference: the newest epoch with none last, then identified before
+ * anonymous, then lower warm cost, then lower cold cost. */
 function compareRoutes(a: Route, b: Route): number {
+	if (a.epoch !== b.epoch) {
+		// An older epoch is a publisher that was replaced.
+		if (a.epoch === undefined) return 1;
+		if (b.epoch === undefined) return -1;
+		return a.epoch > b.epoch ? -1 : 1;
+	}
 	const anonymous = Number(isAnonymous(a)) - Number(isAnonymous(b));
 	if (anonymous !== 0) return anonymous;
 	if (a.cost.warm !== b.cost.warm) return a.cost.warm < b.cost.warm ? -1 : 1;
@@ -665,7 +673,10 @@ export interface Table {
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer;
 
 	/** Advertise a prefix and serve requests under it; see {@link Producer.dynamic}. */
-	dynamic(prefix: Path.Valid, route?: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint }): Dynamic;
+	dynamic(
+		prefix: Path.Valid,
+		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint },
+	): Dynamic;
 }
 
 /** Options for resolving a broadcast path. */
@@ -751,8 +762,9 @@ export class Producer implements Table {
 	 *
 	 * Close the producer to drop it. Creating a path again supersedes the previous
 	 * broadcast: the origin drops its handle on the old one, which closes it unless the
-	 * application still holds a consumer clone. An announced local broadcast competes with
-	 * a remote route at the same path on cost, winning ties.
+	 * application still holds a consumer clone. Announce with a {@link Route.epoch}
+	 * (`Epoch.mint()` per run) so a restart replaces the old broadcast rather than resuming
+	 * into it; at the same epoch, a local broadcast competes on cost and wins ties.
 	 */
 	createBroadcast(path: Path.Valid): broadcast.Producer {
 		path = this.#scope.path(path);
@@ -766,6 +778,10 @@ export class Producer implements Table {
 		hooks.attachAnnouncer(producer, {
 			announce: (route) => this.#advertiseExact(path, front, route),
 			unannounce: () => this.#retractExact(path, front),
+			route: () =>
+				this.#state.local.peek()?.get(path) === front
+					? this.#state.advertisedLocal.peek()?.get(path)
+					: undefined,
 		});
 
 		const previous = created.get(path);
@@ -824,7 +840,7 @@ export class Producer implements Table {
 	 */
 	dynamic(
 		prefix: Path.Valid,
-		route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
+		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
 	): Dynamic {
 		return this.#insertRoute(prefix, Route.normalize(route), true);
 	}
@@ -837,7 +853,7 @@ export class Producer implements Table {
 	 */
 	#receive(
 		prefix: Path.Valid,
-		route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
+		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
 	): Dynamic {
 		return this.#insertRoute(prefix, Route.normalize(route), false);
 	}
@@ -1171,8 +1187,8 @@ export class Consumer {
 				scope === Scope.all
 					? state.originated
 					: new Derived([state.originated], (routes) => scope.projectRoutes(routes)),
-			local: (path) => this.#local(scope.path(path)),
-			demand: (path) => this.#demand(scope.path(path)),
+			local: (path, epoch) => this.#local(scope.path(path), epoch),
+			demand: (path, epoch) => this.#demand(scope.path(path), epoch),
 		});
 	}
 
@@ -1438,7 +1454,8 @@ export class Consumer {
 
 				for (const [path, snap] of active) {
 					const cur = next.get(path);
-					if (!cur || cur.identity !== snap.identity)
+					// A new epoch is another broadcast, even from the same entry.
+					if (!cur || cur.identity !== snap.identity || cur.route.epoch !== snap.route.epoch)
 						producer.append({
 							prefix: path,
 							captures: snap.captures,
@@ -1448,7 +1465,7 @@ export class Consumer {
 				}
 				for (const [path, snap] of next) {
 					const prev = active.get(path);
-					if (!prev || prev.identity !== snap.identity) {
+					if (!prev || prev.identity !== snap.identity || prev.route.epoch !== snap.route.epoch) {
 						producer.append({
 							prefix: path,
 							captures: snap.captures,
@@ -1489,10 +1506,11 @@ export class Consumer {
 	 * The announced local broadcast at `path`, when it beats the originated routes there.
 	 * Resolves through what rebuildOriginated advertised: a peer never sees received routes.
 	 */
-	#local(path: Path.Valid): broadcast.Consumer | undefined {
+	#local(path: Path.Valid, epoch?: Epoch.Valid): broadcast.Consumer | undefined {
 		const local = this.#state.local.peek()?.get(path);
-		if (local && this.#state.localWins(path, this.#state.bestEntry(path, received))) return local;
-		return undefined;
+		if (!local || !this.#state.localWins(path, this.#state.bestEntry(path, received))) return undefined;
+		if (epoch !== undefined && this.#state.advertisedLocal.peek()?.get(path)?.epoch !== epoch) return undefined;
+		return local;
 	}
 
 	/**
@@ -1501,11 +1519,17 @@ export class Consumer {
 	 *
 	 * @internal
 	 */
-	async #demand(path: Path.Valid): Promise<broadcast.Consumer | undefined> {
+	async #demand(path: Path.Valid, epoch?: Epoch.Valid): Promise<broadcast.Consumer | undefined> {
 		const local = this.#local(path);
-		if (local) return local;
+		if (local) {
+			// A peer naming one publisher instance is never handed another.
+			if (epoch !== undefined && this.#state.advertisedLocal.peek()?.get(path)?.epoch !== epoch)
+				throw unroutable();
+			return local;
+		}
 		const entry = this.#state.bestEntry(path, received);
 		if (!entry?.server) return undefined;
+		if (epoch !== undefined && entry.route.peek().epoch !== epoch) throw unroutable();
 
 		const server = entry.server;
 		const live = server.served.get(path);
@@ -1515,6 +1539,9 @@ export class Consumer {
 		server.demanding.set(path, (server.demanding.get(path) ?? 0) + 1);
 		try {
 			for (;;) {
+				// The route may name another instance by the time its handler answers.
+				if (epoch !== undefined && this.#state.bestEntry(path, received)?.route.peek().epoch !== epoch)
+					throw unroutable();
 				const served = server.served.get(path);
 				if (served && served.closed.peek() === undefined) return served;
 				const rejected = server.rejected.get(path);
@@ -1567,8 +1594,18 @@ export class Dynamic {
 		makeDynamic = (prefix, entry, state, retract) => new Dynamic(prefix, entry, state, retract);
 	}
 
-	/** Re-price the route in place. The prefix is fixed at announce time. */
-	update(route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint }): void {
+	/** The route this handle advertises. */
+	get route(): Route {
+		return this.#entry.route.peek();
+	}
+
+	/**
+	 * Replace the route in place. The prefix is fixed at announce time.
+	 *
+	 * The route is taken as given, epoch included: another epoch (or none) names another
+	 * publisher instance, so re-price from the current one, `update({ ...dynamic.route, cost })`.
+	 */
+	update(route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint }): void {
 		if (this.#closed) throw new Error("dynamic is closed");
 		this.#entry.route.set(Route.normalize(route));
 		this.#state.rebuildOriginated();

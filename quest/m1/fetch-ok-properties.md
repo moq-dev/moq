@@ -30,7 +30,7 @@ sends an empty block.
   objects unstamped because no SUBSCRIBE declared a timescale
   (`ietf/publisher.rs`, around line 1346) is a bug to fix here. FETCH_OK declares the track's TIMESCALE, and every
   fetched object keeps its Timestamp, so a fetch-only reader is timed exactly
-  when the track is, as [Typed timedness](/quest/m1/typed-timedness.md)
+  when the track is, as the [untimed model](/quest/m1/untimed-model.md)
   requires. Rejected: omitting timescale from FETCH_OK and leaving fetch-only
   readers untimed.
 - Honour INCLUDE_PROPERTIES (0x35) on FETCH from draft 20, once

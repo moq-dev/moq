@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
+import * as Epoch from "../epoch.ts";
 import { error, fromTransport, reason, StreamCode, StreamError } from "../error.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
@@ -545,6 +546,35 @@ test("a restart replaces an announce that was skipped as a reflected loop", asyn
 	// Retiring the id ends what the restart attached, and nothing else.
 	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, Version.DRAFT_06));
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "end" });
+
+	announced.close();
+	subscriber.close();
+});
+
+test("a restart keeps the epoch of an announce skipped as a reflected loop", async () => {
+	const SELF = 1n;
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_07, SELF);
+	const announced = subscriber.announced();
+	await settle();
+
+	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_07));
+
+	// Skipped: the chain reflects back through us. The epoch still names the instance.
+	const epoch = Epoch.mint();
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: Path.from("room"), epoch, hops: [HopSchema.parse(SELF)] },
+			Version.DRAFT_07,
+		),
+	);
+	await settle();
+
+	// A restart never carries the epoch, so the attached route takes the one the start named.
+	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_A] }, Version.DRAFT_07));
+	const started = await announced.next();
+	expect(started).toMatchObject({ prefix: Path.from("room"), kind: "start" });
+	expect(started?.route.epoch).toBe(epoch);
 
 	announced.close();
 	subscriber.close();

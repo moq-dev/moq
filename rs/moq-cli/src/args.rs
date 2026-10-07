@@ -19,7 +19,7 @@
 //!   conditional on the subcommand.
 //! - The endpoint is one subcommand: a container format (`ts`, `fmp4`, ... read
 //!   from stdin on import, written to stdout on export) or a gateway (`hls`,
-//!   `rtmp`, `srt`, `rtc`). Exactly one per stage, so "which endpoint" is
+//!   `rtmp`, `srt`, `rtc`, `archive`). Exactly one per stage, so "which endpoint" is
 //!   unambiguous and there's no silently-ignored flag.
 //! - `--` starts another stage on the same Origin and the same MoQ attachment, so
 //!   one process can bridge several broadcasts (or both directions at once). Usage
@@ -736,6 +736,8 @@ pub enum ImportSource {
 	Srt(crate::srt::ImportArgs),
 	/// WebRTC: WHEP client pulling a remote (`--connect`) or WHIP server accepting publishes (`--listen`).
 	Rtc(crate::rtc::Args),
+	/// Replay a recording from an object store, serving its groups on demand.
+	Archive(crate::archive::ImportArgs),
 	/// Capture a local source (camera, display, window, app, microphone) and
 	/// encode natively. Run `moq devices` to list them.
 	#[cfg(feature = "capture")]
@@ -876,6 +878,8 @@ pub enum ExportSink {
 	Srt(crate::srt::Args),
 	/// WebRTC: WHIP client pushing to a remote (`--connect`) or WHEP server serving plays (`--listen`).
 	Rtc(crate::rtc::Args),
+	/// Record the broadcast into an object store until it ends.
+	Archive(crate::archive::ExportArgs),
 }
 
 impl ExportSink {
@@ -888,6 +892,7 @@ impl ExportSink {
 			Self::Rtmp(_) => "rtmp",
 			Self::Srt(_) => "srt",
 			Self::Rtc(_) => "rtc",
+			Self::Archive(_) => "archive",
 		})
 	}
 
@@ -1101,6 +1106,7 @@ mod tests {
 			&["rtmp", "--listen", "127.0.0.1:1935"],
 			&["srt", "--listen", "127.0.0.1:9000"],
 			&["rtc", "--listen", "127.0.0.1:8443"],
+			&["archive", "file:///tmp/archive"],
 		];
 		for sink in sinks {
 			export(sink).unwrap().validate().unwrap();

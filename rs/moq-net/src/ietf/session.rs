@@ -95,7 +95,7 @@ impl std::future::Future for Driver {
 	}
 }
 
-pub fn start<S>(config: Config<S>) -> Result<(Driver, crate::goaway::Handle), Error>
+pub fn start<S>(config: Config<S>) -> Result<(Driver, crate::goaway::Handle, crate::session::Setup), Error>
 where
 	S: crate::transport::poll::Boxable,
 {
@@ -133,6 +133,24 @@ where
 	let closing = local_close.clone();
 	let owed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 	let serving = owed.clone();
+
+	// What the peer declared in its SETUP. Seeded now when that stream was already
+	// read (the legacy handshake, or a gated server accept), and filled by the uni
+	// loop otherwise.
+	let peer_setup = peer::PeerSetup::default();
+	let setup_read = peer_declared.is_some();
+	match peer_declared {
+		Some(declared) => peer_setup.set(declared),
+		// A legacy caller that passed nothing (our own tests, and the lite paths):
+		// settle the slot rather than leave the announce loops waiting on a value
+		// that is never coming.
+		None if !cluster::supported(version) => peer_setup.set(peer::Peer::default()),
+		None => {}
+	}
+
+	// Settled already on drafts 14-16, which read the peer's SETUP in the handshake.
+	let setup_seen = crate::session::Setup::Ietf(peer_setup.clone());
+
 	let driver = async move {
 		// Our own Hop ID, taken from whichever origin the caller actually supplied so
 		// every session out of this process stamps the same one and cross-session loop
@@ -146,20 +164,6 @@ where
 		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
 		let publish = publish.unwrap_or_else(|| origin::Producer::empty(Hop::random()).consume());
 		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()));
-
-		// What the peer declared in its SETUP. Seeded now when that stream was already
-		// read (the legacy handshake, or a gated server accept), and filled by the uni
-		// loop otherwise.
-		let peer_setup = peer::PeerSetup::default();
-		let setup_read = peer_declared.is_some();
-		match peer_declared {
-			Some(declared) => peer_setup.set(declared),
-			// A legacy caller that passed nothing (our own tests, and the lite paths):
-			// settle the slot rather than leave the announce loops waiting on a value
-			// that is never coming.
-			None if !cluster::supported(version) => peer_setup.set(peer::Peer::default()),
-			None => {}
-		}
 
 		let res = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
@@ -500,6 +504,7 @@ where
 			future: driver,
 		},
 		goaway_handle,
+		setup_seen,
 	))
 }
 
@@ -1127,7 +1132,7 @@ mod tests {
 		let session = crate::lite::test_transport::ScriptedSession::new(namespace_without_hop_path(VERSION).await);
 		let log = session.log.clone();
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::Clock::sim(),
 			session,
 			setup: None,
@@ -1187,7 +1192,7 @@ mod tests {
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::Clock::sim(),
 			session,
 			setup: None,
@@ -1240,7 +1245,7 @@ mod tests {
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::Clock::sim(),
 			session,
 			setup: None,
@@ -1348,7 +1353,7 @@ mod tests {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let log = session.log.clone();
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::Clock::sim(),
 			session,
 			setup: None,
@@ -1388,7 +1393,7 @@ mod tests {
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
 			let log = session.log.clone();
 
-			let (driver, _goaway) = start(Config {
+			let (driver, _goaway, _) = start(Config {
 				runtime: crate::time::Clock::sim(),
 				session,
 				setup: None,
@@ -1676,7 +1681,7 @@ mod tests {
 				let session =
 					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![payload]);
 				let log = session.log.clone();
-				let (driver, _goaway) = start(Config {
+				let (driver, _goaway, _) = start(Config {
 					runtime: crate::time::Clock::sim(),
 					session,
 					setup: None,
@@ -1779,7 +1784,7 @@ mod tests {
 			.await
 			.expect("open the control stream");
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::Clock::sim(),
 			session,
 			setup: Some(setup),

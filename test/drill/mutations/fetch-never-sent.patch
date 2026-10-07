@@ -1,0 +1,24 @@
+# drill: bursts_cross_a_cluster::loopback
+# expect: Unanswered
+#
+# Removes sending a FETCH. A fetch of an uncached group parks before it opens
+# its stream, so the subscriber's request for a skipped group, and the edge
+# relay's request upstream for it, never reach anything that could answer. The
+# live subscription still delivers each burst's newest group, so only the FETCH
+# recovery of the groups it skipped is removed.
+diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
+index 55006c5f7..93f2f9677 100644
+--- a/rs/moq-net/src/lite/subscriber.rs
++++ b/rs/moq-net/src/lite/subscriber.rs
+@@ -4445,6 +4445,11 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
+
+ 			match &mut self.state {
+ 				FetchRunState::Open { request } => {
++					// MUTATION: never send the FETCH, so nothing ever answers it.
++					if request.is_some() {
++						return Poll::Pending;
++					}
++
+ 					// A peer that sent GOAWAY told us to stop opening streams on this session.
+ 					if self.serve.subscriber.going_away.is_set() {
+ 						request.take().expect("request pending").reject(Error::GoingAway);

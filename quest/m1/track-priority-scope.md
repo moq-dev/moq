@@ -61,7 +61,11 @@ Direction to settle in the draft first, then the code:
   between equal subscriber priorities in `Priority::cmp`
   (`rs/moq-net/src/lite/priority.rs:48`). The
   [ladder controller](/quest/m3/ladder/controller.md), now in m3, wants that
-  tiebreak; this quest owns the answer so the controller only consumes it.
+  tiebreak; this quest owns the answer and the code change, so the controller
+  only consumes it (2026-10-06 audit). Either way, make the docs agree:
+  `Info::priority` in `rs/moq-net/src/model/track.rs` already claims the
+  tiebreak, and the allocator doc in `rs/moq-net/src/model/bandwidth.rs`
+  presents send order as unrelated.
 - A per-session cap on distinct ranks is a scheduling detail; whatever replaces
   the 255-entry sort must stay O(log n) per group under chat-shaped churn.
 
@@ -80,7 +84,5 @@ change.
 
 ## Related
 
-- [Starvation](/quest/m1/qos/starvation.md) - the relay-side signal that
-  shows a starved subscription
 - [Signed priority](/quest/m2/signed-priority.md) - changes the priority type,
   not which streams it competes with

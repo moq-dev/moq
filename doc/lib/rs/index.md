@@ -19,7 +19,7 @@ The reference implementation. Every crate is on
 | [moq-uring](https://docs.rs/moq-uring) | Experimental Linux io\_uring worker: one pinned thread per ring serving moq-lite over its own QUIC stack. |
 | [hang](/lib/rs/hang) | The media layer: catalog, containers, ordered frame delivery. |
 | [moq-mux](/lib/rs/moq-mux) | Import and export fMP4/CMAF, MPEG-TS, Matroska, FLV, and Annex-B. |
-| [moq-archive](https://docs.rs/moq-archive) | Versioned hang recordings on any `object_store` backend: track layout, `.info` JSON, and segment objects. |
+| [moq-archive](https://docs.rs/moq-archive) | Versioned hang recordings on any `object_store` backend: track layout, `.info` JSON, per-track timelines, and span objects. |
 | [moq-video](/lib/rs/moq-video) | Native capture, hardware encode/decode (Apple, Windows, NVIDIA, VAAPI, V4L2, Android), and GPU rendering. |
 | [moq-v4l](https://docs.rs/moq-v4l) | Safe Video4Linux 2 bindings with the kernel headers checked in, so a build needs no libclang. |
 | [moq-audio](/lib/rs/moq-audio) | Microphone and speaker, Opus/PCM/AAC codecs, echo cancellation. |
@@ -87,7 +87,11 @@ URLs may be `https://` (WebTransport, with raw QUIC preferred for native),
 `moql://`/`moqt://` (raw QUIC), or `iroh://`. A `?jwt=` query carries the
 token. `http://` is for a relay on localhost only: it fetches the certificate
 fingerprint unauthenticated before upgrading, so never send a token over it. Connections race
-QUIC against WebSocket and remember which won.
+QUIC against WebSocket and remember which won. When WebSocket wins, a `Connection` keeps
+dialing QUIC and moves onto it once the relay admits that session, handing live tracks over
+at a group boundary and draining the WebSocket session; `Connection::transport()` reports
+which is live. A refused or stalled QUIC session leaves the WebSocket session serving, and
+moq-lite-03 and -04, which give no sign of admission, never upgrade.
 
 The `Default::default()` above is the QUIC transport section, and the same value
 serves a dial and a listener:

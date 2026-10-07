@@ -1,6 +1,6 @@
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::{Hop, Hops, Path, coding::*, origin::Cost};
+use crate::{Epoch, Hop, Hops, Path, coding::*, origin::Cost};
 
 use super::{Message, Version, message::decode_size};
 
@@ -41,9 +41,11 @@ pub fn restart_supported(version: Version) -> bool {
 pub enum AnnounceBroadcast<'a> {
 	/// ANNOUNCE_START (lite-06) / active (older): a broadcast is now available.
 	/// Carries the path suffix, the hop chain, and (lite-06+) the warm and cold
-	/// route costs, and assigns the next announce id.
+	/// route costs, and assigns the next announce id. The epoch (lite-07+) is fixed
+	/// for the announcement's lifetime: a new one is an end and a fresh start.
 	Active {
 		suffix: PathRef<'a>,
+		epoch: Option<Epoch>,
 		hops: HopsRef,
 		cost: Cost,
 	},
@@ -165,12 +167,18 @@ impl AnnounceBroadcast<'_> {
 	#[cfg(test)]
 	pub fn into_owned(self) -> AnnounceBroadcast<'static> {
 		match self {
-			Self::Active { suffix, hops, cost } => AnnounceBroadcast::Active {
+			Self::Active {
+				suffix,
+				epoch,
+				hops,
+				cost,
+			} => AnnounceBroadcast::Active {
 				suffix: PathRef {
 					base: suffix.base,
 					keep: suffix.keep,
 					rest: suffix.rest.into_owned(),
 				},
+				epoch,
 				hops,
 				cost,
 			},
@@ -228,8 +236,14 @@ impl Encode<Version> for AnnounceBroadcast<'_> {
 
 			let prefix = w.prefix_varint();
 			match self {
-				Self::Active { suffix, hops, cost } => {
+				Self::Active {
+					suffix,
+					epoch,
+					hops,
+					cost,
+				} => {
 					suffix.encode(w, version)?;
+					super::epoch::encode_epoch(w, version, epoch.as_ref())?;
 					hops.encode(w, version)?;
 					cost.encode(w, version)?;
 				}
@@ -282,6 +296,7 @@ impl Decode<Version> for AnnounceBroadcast<'_> {
 			let msg = match typ {
 				ANNOUNCE_START => Self::Active {
 					suffix: PathRef::decode(&mut body, version)?,
+					epoch: super::epoch::decode_epoch(&mut body, version)?,
 					hops: HopsRef::decode(&mut body, version)?,
 					cost: Cost::decode(&mut body, version)?,
 				},
@@ -339,6 +354,7 @@ impl AnnounceBroadcast<'_> {
 		Ok(match status {
 			AnnounceStatus::Active => Self::Active {
 				suffix: PathRef::literal(suffix),
+				epoch: None,
 				hops: HopsRef::literal(hops),
 				cost: Cost::UNKNOWN,
 			},
@@ -350,6 +366,7 @@ impl AnnounceBroadcast<'_> {
 			// invalid value there.
 			AnnounceStatus::Restart if restart_supported(version) => Self::Active {
 				suffix: PathRef::literal(suffix),
+				epoch: None,
 				hops: HopsRef::literal(hops),
 				cost: Cost::UNKNOWN,
 			},
@@ -534,6 +551,7 @@ mod tests {
 		// Encode a normal Active, then flip its status byte (1 -> 2).
 		let mut buf = Vec::new();
 		AnnounceBroadcast::Active {
+			epoch: None,
 			suffix: PathRef::literal(Path::new("foo/bar")),
 			hops: HopsRef::default(),
 			cost: Cost::default(),
@@ -624,6 +642,7 @@ mod tests {
 		let mut hops = Hops::new();
 		hops.push(Hop::new(7).unwrap()).unwrap();
 		let msg = AnnounceBroadcast::Active {
+			epoch: None,
 			suffix: PathRef::literal(Path::new("room/cam")),
 			hops: HopsRef::literal(hops.clone()),
 			cost: Cost::UNKNOWN,
@@ -647,6 +666,7 @@ mod tests {
 		let cost = Cost { warm: 12, cold: 30 };
 
 		let active = AnnounceBroadcast::Active {
+			epoch: None,
 			suffix: PathRef::literal(Path::new("room/cam")),
 			hops: HopsRef::literal(hops.clone()),
 			cost,
@@ -672,6 +692,7 @@ mod tests {
 		let cost = Cost { warm: 12, cold: 30 };
 
 		let active = AnnounceBroadcast::Active {
+			epoch: None,
 			suffix: PathRef {
 				base: 2,
 				keep: 3,
@@ -702,8 +723,8 @@ mod tests {
 	#[test]
 	fn a_keep_without_a_base_is_rejected() {
 		for (path_keep, hop_keep) in [(1u8, 0u8), (0, 1)] {
-			// Path base, path keep, empty rest, hop base, no hops, hop keep, cost.
-			let body = [0, path_keep, 0, 0, 0, hop_keep, 0, 0];
+			// Path base, path keep, empty rest, no epoch, hop base, no hops, hop keep, cost.
+			let body = [0, path_keep, 0, 0, 0, 0, hop_keep, 0, 0];
 			let mut buf = vec![ANNOUNCE_START as u8, body.len() as u8];
 			buf.extend_from_slice(&body);
 			assert!(matches!(
@@ -717,6 +738,7 @@ mod tests {
 	#[test]
 	fn a_base_needs_lite07() {
 		let msg = AnnounceBroadcast::Active {
+			epoch: None,
 			suffix: PathRef {
 				base: 1,
 				keep: 1,
@@ -769,6 +791,7 @@ mod tests {
 	#[test]
 	fn route_cost_is_dropped_before_lite06() {
 		let msg = AnnounceBroadcast::Active {
+			epoch: None,
 			suffix: PathRef::literal(Path::new("room/cam")),
 			hops: HopsRef::default(),
 			cost: Cost { warm: 9, cold: 9 },
@@ -777,6 +800,7 @@ mod tests {
 		assert_eq!(
 			got,
 			AnnounceBroadcast::Active {
+				epoch: None,
 				suffix: PathRef::literal(Path::new("room/cam")),
 				hops: HopsRef::default(),
 				cost: Cost::UNKNOWN,

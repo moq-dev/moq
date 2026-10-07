@@ -31,16 +31,17 @@ kind.
   extension, `Merge` wrapper, or flattened generic is needed. One layout for
   relay and clients is given up on purpose.
 - **Publisher: `stats: { track }` in the catalog.** A root section naming one
-  snapshot track: `{ transport, renditions: { <alias>: stats::Track } }`,
+  snapshot track: `{ transport, renditions: { <id>: stats::Track } }`,
   plus container sections flattened in the way `Catalog<E>` flattens
   `ts::Ext`. The stats stay off the catalog track, which would otherwise churn
   for every viewer on each interval.
-- **Keyed by rendition alias** (2026-09-29). Both snapshots key by the
-  catalog's rendition keys, which [catalog track
-  alias](/quest/m1/catalog-track-alias.md) makes aliases unique within a
-  catalog. Nothing repeats the catalog's `video`/`audio` nesting; the kind
+- **Keyed by rendition ID** (2026-09-29). Both snapshots key by the
+  catalog's rendition keys, which [catalog rendition
+  IDs](/quest/m1/catalog-track-id.md) make IDs unique across video and
+  audio within a catalog, refusing a cross-kind duplicate (2026-10-06 audit).
+  Nothing repeats the catalog's `video`/`audio` nesting; the kind
   comes from the catalog entry. A viewer reports a rendition that references
-  another broadcast to the catalog that lists it, under its alias there. The
+  another broadcast to the catalog that lists it, under its ID there. The
   publisher's own snapshot covers only renditions it writes and omits
   referenced ones, whose sender reports them in its own catalog.
   Reason: a track name alone collides once a catalog lists renditions from
@@ -70,7 +71,7 @@ kind.
 - **Trust is the token prefix** (2026-09-29). Whoever the application's
   tokens let publish under the echo path may report, and no report is
   authenticated beyond that.
-- **Feedback track: one snapshot**, `{ transport, renditions: { <alias>:
+- **Feedback track: one snapshot**, `{ transport, renditions: { <id>:
   echo::Track } }`, so the publisher looks up its own renditions directly.
 - **One type per role, shared across kinds.**
   - `stats::Track`: sent frames and bytes, keyframes, skipped frames, target
@@ -108,8 +109,8 @@ connection view and the dashboard flow.
 
 ## Required
 
-- [Catalog track alias](/quest/m1/catalog-track-alias.md) - rendition keys
-  become aliases, the key both snapshots use
+- [Catalog rendition IDs](/quest/m1/catalog-track-id.md) - rendition keys
+  become IDs unique across kinds, the key both snapshots use
 - [Schema](/quest/m1/stats/schema.md) - hang defines the `stats` and
   `echo` catalog sections, their snapshot types, and the draft text
 - [Rust reporters](/quest/m1/stats/rust.md) - the CLI, players, encoders, and

@@ -203,6 +203,7 @@ impl Client {
 			start.recv_bandwidth,
 			crate::driver::Protocol::Lite(Box::new(start.driver)),
 			start.goaway,
+			start.setup,
 		))
 	}
 
@@ -259,7 +260,7 @@ impl Client {
 
 				// Draft-17+: SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
-				let (protocol, goaway) = ietf::start(ietf::Config {
+				let (protocol, goaway, setup) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					session: session.clone(),
 					setup: None,
@@ -285,6 +286,7 @@ impl Client {
 					None,
 					crate::driver::Protocol::Ietf(protocol),
 					goaway,
+					setup,
 				));
 			}
 			Some(ALPN_16) => {
@@ -371,7 +373,7 @@ impl Client {
 			.copied()
 			.ok_or(Error::Version)?;
 
-		let (recv_bw, protocol, goaway) = match version {
+		let (recv_bw, protocol, goaway, setup) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				let start = lite::start(lite::Config {
@@ -392,6 +394,7 @@ impl Client {
 					start.recv_bandwidth,
 					crate::driver::Protocol::Lite(Box::new(start.driver)),
 					start.goaway,
+					start.setup,
 				)
 			}
 			Version::Ietf(v) => {
@@ -410,7 +413,7 @@ impl Client {
 
 				let stream = stream.with_version(v);
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
-				let (protocol, goaway) = ietf::start(ietf::Config {
+				let (protocol, goaway, setup) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					session: session.clone(),
 					setup: Some(stream),
@@ -427,11 +430,13 @@ impl Client {
 					peer_declared: Some(peer_declared),
 					early_unis: Vec::new(),
 				})?;
-				(None, crate::driver::Protocol::Ietf(protocol), goaway)
+				(None, crate::driver::Protocol::Ietf(protocol), goaway, setup)
 			}
 		};
 
-		Ok(Session::new(runtime, session, version, recv_bw, protocol, goaway))
+		Ok(Session::new(
+			runtime, session, version, recv_bw, protocol, goaway, setup,
+		))
 	}
 }
 
