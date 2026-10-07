@@ -58,7 +58,7 @@ import {
 // drafts, or TRACK_INFO on lite-05+) may take. Browsers cap concurrent QUIC streams
 // (Chrome ~100) and we open with waitUntilAvailable, so past the cap the open blocks
 // until the peer frees a slot. The timeout turns a stall into a clear error.
-const SUBSCRIBE_SETUP_TIMEOUT_MS = 10_000;
+export const SUBSCRIBE_SETUP_TIMEOUT_MS = 10_000;
 
 // Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
 // candidate outranks it, while the route stays selectable as the last path. Matches Rust
@@ -165,8 +165,7 @@ export class Subscriber {
 	// stream on the peer having advertised Probe >= Report.
 	#peerSetup?: Signal<Setup | undefined>;
 
-	// Settles when the peer sends GOAWAY. New opens stop; subscriptions already running
-	// keep flowing until the session closes.
+	// Settles when the peer sends GOAWAY, repricing this session's routes to the drain cost.
 	#goaway?: GetPromise<Drain>;
 
 	// Distinguishes failures from streams torn down by Subscriber.close().
@@ -199,13 +198,10 @@ export class Subscriber {
 		this.#goaway = goaway;
 	}
 
-	// The peer told us to stop opening streams on this session.
+	// Whether the peer has sent GOAWAY. Requests keep opening here until a replacement
+	// session's route outranks this one.
 	#goingAway(): boolean {
 		return this.#goaway?.peek() !== undefined;
-	}
-
-	#goingAwayError(): StreamError {
-		return new StreamError(StreamCode.GoingAway, { message: "going away" });
 	}
 
 	// What a route costs once the peer has asked us to leave. A later announce on a
@@ -240,13 +236,6 @@ export class Subscriber {
 		hidden: boolean,
 	): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
-		// The peer asked us to stop opening streams. Leaving the consumer pending, rather
-		// than closing it, keeps a forwarder from treating discovery as failed and answering
-		// new requests on this session.
-		if (this.#goingAway()) {
-			await announced.closed;
-			return;
-		}
 		// Lite04/05: send our own session-level Hop ID so the peer can skip announces
 		// whose hop chain already passed through us. Encoding drops it on every other
 		// version, where we drop the reflected announce on receipt instead. Matches the
@@ -341,7 +330,6 @@ export class Subscriber {
 				}
 			};
 			if (this.#goaway) void this.#goaway.then(() => drainAdvertised());
-			if (this.#goingAway()) drainAdvertised();
 
 			// Lite06+: announce ids. Each received `active` implicitly assigns the next
 			// per-stream ordinal; `endedId`/`restart` reference it, and lite-07 bases copy
@@ -564,13 +552,6 @@ export class Subscriber {
 	}
 
 	async #runSubscribe(broadcast: Path.Valid, epoch: Epoch.Valid | undefined, request: track.Request) {
-		// A peer that sent GOAWAY told us to stop opening streams. Reject before accepting,
-		// so the caller sees the refusal and nothing is registered.
-		if (this.#goingAway()) {
-			request.reject(this.#goingAwayError());
-			return;
-		}
-
 		const id = this.#subscribeNext++;
 		const subscription = request.subscription;
 		const initialBounds = groupBounds(subscription.groups);
@@ -592,14 +573,16 @@ export class Subscriber {
 			epoch,
 			track: request.name,
 			priority: subscription.priority ?? 0,
-			maxAge: subscription.maxAge,
+			maxDelay: subscription.maxDelay,
 			startGroup: subscription.groups?.start === undefined ? undefined : bounds.start,
 			endGroup: inclusiveGroupEnd(bounds.end),
 		});
 
 		// Open the stream under a timeout. The stream handle flows back via `state`
-		// so the timeout path can abort it if it finishes opening after the deadline.
-		const state: { stream?: Stream } = {};
+		// so the timeout path can abort it if it finishes opening after the deadline,
+		// and `cancel` ends a setup still running once the deadline passed, resetting
+		// its TRACK stream so a peer that never answers can't hold one per attempt.
+		const state: { stream?: Stream; cancel: AbortController } = { cancel: new AbortController() };
 		const setup = this.#openSubscribe(state, msg, request, id, timescale);
 
 		let opened: { stream: Stream; entry: SubscribeEntry };
@@ -614,6 +597,7 @@ export class Subscriber {
 			// The setup outlived its deadline waiting for the first response: a control
 			// timeout, not content that arrived late.
 			const e = err instanceof TimeoutError ? controlTimeout(err) : await sessionCause(this.#quic, err);
+			state.cancel.abort(e);
 			request.reject(e);
 			this.#subscribes.delete(id);
 			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${reason(e)}`);
@@ -698,7 +682,7 @@ export class Subscriber {
 	// SUBSCRIBE is accepted implicitly (no SUBSCRIBE_OK). Older drafts carry no
 	// per-track properties, so they resolve to defaults and just drain SUBSCRIBE_OK.
 	async #openSubscribe(
-		state: { stream?: Stream },
+		state: { stream?: Stream; cancel: AbortController },
 		msg: Subscribe,
 		request: track.Request,
 		id: bigint,
@@ -709,7 +693,10 @@ export class Subscriber {
 
 		if (supportsTrackStream(this.version)) {
 			// Fetch the immutable properties once via the TRACK stream.
-			const info = await this.#trackInfo(msg.broadcast, msg.epoch, msg.track);
+			const info = await this.#trackInfo(msg.broadcast, msg.epoch, msg.track, state.cancel.signal);
+			// The deadline passed as TRACK_INFO landed: the request is already rejected, so don't
+			// register it again or send its SUBSCRIBE.
+			state.cancel.signal.throwIfAborted();
 			producer = request.accept(this.#toModelInfo(info));
 			timescale.set(info.timescale);
 		} else {
@@ -723,21 +710,23 @@ export class Subscriber {
 		const entry: SubscribeEntry = {
 			track: producer,
 			timescale,
-			// The effective max age is the stopgap grace: the wrong clock (it bounds
+			// The effective max delay is the stopgap grace: the wrong clock (it bounds
 			// presentation-time drift), but it is how long the subscriber was willing to wait
 			// for a late group anyway. Already the smaller of the subscriber's and the track's.
 			tail: new Tail({
 				grace: () => {
-					const maxAge = producer.subscription.peek()?.maxAge ?? Time.Milli.zero;
-					return maxAge > 0 ? maxAge : TAIL_GRACE_MS;
+					const maxDelay = producer.subscription.peek()?.maxDelay ?? Time.Milli.zero;
+					return maxDelay > 0 ? maxDelay : TAIL_GRACE_MS;
 				},
 			}),
 			requested: msg.startGroup,
 		};
 		this.#subscribes.set(id, entry);
 
-		if (this.#goingAway()) throw this.#goingAwayError();
 		state.stream = await Stream.open(this.#quic, { version: this.version });
+		// The deadline passed while the open waited: the late-setup handler resets the stream, so
+		// don't send a SUBSCRIBE on it first.
+		state.cancel.signal.throwIfAborted();
 		await state.stream.writer.u53(StreamId.Subscribe);
 		await msg.encode(state.stream.writer, this.version);
 
@@ -753,23 +742,31 @@ export class Subscriber {
 	}
 
 	// Opens a TRACK stream, reads the single TRACK_INFO, and FINs. Lite-05+ only.
-	async #trackInfo(broadcast: Path.Valid, epoch: Epoch.Valid | undefined, track: string): Promise<TrackInfo> {
-		return this.#exchange({ version: this.version }, async (stream) => {
-			await stream.writer.u53(StreamId.Track);
-			await new TrackMessage(broadcast, track, epoch).encode(stream.writer, this.version);
-			const info = await TrackInfo.decode(stream.reader, this.version);
-			// The publisher FINs after TRACK_INFO; FIN our side too.
-			stream.close();
-			return info;
-		});
+	async #trackInfo(
+		broadcast: Path.Valid,
+		epoch: Epoch.Valid | undefined,
+		track: string,
+		signal?: AbortSignal,
+	): Promise<TrackInfo> {
+		return this.#exchange(
+			{ version: this.version },
+			async (stream) => {
+				await stream.writer.u53(StreamId.Track);
+				await new TrackMessage(broadcast, track, epoch).encode(stream.writer, this.version);
+				const info = await TrackInfo.decode(stream.reader, this.version);
+				// The publisher FINs after TRACK_INFO; FIN our side too.
+				stream.close();
+				return info;
+			},
+			signal,
+		);
 	}
 
 	// Opens a stream and runs a request/response exchange on it, resetting the stream if `run`
-	// fails. Subscriber.close() also resets it while `run` is pending, so a peer that never
-	// answers cannot hold it open, and a stream that opens after the close is reset at once.
-	async #exchange<T>(options: OpenOptions, run: (stream: Stream) => Promise<T>): Promise<T> {
-		if (this.#goingAway()) throw this.#goingAwayError();
-		const closed = this.#closed.signal;
+	// fails. Subscriber.close() or `signal` also resets it while `run` is pending, so a peer that
+	// never answers cannot hold it open, and a stream that opens after either is reset at once.
+	async #exchange<T>(options: OpenOptions, run: (stream: Stream) => Promise<T>, signal?: AbortSignal): Promise<T> {
+		const closed = signal ? AbortSignal.any([this.#closed.signal, signal]) : this.#closed.signal;
 		closed.throwIfAborted();
 		const stream = await Stream.open(this.#quic, options);
 		const abort = () => stream.abort(error(closed.reason));
@@ -830,8 +827,6 @@ export class Subscriber {
 		if (entry && !entry.group.isClosed) {
 			consumer = entry.group.mirror();
 		} else {
-			// A fetch already in flight keeps its stream. A new one does not open.
-			if (this.#goingAway()) throw this.#goingAwayError();
 			const group = new netGroup.Producer(sequence);
 			consumer = group.mirror();
 			entry = {
@@ -1060,7 +1055,7 @@ export class Subscriber {
 		const stopped: Promise<null> = race([track.closed, stream.reader.closed]).then(() => null);
 		let lastSent: track.Subscription = {
 			priority: msg.priority,
-			maxAge: Time.Milli(msg.maxAge),
+			maxDelay: Time.Milli(msg.maxDelay),
 			groups: {
 				start: msg.startGroup === undefined ? undefined : { included: msg.startGroup },
 				end: msg.endGroup === undefined ? undefined : { excluded: exclusiveGroupEnd(msg.endGroup) ?? 0 },
@@ -1088,10 +1083,10 @@ export class Subscriber {
 			}
 
 			// Round-trip the other Subscribe parameters so the publisher doesn't
-			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxAge/etc.
+			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxDelay/etc.
 			const update = new SubscribeUpdate({
 				priority: current.priority ?? 0,
-				maxAge: current.maxAge,
+				maxDelay: current.maxDelay,
 				startGroup: current.groups?.start === undefined ? undefined : bounds.start,
 				endGroup: inclusiveGroupEnd(bounds.end),
 			});
@@ -1106,7 +1101,7 @@ export class Subscriber {
 		const bg = groupBounds(b.groups);
 		return (
 			(a.priority ?? 0) === (b.priority ?? 0) &&
-			(a.maxAge ?? 0) === (b.maxAge ?? 0) &&
+			(a.maxDelay ?? 0) === (b.maxDelay ?? 0) &&
 			ag.start === bg.start &&
 			ag.end === bg.end
 		);
@@ -1270,8 +1265,7 @@ export class Subscriber {
 			if (probe < ProbeLevel.Report) return;
 		}
 
-		// Probe is best-effort telemetry. After GOAWAY there is nothing to open and nothing
-		// to fail: the session keeps serving what it already has.
+		// A session that is going away has no use for a new estimate.
 		if (this.#goingAway()) return;
 
 		// Probe is best-effort: any failure (stream reset by peer, missing peer support,

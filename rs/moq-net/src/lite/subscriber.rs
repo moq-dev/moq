@@ -38,8 +38,8 @@ pub(super) struct SubscriberConfig<S: crate::transport::poll::Session> {
 	/// Local policy for what pulling from this peer costs, overriding whatever it
 	/// declared in its SETUP. `None` charges the peer's declared price.
 	pub cost: Option<u64>,
-	/// Set once the peer sends a GOAWAY; new request streams are then rejected
-	/// with [`Error::GoingAway`] (the peer told us to stop asking).
+	/// Set once the peer sends a GOAWAY; this session's routes then cost
+	/// [`crate::origin::Cost::DRAIN`], so a replacement session outranks it.
 	pub going_away: crate::goaway::GoingAway,
 }
 
@@ -141,15 +141,6 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	/// The recorded session end, or [`Error::Dropped`] when nothing recorded one.
 	fn end_reason(&self) -> Error {
 		self.ended.lock().clone().unwrap_or(Error::Dropped)
-	}
-
-	/// Reject a new request once the peer has sent a GOAWAY: it told us to stop
-	/// opening streams on this session (existing subscriptions keep flowing).
-	fn check_going_away(&self) -> Result<(), Error> {
-		if self.going_away.is_set() {
-			return Err(Error::GoingAway);
-		}
-		Ok(())
 	}
 
 	/// What pulling content across this session's link costs, added to the route cost
@@ -1172,8 +1163,8 @@ impl<S: crate::transport::poll::Session> ProbeStream<S> {
 		loop {
 			match &mut self.state {
 				ProbeState::Open => {
-					// After a GOAWAY the peer must not see new streams. Probe is
-					// best-effort; skip it rather than erroring.
+					// Probe is best-effort telemetry; a session that is going away
+					// has no use for a new estimate, so skip it rather than erroring.
 					if self.subscriber.going_away.is_set() {
 						return Poll::Ready(Ok(()));
 					}
@@ -1258,8 +1249,6 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 		loop {
 			match &mut self.state {
 				PrefixState::Open => {
-					// A peer that sent GOAWAY told us to stop opening streams on this session.
-					self.subscriber.check_going_away()?;
 					let mut stream = ready!(Stream::poll_open(
 						&mut self.subscriber.session,
 						self.subscriber.version,
@@ -1496,7 +1485,7 @@ mod tests {
 		let mut sub = SubStream {
 			stream,
 			id: 0,
-			max_age: Duration::ZERO,
+			max_delay: Duration::ZERO,
 			start: Some(Position::group(2)),
 			priority: 0,
 			requested: Some(Position::group(2)),
@@ -3221,7 +3210,7 @@ struct SubStream<S: crate::transport::poll::Session> {
 	id: u64,
 	/// Original SUBSCRIBE params, echoed in every SUBSCRIBE_UPDATE; refreshed as the
 	/// downstream aggregate changes.
-	max_age: Duration,
+	max_delay: Duration,
 	start: Option<Position>,
 	priority: u8,
 	/// The start the SUBSCRIBE itself carried, fixed for the stream's life. A
@@ -3553,9 +3542,9 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						// SUBSCRIBE_UPDATE (Lite03+ only; older peers can't carry one).
 						let start_moved = active.start != subscription.start;
 						active.priority = subscription.priority;
-						active.max_age = subscription.max_age;
+						active.max_delay = subscription.max_delay;
 						if let Ok(mut tail) = active.tail.write() {
-							tail.set_grace(tail::grace(subscription.max_age));
+							tail.set_grace(tail::grace(subscription.max_delay));
 							// A lowered floor owes groups nobody asked for until now.
 							if let Some(start) = subscription.start {
 								let floor = active.start.map(|start| start.group).or(active.served);
@@ -3632,7 +3621,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 
 		tracing::info!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
 
-		let tail = kio::Producer::new(Tail::new(tail::grace(subscription.max_age)));
+		let tail = kio::Producer::new(Tail::new(tail::grace(subscription.max_delay)));
 		self.subscriber.subscribes.lock().insert(
 			id,
 			TrackEntry {
@@ -3731,7 +3720,7 @@ fn buffer_update<S: crate::transport::poll::Session>(
 	let bounds = WireBounds::new(active.start, end);
 	active.stream.writer.buffer(&lite::SubscribeUpdate {
 		priority: active.priority,
-		max_age: active.max_age,
+		max_delay: active.max_delay,
 		start_group: bounds.start_group,
 		end_group: bounds.end_group,
 		start_frame: bounds.start_frame,
@@ -3772,8 +3761,6 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 		loop {
 			match &mut self.state {
 				EstablishState::Open => {
-					// A peer that sent GOAWAY told us to stop opening streams.
-					self.serve.subscriber.check_going_away()?;
 					let mut stream = ready!(Stream::poll_open(
 						&mut self.session,
 						self.serve.subscriber.version,
@@ -3787,7 +3774,7 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 						broadcast: self.serve.path.as_path(),
 						track: self.serve.name.as_str().into(),
 						priority: self.subscription.priority,
-						max_age: self.subscription.max_age,
+						max_delay: self.subscription.max_delay,
 						start_group: bounds.start_group,
 						end_group: bounds.end_group,
 						start_frame: bounds.start_frame,
@@ -3831,7 +3818,7 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 		SubStream {
 			stream,
 			id: self.id,
-			max_age: self.subscription.max_age,
+			max_delay: self.subscription.max_delay,
 			start: self.subscription.start,
 			priority: self.subscription.priority,
 			requested: self.subscription.start,
@@ -4018,7 +4005,6 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 		loop {
 			match &mut self.state {
 				TrackInfoState::Open => {
-					serve.subscriber.check_going_away()?;
 					let mut stream = ready!(Stream::poll_open(&mut self.session, serve.subscriber.version, &mut cx))?;
 					stream.writer.buffer(&lite::ControlType::Track)?;
 					stream.writer.buffer(&lite::Track {
@@ -4355,12 +4341,12 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 									0 => end.group,
 									_ => end.group.saturating_add(1),
 								});
-								// The effective max age is the stopgap grace: the wrong clock
+								// The effective max delay is the stopgap grace: the wrong clock
 								// (it bounds presentation-time drift), but it is how long the
 								// subscriber was willing to wait for a late group anyway.
 								if let Ok(mut tail) = active.tail.write() {
 									tail.set_grace(tail::grace(
-										subscription.map(|sub| sub.max_age).unwrap_or_default(),
+										subscription.map(|sub| sub.max_delay).unwrap_or_default(),
 									));
 									tail.expire(serve.subscriber.runtime.now());
 								}
@@ -4480,13 +4466,6 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 
 			match &mut self.state {
 				FetchRunState::Open { request } => {
-					// A peer that sent GOAWAY told us to stop opening streams on this session.
-					if self.serve.subscriber.going_away.is_set() {
-						request.take().expect("request pending").reject(Error::GoingAway);
-						self.state = FetchRunState::Done;
-						return Poll::Ready(());
-					}
-
 					let mut stream = match ready!(Stream::poll_open(
 						&mut self.session,
 						self.serve.subscriber.version,

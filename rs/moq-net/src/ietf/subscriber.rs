@@ -580,8 +580,8 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	state: Lock<State>,
 	tasks: Tasks,
 	version: Version,
-	// Set once the peer sends a GOAWAY; new SUBSCRIBEs are then rejected with
-	// Error::GoingAway (the peer told us to stop opening streams).
+	// Set once the peer sends a GOAWAY; this session's routes then cost
+	// Cost::DRAIN, so a replacement session outranks it.
 	going_away: crate::goaway::GoingAway,
 	// What this session may allocate up front for objects still arriving.
 	frames: frame::Budget,
@@ -840,12 +840,6 @@ where
 		mut stream: Stream<T, Version>,
 		prefix: PathOwned,
 	) -> Result<(), Error> {
-		// A peer that sent GOAWAY told us to stop opening requests on this session,
-		// announce-interest included (draft-19 sect 10.4).
-		if self.going_away.is_set() {
-			return Err(Error::GoingAway);
-		}
-
 		// Hidden namespaces are requested too, as on moq-lite: the session mirrors the
 		// peer into the origin and each local reader opts in on its own. The parameter
 		// fails decoding at a peer that doesn't know it, so it waits on the peer's SETUP
@@ -1727,11 +1721,6 @@ where
 	) {
 		// Data streams wait on the alias bound by SUBSCRIBE_OK, so leave the model request
 		// pending until its immutable track metadata is known.
-		if self.going_away.is_set() {
-			request.reject(Error::GoingAway);
-			return;
-		}
-
 		let track_name = request.name().to_owned();
 		// Group FETCHes for cache misses: standalone, so they outlive each subscription.
 		let mut group_fetches = TaskSet::owned();
@@ -3385,10 +3374,6 @@ where
 	) {
 		let sequence = request.sequence();
 		let start = request.frame_start();
-		if self.going_away.is_set() {
-			request.reject(Error::GoingAway);
-			return;
-		}
 		// Our FETCH still encodes the Fetch Type field that draft-20 removed.
 		if Filter::is_draft20(self.version) {
 			request.reject(Error::Unsupported);
@@ -7165,7 +7150,7 @@ mod stitch_tests {
 		}
 
 		/// A reader over the next scripted stream, standing in for one the peer opened.
-		async fn stream(&self) -> Reader<<ScriptedSession as web_transport_trait::poll::Session>::RecvStream, Version> {
+		async fn stream(&self) -> Reader<<ScriptedSession as crate::transport::poll::Session>::RecvStream, Version> {
 			let mut session = self.session.clone();
 			let (_, recv) = session.open_bi().await.unwrap();
 			Reader::new(recv, VERSION)
@@ -7856,11 +7841,11 @@ mod stitch_tests {
 			],
 		)
 		.with_joining(JoiningFetch::Absolute { group_id: START }, FETCH, largest);
-		// Keep every fetched group: the default max-age of zero would drop each one as
+		// Keep every fetched group: the default max delay of zero would drop each one as
 		// its successor arrives, and the stitch would hang waiting on a group already skipped.
 		let mut consumer = h
 			.track
-			.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(60)));
+			.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(60)));
 
 		let mut fill = h.stream().await;
 		let mut tail = h.stream().await;
@@ -8062,7 +8047,7 @@ mod stitch_tests {
 	/// A subscriber reading one scripted group fetch stream, already past its header.
 	struct GroupFetchRun {
 		subscriber: Subscriber<ScriptedSession>,
-		stream: Reader<<ScriptedSession as web_transport_trait::poll::Session>::RecvStream, Version>,
+		stream: Reader<<ScriptedSession as crate::transport::poll::Session>::RecvStream, Version>,
 		track: track::Producer,
 		_tasks: (Tasks, TaskSet),
 	}

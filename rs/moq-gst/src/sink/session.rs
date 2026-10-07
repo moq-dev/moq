@@ -282,7 +282,11 @@ impl Session {
 		let _rt = RUNTIME.enter();
 
 		let origin = moq_tokio::origin::spawn();
-		let mut broadcast = origin.publish(&settings.broadcast, moq_net::origin::Route::default())?;
+		// Each run is a new publisher instance: a restarted pipeline takes over from one whose route still
+		// lingers, rather than resuming viewers into the old run's group sequence. Reconnects keep it.
+		let epoch = moq_net::Epoch::mint();
+		gst::info!(CAT, "publishing {} under epoch {epoch}", settings.broadcast);
+		let mut broadcast = origin.publish(&settings.broadcast, moq_net::origin::Route::default().with_epoch(epoch))?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default())?;
 
 		let status = Arc::new(Status::default());
@@ -530,7 +534,7 @@ mod tests {
 		assert_eq!(structure.get::<u64>("ended"), Ok(2));
 	}
 
-	fn started() -> (Session, moq_tokio::Connection) {
+	fn started_with_broadcast() -> (Session, moq_net::broadcast::Producer) {
 		gst::init().unwrap();
 		let settings = ResolvedSettings {
 			url: "https://127.0.0.1:1".parse().unwrap(),
@@ -539,10 +543,31 @@ mod tests {
 			quic_idle_timeout: None,
 			quic_keep_alive: None,
 		};
-		let (session, registration, _, _) = Session::start(settings, glib::WeakRef::new()).unwrap();
+		let (session, registration, broadcast, _) = Session::start(settings, glib::WeakRef::new()).unwrap();
 		registration.mark_registered();
+		(session, broadcast)
+	}
+
+	fn started() -> (Session, moq_tokio::Connection) {
+		let (session, _) = started_with_broadcast();
 		let connection = session.connection.clone();
 		(session, connection)
+	}
+
+	fn announced_epoch(broadcast: &moq_net::broadcast::Producer) -> moq_net::Epoch {
+		broadcast.route().expect("announced").epoch.expect("an epoch")
+	}
+
+	// Without an epoch, a restart whose old route lingers resumes viewers into the old run's groups.
+	#[test]
+	fn each_run_announces_a_newer_epoch() {
+		let (first, first_broadcast) = started_with_broadcast();
+		let first_epoch = announced_epoch(&first_broadcast);
+		first.stop();
+
+		let (second, second_broadcast) = started_with_broadcast();
+		assert!(announced_epoch(&second_broadcast) > first_epoch);
+		second.stop();
 	}
 
 	fn is_closed(connection: &moq_tokio::Connection) -> bool {

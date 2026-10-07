@@ -145,7 +145,7 @@ Both bounds may be refined to a Frame within their Group, so a subscription can 
 
 The subscriber and publisher both indicate their delivery preference:
 - `Priority` indicates if Track A should be transmitted instead of Track B.
-- `Subscriber Max Age` indicates the maximum age before a non-latest Group is dropped from live delivery; `Publisher Max Age` indicates the maximum age before a non-latest Group is dropped from the publisher's cache.
+- `Subscriber Max Age` indicates how far a non-latest Group may fall behind the latest Group before it is dropped from live delivery; `Publisher Max Age` indicates the maximum age before a non-latest Group is dropped from the publisher's cache.
 
 The combination of these preferences enables the most important content to arrive during network degradation while still respecting encoding dependencies.
 
@@ -521,7 +521,7 @@ Either endpoint can open a Goaway Stream (0x5) to initiate a graceful session sh
 
 The sender sends a GOAWAY message containing an optional new session URI.
 If the URI is non-empty, the peer SHOULD establish a new session at the provided URI and migrate any active subscriptions.
-The peer MUST NOT open new streams on the current session after receiving a GOAWAY.
+After receiving a GOAWAY, the peer MAY keep opening requests on the current session until it has moved to a replacement session, and the sender MUST keep answering them until the session ends.
 
 The sender closes the stream (FIN) when it is ready to terminate the session.
 The peer SHOULD close all streams and the session after migrating or when it no longer needs the session.
@@ -1382,6 +1382,7 @@ The `Message Length` describes the payload size on the wire.
 
 - The subscriber FINs its Subscribe Stream after settling its tail; graceful session close waits for that FIN or reset.
 - A refusal is not retried at another route of the same prefix either.
+- A GOAWAY recipient MAY keep opening requests on the current session until it has moved to a replacement session, which the sender MUST keep answering; previously it MUST NOT open new streams.
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
 - Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it. Earlier versions carry no such position, so a subscriber takes the first frame instead.
 - Added `Epoch` to ANNOUNCE_START, SUBSCRIBE, TRACK, and FETCH: a UUIDv7 naming the publisher instance, or empty. A path and an Epoch name one Broadcast. A relay MAY move a subscription between routes with the same Epoch, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between routes with different Epochs or none. The newest Epoch wins a path and ends subscriptions to the older one. Replaces the first-hop identity.

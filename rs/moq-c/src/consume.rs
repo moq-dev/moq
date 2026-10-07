@@ -402,7 +402,7 @@ impl Consume {
 		&mut self,
 		catalog: Id,
 		index: usize,
-		max_age: std::time::Duration,
+		max_delay: std::time::Duration,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
@@ -440,7 +440,7 @@ impl Consume {
 					.subscribe(
 						moq_net::track::Subscription::default()
 							.with_priority(hang::catalog::PRIORITY.video)
-							.with_max_age(max_age),
+							.with_max_delay(max_delay),
 					)
 					.await?;
 				let track = moq_mux::container::Consumer::new(track, container);
@@ -463,7 +463,7 @@ impl Consume {
 		&mut self,
 		catalog: Id,
 		index: usize,
-		max_age: std::time::Duration,
+		max_delay: std::time::Duration,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
@@ -496,7 +496,7 @@ impl Consume {
 					.subscribe(
 						moq_net::track::Subscription::default()
 							.with_priority(hang::catalog::PRIORITY.audio)
-							.with_max_age(max_age),
+							.with_max_delay(max_delay),
 					)
 					.await?;
 				let track = moq_mux::container::Consumer::new(track, container);

@@ -160,8 +160,7 @@ export class Subscriber {
 	// Whether the peer understands the HIDDEN parameter (MoQ Hidden).
 	#hidden: boolean;
 
-	// Settles when the peer sends GOAWAY. New opens stop; subscriptions already running
-	// keep flowing until the session closes.
+	// Settles when the peer sends GOAWAY, repricing this session's routes to the drain cost.
 	#goaway?: GetPromise<Drain>;
 
 	/** Marks this subscriber's deliberate local session close. @internal */
@@ -202,13 +201,10 @@ export class Subscriber {
 		if (goaway) void goaway.then(() => this.#drainAnnounced());
 	}
 
-	// The peer told us to stop opening streams on this session.
+	// Whether the peer has sent GOAWAY. Requests keep opening here until a replacement
+	// session's route outranks this one.
 	#goingAway(): boolean {
 		return this.#goaway?.peek() !== undefined;
-	}
-
-	#goingAwayError(): StreamError {
-		return new StreamError(StreamCode.GoingAway, { message: "going away" });
 	}
 
 	// What a route costs once the peer has asked us to leave.
@@ -363,15 +359,6 @@ export class Subscriber {
 	}
 
 	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, hidden: boolean) {
-		// The peer asked us to stop opening streams, including through the draft-14 to -16
-		// adapter (virtual openBi and native openNativeBi alike). Leaving the consumer
-		// pending, rather than closing it, keeps a forwarder from treating discovery as
-		// failed and answering new requests on this session.
-		if (this.#goingAway()) {
-			await announced.closed;
-			return;
-		}
-
 		const version = this.#session.version;
 
 		// Suffixes live on this stream, so a repeat is recognized as an update to the
@@ -582,13 +569,6 @@ export class Subscriber {
 	}
 
 	async #runSubscribe(broadcast: Path.Valid, request: track.Request) {
-		// A peer that sent GOAWAY told us to stop opening streams. Reject before taking a
-		// request id, so nothing is registered and the caller sees the refusal.
-		if (this.#goingAway()) {
-			request.reject(this.#goingAwayError());
-			return;
-		}
-
 		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) {
 			request.reject(await this.#closedSession());
@@ -611,8 +591,8 @@ export class Subscriber {
 		// The publisher can be serving before it answers, so waiting only on the response
 		// would miss the local side going away and leave it serving a track nobody reads.
 		// Demand returning before we commit is not abandonment, matching the serving loop.
+		const demand = producer.demand();
 		const waitAbandoned = async (): Promise<null> => {
-			const demand = producer.demand();
 			// An info-only lookup attaches no subscriber yet still waits on SUBSCRIBE_OK for
 			// the track info, so only demand that arrived and then left is abandonment.
 			while (!demand.used.peek() && demand.closed.peek() === undefined) {
@@ -626,24 +606,34 @@ export class Subscriber {
 
 		let stream: Stream;
 		let trackAlias: bigint;
+		const abandoned = new Error("subscribe abandoned before it was accepted");
 		try {
-			const result = await race([
-				withTimeout(
-					setup,
-					SUBSCRIBE_OK_TIMEOUT_MS,
-					`subscribe timed out after ${SUBSCRIBE_OK_TIMEOUT_MS}ms waiting for SUBSCRIBE_OK (browser stream limit reached?)`,
-				),
-				waitAbandoned(),
-			]);
-
-			if (result === null) throw new Error("subscribe abandoned before it was accepted");
-
-			stream = result.stream;
-			trackAlias = result.alias;
+			// Returning demand keeps the same setup and its original deadline.
+			const accepted = withTimeout(
+				setup,
+				SUBSCRIBE_OK_TIMEOUT_MS,
+				`subscribe timed out after ${SUBSCRIBE_OK_TIMEOUT_MS}ms waiting for SUBSCRIBE_OK (browser stream limit reached?)`,
+			);
+			for (;;) {
+				const result = await race([accepted, waitAbandoned()]);
+				if (result !== null) {
+					stream = result.stream;
+					trackAlias = result.alias;
+					break;
+				}
+				if (demand.closed.peek() === undefined && demand.used.peek()) continue;
+				throw abandoned;
+			}
 			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			// A control request that timed out is not late content, so it carries its own code.
-			const e = err instanceof TimeoutError ? controlTimeout(err) : await sessionCause(this.#quic, err);
+			// Local abandonment must commit without yielding after the demand check.
+			const e =
+				err === abandoned
+					? abandoned
+					: err instanceof TimeoutError
+						? controlTimeout(err)
+						: await sessionCause(this.#quic, err);
 			request.reject(e);
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
@@ -802,7 +792,6 @@ export class Subscriber {
 	): Promise<{ stream: Stream; alias: bigint }> {
 		const version = this.#session.version;
 
-		if (this.#goingAway()) throw this.#goingAwayError();
 		state.stream = await this.#session.openBi();
 
 		// The timeout can fire while the open is still in flight, in which case cleanup ran

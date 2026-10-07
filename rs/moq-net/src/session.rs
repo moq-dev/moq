@@ -2,7 +2,7 @@
 
 use std::{sync::Arc, task::Poll, time::Duration};
 
-use web_transport_trait::Stats as _;
+use crate::transport::Stats as _;
 
 use crate::{Error, SessionError, Version, bandwidth, goaway};
 
@@ -293,10 +293,10 @@ impl Session {
 	/// Observe a GOAWAY from the peer, telling us to migrate elsewhere.
 	///
 	/// [`peek`](goaway::Consumer::peek) is the cheap synchronous check;
-	/// [`recv`](goaway::Consumer::recv) waits for one. Once a GOAWAY arrives, new
-	/// subscribe and announce-interest requests on this session are refused (both
-	/// drafts forbid opening new streams afterward); existing subscriptions keep
-	/// flowing until the session closes.
+	/// [`recv`](goaway::Consumer::recv) waits for one. Once a GOAWAY arrives, this
+	/// session's routes cost [`Cost::DRAIN`](crate::origin::Cost::DRAIN): requests
+	/// keep opening on it until a replacement session's route outranks it, and
+	/// existing subscriptions keep flowing until the session closes.
 	pub fn draining(&self) -> goaway::Consumer {
 		self.goaway.consumer()
 	}
