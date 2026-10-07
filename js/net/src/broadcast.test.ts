@@ -582,10 +582,11 @@ test("a pending track info query counts as broadcast demand", async () => {
 	const broadcast = new BroadcastProducer();
 	const demand = broadcast.demand();
 
+	const pending = wireOf(broadcast).requested();
 	const info = wireOf(broadcast).resolveTrackInfo("video");
 	expect(demand.used.peek()).toBe(true);
 
-	const request = await wireOf(broadcast).requested();
+	const request = await pending;
 	if (!request) throw new Error("expected request");
 	// Nobody subscribes to the queried track itself.
 	expect(request.demand().used.peek()).toBe(false);
