@@ -525,6 +525,9 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 		let mut stdin = None;
 		let mut stdout = None;
 
+		// One publisher instance per run, unless redundant publishers named a shared one.
+		let epoch = moq.epoch.clone().unwrap_or_else(moq_net::Epoch::mint);
+
 		for stage in stages {
 			let name = stage.broadcast(&moq);
 			match stage {
@@ -532,7 +535,9 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 					if import.source.stdin_format().is_some() {
 						claim("stdin", &mut stdin, &name)?;
 					}
-					if let Some(publish) = spawn_import(&origin, import, name, bandwidth.clone(), &mut tasks)? {
+					if let Some(publish) =
+						spawn_import(&origin, import, name, epoch.clone(), bandwidth.clone(), &mut tasks)?
+					{
 						locals.push(publish);
 					}
 				}
@@ -607,12 +612,16 @@ fn display_name(name: &str) -> &str {
 
 /// Route one stage's source INTO the shared Origin, exposing it to the MoQ network.
 ///
+/// The sources announced once per run take `epoch`; the ingest gateways and
+/// `ts --program all` mint their own per connection or program.
+///
 /// Returns the pipeline that has to run on the caller's thread, for the sources
 /// that have one (the stdin containers and capture).
 fn spawn_import(
 	origin: &moq_net::origin::Producer,
 	import: Import,
 	name: String,
+	epoch: moq_net::Epoch,
 	bandwidth: moq_net::bandwidth::Allocator,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<Option<Publish>> {
@@ -649,13 +658,13 @@ fn spawn_import(
 			let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 			Publish::new(broadcast, &format, config)?
 		};
-		publish.announce()?;
+		publish.announce(epoch)?;
 		local = Some(publish);
 	} else {
 		match import.source {
 			ImportSource::Hls(hls) => {
 				warn_if_missing_format(&name);
-				tasks.spawn(hls::import(target(name), hls.playlist));
+				tasks.spawn(hls::import(target(name), hls.playlist, epoch));
 			}
 			ImportSource::Rtmp(rtmp) => {
 				if let Some(addr) = rtmp.listen {
@@ -688,20 +697,20 @@ fn spawn_import(
 						},
 					));
 				} else if let Some(url) = rtc.connect {
-					tasks.spawn(rtc::connect_import(target(name), url));
+					tasks.spawn(rtc::connect_import(target(name), url, epoch));
 				}
 			}
 			ImportSource::Archive(args) => {
 				// A replay serves the retention the recording was made with.
 				anyhow::ensure!(max_age.is_none(), "`--max-age` does not apply to `import archive`");
-				tasks.spawn(archive::import(origin.clone(), name, args));
+				tasks.spawn(archive::import(origin.clone(), name, args, epoch));
 			}
 			#[cfg(feature = "capture")]
 			ImportSource::Capture(capture) => {
 				warn_if_missing_format(&name);
 				let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 				let publish = Publish::capture(broadcast, &capture, bandwidth.clone(), max_age)?;
-				publish.announce()?;
+				publish.announce(epoch)?;
 				local = Some(publish);
 			}
 			_ => unreachable!("container formats are handled by stdin_format above"),
