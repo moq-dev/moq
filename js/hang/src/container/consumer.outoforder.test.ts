@@ -41,16 +41,16 @@ async function drain(consumer: Consumer): Promise<[number, number | undefined][]
 	return seen;
 }
 
-// A publisher serving a subscriber's max age hands over the head of the window alongside
+// A publisher serving a subscriber's max delay hands over the head of the window alongside
 // the live edge, and groups go out newest-first, so the head arrives *after* the group
 // that is already playing. Arriving in that order is not a reason to throw it away:
 // audio writes into a timestamp-indexed ring and video drops a late frame at render, and the
-// subscription's own max age already bounds how far back one can be.
+// subscription's own max delay already bounds how far back one can be.
 test("out-of-order groups are delivered rather than dropped", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Time.Milli(30_000) });
-	const consumer = new Consumer(track.subscribe({ maxAge: Time.Milli(5000) }), {
+	const consumer = new Consumer(track.subscribe({ maxDelay: Time.Milli(5000) }), {
 		format: new LegacyFormat("data"),
-		maxAge: 5000 as Time.Milli,
+		maxDelay: 5000 as Time.Milli,
 	});
 
 	// The live edge lands first, and delivery starts there rather than waiting.
@@ -78,9 +78,9 @@ test("out-of-order groups are delivered rather than dropped", async () => {
 // instant silently truncates its tail, so removal must wait for the group to finish.
 test("a below-cursor group still downloading is not truncated", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Time.Milli(30_000) });
-	const consumer = new Consumer(track.subscribe({ maxAge: Time.Milli(5000) }), {
+	const consumer = new Consumer(track.subscribe({ maxDelay: Time.Milli(5000) }), {
 		format: new LegacyFormat("data"),
-		maxAge: 5000 as Time.Milli,
+		maxDelay: 5000 as Time.Milli,
 	});
 
 	// The live edge group arrives first and starts delivery (still open).
@@ -112,13 +112,13 @@ test("a below-cursor group still downloading is not truncated", async () => {
 	consumer.close();
 });
 
-// The floor belongs to the latest group, not to delayed history within max age.
+// The floor belongs to the latest group, not to delayed history within max delay.
 test("delayed older groups survive a floor established by two newer groups", async () => {
 	const clock = spyOn(performance, "now").mockReturnValue(200);
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Time.Milli(30_000) });
-	const consumer = new Consumer(track.subscribe({ maxAge: Time.Milli(5000) }), {
+	const consumer = new Consumer(track.subscribe({ maxDelay: Time.Milli(5000) }), {
 		format: new LegacyFormat("data"),
-		maxAge: Time.Milli(5000),
+		maxDelay: Time.Milli(5000),
 	});
 	async function nextFrame() {
 		for (;;) {

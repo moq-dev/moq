@@ -279,7 +279,7 @@ async function servedRawSubscription() {
 		broadcast: Path.from("room"),
 		track: "video",
 		priority: 0,
-		maxAge: 10_000,
+		maxDelay: 10_000,
 		startGroup: 0,
 	}).encode(subscriber.writer, version);
 
@@ -447,7 +447,7 @@ test("close waits for a request served while withdrawals are in flight", async (
 			broadcast: Path.from("room"),
 			track: "video",
 			priority: 0,
-			maxAge: 10_000,
+			maxDelay: 10_000,
 			startGroup: 0,
 		}).encode(subscriber.writer, version);
 		expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);

@@ -24,14 +24,14 @@ function publish(origin: OriginProducer, path: Path.Valid) {
 }
 
 // Scheduling tests intentionally stall groups, so keep latency enforcement out of their scope.
-const TEST_MAX_AGE_MS = Milli(30_000);
+const TEST_MAX_DELAY_MS = Milli(30_000);
 
 function replaySubscribe(props: ConstructorParameters<typeof Subscribe>[0]) {
-	return new Subscribe({ ...props, maxAge: TEST_MAX_AGE_MS });
+	return new Subscribe({ ...props, maxDelay: TEST_MAX_DELAY_MS });
 }
 
 function replayUpdate(props: ConstructorParameters<typeof SubscribeUpdate>[0]) {
-	return new SubscribeUpdate({ ...props, maxAge: TEST_MAX_AGE_MS });
+	return new SubscribeUpdate({ ...props, maxDelay: TEST_MAX_DELAY_MS });
 }
 
 test.each([Version.DRAFT_01, Version.DRAFT_03, Version.DRAFT_06])(
@@ -926,7 +926,7 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 
 		expect(sub.track.subscription.peek()).toEqual({
 			priority: 9,
-			maxAge: TEST_MAX_AGE_MS,
+			maxDelay: TEST_MAX_DELAY_MS,
 			groups: { start: undefined, end: { excluded: 6 } },
 		});
 		expect(ranges).not.toHaveBeenCalled();
@@ -1558,7 +1558,7 @@ test("a version without the latency field serves a non-dropping budget", async (
 		try {
 			// These drafts decode the absent field as zero. The publisher must not turn
 			// that into a live-edge request the peer never made.
-			expect(sub.track.subscription.peek()?.maxAge).toBe(Milli(Number.MAX_SAFE_INTEGER));
+			expect(sub.track.subscription.peek()?.maxDelay).toBe(Milli(Number.MAX_SAFE_INTEGER));
 		} finally {
 			await sub.close();
 		}
@@ -1611,7 +1611,7 @@ test("lite draft-05: a group that goes stale while its stream opens writes nothi
 	try {
 		process.on("unhandledRejection", onUnhandled);
 		void publisher.runSubscribe(
-			new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0, maxAge: 100 }),
+			new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0, maxDelay: 100 }),
 			server,
 		);
 
@@ -1630,7 +1630,7 @@ test("lite draft-05: a group that goes stale while its stream opens writes nothi
 		write(2, 20_000);
 		open();
 
-		expect(String(await streamReset)).toContain("max age budget");
+		expect(String(await streamReset)).toContain("max delay budget");
 		expect(writes).toBe(0);
 		await flush();
 		expect(unhandled).toEqual([]);

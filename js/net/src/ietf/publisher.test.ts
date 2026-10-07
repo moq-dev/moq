@@ -372,7 +372,7 @@ test("a group that goes stale while its stream opens writes nothing", async () =
 		write(2, 20_000);
 		open();
 
-		expect(String(await streamReset)).toContain("max age budget");
+		expect(String(await streamReset)).toContain("max delay budget");
 		expect(writes).toBe(0);
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(unhandled).toEqual([]);
@@ -2469,7 +2469,7 @@ test("REQUEST_UPDATE applies priority and preserves it when omitted", async () =
 		await RequestOk.decode(client.reader, fx.version);
 		expect(track.subscription.peek()?.priority).toBe(245);
 		// Only the priority changes; retention and the group range survive.
-		expect(track.subscription.peek()?.maxAge).toBe(before?.maxAge);
+		expect(track.subscription.peek()?.maxDelay).toBe(before?.maxDelay);
 		expect(track.subscription.peek()?.groups).toEqual(before?.groups);
 		await client.writer.write(new Uint8Array([0x02, 0, 2, 4, 0]));
 		expect(await client.reader.u53()).toBe(RequestOk.id);

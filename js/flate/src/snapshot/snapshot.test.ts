@@ -31,7 +31,7 @@ test("one single-frame group per update", async () => {
 	// that arrives after both discards the superseded first group instead of replaying it.
 	expect(await drain(track.subscribe(), false)).toEqual([bytes(2)]);
 
-	const subscriber = track.subscribe({ maxAge: REPLAY_LATENCY }).ordered();
+	const subscriber = track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered();
 	const counts: number[] = [];
 	for (;;) {
 		const group = await subscriber.nextGroup();

@@ -15,7 +15,7 @@ const url = new URL("https://localhost:4443/test");
 
 // Long enough that no group is skipped as stale, and the moq-lite grace for the one group the
 // IETF case never produces.
-const MAX_AGE = Milli(100);
+const MAX_DELAY = Milli(100);
 
 async function session(protocol: string) {
 	const pair = createMockTransportPair(protocol);
@@ -28,7 +28,7 @@ async function session(protocol: string) {
 	broadcast.announce();
 	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const remote = wireOf(client).consume(Path.from("test"));
-	const reader = remote.track("video").subscribe({ maxAge: MAX_AGE }).ordered();
+	const reader = remote.track("video").subscribe({ maxDelay: MAX_DELAY }).ordered();
 
 	return {
 		video,

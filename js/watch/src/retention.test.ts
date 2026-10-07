@@ -90,10 +90,10 @@ test("a long subscription through the player path leaves nothing behind", async 
 		broadcast: broadcast.consume(),
 		track: "audio",
 		priority: 0,
-		maxAge: sync.out.maxAge,
+		maxDelay: sync.out.maxDelay,
 	});
 	if (!sub) throw new Error("no subscription");
-	const consumer = new Container.Consumer(sub, { format, maxAge: sync.out.maxAge });
+	const consumer = new Container.Consumer(sub, { format, maxDelay: sync.out.maxDelay });
 
 	// Presentations overlap, as a decoder's outputs do, so the clock's sleeps are shared.
 	const presenting = new Set<Promise<unknown>>();

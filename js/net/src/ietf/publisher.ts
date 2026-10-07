@@ -354,7 +354,7 @@ export class Publisher {
 			// producer retained and let the receiving subscriber enforce its own budget.
 			// Keep the sentinel encodable if this demand crosses a Lite hop before the
 			// producer's retention bound is known.
-			maxAge: Milli(Varint.MAX_U53),
+			maxDelay: Milli(Varint.MAX_U53),
 		});
 
 		let cache: TrackSubscriber | undefined;
@@ -385,7 +385,7 @@ export class Publisher {
 			// group; the model's `endGroup` is exclusive.
 			track.update({
 				priority,
-				maxAge: Milli(Varint.MAX_U53),
+				maxDelay: Milli(Varint.MAX_U53),
 				groups: {
 					start: range.start ? { included: Number(range.start.group) } : undefined,
 					end: range.end ? { included: Number(range.end.group) } : undefined,
@@ -400,7 +400,8 @@ export class Publisher {
 			// asking the broadcast would mint a second producer nobody has accepted.
 			const fill =
 				msg.fill && Filter.isDraft20(version) ? fillRange(msg.fill, msg.filter, edge.largest) : undefined;
-			cache = fill && fill.kind !== "empty" ? track.fork({ priority, maxAge: Milli(Varint.MAX_U53) }) : undefined;
+			cache =
+				fill && fill.kind !== "empty" ? track.fork({ priority, maxDelay: Milli(Varint.MAX_U53) }) : undefined;
 
 			// Send SUBSCRIBE_OK
 			await stream.writer.u53(SubscribeOk.id);

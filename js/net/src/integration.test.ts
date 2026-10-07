@@ -170,25 +170,25 @@ test("integration: lite subscription options and updates reach the publisher", a
 	// its encoding of group 0 means "replay from the beginning" instead.
 	const subscriber = remote.track("video").subscribe({
 		priority: 3,
-		maxAge: Milli(250),
+		maxDelay: Milli(250),
 		groups: { start: { included: 1 }, end: { excluded: 9 } },
 	});
 	const producer = await accepted;
 	expect(producer.subscription.peek()).toEqual({
 		priority: 3,
-		maxAge: Milli(250),
+		maxDelay: Milli(250),
 		groups: { start: { included: 1 }, end: { excluded: 9 } },
 	});
 
 	const updated = producer.subscription.changed();
 	subscriber.update({
 		priority: 8,
-		maxAge: Milli(500),
+		maxDelay: Milli(500),
 		groups: { start: { included: 2 }, end: { excluded: 12 } },
 	});
 	expect(await updated).toEqual({
 		priority: 8,
-		maxAge: Milli(500),
+		maxDelay: Milli(500),
 		groups: { start: { included: 2 }, end: { excluded: 12 } },
 	});
 
@@ -200,7 +200,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 	server.abort();
 });
 
-test("integration: lite carries a fractional maxAge as a whole millisecond", async () => {
+test("integration: lite carries a fractional maxDelay as a whole millisecond", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_05);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -227,7 +227,7 @@ test("integration: lite carries a fractional maxAge as a whole millisecond", asy
 	// A varint cannot encode 38.75, so an unrounded value fails the SUBSCRIBE outright and
 	// nothing resubscribes. The publisher must see the budget rounded up instead. A floor
 	// of 1, not 0: a pre-06 wire folds a vacuous floor of 0 back to absent.
-	const subscriber = remote.track("video").subscribe({ maxAge: Milli(38.75), groups: { start: { included: 1 } } });
+	const subscriber = remote.track("video").subscribe({ maxDelay: Milli(38.75), groups: { start: { included: 1 } } });
 
 	// A failed subscribe never reaches the publisher, so race its closure to report the
 	// encode error rather than block until the suite times out.
@@ -236,11 +236,11 @@ test("integration: lite carries a fractional maxAge as a whole millisecond", asy
 	});
 
 	const producer = await Promise.race([accepted, failed]);
-	expect(producer.subscription.peek()?.maxAge).toBe(Milli(39));
+	expect(producer.subscription.peek()?.maxDelay).toBe(Milli(39));
 
 	const updated = producer.subscription.changed();
-	subscriber.update({ maxAge: Milli(500.25), groups: { start: { included: 1 } } });
-	expect((await Promise.race([updated, failed]))?.maxAge).toBe(Milli(501));
+	subscriber.update({ maxDelay: Milli(500.25), groups: { start: { included: 1 } } });
+	expect((await Promise.race([updated, failed]))?.maxDelay).toBe(Milli(501));
 
 	subscriber.close();
 	remote.close();
@@ -276,7 +276,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 	const subscriber = remote
 		.track("video")
 		.subscribe({
-			maxAge: Milli(REPLAY_LATENCY_MS),
+			maxDelay: Milli(REPLAY_LATENCY_MS),
 			groups: { start: { included: INITIAL_START_GROUP }, end: { excluded: INITIAL_END_GROUP } },
 		})
 		.ordered();
@@ -288,7 +288,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		expect(await Promise.race([pending, sleep(PENDING_ASSERT_MS).then(() => "pending")])).toBe("pending");
 
 		subscriber.update({
-			maxAge: Milli(REPLAY_LATENCY_MS),
+			maxDelay: Milli(REPLAY_LATENCY_MS),
 			groups: { start: { included: UPDATED_GROUP }, end: { excluded: UPDATED_END_GROUP } },
 		});
 		expect((await withTimeout(pending, UPDATE_TIMEOUT_MS, "updated group bound timed out"))?.sequence).toBe(
@@ -327,7 +327,7 @@ test("integration: lite refuses an empty requested range on open and on update",
 	try {
 		// Bounds that meet cannot go on the wire: the nearest encoding inverts the range.
 		const empty = video.subscribe({
-			maxAge: Milli(REPLAY_LATENCY_MS),
+			maxDelay: Milli(REPLAY_LATENCY_MS),
 			groups: { start: { included: 2 }, end: { excluded: 2 } },
 		});
 		await expect(withTimeout(empty.recvGroup(), TIMEOUT_MS, "empty open never settled")).rejects.toThrow(
@@ -338,13 +338,13 @@ test("integration: lite refuses an empty requested range on open and on update",
 		// A live subscription whose demand later collapses to nothing fails the same way.
 		const live = video
 			.subscribe({
-				maxAge: Milli(REPLAY_LATENCY_MS),
+				maxDelay: Milli(REPLAY_LATENCY_MS),
 				groups: { start: { included: 1 }, end: { excluded: 2 } },
 			})
 			.ordered();
 		expect((await live.nextGroup())?.sequence).toBe(1);
 		live.update({
-			maxAge: Milli(REPLAY_LATENCY_MS),
+			maxDelay: Milli(REPLAY_LATENCY_MS),
 			groups: { start: { included: 3 }, end: { excluded: 3 } },
 		});
 		await expect(withTimeout(live.nextGroup(), TIMEOUT_MS, "empty update never settled")).rejects.toThrow(

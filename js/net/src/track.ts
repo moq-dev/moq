@@ -21,7 +21,7 @@ import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.t
 export type { Datagram } from "./datagram.ts";
 
 // Wall-clock bound for idle cached content, matching Rust cache::DEFAULT_EXPIRY.
-// Media maxAge only bounds how far behind the live edge a reader may fall.
+// Media maxDelay only bounds how far behind the live edge a reader may fall.
 const CACHE_WINDOW_MS = 30_000;
 
 // The cache scans at most this many times per idle cache window.
@@ -82,19 +82,19 @@ export interface Info {
 	priority: number;
 }
 
-// Normalize a latency budget for the wire, which carries it as an unsigned varint.
+// Normalize a duration for the wire, which carries it as an unsigned varint.
 //
 // Callers derive it from measurements (a jitter estimate scaled off RTT), so a fractional
 // millisecond is expected; ceil rather than round, because a budget shortened by rounding
 // skips a group the subscriber still wants. Anything that is not a duration is refused
 // here, where the field is named, rather than deep in the encoder.
-function maxAgeMillis(value: Milli): Milli {
+function wireMillis(field: string, value: Milli): Milli {
 	if (!Number.isFinite(value) || value < 0) {
-		throw new RangeError(`maxAge must be a non-negative number of milliseconds: ${value}`);
+		throw new RangeError(`${field} must be a non-negative number of milliseconds: ${value}`);
 	}
 	const millis = Math.ceil(value);
 	if (!Number.isSafeInteger(millis)) {
-		throw new RangeError(`maxAge exceeds the safe integer millisecond range: ${value}`);
+		throw new RangeError(`${field} exceeds the safe integer millisecond range: ${value}`);
 	}
 	return Milli(millis);
 }
@@ -110,7 +110,7 @@ function priorityByte(value: number): number {
 export function infoDefaults(info: Partial<Info> = {}): Info {
 	return {
 		timescale: info.timescale == null ? undefined : Timescale(info.timescale),
-		maxAge: info.maxAge === undefined ? undefined : maxAgeMillis(info.maxAge),
+		maxAge: info.maxAge === undefined ? undefined : wireMillis("maxAge", info.maxAge),
 		priority: priorityByte(info.priority ?? DEFAULT_PRIORITY),
 	};
 }
@@ -129,21 +129,23 @@ export interface Groups {
 /**
  * Per-subscription options, requested when a subscription opens and adjustable later via
  * {@link Subscriber.update}. Mirrors the Rust `Subscription`.
+ * The obsolete subscriber `maxAge` field is refused at runtime; use `maxDelay`.
  */
 export interface Subscription {
 	/** Delivery priority relative to this session's other subscriptions (`0..=255`). Defaults to `0`. */
 	priority?: number;
 	/**
-	 * Maximum age (milliseconds) of a non-latest group before it is skipped. Defaults to `0`.
+	 * How far (milliseconds) a non-latest group may fall behind the live edge before it is
+	 * skipped. Defaults to `0`.
 	 * Rounded up to a whole millisecond, so a value derived from a measurement is never
 	 * shortened. A negative or non-finite value, or one past `Number.MAX_SAFE_INTEGER`
 	 * after rounding, is refused.
 	 */
-	maxAge?: Milli;
+	maxDelay?: Milli;
 	/**
 	 * The lowest group the publisher may deliver (a floor), or omit for none.
 	 *
-	 * A floor, not a request: only {@link maxAge} asks for data, and the floor bounds how
+	 * A floor, not a request: only {@link maxDelay} asks for data, and the floor bounds how
 	 * far back it may reach. Omitting it and a floor of 0 differ only on an untimed track,
 	 * where nothing is ever stale: omitted starts at the latest group, and an explicit floor
 	 * replays from there. A floor above the live edge simply waits there (a resumed
@@ -155,10 +157,11 @@ export interface Subscription {
 // Materialize the defaults at the model boundary so every layer observes a complete
 // subscription rather than interpreting an omitted field differently.
 function subscriptionDefaults(subscription: Subscription = {}): Subscription {
+	if ("maxAge" in subscription) throw new TypeError("Subscriber maxAge is unsupported; use maxDelay");
 	const bounds = groupBounds(subscription.groups ?? {});
 	return {
 		priority: priorityByte(subscription.priority ?? 0),
-		maxAge: maxAgeMillis(subscription.maxAge ?? Milli.zero),
+		maxDelay: wireMillis("maxDelay", subscription.maxDelay ?? Milli.zero),
 		groups: {
 			start: subscription.groups?.start === undefined ? undefined : { included: bounds.start },
 			end: bounds.end === undefined ? undefined : { excluded: bounds.end },
@@ -178,7 +181,7 @@ function combineSubscriptions(states: Iterable<TrackState>): Subscription | unde
 		}
 
 		combined.priority = Math.max(combined.priority ?? 0, subscription.priority ?? 0);
-		combined.maxAge = Milli(Math.max(combined.maxAge ?? Milli.zero, subscription.maxAge ?? Milli.zero));
+		combined.maxDelay = Milli(Math.max(combined.maxDelay ?? Milli.zero, subscription.maxDelay ?? Milli.zero));
 
 		// A floor only restricts, so a subscriber without one clears the aggregate:
 		// its budget may reach below any floor the others set.
@@ -291,7 +294,7 @@ export class Consumer {
 	 * Open a live subscription to the track.
 	 *
 	 * The cursor starts at the group the subscription named (its floor), or 0.
-	 * {@link Subscription.maxAge} is what asks for data: delivery skips everything above
+	 * {@link Subscription.maxDelay} is what asks for data: delivery skips everything above
 	 * the floor that the budget convicts, so the default budget of zero delivers only the
 	 * latest group and a larger one reaches back over what it can still use. An untimed
 	 * track has nothing to convict, so without a floor it starts at its latest group.
@@ -594,7 +597,7 @@ export class Producer {
 	 * An independent {@link Subscriber} reading this track's groups.
 	 *
 	 * Its cursor starts at the group the subscription named (its floor), or 0.
-	 * {@link Subscription.maxAge} is what asks for data: delivery skips everything above
+	 * {@link Subscription.maxDelay} is what asks for data: delivery skips everything above
 	 * the floor that the budget convicts, so the default budget of zero delivers only the
 	 * latest group and a larger one reaches back over what it can still use. An untimed
 	 * track has nothing to convict, so without a floor it starts at its latest group.
@@ -674,7 +677,8 @@ export class Producer {
 	#updateSubscription(): void {
 		const combined = combineSubscriptions(this.#sinks);
 		const retained = this.#state.info.peek()?.maxAge;
-		if (combined && retained !== undefined) combined.maxAge = Milli.min(combined.maxAge ?? Milli.zero, retained);
+		if (combined && retained !== undefined)
+			combined.maxDelay = Milli.min(combined.maxDelay ?? Milli.zero, retained);
 		this.#state.update.set(combined);
 	}
 
@@ -1086,7 +1090,7 @@ export class Subscriber {
 			break;
 		}
 
-		const requested = this.#state.update.peek()?.maxAge ?? 0;
+		const requested = this.#state.update.peek()?.maxDelay ?? 0;
 		const retained = this.#state.info.peek()?.maxAge;
 		return {
 			budget: this.#enforceLatency
@@ -1173,7 +1177,7 @@ export class Subscriber {
 		this.name = name;
 		this.#state = state;
 		// The cursor's floor is the group the subscription named, or 0. A floor is the
-		// only thing a start contributes; {@link Subscription.maxAge} is what asks for
+		// only thing a start contributes; {@link Subscription.maxDelay} is what asks for
 		// data, and delivery skips everything above the floor that the budget convicts.
 		// Nothing on an untimed track is ever stale, so there the budget would replay the
 		// whole cache: an unfloored subscriber starts at the latest group instead.
@@ -1372,7 +1376,7 @@ export class Subscriber {
 	 * beyond the cap stays buffered (not dropped) and is offered once the cap rises, even
 	 * after a clean close, without blocking in-range groups that arrive behind it.
 	 * A group whose presentation time is further behind the live edge than this
-	 * subscriber's `maxAge` is skipped. The default of zero takes the live edge.
+	 * subscriber's `maxDelay` is skipped. The default of zero takes the live edge.
 	 * The budget remains attached after return, so a pending frame read rejects if a stalled
 	 * group becomes stale while newer data advances.
 	 *
@@ -1562,7 +1566,7 @@ export class Subscriber {
 	 *
 	 * Groups are acquired through the same sequence cursor as {@link Ordered.nextGroup},
 	 * so frames never run backwards: a late lower-sequence group is skipped, and so is
-	 * one every frame of which `maxAge` proves is too old. A group the budget abandons
+	 * one every frame of which `maxDelay` proves is too old. A group the budget abandons
 	 * mid-stall ends cleanly and the cursor resyncs from the next group; a gap inside a
 	 * group still surfaces as {@link TooFarBehind} or {@link GroupTooLarge}.
 	 */
@@ -1661,7 +1665,7 @@ export class Subscriber {
  * Every group this returns has a higher sequence than the last, so a late arrival is
  * skipped rather than delivered out of turn.
  *
- * `maxAge` applies as this cursor reads, exactly as it does on the arrival cursor: a
+ * `maxDelay` applies as this cursor reads, exactly as it does on the arrival cursor: a
  * group is skipped once its reach, where its immediate successor begins, is that far
  * behind the newest frame on the track. Nothing weaker convicts it, since the reach is
  * the only proof that every frame it could still hold is past the budget, so a backlog
@@ -1739,7 +1743,7 @@ export class Ordered {
 	 * Return the next group with a strictly-greater sequence number than the last returned.
 	 *
 	 * Late arrivals (sequence at or below the last returned) are silently skipped, as is a
-	 * group whose every frame is further behind the live edge than `maxAge` (the default of
+	 * group whose every frame is further behind the live edge than `maxDelay` (the default of
 	 * zero keeps only what nothing newer has superseded). Honors the bounds set by
 	 * {@link setGroups}.
 	 */
@@ -1751,7 +1755,7 @@ export class Ordered {
 	 * Read the next frame across groups, in sequence order, with its group and frame numbers.
 	 *
 	 * Rides the same cursor as {@link nextGroup} and shares this handle's contract: a
-	 * buffered backlog is drained in full up to the point `maxAge` proves it useless.
+	 * buffered backlog is drained in full up to the point `maxDelay` proves it useless.
 	 * Treat the returned frame bytes as read-only; they are shared with other consumers.
 	 */
 	readFrame(): Promise<({ group: number; frame: number } & Frame) | undefined> {
