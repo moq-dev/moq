@@ -368,8 +368,8 @@ mod tests {
 				largest,
 				properties,
 			};
-			let decoded: TrackStatusOk = decode_message(&encode_message(&msg, version), version)
-				.unwrap_or_else(|e| panic!("{version}: {e}"));
+			let decoded: TrackStatusOk =
+				decode_message(&encode_message(&msg, version), version).unwrap_or_else(|e| panic!("{version}: {e}"));
 
 			let expected = match version {
 				Version::Draft14 | Version::Draft15 => Properties {

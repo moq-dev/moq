@@ -695,8 +695,7 @@ where
 			// opted out of this SUBSCRIBE_OK's properties learns them from TRACK_STATUS, so
 			// the opt-out strips nothing from the objects. Drafts 14-16 never write TIMESCALE,
 			// so their objects stay unstamped.
-			let timescale =
-				Some(track.info().timescale).filter(|_| ietf::Properties::sends_timescale(self.version));
+			let timescale = Some(track.info().timescale).filter(|_| ietf::Properties::sends_timescale(self.version));
 
 			// Draft-20 replaced joining FETCH with subscription fills. Older drafts save
 			// the same boundary used by the subscription so the two streams never overlap.

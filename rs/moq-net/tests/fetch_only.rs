@@ -146,9 +146,16 @@ async fn relayed(version: &str) {
 
 	let remote = resolve(&client).await;
 	for sequence in [2, 0] {
-		assert_eq!(fetch(&remote, sequence).await.expect("fetch"), frames(sequence), "{version}");
+		assert_eq!(
+			fetch(&remote, sequence).await.expect("fetch"),
+			frames(sequence),
+			"{version}"
+		);
 	}
-	assert!(!subscribed.load(Ordering::SeqCst), "{version}: the relay subscribed upstream");
+	assert!(
+		!subscribed.load(Ordering::SeqCst),
+		"{version}: the relay subscribed upstream"
+	);
 
 	drop((remote, downstream, upstream, broadcast, client, relay, publisher));
 }

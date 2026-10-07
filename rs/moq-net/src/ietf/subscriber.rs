@@ -1763,7 +1763,10 @@ where
 		let mut target = match request.subscription() {
 			Some(_) => Target::Request(request),
 			None => match self.track_status(&broadcast_path, &track_name, request).await {
-				Status::Known(idle) => match self.linger(&broadcast_path, &track_name, idle, &mut group_fetches).await {
+				Status::Known(idle) => match self
+					.linger(&broadcast_path, &track_name, idle, &mut group_fetches)
+					.await
+				{
 					Some(next) => Target::Resume(next),
 					None => return,
 				},
