@@ -26,7 +26,7 @@ pub const TIMESCALE: Timescale = Timescale::MICRO;
 /// which is why every media track should start here rather than at `Info::default()`. It is a
 /// retention budget and a CEILING on what a subscriber may ask to wait for, so it never makes
 /// anyone play further behind live: a subscriber's own
-/// [`Subscription::max_age`](moq_net::track::Subscription::max_age) defaults to
+/// [`Subscription::max_delay`](moq_net::track::Subscription::max_delay) defaults to
 /// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) (skip the moment a newer group arrives).
 ///
 /// `priority` is the publisher's tie-break priority, and should come from

@@ -280,7 +280,7 @@ fn test_generation() -> Generation {
 }
 
 fn subscribe_all() -> moq_net::track::Subscription {
-	moq_net::track::Subscription::default().with_max_age(Duration::from_secs(60))
+	moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60))
 }
 
 fn net_track(name: &Name) -> moq_net::track::Producer {

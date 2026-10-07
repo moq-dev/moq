@@ -8,10 +8,10 @@ for (const count of [1, 16, 256]) {
 	test(`Consumer summarizes ${count} skipped groups once per catch-up`, async () => {
 		const warn = spyOn(console, "warn").mockImplementation(() => {});
 		const track = new Track.Producer("tone");
-		const maxAge = new Signal(Time.Milli(30_000));
-		const consumer = new Consumer(track.subscribe({ maxAge: Time.Milli(30_000) }), {
+		const maxDelay = new Signal(Time.Milli(30_000));
+		const consumer = new Consumer(track.subscribe({ maxDelay: Time.Milli(30_000) }), {
 			format: new Format("data"),
-			maxAge,
+			maxDelay,
 		});
 		const write = (sequence: number, timestamp: number) => {
 			const group = new Group.Producer(sequence);
@@ -27,7 +27,7 @@ for (const count of [1, 16, 256]) {
 			for (let i = 0; i < count; i++) write(i * 2, i * 1000);
 			await buffered(count - 1);
 			expect(warn).not.toHaveBeenCalled();
-			maxAge.set(Time.Milli.zero);
+			maxDelay.set(Time.Milli.zero);
 			const newest = write(count * 2, count * 1000);
 			await buffered(count);
 			expect(warn).toHaveBeenCalledTimes(1);

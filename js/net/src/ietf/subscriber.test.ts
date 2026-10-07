@@ -1,7 +1,8 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
 import type * as announce from "../announced.ts";
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
 import { type Hop, HopSchema, UNKNOWN_HOP } from "../hop.ts";
+import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
@@ -922,6 +923,221 @@ test("an info-only lookup waits for SUBSCRIBE_OK instead of abandoning", async (
 		properties: { priority: 37 },
 	}).encode(peer.writer, VERSION);
 	expect((await info).priority).toBe(0xff - 37);
+});
+
+test.each(["acceptance", "timeout"])("returning demand preserves pending setup until %s", async (outcome) => {
+	jest.useFakeTimers();
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session });
+	const opening = spyOn(session, "openBi");
+	const broadcast = subscriber.consume(Path.from("room"));
+	const pending = hooks.pendingTrackProducer;
+	let returned: track.Subscriber | undefined;
+	const resumed = Promise.withResolvers<void>();
+	const waiting = Promise.withResolvers<void>();
+	const captured = spyOn(hooks, "pendingTrackProducer").mockImplementationOnce((request) => {
+		const producer = pending(request);
+		const demand = producer.demand();
+		const unused = demand.unused.bind(demand);
+		let returnedOnce = false;
+		spyOn(demand, "unused").mockImplementation(async () => {
+			if (returnedOnce) {
+				waiting.resolve();
+				return unused();
+			}
+			returnedOnce = true;
+			await unused();
+			const peek = demand.used.peek.bind(demand.used);
+			// Return after the watcher checks demand, before its result crosses the
+			// promise race to the setup continuation. No real-time sleeps are involved.
+			const observed = spyOn(demand.used, "peek").mockImplementationOnce(() => {
+				const used = peek();
+				observed.mockRestore();
+				queueMicrotask(() => {
+					returned = broadcast.track("video").subscribe();
+					resumed.resolve();
+				});
+				return used;
+			});
+		});
+		return producer;
+	});
+	const first = broadcast.track("video").subscribe();
+	// Restore real timers even if an injection promise outlives the test.
+	onTestFinished(() => {
+		captured.mockRestore();
+		opening.mockRestore();
+		first.close();
+		returned?.close();
+		broadcast.close();
+		session.close();
+		jest.useRealTimers();
+	});
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("missing pending subscribe");
+	expect(await peer.reader.u53()).toBe(Subscribe.id);
+	const request = await Subscribe.decode(peer.reader, VERSION);
+	jest.advanceTimersByTime(6_000);
+	first.close();
+	await resumed.promise;
+	if (!returned) throw new Error("demand did not return");
+	// Observe the result immediately so a regression is reported as the wrong
+	// result, not as an unhandled rejection while the peer writes its response.
+	const info = returned.info().then(
+		(value) => value,
+		(error: unknown) => error,
+	);
+	expect(await Promise.race([waiting.promise.then(() => true), info.then(() => false)])).toBe(true);
+	if (outcome === "acceptance") {
+		await peer.writer.u53(SubscribeOk.id);
+		await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, VERSION);
+		expect(await info).toMatchObject({ priority: 127 });
+		expect(returned.closed.peek()).toBeUndefined();
+	} else {
+		jest.advanceTimersByTime(4_000);
+		expect(await info).toBeInstanceOf(Error);
+		expect(((await info) as Error).message).toContain("subscribe timed out after 10000ms");
+	}
+	expect(opening).toHaveBeenCalledTimes(1);
+});
+
+test("setup abandonment closes before a queued viewer can attach", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session });
+	const broadcast = subscriber.consume(Path.from("room"));
+	const pending = hooks.pendingTrackProducer;
+	const resumed = Promise.withResolvers<track.Subscriber>();
+	const captured = spyOn(hooks, "pendingTrackProducer").mockImplementationOnce((request) => {
+		const producer = pending(request);
+		const demand = producer.demand();
+		const unused = demand.unused.bind(demand);
+		spyOn(demand, "unused").mockImplementationOnce(async () => {
+			await unused();
+			const peek = demand.used.peek.bind(demand.used);
+			let checks = 0;
+			const observed = spyOn(demand.used, "peek").mockImplementation(() => {
+				const used = peek();
+				// The first check is the watcher; the second is the setup loop's
+				// final check. A queued viewer must see that cancellation committed.
+				if (++checks === 2) {
+					observed.mockRestore();
+					queueMicrotask(() => resumed.resolve(broadcast.track("video").subscribe()));
+				}
+				return used;
+			});
+		});
+		return producer;
+	});
+	const first = broadcast.track("video").subscribe();
+	let returned: track.Subscriber | undefined;
+	// Runner timeouts do not unwind an async test parked on the injection promise.
+	onTestFinished(() => {
+		captured.mockRestore();
+		first.close();
+		returned?.close();
+		broadcast.close();
+		session.close();
+	});
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("missing initial subscribe");
+	expect(await peer.reader.u53()).toBe(Subscribe.id);
+	await Subscribe.decode(peer.reader, VERSION);
+	first.close();
+	returned = await resumed.promise;
+	const info = returned.info().then(
+		(value) => value,
+		(error: unknown) => error,
+	);
+	const next = await Promise.race([nextStream(pair.client), info]);
+	expect(next).toBeInstanceOf(Stream);
+	if (!(next instanceof Stream)) throw new Error("returning viewer did not get a new subscribe");
+	expect(await next.reader.u53()).toBe(Subscribe.id);
+	const request = await Subscribe.decode(next.reader, VERSION);
+	await next.writer.u53(SubscribeOk.id);
+	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(next.writer, VERSION);
+	expect(await info).toMatchObject({ priority: 127 });
+});
+
+test("abandonment cancels once and a late acceptance cannot capture a reused alias", async () => {
+	const version = Version.DRAFT_16;
+	const pair = createMockTransportPair(ALPN.DRAFT_16);
+	const control = await Stream.open(pair.server, { version });
+	const session = new ControlStreamAdapter(pair.server, control, version, 100n, true);
+	void session.run().catch(() => void 0);
+	const subscriber = new Subscriber({ session });
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("missing control stream");
+	peer.reader.version = version;
+	peer.writer.version = version;
+	const broadcast = subscriber.consume(Path.from("room"));
+	const pending = hooks.pendingTrackProducer;
+	let producer: track.Producer | undefined;
+	let oldRequest: track.Request | undefined;
+	const captured = spyOn(hooks, "pendingTrackProducer").mockImplementationOnce((request) => {
+		oldRequest = request;
+		producer = pending(request);
+		return producer;
+	});
+	const decoded = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	const decode = SubscribeOk.decode;
+	const held = spyOn(SubscribeOk, "decode").mockImplementationOnce(async (...args) => {
+		const ok = await decode(...args);
+		decoded.resolve();
+		await release.promise;
+		return ok;
+	});
+	const first = broadcast.track("video").subscribe();
+	let second: track.Subscriber | undefined;
+	try {
+		expect(await peer.reader.u53()).toBe(Subscribe.id);
+		const request = await Subscribe.decode(peer.reader, version);
+		if (!producer || !oldRequest) throw new Error("missing pending track");
+		const accepted = spyOn(oldRequest, "accept");
+		await peer.writer.u53(SubscribeOk.id);
+		await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, version);
+		await decoded.promise;
+		first.close();
+		expect(await producer.closed).toBeInstanceOf(Error);
+		expect(await peer.reader.u53()).toBe(Unsubscribe.id);
+		expect((await Unsubscribe.decode(peer.reader, version)).requestId).toBe(request.requestId);
+
+		second = broadcast.track("video").subscribe();
+		// The next message must be the new request, not a duplicate UNSUBSCRIBE.
+		expect(await peer.reader.u53()).toBe(Subscribe.id);
+		const replacement = await Subscribe.decode(peer.reader, version);
+		await peer.writer.u53(SubscribeOk.id);
+		await new SubscribeOk({ requestId: replacement.requestId, trackAlias: ALIAS }).encode(peer.writer, version);
+		await second.info();
+		release.resolve();
+		await subscriber.handleGroup(
+			new GroupMessage({
+				trackAlias: ALIAS,
+				groupId: 0,
+				subGroupId: 0,
+				publisherPriority: 0,
+				flags: groupFlags(true),
+			}),
+			new Reader(undefined, encodeObjects([0]), VERSION),
+		);
+		const groups = second.ordered();
+		const group = await groups.nextGroup();
+		expect(await group?.readString()).toBe("object 0");
+		expect(accepted).not.toHaveBeenCalled();
+		expect(second.closed.peek()).toBeUndefined();
+		groups.close();
+		accepted.mockRestore();
+	} finally {
+		release.resolve();
+		held.mockRestore();
+		captured.mockRestore();
+		first.close();
+		second?.close();
+		broadcast.close();
+		session.close();
+	}
 });
 
 test("early group waits for SUBSCRIBE_OK priority before track acceptance", async () => {
