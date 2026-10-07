@@ -176,9 +176,10 @@ runs on the device or returns an error.
 ## Encoder presets
 
 A preset trades per-frame encode time for compression at the configured
-bitrate. None reorders frames, and none describes keyframe join time, transport
-delay, or viewer playout. Each backend maps a preset onto the controls it has,
-and reports what it applied rather than echoing the request:
+bitrate. None describes keyframe join time, transport delay, or viewer playout.
+Each backend maps a preset onto the controls it has, and reports what it applied
+rather than echoing the request. Only a reported preset confirms its controls,
+including that no frames are reordered:
 
 | Backend | Low latency | Balanced | Quality |
 | --- | --- | --- | --- |

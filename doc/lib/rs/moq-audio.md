@@ -25,14 +25,17 @@ codec requirements in `encode::Settings`; `encode::Options` adds publication
 policy. Decoding likewise separates low-level `decode::Config`, PCM
 `decode::Output`, and subscription `decode::Options`.
 
-`encode::Settings::with_preset` applies an `encode::Preset` without touching
-codec, rate, layout, bitrate, or DTX. `LowLatency` (the default preset) packs
-10 ms of audio per packet, `Balanced` and `Quality` 20 ms, which is also what
-`Settings` defaults to without a preset. AAC frames are fixed at 1024 samples,
-so a preset leaves AAC's frame duration alone. That is packetization, not a delay
-guarantee: Opus adds its 6.5 ms lookahead either way. libopus already runs at
-full complexity, where a 10 ms stereo packet takes about 0.1 ms to encode, so
-Quality has nothing further to spend and matches Balanced.
+`encode::Settings::with_preset` stores an `encode::Preset`, read back with
+`Settings::preset`, and applies it without touching codec, rate, layout,
+bitrate, or DTX. `LowLatency` packs 10 ms of audio per packet, `Balanced` (the
+default, and what `Settings::new` builds) and `Quality` 20 ms. AAC frames are
+fixed at 1024 samples, so a preset leaves AAC's frame duration alone. That is
+packetization, not a delay guarantee: Opus adds its 6.5 ms lookahead either way.
+libopus already runs at full complexity, where a 10 ms stereo packet takes about
+0.1 ms to encode, so Quality has nothing further to spend and matches Balanced.
+Like `moq-video`, `Encoder::applied()` reports the preset whose packetization
+took effect rather than echoing the request: `Quality` reports `Balanced`, and
+AAC or a custom frame duration reports none.
 
 | Module | Does |
 | --- | --- |

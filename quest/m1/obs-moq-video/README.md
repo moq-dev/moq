@@ -12,7 +12,7 @@ Attempt GPU delivery immediately on macOS decode; other platforms keep the CPU p
 
 Initial video decoding covers H.264, HEVC, and AV1 where moq-video has an available backend. Unsupported codecs produce an actionable error; do not retain an FFmpeg fallback. VP8/VP9 return through their own follow-up quest. Audio playback covers Opus, AAC-LC, and PCM.
 
-Publishing remains opt-in, with one **Use MoQ encoders** choice for video and audio. Keep the existing OBS encoder mode. Internal OBS encoder adapters call moq-video/moq-audio, preserving OBS's A/V handling and the existing encoded MoQ output. The combined choice is enabled only when both adapters are present. Start with H.264, supported HEVC, and Opus; defer AV1/AAC encoding and PCM publishing UI. Keep bitrate separate from **Low latency**, **Balanced** (default), and **Quality** presets. Presets describe supported buffering/compression controls, not an end-to-end delay promise.
+Publishing remains opt-in, with one **Use MoQ encoders** choice for video and audio. Keep the existing OBS encoder mode. Internal OBS encoder adapters call moq-video/moq-audio, preserving OBS's A/V handling and the existing encoded MoQ output. The combined choice is enabled only when both adapters are present. Start with H.264, supported HEVC, and Opus; defer AV1/AAC encoding and PCM publishing UI. Keep bitrate separate from **Low latency**, **Balanced** (default), and **Quality** presets. Presets describe supported buffering/compression controls, not an end-to-end delay promise. The line PR must call out the video default changes #4099 made: NVENC P4 to P1, and openh264 medium to low complexity. Known gap: VAAPI reports Low latency whatever was asked, and V4L2 and MediaCodec report unconfirmed; no quest owns measuring and mapping presets for them.
 
 The quests separate portable decoding, audio, and publishing so each can land and be validated independently. moq-ffi's decoded frames own their surface and convert to CPU pixels only on request (#4094); a surface decode exposes the platform surface as a borrowed view, which each platform GPU quest extends to its own surface type.
 
@@ -23,7 +23,6 @@ Decided in the 2026-09-30 audit: the Windows and Linux GPU decode paths and the 
 - [Video source replacement](/quest/m1/obs-moq-video/source.md) - remove the FFmpeg video decode and attempt macOS GPU delivery immediately, with a working CPU fallback on other platforms
 - [Audio playback](/quest/m1/obs-moq-video/audio-playback.md) - replace the FFmpeg audio decode with moq-audio
 - [Linux bundle](/quest/m1/obs-moq-video/linux-bundle.md) - attach a portable Linux x86_64 tarball to every obs-moq release once FFmpeg is gone
-- [Preset parity](/quest/m1/obs-moq-video/preset-parity.md) - audio stores and reports its preset like video, defaults to Balanced, and the preset claims hold
 - [Audio publishing](/quest/m1/obs-moq-video/audio-publish.md) - back an internal OBS Opus encoder with moq-audio
 - [Video publishing](/quest/m1/obs-moq-video/adapter.md) - back an internal OBS video encoder with moq-video and expose the combined opt-in mode
 - [Rate control](/quest/m1/obs-moq-video/rate-control.md) - the plugin reserves its bitrate and retunes the OBS encoder to the grant
