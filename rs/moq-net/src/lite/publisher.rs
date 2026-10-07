@@ -2389,6 +2389,8 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		// drop back to 0: the cursor only rises on its own, and a finished group
 		// below the old floor (a quiet catalog) is never served otherwise. A
 		// cursor that was already at 0 stays where the first served group put it.
+		// No fresh SUBSCRIBE_START follows: the subscriber clears its permanent-miss
+		// floor on the same update, so both sides have to change together.
 		// Pre-06 an absent start means the latest group, which `position_cursor`
 		// already applied.
 		match upd.start_group {
@@ -3484,6 +3486,32 @@ mod serve_group_test {
 		});
 		relay.settle();
 		assert_eq!(relay.opened(), 1, "the finished group is the live edge");
+	}
+
+	/// Widening the floor never rewinds past a group already served: group 0
+	/// arrived before the served groups, so the cursor has moved past it.
+	#[moq_net_sim::test]
+	async fn a_widening_update_does_not_rewind_past_served_groups() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		for sequence in 0..3 {
+			write_group(&mut track, sequence, sequence);
+		}
+		let mut relay = RelayRun::new(&mut track, 1);
+		relay.settle();
+		track.start_at(0).unwrap();
+		relay.settle();
+		assert_eq!(relay.opened(), 2, "groups 1 and 2 are at or above the floor");
+
+		relay.run.update(lite::SubscribeUpdate {
+			priority: 0,
+			max_age: Duration::from_secs(30),
+			start_group: None,
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		});
+		relay.settle();
+		assert_eq!(relay.opened(), 2, "group 0 was passed, not skipped");
 	}
 
 	/// A SUBSCRIBE_UPDATE landing while the first group waits on the source's start keeps

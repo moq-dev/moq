@@ -758,12 +758,13 @@ impl Reader {
 
 	/// Assign the local floor. A copy still waiting on its info takes the floor
 	/// from the mirrored subscription when it resolves; one already reading has
-	/// to be moved, or a group it skipped stays skipped.
+	/// to be moved, or a group it skipped stays skipped. Never below a copy's own
+	/// resume point: groups under it were handed out by an earlier route, or never owed.
 	fn start_at(&mut self, start: u64) {
 		self.groups.0 = start;
 		for copy in &mut self.copies {
 			if let Sub::Ready(sub) = &mut copy.sub {
-				sub.start_at(start);
+				sub.start_at(copy.floor.map_or(start, |floor| start.max(floor.group)));
 			}
 		}
 	}
@@ -1227,6 +1228,35 @@ mod test {
 		routes.serve(b.consume());
 		assert_eq!(recv(&mut sub).sequence, 2);
 		assert!(sub.recv_group().now_or_never().is_none());
+	}
+
+	/// A replacement copy asked to start at the newest group handed out keeps that
+	/// floor when the reader's floor widens: an older group its route cached was
+	/// never owed, and handing it out now would be out of order.
+	#[test]
+	fn a_widened_floor_stays_above_the_replacement_resume_point() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+		let mut group = a.create_group(group::Info { sequence: 5 }).unwrap();
+		group.write_frame(ts(5), b"x".as_ref()).unwrap();
+		group.finish().unwrap();
+		assert_eq!(recv(&mut sub).sequence, 5);
+
+		let b = copy();
+		routes.serve(b.consume());
+		// Subscribe the replacement before it has anything, so the update moves a ready copy.
+		assert!(sub.recv_group().now_or_never().is_none());
+		for sequence in [2, 6] {
+			let mut group = b.create_group(group::Info { sequence }).unwrap();
+			group.write_frame(ts(sequence), b"x".as_ref()).unwrap();
+			group.finish().unwrap();
+		}
+
+		sub.start_at(0);
+		assert_eq!(recv(&mut sub).sequence, 6);
 	}
 
 	#[test]
