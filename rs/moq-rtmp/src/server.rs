@@ -826,14 +826,16 @@ impl<S: Stream> Play<S> {
 			}
 		};
 
-		// The export re-resolves the broadcast (and any sibling broadcast a rendition's
-		// catalog `broadcast` field references) through the origin.
-		let mut export = FlvExport::new(moq_mux::Source::new(origin.consume(), path.as_str()))
+		// The capability check consumed its snapshot, so the export follows a fresh
+		// subscription narrowed to what the client can play. The source still
+		// re-resolves any sibling broadcast a rendition's `broadcast` field names.
+		let stream = moq_mux::catalog::Consumer::<()>::new(&broadcast, CatalogFormat::default())
 			.await
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
+			.select(select);
+		let mut export = FlvExport::new(moq_mux::Source::new(origin.consume(), path.as_str()), stream)
 			.with_max_age(self.latency)
-			.with_multitrack(self.capabilities.multitrack)
-			.with_select(select);
+			.with_multitrack(self.capabilities.multitrack);
 
 		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
 		// broadcast that never produces a playable FLV header looks successful to the
@@ -1201,11 +1203,11 @@ async fn pump<S: Stream>(
 /// pings, `deleteStream`) so a long playback stays healthy. The read and write
 /// halves run independently, so media keeps flowing regardless of when the viewer
 /// next sends anything.
-async fn play_pump<S: Stream>(
+async fn play_pump<S: Stream, C: CatalogStream>(
 	stream: &mut S,
 	session: &mut ServerSession,
 	work: &mut VecDeque<ServerSessionResult>,
-	export: &mut FlvExport,
+	export: &mut FlvExport<C>,
 	mut tags: flv::TagReader,
 	stream_id: u32,
 	peer: SocketAddr,

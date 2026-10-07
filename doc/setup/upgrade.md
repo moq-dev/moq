@@ -119,6 +119,12 @@ These land with the next breaking release, not the 2026-09-23 train.
 - **@moq/publish drops `OpusConfig.usedtx`.** Chromium's DTX output shifts the
   audio timeline, so Opus DTX is always off (the WebCodecs default). Remove the
   field; a plain-JS caller still passing it is ignored.
+- **FLV export takes a catalog stream.** `flv::Export::new` is synchronous and
+  takes `(source, catalog)`, like `fmp4::Export` and `mkv::Export`.
+  `with_catalog_format` and `with_select` are gone. Open the catalog yourself
+  (`source.catalog(format)`) and narrow it with `catalog::Stream::select`
+  before constructing the export. `moq export flv` still applies the same
+  rendition flags.
 
 ## Wire
 
