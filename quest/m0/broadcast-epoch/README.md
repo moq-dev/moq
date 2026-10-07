@@ -42,8 +42,8 @@ Decided:
 - A catalog `broadcast` reference by name follows the newest epoch, since a
   path cannot name one.
 - Every first-party publisher that can restart mints its own: the apps,
-  moq-boy, and moq-room through [Apps](/quest/m0/broadcast-epoch/apps.md), the
-  ingest gateways, moqsink, and the bindings below. moq-stats mints one per group announcement
+  moq-boy, and moq-room (done), the ingest gateways, moqsink, and the
+  bindings below. moq-stats mints one per group announcement
   through [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md), which
   also gates the release (decided 2026-10-04).
 - The m1 quests gating this line moved under it in the 2026-10-05 audit, and
@@ -68,7 +68,6 @@ timeout, and killing the newest epoch falls back to a still-live older one.
 
 ## Required
 
-- [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web restart into a new epoch and reset on the switch
 - [Gateways](/quest/m0/broadcast-epoch/gateways.md) - RTMP, SRT, and WHIP ingest mint an epoch per incoming connection, so an encoder reconnect is a clean takeover
 - [TS restart](/quest/m0/broadcast-epoch/ts-restart.md) - a signalled backward TS discontinuity finishes the broadcast and continues the same input under a fresh epoch
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
