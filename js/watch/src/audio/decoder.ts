@@ -207,6 +207,9 @@ export class Decoder {
 		// This is less efficient for video-only playback but makes muting/unmuting instant.
 		const shape = effect.get(this.#shape);
 		if (!shape) return;
+		// Rendition absence keeps the graph warm, but a disabled broadcast releases its resources.
+		const broadcast = effect.get(this.source.in.broadcast);
+		if (!broadcast || !effect.get(broadcast.in.enabled)) return;
 
 		const { sampleRate, channels: channelCount } = shape;
 
