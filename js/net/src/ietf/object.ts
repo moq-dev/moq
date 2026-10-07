@@ -20,9 +20,9 @@ const PROP_TIMESTAMP = 0x10n;
 const PROP_TIMESTAMP_DRAFT03 = 0x06n;
 
 // draft-18 adds bit 0x40 (FIRST_OBJECT) to the subgroup header type per spec
-// 11.4.2. Set on emit unless a filter trimmed the group's head; on parse a
-// cleared bit is the peer saying its stream starts partway through a group,
-// which the subscriber drops.
+// 11.4.2. Set on emit unless a filter trimmed the group's head. On parse a
+// cleared bit is the peer's claim that the stream starts partway through;
+// object 0 is still the head, and any other first ID is dropped.
 const FIRST_OBJECT_BIT = 0x40;
 
 function hasFirstObjectBit(version: IetfVersion): boolean {

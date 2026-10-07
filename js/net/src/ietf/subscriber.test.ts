@@ -1211,6 +1211,54 @@ test("a group served from partway through is dropped", async () => {
 });
 
 /**
+ * The first Object ID is absolute whatever FIRST_OBJECT says, and IDs start at 0, so a
+ * draft-18 stream that leaves the bit clear and starts at object 0 is the whole group.
+ * The publisher is out of spec on the bit, not missing a head.
+ */
+test("a clear FIRST_OBJECT at object 0 is the whole group", async () => {
+	const { subscriber, track } = await subscribeTrack();
+
+	const flags = groupFlags(false);
+	await subscriber.handleGroup(
+		new GroupMessage({ trackAlias: ALIAS, groupId: 3, subGroupId: 0, publisherPriority: 0, flags }),
+		new Reader(undefined, encodeObjects([0, 0]), VERSION),
+	);
+
+	const group = await track.ordered().nextGroup();
+	expect(group?.sequence).toBe(3);
+	if (!group) return;
+	expect(await group.readString()).toBe("object 0");
+	expect(group.frameCount).toBe(2);
+
+	track.close();
+});
+
+/**
+ * A clear FIRST_OBJECT whose first ID is not 0 still has a hole at the front, so the
+ * stream is dropped and the track resumes at the next group.
+ */
+test("a clear FIRST_OBJECT past object 0 is dropped", async () => {
+	const { subscriber, track } = await subscribeTrack();
+
+	const flags = groupFlags(false);
+	await subscriber.handleGroup(
+		new GroupMessage({ trackAlias: ALIAS, groupId: 3, subGroupId: 0, publisherPriority: 0, flags }),
+		new Reader(undefined, encodeObjects([3]), VERSION),
+	);
+
+	const whole = groupFlags(true);
+	await subscriber.handleGroup(
+		new GroupMessage({ trackAlias: ALIAS, groupId: 4, subGroupId: 0, publisherPriority: 0, flags: whole }),
+		new Reader(undefined, encodeObjects([0]), VERSION),
+	);
+
+	const group = await track.ordered().nextGroup();
+	expect(group?.sequence).toBe(4);
+
+	track.close();
+});
+
+/**
  * FIRST_OBJECT is the publisher's claim, and the object ids are what actually happened. A
  * peer that sets the bit and then starts at object 5 is contradicting itself, so the group
  * is aborted rather than delivered with a hole the header said was not there.
