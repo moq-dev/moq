@@ -1001,9 +1001,7 @@ fn plays_audio(capabilities: &ClientCapabilities, codec: &AudioCodec) -> bool {
 
 /// Codec families this client can play.
 ///
-/// AAC and MP3 need no FourCC on a single-track client. AC-3 and E-AC-3 share
-/// [`AudioCodecKind::Unknown`] with other non-WebCodecs codecs, so advertising
-/// either one also keeps the other.
+/// AAC and MP3 need no FourCC on a single-track client.
 fn playable_audio_kinds(capabilities: &ClientCapabilities) -> Vec<AudioCodecKind> {
 	let samples = [
 		AudioCodec::AAC(hang::catalog::AAC { profile: 2 }),
@@ -2006,11 +2004,15 @@ mod tests {
 		let err = play_selection(&unsupported, &legacy).expect_err("no playable audio");
 		assert!(err.contains("ac-3"), "{err}");
 
-		// An advertised enhanced codec is kept, including one whose kind is Unknown.
+		// An advertised enhanced codec is kept, but not a sibling codec the client never
+		// advertised, even at a higher bitrate: an AC-3 decoder can't play E-AC-3.
 		let mut ac3 = moq_mux::catalog::hang::Catalog::default();
 		ac3.audio
 			.renditions
-			.insert("a".to_string(), audio(AudioCodec::Ac3, 96_000));
+			.insert("a".to_string(), audio(AudioCodec::Ac3, 128_000));
+		ac3.audio
+			.renditions
+			.insert("b".to_string(), audio(AudioCodec::Ec3, 256_000));
 		let support = FourCcSupport {
 			any: false,
 			fourccs: vec![*b"ac-3"],
@@ -2018,7 +2020,10 @@ mod tests {
 		let select = play_selection(&ac3, &ClientCapabilities::new(0, FourCcSupport::default(), support)).unwrap();
 		let mut kept = ac3.clone();
 		select.retain(&mut kept);
-		assert!(kept.audio.renditions.contains_key("a"));
+		assert_eq!(
+			kept.audio.renditions.keys().map(String::as_str).collect::<Vec<_>>(),
+			["a"]
+		);
 
 		// Multitrack still requires every rendition.
 		let multitrack = ClientCapabilities::new(
