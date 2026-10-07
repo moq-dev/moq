@@ -16,12 +16,14 @@ use moq_net::Timestamp;
 
 /// How much media a track may queue while another track waits for its codec configuration.
 ///
-/// The init segment declares every track, so it waits until each one can be described; a
-/// track that needs its bitstream for that (an Annex-B H.264 or H.265 source, or video
-/// whose catalog leaves out its dimensions) holds it until a keyframe arrives. The other
+/// The init segment declares every track, so it waits until each one can be described.
+/// An Annex-B H.264 or H.265 source whose catalog codec string and dimensions determine
+/// the sample entry is described immediately. High AVC profiles whose chroma or bit depth
+/// the string does not carry, HEVC beyond Main and Main Still Picture, and a catalog that
+/// leaves out dimensions still wait for the first keyframe's parameter sets. The other
 /// tracks keep reading meanwhile, so they don't fall behind the subscription's max age,
-/// and their fragments are written right after the init. A source that never delivers a
-/// keyframe would otherwise queue forever.
+/// and their fragments are written right after the init. A source that never delivers
+/// what the init needs would otherwise queue forever.
 const INIT_QUEUE: Duration = Duration::from_secs(30);
 
 /// Subscribe to a moq broadcast and produce a single fMP4 / CMAF byte stream.
@@ -41,10 +43,14 @@ const INIT_QUEUE: Duration = Duration::from_secs(30);
 /// fragment rate. Returns `None` when the broadcast ends.
 ///
 /// The init segment declares every rendition in the catalog once each can be described,
-/// and fragments cut while it waits are written right after it. From then on the track
-/// set is fixed: a rendition that leaves and returns with the same sample entry is
-/// written under the track it was declared as, while a new rendition, a changed sample
-/// entry, or a return that replays media already written fails the export.
+/// and fragments cut while it waits are written right after it. Annex-B H.264 and H.265
+/// whose catalog codec string and dimensions determine the sample entry are described at
+/// the first catalog, as avc3 or hev1 with parameter sets in the samples. From then on
+/// the track set is fixed: a rendition that leaves and returns with the same sample entry
+/// is written under the track it was declared as. That comparison covers the catalog-derived
+/// record, so an Annex-B encoder that restarts with a new parameter set can return. A new
+/// rendition, a changed sample entry, or a return that replays media already written fails
+/// the export.
 ///
 /// [`next_chunk`](Self::next_chunk) returns the same bytes as a [`Chunk`], which
 /// separates the init segment from a [`Fragment`] carrying whether it begins at a
@@ -154,7 +160,7 @@ enum Rendition {
 impl Rendition {
 	fn subscribe(&self, source: &crate::Source, name: &str, max_age: Duration) -> Result<Option<ExportSource>> {
 		match self {
-			Rendition::Video(config) => ExportSource::for_video(source, name, config, max_age),
+			Rendition::Video(config) => ExportSource::for_fmp4_video(source, name, config, max_age),
 			Rendition::Audio(config) => ExportSource::for_audio(source, name, config, max_age),
 		}
 	}
@@ -283,6 +289,11 @@ impl Fmp4Track {
 	/// Apply a newer catalog entry for the same rendition.
 	fn reconfigure(&mut self, name: &str, config: Rendition) -> Result<()> {
 		if config.is_video() != self.is_video {
+			return Err(Error::TrackChanged(name.to_string()).into());
+		}
+		if let (Rendition::Video(video), Some(source)) = (&config, self.source.as_mut())
+			&& !source.note_catalog(video)
+		{
 			return Err(Error::TrackChanged(name.to_string()).into());
 		}
 		self.default_frame = config.default_frame();
@@ -531,8 +542,8 @@ impl<S: Stream> Export<S> {
 			}
 
 			// 2. Fill any empty pending slots by polling each source. ExportSource
-			// has already applied any codec-shape transform (Avc3 → avc1) and
-			// absorbed parameter-only frames.
+			// has already applied any codec-shape transform (Annex-B to
+			// length-prefixed) and absorbed parameter-only frames.
 			//
 			// A track that can't be described yet drops its frames, so the source keeps
 			// polling for the SPS/PPS-bearing keyframe instead of parking.

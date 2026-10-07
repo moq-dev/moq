@@ -628,11 +628,12 @@ fn trun_duration(duration: Timestamp, timescale: moq_net::Timescale) -> Result<u
 
 /// Synthesize a CMAF `Trak` for a video rendition that has no init segment.
 ///
-/// Used by the fMP4 exporter when its source is a `Container::Legacy` track
-/// (Avc3/Hev1/etc. importers that publish raw codec bitstreams). H.264/H.265
-/// need their out-of-band configuration record (`description`), e.g. because the
-/// Avc1 / Hvc1 transform has finished building it from inline parameter sets.
-/// VP8 carries no out-of-band config, so `description` is `None` for it.
+/// Used by the fMP4 exporter when its source is a `Container::Legacy` or `Loc`
+/// track. H.264/H.265 need a configuration record (`description`). When the
+/// catalog codec string determined that record, it lists no parameter sets and
+/// the sample entry is avc3 or hev1; the sets stay in the samples. A record built
+/// from the bitstream still carries them. VP8 carries no out-of-band config, so
+/// `description` is `None` for it.
 pub(crate) fn synthesize_video_trak(
 	track_id: u32,
 	timescale: u64,
@@ -672,14 +673,24 @@ pub(crate) fn synthesize_video_trak(
 	let require_description = || description.ok_or_else(|| Error::MissingVideoDescription(config.codec.to_string()));
 
 	let sample_entry = match &config.codec {
-		VideoCodec::H264(_) => {
+		VideoCodec::H264(h264) => {
 			let mut cursor = std::io::Cursor::new(require_description()?);
 			let avcc = mp4_atom::Avcc::decode_body(&mut cursor).map_err(Error::from)?;
-			mp4_atom::Codec::from(mp4_atom::Avc1 {
-				visual,
-				avcc,
-				..Default::default()
-			})
+			// Empty parameter-set lists are the in-band sample entry. A record that
+			// still carries them, including one built from the first keyframe, stays avc1.
+			if h264.inline && avcc.sequence_parameter_sets.is_empty() && avcc.picture_parameter_sets.is_empty() {
+				mp4_atom::Codec::from(mp4_atom::Avc3 {
+					visual,
+					avcc,
+					..Default::default()
+				})
+			} else {
+				mp4_atom::Codec::from(mp4_atom::Avc1 {
+					visual,
+					avcc,
+					..Default::default()
+				})
+			}
 		}
 		VideoCodec::H265(h265) => {
 			let mut cursor = std::io::Cursor::new(require_description()?);

@@ -166,14 +166,20 @@ the fragment span as frames arrive, including audio whose publisher never cuts.
 MKV uses the same flag to cap clusters, which otherwise follow video GOPs.
 
 The fMP4 init segment declares every rendition in the catalog, so it waits until
-each can be described. An Annex-B H.264 or H.265 track, or video whose catalog
-leaves out its dimensions, waits for its first keyframe; the other tracks keep
-reading meanwhile and their fragments follow the init. A track that is still
-waiting once another has queued 30 seconds fails the export. After the init the
-track set is fixed: a rendition that leaves and returns with the same codec
-configuration is written under its original track, while a new rendition, a
-changed configuration, or a return that replays media already written ends the
-export with an error naming it. Restart the export to pick up a new rendition.
+each can be described. An Annex-B H.264 or H.265 track whose catalog codec string
+and dimensions determine the sample entry is written immediately, as `avc3` or
+`hev1`, with SPS, PPS, and VPS left in the samples. High AVC profiles whose chroma
+or bit depth the string does not carry, HEVC beyond Main and Main Still Picture,
+and video whose catalog leaves out its dimensions still wait for the first
+keyframe; the other tracks keep reading meanwhile and their fragments follow the
+init. A track that is still waiting once another has queued 30 seconds fails the
+export. After the init the track set is fixed: a rendition that leaves and returns
+with the same codec configuration is written under its original track. An Annex-B
+return is matched on that catalog record, so a restarted parameter set does not
+end the export. A new rendition, a changed configuration, or a return that replays
+media already written ends the export with an error naming it. Restart the export
+to pick up a new rendition.
+
 An Opus rendition declared without its OpusHead gets a guessed pre-skip. A
 head that arrives later with the same channel count, decode rate, and gain is
 accepted even if its pre-skip and input rate differ. An init already written

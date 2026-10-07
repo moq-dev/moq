@@ -117,6 +117,21 @@ pub(crate) fn push_distinct(set: &mut Vec<Bytes>, nal: &Bytes) -> bool {
 	true
 }
 
+/// Every NAL in an Annex-B access unit, in order, including a buffer that has no
+/// start code between its last NAL and the end.
+pub(crate) fn nal_units(payload: &Bytes) -> Result<Vec<Bytes>> {
+	let mut buf = payload.clone();
+	let mut nal_iter = NalIterator::new(&mut buf);
+	let mut nals = Vec::new();
+	while let Some(nal) = nal_iter.next().transpose()? {
+		nals.push(nal);
+	}
+	if let Some(nal) = nal_iter.flush()? {
+		nals.push(nal);
+	}
+	Ok(nals)
+}
+
 /// Reconcile the retained parameter sets with what a keyframe access unit carried
 /// inline, called when the keyframe slice is reached:
 ///

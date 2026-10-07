@@ -47,12 +47,18 @@ samples are always encoded as sync samples; the decoded `Frame::keyframe` marks
 only the first audio sample of a MoQ group.
 
 `fmp4::Export` writes its init segment once every rendition can be described,
-queueing other tracks' fragments (up to 30 seconds) behind it. The track set is
+queueing other tracks' fragments (up to 30 seconds) behind it. Annex-B H.264 and
+H.265 whose catalog codec string and dimensions determine the sample entry are
+described at the first catalog: the init is `avc3` or `hev1`, and SPS, PPS, and
+VPS stay in the samples. High AVC profiles whose chroma or bit depth the string
+does not carry, HEVC beyond Main and Main Still Picture, and a catalog missing
+dimensions still wait for the first keyframe's parameter sets. The track set is
 then fixed. A rendition that returns with the same sample entry reuses its track
-id; `fmp4::Error::TrackAdded`, `TrackChanged`, and `TrackRewound` end the export
-for a new rendition, a changed sample entry, or a replay of media already
-written, and `TrackUndescribed` names a track that never delivered its codec
-configuration. An Opus entry synthesized without a catalog `description` guesses
+id. An Annex-B return is compared on the catalog-derived record, so a new
+parameter set can return. `fmp4::Error::TrackAdded`, `TrackChanged`, and
+`TrackRewound` end the export for a new rendition, a changed sample entry, or a
+replay of media already written, and `TrackUndescribed` names a track that never
+delivered its codec configuration. An Opus entry synthesized without a catalog `description` guesses
 its pre-skip and input sample rate, so a later OpusHead that agrees on everything
 else settles it instead of changing it. An OpusHead whose channel count
 contradicts its catalog entry fails with `fmp4::Error::OpusChannelCount`.

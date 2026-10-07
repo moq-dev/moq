@@ -189,7 +189,7 @@ impl Muxer {
 					out.push(frame);
 					continue;
 				};
-				let payload = transform.transform(frame.payload.clone())?;
+				let payload = transform.transform(frame.payload.clone(), frame.keyframe)?;
 				// Track the transform's record even after it is first set: a mid-stream
 				// reconfiguration rebuilds the avcC/hvcC with new parameter sets.
 				if let Some(d) = transform.codec_private()

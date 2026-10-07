@@ -19,6 +19,14 @@ error lists and rerun.
 
 These land with the next breaking release, not the 2026-09-23 train.
 
+- **fMP4 export of Annex-B H.264 and H.265 inits from the catalog.** When the
+  catalog codec string and dimensions are enough, `moq export fmp4` writes an
+  `avc3` or `hev1` init segment before the first keyframe and leaves SPS, PPS,
+  and VPS in the samples. High AVC profiles (110, 122, 244, and the rest whose
+  chroma or bit depth the string does not carry), HEVC beyond Main and Main
+  Still Picture, and a catalog missing dimensions still wait for the SPS. A
+  returning Annex-B rendition is matched on that catalog record, so an encoder
+  that restarts with a new SPS can return.
 - **moq-binary is moq-flate, and @moq/binary is @moq/flate.** The opaque
   `snapshot` and `stream` tracks moved beside the codec; the wire and the
   catalog's `binary` section are unchanged. In Rust, `moq_binary::X` is

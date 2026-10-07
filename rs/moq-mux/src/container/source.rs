@@ -2,21 +2,22 @@
 //! resolved codec configuration record.
 //!
 //! Exporters declare what wire shape they want their frames in (currently:
-//! avc1/hvc1 length-prefixed for H.264/H.265) and call [`ExportSource::poll_read`]
+//! length-prefixed NAL units for H.264/H.265) and call [`ExportSource::poll_read`]
 //! to pull normalized frames. For Annex-B sources (catalog codec marked
 //! `inline: true` / `in_band: true`, empty `description`) the source attaches
-//! an [`Avc1`] / [`Hvc1`] transform that caches parameter sets, synthesizes
-//! the codec config record, and length-prefixes slice NALs. Frame emission
-//! is deferred until the transform has produced its config record.
+//! an [`Avc1`] / [`Hvc1`] transform that caches parameter sets and length-prefixes
+//! NALs. MKV, FLV, and MPEG-TS strip those parameter sets and wait until the
+//! transform has built an avcC or hvcC. fMP4 keeps them in the sample when the
+//! catalog codec string and dimensions already determine the record.
 //!
-//! `description()` returns the resolved codec config: either the catalog's
-//! existing `description` (for already-out-of-band sources) or the synthesized
-//! avcC/hvcC (for Annex-B sources).
+//! `description()` returns the resolved codec config: the catalog description,
+//! a record derived from the codec string, or an avcC/hvcC synthesized from
+//! in-band parameter sets.
 
 use std::task::{Poll, ready};
 
 use bytes::Bytes;
-use hang::catalog::{AudioConfig, VideoCodec, VideoConfig};
+use hang::catalog::{AudioConfig, Container, VideoCodec, VideoConfig};
 
 use super::consumer::Event;
 use crate::catalog::hang::Container as HangContainer;
@@ -38,10 +39,10 @@ impl VideoTransform {
 		}
 	}
 
-	pub(crate) fn transform(&mut self, payload: Bytes) -> crate::Result<Option<Bytes>> {
+	pub(crate) fn transform(&mut self, payload: Bytes, keyframe: bool) -> crate::Result<Option<Bytes>> {
 		match self {
-			VideoTransform::Avc1(t) => Ok(t.transform(payload)?),
-			VideoTransform::Hvc1(t) => Ok(t.transform(payload)?),
+			VideoTransform::Avc1(t) => Ok(t.transform_frame(payload, keyframe)?),
+			VideoTransform::Hvc1(t) => Ok(t.transform_frame(payload, keyframe)?),
 		}
 	}
 }
@@ -91,6 +92,30 @@ impl ExportSource {
 		max_age: std::time::Duration,
 	) -> Result<Option<Self>, crate::Error> {
 		Self::video(source, name, config, max_age, build_video_transform(config))
+	}
+
+	/// Subscribe to a video rendition for fMP4 export.
+	///
+	/// Annex-B H.264 and H.265 whose catalog codec string and dimensions determine
+	/// the sample entry keep their parameter sets in the samples and expose that
+	/// record immediately. Every other source matches [`Self::for_video`].
+	pub(crate) fn for_fmp4_video(
+		source: &crate::Source,
+		name: &str,
+		config: &VideoConfig,
+		max_age: std::time::Duration,
+	) -> Result<Option<Self>, crate::Error> {
+		let record = annexb_catalog_record(config);
+		let transform = match (&config.codec, record.is_some()) {
+			(VideoCodec::H264(_), true) => Some(VideoTransform::Avc1(Avc1::keeping_parameter_sets())),
+			(VideoCodec::H265(_), true) => Some(VideoTransform::Hvc1(Hvc1::keeping_parameter_sets())),
+			_ => build_video_transform(config),
+		};
+		let mut source = Self::video(source, name, config, max_age, transform)?;
+		if let (Some(source), Some(record)) = (source.as_mut(), record) {
+			source.description = Some(record);
+		}
+		Ok(source)
 	}
 
 	/// Subscribe to a video rendition without attaching any codec-shape
@@ -182,6 +207,36 @@ impl ExportSource {
 	/// The resolved codec-config record, if available.
 	pub fn description(&self) -> Option<&Bytes> {
 		self.description.as_ref()
+	}
+
+	/// True when the sample entry was derived from the catalog codec string.
+	///
+	/// A transform that has since built its own avcC or hvcC from parameter sets
+	/// is describing the bitstream, not the catalog.
+	pub(crate) fn described_from_catalog(&self) -> bool {
+		self.description.is_some()
+			&& self
+				.transform
+				.as_ref()
+				.is_some_and(|transform| transform.codec_private().is_none())
+	}
+
+	/// Refresh a catalog-derived record after the catalog entry changes.
+	///
+	/// Returns false when this source was described from the catalog and the new
+	/// entry no longer carries everything that record needs. The previous record
+	/// is left in place so the caller can fail the export against it.
+	pub(crate) fn note_catalog(&mut self, config: &VideoConfig) -> bool {
+		if !self.described_from_catalog() {
+			return true;
+		}
+		match annexb_catalog_record(config) {
+			Some(record) => {
+				self.description = Some(record);
+				true
+			}
+			None => false,
+		}
 	}
 
 	/// The underlying consumer's playhead generation, or 0 until the
@@ -288,7 +343,7 @@ impl ExportSource {
 				return Poll::Ready(Ok(Some(Event::Frame(frame))));
 			};
 
-			match transform.transform(frame.payload.clone())? {
+			match transform.transform(frame.payload.clone(), frame.keyframe)? {
 				None => {
 					// Parameter set absorbed by the transform. Refresh the
 					// resolved description (it may have just become available)
@@ -362,6 +417,31 @@ pub(crate) fn codec_dimensions(
 	};
 
 	Ok(dimensions.filter(|(width, height)| *width > 0 && *height > 0))
+}
+
+/// An avcC or hvcC derived from the catalog codec string, when that string and
+/// the catalog dimensions are everything the fMP4 sample entry needs.
+///
+/// CMAF keeps the init segment it was declared with. A catalog that already
+/// carries a description, or that omits dimensions, stays on the path that
+/// waits for parameter sets in the bitstream.
+fn annexb_catalog_record(config: &VideoConfig) -> Option<Bytes> {
+	if !matches!(config.container, Container::Legacy | Container::Loc) {
+		return None;
+	}
+	if config
+		.description
+		.as_ref()
+		.is_some_and(|description| !description.is_empty())
+	{
+		return None;
+	}
+	catalog_dimensions(config)?;
+	match &config.codec {
+		VideoCodec::H264(h264) => crate::codec::h264::catalog_avcc(h264),
+		VideoCodec::H265(h265) => crate::codec::h265::catalog_hvcc(h265),
+		_ => None,
+	}
 }
 
 /// Build a video transform for an Annex-B source, or `None` if the catalog

@@ -5,7 +5,7 @@ use std::io::Cursor;
 use bytes::{Bytes, BytesMut};
 use mp4_atom::{DecodeMaybe, Encode};
 
-use crate::container::test_util::{Live, PPS, SPS, raw_frame, video_frame};
+use crate::container::test_util::{IDR, Live, PPS, SPS, raw_frame, video_frame};
 
 /// The media track's full retention window, so an exporter started after publishing
 /// can still read every retained group. These tests write or import a whole broadcast
@@ -15,14 +15,8 @@ use crate::container::test_util::{Live, PPS, SPS, raw_frame, video_frame};
 const RECORDING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Avc3-shape source (catalog `Container::Legacy`, `H264 { inline: true }`,
-/// `description: None`) → fMP4 / CMAF export must synthesize a valid init
-/// segment from the codec config the Avc1 transform builds on the wire.
-///
-/// Verifies:
-/// - Exporter doesn't bail on a Legacy source (the historical behavior).
-/// - Init segment is deferred until SPS+PPS arrive.
-/// - The synthesized init segment parses back and carries an avc1 sample
-///   entry whose avcC is built from the inline SPS+PPS.
+/// `description: None`) → fMP4 export writes an avc3 init from the catalog codec
+/// string and leaves the parameter sets in the sample.
 #[tokio::test(start_paused = true)]
 async fn avc3_source_to_cmaf_export_roundtrip() {
 	let mut live = Live::avc3();
@@ -52,21 +46,30 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 	let trak = &moov.trak[0];
 	let stsd = &trak.mdia.minf.stbl.stsd;
 	assert_eq!(stsd.codecs.len(), 1, "expected single sample entry");
-	let avc1 = match &stsd.codecs[0] {
-		mp4_atom::Codec::Avc1(avc1) => avc1,
-		other => panic!("expected Avc1 sample entry, got {:?}", other),
+	let avc3 = match &stsd.codecs[0] {
+		mp4_atom::Codec::Avc3(avc3) => avc3,
+		other => panic!("expected Avc3 sample entry, got {:?}", other),
 	};
-	assert_eq!(avc1.avcc.avc_profile_indication, SPS[1]);
-	assert_eq!(avc1.avcc.avc_level_indication, SPS[3]);
-	assert_eq!(avc1.avcc.sequence_parameter_sets.len(), 1);
-	assert_eq!(avc1.avcc.sequence_parameter_sets[0].as_slice(), SPS);
-	assert_eq!(avc1.avcc.picture_parameter_sets[0].as_slice(), PPS);
-	assert_eq!(avc1.visual.width, 320);
-	assert_eq!(avc1.visual.height, 240);
+	assert_eq!(avc3.avcc.avc_profile_indication, 0x42);
+	assert_eq!(avc3.avcc.profile_compatibility, 0xc0);
+	assert_eq!(avc3.avcc.avc_level_indication, 0x1f);
+	assert_eq!(avc3.avcc.length_size, 4);
+	assert!(avc3.avcc.ext.is_none());
+	assert!(avc3.avcc.sequence_parameter_sets.is_empty());
+	assert!(avc3.avcc.picture_parameter_sets.is_empty());
+	assert_eq!(avc3.visual.width, 320);
+	assert_eq!(avc3.visual.height, 240);
 
 	let mvex = moov.mvex.as_ref().expect("init segment missing mvex");
 	assert_eq!(mvex.trex.len(), 1);
 	assert_eq!(mvex.trex[0].track_id, trak.tkhd.track_id);
+
+	let fragments = drain_now(&mut exporter).await;
+	assert_eq!(fragments.len(), 1, "the finished keyframe is one fragment");
+	assert_eq!(
+		video_payloads(&fragments[0]),
+		vec![Bytes::from(length_prefixed(&[SPS, PPS, IDR]))]
+	);
 }
 
 /// Legacy AAC source (catalog `Container::Legacy`, codec `mp4a.40.2`, with a
@@ -1264,6 +1267,73 @@ async fn drain_now(
 	fragments
 }
 
+/// Length-prefix each NAL with a 4-byte big-endian length.
+fn length_prefixed(nals: &[&[u8]]) -> Vec<u8> {
+	let mut out = Vec::new();
+	for nal in nals {
+		out.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+		out.extend_from_slice(nal);
+	}
+	out
+}
+
+/// One Annex-B access unit at `timestamp_us`.
+fn annexb_frame(timestamp_us: u64, nals: &[&[u8]]) -> crate::container::Frame {
+	let mut payload = BytesMut::new();
+	for nal in nals {
+		payload.extend_from_slice(&[0, 0, 0, 1]);
+		payload.extend_from_slice(nal);
+	}
+	crate::container::Frame {
+		timestamp: moq_net::Timestamp::from_micros(timestamp_us).unwrap(),
+		payload: payload.freeze(),
+		keyframe: true,
+		duration: None,
+	}
+}
+
+/// Sample payloads of one video fragment. The timescale only converts timestamps.
+fn video_payloads(fragment: &crate::container::fmp4::Fragment) -> Vec<Bytes> {
+	super::decode(
+		fragment.data.clone(),
+		moq_net::Timescale::new(30_000).unwrap(),
+		super::Kind::Video,
+	)
+	.expect("decode fragment")
+	.into_iter()
+	.map(|frame| frame.payload)
+	.collect()
+}
+
+/// The video sample entry declared by an init segment.
+fn video_codec(init: &Bytes) -> mp4_atom::Codec {
+	let mut cursor = Cursor::new(init.as_ref());
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode init") {
+		let mp4_atom::Any::Moov(moov) = atom else {
+			continue;
+		};
+		for trak in &moov.trak {
+			if trak.mdia.hdlr.handler.to_string() == "vide" {
+				return trak.mdia.minf.stbl.stsd.codecs[0].clone();
+			}
+		}
+	}
+	panic!("no video trak in the init");
+}
+
+/// High 10: chroma format and bit depth are not in the codec string, so fMP4
+/// export keeps waiting for the SPS.
+fn wait_for_sps(live: &mut Live) {
+	use hang::catalog::VideoCodec;
+
+	let mut catalog = live.catalog.modify().unwrap();
+	let config = catalog.video.renditions.values_mut().next().expect("video");
+	let VideoCodec::H264(h264) = &mut config.codec else {
+		panic!("expected H.264");
+	};
+	h264.profile = 110;
+}
+
 /// The next chunk, required to be ready without another frame arriving.
 async fn chunk_now(
 	exporter: &mut crate::container::fmp4::Export<crate::catalog::Consumer>,
@@ -1328,13 +1398,15 @@ async fn error_now(exporter: &mut crate::container::fmp4::Export<crate::catalog:
 	}
 }
 
-/// An Annex-B H.264 track is described only at its first keyframe, so the init waits
-/// for it. Audio published meanwhile is read as it arrives and written right after the
-/// init, rather than parked on one packet until the max age skips the rest
-/// (moq-dev/moq#4770).
+/// A track the catalog cannot describe yet holds the init. Audio published meanwhile
+/// is read as it arrives and written right after the init, rather than parked on one
+/// packet until the max age skips the rest (moq-dev/moq#4770).
 #[tokio::test(start_paused = true)]
 async fn audio_before_the_first_keyframe_is_kept() {
 	let (mut live, mut audio) = live_av();
+	// High 10: the codec string does not carry chroma or bit depth, so the init
+	// still waits for the SPS. A baseline catalog would be described immediately.
+	wait_for_sps(&mut live);
 	// The CLI's default max age: a parked reader falls behind it within a second.
 	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await)
 		.with_max_age(std::time::Duration::from_millis(500));
@@ -1540,6 +1612,8 @@ async fn a_later_opus_head_settles_the_guess() {
 async fn an_opus_head_before_the_init_is_written() {
 	let (mut live, mut audio) = live_av();
 	let name = audio.name().to_string();
+	// The video codec string cannot describe this profile, so the init waits.
+	wait_for_sps(&mut live);
 	write_audio(&mut audio, 0, 6);
 	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
 	assert!(
@@ -1704,37 +1778,32 @@ async fn a_changed_catalog_description_fails() {
 	);
 }
 
-/// An Annex-B keyframe with new parameter sets changes the avcC the moov declared, so the
-/// export fails instead of writing it.
+/// An Annex-B keyframe with new parameter sets stays on the catalog-derived sample
+/// entry. The new SPS goes out in the sample, beside the PPS this GOP kept.
 #[tokio::test(start_paused = true)]
-async fn a_changed_parameter_set_fails() {
+async fn a_new_parameter_set_stays_in_band() {
 	let mut live = Live::avc3();
-	let name = live.track.name().to_string();
+	let sps2: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xee];
 	live.track.write(video_frame(0, true)).unwrap();
-	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
-	chunk_now(&mut exporter).await.init().expect("init");
+	live.track.write(annexb_frame(33_000, &[sps2, PPS, IDR])).unwrap();
+	live.track.finish().unwrap();
 
-	let mut keyframe = BytesMut::new();
-	for nal in [
-		&[0x67, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xee][..],
-		PPS,
-		crate::container::test_util::IDR,
-	] {
-		keyframe.extend_from_slice(&[0, 0, 0, 1]);
-		keyframe.extend_from_slice(nal);
-	}
-	live.track
-		.write(crate::container::Frame {
-			timestamp: moq_net::Timestamp::from_micros(33_000).unwrap(),
-			payload: keyframe.freeze(),
-			keyframe: true,
-			duration: None,
-		})
-		.unwrap();
-	let err = error_now(&mut exporter).await;
-	assert!(
-		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackChanged(changed)) if *changed == name),
-		"{err:?}"
+	let mut exporter =
+		crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await).with_max_age(RECORDING_MAX_AGE);
+	let init = chunk_now(&mut exporter).await.init().expect("init");
+	let mp4_atom::Codec::Avc3(avc3) = video_codec(&init) else {
+		panic!("expected an avc3 sample entry");
+	};
+	assert!(avc3.avcc.sequence_parameter_sets.is_empty());
+
+	let fragments = drain_now(&mut exporter).await;
+	let payloads: Vec<Bytes> = fragments.iter().flat_map(video_payloads).collect();
+	assert_eq!(
+		payloads,
+		vec![
+			Bytes::from(length_prefixed(&[SPS, PPS, IDR])),
+			Bytes::from(length_prefixed(&[sps2, PPS, IDR])),
+		]
 	);
 }
 
@@ -1800,6 +1869,8 @@ async fn a_track_that_never_describes_itself_fails() {
 
 	let (mut live, mut audio) = live_av();
 	let video = live.track.name().to_string();
+	// The baseline catalog would init before this IDR, which carries no SPS.
+	wait_for_sps(&mut live);
 	live.track.write(raw_frame(0, IDR_ONLY, true)).unwrap();
 	let mut exporter =
 		crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await).with_max_age(RECORDING_MAX_AGE);
@@ -1830,6 +1901,7 @@ async fn an_uncut_audio_backlog_is_bounded() {
 
 	let (mut live, mut audio) = live_av();
 	let video = live.track.name().to_string();
+	wait_for_sps(&mut live);
 	live.track.write(raw_frame(0, IDR_ONLY, true)).unwrap();
 	let mut exporter =
 		crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await).with_max_age(RECORDING_MAX_AGE);
@@ -1923,4 +1995,212 @@ async fn hevc_main10_is_described_from_its_sps() {
 	assert_eq!(hev1.hvcc.chroma_format_idc, 1, "4:2:0");
 	assert_eq!(hev1.hvcc.bit_depth_luma_minus8, 2, "10-bit luma");
 	assert_eq!(hev1.hvcc.bit_depth_chroma_minus8, 2, "10-bit chroma");
+}
+
+/// The catalog codec string and dimensions are enough, so the init is written
+/// before any media frame arrives.
+#[tokio::test(start_paused = true)]
+async fn annexb_init_is_written_before_the_first_keyframe() {
+	let live = Live::avc3();
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	let init = chunk_now(&mut exporter).await.init().expect("init before any frame");
+	let mp4_atom::Codec::Avc3(avc3) = video_codec(&init) else {
+		panic!("expected an avc3 sample entry");
+	};
+	assert!(avc3.avcc.sequence_parameter_sets.is_empty());
+	assert_eq!((avc3.visual.width, avc3.visual.height), (320, 240));
+	assert!(drain_now(&mut exporter).await.is_empty(), "no media has been published");
+}
+
+/// A later keyframe that omits its parameter sets gets the cached set length-prefixed
+/// back in front of the slice.
+#[tokio::test(start_paused = true)]
+async fn a_bare_keyframe_is_prefixed_with_cached_parameter_sets() {
+	let mut live = Live::avc3();
+	live.track.write(video_frame(0, true)).unwrap();
+	live.track.write(annexb_frame(33_000, &[IDR])).unwrap();
+	live.track.finish().unwrap();
+
+	let mut exporter =
+		crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await).with_max_age(RECORDING_MAX_AGE);
+	chunk_now(&mut exporter).await.init().expect("init");
+
+	let fragments = drain_now(&mut exporter).await;
+	let payloads: Vec<Bytes> = fragments.iter().flat_map(video_payloads).collect();
+	assert_eq!(
+		payloads,
+		vec![
+			Bytes::from(length_prefixed(&[SPS, PPS, IDR])),
+			Bytes::from(length_prefixed(&[SPS, PPS, IDR])),
+		]
+	);
+}
+
+/// A returning Annex-B rendition is matched on the catalog record, so a restarted
+/// encoder's new SPS does not end the export.
+#[tokio::test(start_paused = true)]
+async fn a_returning_rendition_may_restart_its_sps() {
+	let mut live = Live::avc3();
+	let name = live.track.name().to_string();
+	live.track.write(video_frame(0, true)).unwrap();
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	chunk_now(&mut exporter).await.init().expect("init");
+
+	let config = live.catalog.modify().unwrap().video.renditions.remove(&name).unwrap();
+	drain_now(&mut exporter).await;
+	let sps2: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xee];
+	live.track.write(annexb_frame(1_000_000, &[sps2, PPS, IDR])).unwrap();
+	live.catalog.modify().unwrap().video.renditions.insert(name, config);
+	drain_now(&mut exporter).await;
+	// The next keyframe flushes the restarted one.
+	live.track.write(video_frame(1_033_000, true)).unwrap();
+	let fragments = drain_now(&mut exporter).await;
+	assert!(
+		fragments.iter().any(|fragment| video_payloads(fragment)
+			.iter()
+			.any(|payload| payload.as_ref() == length_prefixed(&[sps2, PPS, IDR]))),
+		"the restarted SPS is written"
+	);
+}
+
+/// Changing the catalog profile changes the sample entry the moov declared.
+#[tokio::test(start_paused = true)]
+async fn a_changed_catalog_profile_fails() {
+	let mut live = Live::avc3();
+	let name = live.track.name().to_string();
+	live.track.write(video_frame(0, true)).unwrap();
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	chunk_now(&mut exporter).await.init().expect("init");
+
+	{
+		use hang::catalog::VideoCodec;
+		let mut catalog = live.catalog.modify().unwrap();
+		let config = catalog.video.renditions.get_mut(&name).unwrap();
+		let VideoCodec::H264(h264) = &mut config.codec else {
+			panic!("expected H.264");
+		};
+		h264.profile = 0x4d;
+	}
+	let err = error_now(&mut exporter).await;
+	assert!(
+		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackChanged(changed)) if *changed == name),
+		"{err:?}"
+	);
+}
+
+/// High 10 cannot be described from the codec string, so the init waits for the
+/// SPS and then declares avc1 with that SPS inside the avcC.
+#[tokio::test(start_paused = true)]
+async fn high10_waits_for_its_sps() {
+	let mut live = Live::avc3();
+	wait_for_sps(&mut live);
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	let pending = tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await;
+	assert!(pending.is_err(), "an init before the SPS: {pending:?}");
+
+	live.track.write(video_frame(0, true)).unwrap();
+	live.track.finish().unwrap();
+	let init = chunk_now(&mut exporter).await.init().expect("init");
+	let mp4_atom::Codec::Avc1(avc1) = video_codec(&init) else {
+		panic!("expected an avc1 sample entry");
+	};
+	assert_eq!(avc1.avcc.sequence_parameter_sets[0].as_slice(), SPS);
+	assert_eq!(avc1.avcc.picture_parameter_sets[0].as_slice(), PPS);
+	assert_eq!((avc1.visual.width, avc1.visual.height), (320, 240));
+}
+
+/// High is 4:2:0 8-bit, so the catalog inits an avc3 entry and states that in the
+/// avcC extension. The SPS is not in the record.
+#[tokio::test(start_paused = true)]
+async fn high_profile_inits_from_the_catalog() {
+	let mut live = Live::avc3();
+	{
+		use hang::catalog::VideoCodec;
+		let mut catalog = live.catalog.modify().unwrap();
+		let config = catalog.video.renditions.values_mut().next().unwrap();
+		let VideoCodec::H264(h264) = &mut config.codec else {
+			panic!("expected H.264");
+		};
+		h264.profile = 100;
+		h264.constraints = 0;
+		h264.level = 0x1f;
+	}
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	let init = chunk_now(&mut exporter).await.init().expect("init before any frame");
+	let mp4_atom::Codec::Avc3(avc3) = video_codec(&init) else {
+		panic!("expected an avc3 sample entry");
+	};
+	assert_eq!(avc3.avcc.avc_profile_indication, 100);
+	assert!(avc3.avcc.sequence_parameter_sets.is_empty());
+	let ext = avc3.avcc.ext.as_ref().expect("High requires the avcC extension");
+	assert_eq!(ext.chroma_format, 1);
+	assert_eq!(ext.bit_depth_luma, 8);
+	assert_eq!(ext.bit_depth_chroma, 8);
+}
+
+/// Dimensions are not in the codec string. Without them the init waits, then takes
+/// width and height from the SPS.
+#[tokio::test(start_paused = true)]
+async fn annexb_without_dimensions_waits_for_the_sps() {
+	use hang::catalog::{Container, H264, VideoConfig};
+
+	let mut live = Live::new(".avc3", |catalog, name| {
+		let mut config = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		});
+		config.container = Container::Legacy;
+		config.framerate = Some(30.0);
+		catalog.modify().unwrap().video.renditions.insert(name, config);
+	});
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	let pending = tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await;
+	assert!(pending.is_err(), "an init before dimensions: {pending:?}");
+
+	let sps = crate::codec::h264::fixtures::SPS_IPB;
+	let pps = crate::codec::h264::fixtures::PPS;
+	live.track.write(annexb_frame(0, &[sps, pps, IDR])).unwrap();
+	live.track.finish().unwrap();
+	let init = chunk_now(&mut exporter).await.init().expect("init");
+	let mp4_atom::Codec::Avc1(avc1) = video_codec(&init) else {
+		panic!("expected an avc1 sample entry built from the SPS");
+	};
+	assert_eq!((avc1.visual.width, avc1.visual.height), (64, 64));
+	assert_eq!(avc1.avcc.sequence_parameter_sets[0].as_slice(), sps);
+}
+
+/// HEVC Main is fixed 8-bit 4:2:0, so the init is hev1 before the first keyframe
+/// and the hvcC lists no parameter sets.
+#[tokio::test(start_paused = true)]
+async fn hevc_main_inits_from_the_catalog() {
+	use hang::catalog::{Container, H265, VideoConfig};
+
+	let live = Live::new(".hevc", |catalog, name| {
+		let mut config = VideoConfig::new(H265 {
+			in_band: true,
+			profile_space: 0,
+			profile_idc: 1,
+			profile_compatibility_flags: [0x60, 0, 0, 0],
+			tier_flag: false,
+			level_idc: 93,
+			constraint_flags: [0x90, 0, 0, 0, 0, 0],
+		});
+		config.container = Container::Legacy;
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		catalog.modify().unwrap().video.renditions.insert(name, config);
+	});
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	let init = chunk_now(&mut exporter).await.init().expect("init before any frame");
+	let mp4_atom::Codec::Hev1(hev1) = video_codec(&init) else {
+		panic!("expected an hev1 sample entry");
+	};
+	assert_eq!(hev1.hvcc.general_profile_idc, 1);
+	assert_eq!(hev1.hvcc.chroma_format_idc, 1);
+	assert_eq!(hev1.hvcc.bit_depth_luma_minus8, 0);
+	assert_eq!(hev1.hvcc.bit_depth_chroma_minus8, 0);
+	assert!(hev1.hvcc.arrays.is_empty());
+	assert_eq!((hev1.visual.width, hev1.visual.height), (320, 240));
 }
