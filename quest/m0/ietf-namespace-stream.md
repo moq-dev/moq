@@ -2,11 +2,12 @@
 
 ## Goal
 
-On draft-16 and later, every SUBSCRIBE_NAMESPACE response stream carries
-NAMESPACE and NAMESPACE_DONE for each matching namespace, whatever the
-peer's SETUP options, in `rs/moq-net` and `js/net`. Today a peer that did not
-send our SOLICIT option (0x40B5A), which is every other implementation, gets
-an empty stream and only the unsolicited PUBLISH_NAMESPACE pushes.
+On draft-16 and later, a SUBSCRIBE_NAMESPACE that asks for namespaces
+gets NAMESPACE and NAMESPACE_DONE on its response stream for each matching
+namespace, whatever the peer's SETUP options, in `rs/moq-net` and `js/net`.
+Today a peer that did not send our SOLICIT option (0x40B5A), which is every
+other implementation, gets an empty stream and only the unsolicited
+PUBLISH_NAMESPACE pushes.
 
 ## Plan
 
@@ -17,8 +18,19 @@ and §10.18 puts them on the response stream. d16 §9.25 says the same
 without the MUST. Both drafts let a publisher send PUBLISH_NAMESPACE to any
 subscriber, and neither says anything about duplicates.
 
-Decided 2026-10-07: always fill the stream on d16+, and keep the unsolicited
-pushes to non-SOLICIT peers, so those peers hear each namespace twice.
+On d16 and d17 the message's Subscribe Options choose what the subscriber
+wants: PUBLISH (0x00), NAMESPACE (0x01) or both (0x02) (d16 §9.25, d17
+§9.20). d18 moved track requests to SUBSCRIBE_TRACKS, so its
+SUBSCRIBE_NAMESPACE always asks for namespaces. Both `rs/moq-net` and
+`js/net` decode the field but drop it before dispatch, so the publisher
+cannot tell the options apart today.
+
+Decided 2026-10-07: fill the stream on d16+ whenever NAMESPACE is
+requested, and keep the unsolicited pushes to non-SOLICIT peers, so those
+peers hear each namespace twice. Carry Subscribe Options through dispatch;
+0x00 gets no NAMESPACE. We send no PUBLISH for a namespace subscription, so
+decide whether a request for tracks (0x00, 0x02) is refused or answered
+without them; refusing is the recommendation, since it fails loud.
 Rejected: stopping unsolicited pushes on d16+ (a peer that never subscribes
 would learn nothing), and filling only on d18+ (two behaviours for one
 message).
@@ -38,6 +50,7 @@ hears each namespace twice.
 
 Test: a non-SOLICIT d16 and d18 peer's SUBSCRIBE_NAMESPACE receives
 NAMESPACE for an existing match and for one announced later, then
-NAMESPACE_DONE when it ends.
+NAMESPACE_DONE when it ends. On d16, options 0x00, 0x01 and 0x02 each get
+the chosen behaviour, in both languages.
 
 Public API: none. Wire: moq-transport replies move closer to the drafts.
