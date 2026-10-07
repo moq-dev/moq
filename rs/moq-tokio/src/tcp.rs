@@ -370,7 +370,14 @@ mod tests {
 			listen.tcp.tls = Some(true);
 			listen.tls.generate = vec!["localhost".into()];
 			match pinned {
-				true => listen.tls.peers = Some(crate::tls::Peers::new()),
+				// Pinned peers are refused without a QUIC listener to read them.
+				true => {
+					if !cfg!(feature = "noq") {
+						continue;
+					}
+					listen.bind = Some("127.0.0.1:0".parse().unwrap());
+					listen.tls.peers = Some(crate::tls::Peers::new());
+				}
 				false => listen.tls.root = vec!["/nonexistent/client-ca.pem".into()],
 			}
 			tls_round_trip(listen).await;

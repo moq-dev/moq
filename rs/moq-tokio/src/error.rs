@@ -83,7 +83,7 @@ pub enum Error {
 	#[error("failed to initialize Android logcat layer")]
 	Logcat(#[source] Arc<std::io::Error>),
 
-	/// No backend feature is compiled in that can serve this URL. The string names the features to enable.
+	/// No compiled-in backend or configured listener can serve this. The string names what is missing.
 	#[error("{0}")]
 	NoBackend(&'static str),
 

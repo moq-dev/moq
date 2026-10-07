@@ -326,6 +326,7 @@ async fn main() -> anyhow::Result<()> {
 	} else if let [Command::Announced(_)] = stages.as_slice() {
 		cli.dial_only("announced", &[])?;
 	} else {
+		cli.unserved()?;
 		cli.moq.validate()?;
 	}
 

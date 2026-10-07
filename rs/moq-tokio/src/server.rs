@@ -290,6 +290,11 @@ impl Server {
 		quic.validate()?;
 
 		let build_quic = parts.quic() && (config.bind.is_some() || !config.has_stream_listener());
+		// A stream-only server would silently ignore what only QUIC reads. A caller
+		// opening only the streams owns QUIC elsewhere, which reads them.
+		if parts.quic() && !build_quic {
+			config.validate_stream_only()?;
+		}
 		// Read before the member is taken out below, which consumes `parts`.
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		let build_streams = parts.streams();

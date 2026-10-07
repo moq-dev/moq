@@ -155,6 +155,11 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// Whether `flag` is one of the flags `T` declares.
+fn owns<T: usage::spec::CommandArgs>(flag: &usage::Flag<'_>) -> bool {
+	T::COMMAND.flags.iter().any(|own| own.key == flag.key)
+}
+
 impl Invocation {
 	/// Parse the process arguments, exiting with Usage's rendered message on error.
 	///
@@ -195,11 +200,6 @@ impl Invocation {
 	/// `--iroh-*` settings it dials with. Answered from the command line, like
 	/// [`Self::reject`].
 	pub fn dial_only(&self, command: &str, allow: &[&str]) -> anyhow::Result<()> {
-		use usage::spec::CommandArgs;
-
-		fn owns<T: CommandArgs>(flag: &usage::Flag<'_>) -> bool {
-			T::COMMAND.flags.iter().any(|own| own.key == flag.key)
-		}
 		let dials = |flag: &&&usage::Flag<'_>| {
 			#[cfg(feature = "iroh")]
 			if owns::<moq_tokio::iroh::Config>(flag) {
@@ -214,6 +214,23 @@ impl Invocation {
 
 		if let Some(flags) = Self::names(self.given.iter().filter(|flag| !dials(flag))) {
 			anyhow::bail!("`{command}` only dials a relay with --connect; drop {flags}");
+		}
+		Ok(())
+	}
+
+	/// Refuse the listener flags (`--listen-*`, `--auth-*`) when nothing listens,
+	/// rather than silently ignoring them. Answered from the command line, like
+	/// [`Self::reject`].
+	pub fn unserved(&self) -> anyhow::Result<()> {
+		if self.moq.serves() {
+			return Ok(());
+		}
+		let listens =
+			|flag: &&&usage::Flag<'_>| owns::<moq_tokio::listen::Config>(flag) || owns::<moq_relay::auth::Config>(flag);
+		if let Some(flags) = Self::names(self.given.iter().filter(listens)) {
+			anyhow::bail!(
+				"{flags} configure a listener, but none is bound; add --listen, --listen-tcp-bind, --listen-unix-bind, or --cluster-lan"
+			);
 		}
 		Ok(())
 	}
@@ -1806,6 +1823,34 @@ mod tests {
 				.dial_only("fetch", &["--broadcast"])
 				.unwrap_or_else(|err| panic!("{flag:?}: {err}"));
 		}
+	}
+
+	/// A listener or auth flag with nothing listening is refused, naming it, and
+	/// accepted once a listener is bound.
+	#[test]
+	fn listener_flags_need_a_listener() {
+		let parse = |flags: &[&str]| {
+			let argv = ["moq", "--connect", "https://relay.example"]
+				.iter()
+				.chain(flags)
+				.chain(&["import", "ts"])
+				.copied();
+			Invocation::try_parse_from(argv).unwrap_or_else(|err| panic!("{flags:?}: {err}"))
+		};
+		for flag in [
+			&["--listen-tls-root", "ca.pem"][..],
+			&["--listen-tls-cert", "cert.pem"],
+			&["--listen-tcp-tls"],
+			&["--listen-version", "moq-lite-02"],
+			&["--auth-public", "**"],
+		] {
+			let err = parse(flag).unserved().unwrap_err().to_string();
+			assert!(err.contains(flag[0]), "{flag:?}: {err}");
+		}
+		parse(&["--listen", "[::]:0", "--listen-tls-root", "ca.pem"])
+			.unserved()
+			.expect("a listener reads it");
+		parse(&[]).unserved().expect("nothing to refuse");
 	}
 
 	/// `--cluster-connect` / `--cluster-connect-api` attach the process as a

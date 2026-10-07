@@ -21,7 +21,9 @@ dependency bump here. Rejected: owning the TLS accept in this repository, or
 leaving it open.
 
 Keep the token path working on the same listener, and keep pinned peers and
-CA roots meaning the same as on QUIC.
+CA roots meaning the same as on QUIC. `listen::Config::validate_stream_only`
+(`rs/moq-tokio/src/listen.rs`) refuses pinned `tls.peers` without a QUIC
+listener; lift that for a `tls://` listener too.
 
 [Relay client-CA validation](/quest/m1/relay-auth-client-ca.md) refuses a
 listener TLS client CA on a stream-only relay (the `NoBackend` case in

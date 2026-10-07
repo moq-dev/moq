@@ -63,6 +63,14 @@ These land with the next breaking release, not the 2026-09-23 train.
   `linger`, like any unknown setting. `MOQ_CLUSTER_MESH` and
   `MOQ_CLUSTER_LINGER` are no longer read, so drop them from the environment.
   In Rust, `cluster::Config` has no `mesh` or `linger` field.
+- **Settings no listener reads stop startup.** A stream-only relay or `moq`
+  listener (TCP or Unix, no `--listen`) refuses the QUIC-only
+  `--listen-preferred-v4`/`-v6`, `--listen-quic-lb-id`, and pinned `tls.peers`,
+  and a `--listen-tls-cert`, `-key`, or `-generate` unless `--listen-tcp-tls`
+  serves it. `--listen-unix-allow-*` needs `--listen-unix-bind`, and
+  `web.https.cert`, `key`, and `root` need `web.https.listen`. `moq` without a
+  listener refuses `--listen-*` and `--auth-*` flags. Each used to be ignored;
+  drop it, or add the listener it configures.
 - **moq-mux data producers take a broadcast-clock `Timestamp`.** `json` and
   `binary` `Snapshot::update` and `Stream::append` take `Timed<_, Timestamp>`
   instead of `Timed<_, Instant>`, and publish it as given. Convert a capture
