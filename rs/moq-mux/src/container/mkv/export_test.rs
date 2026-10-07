@@ -211,9 +211,18 @@ fn build_he_aac_audio_track_entry() {
 	config.description = Some(Bytes::from_static(&[0x2B, 0x11, 0x88, 0x00]));
 	assert_eq!(audio_rates(&config), (24_000.0, Some(48_000.0)));
 
+	// HE-AACv2: the same rates over a mono PS core.
+	config.codec = AudioCodec::AAC(hang::catalog::AAC { profile: 29 });
+	config.description = Some(Bytes::from_static(&[0xEB, 0x09, 0x88, 0x00]));
+	assert_eq!(audio_rates(&config), (24_000.0, Some(48_000.0)));
+
 	// AAC-LC 48 kHz stereo plays at its own rate.
 	config.codec = AudioCodec::AAC(hang::catalog::AAC { profile: 2 });
 	config.description = Some(Bytes::from_static(&[0x11, 0x90]));
+	assert_eq!(audio_rates(&config), (48_000.0, None));
+
+	// AAC-LC keeps the catalog's rate without parsing its description (a reserved rate index here).
+	config.description = Some(Bytes::from_static(&[0x16, 0x90]));
 	assert_eq!(audio_rates(&config), (48_000.0, None));
 }
 

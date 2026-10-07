@@ -650,20 +650,22 @@ pub(super) fn build_audio_track_entry(track_number: u64, config: &AudioConfig) -
 		MatroskaSpec::TrackType(2),
 		MatroskaSpec::CodecID(codec_id.to_string()),
 	];
-	// The catalog names the output rate. Matroska puts an SBR core's rate first and the output
-	// after it, as a separate field.
-	let sampling_rate = match (&config.codec, &codec_private) {
-		(AudioCodec::AAC(_), Some(asc)) => crate::codec::aac::in_band(asc)?.sample_rate,
-		_ => config.sample_rate,
+	// The catalog names the output rate. Under explicit SBR, Matroska puts the core's rate first
+	// and the output after it, as a separate field.
+	let core_rate = match (&config.codec, &codec_private) {
+		(AudioCodec::AAC(aac), Some(asc)) if matches!(aac.profile, 5 | 29) => {
+			Some(crate::codec::aac::in_band(asc)?.sample_rate)
+		}
+		_ => None,
 	};
 	if let Some(cp) = codec_private {
 		entry.push(MatroskaSpec::CodecPrivate(cp));
 	}
 	let mut audio = vec![
-		MatroskaSpec::SamplingFrequency(sampling_rate as f64),
+		MatroskaSpec::SamplingFrequency(core_rate.unwrap_or(config.sample_rate) as f64),
 		MatroskaSpec::Channels(config.channel_count as u64),
 	];
-	if sampling_rate != config.sample_rate {
+	if core_rate.is_some_and(|core| core != config.sample_rate) {
 		audio.push(MatroskaSpec::OutputSamplingFrequency(config.sample_rate as f64));
 	}
 	entry.push(MatroskaSpec::Audio(Master::Full(audio)));
