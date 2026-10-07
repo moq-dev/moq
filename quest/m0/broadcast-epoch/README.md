@@ -7,9 +7,10 @@ first-party publisher reuses a pair for different content. Only routes with
 the same epoch resume a subscription from the first frame it lacks; a route
 without one keeps its subscriptions until it goes. So epochs are what make
 failover seamless, and a restart is a new epoch at the same path: the newest
-epoch wins new requests and announce consumers see a `Restart`, so viewers
-re-request rather than stall on a replaced broadcast. Subscriptions already
-on the old one stay until the application drops them or its route goes.
+epoch wins new requests and announce consumers see a `Restart` (or an end
+and start on older versions), so viewers re-request rather than stall on a
+replaced broadcast. Subscriptions already on the old one stay until the
+application drops them or its route goes.
 
 The epoch rides moq-lite 07 announcements and requests as metadata, so the
 path never changes and every older version and moq-transport keeps working:

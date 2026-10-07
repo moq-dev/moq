@@ -2,8 +2,10 @@
 
 ## Goal
 
-When the source behind a path changes, every announce consumer sees an
-explicit `Restart` event, in Rust (`AnnounceEvent::Restart`) and `@moq/net`.
+When the source behind a path changes, an announce consumer sees an
+explicit `Restart` event, in Rust (`AnnounceEvent::Restart`) and `@moq/net`:
+always on lite-07, and on older versions and moq-transport when the END and
+START arrive together (otherwise an `End` then a `Start`).
 The source changes on a newer epoch, or, on a route without an epoch, when a
 different route entry wins. A re-price or a same-source failover stays an
 `Update`. Players start on `Start`, restart on `Restart`, and stop on `End`.
