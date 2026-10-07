@@ -313,8 +313,8 @@ mod test {
 			.unwrap();
 
 		// Ask for a replay window, so the first group is delivered rather than skipped by the
-		// subscriber's default max-age budget once a newer group exists.
-		let subscription = moq_net::track::Subscription::default().with_max_age(std::time::Duration::from_secs(30));
+		// subscriber's default max delay budget once a newer group exists.
+		let subscription = moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(30));
 		let subscriber = track.subscribe(subscription);
 
 		// Both groups stay open, the way a publisher writing to two at once leaves them.
