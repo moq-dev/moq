@@ -4476,6 +4476,7 @@ dependencies = [
  "gst-plugin-version-helper",
  "gstreamer",
  "hang",
+ "moq-audio",
  "moq-mux",
  "moq-net",
  "moq-tokio",
