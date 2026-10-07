@@ -6,7 +6,7 @@ A moq-transport group whose object IDs skip (legal per draft-22 section
 11.3.1, but not representable in the model) is refused the same way a
 non-zero subgroup is: the group aborts, a warning is logged, and the stream
 is stopped with the error, in Rust and JS. An object ID that overflows
-closes the session with PROTOCOL_VIOLATION, as the draft requires.
+closes the session with PROTOCOL_VIOLATION in Rust, as the draft requires.
 
 ## Plan
 
