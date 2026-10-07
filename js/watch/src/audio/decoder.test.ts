@@ -191,7 +191,9 @@ async function play(initial: Delay) {
 		numberOfChannels: 2,
 	});
 	const catalog = new Signal<Catalog.Root>({ audio: { renditions: { audio } } });
+	const enabled = new Signal(true);
 	const broadcast = new Signal<Broadcast | undefined>({
+		in: { enabled },
 		out: { catalog },
 		relativeBroadcast,
 	} as unknown as Broadcast);
@@ -216,6 +218,8 @@ async function play(initial: Delay) {
 
 	return {
 		delay,
+		enabled,
+		context: decoder.out.context,
 		play,
 		// Remove the rendition from the catalog, then restore it.
 		remove: () => catalog.set({}),
@@ -246,6 +250,29 @@ async function play(initial: Delay) {
 		},
 	};
 }
+
+describe("Decoder across a broadcast disable", () => {
+	it("releases the graph when its broadcast is disabled and rebuilds on return", async () => {
+		const playback = await play(Time.Milli(100));
+		try {
+			await playback.play();
+			const [context] = contexts;
+
+			playback.enabled.set(false);
+			await microtasks();
+			expect(context.calls.close).toBe(1);
+			expect(playback.context.peek()).toBeUndefined();
+
+			playback.enabled.set(true);
+			await microtasks();
+			expect(contexts).toHaveLength(2);
+			expect(contexts[1].state).toBe("running");
+			expect(playback.context.peek()).toBe(contexts[1] as unknown as AudioContext);
+		} finally {
+			playback.close();
+		}
+	});
+});
 
 describe("Decoder across a delay change", () => {
 	for (const initial of [Time.Milli(100), "auto"] as const) {

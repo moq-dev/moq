@@ -6,10 +6,10 @@ import { Format } from "../src/container/legacy.ts";
 
 for (const count of [1, 16, 256, 1024]) {
 	const track = new Track.Producer("tone");
-	const maxAge = new Signal(Time.Milli(30_000));
-	const consumer = new Consumer(track.subscribe({ maxAge: Time.Milli(30_000) }), {
+	const maxDelay = new Signal(Time.Milli(30_000));
+	const consumer = new Consumer(track.subscribe({ maxDelay: Time.Milli(30_000) }), {
 		format: new Format("data"),
-		maxAge,
+		maxDelay,
 	});
 	const write = (sequence: number) => {
 		const group = new Group.Producer(sequence);
@@ -29,7 +29,7 @@ for (const count of [1, 16, 256, 1024]) {
 	try {
 		for (let i = 0; i < count; i++) write(i);
 		await buffered(count - 1);
-		maxAge.set(Time.Milli.zero);
+		maxDelay.set(Time.Milli.zero);
 		const started = performance.now();
 		write(count);
 		await buffered(count);

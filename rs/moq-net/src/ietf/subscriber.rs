@@ -8190,11 +8190,11 @@ mod stitch_tests {
 			],
 		)
 		.with_joining(JoiningFetch::Absolute { group_id: START }, FETCH, largest);
-		// Keep every fetched group: the default max-age of zero would drop each one as
+		// Keep every fetched group: the default max delay of zero would drop each one as
 		// its successor arrives, and the stitch would hang waiting on a group already skipped.
 		let mut consumer = h
 			.track
-			.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(60)));
+			.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(60)));
 
 		let mut fill = h.stream().await;
 		let mut tail = h.stream().await;
