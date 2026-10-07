@@ -14,7 +14,7 @@
 //!
 //! [`quic`] stacks a sans-IO QUIC stack on that path: a [`quic::Endpoint`]
 //! serves many connections on one socket (demuxed by connection id, dials
-//! included), each a [`quic::Connection`] implementing the transport traits,
+//! included), each a [`quic::Connection`] wrapped by [`transport::Session`],
 //! so `moq_net::Client::connect_lite` and `Server::accept_lite` run real
 //! moq-lite sessions on the worker. The socket is the identity: whatever is
 //! built on it runs on the worker that adopted it, and a socket adopted as a
@@ -43,6 +43,7 @@ mod park;
 pub mod quic;
 mod shared;
 mod timer;
+pub mod transport;
 pub mod udp;
 mod worker;
 

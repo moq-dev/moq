@@ -145,7 +145,7 @@ Both bounds may be refined to a Frame within their Group, so a subscription can 
 
 The subscriber and publisher both indicate their delivery preference:
 - `Priority` indicates if Track A should be transmitted instead of Track B.
-- `Subscriber Max Age` indicates the maximum age before a non-latest Group is dropped from live delivery; `Publisher Max Age` indicates the maximum age before a non-latest Group is dropped from the publisher's cache.
+- `Subscriber Max Age` indicates how far a non-latest Group may fall behind the latest Group before it is dropped from live delivery; `Publisher Max Age` indicates the maximum age before a non-latest Group is dropped from the publisher's cache.
 
 The combination of these preferences enables the most important content to arrive during network degradation while still respecting encoding dependencies.
 

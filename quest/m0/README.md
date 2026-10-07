@@ -41,7 +41,7 @@ a published `@moq/watch` break.
 
 ## Required
 
-- [Expiry wakes](/quest/m0/expiry-wakes.md) - an appended group wakes only the parked reads it expires, so a 2.5 ms-frame publisher with 2 s of parked serves stays near idle and the Python and Go interop rows pass
+- [Held group wakes](/quest/m0/held-group-wakes.md) - a group held across a route switch is woken when its successor's first timestamp or abort makes it stale, not at the next unrelated append
 - [Draft-22 LOCATION_FILTER](/quest/m0/ietf-location-filter-22.md) - moqt-22 LOCATION_FILTER carries its type instead of a Length in Rust and JS, so a draft-22 peer reads our Next Object correctly
 - [Prefix route fronts](/quest/m0/prefix-route-fronts.md) - a prefix route cannot be made to mint one front per requested path
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines

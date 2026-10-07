@@ -495,7 +495,7 @@ impl Error {
 	/// [`StreamError::from_code`]. Reading a stream reset with the session table (or the
 	/// reverse) silently mistranslates, since e.g. 0 is "no error" for a session but an
 	/// internal error for a stream.
-	pub fn from_transport(err: impl web_transport_trait::Error) -> Self {
+	pub fn from_transport(err: impl crate::transport::Error) -> Self {
 		if let Some((code, _reason)) = err.session_error() {
 			return SessionError::from_code(code).into();
 		}
@@ -611,7 +611,7 @@ impl From<&Error> for StreamError {
 	}
 }
 
-impl web_transport_trait::Error for Error {
+impl crate::transport::Error for Error {
 	fn session_error(&self) -> Option<(u32, String)> {
 		None
 	}
@@ -783,7 +783,7 @@ mod tests {
 			stream: Option<u32>,
 		}
 
-		impl web_transport_trait::Error for Failed {
+		impl crate::transport::Error for Failed {
 			fn session_error(&self) -> Option<(u32, String)> {
 				self.session.map(|code| (code, "closed".to_string()))
 			}

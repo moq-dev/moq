@@ -213,7 +213,7 @@ fn filled_track(n: usize, payload: &Bytes) -> TrackCtx {
 /// Request the full cache window instead of the default live edge.
 fn replay() -> track::Subscription {
 	track::Subscription::default()
-		.with_max_age(Duration::MAX)
+		.with_max_delay(Duration::MAX)
 		.with_start(track::Position::group(0))
 }
 

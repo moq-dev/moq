@@ -658,7 +658,7 @@ mod test {
 			.produce()
 			.create_track("test", None)
 			.unwrap();
-		let replay = moq_net::track::Subscription::default().with_max_age(std::time::Duration::from_secs(30));
+		let replay = moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(30));
 		let mut groups = track.subscribe(replay);
 		let mut producer = Producer::<Value>::new(track, ProducerConfig::default());
 
