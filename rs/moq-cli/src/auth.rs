@@ -391,6 +391,10 @@ pub struct Serve {
 	#[usage(long)]
 	mtls_peer: bool,
 
+	/// Mark those peers upstream: never offered a route learned from another upstream. Needs `--mtls-peer`.
+	#[usage(long)]
+	mtls_upstream: bool,
+
 	/// The tier label stamped on every grant, handed to the relay's stats.
 	#[usage(long)]
 	tier: Option<String>,
@@ -433,6 +437,9 @@ impl Serve {
 		if self.mtls_peer && self.mtls_publish.is_empty() && self.mtls_subscribe.is_empty() {
 			anyhow::bail!("--mtls-peer needs --mtls-publish or --mtls-subscribe, or every certificate is refused");
 		}
+		if self.mtls_upstream && !self.mtls_peer {
+			anyhow::bail!("--mtls-upstream needs --mtls-peer; only a cluster peer can be upstream");
+		}
 		// 0.14 read `anon` as the prefix `anon/`, and a pattern reads it as exactly the
 		// broadcast `anon`, so either silent reading would mislead someone upgrading.
 		let flags = [
@@ -468,6 +475,7 @@ impl Serve {
 		policy.public = rules(&self.public_publish, &self.public_subscribe);
 		policy.mtls = rules(&self.mtls_publish, &self.mtls_subscribe);
 		policy.mtls_peer = self.mtls_peer;
+		policy.mtls_upstream = self.mtls_upstream;
 		policy.tier = self.tier.clone();
 		policy.revalidate = revalidate;
 		policy.expires = expires;
@@ -662,6 +670,7 @@ mod tests {
 			"--mtls-subscribe",
 			"**",
 			"--mtls-peer",
+			"--mtls-upstream",
 			"--tier",
 			"internal",
 			"--revalidate",
@@ -682,7 +691,7 @@ mod tests {
 		);
 		assert!(policy.public.publish.is_empty());
 		assert_eq!(policy.mtls.publish, ["**".parse().unwrap()].into_iter().collect());
-		assert!(policy.mtls_peer);
+		assert!(policy.mtls_peer && policy.mtls_upstream);
 		assert_eq!(policy.tier.as_deref(), Some("internal"));
 		assert_eq!(policy.revalidate, Some(std::time::Duration::from_secs(30)));
 		assert_eq!(policy.expires, Some(std::time::Duration::from_secs(7200)));
@@ -704,7 +713,7 @@ mod tests {
 		let bare = serve(&["moq", "auth", "serve"]).policy().unwrap();
 		assert!(bare.keys.is_none());
 		assert!(bare.public.is_empty() && bare.mtls.is_empty());
-		assert!(!bare.mtls_peer);
+		assert!(!bare.mtls_peer && !bare.mtls_upstream);
 		assert_eq!(bare.revalidate, None);
 		assert_eq!(bare.expires, None);
 
@@ -718,6 +727,10 @@ mod tests {
 			(&["--limit-remote", "3", "--expires", "1h"], "need --revalidate"),
 			// A peer marking with nothing granted to certificates marks nobody.
 			(&["--mtls-peer"], "--mtls-peer needs"),
+			(
+				&["--mtls-subscribe", "**", "--mtls-upstream"],
+				"--mtls-upstream needs --mtls-peer",
+			),
 		] {
 			let argv: Vec<&str> = ["moq", "auth", "serve"].iter().chain(args).copied().collect();
 			let err = serve(&argv).policy().unwrap_err().to_string();

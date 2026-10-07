@@ -106,7 +106,9 @@ The mark belongs to the link, whichever side dialed. A peer this relay dials
 is upstream when its `connect` or `connect_api` entry says so. A peer that
 dials in is upstream when its [grant](/bin/relay/auth#the-contract) sets
 `"upstream": true` beside `"peer": true`, so an edge whose auth server grants
-that to core certificates treats a core that dials it as upstream too. A
+that to core certificates treats a core that dials it as upstream too.
+`moq auth serve --mtls-peer --mtls-upstream` grants it to every certificate,
+so use it only where nothing but cores dial in with mTLS. A
 relay that predates the mark treats every link as transit, so a cluster
 migrates one region at a time.
 

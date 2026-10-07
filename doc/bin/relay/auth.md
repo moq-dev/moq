@@ -252,7 +252,8 @@ Cluster peers are admitted the same way, so a mesh runs
 server granting its cluster CA everything with `peer: true`); see
 [Clustering](/bin/relay/cluster). `--mtls-peer` marks every certificate as
 another relay, whose broadcasts entered the cluster elsewhere; leave it off
-when certificates identify clients.
+when certificates identify clients. `--mtls-upstream` also marks those relays
+[upstream](/bin/relay/cluster#upstream-links) and needs `--mtls-peer`.
 The LAN mesh credential on `/.cluster/<credential>` stays relay-internal: it
 is a secret the relay minted for itself, checked locally, and never a request
 to the server.
