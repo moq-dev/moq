@@ -10,9 +10,10 @@ failover seamless, and a restart is a new epoch at the same path: the newest
 epoch wins new requests and announce consumers see a `Restart` (or an end
 and start on older versions), so viewers re-request rather than stall on a
 replaced broadcast. Subscriptions already on the old one stay until the
-application drops them or its route goes. Recovery within a round trip needs
-an epoch: without one, a restarted publisher that loses the routing hash to
-its lingering old session is reached only once that session closes and its
+application drops them or its route goes. Without an epoch, a restarted
+publisher on the same hop chain as its lingering old session wins at once
+(the newest announcement breaks the tie), but one on a different chain that
+loses the routing hash is reached only once the old session closes and its
 route is withdrawn.
 
 The epoch rides moq-lite 07 announcements and requests as metadata, so the

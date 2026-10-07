@@ -46,12 +46,14 @@ Decided in planning (2026-10-07, from #4970's review):
   reconnecting), restarts the paths it moves. Two routes with the same epoch
   and identical metadata are a seamless failover and stay invisible.
 - **Equal-cost restarts keep the hash (2026-10-07).** The rendezvous-hash
-  tiebreak stays, with no newest-wins: a transcode pool's replicas advertise
+  tiebreak stays ahead of recency: a transcode pool's replicas advertise
   the same path, and newest-wins would churn every viewer on each worker
-  restart. So recovery within a round trip needs an epoch. Without one, a
-  restarted publisher that loses the hash to its lingering old session wins,
-  and sends `Restart`, only once that session closes (idle timeout) and its
-  route is withdrawn.
+  restart. `route_order` already breaks a full tie (same hop chain, so the
+  same hash) by the newest announcement, so a restart on the old session's
+  chain wins at once. Without an epoch, a restart on a different chain (say,
+  through another relay) that loses the hash to its lingering old session
+  wins, and sends `Restart`, only once that session closes (idle timeout)
+  and its route is withdrawn.
 - **Sticky subscriptions (reverses the 2026-10-06 hard switch).** A newer
   epoch no longer ends subscriptions in flight with `Unroutable`
   (`Pick::Superseded`, `front.rs` `supersede`). The front keeps serving its
@@ -83,8 +85,9 @@ Decided in planning (2026-10-07, from #4970's review):
   subscription between routes without an Epoch "stays on its route and ends
   with it" holds as written.
 - **Players.** `moq play` (#4970) and `@moq/watch` restart on `Restart`
-  instead of treating every epochless `Update` as a restart, so a GOAWAY
-  drain or re-price no longer restarts playback.
+  instead of treating every epochless `Update` as a restart, so a re-price
+  that keeps its winner, or a same-epoch failover, no longer restarts
+  playback. An epochless drain onto a different entry still does.
   `moqsrc` (planned in #4960) switches on `Restart` too. On lite-06 and
   moq-transport, a pair not coalesced reaches players as `End` then
   `Start`: a stop, then a fresh play.
@@ -92,8 +95,8 @@ Decided in planning (2026-10-07, from #4970's review):
   `SessionClosed` (#4999), since players recover on announcements, not
   errors; announcing only once the old front dies, since viewers stay blank
   until the old session times out; switching only on a strictly better
-  route, which leaves an equal-cost restart blank; the newest winning ties,
-  which lets a joining worker take every tied path; and waiting for lite-07
+  route, which leaves an equal-cost restart blank; the newest winning ahead
+  of the hash, which lets a joining worker take every tied path; and waiting for lite-07
   to be the default.
 
 Tests: a newer epoch and an epochless source change each deliver `Restart`
@@ -109,8 +112,9 @@ announces, while the incumbent's subscriptions continue) and
 epoch. `route_dies_without_an_epoch` keeps its expectation, but its
 `standby()` prices `B` strictly worse so it doesn't win before the trigger,
 and a re-request then lands on `B`. Add a regression case where an
-epochless replacement at equal cost loses the hash to the lingering old
-route: no `Restart` and new requests stay on the old route until it is
+epochless replacement at equal cost, on a different hop chain chosen to lose
+the hash, competes with the lingering old route: no `Restart` and new
+requests stay on the old route until it is
 withdrawn, then `Restart` and a re-request lands on the replacement. Run
 `just drafts check` and
 `just test interop --all`.
