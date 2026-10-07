@@ -394,8 +394,8 @@ test("a push completing several frames keeps the encoder running", async () => {
 	]);
 });
 
-// The frame that reaches the minimum ends its group, and a timeline break closes the group early,
-// so the first frame after it opens the next one.
+// The first frame at the minimum opens the next group. A timeline break closes the group early,
+// so the first frame after it opens a fresh one.
 test("a group duration packs frames until the minimum and restarts after a break", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	using env = await setup(new Baseline(), undefined, Time.Milli(100));
@@ -436,10 +436,12 @@ test("a group duration packs frames until the minimum and restarts after a break
 	expect(groups).toEqual([5, 2, 1, 2]);
 });
 
-test("passes an explicit Opus DTX request to the encoder", async () => {
+// Chromium stamps Opus output by counting the samples emitted, so every frame DTX suppresses pulls
+// later audio earlier. A plain-JS caller passing the old knob must not reach the encoder.
+test("never enables Opus DTX", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	using env = await setup(new Baseline(), { mime: "opus", usedtx: true });
-	expect(env.config.opus?.usedtx).toBe(true);
+	using env = await setup(new Baseline(), { mime: "opus", usedtx: true } as Codec);
+	expect(env.config.opus?.usedtx).toBeUndefined();
 });
 
 // Another rendition on the same broadcast flushing with far less lateness leaves this one trailing

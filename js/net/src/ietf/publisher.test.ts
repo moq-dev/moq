@@ -1,6 +1,7 @@
 import { expect, jest, mock, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
+import * as Epoch from "../epoch.ts";
 import { error } from "../error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "../group.ts";
 import { type Hop, HopSchema } from "../hop.ts";
@@ -879,6 +880,36 @@ test("republishing a path clears a refusal without unannouncing first", async ()
 	const retried = await nextStream(pair.client);
 	if (!retried) throw new Error("the replacement broadcast was never offered");
 	expect(await readPublishNamespace(retried)).toBe(Path.from("recycled"));
+	await acceptPublishNamespace(retried);
+
+	origin.close();
+});
+
+/**
+ * A new epoch on the same broadcast handle is another publisher instance, so a refusal of
+ * the old one does not strand it. Rust gets this from the END and START an epoch change
+ * delivers.
+ */
+test("a new epoch at the same path clears a refusal", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const { pub, origin } = publisher(pair.server);
+
+	const broadcast = origin.createBroadcast(Path.from("restarted"));
+	broadcast.announce({ epoch: Epoch.mint() });
+
+	void pub.runPublishNamespaces();
+
+	const declined = await nextStream(pair.client);
+	if (!declined) throw new Error("the namespace was never advertised");
+	expect(await readPublishNamespace(declined)).toBe(Path.from("restarted"));
+	await declinePublishNamespace(declined, 0n);
+	await new Promise((resolve) => setTimeout(resolve, SETTLE));
+
+	broadcast.announce({ ...broadcast.route, epoch: Epoch.mint() });
+
+	const retried = await nextStream(pair.client);
+	if (!retried) throw new Error("the new instance was never offered");
+	expect(await readPublishNamespace(retried)).toBe(Path.from("restarted"));
 	await acceptPublishNamespace(retried);
 
 	origin.close();

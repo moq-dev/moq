@@ -8,8 +8,7 @@ grouped into milestones ordered by priority.
 ## Plan
 
 m0 is everything in flight now: relay hardening and the last known IETF
-interop fix ahead of Seattle, wildcard routing, broadcast epochs, and audio playout (jitter target
-and quality harness). m1 is the next wave across reliability, features, performance, and
+interop fix ahead of Seattle, wildcard routing, broadcast epochs, and audio playout (the jitter target). m1 is the next wave across reliability, features, performance, and
 planning. m2 holds later features, design studies, and experiments. m3 is
 gated on the outside world (hardware, a partner, a consumer, or a provider's
 offer) or is speculative work with no named consumer yet. m4 waits on an upstream release.

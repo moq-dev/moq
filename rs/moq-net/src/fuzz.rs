@@ -198,6 +198,7 @@ impl AnnounceWriter {
 			Announced::Start(suffix, hops) => {
 				let (_, suffix, hops) = self.encoder.start(suffix.clone(), hops.clone());
 				lite::AnnounceBroadcast::Active {
+					epoch: None,
 					suffix,
 					hops,
 					cost: Default::default(),
@@ -216,6 +217,11 @@ impl AnnounceWriter {
 		msg.encode(&mut Encoder::new(data, self.version.into()), self.version)
 			.expect("could not encode an announcement");
 	}
+}
+
+/// `origin` as a session connected to `peer` serves it, for the viewers bench.
+pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::origin::Consumer {
+	origin.excluding(peer)
 }
 
 /// Encode `announced` as a fresh [`AnnounceWriter`] stream.
@@ -320,6 +326,7 @@ impl LiteSample {
 			.encode(w, version)
 			.unwrap(),
 			Self::Subscribe => lite::Subscribe {
+				epoch: None,
 				id: 3,
 				broadcast: Path::new("room/alice"),
 				track: "video".into(),
@@ -503,6 +510,7 @@ impl Default for Messages {
 
 		Self {
 			lite_subscribe: lite::Subscribe {
+				epoch: None,
 				id: 7,
 				broadcast: Path::new("room/alice"),
 				track: "video".into(),

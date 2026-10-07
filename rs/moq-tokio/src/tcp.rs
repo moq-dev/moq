@@ -384,7 +384,7 @@ mod tests {
 		let url: Url = format!("tls://localhost:{port}/room?jwt=credential").parse().unwrap();
 		let accept = tokio::spawn(async move {
 			let request = server.accept().await.unwrap();
-			assert_eq!(request.transport(), crate::server::Transport::Tcp);
+			assert_eq!(request.transport(), crate::Transport::Tcp);
 			assert_eq!(request.path(), "/room");
 			assert_eq!(request.query(), Some("jwt=credential"));
 			let session = request.ok().await.unwrap();
