@@ -81,7 +81,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [JS data consumer timestamps](/quest/m1/js-data-consumer-timestamps.md) - @moq/json and @moq/flate consumers return each value's timestamp, with snapshot `next()` and `latest()`
 - [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) - a draft-20+ FETCH within one group is served from its LOCATION_FILTER, as older drafts are
 - [Pipelined first FETCH](/quest/m1/pipeline-fetch-info.md) - a fetch-only reader's first FETCH goes out with the track-info request, on lite and moq-transport
-- [FETCH against moxygen](/quest/m1/ietf-fetch-moxygen.md) - interop covers draft-20 FETCH against moxygen both ways
 - [FETCH_OK properties](/quest/m1/fetch-ok-properties.md) - our FETCH_OK carries the track properties SUBSCRIBE_OK does, as draft 16+ requires
 - [Fetch without SUBSCRIBE](/quest/m1/ietf-fetch-only.md) - a relay fetches from an IETF upstream without subscribing, finished tracks included, with End of Track always reported
 - [IETF object gaps](/quest/m1/ietf-object-gaps.md) - a gapped object ID is refused loudly like a subgroup in Rust and JS, and an overflowing one closes the session in Rust
