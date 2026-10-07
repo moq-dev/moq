@@ -1991,6 +1991,14 @@ impl AnnounceProducer {
 			let Some(entry) = shared.routes.entry_mut(prefix, *id) else {
 				return Err(Error::Closed);
 			};
+			// Another publisher instance: what its server was asked, or answered, for the
+			// old one is not its own. Under the table lock, so no front sees the new epoch
+			// while an old answer can still land.
+			if entry.epoch != route.epoch
+				&& let Some(server) = &entry.server
+			{
+				server.lock().renew();
+			}
 			entry.hops = route.hops.clone();
 			entry.epoch = route.epoch.clone();
 			entry.stale = stale;
@@ -2413,9 +2421,11 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 	let mut dynamic = broadcast.dynamic();
 	let mut front = Front::new(track::IDLE_LINGER);
 	let mut sources: HashMap<u64, broadcast::Consumer> = HashMap::new();
+	// The epoch each source's route had when it was asked: the instance its content is from.
+	let mut epochs: HashMap<u64, Option<crate::Epoch>> = HashMap::new();
 	let mut next_source = 0u64;
-	// The in-flight upstream request: the route and its pending channel.
-	let mut upstream: Option<(u64, kio::Consumer<PendingBroadcast>)> = None;
+	// The in-flight upstream request: the route, its epoch when asked, and its pending channel.
+	let mut upstream: Option<(u64, Option<crate::Epoch>, kio::Consumer<PendingBroadcast>)> = None;
 	let mut tracks: HashMap<Arc<str>, TrackIo> = HashMap::new();
 	let mut deadline = crate::time::Deadline::new(&timers);
 	// The watch generation the last selection saw.
@@ -2463,16 +2473,18 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 		)
 	};
 
-	// Whether resolving through `route` would serve an epoch a newer one already beat.
-	let superseded = |front: &Front, route: u64| {
+	// Whether an answer `route` gave for `asked` would serve an epoch a newer one already
+	// beat, or one the route itself has since moved off.
+	let superseded = |front: &Front, route: u64, asked: &Option<crate::Epoch>| {
 		let table = shared.read();
 		let Some(entry) = table.routes.covering(&path.as_path()).find(|entry| entry.id == route) else {
 			return false;
 		};
-		matches!(
-			pick(&table, &path.as_path(), horizon, front, Some(&entry.epoch)),
-			Pick::Superseded
-		)
+		entry.epoch != *asked
+			|| matches!(
+				pick(&table, &path.as_path(), horizon, front, Some(&entry.epoch)),
+				Pick::Superseded
+			)
 	};
 
 	events.push_back(select(&mut front, &sources, &mut seen, &resolved));
@@ -2494,9 +2506,9 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 								.routes
 								.covering(&path.as_path())
 								.find(|entry| entry.id == route && entry.live())
-								.map(|entry| (entry.source.clone(), entry.server.clone()))
+								.map(|entry| (entry.source.clone(), entry.server.clone(), entry.epoch.clone()))
 						};
-						let Some((source, server)) = found else {
+						let Some((source, server, epoch)) = found else {
 							events.push_back(Event::Resolved {
 								route,
 								result: Err(Refusal {
@@ -2510,6 +2522,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 							let id = next_source;
 							next_source += 1;
 							sources.insert(id, source);
+							epochs.insert(id, epoch);
 							events.push_back(Event::Resolved { route, result: Ok(id) });
 							continue;
 						}
@@ -2546,6 +2559,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 							let id = next_source;
 							next_source += 1;
 							sources.insert(id, weak.consume());
+							epochs.insert(id, epoch);
 							events.push_back(Event::Resolved { route, result: Ok(id) });
 							continue;
 						}
@@ -2572,13 +2586,14 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 								}
 							}
 						};
-						upstream = Some((route, pending));
+						upstream = Some((route, epoch, pending));
 					}
 					Action::Detach { source } => {
 						// Readers keep reading the source's copy until a replacement is
 						// spliced, so a route being beaten keeps serving until then; a
 						// route that died ends its copy, which says so.
 						sources.remove(&source);
+						epochs.remove(&source);
 						for io in tracks.values_mut() {
 							if io.query.as_ref().is_some_and(|(asked, _)| asked.source == source) {
 								io.query = None;
@@ -2589,19 +2604,12 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 						}
 					}
 					Action::Resolve => {
-						// The broadcast is whatever its first route serves.
-						let table = shared.read();
+						// The broadcast is whatever its first source serves, from the instance
+						// its route had when asked.
 						let epoch = front
-							.serving_route()
-							.and_then(|route| {
-								table
-									.routes
-									.covering(&path.as_path())
-									.find(|entry| entry.id == route)
-									.map(|entry| entry.epoch.clone())
-							})
+							.serving()
+							.and_then(|source| epochs.get(&source).cloned())
 							.flatten();
-						drop(table);
 						resolved = Some(epoch.clone());
 						if let Ok(mut pending) = request.write()
 							&& pending.resolved.is_none()
@@ -2744,7 +2752,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 			if let Poll::Ready(Ok(request)) = dynamic.poll_requested_track(waiter) {
 				return Poll::Ready(Step::Assigned(request));
 			}
-			if let Some((route, pending)) = &upstream
+			if let Some((route, _, pending)) = &upstream
 				&& let Poll::Ready(result) = pending.poll(waiter, |p| match &p.resolved {
 					Some(result) => Poll::Ready(result.clone()),
 					None => Poll::Pending,
@@ -2832,12 +2840,12 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 				}
 			}
 			Step::Resolved(route, result) => {
-				upstream = None;
+				let asked = upstream.take().and_then(|(_, epoch, _)| epoch);
 				match result {
-					// A newer epoch won the path while the first request was in flight:
-					// the route was beaten, so ask the winner rather than resolve
-					// requesters onto a broadcast that is already replaced.
-					Ok(_) if resolved.is_none() && superseded(&front, route) => Event::Resolved {
+					// A newer epoch won the path, or the route moved to another instance,
+					// while the first request was in flight: ask the winner rather than
+					// resolve requesters onto a broadcast that is already replaced.
+					Ok(_) if resolved.is_none() && superseded(&front, route, &asked) => Event::Resolved {
 						route,
 						result: Err(Refusal {
 							err: Error::Unroutable,
@@ -2848,6 +2856,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 						let id = next_source;
 						next_source += 1;
 						sources.insert(id, source);
+						epochs.insert(id, asked);
 						Event::Resolved { route, result: Ok(id) }
 					}
 					Err(err) => Event::Resolved {
@@ -3573,8 +3582,9 @@ impl Dynamic {
 	/// At the same [`Route::epoch`], consumers observe another active update for
 	/// the same prefix and sessions forward it as a restart, so re-pricing never
 	/// looks like new content. Another epoch, or none, names another publisher
-	/// instance: consumers see the old broadcast end and a new one start, and the
-	/// broadcasts served through the old one end. To re-price, start from the
+	/// instance: consumers see the old broadcast end and a new one start, the
+	/// broadcasts served through the old one end, and requests still waiting on it
+	/// are refused with [`Error::Unroutable`]. To re-price, start from the
 	/// current route: `dynamic.update(dynamic.route().with_cost(cost))`.
 	///
 	/// The prefix is fixed at announce time: to move a route, drop this and call
@@ -3647,6 +3657,11 @@ impl ServeState {
 		if state.closed {
 			return;
 		}
+		// Refused already (the route changed instance): that answer stands and nothing
+		// is cached for the next request.
+		if state.requests.remove_if(path, |p| p.same_channel(producer)).is_none() {
+			return;
+		}
 		let resolved = match result {
 			Ok(broadcast) => {
 				// If a live broadcast was already served for this path while we were
@@ -3657,11 +3672,21 @@ impl ServeState {
 			}
 			Err(err) => Err(err),
 		};
-		state.requests.remove_if(path, |p| p.same_channel(producer));
 		if let Ok(mut pending) = producer.write() {
 			pending.resolved.get_or_insert(resolved);
 			drop(state);
 		}
+	}
+
+	/// Refuse every request, queued or handed to a handler, and forget the answers served,
+	/// because the route now names another publisher instance.
+	fn renew(&mut self) {
+		for producer in self.requests.drain_all() {
+			if let Ok(mut request) = producer.write() {
+				request.resolved.get_or_insert(Err(Error::Unroutable));
+			}
+		}
+		self.served = WeakCache::default();
 	}
 
 	/// Drop the still-pending entry, if it is still ours.
@@ -7747,6 +7772,69 @@ mod tests {
 		let resolved = pending.await.expect("resolves the winner");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		deliver(&new_track, &mut subscription, b"new").await;
+	}
+
+	/// A handler asked under one publisher instance does not answer for the next: the
+	/// route's epoch changing while the request waits refuses it, and its late answer
+	/// is neither handed out under the new epoch nor cached for the next request.
+	#[moq_net_sim::test]
+	async fn a_pending_answer_does_not_outlive_its_epoch() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let dynamic = producer
+			.dynamic("room", Route::default().with_epoch(crate::Epoch::mint()))
+			.unwrap();
+		let pending = consumer.request_broadcast("room/alice", None);
+		let request = queued(&dynamic).await;
+
+		let epoch = crate::Epoch::mint();
+		dynamic.update(dynamic.route().with_epoch(epoch.clone())).unwrap();
+		let stale = broadcast::Info::new().produce();
+		let _stale_track = stale.create_track("video", None).unwrap();
+		request.accept(&stale);
+		assert!(
+			matches!(pending.await, Err(Error::Unroutable)),
+			"an answer for the old instance resolved"
+		);
+
+		let retry = consumer.request_broadcast("room/alice", None);
+		let request = queued(&dynamic).await;
+		let fresh = broadcast::Info::new().produce();
+		let fresh_track = fresh.create_track("video", None).unwrap();
+		request.accept(&fresh);
+		let resolved = retry.await.expect("the new instance resolves");
+		assert_eq!(resolved.epoch(), Some(&epoch));
+		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
+		deliver(&fresh_track, &mut subscription, b"new").await;
+	}
+
+	/// An answer that lands just before its route changes instance, but that the front
+	/// has not taken yet, is not stamped with the new epoch: the front asks again.
+	#[moq_net_sim::test]
+	async fn an_answer_before_an_epoch_change_is_asked_again() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let dynamic = producer
+			.dynamic("room", Route::default().with_epoch(crate::Epoch::mint()))
+			.unwrap();
+		let pending = consumer.request_broadcast("room/alice", None);
+		let request = queued(&dynamic).await;
+
+		// The answer and the change land in the same tick.
+		let stale = broadcast::Info::new().produce();
+		let _stale_track = stale.create_track("video", None).unwrap();
+		request.accept(&stale);
+		let epoch = crate::Epoch::mint();
+		dynamic.update(dynamic.route().with_epoch(epoch.clone())).unwrap();
+
+		let request = queued(&dynamic).await;
+		let fresh = broadcast::Info::new().produce();
+		let fresh_track = fresh.create_track("video", None).unwrap();
+		request.accept(&fresh);
+		let resolved = pending.await.expect("the new instance resolves");
+		assert_eq!(resolved.epoch(), Some(&epoch));
+		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
+		deliver(&fresh_track, &mut subscription, b"new").await;
 	}
 
 	/// Announce cursors follow the newest epoch over a cheaper one, and deliver a
