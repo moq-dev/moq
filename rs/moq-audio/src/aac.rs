@@ -284,8 +284,8 @@ mod tests {
 	#[test]
 	fn rejects_description_disagreeing_with_the_codec_string() {
 		// The catalog claims LC while the description says HE-AAC; the description wins.
-		let mut config = catalog(2, 44_100, 2);
-		config.description = Some(bytes::Bytes::from_static(&[0x2A, 0x10]));
+		let mut config = catalog(2, 48_000, 2);
+		config.description = Some(bytes::Bytes::from_static(&[0x2B, 0x11, 0x88, 0x00]));
 
 		assert!(matches!(description(&config, 2), Err(Error::Unsupported(_))));
 	}

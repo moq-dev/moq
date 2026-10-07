@@ -701,6 +701,23 @@ mod test {
 	}
 
 	#[test]
+	fn aac_derivation_names_the_he_aac_v2_output() {
+		// fdkaacenc HE-AACv2 at 48 kHz stereo: PS over a 24 kHz mono LC core.
+		let asc = [0xEBu8, 0x09, 0x88, 0x00];
+		let mut track = audio_track("audio0", moq_msf::Packaging::Legacy);
+		track.codec = Some("mp4a.40.29".to_string());
+		track.samplerate = None;
+		track.channel_config = None;
+		track.init_data = Some(base64::engine::general_purpose::STANDARD.encode(asc));
+		let msf = moq_msf::Catalog::new(vec![track]);
+
+		let catalog = from_msf::<()>(&msf).expect("AAC AudioSpecificConfig should parse");
+		let audio = catalog.audio.renditions.get("audio0").expect("audio0 rendition");
+		assert_eq!(audio.sample_rate, 48_000);
+		assert_eq!(audio.channel_count, 2);
+	}
+
+	#[test]
 	fn audio_only_channels_missing_uses_explicit_samplerate() {
 		// Half the fields missing: trust the explicit one, derive the missing one.
 		let mut head = Vec::with_capacity(19);

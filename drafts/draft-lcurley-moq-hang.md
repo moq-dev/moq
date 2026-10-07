@@ -253,6 +253,7 @@ type AudioSchema = {
 The `renditions` field contains a map of track names to audio decoder configurations.
 See the [WebCodecs specification](https://www.w3.org/TR/webcodecs/#audio-decoder-config) for specifics and registered codecs.
 Any field carrying raw bytes, notably `description`, is a hex string ({{binary}}).
+The `sampleRate` and `numberOfChannels` fields describe the decoded output: for HE-AAC, the SBR rate rather than the core's, and two channels under parametric stereo.
 
 In addition to the WebCodecs fields, each rendition MAY carry the common rendition fields ({{common}}).
 
@@ -1068,6 +1069,7 @@ This document has no IANA actions.
 - One cutting rule for every track: a record ends at the first group boundary past a minimum (2 seconds RECOMMENDED, zero for sparse data such as a catalog) and splits a group between frames at a maximum (10 seconds RECOMMENDED), so a group that never closes is indexed as it grows and `durationMax` bounds every record.
 - Recording format version 2: each track stores record N at `segments/N`, beside its timeline's `segments/N`, with a `Frame Start` field in the segment object. Tracks commit and expire independently, and a DVR keeps each track's newest record.
 - Described deriving HLS and DASH at the edge from a reference rendition's records.
+- Audio `sampleRate` and `numberOfChannels` describe the decoded output, so HE-AAC names its SBR rate and parametric stereo names two channels.
 
 ## moq-hang-03
 {:numbered="false"}

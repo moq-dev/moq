@@ -996,6 +996,16 @@ pub(crate) fn default_video_timescale(config: &VideoConfig) -> u64 {
 		.unwrap_or(90_000)
 }
 
+/// The fallback duration of an audio frame that states none: ~1024 samples, which SBR doubles
+/// along with the output rate the catalog names.
+pub(crate) fn audio_default_frame(config: &AudioConfig) -> Duration {
+	let samples = match &config.codec {
+		AudioCodec::AAC(aac) if matches!(aac.profile, 5 | 29) => 2048.0,
+		_ => 1024.0,
+	};
+	Duration::from_secs_f64(samples / config.sample_rate.max(1) as f64)
+}
+
 /// A finite catalog framerate with a synthesized scale and duration that fit their MP4 fields.
 pub(crate) fn usable_video_framerate(config: &VideoConfig) -> Option<f64> {
 	config
@@ -1142,6 +1152,17 @@ mod tests {
 		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
 		config.bitrate = bitrate;
 		config
+	}
+
+	#[test]
+	fn he_aac_default_frame_spans_the_core_frame() {
+		// 1024 core samples at 24 kHz, named as 2048 at the 48 kHz output.
+		for profile in [5, 29] {
+			let config = AudioConfig::new(AudioCodec::AAC(hang::catalog::AAC { profile }), 48_000, 2);
+			assert_eq!(audio_default_frame(&config), Duration::from_secs_f64(1024.0 / 24_000.0));
+		}
+		let lc = AudioConfig::new(AudioCodec::AAC(hang::catalog::AAC { profile: 2 }), 48_000, 2);
+		assert_eq!(audio_default_frame(&lc), Duration::from_secs_f64(1024.0 / 48_000.0));
 	}
 
 	/// The moov an encoded init segment carries, so a test asserts on what a player parses

@@ -91,8 +91,7 @@ impl Muxer {
 			transform: None,
 			description: config.description.as_ref().filter(|b| !b.is_empty()).cloned(),
 			timescale: moq_net::Timescale::new(catalog_timescale_audio(config)?).map_err(Error::from)?,
-			// Fallback for a duration-less trailing sample (~1024 samples per frame).
-			default_frame: Duration::from_secs_f64(1024.0 / config.sample_rate.max(1) as f64),
+			default_frame: super::audio_default_frame(config),
 			opus: matches!(config.codec, hang::catalog::AudioCodec::Opus),
 			kind: Kind::Audio(config.clone()),
 		})

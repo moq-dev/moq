@@ -169,8 +169,7 @@ impl Rendition {
 			Rendition::Video(config) => {
 				Duration::from_secs_f64(1.0 / super::usable_video_framerate(config).unwrap_or(30.0))
 			}
-			// ~1024 samples per frame.
-			Rendition::Audio(config) => Duration::from_secs_f64(1024.0 / config.sample_rate.max(1) as f64),
+			Rendition::Audio(config) => super::audio_default_frame(config),
 		}
 	}
 }

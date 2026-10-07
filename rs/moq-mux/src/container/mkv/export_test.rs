@@ -202,6 +202,45 @@ fn build_flac_audio_track_entry() {
 	crate::codec::flac::Config::parse(&mut private.as_slice()).expect("valid FLAC header");
 }
 
+/// The catalog names HE-AAC's output rate; Matroska wants the SBR core's rate as
+/// SamplingFrequency and the output as OutputSamplingFrequency.
+#[test]
+fn build_he_aac_audio_track_entry() {
+	// fdkaacenc HE-AAC at 48 kHz stereo: SBR over a 24 kHz LC core.
+	let mut config = hang::catalog::AudioConfig::new(AudioCodec::AAC(hang::catalog::AAC { profile: 5 }), 48_000, 2);
+	config.description = Some(Bytes::from_static(&[0x2B, 0x11, 0x88, 0x00]));
+	assert_eq!(audio_rates(&config), (24_000.0, Some(48_000.0)));
+
+	// AAC-LC 48 kHz stereo plays at its own rate.
+	config.codec = AudioCodec::AAC(hang::catalog::AAC { profile: 2 });
+	config.description = Some(Bytes::from_static(&[0x11, 0x90]));
+	assert_eq!(audio_rates(&config), (48_000.0, None));
+}
+
+/// The SamplingFrequency and OutputSamplingFrequency of an exported audio track entry.
+fn audio_rates(config: &hang::catalog::AudioConfig) -> (f64, Option<f64>) {
+	let entry = super::export::build_audio_track_entry(1, config).expect("build audio entry");
+	let MatroskaSpec::TrackEntry(Master::Full(children)) = entry else {
+		panic!("expected a TrackEntry");
+	};
+	let audio = children
+		.into_iter()
+		.find_map(|c| match c {
+			MatroskaSpec::Audio(Master::Full(audio)) => Some(audio),
+			_ => None,
+		})
+		.expect("an Audio element");
+	let sampling = audio.iter().find_map(|c| match c {
+		MatroskaSpec::SamplingFrequency(rate) => Some(*rate),
+		_ => None,
+	});
+	let output = audio.iter().find_map(|c| match c {
+		MatroskaSpec::OutputSamplingFrequency(rate) => Some(*rate),
+		_ => None,
+	});
+	(sampling.expect("SamplingFrequency"), output)
+}
+
 /// MP3 (config in band, no codec private) survives an import -> export -> re-import
 /// round trip as the `A_MPEG/L3` track entry.
 #[tokio::test(start_paused = true)]

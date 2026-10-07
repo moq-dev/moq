@@ -54,8 +54,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Typed AAC configuration mirroring the relevant fields of an
 /// AudioSpecificConfig.
 pub struct Config {
+	/// The leading audioObjectType: 2 for AAC-LC, 5 for HE-AAC (SBR), 29 for HE-AACv2 (PS).
 	pub profile: u8,
+	/// The decoded output rate: under SBR, the extension rate rather than the core's.
 	pub sample_rate: u32,
+	/// The decoded output channels: two under PS, which a mono core carries.
 	pub channel_count: u32,
 }
 
@@ -67,18 +70,26 @@ impl Config {
 	/// fields are bit-packed and not byte-aligned, so a bit reader is required:
 	/// with an explicit 24-bit rate the channelConfiguration lands mid-byte after
 	/// it. A channelConfiguration of 0 takes the count from the program config element
-	/// that follows, and a reserved one is refused. Any SBR/PS extension bits after the
-	/// core fields are consumed.
+	/// that follows, and a reserved one is refused.
+	///
+	/// Explicit SBR and PS report what the stream plays as, the extension rate and stereo, not
+	/// their AAC-LC core. Implicit SBR, found only in band, reports the core. Any extension bits
+	/// past the core fields are consumed.
 	pub fn parse<T: Buf>(buf: &mut T) -> Result<Self> {
 		let mut reader = BitReader::new(buf);
-		let (object_type, sample_rate, channel_config) = read_header(&mut reader)?;
+		let (object_type, core_rate, channel_config) = read_header(&mut reader)?;
+		let (core, sample_rate) = read_core(&mut reader, object_type, core_rate)?;
 		let channel_count = match channel_config {
 			0 => {
-				let core = read_core(&mut reader, object_type)?;
 				read_general_audio(&mut reader, core)?;
 				program_config(&mut reader)?
 			}
 			_ => channel_count_from_config(channel_config)?,
+		};
+		let channel_count = if object_type == OBJECT_TYPE_PS {
+			2
+		} else {
+			channel_count
 		};
 
 		// AudioSpecificConfig can carry variable-length extensions (SBR, PS, etc.).
@@ -97,45 +108,31 @@ impl Config {
 	/// Encode this configuration as an AudioSpecificConfig (ISO 14496-3 §1.6.2.1).
 	///
 	/// Standard sample rates produce 2 bytes; non-standard rates fall back to
-	/// the 5-byte form with an explicit 24-bit frequency.
+	/// the 5-byte form with an explicit 24-bit frequency. SBR and PS are signaled explicitly
+	/// over an AAC-LC core at half the output rate, mono under PS.
 	pub fn encode(&self) -> Bytes {
-		// audioObjectType is a 5-bit field; mask to prevent shift overflow.
+		// audioObjectType is a 5-bit field; a wider type is masked, not escaped.
 		let profile = self.profile & 0x1F;
 
-		let freq_index: u8 = match self.sample_rate {
-			96000 => 0,
-			88200 => 1,
-			64000 => 2,
-			48000 => 3,
-			44100 => 4,
-			32000 => 5,
-			24000 => 6,
-			22050 => 7,
-			16000 => 8,
-			12000 => 9,
-			11025 => 10,
-			8000 => 11,
-			7350 => 12,
-			_ => 0xF, // explicit 24-bit frequency follows
-		};
-
-		let channel_config = channel_config_from_count(self.channel_count) as u64;
-
-		if freq_index != 0xF {
-			// 5 + 4 + 4 = 13 bits → 2 bytes (3 bits padding)
-			let b0 = (profile << 3) | (freq_index >> 1);
-			let b1 = ((freq_index & 1) << 7) | ((channel_config as u8 & 0x0F) << 3);
-			Bytes::from(vec![b0, b1])
+		let mut out = BitWriter::default();
+		out.write(5, profile.into());
+		if matches!(profile, OBJECT_TYPE_SBR | OBJECT_TYPE_PS) {
+			let channel_count = if profile == OBJECT_TYPE_PS {
+				1
+			} else {
+				self.channel_count
+			};
+			write_sample_rate(&mut out, self.sample_rate / 2);
+			out.write(4, channel_config_from_count(channel_count).into());
+			write_sample_rate(&mut out, self.sample_rate);
+			out.write(5, OBJECT_TYPE_LC.into());
 		} else {
-			// 5 + 4 + 24 + 4 = 37 bits → 5 bytes (3 bits padding)
-			let mut bits: u64 = 0;
-			bits |= (profile as u64) << 35;
-			bits |= 0xF_u64 << 31;
-			bits |= (self.sample_rate as u64) << 7;
-			bits |= (channel_config & 0xF) << 3;
-			let all = bits.to_be_bytes();
-			Bytes::copy_from_slice(&all[3..8])
+			write_sample_rate(&mut out, self.sample_rate);
+			out.write(4, channel_config_from_count(self.channel_count).into());
 		}
+		// GASpecificConfig: frameLengthFlag, dependsOnCoreCoder, and extensionFlag, all clear.
+		out.write(3, 0);
+		Bytes::from(out.bytes)
 	}
 }
 
@@ -147,36 +144,49 @@ fn read_header<T: Buf>(reader: &mut BitReader<T>) -> Result<(u8, u32, u8)> {
 	}
 	let object_type = read_object_type(reader)?;
 
-	// samplingFrequencyIndex: 4 bits; index 15 means an explicit 24-bit rate follows.
-	let freq_index = reader.read(4, Error::IncompleteConfig)? as u8;
-	let sample_rate = if freq_index == 15 {
-		reader.read(24, Error::ExplicitSampleRateTooShort)?
-	} else {
-		*SAMPLE_RATES
-			.get(freq_index as usize)
-			.ok_or(Error::UnsupportedSampleRateIndex(freq_index))?
-	};
+	let sample_rate = read_sample_rate(reader)?;
 
 	// channelConfiguration: 4 bits, immediately after the (possibly explicit) rate.
 	let channel_config = reader.read(4, Error::IncompleteConfig)? as u8;
 	Ok((object_type, sample_rate, channel_config))
 }
 
-/// Read the core audioObjectType, which explicit SBR and PS name after an extension rate. Any
-/// other object type is its own core, and the leading sample rate is always the core's.
-fn read_core<T: Buf>(reader: &mut BitReader<T>, object_type: u8) -> Result<u8> {
-	if !matches!(object_type, 5 | 29) {
-		return Ok(object_type);
+/// Read the core audioObjectType and the output rate, which explicit SBR and PS name ahead of
+/// their core. Any other object type is its own core at the leading `sample_rate`.
+fn read_core<T: Buf>(reader: &mut BitReader<T>, object_type: u8, sample_rate: u32) -> Result<(u8, u32)> {
+	if !matches!(object_type, OBJECT_TYPE_SBR | OBJECT_TYPE_PS) {
+		return Ok((object_type, sample_rate));
 	}
-	if reader.read(4, Error::IncompleteConfig)? == 15 {
-		reader.read(24, Error::IncompleteConfig)?;
-	}
+	let output_rate = read_sample_rate(reader)?;
 	let core = read_object_type(reader)?;
 	if core == 22 {
 		// extensionChannelConfiguration, only for ER BSAC.
 		reader.read(4, Error::IncompleteConfig)?;
 	}
-	Ok(core)
+	Ok((core, output_rate))
+}
+
+/// Read a samplingFrequencyIndex, escaped to an explicit 24-bit rate when it reads 15.
+fn read_sample_rate<T: Buf>(reader: &mut BitReader<T>) -> Result<u32> {
+	let index = reader.read(4, Error::IncompleteConfig)? as u8;
+	if index == 15 {
+		return reader.read(24, Error::ExplicitSampleRateTooShort);
+	}
+	SAMPLE_RATES
+		.get(index as usize)
+		.copied()
+		.ok_or(Error::UnsupportedSampleRateIndex(index))
+}
+
+/// Write a samplingFrequencyIndex, or the escape and the low 24 bits of a rate the table lacks.
+fn write_sample_rate(out: &mut BitWriter, sample_rate: u32) {
+	match SAMPLE_RATES.iter().position(|&rate| rate == sample_rate) {
+		Some(index) => out.write(4, index as u32),
+		None => {
+			out.write(4, 15);
+			out.write(24, sample_rate);
+		}
+	}
 }
 
 /// Read a GASpecificConfig up to the program config element that a channelConfiguration of 0
@@ -204,13 +214,7 @@ fn read_general_audio<T: Buf>(reader: &mut BitReader<T>, core: u8) -> Result<()>
 pub(crate) fn in_band_config(profile: u8, sample_rate: u32, channel_config: u8, block: &mut &[u8]) -> Result<Bytes> {
 	let mut out = BitWriter::default();
 	out.write(5, u32::from(profile & 0x1F));
-	match SAMPLE_RATES.iter().position(|&rate| rate == sample_rate) {
-		Some(index) => out.write(4, index as u32),
-		None => {
-			out.write(4, 15);
-			out.write(24, sample_rate);
-		}
-	}
+	write_sample_rate(&mut out, sample_rate);
 	out.write(4, u32::from(channel_config));
 
 	if channel_config == 0 {
@@ -250,7 +254,7 @@ pub(crate) fn in_band(asc: &[u8]) -> Result<InBand> {
 	let mut asc = asc;
 	let mut reader = BitReader::new(&mut asc);
 	let (object_type, sample_rate, channel_config) = read_header(&mut reader)?;
-	let core = read_core(&mut reader, object_type)?;
+	let (core, _) = read_core(&mut reader, object_type, sample_rate)?;
 
 	let program_config = match channel_config {
 		0 => {
@@ -271,6 +275,11 @@ pub(crate) fn in_band(asc: &[u8]) -> Result<InBand> {
 		program_config,
 	})
 }
+
+/// The audioObjectTypes of AAC-LC, of SBR (HE-AAC), and of SBR with PS (HE-AACv2).
+const OBJECT_TYPE_LC: u8 = 2;
+const OBJECT_TYPE_SBR: u8 = 5;
+const OBJECT_TYPE_PS: u8 = 29;
 
 /// The raw data block element ID of a program config element (ISO 14496-3 Table 4.85).
 const ID_PCE: u32 = 5;
@@ -601,7 +610,30 @@ mod tests {
 	fn parses_program_config_element_behind_explicit_sbr() {
 		let cfg = Config::parse(&mut sbr_pce_asc().as_slice()).unwrap();
 		assert_eq!(cfg.profile, 5);
+		assert_eq!(cfg.sample_rate, 48_000, "the extension rate");
 		assert_eq!(cfg.channel_count, 4);
+	}
+
+	/// GStreamer 1.28 `fdkaacenc` at 48 kHz stereo: HE-AAC is SBR over a 24 kHz stereo LC core, and
+	/// HE-AACv2 is PS over a mono one.
+	const FDKAAC_HE_AAC: [u8; 4] = [0x2B, 0x11, 0x88, 0x00];
+	const FDKAAC_HE_AAC_V2: [u8; 4] = [0xEB, 0x09, 0x88, 0x00];
+
+	#[test]
+	fn explicit_sbr_and_ps_parse_as_their_output() {
+		for (asc, profile) in [(FDKAAC_HE_AAC, 5), (FDKAAC_HE_AAC_V2, 29)] {
+			let cfg = Config::parse(&mut asc.as_slice()).unwrap();
+			assert_eq!(cfg.profile, profile);
+			assert_eq!(cfg.sample_rate, 48_000, "the output rate, not the 24 kHz core");
+			assert_eq!(cfg.channel_count, 2, "stereo, including over a mono PS core");
+			assert_eq!(cfg.encode(), asc.as_slice(), "encode writes the core back");
+		}
+
+		// A config naming SBR but stopping before its extension rate has no output to name.
+		assert!(matches!(
+			Config::parse(&mut [0x2A, 0x10].as_slice()),
+			Err(Error::IncompleteConfig)
+		));
 	}
 
 	#[test]
@@ -698,9 +730,7 @@ mod tests {
 
 	#[test]
 	fn in_band_of_explicit_sbr_is_its_lc_core() {
-		// GStreamer 1.28 `fdkaacenc` at 48 kHz stereo: HE-AAC is SBR over a 24 kHz stereo LC core,
-		// and HE-AACv2 is PS over a mono one.
-		for (asc, channel_config) in [([0x2B, 0x11, 0x88, 0x00], 2), ([0xEB, 0x09, 0x88, 0x00], 1)] {
+		for (asc, channel_config) in [(FDKAAC_HE_AAC, 2), (FDKAAC_HE_AAC_V2, 1)] {
 			let expected = InBand {
 				object_type: 2,
 				sample_rate: 24_000,
