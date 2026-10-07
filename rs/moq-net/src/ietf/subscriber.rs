@@ -7165,7 +7165,7 @@ mod stitch_tests {
 		}
 
 		/// A reader over the next scripted stream, standing in for one the peer opened.
-		async fn stream(&self) -> Reader<<ScriptedSession as web_transport_trait::poll::Session>::RecvStream, Version> {
+		async fn stream(&self) -> Reader<<ScriptedSession as crate::transport::poll::Session>::RecvStream, Version> {
 			let mut session = self.session.clone();
 			let (_, recv) = session.open_bi().await.unwrap();
 			Reader::new(recv, VERSION)
@@ -7856,11 +7856,11 @@ mod stitch_tests {
 			],
 		)
 		.with_joining(JoiningFetch::Absolute { group_id: START }, FETCH, largest);
-		// Keep every fetched group: the default max-age of zero would drop each one as
+		// Keep every fetched group: the default max delay of zero would drop each one as
 		// its successor arrives, and the stitch would hang waiting on a group already skipped.
 		let mut consumer = h
 			.track
-			.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(60)));
+			.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(60)));
 
 		let mut fill = h.stream().await;
 		let mut tail = h.stream().await;
@@ -8062,7 +8062,7 @@ mod stitch_tests {
 	/// A subscriber reading one scripted group fetch stream, already past its header.
 	struct GroupFetchRun {
 		subscriber: Subscriber<ScriptedSession>,
-		stream: Reader<<ScriptedSession as web_transport_trait::poll::Session>::RecvStream, Version>,
+		stream: Reader<<ScriptedSession as crate::transport::poll::Session>::RecvStream, Version>,
 		track: track::Producer,
 		_tasks: (Tasks, TaskSet),
 	}

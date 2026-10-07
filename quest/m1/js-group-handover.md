@@ -8,7 +8,7 @@ the new provider at the first frame it has not delivered. A viewer at the live
 edge with no latency budget never loses a group across the swap, and never
 has to notice the swap to keep reading.
 
-Done when `test/drain` passes with the viewer's `MAX_AGE` at zero, the
+Done when `test/drain` passes with the viewer's `MAX_DELAY` at zero, the
 viewer subscribes once instead of following `request.active`, and the run is
 stable enough for the nightly.
 

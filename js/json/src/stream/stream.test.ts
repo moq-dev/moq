@@ -82,8 +82,8 @@ test("a second group is reported while the first is still open", async () => {
 	second.writeFrame({ payload: encode({ n: 1 }), timestamp: Time.Timestamp.now() });
 
 	// Ask for a replay window, so the first group is delivered rather than skipped by the
-	// subscriber's default max-age budget once a newer group exists.
-	const consumer = new Consumer<Rec>({ track: track.subscribe({ maxAge: Time.Milli(30_000) }) });
+	// subscriber's default max delay budget once a newer group exists.
+	const consumer = new Consumer<Rec>({ track: track.subscribe({ maxDelay: Time.Milli(30_000) }) });
 	expect(await consumer.next()).toEqual({ n: 0 });
 	await expect(consumer.next()).rejects.toThrow(Rolled);
 
