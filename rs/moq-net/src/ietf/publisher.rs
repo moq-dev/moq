@@ -4737,7 +4737,10 @@ mod serve_tests {
 				}
 				settle().await;
 
-				let location = Location { group: sequence, object: 0 };
+				let location = Location {
+					group: sequence,
+					object: 0,
+				};
 				let buf = standalone_fetch(&h, location, location, GroupOrder::Ascending).await;
 				assert_eq!(
 					fetch_refusal(buf, version),

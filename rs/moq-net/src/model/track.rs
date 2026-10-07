@@ -38,8 +38,8 @@ const DEFAULT_PRIORITY: u8 = 127;
 /// Maximum number of datagrams retained in the per-track send buffer.
 ///
 /// Datagrams are a best-effort send buffer, not a replay cache (unlike groups): only the last
-/// 64 datagrams are kept, so a stalled consumer cannot retain an unbounded backlog, and a new
-/// subscriber starts at the next datagram rather than at this backlog.
+/// 64 datagrams are kept, so a stalled consumer cannot retain an unbounded backlog, and a
+/// subscriber only gets those pushed after it opened.
 /// The payload size limit also bounds the buffer's memory use.
 const MAX_DATAGRAMS: usize = 64;
 
@@ -3855,9 +3855,9 @@ impl Subscriber {
 	///
 	/// Datagrams are a separate best-effort channel from groups (see
 	/// [`Producer::append_datagram`]); they share only the sequence namespace, and
-	/// neither cursor moves the other. The cursor starts at the next datagram sent, never
-	/// the buffered backlog, and skips any outside this subscriber's group range. A
-	/// consumer that falls too far behind silently loses the oldest datagrams.
+	/// neither cursor moves the other. Only datagrams pushed after the subscription opened
+	/// arrive, and any outside this subscriber's group range are skipped. A consumer that
+	/// falls too far behind silently loses the oldest datagrams.
 	///
 	/// Returns `Poll::Ready(Ok(Some(datagram)))` when one is available,
 	/// `Poll::Ready(Ok(None))` when the track is finished, `Poll::Ready(Err(e))` when the track

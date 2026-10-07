@@ -4664,7 +4664,10 @@ mod tests {
 
 		let received = consumer.recv_datagram().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(received.sequence, 5);
-		assert!(consumer.recv_datagram().now_or_never().is_none(), "group 4 never arrives");
+		assert!(
+			consumer.recv_datagram().now_or_never().is_none(),
+			"group 4 never arrives"
+		);
 	}
 
 	/// One alias naming two different tracks is the collision section 11.1 makes fatal.
