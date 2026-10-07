@@ -46,8 +46,12 @@ web-transport-trait = { workspace = true }
 
 [dev-dependencies]
 anyhow = "1"
+bytes = { workspace = true }
 criterion = { workspace = true }
+moq-net = { path = "../moq-net" }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
+web-transport-trait = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 io-uring = { workspace = true }

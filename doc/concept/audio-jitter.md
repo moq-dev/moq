@@ -50,7 +50,7 @@ as packets come and lets the playback buffer hold the target, rather than
 pacing reads to the speaker.
 
 A frame dropped by the relay is never observed, which is correct only while the
-drop is not the receiver's own doing. The subscription's max age drops groups
+drop is not the receiver's own doing. The subscription's max delay drops groups
 before any container sees them, at the relay and in the receiver's own transport
 subscriber, so a subscription cut to the target hides every frame later than
 the target: the estimate creeps up one bucket at a time while the frames it
@@ -404,7 +404,7 @@ Supported or refused, not warned about and continued.
 
 In the browser this is the numeric `delay` setting; natively it is
 `decode::Options::delay`, where `None` selects the estimator. The two spell the
-same thing the same way on purpose. It is distinct from `max_age`, which is the
+same thing the same way on purpose. It is distinct from `max_delay`, which is the
 live-edge skip budget and not a buffer.
 
 ## Constants

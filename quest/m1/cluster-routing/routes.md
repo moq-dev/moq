@@ -66,6 +66,11 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
   rendezvous hash among equal next hops). When the next hop changes, adopt
   the new neighbour's stored set and send downstream only the difference.
   No per-announce seqno.
+- Origin selection keeps `route_order`'s shape and swaps its inputs: the
+  candidates become the origin nodes announcing the path, ranked by longest
+  prefix, then the link's preference
+  ([Multi-CDN endpoints](/quest/m1/cluster-routing/multi-cdn.md)), then the
+  route metric to the node, then the path-keyed rendezvous hash.
 - Down-only bit: set on a route learned on an upstream link, kept across
   other links, and a route carrying it is never sent on an upstream link
   (extending the `upstream` link mark in `doc/bin/relay/cluster.md`).

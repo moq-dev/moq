@@ -38,7 +38,7 @@ how it looks in that language:
 - **Discover** broadcasts by prefix, wait for a specific one, or request one by path, including a path a prefix claim serves on demand. Advertise an exact path with `create_broadcast` then `announce` / `unannounce` (a broadcast is invisible to local consumers and peers alike until announced), or claim a path prefix with `dynamic(prefix, route)`.
 - **Publish and subscribe to media** with the hang catalog filled in from the bitstream, plus raw pixels or PCM in and out with the codec running inside the binding (VideoToolbox, Media Foundation, NVENC, openh264, Opus). A publisher follows the connection's send estimate through `session.bandwidth()`: reserve a share for an app-owned encoder, or pass the handle when encoding so the built-in video encoder follows the grant.
 - **Connection health.** `stats()` snapshots RTT, send/receive estimates, and byte/packet counters. `bandwidth()` divides that send estimate among tracks sharing the connection.
-- **Raw tracks** of arbitrary bytes with timestamps, sparse or replayed groups, per-subscriber priority and max age, and best-effort datagrams.
+- **Raw tracks** of arbitrary bytes with timestamps, sparse or replayed groups, per-subscriber priority and max delay, and best-effort datagrams.
 - **JSON tracks** in snapshot mode (latest value, merge-patch deltas, optional compression) or stream mode (append log).
 - **Fetch** a single group by sequence from the cache, decoded through the container or raw.
 - **Serve on demand**: accept track and broadcast requests as they arrive instead of publishing up front.
