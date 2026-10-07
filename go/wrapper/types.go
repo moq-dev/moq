@@ -51,7 +51,7 @@ type (
 	// [OriginConsumer.RequestBroadcast].
 	Announce = ffi.MoqAnnounce
 	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventStart,
-	// AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventLive.
+	// AnnounceEventUpdate, or AnnounceEventEnd.
 	AnnounceEvent = ffi.MoqAnnounceEvent
 	// AnnounceEventStart reports a route now covering a prefix that had none.
 	AnnounceEventStart = ffi.MoqAnnounceEventStart
@@ -59,9 +59,6 @@ type (
 	AnnounceEventUpdate = ffi.MoqAnnounceEventUpdate
 	// AnnounceEventEnd reports that no route covers a prefix any more, carrying its last route.
 	AnnounceEventEnd = ffi.MoqAnnounceEventEnd
-	// AnnounceEventLive reports that every route live at subscribe time has been
-	// delivered; what follows is live changes. Yielded once.
-	AnnounceEventLive = ffi.MoqAnnounceEventLive
 	// Subscription holds subscriber-side delivery preferences: priority, ordering, max age, and group range.
 	Subscription = ffi.MoqSubscription
 	// TrackInfo holds publisher-side track properties: priority, ordering, max age, and timescale.

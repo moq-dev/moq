@@ -10,10 +10,6 @@ async function main() {
 
 	// Discover broadcasts announced by the server
 	for await (const announcement of announced) {
-		if (announcement.kind === "live") {
-			console.log("Caught up: everything live has been listed");
-			continue;
-		}
 		if (announcement.kind === "end") continue;
 		console.log("New stream available:", announcement.prefix);
 

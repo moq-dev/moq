@@ -1386,7 +1386,9 @@ mod tests {
 			public_subscribe: vec![moq_auth::Pattern::all()],
 			..Default::default()
 		};
-		let auth = auth_config.init("test", &moq_tokio::tls::Connect::default()).unwrap();
+		let auth = auth_config
+			.init("test", &moq_tokio::tls::Connect::default(), false)
+			.unwrap();
 		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
 
@@ -1426,7 +1428,9 @@ mod tests {
 			public_subscribe: vec![moq_auth::Pattern::all()],
 			..Default::default()
 		};
-		let auth = auth_config.init("test", &moq_tokio::tls::Connect::default()).unwrap();
+		let auth = auth_config
+			.init("test", &moq_tokio::tls::Connect::default(), false)
+			.unwrap();
 		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
 		let dir = TempDir::new().unwrap();
 		let (_, cert, _) = make_certs(&dir);
@@ -1449,7 +1453,9 @@ mod tests {
 			public_subscribe: vec![moq_auth::Pattern::all()],
 			..Default::default()
 		};
-		let auth = auth_config.init("test", &moq_tokio::tls::Connect::default()).unwrap();
+		let auth = auth_config
+			.init("test", &moq_tokio::tls::Connect::default(), false)
+			.unwrap();
 		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
 		let dir = TempDir::new().unwrap();
 		let (_, cert, _) = make_certs(&dir);

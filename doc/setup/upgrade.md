@@ -87,6 +87,13 @@ These land with the next breaking release, not the 2026-09-23 train.
   broadcast that ends with media queued behind an undescribed track is an error
   rather than an empty `Ok(None)`. Restart the export to pick up a new
   rendition.
+- **moq-relay auth takes the client-CA answer.** `auth::Config::validate` and
+  `init` take `client_ca: bool`, whether any listener verifies client
+  certificates, and `validate_client_ca` is gone. `moq --listen` with an
+  invalid auth config stops at startup instead of refusing every session.
+- **A client CA needs a QUIC listener.** A stream-only relay or `moq` listener
+  (TCP or Unix, no `--listen`) refuses to start with `listen.tls.root`, which
+  nothing verified; moq-tokio returns `Error::MtlsUnsupported` for it.
 - **moq-tokio's `Transport` names WebTransport.** `moq_tokio::server::Transport`
   is `moq_tokio::Transport`, with no re-export. A WebTransport session reports
   `Transport::WebTransport` (`"webtransport"` in logs) instead of `Quic`, which
@@ -103,6 +110,12 @@ These land with the next breaking release, not the 2026-09-23 train.
   `mapping: None`; any other family is the mapping's own (`mapping.family()`).
   Set `mapping` alone when building a surround head. The OpusHead bytes are
   unchanged.
+- **moq-mux TS stats live in `ts::stats`.** `ts::Stats` is
+  `ts::stats::Snapshot` and `ts::StreamStats` is `ts::stats::Stream`, whose
+  `track` is an owned `String`. `ts::Export::stats` returns
+  `ts::stats::Export`, which carries only `streams`; feed it to
+  `stats::Log` with `.into()`. `ts::MultipleProgramsError` is
+  `#[non_exhaustive]`: recover it by downcast and read `programs`.
 - **@moq/publish drops `OpusConfig.usedtx`.** Chromium's DTX output shifts the
   audio timeline, so Opus DTX is always off (the WebCodecs default). Remove the
   field; a plain-JS caller still passing it is ignored.
