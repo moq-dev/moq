@@ -7,7 +7,7 @@ import { nextMedia, subscribeMedia } from "./media";
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-test("media max age is present on the initial subscription and later updates", async () => {
+test("media max delay is present on the initial subscription and later updates", async () => {
 	let initial: Moq.Track.Subscription | undefined;
 	const updates: Moq.Track.Subscription[] = [];
 	const subscriber = {
@@ -23,20 +23,20 @@ test("media max age is present on the initial subscription and later updates", a
 			},
 		}),
 	} as unknown as Moq.Broadcast.Consumer;
-	const maxAge = new Signal(Time.Milli(250));
+	const maxDelay = new Signal(Time.Milli(250));
 	const effect = new Effect();
 
 	subscribeMedia(effect, {
 		broadcast,
 		track: "media",
 		priority: 7,
-		maxAge,
+		maxDelay,
 	});
-	expect(initial).toEqual({ priority: 7, maxAge: Time.Milli(250) });
+	expect(initial).toEqual({ priority: 7, maxDelay: Time.Milli(250) });
 
-	maxAge.set(Time.Milli(500));
+	maxDelay.set(Time.Milli(500));
 	await flush();
-	expect(updates.at(-1)).toEqual({ priority: 7, maxAge: Time.Milli(500) });
+	expect(updates.at(-1)).toEqual({ priority: 7, maxDelay: Time.Milli(500) });
 
 	effect.close();
 });
@@ -73,7 +73,7 @@ test("media does not subscribe through a closed broadcast handle", () => {
 				broadcast: handle,
 				track: "video",
 				priority: 0,
-				maxAge: new Signal(Time.Milli(0)),
+				maxDelay: new Signal(Time.Milli(0)),
 			}),
 		).toBeUndefined();
 	} finally {

@@ -52,7 +52,7 @@ const HANDOVER = Moq.Time.Milli(2000);
 // drops its pull; the budget is what lets that resubscribe reach back to a group that was in
 // flight across the swap instead of starting at the next one. With none, a group boundary
 // landing inside the swap drops that group.
-const MAX_AGE = Moq.Time.Milli(1000);
+const MAX_DELAY = Moq.Time.Milli(1000);
 
 const path = Moq.Path.from("drain");
 const trackName = "seq";
@@ -167,7 +167,7 @@ const follow = (active: Moq.Broadcast.Consumer | undefined) => {
 	if (!active || active === current?.broadcast) return;
 	generation++;
 	log(`watching generation ${generation}`);
-	const sub = active.track(trackName).subscribe({ maxAge: MAX_AGE });
+	const sub = active.track(trackName).subscribe({ maxDelay: MAX_DELAY });
 	void read(sub, generation);
 	current?.sub.close();
 	current = { broadcast: active, sub };

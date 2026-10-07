@@ -9,7 +9,7 @@ use super::{Container, Frame};
 /// subscribes to a track and juggles group ordering, age skipping, and rewinds, this one
 /// reads exactly the group it was handed, in arrival order, and ends. That is what a caller
 /// wants after a FETCH: a group already chosen by sequence, with no live subscription and no
-/// max age budget that could skip the very group being asked for.
+/// max delay budget that could skip the very group being asked for.
 ///
 /// A batch of frames decoded from one wire frame (a CMAF fragment carrying several samples) is
 /// handed back one frame at a time.

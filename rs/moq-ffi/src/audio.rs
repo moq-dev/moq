@@ -125,7 +125,7 @@ pub struct MoqAudioDecoderOutput {
 	pub channels: Option<u32>,
 	/// Upper bound on buffering before skipping a stalled group, in
 	/// microseconds. Same congestion-control knob as
-	/// [`MoqSubscription::max_age_us`](crate::consumer::MoqSubscription::max_age_us):
+	/// [`MoqSubscription::max_delay_us`](crate::consumer::MoqSubscription::max_delay_us):
 	/// when a group stalls and a newer group is more than this far ahead,
 	/// the consumer skips. `None` keeps the moq-mux default of zero (skip
 	/// aggressively). Named `_max` to leave room for a future
@@ -133,7 +133,7 @@ pub struct MoqAudioDecoderOutput {
 	/// one bounds how stale a group may be, that one how much to hold before
 	/// presenting.
 	#[uniffi(default = None)]
-	pub max_age_us: Option<u64>,
+	pub max_delay_us: Option<u64>,
 }
 
 /// One audio frame: payload bytes plus a presentation timestamp.
@@ -412,7 +412,7 @@ impl MoqBroadcastConsumer {
 		config.output.format = output.format.into();
 		config.output.sample_rate = output.sample_rate;
 		config.output.layout = output.channels.map(moq_audio::Layout::from_channels).transpose()?;
-		config.max_age = output.max_age_us.map(Duration::from_micros).unwrap_or_default();
+		config.max_delay = output.max_delay_us.map(Duration::from_micros).unwrap_or_default();
 
 		let consumer = moq_audio::decode::Consumer::new(&broadcast, &cfg, name, config).await?;
 
