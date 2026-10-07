@@ -1,4 +1,4 @@
-import { expect, jest, spyOn, test } from "bun:test";
+import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
 import type * as announce from "../announced.ts";
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
 import { type Hop, HopSchema, UNKNOWN_HOP } from "../hop.ts";
@@ -964,34 +964,8 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 		return producer;
 	});
 	const first = broadcast.track("video").subscribe();
-	try {
-		const peer = await nextStream(pair.client);
-		if (!peer) throw new Error("missing pending subscribe");
-		expect(await peer.reader.u53()).toBe(Subscribe.id);
-		const request = await Subscribe.decode(peer.reader, VERSION);
-		jest.advanceTimersByTime(6_000);
-		first.close();
-		await resumed.promise;
-		if (!returned) throw new Error("demand did not return");
-		// Observe the result immediately so a regression is reported as the wrong
-		// result, not as an unhandled rejection while the peer writes its response.
-		const info = returned.info().then(
-			(value) => value,
-			(error: unknown) => error,
-		);
-		expect(await Promise.race([waiting.promise.then(() => true), info.then(() => false)])).toBe(true);
-		if (outcome === "acceptance") {
-			await peer.writer.u53(SubscribeOk.id);
-			await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, VERSION);
-			expect(await info).toMatchObject({ priority: 127 });
-			expect(returned.closed.peek()).toBeUndefined();
-		} else {
-			jest.advanceTimersByTime(4_000);
-			expect(await info).toBeInstanceOf(Error);
-			expect(((await info) as Error).message).toContain("subscribe timed out after 10000ms");
-		}
-		expect(opening).toHaveBeenCalledTimes(1);
-	} finally {
+	// Restore real timers even if an injection promise outlives the test.
+	onTestFinished(() => {
 		captured.mockRestore();
 		opening.mockRestore();
 		first.close();
@@ -999,7 +973,33 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 		broadcast.close();
 		session.close();
 		jest.useRealTimers();
+	});
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("missing pending subscribe");
+	expect(await peer.reader.u53()).toBe(Subscribe.id);
+	const request = await Subscribe.decode(peer.reader, VERSION);
+	jest.advanceTimersByTime(6_000);
+	first.close();
+	await resumed.promise;
+	if (!returned) throw new Error("demand did not return");
+	// Observe the result immediately so a regression is reported as the wrong
+	// result, not as an unhandled rejection while the peer writes its response.
+	const info = returned.info().then(
+		(value) => value,
+		(error: unknown) => error,
+	);
+	expect(await Promise.race([waiting.promise.then(() => true), info.then(() => false)])).toBe(true);
+	if (outcome === "acceptance") {
+		await peer.writer.u53(SubscribeOk.id);
+		await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, VERSION);
+		expect(await info).toMatchObject({ priority: 127 });
+		expect(returned.closed.peek()).toBeUndefined();
+	} else {
+		jest.advanceTimersByTime(4_000);
+		expect(await info).toBeInstanceOf(Error);
+		expect(((await info) as Error).message).toContain("subscribe timed out after 10000ms");
 	}
+	expect(opening).toHaveBeenCalledTimes(1);
 });
 
 test("setup abandonment closes before a queued viewer can attach", async () => {
@@ -1032,32 +1032,32 @@ test("setup abandonment closes before a queued viewer can attach", async () => {
 	});
 	const first = broadcast.track("video").subscribe();
 	let returned: track.Subscriber | undefined;
-	try {
-		const peer = await nextStream(pair.client);
-		if (!peer) throw new Error("missing initial subscribe");
-		expect(await peer.reader.u53()).toBe(Subscribe.id);
-		await Subscribe.decode(peer.reader, VERSION);
-		first.close();
-		returned = await resumed.promise;
-		const info = returned.info().then(
-			(value) => value,
-			(error: unknown) => error,
-		);
-		const next = await Promise.race([nextStream(pair.client), info]);
-		expect(next).toBeInstanceOf(Stream);
-		if (!(next instanceof Stream)) throw new Error("returning viewer did not get a new subscribe");
-		expect(await next.reader.u53()).toBe(Subscribe.id);
-		const request = await Subscribe.decode(next.reader, VERSION);
-		await next.writer.u53(SubscribeOk.id);
-		await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(next.writer, VERSION);
-		expect(await info).toMatchObject({ priority: 127 });
-	} finally {
+	// Runner timeouts do not unwind an async test parked on the injection promise.
+	onTestFinished(() => {
 		captured.mockRestore();
 		first.close();
 		returned?.close();
 		broadcast.close();
 		session.close();
-	}
+	});
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("missing initial subscribe");
+	expect(await peer.reader.u53()).toBe(Subscribe.id);
+	await Subscribe.decode(peer.reader, VERSION);
+	first.close();
+	returned = await resumed.promise;
+	const info = returned.info().then(
+		(value) => value,
+		(error: unknown) => error,
+	);
+	const next = await Promise.race([nextStream(pair.client), info]);
+	expect(next).toBeInstanceOf(Stream);
+	if (!(next instanceof Stream)) throw new Error("returning viewer did not get a new subscribe");
+	expect(await next.reader.u53()).toBe(Subscribe.id);
+	const request = await Subscribe.decode(next.reader, VERSION);
+	await next.writer.u53(SubscribeOk.id);
+	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(next.writer, VERSION);
+	expect(await info).toMatchObject({ priority: 127 });
 });
 
 test("abandonment cancels once and a late acceptance cannot capture a reused alias", async () => {

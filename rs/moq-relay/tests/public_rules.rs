@@ -26,7 +26,7 @@ fn client() -> moq_tokio::Client {
 async fn spawn_relay(auth: auth::Config) -> (u16, tokio::task::JoinHandle<()>) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let auth = auth
-		.init("test", &moq_tokio::tls::Connect::default())
+		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init");
 	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
 
@@ -268,4 +268,20 @@ async fn a_client_ca_needs_an_auth_server() {
 		};
 		assert!(error.contains("--auth-public ignores"), "{error}");
 	}
+}
+
+/// A stream-only relay has no QUIC listener to verify a client CA, and its stream
+/// listeners never ask for a client certificate, so the CA is refused rather than
+/// silently ignored.
+#[tokio::test]
+async fn a_client_ca_needs_a_quic_listener() {
+	let mut config = moq_relay::Config::default();
+	config.auth.url = Some("http://127.0.0.1:4440/".parse().expect("parse url"));
+	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
+	config.listen.tls.root = vec!["ca.pem".into()];
+	let error = match moq_relay::Relay::load(config).await {
+		Ok(_) => panic!("a stream-only relay accepted a client CA"),
+		Err(error) => error.to_string(),
+	};
+	assert!(error.contains("needs a QUIC listener"), "{error}");
 }
