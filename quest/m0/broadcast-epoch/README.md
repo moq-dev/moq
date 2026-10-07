@@ -7,8 +7,9 @@ first-party publisher reuses a pair for different content. Only routes with
 the same epoch resume a subscription from the first frame it lacks; a route
 without one keeps its subscriptions until it goes. So epochs are what make
 failover seamless, and a restart is a new epoch at the same path: the newest
-epoch wins and ends subscriptions to the old one, so viewers re-request
-rather than stall on a replaced broadcast.
+epoch wins new requests and announce consumers see a `Restart`, so viewers
+re-request rather than stall on a replaced broadcast. Subscriptions already
+on the old one stay until the application drops them or its route goes.
 
 The epoch rides moq-lite 07 announcements and requests as metadata, so the
 path never changes and every older version and moq-transport keeps working:
@@ -65,8 +66,9 @@ Start a relay forwards upstream.
 
 This README owns an end-to-end relay test: republish a name while the old
 publisher's session stays open. A lite-07 viewer and a lite-06 or IETF viewer
-both reach the new epoch within one RTT-scale bound rather than the idle
-timeout, and killing the newest epoch falls back to a still-live older one.
+that follow the announce `Restart` (or END then START) both reach the new
+epoch within one RTT-scale bound rather than the idle timeout, and killing the
+newest epoch falls back to a still-live older one.
 
 ## Required
 

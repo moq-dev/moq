@@ -21,10 +21,15 @@ Decided in planning (2026-10-07, from #4970's review):
 - **Source identity.** On a route without an epoch, a different route entry
   is a different source: any other announcing session, a peer reconnect
   included. Routes without an epoch can't resume across routes anyway, so
-  the restart is honest. Rust's origin delivers an `Update` today when an
-  epochless winner moves to another entry (`CursorState::update` compares
-  `(hops, cost, source, epoch)`), while JS already ends and restarts it
-  (`#runAnnounced` diffs entry identity). Both deliver `Restart` after this.
+  the restart is honest. Rust's origin (`TableCursor::update`, `origin.rs`)
+  compares `(hops, cost, source, epoch)`, servability, and captures: an
+  epochless winner moving to another entry is an `Update`, or nothing at all
+  when that metadata is identical (a reconnect under an identical route is
+  deliberately invisible today). Change detection must key on the entry id,
+  reversing that dedupe. A newer epoch already goes out as unannounce then
+  announce there (the `prev.3 != meta.3` branch), which becomes the
+  `Restart`. JS already ends and restarts on a new entry (`#runAnnounced`
+  diffs entry identity). Both deliver `Restart` after this.
 - **Sticky subscriptions (reverses the 2026-10-06 hard switch).** A newer
   epoch no longer ends subscriptions in flight with `Unroutable`
   (`Pick::Superseded`, `front.rs` `supersede`). The front keeps serving its
@@ -38,21 +43,29 @@ Decided in planning (2026-10-07, from #4970's review):
   (`origin.rs` `Consumer::request`, `pick`), so a player that re-requests
   gets the dead broadcast again. JS already swaps per path.
 - **Wire.** lite-07 (`moq-lite-07-wip`) gains an explicit restart message on
-  the announce stream, with the draft text and changelog. Older lite
-  versions and moq-transport send `ANNOUNCE_END` then `ANNOUNCE_START`, the
-  draft's existing replacement rule, and a receiver delivers an end and start
-  for the same prefix that are both pending before delivery as one `Restart`
-  (no timer). `ANNOUNCE_UPDATE` stays a metadata update with no content claim.
+  the announce stream. Older lite versions and moq-transport send
+  `ANNOUNCE_END` then `ANNOUNCE_START` for a source change, a new rule for a
+  relay's winner moving between entries (the draft only says so for a
+  publisher replacing its own epoch), and a receiver delivers an end and
+  start for the same prefix that are both pending before delivery as one
+  `Restart` (no timer). `ANNOUNCE_UPDATE` stays a metadata update with no
+  content claim. Draft edits in `drafts/draft-lcurley-moq-lite.md`: the new
+  message; the routing rule that a per-subscriber winner change travels as
+  ANNOUNCE_UPDATE (it does only without a source change); the SHOULD that a
+  newer Epoch ends older subscriptions with UNROUTABLE (removed); and the
+  lite-07 changelog's "ends subscriptions to the older one".
 - **Players.** `moq play` (#4970) and `@moq/watch` restart on `Restart`
   instead of treating every epochless `Update` as a restart, so a GOAWAY
   drain or re-price no longer restarts playback.
   `moqsrc` (planned in #4960) switches on `Restart` too.
 
 Tests: a newer epoch and an epochless source change each deliver `Restart`
-in both languages; a re-price delivers `Update`; an old subscription keeps
+in both languages, including a reconnect with identical route metadata; a
+re-price delivers `Update`; an old subscription keeps
 receiving after a replacement until its route goes; a re-request after
 `Restart` resolves the new route, over a relay on lite-06, lite-07, and
-moq-transport. Run `just drafts check` and `just test interop --all`.
+moq-transport. On lite-06 and moq-transport, coalescing depends on read
+timing, so those tests accept `Restart` or `End` then `Start`. Run `just drafts check` and `just test interop --all`.
 
 Docs: update `doc/concept/moq-lite.md` (publisher epochs) and
 `doc/lib/{rs,js}` announce sections inline.

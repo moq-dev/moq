@@ -15,14 +15,16 @@ with the serve (`TrackInfoServe`, `rs/moq-net/src/lite/publisher.rs`).
 
 - `resolveTrackInfo` (`js/net/src/broadcast.ts`) takes an `AbortSignal` and
   pins demand only while a requester holds the query.
-- The lite publisher (`runTrackInfo` and `#resolveTrackInfo` in
-  `js/net/src/lite/publisher.ts`) watches the TRACK stream for a reset and
-  releases its hold; the shared per-front query ends with its last holder.
+- The lite publisher (`runTrackInfo`, `runFetch`, and `#resolveTrackInfo` in
+  `js/net/src/lite/publisher.ts`) watches the TRACK or FETCH stream for a
+  reset and releases its hold; the shared per-front query ends with its last
+  holder.
 - Fold in the review nit: `removeTrack` on a name cached only by a
   `consume()` subscription is outside its documented contract; document or
   refuse it.
 
-Test: a requester that disconnects before the answer drops broadcast
-demand, and a second requester keeps it pinned until it leaves too.
+Test: a requester (TRACK or FETCH) that disconnects before the answer drops
+broadcast demand, and a second requester keeps it pinned until it leaves too.
 
-Public API: `resolveTrackInfo` gains a signal argument. Wire: none.
+Public API: none (`resolveTrackInfo` is internal, reached through `Wire`).
+Wire: none.

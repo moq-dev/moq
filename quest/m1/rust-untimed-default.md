@@ -23,6 +23,9 @@ timescale as untimed and `@moq/publish` declares milliseconds):
   media tracks already pin microseconds. The shared timeline itself is
   [Shared import clock](/quest/m1/shared-clock.md)'s; this quest only makes
   each data track declare and use it.
+- The untimed model (#4822) keeps `Default` as the timescale a lite encoder
+  declares for an untimed track's send times; that path names
+  `Timescale::MILLI` explicitly instead.
 - Update the bindings and `doc/lib` pages that describe the default.
 
 Public API: breaking (`Timescale` loses `Default`; an undeclared track is
