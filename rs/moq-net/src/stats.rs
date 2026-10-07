@@ -115,8 +115,8 @@ use std::{
 	collections::HashMap,
 	fmt,
 	sync::{
-		Arc, Mutex,
-		atomic::{AtomicU64, Ordering},
+		Arc, Mutex, Weak,
+		atomic::{AtomicU64, AtomicUsize, Ordering},
 	},
 };
 
@@ -273,6 +273,13 @@ struct SessionCounters {
 }
 
 impl SessionCounters {
+	fn peak(&self, cap: Cap) -> &AtomicU64 {
+		match cap {
+			Cap::Announces => &self.announces_peak,
+			Cap::Subscriptions => &self.subscriptions_peak,
+		}
+	}
+
 	/// Read the gauge into a [`Presence`]. Ended is loaded with `Acquire`
 	/// before started with `Relaxed`, the same pairing as [`Counters::snapshot`],
 	/// so the readout never shows `ended > started`.
@@ -1171,6 +1178,9 @@ struct SessionInner {
 	/// subscription this context opens for a broadcast bumps `broadcasts_started`, the last
 	/// to close bumps `broadcasts_ended` on the same counters, even across a tier change.
 	viewers: Mutex<HashMap<PathOwned, Viewer>>,
+	/// What this session holds against each cap right now, so a tier change can seed the
+	/// new tier's peaks with slots it still holds.
+	held: Mutex<Vec<(Cap, Weak<AtomicUsize>)>>,
 }
 
 /// The tier a [`Session`] records under right now.
@@ -1201,6 +1211,7 @@ impl Session {
 				current: Mutex::new(Current { tier, presence }),
 				generation: AtomicU64::new(0),
 				viewers: Mutex::new(HashMap::new()),
+				held: Mutex::new(Vec::new()),
 			})),
 		}
 	}
@@ -1216,6 +1227,17 @@ impl Session {
 		if let Some(presence) = &presence {
 			presence.sessions_started.fetch_add(1, Ordering::Relaxed);
 		}
+		if let Some(presence) = &presence {
+			// Slots still held count on the new tier, but not the old tier's history.
+			let mut held = inner.held.lock().expect("stats session poisoned");
+			held.retain(|(cap, live)| {
+				let Some(live) = live.upgrade() else { return false };
+				presence
+					.peak(*cap)
+					.fetch_max(live.load(Ordering::Acquire) as u64, Ordering::Relaxed);
+				true
+			});
+		}
 		if let Some(old) = std::mem::replace(&mut current.presence, presence) {
 			// Release pairs with the readout's Acquire load of `sessions_ended`.
 			old.sessions_ended.fetch_add(1, Ordering::Release);
@@ -1224,17 +1246,23 @@ impl Session {
 		inner.generation.fetch_add(1, Ordering::Release);
 	}
 
+	/// Count `live` as what this session holds against `cap`, so a tier change carries it.
+	pub(crate) fn track_held(&self, cap: Cap, live: &Arc<AtomicUsize>) {
+		let Some(inner) = &self.inner else { return };
+		inner
+			.held
+			.lock()
+			.expect("stats session poisoned")
+			.push((cap, Arc::downgrade(live)));
+	}
+
 	/// Record that this session holds `held` of what `cap` limits, raising that peak on its
 	/// tier and root.
 	pub(crate) fn hold(&self, cap: Cap, held: u64) {
 		let Some(inner) = &self.inner else { return };
 		let current = inner.current.lock().expect("stats session poisoned");
 		let Some(presence) = &current.presence else { return };
-		let peak = match cap {
-			Cap::Announces => &presence.announces_peak,
-			Cap::Subscriptions => &presence.subscriptions_peak,
-		};
-		peak.fetch_max(held, Ordering::Relaxed);
+		presence.peak(cap).fetch_max(held, Ordering::Relaxed);
 	}
 
 	/// Egress (publisher / reads) scope for a broadcast path. The path is the
@@ -1647,6 +1675,34 @@ mod tests {
 
 		let json = serde_json::to_string(&presence).unwrap();
 		assert_eq!(serde_json::from_str::<Presence>(&json).unwrap(), presence);
+	}
+
+	/// A session moving tiers brings the slots it still holds to the new tier's peak, but
+	/// not the old tier's history.
+	#[test]
+	fn a_tier_change_carries_the_slots_still_held() {
+		use crate::session::Slots;
+
+		let stats = test_stats();
+		let session = stats.tier(Tier::default()).session("acme");
+		let subscriptions = Slots::new(10).with_stats(&session, Cap::Subscriptions);
+		let mut held: Vec<_> = (0..5).map(|_| subscriptions.acquire().unwrap()).collect();
+		held.truncate(3);
+
+		let gold = Tier::new("gold");
+		session.set_tier(gold.clone());
+
+		let peak = |tier: &Tier| {
+			let (_, presence) = stats
+				.snapshot()
+				.sessions()
+				.into_iter()
+				.find(|(t, _)| t == tier)
+				.expect("sessions row");
+			presence.subscriptions_peak
+		};
+		assert_eq!(peak(&Tier::default()), 5);
+		assert_eq!(peak(&gold), 3, "the new tier sees what is still held");
 	}
 
 	#[test]

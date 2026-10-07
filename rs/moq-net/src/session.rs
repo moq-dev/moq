@@ -703,6 +703,7 @@ impl Slots {
 
 	/// Report how many are held to `stats`, as `cap`'s peak.
 	pub(crate) fn with_stats(mut self, stats: &crate::stats::Session, cap: crate::stats::Cap) -> Self {
+		stats.track_held(cap, &self.live);
 		self.stats = Some((stats.clone(), cap));
 		self
 	}
