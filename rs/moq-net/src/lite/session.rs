@@ -872,7 +872,7 @@ mod tests {
 			reason: String::new(),
 		});
 		let mut script = Vec::new();
-		refused.encode(&mut script, Version::Lite06).unwrap();
+		refused.encode(&mut script, Version::Lite07).unwrap();
 		// The setup token's AUTH stream is the first one the session opens.
 		let transport = ScriptedSession::per_stream(vec![script]);
 		let log = transport.log.clone();
@@ -885,7 +885,7 @@ mod tests {
 			publish: None,
 			subscribe: None,
 			peer_hop: None,
-			version: Version::Lite06,
+			version: Version::Lite07,
 			our_setup: Setup::default(),
 			peer_setup: None,
 			auth: crate::auth::Handle::new(true),

@@ -1,6 +1,6 @@
 //! The MoQ Auth extension (draft-lcurley-moq-auth-00).
 //!
-//! The moq-transport binding of the lite-06 Auth Stream (see [`crate::auth`]): each
+//! The moq-transport binding of the lite Auth Stream (see [`crate::auth`]): each
 //! token rides a request stream of its own, answered with the namespace prefixes it
 //! grants. Negotiated with the AUTH Setup Option on draft-17+ only, where SETUP is a
 //! Key-Value-Pair block.

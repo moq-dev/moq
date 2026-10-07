@@ -10,7 +10,7 @@ export const Version = {
 	/// Also adds frame-precise subscribe/fetch bounds and a GROUP frame offset.
 	DRAFT_06: 0xff0dad06,
 	/// Work-in-progress lite-07, only negotiated when explicitly offered.
-	/// Adds the ANNOUNCE_REQUEST hidden opt-in.
+	/// Adds the ANNOUNCE_REQUEST hidden opt-in and the Auth Stream.
 	DRAFT_07: 0xff0dad07,
 } as const;
 
@@ -67,7 +67,7 @@ export function hasDatagrams(version: Version): boolean {
 
 /**
  * Whether either endpoint may open an Auth Stream (0x7) to present a token and learn its
- * grant. Added to lite-06, whose peers that predate it reset the stream as an unknown type.
+ * grant. Added in lite-07.
  */
 export function hasAuth(version: Version): boolean {
 	// Explicitly list older versions so future versions default to carrying AUTH.
@@ -77,6 +77,7 @@ export function hasAuth(version: Version): boolean {
 		case Version.DRAFT_03:
 		case Version.DRAFT_04:
 		case Version.DRAFT_05:
+		case Version.DRAFT_06:
 			return false;
 		default:
 			return true;

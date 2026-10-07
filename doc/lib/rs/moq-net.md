@@ -89,7 +89,7 @@ Expiry is therefore approximate; a late `gc` extends retention.
 
 ## Authorization
 
-`session.auth()` is the session's `auth::Handle`. On moq-lite 06, and on
+`session.auth()` is the session's `auth::Handle`. On moq-lite 07, and on
 moq-transport draft-17+ when both sides negotiate the
 [MoQ Auth extension](/draft/moq-auth), each side presents its connection's
 credential right after setup, and `grant()` watches the union of every grant

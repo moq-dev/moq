@@ -50,7 +50,14 @@ if (role !== "subscribe" || !url || !broadcast || !Number.isFinite(timeoutMs) ||
 
 async function run(): Promise<void> {
 	const origin = new Moq.Origin.Producer();
-	const connection = await Moq.Connection.connect({ url: new URL(url as string), consume: origin });
+	// The grant arrives over AUTH, which only the work-in-progress moq-lite-07 carries and
+	// no client offers by default. The WebSocket fallback cannot offer it, so it stays off.
+	const connection = await Moq.Connection.connect({
+		url: new URL(url as string),
+		consume: origin,
+		webtransport: { protocols: ["moq-lite-07-wip"] },
+		websocket: { enabled: false },
+	});
 	// The grant the relay sent, in the Rust client's `auth granted` shape, so the harness can
 	// check it against the token this cell minted.
 	const printGrant = (grant: Moq.Auth.Grant | undefined) => {

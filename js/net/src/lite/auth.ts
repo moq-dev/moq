@@ -14,7 +14,7 @@ function guardAuth(version: Version) {
 /** Longest AUTH_ERROR reason, in bytes, matching the Rust decoder. */
 const MAX_REASON = 8192;
 
-/** The first message on an Auth Stream: the token the opener presents. Lite06+. */
+/** The first message on an Auth Stream: the token the opener presents. Lite07+. */
 export class AuthMessage {
 	token: Uint8Array;
 
