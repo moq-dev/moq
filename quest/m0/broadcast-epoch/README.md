@@ -14,8 +14,8 @@ application drops them or its route goes.
 
 The epoch rides moq-lite 07 announcements and requests as metadata, so the
 path never changes and every older version and moq-transport keeps working:
-their routes carry no epoch, stay on one route, and see a restart as an end
-and start at the same path.
+their routes carry no epoch, and see a restart as an end and start at the
+same path.
 
 Non-goals: pooling, which needs nothing here; a redundant pair shares an
 explicit epoch through [`--hop` removal](/quest/m0/broadcast-epoch/hop-removal.md).
@@ -35,10 +35,13 @@ Decided:
 - The route's epoch is taken as given: nothing mints one by default (decided
   2026-10-06). Each first-party publisher mints one per run and announces it;
   a replica announces a shared one. A route without one, such as a
-  transcoder's prefix claim, stays on the worker that first served a
-  subscription and is never stitched to another worker's output.
+  transcoder's prefix claim, is never stitched to another worker's output.
+  A better route without an epoch wins new requests and is announced as a
+  `Restart`, replacing "stays on the worker that first served a
+  subscription", which let dead routes linger (decided 2026-10-07).
 - The newest epoch wins a prefix ahead of cost (decided 2026-10-06). The
-  2026-10-06 hard switch (subscriptions in flight end with `Unroutable`) is
+  hard switch that ended subscriptions in flight with `Unroutable` (decided
+  2026-10-06 for epochs, and 2026-10-07 in #5013 for routes without one) is
   reversed (2026-10-07): subscriptions stay sticky on their route and an
   explicit `Restart` announce event tells players to follow, through
   [Restart](/quest/m0/broadcast-epoch/restart.md). When the newest goes and
