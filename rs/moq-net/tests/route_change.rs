@@ -43,6 +43,11 @@ fn payload(group: u64, frame: u64) -> Vec<u8> {
 	format!("{group}.{frame}").into_bytes()
 }
 
+/// [`payload`], prefixed with the publisher that wrote it.
+fn tagged(name: &str, group: u64, frame: u64) -> Vec<u8> {
+	format!("{name}:{group}.{frame}").into_bytes()
+}
+
 /// Let every task settle. Time is paused, so this returns once the runtime is idle.
 async fn settle() {
 	moq_net_sim::sleep(Duration::from_millis(500)).await;
@@ -542,23 +547,25 @@ enum Loss {
 
 /// One publisher of a redundant pair, writing its own copy of `live`.
 struct Replica {
-	_origin: origin::Producer,
-	_broadcast: broadcast::Producer,
+	/// Tags its payloads, so the reader shows which replica served each frame.
+	name: &'static str,
+	origin: origin::Producer,
+	broadcast: broadcast::Producer,
 	track: track::Producer,
 	group: Option<moq_net::group::Producer>,
 	link: Option<MockPair>,
 }
 
 /// A redundant pair: `P1` and `P2` publish `live` under one explicit epoch and write
-/// the same frames. `R` reads through `P1`, priced below `P2` so it starts there,
-/// until `P1` goes mid-group. `R` resumes on `P2` from the first frame its reader
+/// the same frames, tagged with their name. `R` reads through `P1`, priced below `P2`
+/// so it starts there, until `P1` goes mid-group. `R` resumes on `P2` from the first frame its reader
 /// lacks: every frame once, in order, and no timestamp ever rewinds.
 async fn redundant_pair_fails_over(version: &str, loss: Loss) {
 	let version: Version = version.parse().unwrap();
 	let epoch = moq_net::Epoch::mint();
 	let subscriber = produce_origin(4);
 	let mut replicas = Vec::new();
-	for (hop, cost) in [(1, 1), (2, 5)] {
+	for (name, hop, cost) in [("P1", 1, 1), ("P2", 2, 5)] {
 		let publisher = produce_origin(hop);
 		let broadcast = publisher.create_broadcast("live").unwrap();
 		let track = broadcast.create_track("video", None).unwrap();
@@ -567,8 +574,9 @@ async fn redundant_pair_fails_over(version: &str, loss: Loss) {
 			.unwrap();
 		let link = link(version, &publisher, &subscriber).await;
 		replicas.push(Replica {
-			_origin: publisher,
-			_broadcast: broadcast,
+			name,
+			origin: publisher,
+			broadcast,
 			track,
 			group: None,
 			link: Some(link),
@@ -590,25 +598,33 @@ async fn redundant_pair_fails_over(version: &str, loss: Loss) {
 		}
 		for frame in 0..FRAMES {
 			if sequence == 1 && frame == FRAMES / 2 {
-				let mut incumbent = replicas.remove(0);
-				let link = incumbent.link.take().unwrap();
+				let Replica {
+					origin,
+					broadcast,
+					link,
+					..
+				} = replicas.remove(0);
+				let link = link.unwrap();
 				match loss {
 					Loss::Unreachable => {
 						link.server.abort(Error::Cancel);
 						link.client.abort(Error::Cancel);
 					}
-					// Keep the session up: only the broadcast goes.
-					Loss::Ends => kept = Some(link),
+					// Keep the session and its origin up: only the broadcast goes.
+					Loss::Ends => kept = Some((link, origin)),
 				}
-				drop(incumbent);
+				drop(broadcast);
 				settle().await;
 			}
 			let timestamp = Timestamp::from_micros(1_000_000 + sequence * 100_000 + frame * 1_000).unwrap();
 			for replica in &mut replicas {
 				let group = replica.group.as_mut().unwrap();
-				group.write_frame(timestamp, payload(sequence, frame)).unwrap();
+				group
+					.write_frame(timestamp, tagged(replica.name, sequence, frame))
+					.unwrap();
 			}
-			expected.push((sequence, payload(sequence, frame)));
+			// The cheapest replica still up serves it.
+			expected.push((sequence, tagged(replicas[0].name, sequence, frame)));
 			seen.push(next_timed(&mut rx).await);
 		}
 		for replica in &mut replicas {
