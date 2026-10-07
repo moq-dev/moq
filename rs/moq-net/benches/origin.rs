@@ -689,7 +689,9 @@ fn bench_parked(c: &mut Criterion) {
 
 /// `(tracks, copies)` for [`bench_copy_walk`]: tracks one front is serving, and
 /// route copies each of those tracks still holds when the route swaps.
-const COPY_WALK: [(usize, usize); 6] = [(1, 1), (1, 32), (32, 1), (8, 32), (32, 8), (64, 16)];
+///
+/// The single-copy points from 32 to 128 tracks show the per-track slope alone.
+const COPY_WALK: [(usize, usize); 8] = [(1, 1), (1, 32), (32, 1), (64, 1), (128, 1), (8, 32), (32, 8), (64, 16)];
 
 const COPY_PATH: &str = "room/live";
 
@@ -698,47 +700,61 @@ const COPY_WAIT: Duration = Duration::from_secs(5);
 
 /// One generation at [`COPY_PATH`], held so its copies stay subscribed.
 struct Generation {
-	_broadcast: broadcast::Producer,
+	broadcast: broadcast::Producer,
 	tracks: Vec<track::Producer>,
+}
+
+impl Generation {
+	/// Create a hidden generation and leave a finished group on every track, so a
+	/// reader that does look has something to resume.
+	fn build(producer: &origin::Producer, tracks: usize) -> Self {
+		let broadcast = producer.create_broadcast(COPY_PATH).unwrap();
+		let mut held = Vec::with_capacity(tracks);
+		for i in 0..tracks {
+			let track = broadcast.create_track(format!("{i}"), None).unwrap();
+			let mut written = track.append_group().unwrap();
+			written.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
+			written.finish().unwrap();
+			held.push(track);
+		}
+		Self {
+			broadcast,
+			tracks: held,
+		}
+	}
+
+	/// Route the front to this generation without waiting.
+	fn route(&self, epoch: &Epoch) {
+		self.broadcast
+			.announce(origin::Route::default().with_epoch(epoch.clone()))
+			.unwrap();
+	}
+
+	/// Route the front to this generation and wait until every track is spliced.
+	///
+	/// The wait ends on demand, which flips when the front subscribes the new
+	/// copy, before its splice. That bounds the splice only on a current-thread
+	/// runtime, where every local query is ready within the front poll that
+	/// splices it.
+	async fn announce(&self, epoch: &Epoch) {
+		self.route(epoch);
+		for track in &self.tracks {
+			tokio::time::timeout(COPY_WAIT, track.demand().used())
+				.await
+				.expect("route swap did not splice")
+				.expect("replacement track closed");
+		}
+	}
 }
 
 /// A front serving [`COPY_PATH`], with `copies` route copies on each of its tracks.
 struct CopyWalk {
-	producer: origin::Producer,
 	epoch: Epoch,
-	tracks: usize,
+	_producer: origin::Producer,
 	_subscribers: Vec<track::Subscriber>,
 	generations: Vec<Generation>,
-}
-
-/// Publish one local generation and leave a finished group on every track, so a
-/// reader that does look has something to resume.
-fn publish_generation(producer: &origin::Producer, epoch: &Epoch, tracks: usize) -> Generation {
-	let broadcast = producer.create_broadcast(COPY_PATH).unwrap();
-	let mut held = Vec::with_capacity(tracks);
-	for i in 0..tracks {
-		let track = broadcast.create_track(format!("{i}"), None).unwrap();
-		let mut written = track.append_group().unwrap();
-		written.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
-		written.finish().unwrap();
-		held.push(track);
-	}
-	broadcast
-		.announce(origin::Route::default().with_epoch(epoch.clone()))
-		.unwrap();
-	Generation {
-		_broadcast: broadcast,
-		tracks: held,
-	}
-}
-
-async fn wait_spliced(tracks: &[track::Producer]) {
-	for track in tracks {
-		tokio::time::timeout(COPY_WAIT, track.demand().used())
-			.await
-			.expect("route swap did not splice")
-			.expect("replacement track closed");
-	}
+	/// The generation the timed swap announces, built during setup.
+	next: Option<Generation>,
 }
 
 /// Build a front with `copies` already spliced onto each track.
@@ -751,7 +767,8 @@ async fn copy_walk(tracks: usize, copies: usize) -> CopyWalk {
 	let (producer, driver) = origin::Producer::new(origin::Config::default());
 	tokio::spawn(moq_net::time::run(driver));
 	let epoch = Epoch::mint();
-	let first = publish_generation(&producer, &epoch, tracks);
+	let first = Generation::build(&producer, tracks);
+	first.route(&epoch);
 	let resolved = tokio::time::timeout(COPY_WAIT, producer.consume().request_broadcast(COPY_PATH))
 		.await
 		.expect("front did not resolve")
@@ -765,43 +782,45 @@ async fn copy_walk(tracks: usize, copies: usize) -> CopyWalk {
 			.expect("subscribe failed");
 		subscribers.push(subscriber);
 	}
-	let mut generations = Vec::with_capacity(copies);
+	let mut generations = Vec::with_capacity(copies + 1);
 	generations.push(first);
 	for _ in 1..copies {
-		let generation = publish_generation(&producer, &epoch, tracks);
-		wait_spliced(&generation.tracks).await;
+		let generation = Generation::build(&producer, tracks);
+		generation.announce(&epoch).await;
 		generations.push(generation);
 	}
 	CopyWalk {
-		producer,
+		next: Some(Generation::build(&producer, tracks)),
 		epoch,
-		tracks,
+		_producer: producer,
 		_subscribers: subscribers,
 		generations,
 	}
 }
 
 impl CopyWalk {
-	/// Swap in one newer route at the same epoch.
+	/// Swap in the prebuilt newer route at the same epoch.
 	///
 	/// A local track's info is already known, so the front subscribes, walks
-	/// every track, and each reader walks its copies in one driver turn. Demand
-	/// flips at the subscribe, and this wait returns only after that turn.
+	/// every track, and each reader walks its copies in one driver turn.
 	async fn swap(&mut self) {
-		let generation = publish_generation(&self.producer, &self.epoch, self.tracks);
-		wait_spliced(&generation.tracks).await;
+		let generation = self.next.take().expect("one swap per setup");
+		generation.announce(&self.epoch).await;
 		self.generations.push(generation);
 	}
 }
 
-/// A route swap on one front. Setup holds `copies` per track and is not timed;
-/// the swap is. Warm-up sizes the iteration count from wall time, which
-/// includes that setup, so a large front does not multiply it by a fast routine.
+/// A route swap on one front. Setup holds `copies` per track and builds the
+/// next generation, untimed; the announce and splice are timed. Warm-up sizes
+/// the iteration count from wall time, which includes that setup, so a large
+/// front does not multiply it by a fast routine.
+///
+/// The runtime must stay current-thread; see [`Generation::announce`].
 fn bench_copy_walk(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/copy_walk");
 	group.sample_size(10);
 	for (tracks, copies) in COPY_WALK {
-		group.throughput(Throughput::Elements((tracks * copies) as u64));
+		group.throughput(Throughput::Elements(tracks as u64));
 		group.bench_function(BenchmarkId::from_parameter(format!("{tracks}t_{copies}c")), |b| {
 			let runtime = tokio::runtime::Builder::new_current_thread()
 				.enable_all()
