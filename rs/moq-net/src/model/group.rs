@@ -372,7 +372,7 @@ struct Alive {
 	// straddle the abort: see `Producer::live_first_frame`.
 	aborted: AtomicBool,
 	// Set before `aborted`'s release store. True when the abort accounts for the
-	// group (old, evicted, lagged), so a finished track may still end clean.
+	// group (see `is_accounted_hole`), so a finished track may still end clean.
 	// False for a cancel, a session close, or a transport failure: those cut it.
 	skipped: AtomicBool,
 	// The cache stamp `GroupState::charge` maintains, held here as well so the
@@ -412,16 +412,19 @@ impl Drop for Alive {
 	}
 }
 
-/// A group the publisher accounted for: old, evicted, or lagged. A finished
-/// track may end clean without it. A cancel, a session close, or a transport
-/// failure did not account for it.
+/// A group dropped on purpose: old, evicted, lagged, or past the subscriber's
+/// delivery deadline. A finished track may end clean without it. A cancel, a
+/// session close, or a transport failure did not account for it.
 fn is_accounted_hole(err: &Error) -> bool {
+	use crate::StreamError;
 	matches!(
 		err,
 		Error::Old
 			| Error::Evicted
 			| Error::Lagged
-			| Error::Stream(crate::StreamError::Old | crate::StreamError::Evicted | crate::StreamError::TooFarBehind)
+			| Error::Stream(
+				StreamError::Old | StreamError::Evicted | StreamError::TooFarBehind | StreamError::DeliveryTimeout
+			)
 	)
 }
 

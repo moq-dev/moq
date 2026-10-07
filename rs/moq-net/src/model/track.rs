@@ -64,6 +64,13 @@ pub(super) struct ExpiryScan {
 	gc: bool,
 }
 
+impl ExpiryScan {
+	/// Whether something last touched at `tick` sat past the expiry window.
+	fn outlived(&self, tick: u64) -> bool {
+		self.now.saturating_sub(tick) > self.max_ticks
+	}
+}
+
 /// How long a track nobody reads stays, with its cache, before it is let go.
 ///
 /// Within the window a returning viewer, or the next of a run of back-to-back
@@ -276,6 +283,11 @@ pub(crate) struct TrackState {
 	// The error that caused the track to be aborted, if any.
 	abort: Option<Error>,
 
+	// Cut groups (see `Slot::cut`) whose slots the cache reclaimed, so a reader that had
+	// not reached one still gets the cut instead of a clean end. Each is forgotten once
+	// older than the expiry window, when a healthy group would have aged out too.
+	cuts: Vec<Reclaimed>,
+
 	// Whether the declared end still stands after an abort: every group below it was
 	// produced and finished before the abort landed. See [`Self::is_complete`].
 	settled: bool,
@@ -343,11 +355,12 @@ impl Slot {
 		self.serving().is_aborted()
 	}
 
-	/// The copy a finished track must not report as delivered: aborted, and not
-	/// an accounted hole. `None` while anything servable remains.
+	/// The copy a finished track must not report as delivered: a live group that was
+	/// aborted, and not an accounted hole. `None` while anything servable remains, and
+	/// for fetched backfill, which nobody lost when it is abandoned.
 	fn cut(&self) -> Option<&group::Producer> {
 		let group = self.serving();
-		(group.is_aborted() && !group.is_skipped()).then_some(group)
+		(self.visible && group.is_aborted() && !group.is_skipped()).then_some(group)
 	}
 
 	/// The mean access over copies still held, weighed the way each one samples the
@@ -376,7 +389,7 @@ impl Slot {
 			.fold(true, |expired, group| {
 				let idle = group
 					.cache_accessed_tick(scan.gc.then_some(scan.now))
-					.is_some_and(|tick| scan.now.saturating_sub(tick) > scan.max_ticks);
+					.is_some_and(|tick| scan.outlived(tick));
 				expired && idle
 			})
 	}
@@ -440,6 +453,15 @@ pub(crate) struct FetchOutcome {
 	pub(crate) rejected: Option<Error>,
 }
 
+/// A cut whose slot the cache reclaimed. See [`TrackState::cuts`].
+struct Reclaimed {
+	group: group::Producer,
+	// Its absolute arrival index, which an arrival-order reader compares its cursor to.
+	index: usize,
+	// The pool tick it was reclaimed at.
+	tick: u64,
+}
+
 /// What an arrival-order read found. A cut's error is read after the track lock
 /// drops: [`group::Producer::abort_reason`] takes the group lock.
 enum Arrival {
@@ -484,7 +506,7 @@ impl TrackState {
 		self.live || self.sealed || self.final_sequence.is_some() || self.abort.is_some()
 	}
 
-	fn poll_recv_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Arrival>> {
+	fn poll_recv_group(&self, index: usize, min_sequence: u64, end_sequence: Option<u64>) -> Poll<Result<Arrival>> {
 		let start = index.saturating_sub(self.offset);
 		let readable = self.readable();
 		let min_sequence = min_sequence.max(self.live_floor.unwrap_or(0));
@@ -505,7 +527,7 @@ impl TrackState {
 			// A cached abort is not delivery. An accounted hole may be skipped.
 			// A cancel, a session close, or a transport failure still owed below
 			// the end is the cut, including a publisher writer drop (Cancel).
-			if let Some((group, at)) = self.cut_at(start, min_sequence) {
+			if let Some((group, at)) = self.cut_at(index, min_sequence, end_sequence) {
 				return Poll::Ready(Ok(Arrival::Cut(group, at)));
 			}
 			Poll::Ready(Ok(Arrival::End))
@@ -516,23 +538,28 @@ impl TrackState {
 		}
 	}
 
-	/// The first cut this reader has not passed, with its absolute arrival index.
-	fn cut_at(&self, start: usize, min_sequence: u64) -> Option<(group::Producer, usize)> {
-		for (i, (sequence, stamp)) in self.arrival.iter().enumerate().skip(start) {
-			if *sequence < min_sequence {
-				continue;
-			}
-			let Some(slot) = self.lookup.get(sequence) else {
-				continue;
-			};
-			if slot.stamp != *stamp {
-				continue;
-			}
-			if let Some(group) = slot.cut() {
-				return Some((group.clone(), self.offset + i));
-			}
-		}
-		None
+	/// The first cut a reader at absolute arrival `index` has not passed and still
+	/// owes, with its absolute arrival index. A cut above the cap is left in place,
+	/// so raising the cap over it still reports it.
+	fn cut_at(&self, index: usize, min_sequence: u64, end_sequence: Option<u64>) -> Option<(group::Producer, usize)> {
+		let owed = |sequence: u64| sequence >= min_sequence && super::subscription::before_end(sequence, end_sequence);
+		let cached = self
+			.arrival
+			.iter()
+			.enumerate()
+			.skip(index.saturating_sub(self.offset))
+			.filter(|(_, (sequence, _))| owed(*sequence))
+			.find_map(|(i, (sequence, stamp))| {
+				let slot = self.lookup.get(sequence).filter(|slot| slot.stamp == *stamp)?;
+				Some((slot.cut()?.clone(), self.offset + i))
+			});
+		let reclaimed = self
+			.cuts
+			.iter()
+			.filter(|cut| cut.index >= index && owed(cut.group.sequence))
+			.min_by_key(|cut| cut.index)
+			.map(|cut| (cut.group.clone(), cut.index));
+		[cached, reclaimed].into_iter().flatten().min_by_key(|(_, at)| *at)
 	}
 
 	/// Find the next datagram at or after the subscriber's absolute `index`.
@@ -582,10 +609,14 @@ impl TrackState {
 		// the consumer would be handed the abort, or `Dropped`, instead of how it ended.
 		let closed = self.sealed || self.abort.is_some();
 		// Once nothing more is in range: an abort before the end settled cut the track
-		// off. One after it is a clean end (see `is_complete`), as is reaching the end.
+		// off. Otherwise a cut group still owed below the end is the cut, and only then
+		// is it a clean end (see `is_complete`).
 		let end = || match &self.abort {
 			Some(err) if !self.settled => Err(err.clone()),
-			_ => Ok(InRange::End),
+			_ => Ok(match self.cut_in_range(next_sequence, end_sequence) {
+				Some(group) => InRange::Cut(group),
+				None => InRange::End,
+			}),
 		};
 
 		// If the exclusive end is already at or below where we'd resume, no
@@ -627,14 +658,10 @@ impl TrackState {
 		if closed || self.final_sequence.is_some_and(|fin| next_sequence >= fin) {
 			return Poll::Ready(end());
 		}
-		// The boundary is reached and nothing live is left in range. A reset that
-		// is not an accounted hole is the cut; a hole ends clean. Parking here
+		// The boundary is reached and nothing live is left in range. Parking here
 		// would wait for a group the boundary says will not arrive.
 		if self.is_complete() {
-			if let Some(group) = self.cut_in_range(next_sequence, end_sequence) {
-				return Poll::Ready(Ok(InRange::Cut(group)));
-			}
-			return Poll::Ready(Ok(InRange::End));
+			return Poll::Ready(end());
 		}
 		Poll::Pending
 	}
@@ -642,16 +669,19 @@ impl TrackState {
 	/// The lowest-sequence cut in `[next_sequence, end_sequence)`.
 	fn cut_in_range(&self, next_sequence: u64, end_sequence: Option<u64>) -> Option<group::Producer> {
 		let floor = next_sequence.max(self.live_floor.unwrap_or(0));
-		for (_, slot) in self.lookup.range(floor..) {
-			let group = slot.serving();
-			if !super::subscription::before_end(group.sequence, end_sequence) {
-				break;
-			}
-			if let Some(group) = slot.cut() {
-				return Some(group.clone());
-			}
-		}
-		None
+		let in_range = |sequence: u64| super::subscription::before_end(sequence, end_sequence);
+		let cached = self
+			.lookup
+			.range(floor..)
+			.take_while(|(sequence, _)| in_range(**sequence))
+			.find_map(|(_, slot)| slot.cut());
+		let reclaimed = self
+			.cuts
+			.iter()
+			.map(|cut| &cut.group)
+			.filter(|group| group.sequence >= floor && in_range(group.sequence))
+			.min_by_key(|group| group.sequence);
+		[cached, reclaimed].into_iter().flatten().min_by_key(|group| group.sequence).cloned()
 	}
 
 	/// The cached group for `sequence`, but only when it holds every frame from
@@ -902,9 +932,11 @@ impl TrackState {
 			}
 		}
 
-		self.arrival
-			.front()
-			.is_some_and(|(sequence, stamp)| !self.is_current(*sequence, *stamp))
+		self.cuts.iter().any(|cut| scan.outlived(cut.tick))
+			|| self
+				.arrival
+				.front()
+				.is_some_and(|(sequence, stamp)| !self.is_current(*sequence, *stamp))
 			|| self
 				.evict
 				.front()
@@ -929,6 +961,7 @@ impl TrackState {
 	/// Apply a scan previously selected by [`Self::expiry_scan`] or
 	/// [`Self::expiry_scan_drain`].
 	pub(super) fn evict_expired_scan(&mut self, scan: ExpiryScan) {
+		self.cuts.retain(|cut| !scan.outlived(cut.tick));
 		let len = self.evict.len();
 		if len > 0 {
 			let start = scan.start % len;
@@ -945,7 +978,7 @@ impl TrackState {
 				// Already aborted: the frames are gone, reclaim the slot so a
 				// later fetch can serve the sequence again.
 				if slot.is_aborted() {
-					self.lookup.remove(&sequence);
+					self.reclaim(sequence, scan.now);
 					continue;
 				}
 				if self.protects(sequence) || !slot.is_expired(&scan) {
@@ -988,6 +1021,23 @@ impl TrackState {
 			let lookup = &self.lookup;
 			self.evict
 				.retain(|(sequence, stamp)| lookup.get(sequence).is_some_and(|slot| slot.stamp == *stamp));
+		}
+	}
+
+	/// Remove an aborted slot, keeping it in `cuts` if it was a cut.
+	fn reclaim(&mut self, sequence: u64, now: u64) {
+		let Some(slot) = self.lookup.remove(&sequence) else {
+			return;
+		};
+		let Some(group) = slot.cut() else {
+			return;
+		};
+		if let Some(i) = self.arrival.iter().position(|entry| *entry == (sequence, slot.stamp)) {
+			self.cuts.push(Reclaimed {
+				group: group.clone(),
+				index: self.offset + i,
+				tick: now,
+			});
 		}
 	}
 
@@ -1113,6 +1163,8 @@ impl TrackState {
 			},
 		);
 		if visible {
+			// The publisher re-sent it: readers get this incarnation instead.
+			self.cuts.retain(|cut| cut.group.sequence != sequence);
 			self.arrival.push_back((sequence, stamp));
 			let oldest = self.lookup.first_key_value().map_or(sequence, |(oldest, _)| *oldest);
 			self.cache.wakes().landed(below, sequence, oldest);
@@ -1210,7 +1262,7 @@ impl TrackState {
 			}
 			if slot.is_aborted() {
 				// Aborted upstream: the frames are already gone, reclaim the slot.
-				self.lookup.remove(&sequence);
+				self.reclaim(sequence, pool.now());
 				continue;
 			}
 			if self.protects(sequence) {
@@ -3616,7 +3668,7 @@ impl Cursor {
 				}
 				_ => {
 					let (producer, found_index) = match ready!(
-						self.poll(waiter, |state| state.poll_recv_group(self.index, self.min_sequence))?
+						self.poll(waiter, |state| state.poll_recv_group(self.index, self.min_sequence, self.end_sequence))?
 					) {
 						Arrival::End => {
 							// Parked groups survive a finished track: they become deliverable
@@ -3626,13 +3678,9 @@ impl Cursor {
 							}
 							return Poll::Pending;
 						}
-						// Outside the cap this reader does not owe the group. Advance
-						// past it or the next poll returns the same cut.
+						// Advance past the cut, or the next poll returns it again.
 						Arrival::Cut(producer, found_index) => {
 							self.index = found_index + 1;
-							if !super::subscription::before_end(producer.sequence, self.end_sequence) {
-								continue;
-							}
 							return Poll::Ready(Err(producer.abort_reason()));
 						}
 						Arrival::Group(producer, found_index) => (producer, found_index),

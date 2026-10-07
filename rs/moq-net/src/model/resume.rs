@@ -595,6 +595,11 @@ impl Reader {
 						break;
 					}
 					Poll::Ready(Err(err)) => {
+						// A group cut below a complete track's end: the copy is whole, so the
+						// cut is the reader's to see, not a dead route for the front to replace.
+						if let Poll::Ready(Ok(())) = copy.track.poll_complete(&kio::Waiter::noop()) {
+							return Some(Poll::Ready(Err(err)));
+						}
 						copy.done = Some(Err(err));
 						break;
 					}

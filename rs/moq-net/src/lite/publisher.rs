@@ -1228,8 +1228,12 @@ enum SubscribeServe<S: crate::transport::poll::Session> {
 	/// Streaming groups and datagrams. Boxed: by far the largest state, and the enum
 	/// is moved on every transition.
 	Run(Box<TrackRun<S>>),
-	/// The track finished: draining the in-flight group streams before the FIN.
-	Drain { children: kio::Tasks<GroupServe<S>> },
+	/// The track's groups ran out: draining the in-flight group streams, then ending
+	/// with `end` (the FIN, or the track's error).
+	Drain {
+		children: kio::Tasks<GroupServe<S>>,
+		end: Result<(), Error>,
+	},
 }
 
 impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
@@ -1293,6 +1297,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 						self,
 						Self::Drain {
 							children: Default::default(),
+							end: Ok(()),
 						},
 					)
 					else {
@@ -1351,18 +1356,18 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 					*self = Self::Run(Box::new(run));
 				}
 				Self::Run(run) => {
-					// The live edge reached the boundary; SUBSCRIBE_END was already sent (or
-					// the version predates the track stream). Drain the in-flight group
-					// machines, then FIN.
-					if ready!(run.poll_step(writer, waiter))?.is_continue() {
+					// The live edge reached the boundary (SUBSCRIBE_END was already sent, or
+					// the version predates the track stream), or the track failed. Drain the
+					// in-flight group machines either way, so a cut leaves its siblings up.
+					let ControlFlow::Break(end) = ready!(run.poll_step(writer, waiter))? else {
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
-					}
+					};
 					let children = std::mem::take(&mut run.children);
-					*self = Self::Drain { children };
+					*self = Self::Drain { children, end };
 				}
-				Self::Drain { children } => {
+				Self::Drain { children, end } => {
 					ready!(children.poll(waiter));
-					return Poll::Ready(Ok(ControlFlow::Break(())));
+					return Poll::Ready(end.clone().map(ControlFlow::Break));
 				}
 			}
 		}
@@ -2422,18 +2427,22 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	/// Serve until the live edge reaches the track's boundary.
 	#[cfg(test)]
 	fn poll(&mut self, writer: &mut Writer<S::SendStream, Version>, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		while ready!(self.poll_step(writer, waiter))?.is_continue() {}
-		Poll::Ready(Ok(()))
+		loop {
+			if let ControlFlow::Break(end) = ready!(self.poll_step(writer, waiter))? {
+				return Poll::Ready(end);
+			}
+		}
 	}
 
-	/// Serve one ready group or datagram (`Continue`), or `Break` once the live edge
-	/// reaches the track's boundary. Returning per item lets the caller watch the
-	/// requester while work stays ready.
+	/// Serve one ready group or datagram (`Continue`), or `Break` once the track's
+	/// groups run out: `Ok` at its boundary, or the track's error. Returning per item
+	/// lets the caller watch the requester while work stays ready. The outer `Err` is
+	/// a failed write.
 	fn poll_step(
 		&mut self,
 		writer: &mut Writer<S::SendStream, Version>,
 		waiter: &kio::Waiter,
-	) -> Poll<Result<ControlFlow<()>, Error>> {
+	) -> Poll<Result<ControlFlow<Result<(), Error>>, Error>> {
 		let mut cx = waiter.context();
 		// Deliver the buffered range messages before selecting more work.
 		ready!(writer.poll_flush(&mut cx))?;
@@ -2488,7 +2497,11 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		// group is ready (including while groups are parked above the cap).
 		let emit_boundary = self.emit_range && !self.end_sent && !self.count_streams;
 		if let Poll::Ready(res) = poll_recv_next(&mut self.track, self.datagrams, emit_boundary, waiter) {
-			match res? {
+			let res = match res {
+				Ok(res) => res,
+				Err(err) => return Poll::Ready(Ok(ControlFlow::Break(Err(err)))),
+			};
+			match res {
 				Recv::Group(mut group) => {
 					if !position_group(&mut group, self.start_frame, self.end_frame) {
 						// Its head is gone, and this subscriber didn't ask for a
@@ -2526,7 +2539,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 					self.end_sent = true;
 					writer.buffer(&lite::SubscribeResponse::End(lite::SubscribeEnd { group, streams }))?;
 				}
-				Recv::Finished => return Poll::Ready(Ok(ControlFlow::Break(()))),
+				Recv::Finished => return Poll::Ready(Ok(ControlFlow::Break(Ok(())))),
 			}
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}

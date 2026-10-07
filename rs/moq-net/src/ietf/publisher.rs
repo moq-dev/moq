@@ -2420,8 +2420,9 @@ struct TrackServe<S: crate::transport::poll::Session> {
 	range: ServeRange,
 	timescale: Option<Timescale>,
 	children: kio::Tasks<GroupServe<S>>,
-	/// The track finished: the in-flight group machines drain, then FIN.
-	draining: bool,
+	/// The track's groups ran out: the in-flight group machines drain, then the serve
+	/// ends with this (the FIN, or the track's error).
+	drained: Option<Result<(), Error>>,
 	/// Group streams opened, shared with the group machines.
 	opened: Arc<AtomicU64>,
 	/// The track's exclusive end, once its groups ran out because it finished.
@@ -2464,7 +2465,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			range,
 			timescale,
 			children: kio::Tasks::new(),
-			draining: false,
+			drained: None,
 			opened: Default::default(),
 			end: None,
 		}
@@ -2513,8 +2514,8 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		if self.draining {
-			return self.children.poll(waiter).map(Ok);
+		if let Some(end) = &self.drained {
+			return self.children.poll(waiter).map(|()| end.clone());
 		}
 
 		let _ = self.children.poll(waiter);
@@ -2572,13 +2573,17 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 				Poll::Ready(Ok(None)) => {
 					// Datagrams written before the track finished still go out.
 					self.poll_datagrams(waiter);
-					self.draining = true;
 					if let Poll::Ready(Ok(end)) = self.track.poll_finished(waiter) {
 						self.end = Some(end);
 					}
+					self.drained = Some(Ok(()));
 					return self.children.poll(waiter).map(Ok);
 				}
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+				// Send what is in flight before failing, so a cut leaves its siblings up.
+				Poll::Ready(Err(err)) => {
+					self.drained = Some(Err(err.clone()));
+					return self.children.poll(waiter).map(|()| Err(err));
+				}
 				Poll::Pending => break,
 			}
 		}
