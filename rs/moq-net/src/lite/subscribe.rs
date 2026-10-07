@@ -157,15 +157,15 @@ fn canonical_start_group(version: Version, start_group: Option<u64>, start_frame
 
 /// Encode the `Group Start` field shared by SUBSCRIBE and SUBSCRIBE_UPDATE.
 ///
-/// The inverse of [`decode_start_group`]: lite-06 writes the raw floor (`None` and
-/// `Some(0)` are the same absence of a constraint), while a pre-06 wire gets `Some(0)`
-/// folded back to absent. On those wires an explicit group 0 means "replay from the
-/// beginning", which is not what a vacuous floor asks for.
+/// The inverse of [`decode_start_group`]. Lite-06 writes the raw floor, so `None` and
+/// `Some(0)` are the same group 0. A pre-06 wire encodes the sequence + 1: `None` is 0
+/// (the latest group, where the publisher starts) and `Some(0)` is 1, replay from the
+/// beginning.
 fn encode_start_group(w: &mut Encoder<'_>, version: Version, start_group: Option<u64>) -> Result<(), EncodeError> {
 	if version.resolves_start() {
 		return w.varint(start_group.unwrap_or(0));
 	}
-	w.varint_opt(start_group.filter(|&group| group > 0))
+	w.varint_opt(start_group)
 }
 
 /// Decode the trailing `Frame Start` / `Frame End` pair shared by SUBSCRIBE,
@@ -773,8 +773,8 @@ mod test {
 	}
 
 	/// Lite06 carries the raw floor; pre-06 wires encode the sequence + 1 with 0 meaning
-	/// the latest group. A vacuous floor folds to absent on the old wire, where an
-	/// explicit group 0 would mean "replay from the beginning" instead.
+	/// the latest group. An explicit group 0 is that sequence, so it round-trips as group 0
+	/// rather than as the latest group.
 	#[test]
 	fn group_start_is_absolute_on_lite06() {
 		let mut msg = subscribe_sample();
@@ -809,11 +809,23 @@ mod test {
 		let got = crate::coding::decode_buf(&mut zero.as_slice(), Version::Lite06, Subscribe::decode_msg).unwrap();
 		assert_eq!(got.start_group, None);
 
-		// On the pre-06 wire the vacuous floor folds to absent (the latest group).
-		let mut folded = Vec::new();
-		msg.encode_msg(&mut Encoder::new(&mut folded, Version::Lite05.into()), Version::Lite05)
+		// On the pre-06 wire an explicit group 0 is sequence + 1, distinct from an
+		// absent start (the latest group).
+		let mut explicit = Vec::new();
+		msg.encode_msg(
+			&mut Encoder::new(&mut explicit, Version::Lite05.into()),
+			Version::Lite05,
+		)
+		.unwrap();
+		let got = crate::coding::decode_buf(&mut explicit.as_slice(), Version::Lite05, Subscribe::decode_msg).unwrap();
+		assert_eq!(got.start_group, Some(0));
+
+		msg.start_group = None;
+		let mut latest = Vec::new();
+		msg.encode_msg(&mut Encoder::new(&mut latest, Version::Lite05.into()), Version::Lite05)
 			.unwrap();
-		let got = crate::coding::decode_buf(&mut folded.as_slice(), Version::Lite05, Subscribe::decode_msg).unwrap();
+		assert_ne!(explicit, latest);
+		let got = crate::coding::decode_buf(&mut latest.as_slice(), Version::Lite05, Subscribe::decode_msg).unwrap();
 		assert_eq!(got.start_group, None);
 	}
 

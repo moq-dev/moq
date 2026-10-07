@@ -139,9 +139,14 @@ export interface Subscription {
 	 * The lowest group the publisher may deliver (a floor), or omit for none.
 	 *
 	 * A floor, not a request: only {@link maxAge} asks for data, and the floor bounds how
-	 * far back it may reach. Omitting it and a floor of 0 mean the same thing, and a floor
-	 * above the live edge simply waits there (a resumed subscription naming where it left
-	 * off).
+	 * far back it may reach. Omitting it joins where the publisher starts: the first group
+	 * served becomes the floor, so a group created below it is not delivered. A floor of 0
+	 * is explicit, and a later group at or above it is still delivered while {@link maxAge}
+	 * considers it fresh. A floor above the live edge simply waits there (a resumed
+	 * subscription naming where it left off).
+	 *
+	 * On lite-06 and later the wire's 0 is group 0, so an omitted floor and a floor of 0
+	 * are one subscription once they are encoded.
 	 */
 	groups?: Groups;
 }
@@ -174,15 +179,22 @@ function combineSubscriptions(states: Iterable<TrackState>): Subscription | unde
 		combined.priority = Math.max(combined.priority ?? 0, subscription.priority ?? 0);
 		combined.maxAge = Milli(Math.max(combined.maxAge ?? Milli.zero, subscription.maxAge ?? Milli.zero));
 
-		// A floor only restricts, so a subscriber without one clears the aggregate:
-		// its budget may reach below any floor the others set.
+		// An omitted floor joins where the publisher starts. It does not clear an explicit
+		// floor: the loosest explicit one wins, and each subscriber's cursor still filters
+		// what it reads.
 		const a = groupBounds(combined.groups ?? {});
 		const b = groupBounds(subscription.groups ?? {});
+		const aStart = combined.groups?.start;
+		const bStart = subscription.groups?.start;
 		combined.groups = {
 			start:
-				combined.groups?.start === undefined || subscription.groups?.start === undefined
-					? undefined
-					: { included: Math.min(a.start, b.start) },
+				aStart === undefined
+					? bStart === undefined
+						? undefined
+						: { included: b.start }
+					: bStart === undefined
+						? { included: a.start }
+						: { included: Math.min(a.start, b.start) },
 			end: a.end === undefined || b.end === undefined ? undefined : { excluded: Math.max(a.end, b.end) },
 		};
 	}

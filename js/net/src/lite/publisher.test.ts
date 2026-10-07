@@ -643,9 +643,9 @@ test("lite draft-05: a late-arriving older group is still served", async () => {
 	}
 });
 
-// SUBSCRIBE_START promises nothing below the announced sequence will be delivered, so
-// the floor is pinned there: a straggler below the first served group is dropped even
-// though arrival-order serving would otherwise surface it.
+// An unfloored pre-06 subscribe joins at the publisher's start. SUBSCRIBE_START makes
+// that group the floor: a straggler below it is dropped even though arrival-order
+// serving would otherwise surface it.
 test("lite draft-05: a straggler below the announced start group is not served", async () => {
 	const sub = await servedSubscription();
 	try {
@@ -662,6 +662,39 @@ test("lite draft-05: a straggler below the announced start group is not served",
 		sub.serve(1);
 		sub.serve(3);
 		expect(await sub.servedSequence()).toBe(3);
+	} finally {
+		await sub.close();
+	}
+});
+
+// An explicit floor stays where it was named. SUBSCRIBE_START still reports the first
+// served group, and a later group at or above the floor is delivered.
+test("lite draft-05: an explicit floor still serves a group below the first one", async () => {
+	const sub = await servedSubscription({ startGroup: 0 });
+	try {
+		sub.serve(2);
+		expect(await sub.servedSequence()).toBe(2);
+
+		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_05);
+		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
+		expect(resp.start.group).toBe(2);
+
+		sub.serve(0);
+		expect(await sub.servedSequence()).toBe(0);
+	} finally {
+		await sub.close();
+	}
+});
+
+// Lite-06 encodes a floor of group 0 as 0, including a subscribe that omitted Group Start.
+// That is a floor, so a later group 0 is still served.
+test("lite draft-06: an omitted group start still serves a group below the first one", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06 });
+	try {
+		sub.serve(2);
+		expect(await sub.servedSequence()).toBe(2);
+		sub.serve(0);
+		expect(await sub.servedSequence()).toBe(0);
 	} finally {
 		await sub.close();
 	}
@@ -708,8 +741,9 @@ test("lite draft-06: a queued floor update applies before the next group pop", a
 		await replayUpdate({ priority: 0, startGroup: 2 }).encode(sub.client.writer, Version.DRAFT_06);
 		sub.serve(2);
 		await flush();
-		expect(ranges).toHaveBeenCalledTimes(1);
-		expect(lastGroups(ranges)).toEqual({ start: { included: 0 }, end: undefined });
+		// Draft-06 group 0 is a floor, so the first group does not raise the cursor.
+		// The queued update is still waiting on the parked write.
+		expect(ranges).not.toHaveBeenCalled();
 
 		sub.release();
 
@@ -760,8 +794,9 @@ test("lite draft-06: a queued frame floor applies before the next group pop", as
 
 		await replayUpdate({ priority: 0, startGroup: 1, startFrame: 2 }).encode(sub.client.writer, Version.DRAFT_06);
 		await flush();
-		expect(ranges).toHaveBeenCalledTimes(1);
-		expect(lastGroups(ranges)).toEqual({ start: { included: 0 }, end: undefined });
+		// Draft-06 group 0 is a floor, so serving the first group does not move the cursor.
+		// The queued update is still waiting on the parked write.
+		expect(ranges).not.toHaveBeenCalled();
 
 		sub.release();
 

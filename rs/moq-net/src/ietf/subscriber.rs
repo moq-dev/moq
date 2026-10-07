@@ -1766,7 +1766,8 @@ where
 		let subscription = target.subscription();
 		let start = subscription.as_ref().and_then(|s| s.start);
 		// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest.
-		let live = start.is_none();
+		// A floor at group 0 is that same join on pre-draft-20; see [`subscribe_join`].
+		let live = joins_live(start, self.version);
 		let join = match subscribe_join(
 			subscription.as_ref().and_then(|s| s.start),
 			subscription.as_ref().and_then(|s| s.end),
@@ -6664,6 +6665,19 @@ struct Join {
 	fetch: Option<JoiningFetch>,
 }
 
+/// Whether `start` joins at the publisher's live edge.
+///
+/// An absent floor does. So does a floor at the first frame of group 0 on a pre-draft-20
+/// session: that draft's absolute fetch names only group 0, and the current group's head
+/// would otherwise arrive on neither stream. Draft-20 spells group 0 as an unfiltered
+/// subscription, which keeps its own start.
+fn joins_live(start: Option<track::Position>, version: Version) -> bool {
+	if Filter::is_draft20(version) {
+		return start.is_none();
+	}
+	matches!(start, None | Some(track::Position { group: 0, frame: 0 }))
+}
+
 /// What a moq-lite subscription's group range asks for on the wire.
 ///
 /// moq-lite joins a track at the *start* of the current group, which is a decodable point.
@@ -6674,7 +6688,9 @@ struct Join {
 ///
 /// Earlier drafts have no fill parameter. Every subscription is Largest Object, followed
 /// by a joining FETCH: relative at offset 0 for a live join, absolute at the requested
-/// group for an explicit group-aligned and unbounded start. A frame-level start or a
+/// group for an explicit group-aligned and unbounded start. A floor at the first frame
+/// of group 0 excludes nothing, so it uses the live join: an absolute fetch of group 0
+/// would leave the current group's head on neither stream. A frame-level start or a
 /// bounded end has no joining-FETCH spelling, so those shapes are refused rather than
 /// rounded down or left open.
 ///
@@ -6695,7 +6711,7 @@ fn subscribe_join(
 			filter: Filter::NextObject,
 			fill: None,
 			fetch: Some(match start {
-				None => JoiningFetch::Relative { group_offset: 0 },
+				None | Some(track::Position { group: 0, frame: 0 }) => JoiningFetch::Relative { group_offset: 0 },
 				Some(start) => JoiningFetch::Absolute { group_id: start.group },
 			}),
 		});
@@ -6902,6 +6918,19 @@ mod filter_tests {
 					fill: None,
 					fetch: Some(JoiningFetch::Relative { group_offset: 0 }),
 				},
+				"{version}"
+			);
+		}
+	}
+
+	/// A floor at group 0 excludes no group, so the join is the live one. Fetching only
+	/// group 0 would drop the head of whichever group is current.
+	#[test]
+	fn older_drafts_join_live_at_group_zero() {
+		for version in JOINING_DRAFTS {
+			assert_eq!(
+				subscribe_join(Some(track::Position::group(0)), None, version).unwrap(),
+				subscribe_join(None, None, version).unwrap(),
 				"{version}"
 			);
 		}

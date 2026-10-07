@@ -166,8 +166,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 	})();
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	// A floor of 1, not 0: a pre-06 wire folds a vacuous floor of 0 back to absent, since
-	// its encoding of group 0 means "replay from the beginning" instead.
+	// A floor of group 1, a concrete group on every draft.
 	const subscriber = remote.track("video").subscribe({
 		priority: 3,
 		maxAge: Milli(250),
@@ -225,8 +224,7 @@ test("integration: lite carries a fractional maxAge as a whole millisecond", asy
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	// A varint cannot encode 38.75, so an unrounded value fails the SUBSCRIBE outright and
-	// nothing resubscribes. The publisher must see the budget rounded up instead. A floor
-	// of 1, not 0: a pre-06 wire folds a vacuous floor of 0 back to absent.
+	// nothing resubscribes. The publisher must see the budget rounded up instead.
 	const subscriber = remote.track("video").subscribe({ maxAge: Milli(38.75), groups: { start: { included: 1 } } });
 
 	// A failed subscribe never reaches the publisher, so race its closure to report the

@@ -359,6 +359,18 @@ test("multiple subscriber options aggregate like Rust", async () => {
 	expect(await none).toBeUndefined();
 });
 
+test("an omitted floor leaves another subscriber's floor in place", () => {
+	const producer = new TrackProducer("test");
+	producer.subscribe({ groups: { start: { included: 10 } } });
+	producer.subscribe({});
+	expect(producer.subscription.peek()?.groups?.start).toEqual({ included: 10 });
+
+	const unfloored = new TrackProducer("test");
+	unfloored.subscribe({});
+	unfloored.subscribe({});
+	expect(unfloored.subscription.peek()?.groups?.start).toBeUndefined();
+});
+
 test("the producer aggregate is clamped without changing subscriber options", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe({ maxAge: Milli(10_000) });

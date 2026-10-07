@@ -1251,7 +1251,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 		let subscription = crate::track::Subscription {
 			priority: msg.priority,
 			max_age: serving_max_age(shared.version, msg.max_age),
-			..Bounds::from(&msg).positions()
+			..Bounds::from(&msg).subscription(shared.version)
 		};
 
 		// One subscriber for the whole subscription: the run loop polls its groups and its
@@ -1596,10 +1596,9 @@ mod test {
 		assert_eq!(drain(&mut declared), vec![0, 1, 2]);
 	}
 
-	/// The run_track contract behind SUBSCRIBE_OK's implicit drop: once the first
-	/// served group resolves the start, the cursor floor rises to it, so a lower
-	/// group arriving late (unordered delivery) is never served after the range
-	/// was declared dropped.
+	/// An unfloored join adopts the first served group: the cursor rises to it, so a
+	/// group created below it is not served. An explicit floor does not; see
+	/// [`explicit_floor_delivers_a_late_lower_group`].
 	#[moq_net_sim::test]
 	async fn start_floor_suppresses_late_lower_arrivals() {
 		use futures::FutureExt;
@@ -1632,6 +1631,39 @@ mod test {
 			recv_next(&mut subscriber, false, false).now_or_never().is_none(),
 			"a group below the resolved start must be suppressed"
 		);
+	}
+
+	/// The explicit-floor twin of [`start_floor_suppresses_late_lower_arrivals`].
+	/// The subscription named group 0, so group 5 is still inside the floor when
+	/// it is created after group 7.
+	#[moq_net_sim::test]
+	async fn explicit_floor_delivers_a_late_lower_group() {
+		let mut producer = track_producer("test");
+		let mut subscriber = producer.subscribe(
+			track::Subscription::default()
+				.with_start(track::Position::group(0))
+				.with_max_age(std::time::Duration::from_secs(60)),
+		);
+
+		let write = |producer: &mut track::Producer, sequence: u64| {
+			let mut group = producer.create_group(crate::group::Info { sequence }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(1).unwrap(), b"x".to_vec())
+				.unwrap();
+			group.finish().unwrap();
+		};
+
+		write(&mut producer, 7);
+		match recv_next(&mut subscriber, false, false).await.unwrap() {
+			Recv::Group(group) => assert_eq!(group.sequence, 7),
+			_ => panic!("expected the first group"),
+		}
+
+		write(&mut producer, 5);
+		match recv_next(&mut subscriber, false, false).await.unwrap() {
+			Recv::Group(group) => assert_eq!(group.sequence, 5),
+			_ => panic!("expected the late group above the floor"),
+		}
 	}
 
 	#[moq_net_sim::test]
@@ -2195,6 +2227,20 @@ impl Bounds {
 		sub
 	}
 
+	/// The range to store on the serving track.
+	///
+	/// Lite-06 encodes an omitted floor as 0, and that 0 is group 0. Store it as an
+	/// explicit floor so it widens a higher resume instead of leaving that resume in
+	/// place: a fresh reader still receives a finished group the resume skipped. A
+	/// pre-06 absent start stays absent, because those drafts join at the latest group.
+	fn subscription(&self, version: Version) -> crate::track::Subscription {
+		let mut sub = self.positions();
+		if version.resolves_start() && sub.start.is_none() {
+			sub.start = Some(track::Position::group(0));
+		}
+		sub
+	}
+
 	/// The group to apply a frame offset to and the offset itself, or `None` when
 	/// delivery starts on a group boundary.
 	fn start_frame(&self) -> Option<(u64, u64)> {
@@ -2397,7 +2443,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		let _ = self.track.update(crate::track::Subscription {
 			priority: upd.priority,
 			max_age: serving_max_age(self.ctx.version, upd.max_age),
-			..bounds.positions()
+			..bounds.subscription(self.ctx.version)
 		});
 		// An explicit start moves the read cursor. Lite-06+ encodes an absent
 		// start as no floor, so a subscription that had one above group 0 has to
@@ -2568,12 +2614,19 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			group: start,
 			largest,
 		}))?;
-		// SUBSCRIBE_START is an implicit drop of everything below the resolved start (the
-		// subscriber records it as a permanent miss), so a lower group arriving late must
-		// not be served after all. A widening SUBSCRIBE_UPDATE re-lowers the floor,
-		// renegotiating the resolved start along with the demand. Raised, not assigned: an
-		// update that landed while the group was held may already have raised it past.
-		self.track.raise_start_to(start);
+		// SUBSCRIBE_START names the first group served now. Groups already skipped between
+		// the requested floor and this group stay unavailable. A later group at or above an
+		// explicit floor, still inside the subscriber's max age, is delivered, so the cursor
+		// stays at that floor.
+		//
+		// A pre-06 subscription that named no group is the exception: those drafts define an
+		// absent Group Start as the latest group, and the first group served becomes the
+		// floor. Lite-06 encodes a floor of group 0 as 0, which decodes as no named floor;
+		// that 0 is group 0, so it is not pinned. Raised, not assigned: an update that
+		// landed while the group was held may already have raised it past.
+		if self.track.subscription().start.is_none() && !self.ctx.version.resolves_start() {
+			self.track.raise_start_to(start);
+		}
 		self.serve(group);
 		Ok(())
 	}
