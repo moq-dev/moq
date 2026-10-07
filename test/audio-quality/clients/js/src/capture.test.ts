@@ -76,15 +76,15 @@ test("the observer shares playback demand and closes without ending playback", a
 			numberOfChannels: 1,
 			container: { kind: "legacy" },
 		} as Catalog.AudioConfig),
-		maxAge: new Signal(Time.Milli(250)),
+		maxDelay: new Signal(Time.Milli(250)),
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
-		expect(track.subscription.peek()).toMatchObject({ priority: Catalog.PRIORITY.audio, maxAge: 250 });
+		expect(track.subscription.peek()).toMatchObject({ priority: Catalog.PRIORITY.audio, maxDelay: 250 });
 		const player = published
 			.consume()
 			.track("audio")
-			.subscribe({ priority: Catalog.PRIORITY.audio, maxAge: Time.Milli(250) });
+			.subscribe({ priority: Catalog.PRIORITY.audio, maxDelay: Time.Milli(250) });
 		await capture.close();
 		expect(player.closed.peek()).toBeUndefined();
 		player.close();
@@ -113,7 +113,7 @@ async function captureGroupEnd(end: (group: Group.Producer) => void): Promise<st
 			numberOfChannels: 1,
 			container: { kind: "legacy" },
 		} as Catalog.AudioConfig),
-		maxAge: new Signal(Time.Milli(250)),
+		maxDelay: new Signal(Time.Milli(250)),
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
