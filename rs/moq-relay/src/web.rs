@@ -964,7 +964,7 @@ async fn serve_fetch(
 			Err(
 				moq_net::Error::NotFound
 				| moq_net::Error::NotFetchable
-				| moq_net::Error::Stream(moq_net::StreamError::NotFound),
+				| moq_net::Error::Stream(moq_net::StreamError::NotFound | moq_net::StreamError::NotFetchable),
 			) => {
 				return Err(StatusCode::NOT_FOUND);
 			}

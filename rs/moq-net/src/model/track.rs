@@ -516,6 +516,11 @@ impl TrackState {
 		self.datagram_offset + self.datagrams.partition_point(|(pushed, _)| *pushed < opened)
 	}
 
+	/// Whether `sequence` was sent as a datagram still in the send buffer.
+	fn holds_datagram(&self, sequence: u64) -> bool {
+		self.datagrams.iter().any(|(_, datagram)| datagram.sequence == sequence)
+	}
+
 	/// Push a datagram, dropping the oldest when the send buffer is full.
 	fn push_datagram(&mut self, datagram: Datagram) {
 		if self.datagrams.len() == MAX_DATAGRAMS {
@@ -2729,8 +2734,9 @@ impl Consumer {
 	/// or `group::Fetch::default()`.
 	///
 	/// The returned future resolves to [`Error::NotFound`] when the group can never be served
-	/// (past the final sequence, or no [`Dynamic`] on the track), the handler's rejection
-	/// (a relay's upstream miss is [`StreamError::NotFound`](crate::StreamError::NotFound)),
+	/// (past the final sequence, or no [`Dynamic`] on the track), [`Error::NotFetchable`]
+	/// instead when this track sent the sequence as a datagram still buffered, the handler's
+	/// rejection (a relay's upstream miss is [`StreamError::NotFound`](crate::StreamError::NotFound)),
 	/// or the track's abort error if it's already closed. Concurrent fetches for the same sequence coalesce onto one
 	/// handler request.
 	pub fn fetch_group(&self, sequence: u64, options: impl Into<Option<group::Fetch>>) -> kio::Pending<Fetching> {
@@ -3199,11 +3205,15 @@ impl kio::Task for Fetching {
 		let Some(result) = result else {
 			// Never queued: no handler existed when the fetch was made. Fail fast while
 			// that's still true; a handler that appeared since may yet fill the cache.
+			// A sequence this track sent as a datagram says so, rather than a plain miss.
 			return match fetch.poll(waiter, |fetch| match fetch.has_handlers() {
 				false => Poll::Ready(()),
 				true => Poll::Pending,
 			}) {
-				Poll::Ready(_guard) => Poll::Ready(Err(Error::NotFound)),
+				Poll::Ready(_guard) => Poll::Ready(Err(match state.read().holds_datagram(sequence) {
+					true => Error::NotFetchable,
+					false => Error::NotFound,
+				})),
 				Poll::Pending => Poll::Pending,
 			};
 		};
@@ -4823,19 +4833,30 @@ mod test {
 		}
 	}
 
-	/// A fetch never serves a datagram group: it is answered like a group that does not
-	/// exist, whether or not a group followed it.
+	/// A fetch never serves a datagram group, and says so rather than reporting a plain
+	/// miss, whether or not a group followed it.
 	#[test]
 	fn a_datagram_group_is_not_fetchable() {
 		let mut producer = track_producer("test", None);
 		let consumer = producer.consume();
 		let _subscriber = producer.subscribe(None);
 		let sequence = producer.append_datagram(Timestamp::ZERO, &b"x"[..]).unwrap();
-		let fetch = || consumer.fetch_group(sequence, None).now_or_never();
-		assert!(matches!(fetch(), Some(Err(Error::NotFound))), "the newest sequence");
+		let fetch = |sequence| consumer.fetch_group(sequence, None).now_or_never();
+		assert!(
+			matches!(fetch(sequence), Some(Err(Error::NotFetchable))),
+			"the newest sequence"
+		);
 
 		producer.append_group().unwrap();
-		assert!(matches!(fetch(), Some(Err(Error::NotFound))), "below a newer group");
+		assert!(
+			matches!(fetch(sequence), Some(Err(Error::NotFetchable))),
+			"below a newer group"
+		);
+		// A sequence that was never a datagram is a plain miss.
+		assert!(
+			matches!(fetch(sequence + 2), Some(Err(Error::NotFound))),
+			"a missing group"
+		);
 	}
 
 	/// The subscription's floor and cap bound datagrams as they bound groups. The datagrams

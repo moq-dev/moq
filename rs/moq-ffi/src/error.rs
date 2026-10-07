@@ -136,7 +136,8 @@ fn stream_kind(err: &moq_net::StreamError) -> MoqProtocolKind {
 		moq_net::StreamError::GoingAway => MoqProtocolKind::GoingAway,
 		moq_net::StreamError::TooFarBehind => MoqProtocolKind::TooFarBehind,
 		moq_net::StreamError::MalformedTrack => MoqProtocolKind::MalformedTrack,
-		moq_net::StreamError::NotFound => MoqProtocolKind::NotFound,
+		// A datagram reached by a FETCH is, to a binding, a miss like any other.
+		moq_net::StreamError::NotFound | moq_net::StreamError::NotFetchable => MoqProtocolKind::NotFound,
 		moq_net::StreamError::Unroutable => MoqProtocolKind::Unroutable,
 		moq_net::StreamError::Old => MoqProtocolKind::Old,
 		moq_net::StreamError::Evicted => MoqProtocolKind::Evicted,

@@ -289,12 +289,12 @@ pub(crate) mod request {
 				return TIMEOUT;
 			}
 			Error::Unsupported | Error::Version | Error::Session(SessionError::Version) => return NOT_SUPPORTED,
-			// A datagram is never cached, so a FETCH reaching one is answered like a group that
-			// is not there, which is also what our own publisher sends. NOT_SUPPORTED would
-			// claim the peer does not implement FETCH at all.
-			Error::NotFound | Error::NotFetchable | Error::Stream(StreamError::NotFound) => {
-				does_not_exist(kind, version)
-			}
+			// moq-transport has no code for a FETCH that reached a datagram, which is never
+			// cached, so it is a group that is not there. NOT_SUPPORTED would claim the peer
+			// does not implement FETCH at all.
+			Error::NotFound
+			| Error::NotFetchable
+			| Error::Stream(StreamError::NotFound | StreamError::NotFetchable) => does_not_exist(kind, version),
 			Error::InvalidRange => invalid_range(kind, version),
 			Error::InvalidJoiningRequestId => invalid_joining_request_id(kind, version),
 			// A path with no route is one we will not carry. A subscriber that asked for it
@@ -406,6 +406,11 @@ pub(crate) mod request {
 			// NOT_SUPPORTED would say the endpoint has no FETCH at all.
 			assert_eq!(to_code(&Error::NotFetchable, Kind::Fetch, Version::Draft14), 0x4);
 			assert_eq!(to_code(&Error::NotFetchable, Kind::Fetch, Version::Draft20), 0x10);
+			// Including a lite-07 upstream's NOT_FETCHABLE, bridged by a relay.
+			assert_eq!(
+				to_code(&Error::Stream(StreamError::NotFetchable), Kind::Fetch, Version::Draft20),
+				0x10
+			);
 		}
 
 		/// Draft-14 gives 0x4 to UNINTERESTED on the requests that offer content and to
@@ -706,6 +711,7 @@ mod tests {
 	fn unregistered_conditions_are_internal() {
 		for err in [
 			StreamError::NotFound,
+			StreamError::NotFetchable,
 			StreamError::Unroutable,
 			StreamError::Old,
 			StreamError::Evicted,
@@ -739,6 +745,7 @@ mod tests {
 			0x37,
 			0x38,
 			0x39,
+			0x3a,
 			64 + 7,
 		] {
 			assert_eq!(from_stream_code(code, Version::Draft20), StreamError::Unknown(code));
@@ -751,7 +758,7 @@ mod tests {
 
 	/// Every stream error this crate can hold, so the conformance check below covers the
 	/// whole space rather than the variants someone remembered. A new variant belongs here.
-	const EVERY_ERROR: [StreamError; 18] = [
+	const EVERY_ERROR: [StreamError; 19] = [
 		StreamError::Session(SessionError::Cancel),
 		StreamError::Internal,
 		StreamError::Cancel,
@@ -761,6 +768,7 @@ mod tests {
 		StreamError::TooFarBehind,
 		StreamError::MalformedTrack,
 		StreamError::NotFound,
+		StreamError::NotFetchable,
 		StreamError::Unroutable,
 		StreamError::Old,
 		StreamError::Evicted,

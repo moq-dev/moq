@@ -1051,7 +1051,10 @@ fn is_cache_miss(err: &moq_net::Error) -> bool {
 			| moq_net::Error::Old
 			| moq_net::Error::Evicted
 			| moq_net::Error::Stream(
-				moq_net::StreamError::NotFound | moq_net::StreamError::Old | moq_net::StreamError::Evicted
+				moq_net::StreamError::NotFound
+					| moq_net::StreamError::NotFetchable
+					| moq_net::StreamError::Old
+					| moq_net::StreamError::Evicted
 			)
 	)
 }
