@@ -4904,6 +4904,7 @@ dependencies = [
 name = "moq-stats"
 version = "0.2.12"
 dependencies = [
+ "criterion",
  "futures",
  "moq-json",
  "moq-net",
@@ -5137,9 +5138,9 @@ dependencies = [
 
 [[package]]
 name = "mp4-atom"
-version = "0.16.0"
+version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adf4a16eebb3eb223ad0f2d16f37ad276736cec3a74538954e5ce0aec2268467"
+checksum = "b6f6638ef4f165c7eb423d7ab9666fff423c8ab53f0dc67ec523aa49530729a7"
 dependencies = [
  "bytes",
  "derive_more 2.1.1",

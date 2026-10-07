@@ -22,7 +22,7 @@ Callers in the repository (js/hang catalog, js/publish, js/room) pass their
 clock's now explicitly. Update `doc/lib/js/{json,flate,net}.md`.
 
 Decided (2026-10-05, types settled 2026-10-06): timedness is per track, as
-the [untimed model](/quest/m1/untimed-model.md) decided and `@moq/net`
+the untimed model ([#4822](https://github.com/moq-dev/moq/pull/4822)) decided and `@moq/net`
 mirrors: `timescale` is optional, frames keep an optional timestamp, and a
 frame whose timedness doesn't match its track is refused. An absent
 `at` therefore belongs on an untimed track. `@moq/net` already refuses a
