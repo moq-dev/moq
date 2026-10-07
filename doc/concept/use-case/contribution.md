@@ -1,6 +1,6 @@
 ---
 title: MoQ vs RTMP/SRT
-description: Pull-based contribution, on-demand encoding, and redundant ingest
+description: Pull-based contribution, on-demand encoding, and restarts that take the name
 ---
 
 # MoQ vs RTMP/SRT
@@ -22,14 +22,14 @@ That matters for long-tail content: hundreds of security cameras uploading
 a captions track backed by an expensive model runs only while someone has
 captions on.
 
-## Redundant ingest for free
+## Restarts take the name
 
-Because tracks are only pulled where they're needed, a publisher can open
-several connections that might be used. Primary and secondary ingest is two
-connections and no business logic: subscriptions ride the primary until it
-fails, then move. Two encoders publishing the same broadcast name are
-interchangeable sources that relays fail over between mid-group; see
-[redundant publishers](/bin/cli#redundant-publishers).
+A publisher announces an [epoch](/concept/moq-lite#publisher-epochs) naming the
+instance behind a broadcast. Replicas of that instance, announced with the same
+epoch, fail over mid-group. A restart mints a new epoch, and viewers switch to
+it instead of stitching its group numbers onto the old run. `moq` and
+`moqsink` mint a fresh epoch per run. A second process publishing the same name
+is a newer epoch, so viewers move to it.
 
 ## One protocol both ways
 

@@ -14,7 +14,7 @@ browser can decode it directly. The spec is
 broadcasts live at `<opaque>`, derived from the credential and a semantic name
 such as `foo.hang`, and the [epoch](/concept/moq-lite#publisher-epochs) on
 their route identifies each publisher run. The path exposes no format or protection marker; the
-payloads follow [moq-e2ee](/draft/moq-e2ee).
+payloads follow [moq-e2ee](/draft/moq-e2ee). See [Encryption](#encryption).
 
 ## Catalog
 
@@ -103,6 +103,10 @@ document would silently discard everything but the last payload:
 - `snapshot` is lossy. Each group supersedes the previous one, so a consumer reads only the newest. A JSON track may follow the first frame with merge-patch deltas.
 - `stream` is an ordered log: one payload per frame, all in a single group that is never rolled. Retention is still bounded by the group cache, and a consumer that falls behind fails the read rather than silently resuming mid-log.
 
+A sliding window, a bounded log a reader can join in the middle, is a framing
+in [`moq-json`](/lib/rs/moq-json) rather than a catalog mode. Both ends opt
+into it on a raw track.
+
 The rest is descriptive: `compression` (`deflate`, the same group-scoped
 `deflate-raw` the catalog uses), `schema` on a JSON track, `mime` on a binary
 one, `bitrate`, `jitter`, and `delay` with the same meaning as for media, plus
@@ -111,13 +115,9 @@ only from payloads stamped with their capture time on the broadcast clock. A
 consumer that doesn't recognize a `mode` or `compression` ignores that track and
 round-trips it verbatim.
 
-In Rust the catalog owns the lifetime: `catalog.json_stream(track, config)` (or
-`json_snapshot` / `binary_snapshot` / `binary_stream`) writes the entry and
-retracts it when the producer drops. Read the config from `catalog.json.tracks`
-or `catalog.binary.tracks`, then pair its name and config with
-`moq_mux::catalog::Entry::new` to subscribe. In C, `moq_publish_json_*` and
-`moq_publish_binary_*` do the same, retracting on `_finish`. In the browser, read the same map,
-subscribe by name, and hand the track to `@moq/json` or `@moq/flate`.
+The catalog entry lives as long as its producer: dropping it retracts the
+track. [`moq-json`](/lib/rs/moq-json) and [`moq-flate`](/lib/rs/moq-flate) (and
+their TypeScript twins) are what read and write the payloads.
 
 An application with its own per-track fields can list a data track in its own
 root section instead, nesting the JSON or binary config in a `config` field
@@ -159,6 +159,18 @@ independent too and typically hold about a second.
 The `description` field carries out-of-band codec setup (an `avcC` box for
 H.264). When it is absent, the parameter sets ride inline before each keyframe,
 which is what `avc3`/`hev1` tracks do. Decoders should handle both.
+
+## Encryption
+
+[moq-e2ee](/draft/moq-e2ee) encrypts groups, datagrams, and track names so a
+relay forwards ciphertext and never sees a content key. The application
+distributes the credential on its own channel. Each publisher run binds that
+credential to its [epoch](/concept/moq-lite#publisher-epochs), which derives
+the track names and keys for that run alone. A restart is a new epoch, and
+nothing from the previous one decrypts. The broadcast path is an opaque name
+derived from the credential and a semantic name such as `foo.hang`; it carries
+no format marker. `moq-e2ee` is the Rust implementation. Relays need no
+configuration to carry it.
 
 ## Your own format
 

@@ -93,34 +93,13 @@ at a group boundary and draining the WebSocket session; `Connection::transport()
 which is live. A refused or stalled QUIC session leaves the WebSocket session serving, and
 moq-lite-03 and -04, which give no sign of admission, never upgrade.
 
-The `Default::default()` above is the QUIC transport section, and the same value
-serves a dial and a listener:
-
-```rust
-let mut quic = moq_tokio::quic::Config::default();
-quic.congestion_control = Some(moq_tokio::quic::CongestionControl::Delay);
-quic.receive_window = Some(64 << 20);       // whole connection, in bytes
-quic.stream_receive_window = Some(8 << 20); // per stream
-quic.send_window = Some(32 << 20);          // unacknowledged data we may hold
-
-let client = moq_tokio::connect::Config::default().init(quic)?;
-```
-
-Unset flow-control windows keep the transport defaults, except `receive_window`,
-which defaults to 64 MiB because the transport's is unlimited. `init` errors on a
-knob the transport cannot honor rather than dropping it: iroh cannot disable
-GSO. `quic::Resolved::default()` is what an
-untouched config resolves to, so read the defaults from there. The
+The same QUIC config serves a dial and a listener: congestion control, flow
+windows, and the rest. Unset windows keep the transport defaults, except the
+connection receive window, which defaults to 64 MiB because the transport's is
+unlimited. `init` errors on a knob the transport cannot honor. The
 [relay reference](/bin/relay/config#quic) documents each field.
-
-## Connection monitoring
-
-`Connection::monitor()` returns a cloneable `moq_tokio::connection::Monitor`
-that observes the live session across reconnects without keeping the connection
-loop alive. Its `stats()` and `snapshot()` return `None` between connections;
-`connection::Snapshot` pairs transport statistics with the negotiated protocol.
-Use `presence()` for cumulative connects and disconnects, or
-`presence_changed().await` to wait for those counters to change.
+`Connection::monitor()` observes the live session across reconnects, including
+when none is up.
 
 ## WebAssembly
 
