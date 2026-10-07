@@ -1,5 +1,5 @@
-//! One rendition: playlists from its view of the broadcast timeline, segments fetched on
-//! demand.
+//! One rendition: playlists from its view of the broadcast's segments, resolved against its own
+//! timeline, and segments fetched on demand.
 
 use std::sync::{Arc, Mutex, RwLock};
 use std::task::Poll;
@@ -12,6 +12,7 @@ use moq_mux::timeline::Entry;
 use sha2::{Digest, Sha256};
 
 use super::playlist::{Segment, Snapshot};
+use super::spans::{Content, Spans};
 use super::upstream::Upstream;
 use super::{mpd, segments};
 use crate::Result;
@@ -234,9 +235,15 @@ pub struct Rendition {
 	/// The catalog's root broadcast clock: the wall anchor timings map through, after
 	/// timescale conversion. Absent when the publisher exposes none.
 	clock: Option<Clock>,
-	/// This rendition's window over the broadcast timeline, fed by the catalog watcher's
+	/// This rendition's window over the broadcast's segments, fed by the catalog watcher's
 	/// fan-out.
 	live: Arc<segments::Producer>,
+	/// This rendition's own timeline, which resolves each segment to its frames.
+	spans: Arc<Spans>,
+	/// The broadcast carrying the catalog and every timeline.
+	catalog: moq_net::broadcast::Consumer,
+	/// Feeds [`spans`](Self::spans); aborted when the rendition drops.
+	watcher: Mutex<Option<tokio::task::JoinHandle<()>>>,
 	/// The broadcast serving this rendition's media. A sibling is bound when the rendition is
 	/// created and rebound if that publisher is replaced (see [`Upstream::bind`]).
 	media: Media,
@@ -321,6 +328,9 @@ impl Rendition {
 			section,
 			clock,
 			live: Arc::new(segments::Producer::new()),
+			spans: Arc::new(Spans::new()),
+			catalog: upstream.broadcast.clone(),
+			watcher: Mutex::new(None),
 			media: Media::bind(upstream, config.broadcast.as_ref())?,
 			run: Mutex::default(),
 			building: tokio::sync::Mutex::new(()),
@@ -348,33 +358,98 @@ impl Rendition {
 			section,
 			clock,
 			live: Arc::new(segments::Producer::new()),
+			spans: Arc::new(Spans::new()),
+			catalog: upstream.broadcast.clone(),
+			watcher: Mutex::new(None),
 			media: Media::bind(upstream, config.broadcast.as_ref())?,
 			run: Mutex::default(),
 			building: tokio::sync::Mutex::new(()),
 		})
 	}
 
-	/// Feed one timeline record into this rendition's window: its own ranges (empty when the
-	/// record carries none for it, a gap), timed by the record.
-	pub(crate) fn push(&self, index: u64, entry: &Entry, discontinuity: u64, window: Duration) {
+	/// Start following this rendition's own timeline, trimmed to the listed segments.
+	///
+	/// A rendition the catalog indexes no timeline for resolves nothing but the reference's rows.
+	pub(crate) fn watch(&self) {
+		let Some(_) = self.section.timelines.get(&self.name) else {
+			self.spans.end();
+			return;
+		};
+		let watcher = tokio::spawn(watch_spans(
+			self.catalog.clone(),
+			self.section.clone(),
+			self.name.clone(),
+			self.spans.clone(),
+		));
+		*self.watcher.lock().expect("watcher lock poisoned") = Some(watcher);
+	}
+
+	/// Feed one reference timeline record into this rendition's window as a segment. With no
+	/// `window`, only source timeline pops trim it.
+	pub(crate) fn push(
+		&self,
+		index: u64,
+		entry: &Entry,
+		reference: &segments::Reference,
+		discontinuity: u64,
+		window: Option<Duration>,
+	) {
 		if !self.media.admits(&self.live) {
 			return;
 		}
 		let row = segments::Row {
 			index,
-			segment: entry.segment,
-			ranges: entry.tracks.get(&self.name).cloned().unwrap_or_default(),
+			segment: entry.sequence,
+			reference: reference.clone(),
+			frames: entry.start..entry.end,
+			keyframe: entry.keyframe,
 			duration: entry.duration,
 			pts: entry.pts,
-			end: Duration::from(entry.pts) + entry.duration,
+			end: entry.end_time(),
 			discontinuity,
 		};
 		self.live.push(row, window);
+		self.trim();
+	}
+
+	/// Drop this rendition's own records that no listed segment can resolve to anymore.
+	fn trim(&self) {
+		if let Some(oldest) = self.live.oldest() {
+			self.spans.trim(oldest);
+		}
+	}
+
+	/// What `row` holds on this rendition: the reference serves its own record, and every other
+	/// rendition resolves the span against its own timeline.
+	fn resolve(&self, row: &segments::Row) -> Content {
+		if self.is(&row.reference) {
+			return Content::Frames {
+				ranges: vec![row.frames.clone()],
+				filter: None,
+			};
+		}
+		self.spans
+			.resolve(self.kind == Kind::Video, Duration::from(row.pts)..row.end)
+	}
+
+	/// Poll until `row` resolves on this rendition.
+	pub(crate) fn poll_resolved(&self, waiter: &kio::Waiter, row: &segments::Row) -> Poll<()> {
+		if self.is(&row.reference) {
+			return Poll::Ready(());
+		}
+		self.spans
+			.poll_resolved(waiter, self.kind == Kind::Video, Duration::from(row.pts)..row.end)
+	}
+
+	/// Whether this rendition is `reference`.
+	fn is(&self, reference: &(Kind, String)) -> bool {
+		reference.0 == self.kind && reference.1 == self.name
 	}
 
 	/// Remove source timeline records in `range` from this rendition's window.
 	pub(crate) fn pop(&self, range: std::ops::Range<u64>) {
 		self.live.pop(range);
+		self.trim();
 	}
 
 	/// Clear rows that can no longer be followed by a consecutive source timeline record.
@@ -387,12 +462,15 @@ impl Rendition {
 		self.run.lock().expect("run lock poisoned").generation = generation;
 	}
 
-	/// Start a new publisher run labeled `generation`, dropping the previous run's rows and init.
+	/// Start a new publisher run labeled `generation`, dropping the previous run's rows, records,
+	/// and init.
 	///
 	/// The rows go first: renders read the run before the rows, so one that sees the new label
 	/// never lists the old run's segments under it.
 	pub(crate) fn restart(&self, generation: Option<Arc<str>>) {
 		self.live.clear();
+		// The old run's own records would bootstrap an inline init from its media.
+		self.spans.clear();
 		let mut run = self.run.lock().expect("run lock poisoned");
 		*run = Run {
 			generation,
@@ -411,7 +489,7 @@ impl Rendition {
 		self.run().generation
 	}
 
-	/// Mark this rendition's window ended (the timeline finished cleanly).
+	/// Mark this rendition's window ended (the timeline finished or failed).
 	pub(crate) fn end(&self) {
 		self.live.end();
 	}
@@ -493,52 +571,61 @@ impl Rendition {
 		self.media.sync(&self.live);
 		let window = self.live.window();
 
-		// EXT-X-TARGETDURATION starts from the catalog's declared bound when the publisher
-		// offered one: it knows its segment duration up front, so the first playlist already
-		// carries the real value instead of a guess grown from observation. Rounded up, since
-		// HLS wants whole seconds and the advertised value must never understate the bound.
-		let declared = self
-			.section
-			.duration_max
-			.map(|max| max.div_ceil((self.section.timescale as u64).max(1)))
-			.unwrap_or(0);
-
-		// Most publishers can't promise a bound (a real-time GOP can be minutes long), and even
-		// a declared one is only a promise about content the publisher controls. HLS requires
-		// EXT-X-TARGETDURATION to be at least every EXTINF, so cover the window either way.
-		let observed = window
+		// HLS requires EXT-X-TARGETDURATION to be at least every EXTINF, rounded up to whole
+		// seconds. The catalog's `durationMax` is only the ceiling a record is split at, far above a
+		// typical GOP, and a target that large would push every player's live edge back by it.
+		let target_duration = window
 			.segments
 			.iter()
 			.map(|s| s.duration.as_secs_f64().ceil() as u64)
 			.max()
-			.unwrap_or(0);
-		let target_duration = declared.max(observed).max(1);
+			.unwrap_or(0)
+			.max(1);
 
 		let program_date_time = window.segments.first().and_then(|first| self.wall_clock(first.pts));
 
 		let mut previous: Option<u64> = None;
-		let segments = window
-			.segments
-			.into_iter()
-			.map(|s| {
+		let segments: Vec<Segment> = self
+			.resolved(&window.segments)
+			.map(|(s, content)| {
 				let discontinuity = previous.replace(s.discontinuity).is_some_and(|p| p != s.discontinuity);
 				Segment {
 					segment: s.segment,
+					tag: segments::tag(&s.reference),
 					duration: s.duration,
-					gap: s.ranges.is_empty(),
+					gap: content == Content::Gap,
 					discontinuity,
 				}
 			})
 			.collect();
+		// A failed timeline ends this playlist at its last resolvable segment.
+		let failed = window.segments.last().is_some_and(|row| self.is_failed(row));
+		// An ended reference ends the playlist only once this rendition resolved every row, so a
+		// slower timeline's tail is listed before `EXT-X-ENDLIST` stops players polling.
+		let complete = segments.len() == window.segments.len();
 
 		Snapshot {
 			target_duration,
 			media_sequence: window.sequence,
 			segments,
-			finished: window.ended,
+			finished: (window.ended && complete) || failed,
 			program_date_time,
 			generation,
 		}
+	}
+
+	/// `rows` with what each holds, up to the first one this rendition cannot resolve yet (or
+	/// ever, once its timeline failed): a segment is listed only once its content is final.
+	fn resolved<'a>(&'a self, rows: &'a [segments::Row]) -> impl Iterator<Item = (&'a segments::Row, Content)> {
+		rows.iter()
+			.map(|row| (row, self.resolve(row)))
+			.take_while(|(_, content)| !matches!(content, Content::Pending | Content::Failed))
+	}
+
+	/// Whether this rendition's timeline failed before reaching `row`'s end, so neither it nor
+	/// any later row will resolve.
+	pub(crate) fn is_failed(&self, row: &segments::Row) -> bool {
+		self.resolve(row) == Content::Failed
 	}
 
 	/// Whether the playlist has anything to serve yet (at least one segment, or the broadcast
@@ -548,8 +635,8 @@ impl Rendition {
 		self.live.is_playable()
 	}
 
-	/// This rendition's DASH representation: its master-level metadata plus its slice of the
-	/// shared timeline as `(t, d)` pairs in the timeline's own timescale (the record values
+	/// This rendition's DASH representation: its master-level metadata plus its track's
+	/// timeline as `(t, d)` pairs in the timeline's own timescale (the record values
 	/// verbatim, so `$Time$` addressing resolves exactly). `None` until the init is known, as
 	/// for [`media_playlist`](Self::media_playlist).
 	pub(crate) fn representation(&self) -> Option<mpd::Representation> {
@@ -559,11 +646,12 @@ impl Rendition {
 		self.media.sync(&self.live);
 		let window = self.live.window();
 		let timescale = self.timescale();
-		let segments = window
-			.segments
-			.iter()
-			.filter(|row| !row.ranges.is_empty())
-			.filter_map(|row| {
+		// Static only once every row resolved here, like the playlist's `EXT-X-ENDLIST`.
+		let complete = self.resolved(&window.segments).count() == window.segments.len();
+		let segments = self
+			.resolved(&window.segments)
+			.filter(|(_, content)| *content != Content::Gap)
+			.filter_map(|(row, _)| {
 				let t = row.pts.as_scale(timescale) as u64;
 				let span = row.end.saturating_sub(row.pts.into());
 				let d = (span.as_nanos() * timescale.as_u64() as u128 / 1_000_000_000) as u64;
@@ -591,22 +679,23 @@ impl Rendition {
 			channel_count,
 			timescale: self.section.timescale.max(1),
 			segments,
-			ended: window.ended,
+			ended: (window.ended && complete) || window.segments.last().is_some_and(|row| self.is_failed(row)),
+			tag: listed_tag(&window.segments),
 			init: init.hash.clone(),
 			generation: run.generation,
 		})
 	}
 
-	/// Fetch and transmux the segment whose timeline `pts` is `time`, in the timeline's
-	/// timescale (DASH `$Time$` addressing of the same bytes [`segment`](Self::segment) serves
-	/// by aligned number).
+	/// Fetch and transmux the segment of the reference tagged `tag` whose timeline `pts` is
+	/// `time`, in the timeline's timescale (DASH `$Time$` addressing of the same bytes
+	/// [`segment`](Self::segment) serves by aligned number).
 	#[cfg_attr(not(feature = "server"), allow(dead_code))]
-	pub(crate) async fn segment_at(&self, time: u64) -> Result<Option<Bytes>> {
+	pub(crate) async fn segment_at(&self, tag: &str, time: u64) -> Result<Option<Bytes>> {
 		self.media.sync(&self.live);
-		let Some(segment) = self.live.segment_number_at(time, self.timescale()) else {
+		let Some(segment) = self.live.segment_number_at(tag, time, self.timescale()) else {
 			return Ok(None);
 		};
-		self.segment(segment).await
+		self.segment(tag, segment).await
 	}
 
 	/// The timeline's timescale; a declared 0 is clamped rather than trusted.
@@ -713,13 +802,16 @@ impl Rendition {
 		let bytes = match muxer.init()? {
 			Some(bytes) => bytes,
 			None => {
-				let Some(sequence) = self.live.latest_keyframe_group() else {
+				let reference = (self.kind, self.name.clone());
+				let latest = self.spans.latest_keyframe_group();
+				let Some(sequence) = latest.or_else(|| self.live.latest_keyframe_group(&reference)) else {
 					return Ok(None);
 				};
 				let Some((broadcast, track)) = self.track(&binding).await else {
 					return Ok(None);
 				};
-				let Ok(mut group) = fetch(&track, sequence, &broadcast).await? else {
+				let Ok(mut group) = fetch(&track, hang::timeline::Position::group(sequence), None, &broadcast).await?
+				else {
 					return Ok(None);
 				};
 				// A cache eviction mid-read leaves the init unbuildable for now, not an error.
@@ -735,31 +827,37 @@ impl Rendition {
 		Ok(Some(self.cache_init(run.epoch, bytes)))
 	}
 
-	/// Fetch and transmux the segment numbered `segment`.
+	/// Fetch and transmux the segment numbered `segment` by the reference tagged `tag` (the
+	/// `seg/{tag}.{segment}.m4s` URI).
 	///
-	/// Fetches every group the segment's ranges cover (an audio segment packs many short
-	/// groups) and encodes them as a single CMAF fragment. `None` when the segment isn't in
-	/// the playlist window, is a gap for this rendition, or its groups already left the relay
-	/// cache.
-	pub async fn segment(&self, segment: u64) -> Result<Option<Bytes>> {
-		let binding = self.media.sync(&self.live);
-		// Read the run before the rows (see `restart`), so an init decoded from them is never
-		// cached for a run that started while they were being fetched.
-		let run = self.run();
-		let Some(ranges) = self.live.segment_ranges(segment) else {
+	/// Fetches every frame the segment resolves to on this rendition (an audio segment packs many
+	/// short groups) and encodes them as a single CMAF fragment. `None` when the segment isn't in
+	/// the playlist window, is a gap or not yet resolved for this rendition, or its groups already
+	/// left the relay cache.
+	pub async fn segment(&self, tag: &str, segment: u64) -> Result<Option<Bytes>> {
+		self.media.sync(&self.live);
+		let Some(row) = self.live.row(tag, segment) else {
 			return Ok(None);
 		};
-		if ranges.is_empty() {
-			// A gap: the record says this rendition has no content for the span.
+		self.fetch(&row).await
+	}
+
+	/// Fetch and transmux `row`'s frames on this rendition; see [`segment`](Self::segment).
+	pub(crate) async fn fetch(&self, row: &segments::Row) -> Result<Option<Bytes>> {
+		let binding = self.media.sync(&self.live);
+		// Read the run before resolving the row (see `restart`), so an init decoded from its
+		// groups is never cached for a run that started while they were being fetched.
+		let run = self.run();
+		let Content::Frames { ranges, filter } = self.resolve(row) else {
 			return Ok(None);
-		}
+		};
 
 		// A segment must be served whole. If its group span exceeds the safety cap (a
 		// pathologically coarse timeline), 404 rather than silently truncating it to a segment
 		// shorter than its advertised duration.
 		let total: u64 = ranges
 			.iter()
-			.map(|r| r.end.saturating_sub(r.start).saturating_add(1))
+			.map(|range| last_group(range).saturating_sub(range.start.group).saturating_add(1))
 			.sum();
 		if total > MAX_SEGMENT_GROUPS {
 			tracing::warn!(
@@ -780,8 +878,13 @@ impl Rendition {
 		// many groups.
 		let mut frames = Vec::new();
 		for range in &ranges {
-			for sequence in range.start..=range.end {
-				let miss = match fetch(&track, sequence, &broadcast).await? {
+			for sequence in range.start.group..=last_group(range) {
+				let start = match sequence == range.start.group {
+					true => range.start,
+					false => hang::timeline::Position::group(sequence),
+				};
+				let end = (sequence == range.end.group).then_some(range.end.frame);
+				let miss = match fetch(&track, start, end, &broadcast).await? {
 					Ok(mut group) => match read_group(&mut muxer, &mut group, &broadcast).await? {
 						Ok(mut group_frames) => {
 							frames.append(&mut group_frames);
@@ -792,7 +895,7 @@ impl Rendition {
 					Err(err) => err,
 				};
 				tracing::warn!(
-					segment,
+					segment = row.segment,
 					group = sequence,
 					err = %miss,
 					"abandoning an advertised segment: a group is unavailable"
@@ -801,10 +904,14 @@ impl Rendition {
 			}
 		}
 
+		// A rendition resolved by time keeps only the frames inside the segment's span.
+		if let Some(filter) = filter {
+			frames.retain(|frame| filter.contains(&Duration::from(frame.timestamp)));
+		}
 		if frames.is_empty() {
 			return Ok(None);
 		}
-		let fragment = muxer.fragment(segment as u32, &frames)?;
+		let fragment = muxer.fragment(row.segment as u32, &frames)?;
 		// Inline codec metadata was already decoded from these completed groups.
 		// Reuse it instead of fetching a newer, possibly unfinished timeline tail.
 		if let Some(bytes) = muxer.init()? {
@@ -814,15 +921,89 @@ impl Rendition {
 	}
 }
 
+/// The tag of the reference numbering `rows`, empty when none are listed. A reference switch
+/// clears every row, so the listed rows share one.
+fn listed_tag(rows: &[segments::Row]) -> String {
+	rows.first()
+		.map(|row| segments::tag(&row.reference))
+		.unwrap_or_default()
+}
+
+#[cfg(test)]
+impl Rendition {
+	/// Fetch the listed segment numbered `segment`, under the tag its rows carry.
+	pub(crate) async fn listed_segment(&self, segment: u64) -> Result<Option<Bytes>> {
+		let tag = listed_tag(&self.live.window().segments);
+		self.segment(&tag, segment).await
+	}
+
+	/// Fetch the listed segment starting at `time`, under the tag its rows carry.
+	pub(crate) async fn listed_segment_at(&self, time: u64) -> Result<Option<Bytes>> {
+		let tag = listed_tag(&self.live.window().segments);
+		self.segment_at(&tag, time).await
+	}
+}
+
+/// The last group holding a frame of `range`.
+fn last_group(range: &std::ops::Range<hang::timeline::Position>) -> u64 {
+	match range.end.frame {
+		0 => range.end.group.saturating_sub(1),
+		_ => range.end.group,
+	}
+}
+
+/// Follow `track`'s own timeline into `spans` until it ends, then mark nothing pending.
+async fn watch_spans(broadcast: moq_net::broadcast::Consumer, section: Archive, track: String, spans: Arc<Spans>) {
+	let result: Result<()> = async {
+		let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(&broadcast, &section, &track).await?;
+		while let Some(event) = timeline.next().await? {
+			match event {
+				moq_mux::timeline::Event::Push { entry, .. } => spans.push(entry),
+				moq_mux::timeline::Event::Pop(range) => spans.pop(range),
+				moq_mux::timeline::Event::Skip(_) => spans.clear(),
+				_ => unreachable!("unknown timeline event"),
+			}
+		}
+		Ok(())
+	}
+	.await;
+	match result {
+		Ok(()) => spans.end(),
+		// Never retried (the origin already rides out transient source failures), and not
+		// papered over with gaps: the rendition's playlist ends at its last record.
+		Err(err) => {
+			tracing::error!(%track, %err, "rendition timeline failed; ending its playlist");
+			spans.fail();
+		}
+	}
+}
+
+impl Drop for Rendition {
+	fn drop(&mut self) {
+		if let Some(watcher) = self.watcher.lock().expect("watcher lock poisoned").take() {
+			watcher.abort();
+		}
+	}
+}
+
 /// Fetch one group, mapping "no longer (or not yet) servable" to the error that says so
 /// rather than a bare `None`: a caller abandoning a segment can only explain itself with it.
+///
+/// Reads from `start` and, when `end` is set, stops before that frame of the group.
 async fn fetch(
 	track: &moq_net::track::Consumer,
-	sequence: u64,
+	start: hang::timeline::Position,
+	end: Option<u64>,
 	broadcast: &moq_net::broadcast::Consumer,
 ) -> Result<std::result::Result<moq_net::group::Consumer, moq_net::Error>> {
-	match track.fetch_group(sequence, None).await {
-		Ok(group) => Ok(Ok(group)),
+	let options = moq_net::group::Fetch::default().with_frame_start(start.frame);
+	match track.fetch_group(start.group, options).await {
+		Ok(mut group) => {
+			if let Some(end) = end {
+				group.set_frames(..end);
+			}
+			Ok(Ok(group))
+		}
 		Err(err) if is_unservable(&err, broadcast) => Ok(Err(err)),
 		Err(err) => Err(err.into()),
 	}

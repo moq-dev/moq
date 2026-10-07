@@ -10,6 +10,7 @@
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type * as broadcast from "./broadcast.ts";
 import type { Drain } from "./connection/goaway.ts";
+import type * as Epoch from "./epoch.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import type { Route } from "./hop.ts";
 import type * as origin from "./origin.ts";
@@ -32,7 +33,7 @@ export interface OriginProducer {
 	accepts(prefix: Path.Valid): boolean;
 	receive(
 		prefix: Path.Valid,
-		route?: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint },
+		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint },
 	): origin.Dynamic;
 	attach(discovery: boolean): Dispose;
 	expect(): Dispose;
@@ -54,9 +55,11 @@ export interface OriginConsumer {
 	routes(path: Path.Valid): boolean;
 	readonly broadcasts: Getter<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>;
 	readonly advertised: Getter<Advertisements | undefined>;
-	/** The announced local broadcast at `path`, when it is the route peers are offered there. */
-	local(path: Path.Valid): broadcast.Consumer | undefined;
-	demand(path: Path.Valid): Promise<broadcast.Consumer | undefined>;
+	/** The announced local broadcast at `path`, when it is the route peers are offered there.
+	 * A request naming an `epoch` only matches a route serving it. */
+	local(path: Path.Valid, epoch?: Epoch.Valid): broadcast.Consumer | undefined;
+	/** Resolve `path` for serving; throws `Unroutable` when the route serves another `epoch`. */
+	demand(path: Path.Valid, epoch?: Epoch.Valid): Promise<broadcast.Consumer | undefined>;
 }
 
 /** One originated advertisement exposed to the publishing wire. */

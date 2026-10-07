@@ -19,12 +19,12 @@ and a flagged forward jump publishes break markers and carries on.
 
 Decided (maintainer, 2026-09-30):
 
-- A rewind is new content, so it is always a new broadcast at a new epoch
-  path, never a continuation of the old name. Viewers of the bare name follow
-  it through [Origin](/quest/m0/broadcast-epoch/origin.md).
+- A rewind is new content, so it is always a new broadcast at a new epoch,
+  never a continuation of the old one. Viewers follow it because the newest
+  epoch wins the path.
 - `decode` stops at the flagged rewind and reports it. The caller finishes the
   old broadcast (a clean end, not an abort, so its viewers read to its end),
-  publishes a new broadcast at a fresh epoch path, and calls
+  publishes a new broadcast at the same path, minting a fresh epoch, and calls
   `import.restart(broadcast)`. The importer carries over only the PAT/PMT
   layout and the bytes it has not consumed, so there is no wait for the next
   PSI repetition; tracks, groups, and timestamps start fresh. `ts::Programs`
@@ -43,9 +43,6 @@ connection carries both epochs. Update `doc/bin/cli.md` and `doc/bin/srt.md`.
 Public API: breaking in moq-mux, `ts::Import::decode` reports a restart
 and `restart` is new. Wire: none.
 
-## Required
-
-- [Origin](/quest/m0/broadcast-epoch/origin.md) - the fresh epoch path the rest of the feed publishes under
 
 ## Closes
 

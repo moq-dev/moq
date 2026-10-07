@@ -97,7 +97,7 @@ pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()
 	// The WHEP pull fills the tracks as they arrive; announce up front so viewers
 	// can discover the broadcast while it connects.
 	producer
-		.announce(Default::default())
+		.announce(moq_tokio::moq_net::origin::Route::default().with_epoch(moq_tokio::moq_net::Epoch::mint()))
 		.context("failed to announce broadcast")?;
 
 	tracing::info!(url = %RedactedUrl::new(&url), %name, "WHEP client pulling");

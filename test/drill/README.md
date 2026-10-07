@@ -2,8 +2,9 @@
 
 Media flowing on a healthy loopback proves delivery and nothing else. These
 drills disrupt a live session through a real relay over real QUIC and check what
-happens next: cancellation, a relay dying mid-group, and a publisher coming back
-under a name it already used.
+happens next: cancellation, a relay dying mid-group, a publisher coming back
+under a name it already used, and bursts of small groups crossing a two-relay
+cluster.
 
 The drills themselves are ordinary Rust integration tests in
 `rs/moq-relay/tests/drills.rs`, so `just check` already runs them whenever
@@ -28,6 +29,7 @@ checks that what the fault owned was released.
 | `cancel_under_backpressure_releases_the_reader` | A subscriber stops reading while the publisher runs ahead, then cancels | the number of unread groups queued behind the reader at the moment it cancels | everything the cancelled session was feeding closes rather than parking, and the relay still serves a subscriber that joins afterwards |
 | `relay_killed_mid_group_aborts_then_resumes` | The relay's runtime is dropped mid-group: every task and socket at once, no `CONNECTION_CLOSE` | the error the interrupted group aborted with, and both reconnect loops reporting `Disconnected` | the interrupted group fails rather than reporting a clean finish, and after the relay returns the same handles resume delivery |
 | `interrupted_publisher_republishes_new_content` | A publisher vanishes with no finish and no unannounce, then a new one publishes the same name | the withdrawal of the dead publisher's broadcast | the name stops being announced, and the republished name serves the new publisher's content rather than the dead one's cache |
+| `bursts_cross_a_cluster` | Bursts of one-frame groups cross from an origin relay to a clustered edge relay; the subscriber reads newest-only and FETCHes every group it misses | how many groups missed the live subscription, which live groups were reset, and the slowest group's latency | every group arrives, live or by FETCH, within 10s of being written; a lost group fails by name (FETCH failed, FETCH unanswered, live group stalled), and the newest group comes live |
 | `no_publisher_never_delivers` | none: the negative control | - | with nothing publishing, nothing is announced and no broadcast resolves |
 
 A moq publisher is never blocked by a slow reader: `write_frame` is synchronous
@@ -41,7 +43,7 @@ reader leaves, and is covered by moq-net's origin tests. Waiting out a
 linger would make this the slowest test in the workspace; the rejoin the
 drill does assert is the half of that behavior worth grading here.
 
-The negative control is what keeps the rest honest. Three drills prove things by
+The negative control is what keeps the rest honest. Four drills prove things by
 reading a frame; if the harness could report success without data moving, they
 would all pass for free.
 
@@ -71,6 +73,16 @@ forwards each datagram, both ways, after applying the same profile:
 | reorder | 2% skip the delay and overtake whatever is in flight |
 | rate | 10 Mbit/s token bucket, 1500 byte burst, 100ms queue then tail drop |
 
+`bursts_cross_a_cluster` shapes all three hops, the publisher's, the peer link
+between the relays, and the subscriber's, each with that profile behind a
+100 kbit/s bottleneck with a 50ms queue, which a burst overruns. Its impaired
+lane also grants less QUIC credit than a burst needs at every endpoint: 16
+concurrent streams (each group is a stream, each FETCH another) and receive
+windows of a few groups, so senders wait on `MAX_STREAMS` and `MAX_DATA` that
+the path can lose. The bottleneck sits below the rate those windows allow, so
+both bind, and the drill fails unless some burst overflowed a queue. Its
+loopback lane keeps the defaults.
+
 It is a datagram relay, not an HTTP or TCP proxy, neither of which can impair
 QUIC. It needs no capabilities, works the same on macOS and Linux, and touches
 nothing on the host; QUIC is indifferent to the extra hop.
@@ -78,9 +90,10 @@ The shaper runs on the test's runtime rather than the relay's, so killing the
 relay leaves the path up, the way a network outlives the server behind it.
 
 Every decision the shaper makes comes from one seed. Each run picks a fresh one
-and prints it, with the profile, as `impaired: MOQ_SHAPER_SEED=...`; setting that
-variable replays the same decisions. Kernel scheduling still varies delivery
-timing, so the seed makes the decisions reproducible, not the clock. Each client
+and prints it as `impaired: MOQ_SHAPER_SEED=...`; setting that variable replays
+the same decisions. A drill with several paths seeds each one off that base.
+Kernel scheduling still varies delivery timing, so the seed makes the decisions
+reproducible, not the clock. Each client
 draws from its own stream, numbered in the order clients first send, so
 concurrent clients that race to connect can swap streams between runs.
 
@@ -133,6 +146,7 @@ and grades the same body.
 | `subscriber-leaks-broadcasts` | releasing the broadcasts a subscribing session fed when that session ends | `cancel_under_backpressure_releases_the_reader::loopback` |
 | `reconnect-stops-after-session-loss` | redialing after an established session is lost | `relay_killed_mid_group_aborts_then_resumes::loopback` |
 | `relay-withdraws-lost-publisher` | withdrawing a publisher's announcements when its session is lost | `interrupted_publisher_republishes_new_content::loopback` |
+| `fetch-never-sent` | sending a FETCH for an uncached group, at the subscriber and at the edge relay | `bursts_cross_a_cluster::loopback` |
 
 A mutated tree that fails to compile is a failure of the proof, not a pass: a
 compile error shows the patch touched something, not that the drill was
@@ -155,6 +169,7 @@ drill fails, these are where the mechanism is pinned.
 | cancel under backpressure | `kio::loom::{last_consumer_wakes_unused, consumer_churn_resolves_unused, first_consumer_wakes_used}`, `moq-net tests/loom.rs::{subscriber_wakes_parked_demand, concurrent_tracks_drain_a_shared_pool}` | `lite` (`SUBSCRIBE` / `SUBSCRIBE_UPDATE` encodings) |
 | relay killed mid-group | `kio::loom::{racing_last_producer_drops_still_close, queue_close_wakes_a_parked_pop, write_wakes_a_parked_consumer}`, `moq-net tests/loom.rs::publisher_drop_resolves_a_parked_subscriber` | `lite` and `ietf` (a truncated stream must fail to decode, never decode into something else), regression `ietf/subscribe-absolute-filter` |
 | interrupted publisher republishes | `kio::loom::{write_wakes_a_parked_consumer, weak_upgrade_never_resurrects_a_closed_channel}`, `moq-net tests/loom.rs::back_to_back_groups_arrive_in_order` | `path` (the broadcast name is a path: normalization, prefixes, and the wire round-trip) |
+| bursts across a cluster | `moq-net tests/loom.rs::{a_fetch_never_joins_a_withdrawn_attempt, back_to_back_groups_arrive_in_order}` | `lite` (`FETCH` encodings) |
 
 Run them with `just rs loom` and `just rs fuzz <target>`. The committed fuzz
 findings under `rs/moq-net/fuzz/regressions/` replay on stable as part of

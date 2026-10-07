@@ -400,7 +400,7 @@ impl Publish {
 			return Ok(());
 		};
 		broadcast
-			.announce(Default::default())
+			.announce(moq_tokio::moq_net::origin::Route::default().with_epoch(moq_tokio::moq_net::Epoch::mint()))
 			.context("failed to announce broadcast")
 	}
 

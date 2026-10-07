@@ -197,8 +197,16 @@ impl Producer {
 		self
 	}
 
-	/// Advertise this broadcast's exact path as a route, or re-price the standing
-	/// advertisement in place.
+	/// The route this broadcast is announced with, or `None` while it is not.
+	pub fn route(&self) -> Option<Route> {
+		self.alive.announcer.lock().as_ref()?.route()
+	}
+
+	/// Advertise this broadcast's exact path as a route, or replace the standing
+	/// advertisement's route. The route is taken as given, epoch included: another
+	/// epoch, or none, announces a new broadcast. To re-price the same instance,
+	/// start from the current route:
+	/// `broadcast.announce(broadcast.route().unwrap_or_default().with_cost(cost))`.
 	///
 	/// Until this is called the broadcast exists for nobody: announce cursors do
 	/// not list it and requests for its path fail with [`Error::Unroutable`], for
@@ -890,6 +898,17 @@ impl Consumer {
 
 	pub fn assert_closed(&self) {
 		assert!(self.closed().now_or_never().is_some(), "should be closed");
+	}
+
+	/// The tracks still open on the broadcast, whether or not anyone reads them.
+	pub fn open_tracks(&self) -> usize {
+		use super::WeakEntry;
+		self.state
+			.read()
+			.tracks
+			.iter()
+			.filter(|track| !track.is_closed())
+			.count()
 	}
 }
 

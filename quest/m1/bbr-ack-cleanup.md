@@ -9,9 +9,8 @@ in `moq-quic` without changing public APIs or wire behavior.
 
 ## Plan
 
-The fix lives in `moq-quic`'s BBR3, after [BBR3](/quest/m1/quic/fork/bbr3.md)
-re-ports it in the hard fork; moq-dev/noq is frozen. In the BBR3 it ports,
-`on_end_acks` (`noq-proto/src/congestion/bbr3/mod.rs`) runs `retain` over all
+The fix lives in `moq-quic`'s BBR3; moq-dev/noq is frozen. There,
+`on_end_acks` (`rs/moq-quic/src/congestion/bbr3/mod.rs`) runs `retain` over all
 tracked packets, then scans them again to mark stale entries. Draining a flight with fixed-size ACK batches has quadratic total
 cleanup work. [Google QUICHE](https://github.com/google/quiche/blob/c961965aa3ee8f2b6f05ebcac794f7854101adcd/quiche/quic/core/congestion_control/bandwidth_sampler.cc#L377)
 uses packet-number lookup and obsolete-prefix reclamation; use that as a
@@ -52,7 +51,6 @@ packet-lifetime comments inline; no new user guide is needed.
 
 ## Required
 
-- [BBR3](/quest/m1/quic/fork/bbr3.md) - the `moq-quic` BBR3 this fixes
 - [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic`, not the frozen fork
 
 ## Related

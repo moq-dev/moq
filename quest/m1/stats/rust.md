@@ -31,7 +31,7 @@
 - Feedback: after reading a catalog with an `echo` section, the player
   resolves the echo path against the broadcast, appends `<name>.echo`, and
   publishes there with the fixed feedback
-  track, keyed by the catalog's rendition aliases. Each catalog update
+  track, keyed by the catalog's rendition IDs. Each catalog update
   reconciles it: a removed `echo` section, a changed path, or no longer
   watching unannounces the old broadcast. A name that is not a single path segment is refused at
   parse time.

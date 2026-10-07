@@ -19,6 +19,8 @@ export interface Announcer {
 	announce(route: Route): void;
 	/** Retract the advertisement from local consumers and peers alike. */
 	unannounce(): void;
+	/** The route this broadcast's path is advertised with, if it is. */
+	route(): Route | undefined;
 }
 
 let attachAnnouncer: (producer: Producer, announcer: Announcer) => void;
@@ -324,15 +326,26 @@ export class Producer {
 		};
 	}
 
+	/** The route this broadcast is announced with, or undefined while it is not announced. */
+	get route(): Route | undefined {
+		return this.#announcer?.route();
+	}
+
 	/**
-	 * Advertise this broadcast's exact path, or re-price a standing advertisement in place.
+	 * Advertise this broadcast's exact path, or replace the standing advertisement's route.
+	 *
+	 * The route is taken as given, epoch included: a route with another epoch (or none)
+	 * announces a new broadcast, so re-price from the current one,
+	 * `announce({ ...broadcast.route, cost })`, to keep the instance.
 	 *
 	 * Call it once the tracks a subscriber needs first (a catalog) exist. Until then the
 	 * broadcast exists for nobody, on its own origin or at a peer. Retracts on
 	 * {@link unannounce} or {@link close}. Throws if this producer was not created through an
 	 * origin, or if the broadcast is already closed.
 	 */
-	announce(route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default): void {
+	announce(
+		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
+	): void {
 		if (this.#state.closed.peek() !== undefined) {
 			throw new Error("broadcast is closed");
 		}
