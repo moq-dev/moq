@@ -32,8 +32,9 @@ Drafts 14 and 15 keep answering with PUBLISH_NAMESPACE requests, unchanged.
 `js/net` mirrors the solicit logic (`js/net/src/ietf/connection.ts`,
 `publisher.ts`).
 
-Update `doc/concept/standard.md` (around lines 100-106 and 141-144), which
-documents the empty stream.
+Update `doc/concept/standard.md` where it describes solicit: a non-SOLICIT
+d16+ peer now also gets NAMESPACE on its SUBSCRIBE_NAMESPACE stream, so it
+hears each namespace twice.
 
 Test: a non-SOLICIT d16 and d18 peer's SUBSCRIBE_NAMESPACE receives
 NAMESPACE for an existing match and for one announced later, then

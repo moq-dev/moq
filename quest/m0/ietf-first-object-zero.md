@@ -20,9 +20,11 @@ Decided 2026-10-07: accept it anyway, to be lenient toward publishers that
 are out of spec. Rejected: keeping the drop and documenting it.
 
 Where it lives: `rs/moq-net/src/ietf/subscriber.rs` (around line 2611)
-drops the stream before reading any object. Peek the first object's ID
-before deciding. `next_object_id` already enforces the ID sequence. Check
-whether `js/net` drops these streams at all; it has no matching check today.
+drops the stream before reading any object. `next_object_id` already
+refuses a first ID other than the group's start (0 for a whole group), so
+check whether letting a clear-bit stream through to it is enough before
+adding a second peek. Check whether `js/net` drops these streams at all; it
+has no matching check today.
 
 Test: a d18 stream with FIRST_OBJECT clear and first ID 0 delivers its
 group; one with first ID 3 is still dropped.

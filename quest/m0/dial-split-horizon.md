@@ -31,8 +31,10 @@ Facts from `main`:
 Decided 2026-10-07: fix it in moq-net's `Client`, not only the relay's
 dial. A session with no negotiated identity gets a random per-connection hop,
 the same way `server.rs` does. Rejected: calling `with_peer_hop` from
-moq-relay only, which leaves other moq-net users anonymous. Check whether
-`with_peer_hop` still has a caller afterwards, and delete it if not.
+moq-relay only, which leaves other moq-net users anonymous. Keep
+`with_peer_hop` as an explicit override of the random default, as the
+server side does: a random hop changes on every redial, so only a pinned one
+lets every session dialing the same relay resolve to one route.
 
 The same gap let a d16 moq-dev origin route its edges' SUBSCRIBEs to two of
 the edges (the report's T4 fanout-late-join, two runs). Check that this case
@@ -40,8 +42,9 @@ is covered too.
 
 Test: a dialed anonymous ietf session that announces a namespace does not
 receive it back, and a SUBSCRIBE that arrives on it is not routed back to it.
+Check that a redialed anonymous peer's routes do not pile up across hops.
 
-Public API: possibly removes `Client::with_peer_hop`. Wire: none.
+Public API: none. Wire: none.
 
 ## Related
 
