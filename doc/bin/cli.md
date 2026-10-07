@@ -47,7 +47,8 @@ carries a token), and `--broadcast <name>` names the broadcast. A process can
 instead host sessions with `--listen`, or both at once. A listener admits
 clients by `--auth-url` or `--auth-public`, as the relay does (see
 [Authentication](/bin/relay/auth)); public rules ignore certificates, so
-`--auth-public` refuses to start with `--listen-tls-root`. `moq import --help` lists the sources and `moq import rtmp --help` a specific one.
+`--auth-public` refuses to start with `--listen-tls-root`, and only `--listen`
+(QUIC) verifies one. `moq import --help` lists the sources and `moq import rtmp --help` a specific one.
 
 ```bash
 # Publish a file (remux to MPEG-TS without re-encoding)
@@ -475,8 +476,8 @@ See [Authentication](/bin/relay/auth).
 ## Retention and latency
 
 `import --max-age` (default 30 s) tells relays how long to keep old
-groups fetchable, which the [HLS gateway](/bin/hls) depends on. `export --max-age` (default 500 ms) is how long *this* consumer waits for a
-stalled group before skipping. Raising the first never delays playback.
+groups fetchable, which the [HLS gateway](/bin/hls) depends on. `export --max-delay` (default 500 ms) is how far a stalled group may fall
+behind the live edge before *this* consumer skips it. Raising the first never delays playback.
 
 `export ts` takes `--delay` (default 500 ms) instead, and works like an SRT
 receiver's latency. Every frame is muxed that long after its decode time, on

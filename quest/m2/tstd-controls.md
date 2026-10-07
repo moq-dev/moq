@@ -22,7 +22,3 @@ The only positive reference carries MPEG audio, but the export emits AAC.
     shared.
 - Each control fails or passes for the stated reason, and `interop.yml`
   runs them.
-
-## Required
-
-- [T-STD TS export](/quest/m1/tstd/README.md) - `just test ts-tstd` and `tstd-controls.py` land with it (#4645)

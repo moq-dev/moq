@@ -42,7 +42,11 @@ connection (`wss://`) and keep whichever wins. A small multiplexer,
 [qmux](/draft/qmux-websocket), carries MoQ streams over the socket. It works
 everywhere but cannot escape TCP head-of-line blocking, so priority and resets
 only help once bytes leave the TCP queue. The fallback is automatic in every
-client; the relay enables it with `[web.https]`.
+client; the relay enables it with `[web.https]`. A native Rust client that lands on
+WebSocket keeps dialing QUIC and moves the session onto it once the QUIC
+session receives the peer's SETUP, staying on WebSocket if the relay refuses it
+before SETUP. This crate's relays send SETUP after admission; other servers may
+still refuse afterward.
 
 ## Raw QUIC (native)
 
@@ -83,3 +87,15 @@ gives a page a connection, not an endpoint.
 
 The relay opts in with `[iroh] enabled = true` and a persisted `secret` so the
 endpoint id survives restarts. See the [config reference](/bin/relay/config#iroh).
+
+## Custom Rust transports
+
+`moq-net` owns the poll traits a transport implements: sessions open and accept
+streams, outgoing streams write and reset, and incoming streams read and stop.
+Transport errors keep session-close codes separate from stream-reset codes.
+
+`moq-tokio` and `moq-wasm` adapt their backends at the connection boundary;
+`moq-uring::transport::Session::new` wraps a thread-local poll backend. A custom
+transport can implement moq-net's traits directly. Backend trait upgrades then
+change the adapter without changing moq-net's public transport bounds. See the
+[moq-net API](/lib/rs/moq-net).

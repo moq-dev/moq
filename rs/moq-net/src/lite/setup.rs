@@ -55,7 +55,7 @@ impl ProbeLevel {
 	/// transport whose figures exist by the time the session starts. QUIC and TCP
 	/// both qualify: their RTT comes from the handshake, which has already happened.
 	pub fn detect<S: crate::transport::poll::Session>(session: &S) -> Self {
-		use web_transport_trait::Stats as _;
+		use crate::transport::Stats as _;
 		let stats = session.stats();
 		match stats.estimated_send_rate().is_some() || stats.rtt().is_some() {
 			true => Self::Report,
@@ -281,6 +281,11 @@ impl PeerSetup {
 		}
 		state.seen = true;
 		Ok(())
+	}
+
+	/// Poll until the peer's SETUP arrives.
+	pub fn poll_seen(&self, waiter: &kio::Waiter) -> std::task::Poll<()> {
+		self.poll_get(waiter, |_| ())
 	}
 
 	/// Poll for the peer's advertised probe level, waiting until its SETUP arrives.

@@ -203,6 +203,7 @@ impl Client {
 			start.recv_bandwidth,
 			crate::driver::Protocol::Lite(Box::new(start.driver)),
 			start.goaway,
+			start.setup,
 		))
 	}
 
@@ -259,7 +260,7 @@ impl Client {
 
 				// Draft-17+: SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
-				let (protocol, goaway) = ietf::start(ietf::Config {
+				let (protocol, goaway, setup) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					session: session.clone(),
 					setup: None,
@@ -285,6 +286,7 @@ impl Client {
 					None,
 					crate::driver::Protocol::Ietf(protocol),
 					goaway,
+					setup,
 				));
 			}
 			Some(ALPN_16) => {
@@ -371,7 +373,7 @@ impl Client {
 			.copied()
 			.ok_or(Error::Version)?;
 
-		let (recv_bw, protocol, goaway) = match version {
+		let (recv_bw, protocol, goaway, setup) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				let start = lite::start(lite::Config {
@@ -392,6 +394,7 @@ impl Client {
 					start.recv_bandwidth,
 					crate::driver::Protocol::Lite(Box::new(start.driver)),
 					start.goaway,
+					start.setup,
 				)
 			}
 			Version::Ietf(v) => {
@@ -410,7 +413,7 @@ impl Client {
 
 				let stream = stream.with_version(v);
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
-				let (protocol, goaway) = ietf::start(ietf::Config {
+				let (protocol, goaway, setup) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					session: session.clone(),
 					setup: Some(stream),
@@ -427,11 +430,13 @@ impl Client {
 					peer_declared: Some(peer_declared),
 					early_unis: Vec::new(),
 				})?;
-				(None, crate::driver::Protocol::Ietf(protocol), goaway)
+				(None, crate::driver::Protocol::Ietf(protocol), goaway, setup)
 			}
 		};
 
-		Ok(Session::new(runtime, session, version, recv_bw, protocol, goaway))
+		Ok(Session::new(
+			runtime, session, version, recv_bw, protocol, goaway, setup,
+		))
 	}
 }
 
@@ -461,7 +466,7 @@ mod tests {
 
 	impl std::error::Error for FakeError {}
 
-	impl web_transport_trait::Error for FakeError {
+	impl crate::transport::Error for FakeError {
 		fn session_error(&self) -> Option<(u32, String)> {
 			Some((0, "closed".to_string()))
 		}
@@ -530,7 +535,7 @@ mod tests {
 		}
 	}
 
-	impl web_transport_trait::poll::Session for FakeSession {
+	impl crate::transport::poll::Session for FakeSession {
 		type SendStream = FakeSendStream;
 		type RecvStream = FakeRecvStream;
 		type Error = FakeError;
@@ -582,7 +587,7 @@ mod tests {
 			Poll::Ready(FakeError)
 		}
 
-		fn stats(&self) -> impl web_transport_trait::Stats {
+		fn stats(&self) -> impl crate::transport::Stats {
 			FakeStats {
 				send_rate: *self.state.send_rate.lock().unwrap(),
 				bytes_sent: *self.state.bytes_sent.lock().unwrap(),
@@ -595,7 +600,7 @@ mod tests {
 		bytes_sent: Option<u64>,
 	}
 
-	impl web_transport_trait::Stats for FakeStats {
+	impl crate::transport::Stats for FakeStats {
 		fn estimated_send_rate(&self) -> Option<u64> {
 			self.send_rate
 		}
@@ -610,7 +615,7 @@ mod tests {
 		writes: Arc<Mutex<Vec<u8>>>,
 	}
 
-	impl web_transport_trait::poll::SendStream for FakeSendStream {
+	impl crate::transport::poll::SendStream for FakeSendStream {
 		type Error = FakeError;
 
 		fn poll_write(&mut self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
@@ -635,7 +640,7 @@ mod tests {
 		data: VecDeque<u8>,
 	}
 
-	impl web_transport_trait::poll::RecvStream for FakeRecvStream {
+	impl crate::transport::poll::RecvStream for FakeRecvStream {
 		type Error = FakeError;
 
 		fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
@@ -751,37 +756,6 @@ mod tests {
 		.await
 		.expect("connect waited on a peer that never announced")
 		.expect("connect failed");
-	}
-
-	/// A peer that never delivers its announce count cannot stall the live
-	/// marker past its session: dropping the session lands the source.
-	#[moq_net_sim::test]
-	async fn a_dead_session_does_not_hold_the_live_marker() {
-		let gate = kio::Producer::new(true);
-		let transport = crate::lite::test_transport::SinkSession::gated_bi(gate.consume())
-			.with_protocol(crate::version::ALPN_LITE_05);
-
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let client = Client::new()
-			.with_versions([Version::Lite(lite::Version::Lite05)].into())
-			.with_subscriber(origin.clone());
-		let (session, driver) = client
-			.connect(moq_net_sim::now(), transport)
-			.await
-			.expect("connect failed");
-
-		let mut announced = origin.consume().announced();
-		let mut next = std::pin::pin!(announced.next());
-		assert!(
-			moq_net_sim::timeout(std::time::Duration::from_secs(5), next.as_mut())
-				.await
-				.is_err(),
-			"live before the peer answered"
-		);
-
-		drop(driver);
-		drop(session);
-		assert!(matches!(next.await, Some(crate::announce::Event::Live)));
 	}
 
 	/// The client SETUP on the bidi control stream (the pre-draft-17 framing) carries the
@@ -916,7 +890,7 @@ mod tests {
 		_local: std::rc::Rc<()>,
 	}
 
-	impl web_transport_trait::poll::Session for LocalSession {
+	impl crate::transport::poll::Session for LocalSession {
 		type SendStream = LocalSend;
 		type RecvStream = LocalRecv;
 		type Error = FakeError;
@@ -995,12 +969,12 @@ mod tests {
 			self.inner.poll_closed(cx)
 		}
 
-		fn stats(&self) -> impl web_transport_trait::Stats {
+		fn stats(&self) -> impl crate::transport::Stats {
 			self.inner.stats()
 		}
 	}
 
-	impl web_transport_trait::poll::SendStream for LocalSend {
+	impl crate::transport::poll::SendStream for LocalSend {
 		type Error = FakeError;
 
 		fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
@@ -1020,11 +994,11 @@ mod tests {
 		}
 
 		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			web_transport_trait::poll::SendStream::poll_closed(&mut self.inner, cx)
+			crate::transport::poll::SendStream::poll_closed(&mut self.inner, cx)
 		}
 	}
 
-	impl web_transport_trait::poll::RecvStream for LocalRecv {
+	impl crate::transport::poll::RecvStream for LocalRecv {
 		type Error = FakeError;
 
 		fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
@@ -1036,7 +1010,7 @@ mod tests {
 		}
 
 		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			web_transport_trait::poll::RecvStream::poll_closed(&mut self.inner, cx)
+			crate::transport::poll::RecvStream::poll_closed(&mut self.inner, cx)
 		}
 	}
 

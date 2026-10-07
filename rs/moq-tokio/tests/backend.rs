@@ -675,7 +675,7 @@ async fn iroh_connect_test(version: Option<&str>) {
 		assert_eq!(request.role(), Some(moq_tokio::moq_net::Role::Subscriber));
 		// iroh offers the moq ALPNs ahead of H3, so this lands on raw QUIC: no request
 		// URL, leaving the SETUP as the only place for the request target.
-		assert_eq!(request.transport(), moq_tokio::server::Transport::Iroh);
+		assert_eq!(request.transport(), moq_tokio::Transport::Iroh);
 		assert_eq!(request.url(), None);
 		assert_eq!(request.path(), "/room");
 		assert_eq!(request.query(), Some("jwt=abc"));
@@ -1351,13 +1351,10 @@ async fn noq_windows() {
 	window_test("moqt").await;
 }
 
-/// The next route and whether it is active, skipping the caught-up marker.
+/// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-	loop {
-		return match announced.next().await? {
-			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
-			moq_net::announce::Event::End(route) => Some((route, false)),
-			moq_net::announce::Event::Live => continue,
-		};
+	match announced.next().await? {
+		moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

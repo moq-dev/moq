@@ -89,12 +89,13 @@ async fn spawn_server(
 	let server = net.server(moq.server_config())?;
 	let certificates = server.certificates();
 	let cluster = attach_lan(cluster.clone(), moq, &server)?;
-	// The auth server or public grant a `--listen` endpoint admits through. A mesh
-	// listener with neither admits its peers alone.
+	// The auth server or public grant a `--listen` endpoint admits through. A
+	// LAN-mesh listener with neither admits its peers alone; any other config
+	// `init` refuses stops startup.
 	let node = moq.cluster.node.clone().unwrap_or_default();
-	let auth = match moq.auth.validate() {
-		Ok(()) => moq.auth.init(node, &moq.client.tls)?,
-		Err(_) => moq_relay::auth::Auth::refuse(node),
+	let auth = match moq.auth.is_empty() && !moq.server.has_explicit_bind() {
+		true => moq_relay::auth::Auth::refuse(node),
+		false => moq.auth.init(node, &moq.client.tls, moq.client_ca())?,
 	};
 	// Advertise before accepting, so a `/.cluster` dial is verified against a
 	// live credential rather than refused as "LAN discovery is not enabled".
@@ -253,9 +254,9 @@ async fn serve_client(
 }
 
 /// Whether ordinary clients may use this transport on the shared LAN server.
-fn is_public_transport(transport: moq_tokio::server::Transport, public_quic: bool) -> bool {
+fn is_public_transport(transport: moq_tokio::Transport, public_quic: bool) -> bool {
 	match transport {
-		moq_tokio::server::Transport::Tcp | moq_tokio::server::Transport::Unix => true,
+		moq_tokio::Transport::Tcp | moq_tokio::Transport::Unix => true,
 		_ => public_quic,
 	}
 }
@@ -727,7 +728,7 @@ fn spawn_export(
 	if let Some(stdout) = export.sink.stdout() {
 		let args = SubscribeArgs {
 			format: stdout.format,
-			max_age: stdout.max_age,
+			max_delay: stdout.max_delay,
 			linger: stdout.linger,
 			fragment_duration: stdout.fragment_duration,
 			mux_rate: stdout.mux_rate,
@@ -743,12 +744,12 @@ fn spawn_export(
 				tasks.spawn(hls::export(origin.consume(), args, name));
 			}
 			ExportSink::Rtmp(rtmp) => {
-				let max_age = rtmp.max_age.into_std();
+				let max_delay = rtmp.max_delay.into_std();
 				if let Some(addr) = rtmp.endpoint.listen {
 					let name = require_broadcast(name, "export rtmp --listen")?;
-					tasks.spawn(rtmp::listen_export(origin.consume(), addr, name, max_age));
+					tasks.spawn(rtmp::listen_export(origin.consume(), addr, name, max_delay));
 				} else if let Some(url) = rtmp.endpoint.connect {
-					tasks.spawn(rtmp::connect_export(origin.consume(), url, name, max_age));
+					tasks.spawn(rtmp::connect_export(origin.consume(), url, name, max_delay));
 				}
 			}
 			ExportSink::Srt(srt) => {
@@ -916,8 +917,9 @@ mod tests {
 	async fn a_stream_bind_failure_prevents_readiness() {
 		let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("occupy a port");
 		let addr = occupied.local_addr().expect("occupied address").to_string();
-		let invocation = Invocation::try_parse_from(["moq", "--listen-tcp-bind", &addr, "import", "ts"])
-			.expect("parse stream-only invocation");
+		let invocation =
+			Invocation::try_parse_from(["moq", "--listen-tcp-bind", &addr, "--auth-public", "**", "import", "ts"])
+				.expect("parse stream-only invocation");
 		let cluster = invocation.moq.cluster().expect("create cluster");
 		let net = Net {
 			quic: invocation.moq.quic.clone(),
@@ -951,11 +953,52 @@ mod tests {
 		assert!(tasks.is_empty(), "nothing should be spawned after a bind failure");
 	}
 
+	/// An explicit listener with no auth source stops startup instead of refusing
+	/// every session, even for a caller that skipped `MoqSide::validate`.
+	#[tokio::test]
+	async fn a_listener_without_auth_stops_startup() {
+		let invocation = Invocation::try_parse_from(["moq", "--listen-tcp-bind", "127.0.0.1:0", "import", "ts"])
+			.expect("parse TCP-only invocation");
+		let cluster = invocation.moq.cluster().expect("create cluster");
+		let net = Net {
+			quic: invocation.moq.quic.clone(),
+			#[cfg(feature = "iroh")]
+			iroh: None,
+		};
+		let mut tasks = JoinSet::new();
+
+		let err = match spawn_server(
+			&mut tasks,
+			&invocation.moq,
+			&cluster,
+			&net,
+			Directions {
+				publish: true,
+				consume: false,
+			},
+		)
+		.await
+		{
+			Ok(_) => panic!("a listener without auth must not start"),
+			Err(err) => err,
+		};
+		assert!(err.to_string().contains("nobody can authenticate"), "{err:#}");
+		assert!(tasks.is_empty(), "nothing should be spawned without auth");
+	}
+
 	/// A raw TCP bind is a complete server side even when no QUIC bind is set.
 	#[tokio::test]
 	async fn tcp_only_moq_side_starts_a_server() {
-		let invocation = Invocation::try_parse_from(["moq", "--listen-tcp-bind", "127.0.0.1:0", "import", "ts"])
-			.expect("parse TCP-only invocation");
+		let invocation = Invocation::try_parse_from([
+			"moq",
+			"--listen-tcp-bind",
+			"127.0.0.1:0",
+			"--auth-public",
+			"**",
+			"import",
+			"ts",
+		])
+		.expect("parse TCP-only invocation");
 		let cluster = invocation.moq.cluster().expect("create cluster");
 		let net = Net {
 			quic: invocation.moq.quic.clone(),
@@ -1031,9 +1074,9 @@ mod tests {
 
 	#[test]
 	fn explicit_stream_listeners_are_public_without_exposing_mesh_quic() {
-		assert!(is_public_transport(moq_tokio::server::Transport::Tcp, false));
-		assert!(is_public_transport(moq_tokio::server::Transport::Unix, false));
-		assert!(!is_public_transport(moq_tokio::server::Transport::Quic, false));
-		assert!(is_public_transport(moq_tokio::server::Transport::Quic, true));
+		assert!(is_public_transport(moq_tokio::Transport::Tcp, false));
+		assert!(is_public_transport(moq_tokio::Transport::Unix, false));
+		assert!(!is_public_transport(moq_tokio::Transport::Quic, false));
+		assert!(is_public_transport(moq_tokio::Transport::Quic, true));
 	}
 }

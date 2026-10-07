@@ -8,9 +8,9 @@ use std::net;
 #[cfg(any(test, all(feature = "uds", unix)))]
 use std::path::PathBuf;
 
-use crate::Error;
 #[cfg(feature = "iroh")]
 use crate::iroh;
+use crate::{Error, Transport};
 use moq_net::Session;
 use url::Url;
 
@@ -301,17 +301,15 @@ impl Server {
 			return Err(Error::NoBackend("--listen requires the noq feature"));
 		}
 
-		if build_quic && !config.tls.root.is_empty() {
-			// Only the QUIC backend validates client certificates; the qmux listeners
-			// (tcp/unix/websocket) carry no TLS of their own.
-			#[cfg(feature = "noq")]
-			let mtls_supported = true;
-			#[cfg(not(feature = "noq"))]
-			let mtls_supported = false;
-
-			if !mtls_supported {
+		// Only the QUIC backend verifies client certificates; the qmux listeners
+		// (tcp/unix/websocket) never ask for one, even over `tls://`, so a
+		// stream-only server would ignore the CA. A caller opening only the streams owns QUIC elsewhere.
+		if parts.quic() && !config.tls.root.is_empty() {
+			if !build_quic {
 				return Err(Error::MtlsUnsupported);
 			}
+			#[cfg(not(feature = "noq"))]
+			return Err(Error::NoBackend("--listen-tls-root requires the noq feature"));
 		}
 
 		// The member is a serving handle released by a complete reuseport group,
@@ -650,7 +648,9 @@ impl Server {
 							let Accepted { session, url, identity, authority, mut link } = within(deadline, super::noq::accept(_conn, alpns)).await?;
 							link.local = local;
 							let (request, deadline) = setup.accept(session, deadline).await?;
-							Ok(Request { transport: Transport::Quic, url, identity, authority, link, kind: RequestKind::Noq(Box::new(request)), deadline })
+							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
+							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
+							Ok(Request { transport, url, identity, authority, link, kind: RequestKind::Noq(Box::new(request)), deadline })
 						}.boxed());
 					}
 				}
@@ -880,10 +880,8 @@ impl Setup {
 	where
 		S: web_transport_trait::Session,
 		crate::transport::Session<S>: moq_net::transport::poll::Boxable,
-		<crate::transport::Session<S> as web_transport_trait::poll::Session>::SendStream:
-			web_transport_trait::MaybeSync,
-		<crate::transport::Session<S> as web_transport_trait::poll::Session>::RecvStream:
-			web_transport_trait::MaybeSync,
+		<crate::transport::Session<S> as moq_net::transport::poll::Session>::SendStream: moq_net::transport::MaybeSync,
+		<crate::transport::Session<S> as moq_net::transport::poll::Session>::RecvStream: moq_net::transport::MaybeSync,
 	{
 		let session = crate::transport::Session::new(session);
 		let deadline = deadline.map(|at| Deadline::new(at, session.clone()));
@@ -1397,41 +1395,6 @@ pub struct Link {
 	pub alpn: Option<String>,
 }
 
-/// The network transport carrying an incoming MoQ session.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Transport {
-	/// QUIC, either directly or through WebTransport over HTTP/3.
-	Quic,
-	/// An Iroh QUIC connection.
-	Iroh,
-	/// A WebSocket connection using qmux framing.
-	WebSocket,
-	/// A TCP connection using qmux framing, plaintext or TLS.
-	Tcp,
-	/// A Unix domain socket using qmux framing.
-	Unix,
-}
-
-impl Transport {
-	/// Returns the stable lowercase name used in logs and external metadata.
-	pub const fn as_str(self) -> &'static str {
-		match self {
-			Self::Quic => "quic",
-			Self::Iroh => "iroh",
-			Self::WebSocket => "websocket",
-			Self::Tcp => "tcp",
-			Self::Unix => "unix",
-		}
-	}
-}
-
-impl std::fmt::Display for Transport {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.write_str(self.as_str())
-	}
-}
-
 /// An incoming MoQ session that can be accepted or rejected.
 ///
 /// The transport connection and the MoQ SETUP are already complete, so [`path`](Self::path),
@@ -1689,14 +1652,11 @@ impl Request {
 mod tests {
 	use super::*;
 
-	/// The next route and whether it is active, skipping the caught-up marker.
+	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-		loop {
-			return match announced.next().await? {
-				moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
-				moq_net::announce::Event::End(route) => Some((route, false)),
-				moq_net::announce::Event::Live => continue,
-			};
+		match announced.next().await? {
+			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}
 
@@ -2376,12 +2336,52 @@ mod tests {
 		drop((session, connection));
 	}
 
+	/// A client CA on a stream-only server is refused: no QUIC listener would
+	/// verify it, and the stream listeners never ask for a client certificate.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn client_ca_without_a_quic_listener_is_rejected() {
+		let mut config = crate::listen::Config::default();
+		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.tls.root = vec!["ca.pem".into()];
+
+		assert!(matches!(
+			config.clone().init(Default::default()),
+			Err(Error::MtlsUnsupported)
+		));
+		// A worker group owning QUIC verifies it, so the streams alone accept it.
+		config.init_streams().expect("streams beside worker-owned QUIC");
+	}
+
 	/// An explicit QUIC bind cannot be honored without a QUIC backend.
 	#[cfg(not(feature = "noq"))]
 	#[test]
 	fn quic_bind_without_a_quic_backend_is_rejected() {
 		let config = crate::listen::Config {
 			bind: Some("127.0.0.1:0".parse().unwrap()),
+			..Default::default()
+		};
+
+		assert!(matches!(
+			Config {
+				listen: config,
+				..Default::default()
+			}
+			.init(),
+			Err(Error::NoBackend(_))
+		));
+	}
+
+	/// A client CA on the default QUIC listener names the missing backend, not a
+	/// stream-only server the caller never configured.
+	#[cfg(not(feature = "noq"))]
+	#[test]
+	fn client_ca_without_a_quic_backend_is_rejected() {
+		let config = crate::listen::Config {
+			tls: crate::tls::Listen {
+				root: vec!["ca.pem".into()],
+				..Default::default()
+			},
 			..Default::default()
 		};
 
@@ -2413,6 +2413,7 @@ mod tests {
 		assert_eq!(Transport::WebSocket.as_str(), "websocket");
 		assert_eq!(Transport::Tcp.as_str(), "tcp");
 		assert_eq!(Transport::Unix.as_str(), "unix");
+		assert_eq!(Transport::WebTransport.as_str(), "webtransport");
 	}
 
 	/// Building the endpoint needs a runtime, and `certificates()` must stay

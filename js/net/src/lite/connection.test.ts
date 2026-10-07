@@ -278,7 +278,7 @@ async function servedRawSubscription() {
 		broadcast: Path.from("room"),
 		track: "video",
 		priority: 0,
-		maxAge: 10_000,
+		maxDelay: 10_000,
 		startGroup: 0,
 	}).encode(subscriber.writer, version);
 
@@ -434,7 +434,6 @@ test("close waits for a request served while withdrawals are in flight", async (
 	});
 	try {
 		expect((await announced.next())?.kind).toBe("start");
-		expect((await announced.next())?.kind).toBe("live");
 
 		fin.enable();
 		const closing = server.close();
@@ -447,7 +446,7 @@ test("close waits for a request served while withdrawals are in flight", async (
 			broadcast: Path.from("room"),
 			track: "video",
 			priority: 0,
-			maxAge: 10_000,
+			maxDelay: 10_000,
 			startGroup: 0,
 		}).encode(subscriber.writer, version);
 		expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);

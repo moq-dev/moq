@@ -655,7 +655,7 @@ async fn serve_connection(
 
 	let request = moq_net::Server::new()
 		.with_versions(serve.versions.clone())
-		.accept_request_lite(std::time::Instant::now(), transport)
+		.accept_request_lite(std::time::Instant::now(), moq_uring::transport::Session::new(transport))
 		.await
 		.context("moq handshake failed")?;
 
@@ -778,7 +778,12 @@ async fn serve_connection(
 		}
 	});
 
-	tracing::info!(id, version = %session.version(), transport = %moq_tokio::server::Transport::Quic, "negotiated");
+	// Only a WebTransport session carries a URL.
+	let transport = match url {
+		Some(_) => moq_tokio::Transport::WebTransport,
+		None => moq_tokio::Transport::Quic,
+	};
+	tracing::info!(id, version = %session.version(), %transport, "negotiated");
 
 	// The session handle is Send + Sync however its transport is driven, so
 	// its lifecycle (credential expiry, GOAWAY drain) lives with the timers

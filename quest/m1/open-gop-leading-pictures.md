@@ -41,7 +41,7 @@ decode, and the JS test should drive the software decoder.
   sample of a group to `keyframe`, and `js/watch/src/video/decoder.ts` submits
   it as `"key"`): for the first group after any non-continuous transition,
   skip delta frames stamped before that group's keyframe. That covers a
-  subscribe, a declared discontinuity, and a latency skip: `#checkMaxAge`
+  subscribe, a declared discontinuity, and a latency skip: `#checkMaxDelay`
   records the skip through `#gap` and `next()` reports the next frame with
   `continuous: false`. Latency skip also bumps playhead generation (startup
   delay) but does not flush the decoder. Leading pictures after that

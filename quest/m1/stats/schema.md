@@ -18,7 +18,7 @@ and the hang draft specs both. Nothing produces them yet.
   the root refuses the catalog. Shared fixtures pin both in both languages. Additive on main.
 - `rs/hang/src/stats.rs`: the publisher snapshot,
   `Snapshot<E = ()> { transport, renditions: BTreeMap<String, Track>, #[serde(flatten)] ext: E }`.
-  The generic lets moq-mux flatten `{ mpegts: ts::Stats }` in beside it, the
+  The generic lets moq-mux flatten `{ mpegts: ts::stats::Snapshot }` in beside it, the
   way `Catalog<E>` takes `ts::Ext`. `Track` holds sent frames, sent bytes,
   keyframes, skipped frames, and the target bitrate as a gauge.
 - `rs/hang/src/echo.rs`:
@@ -28,8 +28,8 @@ and the hang draft specs both. Nothing produces them yet.
   - stalls, stalled duration, and underruns;
   - the newest media timestamp received, with the wall time it arrived;
   - the playout latency, as a gauge.
-- Both snapshots key by the catalog's rendition alias. Feedback covers a
-  rendition that references another broadcast under its alias in the catalog
+- Both snapshots key by the catalog's rendition ID. Feedback covers a
+  rendition that references another broadcast under its ID in the catalog
   that lists it; the publisher snapshot omits referenced renditions (decided
   in the [README](/quest/m1/stats/README.md)).
 - `Transport` is shared: rtt, estimated rate, bytes and packets lost, and
@@ -58,8 +58,8 @@ and the hang draft specs both. Nothing produces them yet.
 
 ## Required
 
-- [Catalog track alias](/quest/m1/catalog-track-alias.md) - the rendition
-  alias both snapshots key by
+- [Catalog rendition IDs](/quest/m1/catalog-track-id.md) - the rendition
+  ID both snapshots key by
 
 ## Related
 

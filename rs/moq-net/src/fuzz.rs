@@ -198,6 +198,7 @@ impl AnnounceWriter {
 			Announced::Start(suffix, hops) => {
 				let (_, suffix, hops) = self.encoder.start(suffix.clone(), hops.clone());
 				lite::AnnounceBroadcast::Active {
+					epoch: None,
 					suffix,
 					hops,
 					cost: Default::default(),
@@ -216,6 +217,11 @@ impl AnnounceWriter {
 		msg.encode(&mut Encoder::new(data, self.version.into()), self.version)
 			.expect("could not encode an announcement");
 	}
+}
+
+/// `origin` as a session connected to `peer` serves it, for the viewers bench.
+pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::origin::Consumer {
+	origin.excluding(peer)
 }
 
 /// Encode `announced` as a fresh [`AnnounceWriter`] stream.
@@ -320,11 +326,12 @@ impl LiteSample {
 			.encode(w, version)
 			.unwrap(),
 			Self::Subscribe => lite::Subscribe {
+				epoch: None,
 				id: 3,
 				broadcast: Path::new("room/alice"),
 				track: "video".into(),
 				priority: 2,
-				max_age: std::time::Duration::from_secs(10),
+				max_delay: std::time::Duration::from_secs(10),
 				start_group: None,
 				end_group: None,
 				start_frame: 0,
@@ -503,11 +510,12 @@ impl Default for Messages {
 
 		Self {
 			lite_subscribe: lite::Subscribe {
+				epoch: None,
 				id: 7,
 				broadcast: Path::new("room/alice"),
 				track: "video".into(),
 				priority: 3,
-				max_age: Duration::from_millis(500),
+				max_delay: Duration::from_millis(500),
 				start_group: Some(1_000),
 				end_group: None,
 				start_frame: 0,
@@ -515,7 +523,7 @@ impl Default for Messages {
 			},
 			lite_update: lite::SubscribeUpdate {
 				priority: 4,
-				max_age: Duration::from_millis(500),
+				max_delay: Duration::from_millis(500),
 				start_group: Some(1_000),
 				end_group: Some(2_000),
 				start_frame: 0,
@@ -1090,7 +1098,7 @@ struct Chunks {
 	ready: bool,
 }
 
-impl web_transport_trait::poll::RecvStream for Chunks {
+impl crate::transport::poll::RecvStream for Chunks {
 	type Error = NoError;
 
 	fn poll_read(
@@ -1143,7 +1151,7 @@ impl std::fmt::Display for NoError {
 
 impl std::error::Error for NoError {}
 
-impl web_transport_trait::Error for NoError {
+impl crate::transport::Error for NoError {
 	fn session_error(&self) -> Option<(u32, String)> {
 		None
 	}

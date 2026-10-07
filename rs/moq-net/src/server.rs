@@ -1,7 +1,7 @@
 //! Accepting a MoQ session, including the paused handshake that inspects the
 //! peer's SETUP before granting origins.
 
-use web_transport_trait::{MaybeSend, MaybeSync};
+use crate::transport::{MaybeSend, MaybeSync};
 
 use crate::origin;
 use crate::time::{Clock, Instant};
@@ -128,6 +128,7 @@ impl Server {
 			start.recv_bandwidth,
 			crate::driver::Protocol::Lite(Box::new(start.driver)),
 			start.goaway,
+			start.setup,
 		))
 	}
 
@@ -519,7 +520,7 @@ where
 
 			// The client's SETUP was read at the pause; hand the stream back
 			// for GOAWAY. A server never advertises a path, hence `None`.
-			let (protocol, goaway) = ietf::start(ietf::Config {
+			let (protocol, goaway, setup) = ietf::start(ietf::Config {
 				runtime: runtime.clone(),
 				session: session.clone(),
 				setup: None,
@@ -545,6 +546,7 @@ where
 				None,
 				crate::driver::Protocol::Ietf(protocol),
 				goaway,
+				setup,
 			))
 		}
 		.maybe_boxed()
@@ -605,7 +607,7 @@ where
 			};
 			stream.writer.encode(&server_setup).await?;
 
-			let (recv_bw, protocol, goaway) = match version {
+			let (recv_bw, protocol, goaway, setup) = match version {
 				Version::Lite(v) => {
 					let stream = stream.with_version(v);
 					// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
@@ -624,12 +626,13 @@ where
 						start.recv_bandwidth,
 						crate::driver::Protocol::Lite(Box::new(start.driver)),
 						start.goaway,
+						start.setup,
 					)
 				}
 				Version::Ietf(v) => {
 					let stream = stream.with_version(v);
 					// Draft 14-16: path came in the bidi SETUP, no uni SETUP to hand back.
-					let (protocol, goaway) = ietf::start(ietf::Config {
+					let (protocol, goaway, setup) = ietf::start(ietf::Config {
 						runtime: runtime.clone(),
 						session: session.clone(),
 						setup: Some(stream),
@@ -646,11 +649,13 @@ where
 						peer_declared: Some(peer_declared),
 						early_unis: Vec::new(),
 					})?;
-					(None, crate::driver::Protocol::Ietf(protocol), goaway)
+					(None, crate::driver::Protocol::Ietf(protocol), goaway, setup)
 				}
 			};
 
-			Ok(Session::new(runtime, session, version, recv_bw, protocol, goaway))
+			Ok(Session::new(
+				runtime, session, version, recv_bw, protocol, goaway, setup,
+			))
 		}
 		.maybe_boxed()
 	}
@@ -831,7 +836,7 @@ mod tests {
 		}
 	}
 	impl std::error::Error for FakeError {}
-	impl web_transport_trait::Error for FakeError {
+	impl crate::transport::Error for FakeError {
 		fn session_error(&self) -> Option<(u32, String)> {
 			Some((0, "closed".to_string()))
 		}
@@ -865,12 +870,12 @@ mod tests {
 			self
 		}
 
-		fn closed(&self) -> Option<u32> {
+		fn close_code(&self) -> Option<u32> {
 			*self.closed.lock().unwrap()
 		}
 	}
 
-	impl web_transport_trait::poll::Session for FakeSession {
+	impl crate::transport::poll::Session for FakeSession {
 		type SendStream = FakeSend;
 		type RecvStream = FakeRecv;
 		type Error = FakeError;
@@ -884,7 +889,7 @@ mod tests {
 					data: data.into(),
 					stops: self.stops.clone(),
 				})),
-				None if self.closed().is_some() => std::task::Poll::Ready(Err(FakeError)),
+				None if self.close_code().is_some() => std::task::Poll::Ready(Err(FakeError)),
 				None => std::task::Poll::Pending,
 			}
 		}
@@ -940,14 +945,14 @@ mod tests {
 		fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Error> {
 			std::task::Poll::Pending
 		}
-		fn stats(&self) -> impl web_transport_trait::Stats {
-			web_transport_trait::StatsUnavailable
+		fn stats(&self) -> impl crate::transport::Stats {
+			crate::transport::StatsUnavailable
 		}
 	}
 
 	#[derive(Clone, Default)]
 	struct FakeSend;
-	impl web_transport_trait::poll::SendStream for FakeSend {
+	impl crate::transport::poll::SendStream for FakeSend {
 		type Error = FakeError;
 		fn poll_write(
 			&mut self,
@@ -970,7 +975,7 @@ mod tests {
 		data: VecDeque<u8>,
 		stops: Arc<Mutex<Vec<u32>>>,
 	}
-	impl web_transport_trait::poll::RecvStream for FakeRecv {
+	impl crate::transport::poll::RecvStream for FakeRecv {
 		type Error = FakeError;
 		fn poll_read(
 			&mut self,
@@ -1111,7 +1116,7 @@ mod tests {
 			for (name, session) in [("draft-19", modern), ("draft-16", legacy)] {
 				let result = Server::new().accept_request(moq_net_sim::now(), session.clone()).await;
 				assert!(result.is_err(), "{name}");
-				assert_eq!(session.closed(), Some(code.to_code()), "{name} {code}");
+				assert_eq!(session.close_code(), Some(code.to_code()), "{name} {code}");
 			}
 		}
 	}
@@ -1209,7 +1214,7 @@ mod tests {
 	#[moq_net_sim::test]
 	async fn accept_request_reads_buffered_setup_after_transport_close() {
 		let mut session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/closed"), None, None)]);
-		web_transport_trait::poll::Session::close(&mut session, SessionError::Cancel.to_code(), "closed");
+		crate::transport::poll::Session::close(&mut session, SessionError::Cancel.to_code(), "closed");
 		let request = Server::new()
 			.accept_request_lite(moq_net_sim::now(), session)
 			.await
@@ -1228,7 +1233,7 @@ mod tests {
 		let (_session, mut driver) = request.ok().await.unwrap();
 		transport.uni.lock().unwrap().push_back(vec![1]);
 		let _ = driver.poll(moq_net_sim::now(), &kio::Waiter::noop());
-		assert_eq!(transport.closed(), Some(SessionError::ProtocolViolation.to_code()));
+		assert_eq!(transport.close_code(), Some(SessionError::ProtocolViolation.to_code()));
 	}
 
 	#[moq_net_sim::test]

@@ -177,7 +177,7 @@ pub struct SubscribeArgs {
 
 	/// How far playback may drift from the live edge before skipping groups. TS also
 	/// holds every frame this long after its decode time (`--delay`).
-	pub max_age: Duration,
+	pub max_delay: Duration,
 
 	/// How long to wait for the broadcast to come back after it ends (TS only).
 	pub linger: Duration,
@@ -277,7 +277,7 @@ impl Subscribe {
 		// yields moof+mdat fragments in timestamp order across tracks.
 		let stream = self.stream().await?;
 		let mut fmp4 = moq_mux::container::fmp4::Export::new(self.source, stream)
-			.with_max_age(self.args.max_age)
+			.with_max_delay(self.args.max_delay)
 			.with_fragment_duration(self.args.fragment_duration);
 
 		while let Some(chunk) = fmp4.next().await? {
@@ -296,7 +296,7 @@ impl Subscribe {
 		// shape internally (synthesizing avcC/hvcC from inline parameter sets).
 		let stream = self.stream().await?;
 		let mut mkv = moq_mux::container::mkv::Export::new(self.source, stream)
-			.with_max_age(self.args.max_age)
+			.with_max_delay(self.args.max_delay)
 			.with_fragment_duration(self.args.fragment_duration);
 
 		while let Some(chunk) = mkv.next().await? {
@@ -311,7 +311,7 @@ impl Subscribe {
 		let mut stdout = tokio::io::stdout();
 
 		let stream = self.stream().await?;
-		let mut h264 = moq_mux::codec::h264::Export::new(self.source, stream).with_max_age(self.args.max_age);
+		let mut h264 = moq_mux::codec::h264::Export::new(self.source, stream).with_max_delay(self.args.max_delay);
 
 		while let Some(chunk) = h264.next().await? {
 			stdout.write_all(&chunk).await?;
@@ -325,7 +325,7 @@ impl Subscribe {
 		let mut stdout = tokio::io::stdout();
 
 		let stream = self.stream().await?;
-		let mut h265 = moq_mux::codec::h265::Export::new(self.source, stream).with_max_age(self.args.max_age);
+		let mut h265 = moq_mux::codec::h265::Export::new(self.source, stream).with_max_delay(self.args.max_delay);
 
 		while let Some(chunk) = h265.next().await? {
 			stdout.write_all(&chunk).await?;
@@ -347,7 +347,7 @@ impl Subscribe {
 		let mut broadcast = source.broadcast().await?;
 		let mut ts = moq_mux::container::ts::Export::with_ts(self.source, self.catalog)
 			.await?
-			.with_delay(self.args.max_age);
+			.with_delay(self.args.max_delay);
 		if let Some(mux_rate) = self.args.mux_rate {
 			ts = ts.with_mux_rate(mux_rate);
 		}
@@ -422,7 +422,7 @@ impl Subscribe {
 		let select = self.args.selection()?;
 		let mut flv = moq_mux::container::flv::Export::with_catalog_format(self.source, self.catalog)
 			.await?
-			.with_max_age(self.args.max_age)
+			.with_max_delay(self.args.max_delay)
 			.with_select(select);
 
 		while let Some(chunk) = flv.next().await? {

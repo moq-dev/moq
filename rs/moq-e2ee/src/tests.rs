@@ -278,7 +278,7 @@ fn test_generation() -> Generation {
 }
 
 fn subscribe_all() -> moq_net::track::Subscription {
-	moq_net::track::Subscription::default().with_max_age(Duration::from_secs(60))
+	moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60))
 }
 
 fn net_track(name: &Name) -> moq_net::track::Producer {
@@ -339,15 +339,10 @@ fn datagram_ciphertext(generation: &Generation, name: &Name, sequence: u64, plai
 }
 
 #[test]
-fn path_joins_epoch() {
-	let cred = test_credential();
-	let epoch = Epoch::mint();
-	let path = cred.path("meeting.hang").unwrap();
+fn path_is_opaque() {
+	let path = test_credential().path("meeting.hang").unwrap();
 	assert_eq!(path.as_str().len(), 22);
-	let full = path.join_epoch(Some(&epoch));
-	let (opaque, parsed) = full.split_epoch();
-	assert_eq!(opaque, path);
-	assert_eq!(parsed.unwrap(), epoch);
+	assert!(!path.as_str().contains("meeting"));
 }
 
 #[test]

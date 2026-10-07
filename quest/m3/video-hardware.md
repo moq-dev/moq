@@ -13,11 +13,12 @@ the KDE DMA-BUF capture and PipeWire camera validations fold in here, and the
 V4L2 `VIDIOC_EXPBUF` source is dropped with the export itself (see
 [#2819](/quest/m2/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md)).
 
-- **VAAPI low-power entrypoint and a second GPU.** H.264 encode, DMA-BUF
-  input, and VPP resize ran on Intel Meteor Lake with iHD (moq-vaapi 0.1.0).
-  Still unrun: the low-power encode entrypoint, which that device does not
-  expose, and `MOQ_VAAPI_DEVICE` naming a node other than the first render
-  node.
+- **VAAPI low-power entrypoint.** H.264 encode, DMA-BUF input, and VPP
+  resize ran on Intel Meteor Lake with iHD (moq-vaapi 0.1.0). Still unrun:
+  the low-power encode entrypoint, which that device does not expose. A
+  render node other than the first moved to
+  [VA-API external images](/quest/m2/vaapi-vulkan-import.md) (2026-10-06 audit),
+  whose two-node test host has one.
 - **Windows Media Foundation capture**: on-demand open and close, so the
   camera LED is off when nobody is watching, and NV12 delivery from MJPEG and
   YUY2 cameras.

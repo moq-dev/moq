@@ -22,7 +22,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use web_transport_trait::poll;
+use moq_net::transport::poll;
 
 // ── Error ───────────────────────────────────────────────────────────
 
@@ -65,7 +65,7 @@ impl std::fmt::Display for MockError {
 
 impl std::error::Error for MockError {}
 
-impl web_transport_trait::Error for MockError {
+impl moq_net::transport::Error for MockError {
 	fn session_error(&self) -> Option<(u32, String)> {
 		self.session.map(|c| (c, self.reason.clone()))
 	}
@@ -106,7 +106,17 @@ struct ClosedSignal {
 }
 
 impl ClosedSignal {
-	fn set(&self, result: Result<(), MockError>) {
+	/// Signal the sender once `delay` has passed: a STOP_SENDING crosses the link like data.
+	fn set(self: &Arc<Self>, delay: Duration, result: Result<(), MockError>) {
+		if !delay.is_zero() {
+			// Only a test sets a latency, so the stop lands on the simulated clock.
+			let signal = self.clone();
+			drop(moq_net_sim::spawn(async move {
+				moq_net_sim::sleep(delay).await;
+				signal.set(Duration::ZERO, result);
+			}));
+			return;
+		}
 		let mut slot = self.result.lock();
 		if slot.is_none() {
 			*slot = Some(result);
@@ -166,7 +176,7 @@ impl poll::SendStream for MockSendStream {
 			// trusts this signal ahead of the connection error.
 			let pushed = self.push(StreamChunk::Fin);
 			if pushed.is_ok() && (self.ack_fin || self.conn.ack_fins.load(Ordering::Relaxed)) {
-				self.closed.set(Ok(()));
+				self.closed.set(Duration::ZERO, Ok(()));
 			}
 			self.tx = None;
 			pushed?;
@@ -297,7 +307,7 @@ impl poll::RecvStream for MockRecvStream {
 	}
 
 	fn stop(&mut self, _code: u32) {
-		self.closed.set(Ok(()));
+		self.closed.set(self.conn.latency(), Ok(()));
 		self.done = true;
 	}
 
@@ -329,8 +339,9 @@ impl poll::RecvStream for MockRecvStream {
 impl Drop for MockRecvStream {
 	fn drop(&mut self) {
 		// Signal the paired SendStream that the receiver is gone (implicit STOP),
-		// and fail its future writes.
-		self.closed.set(Ok(()));
+		// and fail its future writes. Unlike QUIC, writes fail at once, a link
+		// latency before `poll_closed` reports the stop.
+		self.closed.set(self.conn.latency(), Ok(()));
 		self.rx.close();
 	}
 }
@@ -378,7 +389,7 @@ struct ConnectionState {
 	/// Set once by whichever side closes first.
 	/// Setting it wakes both sides.
 	close_state: kio::Shared<Option<(u32, String)>>,
-	/// One-way delay for stream data in each direction. Zero by default.
+	/// One-way delay for stream data and STOP_SENDING in each direction. Zero by default.
 	latency: Mutex<Duration>,
 }
 
@@ -426,7 +437,7 @@ struct SessionSide {
 
 /// An in-memory mock WebTransport session.
 ///
-/// Implements [`web_transport_trait::poll::Session`]. Created in pairs via
+/// Implements [`moq_net::transport::poll::Session`]. Created in pairs via
 /// [`create_mock_session_pair`]. Streams opened on one side are delivered to
 /// the peer's accept methods deterministically via unbounded queues.
 #[derive(Clone)]
@@ -553,8 +564,8 @@ impl poll::Session for MockSession {
 		Poll::Ready(MockError::session(code, reason))
 	}
 
-	fn stats(&self) -> impl web_transport_trait::Stats {
-		web_transport_trait::StatsUnavailable
+	fn stats(&self) -> impl moq_net::transport::Stats {
+		moq_net::transport::StatsUnavailable
 	}
 }
 
@@ -632,8 +643,8 @@ impl MockSession {
 		*self.side.lossy.lock().unwrap() = true;
 	}
 
-	/// Delay stream data sent from now on by `latency` in each direction, keeping
-	/// each stream in order. Measured on the simulated clock, so tests advance
+	/// Delay stream data and STOP_SENDING sent from now on by `latency` in each direction,
+	/// keeping each stream in order. Measured on the simulated clock, so tests advance
 	/// through it without sleeping.
 	pub fn set_latency(&self, latency: Duration) {
 		*self.side.conn.latency.lock().unwrap() = latency;
@@ -652,7 +663,7 @@ impl MockSession {
 ///
 /// Streams opened on `client` appear in `server.accept_*()` and vice versa.
 /// Both sides report the given `protocol` from
-/// [`web_transport_trait::poll::Session::protocol`], matching ALPN negotiation
+/// [`moq_net::transport::poll::Session::protocol`], matching ALPN negotiation
 /// behavior.
 pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession, MockSession) {
 	let conn = Arc::new(ConnectionState::default());

@@ -254,7 +254,7 @@ async fn import_opus_frames() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(
@@ -533,7 +533,7 @@ async fn survives_midstream_join() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(
@@ -587,7 +587,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(
@@ -860,7 +860,7 @@ fn assert_legal(ts: &[u8], stimulus: &[u8]) {
 
 /// Import `ts` with an `mpegts` catalog, snapshotting the stats once the program clock
 /// reaches each of `at`, and once more at the end of the input.
-fn sample(ts: &[u8], at: &[std::time::Duration]) -> Vec<crate::container::ts::Stats> {
+fn sample(ts: &[u8], at: &[std::time::Duration]) -> Vec<crate::container::ts::stats::Snapshot> {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let _catalog = crate::catalog::Producer::new(
 		&mut broadcast,
@@ -970,7 +970,7 @@ fn import_reports_every_elementary_stream() {
 		),
 	] {
 		let stats = sample(data, &[]).pop().unwrap();
-		let tracks: Vec<(u16, &str)> = stats.streams.iter().map(|(&pid, s)| (pid, s.track)).collect();
+		let tracks: Vec<(u16, &str)> = stats.streams.iter().map(|(&pid, s)| (pid, s.track.as_str())).collect();
 		assert_eq!(tracks, rows);
 		for (pid, stream) in &stats.streams {
 			assert!(stream.units > 0, "{pid:#x} delivered nothing: {stream:?}");

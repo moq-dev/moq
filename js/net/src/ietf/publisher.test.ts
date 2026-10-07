@@ -1,6 +1,7 @@
 import { expect, jest, mock, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
+import * as Epoch from "../epoch.ts";
 import { error } from "../error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "../group.ts";
 import { type Hop, HopSchema } from "../hop.ts";
@@ -371,7 +372,7 @@ test("a group that goes stale while its stream opens writes nothing", async () =
 		write(2, 20_000);
 		open();
 
-		expect(String(await streamReset)).toContain("max age budget");
+		expect(String(await streamReset)).toContain("max delay budget");
 		expect(writes).toBe(0);
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(unhandled).toEqual([]);
@@ -879,6 +880,36 @@ test("republishing a path clears a refusal without unannouncing first", async ()
 	const retried = await nextStream(pair.client);
 	if (!retried) throw new Error("the replacement broadcast was never offered");
 	expect(await readPublishNamespace(retried)).toBe(Path.from("recycled"));
+	await acceptPublishNamespace(retried);
+
+	origin.close();
+});
+
+/**
+ * A new epoch on the same broadcast handle is another publisher instance, so a refusal of
+ * the old one does not strand it. Rust gets this from the END and START an epoch change
+ * delivers.
+ */
+test("a new epoch at the same path clears a refusal", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const { pub, origin } = publisher(pair.server);
+
+	const broadcast = origin.createBroadcast(Path.from("restarted"));
+	broadcast.announce({ epoch: Epoch.mint() });
+
+	void pub.runPublishNamespaces();
+
+	const declined = await nextStream(pair.client);
+	if (!declined) throw new Error("the namespace was never advertised");
+	expect(await readPublishNamespace(declined)).toBe(Path.from("restarted"));
+	await declinePublishNamespace(declined, 0n);
+	await new Promise((resolve) => setTimeout(resolve, SETTLE));
+
+	broadcast.announce({ ...broadcast.route, epoch: Epoch.mint() });
+
+	const retried = await nextStream(pair.client);
+	if (!retried) throw new Error("the new instance was never offered");
+	expect(await readPublishNamespace(retried)).toBe(Path.from("restarted"));
 	await acceptPublishNamespace(retried);
 
 	origin.close();
@@ -2438,7 +2469,7 @@ test("REQUEST_UPDATE applies priority and preserves it when omitted", async () =
 		await RequestOk.decode(client.reader, fx.version);
 		expect(track.subscription.peek()?.priority).toBe(245);
 		// Only the priority changes; retention and the group range survive.
-		expect(track.subscription.peek()?.maxAge).toBe(before?.maxAge);
+		expect(track.subscription.peek()?.maxDelay).toBe(before?.maxDelay);
 		expect(track.subscription.peek()?.groups).toEqual(before?.groups);
 		await client.writer.write(new Uint8Array([0x02, 0, 2, 4, 0]));
 		expect(await client.reader.u53()).toBe(RequestOk.id);

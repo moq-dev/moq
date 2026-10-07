@@ -8,7 +8,7 @@ the new provider at the first frame it has not delivered. A viewer at the live
 edge with no latency budget never loses a group across the swap, and never
 has to notice the swap to keep reading.
 
-Done when `test/drain` passes with the viewer's `MAX_AGE` at zero, the
+Done when `test/drain` passes with the viewer's `MAX_DELAY` at zero, the
 viewer subscribes once instead of following `request.active`, and the run is
 stable enough for the nightly.
 
@@ -41,9 +41,9 @@ settle along the way:
 - `js/watch` and `js/hang` consumers that re-subscribe on `active` changes.
   Check whether they still need to.
 - Giving up a resumed group no route continues. Mirror Rust's rule from
-  [Untimed failover](/quest/m1/untimed-failover.md): when media time can't
-  judge its drift, give it up once the new route holds a newer group and
-  nothing can still fill it.
+  [One max_age meaning](/quest/m1/cache-max-age.md): give it up once its
+  wall-clock age since its successor arrived, or its media-time drift,
+  reaches the reader's budget.
 
 Add unit coverage at the origin level against stand-in sessions, then flip
 `test/drain` to zero budget (drop the resubscribe loop in `drain.ts` and the

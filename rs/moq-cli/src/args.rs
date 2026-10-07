@@ -30,7 +30,6 @@
 //!   an `import hls` playlist path starting with `-`, which `./-name` covers, so
 //!   the separator stays unconditional rather than context-sensitive.
 
-use anyhow::Context as _;
 use std::ffi::{OsStr, OsString};
 use std::time::Duration;
 
@@ -289,15 +288,19 @@ impl Invocation {
 			let Command::Export(export) = command else {
 				continue;
 			};
-			if let Some(stdout) = export.sink.stdout()
-				&& matches!(stdout.format, SubscribeFormat::H264 | SubscribeFormat::H265)
-			{
+			if let Some(stdout) = export.sink.stdout() {
 				anyhow::ensure!(
-					!export.select.no_video,
-					"--no-video leaves nothing for a video elementary stream; pick a container format"
+					stdout.linger.is_zero() || matches!(stdout.format, SubscribeFormat::Ts),
+					"--linger needs an output that can mark a restart, and only `export ts` can"
 				);
-				if let Some(flag) = export.select.audio_flag() {
-					anyhow::bail!("a video elementary stream has no audio; remove {flag}");
+				if matches!(stdout.format, SubscribeFormat::H264 | SubscribeFormat::H265) {
+					anyhow::ensure!(
+						!export.select.no_video,
+						"--no-video leaves nothing for a video elementary stream; pick a container format"
+					);
+					if let Some(flag) = export.select.audio_flag() {
+						anyhow::bail!("a video elementary stream has no audio; remove {flag}");
+					}
 				}
 			}
 			if let Some(sink) = export.sink.ignores_selection()
@@ -508,20 +511,19 @@ impl MoqSide {
 		}
 		// A listener for ordinary clients admits nobody without a decision; a mesh
 		// listener alone admits its peers by their LAN credential.
-		if self.server.has_explicit_bind() {
-			self.auth
-				.validate()
-				.context("--listen needs --auth-url or --auth-public")?;
-		} else if self.auth.url.is_some() || self.auth_public() {
-			self.auth.validate()?;
+		anyhow::ensure!(
+			!(self.server.has_explicit_bind() && self.auth.is_empty()),
+			"--listen needs --auth-url or --auth-public"
+		);
+		if !self.auth.is_empty() {
+			self.auth.validate(self.client_ca())?;
 		}
-		self.auth.validate_client_ca(!self.server.tls.root.is_empty())?;
 		Ok(())
 	}
 
-	/// Whether any public pattern was passed.
-	fn auth_public(&self) -> bool {
-		!(self.auth.public.is_empty() && self.auth.public_subscribe.is_empty() && self.auth.public_publish.is_empty())
+	/// Whether the listener verifies client certificates (`--listen-tls-root`).
+	pub fn client_ca(&self) -> bool {
+		!self.server.tls.root.is_empty()
 	}
 
 	/// The MoQ-side flags one chunk of a command line typed, each once, in order.
@@ -841,9 +843,7 @@ impl Export {
 			ExportSink::Ts(args) => found.extend(args.deprecated()),
 			ExportSink::Flv(args) | ExportSink::H264(args) | ExportSink::H265(args) => found.extend(args.deprecated()),
 			ExportSink::Hls(hls) => found.extend(hls.tls.deprecated()),
-			ExportSink::Rtmp(rtmp) if rtmp.latency_max.is_some() => {
-				found.flag("--latency-max", None, "--max-age");
-			}
+			ExportSink::Rtmp(rtmp) => found.extend(rtmp.deprecated()),
 			_ => {}
 		}
 		found
@@ -902,8 +902,8 @@ impl ExportSink {
 	pub fn stdout(&self) -> Option<Stdout> {
 		let container = |format, container: &Container| Stdout {
 			format,
-			max_age: container.max_age.into_std(),
-			linger: Duration::ZERO,
+			max_delay: container.max_delay.into_std(),
+			linger: container.linger.into_std(),
 			fragment_duration: None,
 			mux_rate: None,
 		};
@@ -918,7 +918,7 @@ impl ExportSink {
 			},
 			Self::Ts(args) => Stdout {
 				format: SubscribeFormat::Ts,
-				max_age: args.delay.into_std(),
+				max_delay: args.delay.into_std(),
 				linger: args.linger.into_std(),
 				fragment_duration: None,
 				mux_rate: args.mux_rate,
@@ -935,21 +935,30 @@ impl ExportSink {
 pub struct Stdout {
 	pub format: SubscribeFormat,
 	/// The staleness budget, which `ts` also holds every frame for (`--delay`).
-	pub max_age: Duration,
+	pub max_delay: Duration,
 	pub linger: Duration,
 	pub fragment_duration: Option<Duration>,
 	pub mux_rate: Option<u64>,
 }
 
-/// Options shared by every stdout container sink.
+/// Options shared by the stdout container sinks other than `ts`.
 #[derive(usage::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Container {
-	/// How stale a group may get before it is skipped (e.g. `500ms`, `1s`).
+	/// How far a group may fall behind the live edge before it is skipped (e.g. `500ms`, `1s`).
 	#[usage(long, default = "500ms")]
-	pub max_age: crate::duration::Duration,
+	pub max_delay: crate::duration::Duration,
 
-	/// The released spelling of [`Self::max_age`].
+	/// Accepted only to refuse a nonzero value with a pointer to `ts`, the one format
+	/// that can mark where a returned broadcast restarts.
+	#[usage(long, default = "0s", hide = true)]
+	pub linger: crate::duration::Duration,
+
+	/// The released spelling of [`Self::max_delay`].
+	#[usage(long = "max-age", hide = true)]
+	max_age: Option<crate::duration::Duration>,
+
+	/// The released spelling of [`Self::max_delay`], before `--max-age`.
 	#[usage(long = "latency-max", hide = true)]
 	latency_max: Option<crate::duration::Duration>,
 }
@@ -957,8 +966,11 @@ pub struct Container {
 impl Container {
 	fn deprecated(&self) -> moq_tokio::cli::Deprecated {
 		let mut found = moq_tokio::cli::Deprecated::default();
+		if self.max_age.is_some() {
+			found.flag("--max-age", None, "--max-delay");
+		}
 		if self.latency_max.is_some() {
-			found.flag("--latency-max", None, "--max-age");
+			found.flag("--latency-max", None, "--max-delay");
 		}
 		found
 	}
@@ -1052,15 +1064,18 @@ mod tests {
 	/// Only TS can mark where a returned broadcast restarts, so only `export ts` may linger.
 	#[test]
 	fn linger_is_ts_only() {
-		let parse = |format: &str| {
-			Invocation::try_parse_from(["moq", "--connect", "http://relay", "export", format, "--linger", "10s"])
+		let parse = |format: &str, linger: &str| {
+			Invocation::try_parse_from(["moq", "--connect", "http://relay", "export", format, "--linger", linger])
+				.unwrap()
 		};
-		assert!(parse("ts").unwrap().validate().is_ok());
+		assert!(parse("ts", "10s").validate().is_ok());
 		for format in ["fmp4", "mkv", "flv", "h264", "h265"] {
-			let Err(err) = parse(format) else {
-				panic!("{format} took --linger");
-			};
-			assert!(err.to_string().contains("--linger"), "{format}: {err}");
+			let err = parse(format, "10s").validate().unwrap_err().to_string();
+			assert!(err.contains("--linger"), "{format}: {err}");
+			assert!(
+				parse(format, "0s").validate().is_ok(),
+				"{format}: no linger is always fine"
+			);
 		}
 	}
 
@@ -1078,7 +1093,7 @@ mod tests {
 			let Command::Export(export) = &cli.stages[0] else {
 				panic!("not an export");
 			};
-			export.sink.stdout().unwrap().max_age
+			export.sink.stdout().unwrap().max_delay
 		};
 		assert_eq!(stdout(&[]), Duration::from_millis(500));
 		assert_eq!(stdout(&["--delay", "2s"]), Duration::from_secs(2));
@@ -1367,7 +1382,7 @@ mod tests {
 	#[test]
 	fn a_client_ca_needs_an_auth_server() {
 		let parse = |auth: [&str; 2]| {
-			let mut argv = vec!["moq", "--listen-tcp-bind", "127.0.0.1:0", "--listen-tls-root", "ca.pem"];
+			let mut argv = vec!["moq", "--listen", "127.0.0.1:0", "--listen-tls-root", "ca.pem"];
 			argv.extend(auth);
 			argv.extend(["import", "ts"]);
 			Invocation::try_parse_from(argv).expect("parse")
@@ -1685,7 +1700,60 @@ mod tests {
 		else {
 			panic!("--latency-max must not start a run");
 		};
-		assert!(err.to_string().contains("--latency-max -> --max-age"), "{}", err);
+		assert!(err.to_string().contains("--latency-max -> --max-delay"), "{}", err);
+	}
+
+	/// A publisher's retention is `--max-age` on `import`; a subscriber's staleness budget is
+	/// `--max-delay` on `export`, except `export ts`, which spells it `--delay`.
+	#[test]
+	fn export_staleness_is_max_delay_and_import_retention_is_max_age() {
+		let export = |args: &[&str]| {
+			let mut argv = vec!["moq", "export", "--broadcast", "b"];
+			argv.extend_from_slice(args);
+			Invocation::try_parse_from(argv)
+		};
+		let stdout = |args: &[&str]| {
+			let cli = export(args).unwrap();
+			let Command::Export(export) = &cli.stages[0] else {
+				panic!("expected export")
+			};
+			export.sink.stdout().unwrap().max_delay
+		};
+
+		for format in ["fmp4", "mkv", "flv", "h264", "h265"] {
+			assert_eq!(stdout(&[format]), Duration::from_millis(500), "{format}");
+			assert_eq!(
+				stdout(&[format, "--max-delay", "2s"]),
+				Duration::from_secs(2),
+				"{format}"
+			);
+			let Err(err) = export(&[format, "--max-age", "2s"]) else {
+				panic!("{format}: --max-age must not start a run");
+			};
+			assert!(err.to_string().contains("--max-age -> --max-delay"), "{format}: {err}");
+		}
+
+		assert_eq!(stdout(&["ts", "--delay", "2s"]), Duration::from_secs(2));
+		assert!(export(&["ts", "--max-delay", "2s"]).is_err(), "ts spells it --delay");
+
+		let rtmp = |flag: &str| export(&["rtmp", "--connect", "rtmp://example.com/live/key", flag, "2s"]);
+		let cli = rtmp("--max-delay").unwrap();
+		let Command::Export(export_rtmp) = &cli.stages[0] else {
+			panic!("expected export")
+		};
+		let ExportSink::Rtmp(args) = &export_rtmp.sink else {
+			panic!("expected rtmp")
+		};
+		assert_eq!(args.max_delay.into_std(), Duration::from_secs(2));
+		let Err(err) = rtmp("--max-age") else {
+			panic!("rtmp: --max-age must not start a run");
+		};
+		assert!(err.to_string().contains("--max-age -> --max-delay"), "rtmp: {err}");
+
+		assert!(
+			Invocation::try_parse_from(["moq", "import", "--max-delay", "5s", "ts"]).is_err(),
+			"import has no subscriber budget"
+		);
 	}
 
 	#[test]

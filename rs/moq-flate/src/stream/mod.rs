@@ -280,7 +280,7 @@ mod test {
 	/// backlog. The default budget is [`Duration::ZERO`], which abandons any group a newer one has
 	/// already superseded.
 	fn replaying() -> moq_net::track::Subscription {
-		moq_net::track::Subscription::default().with_max_age(std::time::Duration::from_secs(30))
+		moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(30))
 	}
 
 	/// The track ends with the group, so nothing opens a second one and splits the log.

@@ -25,9 +25,8 @@ Older quests say "the fork" or "noq"; read that as `moq-quic`. Their steps to
 publish a fork release, pin it, or offer a change upstream are superseded:
 a change lands in-tree with its consumer, and upstreaming is optional.
 
-The seven BBR correctness fixes shipped in moq-noq 1.3.1 (#4206) and move to
-`moq-quic` with the [BBR3 port](/quest/m1/quic/fork/bbr3.md). The remaining
-BBR quests here and [BBR ACK cleanup](/quest/m1/bbr-ack-cleanup.md) all edit
+The seven BBR correctness fixes shipped in moq-noq 1.3.1 (#4206) are in
+`moq-quic`'s BBR3. The remaining BBR quests here and [BBR ACK cleanup](/quest/m1/bbr-ack-cleanup.md) all edit
 `bbr3/mod.rs`, so one owner should work there at a time. Controller-level
 regressions extend the shared test `Sim` in `bbr3/mod.rs` with only what each
 needs, rather than adding another simulation loop; a fix at the transport
@@ -55,8 +54,6 @@ consumes them.
 - [Hard fork](/quest/m1/quic/fork/README.md) - quinn in-tree as `moq-quic`, with BBR3 and lazy stream slots, and MoQ switched onto it
 - [BBR idle burst](/quest/m1/quic/bbr-app-limited.md) - a fork regression proves a burst after a long idle is paced at the learned bandwidth, closing #4219
 - [Mark BBR starvation wherever the source runs dry](/quest/m1/quic/bbr-app-limited-edges.md) - partial polls count, local send caps do not, receiver credit is pinned
-- [Deliver the application close before io_uring teardown](/quest/m1/quic/uring-close.md) -
-  the peer receives the final close when the client immediately stops its worker
 - [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - `RESET_STREAM_AT`,
   so a reset WebTransport stream still delivers its header
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - strict
@@ -72,8 +69,6 @@ consumes them.
 
 - [Scope track priority](/quest/m1/track-priority-scope.md) - the
   per-broadcast fairness policy on cluster sessions
-- [Starvation](/quest/m1/qos/starvation.md) - the first consumer of ACK
-  progress: how far behind viewers are, from the relay's point of view
 - [Discover media headroom](/quest/m2/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
 - [L4S on the backbone](/quest/m2/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m2/quic-careful-resume.md) - a redial starts at the previous connection's rate

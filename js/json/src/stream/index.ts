@@ -10,6 +10,13 @@
  * bound the record rate throttles at the source. Interoperable on the wire with the Rust
  * `moq_json::stream`.
  *
+ * That one group bounds the log at `@moq/net`'s group budget: 32 MiB of payload and 8192 frames. An
+ * append that might not fit throws `GroupTooLarge` before it is encoded, and the log stays intact and
+ * writable. With compression the check counts the record's raw size plus DEFLATE's worst-case
+ * overhead, since the compressed size is only known once the window has moved. The budget covers the
+ * whole log, so once it is spent every append throws and a publisher with more to say opens a new
+ * track.
+ *
  * {@link Producer} and {@link Consumer} own a track: pass `{ track, ... }`. {@link Encoder} and
  * {@link Decoder} are the same logic without it, for when something else is already in charge of the
  * track; they carry the shared DEFLATE window and nothing else, since a log has no group boundaries

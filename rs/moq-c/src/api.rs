@@ -500,7 +500,7 @@ pub struct moq_track_info {
 	pub priority: u8,
 
 	/// Maximum age of a non-latest group before the publisher evicts it, in microseconds.
-	/// The publisher-side half of `moq_subscription.max_age_us`.
+	/// The publisher-side half of `moq_subscription.max_delay_us`.
 	pub max_age_us: u64,
 	/// Whether `max_age_us` is set. When false, the publisher imposes no age limit.
 	pub max_age_present: bool,
@@ -555,11 +555,11 @@ pub struct moq_subscription {
 	/// Delivery priority. Higher values preempt lower ones under contention.
 	pub priority: u8,
 
-	/// Maximum age of a non-latest group before it is skipped, in microseconds.
+	/// How far a non-latest group may fall behind the live edge before it is skipped, in microseconds.
 	/// Zero skips immediately. Enforced by the publisher's cache and by any local buffering.
-	pub max_age_us: u64,
+	pub max_delay_us: u64,
 
-	/// The lowest group to deliver (a floor). A floor is not a request: `max_age_us` is
+	/// The lowest group to deliver (a floor). A floor is not a request: `max_delay_us` is
 	/// what asks for data, and delivery starts at the oldest group at or above the floor
 	/// within that budget (the latest group at the default budget of 0).
 	pub group_start: u64,
@@ -577,7 +577,7 @@ impl From<&moq_subscription> for moq_net::track::Subscription {
 	fn from(subscription: &moq_subscription) -> Self {
 		let mut out = moq_net::track::Subscription::default()
 			.with_priority(subscription.priority)
-			.with_max_age(std::time::Duration::from_micros(subscription.max_age_us));
+			.with_max_delay(std::time::Duration::from_micros(subscription.max_delay_us));
 		if subscription.group_start_present {
 			out = out.with_start(moq_net::track::Position::group(subscription.group_start));
 		}
@@ -726,13 +726,9 @@ pub enum moq_announce_kind {
 	MOQ_ANNOUNCE_KIND_UPDATE = 1,
 	/// No route covers the prefix any more.
 	MOQ_ANNOUNCE_KIND_END = 2,
-	/// Every route live when the listener started has been delivered; what
-	/// follows is live changes. Delivered once, with no prefix or captures.
-	MOQ_ANNOUNCE_KIND_LIVE = 3,
 }
 
-/// An announce event from an origin: a route starting, updating, or ending,
-/// or the listener catching up.
+/// An announce event from an origin: a route starting, updating, or ending.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_announce_event {
@@ -747,7 +743,7 @@ pub struct moq_announce_event {
 	pub captures_len: usize,
 	pub has_captures: bool,
 
-	/// Which event this is. A LIVE event carries no prefix or captures.
+	/// Which event this is.
 	pub kind: moq_announce_kind,
 }
 
@@ -3415,7 +3411,7 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 
 /// Consume a video track from a broadcast, delivering frames in order.
 ///
-/// - `max_age_us` controls the maximum amount of buffering allowed before skipping a GoP.
+/// - `max_delay_us` controls the maximum amount of buffering allowed before skipping a GoP.
 /// - `on_frame` is called with a positive frame ID per frame, then exactly once
 ///   more with a terminal code: `0` (closed cleanly) or a negative error. After
 ///   the terminal (`<= 0`) callback, `on_frame` is never called again and
@@ -3430,16 +3426,16 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 pub unsafe extern "C" fn moq_consume_video(
 	catalog: u32,
 	index: u32,
-	max_age_us: u64,
+	max_delay_us: u64,
 	on_frame: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let max_age = std::time::Duration::from_micros(max_age_us);
+		let max_delay = std::time::Duration::from_micros(max_delay_us);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame)? };
-		State::lock().consume.video(catalog, index, max_age, on_frame)
+		State::lock().consume.video(catalog, index, max_delay, on_frame)
 	})
 }
 
@@ -3464,7 +3460,7 @@ pub extern "C" fn moq_consume_video_cancel(track: u32) -> i32 {
 /// the terminal (`<= 0`) callback, `on_frame` is never called again and
 /// `user_data` is never touched again, so release `user_data` there. The
 /// terminal callback fires even after [moq_consume_audio_cancel].
-/// The `max_age_us` parameter controls how long to wait before skipping frames.
+/// The `max_delay_us` parameter controls how long to wait before skipping frames.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
@@ -3474,16 +3470,16 @@ pub extern "C" fn moq_consume_video_cancel(track: u32) -> i32 {
 pub unsafe extern "C" fn moq_consume_audio(
 	catalog: u32,
 	index: u32,
-	max_age_us: u64,
+	max_delay_us: u64,
 	on_frame: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let max_age = std::time::Duration::from_micros(max_age_us);
+		let max_delay = std::time::Duration::from_micros(max_delay_us);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame)? };
-		State::lock().consume.audio(catalog, index, max_age, on_frame)
+		State::lock().consume.audio(catalog, index, max_delay, on_frame)
 	})
 }
 

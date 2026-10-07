@@ -476,11 +476,11 @@ impl Kind {
 
 	/// The classification [`Import`](super::Import) would give this PID, so a row is graded
 	/// alike at both edges.
-	fn class(&self) -> super::StreamClass {
+	fn class(&self) -> super::stats::Class {
 		match self {
-			Kind::Video(_) => super::StreamClass::Video,
-			Kind::Aac(_) | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3 => super::StreamClass::Audio,
-			Kind::Verbatim { .. } => super::StreamClass::Data,
+			Kind::Video(_) => super::stats::Class::Video,
+			Kind::Aac(_) | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3 => super::stats::Class::Audio,
+			Kind::Verbatim { .. } => super::stats::Class::Data,
 		}
 	}
 }
@@ -609,7 +609,7 @@ impl SiTrack {
 			self.state = match resolved {
 				Ok((broadcast, name)) => match broadcast.track(&name) {
 					Ok(track) => SiState::Subscribing(
-						track.subscribe(moq_net::track::Subscription::default().with_max_age(self.max_age)),
+						track.subscribe(moq_net::track::Subscription::default().with_max_delay(self.max_age)),
 					),
 					Err(err) => {
 						tracing::warn!(%err, track = %name, "SI track unavailable; carrying the last snapshot");
@@ -1385,8 +1385,8 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 		for track in self.tracks.values() {
 			let (units, quiet) = self.liveness.stream(track.pid);
-			let row = super::StreamStats {
-				track: track.kind.suffix(),
+			let row = super::stats::Stream {
+				track: track.kind.suffix().to_string(),
 				class: track.kind.class(),
 				units,
 				quiet,

@@ -118,7 +118,7 @@ impl Publisher {
 		Ok(())
 	}
 
-	fn stats(&self) -> ts::Stats {
+	fn stats(&self) -> ts::stats::Snapshot {
 		match &self.importer {
 			Importer::One { import, .. } => import.stats(),
 			Importer::All(programs) => programs.stats(),
@@ -444,10 +444,8 @@ mod tests {
 		let crate::Error::Mux(moq_mux::Error::Other(inner)) = &err else {
 			panic!("a demux error: {err}");
 		};
-		assert_eq!(
-			inner.downcast_ref::<ts::MultipleProgramsError>(),
-			Some(&ts::MultipleProgramsError { programs: vec![1, 2] })
-		);
+		let refused = inner.downcast_ref::<ts::MultipleProgramsError>();
+		assert_eq!(refused.map(|refused| refused.programs.as_slice()), Some(&[1, 2][..]));
 	}
 
 	/// `Program::One` publishes the chosen program alone on the ingest's path.

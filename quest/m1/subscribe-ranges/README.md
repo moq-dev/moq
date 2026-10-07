@@ -18,8 +18,9 @@ relay bounds a sparse FETCH only if the model can request ranges:
 - **Wire (lite-07, unpublished).** SUBSCRIBE carries a list of group ranges
   (an open end means live) in place of Group Start/End, plus
   `order: asc | desc` (desc, newest first, is today's rule and the default).
-  Max Age stays as a cap alongside the ranges, since a group's timestamp isn't
-  always known. SUBSCRIBE_UPDATE replaces the list. Lite FETCH is removed from
+  Subscriber Max Age (the model's `max_delay`) stays as a cap alongside the
+  ranges, since a group's timestamp isn't always known. SUBSCRIBE_UPDATE
+  replaces the list. Lite FETCH is removed from
   lite-07; published versions keep it, answered through the same model.
 - **Holes.** SUBSCRIBE_DROP (restored in lite-07 by
   [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md)) names every sequence in the
@@ -52,10 +53,10 @@ every sequence delivered or dropped.
 ## Required
 
 - [Model ranges](/quest/m1/subscribe-ranges/model.md) - `Subscription` carries ranges and order, and `Dynamic` fills misses by range
+- [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - publishers name every group they won't deliver
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
 - [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - range FETCH upstream per missing run, and non-blocking FETCH served downstream
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net` model and lite-07 parity
-- [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - publishers name every group they won't deliver
 
 ## Related
 

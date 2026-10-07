@@ -14,5 +14,11 @@ has arrived. Replace it with the jitter buffer the TS export uses
 (`rs/moq-mux/src/jitter.rs`), with the same `--delay` flag and the same
 late-frame drop. Update `doc/bin/cli.md`.
 
-Public API: the exporter gains a delay setting; breaking only if it replaces
-an existing one. Wire: none.
+Decided in the 2026-10-06 audit: `--delay` replaces the staleness flag, as it
+replaced `--max-age` on TS, so one knob sets both the release delay and the
+sources' staleness budget. [#4917](https://github.com/moq-dev/moq/pull/4917)
+renames that flag to `--max-delay` first; this quest then replaces
+`--max-delay` with `--delay`. Rejected: excluding flv from the #4917 rename.
+
+Public API: breaking, the exporter's staleness setting becomes the delay
+setting. Wire: none.

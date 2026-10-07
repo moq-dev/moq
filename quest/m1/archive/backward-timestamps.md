@@ -20,7 +20,3 @@ The 2026-09-30 audit folded this into the recording writer, which landed
 without it; the [#4034 review](https://github.com/moq-dev/moq/pull/4034#issuecomment-6005694031)
 found the silent group drop. The archive format may break in place since it
 is unreleased.
-
-## Related
-
-- [Per-track timelines](/quest/m1/archive/track-timeline.md) - reshapes the recovery this check reads
