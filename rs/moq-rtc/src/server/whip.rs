@@ -98,8 +98,9 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 /// server's) lets the embedder publish through a *scoped* origin, so the publish
 /// scope is enforced by moq-net exactly as for a native session; the bundled
 /// [`router`] passes the server's own (unauthenticated) producer. It parses the
-/// offer, registers the broadcast (so a fast subscriber doesn't 404 in the gap
-/// before the first RTP packet), registers a media session on the shared mux,
+/// offer, registers the broadcast under a fresh epoch (so a fast subscriber
+/// doesn't 404 in the gap before the first RTP packet, and a reconnecting
+/// encoder replaces a stale session's broadcast at once), registers a media session on the shared mux,
 /// and returns the SDP answer plus an opaque `resource_id` for the WHIP
 /// `Location` header. The caller must run the returned [`Response`] to drive the
 /// RTP->MoQ session.
@@ -120,9 +121,10 @@ pub async fn accept(
 
 	// Create the broadcast on the publish origin before negotiating, so a
 	// fast subscriber doesn't see a 404 in the gap between the SDP answer
-	// and the first RTP packet.
-	let producer = publisher.create_broadcast(&broadcast)?;
-	producer.announce(moq_net::origin::Route::default())?;
+	// and the first RTP packet. Each offer is its own publisher instance, so a
+	// reconnect replaces a stale session's broadcast instead of resuming into it.
+	let epoch = moq_net::Epoch::mint();
+	let producer = publisher.publish(&broadcast, moq_net::origin::Route::default().with_epoch(epoch.clone()))?;
 
 	let handle = producer.clone();
 	let config = moq_mux::catalog::Config::default()
@@ -150,6 +152,7 @@ pub async fn accept(
 	// Register before returning so a DELETE that races the first packet still
 	// finds the session; Response::run unregisters itself when it ends.
 	let cancel = server.register_session(resource_id.clone());
+	tracing::info!(%broadcast, %epoch, "whip publish accepted");
 
 	Ok(Response {
 		resource_id: resource_id.clone(),
@@ -183,5 +186,59 @@ fn status_for(err: &Error) -> StatusCode {
 		Error::SessionNotFound => StatusCode::NOT_FOUND,
 		Error::Moq(moq_net::Error::Unauthorized) => StatusCode::UNAUTHORIZED,
 		_ => StatusCode::INTERNAL_SERVER_ERROR,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use str0m::{
+		format::Codec,
+		media::{Direction, MediaKind},
+	};
+
+	use super::*;
+
+	/// An encoder's offer to send one Opus track.
+	fn offer() -> String {
+		let mut rtc = session::rtc_with_codecs(&[Codec::Opus]);
+		let mut api = rtc.sdp_api();
+		api.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
+		let (offer, _pending) = api.apply().expect("an offer");
+		offer.to_sdp_string()
+	}
+
+	/// An encoder reconnecting to the same broadcast while its stale session is still
+	/// open replaces the stale broadcast at once: each offer is its own epoch, so
+	/// viewers re-request instead of stalling on the old one.
+	#[tokio::test]
+	async fn a_reconnect_replaces_the_stale_session() {
+		let server = Server::new(crate::server::Config::default());
+		let origin = moq_tokio::origin::spawn();
+		let consumer = origin.consume();
+		let _stale_session = accept(&server, &origin, "live/cam0", &offer()).await.unwrap();
+		let stale = consumer.request_broadcast("live/cam0").await.unwrap();
+		let mut catalog = stale
+			.track(hang::Catalog::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+
+		let _fresh_session = accept(&server, &origin, "live/cam0", &offer()).await.unwrap();
+		// The session binds a real UDP socket, so this runs on the wall clock.
+		let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+			loop {
+				match catalog.recv_group().await {
+					Ok(Some(_)) => continue,
+					Ok(None) => panic!("the stale broadcast ended cleanly"),
+					Err(err) => return err,
+				}
+			}
+		})
+		.await
+		.expect("the stale viewer stalled");
+		assert!(matches!(ended, moq_net::Error::Unroutable), "{ended:?}");
+		let fresh = consumer.request_broadcast("live/cam0").await.unwrap();
+		assert!(!fresh.is_clone(&stale), "viewers reach the reconnected session");
 	}
 }

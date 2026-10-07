@@ -29,7 +29,10 @@ moq --connect https://relay.example.com/anon --broadcast event.hang import srt -
 ```
 
 Import publishes the feed's own PTS and anchors the catalog clock on its first
-frame, as [`import ts`](/bin/cli) does.
+frame, as [`import ts`](/bin/cli) does. Each connection is its own broadcast,
+under a fresh [epoch](/concept/moq-lite#publisher-epochs): an encoder that
+reconnects while its stale connection is still open replaces it at once, so
+viewers move to the new feed instead of stalling on the old one.
 
 A multi-program feed is refused, as with `import ts`, unless `--program`
 picks one: `--program 2` imports program 2 alone, and `--program all`
