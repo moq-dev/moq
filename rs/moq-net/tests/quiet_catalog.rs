@@ -1,14 +1,13 @@
-//! A catalog publishes one finished group and then stays quiet. The route
-//! carrying it dies while a reader is still subscribed, and another route that
-//! still holds that group takes over. A reader who never received the group
-//! must get it. Media hides a resume that starts at the next group, because
-//! the next group arrives; a catalog does not produce one.
+//! A catalog publishes one finished group and then stays quiet. Media hides a
+//! subscription that starts past a group, because the next group arrives; a
+//! catalog does not produce one, so a reader that never received the snapshot
+//! must still get it.
 
 mod support;
 
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
-use moq_net::{Error, Hop, Timestamp, Version, origin, track};
+use moq_net::{Error, Hop, Timestamp, Version, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -37,104 +36,89 @@ async fn settle() {
 	moq_net_sim::sleep(Duration::from_millis(500)).await;
 }
 
-/// `P -> A -> R` is serving a finished catalog. `P -> B -> R` is standing by.
-/// `A` dies. A new reader on `R` has to receive the snapshot `P` still holds.
-async fn round(version: &str) -> Result<(), String> {
-	let version: Version = version.parse().unwrap();
-	let publisher = produce_origin(1);
-	let relay_a = produce_origin(2);
-	let relay_b = produce_origin(3);
-	let subscriber = produce_origin(4);
-
-	let broadcast = publisher.create_broadcast("live").unwrap();
+/// Announce `live/catalog.json` holding one finished snapshot group.
+fn publish(origin: &origin::Producer) -> (broadcast::Producer, track::Producer) {
+	let broadcast = origin.create_broadcast("live").unwrap();
 	let track = broadcast.create_track("catalog.json", None).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	let mut group = track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, b"snapshot").unwrap();
 	group.finish().unwrap();
+	(broadcast, track)
+}
 
-	let p_a = link(version, &publisher, &relay_a).await;
-	let _p_b = link(version, &publisher, &relay_b).await;
-	let a_r = link(version, &relay_a, &subscriber).await;
-
-	let consumer = subscriber.consume();
+async fn request(origin: &origin::Producer) -> broadcast::Consumer {
+	let consumer = origin.consume();
 	consumer.routed("live").await.unwrap();
-	let remote = consumer.request_broadcast("live").await.unwrap();
-	let mut early = remote
-		.track("catalog.json")
-		.unwrap()
-		.subscribe(None)
-		.await
-		.map_err(|err| format!("{version}: early subscribe: {err}"))?;
-	let mut got = moq_net_sim::timeout(TIMEOUT, early.recv_group())
-		.await
-		.map_err(|_| format!("{version}: the first reader never got the catalog"))?
-		.map_err(|err| format!("{version}: first read: {err}"))?
-		.ok_or_else(|| format!("{version}: catalog track ended empty"))?;
-	let frame = moq_net_sim::timeout(TIMEOUT, got.read_frame())
-		.await
-		.map_err(|_| format!("{version}: snapshot frame missing"))?
-		.map_err(|err| format!("{version}: snapshot read: {err}"))?
-		.ok_or_else(|| format!("{version}: snapshot group ended empty"))?;
-	if frame.payload.as_ref() != b"snapshot" {
-		return Err(format!("{version}: first frame was {:?}", frame.payload));
-	}
+	consumer.request_broadcast("live").await.unwrap()
+}
 
-	// `B` is connected before `A` dies, and the first reader stays subscribed, so
-	// the relay resumes rather than parking an idle cache.
-	let _b_r = link(version, &relay_b, &subscriber).await;
-	settle().await;
-	abort(p_a);
-	abort(a_r);
-	settle().await;
-
-	let start = track.subscription().map(|sub| sub.start);
-	let subscribed = moq_net_sim::timeout(TIMEOUT, remote.track("catalog.json").unwrap().subscribe(None)).await;
-	let mut late = match subscribed {
-		Err(_) => return Err(format!("{version}: late subscribe never resolved; upstream {start:?}")),
-		Ok(Err(err)) => return Err(format!("{version}: late subscribe failed: {err}; upstream {start:?}")),
-		Ok(Ok(late)) => late,
-	};
-	match moq_net_sim::timeout(TIMEOUT, late.recv_group()).await {
-		Err(_) => Err(format!(
-			"{version}: subscribe resolved but no group arrived; upstream {start:?}"
-		)),
-		Ok(Err(err)) => Err(format!("{version}: late read failed: {err}; upstream {start:?}")),
-		Ok(Ok(None)) => Err(format!("{version}: catalog ended with no group; upstream {start:?}")),
-		Ok(Ok(Some(mut group))) => {
-			let frame = moq_net_sim::timeout(TIMEOUT, group.read_frame())
-				.await
-				.map_err(|_| {
-					format!(
-						"{version}: late group {0} had no frame; upstream {start:?}",
-						group.sequence
-					)
-				})?
-				.map_err(|err| format!("{version}: late frame: {err}; upstream {start:?}"))?
-				.ok_or_else(|| format!("{version}: late group ended empty; upstream {start:?}"))?;
-			if group.sequence == 0 && frame.payload.as_ref() == b"snapshot" {
-				Ok(())
-			} else {
-				Err(format!(
-					"{version}: late reader got group {} {:?}",
-					group.sequence, frame.payload
-				))
-			}
-		}
+/// Subscribe without a floor and expect the snapshot as group 0.
+async fn read_snapshot(remote: &broadcast::Consumer) -> Result<track::Subscriber, String> {
+	let subscribe = remote.track("catalog.json").map_err(|err| format!("track: {err}"))?.subscribe(None);
+	let mut sub = moq_net_sim::timeout(TIMEOUT, subscribe)
+		.await
+		.map_err(|_| "subscribe never resolved")?
+		.map_err(|err| format!("subscribe: {err}"))?;
+	let mut group = moq_net_sim::timeout(TIMEOUT, sub.recv_group())
+		.await
+		.map_err(|_| "subscribe resolved but no group arrived")?
+		.map_err(|err| format!("recv: {err}"))?
+		.ok_or("track ended with no group")?;
+	let frame = moq_net_sim::timeout(TIMEOUT, group.read_frame())
+		.await
+		.map_err(|_| "group had no frame")?
+		.map_err(|err| format!("read: {err}"))?
+		.ok_or("group ended empty")?;
+	match (group.sequence, frame.payload.as_ref()) {
+		(0, b"snapshot") => Ok(sub),
+		(sequence, payload) => Err(format!("got group {sequence} {payload:?}")),
 	}
 }
 
-#[moq_net_sim::test]
-async fn a_quiet_catalog_reaches_a_late_reader_after_its_route_dies() {
+/// Run `scenario` for every version and report all failures together.
+async fn each_version<F: Future<Output = Result<(), String>>>(scenario: impl Fn(Version) -> F) {
 	let mut failures = Vec::new();
 	for version in VERSIONS {
-		match moq_net_sim::timeout(Duration::from_secs(30), round(version)).await {
+		let version: Version = version.parse().unwrap();
+		match moq_net_sim::timeout(Duration::from_secs(30), scenario(version)).await {
 			Ok(Ok(())) => {}
-			Ok(Err(err)) => failures.push(err),
+			Ok(Err(err)) => failures.push(format!("{version}: {err}")),
 			Err(_) => failures.push(format!("{version}: scenario timed out")),
 		}
 	}
 	assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// `P -> A -> R` is serving a finished catalog and `P -> B -> R` is standing by.
+/// `A` dies. A new reader on `R` has to receive the snapshot `P` still holds.
+#[moq_net_sim::test]
+async fn a_quiet_catalog_reaches_a_late_reader_after_its_route_dies() {
+	each_version(|version| async move {
+		let publisher = produce_origin(1);
+		let relay_a = produce_origin(2);
+		let relay_b = produce_origin(3);
+		let subscriber = produce_origin(4);
+		let _published = publish(&publisher);
+
+		let p_a = link(version, &publisher, &relay_a).await;
+		let _p_b = link(version, &publisher, &relay_b).await;
+		let a_r = link(version, &relay_a, &subscriber).await;
+
+		let remote = request(&subscriber).await;
+		// Stays subscribed, so the relay resumes rather than parking an idle cache.
+		let _early = read_snapshot(&remote).await.map_err(|err| format!("early reader: {err}"))?;
+
+		let _b_r = link(version, &relay_b, &subscriber).await;
+		settle().await;
+		abort(p_a);
+		abort(a_r);
+		settle().await;
+
+		read_snapshot(&remote).await.map_err(|err| format!("late reader: {err}"))?;
+		Ok(())
+	})
+	.await;
 }
 
 /// A peer resumes one group past a finished catalog before anyone else has
@@ -142,123 +126,40 @@ async fn a_quiet_catalog_reaches_a_late_reader_after_its_route_dies() {
 /// group. A fresh reader must still receive that group.
 #[moq_net_sim::test]
 async fn a_quiet_catalog_reaches_a_fresh_reader_when_a_peer_resumes_past_it() {
-	let mut failures = Vec::new();
-	for version in VERSIONS {
-		match moq_net_sim::timeout(Duration::from_secs(30), resume_past(version)).await {
-			Ok(Ok(())) => {}
-			Ok(Err(err)) => failures.push(err),
-			Err(_) => failures.push(format!("{version}: scenario timed out")),
-		}
-	}
-	assert!(failures.is_empty(), "\n{}", failures.join("\n"));
-}
+	each_version(|version| async move {
+		let publisher = produce_origin(1);
+		let relay = produce_origin(2);
+		let resuming = produce_origin(3);
+		let fresh = produce_origin(4);
+		let (_broadcast, track) = publish(&publisher);
 
-async fn resume_past(version: &str) -> Result<(), String> {
-	let label = version;
-	let version: Version = label.parse().unwrap();
-	let publisher = produce_origin(1);
-	let relay = produce_origin(2);
-	let resuming = produce_origin(3);
-	let fresh = produce_origin(4);
+		let _upstream = link(version, &publisher, &relay).await;
+		let _resume_link = link(version, &relay, &resuming).await;
+		let _fresh_link = link(version, &relay, &fresh).await;
 
-	let broadcast = publisher.create_broadcast("live").unwrap();
-	let track = broadcast.create_track("catalog.json", None).unwrap();
-	broadcast.announce(Default::default()).unwrap();
-	let mut group = track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, b"snapshot").unwrap();
-	group.finish().unwrap();
+		let resume_remote = request(&resuming).await;
+		// Held until the scenario returns. Dropping it would cancel the upstream
+		// subscription and let the fresh reader open a new one at the live edge.
+		let _resume = moq_net_sim::spawn(async move {
+			let _sub = resume_remote
+				.track("catalog.json")
+				.unwrap()
+				.subscribe(track::Subscription::default().with_start(track::Position::group(1)))
+				.await;
+			moq_net_sim::sleep(Duration::from_secs(60)).await;
+		});
 
-	let _upstream = link(version, &publisher, &relay).await;
-	let _resume_link = link(version, &relay, &resuming).await;
-	let _fresh_link = link(version, &relay, &fresh).await;
-
-	let resume_consumer = resuming.consume();
-	resume_consumer.routed("live").await.unwrap();
-	let resume_remote = resume_consumer.request_broadcast("live").await.unwrap();
-	// Held until this function returns. Dropping it would cancel the upstream
-	// subscription and let the fresh reader open a new one at the live edge.
-	let _resume = moq_net_sim::spawn(async move {
-		let _sub = resume_remote
-			.track("catalog.json")
-			.unwrap()
-			.subscribe(track::Subscription::default().with_start(track::Position::group(1)))
-			.await;
-		moq_net_sim::sleep(Duration::from_secs(60)).await;
-	});
-
-	let mut upstream = None;
-	for _ in 0..40 {
-		moq_net_sim::sleep(Duration::from_millis(50)).await;
-		if let Some(sub) = track.subscription() {
-			upstream = Some(sub.start);
-			if sub.start == Some(track::Position::group(1)) {
+		// Wait for the resume to reach the publisher, so the fresh reader widens it.
+		for _ in 0..40 {
+			moq_net_sim::sleep(Duration::from_millis(50)).await;
+			if track.subscription().is_some_and(|sub| sub.start == Some(track::Position::group(1))) {
 				break;
 			}
 		}
-	}
-	let fresh_consumer = fresh.consume();
-	if fresh_consumer.routed("live").await.is_none() {
-		return Err(format!(
-			"{label}: the fresh peer never saw the broadcast; upstream {upstream:?}"
-		));
-	}
-	let fresh_remote = fresh_consumer
-		.request_broadcast("live")
-		.await
-		.map_err(|err| format!("{label}: fresh broadcast: {err}; upstream {upstream:?}"))?;
-	let fresh_track = fresh_remote
-		.track("catalog.json")
-		.map_err(|err| format!("{label}: fresh track: {err}; upstream {upstream:?}"))?;
 
-	let subscribed = moq_net_sim::timeout(TIMEOUT, fresh_track.subscribe(None)).await;
-	let start = track.subscription().map(|sub| sub.start);
-	let mut late = match subscribed {
-		Err(_) => {
-			return Err(format!(
-				"{label}: fresh subscribe never resolved; upstream during {upstream:?} now {start:?}"
-			));
-		}
-		Ok(Err(err)) => {
-			return Err(format!(
-				"{label}: fresh subscribe failed: {err}; upstream during {upstream:?} now {start:?}"
-			));
-		}
-		Ok(Ok(late)) => late,
-	};
-	match moq_net_sim::timeout(TIMEOUT, late.recv_group()).await {
-		Err(_) => {
-			let end = track.subscription().map(|sub| sub.start);
-			Err(format!(
-				"{label}: subscribe resolved but no group arrived; upstream during {upstream:?} now {end:?}"
-			))
-		}
-		Ok(Err(err)) => Err(format!(
-			"{label}: fresh read failed: {err}; upstream during {upstream:?} now {start:?}"
-		)),
-		Ok(Ok(None)) => Err(format!(
-			"{label}: catalog ended with no group; upstream during {upstream:?} now {start:?}"
-		)),
-		Ok(Ok(Some(mut group))) => {
-			let frame = moq_net_sim::timeout(TIMEOUT, group.read_frame())
-				.await
-				.map_err(|_| {
-					format!(
-						"{label}: fresh group {} had no frame; upstream during {upstream:?} now {start:?}",
-						group.sequence
-					)
-				})?
-				.map_err(|err| format!("{label}: fresh frame: {err}; upstream during {upstream:?} now {start:?}"))?
-				.ok_or_else(|| {
-					format!("{label}: fresh group ended empty; upstream during {upstream:?} now {start:?}")
-				})?;
-			if group.sequence == 0 && frame.payload.as_ref() == b"snapshot" {
-				Ok(())
-			} else {
-				Err(format!(
-					"{label}: fresh reader got group {} {:?}; upstream during {upstream:?} now {start:?}",
-					group.sequence, frame.payload
-				))
-			}
-		}
-	}
+		let remote = request(&fresh).await;
+		read_snapshot(&remote).await.map_err(|err| format!("fresh reader: {err}"))?;
+		Ok(())
+	})
+	.await;
 }
