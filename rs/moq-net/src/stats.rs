@@ -1824,8 +1824,18 @@ struct FrontierState {
 	behind: Option<Instant>,
 	/// The tracks feeding the subscription: its own, or the serving route's copy.
 	sources: Vec<Source>,
-	/// Bytes an unwatched source produced since the last sample, still owed to it.
-	unsampled: u64,
+	/// Retired sources. Each keeps the bytes produced since its last sample and the
+	/// edge those bytes are weighed at, so a sample can record them before a
+	/// replacement has a frame, and so they never take the replacement's lag.
+	folded: Vec<Folded>,
+}
+
+/// Bytes a retired source produced before it stopped feeding the subscription,
+/// weighed at the edge it had then. Later bytes on that track are not in here.
+struct Folded {
+	weight: u64,
+	newest: Duration,
+	first: Duration,
 }
 
 /// A track feeding a [`Frontier`], with the produced bytes already sampled.
@@ -1847,7 +1857,7 @@ impl Frontier {
 				advanced: crate::model::clock::now(),
 				behind: None,
 				sources: Vec::new(),
-				unsampled: 0,
+				folded: Vec::new(),
 			}),
 		});
 		counters
@@ -1879,21 +1889,29 @@ impl Frontier {
 	}
 
 	/// Remove a track that no longer feeds this subscription, such as a route's copy
-	/// replaced by a switch, so what it produces from then on stops counting.
+	/// dropped once the reader is done with it. Bytes it already produced stay, at
+	/// the edge it had; anything it produces afterwards does not.
 	pub(crate) fn unwatch(&self, track: &Arc<cache::Track>) {
 		let Some(inner) = &self.0 else { return };
 		let mut state = inner.state.lock().expect("stats frontier poisoned");
 		let production = track.production();
-		let mut unsampled = 0;
-		state.sources.retain(|s| {
-			if !Arc::ptr_eq(&s.production, production) {
+		let mut folded = Vec::new();
+		state.sources.retain(|source| {
+			if !Arc::ptr_eq(&source.production, production) {
 				return true;
 			}
-			// What it produced before the cap reached this reader: keep it for the next sample.
-			unsampled += production.bytes.load(Ordering::Relaxed).saturating_sub(s.sampled);
+			// Acquire pairs with `Production::record`, so the edge covers these bytes.
+			let bytes = production.bytes.load(Ordering::Acquire);
+			let weight = bytes.saturating_sub(source.sampled);
+			if weight > 0
+				&& let Some(newest) = Production::load(&production.newest)
+				&& let Some(first) = Production::load(&production.first)
+			{
+				folded.push(Folded { weight, newest, first });
+			}
 			false
 		});
-		state.unsampled += unsampled;
+		state.folded.extend(folded);
 	}
 
 	/// Start tracking one group stream written toward the peer.
@@ -1905,12 +1923,47 @@ impl Frontier {
 	}
 }
 
+impl FrontierState {
+	/// Lag of `newest` against the acknowledged frontier, including how long that
+	/// frontier has stood still. Does not move the stall mark; [`Self::observe`] does.
+	fn lag(&self, newest: Duration, now: Instant) -> Duration {
+		let Some(acked) = self.acked else {
+			return Duration::ZERO;
+		};
+		let behind = newest.saturating_sub(acked);
+		if behind.is_zero() {
+			return Duration::ZERO;
+		}
+		// Media time alone trusts the publisher's timestamps; a frontier standing
+		// still on the wall clock while there is newer media is lag too.
+		let since = self.behind.unwrap_or(now).max(self.advanced);
+		behind.max(now.duration_since(since))
+	}
+
+	/// Remember whether `newest` leaves the frontier behind, for the next sample's
+	/// wall-clock lag.
+	fn observe(&mut self, newest: Duration, now: Instant) {
+		let Some(acked) = self.acked else {
+			return;
+		};
+		if newest.saturating_sub(acked).is_zero() {
+			self.behind = None;
+			return;
+		}
+		let since = self.behind.unwrap_or(now).max(self.advanced);
+		self.behind = Some(since);
+	}
+}
+
 impl FrontierInner {
-	/// One sample: the lag and the bytes produced since the last one, or `None` when
-	/// nothing was produced (a paused source moves nothing).
+	/// One sample of what the live sources produced since the last one, or `None`
+	/// when they produced nothing (a paused source moves nothing). Retired sources
+	/// are recorded here as well, each at its own edge, including when no live
+	/// source has a frame yet and including the sample taken on drop.
 	fn sample(&self, now: Instant) -> Option<(Duration, u64)> {
 		let mut state = self.state.lock().expect("stats frontier poisoned");
-		let mut weight = std::mem::take(&mut state.unsampled);
+		let folded = std::mem::take(&mut state.folded);
+		let mut weight = 0;
 		let mut newest = None;
 		let mut first: Option<Duration> = None;
 		state.sources.retain_mut(|source| {
@@ -1928,24 +1981,35 @@ impl FrontierInner {
 			}
 			live
 		});
-		let newest = newest?;
-		// Opened before the track produced anything: its first frame is where the
-		// subscription started.
-		let acked = *state.acked.get_or_insert(first?);
 
+		// Opened before anything produced: the earliest frame is where it started.
+		if state.acked.is_none() {
+			let mut seed = first;
+			for item in &folded {
+				seed = Some(seed.map_or(item.first, |seed| seed.min(item.first)));
+			}
+			state.acked = seed;
+		}
+
+		// A retired source's bytes are not the replacement's. Record them even when
+		// the replacement has no frame, and never at the replacement's lag.
+		for item in &folded {
+			let lag = state.lag(item.newest, now);
+			self.counters.publisher.lag.record(lag, item.weight);
+		}
+
+		let Some(newest) = newest else {
+			if let Some(edge) = folded.iter().map(|item| item.newest).max() {
+				state.observe(edge, now);
+			}
+			return None;
+		};
+		// A live edge with no first frame and no acknowledged start cannot be placed.
+		state.acked?;
+		let lag = state.lag(newest, now);
 		// Tracked even without weight, so a pause the peer caught up in doesn't read
 		// as a stalled frontier once production resumes.
-		let behind = newest.saturating_sub(acked);
-		let lag = if behind.is_zero() {
-			state.behind = None;
-			Duration::ZERO
-		} else {
-			// Media time alone trusts the publisher's timestamps; a frontier standing
-			// still on the wall clock while there is newer media is lag too.
-			let since = state.behind.unwrap_or(now).max(state.advanced);
-			state.behind = Some(since);
-			behind.max(now.duration_since(since))
-		};
+		state.observe(newest, now);
 		(weight > 0).then_some((lag, weight))
 	}
 }
