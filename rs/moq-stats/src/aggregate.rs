@@ -106,18 +106,15 @@ impl Default for Config {
 /// every node ever seen. Each route epoch is its own node: a restarted
 /// producer, or a group returning from idle, announces a new epoch whose
 /// counters add to the old epoch's kept contribution instead of regressing it.
-/// Losing or recovering epoch metadata carries only the immediately outgoing
-/// same-path contribution across the transition, avoiding duplicate counters for
-/// one publisher reached through mixed-version links. The latest unversioned
-/// snapshot replaces it; that snapshot cannot identify a reconnect or restart.
-/// Metadata loss carries only the immediately outgoing same-path contribution.
-/// Its known lineage remains in grace if recovery identifies a different epoch.
-/// A fresh unversioned snapshot replaces the outgoing snapshot, but cannot
-/// distinguish a reconnect from a restart.
-/// Only a route without an epoch (an older producer, or a session older than
-/// moq-lite 07) returning within the grace with a lower counter regresses the
-/// merged counter, the same reset contract a single node's own restart
-/// follows. Presence is not sticky: a departed node stops counting sessions
+/// A reader stays pinned to its epoch, so a replacement never feeds it.
+/// When epoch metadata disappears or returns at a path (one publisher reached
+/// through mixed-version links), only the immediately outgoing contribution
+/// carries across; a different known epoch keeps its own entry, even when an
+/// unversioned reader resolves it first. A route without an epoch (an older
+/// producer, or a session older than moq-lite 07) cannot tell a reconnect from
+/// a restart, so its return within the grace with a lower counter regresses the
+/// merged counter, the same reset contract a single node's own restart follows.
+/// Presence is not sticky: a departed node stops counting sessions
 /// immediately.
 pub struct Consumer {
 	origin: origin::Consumer,
@@ -527,6 +524,19 @@ fn advance<V: Mergeable>(
 	loop {
 		match &mut node.reader {
 			Reader::Resolving { pending, queued } => match pending.poll_ok(waiter) {
+				// An unpinned retry on a known lineage can reach a replacement publisher
+				// before its announcement drains here. Its counters belong to its own entry,
+				// which that announcement creates, so this lineage keeps its last frame.
+				Poll::Ready(Ok(broadcast))
+					if node.epoch.is_none()
+						&& node.identity.is_some()
+						&& broadcast
+							.epoch()
+							.is_some_and(|epoch| node.identity.as_ref() != Some(epoch)) =>
+				{
+					tracing::debug!(name, "stats: node resolved another publisher");
+					return changed | node.depart();
+				}
 				Poll::Ready(Ok(broadcast)) => match broadcast.track(name) {
 					Ok(track) => node.reader = Reader::Subscribing(track.subscribe(None)),
 					Err(err) => {

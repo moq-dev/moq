@@ -352,6 +352,7 @@ impl Producer {
 			alive: self.alive.token.consume(),
 			state: self.state.clone(),
 			stats: stats::Scope::default(),
+			epoch: None,
 		}
 	}
 
@@ -573,6 +574,7 @@ impl Dynamic {
 			alive: self.alive.token.consume(),
 			state: self.state.clone(),
 			stats: stats::Scope::default(),
+			epoch: None,
 		}
 	}
 
@@ -625,6 +627,8 @@ pub struct Consumer {
 	// handoff. Inherited by the tracks subscribed through this handle. Empty (no-op)
 	// for an untagged broadcast.
 	stats: stats::Scope,
+	// The epoch of the route an origin resolved this handle through.
+	epoch: Option<crate::Epoch>,
 }
 
 impl Clone for Consumer {
@@ -634,6 +638,7 @@ impl Clone for Consumer {
 			alive: self.alive.clone(),
 			state: self.state.clone(),
 			stats: self.stats.clone(),
+			epoch: self.epoch.clone(),
 		}
 	}
 }
@@ -660,6 +665,22 @@ impl Consumer {
 			self.info = Arc::new(info);
 		}
 		self
+	}
+
+	/// Stamp the epoch of the route an origin resolved this handle through.
+	pub(crate) fn with_epoch(mut self, epoch: Option<crate::Epoch>) -> Self {
+		self.epoch = epoch;
+		self
+	}
+
+	/// The publisher epoch of the route this handle was resolved through, if it has one.
+	///
+	/// Set by [`origin::Consumer::request_broadcast`](crate::origin::Consumer::request_broadcast)
+	/// together with the result, so it names the publisher instance actually serving this
+	/// handle even when the request was unpinned. `None` for a route without an epoch or a
+	/// handle taken straight from a producer.
+	pub fn epoch(&self) -> Option<&crate::Epoch> {
+		self.epoch.as_ref()
 	}
 
 	/// The broadcast's metadata, as reached through this handle.
@@ -804,6 +825,7 @@ impl WeakConsumer {
 			alive: self.alive.consume(),
 			state: self.state.clone(),
 			stats: stats::Scope::default(),
+			epoch: None,
 		}
 	}
 }

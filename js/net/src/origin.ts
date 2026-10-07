@@ -1323,16 +1323,19 @@ export class Consumer {
 		// we already made, and only a real swap clones a new one (cloning before closing the
 		// old, so a broadcast that both routes share never briefly loses its last handle).
 		let released = false;
-		let source: broadcast.Consumer | undefined;
+		let source: Resolution | undefined;
 		let handle: broadcast.Consumer | undefined;
 		const own = (resolution: Resolution | undefined): broadcast.Consumer | undefined => {
 			if (released) return undefined;
 			const front = epoch === undefined || resolution?.epoch === epoch ? resolution?.front : undefined;
-			if (front !== source) {
+			if (front !== source?.front || resolution?.epoch !== source?.epoch) {
 				const previous = handle;
-				source = front;
+				source = front ? { front, epoch: resolution?.epoch } : undefined;
 				handle = front?.clone();
-				if (handle) hooks.stampPath(handle, relative);
+				if (handle) {
+					hooks.stampPath(handle, relative);
+					hooks.stampEpoch(handle, resolution?.epoch);
+				}
 				previous?.close();
 			}
 			return handle;

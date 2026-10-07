@@ -3800,9 +3800,13 @@ impl Requesting {
 		self
 	}
 
-	/// Stamp a resolved broadcast with the path this cursor asked for and its egress scope.
-	fn hand_out(&self, broadcast: broadcast::Consumer) -> broadcast::Consumer {
-		broadcast.with_path(self.path.clone()).with_stats(self.stats.clone())
+	/// Stamp a resolved broadcast with the path this cursor asked for, its egress scope,
+	/// and the epoch of the route it resolved through.
+	fn hand_out(&self, broadcast: broadcast::Consumer, epoch: Option<crate::Epoch>) -> broadcast::Consumer {
+		broadcast
+			.with_path(self.path.clone())
+			.with_stats(self.stats.clone())
+			.with_epoch(epoch)
 	}
 
 	/// Poll for the requested broadcast without blocking.
@@ -3816,7 +3820,7 @@ impl Requesting {
 				})) {
 					// Another instance than the one named: never hand it out.
 					Ok((Ok(_), epoch)) if self.epoch.is_some() && epoch != self.epoch => Err(Error::Unroutable),
-					Ok((result, _)) => result.map(|broadcast| self.hand_out(broadcast)),
+					Ok((result, epoch)) => result.map(|broadcast| self.hand_out(broadcast, epoch)),
 					// Every handler dropped without resolving: nobody could route it.
 					Err(_closed) => Err(Error::Unroutable),
 				},
@@ -7686,11 +7690,17 @@ mod tests {
 	async fn a_request_racing_a_newer_epoch_skips_the_old_front() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
+		let first = crate::Epoch::mint();
 		let old = producer
-			.publish("room/alice", Route::default().with_epoch(crate::Epoch::mint()))
+			.publish("room/alice", Route::default().with_epoch(first.clone()))
 			.unwrap();
 		let _old_track = old.create_track("video", None).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
+		assert_eq!(
+			resolved.epoch(),
+			Some(&first),
+			"an unpinned request names what it resolved"
+		);
 
 		let epoch = crate::Epoch::mint();
 		let new = producer
@@ -7708,6 +7718,7 @@ mod tests {
 		);
 		assert!(!bare.is_clone(&resolved), "a bare request joined the superseded front");
 		assert!(named.is_clone(&bare), "both share the new front");
+		assert_eq!(bare.epoch(), Some(&epoch), "an unpinned request names the new epoch");
 		let mut subscription = named.track("video").unwrap().subscribe(None).await.unwrap();
 		deliver(&new_track, &mut subscription, b"new").await;
 	}
@@ -7780,10 +7791,24 @@ mod tests {
 		let other: crate::Epoch = "01900000-0000-7000-8000-000000000002".parse().unwrap();
 		let refused = consumer.request_broadcast("room/alice", other).await;
 		assert!(matches!(refused, Err(Error::Unroutable)));
-		consumer
+		let named = consumer
 			.request_broadcast("room/alice", epoch())
 			.await
 			.expect("the named epoch resolves");
+		assert_eq!(named.epoch(), Some(&epoch()));
+	}
+
+	/// A route without an epoch resolves a handle without one.
+	#[moq_net_sim::test]
+	async fn a_route_without_an_epoch_resolves_without_one() {
+		let producer = origin(1).produce();
+		let _broadcast = producer.publish("room/alice", Route::default()).unwrap();
+		let resolved = producer
+			.consume()
+			.request_broadcast("room/alice", None)
+			.await
+			.expect("resolves");
+		assert_eq!(resolved.epoch(), None);
 	}
 
 	/// The driver's completion contract: it resolves once every producer handle

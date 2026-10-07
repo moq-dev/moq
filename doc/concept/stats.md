@@ -39,6 +39,9 @@ broadcast at the same path: it replaces the old one, and no relay serves it
 groups cached under the old epoch. A reader treats each epoch as its own set of
 counters. The epoch rides moq-lite 07 announcements; over older versions and
 moq-transport a reader sees the same change as an end and a start at the path.
+An aggregating reader pins each node's subscription to its epoch, and when one
+publisher is reached through both kinds of link (with and without an epoch), it
+carries only that path's outgoing counters across the change.
 
 At depth 0 the broadcast stays announced for the producer's life. At depth
 1 or more, a group's broadcast is announced while that group has entries, and

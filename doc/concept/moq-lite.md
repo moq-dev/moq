@@ -177,8 +177,6 @@ link (no epoch) and a moq-lite 07 link (with one), the epoch-carrying route
 supersedes the other each time it appears, so a flapping moq-lite 07 link cuts
 the viewers resolved through the older one.
 
-Stats aggregation retains each known publisher epoch separately. When epoch metadata disappears or returns, it carries only the immediately outgoing same-path contribution across that transition, retaining the last snapshot until a fresh snapshot replaces it. If recovery names a different known epoch, the outgoing known lineage stays in grace and the incoming epoch resumes its own contribution. Older unversioned routes cannot distinguish a reconnect from a restart, so that fresh snapshot may regress counters; other known epochs retained during grace are never chosen as substitutes.
-
 ### Hidden broadcasts
 
 A path segment starting with `.` hides a route from discovery, the way a
