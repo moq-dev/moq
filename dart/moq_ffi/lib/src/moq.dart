@@ -60,12 +60,12 @@ class FfiConverterMoqFetchGroupOptions {
 
 class MoqSubscription {
   final int priority;
-  final int maxAgeUs;
+  final int maxDelayUs;
   final int? groupStart;
   final int? groupEnd;
   MoqSubscription({
     this.priority = 0,
-    this.maxAgeUs = 0,
+    this.maxDelayUs = 0,
     this.groupStart = null,
     this.groupEnd = null,
   });
@@ -83,11 +83,11 @@ class FfiConverterMoqSubscription {
     );
     final priority = priority_lifted.value;
     new_offset += priority_lifted.bytesRead;
-    final maxAgeUs_lifted = FfiConverterUInt64.read(
+    final maxDelayUs_lifted = FfiConverterUInt64.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final maxAgeUs = maxAgeUs_lifted.value;
-    new_offset += maxAgeUs_lifted.bytesRead;
+    final maxDelayUs = maxDelayUs_lifted.value;
+    new_offset += maxDelayUs_lifted.bytesRead;
     final groupStart_lifted = FfiConverterOptionalUInt64.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -101,7 +101,7 @@ class FfiConverterMoqSubscription {
     return LiftRetVal(
       MoqSubscription(
         priority: priority,
-        maxAgeUs: maxAgeUs,
+        maxDelayUs: maxDelayUs,
         groupStart: groupStart,
         groupEnd: groupEnd,
       ),
@@ -112,7 +112,7 @@ class FfiConverterMoqSubscription {
   static RustBuffer lower(MoqSubscription value) {
     final total_length =
         FfiConverterUInt8.allocationSize(value.priority) +
-        FfiConverterUInt64.allocationSize(value.maxAgeUs) +
+        FfiConverterUInt64.allocationSize(value.maxDelayUs) +
         FfiConverterOptionalUInt64.allocationSize(value.groupStart) +
         FfiConverterOptionalUInt64.allocationSize(value.groupEnd) +
         0;
@@ -128,7 +128,7 @@ class FfiConverterMoqSubscription {
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterUInt64.write(
-      value.maxAgeUs,
+      value.maxDelayUs,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalUInt64.write(
@@ -144,7 +144,7 @@ class FfiConverterMoqSubscription {
 
   static int allocationSize(MoqSubscription value) {
     return FfiConverterUInt8.allocationSize(value.priority) +
-        FfiConverterUInt64.allocationSize(value.maxAgeUs) +
+        FfiConverterUInt64.allocationSize(value.maxDelayUs) +
         FfiConverterOptionalUInt64.allocationSize(value.groupStart) +
         FfiConverterOptionalUInt64.allocationSize(value.groupEnd) +
         0;
@@ -12568,7 +12568,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastconsumer_subscribe_media() !=
-      29917) {
+      8119) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastconsumer_subscribe_track() !=

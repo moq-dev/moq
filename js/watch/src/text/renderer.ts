@@ -258,7 +258,7 @@ export class Renderer {
 			broadcast: active,
 			track,
 			priority: Catalog.PRIORITY.text,
-			maxAge: this.sync.out.maxAge,
+			maxDelay: this.sync.out.maxDelay,
 		});
 		if (!sub) return;
 		const store: CueStore = { cues: [], regions: new Map(), clears: [] };

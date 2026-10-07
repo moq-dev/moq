@@ -121,11 +121,11 @@ int32_t moq_consume_video_enabled(uint32_t catalog, uint32_t index, bool *dst);
 int32_t moq_consume_audio_config(uint32_t catalog, uint32_t index, moq_audio_config *dst);
 
 // Consuming: Video
-int32_t moq_consume_video(uint32_t catalog, uint32_t index, uint64_t max_age_us, moq_status_callback on_frame, void *user_data);
+int32_t moq_consume_video(uint32_t catalog, uint32_t index, uint64_t max_delay_us, moq_status_callback on_frame, void *user_data);
 int32_t moq_consume_video_cancel(uint32_t track);
 
 // Consuming: Audio
-int32_t moq_consume_audio(uint32_t catalog, uint32_t index, uint64_t max_age_us, moq_status_callback on_frame, void *user_data);
+int32_t moq_consume_audio(uint32_t catalog, uint32_t index, uint64_t max_delay_us, moq_status_callback on_frame, void *user_data);
 int32_t moq_consume_audio_cancel(uint32_t track);
 
 // Consuming: Frames

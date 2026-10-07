@@ -42,13 +42,13 @@ public typealias AudioEncoderInput = MoqFFI.MoqAudioEncoderInput
 /// The encoder-side config for a published audio track: codec, rate, channels,
 /// bitrate, and frame duration.
 public typealias AudioEncoderOutput = MoqFFI.MoqAudioEncoderOutput
-/// What a `VideoConsumer` decodes to: an optional resize, a max age, and
+/// What a `VideoConsumer` decodes to: an optional resize, a max delay, and
 /// whether frames keep the decoder's native surface.
 public typealias VideoDecoderOutput = MoqVideoDecoderOutput
 /// One decoded video frame, owning the decoder's surface until released;
 /// `pixels(format:)` converts it to packed CPU pixels.
 public typealias VideoDecodedFrame = MoqVideoDecodedFrame
-/// The PCM layout an `AudioConsumer` decodes to, plus its max age.
+/// The PCM layout an `AudioConsumer` decodes to, plus its max delay.
 public typealias AudioDecoderOutput = MoqFFI.MoqAudioDecoderOutput
 /// A raw PCM sample format, mirroring WebCodecs `AudioData.format`.
 public typealias AudioSampleFormat = MoqFFI.MoqAudioSampleFormat
