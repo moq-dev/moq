@@ -956,7 +956,7 @@ mod tests {
 			let mut track = consumer
 				.track("audio")
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
+				.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
 				.await
 				.unwrap();
 
