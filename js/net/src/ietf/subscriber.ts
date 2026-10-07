@@ -18,7 +18,7 @@ import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../
 import * as Path from "../path.ts";
 import type { Cursor, Reader, Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { Milli, type Timescale, Timestamp } from "../time.ts";
+import { Milli, type Timescale } from "../time.ts";
 import type * as track from "../track.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
@@ -123,8 +123,8 @@ export class Subscriber {
 	#aliases = new TrackAliases<Subscription>();
 
 	// Units for each track's object Timestamps, from the TIMESCALE Track Property in
-	// SUBSCRIBE_OK. A track missing from this map declared no timeline, so the publisher
-	// opted out of timestamps and its frames are stamped on arrival instead.
+	// SUBSCRIBE_OK. A track missing from this map declared no timeline, so its frames
+	// arrive untimed.
 	#timescales = new Map<bigint, Timescale>();
 
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
@@ -797,6 +797,9 @@ export class Subscriber {
 			throw new RangeError("max cache duration exceeds safe milliseconds");
 		}
 		request.accept({
+			// No TIMESCALE (always so on drafts 14-16, which can't carry it) means no timeline,
+			// and the track must not claim one when served onward.
+			timescale: ok.properties.timescale ?? null,
 			priority: fromWire(ok.properties.priority ?? 128),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
 		});
@@ -1086,7 +1089,8 @@ export class Subscriber {
 			// header priority inherits it (draft-21 section 10.4).
 			if (!group.flags.hasPriority) group.publisherPriority = toWire((await track.info()).priority);
 
-			const decode = (c: Cursor) => Frame.decode(c, group.flags, this.#timescales.get(group.trackAlias));
+			const timescale = this.#timescales.get(group.trackAlias);
+			const decode = (c: Cursor) => Frame.decode(c, group.flags, timescale);
 			for (;;) {
 				// Every object already buffered is written without an await, so the reader wakes
 				// once per batch rather than once per object. Only the group's own stream ends it:
@@ -1114,15 +1118,22 @@ export class Subscriber {
 				}
 				if (frame.payload === undefined) break;
 
-				open().writeFrame({ payload: frame.payload, timestamp: frame.timestamp ?? Timestamp.now() });
+				// A track that declared TIMESCALE stamps every object, so one without a Timestamp is
+				// malformed rather than something to invent a time for.
+				if (timescale !== undefined && frame.timestamp === undefined) {
+					throw new StreamError(StreamCode.MalformedTrack, {
+						message: `object without a Timestamp on a track with TIMESCALE: group=${group.groupId}`,
+					});
+				}
+				open().writeFrame({ payload: frame.payload, timestamp: frame.timestamp });
 			}
 
 			// A group with no objects still exists.
 			open().close();
 		} catch (err: unknown) {
 			const e = await sessionCause(this.#quic, err);
-			if (e instanceof ProtocolViolation) {
-				// The publisher broke the track's end, which no later group can repair.
+			if (e instanceof ProtocolViolation || (e instanceof StreamError && e.code === StreamCode.MalformedTrack)) {
+				// The publisher broke the track's end or its content, which no later group can repair.
 				producer?.close(e);
 				track.close(e);
 			} else {

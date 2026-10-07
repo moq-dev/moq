@@ -861,11 +861,11 @@ test("integration: lite draft-05 fetches a cached group", async () => {
 
 	const first = await fetched.readFrame();
 	expect(dec.decode(first?.payload)).toBe("alpha");
-	expect(first?.timestamp.asMillis()).toBe(10);
+	expect(first?.timestamp?.asMillis()).toBe(10);
 
 	const second = await fetched.readFrame();
 	expect(dec.decode(second?.payload)).toBe("beta");
-	expect(second?.timestamp.asMillis()).toBe(15);
+	expect(second?.timestamp?.asMillis()).toBe(15);
 
 	expect(await fetched.readFrame()).toBeUndefined();
 
@@ -1036,7 +1036,7 @@ test("integration: lite draft-05 fetches an in-progress group", async () => {
 	group0.writeFrame({ payload: enc.encode("beta"), timestamp: Timestamp.fromMillis(15) });
 	const second = await fetched.readFrame();
 	expect(dec.decode(second?.payload)).toBe("beta");
-	expect(second?.timestamp.asMillis()).toBe(15);
+	expect(second?.timestamp?.asMillis()).toBe(15);
 
 	group0.close();
 	expect(await fetched.readFrame()).toBeUndefined();
@@ -1118,7 +1118,7 @@ test("integration: lite draft-05 fetch uses the republished track's timescale", 
 	// A millisecond timescale would round this to 1000us.
 	const fetched = await remote.track("video").fetchGroup(0);
 	const frame = await fetched.readFrame();
-	expect(frame?.timestamp.asMicros()).toBe(1234);
+	expect(frame?.timestamp?.asMicros()).toBe(1234);
 
 	first.close();
 	second.close();

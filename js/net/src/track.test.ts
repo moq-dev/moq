@@ -1,5 +1,5 @@
 import { expect, setSystemTime, spyOn, test } from "bun:test";
-import { TooFarBehind } from "./error.ts";
+import { TimestampMismatch, TooFarBehind } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { hooks } from "./internal.ts";
 import { Milli, Timescale, Timestamp } from "./time.ts";
@@ -803,7 +803,7 @@ test("a budget is measured from the reader's position", async () => {
 	// A straggler from the old group, still inside the budget.
 	open.writeFrame({ payload: enc.encode("late"), timestamp: Timestamp.fromMillis(1950) });
 	const frame = await late;
-	expect(frame?.timestamp.asMillis()).toBe(1950);
+	expect(frame?.timestamp?.asMillis()).toBe(1950);
 });
 
 test("a handed-out group still expires while its first frame is stalled", async () => {
@@ -840,7 +840,7 @@ test("committing track info wakes a group newly outside the retention window", a
 
 	const group = await track.recvGroup();
 	if (!group) throw new Error("missing group");
-	expect((await group.readFrame())?.timestamp.asMillis()).toBe(0);
+	expect((await group.readFrame())?.timestamp?.asMillis()).toBe(0);
 	const waiting = group.readFrame();
 
 	producer.writeFrame({ payload: enc.encode("edge"), timestamp: Timestamp.fromMillis(1_000) });
@@ -2027,4 +2027,87 @@ test("an abort leaves a group already taken readable, then reports the abort", a
 		expect(await group?.readString()).toBe("held");
 		await expect(group?.readFrame()).rejects.toBe(boom);
 	}
+});
+
+/** Every group a subscriber can take right now, by sequence. */
+function drain(track: { tryRecvGroup(): { sequence: number } | undefined }): number[] {
+	const sequences: number[] = [];
+	for (let group = track.tryRecvGroup(); group; group = track.tryRecvGroup()) sequences.push(group.sequence);
+	return sequences;
+}
+
+/** An untimed track holding `count` single-frame groups. */
+function untimedTrack(count: number): TrackProducer {
+	const producer = new TrackProducer("test").accept({ timescale: null });
+	for (let i = 0; i < count; i++) producer.writeFrame({ payload: enc.encode(`${i}`) });
+	return producer;
+}
+
+test("a track is timed by default and untimed only when declared", () => {
+	expect(infoDefaults().timescale).toBe(Timescale.MILLI);
+	expect(infoDefaults({ timescale: null }).timescale).toBeNull();
+});
+
+test("a frame whose timedness disagrees with its track is refused", async () => {
+	const timed = new TrackProducer("timed").accept({});
+	const group = timed.appendGroup();
+	expect(() => group.writeFrame({ payload: enc.encode("x") })).toThrow(TimestampMismatch);
+	group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(1) });
+
+	const untimed = new TrackProducer("untimed").accept({ timescale: null });
+	const subscriber = untimed.subscribe();
+	const other = untimed.appendGroup();
+	expect(() => other.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(1) })).toThrow(
+		TimestampMismatch,
+	);
+	other.writeFrame({ payload: enc.encode("y") });
+	other.close();
+
+	// The untimed frame reaches the subscriber as it was written: no time filled in.
+	const frame = await (await subscriber.recvGroup())?.readFrame();
+	expect(frame && dec.decode(frame.payload)).toBe("y");
+	expect(frame?.timestamp).toBeUndefined();
+});
+
+test("a group joining a track it disagrees with is refused", () => {
+	const producer = new TrackProducer("test").accept({ timescale: null });
+	const group = new GroupProducer(0);
+	group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(1) });
+	expect(() => producer.writeGroup(group)).toThrow(TimestampMismatch);
+});
+
+test("a datagram whose timedness disagrees with its track is refused", async () => {
+	const timed = new TrackProducer("timed").accept({});
+	expect(() => timed.appendDatagram(undefined, enc.encode("x"))).toThrow(TimestampMismatch);
+
+	const untimed = new TrackProducer("untimed").accept({ timescale: null });
+	const subscriber = untimed.subscribe();
+	expect(() => untimed.insertDatagram(0, Timestamp.fromMillis(1), enc.encode("x"))).toThrow(TimestampMismatch);
+	untimed.appendDatagram(undefined, enc.encode("y"));
+	const got = await subscriber.recvDatagram();
+	expect(got?.timestamp).toBeUndefined();
+});
+
+test("an untimed track starts at its latest group", () => {
+	const producer = untimedTrack(5);
+
+	// Nothing on an untimed track is ever stale, so no budget can say where to start.
+	const live = producer.subscribe();
+	expect(drain(live)).toEqual([4]);
+	const patient = producer.subscribe({ maxAge: Milli(60_000) });
+	expect(drain(patient)).toEqual([4]);
+
+	producer.writeFrame({ payload: enc.encode("5") });
+	expect(drain(live)).toEqual([5]);
+});
+
+test("an explicit start holds on an untimed track, and nothing there is stale", () => {
+	const producer = untimedTrack(5);
+
+	// A named start says how far back to reach (a resume names the group it lacks), and a
+	// zero budget convicts nothing that has no place in media time.
+	const resumed = producer.subscribe({ groups: { start: { included: 2 } } });
+	expect(drain(resumed)).toEqual([2, 3, 4]);
+	const replay = producer.subscribe({ groups: { start: { included: 0 } } });
+	expect(drain(replay)).toEqual([0, 1, 2, 3, 4]);
 });

@@ -5,7 +5,7 @@
  */
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type { Datagram } from "./datagram.ts";
-import { GroupTooLarge, TooFarBehind } from "./error.ts";
+import { GroupTooLarge, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import {
 	groupBounds,
@@ -58,11 +58,15 @@ export interface Location {
  */
 export interface Info {
 	/**
-	 * Units per second for this track's frame timestamps (reported in TRACK_INFO on
-	 * Lite05+). Defaults to milliseconds; set it finer (e.g. {@link Timescale.MICRO})
-	 * for media that needs sub-millisecond timing.
+	 * Units per second for this track's frame timestamps, or `null` for a track with no
+	 * timeline, whose frames and datagrams carry no timestamp.
+	 *
+	 * Defaults to milliseconds; set it finer (e.g. {@link Timescale.MICRO}) for media that
+	 * needs sub-millisecond timing. Reported in TRACK_INFO on Lite05+ and as the TIMESCALE
+	 * property on moq-transport. A track received without one (moq-lite before Lite05, or
+	 * moq-transport without TIMESCALE) is `null`, and stays untimed when served onward.
 	 */
-	timescale: Timescale;
+	timescale: Timescale | null;
 	/**
 	 * Publisher Max Age: how far behind the live edge a group may fall in media
 	 * timestamps, in milliseconds, before it is stale. Reported in TRACK_INFO (Lite05+)
@@ -104,7 +108,7 @@ function priorityByte(value: number): number {
 /** Fill in any unset {@link Info} fields with their defaults. */
 export function infoDefaults(info: Partial<Info> = {}): Info {
 	return {
-		timescale: Timescale(info.timescale ?? Timescale.MILLI),
+		timescale: info.timescale === null ? null : Timescale(info.timescale ?? Timescale.MILLI),
 		maxAge: info.maxAge === undefined ? undefined : maxAgeMillis(info.maxAge),
 		priority: priorityByte(info.priority ?? DEFAULT_PRIORITY),
 	};
@@ -139,9 +143,10 @@ export interface Subscription {
 	 * The lowest group the publisher may deliver (a floor), or omit for none.
 	 *
 	 * A floor, not a request: only {@link maxAge} asks for data, and the floor bounds how
-	 * far back it may reach. Omitting it and a floor of 0 mean the same thing, and a floor
-	 * above the live edge simply waits there (a resumed subscription naming where it left
-	 * off).
+	 * far back it may reach. Omitting it and a floor of 0 differ only on an untimed track,
+	 * where nothing is ever stale: omitted starts at the latest group, and an explicit floor
+	 * replays from there. A floor above the live edge simply waits there (a resumed
+	 * subscription naming where it left off).
 	 */
 	groups?: Groups;
 }
@@ -287,7 +292,8 @@ export class Consumer {
 	 * The cursor starts at the group the subscription named (its floor), or 0.
 	 * {@link Subscription.maxAge} is what asks for data: delivery skips everything above
 	 * the floor that the budget convicts, so the default budget of zero delivers only the
-	 * latest group and a larger one reaches back over what it can still use.
+	 * latest group and a larger one reaches back over what it can still use. An untimed
+	 * track has nothing to convict, so without a floor it starts at its latest group.
 	 */
 	subscribe(options?: Subscription): Subscriber {
 		return this.#broadcast.subscribe(this.name, options);
@@ -376,8 +382,9 @@ function closeTrackState(state: TrackState, abort?: Error): boolean {
 
 // Resolve the track's immutable publisher properties, or reject if it closes first.
 // On a producer this resolves once info is committed (at accept time); on a consumer
-// once the wire layer commits the TRACK_INFO it received (lite-05+) or defaults (older
-// drafts), so awaiting it never yields a placeholder.
+// once the wire layer commits the properties it received (TRACK_INFO on lite-05+,
+// SUBSCRIBE_OK on moq-transport) or an untimed default (older lite drafts), so awaiting it
+// never yields a placeholder.
 async function resolveInfo(state: TrackState): Promise<Info> {
 	for (;;) {
 		const info = state.info.peek();
@@ -574,6 +581,7 @@ export class Producer {
 	accept(info: Partial<Info> = {}): this {
 		if (this.#state.closed.peek() !== undefined) return this;
 		const resolved = infoDefaults(info);
+		for (const { group } of this.#cache) hooks.bindGroupTimed(group, resolved.timescale !== null);
 		this.#state.info.set(resolved);
 		// Propagate to any sink handed out before accept (the on-demand path).
 		for (const sink of this.#sinks) sink.info.set(resolved);
@@ -587,7 +595,8 @@ export class Producer {
 	 * Its cursor starts at the group the subscription named (its floor), or 0.
 	 * {@link Subscription.maxAge} is what asks for data: delivery skips everything above
 	 * the floor that the budget convicts, so the default budget of zero delivers only the
-	 * latest group and a larger one reaches back over what it can still use.
+	 * latest group and a larger one reaches back over what it can still use. An untimed
+	 * track has nothing to convict, so without a floor it starts at its latest group.
 	 */
 	subscribe(options: Subscription = {}): Subscriber {
 		const sink = new TrackState(options);
@@ -806,6 +815,18 @@ export class Producer {
 		this.#prune();
 	}
 
+	// Hold a group to this track's timedness, once the track has committed it.
+	#bind(group: GroupProducer): void {
+		const info = this.#state.info.peek();
+		if (info) hooks.bindGroupTimed(group, info.timescale !== null);
+	}
+
+	// Refuse a datagram whose timedness disagrees with this track's.
+	#checkDatagram(timestamp: Timestamp | undefined): void {
+		const info = this.#state.info.peek();
+		if (info && (info.timescale !== null) !== (timestamp !== undefined)) throw new TimestampMismatch();
+	}
+
 	// Refuse a write once the track is closed, or at or past its declared end.
 	#writable(sequence: number): void {
 		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
@@ -815,11 +836,17 @@ export class Producer {
 		}
 	}
 
-	/** Append a new group with the next sequence number. */
+	/**
+	 * Append a new group with the next sequence number.
+	 *
+	 * Its frames must match the track's {@link Info.timescale}: a timestamp on every frame of
+	 * a timed track and none on an untimed one, or the write throws {@link TimestampMismatch}.
+	 */
 	appendGroup(): GroupProducer {
 		const sequence = this.#sequence;
 		this.#writable(sequence.next);
 		const group = new GroupProducer(sequence.next);
+		this.#bind(group);
 		sequence.next = group.sequence + 1;
 		this.#publish(group);
 
@@ -832,10 +859,13 @@ export class Producer {
 	 * Throws on a sequence that is still cached: a live duplicate would fan out to every
 	 * subscriber twice. An aborted incarnation is evicted so a fresh group can serve the
 	 * sequence again. Best effort (mirrors Rust): nothing remembers a sequence whose cache
-	 * entry is already gone, so a long-evicted sequence is accepted as new.
+	 * entry is already gone, so a long-evicted sequence is accepted as new. Throws
+	 * {@link TimestampMismatch} if the group already holds a frame whose timedness
+	 * disagrees with the track's {@link Info.timescale}.
 	 */
 	writeGroup(group: GroupProducer) {
 		this.#writable(group.sequence);
+		this.#bind(group);
 
 		const existing = this.#cached.get(group.sequence);
 		if (existing) {
@@ -879,12 +909,16 @@ export class Producer {
 	 * over IETF moq-transport or stream-only transports (the WebSocket fallback). A payload over
 	 * 65535 bytes (the QUIC datagram frame ceiling) throws. An origin publisher uses this; a
 	 * relay preserving upstream numbering uses {@link insertDatagram}.
+	 *
+	 * Pass `undefined` for the timestamp on an untimed track; a timestamp whose presence
+	 * disagrees with the track's {@link Info.timescale} throws {@link TimestampMismatch}.
 	 */
-	appendDatagram(timestamp: Timestamp, payload: Uint8Array): number {
+	appendDatagram(timestamp: Timestamp | undefined, payload: Uint8Array): number {
 		const counter = this.#sequence;
 		const sequence = counter.next;
 		this.#writable(sequence);
 		if (payload.byteLength > MAX_DATAGRAM_BYTES) throw new Error("datagram payload too large");
+		this.#checkDatagram(timestamp);
 
 		counter.next = sequence + 1;
 		this.#publishDatagram({ sequence, timestamp, payload });
@@ -895,12 +929,13 @@ export class Producer {
 	 * Insert a datagram with an explicit sequence number.
 	 *
 	 * Preserves the supplied sequence (advancing the shared counter if needed) so a relay can
-	 * forward a datagram without renumbering it. The size limits of {@link appendDatagram}
-	 * apply. Most origin publishers want {@link appendDatagram} instead.
+	 * forward a datagram without renumbering it. The size and timestamp rules of
+	 * {@link appendDatagram} apply. Most origin publishers want {@link appendDatagram} instead.
 	 */
-	insertDatagram(sequence: number, timestamp: Timestamp, payload: Uint8Array) {
+	insertDatagram(sequence: number, timestamp: Timestamp | undefined, payload: Uint8Array) {
 		this.#writable(sequence);
 		if (payload.byteLength > MAX_DATAGRAM_BYTES) throw new Error("datagram payload too large");
+		this.#checkDatagram(timestamp);
 
 		const counter = this.#sequence;
 		if (sequence >= counter.next) {
@@ -1139,7 +1174,21 @@ export class Subscriber {
 		// The cursor's floor is the group the subscription named, or 0. A floor is the
 		// only thing a start contributes; {@link Subscription.maxAge} is what asks for
 		// data, and delivery skips everything above the floor that the budget convicts.
-		this.#cursor.set({ start: groupBounds(state.update.peek()?.groups ?? {}).start });
+		// Nothing on an untimed track is ever stale, so there the budget would replay the
+		// whole cache: an unfloored subscriber starts at the latest group instead.
+		const groups = state.update.peek()?.groups ?? {};
+		const start = groups.start === undefined ? this.#untimedStart() : undefined;
+		this.#cursor.set({ start: start ?? groupBounds(groups).start });
+	}
+
+	// The newest servable group, when the track is known to be untimed.
+	#untimedStart(): number | undefined {
+		if (this.#state.info.peek()?.timescale !== null) return undefined;
+		const timeline = this.#state.timeline;
+		for (let i = timeline.length - 1; i >= 0; i--) {
+			if (!(timeline[i].closed.peek() instanceof Error)) return timeline[i].sequence;
+		}
+		return undefined;
 	}
 
 	static {
@@ -1171,8 +1220,9 @@ export class Subscriber {
 	/**
 	 * Resolve this track's immutable publisher properties.
 	 *
-	 * Resolves once the wire layer commits the TRACK_INFO it received (lite-05+) or
-	 * defaults (older drafts), so awaiting it never yields a placeholder. Rejects if
+	 * Resolves once the wire layer commits the properties it received (TRACK_INFO on
+	 * lite-05+, SUBSCRIBE_OK on moq-transport) or an untimed default (older lite drafts),
+	 * so awaiting it never yields a placeholder. Rejects if
 	 * the track is closed before the properties are known (e.g. a rejected subscription).
 	 */
 	info(): Promise<Info> {

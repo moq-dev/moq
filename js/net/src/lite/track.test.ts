@@ -47,7 +47,8 @@ test("TrackInfo round-trips on draft-05", async () => {
 });
 
 test("TrackInfo defaults match cross-language wire bytes", async () => {
-	const info = new TrackInfo(infoDefaults());
+	const defaults = infoDefaults();
+	const info = new TrackInfo({ ...defaults, timescale: defaults.timescale ?? undefined });
 	expect(await bytes((w) => info.encode(w, Version.DRAFT_05), Version.DRAFT_05)).toEqual(
 		new Uint8Array([0x0c, 0x7f, 0x00, 0xc0, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x43, 0xe8]),
 	);

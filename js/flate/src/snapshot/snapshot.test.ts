@@ -147,5 +147,5 @@ test("a capture timestamp is written as the frame timestamp", async () => {
 	producer.finish();
 
 	const frame = await (await track.subscribe().ordered().nextGroup())?.readFrame();
-	expect(frame?.timestamp.as(Time.Timescale.MILLI)).toBe(1_234);
+	expect(frame?.timestamp?.as(Time.Timescale.MILLI)).toBe(1_234);
 });
