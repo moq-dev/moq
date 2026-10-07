@@ -287,6 +287,7 @@ fn test_av1_catalog() {
 #[test]
 fn avc3_imports_in_band() {
 	use hang::catalog::{H264, VideoCodec, VideoConfig};
+	use mp4_atom::Atom;
 
 	// configurationVersion, profile, compatibility, level, 4-byte lengths, no SPS, no PPS.
 	const AVCC: &[u8] = &[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe0, 0x00];
@@ -300,18 +301,19 @@ fn avc3_imports_in_band() {
 	config.coded_width = Some(320);
 	config.coded_height = Some(240);
 	let mut trak = super::synthesize_video_trak(1, 90_000, &config, Some(AVCC)).unwrap();
-	let stsd = &mut trak.mdia.minf.stbl.stsd;
-	let mp4_atom::Codec::Avc1(avc1) = stsd.codecs.remove(0) else {
-		panic!("expected an avc1 sample entry to rewrite");
-	};
-	stsd.codecs.push(
+	trak.mdia.minf.stbl.stsd.codecs = vec![
 		mp4_atom::Avc3 {
-			visual: avc1.visual,
-			avcc: avc1.avcc,
+			visual: mp4_atom::Visual {
+				data_reference_index: 1,
+				width: 320,
+				height: 240,
+				..Default::default()
+			},
+			avcc: mp4_atom::Avcc::decode_body(&mut std::io::Cursor::new(AVCC)).unwrap(),
 			..Default::default()
 		}
 		.into(),
-	);
+	];
 	let trex = mp4_atom::Trex {
 		track_id: 1,
 		default_sample_description_index: 1,
