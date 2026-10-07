@@ -40,4 +40,4 @@ requirement, so this waits until the T-STD line settles.
 
 ## Related
 
-- [TS passthrough](/quest/m1/ts-passthrough.md) - byte-identical legs for free in its own lane; adopts `--sync` for alignment
+- [TS passthrough export](/quest/m1/ts-passthrough-export.md) - byte-identical legs for free in its own lane; adopts `--sync` for alignment
