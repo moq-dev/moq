@@ -655,7 +655,7 @@ async fn serve_connection(
 
 	let request = moq_net::Server::new()
 		.with_versions(serve.versions.clone())
-		.accept_request_lite(std::time::Instant::now(), transport)
+		.accept_request_lite(std::time::Instant::now(), moq_uring::transport::Session::new(transport))
 		.await
 		.context("moq handshake failed")?;
 

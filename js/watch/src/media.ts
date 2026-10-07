@@ -4,7 +4,7 @@ import { Error as NetError, type Time } from "@moq/net";
 import type { Effect, Getter } from "@moq/signals";
 
 /**
- * Open a media subscription with its max age on the initial request and every update.
+ * Open a media subscription with its max delay on the initial request and every update.
  *
  * @internal
  */
@@ -14,16 +14,16 @@ export function subscribeMedia(
 		broadcast: Moq.Broadcast.Consumer;
 		track: string;
 		priority: number;
-		maxAge: Getter<Time.Milli>;
+		maxDelay: Getter<Time.Milli>;
 	},
 ): Moq.Track.Subscriber | undefined {
 	if (effect.get(props.broadcast.closed) !== undefined) return;
-	const subscription = () => ({ priority: props.priority, maxAge: props.maxAge.peek() });
+	const subscription = () => ({ priority: props.priority, maxDelay: props.maxDelay.peek() });
 	const subscriber = props.broadcast.track(props.track).subscribe(subscription());
 	effect.cleanup(() => subscriber.close());
 
 	effect.run((inner) => {
-		subscriber.update({ priority: props.priority, maxAge: inner.get(props.maxAge) });
+		subscriber.update({ priority: props.priority, maxDelay: inner.get(props.maxDelay) });
 	});
 
 	return subscriber;

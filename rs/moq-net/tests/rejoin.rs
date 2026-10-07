@@ -52,7 +52,7 @@ async fn rejoin_recovers_the_group_reset_on_leave() {
 				let remote = consumer.request_broadcast("bench", None).await.unwrap();
 
 				let ts = |ms| Timestamp::from_millis(ms).unwrap();
-				let prefs = || track::Subscription::default().with_max_age(Duration::from_secs(10));
+				let prefs = || track::Subscription::default().with_max_delay(Duration::from_secs(10));
 
 				let mut group = track.append_group().unwrap();
 				group.write_frame(ts(0), b"a0".as_ref()).unwrap();

@@ -78,7 +78,7 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 
 	let reader = moq_net_sim::spawn(async move {
 		let subscription = Subscription::default()
-			.with_max_age(FOREVER)
+			.with_max_delay(FOREVER)
 			.with_start(Position::group(0));
 		let mut sub = remote
 			.track("history")
@@ -219,7 +219,7 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 	consumer.routed("bcast").await.unwrap();
 	let remote = consumer.request_broadcast("bcast", None).await.unwrap();
 	let subscription = Subscription::default()
-		.with_max_age(FOREVER)
+		.with_max_delay(FOREVER)
 		.with_start(Position::group(0));
 	let first_subscription = subscription.clone();
 	let first_reader = moq_net_sim::spawn(async move {

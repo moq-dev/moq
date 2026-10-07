@@ -287,7 +287,7 @@ fn lite_session_over_webtransport() {
 
 			let (session, driver) = moq_net::Server::new()
 				.with_publisher(&serve_origin)
-				.accept_lite(std::time::Instant::now(), session)
+				.accept_lite(std::time::Instant::now(), moq_uring::transport::Session::new(session))
 				.await
 				.expect("accept_lite");
 			let task_handle = handle.clone();
@@ -519,6 +519,154 @@ fn a_dropped_stream_carries_a_webtransport_code() {
 		.expect("worker");
 
 	client.join().expect("client thread");
+}
+
+/// Write all of `buf` to a raw QUIC stream.
+async fn write_raw(send: &mut quic::SendStream, mut buf: &[u8]) {
+	while !buf.is_empty() {
+		let n = std::future::poll_fn(|cx| send.poll_write(cx, buf))
+			.await
+			.expect("write");
+		buf = &buf[n..];
+	}
+}
+
+/// Append whatever arrives next on a raw QUIC stream, failing on its end.
+async fn read_more(recv: &mut quic::RecvStream, out: &mut Vec<u8>) {
+	let mut buf = [0u8; 4096];
+	let n = std::future::poll_fn(|cx| recv.poll_read(cx, &mut buf))
+		.await
+		.expect("read")
+		.expect("the stream ended early");
+	out.extend_from_slice(&buf[..n]);
+}
+
+/// Closing a session and dropping it on the spot still delivers the close
+/// capsule, with the HTTP/3 critical streams open underneath it.
+///
+/// Dropping the last handle must not take the server's control stream down
+/// before the capsule goes out: RFC 9114 makes that a connection error, and a
+/// browser reports it in place of the code and reason. No Rust client treats
+/// it as fatal, so this one is hand-rolled and checks the stream directly.
+#[test]
+fn a_dropped_session_delivers_its_close() {
+	use bytes::Buf as _;
+
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let server = h3_endpoint(&handle, &certs);
+	let sock = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+		.expect("client socket");
+	let client = quic::Endpoint::new(sock, quic::endpoint::Config::default()).expect("client endpoint");
+	let mut dial = quic::client::Config::new(server.local_addr(), "localhost");
+	dial.alpn = vec!["h3".to_string()];
+	dial.verify = false;
+
+	worker
+		.block_on(async {
+			let mut peer = client.connect(&dial).await.expect("dial");
+			let conn = server.accept().await.expect("accept");
+			let mut watch = conn.clone();
+
+			// The client half of the handshake: SETTINGS, then the CONNECT.
+			let mut control = std::future::poll_fn(|cx| peer.poll_open_uni(cx))
+				.await
+				.expect("control stream");
+			let mut settings = web_transport_proto::Settings::default();
+			settings.enable_webtransport(1);
+			let mut bytes = Vec::new();
+			settings.encode(&mut bytes);
+			write_raw(&mut control, &bytes).await;
+
+			let (mut connect_send, mut connect_recv) = std::future::poll_fn(|cx| peer.poll_open_bi(cx))
+				.await
+				.expect("CONNECT stream");
+			let url = url::Url::parse(&format!("https://localhost:{}/", server.local_addr().port())).expect("url");
+			let mut bytes = Vec::new();
+			web_transport_proto::ConnectRequest::new(url)
+				.encode(&mut bytes)
+				.expect("encode CONNECT");
+			write_raw(&mut connect_send, &bytes).await;
+
+			let request = within(&handle, "the CONNECT", quic::web::Request::accept(conn))
+				.await
+				.expect("handshake");
+			let mut session = request.ok().await.expect("respond");
+
+			let mut response = Vec::new();
+			let consumed = loop {
+				read_more(&mut connect_recv, &mut response).await;
+				let mut peek = response.as_slice();
+				match web_transport_proto::ConnectResponse::decode(&mut peek) {
+					Ok(decoded) => {
+						assert_eq!(decoded.status, http::StatusCode::OK);
+						break response.len() - peek.len();
+					}
+					Err(web_transport_proto::ConnectError::UnexpectedEnd) => {}
+					Err(err) => panic!("bad CONNECT response: {err}"),
+				}
+			};
+			let mut capsules = response.split_off(consumed);
+
+			// The server's control stream, read past its SETTINGS so that
+			// anything it reports from here on is the stream ending.
+			let mut server_control = std::future::poll_fn(|cx| peer.poll_accept_uni(cx))
+				.await
+				.expect("server control stream");
+			let mut received = Vec::new();
+			loop {
+				read_more(&mut server_control, &mut received).await;
+				if web_transport_proto::Settings::decode(&mut received.as_slice()).is_ok() {
+					break;
+				}
+			}
+
+			session.close(CLOSE_CODE, CLOSE_REASON);
+			drop(session);
+
+			let capsule = within(&handle, "the close capsule", async {
+				loop {
+					let mut peek = capsules.as_slice();
+					if let Ok((frame, mut payload)) = web_transport_proto::Frame::read(&mut peek) {
+						assert_eq!(frame, web_transport_proto::Frame::DATA, "only DATA carries capsules");
+						let capsule = web_transport_proto::Capsule::decode(&mut payload).expect("a whole capsule");
+						assert!(!payload.has_remaining(), "one capsule");
+						break capsule;
+					}
+					read_more(&mut connect_recv, &mut capsules).await;
+				}
+			})
+			.await;
+			assert_eq!(
+				capsule,
+				web_transport_proto::Capsule::CloseWebTransportSession {
+					code: CLOSE_CODE,
+					reason: CLOSE_REASON.to_string(),
+				}
+			);
+
+			// Everything sent before the capsule has been processed by now,
+			// including a reset of the control stream had the drop caused one.
+			let mut buf = [0u8; 64];
+			let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+			match server_control.poll_read(&mut cx, &mut buf) {
+				std::task::Poll::Pending => {}
+				other => panic!("the server's control stream ended under the capsule: {other:?}"),
+			}
+
+			// The peer acts on the capsule, as a browser would.
+			peer.close(0, "");
+			within(
+				&handle,
+				"the connection to close",
+				std::future::poll_fn(|cx| watch.poll_closed(cx)),
+			)
+			.await;
+			drop(control);
+		})
+		.expect("worker");
 }
 
 /// A pending HTTP/3 handshake owns the connection even before it has read

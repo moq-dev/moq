@@ -10,9 +10,8 @@ reports that it cannot rather than returning a guess.
 ## Plan
 
 Decided in the 2026-10-05 audit: re-planned on moq-net's own transport
-traits. [moq-net owns its transport seam](/quest/m1/transport-seam.md)
-removes moq-net's `web-transport-trait` dependency, so moq-net could not call
-a hook that exists only upstream. The method lives on
+traits. moq-net has no `web-transport-trait` dependency, so it could not
+call a hook that exists only upstream. The method lives on
 `rs/moq-net/src/transport.rs`'s `poll::SendStream`, implemented by the
 moq-tokio and moq-uring adapters (the in-tree web-transport-moq after
 [the fork](/quest/m1/quic/fork/README.md)); no `web-transport-trait` release
@@ -54,7 +53,6 @@ Decided in the 2026-09-30 audit: moved to m2 with its only consumer,
 
 ## Required
 
-- [moq-net owns its transport seam](/quest/m1/transport-seam.md) - the moq-net trait this method lives on
 - [Per-stream ACK progress](/quest/m2/quic-ack-progress.md) - the
   `moq-quic` accessor the adapter reads
 

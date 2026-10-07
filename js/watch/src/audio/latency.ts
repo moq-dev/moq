@@ -28,11 +28,11 @@ export function target(props: Target): Time.Milli {
 }
 
 /**
- * The least subscription max age an "auto" track asks for: the estimator's ceiling.
+ * The least subscription max delay an "auto" track asks for: the estimator's ceiling.
  *
  * The measured term saturates at 100 buckets of 20 ms, so a frame later than this adds nothing.
  */
-export const AUTO_MAX_AGE = 2000 as Time.Milli;
+export const AUTO_MAX_DELAY = 2000 as Time.Milli;
 
 // An AudioWorkletProcessor renders in fixed 128-sample quanta, so a ring shallower than one can
 // never be read from.
