@@ -376,10 +376,10 @@ async fn broadcast_moq_lite_05_fetch_webtransport() {
 	lite05_fetch_roundtrip("https").await;
 }
 
-/// A cache miss over moq-transport is a standalone FETCH of the one group, served from
-/// the publisher's cache, and a group the publisher lacks comes back as the publisher's
-/// own refusal. Without `served`, the version has no FETCH and the miss is refused.
-async fn transport_fetch_roundtrip(version: &str, served: bool) {
+/// A cache miss over moq-transport is a FETCH of the one group, served from the
+/// publisher's cache, and a group the publisher lacks comes back as the publisher's own
+/// refusal.
+async fn transport_fetch_roundtrip(version: &str) {
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	broadcast
@@ -444,19 +444,6 @@ async fn transport_fetch_roundtrip(version: &str, served: bool) {
 	let fetched = tokio::time::timeout(TIMEOUT, async { bc.track("video").unwrap().fetch_group(1, None).await })
 		.await
 		.expect("fetch timed out");
-	if !served {
-		assert!(
-			matches!(fetched, Err(moq_net::Error::Unsupported)),
-			"expected an unsupported FETCH, got {:?}",
-			fetched.err()
-		);
-		drop(connection);
-		server_handle
-			.await
-			.expect("server task panicked")
-			.expect("server task failed");
-		return;
-	}
 	let mut group = fetched.expect("fetch failed");
 	assert_eq!(group.sequence, 1);
 	for frame in 0..2 {
@@ -492,25 +479,25 @@ async fn transport_fetch_roundtrip(version: &str, served: bool) {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn fetch_moq_transport_14() {
-	transport_fetch_roundtrip("moq-transport-14", true).await;
+	transport_fetch_roundtrip("moq-transport-14").await;
 }
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn fetch_moq_transport_16() {
-	transport_fetch_roundtrip("moq-transport-16", true).await;
+	transport_fetch_roundtrip("moq-transport-16").await;
 }
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn fetch_moq_transport_18() {
-	transport_fetch_roundtrip("moq-transport-18", true).await;
+	transport_fetch_roundtrip("moq-transport-18").await;
 }
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn fetch_moq_transport_20() {
-	transport_fetch_roundtrip("moq-transport-20", false).await;
+	transport_fetch_roundtrip("moq-transport-20").await;
 }
 
 /// A fetch must be served while a live subscription is active on the same track.

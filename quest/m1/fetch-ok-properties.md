@@ -33,10 +33,8 @@ sends an empty block.
   when the track is, as the [untimed model](/quest/m1/untimed-model.md)
   requires. Rejected: omitting timescale from FETCH_OK and leaving fetch-only
   readers untimed.
-- Honour INCLUDE_PROPERTIES (0x35) on FETCH from draft 20, once
-  [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) serves draft-20 FETCH at
-  all (today our publisher refuses every one). It defaults to sending the
-  properties; at 0 the block is present but empty. `fetch.rs` decodes it on
+- Honour INCLUDE_PROPERTIES (0x35) on FETCH from draft 20. It defaults to
+  sending the properties; at 0 the block is present but empty. `fetch.rs` decodes it on
   draft 20+ and drops it, so it is not honoured today.
 - Test per draft range: FETCH_OK round-trips the properties SUBSCRIBE_OK would
   carry, a standalone FETCH's objects arrive stamped, and
@@ -44,10 +42,6 @@ sends an empty block.
 
 Public API: none. Wire: FETCH_OK gains its properties on drafts that define
 the block. Interop: run `just test interop --all`.
-
-## Required
-
-- [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) - draft-20 FETCH is served at all, and edits the same `run_fetch_stream`
 
 ## Related
 

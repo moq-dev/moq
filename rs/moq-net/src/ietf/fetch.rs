@@ -191,7 +191,7 @@ impl Message for Fetch<'_> {
 		}
 
 		// The token is ignored: the session's grant is what authorizes the request, and
-		// INCLUDE_PROPERTIES only shapes a FETCH_OK we don't send on draft-20.
+		// INCLUDE_PROPERTIES only shapes FETCH_OK's Track Properties, which we leave empty.
 		let (fetch_type, subscriber_priority, group_order, range_filters, fill_timeout) = match version {
 			Version::Draft14 => {
 				let subscriber_priority = buf.u8()?;
