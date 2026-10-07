@@ -1483,7 +1483,7 @@ async fn publish_media_aac_populates_description() {
 		sample_rate: 44_100,
 		channel_count: 2,
 	};
-	let init = config.encode();
+	let init = config.encode().unwrap();
 	let _media = broadcast
 		.publish_audio(audio_init(MoqAudioFormat::Aac, init.to_vec()))
 		.unwrap();

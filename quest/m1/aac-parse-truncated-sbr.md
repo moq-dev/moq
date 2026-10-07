@@ -9,13 +9,10 @@ instead of accepting it as if the core were known.
 ## Plan
 
 - The export path already requires these fields; `parse` stays lenient only
-  because `Config::encode` writes a two-byte config for those object types.
-  Once encode refuses or completes them, the leniency has no producer.
+  because `Config::encode` still writes a two-byte config for object types 5
+  and 29. Refuse or complete those fields in encode before `parse` rejects
+  them, or the round trip breaks.
 - Check the `moq-audio` tests that feed a two-byte HE-AAC config; they should
   keep asserting a refusal, just a different one.
 
 Public API: none beyond a new error case. Wire: none.
-
-## Required
-
-- [AAC encode refusals](/quest/m1/aac-encode-refusals.md) - encode stops producing truncated SBR and PS configs

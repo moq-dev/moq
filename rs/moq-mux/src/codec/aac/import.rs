@@ -20,8 +20,9 @@ impl Import {
 	/// Publish on an existing track producer with a resolved catalog config.
 	///
 	/// Build one from an AudioSpecificConfig with [`config`] (which keeps its bytes as the catalog
-	/// `description`), or from an out-of-band [`Config`] via `into()` (which synthesizes the
-	/// description). The rendition publishes immediately.
+	/// `description`), or from an out-of-band [`Config`] via `try_into()` (which synthesizes the
+	/// description, refusing a channel count no channelConfiguration names). The rendition publishes
+	/// immediately.
 	pub fn new<E: CatalogExt>(
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
@@ -117,24 +118,36 @@ impl Import {
 /// Errors on a malformed or empty buffer.
 pub fn config(init: &[u8]) -> crate::Result<hang::catalog::AudioConfig> {
 	let mut buf = init;
-	let mut audio: hang::catalog::AudioConfig = Config::parse(&mut buf)?.into();
+	let parsed = Config::parse(&mut buf)?;
+	// Keep the bytes verbatim. Re-encoding would refuse a program config element whose count no
+	// channelConfiguration names, and would drop any SBR or PS extension the parse ignores.
+	let mut audio = catalog_config(&parsed);
 	audio.description = Some(bytes::Bytes::copy_from_slice(init));
 	Ok(audio)
 }
 
-impl From<Config> for hang::catalog::AudioConfig {
+impl TryFrom<Config> for hang::catalog::AudioConfig {
+	type Error = super::Error;
+
 	/// Build a catalog config from a config resolved out of band (an ADTS header, gstreamer caps),
 	/// synthesizing the AudioSpecificConfig `description` since no verbatim bytes are available.
-	fn from(config: Config) -> Self {
-		let mut audio = hang::catalog::AudioConfig::new(
-			hang::catalog::AAC {
-				profile: config.profile,
-			},
-			config.sample_rate,
-			config.channel_count,
-		);
-		audio.container = hang::catalog::Container::Legacy;
-		audio.description = Some(config.encode());
-		audio
+	///
+	/// Refuses a channel count no channelConfiguration names, rather than describing it as another layout.
+	fn try_from(config: Config) -> Result<Self, Self::Error> {
+		let mut audio = catalog_config(&config);
+		audio.description = Some(config.encode()?);
+		Ok(audio)
 	}
+}
+
+fn catalog_config(config: &Config) -> hang::catalog::AudioConfig {
+	let mut audio = hang::catalog::AudioConfig::new(
+		hang::catalog::AAC {
+			profile: config.profile,
+		},
+		config.sample_rate,
+		config.channel_count,
+	);
+	audio.container = hang::catalog::Container::Legacy;
+	audio
 }

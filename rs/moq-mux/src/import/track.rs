@@ -911,7 +911,7 @@ mod tests {
 			sample_rate: 44_100,
 			channel_count: 2,
 		};
-		let init = config.encode();
+		let init = config.encode().unwrap();
 		let request = broadcast.reserve_track("audio").unwrap();
 
 		let import = Track::audio(

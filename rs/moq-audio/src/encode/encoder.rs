@@ -386,7 +386,7 @@ impl Encoder {
 					.map_err(moq_mux::Error::from)?;
 				Some(head)
 			}
-			Codec::Aac => Some(aac_config(settings)?.encode()),
+			Codec::Aac => Some(aac_config(settings)?.encode().map_err(moq_mux::Error::from)?),
 			Codec::Pcm => None,
 		};
 
@@ -1006,7 +1006,12 @@ mod tests {
 			Layout::SixPointOne,
 			Layout::Discrete(2),
 		] {
-			assert!(matches!(stub(&aac(layout)), Err(Error::Unsupported(_))), "{layout:?}");
+			let result = stub(&aac(layout));
+			let detail = result.as_ref().err().map(ToString::to_string);
+			assert!(
+				matches!(result, Err(Error::Unsupported(msg)) if msg.contains("no channelConfiguration")),
+				"{layout:?}: {detail:?}"
+			);
 		}
 	}
 

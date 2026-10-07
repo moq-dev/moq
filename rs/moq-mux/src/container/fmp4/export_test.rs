@@ -84,7 +84,8 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 		sample_rate: 44100,
 		channel_count: 2,
 	}
-	.encode();
+	.encode()
+	.unwrap();
 	let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
 	config.description = Some(description);
 
@@ -700,7 +701,7 @@ async fn one_packet_audio_group_is_timed_by_the_catalog() {
 		channel_count: 2,
 	};
 	let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
-	config.description = Some(aac.encode());
+	config.description = Some(aac.encode().unwrap());
 
 	let mut live = Live::audio(config);
 	live.track.write(raw_frame(0, &[0x01, 0x02, 0x03, 0x04], true)).unwrap();
@@ -1634,7 +1635,8 @@ async fn aac_bitrate_churn_keeps_the_track() {
 			sample_rate: 44100,
 			channel_count: 2,
 		}
-		.encode(),
+		.encode()
+		.unwrap(),
 	);
 	let mut live = Live::audio(config);
 	let name = live.track.name().to_string();
