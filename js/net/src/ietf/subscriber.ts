@@ -215,7 +215,8 @@ export class Subscriber {
 	 *
 	 * The peer is asked with SUBSCRIBE_NAMESPACE regardless of what it declared, and an
 	 * unsolicited PUBLISH_NAMESPACE lands here too, so a peer that only tells and one
-	 * that only answers are both discovered.
+	 * that only answers are both discovered. Draft-14 and draft-15 cannot be asked for
+	 * the empty prefix, so an unscoped subscriber only hears what the peer tells.
 	 *
 	 * Hidden routes (a `.`-prefixed segment below the scope's head) are left out unless
 	 * `options.hidden` opts in. The opt-in rides the SUBSCRIBE_NAMESPACE when the peer
@@ -320,6 +321,15 @@ export class Subscriber {
 
 	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, hidden: boolean) {
 		const version = this.#session.version;
+
+		// A zero-field track namespace was a protocol violation until draft-16 allowed
+		// it. There is no other way to ask for every namespace on the older drafts, so
+		// send nothing and stay registered: an unsolicited PUBLISH_NAMESPACE still lands
+		// here. Returning without waiting would drop this consumer before one could.
+		if ((version === Version.DRAFT_14 || version === Version.DRAFT_15) && prefix.length === 0) {
+			await announced.closed;
+			return;
+		}
 
 		// Suffixes live on this stream, so a repeat is recognized as an update to the
 		// advertisement rather than a second one, which would leak the count.

@@ -595,8 +595,9 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 /// our namespace -- a peer outside it has never heard of our root, so a rooted
 /// subscriber asks for its scope and mounts the replies under the root.
 ///
-/// Asked unconditionally: a peer with nothing to advertise answers with an empty set,
-/// which costs one stream.
+/// Every prefix is asked: a peer with nothing to advertise answers with an empty set,
+/// which costs one stream. The session leaves out an empty prefix before draft-16,
+/// where that request is illegal.
 pub(super) fn subscribe_prefixes(origin: &origin::Producer) -> Vec<PathOwned> {
 	crate::model::interest_prefixes(&origin.allowed())
 }

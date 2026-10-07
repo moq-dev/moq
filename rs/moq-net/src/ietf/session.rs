@@ -14,6 +14,16 @@ use super::{
 	subscriber::{is_protocol_violation, subscribe_prefixes},
 };
 
+/// Whether `prefix` may be sent in SUBSCRIBE_NAMESPACE on `version`.
+///
+/// Draft-16 is the first that allows a zero-field track namespace. Before that the
+/// minimum was one field, and an empty prefix was a protocol violation. An unscoped
+/// subscriber has nothing legal to ask for on those drafts; the peer can still
+/// advertise with an unsolicited PUBLISH_NAMESPACE.
+fn ask_namespace(version: Version, prefix: &crate::Path<'_>) -> bool {
+	!prefix.is_empty() || !matches!(version, Version::Draft14 | Version::Draft15)
+}
+
 /// Everything one moq-transport session needs to start.
 pub struct Config<S: crate::transport::poll::Session> {
 	/// The runtime that arms the session's timers.
@@ -124,8 +134,15 @@ where
 	let (goaway_handle, goaway) = crate::goaway::Handle::new(!client);
 
 	// One SUBSCRIBE_NAMESPACE per permitted prefix, like `lite::Subscriber`: the
-	// scope is what we may ask for, and it is not the origin's root.
-	let namespaces = subscribe.as_ref().map(subscribe_prefixes).unwrap_or_default();
+	// scope is what we may ask for, and it is not the origin's root. An empty
+	// prefix is illegal before draft-16, so those drafts are not asked for it.
+	let namespaces: Vec<_> = subscribe
+		.as_ref()
+		.map(subscribe_prefixes)
+		.unwrap_or_default()
+		.into_iter()
+		.filter(|prefix| ask_namespace(version, prefix))
+		.collect();
 
 	let withdrawal = crate::session::Withdrawal::default();
 	let withdrawing = withdrawal.clone();
@@ -1224,6 +1241,98 @@ mod tests {
 		assert_eq!(occurrences(&log, b"cam"), 1, "one SUBSCRIBE_NAMESPACE for cam");
 		assert_eq!(occurrences(&log, b"mic"), 1, "one SUBSCRIBE_NAMESPACE for mic");
 		assert_eq!(occurrences(&log, b"rootns"), 0, "asked the peer for our local root");
+	}
+
+	/// The bytes of one legacy SUBSCRIBE_NAMESPACE, as the session writes them.
+	async fn subscribe_namespace_legacy(version: Version, namespace: &str) -> Vec<u8> {
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+		let msg = ietf::SubscribeNamespaceLegacy {
+			request_id: RequestId(0),
+			namespace: crate::Path::new(namespace),
+			subscribe_options: 0x01,
+			hidden: false,
+		};
+		writer.varint(ietf::SubscribeNamespaceLegacy::ID).await.unwrap();
+		writer.encode(&msg).await.unwrap();
+		log.writes.lock().unwrap().clone()
+	}
+
+	/// How many times a session with this scope writes SUBSCRIBE_NAMESPACE for it.
+	///
+	/// `prefix: None` is an unscoped origin, whose only interest head is empty.
+	async fn asked_namespace(version: Version, prefix: Option<&str>) -> usize {
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let subscribe = match prefix {
+			Some(name) => {
+				let scope: crate::Patterns = [crate::Pattern::subtree(name).unwrap()].into_iter().collect();
+				origin.scope("rootns", &scope).expect("scope the origin")
+			}
+			None => origin,
+		};
+
+		let gate = kio::Producer::new(true);
+		let mut session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
+		let log = session.log.clone();
+		let setup = Stream::open(&mut session, version)
+			.await
+			.expect("open the control stream");
+
+		let (driver, _goaway, _) = start(Config {
+			runtime: crate::time::Clock::sim(),
+			session,
+			setup: Some(setup),
+			request_id_max: None,
+			client: true,
+			publish: None,
+			subscribe: Some(subscribe),
+			peer_hop: None,
+			cost: None,
+			version,
+			path: None,
+			authority: None,
+			peer_setup_stream: None,
+			peer_declared: None,
+			early_unis: Vec::new(),
+		})
+		.expect("start the session");
+		let driver = moq_net_sim::spawn(driver);
+
+		let needle = subscribe_namespace_legacy(version, prefix.unwrap_or("")).await;
+		for _ in 0..ANNOUNCE_TURNS {
+			if occurrences(&log, &needle) > 0 {
+				break;
+			}
+			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+		}
+
+		assert!(!driver.is_finished(), "{version:?} ended the session");
+		assert!(log.closes().is_empty(), "{version:?} closed: {:?}", log.closes());
+		occurrences(&log, &needle)
+	}
+
+	/// Draft-14 and draft-15 reject a zero-field track namespace. An unscoped
+	/// subscriber must not send one, and a real prefix must still go out. Draft-16
+	/// made the empty prefix the way to ask for every namespace, so it stays.
+	#[moq_net_sim::test]
+	async fn an_empty_namespace_is_not_asked_before_draft_16() {
+		for version in [Version::Draft14, Version::Draft15] {
+			assert_eq!(
+				asked_namespace(version, None).await,
+				0,
+				"{version:?} asked for every namespace"
+			);
+			assert_eq!(
+				asked_namespace(version, Some("cam")).await,
+				1,
+				"{version:?} skipped a real prefix"
+			);
+		}
+		assert_eq!(
+			asked_namespace(Version::Draft16, None).await,
+			1,
+			"draft-16 dropped the empty prefix"
+		);
 	}
 
 	/// How many scheduling turns an advertisement gets before the count is taken. Time is
