@@ -23,3 +23,12 @@ names.
   cancelling a pending task and running callbacks through a custom dispatcher.
 - Offer the backend to the LiveKit or NordSecurity upstream once its shape
   settles, or record why not.
+
+Progress (2026-10-07): a `--lang c` backend exists on fork branch
+`kixelated/c-backend` (commit not yet on GitHub: every git push to the fork
+returned HTTP 500). It renders a C99 `<ns>.h` plus `<ns>_c.cpp` over the
+expected-style C++ bindings, covers every construct moq-ffi uses, and
+generates, compiles, and runs a read/write smoke test against moq-ffi. The
+fork's `cpp-tests` gain C fixtures for each construct, cancellation, a custom
+dispatcher, and refusal of callback interfaces. Remaining: land the fork PR and
+tag, settle the open shape decisions in its PR, and the upstream offer.
