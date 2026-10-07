@@ -42,7 +42,10 @@ group's first timestamp moving the edge) never wakes it. It is judged with
 where the successor's first timestamp lands. Recover registers the held
 group in the same index as `GroupServe`, and stamping or aborting the
 successor re-keys the entry. One mechanism, not a per-reader helper beside
-the index.
+the index. Two differences the index must carry: an entry can wait on its
+successor's first stamp with no deadline yet, and Recover's entry lives in
+the serving copy's index (a different track from the one holding the
+group), so it moves when the route changes.
 
 Tests:
 
