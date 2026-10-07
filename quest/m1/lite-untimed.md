@@ -9,13 +9,14 @@ peers. Covers `rs/moq-net`, `js/net` and `drafts/draft-lcurley-moq-lite.md`.
 
 ## Plan
 
-Decided (2026-10-05, maintainer): timedness is per track ([Typed
-timedness](/quest/m1/typed-timedness.md)), and an untimed track sends no
+Decided (2026-10-05, maintainer): timedness is per track ([untimed
+model](/quest/m1/untimed-model.md)), and an untimed track sends no
 TIMESCALE and no Timestamp. On lite-07 that likely means an optional
 Timescale in TRACK_INFO and no Timestamp fields on an untimed track. The
 per-frame shift below was planned for an absent timestamp inside a timed
-track, which no longer exists, so re-plan the encoding once Typed timedness
-settles the shape, and drop the shift if nothing needs it.
+track, which no longer exists (settled 2026-10-06: a mismatched frame is
+refused), so re-plan the encoding on that shape and drop the shift if
+nothing needs it.
 
 Decided (2026-10-01, maintainer): shift the FRAME Timestamp Delta and the
 DATAGRAM Timestamp by one, so 0 means absent. An absent frame doesn't move

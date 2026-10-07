@@ -45,10 +45,10 @@ every QUIC timeout re-arm is an O(log n) map removal and insertion with `Rc`
 traffic. The #2875 design note called for a timer wheel. Not urgent at these
 connection counts, but it is on the same hot path and grows with it.
 
-moq-net's runtime is crate-private now, and its drivers already receive the
-current instant from their owner (`Runtime::now`, "the latest instant
-supplied by the owner", in `rs/moq-net/src/runtime.rs`); moq-uring's worker
-passes `Instant::now()` to `driver.poll` once per poll
+moq-net's drivers already receive the current instant from their owner
+(`Clock::now`, "the latest instant supplied by the owning driver", in
+`rs/moq-net/src/time.rs`); moq-uring's worker passes `Instant::now()` to its
+single `driver.poll(Instant::now(), ...)` call once per poll
 (`rs/moq-uring/src/worker.rs`). Sample once per drive turn there and pass
 that instant through `fire`, the `handle_timeout`, and `poll_transmit`.
 

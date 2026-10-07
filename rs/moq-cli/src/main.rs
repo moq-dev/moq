@@ -5,6 +5,7 @@
 //! plus every stage's endpoint.
 
 mod announced;
+mod archive;
 mod args;
 mod auth;
 mod complete;
@@ -253,9 +254,9 @@ async fn serve_client(
 }
 
 /// Whether ordinary clients may use this transport on the shared LAN server.
-fn is_public_transport(transport: moq_tokio::server::Transport, public_quic: bool) -> bool {
+fn is_public_transport(transport: moq_tokio::Transport, public_quic: bool) -> bool {
 	match transport {
-		moq_tokio::server::Transport::Tcp | moq_tokio::server::Transport::Unix => true,
+		moq_tokio::Transport::Tcp | moq_tokio::Transport::Unix => true,
 		_ => public_quic,
 	}
 }
@@ -691,6 +692,11 @@ fn spawn_import(
 					tasks.spawn(rtc::connect_import(target(name), url));
 				}
 			}
+			ImportSource::Archive(args) => {
+				// A replay serves the retention the recording was made with.
+				anyhow::ensure!(max_age.is_none(), "`--max-age` does not apply to `import archive`");
+				tasks.spawn(archive::import(origin.clone(), name, args));
+			}
 			#[cfg(feature = "capture")]
 			ImportSource::Capture(capture) => {
 				warn_if_missing_format(&name);
@@ -770,6 +776,14 @@ fn spawn_export(
 				} else if let Some(url) = rtc.connect {
 					tasks.spawn(rtc::connect_export(origin.consume(), url, name));
 				}
+			}
+			ExportSink::Archive(args) => {
+				let format = export
+					.catalog_format
+					.map(Into::into)
+					.or_else(|| moq_mux::catalog::CatalogFormat::detect(&name))
+					.unwrap_or_default();
+				tasks.spawn(archive::export(origin.consume(), name, format, args));
 			}
 			_ => unreachable!("container formats are handled by stdout_format above"),
 		}
@@ -1060,9 +1074,9 @@ mod tests {
 
 	#[test]
 	fn explicit_stream_listeners_are_public_without_exposing_mesh_quic() {
-		assert!(is_public_transport(moq_tokio::server::Transport::Tcp, false));
-		assert!(is_public_transport(moq_tokio::server::Transport::Unix, false));
-		assert!(!is_public_transport(moq_tokio::server::Transport::Quic, false));
-		assert!(is_public_transport(moq_tokio::server::Transport::Quic, true));
+		assert!(is_public_transport(moq_tokio::Transport::Tcp, false));
+		assert!(is_public_transport(moq_tokio::Transport::Unix, false));
+		assert!(!is_public_transport(moq_tokio::Transport::Quic, false));
+		assert!(is_public_transport(moq_tokio::Transport::Quic, true));
 	}
 }

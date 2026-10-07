@@ -212,7 +212,10 @@ impl PathData {
 
             congestion_window: Some(controller_metrics.congestion_window),
             ssthresh: controller_metrics.ssthresh,
-            pacing_rate: controller_metrics.pacing_rate,
+            // qlog reports bits per second; the controller reports bytes.
+            pacing_rate: controller_metrics
+                .pacing_rate
+                .map(|rate| rate.saturating_mul(8)),
         };
 
         let event = metrics.to_qlog_event(&self.recovery_metrics);
@@ -486,12 +489,12 @@ mod tests {
         let remote = "203.0.113.1:4433".parse().unwrap();
         let mut path = PathData::new(remote, true, None, 0, now, &config);
         let mtu = path.current_mtu();
-        let window = path.congestion.window();
+        let metrics = path.congestion.metrics();
 
         for _ in 0..1000 {
             if path
                 .pacing
-                .delay(path.rtt.get(), mtu.into(), mtu, window, now)
+                .delay(path.rtt.get(), mtu.into(), mtu, now, &metrics)
                 .is_some()
             {
                 break;
@@ -500,19 +503,21 @@ mod tests {
         }
         assert!(
             path.pacing
-                .delay(path.rtt.get(), mtu.into(), mtu, window, now)
+                .delay(path.rtt.get(), mtu.into(), mtu, now, &metrics)
                 .is_some()
         );
 
         path.reset(now, &config);
 
+        // `reset` rebuilds the controller, so take a fresh snapshot of its metrics.
+        let metrics = path.congestion.metrics();
         assert_eq!(
             path.pacing.delay(
                 path.rtt.get(),
                 path.current_mtu().into(),
                 path.current_mtu(),
-                path.congestion.window(),
-                now
+                now,
+                &metrics
             ),
             None
         );

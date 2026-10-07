@@ -104,7 +104,6 @@ const opusFrameDuration = new Signals.Signal<number | undefined>(undefined); // 
 const opusComplexity = new Signals.Signal<number | undefined>(undefined); // 0 (fast) … 10 (best)
 const opusFec = new Signals.Signal(false); // in-band forward error correction
 const opusPacketLoss = new Signals.Signal<number | undefined>(undefined); // expected loss %
-const opusDtx = new Signals.Signal(false); // discontinuous transmission (silence)
 
 const ui = new Signals.Effect();
 
@@ -202,7 +201,6 @@ ui.run((effect) => {
 		...(complexity != null ? { complexity } : {}),
 		...(packetLoss != null ? { packetlossperc: packetLoss } : {}),
 		useinbandfec: effect.get(opusFec),
-		usedtx: effect.get(opusDtx),
 	};
 	publish.audio.codec.set(config);
 });
@@ -275,7 +273,6 @@ bindOptionalSelect("opus-frame-duration", opusFrameDuration);
 bindOptionalNumber("opus-complexity", opusComplexity);
 bindOptionalNumber("opus-plc", opusPacketLoss);
 bindCheckbox("opus-fec", opusFec);
-bindCheckbox("opus-dtx", opusDtx);
 
 // Audio codec selector: drive the codec kind and show the matching options panel.
 const audioCodecEl = $<HTMLSelectElement>("audio-codec");

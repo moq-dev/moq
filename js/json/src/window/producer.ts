@@ -90,6 +90,24 @@ export class Producer<T> {
 		encoded.commit();
 	}
 
+	/**
+	 * Finish the open group, leaving the next edit to open a replacement with a header.
+	 *
+	 * Idempotent: cutting when no group is open does nothing. A caller that stores complete groups
+	 * cuts after its edits, so every edit so far sits in a group no later frame can extend.
+	 */
+	cut(): void {
+		if (!this.#group) return;
+
+		// Reset first: the group closes either way below, and a throw must not leave the encoder
+		// appending ops to a group that is gone.
+		this.#encoder.reset();
+
+		const group = this.#group;
+		this.#group = undefined;
+		group.close();
+	}
+
 	/** Finish the track, closing any open group. */
 	finish(): void {
 		if (this.#finished) return;

@@ -92,7 +92,7 @@ mod tests {
 	/// starves it: quinn schedules strictly by priority and round-robins only
 	/// within a level, so a rank-0 group with bytes pending is enough to keep
 	/// the scheduler from ever reaching the transport's default of 0.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn open_prioritises_the_stream() {
 		let gate = kio::Producer::new(true);
 		let mut session = SinkSession::gated_bi(gate.consume());
@@ -110,7 +110,7 @@ mod tests {
 	/// The accepted half answers on the stream it was handed (track info, subscribe
 	/// responses), so it needs the same order as one we opened. A fix that only
 	/// covered `open` would leave every reply behind the media.
-	#[tokio::test]
+	#[moq_net_sim::test]
 	async fn accept_prioritises_the_stream() {
 		let gate = kio::Producer::new(true);
 		let mut session = SinkSession::accepted_bi(gate.consume());

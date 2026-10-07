@@ -385,10 +385,12 @@ test("a push completing several frames keeps the encoder running", async () => {
 	]);
 });
 
-test("passes an explicit Opus DTX request to the encoder", async () => {
+// Chromium stamps Opus output by counting the samples emitted, so every frame DTX suppresses pulls
+// later audio earlier. A plain-JS caller passing the old knob must not reach the encoder.
+test("never enables Opus DTX", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	using env = await setup(new Baseline(), { mime: "opus", usedtx: true });
-	expect(env.config.opus?.usedtx).toBe(true);
+	using env = await setup(new Baseline(), { mime: "opus", usedtx: true } as Codec);
+	expect(env.config.opus?.usedtx).toBeUndefined();
 });
 
 // Another rendition on the same broadcast flushing with far less lateness leaves this one trailing

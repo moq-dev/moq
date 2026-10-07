@@ -5,6 +5,9 @@ import { Producer } from "../../js/net/src/origin.ts";
 import * as Path from "../../js/net/src/path.ts";
 import { Milli } from "../../js/net/src/time.ts";
 
+// stdout carries the `ready` handshake to the Rust test, so library debug logs go to stderr.
+console.debug = console.error;
+
 const [address, protocol, mode] = process.argv.slice(2);
 if (!address || !protocol || !["publish", "subscribe"].includes(mode))
 	throw new Error("expected URL ALPN publish|subscribe");

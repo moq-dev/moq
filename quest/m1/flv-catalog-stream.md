@@ -8,6 +8,7 @@ callers narrow renditions with `catalog::Stream::select` and the FLV-only
 
 ## Plan
 
-This is a published API break. Consider whether the TS
-and Matroska exports should take the same shape in the same pass. RTMP play
+This is a published API break. The Matroska and fMP4 exports already take a
+catalog stream (`mkv::Export::new(source, catalog)`), so only TS is open for
+the same pass: consider whether it should take the same shape too. RTMP play
 passes its client-capability selection through the stream instead.

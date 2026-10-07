@@ -13,7 +13,7 @@ pub struct Goaway<'a> {
 }
 
 impl Message for Goaway<'_> {
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 | Version::Lite03 => {
 				return Err(DecodeError::Version);
@@ -25,18 +25,15 @@ impl Message for Goaway<'_> {
 		// cap. Rejected from the string's length prefix alone, before allocating
 		// or validating the payload. (Buffering is bounded separately by the
 		// outer message-size prefix that frames every lite control message.)
-		let len = usize::decode(r, version)?;
+		let len = r.varint()?;
 		if len > 8192 {
 			return Err(DecodeError::InvalidValue);
 		}
-		if r.remaining() < len {
-			return Err(DecodeError::Short);
-		}
-		let uri = String::from_utf8(r.copy_to_bytes(len).to_vec())?;
+		let uri = String::from_utf8(r.slice(len as usize)?.to_vec())?;
 		Ok(Self { uri: Cow::Owned(uri) })
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 | Version::Lite03 => {
 				return Err(EncodeError::Version);
@@ -44,7 +41,7 @@ impl Message for Goaway<'_> {
 			_ => {}
 		}
 
-		self.uri.encode(w, version)?;
+		w.string(&self.uri)?;
 		Ok(())
 	}
 }
@@ -52,27 +49,30 @@ impl Message for Goaway<'_> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bytes::BytesMut;
 
 	#[test]
 	fn roundtrip_with_uri() {
 		let msg = Goaway {
 			uri: Cow::Borrowed("https://relay.example/new"),
 		};
-		let mut buf = BytesMut::new();
-		msg.encode_msg(&mut buf, Version::Lite04).unwrap();
+		let mut buf = Vec::new();
+		msg.encode_msg(&mut Encoder::new(&mut buf, Version::Lite04.into()), Version::Lite04)
+			.unwrap();
 
-		let decoded = Goaway::decode_msg(&mut buf.freeze(), Version::Lite04).unwrap();
+		let decoded =
+			crate::coding::decode_buf(&mut bytes::Bytes::from(buf), Version::Lite04, Goaway::decode_msg).unwrap();
 		assert_eq!(decoded.uri, "https://relay.example/new");
 	}
 
 	#[test]
 	fn roundtrip_empty() {
 		let msg = Goaway { uri: Cow::Borrowed("") };
-		let mut buf = BytesMut::new();
-		msg.encode_msg(&mut buf, Version::Lite04).unwrap();
+		let mut buf = Vec::new();
+		msg.encode_msg(&mut Encoder::new(&mut buf, Version::Lite04.into()), Version::Lite04)
+			.unwrap();
 
-		let decoded = Goaway::decode_msg(&mut buf.freeze(), Version::Lite04).unwrap();
+		let decoded =
+			crate::coding::decode_buf(&mut bytes::Bytes::from(buf), Version::Lite04, Goaway::decode_msg).unwrap();
 		assert_eq!(decoded.uri, "");
 	}
 
@@ -81,15 +81,25 @@ mod tests {
 		let msg = Goaway {
 			uri: Cow::Borrowed("https://relay.example/new"),
 		};
-		let mut buf = BytesMut::new();
+		let mut buf = Vec::new();
 
 		// Encoding should fail on Lite03.
-		assert!(msg.encode_msg(&mut buf, Version::Lite03).is_err());
+		assert!(
+			msg.encode_msg(&mut Encoder::new(&mut buf, Version::Lite03.into()), Version::Lite03)
+				.is_err()
+		);
 
 		// Even if we have valid bytes, decoding on Lite03 should fail.
-		let mut encode_buf = BytesMut::new();
-		msg.encode_msg(&mut encode_buf, Version::Lite04).unwrap();
-		assert!(Goaway::decode_msg(&mut encode_buf.freeze(), Version::Lite03).is_err());
+		let mut encode_buf = Vec::new();
+		msg.encode_msg(
+			&mut Encoder::new(&mut encode_buf, Version::Lite04.into()),
+			Version::Lite04,
+		)
+		.unwrap();
+		assert!(
+			crate::coding::decode_buf(&mut bytes::Bytes::from(encode_buf), Version::Lite03, Goaway::decode_msg)
+				.is_err()
+		);
 	}
 
 	/// The URI is capped at 8,192 bytes (matching the IETF wire), rejected from
@@ -101,9 +111,11 @@ mod tests {
 		let msg = Goaway {
 			uri: Cow::Borrowed(&at_cap),
 		};
-		let mut buf = BytesMut::new();
-		msg.encode_msg(&mut buf, Version::Lite04).unwrap();
-		let decoded = Goaway::decode_msg(&mut buf.freeze(), Version::Lite04).unwrap();
+		let mut buf = Vec::new();
+		msg.encode_msg(&mut Encoder::new(&mut buf, Version::Lite04.into()), Version::Lite04)
+			.unwrap();
+		let decoded =
+			crate::coding::decode_buf(&mut bytes::Bytes::from(buf), Version::Lite04, Goaway::decode_msg).unwrap();
 		assert_eq!(decoded.uri.len(), 8192);
 
 		// One byte over: rejected as InvalidValue, without needing the payload
@@ -112,13 +124,14 @@ mod tests {
 		let msg = Goaway {
 			uri: Cow::Borrowed(&over_cap),
 		};
-		let mut buf = BytesMut::new();
-		msg.encode_msg(&mut buf, Version::Lite04).unwrap();
-		let mut truncated = buf.freeze();
+		let mut buf = Vec::new();
+		msg.encode_msg(&mut Encoder::new(&mut buf, Version::Lite04.into()), Version::Lite04)
+			.unwrap();
+		let mut truncated = bytes::Bytes::from(buf);
 		// Keep only the length prefix plus a little payload.
 		let mut short = truncated.split_to(16);
 		assert!(matches!(
-			Goaway::decode_msg(&mut short, Version::Lite04),
+			crate::coding::decode_buf(&mut short, Version::Lite04, Goaway::decode_msg),
 			Err(DecodeError::InvalidValue)
 		));
 	}

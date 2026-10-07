@@ -37,7 +37,3 @@ Public API: none. Wire: none.
   must not drop protocols when the ring is on
 - [Flow-control windows](/quest/m1/uring-flow-control-windows.md) - the
   `[quic]` section must not be refused at startup on the ring
-- [Close before teardown](/quest/m1/quic/uring-close.md) - sessions on the
-  ring must end with their application close; probably fixed by
-  [#4431](https://github.com/moq-dev/moq/pull/4431), so re-run its repro
-  before starting and drop this blocker if it passes

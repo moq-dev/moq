@@ -27,7 +27,3 @@ who joins late joins mid-replay.
   current group, and that two tracks stay aligned.
 - Deferred in the 2026-09-30 audit and moved to m3 in the 2026-10-05 audit: no named consumer; FETCH replay
   already serves DVR and HLS.
-
-## Required
-
-- [Recording reader](/quest/m1/archive/reader.md) - the FETCH reader this adds live publishing to

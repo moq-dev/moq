@@ -222,5 +222,5 @@ match byte for byte and decode back to the same value.
 version dispatch: `lite-varint.ts` decodes Rust's lite-06 (QUIC) and lite-07
 (leading-ones) varints, a SETUP carrying a 62-bit Hop ID, a datagram, and a
 GROUP stream with frames, and re-encodes them byte for byte. Past 2^62-1 the
-range is per version: JS writes lite-07's 64-bit values, which Rust must refuse
-with a decode error until its `VarInt` widens, and JS refuses them on lite-06.
+range is per version: JS writes lite-07's 64-bit values, which Rust reads back,
+and JS refuses them on lite-06.
