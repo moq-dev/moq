@@ -206,7 +206,7 @@ async fn egress_opus_passthrough() {
 /// An Opus rendition in LOC is read as LOC, not as the legacy varint-timestamp format.
 #[tokio::test(start_paused = true)]
 async fn egress_opus_reads_the_rendition_container() {
-	let mut producer = moq_net::broadcast::Info::new().produce();
+	let producer = moq_net::broadcast::Info::new().produce();
 	let mut writer = moq_mux::container::Producer::new(
 		producer.create_track("audio", None).expect("track"),
 		moq_mux::catalog::hang::Container::Loc(moq_mux::container::Kind::Audio),
