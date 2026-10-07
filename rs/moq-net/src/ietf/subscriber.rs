@@ -2615,8 +2615,10 @@ where
 			return Status::Ended;
 		}
 
-		// Nobody wanting the track any more ends the wait on a peer that may never answer.
+		// Nobody wanting the track any more ends the wait on a peer that may never answer,
+		// and the session ending fails it with the session's reason.
 		let demand = request.demand();
+		let mut closed = self.session.clone();
 		let response = {
 			let mut response = std::pin::pin!(self.read_track_status_response(&mut stream));
 			loop {
@@ -2624,6 +2626,9 @@ where
 					// An answer that already arrived wins over abandonment.
 					if let Poll::Ready(res) = waiter.poll_future(response.as_mut()) {
 						return Poll::Ready(Some(res));
+					}
+					if let Poll::Ready(err) = closed.poll_closed(&mut waiter.context()) {
+						return Poll::Ready(Some(Err(Error::from_transport(err))));
 					}
 					demand.poll_unused(waiter).map(|_| None)
 				})
