@@ -2745,6 +2745,10 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						frame_start: self.frame_start,
 					};
 					if let Err(err) = writer.buffer(&lite::DataType::Group).and_then(|()| writer.buffer(&msg)) {
+						// The header wrote nothing, so the group-stream reset has nothing to pin
+						// it to this subscription. The run loop reads the slot and resets the
+						// subscribe stream instead.
+						self.ctx.note_unencodable(&err);
 						self.state = GroupState::Done;
 						writer.abort(&err);
 						return Poll::Ready(Err(err));
@@ -2918,13 +2922,9 @@ impl<S: crate::transport::poll::Session> kio::Task for GroupServe<S> {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		// Old, Lagged, and Evicted reset the group stream, which is all the subscriber
-		// needs once the header is on the wire. An encode failure can write nothing, so
-		// that reset has no header to pin it to this subscription. The run loop reads
-		// it off the shared slot and resets the subscribe stream.
-		if let Err(err @ Error::Encode(_)) = ready!(self.poll_serve(waiter)) {
-			self.ctx.note_unencodable(&err);
-		}
+		// The machine owns its outcome: the stream was aborted with the reason (or
+		// reset by the writer's Drop), which is all the subscriber sees.
+		ready!(self.poll_serve(waiter)).map(|()| ()).unwrap_or(());
 		Poll::Ready(())
 	}
 }
