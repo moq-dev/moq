@@ -203,7 +203,7 @@ async fn pick_track(source: &moq_mux::Source, catalog: &Catalog, codec: Codec) -
 				return Ok(None);
 			};
 			let track = source.subscribe_track(config.broadcast.as_ref(), name).await?;
-			Ok(Some(codec::Track::opus(track)))
+			Ok(Some(codec::Track::opus(track, config)?))
 		}
 		Codec::H264 | Codec::H265 | Codec::Vp8 | Codec::Vp9 | Codec::Av1 => {
 			let target = match codec {
