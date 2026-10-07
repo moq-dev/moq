@@ -635,6 +635,26 @@ impl Rendition {
 		self.live.is_playable()
 	}
 
+	/// Whether the multivariant playlist advertises this rendition, i.e. a player can start it.
+	///
+	/// Audio starts on any segment. Video starts only at a group start that is a sync point,
+	/// so it waits until a listed segment begins at one rather than send a stock player to
+	/// media it cannot decode.
+	pub(crate) fn is_advertised(&self) -> bool {
+		if !self.is_playable() {
+			return false;
+		}
+		if self.kind == Kind::Audio {
+			return true;
+		}
+		let window = self.live.window();
+		self.resolved(&window.segments).any(|(row, content)| match content {
+			// Another rendition's boundary only resolves to frames by snapping to a sync start.
+			Content::Frames { .. } => !self.is(&row.reference) || row.starts_sync(),
+			_ => false,
+		})
+	}
+
 	/// This rendition's DASH representation: its master-level metadata plus its track's
 	/// timeline as `(t, d)` pairs in the timeline's own timescale (the record values
 	/// verbatim, so `$Time$` addressing resolves exactly). `None` until the init is known, as
@@ -935,6 +955,12 @@ impl Rendition {
 	pub(crate) async fn listed_segment(&self, segment: u64) -> Result<Option<Bytes>> {
 		let tag = listed_tag(&self.live.window().segments);
 		self.segment(&tag, segment).await
+	}
+
+	/// What the listed segment numbered `segment` holds on this rendition.
+	pub(crate) fn listed_content(&self, segment: u64) -> Option<Content> {
+		let tag = listed_tag(&self.live.window().segments);
+		Some(self.resolve(&self.live.row(&tag, segment)?))
 	}
 
 	/// Fetch the listed segment starting at `time`, under the tag its rows carry.

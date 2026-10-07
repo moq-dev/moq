@@ -88,7 +88,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [JS IETF datagrams](/quest/m1/js-ietf-datagram.md) - `@moq/net` sends and receives datagram groups over moq-transport, like Rust
 - [Datagrams are live-only](/quest/m1/datagram-unfetchable.md) - no FETCH, replay to a new subscriber, or cache fill ever returns a datagram group
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
-- [Bounded HLS playlists](/quest/m1/hls-bounded.md) - `moq-hls` renders a capped sliding window for a fresh viewer, with a stable media sequence, gap slots, and no video before a sync point
 - [Request update routing](/quest/m1/ietf-subscribe-update-route.md) - drafts 14 and 15 SUBSCRIBE_UPDATE and draft 16 REQUEST_UPDATE reach the request named by their second field
 - [JS request window](/quest/m1/js-request-window.md) - @moq/net grants MAX_REQUEST_ID as requests close, so a peer never stalls after ~21k requests
 - [Relay session limits](/quest/m1/relay-session-limits.md) - moq-relay sets per-session request limits, tighter for clients than peers, and the bindings name a refused request

@@ -82,6 +82,20 @@ impl Discontinuities {
 	}
 }
 
+/// The most segments a playlist window lists, however short they are.
+///
+/// A fresh subscriber to a `moq-mux` timeline is only promised this many recent records (the
+/// checkpoint each timeline group restates), so an edge that joined long ago must not list more
+/// than one joining now, or the two would disagree on `EXT-X-MEDIA-SEQUENCE`. The dense-timeline
+/// test fails if the two drift apart.
+pub(crate) const MAX_SEGMENTS: usize = 256;
+
+/// Whether a window of `len` rows, whose rows after the oldest span `rest`, should drop its
+/// oldest: it lists more than [`MAX_SEGMENTS`], or the rest still covers `window`.
+pub(crate) fn evicts(window: Duration, len: usize, rest: Duration) -> bool {
+	len > MAX_SEGMENTS || (len >= 2 && rest >= window)
+}
+
 /// The rendition a broadcast's segment boundaries come from.
 pub(crate) type Reference = Arc<(Kind, String)>;
 
@@ -104,7 +118,8 @@ pub(crate) struct Row {
 	pub reference: Reference,
 	/// The reference record's frames, which the reference rendition serves as is.
 	pub frames: std::ops::Range<hang::timeline::Position>,
-	/// Whether the reference record starts on a keyframe.
+	/// Whether the reference record's first frame is a sync point, where a player can start
+	/// decoding (the record's `keyframe` flag).
 	pub keyframe: bool,
 	/// Presentation duration.
 	pub duration: Duration,
@@ -116,6 +131,14 @@ pub(crate) struct Row {
 	/// The broadcast's [`Discontinuities`] sequence for this record, shared by every rendition,
 	/// so renditions mark the same breaks however many segments each one skipped.
 	pub discontinuity: u64,
+}
+
+impl Row {
+	/// Whether the segment starts at a group start that is a sync point, so a player can begin
+	/// decoding with it.
+	pub fn starts_sync(&self) -> bool {
+		self.keyframe && self.frames.start.frame == 0
+	}
 }
 
 /// A consistent read of the window, for rendering one playlist (the serve path only).
@@ -182,8 +205,8 @@ impl Producer {
 		}
 	}
 
-	/// Append a row, evicting the front of the window past `window`. With no `window`, only
-	/// source timeline pops remove rows.
+	/// Append a row, evicting the front of the window past `window` (see [`evicts`]). With no
+	/// `window`, only source timeline pops remove rows.
 	pub fn push(&self, row: Row, window: Option<Duration>) {
 		let Ok(mut state) = self.state.write() else {
 			return;
@@ -203,12 +226,12 @@ impl Producer {
 
 		state.rows.push_back(row);
 
-		// Evict from the front while the remaining rows still cover the window.
-		while let Some(window) = window
-			&& state.rows.len() >= 2
-		{
-			let span = state.rows.back().unwrap().end.saturating_sub(state.rows[1].pts.into());
-			if span < window {
+		while let Some(window) = window {
+			let rest = match state.rows.get(1) {
+				Some(second) => state.rows.back().unwrap().end.saturating_sub(second.pts.into()),
+				None => Duration::ZERO,
+			};
+			if !evicts(window, state.rows.len(), rest) {
 				break;
 			}
 			state.rows.pop_front();
@@ -302,7 +325,7 @@ impl Producer {
 			.iter()
 			.rev()
 			.filter(|row| *row.reference == *reference)
-			.find(|row| row.keyframe && row.frames.start.frame == 0)
+			.find(|row| row.starts_sync())
 			.map(|row| row.frames.start.group)
 	}
 

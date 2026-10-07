@@ -49,9 +49,12 @@ Every track has its own timeline (`rs/moq-mux/src/timeline.rs`):
   playlists read only the timelines, and a segment GETs only its rendition's
   objects. The caller supplies the catalog.
 - A catalog `archive` entry with a `store` and no `replay` path declares its
-  spans durable on that broadcast, so the exporter lists the whole retained
-  timeline and only its pops trim it (`durable` in
-  `rs/moq-hls/src/export/mod.rs`).
+  spans durable on that broadcast. The exporter still lists a capped window
+  for it; only the explicit `export::Config::replay` mode lists the whole
+  retained timeline and lets only its pops trim it (`durable` in
+  `rs/moq-hls/src/export/mod.rs`). Either way the listing starts at the
+  records the timeline restates on join (at most 256 from `moq-mux`), so a
+  longer recording does not list from its start yet.
 
 `rs/moq-archive` stores the versioned objects on any `object_store::ObjectStore`.
 `moq_archive::Writer` (`rs/moq-archive/src/writer.rs`) cuts each enrolled track
@@ -167,6 +170,5 @@ owned by that prerequisite, not duplicated in archive storage.
 
 ## Related
 
-- [Bounded HLS playlists](/quest/m1/hls-bounded.md) - the live renderer rules a replayed archive inherits, planned outside this line
 - [Catalog track identity](/quest/m2/catalog-tracks.md) - explore immutable definitions or explicit version binding independently of archives
 - [e2ee](/quest/m1/e2ee/README.md) - protected broadcasts are excluded initially

@@ -6,8 +6,8 @@ A replayed recording plays as VOD HLS from the stock server: `moq export
 archive`, then `moq import archive`, then `moq export hls` lists the whole
 recording with no embedder supplying a catalog. The replay broadcast publishes
 its recorded catalog live, stamped with the recording's `store` and `version`,
-so the exporter treats its timeline as durable and lists past `--window`. A
-`--follow` replay grows like an event playlist.
+so an exporter in replay mode treats its timeline as durable and lists past
+`--window`. A `--follow` replay grows like an event playlist.
 
 Choosing which catalog applies to which media group stays with
 [Catalog track identity](/quest/m2/catalog-tracks.md).
@@ -35,6 +35,14 @@ this by hand-building a catalog.
 - The recorded catalog's `archive` entry describes the source's live
   timelines, not the recording's, so replace it with the timelines the reader
   replays rather than trusting the recorded ones.
+
+A live playlist stays capped even for a durable timeline; listing past the
+window is the explicit `moq_hls::export::Config::replay` mode, which `moq
+export hls` does not expose yet. Give it a flag here. Replay mode lists from
+the records the timeline restates when the exporter joins (at most 256 from a
+`moq-mux` publisher), so "the whole recording" also needs the exporter to
+read a longer recording's stored history rather than only its live
+restatement.
 
 Add a CI test that records a broadcast longer than the default window, replays
 it, and asserts the stock exporter lists segment 0 with a durable
