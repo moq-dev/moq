@@ -40,6 +40,10 @@ relay bounds a sparse FETCH only if the model can request ranges:
   group's existing prefix but never wait for its future objects. Downstream,
   an IETF FETCH is served from the model's ranges, capped at the Largest
   Object.
+- The `Latest` flag from [lite-07 Latest flag](/quest/m1/lite-latest.md)
+  stays a separate field beside the range list (maintainer, 10-07): a range
+  starting above the live edge must not hide the latest group from a
+  subscriber merged with it.
 - Ranges are frame-precise (`Position`), not whole groups. The IETF joining
   FETCH for a mid-group SUBSCRIBE's uncached prefix stays, because today's
   bridge relies on it (maintainer, 09-29).

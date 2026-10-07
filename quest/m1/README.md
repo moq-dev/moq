@@ -57,6 +57,7 @@ blocks. The quests that gated m0 lines moved under them.
 - [Flapping peer drill](/quest/m1/cross-relay-flap-drill.md) - the cluster burst drill survives a flapping peer link, the regression for 0.15.6 route-flap drops
 - [Untimed lite-07](/quest/m1/lite-untimed.md) - lite-07 carries an untimed track in both languages; lite-05/06 write send time
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
+- [lite-07 Latest flag](/quest/m1/lite-latest.md) - a separate `Latest` field on lite-07 SUBSCRIBE, so merged floors never starve a subscriber; late lower groups build on it
 - [Late lower groups](/quest/m1/lite-late-lower-group.md) - a moq-lite subscriber with a floor receives a group created below the first served one, as moq-transport does
 - [Flate stream budget](/quest/m1/flate-stream-budget.md) - a flate stream refuses an oversized append without ending, sharing one DEFLATE bound with json
 - [JS track takeover](/quest/m1/js-track-takeover.md) - JS `createTrack` answers a queued request and continues its sequences, as Rust does
