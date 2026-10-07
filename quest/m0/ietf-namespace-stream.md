@@ -27,10 +27,12 @@ cannot tell the options apart today.
 
 Decided 2026-10-07: fill the stream on d16+ whenever NAMESPACE is
 requested, and keep the unsolicited pushes to non-SOLICIT peers, so those
-peers hear each namespace twice. Carry Subscribe Options through dispatch;
-0x00 gets no NAMESPACE. We send no PUBLISH for a namespace subscription, so
-decide whether a request for tracks (0x00, 0x02) is refused or answered
-without them; refusing is the recommendation, since it fails loud.
+peers hear each namespace twice. Carry Subscribe Options through dispatch:
+0x01 and 0x02 both ask for namespaces, so both get NAMESPACE; 0x00 gets none.
+We send no PUBLISH for a namespace subscription, so decide how the track half
+is answered. For 0x00 (tracks only), refusing is the recommendation, since it
+fails loud. For 0x02, the recommendation is to answer with namespaces only,
+since refusing would drop the NAMESPACE it asked for.
 Rejected: stopping unsolicited pushes on d16+ (a peer that never subscribes
 would learn nothing), and filling only on d18+ (two behaviours for one
 message).

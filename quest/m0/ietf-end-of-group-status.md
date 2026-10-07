@@ -15,9 +15,10 @@ infer the group's end at FIN, and nothing forbids sending the status too.
 
 Where it lives: `IngestPhase::Status` in `rs/moq-net/src/ietf/subscriber.rs`
 (around line 3992) accepts 0x3 only when `!self.has_end` and otherwise
-returns `Unsupported`, which refetches the rest of the group upstream and
-resets the downstream stream. Accept it either way, as END_OF_TRACK
-already is. Check the matching status parse in `js/net/src/ietf/object.ts`.
+returns `Unsupported`, which aborts the local group producer (`recv_group`
+then returns `Ok`, so the session is not stopped). A downstream reader only
+gets the rest of the group if the model's fetch path recovers it. Accept the
+status either way, as END_OF_TRACK already is. Check the matching status parse in `js/net/src/ietf/object.ts`.
 
 Test: a d18 stream with the END_OF_GROUP bit, objects 0..4, then a 0x3
 status at 5 delivers a finished group with five frames.

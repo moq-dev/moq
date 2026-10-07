@@ -26,9 +26,14 @@ cache holds; d14 to d17 state no rule, so follow the same one there.
   (`rs/moq-net/src/ietf/subscriber.rs`, around line 2013) with its
   upstream's Largest, and does not record the object.
 
-Decided 2026-10-07: carry the upstream's Largest into the model, so the
-publisher can report the maximum of it and the cached objects, and serve the joining FETCH through the existing
-one-group upstream fill. Rejected: leaving INVALID_RANGE, which is compliant
+- The model's `largest()` derives from the newest cached group, so it
+  drops back once that group is evicted, and the upstream's Largest is kept
+  only as `live_floor` (`rs/moq-net/src/model/track.rs`).
+
+Decided 2026-10-07: carry the upstream's Largest into the model, and keep a
+high-watermark of the largest object received that cache eviction does not
+lower, so the publisher reports the maximum of the two. Serve the joining
+FETCH through the existing one-group upstream fill. Rejected: leaving INVALID_RANGE, which is compliant
 but loses late joiners' first group head. This reports state learned from
 the upstream; nothing waits on a peer.
 
@@ -39,7 +44,8 @@ Test: through a cold relay, a d16 subscriber with a relative joining FETCH
 (start 0) receives the current group from object 0, and its SUBSCRIBE_OK
 carries the upstream's Largest. On d18 and d19, a relay whose cached
 objects are behind the upstream's Largest reports the upstream's, and one
-whose cache is ahead reports its own.
+whose cache is ahead reports its own, and still reports it after that
+group is evicted.
 
 Public API: none expected. Wire: none new.
 
