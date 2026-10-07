@@ -2133,6 +2133,31 @@ test("an untimed track starts at its latest group", () => {
 	expect(drain(live)).toEqual([5]);
 });
 
+test("an unfloored subscriber made before accept starts at the latest group once untimed", () => {
+	const producer = new TrackProducer("test");
+	for (let i = 0; i < 3; i++) producer.appendGroup().close();
+	const early = producer.subscribe();
+	const floored = producer.subscribe({ groups: { start: { included: 0 } } });
+
+	producer.accept({});
+	expect(drain(early)).toEqual([2]);
+	expect(drain(floored)).toEqual([0, 1, 2]);
+});
+
+test("a single-frame write that throws aborts its group", () => {
+	const producer = new TrackProducer("test").accept({});
+	const subscriber = producer.subscribe();
+	// writeString stamps the frame, which an untimed track refuses.
+	expect(() => producer.writeString("x")).toThrow(TimestampMismatch);
+	producer.writeFrame({ payload: enc.encode("y") });
+
+	// The failed group ends in that error instead of leaving a reader waiting on it.
+	const failed = subscriber.tryRecvGroup();
+	expect(failed?.sequence).toBe(0);
+	expect(failed?.closed.peek()).toBeInstanceOf(TimestampMismatch);
+	expect(drain(subscriber)).toEqual([1]);
+});
+
 test("an explicit start holds on an untimed track, and nothing there is stale", () => {
 	const producer = untimedTrack(5);
 

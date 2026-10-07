@@ -1020,30 +1020,35 @@ export class Producer {
 
 	/** Append a frame as its own single-frame group. */
 	writeFrame(frame: Frame) {
+		this.#writeSingle((group) => group.writeFrame(frame));
+	}
+
+	// Write one frame as its own group, aborting the group if the write throws so no
+	// subscriber waits on a group that will never get its frame.
+	#writeSingle(write: (group: GroupProducer) => void): void {
 		const group = this.appendGroup();
-		group.writeFrame(frame);
+		try {
+			write(group);
+		} catch (err) {
+			group.close(err instanceof Error ? err : new Error(String(err)));
+			throw err;
+		}
 		group.close();
 	}
 
 	/** Appends a string to the track as its own single-frame group. */
 	writeString(str: string) {
-		const group = this.appendGroup();
-		group.writeString(str);
-		group.close();
+		this.#writeSingle((group) => group.writeString(str));
 	}
 
 	/** Appends a JSON value to the track as its own single-frame group. */
 	writeJson(json: unknown) {
-		const group = this.appendGroup();
-		group.writeJson(json);
-		group.close();
+		this.#writeSingle((group) => group.writeJson(json));
 	}
 
 	/** Appends a boolean to the track as its own single-frame group. */
 	writeBool(bool: boolean) {
-		const group = this.appendGroup();
-		group.writeBool(bool);
-		group.close();
+		this.#writeSingle((group) => group.writeBool(bool));
 	}
 }
 
@@ -1061,6 +1066,8 @@ export class Subscriber {
 	#state: TrackState;
 	#nextSequence = 0;
 	#cursor = new Signal<{ start: number; end?: number }>({ start: 0 });
+	// Unfloored and made before accept(); see #settleStart.
+	#unsettled = false;
 	#enforceLatency = true;
 	// Which cursor owns this subscription. Both cursors draw from one buffer, so the
 	// first group read commits the track to arrival order and {@link ordered} commits
@@ -1184,6 +1191,19 @@ export class Subscriber {
 		const groups = state.update.peek()?.groups ?? {};
 		const start = groups.start === undefined ? this.#untimedStart() : undefined;
 		this.#cursor.set({ start: start ?? groupBounds(groups).start });
+		// Timedness is unknown until accept(), so an unfloored subscriber made before it
+		// settles its start at the first read after.
+		this.#unsettled = groups.start === undefined && !state.info.peek();
+	}
+
+	// Raise the floor of an unfloored subscriber made before accept(), once the track is
+	// known to be untimed. Called before any read consults the cursor.
+	#settleStart(): void {
+		if (!this.#unsettled || !this.#state.info.peek()) return;
+		this.#unsettled = false;
+		const start = this.#untimedStart();
+		if (start === undefined) return;
+		this.#cursor.update((cursor) => ({ ...cursor, start: Math.max(cursor.start, start) }));
 	}
 
 	// The newest servable group, when the track is known to be untimed.
@@ -1410,6 +1430,7 @@ export class Subscriber {
 	// Package-internal synchronous half of recvGroup. The lite publisher uses this so applying
 	// control state, popping the group, and positioning its frames are one JavaScript turn.
 	#tryRecvGroup(): Recv {
+		this.#settleStart();
 		const groups = this.#state.groups.peek();
 		const { start, end } = this.#cursor.peek();
 		while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
@@ -1513,6 +1534,7 @@ export class Subscriber {
 	// The sequence cursor behind {@link Ordered}, which owns the only public door to it.
 	async #nextGroup(): Promise<GroupConsumer | undefined> {
 		for (;;) {
+			this.#settleStart();
 			const groups = this.#state.groups.peek();
 			const cursor = this.#cursor.peek();
 			const start = Math.max(cursor.start, this.#nextSequence);
