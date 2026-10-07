@@ -110,6 +110,13 @@ These land with the next breaking release, not the 2026-09-23 train.
   `moq export fmp4`, `mkv`, `flv`, `h264`, `h265`, and `rtmp` take
   `--max-delay`, and refuse `--max-age`. `track::Info::max_age`,
   `MoqTrackInfo.max_age_us`, `moq import --max-age`, and `moq export ts --max-age` are unchanged, as is the wire.
+- **moq-relay auth takes the client-CA answer.** `auth::Config::validate` and
+  `init` take `client_ca: bool`, whether any listener verifies client
+  certificates, and `validate_client_ca` is gone. `moq --listen` with an
+  invalid auth config stops at startup instead of refusing every session.
+- **A client CA needs a QUIC listener.** A stream-only relay or `moq` listener
+  (TCP or Unix, no `--listen`) refuses to start with `listen.tls.root`, which
+  nothing verified; moq-tokio returns `Error::MtlsUnsupported` for it.
 - **moq-tokio's `Transport` names WebTransport.** `moq_tokio::server::Transport`
   is `moq_tokio::Transport`, with no re-export. A WebTransport session reports
   `Transport::WebTransport` (`"webtransport"` in logs) instead of `Quic`, which
