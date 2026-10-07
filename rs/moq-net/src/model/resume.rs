@@ -20,8 +20,6 @@ use std::task::{Poll, ready};
 
 use crate::{Datagram, Error, Result, StreamError, group, stats, track};
 
-use super::datagram::Tick;
-
 use super::subscription::{Cap, Position, Subscription, max_some};
 
 /// How many delivered group sequences a reader remembers, so a group two routes both
@@ -138,9 +136,8 @@ impl Consumer {
 		self.state.read().copy.clone()
 	}
 
-	/// Subscribe to the logical track with the reader's own preferences, taking the
-	/// datagrams pushed to each copy since the reader `opened`.
-	pub(crate) fn subscribe(&self, subscription: kio::Producer<Subscription>, opened: Tick) -> Subscriber {
+	/// Subscribe to the logical track with the reader's own preferences.
+	pub(crate) fn subscribe(&self, subscription: kio::Producer<Subscription>) -> Subscriber {
 		let mirrored = subscription.read().clone();
 		let reader = Arc::new_cyclic(|this| {
 			Mutex::new(Reader {
@@ -154,7 +151,6 @@ impl Consumer {
 				newest: None,
 				ordered: None,
 				datagram: None,
-				opened,
 				groups: (0, Cap::from(..)),
 			})
 		});
@@ -246,8 +242,8 @@ struct Copy {
 	done: Option<Result<()>>,
 	/// The datagram channel ran out.
 	datagrams_done: Option<Result<()>>,
-	/// The newest datagram handed out before this copy was subscribed: the copy also hands
-	/// over what it buffered since the reader opened, which the replaced copy may have too.
+	/// The newest datagram handed out before this copy was subscribed: a copy that
+	/// buffers datagrams replays them, and those were already handed out.
 	datagrams_seen: Option<u64>,
 	/// Held by every group handed out from this copy, so a replaced copy stays
 	/// subscribed while one is still read.
@@ -416,8 +412,6 @@ struct Reader {
 	ordered: Option<u64>,
 	/// The newest datagram handed out.
 	datagram: Option<u64>,
-	/// When the reader subscribed: each copy hands it the datagrams pushed after this.
-	opened: Tick,
 	/// The local group filter; see [`track::Subscriber::set_groups`].
 	groups: (u64, Cap),
 }
@@ -470,7 +464,7 @@ impl Reader {
 		};
 		self.copies.push(Copy {
 			generation,
-			sub: Sub::Pending(track.subscribe_since(wire, self.opened)),
+			sub: Sub::Pending(track.subscribe(wire)),
 			track,
 			floor,
 			until: None,
@@ -1317,17 +1311,14 @@ mod test {
 		assert!(matches!(reading.read_frame().now_or_never(), Some(Err(Error::Old))));
 	}
 
-	/// A new copy hands over what it buffered since the reader subscribed, once each, and
-	/// nothing it buffered before.
 	#[test]
 	fn datagrams_a_new_copy_replays_are_handed_out_once() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
 		let mut a = copy();
 		routes.serve(a.consume());
-		let mut b = copy();
-		b.insert_datagram(9, ts(9), b"d".as_ref()).unwrap();
 		let mut sub = subscribe(&logical, Duration::from_secs(10));
+		let mut b = copy();
 		for track in [&mut a, &mut b] {
 			for sequence in [1, 2] {
 				track.insert_datagram(sequence, ts(sequence), b"d".as_ref()).unwrap();
@@ -1340,7 +1331,7 @@ mod test {
 		assert_eq!(recv(&mut sub), Some(1));
 		assert_eq!(recv(&mut sub), Some(2));
 		routes.serve(b.consume());
-		assert_eq!(recv(&mut sub), Some(3), "9 predates the reader");
+		assert_eq!(recv(&mut sub), Some(3));
 		assert_eq!(recv(&mut sub), None);
 	}
 

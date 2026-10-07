@@ -375,11 +375,11 @@ datagram: unreliable, unordered, under about 1200 bytes, and never
 retransmitted. It suits real-time audio and sensor data. There is no stream
 fallback, so a datagram that doesn't fit isn't delivered that way.
 
-Datagrams are live-only. A subscription gets the ones sent after it opened and
-inside its group range, never a buffered backlog, and nothing caches them, so
-`FETCH` never returns one. A publisher that knows the sequence was a datagram
-refuses with `NOT_FETCHABLE` (moq-lite-07), otherwise with `NOT_FOUND`. Use a
-group for anything a late joiner needs.
+Nothing caches a datagram. A subscription gets the ones inside its group
+range, and a new one may get the few still in the publisher's short send
+buffer, but `FETCH` never returns one. A publisher that knows the sequence was
+a datagram refuses with `NOT_FETCHABLE` (moq-lite-07), otherwise with
+`NOT_FOUND`. Use a group for anything a late joiner needs.
 
 ## What moq-lite leaves out
 

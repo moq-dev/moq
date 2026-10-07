@@ -156,18 +156,6 @@ test("appendDatagram delivers to a subscriber", async () => {
 	expect(got && dec.decode(got.payload)).toBe("hello");
 });
 
-test("a late subscriber skips the datagram backlog", async () => {
-	const producer = new TrackProducer("test");
-	const early = producer.subscribe();
-	producer.appendDatagram(Timestamp.fromMillis(0), enc.encode("old"));
-	const late = producer.subscribe();
-	producer.appendDatagram(Timestamp.fromMillis(0), enc.encode("new"));
-
-	expect(dec.decode((await early.recvDatagram())?.payload)).toBe("old");
-	expect(dec.decode((await early.recvDatagram())?.payload)).toBe("new");
-	expect(dec.decode((await late.recvDatagram())?.payload)).toBe("new");
-});
-
 // The in-range datagrams, sent between the dropped ones, show the reader is live, so the
 // range is what dropped the others.
 test("the group range bounds datagrams", async () => {

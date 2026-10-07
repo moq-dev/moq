@@ -16,7 +16,7 @@
 use crate::{Error, Result, Timescale, Timestamp, coding};
 use crate::{broadcast, cache, group, stats};
 
-use super::{Datagram, Requests, datagram::Tick};
+use super::{Datagram, Requests};
 
 use super::Cap;
 pub use super::subscription::{Position, Subscription};
@@ -38,8 +38,7 @@ const DEFAULT_PRIORITY: u8 = 127;
 /// Maximum number of datagrams retained in the per-track send buffer.
 ///
 /// Datagrams are a best-effort send buffer, not a replay cache (unlike groups): only the last
-/// 64 datagrams are kept, so a stalled consumer cannot retain an unbounded backlog, and a
-/// subscriber only gets those pushed after it opened.
+/// 64 datagrams are kept, so a stalled consumer cannot retain an unbounded backlog.
 /// The payload size limit also bounds the buffer's memory use.
 const MAX_DATAGRAMS: usize = 64;
 
@@ -208,9 +207,9 @@ pub(crate) struct TrackState {
 	// what each track writes and never touches another track's cache.
 	debt: u64,
 
-	// Datagrams in arrival order, bounded by `MAX_DATAGRAMS`, each stamped with when it was
-	// pushed. Shares the group sequence namespace but is otherwise independent.
-	datagrams: VecDeque<(Tick, Datagram)>,
+	// Datagrams in arrival order, bounded by `MAX_DATAGRAMS`. Shares the group
+	// sequence namespace but is otherwise independent.
+	datagrams: VecDeque<Datagram>,
 
 	// Number of datagrams dropped off the front (over capacity), mapping a subscriber's absolute
 	// cursor to an index into `datagrams` (mirrors `offset` for groups).
@@ -495,7 +494,7 @@ impl TrackState {
 	fn poll_recv_datagram(&self, index: usize) -> Poll<Result<Option<(Datagram, usize)>>> {
 		let start = index.saturating_sub(self.datagram_offset);
 		if self.readable()
-			&& let Some((_, datagram)) = self.datagrams.get(start)
+			&& let Some(datagram) = self.datagrams.get(start)
 		{
 			return Poll::Ready(Ok(Some((datagram.clone(), self.datagram_offset + start))));
 		}
@@ -510,15 +509,9 @@ impl TrackState {
 		}
 	}
 
-	/// The absolute index of the first buffered datagram pushed after `opened`: where a reader
-	/// opened then starts, since datagrams go only to the readers present when they are pushed.
-	fn datagram_start(&self, opened: Tick) -> usize {
-		self.datagram_offset + self.datagrams.partition_point(|(pushed, _)| *pushed < opened)
-	}
-
 	/// Whether `sequence` was sent as a datagram still in the send buffer.
 	fn holds_datagram(&self, sequence: u64) -> bool {
-		self.datagrams.iter().any(|(_, datagram)| datagram.sequence == sequence)
+		self.datagrams.iter().any(|datagram| datagram.sequence == sequence)
 	}
 
 	/// Push a datagram, dropping the oldest when the send buffer is full.
@@ -527,7 +520,7 @@ impl TrackState {
 			self.datagrams.pop_front();
 			self.datagram_offset += 1;
 		}
-		self.datagrams.push_back((Tick::next(), datagram));
+		self.datagrams.push_back(datagram);
 	}
 
 	/// Find the smallest-sequence cached group satisfying
@@ -1535,10 +1528,9 @@ impl Producer {
 	/// session drops (with a debug log) any datagram whose encoded body exceeds the
 	/// transport's datagram size, and sessions that can't carry datagrams at all (moq-lite
 	/// before 05, or stream-only transports like WebSocket) never deliver them. Keep payloads well under the 1200-byte minimum path MTU.
-	/// A datagram is live-only: it reaches the subscribers present when it is sent, and is
-	/// never cached, replayed to a later subscriber, or served by a fetch. Use a group for
-	/// anything a late joiner needs. An origin publisher uses this; a relay preserving
-	/// upstream numbering uses [`Self::insert_datagram`].
+	/// A datagram is never cached or served by a fetch, so use a group for anything a late
+	/// joiner needs. An origin publisher uses this; a relay preserving upstream numbering
+	/// uses [`Self::insert_datagram`].
 	pub fn append_datagram<B: crate::IntoBytes>(&mut self, timestamp: Timestamp, payload: B) -> Result<u64> {
 		let payload = payload.into_bytes();
 		if payload.len() > super::datagram::MAX_DATAGRAM_PAYLOAD {
@@ -1890,7 +1882,7 @@ impl Producer {
 			name: self.name.clone(),
 			broadcast,
 			info,
-			inner: Inner::Plain(Cursor::new(self.state.consume(), subscription, Tick::next())),
+			inner: Inner::Plain(Cursor::new(self.state.consume(), subscription)),
 			// A producer-side (in-process) subscribe is not egress: stay untagged.
 			stats: stats::Scope::default(),
 			_stats_sub: stats::Subscription::default(),
@@ -2600,13 +2592,7 @@ impl Consumer {
 	/// the floor that the budget convicts, so the default budget of zero delivers only
 	/// the latest group and a larger one reaches back over what it can still use.
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Pending<Subscribing> {
-		self.subscribe_since(subscription.into().unwrap_or_default(), Tick::next())
-	}
-
-	/// Open a live subscription taking the datagrams pushed since `opened`: a reader that
-	/// opened earlier on another copy of this track keeps what reached this one meanwhile.
-	pub(crate) fn subscribe_since(&self, subscription: Subscription, opened: Tick) -> kio::Pending<Subscribing> {
-		let subscription = kio::Producer::new(subscription);
+		let subscription = kio::Producer::new(subscription.into().unwrap_or_default());
 
 		// Register the subscription if the track is live. If it is already closed, the
 		// returned future resolves to the abort error via `Subscribing::poll_ok`.
@@ -2617,7 +2603,6 @@ impl Consumer {
 			broadcast: self.broadcast.clone(),
 			state: self.state.clone(),
 			subscription,
-			opened,
 			stats: self.stats.clone(),
 		})
 	}
@@ -2905,8 +2890,6 @@ pub struct Subscribing {
 	broadcast: Arc<broadcast::Info>,
 	state: kio::Consumer<TrackState>,
 	subscription: kio::Producer<Subscription>,
-	/// When the subscription opened: its datagrams are the ones pushed after this.
-	opened: Tick,
 	stats: stats::Scope,
 }
 
@@ -2921,10 +2904,10 @@ impl Subscribing {
 		let resume = self.state.read().routes.clone();
 		let inner = match resume {
 			Some(resume) => Inner::Resume(
-				Box::new(resume.subscribe(self.subscription.clone(), self.opened)),
+				Box::new(resume.subscribe(self.subscription.clone())),
 				self.state.clone(),
 			),
-			None => Inner::Plain(Cursor::new(self.state.clone(), self.subscription.clone(), self.opened)),
+			None => Inner::Plain(Cursor::new(self.state.clone(), self.subscription.clone())),
 		};
 		Poll::Ready(Ok(Subscriber {
 			name: self.name.clone(),
@@ -3415,8 +3398,7 @@ struct Cursor {
 	subscription: kio::Producer<Subscription>,
 	/// Arrival-order cursor used by `recv_group`.
 	index: usize,
-	/// Arrival-order cursor used by `recv_datagram`, independent of groups. Starts at the
-	/// first datagram pushed after the subscription opened, never at an older backlog.
+	/// Arrival-order cursor used by `recv_datagram`, independent of groups.
 	datagram_index: usize,
 	/// Minimum sequence to return from any `recv` method. Set by `start_at`.
 	min_sequence: u64,
@@ -3454,15 +3436,14 @@ struct Cursor {
 }
 
 impl Cursor {
-	fn new(state: kio::Consumer<TrackState>, subscription: kio::Producer<Subscription>, opened: Tick) -> Self {
+	fn new(state: kio::Consumer<TrackState>, subscription: kio::Producer<Subscription>) -> Self {
 		let min_sequence = floor_of(&subscription.read());
-		let datagram_index = state.read().datagram_start(opened);
 		Self {
 			state,
 			subscription,
 			min_sequence,
 			index: 0,
-			datagram_index,
+			datagram_index: 0,
 			next_sequence: 0,
 			end_sequence: None,
 			parked: BTreeMap::new(),
@@ -3865,9 +3846,9 @@ impl Subscriber {
 	///
 	/// Datagrams are a separate best-effort channel from groups (see
 	/// [`Producer::append_datagram`]); they share only the sequence namespace, and
-	/// neither cursor moves the other. Only datagrams pushed after the subscription opened
-	/// arrive, and any outside this subscriber's group range are skipped. A consumer that
-	/// falls too far behind silently loses the oldest datagrams.
+	/// neither cursor moves the other. A new subscriber may get the few still in the send
+	/// buffer, and any outside its group range are skipped. A consumer that falls too far
+	/// behind silently loses the oldest datagrams.
 	///
 	/// Returns `Poll::Ready(Ok(Some(datagram)))` when one is available,
 	/// `Poll::Ready(Ok(None))` when the track is finished, `Poll::Ready(Err(e))` when the track
@@ -4807,30 +4788,6 @@ mod test {
 			.append_datagram(Timestamp::from_millis(0).unwrap(), &b"go"[..])
 			.unwrap();
 		assert_eq!(&recv_datagram(&mut dg).payload[..], b"go");
-	}
-
-	/// Datagrams are live-only: a subscriber gets those sent after it subscribed, never the
-	/// buffered backlog. A remote subscription counts from when it opened, not resolved.
-	#[test]
-	fn a_late_subscriber_skips_the_datagram_backlog() {
-		let mut producer = track_producer("test", None);
-		let consumer = producer.consume();
-		let mut early = producer.subscribe(None);
-		let pending = consumer.subscribe(None);
-		producer.append_datagram(Timestamp::ZERO, &b"old"[..]).unwrap();
-
-		let mut opened = pending.now_or_never().unwrap().unwrap();
-		let mut late = producer.subscribe(None);
-		let mut remote = consumer.subscribe(None).now_or_never().unwrap().unwrap();
-		producer.append_datagram(Timestamp::ZERO, &b"new"[..]).unwrap();
-
-		for present in [&mut early, &mut opened] {
-			assert_eq!(&recv_datagram(present).payload[..], b"old");
-		}
-		for subscriber in [&mut early, &mut opened, &mut late, &mut remote] {
-			assert_eq!(&recv_datagram(subscriber).payload[..], b"new");
-			assert!(subscriber.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
-		}
 	}
 
 	/// A fetch never serves a datagram group, and says so rather than reporting a plain

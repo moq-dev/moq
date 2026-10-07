@@ -796,12 +796,10 @@ impl Consume {
 		};
 		let id = self.datagram_task.insert(Some(entry))?;
 
-		// Open the subscription now: a datagram reaches only the subscriptions open when it is
-		// published. It resolves on SUBSCRIBE_OK, so await that inside the task.
-		let subscribing = broadcast.track(&name).map(|track| track.subscribe(None));
+		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
 			let res = async move {
-				let track = subscribing?.await?;
+				let track = broadcast.track(&name)?.subscribe(None).await?;
 				Self::run_datagrams(on_datagram, track, channel.1).await
 			}
 			.await;

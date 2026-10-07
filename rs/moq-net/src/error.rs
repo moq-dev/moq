@@ -146,7 +146,7 @@ pub enum StreamError {
 	#[error("not found")]
 	NotFound,
 
-	/// A FETCH reached a datagram, which is live-only and never cached. Sent on moq-lite-07
+	/// A FETCH reached a datagram, which is never cached. Sent on moq-lite-07
 	/// and later; an earlier version sends [`NotFound`](Self::NotFound) instead.
 	#[error("not fetchable")]
 	NotFetchable,
@@ -329,7 +329,7 @@ pub enum Error {
 	#[error("not found")]
 	NotFound,
 
-	/// A FETCH reached a datagram, which is live-only and never served from a cache.
+	/// A FETCH reached a datagram, which is never cached.
 	#[error("not fetchable")]
 	NotFetchable,
 

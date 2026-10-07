@@ -3771,7 +3771,7 @@ struct FetchedObject {
 	group: Option<u64>,
 	object: Option<u64>,
 	/// Draft-16 on lets a fetch carry an Object published as a datagram. A datagram group is
-	/// live-only, never cached, so it is never filled from a fetch.
+	/// never cached, so it is never filled from a fetch.
 	datagram: bool,
 	subgroup_ok: bool,
 	properties: Option<Vec<u8>>,

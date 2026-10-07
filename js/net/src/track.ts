@@ -1430,9 +1430,9 @@ export class Subscriber {
 	 * Receive the next datagram in arrival order.
 	 *
 	 * Datagrams are a separate best-effort channel from groups (see
-	 * {@link Producer.appendDatagram}); they share only the sequence namespace. Only datagrams
-	 * sent after the subscription opened arrive, and those outside its group range are skipped.
-	 * A consumer that falls too far behind silently loses the oldest datagrams. Read this alongside
+	 * {@link Producer.appendDatagram}); they share only the sequence namespace. Those outside
+	 * the group range are skipped. A consumer that falls too far behind silently loses the
+	 * oldest datagrams. Read this alongside
 	 * {@link recvGroup} (e.g. in a separate loop) to receive both channels concurrently.
 	 * The two cursors are independent: a datagram never moves the group cursor.
 	 */
