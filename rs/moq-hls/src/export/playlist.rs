@@ -30,14 +30,16 @@ pub(crate) struct Snapshot {
 	/// Wall-clock time of the first listed segment (`EXT-X-PROGRAM-DATE-TIME`), when the
 	/// catalog advertises its root broadcast clock.
 	pub program_date_time: Option<SystemTime>,
-	/// The publisher run every segment URL carries (`seg/{generation}.{segment}.m4s`).
+	/// The publisher run every segment URL carries (`seg/{generation}.{tag}.{segment}.m4s`).
 	pub generation: Option<Arc<str>>,
 }
 
 /// One listed segment.
 pub(crate) struct Segment {
-	/// The aligned segment number; the URI is `seg/{segment}.m4s`.
+	/// The aligned segment number; the URI is `seg/{tag}.{segment}.m4s`.
 	pub segment: u64,
+	/// The [`tag`](super::segments::tag) of the reference numbering the segment.
+	pub tag: String,
 	/// `EXTINF` duration.
 	pub duration: Duration,
 	/// The rendition has no content for this span (`EXT-X-GAP`): the segment keeps its slot in
@@ -91,7 +93,7 @@ pub(crate) fn render_media(snapshot: &Snapshot, init: &str, query: Option<&str>)
 			let _ = writeln!(out, "#EXT-X-GAP");
 		}
 		let _ = writeln!(out, "#EXTINF:{:.5},", segment.duration.as_secs_f64());
-		let _ = writeln!(out, "seg/{generation}{}.m4s{suffix}", segment.segment);
+		let _ = writeln!(out, "seg/{generation}{}.{}.m4s{suffix}", segment.tag, segment.segment);
 	}
 
 	if snapshot.finished {
@@ -115,12 +117,14 @@ mod tests {
 			segments: vec![
 				Segment {
 					segment: 10,
+					tag: "ab12cd34".into(),
 					duration: Duration::from_secs(2),
 					gap: false,
 					discontinuity: false,
 				},
 				Segment {
 					segment: 11,
+					tag: "ab12cd34".into(),
 					duration: Duration::from_millis(1960),
 					gap: false,
 					discontinuity: false,
@@ -137,15 +141,15 @@ mod tests {
 		assert!(out.contains("#EXT-X-MEDIA-SEQUENCE:10\n"));
 		assert!(out.contains("#EXT-X-MAP:URI=\"init.0123abcd.mp4\"\n"));
 		assert!(out.contains("#EXT-X-PROGRAM-DATE-TIME:2025-07-07T00:00:00.123Z\n"));
-		assert!(out.contains("#EXTINF:2.00000,\nseg/10.m4s\n"));
-		assert!(out.contains("#EXTINF:1.96000,\nseg/11.m4s\n"));
+		assert!(out.contains("#EXTINF:2.00000,\nseg/ab12cd34.10.m4s\n"));
+		assert!(out.contains("#EXTINF:1.96000,\nseg/ab12cd34.11.m4s\n"));
 		assert!(!out.contains("#EXT-X-ENDLIST"));
 
 		// A credential rides every child URL so a header-less player keeps sending it.
 		let signed = render_media(&snapshot, "0123abcd", Some("jwt=abc.def"));
 		assert!(signed.contains("#EXT-X-MAP:URI=\"init.0123abcd.mp4?jwt=abc.def\"\n"));
-		assert!(signed.contains("\nseg/10.m4s?jwt=abc.def\n"));
-		assert!(signed.contains("\nseg/11.m4s?jwt=abc.def\n"));
+		assert!(signed.contains("\nseg/ab12cd34.10.m4s?jwt=abc.def\n"));
+		assert!(signed.contains("\nseg/ab12cd34.11.m4s?jwt=abc.def\n"));
 	}
 
 	#[test]
@@ -155,6 +159,7 @@ mod tests {
 			media_sequence: 0,
 			segments: vec![Segment {
 				segment: 0,
+				tag: "ab12cd34".into(),
 				duration: Duration::from_secs(2),
 				gap: false,
 				discontinuity: false,
@@ -166,7 +171,7 @@ mod tests {
 
 		let out = render_media(&snapshot, "0123abcd", Some("jwt=x"));
 		assert!(out.contains("#EXT-X-MAP:URI=\"init.0123abcd.mp4?jwt=x\"\n"));
-		assert!(out.contains("\nseg/run-7.0.m4s?jwt=x\n"));
+		assert!(out.contains("\nseg/run-7.ab12cd34.0.m4s?jwt=x\n"));
 	}
 
 	#[test]
@@ -176,6 +181,7 @@ mod tests {
 			media_sequence: 0,
 			segments: vec![Segment {
 				segment: 0,
+				tag: "ab12cd34".into(),
 				duration: Duration::from_secs(4),
 				gap: false,
 				discontinuity: false,

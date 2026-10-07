@@ -4,18 +4,25 @@
 
 qmux tolerates reordered records when both sides agree to it, so the data
 channel runs `ordered: false` and a lost SCTP chunk stalls only the stream
-whose frame it carried. The browser and native transports flip one option;
-the WebSocket and TCP bindings are untouched.
+whose frame it carried. Native pairs only: both endpoints must run the Rust
+qmux core, and a pair with a browser stays ordered. The native transports
+flip one option; the WebSocket and TCP bindings are untouched.
 
 ## Plan
+
+Decided in the 2026-10-06 audit: native pairs only. Receiver reassembly comes
+from [qmux on the QUIC core](/quest/m2/quic-qmux.md), which ports only the
+Rust qmux; the TypeScript `@moq/qmux` keeps its own in-order state machine,
+and building offset reassembly there was rejected. So only an endpoint on
+the Rust core advertises `unordered`, and a browser never does.
 
 qmux frames already carry stream offsets; the draft's in-order STREAM
 requirement exists so a receiver can deliver without reassembly. Add a
 transport parameter, `unordered`, that both sides must send for the relaxed
 rule to apply, and receiver-side reassembly by offset for STREAM frames when
-it does. Once [qmux on the QUIC core](/quest/m2/quic-qmux.md) lands, that
-reassembly is QUIC's own receive buffer and this quest is the parameter plus
-the binding flip; before it, do not build a second reassembly buffer. One
+it does. That reassembly is QUIC's own receive buffer once qmux runs on the
+QUIC core, so this quest is the parameter plus the binding flip; do not
+build a second reassembly buffer. One
 record is one SCTP message, so the unordered writer emits frames for only
 one stream per record; mixing streams in a record would stall both on one
 lost chunk and is forbidden when unordered is on.
@@ -51,5 +58,6 @@ throughput must not regress.
 
 ## Required
 
+- [qmux on the QUIC core](/quest/m2/quic-qmux.md) - the Rust qmux whose QUIC receive buffer reassembles by offset
 - [Harness](/quest/m3/p2p/harness.md) - the loss row this quest is measured against
 - [Signaling and policy](/quest/m3/p2p/signal.md) - the roster advertisement that decides ordered before the channel exists

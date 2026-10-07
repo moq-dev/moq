@@ -22,5 +22,7 @@ Guidance:
 - Stream handles, write backpressure, and close codes become explicit events
   or return values the driver acts on.
 - Keep maps as Vec slabs where the key space is small.
+- Turn the session's async test bodies into synchronous `poll_*` tests with
+  explicit instants as it is rewritten, so they translate with the code.
 
 Public API: breaks moq-net's session API. Wire: none.

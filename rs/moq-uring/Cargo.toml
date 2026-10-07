@@ -56,7 +56,6 @@ web-transport-trait = { workspace = true }
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 io-uring = { workspace = true }
 libc = { workspace = true }
-moq-noq-udp = { workspace = true }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["noq", "aws-lc-rs"] }
 nix = { workspace = true }
 rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }

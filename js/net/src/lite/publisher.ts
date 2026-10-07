@@ -46,7 +46,7 @@ const PROBE_MAX_AGE = 10_000; // ms
 const PROBE_MAX_DELTA = 0.25;
 const PROBE_RTT_DELTA = 0.25;
 
-/** Map a signed delta to an unsigned zigzag varint value (mirrors Rust `VarInt::from_zigzag`). */
+/** Map a signed delta to an unsigned zigzag varint value (mirrors Rust `varint::zigzag`). */
 function zigzag(delta: bigint): bigint {
 	return delta >= 0n ? delta << 1n : (-delta << 1n) - 1n;
 }
@@ -434,7 +434,7 @@ export class Publisher {
 			if (hasAnnounceId(this.version)) announceIds.set(suffix, nextAnnounceId++);
 			await encodeAnnounceBroadcast(
 				stream.writer,
-				{ status: "active", suffix, hops: wireHops(route), cost: route.cost },
+				{ status: "active", suffix, epoch: route.epoch, hops: wireHops(route), cost: route.cost },
 				this.version,
 			);
 		};
@@ -541,11 +541,13 @@ export class Publisher {
 
 				for (const [suffix, snap] of active) {
 					const cur = updated.get(suffix);
-					if (!cur || cur.identity !== snap.identity) await retract(suffix);
+					// A new epoch is another broadcast, even from the same entry.
+					if (!cur || cur.identity !== snap.identity || cur.route.epoch !== snap.route.epoch)
+						await retract(suffix);
 				}
 				for (const [suffix, snap] of updated) {
 					const prev = active.get(suffix);
-					if (!prev || prev.identity !== snap.identity) {
+					if (!prev || prev.identity !== snap.identity || prev.route.epoch !== snap.route.epoch) {
 						await announce(suffix, snap.route);
 					} else if (!routesEqual(onWire(prev.route), onWire(snap.route))) {
 						await restart(suffix, snap.route);
@@ -576,7 +578,8 @@ export class Publisher {
 		try {
 			front =
 				this.#publish &&
-				(wireOf(this.#publish).local(msg.broadcast) ?? (await wireOf(this.#publish).demand(msg.broadcast)));
+				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
+					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch)));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -700,7 +703,8 @@ export class Publisher {
 		try {
 			front =
 				this.#publish &&
-				(wireOf(this.#publish).local(msg.broadcast) ?? (await wireOf(this.#publish).demand(msg.broadcast)));
+				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
+					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch)));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -970,7 +974,8 @@ export class Publisher {
 		try {
 			const front =
 				this.#publish &&
-				(wireOf(this.#publish).local(msg.broadcast) ?? (await wireOf(this.#publish).demand(msg.broadcast)));
+				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
+					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch)));
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			const info = await this.#resolveTrackInfo(front, msg.track);

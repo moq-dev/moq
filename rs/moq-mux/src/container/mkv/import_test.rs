@@ -412,10 +412,12 @@ fn rendition_is_not_published_when_the_media_track_fails() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
-	// Squat the broadcast's timeline track, so building the media producer (which creates it
-	// on first use) fails. The handle must stay alive: the broadcast tracks names weakly, so
+	// Squat the catalog's timeline track, so building the media producer (whose enrollment
+	// enrolls the catalog too) fails. The handle must stay alive: the broadcast tracks names weakly, so
 	// dropping it frees the name.
-	let _squat = broadcast.create_track(hang::timeline::DEFAULT_NAME, None).unwrap();
+	let _squat = broadcast
+		.create_track(hang::timeline::default_name(hang::Catalog::DEFAULT_NAME), None)
+		.unwrap();
 
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
 	let buf = bytes::BytesMut::from(&data[..]);
@@ -578,10 +580,12 @@ async fn first_catalog_carries_the_anchored_clock() {
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
 
 	mkv.decode(header).unwrap();
-	assert_eq!(
-		catalog.snapshot().video.renditions.len(),
-		1,
-		"the Tracks element was read"
+	let snapshot = catalog.snapshot();
+	assert_eq!(snapshot.video.renditions.len(), 1, "the VP9 rendition was read");
+	let audio: Vec<_> = snapshot.audio.renditions.values().collect();
+	assert!(
+		matches!(audio.as_slice(), [rendition] if matches!(rendition.codec, AudioCodec::Opus)),
+		"the Opus rendition was read: {audio:?}"
 	);
 	assert_eq!(clocks.drain(), vec![], "the Tracks element alone publishes nothing");
 
@@ -594,4 +598,28 @@ async fn first_catalog_carries_the_anchored_clock() {
 
 	mkv.finish().unwrap();
 	assert!(clocks.drain().iter().all(|clock| *clock == Some(anchored)));
+}
+
+/// A Tracks element after `finish()` is refused: its tracks would be declared but never finished.
+#[test]
+fn tracks_after_finish_are_refused() {
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![track_entry_audio_opus(1, 48_000.0, 2)])
+		.segment_end()
+		.build();
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
+
+	mkv.finish().unwrap();
+	let err = mkv.decode(&data).unwrap_err();
+	assert!(
+		matches!(err, crate::Error::Mkv(crate::container::mkv::Error::TracksAfterFinish)),
+		"{err:?}"
+	);
+	assert!(catalog.snapshot().audio.renditions.is_empty(), "no track was declared");
 }

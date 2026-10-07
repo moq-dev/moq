@@ -10,8 +10,7 @@ citations point at draft-06.
 ## Plan
 
 The lost-packet sample gap remains after the seven correctness fixes in
-BBR3 (`noq-proto/src/congestion/bbr3/mod.rs` today), which the
-[hard fork](/quest/m1/quic/fork/README.md) re-ports into `moq-quic`:
+`moq-quic`'s BBR3 (`rs/moq-quic/src/congestion/bbr3/mod.rs`):
 
 - Loss handling reuses the shared ACK sample (`self.rs`) as scratch space,
   and skips the inflight-too-high check when a loss arrives before any ACK

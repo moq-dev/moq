@@ -20,7 +20,7 @@ const PAYLOAD: &[u8] = b"datagram payload";
 /// Build an origin producer, spawning its driver on the ambient runtime.
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(support::harness::run(driver));
+	support::harness::spawn(driver);
 	producer
 }
 
@@ -66,9 +66,9 @@ async fn connect_datagram_track() -> Fixture {
 /// asserts what delivery actually guarantees rather than a fixed count: whatever
 /// arrives is intact and in order, and the last one written arrives, since nothing
 /// is pushed during the drain to evict it.
-#[tokio::test]
+#[moq_net_sim::test]
 async fn datagrams_reach_the_subscriber_in_order() {
-	tokio::time::timeout(TEST_TIMEOUT, async {
+	moq_net_sim::timeout(TEST_TIMEOUT, async {
 		let mut fixture = connect_datagram_track().await;
 		const COUNT: u64 = 32;
 
@@ -111,7 +111,7 @@ async fn datagrams_reach_the_subscriber_in_order() {
 
 /// MoQ Transport carries a datagram as an OBJECT_DATAGRAM at object 0, so it arrives as a
 /// datagram with its sequence, alongside the groups on streams.
-#[tokio::test]
+#[moq_net_sim::test]
 async fn ietf_delivers_datagrams() {
 	for version in [
 		"moq-transport-14",
@@ -119,7 +119,7 @@ async fn ietf_delivers_datagrams() {
 		"moq-transport-17",
 		"moq-transport-20",
 	] {
-		tokio::time::timeout(TEST_TIMEOUT, ietf_delivers_datagrams_on(version))
+		moq_net_sim::timeout(TEST_TIMEOUT, ietf_delivers_datagrams_on(version))
 			.await
 			.unwrap_or_else(|_| panic!("{version}: timed out"));
 	}
@@ -180,9 +180,9 @@ async fn ietf_delivers_datagrams_on(version: &str) {
 }
 
 /// Explicit insert keeps the origin sequence on the lite wire, including a gap.
-#[tokio::test]
+#[moq_net_sim::test]
 async fn inserted_sequences_survive_the_lite_wire() {
-	tokio::time::timeout(TEST_TIMEOUT, async {
+	moq_net_sim::timeout(TEST_TIMEOUT, async {
 		let mut fixture = connect_datagram_track().await;
 
 		fixture

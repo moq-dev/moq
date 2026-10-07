@@ -65,7 +65,6 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 	let mut child = if let Some(publish) = javascript {
 		let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/max-age/client.ts");
 		let mut child = tokio::process::Command::new("bun")
-			.env("NODE_ENV", "production")
 			.arg(script)
 			.arg(url.as_str())
 			.arg(version.alpn())

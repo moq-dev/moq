@@ -169,6 +169,10 @@ case "$action" in
         # selected, since cargo rejects a feature of a package outside the
         # selection; a change to anything they reach selects moq-cli anyway.
         if wants moq-cli; then flags+=(--features "moq-cli/play moq-cli/capture"); fi
+        # Apple UDP batching is opt-in; compile its implementation and tests on macOS.
+        if [[ "$(uname -s)" == Darwin ]] && wants moq-sock; then
+            flags+=(--features moq-sock/fast-apple-datapath)
+        fi
         cargo check --locked "${flags[@]}" --all-targets
         ;;
     *)

@@ -1,7 +1,7 @@
 //! Bytes cross the language boundary to a Bun script under `test/interop`: subscription
 //! responses for subscribers on a mock transport, varint encodings, and moq-lite messages.
 
-use crate::coding::{Decode, Encode, VarInt};
+use crate::coding::{Decoder, Encode, Encoder, Form, varint};
 use crate::{ietf, lite};
 
 // Runs a script with a JSON argument, returning its stdout.
@@ -25,7 +25,7 @@ pub(crate) fn fin(version: &str, started: bool, clean: bool, responses: Vec<u8>)
 }
 
 /// Every varint size boundary in both formats, plus the 2^53 edge of a JS `number`. js/net's own
-/// tests cover leading-ones values past 2^62 - 1, where moq-net's `VarInt` stops.
+/// tests cover leading-ones values past 2^62 - 1, where the QUIC form stops.
 #[test]
 #[ignore = "requires Bun; run by just test interop"]
 fn varint_interop() {
@@ -33,39 +33,40 @@ fn varint_interop() {
 	for bits in [6, 7, 14, 21, 28, 30, 32, 35, 42, 49, 53, 56] {
 		values.extend([(1 << bits) - 1, 1 << bits]);
 	}
-	values.push(VarInt::MAX.into_inner());
-	let values: Vec<VarInt> = values.into_iter().map(|v| VarInt::from_u64(v).unwrap()).collect();
+	values.push(varint::MAX_QUIC);
 
-	let quic = |v: &VarInt| {
+	let quic = Form::Quic;
+	let leading_ones = Form::from(ietf::Version::Draft17);
+	let encode = |v: u64, form: Form| {
 		let mut buf = Vec::new();
-		v.encode_quic(&mut buf).unwrap();
+		Encoder::new(&mut buf, form).varint(v).unwrap();
 		buf
 	};
-	let leading_ones = |v: &VarInt| {
-		let mut buf = Vec::new();
-		v.encode(&mut buf, ietf::Version::Draft17).unwrap();
-		buf
+	let decode = |buf: &[u8], form: Form| {
+		let mut decoder = Decoder::new(buf, form);
+		let v = decoder.varint().unwrap();
+		assert!(decoder.is_empty());
+		v
 	};
 
 	let input = serde_json::json!({
 		"values": values.iter().map(ToString::to_string).collect::<Vec<_>>(),
-		"quic": values.iter().map(quic).collect::<Vec<_>>(),
-		"leadingOnes": values.iter().map(leading_ones).collect::<Vec<_>>(),
+		"quic": values.iter().map(|&v| encode(v, quic)).collect::<Vec<_>>(),
+		"leadingOnes": values.iter().map(|&v| encode(v, leading_ones)).collect::<Vec<_>>(),
 	});
 	let output: serde_json::Value =
 		serde_json::from_slice(&bun("varint.ts", input)).expect("JS returned its encodings");
 	let js = |format: &str| -> Vec<Vec<u8>> { serde_json::from_value(output[format].clone()).unwrap() };
 
-	for ((value, js_quic), js_leading) in values.iter().zip(js("quic")).zip(js("leadingOnes")) {
-		assert_eq!(js_quic, quic(value), "QUIC encoding of {value}");
-		assert_eq!(js_leading, leading_ones(value), "leading-ones encoding of {value}");
-
-		let mut buf = js_quic.as_slice();
-		assert_eq!(VarInt::decode_quic(&mut buf).unwrap(), *value);
-		assert!(buf.is_empty());
-		let mut buf = js_leading.as_slice();
-		assert_eq!(VarInt::decode(&mut buf, ietf::Version::Draft17).unwrap(), *value);
-		assert!(buf.is_empty());
+	for ((&value, js_quic), js_leading) in values.iter().zip(js("quic")).zip(js("leadingOnes")) {
+		assert_eq!(js_quic, encode(value, quic), "QUIC encoding of {value}");
+		assert_eq!(
+			js_leading,
+			encode(value, leading_ones),
+			"leading-ones encoding of {value}"
+		);
+		assert_eq!(decode(&js_quic, quic), value);
+		assert_eq!(decode(&js_leading, leading_ones), value);
 	}
 }
 
@@ -75,7 +76,7 @@ fn lite_values() -> Vec<u64> {
 	for bits in [6, 7, 14, 21, 28, 30, 35, 42, 49, 53, 56] {
 		values.extend([(1u64 << bits) - 1, 1 << bits]);
 	}
-	values.push(VarInt::MAX.into_inner());
+	values.push(varint::MAX_QUIC);
 	values
 }
 
@@ -83,16 +84,17 @@ fn lite_values() -> Vec<u64> {
 /// the payload size, then the payload.
 fn lite_group(version: lite::Version) -> Vec<u8> {
 	let mut buf = Vec::new();
+	let w = &mut Encoder::new(&mut buf, version.into());
 	let header = lite::Group {
 		subscribe: 5,
 		sequence: 1 << 20,
 		frame_start: 200,
 	};
-	header.encode(&mut buf, version).unwrap();
+	header.encode(w, version).unwrap();
 	for (delta, size) in [(0i64, 10usize), (33_333, 300), (-1_000, 20_000), (1 << 40, 1)] {
-		VarInt::from_zigzag(delta).unwrap().encode(&mut buf, version).unwrap();
-		size.encode(&mut buf, version).unwrap();
-		buf.extend(std::iter::repeat_n(0xAB, size));
+		w.varint(varint::zigzag(delta)).unwrap();
+		w.varint(size as u64).unwrap();
+		w.slice(&vec![0xAB; size]);
 	}
 	buf
 }
@@ -110,20 +112,21 @@ struct Echo {
 /// JS decodes what Rust encodes back to the same values, and its own encoding of those
 /// values is byte for byte Rust's, on lite-06 (QUIC) and lite-07 (leading-ones).
 ///
-/// Past 2^62-1 the range is per version. JS writes lite-07's 64-bit values, which Rust
-/// must refuse with a decode error until its `VarInt` widens; on lite-06 JS refuses them.
+/// Past 2^62-1 the range is per version: JS writes lite-07's 64-bit values, which Rust
+/// reads back, while on lite-06 JS refuses them.
 #[test]
 #[ignore = "requires Bun; run by just test interop"]
 fn lite_varint_interop() {
 	let values = lite_values();
 	for version in [lite::Version::Lite06, lite::Version::Lite07] {
 		let mut varints = Vec::new();
+		let w = &mut Encoder::new(&mut varints, version.into());
 		for value in &values {
-			value.encode(&mut varints, version).unwrap();
+			w.varint(*value).unwrap();
 		}
 
 		let setup = lite::Setup {
-			hop: Some(crate::Hop::new(VarInt::MAX.into_inner()).unwrap()),
+			hop: Some(crate::Hop::new(varint::MAX_QUIC).unwrap()),
 			..Default::default()
 		}
 		.encode_bytes(version)
@@ -162,10 +165,10 @@ fn lite_varint_interop() {
 				let mut expected = vec![0xFF, 0x40, 0, 0, 0, 0, 0, 0, 0];
 				expected.extend([0xFF; 9]);
 				assert_eq!(echo.beyond, expected, "{version}: JS's 64-bit encodings");
-				for wire in echo.beyond.chunks(9) {
-					let err = VarInt::decode(&mut &wire[..], version).unwrap_err();
-					assert!(matches!(err, crate::coding::DecodeError::BoundsExceeded), "{err:?}");
-				}
+				let mut r = Decoder::new(&echo.beyond, Form::from(version));
+				assert_eq!(r.varint().unwrap(), 1 << 62);
+				assert_eq!(r.varint().unwrap(), u64::MAX);
+				assert!(r.is_empty());
 			}
 			_ => assert!(echo.beyond.is_empty(), "{version}: JS wrote a value past 2^62-1"),
 		}

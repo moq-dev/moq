@@ -177,7 +177,7 @@ export const hooks: {
 	/** Attach the origin advertisement of a created broadcast. */
 	attachAnnouncer: (
 		producer: BroadcastProducer,
-		announcer: { announce(route: Route): void; unannounce(): void },
+		announcer: { announce(route: Route): void; unannounce(): void; route(): Route | undefined },
 	) => void;
 	/** Name a broadcast handle by the path an origin created or resolved it at. */
 	stampPath: (target: BroadcastProducer | BroadcastConsumer, path: Path.Valid) => void;

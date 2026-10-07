@@ -38,8 +38,9 @@ Rust and TypeScript speak moq-lite 01 through 06 and moq-transport drafts
 still in progress: it negotiates as `moq-lite-07-wip`, and only when both
 sides explicitly enable it. moq-lite 07 also switches every varint from QUIC's
 two-bit length prefix to moq-transport's leading-ones form, so values up to 127
-take one byte instead of up to 63, and the range widens from 62 to 64 bits. Rust
-still refuses lite-07 values above 2^62-1 until its `VarInt` widens.
+take one byte instead of up to 63, and the range widens from 62 to 64 bits.
+A relay cannot forward a value past 2^62 - 1 to an older peer, so it fails
+that subscription or group and keeps the session.
 
 ## Subscription completion
 
@@ -96,9 +97,9 @@ always a prefix, on every wire version and on moq-transport alike; a service
 that serves only some of the paths beneath its prefix refuses the rest as they
 are requested. Each route carries the chain of relay identities it passed
 through, which is how forwarding loops are caught, and a cost, which is how a
-subscriber picks among several routes to the same broadcast. A path names one
-broadcast whoever publishes it, so a subscription moves between routes without
-a seam; a publisher must not reuse a path for different content. A hop of 0 is
+subscriber picks among several routes to the same broadcast. A route may also
+carry a [publisher epoch](#publisher-epochs), which says which routes serve the
+same bytes. A hop of 0 is
 the anonymous mark and travels the chain unchanged; when it is the first hop, a
 relay puts a random ID, fresh per connection, in front of it. A route that passed through an
 anonymous hop at any depth ranks below every fully identified route, whatever
@@ -112,8 +113,10 @@ compresses when it helps; TypeScript decodes it but always sends literally.
 A broadcast exists only while it is announced, for consumers in the same
 process and across a session alike: one that is created but never announced
 can be neither discovered nor requested. A broadcast published locally
-competes with remote routes to its path on cost like any other route, winning
-only a tie. Retracting a route (an unannounce, or the peer's `ANNOUNCE_END`)
+competes with remote routes to its path like any other route: a newer epoch
+beats it whatever the cost, so a local broadcast without an epoch loses to any
+remote route that carries one, and among equal epochs it wins a cost tie.
+Retracting a route (an unannounce, or the peer's `ANNOUNCE_END`)
 stops new requests from resolving through it but leaves subscriptions already
 in flight alone: each track runs to its own end or failure, or until its last
 subscriber leaves, which cancels it upstream. On moq-lite 05 and
@@ -135,22 +138,44 @@ without waiting, since it has no FIN to acknowledge.
 
 ### Publisher epochs
 
-An application can identify each publisher instance with a shared `Epoch` from
-`moq-net` or `@moq/net`. It is a lowercase hyphenated UUIDv7, ordered newest
-last, with its wall-clock creation time available as `Epoch::time()` in Rust
-or `Epoch.time(epoch)` in TypeScript. Minting is explicit; publishing does not
-add an epoch automatically.
+A route may carry an `Epoch`: a UUIDv7 naming the publisher instance behind it,
+ordered newest last, with its creation time available as `Epoch::time()` in
+Rust or `Epoch.time(epoch)` in TypeScript. A path and an epoch name one
+broadcast. The path never changes, so authorization, patterns, and hidden
+names work exactly as without one.
 
-`Path::join_epoch(Some(&epoch))` and `Path.joinEpoch(name, epoch)` append an
-`@<uuidv7>` segment. `Path::split_epoch()` and `Path.splitEpoch(path)` return
-the name and optional epoch. Only the final segment and canonical UUIDv7 text
-count: `@alice`, bare UUIDs, uppercase UUIDs, and other UUID versions remain
-ordinary path segments. Existing path normalization still applies.
+- **Publishing**: the epoch is whatever the route names, and nothing is minted
+  for you. A publisher mints one per run (`Epoch::mint()` with
+  `Route::with_epoch`, or `announce({ epoch: Epoch.mint() })`), so a restart is
+  a new broadcast. Replicas of the same content announce the same one. A route
+  without an epoch, such as a prefix claim, names no instance.
+- **Resolution** ranks the newest epoch first among routes at the same prefix,
+  ahead of cost, and a route without an epoch last. Newest means the latest
+  UUIDv7 timestamp, so ordering instances minted on different hosts trusts
+  their clocks: a restart on a host whose clock runs behind loses to the old
+  instance until that one retracts.
+- **Re-pricing**: announcing again (or `update` on a dynamic route) replaces
+  the whole route, epoch included. Start from the current route, as in
+  `broadcast.route()` or `dynamic.route()`, and change the cost, or the update
+  names another instance.
+- **Resume**: a subscription moves between routes with the same epoch without a
+  seam, continuing from the first frame it lacks. A route without an epoch
+  names no instance, so its subscriptions stay on that route (a transcoder
+  claim stays on the worker that first served it) and end when it goes.
+- **Replacement**: when a newer epoch wins the path, subscriptions to the old
+  one end with `Unroutable`, even ones in flight, and announcement streams see
+  the old route end and the new one start. Clients re-request and get the new
+  broadcast instead of stalling on the old.
 
-The segment travels as part of the ordinary broadcast path on every supported
-wire version. Pattern grants still match the full path: `room/**` covers an
-epoch-qualified instance, while `room/camera` is an exact name. Epochs do not
-hide a broadcast; a leading `.` in a name segment still does.
+The epoch travels on moq-lite 07 in `ANNOUNCE_START`, and relays fill it into
+the `TRACK`, `SUBSCRIBE`, and `FETCH` they send upstream; a publisher refuses a
+request naming another epoch. Older moq-lite versions and moq-transport cannot
+carry it: their routes have no epoch, so they keep their subscriptions on one
+route and see a replacement as an ordinary end and start at the same path. In
+a mixed deployment, where the same content reaches a relay over both an older
+link (no epoch) and a moq-lite 07 link (with one), the epoch-carrying route
+supersedes the other each time it appears, so a flapping moq-lite 07 link cuts
+the viewers resolved through the older one.
 
 ### Hidden broadcasts
 

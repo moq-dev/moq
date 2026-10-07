@@ -1,18 +1,21 @@
 //! A subscription survives its route changing, end to end over real sessions.
 //!
 //! A publisher `P` is pulled by two relays `A` and `B`, both of which re-advertise
-//! it to the subscribing relay `R`. A path is one broadcast whoever serves it, so `R`
-//! may resume a subscription served through one onto the other. The reader on `R`
-//! must see every frame exactly once, in order, whether the route changes between
-//! groups or in the middle of one, and however it changes.
+//! it to the subscribing relay `R`. Both routes carry `P`'s epoch, so `R` may resume
+//! a subscription served through one onto the other. The reader on `R` must see
+//! every frame exactly once, in order, whether the route changes between groups or
+//! in the middle of one, and however it changes.
+//!
+//! Older wire versions cannot carry the epoch, so `R` cannot tell the two routes
+//! serve the same bytes: its subscription stays on its route and ends with it.
 
 mod support;
 
 use std::time::Duration;
 
+use futures::{StreamExt, channel::mpsc};
 use moq_net::{Error, Hop, Timestamp, Version, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
-use tokio::sync::mpsc;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -21,7 +24,7 @@ const FRAMES: u64 = 4;
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(support::harness::run(driver));
+	support::harness::spawn(driver);
 	producer
 }
 
@@ -39,7 +42,7 @@ fn payload(group: u64, frame: u64) -> Vec<u8> {
 
 /// Let every task settle. Time is paused, so this returns once the runtime is idle.
 async fn settle() {
-	tokio::time::sleep(Duration::from_millis(500)).await;
+	moq_net_sim::sleep(Duration::from_millis(500)).await;
 }
 
 /// How the serving route goes away (or is beaten).
@@ -88,7 +91,9 @@ impl Topology {
 
 		let broadcast = publisher.create_broadcast("live").unwrap();
 		let track = broadcast.create_track("video", None).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast
+			.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+			.unwrap();
 
 		let p_to_a = link(version, &publisher, &relay_a).await;
 		let p_to_b = link(version, &publisher, &relay_b).await;
@@ -149,27 +154,27 @@ impl Topology {
 
 /// Read every group in full, reporting each frame as it arrives.
 fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<(u64, moq_net::Result<Vec<u8>>)> {
-	let (tx, rx) = mpsc::unbounded_channel();
-	tokio::spawn(async move {
+	let (tx, rx) = mpsc::unbounded();
+	moq_net_sim::spawn(async move {
 		loop {
 			let mut group = match sub.recv_group().await {
 				Ok(Some(group)) => group,
 				Ok(None) => return,
 				Err(err) => {
-					let _ = tx.send((u64::MAX, Err(err)));
+					let _ = tx.unbounded_send((u64::MAX, Err(err)));
 					return;
 				}
 			};
 			loop {
 				match group.read_frame().await {
 					Ok(Some(frame)) => {
-						if tx.send((group.sequence, Ok(frame.payload.to_vec()))).is_err() {
+						if tx.unbounded_send((group.sequence, Ok(frame.payload.to_vec()))).is_err() {
 							return;
 						}
 					}
 					Ok(None) => break,
 					Err(err) => {
-						let _ = tx.send((group.sequence, Err(err)));
+						let _ = tx.unbounded_send((group.sequence, Err(err)));
 						break;
 					}
 				}
@@ -181,7 +186,7 @@ fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<(u64, moq_net::Re
 
 /// Wait for the next frame the reader reports, failing on an error or a hang.
 async fn next(rx: &mut mpsc::UnboundedReceiver<(u64, moq_net::Result<Vec<u8>>)>) -> (u64, Vec<u8>) {
-	let (group, frame) = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+	let (group, frame) = moq_net_sim::timeout(Duration::from_secs(10), rx.next())
 		.await
 		.expect("reader hung")
 		.expect("reader ended");
@@ -284,6 +289,37 @@ async fn route_flaps(version: &str) {
 	assert!(rx.try_recv().is_err(), "{version}: trailing delivery");
 }
 
+/// A wire without epochs: the subscription stays on `A` while `B` stands by, and
+/// ends when `A`'s route goes instead of resuming through `B`.
+async fn route_dies_without_an_epoch(version: &str, trigger: Trigger) {
+	let version: Version = version.parse().unwrap();
+	let (mut topology, sub) = Topology::new(version).await;
+	let mut rx = read(sub);
+	topology.standby().await;
+
+	let mut group = topology.track.append_group().unwrap();
+	for frame in 0..FRAMES {
+		group.write_frame(Timestamp::ZERO, payload(0, frame)).unwrap();
+		assert_eq!(next(&mut rx).await, (0, payload(0, frame)), "{version}");
+	}
+	group.finish().unwrap();
+
+	topology.trigger(trigger).await;
+	let mut group = topology.track.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, payload(1, 0)).unwrap();
+	settle().await;
+	match moq_net_sim::timeout(Duration::from_secs(10), rx.next())
+		.await
+		.expect("reader hung")
+	{
+		None | Some((_, Err(_))) => {}
+		Some((group, Ok(frame))) => panic!(
+			"{version} {trigger:?}: resumed through another route at {group}:{}",
+			String::from_utf8_lossy(&frame)
+		),
+	}
+}
+
 macro_rules! route_change_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
@@ -291,37 +327,37 @@ macro_rules! route_change_tests {
 				use super::*;
 
 				async fn run(trigger: Trigger, position: Position) {
-					tokio::time::timeout(TEST_TIMEOUT, route_change($version, trigger, position))
+					moq_net_sim::timeout(TEST_TIMEOUT, route_change($version, trigger, position))
 						.await
 						.expect("timed out");
 				}
 
-				#[tokio::test(start_paused = true)]
+				#[moq_net_sim::test]
 				async fn disconnect_between_groups() {
 					run(Trigger::Disconnect, Position::BetweenGroups).await;
 				}
 
-				#[tokio::test(start_paused = true)]
+				#[moq_net_sim::test]
 				async fn disconnect_mid_group() {
 					run(Trigger::Disconnect, Position::MidGroup).await;
 				}
 
-				#[tokio::test(start_paused = true)]
+				#[moq_net_sim::test]
 				async fn unannounce_between_groups() {
 					run(Trigger::Unannounce, Position::BetweenGroups).await;
 				}
 
-				#[tokio::test(start_paused = true)]
+				#[moq_net_sim::test]
 				async fn unannounce_mid_group() {
 					run(Trigger::Unannounce, Position::MidGroup).await;
 				}
 
-				#[tokio::test(start_paused = true)]
+				#[moq_net_sim::test]
 				async fn better_route_between_groups() {
 					run(Trigger::BetterRoute, Position::BetweenGroups).await;
 				}
 
-				#[tokio::test(start_paused = true)]
+				#[moq_net_sim::test]
 				async fn better_route_mid_group() {
 					run(Trigger::BetterRoute, Position::MidGroup).await;
 				}
@@ -333,6 +369,43 @@ macro_rules! route_change_tests {
 
 route_change_tests! {
 	lite_07: "moq-lite-07-wip",
+}
+
+macro_rules! pinned_tests {
+	($($name:ident: $version:literal,)*) => {
+		$(
+			mod $name {
+				use super::*;
+
+				async fn run(trigger: Trigger) {
+					moq_net_sim::timeout(TEST_TIMEOUT, route_dies_without_an_epoch($version, trigger))
+						.await
+						.expect("timed out");
+				}
+
+				#[moq_net_sim::test]
+				async fn disconnect_ends_the_subscription() {
+					run(Trigger::Disconnect).await;
+				}
+
+				#[moq_net_sim::test]
+				async fn unannounce_ends_the_subscription() {
+					run(Trigger::Unannounce).await;
+				}
+
+				/// A better route without an epoch does not move the subscription either.
+				#[moq_net_sim::test]
+				async fn better_route_keeps_the_incumbent() {
+					moq_net_sim::timeout(TEST_TIMEOUT, route_change($version, Trigger::BetterRoute, Position::MidGroup))
+						.await
+						.expect("timed out");
+				}
+			}
+		)*
+	};
+}
+
+pinned_tests! {
 	lite_06: "moq-lite-06",
 	lite_05: "moq-lite-05",
 	lite_04: "moq-lite-04",
@@ -373,7 +446,9 @@ async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<(u64, m
 	);
 	let broadcast = p.create_broadcast("live").unwrap();
 	let track = broadcast.create_track("video", None).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast
+		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.unwrap();
 	let p_a = lagged(version, &p, &a, Duration::from_millis(300)).await;
 	let p_b = lagged(version, &p, &b, Duration::ZERO).await;
 	let a_r = lagged(version, &a, &r, Duration::ZERO).await;
@@ -407,7 +482,7 @@ async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<(u64, m
 	a_r.server.abort(Error::Cancel);
 	a_r.client.abort(Error::Cancel);
 	settle().await;
-	tokio::spawn(async move {
+	moq_net_sim::spawn(async move {
 		let _keep = (broadcast, track, group, p_a, p_b, b_w, b_r, warm, a_r, p, a, b, r, w);
 		std::future::pending::<()>().await
 	});
@@ -416,36 +491,21 @@ async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<(u64, m
 
 /// Lite carries the resume point upstream, so the rest of the group and the next one
 /// arrive in order.
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn lite_resumes_after_a_lagging_route_dies() {
-	for version in ["moq-lite-05", "moq-lite-06"] {
-		let version: Version = version.parse().unwrap();
-		let mut rx = lagging_route_dies(version).await;
-		assert_eq!(next(&mut rx).await, (1, payload(1, 2)), "{version}");
-		assert_eq!(next(&mut rx).await, (1, payload(1, 3)), "{version}");
-		assert_eq!(next(&mut rx).await, (2, payload(2, 0)), "{version}");
-	}
-}
-
-/// Before draft 20 the resume rides a joining FETCH from group 1 through Largest, which
-/// a moq-rs publisher refuses for spanning several groups, so the subscription joins
-/// live instead. The rest of group 1 is still fetched on its own.
-#[tokio::test(start_paused = true)]
-async fn an_older_ietf_draft_still_resumes_the_open_group() {
-	let version: Version = "moq-transport-19".parse().unwrap();
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
 	let mut rx = lagging_route_dies(version).await;
 	assert_eq!(next(&mut rx).await, (1, payload(1, 2)));
 	assert_eq!(next(&mut rx).await, (1, payload(1, 3)));
+	assert_eq!(next(&mut rx).await, (2, payload(2, 0)));
 }
 
-/// moq-transport 22 is left out: its relay fills a group's missing frames with a FETCH,
-/// which draft 20+ does not serve yet (see `quest/m1/ietf-fetch-location.md`).
 macro_rules! route_flap_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
-			#[tokio::test(start_paused = true)]
+			#[moq_net_sim::test]
 			async fn $name() {
-				tokio::time::timeout(TEST_TIMEOUT, route_flaps($version))
+				moq_net_sim::timeout(TEST_TIMEOUT, route_flaps($version))
 					.await
 					.expect("timed out");
 			}
@@ -455,9 +515,4 @@ macro_rules! route_flap_tests {
 
 route_flap_tests! {
 	flaps_lite_07: "moq-lite-07-wip",
-	flaps_lite_06: "moq-lite-06",
-	flaps_lite_05: "moq-lite-05",
-	flaps_lite_04: "moq-lite-04",
-	flaps_ietf_19: "moq-transport-19",
-	flaps_ietf_22: "moq-transport-22",
 }

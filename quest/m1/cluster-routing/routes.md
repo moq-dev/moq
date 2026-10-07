@@ -70,8 +70,8 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
   other links, and a route carrying it is never sent on an upstream link
   (extending the `upstream` link mark in `doc/bin/relay/cluster.md`).
 - A plain client with one link advertises a ROUTE for itself and the
-  ANNOUNCEs it publishes; its node id is scoped to its session (shared
-  identity across sessions is [Route trust](/quest/m3/route-trust.md)).
+  ANNOUNCEs it publishes; its node id is scoped to its session, and
+  nothing promotes it to an identity shared across sessions.
   A relay advertising routes to a client sends them as usual; node ids reveal
   nothing about the backbone.
 - Every hop re-selects; SUBSCRIBE names no origin, and the reply names none

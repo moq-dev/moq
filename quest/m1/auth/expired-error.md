@@ -12,6 +12,10 @@ refusal as final.
 - Add the variant to the `#[non_exhaustive]` error, so the change is additive
   on `main`. Map it from lite's `AUTH_ERROR { Expired }` and moq-transport's
   `EXPIRED_AUTH_TOKEN`, and back again when refusing.
+- Lite session code 0x30 is NOT_SUPPORTED
+  ([Lite NOT_SUPPORTED](/quest/m1/auth/not-supported.md)). `Expired` takes a
+  shared moq-transport session value if one means the same thing, otherwise
+  0x31.
 - Carry it through moq-ffi's error mapping and each wrapper.
 
 Moved from m2 into the auth line: relay tokens refuse an expired
@@ -21,5 +25,3 @@ apart from `Unauthorized`.
 ## Required
 
 - [WebSocket refusal](/quest/m1/auth/ws-unauthorized.md) - both transports refuse a token at the session level
-- [Lite stream](/quest/m1/auth/lite.md) - the lite AUTH streams that carry `Expired`
-- [moq-transport](/quest/m1/auth/moq-transport.md) - the extension that carries `EXPIRED_AUTH_TOKEN`

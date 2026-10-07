@@ -13,7 +13,7 @@ Decided 2026-10-06: `moq-quic` (quinn-proto) is the only crate the fork adds.
 quinn's async layer is imported into moq-tokio as a module rather than a
 `moq-quic-tokio` crate, tokio-only: drop quinn's `Runtime` abstraction and
 its smol and async-io implementations instead of carrying them. Its UDP
-sockets come from `moq_sock::udp` ([udp](/quest/m1/quic/fork/udp.md)).
+sockets come from `moq_sock::udp`.
 Keep the first commit verbatim from upstream (quinn's `quinn/src`) so a
 reviewer can diff it, and extend the cherry-pick recipe in
 `rs/moq-quic/README.md` to map `quinn/src/` onto the module.
@@ -21,8 +21,14 @@ reviewer can diff it, and extend the cherry-pick recipe in
 Move `web-transport-moq` from moq-dev/noq into moq-tokio as a module too. It
 derives from web-transport-quinn; its noq-only parts are `PathId::ZERO` and
 `path_stats`. Report bandwidth from quinn's `PathStats::bandwidth_estimate`
-instead of the current cwnd/rtt guess. moq-uring uses it only in tests,
+instead of the current cwnd/rtt guess; it is in bytes per second and
+`web-transport-trait` wants bits. moq-uring uses it only in tests,
 through moq-tokio.
+
+BBR3 is already `moq-quic`'s default, with `Bbr3Config` and `Bbr3` named as
+in noq, so the `Delay` family maps over unchanged. Run the benchmark matrix
+against `moq-noq` 1.3.x on the same workloads and report any throughput or
+latency difference; the BBR3 port could not, with no relay on `moq-quic` yet.
 
 moq-uring built against both quinn-proto and noq-proto until #3811, behind
 about 20 `cfg` lines (stats fields, CID generator, qlog, BBR). Rename
@@ -43,8 +49,3 @@ Re-run #3342's bulk and fanout relay memory workloads after the switch and
 report them in the PR. On `moq-noq` they measured 75 MiB (bulk) and 31 MiB
 (fanout), against 141 and 97 MiB without lazy slots; `moq-quic` should land
 near the former.
-
-## Required
-
-- [Import quinn-udp](/quest/m1/quic/fork/udp.md)
-- [Port BBR3](/quest/m1/quic/fork/bbr3.md)

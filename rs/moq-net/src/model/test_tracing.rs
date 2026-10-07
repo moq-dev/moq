@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::sync::Once;
 
 use tracing::field::{Field, Visit};
+use tracing::level_filters::LevelFilter;
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Level, Metadata, Subscriber};
 
@@ -17,19 +18,31 @@ thread_local! {
 	static CAPTURE: RefCell<Option<Capture>> = const { RefCell::new(None) };
 }
 
+/// Clears this thread's capture on unwind so the next one is not nested into a stale slot.
+struct Clear;
+
+impl Drop for Clear {
+	fn drop(&mut self) {
+		let _ = CAPTURE.take();
+	}
+}
+
 /// Count WARN events emitted on this thread whose `message` field contains `expected_message`
 /// while running `f`.
 ///
-/// The subscriber is process-global rather than scoped with `with_default`: tracing caches each
-/// callsite's interest process-wide, so a parallel test reaching the WARN first on a thread
-/// without a scoped subscriber disables it for every thread. Counting per thread keeps another
-/// test's WARNs out.
+/// The subscriber is process-global rather than scoped with `with_default`. Tracing caches each
+/// callsite's interest for the whole process, and a single scoped dispatcher rebuilds that cache
+/// from the current thread's default. A parallel test that reaches the WARN first, on a thread
+/// with no subscriber, caches it as disabled, and this capture then sees nothing. One global
+/// subscriber keeps every thread's interest the same. The thread-local slot is what keeps another
+/// test's WARNs out of the count.
 pub(crate) fn count_drop_warnings(expected_message: &str, f: impl FnOnce()) -> usize {
 	static INSTALL: Once = Once::new();
-	INSTALL.call_once(|| tracing::subscriber::set_global_default(Warns).expect("no other global subscriber"));
-	// A callsite first reached on another thread while the install above was still publishing
-	// sees no subscriber and is cached as disabled. Every capture starts after the install has
-	// completed, so rebuilding here re-enables it against the now-global subscriber.
+	INSTALL.call_once(|| {
+		tracing::subscriber::set_global_default(Warns).expect("no other global subscriber");
+	});
+	// A callsite first reached while the install above was still publishing sees no subscriber
+	// and is cached as disabled. Rebuilding after the install has completed re-enables it.
 	tracing::callsite::rebuild_interest_cache();
 
 	let capture = Capture {
@@ -38,6 +51,7 @@ pub(crate) fn count_drop_warnings(expected_message: &str, f: impl FnOnce()) -> u
 	};
 	let prev = CAPTURE.replace(Some(capture));
 	assert!(prev.is_none(), "count_drop_warnings does not nest");
+	let _clear = Clear;
 
 	f();
 
@@ -50,6 +64,12 @@ struct Warns;
 impl Subscriber for Warns {
 	fn enabled(&self, metadata: &Metadata<'_>) -> bool {
 		*metadata.level() == Level::WARN
+	}
+
+	fn max_level_hint(&self) -> Option<LevelFilter> {
+		// `None` leaves the global max level at TRACE, so every level check falls through to
+		// the callsite cache. This subscriber only records WARN.
+		Some(LevelFilter::WARN)
 	}
 
 	fn new_span(&self, _span: &Attributes<'_>) -> Id {
@@ -113,6 +133,18 @@ mod tests {
 			std::thread::spawn(probe).join().unwrap();
 			probe();
 		});
+		assert_eq!(warns, 1);
+	}
+
+	/// A panic inside the capture must clear the slot, or the next capture on this thread looks nested.
+	#[test]
+	fn an_unwind_clears_the_capture() {
+		let panicked = std::panic::catch_unwind(|| {
+			count_drop_warnings("test_tracing probe", || panic!("unwind the capture"));
+		});
+		assert!(panicked.is_err());
+
+		let warns = count_drop_warnings("test_tracing probe", probe);
 		assert_eq!(warns, 1);
 	}
 }

@@ -96,7 +96,6 @@ mod test_interop;
 mod util;
 mod version;
 
-mod runtime;
 pub mod server;
 pub mod session;
 pub mod stats;
@@ -104,7 +103,7 @@ pub mod time;
 pub mod transport;
 
 pub use client::*;
-pub use coding::{BoundsExceeded, DecodeError, EncodeError, VarInt};
+pub use coding::{BoundsExceeded, DecodeError, EncodeError, varint};
 pub use driver::Driver;
 pub use epoch::{Epoch, InvalidEpoch};
 pub use error::*;

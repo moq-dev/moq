@@ -1499,6 +1499,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
 
 [[package]]
+name = "crc-fast"
+version = "1.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e75b2483e97a5a7da73ac68a05b629f9c53cff58d8ed1c77866079e18b00dba5"
+dependencies = [
+ "digest 0.10.7",
+ "spin 0.10.1",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4095,6 +4105,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
+name = "md-5"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
+dependencies = [
+ "cfg-if",
+ "digest 0.11.3",
+]
+
+[[package]]
 name = "mdns-sd"
 version = "0.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4203,15 +4223,22 @@ version = "0.0.11"
 dependencies = [
  "async-trait",
  "bytes",
+ "criterion",
  "futures",
+ "hang",
+ "kio 0.6.2",
+ "moq-json",
+ "moq-mux",
  "moq-net",
  "object_store",
  "percent-encoding",
+ "quick_cache",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4351,9 +4378,12 @@ dependencies = [
  "bytes",
  "hang",
  "humantime",
+ "moq-archive",
  "moq-audio",
  "moq-auth",
  "moq-hls",
+ "moq-json",
+ "moq-msf",
  "moq-mux",
  "moq-relay",
  "moq-rtc",
@@ -4363,6 +4393,7 @@ dependencies = [
  "moq-transcode",
  "moq-video",
  "mpeg2ts",
+ "object_store",
  "pollster",
  "reqwest",
  "rustls",
@@ -4458,12 +4489,16 @@ dependencies = [
 name = "moq-hls"
 version = "0.5.11"
 dependencies = [
+ "async-trait",
  "axum",
  "bytes",
+ "futures",
  "hang",
  "humantime",
  "kio 0.6.2",
  "m3u8-rs",
+ "moq-archive",
+ "moq-json",
  "moq-mux",
  "moq-net",
  "moq-tokio",
@@ -4564,6 +4599,7 @@ dependencies = [
  "getrandom 0.4.3",
  "kio 0.6.2",
  "loom",
+ "moq-net-sim",
  "moq-pattern",
  "num_enum",
  "rand 0.10.3",
@@ -4585,6 +4621,19 @@ dependencies = [
  "libfuzzer-sys",
  "moq-net",
 ]
+
+[[package]]
+name = "moq-net-sim"
+version = "0.0.0"
+dependencies = [
+ "futures",
+ "kio 0.6.2",
+ "moq-net-sim-macros",
+]
+
+[[package]]
+name = "moq-net-sim-macros"
+version = "0.0.0"
 
 [[package]]
 name = "moq-noq"
@@ -4823,6 +4872,7 @@ dependencies = [
 name = "moq-sock"
 version = "0.2.0"
 dependencies = [
+ "cfg_aliases",
  "core_affinity",
  "libc",
  "rand 0.10.3",
@@ -4830,6 +4880,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "tracing-test",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4968,7 +5019,6 @@ dependencies = [
  "libc",
  "moq-net",
  "moq-noq-proto",
- "moq-noq-udp",
  "moq-sock",
  "moq-tokio",
  "nix",
@@ -6308,17 +6358,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1796bc93603f78c5760a69f2d58badc9618d22adade0a95385bb2adbae4eb94"
 dependencies = [
  "async-trait",
+ "aws-lc-rs",
+ "base64 0.23.1",
  "bytes",
  "chrono",
+ "crc-fast",
+ "form_urlencoded",
  "futures-channel",
  "futures-core",
  "futures-util",
  "http",
+ "http-body-util",
+ "httparse",
  "humantime",
+ "hyper",
  "itertools 0.15.0",
+ "md-5",
  "nix",
  "parking_lot",
  "percent-encoding",
+ "quick-xml 0.41.0",
+ "rand 0.10.3",
+ "reqwest",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -7010,6 +7075,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
 dependencies = [
  "memchr",
+ "serde",
 ]
 
 [[package]]
@@ -7019,6 +7085,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "quick_cache"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "403c1a912fec895cafb223201e368234842acb9220aaf08ab042ae89ba5f135c"
+dependencies = [
+ "equivalent",
+ "foldhash",
+ "hashbrown 0.17.1",
+ "parking_lot",
 ]
 
 [[package]]
@@ -7341,6 +7419,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
  "http-body-util",
