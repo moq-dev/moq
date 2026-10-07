@@ -13,8 +13,9 @@ keep the session alive structurally until its capsule is sent.
 
 Decided 2026-10-07: first check whether moq-net always calls `close()` before
 dropping a session (the `Connection` doc comment in
-`rs/moq-uring/src/quic/noq/connection.rs` says its session machine does); if it does, the leak only affects direct moq-uring users,
-which still need it fixed. Close with a generic application code on drop of
+`rs/moq-uring/src/quic/noq/connection.rs` says its session machine does); if
+it does, the leak only affects direct moq-uring users, which still need it
+fixed. Close with a generic application code on drop of
 the last handle, matching what the other backends do, with a test that drops
 a session and observes the peer's close.
 
