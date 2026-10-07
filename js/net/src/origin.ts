@@ -281,9 +281,12 @@ function unroutable(): StreamError {
 /** A served route from {@link Producer.dynamic}: the queue a handler drains. */
 class ServeState {
 	readonly root: Path.Valid;
+	/** False when a session announced the route: it may serve that session's broadcast. */
+	readonly originated: boolean;
 
-	constructor(root: Path.Valid) {
+	constructor(root: Path.Valid, originated: boolean) {
 		this.root = root;
+		this.originated = originated;
 	}
 
 	queue = new Signal<Request[]>([]);
@@ -860,7 +863,7 @@ export class Producer implements Table {
 
 	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean): Dynamic {
 		prefix = this.#scope.prefix(prefix);
-		const server = new ServeState(this.#scope.root);
+		const server = new ServeState(this.#scope.root, originated);
 		server.onChange = (path) => this.#state.refresh(path);
 		const entry: RouteEntry = {
 			identity: {},
@@ -1683,10 +1686,14 @@ export class Request {
 	 * Accept the request, resolving every awaiting requester with `broadcast`.
 	 *
 	 * The caller keeps producing into `broadcast`; repeat requests for the path share
-	 * it for as long as it stays live.
+	 * it for as long as it stays live. An originated route refuses a broadcast a session
+	 * delivered: serving it would label upstream content with this origin's hop.
 	 */
 	accept(source: broadcast.Producer | broadcast.Consumer): void {
 		if (this.#done) return;
+		if (this.#server.originated && !(source instanceof broadcast.Producer) && wireOf(source).fromSession) {
+			throw new Error("origin cannot serve a broadcast it did not produce");
+		}
 		this.#done = true;
 		const front = source instanceof broadcast.Producer ? source.consume() : source;
 		this.#server.accept(this, front);

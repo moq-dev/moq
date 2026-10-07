@@ -8,7 +8,7 @@ import { spreadHash } from "./internal.ts";
 import type { Consumer, Table } from "./origin.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
-import { wireOf } from "./wire.ts";
+import { overrideBroadcastWire, wireOf } from "./wire.ts";
 
 function publish(origin: Producer, path: Path.Valid) {
 	const broadcast = origin.createBroadcast(path);
@@ -1173,6 +1173,49 @@ test("a handle serves a request under live", async () => {
 	request.close();
 	handle.close();
 	produced.close();
+	origin.close();
+});
+
+test("an originated route refuses a broadcast a session delivered", async () => {
+	const origin = new Producer();
+	const handle = origin.dynamic(Path.from("live"));
+	const it = handle.requested();
+	const pending = wireOf(origin.consume()).demand(Path.from("live/cam"));
+	const { value: req } = await it.next();
+	if (!req) throw new Error("expected request");
+
+	// What lite and IETF do when a session hands back a consumed broadcast.
+	const foreign = new BroadcastProducer().consume();
+	overrideBroadcastWire(foreign, {});
+	expect(() => req.accept(foreign)).toThrow("origin cannot serve a broadcast it did not produce");
+
+	const produced = new BroadcastProducer();
+	produced.createTrack("video");
+	req.accept(produced.consume());
+	expect(await pending).toBeDefined();
+
+	handle.close();
+	produced.close();
+	foreign.close();
+	origin.close();
+});
+
+test("a received route still serves a broadcast a session delivered", async () => {
+	const origin = new Producer();
+	const path = Path.from("room");
+	const upstream = new BroadcastProducer();
+	upstream.createTrack("video");
+	const foreign = upstream.consume();
+	overrideBroadcastWire(foreign, {});
+	const stop = serve(origin, path, () => foreign);
+
+	const request = origin.request(path);
+	await settle();
+	expect(request.active.peek()?.track("video").subscribe()).toBeDefined();
+
+	request.close();
+	stop();
+	upstream.close();
 	origin.close();
 });
 
