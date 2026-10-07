@@ -2,6 +2,7 @@ import { race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
+import * as DatagramStream from "../datagram_stream.ts";
 import {
 	closeError,
 	controlTimeout,
@@ -16,7 +17,7 @@ import * as netGroup from "../group.ts";
 import { Cost, type Route, randomHop, routesEqual, stampHops, UNKNOWN_HOP } from "../hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
-import type { Cursor, Reader, Stream } from "../stream.ts";
+import { type Cursor, Reader, type Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
 import { Milli, type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
@@ -25,8 +26,9 @@ import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
 import * as Cluster from "./cluster.ts";
+import { ObjectDatagram } from "./datagram.ts";
 import { requestReason, toRequestCode } from "./error.ts";
-import { Frame, type Group as GroupMessage } from "./object.ts";
+import { decodeObjectTime, Frame, type Group as GroupMessage } from "./object.ts";
 import { fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishError, publishDoneClean } from "./publish.ts";
 import {
@@ -1137,6 +1139,89 @@ export class Subscriber {
 			stream.stop(e);
 		} finally {
 			read();
+		}
+	}
+
+	/**
+	 * Receive QUIC datagrams, each an OBJECT_DATAGRAM for one of our subscriptions.
+	 *
+	 * Returns at once on a transport without datagrams, and once the datagram stream ends or
+	 * fails. A malformed datagram throws a {@link ProtocolViolation}, which ends the session.
+	 *
+	 * @internal
+	 */
+	async runDatagrams(): Promise<void> {
+		if (!this.#quic || DatagramStream.maxDatagramSize(this.#quic) === 0) return;
+		const reader = DatagramStream.datagramReader(this.#quic);
+		if (!reader) return;
+
+		try {
+			for (;;) {
+				// The stream errors once the session closes, which ends this loop like any other.
+				const next = await reader.read().catch(() => undefined);
+				if (!next || next.done) return;
+				await this.#recvDatagram(next.value);
+			}
+		} finally {
+			reader.releaseLock();
+		}
+	}
+
+	/**
+	 * Deliver one OBJECT_DATAGRAM as a datagram on its subscription's track: a single-frame
+	 * group at the Group ID.
+	 *
+	 * One the model cannot carry is dropped like any lost datagram: an Object past ID 0 (the
+	 * group would need a second object), a status other than Normal, or an alias that is not
+	 * bound yet (the draft lets us drop rather than buffer).
+	 */
+	async #recvDatagram(data: Uint8Array): Promise<void> {
+		const version = this.#session.version;
+		const datagram = await ObjectDatagram.decode(data, version);
+		const { trackAlias: alias, groupId: sequence } = datagram;
+
+		if ((datagram.objectId ?? 0) !== 0) {
+			console.debug(`dropping a datagram past object 0: alias=${alias} group=${sequence}`);
+			return;
+		}
+		let payload: Uint8Array;
+		if ("status" in datagram.body) {
+			if (datagram.body.status !== 0) {
+				console.debug(
+					`dropping a datagram status: alias=${alias} group=${sequence} status=${datagram.body.status}`,
+				);
+				return;
+			}
+			payload = new Uint8Array();
+		} else {
+			payload = datagram.body.payload;
+		}
+
+		const subscription = this.#aliases.peek(alias);
+		if (!subscription) {
+			console.debug(`dropping a datagram for an unbound alias: alias=${alias} group=${sequence}`);
+			return;
+		}
+
+		// Like a subgroup object: a track that declared no timescale is stamped on arrival.
+		const timescale = this.#timescales.get(alias);
+		let timestamp: Timestamp | undefined;
+		if (timescale !== undefined && datagram.properties !== undefined) {
+			try {
+				timestamp = await new Reader(undefined, datagram.properties, version).decode((c) =>
+					decodeObjectTime(c, timescale),
+				);
+			} catch (err: unknown) {
+				throw new ProtocolViolation(`malformed OBJECT_DATAGRAM properties: ${reason(error(err))}`, {
+					cause: err,
+				});
+			}
+		}
+
+		try {
+			subscription.track.insertDatagram(sequence, timestamp ?? Timestamp.now(), payload);
+		} catch (err: unknown) {
+			console.debug(`dropping datagram: alias=${alias} group=${sequence} error=${reason(error(err))}`);
 		}
 	}
 }

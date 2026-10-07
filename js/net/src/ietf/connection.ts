@@ -193,6 +193,7 @@ export class Connection implements Established {
 		if (this.#closed) return;
 
 		this.#closed = true;
+		this.#publisher.close();
 
 		// Before the session, whose own close would send a clean code first.
 		try {
@@ -212,7 +213,12 @@ export class Connection implements Established {
 
 	async #run(early: Reader[]): Promise<void> {
 		try {
-			await Promise.all([this.#runBidis(), this.#runUnis(early), this.#publisher.runPublishNamespaces()]);
+			await Promise.all([
+				this.#runBidis(),
+				this.#runUnis(early),
+				this.#runDatagrams(),
+				this.#publisher.runPublishNamespaces(),
+			]);
 		} catch (err) {
 			if (!this.#closed) {
 				console.error("fatal error running connection", err);
@@ -341,6 +347,17 @@ export class Connection implements Established {
 
 			default:
 				throw new ProtocolViolation(`unknown bidi stream type: 0x${typeId.toString(16)}`);
+		}
+	}
+
+	// A malformed OBJECT_DATAGRAM is the peer breaking the protocol, like an invalid stream type.
+	async #runDatagrams() {
+		try {
+			await this.#subscriber.runDatagrams();
+		} catch (err: unknown) {
+			if (!(err instanceof ProtocolViolation)) throw err;
+			console.warn("malformed datagram", err);
+			this.#violated(err);
 		}
 	}
 

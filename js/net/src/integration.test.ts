@@ -624,38 +624,53 @@ test("integration: lite draft-05 missing datagram writer does not close streams"
 	server.abort();
 });
 
-test("integration: ietf does not deliver datagrams", async () => {
-	const enc = new TextEncoder();
-	const pair = createMockTransportPair(Ietf.ALPN.DRAFT_19);
-	const origin = new OriginProducer();
+for (const [name, protocol, version] of [
+	["draft-14", "", Ietf.Version.DRAFT_14],
+	["draft-15", Ietf.ALPN.DRAFT_15, undefined],
+	["draft-16", Ietf.ALPN.DRAFT_16, undefined],
+	["draft-17", Ietf.ALPN.DRAFT_17, undefined],
+	["draft-18", Ietf.ALPN.DRAFT_18, undefined],
+	["draft-19", Ietf.ALPN.DRAFT_19, undefined],
+	["draft-20", Ietf.ALPN.DRAFT_20, undefined],
+	["draft-21", Ietf.ALPN.DRAFT_21, undefined],
+	["draft-22", Ietf.ALPN.DRAFT_22, undefined],
+] as const) {
+	test(`integration: ietf ${name} delivers datagrams`, async () => {
+		const enc = new TextEncoder();
+		const dec = new TextDecoder();
+		const pair = createMockTransportPair(protocol);
+		const origin = new OriginProducer();
 
-	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client }),
-		accept(pair.server, url, { publish: origin.consume() }),
-	]);
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client }),
+			accept(pair.server, url, { version, publish: origin.consume() }),
+		]);
 
-	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const broadcast = publish(origin, Path.from("test"));
+		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
-	const remote = wireOf(client).consume(Path.from("test"));
-	const track = remote.track("video").subscribe().ordered();
-	const datagrams = remote.track("video").subscribe();
+		const remote = wireOf(client).consume(Path.from("test"));
+		const track = remote.track("video").subscribe().ordered();
+		const datagrams = remote.track("video").subscribe();
 
-	producer.insertDatagram(7, Timestamp.fromMillis(0), enc.encode("dgram"));
-	producer.writeString("group");
+		// A group first, so the subscription is serving and its alias is bound on both ends.
+		producer.writeString("group");
+		expect(await track.readString()).toBe("group");
 
-	expect(await track.readString()).toBe("group");
+		producer.insertDatagram(7, Timestamp.fromMillis(1234), enc.encode("dgram"));
+		const datagram = await withTimeout(datagrams.recvDatagram(), 1000, "no datagram arrived");
+		expect(datagram?.sequence).toBe(7);
+		expect(dec.decode(datagram?.payload)).toBe("dgram");
+		// Drafts 14-16 cannot declare TIMESCALE, so their datagrams are stamped on arrival.
+		if (!["draft-14", "draft-15", "draft-16"].includes(name))
+			expect(datagram?.timestamp.as(Timescale.MILLI)).toBe(1234);
 
-	const datagram = datagrams.recvDatagram();
-	datagram.catch(() => {});
-	const outcome = await Promise.race([datagram, sleep(50).then(() => "timeout" as const)]);
-	expect(outcome).toBe("timeout");
-
-	broadcast.close();
-	remote.close();
-	client.abort();
-	server.abort();
-});
+		broadcast.close();
+		remote.close();
+		client.abort();
+		server.abort();
+	});
+}
 
 test("integration: lite draft-05 missing datagram reader does not close streams", async () => {
 	const enc = new TextEncoder();

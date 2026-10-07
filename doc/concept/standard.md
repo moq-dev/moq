@@ -74,8 +74,9 @@ tracks waiting for a group that never arrives.
 A moq-lite datagram is a single-frame group, so on moq-transport it travels
 as an `OBJECT_DATAGRAM` at object 0 whose Group ID is the sequence, and a relay
 forwards it without renumbering. A datagram carrying any other Object ID, or a
-status other than Normal, is dropped. JavaScript does not yet carry datagrams
-on moq-transport.
+status other than Normal, is dropped, as is one for an alias not yet bound. A
+malformed one closes the session. Rust and JavaScript both carry datagrams on
+every supported draft.
 
 A client may present one credential in its `SETUP` with the `AUTHORIZATION
 TOKEN` option. The server reads a value (`USE_VALUE`, or `REGISTER`, which it

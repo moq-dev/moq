@@ -51,5 +51,4 @@ range apart from one dropped for any other reason.
 
 ## Related
 
-- [JS IETF datagrams](/quest/m1/js-ietf-datagram.md) - JS datagram send and receive over moq-transport
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - datagram groups stay best effort there too
