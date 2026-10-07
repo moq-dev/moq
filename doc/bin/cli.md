@@ -227,11 +227,19 @@ the newest cached group, including when a rendition is reopened, so playback
 does not replay the retained backlog. A publisher that retires the rendition
 being played ends that track and the role picks a replacement. A retired audio
 rendition plays out what the speaker holds while its replacement fills, so the
-switch does not cost a delay of silence. A restarted publisher's broadcast
-replaces the one playing, and playback starts over on it with a fresh catalog
-and decoders; the log names each broadcast's epoch. Playback is
-behind the `play` feature, since it pulls in windowing and audio-device
-dependencies:
+switch does not cost a delay of silence.
+
+The broadcast's announcement is its online signal. Playback starts when the
+name is announced and starts over, with a fresh catalog and decoders, on each
+new announcement: a restarted publisher's new
+[epoch](/concept/moq-lite#publisher-epochs), or over moq-lite 06, which carries
+no epoch, any change to the route. When the announcement ends, playback plays
+out what it holds and waits for the broadcast to come back, for as long as the
+window stays open. The log names each announced broadcast's epoch. A catalog
+with nothing this build can play still fails at once.
+
+Playback is behind the `play` feature, since it pulls in windowing and
+audio-device dependencies:
 
 ```bash
 cargo install moq-cli --no-default-features --features "iroh,noq,websocket,play"
@@ -398,8 +406,9 @@ produce identical tracks with aligned groups. Each run announces a fresh
 [epoch](/concept/moq-lite#publisher-epochs), logged at startup. Over
 moq-lite 07 (opt-in while its wire is in progress) the epoch reaches the relay,
 so a restarted publisher replaces the old broadcast and viewers switch to it at
-once. Older versions carry no epoch, so viewers stay on the old route until it
-goes.
+once. Older versions carry no epoch, so a restart that overlaps the old route
+reaches viewers only once that route goes: a clean stop retracts it at once,
+while a crashed publisher's route lasts until its session times out.
 
 ## Cluster
 

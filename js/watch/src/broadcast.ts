@@ -85,8 +85,9 @@ type BroadcastOutput = {
 	status: Signal<Status>;
 	active: Signal<Moq.Broadcast.Consumer | undefined>;
 
-	// Why the origin refused the broadcast, while `status` is "error". A refusal is final:
-	// only a fresh request (a new `name`, `origin`, or `announced`, or re-enabling) clears it and asks again.
+	// Why the origin refused the broadcast, while `status` is "error". A refusal is final: only a
+	// fresh request (a new `name`, `origin`, or `announced`, re-enabling, or a route without an
+	// epoch changing) clears it and asks again.
 	error: Signal<Error | undefined>;
 
 	// The effective catalog: the fetched one, or a copy of input.catalog in manual mode, minus
@@ -230,16 +231,40 @@ export class Broadcast {
 		if (!origin) return;
 
 		const name = effect.get(this.in.name);
-		const request = origin.request(name, { announced: effect.get(this.in.announced) });
-		effect.cleanup(() => request.close());
+		const announced = effect.get(this.in.announced);
+
+		// An epoch names the publisher instance, and a new one already swaps the handle. A route
+		// without one (moq-lite 06) cannot say whether a change in place is a restarted publisher,
+		// so ask for the path again on any change, which starts everything downstream over.
+		const routes = origin.broadcasts(undefined, { hidden: true });
+		const instance = announced
+			? effect.computed((nested) => {
+					let route: Moq.Origin.Route | undefined;
+					let length = -1;
+					for (const [prefix, candidate] of nested.get(routes)) {
+						if (prefix.length > length && Path.hasPrefix(prefix, name)) {
+							route = candidate;
+							length = prefix.length;
+						}
+					}
+					return route?.epoch ?? route;
+				})
+			: undefined;
 
 		effect.run((nested) => {
-			nested.set(this.#out.active, nested.get(request.active), undefined);
-		});
+			if (instance) nested.get(instance);
 
-		effect.run((nested) => {
-			const closed = nested.get(request.closed);
-			if (closed) nested.set(this.#out.error, closed, undefined);
+			const request = origin.request(name, { announced });
+			nested.cleanup(() => request.close());
+
+			nested.run((inner) => {
+				inner.set(this.#out.active, inner.get(request.active), undefined);
+			});
+
+			nested.run((inner) => {
+				const closed = inner.get(request.closed);
+				if (closed) inner.set(this.#out.error, closed, undefined);
+			});
 		});
 	}
 

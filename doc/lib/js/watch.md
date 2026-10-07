@@ -44,10 +44,14 @@ Video holds its last picture while paused, out of view, or waiting for a
 resumed rendition's first frame. Its reported timestamp stays with that picture.
 Going offline or closing the player clears it.
 
-A restarted publisher announces a new [epoch](/concept/moq-lite#publisher-epochs)
+With `announced` on, the broadcast's announcement is its online signal. The
+player starts when the name is announced, goes `offline` when the announcement
+ends, and keeps waiting for it to come back for as long as it is mounted. A
+restarted publisher announces a new [epoch](/concept/moq-lite#publisher-epochs)
 at the same name, and the player follows it: a fresh catalog, and video, audio,
 and the clock start over on its timeline instead of waiting for it to catch up
-to the old one.
+to the old one. moq-lite 06 carries no epoch, so any change to the route
+covering the name may be a restart, and the player starts over on it too.
 
 The overlay adds play/pause, volume, fullscreen, a quality selector, a
 buffering indicator, an unsupported-codec warning, and a stats panel.
@@ -57,8 +61,9 @@ buffering indicator, an unsupported-codec warning, and a stats panel.
 `error` when the origin refuses the broadcast, such as a `dynamic()` handler
 rejecting the request, and `el.broadcast.out.error` then holds the refusal's
 `Error`; the overlay shows its message in place of the offline notice. A
-refusal is final: only a new `name`, a new origin, a changed `announced`, or
-re-enabling asks again, which clears both back to `offline`.
+refusal is final: only a new `name`, a new origin, a changed `announced`,
+re-enabling, or a change to a route without an epoch asks again, which clears
+both back to `offline`.
 
 ## Binding from a framework
 

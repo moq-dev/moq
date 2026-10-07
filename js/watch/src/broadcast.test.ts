@@ -501,3 +501,72 @@ describe("manual catalog", () => {
 		}
 	});
 });
+
+// A broadcast's announcement is its online/offline signal. moq-lite 06 carries no epoch, so a
+// restarted publisher shows up either as a retraction and a fresh announcement or, when it
+// takes over a route still standing, as that route changing in place.
+describe("online and offline", () => {
+	it("follows a broadcast that ends and is announced again", async () => {
+		const owner = new Origin.Producer();
+		const name = Path.from("live.hang");
+		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
+		try {
+			const first = publish(owner, name);
+			await settle();
+			const old = source.out.active.peek();
+			expect(old).toBeDefined();
+
+			first.close();
+			await settle();
+			expect(source.out.active.peek()).toBeUndefined();
+
+			const second = publish(owner, name);
+			await settle();
+			const active = source.out.active.peek();
+			expect(active).toBeDefined();
+			expect(active).not.toBe(old);
+			expect(active?.closed.peek()).toBeUndefined();
+			second.close();
+		} finally {
+			source.close();
+			owner.close();
+			await settle();
+		}
+	});
+
+	it("starts over when a route without an epoch changes in place", async () => {
+		const owner = new Origin.Producer();
+		const name = Path.from("live.hang");
+		const route = owner.dynamic(name);
+		const requests = route.requested();
+		const source = new Broadcast({ origin: owner, name, enabled: true, announced: true, catalogFormat: "manual" });
+		try {
+			const first = await requests.next();
+			first.value?.accept(new Moq.Broadcast.Producer());
+			await settle();
+			const old = source.out.active.peek();
+			expect(old).toBeDefined();
+
+			// Nothing says the changed route serves the same content, so the path is asked for
+			// again and everything reading the handle starts over on a fresh one.
+			route.update({ cost: 4n });
+			await settle();
+			const active = source.out.active.peek();
+			expect(active).toBeDefined();
+			expect(active).not.toBe(old);
+
+			// An epoch says the content is the same, so a re-price keeps the handle.
+			route.update({ epoch: Moq.Epoch.mint(), cost: 4n });
+			await settle();
+			const minted = source.out.active.peek();
+			route.update({ ...route.route, cost: 2n });
+			await settle();
+			expect(source.out.active.peek()).toBe(minted);
+		} finally {
+			source.close();
+			route.close();
+			owner.close();
+			await settle();
+		}
+	});
+});
