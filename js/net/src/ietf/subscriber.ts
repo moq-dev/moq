@@ -1,6 +1,7 @@
-import { race, Signal } from "@moq/signals";
+import { type GetPromise, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
+import type { Drain } from "../connection/goaway.ts";
 import { BroadcastCache } from "../consume.ts";
 import {
 	closeError,
@@ -54,6 +55,11 @@ import { Version } from "./version.ts";
 // concurrent QUIC streams (Chrome ~100); past the cap openBi() silently
 // blocks. The timeout turns that into a clear error.
 const SUBSCRIBE_OK_TIMEOUT_MS = 10_000;
+
+// Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
+// candidate outranks it, while the route stays selectable as the last path. Matches Rust
+// Cost::DRAIN: cost is the whole mechanism, not a separate state.
+const DRAIN_COST = { warm: 2n ** 62n - 1n, cold: 2n ** 62n - 1n };
 
 // A live subscription, as the track alias its data streams name resolves to.
 type Subscription = {
@@ -154,6 +160,10 @@ export class Subscriber {
 	// Whether the peer understands the HIDDEN parameter (MoQ Hidden).
 	#hidden: boolean;
 
+	// Settles when the peer sends GOAWAY. New opens stop; subscriptions already running
+	// keep flowing until the session closes.
+	#goaway?: GetPromise<Drain>;
+
 	/** Marks this subscriber's deliberate local session close. @internal */
 	close() {
 		this.#localClose = true;
@@ -169,6 +179,7 @@ export class Subscriber {
 		quic,
 		cluster,
 		hidden = false,
+		goaway,
 	}: {
 		/** The session abstraction for bidi streams and request IDs. */
 		session: Session;
@@ -178,11 +189,40 @@ export class Subscriber {
 		cluster?: Cluster.Hops;
 		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
 		hidden?: boolean;
+		/** Settles when the peer sends GOAWAY. */
+		goaway?: GetPromise<Drain>;
 	}) {
 		this.#session = session;
 		this.#quic = quic;
 		this.#cluster = cluster;
 		this.#hidden = hidden;
+		this.#goaway = goaway;
+		// A draining peer usually stops publishing namespaces, so reprice from the signal
+		// itself. Waiting for another message would leave the route primary until close.
+		if (goaway) void goaway.then(() => this.#drainAnnounced());
+	}
+
+	// The peer told us to stop opening streams on this session.
+	#goingAway(): boolean {
+		return this.#goaway?.peek() !== undefined;
+	}
+
+	#goingAwayError(): StreamError {
+		return new StreamError(StreamCode.GoingAway, { message: "going away" });
+	}
+
+	// What a route costs once the peer has asked us to leave.
+	#priced(route: Route): Route {
+		if (!this.#goingAway()) return route;
+		if (route.cost.warm === DRAIN_COST.warm && route.cost.cold === DRAIN_COST.cold) return route;
+		return { ...route, cost: DRAIN_COST };
+	}
+
+	// Reprice every live advertisement. Idempotent, since the signal stays set.
+	#drainAnnounced(): void {
+		for (const [path, info] of this.#announced) {
+			this.#updateAnnounce(path, info.route);
+		}
 	}
 
 	/**
@@ -251,9 +291,12 @@ export class Subscriber {
 	 * first. A second one is the same namespace said twice, not news.
 	 */
 	#attachAnnounce(path: Path.Valid, route: Route) {
+		route = this.#priced(route);
 		const existing = this.#announced.get(path);
 		if (existing) {
 			existing.count += 1;
+			// A second advertisement after GOAWAY still must not win selection.
+			if (this.#goingAway()) this.#updateAnnounce(path, existing.route);
 			return;
 		}
 		this.#announced.set(path, { count: 1, route });
@@ -273,6 +316,7 @@ export class Subscriber {
 	 * the first hop now says, so the shared consume stays.
 	 */
 	#updateAnnounce(path: Path.Valid, route: Route) {
+		route = this.#priced(route);
 		const existing = this.#announced.get(path);
 		if (existing === undefined || routesEqual(existing.route, route)) return;
 		existing.route = route;
@@ -319,6 +363,15 @@ export class Subscriber {
 	}
 
 	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, hidden: boolean) {
+		// The peer asked us to stop opening streams, including through the draft-14 to -16
+		// adapter (virtual openBi and native openNativeBi alike). Leaving the consumer
+		// pending, rather than closing it, keeps a forwarder from treating discovery as
+		// failed and answering new requests on this session.
+		if (this.#goingAway()) {
+			await announced.closed;
+			return;
+		}
+
 		const version = this.#session.version;
 
 		// Suffixes live on this stream, so a repeat is recognized as an update to the
@@ -529,6 +582,13 @@ export class Subscriber {
 	}
 
 	async #runSubscribe(broadcast: Path.Valid, request: track.Request) {
+		// A peer that sent GOAWAY told us to stop opening streams. Reject before taking a
+		// request id, so nothing is registered and the caller sees the refusal.
+		if (this.#goingAway()) {
+			request.reject(this.#goingAwayError());
+			return;
+		}
+
 		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) {
 			request.reject(await this.#closedSession());
@@ -742,6 +802,7 @@ export class Subscriber {
 	): Promise<{ stream: Stream; alias: bigint }> {
 		const version = this.#session.version;
 
+		if (this.#goingAway()) throw this.#goingAwayError();
 		state.stream = await this.#session.openBi();
 
 		// The timeout can fire while the open is still in flight, in which case cleanup ran

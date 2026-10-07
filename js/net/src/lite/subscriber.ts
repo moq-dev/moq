@@ -1,6 +1,7 @@
-import { race, Signal } from "@moq/signals";
+import { type GetPromise, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
+import type { Drain } from "../connection/goaway.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import type * as Epoch from "../epoch.ts";
@@ -58,6 +59,11 @@ import {
 // (Chrome ~100) and we open with waitUntilAvailable, so past the cap the open blocks
 // until the peer frees a slot. The timeout turns a stall into a clear error.
 const SUBSCRIBE_SETUP_TIMEOUT_MS = 10_000;
+
+// Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
+// candidate outranks it, while the route stays selectable as the last path. Matches Rust
+// Cost::DRAIN: cost is the whole mechanism, not a separate state.
+const DRAIN_COST = { warm: 2n ** 62n - 1n, cold: 2n ** 62n - 1n };
 
 // The TRACK stream and implicit SUBSCRIBE acceptance are lite-05+.
 function supportsTrackStream(version: Version): boolean {
@@ -159,6 +165,10 @@ export class Subscriber {
 	// stream on the peer having advertised Probe >= Report.
 	#peerSetup?: Signal<Setup | undefined>;
 
+	// Settles when the peer sends GOAWAY. New opens stop; subscriptions already running
+	// keep flowing until the session closes.
+	#goaway?: GetPromise<Drain>;
+
 	// Distinguishes failures from streams torn down by Subscriber.close().
 	#closed = new AbortController();
 	/**
@@ -168,6 +178,7 @@ export class Subscriber {
 	 * @param origin - Hop id shared with the Publisher
 	 * @param probe - Optional sink for the peer's PROBE estimates
 	 * @param peerSetup - Optional peer SETUP slot for capability gating (lite-05+)
+	 * @param goaway - Settles when the peer sends GOAWAY
 	 *
 	 * @internal
 	 */
@@ -177,6 +188,7 @@ export class Subscriber {
 		hop: Hop,
 		probe?: Signal<ProbeStats>,
 		peerSetup?: Signal<Setup | undefined>,
+		goaway?: GetPromise<Drain>,
 	) {
 		this.#quic = quic;
 		this.version = version;
@@ -184,6 +196,22 @@ export class Subscriber {
 		this.#stamp = randomHop();
 		this.#probe = probe;
 		this.#peerSetup = peerSetup;
+		this.#goaway = goaway;
+	}
+
+	// The peer told us to stop opening streams on this session.
+	#goingAway(): boolean {
+		return this.#goaway?.peek() !== undefined;
+	}
+
+	#goingAwayError(): StreamError {
+		return new StreamError(StreamCode.GoingAway, { message: "going away" });
+	}
+
+	// What a route costs once the peer has asked us to leave. A later announce on a
+	// draining session must not win selection, however cheap the path it advertises.
+	#cost(cost?: Cost): Cost {
+		return this.#goingAway() ? DRAIN_COST : (cost ?? Cost.zero);
 	}
 
 	/**
@@ -212,6 +240,13 @@ export class Subscriber {
 		hidden: boolean,
 	): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
+		// The peer asked us to stop opening streams. Leaving the consumer pending, rather
+		// than closing it, keeps a forwarder from treating discovery as failed and answering
+		// new requests on this session.
+		if (this.#goingAway()) {
+			await announced.closed;
+			return;
+		}
 		// Lite04/05: send our own session-level Hop ID so the peer can skip announces
 		// whose hop chain already passed through us. Encoding drops it on every other
 		// version, where we drop the reflected announce on receipt instead. Matches the
@@ -277,7 +312,7 @@ export class Subscriber {
 						if (advertised.has(path)) {
 							throw new ProtocolViolation(`duplicate announce for ${path}`);
 						}
-						const route = { hops: [this.#stamp, UNKNOWN_HOP], cost: Cost.zero };
+						const route = { hops: [this.#stamp, UNKNOWN_HOP], cost: this.#cost() };
 						const live = visible(path);
 						const captures = scopeCaptures(scope, path);
 						advertised.set(path, { live, route, captures });
@@ -291,6 +326,22 @@ export class Subscriber {
 					// Draft03+: no AnnounceInit, initial state comes via Announce messages.
 					break;
 			}
+
+			// A draining peer usually stops announcing, so reprice from the GOAWAY itself.
+			// Waiting for another message would leave the route primary until the session
+			// closed. Idempotent: the signal stays set, and an unchanged cost emits nothing.
+			const drainAdvertised = () => {
+				if (announced.closed.peek() !== undefined) return;
+				for (const [path, ad] of advertised) {
+					if (!ad.live) continue;
+					const route = { ...ad.route, cost: DRAIN_COST };
+					if (routesEqual(ad.route, route)) continue;
+					advertised.set(path, { ...ad, route });
+					announced.append({ prefix: path, captures: ad.captures, kind: "update", route });
+				}
+			};
+			if (this.#goaway) void this.#goaway.then(() => drainAdvertised());
+			if (this.#goingAway()) drainAdvertised();
 
 			// Lite06+: announce ids. Each received `active` implicitly assigns the next
 			// per-stream ordinal; `endedId`/`restart` reference it, and lite-07 bases copy
@@ -433,7 +484,7 @@ export class Subscriber {
 					});
 					continue;
 				}
-				const route: Route = { epoch, hops: fullHops, cost: cost ?? Cost.zero };
+				const route: Route = { epoch, hops: fullHops, cost: this.#cost(cost) };
 				const captures = scopeCaptures(scope, path);
 				if (!visible(path)) {
 					advertised.set(path, { live: false, route, captures });
@@ -513,6 +564,13 @@ export class Subscriber {
 	}
 
 	async #runSubscribe(broadcast: Path.Valid, epoch: Epoch.Valid | undefined, request: track.Request) {
+		// A peer that sent GOAWAY told us to stop opening streams. Reject before accepting,
+		// so the caller sees the refusal and nothing is registered.
+		if (this.#goingAway()) {
+			request.reject(this.#goingAwayError());
+			return;
+		}
+
 		const id = this.#subscribeNext++;
 		const subscription = request.subscription;
 		const initialBounds = groupBounds(subscription.groups);
@@ -678,6 +736,7 @@ export class Subscriber {
 		};
 		this.#subscribes.set(id, entry);
 
+		if (this.#goingAway()) throw this.#goingAwayError();
 		state.stream = await Stream.open(this.#quic, { version: this.version });
 		await state.stream.writer.u53(StreamId.Subscribe);
 		await msg.encode(state.stream.writer, this.version);
@@ -709,6 +768,7 @@ export class Subscriber {
 	// fails. Subscriber.close() also resets it while `run` is pending, so a peer that never
 	// answers cannot hold it open, and a stream that opens after the close is reset at once.
 	async #exchange<T>(options: OpenOptions, run: (stream: Stream) => Promise<T>): Promise<T> {
+		if (this.#goingAway()) throw this.#goingAwayError();
 		const closed = this.#closed.signal;
 		closed.throwIfAborted();
 		const stream = await Stream.open(this.#quic, options);
@@ -770,6 +830,8 @@ export class Subscriber {
 		if (entry && !entry.group.isClosed) {
 			consumer = entry.group.mirror();
 		} else {
+			// A fetch already in flight keeps its stream. A new one does not open.
+			if (this.#goingAway()) throw this.#goingAwayError();
 			const group = new netGroup.Producer(sequence);
 			consumer = group.mirror();
 			entry = {
@@ -1207,6 +1269,10 @@ export class Subscriber {
 			const probe = await this.#peerProbeLevel(this.#peerSetup);
 			if (probe < ProbeLevel.Report) return;
 		}
+
+		// Probe is best-effort telemetry. After GOAWAY there is nothing to open and nothing
+		// to fail: the session keeps serving what it already has.
+		if (this.#goingAway()) return;
 
 		// Probe is best-effort: any failure (stream reset by peer, missing peer support,
 		// transport hiccup) MUST NOT tear down the connection. On error, drop the
