@@ -15,7 +15,7 @@ import { RequestError, RequestOk } from "./request.ts";
 import { Subscribe, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
-import { ALPN, Version } from "./version.ts";
+import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 const VERSION = Version.DRAFT_19;
 
@@ -1040,6 +1040,191 @@ test("every object in a chunk reaches the reader before it wakes", async () => {
 
 	await handled;
 	track.close();
+});
+
+/** One macrotask, which drains every microtask already queued. */
+function settle(): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** SUBSCRIBE_OK, then one group on {@link ALIAS}, read back from `viewer`. */
+async function answerAndRead(
+	subscriber: Subscriber,
+	peer: Stream,
+	requestId: bigint,
+	viewer: track.Subscriber,
+	version: IetfVersion = VERSION,
+): Promise<void> {
+	await peer.writer.u53(SubscribeOk.id);
+	await new SubscribeOk({ requestId, trackAlias: ALIAS }).encode(peer.writer, version);
+	await viewer.info();
+	await subscriber.handleGroup(
+		new GroupMessage({
+			trackAlias: ALIAS,
+			groupId: 0,
+			subGroupId: 0,
+			publisherPriority: 0,
+			flags: groupFlags(true),
+		}),
+		new Reader(undefined, encodeObjects([0]), VERSION),
+	);
+	const ordered = viewer.ordered();
+	expect((await ordered.nextGroup())?.sequence).toBe(0);
+	ordered.close();
+}
+
+// The idle check resolves through `race`, and rejecting awaits the session cause, so a
+// viewer can attach in between. Every delay across that gap keeps a live track: the original
+// subscribe when demand returns before the close commits, and a new one after.
+test("a viewer returning during setup keeps the live track", async () => {
+	let kept = 0;
+	let reopened = 0;
+
+	for (let delay = 0; delay <= 16; delay++) {
+		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const session = new NativeSession(pair.server, VERSION, true);
+		const subscriber = new Subscriber({ session });
+		const abort = spyOn(Stream.prototype, "abort");
+		const broadcast = subscriber.consume(Path.from("room"));
+		try {
+			const first = broadcast.track("video").subscribe();
+			const peer = await nextStream(pair.client);
+			if (!peer) throw new Error("missing SUBSCRIBE stream");
+			expect(await peer.reader.u53()).toBe(Subscribe.id);
+			const request = await Subscribe.decode(peer.reader, VERSION);
+			// Parked on SUBSCRIBE_OK, with the request already on the wire.
+			await settle();
+
+			first.close();
+			for (let i = 0; i < delay; i++) await Promise.resolve();
+			const returned = broadcast.track("video").subscribe();
+			await settle();
+
+			const closed = returned.closed.peek();
+			if (closed !== undefined) {
+				const detail = closed instanceof Error ? closed.message : String(closed);
+				throw new Error(`delay ${delay} closed the returning viewer: ${detail}`);
+			}
+
+			const opened = pair.server.sendStreams.bidi.length;
+			if (opened === 1) {
+				expect(abort).not.toHaveBeenCalled();
+				await answerAndRead(subscriber, peer, request.requestId, returned);
+				kept++;
+			} else {
+				expect(opened, `delay ${delay}`).toBe(2);
+				expect(abort, `delay ${delay}`).toHaveBeenCalledTimes(1);
+				const second = await nextStream(pair.client);
+				if (!second) throw new Error(`delay ${delay} cancelled the subscribe without opening another`);
+				expect(await second.reader.u53()).toBe(Subscribe.id);
+				const again = await Subscribe.decode(second.reader, VERSION);
+				await answerAndRead(subscriber, second, again.requestId, returned);
+				reopened++;
+			}
+			returned.close();
+		} finally {
+			abort.mockRestore();
+			broadcast.close();
+			session.close();
+		}
+	}
+
+	expect(kept).toBeGreaterThan(0);
+	expect(reopened).toBeGreaterThan(0);
+});
+
+// The SUBSCRIBE is already on the wire and nobody comes back. Cancelling is owed once,
+// and a SUBSCRIBE_OK that arrives afterwards must not leave the alias owned: the next
+// subscription of this track is what takes it.
+test("abandoning before SUBSCRIBE_OK cancels once and a late ok releases the alias", async () => {
+	const version = Version.DRAFT_16;
+	const pair = createMockTransportPair(ALPN.DRAFT_16);
+	const control = await Stream.open(pair.server, { version });
+	const session = new ControlStreamAdapter(pair.server, control, version, 100n, true);
+	void session.run().catch(() => void 0);
+	const subscriber = new Subscriber({ session });
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("missing control stream");
+	peer.reader.version = version;
+	peer.writer.version = version;
+
+	const broadcast = subscriber.consume(Path.from("room"));
+	const first = broadcast.track("video").subscribe();
+	expect(await peer.reader.u53()).toBe(Subscribe.id);
+	const request = await Subscribe.decode(peer.reader, version);
+	await settle();
+	first.close();
+
+	expect(await peer.reader.u53()).toBe(Unsubscribe.id);
+	const cancel = await Unsubscribe.decode(peer.reader, version);
+	expect(cancel.requestId).toBe(request.requestId);
+
+	await peer.writer.u53(SubscribeOk.id);
+	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, version);
+	await settle();
+
+	const again = broadcast.track("video").subscribe();
+	expect(await peer.reader.u53()).toBe(Subscribe.id);
+	const second = await Subscribe.decode(peer.reader, version);
+	expect(second.requestId).not.toBe(request.requestId);
+	await answerAndRead(subscriber, peer, second.requestId, again, version);
+
+	again.close();
+	expect(await peer.reader.u53()).toBe(Unsubscribe.id);
+	broadcast.close();
+	session.close();
+});
+
+// Cleanup leaves a SUBSCRIBE that is still being written alone, then cancels once that
+// write lands. Tearing the stream down first would drop the request the peer did receive.
+test("a subscribe abandoned mid-write is cancelled once the write lands", async () => {
+	const version = Version.DRAFT_16;
+	const pair = createMockTransportPair(ALPN.DRAFT_16);
+	const control = await Stream.open(pair.server, { version });
+	const session = new ControlStreamAdapter(pair.server, control, version, 100n, true);
+	void session.run().catch(() => void 0);
+	const subscriber = new Subscriber({ session });
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("missing control stream");
+	peer.reader.version = version;
+	peer.writer.version = version;
+
+	const started = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	const open = session.openBi.bind(session);
+	spyOn(session, "openBi").mockImplementationOnce(() => {
+		const stream = open();
+		const write = stream.writer.u53.bind(stream.writer);
+		spyOn(stream.writer, "u53").mockImplementation(async (value) => {
+			if (value === Subscribe.id) {
+				started.resolve();
+				await release.promise;
+			}
+			await write(value);
+		});
+		return stream;
+	});
+
+	const broadcast = subscriber.consume(Path.from("room"));
+	const first = broadcast.track("video").subscribe();
+	await started.promise;
+	first.close();
+	await settle();
+	release.resolve();
+
+	expect(await peer.reader.u53()).toBe(Subscribe.id);
+	const request = await Subscribe.decode(peer.reader, version);
+	expect(await peer.reader.u53()).toBe(Unsubscribe.id);
+	const cancel = await Unsubscribe.decode(peer.reader, version);
+	expect(cancel.requestId).toBe(request.requestId);
+
+	const again = broadcast.track("video").subscribe();
+	expect(await peer.reader.u53()).toBe(Subscribe.id);
+	const second = await Subscribe.decode(peer.reader, version);
+	await answerAndRead(subscriber, peer, second.requestId, again, version);
+	again.close();
+	broadcast.close();
+	session.close();
 });
 
 // Hold the actual legacy cancellation write so returning demand lands in the teardown gap.

@@ -550,11 +550,10 @@ export class Subscriber {
 
 		// The publisher can be serving before it answers, so waiting only on the response
 		// would miss the local side going away and leave it serving a track nobody reads.
-		// Demand returning before we commit is not abandonment, matching the serving loop.
+		// An info-only lookup attaches no subscriber yet still waits on SUBSCRIBE_OK for the
+		// track info, so only demand that arrived and then left is abandonment.
 		const waitAbandoned = async (): Promise<null> => {
 			const demand = producer.demand();
-			// An info-only lookup attaches no subscriber yet still waits on SUBSCRIBE_OK for
-			// the track info, so only demand that arrived and then left is abandonment.
 			while (!demand.used.peek() && demand.closed.peek() === undefined) {
 				await Signal.race(demand.used, demand.closed);
 			}
@@ -564,23 +563,37 @@ export class Subscriber {
 			}
 		};
 
+		// One attempt. A viewer who returns before the close commits keeps this stream and
+		// whatever is left of its timeout, instead of opening another subscribe.
+		const pending = withTimeout(
+			setup,
+			SUBSCRIBE_OK_TIMEOUT_MS,
+			`subscribe timed out after ${SUBSCRIBE_OK_TIMEOUT_MS}ms waiting for SUBSCRIBE_OK (browser stream limit reached?)`,
+		);
+
 		let stream: Stream;
 		let trackAlias: bigint;
 		try {
-			const result = await race([
-				withTimeout(
-					setup,
-					SUBSCRIBE_OK_TIMEOUT_MS,
-					`subscribe timed out after ${SUBSCRIBE_OK_TIMEOUT_MS}ms waiting for SUBSCRIBE_OK (browser stream limit reached?)`,
-				),
-				waitAbandoned(),
-			]);
+			for (;;) {
+				const result = await race([pending, waitAbandoned()]);
+				if (result !== null) {
+					stream = result.stream;
+					trackAlias = result.alias;
+					console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.name}`);
+					break;
+				}
 
-			if (result === null) throw new Error("subscribe abandoned before it was accepted");
+				// waitAbandoned observed an idle track, then `race` delivered it a turn later.
+				// Recheck and commit in this turn, matching the serving loop: the catch awaits
+				// the session cause before it rejects, and a viewer who attached in that gap
+				// would then be closed with the abandonment.
+				const demand = producer.demand();
+				if (demand.closed.peek() === undefined && demand.used.peek()) continue;
 
-			stream = result.stream;
-			trackAlias = result.alias;
-			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.name}`);
+				const abandoned = new Error("subscribe abandoned before it was accepted");
+				request.reject(abandoned);
+				throw abandoned;
+			}
 		} catch (err) {
 			// A control request that timed out is not late content, so it carries its own code.
 			const e = err instanceof TimeoutError ? controlTimeout(err) : await sessionCause(this.#quic, err);
