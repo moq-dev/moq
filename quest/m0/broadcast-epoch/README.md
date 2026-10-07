@@ -10,7 +10,10 @@ failover seamless, and a restart is a new epoch at the same path: the newest
 epoch wins new requests and announce consumers see a `Restart` (or an end
 and start on older versions), so viewers re-request rather than stall on a
 replaced broadcast. Subscriptions already on the old one stay until the
-application drops them or its route goes.
+application drops them or its route goes. Recovery within a round trip needs
+an epoch: without one, a restarted publisher that loses the routing hash to
+its lingering old session is reached only once that session closes and its
+route is withdrawn.
 
 The epoch rides moq-lite 07 announcements and requests as metadata, so the
 path never changes and every older version and moq-transport keeps working:
@@ -68,8 +71,8 @@ the IETF resume point and lite-05/06 `widen_frame_bounds` still serve any
 mid-group start: a public `Subscription::with_start` or a downstream Frame
 Start a relay forwards upstream.
 
-This README owns an end-to-end relay test: republish a name while the old
-publisher's session stays open. A lite-07 viewer and a lite-06 or IETF viewer
+This README owns an end-to-end relay test: republish a name under a new
+epoch while the old publisher's session stays open. A lite-07 viewer and a lite-06 or IETF viewer
 that follow the announce `Restart` (or END then START) both reach the new
 epoch within one RTT-scale bound rather than the idle timeout, and killing the
 newest epoch falls back to a still-live older one.

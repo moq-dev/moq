@@ -45,6 +45,13 @@ Decided in planning (2026-10-07, from #4970's review):
   an equal-cost pool (a transcoder worker joining, a relay peer
   reconnecting), restarts the paths it moves. Two routes with the same epoch
   and identical metadata are a seamless failover and stay invisible.
+- **Equal-cost restarts keep the hash (2026-10-07).** The rendezvous-hash
+  tiebreak stays, with no newest-wins: a transcode pool's replicas advertise
+  the same path, and newest-wins would churn every viewer on each worker
+  restart. So recovery within a round trip needs an epoch. Without one, a
+  restarted publisher that loses the hash to its lingering old session wins,
+  and sends `Restart`, only once that session closes (idle timeout) and its
+  route is withdrawn.
 - **Sticky subscriptions (reverses the 2026-10-06 hard switch).** A newer
   epoch no longer ends subscriptions in flight with `Unroutable`
   (`Pick::Superseded`, `front.rs` `supersede`). The front keeps serving its
@@ -99,7 +106,11 @@ announces, while the incumbent's subscriptions continue) and
 `identical_reannounce_is_invisible` (`origin.rs`) for routes without an
 epoch. `route_dies_without_an_epoch` keeps its expectation, but its
 `standby()` prices `B` strictly worse so it doesn't win before the trigger,
-and a re-request then lands on `B`. Run `just drafts check` and
+and a re-request then lands on `B`. Add a regression case where an
+epochless replacement at equal cost loses the hash to the lingering old
+route: no `Restart` and new requests stay on the old route until it is
+withdrawn, then `Restart` and a re-request lands on the replacement. Run
+`just drafts check` and
 `just test interop --all`.
 
 Docs: update `doc/concept/moq-lite.md` (publisher epochs) and
