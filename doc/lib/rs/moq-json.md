@@ -32,6 +32,12 @@ A value is stamped when written, unless it carries its capture time:
 `moq_net::Timed::from(&value).at(captured)`. Writes return the encoded frame
 size, and an unchanged snapshot `update` returns `None`.
 
+A stream rides one group, so the whole log shares moq-net's group budget:
+32 MiB of payload and 8192 records. An `append` that might not fit returns
+`moq_net::Error::GroupTooLarge` before it is encoded and leaves the log intact,
+compressed or not. Once the budget is spent every `append` is refused; start a
+new track to keep going.
+
 A snapshot producer also edits in place, so independent owners each touch only
 their own keys instead of clobbering one another. `mutate(|value| ...)` runs a
 closure and publishes the result, matching `Producer.mutate` in TypeScript;
