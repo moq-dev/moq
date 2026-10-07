@@ -10,7 +10,7 @@ use std::{
 	time::Duration,
 };
 
-use web_transport_trait::Stats;
+use crate::transport::Stats;
 
 use crate::{
 	Error, Hop, Hops,
@@ -67,7 +67,7 @@ struct Shared<S: crate::transport::poll::Session> {
 }
 
 /// Largest millisecond duration every implementation can carry losslessly.
-const MAX_SAFE_AGE_MS: u64 = (1_u64 << 53) - 1;
+const MAX_SAFE_DELAY_MS: u64 = (1_u64 << 53) - 1;
 
 /// The budget to serve a peer with, given what its wire could tell us.
 ///
@@ -76,23 +76,23 @@ const MAX_SAFE_AGE_MS: u64 = (1_u64 << 53) - 1;
 /// as real time would discard backlog a legacy subscriber never declined, so fall
 /// back to a window wide enough not to drop and leave enforcement to the receiver,
 /// exactly as the IETF path does for the same reason.
-fn serving_max_age(version: Version, requested: Duration) -> Duration {
-	match version.carries_max_age() {
+fn serving_max_delay(version: Version, requested: Duration) -> Duration {
+	match version.carries_max_delay() {
 		true => requested,
-		false => Duration::from_millis(MAX_SAFE_AGE_MS),
+		false => Duration::from_millis(MAX_SAFE_DELAY_MS),
 	}
 }
 
 /// Position a subscription's read cursor for the wire serving it.
 ///
 /// On lite-06 there is nothing to do: `Consumer::subscribe` resolves the cursor from the
-/// subscription itself, at the oldest group its own Max Age still considers fresh, floored
+/// subscription itself, at the oldest group its own max delay still considers fresh, floored
 /// at the group it named.
 ///
 /// Pre-06 wires are the exception: their drafts define an absent `Group Start` as the
 /// latest group, so say so explicitly rather than letting the budget reach back. Lite03-05
-/// carry a Max Age, but there it is a staleness tolerance only; Lite01/02 additionally get
-/// an unbounded budget so nothing is dropped under them (see [`serving_max_age`]), which
+/// carry a `Subscriber Max Age`, but there it is a staleness tolerance only; Lite01/02 additionally get
+/// an unbounded budget so nothing is dropped under them (see [`serving_max_delay`]), which
 /// must not read as a request to replay the whole cache on join.
 ///
 /// `latest` is the newest group when the SUBSCRIBE arrived, not once the subscription
@@ -1250,7 +1250,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 	fn start(shared: &Shared<S>, msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
 		let subscription = crate::track::Subscription {
 			priority: msg.priority,
-			max_age: serving_max_age(shared.version, msg.max_age),
+			max_delay: serving_max_delay(shared.version, msg.max_delay),
 			..Bounds::from(&msg).positions()
 		};
 
@@ -1317,7 +1317,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 					if !shared.version.has_track_stream() {
 						let info = lite::SubscribeOk {
 							priority: msg.priority,
-							max_age: Duration::ZERO,
+							max_delay: Duration::ZERO,
 							start_group: None,
 							end_group: None,
 						};
@@ -1560,7 +1560,7 @@ mod test {
 		// What run_subscribe hands the model for a peer that sent no budget at all.
 		let served = |version| {
 			producer.subscribe(
-				track::Subscription::default().with_max_age(serving_max_age(version, std::time::Duration::ZERO)),
+				track::Subscription::default().with_max_delay(serving_max_delay(version, std::time::Duration::ZERO)),
 			)
 		};
 		let drain = |subscriber: &mut track::Subscriber| {
@@ -1585,13 +1585,13 @@ mod test {
 		// Lite03-05 declare a budget, but their drafts define it as a staleness tolerance
 		// and an absent start as the latest group, so they are pinned all the same.
 		let mut tolerant =
-			producer.subscribe(track::Subscription::default().with_max_age(std::time::Duration::from_secs(5)));
+			producer.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(5)));
 		position_cursor(&mut tolerant, Version::Lite05, None, producer.latest());
 		assert_eq!(drain(&mut tolerant), vec![2]);
 
 		// On lite-06 the declared budget is what resolves the start, so it stands.
 		let mut declared =
-			producer.subscribe(track::Subscription::default().with_max_age(std::time::Duration::from_secs(5)));
+			producer.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(5)));
 		position_cursor(&mut declared, Version::Lite06, None, producer.latest());
 		assert_eq!(drain(&mut declared), vec![0, 1, 2]);
 	}
@@ -1698,7 +1698,7 @@ mod test {
 		use futures::FutureExt;
 
 		let mut producer = track_producer("test");
-		let mut subscriber = producer.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(5)));
+		let mut subscriber = producer.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(5)));
 
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
 		match recv_next(&mut subscriber, false, false).await.unwrap() {
@@ -1714,7 +1714,7 @@ mod test {
 			None => panic!("the late-arriving group was skipped"),
 		}
 
-		// Staleness is the max age window's job, not arrival order's: the track
+		// Staleness is the max delay window's job, not arrival order's: the track
 		// still finishes normally afterward.
 		producer.finish_at(3).unwrap();
 		match recv_next(&mut subscriber, false, false).await.unwrap() {
@@ -2416,7 +2416,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		let bounds = Bounds::from(&upd);
 		let _ = self.track.update(crate::track::Subscription {
 			priority: upd.priority,
-			max_age: serving_max_age(self.ctx.version, upd.max_age),
+			max_delay: serving_max_delay(self.ctx.version, upd.max_delay),
 			..bounds.positions()
 		});
 		// An explicit start moves the read cursor. Lite-06+ encodes an absent
@@ -3084,7 +3084,7 @@ mod serve_group_test {
 		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
 	}
 
-	/// A subscription group keeps checking the max age while a transport write is
+	/// A subscription group keeps checking the max delay while a transport write is
 	/// flow-control blocked, so a stalled send cannot pin the stream indefinitely.
 	#[moq_net_sim::test]
 	async fn blocked_transport_write_expires_with_the_group() {
@@ -3189,7 +3189,7 @@ mod serve_group_test {
 		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
 	}
 
-	/// A subscription group keeps checking the max age while transport stream credit is
+	/// A subscription group keeps checking the max delay while transport stream credit is
 	/// exhausted, so returning credit is reserved for content that is still live.
 	#[moq_net_sim::test]
 	async fn blocked_transport_open_expires_with_the_group() {
@@ -3231,7 +3231,7 @@ mod serve_group_test {
 		assert!(matches!(serve.await, Err(Error::Old)));
 	}
 
-	/// Lite01/02 have no max age field, so a SUBSCRIBE from one decodes as
+	/// Lite01/02 have no max delay field, so a SUBSCRIBE from one decodes as
 	/// `Duration::ZERO`. Serving that as a real-time budget would hold every legacy
 	/// peer to the live edge and discard backlog it never declined, so those versions
 	/// get a non-dropping window and leave enforcement to the receiver.
@@ -3241,17 +3241,17 @@ mod serve_group_test {
 	#[test]
 	fn a_version_without_the_field_serves_a_non_dropping_budget() {
 		for version in [Version::Lite01, Version::Lite02] {
-			let max_age = serving_max_age(version, Duration::ZERO);
+			let max_delay = serving_max_delay(version, Duration::ZERO);
 			assert!(
-				max_age >= Duration::from_secs(86_400),
-				"{version:?} must not be served as real time: {max_age:?}"
+				max_delay >= Duration::from_secs(86_400),
+				"{version:?} must not be served as real time: {max_delay:?}"
 			);
 		}
 
 		// A version that does carry it is taken at its word, zero included.
-		assert_eq!(serving_max_age(Version::Lite05, Duration::ZERO), Duration::ZERO);
+		assert_eq!(serving_max_delay(Version::Lite05, Duration::ZERO), Duration::ZERO);
 		assert_eq!(
-			serving_max_age(Version::Lite05, Duration::from_secs(3)),
+			serving_max_delay(Version::Lite05, Duration::from_secs(3)),
 			Duration::from_secs(3)
 		);
 	}
@@ -3455,7 +3455,7 @@ mod serve_group_test {
 			track.request_start(Some(0)).unwrap();
 			let subscription = track::Subscription::default()
 				.with_start(track::Position::group(start_group))
-				.with_max_age(Duration::from_secs(30));
+				.with_max_delay(Duration::from_secs(30));
 			let subscriber = track.subscribe(subscription);
 
 			let session = ScriptedSession::new(Vec::new());
@@ -3523,7 +3523,7 @@ mod serve_group_test {
 
 		relay.run.update(lite::SubscribeUpdate {
 			priority: 0,
-			max_age: Duration::from_secs(30),
+			max_delay: Duration::from_secs(30),
 			start_group: None,
 			end_group: None,
 			start_frame: 0,
@@ -3549,7 +3549,7 @@ mod serve_group_test {
 
 		relay.run.update(lite::SubscribeUpdate {
 			priority: 0,
-			max_age: Duration::from_secs(30),
+			max_delay: Duration::from_secs(30),
 			start_group: None,
 			end_group: None,
 			start_frame: 0,
@@ -3572,7 +3572,7 @@ mod serve_group_test {
 		// The subscriber moves its start past the held group before the source resolves.
 		let update = lite::SubscribeUpdate {
 			priority: 0,
-			max_age: Duration::ZERO,
+			max_delay: Duration::ZERO,
 			start_group: Some(7),
 			end_group: None,
 			start_frame: 0,
@@ -4068,7 +4068,7 @@ mod tests {
 			.unwrap();
 		let mut session = ScriptedSession::new(script);
 		let (send, recv) = futures::future::poll_fn(|cx| {
-			<ScriptedSession as web_transport_trait::poll::Session>::poll_open_bi(&mut session, cx)
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
 		})
 		.await
 		.unwrap();
@@ -4139,7 +4139,7 @@ mod tests {
 						broadcast: broadcast.clone(),
 						track: "video".into(),
 						priority: 0,
-						max_age: Duration::ZERO,
+						max_delay: Duration::ZERO,
 						start_group: None,
 						end_group: None,
 						start_frame: 0,
@@ -4192,7 +4192,7 @@ mod tests {
 			broadcast: crate::Path::new("room"),
 			track: "video".into(),
 			priority: 1,
-			max_age: Duration::ZERO,
+			max_delay: Duration::ZERO,
 			start_group: None,
 			end_group: None,
 			start_frame: 0,
@@ -4202,7 +4202,7 @@ mod tests {
 		.unwrap();
 		let mut session = ScriptedSession::new(script);
 		let (send, recv) = futures::future::poll_fn(|cx| {
-			<ScriptedSession as web_transport_trait::poll::Session>::poll_open_bi(&mut session, cx)
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
 		})
 		.await
 		.unwrap();
@@ -4215,7 +4215,7 @@ mod tests {
 
 		let update = lite::SubscribeUpdate {
 			priority: 7,
-			max_age: Duration::ZERO,
+			max_delay: Duration::ZERO,
 			start_group: None,
 			end_group: None,
 			start_frame: 0,

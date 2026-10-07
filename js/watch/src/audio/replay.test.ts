@@ -63,7 +63,7 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 		).toBe(0);
 	});
 
-	it("holds newer groups behind a missing one until the max age gives up on it", async () => {
+	it("holds newer groups behind a missing one until the max delay gives up on it", async () => {
 		const trace = paced(10, () => 30).filter((arrival) => arrival.group !== 250);
 		// The consumer delivers in group order, so the ring runs dry for longer than the missing frame
 		// while the groups behind it wait. Writing arrivals straight into the ring plays straight through.
