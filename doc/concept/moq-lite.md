@@ -100,8 +100,7 @@ through, which is how forwarding loops are caught, and a cost, which is how a
 subscriber picks among several routes to the same broadcast. A route may also
 carry a [publisher epoch](#publisher-epochs), which says which routes serve the
 same bytes. A hop of 0 is
-the anonymous mark and travels the chain unchanged; when it is the first hop, a
-relay puts a random ID, fresh per connection, in front of it. A route that passed through an
+the anonymous mark and travels the chain unchanged. A route that passed through an
 anonymous hop at any depth ranks below every fully identified route, whatever
 the costs say; among anonymous routes, cost keeps ordering.
 

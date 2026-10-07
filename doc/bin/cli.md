@@ -336,7 +336,7 @@ zero-based `frame` and padded standard base64.
 
 `<track>` is the literal track name. `/fetch` splits its path on the last `/`,
 so the two agree only for names without one. Fetch only dials `--connect`, and
-refuses any listener, cluster, auth, or `--hop` flag. It gives up after 30
+refuses any listener, cluster, auth, or `--epoch` flag. It gives up after 30
 seconds, as `/fetch` does, and exits non-zero when the broadcast or group is not
 found (before writing anything), the relay refuses, or the deadline passes.
 
@@ -389,11 +389,20 @@ moq --connect https://relay.example.com/anon \
 
 ## Redundant publishers
 
-Two publishers of the same broadcast name are interchangeable sources:
+Each run announces a fresh epoch, so a restarted publisher replaces the old
+broadcast instead of resuming into it. Two publishers that pass the same
+`--epoch` (a UUIDv7, such as `uuidgen -7` prints) are interchangeable sources:
 relays hold both routes and fail over between them mid-group. They must
-produce identical tracks with aligned groups. A restarted encoder is the same
-broadcast too, so one whose groups restart from 0 must publish under a new
-name, or viewers wait for its sequence to catch up.
+produce identical tracks with aligned groups.
+
+```bash
+EPOCH=$(uuidgen -7)
+# On each of the two hosts:
+moq --connect https://relay.example.com/anon --broadcast event.hang --epoch "$EPOCH" import ts < feed.ts
+```
+
+`--epoch` applies to the sources announced once per run. The RTMP, SRT, and
+WHIP ingests and `import ts --program all` announce their own, so they refuse it.
 
 ## Cluster
 
