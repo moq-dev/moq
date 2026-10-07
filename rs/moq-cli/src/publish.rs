@@ -399,9 +399,7 @@ impl Publish {
 		let Some(broadcast) = &self.broadcast else {
 			return Ok(());
 		};
-		broadcast
-			.announce(moq_tokio::moq_net::origin::Route::default().with_epoch(moq_tokio::moq_net::Epoch::mint()))
-			.context("failed to announce broadcast")
+		crate::moq::announce(broadcast).context("failed to announce broadcast")
 	}
 
 	/// Drive the source until stdin EOF (or the capture devices stop).

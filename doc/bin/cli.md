@@ -226,7 +226,9 @@ the newest cached group, including when a rendition is reopened, so playback
 does not replay the retained backlog. A publisher that retires the rendition
 being played ends that track and the role picks a replacement. A retired audio
 rendition plays out what the speaker holds while its replacement fills, so the
-switch does not cost a delay of silence. Playback is
+switch does not cost a delay of silence. A restarted publisher's broadcast
+replaces the one playing, and playback starts over on it with a fresh catalog
+and decoders; the log names each broadcast's epoch. Playback is
 behind the `play` feature, since it pulls in windowing and audio-device
 dependencies:
 
@@ -391,9 +393,12 @@ moq --connect https://relay.example.com/anon \
 
 Two publishers of the same broadcast name are interchangeable sources:
 relays hold both routes and fail over between them mid-group. They must
-produce identical tracks with aligned groups. A restarted encoder is the same
-broadcast too, so one whose groups restart from 0 must publish under a new
-name, or viewers wait for its sequence to catch up.
+produce identical tracks with aligned groups. Each run announces a fresh
+[epoch](/concept/moq-lite#publisher-epochs), logged at startup. Over
+moq-lite 07 (opt-in while its wire is in progress) the epoch reaches the relay,
+so a restarted publisher replaces the old broadcast and viewers switch to it at
+once. Older versions carry no epoch, so viewers stay on the old route until it
+goes.
 
 ## Cluster
 

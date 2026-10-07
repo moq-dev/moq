@@ -44,6 +44,11 @@ Video holds its last picture while paused, out of view, or waiting for a
 resumed rendition's first frame. Its reported timestamp stays with that picture.
 Going offline or closing the player clears it.
 
+A restarted publisher announces a new [epoch](/concept/moq-lite#publisher-epochs)
+at the same name, and the player follows it: a fresh catalog, and video, audio,
+and the clock start over on its timeline instead of waiting for it to catch up
+to the old one.
+
 The overlay adds play/pause, volume, fullscreen, a quality selector, a
 buffering indicator, an unsupported-codec warning, and a stats panel.
 `<moq-watch-support>` shows what the browser can play.

@@ -3,7 +3,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
-import { Signal } from "@moq/signals";
+import { type Effect, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { Sync } from "../sync";
 import { Decoder } from "./decoder";
@@ -30,7 +30,7 @@ function closedConsumer(): Moq.Broadcast.Consumer {
 
 function watchBroadcast(catalog: Signal<Catalog.Root>): Broadcast {
 	return {
-		out: { catalog },
+		out: { catalog, active: new Signal(undefined) },
 		relativeBroadcast: () => closedConsumer(),
 	} as unknown as Broadcast;
 }
@@ -213,12 +213,12 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[]) {
 	const video = config({ codedWidth: 16, codedHeight: 16, description: "01640028ffe100046764002801000268ee" });
 	if (kind === "cmaf")
 		video.container = { kind, init: Buffer.from(Container.Cmaf.createVideoInitSegment(video)).toString("base64") };
-	const producer = new Moq.Broadcast.Producer();
-	const consumer = producer.consume();
+	let producer = new Moq.Broadcast.Producer();
+	const active = new Signal<Moq.Broadcast.Consumer>(producer.consume());
 	const catalog = new Signal<Catalog.Root>({ video: { renditions: { video } } });
 	const broadcast = new Signal<Broadcast | undefined>({
-		out: { catalog },
-		relativeBroadcast: () => consumer,
+		out: { catalog, active },
+		relativeBroadcast: (effect: Effect) => effect.get(active),
 	} as unknown as Broadcast);
 	const source = new Source({ broadcast, supported: async () => true });
 	const sync = new Sync({ delay: "instant" });
@@ -229,11 +229,19 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[]) {
 		decoder,
 		enabled,
 		submitted,
+		sync,
+		// A restarted publisher takes the name: another instance of the same broadcast.
+		republish() {
+			active.peek().close();
+			producer.close();
+			producer = new Moq.Broadcast.Producer();
+			active.set(producer.consume());
+		},
 		close() {
 			decoder.close();
 			source.close();
 			sync.close();
-			consumer.close();
+			active.peek().close();
 			producer.close();
 			next.mockRestore();
 			for (const [name, original] of [
@@ -260,6 +268,25 @@ it("promoting from no active track holds its picture and timestamp until a frame
 		expect(playback.decoder.out.frame.peek()).toBe(held);
 		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(1));
 		expect((held as unknown as Picture).closed).toBe(false);
+	} finally {
+		playback.close();
+	}
+});
+
+it("switches to a republished broadcast at once, its timeline starting over", async () => {
+	const reads = [sample(10, 10_000_000)];
+	const playback = await guardedPlayback("legacy", reads);
+	try {
+		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(10_000));
+		const reset = spyOn(playback.sync, "reset");
+
+		reads.push(sample(0, 1000));
+		playback.republish();
+		await microtasks();
+
+		// Waiting to catch up to the old picture would hold it until the new timeline passed 10s.
+		expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(1));
+		expect(reset).toHaveBeenCalledTimes(1);
 	} finally {
 		playback.close();
 	}

@@ -14,6 +14,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import { base64ToBytes } from "../base64";
+import type { Broadcast } from "../broadcast";
 import { nextMedia, subscribeMedia } from "../media";
 
 import type { Sync } from "../sync";
@@ -98,6 +99,9 @@ export class Decoder {
 	#pending = new Signal<{ track: string; catalog: Getter<Catalog.Root | undefined> } | undefined>(undefined);
 	// The active track's arrival estimate from its container consumer.
 	#spread = new Signal<Time.Milli | undefined>(undefined);
+	// The catalog broadcast the last rendition subscribed under, and its instance. Every handle to
+	// one instance shares `closed`, so it identifies the instance where the handle itself does not.
+	#instance?: { broadcast: Broadcast; closed: unknown };
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
 
 	#signals = new Effect();
@@ -185,6 +189,15 @@ export class Decoder {
 			return;
 		}
 
+		// A republish at the same name is another instance, whose timeline starts over. Waiting for
+		// it to catch up to the old picture would freeze video until it passed the old timestamps,
+		// so switch at once and re-anchor the clock. A rendition switch within one instance, or a
+		// switch to another name, still waits.
+		const closed = effect.get(broadcast.out.active)?.closed;
+		const republished = this.#instance?.broadcast === broadcast && this.#instance.closed !== closed;
+		this.#instance = { broadcast, closed };
+		if (republished) this.sync.reset();
+
 		// Start a new pending effect.
 		let pending: DecoderTrack | undefined = new DecoderTrack({
 			sync: this.sync,
@@ -202,7 +215,7 @@ export class Decoder {
 			if (!pending) return;
 
 			const current = effect.get(this.#active);
-			if (current) {
+			if (current && !republished) {
 				// A zero timestamp is a rendered frame, not a missing one.
 				const pendingTimestamp = effect.get(pending.timestamp);
 				if (pendingTimestamp === undefined) return;

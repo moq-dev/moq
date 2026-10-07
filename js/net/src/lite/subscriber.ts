@@ -458,7 +458,7 @@ export class Subscriber {
 				advertised.set(path, { live: true, route, captures });
 				if (epoch) this.#epochs.set(path, epoch);
 
-				console.debug(`announced: broadcast=${path} active=true`);
+				console.debug(`announced: broadcast=${path} active=true epoch=${epoch}`);
 				announced.append({ prefix: path, captures, kind: "start", route });
 			}
 

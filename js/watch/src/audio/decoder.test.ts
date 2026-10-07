@@ -362,12 +362,15 @@ describe("Decoder across a rendition's absence", () => {
 
 			playback.remove();
 			await microtasks();
+			const reanchor = spyOn(Sync.prototype, "reset");
 			playback.replace();
 			playback.restore();
 			await microtasks();
 			await playback.play(12);
 
-			// The ring re-anchors on the new broadcast rather than discarding it as already played.
+			// The ring and the shared clock re-anchor on the new broadcast rather than discarding it as
+			// already played.
+			expect(reanchor).toHaveBeenCalledTimes(1);
 			expect(drain(ring)).toBeGreaterThan(0);
 			expect(contexts).toHaveLength(1);
 			expect(playback.rings()).toEqual([ring]);

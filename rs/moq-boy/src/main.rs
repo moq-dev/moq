@@ -236,9 +236,11 @@ async fn run(config: &Config) -> Result<()> {
 	let mut broadcast = publish_origin
 		.create_broadcast(&broadcast_path)
 		.context("failed to create broadcast")?;
+	let epoch = moq_net::Epoch::mint();
 	broadcast
-		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
 		.context("failed to announce broadcast")?;
+	tracing::info!(broadcast = %broadcast_path, %epoch, "announced");
 
 	// Consume origin: viewer broadcasts under the viewer prefix.
 	// JS publishes viewer feedback at "{viewer_prefix}/{name}/{viewerId}"

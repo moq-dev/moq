@@ -2,7 +2,8 @@
 //!
 //! The dial and accept loops live in `moq-tokio` (`Client::publish`/`consume`
 //! and `Server::serve_publish`/`serve_consume`); this module carries the systemd
-//! readiness notification used by every endpoint plus the MoQ side of an import.
+//! readiness notification used by every endpoint, the MoQ side of an import, and
+//! how a publisher announces itself.
 
 use hang::moq_net;
 
@@ -34,4 +35,13 @@ pub struct ImportTarget {
 pub fn notify_ready() {
 	#[cfg(unix)]
 	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
+}
+
+/// Advertise `broadcast` as a fresh publisher instance, so a restart replaces the
+/// previous run's broadcast rather than resuming into it, and log the epoch.
+pub fn announce(broadcast: &moq_net::broadcast::Producer) -> Result<(), moq_net::Error> {
+	let epoch = moq_net::Epoch::mint();
+	broadcast.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))?;
+	tracing::info!(broadcast = %broadcast.info().path, %epoch, "announced");
+	Ok(())
 }

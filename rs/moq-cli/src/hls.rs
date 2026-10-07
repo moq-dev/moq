@@ -59,9 +59,7 @@ pub async fn import(target: ImportTarget, playlist: String) -> anyhow::Result<()
 		.with_max_age(max_age)
 		.with_bandwidth(bandwidth);
 	let catalog = moq_mux::catalog::Producer::new(&mut producer, config)?;
-	producer
-		.announce(moq_tokio::moq_net::origin::Route::default().with_epoch(moq_tokio::moq_net::Epoch::mint()))
-		.context("failed to announce broadcast")?;
+	crate::moq::announce(&producer).context("failed to announce broadcast")?;
 
 	let playlist = playlist_url(&playlist)?;
 	let mut importer = moq_hls::import::Import::new(producer, catalog, moq_hls::import::Config::new(playlist))?;

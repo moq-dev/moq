@@ -63,13 +63,38 @@ impl<O: Output> Media<O> {
 		output.send(event);
 	}
 
+	/// Play whatever the path resolves to, following it onto a new broadcast when
+	/// a restarted publisher replaces the one playing.
 	async fn play(self) -> anyhow::Result<()> {
-		let source = subscribe(self.origin.clone(), &self.broadcast).await?;
-		let broadcast = source
-			.broadcast()
-			.await
-			.context("failed to subscribe to the broadcast")?;
-		let catalog = catalog::Consumer::<()>::new(&broadcast, self.args.catalog_format(&self.broadcast))
+		loop {
+			let source = subscribe(self.origin.clone(), &self.broadcast).await?;
+			let broadcast = source
+				.broadcast()
+				.await
+				.context("failed to subscribe to the broadcast")?;
+			let err = match self.play_broadcast(&source, &broadcast).await {
+				Err(err) if unroutable(&err) => err,
+				result => return result,
+			};
+
+			// A newer publisher instance won the path, or the route went away. The
+			// handle stays routed until it closes, so wait for that before asking
+			// again, then start over: the next broadcast's timeline is its own.
+			tracing::info!(%err, "broadcast went away, waiting for it to return");
+			broadcast.closed().await;
+			*self.presentation.lock().unwrap() = Presentation::new(self.args.video_delay());
+			self.video.lock().unwrap().clear();
+			self.drained.notify_one();
+		}
+	}
+
+	/// Play one broadcast until its catalog and every track it started end.
+	async fn play_broadcast(
+		&self,
+		source: &moq_mux::Source,
+		broadcast: &moq_net::broadcast::Consumer,
+	) -> anyhow::Result<()> {
+		let catalog = catalog::Consumer::<()>::new(broadcast, self.args.catalog_format(&self.broadcast))
 			.await
 			.context("failed to subscribe to the catalog")?;
 		let mut catalogs = catalog.select(self.args.select.selection(None));
@@ -275,6 +300,30 @@ impl<O: Output> Media<O> {
 			);
 		}
 	}
+}
+
+/// Whether playback ended because a newer publisher instance won the path,
+/// which ends the old one's subscriptions with `Unroutable`: the signal to ask
+/// for the path again, whichever layer it surfaced through.
+fn unroutable(err: &anyhow::Error) -> bool {
+	err.chain().any(|cause| {
+		// These wrappers are transparent, which hides the transport error from the chain.
+		let net = cause
+			.downcast_ref::<moq_net::Error>()
+			.or_else(|| match cause.downcast_ref::<moq_json::Error>()? {
+				moq_json::Error::Net(err) => Some(err),
+				_ => None,
+			})
+			.or_else(|| match cause.downcast_ref::<moq_audio::Error>()? {
+				moq_audio::Error::Net(err) => Some(err),
+				_ => None,
+			})
+			.or_else(|| match cause.downcast_ref::<moq_video::Error>()? {
+				moq_video::Error::Net(err) => Some(err),
+				_ => None,
+			});
+		matches!(net, Some(moq_net::Error::Unroutable))
+	})
 }
 
 struct AudioPlayback<O: Output> {
@@ -555,6 +604,56 @@ mod tests {
 		let old_duration: Duration = played.iter().filter(|p| p.sample == OLD).map(|p| p.to - p.from).sum();
 		assert_eq!(old_duration, Duration::from_secs(1));
 	}
+	/// A restarted publisher announces a fresh epoch while its old route still
+	/// stands. The newest epoch wins the path and ends the old broadcast, so
+	/// playback follows the new one, timeline starting over, instead of failing on
+	/// the one it replaced.
+	#[tokio::test]
+	async fn a_republish_plays_the_new_broadcast() {
+		tokio::time::pause();
+
+		const OLD: f32 = 0.25;
+		const NEW: f32 = 0.5;
+		let origin = moq_tokio::origin::spawn();
+		let publish = || {
+			let mut broadcast = origin.create_broadcast("room").unwrap();
+			let catalog = catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+			let audio = rendition(&broadcast, &catalog, "audio");
+			broadcast
+				.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+				.unwrap();
+			(broadcast, catalog, audio)
+		};
+
+		let (_old_broadcast, _old_catalog, mut old) = publish();
+		let recorder = Recorder::default();
+		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
+		for index in 0..10 {
+			old.write(packet(index, OLD)).unwrap();
+			tokio::time::sleep(PACKET_DURATION).await;
+		}
+
+		let (_new_broadcast, mut new_catalog, mut new) = publish();
+		for index in 0..10 {
+			new.write(packet(index, NEW)).unwrap();
+			tokio::time::sleep(PACKET_DURATION).await;
+		}
+		new.finish().unwrap();
+		drop(new);
+		new_catalog.finish().unwrap();
+
+		player.await.unwrap();
+		match recorder.events().pop() {
+			Some(Event::Ended) => {}
+			Some(Event::Failed(err)) => panic!("playback failed: {err}"),
+			_ => panic!("playback never ended"),
+		}
+		let played = recorder.played();
+		assert!(played.iter().any(|p| p.sample == OLD), "the old broadcast never played");
+		let new: Duration = played.iter().filter(|p| p.sample == NEW).map(|p| p.to - p.from).sum();
+		assert_eq!(new, PACKET_DURATION * 10, "the new broadcast did not play in full");
+	}
+
 	#[tokio::test]
 	async fn a_finite_audio_track_plays_its_final_samples() {
 		tokio::time::pause();

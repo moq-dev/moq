@@ -11,10 +11,15 @@ use hang::moq_net;
 /// one, and the media task starts well before the first handshake lands. The
 /// window is already up, so this shows as a black frame rather than as a hang.
 pub(super) async fn subscribe(origin: moq_net::origin::Consumer, broadcast: &str) -> anyhow::Result<moq_mux::Source> {
-	origin
+	let route = origin
 		.routed(broadcast)
 		.await
 		.with_context(|| format!("origin closed before broadcast `{broadcast}` was announced"))?;
+	tracing::info!(
+		broadcast,
+		epoch = route.epoch.as_ref().map(tracing::field::display),
+		"announced"
+	);
 
 	Ok(moq_mux::Source::new(origin, broadcast))
 }

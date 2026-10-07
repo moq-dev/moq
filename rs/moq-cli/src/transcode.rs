@@ -165,9 +165,7 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 	let output = publish
 		.create_broadcast(&output_path)
 		.context("failed to create the derivative broadcast")?;
-	output
-		.announce(moq_tokio::moq_net::origin::Route::default().with_epoch(moq_tokio::moq_net::Epoch::mint()))
-		.context("failed to announce the derivative broadcast")?;
+	crate::moq::announce(&output).context("failed to announce the derivative broadcast")?;
 	tracing::info!(source = %source_path, output = %output_path, "transcoding");
 
 	tokio::select! {

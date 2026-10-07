@@ -118,9 +118,7 @@ pub async fn import(origin: moq_net::origin::Producer, name: String, args: Impor
 		.await
 		.with_context(|| format!("no readable recording at {}", args.store))?;
 	let serve = reader.serve();
-	broadcast
-		.announce(moq_tokio::moq_net::origin::Route::default().with_epoch(moq_tokio::moq_net::Epoch::mint()))
-		.context("failed to announce broadcast")?;
+	crate::moq::announce(&broadcast).context("failed to announce broadcast")?;
 
 	tracing::info!(%name, store = %args.store, "replaying");
 	notify_ready();
