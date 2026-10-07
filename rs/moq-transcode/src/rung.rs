@@ -9,8 +9,8 @@
 //! - A fetch of a specific group (`requested_group`) fetches that same group
 //!   from the source and transcodes just that group with a fresh encoder. A
 //!   fetch that starts mid-group is refused: a fresh encode's frames are only
-//!   valid after the head that same encode produced. A fetch nobody wants
-//!   anymore is dropped before that encode, so a later one starts clean.
+//!   valid after the head that same encode produced. A fetch every caller
+//!   leaves before it is accepted is dropped, so a later one starts clean.
 //!
 //! Output groups mirror the source group sequence numbers 1:1, so a fetch for
 //! output group N maps to source group N and a player switching renditions

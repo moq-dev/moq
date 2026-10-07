@@ -12,9 +12,10 @@
 //!   are active); each rung resizes and encodes its own copy, group for group,
 //!   stopping when the last subscriber leaves.
 //! - Fetching a specific group fetches that same group from the source and
-//!   transcodes just that group, unless every caller leaves first, in which
-//!   case nothing is encoded. Output groups mirror source sequence numbers
-//!   1:1, so group N of every rung is the same content as source group N.
+//!   transcodes just that group, unless every caller leaves before the
+//!   request is accepted, in which case nothing is encoded. Output groups
+//!   mirror source sequence numbers 1:1, so group N of every rung is the same
+//!   content as source group N.
 //!
 //! The codec work is `moq-video`: hardware where available (NVDEC + NVENC on
 //! Linux, VideoToolbox on macOS, Media Foundation on Windows), with the default
