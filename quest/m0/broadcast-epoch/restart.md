@@ -57,15 +57,18 @@ Decided in planning (2026-10-07, from #4970's review):
 - **Players.** `moq play` (#4970) and `@moq/watch` restart on `Restart`
   instead of treating every epochless `Update` as a restart, so a GOAWAY
   drain or re-price no longer restarts playback.
-  `moqsrc` (planned in #4960) switches on `Restart` too.
+  `moqsrc` (planned in #4960) switches on `Restart` too. On lite-06 and
+  moq-transport, a pair not coalesced reaches players as `End` then
+  `Start`: a stop, then a fresh play.
 
 Tests: a newer epoch and an epochless source change each deliver `Restart`
 in both languages, including a reconnect with identical route metadata; a
-re-price delivers `Update`; an old subscription keeps
-receiving after a replacement until its route goes; a re-request after
-`Restart` resolves the new route, over a relay on lite-06, lite-07, and
-moq-transport. On lite-06 and moq-transport, coalescing depends on read
-timing, so those tests accept `Restart` or `End` then `Start`. Run `just drafts check` and `just test interop --all`.
+re-price delivers `Update`; an old subscription keeps receiving after a
+replacement until its route goes; a re-request after `Restart` resolves the
+new route, over a relay on lite-06, lite-07, and moq-transport. On lite-06
+and moq-transport, coalescing depends on read timing, so those tests accept
+`Restart` or `End` then `Start`. Run `just drafts check` and
+`just test interop --all`.
 
 Docs: update `doc/concept/moq-lite.md` (publisher epochs) and
 `doc/lib/{rs,js}` announce sections inline.
