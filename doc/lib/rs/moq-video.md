@@ -145,7 +145,7 @@ with geometry and color metadata intact; call `I420::into_data()` only when
 packed bytes are required. `decode::Config::scale_hint` is best effort and only
 a decoder with a hardware scaler honors it; `Frame::resize` is the exact-size
 operation. `decode::Consumer` takes `decode::Options`, which carries the
-subscription's `start` and `max_age` beside the decoder config.
+subscription's `start` and `max_delay` beside the decoder config.
 
 Linux/NVIDIA applications with a native Vulkan producer use
 `frame::vulkan::Importer`. Each reusable image is a dedicated, optimal-tiling
