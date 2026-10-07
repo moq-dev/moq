@@ -25,7 +25,7 @@ use crate::Timestamp;
 /// of 1200 bytes (e.g. a single audio frame).
 pub(crate) const MAX_DATAGRAM_PAYLOAD: usize = u16::MAX as usize;
 
-/// A single unreliable payload on a track: a sequence number, a presentation timestamp, and the bytes.
+/// A single unreliable payload on a track: a sequence number, an optional presentation timestamp, and the bytes.
 ///
 /// The sequence number is drawn from the same namespace as the track's groups, so a relay can forward
 /// a datagram while preserving the origin's numbering (see [`super::track::Producer::insert_datagram`]).
@@ -33,8 +33,8 @@ pub(crate) const MAX_DATAGRAM_PAYLOAD: usize = u16::MAX as usize;
 pub struct Datagram {
 	/// Per-track sequence number, shared with the group namespace.
 	pub sequence: u64,
-	/// Presentation timestamp in the track's timescale.
-	pub timestamp: Timestamp,
+	/// Presentation timestamp in the track's timescale, or `None` when untimed.
+	pub timestamp: Option<Timestamp>,
 	/// The datagram payload.
 	pub payload: Bytes,
 }

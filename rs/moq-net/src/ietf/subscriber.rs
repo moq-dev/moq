@@ -219,8 +219,8 @@ enum Fill {
 	/// timestamps are in, and the fetch stream can arrive before it does.
 	Requested,
 
-	/// Ready to be served, in these timestamp units. `None` means the publisher opted the
-	/// track out of timestamps, so its frames are stamped on arrival.
+	/// Ready to be served, in these timestamp units. `None` means the track declared none,
+	/// so its frames are untimed.
 	Serving(Option<Timescale>),
 
 	/// A fetch stream is writing the head. A second one answers no request of ours.
@@ -471,8 +471,8 @@ struct TrackState {
 	broadcast: PathOwned,
 
 	// Units for this track's object Timestamps, from the TIMESCALE Track Property in
-	// SUBSCRIBE_OK. `None` until it arrives, and for a track that declares none: the
-	// publisher opted out of timestamps, so frames are stamped on arrival instead.
+	// SUBSCRIBE_OK. `None` until it arrives, and for a track that declares none: its
+	// frames are untimed.
 	timescale: Option<Timescale>,
 
 	// The SUBSCRIBE_OK Largest Location, which bounds a joining FETCH stitch.
@@ -1226,6 +1226,14 @@ where
 					return stream.writer.closed().await;
 				}
 			};
+			// Drafts 14-16 carry no advertisement parameters to update, so an update the
+			// adapter routed here changes nothing.
+			if type_id == ietf::SubscribeUpdate::ID
+				&& matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+			{
+				stream.reader.decode::<ietf::Body>().await?;
+				continue;
+			}
 			let terminal = self.terminal_publish_namespace(type_id);
 			if type_id != ietf::PublishNamespaceUpdate::ID && !terminal {
 				// A repeated PUBLISH_NAMESPACE lands here too: a second request on the
@@ -1971,8 +1979,10 @@ where
 			priority,
 			largest,
 		} = accepted;
+		// Normalized to microseconds, but only for a track that declared a timescale: an
+		// untimed one must not gain a timeline downstream.
 		let info = track::Info::default()
-			.with_timescale(Timescale::MICRO)
+			.with_timescale(timescale.map(|_| Timescale::MICRO))
 			.with_max_age(max_age)
 			.with_priority(super::priority::from_wire(priority.unwrap_or(128)));
 		// The copy already holds the track: it is current again up to the answer's Largest
@@ -2677,6 +2687,13 @@ where
 				// Return the refusal to the dispatcher so it sends STOP_SENDING.
 				return Err(err);
 			}
+			// The track is malformed, not just this group, so no later group is trusted.
+			Err(Error::MalformedTrack) => {
+				tracing::warn!(group = %producer.sequence, "malformed track");
+				let _ = producer.abort(Error::MalformedTrack);
+				let _ = track.abort(Error::MalformedTrack);
+				return Err(Error::MalformedTrack);
+			}
 			Err(err) => {
 				tracing::debug!(%err, group = %producer.sequence, "group error");
 				let _ = producer.abort(err);
@@ -2730,7 +2747,8 @@ where
 			return Ok(());
 		};
 
-		// Like a subgroup object: a track that declared no timescale is stamped on arrival.
+		// Like a subgroup object: a track that declared no timescale is untimed. One on a
+		// timed track without a Timestamp is refused by the model and dropped below.
 		let timestamp = match (track.timescale, &datagram.properties) {
 			(Some(timescale), Some(properties)) => {
 				let mut properties = Decoder::new(properties, self.version.into());
@@ -2738,7 +2756,6 @@ where
 			}
 			_ => None,
 		};
-		let timestamp = timestamp.unwrap_or_else(|| crate::Timestamp::from(self.runtime.now()));
 
 		let Some(producer) = track.producer.as_mut() else {
 			return Ok(());
@@ -2991,7 +3008,6 @@ where
 /// the id delta, the extension headers (carrying the timestamp), the size, the
 /// status for empty objects, and the streamed payload.
 struct GroupIngest {
-	runtime: crate::time::Clock,
 	has_extensions: bool,
 	has_end: bool,
 	timescale: Option<Timescale>,
@@ -3031,7 +3047,6 @@ impl GroupIngest {
 		start: u64,
 	) -> Self {
 		Self {
-			runtime: subscriber.runtime.clone(),
 			has_extensions: group.flags.has_extensions,
 			has_end: group.flags.has_end,
 			timescale,
@@ -3146,6 +3161,10 @@ where
 			Err(err) => {
 				if let Ok(mut state) = fill.write() {
 					*state = Fill::Done;
+				}
+				// As for a subgroup object: the track is malformed, not just this fill.
+				if matches!(err, Error::MalformedTrack) {
+					let _ = track.abort(Error::MalformedTrack);
 				}
 				return Err(err);
 			}
@@ -3331,8 +3350,8 @@ where
 		keep: bool,
 	) -> Result<bool, Error> {
 		// The properties carry the frame's presentation timestamp (the Timestamp Object
-		// Property) in the units the track declared. A track that declared none opted
-		// out, so its frames are stamped on arrival instead.
+		// Property) in the units the track declared. A track that declared none is
+		// untimed, and an object on a timed track without one is malformed.
 		let timestamp = match (properties, timescale) {
 			(Some(properties), Some(timescale)) => {
 				let mut properties = Decoder::new(&properties, self.version.into());
@@ -3340,7 +3359,6 @@ where
 			}
 			_ => None,
 		};
-		let timestamp = timestamp.unwrap_or_else(|| crate::Timestamp::from(self.runtime.now()));
 
 		// A fetch object has no status field from draft-16 on; a zero length is simply
 		// an empty object. Draft-14 and 15 still encode Normal (0) after a zero length.
@@ -3358,6 +3376,7 @@ where
 			return Ok(true);
 		}
 
+		let timestamp = object_time(timescale, timestamp)?;
 		// `create_frame_owned` is the allocation chokepoint: it rejects an oversized `size`
 		// and allocates up front only within the budget, so no pre-check is needed.
 		let mut frame = producer.create_frame_owned(frame::Info { size, timestamp }, &self.frames)?;
@@ -3494,7 +3513,7 @@ where
 		// have set it. FETCH_OK carries the same Track Properties, so the retention window
 		// comes from it.
 		let info = track::Info::default()
-			.with_timescale(Timescale::MICRO)
+			.with_timescale(timescale.map(|_| Timescale::MICRO))
 			.with_max_age(ok.properties.max_cache_duration);
 		// Joined fetches still count until they pick the accepted group up from the cache.
 		let joined = request.result.clone();
@@ -3532,7 +3551,13 @@ where
 		let reset = kio::wait(|waiter| {
 			if open {
 				let mut cx = std::task::Context::from_waker(waiter.waker());
-				match stream.reader.poll_closed(&mut cx) {
+				let closed = match self.version {
+					Version::Draft14 | Version::Draft15 | Version::Draft16 => {
+						super::request_stream::poll_legacy_end(&mut stream, &mut cx)
+					}
+					_ => stream.reader.poll_closed(&mut cx),
+				};
+				match closed {
 					Poll::Ready(Err(err)) => return Poll::Ready(Some(err)),
 					Poll::Ready(Ok(())) => open = false,
 					Poll::Pending => {}
@@ -3917,6 +3942,18 @@ fn settle_join_live(fill: &kio::Producer<Fill>, live: Live) {
 	}
 }
 
+/// A Normal object's timestamp: none on an untimed track, and required on a timed one,
+/// where an object without a Timestamp is malformed.
+fn object_time(
+	timescale: Option<Timescale>,
+	timestamp: Option<crate::Timestamp>,
+) -> Result<Option<crate::Timestamp>, Error> {
+	match (timescale, timestamp) {
+		(Some(_), None) => Err(Error::MalformedTrack),
+		(_, timestamp) => Ok(timestamp),
+	}
+}
+
 impl GroupIngest {
 	/// `Ready(Ok(_))` once the stream FINs on an object boundary, or an explicit
 	/// end-of-group or end-of-track status arrives. The caller finishes or aborts the
@@ -3949,9 +3986,8 @@ impl GroupIngest {
 				IngestPhase::ExtBytes { size } => {
 					// Per-object extension headers may carry the frame's presentation
 					// timestamp (the Timestamp Object Property), in the units the track
-					// declared. A track that declared no timescale opted out, so its
-					// objects are stamped on arrival even if one carries a Timestamp we
-					// could not interpret.
+					// declared. A track that declared no timescale is untimed, even if an
+					// object carries a Timestamp: it has no units to read it in.
 					let ext = ready!(reader.poll_read_exact(&mut cx, *size))?;
 					let timestamp = match self.timescale {
 						Some(timescale) => {
@@ -3976,7 +4012,7 @@ impl GroupIngest {
 					// `create_frame_owned` is the allocation chokepoint: it rejects an
 					// oversized `size` and allocates up front only within the budget, so
 					// no pre-check is needed.
-					let timestamp = timestamp.unwrap_or_else(|| crate::Timestamp::from(self.runtime.now()));
+					let timestamp = object_time(self.timescale, *timestamp)?;
 					let frame = group.create_frame_owned(frame::Info { size, timestamp }, &self.budget)?;
 					self.phase = IngestPhase::Payload { frame };
 				}
@@ -3984,7 +4020,7 @@ impl GroupIngest {
 					let status = ready!(reader.poll_varint(&mut cx))?;
 					if status == 0 {
 						if !self.dropping {
-							let timestamp = timestamp.unwrap_or_else(|| crate::Timestamp::from(self.runtime.now()));
+							let timestamp = object_time(self.timescale, *timestamp)?;
 							let frame = group.create_frame_owned(frame::Info { size: 0, timestamp }, &self.budget)?;
 							frame.finish()?;
 						}
@@ -4611,7 +4647,7 @@ mod tests {
 			.unwrap();
 		let received = consumer.recv_datagram().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(received.sequence, 9, "the Group ID is the sequence");
-		assert_eq!(received.timestamp, timestamp);
+		assert_eq!(received.timestamp, Some(timestamp));
 		assert_eq!(&received.payload[..], b"yes");
 		assert!(
 			consumer.recv_datagram().now_or_never().is_none(),
@@ -6984,15 +7020,12 @@ mod stitch_tests {
 	/// A publisher's fill fetch stream: a FETCH_HEADER, then one object per payload
 	/// numbered from the group's first.
 	fn fill_stream(sequence: u64, payloads: &[&[u8]]) -> Vec<u8> {
-		fill_stream_for(REQUEST, &[(sequence, payloads)], true)
+		fill_stream_for(REQUEST, &[(sequence, payloads)])
 	}
 
-	/// A joining FETCH stream named by its own request id, possibly spanning groups.
-	///
-	/// `timed` writes Timestamp properties. Multi-group tests leave them off so frames
-	/// stamped on arrival share one epoch with the live tail; a 1000µs presentation time
-	/// against a wall-clock tail would convict every earlier group as stale.
-	fn fill_stream_for<B: AsRef<[u8]>>(request_id: RequestId, groups: &[(u64, &[B])], timed: bool) -> Vec<u8> {
+	/// A joining FETCH stream named by its own request id, possibly spanning groups. The
+	/// track is timed, so every object carries a Timestamp.
+	fn fill_stream_for<B: AsRef<[u8]>>(request_id: RequestId, groups: &[(u64, &[B])]) -> Vec<u8> {
 		let mut buf = Vec::new();
 		crate::coding::Encoder::new(&mut buf, VERSION.into())
 			.varint(ietf::FetchHeader::TYPE)
@@ -7006,12 +7039,10 @@ mod stitch_tests {
 		for &(sequence, payloads) in groups {
 			for (index, payload) in payloads.iter().enumerate() {
 				let payload = payload.as_ref();
-				let properties = timed.then(|| {
-					let mut properties = Vec::new();
-					let w = &mut Encoder::new(&mut properties, VERSION.into());
-					ietf::encode_object_time(w, timestamp(object_index), Timescale::MICRO, VERSION).unwrap();
-					properties
-				});
+				let mut properties = Vec::new();
+				let w = &mut Encoder::new(&mut properties, VERSION.into());
+				ietf::encode_object_time(w, timestamp(object_index), Timescale::MICRO, VERSION).unwrap();
+				let properties = Some(properties);
 
 				// The first object of the stream carries the absolute Group ID. From
 				// draft-18 on, the first object of a later group carries the ascending
@@ -7045,7 +7076,8 @@ mod stitch_tests {
 	}
 
 	/// The subscription's own subgroup stream, starting at `start` because a strict
-	/// publisher delivers nothing before it: that head is the fill's job.
+	/// publisher delivers nothing before it: that head is the fill's job. Each object
+	/// carries the Timestamp of its Object ID.
 	fn tail_stream(sequence: u64, start: u64, payloads: &[&[u8]]) -> Vec<u8> {
 		let mut buf = Vec::new();
 		ietf::GroupHeader {
@@ -7055,6 +7087,7 @@ mod stitch_tests {
 			publisher_priority: 0,
 			flags: ietf::GroupFlags {
 				first_object: start == 0,
+				has_extensions: true,
 				..Default::default()
 			},
 		}
@@ -7071,6 +7104,18 @@ mod stitch_tests {
 			crate::coding::Encoder::new(&mut buf, VERSION.into())
 				.varint(delta)
 				.unwrap();
+			let mut ext = Vec::new();
+			let object = usize::try_from(start).unwrap() + index;
+			ietf::encode_object_time(
+				&mut Encoder::new(&mut ext, VERSION.into()),
+				timestamp(object),
+				Timescale::MICRO,
+				VERSION,
+			)
+			.unwrap();
+			let w = &mut crate::coding::Encoder::new(&mut buf, VERSION.into());
+			w.varint(ext.len() as u64).unwrap();
+			buf.extend_from_slice(&ext);
 			crate::coding::Encoder::new(&mut buf, VERSION.into())
 				.varint(payload.len() as u64)
 				.unwrap();
@@ -7092,6 +7137,12 @@ mod stitch_tests {
 
 	impl Harness {
 		fn new(fill: Fill, scripts: Vec<Vec<u8>>) -> Self {
+			Self::with_timescale(fill, scripts, Some(Timescale::MICRO))
+		}
+
+		/// A subscription whose SUBSCRIBE_OK declared `timescale`, or none for an untimed
+		/// track.
+		fn with_timescale(fill: Fill, scripts: Vec<Vec<u8>>, timescale: Option<Timescale>) -> Self {
 			let session = ScriptedSession::per_stream_eof(scripts);
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 			let tasks = TaskSet::new();
@@ -7110,11 +7161,11 @@ mod stitch_tests {
 				Default::default(),
 			);
 
-			// The subscriber accepts every track at microseconds, matching `run_subscribe`.
+			// The subscriber accepts a timed track at microseconds, matching `run_subscribe`.
 			let track = track::Producer::new(
 				std::sync::Arc::new(crate::broadcast::Info::default()),
 				"video",
-				track::Info::default().with_timescale(Timescale::MICRO),
+				track::Info::default().with_timescale(timescale.map(|_| Timescale::MICRO)),
 			);
 			let fill = kio::Producer::new(fill);
 
@@ -7124,7 +7175,7 @@ mod stitch_tests {
 					REQUEST,
 					TrackState {
 						alias: Some(ALIAS),
-						timescale: Some(Timescale::MICRO),
+						timescale,
 						..TrackState::new(track.clone(), Path::new("broadcast").to_owned(), fill.clone(), None)
 					},
 				);
@@ -7173,7 +7224,7 @@ mod stitch_tests {
 	}
 
 	/// Every frame of the next group, once it finishes.
-	async fn read_group(subscriber: &mut track::Subscriber) -> (u64, Vec<(Timestamp, Vec<u8>)>) {
+	async fn read_group(subscriber: &mut track::Subscriber) -> (u64, Vec<(Option<Timestamp>, Vec<u8>)>) {
 		let mut group = subscriber
 			.recv_group()
 			.await
@@ -7220,10 +7271,9 @@ mod stitch_tests {
 		assert_eq!(
 			frames,
 			vec![
-				(timestamp(0), b"head-0".to_vec()),
-				(timestamp(1), b"head-1".to_vec()),
-				// The tail carries no timestamps of its own, so it is stamped on arrival.
-				(frames[2].0, b"tail-2".to_vec()),
+				(Some(timestamp(0)), b"head-0".to_vec()),
+				(Some(timestamp(1)), b"head-1".to_vec()),
+				(Some(timestamp(2)), b"tail-2".to_vec()),
 			]
 		);
 		assert!(matches!(*h.fill.read(), Fill::Done), "the head was claimed");
@@ -7331,8 +7381,9 @@ mod stitch_tests {
 					script.resize(script.len() + size, 0);
 					script.extend_from_slice(&[1, 42]);
 				}
-				// Over-limit lengths deliberately carry no extension bytes.
-				let h = Harness::new(Fill::Done, vec![script]);
+				// Over-limit lengths deliberately carry no extension bytes. The objects carry
+				// no Timestamp, so the track is untimed.
+				let h = Harness::with_timescale(Fill::Done, vec![script], None);
 				let mut consumer = h.track.subscribe(None);
 				let mut stream = h.stream().await;
 				let result = h.subscriber.clone().recv_group(&mut stream).await;
@@ -7361,12 +7412,76 @@ mod stitch_tests {
 
 	/// Append an END_OF_TRACK object: delta 0, an empty payload, then its status.
 	fn end_of_track(mut stream: Vec<u8>) -> Vec<u8> {
-		for value in [0u64, 0, END_OF_TRACK] {
+		// The id delta, an empty extension block, a zero size, and the status.
+		for value in [0u64, 0, 0, END_OF_TRACK] {
 			crate::coding::Encoder::new(&mut stream, VERSION.into())
 				.varint(value)
 				.unwrap();
 		}
 		stream
+	}
+
+	/// A fill object without a Timestamp on a timed track ends the track, as a subgroup
+	/// object does: the fill is the head of a group the subscription carries.
+	#[moq_net_sim::test]
+	async fn an_unstamped_fill_object_ends_the_track() {
+		use futures::FutureExt;
+
+		let mut script = Vec::new();
+		crate::coding::Encoder::new(&mut script, VERSION.into())
+			.varint(ietf::FetchHeader::TYPE)
+			.unwrap();
+		ietf::FetchHeader { request_id: REQUEST }
+			.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
+			.unwrap();
+		ietf::FetchObject::Object {
+			subgroup: ietf::FetchSubgroup::Zero,
+			group: Some(SEQUENCE),
+			object: Some(0),
+			priority: Some(0),
+			properties: None,
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
+		.unwrap();
+		crate::coding::Encoder::new(&mut script, VERSION.into())
+			.varint(1u64)
+			.unwrap();
+		script.push(42);
+
+		let h = Harness::new(Fill::Serving(Some(Timescale::MICRO)), vec![script]);
+		let mut stream = h.stream().await;
+		let res = h.subscriber.clone().recv_fill(&mut stream).await;
+		assert!(matches!(res, Err(Error::MalformedTrack)), "{res:?}");
+		assert!(matches!(h.track.closed().now_or_never(), Some(Error::MalformedTrack)));
+	}
+
+	/// A subgroup object without a Timestamp on a timed track makes the whole track
+	/// malformed, so the track ends rather than only its group.
+	#[moq_net_sim::test]
+	async fn an_unstamped_subgroup_object_ends_the_track() {
+		use futures::FutureExt;
+
+		let mut script = Vec::new();
+		ietf::GroupHeader {
+			track_alias: ALIAS,
+			group_id: SEQUENCE,
+			sub_group_id: 0,
+			publisher_priority: 0,
+			flags: ietf::GroupFlags {
+				first_object: true,
+				..Default::default()
+			},
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
+		.unwrap();
+		// The id delta, the size, and the payload, with no extension block.
+		script.extend_from_slice(&[0, 1, 42]);
+
+		let h = Harness::new(Fill::Done, vec![script]);
+		let mut stream = h.stream().await;
+		let res = h.subscriber.clone().recv_group(&mut stream).await;
+		assert!(matches!(res, Err(Error::MalformedTrack)), "{res:?}");
+		assert!(matches!(h.track.closed().now_or_never(), Some(Error::MalformedTrack)));
 	}
 
 	/// END_OF_TRACK after a group's last object ends the track right after that group.
@@ -7756,7 +7871,7 @@ mod stitch_tests {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
 			vec![
-				fill_stream_for(FETCH, &[(SEQUENCE, &[b"head-0", b"head-1"])], true),
+				fill_stream_for(FETCH, &[(SEQUENCE, &[b"head-0", b"head-1"])]),
 				tail_stream(SEQUENCE, 2, &[b"tail-2"]),
 			],
 		)
@@ -7788,7 +7903,7 @@ mod stitch_tests {
 			Fill::Serving(Some(Timescale::MICRO)),
 			vec![
 				tail_stream(SEQUENCE, 0, &[b"whole-0"]),
-				fill_stream_for(FETCH, &[(SEQUENCE, &[b"head-0", b"head-1"])], true),
+				fill_stream_for(FETCH, &[(SEQUENCE, &[b"head-0", b"head-1"])]),
 			],
 		)
 		.with_joining(JoiningFetch::Relative { group_offset: 0 }, FETCH, LIVE);
@@ -7850,10 +7965,7 @@ mod stitch_tests {
 		];
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
-			vec![
-				fill_stream_for(FETCH, groups, false),
-				tail_stream(LIVE_GROUP, 2, &[b"g10-2"]),
-			],
+			vec![fill_stream_for(FETCH, groups), tail_stream(LIVE_GROUP, 2, &[b"g10-2"])],
 		)
 		.with_joining(JoiningFetch::Absolute { group_id: START }, FETCH, largest);
 		// Keep every fetched group: the default max delay of zero would drop each one as
@@ -7895,7 +8007,7 @@ mod stitch_tests {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
 			vec![
-				fill_stream_for(FETCH, &[(START, &[b"g7-0", b"g7-1"])], true),
+				fill_stream_for(FETCH, &[(START, &[b"g7-0", b"g7-1"])]),
 				tail_stream(10, 2, &[b"g10-2"]),
 			],
 		)
@@ -8001,6 +8113,27 @@ mod stitch_tests {
 		}
 	}
 
+	/// On a timed track every Normal object carries a Timestamp, so one without is
+	/// malformed rather than stamped with its arrival time.
+	#[moq_net_sim::test]
+	async fn an_unstamped_object_on_a_timed_track_is_malformed() {
+		let mut run = GroupFetchRun::new(VERSION, group_fetch_objects(SEQUENCE, 0, &[b"a"])).await;
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"timed",
+			track::Info::default().with_timescale(Timescale::MICRO),
+		);
+		let group = track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
+		let slot = kio::Producer::new(GroupFetch::Ready {
+			producer: group,
+			timescale: Some(Timescale::MICRO),
+			start: 0,
+			end: None,
+		});
+		let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
+		assert!(matches!(res, Err(Error::MalformedTrack)), "{res:?}");
+	}
+
 	/// FETCH_OK's End Location inside the group promises every object before it. A stream
 	/// that FINs short of it, or runs past it, fails the group instead of caching it.
 	#[moq_net_sim::test]
@@ -8088,7 +8221,7 @@ mod stitch_tests {
 			let track = track::Producer::new(
 				std::sync::Arc::new(crate::broadcast::Info::default()),
 				"video",
-				track::Info::default(),
+				track::Info::default().with_timescale(None),
 			);
 
 			Self {
@@ -8494,7 +8627,7 @@ mod joining_fetch_tests {
 		let track = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
 			"video",
-			track::Info::default(),
+			track::Info::default().with_timescale(None),
 		);
 		let dynamic = track.dynamic();
 		let consumer = track.consume();
@@ -8723,7 +8856,7 @@ mod joining_fetch_tests {
 		let track = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
 			"video",
-			track::Info::default(),
+			track::Info::default().with_timescale(None),
 		);
 		let dynamic = track.dynamic();
 		let consumer = track.consume();
@@ -8872,7 +9005,7 @@ mod joining_fetch_tests {
 		let track = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
 			"video",
-			track::Info::default(),
+			track::Info::default().with_timescale(None),
 		);
 		let dynamic = track.dynamic();
 		let consumer = track.consume();

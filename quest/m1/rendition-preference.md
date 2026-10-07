@@ -49,8 +49,8 @@ Decided in planning interviews on 2026-10-01:
   picker keeps listing every tier.
 - `Video::ranked` sorts by preference (highest first), then by picture and
   bitrate as today. RTMP play, FLV export, and moq-transcode take the first
-  rendition they support, so they need no change. Update the
-  [JS rendition ranking](/quest/m1/js-ranked.md) Plan if it is still open.
+  rendition they support, so they need no change. `@moq/hang`'s `ranked`
+  must sort the same way, so update it in this change.
 - WHEP needs its own step: `Session::handle_media` (`rs/moq-rtc`) takes the
   peer's first negotiated payload type, then `pick_video` filters `ranked()`
   to that codec, so a peer offering the fallback's codec first would get the
@@ -74,7 +74,3 @@ Decided in planning interviews on 2026-10-01:
 ## Required
 
 - [Enabled flag](/quest/m1/catalog-enabled.md) - the `enabled` field selection filters on first
-
-## Related
-
-- [JS rendition ranking](/quest/m1/js-ranked.md) - mirrors `Video::ranked` in `@moq/hang`, which sorts by preference first once this quest lands
