@@ -125,30 +125,21 @@ test("an unsolicited announcement lands", async () => {
 });
 
 /**
- * A session without the Cluster extension names no publisher, so each connection stamps its
- * own random Hop ID in front of a 0: a publisher that reconnects reads as a new one, and the 0
- * keeps it ranked below identified routes.
+ * A session without the Cluster extension names no publisher, so its advertisement carries
+ * only the anonymous mark: identity is the epoch's job, and nothing goes in front of the 0.
  */
-test("an advertisement with no path is stamped per connection", async () => {
-	const stamp = async () => {
-		const pair = createMockTransportPair(ALPN.DRAFT_19);
-		const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
-		const announced = subscriber.announced();
-		expect(await nextStream(pair.client)).toBeDefined();
+test("an advertisement with no path is anonymous", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
+	const announced = subscriber.announced();
+	expect(await nextStream(pair.client)).toBeDefined();
 
-		const stream = await Stream.open(pair.server, { version: VERSION });
-		void subscriber.runPublishNamespace(
-			new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("legacy") }),
-			stream,
-		);
-		const hops = (await nextRoute(announced))?.route.hops ?? [];
-		expect(hops).toHaveLength(2);
-		expect(hops[0]).not.toBe(UNKNOWN_HOP);
-		expect(hops[1]).toBe(UNKNOWN_HOP);
-		return hops[0];
-	};
-
-	expect(await stamp()).not.toBe(await stamp());
+	const stream = await Stream.open(pair.server, { version: VERSION });
+	void subscriber.runPublishNamespace(
+		new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("legacy") }),
+		stream,
+	);
+	expect((await nextRoute(announced))?.route.hops).toEqual([UNKNOWN_HOP]);
 });
 
 /**

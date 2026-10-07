@@ -565,10 +565,6 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// that withheld an identity is not named on the wire. A server answers it per
 	// accepted session; a client only when it knows the peer.
 	session_origin: crate::Hop,
-	// A random Hop ID of this connection's own, written as the first hop of any path
-	// that arrives naming no publisher, so a publisher that reconnects reads downstream
-	// as a new one. Fresh per connection, unlike `session_origin`.
-	stamp: crate::Hop,
 	// Our own Hop ID, which an advertisement must not already contain: one that does
 	// looped back through us.
 	self_origin: crate::Hop,
@@ -683,7 +679,6 @@ where
 			origin,
 			control,
 			session_origin: peer_hop.unwrap_or(crate::Hop::UNKNOWN),
-			stamp: crate::Hop::random(),
 			self_origin,
 			peer_setup,
 			cost,
@@ -741,11 +736,10 @@ where
 
 	/// The route for an advertisement that carries no path of its own.
 	///
-	/// Base moq-transport has no hops on the wire, so the chain is this connection's
-	/// stamp, naming the unknown publisher for as long as the connection lasts, then
-	/// the anonymous 0 that keeps it ranked below identified routes.
-	/// The session's assigned identity stays on `via` for split-horizon; putting it in
-	/// the chain would publish a name for a peer that declined to give one.
+	/// Base moq-transport has no hops on the wire, so the chain is a single 0: the
+	/// anonymous mark, forwarded unchanged. The session's assigned identity stays
+	/// on `via` for split-horizon; putting it in the chain would publish a name for
+	/// a peer that declined to give one.
 	///
 	/// The link is charged all the same. Such an advertisement carries no ROUTE_COST,
 	/// which reads as 0, but the draft charges every advertisement for the direction it
@@ -754,11 +748,13 @@ where
 	///
 	/// It is charged only one hop, though the chain it stands for may be arbitrarily
 	/// long: a peer that carries no hop ids hides its depth, so this route understates
-	/// its true length. Price such a link with [`crate::Client::with_cost`].
+	/// its true length. An anonymous route already ranks below every identified one,
+	/// so that understatement cannot beat a real path. Price such a link with
+	/// [`crate::Client::with_cost`] among other anonymous routes.
 	fn session_route(&self, peer: &cluster::Peer) -> crate::origin::Route {
 		let mut hops = crate::Hops::new();
-		hops.stamp(self.stamp)
-			.expect("an empty hop chain has room for the stamp and its 0");
+		hops.push(crate::Hop::UNKNOWN)
+			.expect("an empty hop chain has room for one entry");
 		crate::origin::Route::default()
 			.with_hops(hops)
 			.with_via(self.via(peer))
@@ -771,8 +767,8 @@ where
 	///
 	/// A negotiated peer supplies the path and cost, so the route is what the mesh
 	/// actually knows: the full chain, and the accumulated cost plus this link's price.
-	/// A path starting with 0 gets this connection's stamp in front of it; the 0s stay. An advertisement whose path already contains our own Hop ID looped back,
-	/// and neither forwarding it nor subscribing through it is safe.
+	/// A received 0 stays 0. An advertisement whose path already contains our own Hop
+	/// ID looped back, and neither forwarding it nor subscribing through it is safe.
 	fn route(&self, advert: Option<&cluster::Advert>, peer: &cluster::Peer) -> Option<Advertised> {
 		let Some(advert) = advert else {
 			return Some(Advertised {
@@ -784,11 +780,11 @@ where
 			return None;
 		}
 
-		let mut route = advert
-			.route(cluster::link_cost(self.cost, peer))
-			.with_via(self.via(peer));
-		route.hops.stamp(self.stamp).ok()?;
-		Some(Advertised { route })
+		Some(Advertised {
+			route: advert
+				.route(cluster::link_cost(self.cost, peer))
+				.with_via(self.via(peer)),
+		})
 	}
 
 	/// Bind the alias the publisher chose for this subscription.
@@ -5314,9 +5310,9 @@ mod tests {
 		assert!(!table.map.contains_key(&0), "the oldest tombstone is forgotten first");
 	}
 
-	/// moq-transport carries no hop ids, so a peer's broadcasts are named by the
-	/// connection's own random stamp. An identity assigned via `Client::with_peer_hop`
-	/// is stored as `via` for split-horizon and never written into the chain.
+	/// moq-transport carries no hop ids, so a peer's broadcasts are marked
+	/// anonymous (hop 0). An identity assigned via `Client::with_peer_hop` is
+	/// stored as `via` for split-horizon and never written into the chain.
 	#[moq_net_sim::test]
 	async fn assigned_peer_hop_attributes_announces() {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
@@ -5347,10 +5343,8 @@ mod tests {
 		let mut announced = consumer.announced();
 		let route = announced.assert_next_active("room/host");
 		let hops: Vec<_> = route.hops.iter().copied().collect();
-		assert_eq!(hops, vec![subscriber.stamp, crate::Hop::UNKNOWN]);
-		assert_ne!(subscriber.stamp, crate::Hop::UNKNOWN);
-		assert!(route.is_anonymous(), "the 0 after the stamp still ranks it as unknown");
-		assert_ne!(subscriber.stamp, assigned, "the assigned identity stays off the chain");
+		assert_eq!(hops, vec![crate::Hop::UNKNOWN]);
+		assert!(route.is_anonymous());
 
 		let mut hidden = consumer.excluding(assigned).announced();
 		hidden.assert_next_wait();
@@ -5413,11 +5407,11 @@ mod tests {
 		assert_eq!(route.hops, upstream);
 	}
 
-	/// Two sessions assigned the same identity still stamp their own first hop, since
-	/// a wire with no hop ids cannot say the content continued: the reconnect reads as a
-	/// new source, while split-horizon keeps filtering on the shared identity.
+	/// Two sessions assigned the same identity announce the same anonymous chain.
+	/// The cursor treats that as an identical re-announce, so a reconnect is
+	/// invisible and retracting the stale session leaves the fresh route standing.
 	#[moq_net_sim::test]
-	async fn reconnecting_peer_is_a_new_first_hop() {
+	async fn reconnecting_peer_joins_the_front_it_replaces() {
 		let peer = crate::Hop::new(777).unwrap();
 		let self_origin = crate::Hop::new(1).unwrap();
 
@@ -5449,18 +5443,20 @@ mod tests {
 		};
 
 		let first = connect();
-		let first_stamp = first.stamp;
-		let route = announced.assert_next_active("room/host");
-		assert_eq!(route.hops.iter().next(), Some(&first_stamp));
+		announced.assert_next_active("room/host");
 
-		// The peer reconnects before the old session is retired, under its own stamp.
-		let second = connect();
-		assert_ne!(second.stamp, first_stamp);
-		assert!(routed_now(&consumer, "room/host").is_some());
+		// The peer reconnects before the old session is retired: an identical route
+		// from the fresh session joins without any consumer-visible churn.
+		let _second = connect();
+		announced.assert_next_wait();
 
 		// Neither route is offered back to the peer they both came from.
-		consumer.excluding(peer).announced().assert_next_wait();
+		consumer.clone().excluding(peer).announced().assert_next_wait();
+
+		// The stale session finally retracting leaves the fresh route standing.
 		drop(first);
+		announced.assert_next_wait();
+		assert!(routed_now(&consumer, "room/host").is_some());
 	}
 
 	fn cluster_subscriber(

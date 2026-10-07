@@ -263,34 +263,6 @@ impl Hops {
 		Ok(())
 	}
 
-	/// Name an unknown original publisher: prefix `stamp`, the receiving session's own
-	/// per-connection id, to a chain that starts with 0, and turn an empty chain into
-	/// `[stamp, 0]`.
-	///
-	/// A publisher that reconnects then reads downstream as a new first hop, which is
-	/// all anyone can say about it, while the 0 after the stamp keeps the route ranked
-	/// as anonymous. Fails with [`InvalidHop::TooMany`] if the chain is full, and with
-	/// [`InvalidHop::Duplicate`] if `stamp` already appears in it.
-	pub(crate) fn stamp(&mut self, stamp: Hop) -> Result<(), InvalidHop> {
-		match self.0.first() {
-			None => {
-				self.push(stamp)?;
-				self.push(Hop::UNKNOWN)
-			}
-			Some(first) if *first == Hop::UNKNOWN => {
-				if self.0.len() >= MAX_HOPS {
-					return Err(InvalidHop::TooMany);
-				}
-				if self.0.contains(&stamp) {
-					return Err(InvalidHop::Duplicate);
-				}
-				self.0.insert(0, stamp);
-				Ok(())
-			}
-			Some(_) => Ok(()),
-		}
-	}
-
 	/// Returns true if any entry matches `hop`.
 	pub fn contains(&self, hop: &Hop) -> bool {
 		self.0.contains(hop)
@@ -482,8 +454,7 @@ pub struct Route {
 	/// The chain of origins the route has traversed, oldest first. Each relay
 	/// appends its own [`crate::Hop`] when forwarding; used for loop detection
 	/// and as the selection tie-break. A 0 entry is the anonymous mark and
-	/// travels unchanged; a session receiving one as the first entry puts its own
-	/// per-connection stamp in front of it; see [`Self::is_anonymous`].
+	/// travels unchanged; see [`Self::is_anonymous`].
 	pub hops: Hops,
 
 	/// What pulling content via this route costs, accumulated per link: lower wins
@@ -5788,46 +5759,6 @@ mod tests {
 		let route = announced.assert_next_active("room");
 		assert!(!route.is_anonymous());
 		assert_eq!(route.cost, Cost::new(5));
-	}
-
-	/// A stamped route names its session but keeps the 0 behind the stamp, so it still
-	/// loses to a fully identified route of the same length, however cheap it is.
-	#[moq_net_sim::test]
-	async fn a_stamped_route_ranks_below_an_identified_one() {
-		let producer = origin(1).produce();
-		let mut announced = producer.consume().announced();
-
-		let mut stamped = Hops::new();
-		stamped.stamp(origin(5)).unwrap();
-		assert_eq!(stamped.as_slice(), &[origin(5), Hop::UNKNOWN]);
-
-		let _legacy = producer
-			.announce("room", Route::default().with_hops(stamped).with_cost(0))
-			.unwrap();
-		let route = announced.assert_next_active("room");
-		assert!(route.is_anonymous());
-
-		let _identified = producer
-			.announce("room", Route::default().with_hops(hops(&[10, 11])).with_cost(5))
-			.unwrap();
-		let route = announced.assert_next_active("room");
-		assert_eq!(route.hops.as_slice(), hops(&[10, 11]).as_slice());
-	}
-
-	#[test]
-	fn stamping_keeps_the_leading_zero_and_names_nothing_else() {
-		let mut chain = hops(&[0, 7]);
-		chain.stamp(origin(5)).unwrap();
-		assert_eq!(chain.as_slice(), hops(&[5, 0, 7]).as_slice());
-
-		// Already named: untouched.
-		let mut named = hops(&[7, 0]);
-		named.stamp(origin(5)).unwrap();
-		assert_eq!(named.as_slice(), hops(&[7, 0]).as_slice());
-
-		// A full chain has no room for the stamp.
-		let mut full = Hops::try_from(vec![Hop::UNKNOWN; MAX_HOPS]).unwrap();
-		assert_eq!(full.stamp(origin(5)), Err(InvalidHop::TooMany));
 	}
 
 	#[test]
