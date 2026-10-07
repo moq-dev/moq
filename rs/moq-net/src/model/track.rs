@@ -958,7 +958,10 @@ impl TrackState {
 
 	/// Attach the publisher's immutable metadata without replacing it with local cache policy.
 	fn install(&mut self, info: Info) {
-		self.info = Some(info);
+		// A replaced max age moves every parked read's budget.
+		if self.info.replace(info).is_some() {
+			self.cache.wakes().wake_all();
+		}
 	}
 
 	/// Create the shared state for a track under `broadcast`, along with the cache
@@ -1027,6 +1030,10 @@ impl TrackState {
 		}
 
 		self.max_sequence = Some(self.max_sequence.map_or(sequence, |max| max.max(sequence)));
+		let below = visible
+			.then(|| self.lookup.range(..sequence).rev().find(|(_, slot)| slot.is_live()))
+			.flatten()
+			.map(|(below, _)| *below);
 		self.lookup.insert(
 			sequence,
 			Slot {
@@ -1038,6 +1045,8 @@ impl TrackState {
 		);
 		if visible {
 			self.arrival.push_back((sequence, stamp));
+			let oldest = self.lookup.first_key_value().map_or(sequence, |(oldest, _)| *oldest);
+			self.cache.wakes().landed(below, sequence, oldest);
 		}
 	}
 
@@ -3309,75 +3318,40 @@ impl group::Expiry for GroupExpiry {
 			Poll::<()>::Pending
 		});
 
-		let mut expired = false;
-		let _ = self.state.poll(waiter, |state| {
-			let budget = clamp_max_age(max_age, state.max_age_bound());
-			loop {
-				// An abort can change reach even after the successor is stamped.
-				// Register before judging, so a racing abort is observed or wakes us.
-				// An abort only closes the group, never touching the track, so one that
-				// landed before registering must re-select or the replacement goes unwatched.
-				let successor = loop {
-					let successor = state.first_servable(self.sequence.saturating_add(1), cap);
-					match successor {
-						Some(group) if group.poll_closed(waiter).is_ready() && group.is_aborted() => continue,
-						successor => break successor,
-					}
-				};
-				let edge = state.drift_edge(cap);
-				expired = state.is_stale(self.sequence, &edge, budget);
-				if expired {
-					break;
+		let state = self.state.read();
+		let budget = clamp_max_age(max_age, state.max_age_bound());
+		let wakes = state.cache.wakes();
+		// Park on exactly what can move the verdict: a group landing above this one, the
+		// successor's first frame or abort, and the edge crossing the deadline. Parking on
+		// every track change instead wakes each of N parked reads per append.
+		wakes.watch_landing(self.sequence, waiter);
+		let reach = loop {
+			// An abort can change reach even after the successor is stamped.
+			// Register before judging, so a racing abort is observed or wakes us.
+			// An abort only closes the group, never touching the track, so one that
+			// landed before registering must re-select or the replacement goes unwatched.
+			let successor = loop {
+				let successor = state.first_servable(self.sequence.saturating_add(1), cap);
+				match successor {
+					Some(group) if group.poll_closed(waiter).is_ready() && group.is_aborted() => continue,
+					successor => break successor,
 				}
-
-				// A first timestamp can change the verdict without mutating the track:
-				// on a group past the edge (a new edge), or on the candidate's
-				// unstamped immediate successor (a reach where there was none).
-				// Register on the candidate, its successor, and every servable group
-				// past the edge. If one raced this scan, resolve the edge again before
-				// Pending. Groups between the successor and the edge can move neither,
-				// and walking them would cost each of N parked serves the whole
-				// backlog, O(N^2) per track change.
-				let mut timestamp_raced = false;
-				if let Some(slot) = state.lookup.get(&self.sequence) {
-					let group = &slot.group;
-					if group.timestamp().is_none()
-						&& group.poll_timestamp(waiter).is_ready()
-						&& group.timestamp().is_some()
-					{
-						timestamp_raced = true;
-					}
-				}
-				let past = edge
-					.presentation
-					.map_or(self.sequence, |live| live.sequence.max(self.sequence));
-				let beyond = state
-					.lookup
-					.range((std::ops::Bound::Excluded(past), std::ops::Bound::Unbounded))
-					.map(|(_, slot)| slot)
-					.take_while(|slot| super::subscription::before_end(slot.group.sequence, cap))
-					.filter(|slot| slot.visible && !slot.group.is_aborted())
-					.map(|slot| &slot.group);
-				for group in successor.into_iter().chain(beyond) {
-					if group.timestamp().is_none()
-						&& group.poll_timestamp(waiter).is_ready()
-						&& group.timestamp().is_some()
-					{
-						timestamp_raced = true;
-						break;
-					}
-				}
-				if !timestamp_raced {
-					break;
-				}
+			};
+			// Unbounded until a group lands above, or the successor presents its first frame.
+			let Some(successor) = successor else {
+				return false;
+			};
+			if let Some(reach) = successor.timestamp() {
+				break reach;
 			}
-
-			// Register on track changes even though the current answer is known: a
-			// newer group can move the live edge while this group read is pending.
-			Poll::<()>::Pending
-		});
-
-		expired
+			if successor.poll_timestamp(waiter).is_pending() || successor.timestamp().is_none() {
+				return false;
+			}
+		};
+		// Registered before the edge is resolved, so a write crossing the deadline is
+		// either seen here or wakes us.
+		wakes.watch_deadline(reach, budget, waiter);
+		state.is_stale(self.sequence, &state.drift_edge(cap), budget)
 	}
 }
 
@@ -5854,12 +5828,96 @@ mod test {
 		assert!(matches!(result, Ok(None)), "the held group ends: {result:?}");
 	}
 
-	/// A parked read registers only where a first timestamp can change its verdict: its
-	/// immediate successor and the groups past the edge. Walking every group between them
-	/// costs each parked publisher stream the whole backlog, enough for a 2s audio backlog
-	/// at 400 groups/s to pin a publisher's runtime and starve its connection.
+	/// An appended group wakes only the parked reads whose expiry it crosses, plus the
+	/// newest, whose successor it is. A 2s audio backlog at 400 groups/s parks ~800 reads,
+	/// and waking every one per append pins a publisher's runtime.
 	#[test]
-	fn a_parked_read_ignores_first_frames_between_its_successor_and_the_edge() {
+	fn an_append_wakes_only_the_parked_reads_it_expires() {
+		struct Count(std::sync::atomic::AtomicUsize);
+		impl std::task::Wake for Count {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				self.0.fetch_add(1, Ordering::SeqCst);
+			}
+		}
+
+		const FRAME: u64 = 2500; // micros, one Opus frame per group
+		const PARKED: u64 = 64;
+		let producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_millis(200)));
+		// Left open, so every read parks instead of ending.
+		let _open: Vec<_> = (0..PARKED)
+			.map(|i| {
+				let mut group = producer.append_group().unwrap();
+				group
+					.write_frame(
+						Timestamp::from_micros(i * FRAME).unwrap(),
+						bytes::Bytes::from_static(b"x"),
+					)
+					.unwrap();
+				group
+			})
+			.collect();
+
+		let counts: Vec<_> = (0..PARKED)
+			.map(|_| Arc::new(Count(std::sync::atomic::AtomicUsize::new(0))))
+			.collect();
+		let waiters: Vec<_> = counts
+			.iter()
+			.map(|count| kio::Waiter::new(std::task::Waker::from(count.clone())))
+			.collect();
+		let mut held: Vec<_> = waiters
+			.iter()
+			.map(|waiter| {
+				let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(waiter) else {
+					panic!("every group is cached");
+				};
+				assert!(matches!(group.poll_read_frame(waiter), Poll::Ready(Ok(Some(_)))));
+				group
+			})
+			.collect();
+		for (group, waiter) in held.iter_mut().zip(&waiters) {
+			assert!(group.poll_read_frame(waiter).is_pending(), "nothing is stale yet");
+		}
+		for count in &counts {
+			count.0.store(0, Ordering::SeqCst);
+		}
+
+		// Read `i` can reach its successor's start, `(i + 1) * FRAME`, so an edge at 210ms
+		// puts reads 0..=3 a full 200ms behind and leaves every later one in budget.
+		let mut next = producer.append_group().unwrap();
+		next.write_frame(
+			Timestamp::from_micros(210_000).unwrap(),
+			bytes::Bytes::from_static(b"x"),
+		)
+		.unwrap();
+
+		let woken: Vec<_> = (0..PARKED)
+			.filter(|&i| counts[i as usize].0.load(Ordering::SeqCst) > 0)
+			.collect();
+		assert_eq!(
+			woken,
+			vec![0, 1, 2, 3, PARKED - 1],
+			"only the expired reads and the newest wake"
+		);
+
+		for (i, (group, waiter)) in held.iter_mut().zip(&waiters).enumerate() {
+			let result = group.poll_read_frame(waiter);
+			if i < 4 {
+				assert!(matches!(result, Poll::Ready(Ok(None))), "read {i} expired: {result:?}");
+			} else {
+				assert!(result.is_pending(), "read {i} is in budget: {result:?}");
+			}
+		}
+	}
+
+	/// A parked read wakes only once the edge reaches its deadline: its successor's start
+	/// plus its budget. A first frame below the edge moves nothing, and a new edge short of
+	/// the deadline cannot convict it, so neither wakes it.
+	#[test]
+	fn a_parked_read_wakes_only_once_the_edge_reaches_its_deadline() {
 		let mut producer = track_producer("test", None);
 		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(10)));
 		let mut head = producer.append_group().unwrap();
@@ -5892,14 +5950,22 @@ mod test {
 			"a first frame below the edge moves neither the reach nor the edge"
 		);
 
-		// Control: a first frame past the edge is still observed.
 		let mut beyond = producer.append_group().unwrap();
-		assert!(next.as_mut().poll(&mut cx).is_pending());
-		woken.store(false, Ordering::SeqCst);
 		beyond
 			.write_frame(Timestamp::from_millis(4000).unwrap(), bytes::Bytes::from_static(b"x"))
 			.unwrap();
-		assert!(woken.load(Ordering::SeqCst), "a new edge wakes the parked read");
+		assert!(!woken.load(Ordering::SeqCst), "a new edge short of the deadline");
+
+		// The edge's own later frame reaches the deadline.
+		beyond
+			.write_frame(Timestamp::from_millis(11_000).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		assert!(
+			woken.load(Ordering::SeqCst),
+			"the edge reaching the deadline wakes the read"
+		);
+		let result = next.as_mut().poll(&mut cx);
+		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
 	}
 
 	/// An aborted successor hands the reach to the next group, which sits below the edge

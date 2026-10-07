@@ -41,7 +41,6 @@ a published `@moq/watch` break.
 
 ## Required
 
-- [Expiry wakes](/quest/m0/expiry-wakes.md) - an appended group wakes only the parked reads it expires, so a 2.5 ms-frame publisher with 2 s of parked serves stays near idle and the Python and Go interop rows pass
 - [Draft-22 LOCATION_FILTER](/quest/m0/ietf-location-filter-22.md) - moqt-22 LOCATION_FILTER carries its type instead of a Length in Rust and JS, so a draft-22 peer reads our Next Object correctly
 - [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
 - [Prefix route fronts](/quest/m0/prefix-route-fronts.md) - a prefix route cannot be made to mint one front per requested path
