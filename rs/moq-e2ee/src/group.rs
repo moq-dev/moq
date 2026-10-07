@@ -164,12 +164,12 @@ impl Consumer {
 			};
 			// The transport cursor already advanced past the frame just read; its index is
 			// the nonce half, so a group resumed above frame 0 still authenticates.
-			let index = inner.index().checked_sub(1).ok_or(Error::Identity)?;
-			let result =
+			let result = inner.index().checked_sub(1).ok_or(Error::Identity).and_then(|index| {
 				self.key
 					.lock()
 					.expect("track key")
-					.open(self.sequence, index, &frame.payload, MAX_GROUPED_PAYLOAD);
+					.open(self.sequence, index, &frame.payload, MAX_GROUPED_PAYLOAD)
+			});
 			(frame.timestamp, result)
 		};
 		match opened {

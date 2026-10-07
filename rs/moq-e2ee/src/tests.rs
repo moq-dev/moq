@@ -640,11 +640,13 @@ fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 	assert!(demand.is_used());
 
 	// One authentic frame, then silence. The group and the track stay open.
-	let mut open = pair.producer.append_group().unwrap();
-	open.write_frame(ms(1), b"ok").unwrap();
-
 	let name: Name = pair.net.name().parse().unwrap();
 	let key = pair.generation.key_bytes(&name, Domain::Group).unwrap();
+	let mut open = pair.net.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+	let open_demand = open.demand();
+	open.write_frame(ms(1), protect(&key, 0, 0, b"ok", MAX_GROUPED_PAYLOAD).unwrap())
+		.unwrap();
+
 	let mut payload = protect(&key, 1, 0, b"nope", MAX_GROUPED_PAYLOAD).unwrap().to_vec();
 	payload[0] ^= 1;
 	let mut bad = pair.net.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
@@ -695,6 +697,10 @@ fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 			.map(|r| r.unwrap_err().to_string()),
 		Poll::Ready("authentication".to_string())
 	);
+	assert!(
+		!open_demand.is_used(),
+		"sibling group demand stayed live after its woken read"
+	);
 	assert_eq!(
 		track
 			.poll(|waiter| pair.consumer.poll_recv_group(waiter))
@@ -712,6 +718,23 @@ fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 	drop(good);
 	drop(forged);
 	drop(open);
+}
+
+#[test]
+fn dropping_track_releases_demand_while_group_is_held() {
+	let mut pair = pair("video");
+	let demand = pair.net.demand();
+	let mut open = pair.producer.append_group().unwrap();
+	open.write_frame(ms(1), b"ok").unwrap();
+
+	let mut group = recv_group(&mut pair.consumer);
+	drop(pair.consumer);
+	assert!(!demand.is_used(), "a held group kept the track subscription");
+
+	// The held group is not failed by the unsubscribe.
+	assert_eq!(read_frame(&mut group).plaintext, &b"ok"[..]);
+	open.write_frame(ms(2), b"next").unwrap();
+	assert_eq!(read_frame(&mut group).plaintext, &b"next"[..]);
 }
 
 #[test]

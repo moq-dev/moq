@@ -63,6 +63,11 @@ impl Terminal {
 		slot.inner.take();
 	}
 
+	/// Drop the subscription without failing, so held groups keep reading.
+	pub(crate) fn unsubscribe(&self) {
+		self.subscription.lock().expect("terminal").inner.take();
+	}
+
 	/// Poll `body` against the live subscription.
 	///
 	/// The subscriber is taken out for the poll so [`Self::fail`] does not nest

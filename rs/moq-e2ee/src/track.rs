@@ -254,6 +254,14 @@ impl Consumer {
 	}
 }
 
+// Groups share the terminal, so without this a held group would keep the
+// subscription, and publisher demand, alive after the track is dropped.
+impl Drop for Consumer {
+	fn drop(&mut self) {
+		self.terminal.unsubscribe();
+	}
+}
+
 impl fmt::Debug for Consumer {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("track::Consumer")
