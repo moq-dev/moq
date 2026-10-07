@@ -93,7 +93,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [JS request window](/quest/m1/js-request-window.md) - @moq/net grants MAX_REQUEST_ID as requests close, so a peer never stalls after ~21k requests
 - [Relay session limits](/quest/m1/relay-session-limits.md) - moq-relay sets per-session request limits, tighter for clients than peers, and the bindings name a refused request
 - [Churn with held subscriptions](/quest/m1/session-churn-held.md) - opening and closing a request costs the same with 1 or 1,024 held subscriptions
-- [Wide varint tests](/quest/m1/varint-test-gaps.md) - wide sequences and both varint forms are tested where they differ
 - [Export linger](/quest/m1/export-ts-linger.md) - `moq export ts --linger` fails on an export error while the broadcast is live, and lingers once it closes or is replaced
 - [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; the catalog entry and format may break in place, since no archives exist
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish

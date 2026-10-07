@@ -3,7 +3,7 @@ use std::{
 	collections::{BTreeSet, HashMap},
 	ops::{Bound, ControlFlow},
 	sync::{
-		Arc,
+		Arc, Mutex,
 		atomic::{AtomicU64, AtomicUsize, Ordering},
 	},
 	task::{Context, Poll, ready},
@@ -2256,10 +2256,15 @@ struct Subscription<S: crate::transport::poll::Session> {
 ///
 /// A group is pending from the moment it is queued until its stream opens, or it gives
 /// up first (expired, or the open failed) and is never counted.
+///
+/// `unencodable` rides along because every group machine and the run loop already share
+/// this handle. A header that cannot be encoded writes nothing, so the group-stream
+/// reset is not a stream the subscriber can pin to this subscription.
 #[derive(Default)]
 struct Opens {
 	pending: AtomicU64,
 	opened: AtomicU64,
+	unencodable: Mutex<Option<Error>>,
 }
 
 impl<S: crate::transport::poll::Session> Subscription<S> {
@@ -2298,6 +2303,21 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 	fn track_priority_current(&mut self) -> u8 {
 		self.track_priority_seen = *self.track_priority.read();
 		self.track_priority_seen
+	}
+
+	/// Remember an encode failure the group stream could not carry.
+	///
+	/// The first one wins. The run loop resets the subscribe stream with it.
+	fn note_unencodable(&self, err: &Error) {
+		let mut slot = self.opens.unencodable.lock().unwrap();
+		if slot.is_none() {
+			*slot = Some(err.clone());
+		}
+	}
+
+	/// Take the encode failure, if a group recorded one.
+	fn take_unencodable(&self) -> Option<Error> {
+		self.opens.unencodable.lock().unwrap().take()
 	}
 
 	/// Test shim: drive one group stream like the old `serve_group`, surfacing the
@@ -2440,6 +2460,12 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 
 		// Drive the in-flight group machines; completions just retire.
 		let _ = self.children.poll(waiter);
+		// A group whose header does not fit this peer's varint wrote nothing. The
+		// reset is on a stream the subscriber never tied to this subscription, so
+		// forward it here or the reader waits forever.
+		if let Some(err) = self.ctx.take_unencodable() {
+			return Poll::Ready(Err(err));
+		}
 
 		// The first group waits for the source to resolve where its feed starts; datagrams
 		// keep flowing meanwhile.
@@ -2892,9 +2918,13 @@ impl<S: crate::transport::poll::Session> kio::Task for GroupServe<S> {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		// The machine owns its outcome: the stream was aborted with the reason (or
-		// reset by the writer's Drop), which is all the subscriber sees.
-		ready!(self.poll_serve(waiter)).map(|()| ()).unwrap_or(());
+		// Old, Lagged, and Evicted reset the group stream, which is all the subscriber
+		// needs once the header is on the wire. An encode failure can write nothing, so
+		// that reset has no header to pin it to this subscription. The run loop reads
+		// it off the shared slot and resets the subscribe stream.
+		if let Err(err @ Error::Encode(_)) = ready!(self.poll_serve(waiter)) {
+			self.ctx.note_unencodable(&err);
+		}
 		Poll::Ready(())
 	}
 }
