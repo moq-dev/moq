@@ -253,7 +253,7 @@ mod tests {
 	#[error("stream stopped with {0}")]
 	struct Stopped(u32);
 
-	impl web_transport_trait::Error for Stopped {
+	impl crate::transport::Error for Stopped {
 		fn session_error(&self) -> Option<(u32, String)> {
 			None
 		}
@@ -263,7 +263,7 @@ mod tests {
 		}
 	}
 
-	impl web_transport_trait::poll::SendStream for Stopped {
+	impl crate::transport::poll::SendStream for Stopped {
 		type Error = Self;
 
 		fn poll_write(&mut self, _: &mut Context<'_>, _: &[u8]) -> Poll<Result<usize, Self::Error>> {

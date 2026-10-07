@@ -86,9 +86,9 @@ vector the 2026-09-30 cache-tiers audit kept:
 
 Kept from 2026-09-30: core links are configured and may skip PoPs; Warm and
 Cold collapse to one cost ([One route cost](/quest/m1/route-cost.md));
-`--hop` removal and One route cost land on their own. Decided 2026-10-03: a
-concrete path is a source's identity, whoever serves it
-([Selection](/quest/m1/cluster-routing/selection.md)).
+`--hop` removal and One route cost land on their own. Decided 2026-10-06: a
+path plus its [publisher epoch](/doc/concept/moq-lite.md#publisher-epochs) is
+a source's identity, whoever serves it.
 Anything specific to moq.pro's deployment is planned in moq.pro.
 
 ### Simulator findings
@@ -131,7 +131,6 @@ Once every child has landed:
 
 ## Required
 
-- [Selection](/quest/m1/cluster-routing/selection.md) - a broadcast under overlapping prefixes routes to one origin deterministically, and same-path origins are one source
 - [Multi-CDN endpoints](/quest/m1/cluster-routing/multi-cdn.md) - an endpoint holds sessions to several CDNs, uses its preferred one, and fails over to the next
 - [Simulate the split](/quest/m1/cluster-routing/sim.md) - moq.pro's simulator compares the route layer with path vector before the wire is written
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - ROUTE per origin node and path-less ANNOUNCE on one stream, loop-free by Babel feasibility
