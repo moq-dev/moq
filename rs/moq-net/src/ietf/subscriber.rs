@@ -3240,7 +3240,7 @@ where
 		let mut prior_group = None;
 		let mut first = true;
 		while let Some(object) = decode_fetch_object(stream, self.version, std::mem::take(&mut first)).await? {
-			if !object.subgroup_ok {
+			if !object.datagram && !object.subgroup_ok {
 				tracing::warn!("subgroup ID is not supported, dropping fill");
 				return Err(Error::Unsupported);
 			}
@@ -3249,6 +3249,21 @@ where
 			let group = resolve_fetch_group(self.version, prior_group, object.group)?;
 			if let Some(sequence) = group {
 				prior_group = Some(sequence);
+			}
+
+			if object.datagram {
+				// An absolute join spans whole groups, so a datagram among them is a group of
+				// its own: the head before it is complete, and the groups after it still fill.
+				// Any other fill is the one group, which a datagram cannot be.
+				if !matches!(joining, Some(JoiningFetch::Absolute { .. })) || group.is_none() {
+					tracing::debug!(?group, "a datagram group is not fetchable");
+					return Err(Error::NotFetchable);
+				}
+				end_fill_group(head, largest)?;
+				// Draft-16 on, where a datagram can appear, a fetch object has no status field.
+				let mut remaining = usize::try_from(stream.varint().await?).map_err(|_| Error::FrameTooLarge)?;
+				std::future::poll_fn(|cx| stream.poll_skip(cx, &mut remaining)).await?;
+				continue;
 			}
 
 			match head.as_ref().map(|(sequence, next, _)| (*sequence, *next)) {
@@ -3693,6 +3708,10 @@ where
 				tracing::warn!(sequence, "a group fetch continued past its end marker");
 				return Err(Error::ProtocolViolation);
 			}
+			if object.datagram {
+				tracing::debug!(sequence, "a datagram group is not fetchable");
+				return Err(Error::NotFetchable);
+			}
 			if !object.subgroup_ok {
 				tracing::warn!("subgroup ID is not supported, dropping group fetch");
 				return Err(Error::Unsupported);
@@ -3751,6 +3770,9 @@ where
 struct FetchedObject {
 	group: Option<u64>,
 	object: Option<u64>,
+	/// Draft-16 on lets a fetch carry an Object published as a datagram. A datagram group is
+	/// live-only, never cached, so it is never filled from a fetch.
+	datagram: bool,
 	subgroup_ok: bool,
 	properties: Option<Vec<u8>>,
 }
@@ -3777,6 +3799,7 @@ async fn decode_fetch_object<R: crate::transport::poll::RecvStream>(
 		return Ok(Some(FetchedObject {
 			group: Some(group),
 			object: Some(object),
+			datagram: false,
 			subgroup_ok: subgroup == 0,
 			properties: Some(properties),
 		}));
@@ -3795,13 +3818,6 @@ async fn decode_fetch_object<R: crate::transport::poll::RecvStream>(
 			priority,
 			properties,
 		}) => {
-			// Draft-16 on lets a fetch carry an Object published as a datagram, but a
-			// datagram group is live-only: never cached, so never filled from a fetch. Refusing
-			// it fails only this fetch.
-			if subgroup == ietf::FetchSubgroup::Datagram {
-				tracing::debug!(?group, ?object, "a datagram group is not fetchable");
-				return Err(Error::NotFetchable);
-			}
 			let inherits = group.is_none()
 				|| object.is_none()
 				|| priority.is_none()
@@ -3813,6 +3829,7 @@ async fn decode_fetch_object<R: crate::transport::poll::RecvStream>(
 			Some(FetchedObject {
 				group,
 				object,
+				datagram: subgroup == ietf::FetchSubgroup::Datagram,
 				subgroup_ok: matches!(
 					subgroup,
 					ietf::FetchSubgroup::Zero | ietf::FetchSubgroup::Prior | ietf::FetchSubgroup::Explicit(0)
@@ -3868,8 +3885,17 @@ fn advance_fill_group(
 		return Err(Error::Unsupported);
 	}
 
+	end_fill_group(head, largest)?;
+	open_fill_group(track, head, sequence)
+}
+
+/// Finish the group an absolute joining FETCH was writing, since a later group started.
+fn end_fill_group(
+	head: &mut Option<(u64, u64, crate::recv::Group)>,
+	largest: Option<ietf::Location>,
+) -> Result<(), Error> {
 	let Some((prev, _, producer)) = head.take() else {
-		return open_fill_group(track, head, sequence);
+		return Ok(());
 	};
 
 	if largest.is_some_and(|largest| prev >= largest.group) {
@@ -3879,7 +3905,7 @@ fn advance_fill_group(
 	}
 
 	producer.finish()?;
-	open_fill_group(track, head, sequence)
+	Ok(())
 }
 
 /// Ready once a finished subscription's data streams are accounted for: Stream Count of
@@ -8083,12 +8109,12 @@ mod stitch_tests {
 		}
 	}
 
-	/// One Object published as a datagram, as draft-16 on lets a fetch stream carry it.
-	fn datagram_object(sequence: u64) -> Vec<u8> {
+	/// A group's first fetch Object, with `group` as the wire's Group ID field.
+	fn first_object(subgroup: ietf::FetchSubgroup, group: u64, payload: &[u8]) -> Vec<u8> {
 		let mut buf = Vec::new();
 		ietf::FetchObject::Object {
-			subgroup: ietf::FetchSubgroup::Datagram,
-			group: Some(sequence),
+			subgroup,
+			group: Some(group),
 			object: Some(0),
 			priority: Some(0),
 			properties: None,
@@ -8096,10 +8122,62 @@ mod stitch_tests {
 		.encode(&mut crate::coding::Encoder::new(&mut buf, VERSION.into()), VERSION)
 		.unwrap();
 		crate::coding::Encoder::new(&mut buf, VERSION.into())
-			.varint(1u64)
+			.varint(payload.len() as u64)
 			.unwrap();
-		buf.extend_from_slice(b"d");
+		buf.extend_from_slice(payload);
 		buf
+	}
+
+	/// One Object published as a datagram, as draft-16 on lets a fetch stream carry it.
+	fn datagram_object(sequence: u64) -> Vec<u8> {
+		first_object(ietf::FetchSubgroup::Datagram, sequence, b"d")
+	}
+
+	/// An absolute join spans whole groups, so a datagram among them is skipped: the group
+	/// before it is complete, and the groups after it still fill and stitch into the tail.
+	#[moq_net_sim::test]
+	async fn an_absolute_join_skips_a_datagram_group() {
+		const START: u64 = 7;
+		const LIVE_GROUP: u64 = 9;
+		let largest = ietf::Location {
+			group: LIVE_GROUP,
+			object: 0,
+		};
+		// Group 8 went out as a datagram. From draft-18 on a later Group ID is an ascending
+		// delta, so 7, 8, 9 is 7, 0, 0.
+		let mut fill = fill_stream_for(FETCH, &[(START, &[b"g7-0"])], false);
+		fill.extend(first_object(ietf::FetchSubgroup::Datagram, 0, b"g8"));
+		fill.extend(first_object(ietf::FetchSubgroup::Zero, 0, b"g9-0"));
+
+		let h = Harness::new(Fill::Serving(None), vec![fill, tail_stream(LIVE_GROUP, 1, &[b"g9-1"])]).with_joining(
+			JoiningFetch::Absolute { group_id: START },
+			FETCH,
+			largest,
+		);
+		let mut consumer = h
+			.track
+			.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(60)));
+
+		let mut fill = h.stream().await;
+		let mut tail = h.stream().await;
+		h.subscriber.clone().recv_fill(&mut fill).await.expect("absolute fetch");
+		h.subscriber.clone().recv_group(&mut tail).await.expect("tail");
+
+		let mut groups = Vec::new();
+		for _ in 0..2 {
+			let (sequence, frames) = read_group(&mut consumer).await;
+			groups.push((
+				sequence,
+				frames.into_iter().map(|(_, payload)| payload).collect::<Vec<_>>(),
+			));
+		}
+		assert_eq!(
+			groups,
+			vec![
+				(START, vec![b"g7-0".to_vec()]),
+				(LIVE_GROUP, vec![b"g9-0".to_vec(), b"g9-1".to_vec()]),
+			]
+		);
 	}
 
 	/// A datagram group is never fetchable, so a group fetch answered with one fails as
