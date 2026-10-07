@@ -58,8 +58,8 @@ export interface Location {
  */
 export interface Info {
 	/**
-	 * Units per second for this track's frame timestamps, or omitted for an untimed track,
-	 * whose frames and datagrams carry no timestamp.
+	 * Units per second for this track's frame timestamps, or omitted (`undefined` or `null`,
+	 * which mean the same) for an untimed track, whose frames and datagrams carry no timestamp.
 	 *
 	 * There is no default: a timed track declares its scale, such as {@link Timescale.MILLI},
 	 * or {@link Timescale.MICRO} for media that needs sub-millisecond timing. Reported in
@@ -67,7 +67,7 @@ export interface Info {
 	 * without one (moq-lite before Lite05, or moq-transport without TIMESCALE) is untimed,
 	 * and stays untimed when served onward.
 	 */
-	timescale?: Timescale;
+	timescale?: Timescale | null;
 	/**
 	 * Publisher Max Age: how far behind the live edge a group may fall in media
 	 * timestamps, in milliseconds, before it is stale. Reported in TRACK_INFO (Lite05+)
@@ -109,7 +109,7 @@ function priorityByte(value: number): number {
 /** Fill in any unset {@link Info} fields with their defaults. */
 export function infoDefaults(info: Partial<Info> = {}): Info {
 	return {
-		timescale: info.timescale === undefined ? undefined : Timescale(info.timescale),
+		timescale: info.timescale == null ? undefined : Timescale(info.timescale),
 		maxAge: info.maxAge === undefined ? undefined : maxAgeMillis(info.maxAge),
 		priority: priorityByte(info.priority ?? DEFAULT_PRIORITY),
 	};
@@ -582,7 +582,7 @@ export class Producer {
 	accept(info: Partial<Info> = {}): this {
 		if (this.#state.closed.peek() !== undefined) return this;
 		const resolved = infoDefaults(info);
-		for (const { group } of this.#cache) hooks.bindGroupTimed(group, resolved.timescale !== undefined);
+		for (const { group } of this.#cache) hooks.bindGroupTimed(group, resolved.timescale != null);
 		this.#state.info.set(resolved);
 		// Propagate to any sink handed out before accept (the on-demand path).
 		for (const sink of this.#sinks) sink.info.set(resolved);
@@ -819,13 +819,13 @@ export class Producer {
 	// Hold a group to this track's timedness, once the track has committed it.
 	#bind(group: GroupProducer): void {
 		const info = this.#state.info.peek();
-		if (info) hooks.bindGroupTimed(group, info.timescale !== undefined);
+		if (info) hooks.bindGroupTimed(group, info.timescale != null);
 	}
 
 	// Refuse a datagram whose timedness disagrees with this track's.
 	#checkDatagram(timestamp: Timestamp | undefined): void {
 		const info = this.#state.info.peek();
-		if (info && (info.timescale !== undefined) !== (timestamp !== undefined)) throw new TimestampMismatch();
+		if (info && (info.timescale != null) !== (timestamp !== undefined)) throw new TimestampMismatch();
 	}
 
 	// Refuse a write once the track is closed, or at or past its declared end.
@@ -1185,7 +1185,7 @@ export class Subscriber {
 	// The newest servable group, when the track is known to be untimed.
 	#untimedStart(): number | undefined {
 		const info = this.#state.info.peek();
-		if (!info || info.timescale !== undefined) return undefined;
+		if (!info || info.timescale != null) return undefined;
 		const timeline = this.#state.timeline;
 		for (let i = timeline.length - 1; i >= 0; i--) {
 			if (!(timeline[i].closed.peek() instanceof Error)) return timeline[i].sequence;

@@ -363,7 +363,8 @@ export class Publisher {
 			const info = await track.info();
 			// A Timestamp goes out only when this SUBSCRIBE_OK actually carries TIMESCALE.
 			// Drafts 14-16 never write that property, so their objects stay unstamped.
-			const timescale = msg.propertiesWanted && Properties.sendsTimescale(version) ? info.timescale : undefined;
+			const timescale =
+				msg.propertiesWanted && Properties.sendsTimescale(version) ? (info.timescale ?? undefined) : undefined;
 			// The model ranks higher-first, the IETF wire lower-first. Every group this
 			// subscription serves carries the same publisher priority, which is what lets a
 			// relay prefer catalog and audio over video when it has no subscriber preference
@@ -425,7 +426,7 @@ export class Publisher {
 						// send it. We serve the newest group first, matching moq-lite.
 						{
 							// An untimed track declares none, so it stays untimed downstream.
-							timescale: info.timescale,
+							timescale: info.timescale ?? undefined,
 							priority: publisherPriority,
 							groupOrder: Properties.DESCENDING,
 							maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(info.maxAge),

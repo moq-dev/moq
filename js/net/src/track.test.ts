@@ -2048,6 +2048,19 @@ test("a track is untimed unless it declares a timescale", () => {
 	expect(infoDefaults({ timescale: Timescale.MICRO }).timescale).toBe(Timescale.MICRO);
 });
 
+test("a null timescale declares an untimed track, like an omitted one", () => {
+	expect(infoDefaults({ timescale: null }).timescale).toBeUndefined();
+
+	const producer = new TrackProducer("test").accept({ timescale: null });
+	const group = producer.appendGroup();
+	expect(() => group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(1) })).toThrow(
+		TimestampMismatch,
+	);
+	group.writeFrame({ payload: enc.encode("y") });
+	expect(() => producer.appendDatagram(Timestamp.fromMillis(1), enc.encode("x"))).toThrow(TimestampMismatch);
+	producer.appendDatagram(undefined, enc.encode("y"));
+});
+
 test("a frame whose timedness disagrees with its track is refused", async () => {
 	const timed = new TrackProducer("timed").accept({ timescale: Timescale.MILLI });
 	const group = timed.appendGroup();
