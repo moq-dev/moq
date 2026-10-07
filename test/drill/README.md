@@ -30,7 +30,7 @@ checks that what the fault owned was released.
 | `relay_killed_mid_group_aborts_then_resumes` | The relay's runtime is dropped mid-group: every task and socket at once, no `CONNECTION_CLOSE` | the error the interrupted group aborted with, and both reconnect loops reporting `Disconnected` | the interrupted group fails rather than reporting a clean finish, and after the relay returns the same handles resume delivery |
 | `interrupted_publisher_republishes_new_content` | A publisher vanishes with no finish and no unannounce, then a new one publishes the same name | the withdrawal of the dead publisher's broadcast | the name stops being announced, and the republished name serves the new publisher's content rather than the dead one's cache |
 | `bursts_cross_a_cluster` | Bursts of one-frame groups cross from an origin relay to a clustered edge relay; the subscriber reads newest-only and FETCHes every group it misses | how many groups missed the live subscription, which live groups were reset, and the slowest group's latency | every group arrives, live or by FETCH, within 10s of being written; a lost group fails by name (FETCH failed, FETCH unanswered, live group stalled), and the newest group comes live |
-| `bursts_cross_a_flapping_peer` | The same bursts, with the peer link cut as the second burst is written and restored once the edge withdraws the route | how long the link was down before the withdrawal, and the reads and FETCHes the flap failed | the route comes back and every group still arrives within 10s of being written; only a failure the flap caused is retried, on the restored route, so a hang on the dead one or a withdrawal with the link up still fails |
+| `bursts_cross_a_flapping_peer` | The same bursts, with the peer link cut as the second burst is written and restored once the edge withdraws the route | how long the link was down before the withdrawal, and the reads and FETCHes the flap failed | the route comes back and every group still arrives within 10s of being written, or of the route's return when it arrives after it; only a failure the flap caused is retried, on the restored route, so a hang on the dead one past the relays' idle timeout or a withdrawal with the link up still fails |
 | `no_publisher_never_delivers` | none: the negative control | - | with nothing publishing, nothing is announced and no broadcast resolves |
 
 A moq publisher is never blocked by a slow reader: `write_frame` is synchronous
@@ -87,8 +87,10 @@ loopback lane keeps the defaults.
 `bursts_cross_a_flapping_peer` cuts the peer link with `Shaper::cut`, which
 drops every datagram both ways until it is restored, so its loopback lane puts a
 shaper on that link too, one that forwards untouched. The cut lasts until the
-subscriber sees the route withdrawn, which the relays' two-second idle timeout
-bounds, rather than for a fixed time.
+subscriber sees the route withdrawn, which the relays' default 10s idle timeout
+bounds, rather than for a fixed time. The relays keep that default because a
+short one also bounds their side of an impaired handshake, which can go quiet
+for seconds between a client's backed-off retransmits.
 
 It is a datagram relay, not an HTTP or TCP proxy, neither of which can impair
 QUIC. It needs no capabilities, works the same on macOS and Linux, and touches

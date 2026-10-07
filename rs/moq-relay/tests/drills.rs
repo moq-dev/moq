@@ -864,9 +864,10 @@ lanes!(bursts_cross_a_cluster);
 /// through it, the way an app recovering a control channel would.
 ///
 /// The grading stays as strict: the publisher keeps every group, so each still
-/// arrives within [`SETTLE`] of being written or fails the drill by name. Only a
-/// failure the flap caused is retried; a read or FETCH on the dead route that
-/// never resolves, or a withdrawal while the link was up, still fails it.
+/// arrives within [`SETTLE`] of being written, or of the route coming back when it
+/// arrives after that, or fails the drill by name. Only a failure the flap caused
+/// is retried; a read or FETCH on the dead route that outlasts the relays' idle
+/// timeout, or a withdrawal while the link was up, still fails it.
 async fn bursts_cross_a_flapping_peer(lane: Lane) {
 	cross_cluster(lane, PeerLink::Flapping).await
 }
@@ -908,10 +909,13 @@ impl Flap {
 }
 
 async fn cross_cluster(lane: Lane, link: PeerLink) {
-	// Both relays get the drills' QUIC tuning, so a cut peer link idles out
-	// within the drill's budget rather than after the 10s default.
+	// The relays keep the default idle timeout. The drills' 2s one would also
+	// bound each relay's side of an impaired handshake, which can sit silent
+	// that long between the client's backed-off retransmits. So a cut peer link
+	// idles out only after `relay_idle`, which the flap's waits allow for.
 	let mut config = relay_config(None);
-	config.quic = credit(lane, quic());
+	config.quic = credit(lane, config.quic);
+	let relay_idle = config.quic.idle_timeout;
 	let origin = RelayHost::start(config).await;
 	let seed = seed(lane);
 	let peer = match (link, lane) {
@@ -925,7 +929,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	let mut peer_url = peer.url.clone();
 	peer_url.set_path("/");
 	let mut config = relay_config(None);
-	config.quic = credit(lane, quic());
+	config.quic = credit(lane, config.quic);
 	config.connect = dial();
 	// Retry forever: a give-up after a slow impaired handshake would look exactly
 	// like the never-redialed regression, and a stall still fails the drill.
@@ -1011,11 +1015,21 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	let mut slowest = (Duration::ZERO, 0);
 	let mut generation = 0u64;
 	let mut subscription_up = true;
+	// When the route was restored after a flap. A group that settles after it is
+	// timed from it, since the publisher could not reach the subscriber before.
+	let mut restored_at = None;
+	// How long one read or FETCH may take. A flap leaves those on the dead route
+	// waiting until the edge's peer session idles out, so they get that much more;
+	// one that outlasts even that hung on the dead route and still fails the drill.
+	let wait = match link {
+		PeerLink::Steady => SETTLE,
+		PeerLink::Flapping => SETTLE + relay_idle,
+	};
 	let fetch =
 		|pending: &mut tokio::task::JoinSet<_>, track: &moq_net::track::Consumer, sequence: u64, generation: u64| {
 			let fetching = track.fetch_group(sequence, None);
 			pending.spawn(async move {
-				let fetched = tokio::time::timeout(SETTLE, async {
+				let fetched = tokio::time::timeout(wait, async {
 					let group = fetching.await.map_err(|err| err.to_string())?;
 					read_payload(group, sequence).await
 				});
@@ -1028,9 +1042,9 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 			});
 		};
 
-	// A margin past each settle task's own [`SETTLE`] timeout, so a group that
-	// times out is reported by name rather than as a generic stall.
-	let step_timeout = SETTLE + Duration::from_secs(1);
+	// A margin past each settle task's own timeout, so a group that times out is
+	// reported by name rather than as a generic stall.
+	let step_timeout = wait + Duration::from_secs(1);
 	while (outcomes.len() as u64) < total {
 		let step = tokio::time::timeout(step_timeout, async {
 			tokio::select! {
@@ -1075,7 +1089,8 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 			}
 			Step::Settled(sequence, outcome, _) => {
 				live.remove(&sequence);
-				let late = written[sequence as usize].elapsed();
+				let since = written[sequence as usize].max(restored_at.unwrap_or(written[sequence as usize]));
+				let late = since.elapsed();
 				slowest = slowest.max((late, sequence));
 				outcomes.insert(sequence, outcome);
 			}
@@ -1090,6 +1105,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 					}
 					(false, _) => panic!("the route was withdrawn while the peer link was up"),
 					(true, Flap::Withdrawn { cut }) => {
+						restored_at = Some(tokio::time::Instant::now());
 						reader = subscribe(&subscribed, "live").await;
 						generation += 1;
 						subscription_up = true;
@@ -1122,7 +1138,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 				if claimed.insert(sequence) {
 					live.insert(sequence);
 					pending.spawn(async move {
-						let outcome = match tokio::time::timeout(SETTLE, read_payload(group, sequence)).await {
+						let outcome = match tokio::time::timeout(wait, read_payload(group, sequence)).await {
 							Ok(Ok(())) => Outcome::Live,
 							Ok(Err(err)) => Outcome::Failed(err),
 							Err(_) => Outcome::Stalled,
