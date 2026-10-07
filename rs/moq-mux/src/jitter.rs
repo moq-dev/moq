@@ -73,11 +73,16 @@ pub(crate) enum Push {
 /// whose clock is acquired the same way, though never ahead of a deadline already given
 /// out. So does a skip after which a frame would be held more than a delay past everything
 /// queued: its timeline jumped ahead, as when the skipped groups held a marker the
-/// publisher shed. Every track's next frame runs on it: one crossing the same restart joins
-/// it when the frame lands on its clock, neither late nor held more than a delay past
-/// everything queued, and opens another otherwise. Before anything has gone out there is
-/// nothing to keep in step with, so a restart there keeps the clock. No two tracks are
-/// ever on different clocks.
+/// publisher shed. How far ahead of its decode time the source sends each track belongs to
+/// its mux and survives a restart, so the new clock does not wait to hear from a track the
+/// previous one measured: it is anchored late enough that the track sent latest keeps the
+/// delay when it gets there. A track that has
+/// not reached the restart stays on the previous generation while its frames land there.
+/// One crossing the same restart joins the new generation when the frame lands on its
+/// clock, neither late nor held more than a delay past everything queued, and opens another
+/// otherwise. Before anything has gone out there is nothing to keep in step with, so a
+/// restart there keeps the clock. Generations go out in turn, so no two tracks are ever on
+/// different clocks at once.
 ///
 /// The clock follows the source's: a source clock running slower than ours would make
 /// every frame late in the end, and a faster one would hold more and more. So the clock
@@ -100,6 +105,8 @@ pub(crate) struct Buffer<K, T> {
 	replay: bool,
 	/// The clock every frame is pushed under.
 	clock: Option<Clock>,
+	/// The generation before it, for a track the restart has not reached yet.
+	previous: Option<Clock>,
 	/// The next generation's frames, held while its clock is acquired.
 	acquire: Option<Acquire<K, T>>,
 	tracks: BTreeMap<K, Track<T>>,
@@ -112,6 +119,11 @@ pub(crate) struct Buffer<K, T> {
 	released: bool,
 	/// What the clock is steered on, since it last started.
 	steer: Steer<K>,
+	/// Each track's slack in the last steering step, in seconds, against the others'. How far
+	/// ahead of its decode time a source sends each track belongs to its mux, not to one
+	/// generation, so a new generation keeps the track sent latest at the delay even before
+	/// that track reaches it.
+	leads: BTreeMap<K, f64>,
 	timer: Option<Pin<Box<Sleep>>>,
 	dropped: u64,
 	/// Steps at which the source's clock ran further off ours than the clock may follow.
@@ -160,7 +172,7 @@ impl<K: Ord, T> Acquire<K, T> {
 	/// The frame to anchor on: each track's freshest frame (the one read least behind its
 	/// decode time) is that track's slack less its queueing, and of those, the one with the least
 	/// slack, so the track sent latest against its decode time still has the delay.
-	fn fresh(&self) -> &Arrival<T> {
+	fn fresh(&self) -> (&K, &Arrival<T>) {
 		let behind = |frame: &Arrival<T>| since(self.since, frame.read) - frame.decode.as_nanos() as i128;
 		let mut freshest: BTreeMap<&K, &Arrival<T>> = BTreeMap::new();
 		for (key, frame) in &self.frames {
@@ -170,8 +182,8 @@ impl<K: Ord, T> Acquire<K, T> {
 			}
 		}
 		freshest
-			.into_values()
-			.max_by_key(|frame| behind(frame))
+			.into_iter()
+			.max_by_key(|(_, frame)| behind(frame))
 			.expect("an acquisition holds a frame")
 	}
 
@@ -179,7 +191,7 @@ impl<K: Ord, T> Acquire<K, T> {
 	/// frame's clock, since waiting longer would drop it, and a delay after it began at the
 	/// latest.
 	fn end(&self, delay: Duration) -> Instant {
-		let fresh = self.fresh();
+		let (_, fresh) = self.fresh();
 		let due = |frame: &Arrival<T>| {
 			let ahead = frame.decode.as_nanos() as i128 - fresh.decode.as_nanos() as i128;
 			offset(fresh.read + delay, ahead)
@@ -254,12 +266,14 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			delay,
 			replay: false,
 			clock: None,
+			previous: None,
 			acquire: None,
 			tracks: BTreeMap::new(),
 			horizon: None,
 			expect: BTreeSet::new(),
 			released: false,
 			steer: Steer::default(),
+			leads: BTreeMap::new(),
 			timer: None,
 			dropped: 0,
 			out_of_tolerance: 0,
@@ -294,11 +308,27 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			self.hold(key, arrival);
 			return Ok(Push::Queued);
 		};
+		if let Some(previous) = self.lagging(&key, &arrival) {
+			let deadline = self.deadline(&previous, arrival.decode);
+			return Ok(self.queue(key, arrival, previous.generation, deadline, false));
+		}
 		let deadline = self.deadline(&clock, arrival.decode);
 		if self.released && !self.delay.is_zero() {
 			self.steer(&key, deadline, &arrival)?;
 		}
 		Ok(self.queue(key, arrival, clock.generation, deadline, false))
+	}
+
+	/// The previous generation's clock, for a frame of a track the restart that opened the
+	/// current one has not reached yet: still on the previous generation, crossing no restart,
+	/// and on that clock.
+	fn lagging(&self, key: &K, arrival: &Arrival<T>) -> Option<Clock> {
+		let previous = self.previous?;
+		let track = self.tracks.get(key)?;
+		let lags = track.generation == previous.generation
+			&& track.restart == arrival.restart
+			&& self.lands(self.deadline(&previous, arrival.decode), arrival.arrived);
+		lags.then_some(previous)
 	}
 
 	/// Whether a frame moves its track off the clock: a restart, unless the track is crossing
@@ -348,14 +378,17 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			return;
 		};
 		let acquiring = !self.replay && !self.delay.is_zero();
-		let fresh = match acquiring {
+		let (key, fresh) = match acquiring {
 			true => acquire.fresh(),
-			false => &acquire.frames.first().expect("an acquisition holds a frame").1,
+			false => {
+				let (key, frame) = acquire.frames.first().expect("an acquisition holds a frame");
+				(key, frame)
+			}
 		};
 		let mut clock = Clock {
 			generation: acquire.generation,
 			anchor: match acquiring {
-				true => fresh.read,
+				true => fresh.read + self.unheard_lag(&acquire, key),
 				false => fresh.arrived,
 			},
 			base: fresh.decode,
@@ -375,7 +408,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		{
 			clock.anchor += horizon - kept;
 		}
-		self.clock = Some(clock);
+		self.previous = self.clock.replace(clock);
 		self.steer = Steer::default();
 		for (key, frame) in acquire.frames {
 			let (deadline, stale) = self.judge(&clock, &frame, acquiring);
@@ -473,6 +506,9 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			return Ok(());
 		};
 		let floor = self.steer.floor.take().expect("a floor");
+		for (key, (phase, _)) in &floor.tracks {
+			self.leads.insert(key.clone(), *phase);
+		}
 		let (phase, at) = floor
 			.tracks
 			.into_values()
@@ -560,9 +596,30 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		self.acquire.as_ref().map(|acquire| self.ends(acquire))
 	}
 
-	/// Whether every track it expects has delivered a frame to `acquire`.
+	/// Whether every track it expects has delivered a frame to `acquire`, or, once a clock has
+	/// run, has a lead from it that says how much later than the others it is sent.
 	fn heard(&self, acquire: &Acquire<K, T>) -> bool {
-		self.expect.iter().all(|key| acquire.tracks.contains_key(key))
+		let known = |key: &K| self.clock.is_some() && self.leads.contains_key(key);
+		self.expect
+			.iter()
+			.all(|key| acquire.tracks.contains_key(key) || known(key))
+	}
+
+	/// How much later than `fresh`'s track the latest-sent expected track that `acquire` has
+	/// not heard from is sent, by the leads the previous generation measured: anchoring that
+	/// much later keeps that track at the delay when it reaches the new generation.
+	fn unheard_lag(&self, acquire: &Acquire<K, T>, fresh: &K) -> Duration {
+		let Some(lead) = self.leads.get(fresh) else {
+			return Duration::ZERO;
+		};
+		let lag = self
+			.expect
+			.iter()
+			.filter(|key| !acquire.tracks.contains_key(key))
+			.filter_map(|key| self.leads.get(key))
+			.map(|other| lead - other)
+			.fold(0.0, f64::max);
+		Duration::from_secs_f64(lag)
 	}
 
 	/// When `acquire` ends: a track not yet heard from may be the one sent latest, so until
@@ -645,6 +702,8 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	/// Drop every queued frame and the clock, so the next frame starts it afresh.
 	pub fn clear(&mut self) {
 		self.clock = None;
+		self.previous = None;
+		self.leads.clear();
 		self.acquire = None;
 		self.tracks.clear();
 		self.horizon = None;
@@ -919,6 +978,56 @@ mod tests {
 		tokio::time::advance(Duration::from_millis(20)).await;
 		assert_eq!(released(&mut buffer), [("a5020", 1)]);
 		assert_eq!(buffer.dropped(), 0);
+	}
+
+	/// A track sent further behind than the new generation's acquisition lasts crosses the
+	/// restart after the new clock is set. The new clock keeps the lead the previous
+	/// generation measured for it, so its frames land there, and the frames it sends before
+	/// crossing stay on the previous generation: nothing is dropped and no third generation
+	/// opens.
+	#[tokio::test(start_paused = true)]
+	async fn a_track_crossing_after_the_new_clock_keeps_its_lead() {
+		// The audio is sent this far behind the video, more than two delays.
+		const LAG: u64 = 300;
+		let start = Instant::now();
+		let mut buffer = Buffer::new(DELAY);
+		buffer.expect([1, 2]);
+
+		// (read, track, restarts, decode), every 100 ms of decode time: four seconds, so the
+		// clock is steered and the leads measured, then a restart onto a timeline 15 seconds on.
+		let mut frames = Vec::new();
+		for step in 0..40 {
+			frames.push((step * 100, 1, 0, 1_000 + step * 100));
+		}
+		for step in 0..=(LAG / 100 + 39) {
+			frames.push((step * 100, 2, 0, 1_000 - LAG + step * 100));
+		}
+		for step in 0..20 {
+			let decode = 20_000 + step * 100;
+			frames.push((4_000 + step * 100, 1, 1, decode));
+			frames.push((4_000 + step * 100 + LAG, 2, 1, decode));
+		}
+		frames.sort();
+
+		let mut out = Vec::new();
+		for (read, key, restart, decode) in frames {
+			let at = start + Duration::from_millis(read);
+			tokio::time::advance(at - Instant::now()).await;
+			out.extend(released(&mut buffer).into_iter().map(|(_, generation)| generation));
+			let frame = after(restart, arrival(at, decode, "frame"));
+			assert_eq!(
+				buffer.push(key, frame).unwrap(),
+				Push::Queued,
+				"track {key} at {decode}"
+			);
+		}
+		tokio::time::advance(Duration::from_secs(2)).await;
+		out.extend(released(&mut buffer).into_iter().map(|(_, generation)| generation));
+
+		assert_eq!(buffer.dropped(), 0);
+		assert_eq!(out.iter().filter(|&&generation| generation == 0).count(), 83);
+		assert_eq!(out.iter().filter(|&&generation| generation == 1).count(), 40);
+		assert_eq!(out.len(), 123, "a third generation opened, or a frame never went out");
 	}
 
 	/// A skipped group whose timeline carried on keeps the clock: a frame it made late is

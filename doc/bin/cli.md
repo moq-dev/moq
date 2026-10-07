@@ -129,10 +129,11 @@ SI matches the selection by DVB `service_id`, which is assumed to equal the PAT
 moq --connect https://relay.example.com/anon --broadcast event.hang import ts --program all < mux.ts
 ```
 
-MPEG-TS export restarts its clock and table cadence after a declared marker,
-discarding the old mux buffer. The first new clock packet signals the break and
-stdout pacing re-anchors. Every rendition joins the new program generation;
-no track is fenced across the marker.
+MPEG-TS export starts a new clock after a declared marker, and the first new
+clock packet signals the break. Each track goes out on the old clock until it
+reaches the marker, then joins the new one. The new clock keeps each track's
+lead over the others, so a track the source sends later than the rest crosses
+without losing frames. No track is fenced across the marker.
 
 MPEG-TS export frames AAC as ADTS, which labels only the AAC Main, LC, SSR,
 and LTP profiles. HE-AAC and HE-AACv2 go out as their AAC-LC core, and decoders
