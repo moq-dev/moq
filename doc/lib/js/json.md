@@ -14,7 +14,7 @@ reader will not pick it up.
 
 - **Snapshot**: lossy latest value, with RFC 7396 merge-patch deltas. A delta before any snapshot is an error.
 - **Stream**: lossless append-log in a single group. A reader that falls behind fails the read rather than resuming mid-log.
-- **Window**: a bounded run of records a reader can join at any point. Trimming a record is explicit, so a reader that was keeping up is not handed that record again when the publisher rolls a group.
+- **Window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice.
 
 Both sides choose the same compression, `"none"` or `"deflate"`. A value is
 stamped when written, unless you pass its capture time.

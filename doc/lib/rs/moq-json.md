@@ -15,7 +15,7 @@ generic catalog reader will not pick it up.
 
 - **snapshot**: lossy latest value, with RFC 7396 merge-patch deltas. An unchanged update publishes nothing. Several owners can edit their own keys in place instead of clobbering one document.
 - **stream**: lossless append-log in a single group. A reader that falls behind fails the read rather than resuming mid-log.
-- **window**: a bounded run of records a reader can join at any point. Trimming a record is explicit, so a reader that was keeping up is not handed that record again when the publisher rolls a group.
+- **window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice.
 
 Both sides choose the same compression. A value is stamped when written,
 unless it carries its capture time.

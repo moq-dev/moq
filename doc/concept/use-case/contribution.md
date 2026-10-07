@@ -1,6 +1,6 @@
 ---
 title: MoQ vs RTMP/SRT
-description: Pull-based contribution, on-demand encoding, and restarts that take the name
+description: Pull-based contribution, on-demand encoding, and failover
 ---
 
 # MoQ vs RTMP/SRT
@@ -22,14 +22,14 @@ That matters for long-tail content: hundreds of security cameras uploading
 a captions track backed by an expensive model runs only while someone has
 captions on.
 
-## Restarts take the name
+## Failover and restarts
 
-A publisher announces an [epoch](/concept/moq-lite#publisher-epochs) naming the
-instance behind a broadcast. Replicas of that instance, announced with the same
-epoch, fail over mid-group. A restart mints a new epoch, and viewers switch to
-it instead of stitching its group numbers onto the old run. `moq` and
-`moqsink` mint a fresh epoch per run. A second process publishing the same name
-is a newer epoch, so viewers move to it.
+Because tracks are only pulled where they're needed, a publisher can hold
+several connections and subscriptions move to another when one fails. A
+[publisher epoch](/concept/moq-lite#publisher-epochs) (moq-lite 07, opt-in)
+names the instance behind a broadcast: replicas sharing one fail over
+mid-group, and a restart is a newer epoch that viewers switch to instead of
+stalling on the old group numbers.
 
 ## One protocol both ways
 

@@ -79,7 +79,7 @@ ends the import like any other rewind. The same flag on an elementary PID other 
 continuity-counter gap, and the 33-bit timestamp rollover move no clock and
 declare nothing. FLV covers H.264 + AAC.
 
-`import ts` logs a video or audio PID that stops delivering access units, and
+`import ts` logs an elementary stream that stops delivering access units, and
 counts ETSI TR 101 290 errors on the feed it receives. A sparse PID such as
 SCTE-35 goes quiet between cues, so that line reports rather than alarms.
 Neither check changes what is published, and the PCR checks grade the encoder's
@@ -359,16 +359,13 @@ moq --connect https://relay.example.com/anon \
 
 ## Publisher runs
 
-Each publishing command (`import`, `transcode`, archive replay, HLS or WebRTC
-ingest) announces a fresh [publisher epoch](/concept/moq-lite#publisher-epochs)
-for that process. A restart is a new run: viewers move to it instead of waiting
-for its group numbers to catch the old sequence. Reconnects inside one process
-keep the epoch, so a blip resumes mid-group.
-
-Each process mints its own epoch, so the newer run takes the name and viewers
-of the older run move to it. Mid-group failover needs both routes to carry the
-same epoch. The CLI keeps one epoch for the life of the process and does not
-share it with another process.
+Each run of `moq` announces its own
+[publisher epoch](/concept/moq-lite#publisher-epochs), kept across reconnects.
+On moq-lite 07 (opt-in), a restarted or second process is a newer epoch, so
+viewers move to it instead of waiting for its group numbers to catch up. On
+older versions a subscription stays on the route it first resolved through
+until that route goes. The RTMP, SRT, and WHIP ingests announce without an
+epoch.
 
 ## Cluster
 
