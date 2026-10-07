@@ -1502,19 +1502,13 @@ where
 				false => (end, false),
 			}
 		};
-		// Draft-20's End Location is inclusive, naming the last object. A whole group was read
-		// to its end, so that is known.
+		// Draft-20's End Location is inclusive, naming the last object. The read stopped at
+		// either the requested end or the group's, so that is the last object read.
 		let end_location = match draft20 {
-			true => {
-				let object = match end_location.object {
-					0 => group.end(),
-					object => object,
-				};
-				Location {
-					group: group.sequence,
-					object: object - 1,
-				}
-			}
+			true => Location {
+				group: group.sequence,
+				object: group.end() - 1,
+			},
 			false => end_location,
 		};
 
@@ -4708,7 +4702,7 @@ mod serve_tests {
 	/// A group holding no objects at or past the start is refused on draft 20, whose
 	/// inclusive End Location cannot describe an empty answer. Older drafts answer it empty.
 	#[moq_net_sim::test]
-	async fn a_standalone_fetch_past_the_last_object_is_empty() {
+	async fn a_standalone_fetch_past_the_last_object_is_empty_or_refused() {
 		for version in FETCH_DRAFTS {
 			let mut h = serve(version);
 			publish_pairs(&mut h, 5, None);
@@ -4725,6 +4719,29 @@ mod serve_tests {
 				true => assert_eq!(fetch_refusal(buf, version), does_not_exist(version), "{version}"),
 				false => assert_eq!(fetch_answer(buf, version).1, Vec::new(), "{version}"),
 			}
+		}
+	}
+
+	/// On draft 20, an End Object past a finished group's last object reports that last
+	/// object, which is all the response holds.
+	#[moq_net_sim::test]
+	async fn a_draft20_fetch_past_a_group_end_reports_its_last_object() {
+		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+			let mut h = serve(version);
+			publish_pairs(&mut h, 5, None);
+			settle().await;
+
+			let buf = standalone_fetch(
+				&h,
+				Location { group: 2, object: 0 },
+				Location { group: 2, object: 8 },
+				GroupOrder::Ascending,
+			)
+			.await;
+			let (ok, objects) = fetch_answer(buf, version);
+			assert_eq!(ok.end_location, Location { group: 2, object: 1 }, "{version}");
+			assert!(!ok.end_of_track, "{version}");
+			assert_eq!(objects, pairs([2]), "{version}");
 		}
 	}
 
