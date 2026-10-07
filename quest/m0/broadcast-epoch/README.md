@@ -78,3 +78,4 @@ timeout, and killing the newest epoch falls back to a still-live older one.
 - [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - `moq` takes an optional `--epoch` instead of `--hop`, a plain publisher declares a random Hop ID, and the per-session hop stamp is gone
 - [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md) - moq-stats publishes each group announcement under its own epoch, so neither a restarted node nor a returning idle group stalls its viewers
 - [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the same release retires the per-path stats maps for totals and on-demand prefix tracks (decided 2026-10-05)
+- [Dynamic epoch update](/quest/m0/broadcast-epoch/dynamic-epoch.md) - an epoch change through `Dynamic::update` ends downstream fronts and subscriptions under the old epoch, while the origin keeps serving
