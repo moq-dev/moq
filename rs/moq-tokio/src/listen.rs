@@ -465,11 +465,6 @@ impl Config {
 				!tcp_tls && identity,
 				"tls.identity needs a TLS listener (--listen or --listen-tcp-tls)",
 			),
-			// `tls://` serves the certificate but never asks for the client's.
-			(
-				self.tls.peers.is_some(),
-				"tls.peers (pinned client certificates) needs a QUIC listener (--listen); the TCP and Unix listeners never ask for a client certificate",
-			),
 			(
 				self.preferred_v4.is_some(),
 				"--listen-preferred-v4 needs a QUIC listener (--listen)",
@@ -682,11 +677,10 @@ load_balancer = { id = "ab", nonce = 8 }
 			..Default::default()
 		};
 		type Set = fn(&mut Config);
-		let cases: [(&str, Set); 8] = [
+		let cases: [(&str, Set); 7] = [
 			("--listen-tls-cert", |c| c.tls.cert = vec!["cert.pem".into()]),
 			("--listen-tls-key", |c| c.tls.key = vec!["key.pem".into()]),
 			("--listen-tls-generate", |c| c.tls.generate = vec!["localhost".into()]),
-			("tls.peers", |c| c.tls.peers = Some(crate::tls::Peers::new())),
 			("--listen-preferred-v4", |c| {
 				c.preferred_v4 = Some("192.0.2.1:443".parse().unwrap())
 			}),
