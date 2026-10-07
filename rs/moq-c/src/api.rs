@@ -3649,6 +3649,8 @@ pub extern "C" fn moq_consume_track_cancel(track: u32) -> i32 {
 /// [moq_consume_datagrams_cancel]. Read each datagram with [moq_consume_datagram] and release
 /// it with [moq_consume_datagram_free]. Datagrams arrive only over datagram-capable
 /// transports on moq-transport or lite-05 and newer moq-lite; there is no stream fallback.
+/// Datagrams are live-only: the subscription opens before this returns, and gets only the
+/// datagrams published after that.
 ///
 /// Returns a non-zero handle to the subscription on success, or a negative code on failure.
 ///
