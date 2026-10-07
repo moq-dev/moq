@@ -32,8 +32,13 @@ Decided (maintainer, 2026-10-07):
   `(group, frame)`. Each subscriber's own cursor still filters what it sees.
 - Older wires map at the codec only, with no change to a published version:
   lite-06 `Group Start` 0 is `latest`, any other value a floor; pre-06 absent
-  is `latest`; moq-transport `Largest Object` and `Next Group Start` filters are
-  `latest`, `Absolute Start` a floor.
+  is `latest`. moq-transport has no current-group filter, so `latest` is the
+  bridge `ietf::subscriber::subscribe_join` already sends: `Largest Object`
+  plus the current group's prefix, from a `Relative(1)` fill on draft-20+ or a
+  relative joining FETCH on older drafts. `Next Group Start` (draft-20
+  `Relative(0)`) keeps its draft meaning, a floor at the group after Largest
+  Object; a bare `Largest Object` is a floor at the next object; draft-20
+  `Relative(1)` is `latest`; `Absolute Start` is a floor.
 - When merged subscriptions need both the latest group and a floor that an
   older upstream wire cannot express in one SUBSCRIBE, the relay MAY first ask
   TRACK_STATUS for the largest group and subscribe from the lower of the two.
