@@ -455,16 +455,6 @@ fn accepted_info(max_age: Option<std::time::Duration>, priority: Option<u8>) -> 
 		.with_priority(super::priority::from_wire(priority.unwrap_or(128)))
 }
 
-/// What a TRACK_STATUS for a track nobody subscribes to came to.
-enum Status {
-	/// Accepted as a copy with no subscription.
-	Known(Idle),
-	/// The publisher does not implement TRACK_STATUS, so a SUBSCRIBE has to learn the track.
-	Unsupported(track::Request),
-	/// The request was answered: refused, or abandoned.
-	Ended,
-}
-
 /// A copy with no subscription upstream, kept for fetches and a returning subscriber.
 struct Idle {
 	track: track::Producer,
@@ -1762,17 +1752,18 @@ where
 		// one made only to learn the track races the fetches it was for.
 		let mut target = match request.subscription() {
 			Some(_) => Target::Request(request),
-			None => match self.track_status(&broadcast_path, &track_name, request).await {
-				Status::Known(idle) => match self
+			None => {
+				let Some(idle) = self.track_status(&broadcast_path, &track_name, request).await else {
+					return;
+				};
+				let Some(next) = self
 					.linger(&broadcast_path, &track_name, idle, &mut group_fetches)
 					.await
-				{
-					Some(next) => Target::Resume(next),
-					None => return,
-				},
-				Status::Unsupported(request) => Target::Request(request),
-				Status::Ended => return,
-			},
+				else {
+					return;
+				};
+				Target::Resume(next)
+			}
 		};
 		loop {
 			let Some(idle) = self
@@ -2576,20 +2567,26 @@ where
 
 	/// Learn a track nobody subscribes to from TRACK_STATUS, and accept it as a copy with no
 	/// subscription, which [`Self::linger`] serves fetches from and subscribes once someone
-	/// does.
-	async fn track_status(&mut self, broadcast_path: &Path<'_>, track_name: &str, request: track::Request) -> Status {
+	/// does. `None` once the request was refused or abandoned: a publisher that refuses
+	/// TRACK_STATUS refuses the fetch-only request too.
+	async fn track_status(
+		&mut self,
+		broadcast_path: &Path<'_>,
+		track_name: &str,
+		request: track::Request,
+	) -> Option<Idle> {
 		let request_id = match self.control.next_request_id(&self.runtime).await {
 			Ok(id) => id,
 			Err(err) => {
 				request.reject(err);
-				return Status::Ended;
+				return None;
 			}
 		};
 		let mut stream = match Stream::open(&mut self.session.clone(), self.version).await {
 			Ok(stream) => stream,
 			Err(err) => {
 				request.reject(err);
-				return Status::Ended;
+				return None;
 			}
 		};
 		let written = async {
@@ -2607,7 +2604,7 @@ where
 		.await;
 		if let Err(err) = written {
 			request.reject(err);
-			return Status::Ended;
+			return None;
 		}
 
 		// Nobody wanting the track any more ends the wait on a peer that may never answer,
@@ -2640,19 +2637,17 @@ where
 		let Some(response) = response else {
 			stream.reader.abort(&Error::Cancel);
 			stream.writer.abort(&Error::Cancel);
-			return Status::Ended;
+			return None;
 		};
 		// The publisher has read the request, since it answered, and FINs after its answer:
 		// FIN our side too and let the stream drop.
 		let _ = stream.writer.finish();
 		let ok = match response {
 			Ok(ok) => ok,
-			// A publisher that does not implement TRACK_STATUS still answers a SUBSCRIBE.
-			Err(Error::Unsupported) => return Status::Unsupported(request),
 			Err(err) => {
 				tracing::debug!(%err, broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track status refused");
 				request.reject(err);
-				return Status::Ended;
+				return None;
 			}
 		};
 
@@ -2661,7 +2656,7 @@ where
 		let mut track = request.accept(accepted_info(ok.properties.max_cache_duration, ok.properties.priority));
 		// Nothing feeds this copy live: what it caches is fetched, never the live edge.
 		track.set_idle();
-		Status::Known(Idle {
+		Some(Idle {
 			demand: track.demand(),
 			track,
 			dynamic,
@@ -5357,88 +5352,6 @@ mod tests {
 
 		serving.abort();
 		outstanding
-	}
-
-	/// A publisher that does not implement TRACK_STATUS (an older release, or another
-	/// implementation) refuses it NOT_SUPPORTED. Fetch-only demand then learns the track
-	/// from a SUBSCRIBE, as it did before TRACK_STATUS was asked.
-	#[moq_net_sim::test]
-	async fn an_unsupported_track_status_falls_back_to_subscribe() {
-		for version in [
-			Version::Draft14,
-			Version::Draft15,
-			Version::Draft17,
-			Version::Draft18,
-			Version::Draft22,
-		] {
-			let log = crate::lite::test_transport::Log::default();
-			let mut writer =
-				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
-			let reason = "TRACK_STATUS is not supported";
-			match version {
-				Version::Draft14 => {
-					writer.varint(ietf::TRACK_STATUS_ERROR_14).await.unwrap();
-					writer
-						.encode(&ietf::SubscribeError {
-							request_id: RequestId(0),
-							error_code: 0x3,
-							reason_phrase: reason.into(),
-						})
-						.await
-						.unwrap();
-				}
-				_ => {
-					writer.varint(ietf::RequestError::ID).await.unwrap();
-					writer
-						.encode(&ietf::RequestError {
-							request_id: matches!(version, Version::Draft15 | Version::Draft16).then_some(RequestId(0)),
-							error_code: 0x3,
-							reason_phrase: reason.into(),
-							retry_interval: 0,
-						})
-						.await
-						.unwrap();
-				}
-			}
-			let refusal = log.writes.lock().unwrap().clone();
-
-			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![refusal]);
-			let log = session.log.clone();
-			let (tasks, _task_set) = crate::util::TaskSet::new();
-			let mut subscriber = Subscriber::new(
-				crate::time::Clock::sim(),
-				session,
-				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
-				Control::new(None, false),
-				None,
-				peer::PeerSetup::default(),
-				crate::Hop::new(1).unwrap(),
-				None,
-				version,
-				tasks,
-				Default::default(),
-			);
-
-			let producer = crate::broadcast::Info::default().produce();
-			let mut dynamic = producer.dynamic();
-			let consumer = producer.consume();
-			// Fetch-only demand: nobody subscribes.
-			let _fetching = consumer.track("video").unwrap().fetch_group(0, None);
-			let request = dynamic.requested_track().await.expect("no track requested");
-			assert!(request.subscription().is_none());
-
-			let serving = moq_net_sim::spawn(async move {
-				subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
-			});
-			settle().await;
-
-			assert_eq!(
-				control_message_types(&log, version),
-				[ietf::TrackStatus::ID, ietf::Subscribe::ID],
-				"{version}: a refused TRACK_STATUS must fall back to SUBSCRIBE"
-			);
-			serving.abort();
-		}
 	}
 
 	/// A copy that already knows its track, here from TRACK_STATUS_OK, opts out of the
