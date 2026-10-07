@@ -870,7 +870,21 @@ impl<E: CatalogExt> Output for EncoderOutput<'_, E> {
 
 	fn stamp(&self, captured: Option<Instant>) -> Result<u64, Error> {
 		let timestamp = match captured {
-			Some(at) => self.clock.capture(at)?,
+			// Clamp to the nearest instant the clock can name instead of ending the publication:
+			// a host that under-reports its delay can stamp a chunk after now, and a `Clock::at`
+			// epoch taken just after the first sample leaves it before PTS zero.
+			Some(at) => match self.clock.capture(at) {
+				Err(moq_mux::Error::InvalidCapture) => {
+					let now = self.clock.now();
+					let ago = Instant::now().saturating_duration_since(at).as_micros();
+					if ago > now.as_micros() {
+						moq_net::Timestamp::ZERO
+					} else {
+						now
+					}
+				}
+				timestamp => timestamp?,
+			},
 			None => self.clock.now(),
 		};
 		Ok(timestamp.as_micros() as u64)
@@ -2227,6 +2241,54 @@ mod tests {
 			assert!(
 				read > published + 20_000,
 				"published {published}us, which is the read at {read}us"
+			);
+			fixture.finish().await;
+		}
+
+		/// A first buffer captured before the broadcast clock began clamps to zero, and the
+		/// publication keeps going rather than failing on it.
+		#[tokio::test]
+		async fn a_buffer_before_the_clock_began_clamps_to_zero() {
+			let (samples, input) = stream(None);
+			let mut fixture = Fixture::start(Duration::ZERO, SystemTime::now(), [Open::Stream(input)]);
+			let mut track = fixture.subscribe().await;
+
+			samples
+				.try_push(Ok(capture::Samples::at(
+					vec![0.1; 1920],
+					false,
+					fixture.epoch - Duration::from_millis(10),
+				)))
+				.unwrap();
+			assert_eq!(fixture.read_new(&mut track, &[]).await, 0);
+
+			samples
+				.try_push(Ok(capture::Samples::plain(vec![0.1; 1920], false)))
+				.unwrap();
+			assert_eq!(fixture.read_new(&mut track, &[0]).await, 20_000);
+			fixture.finish().await;
+		}
+
+		/// A capture instant reported after the read clamps to the read.
+		#[tokio::test]
+		async fn a_buffer_captured_after_now_clamps_to_the_read() {
+			let (samples, input) = stream(None);
+			let mut fixture = Fixture::start(Duration::from_secs(1), SystemTime::now(), [Open::Stream(input)]);
+			let mut track = fixture.subscribe().await;
+
+			let pushed = fixture.at(Instant::now());
+			samples
+				.try_push(Ok(capture::Samples::at(
+					vec![0.1; 1920],
+					false,
+					Instant::now() + Duration::from_secs(1),
+				)))
+				.unwrap();
+			let published = fixture.read_new(&mut track, &[]).await;
+			let read = fixture.at(Instant::now());
+			assert!(
+				(pushed..=read).contains(&published),
+				"published {published}us, read within {pushed}..={read}us"
 			);
 			fixture.finish().await;
 		}
