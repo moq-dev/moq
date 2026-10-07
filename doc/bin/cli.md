@@ -484,7 +484,7 @@ receiver's latency. Every frame is muxed that long after its decode time, on
 a clock that keeps the source's pace and muxes all tracks in decode order
 whatever their arrival skew: two exporters of one broadcast emit them in one
 order. The export joins at the newest group and holds its output until it
-has heard from every audio, video and PES track (two delays at most) and a
+has heard from every audio, video, DVB AC-3 and teletext track (two delays at most) and a
 track starts its next group, or one of the frames it holds falls due. It then
 starts the clock on the track the source sends latest against its decode time,
 from that track's freshest frame: a broadcast TS sends video most of a second

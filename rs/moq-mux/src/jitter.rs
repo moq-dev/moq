@@ -303,7 +303,9 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 
 	/// Whether a frame moves its track off the clock: a restart, unless the track is crossing
 	/// one another track already opened a generation for and the frame lands on its clock, or
-	/// a skip that leapt ahead.
+	/// a frame held more than a delay past everything queued after a skip, or while a
+	/// generation is acquired. The latter is a track reaching the new timeline without a
+	/// marker of its own, which belongs to that generation, not far ahead on the old clock.
 	fn jumps(&self, key: &K, arrival: &Arrival<T>) -> bool {
 		let (Some(clock), Some(track)) = (self.clock, self.tracks.get(key)) else {
 			return false;
@@ -311,8 +313,8 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		let deadline = self.deadline(&clock, arrival.decode);
 		let restarted = track.restart != arrival.restart
 			&& (track.generation == clock.generation || !self.lands(deadline, arrival.arrived));
-		let leapt =
-			track.skip != arrival.skip && deadline.is_some_and(|deadline| deadline > self.bound(arrival.arrived));
+		let leapt = (track.skip != arrival.skip || self.acquire.is_some())
+			&& deadline.is_some_and(|deadline| deadline > self.bound(arrival.arrived));
 		restarted || leapt
 	}
 
@@ -881,6 +883,42 @@ mod tests {
 		assert_eq!(released(&mut buffer), [("v5000", 1), ("a5000", 1), ("d5000", 1)]);
 		tokio::time::advance(Duration::from_millis(20)).await;
 		assert_eq!(released(&mut buffer), [("a5020", 1)]);
+	}
+
+	/// Not replaying, the same: a track that crosses no restart of its own, sent behind the
+	/// one that did, joins the generation being acquired once its frame is ahead of the old
+	/// clock, rather than queuing seconds ahead on it and holding every track back. The new
+	/// clock anchors on it, the track sent latest, so it keeps the delay.
+	#[tokio::test(start_paused = true)]
+	async fn a_track_without_the_restart_joins_the_acquisition() {
+		let start = Instant::now();
+		let mut buffer = Buffer::new(DELAY);
+		buffer.expect([1, 2]);
+		buffer.push(1, arrival(start, 0, "v0")).unwrap();
+		buffer.push(2, arrival(start, 0, "a0")).unwrap();
+		tokio::time::advance(DELAY).await;
+		assert_eq!(due(&mut buffer), ["v0", "a0"]);
+
+		// The publisher resumes a second later with its timeline five seconds on, and sends
+		// the audio further behind the video than the delay.
+		let resume = start + Duration::from_secs(1);
+		tokio::time::advance(resume - Instant::now()).await;
+		assert_eq!(
+			buffer.push(1, after(1, arrival(resume, 5_000, "v5000"))).unwrap(),
+			Push::Queued
+		);
+		let lag = resume + DELAY + Duration::from_millis(50);
+		tokio::time::advance(lag - Instant::now()).await;
+		assert_eq!(buffer.push(2, arrival(lag, 5_000, "a5000")).unwrap(), Push::Queued);
+		tokio::time::advance(Duration::from_millis(20)).await;
+		let next = Instant::now();
+		assert_eq!(buffer.push(2, arrival(next, 5_020, "a5020")).unwrap(), Push::Queued);
+
+		tokio::time::advance(lag + DELAY - Instant::now()).await;
+		assert_eq!(released(&mut buffer), [("v5000", 1), ("a5000", 1)]);
+		tokio::time::advance(Duration::from_millis(20)).await;
+		assert_eq!(released(&mut buffer), [("a5020", 1)]);
+		assert_eq!(buffer.dropped(), 0);
 	}
 
 	/// A skipped group whose timeline carried on keeps the clock: a frame it made late is

@@ -1308,17 +1308,13 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 		// The clock anchors on whichever track a source sends latest against its decode time
 		// (audio just in time while video runs most of a second ahead), so it waits to hear
-		// from each. Not from sections: SCTE-35 and the like are sparse, and would hold every
-		// join for the full bound.
-		let continuous = self.tracks.values().filter(|track| {
-			!matches!(
-				track.kind,
-				Kind::Verbatim {
-					framing: catalog::Framing::Section,
-					..
-				}
-			)
-		});
+		// from each continuous one: audio, video, and the passthrough streams the schedule
+		// models (DVB AC-3, teletext). Not from sparse ones such as SCTE-35, subtitles or ID3,
+		// which would hold every join for the full bound.
+		let continuous = self
+			.tracks
+			.values()
+			.filter(|track| !matches!(track.kind, Kind::Verbatim { .. }) || track.buffer.is_some());
 		self.jitter.expect(continuous.map(|track| track.pid));
 		Ok(())
 	}
