@@ -2108,6 +2108,16 @@ test("a group joining a track it disagrees with is refused", () => {
 	expect(() => producer.writeGroup(group)).toThrow(TimestampMismatch);
 });
 
+test("an empty group bound to a timed track can't join an untimed one", () => {
+	const timed = new TrackProducer("timed").accept({ timescale: Timescale.MILLI });
+	const untimed = new TrackProducer("untimed").accept({});
+	const group = timed.appendGroup();
+	expect(() => untimed.writeGroup(group)).toThrow(TimestampMismatch);
+	// Still held to the timed track it was bound to first.
+	expect(() => group.writeFrame({ payload: enc.encode("x") })).toThrow(TimestampMismatch);
+	group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(1) });
+});
+
 test("a datagram whose timedness disagrees with its track is refused", async () => {
 	const timed = new TrackProducer("timed").accept({ timescale: Timescale.MILLI });
 	expect(() => timed.appendDatagram(undefined, enc.encode("x"))).toThrow(TimestampMismatch);

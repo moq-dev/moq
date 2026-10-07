@@ -161,6 +161,8 @@ export class Producer {
 		hooks.bindGroupTimed = (group, timed) => {
 			const state = group.#state;
 			if (state.timed === timed) return;
+			// Another track already holds it to the opposite timedness, empty or not.
+			if (state.timed !== undefined) throw new TimestampMismatch();
 			for (const frame of state.frames.peek()) checkTimed(timed, frame);
 			state.timed = timed;
 		};
