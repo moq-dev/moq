@@ -10,7 +10,7 @@ use std::{
 	time::Duration,
 };
 
-use web_transport_trait::poll::SendStream as _;
+use crate::transport::poll::SendStream as _;
 
 use crate::{
 	AsPath, Error, Timescale, Timestamp,
@@ -23,16 +23,16 @@ use crate::{
 use super::{Message, Version, cluster, error::request, peer};
 
 /// Largest millisecond duration every implementation can carry losslessly.
-const MAX_SAFE_AGE_MS: u64 = (1_u64 << 53) - 1;
+const MAX_SAFE_DELAY_MS: u64 = (1_u64 << 53) - 1;
 
 /// Build the serving-side subscription for a peer whose wire protocol carries no
-/// max age preference. The receiver applies its own budget after the transfer.
+/// max delay preference. The receiver applies its own budget after the transfer.
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
 	Subscription {
 		priority: super::priority::from_wire(subscriber_priority),
 		// Demand can cross a Lite hop before the producer's retention bound is
 		// known, so use the largest duration that remains wire-encodable.
-		max_age: Duration::from_millis(MAX_SAFE_AGE_MS),
+		max_delay: Duration::from_millis(MAX_SAFE_DELAY_MS),
 		..Default::default()
 	}
 }
@@ -4984,7 +4984,7 @@ mod tests {
 		slot
 	}
 
-	/// moq-transport cannot carry the receiver's max age budget, so the serving
+	/// moq-transport cannot carry the receiver's max delay budget, so the serving
 	/// subscription must preserve everything the producer still retains.
 	#[test]
 	fn serving_subscription_keeps_retained_backlog() {
@@ -4998,7 +4998,7 @@ mod tests {
 		}
 
 		let subscription = serving_subscription(128);
-		assert_eq!(subscription.max_age.as_millis(), MAX_SAFE_AGE_MS as u128);
+		assert_eq!(subscription.max_delay.as_millis(), MAX_SAFE_DELAY_MS as u128);
 		let mut subscriber = producer.subscribe(subscription);
 		for sequence in [0, 1] {
 			let group = subscriber

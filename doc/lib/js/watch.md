@@ -130,7 +130,8 @@ const dispose = el.signals.run((effect) => {
 
 Call `dispose()` from your framework's unmount cleanup when this subscription
 is no longer needed. Removing the element disables playback but keeps its
-effects open so the same node can reconnect.
+effects open so the same node can reconnect. Its audio graph is released and
+rebuilt on return; pausing or muting keeps the graph warm.
 
 The effect re-runs whenever the catalog or the active broadcast changes, so a
 reconnect resubscribes on its own. A publisher that rewrites its catalog often

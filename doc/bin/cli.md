@@ -467,8 +467,9 @@ See [Authentication](/bin/relay/auth).
 ## Retention and latency
 
 `import --max-age` (default 30 s) tells relays how long to keep old
-groups fetchable, which the [HLS gateway](/bin/hls) depends on. `export --max-age` (default 500 ms) is how long *this* consumer waits for a
-stalled group before skipping. Raising the first never delays playback.
+groups fetchable, which the [HLS gateway](/bin/hls) depends on. `export --max-delay` (default 500 ms) is how far a stalled group may fall
+behind the live edge before *this* consumer skips it. Raising the first never delays playback.
+`export ts` still spells its budget `--max-age`.
 
 For `export ts`, `--max-age` also bounds how long the muxer holds a leading
 track for a lagging one. Frames go out in media-time order across all tracks,

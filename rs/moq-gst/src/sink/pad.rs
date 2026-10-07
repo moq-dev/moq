@@ -1562,7 +1562,7 @@ mod tests {
 			.consume()
 			.track("audiolevels")
 			.expect("the opaque track is published")
-			.subscribe(moq_net::track::Subscription::default().with_max_age(std::time::Duration::from_secs(1)))
+			.subscribe(moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(1)))
 			.await
 			.expect("subscribe to the opaque track")
 			.ordered();
