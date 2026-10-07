@@ -25,7 +25,9 @@ segment is servable for as long as the relay's
 [cache](/bin/relay/config#cache) retains it, and idle renditions cost nothing.
 Segment boundaries come from one reference rendition (the first video
 rendition by name, or the first audio one without video) and are numbered by
-its records, so every edge and every reload agree. Every other video rendition
+its records. That choice sticks while the rendition stays in the catalog, so a
+newer rendition that sorts earlier does not rewind `EXT-X-MEDIA-SEQUENCE`.
+Every other video rendition
 snaps each boundary to its nearest keyframe within about a second, and a
 segment with none in range renders as `EXT-X-GAP`; audio takes every frame
 inside the segment's span. A jump in content time renders as
@@ -49,9 +51,9 @@ broadcast by path:
 
 Segment boundaries come from one reference rendition's timeline, and its records
 number the segments. `{reference}` is a short hash of that rendition's kind and
-name, so every edge derives the same URL, and a reference that changes (a new
-first video rendition) starts a new numbering under new URLs rather than reusing
-the old ones for other content.
+name, so every edge that chose it derives the same URL. A reference that leaves
+the catalog starts a new numbering under new URLs rather than reusing the old
+ones for other content.
 
 A [`moq-archive`](https://docs.rs/moq-archive) recording replayed through its
 `Reader` is served the same way, with no second stored copy. Playlists come
