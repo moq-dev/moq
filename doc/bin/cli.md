@@ -164,7 +164,7 @@ Each frame goes out as early as a receiver's buffers for its PID admit (the
 ISO 13818-1 T-STD: no more of a PID's packets per interval than its transport
 buffer passes on, and no more bytes than its decoder buffer holds, sized from the
 SPS's HRD or level for video and per codec for audio), up to `--delay` ahead of its
-decode time, earliest decode time first. So a heavy passage rides the intervals
+decode time on the output's PCR clock, earliest decode time first. So a heavy passage rides the intervals
 before it, and the output trails the source by twice the delay. A frame that cannot
 arrive by its decode time at the rate fails the export with an error naming both
 knobs; a broadcast-sized decoder buffer (a CPB of a second or more) needs a delay to
@@ -496,8 +496,8 @@ groups fetchable, which the [HLS gateway](/bin/hls) depends on. `export --max-de
 behind the live edge before *this* consumer skips it. Raising the first never delays playback.
 
 `export ts` takes `--delay` (default 500 ms) instead, and works like an SRT
-receiver's latency. Every frame is muxed that long after its decode time, on
-a clock that keeps the source's pace and muxes all tracks in decode order
+receiver's latency. Every frame is released to the multiplexer that long after
+its decode time, on a clock that keeps the source's pace and muxes all tracks in decode order
 whatever their arrival skew: two exporters of one broadcast emit them in one
 order. The export joins at the newest group and holds its output until it
 has heard from every audio, video, DVB AC-3 and teletext track (two delays at most) and a

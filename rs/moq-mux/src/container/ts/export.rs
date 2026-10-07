@@ -395,7 +395,7 @@ impl Timing {
 	fn buffer(&self) -> Option<Buffer> {
 		let level = self.level?;
 		let (rate, cpb) = match self.hrd {
-			Some(hrd) => (hrd.bit_rate * level.factor / 1_000, hrd.cpb_size),
+			Some(hrd) => (hrd.bit_rate.saturating_mul(level.factor) / 1_000, hrd.cpb_size),
 			None => (level.leak, level.cpb),
 		};
 		Some(Buffer {
