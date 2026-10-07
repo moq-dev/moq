@@ -18,3 +18,7 @@ pairs moq with moxygen, adding FETCH cases if it has none. Cover a fetch
 within one group, a joining fetch, and a refused multi-group range.
 
 Public API: none. Wire: none expected.
+
+## Related
+
+- [Runner approval](/quest/m3/interop-runner-approval.md) - adding FETCH cases to moq-interop-runner needs it

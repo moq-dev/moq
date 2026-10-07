@@ -13,7 +13,8 @@ lists from its middle.
 Found by #4978 (bounded HLS playlists), which kept the full listing behind
 `moq_hls::export::Config::replay` and confirmed the gap with a 4-record limit:
 12 replayed segments listed from `EXT-X-MEDIA-SEQUENCE:8`. The archive test
-missed it because its hand-built timeline repeats every record.
+missed it because its hand-built timeline repeats every record. Start after
+#4978 lands.
 
 Decided 2026-10-07: read the stored timeline groups in replay mode rather than
 only the restated tail, so the exporter or the archive reader replays the
@@ -25,7 +26,3 @@ Test with more records than one checkpoint and assert replay mode lists
 segment 0.
 
 Public API: none expected. Wire: none.
-
-## Related
-
-- [Bounded HLS playlists](/quest/m1/hls-bounded.md) - the live renderer rules and the replay mode switch

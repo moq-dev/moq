@@ -16,15 +16,16 @@ Why the round trip exists (facts, 2026-10-07): nothing in a FETCH request
 needs the info. Two serial gates do:
 
 - The origin accepts the logical track with the first copy's info (timescale,
-  max_age) and refuses later copies whose info differs
+  max_age, priority) and refuses later copies whose info differs
   (`model/front.rs` `track_info`), because a relayed group's raw timestamps go
   downstream in the group's own timescale while downstream decodes them with
   the logical track's advertised one. A fetch is routed only to a copy already
   spliced (`resume::Fetching`, `TrackIo::splice`).
 - Both sessions register their fetch handler only after their info exchange:
   lite's `TrackServeRun` runs TRACK_INFO first because FETCH frames are
-  timestamped in its units; IETF takes the timescale only from SUBSCRIBE_OK or
-  TRACK_STATUS_OK.
+  timestamped in its units (only on wires with a track stream; older lite
+  serves with default info and has no gate to remove); IETF takes the
+  timescale only from SUBSCRIBE_OK or TRACK_STATUS_OK.
 
 What needs the info is decoding the response and approving the group, so:
 

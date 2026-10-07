@@ -18,6 +18,8 @@ Decided 2026-10-07: verify it first with a test that unannounces and
 re-announces a running publish and reads the catalog's group sequence. Fix it
 only if it reproduces: continue the sequence, or mint a fresh epoch per
 announce, whichever matches how the rest of `@moq/publish` treats a
-re-announce.
+re-announce. `js/publish/src/broadcast.ts` mints the epoch once and keeps the
+publisher across unannounce and announce on purpose, which points at
+continuing the sequence.
 
 Public API: none expected. Wire: none.
