@@ -1984,12 +1984,21 @@ where
 				frame: largest.object,
 			})
 		});
+		// The group below is only the read floor. The object is what a downstream
+		// SUBSCRIBE_OK repeats while this copy has cached nothing, so its joining
+		// FETCH can still name the current group. It is stored before accept wakes
+		// a reader: that reader can snapshot the edge as soon as the track exists.
+		let upstream_largest = largest.map(|largest| track::Position {
+			group: largest.group,
+			frame: largest.object,
+		});
 		let (mut track, dynamic) = match resumed {
-			Some(idle) => {
+			Some(mut idle) => {
 				if !self.state.lock().subscribes.contains_key(&request_id) {
 					// Aborted with the session while the answer was in hand.
 					return None;
 				}
+				idle.track.set_upstream_largest(upstream_largest);
 				(idle.track, idle.dynamic)
 			}
 			None => {
@@ -2005,7 +2014,7 @@ where
 				// Serves cache misses with a group FETCH. Registered before accepting, so a
 				// miss queued meanwhile waits for it rather than failing for want of a handler.
 				let dynamic = request.dynamic();
-				(request.accept(info), dynamic)
+				(request.with_upstream_largest(upstream_largest).accept(info), dynamic)
 			}
 		};
 		// A live join starts at the publisher's edge; an absolute one where it asked.
@@ -8297,12 +8306,33 @@ mod joining_fetch_tests {
 				.expect("the subscription is registered");
 			track.fill.read().outstanding()
 		}
+
+		fn track(&self) -> &track::Consumer {
+			&self._hold.1
+		}
 	}
 
 	impl Drop for JoinRun {
 		fn drop(&mut self) {
 			self.serving.abort();
 		}
+	}
+
+	/// SUBSCRIBE_OK's Largest is kept on the copy before any object is cached.
+	#[moq_net_sim::test]
+	async fn a_cold_copy_records_the_subscribe_ok_largest() {
+		let largest = ietf::Location { group: 4, object: 1 };
+		let version = Version::Draft16;
+		let run = JoinRun::start(version, None, subscribe_ok(version, Some(largest)), fetch_ok(version)).await;
+
+		assert_eq!(run.track().latest(), None, "the copy has no cached group");
+		assert_eq!(
+			run.track().upstream_largest(),
+			Some(track::Position {
+				group: largest.group,
+				frame: largest.object,
+			}),
+		);
 	}
 
 	/// Every pre-draft-20 live join is Largest Object on the SUBSCRIBE and a relative

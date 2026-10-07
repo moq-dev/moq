@@ -267,6 +267,10 @@ pub(crate) struct TrackState {
 	// The newest group cached when the track went idle: what the route's answer is
 	// judged against, whatever lands before it.
 	idle_newest: Option<u64>,
+	// Largest Location from the upstream SUBSCRIBE_OK. Reported downstream while
+	// no object is cached, so a joining FETCH can name the current group. A cached
+	// object supersedes it.
+	upstream_largest: Option<Position>,
 
 	// Where production stopped, snapshotted when the open groups are released (an
 	// abort, or the last producer dropping). Computed live from the cache otherwise;
@@ -1702,6 +1706,15 @@ impl Producer {
 		}
 	}
 
+	/// Record the upstream SUBSCRIBE_OK Largest, or clear it when that answer named none.
+	///
+	/// A downstream subscribe reports this while the copy has no cached object.
+	pub(crate) fn set_upstream_largest(&mut self, largest: Option<Position>) {
+		if let Ok(mut state) = self.modify() {
+			state.upstream_largest = largest;
+		}
+	}
+
 	/// Whether readers may take from the cache; see [`Self::set_idle`].
 	pub(crate) fn is_live(&self) -> bool {
 		self.state.read().live
@@ -2826,6 +2839,16 @@ impl Consumer {
 			return serving.latest();
 		}
 		self.state.read().max_sequence
+	}
+
+	/// The upstream Largest recorded by [`Producer::set_upstream_largest`].
+	///
+	/// A front answers from the route serving it.
+	pub(crate) fn upstream_largest(&self) -> Option<Position> {
+		if let Some(serving) = self.serving() {
+			return serving.upstream_largest();
+		}
+		self.state.read().upstream_largest
 	}
 
 	/// The declared exclusive final sequence, or `None` while the track is open ended.
@@ -4196,6 +4219,10 @@ pub struct Request {
 
 	// Served from a front's routes; see [`Self::routes`].
 	routes: Option<super::resume::Consumer>,
+
+	// Upstream SUBSCRIBE_OK Largest, written in the same update as [`Self::accept`]
+	// so a reader woken by that update already sees it.
+	upstream_largest: Option<Position>,
 }
 
 impl Request {
@@ -4214,6 +4241,7 @@ impl Request {
 			stats: stats::Scope::default(),
 			resolving_start: false,
 			routes: None,
+			upstream_largest: None,
 		}
 	}
 
@@ -4231,6 +4259,14 @@ impl Request {
 	/// [`Self::accept`], before any reader can see the track.
 	pub(crate) fn resolving_start(mut self) -> Self {
 		self.resolving_start = true;
+		self
+	}
+
+	/// Record the upstream SUBSCRIBE_OK Largest, applied in the same write as
+	/// [`Self::accept`]. A downstream subscribe reports it while the copy has no
+	/// cached object. `None` leaves the field clear.
+	pub(crate) fn with_upstream_largest(mut self, largest: Option<Position>) -> Self {
+		self.upstream_largest = largest;
 		self
 	}
 
@@ -4302,6 +4338,7 @@ impl Request {
 			state.accept(info.clone());
 			state.start_pending = self.resolving_start;
 			state.routes = self.routes;
+			state.upstream_largest = self.upstream_largest;
 		}
 		// Accepting the request creates the track producer: count it as one ingress
 		// subscription (closed when the last handle drops). No-op when untagged.

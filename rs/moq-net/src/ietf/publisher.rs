@@ -4889,6 +4889,76 @@ mod serve_tests {
 		);
 	}
 
+	/// Nothing is cached, but the copy learned an upstream Largest. SUBSCRIBE_OK
+	/// repeats it, and a relative joining FETCH at offset 0 is the current group
+	/// from object 0, filled by the one-group upstream fetch.
+	#[moq_net_sim::test]
+	async fn a_cold_copy_reports_the_upstream_largest() {
+		const GROUP: u64 = 4;
+		let version = Version::Draft16;
+		let mut h = serve(version);
+		h.track
+			.set_upstream_largest(Some(track::Position { group: GROUP, frame: 2 }));
+		let dynamic = h.track.dynamic();
+		let filling = moq_net_sim::spawn(async move {
+			let request = dynamic.requested_group().await.expect("upstream fill");
+			assert_eq!(request.sequence(), GROUP);
+			assert_eq!(request.frame_start(), 0);
+			let mut group = request.accept(None).expect("fill");
+			for payload in [b"o0".as_slice(), b"o1", b"o2"] {
+				group.write_frame(timestamp(), payload).unwrap();
+			}
+			group.finish().unwrap();
+		});
+
+		settle().await;
+		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+		let mut serving = std::pin::pin!(
+			h.publisher
+				.clone()
+				.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+		);
+		registered(&h, serving.as_mut()).await;
+
+		let writes = h.log.writes.lock().unwrap().clone();
+		let mut buf = writes.as_slice();
+		assert_eq!(
+			crate::coding::decode_varint(&mut buf, version).unwrap(),
+			ietf::SubscribeOk::ID
+		);
+		assert_eq!(
+			crate::coding::decode_buf(&mut buf, version, ietf::SubscribeOk::decode)
+				.unwrap()
+				.largest,
+			Some(Location {
+				group: GROUP,
+				object: 2
+			}),
+		);
+
+		let mark = h.log.writes.lock().unwrap().len();
+		let response = joining_fetch(&h, mark).await.expect("joining FETCH");
+		let (ok, objects) = fetch_answer(bytes::Bytes::from(response), version);
+		assert_eq!(
+			ok.end_location,
+			Location {
+				group: GROUP,
+				object: 3
+			},
+		);
+		assert_eq!(
+			objects,
+			vec![
+				(GROUP, 0, "o0".to_string()),
+				(GROUP, 1, "o1".to_string()),
+				(GROUP, 2, "o2".to_string()),
+			],
+		);
+		assert!(h.log.resets().is_empty());
+		filling.await.expect("fill task");
+		assert!(futures::poll!(serving.as_mut()).is_pending());
+	}
+
 	/// The filter's object bounds trim what `run_group` writes: the skipped head is not
 	/// sent, the first written object's delta is its absolute id, and a capped tail stops
 	/// early. Extensions are off so the wire is just deltas, sizes, and payloads.
@@ -6681,9 +6751,10 @@ mod tests {
 struct LiveEdge {
 	/// The newest group sequence, `None` before any group exists.
 	latest: Option<u64>,
-	/// The precise Largest Object. `None` when the track is empty, or when the newest
-	/// group's frames cannot be read right now (none written yet), in which case nothing
-	/// is advertised and no fill is servable.
+	/// The precise Largest Object. `None` when the track is empty and no upstream
+	/// named one, or when the newest group's frames cannot be read right now (none
+	/// written yet) and the upstream Largest names a different group. Nothing is
+	/// advertised then, and no fill is servable.
 	largest: Option<Location>,
 	/// One past the Largest Object, which is where a Next Object subscription begins.
 	/// When the edge is imprecise this falls back to the next group boundary: never below
@@ -6693,51 +6764,78 @@ struct LiveEdge {
 
 /// Snapshot the live edge of a track.
 fn live_edge(track: &track::Consumer) -> LiveEdge {
-	let Some(latest) = track.latest() else {
-		return LiveEdge::default();
-	};
-
-	match track.peek_latest() {
-		Some(group) if group.sequence == latest => {
-			let count = group.frame_count() as u64;
-			let largest = match count.checked_sub(1) {
-				Some(object) => Some(Location { group: latest, object }),
-				// A group with no frames yet has no objects, so the largest sits in an
-				// earlier group. Walk back through the cache to find it, or a peer that
-				// subscribes in the instant between a group's creation and its first
-				// frame is told the track is empty and gets no fill.
-				None => largest_before(track, latest),
-			};
-			// One past the edge, even when the edge sits below the newest group: a group
-			// may keep writing after a newer one exists, and a floor above the true Next
-			// Object would strand those objects between the fill cap and the
-			// subscription. With no readable object anywhere, the newest group's start
-			// excludes nothing the cache can still name.
-			let next = match largest {
-				Some(largest) => Location {
-					group: largest.group,
-					object: largest.object.saturating_add(1),
-				},
-				None => Location {
-					group: latest,
-					object: 0,
-				},
-			};
-			LiveEdge {
-				latest: Some(latest),
-				largest,
-				next: Some(next),
+	let edge = match track.latest() {
+		None => LiveEdge::default(),
+		Some(latest) => match track.peek_latest() {
+			Some(group) if group.sequence == latest => {
+				let count = group.frame_count() as u64;
+				let largest = match count.checked_sub(1) {
+					Some(object) => Some(Location { group: latest, object }),
+					// A group with no frames yet has no objects, so the largest sits in an
+					// earlier group. Walk back through the cache to find it, or a peer that
+					// subscribes in the instant between a group's creation and its first
+					// frame is told the track is empty and gets no fill.
+					None => largest_before(track, latest),
+				};
+				// One past the edge, even when the edge sits below the newest group: a group
+				// may keep writing after a newer one exists, and a floor above the true Next
+				// Object would strand those objects between the fill cap and the
+				// subscription. With no readable object anywhere, the newest group's start
+				// excludes nothing the cache can still name.
+				let next = match largest {
+					Some(largest) => Location {
+						group: largest.group,
+						object: largest.object.saturating_add(1),
+					},
+					None => Location {
+						group: latest,
+						object: 0,
+					},
+				};
+				LiveEdge {
+					latest: Some(latest),
+					largest,
+					next: Some(next),
+				}
 			}
-		}
-		_ => LiveEdge {
-			latest: Some(latest),
-			largest: None,
-			next: Some(Location {
-				group: latest.saturating_add(1),
-				object: 0,
-			}),
+			_ => LiveEdge {
+				latest: Some(latest),
+				largest: None,
+				next: Some(Location {
+					group: latest.saturating_add(1),
+					object: 0,
+				}),
+			},
 		},
+	};
+	// A relay learns this from upstream before any object is cached. Reporting it
+	// is what lets a joining FETCH ask for the current group instead of being told
+	// the track is empty. A cached object is newer. So is an empty group past the
+	// one upstream named: that edge has moved, and the old object is not it.
+	apply_upstream_largest(track, edge)
+}
+
+/// Use the upstream Largest when the cache cannot name an object.
+fn apply_upstream_largest(track: &track::Consumer, mut edge: LiveEdge) -> LiveEdge {
+	if edge.largest.is_some() {
+		return edge;
 	}
+	let Some(upstream) = track.upstream_largest() else {
+		return edge;
+	};
+	if edge.latest.is_some_and(|latest| latest != upstream.group) {
+		return edge;
+	}
+	edge.latest = Some(upstream.group);
+	edge.largest = Some(Location {
+		group: upstream.group,
+		object: upstream.frame,
+	});
+	edge.next = Some(Location {
+		group: upstream.group,
+		object: upstream.frame.saturating_add(1),
+	});
+	edge
 }
 
 /// The last object below `sequence`: the nearest earlier cached group that has started a
@@ -7133,6 +7231,46 @@ mod range_tests {
 		assert_eq!(edge.latest, Some(2));
 		assert_eq!(edge.largest, Some(Location { group: 0, object: 0 }));
 		assert_eq!(edge.next, Some(Location { group: 0, object: 1 }));
+	}
+
+	/// No cached object: the edge is the Largest the upstream SUBSCRIBE_OK named.
+	#[test]
+	fn an_empty_track_reports_the_upstream_largest() {
+		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		track.set_upstream_largest(Some(track::Position { group: 4, frame: 2 }));
+
+		let edge = live_edge(&track.consume());
+		assert_eq!(edge.latest, Some(4));
+		assert_eq!(edge.largest, Some(Location { group: 4, object: 2 }));
+		assert_eq!(edge.next, Some(Location { group: 4, object: 3 }));
+	}
+
+	/// Once an object is cached it is the edge, not the older upstream answer.
+	#[test]
+	fn a_cached_object_outranks_the_upstream_largest() {
+		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		track.set_upstream_largest(Some(track::Position { group: 4, frame: 9 }));
+		let mut group = track.create_group(group::Info { sequence: 4 }).unwrap();
+		group
+			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"only".as_slice())
+			.unwrap();
+
+		let edge = live_edge(&track.consume());
+		assert_eq!(edge.largest, Some(Location { group: 4, object: 0 }));
+		assert_eq!(edge.next, Some(Location { group: 4, object: 1 }));
+	}
+
+	/// An empty group past the upstream Largest means the edge moved. The old
+	/// object is not advertised in its place.
+	#[test]
+	fn a_newer_empty_group_does_not_revive_an_older_upstream_largest() {
+		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		track.set_upstream_largest(Some(track::Position { group: 1, frame: 3 }));
+		let _open = track.create_group(group::Info { sequence: 5 }).unwrap();
+
+		let edge = live_edge(&track.consume());
+		assert_eq!(edge.latest, Some(5));
+		assert_eq!(edge.largest, None);
 	}
 
 	/// Both ends carry through, object bounds included, so the boundary groups can be
