@@ -369,6 +369,9 @@ class TrackState {
 	update: Signal<Subscription | undefined>;
 	/** Resolved once the producer commits the immutable properties. */
 	info = new Signal<Info | undefined>(undefined);
+	// Set by an unfloored subscriber made before accept(), which calls it to settle its
+	// start the moment the track's timedness is known.
+	settle?: () => void;
 
 	constructor(subscription?: Subscription) {
 		this.update = new Signal(subscription === undefined ? undefined : subscriptionDefaults(subscription));
@@ -585,10 +588,26 @@ export class Producer {
 	accept(info: Partial<Info> = {}): this {
 		if (this.#state.closed.peek() !== undefined) return this;
 		const resolved = infoDefaults(info);
-		for (const { group } of this.#cache) hooks.bindGroupTimed(group, resolved.timescale != null);
+		const timed = resolved.timescale != null;
+		// Anything written before accept() must match too. A mismatch closes the track, so
+		// nothing waiting on info() hangs on a half-bound cache.
+		try {
+			for (const { group } of this.#cache) hooks.bindGroupTimed(group, timed);
+			for (const sink of this.#sinks) {
+				for (const datagram of sink.datagrams.peek()) {
+					if ((datagram.timestamp !== undefined) !== timed) throw new TimestampMismatch();
+				}
+			}
+		} catch (err) {
+			this.close(err instanceof Error ? err : new Error(String(err)));
+			throw err;
+		}
 		this.#state.info.set(resolved);
 		// Propagate to any sink handed out before accept (the on-demand path).
-		for (const sink of this.#sinks) sink.info.set(resolved);
+		for (const sink of this.#sinks) {
+			sink.info.set(resolved);
+			sink.settle?.();
+		}
 		this.#updateSubscription();
 		return this;
 	}
@@ -1066,8 +1085,6 @@ export class Subscriber {
 	#state: TrackState;
 	#nextSequence = 0;
 	#cursor = new Signal<{ start: number; end?: number }>({ start: 0 });
-	// Unfloored and made before accept(); see #settleStart.
-	#unsettled = false;
 	#enforceLatency = true;
 	// Which cursor owns this subscription. Both cursors draw from one buffer, so the
 	// first group read commits the track to arrival order and {@link ordered} commits
@@ -1189,29 +1206,29 @@ export class Subscriber {
 		// Nothing on an untimed track is ever stale, so there the budget would replay the
 		// whole cache: an unfloored subscriber starts at the latest group instead.
 		const groups = state.update.peek()?.groups ?? {};
-		const start = groups.start === undefined ? this.#untimedStart() : undefined;
-		this.#cursor.set({ start: start ?? groupBounds(groups).start });
+		const bounds = groupBounds(groups);
+		const start = groups.start === undefined ? this.#untimedStart(bounds.end) : undefined;
+		this.#cursor.set({ start: start ?? bounds.start });
 		// Timedness is unknown until accept(), so an unfloored subscriber made before it
-		// settles its start at the first read after.
-		this.#unsettled = groups.start === undefined && !state.info.peek();
+		// settles its start then, against the groups that existed at that moment.
+		if (groups.start === undefined && !state.info.peek()) state.settle = () => this.#settleStart();
 	}
 
 	// Raise the floor of an unfloored subscriber made before accept(), once the track is
-	// known to be untimed. Called before any read consults the cursor.
+	// known to be untimed.
 	#settleStart(): void {
-		if (!this.#unsettled || !this.#state.info.peek()) return;
-		this.#unsettled = false;
-		const start = this.#untimedStart();
+		this.#state.settle = undefined;
+		const start = this.#untimedStart(this.#cursor.peek().end);
 		if (start === undefined) return;
 		this.#cursor.update((cursor) => ({ ...cursor, start: Math.max(cursor.start, start) }));
 	}
 
-	// The newest servable group, when the track is known to be untimed.
-	#untimedStart(): number | undefined {
+	// The newest servable group below the `end` cap, when the track is known to be untimed.
+	#untimedStart(end: number | undefined): number | undefined {
 		const info = this.#state.info.peek();
 		if (!info || info.timescale != null) return undefined;
 		const timeline = this.#state.timeline;
-		for (let i = timeline.length - 1; i >= 0; i--) {
+		for (let i = (end === undefined ? timeline.length : timelineIndex(timeline, end)) - 1; i >= 0; i--) {
 			if (!(timeline[i].closed.peek() instanceof Error)) return timeline[i].sequence;
 		}
 		return undefined;
@@ -1355,6 +1372,7 @@ export class Subscriber {
 	 */
 	setGroups(groups: Groups): void {
 		const { start, end } = groupBounds(groups);
+		if (groups.start !== undefined) this.#state.settle = undefined;
 		this.#cursor.update((cursor) => ({ start: Math.max(cursor.start, start), end }));
 	}
 
@@ -1362,6 +1380,7 @@ export class Subscriber {
 	// Rust `start_at`. Local readers stay monotonic; only the wire publisher lowers.
 	#replaceGroups(groups: Groups): void {
 		const { start, end } = groupBounds(groups);
+		if (groups.start !== undefined) this.#state.settle = undefined;
 		this.#cursor.update((cursor) => ({
 			start: groups.start === undefined ? cursor.start : start,
 			end,
@@ -1430,7 +1449,6 @@ export class Subscriber {
 	// Package-internal synchronous half of recvGroup. The lite publisher uses this so applying
 	// control state, popping the group, and positioning its frames are one JavaScript turn.
 	#tryRecvGroup(): Recv {
-		this.#settleStart();
 		const groups = this.#state.groups.peek();
 		const { start, end } = this.#cursor.peek();
 		while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
@@ -1534,7 +1552,6 @@ export class Subscriber {
 	// The sequence cursor behind {@link Ordered}, which owns the only public door to it.
 	async #nextGroup(): Promise<GroupConsumer | undefined> {
 		for (;;) {
-			this.#settleStart();
 			const groups = this.#state.groups.peek();
 			const cursor = this.#cursor.peek();
 			const start = Math.max(cursor.start, this.#nextSequence);

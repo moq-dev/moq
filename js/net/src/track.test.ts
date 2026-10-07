@@ -2138,10 +2138,36 @@ test("an unfloored subscriber made before accept starts at the latest group once
 	for (let i = 0; i < 3; i++) producer.appendGroup().close();
 	const early = producer.subscribe();
 	const floored = producer.subscribe({ groups: { start: { included: 0 } } });
+	const named = producer.subscribe();
+	named.setGroups({ start: { included: 1 } });
 
 	producer.accept({});
-	expect(drain(early)).toEqual([2]);
-	expect(drain(floored)).toEqual([0, 1, 2]);
+	// Settled at accept(), so groups written before the first read still arrive.
+	producer.writeFrame({ payload: enc.encode("3") });
+	producer.writeFrame({ payload: enc.encode("4") });
+	expect(drain(early)).toEqual([2, 3, 4]);
+	expect(drain(floored)).toEqual([0, 1, 2, 3, 4]);
+	expect(drain(named)).toEqual([1, 2, 3, 4]);
+});
+
+test("an untimed subscriber without a start begins at the latest group under its end", () => {
+	const producer = untimedTrack(5);
+	// As the lite publisher serves a SUBSCRIBE with an end and no start.
+	const subscriber = producer.subscribe({ groups: { end: { excluded: 3 } } });
+	subscriber.setGroups({ end: { excluded: 3 } });
+	expect(drain(subscriber)).toEqual([2]);
+});
+
+test("accept closes the track when something written before it disagrees", async () => {
+	const timed = new TrackProducer("groups");
+	timed.appendGroup().writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(1) });
+	expect(() => timed.accept({})).toThrow(TimestampMismatch);
+	await expect(timed.info()).rejects.toBeInstanceOf(TimestampMismatch);
+
+	const datagrams = new TrackProducer("datagrams");
+	datagrams.subscribe();
+	datagrams.appendDatagram(Timestamp.fromMillis(1), enc.encode("x"));
+	expect(() => datagrams.accept({})).toThrow(TimestampMismatch);
 });
 
 test("a single-frame write that throws aborts its group", () => {
