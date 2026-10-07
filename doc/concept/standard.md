@@ -69,7 +69,9 @@ publisher that refuses `TRACK_STATUS` with `NOT_SUPPORTED` gets the
 Location on every draft, and the Track Properties from draft-18, when the
 answer gained them. A `SUBSCRIBE` that sets `INCLUDE_PROPERTIES` to 0 gets an
 empty properties block, but its objects keep their Timestamps, whose units
-`TRACK_STATUS` reports.
+`TRACK_STATUS` reports. From draft-20, a Rust subscriber sets
+`INCLUDE_PROPERTIES` to 0 on every later `SUBSCRIBE` or `FETCH` for a track
+it already learned, instead of receiving the same properties again.
 
 On drafts 14–19, the Rust publisher also serves relative and absolute joining
 `FETCH` requests for `NextObject` subscriptions, for the subscription group's

@@ -81,7 +81,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [JS data consumer timestamps](/quest/m1/js-data-consumer-timestamps.md) - @moq/json and @moq/flate consumers return each value's timestamp, with snapshot `next()` and `latest()`
 - [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) - a draft-20+ FETCH within one group is served from its LOCATION_FILTER, as older drafts are
 - [FETCH_OK properties](/quest/m1/fetch-ok-properties.md) - our FETCH_OK carries the track properties SUBSCRIBE_OK does, as draft 16+ requires
-- [Properties opt-out](/quest/m1/ietf-properties-opt-out.md) - our IETF subscriber learns track properties once, from TRACK_STATUS, once the opt-out stops costing released publishers their properties and timestamps
 - [IETF object gaps](/quest/m1/ietf-object-gaps.md) - a gapped object ID is refused loudly like a subgroup in Rust and JS, and an overflowing one closes the session in Rust
 - [JS IETF datagrams](/quest/m1/js-ietf-datagram.md) - `@moq/net` sends and receives datagram groups over moq-transport, like Rust
 - [Datagrams are live-only](/quest/m1/datagram-unfetchable.md) - no FETCH, replay to a new subscriber, or cache fill ever returns a datagram group

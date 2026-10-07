@@ -9,16 +9,14 @@ meets draft 16+'s rule to include all of a track's properties.
 
 ## Plan
 
-Found (2026-10-01) in #4647: a group FETCH with no
-prior SUBSCRIBE_OK now reads its max age from FETCH_OK, but our publisher
-sends an empty block.
+Found (2026-10-01) in #4647: our publisher's FETCH_OK sends an empty
+properties block. Our own subscriber no longer reads it (#4974): it learns a
+track from SUBSCRIBE_OK or TRACK_STATUS_OK before any FETCH, and from draft 20
+opts out with INCLUDE_PROPERTIES = 0. Other fetch-only readers still need it.
 
 - `rs/moq-net/src/ietf/publisher.rs` sends FETCH_OK with
   `properties: Default::default()`. SUBSCRIBE_OK fills them in the block near
   `publisher.rs:655`. Share that code so the two can't diverge.
-- Our group-fetch accept path reads only the max age from FETCH_OK and
-  hardcodes a microsecond timescale. Apply the same properties SUBSCRIBE_OK
-  does (timescale, priority, group order) there too.
 - Drafts 14-15 allow the omission: MAX_CACHE_DURATION is a MAY there, and
   FETCH_OK has no properties block. From draft 16, a relay MUST include all
   Extension Headers / Properties associated with a track in FETCH_OK (d16
@@ -36,8 +34,8 @@ sends an empty block.
 - Honour INCLUDE_PROPERTIES (0x35) on FETCH from draft 20, once
   [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) serves draft-20 FETCH at
   all (today our publisher refuses every one). It defaults to sending the
-  properties; at 0 the block is present but empty. `fetch.rs` decodes it on
-  draft 20+ and drops it, so it is not honoured today.
+  properties; at 0 the block is present but empty. `fetch.rs` decodes it into
+  `Fetch::properties_wanted`, which the publisher does not honour yet.
 - Test per draft range: FETCH_OK round-trips the properties SUBSCRIBE_OK would
   carry, a standalone FETCH's objects arrive stamped, and
   INCLUDE_PROPERTIES = 0 empties the block.
@@ -49,6 +47,3 @@ the block. Interop: run `just test interop --all`.
 
 - [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) - draft-20 FETCH is served at all, and edits the same `run_fetch_stream`
 
-## Related
-
-- [Properties opt-out](/quest/m1/ietf-properties-opt-out.md) - our subscriber opting out of these properties, to learn them from TRACK_STATUS instead

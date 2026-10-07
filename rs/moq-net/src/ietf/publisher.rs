@@ -3543,6 +3543,7 @@ mod serve_tests {
 				},
 				range_filters: false,
 				fill_timeout: false,
+				properties_wanted: true,
 			}
 			.encode_msg(&mut Encoder::new(&mut fetch_body, version.into()), version)
 			.unwrap();
@@ -4175,6 +4176,7 @@ mod serve_tests {
 					},
 					range_filters: false,
 					fill_timeout: false,
+					properties_wanted: true,
 				},
 			)
 			.await?;
@@ -4653,6 +4655,7 @@ mod serve_tests {
 					},
 					range_filters: false,
 					fill_timeout: false,
+					properties_wanted: true,
 				},
 			)
 			.await
@@ -4893,6 +4896,7 @@ mod serve_tests {
 							fetch_type,
 							range_filters: false,
 							fill_timeout: false,
+							properties_wanted: true,
 						},
 					)
 					.await
@@ -4936,6 +4940,7 @@ mod serve_tests {
 					},
 					range_filters: false,
 					fill_timeout: false,
+					properties_wanted: true,
 				},
 			)
 			.await
@@ -6729,6 +6734,7 @@ mod tests {
 					fetch_type,
 					range_filters: false,
 					fill_timeout: false,
+					properties_wanted: true,
 				},
 			)
 			.await
