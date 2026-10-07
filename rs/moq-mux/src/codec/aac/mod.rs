@@ -32,11 +32,13 @@ pub enum Error {
 	#[error("reserved channelConfiguration: {0}")]
 	ReservedChannelConfig(u8),
 
-	/// A channel count no channelConfiguration names.
+	/// A channel count that does not pick a channelConfiguration on its own.
 	///
-	/// Counts 1 through 6 are that configuration, and 8 channels are configuration 7
-	/// (7.1). Any other count needs a program config element, which a bare count does not supply.
-	#[error("{0} channels have no channelConfiguration")]
+	/// Counts 1 through 6 are that configuration, and 8 channels are configuration 7 (7.1).
+	/// Seven channels (6.1, or configuration 11) and 24 (22.2, configuration 13) have a
+	/// configuration but also program config element layouts, so the speaker positions are
+	/// not guessed. Every other count has no configuration at all.
+	#[error("cannot pick a channelConfiguration for {0} channels")]
 	UnsupportedChannelCount(u32),
 
 	/// A program config element is used with an object type that has no GASpecificConfig.
@@ -104,8 +106,8 @@ impl Config {
 	/// Encode this configuration as an AudioSpecificConfig (ISO 14496-3 §1.6.2.1).
 	///
 	/// Standard sample rates produce 2 bytes; non-standard rates fall back to
-	/// the 5-byte form with an explicit 24-bit frequency. A channel count no
-	/// channelConfiguration names is refused rather than written as another layout.
+	/// the 5-byte form with an explicit 24-bit frequency. A channel count that does
+	/// not pick a channelConfiguration is refused rather than written as another layout.
 	pub fn encode(&self) -> Result<Bytes> {
 		// audioObjectType is a 5-bit field; mask to prevent shift overflow.
 		let profile = self.profile & 0x1F;
@@ -442,8 +444,10 @@ fn channel_count_from_config(channel_config: u8) -> Result<u32> {
 /// Inverse of [`channel_count_from_config`] for the configurations a bare count names.
 ///
 /// Counts 1 through 6 are that configuration. Eight channels are configuration 7, the
-/// 7.1 layout. Seven channels and any count past eight are configurations a program
-/// config element could describe; guessing those speaker positions is refused.
+/// 7.1 layout, so a configuration 12 or 14 source keeps its layout only through its
+/// verbatim AudioSpecificConfig. Any other count is refused rather than guessing speaker
+/// positions, including 7 and 24, which configurations 11 and 13 name alongside program
+/// config element layouts.
 fn channel_config_from_count(channel_count: u32) -> Result<u8> {
 	match channel_count {
 		1..=6 => Ok(channel_count as u8),
@@ -786,7 +790,6 @@ mod tests {
 		}
 
 		// One past the configurations a count names, plus zero and 22.2 (configuration 13).
-		// Each used to be logged and written as stereo.
 		for count in [0, 9, 24] {
 			assert!(matches!(
 				Config {
@@ -813,7 +816,7 @@ mod tests {
 
 	#[test]
 	fn verbatim_config_keeps_a_program_config_element() {
-		// Seven channels have no channelConfiguration. Import keeps the element instead of re-encoding.
+		// Encode refuses seven channels. Import keeps the element instead of re-encoding.
 		let asc = pce_asc(2, &[false, true], &[true], &[true], 0);
 		let audio = config(&asc).unwrap();
 		assert_eq!(audio.channel_count, 7);

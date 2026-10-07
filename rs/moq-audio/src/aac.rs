@@ -80,8 +80,8 @@ pub(crate) fn description(catalog: &hang::catalog::AudioConfig, profile: u8) -> 
 
 			// Synthesis still drops bits the config cannot hold: the object type is
 			// masked to five bits, and the sample rate to 24. Encode refuses a channel
-			// count no channelConfiguration names, but check the catalog first so the
-			// error stays the decoder's.
+			// count that does not pick a channelConfiguration, but check the catalog
+			// first so the error stays the decoder's.
 			validate(&config)?;
 
 			config.encode().map_err(moq_mux::Error::from)?

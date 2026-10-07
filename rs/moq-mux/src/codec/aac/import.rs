@@ -21,8 +21,8 @@ impl Import {
 	///
 	/// Build one from an AudioSpecificConfig with [`config`] (which keeps its bytes as the catalog
 	/// `description`), or from an out-of-band [`Config`] via `try_into()` (which synthesizes the
-	/// description, refusing a channel count no channelConfiguration names). The rendition publishes
-	/// immediately.
+	/// description, refusing a channel count that does not pick a channelConfiguration). The rendition
+	/// publishes immediately.
 	pub fn new<E: CatalogExt>(
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
@@ -119,8 +119,8 @@ impl Import {
 pub fn config(init: &[u8]) -> crate::Result<hang::catalog::AudioConfig> {
 	let mut buf = init;
 	let parsed = Config::parse(&mut buf)?;
-	// Keep the bytes verbatim. Re-encoding would refuse a program config element whose count no
-	// channelConfiguration names, and would drop any SBR or PS extension the parse ignores.
+	// Keep the bytes verbatim. Re-encoding would refuse a program config element whose count does
+	// not pick a channelConfiguration, and would drop any SBR or PS extension the parse ignores.
 	let mut audio = catalog_config(&parsed);
 	audio.description = Some(bytes::Bytes::copy_from_slice(init));
 	Ok(audio)
@@ -132,7 +132,8 @@ impl TryFrom<Config> for hang::catalog::AudioConfig {
 	/// Build a catalog config from a config resolved out of band (an ADTS header, gstreamer caps),
 	/// synthesizing the AudioSpecificConfig `description` since no verbatim bytes are available.
 	///
-	/// Refuses a channel count no channelConfiguration names, rather than describing it as another layout.
+	/// Refuses a channel count that does not pick a channelConfiguration, rather than describing it as
+	/// another layout.
 	fn try_from(config: Config) -> Result<Self, Self::Error> {
 		let mut audio = catalog_config(&config);
 		audio.description = Some(config.encode()?);
