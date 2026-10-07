@@ -314,15 +314,15 @@ Each subscription carries the knobs that decide behavior under congestion:
 | --- | --- |
 | **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. |
 | **Order** | Which group to send first when several are pending. Newest first for live, oldest first for catch-up. |
-| **Max age** | How old a non-latest group may get before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
+| **Max delay** | How far a non-latest group may fall behind the live edge before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
 
-Max age is measured on the media timeline, not the wall clock, so a backlog
-delivered as a burst is still old while a congestion stall never expires
+Max delay is measured on the media timeline, not the wall clock, so a backlog
+delivered as a burst is still late while a congestion stall never expires
 anything on its own. Both ends apply it: the publisher skips a group rather
 than sending it, and the subscriber skips it again as it reads, since the
 publisher only ever sees the most tolerant budget across its subscribers.
 
-A route failover is invisible to max age: a group open across the change carries
+A route failover is invisible to max delay: a group open across the change carries
 on from the new route at the frame where the old one stopped, and a group only a
 replaced route that went quiet still holds is given up once it falls a full
 budget behind the new route's live edge. A successor group with no timestamp
@@ -348,7 +348,7 @@ IETF carries this value as MAX\_CACHE\_DURATION, received on every supported dra
 and sent from draft 17 onward. A relay reads it from FETCH\_OK as well as SUBSCRIBE\_OK, so a track it
 only fetches still learns its window. Drafts 14–16 remain receive-only for compatibility
 with older implementations. This is an approximate mapping: IETF measures wall
-time, while max age uses media timestamps and always keeps the newest group.
+time, while the publisher's retention window uses media timestamps and always keeps the newest group.
 EXPIRES describes subscription lifetime and does not set retention.
 
 Lite-07 encodes a finite limit as milliseconds plus one, with zero meaning no limit.
@@ -359,7 +359,7 @@ timer cap schedules periodic age checks and does not shorten that window.
 
 Put together, a conference might use:
 
-| Track | Priority | Order | Max age |
+| Track | Priority | Order | Max delay |
 | --- | --- | --- | --- |
 | audio | 100 | ascending | 500 ms |
 | video | 50 | descending | 2 s |

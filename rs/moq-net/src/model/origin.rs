@@ -5352,7 +5352,8 @@ mod tests {
 
 	/// Equal-cost advertisers of one prefix share its paths: a set of requested
 	/// paths spreads across the pool, and one path always resolves to the same
-	/// advertiser, whatever order the routes arrived in.
+	/// advertiser, whatever order the routes arrived in. The split is a rendezvous
+	/// hash, so losing an advertiser moves only the paths it won.
 	#[test]
 	fn equal_cost_pool_spreads_paths() {
 		const WORKERS: [u64; 4] = [10, 11, 12, 13];
@@ -5390,6 +5391,15 @@ mod tests {
 		for worker in WORKERS {
 			let share = forward.iter().filter(|hop| **hop == origin(worker)).count();
 			assert!(share >= PATHS / 16, "worker {worker} took {share} of {PATHS} paths");
+		}
+
+		// A mod-N style hash would reshuffle most paths here.
+		let lost = origin(WORKERS[1]);
+		let survivors = winners(WORKERS.into_iter().filter(|id| origin(*id) != lost));
+		for (i, (before, after)) in forward.iter().zip(&survivors).enumerate() {
+			if *before != lost {
+				assert_eq!(after, before, "pool/job-{i} moved off a surviving worker");
+			}
 		}
 	}
 
@@ -7223,7 +7233,7 @@ mod tests {
 		queued(&server).await.accept(&source);
 		let resolved = pending.await.expect("resolves");
 
-		let budget = track::Subscription::default().with_max_age(Duration::from_secs(3600));
+		let budget = track::Subscription::default().with_max_delay(Duration::from_secs(3600));
 		for name in ["a", "b"] {
 			let mut subscription = resolved
 				.track(name)
@@ -8196,7 +8206,7 @@ mod tests {
 		let mut again = resolved
 			.track("video")
 			.unwrap()
-			.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(3600)))
+			.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)))
 			.await
 			.expect("resubscribe");
 		let mut group = moq_net_sim::timeout(Duration::from_secs(1), again.recv_group())
@@ -8343,7 +8353,7 @@ mod tests {
 		let mut subscription = edge_resolved
 			.track("video")
 			.unwrap()
-			.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(3600)))
+			.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)))
 			.await
 			.expect("resubscribe");
 		moq_net_sim::timeout(Duration::from_secs(5), track.demand().used())

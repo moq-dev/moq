@@ -737,7 +737,7 @@ fn spawn_export(
 	if let Some(stdout) = export.sink.stdout() {
 		let args = SubscribeArgs {
 			format: stdout.format,
-			max_age: stdout.max_age,
+			max_delay: stdout.max_delay,
 			linger: stdout.linger,
 			fragment_duration: stdout.fragment_duration,
 			mux_rate: stdout.mux_rate,
@@ -753,12 +753,12 @@ fn spawn_export(
 				tasks.spawn(hls::export(origin.consume(), args, name));
 			}
 			ExportSink::Rtmp(rtmp) => {
-				let max_age = rtmp.max_age.into_std();
+				let max_delay = rtmp.max_delay.into_std();
 				if let Some(addr) = rtmp.endpoint.listen {
 					let name = require_broadcast(name, "export rtmp --listen")?;
-					tasks.spawn(rtmp::listen_export(origin.consume(), addr, name, max_age));
+					tasks.spawn(rtmp::listen_export(origin.consume(), addr, name, max_delay));
 				} else if let Some(url) = rtmp.endpoint.connect {
-					tasks.spawn(rtmp::connect_export(origin.consume(), url, name, max_age));
+					tasks.spawn(rtmp::connect_export(origin.consume(), url, name, max_delay));
 				}
 			}
 			ExportSink::Srt(srt) => {

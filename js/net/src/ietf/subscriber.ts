@@ -541,8 +541,8 @@ export class Subscriber {
 		// The publisher can be serving before it answers, so waiting only on the response
 		// would miss the local side going away and leave it serving a track nobody reads.
 		// Demand returning before we commit is not abandonment, matching the serving loop.
+		const demand = producer.demand();
 		const waitAbandoned = async (): Promise<null> => {
-			const demand = producer.demand();
 			// An info-only lookup attaches no subscriber yet still waits on SUBSCRIBE_OK for
 			// the track info, so only demand that arrived and then left is abandonment.
 			while (!demand.used.peek() && demand.closed.peek() === undefined) {
@@ -556,24 +556,34 @@ export class Subscriber {
 
 		let stream: Stream;
 		let trackAlias: bigint;
+		const abandoned = new Error("subscribe abandoned before it was accepted");
 		try {
-			const result = await race([
-				withTimeout(
-					setup,
-					SUBSCRIBE_OK_TIMEOUT_MS,
-					`subscribe timed out after ${SUBSCRIBE_OK_TIMEOUT_MS}ms waiting for SUBSCRIBE_OK (browser stream limit reached?)`,
-				),
-				waitAbandoned(),
-			]);
-
-			if (result === null) throw new Error("subscribe abandoned before it was accepted");
-
-			stream = result.stream;
-			trackAlias = result.alias;
+			// Returning demand keeps the same setup and its original deadline.
+			const accepted = withTimeout(
+				setup,
+				SUBSCRIBE_OK_TIMEOUT_MS,
+				`subscribe timed out after ${SUBSCRIBE_OK_TIMEOUT_MS}ms waiting for SUBSCRIBE_OK (browser stream limit reached?)`,
+			);
+			for (;;) {
+				const result = await race([accepted, waitAbandoned()]);
+				if (result !== null) {
+					stream = result.stream;
+					trackAlias = result.alias;
+					break;
+				}
+				if (demand.closed.peek() === undefined && demand.used.peek()) continue;
+				throw abandoned;
+			}
 			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			// A control request that timed out is not late content, so it carries its own code.
-			const e = err instanceof TimeoutError ? controlTimeout(err) : await sessionCause(this.#quic, err);
+			// Local abandonment must commit without yielding after the demand check.
+			const e =
+				err === abandoned
+					? abandoned
+					: err instanceof TimeoutError
+						? controlTimeout(err)
+						: await sessionCause(this.#quic, err);
 			request.reject(e);
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
