@@ -132,7 +132,6 @@ discovery.run((effect) => {
 		for (;;) {
 			const entry = await effect.race(announced.next());
 			if (!entry) break;
-			if (entry.kind === "live") continue;
 			const path = entry.prefix;
 			const node = Net.Path.stripPrefix(prefix, path);
 			if (!node) continue;

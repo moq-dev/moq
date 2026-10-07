@@ -36,7 +36,7 @@ async fn next_first_hop(announced: &mut announce::Consumer) -> Hop {
 	loop {
 		let update = match announced.next().await.expect("announce cursor ended") {
 			announce::Event::Start(update) | announce::Event::Update(update) => update,
-			announce::Event::End(_) | announce::Event::Live => continue,
+			announce::Event::End(_) => continue,
 		};
 		if update.prefix.as_str() != PATH {
 			continue;

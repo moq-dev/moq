@@ -2250,8 +2250,7 @@ where
 	/// The routes an announce cursor holds right now, without waiting for more.
 	///
 	/// A route announced and retracted within the snapshot is left out, and a repeat
-	/// keeps its latest metadata, so each path appears once. The origin's live marker is
-	/// skipped: it says when the origin caught up, not what the peer should hear.
+	/// keeps its latest metadata, so each path appears once.
 	fn snapshot(announced: &mut crate::announce::Consumer) -> Vec<crate::announce::Announce> {
 		let mut initial = std::collections::BTreeMap::new();
 		while let Some(event) = announced.try_next() {
@@ -2262,7 +2261,6 @@ where
 				crate::announce::Event::End(update) => {
 					initial.remove(&update.prefix);
 				}
-				crate::announce::Event::Live => {}
 			}
 		}
 		initial.into_values().collect()
@@ -2320,18 +2318,13 @@ where
 					if let Poll::Ready(res) = target.poll_closed(&mut finished, self.version, &mut cx) {
 						return Poll::Ready(NamespaceEvent::Closed(res));
 					}
-					// The origin's live marker means nothing to the peer here.
-					while let Poll::Ready(next) = announced.poll_next(waiter) {
-						match next {
-							Some(crate::announce::Event::Live) => continue,
-							Some(crate::announce::Event::Start(update) | crate::announce::Event::Update(update)) => {
-								return Poll::Ready(NamespaceEvent::Update(Some((update, true))));
+					if let Poll::Ready(next) = announced.poll_next(waiter) {
+						return Poll::Ready(NamespaceEvent::Update(next.map(|event| match event {
+							crate::announce::Event::Start(update) | crate::announce::Event::Update(update) => {
+								(update, true)
 							}
-							Some(crate::announce::Event::End(update)) => {
-								return Poll::Ready(NamespaceEvent::Update(Some((update, false))));
-							}
-							None => return Poll::Ready(NamespaceEvent::Update(None)),
-						}
+							crate::announce::Event::End(update) => (update, false),
+						})));
 					}
 					if retry.poll(waiter).is_ready() {
 						return Poll::Ready(NamespaceEvent::Retry);

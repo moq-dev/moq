@@ -33,14 +33,11 @@ export interface Announce {
  * What an announcement stream yields.
  *
  * `start`: a route now covers the prefix. `update`: the route covering it changed
- * hops or cost, in place. `end`: no route covers it any more. `live`: every route
- * live at subscribe time has been delivered, including those a connected peer was still
- * sending, so what follows is live changes; yielded at most once, and a caller listing
- * what is live stops there.
+ * hops or cost, in place. `end`: no route covers it any more.
  *
  * @public
  */
-export type Event = ({ kind: "start" | "update" | "end" } & Announce) | { kind: "live" };
+export type Event = { kind: "start" | "update" | "end" } & Announce;
 
 /**
  * Options for an announcement stream.
@@ -60,8 +57,6 @@ export interface Options {
 /** Reactive backing state shared by announcement producers and consumers. */
 class AnnounceState {
 	queue = new Signal<Event[]>([]);
-	// Whether the live marker was appended, so a repeat (from a stream spanning sessions) is dropped.
-	live = false;
 	closed = new Once<Error | null>();
 }
 
@@ -95,13 +90,9 @@ export class Producer {
 		return makeConsumer(this.#state);
 	}
 
-	/** Writes an event to the queue. The `live` marker is written once; later ones are dropped. */
+	/** Writes an event to the queue. */
 	append(event: Event) {
 		if (this.#state.closed.peek() !== undefined) throw new Error("announcements are closed");
-		if (event.kind === "live") {
-			if (this.#state.live) return;
-			this.#state.live = true;
-		}
 		this.#state.queue.mutate((queue) => {
 			queue.push(event);
 		});
@@ -167,48 +158,5 @@ export class Consumer {
 	/** Closes the reader. Idempotent. */
 	close(abort?: Error) {
 		closeState(this.#state, abort);
-	}
-}
-
-/**
- * When an initial set has landed, for wires that never say where it ends (lite-03/04,
- * moq-transport): once its stream goes quiet.
- *
- * A peer writes its whole set back to back, so the first announcement gets a round trip's
- * grace and each one after it only has to beat its siblings. Mirrors `Quiet` in `rs/moq-net`.
- *
- * @internal
- */
-export class Quiet {
-	/** How long the stream may stay silent before its first announcement, in ms. */
-	static readonly FIRST = 500;
-	/** How long the stream may stay silent between announcements, in ms. */
-	static readonly GAP = 30;
-
-	#landed: () => void;
-	#timer: ReturnType<typeof setTimeout> | undefined;
-
-	/** Start counting from now; `landed` runs once the stream goes quiet. */
-	constructor(landed: () => void) {
-		this.#landed = landed;
-		this.#timer = setTimeout(() => this.#land(), Quiet.FIRST);
-	}
-
-	/** An announcement arrived: the set is still landing. */
-	heard(): void {
-		if (this.#timer === undefined) return;
-		clearTimeout(this.#timer);
-		this.#timer = setTimeout(() => this.#land(), Quiet.GAP);
-	}
-
-	/** Stop counting without landing, once the stream is gone. Idempotent. */
-	close(): void {
-		clearTimeout(this.#timer);
-		this.#timer = undefined;
-	}
-
-	#land(): void {
-		this.#timer = undefined;
-		this.#landed();
 	}
 }
