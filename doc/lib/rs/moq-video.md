@@ -147,31 +147,28 @@ a decoder with a hardware scaler honors it; `Frame::resize` is the exact-size
 operation. `decode::Consumer` takes `decode::Options`, which carries the
 subscription's `start` and `max_age` beside the decoder config.
 
-Linux/NVIDIA applications with a native Vulkan producer use
-`frame::vulkan::Importer`. Each reusable image is a dedicated, optimal-tiling
-`VK_FORMAT_R8G8B8A8_UNORM` allocation exported with an opaque memory FD, plus an
-opaque-FD timeline semaphore and the physical-device UUID. Publishing consumes
-the producer-owned slot; awaiting its completion returns that slot only after
-CUDA readers finish. Import capacity bounds retained images. Unsupported
-devices, formats, layouts, and synchronization are errors, with no CPU mapping
-or staging fallback. A non-exportable application image needs one Vulkan GPU
-copy into an exportable slot. The image is `VK_FORMAT_B8G8R8A8_UNORM` when
-imported through `Image::bgra8` instead.
+External Linux Vulkan producers construct `frame::vulkan::Slot` from exported
+memory and timeline FDs, an `Image` describing the format, allocation, and
+memory handle type, and a guard retaining the producer's allocation. Device
+and driver UUIDs identify the exporter; opaque memory also carries its original
+memory type index, while DMA-BUF memory carries its DRM modifier and explicit
+plane offsets and row pitches, including producer padding.
 
-`frame::cuda::Converter` turns a published Vulkan frame into the NV12
-`Surface::Cuda` NVENC encodes in place, on the GPU, in one declared color space
-(matrix and range) with 4:2:0 chroma averaged per 2x2 block and no transfer
-function applied. Its buffers come from a pool sized at construction:
-`Converter::reserve` holds one as a `cuda::Slot`, which `Slot::convert` fills
-with the captured frame or `Slot::resize` with a smaller rendition of it. One
-captured frame feeding HD and SD holds a fixed number of buffers, and a producer
-that outruns its encoder gets `None` from `reserve`, its cue to drop the frame,
-instead of unbounded device memory. A slot dropped unfilled, or consumed by a
-failed conversion, returns its buffer, so only a real failure is an error. Open the encoder with `encode::Kind::Named("nvenc")`
-and the same `encode::Config::color`: `Kind::Auto` could fall back to a software
-encoder that reads the frame back, and the portable `Surface::resize` downloads
-when the GPU scaler fails. Everything under `frame::cuda` and `frame::vulkan`
-runs on the device or returns an error.
+Set `encode::Config::input` to the image's device before opening or probing the
+encoder. `Kind::Auto` selects an importing backend on that device and refuses
+unsupported devices without a CPU fallback. Feed each published image through
+`Surface::Vulkan`; NVENC privately imports it into CUDA, shares one full-size
+NV12 conversion per capture and color space, and scales each rendition on the
+GPU. Pin `Config::color` when renditions cross the SD/HD color-inference boundary.
+
+`Slot::publish` consumes the producer slot and `Completion::wait` returns it
+only after the last reader finishes its GPU work. An unconsumed or failed frame
+fails completion and releases its slot instead of recycling an unsignalled
+timeline. Non-exportable application images need a GPU copy into an exportable
+slot. External Vulkan images have no CPU mapping or download fallback.
+
+External DMA-BUF producers use `DmaBuf::new` with an owned FD, `DmaBufLayout`,
+and a release guard; their buffers also refuse CPU download.
 
 ## Encoder presets
 
@@ -228,7 +225,7 @@ An `Encoder` or `Sink` takes one frame per call and queues none of its own. A
 source that outruns the codec should drop raw frames it has not submitted,
 never encoded packets.
 
-`just rs vulkan-cuda` runs the opt-in native Vulkan/CUDA/NVENC hardware
+`just rs gpu` runs the opt-in native Vulkan/CUDA/NVENC hardware
 exercise, including a three-view 1280x720 workload that reports per-stage
 latency and CPU time.
 

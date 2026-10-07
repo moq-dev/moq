@@ -1117,7 +1117,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						modifier,
 						color,
 					});
-					match DmaBuf::new(format, modifier, layout.width, layout.height, planes, color, inner) {
+					match DmaBuf::adopt(format, modifier, layout.width, layout.height, planes, color, inner) {
 						Ok(frame) => {
 							chan.push(Surface::DmaBuf(frame.clone()));
 							// Only the pacing timer reads `last`. A camera must not
@@ -2087,7 +2087,7 @@ mod tests {
 			modifier: 0,
 			color: Some(Color::Bt709Full),
 		});
-		let frame = DmaBuf::new(
+		let frame = DmaBuf::adopt(
 			DrmFormat::NV12,
 			0,
 			2,

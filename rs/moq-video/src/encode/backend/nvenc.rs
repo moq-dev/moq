@@ -32,6 +32,7 @@
 //! rung of a rendition ladder can be too small for NVENC even though the GPU
 //! conversion and resize handle it.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -45,7 +46,7 @@ use moq_nvenc::{Encoder, EncoderInitParams, Session};
 
 use super::super::encoder::{Applied, Codec, Config, Gop, Preset};
 use super::{Backend, Encoded, keyframe_annexb};
-use crate::frame::{Surface, interleave_uv};
+use crate::frame::{Surface, cuda, interleave_uv, vulkan};
 use crate::{Color, Error, Frame};
 
 pub(crate) const NAME: &str = "nvenc";
@@ -81,6 +82,8 @@ pub(crate) struct Nvenc {
 	_cuda: Arc<CudaContext>,
 	timestamp: u64,
 	codec: Codec,
+	size: crate::Size,
+	converter: Option<cuda::Converter>,
 }
 
 impl Nvenc {
@@ -98,7 +101,7 @@ impl Nvenc {
 		// cudarc 0.19's DriverError is Debug-only (no Display), so format with `{e:?}`.
 		let codec_guid = codec_guid(config.codec);
 
-		let cuda = CudaContext::new(0).map_err(|e| Error::Codec(anyhow::anyhow!("CUDA init: {e:?}")))?;
+		let cuda = input_context(config.input)?;
 		let encoder = Encoder::initialize_with_cuda(cuda.clone())
 			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC init: {e}")))?;
 
@@ -224,6 +227,11 @@ impl Nvenc {
 				config.preset,
 				format!("{label}, low-latency tuning, no B-frames, CBR, 1-frame VBV"),
 			),
+			converter: config
+				.input
+				.map(|_| cuda::Converter::new(cuda.ordinal(), config.resolved_color(), NonZeroUsize::new(8).unwrap()))
+				.transpose()?,
+			size: config.size(),
 			_cuda: cuda,
 			timestamp: 0,
 			codec: config.codec,
@@ -233,6 +241,35 @@ impl Nvenc {
 
 impl Backend for Nvenc {
 	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
+		// The published image shares its full-size conversion across renditions.
+		// Smaller encoders resize that NV12 buffer, so capture converts only once
+		// for each declared color space and never downloads its pixels.
+		let prepared = if let Surface::Vulkan(image) = &frame.surface {
+			let converter = self.converter.as_ref().ok_or_else(|| {
+				Error::Unsupported(format!(
+					"NVENC was not opened for external Vulkan {}",
+					image.image().device
+				))
+			})?;
+			let converted = image.converted(converter.color(), || {
+				converter
+					.reserve()
+					.ok_or_else(|| Error::Unsupported("CUDA conversion pool exhausted".into()))?
+					.convert(image)
+			})?;
+			let sized = if converted.size() == self.size {
+				converted
+			} else {
+				converter
+					.reserve()
+					.ok_or_else(|| Error::Unsupported("CUDA resize pool exhausted".into()))?
+					.resize(&converted, self.size)?
+			};
+			Some(Frame::new(Surface::Cuda(sized), frame.timestamp))
+		} else {
+			None
+		};
+		let frame = prepared.as_ref().unwrap_or(frame);
 		let output = self
 			.session
 			.create_output_bitstream()
@@ -360,6 +397,59 @@ fn drain_output<I>(submission: moq_nvenc::Submission<I>) -> Result<Vec<u8>, Erro
 		.finish()
 		.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC lock output: {e}")))?;
 	Ok(data)
+}
+
+/// Match the declared Vulkan device before allocating an NVENC session.
+fn input_context(input: Option<vulkan::Device>) -> Result<Arc<CudaContext>, Error> {
+	let Some(device) = input else {
+		return CudaContext::new(0).map_err(|e| Error::Codec(anyhow::anyhow!("CUDA init: {e:?}")));
+	};
+	matching_driver(device)?;
+	let count = CudaContext::device_count().map_err(|e| Error::Codec(anyhow::anyhow!("CUDA enumerate: {e:?}")))?;
+	for ordinal in 0..count {
+		let physical = cudarc::driver::result::device::get(ordinal)
+			.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA device {ordinal}: {e:?}")))?;
+		let uuid = cudarc::driver::result::device::get_uuid(physical)
+			.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA UUID: {e:?}")))?;
+		if uuid.bytes.map(|byte| u8::from_ne_bytes(byte.to_ne_bytes())) == device.device_uuid {
+			return CudaContext::new(ordinal as usize)
+				.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA input device {ordinal}: {e:?}")));
+		}
+	}
+	Err(Error::Unsupported(format!(
+		"no CUDA device matches external Vulkan {device}"
+	)))
+}
+
+/// Opaque memory belongs to the exporting Vulkan driver as well as its device.
+fn matching_driver(device: vulkan::Device) -> Result<(), Error> {
+	use ash::vk;
+	// SAFETY: load the system Vulkan implementation and retain it through the query.
+	let entry = unsafe { ash::Entry::load() }
+		.map_err(|e| Error::Unsupported(format!("Vulkan unavailable for {device}: {e}")))?;
+	let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_1);
+	// SAFETY: the create info has no borrowed pointers beyond this call.
+	let instance = unsafe { entry.create_instance(&vk::InstanceCreateInfo::default().application_info(&app), None) }
+		.map_err(|e| Error::Unsupported(format!("Vulkan instance for {device}: {e}")))?;
+	let result = (|| {
+		// SAFETY: the instance and queried physical devices stay alive throughout.
+		for physical in unsafe { instance.enumerate_physical_devices() }
+			.map_err(|e| Error::Unsupported(format!("Vulkan devices: {e}")))?
+		{
+			let mut id = vk::PhysicalDeviceIDProperties::default();
+			let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut id);
+			unsafe { instance.get_physical_device_properties2(physical, &mut properties) };
+			if id.device_uuid == device.device_uuid && id.driver_uuid == device.driver_uuid {
+				return Ok(());
+			}
+		}
+		Err(Error::Unsupported(format!(
+			"no Vulkan driver matches external {device}"
+		)))
+	})();
+	// SAFETY: no children or outstanding device work were created by this query.
+	unsafe { instance.destroy_instance(None) };
+	result
 }
 
 /// Whether cudarc's CUDA driver library can be opened without panicking.

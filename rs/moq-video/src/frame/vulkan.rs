@@ -1,30 +1,66 @@
-//! Vulkan images imported into CUDA on Linux/NVIDIA.
+//! External Vulkan images and their producer-owned reuse slots.
 //!
-//! A [`Slot`] is an exportable Vulkan allocation imported once. Publishing it
-//! consumes the slot and [`Completion::wait`] returns it only after every CUDA
-//! operation queued through the frame's stream has finished. A producer cannot
-//! accidentally overwrite an image while a consumer still reads it.
-//!
-//! The image is packed RGBA or BGRA, which no encoder takes: a
-//! [`cuda::Converter`](super::cuda::Converter) turns a published [`Frame`] into
-//! the NV12 [`cuda::Frame`](super::cuda::Frame) NVENC encodes in place.
+//! A producer exports a dedicated image and timeline semaphore once, then
+//! publishes the slot for each capture. Encoders import it on its declared
+//! device and return the slot only after their GPU reads have completed.
 
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
 use std::fmt;
-use std::num::NonZeroUsize;
-use std::os::fd::{AsRawFd, OwnedFd};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
-
-use cudarc::driver::sys;
-use cudarc::driver::{CudaContext, CudaStream};
+use std::os::fd::OwnedFd;
+use std::sync::{Arc, Mutex};
 
 use crate::{Error, Size};
 
+/// The physical device and driver that own an external image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Device {
+	/// Vulkan physical-device UUID.
+	pub device_uuid: [u8; 16],
+	/// Vulkan driver UUID, required to import opaque Vulkan allocations.
+	pub driver_uuid: [u8; 16],
+	/// Render node `dev_t`, absent when the exporter has no DRM render node.
+	pub render_node: Option<u64>,
+}
+
+impl fmt::Display for Device {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "device {} driver {}", uuid(self.device_uuid), uuid(self.driver_uuid))
+	}
+}
+
+/// One DRM modifier memory plane's allocation offset and row pitch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Plane {
+	/// Byte offset from the start of the exported allocation.
+	pub offset: u64,
+	/// Byte pitch reported by the producer, including any row padding.
+	pub row_pitch: u64,
+}
+
+/// The memory handle's import contract.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Memory {
+	/// Dedicated optimal-tiling memory, imported with the exporter's memory type.
+	OpaqueFd {
+		/// Vulkan memory type index used for the original allocation.
+		memory_type: u32,
+	},
+	/// A DMA-BUF image, imported with its DRM format modifier.
+	DmaBuf {
+		/// DRM format modifier describing the allocation's tiling.
+		modifier: u64,
+		/// Explicit memory-plane layouts, in the DRM modifier's plane order.
+		/// Importers check the plane count against the modifier's properties.
+		planes: Vec<Plane>,
+	},
+}
+
 /// The Vulkan handles exported for one reusable image slot.
 pub struct Handles {
-	/// A dedicated `VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT` allocation.
+	/// Memory exported with the handle type declared by [`Image::memory`].
 	pub memory: OwnedFd,
-	/// A `VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT` timeline semaphore.
+	/// An `OPAQUE_FD` timeline semaphore.
 	pub timeline: OwnedFd,
 }
 
@@ -33,243 +69,106 @@ impl Handles {
 	pub fn new(memory: OwnedFd, timeline: OwnedFd) -> Self {
 		Self { memory, timeline }
 	}
+
+	#[cfg_attr(not(feature = "nvidia"), allow(dead_code))]
+	fn try_clone(&self) -> Result<Self, Error> {
+		Ok(Self::new(
+			self.memory.try_clone().map_err(|e| Error::Codec(e.into()))?,
+			self.timeline.try_clone().map_err(|e| Error::Codec(e.into()))?,
+		))
+	}
 }
 
-/// The byte order of an imported image's four 8-bit channels.
+/// The byte order of an image's four 8-bit channels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Channels {
 	/// `VK_FORMAT_R8G8B8A8_UNORM`.
 	Rgba,
-	/// `VK_FORMAT_B8G8R8A8_UNORM`, what a swapchain or an Unreal render target
-	/// usually holds.
+	/// `VK_FORMAT_B8G8R8A8_UNORM`.
 	Bgra,
 }
 
-/// The Vulkan image contract accepted by CUDA.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// An external dedicated Vulkan image, in `GENERAL` layout while being read.
+///
+/// The producer creates a 2D image with one mip, one array layer, one sample,
+/// no create flags, exclusive sharing, and usage `TRANSFER_DST | SAMPLED |
+/// STORAGE`. It binds dedicated memory at offset zero. `OpaqueFd` images use
+/// optimal tiling; `DmaBuf` images use DRM modifier tiling with explicit memory
+/// planes. The channel order names the exact UNORM format. Importers recreate
+/// this contract, including usage, rather than infer image creation parameters.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Image {
-	device_uuid: [u8; 16],
-	size: Size,
-	allocation_size: u64,
-	channels: Channels,
+	/// Device and driver that allocated the image.
+	pub device: Device,
+	/// Memory handle type and its import parameters.
+	pub memory: Memory,
+	/// Visible image size.
+	pub size: Size,
+	/// Complete allocation size, rather than the number of visible pixel bytes.
+	pub allocation_size: u64,
+	/// Packed 8-bit channel order.
+	pub channels: Channels,
 }
 
 impl Image {
-	/// Describe a dedicated optimal-tiling `VK_FORMAT_R8G8B8A8_UNORM` image.
-	///
-	/// The image must be in `VK_IMAGE_LAYOUT_GENERAL` while CUDA owns the slot.
-	/// `allocation_size` is the complete `VkDeviceMemory` allocation size from
-	/// Vulkan, not `width * height * 4`.
-	pub fn rgba8(device_uuid: [u8; 16], size: Size, allocation_size: u64) -> Result<Self, Error> {
-		Self::new(device_uuid, size, allocation_size, Channels::Rgba)
-	}
-
-	/// Describe a dedicated optimal-tiling `VK_FORMAT_B8G8R8A8_UNORM` image,
-	/// under the same contract as [`rgba8`](Self::rgba8).
-	pub fn bgra8(device_uuid: [u8; 16], size: Size, allocation_size: u64) -> Result<Self, Error> {
-		Self::new(device_uuid, size, allocation_size, Channels::Bgra)
-	}
-
-	fn new(device_uuid: [u8; 16], size: Size, allocation_size: u64, channels: Channels) -> Result<Self, Error> {
-		size.validate_nonzero("Vulkan/CUDA image")?;
-		if allocation_size == 0 {
+	fn validate(&self) -> Result<(), Error> {
+		self.size.validate_nonzero("external Vulkan image")?;
+		if self.allocation_size == 0 {
 			return Err(Error::Unsupported(
-				"Vulkan/CUDA allocation size must be non-zero".into(),
+				"external Vulkan allocation size must be non-zero".into(),
 			));
 		}
-		Ok(Self {
-			device_uuid,
-			size,
-			allocation_size,
-			channels,
-		})
-	}
-
-	/// Vulkan physical-device UUID required to match the CUDA device.
-	pub const fn device_uuid(&self) -> [u8; 16] {
-		self.device_uuid
-	}
-
-	/// Visible image size.
-	pub const fn size(&self) -> Size {
-		self.size
-	}
-
-	/// Complete size of the dedicated Vulkan memory allocation.
-	pub const fn allocation_size(&self) -> u64 {
-		self.allocation_size
-	}
-
-	/// The channel order of the image's pixels.
-	pub const fn channels(&self) -> Channels {
-		self.channels
+		match &self.memory {
+			Memory::OpaqueFd { memory_type } if *memory_type >= 32 => {
+				return Err(Error::Unsupported("Vulkan memory type index must be below 32".into()));
+			}
+			Memory::DmaBuf { planes, .. }
+				if (planes.is_empty()
+					|| planes.len() > 4
+					|| planes
+						.iter()
+						.any(|plane| plane.row_pitch == 0 || plane.offset >= self.allocation_size)) =>
+			{
+				return Err(Error::Unsupported("Vulkan DMA-BUF requires one to four explicit memory planes with non-zero row pitches and offsets within its allocation".into()));
+			}
+			_ => {}
+		}
+		Ok(())
 	}
 }
 
-/// Monotonic values for one Vulkan-to-CUDA-to-Vulkan handoff.
+/// Monotonic values for one producer-to-consumer-to-producer handoff.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Timeline {
-	/// Value Vulkan signals after finishing writes and the layout transition.
+	/// Value the producer signals after finishing writes and the layout transition.
 	pub ready: u64,
-	/// Value CUDA signals after the last queued reader finishes.
+	/// Value the consumer signals after the last GPU reader finishes.
 	pub complete: u64,
 }
 
 impl Timeline {
-	/// Create one handoff. `complete` must be greater than `ready`.
+	/// Create one handoff with a completion value greater than its ready value.
 	pub fn new(ready: u64, complete: u64) -> Result<Self, Error> {
 		if complete <= ready {
 			return Err(Error::Unsupported(format!(
-				"Vulkan/CUDA completion value {complete} must be greater than ready value {ready}"
+				"Vulkan completion value {complete} must exceed ready value {ready}"
 			)));
 		}
 		Ok(Self { ready, complete })
 	}
 }
 
-/// Imports a bounded number of reusable Vulkan image slots into one CUDA device.
-#[derive(Clone)]
-pub struct Importer {
-	backend: Arc<Backend>,
+#[cfg_attr(not(feature = "nvidia"), allow(dead_code))]
+struct Allocation {
+	handles: Handles,
+	image: Image,
+	// Imports belong to a slot, not to an FD that can be duplicated or reused.
+	imports: Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
 }
 
-impl fmt::Debug for Importer {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("Importer")
-			.field("device", &self.backend.ctx.ordinal())
-			.field("capacity", &self.backend.capacity)
-			.finish_non_exhaustive()
-	}
-}
-
-impl Importer {
-	/// Open CUDA device `ordinal` and cap the number of imported image slots.
-	pub fn new(ordinal: usize, capacity: NonZeroUsize) -> Result<Self, Error> {
-		let ctx = CudaContext::new(ordinal)
-			.map_err(|e| Error::Unsupported(format!("CUDA device {ordinal} is unavailable: {e:?}")))?;
-		let (reap, receiver) = mpsc::channel::<Reap>();
-		let thread = std::thread::Builder::new()
-			.name("moq-video-vulkan-cuda".into())
-			.spawn(move || {
-				while let Ok(job) = receiver.recv() {
-					let Reap::Synchronize(stream, completion, signal_queued) = job;
-					// A device loss returns an error here instead of stranding the
-					// producer. This is the dedicated completion worker, never the
-					// producer's render thread. A failed slot is released instead of
-					// being reused with an unsignalled Vulkan semaphore.
-					let reusable = signal_queued && stream.synchronize().is_ok();
-					completion.complete(reusable);
-				}
-			})
-			.map_err(|e| Error::Codec(anyhow::anyhow!("start Vulkan/CUDA completion worker: {e}")))?;
-		let thread_id = thread.thread().id();
-		Ok(Self {
-			backend: Arc::new(Backend {
-				ctx,
-				capacity: capacity.get(),
-				imported: AtomicUsize::new(0),
-				reap: Mutex::new(Some(reap)),
-				thread: Mutex::new(Some((thread_id, thread))),
-			}),
-		})
-	}
-
-	/// Import an exportable Vulkan image and attach its producer-owned slot.
-	///
-	/// `owner` is returned inside [`Slot`] and remains retained until CUDA
-	/// completion. If import fails, it is returned in [`ImportError`]. The opaque
-	/// FDs are consumed by CUDA on success and closed on failure.
-	pub fn import<T: Send + Sync + 'static>(
-		&self,
-		handles: Handles,
-		image: Image,
-		owner: T,
-	) -> Result<Slot<T>, ImportError<T>> {
-		if self
-			.backend
-			.imported
-			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-				(count < self.backend.capacity).then_some(count + 1)
-			})
-			.is_err()
-		{
-			return Err(ImportError::new(
-				Error::Unsupported(format!(
-					"Vulkan/CUDA importer capacity {} exhausted",
-					self.backend.capacity
-				)),
-				owner,
-			));
-		}
-
-		match Imported::new(self.backend.clone(), handles, image) {
-			Ok(imported) => Ok(Slot {
-				imported: Arc::new(imported),
-				owner,
-				last_complete: 0,
-			}),
-			Err(error) => {
-				self.backend.imported.fetch_sub(1, Ordering::AcqRel);
-				Err(ImportError::new(error, owner))
-			}
-		}
-	}
-}
-
-struct Backend {
-	ctx: Arc<CudaContext>,
-	capacity: usize,
-	imported: AtomicUsize,
-	reap: Mutex<Option<mpsc::Sender<Reap>>>,
-	thread: Mutex<Option<(std::thread::ThreadId, std::thread::JoinHandle<()>)>>,
-}
-
-impl Backend {
-	fn send(&self, job: Reap) {
-		if let Some(sender) = self.reap.lock().expect("completion sender poisoned").as_ref() {
-			// A job owns a Slot, which owns this Backend, so the receiver cannot
-			// disappear before this send.
-			let _ = sender.send(job);
-		}
-	}
-}
-
-impl Drop for Backend {
-	fn drop(&mut self) {
-		self.reap.lock().expect("completion sender poisoned").take();
-		if let Some((thread_id, thread)) = self.thread.lock().expect("completion worker poisoned").take()
-			&& std::thread::current().id() != thread_id
-		{
-			let _ = thread.join();
-		}
-	}
-}
-
-enum Reap {
-	Synchronize(Arc<CudaStream>, Box<dyn Complete>, bool),
-}
-
-trait Complete: Send + Sync {
-	fn complete(self: Box<Self>, reusable: bool);
-}
-
-struct ReturnSlot<T: Send + Sync + 'static> {
-	slot: Slot<T>,
-	sender: tokio::sync::oneshot::Sender<Slot<T>>,
-}
-
-impl<T: Send + Sync + 'static> Complete for ReturnSlot<T> {
-	fn complete(self: Box<Self>, reusable: bool) {
-		let Self { slot, sender } = *self;
-		if reusable {
-			let _ = sender.send(slot);
-		}
-	}
-}
-
-/// One imported Vulkan image plus its producer-owned slot.
+/// One external Vulkan allocation and the producer value that keeps it alive.
 pub struct Slot<T: Send + Sync + 'static> {
-	imported: Arc<Imported>,
+	allocation: Arc<Allocation>,
 	owner: T,
 	last_complete: u64,
 }
@@ -277,13 +176,32 @@ pub struct Slot<T: Send + Sync + 'static> {
 impl<T: Send + Sync + 'static> fmt::Debug for Slot<T> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("Slot")
-			.field("image", &self.imported.image)
+			.field("image", &self.allocation.image)
 			.field("last_complete", &self.last_complete)
 			.finish_non_exhaustive()
 	}
 }
 
 impl<T: Send + Sync + 'static> Slot<T> {
+	/// Own exported handles and retain their producer without opening a backend.
+	///
+	/// The producer guard must keep the Vulkan image, memory, and semaphore alive
+	/// and safely finish or cancel its own queued writes before destroying them.
+	/// An unread frame has no imported backend through which to wait for those
+	/// writes, so its failed completion releases the guard for producer teardown.
+	pub fn new(handles: Handles, image: Image, owner: T) -> Result<Self, Error> {
+		image.validate()?;
+		Ok(Self {
+			allocation: Arc::new(Allocation {
+				handles,
+				image,
+				imports: Mutex::new(HashMap::new()),
+			}),
+			owner,
+			last_complete: 0,
+		})
+	}
+
 	/// Access the producer-owned value while the slot is idle.
 	pub fn owner(&self) -> &T {
 		&self.owner
@@ -294,42 +212,40 @@ impl<T: Send + Sync + 'static> Slot<T> {
 		&mut self.owner
 	}
 
-	/// Publish this slot after Vulkan has queued its `ready` signal.
+	/// Publish after queueing the ready signal, returning a completion handle.
 	///
-	/// CUDA waits asynchronously. Dropping the last [`Frame`] queues the
-	/// `complete` signal after all consumer work on the frame stream, then the
-	/// completion worker returns this exact slot.
+	/// A frame that no backend reads fails completion and releases its slot.
+	/// It cannot be recycled because no consumer signalled its timeline. The
+	/// guard must safely finish or cancel queued producer writes before teardown,
+	/// as required by [`Slot::new`].
 	pub fn publish(self, timeline: Timeline) -> Result<(Frame, Completion<T>), PublishError<T>> {
-		if timeline.ready <= self.last_complete {
+		if timeline.complete <= timeline.ready || timeline.ready <= self.last_complete {
 			return Err(PublishError::new(
 				Error::Unsupported(format!(
-					"Vulkan/CUDA ready value {} must be greater than previous completion {}",
-					timeline.ready, self.last_complete
+					"invalid Vulkan handoff {timeline:?} after completion {}",
+					self.last_complete
 				)),
 				self,
 			));
 		}
-
-		if let Err(error) = self.imported.wait(timeline.ready) {
-			return Err(PublishError::new(error, self));
-		}
-
 		let (sender, receiver) = tokio::sync::oneshot::channel();
-		let imported = self.imported.clone();
+		let allocation = self.allocation.clone();
 		let completion: Box<dyn Complete> = Box::new(ReturnSlot {
 			slot: Slot {
-				imported: self.imported,
-				owner: self.owner,
 				last_complete: timeline.complete,
+				..self
 			},
 			sender,
 		});
 		Ok((
 			Frame {
 				inner: Arc::new(FrameInner {
-					imported,
-					complete: timeline.complete,
+					allocation,
+					timeline,
+					reader: Mutex::new(None),
 					completion: Some(completion),
+					#[cfg(feature = "nvidia")]
+					converted: Mutex::new(Vec::new()),
 				}),
 			},
 			Completion { receiver },
@@ -337,7 +253,7 @@ impl<T: Send + Sync + 'static> Slot<T> {
 	}
 }
 
-/// A Vulkan image being read through CUDA.
+/// A published external image, retained until every consumer drops its clone.
 #[derive(Clone)]
 pub struct Frame {
 	inner: Arc<FrameInner>,
@@ -346,8 +262,8 @@ pub struct Frame {
 impl fmt::Debug for Frame {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("Frame")
-			.field("image", &self.inner.imported.image)
-			.field("complete", &self.inner.complete)
+			.field("image", &self.inner.allocation.image)
+			.field("timeline", &self.inner.timeline)
 			.finish_non_exhaustive()
 	}
 }
@@ -355,79 +271,126 @@ impl fmt::Debug for Frame {
 impl Frame {
 	/// Image width in pixels.
 	pub fn width(&self) -> u32 {
-		self.inner.imported.image.size.width
+		self.image().size.width
 	}
-
 	/// Image height in pixels.
 	pub fn height(&self) -> u32 {
-		self.inner.imported.image.size.height
+		self.image().size.height
 	}
-
 	/// Image size in pixels.
 	pub fn size(&self) -> Size {
-		self.inner.imported.image.size
+		self.image().size
 	}
-
-	/// The channel order the producer declared when importing the image.
+	/// Image and device import contract.
+	pub fn image(&self) -> &Image {
+		&self.inner.allocation.image
+	}
+	/// Packed channel order.
 	pub fn channels(&self) -> Channels {
-		self.inner.imported.image.channels
+		self.image().channels
 	}
 
-	/// The level-0 array behind the surface, for the tests' readback only.
-	#[cfg(test)]
-	pub(crate) fn cuda_array(&self) -> sys::CUarray {
-		let mut array = std::ptr::null_mut();
-		// SAFETY: the imported image has exactly one mip level and is alive.
-		unsafe { sys::cuMipmappedArrayGetLevel(&mut array, self.inner.imported.mipmap, 0) }
-			.result()
-			.expect("Vulkan image mip level");
-		array
+	#[cfg(feature = "nvidia")]
+	pub(crate) fn handles(&self) -> Result<Handles, Error> {
+		self.inner.allocation.handles.try_clone()
 	}
 
-	/// The surface object over the image, for a kernel reading it in place.
-	pub(crate) fn cuda_surface(&self) -> sys::CUsurfObject {
-		self.inner.imported.surface
+	#[cfg(feature = "nvidia")]
+	pub(crate) fn import<T: Any + Send + Sync>(
+		&self,
+		create: impl FnOnce() -> Result<T, Error>,
+	) -> Result<Arc<T>, Error> {
+		let mut imports = self.inner.allocation.imports.lock().expect("Vulkan imports poisoned");
+		if let Some(imported) = imports.get(&TypeId::of::<T>()) {
+			return Ok(imported.clone().downcast().expect("Vulkan import type"));
+		}
+		let imported = Arc::new(create()?);
+		imports.insert(TypeId::of::<T>(), imported.clone());
+		Ok(imported)
 	}
 
-	/// The stream every CUDA reader of this image queues on, so the completion
-	/// signal queued after the last reader lands behind their work.
-	pub(crate) fn cuda_stream(&self) -> &Arc<CudaStream> {
-		&self.inner.imported.stream
+	#[cfg(feature = "nvidia")]
+	pub(crate) fn read(&self, imported: Arc<dyn Reader>) -> Result<(), Error> {
+		let mut reader = self.inner.reader.lock().expect("Vulkan reader poisoned");
+		if let Some(current) = reader.as_ref() {
+			if !Arc::ptr_eq(current, &imported) {
+				return Err(Error::Unsupported(
+					"external image cannot be read through multiple import backends".into(),
+				));
+			}
+		} else {
+			imported.wait(self.inner.timeline.ready)?;
+			*reader = Some(imported);
+		}
+		Ok(())
 	}
 
-	/// The context that owns the imported image.
-	pub(crate) fn cuda_context(&self) -> &Arc<CudaContext> {
-		&self.inner.imported.backend.ctx
+	#[cfg(feature = "nvidia")]
+	pub(crate) fn converted(
+		&self,
+		color: crate::Color,
+		convert: impl FnOnce() -> Result<super::cuda::Frame, Error>,
+	) -> Result<super::cuda::Frame, Error> {
+		let mut converted = self.inner.converted.lock().expect("Vulkan conversions poisoned");
+		if let Some((_, frame)) = converted.iter().find(|(existing, _)| *existing == color) {
+			return Ok(frame.clone());
+		}
+		let frame = convert()?;
+		converted.push((color, frame.clone()));
+		Ok(frame)
 	}
 }
 
+pub(crate) trait Reader: Send + Sync {
+	#[cfg_attr(not(feature = "nvidia"), allow(dead_code))]
+	fn wait(&self, value: u64) -> Result<(), Error>;
+	fn finish(&self, value: u64, completion: Box<dyn Complete>);
+}
+
 struct FrameInner {
-	imported: Arc<Imported>,
-	complete: u64,
+	allocation: Arc<Allocation>,
+	timeline: Timeline,
+	reader: Mutex<Option<Arc<dyn Reader>>>,
 	completion: Option<Box<dyn Complete>>,
+	#[cfg(feature = "nvidia")]
+	converted: Mutex<Vec<(crate::Color, super::cuda::Frame)>>,
 }
 
 impl Drop for FrameInner {
 	fn drop(&mut self) {
-		let completion = self.completion.take().expect("Vulkan/CUDA completion missing");
-		// Queueing is asynchronous. A device error releases the slot after the
-		// worker drains the stream, but never returns it for unsafe Vulkan reuse.
-		let signal_queued = self.imported.signal(self.complete).is_ok();
-		self.imported.backend.send(Reap::Synchronize(
-			self.imported.stream.clone(),
-			completion,
-			signal_queued,
-		));
+		let completion = self.completion.take().expect("Vulkan completion missing");
+		if let Some(reader) = self.reader.get_mut().expect("Vulkan reader poisoned").take() {
+			reader.finish(self.timeline.complete, completion);
+		} else {
+			completion.complete(false);
+		}
 	}
 }
 
-/// Resolves to the producer slot after CUDA has signalled completion.
+pub(crate) trait Complete: Send + Sync {
+	fn complete(self: Box<Self>, reusable: bool);
+}
+
+struct ReturnSlot<T: Send + Sync + 'static> {
+	slot: Slot<T>,
+	sender: tokio::sync::oneshot::Sender<Slot<T>>,
+}
+
+impl<T: Send + Sync + 'static> Complete for ReturnSlot<T> {
+	fn complete(self: Box<Self>, reusable: bool) {
+		if reusable {
+			let _ = self.sender.send(self.slot);
+		}
+	}
+}
+
+/// Resolves to the producer slot after the GPU has signalled completion.
 pub struct Completion<T: Send + Sync + 'static> {
 	receiver: tokio::sync::oneshot::Receiver<Slot<T>>,
 }
 
 impl<T: Send + Sync + 'static> Completion<T> {
-	/// Return the slot if CUDA has completed, without blocking or polling CUDA.
+	/// Return the slot if the GPU has completed, without blocking or polling the GPU.
 	pub fn try_wait(&mut self) -> Result<Option<Slot<T>>, CompletionError> {
 		match self.receiver.try_recv() {
 			Ok(slot) => Ok(Some(slot)),
@@ -442,43 +405,10 @@ impl<T: Send + Sync + 'static> Completion<T> {
 	}
 }
 
-/// CUDA failed before the producer slot became safe to reuse.
+/// the GPU failed before the producer slot became safe to reuse.
 #[derive(Clone, Copy, Debug, thiserror::Error)]
-#[error("Vulkan/CUDA completion failed; the producer slot was released")]
+#[error("Vulkan GPU completion failed; the producer slot was released")]
 pub struct CompletionError;
-
-/// An import failure that returns the producer-owned value.
-pub struct ImportError<T> {
-	error: Error,
-	owner: T,
-}
-
-impl<T> ImportError<T> {
-	fn new(error: Error, owner: T) -> Self {
-		Self { error, owner }
-	}
-
-	/// Split the error from the producer-owned value.
-	pub fn into_parts(self) -> (Error, T) {
-		(self.error, self.owner)
-	}
-}
-
-impl<T> fmt::Debug for ImportError<T> {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("ImportError")
-			.field("error", &self.error)
-			.finish_non_exhaustive()
-	}
-}
-
-impl<T> fmt::Display for ImportError<T> {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		fmt::Display::fmt(&self.error, f)
-	}
-}
-
-impl<T: 'static> std::error::Error for ImportError<T> {}
 
 /// A publish failure that returns the still-idle slot.
 pub struct PublishError<T: Send + Sync + 'static> {
@@ -513,209 +443,156 @@ impl<T: Send + Sync + 'static> fmt::Display for PublishError<T> {
 
 impl<T: Send + Sync + 'static> std::error::Error for PublishError<T> {}
 
-struct Imported {
-	backend: Arc<Backend>,
-	stream: Arc<CudaStream>,
-	image: Image,
-	memory: sys::CUexternalMemory,
-	semaphore: sys::CUexternalSemaphore,
-	mipmap: sys::CUmipmappedArray,
-	surface: sys::CUsurfObject,
-}
-
-// CUDA's external handles are explicitly safe to use from threads after making
-// their context current. `CudaContext` and `CudaStream` already carry the same
-// guarantees; cudarc's raw pointer aliases cannot express them.
-unsafe impl Send for Imported {}
-unsafe impl Sync for Imported {}
-
-impl Imported {
-	fn new(backend: Arc<Backend>, handles: Handles, image: Image) -> Result<Self, Error> {
-		backend.ctx.bind_to_thread().map_err(cuda("bind CUDA context"))?;
-		let actual = backend.ctx.uuid().map_err(cuda("read CUDA device UUID"))?;
-		// `CUuuid.bytes` is `[c_char; 16]`, which is `i8` on x86_64 and `u8` on
-		// aarch64. Reinterpret per element: an `as u8` cast fails clippy's
-		// `unnecessary_cast` where `c_char` is already `u8`.
-		let actual = actual.bytes.map(|b| u8::from_ne_bytes(b.to_ne_bytes()));
-		if actual != image.device_uuid {
-			return Err(Error::Unsupported(format!(
-				"Vulkan device UUID {} does not match CUDA device UUID {}",
-				uuid(image.device_uuid),
-				uuid(actual)
-			)));
-		}
-
-		let stream = backend.ctx.new_stream().map_err(cuda("create CUDA stream"))?;
-		let memory_desc = sys::CUDA_EXTERNAL_MEMORY_HANDLE_DESC {
-			type_: sys::CUexternalMemoryHandleType::CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD,
-			handle: sys::CUDA_EXTERNAL_MEMORY_HANDLE_DESC_st__bindgen_ty_1 {
-				fd: handles.memory.as_raw_fd(),
-			},
-			size: image.allocation_size,
-			flags: 1, // CUDA_EXTERNAL_MEMORY_DEDICATED
-			reserved: [0; 16],
-		};
-		let mut memory = std::ptr::null_mut();
-		// SAFETY: the descriptor names a live owned fd and its exact allocation
-		// size. CUDA takes fd ownership only after successful import.
-		unsafe { sys::cuImportExternalMemory(&mut memory, &memory_desc) }
-			.result()
-			.map_err(cuda("import Vulkan image memory"))?;
-		std::mem::forget(handles.memory);
-
-		let semaphore_desc = sys::CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC {
-			type_: sys::CUexternalSemaphoreHandleType::CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_SEMAPHORE_FD,
-			handle: sys::CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC_st__bindgen_ty_1 {
-				fd: handles.timeline.as_raw_fd(),
-			},
-			flags: 0,
-			reserved: [0; 16],
-		};
-		let mut semaphore = std::ptr::null_mut();
-		// SAFETY: the descriptor names a Vulkan timeline semaphore exported as an
-		// opaque fd. CUDA takes fd ownership only after successful import.
-		if let Err(error) = unsafe { sys::cuImportExternalSemaphore(&mut semaphore, &semaphore_desc) }.result() {
-			// SAFETY: memory was imported above and has no mappings yet.
-			let _ = unsafe { sys::cuDestroyExternalMemory(memory) };
-			return Err(cuda("import Vulkan timeline semaphore")(error));
-		}
-		std::mem::forget(handles.timeline);
-
-		let array_desc = sys::CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC {
-			offset: 0,
-			arrayDesc: sys::CUDA_ARRAY3D_DESCRIPTOR {
-				Width: image.size.width as usize,
-				Height: image.size.height as usize,
-				Depth: 0,
-				Format: sys::CUarray_format::CU_AD_FORMAT_UNSIGNED_INT8,
-				NumChannels: 4,
-				Flags: sys::CUDA_ARRAY3D_SURFACE_LDST,
-			},
-			numLevels: 1,
-			reserved: [0; 16],
-		};
-		let mut mipmap = std::ptr::null_mut();
-		// SAFETY: the Vulkan allocation is dedicated to an optimal-tiling RGBA8
-		// image matching this descriptor.
-		if let Err(error) =
-			unsafe { sys::cuExternalMemoryGetMappedMipmappedArray(&mut mipmap, memory, &array_desc) }.result()
-		{
-			// SAFETY: both handles were imported and no work references them.
-			let _ = unsafe { sys::cuDestroyExternalSemaphore(semaphore) };
-			let _ = unsafe { sys::cuDestroyExternalMemory(memory) };
-			return Err(cuda("map Vulkan image in CUDA")(error));
-		}
-
-		let mut array = std::ptr::null_mut();
-		// SAFETY: the imported image has exactly one mip level.
-		if let Err(error) = unsafe { sys::cuMipmappedArrayGetLevel(&mut array, mipmap, 0) }.result() {
-			// SAFETY: no work references these newly-created handles.
-			let _ = unsafe { sys::cuMipmappedArrayDestroy(mipmap) };
-			let _ = unsafe { sys::cuDestroyExternalSemaphore(semaphore) };
-			let _ = unsafe { sys::cuDestroyExternalMemory(memory) };
-			return Err(cuda("get Vulkan image mip level")(error));
-		}
-
-		// A surface object is how a kernel reads the array in place; the array
-		// was mapped with `CUDA_ARRAY3D_SURFACE_LDST` for exactly this.
-		let surface_desc = sys::CUDA_RESOURCE_DESC {
-			resType: sys::CUresourcetype::CU_RESOURCE_TYPE_ARRAY,
-			res: sys::CUDA_RESOURCE_DESC_st__bindgen_ty_1 {
-				array: sys::CUDA_RESOURCE_DESC_st__bindgen_ty_1__bindgen_ty_1 { hArray: array },
-			},
-			flags: 0,
-		};
-		let mut surface = 0;
-		// SAFETY: the descriptor names the live level-0 array mapped above.
-		if let Err(error) = unsafe { sys::cuSurfObjectCreate(&mut surface, &surface_desc) }.result() {
-			// SAFETY: no work references these newly-created handles.
-			let _ = unsafe { sys::cuMipmappedArrayDestroy(mipmap) };
-			let _ = unsafe { sys::cuDestroyExternalSemaphore(semaphore) };
-			let _ = unsafe { sys::cuDestroyExternalMemory(memory) };
-			return Err(cuda("create surface over Vulkan image")(error));
-		}
-
-		Ok(Self {
-			backend,
-			stream,
-			image,
-			memory,
-			semaphore,
-			mipmap,
-			surface,
-		})
-	}
-
-	fn wait(&self, value: u64) -> Result<(), Error> {
-		self.backend.ctx.bind_to_thread().map_err(cuda("bind CUDA context"))?;
-		let params = timeline_wait(value);
-		// SAFETY: both semaphore and stream are live and belong to this context.
-		unsafe { sys::cuWaitExternalSemaphoresAsync(&self.semaphore, &params, 1, self.stream.cu_stream()) }
-			.result()
-			.map_err(cuda("queue Vulkan timeline wait"))
-	}
-
-	fn signal(&self, value: u64) -> Result<(), Error> {
-		self.backend.ctx.bind_to_thread().map_err(cuda("bind CUDA context"))?;
-		let params = timeline_signal(value);
-		// SAFETY: both semaphore and stream are live and belong to this context.
-		unsafe { sys::cuSignalExternalSemaphoresAsync(&self.semaphore, &params, 1, self.stream.cu_stream()) }
-			.result()
-			.map_err(cuda("queue Vulkan timeline signal"))
-	}
-}
-
-impl Drop for Imported {
-	fn drop(&mut self) {
-		if self.backend.ctx.bind_to_thread().is_ok() {
-			// Completion returned the slot only after stream synchronization, so no
-			// queued work can still reference these handles.
-			let _ = unsafe { sys::cuSurfObjectDestroy(self.surface) };
-			let _ = unsafe { sys::cuMipmappedArrayDestroy(self.mipmap) };
-			let _ = unsafe { sys::cuDestroyExternalMemory(self.memory) };
-			let _ = unsafe { sys::cuDestroyExternalSemaphore(self.semaphore) };
-		}
-		self.backend.imported.fetch_sub(1, Ordering::AcqRel);
-	}
-}
-
-fn timeline_wait(value: u64) -> sys::CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS {
-	sys::CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS {
-		params: sys::CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS_st__bindgen_ty_1 {
-			fence: sys::CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS_st__bindgen_ty_1__bindgen_ty_1 { value },
-			nvSciSync: sys::CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS_st__bindgen_ty_1__bindgen_ty_2 { reserved: 0 },
-			keyedMutex: sys::CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS_st__bindgen_ty_1__bindgen_ty_3 {
-				key: 0,
-				timeoutMs: 0,
-			},
-			reserved: [0; 10],
-		},
-		flags: 0,
-		reserved: [0; 16],
-	}
-}
-
-fn timeline_signal(value: u64) -> sys::CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS {
-	sys::CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS {
-		params: sys::CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS_st__bindgen_ty_1 {
-			fence: sys::CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS_st__bindgen_ty_1__bindgen_ty_1 { value },
-			nvSciSync: sys::CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS_st__bindgen_ty_1__bindgen_ty_2 { reserved: 0 },
-			keyedMutex: sys::CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS_st__bindgen_ty_1__bindgen_ty_3 { key: 0 },
-			reserved: [0; 12],
-		},
-		flags: 0,
-		reserved: [0; 16],
-	}
-}
-
-fn cuda(action: &'static str) -> impl FnOnce(cudarc::driver::result::DriverError) -> Error {
-	move |error| Error::Codec(anyhow::anyhow!("{action}: {error:?}"))
-}
-
-fn uuid(bytes: [u8; 16]) -> String {
+pub(crate) fn uuid(bytes: [u8; 16]) -> String {
 	bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "nvidia"))]
 #[path = "vulkan_test.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod unit_tests {
+	use super::*;
+	use std::os::unix::net::UnixStream;
+
+	fn image() -> Image {
+		Image {
+			device: Device {
+				device_uuid: [0xaa; 16],
+				driver_uuid: [0xbb; 16],
+				render_node: None,
+			},
+			memory: Memory::OpaqueFd { memory_type: 1 },
+			size: Size::new(4, 2),
+			allocation_size: 4096,
+			channels: Channels::Rgba,
+		}
+	}
+
+	fn slot() -> Slot<()> {
+		let (memory, timeline) = UnixStream::pair().unwrap();
+		Slot::new(Handles::new(memory.into(), timeline.into()), image(), ()).unwrap()
+	}
+
+	#[test]
+	fn rejects_invalid_image_contracts() {
+		let mut contract = image();
+		contract.size.width = 0;
+		assert!(contract.validate().is_err());
+		contract.size = Size::new(3, 5);
+		assert!(contract.validate().is_ok());
+		contract.allocation_size = 0;
+		assert!(contract.validate().is_err());
+		contract = image();
+		contract.memory = Memory::OpaqueFd { memory_type: 32 };
+		assert!(contract.validate().is_err());
+	}
+
+	#[test]
+	fn refuses_dma_buf_without_explicit_valid_plane_layouts() {
+		for planes in [
+			vec![],
+			vec![Plane {
+				offset: 0,
+				row_pitch: 0,
+			}],
+			vec![Plane {
+				offset: 4096,
+				row_pitch: 32,
+			}],
+			vec![
+				Plane {
+					offset: 0,
+					row_pitch: 32
+				};
+				5
+			],
+		] {
+			let mut contract = image();
+			contract.memory = Memory::DmaBuf { modifier: 0, planes };
+			assert!(contract.validate().is_err());
+		}
+		let mut padded = image();
+		padded.memory = Memory::DmaBuf {
+			modifier: 0,
+			planes: vec![Plane {
+				offset: 128,
+				row_pitch: 64,
+			}],
+		};
+		assert!(padded.validate().is_ok());
+	}
+
+	#[test]
+	fn validates_timeline_even_when_fields_are_set_directly() {
+		assert!(Timeline::new(4, 4).is_err());
+		assert!(Timeline::new(5, 4).is_err());
+		assert!(slot().publish(Timeline { ready: 4, complete: 4 }).is_err());
+		assert!(slot().publish(Timeline { ready: 0, complete: 1 }).is_err());
+	}
+
+	#[tokio::test]
+	async fn unconsumed_image_retains_guard_until_last_clone_and_is_never_recycled() {
+		use std::sync::atomic::{AtomicUsize, Ordering};
+		struct Guard(Arc<AtomicUsize>);
+		impl Drop for Guard {
+			fn drop(&mut self) {
+				self.0.fetch_add(1, Ordering::SeqCst);
+			}
+		}
+		let released = Arc::new(AtomicUsize::new(0));
+		let (memory, timeline) = UnixStream::pair().unwrap();
+		let slot = Slot::new(
+			Handles::new(memory.into(), timeline.into()),
+			image(),
+			Guard(released.clone()),
+		)
+		.unwrap();
+		let (frame, mut completion) = slot.publish(Timeline::new(1, 2).unwrap()).unwrap();
+		let held = frame.clone();
+		drop(frame);
+		assert_eq!(released.load(Ordering::SeqCst), 0);
+		assert!(completion.try_wait().unwrap().is_none());
+		drop(held);
+		assert!(completion.wait().await.is_err());
+		assert_eq!(released.load(Ordering::SeqCst), 1);
+	}
+
+	#[cfg(feature = "nvidia")]
+	#[tokio::test]
+	async fn caches_imports_by_slot_and_returns_only_after_last_reader() {
+		struct Import;
+		impl Reader for Import {
+			fn wait(&self, _: u64) -> Result<(), Error> {
+				Ok(())
+			}
+			fn finish(&self, _: u64, completion: Box<dyn Complete>) {
+				completion.complete(true);
+			}
+		}
+		let (frame, mut completion) = slot().publish(Timeline::new(1, 2).unwrap()).unwrap();
+		let imported = frame.import(|| Ok(Import)).unwrap();
+		let duplicate_handles = frame.handles().unwrap();
+		drop(duplicate_handles);
+		assert!(Arc::ptr_eq(
+			&imported,
+			&frame.import::<Import>(|| panic!("imported twice")).unwrap()
+		));
+		frame.read(imported.clone()).unwrap();
+		let held = frame.clone();
+		drop(frame);
+		assert!(completion.try_wait().unwrap().is_none());
+		drop(held);
+		let slot = completion.wait().await.unwrap();
+		let (_, completion) = slot.publish(Timeline::new(2, 3).unwrap()).err().unwrap().into_parts();
+		let (frame, completion) = completion.publish(Timeline::new(3, 4).unwrap()).unwrap();
+		assert!(Arc::ptr_eq(
+			&imported,
+			&frame.import::<Import>(|| panic!("reimported slot")).unwrap()
+		));
+		frame.read(imported).unwrap();
+		drop(frame);
+		assert!(completion.wait().await.is_ok());
+	}
+}

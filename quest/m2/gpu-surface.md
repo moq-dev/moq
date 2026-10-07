@@ -24,8 +24,14 @@ added this quest):
 - The surface is a neutral external image. Rejected: an encoder-owned input
   the producer renders into (it flips the producer's protocol), and offering
   both. `Surface::Vulkan` is no longer gated on `nvidia` and describes:
-  - the memory handle: `OPAQUE_FD`, or `DMA_BUF` with a DRM format modifier;
-  - the format, size, and allocation size. For `OPAQUE_FD`, the exporter's
+  - the memory handle: `OPAQUE_FD`, or `DMA_BUF` with a DRM format modifier
+    and explicit memory-plane offsets and row pitches. Importers check the
+    plane count against modifier properties and never infer tight rows;
+  - the format, size, and allocation size. The image creation contract is 2D,
+    one mip/layer/sample, flags zero, EXCLUSIVE sharing, and
+    `TRANSFER_DST | SAMPLED | STORAGE` usage, with dedicated memory bound at
+    offset zero. `OPAQUE_FD` uses optimal tiling and `DMA_BUF` uses explicit
+    modifier tiling. For `OPAQUE_FD`, the exporter's
     memory type index too: a Vulkan import must reuse both (VUID 01742),
     and an `OPAQUE_FD` handle cannot be queried for its properties. A
     `DMA_BUF` importer picks its memory type from the handle's properties;
@@ -57,31 +63,31 @@ added this quest):
   one costs.
 - Docs are rustdoc, inline. No doc.moq.dev page.
 
-Open, found in review:
+Implementation decisions:
 
-- Where `Kind::Auto` learns the device. `Encoder::new` opens its backend
-  eagerly from `Config` alone, and `Config::probe` feeds a throwaway encoder a
-  synthetic I420 frame. So no surface exists at selection time, and on a host
-  with two GPUs `Auto` would open whichever backend comes first in
-  `HARDWARE`. Options:
-  - a `Config` field naming the input device by device and driver UUID
-    (recommended: `probe` and fail-fast open keep working);
-  - deferring the open to the first frame, which breaks `probe`'s
-    advertise-before-the-first-frame contract.
+- Device selection is decided: `encode::Config::input` names the external
+  device by device and driver UUID and optional render-node `dev_t`. The encoder
+  opens eagerly, and `probe` can advertise before capture begins. A configuration
+  naming an external device cannot fall back to software, and an external frame
+  on another device is refused before reaching the backend.
+- `vulkan::Slot::new` owns the exported handles and producer guard without
+  opening CUDA. Each slot caches imports by backend type on its allocation,
+  rather than an FD number. Imports live with the producer-owned allocation,
+  without an additional backend quota on the number of producer slots.
+  Published clones share one reader and per-color
+  NV12 conversions. Different import backends for one published image are
+  refused until there is a protocol for ordering their completion signals.
+- `DmaBuf::new` takes an `OwnedFd`, a `DmaBufLayout`, and a producer release
+  guard. Its private adoption path keeps capture and decoder lifetimes private.
+  External buffers refuse CPU download even when the allocation is linear.
+- An unconsumed external Vulkan frame fails completion and releases the slot;
+  it cannot be recycled because no backend signalled its completion timeline.
+  The producer guard owns safe teardown of its allocation.
 
-  Either is a public API change, so record it here. The refusal test must
-  cover `Encoder::new` and `probe` as well as a frame.
-- Slot identity. Today a `Slot` exists only through the CUDA
-  `vulkan::Importer::import`, and `Slot::publish` and `Completion` wait on
-  CUDA. Lift slot identity and completion out of the CUDA importer so a
-  producer publishes a slot before any backend has imported it. Each backend
-  caches its import by that slot identity, never by fd, since a fresh or
-  dup'd fd cannot identify a slot.
-- `DmaBuf::new` takes an `Arc<dyn DmaBufFrame>`, a trait kept `pub(crate)` so
-  backend lifetimes stay private. Decide what an external producer passes
-  instead (an `OwnedFd` plus a release guard, say), and refuse
-  `download_i420` on an external buffer as `Surface::Vulkan` already refuses
-  readback.
+NVIDIA hardware verification remains required before this quest is complete:
+run `just rs gpu` on the NVIDIA demo PC. The AMD/Intel development PC can compile
+these tests and exercise refusal/lifetime policy, but cannot prove NVENC output
+or CUDA external-image import.
 
 What moves: `vulkan::Importer::new(ordinal, capacity)`, `cuda::Converter`, and the
 caller's `Surface::Cuda` construction go behind the NVENC backend for this

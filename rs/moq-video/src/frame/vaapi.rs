@@ -259,7 +259,7 @@ pub(crate) fn adopt(frame: ExportedFrame, color: Option<Color>) -> anyhow::Resul
 		.collect();
 	let modifier = object.drm_format_modifier;
 
-	DmaBuf::new(
+	DmaBuf::adopt(
 		DrmFormat::NV12,
 		modifier,
 		width,
@@ -390,7 +390,7 @@ pub(crate) mod testing {
 	pub(crate) fn unimportable_dmabuf(pixels: I420) -> DmaBuf {
 		let fd = OwnedFd::from(std::fs::File::open("/dev/null").expect("open /dev/null"));
 		let (width, height) = (pixels.width(), pixels.height());
-		DmaBuf::new(
+		DmaBuf::adopt(
 			DrmFormat::NV12,
 			0x00ff_ffff_ffff_fffe,
 			width,
@@ -446,7 +446,7 @@ pub(crate) mod testing {
 		assert_eq!(layer.drm_format, DrmFormat::XRGB8888.as_raw());
 		let plane = DmaBufPlane::new(layer.offset[0], layer.pitch[0]);
 		let object = exported.objects.remove(0);
-		DmaBuf::new(
+		DmaBuf::adopt(
 			DrmFormat::XRGB8888,
 			object.drm_format_modifier,
 			width,

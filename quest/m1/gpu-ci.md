@@ -29,7 +29,7 @@ skipping inside the Nix shell.
 - `just rs nvidia`, a one-line recipe over `sh/rs/nvidia.sh`: symlink only those three libraries (by
   soname) from `/usr/lib/x86_64-linux-gnu` into a private directory, put that
   on `LD_LIBRARY_PATH`, and run that selection. Fail when a library is missing
-  instead of skipping. `just rs vulkan-cuda` (`sh/rs/vulkan-cuda.sh`) puts the
+  instead of skipping. `just rs gpu` (`sh/rs/gpu.sh`, NVIDIA branch) puts the
   whole host driver directory on the path, which lets host libraries shadow
   the Nix ones; fold it into this script and recipe, since its `vulkan_cuda_`
   tests are the same kind. Those also need

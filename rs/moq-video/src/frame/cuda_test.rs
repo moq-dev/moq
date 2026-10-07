@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::frame::vulkan::tests::Producer;
-use crate::frame::vulkan::{Channels, Image, ImportError, Importer, Timeline};
+use crate::frame::vulkan::{Channels, Slot as VulkanSlot, Timeline};
 use crate::{Frame as VideoFrame, Surface};
 
 /// A gradient with structure on both axes, so a pitch, plane, or channel-order
@@ -99,7 +99,7 @@ fn nvenc(size: Size, color: Color) -> crate::encode::Encoder {
 	crate::encode::Encoder::new(&config).expect("open NVENC")
 }
 
-/// Real hardware only, and loud about it: the opt-in `just rs vulkan-cuda`
+/// Real hardware only, and loud about it: the opt-in `just rs gpu`
 /// recipe runs this, and a machine without the GPU path fails rather than
 /// reporting a pass it did not earn.
 ///
@@ -119,16 +119,12 @@ async fn vulkan_cuda_convert_resize_encode() {
 	let sd = Size::new(160, 96);
 	let color = Color::Bt709Limited;
 	let mut producer = Producer::new(size).expect("no Vulkan NVIDIA device: this opt-in test needs one");
-	let importer = Importer::new(0, NonZeroUsize::new(1).unwrap()).expect("CUDA importer");
 	let converter = Converter::new(0, color, NonZeroUsize::new(3).unwrap()).expect("CUDA converter");
 	assert_eq!(converter.color(), color);
 
 	// Round one, RGBA: conversion, resize, and the pool bound.
-	let image = Image::rgba8(producer.uuid, size, producer.allocation_size).unwrap();
-	let slot = importer
-		.import(producer.export(), image, ())
-		.map_err(ImportError::into_parts)
-		.expect("import RGBA image");
+	let image = producer.contract(Channels::Rgba);
+	let slot = VulkanSlot::new(producer.export(), image, ()).expect("import RGBA image");
 	let rgba = gradient(size, Channels::Rgba, 0);
 	let expected = reference(&rgba, size, color);
 	producer.upload(&rgba, None, 1);
@@ -201,19 +197,13 @@ async fn vulkan_cuda_convert_resize_encode() {
 	eprintln!("pool bound held at capacity 3");
 
 	drop((converted, scaled, frame));
-	let slot = tokio::time::timeout(std::time::Duration::from_secs(2), completion.wait())
-		.await
-		.expect("CUDA completion timed out")
-		.expect("completion worker stopped");
+	let slot = completion.wait().await.expect("completion worker stopped");
 	drop(slot);
 
 	// Round two, BGRA: the same picture in the other channel order converts to
 	// the same samples, and both renditions encode through NVENC in place.
-	let image = Image::bgra8(producer.uuid, size, producer.allocation_size).unwrap();
-	let mut slot = importer
-		.import(producer.export(), image, ())
-		.map_err(ImportError::into_parts)
-		.expect("import BGRA image");
+	let image = producer.contract(Channels::Bgra);
+	let mut slot = VulkanSlot::new(producer.export(), image, ()).expect("import BGRA image");
 	let mut hd = nvenc(size, color);
 	let mut sd_encoder = nvenc(sd, color);
 	assert_eq!(hd.name(), "nvenc");
@@ -280,10 +270,7 @@ async fn vulkan_cuda_convert_resize_encode() {
 		assert_eq!(packets[0].timestamp, timestamp);
 		sd_packets += packets.len();
 
-		slot = tokio::time::timeout(std::time::Duration::from_secs(2), completion.wait())
-			.await
-			.expect("CUDA completion timed out")
-			.expect("completion worker stopped");
+		slot = completion.wait().await.expect("completion worker stopped");
 	}
 	assert_eq!(sd_packets, 8);
 
@@ -301,7 +288,7 @@ async fn vulkan_cuda_convert_resize_encode() {
 	assert!(mae(decoded.u(), expected.u()) < 8, "decoded u corrupt");
 	assert!(mae(decoded.v(), expected.v()) < 8, "decoded v corrupt");
 
-	drop((hd, sd_encoder, slot, importer, converter));
+	drop((hd, sd_encoder, slot, converter));
 	eprintln!("encoders, importer, and converter torn down");
 }
 
@@ -379,7 +366,6 @@ async fn vulkan_cuda_three_view_workload() {
 	// frozen frame no P-slice has to code.
 	let pictures: Vec<Vec<u8>> = (0..8).map(|i| gradient(size, Channels::Rgba, i * 37)).collect();
 
-	let importer = Importer::new(0, NonZeroUsize::new(VIEWS).unwrap()).expect("CUDA importer");
 	// Two live buffers per view (the converted frame and its scaled copy) plus
 	// one of slack, the sizing the `Converter` docs recommend.
 	let converter = Converter::new(0, color, NonZeroUsize::new(2 * VIEWS + 1).unwrap()).expect("CUDA converter");
@@ -387,11 +373,8 @@ async fn vulkan_cuda_three_view_workload() {
 	let mut views = Vec::new();
 	for _ in 0..VIEWS {
 		let mut producer = Producer::new(size).expect("no Vulkan NVIDIA device: this opt-in test needs one");
-		let image = Image::rgba8(producer.uuid, size, producer.allocation_size).unwrap();
-		let slot = importer
-			.import(producer.export(), image, ())
-			.map_err(ImportError::into_parts)
-			.expect("import view");
+		let image = producer.contract(Channels::Rgba);
+		let slot = VulkanSlot::new(producer.export(), image, ()).expect("import view");
 		producer.upload(&pictures[0], None, 1);
 		views.push((producer, Some(slot), nvenc(size, color), nvenc(sd, color), 1u64));
 	}
@@ -448,10 +431,7 @@ async fn vulkan_cuda_three_view_workload() {
 			bytes.1 += packets.iter().map(|p| p.payload.len()).sum::<usize>();
 
 			let (wall, cpu) = (std::time::Instant::now(), cpu_now());
-			let returned = tokio::time::timeout(Duration::from_secs(2), completion.wait())
-				.await
-				.expect("CUDA completion timed out")
-				.expect("completion worker stopped");
+			let returned = completion.wait().await.expect("completion worker stopped");
 			complete.wall.push(wall.elapsed());
 			complete.cpu.push(cpu_now() - cpu);
 
@@ -497,4 +477,65 @@ async fn vulkan_cuda_three_view_workload() {
 		bytes.1,
 		(bytes.0 + bytes.1) as f64 * 8.0 / elapsed.as_secs_f64() / 1e6,
 	);
+}
+
+/// Producers declare only their device; both renditions import, convert, and scale inside NVENC.
+#[tokio::test]
+#[ignore = "requires a Linux NVIDIA GPU with Vulkan/CUDA external memory and NVENC"]
+async fn vulkan_cuda_auto_external_encode() {
+	let size = Size::new(320, 192);
+	let color = Color::Bt709Limited;
+	let mut producer = Producer::new(size).expect("NVIDIA Vulkan device required by opted-in test");
+	let image = producer.contract(Channels::Rgba);
+	let mut encoders = Vec::new();
+	for output in [size, Size::new(160, 96)] {
+		let mut config = crate::encode::Config::new(output.width, output.height, crate::Rate::new(30, 1).unwrap());
+		config.input = Some(image.device);
+		config.color = Some(color);
+		config
+			.probe()
+			.await
+			.expect("probe the declared input device before capture");
+		let encoder = crate::encode::Encoder::new(&config).expect("automatic external-image selection");
+		assert_eq!(encoder.name(), "nvenc");
+		encoders.push(encoder);
+	}
+	let mut slot = VulkanSlot::new(producer.export(), image, ()).unwrap();
+	for capture in 0..3 {
+		let ready = capture * 2 + 1;
+		let rgba = gradient(size, Channels::Rgba, capture as usize);
+		producer.upload(&rgba, (capture > 0).then_some(ready - 1), ready);
+		let (image, completion) = slot.publish(Timeline::new(ready, ready + 1).unwrap()).unwrap();
+		let frame = VideoFrame::new(
+			Surface::Vulkan(image),
+			moq_net::Timestamp::from_micros(capture * 33_333).unwrap(),
+		);
+		for encoder in &mut encoders {
+			encoder.cut().unwrap();
+			let encoded = encoder
+				.encode(&frame)
+				.expect("external image encoded entirely on the GPU");
+			assert!(!encoded.is_empty());
+			let decode = crate::decode::Config {
+				kind: crate::decode::Kind::Software,
+				..crate::decode::Config::new()
+			};
+			let mut decoder = crate::decode::backend::open(crate::decode::backend::Codec::H264, &decode).unwrap();
+			let mut decoded = Vec::new();
+			for packet in encoded {
+				decoded.extend(
+					decoder
+						.decode(packet.payload, packet.timestamp, packet.keyframe)
+						.unwrap(),
+				);
+			}
+			assert_eq!(decoded.len(), 1);
+			assert_eq!(decoded[0].size(), encoder.size());
+		}
+		drop(frame);
+		slot = completion
+			.wait()
+			.await
+			.expect("producer slot returned after both renditions");
+	}
 }

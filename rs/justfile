@@ -234,9 +234,9 @@ media-features:
 test *args:
     RUSTC_WORKSPACE_WRAPPER="$(command -v clippy-driver || true)" cargo nextest run --locked --all-targets "$@"
 
-# Exercise Vulkan -> CUDA -> NVENC on Linux/NVIDIA hardware.
-vulkan-cuda:
-    sh/rs/vulkan-cuda.sh
+# Exercise the ignored hardware tests for every GPU vendor on this Linux host.
+gpu:
+    sh/rs/gpu.sh
 
 # The media tasks run against a recorder rather than a device (see
 # `rs/moq-cli/src/play/fake.rs`), so this needs no speaker or display.
