@@ -1,6 +1,8 @@
+import type * as Epoch from "../epoch.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import type { Location } from "../track.ts";
+import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
 import { hasFrameBounds, hasGroupOrder, hasLargest, hasStreamCount, resolvesStart, Version } from "./version.ts";
 
@@ -230,6 +232,8 @@ export class SubscribeUpdate {
 export class Subscribe {
 	id: bigint;
 	broadcast: Path.Valid;
+	/** The publisher instance the subscriber expects. Lite-07+. */
+	epoch?: Epoch.Valid;
 	track: string;
 	priority: number;
 	/** Subscriber max delay in milliseconds; zero skips once a newer group is available. */
@@ -254,6 +258,7 @@ export class Subscribe {
 	constructor(props: {
 		id: bigint;
 		broadcast: Path.Valid;
+		epoch?: Epoch.Valid;
 		track: string;
 		priority: number;
 		maxDelay?: number;
@@ -264,6 +269,7 @@ export class Subscribe {
 	}) {
 		this.id = props.id;
 		this.broadcast = props.broadcast;
+		this.epoch = props.epoch;
 		this.track = props.track;
 		this.priority = props.priority;
 		this.maxDelay = props.maxDelay ?? 0;
@@ -276,6 +282,7 @@ export class Subscribe {
 	async #encode(w: Writer, version: Version) {
 		await w.u62(this.id);
 		await w.string(Path.encode(this.broadcast));
+		await encodeEpoch(w, version, this.epoch);
 		await w.string(this.track);
 		await w.u8(this.priority);
 
@@ -296,6 +303,7 @@ export class Subscribe {
 	static async #decode(r: Reader, version: Version): Promise<Subscribe> {
 		const id = await r.u62();
 		const broadcast = Path.decode(await r.string());
+		const epoch = await decodeEpoch(r, version);
 		const track = await r.string();
 		const priority = await r.u8();
 
@@ -313,6 +321,7 @@ export class Subscribe {
 				return new Subscribe({
 					id,
 					broadcast,
+					epoch,
 					track,
 					priority,
 					maxDelay,

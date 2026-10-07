@@ -991,14 +991,17 @@ async fn read_payloads(sub: &mut moq_net::track::Subscriber, count: usize) -> Ve
 /// The client connects to two servers announcing the same route. The preferred
 /// (cheaper) route serves the track; when that session dies, the broadcast
 /// re-splices through the standby at a group boundary, without the path ever
-/// being retracted: both routes name the same first hop, so they are the same
-/// origin reached different ways and the subscription rides the failover.
+/// being retracted: both routes carry the same epoch over lite-07, so they serve
+/// the same bytes and the subscription rides the failover.
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_route_migration() {
 	use moq_net::Timestamp;
 
 	let publisher = Hop::new(0x42).unwrap();
+	// Replicas of one publisher instance, and the only version that carries it.
+	let epoch = moq_net::Epoch::mint();
+	let lite_07: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
 
 	// ── publisher A: the preferred route (cheaper) ──────────────────
 	let origin_a = moq_tokio::origin::spawn();
@@ -1006,7 +1009,12 @@ async fn broadcast_route_migration() {
 	hops_a.push(publisher).unwrap();
 	let broadcast_a = origin_a.create_broadcast("test").expect("create broadcast");
 	broadcast_a
-		.announce(moq_net::origin::Route::default().with_hops(hops_a).with_cost(1))
+		.announce(
+			moq_net::origin::Route::default()
+				.with_epoch(epoch.clone())
+				.with_hops(hops_a)
+				.with_cost(1),
+		)
 		.expect("announce");
 	let track_a = broadcast_a.create_track("video", None).expect("create track");
 	for sequence in 0..2u64 {
@@ -1026,7 +1034,12 @@ async fn broadcast_route_migration() {
 	hops_b.push(Hop::new(0x1234).unwrap()).unwrap();
 	let broadcast_b = origin_b.create_broadcast("test").expect("create broadcast");
 	broadcast_b
-		.announce(moq_net::origin::Route::default().with_hops(hops_b).with_cost(2))
+		.announce(
+			moq_net::origin::Route::default()
+				.with_epoch(epoch.clone())
+				.with_hops(hops_b)
+				.with_cost(2),
+		)
 		.expect("announce");
 	let track_b = broadcast_b.create_track("video", None).expect("create track");
 	// A clone to keep producing from the test body once the task owns the rest.
@@ -1043,12 +1056,14 @@ async fn broadcast_route_migration() {
 	}
 	let server_a = {
 		let mut config = moq_tokio::listen::Config::default();
+		config.version = vec![lite_07];
 		config.bind = Some("[::]:0".parse().unwrap());
 		config.tls.generate = vec!["localhost".into()];
 		config.init(Default::default()).expect("init server a")
 	};
 	let server_b = {
 		let mut config = moq_tokio::listen::Config::default();
+		config.version = vec![lite_07];
 		config.bind = Some("[::]:0".parse().unwrap());
 		config.tls.generate = vec!["localhost".into()];
 		config.init(Default::default()).expect("init server b")
@@ -1082,6 +1097,7 @@ async fn broadcast_route_migration() {
 
 	let connect = |port: u16, sub: moq_net::origin::Producer| {
 		let mut config = moq_tokio::connect::Config::default();
+		config.version = vec![lite_07];
 		config.tls.insecure = Some(true);
 		let client = config.init(Default::default()).expect("init client");
 		let url: url::Url = format!("moqt://localhost:{port}").parse().unwrap();

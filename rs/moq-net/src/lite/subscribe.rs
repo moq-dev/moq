@@ -14,6 +14,9 @@ use super::{Message, Version};
 pub struct Subscribe<'a> {
 	pub id: u64,
 	pub broadcast: Path<'a>,
+	/// The publisher instance the subscriber expects; see [`crate::origin::Route::epoch`].
+	/// Lite07+ only.
+	pub epoch: Option<crate::Epoch>,
 	pub track: Cow<'a, str>,
 	pub priority: u8,
 	pub max_delay: std::time::Duration,
@@ -47,6 +50,7 @@ impl Message for Subscribe<'_> {
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let id = r.varint()?;
 		let broadcast = Path::decode(r, version)?;
+		let epoch = super::epoch::decode_epoch(r, version)?;
 		let track = Cow::Owned(r.string()?);
 		let priority = r.u8()?;
 
@@ -67,6 +71,7 @@ impl Message for Subscribe<'_> {
 		Ok(Self {
 			id,
 			broadcast,
+			epoch,
 			track,
 			priority,
 			max_delay,
@@ -80,6 +85,7 @@ impl Message for Subscribe<'_> {
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		w.varint(self.id)?;
 		self.broadcast.encode(w, version)?;
+		super::epoch::encode_epoch(w, version, self.epoch.as_ref())?;
 		w.string(&self.track)?;
 		w.u8(self.priority);
 
@@ -706,6 +712,7 @@ mod test {
 
 	fn subscribe_sample() -> Subscribe<'static> {
 		Subscribe {
+			epoch: None,
 			id: 1,
 			broadcast: Path::new("room").to_owned(),
 			track: Cow::Borrowed("video"),

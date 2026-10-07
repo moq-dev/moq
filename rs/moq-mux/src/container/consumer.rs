@@ -1648,12 +1648,17 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn truncated_resumed_group_skips_to_the_next_clean_group() {
+		// One publisher instance behind every route, so each may resume the others.
+		let epoch = moq_net::Epoch::mint();
 		let origin = crate::source::produce_origin();
 		let hops = moq_net::Hops::try_from(vec![moq_net::Hop::new(10).unwrap()]).unwrap();
 		let first_route = origin
 			.dynamic(
 				"live",
-				moq_net::origin::Route::default().with_hops(hops.clone()).with_cost(5),
+				moq_net::origin::Route::default()
+					.with_epoch(epoch.clone())
+					.with_hops(hops.clone())
+					.with_cost(5),
 			)
 			.unwrap();
 		let pending = origin.consume().request_broadcast("live");
@@ -1695,6 +1700,7 @@ mod tests {
 				.dynamic(
 					"live",
 					moq_net::origin::Route::default()
+						.with_epoch(epoch.clone())
 						.with_hops(hops.clone())
 						.with_cost(5 - sequence),
 				)
