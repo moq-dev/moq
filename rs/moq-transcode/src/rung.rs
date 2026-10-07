@@ -479,8 +479,9 @@ fn spawn_fetch(
 
 /// Transcode one specifically requested group, fetching it from the source.
 ///
-/// A failure while someone still wants the group rejects the request with that
-/// error. Dropping it would auto-reject with [`moq_net::Error::Dropped`], which
+/// A failure while someone still wants the group rejects the request: a source
+/// fetch error passes through, and a pipeline or container error rejects with
+/// [`moq_net::Error::Cancel`]. Dropping it would auto-reject with [`moq_net::Error::Dropped`], which
 /// reads as "the handler vanished" and hides the actual failure. Once nobody
 /// wants the group, the request is dropped instead: the last caller already
 /// withdrew the attempt, and accepting afterwards would cache the group under a
@@ -519,14 +520,12 @@ async fn fetch(rung: Rung, request: moq_net::group::Request) -> Result<(), Error
 	};
 
 	// A fresh pipeline per fetched group: groups are independently decodable,
-	// so the encoder starts clean at the group's keyframe. The decoder opens
-	// here, ahead of any encoded frame, so an abandoned fetch stops first.
-	let pipeline = tokio::select! {
-		biased;
-		_ = demand.unused() => return abandon(request),
-		pipeline = rung.pipeline() => pipeline,
-	};
-	let pipeline = match pipeline {
+	// so the encoder starts clean at the group's keyframe. The open is not
+	// raced against demand: a threaded codec keeps opening its session after
+	// the future drops, so cancelling it would free this fetch's slot while
+	// that session still exists. The check before accept covers a caller who
+	// leaves meanwhile.
+	let pipeline = match rung.pipeline().await {
 		Ok(pipeline) => pipeline,
 		Err(err) => {
 			request.reject(moq_net::Error::Cancel);

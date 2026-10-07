@@ -14,8 +14,8 @@ Nothing is encoded until someone asks, Cloudflare-style just-in-time per rung:
   active rung of a source shares one subscription and one decoder, so decode
   cost scales with sources, not ladder depth.
 - **Fetch** a specific group and the transcoder fetches that same group from
-  the source and transcodes just that group. A caller that leaves before the
-  encode cancels it. Output groups mirror source group sequence numbers 1:1,
+  the source and transcodes just that group. If every caller leaves before the
+  encode starts, nothing is encoded. Output groups mirror source group sequence numbers 1:1,
   so group N of every rung is the same content as source group N and rendition
   switches land cleanly.
 
