@@ -586,7 +586,7 @@ async fn redundant_pair_fails_over(version: &str, loss: Loss) {
 
 	let consumer = subscriber.consume();
 	let remote = consumer.request_broadcast("live").await.unwrap();
-	let prefs = track::Subscription::default().with_max_age(Duration::from_secs(60));
+	let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 
 	let mut expected = Vec::new();
