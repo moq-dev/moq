@@ -1234,7 +1234,7 @@ enum SubscribeServe<S: crate::transport::poll::Session> {
 		/// The subscription's demand lasts until its groups drain. A relay cancels its
 		/// upstream subscription once nobody subscribes, and the publisher then resets
 		/// every group still on the wire. `None` only in passing between states.
-		_track: Option<track::Subscriber>,
+		_track: Option<Box<track::Subscriber>>,
 	},
 }
 
@@ -1376,7 +1376,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 					let TrackRun { children, track, .. } = *run;
 					*self = Self::Drain {
 						children,
-						_track: Some(track),
+						_track: Some(Box::new(track)),
 					};
 				}
 				Self::Drain { children, .. } => {

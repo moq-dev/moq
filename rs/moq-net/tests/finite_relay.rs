@@ -164,12 +164,12 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 			let newest = loop {
 				let held = upstream.server_transport.release_newest_uni();
 				moq_net_sim::sleep(Duration::from_millis(10)).await;
-				if let Ok(head) = opened.try_next() {
+				if let Ok(head) = opened.try_recv() {
 					break head;
 				}
 				assert!(held > 0, "{name}: no group reached the subscriber");
 			};
-			assert_eq!(newest, Some(GROUPS - 1), "{name}");
+			assert_eq!(newest, GROUPS - 1, "{name}");
 			moq_net_sim::sleep(Duration::from_millis(100)).await;
 			upstream.server_transport.release_unis();
 		}

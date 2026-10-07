@@ -57,6 +57,12 @@ datagrams, and `SUBSCRIBE_DROP`, from the start group the subscription last
 asked for. A lost datagram is not owed, but its hole waits out the grace like a
 lost stream.
 
+Until the tail settles, a Rust reader at the declared end waits for any group
+missing between where the feed starts and the end, so a group whose header
+arrives after a higher one is still read. On moq-lite 05 and 06 a lost
+datagram's hole therefore delays the end by the grace; moq-lite 07's count
+does not.
+
 From moq-lite 06, an end that contradicts the groups received aborts the track:
 a group at or past `SUBSCRIBE_END`, or a `SUBSCRIBE_END` below a group already
 received. moq-lite 05 specified an inclusive end, so there it only drops that
