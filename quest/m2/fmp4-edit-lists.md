@@ -21,7 +21,9 @@ rather than `tfdt`. Decide in the PR whether priming samples before the edit
 are dropped or published with negative-offset handling, and refuse edit
 lists with more than one non-empty entry rather than guess.
 
-Public API: none. Wire: none (catalog init loses `edts`).
+Public API: none. Wire: none, but a catalog behavior change: the init
+loses `edts`, so a third-party consumer that applied `elst` itself must stop,
+or it shifts twice. Note it in the changelog.
 
 ## Required
 

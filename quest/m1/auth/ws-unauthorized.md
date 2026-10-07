@@ -33,8 +33,9 @@ whose role its grant cannot serve (a publisher holding a subscribe-only
 grant) is upgraded and its broadcasts silently go nowhere, where QUIC refuses
 it in `Cluster::scope`; and a moqt-over-WebSocket client that authenticates
 only with the SETUP `AUTHORIZATION TOKEN` is treated as anonymous. Neither
-grants extra access, so this stays in m1 (decided 2026-10-07). Copy the SETUP
-token onto the auth request as the QUIC path does in `request_for`.
+grants extra access, so this stays in m1 (decided 2026-10-07). Serving
+through `Connection::run` already applies `request_for` and `Cluster::scope`,
+so both close with no relay-side admit; the tests below pin them.
 
 Tests: a WebSocket connect with a bad token ends in a JS `SessionError` with
 the unauthorized code and the reload loop stops; a Rust client stops too. A

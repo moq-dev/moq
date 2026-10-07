@@ -17,16 +17,21 @@ test that fails without it:
 
 - `rs/moq-relay/src/web.rs`: both `admit_http` call sites (`serve_announced`
   and `serve_fetch`) return the error with `?` and never call
-  `cluster.refusals.record`. The missing-subscriber 401 in `serve_announced`
-  is uncounted too. Record each refusal the way `websocket.rs` does.
+  `cluster.refusals.record`. The missing-subscriber 401 in each handler is
+  uncounted too. Record each refusal the way `websocket.rs` does.
 - `rs/moq-net/src/model/resume.rs` (around line 267): `Position::after_group`
   returns `None` for the last group, meaning "no end", and
-  `unwrap_or_default()` turns that into position 0. Treat `None` as unbounded,
-  as `let_go` in the same file already does. lite-07 varints can carry
-  `u64::MAX`, so this is reachable from the wire.
+  `unwrap_or_default()` turns that into position 0. `until` is
+  `Option<Option<u64>>`, and an inner `None` (replaced before any group) must
+  still end at 0; only `after_group`'s overflow is unbounded. Reuse `let_go`'s
+  `until.map_or(Some(0), |last| last.checked_add(1))` and test both cases.
+  lite-07 varints can carry `u64::MAX`, so this is reachable from the wire.
 - `rs/moq-net/src/ietf/error.rs`: `has_going_away` lists Draft18 through
-  Draft22 explicitly. Flip it to `!matches!(older drafts)` like the
-  request-error helper next to it, so a new draft variant falls forward.
+  Draft22 explicitly. Flip it to `!matches!(older drafts)` like
+  `has_too_far_behind` and `has_malformed_track` next to it, keeping Draft16
+  and Draft17 excluded (0x4 is UNKNOWN_OBJECT_STATUS there), so a new draft
+  variant falls forward. This also changes `from_stream_code`; update its doc,
+  which says values a later draft may add stay `Unknown`.
 - `rs/moq-uring/src/udp.rs`: `RecvMeta::parse` stores a stride of 0 as
   `Some(0)`, and `Packet::segments` then calls `chunks_mut(0)`. Drop a zero
   stride in the parser. Linux only emits `UDP_GRO` when `gso_size != 0`, so

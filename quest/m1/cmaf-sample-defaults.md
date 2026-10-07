@@ -17,18 +17,21 @@ Today there are three rules (2026-10-07 audit):
   `MissingSampleDuration`, and a size that only `trex` carries is an empty
   sample. The importer forwards `trex` in the catalog init and passes the
   fragments through, so its own output can hit this.
-- Rust `decode` reads only the `trun` entry flags, ignores the non-sync bit,
-  and needs `sample_depends_on == 2`. The importer's `is_sync_sample`
+- Rust `decode` reads only the `trun` entry flags (`entry.flags.unwrap_or(0)`),
+  ignoring `first_sample_flags`, the `tfhd` and `trex` default flags, and the
+  non-sync bit, and needs `sample_depends_on == 2`. The importer's `is_sync_sample`
   (`import.rs`) needs `depends_on == 2` with non-sync clear. JS
-  (`js/hang/src/container/cmaf/decode.ts`) treats flags 0 or a clear non-sync
-  bit as a keyframe.
+  (`js/hang/src/container/cmaf/decode.ts`) already resolves size, duration,
+  and flags through `trun` (including `firstSampleFlags`), `tfhd`, and `trex`,
+  but treats flags 0 or a clear non-sync bit as a keyframe.
 
 Decided (2026-10-07): one quest and one resolver. Resolve each of size,
-duration, and flags as `trun`, then `tfhd`, then `trex`, in one place shared
-by the importer and `Wire::decode`, and mirror it in JS. Use one sync rule in
-all three. Add a fixture set that only Rust can generate today (defaults
-only in `trex`, flags only in `tfhd`, a sync sample with `depends_on` unset)
-and decode it in both languages.
+duration, and flags as `trun` (with `first_sample_flags` for the first
+sample), then `tfhd`, then `trex`, in one place shared by the importer and
+`Wire::decode`, matching JS. Use one sync rule in all three; JS changes only
+there. Add fixtures that Rust cannot decode today (defaults only in `trex`,
+flags only in `tfhd` or `first_sample_flags`, a sync sample with `depends_on`
+unset) and decode them in both languages.
 
 Public API: none. Wire: none.
 
