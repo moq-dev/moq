@@ -50,7 +50,7 @@ Decided in planning (2026-10-03):
   which rewrites the same messages: whichever lands second rebases.
 - `js/watch/src/sync.ts` stays as it is: its latency range (from #1620) is
   intended, and only the publisher's estimate uses the least-delayed reference.
-- No new docs page: the lite draft and the max-age paragraph in
+- No new docs page: the lite draft and the max delay paragraph in
   `doc/concept/moq-lite.md` are updated inline.
 
 ## Related
