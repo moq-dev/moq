@@ -60,6 +60,8 @@ impl LockWait {
 		self.inner.snapshot()
 	}
 
+	/// Bind this meter on the calling thread. Only the QUIC worker group calls it.
+	#[cfg(feature = "noq")]
 	pub(crate) fn bind(&self) -> kio::LockWaitBind {
 		self.inner.bind()
 	}
