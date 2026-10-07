@@ -984,10 +984,20 @@ mod tests {
 		);
 	}
 
-	/// A replacement on another worker can land after announces drain and before the
-	/// old reader retries. Its cached frame must never become the old epoch's total.
+	/// A known replacement must not overwrite the outgoing known epoch's counters.
 	#[test]
 	fn replacement_between_announce_drain_and_reader_retry() {
+		replacement_while_reader_retries(false);
+	}
+
+	/// Missing metadata must not let the outgoing lineage consume a recovered known epoch.
+	#[test]
+	fn unknown_replacement_between_announce_drain_and_reader_retry() {
+		replacement_while_reader_retries(true);
+	}
+
+	/// Arrange replacement on another worker after announcements drain and before retrying.
+	fn replacement_while_reader_retries(drop_epoch: bool) {
 		use std::sync::Barrier;
 
 		let now = std::time::Instant::now();
@@ -1008,6 +1018,20 @@ mod tests {
 		.unwrap()
 		.unwrap();
 		assert_eq!(initial["acme/room"].bytes, 100);
+		if drop_epoch {
+			old.source.announce(origin::Route::default()).unwrap();
+			let unversioned = futures::executor::block_on(kio::wait(|waiter| {
+				driver.poll(now, waiter).unwrap();
+				merged.poll_next(waiter)
+			}))
+			.unwrap()
+			.unwrap();
+			assert_eq!(unversioned["acme/room"].bytes, 100);
+			assert!(matches!(
+				merged.nodes[&(PathOwned::from(".stats/acme/node/a"), None)].reader,
+				Reader::Active(_)
+			));
+		}
 		assert!(merged.announce.poll_next(&Waiter::noop()).is_pending());
 
 		let ready = Barrier::new(2);
@@ -1044,14 +1068,13 @@ mod tests {
 				(new, front, warm, driver)
 			});
 			ready.wait();
-			let key = (PathOwned::from(".stats/acme/node/a"), Some(epoch_a));
+			let key = (PathOwned::from(".stats/acme/node/a"), (!drop_epoch).then_some(epoch_a));
 			let node = merged.nodes.get_mut(&key).unwrap();
 			advance(node, &merged.origin, &merged.config, &name, &Waiter::noop());
 			let old_bytes = node.last.as_ref().unwrap()["acme/room"].bytes;
 			// Release before asserting, so a failed regression also joins its worker.
 			release.wait();
 			let (_new, _front, _warm, mut driver) = worker.join().unwrap();
-			assert_eq!(old_bytes, 100, "the replacement frame overwrote the old epoch");
 			let combined = futures::executor::block_on(kio::wait(|waiter| {
 				driver.poll(now, waiter).unwrap();
 				merged.poll_next(waiter)
@@ -1059,6 +1082,7 @@ mod tests {
 			.unwrap()
 			.unwrap();
 			assert_eq!(combined["acme/room"].bytes, 130);
+			assert_eq!(old_bytes, 100, "the replacement frame overwrote the old epoch");
 		});
 	}
 
