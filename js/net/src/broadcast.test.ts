@@ -437,7 +437,7 @@ test("a finished track is still served from its cache", async () => {
 	const late = broadcast
 		.consume()
 		.track("track1")
-		.subscribe({ maxAge: Milli(5000) })
+		.subscribe({ maxDelay: Milli(5000) })
 		.ordered();
 	expect(await late.readString()).toBe("last");
 	expect(await late.nextGroup()).toBeUndefined();
