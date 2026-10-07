@@ -14,7 +14,12 @@ import { type GroupFlags, Group as GroupMessage } from "./object.ts";
 import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { Subscribe, SubscribeOk, Unsubscribe } from "./subscribe.ts";
-import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
+import {
+	SubscribeNamespace,
+	SubscribeNamespaceEntry,
+	SubscribeNamespaceEntryDone,
+	SubscribeNamespaceLegacy,
+} from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
 import { ALPN, Version } from "./version.ts";
 
@@ -63,6 +68,44 @@ test("every peer is asked", async () => {
 	subscriber.announced();
 
 	expect(await nextStream(pair.client)).toBeDefined();
+});
+
+/**
+ * Draft-14 forbids SUBSCRIBE_NAMESPACE with an empty prefix. The default scope's head
+ * is that prefix, so we do not ask. An unsolicited PUBLISH_NAMESPACE still lands.
+ */
+test("draft-14 does not subscribe to an empty prefix", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_14);
+	const session = new NativeSession(pair.server, Version.DRAFT_14, true);
+	const subscriber = new Subscriber({ session });
+	const announced = subscriber.announced();
+
+	expect(await nextStream(pair.client)).toBeUndefined();
+
+	const incoming = await Stream.open(pair.server, { version: Version.DRAFT_14 });
+	void subscriber.runPublishNamespace(
+		new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("surprise") }),
+		incoming,
+	);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("surprise"), kind: "start" });
+	announced.close();
+	incoming.close();
+});
+
+/** A non-empty draft-14 prefix is still asked for. */
+test("draft-14 still subscribes to a scoped prefix", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_14);
+	const session = new NativeSession(pair.server, Version.DRAFT_14, true);
+	const subscriber = new Subscriber({ session });
+
+	subscriber.announced(Path.Pattern.subtree(Path.from("cam")));
+
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("no SUBSCRIBE_NAMESPACE was sent");
+	expect(await peer.reader.u53()).toBe(SubscribeNamespaceLegacy.id);
+	const size = await peer.reader.u16();
+	const body = await peer.reader.read(size);
+	expect(new TextDecoder().decode(body)).toContain("cam");
 });
 
 /**

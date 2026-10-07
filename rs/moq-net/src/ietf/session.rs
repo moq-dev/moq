@@ -124,8 +124,12 @@ where
 	let (goaway_handle, goaway) = crate::goaway::Handle::new(!client);
 
 	// One SUBSCRIBE_NAMESPACE per permitted prefix, like `lite::Subscriber`: the
-	// scope is what we may ask for, and it is not the origin's root.
-	let namespaces = subscribe.as_ref().map(subscribe_prefixes).unwrap_or_default();
+	// scope is what we may ask for, and it is not the origin's root. Draft-14
+	// drops an empty prefix; see `subscribe_prefixes`.
+	let namespaces = subscribe
+		.as_ref()
+		.map(|origin| subscribe_prefixes(origin, version))
+		.unwrap_or_default();
 
 	let withdrawal = crate::session::Withdrawal::default();
 	let withdrawing = withdrawal.clone();
@@ -1224,6 +1228,117 @@ mod tests {
 		assert_eq!(occurrences(&log, b"cam"), 1, "one SUBSCRIBE_NAMESPACE for cam");
 		assert_eq!(occurrences(&log, b"mic"), 1, "one SUBSCRIBE_NAMESPACE for mic");
 		assert_eq!(occurrences(&log, b"rootns"), 0, "asked the peer for our local root");
+	}
+
+	/// The control messages that reached the wire, by type id.
+	///
+	/// Decoding the framing rather than scanning for a byte: a type id is one varint
+	/// among many, and a substring match would find one inside a length or a payload.
+	fn control_message_types(log: &crate::lite::test_transport::Log, version: Version) -> Vec<u64> {
+		let writes = log.writes.lock().unwrap().clone();
+		let mut buf = crate::coding::Decoder::new(&writes, version.into());
+		let mut types = Vec::new();
+
+		while !buf.is_empty() {
+			let Ok(type_id) = buf.varint() else {
+				break;
+			};
+			let Ok(size) = buf.u16() else {
+				break;
+			};
+			if buf.slice(size as usize).is_err() {
+				break;
+			}
+			types.push(type_id);
+		}
+
+		types
+	}
+
+	/// Drive a draft-14 session and return what it wrote.
+	///
+	/// `scoped` asks for `cam` under a local root. Otherwise the origin is unscoped,
+	/// whose interest prefix is empty.
+	async fn draft14_subscribe_log(scoped: bool) -> crate::lite::test_transport::Log {
+		const VERSION: Version = Version::Draft14;
+
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let subscribe = if scoped {
+			let patterns = crate::Patterns::from(crate::Pattern::subtree("cam").unwrap());
+			origin.scope("rootns", &patterns).expect("scope the origin")
+		} else {
+			origin.clone()
+		};
+
+		let mut session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let log = session.log.clone();
+		let setup = Stream::open(&mut session, VERSION)
+			.await
+			.expect("open the control stream");
+
+		let (driver, _goaway, _) = start(Config {
+			runtime: crate::time::Clock::sim(),
+			session,
+			setup: Some(setup),
+			request_id_max: None,
+			client: true,
+			publish: None,
+			subscribe: Some(subscribe),
+			peer_hop: None,
+			cost: None,
+			version: VERSION,
+			path: None,
+			authority: None,
+			peer_setup_stream: None,
+			peer_declared: None,
+			early_unis: Vec::new(),
+		})
+		.expect("start the session");
+		let driver = moq_net_sim::spawn(driver);
+
+		// A scoped request is written before the peer answers, which never comes.
+		// An unscoped session must stay silent for the same window.
+		for _ in 0..ANNOUNCE_TURNS {
+			if control_message_types(&log, VERSION).contains(&ietf::SubscribeNamespaceLegacy::ID) {
+				break;
+			}
+			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+		}
+
+		assert!(!driver.is_finished(), "the session ended");
+		assert!(log.closes().is_empty(), "closed the session: {:?}", log.closes());
+
+		// The original handle shares the table the session is still reading.
+		drop(origin);
+		log
+	}
+
+	/// Draft-14 forbids SUBSCRIBE_NAMESPACE with an empty prefix. An unscoped origin's
+	/// interest is that prefix, so the session does not ask and takes unsolicited
+	/// PUBLISH_NAMESPACE instead. A scoped origin still asks for its scope.
+	#[moq_net_sim::test]
+	async fn an_unscoped_draft14_session_does_not_subscribe_to_the_root() {
+		const VERSION: Version = Version::Draft14;
+
+		let unscoped = draft14_subscribe_log(false).await;
+		let unscoped_types = control_message_types(&unscoped, VERSION);
+		assert!(
+			!unscoped_types.contains(&ietf::SubscribeNamespaceLegacy::ID),
+			"an unscoped origin sent SUBSCRIBE_NAMESPACE: {unscoped_types:?}"
+		);
+
+		let scoped = draft14_subscribe_log(true).await;
+		let scoped_types = control_message_types(&scoped, VERSION);
+		assert_eq!(
+			scoped_types
+				.iter()
+				.filter(|id| **id == ietf::SubscribeNamespaceLegacy::ID)
+				.count(),
+			1,
+			"a scoped origin must still subscribe: {scoped_types:?}"
+		);
+		assert_eq!(occurrences(&scoped, b"cam"), 1, "asked for the scope");
+		assert_eq!(occurrences(&scoped, b"rootns"), 0, "asked the peer for our local root");
 	}
 
 	/// How many scheduling turns an advertisement gets before the count is taken. Time is

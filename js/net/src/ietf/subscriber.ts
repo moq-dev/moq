@@ -215,7 +215,8 @@ export class Subscriber {
 	 *
 	 * The peer is asked with SUBSCRIBE_NAMESPACE regardless of what it declared, and an
 	 * unsolicited PUBLISH_NAMESPACE lands here too, so a peer that only tells and one
-	 * that only answers are both discovered.
+	 * that only answers are both discovered. Draft-14 cannot be asked for the empty
+	 * prefix, so an unscoped subscriber only hears what the peer tells.
 	 *
 	 * Hidden routes (a `.`-prefixed segment below the scope's head) are left out unless
 	 * `options.hidden` opts in. The opt-in rides the SUBSCRIBE_NAMESPACE when the peer
@@ -320,6 +321,16 @@ export class Subscriber {
 
 	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, hidden: boolean) {
 		const version = this.#session.version;
+
+		// Draft-14 makes a prefix with N = 0 a protocol violation. An unscoped interest
+		// is that empty prefix, so do not ask and take unsolicited PUBLISH_NAMESPACE
+		// instead. Stay open until the caller drops the consumer, or those announcements
+		// have nowhere to land.
+		if (version === Version.DRAFT_14 && prefix === Path.empty()) {
+			console.debug("skipping empty SUBSCRIBE_NAMESPACE prefix on draft-14");
+			await announced.closed;
+			return;
+		}
 
 		// Suffixes live on this stream, so a repeat is recognized as an update to the
 		// advertisement rather than a second one, which would leak the count.

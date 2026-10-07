@@ -595,10 +595,21 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 /// our namespace -- a peer outside it has never heard of our root, so a rooted
 /// subscriber asks for its scope and mounts the replies under the root.
 ///
-/// Asked unconditionally: a peer with nothing to advertise answers with an empty set,
-/// which costs one stream.
-pub(super) fn subscribe_prefixes(origin: &origin::Producer) -> Vec<PathOwned> {
-	crate::model::interest_prefixes(&origin.allowed())
+/// A peer with nothing to advertise answers with an empty set, which costs one stream.
+///
+/// Draft-14 makes a prefix with no tuple fields (N = 0) a protocol violation. An
+/// unscoped origin's interest is that empty prefix, so it is left out and the session
+/// takes the peer's unsolicited PUBLISH_NAMESPACE instead.
+pub(super) fn subscribe_prefixes(origin: &origin::Producer, version: Version) -> Vec<PathOwned> {
+	let mut prefixes = crate::model::interest_prefixes(&origin.allowed());
+	if version == Version::Draft14 {
+		let skipped = prefixes.iter().any(|prefix| prefix.is_empty());
+		if skipped {
+			tracing::debug!("skipping empty SUBSCRIBE_NAMESPACE prefix on draft-14");
+		}
+		prefixes.retain(|prefix| !prefix.is_empty());
+	}
+	prefixes
 }
 
 /// Resolve the subscription a data stream belongs to.
@@ -840,6 +851,14 @@ where
 		mut stream: Stream<T, Version>,
 		prefix: PathOwned,
 	) -> Result<(), Error> {
+		// Draft-14 makes a prefix with N = 0 a protocol violation. `subscribe_prefixes`
+		// already drops that root; this is the send path, so a direct caller cannot
+		// put it on the wire either. The peer's unsolicited PUBLISH_NAMESPACE covers it.
+		if self.version == Version::Draft14 && prefix.is_empty() {
+			tracing::debug!("skipping empty SUBSCRIBE_NAMESPACE prefix on draft-14");
+			return Ok(());
+		}
+
 		// A peer that sent GOAWAY told us to stop opening requests on this session,
 		// announce-interest included (draft-19 sect 10.4).
 		if self.going_away.is_set() {
@@ -4256,7 +4275,7 @@ mod tests {
 			Default::default(),
 		);
 
-		let mut namespaces = subscribe_prefixes(&subscriber.origin);
+		let mut namespaces = subscribe_prefixes(&subscriber.origin, Version::Draft16);
 		assert_eq!(
 			namespaces,
 			vec![crate::Path::new("cam").to_owned()],
@@ -4336,7 +4355,9 @@ mod tests {
 			Default::default(),
 		);
 
-		let prefix = subscribe_prefixes(&subscriber.origin).pop().expect("one prefix");
+		let prefix = subscribe_prefixes(&subscriber.origin, VERSION)
+			.pop()
+			.expect("one prefix");
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		// Parks on the read after the scripted NAMESPACE is consumed.
 		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix));
