@@ -327,7 +327,7 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x39  | TIMESTAMP_MISMATCH | A frame's timestamp does not match its track's timescale. |
 | ------- | ------------- | ----------- |
-|  0x3A  | UNAUTHORIZED | The [scope](#auth-stream) does not cover this request, or no longer does. The session stays up. |
+|  0x3A  | UNAUTHORIZED | The endpoint does not authorize this request, or no longer does, such as when the [scope](#auth-stream) does not cover it. The session stays up. |
 | ------- | ------------- | ----------- |
 
 Note that CANCELLED is 0x1, not 0x0: a stream reset with 0x0 is an INTERNAL_ERROR, not a routine cancellation.

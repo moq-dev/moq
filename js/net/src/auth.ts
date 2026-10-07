@@ -1,7 +1,7 @@
 /**
  * In-band authorization: present tokens to the peer and learn what they grant.
  *
- * Each side of a moq-lite-06 session, and of a moq-transport draft-17+ session when both
+ * Each side of a moq-lite-07 session, and of a moq-transport draft-17+ session when both
  * sides negotiate MoQ Auth, presents the credential its connection already carried (the
  * URL, or nothing) right after setup, and learns the {@link Grant} it earned. Older
  * versions, and peers that do not negotiate it, carry no AUTH exchange: the grant stays

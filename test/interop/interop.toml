@@ -9,7 +9,7 @@ level = "info"
 bind = "127.0.0.1:4443"
 tls.generate = ["localhost", "127.0.0.1"]
 # Every default version, plus the work-in-progress moq-lite-07 that carries AUTH,
-# which the defaults leave out.
+# which the defaults leave out. Keep in sync with `ALL` in rs/moq-net/src/version.rs.
 version = [
     "moq-lite-07-wip",
     "moq-lite-06",

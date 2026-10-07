@@ -95,20 +95,13 @@ async fn lite_06_has_no_grant() {
 	older_versions_have_no_grant(LITE_06).await
 }
 
-/// The control for the lite versions without AUTH: lite-07 opens an Auth Stream on each
-/// side right away, which is what makes its absence on them mean something.
+/// The control for the lite versions without AUTH: on the same barrier, lite-07 has
+/// opened an Auth Stream on each side, which is what makes its absence on them mean
+/// something.
 #[tokio::test]
 async fn lite_07_opens_an_auth_stream_per_side() {
 	within(async {
-		let pair = connect(Options {
-			version: Some(LITE_07),
-			client_publish: Some(produce_origin(2)),
-			server_subscribe: Some(produce_origin(1)),
-			..Default::default()
-		})
-		.await;
-		granted(&pair.client).await;
-		granted(&pair.server).await;
+		let (pair, _broadcast) = connect_announced(LITE_07).await;
 		for transport in [&pair.client_transport, &pair.server_transport] {
 			assert!(
 				transport.bidi_types().contains(&AUTH_STREAM),
@@ -696,20 +689,7 @@ async fn a_reset_auth_stream_reports_unsupported(version: &'static str) {
 /// Versions without AUTH never open the stream: no grant, and no way to add a token.
 async fn older_versions_have_no_grant(version: &'static str) {
 	within(async {
-		let client_origin = produce_origin(2);
-		let broadcast = client_origin.create_broadcast("room/x").unwrap();
-		broadcast.announce(Default::default()).unwrap();
-		let server_origin = produce_origin(1);
-		let pair = connect(Options {
-			version: Some(version),
-			client_publish: Some(client_origin.clone()),
-			server_subscribe: Some(server_origin.clone()),
-			..Default::default()
-		})
-		.await;
-		// The announcement crossing means both drivers are running, so a setup token
-		// would already have its stream.
-		wait_announced(&server_origin.consume(), "room/x", true).await;
+		let (pair, _broadcast) = connect_announced(version).await;
 		assert_eq!(pair.client.auth().grant().peek(), None);
 		assert!(matches!(pair.client.auth().add("token").await, Err(Error::Unsupported)));
 		// moq-transport's request streams have no stream type to look for.
@@ -725,6 +705,25 @@ async fn older_versions_have_no_grant(version: &'static str) {
 	})
 	.await
 	.expect("timed out");
+}
+
+/// Connect on `version` and wait for a client announcement to reach the server. Each
+/// driver presents its setup token before it handles any other stream, so by then a
+/// version with AUTH has opened its Auth Stream on both sides.
+async fn connect_announced(version: &'static str) -> (Pair, moq_net::broadcast::Producer) {
+	let client_origin = produce_origin(2);
+	let broadcast = client_origin.create_broadcast("room/x").unwrap();
+	broadcast.announce(Default::default()).unwrap();
+	let server_origin = produce_origin(1);
+	let pair = connect(Options {
+		version: Some(version),
+		client_publish: Some(client_origin),
+		server_subscribe: Some(server_origin.clone()),
+		..Default::default()
+	})
+	.await;
+	wait_announced(&server_origin.consume(), "room/x", true).await;
+	(pair, broadcast)
 }
 
 /// Losing a grant cancels the subscriptions it covered, in both directions, and
