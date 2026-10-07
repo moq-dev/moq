@@ -3187,6 +3187,26 @@ mod tests {
 		drop((media, earlier_media, video0, added, broadcast));
 	}
 
+	// The reference sticks while it stays listed with a timeline, and falls back to the first
+	// choice once it leaves.
+	#[test]
+	fn the_reference_sticks_until_it_leaves() {
+		let catalog = |names: &[&str]| {
+			let mut catalog = moq_mux::catalog::hang::Catalog::default();
+			for name in names {
+				catalog.video.renditions.insert(name.to_string(), video_config());
+			}
+			catalog.archive = Some(archive(names));
+			catalog
+		};
+		let video = |name: &str| Arc::new((Kind::Video, name.to_string()));
+
+		let first = reference(&catalog(&["b"]), None);
+		assert_eq!(first, Some(video("b")));
+		assert_eq!(reference(&catalog(&["a", "b"]), first.as_ref()), Some(video("b")));
+		assert_eq!(reference(&catalog(&["a", "c"]), first.as_ref()), Some(video("a")));
+	}
+
 	// A new reference numbers segments from its own records, so its URLs carry its own tag and
 	// never reuse one the old reference listed for other content.
 	#[tokio::test(start_paused = true)]
