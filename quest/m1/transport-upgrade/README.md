@@ -68,6 +68,5 @@ Shared decisions, which Rust implements and [JavaScript](/quest/m1/transport-upg
 
 ## Required
 
-- [JS qmux finish](/quest/m1/transport-upgrade/js-qmux-finish.md) - `@moq/qmux` reports a cleanly finished send stream as closed without error
 - [JavaScript](/quest/m1/transport-upgrade/js.md) - js/net keeps the WebTransport dial after WebSocket wins and migrates through the client-goaway handover
 - [Closed fallback](/quest/m1/transport-upgrade/closed-fallback.md) - a WebSocket session that closes right after connecting falls back to the pending QUIC dial instead of redialing

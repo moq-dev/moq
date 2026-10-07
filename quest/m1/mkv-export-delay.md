@@ -16,8 +16,8 @@ and the same late-frame drop. Update `doc/bin/cli.md`.
 
 Decided in the 2026-10-06 audit: `--delay` replaces the staleness flag, as it
 replaced `--max-age` on TS, so one knob sets both the release delay and the
-sources' staleness budget. [Subscriber max-delay](/quest/m1/subscriber-max-delay.md)
-(#4917) renames that flag to `--max-delay` first; this quest then replaces
+sources' staleness budget. [#4917](https://github.com/moq-dev/moq/pull/4917)
+renames that flag to `--max-delay` first; this quest then replaces
 `--max-delay` with `--delay`. Rejected: excluding mkv from the #4917 rename.
 
 Public API: breaking, the exporter's staleness setting becomes the delay
@@ -25,5 +25,4 @@ setting. Wire: none.
 
 ## Required
 
-- [Subscriber max-delay](/quest/m1/subscriber-max-delay.md) - renames the staleness flag first, so this replaces `--max-delay`
 - [Fixed-delay release](/quest/m1/tstd/delay.md) - builds the shared release stage

@@ -21,7 +21,7 @@ audit moved P2P, ladder, processor, and timed metadata there from m2.
 Decided in the 2026-10-05 audit: the clock chain ranks first (the untimed models,
 CMAF frame timestamp, the shared clock, and the two publish-timestamp
 quests), with FFI shape pulled up inside it because publishing never invents
-a timestamp requires its JSON pilot. The hard fork follows, ahead of transport-seam and perf, and the rest
+a timestamp requires its JSON pilot. The hard fork follows, ahead of perf, and the rest
 of the QUIC line follows the fork. Every blocker ranks above the work it
 blocks. The quests that gated m0 lines moved under them.
 
@@ -35,19 +35,17 @@ blocks. The quests that gated m0 lines moved under them.
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, flate, audio, and video namespaces built from the handle below
 - [Publishing never invents a timestamp](/quest/m1/publish-timestamp.md) - no Rust or binding publish API fills in a timestamp; an untimed payload goes out untimed
 - [JS publishing never invents a timestamp](/quest/m1/js-publish-timestamp.md) - the same in @moq/json, @moq/flate, and @moq/net
-- [Hard fork](/quest/m1/quic/fork/README.md) - quinn hard-forked in-tree as `moq-quic`, ranked ahead of transport-seam and perf; the rest of the QUIC line follows it
+- [Hard fork](/quest/m1/quic/fork/README.md) - quinn hard-forked in-tree as `moq-quic`, ranked ahead of perf; the rest of the QUIC line follows it
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - any node routes toward a broadcast's origin over CDN and P2P links alike, with per-origin routes and path-less announces
 - [One route cost](/quest/m1/route-cost.md) - Warm and Cold collapse to one static route cost
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
-- [JS broadcast demand](/quest/m1/js-broadcast-demand.md) - `@moq/net`'s `Broadcast.Demand` matches Rust in three edge cases
 - [Flat questlines](/quest/m1/quest-flat-lines.md) - moq pins the current quest CLI, lands its questline branches on main, and retires them
 - [moq-bot may push workflow changes](/quest/m1/bot-workflows-permission.md) - condition: the maintainer grants moq-bot's GitHub App the `workflows` permission, so back-merges carrying workflow changes go through
 - [main merges through a squash queue](/quest/m1/merge-queue-settings.md) - condition: once `release` carries the new back-merge script, the maintainer enables the squash merge queue and moq-bot's pull_request bypass together
 - [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
-- [moq-net owns its transport seam](/quest/m1/transport-seam.md) - moq-net names only its own transport traits, so a web-transport-trait or qmux major bump is a patch for it
 - [Bump mp4-atom for avc3](/quest/m1/mp4-atom-avc3-bump.md) - this repository depends on mp4-atom 0.16.2, which reads and writes an `avc3` sample entry
 - [fMP4 init from the catalog](/quest/m1/fmp4-catalog-init.md) - fMP4 export writes avc3/hev1 entries from the catalog, so an Annex-B H.264 or H.265 init no longer waits for the first keyframe
-- [WebTransport close backends](/quest/m1/wt-close-backends.md) - iroh's client reads a peer's capsule close, and moq-uring's HTTP/3 close task keeps the session alive until the capsule is sent
+- [Bump web-transport-iroh for the capsule close](/quest/m1/iroh-capsule-bump.md) - condition: moq-dev/web-transport#419 ships in a release, then moq's iroh HTTP/3 client reports a peer's close capsule
 - [Enabled flag](/quest/m1/catalog-enabled.md) - one `enabled` rendition flag replaces `stalled` and pausing, and the flapping encoder-lag detector is deleted
 - [Hang changelog](/quest/m1/hang-changelog-04.md) - the hang draft lists under -03 only what -03 published
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
@@ -59,7 +57,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [Untimed lite-07](/quest/m1/lite-untimed.md) - lite-07 carries an untimed track in both languages; lite-05/06 write send time
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Late lower groups](/quest/m1/lite-late-lower-group.md) - a moq-lite subscriber with a floor receives a group created below the first served one, as moq-transport does
-- [JSON stream budget](/quest/m1/json-stream-budget.md) - an oversized JSON stream record is refused without ending the log, and a JS subscribe to a gone track answers NotFound
 - [Flate stream budget](/quest/m1/flate-stream-budget.md) - a flate stream refuses an oversized append without ending, sharing one DEFLATE bound with json
 - [JS track takeover](/quest/m1/js-track-takeover.md) - JS `createTrack` answers a queued request and continues its sequences, as Rust does
 - [A watch and publish release ships assets()](/quest/m1/assets-release.md) - the release that lets the sites host the worklets
@@ -68,10 +65,8 @@ blocks. The quests that gated m0 lines moved under them.
 - [moq-uring tests under load](/quest/m1/uring-tests-under-load.md) - uring tests pass while parallel checks share locked memory
 - [Media audio-tone check](/quest/m1/media-audio-tone.md) - the media lane's audio-tone check passes under load, fixed at its cause
 - [CI runner stalls](/quest/m1/ci-runner-stalls.md) - the 0.4 to 0.8 s freezes of both interop tracks on CI are attributed from a week of nightlies and fixed or told apart from playback bugs
-- [Subscriber max-delay](/quest/m1/subscriber-max-delay.md) - subscriber staleness becomes `max_delay`; publisher retention stays `max_age`
 - [Wire compatibility](/quest/m1/wire-compat.md) - a nightly run tests this checkout against the last published release for tokens, session wire, and catalog/container
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - importers sharing one `--epoch` and fed one stream publish identical groups and timestamps, so failover between a redundant pair survives
-- [Auth client CA](/quest/m1/relay-auth-client-ca.md) - `auth::Config::validate` and `init` take the client-CA flag, so no caller can skip the check
 - [Refuse ignored TLS config](/quest/m1/refuse-ignored-tls.md) - TLS options no listener would use fail at load instead of being ignored
 - [cpal loads libasound at runtime](/quest/m1/cpal-alsa-runtime.md) - condition: a cpal release whose Linux build carries no load-time libasound requirement
 - [Audio capture without ALSA link](/quest/m1/capture-alsa-link.md) - moq-audio capture and playback build on Linux without linking libasound
@@ -110,7 +105,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [TS Opus channel codes](/quest/m1/ts-opus-channel-codes.md) - TS Opus with a channel code of 0x81 or above imports with its real head or is refused, never guessed as stereo
 - [AudioToolbox encode](/quest/m1/audio-encode-audiotoolbox.md) - macOS and iOS encode AAC-LC
 - [AAC encode refusals](/quest/m1/aac-encode-refusals.md) - `Config::encode` refuses channel counts it cannot name instead of writing stereo
-- [AAC parse truncated SBR](/quest/m1/aac-parse-truncated-sbr.md) - `Config::parse` refuses SBR and PS configs cut off before their core
 - [GStreamer surround Opus](/quest/m1/gst-opus-surround.md) - the moq-gst sink publishes 3 to 8 channel Opus with the OpusHead its caps describe
 - [TS AAC PCE joins](/quest/m1/ts-aac-pce-join.md) - PCE-described AAC over TS plays after a mid-stream join or resume, and a missing PCE silences only its track
 - [FFI frame duration default](/quest/m1/ffi-frame-duration-default.md) - the binding audio encoder takes the codec's own frame by default, so `aac()` needs no explicit 0
@@ -148,7 +142,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [Browser benchmarks](/quest/m1/browser-benchmarks.md) - measure JS transport, container, decode, and render costs in an identified browser
 - [Generated @moq/net](/quest/m1/rs2ts/README.md) - the browser runs moq-net as TypeScript generated from the Rust source, retiring js/net's hand-written protocol and model code
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
-- [Video auto creep](/quest/m1/video-auto-creep.md) - a browser video-only broadcast's `"auto"` target stops creeping upward one step at a time
 - [Plan: watch worker](/quest/m1/plan-watch-worker.md) - prototype an invisible page worker against app-spawned workers, and land the jank harness that decides
 - [Watch worker](/quest/m1/watch-worker.md) - watch playback runs in a worker onto an OffscreenCanvas, so main-thread jank never stalls video or audio
 - [Cache expiry growth](/quest/m1/cache-expiry-growth.md) - with the default pool, relay memory plateaus at the expiry window on every version
@@ -160,7 +153,9 @@ blocks. The quests that gated m0 lines moved under them.
 - [Route wakes](/quest/m1/route-wakes.md) - a route change wakes only the fronts it can move, so pool churn stops scaling with served paths
 - [Copy-walk bench](/quest/m1/admission-bench.md) - a front's walk over its copies on a route change is benchmarked over tracks and copies
 - [Publish channel count](/quest/m1/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence
-- [JS abandonment](/quest/m1/js-subscribe-abandonment.md) - a viewer returning during IETF subscribe setup keeps its track across microtasks
+- [JS request deadline](/quest/m1/js-request-deadline.md) - each JS request, PUBLISH_NAMESPACE included, has one fatal 10 s timer from create to answer and fails fast without stream credit, so nothing queues or retries
+- [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
+- [qmux no-wait opens](/quest/m1/qmux-no-wait.md) - @moq/qmux rejects an over-limit create when waitUntilAvailable is false, like Chrome
 - [E2EE](/quest/m1/e2ee/README.md) - TypeScript and Rust peers interoperate over encrypted broadcasts no relay can decrypt
 - [#3056](/quest/m1/3056-watch-video-decoder-captures-the-rewind-generation-at.md) - watch: the video decoder resets on a declared discontinuity
 - [#933](/quest/m1/933-video-rotation-metadata-not-propagated-from-mobile-camera.md) - the catalog rotation follows the live camera's orientation

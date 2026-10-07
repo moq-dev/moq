@@ -69,7 +69,7 @@ func (b *BroadcastConsumer) FetchMediaGroup(
 
 // SubscribeMedia subscribes to a media track, decoded with the given container.
 // subscription tunes delivery priority, group range, and
-// the max age; pass nil for defaults. Raise Subscription.MaxAgeUs to
+// the max delay; pass nil for defaults. Raise Subscription.MaxDelayUs to
 // buffer instead of skipping a stalled group.
 func (b *BroadcastConsumer) SubscribeMedia(
 	ctx context.Context,

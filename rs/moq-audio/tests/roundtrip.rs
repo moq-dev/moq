@@ -61,7 +61,7 @@ async fn opus_round_trip_48k_stereo() {
 	// The whole clip is encoded before anything decodes it. The default REAL_TIME
 	// budget is enforced on the subscription, so without a tolerance the decoder would
 	// take the live edge and drop the rest of the batch.
-	options.max_age = Duration::from_secs(30);
+	options.max_delay = Duration::from_secs(30);
 	let mut consumer = decode::Consumer::new(&broadcast_consumer, cfg, "audio", options)
 		.await
 		.unwrap();
@@ -135,7 +135,7 @@ async fn opus_round_trip_44100_s16_resampled() {
 	config.output.format = Format::S16;
 	config.output.sample_rate = Some(44_100);
 	config.output.layout = Some(Layout::Mono);
-	config.max_age = Duration::from_millis(500);
+	config.max_delay = Duration::from_millis(500);
 
 	let mut consumer = decode::Consumer::new(&broadcast_consumer, cfg, "audio", config)
 		.await

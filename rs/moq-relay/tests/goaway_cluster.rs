@@ -395,7 +395,7 @@ async fn spawn_relay_with_upstream(
 	let mut auth_config = auth::Config::default();
 	auth_config.public = vec![moq_auth::Pattern::all()];
 	let auth = auth_config
-		.init("test", &moq_tokio::tls::Connect::default())
+		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init");
 
 	let mut cluster_config = cluster::Config::default();
@@ -559,7 +559,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		"subscribe to the video track",
 		bc.track("video")
 			.expect("track handle")
-			.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(60))),
+			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60))),
 	)
 	.await
 	.expect("subscribe");
