@@ -375,6 +375,11 @@ datagram: unreliable, unordered, under about 1200 bytes, and never
 retransmitted. It suits real-time audio and sensor data. There is no stream
 fallback, so a datagram that doesn't fit isn't delivered that way.
 
+Datagrams are live-only. A subscription gets the ones sent after it opened and
+inside its group range, never a buffered backlog, and nothing caches them, so
+`FETCH` treats a datagram group as one that does not exist. Use a group for
+anything a late joiner needs.
+
 ## What moq-lite leaves out
 
 Compared with moq-transport: no request IDs (a stream per request instead), no

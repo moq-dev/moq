@@ -10,8 +10,13 @@
 //! body exceeds the transport's datagram size, and sessions that can't carry datagrams at all
 //! (moq-lite before 05, or stream-only transports like WebSocket) never deliver them.
 //!
+//! A datagram is live-only: it reaches the subscriptions open when it is pushed, and is never
+//! cached, replayed to a later subscription, or served by a fetch.
+//!
 //! Wire counterparts: [`crate::lite::Datagram`], and on moq-transport an OBJECT_DATAGRAM at
 //! object 0 whose Group ID is the sequence ([`crate::ietf::ObjectDatagram`]).
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 
@@ -37,4 +42,18 @@ pub struct Datagram {
 	pub timestamp: Timestamp,
 	/// The datagram payload.
 	pub payload: Bytes,
+}
+
+/// A point on the process-wide datagram clock, which orders every datagram push against every
+/// subscription opening. A subscription takes the datagrams pushed after it opened, whichever
+/// copy of the track (a relay's upstream, a replacement route) they reach it through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Tick(u64);
+
+impl Tick {
+	/// A tick later than every one taken before it, on any thread.
+	pub(crate) fn next() -> Self {
+		static CLOCK: AtomicU64 = AtomicU64::new(0);
+		Self(CLOCK.fetch_add(1, Ordering::Relaxed))
+	}
 }

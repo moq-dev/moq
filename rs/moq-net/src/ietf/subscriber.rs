@@ -3795,6 +3795,13 @@ async fn decode_fetch_object<R: crate::transport::poll::RecvStream>(
 			priority,
 			properties,
 		}) => {
+			// Draft-16 on lets a fetch carry an Object published as a datagram, but a
+			// datagram group is live-only: never cached, so never filled from a fetch. It is
+			// refused as a group that does not exist, which fails only this fetch.
+			if subgroup == ietf::FetchSubgroup::Datagram {
+				tracing::debug!(?group, ?object, "a datagram group is not fetchable");
+				return Err(Error::NotFound);
+			}
 			let inherits = group.is_none()
 				|| object.is_none()
 				|| priority.is_none()
@@ -4621,6 +4628,43 @@ mod tests {
 		// A status datagram cannot end the group.
 		let malformed = bytes::Bytes::from_static(&[0x22, 0x07, 0x04, 0x00]);
 		assert!(is_protocol_violation(&subscriber.recv_datagram(malformed).unwrap_err()));
+	}
+
+	/// A datagram that lands before SUBSCRIBE_OK binds its alias is dropped, not held for the
+	/// subscription to replay once it is bound. The reader was already subscribed, so only the
+	/// missing alias can have dropped it.
+	#[moq_net_sim::test]
+	async fn a_datagram_before_its_alias_is_dropped() {
+		use crate::coding::Encode as _;
+		use futures::FutureExt as _;
+
+		let subscriber = subscriber_with_tracks(&[(RequestId(11), "cam", "audio")]);
+		let mut consumer = {
+			let mut state = subscriber.state.lock();
+			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
+			track.producer.as_ref().unwrap().subscribe(None)
+		};
+		let datagram = |group_id: u64| {
+			ietf::ObjectDatagram {
+				track_alias: 7,
+				group_id,
+				object_id: None,
+				publisher_priority: None,
+				end_of_group: true,
+				properties: None,
+				body: ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"d")),
+			}
+			.encode_bytes(Version::Draft19)
+			.unwrap()
+		};
+
+		subscriber.recv_datagram(datagram(4)).unwrap();
+		subscriber.register_alias(RequestId(11), 7).unwrap();
+		subscriber.recv_datagram(datagram(5)).unwrap();
+
+		let received = consumer.recv_datagram().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(received.sequence, 5);
+		assert!(consumer.recv_datagram().now_or_never().is_none(), "group 4 never arrives");
 	}
 
 	/// One alias naming two different tracks is the collision section 11.1 makes fatal.
@@ -8034,6 +8078,84 @@ mod stitch_tests {
 				false => assert!(end.is_err(), "{count} objects: the group must fail, not end"),
 			}
 		}
+	}
+
+	/// One Object published as a datagram, as draft-16 on lets a fetch stream carry it.
+	fn datagram_object(sequence: u64) -> Vec<u8> {
+		let mut buf = Vec::new();
+		ietf::FetchObject::Object {
+			subgroup: ietf::FetchSubgroup::Datagram,
+			group: Some(sequence),
+			object: Some(0),
+			priority: Some(0),
+			properties: None,
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut buf, VERSION.into()), VERSION)
+		.unwrap();
+		crate::coding::Encoder::new(&mut buf, VERSION.into())
+			.varint(1u64)
+			.unwrap();
+		buf.extend_from_slice(b"d");
+		buf
+	}
+
+	/// A datagram group is never fetchable, so a group fetch answered with one fails as a
+	/// group that does not exist, and nothing is cached.
+	#[moq_net_sim::test]
+	async fn a_group_fetch_refuses_a_datagram_object() {
+		let mut run = GroupFetchRun::new(VERSION, datagram_object(SEQUENCE)).await;
+		let group = run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
+		let mut consumer = group.consume();
+		let slot = kio::Producer::new(GroupFetch::Ready {
+			producer: group,
+			timescale: None,
+			start: 0,
+			end: None,
+		});
+
+		let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
+		assert!(matches!(res, Err(Error::NotFound)), "{res:?}");
+		assert!(
+			matches!(consumer.read_frame().await, Err(Error::NotFound)),
+			"the group fails without the payload"
+		);
+	}
+
+	/// A fill answered with a datagram Object is refused the same way. Only the fill goes:
+	/// the subscription keeps delivering the groups after it.
+	#[moq_net_sim::test]
+	async fn a_datagram_fill_fails_only_the_fill() {
+		let mut fill = Vec::new();
+		crate::coding::Encoder::new(&mut fill, VERSION.into())
+			.varint(ietf::FetchHeader::TYPE)
+			.unwrap();
+		ietf::FetchHeader { request_id: REQUEST }
+			.encode(&mut crate::coding::Encoder::new(&mut fill, VERSION.into()), VERSION)
+			.unwrap();
+		fill.extend(datagram_object(SEQUENCE));
+
+		let h = Harness::new(
+			Fill::Serving(Some(Timescale::MICRO)),
+			vec![fill, tail_stream(SEQUENCE + 1, 0, &[b"next"])],
+		);
+		let mut consumer = h.track.subscribe(None);
+		let mut fill = h.stream().await;
+		let mut tail = h.stream().await;
+
+		assert!(matches!(
+			h.subscriber.clone().recv_fill(&mut fill).await,
+			Err(Error::NotFound)
+		));
+		h.subscriber
+			.clone()
+			.recv_group(&mut tail)
+			.await
+			.expect("the subscription carries on");
+
+		let (sequence, frames) = read_group(&mut consumer).await;
+		assert_eq!(sequence, SEQUENCE + 1);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].1, b"next");
 	}
 
 	/// A group fetch's objects after the FETCH_HEADER: the first one names the group and

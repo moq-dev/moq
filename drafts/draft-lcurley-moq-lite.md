@@ -656,7 +656,9 @@ The subscriber MAY cache the error and potentially retry later.
 QUIC datagrams provide unreliable, unordered delivery for latency-sensitive content that does not need retransmission.
 
 A publisher MAY transmit a Group consisting of exactly one Frame as a single QUIC datagram, in addition to (or instead of) opening a Group Stream, based on application hints, group size, and network conditions; a multi-frame Group is delivered via a Group Stream only.
-A datagram-delivered group is not cached or retransmitted; a publisher SHOULD only send a datagram if the congestion controller can transmit it immediately.
+Datagram delivery is live-only: a publisher sends a datagram only to the subscriptions active when it sends it, and only when its Group Sequence is inside the subscription's range, where a non-zero `Frame Start` excludes the start group (see [Positions](#positions)).
+A datagram is never cached, retransmitted, or replayed to a later subscription, and FETCH never returns one; a publisher answers a FETCH for a group delivered only as a datagram as for a group that does not exist.
+A publisher SHOULD only send a datagram if the congestion controller can transmit it immediately.
 There is no separate subscription for datagram delivery: datagrams are routed to existing subscriptions via the Subscribe ID, and a subscriber receiving the same group via both a stream and a datagram MUST deduplicate by group sequence.
 
 Each datagram body has the following encoding (note: there is no message length prefix; the QUIC datagram boundary delimits the payload):
@@ -1380,6 +1382,7 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
+- Datagram delivery is live-only: a datagram goes only to the subscriptions active when it is sent and inside their range, and FETCH never returns one.
 - The subscriber FINs its Subscribe Stream after settling its tail; graceful session close waits for that FIN or reset.
 - A refusal is not retried at another route of the same prefix either.
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
