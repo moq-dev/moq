@@ -1,9 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
+import { Encoder as Flate } from "@moq/flate";
 import { Group, Track } from "@moq/net";
 import * as z from "@zod/mini";
 import { Desync } from "../error.ts";
 import { Decoder } from "./decoder.ts";
-import { Encoder } from "./encoder.ts";
+import { deflateBound, Encoder } from "./encoder.ts";
 import { Producer } from "./producer.ts";
 
 type Rec = { n: number };
@@ -207,4 +208,27 @@ test("a lost compressed stream frame has a typed error", () => {
 	const encoder = new Encoder<Rec>({ compression: "deflate" });
 	encoder.encode({ n: 1 });
 	expect(() => encoder.encode({ n: 2 })).toThrow(Desync);
+});
+
+// The bound holds for incompressible input, the worst case, at sizes straddling the 16 KiB block
+// boundary, and on a window already primed by earlier frames. Twin of the Rust test, since pako is a
+// separate implementation from the zlib the Rust side checks.
+test("deflate bound covers incompressible frames", () => {
+	// xorshift: incompressible enough to force stored blocks, and deterministic.
+	let state = 0x9e3779b9;
+	const noise = (len: number) => {
+		const out = new Uint8Array(len);
+		for (let i = 0; i < len; i++) {
+			state ^= state << 13;
+			state ^= state >>> 17;
+			state ^= state << 5;
+			out[i] = state & 0xff;
+		}
+		return out;
+	};
+
+	const flate = new Flate();
+	for (const len of [1, 2, 100, 16_383, 16_384, 16_385, 65_535, 65_536, 1 << 20, 3 << 20]) {
+		expect(flate.frame(noise(len)).byteLength).toBeLessThanOrEqual(deflateBound(len));
+	}
 });

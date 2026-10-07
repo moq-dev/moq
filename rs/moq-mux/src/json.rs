@@ -304,8 +304,9 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 	///
 	/// A record that cannot be written ends the track (see [`moq_json::stream::Producer::append`])
 	/// and retires the catalog entry with it. A record refused with
-	/// [`moq_net::Error::GroupTooLarge`] leaves both intact, since nothing was written. A catalog error publishing the measured bitrate is
-	/// returned after the record was written, so the track stays open and a retry would duplicate it.
+	/// [`moq_net::Error::GroupTooLarge`] leaves both intact, since nothing was written. A catalog
+	/// error publishing the measured bitrate is returned after the record was written, so the track
+	/// stays open and a retry would duplicate it.
 	pub fn append<'a>(&mut self, value: impl Into<Timed<&'a T>>) -> crate::Result<()>
 	where
 		T: 'a,

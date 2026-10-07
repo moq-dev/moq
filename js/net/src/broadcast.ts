@@ -90,7 +90,10 @@ function dequeueRequest(state: BroadcastState): track.Request | undefined {
 
 // The next on-demand track request, or undefined once the broadcast closes.
 async function requested(state: BroadcastState): Promise<track.Request | undefined> {
-	// Pulling requests is what makes a broadcast serve tracks on demand.
+	// Pulling requests is what makes a broadcast serve tracks on demand, and it latches for the
+	// broadcast's lifetime since JS has no drop to mark the handler gone. A subscribe before the first
+	// pull is answered NotFound, so an on-demand publisher starts pulling before it publishes and keeps
+	// pulling until the broadcast closes.
 	state.served = true;
 	for (;;) {
 		const request = dequeueRequest(state);

@@ -180,16 +180,18 @@ for (const compression of [false, true]) {
 
 // The budget covers the whole log, so once its frames are spent every append is refused, and the log
 // written so far still finishes cleanly and reads back whole.
-test("a spent budget refuses every append", async () => {
-	const track = new Track.Producer("test");
-	const producer = new Producer<Rec>({ track, compression: "deflate" });
-	for (let n = 0; n < Group.MAX_GROUP_FRAMES; n++) producer.append({ n });
+for (const compression of [false, true]) {
+	test(`a spent budget refuses every append (compression=${compression})`, async () => {
+		const track = new Track.Producer("test");
+		const producer = new Producer<Rec>({ track, compression: compression ? "deflate" : "none" });
+		for (let n = 0; n < Group.MAX_GROUP_FRAMES; n++) producer.append({ n });
 
-	expect(() => producer.append({ n: -1 })).toThrow(NetError.GroupTooLarge);
-	expect(() => producer.append({ n: -2 })).toThrow(NetError.GroupTooLarge);
-	producer.finish();
+		expect(() => producer.append({ n: -1 })).toThrow(NetError.GroupTooLarge);
+		expect(() => producer.append({ n: -2 })).toThrow(NetError.GroupTooLarge);
+		producer.finish();
 
-	const records = await drain(track.subscribe(), true);
-	expect(records.length).toBe(Group.MAX_GROUP_FRAMES);
-	expect(records.at(-1)).toBe(Group.MAX_GROUP_FRAMES - 1);
-});
+		const records = await drain(track.subscribe(), compression);
+		expect(records.length).toBe(Group.MAX_GROUP_FRAMES);
+		expect(records.at(-1)).toBe(Group.MAX_GROUP_FRAMES - 1);
+	});
+}

@@ -157,6 +157,6 @@ export class Encoder<T> {
 // its default window and memory level, which both pako and moq-flate use. Incompressible input falls
 // back to stored blocks, 5 bytes per 16 KiB; the constant covers the block headers and the flush,
 // whose fixed 4-byte marker is stripped anyway. Division rather than shifts, which wrap past 2^31.
-function deflateBound(len: number): number {
+export function deflateBound(len: number): number {
 	return len + Math.floor(len / 4096) + Math.floor(len / 16384) + Math.floor(len / 33554432) + 13;
 }
