@@ -25,7 +25,7 @@ async fn ts_surround_opus_decodes() {
 	let mut options = decode::Options::default();
 	options.output.format = Format::F32;
 	// The whole file is imported before anything decodes it.
-	options.max_age = Duration::from_secs(30);
+	options.max_delay = Duration::from_secs(30);
 	let mut consumer = decode::Consumer::new(&broadcast_consumer, config, name, options)
 		.await
 		.unwrap();
