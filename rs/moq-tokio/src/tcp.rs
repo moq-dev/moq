@@ -364,6 +364,7 @@ mod tests {
 	#[tokio::test]
 	async fn tls_carries_qmux_and_refuses_an_untrusted_certificate() {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let dir = tempfile::tempdir().unwrap();
 		for pinned in [false, true] {
 			let mut listen = crate::listen::Config::default();
 			listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -371,7 +372,19 @@ mod tests {
 			listen.tls.generate = vec!["localhost".into()];
 			match pinned {
 				true => listen.tls.peers = Some(crate::tls::Peers::new()),
-				false => listen.tls.root = vec!["/nonexistent/client-ca.pem".into()],
+				// A client CA is refused without a QUIC listener to verify it.
+				false => {
+					if !cfg!(feature = "noq") {
+						continue;
+					}
+					let ca = dir.path().join("client-ca.pem");
+					let cert = rcgen::generate_simple_self_signed(["client-ca".to_string()])
+						.unwrap()
+						.cert;
+					std::fs::write(&ca, cert.pem()).unwrap();
+					listen.bind = Some("127.0.0.1:0".parse().unwrap());
+					listen.tls.root = vec![ca];
+				}
 			}
 			tls_round_trip(listen).await;
 		}
