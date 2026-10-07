@@ -3,7 +3,7 @@
 use std::fmt;
 use std::sync::Arc;
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rand::RngExt;
 
@@ -120,6 +120,9 @@ impl State {
 ///
 /// Samples are stamped on the catalog's [`clock`](moq_mux::catalog::Producer::clock), the one
 /// its consumers are told about, so a concurrent video capture on the same catalog stays aligned.
+/// A microphone buffer is placed at the capture instant of its first sample. That device clock
+/// is mapped onto the catalog clock once per open, the same way a camera's private timeline is.
+/// A host that reports no usable capture time, and system audio, are stamped when the buffer is read.
 ///
 /// `#[non_exhaustive]`: construct via [`Capture::default`] and set
 /// fields, so new publication settings can be added without changing
@@ -973,6 +976,35 @@ impl Converter {
 	}
 }
 
+/// One open's placement of capture instants on the broadcast clock.
+///
+/// Sampled once, broadcast clock first, then the monotonic instant, matching
+/// video. A stamp can land early by the gap between those two reads and does
+/// not move later when the buffer is read.
+struct CaptureMap {
+	broadcast_us: u64,
+	instant: Instant,
+}
+
+impl CaptureMap {
+	fn sample(broadcast_us: u64) -> Self {
+		Self {
+			broadcast_us,
+			instant: Instant::now(),
+		}
+	}
+
+	fn stamp(&self, captured: Instant) -> u64 {
+		let micros = |duration: Duration| u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
+		match captured.checked_duration_since(self.instant) {
+			Some(after) => self.broadcast_us.saturating_add(micros(after)),
+			None => self
+				.broadcast_us
+				.saturating_sub(micros(self.instant.duration_since(captured))),
+		}
+	}
+}
+
 struct Supervisor {
 	next: Duration,
 	jitter: fn(Duration) -> Duration,
@@ -1086,6 +1118,9 @@ impl Supervisor {
 					Ok(mut input) => {
 						output.live(source.device(&input));
 						let mut converter = Converter::new(source.layout(&input), output_layout)?;
+						// Once per open. A later read must not move a buffer off the
+						// instant its first sample was captured.
+						let map = CaptureMap::sample(output.now());
 						loop {
 							// Demand wins over a simultaneous buffer or error, so an unused
 							// track releases the device without starting a retry sequence.
@@ -1115,11 +1150,14 @@ impl Supervisor {
 										self.reset();
 										tracing::info!("audio capture recovered");
 									}
-									// A bounded-queue drop is a real hole in the timeline.
+									// A bounded-queue drop is a real hole in the timeline. The next
+									// buffer re-anchors at its own capture instant.
 									if samples.gap {
 										output.reset_epoch();
 									}
-									if let Some((samples, timestamp_us)) = converter.process(samples, output.now())? {
+									let captured = samples.captured.unwrap_or_else(Instant::now);
+									let timestamp_us = map.stamp(captured);
+									if let Some((samples, timestamp_us)) = converter.process(samples, timestamp_us)? {
 										output.write(samples, timestamp_us)?;
 									}
 								}
@@ -2077,17 +2115,29 @@ mod tests {
 			.unwrap();
 	}
 
+	#[test]
+	fn capture_map_keeps_a_buffer_lead_on_the_broadcast_clock() {
+		let map = CaptureMap::sample(5_000_000);
+		assert_eq!(map.stamp(map.instant), 5_000_000);
+		assert_eq!(map.stamp(map.instant - Duration::from_millis(20)), 4_980_000);
+		assert_eq!(map.stamp(map.instant + Duration::from_millis(20)), 5_020_000);
+	}
+
 	/// Clock fixtures: the real publication driver, fed by synthetic microphones against a
 	/// pinned broadcast clock, graded on the timestamps a subscriber reads back.
 	///
-	/// Capture stamps a buffer when the driver reads it, so each expectation is bracketed by
-	/// the broadcast clock just before the fixture delivers the buffer and just after the
-	/// published packet is read back.
+	/// A buffer carries the instant its first sample was captured. The driver maps that
+	/// timeline onto the broadcast clock once per open, so the published timestamp is that
+	/// instant even when the read happens later.
 	mod clock {
 		use std::time::{Duration, Instant, SystemTime};
 
 		use super::*;
 
+		/// How early a mapped timestamp may land: the gap between the two clock samples at open.
+		const SAMPLING: Duration = Duration::from_millis(250);
+		/// Rounding slack on the late side: each clock reading truncates to a microsecond.
+		const ROUNDING: u64 = 2;
 		/// Retain every fixture group, so a slow runner never evicts one before it is read.
 		const RETAIN: Duration = Duration::from_secs(600);
 
@@ -2152,26 +2202,39 @@ mod tests {
 				u64::try_from(instant.duration_since(self.epoch).as_micros()).unwrap()
 			}
 
-			/// Deliver one Opus frame of stereo audio and read back the first packet not in
-			/// `seen`, asserting it is stamped while the driver held the buffer.
-			async fn deliver(&self, samples: &Samples, track: &mut Track, seen: &[u64]) -> u64 {
-				let pushed = self.at(Instant::now());
+			/// Deliver one Opus frame captured at `captured` and read back the first packet not in `seen`.
+			async fn deliver_at(&self, samples: &Samples, track: &mut Track, seen: &[u64], captured: Instant) -> u64 {
 				samples
-					.try_push(Ok(capture::Samples::plain(vec![0.1; 1920], false)))
+					.try_push(Ok(capture::Samples::at(vec![0.1; 1920], false, captured)))
 					.unwrap();
-				let published = loop {
+				let published = self.read_new(track, seen).await;
+				self.assert_captured(published, captured);
+				published
+			}
+
+			/// Deliver one Opus frame captured as it is handed to the driver.
+			async fn deliver(&self, samples: &Samples, track: &mut Track, seen: &[u64]) -> u64 {
+				self.deliver_at(samples, track, seen, Instant::now()).await
+			}
+
+			async fn read_new(&self, track: &mut Track, seen: &[u64]) -> u64 {
+				loop {
 					let packet = track.read().await.unwrap().expect("a published packet");
 					let timestamp = u64::try_from(packet.timestamp.as_micros()).unwrap();
 					if !seen.contains(&timestamp) {
-						break timestamp;
+						return timestamp;
 					}
-				};
-				let read = self.at(Instant::now());
+				}
+			}
+
+			/// `published` is `captured` on the broadcast clock, early only by the open-time sample gap.
+			fn assert_captured(&self, published: u64, captured: Instant) {
+				let exact = self.at(captured);
+				let early = u64::try_from(SAMPLING.as_micros()).unwrap();
 				assert!(
-					(pushed..=read).contains(&published),
-					"published {published}us, delivered within {pushed}..={read}us on the broadcast clock"
+					published + early >= exact && published <= exact + ROUNDING,
+					"published {published}us, captured at {exact}us on the broadcast clock"
 				);
-				published
 			}
 
 			/// Stop the publication, as dropping its last control does.
@@ -2182,16 +2245,78 @@ mod tests {
 			}
 		}
 
-		/// A microphone whose first buffer arrives long after the broadcast began stamps it
-		/// then, rather than restarting the broadcast at zero.
+		/// A microphone whose first buffer is captured long after the broadcast began stamps
+		/// that instant, rather than restarting the broadcast at zero.
 		#[tokio::test]
-		async fn a_late_first_buffer_publishes_its_arrival() {
+		async fn a_late_first_buffer_publishes_its_capture() {
 			let (samples, input) = stream(None);
 			let mut fixture = Fixture::start(Duration::from_secs(5), SystemTime::now(), [Open::Stream(input)]);
 			let mut track = fixture.subscribe().await;
 
 			let published = fixture.deliver(&samples, &mut track, &[]).await;
 			assert!(published >= 5_000_000, "{published}us restarted the broadcast at zero");
+			fixture.finish().await;
+		}
+
+		/// The read can be well after the first sample. The published timestamp stays at the
+		/// capture instant, which is what lines the buffer up with video acquired then.
+		#[tokio::test]
+		async fn a_queued_buffer_publishes_its_capture_instant() {
+			let (samples, input) = stream(None);
+			let mut fixture = Fixture::start(Duration::from_secs(5), SystemTime::now(), [Open::Stream(input)]);
+			let mut track = fixture.subscribe().await;
+
+			let captured = Instant::now() - Duration::from_millis(40);
+			let published = fixture.deliver_at(&samples, &mut track, &[], captured).await;
+			let read = fixture.at(Instant::now());
+			assert!(
+				read > published + 20_000,
+				"published {published}us, which is the read at {read}us"
+			);
+			fixture.finish().await;
+		}
+
+		/// No capture instant means the host reported nothing usable, so the buffer is stamped
+		/// when it is read.
+		#[tokio::test]
+		async fn a_buffer_without_a_capture_instant_publishes_its_read() {
+			let (samples, input) = stream(None);
+			let mut fixture = Fixture::start(Duration::from_secs(1), SystemTime::now(), [Open::Stream(input)]);
+			let mut track = fixture.subscribe().await;
+
+			let pushed = fixture.at(Instant::now());
+			samples
+				.try_push(Ok(capture::Samples::plain(vec![0.1; 1920], false)))
+				.unwrap();
+			let published = fixture.read_new(&mut track, &[]).await;
+			let read = fixture.at(Instant::now());
+			assert!(
+				(pushed..=read).contains(&published),
+				"published {published}us, read within {pushed}..={read}us"
+			);
+			fixture.finish().await;
+		}
+
+		/// A dropped buffer re-anchors on the next capture instant, so the hole is the real
+		/// gap between those instants rather than one frame of sample count.
+		#[tokio::test]
+		async fn a_gap_reanchors_to_the_next_capture_instant() {
+			let (samples, input) = stream(None);
+			let mut fixture = Fixture::start(Duration::from_secs(1), SystemTime::now(), [Open::Stream(input)]);
+			let mut track = fixture.subscribe().await;
+
+			let second_at = Instant::now() - Duration::from_millis(20);
+			let first_at = second_at - Duration::from_millis(80);
+			let first = fixture.deliver_at(&samples, &mut track, &[], first_at).await;
+			samples
+				.try_push(Ok(capture::Samples::at(vec![0.1; 1920], true, second_at)))
+				.unwrap();
+			let second = fixture.read_new(&mut track, &[first]).await;
+			fixture.assert_captured(second, second_at);
+			assert!(
+				second >= first + 50_000,
+				"{second}us compressed the gap after {first}us into a frame step"
+			);
 			fixture.finish().await;
 		}
 
@@ -2213,7 +2338,9 @@ mod tests {
 				.try_push(Err(capture::Failure::retry(Error::Capture("unplugged".into()))))
 				.unwrap();
 			wait_for(&mut fixture.publication, Status::Failed).await;
-			// The supervisor backs off before reopening, so the restart lands at least that late.
+			// The supervisor backs off before reopening. Wait until that open is live so the
+			// next buffer's capture instant, not the read, is what has to clear the backoff.
+			wait_for(&mut fixture.publication, Status::Live).await;
 			let after = fixture.deliver(&second, &mut track, &[before]).await;
 			let backoff = u64::try_from(RETRY_MIN.as_micros()).unwrap();
 			assert!(

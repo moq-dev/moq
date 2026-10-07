@@ -91,6 +91,7 @@ that way there.
 Highlights:
 
 - **`encode::Control`** advertises the track and opens the microphone only while someone listens. Stop, swap devices, and restart without changing the track subscribers know; read a level meter for the UI.
+- **Capture time.** A microphone buffer is stamped at the instant its first sample was captured, mapped onto the catalog clock once per open, so it lines up with video acquired then. A host with no usable capture time stamps the buffer when it is read.
 - **A/V sync signal.** `Sink::buffered()` reports how far ahead the speaker is, which is what a video clock steers by.
 - **Activity per packet**, read off the Opus stream, so a call UI shows who is talking without a second voice detector.
 - **One Linux build dependency**: ALSA headers, and only when `capture` or `playback` is enabled.

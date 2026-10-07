@@ -18,7 +18,7 @@
 //! in that same callback so the buffers leaving here are already clean.
 
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::traits::Producer;
@@ -108,6 +108,10 @@ pub(crate) struct Samples {
 	/// behind wall clock.
 	pub gap: bool,
 
+	/// When the first sample was captured, or `None` when the host did not report
+	/// a usable capture time and the buffer should be stamped at arrival.
+	pub captured: Option<Instant>,
+
 	/// Returns the allocation to the microphone callback after every downstream
 	/// borrower is done with it. `None` for non-cpal capture sources.
 	recycle: Option<ringbuf::HeapProd<Vec<f32>>>,
@@ -120,15 +124,28 @@ impl Samples {
 		Self {
 			data,
 			gap,
+			captured: None,
+			recycle: None,
+		}
+	}
+
+	/// Samples captured at `captured`, for a fixture that separates that instant from the read.
+	#[cfg(test)]
+	pub(crate) fn at(data: Vec<f32>, gap: bool, captured: Instant) -> Self {
+		Self {
+			data,
+			gap,
+			captured: Some(captured),
 			recycle: None,
 		}
 	}
 
 	/// Samples borrowed from the microphone callback's fixed buffer pool.
-	fn pooled(data: Vec<f32>, gap: bool, recycle: ringbuf::HeapProd<Vec<f32>>) -> Self {
+	fn pooled(data: Vec<f32>, gap: bool, captured: Option<Instant>, recycle: ringbuf::HeapProd<Vec<f32>>) -> Self {
 		Self {
 			data,
 			gap,
+			captured,
 			recycle: Some(recycle),
 		}
 	}
@@ -395,6 +412,7 @@ impl Microphone {
 
 		let (mut writer, rx) = buffer::channel(
 			channels as usize,
+			sample_rate,
 			#[cfg(feature = "aec")]
 			aec,
 		);
@@ -409,7 +427,7 @@ impl Microphone {
 				let errors = error_tx.clone();
 				device.build_input_stream(
 					stream_config,
-					move |data: &[f32], _: &_| writer.write_f32(data),
+					move |data: &[f32], info| writer.write_f32(data, capture_instant(info)),
 					move |err| stream_err(&errors, err),
 					None,
 				)
@@ -418,7 +436,7 @@ impl Microphone {
 				let errors = error_tx.clone();
 				device.build_input_stream(
 					stream_config,
-					move |data: &[i16], _: &_| writer.write_i16(data),
+					move |data: &[i16], info| writer.write_i16(data, capture_instant(info)),
 					move |err| stream_err(&errors, err),
 					None,
 				)
@@ -427,7 +445,7 @@ impl Microphone {
 				let errors = error_tx.clone();
 				device.build_input_stream(
 					stream_config,
-					move |data: &[u16], _: &_| writer.write_u16(data),
+					move |data: &[u16], info| writer.write_u16(data, capture_instant(info)),
 					move |err| stream_err(&errors, err),
 					None,
 				)
@@ -709,6 +727,28 @@ fn describe(device: &cpal::Device, id: &cpal::DeviceId, default: bool) -> Result
 	})
 }
 
+/// Longer than a live device buffer. A host that leaves `capture` at zero against
+/// an absolute callback clock reports a delay of the whole uptime, which is not
+/// a sample time this process can place.
+const MAX_CAPTURE_DELAY: Duration = Duration::from_secs(1);
+
+/// The instant the callback's first sample was captured.
+///
+/// `None` when the host timestamp cannot name one: the capture mark is after the
+/// callback, or the delay is not a device buffer. The caller then stamps arrival.
+fn capture_instant(info: &cpal::InputCallbackInfo) -> Option<Instant> {
+	placed_capture(info.timestamp().callback, info.timestamp().capture, Instant::now())
+}
+
+/// Place `capture` on the monotonic clock that read `now` at `callback`.
+fn placed_capture(callback: cpal::StreamInstant, capture: cpal::StreamInstant, now: Instant) -> Option<Instant> {
+	let delay = callback.checked_duration_since(capture)?;
+	if delay > MAX_CAPTURE_DELAY {
+		return None;
+	}
+	now.checked_sub(delay)
+}
+
 fn stream_err(errors: &kio::Producer<Option<cpal::Error>>, err: cpal::Error) {
 	if survivable(err.kind()) {
 		tracing::warn!(error = %err, "microphone stream error does not require a restart");
@@ -755,6 +795,7 @@ mod tests {
 	fn reader() -> (buffer::Writer, kio::Producer<Option<cpal::Error>>, MicrophoneReader) {
 		let (tx, rx) = buffer::channel(
 			1,
+			48_000,
 			#[cfg(feature = "aec")]
 			None,
 		);
@@ -789,7 +830,7 @@ mod tests {
 		drop(old_reader);
 
 		fail(&old_errors, "stale");
-		new_samples.write_f32(&[1.0]);
+		new_samples.write_f32(&[1.0], None);
 		let samples = new_reader.read().await.unwrap().unwrap();
 		assert_eq!(samples.data, vec![1.0]);
 	}
@@ -819,6 +860,39 @@ mod tests {
 	fn permission_errors_are_not_retryable() {
 		let failure = Failure::cpal(cpal::Error::new(cpal::ErrorKind::PermissionDenied));
 		assert!(!failure.is_retryable());
+	}
+
+	#[test]
+	fn a_capture_timestamp_is_the_first_sample_not_the_callback() {
+		let now = Instant::now();
+		let callback = cpal::StreamInstant::from_millis(1_000);
+		let capture = cpal::StreamInstant::from_millis(980);
+		let placed = placed_capture(callback, capture, now).unwrap();
+		let delay = now.saturating_duration_since(placed);
+		assert_eq!(delay, Duration::from_millis(20));
+	}
+
+	#[test]
+	fn a_capture_mark_after_the_callback_is_unusable() {
+		let now = Instant::now();
+		let callback = cpal::StreamInstant::from_millis(10);
+		let capture = cpal::StreamInstant::from_millis(11);
+		assert!(placed_capture(callback, capture, now).is_none());
+	}
+
+	#[test]
+	fn an_uptime_sized_capture_delay_is_unusable() {
+		let now = Instant::now();
+		let callback = cpal::StreamInstant::from_millis(60_000);
+		assert!(placed_capture(callback, cpal::StreamInstant::ZERO, now).is_none());
+	}
+
+	#[test]
+	fn a_zero_capture_delay_stamps_the_callback() {
+		let now = Instant::now();
+		let callback = cpal::StreamInstant::from_millis(5);
+		let placed = placed_capture(callback, callback, now).unwrap();
+		assert_eq!(placed, now);
 	}
 
 	const MIC: &str = "Test Mic";
