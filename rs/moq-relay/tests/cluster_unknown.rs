@@ -137,7 +137,7 @@ async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 	// This verifies route propagation rather than real-time backlog skipping. Give
 	// every hop enough tolerance for the next 100ms group to arrive while the
 	// selected group's frame is still crossing the redundant mesh.
-	let subscription = moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1));
+	let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1));
 	let mut track = tokio::time::timeout(
 		TIMEOUT,
 		broadcast.track("video").expect("track handle").subscribe(subscription),
@@ -365,13 +365,10 @@ async fn unknown_publisher_does_not_flap_across_a_lite04_cluster_triangle() {
 	assert_unknown_publisher_stays_announced(Some(version), true).await;
 }
 
-/// The next route and whether it is active, skipping the caught-up marker.
+/// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-	loop {
-		return match announced.next().await? {
-			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
-			moq_net::announce::Event::End(route) => Some((route, false)),
-			moq_net::announce::Event::Live => continue,
-		};
+	match announced.next().await? {
+		moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }
