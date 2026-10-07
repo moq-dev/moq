@@ -28,10 +28,11 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 
 Interop: Fastly's moq-relay-interop report (run of 2026-09-23, build
 7ee2b02) was triaged against `main` on 2026-10-07. Its SETUP, UNSUBSCRIBE
-and error-code items were already fixed. End of Track ends cleanly, but a
-relay moves the marker's Location (Fastly's rerun on 2026-10-07). The six
-fixes below LOCATION_FILTER come from it and go ahead of Seattle. The cold-relay Largest
-and the deviations it flagged are in m1.
+and error-code items were already fixed. Fastly's reruns that day found
+that a relay moves End of Track's Location and refuses imquic's End of
+Group status. The seven fixes below LOCATION_FILTER come from them and go
+ahead of Seattle. The cold-relay Largest and the deviations it flagged are
+in m1.
 
 Identity: the [broadcast epoch](/quest/m0/broadcast-epoch/README.md) line
 gates the next release (decided 2026-10-03:
@@ -53,8 +54,9 @@ a published `@moq/watch` break.
 - [moq-transport parameters per draft](/quest/m0/ietf-params-per-draft.md) - every control message accepts exactly the parameters its draft allows, so moqx's draft-16 SUBSCRIBE_NAMESPACE with FORWARD stops failing
 - [NAMESPACE on the stream](/quest/m0/ietf-namespace-stream.md) - every draft-16+ SUBSCRIBE_NAMESPACE stream carries NAMESPACE for each match, whatever the peer's SETUP options
 - [Dialed split horizon](/quest/m0/dial-split-horizon.md) - a session moq-net dials gets a per-connection hop, so routes never echo back to the peer they came from
-- [No empty d14 prefix](/quest/m0/ietf-d14-root-prefix.md) - draft-14 never sends SUBSCRIBE_NAMESPACE with an empty prefix
+- [No empty d14 prefix](/quest/m0/ietf-d14-root-prefix.md) - draft-14 never sends SUBSCRIBE_NAMESPACE with an empty prefix, and the docs say to scope a d14 link to moxygen
 - [End of Track Location](/quest/m0/ietf-end-of-track-location.md) - a relay forwards END_OF_TRACK at its upstream's Location, on the last group's stream, instead of re-sending it at the next group's object 0
+- [End of Group status](/quest/m0/ietf-end-of-group-status.md) - an End of Group status on a stream whose header already marks the group's end is accepted, so imquic's last object per group arrives
 - [Subgroup at object 0](/quest/m0/ietf-first-object-zero.md) - a draft-18 subgroup with FIRST_OBJECT clear that starts at object 0 is read whole
 - [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
 - [Prefix route fronts](/quest/m0/prefix-route-fronts.md) - a prefix route cannot be made to mint one front per requested path
