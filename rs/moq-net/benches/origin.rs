@@ -12,14 +12,17 @@
 //! An equal-cost pool is swept the same way, over its members and the paths it
 //! already serves.
 //!
+//! A route swap on one front is swept over its tracks and the copies each track
+//! still holds from earlier routes.
+//!
 //! Run with `cargo bench -p moq-net --bench origin`.
 
 use std::task::Poll;
 use std::time::Duration;
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Hop, Hops, Pattern, Patterns, Timestamp, announce, broadcast, kio, origin};
+use moq_net::{Epoch, Hop, Hops, Pattern, Patterns, Timestamp, announce, broadcast, kio, origin, track};
 
 /// `(publishers, subscribers)` shapes for the fan-out benchmarks.
 const SHAPES: [(usize, usize); 3] = [(100, 10), (1_000, 100), (1_000, 1_000)];
@@ -684,6 +687,136 @@ fn bench_parked(c: &mut Criterion) {
 	group.finish();
 }
 
+/// `(tracks, copies)` for [`bench_copy_walk`]: tracks one front is serving, and
+/// route copies each of those tracks still holds when the route swaps.
+const COPY_WALK: [(usize, usize); 6] = [(1, 1), (1, 32), (32, 1), (8, 32), (32, 8), (64, 16)];
+
+const COPY_PATH: &str = "room/live";
+
+/// How long a splice may take before the bench treats it as stuck.
+const COPY_WAIT: Duration = Duration::from_secs(5);
+
+/// One generation at [`COPY_PATH`], held so its copies stay subscribed.
+struct Generation {
+	_broadcast: broadcast::Producer,
+	tracks: Vec<track::Producer>,
+}
+
+/// A front serving [`COPY_PATH`], with `copies` route copies on each of its tracks.
+struct CopyWalk {
+	producer: origin::Producer,
+	epoch: Epoch,
+	tracks: usize,
+	_subscribers: Vec<track::Subscriber>,
+	generations: Vec<Generation>,
+}
+
+/// Publish one local generation and leave a finished group on every track, so a
+/// reader that does look has something to resume.
+fn publish_generation(producer: &origin::Producer, epoch: &Epoch, tracks: usize) -> Generation {
+	let broadcast = producer.create_broadcast(COPY_PATH).unwrap();
+	let mut held = Vec::with_capacity(tracks);
+	for i in 0..tracks {
+		let track = broadcast.create_track(format!("{i}"), None).unwrap();
+		let mut written = track.append_group().unwrap();
+		written.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
+		written.finish().unwrap();
+		held.push(track);
+	}
+	broadcast
+		.announce(origin::Route::default().with_epoch(epoch.clone()))
+		.unwrap();
+	Generation {
+		_broadcast: broadcast,
+		tracks: held,
+	}
+}
+
+async fn wait_spliced(tracks: &[track::Producer]) {
+	for track in tracks {
+		tokio::time::timeout(COPY_WAIT, track.demand().used())
+			.await
+			.expect("route swap did not splice")
+			.expect("replacement track closed");
+	}
+}
+
+/// Build a front with `copies` already spliced onto each track.
+///
+/// Subscribers are never polled. A poll drops a replaced copy once its groups
+/// are delivered, and this measures the walk over the copies a swap still has.
+/// The same is why every generation is kept: dropping one ends its copy.
+async fn copy_walk(tracks: usize, copies: usize) -> CopyWalk {
+	assert!(copies >= 1, "a front holds at least the serving copy");
+	let (producer, driver) = origin::Producer::new(origin::Config::default());
+	tokio::spawn(moq_net::time::run(driver));
+	let epoch = Epoch::mint();
+	let first = publish_generation(&producer, &epoch, tracks);
+	let resolved = tokio::time::timeout(COPY_WAIT, producer.consume().request_broadcast(COPY_PATH))
+		.await
+		.expect("front did not resolve")
+		.expect("front refused");
+	let mut subscribers = Vec::with_capacity(tracks);
+	for i in 0..tracks {
+		let track = resolved.track(&format!("{i}")).unwrap();
+		let subscriber = tokio::time::timeout(COPY_WAIT, track.subscribe(None))
+			.await
+			.expect("track did not splice")
+			.expect("subscribe failed");
+		subscribers.push(subscriber);
+	}
+	let mut generations = Vec::with_capacity(copies);
+	generations.push(first);
+	for _ in 1..copies {
+		let generation = publish_generation(&producer, &epoch, tracks);
+		wait_spliced(&generation.tracks).await;
+		generations.push(generation);
+	}
+	CopyWalk {
+		producer,
+		epoch,
+		tracks,
+		_subscribers: subscribers,
+		generations,
+	}
+}
+
+impl CopyWalk {
+	/// Swap in one newer route at the same epoch.
+	///
+	/// A local track's info is already known, so the front subscribes, walks
+	/// every track, and each reader walks its copies in one driver turn. Demand
+	/// flips at the subscribe, and this wait returns only after that turn.
+	async fn swap(&mut self) {
+		let generation = publish_generation(&self.producer, &self.epoch, self.tracks);
+		wait_spliced(&generation.tracks).await;
+		self.generations.push(generation);
+	}
+}
+
+/// A route swap on one front. Setup holds `copies` per track and is not timed;
+/// the swap is. Warm-up sizes the iteration count from wall time, which
+/// includes that setup, so a large front does not multiply it by a fast routine.
+fn bench_copy_walk(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/copy_walk");
+	group.sample_size(10);
+	for (tracks, copies) in COPY_WALK {
+		group.throughput(Throughput::Elements((tracks * copies) as u64));
+		group.bench_function(BenchmarkId::from_parameter(format!("{tracks}t_{copies}c")), |b| {
+			let runtime = tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap();
+			b.iter_batched_ref(
+				|| runtime.block_on(copy_walk(tracks, copies)),
+				|rig| runtime.block_on(rig.swap()),
+				BatchSize::PerIteration,
+			);
+		});
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_announce,
@@ -698,6 +831,7 @@ criterion_group!(
 	bench_pool_churn,
 	bench_handoff,
 	bench_relay,
-	bench_parked
+	bench_parked,
+	bench_copy_walk
 );
 criterion_main!(benches);
