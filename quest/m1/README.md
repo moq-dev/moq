@@ -39,6 +39,7 @@ blocks. The quests that gated m0 lines moved under them.
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - any node routes toward a broadcast's origin over CDN and P2P links alike, with per-origin routes and path-less announces
 - [One route cost](/quest/m1/route-cost.md) - Warm and Cold collapse to one static route cost
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
+- [moq-transport deviations](/quest/m1/ietf-deviations-doc.md) - `standard.md` lists the deviations Fastly's interop report flagged (one publisher per path, dropped object properties, OK before an old lite source answers) with their reasons
 - [Transcode fetch demand](/quest/m1/transcode-fetch-demand.md) - the transcode fetch handler drops a request once nobody wants the group
 - [Flat questlines](/quest/m1/quest-flat-lines.md) - moq pins the current quest CLI, lands its questline branches on main, and retires them
 - [moq-bot may push workflow changes](/quest/m1/bot-workflows-permission.md) - condition: the maintainer grants moq-bot's GitHub App the `workflows` permission, so back-merges carrying workflow changes go through
@@ -52,6 +53,7 @@ blocks. The quests that gated m0 lines moved under them.
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
 - [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - one dynamic producer per track name in both languages, with the sequence namespace surviving a replacement
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges in either order and replaces FETCH; relays fill misses by range, including over moq-transport
+- [Cold relay Largest](/quest/m1/ietf-cold-largest.md) - a relay with nothing cached reports its upstream's Largest, so a d14-19 joining FETCH through it gets the current group's head
 - [Live media time](/quest/m1/subscribe-live-time.md) - re-scoped against `set_live`: a lite-07 SUBSCRIBE_OK carries the publisher's current media time only if a reader still needs it
 - [Cross-relay bursts re-run](/quest/m1/cross-relay-bursts.md) - condition: the #4349 reporter re-runs their A/B/C comparison against current cdn.moq.pro
 - [Flapping peer drill](/quest/m1/cross-relay-flap-drill.md) - the cluster burst drill survives a flapping peer link, the regression for 0.15.6 route-flap drops
