@@ -3,7 +3,7 @@
 ## Goal
 
 A moq-lite subscriber with an explicit floor receives every group at or above
-that floor that its `max_age` still considers fresh, whatever order the
+that floor that its `max_delay` still considers fresh, whatever order the
 publisher created them in, as moq-transport already does. Today the lite
 publisher silently drops a group created below the first group it served: the
 publisher's `create_group` and `write_frame` succeed, and the subscriber sees a
@@ -21,7 +21,7 @@ explicit floor.
 
 Decided:
 
-- An explicit floor delivers late lower groups within `max_age`, matching
+- An explicit floor delivers late lower groups within `max_delay`, matching
   moq-transport, draft-ietf-moq-transport ("subscriptions without a filter pass
   all Objects"), and moq-mux's floor handling (#3258).
 - `start: None` joins where the publisher starts: the first served group

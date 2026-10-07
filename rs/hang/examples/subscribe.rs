@@ -84,7 +84,7 @@ async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()
 		.subscribe(
 			moq_net::track::Subscription::default()
 				.with_priority(1)
-				.with_max_age(latency),
+				.with_max_delay(latency),
 		)
 		.await?;
 	let mut ordered =
