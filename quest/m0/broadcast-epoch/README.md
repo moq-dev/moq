@@ -54,12 +54,12 @@ Decided:
   instead of resuming them (accepted 2026-10-06 over negotiating the field on
   lite-06). A release that needs seamless failover promotes lite-07 first.
 
-Open:
-
-- Older versions and moq-transport lose cross-route resume, since their routes
-  have no epoch. The IETF joining-FETCH resume and the lite-05/06 resume
-  points are unreachable for them now; delete them or keep them for a future
-  moq-transport epoch extension.
+Decided 2026-10-06: older versions and moq-transport lose cross-route resume,
+since their routes have no epoch, but their mid-group start handling stays.
+The IETF joining FETCH is the normal live join for every IETF subscription, and
+the IETF resume point and lite-05/06 `widen_frame_bounds` still serve any
+mid-group start: a public `Subscription::with_start` or a downstream Frame
+Start a relay forwards upstream.
 
 This README owns an end-to-end relay test: republish a name while the old
 publisher's session stays open. A lite-07 viewer and a lite-06 or IETF viewer

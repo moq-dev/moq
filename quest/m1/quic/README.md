@@ -25,9 +25,8 @@ Older quests say "the fork" or "noq"; read that as `moq-quic`. Their steps to
 publish a fork release, pin it, or offer a change upstream are superseded:
 a change lands in-tree with its consumer, and upstreaming is optional.
 
-The seven BBR correctness fixes shipped in moq-noq 1.3.1 (#4206) and move to
-`moq-quic` with the [BBR3 port](/quest/m1/quic/fork/bbr3.md). The remaining
-BBR quests here and [BBR ACK cleanup](/quest/m1/bbr-ack-cleanup.md) all edit
+The seven BBR correctness fixes shipped in moq-noq 1.3.1 (#4206) are in
+`moq-quic`'s BBR3. The remaining BBR quests here and [BBR ACK cleanup](/quest/m1/bbr-ack-cleanup.md) all edit
 `bbr3/mod.rs`, so one owner should work there at a time. Controller-level
 regressions extend the shared test `Sim` in `bbr3/mod.rs` with only what each
 needs, rather than adding another simulation loop; a fix at the transport

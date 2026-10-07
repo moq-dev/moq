@@ -37,7 +37,7 @@ kind.
   for every viewer on each interval.
 - **Keyed by rendition ID** (2026-09-29). Both snapshots key by the
   catalog's rendition keys, which [catalog rendition
-  IDs](/quest/m1/catalog-track-alias.md) make IDs unique across video and
+  IDs](/quest/m1/catalog-track-id.md) make IDs unique across video and
   audio within a catalog, refusing a cross-kind duplicate (2026-10-06 audit).
   Nothing repeats the catalog's `video`/`audio` nesting; the kind
   comes from the catalog entry. A viewer reports a rendition that references
@@ -109,7 +109,7 @@ connection view and the dashboard flow.
 
 ## Required
 
-- [Catalog rendition IDs](/quest/m1/catalog-track-alias.md) - rendition keys
+- [Catalog rendition IDs](/quest/m1/catalog-track-id.md) - rendition keys
   become IDs unique across kinds, the key both snapshots use
 - [Schema](/quest/m1/stats/schema.md) - hang defines the `stats` and
   `echo` catalog sections, their snapshot types, and the draft text
