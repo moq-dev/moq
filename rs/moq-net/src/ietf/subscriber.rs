@@ -7165,7 +7165,7 @@ mod stitch_tests {
 		}
 
 		/// A reader over the next scripted stream, standing in for one the peer opened.
-		async fn stream(&self) -> Reader<<ScriptedSession as web_transport_trait::poll::Session>::RecvStream, Version> {
+		async fn stream(&self) -> Reader<<ScriptedSession as crate::transport::poll::Session>::RecvStream, Version> {
 			let mut session = self.session.clone();
 			let (_, recv) = session.open_bi().await.unwrap();
 			Reader::new(recv, VERSION)
@@ -8062,7 +8062,7 @@ mod stitch_tests {
 	/// A subscriber reading one scripted group fetch stream, already past its header.
 	struct GroupFetchRun {
 		subscriber: Subscriber<ScriptedSession>,
-		stream: Reader<<ScriptedSession as web_transport_trait::poll::Session>::RecvStream, Version>,
+		stream: Reader<<ScriptedSession as crate::transport::poll::Session>::RecvStream, Version>,
 		track: track::Producer,
 		_tasks: (Tasks, TaskSet),
 	}
