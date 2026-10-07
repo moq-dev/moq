@@ -1599,6 +1599,7 @@ impl Producer {
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
 			path: full,
+			epoch: None,
 		};
 		let source = info.produce().with_stats(ingress.clone());
 		let entry = announcing.announce(
@@ -1636,6 +1637,7 @@ impl Producer {
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
 			path: full,
+			epoch: None,
 		}
 		.produce()
 		.with_stats(ingress)
@@ -3816,7 +3818,7 @@ impl Requesting {
 				})) {
 					// Another instance than the one named: never hand it out.
 					Ok((Ok(_), epoch)) if self.epoch.is_some() && epoch != self.epoch => Err(Error::Unroutable),
-					Ok((result, _)) => result.map(|broadcast| self.hand_out(broadcast)),
+					Ok((result, epoch)) => result.map(|broadcast| self.hand_out(broadcast).with_epoch(epoch)),
 					// Every handler dropped without resolving: nobody could route it.
 					Err(_closed) => Err(Error::Unroutable),
 				},
@@ -4402,6 +4404,7 @@ impl Consumer {
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
 			path: absolute.clone(),
+			epoch: None,
 		});
 		let request = kio::Producer::<PendingBroadcast>::default();
 		let consumer = request.consume();
@@ -5772,6 +5775,24 @@ mod tests {
 		let upstream = broadcast::Info::new().produce();
 		request.accept(&upstream);
 		pending.await.expect("resolves through the cheaper route");
+	}
+
+	/// A resolved broadcast names the epoch of the route it came through, and none
+	/// when that route has none.
+	#[moq_net_sim::test]
+	async fn a_resolved_broadcast_carries_its_route_epoch() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+
+		let _epoched = producer
+			.publish("room/alice", Route::default().with_epoch(epoch()))
+			.unwrap();
+		let _plain = producer.publish("room/bob", Route::default()).unwrap();
+
+		let alice = consumer.request_broadcast("room/alice").await.unwrap();
+		assert_eq!(alice.info().epoch, Some(epoch()));
+		let bob = consumer.request_broadcast("room/bob").await.unwrap();
+		assert_eq!(bob.info().epoch, None);
 	}
 
 	/// A cheaper route that appears after a front was minted takes the front over: it

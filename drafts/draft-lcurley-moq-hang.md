@@ -876,17 +876,19 @@ Each track has its own objects so a reader can fetch one rendition without downl
 }
 ~~~
 
-All three fields are required integers.
+`version`, `priority`, and `timescale` are required integers.
 `version` identifies this recording format and MUST be 2.
 `priority` and `timescale` have the meanings of moq-lite `TRACK_INFO` {{moql}}: `priority` is in the range 0 through 255, and `timescale` is in the range 1 through 9007199254740991, so JSON consumers can preserve it exactly.
 A reader MUST preserve integer values exactly.
+An optional `epoch` string is the Epoch of the route the source was read through {{moql}}, in its canonical UUID text, and is omitted when that route had none.
 `Publisher Max Age` is not stored; a reader supplies its own serving policy.
 
 The track object MUST be durable before its first segment object is stored, including for a timeline track.
 It is immutable for the lifetime of the recording.
 A reader MUST refuse an unknown version or invalid track properties.
-On an existing `.info`, a writer MUST validate and compare the parsed `version`, `priority`, and `timescale` values; JSON whitespace and member order do not affect equality.
+On an existing `.info`, a writer MUST validate and compare the parsed `version`, `priority`, `timescale`, and `epoch` values, an absent `epoch` matching only an absent one; JSON whitespace and member order do not affect equality.
 Different property values MUST fail enrollment, and the existing object MUST NOT be rewritten.
+A different `epoch` means the source restarted, so the writer starts a new recording rather than continuing this one.
 
 ## Segment Objects {#recording-segments}
 A segment object holds one record's frames:
@@ -1068,6 +1070,7 @@ This document has no IANA actions.
 - One cutting rule for every track: a record ends at the first group boundary past a minimum (2 seconds RECOMMENDED, zero for sparse data such as a catalog) and splits a group between frames at a maximum (10 seconds RECOMMENDED), so a group that never closes is indexed as it grows and `durationMax` bounds every record.
 - Recording format version 2: each track stores record N at `segments/N`, beside its timeline's `segments/N`, with a `Frame Start` field in the segment object. Tracks commit and expire independently, and a DVR keeps each track's newest record.
 - Described deriving HLS and DASH at the edge from a reference rendition's records.
+- Added an optional `epoch` to `.info`: the source route's Epoch, compared on resume so a restarted source fails enrollment.
 
 ## moq-hang-03
 {:numbered="false"}

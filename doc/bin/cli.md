@@ -359,9 +359,10 @@ sparse data, so each of their groups is stored as soon as it finishes, and a
 group that never closes is stored in pieces as it grows. It refuses a rendition served
 from another broadcast, and one that returns after the catalog dropped it. The
 stage ends once the broadcast does. A store URL that already holds a
-recording is continued: each track resumes after its newest stored span. A source that
-restarts at or below that span, or whose timestamps jump backward, fails the recording;
-start a new prefix. `--retention 1h` keeps only the last hour (a DVR),
+recording is continued: each track resumes after its newest stored span. A source
+announced under another [epoch](/concept/moq-lite#publisher-epochs) than the recording
+restarted, so the export fails; start a new prefix. A source without an epoch fails the
+same way once its timestamps jump back before the stored span. `--retention 1h` keeps only the last hour (a DVR),
 deleting expired objects, and timeline objects no longer needed to recover it,
 `--retention-grace` (default 30s) after the timeline stops needing them. Every
 track keeps at least its newest span, so a catalog that never changes outlives

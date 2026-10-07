@@ -61,10 +61,11 @@ timeline's `segments/<n>`. A failed object PUT drops that record. A DVR prunes
 each timeline's oldest objects no checkpoint recovery reads. On a prefix
 that already holds a recording, it replays each retained timeline through
 `timeline::Producer::resume`, deletes objects past each track's committed tail,
-resumes after the newest record's end (partway through a split group). A
-source whose first group is at or below that end, or whose first timestamp
-precedes it, fails the recording instead of overlapping media time; the caller
-starts a new prefix. A DVR deletes unreferenced objects and unneeded timeline
+resumes after the newest record's end (partway through a split group). Each
+track's `.info` keeps the source route's epoch, and a resume under another
+epoch fails to enroll (`Error::EpochMismatch`); the caller starts a new
+prefix. A new group whose first timestamp precedes the recorded end fails the
+recording instead of overlapping media time. A DVR deletes unreferenced objects and unneeded timeline
 objects one grace period after recovery.
 `moq_archive::Reader` (`rs/moq-archive/src/reader/mod.rs`) replays every timeline
 onto a supplied `broadcast::Producer` and serves FETCH through `track::Dynamic`

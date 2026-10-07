@@ -30,6 +30,18 @@ pub enum Error {
 	#[error("timescale {existing} does not match {intended}")]
 	TimescaleMismatch { existing: u64, intended: u64 },
 
+	/// An existing `.info` was recorded from another publisher instance: the source
+	/// restarted, so the caller starts a new prefix.
+	#[error(
+		"source epoch {} does not match the recorded {}",
+		epoch_text(intended),
+		epoch_text(existing)
+	)]
+	EpochMismatch {
+		existing: Option<moq_net::Epoch>,
+		intended: Option<moq_net::Epoch>,
+	},
+
 	/// The object has no groups.
 	#[error("empty object")]
 	Empty,
@@ -118,3 +130,10 @@ impl From<serde_json::Error> for Error {
 
 /// A [`Result`](std::result::Result) using this crate's [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
+
+fn epoch_text(epoch: &Option<moq_net::Epoch>) -> String {
+	match epoch {
+		Some(epoch) => epoch.to_string(),
+		None => "none".to_string(),
+	}
+}
