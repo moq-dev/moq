@@ -75,8 +75,8 @@ A moq-lite datagram is a single-frame group, so on moq-transport it travels
 as an `OBJECT_DATAGRAM` at object 0 whose Group ID is the sequence, and a relay
 forwards it without renumbering. A datagram carrying any other Object ID, or a
 status other than Normal, is dropped. Datagrams are never fetchable: a fetch
-object flagged as a datagram fails that fetch as a group that does not exist,
-and leaves the session up. JavaScript does not yet carry datagrams
+object flagged as a datagram fails only that fetch, as `NotFetchable`, and a
+relay answers its own downstream FETCH as for a group that does not exist. JavaScript does not yet carry datagrams
 on moq-transport.
 
 A client may present one credential in its `SETUP` with the `AUTHORIZATION

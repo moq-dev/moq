@@ -3796,11 +3796,11 @@ async fn decode_fetch_object<R: crate::transport::poll::RecvStream>(
 			properties,
 		}) => {
 			// Draft-16 on lets a fetch carry an Object published as a datagram, but a
-			// datagram group is live-only: never cached, so never filled from a fetch. It is
-			// refused as a group that does not exist, which fails only this fetch.
+			// datagram group is live-only: never cached, so never filled from a fetch. Refusing
+			// it fails only this fetch.
 			if subgroup == ietf::FetchSubgroup::Datagram {
 				tracing::debug!(?group, ?object, "a datagram group is not fetchable");
-				return Err(Error::NotFound);
+				return Err(Error::NotFetchable);
 			}
 			let inherits = group.is_none()
 				|| object.is_none()
@@ -8102,8 +8102,8 @@ mod stitch_tests {
 		buf
 	}
 
-	/// A datagram group is never fetchable, so a group fetch answered with one fails as a
-	/// group that does not exist, and nothing is cached.
+	/// A datagram group is never fetchable, so a group fetch answered with one fails as
+	/// not fetchable, and nothing is cached.
 	#[moq_net_sim::test]
 	async fn a_group_fetch_refuses_a_datagram_object() {
 		let mut run = GroupFetchRun::new(VERSION, datagram_object(SEQUENCE)).await;
@@ -8117,9 +8117,9 @@ mod stitch_tests {
 		});
 
 		let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
-		assert!(matches!(res, Err(Error::NotFound)), "{res:?}");
+		assert!(matches!(res, Err(Error::NotFetchable)), "{res:?}");
 		assert!(
-			matches!(consumer.read_frame().await, Err(Error::NotFound)),
+			matches!(consumer.read_frame().await, Err(Error::NotFetchable)),
 			"the group fails without the payload"
 		);
 	}
@@ -8147,7 +8147,7 @@ mod stitch_tests {
 
 		assert!(matches!(
 			h.subscriber.clone().recv_fill(&mut fill).await,
-			Err(Error::NotFound)
+			Err(Error::NotFetchable)
 		));
 		h.subscriber
 			.clone()

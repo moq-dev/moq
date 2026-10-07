@@ -322,6 +322,10 @@ pub enum Error {
 	#[error("not found")]
 	NotFound,
 
+	/// A FETCH reached a datagram, which is live-only and never served from a cache.
+	#[error("not fetchable")]
+	NotFetchable,
+
 	/// A joining FETCH named a request that is not an active subscription.
 	#[error("invalid joining request ID")]
 	InvalidJoiningRequestId,
@@ -566,7 +570,9 @@ impl From<&Error> for StreamError {
 			Error::Old => Self::Old,
 			Error::Evicted => Self::Evicted,
 			Error::Lagged => Self::TooFarBehind,
-			Error::NotFound => Self::NotFound,
+			// moq-lite has no code of its own for this: a lite publisher never caches a
+			// datagram, so it answers the same FETCH with NOT_FOUND, and a relay says the same.
+			Error::NotFound | Error::NotFetchable => Self::NotFound,
 			Error::Unroutable => Self::Unroutable,
 			Error::WrongSize => Self::WrongSize,
 			Error::FrameTooLarge => Self::FrameTooLarge,
@@ -725,6 +731,9 @@ mod tests {
 		// 0x1: downstream read a routine CANCELLED for an upstream session teardown.
 		let relayed = StreamError::from(&Error::from(StreamError::from_code(0x3)));
 		assert_eq!(relayed.to_code(), 0x3);
+
+		// A datagram reached by a FETCH goes out as the NOT_FOUND a lite publisher would send.
+		assert_eq!(StreamError::from(&Error::NotFetchable), StreamError::NotFound);
 
 		// Registered stream codes survive the hop unchanged.
 		for code in [

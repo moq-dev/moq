@@ -1047,6 +1047,7 @@ fn is_cache_miss(err: &moq_net::Error) -> bool {
 	matches!(
 		err,
 		moq_net::Error::NotFound
+			| moq_net::Error::NotFetchable
 			| moq_net::Error::Old
 			| moq_net::Error::Evicted
 			| moq_net::Error::Stream(
@@ -1100,7 +1101,12 @@ mod tests {
 
 	#[test]
 	fn a_cache_miss_that_crossed_a_session_is_still_a_cache_miss() {
-		for local in [moq_net::Error::NotFound, moq_net::Error::Old, moq_net::Error::Evicted] {
+		for local in [
+			moq_net::Error::NotFound,
+			moq_net::Error::NotFetchable,
+			moq_net::Error::Old,
+			moq_net::Error::Evicted,
+		] {
 			assert!(is_cache_miss(&local), "{local:?} locally");
 			let lite = over_lite(&local);
 			assert!(is_cache_miss(&lite), "{local:?} over lite ({lite:?})");

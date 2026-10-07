@@ -289,7 +289,12 @@ pub(crate) mod request {
 				return TIMEOUT;
 			}
 			Error::Unsupported | Error::Version | Error::Session(SessionError::Version) => return NOT_SUPPORTED,
-			Error::NotFound | Error::Stream(StreamError::NotFound) => does_not_exist(kind, version),
+			// A datagram is never cached, so a FETCH reaching one is answered like a group that
+			// is not there, which is also what our own publisher sends. NOT_SUPPORTED would
+			// claim the peer does not implement FETCH at all.
+			Error::NotFound | Error::NotFetchable | Error::Stream(StreamError::NotFound) => {
+				does_not_exist(kind, version)
+			}
 			Error::InvalidRange => invalid_range(kind, version),
 			Error::InvalidJoiningRequestId => invalid_joining_request_id(kind, version),
 			// A path with no route is one we will not carry. A subscriber that asked for it
@@ -361,12 +366,13 @@ pub(crate) mod request {
 		/// Every error a rejection distinguishes, plus one it does not, so the checks below cover
 		/// the whole registry rather than the variants someone remembered. A new arm in
 		/// [`to_code`] belongs here.
-		const EVERY_ERROR: [Error; 11] = [
+		const EVERY_ERROR: [Error; 12] = [
 			Error::Duplicate,
 			Error::Unauthorized,
 			Error::Timeout,
 			Error::Unsupported,
 			Error::NotFound,
+			Error::NotFetchable,
 			Error::InvalidRange,
 			Error::InvalidJoiningRequestId,
 			Error::Unroutable,
@@ -395,6 +401,11 @@ pub(crate) mod request {
 
 			// A broadcast with no route is, to the peer that asked for it, not here either.
 			assert_eq!(to_code(&Error::Unroutable, Kind::Subscribe, Version::Draft20), 0x10);
+
+			// So is a datagram group: never cached, so a FETCH reaching one finds nothing, and
+			// NOT_SUPPORTED would say the endpoint has no FETCH at all.
+			assert_eq!(to_code(&Error::NotFetchable, Kind::Fetch, Version::Draft14), 0x4);
+			assert_eq!(to_code(&Error::NotFetchable, Kind::Fetch, Version::Draft20), 0x10);
 		}
 
 		/// Draft-14 gives 0x4 to UNINTERESTED on the requests that offer content and to

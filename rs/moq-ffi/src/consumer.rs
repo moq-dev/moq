@@ -302,7 +302,7 @@ impl MoqBroadcastConsumer {
 
 fn map_fetch_error(err: moq_net::Error) -> MoqError {
 	match err {
-		moq_net::Error::NotFound => MoqError::NotFound,
+		moq_net::Error::NotFound | moq_net::Error::NotFetchable => MoqError::NotFound,
 		moq_net::Error::Unsupported | moq_net::Error::Version => MoqError::Unsupported,
 		err => err.into(),
 	}

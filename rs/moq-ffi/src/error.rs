@@ -280,7 +280,7 @@ impl From<moq_net::Error> for MoqError {
 	fn from(err: moq_net::Error) -> Self {
 		match err {
 			moq_net::Error::Transport(message) => Self::Transport(message),
-			moq_net::Error::NotFound => Self::NotFound,
+			moq_net::Error::NotFound | moq_net::Error::NotFetchable => Self::NotFound,
 			moq_net::Error::Closed | moq_net::Error::GoingAway | moq_net::Error::SessionClosed => Self::Closed,
 			moq_net::Error::Cancel => Self::Cancelled,
 			moq_net::Error::Unauthorized => Self::Unauthorized,
