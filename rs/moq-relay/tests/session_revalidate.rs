@@ -108,7 +108,7 @@ fn build_auth(url: url::Url) -> moq_relay::auth::Auth {
 	let mut config = auth::Config::default();
 	config.url = Some(url);
 	config
-		.init("test-relay", &moq_tokio::tls::Connect::default())
+		.init("test-relay", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init")
 }
 
