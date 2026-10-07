@@ -40,7 +40,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [One route cost](/quest/m1/route-cost.md) - Warm and Cold collapse to one static route cost
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
 - [Transcode fetch demand](/quest/m1/transcode-fetch-demand.md) - the transcode fetch handler drops a request once nobody wants the group
-- [JS broadcast demand](/quest/m1/js-broadcast-demand.md) - `@moq/net`'s `Broadcast.Demand` matches Rust in three edge cases
 - [Flat questlines](/quest/m1/quest-flat-lines.md) - moq pins the current quest CLI, lands its questline branches on main, and retires them
 - [moq-bot may push workflow changes](/quest/m1/bot-workflows-permission.md) - condition: the maintainer grants moq-bot's GitHub App the `workflows` permission, so back-merges carrying workflow changes go through
 - [main merges through a squash queue](/quest/m1/merge-queue-settings.md) - condition: once `release` carries the new back-merge script, the maintainer enables the squash merge queue and moq-bot's pull_request bypass together
