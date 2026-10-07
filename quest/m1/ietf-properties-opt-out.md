@@ -9,7 +9,7 @@ against a publisher that refuses TRACK_STATUS.
 
 ## Plan
 
-Decided (2026-10-01), carried over from fetch-only demand (#PR_NUMBER): send
+Decided (2026-10-01), carried over from fetch-only demand (#4974): send
 TRACK_STATUS in parallel with every SUBSCRIBE or FETCH, set
 INCLUDE_PROPERTIES to 0 on those from draft 20, and ignore the duplicate
 before draft 20. The publisher half already landed there: our publisher
