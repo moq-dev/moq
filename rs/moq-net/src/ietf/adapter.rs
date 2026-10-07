@@ -155,7 +155,7 @@ impl VirtualRecvStream {
 	}
 }
 
-impl web_transport_trait::poll::RecvStream for VirtualRecvStream {
+impl crate::transport::poll::RecvStream for VirtualRecvStream {
 	type Error = crate::Error;
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
@@ -358,7 +358,7 @@ impl VirtualSendStream {
 	}
 }
 
-impl web_transport_trait::poll::SendStream for VirtualSendStream {
+impl crate::transport::poll::SendStream for VirtualSendStream {
 	type Error = crate::Error;
 
 	fn poll_write(&mut self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
@@ -400,7 +400,7 @@ pub enum AdapterSend<S: crate::transport::poll::Session> {
 	Virtual(VirtualSendStream),
 }
 
-impl<S: crate::transport::poll::Session> web_transport_trait::poll::SendStream for AdapterSend<S> {
+impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for AdapterSend<S> {
 	type Error = crate::Error;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
@@ -451,7 +451,7 @@ pub enum AdapterRecv<S: crate::transport::poll::Session> {
 	Virtual(VirtualRecvStream),
 }
 
-impl<S: crate::transport::poll::Session> web_transport_trait::poll::RecvStream for AdapterRecv<S> {
+impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for AdapterRecv<S> {
 	type Error = crate::Error;
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
@@ -1066,7 +1066,7 @@ fn lookup_namespace_request_id(
 	Ok(namespaces.get(direction, &ns))
 }
 
-impl<S: crate::transport::poll::Session> web_transport_trait::poll::Session for ControlStreamAdapter<S> {
+impl<S: crate::transport::poll::Session> crate::transport::poll::Session for ControlStreamAdapter<S> {
 	type SendStream = AdapterSend<S>;
 	type RecvStream = AdapterRecv<S>;
 	type Error = crate::Error;
@@ -1144,7 +1144,7 @@ impl<S: crate::transport::poll::Session> web_transport_trait::poll::Session for 
 		self.inner.poll_closed(cx).map(|_| crate::Error::Closed)
 	}
 
-	fn stats(&self) -> impl web_transport_trait::Stats {
+	fn stats(&self) -> impl crate::transport::Stats {
 		self.inner.stats()
 	}
 }
