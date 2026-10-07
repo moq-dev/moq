@@ -56,6 +56,10 @@ Each `sink_%u` request pad is one track. Pad properties: `track` names it
 `estimated-send-rate`, `estimated-recv-rate`, `connection-stats`, and
 `sessions`. The sink reconnects for as long as the pipeline runs and only
 reports `failed` on an answer redialing can't change, such as a rejected token.
+Each run from `READY` publishes under a fresh
+[publisher epoch](/concept/moq-lite#publisher-epochs), so viewers switch to a
+restarted pipeline at once instead of stalling on the old one; reconnects
+within a run keep it.
 
 `connection-stats` is null while disconnected. While connected it is a
 `GstStructure` named `moq-connection-stats` containing the transport metrics

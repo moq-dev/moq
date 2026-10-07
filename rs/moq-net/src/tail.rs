@@ -17,16 +17,16 @@ use crate::time::{Deadline, Instant};
 /// How long a subscriber waits for a group stream it cannot account for once the
 /// publisher has ended the subscription.
 ///
-/// Bounds the wait on IETF, and on moq-lite when the subscription has no max age to bound
+/// Bounds the wait on IETF, and on moq-lite when the subscription has no max delay to bound
 /// it with. Matches `@moq/net`, so a reader cannot tell which side it is talking to.
 pub(crate) const GRACE: Duration = Duration::from_secs(1);
 
-/// The grace for a subscription with `max_age`: how long the subscriber was willing to
+/// The grace for a subscription with `max_delay`: how long the subscriber was willing to
 /// wait for a late group anyway, or [`GRACE`] without one.
-pub(crate) fn grace(max_age: Duration) -> Duration {
-	match max_age.is_zero() {
+pub(crate) fn grace(max_delay: Duration) -> Duration {
+	match max_delay.is_zero() {
 		true => GRACE,
-		false => max_age,
+		false => max_delay,
 	}
 }
 
@@ -72,7 +72,7 @@ impl Tail {
 		}
 	}
 
-	/// Change the grace, for a subscription whose max age changed.
+	/// Change the grace, for a subscription whose max delay changed.
 	pub fn set_grace(&mut self, grace: Duration) {
 		self.grace = grace;
 	}
