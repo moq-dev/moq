@@ -597,34 +597,8 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 ///
 /// Asked unconditionally: a peer with nothing to advertise answers with an empty set,
 /// which costs one stream.
-///
-/// Each comes with the guard its stream holds until the peer's initial set has
-/// landed. Taken when the session starts, before it is handed out, so no announce
-/// cursor misses the replay.
-pub(super) fn subscribe_prefixes(origin: &origin::Producer) -> Vec<(PathOwned, crate::model::Replaying)> {
+pub(super) fn subscribe_prefixes(origin: &origin::Producer) -> Vec<PathOwned> {
 	crate::model::interest_prefixes(&origin.allowed())
-		.into_iter()
-		.map(|prefix| (prefix.clone(), origin.replaying(prefix)))
-		.collect()
-}
-
-/// How a SUBSCRIBE_NAMESPACE stream's initial set ends.
-enum Landing {
-	/// MoQ Active Count: after this many more NAMESPACE messages.
-	Count(u64),
-	/// Once the stream goes quiet, which is all the base protocol offers.
-	Quiet(crate::model::Quiet),
-}
-
-impl Landing {
-	/// Ready once the initial set has landed.
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		match self {
-			Self::Count(0) => Poll::Ready(()),
-			Self::Count(_) => Poll::Pending,
-			Self::Quiet(quiet) => quiet.poll(waiter),
-		}
-	}
 }
 
 /// Resolve the subscription a data stream belongs to.
@@ -865,7 +839,6 @@ where
 		&mut self,
 		mut stream: Stream<T, Version>,
 		prefix: PathOwned,
-		replaying: crate::model::Replaying,
 	) -> Result<(), Error> {
 		// A peer that sent GOAWAY told us to stop opening requests on this session,
 		// announce-interest included (draft-19 sect 10.4).
@@ -936,16 +909,13 @@ where
 
 		tracing::debug!(%prefix, ?count, "subscribe_namespace ok");
 
-		// MoQ Active Count says how many NAMESPACE messages come before we are caught up.
-		// Without it nothing on this wire marks the end, so the set has landed once the
-		// stream goes quiet. A count the negotiation did not promise, or a missing one it
-		// did, is the peer breaking the extension.
-		let landing = match (declared.active_count, count) {
-			(true, Some(count)) => Landing::Count(count),
-			(false, None) => Landing::Quiet(crate::model::Quiet::new(&self.runtime)),
-			_ => return Err(Error::ProtocolViolation),
-		};
-		let mut landing = Some((replaying, landing));
+		// MoQ Active Count says how many NAMESPACE messages make up the initial set;
+		// nothing here needs that boundary, so it is only checked. A count the
+		// negotiation did not promise, or a missing one it did, is the peer breaking
+		// the extension.
+		if declared.active_count != count.is_some() {
+			return Err(Error::ProtocolViolation);
+		}
 
 		// The extension changes the NAMESPACE encoding, so we can't parse one until
 		// the peer's SETUP says whether it negotiated.
@@ -961,9 +931,7 @@ where
 		//
 		// This is what moq-lite already does, where the equivalent map is a local whose
 		// guards drop.
-		let res = self
-			.run_namespace_entries(&mut stream, &prefix, &peer, &mut live, &mut landing)
-			.await;
+		let res = self.run_namespace_entries(&mut stream, &prefix, &peer, &mut live).await;
 		for path in live {
 			let _ = self.stop_announce(path);
 		}
@@ -981,31 +949,12 @@ where
 		prefix: &PathOwned,
 		peer: &cluster::Peer,
 		live: &mut std::collections::HashSet<PathOwned>,
-		// The replay guard and how it lands, until the initial set has.
-		landing: &mut Option<(crate::model::Replaying, Landing)>,
 	) -> Result<(), Error> {
 		loop {
-			let next = {
-				let mut decode = std::pin::pin!(stream.reader.varint_maybe());
-				kio::wait(|waiter| {
-					// Land before decoding past the boundary, so no live update enters the
-					// origin ahead of the marker.
-					if let Some((_, how)) = landing
-						&& how.poll(waiter).is_ready()
-					{
-						*landing = None;
-					}
-					waiter.poll_future(decode.as_mut())
-				})
-				.await
-			};
-			let type_id = match next? {
+			let type_id = match stream.reader.varint_maybe().await? {
 				Some(id) => id,
 				None => break, // Stream closed
 			};
-			if let Some((_, Landing::Quiet(quiet))) = landing {
-				quiet.heard();
-			}
 			let body: ietf::Body = stream.reader.decode().await?;
 			let mut data = body.decoder(self.version);
 
@@ -1017,12 +966,6 @@ where
 					let msg = ietf::Namespace::decode_body(&mut data, self.version, peer.negotiated())?;
 					if !data.is_empty() {
 						return Err(Error::WrongSize);
-					}
-					// Counted whether or not we keep it: the publisher cannot know we will
-					// drop a reflection. The guard only drops at the top of the loop, after
-					// this one is in the origin.
-					if let Some((_, Landing::Count(remaining))) = landing {
-						*remaining = remaining.saturating_sub(1);
 					}
 					let path = prefix.join(&msg.suffix);
 					let Some(advert) = self.route(msg.cluster.as_ref(), peer) else {
@@ -4329,14 +4272,14 @@ mod tests {
 
 		let mut namespaces = subscribe_prefixes(&subscriber.origin);
 		assert_eq!(
-			namespaces.iter().map(|(prefix, _)| prefix.clone()).collect::<Vec<_>>(),
+			namespaces,
 			vec![crate::Path::new("cam").to_owned()],
 			"one SUBSCRIBE_NAMESPACE per permitted prefix, relative to the root",
 		);
-		let (prefix, replaying) = namespaces.pop().unwrap();
+		let prefix = namespaces.pop().unwrap();
 
 		let stream = Stream::open(&mut session.clone(), Version::Draft16).await.unwrap();
-		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, replaying));
+		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix));
 		// Parks awaiting the peer's response; the request is already on the wire.
 		assert!(futures::poll!(run.as_mut()).is_pending());
 
@@ -4407,10 +4350,10 @@ mod tests {
 			Default::default(),
 		);
 
-		let (prefix, replaying) = subscribe_prefixes(&subscriber.origin).pop().expect("one prefix");
+		let prefix = subscribe_prefixes(&subscriber.origin).pop().expect("one prefix");
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		// Parks on the read after the scripted NAMESPACE is consumed.
-		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, replaying));
+		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix));
 		for _ in 0..100 {
 			// The result is deliberately ignored: a regressed mount lands out of scope
 			// and errors here, which the assertions below name far better than a poll
@@ -4477,7 +4420,7 @@ mod tests {
 
 			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 			let res = subscriber
-				.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), subscriber.origin.replaying(""))
+				.run_subscribe_namespace(stream, crate::Path::new("").to_owned())
 				.await;
 			assert!(
 				matches!(res, Err(Error::ProtocolViolation)),
@@ -5639,7 +5582,7 @@ mod tests {
 
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		subscriber
-			.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), subscriber.origin.replaying(""))
+			.run_subscribe_namespace(stream, crate::Path::new("").to_owned())
 			.await
 			.expect("a clean FIN is not an error");
 		settle().await;
@@ -5715,9 +5658,7 @@ mod tests {
 		);
 
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
-		let replaying = subscriber.origin.replaying("");
-		let mut run =
-			std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), replaying));
+		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("").to_owned()));
 		for _ in 0..100 {
 			assert!(
 				futures::poll!(run.as_mut()).is_pending(),
@@ -7238,7 +7179,7 @@ mod stitch_tests {
 		}
 
 		/// A reader over the next scripted stream, standing in for one the peer opened.
-		async fn stream(&self) -> Reader<<ScriptedSession as web_transport_trait::poll::Session>::RecvStream, Version> {
+		async fn stream(&self) -> Reader<<ScriptedSession as crate::transport::poll::Session>::RecvStream, Version> {
 			let mut session = self.session.clone();
 			let (_, recv) = session.open_bi().await.unwrap();
 			Reader::new(recv, VERSION)
@@ -7929,11 +7870,11 @@ mod stitch_tests {
 			],
 		)
 		.with_joining(JoiningFetch::Absolute { group_id: START }, FETCH, largest);
-		// Keep every fetched group: the default max-age of zero would drop each one as
+		// Keep every fetched group: the default max delay of zero would drop each one as
 		// its successor arrives, and the stitch would hang waiting on a group already skipped.
 		let mut consumer = h
 			.track
-			.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(60)));
+			.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(60)));
 
 		let mut fill = h.stream().await;
 		let mut tail = h.stream().await;
@@ -8135,7 +8076,7 @@ mod stitch_tests {
 	/// A subscriber reading one scripted group fetch stream, already past its header.
 	struct GroupFetchRun {
 		subscriber: Subscriber<ScriptedSession>,
-		stream: Reader<<ScriptedSession as web_transport_trait::poll::Session>::RecvStream, Version>,
+		stream: Reader<<ScriptedSession as crate::transport::poll::Session>::RecvStream, Version>,
 		track: track::Producer,
 		_tasks: (Tasks, TaskSet),
 	}

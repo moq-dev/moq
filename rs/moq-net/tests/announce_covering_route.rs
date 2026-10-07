@@ -24,8 +24,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 	producer
 }
 
-/// Drain every event the cursor has pending, as `kind prefix` lines, skipping the
-/// live marker.
+/// Drain every event the cursor has pending, as `kind prefix` lines.
 fn drain(announced: &mut moq_net::announce::Consumer) -> Vec<String> {
 	use moq_net::announce::Event;
 	let mut seen = Vec::new();
@@ -34,7 +33,6 @@ fn drain(announced: &mut moq_net::announce::Consumer) -> Vec<String> {
 			Event::Start(announce) => ("Start", announce),
 			Event::Update(announce) => ("Update", announce),
 			Event::End(announce) => ("End", announce),
-			Event::Live => continue,
 		};
 		seen.push(format!("{kind} {}", announce.prefix));
 	}

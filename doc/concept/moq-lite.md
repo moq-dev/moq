@@ -253,14 +253,10 @@ and TypeScript `Announce.Event`, whose `kind` is `"start"`, `"update"`, or
 `"end"` alongside the same `Announce.Announce` fields. An update is a
 reprice in place. Captures are present when the announced prefix pins every
 wildcard in the most-specific matching scope member. The Rust consumer is a
-`Stream` and the TypeScript one an async iterable. Both, and every binding over
-moq-ffi or moq-c, also yield one `Live` marker (TypeScript `{ kind: "live" }`)
-once the routes live at subscribe time have all been delivered, including those
-a peer session was still sending: moq-lite-05+ counts them in `ANNOUNCE_OK`,
-moq-lite-01/02 send them in `ANNOUNCE_INIT`, Rust IETF draft-16+ sessions count
-them in `REQUEST_OK` when both sides speak
-[active-count](/draft/moq-active-count), and anything else waits for the
-stream to go quiet.
+`Stream` and the TypeScript one an async iterable. Neither marks when the
+routes live at subscribe time have all arrived: an origin merges many sessions
+that connect and reconnect independently, so drive loading and offline UI from
+the connection status instead.
 
 Announcements are hints; requests are the authority. When a subscriber asks
 for a covered path the advertiser will not serve, the advertiser refuses that
@@ -319,15 +315,15 @@ Each subscription carries the knobs that decide behavior under congestion:
 | --- | --- |
 | **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. |
 | **Order** | Which group to send first when several are pending. Newest first for live, oldest first for catch-up. |
-| **Max age** | How old a non-latest group may get before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
+| **Max delay** | How far a non-latest group may fall behind the live edge before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
 
-Max age is measured on the media timeline, not the wall clock, so a backlog
-delivered as a burst is still old while a congestion stall never expires
+Max delay is measured on the media timeline, not the wall clock, so a backlog
+delivered as a burst is still late while a congestion stall never expires
 anything on its own. Both ends apply it: the publisher skips a group rather
 than sending it, and the subscriber skips it again as it reads, since the
 publisher only ever sees the most tolerant budget across its subscribers.
 
-A route failover is invisible to max age: a group open across the change carries
+A route failover is invisible to max delay: a group open across the change carries
 on from the new route at the frame where the old one stopped, and a group only a
 replaced route that went quiet still holds is given up once it falls a full
 budget behind the new route's live edge. A successor group with no timestamp
@@ -353,7 +349,7 @@ IETF carries this value as MAX\_CACHE\_DURATION, received on every supported dra
 and sent from draft 17 onward. A relay reads it from FETCH\_OK as well as SUBSCRIBE\_OK, so a track it
 only fetches still learns its window. Drafts 14–16 remain receive-only for compatibility
 with older implementations. This is an approximate mapping: IETF measures wall
-time, while max age uses media timestamps and always keeps the newest group.
+time, while the publisher's retention window uses media timestamps and always keeps the newest group.
 EXPIRES describes subscription lifetime and does not set retention.
 
 Lite-07 encodes a finite limit as milliseconds plus one, with zero meaning no limit.
@@ -364,7 +360,7 @@ timer cap schedules periodic age checks and does not shorten that window.
 
 Put together, a conference might use:
 
-| Track | Priority | Order | Max age |
+| Track | Priority | Order | Max delay |
 | --- | --- | --- | --- |
 | audio | 100 | ascending | 500 ms |
 | video | 50 | descending | 2 s |
