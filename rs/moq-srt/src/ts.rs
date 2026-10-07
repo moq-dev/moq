@@ -421,7 +421,7 @@ mod tests {
 			.await
 			.expect("announce timed out")
 			.expect("the broadcast is announced");
-		let broadcast = consumer.request_broadcast(path).await.unwrap();
+		let broadcast = consumer.request_broadcast(path, None).await.unwrap();
 		let mut catalog = moq_mux::catalog::Consumer::<ts::Ext>::new(&broadcast, CatalogFormat::Hang)
 			.await
 			.unwrap();
@@ -493,7 +493,7 @@ mod tests {
 
 		let consumer = origin.consume();
 		consumer.routed("live/cam0").await.unwrap();
-		let broadcast = consumer.request_broadcast("live/cam0").await.unwrap();
+		let broadcast = consumer.request_broadcast("live/cam0", None).await.unwrap();
 		let info = broadcast.track("0.avc3").unwrap().query().await.unwrap();
 		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	}
@@ -543,7 +543,7 @@ mod tests {
 			.await
 			.expect("announce timed out")
 			.expect("the ingest broadcast is announced");
-		let broadcast = consumer.request_broadcast("ingest").await.unwrap();
+		let broadcast = consumer.request_broadcast("ingest", None).await.unwrap();
 
 		publisher.feed(bytes::Bytes::from_static(BBB5S)).unwrap();
 

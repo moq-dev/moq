@@ -1658,7 +1658,7 @@ mod tests {
 					.with_cost(5),
 			)
 			.unwrap();
-		let pending = origin.consume().request_broadcast("live");
+		let pending = origin.consume().request_broadcast("live", None);
 		let first = moq_net::broadcast::Info::new().produce();
 		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
 		let first_track = first.create_track("video", info.clone()).unwrap();

@@ -130,7 +130,7 @@ async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 		.map_err(|_| "routed timed out".to_string())?
 		.ok_or_else(|| "origin closed before the broadcast was announced".to_string())?;
 	let broadcast = consumer
-		.request_broadcast(PATH)
+		.request_broadcast(PATH, None)
 		.await
 		.map_err(|err| format!("broadcast unroutable: {err}"))?;
 

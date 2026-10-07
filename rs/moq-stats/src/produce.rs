@@ -1230,7 +1230,7 @@ mod tests {
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);
-		let consumer = egress.request_broadcast(path).await.expect("resolve");
+		let consumer = egress.request_broadcast(path, None).await.expect("resolve");
 
 		let sub = if subscribe {
 			let mut sub = consumer
@@ -1273,7 +1273,7 @@ mod tests {
 		assert!(active);
 		let broadcast = origin
 			.consume()
-			.request_broadcast(moq_net::Path::new(update.prefix.as_str()))
+			.request_broadcast(moq_net::Path::new(update.prefix.as_str()), None)
 			.await
 			.expect("resolve");
 		(update.prefix.as_str().to_string(), broadcast)
@@ -1416,7 +1416,7 @@ mod tests {
 		};
 		let stats = origin
 			.consume()
-			.request_broadcast(path.as_str())
+			.request_broadcast(path.as_str(), None)
 			.await
 			.expect("resolve");
 		let mut old = subscribe(&stats, "publisher.json").await;
@@ -1440,7 +1440,7 @@ mod tests {
 
 		let stats = origin
 			.consume()
-			.request_broadcast(path.as_str())
+			.request_broadcast(path.as_str(), None)
 			.await
 			.expect("resolve");
 		assert_eq!(read_last_frame(&stats, "publisher.json").await["foo/bar"].bytes, 30);
@@ -1569,7 +1569,7 @@ mod tests {
 			.with_stats(registry.tier(Tier::default()).session("viewer"));
 
 		async fn view(egress: &origin::Consumer, video: &mut track::Producer, size: usize) {
-			let broadcast = egress.request_broadcast("foo/bar").await.expect("resolve");
+			let broadcast = egress.request_broadcast("foo/bar", None).await.expect("resolve");
 			let mut sub = broadcast
 				.track("video")
 				.expect("track")
@@ -1662,8 +1662,8 @@ mod tests {
 			panic!("expected both groups to announce, got {started:?}");
 		};
 		assert_eq!((acme_path.as_str(), feed_path.as_str()), (ACME, FEED));
-		let acme = origin.consume().request_broadcast(ACME).await.expect("resolve");
-		let sessions = origin.consume().request_broadcast(FEED).await.expect("resolve");
+		let acme = origin.consume().request_broadcast(ACME, None).await.expect("resolve");
+		let sessions = origin.consume().request_broadcast(FEED, None).await.expect("resolve");
 		assert_eq!(read_last_frame(&acme, "publisher.json").await["acme/live"].bytes, 100);
 
 		// The viewer leaves: both groups empty but stay announced, reading zero.
@@ -1725,7 +1725,7 @@ mod tests {
 			new_acme > acme_epoch && new_feed > feed_epoch,
 			"a returning group mints a new epoch"
 		);
-		let acme = origin.consume().request_broadcast(ACME).await.expect("resolve");
+		let acme = origin.consume().request_broadcast(ACME, None).await.expect("resolve");
 		assert_eq!(read_last_frame(&acme, "publisher.json").await["acme/live"].bytes, 25);
 		let mut track = subscribe(&acme, "publisher.json").await;
 		let group = track.next_group().await.expect("ok").expect("group");

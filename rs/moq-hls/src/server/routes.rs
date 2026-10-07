@@ -753,7 +753,7 @@ mod tests {
 		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
 		wait_listed(&app, "/live/video/video0/media.m3u8", "seg/656e3d1b.0.m4s").await;
 
-		let remote = tokio::time::timeout(TIMEOUT, pair.sub_origin.consume().request_broadcast("live"))
+		let remote = tokio::time::timeout(TIMEOUT, pair.sub_origin.consume().request_broadcast("live", None))
 			.await
 			.expect("remote resolve timed out")
 			.expect("remote broadcast");
@@ -798,10 +798,13 @@ mod tests {
 		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
 		wait_listed(&app, "/room/live/video/video0/media.m3u8", "seg/656e3d1b.0.m4s").await;
 
-		let remote_media = tokio::time::timeout(TIMEOUT, pair.sub_origin.consume().request_broadcast("room/source"))
-			.await
-			.expect("sibling resolve timed out")
-			.expect("sibling broadcast");
+		let remote_media = tokio::time::timeout(
+			TIMEOUT,
+			pair.sub_origin.consume().request_broadcast("room/source", None),
+		)
+		.await
+		.expect("sibling resolve timed out")
+		.expect("sibling broadcast");
 		drop(media);
 		drop(media_broadcast);
 		tokio::time::timeout(TIMEOUT, remote_media.closed())

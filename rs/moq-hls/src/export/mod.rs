@@ -2416,10 +2416,13 @@ mod tests {
 		accept_sibling(&new_server, &new_media).await;
 		// The rendition skips timeline rows until this bind resolves. Joining the
 		// same front waits for attach, so writes below land after that.
-		tokio::time::timeout(Duration::from_secs(5), origin.consume().request_broadcast("media"))
-			.await
-			.expect("the rebound sibling resolves")
-			.expect("the replacement is routable");
+		tokio::time::timeout(
+			Duration::from_secs(5),
+			origin.consume().request_broadcast("media", None),
+		)
+		.await
+		.expect("the rebound sibling resolves")
+		.expect("the replacement is routable");
 		let recorder = catalog.enroll_test("video0").unwrap();
 		// Model source records lost during the outage: every rendition must carry the
 		// same new timeline sequence, including a recorder that starts after this rebind.
@@ -2623,10 +2626,13 @@ mod tests {
 		let mut new_media = moq_net::broadcast::Info::new().produce();
 		let _ = rendition.snapshot();
 		accept_sibling(&new_server, &new_media).await;
-		tokio::time::timeout(Duration::from_secs(5), origin.consume().request_broadcast("media"))
-			.await
-			.expect("the rebound sibling resolves")
-			.expect("the replacement is routable");
+		tokio::time::timeout(
+			Duration::from_secs(5),
+			origin.consume().request_broadcast("media", None),
+		)
+		.await
+		.expect("the rebound sibling resolves")
+		.expect("the replacement is routable");
 		let recorder = catalog.enroll_test("video0").unwrap();
 		let _new_track = write_routed_media(&mut new_media, NEW, recorder, 6_000_000);
 		let deadline = tokio::time::Instant::now() + Duration::from_secs(5);

@@ -179,7 +179,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	// Auth root for `/smoke` is "smoke"; the broadcast "test" announces underneath.
 	assert_eq!(path.as_str(), "test");
 	let bc = sub_consumer
-		.request_broadcast(&path)
+		.request_broadcast(&path, None)
 		.await
 		.expect("announced broadcast resolves");
 
@@ -296,7 +296,7 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 			continue;
 		}
 		let bc = consumer
-			.request_broadcast(".x/y")
+			.request_broadcast(".x/y", None)
 			.await
 			.expect("hidden broadcast resolves");
 		let mut sub = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
@@ -472,7 +472,7 @@ async fn relay_websocket_root_path_upgrades() {
 	assert!(active, "expected announce, got retraction");
 	assert_eq!(path.as_str(), "test");
 	let bc = sub_consumer
-		.request_broadcast(&path)
+		.request_broadcast(&path, None)
 		.await
 		.expect("announced broadcast resolves");
 
@@ -691,7 +691,7 @@ async fn internal_tcp_round_trip() {
 	assert!(active, "expected announce, got retraction");
 	assert_eq!(path.as_str(), "test");
 	let bc = sub_consumer
-		.request_broadcast(&path)
+		.request_broadcast(&path, None)
 		.await
 		.expect("announced broadcast resolves");
 
@@ -790,7 +790,7 @@ async fn internal_unix_round_trip() {
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
 		.await
 		.expect("request timeout")
 		.expect("announced broadcast resolves");

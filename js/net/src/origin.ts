@@ -179,7 +179,13 @@ export interface RequestSlot {
 	announced: number;
 	answer?: broadcast.Consumer;
 	readonly handles: Set<Once<Error | null>>;
-	readonly route: Signal<broadcast.Consumer | undefined>;
+	readonly route: Signal<Resolution | undefined>;
+}
+
+/** One path resolution and the epoch of the route that can currently serve it. */
+interface Resolution {
+	readonly front?: broadcast.Consumer;
+	readonly epoch?: Epoch.Valid;
 }
 
 /**
@@ -349,6 +355,11 @@ class ServeState {
 		if (this.closed.peek() !== undefined) return;
 		const err = abort ?? unroutable();
 		this.closed.set(err);
+		this.reset(err);
+	}
+
+	/** Release answers and invalidate pending handlers when the publisher instance changes. */
+	reset(err: Error = unroutable()): void {
 		const queued = [...this.pending.values()];
 		this.pending.clear();
 		this.queue.mutate((queue) => {
@@ -357,11 +368,12 @@ class ServeState {
 		for (const request of queued) {
 			finishRequest(request, err);
 		}
-		for (const [path, front] of this.served) {
+		const served = [...this.served];
+		this.served.clear();
+		for (const [path, front] of served) {
 			front.close();
 			this.onChange(path);
 		}
-		this.served.clear();
 		this.rejected.clear();
 		this.demanding.clear();
 		this.settled.update((n) => n + 1);
@@ -468,7 +480,7 @@ class OriginState {
 	// Broadcasts materialized from a served route, keyed by exact path. Shared by every
 	// request for the path so repeats reuse one accept; dropped (and closed) when the
 	// providing route goes away or the last request releases it.
-	materialized = new Map<Path.Valid, { entry: RouteEntry; front: broadcast.Consumer }>();
+	materialized = new Map<Path.Valid, { entry: RouteEntry; front: broadcast.Consumer; epoch?: Epoch.Valid }>();
 
 	// Paths consumers asked for without waiting for an announcement; attached sessions
 	// answer them with blind subscriptions. Never announced: an answered request is assumed
@@ -612,13 +624,13 @@ class OriginState {
 	 * before the old one breaks: the current front keeps serving until the new route
 	 * answers (then swaps) or refuses (then the request ends). A retracted route swaps at once.
 	 */
-	route(path: Path.Valid, slot: Pick<RequestSlot, "answer">): broadcast.Consumer | undefined {
+	route(path: Path.Valid, slot: Pick<RequestSlot, "answer">): Resolution | undefined {
 		const entry = this.bestEntry(path);
 		const local = this.local.peek()?.get(path);
 		if (local && this.localWins(path, entry)) {
 			// Nothing reads a remote front the local broadcast replaced, so close its session subscription.
 			this.releaseMaterialized(path);
-			return local;
+			return { front: local, epoch: this.advertisedLocal.peek()?.get(path)?.epoch };
 		}
 
 		let cached = this.materialized.get(path);
@@ -626,21 +638,23 @@ class OriginState {
 			this.materialized.delete(path);
 			cached = undefined;
 		}
-		if (cached && cached.entry === entry) return cached.front;
+		const epoch = entry?.route.peek().epoch;
+		if (cached && cached.entry === entry && cached.epoch === epoch) return cached;
 		if (!entry?.server) {
 			this.releaseMaterialized(path);
-			return slot.answer;
+			return slot.answer ? { front: slot.answer } : undefined;
 		}
 
 		const served = entry.server.served.get(path);
 		if (served && served.closed.peek() === undefined) {
 			cached?.front.close();
-			this.materialized.set(path, { entry, front: served });
-			return served;
+			const resolution = { entry, front: served, epoch };
+			this.materialized.set(path, resolution);
+			return resolution;
 		}
 
 		entry.server.enqueue(path);
-		return cached?.front;
+		return { front: cached?.epoch === epoch ? cached?.front : undefined, epoch };
 	}
 }
 
@@ -683,6 +697,8 @@ export interface Table {
 export interface RequestOptions {
 	/** Wait for a routed announcement when discovery is supported; otherwise subscribe blindly. */
 	announced?: boolean;
+	/** Refuse a different publisher instance, including an asynchronous answer or a retry. */
+	epoch?: Epoch.Valid;
 }
 
 /**
@@ -1255,6 +1271,7 @@ export class Consumer {
 	 * feeds from more than one connection.
 	 */
 	request(path: Path.Valid, options: RequestOptions = {}): Requesting {
+		const epoch = options.epoch;
 		const relative = path;
 		path = this.#scope.path(path);
 		const requests = this.#state.requests.peek();
@@ -1308,8 +1325,9 @@ export class Consumer {
 		let released = false;
 		let source: broadcast.Consumer | undefined;
 		let handle: broadcast.Consumer | undefined;
-		const own = (front: broadcast.Consumer | undefined): broadcast.Consumer | undefined => {
+		const own = (resolution: Resolution | undefined): broadcast.Consumer | undefined => {
 			if (released) return undefined;
+			const front = epoch === undefined || resolution?.epoch === epoch ? resolution?.front : undefined;
 			if (front !== source) {
 				const previous = handle;
 				source = front;
@@ -1334,7 +1352,10 @@ export class Consumer {
 		// answer.
 		const unroutable = new Derived(
 			[route, this.#state.answerers, closed],
-			(front, answerers, ended) => ended !== undefined || (!front && answerers === 0),
+			(resolution, answerers, ended) =>
+				ended !== undefined ||
+				(epoch !== undefined && resolution?.epoch !== epoch) ||
+				(!resolution?.front && answerers === 0),
 		);
 
 		return makeRequesting(relative, active, unroutable, closed, () => {
@@ -1607,7 +1628,10 @@ export class Dynamic {
 	 */
 	update(route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] | bigint }): void {
 		if (this.#closed) throw new Error("dynamic is closed");
-		this.#entry.route.set(Route.normalize(route));
+		const next = Route.normalize(route);
+		const previous = this.#entry.route.peek().epoch;
+		this.#entry.route.set(next);
+		if (previous !== next.epoch) this.#entry.server?.reset();
 		this.#state.rebuildOriginated();
 		this.#state.refreshPrefix(Path.join(this.#entry.scope.root, this.prefix));
 		this.#state.routes.mutate(() => {});

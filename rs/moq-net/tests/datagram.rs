@@ -48,7 +48,7 @@ async fn connect_datagram_track() -> Fixture {
 
 	let consumer = consumer_origin.consume();
 	consumer.routed("bench").await.unwrap();
-	let remote = consumer.request_broadcast("bench").await.unwrap();
+	let remote = consumer.request_broadcast("bench", None).await.unwrap();
 	let subscriber = remote.track("datagrams").unwrap().subscribe(None).await.unwrap();
 
 	Fixture {
@@ -140,7 +140,7 @@ async fn ietf_delivers_datagrams_on(version: &str) {
 
 	let consumer = consumer_origin.consume();
 	consumer.routed("bench").await.unwrap();
-	let remote = consumer.request_broadcast("bench").await.unwrap();
+	let remote = consumer.request_broadcast("bench", None).await.unwrap();
 	let mut subscriber = remote.track("datagrams").unwrap().subscribe(None).await.unwrap();
 
 	// A group first, so the subscription's alias is bound before any datagram lands.
