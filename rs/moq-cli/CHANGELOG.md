@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2](https://github.com/moq-dev/moq/compare/moq-cli-v0.14.1...moq-cli-v0.14.2) - 2026-10-06
+
+### Other
+
+- updated the following local packages: moq-tokio, moq-relay, moq-rtc
+
 ## [0.14.1](https://github.com/moq-dev/moq/compare/moq-cli-v0.14.0...moq-cli-v0.14.1) - 2026-10-05
 
 ### Other

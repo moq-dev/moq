@@ -237,8 +237,11 @@ mod tests {
 	/// A multiplex refusal names the flag that resolves it; other errors pass through unchanged.
 	#[test]
 	fn a_multiplex_suggests_the_program_flag() {
-		let refused = moq_mux::container::ts::MultipleProgramsError { programs: vec![1, 2] };
-		let err = suggest_program(moq_srt::Error::Mux(anyhow::Error::from(refused).into()));
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut import = moq_mux::container::ts::Import::new(broadcast, catalog.reserve());
+		let refused = import.decode(&crate::publish::tests::two_programs()).unwrap_err();
+		let err = suggest_program(moq_srt::Error::Mux(refused.into()));
 		let err = format!("{err:#}");
 		assert!(err.contains("--program") && err.contains("programs (1, 2)"), "{err}");
 

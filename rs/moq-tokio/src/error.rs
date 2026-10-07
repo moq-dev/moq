@@ -138,8 +138,10 @@ pub enum Error {
 	#[error("Iroh support is not enabled")]
 	IrohDisabled,
 
-	/// A client certificate was configured, but this QUIC backend can't do mTLS.
-	#[error("tls.root (mTLS) is not supported by the selected QUIC backend")]
+	/// A client CA was configured on a stream-only server, which has no QUIC listener to verify it.
+	#[error(
+		"--listen-tls-root (mTLS) needs a QUIC listener (--listen); the TCP and Unix listeners never ask for a client certificate"
+	)]
 	MtlsUnsupported,
 
 	/// A worker group was asked for more members than the connection ID's one-byte

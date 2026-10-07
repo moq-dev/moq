@@ -89,12 +89,13 @@ async fn spawn_server(
 	let server = net.server(moq.server_config())?;
 	let certificates = server.certificates();
 	let cluster = attach_lan(cluster.clone(), moq, &server)?;
-	// The auth server or public grant a `--listen` endpoint admits through. A mesh
-	// listener with neither admits its peers alone.
+	// The auth server or public grant a `--listen` endpoint admits through. A
+	// LAN-mesh listener with neither admits its peers alone; any other config
+	// `init` refuses stops startup.
 	let node = moq.cluster.node.clone().unwrap_or_default();
-	let auth = match moq.auth.validate() {
-		Ok(()) => moq.auth.init(node, &moq.client.tls)?,
-		Err(_) => moq_relay::auth::Auth::refuse(node),
+	let auth = match moq.auth.is_empty() && !moq.server.has_explicit_bind() {
+		true => moq_relay::auth::Auth::refuse(node),
+		false => moq.auth.init(node, &moq.client.tls, moq.client_ca())?,
 	};
 	// Advertise before accepting, so a `/.cluster` dial is verified against a
 	// live credential rather than refused as "LAN discovery is not enabled".
@@ -925,8 +926,9 @@ mod tests {
 	async fn a_stream_bind_failure_prevents_readiness() {
 		let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("occupy a port");
 		let addr = occupied.local_addr().expect("occupied address").to_string();
-		let invocation = Invocation::try_parse_from(["moq", "--listen-tcp-bind", &addr, "import", "ts"])
-			.expect("parse stream-only invocation");
+		let invocation =
+			Invocation::try_parse_from(["moq", "--listen-tcp-bind", &addr, "--auth-public", "**", "import", "ts"])
+				.expect("parse stream-only invocation");
 		let cluster = invocation.moq.cluster().expect("create cluster");
 		let net = Net {
 			quic: invocation.moq.quic.clone(),
@@ -960,11 +962,52 @@ mod tests {
 		assert!(tasks.is_empty(), "nothing should be spawned after a bind failure");
 	}
 
+	/// An explicit listener with no auth source stops startup instead of refusing
+	/// every session, even for a caller that skipped `MoqSide::validate`.
+	#[tokio::test]
+	async fn a_listener_without_auth_stops_startup() {
+		let invocation = Invocation::try_parse_from(["moq", "--listen-tcp-bind", "127.0.0.1:0", "import", "ts"])
+			.expect("parse TCP-only invocation");
+		let cluster = invocation.moq.cluster().expect("create cluster");
+		let net = Net {
+			quic: invocation.moq.quic.clone(),
+			#[cfg(feature = "iroh")]
+			iroh: None,
+		};
+		let mut tasks = JoinSet::new();
+
+		let err = match spawn_server(
+			&mut tasks,
+			&invocation.moq,
+			&cluster,
+			&net,
+			Directions {
+				publish: true,
+				consume: false,
+			},
+		)
+		.await
+		{
+			Ok(_) => panic!("a listener without auth must not start"),
+			Err(err) => err,
+		};
+		assert!(err.to_string().contains("nobody can authenticate"), "{err:#}");
+		assert!(tasks.is_empty(), "nothing should be spawned without auth");
+	}
+
 	/// A raw TCP bind is a complete server side even when no QUIC bind is set.
 	#[tokio::test]
 	async fn tcp_only_moq_side_starts_a_server() {
-		let invocation = Invocation::try_parse_from(["moq", "--listen-tcp-bind", "127.0.0.1:0", "import", "ts"])
-			.expect("parse TCP-only invocation");
+		let invocation = Invocation::try_parse_from([
+			"moq",
+			"--listen-tcp-bind",
+			"127.0.0.1:0",
+			"--auth-public",
+			"**",
+			"import",
+			"ts",
+		])
+		.expect("parse TCP-only invocation");
 		let cluster = invocation.moq.cluster().expect("create cluster");
 		let net = Net {
 			quic: invocation.moq.quic.clone(),
