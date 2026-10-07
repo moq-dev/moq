@@ -323,6 +323,16 @@ anything on its own. Both ends apply it: the publisher skips a group rather
 than sending it, and the subscriber skips it again as it reads, since the
 publisher only ever sees the most tolerant budget across its subscribers.
 
+A track is all timed or all untimed: it declares a timescale or none, and a
+frame that doesn't match is refused. An untimed track stays untimed at every
+hop: no receiver fills in arrival time, which would change whenever a route
+fails over. An untimed group is never too old, so the cache's own expiry is what
+reclaims it, and a new subscriber to an untimed track starts at its latest group
+unless it names a start. Tracks from lite before 05, or from moq-transport
+without a `TIMESCALE` (every track on drafts 14–16), arrive untimed. Lite cannot
+mark a track untimed yet, so a lite-05 or later publisher sends each frame of an
+untimed track with its send time.
+
 A route failover is invisible to max delay: a group open across the change carries
 on from the new route at the frame where the old one stopped, and a group only a
 replaced route that went quiet still holds is given up once it falls a full

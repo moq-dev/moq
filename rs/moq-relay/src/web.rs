@@ -233,6 +233,16 @@ impl Web {
 
 	/// Bind the configured listeners now, so [`addrs`](Self::addrs) reports ephemeral ports before serving.
 	pub fn bind(mut self) -> anyhow::Result<Self> {
+		let https = &self.config.https;
+		if https.listen.is_none() {
+			for (flag, set) in [
+				("--web-https-cert", !https.cert.is_empty()),
+				("--web-https-key", !https.key.is_empty()),
+				("--web-https-root", !https.root.is_empty()),
+			] {
+				anyhow::ensure!(!set, "{flag} requires --web-https-listen");
+			}
+		}
 		if self.https_tls.is_none() && self.config.https.listen.is_some() {
 			let tls = build_https_config(&self.config.https.cert, &self.config.https.key, &self.config.https.root)?;
 			self.https_tls = Some(RustlsConfig::from_config(tls));
@@ -1423,6 +1433,32 @@ mod tests {
 		);
 
 		serving.abort();
+	}
+
+	/// HTTPS settings without the HTTPS listener that would read them are refused,
+	/// not ignored.
+	#[tokio::test]
+	async fn https_settings_require_the_https_listener() {
+		type Set = fn(&mut Https);
+		let cases: [(&str, Set); 3] = [
+			("--web-https-cert", |https| https.cert = vec!["cert.pem".into()]),
+			("--web-https-key", |https| https.key = vec!["key.pem".into()]),
+			("--web-https-root", |https| https.root = vec!["ca.pem".into()]),
+		];
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
+		for (flag, set) in cases {
+			let mut config = Config::default();
+			set(&mut config.https);
+			let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+			let web = Web::new(crate::auth::Auth::refuse("test"), cluster, certificates.clone(), config);
+			let err = match web.bind() {
+				Ok(_) => panic!("{flag} was ignored"),
+				Err(err) => err.to_string(),
+			};
+			assert!(err.contains(flag) && err.contains("--web-https-listen"), "{err}");
+		}
 	}
 
 	/// A timeout past the clock's range waits forever, rather than reaching hyper,

@@ -883,6 +883,17 @@ impl Registry {
 		}
 	}
 
+	/// Add `n` publisher-side payload bytes on `(path, tier)`. The hidden `fuzz`
+	/// module exposes this to the stats producer bench. A report drops the entry
+	/// unless a guard still holds it.
+	#[cfg(any(test, feature = "fuzz"))]
+	pub(crate) fn bump_publisher_bytes(&self, path: impl AsPath, tier: &Tier, n: u64) {
+		let Some(entry) = self.entry(path) else {
+			return;
+		};
+		entry.tier(tier).publisher.bytes.fetch_add(n, Ordering::Relaxed);
+	}
+
 	fn entry(&self, path: impl AsPath) -> Option<Arc<BroadcastEntry>> {
 		// A disabled registry never allocates state.
 		let shared = self.shared.as_ref()?;

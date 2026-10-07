@@ -103,6 +103,9 @@ export type EncoderProps = Inputs<EncoderInput> & {
 
 	// Codec selection plus encoder settings. Defaults to "opus".
 	codec?: Codec | Signal<Codec>;
+
+	// The minimum audio carried by each group. Defaults to 0, a group per frame.
+	groupDuration?: Time.Milli | Signal<Time.Milli>;
 };
 
 type EncoderOutput = {
@@ -143,6 +146,12 @@ export class Encoder {
 	fade: Signal<Time.Milli>;
 	/** The live-editable codec selection plus its encoder settings. */
 	codec: Signal<Codec>;
+	/**
+	 * The minimum timestamp span before a frame opens the next group, closing the previous one. 0 puts every frame in its own group. A longer group costs the
+	 * relay fewer streams but makes loss coarser: a viewer that falls behind skips a whole group. A
+	 * negative or non-finite duration refuses the rendition.
+	 */
+	groupDuration: Signal<Time.Milli>;
 
 	/**
 	 * The capture supplying this rendition, or undefined while none is wired.
@@ -173,7 +182,8 @@ export class Encoder {
 	#pipeline: Pipeline | undefined;
 
 	// The current subscription's track and the producer writing into it, or undefined without demand.
-	#live: { track: Moq.Track.Producer; producer: Container.Legacy.Producer } | undefined;
+	// `start` is the open group's first timestamp, undefined until a frame opens one.
+	#live: { track: Moq.Track.Producer; producer: Container.Legacy.Producer; start?: Time.Micro } | undefined;
 
 	// Where the next frame submitted to the AudioEncoder starts, i.e. the exclusive end of the
 	// newest one, where an epoch's discontinuity marker goes. Cleared once the marker is written.
@@ -187,6 +197,9 @@ export class Encoder {
 	// The last valid fade, which the read loop ramps with. #runConfig refuses the rendition on an
 	// invalid one, so a bad value never reaches the gain.
 	#fade: Time.Milli = FADE;
+
+	// The last valid group duration, validated by #runConfig the same way as #fade.
+	#groupDuration = Time.Micro(0);
 
 	// The fatal error an AudioEncoder reported, if any. That instance can never encode again and
 	// reconfiguring it would be a retry, so the rendition stays down for the life of this encoder.
@@ -224,6 +237,7 @@ export class Encoder {
 		this.volume = Signal.from(props?.volume ?? 1);
 		this.fade = Signal.from(props?.fade ?? FADE);
 		this.codec = Signal.from<Codec>(props?.codec ?? "opus");
+		this.groupDuration = Signal.from(props?.groupDuration ?? Time.Milli(0));
 
 		// Only the capture graph has a node to expose.
 		this.#signals.run((effect) => {
@@ -385,6 +399,11 @@ export class Encoder {
 			throw new Error(`audio fade must be a finite, non-negative number of ms: ${fade}`);
 		this.#fade = fade;
 
+		const groupDuration = effect.get(this.groupDuration);
+		if (!Number.isFinite(groupDuration) || groupDuration < 0)
+			throw new Error(`audio group duration must be a finite, non-negative number of ms: ${groupDuration}`);
+		this.#groupDuration = Time.Micro.fromMilli(groupDuration);
+
 		const capture = effect.get(this.in.capture);
 		const captured = capture ? effect.get(capture.out.format) : undefined;
 		if (!effect.get(this.in.enabled) || !captured) {
@@ -436,6 +455,7 @@ export class Encoder {
 		if (end === undefined || !live || live.track.closed.peek() !== undefined) return;
 		this.#floor = end;
 		live.producer.discontinuity(end);
+		live.start = undefined;
 	}
 
 	// Encode captured audio frames into whichever track producer is live. The broadcast owns the
@@ -483,12 +503,18 @@ export class Encoder {
 							bytes: stats.bytes + frame.byteLength,
 						}));
 
-						// Each audio frame is a keyframe, so its own group, which the relay can forward
-						// without waiting for a group boundary. Loss is handled by the codec's PLC.
 						const live = this.#live;
 						if (!live) return;
-						if (this.#floor !== undefined && frame.timestamp < this.#floor) return;
-						live.producer.encode(frame, frame.timestamp as Time.Micro, true);
+						const timestamp = frame.timestamp as Time.Micro;
+						if (this.#floor !== undefined && timestamp < this.#floor) return;
+
+						// Every audio frame decodes on its own, so any of them can open a group: the
+						// first one at or past the minimum after the open group's start. Frames forward
+						// as they are written rather than waiting for the group to fill. A dropped
+						// group leaves a gap for the codec's PLC.
+						const keyframe = live.start === undefined || timestamp - live.start >= this.#groupDuration;
+						if (keyframe) live.start = timestamp;
+						live.producer.encode(frame, timestamp, keyframe);
 						if (this.#estimator.flush(frame.timestamp, baseline)) {
 							const catalog = this.#out.catalog.peek();
 							if (catalog) this.#out.catalog.set({ ...catalog, ...this.#estimator.estimate });

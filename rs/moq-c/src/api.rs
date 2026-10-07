@@ -466,8 +466,13 @@ pub struct moq_frame {
 	pub payload: *const u8,
 	pub payload_size: usize,
 
-	/// The presentation timestamp of the frame in microseconds
+	/// The presentation timestamp of the frame in microseconds, or 0 when
+	/// `timestamp_present` is false.
 	pub timestamp_us: u64,
+
+	/// Whether the frame carries a timestamp. Media frames always do; a raw frame read
+	/// from an untimed track does not.
+	pub timestamp_present: bool,
 
 	/// Whether this frame opens a group or is a video keyframe; audio is true only at a group start.
 	pub keyframe: bool,
@@ -481,8 +486,12 @@ pub struct moq_datagram {
 	pub payload: *const u8,
 	pub payload_size: usize,
 
-	/// The presentation timestamp of the datagram in microseconds.
+	/// The presentation timestamp of the datagram in microseconds, or 0 when
+	/// `timestamp_present` is false.
 	pub timestamp_us: u64,
+
+	/// Whether the datagram carries a timestamp. One read from an untimed track does not.
+	pub timestamp_present: bool,
 
 	/// Per-track sequence number, drawn from the same namespace as groups.
 	pub sequence: u64,
@@ -3597,7 +3606,8 @@ pub unsafe extern "C" fn moq_consume_track_update(track: u32, subscription: *con
 ///
 /// Fills `dst.payload` / `dst.payload_size`; the pointer is valid until the
 /// frame is released with [moq_consume_frame_free]. `dst.timestamp_us` is the
-/// frame presentation timestamp in microseconds. `dst.keyframe` is reported as
+/// frame presentation timestamp in microseconds, when `dst.timestamp_present` says it
+/// has one. `dst.keyframe` is reported as
 /// false because raw tracks do not parse codec metadata.
 ///
 /// Returns a zero on success, or a negative code on failure.
@@ -3674,7 +3684,8 @@ pub unsafe extern "C" fn moq_consume_datagrams(
 /// Read a datagram delivered via the [moq_consume_datagrams] callback.
 ///
 /// Fills `dst.payload` / `dst.payload_size` (valid until the datagram is released with
-/// [moq_consume_datagram_free]), plus `dst.timestamp_us` and `dst.sequence`.
+/// [moq_consume_datagram_free]), plus `dst.timestamp_us` (when `dst.timestamp_present`)
+/// and `dst.sequence`.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///

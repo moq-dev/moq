@@ -90,7 +90,7 @@ async fn datagrams_reach_the_subscriber_in_order() {
 			assert_eq!(&datagram.payload[..], PAYLOAD, "payload corrupted in transit");
 			assert_eq!(
 				datagram.timestamp,
-				Timestamp::from_millis(datagram.sequence).unwrap(),
+				Some(Timestamp::from_millis(datagram.sequence).unwrap()),
 				"timestamp did not survive the wire"
 			);
 			if let Some(previous) = seen.last() {
@@ -149,8 +149,15 @@ async fn ietf_delivers_datagrams_on(version: &str) {
 		.unwrap();
 	let mut before = subscriber.recv_group().await.unwrap().unwrap();
 	assert_eq!(before.sequence, 0, "{version}");
-	// Drafts without a track timescale stamp objects on arrival, datagrams included.
-	let stamped = before.next_frame().await.unwrap().unwrap().timestamp.value() == 0;
+	// Drafts 14 to 16 can't carry TIMESCALE, so the track arrives untimed, datagrams
+	// included.
+	let timed = !matches!(version, "moq-transport-14" | "moq-transport-16");
+	let first = before.next_frame().await.unwrap().unwrap().timestamp;
+	assert_eq!(
+		first.map(|timestamp| timestamp.is_zero()),
+		timed.then_some(true),
+		"{version}"
+	);
 
 	producer
 		.insert_datagram(
@@ -162,14 +169,14 @@ async fn ietf_delivers_datagrams_on(version: &str) {
 	let datagram = subscriber.recv_datagram().await.unwrap().unwrap();
 	assert_eq!(datagram.sequence, 5, "{version}: the relay must not renumber");
 	assert_eq!(&datagram.payload[..], PAYLOAD, "{version}");
-	if stamped {
-		let expected = Timestamp::from_millis(7).unwrap();
-		assert_eq!(
-			datagram.timestamp.convert(expected.scale()).unwrap(),
-			expected,
-			"{version}"
-		);
-	}
+	let expected = Timestamp::from_millis(7).unwrap();
+	assert_eq!(
+		datagram
+			.timestamp
+			.map(|timestamp| timestamp.convert(expected.scale()).unwrap()),
+		timed.then_some(expected),
+		"{version}"
+	);
 
 	// The group sequence continues past the datagram.
 	producer
@@ -206,14 +213,14 @@ async fn inserted_sequences_survive_the_lite_wire() {
 		assert_eq!(first.sequence, 5);
 		assert_eq!(
 			first.timestamp,
-			Timestamp::from_millis(5).unwrap(),
+			Some(Timestamp::from_millis(5).unwrap()),
 			"timestamp did not survive the wire"
 		);
 		assert_eq!(&first.payload[..], PAYLOAD);
 
 		let second = fixture.subscriber.recv_datagram().await.unwrap().unwrap();
 		assert_eq!(second.sequence, 2);
-		assert_eq!(second.timestamp, Timestamp::from_millis(2).unwrap());
+		assert_eq!(second.timestamp, Some(Timestamp::from_millis(2).unwrap()));
 		assert_eq!(&second.payload[..], PAYLOAD);
 	})
 	.await

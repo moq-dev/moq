@@ -166,4 +166,6 @@ not the same as zero.
 
 Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).
 
+A raw `Frame` or `Datagram` has `timestamp_us` of `None` when it was read from an untimed track; see [untimed tracks](/concept/moq-lite#subscriptions). A raw track you publish is always timed.
+
 Await `session.shutdown()` to drain finished tracks before disconnecting. It raises if delivery has not completed within one second. `cancel(code)` stays immediate. Session and client async context managers await shutdown on a clean exit and cancel on an error, so the body's exception survives; finish or abort live tracks first. IETF media streams are not drained yet.
