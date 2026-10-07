@@ -581,7 +581,9 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	tasks: Tasks,
 	version: Version,
 	// Set once the peer sends a GOAWAY; this session's routes then cost
-	// Cost::DRAIN, so a replacement session outranks it.
+	// Cost::DRAIN, so a replacement session outranks it. Requests keep opening,
+	// deliberately past draft-19 section 10.4's SHOULD NOT: refusing them would
+	// fail requests that land before the replacement is up.
 	going_away: crate::goaway::GoingAway,
 	// What this session may allocate up front for objects still arriving.
 	frames: frame::Budget,

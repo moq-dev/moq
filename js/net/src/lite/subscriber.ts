@@ -1,4 +1,4 @@
-import { type GetPromise, race, Signal } from "@moq/signals";
+import { type Dispose, type GetPromise, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Drain } from "../connection/goaway.ts";
@@ -253,6 +253,7 @@ export class Subscriber {
 			return;
 		}
 
+		let stopDrain: Dispose | undefined;
 		try {
 			// Send the announce interest.
 			await stream.writer.u53(StreamId.Announce);
@@ -318,7 +319,8 @@ export class Subscriber {
 
 			// A draining peer usually stops announcing, so reprice from the GOAWAY itself.
 			// Waiting for another message would leave the route primary until the session
-			// closed. Idempotent: the signal stays set, and an unchanged cost emits nothing.
+			// closed. Idempotent: an unchanged cost emits nothing. A GOAWAY that already
+			// arrived needs no listener, since `#cost()` priced every route above.
 			const drainAdvertised = () => {
 				if (announced.closed.peek() !== undefined) return;
 				for (const [path, ad] of advertised) {
@@ -329,7 +331,7 @@ export class Subscriber {
 					announced.append({ prefix: path, captures: ad.captures, kind: "update", route });
 				}
 			};
-			if (this.#goaway) void this.#goaway.then(() => drainAdvertised());
+			stopDrain = this.#goaway?.changed(() => drainAdvertised());
 
 			// Lite06+: announce ids. Each received `active` implicitly assigns the next
 			// per-stream ordinal; `endedId`/`restart` reference it, and lite-07 bases copy
@@ -516,6 +518,9 @@ export class Subscriber {
 			if (e instanceof ProtocolViolation) {
 				this.#quic.close({ closeCode: PROTOCOL_VIOLATION_CODE, reason: closeReason(reason(e)) });
 			}
+		} finally {
+			// Releases this interest's routes on a session that never drains.
+			stopDrain?.();
 		}
 	}
 

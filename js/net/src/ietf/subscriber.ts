@@ -202,7 +202,8 @@ export class Subscriber {
 	}
 
 	// Whether the peer has sent GOAWAY. Requests keep opening here until a replacement
-	// session's route outranks this one.
+	// session's route outranks this one, deliberately past draft-19 section 10.4's SHOULD
+	// NOT: refusing them would fail requests that land before the replacement is up.
 	#goingAway(): boolean {
 		return this.#goaway?.peek() !== undefined;
 	}
