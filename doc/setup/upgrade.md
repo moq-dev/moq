@@ -58,6 +58,13 @@ These land with the next breaking release, not the 2026-09-23 train.
   `SourceMap` (#4667) are gone, along with the importers' `live()`. Publish the
   source's own timestamps and let the catalog clock map them to wall time;
   pin that mapping with `Config::with_clock` when the source's zero is known.
+- **moq-net owns its transport traits.** `moq_net::web_transport_trait` is
+  gone, and `transport::poll::{Session, SendStream, RecvStream}` no longer
+  extend `web_transport_trait::poll`. They carry their own `poll_*` methods,
+  `transport::Error`, and `transport::Stats`, and `Error::from_transport` takes
+  a `transport::Error`. moq-tokio's `Client` and `Server` are unchanged. A
+  custom transport handed straight to moq-net implements these traits; a
+  `moq-uring` session is wrapped with `moq_uring::transport::Session::new`.
 - **`--cluster-mesh` and `--cluster-linger` are unknown flags.** moq-relay
   0.17 refuses them by name; later relays reject them, and TOML `mesh` and
   `linger`, like any unknown setting. `MOQ_CLUSTER_MESH` and
