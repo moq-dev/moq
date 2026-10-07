@@ -1481,7 +1481,121 @@ async fn aac_program_config_roundtrip() {
 	assert_eq!(audio2.channel_count, 4);
 	assert_eq!(audio2.description, audio.description);
 	let roundtripped = read_frames(&consumer2, name2, Kind::Audio).await;
-	assert_eq!(roundtripped, ingested, "the element is written once, not per frame");
+	assert_eq!(roundtripped, ingested, "the element leaves the frames on import");
+}
+
+/// For each AAC PES, whether it follows a PAT and whether a program config element leads its
+/// first raw data block.
+fn aac_program_configs(ts: &[u8]) -> Vec<(bool, bool)> {
+	let mut reader = TsPacketReader::new(Cursor::new(ts));
+	let mut out = Vec::new();
+	let mut after_pat = false;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		match packet.payload {
+			Some(TsPayload::Pat(_)) => after_pat = true,
+			Some(TsPayload::PesStart(pes)) => {
+				let header = super::adts::Header::parse(&pes.data).unwrap();
+				assert_eq!(header.channel_config, 0);
+				// ID_PCE in the first three bits of the raw data block.
+				out.push((std::mem::take(&mut after_pat), pes.data[header.header_len] >> 5 == 5));
+			}
+			_ => {}
+		}
+	}
+	out
+}
+
+/// A receiver tunes in at a PAT/PMT, so the program config element follows each one rather
+/// than riding the first frame only, including after a marker restarts the program clock. The
+/// output cut at a later PAT imports as the same quad track.
+#[tokio::test(start_paused = true)]
+async fn aac_program_config_follows_each_table() {
+	let mut quad = vec![0x11, 0x80, 0x04, 0xC4, 0x04, 0x00, 0x21, 0x10, 0x0C];
+	quad.extend_from_slice(b"Lavc63.1.101");
+	let payload = Bytes::from_static(&[0x20; 10]);
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let track = broadcast
+		.create_track("a.aac", hang::container::track_info(hang::catalog::PRIORITY.audio))
+		.unwrap();
+	let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 4);
+	cfg.container = Container::Legacy;
+	cfg.description = Some(Bytes::from(quad.clone()));
+	catalog
+		.modify()
+		.unwrap()
+		.audio
+		.renditions
+		.insert("a.aac".to_string(), cfg);
+	let mut producer = Producer::new(track, HangContainer::Legacy(Kind::Audio));
+	let mut export = Export::new(crate::source::announced(&consumer))
+		.await
+		.unwrap()
+		.with_max_age(RECORDING_MAX_AGE);
+
+	let write = |producer: &mut Producer<HangContainer>, ms: std::ops::Range<u64>| {
+		for ms in ms.step_by(100) {
+			producer
+				.write(Frame {
+					timestamp: Timestamp::from_millis(ms).unwrap(),
+					duration: None,
+					payload: payload.clone(),
+					keyframe: true,
+				})
+				.unwrap();
+			producer.cut(None).unwrap();
+		}
+	};
+	write(&mut producer, 0..2_000);
+	producer.discontinuity().unwrap();
+	write(&mut producer, 2_000..3_000);
+	producer.finish().unwrap();
+	let frames = drain_frames(&mut export).await;
+	let ts: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	assert_packet_aligned(&ts);
+
+	let units = aac_program_configs(&ts);
+	assert_eq!(units.len(), 30);
+	for (i, (after_pat, pce)) in units.iter().enumerate() {
+		assert_eq!(
+			after_pat, pce,
+			"unit {i}: the element rides with the tables, and only there"
+		);
+	}
+	assert!(units[20].1, "the restarted clock re-sends the element");
+
+	// Join at the second PAT.
+	let pats: Vec<usize> = ts
+		.chunks(188)
+		.enumerate()
+		.filter(|(_, p)| p[1] & 0x1f == 0 && p[2] == 0)
+		.map(|(i, _)| i * 188)
+		.collect();
+	assert!(pats.len() > 2, "PAT on its cadence");
+	let mut joined = moq_net::broadcast::Info::new().produce();
+	let joined_consumer = joined.consume();
+	let joined_catalog = crate::catalog::Producer::new(&mut joined, crate::catalog::Config::default()).unwrap();
+	let mut import = crate::container::ts::Import::new(joined, joined_catalog.reserve());
+	import.decode(&BytesMut::from(&ts[pats[1]..])).unwrap();
+	import.finish().unwrap();
+
+	let snapshot = joined_catalog.snapshot();
+	let (name, audio) = snapshot
+		.audio
+		.renditions
+		.iter()
+		.next()
+		.expect("the late join lost the AAC track");
+	assert_eq!(audio.channel_count, 4);
+	assert_eq!(audio.description.as_deref(), Some(quad.as_slice()));
+	let imported = read_frames(&joined_consumer, name, Kind::Audio).await;
+	assert!(!imported.is_empty());
+	assert!(
+		imported.iter().all(|frame| frame[..] == payload[..]),
+		"the repeated element leaves every frame"
+	);
 }
 
 /// GStreamer 1.28 `fdkaacenc` output, 48 kHz stereo, remuxed to FLV by ffmpeg 9.0.1. Its

@@ -498,8 +498,10 @@ impl<E: catalog::Catalog> Import<E> {
 			// framing and syncword, so it falls through to the ignored arm below.
 			Some(StreamType::AdtsAac) => Stream::Aac(Box::new(AacStream {
 				import: None,
+				asc: bytes::Bytes::new(),
 				broadcast: self.broadcast.clone(),
 				reserved: Some(self.reserve()),
+				catalog: self.catalog.clone(),
 				container: self.container.clone(),
 				unwrap: PtsUnwrap::default(),
 				tail: Vec::new(),
@@ -2168,11 +2170,16 @@ impl From<&legacy::Descriptor> for SyncWord {
 /// deferred until the first frame arrives.
 struct AacStream<E: CatalogExt = ()> {
 	import: Option<aac::Import>,
+	/// The AudioSpecificConfig `import` was built with. A program config element in a later frame
+	/// must rebuild it exactly.
+	asc: bytes::Bytes,
 	broadcast: moq_net::broadcast::Producer,
 	/// Reservation held from the PMT until the first frame builds the importer, so the catalog stays
 	/// withheld until this deferred rendition resolves (config comes from the first ADTS header).
-	/// Consumed when `import` is built.
+	/// Consumed when `import` is built, or released by a frame that cannot build it.
 	reserved: Option<crate::catalog::Reserved<E>>,
+	/// Reserves the rendition anew when `import` is built after `reserved` was released.
+	catalog: crate::catalog::Producer<E>,
 	/// The container this importer publishes decoded renditions with.
 	container: hang::catalog::Container,
 	unwrap: PtsUnwrap,
@@ -2314,7 +2321,24 @@ impl<E: CatalogExt> AacStream<E> {
 
 			let mut block = &data[offset + header.header_len..end];
 			let import = match &mut self.import {
-				Some(import) => import,
+				Some(import) => {
+					// The description already carries the layout, so a repeated program config
+					// element (the TS export writes one after each PAT/PMT) leaves the frame too.
+					if header.channel_config == 0 {
+						let mut rest = block;
+						match aac::in_band_config(header.object_type, header.sample_rate, 0, &mut rest) {
+							Ok(asc) if asc == self.asc => block = rest,
+							Ok(_) => {
+								return Err(
+									Damaged(anyhow::anyhow!("AAC program config element changed mid-stream")).into(),
+								);
+							}
+							Err(aac::Error::ProgramConfigMissing) => {}
+							Err(err) => return Err(unit_error(err.into())),
+						}
+					}
+					import
+				}
 				None => {
 					// Synthesize the AudioSpecificConfig `description` so out-of-band consumers
 					// (fMP4/MKV export, WebCodecs) can configure the decoder. A channel_config of 0
@@ -2326,16 +2350,23 @@ impl<E: CatalogExt> AacStream<E> {
 						header.channel_config,
 						&mut block,
 					)
-					.map_err(|err| unit_error(err.into()))?;
+					.map_err(|err| {
+						// ffmpeg writes the element in its first frame only, so a receiver that
+						// joined later may never see one. Stop withholding the catalog for this
+						// track; it joins the catalog if an element arrives.
+						self.reserved.take();
+						unit_error(err.into())
+					})?;
 					let mut config = aac::config(&asc)?;
 					config.container = self.container.clone();
 					// Consume the reservation held since the PMT: this resolves the gated rendition,
 					// and carries the catalog's declared media retention onto the track.
-					let reserved = self.reserved.take().expect("aac reservation already consumed");
+					let reserved = self.reserved.take().unwrap_or_else(|| self.catalog.reserve());
 					let track = self
 						.broadcast
 						.unique_track(".aac", reserved.track_info(hang::catalog::PRIORITY.audio))?;
 					let aac = aac::Import::new(track, reserved, config)?;
+					self.asc = asc;
 					self.import.insert(aac)
 				}
 			};
@@ -4798,6 +4829,84 @@ pub(super) mod test {
 			"a PID that never published held the catalog shut: {published:?}"
 		);
 		drop(import);
+	}
+
+	/// A receiver that joins an AAC stream after its program config element (ffmpeg writes it in
+	/// the first frame only) cannot build that track, but must not withhold the catalog for the
+	/// rest of the program. The track joins once an element arrives, and a repeated element
+	/// leaves its frame, since the description carries the layout.
+	#[tokio::test(start_paused = true)]
+	async fn aac_joined_after_its_program_config_publishes_the_rest() {
+		const AAC_PID: u16 = 0x0060;
+		// ffmpeg's quad layout, two channel pair elements in a program config element.
+		let mut quad = vec![0x11, 0x80, 0x04, 0xC4, 0x04, 0x00, 0x21, 0x10, 0x0C];
+		quad.extend_from_slice(b"Lavc63.1.101");
+		let pce = crate::codec::aac::in_band(&quad).unwrap().program_config.unwrap();
+		// A raw data block: the element, if given, then bytes that lead with a channel pair (ID 1).
+		let frame = |pce: &[u8]| {
+			let mut f = super::adts::write_header(2, 48_000, 0, pce.len() + 10)
+				.unwrap()
+				.to_vec();
+			f.extend_from_slice(pce);
+			f.resize(f.len() + 10, 0x20);
+			f
+		};
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut updates = catalog.consume().unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::H264, VIDEO), (StreamType::AdtsAac, AAC_PID)], false),
+			..Default::default()
+		};
+		mux.gop(VIDEO, 90_000);
+		let cc = mux.cc(AAC_PID);
+		let bare = frame(&[]);
+		mux.out.extend(audio_pes_packet(
+			AAC_PID,
+			cc,
+			90_000,
+			&[bare.as_slice(), &bare, &bare].concat(),
+		));
+		import.decode(&mux.out).unwrap();
+		assert_eq!(import.stats().streams[&AAC_PID].damaged, 1);
+
+		let first = tokio::time::timeout(Duration::from_millis(10), updates.next())
+			.await
+			.expect("the catalog waits on a track that cannot resolve")
+			.unwrap()
+			.unwrap();
+		assert_eq!(first.video.renditions.len(), 1);
+		assert!(first.audio.renditions.is_empty());
+
+		// The element arrives, then frames without it, then a repeat.
+		let with = frame(&pce);
+		let cc = mux.cc(AAC_PID);
+		let late = audio_pes_packet(AAC_PID, cc, 180_000, &[with.as_slice(), &bare, &with, &bare].concat());
+		import.decode(&late).unwrap();
+		import.finish().unwrap();
+
+		let audio = loop {
+			let update = tokio::time::timeout(Duration::from_millis(10), updates.next())
+				.await
+				.expect("the AAC track never joined")
+				.unwrap()
+				.unwrap();
+			if let Some(audio) = update.audio.renditions.values().next() {
+				break audio.clone();
+			}
+		};
+		assert_eq!(audio.channel_count, 4);
+		assert_eq!(audio.description.as_deref(), Some(quad.as_slice()));
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(frames.len(), 4, "only the frames from the element on");
+		for frame in frames {
+			assert_eq!(frame.payload.as_ref(), [0x20; 10], "the element leaves every frame");
+		}
 	}
 
 	// Resync is bounded: a PID carrying something other than the codec its PMT declares is a
