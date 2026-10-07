@@ -610,6 +610,17 @@ impl MockSession {
 		}
 	}
 
+	/// Deliver only the newest held uni stream, and keep holding the rest. Returns how
+	/// many are still held.
+	pub fn release_newest_uni(&self) -> usize {
+		let mut held = self.side.held.lock().unwrap();
+		let held = held.as_mut().expect("not holding");
+		if let Some(stream) = held.pop() {
+			let _ = self.side.peer_uni.try_push(stream);
+		}
+		held.len()
+	}
+
 	/// Deliver the held uni streams newest first, and stop holding.
 	pub fn release_unis_reversed(&self) {
 		for stream in self

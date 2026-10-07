@@ -3944,6 +3944,7 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 							}
 						},
 						ServeEnd::Finished => {
+							serve_loop.serving.set_tail_pending(false);
 							let _ = serve_loop.serving.finish();
 						}
 						ServeEnd::GiveBack(err) => {
@@ -4288,6 +4289,9 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 													return Poll::Ready(ServeEnd::GiveBack(Error::ProtocolViolation));
 												}
 											}
+										} else {
+											// Lower groups may still be on the wire, behind a higher one.
+											self.serving.set_tail_pending(true);
 										}
 										active.end = Some(end.clone());
 									}

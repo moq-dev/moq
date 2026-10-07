@@ -304,12 +304,13 @@ async fn ietf_leaving_cancels_a_blocked_end_of_track() {
 	}
 }
 
-/// A lost datagram is not owed. Nothing tells the subscriber its sequence was a datagram, so
-/// on the drafts that account for the owed range its hole keeps the subscription routable for
-/// the grace, like a stream reset before its header. A reader never waits on it: the track
-/// ends for readers once the live edge reaches the declared end.
+/// A lost datagram is not owed, but nothing tells a lite-05 or lite-06 subscriber its
+/// sequence was a datagram rather than a group stream still on its way. Its hole holds
+/// the subscription, and its readers, for the grace, like a stream reset before its
+/// header: ending at once would drop a reordered group. Lite-07 counts the streams, so a
+/// lost datagram never delays its end.
 #[moq_net_sim::test]
-async fn a_lost_datagram_never_delays_the_end() {
+async fn a_lost_datagram_delays_the_end_only_without_a_stream_count() {
 	for version in ["moq-lite-05", "moq-lite-07-wip"] {
 		let Pair {
 			pair,
@@ -357,7 +358,13 @@ async fn a_lost_datagram_never_delays_the_end() {
 			.expect("reader panicked");
 		assert_eq!(groups, [0, 2], "{version}");
 		let elapsed = ended - finished;
-		assert!(elapsed < GRACE / 10, "{version}: ended after {elapsed:?}");
+		match version {
+			"moq-lite-07-wip" => assert!(elapsed < GRACE / 10, "{version}: ended after {elapsed:?}"),
+			_ => assert!(
+				(GRACE / 2..GRACE * 2).contains(&elapsed),
+				"{version}: ended after {elapsed:?}"
+			),
+		}
 		drop((pair, _keep));
 	}
 }

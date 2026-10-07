@@ -36,10 +36,20 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	producer
 }
 
-/// Publish groups 0..4 through a relay, each holding its last frame until the end has
-/// reached the subscriber, and return the groups the subscriber read whole and how its
-/// subscription ended.
-async fn round(name: &str) -> (Vec<u64>, Result<(), moq_net::Error>) {
+/// How the publisher's groups reach the relay.
+#[derive(Clone, Copy)]
+enum Arrival {
+	/// Each group's header arrives in order, but its last frame is held until the end has
+	/// reached the subscriber.
+	HeldTails,
+	/// Every group is written whole, but the newest group's stream reaches the relay
+	/// before the others, after the end: QUIC does not order streams.
+	NewestFirst,
+}
+
+/// Publish groups 0..4 through a relay, delivered as `arrival` says, and return the
+/// groups the subscriber read whole and how its subscription ended.
+async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::Error>) {
 	let version: Version = name.parse().unwrap();
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
@@ -110,26 +120,59 @@ async fn round(name: &str) -> (Vec<u64>, Result<(), moq_net::Error>) {
 		.expect("no subscriber appeared")
 		.unwrap();
 	track.finish_at(GROUPS).unwrap();
-	let mut groups = Vec::new();
-	for sequence in 0..GROUPS {
-		let mut group = track.append_group().unwrap();
-		group.write_frame(Timestamp::ZERO, &b"head"[..]).unwrap();
-		groups.push(group);
-		// IETF requests the live edge, so observe each header before advancing it.
-		assert_eq!(
-			moq_net_sim::timeout(TIMEOUT, opened.next())
-				.await
-				.expect("head timeout"),
-			Some(sequence),
-		);
-	}
+	match arrival {
+		Arrival::HeldTails => {
+			let mut groups = Vec::new();
+			for sequence in 0..GROUPS {
+				let mut group = track.append_group().unwrap();
+				group.write_frame(Timestamp::ZERO, &b"head"[..]).unwrap();
+				groups.push(group);
+				// IETF requests the live edge, so observe each header before advancing it.
+				assert_eq!(
+					moq_net_sim::timeout(TIMEOUT, opened.next())
+						.await
+						.expect("head timeout"),
+					Some(sequence),
+				);
+			}
 
-	// Simulated time advances only once every task is idle: each group has reached the
-	// subscriber, so the relay's downstream subscription has seen the end.
-	moq_net_sim::sleep(Duration::from_millis(100)).await;
-	for mut group in groups {
-		group.write_frame(Timestamp::ZERO, &b"tail"[..]).unwrap();
-		group.finish().unwrap();
+			// Simulated time advances only once every task is idle: each group has reached
+			// the subscriber, so the relay's downstream subscription has seen the end.
+			moq_net_sim::sleep(Duration::from_millis(100)).await;
+			for mut group in groups {
+				group.write_frame(Timestamp::ZERO, &b"tail"[..]).unwrap();
+				group.finish().unwrap();
+			}
+		}
+		Arrival::NewestFirst => {
+			upstream.server_transport.hold_unis();
+			for _ in 0..GROUPS {
+				let mut group = track.append_group().unwrap();
+				group.write_frame(Timestamp::ZERO, &b"head"[..]).unwrap();
+				group.write_frame(Timestamp::ZERO, &b"tail"[..]).unwrap();
+				group.finish().unwrap();
+				// IETF serves from the live edge, so let each group open its stream before
+				// the next one supersedes it.
+				moq_net_sim::sleep(Duration::from_millis(10)).await;
+			}
+
+			// Once idle, the publisher has opened every stream and ended the subscription,
+			// so the relay knows the end before any group arrives.
+			moq_net_sim::sleep(Duration::from_millis(100)).await;
+			// Deliver streams newest first (IETF also carries the end on a stream of its
+			// own) until the last group reaches the subscriber, at the declared boundary.
+			let newest = loop {
+				let held = upstream.server_transport.release_newest_uni();
+				moq_net_sim::sleep(Duration::from_millis(10)).await;
+				if let Ok(head) = opened.try_next() {
+					break head;
+				}
+				assert!(held > 0, "{name}: no group reached the subscriber");
+			};
+			assert_eq!(newest, Some(GROUPS - 1), "{name}");
+			moq_net_sim::sleep(Duration::from_millis(100)).await;
+			upstream.server_transport.release_unis();
+		}
 	}
 
 	// Lite03 carries no declared end: each of the two hops waits one max-delay grace.
@@ -144,7 +187,18 @@ async fn round(name: &str) -> (Vec<u64>, Result<(), moq_net::Error>) {
 #[moq_net_sim::test]
 async fn relay_keeps_groups_in_flight_past_the_end() {
 	for version in VERSIONS {
-		let (seen, end) = round(version).await;
+		let (seen, end) = round(version, Arrival::HeldTails).await;
+		assert_eq!(seen, [0, 1, 2, 3], "{version}: end={end:?}");
+		assert!(end.is_ok(), "{version}: ended with {end:?}");
+	}
+}
+
+/// The relay learns the end, then receives the last group's stream before the others: it
+/// keeps serving until the upstream tail settles instead of ending at the boundary.
+#[moq_net_sim::test]
+async fn relay_waits_for_reordered_upstream_headers() {
+	for version in VERSIONS {
+		let (seen, end) = round(version, Arrival::NewestFirst).await;
 		assert_eq!(seen, [0, 1, 2, 3], "{version}: end={end:?}");
 		assert!(end.is_ok(), "{version}: ended with {end:?}");
 	}

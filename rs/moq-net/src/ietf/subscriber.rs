@@ -2146,6 +2146,8 @@ where
 										fill.end();
 									}
 								}
+								// The tail settled, so readers may end at an END_OF_TRACK's boundary.
+								track.set_tail_pending(false);
 								// A no-op once an END_OF_TRACK declared the end.
 								let _ = track.finish();
 							}
@@ -2766,6 +2768,8 @@ fn end_track(track: &mut track::Producer, end: u64) -> Result<(), Error> {
 		let _ = track.clone().abort(Error::ProtocolViolation);
 		return Err(Error::ProtocolViolation);
 	}
+	// Lower groups may still be on the wire, behind the one that carried the end.
+	track.set_tail_pending(true);
 	Ok(())
 }
 
