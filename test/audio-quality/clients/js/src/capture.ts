@@ -11,7 +11,7 @@ export type Input = {
 	broadcast: Getter<Broadcast | undefined>;
 	track: Getter<string | undefined>;
 	config: Getter<Catalog.AudioConfig | undefined>;
-	maxAge: Getter<Time.Milli>;
+	maxDelay: Getter<Time.Milli>;
 };
 
 /** Record frames on the player's connection with its subscription settings. */
@@ -34,14 +34,14 @@ export class Capture {
 				if (!active) return;
 				const track = active
 					.track(name)
-					.subscribe({ priority: Catalog.PRIORITY.audio, maxAge: input.maxAge.peek() });
+					.subscribe({ priority: Catalog.PRIORITY.audio, maxDelay: input.maxDelay.peek() });
 				const groups = new Set<Group.Consumer>();
 				effect.cleanup(() => {
 					track.close();
 					for (const group of groups) group.close();
 				});
 				effect.run((inner) =>
-					track.update({ priority: Catalog.PRIORITY.audio, maxAge: inner.get(input.maxAge) }),
+					track.update({ priority: Catalog.PRIORITY.audio, maxDelay: inner.get(input.maxDelay) }),
 				);
 				effect.spawn(async () => {
 					try {
