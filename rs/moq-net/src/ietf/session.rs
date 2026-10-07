@@ -169,6 +169,10 @@ where
 		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
 		let publish = publish.unwrap_or_else(|| origin::Producer::empty(Hop::random()).consume());
 		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()));
+		let subscriptions = crate::session::Slots::new(limits.subscriptions)
+			.with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
+		let announces =
+			crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
 
 		let res = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
@@ -192,7 +196,7 @@ where
 				let (tasks, mut task_set) = TaskSet::new();
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
-				publisher.subscriptions = crate::session::Slots::new(limits.subscriptions);
+				publisher.subscriptions = subscriptions;
 
 				let mut subscriber = Subscriber::new(
 					runtime.clone(),
@@ -207,7 +211,7 @@ where
 					tasks.clone(),
 					goaway.going_away.clone(),
 				);
-				subscriber.announces = crate::session::Slots::new(limits.announces);
+				subscriber.announces = announces;
 
 				// GOAWAY send task: draft-14-16 carry GOAWAY on the shared control
 				// stream. Parked on the drain trigger; races the transport close so
@@ -362,7 +366,7 @@ where
 				let (tasks, mut task_set) = TaskSet::new();
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
-				publisher.subscriptions = crate::session::Slots::new(limits.subscriptions);
+				publisher.subscriptions = subscriptions;
 
 				let mut subscriber = Subscriber::new(
 					runtime.clone(),
@@ -377,7 +381,7 @@ where
 					tasks,
 					goaway.going_away.clone(),
 				);
-				subscriber.announces = crate::session::Slots::new(limits.announces);
+				subscriber.announces = announces;
 
 				let sub_ns_session = session.clone();
 				let sub_ns = subscriber.clone();

@@ -1257,26 +1257,10 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 		}
 	}
 
+	/// Fails the session on any error, [`Error::TooManyRequests`] included: a peer
+	/// announcing more than the session allows loses the session.
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		match ready!(self.poll_run(waiter)) {
-			// More announcements than the session allows: refuse this announce stream
-			// alone, which retracts what it carried, and keep the session.
-			Err(err @ Error::TooManyRequests) => {
-				tracing::warn!(prefix = %self.prefix, %err, "refusing announce stream");
-				if let PrefixState::Send { stream }
-				| PrefixState::ReadOk { stream }
-				| PrefixState::Cost { stream, .. }
-				| PrefixState::ReadInit { stream, .. }
-				| PrefixState::Run { stream, .. } = std::mem::replace(&mut self.state, PrefixState::Open)
-				{
-					let Stream { writer, mut reader } = stream;
-					reader.abort(&err);
-					writer.abort(&err);
-				}
-				Poll::Ready(Ok(()))
-			}
-			res => Poll::Ready(res),
-		}
+		self.poll_run(waiter)
 	}
 
 	fn poll_run(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -3198,11 +3182,10 @@ mod tests {
 		cursor.assert_next_active("b");
 	}
 
-	/// An announce past the session's cap refuses that announce stream alone: the
-	/// prefix ends cleanly instead of failing the session, and what the stream carried
-	/// retracts and gives its slots back.
+	/// An announce past the session's cap fails the session with TOO_MANY_REQUESTS, and
+	/// the stream gives its slots back once the session drops it.
 	#[moq_net_sim::test]
-	async fn announces_past_the_cap_refuse_the_stream() {
+	async fn announces_past_the_cap_close_the_session() {
 		const VERSION: Version = Version::Lite06;
 		let start = |suffix| lite::AnnounceBroadcast::Active {
 			epoch: None,
@@ -3224,9 +3207,7 @@ mod tests {
 		}
 
 		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let consumer = origin.consume();
 		let session = crate::lite::test_transport::ScriptedSession::new(script);
-		let log = session.log.clone();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::Clock::sim(),
 			session,
@@ -3241,21 +3222,16 @@ mod tests {
 		let slots = crate::session::Slots::new(2);
 		subscriber.announces = slots.clone();
 		let mut prefix = AnnouncePrefix::new(subscriber, Path::new("").to_owned());
-		let mut cursor = consumer.announced();
 
-		let res = kio::wait(|waiter| prefix.poll(waiter)).await;
-		assert!(res.is_ok(), "refusing the stream must not fail the session: {res:?}");
-		assert_eq!(
-			log.stops(),
-			vec![crate::StreamError::Internal.to_code()],
-			"the stream was not refused"
-		);
+		let err = kio::wait(|waiter| prefix.poll(waiter))
+			.await
+			.expect_err("an announce past the cap must fail the session");
+		assert_eq!(crate::SessionError::from(&err), crate::SessionError::TooManyRequests);
 
-		// The two it took are retracted with it, so nothing ever went live.
-		cursor.assert_next_wait();
+		// The session's end drops the stream, which gives its slots back.
 		drop(prefix);
-		let _a = slots.acquire().expect("the refused stream kept a slot");
-		let _b = slots.acquire().expect("the refused stream kept a slot");
+		let _a = slots.acquire().expect("the failed stream kept a slot");
+		let _b = slots.acquire().expect("the failed stream kept a slot");
 	}
 }
 

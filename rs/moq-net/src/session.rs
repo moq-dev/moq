@@ -646,13 +646,13 @@ impl Drop for Withdrawing {
 
 /// Caps on what one peer can make a session hold at once.
 ///
-/// A request past a cap is refused on its own where the protocol allows it, never by
-/// closing the session: a SUBSCRIBE is answered with an error, and an announce stream
-/// that would exceed the cap is reset, dropping everything it carried.
+/// A peer that goes past a cap loses the session, closed with `TOO_MANY_REQUESTS`. The
+/// stats sessions rows report each root's peaks, so an operator sees how close sessions
+/// come before one is closed.
 ///
 /// On moq-transport drafts 14 to 16 the caps also size the request window, which counts
 /// every request (FETCH, TRACK_STATUS and SUBSCRIBE_UPDATE included), so very low caps
-/// can starve it and turn one more request into a session error.
+/// can starve it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
@@ -676,7 +676,7 @@ impl Limits {
 	/// How many requests a moq-transport peer may hold open at once (drafts 14 to 16).
 	///
 	/// Twice what the caps admit, so a peer within them is never blocked by request IDs
-	/// still waiting to be granted back: a request past a cap is refused instead.
+	/// still waiting to be granted back.
 	pub(crate) fn requests(&self) -> u64 {
 		let caps = self.announces.saturating_add(self.subscriptions) as u64;
 		caps.saturating_mul(2)
@@ -688,6 +688,8 @@ impl Limits {
 pub(crate) struct Slots {
 	live: Arc<std::sync::atomic::AtomicUsize>,
 	max: usize,
+	/// Where the most this session has held is reported.
+	stats: Option<(crate::stats::Session, crate::stats::Cap)>,
 }
 
 impl Slots {
@@ -695,17 +697,31 @@ impl Slots {
 		Self {
 			live: Default::default(),
 			max,
+			stats: None,
 		}
 	}
 
+	/// Report how many are held to `stats`, as `cap`'s peak.
+	pub(crate) fn with_stats(mut self, stats: &crate::stats::Session, cap: crate::stats::Cap) -> Self {
+		self.stats = Some((stats.clone(), cap));
+		self
+	}
+
 	/// Take one slot until the returned guard drops, or [`Error::TooManyRequests`] at the cap.
+	///
+	/// The caller closes the session on that error: a peer past its limits loses the session.
 	pub(crate) fn acquire(&self) -> Result<Slot, Error> {
 		use std::sync::atomic::Ordering;
-		self.live
+		let held = self
+			.live
 			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |live| {
 				(live < self.max).then_some(live + 1)
 			})
-			.map_err(|_| Error::TooManyRequests)?;
+			.map_err(|_| Error::TooManyRequests)?
+			+ 1;
+		if let Some((stats, cap)) = &self.stats {
+			stats.hold(*cap, held as u64);
+		}
 		Ok(Slot(self.live.clone()))
 	}
 }

@@ -610,13 +610,14 @@ where
 					.reject_subscribe(stream, request_id, &Error::Unsupported, "range filters not supported")
 					.await;
 			}
-			// Held for the life of the subscription.
+			// Held for the life of the subscription. A peer past its limits loses the session.
 			let _slot = match self.subscriptions.acquire() {
 				Ok(slot) => slot,
 				Err(err) => {
-					return self
-						.reject_subscribe(stream, request_id, &err, "too many subscriptions")
-						.await;
+					self.session
+						.clone()
+						.close(crate::SessionError::from(&err).to_code(), "too many subscriptions");
+					return Err(err);
 				}
 			};
 
@@ -3796,10 +3797,9 @@ mod serve_tests {
 		}
 	}
 
-	/// A SUBSCRIBE past the session's cap is refused with a request error, not by
-	/// closing the session.
+	/// A SUBSCRIBE past the session's cap closes the session with TOO_MANY_REQUESTS.
 	#[moq_net_sim::test]
-	async fn subscriptions_past_the_cap_are_refused_per_request() {
+	async fn subscriptions_past_the_cap_close_the_session() {
 		for version in [Version::Draft14, Version::Draft16, Version::Draft20] {
 			let mut h = serve(version);
 			h.publisher.subscriptions = crate::session::Slots::new(0);
@@ -3811,17 +3811,16 @@ mod serve_tests {
 			h.publisher
 				.clone()
 				.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream)
-				.unwrap_or_else(|e| panic!("{version}: the request closed the session: {e}"))
+				.unwrap_or_else(|e| panic!("{version}: the request was not started: {e}"))
 				.await;
-			assert!(h.log.resets().is_empty(), "{version}: refusal was reset");
-
-			let buf = h.log.writes.lock().unwrap().clone();
-			let id = Decoder::new(&buf, version.into()).varint().unwrap();
-			let expected = match version {
-				Version::Draft14 => ietf::SubscribeError::ID,
-				_ => ietf::RequestError::ID,
-			};
-			assert_eq!(id, expected, "{version}: SUBSCRIBE was not refused");
+			assert_eq!(
+				h.log.closes(),
+				vec![(
+					crate::SessionError::TooManyRequests.to_code(),
+					"too many subscriptions".to_string()
+				)],
+				"{version}"
+			);
 		}
 	}
 

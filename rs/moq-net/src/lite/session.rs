@@ -229,6 +229,10 @@ where
 	// subscribe origin issues no ANNOUNCE_PLEASE.
 	let publish = publish.unwrap_or_else(|| origin::Producer::empty(Hop::random()).consume());
 	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()));
+	let subscriptions =
+		crate::session::Slots::new(limits.subscriptions).with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
+	let announces =
+		crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
 
 	// Publisher and Subscriber each derive their identity from their own
 	// attached origin (publish.info / subscribe.info). This is what gets
@@ -274,7 +278,7 @@ where
 		peer_setup: peer_setup.clone(),
 		goaway: goaway.clone(),
 		peer_hop,
-		subscriptions: crate::session::Slots::new(limits.subscriptions),
+		subscriptions,
 	});
 	let mut subscriber = Subscriber::new(SubscriberConfig {
 		runtime: runtime.clone(),
@@ -290,7 +294,7 @@ where
 		cost: our_cost,
 		going_away: goaway.going_away.clone(),
 	});
-	subscriber.announces = crate::session::Slots::new(limits.announces);
+	subscriber.announces = announces;
 
 	let driver = Driver {
 		local_close: Default::default(),

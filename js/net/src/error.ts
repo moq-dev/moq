@@ -38,7 +38,7 @@ export const SessionCode = Object.freeze(
 		ProtocolViolation: 0x3 as SessionCode,
 		/** A key-value pair was malformed or repeated more than allowed. */
 		KeyValueFormatting: 0x6 as SessionCode,
-		/** A request ID was at or past the advertised MAX_REQUEST_ID (moq-transport drafts 14 to 16). */
+		/** The peer went past what the session allows: a request ID past MAX_REQUEST_ID, or too many announcements or subscriptions. */
 		TooManyRequests: 0x7 as SessionCode,
 		/** The peer did not close within the GOAWAY drain deadline. */
 		GoawayTimeout: 0x10 as SessionCode,

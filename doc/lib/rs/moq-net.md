@@ -89,13 +89,14 @@ close code.
 `Client::with_limits` and `Server::with_limits` take a `session::Limits`, which
 caps what the peer can make one session hold: `announces` (broadcasts, or
 moq-transport namespaces) and `subscriptions`. The defaults (100,000 and
-10,000) suit a relay mesh; lower them for untrusted peers. A subscription past
-the cap is refused on its own. An announce stream that would pass it is reset,
-which drops every broadcast that stream carried for the rest of the session.
-Neither closes the session. On moq-transport drafts 14 to 16 the limits also
-size the `MAX_REQUEST_ID` window advertised in SETUP, granted back as requests
-close. That window counts every request, FETCH and SUBSCRIBE_UPDATE included,
-so very low limits can starve it. A request ID past it closes the session with
+10,000) suit a relay mesh; lower them for untrusted peers. A peer that goes
+past either cap loses the session, closed with `TOO_MANY_REQUESTS`. Each
+auth root's stats `sessions` row reports `announces_peak` and
+`subscriptions_peak`, the most any one session held, so an operator sees how
+close sessions come. On moq-transport drafts 14 to 16 the limits also size the
+`MAX_REQUEST_ID` window advertised in SETUP, granted back as requests close.
+That window counts every request, FETCH and SUBSCRIBE_UPDATE included, so very
+low limits can starve it. A request ID past it also closes the session with
 `TOO_MANY_REQUESTS`, as the draft requires.
 
 Every length a peer declares is capped before it is buffered: 65,535 bytes for

@@ -309,11 +309,12 @@ impl<S: crate::transport::poll::Session> Control<S> {
 								self._slot = Some(slot);
 								ControlState::Subscribe(RequestServe::new(self.shared.clone(), stream))
 							}
-							// Refused on its own stream: the session and its other requests carry on.
+							// A peer past its limits loses the session, not just this request.
 							Err(err) => {
-								let Stream { writer, mut reader } = stream;
-								reader.abort(&err);
-								writer.abort(&err);
+								self.shared
+									.session
+									.clone()
+									.close(crate::SessionError::from(&err).to_code(), "too many subscriptions");
 								return Poll::Ready(Err(err));
 							}
 						},
@@ -4229,10 +4230,9 @@ mod tests {
 		assert_eq!(*run.track_priority_tx.read(), 7, "the update was lost");
 	}
 
-	/// A subscription past the session's cap is refused on its own stream, and the
-	/// publisher keeps serving the session.
+	/// A subscription past the session's cap closes the session with TOO_MANY_REQUESTS.
 	#[moq_net_sim::test]
-	async fn subscriptions_past_the_cap_are_refused() {
+	async fn subscriptions_past_the_cap_close_the_session() {
 		use crate::coding::Encode as _;
 
 		const VERSION: Version = Version::Lite06;
@@ -4256,10 +4256,13 @@ mod tests {
 			subscriptions: crate::session::Slots::new(0),
 		});
 
-		assert!(
-			publisher.poll(&kio::Waiter::noop()).is_pending(),
-			"the session must survive"
+		let _ = publisher.poll(&kio::Waiter::noop());
+		assert_eq!(
+			log.closes(),
+			vec![(
+				crate::SessionError::TooManyRequests.to_code(),
+				"too many subscriptions".to_string()
+			)]
 		);
-		assert_eq!(log.stops(), vec![crate::StreamError::Internal.to_code()]);
 	}
 }

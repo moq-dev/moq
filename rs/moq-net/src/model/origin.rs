@@ -1459,6 +1459,11 @@ impl Producer {
 		(producer, driver)
 	}
 
+	/// The ingress stats context this handle was tagged with.
+	pub(crate) fn stats(&self) -> &stats::Session {
+		&self.stats
+	}
+
 	/// Attach an ingress stats context: broadcasts created through this handle (and
 	/// any handle derived from it) are attributed to `session` on the subscriber
 	/// (ingress) side. Pass [`stats::Session::default`] to opt out.
@@ -4020,6 +4025,11 @@ impl Consumer {
 	/// Whether [`announced`](Self::announced) reports hidden routes too.
 	pub(crate) fn includes_hidden(&self) -> bool {
 		self.hidden.include
+	}
+
+	/// The egress stats context this handle was tagged with.
+	pub(crate) fn stats(&self) -> &stats::Session {
+		&self.stats
 	}
 
 	/// Attach an egress stats context: broadcasts handed out through this handle (and

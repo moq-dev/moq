@@ -232,8 +232,11 @@ Each node publishes `publisher.json`, `subscriber.json`, and `sessions.json`
 tracks (plus compressed `.json.z` twins) of cumulative counters per broadcast
 and auth root, split by a **tier** label chosen by the auth server's grant or
 `--cluster-tier`, which is what makes billing per customer or per region
-possible. [Stats](/concept/stats) describes the paths, tracks, and encodings;
-read them with the [`moq-stats`](https://docs.rs/moq-stats) crate.
+possible. Each `sessions.json` row also carries `announces_peak` and
+`subscriptions_peak`: the most any one session under that root held against
+the per-session limits, past which a session is closed with
+`TOO_MANY_REQUESTS`. [Stats](/concept/stats) describes the paths, tracks, and
+encodings; read them with the [`moq-stats`](https://docs.rs/moq-stats) crate.
 
 ## \[iroh]
 

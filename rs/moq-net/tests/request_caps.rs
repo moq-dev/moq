@@ -1,7 +1,7 @@
-//! A server's [`moq_net::session::Limits`] bound what one client can make it hold, without
-//! ending the session: subscriptions past the cap are refused one at a time, and on
-//! moq-transport drafts 14 to 16 the MAX_REQUEST_ID window they size is granted back as
-//! requests close, so a client that keeps opening and closing requests never stalls.
+//! A server's [`moq_net::session::Limits`] bound what one client can make it hold: a client
+//! past a cap loses the session with TOO_MANY_REQUESTS, and on moq-transport drafts 14 to 16
+//! the MAX_REQUEST_ID window they size is granted back as requests close, so a client that
+//! keeps opening and closing requests within the caps never stalls.
 
 mod support;
 
@@ -103,10 +103,9 @@ async fn closed_requests_are_granted_back() {
 	}
 }
 
-/// A subscription past the cap is refused on its own: the session and the subscription
-/// already held carry on, and the slot frees once that one ends.
+/// A subscription past the cap closes the session with TOO_MANY_REQUESTS.
 #[moq_net_sim::test]
-async fn subscriptions_past_the_cap_are_refused() {
+async fn a_subscription_past_the_cap_closes_the_session() {
 	for version in VERSIONS {
 		let setup = setup(version, limits(1, 1), 2).await;
 		let broadcast = moq_net_sim::timeout(TIMEOUT, setup.client.consume().routed_broadcast("bcast"))
@@ -114,12 +113,12 @@ async fn subscriptions_past_the_cap_are_refused() {
 			.expect("announce timeout")
 			.unwrap();
 
-		let held = moq_net_sim::timeout(TIMEOUT, broadcast.track("t0").unwrap().subscribe(None))
+		let _held = moq_net_sim::timeout(TIMEOUT, broadcast.track("t0").unwrap().subscribe(None))
 			.await
 			.expect("subscribe timeout")
 			.unwrap_or_else(|err| panic!("{version}: the first subscription was refused: {err}"));
 
-		// moq-lite hands the subscriber over once TRACK_INFO answers, so its refusal
+		// moq-lite hands the subscriber over once TRACK_INFO answers, so the close
 		// arrives on the first read instead.
 		let refused = moq_net_sim::timeout(TIMEOUT, async {
 			let mut subscriber = broadcast.track("t1").unwrap().subscribe(None).await?;
@@ -129,15 +128,40 @@ async fn subscriptions_past_the_cap_are_refused() {
 		.expect("subscribe timeout");
 		assert!(refused.is_err(), "{version}: a second subscription was admitted");
 
-		drop(held);
-		moq_net_sim::timeout(TIMEOUT, setup.tracks[0].demand().unused())
+		let err = moq_net_sim::timeout(TIMEOUT, setup._pair.client.closed())
 			.await
-			.expect("unsubscribe timeout")
-			.unwrap();
+			.unwrap_or_else(|_| panic!("{version}: the session stayed open"));
+		assert!(
+			matches!(err, moq_net::Error::Session(moq_net::SessionError::TooManyRequests)),
+			"{version}: closed with {err}"
+		);
+	}
+}
 
-		moq_net_sim::timeout(TIMEOUT, broadcast.track("t1").unwrap().subscribe(None))
+/// A broadcast announced past the cap closes the session with TOO_MANY_REQUESTS.
+#[moq_net_sim::test]
+async fn an_announce_past_the_cap_closes_the_session() {
+	for version in VERSIONS {
+		let version: Version = version.parse().unwrap();
+		let client = produce_origin(1);
+		let server = produce_origin(2);
+		let a = client.create_broadcast("a").unwrap();
+		let b = client.create_broadcast("b").unwrap();
+		a.announce(Default::default()).unwrap();
+		b.announce(Default::default()).unwrap();
+
+		let mut options = MockConnectOptions::new(version);
+		options.client_publish = Some(client.consume());
+		options.server_subscribe = Some(server.clone());
+		options.server_limits = Some(limits(1, 1));
+		let pair = connect_mock(options).await;
+
+		let err = moq_net_sim::timeout(TIMEOUT, pair.client.closed())
 			.await
-			.expect("subscribe timeout")
-			.unwrap_or_else(|err| panic!("{version}: the freed slot was not reused: {err}"));
+			.unwrap_or_else(|_| panic!("{version}: the session stayed open"));
+		assert!(
+			matches!(err, moq_net::Error::Session(moq_net::SessionError::TooManyRequests)),
+			"{version}: closed with {err}"
+		);
 	}
 }

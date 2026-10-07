@@ -1533,8 +1533,12 @@ where
 				Ok(())
 			}
 			Entry::Vacant(entry) => {
-				// Refused past the session's cap, as the request that asked for it.
-				let slot = self.announces.acquire()?;
+				// A peer past its limits loses the session, not just this namespace.
+				let slot = self.announces.acquire().inspect_err(|err| {
+					self.session
+						.clone()
+						.close(crate::SessionError::from(err).to_code(), "too many announcements");
+				})?;
 				// Propagates Error::Unauthorized if the namespace is out of scope.
 				let dynamic = self.origin.dynamic(&path, route.clone())?;
 
@@ -5279,11 +5283,12 @@ mod tests {
 		assert!(!table.map.contains_key(&0), "the oldest tombstone is forgotten first");
 	}
 
-	/// Namespaces past the session's cap are refused as the request that carried them,
-	/// a repeat of a held namespace costs nothing, and a retraction frees its slot.
+	/// A namespace past the session's cap closes the session with TOO_MANY_REQUESTS, a
+	/// repeat of a held namespace costs nothing, and a retraction frees its slot.
 	#[moq_net_sim::test]
-	async fn namespaces_past_the_cap_are_refused() {
+	async fn namespaces_past_the_cap_close_the_session() {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let log = session.log.clone();
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
@@ -5316,6 +5321,13 @@ mod tests {
 			subscriber.start_announce(b.clone(), over),
 			Err(Error::TooManyRequests)
 		));
+		assert_eq!(
+			log.closes(),
+			vec![(
+				crate::SessionError::TooManyRequests.to_code(),
+				"too many announcements".to_string()
+			)]
+		);
 
 		subscriber.stop_announce(a.clone()).unwrap();
 		subscriber.stop_announce(a).unwrap();

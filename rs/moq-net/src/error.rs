@@ -32,8 +32,9 @@ pub enum SessionError {
 	#[error("key-value formatting error")]
 	KeyValueFormatting,
 
-	/// The peer used a request ID at or past the MAX_REQUEST_ID we advertised.
-	/// moq-transport drafts 14 to 16 only; moq-lite has no request IDs.
+	/// The peer went past what the session allows: a request ID at or past the
+	/// MAX_REQUEST_ID we advertised (moq-transport drafts 14 to 16), or more announcements
+	/// or subscriptions than its [`crate::session::Limits`].
 	#[error("too many requests")]
 	TooManyRequests,
 
