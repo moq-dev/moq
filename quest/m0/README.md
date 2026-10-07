@@ -27,9 +27,10 @@ view (`origin::Consumer::local()`) to localhost workers belongs to moq.pro's
 edge, which embeds moq-relay; it moved there on 2026-09-28.
 
 Interop: Fastly's moq-relay-interop report (run of 2026-09-23, build
-7ee2b02) was triaged against `main` on 2026-10-07. Its End of Track, SETUP,
-UNSUBSCRIBE and error-code items were already fixed; the five fixes below
-LOCATION_FILTER come from it and go ahead of Seattle. The cold-relay Largest
+7ee2b02) was triaged against `main` on 2026-10-07. Its SETUP, UNSUBSCRIBE
+and error-code items were already fixed. End of Track ends cleanly, but a
+relay moves the marker's Location (Fastly's rerun on 2026-10-07). The six
+fixes below LOCATION_FILTER come from it and go ahead of Seattle. The cold-relay Largest
 and the deviations it flagged are in m1.
 
 Identity: the [broadcast epoch](/quest/m0/broadcast-epoch/README.md) line
@@ -53,6 +54,7 @@ a published `@moq/watch` break.
 - [NAMESPACE on the stream](/quest/m0/ietf-namespace-stream.md) - every draft-16+ SUBSCRIBE_NAMESPACE stream carries NAMESPACE for each match, whatever the peer's SETUP options
 - [Dialed split horizon](/quest/m0/dial-split-horizon.md) - a session moq-net dials gets a per-connection hop, so routes never echo back to the peer they came from
 - [No empty d14 prefix](/quest/m0/ietf-d14-root-prefix.md) - draft-14 never sends SUBSCRIBE_NAMESPACE with an empty prefix
+- [End of Track Location](/quest/m0/ietf-end-of-track-location.md) - a relay forwards END_OF_TRACK at its upstream's Location, on the last group's stream, instead of re-sending it at the next group's object 0
 - [Subgroup at object 0](/quest/m0/ietf-first-object-zero.md) - a draft-18 subgroup with FIRST_OBJECT clear that starts at object 0 is read whole
 - [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
 - [Prefix route fronts](/quest/m0/prefix-route-fronts.md) - a prefix route cannot be made to mint one front per requested path
