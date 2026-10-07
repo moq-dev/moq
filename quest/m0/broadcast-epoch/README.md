@@ -5,15 +5,15 @@
 A path and the epoch on its route are the only content identity, and no
 first-party publisher reuses a pair for different content. Only routes with
 the same epoch resume a subscription from the first frame it lacks; a route
-without one keeps its subscriptions until it goes. So epochs are what make
+without one keeps its subscriptions until a better route takes over. So epochs are what make
 failover seamless, and a restart is a new epoch at the same path: the newest
 epoch wins and ends subscriptions to the old one, so viewers re-request
 rather than stall on a replaced broadcast.
 
 The epoch rides moq-lite 07 announcements and requests as metadata, so the
 path never changes and every older version and moq-transport keeps working:
-their routes carry no epoch, stay on one route, and see a restart as an end
-and start at the same path.
+their routes carry no epoch, and see a restart as an end and start at the
+same path.
 
 Non-goals: pooling, which needs nothing here; a redundant pair shares an
 explicit epoch through [`--hop` removal](/quest/m0/broadcast-epoch/hop-removal.md).
@@ -33,8 +33,10 @@ Decided:
 - The route's epoch is taken as given: nothing mints one by default (decided
   2026-10-06). Each first-party publisher mints one per run and announces it;
   a replica announces a shared one. A route without one, such as a
-  transcoder's prefix claim, stays on the worker that first served a
-  subscription and is never stitched to another worker's output.
+  transcoder's prefix claim, is never stitched to another worker's output: a
+  better route takes over with a hard switch and an announcement (decided
+  2026-10-07, replacing "stays on the worker that first served a
+  subscription", which let dead routes linger).
 - The newest epoch wins a prefix ahead of cost (decided 2026-10-06), and
   replaces the old one with a hard switch: subscriptions in flight end with
   `Unroutable`. When it goes and an older one is still live, the older one
@@ -69,6 +71,7 @@ timeout, and killing the newest epoch falls back to a still-live older one.
 ## Required
 
 - [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web restart into a new epoch and reset on the switch
+- [Un-epoched takeover](/quest/m0/broadcast-epoch/unepoched-takeover.md) - a better route without an epoch takes over with a hard switch and an announcement, so a restarted lite-06 publisher reaches viewers
 - [TS restart](/quest/m0/broadcast-epoch/ts-restart.md) - a signalled backward TS discontinuity finishes the broadcast and continues the same input under a fresh epoch
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
 - [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - `moq` takes an optional `--epoch` instead of `--hop`, a plain publisher declares a random Hop ID, and the per-session hop stamp is gone

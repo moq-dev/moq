@@ -94,6 +94,29 @@ These land with the next breaking release, not the 2026-09-23 train.
   broadcast that ends with media queued behind an undescribed track is an error
   rather than an empty `Ok(None)`. Restart the export to pick up a new
   rendition.
+- **Subscriber staleness is max delay.** How far a group may fall behind the
+  live edge before a subscriber skips it is now `max_delay`, so it no longer
+  shares a name with a publisher's retention, which keeps `max_age`. In Rust,
+  `track::Subscription::max_age` and `with_max_age` are `max_delay` and
+  `with_max_delay`; moq-mux's `container::Consumer::set_max_age` and the fMP4,
+  MKV, FLV, H.264, and H.265 exports' `with_max_age` are `set_max_delay` and
+  `with_max_delay`; moq-audio's and moq-video's `decode::Options::max_age` is
+  `max_delay`, as is moq-audio's `decode::Consumer::max_age()`; and moq-rtmp's
+  `Play::with_max_age`, `Client::with_export_max_age`,
+  `listen::Config::export_max_age`, and `DEFAULT_MAX_AGE` are `with_max_delay`,
+  `with_export_max_delay`, `export_max_delay`, and `DEFAULT_MAX_DELAY`. In
+  TypeScript, `Track.Subscription`'s `maxAge` is `maxDelay`, as are
+  `Container.Consumer`'s `maxAge` prop and `@moq/watch`'s `Sync.out.maxAge`;
+  JavaScript refuses a `maxAge` key in subscription options or container consumer
+  props with a `TypeError` naming `maxDelay`, including when both keys are supplied
+  or `maxAge` is `undefined`. Untyped callers must rename it.
+  moq-ffi's `MoqSubscription`, `MoqAudioDecoderOutput`, and
+  `MoqVideoDecoderOutput` take `max_delay_us` (each binding in its own casing),
+  and so do C's `moq_subscription`, `moq_audio_decoder_output`,
+  `moq_video_decoder_output`, `moq_consume_video`, and `moq_consume_audio`.
+  `moq export fmp4`, `mkv`, `flv`, `h264`, `h265`, and `rtmp` take
+  `--max-delay`, and refuse `--max-age`. `track::Info::max_age`,
+  `MoqTrackInfo.max_age_us`, `moq import --max-age`, and `moq export ts --max-age` are unchanged, as is the wire.
 - **moq-relay auth takes the client-CA answer.** `auth::Config::validate` and
   `init` take `client_ca: bool`, whether any listener verifies client
   certificates, and `validate_client_ca` is gone. `moq --listen` with an

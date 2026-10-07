@@ -35,7 +35,7 @@ a cheaper route with that epoch, each subscription continues on the new route
 from the first frame its readers lack, so they see
 every frame once, mid-group included. A route that is still up finishes the
 groups it has open, overlapping the new one. A group neither route delivers is
-dropped once the readers' max age has passed it. A route through the subscribing peer
+dropped once the readers' max delay has passed it. A route through the subscribing peer
 itself is never used. A publisher whose groups restart, such as an encoder
 restarting from group 0, publishes under a new epoch, which replaces the old
 broadcast instead of resuming it. RTMP, SRT, and WHIP ingest mint one per
