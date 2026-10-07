@@ -3,7 +3,8 @@
 //! Used when QUIC is unreachable: UDP blocked by a firewall, a proxy in the way, a
 //! network that only passes TCP/443. The client races this against QUIC and gives QUIC
 //! a small head start ([`Config::delay`]), so WebSocket only wins when QUIC can't get
-//! through. Servers accept it on a separate TCP port via [`Listener`].
+//! through. A [`crate::Connection`] that lands on WebSocket keeps the QUIC dial going and
+//! moves onto it if it completes. Servers accept it on a separate TCP port via [`Listener`].
 
 use qmux::ws::tokio_tungstenite;
 use qmux::ws::tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, http};
@@ -105,6 +106,32 @@ type Result<T> = std::result::Result<T, Error>;
 
 // Track servers (hostname:port) where WebSocket won the race, so we won't give QUIC a headstart next time
 static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// The [`WEBSOCKET_WON`] key for a dial URL: the host and port the fallback dials.
+fn won_key(url: &Url) -> Result<(String, u16)> {
+	let host = url.host_str().ok_or(Error::MissingHostname)?.to_string();
+	let port = url.port().unwrap_or_else(|| match url.scheme() {
+		"https" | "wss" | "moql" | "moqt" => 443,
+		"http" | "ws" => 80,
+		_ => 443,
+	});
+	Ok((host, port))
+}
+
+/// Forget that WebSocket won for `url`, giving QUIC its head start again.
+///
+/// Called once a QUIC dial to `url` lands after all, which proves UDP gets through.
+pub(crate) fn forget(url: &Url) {
+	if let Ok(key) = won_key(url) {
+		WEBSOCKET_WON.lock().unwrap().remove(&key);
+	}
+}
+
+/// Whether the next dial to `url` skips QUIC's head start.
+#[cfg(all(test, feature = "noq"))]
+pub(crate) fn won(url: &Url) -> bool {
+	won_key(url).is_ok_and(|key| WEBSOCKET_WON.lock().unwrap().contains(&key))
+}
 
 /// WebSocket configuration for the client.
 #[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
@@ -278,13 +305,8 @@ pub(crate) async fn connect(
 		return Err(Error::Disabled);
 	}
 
-	let host = url.host_str().ok_or(Error::MissingHostname)?.to_string();
-	let port = url.port().unwrap_or_else(|| match url.scheme() {
-		"https" | "wss" | "moql" | "moqt" => 443,
-		"http" | "ws" => 80,
-		_ => 443,
-	});
-	let key = (host.clone(), port);
+	let key = won_key(&url)?;
+	let (host, port) = key.clone();
 
 	// Apply a small penalty to WebSocket to improve odds for QUIC to connect first,
 	// unless we've already had to fall back to WebSockets for this server.
@@ -719,7 +741,6 @@ mod tests {
 
 	#[tokio::test]
 	async fn fixed_addresses_keep_tls_name_and_request_host() {
-		tokio::time::pause();
 		check_tls_authority("relay.example", true, None).await;
 	}
 
@@ -730,7 +751,6 @@ mod tests {
 
 	#[tokio::test]
 	async fn ipv6_literal_fixed_addresses() {
-		tokio::time::pause();
 		check_tls_authority("[::1]", true, None).await;
 	}
 
@@ -741,6 +761,9 @@ mod tests {
 
 	/// Dial `wss://{url_host}` on loopback, optionally pinned to fixed addresses, and
 	/// check the TLS name and HTTP `Host` the server sees.
+	///
+	/// Stays on the wall clock. A paused clock auto-advances while the real dial
+	/// waits, so a timer on this path can fire before loopback delivers.
 	async fn check_tls_authority(url_host: &str, fixed: bool, tls_name: Option<&str>) {
 		let ipv6 = url_host.starts_with('[');
 		let name = tls_name.unwrap_or(url_host.trim_start_matches('[').trim_end_matches(']'));

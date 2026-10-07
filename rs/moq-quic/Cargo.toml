@@ -1,0 +1,99 @@
+[package]
+name = "moq-quic"
+description = "Sans-IO QUIC state machine for MoQ, forked from quinn-proto"
+repository = "https://github.com/moq-dev/moq"
+license = "MIT OR Apache-2.0"
+
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+
+keywords = ["quic"]
+categories = ["network-programming", "asynchronous"]
+
+[package.metadata.docs.rs]
+# all non-default features except fips (cannot build on docs.rs environment)
+features = ["rustls-aws-lc-rs", "rustls-ring", "platform-verifier", "rustls-log"]
+
+[package.metadata.cargo-shear]
+# Enables the `web` feature on wasm32-unknown-unknown; never named in code.
+ignored = ["rustls-pki-types"]
+
+[features]
+# quinn's own defaults turn on `platform-verifier`, MoQ's clients use it, and
+# the rustdoc links to it resolve only with it on.
+default = ["rustls-ring", "tracing-log", "bloom", "platform-verifier"]
+aws-lc-rs = ["dep:aws-lc-rs", "aws-lc-rs?/aws-lc-sys", "aws-lc-rs?/prebuilt-nasm"]
+aws-lc-rs-fips = ["aws-lc-rs", "aws-lc-rs?/fips"]
+# Enables BloomTokenLog, and uses it by default
+bloom = ["dep:fastbloom"]
+# For backwards compatibility, `rustls` forwards to `rustls-ring`
+rustls = ["rustls-ring"]
+# Enable rustls with the `aws-lc-rs` crypto provider
+rustls-aws-lc-rs = ["dep:rustls", "rustls?/aws-lc-rs", "aws-lc-rs"]
+rustls-aws-lc-rs-fips = ["rustls-aws-lc-rs", "aws-lc-rs-fips"]
+# Enable rustls with the `ring` crypto provider
+rustls-ring = ["dep:rustls", "rustls?/ring", "ring"]
+ring = ["dep:ring"]
+# Enable rustls ring provider and direct ring usage
+# Provides `ClientConfig::with_platform_verifier()` convenience method
+platform-verifier = ["dep:rustls-platform-verifier"]
+# Configure `tracing` to log events via `log` if no `tracing` subscriber exists.
+tracing-log = ["tracing/log"]
+# Enable rustls logging
+rustls-log = ["rustls?/logging"]
+# Enable qlog support
+qlog = ["dep:qlog"]
+
+# Internal (PRIVATE!) features used to aid testing.
+# Don't rely on these whatsoever. They may disappear at any time.
+
+__rustls-post-quantum-test = []
+
+[dependencies]
+arbitrary = { version = "1.0.1", features = ["derive"], optional = true }
+aws-lc-rs = { version = "1.9", default-features = false, optional = true }
+bytes = { workspace = true }
+fastbloom = { version = "0.17", default-features = false, optional = true }
+lru-slab = "0.1.2"
+qlog = { version = "0.18", optional = true }
+rand = { workspace = true }
+rand_pcg = "0.10"
+ring = { version = "0.17", optional = true }
+rustc-hash = { workspace = true }
+rustls = { version = "0.23.5", default-features = false, features = ["std"], optional = true }
+rustls-platform-verifier = { version = "0.7", optional = true }
+slab = { workspace = true }
+thiserror = { workspace = true }
+tinyvec = { version = "1.1", features = ["alloc"] }
+tracing = { version = "0.1.10", default-features = false, features = ["std"] }
+
+# Feature flags & dependencies for wasm
+# wasm-bindgen is assumed for a wasm*-*-unknown target
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", default-features = false, features = ["wasm_js"] }
+ring = { version = "0.17", features = ["wasm32_unknown_unknown_js"] }
+# only added as dependency to enforce the `web` feature for this target
+rustls-pki-types = { version = "1.7", features = ["web"] }
+web-time = "1"
+
+[dev-dependencies]
+assert_matches = "1.1"
+hex-literal = "1"
+rcgen = "0.14"
+tracing-subscriber = { version = "0.3.0", default-features = false, features = ["env-filter", "fmt", "ansi", "time", "local-time"] }
+wasm-bindgen-test = "0.3.45"
+
+# quinn's workspace lints, kept so upstream code stays clean against them.
+[lints.rust]
+elided_lifetimes_in_paths = "warn"
+# https://rust-fuzz.github.io/book/cargo-fuzz/guide.html#cfgfuzzing
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+unnameable_types = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+
+[lints.clippy]
+manual_let_else = "warn"
+or_fun_call = "warn"
+use_self = "warn"

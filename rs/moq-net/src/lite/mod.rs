@@ -7,6 +7,7 @@
 mod announce;
 mod compress;
 mod datagram;
+mod epoch;
 mod fetch;
 mod goaway;
 mod group;

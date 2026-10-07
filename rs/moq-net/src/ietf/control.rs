@@ -1,16 +1,13 @@
 use std::task::Poll;
 
-use crate::{Error, SessionError, coding::VarInt, ietf::RequestId};
+use crate::{Error, SessionError, ietf::RequestId};
 
 /// The MAX_REQUEST_ID that first admits `window` requests from a peer.
 ///
 /// A client's request IDs are even from 0 and a server's odd from 1, each stepping by 2.
 pub(crate) fn initial_max_request_id(window: u64, peer_client: bool) -> u64 {
 	let parity = if peer_client { 0 } else { 1 };
-	window
-		.saturating_mul(2)
-		.saturating_add(parity)
-		.min(VarInt::MAX.into_inner())
+	window.saturating_mul(2).saturating_add(parity).min((1 << 62) - 1)
 }
 
 struct ControlState {
@@ -102,7 +99,7 @@ impl Control {
 		incoming.retired += 1;
 		if incoming.retired.saturating_mul(2) >= incoming.window {
 			let grant = incoming.retired.saturating_mul(2);
-			incoming.max = incoming.max.saturating_add(grant).min(VarInt::MAX.into_inner());
+			incoming.max = incoming.max.saturating_add(grant).min((1 << 62) - 1);
 			incoming.retired = 0;
 		}
 	}
@@ -126,7 +123,7 @@ impl Control {
 	/// `runtime` arms the give-up timer, so the wait cannot outlive the caller's
 	/// clock.
 	pub async fn next_request_id(&self, runtime: &crate::time::Clock) -> Result<RequestId, Error> {
-		let mut timeout = crate::runtime::Deadline::after(runtime, std::time::Duration::from_secs(10));
+		let mut timeout = crate::time::Deadline::after(runtime, std::time::Duration::from_secs(10));
 
 		kio::wait(|waiter| {
 			let allowed = self.state.poll(waiter, |state| {

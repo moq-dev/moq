@@ -385,34 +385,45 @@ test("a push completing several frames keeps the encoder running", async () => {
 	]);
 });
 
-test("passes an explicit Opus DTX request to the encoder", async () => {
+// Chromium stamps Opus output by counting the samples emitted, so every frame DTX suppresses pulls
+// later audio earlier. A plain-JS caller passing the old knob must not reach the encoder.
+test("never enables Opus DTX", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	using env = await setup(new Baseline(), { mime: "opus", usedtx: true });
-	expect(env.config.opus?.usedtx).toBe(true);
+	using env = await setup(new Baseline(), { mime: "opus", usedtx: true } as Codec);
+	expect(env.config.opus?.usedtx).toBeUndefined();
 });
 
 // Another rendition on the same broadcast flushing with far less lateness leaves this one trailing
 // it, which the catalog advertises as `delay`.
 test("a rendition trailing the broadcast's earliest advertises delay", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	const baseline = new Baseline();
-	using env = await setup(baseline);
-	const { encoder, feed } = env;
+	const clock = spyOn(performance, "now").mockReturnValue(200);
 
-	expect(encoder.out.catalog.peek()?.delay).toBeUndefined();
+	try {
+		const baseline = new Baseline();
+		using env = await setup(baseline);
+		const { encoder, feed } = env;
 
-	// A sibling flushing 100ms less late than this rendition ever can. Shifting the sibling rather
-	// than backdating this capture keeps timestamps non-negative however young the process is.
-	baseline.observe(-100_000, performance.now() * 1000);
+		expect(encoder.out.catalog.peek()?.delay).toBeUndefined();
 
-	const start = performance.now() * 1000;
-	for (let index = 0; index < 4; index++) {
-		await feed.push({ timestamp: Time.Micro(start + index * 20_000), channels: [new Float32Array(960)] });
+		// A sibling that flushes each frame the instant it is captured.
+		baseline.observe(0, performance.now() * 1000);
+
+		// Captured 100ms ago, with a clock origin that keeps timestamps nonnegative.
+		const start = performance.now() * 1000 - 100_000;
+		for (let index = 0; index < 4; index++) {
+			await feed.push({ timestamp: Time.Micro(start + index * 20_000), channels: [new Float32Array(960)] });
+		}
+		await feed.drain();
+
+		expect(env.written).toEqual([
+			[100_000, 1],
+			[120_000, 1],
+		]);
+		expect(encoder.out.catalog.peek()).toMatchObject({ delay: 100 });
+	} finally {
+		clock.mockRestore();
 	}
-	await feed.drain();
-
-	expect(env.written.length).toBe(2);
-	expect(encoder.out.catalog.peek()?.delay).toBeGreaterThanOrEqual(100);
 });
 
 // Regression: codec settings that can't resolve left the encoder unsettled, so `<moq-publish>` never

@@ -30,4 +30,4 @@ with no buffer model, so a multi-frame PES can overflow B.
 
 ## Required
 
-- [T-STD TS export](/quest/m1/tstd/README.md) - the per-PID schedule this joins
+- [Fixed-delay muxing](/quest/m1/tstd/delay.md) - the per-PID admission this joins, which #4645 lands; the rest of the T-STD line is not needed (2026-10-06 audit)

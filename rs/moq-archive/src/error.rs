@@ -10,7 +10,7 @@ pub enum Error {
 	#[error("not found: {0}")]
 	NotFound(String),
 
-	/// The recording format version is not 1.
+	/// The recording format version is not the current one.
 	#[error("unknown version {0}")]
 	Version(u64),
 
@@ -38,9 +38,9 @@ pub enum Error {
 	#[error("group sequences are not strictly ascending")]
 	Sequence,
 
-	/// A group range is empty, reversed, or does not match an object's table.
-	#[error("invalid or mismatched group bounds {smallest}..={largest}")]
-	Bounds { smallest: u64, largest: u64 },
+	/// An object's table does not hold exactly the frames its record names.
+	#[error("object does not match its record")]
+	Span,
 
 	/// The binary table is truncated, overlapping, gapped, or out of range.
 	#[error("malformed table")]
@@ -73,6 +73,26 @@ pub enum Error {
 	/// `.info` JSON is malformed.
 	#[error("json: {0}")]
 	Json(String),
+
+	/// Publishing the replayed archive failed.
+	#[error("moq: {0}")]
+	Moq(String),
+
+	/// The track was already enrolled, or is the recording's own timeline.
+	#[error("track already enrolled: {0}")]
+	Enrolled(String),
+
+	/// The source broadcast or one of its tracks failed.
+	#[error("source: {0}")]
+	Source(String),
+
+	/// The recording's timeline could not be recovered, segmented, or published.
+	#[error("timeline: {0}")]
+	Timeline(String),
+
+	/// The writer stopped accepting commands.
+	#[error("writer closed")]
+	Closed,
 }
 
 impl From<object_store::Error> for Error {
@@ -81,6 +101,12 @@ impl From<object_store::Error> for Error {
 			object_store::Error::NotFound { path, .. } => Self::NotFound(path),
 			other => Self::Store(other.to_string()),
 		}
+	}
+}
+
+impl From<moq_net::Error> for Error {
+	fn from(err: moq_net::Error) -> Self {
+		Self::Moq(err.to_string())
 	}
 }
 

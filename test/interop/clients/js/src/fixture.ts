@@ -17,7 +17,7 @@ import { Time } from "@moq/net";
 import * as Publish from "@moq/publish";
 import { Effect, Signal } from "@moq/signals";
 import type { Fault, FixtureState } from "./contract";
-import { KEYFRAME_INTERVAL_MS, OFFSET_STEPS, SAMPLE_RATE } from "./contract";
+import { KEYFRAME_INTERVAL_MS, OFFSET_STEPS, readLiveGop, SAMPLE_RATE } from "./contract";
 import * as Pattern from "./pattern";
 
 /** Cap the encoder rather than letting it track a bandwidth estimate, so runs are comparable. */
@@ -47,6 +47,7 @@ export class Fixture {
 	readonly host: HTMLElement;
 
 	readonly #signals = new Effect();
+	readonly #broadcast: Publish.Broadcast;
 	readonly #audio: AudioContext;
 	readonly #frameId = new Signal(-1);
 	readonly #audioState = new Signal<AudioContextState>("suspended");
@@ -94,6 +95,8 @@ export class Fixture {
 			display: capture.out.display,
 		});
 		this.#signals.cleanup(() => broadcast.close());
+
+		this.#broadcast = broadcast;
 
 		const video = new Publish.Video.Encoder("video", {
 			broadcast,
@@ -183,8 +186,8 @@ export class Fixture {
 		this.#signals.interval(schedule, (SCHEDULE_AHEAD * 1000) / 4);
 	}
 
-	// Paint and emit one frame per pattern tick. The counter comes from the audio clock rather than
-	// the timer, so a late or coalesced tick skips a frame instead of drifting the two apart.
+	// Paint and request capture per pattern tick. Capture and encoding can finish later. The counter
+	// comes from the audio clock, so a coalesced tick skips a frame instead of drifting the two apart.
 	#runPicture(ctx: CanvasRenderingContext2D, track: CanvasSource, start: number, fault: Fault): void {
 		let painted = -1;
 
@@ -202,12 +205,19 @@ export class Fixture {
 		};
 
 		// Twice the frame rate: a tick that lands between frames is a no-op, and one that lands late
-		// still emits the frame the clock is on.
+		// still requests capture of the frame the clock is on.
 		this.#timer = self.setInterval(tick, 1000 / Pattern.FPS / 2);
 		this.#signals.cleanup(() => {
 			if (this.#timer !== undefined) self.clearInterval(this.#timer);
 			this.#timer = undefined;
 		});
+	}
+
+	/** Sample the current published keyframe before the viewer closes its subscription. */
+	async liveGop() {
+		const broadcast = this.#broadcast.net.peek();
+		if (!broadcast) throw new Error("the fixture is not publishing");
+		return readLiveGop(broadcast.track("video"));
 	}
 
 	/** Stop publishing and release the capture, audio graph, and session. */

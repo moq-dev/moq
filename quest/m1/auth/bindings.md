@@ -24,9 +24,9 @@ one without the plugin reconnecting.
   generated C and C++ bindings get this from moq-ffi, and OBS reaches it
   through [C++ through moq-ffi](/quest/m1/cpp/README.md); update `cpp/obs/src`
   only if the plugin surfaces a token field.
-- Interop: the Python, Go, and C++ interop clients print their grant and join
-  the assertion [Interop grants](/quest/m1/auth/interop.md) adds for Rust
-  and JS.
+- Interop: the Python, Go, and C++ interop clients print their grant as the
+  `auth granted publish=[...] subscribe=[...]` line and join `prints_grant` and
+  `enforces_grant` in `test/interop/interop.sh`, beside Rust and JS.
 - Wrappers: `py/moq-rs/moq/session.py`, `swift/Sources/Moq`,
   `kt/.../Flows.kt` (a `Flow` over `grant_changed`), `go/wrapper/moq/session.go`
   (context-cancellable like the rest), and `dart/moq/lib/moq.dart`. Kotlin
@@ -43,6 +43,6 @@ surface comes from moq-ffi rather than new `moq_session_auth_*` calls.
 
 ## Required
 
-- [Lite stream](/quest/m1/auth/lite.md) - supplies `Session::auth()`
+- [FFI shape](/quest/m1/ffi-shape/README.md) - reshapes the moq-ffi session and wrappers this edits, so the wrappers break once
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - supplies the connection
   accessor and a relay that answers a real token, which the wrapper tests need

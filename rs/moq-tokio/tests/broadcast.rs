@@ -372,7 +372,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 #[tokio::test]
 async fn broadcast_moq_lite_05_fetch_webtransport() {
 	// Exercises the WebTransport path; lite-05 is forced via config on both ends.
-	// The raw-QUIC ALPN path is covered by broadcast_race_quic_wins.
+	// The raw-QUIC ALPN path is covered by client::tests::broadcast_race_quic_wins.
 	lite05_fetch_roundtrip("https").await;
 }
 
@@ -991,14 +991,17 @@ async fn read_payloads(sub: &mut moq_net::track::Subscriber, count: usize) -> Ve
 /// The client connects to two servers announcing the same route. The preferred
 /// (cheaper) route serves the track; when that session dies, the broadcast
 /// re-splices through the standby at a group boundary, without the path ever
-/// being retracted: both routes name the same first hop, so they are the same
-/// origin reached different ways and the subscription rides the failover.
+/// being retracted: both routes carry the same epoch over lite-07, so they serve
+/// the same bytes and the subscription rides the failover.
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_route_migration() {
 	use moq_net::Timestamp;
 
 	let publisher = Hop::new(0x42).unwrap();
+	// Replicas of one publisher instance, and the only version that carries it.
+	let epoch = moq_net::Epoch::mint();
+	let lite_07: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
 
 	// ── publisher A: the preferred route (cheaper) ──────────────────
 	let origin_a = moq_tokio::origin::spawn();
@@ -1006,7 +1009,12 @@ async fn broadcast_route_migration() {
 	hops_a.push(publisher).unwrap();
 	let broadcast_a = origin_a.create_broadcast("test").expect("create broadcast");
 	broadcast_a
-		.announce(moq_net::origin::Route::default().with_hops(hops_a).with_cost(1))
+		.announce(
+			moq_net::origin::Route::default()
+				.with_epoch(epoch.clone())
+				.with_hops(hops_a)
+				.with_cost(1),
+		)
 		.expect("announce");
 	let track_a = broadcast_a.create_track("video", None).expect("create track");
 	for sequence in 0..2u64 {
@@ -1026,7 +1034,12 @@ async fn broadcast_route_migration() {
 	hops_b.push(Hop::new(0x1234).unwrap()).unwrap();
 	let broadcast_b = origin_b.create_broadcast("test").expect("create broadcast");
 	broadcast_b
-		.announce(moq_net::origin::Route::default().with_hops(hops_b).with_cost(2))
+		.announce(
+			moq_net::origin::Route::default()
+				.with_epoch(epoch.clone())
+				.with_hops(hops_b)
+				.with_cost(2),
+		)
 		.expect("announce");
 	let track_b = broadcast_b.create_track("video", None).expect("create track");
 	// A clone to keep producing from the test body once the task owns the rest.
@@ -1043,12 +1056,14 @@ async fn broadcast_route_migration() {
 	}
 	let server_a = {
 		let mut config = moq_tokio::listen::Config::default();
+		config.version = vec![lite_07];
 		config.bind = Some("[::]:0".parse().unwrap());
 		config.tls.generate = vec!["localhost".into()];
 		config.init(Default::default()).expect("init server a")
 	};
 	let server_b = {
 		let mut config = moq_tokio::listen::Config::default();
+		config.version = vec![lite_07];
 		config.bind = Some("[::]:0".parse().unwrap());
 		config.tls.generate = vec!["localhost".into()];
 		config.init(Default::default()).expect("init server b")
@@ -1082,6 +1097,7 @@ async fn broadcast_route_migration() {
 
 	let connect = |port: u16, sub: moq_net::origin::Producer| {
 		let mut config = moq_tokio::connect::Config::default();
+		config.version = vec![lite_07];
 		config.tls.insecure = Some(true);
 		let client = config.init(Default::default()).expect("init client");
 		let url: url::Url = format!("moqt://localhost:{port}").parse().unwrap();
@@ -2091,7 +2107,7 @@ async fn broadcast_websocket() {
 	// ── run server and client concurrently ──────────────────────────
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		assert_eq!(request.transport(), moq_tokio::server::Transport::WebSocket);
+		assert_eq!(request.transport(), moq_tokio::Transport::WebSocket);
 		assert_eq!(request.path(), "");
 		// The dialed host reaches the server as the authority, like the QUIC transports.
 		assert_eq!(request.authority(), Some("localhost"));
@@ -2213,7 +2229,7 @@ async fn broadcast_websocket_fallback() {
 	// ── run server and client concurrently ──────────────────────────
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		assert_eq!(request.transport(), moq_tokio::server::Transport::WebSocket);
+		assert_eq!(request.transport(), moq_tokio::Transport::WebSocket);
 		assert_eq!(request.path(), "/admin");
 		assert_eq!(request.query(), Some("jwt=test"));
 		assert_eq!(request.url().and_then(url::Url::query), Some("jwt=test"));
@@ -2330,87 +2346,7 @@ async fn broadcast_websocket_uses_newest_version() {
 
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		assert_eq!(request.transport(), moq_tokio::server::Transport::WebSocket);
-		let session = request.with_publisher(&pub_origin).ok().await?;
-		assert_eq!(session.version(), expected_version, "server negotiated stale version");
-		let _broadcast = broadcast;
-		let _track = track;
-		let _ = session.closed().await;
-		Ok::<_, anyhow::Error>(())
-	});
-
-	let client = client.with_subscriber(sub_origin);
-	let (_client, cc) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
-		.await
-		.expect("client connect timed out")
-		.expect("client connect failed");
-
-	assert_eq!(cc.version(), Some(expected_version), "client negotiated stale version");
-
-	drop(cc);
-	server_handle
-		.await
-		.expect("server task panicked")
-		.expect("server task failed");
-}
-
-/// Regression guard for the QUIC vs WebSocket race. With both transports
-/// reachable at the same URL, QUIC must win, since it's lower-latency and
-/// has direct ALPN negotiation. A WebSocket win here means QUIC silently
-/// regressed (and would also tend to drag the version down to Lite02 on
-/// older relays). We bind WebSocket TCP and QUIC UDP to the same port,
-/// then disable the head start so the race is genuine.
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_race_quic_wins() {
-	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
-	broadcast
-		.announce(Default::default())
-		.expect("failed to create broadcast");
-	let track = broadcast.create_track("video", None).expect("failed to create track");
-	let mut group = track.append_group().expect("failed to append group");
-	group
-		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"hello".as_ref())
-		.expect("failed to write frame");
-	group.finish().expect("failed to finish group");
-
-	// Bind WebSocket TCP first to pick a random port, then bind QUIC UDP to
-	// the same port. UDP and TCP live in separate kernel namespaces, so this
-	// works on every supported platform.
-	let ws_listener = moq_tokio::websocket::Listener::bind("[::]:0".parse().unwrap())
-		.await
-		.expect("failed to bind WebSocket listener");
-	let port = ws_listener.local_addr().expect("failed to get ws addr").port();
-
-	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some(format!("[::]:{port}").parse().unwrap());
-	server_config.tls.generate = vec!["localhost".into()];
-
-	let mut config = moq_tokio::server::Config::default();
-	config.listen = server_config;
-	config.websocket = Some(ws_listener);
-	let server = config.init().expect("failed to init server");
-	let mut server = server.listen().await.expect("failed to listen");
-
-	let sub_origin = moq_tokio::origin::spawn();
-	let mut client_config = moq_tokio::connect::Config::default();
-	client_config.tls.insecure = Some(true);
-	// Zero head start: QUIC has to win on its own merit, not by penalising WS.
-	client_config.websocket.delay = Duration::ZERO;
-
-	let client = client_config.init(Default::default()).expect("failed to init client");
-	let url: url::Url = format!("https://localhost:{port}").parse().unwrap();
-
-	let expected_version: moq_net::Version = NEWEST_LITE.parse().expect("invalid version");
-
-	let server_handle = tokio::spawn(async move {
-		let request = server.accept().await.expect("no incoming connection");
-		assert_eq!(
-			request.transport(),
-			moq_tokio::server::Transport::Quic,
-			"QUIC lost the race to WebSocket with both reachable",
-		);
+		assert_eq!(request.transport(), moq_tokio::Transport::WebSocket);
 		let session = request.with_publisher(&pub_origin).ok().await?;
 		assert_eq!(session.version(), expected_version, "server negotiated stale version");
 		let _broadcast = broadcast;

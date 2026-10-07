@@ -5,8 +5,8 @@
 //! WebTransport session. This covers both directions (produce + consume) plus
 //! the wasm timestamp clock that the producer path depends on.
 //!
-//! Run (bypassing `wasm-pack test`, which builds the crate's native-only lib
-//! unit tests too. They use `tokio::spawn` and don't compile on wasm):
+//! Run (bypassing `wasm-pack test`, which also builds the crate's native-only
+//! lib unit tests):
 //!
 //! ```sh
 //! CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \

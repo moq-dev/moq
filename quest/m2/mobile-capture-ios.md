@@ -7,7 +7,7 @@ through ReplayKit.
 
 ## Plan
 
-Rust owns capture and codecs on mobile, settled in the 2026-09-30 audit ([Mobile ownership](/quest/m1/mobile-ownership.md)).
+Rust owns capture and codecs on mobile, settled in the 2026-09-30 audit.
 Not a new codec backend. VideoToolbox encode, decode, and the native
 PixelBuffer surface compile on iOS (the `apple` cfg in moq-video). Verify the
 runtime path on a device rather than assuming desktop behavior. The new work is

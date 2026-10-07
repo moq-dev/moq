@@ -47,7 +47,7 @@ import {
 import {
 	type CaptureState,
 	FAULTS,
-	KEYFRAME_INTERVAL_MS,
+	lateJoinStartsLive,
 	leakedPlayerStarted,
 	SAMPLE_MS,
 	SAMPLE_RATE,
@@ -114,9 +114,6 @@ const MIN_RATE = 0.5;
  * step off some of the time. Two steps is not boundary noise.
  */
 const MAX_SKEW_STEPS = 1;
-
-/** The first decodable frame may start at the current GOP's keyframe, but never in older history. */
-const MAX_LATE_JOIN_LAG_FRAMES = Math.ceil((Pattern.FPS * KEYFRAME_INTERVAL_MS) / 1000);
 
 const percentile = (values: number[], p: number) => {
 	if (values.length === 0) return Number.NaN;
@@ -660,8 +657,8 @@ try {
 	// at the live edge rather than replay what it missed.
 	if (wants("late-join")) {
 		console.error("=== late join ===");
+		const live = await command(publisher, "liveGop");
 		await player.close();
-		const live = await readFixtureState(publisher);
 		[player, playerErrors] = await subscriber(broadcast, "latecomer");
 		await gesture(player);
 		const joined = await waitForState(player, playerErrors, {
@@ -670,17 +667,16 @@ try {
 			description: "the latecomer to present the fixture",
 			predicate: (state) => state.frameId !== undefined && state.audioContext === "running",
 		});
-		// The fixture sample names the frame painted immediately before the page opens. The first
-		// decodable frame can be the keyframe at the start of the current GOP, so require it to be
-		// within that GOP rather than requiring an impossible zero-frame capture/encode delay.
-		const lag = live.frameId - (joined.frameId ?? 0);
+		// requestFrame() is asynchronous, and capture timestamps decide keyframes. The painted
+		// counter can therefore be over 15 ticks ahead of a still-current encoded GOP under load.
+		// Compare against its actual published keyframe, sampled while the old viewer held demand.
 		check(
-			lag <= MAX_LATE_JOIN_LAG_FRAMES,
+			lateJoinStartsLive(live, joined.videoTimestamp),
 			"late join starts live",
 			() =>
-				`joined at frame ${joined.frameId}, ${lag} frames behind the ${live.frameId} already published when it opened (one GOP is ${MAX_LATE_JOIN_LAG_FRAMES})`,
+				`joined at frame ${joined.frameId}, timestamp ${joined.videoTimestamp}ms before the current GOP's ${live.timestamp}ms keyframe`,
 		);
-		console.error(`  joined at frame ${joined.frameId}, live edge was ${live.frameId}`);
+		console.error(`  joined at frame ${joined.frameId}, timestamp ${joined.videoTimestamp}ms, current GOP began at ${live.timestamp}ms`);
 		assertMedia(await collect(player, playerErrors, WINDOW_MS), "late join");
 	}
 

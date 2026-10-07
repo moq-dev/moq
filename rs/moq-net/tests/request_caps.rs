@@ -23,7 +23,7 @@ const VERSIONS: [&str; 5] = [
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(support::harness::run(driver));
+	support::harness::spawn(driver);
 	producer
 }
 
@@ -71,7 +71,7 @@ fn limits(announces: usize, subscriptions: usize) -> Limits {
 
 /// Many more requests than the window admits at once, opened and closed in turn, all
 /// succeed: each one that closes is granted back.
-#[tokio::test]
+#[moq_net_sim::test]
 async fn closed_requests_are_granted_back() {
 	const ROUNDS: usize = 64;
 
@@ -79,14 +79,14 @@ async fn closed_requests_are_granted_back() {
 		// A window of 8 requests, far fewer than the rounds below. The cap leaves room
 		// for an UNSUBSCRIBE still in flight when the next SUBSCRIBE lands.
 		let setup = setup(version, limits(0, 4), ROUNDS).await;
-		let broadcast = tokio::time::timeout(TIMEOUT, setup.client.consume().routed_broadcast("bcast"))
+		let broadcast = moq_net_sim::timeout(TIMEOUT, setup.client.consume().routed_broadcast("bcast"))
 			.await
 			.expect("announce timeout")
 			.unwrap();
 
 		for round in 0..ROUNDS {
 			let track = broadcast.track(&format!("t{round}")).unwrap();
-			let subscriber = tokio::time::timeout(TIMEOUT, track.subscribe(None))
+			let subscriber = moq_net_sim::timeout(TIMEOUT, track.subscribe(None))
 				.await
 				.unwrap_or_else(|_| panic!("{version}: round {round} stalled"))
 				.unwrap_or_else(|err| panic!("{version}: round {round} refused: {err}"));
@@ -95,7 +95,7 @@ async fn closed_requests_are_granted_back() {
 
 			// Wait for the server to see it end, so the next round is a fresh request.
 			let published = &setup.tracks[round];
-			tokio::time::timeout(TIMEOUT, published.demand().unused())
+			moq_net_sim::timeout(TIMEOUT, published.demand().unused())
 				.await
 				.unwrap_or_else(|_| panic!("{version}: round {round} never ended"))
 				.unwrap();
@@ -105,23 +105,23 @@ async fn closed_requests_are_granted_back() {
 
 /// A subscription past the cap is refused on its own: the session and the subscription
 /// already held carry on, and the slot frees once that one ends.
-#[tokio::test]
+#[moq_net_sim::test]
 async fn subscriptions_past_the_cap_are_refused() {
 	for version in VERSIONS {
 		let setup = setup(version, limits(1, 1), 2).await;
-		let broadcast = tokio::time::timeout(TIMEOUT, setup.client.consume().routed_broadcast("bcast"))
+		let broadcast = moq_net_sim::timeout(TIMEOUT, setup.client.consume().routed_broadcast("bcast"))
 			.await
 			.expect("announce timeout")
 			.unwrap();
 
-		let held = tokio::time::timeout(TIMEOUT, broadcast.track("t0").unwrap().subscribe(None))
+		let held = moq_net_sim::timeout(TIMEOUT, broadcast.track("t0").unwrap().subscribe(None))
 			.await
 			.expect("subscribe timeout")
 			.unwrap_or_else(|err| panic!("{version}: the first subscription was refused: {err}"));
 
 		// moq-lite hands the subscriber over once TRACK_INFO answers, so its refusal
 		// arrives on the first read instead.
-		let refused = tokio::time::timeout(TIMEOUT, async {
+		let refused = moq_net_sim::timeout(TIMEOUT, async {
 			let mut subscriber = broadcast.track("t1").unwrap().subscribe(None).await?;
 			subscriber.recv_group().await.map(|_| ())
 		})
@@ -130,12 +130,12 @@ async fn subscriptions_past_the_cap_are_refused() {
 		assert!(refused.is_err(), "{version}: a second subscription was admitted");
 
 		drop(held);
-		tokio::time::timeout(TIMEOUT, setup.tracks[0].demand().unused())
+		moq_net_sim::timeout(TIMEOUT, setup.tracks[0].demand().unused())
 			.await
 			.expect("unsubscribe timeout")
 			.unwrap();
 
-		tokio::time::timeout(TIMEOUT, broadcast.track("t1").unwrap().subscribe(None))
+		moq_net_sim::timeout(TIMEOUT, broadcast.track("t1").unwrap().subscribe(None))
 			.await
 			.expect("subscribe timeout")
 			.unwrap_or_else(|err| panic!("{version}: the freed slot was not reused: {err}"));

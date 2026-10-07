@@ -1,6 +1,7 @@
 import { expect, jest, mock, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
+import * as Epoch from "../epoch.ts";
 import { error } from "../error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "../group.ts";
 import { type Hop, HopSchema } from "../hop.ts";
@@ -879,6 +880,36 @@ test("republishing a path clears a refusal without unannouncing first", async ()
 	const retried = await nextStream(pair.client);
 	if (!retried) throw new Error("the replacement broadcast was never offered");
 	expect(await readPublishNamespace(retried)).toBe(Path.from("recycled"));
+	await acceptPublishNamespace(retried);
+
+	origin.close();
+});
+
+/**
+ * A new epoch on the same broadcast handle is another publisher instance, so a refusal of
+ * the old one does not strand it. Rust gets this from the END and START an epoch change
+ * delivers.
+ */
+test("a new epoch at the same path clears a refusal", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const { pub, origin } = publisher(pair.server);
+
+	const broadcast = origin.createBroadcast(Path.from("restarted"));
+	broadcast.announce({ epoch: Epoch.mint() });
+
+	void pub.runPublishNamespaces();
+
+	const declined = await nextStream(pair.client);
+	if (!declined) throw new Error("the namespace was never advertised");
+	expect(await readPublishNamespace(declined)).toBe(Path.from("restarted"));
+	await declinePublishNamespace(declined, 0n);
+	await new Promise((resolve) => setTimeout(resolve, SETTLE));
+
+	broadcast.announce({ ...broadcast.route, epoch: Epoch.mint() });
+
+	const retried = await nextStream(pair.client);
+	if (!retried) throw new Error("the new instance was never offered");
+	expect(await readPublishNamespace(retried)).toBe(Path.from("restarted"));
 	await acceptPublishNamespace(retried);
 
 	origin.close();
@@ -2024,6 +2055,47 @@ test("draft-20: an opt-out peer gets no track properties", async () => {
 		if (propertiesWanted) {
 			const length = await reader.u53();
 			expect(length).toBeGreaterThan(0); // the properties block, carrying the timestamp
+			await reader.read(length);
+		}
+		expect(await reader.read(await reader.u53())).toEqual(new TextEncoder().encode("0.0"));
+
+		fx.close();
+		client.close();
+	}
+});
+
+/**
+ * Drafts 14-16 cannot send TIMESCALE, so a subscribed group carries no Timestamp even though
+ * the track has units. Draft-17 declares the units and stamps the object.
+ */
+test("drafts 14-16 send no Timestamp without TIMESCALE", async () => {
+	for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16, Version.DRAFT_17] as const) {
+		const fx = fixture(version);
+		const track = fx.broadcast.createTrack("video");
+		const { client, ok } = await runSubscribe(
+			fx,
+			new Subscribe({
+				requestId: 7n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 0,
+			}),
+		);
+
+		const stamped = version >= Version.DRAFT_17;
+		expect(ok.properties.timescale !== undefined).toBe(stamped);
+
+		writeGroup(track, 1);
+		const served = await nextUni(fx.uni);
+		if (!served) throw new Error("the group was never served");
+		const reader = new Reader(served, undefined, version);
+		const header = await GroupMessage.decode(reader, version);
+		expect(header.flags.hasExtensions).toBe(stamped);
+
+		await reader.u53(); // object id delta
+		if (stamped) {
+			const length = await reader.u53();
+			expect(length).toBeGreaterThan(0);
 			await reader.read(length);
 		}
 		expect(await reader.read(await reader.u53())).toEqual(new TextEncoder().encode("0.0"));

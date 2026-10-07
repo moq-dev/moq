@@ -385,6 +385,8 @@ pub struct Token {
 	pub tier: Tier,
 	/// Whether the session is a cluster peer, so its routes entered elsewhere.
 	pub peer: bool,
+	/// Whether the peer is upstream, so it is never offered another upstream's routes.
+	pub upstream: bool,
 }
 
 impl Token {
@@ -407,6 +409,7 @@ impl Token {
 			publish: grant.publish.clone(),
 			tier: crate::configured_tier(grant.tier.clone()),
 			peer: grant.peer,
+			upstream: grant.upstream,
 		}
 	}
 
@@ -480,8 +483,9 @@ impl Lease {
 	///
 	/// A changed root or mounts, or a narrower grant, ends it: origin handles cannot yet narrow
 	/// a live scope in place (tracked by `quest/m1/auth/narrowing.md`). A flipped
-	/// `peer` ends it too, since the routes it already announced would be
-	/// misreported as entering here or from a peer. A changed tier keeps the
+	/// `peer` or `upstream` ends it too, since the routes it already announced
+	/// would be misreported as entering here or from a peer, or offered to the
+	/// wrong links. A changed tier keeps the
 	/// session and moves its [stats](Self::with_stats) to the new tier.
 	pub async fn ended(&mut self) -> lease::Reason {
 		loop {
@@ -505,6 +509,9 @@ impl Lease {
 						// entering here or from a peer; a flip would misreport them.
 						if fresh.peer != self.token.peer {
 							return "peer changed".into();
+						}
+						if fresh.upstream != self.token.upstream {
+							return "upstream changed".into();
 						}
 						if !self.token.covered_by(&fresh) {
 							return lease::Reason::Narrowed;
@@ -714,11 +721,12 @@ impl Admission {
 /// transport knows, nothing parsed on the server's behalf.
 pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request {
 	let transport = match request.transport() {
-		moq_tokio::server::Transport::Quic => moq_auth::Transport::Quic,
-		moq_tokio::server::Transport::Iroh => moq_auth::Transport::Iroh,
-		moq_tokio::server::Transport::WebSocket => moq_auth::Transport::WebSocket,
-		moq_tokio::server::Transport::Tcp => moq_auth::Transport::Tcp,
-		moq_tokio::server::Transport::Unix => moq_auth::Transport::Unix,
+		// The auth contract names QUIC either way; WebTransport is QUIC underneath.
+		moq_tokio::Transport::Quic | moq_tokio::Transport::WebTransport => moq_auth::Transport::Quic,
+		moq_tokio::Transport::Iroh => moq_auth::Transport::Iroh,
+		moq_tokio::Transport::WebSocket => moq_auth::Transport::WebSocket,
+		moq_tokio::Transport::Tcp => moq_auth::Transport::Tcp,
+		moq_tokio::Transport::Unix => moq_auth::Transport::Unix,
 		// A transport this build does not know is still a session on the wire; the
 		// server sees the same facts either way.
 		other => unreachable!("unknown transport {other}"),
@@ -1054,7 +1062,7 @@ mod tests {
 	/// Routes a session announced were recorded as a peer's or not; a re-check that
 	/// flips it closes the session rather than misreport them.
 	#[tokio::test]
-	async fn a_recheck_that_flips_peer_closes() {
+	async fn a_recheck_that_flips_the_link_closes() {
 		let grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
 		let (producer, consumer) = lease::Producer::new(grant.clone());
 		let mut lease = Lease::new("/", consumer);
@@ -1062,8 +1070,17 @@ mod tests {
 
 		let mut peer = grant;
 		peer.peer = true;
-		producer.update(peer);
+		producer.update(peer.clone());
 		assert_eq!(lease.ended().await.to_string(), "peer changed");
+
+		// Routes already offered to (or withheld from) the session were filtered
+		// by whether it is upstream, so flipping that closes it too.
+		let (producer, consumer) = lease::Producer::new(peer.clone());
+		let mut lease = Lease::new("/", consumer);
+		let mut upstream = peer;
+		upstream.upstream = true;
+		producer.update(upstream);
+		assert_eq!(lease.ended().await.to_string(), "upstream changed");
 	}
 
 	#[test]

@@ -10,7 +10,7 @@ use support::harness::{MockConnectOptions, connect_mock};
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(support::harness::run(driver));
+	support::harness::spawn(driver);
 	producer
 }
 
@@ -32,17 +32,17 @@ async fn release(version: Version) {
 	track.demand().used().await.unwrap();
 
 	broadcast.unannounce();
-	tokio::time::sleep(Duration::from_secs(1)).await;
+	moq_net_sim::sleep(Duration::from_secs(1)).await;
 
 	drop(sub);
 	drop(remote);
-	tokio::time::timeout(Duration::from_secs(600), track.demand().unused())
+	moq_net_sim::timeout(Duration::from_secs(600), track.demand().unused())
 		.await
 		.unwrap_or_else(|_| panic!("{version}: the relay kept its upstream subscription"))
 		.unwrap();
 }
 
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn unannounced_remote_track_releases_demand() {
 	for name in Version::names() {
 		release(name.parse().unwrap()).await;

@@ -260,7 +260,7 @@ impl Cluster {
 		let mut config = origin::Config::new(Hop::new(self.next_hop).unwrap());
 		config.pool = cache::Pool::new(cache::Config::default().with_capacity(capacity));
 		let (producer, driver) = origin::Producer::new(config);
-		tokio::spawn(support::harness::run(driver));
+		support::harness::spawn(driver);
 		producer
 	}
 

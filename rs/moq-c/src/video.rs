@@ -968,7 +968,7 @@ pub unsafe extern "C" fn moq_decode_video_frame(id: u32, dst: *mut moq_video_fra
 		let frame = State::lock().video.frame(id)?;
 		let pixels = frame.pixels()?;
 		*dst = moq_video_frame {
-			// The decoded Timestamp is bounded by a QUIC VarInt, so its microseconds fit.
+			// The decoded Timestamp is bounded by a QUIC varint, so its microseconds fit.
 			timestamp_us: frame.frame.timestamp.as_micros() as u64,
 			width: pixels.width,
 			height: pixels.height,

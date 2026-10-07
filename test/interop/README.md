@@ -19,6 +19,12 @@ subscriber checks end-to-end: the browser encodes fake microphone audio, and the
 Python and Go clients encode a synthetic tone through `moq-ffi` at a 2.5 ms frame
 duration, so the matrix covers the FFI audio path with a non-default codec config.
 
+Whenever the browser subscriber is in the run, the matrix ends with a close-code
+case: Chromium dials the relay with a token its public rules refuse, and
+`WebTransport.closed` must carry the relay's code and reason. Chromium treats a
+server's HTTP/3 control stream ending as fatal, so a server that ends it under
+the close capsule loses both; no Rust peer is that strict.
+
 `just test media` is a separate, browser-only run that asks a harder
 question: is the media a viewer gets actually advancing and in sync, and does the
 player survive the publication lifecycle. See [Media QA](#media-qa).
@@ -126,7 +132,10 @@ Each run covers, against a real local relay:
   The fake device is not physical hardware, and the headless permission decision
   is not a person clicking a browser prompt.
 - **pause and resume**, **unsubscribe and rejoin**, **detach and reattach**,
-  **publisher stop and same-path republish**, and **late join**.
+  **publisher stop and same-path republish**, and **late join**. The late join
+  must present the newest published GOP or a newer one. Its lower bound is the
+  encoded keyframe timestamp sampled before the existing viewer closes, since
+  painting the canvas does not mean capture and encoding have finished.
 - **resources return to baseline** - the page wraps `WebTransport`, `WebSocket`,
   `AudioContext`, and `Worker` to count live instances, so a detach that leaks a
   session is visible rather than merely invisible.
@@ -172,6 +181,7 @@ clients/
   go/main.go              publish/subscribe via go/wrapper (import moq-go/moq)
   js/                     headless-Chromium publish/subscribe via @moq/watch + @moq/publish
     driver.ts             the interop matrix's browser publisher/subscriber
+    close.ts              the refused session's close code and reason
     media.ts              the media output + lifecycle checks
     harness.ts            shared Playwright plumbing
     src/contract.ts       what the page and its drivers agree on, free of browser imports
@@ -179,6 +189,7 @@ clients/
     src/pattern.ts        how that fixture encodes itself into the picture and the audio
     src/probe.ts          subscriber-side measurement, taken at the sinks
     src/instrument.ts     live counts of the platform resources the page holds
+    src/close.ts          the refused session, read off `WebTransport.closed`
   js-native/subscribe.ts  subscribe via @moq/net + @moq/hang + the WebTransport polyfill
   c/subscribe.c           subscribe via rs/moq-c
 ```
@@ -211,5 +222,5 @@ match byte for byte and decode back to the same value.
 version dispatch: `lite-varint.ts` decodes Rust's lite-06 (QUIC) and lite-07
 (leading-ones) varints, a SETUP carrying a 62-bit Hop ID, a datagram, and a
 GROUP stream with frames, and re-encodes them byte for byte. Past 2^62-1 the
-range is per version: JS writes lite-07's 64-bit values, which Rust must refuse
-with a decode error until its `VarInt` widens, and JS refuses them on lite-06.
+range is per version: JS writes lite-07's 64-bit values, which Rust reads back,
+and JS refuses them on lite-06.
