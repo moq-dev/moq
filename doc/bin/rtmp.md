@@ -31,8 +31,9 @@ is unauthenticated; firewall it.
 
 Each push or pull is its own broadcast, under a fresh
 [epoch](/concept/moq-lite#publisher-epochs): an encoder that reconnects while
-its stale connection is still open replaces it at once, so viewers move to the
-new push instead of stalling on the old one. Import publishes the encoder's own timestamps
+its stale connection is still open replaces it at once. Subscriptions to the
+stale push end with `Unroutable` instead of stalling, and a viewer's next
+subscribe reaches the new push. Import publishes the encoder's own timestamps
 and anchors the catalog clock on the first frame, so it names the wall time the
 push arrived. A group starting before the previous group's start, such as an
 encoder restarting its timestamps mid-push, ends that push with an error.

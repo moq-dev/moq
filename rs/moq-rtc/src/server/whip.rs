@@ -98,10 +98,10 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 /// server's) lets the embedder publish through a *scoped* origin, so the publish
 /// scope is enforced by moq-net exactly as for a native session; the bundled
 /// [`router`] passes the server's own (unauthenticated) producer. It parses the
-/// offer, registers the broadcast under a fresh epoch (so a fast subscriber
+/// offer, registers a media session on the shared mux, publishes the
+/// broadcast under a fresh epoch once negotiation succeeds (so a fast subscriber
 /// doesn't 404 in the gap before the first RTP packet, and a reconnecting
-/// encoder replaces a stale session's broadcast at once), registers a media session on the shared mux,
-/// and returns the SDP answer plus an opaque `resource_id` for the WHIP
+/// encoder replaces a stale session's broadcast at once), and returns the SDP answer plus an opaque `resource_id` for the WHIP
 /// `Location` header. The caller must run the returned [`Response`] to drive the
 /// RTP->MoQ session.
 ///
@@ -119,19 +119,6 @@ pub async fn accept(
 	let offer = sdp::parse_offer(offer)?;
 	let broadcast = broadcast.as_path();
 
-	// Create the broadcast on the publish origin before negotiating, so a
-	// fast subscriber doesn't see a 404 in the gap between the SDP answer
-	// and the first RTP packet. Each offer is its own publisher instance, so a
-	// reconnect replaces a stale session's broadcast instead of resuming into it.
-	let epoch = moq_net::Epoch::mint();
-	let producer = publisher.publish(&broadcast, moq_net::origin::Route::default().with_epoch(epoch.clone()))?;
-
-	let handle = producer.clone();
-	let config = moq_mux::catalog::Config::default()
-		.with_max_age(server.config().max_age)
-		.with_bandwidth(server.config().bandwidth.clone());
-	let sink = Box::new(IngestSink::new(producer, config)?);
-
 	// Register a session on the shared media mux: known ICE credentials (so the
 	// demux routes this peer's STUN by ufrag), an inbox to read datagrams from,
 	// and a guard the session task holds for its lifetime (unregisters on exit).
@@ -146,6 +133,21 @@ pub async fn accept(
 	}
 
 	let answer = rtc.sdp_api().accept_offer(offer).map_err(Error::rtc)?;
+
+	// Publish only once negotiation succeeded, so a failed offer leaves a live
+	// session's broadcast alone, but before returning the answer, so a fast
+	// subscriber doesn't see a 404 in the gap before the first RTP packet. Each
+	// offer is its own publisher instance, so a reconnect replaces a stale
+	// session's broadcast instead of resuming into it.
+	let epoch = moq_net::Epoch::mint();
+	let producer = publisher.publish(&broadcast, moq_net::origin::Route::default().with_epoch(epoch.clone()))?;
+
+	let handle = producer.clone();
+	let config = moq_mux::catalog::Config::default()
+		.with_max_age(server.config().max_age)
+		.with_bandwidth(server.config().bandwidth.clone());
+	let sink = Box::new(IngestSink::new(producer, config)?);
+
 	let resource_id = sdp::new_resource_id();
 	let session = session::Session::ingest(rtc, mux.socket(), mux.candidates().to_vec(), inbound, sink);
 
