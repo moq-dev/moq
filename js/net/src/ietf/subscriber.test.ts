@@ -1215,11 +1215,6 @@ test("a group served from partway through is dropped", async () => {
 });
 
 /**
- * FIRST_OBJECT is the publisher's claim, and the object ids are what actually happened. A
- * peer that sets the bit and then starts at object 5 is contradicting itself, so the group
- * is aborted rather than delivered with a hole the header said was not there.
- */
-/**
  * Drafts 14-17 have no FIRST_OBJECT bit, so a subgroup that starts at the live edge
  * arrives with `firstObject` forced on and a non-zero first delta. That stream is the
  * in-progress group: drop it, keep the subscription, and deliver the next group, which
@@ -1238,6 +1233,7 @@ test("a draft without FIRST_OBJECT drops a subgroup that starts mid-group", asyn
 		flags: groupFlags(true),
 	});
 	await subscriber.handleGroup(partial, new Reader(undefined, encodeObjects([2, 0]), version));
+	expect(track.latest()).toBeUndefined();
 	expect(track.closed.peek()).toBeUndefined();
 
 	const whole = groupFlags(true);
@@ -1265,6 +1261,11 @@ test("a draft without FIRST_OBJECT drops a subgroup that starts mid-group", asyn
 	track.close();
 });
 
+/**
+ * FIRST_OBJECT is the publisher's claim, and the object ids are what actually happened. A
+ * peer that sets the bit and then starts at object 5 is contradicting itself, so the group
+ * is aborted rather than delivered with a hole the header said was not there.
+ */
 test("a group that claims its first object must start at zero", async () => {
 	const { subscriber, track } = await subscribeTrack();
 
