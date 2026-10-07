@@ -35,10 +35,12 @@ Decided:
   a replica announces a shared one. A route without one, such as a
   transcoder's prefix claim, stays on the worker that first served a
   subscription and is never stitched to another worker's output.
-- The newest epoch wins a prefix ahead of cost (decided 2026-10-06), and
-  replaces the old one with a hard switch: subscriptions in flight end with
-  `Unroutable`. When it goes and an older one is still live, the older one
-  wins again as a new broadcast.
+- The newest epoch wins a prefix ahead of cost (decided 2026-10-06). The
+  2026-10-06 hard switch (subscriptions in flight end with `Unroutable`) is
+  reversed (2026-10-07): subscriptions stay sticky on their route and an
+  explicit `Restart` announce event tells players to follow, through
+  [Restart](/quest/m0/broadcast-epoch/restart.md). When the newest goes and
+  an older one is still live, the older one wins again as a new broadcast.
 - A catalog `broadcast` reference by name follows the newest epoch, since a
   path cannot name one.
 - Every first-party publisher that can restart mints its own: the apps,
@@ -69,6 +71,7 @@ timeout, and killing the newest epoch falls back to a still-live older one.
 ## Required
 
 - [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web restart into a new epoch and reset on the switch
+- [Restart](/quest/m0/broadcast-epoch/restart.md) - a replaced broadcast reaches announce consumers as an explicit Restart, subscriptions stay sticky, and new requests never join a replaced route's front
 - [Gateways](/quest/m0/broadcast-epoch/gateways.md) - RTMP, SRT, and WHIP ingest mint an epoch per incoming connection, so an encoder reconnect is a clean takeover
 - [TS restart](/quest/m0/broadcast-epoch/ts-restart.md) - a signalled backward TS discontinuity finishes the broadcast and continues the same input under a fresh epoch
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
