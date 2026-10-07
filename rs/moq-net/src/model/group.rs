@@ -540,6 +540,7 @@ impl Producer {
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
 		self.cache.settle(now);
+		self.cache.wakes().presented(timestamp);
 
 		// Ingress payload: one whole frame written.
 		self.stats.frames(1);
@@ -587,6 +588,7 @@ impl Producer {
 
 		// The last frame's tick, reused below so settling does not re-read the clock.
 		let mut now = None;
+		let mut latest = None;
 		for mut frame in frames.drain() {
 			frame.timestamp = frame
 				.timestamp
@@ -596,6 +598,7 @@ impl Producer {
 			state.cache += size;
 			now = state.charge.add(size);
 			state.stamp(frame.timestamp);
+			latest = Some(frame.timestamp);
 			state.frames.push_back(frame);
 		}
 		state.next_index = next_index;
@@ -603,6 +606,9 @@ impl Producer {
 		drop(state);
 
 		self.cache.settle(now);
+		if let Some(latest) = latest {
+			self.cache.wakes().presented(latest);
+		}
 		self.stats.frames(count as u64);
 		self.stats.bytes(bytes);
 		Ok(())
@@ -691,6 +697,7 @@ impl Producer {
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
 		self.cache.settle(now);
+		self.cache.wakes().presented(timestamp);
 
 		// Ingress payload: one frame opened; its bytes are counted per chunk as the
 		// producer writes them.
@@ -1200,7 +1207,7 @@ pub(crate) trait Expiry: Send + Sync + std::panic::UnwindSafe + std::panic::RefU
 	/// Return whether the group is stale, registering `waiter` for anything that
 	/// could change the answer while the group remains live.
 	/// A logical reader supplies its current budget after the original copy is gone.
-	fn is_expired(&self, max_age: Option<std::time::Duration>, waiter: &kio::Waiter) -> bool;
+	fn is_expired(&self, max_delay: Option<std::time::Duration>, waiter: &kio::Waiter) -> bool;
 
 	/// Keep the reader's budget and cap while following a replacement track's edge.
 	fn for_track(&self, track: &track::Consumer) -> Arc<dyn Expiry>;
@@ -1405,7 +1412,7 @@ impl Consumer {
 		self.cursor.expiry_pending()
 	}
 
-	/// Whether this cursor failed because its subscription max age budget expired.
+	/// Whether this cursor failed because its subscription max delay budget expired.
 	#[cfg(test)]
 	pub(crate) fn latency_expired(&self) -> bool {
 		self.expired

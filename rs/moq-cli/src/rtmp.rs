@@ -37,14 +37,31 @@ pub struct ExportArgs {
 	#[usage(flatten)]
 	pub endpoint: Args,
 
-	/// How stale a group may get before it is skipped. RTMP is unpaced, so this
-	/// bounds buffering, not the wire rate.
+	/// How far a group may fall behind the live edge before it is skipped. RTMP is
+	/// unpaced, so this bounds buffering, not the wire rate.
 	#[usage(long, default = "500ms")]
-	pub max_age: crate::duration::Duration,
+	pub max_delay: crate::duration::Duration,
 
-	/// The released spelling of [`Self::max_age`].
+	/// The released spelling of [`Self::max_delay`].
+	#[usage(long = "max-age", hide = true)]
+	max_age: Option<crate::duration::Duration>,
+
+	/// The released spelling of [`Self::max_delay`], before `--max-age`.
 	#[usage(long = "latency-max", hide = true)]
-	pub(crate) latency_max: Option<crate::duration::Duration>,
+	latency_max: Option<crate::duration::Duration>,
+}
+
+impl ExportArgs {
+	pub(crate) fn deprecated(&self) -> moq_tokio::cli::Deprecated {
+		let mut found = moq_tokio::cli::Deprecated::default();
+		if self.max_age.is_some() {
+			found.flag("--max-age", None, "--max-delay");
+		}
+		if self.latency_max.is_some() {
+			found.flag("--latency-max", None, "--max-delay");
+		}
+		found
+	}
 }
 
 /// Accept incoming RTMP publishes into the Origin as `target.name`; reject plays (import).
@@ -93,7 +110,7 @@ pub async fn listen_export(
 	origin: moq_net::origin::Consumer,
 	addr: SocketAddr,
 	name: String,
-	max_age: Duration,
+	max_delay: Duration,
 ) -> anyhow::Result<()> {
 	let mut server = Server::bind(addr).await?;
 	tracing::info!(%addr, %name, "RTMP listening (export)");
@@ -105,7 +122,7 @@ pub async fn listen_export(
 				let origin = origin.clone();
 				let name = name.clone();
 				tokio::spawn(async move {
-					if let Err(err) = play.with_max_age(max_age).accept(&origin, &name).await {
+					if let Err(err) = play.with_max_delay(max_delay).accept(&origin, &name).await {
 						tracing::warn!(%name, %err, "RTMP play ended with error");
 					}
 				});
@@ -144,7 +161,7 @@ pub async fn connect_export(
 	origin: moq_net::origin::Consumer,
 	url: Url,
 	name: String,
-	max_age: Duration,
+	max_delay: Duration,
 ) -> anyhow::Result<()> {
 	let (addr, app, key) = parse_url(&url).await?;
 	// Confirm the broadcast is reachable (and wait for it to be announced) before dialing;
@@ -158,7 +175,7 @@ pub async fn connect_export(
 	tracing::info!(%addr, %app, %name, "RTMP client pushing");
 	notify_ready();
 
-	let client = Client::connect(addr, &app).await?.with_export_max_age(max_age);
+	let client = Client::connect(addr, &app).await?.with_export_max_delay(max_delay);
 	Ok(client.publish(&key, origin, &name).await?)
 }
 
