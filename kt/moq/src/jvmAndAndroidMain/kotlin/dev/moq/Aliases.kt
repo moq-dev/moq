@@ -39,7 +39,7 @@ typealias AnnouncedBroadcast = uniffi.moq.MoqAnnouncedBroadcast
 typealias Announce = uniffi.moq.MoqAnnounce
 /**
  * What an [AnnounceConsumer] yields: [AnnounceEventStart], [AnnounceEventUpdate],
- * [AnnounceEventEnd], or [AnnounceEventLive].
+ * or [AnnounceEventEnd].
  */
 typealias AnnounceEvent = uniffi.moq.MoqAnnounceEvent
 // Kotlin cannot reach a sealed class's subtypes through its typealias, so each
@@ -50,8 +50,6 @@ typealias AnnounceEventStart = uniffi.moq.MoqAnnounceEvent.Start
 typealias AnnounceEventUpdate = uniffi.moq.MoqAnnounceEvent.Update
 /** No route covers the prefix any more; carries its last route. */
 typealias AnnounceEventEnd = uniffi.moq.MoqAnnounceEvent.End
-/** Every route live at subscribe time has been delivered; what follows is live changes. */
-typealias AnnounceEventLive = uniffi.moq.MoqAnnounceEvent.Live
 // Broadcast / track / group producers and consumers.
 /** The write side of a broadcast: publish tracks into it. */
 typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer

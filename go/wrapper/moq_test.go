@@ -1431,83 +1431,21 @@ func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
 	}
 }
 
-// Live marks the end of the routes live at subscribe time: at once on an empty
-// origin, and after the existing routes otherwise, so an app can list and stop.
-func TestAnnouncedYieldsLiveOnceCaughtUp(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
-
-	origin := newOrigin(t)
-	consumer := origin.Consume()
-
-	empty, err := consumer.Announced(moq.AnnounceOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer empty.Cancel()
-	if event, err := empty.Next(ctx); err != nil || event != (moq.AnnounceEventLive{}) {
-		t.Fatalf("empty origin: event=%+v err=%v, want Live", event, err)
-	}
-
-	broadcast, err := origin.CreateBroadcast("cam")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = broadcast.Close() }()
-	if err := broadcast.Announce(moq.Route{}); err != nil {
-		t.Fatal(err)
-	}
-	available, err := consumer.AnnouncedBroadcast("cam")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer available.Cancel()
-	if _, err := available.Available(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	announced, err := consumer.Announced(moq.AnnounceOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer announced.Cancel()
-
-	var listed []string
-	for event, err := range announced.All(ctx) {
-		if err != nil {
-			t.Fatal(err)
-		}
-		if a, ok := event.(moq.AnnounceEventStart); ok {
-			listed = append(listed, a.Announce.Prefix)
-		}
-		if _, ok := event.(moq.AnnounceEventLive); ok {
-			break
-		}
-	}
-	if len(listed) != 1 || listed[0] != "cam" {
-		t.Fatalf("listed = %v, want [cam]", listed)
-	}
-}
-
-// nextRoute returns the next announce event that is not Live, skipping Live wherever it lands.
+// nextRoute returns the next announce event.
 func nextRoute(t *testing.T, ctx context.Context, announced *moq.AnnounceConsumer) moq.AnnounceEvent {
 	t.Helper()
 
-	for {
-		event, err := announced.Next(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if event == nil {
-			t.Fatal("announcement stream ended")
-		}
-		if _, live := event.(moq.AnnounceEventLive); !live {
-			return event
-		}
+	event, err := announced.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if event == nil {
+		t.Fatal("announcement stream ended")
+	}
+	return event
 }
 
-// nextAnnounced returns the next newly announced route, skipping Live.
+// nextAnnounced returns the next newly announced route.
 func nextAnnounced(t *testing.T, ctx context.Context, announced *moq.AnnounceConsumer) moq.Announce {
 	t.Helper()
 
