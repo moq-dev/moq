@@ -20,7 +20,7 @@ pub struct MoqTrackInfo {
 	pub priority: u8,
 	/// Maximum age of a non-latest group before the publisher evicts it, in
 	/// microseconds. Null imposes no publisher age limit. This is the publisher-side half of
-	/// [`MoqSubscription::max_age_us`](crate::consumer::MoqSubscription::max_age_us).
+	/// [`MoqSubscription::max_delay_us`](crate::consumer::MoqSubscription::max_delay_us).
 	#[uniffi(default = None)]
 	pub max_age_us: Option<u64>,
 	/// Per-frame timescale in ticks per second. Null uses microseconds.

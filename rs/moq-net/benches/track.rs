@@ -408,7 +408,8 @@ fn bench_parked_read(c: &mut Criterion) {
 			let mut held: Vec<_> = waiters
 				.iter()
 				.map(|waiter| {
-					let mut sub = track.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(1)));
+					let mut sub =
+						track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(1)));
 					let Poll::Ready(Ok(Some(mut head))) = sub.poll_recv_group(waiter) else {
 						panic!("head is cached");
 					};

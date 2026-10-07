@@ -64,12 +64,12 @@ type SyncOutput = {
 
 	// Derived: true when a lookahead is configured. Buffered playback lets the reference stay
 	// anchored so future-dated frames build up, re-anchoring (skipping ahead) only once they
-	// would sit further than `maxAge` ahead of the playhead. See `reset()`.
+	// would sit further than `maxDelay` ahead of the playhead. See `reset()`.
 	buffered: Signal<boolean>;
 
 	// Derived: `delay + buffer`, the furthest a held frame may sit ahead of the playhead. Feeds the
 	// transport subscription and the container consumer, which bound the same span. Always finite.
-	maxAge: Signal<Time.Milli>;
+	maxDelay: Signal<Time.Milli>;
 };
 
 export class Sync {
@@ -82,7 +82,7 @@ export class Sync {
 		jitter: new Signal<Time.Milli>(Time.Milli.zero),
 		timestamp: new Signal<Time.Milli | undefined>(undefined),
 		buffered: new Signal<boolean>(false),
-		maxAge: new Signal<Time.Milli>(Time.Milli.zero),
+		maxDelay: new Signal<Time.Milli>(Time.Milli.zero),
 	};
 	readonly out = readonlys(this.#out);
 
@@ -102,7 +102,7 @@ export class Sync {
 
 		this.#signals.run(this.#runInstant.bind(this));
 		this.#signals.run(this.#runDelay.bind(this));
-		this.#signals.run(this.#runMaxAge.bind(this));
+		this.#signals.run(this.#runMaxDelay.bind(this));
 	}
 
 	/** Hold a decoder's "auto" playout target in the shared playback clock until disposed. */
@@ -116,14 +116,14 @@ export class Sync {
 		this.#out.instant.set(effect.get(this.in.delay) === "instant");
 	}
 
-	// Derive `buffered` / `maxAge` from the resolved delay and the configured lookahead.
-	#runMaxAge(effect: Effect): void {
+	// Derive `buffered` / `maxDelay` from the resolved delay and the configured lookahead.
+	#runMaxDelay(effect: Effect): void {
 		const delay = effect.get(this.#out.delay);
 		// "instant" holds nothing, so a configured lookahead doesn't apply.
 		const buffer = effect.get(this.#out.instant) ? Time.Milli.zero : effect.get(this.in.buffer);
 
 		this.#out.buffered.set(buffer > 0);
-		this.#out.maxAge.set(Time.Milli.add(delay, buffer));
+		this.#out.maxDelay.set(Time.Milli.add(delay, buffer));
 	}
 
 	// A fixed delay is taken literally and "auto" holds the deepest track's target, so every track
@@ -145,7 +145,7 @@ export class Sync {
 	}
 
 	// Fold a newly received frame into the reference. The reference anchors playback to the
-	// wall clock; we lower it (skip ahead) only when keeping it would push the lookahead past `maxAge`.
+	// wall clock; we lower it (skip ahead) only when keeping it would push the lookahead past `maxDelay`.
 	received(timestamp: Time.Milli, label = ""): void {
 		this.#out.timestamp.update((current) => (current === undefined || timestamp > current ? timestamp : current));
 		const now = Time.Milli.now();
@@ -186,7 +186,7 @@ export class Sync {
 
 		// Frame is earlier (more lookahead). `sleep` is how far ahead of the playhead keeping the
 		// anchor would put it.
-		const cap = this.#out.maxAge.peek();
+		const cap = this.#out.maxDelay.peek();
 		if (sleep <= cap) return; // within budget: let the buffer grow instead of skipping ahead
 
 		// Over the cap: re-anchor down so the resulting lookahead is exactly the cap.

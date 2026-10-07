@@ -18,15 +18,14 @@ Decided 2026-10-01 (moq-dev/moq#4694):
   wins, equal by default), separate from the additive link cost, so metrics
   from different operators are never added together or compared; within one
   preference the metric decides as before. Babel permits any choice among
-  feasible routes, so loop freedom is unchanged. The ranking lives in
-  [Selection](/quest/m1/cluster-routing/selection.md); this quest adds the
-  preference input and the endpoint side.
+  feasible routes, so loop freedom is unchanged. The ranking is `route_order`
+  in `rs/moq-net/src/model/origin.rs`; this quest adds the preference input
+  and the endpoint side.
 - A session that speaks no ROUTE (moq-transport, older lite) is a link whose
   announces resolve to a session-scoped origin at that link's cost.
-- Identity: two CDNs never share node ids, but any same-path route resumes,
-  so failover across them needs only the same path. The publisher side is
-  the redundant pair of [Selection](/quest/m1/cluster-routing/selection.md),
-  from one process.
+- Identity: two CDNs never share node ids, but any route with the same path
+  and epoch resumes, so failover across them needs only that. The publisher
+  side is a redundant pair under one explicit epoch, from one process.
 - API: the Rust client config and `js/net` accept several upstream URLs, each
   with its preference (and cost), feeding one shared origin. Mirror the shape
   in the bindings that expose connect config. Pick the smallest shape that
@@ -42,7 +41,3 @@ connect docs.
 
 Public API: per-upstream preference in client config, in Rust, JS, and the
 bindings. Wire: none.
-
-## Required
-
-- [Selection](/quest/m1/cluster-routing/selection.md) - the ranking this adds the preference input to

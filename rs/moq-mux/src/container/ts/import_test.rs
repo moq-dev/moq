@@ -248,7 +248,7 @@ async fn import_opus_frames() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(
@@ -526,7 +526,7 @@ async fn survives_midstream_join() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(
@@ -580,7 +580,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(

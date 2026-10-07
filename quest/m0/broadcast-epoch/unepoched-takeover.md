@@ -2,13 +2,13 @@
 
 ## Goal
 
-When a path's routes carry no epoch, the route that ranks best (cost, then
-newest) always serves it. A better route takes over with a hard switch, as a
-newer epoch does: subscriptions in flight end, and downstream sessions see the
-switch as an announcement (End then Start on lite-06 and moq-transport), even
-when the new route's metadata matches the old. Viewers re-request and land on
-the new route, never stitched across the two. This holds in moq-net and in
-js/net's origin.
+When a path's routes carry no epoch, whichever route `route_order` ranks first
+always serves it. A new winner takes over with a hard switch, as a newer epoch
+does: subscriptions in flight end, and downstream sessions see the switch as an
+announcement (End then Start), even when the new route's metadata matches the
+old. Viewers re-request and land on the new route, never stitched across the
+two. This holds on every version, lite-07 included, for any route without an
+epoch.
 
 So a lite-06 publisher that restarts onto the same path while its old session
 lingers reaches viewers within an RTT, instead of leaving them on a dead front
@@ -30,21 +30,40 @@ Decided 2026-10-07 while re-planning #4999 and #5001:
   in flight end, so nothing splices bytes from two publishers. That keeps the
   README's "never stitched" rule while dropping "stays on the worker that
   first served a subscription".
-- A change of winning route always reaches downstream as an announcement, even
-  when the metadata is identical. Today the announce cursor sends nothing in
-  that case, which leaves a client holding the old handle.
-- Consequence, accepted: a cost change between live routes without an epoch
-  (a GOAWAY drain re-price, a cluster cost shift) restarts lite-06 playback.
-  Routes with an epoch are unchanged.
+- Any new winner takes over, including one decided by the rendezvous-hash
+  tiebreak. Without an epoch a relay can't tell a restarted publisher from an
+  extra replica, so there is no narrower rule that fixes restarts.
+- Consequence, accepted: any change of winner restarts playback for the paths
+  it moves, on every version. That includes a cost change (a GOAWAY drain
+  re-price) and a change to an equal-cost pool (a transcoder worker joining, a
+  relay peer reconnecting), which moves the paths the hash now gives the new
+  route. Routes with an epoch are unchanged.
+- A change of winner between routes without an epoch always reaches downstream
+  as an announcement, even with identical metadata. Today the announce cursor
+  hides it ("a reconnect under an identical route is invisible"). Two routes
+  with the same epoch and identical metadata are a seamless failover and stay
+  invisible.
 - Rejected: `@moq/watch` resubscribing on `Internal` or `SessionClosed`
   (#4999), since players recover on announcements, not errors; re-announcing
   only once the old front dies, since viewers stay blank until the old session
-  times out; and waiting for lite-07 to be the default.
+  times out; taking over only on a strictly better route, which leaves an
+  equal-cost restart blank; the newest winning ties, which lets a joining
+  worker take every tied path; and waiting for lite-07 to be the default.
 
-Flip `better_route_keeps_the_incumbent` and `route_dies_without_an_epoch` in
-`rs/moq-net/tests/route_change.rs` to expect the takeover, and cover the same
-in js/net. Check the lite draft for any text describing a sticky route. Wire:
-no new messages.
+Tests to flip: `better_route_keeps_the_incumbent` in
+`rs/moq-net/tests/route_change.rs`, and `identical_reannounce_is_invisible` in
+`origin.rs` for routes without an epoch. `route_dies_without_an_epoch` keeps
+its expectation (a dead route ends its subscriptions), but its `standby()`
+must price `B` strictly worse, or it takes over before the trigger; extend it
+so a re-request lands on `B`. js/net's origin already swaps to a better entry
+and closes the old front (`route()` in `js/net/src/origin.ts`), and its
+announce cursor emits End and Start on a new winner, so the JS half is likely
+tests only.
+
+Wire: no new messages, but a behavior change for other relays.
+`drafts/draft-lcurley-moq-lite.md` says a subscription between routes without
+an Epoch "stays on its route and ends with it". Replace that with: the relay
+ends it when another route wins, and announces the change.
 
 ## Related
 

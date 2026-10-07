@@ -10,12 +10,21 @@ out of scope.
 
 ## Plan
 
-Decided 2026-10-07 with [JS requests](/quest/m1/js-request-deadline.md):
-waiting for credit queues work the caller can't see, so a request is refused
-rather than parked. Poll the open once; `Pending` means no credit, and
-dropping the open cancels it cleanly. Rust gets no answer timer: a request
-lives until it is answered, its demand leaves, or the session closes, and a
-relay shouldn't kill a subscribe on a slow upstream hop.
+Decided 2026-10-07 with [JS requests](/quest/m1/js-request-deadline.md): a
+request without credit is refused, which sheds load rather than parking work
+the caller can't see. Accepted: a relay asking a peer that grants few streams
+gets hard failures in bursts where it used to wait, and nothing retries them.
+Rust gets no answer timer: a request lives until it is answered, its demand
+leaves, or the session closes, and a relay shouldn't kill a subscribe on a
+slow upstream hop.
+
+A single `Pending` poll of `open_bi` is not "no credit": on WebTransport,
+`web-transport-quinn` opens the QUIC stream and then writes the session header,
+which can be pending under send-window pressure. Check credit at the QUIC
+level instead, likely a non-waiting open on the transport trait. Also note that
+`moq-tokio`'s `poll_open_bi` parks an abandoned open in the session's slot
+rather than dropping it, so the next request inherits it; the non-waiting open
+should avoid that.
 
 Propose the error variant's name in the PR. Public API: one new `Error`
-variant. Wire: none.
+variant, and possibly a transport-trait method. Wire: none.
