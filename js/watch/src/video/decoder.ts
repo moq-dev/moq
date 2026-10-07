@@ -334,6 +334,9 @@ class DecoderTrack {
 	// Codec description from the last configure, reused after a playhead reset.
 	#description?: Uint8Array;
 
+	// The playhead moved and the next decoded frame decides whether the decoder resets.
+	#resetPending = false;
+
 	#signals = new Effect();
 
 	constructor(props: DecoderTrackProps) {
@@ -455,8 +458,8 @@ class DecoderTrack {
 				const next = await nextMedia(consumer);
 				if (!next) break;
 
-				// Playhead moved: drop queued pictures and re-anchor before decoding further.
-				if (this.#onDiscontinuity(next.discontinuity, decoder)) previous = undefined;
+				// Playhead moved: re-anchor before decoding further.
+				if (this.#onDiscontinuity(next.discontinuity)) previous = undefined;
 
 				const { frame } = next;
 				if (!frame) continue; // The group is done
@@ -493,6 +496,7 @@ class DecoderTrack {
 				previous = frame.timestamp;
 
 				latest = next.group;
+				this.#resetAtKeyframe(decoder, frame.keyframe);
 				decoder.decode(chunk);
 			}
 		});
@@ -534,8 +538,8 @@ class DecoderTrack {
 				const next = await nextMedia(consumer);
 				if (!next) break;
 
-				// Playhead moved: drop queued pictures and re-anchor before decoding further.
-				if (this.#onDiscontinuity(next.discontinuity, decoder)) previous = undefined;
+				// Playhead moved: re-anchor before decoding further.
+				if (this.#onDiscontinuity(next.discontinuity)) previous = undefined;
 
 				const { frame } = next;
 				if (!frame) continue;
@@ -564,6 +568,7 @@ class DecoderTrack {
 
 				if (decoder.state === "closed") break;
 				latest = next.group;
+				this.#resetAtKeyframe(decoder, frame.keyframe);
 				decoder.decode(
 					new EncodedVideoChunk({
 						type: frame.keyframe ? "key" : "delta",
@@ -575,26 +580,34 @@ class DecoderTrack {
 		});
 	}
 
-	// The container bumped its playhead (a marker, a hole, or a latency skip). Drop chunks
-	// still queued in the decoder and re-anchor before the next keyframe. `reset()` cannot
-	// cancel an output callback that already holds a frame, so the generation captured when
-	// that callback started still rejects it after `sync.wait`. Clearing `timestamp` keeps a
-	// stale high value from late-rejecting the following frames, which may overlap the
-	// previous group's tail. The held picture stays until the new keyframe renders.
+	// The container bumped its playhead (a marker, a hole, or a latency skip). Re-anchor and
+	// let the next decoded frame decide the decoder reset (see #resetAtKeyframe). Clearing
+	// `timestamp` keeps a stale high value from late-rejecting the following frames, which may
+	// overlap the previous group's tail. The held picture stays until the new keyframe renders.
 	// Returns true when a new generation was handled.
-	#onDiscontinuity(count: number, decoder: VideoDecoder): boolean {
+	#onDiscontinuity(count: number): boolean {
 		if (count === this.#discontinuity) return false;
 		this.#discontinuity = count;
 		this.timestamp.set(undefined);
 		this.#buffered.set([]);
 		this.sync.reset();
-		// A closed decoder throws on reset. The next decoded frame is a keyframe, so
-		// configure again before that decode.
-		if (decoder.state !== "closed") {
-			decoder.reset();
-			this.#configure(decoder);
-		}
+		this.#resetPending = true;
 		return true;
+	}
+
+	// Call before each decode. After a playhead bump, a keyframe starts a new timeline, so drop
+	// the pictures still queued in the decoder: one from later in a group that restarts would
+	// otherwise come out above the new keyframe and late-reject it. A delta continues a group the
+	// bump interrupted (a stale marker or a max-delay hole), so it keeps the decoder's references;
+	// a reset would make WebCodecs require a key chunk and throw. `reset()` cannot cancel an
+	// output callback that already holds a frame; the generation it captured rejects that one.
+	#resetAtKeyframe(decoder: VideoDecoder, keyframe: boolean): void {
+		if (!this.#resetPending) return;
+		this.#resetPending = false;
+		// A closed decoder throws on reset.
+		if (!keyframe || decoder.state === "closed") return;
+		decoder.reset();
+		this.#configure(decoder);
 	}
 
 	#configure(decoder: VideoDecoder): void {
