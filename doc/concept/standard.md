@@ -67,9 +67,10 @@ publisher that refuses `TRACK_STATUS` refuses the fetch. The Rust publisher
 answers `TRACK_STATUS` with what its `SUBSCRIBE_OK` would carry, as far as the
 draft's answer has room: the Largest Location on every draft, and the Track
 Properties from draft-18, when the answer gained them. A relay with no
-subscription upstream reports the Largest Location it has cached. A `SUBSCRIBE` that sets `INCLUDE_PROPERTIES` to 0 gets an
-empty properties block, but its objects keep their Timestamps, whose units
-`TRACK_STATUS` reports. From draft-20, a Rust subscriber sets
+subscription upstream reports the Largest Location it has cached. A
+`SUBSCRIBE` that sets `INCLUDE_PROPERTIES` to 0 gets an empty properties
+block, but its objects keep their Timestamps, whose units `TRACK_STATUS`
+reports. From draft-20, a Rust subscriber sets
 `INCLUDE_PROPERTIES` to 0 on every later `SUBSCRIBE` or `FETCH` for a track
 it already learned, instead of receiving the same properties again.
 
