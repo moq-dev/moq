@@ -2018,11 +2018,10 @@ where
 			largest,
 		} = accepted;
 		let info = accepted_info(max_age, priority);
-		// A resumed copy opted out of the properties, so it keeps the units it learned.
-		let timescale = match &resumed {
-			Some(idle) => idle.timescale,
-			None => timescale,
-		};
+		// A resumed copy opts out of the properties from draft-20, so it keeps the units it
+		// learned. Before that the answer still declares them, and may be the first to: draft-17's
+		// TRACK_STATUS_OK has no properties block.
+		let timescale = timescale.or(resumed.as_ref().and_then(|idle| idle.timescale));
 		// The copy already holds the track: it is current again up to the answer's Largest
 		// Location once the join's head lands or a newer group does, since leaving cut the
 		// group it was in.
@@ -5356,7 +5355,9 @@ mod tests {
 
 	/// A copy that already knows its track, here from TRACK_STATUS_OK, opts out of the
 	/// properties when a subscriber returns, and keeps the units it learned rather than
-	/// taking the empty block the opted-out SUBSCRIBE_OK carries.
+	/// taking the empty block the opted-out SUBSCRIBE_OK carries. On draft-17, where
+	/// TRACK_STATUS_OK has no properties block and SUBSCRIBE cannot opt out, the copy takes
+	/// the units SUBSCRIBE_OK declares.
 	#[moq_net_sim::test]
 	async fn a_resumed_subscribe_opts_out_of_known_properties() {
 		use crate::coding::Encode as _;
@@ -5371,29 +5372,31 @@ mod tests {
 		}
 
 		let declared = Timescale::new(90_000).unwrap();
-		for version in [Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft17, Version::Draft20, Version::Draft22] {
+			let opts_out = ietf::Filter::is_draft20(version);
+			let declares = |yes: bool| ietf::Properties {
+				timescale: yes.then_some(declared),
+				..Default::default()
+			};
 			let status_ok = message(
 				ietf::TrackStatusOk::ID,
 				&ietf::TrackStatusOk {
 					request_id: None,
 					largest: None,
-					properties: ietf::Properties {
-						timescale: Some(declared),
-						..Default::default()
-					},
+					properties: declares(opts_out),
 				},
 				version,
 			);
 			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![
 				status_ok,
-				// Opted out, so its block is empty.
+				// Empty when opted out. Draft-17 cannot opt out, so it declares the units.
 				message(
 					ietf::SubscribeOk::ID,
 					&ietf::SubscribeOk {
 						request_id: None,
 						track_alias: 7,
 						largest: None,
-						properties: Default::default(),
+						properties: declares(!opts_out),
 					},
 					version,
 				),
@@ -5443,8 +5446,8 @@ mod tests {
 				}
 			}
 			assert_eq!(subscribes.len(), 1, "{version}: the returning subscriber subscribes");
-			assert!(
-				!subscribes[0].properties_wanted,
+			assert_eq!(
+				subscribes[0].properties_wanted, !opts_out,
 				"{version}: TRACK_STATUS_OK already gave the properties"
 			);
 
@@ -5456,7 +5459,7 @@ mod tests {
 				.next()
 				.expect("the subscription is registered")
 				.timescale;
-			assert_eq!(timescale, Some(declared), "{version}: the learned units are kept");
+			assert_eq!(timescale, Some(declared), "{version}: the copy keeps the units it learned");
 			serving.abort();
 		}
 	}
