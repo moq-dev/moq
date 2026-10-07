@@ -28,8 +28,8 @@ Decided 2026-10-01 (moq-dev/moq#4694):
   ANNOUNCE names its origin node, and the roster maps that node to a peer the
   application may dial, so an app learns whom to dial from the announce.
 - Switching between the peer and the relay resumes the subscription, since
-  every route announcing a path is one source, per
-  [Selection](/quest/m1/cluster-routing/selection.md).
+  every route announcing a path under one
+  [publisher epoch](/doc/concept/moq-lite.md#publisher-epochs) is one source.
 
 Deliverables: the `Peers` and `moq-cli` cost knobs with their defaults, the
 rule written beside route selection in the routing concept page the cluster

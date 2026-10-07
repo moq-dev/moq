@@ -382,7 +382,7 @@ impl<S: ObjectStore> Control<S> {
 
 	async fn subscribe(&self, name: &str, config: timeline::Config) -> Result<()> {
 		let shared = &self.shared;
-		let replay = track::Subscription::default().with_max_age(REPLAY);
+		let replay = track::Subscription::default().with_max_delay(REPLAY);
 		let subscriber = shared
 			.source
 			.track(name)

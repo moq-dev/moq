@@ -66,7 +66,7 @@ pub(crate) struct ExportSource {
 	state: SourceState,
 	/// Wire format, consumed when the subscription resolves into a consumer.
 	media: Option<HangContainer>,
-	max_age: std::time::Duration,
+	max_delay: std::time::Duration,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
 	/// OpusHead). Some once the codec config is available — from the catalog
@@ -89,9 +89,9 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		max_age: std::time::Duration,
+		max_delay: std::time::Duration,
 	) -> Result<Option<Self>, crate::Error> {
-		Self::video(source, name, config, max_age, build_video_transform(config))
+		Self::video(source, name, config, max_delay, build_video_transform(config))
 	}
 
 	/// Subscribe to a video rendition for fMP4 export.
@@ -103,7 +103,7 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		max_age: std::time::Duration,
+		max_delay: std::time::Duration,
 	) -> Result<Option<Self>, crate::Error> {
 		let record = annexb_catalog_record(config);
 		let transform = match (&config.codec, record.is_some()) {
@@ -111,7 +111,7 @@ impl ExportSource {
 			(VideoCodec::H265(_), true) => Some(VideoTransform::Hvc1(Hvc1::keeping_parameter_sets())),
 			_ => build_video_transform(config),
 		};
-		let mut source = Self::video(source, name, config, max_age, transform)?;
+		let mut source = Self::video(source, name, config, max_delay, transform)?;
 		if let (Some(source), Some(record)) = (source.as_mut(), record) {
 			source.description = Some(record);
 		}
@@ -128,16 +128,16 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		max_age: std::time::Duration,
+		max_delay: std::time::Duration,
 	) -> Result<Option<Self>, crate::Error> {
-		Self::video(source, name, config, max_age, None)
+		Self::video(source, name, config, max_delay, None)
 	}
 
 	fn video(
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		max_age: std::time::Duration,
+		max_delay: std::time::Duration,
 		transform: Option<VideoTransform>,
 	) -> Result<Option<Self>, crate::Error> {
 		let media: HangContainer = config.try_into()?;
@@ -149,7 +149,7 @@ impl ExportSource {
 		let mut source = Self {
 			state: SourceState::Requesting(request, name.to_string()),
 			media: Some(media),
-			max_age,
+			max_delay,
 			transform,
 			description,
 			video_codec: Some(config.codec.clone()),
@@ -167,7 +167,7 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &AudioConfig,
-		max_age: std::time::Duration,
+		max_delay: std::time::Duration,
 	) -> Result<Option<Self>, crate::Error> {
 		let media: HangContainer = config.try_into()?;
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
@@ -178,7 +178,7 @@ impl ExportSource {
 		Ok(Some(Self {
 			state: SourceState::Requesting(request, name.to_string()),
 			media: Some(media),
-			max_age,
+			max_delay,
 			transform: None,
 			description,
 			video_codec: None,
@@ -192,11 +192,15 @@ impl ExportSource {
 	///
 	/// Such a rendition has no catalog `broadcast` field, so it always lives on the
 	/// catalog broadcast and can never carry an escaping reference.
-	pub fn for_stream(source: &crate::Source, name: &str, max_age: std::time::Duration) -> Result<Self, crate::Error> {
+	pub fn for_stream(
+		source: &crate::Source,
+		name: &str,
+		max_delay: std::time::Duration,
+	) -> Result<Self, crate::Error> {
 		Ok(Self {
 			state: SourceState::Requesting(source.request_catalog(), name.to_string()),
 			media: Some(HangContainer::Legacy(crate::container::Kind::Data)),
-			max_age,
+			max_delay,
 			transform: None,
 			description: None,
 			video_codec: None,
@@ -305,7 +309,7 @@ impl ExportSource {
 				};
 				(ready!(pending.poll_ok(waiter))?, name.clone())
 			};
-			let subscription = moq_net::track::Subscription::default().with_max_age(self.max_age);
+			let subscription = moq_net::track::Subscription::default().with_max_delay(self.max_delay);
 			self.state = SourceState::Subscribing(broadcast.track(&name)?.subscribe(subscription));
 		}
 
@@ -492,7 +496,7 @@ mod tests {
 	async fn escaping_reference_skips_the_rendition() {
 		let live = Live::avc3();
 		let source = live.source();
-		let max_age = std::time::Duration::ZERO;
+		let max_delay = std::time::Duration::ZERO;
 
 		let escaping = |result: Result<Option<ExportSource>, crate::Error>, what: &str| match result {
 			Ok(None) => {}
@@ -504,13 +508,13 @@ mod tests {
 		// single-segment path, so its parent is the root and any `..` walks above it.
 		for reference in ["..", "../source", "../../elsewhere"] {
 			let config = video(Some(reference));
-			escaping(ExportSource::for_video(&source, "video", &config, max_age), reference);
+			escaping(ExportSource::for_video(&source, "video", &config, max_delay), reference);
 			escaping(
-				ExportSource::for_video_raw(&source, "video", &config, max_age),
+				ExportSource::for_video_raw(&source, "video", &config, max_delay),
 				reference,
 			);
 			escaping(
-				ExportSource::for_audio(&source, "audio", &audio(Some(reference)), max_age),
+				ExportSource::for_audio(&source, "audio", &audio(Some(reference)), max_delay),
 				reference,
 			);
 		}
@@ -522,13 +526,13 @@ mod tests {
 	async fn legal_reference_keeps_the_rendition() {
 		let live = Live::avc3();
 		let source = live.source();
-		let max_age = std::time::Duration::ZERO;
+		let max_delay = std::time::Duration::ZERO;
 
 		for reference in [None, Some(""), Some("./source"), Some("sub"), Some(".")] {
-			ExportSource::for_video(&source, "video", &video(reference), max_age)
+			ExportSource::for_video(&source, "video", &video(reference), max_delay)
 				.unwrap_or_else(|err| panic!("{reference:?} should keep the rendition: {err:?}"))
 				.unwrap_or_else(|| panic!("{reference:?} should keep the rendition"));
-			ExportSource::for_audio(&source, "audio", &audio(reference), max_age)
+			ExportSource::for_audio(&source, "audio", &audio(reference), max_delay)
 				.unwrap_or_else(|err| panic!("{reference:?} should keep the rendition: {err:?}"))
 				.unwrap_or_else(|| panic!("{reference:?} should keep the rendition"));
 		}
@@ -539,20 +543,20 @@ mod tests {
 	#[tokio::test]
 	async fn latency_is_sent_with_the_initial_subscription() {
 		let live = Live::avc3();
-		let max_age = std::time::Duration::from_secs(10);
-		let mut export = ExportSource::for_video(&live.source(), live.track.name(), &video(None), max_age)
+		let max_delay = std::time::Duration::from_secs(10);
+		let mut export = ExportSource::for_video(&live.source(), live.track.name(), &video(None), max_delay)
 			.unwrap()
 			.expect("fixture should produce a video rendition");
 
 		let observed = kio::wait(|waiter| {
 			let _ = export.poll_read(waiter);
 			match live.track.subscription() {
-				Some(subscription) => Poll::Ready(subscription.max_age),
+				Some(subscription) => Poll::Ready(subscription.max_delay),
 				None => Poll::Pending,
 			}
 		})
 		.await;
 
-		assert_eq!(observed, max_age);
+		assert_eq!(observed, max_delay);
 	}
 }
