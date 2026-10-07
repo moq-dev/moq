@@ -1496,7 +1496,7 @@ mod tests {
 		let mut sub = SubStream {
 			stream,
 			id: 0,
-			max_age: Duration::ZERO,
+			max_delay: Duration::ZERO,
 			start: Some(Position::group(2)),
 			priority: 0,
 			requested: Some(Position::group(2)),
@@ -3221,7 +3221,7 @@ struct SubStream<S: crate::transport::poll::Session> {
 	id: u64,
 	/// Original SUBSCRIBE params, echoed in every SUBSCRIBE_UPDATE; refreshed as the
 	/// downstream aggregate changes.
-	max_age: Duration,
+	max_delay: Duration,
 	start: Option<Position>,
 	priority: u8,
 	/// The start the SUBSCRIBE itself carried, fixed for the stream's life. A
@@ -3553,9 +3553,9 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						// SUBSCRIBE_UPDATE (Lite03+ only; older peers can't carry one).
 						let start_moved = active.start != subscription.start;
 						active.priority = subscription.priority;
-						active.max_age = subscription.max_age;
+						active.max_delay = subscription.max_delay;
 						if let Ok(mut tail) = active.tail.write() {
-							tail.set_grace(tail::grace(subscription.max_age));
+							tail.set_grace(tail::grace(subscription.max_delay));
 							// A lowered floor owes groups nobody asked for until now.
 							if let Some(start) = subscription.start {
 								let floor = active.start.map(|start| start.group).or(active.served);
@@ -3632,7 +3632,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 
 		tracing::info!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
 
-		let tail = kio::Producer::new(Tail::new(tail::grace(subscription.max_age)));
+		let tail = kio::Producer::new(Tail::new(tail::grace(subscription.max_delay)));
 		self.subscriber.subscribes.lock().insert(
 			id,
 			TrackEntry {
@@ -3731,7 +3731,7 @@ fn buffer_update<S: crate::transport::poll::Session>(
 	let bounds = WireBounds::new(active.start, end);
 	active.stream.writer.buffer(&lite::SubscribeUpdate {
 		priority: active.priority,
-		max_age: active.max_age,
+		max_delay: active.max_delay,
 		start_group: bounds.start_group,
 		end_group: bounds.end_group,
 		start_frame: bounds.start_frame,
@@ -3787,7 +3787,7 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 						broadcast: self.serve.path.as_path(),
 						track: self.serve.name.as_str().into(),
 						priority: self.subscription.priority,
-						max_age: self.subscription.max_age,
+						max_delay: self.subscription.max_delay,
 						start_group: bounds.start_group,
 						end_group: bounds.end_group,
 						start_frame: bounds.start_frame,
@@ -3831,7 +3831,7 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 		SubStream {
 			stream,
 			id: self.id,
-			max_age: self.subscription.max_age,
+			max_delay: self.subscription.max_delay,
 			start: self.subscription.start,
 			priority: self.subscription.priority,
 			requested: self.subscription.start,
@@ -4355,12 +4355,12 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 									0 => end.group,
 									_ => end.group.saturating_add(1),
 								});
-								// The effective max age is the stopgap grace: the wrong clock
+								// The effective max delay is the stopgap grace: the wrong clock
 								// (it bounds presentation-time drift), but it is how long the
 								// subscriber was willing to wait for a late group anyway.
 								if let Ok(mut tail) = active.tail.write() {
 									tail.set_grace(tail::grace(
-										subscription.map(|sub| sub.max_age).unwrap_or_default(),
+										subscription.map(|sub| sub.max_delay).unwrap_or_default(),
 									));
 									tail.expire(serve.subscriber.runtime.now());
 								}
