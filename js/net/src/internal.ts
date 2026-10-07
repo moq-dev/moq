@@ -177,7 +177,7 @@ export const hooks: {
 	/** Attach the origin advertisement of a created broadcast. */
 	attachAnnouncer: (
 		producer: BroadcastProducer,
-		announcer: { announce(route: Route): void; unannounce(): void },
+		announcer: { announce(route: Route): void; unannounce(): void; route(): Route | undefined },
 	) => void;
 	/** Name a broadcast handle by the path an origin created or resolved it at. */
 	stampPath: (target: BroadcastProducer | BroadcastConsumer, path: Path.Valid) => void;
@@ -225,3 +225,23 @@ export const hooks: {
 		throw new Error("broadcast.ts not loaded");
 	},
 };
+
+/**
+ * Spreads equal routes across paths: FNV-1a 64 of `path` then each hop, oldest first, as 8
+ * little-endian bytes. Keyed on the requested path so an equal-cost pool advertising one
+ * prefix shares its paths, and every node holding the same routes picks the same member.
+ * Mirrors `fnv_key` in `rs/moq-net`; the seed is the draft's Spread Hash offset basis.
+ */
+export function spreadHash(path: string, hops: readonly bigint[]): bigint {
+	const prime = 0x100000001b3n;
+	let hash = 0x420c0decb00bn;
+	for (const byte of new TextEncoder().encode(path)) {
+		hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * prime);
+	}
+	for (const hop of hops) {
+		for (let shift = 0n; shift < 64n; shift += 8n) {
+			hash = BigInt.asUintN(64, (hash ^ ((hop >> shift) & 0xffn)) * prime);
+		}
+	}
+	return hash;
+}

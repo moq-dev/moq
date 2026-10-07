@@ -9,10 +9,11 @@
 //! sources, the tracks, the clock) and executes the actions; see
 //! `origin::run_front`.
 //!
-//! A path names one broadcast, whoever serves it, so any route covering the path
-//! may take over from another and its tracks resume where they stopped. A
-//! publisher reusing a name for different content is a bug; it publishes under a
-//! new name (an epoch) instead.
+//! The driver only offers a front routes that serve its broadcast: those with the
+//! epoch it first resolved, whose tracks resume where they stopped, or its first
+//! route alone when that had no epoch, since nothing says another serves the
+//! same bytes. A newer epoch supersedes the front, ending even the tracks in
+//! flight, so readers re-request the new broadcast rather than stall on the old.
 //!
 //! Sources and tracks are named by ids and names, never handles, so a
 //! transition can be checked in a unit test by comparing the actions it emits.
@@ -23,7 +24,7 @@ use std::{
 	time::Duration,
 };
 
-use crate::{Error, runtime::Instant, track};
+use crate::{Error, time::Instant, track};
 
 /// A route the table selected for the front: the entry id, and whether it is a
 /// broadcast published on this origin.
@@ -88,6 +89,9 @@ pub(super) enum Event {
 	/// The driver let go of a track the machine asked it to [`Action::Forget`].
 	/// Not fed when a reader arrived first: [`Event::Used`] follows instead.
 	Forgotten { track: Arc<str> },
+	/// A newer publisher instance replaced the broadcast: every track ends now,
+	/// even one in flight, and readers re-request the path.
+	Superseded,
 	/// The origin is tearing down.
 	Closed,
 }
@@ -218,6 +222,11 @@ impl Front {
 		self.excluded.retain(|route| standing(*route));
 	}
 
+	/// The route the attached source came through, if any.
+	pub(super) fn serving_route(&self) -> Option<u64> {
+		self.serving.map(|(_, candidate)| candidate.route)
+	}
+
 	/// The attached source, if any.
 	pub(super) fn serving(&self) -> Option<u64> {
 		self.serving.map(|(source, _)| source)
@@ -275,6 +284,7 @@ impl Front {
 			Event::Forgotten { track } => {
 				self.tracks.remove(&track);
 			}
+			Event::Superseded => self.supersede(&mut actions),
 			Event::Closed => self.end(Error::Dropped, &mut actions),
 		}
 		if !self.ended {
@@ -470,8 +480,9 @@ impl Front {
 		let spliced = track.state == (TrackState::Spliced { source });
 		if track.draining == Some(source) {
 			track.draining = None;
-			// A path is one broadcast, so a copy that completed ends the track whoever
-			// serves it now. One that failed leaves the track to the serving source.
+			// Every source of a front serves one broadcast, so a copy that completed ends
+			// the track whoever serves it now. One that failed leaves the track to the
+			// serving source.
 			if result.is_ok() && !track.ended {
 				track.state = TrackState::Idle;
 				track.ended = true;
@@ -618,6 +629,21 @@ impl Front {
 				_ => None,
 			})
 			.min()
+	}
+
+	/// Abort every track still going, then end: unlike a retraction, a newer
+	/// broadcast does not leave readers on the old one's copies.
+	fn supersede(&mut self, actions: &mut Vec<Action>) {
+		for (name, track) in &mut self.tracks {
+			if !track.ended {
+				track.ended = true;
+				actions.push(Action::Abort {
+					track: name.clone(),
+					err: Error::Unroutable,
+				});
+			}
+		}
+		self.end(Error::Unroutable, actions);
 	}
 
 	fn end(&mut self, err: Error, actions: &mut Vec<Action>) {
@@ -1556,8 +1582,8 @@ mod tests {
 	}
 
 	/// The serving source closed and the front reselected, but the pump still reads the
-	/// closed source's copy. That copy ending cleanly ends the track: a path is one
-	/// broadcast, whoever serves it.
+	/// closed source's copy. That copy ending cleanly ends the track: every source of
+	/// the front serves one broadcast.
 	#[test]
 	fn a_closed_sources_clean_end_finishes_the_track() {
 		let mut front = serving(remote(1), 100);

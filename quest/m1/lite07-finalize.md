@@ -44,11 +44,16 @@ The cut:
   rather than misparse; no compatibility shim.
 - The draft's lite-07 changelog matches the wire and `just drafts check`
   passes.
+- Preserve SETUP's rule: "a receiver MUST treat a longer SETUP as a protocol
+  violation and MAY reject it based on the length prefix alone" (65,536
+  bytes). The general cap proposed by request caps (#4820) only permits
+  rejection (MAY), so it does not replace SETUP's stronger requirement.
+  Remove the SETUP sentence only if the general rule requires the same
+  rejection. If SETUP keeps its own rule, the lite-07 changelog still names
+  that rejection, not only the cap.
 
-Decided 2026-10-05: Rust's 64-bit `VarInt` is not required first. The draft
-already specifies 64 bits; Rust refusing values above 2^62-1 is an
-implementation limit that [VarInt codec](/quest/m1/rs2ts/varint-codec.md)
-fixes whenever it lands.
+Rust's lite-07 varints already carry the full 64 bits the draft specifies,
+so no codec work waits on the cut.
 
 Open, for the maintainer:
 

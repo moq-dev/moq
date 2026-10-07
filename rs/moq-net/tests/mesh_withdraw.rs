@@ -9,14 +9,14 @@ mod support;
 
 use std::{collections::HashMap, time::Duration};
 
-use tokio::sync::mpsc;
+use futures::{StreamExt, channel::mpsc};
 
 use moq_net::{Hop, Version, announce, broadcast, origin};
 use support::harness::{MockPair, peer, peer_with_latency};
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(support::harness::run(driver));
+	support::harness::spawn(driver);
 	producer
 }
 
@@ -32,7 +32,7 @@ enum Kind {
 /// timeout fires only once every task is idle.
 async fn drain(watched: &mut mpsc::UnboundedReceiver<(String, Kind)>) -> HashMap<String, Vec<Kind>> {
 	let mut updates = HashMap::<String, Vec<Kind>>::new();
-	while let Ok(Some((prefix, kind))) = tokio::time::timeout(Duration::from_secs(1), watched.recv()).await {
+	while let Ok(Some((prefix, kind))) = moq_net_sim::timeout(Duration::from_secs(1), watched.next()).await {
 		updates.entry(prefix).or_default().push(kind);
 	}
 	updates
@@ -42,8 +42,8 @@ async fn drain(watched: &mut mpsc::UnboundedReceiver<(String, Kind)>) -> HashMap
 /// it runs when woken, between the relays' own tasks, rather than only once the
 /// test task is polled again, which would coalesce every intermediate update.
 fn watch(mut announced: announce::Consumer) -> mpsc::UnboundedReceiver<(String, Kind)> {
-	let (tx, rx) = mpsc::unbounded_channel();
-	tokio::spawn(async move {
+	let (tx, rx) = mpsc::unbounded();
+	moq_net_sim::spawn(async move {
 		while let Some(event) = announced.next().await {
 			let (kind, announce) = match event {
 				announce::Event::Start(announce) => (Kind::Start, announce),
@@ -51,7 +51,7 @@ fn watch(mut announced: announce::Consumer) -> mpsc::UnboundedReceiver<(String, 
 				announce::Event::End(announce) => (Kind::End, announce),
 				announce::Event::Live => continue,
 			};
-			if tx.send((announce.prefix.to_string(), kind)).is_err() {
+			if tx.unbounded_send((announce.prefix.to_string(), kind)).is_err() {
 				break;
 			}
 		}
@@ -117,12 +117,12 @@ fn ring_with_chords(n: usize) -> Vec<(usize, usize)> {
 /// Every relay neighbors the publisher's, so each hears the withdrawal first-hand
 /// and drops every path derived from it at once. Lite04 names the peer only in
 /// the chain, later versions in the announce handshake too.
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn full_mesh_withdraw_retracts_once_lite04() {
 	full_mesh_withdraw_retracts_once("moq-lite-04").await;
 }
 
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn full_mesh_withdraw_retracts_once_lite06() {
 	full_mesh_withdraw_retracts_once("moq-lite-06").await;
 }
@@ -144,7 +144,7 @@ async fn full_mesh_withdraw_retracts_once(version: &str) {
 /// why, so it can still pass through a stale path or two. Every broadcast must still
 /// end retracted, and republishing from other relays must reach the watcher again:
 /// no withdrawal outlives the peer announcing the path again.
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn partial_mesh_withdraw_then_republish() {
 	let mut mesh = Mesh::new("moq-lite-06", 12, &ring_with_chords(12)).await;
 	let broadcasts = mesh.publish(100, 0).await;
@@ -197,7 +197,7 @@ const PRODUCTION_LATENCY_MS: &[u64] = &[
 /// announcement. Holding route updates (`origin::Config::update_hold`) lets the
 /// withdrawal remove those paths first; with link latency and no hold, each
 /// withdrawal here costs tens of thousands of announcements.
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn partial_mesh_withdraw_retracts_once() {
 	let version: Version = "moq-lite-06".parse().unwrap();
 	let nodes: Vec<_> = (1..=34).map(produce_origin).collect();

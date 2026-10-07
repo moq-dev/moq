@@ -17,13 +17,13 @@ above ([hang](/lib/rs/hang)); relays and CDNs implement only this.
 
 - **Origins** scope what a session can see, and merge duplicate subscriptions so a broadcast is pulled upstream once no matter how many local readers.
 - **Broadcasts** are created unannounced and invisible to everyone, then announced as an exact route, or served below a prefix with `dynamic`. A consumer of the same origin sees exactly what a peer sees. Discovery accepts pattern unions; events carry the advertised prefix and captures for a complete match.
-- **Epochs** identify publisher instances with a canonical UUIDv7 and explicit path helpers; see [publisher epochs](/concept/moq-lite#publisher-epochs).
+- **Epochs** identify publisher instances with a canonical UUIDv7 carried on each route (`Route::epoch`): the newest wins a path, and only routes with the same epoch resume a subscription; see [publisher epochs](/concept/moq-lite#publisher-epochs).
 - **Patterns** (`Pattern`, `Patterns`) are re-exported from [`moq-pattern`](https://docs.rs/moq-pattern). Literal `Path` stays a coordinate.
 - **Tracks** carry groups with a priority, an optional publisher retention window (`Info::max_age`), and a timescale. Subscribers set their own priority and max age and can change them live.
 - **Groups** are written frame by frame and delivered on independent streams. Old groups are cached for fetch-by-sequence; stale groups are skipped per the subscriber's budget.
 - **Track ends**: `finish()` ends a track at its live edge, while `finish_at(n)` declares the exclusive end ahead of it and still accepts the groups below. A subscriber awaits it with `finished()`. A remote track ends only once every group below its end has arrived or was dropped; one reset before its header arrived is skipped after the subscription's max age on moq-lite (one second without one), or after one second on IETF.
 - **Datagrams** send a single small frame unreliably on moq-lite 05+ and moq-transport.
-- **Routes** record the relay hops and a cost, which is what the relay [cluster](/bin/relay/cluster) routes on. A hop of 0 marks the chain anonymous: `Route::is_anonymous()` is true, and that route ranks below every fully identified one. `Route::source()` says where a delivered route entered: `Source::Local`, or `Source::Peer(hop)` when a handle marked `origin::Producer::peer()` announced it. `origin::Consumer::local()` sees only the local ones.
+- **Routes** record the relay hops and a cost, which is what the relay [cluster](/bin/relay/cluster) routes on. A hop of 0 marks the chain anonymous: `Route::is_anonymous()` is true, and that route ranks below every fully identified one. `Route::source()` says where a delivered route entered: `Source::Local`, or `Source::Peer(hop)` when a handle marked `origin::Producer::peer()` announced it. `origin::Consumer::local()` sees only the local ones. A handle marked `origin::Producer::upstream()` announces as a peer, and a consumer taken from it never sees a route another upstream handle announced, so a relay never transits between two upstream links.
 - **Stats** counters per broadcast and session, drained by [`moq-stats`](https://docs.rs/moq-stats).
 
 It runs over anything implementing `web_transport_trait::poll::Session`: noq, the
@@ -51,6 +51,15 @@ let now = tokio::time::Instant::now().into_std();
 let (session, driver) = client.connect(now, transport).await?;
 tokio::spawn(moq_net::time::run(driver));
 ```
+
+On moq-lite-05+ and moq-transport draft 17+, `Client::connect` returns before
+the server's SETUP arrives, so a request made at once may still be
+refused along with it. `session.setup().await` waits for the server's SETUP
+and returns the close reason if the session is already closed, even after SETUP. A moq-rs
+server sends its SETUP only once it admits the client; neither protocol
+requires that, so another server may still refuse afterward. Older versions
+read that SETUP during the handshake and resolve at once, except moq-lite-03
+and -04, which carry none and return `Error::Unsupported`.
 
 A custom event loop calls `driver.poll(now, waiter)` with a nondecreasing
 `moq_net::time::Instant`. `Ok(Some(at))` asks to be polled again by `at` or
@@ -128,9 +137,13 @@ Three operations, on an origin:
   invisible and unroutable, for local consumers and peers alike, until
   `broadcast.announce(route)`.
 - `broadcast.announce(route)` / `broadcast.unannounce()` own that
-  advertisement. Announcing again re-prices the standing route, which competes
-  on cost with remote routes at the same path (a tie goes to the local
-  broadcast). The route retracts on `unannounce()`, `close()`, or the last
+  advertisement. Announcing again replaces the standing route as given, epoch
+  included, so re-price from the current one
+  (`broadcast.announce(broadcast.route().unwrap_or_default().with_cost(c))`);
+  another epoch, or none, announces a new broadcast; `origin::Dynamic` has the
+  same `route()` and `update(route)`. The route competes with
+  remote routes at the same path: the newest epoch wins, then the cheapest (a
+  tie goes to the local broadcast). The route retracts on `unannounce()`, `close()`, or the last
   producer dropping; tracks already in flight carry on to their own end.
 - `broadcast.close()` ends the broadcast for good: it retracts, leaves local
   discovery, and answers every later track lookup with `Unroutable`. Tracks

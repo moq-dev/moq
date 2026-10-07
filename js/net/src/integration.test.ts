@@ -10,6 +10,7 @@ import {
 	connect as connectSession,
 	type Established,
 } from "./connection/index.ts";
+import * as Epoch from "./epoch.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import { Producer as GroupProducer } from "./group.ts";
 import * as Ietf from "./ietf/index.ts";
@@ -816,9 +817,11 @@ test("integration: a peer is served the cheaper route it was offered, not the lo
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const path = Path.from("test");
+	// One publisher instance, so the two compete on cost alone.
+	const epoch = Epoch.mint();
 	const local = origin.createBroadcast(path);
-	local.announce({ cost: 5n });
-	const dynamic = origin.dynamic(path, { cost: 1n });
+	local.announce({ epoch, cost: 5n });
+	const dynamic = origin.dynamic(path, { epoch, cost: 1n });
 
 	const [client, server] = await Promise.all([
 		connect(url, { transport: pair.client }),

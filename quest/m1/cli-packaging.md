@@ -44,10 +44,18 @@ without NVENC; Pi 4, CM4, Zero 2 W, and Orin NX and above encode. RK3588
 encodes through rkmpp in a vendor kernel, not V4L2, so it stays on the
 `moq-gst` route.
 
+`pipewire` stays off in shipped builds (decided 2026-10-06): it needs
+libpipewire-0.3 to load, the same load-time requirement
+[ALSA](/quest/m1/capture-alsa-link.md) removes.
+
 Decided in the 2026-09-30 audit: the v4l2 encode quest folded in here, since
 its remaining work was one release feature flag and a doc note.
 
+Decided in the 2026-10-06 audit: this does not wait on
+[Capture by default](/quest/m1/capture-default.md). moq-cli's `capture`
+feature enables `moq-video/capture` and `moq-audio/capture` explicitly, so
+making it default-on does not depend on the library defaults.
+
 ## Required
 
-- [Capture by default](/quest/m1/capture-default.md) - also changes moq-cli's `capture` feature; land it first
 - [Audio capture without runtime system libraries](/quest/m1/capture-alsa-link.md) - the microphone path must start without system audio libraries before every distribution can ship it

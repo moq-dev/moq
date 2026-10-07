@@ -180,7 +180,7 @@ impl Pool {
 			}
 			ms.max(1).div_ceil(TICK_MS).saturating_mul(TICK_MS)
 		});
-		let pool = Self {
+		Self {
 			inner: Arc::new(Inner {
 				used: AtomicU64::new(0),
 				capacity: AtomicU64::new(config.capacity.unwrap_or(u64::MAX)),
@@ -191,10 +191,7 @@ impl Pool {
 				access_count: AtomicU64::new(0),
 				tracks: kio::Lock::new(slab::Slab::new()),
 			}),
-		};
-		#[cfg(test)]
-		crate::model::clock::register(&pool);
-		pool
+		}
 	}
 
 	/// Create a pool that never evicts. This is the [`Default`].
@@ -301,8 +298,18 @@ impl Pool {
 		clock.sweep
 	}
 
+	/// Move the pool's sampled clock forward by `duration`, dating accesses on either
+	/// side without collecting, as if that much time passed between two passes.
 	#[cfg(test)]
-	pub(crate) fn advance_test(&self, now: crate::time::Instant) {
+	pub(crate) fn step(&self, duration: Duration) {
+		let now = self.inner.clock.lock().unwrap().as_ref().map(|clock| clock.now);
+		let now = now.unwrap_or_else(crate::time::Instant::now);
+		self.date(now);
+		self.date(now + duration);
+	}
+
+	#[cfg(test)]
+	fn date(&self, now: crate::time::Instant) {
 		self.advance(now, false);
 		let tracks: Vec<_> = self
 			.inner
@@ -1081,7 +1088,7 @@ mod test {
 	#[test]
 	fn collecting_before_the_deadline_does_not_postpone_it() {
 		let pool = Pool::new(Config::default().with_expiry(Duration::from_secs(2)));
-		let now = crate::model::clock::now();
+		let now = crate::time::Instant::now();
 		let deadline = pool.gc(now);
 		assert_eq!(pool.gc(now + Duration::from_millis(500)), deadline);
 	}
@@ -1089,7 +1096,7 @@ mod test {
 	#[test]
 	fn bounded_pools_sample_recency_without_expiration() {
 		let pool = Pool::unbounded();
-		let now = crate::model::clock::now();
+		let now = crate::time::Instant::now();
 		assert_eq!(pool.gc(now), None);
 		pool.resize(1024);
 		assert_eq!(pool.gc(now), Some(now + DEFAULT_EXPIRY / 2));

@@ -16,9 +16,11 @@ long-running and would stall the JS timestamp quests. Whichever lands second
 absorbs the other. The semantics, the end-marker rule and the reasons are in
 the Rust quest; keep the two in step.
 
-Decided (2026-10-05): timedness is per track, in the shape [Typed
-timedness](/quest/m1/typed-timedness.md) mirrors into `@moq/net`. Where the
-notes below assume a per-frame optional timestamp, that shape wins.
+Decided (2026-10-05, types settled 2026-10-06): timedness is per track, as
+the [untimed model](/quest/m1/untimed-model.md) decided and `@moq/net`
+mirrors: `timescale` is optional, frames keep an optional timestamp, and a
+frame whose timedness doesn't match its track is refused. Where the
+notes below assume groups that mix timed and untimed frames, this wins.
 
 Things to look out for:
 
@@ -31,10 +33,9 @@ Things to look out for:
   a track that never declared one must not claim a timeline downstream.
 - A FETCH is timed only when it learns the track's units when accepted.
 - Tracks on drafts 14-16, where SUBSCRIBE_OK can't carry TIMESCALE, are
-  untimed (decided 2026-10-05), so the publisher sends no Timestamp there, as
-  [IETF timestamp units](/quest/m1/ietf-timestamp-units.md) plans. This
-  replaces the earlier plan to write an object-scope TIMESCALE beside each
-  Timestamp.
+  untimed (decided 2026-10-05), so the publisher sends no Timestamp there.
+  This replaces the earlier plan to write an object-scope TIMESCALE beside
+  each Timestamp.
 - Update callers in js/hang and js/loc (end markers) and anything in
   js/watch that reads frame timestamps.
 
@@ -43,10 +44,6 @@ Test: an untimed frame survives a JS subscribe on each receive path. Run
 
 Public API: breaking. Wire: none beyond what IETF timestamp units
 changes.
-
-## Required
-
-- [Typed timedness](/quest/m1/typed-timedness.md) - the per-track types this mirrors
 
 ## Related
 

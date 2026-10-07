@@ -338,7 +338,7 @@ mod tests {
 	///
 	/// The root spec is the globals plus the first stage, so answering a later chunk
 	/// against it offers process-wide flags that the chunk refuses.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn retargets_to_the_active_stage() {
 		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
 		// A stage offers its own flags, and none of the globals it would refuse.

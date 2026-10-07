@@ -1,8 +1,8 @@
 //! Serve a front's logical track straight from its routes' copies.
 //!
 //! A front serves each track through one route at a time and switches when that route
-//! dies, withdraws, or is beaten. A path names one broadcast whoever serves it, so every
-//! route's copy of a track holds the same groups and frames. A reader of the logical
+//! dies, withdraws, or is beaten by another with the same epoch. Routes with one epoch
+//! serve one broadcast, so every route's copy of a track holds the same groups and frames. A reader of the logical
 //! track therefore reads the serving route's copy directly, through its own
 //! [`Subscriber`]: nothing is copied, and with one route it is a passthrough.
 //!
