@@ -70,8 +70,9 @@ const CATALOG_RETRY_MAX: Duration = Duration::from_secs(5);
 #[non_exhaustive]
 pub struct Config {
 	/// Minimum duration of media listed in each rendition's playlist window. Older timeline
-	/// records are evicted once the remaining segments still cover this span, and past 256
-	/// segments however short they are. Keep it within the relay's group-cache retention, since
+	/// records are evicted once the remaining segments still cover this span, except the newest
+	/// one a video player can start at, so a GOP longer than the window stretches it. Past 256
+	/// segments they are evicted however short they are. Keep it within the relay's group-cache retention, since
 	/// segments are fetched from there on request. It also caps segment `Cache-Control: max-age`.
 	///
 	/// A durable timeline gets the same window: a live playlist stays bounded however much its
@@ -3347,6 +3348,64 @@ mod tests {
 			.unwrap();
 		test.listed("video1", 4).await;
 		assert_eq!(advertised(&test.renditions), ["video0", "video1", "audio0"]);
+	}
+
+	/// Record `sequence` covering frames `frames` of one long group from `pts_ms`, a sync point
+	/// only at the group start: how `moq-mux` splits a GOP longer than its record limit.
+	fn split(sequence: u64, pts_ms: u64, duration_ms: u64, frames: std::ops::Range<u64>) -> hang::timeline::Record {
+		let mut record = span(sequence, pts_ms, duration_ms, 0);
+		record.start.frame = frames.start;
+		record.end = record.start;
+		record.end.frame = frames.end;
+		record.keyframe = frames.start == 0;
+		record
+	}
+
+	// A 30s GOP is split into 10s records with one sync start. The 16s window keeps that record
+	// rather than evict it, so video stays startable and advertised until the next GOP starts.
+	#[tokio::test(start_paused = true)]
+	async fn a_long_gop_keeps_its_sync_start_in_the_window() {
+		let test = Timelines::with(&["video0"], &["audio0"]);
+		let (_track0, mut video0) = test.publish("video0");
+		let (_track1, mut audio0) = test.publish("audio0");
+		for sequence in 0..3 {
+			let frames = sequence * 300..(sequence + 1) * 300;
+			video0
+				.push(&split(sequence, sequence * 10_000, 10_000, frames))
+				.unwrap();
+			audio0
+				.push(&span(sequence, sequence * 10_000, 10_000, sequence))
+				.unwrap();
+		}
+		let window = test.listed("video0", 2).await;
+		assert_eq!(numbers(&window), [0, 1, 2], "the sync start stays listed");
+		assert_eq!(advertised(&test.renditions), ["video0", "audio0"]);
+
+		video0.push(&span(3, 30_000, 10_000, 1)).unwrap();
+		audio0.push(&span(3, 30_000, 10_000, 3)).unwrap();
+		let window = test.listed("video0", 3).await;
+		assert_eq!(numbers(&window), [2, 3], "the next sync start releases the old GOP");
+		assert_eq!(advertised(&test.renditions), ["video0", "audio0"]);
+	}
+
+	// A GOP past the 256-record cap loses its sync start to the cap. The rendition stays
+	// advertised for the rest of the run rather than vanish from a master players already loaded.
+	#[tokio::test(start_paused = true)]
+	async fn a_gop_past_the_cap_stays_advertised() {
+		let test = Timelines::with(&["video0"], &[]);
+		let (_track, mut video0) = test.publish("video0");
+		let records = segments::MAX_SEGMENTS as u64 + 44;
+		// The exporter follows from the GOP start; a later join is only restated the tail.
+		video0.push(&split(0, 0, 40, 0..1)).unwrap();
+		test.listed("video0", 0).await;
+		for sequence in 1..records {
+			video0
+				.push(&split(sequence, sequence * 40, 40, sequence..sequence + 1))
+				.unwrap();
+		}
+		let window = test.listed("video0", records - 1).await;
+		assert_eq!(numbers(&window)[0], 44, "the cap evicted the sync start");
+		assert_eq!(advertised(&test.renditions), ["video0"]);
 	}
 
 	// A span with no media in one rendition keeps its slot as a gap of the same duration there

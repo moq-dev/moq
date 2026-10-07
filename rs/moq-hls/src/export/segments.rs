@@ -91,9 +91,17 @@ impl Discontinuities {
 pub(crate) const MAX_SEGMENTS: usize = 256;
 
 /// Whether a window of `len` rows, whose rows after the oldest span `rest`, should drop its
-/// oldest: it lists more than [`MAX_SEGMENTS`], or the rest still covers `window`.
-pub(crate) fn evicts(window: Duration, len: usize, rest: Duration) -> bool {
-	len > MAX_SEGMENTS || (len >= 2 && rest >= window)
+/// oldest: it lists more than [`MAX_SEGMENTS`], or the rest still covers `window` and still
+/// holds a start (`keeps_start`, see [`starts`]). A GOP longer than the window keeps its sync
+/// row, so the window can grow to one GOP plus `window`, and stays startable.
+pub(crate) fn evicts(window: Duration, len: usize, rest: Duration, keeps_start: bool) -> bool {
+	len > MAX_SEGMENTS || (len >= 2 && rest >= window && keeps_start)
+}
+
+/// Whether a player can start at a `reference` record: audio starts anywhere, video only at a
+/// group start that is a sync point.
+pub(crate) fn starts(reference: &(Kind, String), keyframe: bool, start: &hang::timeline::Position) -> bool {
+	reference.0 == Kind::Audio || (keyframe && start.frame == 0)
 }
 
 /// The rendition a broadcast's segment boundaries come from.
@@ -138,6 +146,11 @@ impl Row {
 	/// decoding with it.
 	pub fn starts_sync(&self) -> bool {
 		self.keyframe && self.frames.start.frame == 0
+	}
+
+	/// Whether a player can start at this segment (see [`starts`]).
+	fn starts(&self) -> bool {
+		starts(&self.reference, self.keyframe, &self.frames.start)
 	}
 }
 
@@ -231,7 +244,8 @@ impl Producer {
 				Some(second) => state.rows.back().unwrap().end.saturating_sub(second.pts.into()),
 				None => Duration::ZERO,
 			};
-			if !evicts(window, state.rows.len(), rest) {
+			let keeps_start = !state.rows[0].starts() || state.rows.iter().skip(1).any(Row::starts);
+			if !evicts(window, state.rows.len(), rest, keeps_start) {
 				break;
 			}
 			state.rows.pop_front();

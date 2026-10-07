@@ -90,6 +90,10 @@ struct Run {
 	init: Option<Arc<Init>>,
 	/// Bumped by every restart, so an init build that straddles one isn't cached for the new run.
 	epoch: u64,
+	/// A listed segment of this run started where a player can, so the master keeps advertising
+	/// the rendition even once a GOP past [`MAX_SEGMENTS`](segments::MAX_SEGMENTS) records evicts
+	/// that segment.
+	startable: bool,
 }
 
 /// The rendition's catalog config, kept whole so a [`Muxer`] can be built per request.
@@ -408,6 +412,9 @@ impl Rendition {
 			end: entry.end_time(),
 			discontinuity,
 		};
+		if self.is(reference) && row.starts_sync() {
+			self.run.lock().expect("run lock poisoned").startable = true;
+		}
 		self.live.push(row, window);
 		self.trim();
 	}
@@ -476,6 +483,7 @@ impl Rendition {
 			generation,
 			init: None,
 			epoch: run.epoch + 1,
+			startable: false,
 		};
 	}
 
@@ -639,18 +647,19 @@ impl Rendition {
 	///
 	/// Audio starts on any segment. Video starts only at a group start that is a sync point,
 	/// so it waits until a listed segment begins at one rather than send a stock player to
-	/// media it cannot decode.
+	/// media it cannot decode. The window keeps its newest such segment, and a GOP too long for
+	/// that still stays advertised for the rest of the publisher run.
 	pub(crate) fn is_advertised(&self) -> bool {
 		self.poll_advertised(&kio::Waiter::noop()).is_ready()
 	}
 
 	/// Poll until [`is_advertised`](Self::is_advertised), for the master route's long-poll.
 	pub(crate) fn poll_advertised(&self, waiter: &kio::Waiter) -> Poll<()> {
-		if self.kind == Kind::Audio {
+		if self.kind == Kind::Audio || self.run().startable {
 			return self.poll_playable(waiter);
 		}
 		self.media.sync(&self.live);
-		self.live.poll_rows(waiter, |rows| {
+		let startable = self.live.poll_rows(waiter, |rows| {
 			for row in rows {
 				let mut content = self.resolve(row);
 				if content == Content::Pending {
@@ -668,7 +677,11 @@ impl Rendition {
 				}
 			}
 			Poll::Pending
-		})
+		});
+		if startable.is_ready() {
+			self.run.lock().expect("run lock poisoned").startable = true;
+		}
+		startable
 	}
 
 	/// This rendition's DASH representation: its master-level metadata plus its track's

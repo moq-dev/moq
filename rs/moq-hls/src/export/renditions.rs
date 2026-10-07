@@ -227,7 +227,11 @@ impl Fanout {
 				}
 				None => Duration::ZERO,
 			};
-			if !segments::evicts(window, feed.history.len(), rest) {
+			let starts = |(_, entry, reference, _): &(u64, Entry, Reference, u64)| {
+				segments::starts(reference, entry.keyframe, &entry.start)
+			};
+			let keeps_start = !starts(&feed.history[0]) || feed.history.iter().skip(1).any(starts);
+			if !segments::evicts(window, feed.history.len(), rest, keeps_start) {
 				break;
 			}
 			feed.history.pop_front();
