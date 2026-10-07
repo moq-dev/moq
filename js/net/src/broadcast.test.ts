@@ -1,4 +1,5 @@
-import { expect, setSystemTime, test } from "bun:test";
+import { expect, setSystemTime, spyOn, test } from "bun:test";
+import { Signal } from "@moq/signals";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { GroupTooLarge } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
@@ -544,4 +545,75 @@ test("broadcast closure clears active demand and subscriptions", async () => {
 	await demand.unused();
 	subscriber.close();
 	track.close();
+});
+
+test("a pending track info query counts as broadcast demand", async () => {
+	const broadcast = new BroadcastProducer();
+	const demand = broadcast.demand();
+
+	const info = wireOf(broadcast).resolveTrackInfo("video");
+	expect(demand.used.peek()).toBe(true);
+
+	const request = await wireOf(broadcast).requested();
+	if (!request) throw new Error("expected request");
+	// Nobody subscribes to the queried track itself.
+	expect(request.demand().used.peek()).toBe(false);
+	request.accept({ priority: 2 });
+	expect((await info).priority).toBe(2);
+	await demand.unused();
+	expect(demand.used.peek()).toBe(false);
+
+	// Closing the broadcast ends a query's demand at once.
+	const rejected = wireOf(broadcast).resolveTrackInfo("audio");
+	expect(demand.used.peek()).toBe(true);
+	broadcast.close();
+	expect(demand.used.peek()).toBe(false);
+	await expect(rejected).rejects.toThrow();
+});
+
+test("removeTrack stops counting the removed track's demand at once", async () => {
+	const broadcast = new BroadcastProducer();
+	const demand = broadcast.demand();
+	const video = broadcast.createTrack("video");
+	const subscriber = video.subscribe();
+	await Promise.resolve();
+	expect(demand.used.peek()).toBe(true);
+
+	broadcast.removeTrack("video");
+	expect(demand.used.peek()).toBe(false);
+
+	// Re-inserting the same track counts it again.
+	broadcast.insertTrack(video);
+	expect(demand.used.peek()).toBe(true);
+
+	subscriber.close();
+	video.close();
+	broadcast.close();
+});
+
+test("inserting a closed track leaves no demand watcher behind", () => {
+	const broadcast = new BroadcastProducer();
+	const track = new TrackProducer("video").accept();
+	track.close();
+
+	// Count the listeners insertTrack attaches and never disposes.
+	let live = 0;
+	const subscribe = Signal.prototype.subscribe;
+	const spy = spyOn(Signal.prototype, "subscribe").mockImplementation(function (this: Signal<unknown>, fn) {
+		live++;
+		const dispose = subscribe.call(this, fn);
+		return () => {
+			live--;
+			dispose();
+		};
+	});
+	try {
+		broadcast.insertTrack(track);
+	} finally {
+		spy.mockRestore();
+	}
+
+	expect(live).toBe(0);
+	expect(broadcast.demand().used.peek()).toBe(false);
+	broadcast.close();
 });

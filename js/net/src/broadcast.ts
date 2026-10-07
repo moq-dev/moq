@@ -38,18 +38,21 @@ class BroadcastState {
 	consumers = 0;
 	used = new Signal(false);
 	active = 0;
-	watched = new WeakSet<track.Producer>();
-	demandCleanup = new Set<Dispose>();
+	// The demand watcher of each open track, disposed when it closes or leaves the broadcast.
+	demands = new Map<track.Producer, Dispose>();
 }
 
 // Each track updates the aggregate on an edge, so a demand change touches only its track.
-function watchDemand(state: BroadcastState, producer: track.Producer): void {
-	if (state.watched.has(producer)) return;
-	state.watched.add(producer);
+// A `pinned` track counts as demand until it closes, subscribed or not.
+function watchDemand(state: BroadcastState, producer: track.Producer, pinned = false): void {
+	if (state.demands.has(producer)) return;
 	const demand = producer.demand();
+	// A closed track is never demand, and its close already fired, so nothing would dispose a watcher.
+	if (demand.closed.peek() !== undefined) return;
 	let active = false;
 	const update = () => {
-		const used = state.closed.peek() === undefined && demand.closed.peek() === undefined && demand.used.peek();
+		const used =
+			state.closed.peek() === undefined && demand.closed.peek() === undefined && (pinned || demand.used.peek());
 		if (active === used) return;
 		state.active += used ? 1 : -1;
 		active = used;
@@ -68,9 +71,9 @@ function watchDemand(state: BroadcastState, producer: track.Producer): void {
 			active = false;
 			state.used.set(state.active > 0);
 		}
-		state.demandCleanup.delete(cleanup);
+		state.demands.delete(producer);
 	};
-	state.demandCleanup.add(cleanup);
+	state.demands.set(producer, cleanup);
 	update();
 }
 
@@ -89,7 +92,7 @@ function dequeueRequest(state: BroadcastState): track.Request | undefined {
 function closeState(state: BroadcastState) {
 	if (state.closed.peek() !== undefined) return;
 	state.closed.set(null);
-	for (const cleanup of state.demandCleanup) cleanup();
+	for (const cleanup of state.demands.values()) cleanup();
 	for (const request of state.pending) request.reject();
 	state.requested.mutate((requests) => {
 		requests.length = 0;
@@ -149,8 +152,9 @@ async function resolveTrackInfo(state: BroadcastState, name: string): Promise<tr
 		return Promise.reject(new Error("broadcast is closed"));
 	}
 
+	// A pending query is demand, as a pending track request is in Rust, though nobody subscribes.
 	const producer = new track.Producer(name);
-	watchDemand(state, producer);
+	watchDemand(state, producer, true);
 	state.requested.mutate((requested) => {
 		requested.push(hooks.makeRequest({ name, producer, sequences: state.sequences, pending: state.pending }));
 	});
@@ -207,7 +211,7 @@ export class Demand {
 		makeDemand = (state) => new Demand(state);
 	}
 
-	/** Whether any track currently has subscribers. */
+	/** Whether any track currently has subscribers, or a track info query is pending. */
 	get used(): Getter<boolean> {
 		return this.#state.used;
 	}
@@ -307,9 +311,12 @@ export class Producer {
 		return producer;
 	}
 
-	/** Remove a statically inserted track by name. */
+	/** Remove a statically inserted track by name. It stops counting toward {@link demand} at once. */
 	removeTrack(name: string): void {
+		const track = this.#state.tracks.get(name);
+		if (!track) return;
 		this.#state.tracks.delete(name);
+		this.#state.demands.get(track)?.();
 	}
 
 	/** A lazy read handle for a track on this broadcast. */

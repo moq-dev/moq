@@ -1098,7 +1098,7 @@ struct Chunks {
 	ready: bool,
 }
 
-impl web_transport_trait::poll::RecvStream for Chunks {
+impl crate::transport::poll::RecvStream for Chunks {
 	type Error = NoError;
 
 	fn poll_read(
@@ -1151,7 +1151,7 @@ impl std::fmt::Display for NoError {
 
 impl std::error::Error for NoError {}
 
-impl web_transport_trait::Error for NoError {
+impl crate::transport::Error for NoError {
 	fn session_error(&self) -> Option<(u32, String)> {
 		None
 	}
