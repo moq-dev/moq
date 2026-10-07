@@ -392,9 +392,14 @@ moq --connect https://relay.example.com/anon \
 
 Each run announces a fresh epoch, so a restarted publisher replaces the old
 broadcast instead of resuming into it. Two publishers that pass the same
-`--epoch` (a UUIDv7, such as `uuidgen -7` prints) are interchangeable sources:
-relays hold both routes and fail over between them mid-group. They must
-produce identical tracks with aligned groups.
+`--epoch` (a lowercase, hyphenated UUIDv7, such as util-linux `uuidgen -7`
+prints) are interchangeable sources: relays hold both routes and fail over
+between them mid-group. They must produce identical tracks with aligned groups,
+which no importer guarantees yet (see
+[#4352](https://github.com/moq-dev/moq/issues/4352) and
+[#4354](https://github.com/moq-dev/moq/issues/4354)). A member restarted with
+the same epoch rejoins as the same content, so if its groups restart from 0,
+viewers wait for its sequence to catch up.
 
 ```bash
 EPOCH=$(uuidgen -7)

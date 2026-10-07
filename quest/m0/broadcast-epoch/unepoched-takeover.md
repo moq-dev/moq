@@ -68,4 +68,3 @@ ends it when another route wins, and announces the change.
 ## Related
 
 - [Apps](/quest/m0/broadcast-epoch/apps.md) - #4970 drives `@moq/watch` and `moq play` from announcements, which this relies on
-- [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - drops the per-session hop stamp, so restarted routes often have identical metadata

@@ -51,11 +51,12 @@ These land with the next breaking release, not the 2026-09-23 train.
   epoch, a UUIDv7 such as `uuidgen -7` prints, instead of a Hop ID: pass the
   same `--epoch` (or `MOQ_EPOCH`) to both. Unlike a rename, `--hop` is now an
   unknown flag and `MOQ_HOP` is silently ignored, so remove it from any
-  deployment: a pair still keyed on `MOQ_HOP` mints an epoch each and stops
-  failing over seamlessly. `--cluster-id` no longer falls back to `--hop`, so a
-  node that pinned its Hop ID with `--hop` passes `--cluster-id`. Relays no
-  longer put a random hop in front of a route that names no publisher; it
-  keeps its 0.
+  deployment: a pair still keyed on `MOQ_HOP` mints an epoch per process, and
+  whenever either member starts or restarts, its new epoch replaces the other's
+  broadcast and ends its viewers' subscriptions. `--cluster-id` no longer falls
+  back to `--hop`, so a node that pinned its Hop ID with `--hop` passes
+  `--cluster-id`. Relays no longer put a random hop in front of a route that
+  names no publisher; it keeps its 0.
 - **The `"auto"` delay is measured, not derived from RTT** (#4162). It is sized
   from how late frames arrive (see [audio jitter](/concept/audio-jitter)) in
   `@moq/watch` and `moq play`, which now defaults `--delay` to `auto` instead of
