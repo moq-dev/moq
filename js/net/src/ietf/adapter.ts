@@ -556,6 +556,21 @@ export class ControlStreamAdapter implements Session {
 			return await r.u62();
 		};
 
+		// Drafts 14 and 15 name the subscription in the second field, and draft 16
+		// names the existing request there. The first field is the update's own
+		// Request ID. Draft 17 and later dropped it, so Request ID is the target.
+		const readUpdateTarget = async (): Promise<bigint> => {
+			const r = new Reader(undefined, body, this.version);
+			if (
+				this.version === Version.DRAFT_14 ||
+				this.version === Version.DRAFT_15 ||
+				this.version === Version.DRAFT_16
+			) {
+				await r.u62();
+			}
+			return await r.u62();
+		};
+
 		// v14/v15 name their withdrawals instead of numbering them. A name we have no
 		// announcement for is dropped, not fatal: it belongs to a duplicate we already
 		// refused, or to a request that is already gone, so there is nothing left to close.
@@ -573,7 +588,7 @@ export class ControlStreamAdapter implements Session {
 			// === FollowUp: route to existing stream ===
 			case 0x02: {
 				// SubscribeUpdate / REQUEST_UPDATE
-				const requestId = await readRequestId();
+				const requestId = await readUpdateTarget();
 				return { route: Route.FollowUp, requestId };
 			}
 

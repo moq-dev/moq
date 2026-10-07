@@ -7,7 +7,8 @@ import { toRequestCode } from "./error.ts";
 import { GoAway } from "./goaway.ts";
 import { PublishNamespace, PublishNamespaceCancel, PublishNamespaceDone } from "./publish_namespace.ts";
 import { RequestError } from "./request.ts";
-import { ALPN, Version } from "./version.ts";
+import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
+import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 test("draft-14 TRACK_STATUS_OK cannot be routed as NAMESPACE_DONE", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_14);
@@ -217,6 +218,80 @@ test("a server adapter rejects a client GOAWAY that names a redirect", async () 
 	await peer.writer.u53(GoAway.id);
 	await new GoAway({ newSessionUri: "https://other.example/" }).encode(peer.writer, VERSION);
 	await expect(running).rejects.toThrow("client GOAWAY must not name a redirect");
+});
+
+function alpnFor(version: IetfVersion): string {
+	switch (version) {
+		case Version.DRAFT_14:
+			return ALPN.DRAFT_14;
+		case Version.DRAFT_15:
+			return ALPN.DRAFT_15;
+		case Version.DRAFT_16:
+			return ALPN.DRAFT_16;
+		case Version.DRAFT_17:
+			return ALPN.DRAFT_17;
+		case Version.DRAFT_18:
+			return ALPN.DRAFT_18;
+		default:
+			throw new Error(`no adapter routing test for ${version}`);
+	}
+}
+
+/**
+ * Open a subscription on `target`, then deliver an update. Returns the request
+ * id the adapter delivered it to.
+ */
+async function routedUpdate(version: IetfVersion, target: bigint, own: bigint | undefined): Promise<bigint> {
+	const pair = createMockTransportPair(alpnFor(version));
+	const control = await Stream.open(pair.server, { version });
+	const adapter = new ControlStreamAdapter(pair.server, control, version, 100n, true);
+	void adapter.run().catch(() => void 0);
+
+	const peer = await Stream.accept(pair.client, version);
+	if (!peer) throw new Error("no control stream");
+
+	await peer.writer.u53(Subscribe.id);
+	await new Subscribe({
+		requestId: target,
+		trackNamespace: Path.from("update"),
+		trackName: "video",
+		subscriberPriority: 128,
+	}).encode(peer.writer, version);
+
+	const stream = await Promise.race([
+		adapter.acceptBi(),
+		new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), WAIT)),
+	]);
+	if (!stream) throw new Error("no virtual stream");
+	expect(await stream.reader.u53()).toBe(Subscribe.id);
+	await Subscribe.decode(stream.reader, version);
+
+	await peer.writer.u53(SubscribeUpdate.id);
+	await new SubscribeUpdate({ requestId: target, ownRequestId: own }).encode(peer.writer, version);
+
+	const typeId = await Promise.race([
+		stream.reader.u53(),
+		new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), WAIT)),
+	]);
+	if (typeId === undefined) throw new Error(`${version}: update ${own} did not reach ${target}`);
+	expect(typeId).toBe(SubscribeUpdate.id);
+	const update = await SubscribeUpdate.decode(stream.reader, version);
+	return update.requestId;
+}
+
+test("drafts 14 to 16 route an update to its second request id", async () => {
+	const own = 10n;
+	const target = 4n;
+	for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16] as const) {
+		expect(await routedUpdate(version, target, own)).toBe(target);
+	}
+});
+
+test("draft 17 and later route an update by its request id", async () => {
+	const target = 10n;
+	for (const version of [Version.DRAFT_17, Version.DRAFT_18] as const) {
+		expect(await routedUpdate(version, target, undefined)).toBe(target);
+	}
 });
 
 test("a second GOAWAY on the control stream closes the session", async () => {

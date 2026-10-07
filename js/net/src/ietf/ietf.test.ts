@@ -983,28 +983,36 @@ test("PublishDone v17: no requestId", async () => {
 
 // --- SubscribeUpdate tests ---
 
-test("SubscribeUpdate v14: round trip", async () => {
-	const msg = new Subscribe.SubscribeUpdate({ requestId: 5n });
+// The first field is the update's own Request ID. requestId is the subscription
+// (drafts 14 and 15) or the existing request (draft 16), and a round trip that
+// only carries one id cannot tell them apart.
+test("SubscribeUpdate drafts 14 to 16 round-trip the target separately from the update", async () => {
+	const own = 10n;
+	const target = 4n;
+	for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16] as const) {
+		const msg = new Subscribe.SubscribeUpdate({ requestId: target, ownRequestId: own });
 
-	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
-	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeUpdate.decode, Version.DRAFT_14);
+		const encoded = await encodeVersioned(msg, version);
+		const reader = new Reader(undefined, encoded, version);
+		await reader.u16();
+		expect(await reader.u62()).toBe(own);
+		expect(await reader.u62()).toBe(target);
 
-	expect(decoded.requestId).toBe(5n);
-});
-
-test("SubscribeUpdate v15: round trip", async () => {
-	const msg = new Subscribe.SubscribeUpdate({ requestId: 10n });
-
-	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
-	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeUpdate.decode, Version.DRAFT_15);
-
-	expect(decoded.requestId).toBe(10n);
+		const decoded = await decodeVersioned(encoded, Subscribe.SubscribeUpdate.decode, version);
+		expect(decoded.requestId).toBe(target);
+		const again = await encodeVersioned(decoded, version);
+		expect(Array.from(again)).toEqual(Array.from(encoded));
+	}
 });
 
 test("SubscribeUpdate v17: round trip with requiredRequestIdDelta", async () => {
 	const msg = new Subscribe.SubscribeUpdate({ requestId: 42n });
 
 	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
+	const reader = new Reader(undefined, encoded, Version.DRAFT_17);
+	await reader.u16();
+	expect(await reader.u62()).toBe(42n);
+
 	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeUpdate.decode, Version.DRAFT_17);
 
 	expect(decoded.requestId).toBe(42n);

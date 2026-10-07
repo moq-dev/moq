@@ -361,26 +361,34 @@ export class SubscribeUpdate {
 
 	requestId: bigint;
 
-	constructor({ requestId }: { requestId: bigint }) {
+	// This update's own Request ID, the first field on drafts 14 to 16.
+	#ownRequestId?: bigint;
+
+	constructor({ requestId, ownRequestId }: { requestId: bigint; ownRequestId?: bigint }) {
 		this.requestId = requestId;
+		this.#ownRequestId = ownRequestId;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
-		if (version === Version.DRAFT_14) {
+		// Drafts 14 to 16 send a new Request ID and then the request being updated.
+		// Later drafts dropped the new id, so the one field left is the target.
+		if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
+			if (this.#ownRequestId === undefined) throw new Error("ownRequestId required for draft14-16");
+			await w.u62(this.#ownRequestId);
 			await w.u62(this.requestId);
-			await w.u62(0n); // subscription_request_id
-			await w.u62(0n); // start_group
-			await w.u62(0n); // start_object
-			await w.u62(0n); // end_group
-			await w.u8(128); // subscriber_priority
-			await w.bool(true); // forward
-			await w.u53(0); // no parameters
-		} else if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-			await w.u62(this.requestId);
-			await w.u62(0n); // subscription_request_id
-			const params = new Parameters();
-			await params.encode(w, version);
+			if (version === Version.DRAFT_14) {
+				await w.u62(0n); // start_group
+				await w.u62(0n); // start_object
+				await w.u62(0n); // end_group
+				await w.u8(128); // subscriber_priority
+				await w.bool(true); // forward
+				await w.u53(0); // no parameters
+			} else {
+				const params = new Parameters();
+				await params.encode(w, version);
+			}
 		} else {
+			if (this.#ownRequestId !== undefined) throw new Error("ownRequestId is only valid on draft14-16");
 			// v17+: REQUEST_UPDATE
 			await w.u62(this.requestId);
 			if (version === Version.DRAFT_17) {
@@ -400,30 +408,29 @@ export class SubscribeUpdate {
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<SubscribeUpdate> {
-		if (version === Version.DRAFT_14) {
+		if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
+			const ownRequestId = await r.u62();
 			const requestId = await r.u62();
-			await r.u62(); // subscription_request_id
-			await r.u62(); // start_group
-			await r.u62(); // start_object
-			await r.u62(); // end_group
-			await r.u8(); // subscriber_priority
-			await r.bool(); // forward
-			await Parameters.decode(r, version); // parameters
-			return new SubscribeUpdate({ requestId });
-		} else if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-			const requestId = await r.u62();
-			await r.u62(); // subscription_request_id
-			await Parameters.decode(r, version);
-			return new SubscribeUpdate({ requestId });
-		} else {
-			// v17+: REQUEST_UPDATE
-			const requestId = await r.u62();
-			if (version === Version.DRAFT_17) {
-				await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
+			if (version === Version.DRAFT_14) {
+				await r.u62(); // start_group
+				await r.u62(); // start_object
+				await r.u62(); // end_group
+				await r.u8(); // subscriber_priority
+				await r.bool(); // forward
+				await Parameters.decode(r, version); // parameters
+			} else {
+				await Parameters.decode(r, version);
 			}
-			await Parameters.decode(r, version);
-			return new SubscribeUpdate({ requestId });
+			return new SubscribeUpdate({ requestId, ownRequestId });
 		}
+
+		// v17+: REQUEST_UPDATE. Request ID is the existing request.
+		const requestId = await r.u62();
+		if (version === Version.DRAFT_17) {
+			await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
+		}
+		await Parameters.decode(r, version);
+		return new SubscribeUpdate({ requestId });
 	}
 }
 
