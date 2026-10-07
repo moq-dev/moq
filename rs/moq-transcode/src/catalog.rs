@@ -1,7 +1,7 @@
 //! Derivative catalog construction: pick the source rendition, size the ladder
 //! against it, and fill the output catalog with rung + passthrough entries.
 
-use hang::catalog::{AV1, Video, VideoCodec, VideoConfig};
+use hang::catalog::{AV1, Container, Video, VideoCodec, VideoConfig};
 use moq_net::path::RelativeOwned;
 use moq_video::decode::Codec;
 
@@ -144,11 +144,13 @@ impl Decoders {
 
 	/// Open and drop a decoder for `rendition`.
 	async fn open(&self, rendition: &VideoConfig) -> Result<(), moq_video::Error> {
-		// Parameter sets in band, so the probe asks about the backend and not about
-		// this rendition's description: a malformed one belongs to the stream and
-		// fails when the rendition is decoded, not as a verdict on the whole codec.
+		// Annex-B with the parameter sets in band, so the probe asks about the backend
+		// and not about this rendition's description or container: a malformed one
+		// belongs to the stream and fails when the rendition is decoded, not as a
+		// verdict on the whole codec.
 		let mut config = rendition.clone();
 		config.description = None;
+		config.container = Container::Legacy;
 		match &mut config.codec {
 			VideoCodec::H264(h264) => h264.inline = true,
 			VideoCodec::H265(h265) => h265.in_band = true,
