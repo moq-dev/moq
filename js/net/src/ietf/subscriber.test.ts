@@ -1212,10 +1212,11 @@ test("an object datagram is a datagram group", async () => {
 			}).encode(VERSION),
 		);
 
-	// Past object 0, an unbound alias, and a status other than Normal.
+	// Past object 0, an unbound alias, a status other than Normal, and no Timestamp on a timed track.
 	await send({ objectId: 1 });
 	await send({ trackAlias: ALIAS + 1n });
 	await send({ endOfGroup: false, body: { status: 3 } });
+	await send({ groupId: 5, objectId: 0 });
 	const properties = await encodeObjectExtensions(Timestamp.fromMillis(1234), Timescale.MILLI, VERSION);
 	await send({ groupId: 9, objectId: 0, publisherPriority: 7, properties, body: { payload: Uint8Array.of(1) } });
 

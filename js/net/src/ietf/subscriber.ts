@@ -1172,8 +1172,9 @@ export class Subscriber {
 	 * group at the Group ID.
 	 *
 	 * One the model cannot carry is dropped like any lost datagram: an Object past ID 0 (the
-	 * group would need a second object), a status other than Normal, or an alias that is not
-	 * bound yet (the draft lets us drop rather than buffer).
+	 * group would need a second object), a status other than Normal, an alias that is not
+	 * bound yet (the draft lets us drop rather than buffer), or no Timestamp on a track that
+	 * declared a timescale.
 	 */
 	async #recvDatagram(data: Uint8Array): Promise<void> {
 		const version = this.#session.version;
@@ -1216,6 +1217,10 @@ export class Subscriber {
 					cause: err,
 				});
 			}
+		}
+		if (timescale !== undefined && timestamp === undefined) {
+			console.debug(`dropping an unstamped datagram: alias=${alias} group=${sequence}`);
+			return;
 		}
 
 		try {
