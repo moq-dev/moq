@@ -206,9 +206,6 @@ pub enum MoqAnnounceEvent {
 	Update { announce: MoqAnnounce },
 	/// No route covers the prefix any more. Carries its last advertised route.
 	End { announce: MoqAnnounce },
-	/// Every route live at subscribe time has been delivered; what follows is
-	/// live changes. Yielded once.
-	Live,
 }
 
 impl From<moq_net::announce::Event> for MoqAnnounceEvent {
@@ -224,7 +221,6 @@ impl From<moq_net::announce::Event> for MoqAnnounceEvent {
 			Event::End(announce) => Self::End {
 				announce: announce.into(),
 			},
-			Event::Live => Self::Live,
 		}
 	}
 }

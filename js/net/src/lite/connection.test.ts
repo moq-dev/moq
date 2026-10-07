@@ -434,7 +434,6 @@ test("close waits for a request served while withdrawals are in flight", async (
 	});
 	try {
 		expect((await announced.next())?.kind).toBe("start");
-		expect((await announced.next())?.kind).toBe("live");
 
 		fin.enable();
 		const closing = server.close();

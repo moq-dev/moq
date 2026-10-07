@@ -17,7 +17,7 @@ use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
 
 use crate::catalog::hang::Container as HangContainer;
 use crate::container::ts::export::PCR_INTERVAL;
-use crate::container::ts::{Export, Stats, catalog as tscat};
+use crate::container::ts::{Export, catalog as tscat, stats};
 use crate::container::{Frame, Kind, Producer};
 use moq_net::Timestamp;
 
@@ -6086,7 +6086,7 @@ async fn export_stats_skip_output_a_failure_discards() {
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		(broadcast, catalog)
 	};
-	let units = |stats: Stats| stats.streams.values().map(|row| row.units).sum::<u64>() as usize;
+	let units = |stats: stats::Export| stats.streams.values().map(|row| row.units).sum::<u64>() as usize;
 
 	let (mut broadcast, mut catalog) = publish();
 	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
@@ -6144,7 +6144,7 @@ async fn export_stats_skip_output_a_failure_discards() {
 ///
 /// Drained after every write, like [`export_twice`], so the export reads every frame and a row
 /// stops only because its track did.
-async fn export_liveness(sample: u64, stop: u64) -> (Stats, Stats, Vec<Frame>) {
+async fn export_liveness(sample: u64, stop: u64) -> (stats::Export, stats::Export, Vec<Frame>) {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
@@ -6174,7 +6174,7 @@ async fn export_liveness(sample: u64, stop: u64) -> (Stats, Stats, Vec<Frame>) {
 	];
 
 	let mut export = Export::new(crate::source::announced(&consumer)).await.unwrap();
-	assert!(export.stats().is_empty(), "no row before the program tables");
+	assert!(export.stats().streams.is_empty(), "no row before the program tables");
 	let (mut sampled, mut frames) = (None, Vec::new());
 	let mut audio_index = 0;
 	for tick in 0..TICKS {
@@ -6226,7 +6226,7 @@ async fn export_liveness(sample: u64, stop: u64) -> (Stats, Stats, Vec<Frame>) {
 async fn export_stats_advance_every_stream() {
 	let (mid, end, _) = export_liveness(TICKS / 2, TICKS).await;
 
-	let tracks: Vec<&str> = end.streams.values().map(|row| row.track).collect();
+	let tracks: Vec<&str> = end.streams.values().map(|row| row.track.as_str()).collect();
 	assert_eq!(tracks, [".aac", ".aac", ".avc3"], "one row per elementary stream");
 	for (pid, row) in &end.streams {
 		let before = &mid.streams[pid];

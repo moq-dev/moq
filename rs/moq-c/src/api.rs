@@ -726,13 +726,9 @@ pub enum moq_announce_kind {
 	MOQ_ANNOUNCE_KIND_UPDATE = 1,
 	/// No route covers the prefix any more.
 	MOQ_ANNOUNCE_KIND_END = 2,
-	/// Every route live when the listener started has been delivered; what
-	/// follows is live changes. Delivered once, with no prefix or captures.
-	MOQ_ANNOUNCE_KIND_LIVE = 3,
 }
 
-/// An announce event from an origin: a route starting, updating, or ending,
-/// or the listener catching up.
+/// An announce event from an origin: a route starting, updating, or ending.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_announce_event {
@@ -747,7 +743,7 @@ pub struct moq_announce_event {
 	pub captures_len: usize,
 	pub has_captures: bool,
 
-	/// Which event this is. A LIVE event carries no prefix or captures.
+	/// Which event this is.
 	pub kind: moq_announce_kind,
 }
 

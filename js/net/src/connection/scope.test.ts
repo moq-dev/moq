@@ -37,8 +37,6 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_19]) {
 				received.push(update.prefix);
 			}
 			expect(received.sort()).toEqual(["client/other/live", "client/room/.hidden", "client/room/live"]);
-			// The marker waits for every interest's initial set, not just the first to land.
-			expect(await withTimeout(announced.next(), 1000, "live marker did not arrive")).toEqual({ kind: "live" });
 			expect([...consume.broadcasts().peek().keys()].sort()).toEqual([
 				Path.from("other/live"),
 				Path.from("room/live"),
