@@ -150,7 +150,8 @@ jobs:
 
       # One relay's stats tick (drain plus plain and compressed encode), swept
       # over held paths, tiers, and how many of those paths changed, plus the
-      # decode table. `--test` runs each routine once, so a panic (a plain
+      # decode table. `--test` runs each tick routine once (decode ignores it
+      # and runs its whole table), so a panic (a plain
       # frame past the cache cap, a drain that drops a held path) fails here
       # instead of on the next manual run. Timing is not compared. `bench`
       # exposes the hidden producer hook; without it the tick target is skipped.

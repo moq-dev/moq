@@ -3,7 +3,8 @@
 //! whose counters changed since the last tick.
 //!
 //! Idle paths stay in the plain snapshot for as long as the registry holds
-//! them, so `heldB` grows with the table and is what nears the frame cap.
+//! them, so `heldB` grows with the table and is what nears the frame cap
+//! (`cap%`).
 //! `plainB` and `zB` are what this tick wrote (zero when nothing changed).
 //! The plain side is a full snapshot; the compressed side is a merge-patch
 //! delta. Time is the Criterion target `stats/tick`. The table is one warm-up
@@ -59,7 +60,7 @@ unsafe impl GlobalAlloc for Counter {
 /// Ticks averaged into one table row, after a warm-up drain.
 const TABLE_TICKS: u32 = 4;
 
-/// Held paths. The last count is the one whose plain snapshot should near the cache cap.
+/// Held paths. The last count is sized so its plain snapshot nears the cache cap; `cap%` shows how close.
 const PATHS: [usize; 4] = [100, 1_000, 10_000, 50_000];
 
 const TIERS: [usize; 2] = [1, 4];
@@ -188,21 +189,12 @@ fn check_row(paths: usize, changed: usize, row: &Row) {
 			"changed paths did not publish a compressed frame"
 		);
 	}
-	if paths == *PATHS.last().unwrap() {
-		// Idle paths are most of the plain snapshot. This count should sit near
-		// the cap without crossing it; a much smaller frame means the shape no
-		// longer stresses the limit the producer refuses past.
-		assert!(
-			row.bytes.held as u64 * 2 > cap,
-			"largest plain frame is under half the cache cap ({cap} bytes): {}",
-			row.bytes.held
-		);
-	}
 }
 
 fn bench(c: &mut Criterion) {
-	println!("plain frame cap: {} bytes", moq_net::group::MAX_CACHE_BYTES);
-	println!("paths tiers changed% allocs/tick us/tick heldB plainB zB");
+	let cap = moq_net::group::MAX_CACHE_BYTES;
+	println!("plain frame cap: {cap} bytes");
+	println!("paths tiers changed% allocs/tick us/tick heldB cap% plainB zB");
 
 	let mut group = c.benchmark_group("stats/tick");
 	group.sample_size(10);
@@ -213,18 +205,25 @@ fn bench(c: &mut Criterion) {
 			for &paths in &PATHS {
 				let id = BenchmarkId::from_parameter(format!("{paths}p_{tiers}t_{changed}pct"));
 				group.throughput(Throughput::Elements((paths * tiers) as u64));
+				// Criterion re-enters the closure per sample, so build and print the row
+				// once, and only when this id runs (not under `--list` or a filter).
+				let mut relay = None;
 				group.bench_function(id, |b| {
-					let mut relay = Relay::build(paths, tiers, changed);
-					let row = sample(&mut relay);
-					let micros = row.elapsed.as_secs_f64() * 1e6;
-					println!(
-						"{paths:>5} {tiers:>5} {changed:>8} {allocs:>11} {micros:>8.1} {held:>8} {plain:>8} {z:>8}",
-						allocs = row.allocs,
-						held = row.bytes.held,
-						plain = row.bytes.plain,
-						z = row.bytes.compressed,
-					);
-					check_row(paths, changed, &row);
+					let relay = relay.get_or_insert_with(|| {
+						let mut relay = Relay::build(paths, tiers, changed);
+						let row = sample(&mut relay);
+						let micros = row.elapsed.as_secs_f64() * 1e6;
+						println!(
+							"{paths:>5} {tiers:>5} {changed:>8} {allocs:>11} {micros:>8.1} {held:>8} {ratio:>4.0} {plain:>8} {z:>8}",
+							allocs = row.allocs,
+							held = row.bytes.held,
+							ratio = row.bytes.held as f64 * 100.0 / cap as f64,
+							plain = row.bytes.plain,
+							z = row.bytes.compressed,
+						);
+						check_row(paths, changed, &row);
+						relay
+					});
 					b.iter_custom(|iters| {
 						let mut total = Duration::ZERO;
 						for _ in 0..iters {

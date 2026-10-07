@@ -348,7 +348,7 @@ bench-playback:
 bench-rtmp *args:
     cargo bench --locked -p moq-rtmp --bench chunk_interleaving -- "$@"
 
-# One relay's stats tick, plus the decode table. `--test` runs each once.
+# One relay's stats tick, plus the decode table. `--test` runs each tick once; decode ignores it and prints its whole table.
 [positional-arguments]
 bench-stats *args:
     cargo bench --locked -p moq-stats --features bench --bench producer_tick --bench decode -- "$@"
