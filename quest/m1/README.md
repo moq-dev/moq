@@ -49,6 +49,7 @@ blocks. The quests that gated m0 lines moved under them.
 - [Bump mp4-atom for avc3](/quest/m1/mp4-atom-avc3-bump.md) - this repository depends on mp4-atom 0.16.2, which reads and writes an `avc3` sample entry
 - [fMP4 init from the catalog](/quest/m1/fmp4-catalog-init.md) - fMP4 export writes avc3/hev1 entries from the catalog, so an Annex-B H.264 or H.265 init no longer waits for the first keyframe
 - [WebTransport close backends](/quest/m1/wt-close-backends.md) - iroh's client reads a peer's capsule close, and moq-uring's HTTP/3 close task keeps the session alive until the capsule is sent
+- [Early video demand](/quest/m1/catalog-early-demand.md) - a regression guards demand before the first keyframe after the detector removal
 - [Hang changelog](/quest/m1/hang-changelog-04.md) - the hang draft lists under -03 only what -03 published
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
 - [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - one dynamic producer per track name in both languages, with the sequence namespace surviving a replacement
