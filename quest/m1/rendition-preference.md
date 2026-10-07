@@ -78,4 +78,3 @@ Decided in planning interviews on 2026-10-01:
 ## Related
 
 - [JS rendition ranking](/quest/m1/js-ranked.md) - mirrors `Video::ranked` in `@moq/hang`, which sorts by preference first once this quest lands
-- [Audio rendition pick](/quest/m1/audio-ranked.md) - audio ranking, where `preference` could join later

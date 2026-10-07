@@ -702,6 +702,95 @@ async fn export_without_multitrack_keeps_best_rendition() {
 	);
 }
 
+/// Single-track FLV serves the best audio rendition it can carry, not the first by name.
+///
+/// The weaker rendition sorts first. A higher sample rate at a lower bitrate loses to the
+/// higher bitrate, and an uncarryable rendition does not hide the one FLV can mux.
+#[tokio::test(start_paused = true)]
+async fn export_without_multitrack_keeps_best_audio_rendition() {
+	use hang::catalog::{AAC, AudioCodec, AudioConfig, Container};
+	use moq_net::Timestamp;
+
+	use crate::container::Producer;
+
+	// AAC-LC, 48000 Hz, stereo. Higher rate, lower bitrate.
+	const WEAK_ASC: [u8; 2] = [0x11, 0x90];
+	// AAC-LC, 44100 Hz, stereo. Lower rate, higher bitrate.
+	const STRONG_ASC: [u8; 2] = [0x12, 0x10];
+
+	let mut producer = moq_net::broadcast::Info::new().produce();
+	let consumer = producer.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
+	let mut tracks = Vec::new();
+
+	{
+		let mut publish = |name: &str, config: AudioConfig| {
+			let track = producer.create_track(name, None).unwrap();
+			catalog
+				.modify()
+				.unwrap()
+				.audio
+				.renditions
+				.insert(track.name().to_string(), config);
+			let mut audio = Producer::new(
+				track,
+				crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+			);
+			audio
+				.write(crate::container::Frame {
+					timestamp: Timestamp::from_millis(0).unwrap(),
+					duration: None,
+					payload: Bytes::from_static(&[0xde, 0xad]),
+					keyframe: true,
+				})
+				.unwrap();
+			audio.finish().unwrap();
+			tracks.push(audio);
+		};
+
+		// Name order is the uncarryable rendition, then the higher-rate lower-bitrate one.
+		let mut flac = AudioConfig::new(AudioCodec::Flac, 48_000, 2);
+		flac.container = Container::Legacy;
+		flac.bitrate = Some(256_000);
+		publish("a", flac);
+
+		let mut weak = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		weak.container = Container::Legacy;
+		weak.bitrate = Some(64_000);
+		weak.description = Some(Bytes::from_static(&WEAK_ASC));
+		publish("m", weak);
+
+		let mut strong = AudioConfig::new(AAC { profile: 2 }, 44_100, 2);
+		strong.container = Container::Legacy;
+		strong.bitrate = Some(128_000);
+		strong.description = Some(Bytes::from_static(&STRONG_ASC));
+		publish("z", strong);
+	}
+
+	catalog.finish().unwrap();
+	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	let exported = drain_to_end(exporter, (producer, catalog, tracks)).await;
+
+	let mut bcast2 = moq_net::broadcast::Info::new().produce();
+	let cat2 = crate::catalog::Producer::new(&mut bcast2, crate::catalog::Config::default()).unwrap();
+	let mut imp2 = Import::new(bcast2, cat2.reserve());
+	imp2.decode(&bytes::BytesMut::from(exported.as_slice())).unwrap();
+	imp2.finish().unwrap();
+
+	let snap = cat2.snapshot();
+	assert_eq!(
+		snap.audio.renditions.len(),
+		1,
+		"only one audio rendition without multitrack"
+	);
+	let audio = snap.audio.renditions.values().next().unwrap();
+	assert_eq!(
+		audio.sample_rate, 44_100,
+		"the higher bitrate wins over the higher sample rate"
+	);
+	assert_eq!(audio.description.as_deref(), Some(&STRONG_ASC[..]));
+}
+
 /// A selection narrows what the export may carry, and a single-track export
 /// picks the best rendition among what remains.
 #[tokio::test(start_paused = true)]
