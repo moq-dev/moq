@@ -16,7 +16,7 @@ import { RequestError, RequestOk } from "./request.ts";
 import { Subscribe, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
-import { ALPN, Version } from "./version.ts";
+import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 const VERSION = Version.DRAFT_19;
 
@@ -874,7 +874,7 @@ function encodeObjects(deltas: number[]): Uint8Array {
  * and lets a group stream naming it be handled.
  */
 async function subscribeTrack(
-	version: Version = VERSION,
+	version: IetfVersion = VERSION,
 ): Promise<{ subscriber: Subscriber; track: track.Subscriber }> {
 	const pair = createMockTransportPair(version === Version.DRAFT_16 ? ALPN.DRAFT_16 : ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, version, true);
