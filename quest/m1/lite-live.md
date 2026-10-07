@@ -24,7 +24,8 @@ Decided (maintainer, 2026-10-07):
   "0 means none" sentinel.
 - A live-only subscriber has no floor, the neutral value for the minimum, so
   lite-07 makes the floor optional. A subscription with neither a floor nor
-  `Live` is refused.
+  `Live` is refused. The draft names how an absent floor is encoded (not a
+  value-plus-one sentinel) and how SUBSCRIBE_UPDATE clears a floor or `Live`.
 - `Live: true` lowers the floor to frame 0 of the oldest group that
   `Subscriber Max Age` has not expired, when that position sorts below the
   floor. That is the start lite-06 already resolves for `Group Start` 0, so a
@@ -52,15 +53,20 @@ Decided (maintainer, 2026-10-07):
   of the two. For an empty track the `live` mapping alone covers both, since
   moq-transport starts it at {0, 0}. moq-lite has no
   TRACK_STATUS, so a lite-06 or pre-06 upstream is subscribed at floor 0 and
-  the relay filters locally, as main does today.
+  the relay filters locally. On lite-06 that is `Group Start` 0, exactly the
+  `live` mapping. On pre-06 the floor must go out as an explicit group 0
+  (replay from the beginning): the codec folds a floor of 0 to absent today
+  (`encode_start_group`), which pre-06 reads as the latest group, so a merged
+  `{floor: 2, live}` with groups 2-4 retained would lose 2-3.
 - Docs stay inline: the lite draft (field, semantics, lite-07 changelog),
   `doc/concept`, and the Rust and JS API docs.
 
 Test with mock time: the starvation case (a floor-4 subscriber and a `live`
 subscriber on a quiet track whose newest group is 3) in-process and through a
 relay on lite-06 and lite-07-wip, a buffering `live` subscriber (max age > 0)
-merged with a floor above the live edge, a frame floor merged with `live`, and
-the codec mapping of each older wire.
+merged with a floor above the live edge, a frame floor merged with `live`, a
+merged `{floor: 2, live}` through a pre-06 upstream with groups 2-4 retained
+that delivers all three, and the codec mapping of each older wire.
 
 ## Related
 
