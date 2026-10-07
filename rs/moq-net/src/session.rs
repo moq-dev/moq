@@ -648,7 +648,11 @@ impl Drop for Withdrawing {
 ///
 /// A request past a cap is refused on its own where the protocol allows it, never by
 /// closing the session: a SUBSCRIBE is answered with an error, and an announce stream
-/// that would exceed the cap is reset.
+/// that would exceed the cap is reset, dropping everything it carried.
+///
+/// On moq-transport drafts 14 to 16 the caps also size the request window, which counts
+/// every request (FETCH, TRACK_STATUS and SUBSCRIBE_UPDATE included), so very low caps
+/// can starve it and turn one more request into a session error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {

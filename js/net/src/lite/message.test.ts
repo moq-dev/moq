@@ -29,7 +29,7 @@ test("ANNOUNCE_INIT keeps room for a large initial set", async () => {
 	await expect(AnnounceInit.decode(new Reader(undefined, wire, version), version)).rejects.not.toThrow("too large");
 });
 
- test("control message length 65,535 passes the prefix check", async () => {
+test("control message length 65,535 passes the prefix check", async () => {
 	const version = Version.DRAFT_05;
 	const wire = await prefix(65_535, version);
 	await expect(Subscribe.decode(new Reader(undefined, wire, version), version)).rejects.not.toThrow("too large");
