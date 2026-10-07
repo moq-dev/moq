@@ -24,10 +24,9 @@ Decided in planning (2026-10-07, from #4970's review):
   better route without an epoch takes over with a hard switch, ending
   subscriptions in flight. The maintainer chose sticky subscriptions plus
   `Restart` instead (2026-10-07), and this quest absorbs the rest of that
-  takeover plan. Open for the maintainer: a client that doesn't read
-  announces (IETF subscribers, the go/python/c interop clients, third-party
-  players) stays on a replaced broadcast until its route goes. Settle
-  whether that is accepted before implementing.
+  takeover plan. Accepted consequence: a client that doesn't read announces
+  (IETF subscribers, the go/python/c interop clients, third-party players)
+  stays on a replaced broadcast until its route goes.
 - **Source identity.** On a route without an epoch, a different route entry
   is a different source: any other announcing session, a peer reconnect
   included. Routes without an epoch can't resume across routes anyway, so
