@@ -120,7 +120,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [JS rendition ranking](/quest/m1/js-ranked.md) - `@moq/hang` ranks video renditions like Rust, and `@moq/watch`'s fallback uses it
 - [Audio rendition pick](/quest/m1/audio-ranked.md) - single-track FLV/RTMP and WHEP serve the best audio rendition, not the first by name
 - [FLV catalog stream](/quest/m1/flv-catalog-stream.md) - `flv::Export` takes a catalog stream like fmp4, replacing `with_select`
-- [io_uring flow control](/quest/m1/uring-flow-control-windows.md) - the relay's io_uring workers honor the QUIC flow-control windows instead of refusing them
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
 - [QoS](/quest/m1/qos/README.md) - broadcast health: relay starvation and timeliness histograms
 - [Catalog rendition IDs](/quest/m1/catalog-track-id.md) - catalog rendition keys become IDs unique across video and audio, with an optional `track` name, so one catalog lists renditions from several broadcasts
