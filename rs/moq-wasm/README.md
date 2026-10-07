@@ -18,12 +18,12 @@ that path is unrelated to this crate.)
 What works today:
 
 - **Executor-independent sessions.** `moq-net` is generic over
-  `web_transport_trait::poll::Session` and returns a driver for the caller to
+  `moq_net::transport::poll::Session` and returns a driver for the caller to
   run. `moq-wasm` spawns `moq_net::time::run` via `web_async::spawn`, which
   supplies the browser clock and sleeps until the driver's next deadline.
-- **The browser transport needs no adapter**: `web-transport-wasm` implements
-  the poll traits `moq-net` consumes, so `src/transport.rs` is just the dial
-  (the ALPN list and the browser's two trust modes).
+- **The browser transport is adapted at the edge**: `src/transport.rs` wraps
+  `web-transport-wasm` in a newtype implementing moq-net's owned poll traits,
+  alongside the ALPN list and the browser's two trust modes.
 - **It compiles to `wasm32-unknown-unknown` and produces `@moq/wasm`**: `just
   wasm` emits a typed, importable package (`Session` / `Broadcast` / `Track` /
   `Group`, used as `Moq.Session` etc. via `import * as Moq`, `Promise`-returning

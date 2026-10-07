@@ -21,7 +21,7 @@ Turns existing container formats into hang broadcasts and back. This is what
 
 Importers parse the bitstream to fill the catalog (resolution, codec string,
 `description`), split groups at keyframes, and stamp timestamps. Exporters do
-the inverse and skip stalled groups past a max age. Per-codec
+the inverse and skip stalled groups past a max delay. Per-codec
 producers (`import::Opus`, H.264, and so on) are available for feeding frames
 you already have.
 
