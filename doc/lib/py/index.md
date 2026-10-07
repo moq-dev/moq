@@ -25,7 +25,7 @@ async def main():
         # The filter is relative to the literal prefix; prefixes stay origin-relative.
         async for event in client.announced("live/", filter="*/camera"):
             if not isinstance(event, moq.AnnounceEventStart):
-                continue  # AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventLive
+                continue  # AnnounceEventUpdate or AnnounceEventEnd
             announcement = event.announce
             print(announcement.captures)  # what * matched, or None for a partial overlap
             broadcast = await client.request_broadcast(announcement.prefix)
@@ -93,9 +93,7 @@ capability, not an inventory. `announced(prefix, filter=...)` combines a literal
 root with an optional relative pattern and yields `AnnounceEvent`s:
 `AnnounceEventStart`, `AnnounceEventUpdate`, or `AnnounceEventEnd`
 carrying an `Announce` as `.announce`, whose `.prefix` stays relative to the
-origin and whose `.captures` reports what the pattern wildcards matched, or
-`AnnounceEventLive` once every route live at subscribe time has been delivered.
-Break on `AnnounceEventLive` to list what is live and stop.
+origin and whose `.captures` reports what the pattern wildcards matched.
 Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless
 `hidden=True`.
 

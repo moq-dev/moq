@@ -48,7 +48,8 @@ instead host sessions with `--listen`, or both at once; without a listener,
 the `--listen-*` and `--auth-*` flags are refused. A listener admits
 clients by `--auth-url` or `--auth-public`, as the relay does (see
 [Authentication](/bin/relay/auth)); public rules ignore certificates, so
-`--auth-public` refuses to start with `--listen-tls-root`. `moq import --help` lists the sources and `moq import rtmp --help` a specific one.
+`--auth-public` refuses to start with `--listen-tls-root`, and only `--listen`
+(QUIC) verifies one. `moq import --help` lists the sources and `moq import rtmp --help` a specific one.
 
 ```bash
 # Publish a file (remux to MPEG-TS without re-encoding)

@@ -30,7 +30,6 @@
 //!   an `import hls` playlist path starting with `-`, which `./-name` covers, so
 //!   the separator stays unconditional rather than context-sensitive.
 
-use anyhow::Context as _;
 use std::ffi::{OsStr, OsString};
 use std::time::Duration;
 
@@ -529,20 +528,19 @@ impl MoqSide {
 		}
 		// A listener for ordinary clients admits nobody without a decision; a mesh
 		// listener alone admits its peers by their LAN credential.
-		if self.server.has_explicit_bind() {
-			self.auth
-				.validate()
-				.context("--listen needs --auth-url or --auth-public")?;
-		} else if self.auth.url.is_some() || self.auth_public() {
-			self.auth.validate()?;
+		anyhow::ensure!(
+			!(self.server.has_explicit_bind() && self.auth.is_empty()),
+			"--listen needs --auth-url or --auth-public"
+		);
+		if !self.auth.is_empty() {
+			self.auth.validate(self.client_ca())?;
 		}
-		self.auth.validate_client_ca(!self.server.tls.root.is_empty())?;
 		Ok(())
 	}
 
-	/// Whether any public pattern was passed.
-	fn auth_public(&self) -> bool {
-		!(self.auth.public.is_empty() && self.auth.public_subscribe.is_empty() && self.auth.public_publish.is_empty())
+	/// Whether the listener verifies client certificates (`--listen-tls-root`).
+	pub fn client_ca(&self) -> bool {
+		!self.server.tls.root.is_empty()
 	}
 
 	/// The MoQ-side flags one chunk of a command line typed, each once, in order.
@@ -1336,7 +1334,7 @@ mod tests {
 	#[test]
 	fn a_client_ca_needs_an_auth_server() {
 		let parse = |auth: [&str; 2]| {
-			let mut argv = vec!["moq", "--listen-tcp-bind", "127.0.0.1:0", "--listen-tls-root", "ca.pem"];
+			let mut argv = vec!["moq", "--listen", "127.0.0.1:0", "--listen-tls-root", "ca.pem"];
 			argv.extend(auth);
 			argv.extend(["import", "ts"]);
 			Invocation::try_parse_from(argv).expect("parse")

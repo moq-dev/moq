@@ -18,8 +18,6 @@ async def run(url: str, prefix: str, tls_verify: bool) -> None:
                 print(f"  + {event.announce.prefix}")
             elif isinstance(event, moq.AnnounceEventEnd):
                 print(f"  - {event.announce.prefix}")
-            elif isinstance(event, moq.AnnounceEventLive):
-                print("  (caught up; what follows is live)")
 
 
 def main() -> None:

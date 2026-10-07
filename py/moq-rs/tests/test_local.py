@@ -15,18 +15,15 @@ def create_announced(origin: moq.OriginProducer, path: str) -> moq.BroadcastProd
 
 
 async def routes(announced: moq.AnnounceConsumer):
-    """Yield each newly announced route, skipping the other events such as LIVE."""
+    """Yield each newly announced route, skipping updates and ends."""
     async for event in announced:
         if isinstance(event, moq.AnnounceEventStart):
             yield event.announce
 
 
 async def next_route(announced: moq.AnnounceConsumer) -> moq.AnnounceEvent:
-    """The next announce event that is not LIVE, which lands wherever the backlog ends."""
-    while True:
-        event = await asyncio.wait_for(anext(announced), timeout=5.0)
-        if not isinstance(event, moq.AnnounceEventLive):
-            return event
+    """The next announce event."""
+    return await asyncio.wait_for(anext(announced), timeout=5.0)
 
 
 def opus_head() -> bytes:
@@ -1178,29 +1175,6 @@ async def test_broadcast_is_reachable_only_while_announced():
     await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)
     announced.cancel()
     track.finish()
-    broadcast.close()
-
-
-async def test_announced_yields_live_once_caught_up():
-    """LIVE ends the backlog: at once on an empty origin, after existing routes otherwise."""
-    origin = moq.OriginProducer()
-    consumer = origin.consume()
-
-    empty = consumer.announced()
-    assert isinstance(await asyncio.wait_for(anext(empty), timeout=5.0), moq.AnnounceEventLive)
-    empty.cancel()
-
-    broadcast = create_announced(origin, "cam")
-    await asyncio.wait_for(consumer.announced_broadcast("cam"), timeout=5.0)
-
-    listed = []
-    async with consumer.announced() as announced:
-        async for event in announced:
-            if isinstance(event, moq.AnnounceEventLive):
-                break
-            assert isinstance(event, moq.AnnounceEventStart)
-            listed.append(event.announce.prefix)
-    assert listed == ["cam"]
     broadcast.close()
 
 
