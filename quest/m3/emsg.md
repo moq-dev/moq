@@ -57,8 +57,6 @@ byte-identical.
 
 ## Related
 
-- [AV1 metadata OBUs](/quest/m2/av1-metadata.md) - the same silent drop in a
-  different layer
 - [ID3 catalog section](/quest/m3/id3.md) - gives one payload type carried here a
   typed contract
 - [FLV script tags](/quest/m3/flv-script.md) - likewise

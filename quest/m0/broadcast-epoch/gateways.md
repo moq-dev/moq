@@ -10,14 +10,12 @@ up.
 
 ## Plan
 
-Use the origin default where the gateways create broadcasts (`moq-rtmp`,
-`moq-srt`, `moq-rtc`, and the relay wiring). Test a reconnect under the same
-key with the stale connection still open. Update `doc/bin/relay/` where it
+Mint an epoch per incoming connection and announce it on the broadcast's
+route (`moq-rtmp`, `moq-srt`, `moq-rtc`, and the relay wiring); nothing mints
+by default. Test a reconnect under the
+same key with the stale connection still open. Update `doc/bin/relay/` where it
 describes ingest paths.
 
-## Required
-
-- [Origin](/quest/m0/broadcast-epoch/origin.md) - the publish default
 
 ## Related
 

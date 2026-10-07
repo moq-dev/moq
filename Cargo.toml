@@ -155,7 +155,6 @@ moq-net = { version = "0.3.10", path = "rs/moq-net" }
 # The MoQ fork of noq (moq-dev/noq). iroh keeps upstream noq, so a build with the
 # iroh feature carries both stacks.
 moq-noq-proto = { version = "2.0.1", default-features = false }
-moq-noq-udp = "2.0.1"
 # NVENC bindings, forked from ViliamVadocz/nvidia-video-codec-sdk to dlopen the
 # driver at runtime. Compiles on any platform (macOS included) but only actually
 # used by moq-video on Linux.

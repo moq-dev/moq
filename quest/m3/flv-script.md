@@ -31,7 +31,3 @@ media tag, and a byte-identical round trip.
 ## Required
 
 - [fMP4 emsg](/quest/m3/emsg.md) - settles the shared timed-metadata contract this builds on, which needs maintainer agreement first
-
-## Related
-
-- [AV1 metadata OBUs](/quest/m2/av1-metadata.md) - likewise

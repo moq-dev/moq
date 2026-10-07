@@ -87,7 +87,11 @@ URLs may be `https://` (WebTransport, with raw QUIC preferred for native),
 `moql://`/`moqt://` (raw QUIC), or `iroh://`. A `?jwt=` query carries the
 token. `http://` is for a relay on localhost only: it fetches the certificate
 fingerprint unauthenticated before upgrading, so never send a token over it. Connections race
-QUIC against WebSocket and remember which won.
+QUIC against WebSocket and remember which won. When WebSocket wins, a `Connection` keeps
+dialing QUIC and moves onto it once the relay admits that session, handing live tracks over
+at a group boundary and draining the WebSocket session; `Connection::transport()` reports
+which is live. A refused or stalled QUIC session leaves the WebSocket session serving, and
+moq-lite-03 and -04, which give no sign of admission, never upgrade.
 
 The `Default::default()` above is the QUIC transport section, and the same value
 serves a dial and a listener:

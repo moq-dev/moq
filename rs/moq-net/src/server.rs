@@ -128,6 +128,7 @@ impl Server {
 			start.recv_bandwidth,
 			crate::driver::Protocol::Lite(Box::new(start.driver)),
 			start.goaway,
+			start.setup,
 		))
 	}
 
@@ -519,7 +520,7 @@ where
 
 			// The client's SETUP was read at the pause; hand the stream back
 			// for GOAWAY. A server never advertises a path, hence `None`.
-			let (protocol, goaway) = ietf::start(ietf::Config {
+			let (protocol, goaway, setup) = ietf::start(ietf::Config {
 				runtime: runtime.clone(),
 				session: session.clone(),
 				setup: None,
@@ -545,6 +546,7 @@ where
 				None,
 				crate::driver::Protocol::Ietf(protocol),
 				goaway,
+				setup,
 			))
 		}
 		.maybe_boxed()
@@ -605,7 +607,7 @@ where
 			};
 			stream.writer.encode(&server_setup).await?;
 
-			let (recv_bw, protocol, goaway) = match version {
+			let (recv_bw, protocol, goaway, setup) = match version {
 				Version::Lite(v) => {
 					let stream = stream.with_version(v);
 					// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
@@ -624,12 +626,13 @@ where
 						start.recv_bandwidth,
 						crate::driver::Protocol::Lite(Box::new(start.driver)),
 						start.goaway,
+						start.setup,
 					)
 				}
 				Version::Ietf(v) => {
 					let stream = stream.with_version(v);
 					// Draft 14-16: path came in the bidi SETUP, no uni SETUP to hand back.
-					let (protocol, goaway) = ietf::start(ietf::Config {
+					let (protocol, goaway, setup) = ietf::start(ietf::Config {
 						runtime: runtime.clone(),
 						session: session.clone(),
 						setup: Some(stream),
@@ -646,11 +649,13 @@ where
 						peer_declared: Some(peer_declared),
 						early_unis: Vec::new(),
 					})?;
-					(None, crate::driver::Protocol::Ietf(protocol), goaway)
+					(None, crate::driver::Protocol::Ietf(protocol), goaway, setup)
 				}
 			};
 
-			Ok(Session::new(runtime, session, version, recv_bw, protocol, goaway))
+			Ok(Session::new(
+				runtime, session, version, recv_bw, protocol, goaway, setup,
+			))
 		}
 		.maybe_boxed()
 	}

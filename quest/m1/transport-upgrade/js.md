@@ -31,6 +31,12 @@ session to close on its own or at the handover cap. See the
   may not name a redirect URI, and an empty one is legal) and closes at the
   configured cap. A WebTransport attempt that fails after WebSocket won is logged at
   debug and the session stays on WebSocket.
+- Swap only once the server's SETUP arrives on the WebTransport session: mirror Rust's
+  `moq_net::Session::setup()` in `js/net` (resolves on the server's SETUP,
+  rejects with the close reason if already closed, even after SETUP) and await it inside the
+  connect deadline. A refusal, a stall, or moq-lite-03/-04 (no server SETUP)
+  keeps WebSocket with no GOAWAY sent. This crate's servers send SETUP after
+  admission; other servers may still refuse afterward.
 - A self-sent GOAWAY must gate new requests on the old session too, not only
   a received one: [JS GOAWAY requests](/quest/m1/js-goaway-requests.md)
   covers the received case, so check it also covers this path.
@@ -40,11 +46,12 @@ session to close on its own or at the handover cap. See the
   group across the upgrade, the WebSocket session closes within the cap, and
   the next connect to the same URL gives WebTransport the head start again;
   with no delay, WebTransport wins and no WebSocket session is ever opened.
-- Public API: none beyond what client-goaway adds; `transportOf` already
+- Public API: the `setup` mirror, if it is exported; `transportOf` already
   reports the live transport. Update `doc/lib/js` where the fallback race is
   described.
 
 ## Required
 
+- [JS qmux finish](/quest/m1/transport-upgrade/js-qmux-finish.md) - the GOAWAY this sends over the WebSocket session must not read as a failure
 - [JS track handover](/quest/m1/js-group-handover.md) - tracks carry across the handover this upgrade reuses without a dropped group
 - [JS GOAWAY requests](/quest/m1/js-goaway-requests.md) - no new request opens on a session that is going away

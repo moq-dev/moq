@@ -72,6 +72,47 @@ follows by listing each timeline's keys after its cursor; `Reader::finish`
 applies out-of-band finality. `rs/moq-archive/src/proof.rs` records one
 multi-rendition broadcast end to end.
 
+### Decisions
+
+Moved from the deleted per-track timelines quest (2026-10-06 audit: its Rust
+work landed in #4034 and its children are this line's own):
+
+- One timeline track per track, live and recorded. `moq-mux` publishes them for
+  every broadcast; an unsubscribed track costs nothing.
+- The catalog's root `archive` entry maps each track to its timeline, including
+  the catalog track itself. `replay`, `store`, and `version` stay beside it.
+- Each track cuts on its own by one rule: at a group boundary between a
+  minimum and maximum duration (a 2s minimum today; 4s and a multiple of the
+  declared duration once
+  [declared duration](/quest/m1/archive/declared-duration.md) lands; a zero
+  minimum only for sparse data such as the catalog), splitting a long-lived
+  group by frame at the maximum. Manual cuts stay as an optimization, such as
+  a video keyframe cutting audio so derived segments need fewer objects.
+- A stored object may hold a frame range of a group, not only whole groups.
+- HLS and DASH segments are derived at the edge from group timestamps, not
+  from storage objects. Fetching extra objects is fine when they land in the
+  reader's cache for the next request.
+- `moq-hls` never retries a failed timeline, because the origin already reconnects
+  transient source failures. A replacement publisher that restarts group
+  numbering is a publisher bug: a broadcast, track, or group name always means
+  the same content, and MoQ has no ETag-style invalidation
+  ([#4556](https://github.com/moq-dev/moq/pull/4556)). A failed timeline
+  fails loud instead: the reference ends every playlist with `EXT-X-ENDLIST`,
+  and another rendition's playlist ends at its last covered segment rather than
+  listing gaps.
+- HLS `EXT-X-TARGETDURATION` is fixed for the run, not the observed maximum
+  #4280 shipped. This reverses that PR's decision 4 (09-28 merged-PR audit).
+  The target comes from each timeline's declared duration, which replaces the
+  broadcast-wide `durationMax` (09-29 planning).
+
+For triage, not blocking: two Codex P2s arrived after #4280 merged and are
+unanswered. A timeline record whose `sequence` differs from its window index
+is passed through unvalidated
+([review](https://github.com/moq-dev/moq/pull/4280#pullrequestreview-5332725290)),
+and `Timelines::track` re-enrolling a name while its old `Recorder` is alive
+leaves two handles on one segmenter
+([r4117516035](https://github.com/moq-dev/moq/pull/4280#discussion_r4117516035)).
+
 ### Format
 
 The format is the draft's
@@ -118,8 +159,7 @@ owned by that prerequisite, not duplicated in archive storage.
 - [Timelines declare their segment duration](/quest/m1/archive/declared-duration.md) - each timeline entry declares its segment duration (reported or estimated by the publisher), replacing the root `durationMax`
 - [JS per-track timelines](/quest/m1/archive/js-timelines.md) - `@moq/hang` publishes the same per-track timelines as Rust (it already reads them)
 - [Fixed HLS target duration](/quest/m1/archive/hls-target.md) - one `EXT-X-TARGETDURATION` for the run, from the reference timeline's declared duration; an overrun is listed with a warning
-- [Per-track timelines](/quest/m1/archive/track-timeline.md) - every track segments and expires on its own timeline, and HLS is derived from group timestamps at the edge
-- [Replay catalog](/quest/m1/archive/replay-catalog.md) - `moq import archive` publishes the recorded catalog live with `store` set, so stock `moq export hls` serves the whole replay
+- [Replay catalog](/quest/m1/archive/replay-catalog.md) - `moq_archive::Reader` republishes the recorded catalog live with `store` set, so stock `moq export hls` serves the whole replay of `moq import archive`
 - [Idle flush](/quest/m1/archive/flush.md) - idle tracks are recorded within a bounded wall-clock delay, and `flush()` forces a track's pending record out
 - [Backward timestamps](/quest/m1/archive/backward-timestamps.md) - a resumed recording refuses a restarted source instead of dropping its groups or overlapping media time
 - [HLS media sequence](/quest/m1/archive/hls-media-sequence.md) - `EXT-X-MEDIA-SEQUENCE` never decreases when the reference rendition switches
@@ -129,6 +169,4 @@ owned by that prerequisite, not duplicated in archive storage.
 
 - [Bounded HLS playlists](/quest/m1/hls-bounded.md) - the live renderer rules a replayed archive inherits, planned outside this line
 - [Catalog track identity](/quest/m2/catalog-tracks.md) - explore immutable definitions or explicit version binding independently of archives
-
-- [wildcard](/quest/m0/wildcard/README.md) - catch-all routing exposes an archive at its stable replay path
 - [e2ee](/quest/m1/e2ee/README.md) - protected broadcasts are excluded initially

@@ -4873,6 +4873,7 @@ dependencies = [
 name = "moq-sock"
 version = "0.2.0"
 dependencies = [
+ "cfg_aliases",
  "core_affinity",
  "libc",
  "rand 0.10.3",
@@ -4880,6 +4881,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "tracing-test",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5018,7 +5020,6 @@ dependencies = [
  "libc",
  "moq-net",
  "moq-noq-proto",
- "moq-noq-udp",
  "moq-sock",
  "moq-tokio",
  "nix",

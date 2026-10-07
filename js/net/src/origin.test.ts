@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { getter, Once, race, Signal } from "@moq/signals";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
+import * as Epoch from "./epoch.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { HopSchema, Route, stampHops } from "./hop.ts";
 import { spreadHash } from "./internal.ts";
@@ -27,6 +28,8 @@ function publish(origin: Producer, path: Path.Valid) {
 
 /** A peer's hop, for a route that is not local. */
 const PEER = HopSchema.parse(10n);
+// One publisher instance, so a local broadcast and a remote route compete on cost alone.
+const EPOCH = Epoch.parse("01900000-0000-7000-8000-000000000001");
 
 /** Land a received prefix, served from `consume`, the way a session does. */
 function serve(origin: Producer, prefix: Path.Valid, consume: () => BroadcastConsumer, route: Route = Route.default) {
@@ -83,9 +86,9 @@ test("a borrowed table exposes dynamic serving and a live scoped broadcast map",
 	expect(live.peek().has(localPath)).toBe(false);
 	expect(live.peek().has(Path.from("other"))).toBe(false);
 
-	local.announce({ cost: 4n });
+	local.announce({ epoch: EPOCH, cost: 4n });
 	await settle();
-	expect(live.peek().get(localPath)).toEqual(Route.normalize({ cost: 4n }));
+	expect(live.peek().get(localPath)).toEqual(Route.normalize({ epoch: EPOCH, cost: 4n }));
 	expect(changes.some((value) => value.get(localPath)?.cost.warm === 4n)).toBe(true);
 
 	const prefix = Path.from("room");
@@ -149,23 +152,23 @@ test("an announced local path competes with a received route on cost", async () 
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const path = Path.from("room/alice");
-	const remote = wireOf(origin).receive(path, { hops: [PEER], cost: 5n });
+	const remote = wireOf(origin).receive(path, { epoch: EPOCH, hops: [PEER], cost: 5n });
 	const live = consumer.broadcasts();
-	expect(live.peek().get(path)).toEqual(Route.normalize({ hops: [PEER], cost: 5n }));
+	expect(live.peek().get(path)).toEqual(Route.normalize({ epoch: EPOCH, hops: [PEER], cost: 5n }));
 
 	// Unannounced, it competes for nothing.
 	const local = origin.createBroadcast(path);
-	expect(live.peek().get(path)).toEqual(Route.normalize({ hops: [PEER], cost: 5n }));
+	expect(live.peek().get(path)).toEqual(Route.normalize({ epoch: EPOCH, hops: [PEER], cost: 5n }));
 
 	// Cheaper wins; a tie falls to the local broadcast.
-	local.announce({ cost: 9n });
-	expect(live.peek().get(path)).toEqual(Route.normalize({ hops: [PEER], cost: 5n }));
-	local.announce({ cost: 5n });
-	expect(live.peek().get(path)).toEqual(Route.normalize({ cost: 5n }));
+	local.announce({ epoch: EPOCH, cost: 9n });
+	expect(live.peek().get(path)).toEqual(Route.normalize({ epoch: EPOCH, hops: [PEER], cost: 5n }));
+	local.announce({ epoch: EPOCH, cost: 5n });
+	expect(live.peek().get(path)).toEqual(Route.normalize({ epoch: EPOCH, cost: 5n }));
 
 	local.close();
 	await settle();
-	expect(live.peek().get(path)).toEqual(Route.normalize({ hops: [PEER], cost: 5n }));
+	expect(live.peek().get(path)).toEqual(Route.normalize({ epoch: EPOCH, hops: [PEER], cost: 5n }));
 
 	remote.close();
 	await settle();
@@ -182,7 +185,7 @@ test("a scoped route remains visible when an exact local path is outside the sco
 	const scope = Path.Pattern.parse("room/*");
 	const live = origin.broadcasts(scope);
 
-	expect(origin.broadcasts().peek().get(path)).toEqual(Route.default);
+	expect(origin.broadcasts().peek().get(path)).toMatchObject(Route.default);
 	expect(live.peek().get(path)).toEqual(Route.normalize({ cost: 5n }));
 
 	local.close();
@@ -1195,9 +1198,9 @@ test("a request prefers a cheaper received route over an announced local broadca
 	const consumer = origin.consume();
 	const path = Path.from("room");
 	const upstream = new BroadcastProducer();
-	const dispose = serve(origin, path, provider(upstream), Route.normalize({ hops: [PEER], cost: 1n }));
+	const dispose = serve(origin, path, provider(upstream), Route.normalize({ epoch: EPOCH, hops: [PEER], cost: 1n }));
 	const local = origin.createBroadcast(path);
-	local.announce({ cost: 3n });
+	local.announce({ epoch: EPOCH, cost: 3n });
 
 	// The cheaper route is served on demand, so it resolves only once its handler answers.
 	const request = consumer.request(path);
@@ -1209,7 +1212,7 @@ test("a request prefers a cheaper received route over an announced local broadca
 	expect(await nextRoute(announced)).toMatchObject({ prefix: path, route: { hops: [PEER] } });
 
 	// Re-priced below it, the local broadcast wins at once, and the remote front it replaced closes.
-	local.announce({ cost: 0n });
+	local.announce({ epoch: EPOCH, cost: 0n });
 	expect(await nextRoute(announced)).toMatchObject({ prefix: path, kind: "end" });
 	expect(await nextRoute(announced)).toMatchObject({ prefix: path, kind: "start", route: Route.default });
 	expect(request.active.peek()).not.toBe(remote);
@@ -1233,12 +1236,12 @@ test("the cheapest received route competes with the local broadcast, not the new
 		served.push(name);
 		return upstream.consume();
 	};
-	const cheap = serve(origin, path, via("cheap"), Route.normalize({ hops: [PEER], cost: 1n }));
-	const pricey = serve(origin, path, via("pricey"), Route.normalize({ hops: [PEER], cost: 10n }));
+	const cheap = serve(origin, path, via("cheap"), Route.normalize({ epoch: EPOCH, hops: [PEER], cost: 1n }));
+	const pricey = serve(origin, path, via("pricey"), Route.normalize({ epoch: EPOCH, hops: [PEER], cost: 10n }));
 	const local = origin.createBroadcast(path);
-	local.announce({ cost: 5n });
+	local.announce({ epoch: EPOCH, cost: 5n });
 
-	expect(consumer.broadcasts().peek().get(path)).toEqual(Route.normalize({ hops: [PEER], cost: 1n }));
+	expect(consumer.broadcasts().peek().get(path)).toEqual(Route.normalize({ epoch: EPOCH, hops: [PEER], cost: 1n }));
 	const request = consumer.request(path);
 	await settle();
 	expect(request.active.peek()).toBeDefined();
@@ -1344,10 +1347,12 @@ test("a peer is offered and served the cheapest originated route", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const prefix = Path.from("live");
-	const cheap = origin.dynamic(prefix, { cost: 1n });
-	const pricey = origin.dynamic(prefix, { cost: 10n });
+	const cheap = origin.dynamic(prefix, { epoch: EPOCH, cost: 1n });
+	const pricey = origin.dynamic(prefix, { epoch: EPOCH, cost: 10n });
 
-	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.[0]?.route).toEqual(Route.normalize({ cost: 1n }));
+	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.[0]?.route).toEqual(
+		Route.normalize({ epoch: EPOCH, cost: 1n }),
+	);
 	const pending = wireOf(consumer).demand(Path.from("live/cam"));
 	const { value: req } = await cheap.requested().next();
 	const upstream = new BroadcastProducer();
@@ -1356,10 +1361,14 @@ test("a peer is offered and served the cheapest originated route", async () => {
 
 	// An exact-path local broadcast competes with them on cost too.
 	const local = origin.createBroadcast(prefix);
-	local.announce({ cost: 5n });
-	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.[0]?.route).toEqual(Route.normalize({ cost: 1n }));
-	local.announce({ cost: 0n });
-	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.[0]?.route).toEqual(Route.normalize({ cost: 0n }));
+	local.announce({ epoch: EPOCH, cost: 5n });
+	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.[0]?.route).toEqual(
+		Route.normalize({ epoch: EPOCH, cost: 1n }),
+	);
+	local.announce({ epoch: EPOCH, cost: 0n });
+	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.[0]?.route).toEqual(
+		Route.normalize({ epoch: EPOCH, cost: 0n }),
+	);
 
 	local.close();
 	upstream.close();
@@ -1879,9 +1888,9 @@ test("a scoped reader sees a local broadcast that only loses to a route outside 
 	const origin = new Producer();
 	const chat = origin
 		.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*/chat")]))
-		.dynamic(Path.from("room/alice"), { cost: 0n });
+		.dynamic(Path.from("room/alice"), { epoch: EPOCH, cost: 0n });
 	const local = origin.createBroadcast(Path.from("room/alice"));
-	local.announce({ cost: 5n });
+	local.announce({ epoch: EPOCH, cost: 5n });
 	const reader = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*")]));
 
 	expect(reader.broadcasts().peek().get(Path.from("room/alice"))?.cost.warm).toBe(5n);
@@ -1924,5 +1933,78 @@ test("broadcast handles carry the path they were created or requested at", async
 	served.close();
 	dynamic.close();
 	broadcast.close();
+	origin.close();
+});
+
+test("the newest epoch wins the path over a cheaper one and arrives as a new broadcast", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("room/alice");
+	const announced = consumer.announced();
+
+	const old = origin.createBroadcast(path);
+	old.announce({ epoch: Epoch.mint(), cost: 1n });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: path, kind: "start" });
+
+	// Minted after the local broadcast's, so it is the newer publisher despite the cost.
+	const newer = wireOf(origin).receive(path, { epoch: Epoch.mint(), hops: [PEER], cost: 9n });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: path, kind: "end" });
+	expect(await nextRoute(announced)).toMatchObject({ prefix: path, kind: "start", route: { hops: [PEER] } });
+
+	newer.close();
+	old.close();
+	announced.close();
+	origin.close();
+});
+
+test("demand naming an epoch is refused when the route changes instance while it waits", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const handle = origin.dynamic(Path.from("live"), { epoch: EPOCH });
+	const it = handle.requested();
+	const pending = wireOf(consumer).demand(Path.from("live/cam"), EPOCH);
+	const { value: req } = await it.next();
+
+	// Another instance now serves the route; its answer is not the one the peer named.
+	handle.update({ ...handle.route, epoch: Epoch.mint() });
+	req?.accept(new BroadcastProducer().consume());
+	await expect(pending).rejects.toThrow("unroutable");
+
+	handle.close();
+	origin.close();
+});
+
+test("re-pricing from the current route keeps the epoch", () => {
+	const origin = new Producer();
+	const handle = origin.dynamic(Path.from("live"), { epoch: EPOCH, cost: 5n });
+	handle.update({ ...handle.route, cost: 1n });
+	expect(handle.route).toEqual(Route.normalize({ epoch: EPOCH, cost: 1n }));
+
+	const broadcast = origin.createBroadcast(Path.from("room"));
+	expect(broadcast.route).toBeUndefined();
+	broadcast.announce({ epoch: EPOCH, cost: 5n });
+	broadcast.announce({ ...broadcast.route, cost: 1n });
+	expect(broadcast.route).toEqual(Route.normalize({ epoch: EPOCH, cost: 1n }));
+	broadcast.unannounce();
+	expect(broadcast.route).toBeUndefined();
+
+	broadcast.close();
+	handle.close();
+	origin.close();
+});
+
+test("a peer naming another epoch is refused rather than served a different instance", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("room");
+	const local = origin.createBroadcast(path);
+	local.announce({ epoch: EPOCH });
+
+	expect(wireOf(consumer).local(path, EPOCH)).toBeDefined();
+	const other = Epoch.parse("01900000-0000-7000-8000-000000000002");
+	expect(wireOf(consumer).local(path, other)).toBeUndefined();
+	await expect(wireOf(consumer).demand(path, other)).rejects.toThrow("unroutable");
+
+	local.close();
 	origin.close();
 });
