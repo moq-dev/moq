@@ -41,6 +41,7 @@ a published `@moq/watch` break.
 
 ## Required
 
+- [Held group wakes](/quest/m0/held-group-wakes.md) - a group held across a route switch is woken when its successor's first timestamp or abort makes it stale, not at the next unrelated append
 - [Draft-22 LOCATION_FILTER](/quest/m0/ietf-location-filter-22.md) - moqt-22 LOCATION_FILTER carries its type instead of a Length in Rust and JS, so a draft-22 peer reads our Next Object correctly
 - [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
 - [Prefix route fronts](/quest/m0/prefix-route-fronts.md) - a prefix route cannot be made to mint one front per requested path
