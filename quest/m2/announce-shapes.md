@@ -99,12 +99,11 @@ lookups, each swept over publishers and subscribers, and extend
 routes independently of Rust. The slopes decide between a reversed-segment
 index and dropping suffix shapes from the quest.
 
-A non-prefix advertisement needs authorizing:
-[advertise auth](/quest/m3/processor/advertise-auth.md) scopes are prefix-only
-today, and this quest extends them to the new shapes. Token patterns
-(`moq-pattern`, `moq_auth::Claims`) already match suffixes and do not change.
+A shaped advertisement is authorized against the sender's publish claim, as
+Wildcard (#4403) does for prefix advertisements today
+(decided in the 2026-10-06 audit). Token patterns (`moq-pattern`,
+`moq_auth::Claims`) already match suffixes, so no auth change is needed.
 
 ## Related
 
-- [Wildcard](/quest/m0/wildcard/README.md) - prefix-only advertisements and the service-prefix layout this extends
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - forwards announcements between relays, which must keep their shape

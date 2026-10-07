@@ -53,7 +53,11 @@ sync_file import, so an explicit-sync producer races it.
 
 Test: an ignored hardware test in `just rs gpu`'s Intel branch renders on the
 iGPU with Vulkan, exports a DMA-BUF image and an explicit-sync timeline, and
-encodes H.264 at two sizes; the output decodes, and the slots recycle.
+encodes H.264 at two sizes; the output decodes, and the slots recycle. On
+the two-node host, also check that a surface carrying `renderD129`'s
+`dev_t`, or `MOQ_VAAPI_DEVICE` naming it, opens that node rather than the
+first render node: the second-node check moved here from
+[Video hardware validation](/quest/m3/video-hardware.md) (2026-10-06 audit).
 
 Public API: none beyond the surface quest's. Wire: none.
 

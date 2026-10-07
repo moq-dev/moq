@@ -16,9 +16,10 @@ Decided (2026-10-01): `next()` and the async iterator yield `@moq/net`'s
 `Timed<T>` (`{ value, at? }`), the type the producers take after
 [JS publishing never invents a timestamp](/quest/m1/js-publish-timestamp.md).
 `at` is the frame's timestamp, absent for an untimed frame. Decided
-(2026-10-05): timedness is per track, in the shape [Typed
-timedness](/quest/m1/typed-timedness.md) mirrors into `@moq/net`; where this
-note assumes a per-frame optional timestamp, that shape wins. Snapshot
+(2026-10-05, types settled 2026-10-06): timedness is per track, as the
+[untimed model](/quest/m1/untimed-model.md) decided and `@moq/net` mirrors:
+`timescale` is optional, an untimed track's frames have no `at`, and a frame
+whose timedness doesn't match its track is refused. Snapshot
 consumers get the same two reads as Rust: `next()` yields every state in
 order (`@moq/json` stops draining to the latest, `@moq/flate` reads groups in
 order), and `latest()` skips to the newest state, today's behavior. A reader

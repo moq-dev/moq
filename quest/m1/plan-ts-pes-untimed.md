@@ -15,8 +15,8 @@ Both are invented times, which
 [moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md) rules
 out for moq-net itself.
 
-Timedness is per track since 2026-10-05 ([Typed
-timedness](/quest/m1/typed-timedness.md)): a timed track refuses an untimed
+Timedness is per track since 2026-10-05 ([untimed
+model](/quest/m1/untimed-model.md)): a timed track refuses an untimed
 frame, so a PES without a PTS can only go out untimed on an untimed track.
 Weigh that in the carriage decision.
 

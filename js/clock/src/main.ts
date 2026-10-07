@@ -79,7 +79,8 @@ async function publish(config: Config) {
 
 	// Create a new "broadcast", which is a collection of tracks.
 	const broadcast = origin.createBroadcast(Moq.Path.from(config.broadcast));
-	broadcast.announce();
+	// A fresh epoch per run, so a restarted clock replaces the old broadcast.
+	broadcast.announce({ epoch: Moq.Epoch.mint() });
 
 	console.log("✅ Published broadcast:", config.broadcast);
 

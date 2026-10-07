@@ -13,6 +13,9 @@ use super::{Message, Version};
 #[derive(Clone, Debug)]
 pub struct Fetch<'a> {
 	pub broadcast: Path<'a>,
+	/// The publisher instance the subscriber expects; see [`crate::origin::Route::epoch`].
+	/// Lite07+ only.
+	pub epoch: Option<crate::Epoch>,
 	pub track: Cow<'a, str>,
 	pub priority: u8,
 	pub group: u64,
@@ -33,6 +36,7 @@ impl Message for Fetch<'_> {
 		}
 
 		let broadcast = Path::decode(r, version)?;
+		let epoch = super::epoch::decode_epoch(r, version)?;
 		let track = Cow::Owned(r.string()?);
 		let priority = r.u8()?;
 		let group = r.varint()?;
@@ -48,6 +52,7 @@ impl Message for Fetch<'_> {
 
 		Ok(Self {
 			broadcast,
+			epoch,
 			track,
 			priority,
 			group,
@@ -65,6 +70,7 @@ impl Message for Fetch<'_> {
 		}
 
 		self.broadcast.encode(w, version)?;
+		super::epoch::encode_epoch(w, version, self.epoch.as_ref())?;
 		w.string(&self.track)?;
 		w.u8(self.priority);
 		w.varint(self.group)?;
@@ -87,6 +93,7 @@ mod test {
 
 	fn fetch_sample() -> Fetch<'static> {
 		Fetch {
+			epoch: None,
 			broadcast: Path::new("room").to_owned(),
 			track: Cow::Borrowed("video"),
 			priority: 3,

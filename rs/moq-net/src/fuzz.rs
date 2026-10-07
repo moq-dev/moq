@@ -198,6 +198,7 @@ impl AnnounceWriter {
 			Announced::Start(suffix, hops) => {
 				let (_, suffix, hops) = self.encoder.start(suffix.clone(), hops.clone());
 				lite::AnnounceBroadcast::Active {
+					epoch: None,
 					suffix,
 					hops,
 					cost: Default::default(),
@@ -325,6 +326,7 @@ impl LiteSample {
 			.encode(w, version)
 			.unwrap(),
 			Self::Subscribe => lite::Subscribe {
+				epoch: None,
 				id: 3,
 				broadcast: Path::new("room/alice"),
 				track: "video".into(),
@@ -508,6 +510,7 @@ impl Default for Messages {
 
 		Self {
 			lite_subscribe: lite::Subscribe {
+				epoch: None,
 				id: 7,
 				broadcast: Path::new("room/alice"),
 				track: "video".into(),

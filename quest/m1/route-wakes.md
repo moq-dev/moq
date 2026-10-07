@@ -17,15 +17,15 @@ no `select`, track poll, or deadline scan for a front that keeps its route.
 
 ## Plan
 
-Facts from the wildcard line (`rs/moq-net/src/model/origin.rs` there):
+Facts from `main` (`rs/moq-net/src/model/origin.rs`, since Wildcard landed in
+#4403):
 
 - Every route change calls `sync_route`, which calls
   `routes.poke_below(prefix)`. That bumps a counter-only `Watch` on every path
   below the prefix, so a woken front cannot tell what changed. Each re-runs
   `select` under the table read lock (`retain_routes`, then `best_route`,
-  which hashes every pool member unless a serving front's route still
-  serves; that `Pin::Stay` short-circuit goes with the follow-the-best-route
-  rule below), then the driver polls every track and rescans deadlines.
+  which hashes every pool member), then the driver polls every track and
+  rescans deadlines. `Pin` is gone (#4741).
 - `route_order` is rendezvous-style: FNV over the path and hop ids, lowest
   wins. A join moves only paths the newcomer wins, a leave only paths the
   leaver was winning.
@@ -66,10 +66,6 @@ join, and a parked waiter retrying when a deeper advertise-only claim over a
 served root is withdrawn. Keep `pool_resolve` unchanged.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Wildcard](/quest/m0/wildcard/README.md) - `sync_route`, `poke_below`, and the `origin/pool_churn` bench this reworks exist only on its line branch
 
 ## Related
 

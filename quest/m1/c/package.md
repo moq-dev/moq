@@ -25,4 +25,5 @@ under the same names.
 
 ## Required
 
+- [FFI shape](/quest/m1/ffi-shape/README.md) - moq-c 0.8.0 ships the reshaped moq-ffi, so C breaks once
 - [C backend](/quest/m1/c/backend.md) - the generator output this packages

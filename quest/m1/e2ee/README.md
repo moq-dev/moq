@@ -4,7 +4,7 @@
 
 TypeScript and Rust publishers and subscribers interoperate over encrypted MoQ broadcasts while every relay, cache, and control plane remains unable to recover content.
 
-Every application payload and semantic track name is confidential and authenticated. MoQ still exposes the outer broadcast path (an opaque name and the epoch), opaque physical track names, group and frame structure, timestamps, sizes, and traffic patterns; padding and metadata-flow confidentiality are out of scope.
+Every application payload and semantic track name is confidential and authenticated. MoQ still exposes the outer broadcast path (an opaque name), the route's epoch, opaque physical track names, group and frame structure, timestamps, sizes, and traffic patterns; padding and metadata-flow confidentiality are out of scope.
 
 ## Plan
 
@@ -19,7 +19,7 @@ The contract is [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md), pro
 
 ### Epoch and identity
 
-- Every publisher instance mints an epoch, a UUIDv7 in lowercase text, and publishes at `<opaque>/@<epoch>`, where `<opaque>` derives from the credential and the semantic broadcast name without the epoch. The epoch is an input to every HKDF derivation, so a restart, takeover, or explicit group sequence cannot repeat a nonce under a key: nothing is persisted across instances and no generation counter is redistributed. The epoch is the shared [`Epoch`](/doc/concept/moq-lite.md#publisher-epochs) primitive. Subscribers discover instances under the `<opaque>/` prefix and take the greatest epoch, which sorts newest; a known full path carries its epoch in the last segment.
+- Every publisher instance mints an epoch, a UUIDv7 in lowercase text, and publishes at `<opaque>` with the epoch on its route, where `<opaque>` derives from the credential and the semantic broadcast name without the epoch. The epoch is an input to every HKDF derivation, so a restart, takeover, or explicit group sequence cannot repeat a nonce under a key: nothing is persisted across instances and no generation counter is redistributed. The epoch is the shared [`Epoch`](/doc/concept/moq-lite.md#publisher-epochs) primitive. Subscribers resolve `<opaque>` and take the epoch from its route, where the newest wins; on a wire without route epochs the application supplies it.
 - The epoch is untrusted and unauthenticated. A wrong epoch fails authentication and a withheld one denies service; neither can make a nonce repeat, because only the publisher instance chooses what it encrypts under. This is the same trust a cache needs to serve the right instance. Plaintext broadcasts adopt the same epoch by default through [broadcast epochs](/quest/m0/broadcast-epoch/README.md).
 - Nothing in the path says the bytes are encrypted. The format after decryption (`meeting.hang`) is inside the opaque name; a plaintext player, exporter, or matcher that opens a protected broadcast finds no catalog it can read and fails with its usual typed refusal, the same as for any format it does not support.
 - One 32-byte secret authorizes the whole broadcast; HKDF-SHA-256 derives separate AES-128-GCM keys for each physical track and for grouped-frame versus datagram domains. A grouped frame uses the 96-bit nonce `uint64_be(group) || uint32_be(frame)`; a datagram uses its sequence with frame zero under the datagram domain. Empty AAD: every immutable end-to-end field is in the HKDF info or the nonce.

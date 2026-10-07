@@ -2,10 +2,9 @@
 
 ## Goal
 
-`moq-ffi` and the py, swift, kt, go, and dart wrappers publish under the
-default epoch and follow bare names like Rust. The generated C and C++
-bindings pick it up from moq-ffi; libmoq gets no new API. The epoch of a published or
-consumed broadcast is readable, and a caller can pass an explicit one. The
+`moq-ffi` and the py, swift, kt, go, and dart wrappers can announce an epoch like Rust, with a minting helper. The generated C and C++
+bindings pick it up from moq-ffi; libmoq gets no new API. The epoch on an announced route is
+readable, and a publisher can pass an explicit one. The
 reconnect counter `session.epoch()` is renamed so "epoch" has one meaning.
 
 ## Plan
@@ -24,6 +23,3 @@ Decided in the 2026-10-05 audit: this lands before the
 same wrappers and keeps `epoch()` today. It rebases onto this quest and
 adopts the epoch surface and the rename, so the wrappers break once each.
 
-## Required
-
-- [Origin](/quest/m0/broadcast-epoch/origin.md) - the behavior the bindings surface

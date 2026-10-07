@@ -17,7 +17,7 @@ above ([hang](/lib/rs/hang)); relays and CDNs implement only this.
 
 - **Origins** scope what a session can see, and merge duplicate subscriptions so a broadcast is pulled upstream once no matter how many local readers.
 - **Broadcasts** are created unannounced and invisible to everyone, then announced as an exact route, or served below a prefix with `dynamic`. A consumer of the same origin sees exactly what a peer sees. Discovery accepts pattern unions; events carry the advertised prefix and captures for a complete match.
-- **Epochs** identify publisher instances with a canonical UUIDv7 and explicit path helpers; see [publisher epochs](/concept/moq-lite#publisher-epochs).
+- **Epochs** identify publisher instances with a canonical UUIDv7 carried on each route (`Route::epoch`): the newest wins a path, and only routes with the same epoch resume a subscription; see [publisher epochs](/concept/moq-lite#publisher-epochs).
 - **Patterns** (`Pattern`, `Patterns`) are re-exported from [`moq-pattern`](https://docs.rs/moq-pattern). Literal `Path` stays a coordinate.
 - **Tracks** carry groups with a priority, an optional publisher retention window (`Info::max_age`), and a timescale. Subscribers set their own priority and max age and can change them live.
 - **Groups** are written frame by frame and delivered on independent streams. Old groups are cached for fetch-by-sequence; stale groups are skipped per the subscriber's budget.
@@ -137,9 +137,13 @@ Three operations, on an origin:
   invisible and unroutable, for local consumers and peers alike, until
   `broadcast.announce(route)`.
 - `broadcast.announce(route)` / `broadcast.unannounce()` own that
-  advertisement. Announcing again re-prices the standing route, which competes
-  on cost with remote routes at the same path (a tie goes to the local
-  broadcast). The route retracts on `unannounce()`, `close()`, or the last
+  advertisement. Announcing again replaces the standing route as given, epoch
+  included, so re-price from the current one
+  (`broadcast.announce(broadcast.route().unwrap_or_default().with_cost(c))`);
+  another epoch, or none, announces a new broadcast; `origin::Dynamic` has the
+  same `route()` and `update(route)`. The route competes with
+  remote routes at the same path: the newest epoch wins, then the cheapest (a
+  tie goes to the local broadcast). The route retracts on `unannounce()`, `close()`, or the last
   producer dropping; tracks already in flight carry on to their own end.
 - `broadcast.close()` ends the broadcast for good: it retracts, leaves local
   discovery, and answers every later track lookup with `Unroutable`. Tracks

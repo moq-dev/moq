@@ -60,7 +60,7 @@ pub async fn import(target: ImportTarget, playlist: String) -> anyhow::Result<()
 		.with_bandwidth(bandwidth);
 	let catalog = moq_mux::catalog::Producer::new(&mut producer, config)?;
 	producer
-		.announce(Default::default())
+		.announce(moq_tokio::moq_net::origin::Route::default().with_epoch(moq_tokio::moq_net::Epoch::mint()))
 		.context("failed to announce broadcast")?;
 
 	let playlist = playlist_url(&playlist)?;
