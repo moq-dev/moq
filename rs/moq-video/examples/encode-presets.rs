@@ -15,6 +15,9 @@
 //!     -i src.yuv.nvenc-h264-balanced.h264.yuv -lavfi "[0:v][1:v]psnr;[0:v][1:v]ssim" -f null -
 //! ```
 //!
+//! Each reference is a full copy of the source, so a run takes about three
+//! times the input's size on disk.
+//!
 //! Hardware on another machine needs its own run; nothing here extrapolates.
 
 use std::time::{Duration, Instant};

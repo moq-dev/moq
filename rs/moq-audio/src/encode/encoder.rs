@@ -254,7 +254,9 @@ impl Settings {
 	}
 
 	/// The preset given to [`with_preset`](Self::with_preset), or the default.
-	/// [`Encoder::applied`] reports what took effect.
+	///
+	/// It echoes the request and goes stale if `codec` or `frame_duration` is
+	/// changed afterward; [`Encoder::applied`] reports what took effect.
 	pub fn preset(&self) -> Preset {
 		self.preset
 	}
