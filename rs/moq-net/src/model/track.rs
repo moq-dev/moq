@@ -3978,7 +3978,10 @@ impl Subscriber {
 	pub(crate) fn start_at(&mut self, sequence: u64) {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.min_sequence = sequence,
-			Inner::Resume(resume, _) => resume.raise_start_to(sequence),
+			// Assigns, including downward. A front serves every viewer of a path,
+			// and a later SUBSCRIBE_UPDATE can widen the floor; raising only would
+			// leave a finished group below the old floor unread.
+			Inner::Resume(resume, _) => resume.start_at(sequence),
 		}
 	}
 

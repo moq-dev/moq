@@ -6,6 +6,7 @@
 //! GRO coalesces in), arms the worker's userspace timers from the
 //! connection's timeout, and wakes stream waiters. The returned
 //! [`Connection`] implements [`web_transport_trait::poll`], so
+//! wrapping it with `crate::transport::Session::new` lets
 //! `moq_net::Client::connect_lite` / `Server::accept_lite` run real moq-lite
 //! sessions on the worker; everything is `Rc`-shared and `!Send` by design.
 //!
