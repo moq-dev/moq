@@ -138,6 +138,10 @@ MPEG-TS export frames AAC as ADTS, which labels only the AAC Main, LC, SSR,
 and LTP profiles. HE-AAC and HE-AACv2 go out as their AAC-LC core, and decoders
 find the SBR and PS in band, as ffmpeg's ADTS output does. A track whose
 profile or channel layout ADTS cannot label is refused rather than mislabeled.
+An Opus track is labeled with the plain channel code its extension descriptor
+can name: a family 0 head, a family 1 head with the Vorbis mapping, or mono or
+stereo when the track has no OpusHead. Any other head is refused rather than
+written with a guessed channel code.
 
 A constant-rate MPEG-TS source records its multiplex rate in the catalog
 (`mpegts.muxRate`, measured off the PCR clock, null stuffing included), and

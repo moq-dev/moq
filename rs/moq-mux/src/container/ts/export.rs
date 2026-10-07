@@ -38,7 +38,7 @@ use moq_net::Timestamp;
 use crate::catalog::hang::Catalog;
 use crate::catalog::{CatalogFormat, Stream};
 use crate::codec::video::Reorder;
-use crate::codec::{aac, annexb};
+use crate::codec::{aac, annexb, opus};
 use crate::container::{ExportSource, Frame};
 
 use super::adts;
@@ -407,8 +407,9 @@ enum Kind {
 	Aac(aac::InBand),
 	/// Opus (private stream_type 0x06). Each frame is one Opus packet, prefixed with
 	/// the Opus-in-TS access-unit control header and announced with the 'Opus'
-	/// registration plus DVB extension descriptor.
-	Opus { channel_count: u32 },
+	/// registration plus DVB extension descriptor. `channel_config_code` is a plain
+	/// code that descriptor can name, never a count clamped into range.
+	Opus { channel_config_code: u8 },
 	/// MP2, carried verbatim. The sample rate picks the stream type on the way
 	/// out (0x03 vs 0x04).
 	Mp2 { sample_rate: u32 },
@@ -1528,7 +1529,7 @@ impl<E: catalog::Catalog> Export<E> {
 							tag: 0x05,
 							data: b"EAC3".to_vec(),
 						}],
-						Kind::Opus { channel_count } => opus_descriptors(*channel_count),
+						Kind::Opus { channel_config_code } => opus_descriptors(*channel_config_code),
 						_ => Vec::new(),
 					}
 				};
@@ -2449,7 +2450,7 @@ fn audio_kind(config: &AudioConfig, name: &str) -> anyhow::Result<Kind> {
 			sample_rate: config.sample_rate,
 		}),
 		AudioCodec::Opus => Ok(Kind::Opus {
-			channel_count: config.channel_count,
+			channel_config_code: opus_channel_code(config, name)?,
 		}),
 		AudioCodec::Ac3 => Ok(Kind::Ac3),
 		AudioCodec::Ec3 => Ok(Kind::Eac3),
@@ -2460,7 +2461,10 @@ fn audio_kind(config: &AudioConfig, name: &str) -> anyhow::Result<Kind> {
 /// The two PMT descriptors for an Opus elementary stream: the `Opus` registration
 /// descriptor (which sets the codec) and the DVB extension descriptor 0x80 carrying
 /// the channel configuration. ffmpeg's demuxer requires both to recognize the stream.
-fn opus_descriptors(channel_count: u32) -> Vec<Descriptor> {
+///
+/// `channel_config_code` is already a plain code ([`opus_channel_code`]): 1 is mono,
+/// 2 is stereo, and 3..=8 is the Vorbis family 1 mapping for that many channels.
+fn opus_descriptors(channel_config_code: u8) -> Vec<Descriptor> {
 	vec![
 		Descriptor {
 			tag: 0x05,
@@ -2468,11 +2472,58 @@ fn opus_descriptors(channel_count: u32) -> Vec<Descriptor> {
 		},
 		Descriptor {
 			tag: 0x7f,
-			// extension_descriptor_tag 0x80, then channel_config_code (1=mono, 2=stereo,
-			// = channel count for the Vorbis mapping), clamped to the 1..=8 the demuxer reads.
-			data: vec![0x80, channel_count.clamp(1, 8) as u8],
+			// extension_descriptor_tag 0x80, then the plain channel_config_code.
+			data: vec![0x80, channel_config_code],
 		},
 	]
+}
+
+/// Plain `channel_config_code` for an Opus track the extension descriptor can name.
+///
+/// Family 0, and family 1 with the Vorbis mapping, use that channel count. A missing
+/// head is mono or stereo only. Every other layout is refused: the descriptor has no
+/// code for it, and a clamped count would name a layout the packets do not have.
+fn opus_channel_code(config: &AudioConfig, name: &str) -> anyhow::Result<u8> {
+	let Some(description) = config.description.as_deref() else {
+		anyhow::ensure!(
+			matches!(config.channel_count, 1 | 2),
+			"TS export cannot label Opus track '{name}' with {} channels and no OpusHead",
+			config.channel_count
+		);
+		return Ok(config.channel_count as u8);
+	};
+
+	let mut buf = description;
+	let head = opus::Config::parse(&mut buf)
+		.map_err(|err| anyhow::anyhow!("TS export cannot read the OpusHead on track '{name}': {err}"))?;
+	anyhow::ensure!(
+		head.channel_count == config.channel_count,
+		"Opus head has {} channels but the catalog declares {} (track '{name}')",
+		head.channel_count,
+		config.channel_count
+	);
+
+	if let Some(mapping) = &head.mapping {
+		let channels = mapping.table().len() as u8;
+		let vorbis = opus::Mapping::vorbis(channels).ok();
+		anyhow::ensure!(
+			vorbis.as_ref() == Some(mapping),
+			"TS export cannot label Opus track '{name}': channel mapping family {} is not the Vorbis layout",
+			mapping.family()
+		);
+	}
+
+	let code = u8::try_from(head.channel_count).with_context(|| {
+		format!(
+			"TS export cannot label Opus track '{name}' with {} channels",
+			head.channel_count
+		)
+	})?;
+	anyhow::ensure!(
+		(1..=8).contains(&code),
+		"TS export cannot label Opus track '{name}' with {code} channels"
+	);
+	Ok(code)
 }
 
 /// Wrap a raw Opus packet in the Opus-in-TS access-unit control header, producing one

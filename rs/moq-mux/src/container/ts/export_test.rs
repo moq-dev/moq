@@ -6,7 +6,7 @@
 //! parameter sets on keyframes). These build a synthetic broadcast, export to
 //! TS, and re-parse with the `mpeg2ts` reader.
 
-use std::io::Cursor;
+use std::io::{Cursor, Write};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
@@ -3784,6 +3784,182 @@ async fn opus_export_import_roundtrip() {
 	for (orig, got) in packets.iter().zip(&recovered) {
 		assert_eq!(got.as_slice(), orig.as_ref(), "Opus packet survived the round-trip");
 	}
+}
+
+/// An OpusHead for `channels` channels. `pre_skip` is libopus's usual 6.5 ms, so the
+/// bytes are a real head rather than a channel count with the magic glued on.
+fn opus_head(channels: u32, mapping: Option<crate::codec::opus::Mapping>) -> Bytes {
+	let mut config = crate::codec::opus::Config::new(48_000, channels);
+	config.pre_skip = 312;
+	config.mapping = mapping;
+	config.encode().expect("a real OpusHead")
+}
+
+fn opus_mapping(family: u8, streams: u8, coupled: u8, table: &[u8]) -> crate::codec::opus::Mapping {
+	crate::codec::opus::Mapping::new(crate::codec::opus::mapping::Config {
+		family,
+		streams,
+		coupled,
+		table,
+	})
+	.expect("mapping")
+}
+
+/// Publish one Opus frame and export it. `Err` is the exporter's refusal.
+async fn export_opus_track(channel_count: u32, description: Option<Bytes>) -> Result<BytesMut, String> {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+
+	let track = broadcast
+		.create_track(
+			broadcast.unique_name(".opus"),
+			hang::container::track_info(hang::catalog::PRIORITY.audio),
+		)
+		.unwrap();
+	let mut cfg = AudioConfig::new(AudioCodec::Opus, 48_000, channel_count);
+	cfg.container = Container::Legacy;
+	cfg.description = description;
+	catalog
+		.modify()
+		.unwrap()
+		.audio
+		.renditions
+		.insert(track.name().to_string(), cfg);
+
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+	producer
+		.write(Frame {
+			timestamp: Timestamp::ZERO,
+			duration: None,
+			payload: opus_packet(0x01, 8),
+			keyframe: true,
+		})
+		.unwrap();
+	producer.finish().unwrap();
+
+	let mut exporter = Export::new(crate::source::announced(&consumer))
+		.await
+		.unwrap()
+		.with_max_age(RECORDING_MAX_AGE);
+	let mut out = BytesMut::new();
+	loop {
+		match tokio::time::timeout(Duration::from_secs(1), exporter.next()).await {
+			Ok(Ok(Some(frame))) => out.extend_from_slice(&frame.payload),
+			Ok(Ok(None)) => return Ok(out),
+			Ok(Err(err)) => return Err(err.to_string()),
+			Err(_) => return Ok(out),
+		}
+	}
+}
+
+/// The plain `channel_config_code` on the first PMT.
+fn opus_config_code(ts: &[u8]) -> u8 {
+	let mut reader = TsPacketReader::new(Cursor::new(ts));
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::Pmt(pmt)) = packet.payload {
+			let ext = pmt.es_info[0]
+				.descriptors
+				.iter()
+				.find(|d| d.tag == 0x7f)
+				.expect("extension descriptor");
+			assert_eq!(ext.data[0], 0x80, "extension_descriptor_tag");
+			return ext.data[1];
+		}
+	}
+	panic!("missing PMT");
+}
+
+/// Channel count ffprobe reads from the descriptor. ffmpeg's demuxer is what a plain
+/// code has to agree with; a clamped or guessed code shows up here as the wrong count.
+fn ffprobe_opus_channels(ts: &[u8]) -> u32 {
+	let mut child = std::process::Command::new("ffprobe")
+		.args([
+			"-v",
+			"error",
+			"-select_streams",
+			"a:0",
+			"-show_entries",
+			"stream=codec_name,channels",
+			"-of",
+			"csv=p=0",
+			"-i",
+			"pipe:0",
+		])
+		.stdin(std::process::Stdio::piped())
+		.stdout(std::process::Stdio::piped())
+		.stderr(std::process::Stdio::piped())
+		.spawn()
+		.expect("ffprobe is in the dev shell");
+	child.stdin.take().unwrap().write_all(ts).unwrap();
+	let output = child.wait_with_output().unwrap();
+	let stdout = String::from_utf8_lossy(&output.stdout);
+	let stderr = String::from_utf8_lossy(&output.stderr);
+	assert!(output.status.success(), "ffprobe failed: {stderr} stdout={stdout}");
+	let line = stdout.lines().next().unwrap_or("").trim();
+	let (codec, channels) = line.split_once(',').unwrap_or_else(|| panic!("ffprobe: {line}"));
+	assert_eq!(codec, "opus", "ffprobe: {line} ({stderr})");
+	channels
+		.trim()
+		.parse()
+		.unwrap_or_else(|_| panic!("ffprobe channels in {line}"))
+}
+
+/// A head the extension descriptor can name keeps the plain channel code, and
+/// ffprobe reads that count. A family 255 or ambisonic head, a family 1 table that
+/// is not Vorbis, a head that contradicts the catalog, or more than stereo with no
+/// head is refused rather than labeled with a clamped count.
+#[tokio::test(start_paused = true)]
+async fn opus_export_refuses_a_head_it_cannot_label() {
+	for channels in 1..=2 {
+		let ts = export_opus_track(channels, Some(opus_head(channels, None)))
+			.await
+			.expect("family 0");
+		assert_eq!(opus_config_code(&ts), channels as u8);
+		assert_eq!(ffprobe_opus_channels(&ts), channels);
+		let ts = export_opus_track(channels, None).await.expect("no head");
+		assert_eq!(opus_config_code(&ts), channels as u8);
+		assert_eq!(ffprobe_opus_channels(&ts), channels);
+	}
+	for channels in 1..=8u32 {
+		let mapping = crate::codec::opus::Mapping::vorbis(channels as u8).unwrap();
+		let ts = export_opus_track(channels, Some(opus_head(channels, Some(mapping))))
+			.await
+			.unwrap_or_else(|err| panic!("{channels} channel Vorbis head: {err}"));
+		assert_eq!(opus_config_code(&ts), channels as u8, "{channels} channels");
+		assert_eq!(ffprobe_opus_channels(&ts), channels, "{channels} channels");
+	}
+
+	// 5.1 with the center and LFE swapped, still four streams and two coupled.
+	let swapped = opus_mapping(1, 4, 2, &[0, 4, 1, 2, 5, 3]);
+	// The uncoupled identity table ffmpeg writes as `0x80 | channels`, which its demuxer does not read.
+	let identity = opus_mapping(1, 6, 0, &[0, 1, 2, 3, 4, 5]);
+	let ambisonic = opus_mapping(2, 4, 0, &[0, 1, 2, 3]);
+	let family_255 = opus_mapping(255, 2, 0, &[0, 1]);
+	let wide = opus_mapping(255, 9, 0, &[0, 1, 2, 3, 4, 5, 6, 7, 8]);
+
+	let refused: [(u32, Option<Bytes>, &str); 9] = [
+		(0, None, "no OpusHead"),
+		(6, None, "no OpusHead"),
+		(9, None, "no OpusHead"),
+		(6, Some(opus_head(6, Some(swapped))), "not the Vorbis layout"),
+		(6, Some(opus_head(6, Some(identity))), "not the Vorbis layout"),
+		(4, Some(opus_head(4, Some(ambisonic))), "not the Vorbis layout"),
+		(2, Some(opus_head(2, Some(family_255))), "not the Vorbis layout"),
+		(9, Some(opus_head(9, Some(wide))), "not the Vorbis layout"),
+		(6, Some(opus_head(2, None)), "catalog declares"),
+	];
+	for (channels, description, needle) in refused {
+		let err = export_opus_track(channels, description)
+			.await
+			.expect_err("a guessed channel_config_code");
+		assert!(err.contains(needle), "expected {needle} in {err}");
+	}
+
+	let err = export_opus_track(2, Some(Bytes::from_static(b"not-an-opus-head")))
+		.await
+		.expect_err("a head that does not parse");
+	assert!(err.contains("cannot read the OpusHead"), "{err}");
 }
 
 // Two exporters of one broadcast, started at different times, must render the same packets
