@@ -58,7 +58,8 @@ These land with the next breaking release, not the 2026-09-23 train.
   written that long after its decode time, on a clock that follows the
   source's; `--max-age` and `--latency-max` are refused with the new flag
   named. In Rust, moq-mux's `ts::Export::with_max_age` is `with_delay`, and
-  `ts::stats::Export` gains the late drops, measured drift and
+  `ts::stats::Export` gains the dropped-frame count (late frames, and the
+  video frames then dropped waiting for a keyframe), measured drift and
   out-of-tolerance count beside its `streams` rows. It is no longer `Eq`.
 - **moq-mux has no clock translators.** `clock::Anchor`, `clock::Lane`, and
   `SourceMap` (#4667) are gone, along with the importers' `live()`. Publish the
