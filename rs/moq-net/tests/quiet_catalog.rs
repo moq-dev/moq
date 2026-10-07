@@ -123,6 +123,9 @@ async fn a_quiet_catalog_reaches_a_late_reader_after_its_route_dies() {
 		abort(a_r);
 		settle().await;
 
+		// An untagged route's broadcast ends with that route. A new reader
+		// resolves the surviving route instead of reusing the closed handle.
+		let remote = request(&subscriber).await;
 		read_snapshot(&remote)
 			.await
 			.map_err(|err| format!("late reader: {err}"))?;
