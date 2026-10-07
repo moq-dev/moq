@@ -3054,7 +3054,7 @@ mod tests {
 	// RFC 8216 §6.2.2: EXT-X-MEDIA-SEQUENCE must not decrease across reloads. A rendition that
 	// sorts ahead of the reference must not take over, or the playlist rewinds to that
 	// rendition's own record numbers and its URLs name other content.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn an_earlier_rendition_does_not_rewind_the_media_sequence() {
 		const OLD: &[u8] = b"OLDOLDOLDOLDOLDO";
 		const NEW: &[u8] = b"NEWNEWNEWNEWNEWN";
@@ -3085,6 +3085,7 @@ mod tests {
 		let source = moq_mux::Source::new(origin.consume(), "live");
 		let config = Config {
 			window: Duration::from_secs(6),
+			..Config::default()
 		};
 		let broadcaster = Broadcaster::new(source, config).await.unwrap();
 		let sequence_of = |playlist: &str| -> u64 {
