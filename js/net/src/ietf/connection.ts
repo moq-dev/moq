@@ -212,6 +212,10 @@ export class Connection implements Established {
 
 	async #run(early: Reader[]): Promise<void> {
 		try {
+			// Both run together. runPublishNamespaces is a no-op when the peer asked to be
+			// solicited; otherwise it pushes PUBLISH_NAMESPACE. On draft-16 and later a
+			// SUBSCRIBE_NAMESPACE stream is filled either way. A NAMESPACE is discovery,
+			// not a second route.
 			await Promise.all([this.#runBidis(), this.#runUnis(early), this.#publisher.runPublishNamespaces()]);
 		} catch (err) {
 			if (!this.#closed) {

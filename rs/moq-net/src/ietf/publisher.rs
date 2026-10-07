@@ -2107,10 +2107,10 @@ where
 	/// expecting a publisher to announce itself, so the default has to be to announce. A
 	/// peer that would rather ask says so with the MoQ Solicit extension
 	/// ([`solicit`](super::solicit)),
-	/// and then this loop does nothing and
-	/// [`Self::run_subscribe_namespace_stream`] carries the advertisements instead.
-	/// Exactly one of the two is live, which is what keeps the peer from hearing a
-	/// namespace twice.
+	/// and then this loop does nothing.
+	/// On draft-16 and later [`Self::run_subscribe_namespace_stream`] also carries every
+	/// match, so a peer that did not ask hears each namespace both ways. A NAMESPACE is
+	/// discovery only, not a second route.
 	pub async fn run_publish_namespaces(self) -> Result<(), Error> {
 		if self.requires_solicitation().await {
 			return Ok(());
@@ -2135,8 +2135,10 @@ where
 	///
 	/// All the announce state is local to this task (mirroring `lite::Publisher`'s
 	/// announce handling): whatever this subscription advertised is withdrawn
-	/// when its stream ends. It only advertises anything when the peer asked to be told
-	/// on request; otherwise [`Self::run_publish_namespaces`] has already said it all.
+	/// when its stream ends. On draft-16 and later every match is a NAMESPACE on
+	/// this stream, whatever the peer's SETUP said. Draft-14 and 15 predate that
+	/// message and still answer with PUBLISH_NAMESPACE only for what
+	/// [`Self::run_publish_namespaces`] does not already say.
 	async fn run_subscribe_namespace_stream(
 		self,
 		mut stream: Stream<S, Version>,
@@ -2176,15 +2178,19 @@ where
 		// origin that already opted in (the caller's choice for this peer) keeps them.
 		let origin = origin.discovery(!declared.hidden || msg.hidden || self.origin.includes_hidden());
 
-		// Unless the peer asked to be told only on request, it has already heard what an
-		// unsolicited PUBLISH_NAMESPACE can say. Repeating it here would leave it holding
-		// two sources for one namespace, so this stream carries only what that loop hid
-		// from the empty prefix and this request may see, and otherwise simply stays open
-		// until the peer is done with it.
-		let origin = match declared.solicit.unwrap_or(false) {
-			true => origin,
-			false if !declared.hidden || self.origin.includes_hidden() => origin.empty(),
-			false => origin.beyond(&self.origin.clone().discovery(false)),
+		// Draft-16 and later always fill this stream. A NAMESPACE is discovery, not a
+		// route, so a peer that also hears the unsolicited PUBLISH_NAMESPACE still gets
+		// the match here. Draft-14 and 15 answer with PUBLISH_NAMESPACE and only say
+		// what that loop does not already say: everything when the peer asked to be
+		// told on request, otherwise the hidden remainder.
+		let origin = if matches!(self.version, Version::Draft14 | Version::Draft15) {
+			match declared.solicit.unwrap_or(false) {
+				true => origin,
+				false if !declared.hidden || self.origin.includes_hidden() => origin.empty(),
+				false => origin.beyond(&self.origin.clone().discovery(false)),
+			}
+		} else {
+			origin
 		};
 
 		let mut announced = origin.announced();
@@ -4960,6 +4966,7 @@ mod serve_tests {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::coding::Decode;
 	use crate::lite::test_transport::SinkSession;
 	use crate::model::ProduceTest;
 	use futures::FutureExt;
@@ -4971,6 +4978,30 @@ mod tests {
 	fn occurrences(log: &crate::lite::test_transport::Log, needle: &[u8]) -> usize {
 		let writes = log.writes.lock().unwrap();
 		writes.windows(needle.len()).filter(|window| *window == needle).count()
+	}
+
+	/// NAMESPACE and NAMESPACE_DONE suffixes on a SUBSCRIBE_NAMESPACE stream, in order.
+	fn namespace_events(bytes: &[u8], version: Version) -> Vec<(u64, String)> {
+		let mut dec = crate::coding::Decoder::new(bytes, version.into());
+		let mut out = Vec::new();
+		while !dec.is_empty() {
+			let id = dec.varint().expect("message type");
+			match id {
+				ietf::RequestOk::ID => {
+					ietf::RequestOk::decode(&mut dec, version).expect("request ok");
+				}
+				ietf::Namespace::ID => {
+					let msg = ietf::Namespace::decode(&mut dec, version).expect("namespace");
+					out.push((id, msg.suffix.as_str().to_owned()));
+				}
+				ietf::NamespaceDone::ID => {
+					let msg = ietf::NamespaceDone::decode(&mut dec, version).expect("namespace done");
+					out.push((id, msg.suffix.as_str().to_owned()));
+				}
+				other => panic!("unexpected message {other:#x}"),
+			}
+		}
+		out
 	}
 
 	/// A SETUP slot already filled with what the peer declared. The announce loops block
@@ -5747,13 +5778,14 @@ mod tests {
 	}
 
 	/// A hidden namespace reaches only a subscription that opted in or named its dot
-	/// segment. With the unsolicited loop live, the subscription stream carries just
-	/// what that loop hid, so nothing is advertised twice.
+	/// segment. On draft-16 and later the subscription also repeats every visible
+	/// namespace the unsolicited loop already sent. A NAMESPACE is discovery, not
+	/// a second route.
 	#[moq_net_sim::test]
 	async fn hidden_namespaces_need_an_opt_in() {
 		for (solicit, prefix, hidden, cam, stats) in [
-			(Some(false), "", false, 1, 0),
-			(Some(false), "", true, 1, 1),
+			(Some(false), "", false, 2, 0),
+			(Some(false), "", true, 2, 1),
 			(Some(false), ".stats", false, 1, 1),
 			(Some(true), "", false, 1, 0),
 			(Some(true), "", true, 1, 1),
@@ -5795,7 +5827,20 @@ mod tests {
 								scoped,
 							})
 							.await;
-							let expected = usize::from(!declared || hidden || prefix == ".stats");
+							// Visible on the subscription: not filtered, opted in, or the prefix
+							// names the dot segment. The unsolicited loop sends a dot namespace
+							// only when the peer did not declare MoQ Hidden. Draft-14/15 keep
+							// the two paths disjoint; draft-16 and later fill the stream too.
+							let on_stream = !declared || hidden || prefix == ".stats";
+							let unsolicited = solicit != Some(true) && !declared;
+							let legacy = matches!(version, Version::Draft14 | Version::Draft15);
+							let inline = if legacy {
+								(solicit == Some(true) && on_stream)
+									|| (solicit != Some(true) && declared && (hidden || prefix == ".stats"))
+							} else {
+								on_stream
+							};
+							let expected = usize::from(inline) + usize::from(unsolicited);
 							assert_eq!(
 								occurrences(&log, b"node"),
 								expected,
@@ -5808,20 +5853,121 @@ mod tests {
 		}
 	}
 
-	/// The regression that made announces solicited in the first place: a namespace sent
-	/// as both PUBLISH_NAMESPACE and NAMESPACE leaves the peer holding two sources for
-	/// one broadcast, and whichever arrives second replaces the one the first attached.
-	/// The peer's SETUP picks which loop carries it, so the other stays quiet and the
-	/// namespace goes out exactly once either way.
+	/// On draft-16 and later a peer that did not ask to be solicited hears each
+	/// namespace twice: an unsolicited PUBLISH_NAMESPACE and a NAMESPACE on the
+	/// SUBSCRIBE_NAMESPACE stream. Those are two discoveries of one namespace, not
+	/// two routes. A peer that asked to be solicited hears it only on the stream.
+	/// Draft-14 and 15 still answer a non-solicit peer only with PUBLISH_NAMESPACE.
 	#[moq_net_sim::test]
-	async fn each_namespace_is_advertised_exactly_once() {
-		let (unsolicited, streams) = advertise_both_ways(Some(false)).await;
-		assert_eq!(unsolicited, 1, "a peer that required nothing is told once");
-		assert_eq!(streams, 2, "on its own PUBLISH_NAMESPACE request");
+	async fn a_non_solicit_peer_hears_a_namespace_both_ways() {
+		let (times, streams) = advertise_both_ways(Some(false)).await;
+		assert_eq!(times, 2, "PUBLISH_NAMESPACE and NAMESPACE");
+		assert_eq!(streams, 2, "the subscription plus one PUBLISH_NAMESPACE request");
 
-		let (solicited, streams) = advertise_both_ways(Some(true)).await;
-		assert_eq!(solicited, 1, "a peer that asked to be told on request is told once");
+		let (once, streams) = advertise_both_ways(Some(true)).await;
+		assert_eq!(once, 1, "a peer that asked to be told on request is told once");
 		assert_eq!(streams, 1, "inline on the SUBSCRIBE_NAMESPACE stream it asked on");
+
+		for version in [Version::Draft14, Version::Draft15] {
+			let log = advertise_with_hidden(Discovery {
+				version,
+				solicit: Some(false),
+				..Discovery::default()
+			})
+			.await;
+			assert_eq!(
+				occurrences(&log, b"cam"),
+				1,
+				"{version:?} still answers only with PUBLISH_NAMESPACE"
+			);
+		}
+	}
+
+	/// A peer that did not send SOLICIT still gets NAMESPACE on its SUBSCRIBE_NAMESPACE
+	/// stream on draft-16 and later: one for a match that already exists, one announced
+	/// after, then NAMESPACE_DONE when that announcement ends.
+	#[moq_net_sim::test]
+	async fn a_non_solicit_subscribe_namespace_carries_namespace() {
+		for version in [Version::Draft16, Version::Draft18] {
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let early = origin.announce("early-cam", crate::origin::Route::default()).unwrap();
+			settle().await;
+
+			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
+			let log = session.log.clone();
+
+			let peer_setup = peer::PeerSetup::default();
+			peer_setup.set(peer::Peer::default());
+
+			let publisher = Publisher::new(
+				crate::time::Clock::sim(),
+				session.clone(),
+				origin.consume(),
+				Control::new(None, false),
+				None,
+				peer_setup,
+				version,
+			);
+
+			let stream = Stream::open(&mut session.clone(), version).await.unwrap();
+			let msg = ietf::SubscribeNamespace {
+				request_id: RequestId(1),
+				namespace: crate::Path::new(""),
+				hidden: false,
+			};
+			let mut run = std::pin::pin!(publisher.run_subscribe_namespace_stream(stream, msg));
+
+			for _ in 0..100 {
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				if occurrences(&log, b"early-cam") >= 1 {
+					break;
+				}
+				settle().await;
+			}
+			let bytes = log.writes.lock().unwrap().clone();
+			assert_eq!(
+				namespace_events(&bytes, version),
+				vec![(ietf::Namespace::ID, "early-cam".to_owned())],
+				"{version:?}: existing match",
+			);
+
+			let _late = origin.announce("late-cam", crate::origin::Route::default()).unwrap();
+			for _ in 0..100 {
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				if occurrences(&log, b"late-cam") >= 1 {
+					break;
+				}
+				settle().await;
+			}
+			let bytes = log.writes.lock().unwrap().clone();
+			assert_eq!(
+				namespace_events(&bytes, version),
+				vec![
+					(ietf::Namespace::ID, "early-cam".to_owned()),
+					(ietf::Namespace::ID, "late-cam".to_owned()),
+				],
+				"{version:?}: announced later",
+			);
+
+			drop(early);
+			for _ in 0..100 {
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				if occurrences(&log, b"early-cam") >= 2 {
+					break;
+				}
+				settle().await;
+			}
+			let bytes = log.writes.lock().unwrap().clone();
+			assert_eq!(
+				namespace_events(&bytes, version),
+				vec![
+					(ietf::Namespace::ID, "early-cam".to_owned()),
+					(ietf::Namespace::ID, "late-cam".to_owned()),
+					(ietf::NamespaceDone::ID, "early-cam".to_owned()),
+				],
+				"{version:?}: NAMESPACE_DONE when it ends",
+			);
+		}
 	}
 
 	/// A peer out of stream credit parks the open. That must not wedge the loop, because

@@ -239,9 +239,10 @@ export class Publisher {
 	#hidden: boolean;
 
 	// The origin this session serves, borrowed: it outlives the session, and closing the
-	// session leaves its broadcasts alone. The namespaces are advertised with an unsolicited
-	// PUBLISH_NAMESPACE (see {@link runPublishNamespaces}), or on request if the peer asked
-	// for that (see {@link runSubscribeNamespace}).
+	// session leaves its broadcasts alone. Namespaces go out as an unsolicited
+	// PUBLISH_NAMESPACE (see {@link runPublishNamespaces}) unless the peer asked to be
+	// told on request. On draft-16 and later {@link runSubscribeNamespace} also carries
+	// every match: a NAMESPACE is discovery, not a second route.
 	#advertised: Getter<Advertisements | undefined>;
 	#publish?: OriginConsumer;
 
@@ -860,12 +861,12 @@ export class Publisher {
 	/**
 	 * Handles an incoming SUBSCRIBE_NAMESPACE on a bidi stream.
 	 *
-	 * This carries the advertisements when the peer asked to be told on request (MoQ
-	 * Solicit); otherwise {@link runPublishNamespaces} has already announced everything
-	 * visible and repeating it here would leave the peer holding two sources for one
-	 * broadcast, so only the hidden namespaces it may see ride here (MoQ Hidden).
-	 * Draft-16+ streams Namespace entries inline; draft-14/15 predate those messages, so
-	 * each advertisement is a PUBLISH_NAMESPACE request of its own.
+	 * On draft-16 and later every visible match is a NAMESPACE on this stream, whatever
+	 * the peer's SETUP said. A NAMESPACE is discovery, not a route, so a peer that also
+	 * hears the unsolicited PUBLISH_NAMESPACE still gets the match here. Draft-14/15
+	 * predate those messages, so each advertisement is a PUBLISH_NAMESPACE request, and
+	 * only for what {@link runPublishNamespaces} does not already say (the whole set when
+	 * the peer asked to be told on request, otherwise the hidden remainder).
 	 *
 	 * @internal
 	 */
@@ -903,12 +904,15 @@ export class Publisher {
 				await ok.encode(stream.writer, version);
 			}
 
-			// Hidden namespaces are left out unless the peer opted in (MoQ Hidden). Unless the
-			// peer asked to be told only on request, it has already heard everything visible
-			// from the empty prefix unasked, so this stream carries only what that hid.
+			// Hidden namespaces are left out unless the peer opted in (MoQ Hidden). Draft-16
+			// and later carry every remaining match. Draft-14/15 only add what the
+			// unsolicited loop cannot say.
+			const visible = (covered: Path.Valid) => !this.#hidden || msg.hidden || !hiddenBelow(prefix, covered);
 			const carries = (covered: Path.Valid) =>
-				(!this.#hidden || msg.hidden || !hiddenBelow(prefix, covered)) &&
-				(this.#requiresSolicitation || (this.#hidden && hiddenBelow(Path.empty(), covered)));
+				visible(covered) &&
+				(legacy
+					? this.#requiresSolicitation || (this.#hidden && hiddenBelow(Path.empty(), covered))
+					: true);
 
 			// Inline entries always land, and the receiver treats a repeated NAMESPACE as a
 			// replacement, so repricing one is just sending it again, a new original
@@ -989,9 +993,10 @@ export class Publisher {
 	 *
 	 * The peers that never send SUBSCRIBE_NAMESPACE are exactly the ones expecting a
 	 * publisher to announce itself, so announcing is the default. A peer that would
-	 * rather ask says so in its SETUP (MoQ Solicit) and this does nothing, leaving
-	 * {@link runSubscribeNamespace} to carry the advertisements instead. Exactly one of
-	 * the two is live, so the peer never hears a namespace twice.
+	 * rather ask says so in its SETUP (MoQ Solicit) and this does nothing. On draft-16
+	 * and later {@link runSubscribeNamespace} also carries every match, so a peer that
+	 * did not ask hears each namespace both ways. A NAMESPACE is discovery only, not a
+	 * second route.
 	 *
 	 * @internal
 	 */
