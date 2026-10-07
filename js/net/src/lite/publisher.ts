@@ -302,12 +302,12 @@ function waitForSubscription(controls: SubscriptionControls, subscriber: track.S
  * a legacy subscriber never declined, so fall back to a window wide enough not to drop
  * and leave enforcement to the receiver, as the IETF path does for the same reason.
  */
-function servingMaxAge(version: Version, requested: number | undefined): number {
-	return carriesMaxAge(version) ? (requested ?? 0) : Number.MAX_SAFE_INTEGER;
+function servingMaxDelay(version: Version, requested: number | undefined): number {
+	return carriesMaxDelay(version) ? (requested ?? 0) : Number.MAX_SAFE_INTEGER;
 }
 
 /** Whether this version's SUBSCRIBE carries Subscriber Max Age at all. */
-function carriesMaxAge(version: Version): boolean {
+function carriesMaxDelay(version: Version): boolean {
 	return version !== Version.DRAFT_01 && version !== Version.DRAFT_02;
 }
 
@@ -315,12 +315,12 @@ function carriesMaxAge(version: Version): boolean {
  * Position a subscription's read cursor for the wire serving it.
  *
  * On lite-06 there is nothing to do: the cursor is floored at the group the subscription
- * named (or 0), and its Max Age decides what above the floor is worth delivering.
+ * named (or 0), and its max delay decides what above the floor is worth delivering.
  *
  * Pre-06 wires are the exception: their drafts define an absent `Group Start` as the
  * latest group, so say so explicitly rather than letting the budget reach back. Lite-03/04/05
- * carry a Max Age, but there it is a staleness tolerance only; lite-01/02 additionally get
- * an unbounded budget so nothing is dropped under them (see {@link servingMaxAge}), which
+ * carry a `Subscriber Max Age`, but there it is a staleness tolerance only; lite-01/02 additionally get
+ * an unbounded budget so nothing is dropped under them (see {@link servingMaxDelay}), which
  * must not read as a request to replay the whole cache on join.
  */
 function positionCursor(track: track.Subscriber, version: Version, startGroup: number | undefined) {
@@ -434,7 +434,7 @@ export class Publisher {
 			if (hasAnnounceId(this.version)) announceIds.set(suffix, nextAnnounceId++);
 			await encodeAnnounceBroadcast(
 				stream.writer,
-				{ status: "active", suffix, hops: wireHops(route), cost: route.cost },
+				{ status: "active", suffix, epoch: route.epoch, hops: wireHops(route), cost: route.cost },
 				this.version,
 			);
 		};
@@ -541,11 +541,13 @@ export class Publisher {
 
 				for (const [suffix, snap] of active) {
 					const cur = updated.get(suffix);
-					if (!cur || cur.identity !== snap.identity) await retract(suffix);
+					// A new epoch is another broadcast, even from the same entry.
+					if (!cur || cur.identity !== snap.identity || cur.route.epoch !== snap.route.epoch)
+						await retract(suffix);
 				}
 				for (const [suffix, snap] of updated) {
 					const prev = active.get(suffix);
-					if (!prev || prev.identity !== snap.identity) {
+					if (!prev || prev.identity !== snap.identity || prev.route.epoch !== snap.route.epoch) {
 						await announce(suffix, snap.route);
 					} else if (!routesEqual(onWire(prev.route), onWire(snap.route))) {
 						await restart(suffix, snap.route);
@@ -576,7 +578,8 @@ export class Publisher {
 		try {
 			front =
 				this.#publish &&
-				(wireOf(this.#publish).local(msg.broadcast) ?? (await wireOf(this.#publish).demand(msg.broadcast)));
+				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
+					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch)));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -590,7 +593,7 @@ export class Publisher {
 		const endGroup = exclusiveGroupEnd(msg.endGroup);
 		const track = wireOf(front).subscribe(msg.track, {
 			priority: msg.priority,
-			maxAge: Milli(servingMaxAge(this.version, msg.maxAge)),
+			maxDelay: Milli(servingMaxDelay(this.version, msg.maxDelay)),
 			groups: {
 				start: msg.startGroup === undefined ? undefined : { included: msg.startGroup },
 				end: endGroup === undefined ? undefined : { excluded: endGroup },
@@ -624,7 +627,7 @@ export class Publisher {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
 				const ok = new SubscribeOk({
 					priority: msg.priority,
-					maxAge: msg.maxAge,
+					maxDelay: msg.maxDelay,
 					startGroup: msg.startGroup,
 					endGroup: msg.endGroup,
 				});
@@ -647,7 +650,7 @@ export class Publisher {
 					const end = exclusiveGroupEnd(update.endGroup);
 					track.update({
 						priority: update.priority,
-						maxAge: Milli(servingMaxAge(this.version, update.maxAge)),
+						maxDelay: Milli(servingMaxDelay(this.version, update.maxDelay)),
 						groups: {
 							start: update.startGroup === undefined ? undefined : { included: update.startGroup },
 							end: end === undefined ? undefined : { excluded: end },
@@ -700,7 +703,8 @@ export class Publisher {
 		try {
 			front =
 				this.#publish &&
-				(wireOf(this.#publish).local(msg.broadcast) ?? (await wireOf(this.#publish).demand(msg.broadcast)));
+				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
+					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch)));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -970,7 +974,8 @@ export class Publisher {
 		try {
 			const front =
 				this.#publish &&
-				(wireOf(this.#publish).local(msg.broadcast) ?? (await wireOf(this.#publish).demand(msg.broadcast)));
+				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
+					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch)));
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			const info = await this.#resolveTrackInfo(front, msg.track);

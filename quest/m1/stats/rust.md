@@ -26,12 +26,12 @@
     `rs/moq-audio/src/playback` is already counted privately.
 - `moq-cli` folds the counters into `hang::stats::Snapshot` on the stats
   interval and writes it through `moq_json::snapshot`, with the `.z` sibling.
-  A TS import flattens `ts::Stats` in as `mpegts`. `transport` comes from
+  A TS import flattens `ts::stats::Snapshot` in as `mpegts`. `transport` comes from
   the connection's `ConnectionStats`.
 - Feedback: after reading a catalog with an `echo` section, the player
   resolves the echo path against the broadcast, appends `<name>.echo`, and
   publishes there with the fixed feedback
-  track, keyed by the catalog's rendition aliases. Each catalog update
+  track, keyed by the catalog's rendition IDs. Each catalog update
   reconciles it: a removed `echo` section, a changed path, or no longer
   watching unannounces the old broadcast. A name that is not a single path segment is refused at
   parse time.

@@ -17,7 +17,7 @@ use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_AGE: Duration = Duration::from_secs(5);
+const MAX_DELAY: Duration = Duration::from_secs(5);
 const GROUPS: u64 = 4;
 
 const VERSIONS: &[&str] = &[
@@ -70,7 +70,7 @@ async fn round(name: &str) -> (Vec<u64>, Result<(), moq_net::Error>) {
 
 	let (mut heads, mut opened) = futures::channel::mpsc::unbounded();
 	let reader = moq_net_sim::spawn(async move {
-		let subscription = Subscription::default().with_max_age(MAX_AGE).with_groups(0..);
+		let subscription = Subscription::default().with_max_delay(MAX_DELAY).with_groups(0..);
 		let mut sub = remote
 			.track("tail")
 			.unwrap()
@@ -132,8 +132,8 @@ async fn round(name: &str) -> (Vec<u64>, Result<(), moq_net::Error>) {
 		group.finish().unwrap();
 	}
 
-	// Lite03 carries no declared end: each of the two hops waits one max-age grace.
-	let outcome = moq_net_sim::timeout(MAX_AGE * 2 + TIMEOUT, reader)
+	// Lite03 carries no declared end: each of the two hops waits one max-delay grace.
+	let outcome = moq_net_sim::timeout(MAX_DELAY * 2 + TIMEOUT, reader)
 		.await
 		.unwrap_or_else(|_| panic!("{name}: the track never ended"))
 		.expect("reader panicked");

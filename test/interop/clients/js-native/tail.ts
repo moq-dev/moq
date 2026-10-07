@@ -55,7 +55,7 @@ try {
 			}
 			const track = broadcast
 				.track("tail")
-				.subscribe({ maxAge: Moq.Time.Milli(5000), groups: { start: { included: 0 } } });
+				.subscribe({ maxDelay: Moq.Time.Milli(5000), groups: { start: { included: 0 } } });
 			const seen: number[] = [];
 			try {
 				for (;;) {

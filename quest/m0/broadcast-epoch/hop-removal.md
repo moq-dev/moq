@@ -2,10 +2,10 @@
 
 ## Goal
 
-Nothing names a publisher's identity outside its path. `moq` loses `--hop`,
+Nothing names a publisher's identity outside its epoch. `moq` loses `--hop`,
 `MOQ_HOP`, and the hidden `--origin` alias; an optional `--epoch` takes their
-place for publishing. Omitted, each run gets a fresh epoch (the origin
-default); a redundant pair passes the same value. A plain publisher declares
+place for publishing. Omitted, `moq` itself mints a fresh epoch per run, since
+nothing mints one by default; a redundant pair passes the same value. A plain publisher declares
 a random Hop ID per process with no flag, as the bindings and js already do,
 so a multi-homed publisher still catches its own loops. `--cluster-id` names
 a node and no longer falls back to `--hop`. Relays stop stamping an unnamed
@@ -26,11 +26,6 @@ publisher's hop chain.
   would let a shared front hairpin through a peer in a cluster. Viewers share
   a front anyway, because `Horizon::effective` ignores a hop no route chain
   names (#4922).
-- NO_CAPACITY's removal (decided 2026-10-03: every refusal is terminal)
-  lands with the [wildcard](/quest/m0/wildcard/README.md) line, whose branch
-  already deletes it from js/net, moq-net, and both drafts (found in the
-  2026-10-05 audit). Don't redo it here; rebase onto that line if it lands
-  first.
 - Drafts: lite-07 and cluster-02 are in progress, so edit their text and
   changelogs in place. In `drafts/draft-lcurley-moq-lite.md`: the stamping
   rule, "the identity it stamps",
@@ -53,6 +48,3 @@ Public API: removes `--hop`, `MOQ_HOP`, and `--origin`, adds `--epoch`, and
 `--cluster-id` stops reading `--hop`.
 Wire: relays stop stamping.
 
-## Required
-
-- [Origin](/quest/m0/broadcast-epoch/origin.md) - the default mint `--epoch` falls back to

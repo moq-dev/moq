@@ -123,20 +123,14 @@ impl Callback {
 }
 
 impl Callback {
-	/// Wait for the next announce event that is not `LIVE`, freeing any `LIVE` ahead of it.
+	/// Wait for the next announce event.
 	fn recv_route(&self) -> (u32, moq_announce_event) {
-		loop {
-			let announced = id(self.recv());
-			let info = announce_info(announced);
-			if info.kind != moq_announce_kind::MOQ_ANNOUNCE_KIND_LIVE {
-				return (announced, info);
-			}
-			assert_eq!(moq_origin_announced_free(announced), 0);
-		}
+		let announced = id(self.recv());
+		(announced, announce_info(announced))
 	}
 
 	/// Like [`recv_terminal`](Self::recv_terminal), but first frees any announce
-	/// events (such as a late `LIVE`) still queued ahead of it.
+	/// events still queued ahead of it.
 	fn recv_announce_terminal(&self) -> i32 {
 		loop {
 			let code = self.recv();
@@ -156,7 +150,7 @@ fn announce_info(announced: u32) -> moq_announce_event {
 		captures: std::ptr::null(),
 		captures_len: 0,
 		has_captures: false,
-		kind: moq_announce_kind::MOQ_ANNOUNCE_KIND_LIVE,
+		kind: moq_announce_kind::MOQ_ANNOUNCE_KIND_START,
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced, &mut info) }, 0);
 	info
@@ -1408,7 +1402,7 @@ fn publish_track_invalid_broadcast() {
 
 	let subscription = moq_subscription {
 		priority: 1,
-		max_age_us: 0,
+		max_delay_us: 0,
 		group_start: 0,
 		group_start_present: false,
 		group_end: 0,
@@ -1458,7 +1452,7 @@ fn raw_track_publish_consume() {
 	// finish draining if the second becomes visible while the callback runs.
 	let subscription = moq_subscription {
 		priority: 0,
-		max_age_us: 1_000_000,
+		max_delay_us: 1_000_000,
 		group_start: 0,
 		group_start_present: false,
 		group_end: 0,
@@ -1660,7 +1654,7 @@ fn raw_track_subscription_options_and_update() {
 	let frame_cb = Callback::new();
 	let subscription = moq_subscription {
 		priority: 5,
-		max_age_us: 25_000,
+		max_delay_us: 25_000,
 		group_start: 1,
 		group_start_present: true,
 		group_end: 2,
@@ -1890,7 +1884,7 @@ fn announced_free_lifecycle() {
 
 	// Stop the listener and drain its terminal callback before the Callback drops.
 	assert_eq!(moq_origin_announced_cancel(ann_task), 0);
-	ann_cb.recv_announce_terminal();
+	ann_cb.recv_terminal();
 
 	assert_eq!(moq_origin_close(origin), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -2017,45 +2011,6 @@ fn unknown_format() {
 	assert!(ret < 0, "an out-of-range format code should fail");
 }
 
-/// `LIVE` marks the end of the routes live when the listener started: at once on
-/// an empty origin, and after the existing routes otherwise.
-#[test]
-fn announced_delivers_live_once_caught_up() {
-	let origin = id(moq_origin_create());
-
-	let empty_cb = Callback::new();
-	let empty = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), empty_cb.ptr) });
-	let live = id(empty_cb.recv());
-	let info = announce_info(live);
-	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_LIVE);
-	assert_eq!(info.prefix_len, 0);
-	assert!(!info.has_captures);
-	assert_eq!(moq_origin_announced_free(live), 0);
-	assert_eq!(moq_origin_announced_cancel(empty), 0);
-	assert_eq!(empty_cb.recv_announce_terminal(), 0);
-
-	let path = b"cam";
-	let broadcast = publish_broadcast(origin, path);
-	let _ = request_broadcast(origin, path);
-
-	let cb = Callback::new();
-	let task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
-	let announced = id(cb.recv());
-	let info = announce_info(announced);
-	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
-	let got = unsafe { std::slice::from_raw_parts(info.prefix.cast::<u8>(), info.prefix_len) };
-	assert_eq!(got, path);
-	let live = id(cb.recv());
-	assert_eq!(announce_info(live).kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_LIVE);
-	assert_eq!(moq_origin_announced_free(announced), 0);
-	assert_eq!(moq_origin_announced_free(live), 0);
-
-	assert_eq!(moq_origin_announced_cancel(task), 0);
-	assert_eq!(cb.recv_announce_terminal(), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
-	assert_eq!(moq_origin_close(origin), 0);
-}
-
 #[test]
 fn local_announce() {
 	let origin = id(moq_origin_create());
@@ -2075,7 +2030,7 @@ fn local_announce() {
 	assert_eq!(moq_origin_announced_free(announced_id), 0);
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
-	assert_eq!(cb.recv_announce_terminal(), 0, "announced close delivers terminal 0");
+	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -2110,7 +2065,7 @@ fn announced_filters_patterns_and_reports_captures() {
 
 	assert_eq!(moq_origin_announced_free(announced_id), 0);
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
-	assert_eq!(cb.recv_announce_terminal(), 0);
+	assert_eq!(cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_close(audio), 0);
 	assert_eq!(moq_publish_close(chat), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -2183,7 +2138,7 @@ fn announced_deactivation() {
 	let _ = request_broadcast(origin, path);
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
-	assert_eq!(cb.recv_announce_terminal(), 0, "announced close delivers terminal 0");
+	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -2206,7 +2161,7 @@ fn create_broadcast_is_unroutable_until_announced() {
 	assert_eq!(moq_origin_announced_free(announced_id), 0);
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
-	assert_eq!(cb.recv_announce_terminal(), 0);
+	assert_eq!(cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -3352,7 +3307,7 @@ fn video_raw_publish_consume() {
 	let catalog_id = id(catalog_cb.recv());
 
 	let decoder = moq_video_decoder_output {
-		max_age_us: 10_000_000,
+		max_delay_us: 10_000_000,
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 		width: 0,
 		height: 0,
@@ -3424,7 +3379,7 @@ fn video_raw_decode_output_rejected() {
 	use crate::ffi::ReturnCode;
 
 	let bad_format = moq_video_decoder_output {
-		max_age_us: 0,
+		max_delay_us: 0,
 		format: 999,
 		width: 0,
 		height: 0,
@@ -3436,7 +3391,7 @@ fn video_raw_decode_output_rejected() {
 
 	for (width, height) in [(320, 0), (0, 240), (321, 240), (320, 241), (u32::MAX - 1, u32::MAX - 1)] {
 		let bad_size = moq_video_decoder_output {
-			max_age_us: 0,
+			max_delay_us: 0,
 			format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 			width,
 			height,
@@ -3454,7 +3409,7 @@ fn video_raw_decode_output_rejected() {
 	);
 
 	let valid = moq_video_decoder_output {
-		max_age_us: 0,
+		max_delay_us: 0,
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 160,
 		height: 120,
@@ -3557,7 +3512,7 @@ fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
 #[test]
 fn video_raw_decode_rgba() {
 	let output = moq_video_decoder_output {
-		max_age_us: 10_000_000,
+		max_delay_us: 10_000_000,
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 0,
 		height: 0,
@@ -3570,7 +3525,7 @@ fn video_raw_decode_rgba() {
 #[test]
 fn video_raw_decode_resize() {
 	let output = moq_video_decoder_output {
-		max_age_us: 10_000_000,
+		max_delay_us: 10_000_000,
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 		width: 160,
 		height: 120,
@@ -3898,7 +3853,7 @@ fn video_raw_decode() {
 
 	// Subscribe + decode before publishing frames so the keyframe group is delivered.
 	let output = moq_video_decoder_output {
-		max_age_us: 10_000_000,
+		max_delay_us: 10_000_000,
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 		width: 0,
 		height: 0,
@@ -4895,7 +4850,7 @@ fn read_raw_frames(consume: u32, name: &[u8], count: usize) -> Vec<Vec<u8>> {
 	let frame_cb = Callback::new();
 	let subscription = moq_subscription {
 		priority: 0,
-		max_age_us: 1_000_000,
+		max_delay_us: 1_000_000,
 		group_start: 0,
 		group_start_present: false,
 		group_end: 0,

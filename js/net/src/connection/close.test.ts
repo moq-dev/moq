@@ -67,7 +67,6 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_19]) {
 			let timer: ReturnType<typeof spyOn<typeof globalThis, "setTimeout">> | undefined;
 			try {
 				expect((await announced.next())?.kind).toBe("start");
-				expect((await announced.next())?.kind).toBe("live");
 				fin.enable();
 				let closed = false;
 				void pair.server.closed.then(() => {

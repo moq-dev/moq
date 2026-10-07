@@ -1,5 +1,7 @@
+import type * as Epoch from "../epoch.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
 import { hasFrameBounds, Version } from "./version.ts";
 
@@ -15,6 +17,8 @@ function guardFetch(version: Version) {
 
 export class Fetch {
 	broadcast: Path.Valid;
+	/** The publisher instance the subscriber expects. Lite-07+. */
+	epoch?: Epoch.Valid;
 	track: string;
 	priority: number;
 	group: number;
@@ -30,6 +34,7 @@ export class Fetch {
 
 	constructor({
 		broadcast,
+		epoch,
 		track,
 		priority,
 		group,
@@ -37,6 +42,7 @@ export class Fetch {
 		endFrame,
 	}: {
 		broadcast: Path.Valid;
+		epoch?: Epoch.Valid;
 		track: string;
 		priority: number;
 		group: number;
@@ -44,6 +50,7 @@ export class Fetch {
 		endFrame?: number;
 	}) {
 		this.broadcast = broadcast;
+		this.epoch = epoch;
 		this.track = track;
 		this.priority = priority;
 		this.group = group;
@@ -53,6 +60,7 @@ export class Fetch {
 
 	async #encode(w: Writer, version: Version) {
 		await w.string(Path.encode(this.broadcast));
+		await encodeEpoch(w, version, this.epoch);
 		await w.string(this.track);
 		await w.u8(this.priority);
 		await w.u53(this.group);
@@ -68,12 +76,13 @@ export class Fetch {
 
 	static async #decode(r: Reader, version: Version): Promise<Fetch> {
 		const broadcast = Path.decode(await r.string());
+		const epoch = await decodeEpoch(r, version);
 		const track = await r.string();
 		const priority = await r.u8();
 		const group = await r.u53();
 
 		if (!hasFrameBounds(version)) {
-			return new Fetch({ broadcast, track, priority, group });
+			return new Fetch({ broadcast, epoch, track, priority, group });
 		}
 
 		const startFrame = await r.u53();
@@ -84,6 +93,7 @@ export class Fetch {
 
 		return new Fetch({
 			broadcast,
+			epoch,
 			track,
 			priority,
 			group,

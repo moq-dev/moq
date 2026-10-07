@@ -16,9 +16,8 @@ This questline adds an AUTH exchange to both wires: one stream per token, a
 grant per token, the union of every accepted token as the session's scope,
 and a loud failure when a publish can never be honored. It ends with the
 credential able to travel in band, while the URL keeps working for every peer
-that predates the stream. Direct peer sessions need a second credential: a
-relay-signed, hop-bound grant that a browser can verify without a signing
-key, which HMAC relay keys cannot provide.
+that predates the stream. Hop-bound peer grants for direct sessions belong to
+[P2P](/quest/m3/p2p/peer-grant.md), their only consumer.
 
 ## Plan
 
@@ -39,17 +38,18 @@ Decisions settled while planning, recorded so review does not relitigate them:
   the union and cancels publications and subscriptions that lose authorization.
   Other authorized work continues on the same session. An empty union leaves
   the session connected with no access, so it can accept a fresh token.
-  [Origin narrowing](/quest/m1/auth/narrowing.md) owns the common resize
-  operation; relay token handling requires it rather than shipping a temporary
-  close-on-shrink policy.
+  `auth::Handle::authorize` is the common resize operation; relay token handling
+  uses it rather than shipping a temporary close-on-shrink policy.
 - **A public grant contains publish patterns, subscribe patterns, and an
   expiry**, in the presenter's own root; the presenter never sees the relay-side
   root, and every token in a union shares the connection's root. Unscoped
-  permission is `**`; an empty union grants nothing. Legacy AUTH wire codecs
-  explicitly convert representable prefix unions, where `[""]` means all,
-  and refuse patterns they cannot represent. Pattern interest (#4277, on this
-  line) upgrades AUTH and ANNOUNCE_REQUEST wire fields together without changing
-  the public pattern-valued grant type.
+  permission is `**`; an empty union grants nothing. Lite AUTH_OK carries
+  those patterns, wildcards and literals alike, from the first release, with
+  no covering-prefix workaround. IETF AUTH_OK carries Track Namespace
+  prefixes, so an acceptor whose grant is not a union of subtrees answers
+  AUTH_ERROR NOT_SUPPORTED rather than widening it. Announce stays a prefix:
+  ANNOUNCE_REQUEST and SUBSCRIBE_NAMESPACE do not gain patterns. The public
+  grant type stays pattern-valued.
 - **Fail loud by aborting the session.** A publisher whose origin announces a
   broadcast outside the union aborts the session with `Unauthorized`, naming
   the path. The check runs against the grants in hand once the tokens the
@@ -73,7 +73,9 @@ Decisions settled while planning, recorded so review does not relitigate them:
   must explicitly grant `**` for unrestricted access; AUTH does not widen a
   scoped grant because the caller is another relay.
 - **Client API.** Tokens live on `moq_tokio::connect::Config`, the
-  dial-side config, and `Connection` exposes the live session's auth handle.
+  dial-side config. `Connection::auth()` is a handle the connection owns: it
+  keeps every added token, presents them on each session as it reconnects,
+  and reports the live session's grant.
 - **Spec home.** The AUTH stream is core in the wip lite version
   (`moq-lite-07-wip` today) in `drafts/draft-lcurley-moq-lite.md`, the way
   routing is. moq-transport gets
@@ -93,28 +95,18 @@ published version in place, so AUTH and its stream code land in
 ## Required
 
 - [WebSocket refusal](/quest/m1/auth/ws-unauthorized.md) - the relay serves WebSocket through moq-tokio, so a refused token closes the session as Unauthorized, as QUIC does
-- [Lite stream](/quest/m1/auth/lite.md) - both sides of a wip-version lite session
-  exchange grants over AUTH streams, exposed as `Session::auth()`, and an
-  out-of-scope announce aborts the session
-- [Interop grants](/quest/m1/auth/interop.md) - the interop matrix asserts
-  each AUTH-capable cell's grant and that a publish outside it fails loud
-- [Unauthorized reset](/quest/m1/auth/unauthorized.md) - a subscription that
-  loses access resets with a dedicated UNAUTHORIZED stream code
-- [AUTH_OK preflight](/quest/m1/auth/auth-ok-preflight.md) - an unencodable IETF grant answers NOT_SUPPORTED with nothing written, as JS already does
-- [AUTH endings](/quest/m1/auth/error-codes.md) - an out-of-range AUTH_ERROR code is refused, and both sides settle and recompute grants when a stream ends
+- [AUTH on the wip version](/quest/m1/auth/wip-version.md) - lite AUTH and UNAUTHORIZED move from lite-06 to `moq-lite-07-wip`, so no published version changes in place
+- [Lite NOT_SUPPORTED](/quest/m1/auth/not-supported.md) - a lite acceptor answers AUTH_ERROR NOT_SUPPORTED after a grant too, with a lite session code for `Error::Unsupported`
+- [AUTH violations](/quest/m1/auth/violations.md) - every AUTH protocol violation closes the session in Rust and JS, lite and IETF
 - [Malformed grant](/quest/m1/auth/malformed-grant.md) - a malformed or
   non-canonical grant pattern, or an out-of-range `Expires`, closes the
   session with PROTOCOL_VIOLATION in Rust and JS
-- [Origin narrowing](/quest/m1/auth/narrowing.md) - a live grant narrows in
-  place: subscriptions outside it reset, publishes outside it abort, and relay
-  revalidation stops closing the session
+- [JS fetch grant watch](/quest/m1/auth/js-fetch-watch.md) - a JS `fetchGroup` ends `Unauthorized` when its path leaves the grant
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
   sent in band, unions their grants, and cancels only work that loses access
 - [Request tokens](/quest/m1/auth/request-token.md) - an `AUTHORIZATION
   TOKEN` on a moq-transport request authorizes that request when the session
   grant does not, and REQUEST_UPDATE refreshes it
-- [moq-transport](/quest/m1/auth/moq-transport.md) - the same exchange as a
-  setup-option extension on draft-17+, specified in a new draft
 - [Expired token error](/quest/m1/auth/expired-error.md) - an expired token
   reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
@@ -122,11 +114,8 @@ published version in place, so AUTH and its stream code land in
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave
   the URL: a session starts on what the URL carried and its AUTH streams add
   the rest, with the URL kept for peers without the AUTH stream
-- [Peer grants](/quest/m1/auth/peer-grant.md) - the relay issues a hop-bound,
-  asymmetrically signed grant a browser can verify; HS256 keys issue none
 
 ## Related
 
-- [Expiring media grants](/quest/m3/processor/grant-lease.md) - a worker's
-  lease renewal is a new in-band token
-- [P2P](/quest/m3/p2p/README.md) - the first consumer of hop-bound peer grants
+- [Peer grants](/quest/m3/p2p/peer-grant.md) - P2P's hop-bound credential,
+  built on this line's relay tokens

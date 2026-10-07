@@ -120,7 +120,6 @@ async fn main() -> anyhow::Result<()> {
 						announce::Event::End(update) => {
 							tracing::warn!(broadcast = %update.prefix, "broadcast is offline, waiting...");
 						}
-						announce::Event::Live => {}
 					},
 					res = reconnect.closed() => return Ok(res?),
 					// Drops the previous subscriber on each new announce.

@@ -26,9 +26,12 @@ this by hand-building a catalog.
   recording format. Refuse a URL carrying userinfo and strip its query so
   credentials never land in a catalog, and let the importer opt out of
   advertising the URL at all. `replay` stays unset: the timelines live on this broadcast.
-- Keep the logic in `moq-cli`; `moq-archive` stays catalog-agnostic. Select the
-  catalog track with the CLI's catalog format as `export archive` does: hang
-  and hang.z are stamped, MSF is refused.
+- The logic lives in `moq-archive` (`moq_archive::Reader`), so any host of
+  the archive behind the root claim republishes and stamps the catalog, not
+  only `moq-cli` (decided 09-29 in [DVR rewind](/quest/m1/archive/dvr.md)).
+  `moq-cli` only passes the URL and the opt-out. Select the catalog track by
+  catalog format as `export archive` does: hang and hang.z are stamped, MSF
+  is refused.
 - The recorded catalog's `archive` entry describes the source's live
   timelines, not the recording's, so replace it with the timelines the reader
   replays rather than trusting the recorded ones.

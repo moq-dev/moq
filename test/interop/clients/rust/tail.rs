@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             let broadcast = consumer.routed_broadcast(&args[3]).await?;
             let options = moq_net::track::Subscription::default()
-                .with_max_age(Duration::from_secs(5))
+                .with_max_delay(Duration::from_secs(5))
                 .with_groups(0..);
             let mut track = broadcast.track("tail")?.subscribe(Some(options)).await?;
             let mut seen = Vec::new();

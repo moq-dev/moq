@@ -108,7 +108,7 @@ impact: new on-demand tracks; existing tracks unchanged.
 
 ## Required
 
-- [Bench coverage](/quest/m2/bench-coverage.md) - its stats producer benchmark is the moq-json snapshot encoder profile the gate needs
+- [Benchmark the moq-stats producer](/quest/m2/stats-producer-bench.md) - the moq-json snapshot encoder profile the gate needs
 
 ## Related
 
