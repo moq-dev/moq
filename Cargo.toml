@@ -160,13 +160,13 @@ moq-noq-proto = { version = "2.0.1", default-features = false }
 # used by moq-video on Linux.
 moq-nvenc = { version = "0.1.2", path = "rs/moq-nvenc" }
 moq-pattern = { version = "0.1.2", path = "rs/moq-pattern" }
-moq-relay = { version = "0.17.1", path = "rs/moq-relay", default-features = false }
-moq-rtc = { version = "0.3.11", path = "rs/moq-rtc" }
+moq-relay = { version = "0.17.2", path = "rs/moq-relay", default-features = false }
+moq-rtc = { version = "0.3.12", path = "rs/moq-rtc" }
 moq-rtmp = { version = "0.3.11", path = "rs/moq-rtmp" }
 moq-sock = { version = "0.2.0", path = "rs/moq-sock" }
 moq-srt = { version = "0.3.11", path = "rs/moq-srt" }
-moq-stats = { version = "0.2.11", path = "rs/moq-stats" }
-moq-tokio = { version = "0.19.22", path = "rs/moq-tokio", default-features = false }
+moq-stats = { version = "0.2.12", path = "rs/moq-stats" }
+moq-tokio = { version = "0.19.23", path = "rs/moq-tokio", default-features = false }
 # Default features off on moq-transcode and moq-video so each workspace consumer
 # chooses native codecs, OpenH264, and rendering explicitly. Both crates still
 # provide working native plus software defaults when depended on directly.

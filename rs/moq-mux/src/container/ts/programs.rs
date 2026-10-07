@@ -6,7 +6,7 @@ use anyhow::Context;
 use mpeg2ts::ts::{Pid, TsPacket};
 
 use super::import::{Framer, PatReader};
-use super::{Ext, Import, Stats, psi};
+use super::{Ext, Import, psi, stats};
 use crate::catalog;
 
 /// Imports every program the first PAT lists, each as its own broadcast on `origin`, with its
@@ -102,8 +102,8 @@ impl Programs {
 	/// Every importer reads the same PAT, and programs sharing a PMT PID read the same PMT
 	/// sections, so a dropped section counts once however many read it. Every importer also
 	/// grades every packet of the multiplex, so each TR 101 290 error counts once too.
-	pub fn stats(&self) -> Stats {
-		let mut stats = Stats::default();
+	pub fn stats(&self) -> stats::Snapshot {
+		let mut stats = stats::Snapshot::default();
 		let mut crc_errors = BTreeMap::<u16, u64>::new();
 		let mut errors = super::health::Errors::default();
 		for program in &self.programs {

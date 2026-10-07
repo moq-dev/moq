@@ -41,7 +41,7 @@ for event, err := range announced.All(ctx) {
     }
     ann, ok := event.(moq.AnnounceEventStart)
     if !ok {
-        continue // AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventLive
+        continue // AnnounceEventUpdate or AnnounceEventEnd
     }
     // Prefix stays origin-relative; Captures reports what each wildcard matched.
     fmt.Printf("captures: %v\n", ann.Announce.Captures)
@@ -92,9 +92,7 @@ serve. A route is a capability, not an inventory. `Announced(options)` combines
 a literal prefix with an optional relative pattern and yields an `AnnounceEvent`:
 `AnnounceEventStart`, `AnnounceEventUpdate`, or `AnnounceEventEnd`
 carrying an `Announce`, whose `Prefix` stays relative to the origin and whose
-`Captures` reports the wildcard matches, or `AnnounceEventLive` once every route
-live at subscribe time has been delivered. Break on `AnnounceEventLive` to list
-what is live and stop.
+`Captures` reports the wildcard matches.
 Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless
 `Hidden: true`.
 

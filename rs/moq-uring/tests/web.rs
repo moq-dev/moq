@@ -284,7 +284,7 @@ fn lite_session_over_webtransport() {
 
 			let (session, driver) = moq_net::Server::new()
 				.with_publisher(&serve_origin)
-				.accept_lite(std::time::Instant::now(), session)
+				.accept_lite(std::time::Instant::now(), moq_uring::transport::Session::new(session))
 				.await
 				.expect("accept_lite");
 			let task_handle = handle.clone();

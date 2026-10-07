@@ -25,7 +25,7 @@ pub trait StreamCodes {
 	///
 	/// A session close is not stream-scoped, so it decodes through
 	/// [`SessionError`](crate::SessionError) exactly as [`Error::from_transport`] does.
-	fn transport_error<E: web_transport_trait::Error>(&self, err: E) -> Error {
+	fn transport_error<E: crate::transport::Error>(&self, err: E) -> Error {
 		if let Some((code, _reason)) = err.session_error() {
 			return crate::SessionError::from_code(code).into();
 		}
@@ -137,7 +137,7 @@ mod tests {
 			stream: Option<u32>,
 		}
 
-		impl web_transport_trait::Error for Failed {
+		impl crate::transport::Error for Failed {
 			fn session_error(&self) -> Option<(u32, String)> {
 				self.session.map(|code| (code, "closed".to_string()))
 			}

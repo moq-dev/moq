@@ -26,9 +26,13 @@ above ([hang](/lib/rs/hang)); relays and CDNs implement only this.
 - **Routes** record the relay hops and a cost, which is what the relay [cluster](/bin/relay/cluster) routes on. A hop of 0 marks the chain anonymous: `Route::is_anonymous()` is true, and that route ranks below every fully identified one. `Route::source()` says where a delivered route entered: `Source::Local`, or `Source::Peer(hop)` when a handle marked `origin::Producer::peer()` announced it. `origin::Consumer::local()` sees only the local ones. A handle marked `origin::Producer::upstream()` announces as a peer, and a consumer taken from it never sees a route another upstream handle announced, so a relay never transits between two upstream links.
 - **Stats** counters per broadcast and session, drained by [`moq-stats`](https://docs.rs/moq-stats).
 
-It runs over anything implementing `web_transport_trait::poll::Session`: noq, the
-browser, iroh, or qmux over TCP, Unix sockets, and
-WebSockets. [`moq-tokio`](https://docs.rs/moq-tokio) wires those up.
+It runs over its own `moq_net::transport::poll::Session`, `SendStream`, and
+`RecvStream` traits. Implement these for a custom transport; session clones keep
+independent operation state, and errors expose session and stream codes separately.
+[`moq-tokio`](https://docs.rs/moq-tokio) adapts native backends, `moq-wasm` adapts
+browser WebTransport, and `moq-uring::transport::Session::new` wraps a poll backend
+without adding thread bounds. `moq-net` does not depend on `web-transport-trait`,
+so backend trait upgrades affect their adapters rather than this public API.
 
 ```bash
 cargo add moq-net moq-tokio
@@ -167,10 +171,8 @@ refused locally. A disjoint route is `Unauthorized`.
 `announce::Announce` with `prefix`, the covered prefix relative to the
 consumer's root; `captures`, what the most specific matching scope member's
 wildcards stood for when the prefix pins them; and `route`, its hops and cost
-(on a retraction, its last values). A single `Event::Live` follows
-the routes live at subscribe time, including every route a connected peer
-was still sending, so a caller listing what is live stops there. The
-consumer is also a `futures::Stream`. A prefix is not a broadcast name;
+(on a retraction, its last values). The consumer is also a
+`futures::Stream`. A prefix is not a broadcast name;
 sessions request each scope member's literal head and filter locally. Routes
 with a `.`-prefixed segment below that head are [hidden](/concept/moq-lite#hidden-broadcasts)
 unless `with_hidden(true)` opts the consumer in. Sessions always ask the peer
