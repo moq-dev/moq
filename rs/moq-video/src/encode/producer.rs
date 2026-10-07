@@ -920,7 +920,7 @@ mod tests {
 				catalog.track_info(hang::catalog::PRIORITY.video).with_max_age(replay),
 			)
 			.unwrap();
-		let consumer = track.subscribe(moq_net::track::Subscription::default().with_max_age(replay));
+		let consumer = track.subscribe(moq_net::track::Subscription::default().with_max_delay(replay));
 
 		let mut config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
 		config.kind = encoder::Kind::Software;
@@ -1204,7 +1204,7 @@ mod tests {
 					.consumer
 					.track(name)
 					.unwrap()
-					.subscribe(moq_net::track::Subscription::default().with_max_age(RETAIN))
+					.subscribe(moq_net::track::Subscription::default().with_max_delay(RETAIN))
 					.await
 					.unwrap();
 				moq_mux::container::Consumer::new(track, container)

@@ -1207,7 +1207,7 @@ pub(crate) trait Expiry: Send + Sync + std::panic::UnwindSafe + std::panic::RefU
 	/// Return whether the group is stale, registering `waiter` for anything that
 	/// could change the answer while the group remains live.
 	/// A logical reader supplies its current budget after the original copy is gone.
-	fn is_expired(&self, max_age: Option<std::time::Duration>, waiter: &kio::Waiter) -> bool;
+	fn is_expired(&self, max_delay: Option<std::time::Duration>, waiter: &kio::Waiter) -> bool;
 
 	/// Keep the reader's budget and cap while following a replacement track's edge.
 	fn for_track(&self, track: &track::Consumer) -> Arc<dyn Expiry>;
@@ -1412,7 +1412,7 @@ impl Consumer {
 		self.cursor.expiry_pending()
 	}
 
-	/// Whether this cursor failed because its subscription max age budget expired.
+	/// Whether this cursor failed because its subscription max delay budget expired.
 	#[cfg(test)]
 	pub(crate) fn latency_expired(&self) -> bool {
 		self.expired

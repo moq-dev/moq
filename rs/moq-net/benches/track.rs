@@ -421,7 +421,7 @@ fn bench_parked_read(c: &mut Criterion) {
 				let broadcast = broadcast::Info::default().produce();
 				let track = broadcast.create_track("bench", None).unwrap();
 				// Long enough that no read expires, so every append measures the same backlog.
-				let mut sub = track.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(3600)));
+				let mut sub = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
 				let mut micros = 0;
 				let mut open = Vec::with_capacity(parked);
 				let queue = Arc::new(std::sync::Mutex::new(Vec::new()));

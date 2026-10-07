@@ -100,7 +100,7 @@ pub struct Info {
 	/// is stale. The newest group is always retained.
 	///
 	/// A retention bound rather than a delivery one, the inverse of an HTTP
-	/// `Cache-Control: max-age`. [`Subscription::max_age`] is clamped to this, since a
+	/// `Cache-Control: max-age`. [`Subscription::max_delay`] is clamped to this, since a
 	/// group can't be waited for longer than it's kept around. Reported in TRACK_INFO so
 	/// relays re-serve with the same window. `None` (the default) sets no limit;
 	/// the origin cache ceiling and pool still apply. `Some(Duration::ZERO)` keeps the live edge.
@@ -111,7 +111,7 @@ pub struct Info {
 	/// [`expiry`](crate::cache::Pool::expiry) window, not to this budget.
 	///
 	/// This is the `Publisher Max Age` on the wire, the publisher-side half of the
-	/// budget [`Subscription::max_age`] sets for a subscriber.
+	/// budget [`Subscription::max_delay`] sets for a subscriber.
 	///
 	/// Encoded as milliseconds in a QUIC varint, so a duration of `2^62` milliseconds
 	/// or more cannot be put on lite-07 or IETF wires. Lite05/06 map values at or above
@@ -1855,7 +1855,7 @@ impl Producer {
 	/// SUBSCRIBE_OK round trip). Pass `None` for [`Subscription::default`].
 	///
 	/// The read cursor starts at the group the subscription named (its floor), or 0.
-	/// [`Subscription::max_age`] is what asks for data: delivery skips everything above
+	/// [`Subscription::max_delay`] is what asks for data: delivery skips everything above
 	/// the floor that the budget convicts, so the default budget of zero delivers only
 	/// the latest group and a larger one reaches back over what it can still use.
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> Subscriber {
@@ -1896,7 +1896,7 @@ impl Producer {
 	/// when there are no live subscribers. Unlike [`Self::subscription`], this
 	/// doesn't wait for a change or advance the change cursor.
 	///
-	/// The aggregate's [`Subscription::max_age`] is clamped to this track's
+	/// The aggregate's [`Subscription::max_delay`] is clamped to this track's
 	/// [`Info::max_age`]: no subscriber can wait for a late group longer than the
 	/// publisher keeps it.
 	pub fn subscription(&self) -> Option<Subscription> {
@@ -2250,7 +2250,7 @@ fn snapshot_subscription(subs: &kio::Shared<Subscriptions>, bound: Option<Durati
 
 /// The read cursor's floor: the group the subscription named, or 0 (no floor).
 ///
-/// A floor is the only thing a start contributes; [`Subscription::max_age`] is what asks
+/// A floor is the only thing a start contributes; [`Subscription::max_delay`] is what asks
 /// for data. Delivery walks everything at or above the floor and skips what the budget
 /// convicts, so a zero budget (the default) delivers only the live edge, a larger one
 /// reaches back over what it can still use, and a floor above the live edge simply waits
@@ -2269,17 +2269,17 @@ fn floor_of(subscription: &Subscription) -> u64 {
 /// budget when it decides a group is stale ([`TrackState::is_stale`]). Those agree because
 /// `min` distributes over the `max` that combines them. `bound` is `None` on a track whose
 /// info isn't known yet (an unaccepted [`Request`]), which imposes no window.
-fn clamp_max_age(mut max_age: Duration, bound: Option<Duration>) -> Duration {
+fn clamp_max_delay(mut max_delay: Duration, bound: Option<Duration>) -> Duration {
 	if let Some(bound) = bound {
-		max_age = max_age.min(bound);
+		max_delay = max_delay.min(bound);
 	}
-	max_age
+	max_delay
 }
 
-/// Clamp the aggregate's max age budget to the publisher's window; see [`clamp_max_age`].
+/// Clamp the aggregate's max delay budget to the publisher's window; see [`clamp_max_delay`].
 fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Option<Subscription> {
 	let mut combined = combined?;
-	combined.max_age = clamp_max_age(combined.max_age, bound);
+	combined.max_delay = clamp_max_delay(combined.max_delay, bound);
 	Some(combined)
 }
 
@@ -2582,7 +2582,7 @@ impl Consumer {
 	/// [`Error::Dropped`]) if it is already closed.
 	///
 	/// The read cursor starts at the group the subscription named (its floor), or 0.
-	/// [`Subscription::max_age`] is what asks for data: delivery skips everything above
+	/// [`Subscription::max_delay`] is what asks for data: delivery skips everything above
 	/// the floor that the budget convicts, so the default budget of zero delivers only
 	/// the latest group and a larger one reaches back over what it can still use.
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Pending<Subscribing> {
@@ -3234,7 +3234,7 @@ impl kio::Task for Fetching {
 ///
 /// The one place they meet is where the cursor comes from. A new subscriber's cursor is
 /// floored at the group its own subscription named (or 0), and its
-/// [`Subscription::max_age`] decides what above the floor is worth delivering. Every later
+/// [`Subscription::max_delay`] decides what above the floor is worth delivering. Every later
 /// move is the caller's.
 pub struct Subscriber {
 	name: Arc<str>,
@@ -3302,14 +3302,14 @@ impl group::Expiry for GroupExpiry {
 		})
 	}
 
-	fn is_expired(&self, max_age: Option<Duration>, waiter: &kio::Waiter) -> bool {
-		let max_age = max_age.unwrap_or_else(|| {
-			let mut max_age = Duration::default();
+	fn is_expired(&self, max_delay: Option<Duration>, waiter: &kio::Waiter) -> bool {
+		let max_delay = max_delay.unwrap_or_else(|| {
+			let mut max_delay = Duration::default();
 			let _ = self.subscription.poll(waiter, |subscription| {
-				max_age = subscription.max_age;
+				max_delay = subscription.max_delay;
 				Poll::<()>::Pending
 			});
-			max_age
+			max_delay
 		});
 
 		let mut cap = None;
@@ -3319,7 +3319,7 @@ impl group::Expiry for GroupExpiry {
 		});
 
 		let state = self.state.read();
-		let budget = clamp_max_age(max_age, state.max_age_bound());
+		let budget = clamp_max_delay(max_delay, state.max_age_bound());
 		let wakes = state.cache.wakes();
 		// Park on exactly what can move the verdict: a group landing above this one, the
 		// successor's first frame or abort, and the edge crossing the deadline. Parking on
@@ -3480,14 +3480,14 @@ impl Cursor {
 	/// [`Poll::Ready`]; the track ending surfaces as the error the caller was going to
 	/// get anyway.
 	fn poll_drift(&self, cap: Option<u64>, waiter: &kio::Waiter) -> Poll<Result<Drift>> {
-		let mut max_age = Duration::default();
+		let mut max_delay = Duration::default();
 		let _ = self.subscription.poll(waiter, |subscription| {
-			max_age = subscription.max_age;
+			max_delay = subscription.max_delay;
 			Poll::<()>::Pending
 		});
 		self.poll(waiter, |state| {
 			Poll::Ready(Ok(Drift {
-				budget: clamp_max_age(max_age, state.max_age_bound()),
+				budget: clamp_max_delay(max_delay, state.max_age_bound()),
 				edge: state.drift_edge(cap),
 			}))
 		})
@@ -3662,7 +3662,7 @@ impl Cursor {
 /// A cloneable handle to a subscriber's delivery preferences.
 ///
 /// This updates the same subscription as the owning [`Subscriber`] without
-/// borrowing its read cursor, so callers can change delivery priority, the max age
+/// borrowing its read cursor, so callers can change delivery priority, the max delay
 /// budget, or group bounds while another task is waiting for groups.
 #[derive(Clone)]
 pub struct Control {
@@ -3740,7 +3740,7 @@ impl Subscriber {
 	/// [`Self::ordered`] if you only want groups whose sequence number is higher than any
 	/// previously returned.
 	///
-	/// Groups are semi-reliable, and the [`Subscription::max_age`] budget is the other
+	/// Groups are semi-reliable, and the [`Subscription::max_delay`] budget is the other
 	/// thing (alongside eviction and a moving start) that decides which of them arrive:
 	/// one that has drifted further behind the live edge than the budget tolerates is
 	/// skipped rather than handed over, so a single poll walks off a whole backlog. The
@@ -4028,7 +4028,7 @@ impl Subscriber {
 ///
 /// # Age and skipping
 ///
-/// [`Subscription::max_age`] applies as this cursor reads, exactly as it does on the
+/// [`Subscription::max_delay`] applies as this cursor reads, exactly as it does on the
 /// arrival cursor: a group is skipped once its *reach*, where its immediate successor
 /// begins, is that far behind the newest frame on the track. Nothing weaker convicts it,
 /// because the reach is the only proof that *every* frame it could still hold is past the
@@ -4422,7 +4422,7 @@ mod test {
 
 	/// A bounded replay window for tests whose subject requires every buffered group.
 	fn replay() -> Subscription {
-		Subscription::default().with_max_age(Duration::from_secs(30))
+		Subscription::default().with_max_delay(Duration::from_secs(30))
 	}
 
 	/// Helper: count live cached groups in state.
@@ -5335,26 +5335,26 @@ mod test {
 	}
 
 	#[test]
-	fn max_age_clamped_to_cache() {
+	fn max_delay_clamped_to_cache() {
 		let producer = track_producer("test", Info::default().with_max_age(Duration::from_secs(2)));
 
-		// A max age budget beyond the cache is capped in the aggregate; a group can't be
+		// A max delay budget beyond the cache is capped in the aggregate; a group can't be
 		// waited for longer than the publisher keeps it. The subscriber's own preference
 		// is stored verbatim, so what it asked for stays readable.
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(10)));
-		assert_eq!(subscriber.subscription().max_age, Duration::from_secs(10));
-		assert_eq!(producer.subscription().unwrap().max_age, Duration::from_secs(2));
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(10)));
+		assert_eq!(subscriber.subscription().max_delay, Duration::from_secs(10));
+		assert_eq!(producer.subscription().unwrap().max_delay, Duration::from_secs(2));
 
 		// A budget within the cache is left alone, and ZERO (skip immediately) stays ZERO.
 		subscriber
-			.update(Subscription::default().with_max_age(Duration::from_millis(500)))
+			.update(Subscription::default().with_max_delay(Duration::from_millis(500)))
 			.unwrap();
-		assert_eq!(producer.subscription().unwrap().max_age, Duration::from_millis(500));
+		assert_eq!(producer.subscription().unwrap().max_delay, Duration::from_millis(500));
 
 		subscriber
-			.update(Subscription::default().with_max_age(Duration::ZERO))
+			.update(Subscription::default().with_max_delay(Duration::ZERO))
 			.unwrap();
-		assert_eq!(producer.subscription().unwrap().max_age, Duration::ZERO);
+		assert_eq!(producer.subscription().unwrap().max_delay, Duration::ZERO);
 	}
 
 	/// Mint a track under an origin whose retention ceiling is `cap`, so the
@@ -5424,32 +5424,32 @@ mod test {
 	}
 
 	#[test]
-	fn max_age_clamped_via_every_update_path() {
+	fn max_delay_clamped_via_every_update_path() {
 		let producer = track_producer("test", Info::default().with_max_age(Duration::from_secs(2)));
-		let over = Subscription::default().with_max_age(Duration::from_secs(10));
+		let over = Subscription::default().with_max_delay(Duration::from_secs(10));
 
 		// The clamp lives in the aggregation, so it applies no matter which entry point
 		// wrote the raw preference. Previously only `Subscriber::update` clamped.
 		let mut subscriber = producer.subscribe(over.clone());
-		assert_eq!(producer.subscription().unwrap().max_age, Duration::from_secs(2));
+		assert_eq!(producer.subscription().unwrap().max_delay, Duration::from_secs(2));
 
 		subscriber.control().update(over.clone()).unwrap();
-		assert_eq!(producer.subscription().unwrap().max_age, Duration::from_secs(2));
+		assert_eq!(producer.subscription().unwrap().max_delay, Duration::from_secs(2));
 
 		subscriber.update(over).unwrap();
-		assert_eq!(producer.subscription().unwrap().max_age, Duration::from_secs(2));
+		assert_eq!(producer.subscription().unwrap().max_delay, Duration::from_secs(2));
 	}
 
 	#[test]
-	fn max_age_aggregate_clamps_across_subscribers() {
+	fn max_delay_aggregate_clamps_across_subscribers() {
 		let producer = track_producer("test", Info::default().with_max_age(Duration::from_secs(2)));
 
 		// The aggregate takes the max, then clamps once. Equivalent to clamping each
 		// subscriber first, since `min` distributes over `max`.
-		let _a = producer.subscribe(Subscription::default().with_max_age(Duration::from_millis(500)));
-		let _b = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(10)));
+		let _a = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(500)));
+		let _b = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(10)));
 
-		assert_eq!(producer.subscription().unwrap().max_age, Duration::from_secs(2));
+		assert_eq!(producer.subscription().unwrap().max_delay, Duration::from_secs(2));
 	}
 
 	#[test]
@@ -5549,7 +5549,7 @@ mod test {
 		for second in 0..5 {
 			append_at(&mut producer, second * 1000);
 		}
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(1)));
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(1)));
 		assert_eq!(
 			subscriber
 				.recv_group()
@@ -5577,7 +5577,7 @@ mod test {
 		edge.write_frame(Timestamp::from_millis(2000).unwrap(), bytes::Bytes::from_static(b"a"))
 			.unwrap();
 
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(2)));
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(2)));
 		assert_eq!(
 			subscriber
 				.recv_group()
@@ -5607,7 +5607,7 @@ mod test {
 		// edge (2s, 3s, 4s) and drops the two below it. Group 1 reaches exactly 2s behind
 		// the edge, and the reach bound is exclusive, so every frame it could hold is
 		// already past the budget.
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(2)));
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(2)));
 		assert_eq!(drain(&mut subscriber), vec![2, 3, 4]);
 	}
 
@@ -5627,7 +5627,7 @@ mod test {
 		// edge, so the same join is handed the head of what it can still use. One bound
 		// decides both what is sent and what is expired, so a subscriber is never sent
 		// history it would discard on arrival.
-		let budget = Subscription::default().with_max_age(Duration::from_secs(2));
+		let budget = Subscription::default().with_max_delay(Duration::from_secs(2));
 		let mut subscriber = producer.subscribe(budget);
 		assert_eq!(drain(&mut subscriber), vec![2, 3, 4]);
 	}
@@ -5649,14 +5649,14 @@ mod test {
 		// A budget reaching further back than the floor is cut off at it.
 		let floored = Subscription::default()
 			.with_start(Position::group(3))
-			.with_max_age(Duration::from_secs(10));
+			.with_max_delay(Duration::from_secs(10));
 		let mut subscriber = producer.subscribe(floored);
 		assert_eq!(drain(&mut subscriber), vec![3, 4]);
 
 		// A floor below what the budget admits changes nothing.
 		let slack = Subscription::default()
 			.with_start(Position::group(1))
-			.with_max_age(Duration::from_secs(2));
+			.with_max_delay(Duration::from_secs(2));
 		let mut subscriber = producer.subscribe(slack);
 		assert_eq!(drain(&mut subscriber), vec![2, 3, 4]);
 	}
@@ -5672,7 +5672,7 @@ mod test {
 		// cursor sits at the floor rather than sliding back to what is cached.
 		let resumed = Subscription::default()
 			.with_start(Position::group(7))
-			.with_max_age(Duration::from_secs(10));
+			.with_max_delay(Duration::from_secs(10));
 		let mut subscriber = producer.subscribe(resumed);
 		assert_eq!(drain(&mut subscriber), Vec::<u64>::new());
 		append_at(&mut producer, 3000); // sequence 3: still below the floor
@@ -5694,7 +5694,7 @@ mod test {
 			group.finish().unwrap();
 		}
 
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(5)));
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(5)));
 		assert_eq!(drain(&mut subscriber), vec![5, 6, 7]);
 
 		// Arriving below everything already delivered is not what makes content stale:
@@ -5717,7 +5717,7 @@ mod test {
 			append_at(&mut producer, second * 1000);
 		}
 
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_millis(1500)));
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(1500)));
 		assert_eq!(drain(&mut subscriber), vec![1, 2, 3]);
 	}
 
@@ -5798,7 +5798,7 @@ mod test {
 	#[moq_net_sim::test]
 	async fn a_handed_out_group_wakes_when_a_newer_group_gets_its_first_timestamp() {
 		let mut producer = track_producer("test", None);
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_millis(500)));
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(500)));
 		let mut old = producer.append_group().unwrap();
 		old.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"old"))
 			.unwrap();
@@ -5846,7 +5846,7 @@ mod test {
 		const FRAME: u64 = 2500; // micros, one Opus frame per group
 		const PARKED: u64 = 64;
 		let producer = track_producer("test", None);
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_millis(200)));
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(200)));
 		// Left open, so every read parks instead of ending.
 		let _open: Vec<_> = (0..PARKED)
 			.map(|i| {
@@ -5919,7 +5919,7 @@ mod test {
 	#[test]
 	fn a_parked_read_wakes_only_once_the_edge_reaches_its_deadline() {
 		let mut producer = track_producer("test", None);
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(10)));
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(10)));
 		let mut head = producer.append_group().unwrap();
 		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
 			.unwrap();
@@ -5973,7 +5973,7 @@ mod test {
 	#[test]
 	fn a_parked_read_watches_the_replacement_for_an_aborted_successor() {
 		let mut producer = track_producer("test", None);
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_millis(500)));
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(500)));
 		let mut head = producer.append_group().unwrap();
 		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
 			.unwrap();
@@ -6105,7 +6105,7 @@ mod test {
 	#[moq_net_sim::test]
 	async fn a_budget_is_measured_from_the_readers_position() {
 		let producer = track_producer("test", None);
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(1)));
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(1)));
 
 		let mut open = producer.append_group().unwrap();
 		open.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"key"))
@@ -6236,7 +6236,7 @@ mod test {
 
 		// Group 0 reaches 1s, a full second behind the 2s edge, so the clamped 500ms
 		// budget drops it. An unclamped ten seconds would have kept it.
-		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(10)));
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(10)));
 		assert_eq!(drain(&mut subscriber), vec![1, 2]);
 	}
 
@@ -6256,7 +6256,7 @@ mod test {
 		let mut patient = producer.subscribe(
 			Subscription::default()
 				.with_start(Position::group(0))
-				.with_max_age(Duration::from_secs(10)),
+				.with_max_delay(Duration::from_secs(10)),
 		);
 		patient.start_at(0);
 		assert_eq!(drain(&mut patient), vec![0, 1, 2, 3]);
@@ -6279,7 +6279,7 @@ mod test {
 		append_at(&mut producer, 2000);
 
 		// A budget far shorter than the group's own span still keeps it.
-		let mut sub = producer.subscribe(Subscription::default().with_max_age(Duration::from_millis(500)));
+		let mut sub = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(500)));
 		assert_eq!(drain(&mut sub), vec![0, 1]);
 	}
 
@@ -6303,7 +6303,7 @@ mod test {
 		append_at(&mut producer, 3000);
 		append_at(&mut producer, 4000);
 
-		let mut sub = producer.subscribe(Subscription::default().with_max_age(Duration::from_millis(500)));
+		let mut sub = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(500)));
 		assert_eq!(drain(&mut sub), vec![1, 2]);
 	}
 
@@ -6343,7 +6343,7 @@ mod test {
 		// Group 0 reaches 10s, so nothing here proves it is past a 500ms budget: it could
 		// hold frames through nearly 10s. A minimum over later groups would put its reach
 		// at 1s and drop it.
-		let mut sub = producer.subscribe(Subscription::default().with_max_age(Duration::from_millis(500)));
+		let mut sub = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(500)));
 		assert!(
 			drain(&mut sub).contains(&0),
 			"group 0 is bounded by its successor at 10s, not by a later rewind"
@@ -6420,7 +6420,7 @@ mod test {
 		// Group 0 reaches 1s, a full 2s behind the 3s edge, so it is gone. Group 1
 		// reaches 2s and could still present up to it: inside a 1.5s budget.
 		let mut subscriber = producer
-			.subscribe(Subscription::default().with_max_age(Duration::from_millis(1500)))
+			.subscribe(Subscription::default().with_max_delay(Duration::from_millis(1500)))
 			.ordered();
 		assert_eq!(drain_ordered(&mut subscriber), vec![1, 2, 3]);
 
