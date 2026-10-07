@@ -43,8 +43,8 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
 - **Prefix tracks** (decided 2026-10-05, replacing per-broadcast tracks).
   Routing is by prefix, so a reader requests any prefix of a member path (so
   its depth is bounded by `Path::MAX_PARTS` less the group's own segments) and
-  gets one track: the prefix's rollup plus a one-level map of each direct
-  child's rollup (a channel's broadcasts).
+  gets one track: the prefix's rollup, its self counters, and a one-level
+  map of each direct child's rollup (a channel's broadcasts).
   Nothing is produced for a prefix no one holds. The relay's `--stats-depth`
   only places the group broadcasts; requests are not capped by it.
 - Flow counters (bytes, frames, groups, fetches) count from zero when the
@@ -64,6 +64,17 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
   just-ended children, not every child the prefix has ever seen. Decide
   while implementing whether a map with hundreds of children needs a cap or
   paging.
+- **Self counters** (decided 2026-10-07, planned from
+  moq-dev/moq.pro#2165). A prefix track also carries cumulative counters for
+  members at exactly the prefix, not its descendants, so a reader can show a
+  broadcast that also has nested broadcasts. A reader can't derive them as the
+  rollup less the current children: a pruned child's tail stays in the
+  rollup, so the difference jumps when the child leaves the map (self 10 and
+  a child at 100 reads 110 less 100, then 110 less nothing) and reads as a
+  rate spike. They follow the rollup's rules: held from zero, pairs seeded,
+  merged by the aggregator. Test a nested broadcast ending and leaving the
+  map while the parent prefix stays held: the parent's self counters stay
+  flat and its rollup keeps the child's tail.
 - The aggregator merges a prefix track across nodes with a baseline per
   upstream (node, epoch) hold, and treats a decrease as that upstream's
   reset: a node restart, a new group epoch, or the aggregator re-holding the
