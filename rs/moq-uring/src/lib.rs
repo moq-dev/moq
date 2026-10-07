@@ -26,7 +26,8 @@
 //!
 //! [`metrics::Metrics`] is how the worker's own health leaves its thread:
 //! relaxed counters for the buffer pools, the batching mechanisms, the ring,
-//! and the scheduler, snapshotted from anywhere. Hand one to
+//! the scheduler, and time blocked on a `kio` lock, snapshotted from anywhere.
+//! Hand one to
 //! [`Config::metrics`] to keep a copy where the worker was spawned, or read the
 //! worker's own through [`Handle::metrics`].
 //!

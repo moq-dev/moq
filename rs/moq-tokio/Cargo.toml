@@ -55,6 +55,7 @@ futures = "0.3"
 hex = { workspace = true }
 hmac = { workspace = true, optional = true }
 humantime = "2.3"
+kio = { workspace = true }
 mdns-sd = { workspace = true, optional = true }
 
 moq-net = { workspace = true }

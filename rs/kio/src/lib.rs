@@ -39,7 +39,7 @@ mod loom;
 mod tests;
 
 pub use consumer::Consumer;
-pub use lock::{Lock, LockGuard};
+pub use lock::{Lock, LockGuard, LockSite, LockWait, LockWaitBind, lock_site_overflow, lock_sites};
 pub use pending::Pending;
 pub use producer::{Mut, Producer, Ref, Unused};
 pub use queue::{PushError, Queue};

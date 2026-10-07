@@ -308,6 +308,11 @@ impl Relay {
 			Some(uring) => internal.with_uring(uring.metrics()),
 			None => internal,
 		};
+		#[cfg(feature = "_quic")]
+		let internal = match workers.as_ref() {
+			Some(workers) => internal.with_workers(workers.lock_waits()),
+			None => internal,
+		};
 
 		// `kind` so the QUIC line is distinguishable from the web listeners', which
 		// log the same way from `web::Web::serve` and may sit on a different port.

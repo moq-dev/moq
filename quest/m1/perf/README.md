@@ -52,15 +52,16 @@ ones moved out (3129, 3200, 3202, the open contract, and cache shard to m2;
 arguments (3205), and the priority `set_track` wakes were dropped. Egress
 requeue folded into Run to quiescence; egress keep-alive and owned decode
 copies folded into Group cost. The benchmark noise estimate and the noq
-re-profile come first, since every quest here accepts "within noise". Lock
-wait and One enter per turn rank next: they produce the numbers that decide
-the rest.
+re-profile come first, since every quest here accepts "within noise". One
+enter per turn ranks next: it produces the numbers that decide the rest.
+Lock wait was measured above 1% of worker CPU at 4 and 16 workers. The time
+is in `Consumer::poll`, `ConsumerWeak::poll`, and `Consumer::read`. The
+follow-up is not filed here.
 
 ## Required
 
 - [Performance comparisons](/quest/m1/performance-comparisons.md) - the noise estimate every "within noise" verdict here depends on
 - [Performance profiles](/quest/m1/performance-profiles.md) - the reproducible noq profile the quests below re-measure on
-- [Lock wait](/quest/m1/perf/lock-wait.md) - each worker reports time blocked on cross-worker locks, deciding whether the shared model needs work
 - [One enter per turn](/quest/m1/perf/uring-one-enter.md) - a parking turn pays one io_uring_enter, submits flush deferred completions, and SQEs per enter is a counter
 - [Group cost](/quest/m1/perf/group-cost.md) - count and cut the allocations and time spent relaying one small group to one viewer
 - [Run to quiescence](/quest/m1/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule

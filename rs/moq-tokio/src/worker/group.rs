@@ -5,7 +5,7 @@ use std::sync::{
 	atomic::{AtomicBool, Ordering},
 };
 
-use super::Config;
+use super::{Config, LockWait};
 use crate::{Error, Result, Server, abort::AbortOnDrop, listen::Socket as ShardSocket, server::SocketRetainer};
 
 /// A bound group of QUIC workers sharing one port.
@@ -161,6 +161,15 @@ impl Workers {
 	/// Always false: a bound group has at least one member.
 	pub fn is_empty(&self) -> bool {
 		self.workers.is_empty()
+	}
+
+	/// Each worker's lock-wait counters, in shard order.
+	///
+	/// Clone them out before [`split`](Self::split). The threads update the
+	/// same counters for as long as they run, including before the first
+	/// acquire, so a scrape sees zeros rather than a missing series.
+	pub fn lock_waits(&self) -> Vec<LockWait> {
+		self.workers.iter().map(|worker| worker.lock_wait.clone()).collect()
 	}
 
 	/// Hand the bound workers to an owning group that serves them together.
@@ -635,6 +644,7 @@ struct Worker {
 	thread: Option<std::thread::JoinHandle<()>>,
 	stop: Option<tokio::sync::oneshot::Sender<()>>,
 	shared: Arc<Shared>,
+	lock_wait: LockWait,
 }
 
 impl Worker {
@@ -650,11 +660,16 @@ impl Worker {
 		let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
 		let (spawn_tx, spawn_rx) = tokio::sync::mpsc::unbounded_channel();
 
+		let lock_wait = LockWait::default();
+		let thread_wait = lock_wait.clone();
 		let thread = std::thread::Builder::new()
 			.name(format!("moq-quic-{index}"))
 			.spawn({
 				let shared = shared.clone();
-				move || run(member, core, server, ready_tx, stop_rx, spawn_rx, shared)
+				move || {
+					let _lock_wait = thread_wait.bind();
+					run(member, core, server, ready_tx, stop_rx, spawn_rx, shared);
+				}
 			})
 			.map_err(|err| Error::WorkerStart {
 				index,
@@ -694,6 +709,7 @@ impl Worker {
 			thread: Some(thread),
 			stop: Some(stop_tx),
 			shared,
+			lock_wait,
 		})
 	}
 }

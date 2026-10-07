@@ -97,7 +97,19 @@ With `--runtime-io-uring`, each QUIC worker thread also reports its own
 `moq_relay_uring_*` counters under a `worker` label: datagrams and syscalls
 (the ratios are the GRO/GSO batching and the syscall amortization the runtime
 exists for), buffer-pool backpressure (`rx_enobufs`, `rx_exhausted`,
-`tx_stalls`), cross-thread wakes, and timer churn. Every worker reports from
+`tx_stalls`), cross-thread wakes, and timer churn. Beside `enters`,
+`moq_relay_uring_lock_wait_seconds_total` is how long that worker blocked
+acquiring a `kio` lock another thread held, and
+`moq_relay_uring_lock_contended_total` is how many of those acquires blocked.
+With `--runtime-workers` and io_uring off, the same pair is
+`moq_relay_worker_lock_wait_seconds_total` and
+`moq_relay_worker_lock_contended_total`. The uncontended acquire does not touch
+them, and they stay on in release builds. A contended acquire also adds its
+call site to `moq_relay_lock_site_wait_seconds_total` and
+`moq_relay_lock_site_contended_total` (`file`, `line`, and `column`), summed
+across every thread. Generic instantiations of the same line are one row.
+That table is fixed at 128 sites;
+`moq_relay_lock_site_overflow_total` counts acquires that did not fit. Every worker reports from
 the moment the port is bound, so a dead one shows stuck zeros rather than
 disappearing. These describe the process, not the traffic, so they never appear
 on the `.stats` broadcast.

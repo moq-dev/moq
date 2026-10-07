@@ -90,6 +90,9 @@ pub struct Worker {
 	shared: Rc<Shared>,
 	tasks: kio::Tasks<Task>,
 	park: kio::Park,
+	/// Unbinds this thread's [`kio::LockWait`] after teardown, so a lock taken
+	/// while the ring is still draining is still this worker's.
+	lock_wait: kio::LockWaitBind,
 	/// Reused while copying CQEs out of the ring before dispatch.
 	cqes: Vec<Cqe>,
 	/// Whether the park-word `FUTEX_WAIT` SQE is in flight.
@@ -134,6 +137,7 @@ impl Worker {
 			)));
 		}
 
+		let lock_wait = metrics.lock_wait.bind();
 		Ok(Self {
 			shared: Rc::new(Shared {
 				ring: RefCell::new(ring),
@@ -150,6 +154,7 @@ impl Worker {
 			park: kio::Park::default(),
 			cqes: Vec::new(),
 			futex_armed: false,
+			lock_wait,
 		})
 	}
 
@@ -444,6 +449,10 @@ impl Drop for Worker {
 		// Handles may outlive us; everything they try from here on fails
 		// instead of pending on a loop that will never run again.
 		self.shared.stopped.set(true);
+		// The bind stays installed through the drain. It unbinds when the
+		// field drops, after this returns, so locks taken while cancelling
+		// still belong to this worker.
+		let _bind = &self.lock_wait;
 		// One deadline bounds cancellation staging and draining together.
 		let deadline = Instant::now() + TEARDOWN_TIMEOUT;
 		// The kernel may still write into provided buffers and read send
@@ -687,6 +696,25 @@ mod tests {
 			}
 			Err(err) => panic!("worker setup failed: {err}"),
 		}
+	}
+
+	/// The worker thread's uncontended acquires stay off the meter. Contention
+	/// is what [`kio::LockWait`] exists to count.
+	#[test]
+	fn uncontended_lock_is_not_lock_wait() {
+		let metrics = Metrics::default();
+		let config = Config {
+			metrics: metrics.clone(),
+			..Default::default()
+		};
+		let Some(_worker) = worker_with(config) else { return };
+		let lock = kio::Lock::new(());
+		{
+			let _guard = lock.lock();
+		}
+		let snap = metrics.snapshot();
+		assert_eq!(snap.lock_contended, 0);
+		assert_eq!(snap.lock_wait, Duration::ZERO);
 	}
 
 	#[test]

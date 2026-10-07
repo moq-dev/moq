@@ -1,5 +1,5 @@
 //! Per-worker counters: buffer-pool health, batch effectiveness, ring traffic,
-//! and scheduling.
+//! scheduling, and time blocked on a [`kio::Lock`].
 //!
 //! A worker is a thread that never yields to anything an ops surface can see,
 //! so these are how its health leaves the thread. Every write is a relaxed
@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 /// One cumulative counter.
 #[derive(Default)]
@@ -41,6 +42,9 @@ pub(crate) struct Counters {
 	pub submissions: Counter,
 	pub completions: Counter,
 	pub enters: Counter,
+	/// Blocking [`kio::Lock`] acquires on this worker's thread. The worker binds
+	/// it; the fast path never touches it.
+	pub lock_wait: kio::LockWait,
 	pub parks: Counter,
 	pub wakes: Counter,
 	pub timers_armed: Counter,
@@ -68,6 +72,7 @@ impl Metrics {
 
 	/// Read every counter.
 	pub fn snapshot(&self) -> Snapshot {
+		let (lock_wait, lock_contended) = self.0.lock_wait.snapshot();
 		Snapshot {
 			rx_datagrams: self.0.rx_datagrams.get(),
 			rx_receives: self.0.rx_receives.get(),
@@ -79,6 +84,8 @@ impl Metrics {
 			submissions: self.0.submissions.get(),
 			completions: self.0.completions.get(),
 			enters: self.0.enters.get(),
+			lock_wait,
+			lock_contended,
 			parks: self.0.parks.get(),
 			wakes: self.0.wakes.get(),
 			timers_armed: self.0.timers_armed.get(),
@@ -129,6 +136,10 @@ pub struct Snapshot {
 	/// `io_uring_enter` calls. Datagrams over this is the syscall amortization
 	/// the runtime exists for.
 	pub enters: u64,
+	/// Time blocked acquiring a kio lock another thread held.
+	pub lock_wait: Duration,
+	/// How many of those acquires blocked.
+	pub lock_contended: u64,
 	/// Times the worker parked in `io_uring_enter` with nothing left to poll.
 	pub parks: u64,
 	/// `futex` wakes another thread had to issue because the worker was parked.

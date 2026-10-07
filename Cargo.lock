@@ -4947,6 +4947,7 @@ dependencies = [
  "hmac 0.13.0",
  "humantime",
  "jni 0.22.4",
+ "kio 0.6.2",
  "libc",
  "mdns-sd",
  "moq-net",

@@ -45,6 +45,60 @@ pub struct Config {
 	pub pin: bool,
 }
 
+/// How long one QUIC worker thread has blocked on a [`kio::Lock`].
+///
+/// The thread binds it for its whole life. Clones share the counters, which
+/// is how a scrape reads them from off the thread.
+#[derive(Clone, Debug, Default)]
+pub struct LockWait {
+	inner: kio::LockWait,
+}
+
+impl LockWait {
+	/// Time blocked, and how many acquires blocked.
+	pub fn snapshot(&self) -> (std::time::Duration, u64) {
+		self.inner.snapshot()
+	}
+
+	pub(crate) fn bind(&self) -> kio::LockWaitBind {
+		self.inner.bind()
+	}
+}
+
+/// One contended `kio` lock call site, summed across every thread.
+#[derive(Clone, Copy, Debug)]
+pub struct LockSite {
+	/// Source file of the `lock` call.
+	pub file: &'static str,
+	/// Line of the `lock` call.
+	pub line: u32,
+	/// Column of the `lock` call.
+	pub column: u32,
+	/// Time blocked at this call site.
+	pub wait: std::time::Duration,
+	/// How many acquires at this call site blocked.
+	pub contended: u64,
+}
+
+/// Contended acquires since process start, hottest call site first.
+pub fn lock_sites() -> Vec<LockSite> {
+	kio::lock_sites()
+		.into_iter()
+		.map(|site| LockSite {
+			file: site.file,
+			line: site.line,
+			column: site.column,
+			wait: site.wait,
+			contended: site.contended,
+		})
+		.collect()
+}
+
+/// Contended acquires that missed the fixed site table.
+pub fn lock_site_overflow() -> u64 {
+	kio::lock_site_overflow()
+}
+
 impl Config {
 	/// `count` workers, pinned.
 	pub fn new(count: u16) -> Self {

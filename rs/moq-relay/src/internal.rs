@@ -9,7 +9,8 @@
 //! - `/metrics` - this node's own traffic counters as Prometheus text
 //!   exposition, plus the accept-loop health of its TCP listeners
 //!   ([`with_listeners`](Internal::with_listeners)) and the per-worker health of
-//!   its io_uring runtime ([`with_uring`](Internal::with_uring)), and the
+//!   its io_uring runtime ([`with_uring`](Internal::with_uring)), the lock-wait
+//!   of its tokio QUIC workers ([`with_workers`](Internal::with_workers)), and the
 //!   progress of a shutdown drain ([`with_shutdown`](Internal::with_shutdown)). A distinct plane
 //!   from both the customer `web` surface and the MoQ `.stats` broadcast: the same
 //!   atomics, but a different transport and audience (an ops scraper, not a
@@ -90,6 +91,7 @@ pub struct Internal {
 	health: moq_tokio::accept::Health,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
+	workers: Vec<moq_tokio::worker::LockWait>,
 	shutdown: Option<crate::shutdown::Observer>,
 	listener: Option<net::TcpListener>,
 	addr: Option<net::SocketAddr>,
@@ -103,6 +105,7 @@ struct InternalState {
 	sessions: crate::session::Registry,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
+	workers: Vec<moq_tokio::worker::LockWait>,
 	shutdown: Option<crate::shutdown::Observer>,
 }
 
@@ -129,6 +132,7 @@ impl Internal {
 			health,
 			listeners,
 			uring: Vec::new(),
+			workers: Vec::new(),
 			shutdown: None,
 			listener: None,
 			addr: None,
@@ -202,6 +206,17 @@ impl Internal {
 		self
 	}
 
+	/// Report tokio QUIC workers' lock-wait counters at `/metrics`.
+	///
+	/// Takes the meters the tokio worker group hands out at bind time, in shard
+	/// order: the position in the iterator is the `worker` label. The same kio
+	/// lock the io_uring workers time. Register them before serving, so a worker
+	/// that has not blocked yet still publishes a zero rather than no series.
+	pub fn with_workers(mut self, workers: impl IntoIterator<Item = moq_tokio::worker::LockWait>) -> Self {
+		self.workers.extend(workers);
+		self
+	}
+
 	/// Report the sessions a shutdown drain is still waiting on at `/metrics`.
 	pub fn with_shutdown(mut self, shutdown: crate::shutdown::Observer) -> Self {
 		self.shutdown = Some(shutdown);
@@ -244,6 +259,7 @@ impl Internal {
 				sessions: self.sessions.clone(),
 				listeners: self.listeners.clone(),
 				uring: self.uring.clone(),
+				workers: self.workers.clone(),
 				shutdown: self.shutdown.clone(),
 			})
 	}
@@ -304,7 +320,7 @@ async fn serve_health() -> Response {
 /// current cumulative snapshot; a downstream scraper derives rates and live
 /// counts (`open - closed`).
 async fn serve_metrics(State(state): State<InternalState>) -> Response {
-	let mut body = render_metrics(&state.stats.snapshot(), &state.listeners, &state.uring);
+	let mut body = render_metrics(&state.stats.snapshot(), &state.listeners, &state.uring, &state.workers);
 	if let Some(shutdown) = &state.shutdown {
 		render_drain(&mut body, shutdown.tally());
 	}
@@ -360,6 +376,7 @@ fn render_metrics(
 	snap: &moq_net::stats::Snapshot,
 	listeners: &[moq_tokio::accept::Health],
 	uring: &[UringWorker],
+	workers: &[moq_tokio::worker::LockWait],
 ) -> String {
 	use std::fmt::Write as _;
 
@@ -482,6 +499,12 @@ fn render_metrics(
 
 	render_accepts(&mut out, listeners);
 	render_uring(&mut out, uring);
+	render_worker_locks(&mut out, workers);
+	render_lock_sites(
+		&mut out,
+		&moq_tokio::worker::lock_sites(),
+		moq_tokio::worker::lock_site_overflow(),
+	);
 
 	out
 }
@@ -654,6 +677,11 @@ fn render_uring(out: &mut String, workers: &[UringWorker]) {
 		|snap| snap.enters,
 	);
 	counter(
+		"moq_relay_uring_lock_contended_total",
+		"Times an io_uring worker blocked acquiring a kio lock another thread held.",
+		|snap| snap.lock_contended,
+	);
+	counter(
 		"moq_relay_uring_parks_total",
 		"Times a worker parked in io_uring_enter with nothing left to poll.",
 		|snap| snap.parks,
@@ -684,12 +712,124 @@ fn render_uring(out: &mut String, workers: &[UringWorker]) {
 		"Timers currently in a worker's heap.",
 		|snap| snap.timers_active(),
 	);
+	// Seconds, not a count, so it cannot go through `counter`. After the
+	// closure above has finished with `out`.
+	let _ = writeln!(
+		out,
+		"# HELP moq_relay_uring_lock_wait_seconds_total Time an io_uring worker spent blocked acquiring a kio lock another thread held."
+	);
+	let _ = writeln!(out, "# TYPE moq_relay_uring_lock_wait_seconds_total counter");
+	for (worker, snap) in snaps.iter().enumerate() {
+		let _ = writeln!(
+			out,
+			"moq_relay_uring_lock_wait_seconds_total{{worker=\"{worker}\"}} {}",
+			snap.lock_wait.as_secs_f64()
+		);
+	}
 }
 
 /// Off the io_uring path there are no workers to describe, and [`UringWorker`]
 /// is uninhabited, so the list handed here is always empty.
 #[cfg(not(all(target_os = "linux", feature = "_uring")))]
 fn render_uring(_out: &mut String, _workers: &[UringWorker]) {}
+
+/// Lock wait on the tokio QUIC workers. Empty when that group is not running,
+/// including when io_uring owns the sockets: those threads report on the
+/// `moq_relay_uring_lock_*` series instead.
+fn render_worker_locks(out: &mut String, workers: &[moq_tokio::worker::LockWait]) {
+	use std::fmt::Write as _;
+
+	if workers.is_empty() {
+		return;
+	}
+	let snaps: Vec<(std::time::Duration, u64)> = workers.iter().map(|wait| wait.snapshot()).collect();
+	let _ = writeln!(
+		out,
+		"# HELP moq_relay_worker_lock_wait_seconds_total Time a tokio QUIC worker spent blocked acquiring a kio lock another thread held."
+	);
+	let _ = writeln!(out, "# TYPE moq_relay_worker_lock_wait_seconds_total counter");
+	for (worker, (blocked, _)) in snaps.iter().enumerate() {
+		let _ = writeln!(
+			out,
+			"moq_relay_worker_lock_wait_seconds_total{{worker=\"{worker}\"}} {}",
+			blocked.as_secs_f64()
+		);
+	}
+	let _ = writeln!(
+		out,
+		"# HELP moq_relay_worker_lock_contended_total Times a tokio QUIC worker blocked acquiring a kio lock another thread held."
+	);
+	let _ = writeln!(out, "# TYPE moq_relay_worker_lock_contended_total counter");
+	for (worker, (_, contended)) in snaps.iter().enumerate() {
+		let _ = writeln!(
+			out,
+			"moq_relay_worker_lock_contended_total{{worker=\"{worker}\"}} {contended}"
+		);
+	}
+}
+
+/// Call sites that blocked in `kio`'s lock. Empty until something contends.
+/// The table is process-wide, so io_uring and tokio workers share it.
+fn render_lock_sites(out: &mut String, sites: &[moq_tokio::worker::LockSite], overflow: u64) {
+	use std::fmt::Write as _;
+
+	if sites.is_empty() && overflow == 0 {
+		return;
+	}
+	let sample = |site: &moq_tokio::worker::LockSite| {
+		format!(
+			"file=\"{}\",line=\"{}\",column=\"{}\"",
+			prom_label(short_file(site.file)),
+			site.line,
+			site.column
+		)
+	};
+	let _ = writeln!(
+		out,
+		"# HELP moq_relay_lock_site_wait_seconds_total Time blocked at one kio lock call site, across every thread."
+	);
+	let _ = writeln!(out, "# TYPE moq_relay_lock_site_wait_seconds_total counter");
+	for site in sites {
+		let _ = writeln!(
+			out,
+			"moq_relay_lock_site_wait_seconds_total{{{}}} {}",
+			sample(site),
+			site.wait.as_secs_f64()
+		);
+	}
+	let _ = writeln!(
+		out,
+		"# HELP moq_relay_lock_site_contended_total Acquires that blocked at one kio lock call site."
+	);
+	let _ = writeln!(out, "# TYPE moq_relay_lock_site_contended_total counter");
+	for site in sites {
+		let _ = writeln!(
+			out,
+			"moq_relay_lock_site_contended_total{{{}}} {}",
+			sample(site),
+			site.contended
+		);
+	}
+	if overflow > 0 {
+		let _ = writeln!(
+			out,
+			"# HELP moq_relay_lock_site_overflow_total Contended acquires dropped because the call-site table was full."
+		);
+		let _ = writeln!(out, "# TYPE moq_relay_lock_site_overflow_total counter");
+		let _ = writeln!(out, "moq_relay_lock_site_overflow_total {overflow}");
+	}
+}
+
+fn short_file(file: &str) -> &str {
+	match file.rfind("/rs/") {
+		Some(index) => &file[index + 1..],
+		None => file,
+	}
+}
+
+fn prom_label(value: &str) -> String {
+	value.replace('\\', "\\\\").replace('\n', "\\n").replace('"', "\\\"")
+}
 
 #[cfg(test)]
 mod tests {
@@ -724,6 +864,7 @@ mod tests {
 			&moq_net::stats::Registry::disabled().snapshot(),
 			&disabled.listeners,
 			&[],
+			&[],
 		);
 		assert!(
 			!body.contains("listener=\"internal\""),
@@ -737,6 +878,7 @@ mod tests {
 		let body = render_metrics(
 			&moq_net::stats::Registry::disabled().snapshot(),
 			&stream_only.listeners,
+			&[],
 			&[],
 		);
 		assert!(
@@ -766,6 +908,7 @@ mod tests {
 			&moq_net::stats::Registry::disabled().snapshot(),
 			&internal.listeners,
 			&[],
+			&[],
 		);
 
 		for listener in ["internal", "web"] {
@@ -792,6 +935,7 @@ mod tests {
 		let body = render_metrics(
 			&moq_net::stats::Registry::disabled().snapshot(),
 			&internal.listeners,
+			&[],
 			&[],
 		);
 		assert!(body.contains("moq_relay_accept_failures_total{listener=\"web\",class=\"exhausted\"} 1"));
@@ -823,6 +967,7 @@ mod tests {
 			&moq_net::stats::Registry::disabled().snapshot(),
 			&internal.listeners,
 			&internal.uring,
+			&internal.workers,
 		);
 
 		// Every counter the module documents, for every worker, plus the derived
@@ -839,6 +984,7 @@ mod tests {
 			"submissions",
 			"completions",
 			"enters",
+			"lock_contended",
 			"parks",
 			"wakes",
 			"timers_armed",
@@ -858,6 +1004,54 @@ mod tests {
 		}
 		assert!(body.contains("# TYPE moq_relay_uring_timers_active gauge"));
 		assert!(body.contains("moq_relay_uring_timers_active{worker=\"1\"} 0"));
+		assert!(body.contains("# TYPE moq_relay_uring_lock_wait_seconds_total counter"));
+		assert!(body.contains("moq_relay_uring_lock_wait_seconds_total{worker=\"0\"} 0"));
+		assert!(body.contains("moq_relay_uring_lock_wait_seconds_total{worker=\"1\"} 0"));
+	}
+
+	/// Tokio QUIC workers publish the same lock-wait pair from zero. A worker
+	/// that has not blocked yet is a zero, not a missing series.
+	#[test]
+	fn worker_lock_metrics_list_every_worker_from_zero() {
+		let workers = vec![
+			moq_tokio::worker::LockWait::default(),
+			moq_tokio::worker::LockWait::default(),
+		];
+		let internal = Internal::new(listening(), moq_net::stats::Registry::disabled()).with_workers(workers);
+		let body = render_metrics(
+			&moq_net::stats::Registry::disabled().snapshot(),
+			&internal.listeners,
+			&internal.uring,
+			&internal.workers,
+		);
+		assert!(body.contains("# TYPE moq_relay_worker_lock_wait_seconds_total counter"));
+		assert!(body.contains("# TYPE moq_relay_worker_lock_contended_total counter"));
+		assert!(body.contains("moq_relay_worker_lock_wait_seconds_total{worker=\"0\"} 0"));
+		assert!(body.contains("moq_relay_worker_lock_contended_total{worker=\"1\"} 0"));
+		assert!(
+			!body.contains("moq_relay_uring_lock_"),
+			"tokio workers must not publish the io_uring series:\n{body}"
+		);
+	}
+
+	#[test]
+	fn lock_sites_render_file_and_line() {
+		let mut out = String::new();
+		render_lock_sites(
+			&mut out,
+			&[moq_tokio::worker::LockSite {
+				file: "/work/rs/moq-net/src/model/broadcast.rs",
+				line: 40,
+				column: 3,
+				wait: std::time::Duration::from_millis(1500),
+				contended: 9,
+			}],
+			2,
+		);
+		let labels = "file=\"rs/moq-net/src/model/broadcast.rs\",line=\"40\",column=\"3\"";
+		assert!(out.contains(&format!("moq_relay_lock_site_contended_total{{{labels}}} 9")));
+		assert!(out.contains(&format!("moq_relay_lock_site_wait_seconds_total{{{labels}}} 1.5")));
+		assert!(out.contains("moq_relay_lock_site_overflow_total 2"));
 	}
 
 	/// A relay with no io_uring workers publishes no worker series at all,
@@ -870,8 +1064,13 @@ mod tests {
 			&moq_net::stats::Registry::disabled().snapshot(),
 			&internal.listeners,
 			&internal.uring,
+			&internal.workers,
 		);
 		assert!(!body.contains("moq_relay_uring_"), "unexpected worker series:\n{body}");
+		assert!(
+			!body.contains("moq_relay_worker_lock_"),
+			"unexpected tokio worker series:\n{body}"
+		);
 	}
 
 	/// `serve` hosts the router it is HANDED, so an embedder's extra ops routes
@@ -932,6 +1131,7 @@ mod tests {
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
+			workers: Vec::new(),
 			shutdown: None,
 		};
 
@@ -950,6 +1150,7 @@ mod tests {
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
+			workers: Vec::new(),
 			shutdown: None,
 		};
 
@@ -1045,7 +1246,7 @@ mod tests {
 			group.finish().unwrap();
 		}
 
-		let body = render_metrics(&stats.snapshot(), &[], &[]);
+		let body = render_metrics(&stats.snapshot(), &[], &[], &[]);
 
 		assert!(
 			body.contains("# TYPE moq_relay_bytes_total counter"),
