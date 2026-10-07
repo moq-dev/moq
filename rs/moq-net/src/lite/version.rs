@@ -21,7 +21,8 @@ pub enum Version {
 	/// a `.`-prefixed segment below the requested prefix is left out. SUBSCRIBE_END
 	/// carries the number of group streams opened, replacing SUBSCRIBE_DROP.
 	/// ANNOUNCE_START and ANNOUNCE_UPDATE may copy a path head or hop-chain tail from a
-	/// live announcement on the same stream. The wire format is still work-in-progress,
+	/// live announcement on the same stream. Adds the Auth Stream and the UNAUTHORIZED
+	/// stream code. The wire format is still work-in-progress,
 	/// so it is advertised over ALPN as `moq-lite-07-wip` and only when explicitly
 	/// requested; the default version sets leave it out.
 	Lite07,
@@ -125,13 +126,12 @@ impl Version {
 	}
 
 	/// Whether either endpoint may open an Auth Stream (0x7) to present a token and
-	/// learn its grant. Added to lite-06, whose peers that predate it reset the
-	/// stream as an unknown type.
+	/// learn its grant, and reset a request with UNAUTHORIZED (0x3A). Added in lite-07.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_auth(self) -> bool {
-		// Match form so future versions default forward (CLAUDE.md convention).
+		// Match form so future versions default forward (AGENTS.md convention).
 		match self {
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 => false,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
 			_ => true,
 		}
 	}

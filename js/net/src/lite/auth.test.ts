@@ -19,7 +19,7 @@ async function roundTrip(write: (w: Writer) => Promise<void>): Promise<Reader> {
 				chunks.push(new Uint8Array(chunk));
 			},
 		}),
-		Lite.Version.DRAFT_06,
+		Lite.Version.DRAFT_07,
 	);
 	await write(writer);
 	writer.close();
@@ -31,12 +31,12 @@ async function roundTrip(write: (w: Writer) => Promise<void>): Promise<Reader> {
 		buf.set(chunk, offset);
 		offset += chunk.byteLength;
 	}
-	return new Reader(undefined, buf, Lite.Version.DRAFT_06);
+	return new Reader(undefined, buf, Lite.Version.DRAFT_07);
 }
 
 test("AUTH round-trips its token", async () => {
-	const r = await roundTrip((w) => new AuthMessage(new TextEncoder().encode("jwt")).encode(w, Lite.Version.DRAFT_06));
-	const msg = await AuthMessage.decode(r, Lite.Version.DRAFT_06);
+	const r = await roundTrip((w) => new AuthMessage(new TextEncoder().encode("jwt")).encode(w, Lite.Version.DRAFT_07));
+	const msg = await AuthMessage.decode(r, Lite.Version.DRAFT_07);
 	expect(new TextDecoder().decode(msg.token)).toBe("jwt");
 });
 
@@ -44,10 +44,10 @@ test("AUTH_OK and AUTH_ERROR round-trip behind their type", async () => {
 	const ok = new AuthOk(patterns("**"), patterns(), 60_000);
 	const err = new AuthError(SessionCode.Unauthorized, "expired");
 	const r = await roundTrip(async (w) => {
-		await ok.encode(w, Lite.Version.DRAFT_06);
-		await err.encode(w, Lite.Version.DRAFT_06);
+		await ok.encode(w, Lite.Version.DRAFT_07);
+		await err.encode(w, Lite.Version.DRAFT_07);
 	});
-	const first = await decodeAuthReplyMaybe(r, Lite.Version.DRAFT_06);
+	const first = await decodeAuthReplyMaybe(r, Lite.Version.DRAFT_07);
 	expect(first).toBeInstanceOf(AuthOk);
 	if (!(first instanceof AuthOk)) throw new Error("unreachable");
 	// `**` grants everything; the empty list grants nothing.
@@ -55,15 +55,15 @@ test("AUTH_OK and AUTH_ERROR round-trip behind their type", async () => {
 	expect(first.subscribe.size).toBe(0);
 	expect(first.expires).toBe(60_000);
 
-	const second = await decodeAuthReplyMaybe(r, Lite.Version.DRAFT_06);
+	const second = await decodeAuthReplyMaybe(r, Lite.Version.DRAFT_07);
 	expect(second).toEqual(err);
-	expect(await decodeAuthReplyMaybe(r, Lite.Version.DRAFT_06)).toBeUndefined();
+	expect(await decodeAuthReplyMaybe(r, Lite.Version.DRAFT_07)).toBeUndefined();
 });
 
 test("literal and wildcard grants travel exactly, never widened", async () => {
 	const ok = new AuthOk(patterns("room/alice", "room/*/cam", "**/demo.hang"), patterns("", "lobby/**"));
-	const r = await roundTrip((w) => ok.encode(w, Lite.Version.DRAFT_06));
-	const got = await decodeAuthReplyMaybe(r, Lite.Version.DRAFT_06);
+	const r = await roundTrip((w) => ok.encode(w, Lite.Version.DRAFT_07));
+	const got = await decodeAuthReplyMaybe(r, Lite.Version.DRAFT_07);
 	if (!(got instanceof AuthOk)) throw new Error("expected AUTH_OK");
 	expect(got.publish.equals(ok.publish)).toBe(true);
 	expect(got.subscribe.equals(ok.subscribe)).toBe(true);
@@ -72,7 +72,7 @@ test("literal and wildcard grants travel exactly, never widened", async () => {
 // The same bytes as `auth_ok_golden` in `rs/moq-net/src/lite/auth.rs`.
 test("AUTH_OK matches the Rust encoding", async () => {
 	const ok = new AuthOk(patterns("room/*/cam", "**/b.hang"), patterns(""), 1000);
-	const r = await roundTrip((w) => ok.encode(w, Lite.Version.DRAFT_06));
+	const r = await roundTrip((w) => ok.encode(w, Lite.Version.DRAFT_07));
 	const text = (s: string) => [s.length, ...new TextEncoder().encode(s)];
 	expect([...(await r.readAll())]).toEqual([
 		0x00, // AUTH_OK
@@ -82,8 +82,8 @@ test("AUTH_OK matches the Rust encoding", async () => {
 		...text("room/*/cam"),
 		0x01, // subscribe count
 		0x00, // the empty pattern: the root alone
-		0x43,
-		0xe8, // expires: 1000ms
+		0x83,
+		0xe8, // expires: 1000ms, as a leading-ones varint
 	]);
 });
 
@@ -109,12 +109,13 @@ test("only valid, canonical patterns decode", async () => {
 			await w.u53(0);
 			await w.u53(0);
 		});
-		await expect(decodeAuthReplyMaybe(r, Lite.Version.DRAFT_06)).rejects.toThrow();
+		await expect(decodeAuthReplyMaybe(r, Lite.Version.DRAFT_07)).rejects.toThrow();
 	}
 });
 
-test("lite-05 carries no AUTH", async () => {
-	await expect(
-		roundTrip((w) => new AuthMessage(new Uint8Array()).encode(w, Lite.Version.DRAFT_05)),
-	).rejects.toThrow();
+test.each([
+	["lite-05", Lite.Version.DRAFT_05],
+	["lite-06", Lite.Version.DRAFT_06],
+])("%s carries no AUTH", async (_, version) => {
+	await expect(roundTrip((w) => new AuthMessage(new Uint8Array()).encode(w, version))).rejects.toThrow();
 });

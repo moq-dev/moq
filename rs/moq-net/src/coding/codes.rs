@@ -38,15 +38,22 @@ pub trait StreamCodes {
 	}
 }
 
-/// moq-lite's registry, specified by draft-lcurley-moq-lite (Error Codes) and identical
-/// across the versions we negotiate.
+/// moq-lite's registry, specified by draft-lcurley-moq-lite (Error Codes). A version
+/// without the Auth Stream has no UNAUTHORIZED, so it sends INTERNAL_ERROR instead and
+/// reads 0x3A as unknown.
 impl StreamCodes for lite::Version {
 	fn encode_stream_code(&self, err: &StreamError) -> u32 {
-		err.to_code()
+		match err {
+			StreamError::Unauthorized if !self.has_auth() => StreamError::Internal.to_code(),
+			err => err.to_code(),
+		}
 	}
 
 	fn decode_stream_code(&self, code: u32) -> StreamError {
-		StreamError::from_code(code)
+		match StreamError::from_code(code) {
+			StreamError::Unauthorized if !self.has_auth() => StreamError::Unknown(code),
+			err => err,
+		}
 	}
 }
 
@@ -108,6 +115,24 @@ mod tests {
 			draft17.encode_stream_code(&StreamError::GoingAway),
 			ietf::error::INTERNAL_ERROR
 		);
+	}
+
+	/// UNAUTHORIZED is lite-07's: an older lite version sends INTERNAL_ERROR in its place
+	/// and reads 0x3A as unknown, since no published version assigns it.
+	#[test]
+	fn unauthorized_needs_the_auth_stream() {
+		let code = StreamError::Unauthorized.to_code();
+
+		let lite07 = lite::Version::Lite07;
+		assert_eq!(lite07.encode_stream_code(&StreamError::Unauthorized), code);
+		assert_eq!(lite07.decode_stream_code(code), StreamError::Unauthorized);
+
+		let lite06 = lite::Version::Lite06;
+		assert_eq!(
+			lite06.encode_stream_code(&StreamError::Unauthorized),
+			StreamError::Internal.to_code()
+		);
+		assert_eq!(lite06.decode_stream_code(code), StreamError::Unknown(code));
 	}
 
 	/// A dropped [`Writer`](super::Writer) resets with a cancellation, and `Drop` cannot

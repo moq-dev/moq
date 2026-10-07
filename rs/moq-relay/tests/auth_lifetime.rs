@@ -142,6 +142,7 @@ async fn spawn_relay_with(
 
 	let mut config = moq_tokio::listen::Config::default();
 	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
+	config.version = relay_versions();
 	let server = config.init(Default::default()).expect("server init");
 	let mut server = server.listen().await.expect("listen");
 	let port = server.tcp_local_addr().expect("TCP listener is configured").port();
@@ -180,6 +181,7 @@ async fn spawn_ws_relay(auth: moq_relay::auth::Auth) -> (u16, tokio::task::JoinH
 	web_config.ws = true;
 	web_config.http.listen = Some("127.0.0.1:0".parse().expect("parse listen"));
 	let web = web::Web::new(auth, cluster, certificates, web_config)
+		.with_versions(moq_net::Versions::from(relay_versions()))
 		.bind()
 		.expect("bind web listener");
 	let port = web.addrs().http.expect("HTTP listener is configured").port();
@@ -191,12 +193,34 @@ async fn spawn_ws_relay(auth: moq_relay::auth::Auth) -> (u16, tokio::task::JoinH
 	(port, handle)
 }
 
+/// The work-in-progress lite version, the first with the Auth Stream: a client learns
+/// its grant, and a request it loses resets with UNAUTHORIZED.
+fn lite07() -> moq_net::Version {
+	"moq-lite-07-wip".parse().expect("parse version")
+}
+
+/// What the test relays accept: every default version, plus [`lite07`], which the
+/// defaults leave out.
+fn relay_versions() -> Vec<moq_net::Version> {
+	std::iter::once(lite07())
+		.chain(moq_net::Versions::all().iter().copied())
+		.collect()
+}
+
 fn client() -> moq_tokio::Client {
+	client_version(None)
+}
+
+/// A client pinned to `version`, or offering the defaults when `None`.
+fn client_version(version: Option<moq_net::Version>) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	config.once = Some(true);
 	config.websocket.delay = Duration::ZERO;
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
+	if let Some(version) = version {
+		config.version = vec![version];
+	}
 	config.init(Default::default()).expect("client init")
 }
 
@@ -562,6 +586,7 @@ async fn a_moved_tier_retags_the_live_session() {
 /// A re-check resizes the live session in place, over TCP and WebSocket: a narrower
 /// grant resets the deafened path with `Unauthorized` while a sibling under the same
 /// prefix keeps flowing, a wider one brings the path back, and neither session closes.
+/// The clients speak lite-07, the first lite version with UNAUTHORIZED.
 #[tokio::test]
 async fn a_rechecked_grant_resizes_live_sessions() {
 	for scheme in ["tcp", "ws"] {
@@ -583,7 +608,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 		}
 		let pub_session = tokio::time::timeout(
 			TIMEOUT,
-			client()
+			client_version(Some(lite07()))
 				.with_publisher(pub_origin.consume())
 				.with_reconnect(false)
 				.connect(url.clone())
@@ -597,7 +622,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 		let sub_consumer = sub_origin.consume();
 		let sub_session = tokio::time::timeout(
 			TIMEOUT,
-			client()
+			client_version(Some(lite07()))
 				.with_subscriber(sub_origin)
 				.with_reconnect(false)
 				.connect(url.clone())

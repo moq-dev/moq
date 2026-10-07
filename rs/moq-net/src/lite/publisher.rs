@@ -410,7 +410,7 @@ struct AuthServe<S: crate::transport::poll::Session> {
 
 impl<S: crate::transport::poll::Session> AuthServe<S> {
 	fn new(shared: Arc<Shared<S>>, stream: Stream<S, Version>) -> Result<Self, Error> {
-		// The Auth Stream is lite-06+ only.
+		// The Auth Stream is lite-07+ only.
 		if !shared.version.has_auth() {
 			return Err(Error::UnexpectedStream);
 		}

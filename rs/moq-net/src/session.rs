@@ -250,7 +250,7 @@ impl Session {
 	/// The tokens this side presented and the grant they earned, plus the tokens
 	/// the peer presents. See [`auth`].
 	///
-	/// On moq-lite-06, and on moq-transport draft-17+ when both sides negotiate the
+	/// On moq-lite-07-wip, and on moq-transport draft-17+ when both sides negotiate the
 	/// MoQ Auth extension, each side presents its connection's credential right after
 	/// setup. Older versions, and peers that do not negotiate it, leave the grant `None`.
 	pub fn auth(&self) -> auth::Handle {

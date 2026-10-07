@@ -1,6 +1,6 @@
 //! In-band AUTH over the in-memory mock transport: both sides learn their grant,
 //! tokens union, and a publication outside the grant fails loud. Every case runs on
-//! moq-lite-06 and on moq-transport with the MoQ Auth extension.
+//! moq-lite-07-wip and on moq-transport with the MoQ Auth extension.
 
 mod support;
 
@@ -17,7 +17,12 @@ use support::mock::{MockSession, create_mock_session_pair};
 /// Maximum time any single test may run before being treated as a deadlock.
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The first lite version with the Auth Stream, still work-in-progress.
+const LITE_07: &str = "moq-lite-07-wip";
+/// The newest published lite version, which has no Auth Stream.
 const LITE_06: &str = "moq-lite-06";
+/// The lite Auth Stream's type byte.
+const AUTH_STREAM: u8 = 0x7;
 /// The first draft that negotiates MoQ Auth, and the newest.
 const MOQT_17: &str = "moq-transport-17";
 const MOQT_22: &str = "moq-transport-22";
@@ -25,8 +30,8 @@ const MOQT_22: &str = "moq-transport-22";
 /// Run each case on every version that exchanges AUTH.
 macro_rules! cases {
 	($($case:ident),* $(,)?) => {
-		mod lite_06 {
-			$(#[tokio::test] async fn $case() { super::$case(super::LITE_06).await })*
+		mod lite_07 {
+			$(#[tokio::test] async fn $case() { super::$case(super::LITE_07).await })*
 		}
 		mod moqt_17 {
 			$(#[tokio::test] async fn $case() { super::$case(super::MOQT_17).await })*
@@ -76,13 +81,44 @@ prefix_cases!(
 );
 
 #[tokio::test]
-async fn lite_06_carries_pattern_grants() {
-	pattern_grants_arrive_exactly(LITE_06).await
+async fn lite_07_carries_pattern_grants() {
+	pattern_grants_arrive_exactly(LITE_07).await
 }
 
 #[tokio::test]
-async fn lite_06_enforces_a_wildcard_grant() {
-	a_wildcard_grant_is_enforced(LITE_06).await
+async fn lite_07_enforces_a_wildcard_grant() {
+	a_wildcard_grant_is_enforced(LITE_07).await
+}
+
+#[tokio::test]
+async fn lite_06_has_no_grant() {
+	older_versions_have_no_grant(LITE_06).await
+}
+
+/// The control for the lite versions without AUTH: lite-07 opens an Auth Stream on each
+/// side right away, which is what makes its absence on them mean something.
+#[tokio::test]
+async fn lite_07_opens_an_auth_stream_per_side() {
+	within(async {
+		let pair = connect(Options {
+			version: Some(LITE_07),
+			client_publish: Some(produce_origin(2)),
+			server_subscribe: Some(produce_origin(1)),
+			..Default::default()
+		})
+		.await;
+		granted(&pair.client).await;
+		granted(&pair.server).await;
+		for transport in [&pair.client_transport, &pair.server_transport] {
+			assert!(
+				transport.bidi_types().contains(&AUTH_STREAM),
+				"{:x?}",
+				transport.bidi_types()
+			);
+		}
+	})
+	.await
+	.expect("timed out");
 }
 
 #[tokio::test]
@@ -181,7 +217,7 @@ struct Pair {
 }
 
 async fn connect(opts: Options) -> Pair {
-	let version: Version = opts.version.unwrap_or(LITE_06).parse().unwrap();
+	let version: Version = opts.version.unwrap_or(LITE_07).parse().unwrap();
 	let (client_transport, server_transport) = create_mock_session_pair(Some(version.alpn()));
 
 	let mut client = Client::new().with_versions(version.into());
@@ -660,15 +696,32 @@ async fn a_reset_auth_stream_reports_unsupported(version: &'static str) {
 /// Versions without AUTH never open the stream: no grant, and no way to add a token.
 async fn older_versions_have_no_grant(version: &'static str) {
 	within(async {
+		let client_origin = produce_origin(2);
+		let broadcast = client_origin.create_broadcast("room/x").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let server_origin = produce_origin(1);
 		let pair = connect(Options {
 			version: Some(version),
-			client_publish: Some(produce_origin(2)),
-			server_subscribe: Some(produce_origin(1)),
+			client_publish: Some(client_origin.clone()),
+			server_subscribe: Some(server_origin.clone()),
 			..Default::default()
 		})
 		.await;
+		// The announcement crossing means both drivers are running, so a setup token
+		// would already have its stream.
+		wait_announced(&server_origin.consume(), "room/x", true).await;
 		assert_eq!(pair.client.auth().grant().peek(), None);
 		assert!(matches!(pair.client.auth().add("token").await, Err(Error::Unsupported)));
+		// moq-transport's request streams have no stream type to look for.
+		if version.starts_with("moq-lite") {
+			for transport in [&pair.client_transport, &pair.server_transport] {
+				assert!(
+					!transport.bidi_types().contains(&AUTH_STREAM),
+					"{:x?}",
+					transport.bidi_types()
+				);
+			}
+		}
 	})
 	.await
 	.expect("timed out");
@@ -737,7 +790,7 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 		};
 		// The relay's own reader learns the peer's code across the origin's splice, not a
 		// generic drop. moq-transport reports it in PUBLISH_DONE instead.
-		if version == LITE_06 {
+		if version == LITE_07 {
 			assert!(matches!(err, Error::Stream(StreamError::Unauthorized)), "{err:?}");
 		}
 		assert_eq!(pair.client_transport.close_reason(), None);
@@ -747,7 +800,7 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 		let resets = pair.client_transport.resets();
 		let closed = StreamError::Session(SessionError::Unauthorized).to_code();
 		assert!(!resets.contains(&closed), "{resets:x?}");
-		if version == LITE_06 {
+		if version == LITE_07 {
 			let unauthorized = StreamError::Unauthorized.to_code();
 			let count = resets.iter().filter(|&&code| code == unauthorized).count();
 			assert_eq!(count, 2, "both subscriptions reset with UNAUTHORIZED: {resets:x?}");
@@ -1020,6 +1073,9 @@ macro_rules! limit_cases {
 		mod limit_lite_06 {
 			$(#[tokio::test] async fn $case() { super::$case(super::LITE_06).await })*
 		}
+		mod limit_lite_07 {
+			$(#[tokio::test] async fn $case() { super::$case(super::LITE_07).await })*
+		}
 		mod limit_moqt_16 {
 			$(#[tokio::test] async fn $case() { super::$case("moq-transport-16").await })*
 		}
@@ -1046,15 +1102,38 @@ async fn lite_06_narrowing_resets_a_fetch_in_flight() {
 	a_narrowing_resets_a_fetch_in_flight(LITE_06).await
 }
 
+#[tokio::test]
+async fn lite_07_narrowing_resets_a_fetch_in_flight() {
+	a_narrowing_resets_a_fetch_in_flight(LITE_07).await
+}
+
 /// Whether `version` exchanges AUTH, so the peer also hears of a narrowing.
 fn speaks_auth(version: &str) -> bool {
-	matches!(version, LITE_06 | MOQT_17 | MOQT_22)
+	matches!(version, LITE_07 | MOQT_17 | MOQT_22)
+}
+
+/// The code a lite session resets a request it no longer allows with: UNAUTHORIZED
+/// where the version has it, otherwise INTERNAL_ERROR.
+fn unauthorized_reset(version: &str) -> u32 {
+	match speaks_auth(version) {
+		true => StreamError::Unauthorized.to_code(),
+		false => StreamError::Internal.to_code(),
+	}
 }
 
 /// A revocation as the reader sees it: the local gate's own error, or the peer's
 /// UNAUTHORIZED reset relayed across the splice.
 fn unauthorized(err: &Error) -> bool {
 	matches!(err, Error::Unauthorized | Error::Stream(StreamError::Unauthorized))
+}
+
+/// A revocation the peer made, as `version` carries it: a lite version without
+/// UNAUTHORIZED resets with INTERNAL_ERROR.
+fn revoked(version: &str, err: &Error) -> bool {
+	match version.starts_with("moq-lite") && !speaks_auth(version) {
+		true => matches!(err, Error::Stream(StreamError::Internal)),
+		false => unauthorized(err),
+	}
 }
 
 /// Read groups until the subscription ends, returning how it ended.
@@ -1108,7 +1187,7 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 		pair.server.auth().authorize(&grant(&[], &["room/alice/video"]));
 
 		let err = ended(&mut audio_sub).await;
-		assert!(unauthorized(&err), "{err:?}");
+		assert!(revoked(version, &err), "{err:?}");
 		wait_announced(&received.consume(), "room/alice/audio", false).await;
 
 		// The sibling keeps flowing.
@@ -1117,11 +1196,11 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 		let group = video_sub.recv_group().await.unwrap().expect("video still flows");
 		assert_eq!(group.sequence, 1);
 
-		// The relay enforced it, not the client: moq-lite resets the subscription with
-		// UNAUTHORIZED, and neither side closed the session.
+		// The relay enforced it, not the client: moq-lite resets the subscription, and
+		// neither side closed the session.
 		if version.starts_with("moq-lite") {
 			let resets = pair.server_transport.resets();
-			assert!(resets.contains(&StreamError::Unauthorized.to_code()), "{resets:x?}");
+			assert!(resets.contains(&unauthorized_reset(version)), "{resets:x?}");
 		}
 		assert_eq!(pair.client_transport.close_reason(), None);
 
@@ -1237,7 +1316,7 @@ async fn a_narrowing_resets_a_fetch_in_flight(version: &'static str) {
 		// the revocation regardless.
 		assert!(unauthorized(&err) || matches!(err, moq_net::Error::Dropped), "{err:?}");
 		let resets = pair.server_transport.resets();
-		assert!(resets.contains(&StreamError::Unauthorized.to_code()), "{resets:x?}");
+		assert!(resets.contains(&unauthorized_reset(version)), "{resets:x?}");
 		drop(group);
 	})
 	.await
@@ -1283,7 +1362,7 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 
 		pair.server.auth().authorize(&grant(&[], &["room/alice/video"]));
 		let err = ended(&mut sub).await;
-		assert!(unauthorized(&err), "{err:?}");
+		assert!(revoked(version, &err), "{err:?}");
 		wait_announced(&received.consume(), "room/alice/audio", false).await;
 		drop((sub, remote));
 

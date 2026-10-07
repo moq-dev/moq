@@ -17,7 +17,9 @@
 # `moq auth serve`. Clients that print the grant the relay sent back over AUTH
 # must report exactly what their token implies, and a final round per enforcing
 # publisher mints a token that excludes its broadcast: the publisher must fail
-# loud with Unauthorized and no subscriber may see data.
+# loud with Unauthorized and no subscriber may see data. AUTH is only on the
+# work-in-progress moq-lite-07, so those clients dial it alone while the rest keep
+# their defaults, and the matrix also crosses versions through the relay.
 set -euo pipefail
 
 INTEROP_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -460,6 +462,10 @@ token_url() {
 # moq-cli logs each grant it receives over AUTH at debug, under `moq_net::auth`.
 CLI_LOG="${RUST_LOG:-info},moq_net::auth=debug"
 
+# The lite version with AUTH, which no client offers by default. The clients the
+# harness reads a grant or a refusal from dial it.
+AUTH_VERSION="moq-lite-07-wip"
+
 # The clients that print the grant they received as an `auth granted` line. The
 # binding clients (python, go, c, gst) have no grant to print until moq-ffi
 # exposes one, and the browser's shared connection keeps its session private.
@@ -471,7 +477,7 @@ prints_grant() {
 }
 
 # The `auth granted` line a token minted with at most one publish and one
-# subscribe pattern implies. Every client on this relay negotiates moq-lite-06,
+# subscribe pattern implies. Every client that prints one dials $AUTH_VERSION,
 # which carries AUTH, so a client that prints nothing never got its grant.
 grant_line() {
     local publish="${1:+\"$1\"}" subscribe="${2:+\"$2\"}"
@@ -518,7 +524,8 @@ run_publisher() {
     local lang="$1" broadcast="$2" url="$3"
     case "$lang" in
         rust)
-            ffmpeg_h264 | RUST_LOG="$CLI_LOG" "$MOQ" --connect "$url" --broadcast "$broadcast" import avc3
+            ffmpeg_h264 | RUST_LOG="$CLI_LOG" "$MOQ" --connect "$url" --connect-version "$AUTH_VERSION" \
+                --broadcast "$broadcast" import avc3
             ;;
         python)
             ffmpeg_h264 | "$PY" "$CLIENTS/python/interop.py" \
@@ -570,8 +577,8 @@ run_subscriber() {
             # moq-cli only handles SIGINT, so -k forces SIGKILL if it ignores the
             # SIGTERM that fires when no data arrives within the timeout.
             local n
-            n=$(RUST_LOG="$CLI_LOG" timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$url" --broadcast "$broadcast" \
-                export fmp4 | head -c 1 | wc -c | tr -d ' ' || true)
+            n=$(RUST_LOG="$CLI_LOG" timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$url" --connect-version "$AUTH_VERSION" \
+                --broadcast "$broadcast" export fmp4 | head -c 1 | wc -c | tr -d ' ' || true)
             [[ "${n:-0}" -ge 1 ]]
             ;;
         python)
@@ -731,12 +738,12 @@ run_media() {
     fi
 }
 
-# The publishers whose refusal the harness can read: the Rust CLI's log and the
-# browser page's console. The binding publishers enforce the grant too, but
-# surface it only through their bindings.
+# The publishers whose refusal the harness can read: the Rust CLI's log. The
+# binding publishers enforce the grant too, but surface it only through their
+# bindings, and the browser elements have no way to offer $AUTH_VERSION.
 enforces_grant() {
     case "$1" in
-        rust | js) return 0 ;;
+        rust) return 0 ;;
         *) return 1 ;;
     esac
 }

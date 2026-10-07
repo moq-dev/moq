@@ -67,7 +67,8 @@ clock, so later polls, outages, and wall-clock adjustments do not restart it.
 same request. A grant applies: its patterns resize the live session in place,
 narrower or wider, so a moderation decision lands on the session it targets and
 can be lifted the same way. Subscriptions and fetches outside a narrower grant
-reset with `Unauthorized`, the broadcasts it published outside abort, and
+reset with `Unauthorized` (an internal error on moq-lite 06 and older, which
+lack the code), the broadcasts it published outside abort, and
 everything else keeps flowing; a wider grant brings those paths back, up to what
 the session was admitted with. A one-shot HTTP `/fetch` ends on a narrower grant
 instead. A

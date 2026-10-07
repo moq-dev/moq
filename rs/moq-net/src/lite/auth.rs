@@ -7,7 +7,7 @@ use crate::{Pattern, Patterns};
 
 use super::{Message, Version};
 
-/// The first message on an Auth Stream: the token the opener presents. Lite06+.
+/// The first message on an Auth Stream: the token the opener presents. Lite07+.
 ///
 /// An empty token means the credential the connection already presented (the
 /// URL, a client certificate), or nothing.
@@ -200,9 +200,9 @@ mod tests {
 
 	fn round_trip<T: Encode<Version> + Decode<Version>>(msg: &T) -> T {
 		let mut buf = bytes::BytesMut::new();
-		msg.encode(&mut buf, Version::Lite06).unwrap();
+		msg.encode(&mut buf, Version::Lite07).unwrap();
 		let mut slice = &buf[..];
-		let got = T::decode(&mut slice, Version::Lite06).unwrap();
+		let got = T::decode(&mut slice, Version::Lite07).unwrap();
 		assert!(slice.is_empty(), "trailing bytes after decode");
 		got
 	}
@@ -246,7 +246,7 @@ mod tests {
 			expires: Some(Duration::from_millis(1000)),
 		});
 		let mut buf = bytes::BytesMut::new();
-		msg.encode(&mut buf, Version::Lite06).unwrap();
+		msg.encode(&mut buf, Version::Lite07).unwrap();
 		#[rustfmt::skip]
 		let want: &[u8] = &[
 			0x00, // AUTH_OK
@@ -256,7 +256,7 @@ mod tests {
 			0x0a, b'r', b'o', b'o', b'm', b'/', b'*', b'/', b'c', b'a', b'm',
 			0x01, // subscribe count
 			0x00, // the empty pattern: the root alone
-			0x43, 0xe8, // expires: 1000ms
+			0x83, 0xe8, // expires: 1000ms, as a leading-ones varint
 		];
 		assert_eq!(&buf[..], want);
 	}
@@ -266,17 +266,17 @@ mod tests {
 	fn invalid_patterns_are_refused() {
 		for text in ["*/**", "/room", "room/", "room//a", "a*b*c", "**/**", "a**"] {
 			let mut buf = bytes::BytesMut::new();
-			AUTH_OK.encode(&mut buf, Version::Lite06).unwrap();
+			AUTH_OK.encode(&mut buf, Version::Lite07).unwrap();
 			let mut body = bytes::BytesMut::new();
-			1usize.encode(&mut body, Version::Lite06).unwrap();
-			text.encode(&mut body, Version::Lite06).unwrap();
-			0usize.encode(&mut body, Version::Lite06).unwrap();
-			0u64.encode(&mut body, Version::Lite06).unwrap();
-			body.len().encode(&mut buf, Version::Lite06).unwrap();
+			1usize.encode(&mut body, Version::Lite07).unwrap();
+			text.encode(&mut body, Version::Lite07).unwrap();
+			0usize.encode(&mut body, Version::Lite07).unwrap();
+			0u64.encode(&mut body, Version::Lite07).unwrap();
+			body.len().encode(&mut buf, Version::Lite07).unwrap();
 			buf.extend_from_slice(&body);
 			assert!(
 				matches!(
-					AuthReply::decode(&mut &buf[..], Version::Lite06),
+					AuthReply::decode(&mut &buf[..], Version::Lite07),
 					Err(DecodeError::InvalidValue)
 				),
 				"{text} decoded"
@@ -315,7 +315,7 @@ mod tests {
 			token: Bytes::from(vec![0; super::super::message::MAX_MESSAGE_SIZE + 1]),
 		};
 		assert!(matches!(
-			msg.encode(&mut Sizer::default(), Version::Lite06),
+			msg.encode(&mut Sizer::default(), Version::Lite07),
 			Err(EncodeError::TooLarge)
 		));
 	}
@@ -328,6 +328,7 @@ mod tests {
 			Version::Lite03,
 			Version::Lite04,
 			Version::Lite05,
+			Version::Lite06,
 		] {
 			let mut buf = bytes::BytesMut::new();
 			assert!(matches!(

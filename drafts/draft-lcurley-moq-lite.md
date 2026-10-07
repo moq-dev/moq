@@ -1472,13 +1472,13 @@ The `Message Length` describes the payload size on the wire.
 - The Subscribe Stream FIN now follows once every counted Group Stream has finished or been reset.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
 - Capped the SETUP Message Length at 65,536 bytes.
-- An AUTH_ERROR code that does not fit in 32 bits is a PROTOCOL_VIOLATION.
+- Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
+- Assigned 0x3A UNAUTHORIZED in the stream error table: a request reset because the scope does not cover it, or no longer does, distinct from SESSION_CLOSED.
 - A relay puts a random Hop ID, picked per session, in front of an announcement whose reconstructed path starts with 0, and writes that stamp followed by 0 for an empty path.
 
 ## moq-lite-06
 
 - Assigned `moq-lite-06` as this draft's protocol identifier.
-- Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
 - Require error-code translation when bridging protocols and draft versions.
 - Made a repeated non-zero Hop ID in one announcement's Hop ID list a PROTOCOL_VIOLATION, matching draft-lcurley-moq-cluster. Repeated 0 entries stay legal.
 - Moved the Qmux-over-WebSocket binding details to draft-lcurley-qmux-websocket; the binding itself is unchanged.
@@ -1490,7 +1490,6 @@ The `Message Length` describes the payload size on the wire.
 - Split the reserved stream error range: 32 through 47 stays reserved, and 48 through 63 is moq-lite's own, assigned by the tables and mapped rather than forwarded across a bridge. Assigned 0x30 NO_CAPACITY there: it permits one re-resolution within the tier excluding the refusing advertiser, and a receiver that has spent or lacks that retry resets downstream with another code. Assigned 0x32 GROUP_TOO_LARGE: a group that grew past the publisher's cache budget is aborted. Every other code is terminal.
 - Assigned 0x33 NOT_FOUND, 0x34 OLD, and 0x35 EVICTED in the stream error table: a group the publisher cannot serve because it was never here, has been superseded, or was dropped under memory pressure.
 - Assigned 0x36 UNROUTABLE, 0x37 WRONG_SIZE, 0x38 FRAME_TOO_LARGE, and 0x39 TIMESTAMP_MISMATCH in the stream error table, moving them out of the reserved 32 through 47 range, which no longer carries provisional placeholders.
-- Assigned 0x3A UNAUTHORIZED in the stream error table: a request reset because the scope does not cover it, or no longer does, distinct from SESSION_CLOSED.
 - Assigned 0x31 CONTROL_TIMEOUT in the stream error table: a request stream torn down because the peer never answered, which DELIVERY_TIMEOUT described as late content. It has no moq-transport value and bridges to INTERNAL_ERROR.
 - A disallowed stream type, a role mismatch, or a missing extension is a PROTOCOL_VIOLATION; the session table gains no code for them, so nothing is sent from the reserved 32 through 47 range in either registry.
 - Added implicit Announce IDs: each ANNOUNCE_START assigns the next per-stream ordinal.

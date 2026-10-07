@@ -43,7 +43,7 @@ still refuses lite-07 values above 2^62-1 until its `VarInt` widens.
 
 ## Authorization
 
-On moq-lite 06 each side presents a token on its own Auth stream and learns
+On moq-lite 07 each side presents a token on its own Auth stream and learns
 what it may publish and subscribe to. Right after setup both sides present the
 credential the connection already carried (the URL token, a client
 certificate, or nothing), so a publisher learns before anyone subscribes
@@ -54,7 +54,8 @@ covered. A grant is a union of [path patterns](#path-patterns), so `room/*/cam`
 or the exact broadcast `room/alice` arrives as issued rather than widened to a
 prefix. A subscription or fetch that loses access resets with the
 `UNAUTHORIZED` stream code, so the peer can tell it apart from the session
-closing.
+closing. Older lite versions have no such code and reset with
+`INTERNAL_ERROR`.
 
 A client that publishes a broadcast outside its grant closes the session with
 `UNAUTHORIZED` and names the path in the close reason, rather than waiting

@@ -8,6 +8,26 @@ level = "info"
 # QUIC on UDP. 127.0.0.1 avoids IPv6 flakiness on CI runners.
 bind = "127.0.0.1:4443"
 tls.generate = ["localhost", "127.0.0.1"]
+# Every default version, plus the work-in-progress moq-lite-07 that carries AUTH,
+# which the defaults leave out.
+version = [
+	"moq-lite-07-wip",
+	"moq-lite-06",
+	"moq-lite-05",
+	"moq-lite-04",
+	"moq-lite-03",
+	"moq-lite-02",
+	"moq-lite-01",
+	"moq-transport-22",
+	"moq-transport-21",
+	"moq-transport-20",
+	"moq-transport-19",
+	"moq-transport-18",
+	"moq-transport-17",
+	"moq-transport-16",
+	"moq-transport-15",
+	"moq-transport-14",
+]
 
 [web.http]
 # HTTP + WebSocket on TCP, also serving /certificate.sha256 for cert pinning.

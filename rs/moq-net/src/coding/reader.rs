@@ -321,7 +321,7 @@ mod tests {
 	/// arrive as INTERNAL_ERROR, and `Unauthorized` as DELIVERY_TIMEOUT.
 	#[test]
 	fn abort_stops_with_a_stream_code() {
-		const VERSION: crate::lite::Version = crate::lite::Version::Lite05;
+		const VERSION: crate::lite::Version = crate::lite::Version::Lite07;
 
 		for (err, expected) in [
 			(Error::Cancel, StreamError::Cancel.to_code()),

@@ -132,6 +132,9 @@ pub struct MockSendStream {
 	/// Drop this stream's FIN, as a peer that never completes it (see
 	/// [`MockSession::withhold_bidi_fins`]).
 	withhold_fin: Arc<AtomicBool>,
+	/// Where to log the first byte written, the stream type (see
+	/// [`MockSession::bidi_types`]), until it is written.
+	first_byte: Option<StreamTypes>,
 	conn: Arc<ConnectionState>,
 }
 
@@ -153,6 +156,11 @@ impl poll::SendStream for MockSendStream {
 	type Error = MockError;
 
 	fn poll_write(&mut self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		if let Some(&first) = buf.first()
+			&& let Some(types) = self.first_byte.take()
+		{
+			types.lock().unwrap().push(first);
+		}
 		Poll::Ready(
 			self.push(StreamChunk::Data(Bytes::copy_from_slice(buf)))
 				.map(|()| buf.len()),
@@ -339,6 +347,9 @@ impl Drop for MockRecvStream {
 /// The stream reset codes one side has sent.
 type Resets = Arc<Mutex<Vec<u32>>>;
 
+/// The first byte of each bidi stream one side has opened.
+type StreamTypes = Arc<Mutex<Vec<u8>>>;
+
 /// Create a linked (send, recv) stream pair, logging the sender's resets to `resets`.
 fn new_stream_pair(conn: &Arc<ConnectionState>, resets: &Resets) -> (MockSendStream, MockRecvStream) {
 	let queue = kio::Queue::new();
@@ -351,6 +362,7 @@ fn new_stream_pair(conn: &Arc<ConnectionState>, resets: &Resets) -> (MockSendStr
 		park: kio::Park::default(),
 		ack_fin: false,
 		withhold_fin: Arc::default(),
+		first_byte: None,
 		conn: conn.clone(),
 	};
 	let recv = MockRecvStream {
@@ -428,6 +440,8 @@ struct SessionSide {
 	lossy: Mutex<bool>,
 	/// Whether this side drops the FIN of the bidi streams it opens.
 	withhold_bidi_fins: Arc<AtomicBool>,
+	/// The first byte of each bidi stream this side opened.
+	bidi_types: StreamTypes,
 }
 
 /// An in-memory mock WebTransport session.
@@ -484,6 +498,7 @@ impl poll::Session for MockSession {
 		// Create two stream pairs: one for each direction.
 		let (mut our_send, peer_recv) = new_stream_pair(&self.side.conn, &self.side.resets);
 		our_send.withhold_fin = self.side.withhold_bidi_fins.clone();
+		our_send.first_byte = Some(self.side.bidi_types.clone());
 		let (peer_send, our_recv) = new_stream_pair(&self.side.conn, &self.side.peer_resets);
 
 		// Deliver (peer_send, peer_recv) to the peer's accept_bi.
@@ -654,6 +669,14 @@ impl MockSession {
 		self.side.conn.close_state.read().clone()
 	}
 
+	/// The first byte, the stream type, of every bidi stream this side has written to,
+	/// in the order each was first written.
+	// Only some test binaries inspect the types.
+	#[allow(dead_code)]
+	pub fn bidi_types(&self) -> Vec<u8> {
+		self.side.bidi_types.lock().unwrap().clone()
+	}
+
 	/// Every code this side has reset a stream with, in order.
 	// Only some test binaries inspect the codes.
 	#[allow(dead_code)]
@@ -702,6 +725,7 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		withheld: Mutex::default(),
 		lossy: Mutex::default(),
 		withhold_bidi_fins: Arc::default(),
+		bidi_types: StreamTypes::default(),
 	});
 
 	let server_side = Arc::new(SessionSide {
@@ -719,6 +743,7 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		withheld: Mutex::default(),
 		lossy: Mutex::default(),
 		withhold_bidi_fins: Arc::default(),
+		bidi_types: StreamTypes::default(),
 	});
 
 	let new = |side| MockSession {

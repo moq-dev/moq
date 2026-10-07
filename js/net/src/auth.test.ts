@@ -4,6 +4,7 @@ import { type Grant, type Issued, Unsupported } from "./auth.ts";
 import { accept as acceptSession, connect as connectSession, type Established } from "./connection/index.ts";
 import { SessionCode, SessionError, StreamCode, toStreamCode } from "./error.ts";
 import * as Ietf from "./ietf/index.ts";
+import { LiteAuthWire } from "./lite/auth.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair, type MockTransport } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
@@ -54,8 +55,8 @@ async function connect(opts: { publish?: OriginProducer; serverPublish?: OriginP
 	return { client, server, transport: pair.client } satisfies Pair;
 }
 
-// Every case runs on moq-lite-06 and on moq-transport with the MoQ Auth extension.
-describe.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
+// Every case runs on moq-lite-07-wip and on moq-transport with the MoQ Auth extension.
+describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 	test("both sides learn their default grant", async () => {
 		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
 
@@ -273,8 +274,8 @@ describe.each([Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 });
 
 // moq-lite carries patterns, so every grant arrives exactly as issued.
-test("lite-06 carries literal and wildcard grants exactly", async () => {
-	const { client, server } = await connect({ publish: new OriginProducer(), protocol: Lite.ALPN_06 });
+test("lite-07 carries literal and wildcard grants exactly", async () => {
+	const { client, server } = await connect({ publish: new OriginProducer(), protocol: Lite.ALPN_07_WIP });
 	const requests = server.auth.requests();
 	const unions: Record<string, [string[], string[]]> = {
 		"": [["a/**"], []],
@@ -306,12 +307,29 @@ test("lite-06 carries literal and wildcard grants exactly", async () => {
 	server.abort();
 });
 
-test.each([Lite.ALPN_05, Ietf.ALPN.DRAFT_16])("%s has no grant", async (protocol) => {
+test.each([Lite.ALPN_05, Lite.ALPN_06, Ietf.ALPN.DRAFT_16])("%s has no grant", async (protocol) => {
 	const { client, server } = await connect({ publish: new OriginProducer(), protocol });
 	expect(client.auth.grant.peek()).toBeUndefined();
 	await expect(client.auth.add("token")).rejects.toBeInstanceOf(Unsupported);
 	client.abort();
 	server.abort();
+});
+
+// lite-07 presents the connection's credential on an Auth Stream right away; lite-06 never
+// opens one.
+test.each([
+	[Lite.ALPN_06, false],
+	[Lite.ALPN_07_WIP, true],
+])("%s opens an Auth Stream: %p", async (protocol, opens) => {
+	const presented = spyOn(LiteAuthWire.prototype, "present");
+	try {
+		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
+		expect(presented).toHaveBeenCalledTimes(opens ? 2 : 0);
+		client.abort();
+		server.abort();
+	} finally {
+		presented.mockRestore();
+	}
 });
 
 // moq-transport has no stream code for it, so only moq-lite resets with UNAUTHORIZED.
@@ -329,7 +347,7 @@ test("a revoked grant resets its subscriptions with UNAUTHORIZED", async () => {
 	const { client, server } = await connect({
 		publish: clientOrigin,
 		serverPublish: serverOrigin,
-		protocol: Lite.ALPN_06,
+		protocol: Lite.ALPN_07_WIP,
 	});
 	const requests = server.auth.requests();
 	const issued: Issued[] = [];
