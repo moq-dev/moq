@@ -610,7 +610,7 @@ async fn redundant_pair_fails_over(version: &str, loss: Loss) {
 						link.server.abort(Error::Cancel);
 						link.client.abort(Error::Cancel);
 					}
-					// Keep the session and its origin up: only the broadcast goes.
+					// Keep the session and its origin up: only the broadcast, its track, and its open group go.
 					Loss::Ends => kept = Some((link, origin)),
 				}
 				drop(broadcast);
