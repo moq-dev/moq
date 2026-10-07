@@ -480,7 +480,7 @@ impl Config {
 			),
 			(
 				self.lb_id.is_some() || self.load_balancer.is_some(),
-				"--listen-quic-lb-id needs a QUIC listener (--listen)",
+				"--listen-quic-lb-id (load_balancer) needs a QUIC listener (--listen)",
 			),
 		];
 		match refused.into_iter().find(|(set, _)| *set) {
@@ -682,8 +682,9 @@ load_balancer = { id = "ab", nonce = 8 }
 			..Default::default()
 		};
 		type Set = fn(&mut Config);
-		let cases: [(&str, Set); 6] = [
+		let cases: [(&str, Set); 8] = [
 			("--listen-tls-cert", |c| c.tls.cert = vec!["cert.pem".into()]),
+			("--listen-tls-key", |c| c.tls.key = vec!["key.pem".into()]),
 			("--listen-tls-generate", |c| c.tls.generate = vec!["localhost".into()]),
 			("tls.peers", |c| c.tls.peers = Some(crate::tls::Peers::new())),
 			("--listen-preferred-v4", |c| {
@@ -693,6 +694,12 @@ load_balancer = { id = "ab", nonce = 8 }
 				c.preferred_v6 = Some("[2001:db8::1]:443".parse().unwrap())
 			}),
 			("--listen-quic-lb-id", |c| c.lb_id = Some("ab".parse().unwrap())),
+			("--listen-quic-lb-id (load_balancer)", |c| {
+				c.load_balancer = Some(crate::quic::LoadBalancer {
+					id: "ab".parse().unwrap(),
+					nonce: 8,
+				})
+			}),
 		];
 		for (name, set) in cases {
 			let mut config = stream_only();
