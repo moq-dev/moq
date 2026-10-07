@@ -140,7 +140,6 @@ Once every child has landed:
 ## Related
 
 - [P2P](/quest/m3/p2p/README.md) - browser and native peers that become routing nodes over this layer
-- [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - redundant publishers share an explicit epoch
 - [One route cost](/quest/m1/route-cost.md) - Warm and Cold collapse to one static cost
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - the importer half of a redundant pair under one explicit epoch
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a redundant pair shares one epoch
