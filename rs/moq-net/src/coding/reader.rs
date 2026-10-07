@@ -437,7 +437,7 @@ mod tests {
 			.create_frame_owned(
 				crate::frame::Info {
 					size: size as u64,
-					timestamp: crate::Timestamp::ZERO,
+					timestamp: Some(crate::Timestamp::ZERO),
 				},
 				&Default::default(),
 			)

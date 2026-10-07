@@ -2,8 +2,7 @@
 
 ## Goal
 
-`@moq/net` mirrors [moq-net carries untimed frames
-faithfully](/quest/m1/untimed-model.md). An untimed track stays untimed from
+`@moq/net` mirrors the Rust untimed model ([#4822](https://github.com/moq-dev/moq/pull/4822)). An untimed track stays untimed from
 publisher to consumer, and js/net never fills in `Timestamp.now()` on
 receive. Covers `@moq/net` and its in-repo callers
 (`@moq/hang`, `@moq/loc`, `@moq/watch`).
@@ -14,10 +13,10 @@ Decided (2026-10-02): a hand-written change now, rather than
 waiting for [Generated @moq/net](/quest/m1/rs2ts/README.md). That line is
 long-running and would stall the JS timestamp quests. Whichever lands second
 absorbs the other. The semantics, the end-marker rule and the reasons are in
-the Rust quest; keep the two in step.
+the Rust quest, deleted by [#4822](https://github.com/moq-dev/moq/pull/4822); keep the two in step.
 
 Decided (2026-10-05, types settled 2026-10-06): timedness is per track, as
-the [untimed model](/quest/m1/untimed-model.md) decided and `@moq/net`
+the untimed model decided and `@moq/net`
 mirrors: `timescale` is optional, frames keep an optional timestamp, and a
 frame whose timedness doesn't match its track is refused. Where the
 notes below assume groups that mix timed and untimed frames, this wins.
@@ -47,5 +46,4 @@ changes.
 
 ## Related
 
-- [moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md) - the Rust side and the decisions
 - [Generated @moq/net](/quest/m1/rs2ts/README.md) - will replace this code with generated code

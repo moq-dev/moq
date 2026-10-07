@@ -55,5 +55,4 @@ Decided in planning (2026-10-03):
 
 ## Related
 
-- [Untimed model](/quest/m1/untimed-model.md) - absent timestamps end to end; only real pairs feed the estimate
 - [Shared clock](/quest/m1/shared-clock.md) - the hang catalog's `{wall, timescale}` anchor sits a layer up; this stays media-agnostic
