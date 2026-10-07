@@ -3493,7 +3493,7 @@ mod serve_group_test {
 
 		relay.run.update(lite::SubscribeUpdate {
 			priority: 0,
-			max_age: Duration::from_secs(30),
+			max_delay: Duration::from_secs(30),
 			start_group: None,
 			end_group: None,
 			start_frame: 0,
@@ -3519,7 +3519,7 @@ mod serve_group_test {
 
 		relay.run.update(lite::SubscribeUpdate {
 			priority: 0,
-			max_age: Duration::from_secs(30),
+			max_delay: Duration::from_secs(30),
 			start_group: None,
 			end_group: None,
 			start_frame: 0,

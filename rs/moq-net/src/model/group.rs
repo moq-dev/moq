@@ -540,6 +540,7 @@ impl Producer {
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
 		self.cache.settle(now);
+		self.cache.wakes().presented(timestamp);
 
 		// Ingress payload: one whole frame written.
 		self.stats.frames(1);
@@ -587,6 +588,7 @@ impl Producer {
 
 		// The last frame's tick, reused below so settling does not re-read the clock.
 		let mut now = None;
+		let mut latest = None;
 		for mut frame in frames.drain() {
 			frame.timestamp = frame
 				.timestamp
@@ -596,6 +598,7 @@ impl Producer {
 			state.cache += size;
 			now = state.charge.add(size);
 			state.stamp(frame.timestamp);
+			latest = Some(frame.timestamp);
 			state.frames.push_back(frame);
 		}
 		state.next_index = next_index;
@@ -603,6 +606,9 @@ impl Producer {
 		drop(state);
 
 		self.cache.settle(now);
+		if let Some(latest) = latest {
+			self.cache.wakes().presented(latest);
+		}
 		self.stats.frames(count as u64);
 		self.stats.bytes(bytes);
 		Ok(())
@@ -691,6 +697,7 @@ impl Producer {
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
 		self.cache.settle(now);
+		self.cache.wakes().presented(timestamp);
 
 		// Ingress payload: one frame opened; its bytes are counted per chunk as the
 		// producer writes them.
