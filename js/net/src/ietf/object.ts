@@ -25,6 +25,7 @@ const PROP_TIMESTAMP_DRAFT03 = 0x06n;
 // which the subscriber drops.
 const FIRST_OBJECT_BIT = 0x40;
 
+/** Whether the subgroup header carries FIRST_OBJECT: draft-18 and later, not drafts 14-17. */
 export function hasFirstObjectBit(version: IetfVersion): boolean {
 	switch (version) {
 		case Version.DRAFT_14:
