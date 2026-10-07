@@ -200,14 +200,11 @@ async fn next_event(announced: &MoqAnnounceConsumer) -> MoqAnnounceEvent {
 		.expect("origin ended while waiting for an announce event")
 }
 
-/// The next newly announced route, skipping the `Live` marker wherever it lands.
+/// The next newly announced route.
 async fn next_announced(announced: &MoqAnnounceConsumer) -> MoqAnnounce {
-	loop {
-		match next_event(announced).await {
-			MoqAnnounceEvent::Live => continue,
-			MoqAnnounceEvent::Start { announce } => return announce,
-			other => panic!("expected an announcement, got {other:?}"),
-		}
+	match next_event(announced).await {
+		MoqAnnounceEvent::Start { announce } => announce,
+		other => panic!("expected an announcement, got {other:?}"),
 	}
 }
 
@@ -235,7 +232,7 @@ fn audio_output() -> crate::audio::MoqAudioDecoderOutput {
 		format: MoqAudioSampleFormat::F32,
 		sample_rate: None,
 		channels: None,
-		max_age_us: None,
+		max_delay_us: None,
 	}
 }
 
@@ -647,7 +644,7 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 
 	consumer.update(MoqSubscription {
 		priority: 10,
-		max_age_us: 25_000,
+		max_delay_us: 25_000,
 		group_start: Some(0),
 		group_end: None,
 	});
@@ -1535,7 +1532,6 @@ async fn create_broadcast_is_invisible_until_announced() {
 	assert!(unroutable.is_err(), "an unannounced broadcast is unroutable");
 
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	assert_eq!(next_event(&announced).await, MoqAnnounceEvent::Live);
 	let pending = tokio::spawn(async move { announced.next().await });
 	let waiting = consumer.announced_broadcast("live".into()).unwrap();
 	let waited = tokio::spawn(async move { waiting.available().await });
@@ -1707,28 +1703,6 @@ async fn announced_filters_patterns_and_reports_captures() {
 	assert_eq!(update.captures, Some(vec!["alice".into()]));
 
 	chat.close().unwrap();
-}
-
-/// `Live` marks the end of the routes live at subscribe time: at once on an empty
-/// origin, and after the existing routes otherwise, so an app can list and stop.
-#[tokio::test]
-async fn announced_yields_live_once_caught_up() {
-	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let consumer = origin.consume();
-
-	let empty = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	assert_eq!(next_event(&empty).await, MoqAnnounceEvent::Live);
-
-	let _cam = create_announced(&origin, "cam");
-	await_announced(&consumer, "cam").await;
-
-	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let first = next_event(&announced).await;
-	assert!(
-		matches!(&first, MoqAnnounceEvent::Start { announce } if announce.prefix == "cam"),
-		"{first:?}"
-	);
-	assert_eq!(next_event(&announced).await, MoqAnnounceEvent::Live);
 }
 
 /// A `.`-named broadcast is listed only when the config opts in or the prefix names it.
@@ -2914,7 +2888,7 @@ async fn raw_track_update_during_pending_group_still_reads_datagram() {
 
 	consumer.update(MoqSubscription {
 		priority: 10,
-		max_age_us: 25_000,
+		max_delay_us: 25_000,
 		group_start: Some(0),
 		group_end: None,
 	});
@@ -3348,12 +3322,9 @@ fn without_runtime() {
 			.unwrap();
 
 		let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-		let announcement = loop {
-			match pollster::block_on(announced.next()).unwrap().unwrap() {
-				MoqAnnounceEvent::Live => continue,
-				MoqAnnounceEvent::Start { announce } => break announce,
-				other => panic!("expected an announcement, got {other:?}"),
-			}
+		let announcement = match pollster::block_on(announced.next()).unwrap().unwrap() {
+			MoqAnnounceEvent::Start { announce } => announce,
+			other => panic!("expected an announcement, got {other:?}"),
 		};
 		assert_eq!(announcement.prefix, "test");
 		let _bc = pollster::block_on(consumer.request_broadcast("test".into())).unwrap();

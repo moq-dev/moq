@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>", "Brian Medley <bpm@bmedley.org>"
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.4.11"
+version = "0.4.12"
 edition = "2024"
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
@@ -75,6 +75,7 @@ getrandom = { workspace = true }
 # (LocalBoxFuture) and Rc-backed handles cannot satisfy.
 uniffi = { workspace = true, features = ["wasm-unstable-single-threaded"] }
 web-async = { workspace = true }
+web-transport-trait = { workspace = true }
 web-transport-wasm = { workspace = true }
 
 [build-dependencies]
@@ -83,3 +84,4 @@ uniffi = { workspace = true, features = ["build"] }
 [dev-dependencies]
 # One non-codec test blocks on a future; the main dep is `video`-only.
 pollster = { workspace = true }
+web-transport-trait = { workspace = true }

@@ -1944,25 +1944,19 @@ mod tests {
 	use super::*;
 	use crate::Config as RelayConfig;
 
-	/// The next route and whether it is active, skipping the caught-up marker.
+	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-		loop {
-			return match announced.next().await? {
-				moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
-				moq_net::announce::Event::End(route) => Some((route, false)),
-				moq_net::announce::Event::Live => continue,
-			};
+		match announced.next().await? {
+			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}
 
-	/// The next announcement without blocking, skipping the caught-up marker.
+	/// The next announcement without blocking.
 	fn try_next_announced(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Announce> {
-		loop {
-			return match announced.try_next()? {
-				moq_net::announce::Event::Start(route) => Some(route),
-				moq_net::announce::Event::Live => continue,
-				other => panic!("expected an announcement: got {other:?}"),
-			};
+		match announced.try_next()? {
+			moq_net::announce::Event::Start(route) => Some(route),
+			other => panic!("expected an announcement: got {other:?}"),
 		}
 	}
 

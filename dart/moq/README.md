@@ -13,8 +13,6 @@ await for (final event in connection.announcements(
     // Prefix stays origin-relative; captures reports wildcard matches.
     print(event.announce.prefix);
     print(event.announce.captures);
-  } else if (event is AnnounceEventLive) {
-    break; // every route live at subscribe time has been delivered
   }
 }
 ```

@@ -2,15 +2,10 @@ import Foundation
 import XCTest
 @testable import Moq
 
-/// The next announce event that is not `.live`, which lands wherever the backlog ends.
+/// The next announce event.
 private func nextRoute(_ announced: AnnounceConsumer) async throws -> AnnounceEvent {
-    while true {
-        let next = try await announced.next()
-        let event = try XCTUnwrap(next, "announce stream ended")
-        if event != .live {
-            return event
-        }
-    }
+    let next = try await announced.next()
+    return try XCTUnwrap(next, "announce stream ended")
 }
 
 final class SmokeTests: XCTestCase {
@@ -135,30 +130,6 @@ final class SmokeTests: XCTestCase {
         }
         XCTAssertEqual(update.prefix, "room/alice/chat")
         XCTAssertEqual(update.captures, ["alice"])
-    }
-
-    func testAnnouncedYieldsLiveOnceCaughtUp() async throws {
-        let origin = OriginProducer()
-        let consumer = origin.consume()
-
-        let empty = try consumer.announced()
-        let first = try await empty.next()
-        XCTAssertEqual(first, .live)
-        empty.cancel()
-
-        let broadcast = try origin.createBroadcast(path: "cam")
-        try broadcast.announce()
-        _ = try await consumer.announcedBroadcast(path: "cam").available()
-
-        var listed: [String] = []
-        for try await event in try consumer.announced() {
-            if case .start(let announce) = event {
-                listed.append(announce.prefix)
-            } else if event == .live {
-                break
-            }
-        }
-        XCTAssertEqual(listed, ["cam"])
     }
 
     func testDynamicServesARequestUnderAPrefix() async throws {
