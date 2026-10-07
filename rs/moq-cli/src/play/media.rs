@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use hang::moq_net;
-use moq_net::announce::Event as AnnounceEvent;
 use moq_mux::catalog::{self, Stream};
+use moq_net::announce::Event as AnnounceEvent;
 // tokio's clock, which is the wall clock unless a test pauses it to drive the
 // playout clock itself.
 use tokio::time::Instant;
@@ -333,7 +333,9 @@ impl<O: Output> Media<O> {
 			// Renditions on offer and not one of them playable, with nothing
 			// already running to fall back on.
 			if tasks.is_empty() && !rejected.is_empty() {
-				return Err(Unplayable(format!("no playable rendition in the catalog: {}", rejected.join("; "))).into());
+				return Err(
+					Unplayable(format!("no playable rendition in the catalog: {}", rejected.join("; "))).into(),
+				);
 			}
 		}
 	}
@@ -698,8 +700,15 @@ mod tests {
 		write(&mut new, 10, NEW).await;
 
 		settle(player, &recorder).await;
-		assert!(played(&recorder, OLD) > Duration::ZERO, "the old broadcast never played");
-		assert_eq!(played(&recorder, NEW), PACKET_DURATION * 10, "the new broadcast did not play in full");
+		assert!(
+			played(&recorder, OLD) > Duration::ZERO,
+			"the old broadcast never played"
+		);
+		assert_eq!(
+			played(&recorder, NEW),
+			PACKET_DURATION * 10,
+			"the new broadcast did not play in full"
+		);
 	}
 
 	/// Without epochs (moq-lite 06), a publisher that stops cleanly retracts the
@@ -729,8 +738,16 @@ mod tests {
 		write(&mut new, 10, NEW).await;
 
 		settle(player, &recorder).await;
-		assert_eq!(played(&recorder, OLD), PACKET_DURATION * 10, "the old broadcast did not play in full");
-		assert_eq!(played(&recorder, NEW), PACKET_DURATION * 10, "the new broadcast did not play in full");
+		assert_eq!(
+			played(&recorder, OLD),
+			PACKET_DURATION * 10,
+			"the old broadcast did not play in full"
+		);
+		assert_eq!(
+			played(&recorder, NEW),
+			PACKET_DURATION * 10,
+			"the new broadcast did not play in full"
+		);
 	}
 
 	/// Without epochs (moq-lite 06), a publisher can restart while its old route
@@ -760,8 +777,15 @@ mod tests {
 		write(&mut new, 10, NEW).await;
 
 		settle(player, &recorder).await;
-		assert!(played(&recorder, OLD) > Duration::ZERO, "the old broadcast never played");
-		assert_eq!(played(&recorder, NEW), PACKET_DURATION * 10, "the new broadcast did not play in full");
+		assert!(
+			played(&recorder, OLD) > Duration::ZERO,
+			"the old broadcast never played"
+		);
+		assert_eq!(
+			played(&recorder, NEW),
+			PACKET_DURATION * 10,
+			"the new broadcast did not play in full"
+		);
 	}
 
 	#[tokio::test]

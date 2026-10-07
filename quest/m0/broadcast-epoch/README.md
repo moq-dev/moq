@@ -53,6 +53,11 @@ Decided:
   epoch, so a cluster GOAWAY redial or a standby takeover ends subscriptions
   instead of resuming them (accepted 2026-10-06 over negotiating the field on
   lite-06). A release that needs seamless failover promotes lite-07 first.
+- Restarts do not promote lite-07 (decided 2026-10-07). A broadcast's
+  announcement is its online signal: players start when it is announced, start
+  over on a new announcement (a new epoch, or any change to a route without
+  one), stop when it ends, and wait for it to return indefinitely. Recovery
+  never hinges on a subscription error such as `Unroutable`.
 
 Decided 2026-10-06: older versions and moq-transport lose cross-route resume,
 since their routes have no epoch, but their mid-group start handling stays.
