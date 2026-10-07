@@ -806,10 +806,9 @@ fn opus_catalog(structure: &gst::StructureRef) -> Result<hang::catalog::AudioCon
 	let declared = opus_declared(structure)?;
 
 	if let Some(head) = opus_stream_head(structure)? {
-		let mut rest = head.as_ref();
-		let parsed =
-			moq_mux::codec::opus::Config::parse(&mut rest).context("Opus caps streamheader is not an OpusHead")?;
-		ensure!(rest.is_empty(), "Opus caps streamheader OpusHead has trailing bytes");
+		// RFC 7845 lets a later minor version append fields, so bytes after the head are kept.
+		let parsed = moq_mux::codec::opus::Config::parse(&mut head.as_ref())
+			.context("Opus caps streamheader is not an OpusHead")?;
 		ensure!(
 			parsed.channel_count == channels,
 			"Opus caps channels {channels} contradict the OpusHead's {}",
@@ -1303,6 +1302,26 @@ mod tests {
 			matches!(outcome, CapsOutcome::Failed(ref reason) if reason.contains("contradict")),
 			"a mapping that disagrees with the OpusHead is refused, got {outcome:?}"
 		);
+	}
+
+	// RFC 7845: a later minor version may append fields. The head still publishes, byte for byte.
+	#[test]
+	fn opus_head_with_a_newer_minor_version_publishes_unchanged() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		let mut bytes = moq_mux::codec::opus::Config::new(48_000, 2).encode().unwrap().to_vec();
+		bytes[8] = 2;
+		bytes.extend_from_slice(&[0xAA, 0xBB]);
+		let head = gst::Buffer::from_slice(bytes.clone());
+		let outcome = pad.observe_caps(
+			&broadcast,
+			&catalog,
+			producer_options(&opus_caps(2, None, Some(head)), Some("extended")),
+		);
+		assert!(matches!(outcome, CapsOutcome::Active(_)), "{outcome:?}");
+		let (audio, _) = published_opus(&catalog, "extended");
+		assert_eq!(audio.description.as_deref(), Some(bytes.as_slice()));
 	}
 
 	/// `opusenc` 5.1 caps, plus the packets it produced.
