@@ -91,19 +91,21 @@ impl Message for Subscribe<'_> {
 				decode_params!(r, version,
 					0x02 => _object_delivery_timeout: Option<u64>,
 					0x03 => _authorization_token: Vec<Opaque>,
-					0x04 => rendezvous_timeout: Option<u64>,
-					0x06 => _subgroup_delivery_timeout: Option<u64>,
+					// 0x04 is MAX_CACHE_DURATION in draft-15 (a publisher parameter) and not a
+					// message parameter at all in draft-16. RENDEZVOUS_TIMEOUT arrives in draft-17.
+					0x04 => rendezvous_timeout: Option<u64> where !matches!(version, Version::Draft15 | Version::Draft16),
+					0x06 => _subgroup_delivery_timeout: Option<u64> where !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17),
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => filter: Option<Filter>,
 					0x22 => group_order: Option<GroupOrder>,
-					0x23 => fill: Option<Fill>,
-					0x25 => subgroup_filter: Vec<Opaque>,
-					0x26 => object_id_filter: Vec<Opaque>,
-					0x27 => priority_filter: Vec<Opaque>,
-					0x28 => object_property_filter: Vec<Opaque>,
-					0x32 => new_group_request: Option<u64>,
-					0x35 => include_properties: Option<bool>,
+					0x23 => fill: Option<Fill> where Filter::is_draft20(version),
+					0x25 => subgroup_filter: Vec<Opaque> where has_range_filters(version),
+					0x26 => object_id_filter: Vec<Opaque> where has_range_filters(version),
+					0x27 => priority_filter: Vec<Opaque> where has_range_filters(version),
+					0x28 => object_property_filter: Vec<Opaque> where has_range_filters(version),
+					0x32 => new_group_request: Option<u64> where has_new_group_request(version),
+					0x35 => include_properties: Option<bool> where Filter::is_draft20(version),
 				);
 
 				let range_filters = [
@@ -115,8 +117,9 @@ impl Message for Subscribe<'_> {
 				.iter()
 				.any(|filter| !filter.is_empty());
 
-				// An unknown message parameter is a protocol violation, so each stays rejected
-				// on the drafts that predate it rather than being quietly tolerated.
+				// A parameter that arrived in a later draft is unknown from draft-16 on, which
+				// closes the session. The gates above are what reject it. Draft-14 and draft-15
+				// ignore an unrecognized parameter instead, so it never reaches these checks.
 				if ((fill.is_some() || include_properties.is_some()) && !Filter::is_draft20(version))
 					|| (range_filters && !has_range_filters(version))
 					|| (new_group_request.is_some() && !has_new_group_request(version))
@@ -126,13 +129,6 @@ impl Message for Subscribe<'_> {
 
 				// Defaults to 1, so an absent parameter means the subscriber wants them.
 				let properties_wanted = include_properties.unwrap_or(true);
-
-				// RENDEZVOUS_TIMEOUT arrived in draft-17; 0x04 means MAX_CACHE_DURATION in
-				// draft-15, which is a publisher parameter with no business in a SUBSCRIBE.
-				// An unknown message parameter is a protocol violation, so reject it there.
-				if rendezvous_timeout.is_some() && matches!(version, Version::Draft15 | Version::Draft16) {
-					return Err(DecodeError::InvalidValue);
-				}
 
 				// The value is deliberately dropped: we always answer a SUBSCRIBE with what is
 				// published right now, which is the shorter timeout the draft lets a relay pick.
@@ -293,16 +289,16 @@ impl Message for SubscribeOk {
 				properties.max_cache_duration = Parameters::skip(r)?.map(std::time::Duration::from_millis);
 			}
 			_ => {
-				// GROUP_ORDER is only legal here through draft-15, but keep accepting it so a
-				// peer that still sends it doesn't have its session torn down over a hint.
-				// LARGEST_OBJECT is required on every draft once the track has content, so
-				// rejecting it would tear down a session over a parameter compliant
-				// publishers must send. EXPIRES is ignored, as on draft-14.
+				// GROUP_ORDER and MAX_CACHE_DURATION are legal here only in draft-15. Draft-16
+				// still knows GROUP_ORDER, so one on this message is ignored. From draft-17
+				// it closes the session. LARGEST_OBJECT is required once the track has
+				// content, so rejecting it would tear down a session over a parameter
+				// compliant publishers must send. EXPIRES is ignored, as on draft-14.
 				decode_params!(r, version,
-					0x04 => max_cache_duration: Option<u64>,
+					0x04 => max_cache_duration: Option<u64> where version == Version::Draft15,
 					0x08 => _expires: Option<u64>,
 					0x09 => largest: Option<Location>,
-					0x22 => group_order: Option<GroupOrder>,
+					0x22 => group_order: Option<GroupOrder> where version == Version::Draft15,
 				);
 				properties = Properties::decode(r, version)?;
 				properties.group_order = properties.group_order.or(group_order);
@@ -464,11 +460,10 @@ impl Message for SubscribeUpdate {
 				decode_params!(r, version,
 					0x02 => _object_delivery_timeout: Option<u64>,
 					0x03 => _authorization_token: Vec<Opaque>,
-					0x06 => _subgroup_delivery_timeout: Option<u64>,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => _filter: Option<Filter>,
-					0x32 => new_group_request: Option<u64>,
+					0x32 => new_group_request: Option<u64> where has_new_group_request(version),
 				);
 
 				// NEW_GROUP_REQUEST arrived in draft-16.
@@ -495,22 +490,25 @@ impl Message for SubscribeUpdate {
 					let _required_request_id_delta = r.varint()?;
 				}
 				// Nothing reads an update's Range Filters yet; they are consumed so a legal
-				// update does not fail the session. TRACK_PROPERTY_FILTER (0x29) is legal
-				// only on an update to SUBSCRIBE_TRACKS, which the message alone can't tell.
+				// update does not fail the session. TRACK_PROPERTY_FILTER (0x29) and
+				// TRACK_NAMESPACE_PREFIX (0x34) are legal only on some request types, which
+				// the message alone can't tell, so a legal update is accepted and the value
+				// is not applied.
 				decode_params!(r, version,
 					0x02 => _object_delivery_timeout: Option<u64>,
 					0x03 => _authorization_token: Vec<Opaque>,
-					0x06 => _subgroup_delivery_timeout: Option<u64>,
+					0x06 => _subgroup_delivery_timeout: Option<u64> where !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17),
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => _filter: Option<Filter>,
-					0x23 => fill: Option<Fill>,
-					0x25 => subgroup_filter: Vec<Opaque>,
-					0x26 => object_id_filter: Vec<Opaque>,
-					0x27 => priority_filter: Vec<Opaque>,
-					0x28 => object_property_filter: Vec<Opaque>,
-					0x29 => track_property_filter: Vec<Opaque>,
+					0x23 => fill: Option<Fill> where Filter::is_draft20(version),
+					0x25 => subgroup_filter: Vec<Opaque> where has_range_filters(version),
+					0x26 => object_id_filter: Vec<Opaque> where has_range_filters(version),
+					0x27 => priority_filter: Vec<Opaque> where has_range_filters(version),
+					0x28 => object_property_filter: Vec<Opaque> where has_range_filters(version),
+					0x29 => track_property_filter: Vec<Opaque> where has_range_filters(version),
 					0x32 => _new_group_request: Option<u64>,
+					0x34 => _prefix: Option<super::parameters::TrackNamespace> where !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17),
 				);
 
 				let range_filters = [
@@ -645,14 +643,15 @@ mod tests {
 		}
 	}
 
-	/// 0x04 only means RENDEZVOUS_TIMEOUT from draft-17 on; in draft-15 it is
-	/// MAX_CACHE_DURATION, a publisher parameter that has no business in a SUBSCRIBE.
+	/// 0x04 is MAX_CACHE_DURATION in draft-15, defined for other messages, so a SUBSCRIBE
+	/// that carries it is ignored. Draft-16 dropped the id, which makes it unknown.
 	#[test]
-	fn rendezvous_timeout_is_rejected_before_draft17() {
-		for version in [Version::Draft15, Version::Draft16] {
-			let encoded = subscribe_with_rendezvous(0, version);
-			decode_message::<Subscribe>(&encoded, version).expect_err(&format!("{version} must reject parameter 0x04"));
-		}
+	fn cache_duration_on_subscribe_follows_the_draft() {
+		let draft15 = subscribe_with_rendezvous(0, Version::Draft15);
+		decode_message::<Subscribe>(&draft15, Version::Draft15).expect("draft-15 ignores MAX_CACHE_DURATION");
+
+		let draft16 = subscribe_with_rendezvous(0, Version::Draft16);
+		decode_message::<Subscribe>(&draft16, Version::Draft16).expect_err("draft-16 rejects unknown parameter 0x04");
 	}
 
 	/// The first message parameter key on an encoded SUBSCRIBE, or `None` when it carries no
@@ -1244,10 +1243,10 @@ mod tests {
 		assert_eq!(decoded.properties.group_order, Some(GroupOrder::Descending));
 	}
 
-	/// We stopped sending the parameter, but a peer still sending it shouldn't lose its
-	/// session over a hint we ignore anyway.
+	/// GROUP_ORDER left SUBSCRIBE_OK after draft-15. Draft-18 closes the session when a
+	/// known parameter shows up on a message that does not define it.
 	#[test]
-	fn test_subscribe_ok_v18_accepts_group_order_parameter() {
+	fn test_subscribe_ok_v18_rejects_group_order_parameter() {
 		#[rustfmt::skip]
 		let bytes = vec![
 			42,   // track alias
@@ -1256,9 +1255,7 @@ mod tests {
 			0x02, // descending
 		];
 
-		let decoded: SubscribeOk = decode_message(&bytes, Version::Draft18).unwrap();
-		assert_eq!(decoded.track_alias, 42);
-		assert_eq!(decoded.properties.group_order, Some(GroupOrder::Descending));
+		assert!(decode_message::<SubscribeOk>(&bytes, Version::Draft18).is_err());
 	}
 
 	/// Draft-18 removes the `required_request_id_delta` field (#1615), so the
@@ -1431,13 +1428,21 @@ mod tests {
 		}
 	}
 
+	/// Draft-15 ignores a parameter it does not know. From draft-16 on, a parameter from
+	/// a later draft is unknown, which closes the session.
+	#[test]
+	fn subscribe_ignores_unrecognized_parameters_in_draft15() {
+		let body = subscribe_body(&[0x01, 0x32, 0x00]);
+		decode_message::<Subscribe>(&body, Version::Draft15).expect("draft-15 ignores NEW_GROUP_REQUEST");
+	}
+
 	/// A parameter from a later draft is still an unknown parameter, which the draft makes
 	/// a protocol violation.
 	#[test]
 	fn subscribe_refuses_parameters_before_their_draft() {
 		for (version, params) in [
-			// NEW_GROUP_REQUEST arrived in draft-16.
-			(Version::Draft15, &[0x01, 0x32, 0x00][..]),
+			// SUBGROUP_DELIVERY_TIMEOUT arrived in draft-18, and 0x06 is not a draft-16 id.
+			(Version::Draft16, &[0x01, 0x06, 0x00][..]),
 			// The Range Filters arrived in draft-19.
 			(Version::Draft18, &[0x01, 0x25, 0x00][..]),
 			// INCLUDE_PROPERTIES arrived in draft-20.
@@ -1467,6 +1472,26 @@ mod tests {
 		];
 		let decoded: SubscribeUpdate = decode_message(&body, Version::Draft20).unwrap();
 		assert_eq!(decoded.request_id, RequestId(2));
+	}
+
+	/// SUBGROUP_DELIVERY_TIMEOUT (0x06) is not a draft-16 parameter. Draft-18 defines it
+	/// for SUBSCRIBE, and the value is dropped.
+	#[test]
+	fn subgroup_delivery_timeout_follows_its_draft() {
+		let head: &[u8] = &[
+			0x01, 0x01, 0x04, b'l', b'i', b'v', b'e', 0x05, b'v', b'i', b'd', b'e', b'o',
+		];
+		let body = [head, &[0x01, 0x06, 0x00][..]].concat();
+		assert!(decode_message::<Subscribe>(&body, Version::Draft16).is_err());
+		decode_message::<Subscribe>(&body, Version::Draft18).expect("draft-18 accepts SUBGROUP_DELIVERY_TIMEOUT");
+
+		// GROUP_ORDER (0x22) is known in draft-16 but not defined for REQUEST_UPDATE.
+		// Request ID, Subscription Request ID, one parameter, absolute key, varint value.
+		let update16: &[u8] = &[0x02, 0x0A, 0x01, 0x22, 0x02];
+		decode_message::<SubscribeUpdate>(update16, Version::Draft16).expect("draft-16 ignores GROUP_ORDER");
+		// Draft-18 has no Subscription Request ID. The value is a uint8.
+		let update18: &[u8] = &[0x02, 0x01, 0x22, 0x02];
+		assert!(decode_message::<SubscribeUpdate>(update18, Version::Draft18).is_err());
 	}
 }
 

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { ProtocolViolation } from "../error.ts";
 import * as Path from "../path.ts";
 import { type Cursor, Reader, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
@@ -1557,6 +1558,63 @@ test("SubscribeNamespace: draft-18 omits subscribe options", async () => {
 		expect(decoded.requestId).toBe(4n);
 		expect(decoded.namespace).toBe("example/meeting" as Path.Valid);
 	}
+});
+
+// FORWARD is legal on SUBSCRIBE_NAMESPACE through draft-17. A value other than 0 or 1
+// still closes the session. Draft-18 dropped it from this message.
+test("SubscribeNamespace: FORWARD follows the draft", async () => {
+	const legacy = (version: IetfVersion, value: number) => {
+		const body = [0x01];
+		if (version === Version.DRAFT_17) body.push(0x00);
+		body.push(0x00, 0x01, 0x01, 0x10, value);
+		return framed(body);
+	};
+
+	for (const version of [Version.DRAFT_16, Version.DRAFT_17] as const) {
+		const decoded = await decodeVersioned(
+			legacy(version, 0),
+			SubscribeNamespace.SubscribeNamespaceLegacy.decode,
+			version,
+		);
+		expect(decoded.requestId).toBe(1n);
+		await expect(
+			decodeVersioned(legacy(version, 2), SubscribeNamespace.SubscribeNamespaceLegacy.decode, version),
+		).rejects.toThrow(ProtocolViolation);
+	}
+
+	await expect(
+		decodeVersioned(
+			framed([0x01, 0x00, 0x01, 0x10, 0x00]),
+			SubscribeNamespace.SubscribeNamespace.decode,
+			Version.DRAFT_18,
+		),
+	).rejects.toThrow(ProtocolViolation);
+});
+
+// EXPIRES is a draft-16 message parameter, but not on SUBSCRIBE. Draft-16 ignores it and
+// still reads the parameter after it. Draft-18 closes the session.
+test("Parameters: a known parameter on the wrong message", async () => {
+	const block = new Uint8Array([0x02, 0x08, 0x05, 0x18, 0x07]);
+	const ignored = await Parameters.decode(
+		new Reader(undefined, block, Version.DRAFT_16),
+		Version.DRAFT_16,
+		"subscribe",
+	);
+	expect(ignored.subscriberPriority).toBe(7);
+	expect(ignored.expires).toBeUndefined();
+
+	await expect(
+		Parameters.decode(new Reader(undefined, block, Version.DRAFT_18), Version.DRAFT_18, "subscribe"),
+	).rejects.toThrow(ProtocolViolation);
+});
+
+test("Subscribe: SUBGROUP_DELIVERY_TIMEOUT follows its draft", async () => {
+	const body = framed([...TRACK_HEAD, 0x01, 0x06, 0x00]);
+	await expect(decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_16)).rejects.toThrow(
+		ProtocolViolation,
+	);
+	const decoded = await decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_18);
+	expect(decoded.trackName).toBe("video");
 });
 
 test("Group: draft-18 sets FIRST_OBJECT bit, draft-17 does not", async () => {

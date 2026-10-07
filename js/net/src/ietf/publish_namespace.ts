@@ -66,7 +66,7 @@ export class PublishNamespace {
 			return new PublishNamespace({ requestId, trackNamespace, cluster });
 		}
 
-		await Parameters.decode(r, version); // ignore parameters
+		await Parameters.decode(r, version, "publish-namespace");
 		return new PublishNamespace({ requestId, trackNamespace });
 	}
 }
@@ -134,7 +134,7 @@ export class PublishNamespaceUpdate {
 		if (version === Version.DRAFT_17) {
 			await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
 		}
-		const params = await Parameters.decode(r, version);
+		const params = await Parameters.decode(r, version, "publish-namespace");
 		return new PublishNamespaceUpdate({ requestId, update: Cluster.updateFromParams(params) });
 	}
 }

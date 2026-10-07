@@ -68,7 +68,7 @@ export class SubscribeNamespace {
 		}
 		const requestId = await r.u62();
 		const namespace = await Namespace.decode(r);
-		const params = await Parameters.decode(r, version);
+		const params = await Parameters.decode(r, version, "subscribe-namespace");
 
 		return new SubscribeNamespace({ namespace, requestId, hidden: params.hidden });
 	}
@@ -144,7 +144,7 @@ export class SubscribeNamespaceLegacy {
 		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
 			subscribeOptions = await r.u53();
 		}
-		const params = await Parameters.decode(r, version);
+		const params = await Parameters.decode(r, version, "subscribe-namespace");
 
 		return new SubscribeNamespaceLegacy({ namespace, requestId, subscribeOptions, hidden: params.hidden });
 	}

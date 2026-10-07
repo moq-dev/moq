@@ -55,17 +55,20 @@ impl crate::coding::Decode<Version> for Update {
 			decode_params!(&mut data, version,
 				0x02 => object_timeout: Option<u64>,
 				0x03 => token: Vec<Opaque>,
-				0x06 => subgroup_timeout: Option<u64>,
+				0x06 => subgroup_timeout: Option<u64> where !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17),
 				0x10 => forward: Option<bool>,
 				0x20 => priority: Option<u8>,
 				0x21 => filter: Option<Filter>,
-				0x23 => fill: Option<Fill>,
-				0x25 => subgroup_filter: Vec<Opaque>,
-				0x26 => object_filter: Vec<Opaque>,
-				0x27 => priority_filter: Vec<Opaque>,
-				0x28 => property_filter: Vec<Opaque>,
-				0x29 => track_filter: Vec<Opaque>,
-				0x32 => new_group: Option<u64>,
+				0x23 => fill: Option<Fill> where Filter::is_draft20(version),
+				0x25 => subgroup_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
+				0x26 => object_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
+				0x27 => priority_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
+				0x28 => property_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
+				0x29 => track_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
+				0x32 => new_group: Option<u64> where !matches!(version, Version::Draft14 | Version::Draft15),
+				// Legal on a SUBSCRIBE_NAMESPACE update from draft-18. The message cannot
+				// say which request it updates, so the prefix is consumed and not applied.
+				0x34 => _prefix: Option<super::parameters::TrackNamespace> where !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17),
 			);
 			if !data.is_empty() {
 				return Err(DecodeError::InvalidValue);

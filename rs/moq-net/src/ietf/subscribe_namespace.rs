@@ -138,8 +138,13 @@ impl Message for SubscribeNamespaceLegacy<'_> {
 		};
 
 		// The token is ignored: the session's grant is what authorizes the request.
+		// FORWARD is legal here in draft-15 through draft-17. The value is checked (only
+		// 0 or 1) and then dropped: a namespace subscription has no objects to forward.
+		// Draft-14 has no such parameter, so an unlisted id is ignored. Draft-18 moved
+		// FORWARD onto SUBSCRIBE_TRACKS and closes if it shows up on the new message.
 		decode_params!(r, version,
 			0x03 => _authorization_token: Vec<super::Opaque>,
+			0x10 => _forward: Option<bool> where matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17),
 			HIDDEN_PARAM => hidden: Option<u64>,
 		);
 
@@ -437,6 +442,45 @@ mod tests {
 			))
 			.is_err()
 		);
+	}
+
+	/// FORWARD (0x10) is legal on SUBSCRIBE_NAMESPACE through draft-17. A value other
+	/// than 0 or 1 still closes the session. Draft-18 dropped it from this message.
+	#[test]
+	fn forward_follows_the_draft() {
+		fn with_forward(version: Version, value: u64) -> Vec<u8> {
+			let mut buf = Vec::new();
+			let w = &mut Encoder::new(&mut buf, version.into());
+			RequestId(1).encode(w, version).unwrap();
+			if version == Version::Draft17 {
+				w.varint(0).unwrap();
+			}
+			encode_namespace(w, &Path::default()).unwrap();
+			if matches!(version, Version::Draft16 | Version::Draft17) {
+				w.varint(1).unwrap();
+			}
+			// Count, absolute key, then the raw varint. encode_params! needs a Result.
+			w.varint(1).unwrap();
+			w.varint(0x10).unwrap();
+			w.varint(value).unwrap();
+			buf
+		}
+
+		for version in [Version::Draft15, Version::Draft16, Version::Draft17] {
+			let mut buf = bytes::Bytes::from(with_forward(version, 0));
+			crate::coding::decode_buf(&mut buf, version, SubscribeNamespaceLegacy::decode_msg)
+				.unwrap_or_else(|err| panic!("{version} FORWARD=0: {err}"));
+			assert!(buf.is_empty(), "{version}");
+
+			let mut buf = bytes::Bytes::from(with_forward(version, 2));
+			assert!(
+				crate::coding::decode_buf(&mut buf, version, SubscribeNamespaceLegacy::decode_msg).is_err(),
+				"{version} FORWARD=2"
+			);
+		}
+
+		let mut buf = bytes::Bytes::from(with_forward(Version::Draft18, 0));
+		assert!(crate::coding::decode_buf(&mut buf, Version::Draft18, SubscribeNamespace::decode_msg).is_err());
 	}
 
 	#[test]

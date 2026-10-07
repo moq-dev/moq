@@ -204,13 +204,13 @@ impl Message for Fetch<'_> {
 				let fetch_type = FetchType::decode(buf, version)?;
 				decode_params!(buf, version,
 					0x03 => _authorization_token: Vec<Opaque>,
-					0x0A => fill_timeout: Option<u64>,
+					0x0A => fill_timeout: Option<u64> where !matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17),
 					0x20 => subscriber_priority: Option<u8>,
 					0x22 => group_order: Option<GroupOrder>,
-					0x25 => subgroup_filter: Vec<Opaque>,
-					0x26 => object_id_filter: Vec<Opaque>,
-					0x27 => priority_filter: Vec<Opaque>,
-					0x28 => object_property_filter: Vec<Opaque>,
+					0x25 => subgroup_filter: Vec<Opaque> where has_range_filters(version),
+					0x26 => object_id_filter: Vec<Opaque> where has_range_filters(version),
+					0x27 => priority_filter: Vec<Opaque> where has_range_filters(version),
+					0x28 => object_property_filter: Vec<Opaque> where has_range_filters(version),
 				);
 				let range_filters = [
 					subgroup_filter,
@@ -221,10 +221,9 @@ impl Message for Fetch<'_> {
 				.iter()
 				.any(|filter| !filter.is_empty());
 
-				// An unknown message parameter is a protocol violation, so each stays rejected
-				// on the drafts that predate it: FILL_TIMEOUT arrived in draft-18.
-				let has_fill_timeout = !matches!(version, Version::Draft15 | Version::Draft16 | Version::Draft17);
-				if (fill_timeout.is_some() && !has_fill_timeout) || (range_filters && !has_range_filters(version)) {
+				// Range Filters arrived in draft-19. An earlier draft-16+ peer sending one
+				// is an unknown parameter. Draft-15 ignores an unrecognized parameter.
+				if range_filters && !has_range_filters(version) {
 					return Err(DecodeError::InvalidValue);
 				}
 
@@ -358,11 +357,12 @@ impl Message for FetchOk {
 			_ => {
 				let end_of_track = buf.bool()?;
 				let end_location = Location::decode(buf, version)?;
-				// GROUP_ORDER isn't legal here, but keep accepting it so a peer that still sends
-				// it doesn't have its session torn down over a hint.
+				// MAX_CACHE_DURATION and GROUP_ORDER are legal on FETCH_OK only in draft-15.
+				// Draft-16 still knows GROUP_ORDER, so one here is ignored. From draft-17
+				// it closes the session.
 				decode_params!(buf, version,
-					0x04 => max_cache_duration: Option<u64>,
-					0x22 => group_order: Option<GroupOrder>,
+					0x04 => max_cache_duration: Option<u64> where version == Version::Draft15,
+					0x22 => group_order: Option<GroupOrder> where version == Version::Draft15,
 				);
 				// The timescale is read but not surfaced yet: a fetched object without an
 				// interpretable timestamp is stamped on arrival.

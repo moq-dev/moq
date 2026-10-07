@@ -215,7 +215,7 @@ function encodeHops(hops: Hop[]): Uint8Array {
 export async function decodeParams(r: Reader, version: IetfVersion): Promise<Advert> {
 	let params: Parameters;
 	try {
-		params = await Parameters.decode(r, version);
+		params = await Parameters.decode(r, version, "namespace");
 	} catch (err) {
 		throw new ProtocolViolation(reason(err), { cause: err });
 	}
