@@ -441,7 +441,7 @@ pub(crate) struct FetchOutcome {
 }
 
 /// What an arrival-order read found. A cut's error is read after the track lock
-/// drops: [`group::Producer::abort_error`] takes the group lock.
+/// drops: [`group::Producer::abort_reason`] takes the group lock.
 enum Arrival {
 	Group(group::Producer, usize),
 	End,
@@ -3659,7 +3659,7 @@ impl Cursor {
 							if !super::subscription::before_end(producer.sequence, self.end_sequence) {
 								continue;
 							}
-							return Poll::Ready(Err(producer.abort_error()));
+							return Poll::Ready(Err(producer.abort_reason()));
 						}
 						Arrival::Group(producer, found_index) => (producer, found_index),
 					};
@@ -3720,7 +3720,7 @@ impl Cursor {
 				// that will lower again. A conviction never committed is dropped
 				// uncounted with the cursor.
 				InRange::End => return Poll::Ready(Ok(None)),
-				InRange::Cut(producer) => return Poll::Ready(Err(producer.abort_error())),
+				InRange::Cut(producer) => return Poll::Ready(Err(producer.abort_reason())),
 				InRange::Group(producer) => producer,
 			};
 			let group = producer.consume();

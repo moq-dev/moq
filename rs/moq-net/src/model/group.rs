@@ -855,12 +855,6 @@ impl Producer {
 		self.alive.skipped.load(Ordering::Relaxed)
 	}
 
-	/// The recorded abort. Takes the group lock, so a track scan must call it
-	/// only after releasing the track lock.
-	pub(crate) fn abort_error(&self) -> Error {
-		self.abort_reason()
-	}
-
 	/// Whether the group was finished: it holds every frame it will ever have.
 	pub(crate) fn is_finished(&self) -> bool {
 		self.state.read().fin.is_some()
@@ -1032,7 +1026,9 @@ impl Producer {
 	}
 
 	/// The recorded abort reason, or [`Error::Dropped`] if the group closed without one.
-	fn abort_reason(&self) -> Error {
+	///
+	/// Takes the group lock, so a track scan must call it only after releasing the track lock.
+	pub(crate) fn abort_reason(&self) -> Error {
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 }
