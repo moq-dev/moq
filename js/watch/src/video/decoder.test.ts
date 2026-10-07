@@ -180,21 +180,46 @@ function sample(group: number, timestamp: number, discontinuity = 0): Read {
 	};
 }
 
-async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[]) {
+async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: readonly number[] = []) {
 	const originalDecoder = Object.getOwnPropertyDescriptor(globalThis, "VideoDecoder");
 	const originalChunk = Object.getOwnPropertyDescriptor(globalThis, "EncodedVideoChunk");
 	const submitted: number[] = [];
+	const outputs: number[] = [];
+	const owed = new Set(hold);
+	const pending: Array<() => void> = [];
+	let resets = 0;
 	const next = spyOn(Container.Consumer.prototype, "next").mockImplementation(async () => reads.shift());
 	class Codec {
-		state = "configured";
+		state = "unconfigured";
 		readonly callbacks: VideoDecoderInit;
 		constructor(callbacks: VideoDecoderInit) {
 			this.callbacks = callbacks;
 		}
-		configure() {}
+		configure() {
+			this.state = "configured";
+		}
+		// Pictures still inside the decoder come out ahead of a chunk decoded later, unless reset
+		// discarded them. That is the gap the generation guard misses: it is read when the frame
+		// comes out, which is after the playhead bump.
 		decode(chunk: EncodedVideoChunk) {
+			if (this.state !== "configured") throw new Error("decode on an unconfigured decoder");
 			submitted.push(chunk.timestamp);
-			this.callbacks.output(new Picture(chunk.timestamp) as unknown as VideoFrame);
+			const emit = () => {
+				outputs.push(chunk.timestamp);
+				void this.callbacks.output(new Picture(chunk.timestamp) as unknown as VideoFrame);
+			};
+			if (owed.delete(chunk.timestamp)) {
+				pending.push(emit);
+				return;
+			}
+			for (const earlier of pending) earlier();
+			pending.length = 0;
+			emit();
+		}
+		reset() {
+			resets++;
+			pending.length = 0;
+			this.state = "unconfigured";
 		}
 		close() {
 			this.state = "closed";
@@ -229,6 +254,8 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[]) {
 		decoder,
 		enabled,
 		submitted,
+		outputs,
+		resets,
 		close() {
 			decoder.close();
 			source.close();
@@ -284,6 +311,21 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			expect(playback.submitted).toEqual([1000, 1100, 1200]);
 			// Rejected payloads were still received, but never counted as frames.
 			expect(playback.decoder.out.stats.peek()).toEqual({ frameCount: 3, bytesReceived: 5 });
+		} finally {
+			playback.close();
+		}
+	});
+
+	// A group may restart at its own start, so a picture already queued from later in that
+	// group is above the new keyframe. It must not come out afterwards and late-reject it.
+	it(`${kind} drops a picture queued before a discontinuity`, async () => {
+		const queued = 60_000_000;
+		const playback = await guardedPlayback(kind, [sample(1, 0), sample(1, queued), sample(2, 0, 1)], [queued]);
+		try {
+			expect(playback.submitted).toEqual([0, queued, 0]);
+			expect(playback.outputs).toEqual([0, 0]);
+			expect(playback.resets).toBe(1);
+			expect(playback.decoder.out.timestamp.peek()).toBe(Time.Milli(0));
 		} finally {
 			playback.close();
 		}
