@@ -59,7 +59,9 @@ Decided in planning (2026-10-07, from #4970's review):
   on the old route while any downstream still holds it. JS `route()`
   (`js/net/src/origin.ts`) closes the old front when it swaps to a better
   entry, so it changes too. Update the epoch tests from #4942 and #4962's
-  gateway tests that assert `Unroutable`.
+  three gateway tests that assert `Unroutable` (`a_reconnect_replaces_the_stale_*`
+  in `moq-rtmp` `server.rs`, `moq-srt` `ts.rs`, and `moq-rtc` `whip.rs`): the
+  stale viewer keeps receiving, and a fresh request reaches the reconnect.
 - **No pinned joins.** `Consumer::request` joins an existing front only while
   the route it resolved through still wins. Since #4942 an epochless front
   stays on its first route (`pick`'s `Some(None)` arm in `origin.rs`, the
@@ -114,7 +116,10 @@ withdrawn, then `Restart` and a re-request lands on the replacement. Run
 `just test interop --all`.
 
 Docs: update `doc/concept/moq-lite.md` (publisher epochs) and
-`doc/lib/{rs,js}` announce sections inline.
+`doc/lib/{rs,js}` announce sections inline, plus `doc/bin/rtmp.md`,
+`doc/bin/srt.md`, `doc/bin/rtc.md`, and `doc/bin/relay/cluster.md`, which
+(after #4962) describe the hard switch: a reconnect "replaces it at once" and
+stale subscriptions end with `Unroutable`.
 
 Public API: breaking, a new `AnnounceEvent::Restart` variant (Rust) and
 `"restart"` kind (JS). Wire: a new lite-07 announce message; older versions
