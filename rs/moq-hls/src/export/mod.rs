@@ -10,9 +10,9 @@
 //!
 //! Segment boundaries come from one reference rendition's records, numbered by record sequence,
 //! so edges that share the choice agree without the publisher cutting for HLS. The first choice
-//! is the first video rendition, or the first audio one when there is no video, and it sticks
-//! while that rendition stays in the catalog: a newer rendition that sorts earlier must not
-//! rewind `EXT-X-MEDIA-SEQUENCE`. Every other rendition resolves each segment against its own
+//! is the first video rendition, or the first audio one when there is no video. A video choice
+//! sticks while that rendition stays in the catalog: a newer rendition that sorts earlier must
+//! not rewind `EXT-X-MEDIA-SEQUENCE`. An audio choice switches once to video. Every other rendition resolves each segment against its own
 //! timeline.
 //! An inline-parameter-set codec with no catalog `description` GETs one keyframe
 //! group on the first playlist render to build its init, then caches it.
@@ -398,28 +398,29 @@ async fn watch_catalog(
 ///
 /// The first choice is the first video rendition with a timeline, or the first audio one when
 /// the broadcast has no video. Renditions are ordered by name, so edges choosing together pick
-/// the same one. `current` stays while it is still a rendition with a timeline: a newer
-/// rendition that sorts earlier must not take over, or `EXT-X-MEDIA-SEQUENCE` rewinds. A
-/// reference that leaves falls back to that first choice, which can still rewind.
+/// the same one. A video `current` stays while it is still a rendition with a timeline: a newer
+/// rendition that sorts earlier must not take over, or `EXT-X-MEDIA-SEQUENCE` rewinds. An audio
+/// `current` stays only until a video rendition has a timeline, since video segments cut on
+/// audio records would mostly be gaps; that one switch, like a reference that leaves, rewinds.
 fn reference(catalog: &moq_mux::catalog::hang::Catalog, current: Option<&Reference>) -> Option<Reference> {
 	let archive = catalog.archive.as_ref()?;
 	let indexed = |name: &str| archive.timelines.contains_key(name);
-	if let Some(current) = current {
-		let (kind, name) = current.as_ref();
-		let listed = match kind {
-			Kind::Video => catalog.video.renditions.contains_key(name),
-			Kind::Audio => catalog.audio.renditions.contains_key(name),
-		};
-		if listed && indexed(name) {
-			return Some(Arc::clone(current));
-		}
-	}
 	let video = catalog
 		.video
 		.renditions
 		.keys()
 		.find(|name| indexed(name))
 		.map(|name| (Kind::Video, name));
+	if let Some(current) = current {
+		let (kind, name) = current.as_ref();
+		let listed = match kind {
+			Kind::Video => catalog.video.renditions.contains_key(name),
+			Kind::Audio => video.is_none() && catalog.audio.renditions.contains_key(name),
+		};
+		if listed && indexed(name) {
+			return Some(Arc::clone(current));
+		}
+	}
 	let audio = || {
 		catalog
 			.audio
@@ -3187,24 +3188,39 @@ mod tests {
 		drop((media, earlier_media, video0, added, broadcast));
 	}
 
-	// The reference sticks while it stays listed with a timeline, and falls back to the first
-	// choice once it leaves.
+	// A video reference sticks while it stays listed with a timeline, and falls back to the
+	// first choice once it leaves. An audio reference yields once video has a timeline.
 	#[test]
 	fn the_reference_sticks_until_it_leaves() {
-		let catalog = |names: &[&str]| {
+		let catalog = |videos: &[&str], audios: &[&str]| {
 			let mut catalog = moq_mux::catalog::hang::Catalog::default();
-			for name in names {
+			for name in videos {
 				catalog.video.renditions.insert(name.to_string(), video_config());
 			}
-			catalog.archive = Some(archive(names));
+			for name in audios {
+				catalog.audio.renditions.insert(
+					name.to_string(),
+					hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
+				);
+			}
+			catalog.archive = Some(archive(&[videos, audios].concat()));
 			catalog
 		};
 		let video = |name: &str| Arc::new((Kind::Video, name.to_string()));
+		let audio = |name: &str| Arc::new((Kind::Audio, name.to_string()));
 
-		let first = reference(&catalog(&["b"]), None);
+		let first = reference(&catalog(&["b"], &[]), None);
 		assert_eq!(first, Some(video("b")));
-		assert_eq!(reference(&catalog(&["a", "b"]), first.as_ref()), Some(video("b")));
-		assert_eq!(reference(&catalog(&["a", "c"]), first.as_ref()), Some(video("a")));
+		assert_eq!(reference(&catalog(&["a", "b"], &[]), first.as_ref()), Some(video("b")));
+		assert_eq!(reference(&catalog(&["a", "c"], &[]), first.as_ref()), Some(video("a")));
+
+		let first = reference(&catalog(&[], &["b"]), None);
+		assert_eq!(first, Some(audio("b")));
+		assert_eq!(reference(&catalog(&[], &["a", "b"]), first.as_ref()), Some(audio("b")));
+		assert_eq!(
+			reference(&catalog(&["v"], &["a", "b"]), first.as_ref()),
+			Some(video("v"))
+		);
 	}
 
 	// A new reference numbers segments from its own records, so its URLs carry its own tag and
