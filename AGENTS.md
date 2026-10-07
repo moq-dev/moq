@@ -8,7 +8,7 @@ This file is split into nested `AGENTS.md` files based on the language/situation
 - Read `CONTRIBUTING.md` when dealing with PRs.
 - Read `PROMPTING.md` before instructing other agents via context, memory, plans, or reviews.
 - Read `*/AGENTS.md` if the file exists before touching a root directory.
-- Read (and keep up-to-date) `doc/*.md` for user-facing documentation.
+- `doc/` is the feature entry point, not a reference. Update it only when a change alters what a user would do; see `doc/AGENTS.md`.
 
 # Required
 
@@ -101,11 +101,10 @@ The `quest` binary comes from the kixelated/quest flake input and serves the que
 | `rs/moq-ffi` | `rs/moq-c`, `{py,swift,kt,dart}/`, `go/wrapper/moq/*.go` (the `go/ffi` and `dart/moq_ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs` or `dart/moq`), `doc/lib/{py,swift,kt,go,dart,c}` |
 | `rs/moq-net` wire/API | `js/net`, `doc/concept`, `drafts/draft-lcurley-moq-lite.md` (if the wire spec changes) |
 | `rs/hang` catalog/container | `js/hang`, `doc/concept`, `drafts/draft-lcurley-moq-hang.md` (if the format spec changes) |
-| `rs/moq-token` | `js/token` |
+| `rs/moq-auth` | `js/auth`, `doc/bin/relay/auth.md` |
 | `rs/moq-stats` wire (track names, frame shapes) | `doc/bin/relay/config.md` (stats section) |
 | `rs/moq-relay` config/behavior | `doc/bin/relay/` |
 | `rs/moq-cli` | `doc/bin/cli.md` |
-| `rs/moq-token-cli` | `doc/bin/relay/auth.md`, `doc/lib/rs/moq-token.md`, `doc/lib/rs/index.md` |
 | `rs/moq-gst` | `doc/bin/gstreamer.md` |
 | `rs/moq-c` C ABI (`moq.h`) | `cpp/obs/src`, `doc/bin/obs.md` |
 | `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |

@@ -20,23 +20,11 @@ back. This is what `moq import` / `export` and the gateways are built on.
 | Annex-B (H.264, H.265) | yes | yes | Parameter sets extracted to the catalog or re-injected per keyframe. |
 
 Importers fill the catalog from the bitstream, split groups at keyframes, and
-publish the source's own timestamps. The catalog clock maps the first frame to
-the time it arrived, and every track keeps that one mapping. The catalog is
-held until that first frame, so the first snapshot already carries the final
-clock. A group that starts before the previous group's start ends the import;
-a keyframe that merely overlaps the previous group's last frame does not. A
-flagged MPEG-TS discontinuity that jumps forward continues the broadcast and
-is declared on the exported clock.
-
-fMP4 export writes one fragment per group, and fixes the track set at the init
-segment. A rendition that returns with the same configuration reuses its track.
-A new rendition, a changed configuration, or a replay of media already written
-ends the export. Restart it to pick up the new set. Other tracks queue for up
-to 30 seconds while the init waits on a description.
-
-MPEG-TS import takes one program unless asked otherwise. The
-[CLI page](/bin/cli) covers multi-program publishing, damaged packets, and the
-feed checks. Those checks grade the input; they do not change the broadcast.
+publish the source's own timestamps, mapped to the wall time the first frame
+arrived. A timeline that rewinds ends the import. fMP4 export fixes its track
+set at the init segment, so a new rendition or a changed configuration ends the
+export. The [CLI page](/bin/cli#import) covers these and the MPEG-TS specifics:
+one program per broadcast, damaged packets, and feed checks.
 
 Data tracks are catalog entries too. The [hang page](/concept/hang#data-tracks)
 describes the modes. A capture time converts onto the broadcast clock; a

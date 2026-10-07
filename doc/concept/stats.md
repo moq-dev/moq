@@ -39,15 +39,14 @@ for a linger (five minutes by default) after its last one leaves. A group that
 returns within the linger keeps its broadcast, so viewer churn doesn't
 unannounce and re-announce it across the mesh; while it lingers empty, its
 tracks hold `{}`. Once the linger elapses with the group still empty, the
-broadcast is unannounced. Group numbers keep increasing across recreated
-tracks and group broadcasts for the producer's life; they may have gaps. A
-recreated compressed track starts a new group with a full snapshot, never a
-delta whose compression state belonged to its previous writer.
+broadcast is unannounced. Group numbers keep increasing for the producer's
+life, across recreated broadcasts, and may have gaps.
 
 ## Tracks
 
 Traffic is split by **tier**, an arbitrary label (a billing class, a region)
-the relay takes from the auth grant or `--cluster-tier`. Each tier has three
+the relay takes from the auth grant, or from `--cluster-tier` for links it
+dials. Each tier has three
 tracks, each in two encodings:
 
 | Track | Frame keyed by | Entry |
@@ -158,8 +157,7 @@ fraction of the plain track's bytes.
 - **Groups.** A group's first frame is the full object. Each later frame is an
   [RFC 7396](https://www.rfc-editor.org/rfc/rfc7396) merge patch against the
   value so far: it carries only the changed counters, and `null` removes a
-  dropped entry. The producer starts a new group once the patches outgrow
-  eight times the snapshot's compressed size, or after 256 frames.
+  dropped entry.
 - **DEFLATE.** Each group's frames form one raw DEFLATE stream, sync flushed
   per frame with the trailing `00 00 ff ff` stripped, as
   [moq-flate](/draft/moq-flate) specifies. The window starts cold at every

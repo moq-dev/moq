@@ -43,9 +43,7 @@ What it demonstrates:
 - **Bidirectional data.** Button presses go up on a raw JSON `command` track; a `status` track comes down with everyone's held buttons and latency. Same relay, same protocol as the media.
 - **Split trust.** In production the game prefix is authenticated (only the server publishes games) while the viewer prefix is anonymous.
 
-Tracks: `catalog.json`, `video0.avc3` (160x144 H.264 at 60 fps), `audio0.opus`,
-and the raw `status` and `command` tracks. Code:
-[`rs/moq-boy`](https://github.com/moq-dev/moq/tree/main/rs/moq-boy) (emulator
+Code: [`rs/moq-boy`](https://github.com/moq-dev/moq/tree/main/rs/moq-boy) (emulator
 and publisher), [`js/moq-boy`](https://github.com/moq-dev/moq/tree/main/js/moq-boy)
 (the `<moq-boy>` element, published as `@moq/boy`), and
 [`demo/boy`](https://github.com/moq-dev/moq/tree/main/demo/boy). The same

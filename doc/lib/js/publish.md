@@ -31,74 +31,36 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | `source` | `camera`, `screen`, or `file`. |
 | `muted`, `invisible` | Disable audio or video capture. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
-| `announce` | When to advertise: once a `source` is live (default), `always`, or `never`. A camera source waits for every enabled track, and `source` waits until each captured track's config resolves or fails, so the first catalog lists every rendition. The broadcast is created while connected either way, but nobody can see or subscribe to it until it is announced. |
+| `announce` | When to advertise: once the `source` is live (default), `always`, or `never`. Nobody can see or subscribe to the broadcast until it is announced. |
 
+Every attribute is also a reactive property. The
+[README](https://www.npmjs.com/package/@moq/publish) lists types and defaults.
 A nested `<video>` gets the raw capture stream; a `<canvas>` is drawn by the
 element. `<moq-publish-support>` shows what the browser can encode.
 
-File demuxers load when decoding a file whose MIME type is empty or does not
-start with `image/`. Camera, screen, and files identified as images do not
-load them. The file picker opens synchronously, before any decoder module
-is loaded.
-
-Camera and microphone failures are readable through the element's
-`el.sources.video` and `el.sources.audio` signals. When these hold a
-`Publish.Source.Camera` or `Publish.Source.Microphone`, their `out.error` signal
-contains an `Error`, such as `NotAllowedError` when permission is refused, and
-clears when capture restarts. A refused capture waits for a permission,
-device, constraint, or enabled-state change instead of repeatedly prompting.
-`<moq-publish-ui>` displays the failure in its status badge.
+Capture failures, such as `NotAllowedError` when permission is refused, land in
+`out.error` on the camera or microphone in `el.sources.video` and
+`el.sources.audio`, and `<moq-publish-ui>` shows them. A refused capture waits
+for a permission, device, or settings change instead of prompting again.
 
 ## Encoding
 
-The video encoder follows its share of the connection's send-rate estimate
-(via `Bandwidth.Allocator`), so several publishers on one connection do not
-each target the whole uplink. Audio reserves its configured bitrate so
-video's share is honest, and keeps encoding at that rate. Codec, resolution,
-framerate, and bitrate are tunable through `el.video.config`; the audio
-encoder exposes its codec and volume. For simulcast or several renditions,
-drop the element and register your own encoders on a `Publish.Broadcast`.
+The video encoder follows its share of the connection's send-rate estimate, so
+several publishers on one connection do not each target the whole uplink.
+Codec, resolution, framerate, and bitrate are tunable through
+`el.video.config`, and `el.video.cut()` asks for an extra keyframe. For
+simulcast, drop the element and register several encoders on a
+`Publish.Broadcast`, as below.
 
-Every audio volume change ramps over `el.audio.fade`, 50ms by default, so
-`volume = 0` is silent once the fade passes. A fade of 0 steps at once; a
-negative or non-finite fade drops the rendition until it is fixed.
-Disabling a rendition (`muted` on the element) ends the audio timeline with
-a marker, so a viewer that stays subscribed, or joins during the pause, never
-plays the audio before it as live.
-
-`el.video.cut()` asks for a keyframe on top of the `keyframeInterval` cadence,
-for a resume, a recording cut, or a known tune-in moment. Requests coalesce into
-the next keyframe, and forced keyframes land at least 500ms apart.
-
-A still source, such as a screen share of an unchanging slide, delivers a frame
-only when its picture changes. `Video.Capture` holds the newest frame and opens
-every new reader with a copy stamped at the moment it attaches, so a viewer or
-recorder that subscribes later still gets the current picture as a keyframe.
-
-The video and audio encoders measure how far their output falls behind the media
-clock when they flush frames. Catalog jitter is the spread above each
-rendition's own recent minimum lateness, so a constant encoder delay is not jitter.
-The advertised value only rises; frame duration alone does not set it.
-The first estimate rise publishes immediately. Later rises within a second
-coalesce into one update at the end of that window carrying the latest value.
-Track additions, removals, and configuration edits publish immediately,
-including any pending estimate.
-
-## Clock
-
-Every timestamp the publisher writes is `performance.now()` in microseconds,
-so camera, microphone, screen, and file sources share one timeline. The catalog
-advertises that mapping as its root `clock` from the first snapshot, with PTS
-zero at `performance.timeOrigin`, so a viewer or an HLS export can name any
-frame's wall time. The mapping is fixed for the page: a system-clock
-adjustment never retimes the broadcast. Stamp your own tracks (e.g. text cues)
-on the same timeline to stay in sync.
+Timestamps are `performance.now()` in microseconds, so every source shares one
+timeline. The catalog's `clock` maps it to wall time. Stamp your own tracks
+(e.g. text cues) on the same timeline to stay in sync.
 
 ## Custom tracks
 
 `broadcast.net` is the underlying `Moq.Broadcast.Producer`, so an application
 can serve its own tracks alongside the media. It is recreated on each
-(re)connection, so acquire it from an effect and reseed the track each time:
+reconnect, so acquire it from an effect and reseed the track each time:
 
 ```ts
 import * as Json from "@moq/json";
@@ -116,10 +78,8 @@ signals.run((effect) => {
 });
 ```
 
-`broadcast.catalog.mutate(c => { c.yourSection = ... })` advertises it without
-touching the media sections, which are folded in from the registered
-renditions. The catalog schema is loose, so an unknown root section passes
-through untouched; cast to name your own:
+Advertise it in the catalog without touching the media sections. The schema
+is loose, so cast to name your own section:
 
 ```ts
 broadcast.catalog.mutate((catalog) => {
@@ -158,21 +118,17 @@ new Publish.Audio.Encoder("audio", { broadcast, capture: audioCapture, enabled: 
 ```
 
 Standalone components start enabled unless you pass `enabled: false` (or a
-signal). Camera and microphone sources may prompt for permission on
-construction, so build an enabled screen source inside the user gesture that
-authorizes screen capture. Audio capture that starts before the page's first
-click or keypress waits for one: browsers suspend Web Audio until then, and the
-audio rendition stays out of the catalog until samples flow.
-
-Every input and output is a signal from [`@moq/signals`](/lib/js/signals).
-Load from a CDN (`https://esm.sh/@moq/publish/element`) for a no-build embed.
+signal). An enabled camera or microphone prompts for permission on
+construction, and a screen source must be built inside the user gesture that
+authorizes it. Audio waits for the page's first click or keypress, since
+browsers suspend Web Audio until then. Every input and output is a signal from
+[`@moq/signals`](/lib/js/signals).
 
 ## Strict CSP
 
 The audio worklet and the capture worker load from `blob:` URLs by default, so
-they need no hosted files but a CSP must allow `blob:` in `script-src` and
-`worker-src`. For a CSP that refuses `blob:`, copy
-`node_modules/@moq/publish/assets/*` into a directory your origin serves, and
+a CSP must allow `blob:` in `script-src` and `worker-src`. Otherwise, copy
+`node_modules/@moq/publish/assets/*` into a directory your origin serves and
 point the package at it before capture starts:
 
 ```ts
@@ -182,7 +138,5 @@ Publish.assets("/moq/");
 ```
 
 The URL must end with `/`. Copy the files again on every upgrade: they change
-with the package. The capture worker only runs where the main thread lacks
-`MediaStreamTrackProcessor` (Firefox and Safari); if the hosted file fails to
-load, capture errors instead of hiding the broken deploy. `@moq/room`
-publishes through `@moq/publish`, so this one call covers it.
+with the package. `@moq/room` publishes through `@moq/publish`, so this one
+call covers it.

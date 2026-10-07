@@ -16,43 +16,27 @@ same way so the cluster converges instead of flapping. Both wire protocols
 carry it: natively on moq-lite, and via the [cluster extension](/draft/moq-cluster)
 on moq-transport 17+.
 
-When a moq-lite-04 or later peer withdraws its last advertisement for a broadcast, a relay
-drops every other route to it that passed through that peer, since each was
-relayed from what the peer just withdrew, rather than falling back to them one
-by one. During reconnect, another session from that peer can still advertise
-the broadcast; an old session's withdrawal does not invalidate that route.
-
-A relay two hops from the publisher's still holds routes relayed through others.
-So a change of a broadcast's best route waits 300 ms before it is announced,
-while a new broadcast and a removed one go out at once. By then the withdrawal
-has usually removed the other stale routes too, and the relay sends one
-retraction instead of advertising each stale path in turn. Requests still
-follow the current best route immediately; only the announcement waits.
+When a moq-lite-04 or later peer withdraws a broadcast, the routes relayed
+through it go with it at once. A change of best route is announced after
+300 ms, so stale paths are retracted once instead of advertised in turn;
+requests follow the new best route immediately.
 
 Routes carrying the same [publisher epoch](/concept/moq-lite#publisher-epochs)
 serve one broadcast. When the route serving it dies, withdraws, or is beaten by
-a cheaper route with that epoch, each subscription continues on the new route
-from the first frame its readers lack, so they see
-every frame once, mid-group included. A route that is still up finishes the
-groups it has open, overlapping the new one. A group neither route delivers is
-dropped once the readers' max delay has passed it. A route through the subscribing peer
-itself is never used. A publisher whose groups restart, such as an encoder
-restarting from group 0, publishes under a new epoch, which replaces the old
-broadcast instead of resuming it. A route without an epoch, including every
-route on moq-lite 06 and older or moq-transport, keeps its subscriptions until it
-goes. Seamless failover needs both: a publisher that announces an epoch, and
-moq-lite 07 on every link the route crosses, since epochs travel on nothing
-older. A cluster that mixes moq-lite 06 and 07 links to the same content has a
-second cost: the route that carries the epoch supersedes the one that does not
-each time it appears, so a flapping moq-lite 07 link cuts the viewers resolved
-through the older one.
+a cheaper one with that epoch, each subscription continues on the new route
+from the first frame its readers lack, so they see every frame once. A
+publisher whose groups restart, such as an encoder restarting from group 0,
+publishes under a new epoch, which replaces the old broadcast instead of
+resuming it. Seamless failover needs a publisher that announces an epoch and
+moq-lite 07 on every link the route crosses. A route without an epoch,
+including every route on moq-lite 06 and older or moq-transport, keeps its
+subscriptions until it goes. In a cluster that mixes moq-lite 06 and 07 links
+to the same content, a flapping 07 link cuts the viewers resolved through the
+06 one.
 
-Failover routes must carry copies of the same broadcast. For each track, the
-relay requires matching timescale, retention window, publisher priority, and
-group ordering. A source with different properties is refused before it serves
-the track. If no compatible source remains, the track fails with
-`Unsupported`. New immutable properties require a new track name or broadcast
-name.
+Failover routes must carry copies of the same broadcast: a source whose track
+differs in timescale, retention, publisher priority, or group order is refused
+for that track.
 
 A route whose original publisher (its first hop) changes is updated in place on
 both wire protocols, so the broadcast never briefly vanishes downstream, and
@@ -102,18 +86,12 @@ connect = [
 ]
 ```
 
-The mark belongs to the link, whichever side dialed. A peer this relay dials
-is upstream when its `connect` or `connect_api` entry says so. A peer that
-dials in is upstream when its [grant](/bin/relay/auth#the-contract) sets
-`"upstream": true` beside `"peer": true`, so an edge whose auth server grants
-that to core certificates treats a core that dials it as upstream too. A
-relay that predates the mark treats every link as transit, so a cluster
-migrates one region at a time.
-
-Which relay dials which is still the peer list's job: there are no roles and
-no topology check, so whatever generates the list applies the layout's rules.
-Hiding a core from clients is admission, not routing: its auth refuses any
-session that is not a cluster peer.
+The mark belongs to the link, whichever side dialed: a dialed peer is upstream
+when its `connect` entry says so, and a peer that dials in when its
+[grant](/bin/relay/auth#the-contract) sets `"upstream": true` beside
+`"peer": true`. A relay that predates the mark treats every link as transit,
+so a cluster migrates one region at a time. There are no roles and no topology
+check; whatever generates the peer list applies the layout's rules.
 
 ## TLS links
 
@@ -142,60 +120,32 @@ link costs 1, which reproduces plain hop counting. Each relay adds the price of
 the link an announcement arrived on before forwarding it, so a route's cost is
 the sum of what it crossed.
 
-Prefix advertisements are forwarded and costed the same way as an exact-path
-route: each hop appends its identity, adds the link price, and passes the
-claim on. An advertised prefix must overlap the publisher's grant, or it is
-refused. A prefix wider than the grant is accepted, but it only routes requests
-for paths the grant covers.
-
 Routing prefers the longest covering prefix, then a fully identified hop list
-over one that holds a 0 (an anonymous hop) at any depth, then the lowest cost,
-then the shortest hop list, then a hash of the requested path and the hop list,
-breaking any remaining tie toward the newest announcement so a reconnecting
-publisher isn't outranked by the session it replaced. Hashing the requested
-path spreads equal-cost advertisers of one prefix, such as a transcode pool,
-across its paths instead of sending every path to one of them, and every relay
-that holds the same routes picks the same one for a given path. An assigned
-identity for an anonymous peer is local selection state and is never written
-into the hop list.
+over one holding an anonymous hop (0), then the lowest cost, then the shortest
+hop list. Remaining ties hash the requested path, so equal-cost advertisers of
+one prefix, such as a transcode pool, split its paths, and every relay picks
+the same one for a given path.
 
 ```toml
 [cluster]
 connect = ["https://sibling.same-dc/?cost=0", "https://us-east.example.com/?cost=10"]
 ```
 
-The same policy reads as an object, which is the only form that accepts
-`egress`, `token`, and [`upstream`](#upstream-links). A bare URL stays valid, and an object whose `url` still
-carries `?cost=` or `?jwt=` alongside those fields is rejected rather than
-given a precedence a migration could silently get wrong.
+The same policy reads as an object, the only form that accepts `token` and
+[`upstream`](#upstream-links):
 
 ```toml
 [cluster]
 connect = [
   { url = "https://sibling.same-dc/", cost = 0 },
-  { url = "https://us-east.example.com/", cost = 10, egress = 10, token = "PEER_JWT" },
+  { url = "https://us-east.example.com/", cost = 10, token = "PEER_JWT" },
 ]
 ```
 
-`cost` is what this relay charges to pull from the peer. `egress` is what it
-declares in SETUP as its own price toward the peer and defaults to `cost`;
-anything else is refused until asymmetric routing lands, so the two are always
-equal today. `token` replaces an inline `?jwt=` with identical authorization
-and redaction.
-
-Price is per direction: pulling from a metered origin can cost far more than
-pushing to it, so each end declares its own and the two need not match. Prices
-aren't static either. A publisher can re-price a live announcement, which is how
-a standby transcoder pool seeds a high cost and drops it once it's working, and
-a relay receiving a GOAWAY re-prices every route learned from that peer to the
-maximum so new subscriptions go elsewhere while existing ones finish.
-
-moq-lite-06 announcements carry two prices, *warm* and *cold*. Both accumulate
-identically today, so routing runs on link costs alone; the split reserves room
-for a warm-copy discount, letting a relay advertise its cached copy cheaper on
-the warm side while the cold price still says who sits closest to the publisher.
-moq-transport has nowhere to carry the cold price, so a route learned from it
-ranks with an unknown (worst-case) one.
+Prices aren't static. A publisher can re-price a live announcement, which is
+how a standby transcoder pool seeds a high cost and drops it once it's working,
+and a relay receiving a GOAWAY re-prices every route learned from that peer to
+the maximum so new subscriptions go elsewhere while existing ones finish.
 
 ## LAN discovery
 
@@ -216,20 +166,12 @@ enabled = true
 # app = "default"                     # DNS-SD subtype; moq-cli shares this name.
 ```
 
-A LAN peer authenticates with its mDNS credential on `/.cluster/<credential>`
-and is never handed `cluster.token`; that token is for `connect` and
-`connect_api` peers only. The advertisement carries the listener fingerprint
-when the certificate was generated or supplied in-memory, the `node` URL when
-one is configured, and at least one of them. `secret` is optional. Without it, anyone who can
-reach the listener joins, so leave it unset only on networks you trust. With
-it, only peers that prove they hold the same key are discovered or accepted.
-mDNS is still an open channel: the secret authenticates the record, it does
-not hide the credential or the node URL. `app` names the DNS-SD application
-this relay advertises under; peers using a different name never discover it.
-It defaults to `default`, which moq-cli shares so the two find each other
-with no configuration. An application built on the library picks its own
-name. Startup waits for at least one interface to announce before the relay
-reports itself ready.
+A LAN peer authenticates with a credential carried in its mDNS record and is
+never handed `cluster.token`. Without `secret`, anyone who can reach the
+listener joins, so leave it unset only on networks you trust. With it, only
+peers that hold the same key are discovered or accepted. The secret
+authenticates the record; it does not hide the node URL. Peers advertising a
+different `app` never discover each other.
 
 ## Dynamic peer lists
 
@@ -276,24 +218,13 @@ timeout; WebSocket links keep their own 30s deadline.
 Peers dial with **mTLS** (recommended: `listen.tls.root` on the listener,
 `connect.tls.cert`/`key` on the dialer) or a **JWT** (inline `?jwt=` on a peer
 URL, `token` on a peer object, or a shared `cluster.token` file for every
-listed peer). The
-accepting relay admits a peer through the same lease as any client: its
-certificate is reported to the auth server, which grants it, so a mesh needs
-`moq auth serve --mtls-publish '**' --mtls-subscribe '**'` (or a server of
-your own that grants the cluster CA) behind `--auth-url`. A relay on
-`--auth-public '**'` admits peers through that grant instead, as long as they
-send no `cluster.token`: public rules refuse a token. LAN peers
-authenticate with the mDNS credential on `/.cluster/<credential>`, a secret
-the relay minted for itself and checks locally, and never receive
-`cluster.token`. Dials retry forever with capped backoff, so a rejected peer
-is loud in the logs rather than fatal. See [Authentication](/bin/relay/auth#mtls).
-
-A relay records whether each route entered here or came from a peer, which the
-hop list alone cannot say: a client and a peer each add one hop. Routes over a
-dial this relay made, and over an accepted LAN peer, count as a peer's. An
-accepted peer counts only when its grant sets `peer: true`; otherwise it looks
-like a client ingesting here. An embedder reads this as `Route::source()` and
-filters with `origin::Consumer::local()`.
+listed peer). The accepting relay admits a peer like any client, so a mesh
+needs an auth server that grants the cluster CA, such as
+`moq auth serve --mtls-publish '**' --mtls-subscribe '**'`. An accepted peer
+counts as a cluster peer only when its grant sets `peer: true`, which
+`moq auth serve` never does; otherwise what it announces counts as ingest
+here, like a client's. Dials retry forever with capped backoff, so a rejected
+peer is loud in the logs rather than fatal. See [Authentication](/bin/relay/auth#mtls).
 
 The `/nodes` [internal endpoint](/bin/relay/http#get-nodes) lists the peers
 this relay dialed and holds a session with.

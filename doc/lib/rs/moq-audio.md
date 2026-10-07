@@ -16,32 +16,20 @@ capture or playback is enabled.
 | Module | Does |
 | --- | --- |
 | `capture` | Microphones via CoreAudio, WASAPI, ALSA (and PipeWire/PulseAudio hosts), plus macOS system audio |
-| `encode` | PCM to Opus (with DTX and voice-activity signaling), raw PCM, or AAC-LC through a platform encoder |
-| `decode` | Opus, PCM, and AAC-LC back to PCM, resampled to the rate you want |
+| `encode` | PCM to Opus (mono or stereo, with DTX and voice activity) or raw PCM |
+| `decode` | Opus (up to 7.1), PCM, and AAC-LC (mono or stereo) back to PCM, resampled to the rate you want |
 | `playback` | One output device mixing every track in a call, with click-free volume ramps |
 | `aec` | Acoustic echo cancellation (a port of WebRTC's), so a laptop with no headset doesn't feed itself back |
 
 The microphone opens only while someone listens, and can be swapped without
-changing the track subscribers know. Opus packetization is 10 ms at the
-default low-latency preset and 20 ms otherwise. That is packetization, not a
-delay guarantee: Opus adds its lookahead either way. AAC frames stay 1024
-samples.
+changing the track subscribers know. Opus packetizes 10 ms frames at the
+default low-latency preset. There is no AAC encoder, so an AAC encode request is
+refused; AAC decode is for broadcasts from the ingest gateways.
 
-What actually decodes and encodes today:
-
-- **Opus** decode is mono, stereo, or surround up to 7.1 on every host. Encode is mono or stereo. Ambisonics and unpositioned channel mappings are refused.
-- **PCM** in both directions.
-- **AAC-LC** decodes mono or stereo. HE-AAC signaled only in band plays as its half-rate LC core. Encoding AAC is refused on every host until a platform encoder is wired in, and Linux has no OS encoder to wire.
-
-Playback writes never block. Dropped live samples are reported and should not
-be retried, since a retry would add latency. `Sink::buffered()` is how far
-ahead the speaker is, which is what a video clock steers by. Voice activity is
-read off the Opus stream, so a call UI does not need a second detector.
-
-Echo cancellation is one control set per playback engine and one live
-microphone. A second microphone, or a second canceller on the same engine,
-is refused until the first capture is dropped. Disabling it is a passthrough;
-the device stays open.
+Playback writes never block: samples that do not fit are dropped and
+reported, and retrying them would only add latency. Voice activity is read off the Opus
+stream, so a call UI needs no second detector. Echo cancellation pairs one
+playback engine with one live microphone.
 
 ```bash
 cargo add moq-audio --features playback
