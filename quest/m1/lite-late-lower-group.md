@@ -32,10 +32,10 @@ Decided:
 - `raise_start_to` applies only when the subscription has no explicit floor
   (`start.is_none()`). With an explicit floor, `SUBSCRIBE_START` still reports
   the first served group, but nothing below it is suppressed.
-- Aggregation follows [lite-07 Latest flag](/quest/m1/lite-latest.md): letting
+- Aggregation follows [lite-07 Live flag](/quest/m1/lite-live.md): letting
   an explicit floor survive mixing with `None` starved a floorless subscriber
-  until the floor's group existed (#5000's review), so the floor and "the latest
-  group" become separate fields and merge as min and OR.
+  until the floor's group existed (#5000's review), so the floor and `Live`
+  become separate fields and merge as min and OR.
 - `start_floor_suppresses_late_lower_arrivals` stays as the `None` case: it
   subscribes with `None`, receives group 7, raises the start to 7 as
   `SUBSCRIBE_START` does, and group 5 is still suppressed. Add its explicit-floor
@@ -54,7 +54,7 @@ of group 0, and a fresh group 0 reaches only the second.
 
 ## Required
 
-- [lite-07 Latest flag](/quest/m1/lite-latest.md) - floors and "the latest group" are separate fields, so merging them never starves a subscriber
+- [lite-07 Live flag](/quest/m1/lite-live.md) - floors and `Live` are separate fields, so merging them never starves a subscriber
 
 ## Closes
 
