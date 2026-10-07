@@ -383,7 +383,7 @@ run_audio_comparison() {
     HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
 
     printf '\nAudio grouping: 50 fps, 200-byte frames, 0 / 100 / 200 ms groups\n'
-    printf '%-28s %10s %8s %8s %8s\n' shape recv-fps p99-ms CPU RSS-MiB
+    printf 'shape\trecv-fps\tp99-ms\tCPU\tRSS-MiB\n'
     local connections subscribers group_size label
     for group_size in 0 4 9; do
         for connections in 16 32; do

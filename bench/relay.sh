@@ -246,7 +246,7 @@ run_workload() {
         --startup 2s \
         --duration 10s \
         --report 500ms \
-        --output "$stats" "${overrides[@]}" >"$directory/load.log" 2>&1; then
+        --output "$stats" ${overrides[@]+"${overrides[@]}"} >"$directory/load.log" 2>&1; then
         printf 'load benchmark failed: %s/%s\n' "$label" "$workload" >&2
         cat "$directory/load.log" >&2
         return 1

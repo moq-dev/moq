@@ -510,8 +510,8 @@ export class Encoder {
 
 						// Every audio frame decodes on its own, so any of them can open a group: the
 						// first one at or past the minimum after the open group's start. Frames forward
-						// as they are written, so a longer group adds no latency, and a dropped one is
-						// left to the codec's PLC.
+						// as they are written rather than waiting for the group to fill. A dropped
+						// group leaves a gap for the codec's PLC.
 						const keyframe = live.start === undefined || timestamp - live.start >= this.#groupDuration;
 						if (keyframe) live.start = timestamp;
 						live.producer.encode(frame, timestamp, keyframe);

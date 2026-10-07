@@ -72,11 +72,12 @@ per group instead, such as `Time.Milli(100)`: the first frame at least 100ms
 after the group's first timestamp opens the next group and closes the previous
 one. If encoding pauses, the current group stays open until the next frame or
 timeline marker. Frames still forward as they are encoded, so grouping does
-not buffer them,
-but loss gets coarser: a viewer that falls behind skips a whole group, and a
-lost frame holds back the rest of its group until it is retransmitted. A 60ms
+not buffer them, but loss gets coarser: a viewer that falls behind skips a
+whole group, and a lost frame holds back the rest of its group until it is retransmitted. A 60ms
 Opus `frameDuration` also cuts the group rate, without code, at the cost of
-encoder latency.
+encoder latency. The synthetic `just bench-audio` workload reports higher p99
+delivery latency with longer groups; immediate forwarding is not a promise of
+unchanged end-to-end latency.
 
 `el.video.cut()` asks for a keyframe on top of the `keyframeInterval` cadence,
 for a resume, a recording cut, or a known tune-in moment. Requests coalesce into

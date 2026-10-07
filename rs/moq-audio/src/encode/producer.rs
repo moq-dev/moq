@@ -47,9 +47,11 @@ pub struct Options {
 	/// and its bookkeeping, so raising this trades per-group overhead for coarser
 	/// loss: a viewer that falls behind skips a whole group, and a lost packet
 	/// stalls the rest of its group until retransmitted. Packets still forward as
-	/// they are encoded, so a longer group adds no latency on its own. A longer
+	/// they are encoded rather than buffered until the group fills. A longer
 	/// [`Settings::frame_duration`] (up to 60 ms for Opus) also packs more audio
-	/// per group, at the cost of encoder latency.
+	/// per group, at the cost of encoder latency. An unfinished group remains open
+	/// across a pause or [`Producer::reset_epoch`] until the next write; use
+	/// [`Producer::discontinuity`] to close it when capture stops.
 	pub group_duration: std::time::Duration,
 }
 
@@ -603,7 +605,7 @@ mod tests {
 	/// Terminal Opus lookahead samples survive both exact-frame and partial-frame input.
 	#[tokio::test]
 	async fn finish_publishes_the_opus_lookahead_tail() {
-		for frames in [960, 860] {
+		for (group_ms, frames) in [(0, 960), (0, 860), (100, 2_880), (100, 2_780)] {
 			let input = Input {
 				format: Format::F32,
 				sample_rate: 48_000,
@@ -611,6 +613,7 @@ mod tests {
 			};
 			let options = Options {
 				track: Some("audio".to_string()),
+				group_duration: Duration::from_millis(group_ms),
 				settings: Settings {
 					layout: Layout::Mono,
 					bitrate: Some(moq_net::bandwidth::Rate::from_bps(128_000)),
@@ -971,6 +974,62 @@ mod tests {
 				sizes.push(frames);
 			}
 			assert_eq!(sizes, expected, "group duration {group_ms} ms");
+		}
+	}
+
+	/// Timeline breaks close a partial group and reset the resumed group's packet count.
+	#[tokio::test]
+	async fn group_duration_restarts_after_a_timeline_break() {
+		for deferred in [false, true] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let consumer = broadcast.consume();
+			let input = Input {
+				format: Format::F32,
+				sample_rate: 48_000,
+				layout: Layout::Mono,
+			};
+			let options = Options {
+				track: Some("audio".to_string()),
+				group_duration: Duration::from_millis(100),
+				..Options::default()
+			};
+			let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+			let mut track = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
+
+			for index in 0..2 {
+				producer.write(&full_frame(index * 20_000)).unwrap();
+			}
+			let mut partial = track.recv_group().await.unwrap().expect("partial group");
+			for _ in 0..2 {
+				assert!(
+					partial.read_frame().await.unwrap().is_some(),
+					"packets forward before the group fills"
+				);
+			}
+			assert!(partial.poll_read_frame(&moq_net::kio::Waiter::noop()).is_pending());
+
+			if deferred {
+				producer.reset_epoch();
+				assert!(partial.poll_read_frame(&moq_net::kio::Waiter::noop()).is_pending());
+			} else {
+				producer.discontinuity().unwrap();
+				assert!(partial.read_frame().await.unwrap().is_none());
+			}
+			for index in 0..5 {
+				producer.write(&full_frame(1_000_000 + index * 20_000)).unwrap();
+			}
+			assert!(partial.read_frame().await.unwrap().is_none());
+			let mut resumed = track.recv_group().await.unwrap().expect("resumed group");
+			assert_eq!(
+				resumed.sequence,
+				partial.sequence + 2,
+				"one marker separates the epochs"
+			);
+			for _ in 0..5 {
+				assert!(resumed.read_frame().await.unwrap().is_some());
+			}
+			assert!(resumed.read_frame().await.unwrap().is_none());
 		}
 	}
 

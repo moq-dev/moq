@@ -91,11 +91,15 @@ that way there.
 Each packet is its own group by default, so a relay pays a stream and a
 group's bookkeeping per 20 ms Opus frame. `encode::Options::group_duration`
 sets a minimum per group instead, for every codec: the packet that reaches it
-closes the group. Packets still forward as they are encoded, so this adds no
-latency, but loss gets coarser: a subscriber that falls behind skips a whole
+closes the group. During a pause or after `reset_epoch()`, a partial group
+stays open until the next write; `discontinuity()` closes it immediately.
+Packets forward as they are encoded rather than waiting for the group to fill,
+but loss gets coarser: a subscriber that falls behind skips a whole
 group, and a lost packet holds back the rest of its group until it is
 retransmitted. A 60 ms Opus `Settings::frame_duration` also cuts the group
-rate, without code, at the cost of encoder latency.
+rate, without code, at the cost of encoder latency. The synthetic
+`just bench-audio` workload reports higher p99 delivery latency with longer
+groups; immediate forwarding is not a promise of unchanged end-to-end latency.
 
 Highlights:
 
