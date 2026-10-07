@@ -6,7 +6,7 @@ import { Reader, Stream, type Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { GoAway } from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
-import { MaxRequestId, REQUEST_LIMIT } from "./request.ts";
+import { initialMaxRequestId, MaxRequestId, REQUEST_WINDOW } from "./request.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /** Draft-14 to -16: the request ID is not valid for this peer (wrong parity or a duplicate). */
@@ -151,10 +151,13 @@ export class ControlStreamAdapter implements Session {
 	#maxRequestId: bigint;
 	#maxRequestIdResolves: (() => void)[] = [];
 
-	// The exclusive bound advertised to the peer, and the requests still holding a slot.
-	// Closing one raises the bound by 2 (one ID of the peer's parity) and sends MAX_REQUEST_ID.
+	// The peer's requests, flow controlled as moq-net does: at most `#peerWindow` open at
+	// once, every ID below `#peerMax`, and once half the window has closed the bound rises
+	// by the IDs they spent and goes out as one MAX_REQUEST_ID.
+	#peerWindow: bigint;
 	#peerMax: bigint;
 	#open = new Set<bigint>();
+	#retired = 0n;
 	#granting = false;
 	#grantDirty = false;
 
@@ -169,7 +172,7 @@ export class ControlStreamAdapter implements Session {
 		version: IetfVersion,
 		maxRequestId: bigint,
 		client: boolean,
-		peerLimit: bigint = REQUEST_LIMIT,
+		window: bigint = REQUEST_WINDOW,
 	) {
 		this.#quic = quic;
 		this.#reader = controlStream.reader;
@@ -178,7 +181,8 @@ export class ControlStreamAdapter implements Session {
 		this.#writer.version = version;
 		this.version = version;
 		this.#maxRequestId = maxRequestId;
-		this.#peerMax = peerLimit;
+		this.#peerWindow = window;
+		this.#peerMax = initialMaxRequestId(!client, window);
 		this.#requestId = client ? 0n : 1n;
 		this.#client = client;
 	}
@@ -275,7 +279,7 @@ export class ControlStreamAdapter implements Session {
 
 	/** Give back a slot taken by {@link admitRequest}. */
 	releaseRequest(requestId: bigint): void {
-		if (this.#open.delete(requestId)) this.#grant();
+		if (this.#open.delete(requestId)) this.#retire();
 	}
 
 	/**
@@ -466,7 +470,7 @@ export class ControlStreamAdapter implements Session {
 			if (namespaces.get(registered.namespace) === requestId) namespaces.delete(registered.namespace);
 		}
 
-		if (held) this.#grant();
+		if (held) this.#retire();
 	}
 
 	/** Reject a request ID the peer is not allowed to use. */
@@ -486,17 +490,26 @@ export class ControlStreamAdapter implements Session {
 		if (this.#open.has(requestId)) {
 			this.#refuse(INVALID_REQUEST_ID, "duplicate request id");
 		}
+		this.#checkLive();
 		this.#open.add(requestId);
 	}
 
 	/**
 	 * An update spends a request ID and does not keep a stream, so the slot it took
-	 * is free again immediately. Naming an open request does not spend one.
+	 * is retired immediately. Naming an open request does not spend one.
 	 */
 	#admitUpdate(requestId: bigint): void {
 		if (this.#open.has(requestId)) return;
 		this.#checkPeer(requestId);
-		this.#grant();
+		this.#checkLive();
+		this.#retire();
+	}
+
+	/** A peer reusing IDs below the bound still cannot hold more than the window open. */
+	#checkLive(): void {
+		if (BigInt(this.#open.size) >= this.#peerWindow) {
+			this.#refuse(TOO_MANY_REQUESTS, "too many open requests");
+		}
 	}
 
 	#refuse(code: number, message: string): never {
@@ -508,9 +521,15 @@ export class ControlStreamAdapter implements Session {
 		throw new RequestWindowError(code, message);
 	}
 
-	/** Raise the peer's exclusive bound by one ID and send it, coalescing a burst into one write. */
-	#grant(): void {
-		this.#peerMax += 2n;
+	/**
+	 * Count a request that ended. Once half the window has, raise the bound by the IDs
+	 * they spent and send it, so grants cost a fraction of the requests they admit.
+	 */
+	#retire(): void {
+		this.#retired += 1n;
+		if (this.#retired * 2n < this.#peerWindow) return;
+		this.#peerMax += this.#retired * 2n;
+		this.#retired = 0n;
 		this.#grantDirty = true;
 		if (this.#granting || this.#closed) return;
 		this.#granting = true;

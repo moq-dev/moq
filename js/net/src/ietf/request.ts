@@ -5,14 +5,22 @@ import * as Properties from "./properties.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /**
- * Request IDs a draft-14 to -16 peer may have in flight.
+ * Requests a draft-14 to -16 peer may hold open at once.
  *
- * SETUP's MAX_REQUEST_ID is this exclusive bound (the draft's "maximum request
- * ID plus 1"). Even IDs are the client's and odd IDs are the server's, so each
- * peer can use about half of them. Closing a request raises the bound by 2,
- * one more ID of that parity. Draft-17 dropped the field.
+ * Sized like moq-net's window: twice its default 100,000 announce and 10,000
+ * subscription caps. Draft-17 dropped MAX_REQUEST_ID.
  */
-export const REQUEST_LIMIT = 42069n;
+export const REQUEST_WINDOW = 220_000n;
+
+/**
+ * The SETUP MAX_REQUEST_ID that first admits `window` requests from the peer.
+ *
+ * It is exclusive (the draft's "maximum request ID plus 1"), and the peer uses
+ * only its own parity: even IDs are the client's, odd the server's.
+ */
+export function initialMaxRequestId(peerClient: boolean, window: bigint = REQUEST_WINDOW): bigint {
+	return window * 2n + (peerClient ? 0n : 1n);
+}
 
 export class MaxRequestId {
 	static id = 0x15;

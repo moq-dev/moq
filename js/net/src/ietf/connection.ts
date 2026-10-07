@@ -102,6 +102,7 @@ export class Connection implements Established {
 		hidden = false,
 		cluster,
 		early = [],
+		requestWindow,
 	}: {
 		url: URL;
 		quic: WebTransport;
@@ -127,6 +128,8 @@ export class Connection implements Established {
 		cluster?: Cluster.Hops;
 		/** Uni streams that arrived before the peer's SETUP, type unread (v17+). */
 		early?: Reader[];
+		/** Requests the peer may hold open on drafts 14 to 16, the window our SETUP advertised (default `REQUEST_WINDOW`). */
+		requestWindow?: bigint;
 	}) {
 		this.url = url;
 		this.discovery = discovery;
@@ -142,7 +145,7 @@ export class Connection implements Established {
 			// v17+: control/setup stream only carries GoAway
 			void this.#runGoAway(control, version);
 		} else {
-			const adapter = new ControlStreamAdapter(quic, control, version, maxRequestId, client);
+			const adapter = new ControlStreamAdapter(quic, control, version, maxRequestId, client, requestWindow);
 			this.#session = adapter;
 			this.#goaway = adapter.goaway;
 			// Start the adapter read loop (routes control messages to virtual streams)

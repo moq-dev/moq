@@ -7,7 +7,7 @@ import { Stream, Writer } from "../stream.ts";
 import { Connection } from "./connection.ts";
 import { Group } from "./object.ts";
 import { SetupOption, SetupOptions } from "./parameters.ts";
-import { MaxRequestId, REQUEST_LIMIT, RequestError, RequestOk } from "./request.ts";
+import { initialMaxRequestId, MaxRequestId, RequestError, RequestOk } from "./request.ts";
 import { Setup } from "./setup.ts";
 import { SUBSCRIBE_TRACKS_ID, SubscribeNamespaceLegacy } from "./subscribe_namespace.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
@@ -278,7 +278,7 @@ test("draft-16 subscribe namespace past the request window closes the session", 
 		const stream = await Stream.open(pair.client, { version });
 		await stream.writer.u53(SubscribeNamespaceLegacy.id);
 		await new SubscribeNamespaceLegacy({
-			requestId: REQUEST_LIMIT + 1n,
+			requestId: initialMaxRequestId(true),
 			namespace: Path.from("room"),
 		}).encode(stream.writer, version);
 
@@ -304,6 +304,7 @@ test("draft-16 subscribe namespace grants another request id when it ends", asyn
 		maxRequestId: 100n,
 		version,
 		client: false,
+		requestWindow: 1n,
 	});
 	const peerControl = await Stream.accept(pair.client, version);
 	if (!peerControl) throw new Error("no control stream");
@@ -323,7 +324,7 @@ test("draft-16 subscribe namespace grants another request id when it ends", asyn
 
 		expect(await peerControl.reader.u53()).toBe(MaxRequestId.id);
 		const grant = await MaxRequestId.decode(peerControl.reader, version);
-		expect(grant.requestId).toBe(REQUEST_LIMIT + 2n);
+		expect(grant.requestId).toBe(initialMaxRequestId(true, 1n) + 2n);
 		expect(logged).not.toHaveBeenCalled();
 	} finally {
 		logged.mockRestore();
