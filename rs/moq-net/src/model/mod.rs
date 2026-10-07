@@ -57,9 +57,6 @@ pub use origin_impl::{Consume, Hop, Hops, InvalidHop};
 // The announce-interest prefixes a scope needs on a prefix-shaped wire.
 pub(crate) use origin_impl::interest_prefixes;
 
-// Held by a session until the peer's initial announce set has landed.
-pub(crate) use origin_impl::{Quiet, Replaying};
-
 // The advertise-only route guard, for tests shaping the route table.
 #[cfg(test)]
 pub(crate) use origin_impl::AnnounceProducer;

@@ -10,7 +10,7 @@ use std::{
 	time::Duration,
 };
 
-use web_transport_trait::Stats;
+use crate::transport::Stats;
 
 use crate::{
 	Error, Hop, Hops,
@@ -763,9 +763,6 @@ impl AnnounceRun {
 					let (update, active) = match event {
 						announce::Event::Start(update) | announce::Event::Update(update) => (update, true),
 						announce::Event::End(update) => (update, false),
-						// The marker only says the origin caught up; the peer learns the
-						// initial set's end from the version's own framing.
-						announce::Event::Live => continue,
 					};
 					let absolute = origin.absolute(&update.prefix);
 					let suffix = update.prefix;
@@ -801,9 +798,6 @@ impl AnnounceRun {
 					let (update, active) = match event {
 						announce::Event::Start(update) | announce::Event::Update(update) => (update, true),
 						announce::Event::End(update) => (update, false),
-						// The marker only says the origin caught up; the peer learns the
-						// initial set's end from the version's own framing.
-						announce::Event::Live => continue,
 					};
 					let absolute = origin.absolute(&update.prefix);
 					let suffix = update.prefix;
@@ -900,7 +894,6 @@ impl AnnounceRun {
 			let (update, active) = match next {
 				Some(announce::Event::Start(update) | announce::Event::Update(update)) => (update, true),
 				Some(announce::Event::End(update)) => (update, false),
-				Some(announce::Event::Live) => continue,
 				None => {
 					// The buffer is empty (flushed at the loop top), so FIN now and
 					// wait for the acknowledgement.
@@ -2398,14 +2391,27 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		}
 		// Feed the full update into the model subscriber so the producer's
 		// aggregate reflects it (and a relay re-forwards it upstream).
+		// Read first: `update` replaces these preferences.
+		let floored = self.track.subscription().start.is_some_and(|start| start.group > 0);
 		let bounds = Bounds::from(&upd);
 		let _ = self.track.update(crate::track::Subscription {
 			priority: upd.priority,
 			max_age: serving_max_age(self.ctx.version, upd.max_age),
 			..bounds.positions()
 		});
-		if let Some(start_group) = upd.start_group {
-			self.track.start_at(start_group);
+		// An explicit start moves the read cursor. Lite-06+ encodes an absent
+		// start as no floor, so a subscription that had one above group 0 has to
+		// drop back to 0: the cursor only rises on its own, and a finished group
+		// below the old floor (a quiet catalog) is never served otherwise. A
+		// cursor that was already at 0 stays where the first served group put it.
+		// No fresh SUBSCRIBE_START follows: the subscriber clears its permanent-miss
+		// floor on the same update, so both sides have to change together.
+		// Pre-06 an absent start means the latest group, which `position_cursor`
+		// already applied.
+		match upd.start_group {
+			Some(start_group) => self.track.start_at(start_group),
+			None if floored && self.ctx.version.resolves_start() => self.track.start_at(0),
+			None => {}
 		}
 		self.track
 			.end_at(upd.end_group.map_or(Bound::Unbounded, Bound::Included));
@@ -3474,6 +3480,55 @@ mod serve_group_test {
 		}
 	}
 
+	/// A resume past the only finished group leaves that group below the cursor.
+	/// Widening to no floor serves it: it is the live edge until a newer group
+	/// exists, and a catalog never publishes the next one.
+	#[moq_net_sim::test]
+	async fn a_widening_update_serves_the_finished_group_it_had_skipped() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		write_group(&mut track, 0, 0);
+		let mut relay = RelayRun::new(&mut track, 1);
+		relay.settle();
+		assert_eq!(relay.opened(), 0, "the resume is past the only group");
+
+		relay.run.update(lite::SubscribeUpdate {
+			priority: 0,
+			max_age: Duration::from_secs(30),
+			start_group: None,
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		});
+		relay.settle();
+		assert_eq!(relay.opened(), 1, "the finished group is the live edge");
+	}
+
+	/// Widening the floor never rewinds past a group already served: group 0
+	/// arrived before the served groups, so the cursor has moved past it.
+	#[moq_net_sim::test]
+	async fn a_widening_update_does_not_rewind_past_served_groups() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		for sequence in 0..3 {
+			write_group(&mut track, sequence, sequence);
+		}
+		let mut relay = RelayRun::new(&mut track, 1);
+		relay.settle();
+		track.start_at(0).unwrap();
+		relay.settle();
+		assert_eq!(relay.opened(), 2, "groups 1 and 2 are at or above the floor");
+
+		relay.run.update(lite::SubscribeUpdate {
+			priority: 0,
+			max_age: Duration::from_secs(30),
+			start_group: None,
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		});
+		relay.settle();
+		assert_eq!(relay.opened(), 2, "group 0 was passed, not skipped");
+	}
+
 	/// A SUBSCRIBE_UPDATE landing while the first group waits on the source's start keeps
 	/// the floor it raised: resolving the start from the held group must not lower it.
 	#[moq_net_sim::test]
@@ -3983,7 +4038,7 @@ mod tests {
 			.unwrap();
 		let mut session = ScriptedSession::new(script);
 		let (send, recv) = futures::future::poll_fn(|cx| {
-			<ScriptedSession as web_transport_trait::poll::Session>::poll_open_bi(&mut session, cx)
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
 		})
 		.await
 		.unwrap();
@@ -4117,7 +4172,7 @@ mod tests {
 		.unwrap();
 		let mut session = ScriptedSession::new(script);
 		let (send, recv) = futures::future::poll_fn(|cx| {
-			<ScriptedSession as web_transport_trait::poll::Session>::poll_open_bi(&mut session, cx)
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
 		})
 		.await
 		.unwrap();

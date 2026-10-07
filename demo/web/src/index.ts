@@ -187,7 +187,6 @@ discovery.run((effect) => {
 		for (;;) {
 			const entry = await effect.race(announced.next());
 			if (!entry) break;
-			if (entry.kind === "live") continue;
 			const path = entry.prefix;
 			// Only catalog-backed broadcasts are watchable streams; this skips the relay's
 			// `.stats` broadcast (see the stats dashboard demo for that one).
