@@ -799,7 +799,7 @@ export class Subscriber {
 		request.accept({
 			// No TIMESCALE (always so on drafts 14-16, which can't carry it) means no timeline,
 			// and the track must not claim one when served onward.
-			timescale: ok.properties.timescale ?? null,
+			timescale: ok.properties.timescale,
 			priority: fromWire(ok.properties.priority ?? 128),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
 		});

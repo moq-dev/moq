@@ -656,7 +656,7 @@ export class Subscriber {
 			timescale.set(info.timescale);
 		} else {
 			// Older drafts negotiate nothing per-track: verbatim frames with no timeline.
-			producer = request.accept({ timescale: null });
+			producer = request.accept();
 			timescale.set(0);
 			drainOk = true;
 		}

@@ -425,7 +425,7 @@ describe("wildcard renditions", () => {
 			expect(active).toBeUndefined();
 
 			const produced = new Moq.Broadcast.Producer();
-			produced.createTrack("video").writeString("frame");
+			produced.createTrack("video", { timescale: Moq.Time.Timescale.MILLI }).writeString("frame");
 			request?.accept(produced);
 			await settle();
 			expect(active).toBeDefined();

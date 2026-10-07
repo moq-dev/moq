@@ -109,7 +109,7 @@ await new Promise<void>((resolve, reject) => {
 // ── publisher on B ────────────────────────────────────────────────────────────
 const published = new Moq.Origin.Producer();
 const broadcast = published.createBroadcast(path);
-const track = broadcast.createTrack(trackName);
+const track = broadcast.createTrack(trackName, { timescale: Moq.Time.Timescale.MILLI });
 broadcast.announce();
 const publisher = new Moq.Connection({ url: new URL(`http://127.0.0.1:${bPort}/`), publish: published.consume() });
 

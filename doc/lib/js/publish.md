@@ -102,13 +102,18 @@ can serve its own tracks alongside the media. It is recreated on each
 
 ```ts
 import * as Json from "@moq/json";
+import * as Moq from "@moq/net";
 
 signals.run((effect) => {
     const net = effect.get(broadcast.net);
     if (!net) return;
 
-    // A day-long retention so a late viewer still replays the last value.
-    const track = net.createTrack("meta.json", { maxAge: 86_400_000 });
+    // A day-long retention so a late viewer still replays the last value. JSON
+    // values are stamped when written, so the track declares a timescale.
+    const track = net.createTrack("meta.json", {
+        timescale: Moq.Time.Timescale.MILLI,
+        maxAge: Moq.Time.Milli(86_400_000),
+    });
     effect.cleanup(() => track.close());
 
     const meta = new Json.Snapshot.Producer<Meta>({ track });

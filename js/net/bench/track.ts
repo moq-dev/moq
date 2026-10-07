@@ -1,6 +1,6 @@
 /** Sweep retained groups and subscribers for one group published through a track and received. */
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "../src/group.ts";
-import { Milli, Timestamp } from "../src/time.ts";
+import { Milli, Timescale, Timestamp } from "../src/time.ts";
 import { Producer, type Subscriber } from "../src/track.ts";
 
 const retainedCounts = [25, 100, 400, 1500];
@@ -47,7 +47,7 @@ async function measure(
 ): Promise<{ publish: number; end: number; idle: number }> {
 	// Held rows stay within the idle window while the media budget keeps their frames usable.
 	const window = Milli(held > 0 ? 3_600_000 : retained);
-	const producer = new Producer("bench").accept({ maxAge: window });
+	const producer = new Producer("bench").accept({ timescale: Timescale.MILLI, maxAge: window });
 	const subscribers = Array.from({ length: subscriberCount }, () => producer.subscribe({ maxAge: window }));
 	let sequence = 0;
 	// Inserted by sequence, the way the wire hands a subscribed track its groups.

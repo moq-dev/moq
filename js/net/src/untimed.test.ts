@@ -37,7 +37,7 @@ const WIRES: Wire[] = [
 ];
 
 /** Serve one group of `timestamps` on a track with `timescale`, and read it back over `wire`. */
-async function roundTrip(wire: Wire, timescale: Timescale | null, timestamps: (Timestamp | undefined)[]) {
+async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamps: (Timestamp | undefined)[]) {
 	const pair = createMockTransportPair(wire.protocol);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -109,7 +109,7 @@ test("a forwarded untimed track stays untimed", async () => {
 
 	const remote = wireOf(subscriber).consume(Path.from("test"));
 	const track = remote.track("video").subscribe();
-	expect((await track.info()).timescale).toBeNull();
+	expect((await track.info()).timescale).toBeUndefined();
 	const frame = await (await track.ordered().nextGroup())?.readFrame();
 	expect(frame?.payload).toEqual(new Uint8Array([7]));
 	expect(frame?.timestamp).toBeUndefined();
@@ -124,15 +124,15 @@ test("a forwarded untimed track stays untimed", async () => {
 
 for (const wire of WIRES) {
 	test(`${wire.name}: an untimed track arrives untimed, or with send times where the wire must stamp`, async () => {
-		const { info, frames } = await roundTrip(wire, null, [undefined, undefined]);
+		const { info, frames } = await roundTrip(wire, undefined, [undefined, undefined]);
 		expect(frames.map((frame) => frame.payload[0])).toEqual([0, 1]);
 
 		if (wire.stamps) {
-			// Lite-05 and lite-06 can't say a track is untimed, so it goes out timed at the default scale.
+			// Lite-05 and lite-06 can't say a track is untimed, so it goes out timed at milliseconds.
 			expect(info.timescale).toBe(Timescale.MILLI);
 			for (const frame of frames) expect(frame.timestamp).toBeDefined();
 		} else {
-			expect(info.timescale).toBeNull();
+			expect(info.timescale).toBeUndefined();
 			for (const frame of frames) expect(frame.timestamp).toBeUndefined();
 		}
 	});
@@ -149,7 +149,7 @@ for (const wire of WIRES) {
 			expect(frames.map((frame) => frame.timestamp?.asMicros())).toEqual([1_000, 1_234]);
 		} else {
 			// No units on the wire, and no arrival time made up in their place.
-			expect(info.timescale).toBeNull();
+			expect(info.timescale).toBeUndefined();
 			for (const frame of frames) expect(frame.timestamp).toBeUndefined();
 		}
 	});

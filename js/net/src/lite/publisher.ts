@@ -52,8 +52,8 @@ function zigzag(delta: bigint): bigint {
 }
 
 /**
- * The timescale TRACK_INFO declares for a track. Lite05+ requires one, so a track without a
- * timeline declares the default, the scale its frames' send times go out at.
+ * The timescale TRACK_INFO declares for a track. Lite05+ requires one, so an untimed track
+ * declares milliseconds, the scale its frames' send times go out at.
  */
 function wireTimescale(info: track.Info): Timescale {
 	return info.timescale ?? Timescale.MILLI;

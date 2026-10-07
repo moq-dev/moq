@@ -913,7 +913,7 @@ function stampedGroup(groupId: number): GroupMessage {
 
 test("a track without TIMESCALE arrives untimed, even if an object carries a Timestamp", async () => {
 	const { subscriber, track } = await subscribeTrack();
-	expect((await track.info()).timescale).toBeNull();
+	expect((await track.info()).timescale).toBeUndefined();
 
 	// Property 0x10 (Timestamp) = 5, with no units to read it in.
 	await subscriber.handleGroup(stampedGroup(0), new Reader(undefined, encodeStamped([0x10, 5]), VERSION));

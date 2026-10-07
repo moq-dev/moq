@@ -47,7 +47,7 @@ async function drain(consumer: Consumer): Promise<[number, number | undefined][]
 // audio writes into a timestamp-indexed ring and video drops a late frame at render, and the
 // subscription's own max age already bounds how far back one can be.
 test("out-of-order groups are delivered rather than dropped", async () => {
-	const track = new Track.Producer("test").accept({ maxAge: Time.Milli(30_000) });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Time.Milli(30_000) });
 	const consumer = new Consumer(track.subscribe({ maxAge: Time.Milli(5000) }), {
 		format: new LegacyFormat("data"),
 		maxAge: 5000 as Time.Milli,
@@ -77,7 +77,7 @@ test("out-of-order groups are delivered rather than dropped", async () => {
 // drained (the decode loop consumes faster than the network delivers). Removing it at that
 // instant silently truncates its tail, so removal must wait for the group to finish.
 test("a below-cursor group still downloading is not truncated", async () => {
-	const track = new Track.Producer("test").accept({ maxAge: Time.Milli(30_000) });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Time.Milli(30_000) });
 	const consumer = new Consumer(track.subscribe({ maxAge: Time.Milli(5000) }), {
 		format: new LegacyFormat("data"),
 		maxAge: 5000 as Time.Milli,
@@ -115,7 +115,7 @@ test("a below-cursor group still downloading is not truncated", async () => {
 // The floor belongs to the latest group, not to delayed history within max age.
 test("delayed older groups survive a floor established by two newer groups", async () => {
 	const clock = spyOn(performance, "now").mockReturnValue(200);
-	const track = new Track.Producer("test").accept({ maxAge: Time.Milli(30_000) });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Time.Milli(30_000) });
 	const consumer = new Consumer(track.subscribe({ maxAge: Time.Milli(5000) }), {
 		format: new LegacyFormat("data"),
 		maxAge: Time.Milli(5000),

@@ -29,4 +29,8 @@ frame whose timedness doesn't match its track is refused. An absent
 mismatched frame, so the group helpers, which still stamp now, only work on a
 timed track today.
 
+Decided (2026-10-07): `@moq/net` has no default timescale. Omitting
+`Track.Info.timescale` declares an untimed track, so every timed publisher
+names its units, unlike Rust's millisecond default.
+
 Public API: breaking. Wire: none.
