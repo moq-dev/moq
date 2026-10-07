@@ -853,10 +853,11 @@ async fn bursts_cross_a_cluster(lane: Lane) {
 
 lanes!(bursts_cross_a_cluster);
 
-/// Drill: [`bursts_cross_a_cluster`], with the peer link flapping mid-burst.
+/// Drill: [`bursts_cross_a_cluster`], with the peer link flapping mid-recovery.
 ///
-/// The link between the relays is cut halfway through writing the second burst
-/// and stays down until the subscriber sees the edge withdraw the route, then
+/// The link between the relays is cut as the second burst is written, once the
+/// first has started arriving, so the first burst's gap FETCHes are in flight and
+/// the second is stranded at the origin. It stays down until the subscriber sees the edge withdraw the route, then
 /// comes back and the edge redials. That is a route flap: the regression for the
 /// groups 0.15.6 dropped across one (#4349). The subscriber re-subscribes once
 /// the route returns, and every read or FETCH the flap failed is claimed again
@@ -872,15 +873,15 @@ async fn bursts_cross_a_flapping_peer(lane: Lane) {
 
 lanes!(bursts_cross_a_flapping_peer);
 
-/// Whether the cross-relay drill's peer link stays up or flaps mid-burst.
+/// Whether the cross-relay drill's peer link stays up or flaps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PeerLink {
 	Steady,
 	Flapping,
 }
 
-/// The burst a flapping peer link is cut in the middle of: after one that
-/// crossed the link, and before the bursts that prove the restored route carries on.
+/// The burst a flapping peer link is cut just before: after one that started
+/// crossing the link, and before the bursts that prove the restored route carries on.
 const FLAP_BURST: u64 = 1;
 
 /// Where a flapping peer link stands.
@@ -926,6 +927,9 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	let mut config = relay_config(None);
 	config.quic = credit(lane, quic());
 	config.connect = dial();
+	// Retry forever: a give-up after a slow impaired handshake would look exactly
+	// like the never-redialed regression, and a stall still fails the drill.
+	config.connect.backoff.timeout = Duration::ZERO;
 	config.cluster.connect = vec![moq_relay::cluster::Peer::new(peer_url.to_string())];
 	let edge = RelayHost::start(config).await;
 
@@ -975,17 +979,18 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	let total = BURSTS * BURST_GROUPS;
 	let mut written = Vec::new();
 	let mut flap = Flap::Up;
-	// Write the next burst, cutting a flapping link halfway through the flap burst.
+	// Write the next burst, cutting a flapping link just before the flap burst.
+	// A burst is written without yielding, so a cut partway through it would
+	// still land before any of it left the publisher.
 	let burst = |track: &mut moq_net::track::Producer, written: &mut Vec<tokio::time::Instant>, flap: &mut Flap| {
-		let index = written.len() as u64 / BURST_GROUPS;
-		for i in 0..BURST_GROUPS {
-			if link == PeerLink::Flapping && index == FLAP_BURST && i == BURST_GROUPS / 2 {
-				let outage = peer.shaper.as_ref().expect("a flapping link has a shaper").cut();
-				*flap = Flap::Cut {
-					outage,
-					at: tokio::time::Instant::now(),
-				};
-			}
+		if link == PeerLink::Flapping && written.len() as u64 == FLAP_BURST * BURST_GROUPS {
+			let outage = peer.shaper.as_ref().expect("a flapping link has a shaper").cut();
+			*flap = Flap::Cut {
+				outage,
+				at: tokio::time::Instant::now(),
+			};
+		}
+		for _ in 0..BURST_GROUPS {
 			let sequence = written.len() as u64;
 			write_group(track, &payload(sequence));
 			written.push(tokio::time::Instant::now());
