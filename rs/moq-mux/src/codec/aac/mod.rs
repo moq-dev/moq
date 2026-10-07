@@ -629,11 +629,13 @@ mod tests {
 			assert_eq!(cfg.encode(), asc.as_slice(), "encode writes the core back");
 		}
 
-		// A config naming SBR but stopping before its extension rate has no output to name.
-		assert!(matches!(
-			Config::parse(&mut [0x2A, 0x10].as_slice()),
-			Err(Error::IncompleteConfig)
-		));
+		// A config naming SBR or PS but stopping before its extension rate has no output to name.
+		for truncated in [[0x2A, 0x10], [0xEA, 0x08]] {
+			assert!(matches!(
+				Config::parse(&mut truncated.as_slice()),
+				Err(Error::IncompleteConfig)
+			));
+		}
 	}
 
 	#[test]
