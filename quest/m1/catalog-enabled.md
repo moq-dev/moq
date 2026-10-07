@@ -50,7 +50,15 @@ Decided (2026-10-04):
   Selection in `js/watch/src/video/source.ts` filters on it, as
   [rendition preference](/quest/m1/rendition-preference.md) expects.
 
-Tests: disabling an audio rendition publishes a catalog with the same
+- Nothing edits a rendition before its config is published (decided
+  2026-10-06, #4945). Today demand on a video track before its first
+  keyframe lets `publish_stalled` (`rs/moq-mux/src/codec/video.rs`) call
+  `track.modify()` on an unpublished rendition, and `moq import ts` exits
+  with `NotPublished`. Deleting the detector removes that path; whatever
+  writes `enabled` must not bring it back.
+
+Tests: demand on a video track before its first keyframe does not end
+the import. Disabling an audio rendition publishes a catalog with the same
 rendition and `enabled: false`, and a viewer deselects it and keeps one
 AudioContext across disable and enable; a legacy `stalled: true` changes
 nothing; nothing in the tree writes `stalled`.
@@ -59,6 +67,7 @@ nothing; nothing in the tree writes `stalled`.
 
 - [#4772](https://github.com/moq-dev/moq/issues/4772) - close this issue when the quest finishes
 - [#4776](https://github.com/moq-dev/moq/issues/4776) - close this issue when the quest finishes
+- [#4945](https://github.com/moq-dev/moq/issues/4945) - a replacement `moq import ts` exits with "rendition is not published"; the relay half is fixed by #4942's epochs
 
 ## Related
 
