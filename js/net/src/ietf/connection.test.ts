@@ -2,13 +2,14 @@ import { expect, spyOn, test } from "bun:test";
 import { exchangeSetup } from "../connection/handshake.ts";
 import { SessionCode } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
+import * as Path from "../path.ts";
 import { Stream, Writer } from "../stream.ts";
 import { Connection } from "./connection.ts";
 import { Group } from "./object.ts";
 import { SetupOption, SetupOptions } from "./parameters.ts";
-import { RequestError } from "./request.ts";
+import { MaxRequestId, REQUEST_LIMIT, RequestError, RequestOk } from "./request.ts";
 import { Setup } from "./setup.ts";
-import { SUBSCRIBE_TRACKS_ID } from "./subscribe_namespace.ts";
+import { SUBSCRIBE_TRACKS_ID, SubscribeNamespaceLegacy } from "./subscribe_namespace.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 const PADDING = 0x132b3e28n;
@@ -256,4 +257,76 @@ test("truncated uni stream before SETUP is skipped", async () => {
 
 	const { early } = await exchangeSetup(pair.server, version, "test");
 	expect(early.length).toBe(0);
+});
+
+/** Draft-16 carries SUBSCRIBE_NAMESPACE on its own stream, so the control adapter never sees the id. */
+test("draft-16 subscribe namespace past the request window closes the session", async () => {
+	const logged = spyOn(console, "error").mockImplementation(() => undefined);
+	const version = Version.DRAFT_16;
+	const pair = createMockTransportPair(ALPN.DRAFT_16);
+	const control = await Stream.open(pair.server, { version });
+	const connection = new Connection({
+		url: new URL("https://example.com"),
+		quic: pair.server,
+		control,
+		maxRequestId: 100n,
+		version,
+		client: false,
+	});
+
+	try {
+		const stream = await Stream.open(pair.client, { version });
+		await stream.writer.u53(SubscribeNamespaceLegacy.id);
+		await new SubscribeNamespaceLegacy({
+			requestId: REQUEST_LIMIT + 1n,
+			namespace: Path.from("room"),
+		}).encode(stream.writer, version);
+
+		const info = await pair.client.closed;
+		expect(info.closeCode).toBe(0x7);
+		expect(logged).not.toHaveBeenCalled();
+	} finally {
+		logged.mockRestore();
+		connection.abort();
+	}
+});
+
+/** Ending that stream has to grant another id, or the next namespace request stalls at the same ceiling. */
+test("draft-16 subscribe namespace grants another request id when it ends", async () => {
+	const logged = spyOn(console, "error").mockImplementation(() => undefined);
+	const version = Version.DRAFT_16;
+	const pair = createMockTransportPair(ALPN.DRAFT_16);
+	const control = await Stream.open(pair.server, { version });
+	const connection = new Connection({
+		url: new URL("https://example.com"),
+		quic: pair.server,
+		control,
+		maxRequestId: 100n,
+		version,
+		client: false,
+	});
+	const peerControl = await Stream.accept(pair.client, version);
+	if (!peerControl) throw new Error("no control stream");
+
+	try {
+		const stream = await Stream.open(pair.client, { version });
+		await stream.writer.u53(SubscribeNamespaceLegacy.id);
+		await new SubscribeNamespaceLegacy({
+			requestId: 0n,
+			namespace: Path.from("room"),
+		}).encode(stream.writer, version);
+
+		expect(await stream.reader.u53()).toBe(RequestOk.id);
+		const ok = await RequestOk.decode(stream.reader, version);
+		expect(ok.requestId).toBe(0n);
+		stream.close();
+
+		expect(await peerControl.reader.u53()).toBe(MaxRequestId.id);
+		const grant = await MaxRequestId.decode(peerControl.reader, version);
+		expect(grant.requestId).toBe(REQUEST_LIMIT + 2n);
+		expect(logged).not.toHaveBeenCalled();
+	} finally {
+		logged.mockRestore();
+		connection.abort();
+	}
 });

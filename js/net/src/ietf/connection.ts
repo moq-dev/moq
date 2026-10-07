@@ -10,7 +10,7 @@ import type * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
-import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
+import { ControlStreamAdapter, NativeSession, RequestWindowError, type Session } from "./adapter.ts";
 import * as Cluster from "./cluster.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
@@ -147,7 +147,12 @@ export class Connection implements Established {
 			this.#goaway = adapter.goaway;
 			// Start the adapter read loop (routes control messages to virtual streams)
 			void adapter.run().catch((err: unknown) => {
-				if (!this.#closed) console.error("adapter error", err);
+				if (this.#closed) return;
+				if (err instanceof RequestWindowError) {
+					this.#close({ closeCode: err.code, reason: err.message });
+					return;
+				}
+				console.error("adapter error", err);
 				this.#close();
 			});
 		}
@@ -240,6 +245,10 @@ export class Connection implements Established {
 			if (!stream) break;
 
 			void this.#runBidi(stream).catch((err: unknown) => {
+				if (err instanceof RequestWindowError) {
+					this.#close({ closeCode: err.code, reason: err.message });
+					return;
+				}
 				console.error("error processing bidi stream", err);
 				stream.abort(new Error("bidi stream error"));
 				if (err instanceof ProtocolViolation) this.#violated(err);
@@ -270,7 +279,18 @@ export class Connection implements Established {
 					namespace: legacy.namespace,
 					hidden: legacy.hidden,
 				});
-				await this.#publisher.runSubscribeNamespace(msg, stream);
+				// Draft-16 carries this on its own stream, so the control adapter never sees the ID.
+				// Draft-14 and 15 already admitted it off the control stream.
+				const adapter =
+					this.#session instanceof ControlStreamAdapter && this.#session.version === Version.DRAFT_16
+						? this.#session
+						: undefined;
+				if (adapter) adapter.admitRequest(legacy.requestId);
+				try {
+					await this.#publisher.runSubscribeNamespace(msg, stream);
+				} finally {
+					adapter?.releaseRequest(legacy.requestId);
+				}
 				break;
 			}
 			case BigInt(SubscribeUpdate.id): {

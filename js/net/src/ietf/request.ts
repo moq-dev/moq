@@ -4,6 +4,16 @@ import { Parameters } from "./parameters.ts";
 import * as Properties from "./properties.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
+/**
+ * Request IDs a draft-14 to -16 peer may have in flight.
+ *
+ * SETUP's MAX_REQUEST_ID is this exclusive bound (the draft's "maximum request
+ * ID plus 1"). Even IDs are the client's and odd IDs are the server's, so each
+ * peer can use about half of them. Closing a request raises the bound by 2,
+ * one more ID of that parity. Draft-17 dropped the field.
+ */
+export const REQUEST_LIMIT = 42069n;
+
 export class MaxRequestId {
 	static id = 0x15;
 

@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
@@ -6,8 +6,10 @@ import { ControlStreamAdapter } from "./adapter.ts";
 import { toRequestCode } from "./error.ts";
 import { GoAway } from "./goaway.ts";
 import { PublishNamespace, PublishNamespaceCancel, PublishNamespaceDone } from "./publish_namespace.ts";
-import { RequestError } from "./request.ts";
-import { ALPN, Version } from "./version.ts";
+import { MaxRequestId, REQUEST_LIMIT, RequestError } from "./request.ts";
+import { SubscribeUpdate } from "./subscribe.ts";
+import { TrackStatusRequest } from "./track.ts";
+import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 test("draft-14 TRACK_STATUS_OK cannot be routed as NAMESPACE_DONE", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_14);
@@ -233,3 +235,242 @@ test("a second GOAWAY on the control stream closes the session", async () => {
 	}
 	await expect(running).rejects.toThrow("duplicate GOAWAY");
 });
+
+// Draft-14 to -16 session codes. Past the advertised maximum is TOO_MANY_REQUESTS;
+// a parity or duplicate error is INVALID_REQUEST_ID.
+const TOO_MANY_REQUESTS = 0x7;
+const INVALID_REQUEST_ID = 0x4;
+
+const WINDOW_DRAFTS = [
+	[Version.DRAFT_14, ALPN.DRAFT_14],
+	[Version.DRAFT_15, ALPN.DRAFT_15],
+	[Version.DRAFT_16, ALPN.DRAFT_16],
+] as const;
+
+/** Adapter plus the peer's control stream. `client` is this side, so the peer uses the other parity. */
+async function windowed(
+	version: IetfVersion,
+	alpn: string,
+	peerLimit: bigint,
+	client: boolean,
+): Promise<{
+	pair: ReturnType<typeof createMockTransportPair>;
+	adapter: ControlStreamAdapter;
+	peer: Stream;
+	running: Promise<void>;
+}> {
+	const pair = createMockTransportPair(alpn);
+	const control = await Stream.open(pair.server, { version });
+	const adapter = new ControlStreamAdapter(pair.server, control, version, 100n, client, peerLimit);
+	const running = adapter.run();
+	const peer = await Stream.accept(pair.client, version);
+	if (!peer) throw new Error("no control stream");
+	return { pair, adapter, peer, running };
+}
+
+/** A new request of the peer's parity. TRACK_STATUS spends an id and holds no namespace. */
+async function trackStatus(peer: Stream, version: IetfVersion, requestId: bigint): Promise<void> {
+	await peer.writer.u53(TrackStatusRequest.id);
+	await new TrackStatusRequest({
+		requestId,
+		trackNamespace: Path.from("t"),
+		trackName: "a",
+	}).encode(peer.writer, version);
+}
+
+/** Read grant updates until one is at least `target`. Hangs when no grant is sent, which is the bug. */
+async function granted(peer: Stream, version: IetfVersion, target: bigint): Promise<bigint> {
+	let max = 0n;
+	while (max < target) {
+		const type = await peer.reader.u53();
+		if (type !== MaxRequestId.id) {
+			const size = await peer.reader.u16();
+			await peer.reader.read(size);
+			continue;
+		}
+		const msg = await MaxRequestId.decode(peer.reader, version);
+		if (msg.requestId > max) max = msg.requestId;
+	}
+	return max;
+}
+
+test("an id at the advertised maximum closes the session", async () => {
+	for (const [version, alpn] of WINDOW_DRAFTS) {
+		for (const client of [false, true]) {
+			// Correct parity, one past the window. A wrong-parity id that is also past the
+			// window is still too many: the maximum is checked first.
+			const past = client ? 5n : 4n;
+			const pastWrong = client ? 4n : 5n;
+			for (const requestId of [past, pastWrong]) {
+				const { pair, peer, running } = await windowed(version, alpn, 4n, client);
+				await trackStatus(peer, version, requestId);
+				await expect(running).rejects.toThrow("request id exceeds max");
+				expect((await pair.client.closed).closeCode).toBe(TOO_MANY_REQUESTS);
+			}
+		}
+	}
+});
+
+test("a request id with the wrong parity closes the session", async () => {
+	for (const [version, alpn] of WINDOW_DRAFTS) {
+		for (const client of [false, true]) {
+			const wrong = client ? 0n : 1n;
+			const { pair, peer, running } = await windowed(version, alpn, 4n, client);
+			await trackStatus(peer, version, wrong);
+			await expect(running).rejects.toThrow("wrong parity");
+			expect((await pair.client.closed).closeCode).toBe(INVALID_REQUEST_ID);
+		}
+	}
+});
+
+test("a second use of an open request id closes the session", async () => {
+	for (const [version, alpn] of WINDOW_DRAFTS) {
+		const { pair, peer, running } = await windowed(version, alpn, 4n, false);
+		await trackStatus(peer, version, 0n);
+		await trackStatus(peer, version, 0n);
+		await expect(running).rejects.toThrow("duplicate request id");
+		expect((await pair.client.closed).closeCode).toBe(INVALID_REQUEST_ID);
+	}
+});
+
+test("closing a request grants one more id of the peer's parity", async () => {
+	for (const [version, alpn] of WINDOW_DRAFTS) {
+		for (const client of [false, true]) {
+			const ids = client ? [1n, 3n, 5n] : [0n, 2n, 4n];
+			const { adapter, peer, running } = await windowed(version, alpn, 4n, client);
+			const failed = running.then(
+				() => undefined,
+				(err: unknown) => err,
+			);
+			for (const requestId of ids) {
+				await trackStatus(peer, version, requestId);
+				const stream = await adapter.acceptBi();
+				if (!stream) throw new Error(`no stream for ${requestId}`);
+				stream.close();
+			}
+			// Three closes, each raising the exclusive max by 2.
+			expect(await granted(peer, version, 10n)).toBeGreaterThanOrEqual(10n);
+			expect(await Promise.race([failed, Promise.resolve(undefined)])).toBeUndefined();
+		}
+	}
+});
+
+test("a request update spends an id and frees it immediately", async () => {
+	const warn = spyOn(console, "warn").mockImplementation(() => undefined);
+	try {
+		for (const [version, alpn] of WINDOW_DRAFTS) {
+			for (const client of [false, true]) {
+				const updateId = client ? 1n : 0n;
+				const nextId = client ? 3n : 2n;
+				const { adapter, peer, running } = await windowed(version, alpn, 2n, client);
+				const failed = running.then(
+					() => undefined,
+					(err: unknown) => err,
+				);
+				await peer.writer.u53(SubscribeUpdate.id);
+				await new SubscribeUpdate({ requestId: updateId }).encode(peer.writer, version);
+				await trackStatus(peer, version, nextId);
+				const stream = await adapter.acceptBi();
+				if (!stream) throw new Error("update held the only slot");
+				stream.close();
+				expect(await granted(peer, version, 4n)).toBeGreaterThanOrEqual(4n);
+				expect(await Promise.race([failed, Promise.resolve(undefined)])).toBeUndefined();
+			}
+		}
+	} finally {
+		warn.mockRestore();
+	}
+});
+
+test("an update naming an open request does not grow the window", async () => {
+	const warn = spyOn(console, "warn").mockImplementation(() => undefined);
+	try {
+		for (const [version, alpn] of WINDOW_DRAFTS) {
+			for (const client of [false, true]) {
+				const heldId = client ? 1n : 0n;
+				const nextId = client ? 3n : 2n;
+				const { pair, adapter, peer, running } = await windowed(version, alpn, 2n, client);
+				await trackStatus(peer, version, heldId);
+				const held = await adapter.acceptBi();
+				if (!held) throw new Error("no stream");
+				await peer.writer.u53(SubscribeUpdate.id);
+				await new SubscribeUpdate({ requestId: heldId }).encode(peer.writer, version);
+				await trackStatus(peer, version, nextId);
+				await expect(running).rejects.toThrow("request id exceeds max");
+				expect((await pair.client.closed).closeCode).toBe(TOO_MANY_REQUESTS);
+			}
+		}
+	} finally {
+		warn.mockRestore();
+	}
+});
+
+/**
+ * SETUP advertises 42069 and used to stop there. One more even id than that window
+ * (0, 2, ..., 42070) only completes when each close raises the maximum.
+ */
+test(
+	"more requests than the setup window complete on one session",
+	async () => {
+		const version = Version.DRAFT_15;
+		const { pair, adapter, peer, running } = await windowed(version, ALPN.DRAFT_15, REQUEST_LIMIT, false);
+		const failed = running.then(
+			() => undefined,
+			(err: unknown) => err,
+		);
+
+		let limit = 0n;
+		let wake: (() => void) | undefined;
+		const reading = (async () => {
+			try {
+				for (;;) {
+					if (await peer.reader.done()) return;
+					const type = await peer.reader.u53();
+					if (type !== MaxRequestId.id) {
+						const size = await peer.reader.u16();
+						await peer.reader.read(size);
+						continue;
+					}
+					const msg = await MaxRequestId.decode(peer.reader, version);
+					if (msg.requestId > limit) {
+						limit = msg.requestId;
+						wake?.();
+					}
+				}
+			} catch {
+				// The session closed under the reader.
+			}
+		})();
+
+		try {
+			for (let id = 0n; id <= REQUEST_LIMIT + 1n; id += 2n) {
+				await trackStatus(peer, version, id);
+				const stream = await adapter.acceptBi();
+				if (!stream) throw new Error(`session closed at request ${id}`);
+				stream.close();
+			}
+
+			if (limit <= REQUEST_LIMIT) {
+				await new Promise<void>((resolve, reject) => {
+					const timer = setTimeout(
+						() => reject(new Error("peer was not granted a larger request window")),
+						1000,
+					);
+					wake = () => {
+						if (limit <= REQUEST_LIMIT) return;
+						clearTimeout(timer);
+						resolve();
+					};
+					if (limit > REQUEST_LIMIT) wake();
+				});
+			}
+			expect(limit).toBeGreaterThan(REQUEST_LIMIT);
+			expect(await Promise.race([failed, Promise.resolve(undefined)])).toBeUndefined();
+		} finally {
+			pair.server.close();
+			await running.catch(() => undefined);
+			await reading;
+		}
+	},
+	{ timeout: 60_000 },
+);

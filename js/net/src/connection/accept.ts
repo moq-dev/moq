@@ -158,7 +158,7 @@ async function acceptSetup(
 
 	const encoder = new TextEncoder();
 	const params = new Ietf.SetupOptions();
-	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n);
+	params.setVarint(Ietf.SetupOption.MaxRequestId, Ietf.REQUEST_LIMIT);
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 	Ietf.solicitIntoSetup(params);
 	Ietf.hiddenIntoSetup(params);
@@ -166,7 +166,7 @@ async function acceptSetup(
 	const server = new Ietf.ServerSetup({ version, parameters: params });
 	await server.encode(stream.writer, version);
 
-	const maxRequestId = 42069n;
+	const maxRequestId = Ietf.REQUEST_LIMIT;
 
 	return new Ietf.Connection({
 		...wiring,
@@ -218,7 +218,7 @@ async function acceptNegotiated(
 
 	const encoder = new TextEncoder();
 	const params = new Ietf.SetupOptions();
-	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n);
+	params.setVarint(Ietf.SetupOption.MaxRequestId, Ietf.REQUEST_LIMIT);
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 	Ietf.solicitIntoSetup(params);
 	Ietf.hiddenIntoSetup(params);

@@ -6,7 +6,30 @@ import { Reader, Stream, type Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { GoAway } from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
+import { MaxRequestId, REQUEST_LIMIT } from "./request.ts";
 import { type IetfVersion, Version } from "./version.ts";
+
+/** Draft-14 to -16: the request ID is not valid for this peer (wrong parity or a duplicate). */
+const INVALID_REQUEST_ID = 0x4;
+
+/**
+ * Draft-14 to -16: the request ID is at or past the MAX_REQUEST_ID we advertised.
+ *
+ * Section 9.1 also names INVALID_REQUEST_ID for an ID past the maximum. The session
+ * registry and section 9.5 assign that case to this code, so this is the one we send.
+ */
+const TOO_MANY_REQUESTS = 0x7;
+
+/** The peer used a request ID the draft closes the session for. */
+export class RequestWindowError extends Error {
+	readonly code: number;
+
+	constructor(code: number, message: string) {
+		super(message);
+		this.name = "RequestWindowError";
+		this.code = code;
+	}
+}
 
 /**
  * Interface for opening outgoing bidi streams and allocating request IDs.
@@ -128,6 +151,13 @@ export class ControlStreamAdapter implements Session {
 	#maxRequestId: bigint;
 	#maxRequestIdResolves: (() => void)[] = [];
 
+	// The exclusive bound advertised to the peer, and the requests still holding a slot.
+	// Closing one raises the bound by 2 (one ID of the peer's parity) and sends MAX_REQUEST_ID.
+	#peerMax: bigint;
+	#open = new Set<bigint>();
+	#granting = false;
+	#grantDirty = false;
+
 	#closed = false;
 
 	// Whether this side opened the session. Only a server may name a redirect.
@@ -139,6 +169,7 @@ export class ControlStreamAdapter implements Session {
 		version: IetfVersion,
 		maxRequestId: bigint,
 		client: boolean,
+		peerLimit: bigint = REQUEST_LIMIT,
 	) {
 		this.#quic = quic;
 		this.#reader = controlStream.reader;
@@ -147,6 +178,7 @@ export class ControlStreamAdapter implements Session {
 		this.#writer.version = version;
 		this.version = version;
 		this.#maxRequestId = maxRequestId;
+		this.#peerMax = peerLimit;
 		this.#requestId = client ? 0n : 1n;
 		this.#client = client;
 	}
@@ -234,6 +266,19 @@ export class ControlStreamAdapter implements Session {
 	}
 
 	/**
+	 * Take a slot for a request that arrived on its own stream (draft-16 SUBSCRIBE_NAMESPACE).
+	 * Control-stream requests are admitted while they are classified.
+	 */
+	admitRequest(requestId: bigint): void {
+		this.#admitHeld(requestId);
+	}
+
+	/** Give back a slot taken by {@link admitRequest}. */
+	releaseRequest(requestId: bigint): void {
+		if (this.#open.delete(requestId)) this.#grant();
+	}
+
+	/**
 	 * Allocate the next request ID, blocking if flow control limit reached.
 	 */
 	async nextRequestId(): Promise<bigint | undefined> {
@@ -292,6 +337,7 @@ export class ControlStreamAdapter implements Session {
 
 				switch (route) {
 					case Route.NewRequest:
+						this.#admitHeld(requestId);
 						this.#newRequest(typeId, size, body, requestId);
 						break;
 					case Route.Response:
@@ -305,6 +351,9 @@ export class ControlStreamAdapter implements Session {
 						this.#closeStream(requestId);
 						break;
 					case Route.FollowUp:
+						// REQUEST_UPDATE consumes its own request ID. One that names an open
+						// request is not a new ID; the routing quest owns where the bytes go.
+						if (typeId === 0x02) this.#admitUpdate(requestId);
 						this.#pushMessage(requestId, typeId, size, body);
 						break;
 					case Route.MaxRequestId:
@@ -402,18 +451,92 @@ export class ControlStreamAdapter implements Session {
 	 * locally still gives its namespace back.
 	 */
 	#forget(requestId: bigint) {
+		const held = this.#open.delete(requestId);
 		this.#streams.delete(requestId);
 		this.#subscribeNamespaces.delete(requestId);
 
 		const registered = this.#namespacesByRequestId.get(requestId);
-		if (registered === undefined) return;
-		this.#namespacesByRequestId.delete(requestId);
-		const namespaces = this.#namespaceRequests(registered.direction);
+		if (registered !== undefined) {
+			this.#namespacesByRequestId.delete(requestId);
+			const namespaces = this.#namespaceRequests(registered.direction);
 
-		// Only the request holding the live announcement may retract it. A refused duplicate
-		// carries the same name, and letting its close withdraw the name would strand the
-		// original: its own DONE would then resolve to nothing.
-		if (namespaces.get(registered.namespace) === requestId) namespaces.delete(registered.namespace);
+			// Only the request holding the live announcement may retract it. A refused duplicate
+			// carries the same name, and letting its close withdraw the name would strand the
+			// original: its own DONE would then resolve to nothing.
+			if (namespaces.get(registered.namespace) === requestId) namespaces.delete(registered.namespace);
+		}
+
+		if (held) this.#grant();
+	}
+
+	/** Reject a request ID the peer is not allowed to use. */
+	#checkPeer(requestId: bigint): void {
+		if (requestId >= this.#peerMax) {
+			this.#refuse(TOO_MANY_REQUESTS, "request id exceeds max");
+		}
+		// Even IDs are the client's. `#client` is this side, so the peer's IDs are the other parity.
+		const even = (requestId & 1n) === 0n;
+		if (even === this.#client) {
+			this.#refuse(INVALID_REQUEST_ID, "request id has the wrong parity");
+		}
+	}
+
+	#admitHeld(requestId: bigint): void {
+		this.#checkPeer(requestId);
+		if (this.#open.has(requestId)) {
+			this.#refuse(INVALID_REQUEST_ID, "duplicate request id");
+		}
+		this.#open.add(requestId);
+	}
+
+	/**
+	 * An update spends a request ID and does not keep a stream, so the slot it took
+	 * is free again immediately. Naming an open request does not spend one.
+	 */
+	#admitUpdate(requestId: bigint): void {
+		if (this.#open.has(requestId)) return;
+		this.#checkPeer(requestId);
+		this.#grant();
+	}
+
+	#refuse(code: number, message: string): never {
+		try {
+			this.#quic.close({ closeCode: code, reason: message });
+		} catch {
+			// The session is already closed.
+		}
+		throw new RequestWindowError(code, message);
+	}
+
+	/** Raise the peer's exclusive bound by one ID and send it, coalescing a burst into one write. */
+	#grant(): void {
+		this.#peerMax += 2n;
+		this.#grantDirty = true;
+		if (this.#granting || this.#closed) return;
+		this.#granting = true;
+		void this.#flushGrant();
+	}
+
+	async #flushGrant(): Promise<void> {
+		try {
+			while (this.#grantDirty && !this.#closed) {
+				this.#grantDirty = false;
+				const max = this.#peerMax;
+				await this.#writeMutex.runExclusive(async () => {
+					if (this.#closed) return;
+					await this.#writer.u53(MaxRequestId.id);
+					await new MaxRequestId({ requestId: max }).encode(this.#writer, this.version);
+				});
+			}
+		} catch {
+			// The control stream closed under the grant.
+		} finally {
+			this.#granting = false;
+		}
+		if (this.#grantDirty && !this.#closed) {
+			this.#granting = true;
+			void this.#flushGrant();
+		}
 	}
 
 	/**
