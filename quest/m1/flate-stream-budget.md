@@ -27,7 +27,3 @@ prior records readable and allows a later fitting append; a failed write
 after encoding still aborts, as JSON does. Mirror #4911's tests in both
 compression modes, including the decoder-size refusal, and document the
 budget and refusal behavior in the flate library docs.
-
-## Required
-
-- [JSON stream budget](/quest/m1/json-stream-budget.md) - #4911 provides the preflight budget model and DEFLATE bound
