@@ -5459,7 +5459,11 @@ mod tests {
 				.next()
 				.expect("the subscription is registered")
 				.timescale;
-			assert_eq!(timescale, Some(declared), "{version}: the copy keeps the units it learned");
+			assert_eq!(
+				timescale,
+				Some(declared),
+				"{version}: the copy keeps the units it learned"
+			);
 			serving.abort();
 		}
 	}
