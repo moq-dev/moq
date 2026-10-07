@@ -61,7 +61,7 @@ inline-parameter-set codec with no catalog `description` is the exception:
 the first playlist render GETs one keyframe group to build the init segment,
 then caches it. Out-of-band configs need no media GET. A recording's playlists
 list the same capped window as a live broadcast. A library embedder can set
-`export::Config::replay` to list past it instead: when the catalog's `archive`
+`export::Config::history` to list past it instead: when the catalog's `archive`
 entry names a `store` and no `replay` path, its spans are durable on this
 broadcast, so only the recording's own retention trims the playlists and DASH
 `timeShiftBufferDepth` is the listed span. The listing starts at the records

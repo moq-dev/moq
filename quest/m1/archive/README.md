@@ -50,7 +50,7 @@ Every track has its own timeline (`rs/moq-mux/src/timeline.rs`):
   objects. The caller supplies the catalog.
 - A catalog `archive` entry with a `store` and no `replay` path declares its
   spans durable on that broadcast. The exporter still lists a capped window
-  for it; only the explicit `export::Config::replay` mode lists the whole
+  for it; only the explicit `export::Config::history` mode lists the whole
   retained timeline and lets only its pops trim it (`durable` in
   `rs/moq-hls/src/export/mod.rs`). Either way the listing starts at the
   records the timeline restates on join (at most 256 from `moq-mux`), so a

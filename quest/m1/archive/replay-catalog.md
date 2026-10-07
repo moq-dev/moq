@@ -6,7 +6,7 @@ A replayed recording plays as VOD HLS from the stock server: `moq export
 archive`, then `moq import archive`, then `moq export hls` lists the whole
 recording with no embedder supplying a catalog. The replay broadcast publishes
 its recorded catalog live, stamped with the recording's `store` and `version`,
-so an exporter in replay mode treats its timeline as durable and lists past
+so an exporter in history mode treats its timeline as durable and lists past
 `--window`. A `--follow` replay grows like an event playlist.
 
 Choosing which catalog applies to which media group stays with
@@ -37,8 +37,8 @@ this by hand-building a catalog.
   replays rather than trusting the recorded ones.
 
 A live playlist stays capped even for a durable timeline; listing past the
-window is the explicit `moq_hls::export::Config::replay` mode, which `moq
-export hls` does not expose yet. Give it a flag here. Replay mode lists from
+window is the explicit `moq_hls::export::Config::history` mode, which `moq
+export hls` does not expose yet. Give it a flag here. History mode lists from
 the records the timeline restates when the exporter joins (at most 256 from a
 `moq-mux` publisher), so "the whole recording" also needs the exporter to
 read a longer recording's stored history rather than only its live

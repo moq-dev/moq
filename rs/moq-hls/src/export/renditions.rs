@@ -68,7 +68,7 @@ struct Feed {
 	generation: Option<Arc<str>>,
 	/// The playlist window duration applied on every push (see
 	/// [`Config::window`](super::Config::window)), or `None` in
-	/// [`Config::replay`](super::Config::replay) mode, where only the source timeline's pops
+	/// [`Config::history`](super::Config::history) mode, where only the source timeline's pops
 	/// trim the playlists.
 	window: Option<Duration>,
 }

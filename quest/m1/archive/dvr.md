@@ -44,7 +44,7 @@ is durable, and every group it lists is promised available, so a seek past
 the live window FETCHes old groups through the normal miss chain down to the
 archive. A live HLS playlist stays capped to its window even for a durable
 timeline (decided 10-05), so an HLS seek past it needs the explicit
-`moq_hls::export::Config::replay` listing. `moq-hls` gains
+`moq_hls::export::Config::history` listing. `moq-hls` gains
 no linger (the `hls-linger` quest was dropped, because an unannounced
 broadcast can't be FETCHed and a linger would only serve the cache). Test
 the handover: a live HLS session keeps its playlist URIs and media sequence

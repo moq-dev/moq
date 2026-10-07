@@ -75,7 +75,7 @@ pub struct Config {
 	/// segments are fetched from there on request. It also caps segment `Cache-Control: max-age`.
 	///
 	/// A durable timeline gets the same window: a live playlist stays bounded however much its
-	/// store retains. See [`replay`](Self::replay) to list all of it.
+	/// store retains. See [`history`](Self::history) to list all of it.
 	pub window: Duration,
 
 	/// List a durable timeline past the window, trimmed only by the timeline's own pops, so a
@@ -88,14 +88,14 @@ pub struct Config {
 	/// The listing starts at the records the timeline restates when this exporter joins (a
 	/// `moq-mux` publisher restates at most 256), so it reaches the start of a longer recording
 	/// only if the exporter followed it from there.
-	pub replay: bool,
+	pub history: bool,
 }
 
 impl Default for Config {
 	fn default() -> Self {
 		Self {
 			window: Duration::from_secs(16),
-			replay: false,
+			history: false,
 		}
 	}
 }
@@ -136,7 +136,7 @@ impl Broadcaster {
 		});
 		// The watcher owns its own producer clone; the `Broadcaster`'s `Drop` aborts it so the
 		// standing catalog subscription stops when nobody's serving from this broadcaster.
-		let watcher = tokio::spawn(watch_catalog(upstream, renditions, timeline_watcher, config.replay));
+		let watcher = tokio::spawn(watch_catalog(upstream, renditions, timeline_watcher, config.history));
 		*broadcaster.watcher.lock().unwrap() = Some(watcher);
 		Ok(broadcaster)
 	}
@@ -348,7 +348,7 @@ async fn watch_catalog(
 	upstream: Upstream,
 	renditions: renditions::Producer,
 	timeline_watcher: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-	replay: bool,
+	history: bool,
 ) {
 	// The already-resolved handle rather than a fresh lookup through `source`, so the catalog,
 	// the timeline subscription, and the closed check below all refer to the same resolution. A
@@ -379,7 +379,7 @@ async fn watch_catalog(
 		match kio::wait(|waiter| consumer.poll_next(waiter)).await {
 			Ok(Some(catalog)) => {
 				// Decide the playlists' retention before any rendition starts following its timeline.
-				if replay && !unbound && catalog.archive.as_ref().is_some_and(durable) {
+				if history && !unbound && catalog.archive.as_ref().is_some_and(durable) {
 					unbound = true;
 					renditions.fanout().unbound();
 				}
@@ -441,7 +441,7 @@ fn reference(catalog: &moq_mux::catalog::hang::Catalog) -> Option<Reference> {
 
 /// Whether every range `archive` advertises stays FETCHable from this broadcast until the
 /// timeline pops it: a store makes the ranges durable, and no `replay` path means this
-/// broadcast serves them. The catalog states this, so [`Config::replay`] can follow the
+/// broadcast serves them. The catalog states this, so [`Config::history`] can follow the
 /// timeline's own retention rather than a window sized for relay caches.
 fn durable(archive: &hang::catalog::Archive) -> bool {
 	archive.store.is_some() && archive.replay.is_none()

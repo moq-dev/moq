@@ -584,14 +584,14 @@ async fn a_durable_timeline_lists_the_window() {
 	assert!(!playlist.contains("seg/29b1cd67.3.m4s\n"), "{playlist}");
 }
 
-/// Replay mode lists a durable timeline's whole recording, and DASH offers the whole listed
+/// History mode lists a durable timeline's whole recording, and DASH offers the whole listed
 /// span. A live-style entry, or a `replay` path that moves the durable ranges to another
 /// broadcast, keeps the window even then.
 #[tokio::test]
-async fn replay_mode_lists_a_durable_timeline_past_the_window() {
+async fn history_mode_lists_a_durable_timeline_past_the_window() {
 	let recording = segments(12).await;
 	let config = Config {
-		replay: true,
+		history: true,
 		..Config::default()
 	};
 	let replay = Replay::open_with(&recording, 64 * 1024 * 1024, durable(), config.clone()).await;
