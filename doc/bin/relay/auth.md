@@ -243,7 +243,9 @@ decision: the relay reports its facts in the request's `tls` and enforces the
 grant it gets back. `moq auth serve` grants a certificate only what
 `--mtls-publish` and `--mtls-subscribe` name, empty by default. Public rules
 ignore certificates, so a relay or `moq --listen` on `--auth-public` refuses
-to start with `listen.tls.root` or `web.https.root`.
+to start with `listen.tls.root` or `web.https.root`. Only the QUIC listener
+verifies `listen.tls.root`, so a stream-only relay (no `listen.bind`) refuses
+to start with it too.
 
 Cluster peers are admitted the same way, so a mesh runs
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**'` (or a server

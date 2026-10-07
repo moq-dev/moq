@@ -50,7 +50,7 @@ async fn build_web_with(web_config: web::Config) -> web::Web {
 	let mut auth_config = auth::Config::default();
 	auth_config.public = vec![moq_auth::Pattern::all()];
 	let auth = auth_config
-		.init("test", &moq_tokio::tls::Connect::default())
+		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init");
 
 	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
@@ -596,7 +596,7 @@ async fn spawn_accept_relay(
 	let server = config.init(Default::default()).expect("server init");
 
 	let auth = auth_config
-		.init("test", &moq_tokio::tls::Connect::default())
+		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init");
 
 	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
