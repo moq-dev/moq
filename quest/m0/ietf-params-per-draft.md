@@ -38,9 +38,11 @@ Its call sites are in `fetch.rs`, `publish_namespace.rs`, `publish.rs`,
 SUBSCRIBE, FETCH and PUBLISH use it; the legacy d14 to d17 decodes of
 SUBSCRIBE_NAMESPACE, PUBLISH_NAMESPACE and the `request*.rs` messages go
 through `decode_params!`, so they refuse unknown keys on d14 and d15 today
-(`test_param_unknown_rejected` asserts that). Those are gaps. Accepting FORWARD=0 on a d16 SUBSCRIBE_NAMESPACE can
-be accept-and-ignore: it only sets FORWARD on the PUBLISH messages it
-triggers, and we send none for that subscription (Subscribe Options 0x01).
+(`test_param_unknown_rejected` asserts that). Those are gaps.
+
+Accepting FORWARD=0 on a d16 SUBSCRIBE_NAMESPACE can be accept-and-ignore:
+it only sets FORWARD on the PUBLISH messages it triggers, and we send none
+for that subscription (Subscribe Options 0x01).
 
 Coordinate with [moq-transport request codes](/quest/m2/ietf-request-codes.md),
 which accepts the delivery-timeout parameters on REQUEST_UPDATE; whichever
