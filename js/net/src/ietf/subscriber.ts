@@ -26,7 +26,7 @@ import type { Session } from "./adapter.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
 import * as Cluster from "./cluster.ts";
 import { requestReason, toRequestCode } from "./error.ts";
-import { Frame, type Group as GroupMessage } from "./object.ts";
+import { Frame, type Group as GroupMessage, hasFirstObjectBit, ObjectIdGap } from "./object.ts";
 import { fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishError, publishDoneClean } from "./publish.ts";
 import {
@@ -1082,10 +1082,10 @@ export class Subscriber {
 			// is the unit an application resyncs on. Drop it and pick up at the next group, the
 			// same degradation as a publisher that no longer holds the head.
 			//
-			// This only saves reading a stream we would throw away. The bit is the publisher's
-			// claim, so what is enforced is the object ids themselves: `Frame.decode` holds every
-			// object to starting at 0 and incrementing by 1, whatever the header said and on the
-			// drafts that have no such bit to read.
+			// Drafts before the bit cannot say this in the header. A non-zero delta on the
+			// first object is the same hole, and the catch below drops that stream too. A
+			// later gap, or a header that claimed the group starts at object 0, still fails
+			// it: `Frame.decode` refuses every non-zero delta.
 			if (!group.flags.firstObject) {
 				console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
 				stream.stop(new Error("a group must start at object 0"));
@@ -1131,6 +1131,15 @@ export class Subscriber {
 			open().close();
 		} catch (err: unknown) {
 			const e = await sessionCause(this.#quic, err);
+			// The producer is still unopened only when the first object failed. On a draft
+			// with no FIRST_OBJECT bit, that non-zero delta is a headless group: drop the
+			// stream and leave the subscription up for the next group. Delivering the
+			// object would renumber a P-frame as the keyframe the group opens with.
+			if (producer === undefined && e instanceof ObjectIdGap && !hasFirstObjectBit(this.#session.version)) {
+				console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
+				stream.stop(new Error("a group must start at object 0"));
+				return;
+			}
 			if (e instanceof ProtocolViolation) {
 				// The publisher broke the track's end, which no later group can repair.
 				producer?.close(e);

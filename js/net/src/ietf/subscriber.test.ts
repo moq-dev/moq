@@ -873,20 +873,24 @@ function encodeObjects(deltas: number[]): Uint8Array {
  * A subscriber with one track subscribed and answered, which is what registers {@link ALIAS}
  * and lets a group stream naming it be handled.
  */
-async function subscribeTrack(): Promise<{ subscriber: Subscriber; track: track.Subscriber }> {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
-	const session = new NativeSession(pair.server, VERSION, true);
+async function subscribeTrack(
+	version: Version = VERSION,
+): Promise<{ subscriber: Subscriber; track: track.Subscriber }> {
+	const pair = createMockTransportPair(version === Version.DRAFT_16 ? ALPN.DRAFT_16 : ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, version, true);
 	const subscriber = new Subscriber({ session });
 
 	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 
 	const peer = await nextStream(pair.client);
 	if (!peer) throw new Error("the subscriber never opened a subscribe stream");
+	peer.reader.version = version;
+	peer.writer.version = version;
 
 	expect(await peer.reader.u53()).toBe(Subscribe.id);
-	const request = await Subscribe.decode(peer.reader, VERSION);
+	const request = await Subscribe.decode(peer.reader, version);
 	await peer.writer.u53(SubscribeOk.id);
-	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, VERSION);
+	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, version);
 
 	return { subscriber, track };
 }
@@ -1215,6 +1219,52 @@ test("a group served from partway through is dropped", async () => {
  * peer that sets the bit and then starts at object 5 is contradicting itself, so the group
  * is aborted rather than delivered with a hole the header said was not there.
  */
+/**
+ * Drafts 14-17 have no FIRST_OBJECT bit, so a subgroup that starts at the live edge
+ * arrives with `firstObject` forced on and a non-zero first delta. That stream is the
+ * in-progress group: drop it, keep the subscription, and deliver the next group, which
+ * starts at object 0. A gap after an object was delivered still fails that group.
+ */
+test("a draft without FIRST_OBJECT drops a subgroup that starts mid-group", async () => {
+	const version = Version.DRAFT_16;
+	const { subscriber, track } = await subscribeTrack(version);
+
+	// The header cannot say otherwise on this draft: decode reports firstObject.
+	const partial = new GroupMessage({
+		trackAlias: ALIAS,
+		groupId: 3,
+		subGroupId: 0,
+		publisherPriority: 0,
+		flags: groupFlags(true),
+	});
+	await subscriber.handleGroup(partial, new Reader(undefined, encodeObjects([2, 0]), version));
+	expect(track.closed.peek()).toBeUndefined();
+
+	const whole = groupFlags(true);
+	await subscriber.handleGroup(
+		new GroupMessage({ trackAlias: ALIAS, groupId: 4, subGroupId: 0, publisherPriority: 0, flags: whole }),
+		new Reader(undefined, encodeObjects([0, 0]), version),
+	);
+
+	const ordered = track.ordered();
+	const group = await ordered.nextGroup();
+	expect(group?.sequence).toBe(4);
+	expect(await group?.readString()).toBe("object 0");
+
+	await subscriber.handleGroup(
+		new GroupMessage({ trackAlias: ALIAS, groupId: 5, subGroupId: 0, publisherPriority: 0, flags: whole }),
+		new Reader(undefined, encodeObjects([0, 5]), version),
+	);
+	const gapped = await ordered.nextGroup();
+	expect(gapped?.sequence).toBe(5);
+	expect(await gapped?.readString()).toBe("object 0");
+	await expect(gapped?.readFrameSequence()).rejects.toThrow(/object IDs must start at 0/);
+	expect(track.closed.peek()).toBeUndefined();
+
+	ordered.close();
+	track.close();
+});
+
 test("a group that claims its first object must start at zero", async () => {
 	const { subscriber, track } = await subscribeTrack();
 
