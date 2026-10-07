@@ -57,7 +57,7 @@ The framing is where the guarantee lives, not the subscription flags:
   stale bytes stop being retransmitted.
 - A subscriber cannot weaken either class. `clamp_combined`
   (`rs/moq-net/src/model/track.rs`) clamps the aggregate window down to
-  `Info::max_age`, and `Subscription::max_age` already defaults to
+  `Info::max_age`, and `Subscription::max_delay` already defaults to
   `Duration::ZERO`, so a raw observer subscribing through `moq-net` neither
   widens the window nor has to be prevented from trying.
 

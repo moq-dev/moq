@@ -71,7 +71,7 @@ const subscribe: Sample = {
 			broadcast: Path.from("room/alice"),
 			track: "video",
 			priority: 2,
-			maxAge: 10_000,
+			maxDelay: 10_000,
 		}).encode(w, version),
 	decode: (r, version) => Subscribe.decode(r, version),
 };
