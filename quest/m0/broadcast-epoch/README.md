@@ -13,7 +13,7 @@ rather than stall on a replaced broadcast.
 The epoch rides moq-lite 07 announcements and requests as metadata, so the
 path never changes and every older version and moq-transport keeps working:
 their routes carry no epoch, and see a restart as an end and start at the
-same path once the old session retires.
+same path.
 
 Non-goals: pooling, which needs nothing here; a redundant pair shares an
 explicit epoch through `moq --epoch`.
