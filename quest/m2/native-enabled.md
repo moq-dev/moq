@@ -19,7 +19,3 @@ Test mixed and all-disabled catalogs, plus disable/re-enable transitions.
 A C `moq_consume_audio_enabled` getter is added only if a C consumer needs it;
 any FFI/C API change updates all wrappers and their docs in the same PR.
 Update native consumer docs for the selection behavior.
-
-## Required
-
-- [Enabled flag](/quest/m1/catalog-enabled.md) - #4915 provides enabled fields and enabled-first video ranking
