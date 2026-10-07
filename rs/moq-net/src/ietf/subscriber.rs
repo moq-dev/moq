@@ -1283,6 +1283,14 @@ where
 					return stream.writer.closed().await;
 				}
 			};
+			// Drafts 14-16 carry no advertisement parameters to update, so an update the
+			// adapter routed here changes nothing.
+			if type_id == ietf::SubscribeUpdate::ID
+				&& matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+			{
+				stream.reader.decode::<ietf::Body>().await?;
+				continue;
+			}
 			let terminal = self.terminal_publish_namespace(type_id);
 			if type_id != ietf::PublishNamespaceUpdate::ID && !terminal {
 				// A repeated PUBLISH_NAMESPACE lands here too: a second request on the
@@ -3589,7 +3597,13 @@ where
 		let reset = kio::wait(|waiter| {
 			if open {
 				let mut cx = std::task::Context::from_waker(waiter.waker());
-				match stream.reader.poll_closed(&mut cx) {
+				let closed = match self.version {
+					Version::Draft14 | Version::Draft15 | Version::Draft16 => {
+						super::request_stream::poll_legacy_end(&mut stream, &mut cx)
+					}
+					_ => stream.reader.poll_closed(&mut cx),
+				};
+				match closed {
 					Poll::Ready(Err(err)) => return Poll::Ready(Some(err)),
 					Poll::Ready(Ok(())) => open = false,
 					Poll::Pending => {}

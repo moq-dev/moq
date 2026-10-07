@@ -1175,8 +1175,7 @@ fn decode_request_id(body: &Bytes, version: Version) -> Result<RequestId, Error>
 ///
 /// Drafts 14 and 15 name it in Subscription Request ID, and draft 16 in Existing
 /// Request ID. Both are the second field; the first is the update's own new
-/// Request ID. Draft 17 and later dropped that field, so Request ID itself is
-/// the existing request.
+/// Request ID. Later drafts send updates on the request's own stream, not here.
 fn decode_update_target(body: &Bytes, version: Version) -> Result<RequestId, Error> {
 	match version {
 		Version::Draft14 | Version::Draft15 | Version::Draft16 => {
@@ -1184,7 +1183,7 @@ fn decode_update_target(body: &Bytes, version: Version) -> Result<RequestId, Err
 			let _own = RequestId::decode(&mut r, version)?;
 			Ok(RequestId::decode(&mut r, version)?)
 		}
-		_ => decode_request_id(body, version),
+		_ => Err(Error::UnexpectedMessage),
 	}
 }
 
@@ -1316,24 +1315,6 @@ mod tests {
 				"{version}: update {update_id} did not reach {target_id}"
 			);
 		}
-	}
-
-	/// Draft 17 and later dropped the second field. Request ID itself names the
-	/// request being updated, which is where the bytes have to land.
-	#[test]
-	fn test_request_update_draft17_follows_its_request_id() {
-		let version = Version::Draft17;
-		let update = ietf::SubscribeUpdate {
-			request_id: RequestId(10),
-			subscription_request_id: None,
-			start_location: ietf::Location { group: 0, object: 0 },
-			end_group: 0,
-			subscriber_priority: 128,
-			forward: true,
-		};
-		let body = encode_body(&update, version);
-		let route = classify_msg(version, ietf::SubscribeUpdate::ID, &body).unwrap();
-		assert!(matches!(route, Route::FollowUp(RequestId(10))));
 	}
 
 	#[test]

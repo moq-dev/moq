@@ -31,6 +31,10 @@ subscription or namespace advertisement stays active. Cancellation uses
 `RESET_STREAM` or `STOP_SENDING`. Subscription `REQUEST_UPDATE` can change
 subscriber priority; other changes are refused with `NOT_SUPPORTED` and end
 the subscription with `UPDATE_FAILED`. Drafts 17 and 18 retain FIN cancellation.
+In Rust, drafts 14 to 16 apply a subscription's `SUBSCRIBE_UPDATE`
+(`REQUEST_UPDATE` on draft 16) the same way. Draft 14 sends no answer and has
+no `UPDATE_FAILED`, so a refused update ends the subscription with
+`INTERNAL_ERROR`. On those drafts an update to any other request is ignored.
 
 Rust and JavaScript subscribers accept object extension blocks up to 64 KiB.
 This is an implementation limit, not a limit in the IETF draft. A larger
