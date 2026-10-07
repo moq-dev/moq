@@ -58,9 +58,8 @@ These land with the next breaking release, not the 2026-09-23 train.
   written that long after its decode time, on a clock that follows the
   source's; `--max-age` and `--latency-max` are refused with the new flag
   named. In Rust, moq-mux's `ts::Export::with_max_age` is `with_delay`, and
-  `ts::Export::stats` returns `ts::stats::Export` (its `streams` rows, plus the
-  late drops, measured drift and out-of-tolerance count) instead of
-  `ts::Stats`; pass it to `ts::stats::Log` with `.into()`.
+  `ts::stats::Export` gains the late drops, measured drift and
+  out-of-tolerance count beside its `streams` rows. It is no longer `Eq`.
 - **moq-mux has no clock translators.** `clock::Anchor`, `clock::Lane`, and
   `SourceMap` (#4667) are gone, along with the importers' `live()`. Publish the
   source's own timestamps and let the catalog clock map them to wall time;
@@ -150,8 +149,7 @@ These land with the next breaking release, not the 2026-09-23 train.
 - **moq-mux TS stats live in `ts::stats`.** `ts::Stats` is
   `ts::stats::Snapshot` and `ts::StreamStats` is `ts::stats::Stream`, whose
   `track` is an owned `String`. `ts::Export::stats` returns
-  `ts::stats::Export`, which carries only `streams`; feed it to
-  `stats::Log` with `.into()`. `ts::MultipleProgramsError` is
+  `ts::stats::Export`; feed it to `stats::Log` with `.into()`. `ts::MultipleProgramsError` is
   `#[non_exhaustive]`: recover it by downcast and read `programs`.
 - **@moq/publish drops `OpusConfig.usedtx`.** Chromium's DTX output shifts the
   audio timeline, so Opus DTX is always off (the WebCodecs default). Remove the
