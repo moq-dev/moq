@@ -343,6 +343,13 @@ impl Slot {
 		self.serving().is_aborted()
 	}
 
+	/// The copy a finished track must not report as delivered: aborted, and not
+	/// an accounted hole. `None` while anything servable remains.
+	fn cut(&self) -> Option<&group::Producer> {
+		let group = self.serving();
+		(group.is_aborted() && !group.is_skipped()).then_some(group)
+	}
+
 	/// The mean access over copies still held, weighed the way each one samples the
 	/// pool's average: a maximum would sit above the mean forever, so a lone slot with
 	/// two copies could never be evicted.
@@ -433,6 +440,21 @@ pub(crate) struct FetchOutcome {
 	pub(crate) rejected: Option<Error>,
 }
 
+/// What an arrival-order read found. A cut's error is read after the track lock
+/// drops: [`group::Producer::abort_error`] takes the group lock.
+enum Arrival {
+	Group(group::Producer, usize),
+	End,
+	Cut(group::Producer, usize),
+}
+
+/// What a sequence-order read found. Same lock rule as [`Arrival`].
+enum InRange {
+	Group(group::Producer),
+	End,
+	Cut(group::Producer),
+}
+
 impl TrackState {
 	fn accept(&mut self, info: Info) {
 		self.published = true;
@@ -462,28 +484,55 @@ impl TrackState {
 		self.live || self.sealed || self.final_sequence.is_some() || self.abort.is_some()
 	}
 
-	fn poll_recv_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Option<(group::Producer, usize)>>> {
+	fn poll_recv_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Arrival>> {
 		let start = index.saturating_sub(self.offset);
 		let readable = self.readable();
 		let min_sequence = min_sequence.max(self.live_floor.unwrap_or(0));
-		for (i, (sequence, stamp)) in self.arrival.iter().enumerate().skip(start).filter(|_| readable) {
-			if *sequence >= min_sequence
-				&& let Some(slot) = self.lookup.get(sequence)
-				&& slot.stamp == *stamp
-				&& !slot.is_aborted()
-			{
-				return Poll::Ready(Ok(Some((slot.serving().clone(), self.offset + i))));
+		if readable {
+			for (i, (sequence, stamp)) in self.arrival.iter().enumerate().skip(start) {
+				if *sequence >= min_sequence
+					&& let Some(slot) = self.lookup.get(sequence)
+					&& slot.stamp == *stamp
+					&& !slot.is_aborted()
+				{
+					return Poll::Ready(Ok(Arrival::Group(slot.serving().clone(), self.offset + i)));
+				}
 			}
 		}
 
 		// TODO once we have drop notifications, check if index == final_sequence.
 		if self.is_complete() {
-			Poll::Ready(Ok(None))
+			// A cached abort is not delivery. An accounted hole may be skipped.
+			// A cancel, a session close, or a transport failure still owed below
+			// the end is the cut, including a publisher writer drop (Cancel).
+			if let Some((group, at)) = self.cut_at(start, min_sequence) {
+				return Poll::Ready(Ok(Arrival::Cut(group, at)));
+			}
+			Poll::Ready(Ok(Arrival::End))
 		} else if let Some(err) = &self.abort {
 			Poll::Ready(Err(err.clone()))
 		} else {
 			Poll::Pending
 		}
+	}
+
+	/// The first cut this reader has not passed, with its absolute arrival index.
+	fn cut_at(&self, start: usize, min_sequence: u64) -> Option<(group::Producer, usize)> {
+		for (i, (sequence, stamp)) in self.arrival.iter().enumerate().skip(start) {
+			if *sequence < min_sequence {
+				continue;
+			}
+			let Some(slot) = self.lookup.get(sequence) else {
+				continue;
+			};
+			if slot.stamp != *stamp {
+				continue;
+			}
+			if let Some(group) = slot.cut() {
+				return Some((group.clone(), self.offset + i));
+			}
+		}
+		None
 	}
 
 	/// Find the next datagram at or after the subscriber's absolute `index`.
@@ -525,13 +574,9 @@ impl TrackState {
 	/// without scanning past them in arrival order.
 	///
 	/// Returns `Poll::Pending` when no in-range group is currently cached but
-	/// future groups could still arrive in range; returns `Ok(None)` only when
-	/// the track is finalized and no further in-range group is possible.
-	fn poll_next_in_range(
-		&self,
-		next_sequence: u64,
-		end_sequence: Option<u64>,
-	) -> Poll<Result<Option<group::Producer>>> {
+	/// future groups could still arrive in range. `End` is a clean end. `Cut`
+	/// is a group below the end that a finished track still owes.
+	fn poll_next_in_range(&self, next_sequence: u64, end_sequence: Option<u64>) -> Poll<Result<InRange>> {
 		// Nothing more can arrive once the track was sealed (dropped with its end
 		// declared) or aborted. Either closed the channel, so parking is not an option:
 		// the consumer would be handed the abort, or `Dropped`, instead of how it ended.
@@ -540,7 +585,7 @@ impl TrackState {
 		// off. One after it is a clean end (see `is_complete`), as is reaching the end.
 		let end = || match &self.abort {
 			Some(err) if !self.settled => Err(err.clone()),
-			_ => Ok(None),
+			_ => Ok(InRange::End),
 		};
 
 		// If the exclusive end is already at or below where we'd resume, no
@@ -569,7 +614,7 @@ impl TrackState {
 			// convict the candidate rather than deliver it. The caller stamps what it
 			// delivers; a group walked off must not be shielded from eviction. The caller
 			// consumes it with the track guard released, like `poll_recv_group`.
-			return Poll::Ready(Ok(Some(group.clone())));
+			return Poll::Ready(Ok(InRange::Group(group.clone())));
 		}
 
 		// No in-range group is cached. Decide whether more could ever arrive.
@@ -582,7 +627,31 @@ impl TrackState {
 		if closed || self.final_sequence.is_some_and(|fin| next_sequence >= fin) {
 			return Poll::Ready(end());
 		}
+		// The boundary is reached and nothing live is left in range. A reset that
+		// is not an accounted hole is the cut; a hole ends clean. Parking here
+		// would wait for a group the boundary says will not arrive.
+		if self.is_complete() {
+			if let Some(group) = self.cut_in_range(next_sequence, end_sequence) {
+				return Poll::Ready(Ok(InRange::Cut(group)));
+			}
+			return Poll::Ready(Ok(InRange::End));
+		}
 		Poll::Pending
+	}
+
+	/// The lowest-sequence cut in `[next_sequence, end_sequence)`.
+	fn cut_in_range(&self, next_sequence: u64, end_sequence: Option<u64>) -> Option<group::Producer> {
+		let floor = next_sequence.max(self.live_floor.unwrap_or(0));
+		for (_, slot) in self.lookup.range(floor..) {
+			let group = slot.serving();
+			if !super::subscription::before_end(group.sequence, end_sequence) {
+				break;
+			}
+			if let Some(group) = slot.cut() {
+				return Some(group.clone());
+			}
+		}
+		None
 	}
 
 	/// The cached group for `sequence`, but only when it holds every frame from
@@ -3572,15 +3641,27 @@ impl Cursor {
 					group
 				}
 				_ => {
-					let Some((producer, found_index)) =
-						ready!(self.poll(waiter, |state| state.poll_recv_group(self.index, self.min_sequence))?)
-					else {
-						// Parked groups survive a finished track: they become deliverable
-						// again if the cap rises, so the stream isn't over while any are held.
-						if self.parked.is_empty() {
-							return Poll::Ready(Ok(None));
+					let (producer, found_index) = match ready!(
+						self.poll(waiter, |state| state.poll_recv_group(self.index, self.min_sequence))?
+					) {
+						Arrival::End => {
+							// Parked groups survive a finished track: they become deliverable
+							// again if the cap rises, so the stream isn't over while any are held.
+							if self.parked.is_empty() {
+								return Poll::Ready(Ok(None));
+							}
+							return Poll::Pending;
 						}
-						return Poll::Pending;
+						// Outside the cap this reader does not owe the group. Advance
+						// past it or the next poll returns the same cut.
+						Arrival::Cut(producer, found_index) => {
+							self.index = found_index + 1;
+							if !super::subscription::before_end(producer.sequence, self.end_sequence) {
+								continue;
+							}
+							return Poll::Ready(Err(producer.abort_error()));
+						}
+						Arrival::Group(producer, found_index) => (producer, found_index),
 					};
 					let consumer = producer.consume();
 					// Stamp with the track guard released, so delivery never nests the
@@ -3633,12 +3714,14 @@ impl Cursor {
 		let drift = ready!(self.poll_drift(end, waiter))?;
 
 		let group = loop {
-			let Some(producer) = ready!(self.poll(waiter, |state| state.poll_next_in_range(floor, end))?) else {
+			let producer = match ready!(self.poll(waiter, |state| state.poll_next_in_range(floor, end))?) {
 				// Deliberately no flush of `seek_pending` here: only a delivery commit
-				// may count a conviction. This `None` can be an artifact of a floor
+				// may count a conviction. This end can be an artifact of a floor
 				// that will lower again. A conviction never committed is dropped
 				// uncounted with the cursor.
-				return Poll::Ready(Ok(None));
+				InRange::End => return Poll::Ready(Ok(None)),
+				InRange::Cut(producer) => return Poll::Ready(Err(producer.abort_error())),
+				InRange::Group(producer) => producer,
 			};
 			let group = producer.consume();
 
@@ -3785,7 +3868,7 @@ impl Subscriber {
 	///
 	/// Returns `Poll::Ready(Ok(Some(group)))` when a group is available,
 	/// `Poll::Ready(Ok(None))` when the track is finished,
-	/// `Poll::Ready(Err(e))` when the track has been aborted, or
+	/// `Poll::Ready(Err(e))` when the track was aborted or a group below the end was cut, or
 	/// `Poll::Pending` when no group is available yet.
 	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		let meter = self.stats.meter();
@@ -6995,6 +7078,141 @@ mod test {
 		producer.abort(Error::Timeout).unwrap();
 		let res = consumer.recv_group().now_or_never().expect("should not block");
 		assert!(matches!(res, Err(Error::Timeout)));
+	}
+
+	/// A group reset below a declared end is a cut. The publisher's writer drop
+	/// reports it as a stream cancel, and the subscriber must not turn that into
+	/// a clean end after it has already learned the boundary.
+	#[test]
+	fn a_cancelled_group_below_the_end_does_not_end_clean() {
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(replay());
+		producer
+			.create_group(group::Info { sequence: 0 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		let tail = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		producer.finish_at(2).unwrap();
+		assert_eq!(consumer.assert_group().sequence, 0);
+
+		tail.abort(Error::Stream(crate::StreamError::Cancel)).unwrap();
+		let res = consumer
+			.recv_group()
+			.now_or_never()
+			.expect("should not block")
+			.map(|group| group.map(|group| group.sequence));
+		assert!(
+			matches!(res, Err(Error::Stream(crate::StreamError::Cancel))),
+			"expected the cut, got {res:?}"
+		);
+	}
+
+	/// The ordered cursor owes the same group. A finished track has nothing left
+	/// to wait for, so the cut is an error, not a park.
+	#[test]
+	fn a_cancelled_group_below_the_end_does_not_end_clean_for_an_ordered_reader() {
+		let mut producer = track_producer("test", None);
+		let mut ordered = producer.subscribe(replay()).ordered();
+		producer
+			.create_group(group::Info { sequence: 0 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		let tail = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		producer.finish_at(2).unwrap();
+		tail.abort(Error::Stream(crate::StreamError::Cancel)).unwrap();
+
+		assert_eq!(
+			ordered.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			0
+		);
+		let res = ordered
+			.next_group()
+			.now_or_never()
+			.expect("should not block")
+			.map(|group| group.map(|group| group.sequence));
+		assert!(
+			matches!(res, Err(Error::Stream(crate::StreamError::Cancel))),
+			"expected the cut, got {res:?}"
+		);
+	}
+
+	/// A session close aborts the group with the session error. Same cut.
+	#[test]
+	fn a_session_error_below_the_end_does_not_end_clean() {
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(replay());
+		producer
+			.create_group(group::Info { sequence: 0 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		let tail = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		producer.finish_at(2).unwrap();
+		assert_eq!(consumer.assert_group().sequence, 0);
+
+		tail.abort(Error::Session(crate::SessionError::Cancel)).unwrap();
+		let res = consumer
+			.recv_group()
+			.now_or_never()
+			.expect("should not block")
+			.map(|group| group.map(|group| group.sequence));
+		assert!(
+			matches!(res, Err(Error::Session(crate::SessionError::Cancel))),
+			"expected the session cut, got {res:?}"
+		);
+	}
+
+	/// Old and evicted groups are holes the publisher accounted for. Ending after
+	/// one is still clean.
+	#[test]
+	fn an_old_group_below_the_end_still_ends_clean() {
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(replay());
+		producer
+			.create_group(group::Info { sequence: 0 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		let tail = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		producer.finish_at(2).unwrap();
+		assert_eq!(consumer.assert_group().sequence, 0);
+
+		tail.abort(Error::Old).unwrap();
+		let res = consumer
+			.recv_group()
+			.now_or_never()
+			.expect("should not block")
+			.map(|group| group.map(|group| group.sequence));
+		assert!(matches!(res, Ok(None)), "an old group is a hole, got {res:?}");
+	}
+
+	/// A reader capped below the cut does not owe that group.
+	#[test]
+	fn a_cut_beyond_the_readers_cap_still_ends_clean() {
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(replay());
+		consumer.set_groups(..1);
+		producer
+			.create_group(group::Info { sequence: 0 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		let tail = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		producer.finish_at(2).unwrap();
+		tail.abort(Error::Cancel).unwrap();
+
+		assert_eq!(consumer.assert_group().sequence, 0);
+		let res = consumer
+			.recv_group()
+			.now_or_never()
+			.expect("should not block")
+			.map(|group| group.map(|group| group.sequence));
+		assert!(
+			matches!(res, Ok(None)),
+			"a group above the cap is not owed, got {res:?}"
+		);
 	}
 
 	#[moq_net_sim::test]

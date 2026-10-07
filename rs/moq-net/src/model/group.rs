@@ -371,6 +371,10 @@ struct Alive {
 	// out of `GroupState` has to read both under one guard, or the two halves can
 	// straddle the abort: see `Producer::live_first_frame`.
 	aborted: AtomicBool,
+	// Set before `aborted`'s release store. True when the abort accounts for the
+	// group (old, evicted, lagged), so a finished track may still end clean.
+	// False for a cancel, a session close, or a transport failure: those cut it.
+	skipped: AtomicBool,
 	// The cache stamp `GroupState::charge` maintains, held here as well so the
 	// eviction and expiry walks can weigh a candidate without taking the group lock
 	// they already hold the track lock over.
@@ -408,6 +412,19 @@ impl Drop for Alive {
 	}
 }
 
+/// A group the publisher accounted for: old, evicted, or lagged. A finished
+/// track may end clean without it. A cancel, a session close, or a transport
+/// failure did not account for it.
+fn is_accounted_hole(err: &Error) -> bool {
+	matches!(
+		err,
+		Error::Old
+			| Error::Evicted
+			| Error::Lagged
+			| Error::Stream(crate::StreamError::Old | crate::StreamError::Evicted | crate::StreamError::TooFarBehind)
+	)
+}
+
 impl std::ops::Deref for Producer {
 	type Target = Info;
 
@@ -436,6 +453,7 @@ impl Producer {
 			info,
 			state: state.clone(),
 			aborted: AtomicBool::new(false),
+			skipped: AtomicBool::new(false),
 			access,
 		});
 		Self {
@@ -793,8 +811,8 @@ impl Producer {
 	}
 
 	fn commit_abort(&self, mut guard: kio::Mut<'_, GroupState>, err: Error) {
-		guard.abort = Some(err);
-		self.alive.aborted.store(true, Ordering::Release);
+		guard.abort = Some(err.clone());
+		self.note_abort(&err);
 		guard.release();
 		guard.close();
 	}
@@ -804,10 +822,20 @@ impl Producer {
 	fn abort_too_large(&self, mut state: kio::Mut<'_, GroupState>) -> Error {
 		let err = Error::GroupTooLarge;
 		state.abort = Some(err.clone());
-		self.alive.aborted.store(true, Ordering::Release);
+		self.note_abort(&err);
 		state.release();
 		state.close();
 		err
+	}
+
+	/// Publish the abort where a track scan can see it without this group's lock.
+	///
+	/// The skip bit is stored first. A reader that has observed `aborted` with
+	/// Acquire is synchronized with that release, so its relaxed load of `skipped`
+	/// sees this write.
+	fn note_abort(&self, err: &Error) {
+		self.alive.skipped.store(is_accounted_hole(err), Ordering::Relaxed);
+		self.alive.aborted.store(true, Ordering::Release);
 	}
 
 	/// Whether the group has been aborted (including pool eviction). The track's
@@ -819,6 +847,18 @@ impl Producer {
 	/// which hands out a group whose consumer then surfaces the abort.
 	pub(crate) fn is_aborted(&self) -> bool {
 		self.alive.aborted.load(Ordering::Acquire)
+	}
+
+	/// Whether this abort is a hole a finished track may skip. Meaningful only
+	/// after [`Self::is_aborted`] has observed the release store.
+	pub(crate) fn is_skipped(&self) -> bool {
+		self.alive.skipped.load(Ordering::Relaxed)
+	}
+
+	/// The recorded abort. Takes the group lock, so a track scan must call it
+	/// only after releasing the track lock.
+	pub(crate) fn abort_error(&self) -> Error {
+		self.abort_reason()
 	}
 
 	/// Whether the group was finished: it holds every frame it will ever have.
