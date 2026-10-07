@@ -4909,6 +4909,54 @@ pub(super) mod test {
 		}
 	}
 
+	// A program config element that changes the layout mid-stream refuses its unit as
+	// damaged, and the track carries on with the frames around it.
+	#[tokio::test]
+	async fn aac_program_config_changed_mid_stream_refuses_the_unit() {
+		const AAC_PID: u16 = 0x0060;
+		// ffmpeg's quad layout: one front and one back channel pair.
+		let mut quad = vec![0x11, 0x80, 0x04, 0xC4, 0x04, 0x00, 0x21, 0x10, 0x0C];
+		quad.extend_from_slice(b"Lavc63.1.101");
+		// The same two pairs, with the second moved from the back to the side.
+		let mut side = quad.clone();
+		side[4] = 0x40;
+		let element = |asc: &[u8]| crate::codec::aac::in_band(asc).unwrap().program_config.unwrap();
+		let frame = |pce: &[u8]| {
+			let mut f = super::adts::write_header(2, 48_000, 0, pce.len() + 10)
+				.unwrap()
+				.to_vec();
+			f.extend_from_slice(pce);
+			f.resize(f.len() + 10, 0x20);
+			f
+		};
+		let (with, changed, bare) = (frame(&element(&quad)), frame(&element(&side)), frame(&[]));
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false),
+			..Default::default()
+		};
+		for (pts, unit) in [
+			(90_000, [with.as_slice(), &bare]),
+			(180_000, [changed.as_slice(), &bare]),
+		] {
+			let cc = mux.cc(AAC_PID);
+			mux.out.extend(audio_pes_packet(AAC_PID, cc, pts, &unit.concat()));
+		}
+		let cc = mux.cc(AAC_PID);
+		mux.out.extend(audio_pes_packet(AAC_PID, cc, 270_000, &bare));
+		import.decode(&mux.out).unwrap();
+		import.finish().unwrap();
+		assert_eq!(import.stats().streams[&AAC_PID].damaged, 1);
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(frames.len(), 3, "the changed unit is dropped, the rest publish");
+	}
+
 	// Resync is bounded: a PID carrying something other than the codec its PMT declares is a
 	// config error, not damage, so it must still fail rather than scan forever behind an
 	// unresolved catalog reservation (which would withhold the catalog for every track).
