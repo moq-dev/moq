@@ -1,7 +1,6 @@
 //! Grouped-frame producer and consumer for one group identity.
 
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, ready};
 
@@ -10,6 +9,7 @@ use bytes::Bytes;
 use crate::error::{Error, Result};
 use crate::key::TrackKey;
 use crate::limits::MAX_GROUPED_PAYLOAD;
+use crate::terminal::Terminal;
 
 /// A decrypted grouped frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,29 +114,34 @@ impl fmt::Debug for Producer {
 
 /// Reader for one protected group.
 ///
-/// Authentication failure is sticky and ends the grouped track.
+/// A grouped authentication failure ends the track: pending reads wake with
+/// [`Error::Authentication`] and the underlying subscription is released.
 pub struct Consumer {
-	inner: moq_net::group::Consumer,
+	inner: Option<moq_net::group::Consumer>,
+	sequence: u64,
 	key: Arc<Mutex<TrackKey>>,
-	auth_failed: Arc<AtomicBool>,
+	terminal: Arc<Terminal>,
 }
 
 impl Consumer {
-	pub(crate) fn new(
-		inner: moq_net::group::Consumer,
-		key: Arc<Mutex<TrackKey>>,
-		auth_failed: Arc<AtomicBool>,
-	) -> Self {
+	pub(crate) fn new(inner: moq_net::group::Consumer, key: Arc<Mutex<TrackKey>>, terminal: Arc<Terminal>) -> Self {
+		let sequence = inner.sequence;
 		Self {
-			inner,
+			inner: Some(inner),
+			sequence,
 			key,
-			auth_failed,
+			terminal,
 		}
+	}
+
+	/// Drop the net reader so this group no longer counts as demanded.
+	fn release(&mut self) {
+		self.inner.take();
 	}
 
 	/// The group's sequence number.
 	pub fn sequence(&self) -> u64 {
-		self.inner.sequence
+		self.sequence
 	}
 
 	/// Read the next decrypted frame, without blocking.
@@ -146,28 +151,33 @@ impl Consumer {
 	/// [`Error::Authentication`] ends this track. [`Error::Oversize`] or
 	/// [`Error::Exhausted`] as for open, and net errors from the underlying group.
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Frame>>> {
-		if self.auth_failed.load(Ordering::Acquire) {
+		if self.terminal.poll_failed(waiter) {
+			self.release();
 			return Poll::Ready(Err(Error::Authentication));
 		}
-		let Some(frame) = ready!(self.inner.poll_read_frame(waiter)?) else {
-			return Poll::Ready(Ok(None));
+		let opened = {
+			let Some(inner) = self.inner.as_mut() else {
+				return Poll::Ready(Err(Error::Authentication));
+			};
+			let Some(frame) = ready!(inner.poll_read_frame(waiter)?) else {
+				return Poll::Ready(Ok(None));
+			};
+			// The transport cursor already advanced past the frame just read; its index is
+			// the nonce half, so a group resumed above frame 0 still authenticates.
+			let index = inner.index().checked_sub(1).ok_or(Error::Identity)?;
+			let result =
+				self.key
+					.lock()
+					.expect("track key")
+					.open(self.sequence, index, &frame.payload, MAX_GROUPED_PAYLOAD);
+			(frame.timestamp, result)
 		};
-		// The transport cursor already advanced past the frame just read; its index is
-		// the nonce half, so a group resumed above frame 0 still authenticates.
-		let index = self.inner.index().checked_sub(1).ok_or(Error::Identity)?;
-		let result =
-			self.key
-				.lock()
-				.expect("track key")
-				.open(self.inner.sequence, index, &frame.payload, MAX_GROUPED_PAYLOAD);
-		match result {
-			Ok(plaintext) => Poll::Ready(Ok(Some(Frame {
-				timestamp: frame.timestamp,
-				plaintext,
-			}))),
-			Err(err) => {
+		match opened {
+			(timestamp, Ok(plaintext)) => Poll::Ready(Ok(Some(Frame { timestamp, plaintext }))),
+			(_, Err(err)) => {
 				if matches!(err, Error::Authentication | Error::Identity) {
-					self.auth_failed.store(true, Ordering::Release);
+					self.terminal.fail();
+					self.release();
 				}
 				Poll::Ready(Err(err))
 			}
@@ -188,7 +198,7 @@ impl fmt::Debug for Consumer {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("group::Consumer")
 			.field("sequence", &self.sequence())
-			.field("index", &self.inner.index())
+			.field("index", &self.inner.as_ref().map(|inner| inner.index()))
 			.finish()
 	}
 }
