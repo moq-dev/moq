@@ -14,9 +14,8 @@ not written with a guessed `channel_config_code`.
   with a non-Vorbis table, or more than eight channels exports mislabeled.
   Decide from the parsed description: family 0, and family 1 with the Vorbis
   default mapping, keep the plain code; refuse the rest, or write the explicit
-  layout if the import side of
-  [TS Opus channel codes](/quest/m1/ts-opus-channel-codes.md) settles
-  one both sides agree on.
+  ETSI TS 103 491 layout (Table 4-3, including bit-packed 0x81) now that import
+  reads it.
 - A track with no description stays mono or stereo only.
 - Tests with real heads, checked against ffprobe where ffmpeg reads the result.
 

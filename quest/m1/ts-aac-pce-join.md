@@ -30,7 +30,3 @@ Found in review of the audio-codecs line (#4081), 2026-09-30.
   tracks at once, then adds the AAC track once a PCE arrives.
 
 Public API: none. Wire: none; TS output gains repeated PCEs.
-
-## Related
-
-- [TS Opus channel codes](/quest/m1/ts-opus-channel-codes.md) - the same per-track refusal principle for Opus descriptors
