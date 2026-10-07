@@ -85,7 +85,7 @@ For an advisory against noq or Quinn, compare the pinned release's `PARENT` with
 `main` is the trunk; `release` is what ships, and release-plz and every branch-triggered publish run only there.
 
 - A release is cut by hand: a PR merging `main` into `release`, with a merge commit.
-- An urgent fix between cuts lands on `main` first, then reaches `release` as a cherry-pick PR (a backport).
+- Consider a backport for any critical bug fix (crash, security, data loss, broken interop): land it on `main` first, then cherry-pick it onto `release` as a separate PR.
 - After every push to `release`, the Back-merge workflow opens a PR merging `release` into `main`, so trunk carries the published versions and CHANGELOGs. It lands as a merge commit, outside the merge queue; never squash it, or the next back-merge conflicts.
 
 # Versions

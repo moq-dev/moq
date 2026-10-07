@@ -68,7 +68,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 		.track(name.as_str())
 		.unwrap()
 		.subscribe(Some(
-			moq_net::track::Subscription::default().with_max_age(Duration::from_secs(60)),
+			moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60)),
 		))
 		.await
 		.unwrap();

@@ -979,7 +979,7 @@ impl Recover {
 		// A held group or frame may be the only thing being polled. Mirror and watch
 		// preferences here too, before judging its budget against the live edge.
 		reader.sync(waiter);
-		Some(reader.mirrored.max_age)
+		Some(reader.mirrored.max_delay)
 	}
 
 	/// Commit the replacement only once the caller has acquired its cursor or frame.
@@ -1093,8 +1093,8 @@ mod test {
 			.accept(None)
 	}
 
-	fn subscribe(logical: &track::Producer, max_age: Duration) -> track::Subscriber {
-		let subscription = Subscription::default().with_max_age(max_age);
+	fn subscribe(logical: &track::Producer, max_delay: Duration) -> track::Subscriber {
+		let subscription = Subscription::default().with_max_delay(max_delay);
 		logical
 			.consume()
 			.subscribe(subscription)
@@ -1791,7 +1791,7 @@ mod test {
 						.update(
 							Subscription::default()
 								.with_priority(7)
-								.with_max_age(Duration::from_secs(if widen { 10 } else { 2 })),
+								.with_max_delay(Duration::from_secs(if widen { 10 } else { 2 })),
 						)
 						.unwrap();
 					assert!(
@@ -1828,7 +1828,7 @@ mod test {
 							.update(
 								Subscription::default()
 									.with_priority(8)
-									.with_max_age(Duration::from_secs(10)),
+									.with_max_delay(Duration::from_secs(10)),
 							)
 							.unwrap();
 						assert!(
@@ -1920,7 +1920,7 @@ mod test {
 						.update(
 							Subscription::default()
 								.with_priority(7)
-								.with_max_age(Duration::from_secs(2)),
+								.with_max_delay(Duration::from_secs(2)),
 						)
 						.unwrap(),
 					Event::Cancel => {
@@ -1946,7 +1946,7 @@ mod test {
 			);
 			let demand = copies[0].subscription().expect("surviving reader");
 			assert_eq!(demand.priority, 7, "{events:?}");
-			assert_eq!(demand.max_age, Duration::from_secs(2), "{events:?}");
+			assert_eq!(demand.max_delay, Duration::from_secs(2), "{events:?}");
 			drop(groups);
 			drop(subscriptions);
 			drop(control);

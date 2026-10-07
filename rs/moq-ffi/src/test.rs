@@ -232,7 +232,7 @@ fn audio_output() -> crate::audio::MoqAudioDecoderOutput {
 		format: MoqAudioSampleFormat::F32,
 		sample_rate: None,
 		channels: None,
-		max_age_us: None,
+		max_delay_us: None,
 	}
 }
 
@@ -644,7 +644,7 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 
 	consumer.update(MoqSubscription {
 		priority: 10,
-		max_age_us: 25_000,
+		max_delay_us: 25_000,
 		group_start: Some(0),
 		group_end: None,
 	});
@@ -2888,7 +2888,7 @@ async fn raw_track_update_during_pending_group_still_reads_datagram() {
 
 	consumer.update(MoqSubscription {
 		priority: 10,
-		max_age_us: 25_000,
+		max_delay_us: 25_000,
 		group_start: Some(0),
 		group_end: None,
 	});
