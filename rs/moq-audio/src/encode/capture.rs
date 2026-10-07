@@ -120,9 +120,9 @@ impl State {
 ///
 /// Samples are stamped on the catalog's [`clock`](moq_mux::catalog::Producer::clock), the one
 /// its consumers are told about, so a concurrent video capture on the same catalog stays aligned.
-/// A microphone buffer is placed at the capture instant of its first sample. That device clock
-/// is mapped onto the catalog clock once per open, the same way a camera's private timeline is.
-/// A host that reports no usable capture time, and system audio, are stamped when the buffer is read.
+/// A microphone buffer is placed at the capture instant of its first sample, mapped through the
+/// catalog clock's own correlation. A host that reports no usable capture time, and system audio,
+/// are stamped when the buffer is read.
 ///
 /// `#[non_exhaustive]`: construct via [`Capture::default`] and set
 /// fields, so new publication settings can be added without changing
@@ -819,7 +819,8 @@ trait Output {
 	fn live(&mut self, _device: Option<capture::Device>) {}
 	fn failed(&mut self, _error: &Error) {}
 	fn reset_epoch(&mut self);
-	fn now(&self) -> u64;
+	/// The broadcast timestamp of a buffer captured at `captured`, or now when unknown.
+	fn stamp(&self, captured: Option<Instant>) -> Result<u64, Error>;
 	fn write(&mut self, samples: capture::Samples, timestamp_us: u64) -> Result<(), Error>;
 }
 
@@ -867,8 +868,12 @@ impl<E: CatalogExt> Output for EncoderOutput<'_, E> {
 		self.producer.reset_epoch();
 	}
 
-	fn now(&self) -> u64 {
-		self.clock.now().as_micros() as u64
+	fn stamp(&self, captured: Option<Instant>) -> Result<u64, Error> {
+		let timestamp = match captured {
+			Some(at) => self.clock.capture(at)?,
+			None => self.clock.now(),
+		};
+		Ok(timestamp.as_micros() as u64)
 	}
 
 	fn write(&mut self, samples: capture::Samples, timestamp_us: u64) -> Result<(), Error> {
@@ -973,35 +978,6 @@ impl Converter {
 		}
 
 		Ok(Some((samples, self.anchor_us.take().unwrap_or(timestamp_us))))
-	}
-}
-
-/// One open's placement of capture instants on the broadcast clock.
-///
-/// Sampled once, broadcast clock first, then the monotonic instant, matching
-/// video. A stamp can land early by the gap between those two reads and does
-/// not move later when the buffer is read.
-struct CaptureMap {
-	broadcast_us: u64,
-	instant: Instant,
-}
-
-impl CaptureMap {
-	fn sample(broadcast_us: u64) -> Self {
-		Self {
-			broadcast_us,
-			instant: Instant::now(),
-		}
-	}
-
-	fn stamp(&self, captured: Instant) -> u64 {
-		let micros = |duration: Duration| u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
-		match captured.checked_duration_since(self.instant) {
-			Some(after) => self.broadcast_us.saturating_add(micros(after)),
-			None => self
-				.broadcast_us
-				.saturating_sub(micros(self.instant.duration_since(captured))),
-		}
 	}
 }
 
@@ -1118,9 +1094,6 @@ impl Supervisor {
 					Ok(mut input) => {
 						output.live(source.device(&input));
 						let mut converter = Converter::new(source.layout(&input), output_layout)?;
-						// Once per open. A later read must not move a buffer off the
-						// instant its first sample was captured.
-						let map = CaptureMap::sample(output.now());
 						loop {
 							// Demand wins over a simultaneous buffer or error, so an unused
 							// track releases the device without starting a retry sequence.
@@ -1155,8 +1128,7 @@ impl Supervisor {
 									if samples.gap {
 										output.reset_epoch();
 									}
-									let captured = samples.captured.unwrap_or_else(Instant::now);
-									let timestamp_us = map.stamp(captured);
+									let timestamp_us = output.stamp(samples.captured)?;
 									if let Some((samples, timestamp_us)) = converter.process(samples, timestamp_us)? {
 										output.write(samples, timestamp_us)?;
 									}
@@ -1356,8 +1328,8 @@ mod tests {
 			self.events.push(OutputEvent::Reset);
 		}
 
-		fn now(&self) -> u64 {
-			0
+		fn stamp(&self, _captured: Option<Instant>) -> Result<u64, Error> {
+			Ok(0)
 		}
 
 		fn write(&mut self, samples: capture::Samples, _timestamp_us: u64) -> Result<(), Error> {
@@ -2115,29 +2087,17 @@ mod tests {
 			.unwrap();
 	}
 
-	#[test]
-	fn capture_map_keeps_a_buffer_lead_on_the_broadcast_clock() {
-		let map = CaptureMap::sample(5_000_000);
-		assert_eq!(map.stamp(map.instant), 5_000_000);
-		assert_eq!(map.stamp(map.instant - Duration::from_millis(20)), 4_980_000);
-		assert_eq!(map.stamp(map.instant + Duration::from_millis(20)), 5_020_000);
-	}
-
 	/// Clock fixtures: the real publication driver, fed by synthetic microphones against a
 	/// pinned broadcast clock, graded on the timestamps a subscriber reads back.
 	///
-	/// A buffer carries the instant its first sample was captured. The driver maps that
-	/// timeline onto the broadcast clock once per open, so the published timestamp is that
-	/// instant even when the read happens later.
+	/// A buffer carries the instant its first sample was captured. The driver maps it through
+	/// the broadcast clock's own correlation, so the published timestamp is exactly that
+	/// instant however late the read happens.
 	mod clock {
 		use std::time::{Duration, Instant, SystemTime};
 
 		use super::*;
 
-		/// How early a mapped timestamp may land: the gap between the two clock samples at open.
-		const SAMPLING: Duration = Duration::from_millis(250);
-		/// Rounding slack on the late side: each clock reading truncates to a microsecond.
-		const ROUNDING: u64 = 2;
 		/// Retain every fixture group, so a slow runner never evicts one before it is read.
 		const RETAIN: Duration = Duration::from_secs(600);
 
@@ -2227,14 +2187,9 @@ mod tests {
 				}
 			}
 
-			/// `published` is `captured` on the broadcast clock, early only by the open-time sample gap.
+			/// `published` is exactly `captured` on the broadcast clock.
 			fn assert_captured(&self, published: u64, captured: Instant) {
-				let exact = self.at(captured);
-				let early = u64::try_from(SAMPLING.as_micros()).unwrap();
-				assert!(
-					published + early >= exact && published <= exact + ROUNDING,
-					"published {published}us, captured at {exact}us on the broadcast clock"
-				);
+				assert_eq!(published, self.at(captured), "published at the capture instant");
 			}
 
 			/// Stop the publication, as dropping its last control does.
