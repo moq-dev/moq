@@ -8,7 +8,8 @@ import { type IetfVersion, Version } from "./version.ts";
  * Requests a draft-14 to -16 peer may hold open at once.
  *
  * Sized like moq-net's window: twice its default 100,000 announce and 10,000
- * subscription caps. Draft-17 dropped MAX_REQUEST_ID.
+ * subscription caps. Draft-17 dropped MAX_REQUEST_ID. Grants are batched per
+ * half window, so only about half of it is guaranteed to a peer holding requests open.
  */
 export const REQUEST_WINDOW = 220_000n;
 
