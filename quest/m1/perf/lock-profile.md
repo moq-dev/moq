@@ -16,18 +16,28 @@ plus five Prometheus families:
 - Measure from outside the process: bpftrace on the futex syscalls of the
   relay's worker threads, aggregated by thread name and user stack. No
   instrumentation in `kio`, no new public API, no metrics.
-- Add bpftrace to the Nix dev shell. The recipe needs sudo (or `CAP_BPF`)
-  and says so.
+- Build the relay with `[profile.profiling]` and
+  `RUSTFLAGS="-C force-frame-pointers=yes"`: the release build `bench/run.sh`
+  uses has neither debug info nor frame pointers, so `ustack` would stop at
+  the libc futex frame. `Consumer::poll` is generic and inlined, and
+  bpftrace doesn't expand inline frames, so the stacks name its callers.
+- Count only stacks under the std mutex's contended path (`kio::Lock` is a
+  `std::sync::Mutex`): futex waits also include allocator, condvar, and tokio
+  waits, and a contended acquire that resolves while spinning never reaches
+  the futex.
+- Add bpftrace to the Nix dev shell for Linux only
+  (`lib.optionals stdenv.isLinux`), since the shell also builds for
+  `aarch64-darwin`. The recipe needs sudo (or `CAP_BPF`) and says so.
 - Local only, documented next to the existing bench recipes (`just bench`,
   `just bench-runtime`). Not in CI, since it needs privileges.
 - Shapes and worker counts follow #5031: fanout (`bench/workloads/fanout.toml`)
   and chat (`rs/moq-bench/config/chat.toml`) at 1, 4, and 16 workers, with a
-  steady window after startup. Wait is off-CPU, so the share can exceed 1
-  when workers block together.
+  steady window after startup. Wait is off-CPU, so a thread's share can
+  exceed 1 when it blocks longer than it runs.
 
-Check that it reproduces #5031's numbers (see
-[kio channel contention](/quest/m1/perf/kio-channel-contention.md)) and
-names the same call sites.
+Check that it roughly reproduces #5031's wait time (see
+[kio channel contention](/quest/m1/perf/kio-channel-contention.md)), not its
+contended-acquire counts, and that its stacks lead to the same call sites.
 
 ## Related
 

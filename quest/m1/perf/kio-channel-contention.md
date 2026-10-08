@@ -20,7 +20,8 @@ utime+stime:
 | tokio QUIC | chat | 0.35% | 5.3% | 215% (78s waiting in a 30s window) |
 
 The hot sites are generic channel accessors, so they don't say which channels
-are contended. On chat with 16 tokio workers:
+are contended. On chat with 16 tokio workers, as process-lifetime totals
+across every thread (ramp included, unlike the table's steady window):
 
 - `Consumer::poll` (`rs/kio/src/consumer.rs:79`): 61.4s
 - `ConsumerWeak::poll` (`rs/kio/src/weak.rs:276`): 45.5s
@@ -29,6 +30,8 @@ are contended. On chat with 16 tokio workers:
 `kio::Lock` is a plain `std::sync::Mutex`, and every poll takes it: the
 closure check, the closed check, and the waiter registration. The cache pool
 line ([Cache shard](/quest/m2/cache-shard.md)) is not among the hot sites.
+`Shared::lock` (`rs/kio/src/shared.rs:47`) shows up too, but stays flat with
+the worker count.
 
 Decided (maintainer, 2026-10-07):
 
