@@ -120,8 +120,8 @@ Decided in planning (2026-10-07, from #4970's review):
   lite-07 changelog's "ends subscriptions to the older one". The rule that a
   subscription between routes without an Epoch "stays on its route and ends
   with it" holds as written.
-- **Players** follow `Restart` in [Apps](/quest/m0/broadcast-epoch/apps.md);
-  `moqsrc` (planned in #4960) switches on it too. On lite-06 and
+- **Players** follow `Restart` in [Apps](/quest/m0/broadcast-epoch/apps.md),
+  and [moqsrc](/quest/m0/broadcast-epoch/moqsrc.md) switches on it too. On lite-06 and
   moq-transport, a pair not coalesced reaches players as `End` then
   `Start`: a stop, then a fresh play.
 - **Every Rust consumer** of announce events handles `Restart` in the same
