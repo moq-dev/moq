@@ -14,7 +14,7 @@ fn timestamp_us(timestamp: moq_net::Timestamp) -> Result<u64, MoqError> {
 }
 
 fn raw_frame(frame: moq_net::frame::Frame) -> Result<MoqFrame, MoqError> {
-	let timestamp_us = timestamp_us(frame.timestamp)?;
+	let timestamp_us = frame.timestamp.map(timestamp_us).transpose()?;
 	Ok(MoqFrame {
 		payload: frame.payload.to_vec(),
 		timestamp_us,
@@ -302,7 +302,7 @@ impl MoqBroadcastConsumer {
 
 fn map_fetch_error(err: moq_net::Error) -> MoqError {
 	match err {
-		moq_net::Error::NotFound => MoqError::NotFound,
+		moq_net::Error::NotFound | moq_net::Error::NotFetchable => MoqError::NotFound,
 		moq_net::Error::Unsupported | moq_net::Error::Version => MoqError::Unsupported,
 		err => err.into(),
 	}
@@ -455,7 +455,7 @@ impl TrackInner {
 		};
 		Poll::Ready(Ok(Some(MoqDatagram {
 			sequence: datagram.sequence,
-			timestamp_us: timestamp_us(datagram.timestamp)?,
+			timestamp_us: datagram.timestamp.map(timestamp_us).transpose()?,
 			payload: datagram.payload.to_vec(),
 		})))
 	}

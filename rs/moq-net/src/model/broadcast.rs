@@ -45,6 +45,13 @@ pub struct Info {
 	/// Empty (the default) for a standalone broadcast with no origin, which is then its own
 	/// root: any `..` reference escapes.
 	pub path: crate::PathOwned,
+
+	/// The epoch of the route a [`Consumer`] was resolved through, naming the publisher
+	/// instance it reads.
+	///
+	/// Stamped on every [`Consumer`] an origin resolves, like [`Self::path`]. `None` for a
+	/// route without an epoch and for a handle not resolved through an origin.
+	pub epoch: Option<crate::Epoch>,
 }
 
 impl Default for Info {
@@ -53,6 +60,7 @@ impl Default for Info {
 			pool: cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)),
 			cache_duration: std::time::Duration::MAX,
 			path: crate::PathOwned::default(),
+			epoch: None,
 		}
 	}
 }
@@ -657,6 +665,16 @@ impl Consumer {
 		if self.info.path != path {
 			let mut info = (*self.info).clone();
 			info.path = path;
+			self.info = Arc::new(info);
+		}
+		self
+	}
+
+	/// Stamp the epoch of the route this handle was resolved through, overriding [`Info::epoch`].
+	pub(crate) fn with_epoch(mut self, epoch: Option<crate::Epoch>) -> Self {
+		if self.info.epoch != epoch {
+			let mut info = (*self.info).clone();
+			info.epoch = epoch;
 			self.info = Arc::new(info);
 		}
 		self

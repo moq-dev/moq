@@ -7,7 +7,7 @@ import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
-import { Timestamp } from "./time.ts";
+import { Timescale, Timestamp } from "./time.ts";
 import { wireOf } from "./wire.ts";
 
 // A subscription races its track's `closed` once per frame. These count the listeners left on
@@ -83,7 +83,7 @@ async function session(alpn: string) {
 
 	const broadcast = origin.createBroadcast(Path.from("test"));
 	broadcast.announce();
-	const producer = broadcast.createTrack("video");
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const track = remote.track("video").subscribe().ordered();

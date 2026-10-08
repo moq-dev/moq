@@ -43,6 +43,8 @@ export type FixtureState = {
 	audioActive: boolean;
 	/** Frames the encoder has produced. */
 	encodedFrames: number;
+	/** Whether the video rendition is published as enabled; false while {@link InteropControl.disableVideo} holds. */
+	videoEnabled: boolean;
 };
 
 /** The newest published video's GOP, sampled independently of canvas capture and encoding. */
@@ -60,6 +62,7 @@ export async function readLiveGop(track: Moq.Track.Consumer): Promise<LiveGop> {
 		try {
 			const frame = await group.readFrame();
 			if (!frame) throw new Error("the fixture GOP has no keyframe");
+			if (!frame.timestamp) throw new Error("the fixture video arrived untimed");
 			return { timestamp: frame.timestamp.asMillis() };
 		} finally {
 			group.close();
@@ -213,6 +216,10 @@ export type InteropControl = {
 	reattach(): void;
 	/** Connect a second player and leave it behind for the leaked-session negative control. */
 	startLeak(): void;
+	/** Keep the fixture's video rendition in the catalog with `enabled: false`, stopping its frames. */
+	disableVideo(): void;
+	/** Re-enable the fixture's video rendition. */
+	enableVideo(): void;
 };
 
 /** The `window` property the commands are published on. */
