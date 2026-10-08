@@ -370,19 +370,19 @@ mod tests {
 			listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 			listen.tcp.tls = Some(true);
 			listen.tls.generate = vec!["localhost".into()];
+			// Client-certificate policy is refused without a QUIC listener to read it.
+			if !cfg!(feature = "noq") {
+				continue;
+			}
+			listen.bind = Some("127.0.0.1:0".parse().unwrap());
 			match pinned {
 				true => listen.tls.peers = Some(crate::tls::Peers::new()),
-				// A client CA is refused without a QUIC listener to verify it.
 				false => {
-					if !cfg!(feature = "noq") {
-						continue;
-					}
 					let ca = dir.path().join("client-ca.pem");
 					let cert = rcgen::generate_simple_self_signed(["client-ca".to_string()])
 						.unwrap()
 						.cert;
 					std::fs::write(&ca, cert.pem()).unwrap();
-					listen.bind = Some("127.0.0.1:0".parse().unwrap());
 					listen.tls.root = vec![ca];
 				}
 			}

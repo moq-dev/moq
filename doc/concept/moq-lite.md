@@ -50,9 +50,8 @@ Each route carries the chain of relay identities it passed through, which is
 how forwarding loops are caught, and a cost, which is how a subscriber picks
 among several routes to the same broadcast. It may also carry a
 [publisher epoch](#publisher-epochs), which says which routes serve the same
-bytes. A hop of 0 is the anonymous mark and travels the chain unchanged; when
-it is the first hop, a relay puts a random ID, fresh per connection, in front
-of it. A route that passed through an anonymous hop at any depth ranks below
+bytes. A hop of 0 is the anonymous mark and travels the chain unchanged. A
+route that passed through an anonymous hop at any depth ranks below
 every fully identified route, whatever the costs say.
 
 A broadcast exists only while it is announced, in the same process and across
@@ -84,14 +83,17 @@ authorization and hidden names work exactly as without one.
   encoder, whose group numbers start over, takes the name instead of stalling
   viewers on the old sequence.
 
-The epoch travels on moq-lite 07. Older moq-lite versions and moq-transport
-cannot carry it, so their routes have no epoch and a replacement looks like an
-ordinary end and start at the same path. In a mixed deployment the
-epoch-carrying route supersedes the one without each time it appears, so a
+The epoch travels on moq-lite 07, which is opt-in. Older moq-lite versions and
+moq-transport cannot carry it, so their routes have no epoch: a relay keeps a
+subscription on the route it first resolved through, and viewers of a
+restarted publisher wait until the old session closes. In a mixed deployment
+the epoch-carrying route supersedes the one without each time it appears, so a
 flapping moq-lite 07 link cuts viewers that resolved through the older link.
 
-`moq` and `moqsink` mint a fresh epoch per run. Reconnects inside that run keep
-it. See [Clustering](/bin/relay/cluster) for how a relay uses this.
+`moq` and `moqsink` mint a fresh epoch per run, kept across reconnects, and the
+RTMP, SRT, and WHIP ingests mint one per connection. Replicas share one by
+passing the same `moq --epoch`. See [Clustering](/bin/relay/cluster) for how a
+relay uses this.
 
 ### Hidden broadcasts
 
@@ -155,6 +157,14 @@ anything on its own. Both ends apply it: the publisher skips a group rather
 than sending it, and the subscriber skips it again as it reads, since the
 publisher only ever sees the most tolerant budget across its subscribers.
 
+A track is timed or untimed: it declares a timescale or none, and a frame that
+doesn't match is refused. No receiver fills in an arrival time. An untimed
+group never falls past max delay, so a new subscriber starts at its latest
+group unless it names a start. Tracks from moq-lite before 05, or from
+moq-transport without a `TIMESCALE` (every track on drafts 14-16), arrive
+untimed. No moq-lite version can declare an untimed track, so on 05 and later
+its frames go out stamped with their send time.
+
 A relay cancels its upstream subscription once nobody subscribes, but keeps its
 copy of the track for 30 seconds after the last reader leaves, so a returning
 reader or the next fetch finds it. That copy is not live meanwhile: readers get
@@ -183,6 +193,12 @@ Since moq-lite 05, a publisher can send a tiny single-frame group as a QUIC
 datagram: unreliable, unordered, under about 1200 bytes, and never
 retransmitted. It suits real-time audio and sensor data. There is no stream
 fallback, so a datagram that doesn't fit isn't delivered that way.
+
+Nothing caches a datagram. A subscription gets the ones inside its group
+range, and a new one may get the few still in the publisher's short send
+buffer, but `FETCH` never returns one. A publisher that knows the sequence was
+a datagram refuses with `NOT_FETCHABLE` (moq-lite-07), otherwise with
+`NOT_FOUND`. Use a group for anything a late joiner needs.
 
 ## What moq-lite leaves out
 

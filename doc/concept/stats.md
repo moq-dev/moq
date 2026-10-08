@@ -46,7 +46,7 @@ life, across recreated broadcasts, and may have gaps.
 
 Traffic is split by **tier**, an arbitrary label (a billing class, a region)
 the relay takes from the auth grant, or from `--cluster-tier` for links it
-dials. Each tier has three
+dials and LAN peers it admits. Each tier has three
 tracks, each in two encodings:
 
 | Track | Frame keyed by | Entry |

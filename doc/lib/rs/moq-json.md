@@ -22,7 +22,7 @@ unless it carries its capture time.
 
 A stream rides one group, so the whole log shares moq-net's group budget:
 32 MiB of payload and 8192 records. An append that might not fit is refused
-before it is encoded and leaves the log intact. Once the budget is spent,
+before anything is written and leaves the log intact. Once the budget is spent,
 start a new track.
 
 The TypeScript twin is [`@moq/json`](/lib/js/json). API:

@@ -24,6 +24,12 @@ ffplay srt://localhost:9000
 moq --connect https://relay.example.com/anon --broadcast event.hang import srt --connect 'srt://encoder.example.com:9000?streamid=live/cam'
 ```
 
+Each connection publishes under a fresh
+[epoch](/concept/moq-lite#publisher-epochs), so an encoder that reconnects
+while its stale connection is still open replaces it at once: subscriptions to
+the stale feed end with `Unroutable`, and a viewer's next subscribe reaches the
+new feed.
+
 A multi-program feed is refused unless `--program`
 picks one: `--program 2` imports program 2 alone, and `--program all`
 publishes each program as its own broadcast (`event.hang` becomes

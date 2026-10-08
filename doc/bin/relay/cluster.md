@@ -27,12 +27,15 @@ a cheaper one with that epoch, each subscription continues on the new route
 from the first frame its readers lack, so they see every frame once. A
 publisher whose groups restart, such as an encoder restarting from group 0,
 publishes under a new epoch, which replaces the old broadcast instead of
-resuming it. Seamless failover needs a publisher that announces an epoch and
-moq-lite 07 on every link the route crosses. A route without an epoch,
-including every route on moq-lite 06 and older or moq-transport, keeps its
-subscriptions until it goes. In a cluster that mixes moq-lite 06 and 07 links
-to the same content, a flapping 07 link cuts the viewers resolved through the
-06 one.
+resuming it; the RTMP, SRT, and WHIP ingests mint one per connection. Epochs
+order by creation time, so a reconnect to a different gateway assumes the two
+gateways' clocks roughly agree. Seamless failover needs a publisher that
+announces an epoch and moq-lite 07 on every link the route crosses. A route
+without an epoch, including every route on moq-lite 06 and older or
+moq-transport, keeps its subscriptions until it goes. In a cluster that mixes
+moq-lite 06 and 07 links to the same content, the route carrying the epoch
+supersedes the one without each time it appears, so a flapping 07 link cuts
+the viewers resolved through the 06 one.
 
 Failover routes must carry copies of the same broadcast: a source whose track
 differs in timescale, retention, publisher priority, or group order is refused
@@ -41,12 +44,6 @@ for that track.
 A route whose original publisher (its first hop) changes is updated in place on
 both wire protocols, so the broadcast never briefly vanishes downstream, and
 subscriptions in flight carry on through it.
-
-A publisher whose protocol names no hop (moq-transport without the cluster
-extension, moq-lite 01 through 03, or a peer that sends 0) gets a random first
-hop from the relay it connects to, fresh for each connection, followed by a 0.
-Its reconnect is therefore a new first hop downstream, a reprice on the same
-connection stays in place, and the 0 keeps it ranked as anonymous.
 
 ## Topology
 

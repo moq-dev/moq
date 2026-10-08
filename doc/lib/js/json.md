@@ -17,11 +17,12 @@ reader will not pick it up.
 - **Window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice.
 
 Both sides choose the same compression, `"none"` or `"deflate"`. A value is
-stamped when written, unless you pass its capture time.
+stamped when written, unless you pass its capture time, so the track must
+declare a timescale.
 
 A stream rides one group, so the whole log shares `@moq/net`'s group budget:
 32 MiB of payload and 8192 records. An append that might not fit is refused
-before it is encoded and leaves the log intact. Once the budget is spent,
+before anything is written and leaves the log intact. Once the budget is spent,
 start a new track. Any other failed append aborts the track, so readers see
 the error rather than a log that looks complete.
 

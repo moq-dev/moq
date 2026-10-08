@@ -82,7 +82,8 @@ publishes. FLV covers H.264 + AAC.
 
 The `fmp4`, `mkv`, `flv`, `h264`, and `h265` exports pick renditions with
 `--video-name`, `--audio-name`, `--video-codec`, `--audio-codec`, `--no-video`,
-and `--no-audio`. `ts`, `archive`, and the gateways export everything.
+and `--no-audio`. `ts`, `archive`, and the gateways export everything and
+refuse these flags.
 
 ```bash
 moq ... export --no-video fmp4 > audio.mp4
@@ -199,7 +200,10 @@ moq --connect https://relay.example.com/anon --broadcast event-replay.hang impor
 `export archive` records one broadcast with
 [moq-archive](https://docs.rs/moq-archive), cutting each track into 2-10 s
 spans at group boundaries. A store that already holds the recording is
-continued. `--retention 1h` keeps only the last hour, a DVR.
+continued, unless the source now announces another
+[epoch](/concept/moq-lite#publisher-epochs): that is a restart, so the export
+fails; record it under a new prefix. `--retention 1h` keeps only the last
+hour, a DVR.
 
 `import archive` republishes a recording as live tracks, fetching spans on
 request. It ends where the recording ends; `--follow 2s` keeps polling a
@@ -223,13 +227,22 @@ moq --connect https://relay.example.com/anon \
 
 ## Publisher runs
 
-Each run of `moq` announces its own
+Each run of `moq` announces a fresh
 [publisher epoch](/concept/moq-lite#publisher-epochs), kept across reconnects.
-On moq-lite 07 (opt-in), a restarted or second process is a newer epoch, so
-viewers move to it instead of waiting for its group numbers to catch up. On
-older versions a subscription stays on the route it first resolved through
-until that route goes. The RTMP, SRT, and WHIP ingests announce without an
-epoch.
+The RTMP, SRT, and WHIP ingests mint one per connection instead, and
+`import ts --program all` one per program.
+
+Epochs cross a connection only on moq-lite 07, which is opt-in. There, a
+restarted process takes the name at once: subscriptions to the old run end with
+`Unroutable`, and a viewer's next subscribe reaches the new run instead of
+waiting for its group numbers to catch up. On older versions and moq-transport
+the relay sees no epoch and keeps a subscription on the route it first resolved
+through, so viewers of a restarted process wait until the old session closes.
+
+On moq-lite 07, two processes that pass the same `--epoch` (a UUIDv7, such as
+`uuidgen -7` prints) are one publisher: relays fail over between them
+mid-group, so they must produce identical tracks with aligned groups, which no
+importer guarantees yet. The ingests that mint their own refuse `--epoch`.
 
 ## Cluster
 

@@ -22,8 +22,10 @@ capture or playback is enabled.
 | `aec` | Acoustic echo cancellation (a port of WebRTC's), so a laptop with no headset doesn't feed itself back |
 
 The microphone opens only while someone listens, and can be swapped without
-changing the track subscribers know. Opus packetizes 10 ms frames at the
-default low-latency preset. There is no AAC encoder, so an AAC encode request is
+changing the track subscribers know. Opus packs 20 ms per packet by default,
+or 10 ms with the low-latency preset. Each packet is its own group unless
+`encode::Options::group_duration` sets a minimum, which means fewer streams per
+relay but coarser loss. There is no AAC encoder, so an AAC encode request is
 refused; AAC decode is for broadcasts from the ingest gateways.
 
 Playback writes never block: samples that do not fit are dropped and

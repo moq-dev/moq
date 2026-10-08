@@ -26,9 +26,10 @@ maps everything else to "not supported" or a harmless equivalent. The
 subset drops. What a peer actually observes against this implementation:
 
 - **Pull.** Subscribers ask. Single-track `PUBLISH` offers are declined; announce a namespace and serve the resulting subscriptions. Announcements go out unsolicited, and we also ask for every prefix we may discover. The solicit `SETUP` option makes us wait to be asked.
-- **History is one group.** On drafts 14 through 19 a `FETCH` returns one whole group from the cache, or the saved prefix of the group a new subscription just joined. A range of groups is refused, as is any `FETCH` on draft 20 and later. JavaScript publishing refuses every `FETCH`. A standalone fetch carries no timestamps.
+- **History is one group.** On drafts 14 through 19 a `FETCH` returns one whole group from the cache, or the saved prefix of the group a new subscription just joined. A range of groups is refused, as is any `FETCH` on draft 20 and later. JavaScript publishing refuses every `FETCH`. Datagrams are never fetchable.
+- **Timing.** A track whose `SUBSCRIBE_OK` declares no `TIMESCALE` is untimed, as is every track on drafts 14 through 16. A reader that never subscribed reads a standalone fetch untimed.
 - **One credential per session**, carried in `SETUP` and forwarded to the [auth server](/bin/relay/auth#the-contract) unverified. A token attached to an individual request is ignored. An alias reference, a second token, or a parameter the negotiated draft does not define closes the session.
-- **Refused, not fatal.** A legal request this stack does not serve is rejected on its own and the session stays up: `FORWARD=0`, range filters, `TRACK_STATUS`, `SUBSCRIBE_TRACKS`, and the fetch forms above. On draft 19 and later, a subscription update may change only priority; any other update ends that subscription.
+- **Refused, not fatal.** A legal request this stack does not serve is rejected on its own and the session stays up: `FORWARD=0`, range filters, `TRACK_STATUS`, `SUBSCRIBE_TRACKS`, and the fetch forms above. On draft 19 and later, and in Rust on drafts 14 through 16, a subscription update may change only priority; any other update ends that subscription.
 - **Datagrams** are a single normal object at object 0, forwarded without renumbering. Anything else is dropped. JavaScript does not carry datagrams on moq-transport.
 - **Priority.** Higher is served first. The IETF default of 128 is this stack's 127, and a track that never sets one is 127.
 - **Size.** An object extension block larger than 64 KiB ends that subgroup stream. The session stays up. This cap is ours, not the draft's.
@@ -50,7 +51,6 @@ The MoQ Streaming Format is a catalog, playing the role HLS playlists and SDP
 do elsewhere. It overlaps with the [hang catalog](/concept/hang) and the two
 will likely converge. The tools track draft-01 and hide the version on the
 wire, so draft-00 catalogs still decode and init data always arrives inline.
-The `stalled` rendition hint is shared between the two formats.
 
 ## LOC
 

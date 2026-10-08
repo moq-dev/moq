@@ -52,6 +52,11 @@ Codec, resolution, framerate, and bitrate are tunable through
 simulcast, drop the element and register several encoders on a
 `Publish.Broadcast`, as below.
 
+Each audio frame is its own group by default. `el.audio.groupDuration` (such as
+`Time.Milli(100)`) packs several frames per group, so a relay keeps fewer
+streams, at the cost of coarser loss: a viewer that falls behind skips a whole
+group. Frames still forward as they are encoded.
+
 Timestamps are `performance.now()` in microseconds, so every source shares one
 timeline. The catalog's `clock` maps it to wall time. Stamp your own tracks
 (e.g. text cues) on the same timeline to stay in sync.
@@ -64,13 +69,18 @@ reconnect, so acquire it from an effect and reseed the track each time:
 
 ```ts
 import * as Json from "@moq/json";
+import * as Moq from "@moq/net";
 
 signals.run((effect) => {
     const net = effect.get(broadcast.net);
     if (!net) return;
 
-    // A day-long retention so a late viewer still replays the last value.
-    const track = net.createTrack("meta.json", { maxAge: 86_400_000 });
+    // A day-long retention so a late viewer still replays the last value. JSON
+    // values are stamped when written, so the track declares a timescale.
+    const track = net.createTrack("meta.json", {
+        timescale: Moq.Time.Timescale.MILLI,
+        maxAge: Moq.Time.Milli(86_400_000),
+    });
     effect.cleanup(() => track.close());
 
     const meta = new Json.Snapshot.Producer<Meta>({ track });

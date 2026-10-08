@@ -140,8 +140,9 @@ response emitted in one burst with future timestamps, wants the opposite. Set
 <moq-watch url="..." name="bot/tts.hang" delay="100ms" buffer="30s"></moq-watch>
 ```
 
-Durations need a unit; a bare number is rejected. The buffer holds encoded
-frames, so a large one is cheap. `el.reset()` flushes and re-anchors at the
+Durations need a unit; a bare number is rejected. Audio holds the buffer as
+encoded frames, so a large one is cheap; video waits as decoded pictures, which
+hold decoder memory, so a long video buffer is not. `el.reset()` flushes and re-anchors at the
 next frame, which is how a producer interrupts an utterance.
 
 ## Strict CSP

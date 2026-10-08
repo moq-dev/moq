@@ -24,12 +24,13 @@ captions on.
 
 ## Failover and restarts
 
-Because tracks are only pulled where they're needed, a publisher can hold
-several connections and subscriptions move to another when one fails. A
-[publisher epoch](/concept/moq-lite#publisher-epochs) (moq-lite 07, opt-in)
-names the instance behind a broadcast: replicas sharing one fail over
-mid-group, and a restart is a newer epoch that viewers switch to instead of
-stalling on the old group numbers.
+A broadcast can be announced over several connections. Seamless failover
+between them needs a [publisher epoch](/concept/moq-lite#publisher-epochs)
+(moq-lite 07, opt-in), which names the instance behind a broadcast: replicas
+sharing one fail over mid-group, and a restart is a newer epoch that viewers
+switch to instead of stalling on the old group numbers. The RTMP, SRT, and
+WHIP ingests mint one per connection. Without an epoch, a subscription stays on
+the route it first resolved through until that route goes.
 
 ## One protocol both ways
 

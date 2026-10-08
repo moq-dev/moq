@@ -41,6 +41,13 @@ anything else.
 | Captions | `text/x-raw` (one WebVTT cue per buffer, PTS is the cue start and the buffer duration its end) |
 | Opaque data | `application/octet-stream` (raw bytes on a named track, one group per buffer) |
 
+`audio/x-opus` is published from the caps' OpusHead. A `streamheader` is that
+head, including pre-skip and gain, and it wins when present. Otherwise mono
+and stereo use a family 0 head, and three to eight channels need
+`channel-mapping-family`, `stream-count`, `coupled-count`, and
+`channel-mapping`. Caps that omit that mapping, or that contradict the header,
+are refused. `opusenc` supplies both, so a 5.1 encode plays as six channels.
+
 A `text/x-raw` pad is how captions get in: ffmpeg cannot mux a subtitle track
 into fragmented MP4, so `moq import fmp4` can't carry one, while a demuxer that
 resolves timed text (`qtdemux` on a 3GPP timed-text track) can feed the pad

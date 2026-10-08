@@ -62,7 +62,8 @@ for event, err := range announced.All(ctx) {
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
 broadcast, _ := client.CreateBroadcast("my-stream.hang")
 audio, _ := broadcast.PublishAudio(moq.AudioFormatOpus, opusInit)
-_ = audio.WriteFrame(moq.Frame{Payload: packet, TimestampUs: 20_000})
+pts := uint64(20_000)
+_ = audio.WriteFrame(moq.Frame{Payload: packet, TimestampUs: &pts})
 _ = audio.Cut() // audio has no keyframes, so this is what gives it groups
 
 track := "camera"

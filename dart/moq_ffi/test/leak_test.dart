@@ -64,7 +64,7 @@ void main() {
       final track = broadcast.publishTrack(name: 'frames', info: null);
       final consumer = track.consume(subscription: null);
       final producer = track.appendGroup();
-      producer.writeFrame(frame: MoqFrame(payload: payload));
+      producer.writeFrame(frame: MoqFrame(payload: payload, timestampUs: 0));
       producer.finish();
       final group = await consumer.nextGroup();
       final frame = await group!.readFrame();
