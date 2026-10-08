@@ -147,3 +147,7 @@ max-age:
 # Cross-language subscription termination over in-memory transports.
 bare-fin:
     just rs test -p moq-net --lib bare_fin_interop --run-ignored all
+
+# Compare rs2ts semantic prototypes against a native Rust oracle.
+rs2ts:
+    just --justfile ../rs/rs2ts/prototype/justfile check

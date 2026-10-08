@@ -9,6 +9,14 @@ the hand-written one.
 
 ## Plan
 
+Runnable follow-up prototypes are in [rs/rs2ts](/rs/rs2ts/README.md).
+They translate moq-net's actual zigzag/unzigzag from Charon 0.1.284 and compare
+the generated output and integer runtime against native Rust. Ownership,
+unwind cleanup, struct copies, and tagged nested options are handwritten
+semantic probes, not generated yet. The `varint::size` extraction succeeds;
+enum/Result lowering is the next unsupported slice. This does not complete
+the translator or settle its production subset.
+
 A prototype exists in the planning spike: about 1,800 lines on `charon_lib`
 plus a 200-line runtime shim. It turned a sample crate into TypeScript that
 passed behavioral tests, including close-on-last-drop, and ran on moq-net's
