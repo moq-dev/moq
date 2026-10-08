@@ -98,7 +98,6 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [Careful resume on reconnect](/quest/m2/quic-careful-resume.md) - a redial starts at the previous connection's rate
 - [Keep-alive by deadline](/quest/m2/quic-keep-alive.md) - a PING only when the idle deadline nears, no fixed timer
 - [Socket close](/quest/m2/noq-socket-close.md) - `moq-quic` releases an endpoint's socket on close, so moq-tokio drops its wrapper
-- [GOP overhead](/quest/m2/gop-overhead.md) - price the I-frames a short GOP pays for, deciding whether a long GOP plus a keyframe request is worth designing
 - [TS health stats](/quest/m2/ts-health-stats.md) - the TS counters ride the stats plumbing beside the media counters
 - [Teleoperation](/quest/m2/teleop/README.md) - MoQ carries robot video down and control up on one session as a library capability
 - [Media QA on other engines](/quest/m2/browser-media-qa-engines.md) - the media harness measures a Firefox or WebKit player over the fallback and names what each engine lacks
@@ -117,7 +116,6 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [GPU capacity and health](/quest/m2/gpu-health.md) - moq-video reports each device's sessions, memory, utilization, and health on NVIDIA, AMD, and Intel alike
 - [Malformed moq-transport input](/quest/m2/ietf-malformed-close.md) - malformed draft-18 and draft-21 control input closes the session with the draft's code, or PROTOCOL_VIOLATION where a code is a real burden and the fallback is recorded in `doc/concept/standard.md`, in moq-net and js/net
 - [moq-transport request codes](/quest/m2/ietf-request-codes.md) - Range Filters (INVALID_FILTER), reserved namespaces, and RENDEZVOUS_TIMEOUT get the draft's answer, or a recorded fallback code, and the deliberate deviations are documented
-- [Leftover worklet types](/quest/m2/worklet-leftovers.md) - `@moq/hang` drops its unused `@types/audioworklet` dependency, and moq-boy stops including the shared worklet declaration
 - [Native enabled](/quest/m2/native-enabled.md) - native players and the ffi/C paths never select a disabled rendition
 - [JS audio ranking](/quest/m2/js-audio-ranked.md) - @moq/hang and HLS rank audio renditions like Rust
 - [ts::Export catalog stream](/quest/m2/ts-export-catalog.md) - TS export takes (source, catalog) like the other exporters
