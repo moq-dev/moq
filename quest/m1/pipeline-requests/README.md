@@ -13,7 +13,8 @@ working unchanged.
 Decided 2026-10-08 in a `/quest-plan` interview: the extra round trip is not
 worth keeping, for SUBSCRIBE and FETCH alike. Shared rules for both children:
 
-- Data that arrives before the info stays unread in QUIC until the info lands.
+- Streamed data that arrives before the info stays unread in QUIC until the
+  info lands. Datagrams can't wait unread, so they are dropped until then.
 - A failed or reset info request fails the data request.
 - Legacy serial peers keep working, proven by mixed-mode tests in Rust and JS.
 
