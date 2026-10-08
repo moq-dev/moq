@@ -730,7 +730,6 @@ fn video_config(catalog_video: crate::media::MoqVideo) -> Result<hang::catalog::
 	}
 	config.bitrate = catalog_video.bitrate;
 	config.framerate = catalog_video.framerate;
-	config.stalled = Some(catalog_video.stalled);
 	config.container = catalog_video.container.into();
 	Ok(config)
 }
@@ -807,7 +806,7 @@ mod decode_tests {
 			}),
 			display_aspect: None,
 			bitrate: None,
-			stalled: false,
+			enabled: true,
 			framerate: Some(30.0),
 			container: MoqContainer::Legacy,
 		}

@@ -290,6 +290,10 @@ struct Replay {
 
 impl Replay {
 	async fn open(recording: &Recording, cache: u64, archive: hang::catalog::Archive) -> Self {
+		Self::open_with(recording, cache, archive, Config::default()).await
+	}
+
+	async fn open_with(recording: &Recording, cache: u64, archive: hang::catalog::Archive, config: Config) -> Self {
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		tokio::spawn(moq_net::time::run(driver));
 		let broadcast = origin.create_broadcast("rec").unwrap();
@@ -302,8 +306,8 @@ impl Replay {
 		let mut catalog = moq_json::snapshot::Producer::new(track, json);
 		catalog.update(&self::catalog(archive)).unwrap();
 
-		let config = reader::Config::new(recording.timelines()).with_cache(cache);
-		let reader = moq_archive::Reader::open(recording.store.clone(), &broadcast, config)
+		let serving = reader::Config::new(recording.timelines()).with_cache(cache);
+		let reader = moq_archive::Reader::open(recording.store.clone(), &broadcast, serving)
 			.await
 			.unwrap();
 		tokio::spawn(reader.serve());
@@ -313,7 +317,7 @@ impl Replay {
 		}
 
 		let source = moq_mux::Source::new(origin.consume(), "rec");
-		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let broadcaster = Broadcaster::new(source, config).await.unwrap();
 		tokio::time::timeout(Duration::from_secs(5), broadcaster.ready())
 			.await
 			.expect("a rendition becomes playable");
@@ -564,13 +568,33 @@ async fn a_growing_recording_ends_only_on_caller_finality() {
 	assert!(playlist.contains("seg/29b1cd67.3.m4s\n#EXT-X-ENDLIST\n"), "{playlist}");
 }
 
-/// A durable timeline lists the whole recording past the default 16s window, and DASH offers
-/// the whole listed span. A live-style entry, or a `replay` path that moves the durable ranges
-/// to another broadcast, keeps the window.
+/// A durable timeline still lists only the default 16s window: a live playlist stays bounded
+/// however much the store retains.
 #[tokio::test]
-async fn a_durable_timeline_lists_past_the_window() {
+async fn a_durable_timeline_lists_the_window() {
 	let recording = segments(12).await;
 	let replay = Replay::open(&recording, 64 * 1024 * 1024, durable()).await;
+	let playlist = replay
+		.playlist_until(Kind::Video, "1080p", |playlist| {
+			playlist.contains("seg/29b1cd67.11.m4s\n")
+		})
+		.await;
+	// Eight 2s segments cover the window.
+	assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:4\n"), "{playlist}");
+	assert!(!playlist.contains("seg/29b1cd67.3.m4s\n"), "{playlist}");
+}
+
+/// History mode lists a durable timeline's whole recording, and DASH offers the whole listed
+/// span. A live-style entry, or a `replay` path that moves the durable ranges to another
+/// broadcast, keeps the window even then.
+#[tokio::test]
+async fn history_mode_lists_a_durable_timeline_past_the_window() {
+	let recording = segments(12).await;
+	let config = Config {
+		history: true,
+		..Config::default()
+	};
+	let replay = Replay::open_with(&recording, 64 * 1024 * 1024, durable(), config.clone()).await;
 	let playlist = replay
 		.playlist_until(Kind::Video, "1080p", |playlist| {
 			playlist.contains("seg/29b1cd67.11.m4s\n")
@@ -588,8 +612,8 @@ async fn a_durable_timeline_lists_past_the_window() {
 	let mut elsewhere = durable();
 	elsewhere.replay = Some(moq_net::path::RelativeOwned::new("./recording"));
 	for archive in [live(), elsewhere] {
-		let live = Replay::open(&recording, 64 * 1024 * 1024, archive).await;
-		let playlist = live
+		let windowed = Replay::open_with(&recording, 64 * 1024 * 1024, archive, config.clone()).await;
+		let playlist = windowed
 			.playlist_until(Kind::Video, "1080p", |playlist| {
 				playlist.contains("seg/29b1cd67.11.m4s\n")
 			})

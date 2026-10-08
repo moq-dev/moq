@@ -5,7 +5,7 @@
  */
 
 import * as Json from "@moq/json";
-import type { Broadcast, Track } from "@moq/net";
+import { type Broadcast, Time, type Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 
 /** Name of the track carrying the chat window. */
@@ -17,9 +17,9 @@ export const HISTORY = 10_000;
 /** A message entering, leaving, or missed from the window. */
 export type Event = Json.Window.Event<string>;
 
-/** Track settings for the latest chat window. */
-export function info(): Pick<Track.Info, "priority"> {
-	return { priority: PRIORITY };
+/** Track settings for the latest chat window, timed in milliseconds since each message is stamped when sent. */
+export function info(): Pick<Track.Info, "priority" | "timescale"> {
+	return { priority: PRIORITY, timescale: Time.Timescale.MILLI };
 }
 
 /** Publishes chat messages and retires them after ten seconds, including while idle. */
