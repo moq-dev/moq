@@ -44,7 +44,8 @@ moq <MoQ side> fetch <track> [options]
 The **MoQ side** goes first and attaches the process to the network:
 `--connect <url>` dials a relay (the path is the auth path, `?jwt=`
 carries a token), and `--broadcast <name>` names the broadcast. A process can
-instead host sessions with `--listen`, or both at once. A listener admits
+instead host sessions with `--listen`, or both at once; without a listener,
+the `--listen-*` and `--auth-*` flags are refused. A listener admits
 clients by `--auth-url` or `--auth-public`, as the relay does (see
 [Authentication](/bin/relay/auth)); public rules ignore certificates, so
 `--auth-public` refuses to start with `--listen-tls-root`, and only `--listen`
@@ -138,6 +139,16 @@ MPEG-TS export frames AAC as ADTS, which labels only the AAC Main, LC, SSR,
 and LTP profiles. HE-AAC and HE-AACv2 go out as their AAC-LC core, and decoders
 find the SBR and PS in band, as ffmpeg's ADTS output does. A track whose
 profile or channel layout ADTS cannot label is refused rather than mislabeled.
+An Opus track is labeled with the plain channel code its extension descriptor
+can name: a family 0 head, a family 1 head with the Vorbis mapping, or mono or
+stereo when the track has no OpusHead. Any other head is refused rather than
+written with a guessed channel code.
+
+An AAC layout without a channelConfiguration, such as quad, rides in a program
+config element. `export ts` repeats it in the first frame after each PAT/PMT, so a
+receiver tuning in mid-stream can decode. ffmpeg writes it in the first frame
+only, so `import ts` joining an ffmpeg source mid-stream publishes the rest of
+the program without that AAC track, and adds the track if an element arrives.
 
 A constant-rate MPEG-TS source records its multiplex rate in the catalog
 (`mpegts.muxRate`, measured off the PCR clock, null stuffing included), and
@@ -357,7 +368,9 @@ Every track gets its own timeline, stored in spans cut at group boundaries
 between 2s and 10s. The catalog and every text, JSON, and binary track are
 sparse data, so each of their groups is stored as soon as it finishes, and a
 group that never closes is stored in pieces as it grows. It refuses a rendition served
-from another broadcast, and one that returns after the catalog dropped it. The
+from another broadcast, one that returns after the catalog dropped it, and an
+untimed track, which has no timestamps to record (any track over moq-lite before
+05, or moq-transport without `TIMESCALE`, such as drafts 14–16). The
 stage ends once the broadcast does. A store URL that already holds a
 recording is continued: each track resumes after its newest stored span. A source
 announced under another [epoch](/concept/moq-lite#publisher-epochs) than the recording
