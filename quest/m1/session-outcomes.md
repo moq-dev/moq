@@ -6,9 +6,10 @@ The relay's session stats carry, per tier in [stats-split](/quest/m0/broadcast-e
 totals and per root in its requested per-root track, how many sessions were
 refused, by reason, and how many ended abnormally, by kind: idle timeout,
 transport error, application error, or token expired. A dashboard computes an
-error rate from the stats feed alone, with no log scraping. An embedder that
-decides admission (a CDN's auth layer) can count a refusal against the root it
-resolved, since a refused session never gets a stats context of its own.
+error rate from the stats feed alone, with no log scraping. Refusals count
+unattributed, on the default tier, until
+[Typed refusal reason](/quest/m1/auth/refusal-reason.md) adds `expired` and
+attributes a refusal to the root and tier the auth server resolved.
 
 ## Plan
 
@@ -16,18 +17,14 @@ Decided 2026-10-07, for moq.pro's per-project error counts (a customer
 rolling out browser playback wants an error rate it cannot see client-side):
 
 - **Refusals reuse moq#4825's reasons** (`refusals.rs`: refused, unavailable,
-  request, forbidden, lan) plus `expired`, so `/metrics` and the stats track
-  share one vocabulary. `expired` comes from moq-auth's typed `TokenExpired`;
-  [Expired token error](/quest/m1/auth/expired-error.md) is the wire half of
-  the same distinction.
-- **A refusal counts against a root only when the decider names one.** The
-  relay verifies no token itself (its deciders are the auth server, public
-  rules, or refuse-all in `rs/moq-relay/src/auth.rs`), so a refusal the decider
-  does not attribute stays node-wide in `/metrics`. A refused session has no
-  grant, so no tier either (`auth::Token::new` takes the tier from the grant).
-  Add a way for a decider's refusal to carry the root it resolved and,
-  optionally, the tier; count it in that root's `Presence` on that tier, or the
-  default tier when it names none.
+  request, forbidden, lan), so `/metrics` and the stats track share one
+  vocabulary.
+- **Refusals stay unattributed here** (decided 2026-10-08). The relay verifies
+  no token itself (its deciders are the auth server, public rules, or
+  refuse-all in `rs/moq-relay/src/auth.rs`), and a refused session has no
+  grant, so no root or tier. Count refusals in the default tier's totals;
+  `expired` and per-root attribution need the auth server to say so, which
+  [Typed refusal reason](/quest/m1/auth/refusal-reason.md) adds.
 - **Ends are classified from a typed close kind, not a string.** A peer's
   application close is already typed (`Error::from_transport` decodes it into
   `Error::Session`), but `moq_net::Error::Transport(String)` still flattens
@@ -49,12 +46,11 @@ rolling out browser playback wants an error rate it cannot see client-side):
   counts into the group totals, and the aggregator merges with a baseline per
   upstream (node, epoch), so a node leaving or returning never reads as new
   errors or a drop.
-- Tests: an expired token, a forbidden path, and an embedder refusal on a
-  named tier each count under the right root, tier, and reason; a clean close,
-  a peer's zero-code close, an idle timeout, and a peer application error
-  each count as their kind; the aggregator sums both maps across nodes, and a
-  node departing and returning while another stays leaves the merged counts
-  unchanged.
+- Tests: a forbidden path and an auth server refusal each count under their
+  reason; a clean close, a peer's zero-code close, an idle timeout, and a peer
+  application error each count as their kind; the aggregator sums both maps
+  across nodes, and a node departing and returning while another stays leaves
+  the merged counts unchanged.
 
 ## Required
 
@@ -65,5 +61,7 @@ rolling out browser playback wants an error rate it cannot see client-side):
 
 - [WebTransport transport](/quest/m1/auth/webtransport-transport.md) - the
   same consumer's per-transport session split
+- [Typed refusal reason](/quest/m1/auth/refusal-reason.md) - adds `expired`
+  and per-root, per-tier refusal attribution on top of these counters
 - [Own the QUIC stack](/quest/m1/quic/README.md) - where a typed close kind
   is natural once `moq-quic` owns the connection

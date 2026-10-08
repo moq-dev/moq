@@ -16,10 +16,19 @@ measuring how often browsers fall back to WebSocket, whose native QUIC
 workers share the `quic` count today):
 
 - **A variant, not a flag.** Rejected: an additive `webtransport: bool` beside
-  `transport: "quic"`. The variant states the truth, and the enum is already
-  `#[non_exhaustive]`. An auth server that matches `"quic"` sees
-  `"webtransport"` for browser sessions after this lands: call it out in the
-  changelog.
+  `transport: "quic"`. The variant states the truth. An auth server that
+  matches `"quic"` sees `"webtransport"` for browser sessions after this
+  lands: call it out in the changelog.
+- **Auth servers upgrade before relays** (decided 2026-10-08).
+  `#[non_exhaustive]` does not help the wire: `moq_auth::Transport` has no
+  unknown-value fallback and `moq auth serve` deserializes the whole request
+  (`rs/moq-auth/src/serve.rs`), so an auth server on today's moq-auth rejects
+  `"webtransport"`, the relay reads that as Unavailable, and every browser
+  session is refused. Auth servers, moq.pro included, deploy the new moq-auth
+  first; document the order in the changelog and `doc/bin/relay/auth.md`.
+- **Add a `#[serde(other)]` fallback** to `moq_auth::Transport` in the same
+  change, so the next variant reads as unknown on an older server instead of
+  failing the request. Test that an unknown transport deserializes to it.
 - **The ALPN cannot tell them apart.** Both present the negotiated
   sub-protocol (e.g. `moq-lite-04`) as `alpn`; `h3` never reaches auth. The
   transport already knows: `moq_tokio::server::Request::transport()` returns
