@@ -12,7 +12,7 @@ Values above 2^53 are legal on the IETF wire (request ids, track aliases);
 they stay exact as `U64` and only fail where code converts them to
 `number`.
 
-Public API: breaks `@moq/net`; retargets to `dev`. Wire: none.
+Public API: breaks `@moq/net`. Wire: none.
 
 Decided in the 2026-09-30 audit: deferred to m2 until generated lite passes
 its no-downgrade go/no-go in the [rs2ts line](/quest/m1/rs2ts/README.md).
@@ -21,3 +21,4 @@ its no-downgrade go/no-go in the [rs2ts line](/quest/m1/rs2ts/README.md).
 
 - [Generated lite](/quest/m1/rs2ts/lite.md) - the pipeline this reuses
 - [Sans-IO IETF session](/quest/m2/rs2ts-sans-io-ietf.md) - the session shape it translates
+- [IETF parameters](/quest/m2/rs2ts-ietf-params.md) - the concrete parameter codec it translates

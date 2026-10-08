@@ -128,6 +128,12 @@ impl TasksWeak {
 			state.queued.push_back(task.maybe_boxed());
 		}
 	}
+
+	/// Poll for every owning handle being gone, after which the set finishes as soon
+	/// as its children do.
+	pub fn poll_orphaned(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.alive.poll_closed(waiter)
+	}
 }
 
 /// A dynamic set of child tasks polled by its parent driver, built on

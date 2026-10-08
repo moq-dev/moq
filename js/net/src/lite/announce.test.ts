@@ -287,7 +287,7 @@ const GOLDEN_RESOLVED = [
 // Pinned from the Rust encoder (`lite::compress::tests::golden_stream_is_pinned`), so the
 // JS decoder is checked against real compressed output.
 const GOLDEN =
-	"001500000a726f6f6d2f612f63616d00029111a2220000000c0102036d69630101b33301000208000101c044440100010101000b020101620201c055550100";
+	"001600000a726f6f6d2f612f63616d0000029111a2220000000d0102036d6963000101b33301000208000101c044440100010101000c02010162000201c055550100";
 
 test("AnnounceHistory resolves the Rust encoder's compressed stream", async () => {
 	expect(await resolveStream(unhex(GOLDEN))).toEqual(GOLDEN_RESOLVED);
@@ -295,7 +295,7 @@ test("AnnounceHistory resolves the Rust encoder's compressed stream", async () =
 
 // JS always encodes literally; Rust decodes these bytes too (`js_literal_stream_decodes`).
 const JS_LITERAL =
-	"001500000a726f6f6d2f612f63616d00029111a2220000001500000a726f6f6d2f612f6d69630002b333a2220000020a000002c04444a22200000101010012000006726f6f6d2f620002c05555a2220000";
+	"001600000a726f6f6d2f612f63616d0000029111a2220000001600000a726f6f6d2f612f6d6963000002b333a2220000020a000002c04444a22200000101010013000006726f6f6d2f62000002c05555a2220000";
 
 test("the literal draft-07 stream matches what Rust decodes", async () => {
 	const wire = await bytes(async (w) => {
@@ -388,12 +388,12 @@ test("route costs saturate at 2^62-1 on every version", async () => {
 		expect(got).toMatchObject({ cost: ceiling });
 	}
 
-	// ANNOUNCE_START: path base, path keep, empty suffix, hop base, no hops, hop keep, then
-	// a cost of 2^64-1, which only lite-07's varints can carry.
+	// ANNOUNCE_START: path base, path keep, empty suffix, no epoch, hop base, no hops, hop
+	// keep, then a cost of 2^64-1, which only lite-07's varints can carry.
 	const wire = await bytes(async (w) => {
 		await w.u53(0);
-		await w.u53(15);
-		for (const b of [0, 0, 0, 0, 0, 0]) await w.u8(b);
+		await w.u53(16);
+		for (const b of [0, 0, 0, 0, 0, 0, 0]) await w.u8(b);
 		await w.u62(huge);
 	}, Version.DRAFT_07);
 	const got = await decodeAnnounceBroadcast(new Reader(undefined, wire, Version.DRAFT_07), Version.DRAFT_07);
@@ -406,7 +406,8 @@ test("wip start and update carry one static cost", async () => {
 		(w) => encodeAnnounceBroadcast(w, { status: "active", suffix: Path.empty(), hops: [], cost: Cost.zero }, v),
 		v,
 	);
-	expect([...start]).toEqual([0, 7, 0, 0, 0, 0, 0, 0, 0]);
+	// Path base, path keep, empty suffix, no epoch, hop base, no hops, hop keep, cost.
+	expect([...start]).toEqual([0, 8, 0, 0, 0, 0, 0, 0, 0, 0]);
 	const update = await bytes(
 		(w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [], cost: Cost.zero }, v),
 		v,

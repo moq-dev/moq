@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.10](https://github.com/moq-dev/moq/compare/moq-net-v0.3.9...moq-net-v0.3.10) - 2026-10-05
+
+### Fixed
+
+- *(net)* widen only frame-bounded starts to the head; pin the peer's own read
+- *(net)* a relay resuming mid-group asks upstream for the group's head
+
+### Other
+
+- *(net)* cover a frame-precise resume arriving at the relay itself
+
+## [0.3.9](https://github.com/moq-dev/moq/compare/moq-net-v0.3.8...moq-net-v0.3.9) - 2026-10-03
+
+### Fixed
+
+- *(net)* keep track::Fetching unwind safe
+- *(net)* a subscriber hands its cursors off to a park's cache ([#4698](https://github.com/moq-dev/moq/pull/4698))
+- *(ietf)* refuse SUBSCRIBE_TRACKS per request with NOT_SUPPORTED ([#4685](https://github.com/moq-dev/moq/pull/4685))
+- *(net)* cancel an abandoned lite FETCH upstream, before or after the answer ([#4691](https://github.com/moq-dev/moq/pull/4691))
+- *(net)* a truncated spliced group fails instead of ending cleanly ([#4689](https://github.com/moq-dev/moq/pull/4689))
+- *(moq-net)* hold IETF uni streams that arrive before SETUP ([#4686](https://github.com/moq-dev/moq/pull/4686))
+- *(net)* a group-only reader subscribes to its replacement copy ([#4491](https://github.com/moq-dev/moq/pull/4491))
+- *(net)* preserve session close outcomes for tracks and groups ([#4663](https://github.com/moq-dev/moq/pull/4663))
+- *(net)* a takeover keeps the open group's head for later readers ([#4655](https://github.com/moq-dev/moq/pull/4655))
+- *(net)* end a lite SUBSCRIBE or FETCH once the requester leaves ([#4531](https://github.com/moq-dev/moq/pull/4531))
+- *(ietf)* discard padding streams and close on unknown uni types ([#4603](https://github.com/moq-dev/moq/pull/4603))
+- *(net)* a spliced group's end is asked from the seam, not frame 0 ([#4651](https://github.com/moq-dev/moq/pull/4651))
+- *(ietf)* decode every legal request and refuse per request ([#4610](https://github.com/moq-dev/moq/pull/4610))
+- *(moq-net)* back received frame buffers by bytes received ([#4609](https://github.com/moq-dev/moq/pull/4609))
+- *(moq-net)* hold route updates so a withdrawal retracts once ([#4642](https://github.com/moq-dev/moq/pull/4642))
+- *(net)* prune departed subscribers on every aggregate wake ([#4633](https://github.com/moq-dev/moq/pull/4633))
+- *(net)* prune departed subscribers only when the list would grow ([#4627](https://github.com/moq-dev/moq/pull/4627))
+- *(net)* prune departed subscribers when registering a new one ([#4604](https://github.com/moq-dev/moq/pull/4604))
+- *(moq-net)* a stream reset with an unmapped code no longer ends an IETF session ([#4602](https://github.com/moq-dev/moq/pull/4602))
+
+### Other
+
+- *(net)* share route ranking across announcement cursors ([#4634](https://github.com/moq-dev/moq/pull/4634))
+- *(moxygen)* Moxygen compatibility ([#4253](https://github.com/moq-dev/moq/pull/4253))
+
 ## [0.3.8](https://github.com/moq-dev/moq/compare/moq-net-v0.3.7...moq-net-v0.3.8) - 2026-09-30
 
 ### Added

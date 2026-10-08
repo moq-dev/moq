@@ -36,6 +36,11 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 A nested `<video>` gets the raw capture stream; a `<canvas>` is drawn by the
 element. `<moq-publish-support>` shows what the browser can encode.
 
+File demuxers load when decoding a file whose MIME type is empty or does not
+start with `image/`. Camera, screen, and files identified as images do not
+load them. The file picker opens synchronously, before any decoder module
+is loaded.
+
 Camera and microphone failures are readable through the element's
 `el.sources.video` and `el.sources.audio` signals. When these hold a
 `Publish.Source.Camera` or `Publish.Source.Microphone`, their `out.error` signal
@@ -54,14 +59,43 @@ framerate, and bitrate are tunable through `el.video.config`; the audio
 encoder exposes its codec and volume. For simulcast or several renditions,
 drop the element and register your own encoders on a `Publish.Broadcast`.
 
+Every audio volume change ramps over `el.audio.fade`, 50ms by default, so
+`volume = 0` is silent once the fade passes. A fade of 0 steps at once; a
+negative or non-finite fade drops the rendition until it is fixed.
+Disabling a rendition (`muted` on the element) ends the audio timeline with
+a marker, so a viewer that stays subscribed, or joins during the pause, never
+plays the audio before it as live.
+
+Each audio frame is its own group by default, so a relay pays a stream and a
+group's bookkeeping per 20ms frame. `el.audio.groupDuration` sets a minimum
+per group instead, such as `Time.Milli(100)`: the first frame at least 100ms
+after the group's first timestamp opens the next group and closes the previous
+one. If encoding pauses, the current group stays open until the next frame or
+timeline marker. Frames still forward as they are encoded, so grouping does
+not buffer them, but loss gets coarser: a viewer that falls behind skips a
+whole group, and a lost frame holds back the rest of its group until it is retransmitted. A 60ms
+Opus `frameDuration` also cuts the group rate, without code, at the cost of
+encoder latency. The synthetic `just bench-audio` workload reports higher p99
+delivery latency with longer groups; immediate forwarding is not a promise of
+unchanged end-to-end latency.
+
 `el.video.cut()` asks for a keyframe on top of the `keyframeInterval` cadence,
 for a resume, a recording cut, or a known tune-in moment. Requests coalesce into
 the next keyframe, and forced keyframes land at least 500ms apart.
+
+A still source, such as a screen share of an unchanging slide, delivers a frame
+only when its picture changes. `Video.Capture` holds the newest frame and opens
+every new reader with a copy stamped at the moment it attaches, so a viewer or
+recorder that subscribes later still gets the current picture as a keyframe.
 
 The video and audio encoders measure how far their output falls behind the media
 clock when they flush frames. Catalog jitter is the spread above each
 rendition's own recent minimum lateness, so a constant encoder delay is not jitter.
 The advertised value only rises; frame duration alone does not set it.
+The first estimate rise publishes immediately. Later rises within a second
+coalesce into one update at the end of that window carrying the latest value.
+Track additions, removals, and configuration edits publish immediately,
+including any pending estimate.
 
 ## Clock
 
@@ -81,13 +115,18 @@ can serve its own tracks alongside the media. It is recreated on each
 
 ```ts
 import * as Json from "@moq/json";
+import * as Moq from "@moq/net";
 
 signals.run((effect) => {
     const net = effect.get(broadcast.net);
     if (!net) return;
 
-    // A day-long retention so a late viewer still replays the last value.
-    const track = net.createTrack("meta.json", { maxAge: 86_400_000 });
+    // A day-long retention so a late viewer still replays the last value. JSON
+    // values are stamped when written, so the track declares a timescale.
+    const track = net.createTrack("meta.json", {
+        timescale: Moq.Time.Timescale.MILLI,
+        maxAge: Moq.Time.Milli(86_400_000),
+    });
     effect.cleanup(() => track.close());
 
     const meta = new Json.Snapshot.Producer<Meta>({ track });
@@ -145,3 +184,23 @@ audio rendition stays out of the catalog until samples flow.
 
 Every input and output is a signal from [`@moq/signals`](/lib/js/signals).
 Load from a CDN (`https://esm.sh/@moq/publish/element`) for a no-build embed.
+
+## Strict CSP
+
+The audio worklet and the capture worker load from `blob:` URLs by default, so
+they need no hosted files but a CSP must allow `blob:` in `script-src` and
+`worker-src`. For a CSP that refuses `blob:`, copy
+`node_modules/@moq/publish/assets/*` into a directory your origin serves, and
+point the package at it before capture starts:
+
+```ts
+import * as Publish from "@moq/publish";
+
+Publish.assets("/moq/");
+```
+
+The URL must end with `/`. Copy the files again on every upgrade: they change
+with the package. The capture worker only runs where the main thread lacks
+`MediaStreamTrackProcessor` (Firefox and Safari); if the hosted file fails to
+load, capture errors instead of hiding the broken deploy. `@moq/room`
+publishes through `@moq/publish`, so this one call covers it.

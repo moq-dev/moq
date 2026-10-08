@@ -8,6 +8,8 @@
  * @module
  */
 
+import type * as Moq from "@moq/net";
+
 // ── the deterministic publisher ─────────────────────────────────────────────
 
 /** A deliberate defect, used to prove an assertion can fail. */
@@ -41,7 +43,39 @@ export type FixtureState = {
 	audioActive: boolean;
 	/** Frames the encoder has produced. */
 	encodedFrames: number;
+	/** Whether the video rendition is published as enabled; false while {@link InteropControl.disableVideo} holds. */
+	videoEnabled: boolean;
 };
+
+/** The newest published video's GOP, sampled independently of canvas capture and encoding. */
+export type LiveGop = {
+	/** The timestamp of its keyframe, in milliseconds on the publisher's media clock. */
+	timestamp: number;
+};
+
+/** Read the newest published GOP without retaining a subscription or changing its frames. */
+export async function readLiveGop(track: Moq.Track.Consumer): Promise<LiveGop> {
+	const subscriber = track.subscribe();
+	try {
+		const group = await subscriber.recvGroup();
+		if (!group) throw new Error("the fixture video has no published GOP");
+		try {
+			const frame = await group.readFrame();
+			if (!frame) throw new Error("the fixture GOP has no keyframe");
+			if (!frame.timestamp) throw new Error("the fixture video arrived untimed");
+			return { timestamp: frame.timestamp.asMillis() };
+		} finally {
+			group.close();
+		}
+	} finally {
+		subscriber.close();
+	}
+}
+
+/** True when the presented frame belongs to the sampled GOP or a newer one. */
+export function lateJoinStartsLive(gop: LiveGop, timestamp: number | undefined): boolean {
+	return timestamp !== undefined && timestamp >= gop.timestamp;
+}
 
 /** The camera publisher state mirrored onto its element for Playwright. */
 export type CaptureState = {
@@ -152,6 +186,15 @@ export type Sample = {
 	resources: Resources;
 };
 
+// ── the refused session ─────────────────────────────────────────────────────
+
+/** How a refused session ended, as `WebTransport.closed` reported it to the page. */
+export type CloseState =
+	/** `closed` resolved: the close capsule arrived. */
+	| { closeCode: number; reason: string }
+	/** `closed` rejected, or the relay admitted the session: the close never said why. */
+	| { error: string };
+
 // ── the command channel ─────────────────────────────────────────────────────
 
 /**
@@ -161,6 +204,8 @@ export type Sample = {
  * owns them rather than the driver reaching in.
  */
 export type InteropControl = {
+	/** Read the current video GOP while an existing viewer is still pulling media. */
+	liveGop(): Promise<LiveGop>;
 	/** Stop the fixture publisher, releasing its session. */
 	stop(): void;
 	/** Start (or restart) the fixture publisher on the same broadcast path. */
@@ -171,6 +216,10 @@ export type InteropControl = {
 	reattach(): void;
 	/** Connect a second player and leave it behind for the leaked-session negative control. */
 	startLeak(): void;
+	/** Keep the fixture's video rendition in the catalog with `enabled: false`, stopping its frames. */
+	disableVideo(): void;
+	/** Re-enable the fixture's video rendition. */
+	enableVideo(): void;
 };
 
 /** The `window` property the commands are published on. */

@@ -1,5 +1,6 @@
 import { race } from "@moq/signals";
-import { fromTransport, StreamCode, StreamError, toStreamCode, toTransport } from "./error.ts";
+import { fromTransport, StreamCode, toStreamCode, toTransport } from "./error.ts";
+import { sharedStreamCode } from "./ietf/error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version } from "./ietf/version.ts";
 import { Version as Lite, type Version as LiteVersion } from "./lite/version.ts";
@@ -26,6 +27,16 @@ function withCode(reason: unknown, stream: StreamVersion): unknown {
 	const decoded = fromTransport(reason, { version });
 	const code = toStreamCode(decoded, { version });
 	return code === StreamCode.Internal && decoded === reason ? reason : toTransport(code, decoded.message);
+}
+
+// A bare number is a stream code, and only Reader.stop takes one. Writer.reset stays on
+// withCode, which reads a number as a non-stream error and sends Internal.
+function stopReason(reason: unknown, stream: StreamVersion): unknown {
+	if (typeof reason !== "number") return withCode(reason, stream);
+	const version = asIetf(stream);
+	const code =
+		version === undefined || sharedStreamCode(reason, version) ? (reason as StreamCode) : StreamCode.Internal;
+	return toTransport(code, "cancel");
 }
 
 const MAX_U31 = 2 ** 31 - 1;
@@ -230,7 +241,7 @@ export class Stream {
 		// A routine unsubscribe, so send CANCELLED. A bare Error would put 0 on the wire,
 		// which the stream registry reads as INTERNAL_ERROR: the peer would log a failure
 		// for every subscription we walk away from.
-		this.reader.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
+		this.reader.stop(StreamCode.Cancel);
 	}
 
 	abort(reason: Error) {
@@ -270,17 +281,24 @@ export class Reader {
 
 	// Adds more data to the buffer, returning true if more data was added.
 	async #fill(): Promise<boolean> {
-		if (!this.#reader) {
+		const reader = this.#reader;
+		if (!reader) {
 			return false;
 		}
 
 		// Every read of this stream funnels through here, so decoding the peer's reset code
 		// once is enough to keep the raw transport error out of every caller (and every app).
-		const result = await this.#reader.read().catch((err: unknown) => {
+		const result = await reader.read().catch((err: unknown) => {
 			throw fromTransport(err, { version: asIetf(this.version) });
 		});
 
 		if (result.done) {
+			// The transport already finished the stream. Drop the reader so a later stop
+			// neither builds a cancel error nor sends a reset the peer will ignore.
+			if (this.#reader === reader) {
+				this.#reader = undefined;
+				reader.releaseLock();
+			}
 			return false;
 		}
 
@@ -304,7 +322,7 @@ export class Reader {
 
 		while (this.#buffer.byteLength + this.#chunked < size) {
 			if (!(await this.#fill())) {
-				throw new Error("unexpected end of stream");
+				throw new UnexpectedEnd();
 			}
 		}
 
@@ -364,13 +382,22 @@ export class Reader {
 		}
 	}
 
+	// Like decode, but leaves the bytes buffered for the next read.
+	async #peek<T>(decode: (c: Cursor) => T): Promise<T> {
+		for (;;) {
+			const result = this.#try(decode, false);
+			if (!(result instanceof Short)) return result;
+			await this.#fillTo(result.need);
+		}
+	}
+
 	/** Like {@link decode}, but returns undefined if the stream ends cleanly first. */
 	async decodeMaybe<T>(decode: (c: Cursor) => T): Promise<T | undefined> {
 		if (await this.done()) return undefined;
 		return this.decode(decode);
 	}
 
-	#try<T>(decode: (c: Cursor) => T): T | Short {
+	#try<T>(decode: (c: Cursor) => T, consume = true): T | Short {
 		// A retry of the decode that last ran short, before the bytes it needs have arrived,
 		// would only throw again. Every decode reads at least a byte, so none can succeed on
 		// an empty buffer either.
@@ -382,7 +409,7 @@ export class Reader {
 		const cursor = new Cursor(this.#buffer, this.version);
 		try {
 			const result = decode(cursor);
-			this.#slice(cursor.offset);
+			if (consume) this.#slice(cursor.offset);
 			this.#short = undefined;
 			return result;
 		} catch (err: unknown) {
@@ -405,6 +432,15 @@ export class Reader {
 		}
 		this.#join();
 		return this.#slice(this.#buffer.byteLength);
+	}
+
+	// Reads to the end of the stream, dropping every byte instead of buffering it.
+	async discard(): Promise<void> {
+		this.#buffer = new Uint8Array();
+		do {
+			this.#chunks = [];
+			this.#chunked = 0;
+		} while (await this.#fill());
 	}
 
 	async string(): Promise<string> {
@@ -433,6 +469,11 @@ export class Reader {
 		return this.decode(U62);
 	}
 
+	/** Like {@link u62}, but leaves the varint buffered, so a stream's type can be read twice. */
+	async peekU62(): Promise<bigint> {
+		return this.#peek(U62);
+	}
+
 	async varint(): Promise<U64> {
 		return this.decode(VARINT);
 	}
@@ -443,8 +484,13 @@ export class Reader {
 		return !(await this.#fill());
 	}
 
+	// The transport error is built only while the stream is still open. After a FIN the
+	// reader is gone, so this allocates nothing and sends nothing.
 	stop(reason: unknown) {
-		this.#reader?.cancel(withCode(reason, this.version)).catch(() => void 0);
+		const reader = this.#reader;
+		if (!reader) return;
+		this.#reader = undefined;
+		reader.cancel(stopReason(reason, this.version)).catch(() => void 0);
 	}
 
 	// Decoded like #fill: a caller racing this against a read must not get a different error
@@ -454,6 +500,13 @@ export class Reader {
 			throw fromTransport(err, { version: asIetf(this.version) });
 		});
 		return this.#closed;
+	}
+}
+
+/** The stream ended cleanly partway through a read. */
+export class UnexpectedEnd extends Error {
+	constructor() {
+		super("unexpected end of stream");
 	}
 }
 

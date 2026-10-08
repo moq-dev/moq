@@ -36,6 +36,12 @@ glommio, and compio all fold the tick's submit into the park enter.
   fixed-bucket histogram of SQEs per enter and CQEs per enter, one row per
   worker. `enters` stays for the ratio the docs already describe.
 
+Decided in the 2026-10-05 audit: driver-touching perf work waits on the
+[hard fork](/quest/m1/quic/fork/README.md). This quest's worker loop,
+`Shared::push`, and metrics changes do not touch the QUIC driver
+(`rs/moq-uring/src/quic/noq`), so it can land first; any part that turns out
+to edit the driver moves to a follow-up after the fork.
+
 Acceptance: enters per turn on the chat and fanout shapes via `just bench
 BASE` on Linux and the new counters; the deferred-completion regression
 fails without the flag. Latency must not regress.

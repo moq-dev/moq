@@ -65,7 +65,6 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 	let mut child = if let Some(publish) = javascript {
 		let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/max-age/client.ts");
 		let mut child = tokio::process::Command::new("bun")
-			.env("NODE_ENV", "production")
 			.arg(script)
 			.arg(url.as_str())
 			.arg(version.alpn())
@@ -103,7 +102,7 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 				.ok_or_else(|| anyhow::anyhow!("announcements closed"))?,
 			moq_net::announce::Event::Start(_)
 		) {}
-		let front = consumer.request_broadcast("age").await?;
+		let front = consumer.request_broadcast("age", None).await?;
 		for (i, age) in AGES.into_iter().enumerate() {
 			let track = front.track(&i.to_string())?.subscribe(None).await?;
 			anyhow::ensure!(

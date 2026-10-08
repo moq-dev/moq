@@ -45,8 +45,7 @@ pub enum Error {
 	InvalidMappingTable,
 
 	/// A channel mapping family the operation cannot carry: family 0 given to
-	/// [`Mapping::new`], which has no table; a [`Config::encode`] whose
-	/// `mapping_family` is not its `mapping`'s; or a container with no room for
+	/// [`Mapping::new`], which has no table, or a container with no room for
 	/// the table.
 	#[error("unsupported channel mapping family {0}")]
 	UnsupportedMappingFamily(u8),
@@ -69,11 +68,7 @@ pub struct Config {
 	pub pre_skip: u16,
 	/// Gain to apply to the decoded output, in Q7.8 dB.
 	pub output_gain: i16,
-	/// Channel mapping family; 0 is mono/stereo with no mapping table.
-	///
-	/// Always `mapping`'s family, or 0 without one.
-	pub mapping_family: u8,
-	/// The channel mapping table, or `None` for family 0 (mono/stereo, one stream).
+	/// The channel mapping table, carrying its family; `None` is family 0.
 	pub mapping: Option<Mapping>,
 }
 
@@ -85,7 +80,6 @@ impl Config {
 			channel_count,
 			pre_skip: 0,
 			output_gain: 0,
-			mapping_family: 0,
 			mapping: None,
 		}
 	}
@@ -118,12 +112,12 @@ impl Config {
 		let pre_skip = buf.get_u16_le();
 		let sample_rate = buf.get_u32_le();
 		let output_gain = buf.get_i16_le();
-		let mapping_family = buf.get_u8();
+		let family = buf.get_u8();
 
-		let mapping = match mapping_family {
+		let mapping = match family {
 			0 if (1..=2).contains(&channel_count) => None,
 			0 => return Err(Error::UnsupportedChannelCount(channel_count)),
-			family => Some(Mapping::parse(buf, family, channel_count as u8)?),
+			other => Some(Mapping::parse(buf, other, channel_count as u8)?),
 		};
 
 		Ok(Self {
@@ -131,7 +125,6 @@ impl Config {
 			channel_count,
 			pre_skip,
 			output_gain,
-			mapping_family,
 			mapping,
 		})
 	}
@@ -139,15 +132,11 @@ impl Config {
 	/// Encode an OpusHead packet (RFC 7845 §5.1), followed by the channel mapping
 	/// table when there is one.
 	///
-	/// Errors with [`Error::UnsupportedChannelCount`] when `channel_count` is not
-	/// 1 or 2 without a `mapping` (family 0 is only defined for mono/stereo), or
-	/// is not the mapping's own channel count, and with
-	/// [`Error::UnsupportedMappingFamily`] when `mapping_family` is not the
-	/// mapping's family.
+	/// The family byte is the mapping's, or 0 when there is none. Errors with
+	/// [`Error::UnsupportedChannelCount`] when `channel_count` is not 1 or 2
+	/// without a `mapping` (family 0 is only defined for mono/stereo), or is not
+	/// the mapping's own channel count.
 	pub fn encode(&self) -> Result<Bytes> {
-		if self.mapping_family != self.mapping.map_or(0, |mapping| mapping.family()) {
-			return Err(Error::UnsupportedMappingFamily(self.mapping_family));
-		}
 		let valid = match &self.mapping {
 			None => (1..=2).contains(&self.channel_count),
 			Some(mapping) => self.channel_count == mapping.table().len() as u32,
@@ -178,8 +167,8 @@ impl Config {
 ///
 /// MPEG-TS aggregates several Opus packets into one PES, so the importer advances each
 /// packet's timestamp by this. Opus timing is always reckoned at 48 kHz regardless of the
-/// encoder's internal bandwidth. Returns `None` for an empty packet or a code-3 packet
-/// missing its frame-count byte.
+/// encoder's internal bandwidth. Returns `None` for an empty packet, a code-3 packet
+/// missing its frame-count byte, or a packet outside the 1 frame and 120 ms RFC 6716 allows.
 pub(crate) fn packet_samples(packet: &[u8]) -> Option<u32> {
 	let toc = *packet.first()?;
 	let frames = match toc & 0b11 {
@@ -188,7 +177,9 @@ pub(crate) fn packet_samples(packet: &[u8]) -> Option<u32> {
 		// Code 3: the frame count is the low 6 bits of the following byte.
 		_ => (packet.get(1)? & 0b0011_1111) as u32,
 	};
-	Some(config_samples(toc >> 3) * frames)
+	let samples = config_samples(toc >> 3) * frames;
+	// RFC 6716 §3.2.5: a packet holds at most 120 ms of audio.
+	(frames > 0 && samples <= 5_760).then_some(samples)
 }
 
 /// 48 kHz samples per frame for an Opus TOC config index (0..=31), per RFC 6716 Table 1.
@@ -226,6 +217,11 @@ mod tests {
 		// config 1, code 3 with 4 frames -> 3840.
 		assert_eq!(packet_samples(&[(1 << 3) | 3, 4]), Some(3840));
 		assert_eq!(packet_samples(&[]), None);
+		// Code 3 with zero frames, and with 63 frames of 60 ms.
+		assert_eq!(packet_samples(&[(1 << 3) | 3, 0]), None);
+		assert_eq!(packet_samples(&[(3 << 3) | 3, 63]), None);
+		// Two 60 ms frames is the 120 ms maximum.
+		assert_eq!(packet_samples(&[(3 << 3) | 3, 2]), Some(5760));
 	}
 
 	#[test]
@@ -272,7 +268,7 @@ mod tests {
 		assert_eq!(parsed.sample_rate, 44_100);
 		assert_eq!(parsed.pre_skip, 312);
 		assert_eq!(parsed.output_gain, -1536);
-		assert_eq!(parsed.mapping_family, 0);
+		assert!(parsed.mapping.is_none());
 
 		// The gain survives a round trip.
 		let encoded = parsed.encode().unwrap();
@@ -300,7 +296,6 @@ mod tests {
 		let parsed = Config::parse(&mut buf).unwrap();
 		assert_eq!(buf, b"trailing");
 		assert_eq!(parsed.channel_count, 6);
-		assert_eq!(parsed.mapping_family, 1);
 
 		let mapping = parsed.mapping.unwrap();
 		assert_eq!(mapping.family(), 1);
@@ -316,7 +311,6 @@ mod tests {
 	fn encodes_the_vorbis_mappings() {
 		for channels in 1..=8u8 {
 			let mut config = Config::new(48_000, channels as u32);
-			config.mapping_family = 1;
 			config.mapping = Some(Mapping::vorbis(channels).unwrap());
 			let head = config.encode().unwrap();
 			assert_eq!(head.len(), 21 + channels as usize, "{channels} channels");
@@ -337,17 +331,8 @@ mod tests {
 
 		// The channel count must agree with the table.
 		let mut config = Config::new(48_000, 5);
-		config.mapping_family = 1;
 		config.mapping = Some(five_one);
 		assert!(matches!(config.encode(), Err(Error::UnsupportedChannelCount(5))));
-
-		// So must the family, both ways.
-		let mut config = Config::new(48_000, 6);
-		config.mapping = Some(five_one);
-		assert!(matches!(config.encode(), Err(Error::UnsupportedMappingFamily(0))));
-		let mut config = Config::new(48_000, 2);
-		config.mapping_family = 1;
-		assert!(matches!(config.encode(), Err(Error::UnsupportedMappingFamily(1))));
 	}
 
 	#[test]

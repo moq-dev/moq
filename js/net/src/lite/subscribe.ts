@@ -1,7 +1,10 @@
+import type * as Epoch from "../epoch.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import type { Location } from "../track.ts";
+import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
-import { hasFrameBounds, hasGroupOrder, hasStreamCount, resolvesStart, Version } from "./version.ts";
+import { hasFrameBounds, hasGroupOrder, hasLargest, hasStreamCount, resolvesStart, Version } from "./version.ts";
 
 /**
  * Encode the `Group Start` field shared by SUBSCRIBE and SUBSCRIBE_UPDATE.
@@ -147,8 +150,8 @@ export function emptyRange({ startGroup, endGroup }: { startGroup?: number; endG
 
 export class SubscribeUpdate {
 	priority: number;
-	/** Subscriber max latency in milliseconds; zero skips once a newer group is available. */
-	maxAge: number;
+	/** Subscriber max delay in milliseconds; zero skips once a newer group is available. */
+	maxDelay: number;
 	startGroup?: number;
 	endGroup?: number;
 	/** See {@link Subscribe.startFrame}. */
@@ -158,14 +161,14 @@ export class SubscribeUpdate {
 
 	constructor(props: {
 		priority: number;
-		maxAge?: number;
+		maxDelay?: number;
 		startGroup?: number;
 		endGroup?: number;
 		startFrame?: number;
 		endFrame?: number;
 	}) {
 		this.priority = props.priority;
-		this.maxAge = props.maxAge ?? 0;
+		this.maxDelay = props.maxDelay ?? 0;
 		this.startGroup = props.startGroup;
 		this.endGroup = props.endGroup;
 		this.startFrame = props.startFrame ?? 0;
@@ -181,7 +184,7 @@ export class SubscribeUpdate {
 			default:
 				await w.u8(this.priority);
 				await padGroupOrder(w, version);
-				await w.u53(this.maxAge);
+				await w.u53(this.maxDelay);
 				await encodeStartGroup(w, version, this.startGroup);
 				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
 				await encodeFrameBounds(w, version, this);
@@ -197,14 +200,14 @@ export class SubscribeUpdate {
 			default: {
 				const priority = await r.u8();
 				await skipGroupOrder(r, version);
-				const maxAge = await r.u53();
+				const maxDelay = await r.u53();
 				const startGroup = await decodeStartGroup(r, version);
 				const endGroup = (await r.u53()) || undefined;
 				const end = endGroup !== undefined ? endGroup - 1 : undefined;
 				const frames = await decodeFrameBounds(r, version, startGroup, end);
 				return new SubscribeUpdate({
 					priority,
-					maxAge,
+					maxDelay,
 					startGroup: canonicalStartGroup(version, startGroup, frames.startFrame),
 					endGroup: end,
 					...frames,
@@ -229,10 +232,12 @@ export class SubscribeUpdate {
 export class Subscribe {
 	id: bigint;
 	broadcast: Path.Valid;
+	/** The publisher instance the subscriber expects. Lite-07+. */
+	epoch?: Epoch.Valid;
 	track: string;
 	priority: number;
-	/** Subscriber max latency in milliseconds; zero skips once a newer group is available. */
-	maxAge: number;
+	/** Subscriber max delay in milliseconds; zero skips once a newer group is available. */
+	maxDelay: number;
 
 	startGroup?: number;
 	endGroup?: number;
@@ -253,9 +258,10 @@ export class Subscribe {
 	constructor(props: {
 		id: bigint;
 		broadcast: Path.Valid;
+		epoch?: Epoch.Valid;
 		track: string;
 		priority: number;
-		maxAge?: number;
+		maxDelay?: number;
 		startGroup?: number;
 		endGroup?: number;
 		startFrame?: number;
@@ -263,9 +269,10 @@ export class Subscribe {
 	}) {
 		this.id = props.id;
 		this.broadcast = props.broadcast;
+		this.epoch = props.epoch;
 		this.track = props.track;
 		this.priority = props.priority;
-		this.maxAge = props.maxAge ?? 0;
+		this.maxDelay = props.maxDelay ?? 0;
 		this.startGroup = props.startGroup;
 		this.endGroup = props.endGroup;
 		this.startFrame = props.startFrame ?? 0;
@@ -275,6 +282,7 @@ export class Subscribe {
 	async #encode(w: Writer, version: Version) {
 		await w.u62(this.id);
 		await w.string(Path.encode(this.broadcast));
+		await encodeEpoch(w, version, this.epoch);
 		await w.string(this.track);
 		await w.u8(this.priority);
 
@@ -284,7 +292,7 @@ export class Subscribe {
 				break;
 			default:
 				await padGroupOrder(w, version);
-				await w.u53(this.maxAge);
+				await w.u53(this.maxDelay);
 				await encodeStartGroup(w, version, this.startGroup);
 				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
 				await encodeFrameBounds(w, version, this);
@@ -295,6 +303,7 @@ export class Subscribe {
 	static async #decode(r: Reader, version: Version): Promise<Subscribe> {
 		const id = await r.u62();
 		const broadcast = Path.decode(await r.string());
+		const epoch = await decodeEpoch(r, version);
 		const track = await r.string();
 		const priority = await r.u8();
 
@@ -304,7 +313,7 @@ export class Subscribe {
 				return new Subscribe({ id, broadcast, track, priority });
 			default: {
 				await skipGroupOrder(r, version);
-				const maxAge = await r.u53();
+				const maxDelay = await r.u53();
 				const startGroup = await decodeStartGroup(r, version);
 				const endGroup = (await r.u53()) || undefined;
 				const end = endGroup !== undefined ? endGroup - 1 : undefined;
@@ -312,9 +321,10 @@ export class Subscribe {
 				return new Subscribe({
 					id,
 					broadcast,
+					epoch,
 					track,
 					priority,
-					maxAge,
+					maxDelay,
 					startGroup: canonicalStartGroup(version, startGroup, frames.startFrame),
 					endGroup: end,
 					...frames,
@@ -340,24 +350,24 @@ export class Subscribe {
  */
 export class SubscribeOk {
 	priority: number;
-	/** Accepted subscriber max latency in milliseconds. */
-	maxAge: number;
+	/** Accepted subscriber max delay in milliseconds. */
+	maxDelay: number;
 	startGroup?: number;
 	endGroup?: number;
 
 	constructor({
 		priority = 0,
-		maxAge = 0,
+		maxDelay = 0,
 		startGroup = undefined,
 		endGroup = undefined,
 	}: {
 		priority?: number;
-		maxAge?: number;
+		maxDelay?: number;
 		startGroup?: number;
 		endGroup?: number;
 	}) {
 		this.priority = priority;
-		this.maxAge = maxAge;
+		this.maxDelay = maxDelay;
 		this.startGroup = startGroup;
 		this.endGroup = endGroup;
 	}
@@ -375,7 +385,7 @@ export class SubscribeOk {
 			default:
 				await w.u8(this.priority);
 				await padGroupOrder(w, version);
-				await w.u53(this.maxAge);
+				await w.u53(this.maxDelay);
 				await w.u53(this.startGroup !== undefined ? this.startGroup + 1 : 0);
 				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
 				break;
@@ -384,7 +394,7 @@ export class SubscribeOk {
 
 	static async #decode(version: Version, r: Reader): Promise<SubscribeOk> {
 		let priority: number | undefined;
-		let maxAge: number | undefined;
+		let maxDelay: number | undefined;
 		let startGroup: number | undefined;
 		let endGroup: number | undefined;
 
@@ -398,7 +408,7 @@ export class SubscribeOk {
 			default:
 				priority = await r.u8();
 				await skipGroupOrder(r, version);
-				maxAge = await r.u53();
+				maxDelay = await r.u53();
 				startGroup = await r.u53();
 				endGroup = await r.u53();
 				break;
@@ -406,7 +416,7 @@ export class SubscribeOk {
 
 		return new SubscribeOk({
 			priority,
-			maxAge,
+			maxDelay,
 			startGroup: startGroup !== undefined && startGroup > 0 ? startGroup - 1 : undefined,
 			endGroup: endGroup !== undefined && endGroup > 0 ? endGroup - 1 : undefined,
 		});
@@ -433,18 +443,39 @@ export class SubscribeOk {
 export class SubscribeStart {
 	group: number;
 
-	constructor(group: number) {
+	/**
+	 * The publisher's largest (group, frame) when it answered, or `undefined` for a track
+	 * with nothing yet. Draft-07+ only; not on the wire before, where it decodes as `undefined`.
+	 */
+	largest?: Location;
+
+	constructor(group: number, largest?: Location) {
 		this.group = group;
+		this.largest = largest;
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, version: Version): Promise<void> {
 		return Message.encode(w, async (w) => {
 			await w.u53(this.group);
+			if (!hasLargest(version)) return;
+			// Group + 1, so 0 is a track with nothing yet; the frame follows only otherwise.
+			if (this.largest === undefined) {
+				await w.u53(0);
+			} else {
+				await w.u53(this.largest.group + 1);
+				await w.u53(this.largest.frame);
+			}
 		});
 	}
 
-	static async decode(r: Reader): Promise<SubscribeStart> {
-		return Message.decode(r, async (r) => new SubscribeStart(await r.u53()));
+	static async decode(r: Reader, version: Version): Promise<SubscribeStart> {
+		return Message.decode(r, async (r) => {
+			const group = await r.u53();
+			if (!hasLargest(version)) return new SubscribeStart(group);
+			const largest = await r.u53();
+			if (largest === 0) return new SubscribeStart(group);
+			return new SubscribeStart(group, { group: largest - 1, frame: await r.u53() });
+		});
 	}
 }
 
@@ -557,7 +588,7 @@ export async function encodeSubscribeResponse(w: Writer, resp: SubscribeResponse
 			// Draft-05+: SUBSCRIBE_OK is gone; START/END/DROP carry the resolved range.
 			if ("start" in resp) {
 				await w.u53(0x0);
-				await resp.start.encode(w);
+				await resp.start.encode(w, version);
 			} else if ("end" in resp) {
 				await w.u53(0x1);
 				await resp.end.encode(w, version);
@@ -592,7 +623,7 @@ export async function decodeSubscribeResponse(r: Reader, version: Version): Prom
 			const typ = await r.u53();
 			switch (typ) {
 				case 0x0:
-					return { start: await SubscribeStart.decode(r) };
+					return { start: await SubscribeStart.decode(r, version) };
 				case 0x1:
 					return { end: await SubscribeEnd.decode(r, version) };
 				case 0x2:

@@ -9,19 +9,30 @@ everything it serves on one UDP port and one TCP port. UDP carries QUIC
 HTTP (WebSocket qmux, WHIP and WHEP signaling, HLS, ops), RTMP, and RTMPS.
 Upstream delivers the demux, the responder, and stacks that accept a fed
 socket or stream; `moq-relay` itself serves QUIC, STUN, and HTTP on them,
-and an embedder such as moq.pro's edge wires RTMP and SRT, which the relay
-binary has never spoken. An operator opens 443 twice and is done; a client on
+and an embedder such as moq.pro's edge wires WebRTC, RTMP, and SRT, which the
+relay binary has never spoken. An operator opens 443 twice and is done; a client on
 a network that permits only 443 reaches every protocol; a P2P client names
 the relay as its STUN server and gets the lowest-RTT reflexive candidate
 there is.
 
-The demux is a `moq-sock` primitive over the tokio backends. `moq-uring`'s
-reuseport shard groups are a later consumer, not a blocker.
+The demux is a `moq-sock` primitive over the tokio backends.
+[`moq-uring`'s workers](/quest/m2/uring-demux.md) host it later; that is not
+a blocker for this line.
 
 ## Plan
 
-Deferred to m2 in the 2026-09-30 audit: the consumer is moq.pro's edge, SRT is
-blocked upstream on srt-tokio, and STUN's only consumer is P2P, also m2.
+Deferred to m2 in the 2026-09-30 audit: the consumer is moq.pro's edge, and
+STUN's only consumer is P2P, now in m3. SRT is not blocked upstream:
+[SRT demux](/quest/m2/one-port/srt-demux.md) decided on 2026-09-30 to drive
+sans-io `srt-protocol` directly instead of waiting on a socket abstraction in
+srt-tokio.
+
+Decided 2026-10-05, from moq.pro's audit: `moq-rtc` taking a fed socket
+([rtc-feed](/quest/m2/one-port/rtc-feed.md)) and the steering filter
+([shard steering](/quest/m2/one-port/shard-steering.md)) join this line, and
+[the io_uring demux](/quest/m2/uring-demux.md) is planned beside it, all in
+m2 rather than m3, since moq.pro's edge cutover and its uring rollout wait on
+them.
 
 ### Classifying a datagram
 
@@ -48,9 +59,12 @@ One OS socket, or one shard of a reuseport group, is read by the demux and
 fanned into virtual sockets, one per stack, each with the `AsyncUdpSocket`
 shape. Sends go straight to the shared socket, so every stack answers from
 the same address and port. noq accepts the virtual socket through
-`new_with_abstract_socket`. `moq-rtc`'s `Mux` already demuxes STUN by ufrag internally and only
-needs a `feed` entry beside its `recv_from` loop. `srt-tokio` accepts a
-`tokio::net::UdpSocket` but no abstraction; that is its own quest.
+`new_with_abstract_socket`. `moq-rtc`'s `Mux` already demuxes STUN by ufrag
+internally and takes a fed socket in
+[WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md). SRT skips `srt-tokio`,
+which accepts a `tokio::net::UdpSocket` but no abstraction, and feeds
+datagrams to sans-io `srt-protocol` as [SRT demux](/quest/m2/one-port/srt-demux.md)
+decided.
 
 ### STUN
 
@@ -76,11 +90,14 @@ pre-accepted streams can stand behind.
 
 ## Required
 
-- [UDP demux](/quest/m2/one-port/udp-demux.md) - one socket carries QUIC and STUN answers, with greasing off and a WebRTC hook for embedders
+- [Steer only QUIC by connection ID](/quest/m2/one-port/shard-steering.md) - QUIC-bit greasing goes off and the reuseport filter leaves RTP, SRT, and STUN flows on one shard each
+- [UDP demux](/quest/m2/one-port/udp-demux.md) - one socket carries QUIC and STUN answers, with a WebRTC hook for embedders
+- [WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md) - `moq-rtc` serves WHIP and WHEP media from the WebRTC hook and pins ICE tuples
 - [TCP acceptor](/quest/m2/one-port/tcp-demux.md) - one listener carries TLS-terminated HTTP, RTMP, and RTMPS
-- [SRT on the shared socket](/quest/m2/one-port/srt-demux.md) - srt-tokio accepts a virtual socket and the flow table pins its 4-tuples
+- [SRT on the shared socket](/quest/m2/one-port/srt-demux.md) - moq-srt drives `srt-protocol` on demuxed packets and the flow table pins its 4-tuples
 
 ## Related
 
-- [P2P](/quest/m2/p2p/README.md) - the client that names the relay as its STUN server
-- [Stream sessions](/quest/m2/uring-tcp/README.md) - the io_uring workers that would host the same demux later
+- [P2P](/quest/m3/p2p/README.md) - the client that names the relay as its STUN server
+- [One port on the io_uring workers](/quest/m2/uring-demux.md) - the io_uring workers host the UDP demux
+- [Stream sessions](/quest/m2/uring-tcp/README.md) - the io_uring workers that would host the TCP acceptor later

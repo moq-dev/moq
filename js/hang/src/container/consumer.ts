@@ -3,9 +3,10 @@ import * as Moq from "@moq/net";
 import { Effect, type Getter, type GetterInit, getter, Once, Signal } from "@moq/signals";
 
 import type { Format } from "./format";
+import { Jitter } from "./jitter";
 import type { BufferedRanges, Frame } from "./types";
 
-/** Options for constructing a {@link Consumer}. */
+/** Options for constructing a {@link Consumer}; the obsolete `maxAge` prop is refused. */
 export interface ConsumerProps {
 	/** The container format used to decode each MoQ frame. */
 	format: Format;
@@ -14,10 +15,10 @@ export interface ConsumerProps {
 	 *
 	 * Measured as the span from the oldest buffered frame to the newest, so it bounds how long a
 	 * late or missing group is waited for. The local half of the subscription's
-	 * `maxAge`; both measure the same budget, one on the wire and one as frames are read.
+	 * `maxDelay`; both measure the same budget, one on the wire and one as frames are read.
 	 */
 	// Read-only: a Getter (e.g. another component's output) is accepted directly.
-	maxAge?: GetterInit<Time.Milli>;
+	maxDelay?: GetterInit<Time.Milli>;
 }
 
 interface Group {
@@ -46,8 +47,8 @@ const CONTIGUITY_TOLERANCE = Moq.Time.Micro.fromMilli(1 as Time.Milli);
  * durations and base-decode-times. Undefined on either side means continuity can't be proven.
  *
  * The bound is one-sided (upper only) by design: a next start at or before `end` continues the
- * timeline, a start past `end` beyond the tolerance is a gap. A start well before `end` is
- * malformed and aborts the track.
+ * timeline, a start past `end` beyond the tolerance is a gap. Group starts are validated
+ * separately; an overlapping endpoint is not a rewind.
  */
 function ptsContiguous(end: Time.Micro | undefined, nextStart: Time.Micro | undefined): boolean {
 	return end !== undefined && nextStart !== undefined && nextStart <= Moq.Time.Micro.add(end, CONTIGUITY_TOLERANCE);
@@ -66,11 +67,11 @@ function continues(prev: Group, next: Group | undefined): next is Group {
 	);
 }
 
-/** Reads frames from a MoQ track in order, buffering groups and skipping ones that age past `maxAge`. */
+/** Reads frames from a MoQ track in order, buffering groups and skipping ones that fall `maxDelay` behind. */
 export class Consumer {
 	#track: Moq.Track.Subscriber;
 	#format: Format;
-	#maxAge: Getter<Time.Milli>;
+	#maxDelay: Getter<Time.Milli>;
 	#groups: Group[] = [];
 	#active?: number; // the active group sequence number
 	// Presentation end (max PTS + duration) of the group we most recently advanced past, so next()'s
@@ -80,17 +81,19 @@ export class Consumer {
 	// Group of the last frame next() returned, so it can report whether the following result
 	// continues that frame's timeline. Undefined until the first delivery and after a playhead event.
 	#deliveredGroup?: number;
-	// Set whenever the consumer throws content away: a group that aged past `maxAge`,
+	// Set whenever the consumer throws content away: a group that fell `maxDelay` behind,
 	// a group truncated by a decode error. Reported (and
 	// cleared) on the first frame delivered from the next group, which is where the missing span
 	// sits. Only the consumer can know this, which is why next() reports it instead of leaving
 	// callers to guess from group numbers.
 	#gap = false;
-	// The live edge of playback: max delivered timestamp and the group that carried it.
-	#liveEdge?: { group: number; timestamp: Time.Micro };
+	// The first media timestamp of the latest delivered group, and its predecessor's start.
+	// Endpoints and later frames can overlap the next group without moving this floor.
+	#start?: { group: number; timestamp: Time.Micro };
+	#floor?: Time.Micro;
 	// Increments on a declared marker, an unproven delivered hole, and a latency skip.
 	#discontinuity = 0;
-	// A group below the live edge aborts the track.
+	// A group below the previous group start aborts the track.
 	#error?: Error;
 
 	// Wake up the consumer when a new frame is available.
@@ -100,14 +103,25 @@ export class Consumer {
 	/** The time ranges currently buffered and ready to play. */
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
+	#jitter = new Jitter();
+	#spread = new Signal<Time.Milli>(this.#jitter.measured);
+	/**
+	 * How much buffer late arrivals need, measured as frames come off the transport.
+	 *
+	 * The measured term of doc/concept/audio-jitter.md, excluding the codec frame and any advertised
+	 * floor. Starts at the cold-start estimate before any frame arrives.
+	 */
+	readonly spread: Getter<Time.Milli> = this.#spread;
+
 	#signals = new Effect();
 	#closed = new Once<Error | null>();
 
 	/** Start consuming the given track, decoding frames with `props.format`. */
 	constructor(track: Moq.Track.Subscriber, props: ConsumerProps) {
+		if ("maxAge" in props) throw new TypeError("Consumer maxAge is unsupported; use maxDelay");
 		this.#track = track;
 		this.#format = props.format;
-		this.#maxAge = getter(props.maxAge ?? Moq.Time.Milli.zero);
+		this.#maxDelay = getter(props.maxDelay ?? Moq.Time.Milli.zero);
 
 		this.#signals.spawn(this.#run.bind(this));
 		this.#signals.cleanup(() => {
@@ -142,7 +156,7 @@ export class Consumer {
 				// sent newest-first, so the head of a subscription arrives after the live edge it
 				// was served alongside. Audio can place older groups in its timestamp-indexed ring;
 				// video must reject older groups before decode to preserve codec references. How far back one
-				// may be is the subscription's own max age, applied before it ever reaches here.
+				// may be is the subscription's own max delay, applied before it ever reaches here.
 				const group: Group = {
 					consumer,
 					frames: [],
@@ -172,11 +186,19 @@ export class Consumer {
 				const next = await group.consumer.readFrame();
 				if (!next) break;
 				group.empty = false;
+				const arrival = Moq.Time.Milli.now();
 
 				const decoded = this.#format.decode(next.payload);
 
 				for (const sample of decoded) {
 					const marker = this.#format.end?.(sample) !== undefined;
+
+					// Observed here, before any gap handling or age budget: a target derived from
+					// what survives the budget would only ever confirm the budget it was cut to.
+					if (!marker) {
+						this.#jitter.observe(arrival, Moq.Time.Milli.fromMicro(sample.timestamp));
+						this.#spread.set(this.#jitter.measured);
+					}
 					const frame: Frame = {
 						payload: sample.payload,
 						timestamp: sample.timestamp,
@@ -219,9 +241,9 @@ export class Consumer {
 					if (group.consumer.sequence !== this.#active) {
 						// A non-active group can also be too slow to wait for. This runs even when
 						// the group is the delivery head, because that is exactly the stalled case
-						// (#active sits below every buffered group) where the max age budget is
+						// (#active sits below every buffered group) where the max delay budget is
 						// what eventually breaks the stall.
-						this.#checkMaxAge();
+						this.#checkMaxDelay();
 
 						// A newer group reaching back to where the stalled active group has
 						// already presented means we can advance now instead of waiting.
@@ -259,10 +281,10 @@ export class Consumer {
 				// Advance to the next buffered group's actual sequence, but ONLY if it continues this
 				// group's timeline. Some encoders number groups non-sequentially with large gaps (not
 				// +1), so a bare `+= 1` would point #active at a nonexistent sequence and stall next()
-				// until #checkMaxAge skipped it -- every group through the skip path, i.e. constant
+				// until #checkMaxDelay skipped it -- every group through the skip path, i.e. constant
 				// stutter. A real PTS gap is different: an intermediate group may still be in transit,
 				// so fall back to +1 there (next()'s promotion guard fixes it up once a continuous
-				// group arrives) and let #checkMaxAge / #tryDurationSkip skip the gap only once
+				// group arrives) and let #checkMaxDelay / #tryDurationSkip skip the gap only once
 				// age or duration coverage proves it too old.
 				const next = this.#groups[this.#groups.indexOf(group) + 1];
 				this.#active = continues(group, next) ? next.consumer.sequence : group.consumer.sequence + 1;
@@ -295,24 +317,24 @@ export class Consumer {
 	// Frames within a group are consecutive by protocol, so only a group boundary can break it, and
 	// there it comes down to whether anything was dropped in between. Deliberately not derived from
 	// group numbers: they need not be sequential, so adjacency neither proves continuity nor catches
-	// a group the max age check truncated on the way past.
+	// a group the max delay check truncated on the way past.
 	#continuesDelivery(sequence: number): boolean {
 		if (this.#deliveredGroup === undefined) return false;
 		return sequence === this.#deliveredGroup || !this.#gap;
 	}
 
-	#checkMaxAge() {
+	#checkMaxDelay() {
 		if (this.#active === undefined) return;
 
 		let skipped = 0;
 		const start = this.#groups[0]?.consumer.sequence;
 		let hole = false;
 
-		// Keep skipping the oldest group while the buffered span exceeds the max age.
+		// Keep skipping the oldest group while the buffered span exceeds the max delay.
 		// This also handles gaps in group sequence numbers: if #active points to a missing
 		// group, the span proves the missing content is too old to wait for.
 		while (this.#groups.length >= 2) {
-			const threshold = Moq.Time.Micro.fromMilli(this.#maxAge.peek());
+			const threshold = Moq.Time.Micro.fromMilli(this.#maxDelay.peek());
 			const first = this.#groups[0];
 
 			// Check the difference between the earliest and latest known frames.
@@ -386,27 +408,27 @@ export class Consumer {
 		return true;
 	}
 
-	// A group whose media timestamps sit below the live edge earlier groups reached is
+	// A later group whose media timestamps sit below the latest delivered group start is
 	// malformed. Returns true if the track was aborted.
 	#checkMalformed(): void {
-		const live = this.#liveEdge;
-		if (live === undefined) return;
+		const start = this.#start;
+		if (start === undefined) return;
 		for (const group of this.#groups) {
-			if (group.consumer.sequence <= live.group) continue;
-			if (group.minMedia !== undefined && group.minMedia < live.timestamp) {
-				this.#abort(new Error("group timestamp is below the live edge"));
+			if (group.consumer.sequence <= start.group) continue;
+			if (group.minMedia !== undefined && group.minMedia < start.timestamp) {
+				this.#abort(new Error("group timestamp is below the previous group start"));
 				return;
 			}
 		}
 	}
 
 	#abortIfRewound(group: Group, timestamp: Time.Micro): boolean {
-		const live = this.#liveEdge;
-		if (live === undefined) return false;
-		if (group.consumer.sequence <= live.group) return false;
-		if (timestamp >= live.timestamp) return false;
+		const start = this.#start;
+		if (start === undefined) return false;
+		if (group.consumer.sequence <= start.group) return false;
+		if (timestamp >= start.timestamp) return false;
 
-		this.#abort(new Error("group timestamp is below the live edge"));
+		this.#abort(new Error("group timestamp is below the previous group start"));
 		return true;
 	}
 
@@ -424,12 +446,12 @@ export class Consumer {
 	 * the end of that group or, when `end` is present, an exclusive media endpoint carried by a
 	 * legacy marker. The overall result is undefined once closed. When `discontinuity`
 	 * jumps relative to the previous call, re-apply startup delay and skip: it is a playhead
-	 * event, not a decoder flush.
+	 * event, and the next frame may be a delta that continues the interrupted group.
 	 *
 	 * `continuous` is true when this result picks up exactly where the previous frame left off, so
 	 * the span between them can be treated as delivered. It is false on the first frame, after a
 	 * playhead event, and whenever the consumer threw content away to keep up: a slow group skipped
-	 * for the max age, a group truncated by a decode error. Use it rather than comparing group
+	 * for the max delay, a group truncated by a decode error. Use it rather than comparing group
 	 * numbers, which are not required to be sequential: adjacency neither proves the timeline is
 	 * unbroken nor catches a group dropped on the way past.
 	 *
@@ -468,23 +490,23 @@ export class Consumer {
 			// Promote #active to the first buffered group when it continues the timeline we left off at,
 			// when a completed empty group can be walked (empty groups mean nothing), or when the hole
 			// is proven: the head already reaches past where presentation left off by more than the
-			// max age, so anything still missing in between would arrive too old to play. Proving it
-			// here matters: #checkMaxAge would instead drop the head, the very group to play next.
+			// max delay, so anything still missing in between would arrive too old to play. Proving it
+			// here matters: #checkMaxDelay would instead drop the head, the very group to play next.
 			// After track termination no missing group can arrive, so drain across any remaining gap.
-			// Otherwise wait: #checkMaxAge skips once the budget is spent, and #tryDurationSkip once
+			// Otherwise wait: #checkMaxDelay skips once the budget is spent, and #tryDurationSkip once
 			// the duration covers it.
 			if (this.#active !== undefined && this.#groups.length > 0) {
 				const head = this.#groups[0];
 				if (head.consumer.sequence > this.#active) {
 					const contiguous = ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp);
 					const empty = head.empty && head.consumer.done;
-					const maxAge = Moq.Time.Micro.fromMilli(this.#maxAge.peek());
+					const maxDelay = Moq.Time.Micro.fromMilli(this.#maxDelay.peek());
 					const skipHole =
 						head.frames.length > 0 &&
-						(maxAge === 0 ||
+						(maxDelay === 0 ||
 							(this.#presentedEnd !== undefined &&
 								head.latest !== undefined &&
-								head.latest - this.#presentedEnd > maxAge));
+								head.latest - this.#presentedEnd > maxDelay));
 					if (empty || contiguous || skipHole || ended !== undefined) {
 						if ((skipHole || ended !== undefined) && !contiguous && !empty) this.#markPlayhead();
 						if (!contiguous) this.#gap = true;
@@ -504,9 +526,6 @@ export class Consumer {
 					const end = this.#format.end?.(frame);
 					if (end !== undefined) {
 						if (!this.#groups[0].media) this.#markPlayhead();
-						if (this.#liveEdge === undefined || end > this.#liveEdge.timestamp) {
-							this.#liveEdge = { group: seq, timestamp: end };
-						}
 						this.#updateBuffered();
 						return {
 							frame: undefined,
@@ -520,9 +539,14 @@ export class Consumer {
 					if (seq !== this.#deliveredGroup) this.#gap = false;
 					this.#deliveredGroup = seq;
 
-					const live = this.#liveEdge;
-					if (live === undefined || frame.timestamp > live.timestamp) {
-						this.#liveEdge = { group: seq, timestamp: frame.timestamp };
+					if (this.#start === undefined || seq > this.#start.group) {
+						this.#floor = this.#start?.timestamp;
+						this.#start = { group: seq, timestamp: frame.timestamp };
+					}
+					// Delayed history has its own earlier floor; this bound belongs to #start.group.
+					if (seq === this.#start.group && this.#floor !== undefined && frame.timestamp < this.#floor) {
+						this.#abort(new Error("frame timestamp is below the previous group start"));
+						throw this.#error;
 					}
 					this.#updateBuffered();
 					return { frame, group: seq, discontinuity: this.#discontinuity, continuous };
@@ -533,7 +557,7 @@ export class Consumer {
 				// a below-#active group (a backlog group admitted behind the live edge) may
 				// still be downloading when its buffer momentarily drains, and removing it
 				// then silently truncates its tail. #runGroup notifies whenever the head
-				// group gains a frame, so waiting here is woken, and #checkMaxAge bounds
+				// group gains a frame, so waiting here is woken, and #checkMaxDelay bounds
 				// how long a stalled head can hold delivery up.
 				if (this.#groups[0].done) {
 					if (this.#groups[0].consumer.sequence === this.#active) {

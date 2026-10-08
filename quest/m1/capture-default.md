@@ -11,7 +11,10 @@ relay, the language bindings) keep building without it.
 ## Plan
 
 Decided in planning (09-29), after capture-control (#4545) found that
-pre-merge `just check` never runs moq-video's `capture` tests:
+pre-merge `just check` never ran moq-video's `capture` tests. `sh/rs/select.sh`
+now runs `just rs capture-test` when moq-video or moq-audio changes, so this
+is gate cleanup, not a coverage fix (reframed 2026-10-07): one default build
+replaces the special branch.
 
 - **Default-on, keep the flag.** Removing the flag was rejected: consumers
   that don't want device stacks would pay for them.
@@ -25,8 +28,11 @@ pre-merge `just check` never runs moq-video's `capture` tests:
   capture branch in `sh/rs/select.sh`) once default
   `just check` covers it. Keep the platform jobs (`just rs macos`,
   `just rs windows`).
-- Update the Cargo feature comments, moq-cli's `capture` feature (it may
-  become redundant), and `doc/` wherever capture is described as opt-in.
+- Update the Cargo feature comments and `doc/` wherever capture is described
+  as opt-in. moq-cli's `capture` feature stays: the root manifest pins
+  moq-video and moq-audio to `default-features = false` for every workspace
+  consumer, and [Ship capture and playback](/quest/m1/cli-packaging.md) makes
+  it default-on and droppable.
 
 Verify: `just check` on a moq-video or moq-audio change runs the capture
 tests, and a `default-features = false` consumer (for example

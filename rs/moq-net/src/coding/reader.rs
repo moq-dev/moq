@@ -1,7 +1,6 @@
 use std::{
 	cmp,
 	fmt::Debug,
-	io,
 	task::{Context, Poll, ready},
 };
 
@@ -41,17 +40,26 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		}
 	}
 
-	/// Poll for the next message on the stream.
-	pub fn poll_decode<T: Decode<V> + Debug>(&mut self, cx: &mut Context<'_>) -> Poll<Result<T, Error>>
+	/// Poll `decode` against the buffered bytes, reading more until it stops coming up
+	/// short. `consume` drops what it read; otherwise the bytes stay for the next read.
+	fn poll_with<T>(
+		&mut self,
+		cx: &mut Context<'_>,
+		consume: bool,
+		decode: impl Fn(&mut Decoder<'_>) -> Result<T, DecodeError>,
+	) -> Poll<Result<T, Error>>
 	where
-		V: Clone,
+		V: Into<Form> + Copy,
 	{
 		loop {
-			let mut cursor = io::Cursor::new(&self.buffer);
-			match T::decode(&mut cursor, self.version.clone()) {
-				Ok(msg) => {
-					self.buffer.advance(cursor.position() as usize);
-					return Poll::Ready(Ok(msg));
+			let mut r = Decoder::new(&self.buffer, self.version.into());
+			match decode(&mut r) {
+				Ok(value) => {
+					if consume {
+						let used = self.buffer.len() - r.remaining();
+						self.buffer.advance(used);
+					}
+					return Poll::Ready(Ok(value));
 				}
 				// Stream closed while we still need more data.
 				Err(DecodeError::Short) if !ready!(self.poll_read_more(cx))? => {
@@ -63,10 +71,36 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		}
 	}
 
+	/// [`Self::poll_with`], or `None` if the stream closes cleanly before any byte.
+	fn poll_with_maybe<T>(
+		&mut self,
+		cx: &mut Context<'_>,
+		consume: bool,
+		decode: impl Fn(&mut Decoder<'_>) -> Result<T, DecodeError>,
+	) -> Poll<Result<Option<T>, Error>>
+	where
+		V: Into<Form> + Copy,
+	{
+		if !ready!(self.poll_has_more(cx))? {
+			return Poll::Ready(Ok(None));
+		}
+
+		self.poll_with(cx, consume, decode).map_ok(Some)
+	}
+
+	/// Poll for the next message on the stream.
+	pub fn poll_decode<T: Decode<V> + Debug>(&mut self, cx: &mut Context<'_>) -> Poll<Result<T, Error>>
+	where
+		V: Into<Form> + Copy,
+	{
+		let version = self.version;
+		self.poll_with(cx, true, |r| T::decode(r, version))
+	}
+
 	/// Decode the next message from the stream.
 	pub async fn decode<T: Decode<V> + Debug>(&mut self) -> Result<T, Error>
 	where
-		V: Clone,
+		V: Into<Form> + Copy,
 	{
 		std::future::poll_fn(|cx| self.poll_decode(cx)).await
 	}
@@ -74,47 +108,18 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 	/// Poll for the next message unless the stream is closed cleanly first.
 	pub fn poll_decode_maybe<T: Decode<V> + Debug>(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<T>, Error>>
 	where
-		V: Clone,
+		V: Into<Form> + Copy,
 	{
-		if !ready!(self.poll_has_more(cx))? {
-			return Poll::Ready(Ok(None));
-		}
-
-		self.poll_decode(cx).map_ok(Some)
+		let version = self.version;
+		self.poll_with_maybe(cx, true, |r| T::decode(r, version))
 	}
 
 	/// Decode the next message unless the stream is closed.
 	pub async fn decode_maybe<T: Decode<V> + Debug>(&mut self) -> Result<Option<T>, Error>
 	where
-		V: Clone,
+		V: Into<Form> + Copy,
 	{
 		std::future::poll_fn(|cx| self.poll_decode_maybe(cx)).await
-	}
-
-	/// Poll for the next message without consuming it.
-	pub fn poll_decode_peek<T: Decode<V> + Debug>(&mut self, cx: &mut Context<'_>) -> Poll<Result<T, Error>>
-	where
-		V: Clone,
-	{
-		loop {
-			let mut cursor = io::Cursor::new(&self.buffer);
-			match T::decode(&mut cursor, self.version.clone()) {
-				Ok(msg) => return Poll::Ready(Ok(msg)),
-				Err(DecodeError::Short) if !ready!(self.poll_read_more(cx))? => {
-					return Poll::Ready(Err(DecodeError::Short.into()));
-				}
-				Err(DecodeError::Short) => {}
-				Err(e) => return Poll::Ready(Err(e.into())),
-			}
-		}
-	}
-
-	/// Decode the next message from the stream without consuming it.
-	pub async fn decode_peek<T: Decode<V> + Debug>(&mut self) -> Result<T, Error>
-	where
-		V: Clone,
-	{
-		std::future::poll_fn(|cx| self.poll_decode_peek(cx)).await
 	}
 
 	/// Poll for the next message without consuming it unless the stream closes cleanly first.
@@ -123,21 +128,66 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		cx: &mut Context<'_>,
 	) -> Poll<Result<Option<T>, Error>>
 	where
-		V: Clone,
+		V: Into<Form> + Copy,
 	{
-		if !ready!(self.poll_has_more(cx))? {
-			return Poll::Ready(Ok(None));
-		}
-
-		self.poll_decode_peek(cx).map_ok(Some)
+		let version = self.version;
+		self.poll_with_maybe(cx, false, |r| T::decode(r, version))
 	}
 
 	/// Peek the next message unless the stream is closed.
 	pub async fn decode_peek_maybe<T: Decode<V> + Debug>(&mut self) -> Result<Option<T>, Error>
 	where
-		V: Clone,
+		V: Into<Form> + Copy,
 	{
 		std::future::poll_fn(|cx| self.poll_decode_peek_maybe(cx)).await
+	}
+
+	/// Poll for the next varint on the stream.
+	pub fn poll_varint(&mut self, cx: &mut Context<'_>) -> Poll<Result<u64, Error>>
+	where
+		V: Into<Form> + Copy,
+	{
+		self.poll_with(cx, true, |r| r.varint())
+	}
+
+	/// Read the next varint from the stream.
+	pub async fn varint(&mut self) -> Result<u64, Error>
+	where
+		V: Into<Form> + Copy,
+	{
+		std::future::poll_fn(|cx| self.poll_varint(cx)).await
+	}
+
+	/// Poll for the next varint unless the stream is closed cleanly first.
+	pub fn poll_varint_maybe(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<u64>, Error>>
+	where
+		V: Into<Form> + Copy,
+	{
+		self.poll_with_maybe(cx, true, |r| r.varint())
+	}
+
+	/// Read the next varint unless the stream is closed.
+	pub async fn varint_maybe(&mut self) -> Result<Option<u64>, Error>
+	where
+		V: Into<Form> + Copy,
+	{
+		std::future::poll_fn(|cx| self.poll_varint_maybe(cx)).await
+	}
+
+	/// Poll for the next varint without consuming it.
+	pub fn poll_varint_peek(&mut self, cx: &mut Context<'_>) -> Poll<Result<u64, Error>>
+	where
+		V: Into<Form> + Copy,
+	{
+		self.poll_with(cx, false, |r| r.varint())
+	}
+
+	/// Read the next varint without consuming it.
+	pub async fn varint_peek(&mut self) -> Result<u64, Error>
+	where
+		V: Into<Form> + Copy,
+	{
+		std::future::poll_fn(|cx| self.poll_varint_peek(cx)).await
 	}
 
 	/// Poll for the next chunk, draining the reader's internal buffer first.
@@ -213,6 +263,23 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		Poll::Ready(Ok(self.buffer.split_to(size).freeze()))
 	}
 
+	/// Poll to discard `remaining` bytes, counting it down as they arrive. Nothing is
+	/// buffered past what one read brings, so a peer cannot make a skipped payload cost
+	/// memory.
+	pub(crate) fn poll_skip(&mut self, cx: &mut Context<'_>, remaining: &mut usize) -> Poll<Result<(), Error>> {
+		loop {
+			let skipped = self.buffer.len().min(*remaining);
+			self.buffer.advance(skipped);
+			*remaining -= skipped;
+			if *remaining == 0 {
+				return Poll::Ready(Ok(()));
+			}
+			if !ready!(self.poll_read_more(cx))? {
+				return Poll::Ready(Err(DecodeError::Short.into()));
+			}
+		}
+	}
+
 	/// Read exactly the given number of bytes from the stream.
 	pub async fn read_exact(&mut self, size: usize) -> Result<Bytes, Error> {
 		std::future::poll_fn(|cx| self.poll_read_exact(cx, size)).await
@@ -279,7 +346,7 @@ mod tests {
 		stops: Vec<u32>,
 	}
 
-	impl web_transport_trait::poll::RecvStream for StopLog {
+	impl crate::transport::poll::RecvStream for StopLog {
 		type Error = crate::lite::test_transport::SinkError;
 
 		fn poll_read(
@@ -367,10 +434,13 @@ mod tests {
 		let mut group = crate::group::Info { sequence: 0 }.produce();
 		let mut consumer = group.consume();
 		let frame = group
-			.create_frame_owned(crate::frame::Info {
-				size: size as u64,
-				timestamp: crate::Timestamp::ZERO,
-			})
+			.create_frame_owned(
+				crate::frame::Info {
+					size: size as u64,
+					timestamp: Some(crate::Timestamp::ZERO),
+				},
+				&Default::default(),
+			)
 			.unwrap();
 
 		let payload = consumer.next_frame().now_or_never().unwrap().unwrap().unwrap();
@@ -385,7 +455,7 @@ mod tests {
 	#[derive(Default)]
 	struct Chunks(std::collections::VecDeque<&'static [u8]>);
 
-	impl web_transport_trait::poll::RecvStream for Chunks {
+	impl crate::transport::poll::RecvStream for Chunks {
 		type Error = crate::lite::test_transport::SinkError;
 
 		fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
@@ -410,7 +480,30 @@ mod tests {
 		}
 	}
 
-	fn refuses_frame<T: Decode<V> + Debug, V: StreamCodes + Clone>(prefix: &[u8], version: V, oversized: bool) {
+	/// A skipped payload is discarded across reads, leaving what follows it, and a skip
+	/// waiting on more has counted down what it already discarded.
+	#[test]
+	fn skip_discards_across_reads() {
+		let chunks = [b"abc".as_slice(), b"defg", b"hi"];
+		let mut reader = Reader::new(Chunks(chunks.into()), crate::lite::Version::Lite05);
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+
+		let mut remaining = 6;
+		assert!(matches!(reader.poll_skip(&mut cx, &mut remaining), Poll::Ready(Ok(()))));
+		assert_eq!(&reader.read_exact(3).now_or_never().unwrap().unwrap()[..], b"ghi");
+
+		let mut reader = Reader::new(Chunks([b"ab".as_slice(), b"cd"].into()), crate::lite::Version::Lite05);
+		let mut remaining = 5;
+		assert!(reader.poll_skip(&mut cx, &mut remaining).is_pending());
+		assert_eq!(remaining, 1);
+		assert!(reader.buffer.is_empty(), "nothing skipped is kept");
+	}
+
+	fn refuses_frame<T: Decode<V> + Debug, V: StreamCodes + Into<Form> + Copy>(
+		prefix: &[u8],
+		version: V,
+		oversized: bool,
+	) {
 		let mut reader = Reader::new(Chunks([b"following bytes".as_slice()].into()), version);
 		reader.buffer.extend_from_slice(prefix);
 		let mut cx = Context::from_waker(std::task::Waker::noop());
@@ -465,7 +558,7 @@ mod tests {
 		for version in [lite::Version::Lite01, lite::Version::Lite02] {
 			for size in [65537u64, (1 << 40) + 1] {
 				let mut prefix = vec![0x20];
-				size.encode(&mut prefix, version).unwrap();
+				Encoder::new(&mut prefix, version.into()).varint(size).unwrap();
 				refuses_frame::<setup::Client, _>(&prefix, Version::Lite(version), true);
 				prefix[0] = 0x21;
 				refuses_frame::<setup::Server, _>(&prefix, Version::Lite(version), true);
@@ -473,7 +566,7 @@ mod tests {
 		}
 		for version in [lite::Version::Lite05, lite::Version::Lite06] {
 			let mut prefix = Vec::new();
-			65537u64.encode(&mut prefix, version).unwrap();
+			Encoder::new(&mut prefix, version.into()).varint(65537).unwrap();
 			refuses_frame::<lite::Setup, _>(&prefix, version, true);
 		}
 	}
@@ -483,22 +576,22 @@ mod tests {
 		use crate::{Version, lite, setup};
 		for version in [lite::Version::Lite01, lite::Version::Lite02] {
 			let mut prefix = vec![0x20];
-			65536u64.encode(&mut prefix, version).unwrap();
+			Encoder::new(&mut prefix, version.into()).varint(65536).unwrap();
 			assert!(matches!(
-				setup::Client::decode(&mut prefix.as_slice(), Version::Lite(version)),
+				setup::Client::decode_slice(&prefix, Version::Lite(version)),
 				Err(DecodeError::Short)
 			));
 			prefix[0] = 0x21;
 			assert!(matches!(
-				setup::Server::decode(&mut prefix.as_slice(), Version::Lite(version)),
+				setup::Server::decode_slice(&prefix, Version::Lite(version)),
 				Err(DecodeError::Short)
 			));
 		}
 		for version in [lite::Version::Lite05, lite::Version::Lite06] {
 			let mut prefix = Vec::new();
-			65536u64.encode(&mut prefix, version).unwrap();
+			Encoder::new(&mut prefix, version.into()).varint(65536).unwrap();
 			assert!(matches!(
-				lite::Setup::decode(&mut prefix.as_slice(), version),
+				lite::Setup::decode_slice(&prefix, version),
 				Err(DecodeError::Short)
 			));
 		}
@@ -563,7 +656,7 @@ mod tests {
 		waiter: kio::Waiter,
 	}
 
-	impl web_transport_trait::poll::RecvStream for Burst {
+	impl crate::transport::poll::RecvStream for Burst {
 		type Error = crate::lite::test_transport::SinkError;
 
 		fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {

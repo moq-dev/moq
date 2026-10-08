@@ -1,7 +1,7 @@
 {
 	"name": "@moq/watch",
 	"type": "module",
-	"version": "0.6.1",
+	"version": "0.6.2",
 	"jsr": false,
 	"description": "Watch Media over QUIC broadcasts",
 	"license": "(MIT OR Apache-2.0)",
@@ -43,6 +43,6 @@
 		"esbuild": "^0.28.2",
 		"rimraf": "^6.1.3",
 		"typescript": "7.0.2",
-		"vite": "^8.3.0"
+		"vite": "^8.3.1"
 	}
 }

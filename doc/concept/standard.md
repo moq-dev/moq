@@ -26,10 +26,25 @@ maps everything else to "not supported" or a harmless equivalent. The
 [moq-lite page](/concept/moq-lite#what-moq-lite-leaves-out) lists the
 differences.
 
+On draft 19 and later, a requester can FIN its request stream while its
+subscription or namespace advertisement stays active. Cancellation uses
+`RESET_STREAM` or `STOP_SENDING`. Subscription `REQUEST_UPDATE` can change
+subscriber priority; other changes are refused with `NOT_SUPPORTED` and end
+the subscription with `UPDATE_FAILED`. Drafts 17 and 18 retain FIN cancellation.
+In Rust, drafts 14 to 16 apply a subscription's `SUBSCRIBE_UPDATE`
+(`REQUEST_UPDATE` on draft 16) the same way. Draft 14 sends no answer and has
+no `UPDATE_FAILED`, so a refused update ends the subscription with
+`INTERNAL_ERROR`. On those drafts an update to any other request is ignored.
+
 Rust and JavaScript subscribers accept object extension blocks up to 64 KiB.
 This is an implementation limit, not a limit in the IETF draft. A larger
 declared block stops its subgroup stream with `MALFORMED_TRACK` before reading
 the block; other groups and the session stay open.
+
+Rust and JavaScript read an incoming padding stream (draft-18 and later) to
+the end and discard it, without sending `STOP_SENDING`. A unidirectional stream type the negotiated draft does not
+define, or a `SUBGROUP_HEADER` type it marks invalid, closes the session with
+`PROTOCOL_VIOLATION`, as the draft requires.
 
 An IETF publisher declares the track's default priority in `SUBSCRIBE_OK` or
 `PUBLISH` when that draft carries track properties. Groups without a priority
@@ -41,17 +56,28 @@ on moq-lite.
 On drafts 14–19, the Rust publisher answers a standalone `FETCH` within one
 group from the cache. A relay fetches a missing group upstream with a `FETCH`
 of that one whole group, and an upstream refusal is the refusal the fetcher
-sees. A range touching several groups is refused with `NOT_SUPPORTED`, as is
+sees. Once its last reader leaves, the relay cancels the upstream fetch, even
+before `FETCH_OK`, and aborts an incomplete group instead of caching it as whole.
+Drafts 14–16 use `FETCH_CANCEL`; drafts 17–19 stop and reset the request stream.
+A range touching several groups is refused with `NOT_SUPPORTED`, as is
 any `FETCH` on draft-20 and later, which moved the range into
-`LOCATION_FILTER`. A standalone `FETCH`
-carries no timestamps, since no `SUBSCRIBE_OK` declared a timescale for it.
+`LOCATION_FILTER`. A standalone `FETCH` keeps each object's Timestamp, in the
+units the track's `SUBSCRIBE_OK` declares. `FETCH_OK` doesn't declare them yet,
+so a reader that never subscribed reads the objects untimed.
+
+A track whose `SUBSCRIBE_OK` declares no `TIMESCALE` is untimed: its objects
+arrive untimed, and an object-scope Timescale or a Timestamp on them is
+ignored, as on imquic's LOC objects. A relay serves such a track downstream
+untimed, without a `TIMESCALE` of its own. On a track that declares one, an
+object without a Timestamp is malformed. Drafts 14–16 can't carry `TIMESCALE`,
+so every track there is untimed.
 
 On drafts 14–19, the Rust publisher also serves relative and absolute joining
 `FETCH` requests for `NextObject` subscriptions, for the subscription group's
 saved prefix only, while the subscription delivers later objects. One reaching
 back to earlier groups is refused with `NOT_SUPPORTED`. Draft-20 uses
 subscription fills instead. JavaScript
-publishing does not yet serve `FETCH`;
+publishing refuses every `FETCH` with `NOT_SUPPORTED`;
 Rust and JavaScript subscribers request unfiltered delivery on older drafts
 because they do not issue joining fetches. Other publishers may replay a cached
 backlog for that filter; selecting the next group instead would leave static
@@ -60,7 +86,10 @@ tracks waiting for a group that never arrives.
 A moq-lite datagram is a single-frame group, so on moq-transport it travels
 as an `OBJECT_DATAGRAM` at object 0 whose Group ID is the sequence, and a relay
 forwards it without renumbering. A datagram carrying any other Object ID, or a
-status other than Normal, is dropped. JavaScript does not yet carry datagrams
+status other than Normal, is dropped. Datagrams are never fetchable: a fetch
+object flagged as a datagram fails only that fetch, as `NotFetchable`, and a
+relay answers its own downstream FETCH with `DOES_NOT_EXIST`, or `NOT_FETCHABLE`
+to a moq-lite-07 peer. JavaScript does not yet carry datagrams
 on moq-transport.
 
 A client may present one credential in its `SETUP` with the `AUTHORIZATION
@@ -70,7 +99,18 @@ and bytes to the application unverified; a relay forwards them to its
 [auth server](/bin/relay/auth#the-contract). An alias reference (`DELETE`,
 `USE_ALIAS`) closes the session with `PROTOCOL_VIOLATION`, a structure that
 does not decode with `KEY_VALUE_FORMATTING_ERROR`, and a second token is
-refused.
+refused. An `AUTHORIZATION TOKEN` parameter on a request is read and ignored:
+the session's credential is what authorizes it.
+
+A legal request that is not served is refused on its own with `NOT_SUPPORTED`,
+leaving the session open: a `SUBSCRIBE` with `FORWARD=0`, a `SUBSCRIBE` or
+`FETCH` carrying Range Filters (no `MAX_FILTER_RANGES` is advertised), a
+`FETCH` carrying `FILL_TIMEOUT` (Timed-Out gaps are not written),
+`TRACK_STATUS`, `SUBSCRIBE_TRACKS` (draft-18 and later), and the `FETCH`
+forms above. `NEW_GROUP_REQUEST` is ignored, as
+the draft allows a publisher without dynamic groups to do. A parameter the
+negotiated draft does not define still closes the session with
+`PROTOCOL_VIOLATION`, as the draft requires.
 
 Several project drafts extend the IETF wire without breaking it, since `SETUP`
 ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
@@ -82,13 +122,39 @@ before a `SUBSCRIBE_NAMESPACE` is caught up, and
 [moq-e2ee](/draft/moq-e2ee) is not a transport extension: it encrypts application
 payloads so relays still forward named tracks they cannot read.
 
+### Deliberate deviations
+
+These three answers differ from the draft on purpose. They are the
+product's model, not bugs, and the relay does not change them.
+
+- **One publisher per path.** A broadcast path names one piece of content, so a
+  `SUBSCRIBE` goes to one route, not to every publisher whose namespace matches.
+  [Draft 16 §8.5](https://www.ietf.org/archive/id/draft-ietf-moq-transport-16.html#section-8.5)
+  requires the relay to send that `SUBSCRIBE` to all matching publishers. See
+  [publisher epochs](/concept/moq-lite#publisher-epochs) for how that one route
+  is chosen.
+- **Unknown object properties are dropped.**
+  [Draft 18 §2.5](https://www.ietf.org/archive/id/draft-ietf-moq-transport-18.html#section-2.5)
+  says a relay that does not understand a property still forwards and caches
+  it. The model keeps a payload and a timestamp, and
+  [leaves other per-object metadata out](/concept/moq-lite#what-moq-lite-leaves-out),
+  so a property it does not understand stops at the session that delivered it.
+- **`SUBSCRIBE_OK` before an old source answers.** moq-lite 01 through 04 have
+  no track stream, so the relay cannot learn from that source whether the track
+  exists before answering. A moq-transport subscriber gets `SUBSCRIBE_OK`
+  before the source answers, and a missing track ends as `PUBLISH_DONE`, not
+  `REQUEST_ERROR`.
+  [Draft 16 §8.4](https://www.ietf.org/archive/id/draft-ietf-moq-transport-16.html#section-8.4)
+  requires an established upstream subscription before `SUBSCRIBE_OK`. From
+  moq-lite 05 the track stream answers first, and a missing track is refused
+  before `SUBSCRIBE_OK`.
+
 ## MSF
 
 The MoQ Streaming Format is a catalog, playing the role HLS playlists and SDP
 do elsewhere. It overlaps with the [hang catalog](/concept/hang) and the two
 will likely converge. The tools track draft-01 and hide the version on the
 wire, so draft-00 catalogs still decode and init data always arrives inline.
-The `stalled` rendition hint is shared between the two formats.
 
 ## LOC
 

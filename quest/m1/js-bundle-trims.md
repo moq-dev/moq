@@ -5,9 +5,6 @@
 The watch and publish elements stop shipping bytes a consumer's bundler
 cannot remove. Measured in bundled, minified form (2026-09-26):
 
-- The inlined worklets are built unminified, and code inside a string can't
-  be minified by the consumer. The watch render worklet is 25.9 KB against
-  10.1 KB minified, and the publish capture worklet is 4.7 KB against 2.3 KB.
 - `bowser` costs 37 KB for three checks in
   `js/net/src/connection/browser.ts`: the WebKit engine, iOS, and Firefox 153
   or later.
@@ -18,12 +15,12 @@ cannot remove. Measured in bundled, minified form (2026-09-26):
 
 ## Plan
 
-Decided in planning: all four trims are in scope. Mediabunny is its own
+Decided in planning: all three trims are in scope (worklet minification
+landed with the strict-CSP worklet change). Mediabunny is its own
 quest.
 
 Guidance:
 
-- Worklets: minify them in `js/common/vite-plugin-worklet.ts`.
 - bowser: write a small user-agent check with unit tests over real UA
   strings. Chrome's UA contains `AppleWebKit` too, and iPadOS Safari reports
   macOS, so test Chrome and Edge on macOS, iPadOS Safari, iOS Chrome, and
@@ -43,5 +40,4 @@ Guidance:
 
 ## Related
 
-- [Publish lazy file source](/quest/m1/publish-lazy-file.md) - the largest JS saving, landed separately
 - [Size report](/quest/m1/size-report.md) - tracks these entries nightly

@@ -7,7 +7,8 @@
 # TSDuck + custom analyzer in compliance.py against the capture. The point is to
 # tell whether what the subscriber emits is something an Integrated
 # Receiver/Decoder would accept, and to quantify where it diverges (the exporter
-# is VBR, emits no null packets, and paces PCR per frame).
+# pads to the recorded multiplex rate but never delays media to fit it, and puts a
+# PCR every 25 ms of media time).
 #
 # Modes:
 #   ./run.sh                       # generate a clip, round-trip it, analyze
@@ -160,7 +161,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 require_tools() {
     local missing=() t
-    for t in tsp tsanalyze python3; do
+    for t in tsp tsanalyze tstables python3; do
         have "$t" || missing+=("$t")
     done
     # ffmpeg + cargo are only needed for the round-trip, not for --analyze-only.
@@ -174,7 +175,7 @@ require_tools() {
     fi
     if [[ ${#missing[@]} -gt 0 ]]; then
         echo "error: missing required tools: ${missing[*]}" >&2
-        echo "  TSDuck (tsp, tsanalyze) is required; install from https://tsduck.io" >&2
+        echo "  TSDuck (tsp, tsanalyze, tstables) is required; install from https://tsduck.io" >&2
         exit 1
     fi
 }

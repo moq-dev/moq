@@ -2,7 +2,7 @@
 
 use std::{sync::Arc, task::Poll, time::Duration};
 
-use web_transport_trait::Stats as _;
+use crate::transport::Stats as _;
 
 use crate::{Error, SessionError, Version, bandwidth, goaway};
 
@@ -33,6 +33,31 @@ struct StatsState {
 	sample: Stats,
 	/// A handle read the stats since the last sample: keep sampling.
 	demanded: bool,
+}
+
+/// How [`Session::setup`] learns that the peer's SETUP arrived.
+#[derive(Clone)]
+pub(crate) enum Setup {
+	/// The handshake read it before the session started.
+	Read,
+	/// The lite driver records it from the peer's Setup Stream.
+	Lite(crate::lite::PeerSetup),
+	/// The moq-transport driver records it from the peer's SETUP stream.
+	Ietf(crate::ietf::peer::PeerSetup),
+	/// The version carries no SETUP from the peer.
+	Never,
+}
+
+impl Setup {
+	/// `Ready(true)` once the SETUP arrived, `Ready(false)` if it never will.
+	fn poll(&self, waiter: &kio::Waiter) -> Poll<bool> {
+		match self {
+			Self::Read => Poll::Ready(true),
+			Self::Lite(setup) => setup.poll_seen(waiter).map(|()| true),
+			Self::Ietf(setup) => setup.poll_seen(waiter).map(|()| true),
+			Self::Never => Poll::Ready(false),
+		}
+	}
 }
 
 /// A snapshot of connection statistics for a [`Session`].
@@ -101,6 +126,7 @@ pub struct Session {
 	send_bandwidth: Option<bandwidth::Consumer>,
 	recv_bandwidth: Option<bandwidth::Consumer>,
 	goaway: Arc<goaway::Handle>,
+	setup: Setup,
 }
 
 impl Session {
@@ -170,8 +196,7 @@ impl Session {
 	/// is still live never finishes, so finish or abort tracks before closing.
 	///
 	/// Both protocols withdraw this session's announcements and wait for their
-	/// delivery. IETF drafts 14 through 16 send withdrawals without waiting, and
-	/// IETF media streams are not drained yet.
+	/// delivery. IETF drafts 14 through 16 send withdrawals without waiting.
 	pub async fn close(self) -> Result<(), Error> {
 		if let Ok(mut close) = self.close.write()
 			&& close.is_none()
@@ -217,6 +242,35 @@ impl Session {
 		}
 	}
 
+	/// Wait for the peer's SETUP, or return the session's close reason.
+	///
+	/// Resolves when the peer's SETUP arrives. This crate's servers send it only once
+	/// they admit the client, but neither protocol requires that ordering, so another
+	/// server may send SETUP and still refuse the session afterward.
+	/// [`crate::Client::connect`] returns before the SETUP on moq-lite-05+ and
+	/// moq-transport draft 17+. Older versions read it during the handshake and resolve
+	/// at once, except moq-lite-03 and -04, which carry none and return
+	/// [`Error::Unsupported`]. A session that already closed returns its close reason.
+	pub async fn setup(&self) -> Result<(), Error> {
+		kio::wait(|waiter| {
+			match self.closed.poll(waiter, |state| match &**state {
+				Some(ended) => Poll::Ready(ended.err.clone()),
+				None => Poll::Pending,
+			}) {
+				Poll::Ready(Ok(err)) => return Poll::Ready(Err(err)),
+				// The driver was dropped before it could observe the close.
+				Poll::Ready(Err(_)) => return Poll::Ready(Err(Error::Cancel)),
+				Poll::Pending => {}
+			}
+			match self.setup.poll(waiter) {
+				Poll::Ready(true) => Poll::Ready(Ok(())),
+				Poll::Ready(false) => Poll::Ready(Err(Error::Unsupported)),
+				Poll::Pending => Poll::Pending,
+			}
+		})
+		.await
+	}
+
 	/// Drain the peer gracefully: the handle for sending this session's single
 	/// GOAWAY.
 	///
@@ -256,6 +310,7 @@ impl Session {
 		recv_bandwidth: Option<bandwidth::Consumer>,
 		protocol: crate::driver::Protocol<S>,
 		goaway: goaway::Handle,
+		setup: Setup,
 	) -> (Self, crate::Driver<S>)
 	where
 		S: crate::transport::poll::Session,
@@ -279,6 +334,7 @@ impl Session {
 		});
 
 		let supervisor = Supervisor {
+			local_close: protocol.local_close(),
 			runtime: runtime.clone(),
 			closed_watch: session.clone(),
 			session,
@@ -298,6 +354,7 @@ impl Session {
 			send_bandwidth,
 			recv_bandwidth,
 			goaway: Arc::new(goaway),
+			setup,
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),
@@ -319,6 +376,7 @@ impl Session {
 ///
 /// Finishes once the transport reports closed; everything else is moot then.
 pub(crate) struct Supervisor<S> {
+	local_close: Arc<std::sync::atomic::AtomicBool>,
 	runtime: crate::time::Clock,
 	session: S,
 	// A dedicated clone for the close watch, since each pending poll operation
@@ -343,7 +401,7 @@ enum Drain {
 	/// Nobody asked for one.
 	Idle,
 	/// Requested: close once drained, or at the deadline.
-	Waiting(crate::runtime::Deadline<crate::time::Clock>),
+	Waiting(crate::time::Deadline),
 	/// The drain closed the transport, with this outcome.
 	Done(Result<(), Error>),
 }
@@ -352,9 +410,7 @@ enum SamplerMode {
 	/// Nobody wants stats; sampling is paused.
 	Idle,
 	/// Someone does; sample when the deadline elapses.
-	Polling {
-		deadline: crate::runtime::Deadline<crate::time::Clock>,
-	},
+	Polling { deadline: crate::time::Deadline },
 }
 
 impl<S: crate::transport::poll::Session> Supervisor<S> {
@@ -395,9 +451,12 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 			}) {
 				Poll::Ready(Ok(request)) => (request, false),
 				Poll::Ready(Err(last)) => (
-					last.clone().unwrap_or_else(|| Close::Abort {
-						code: SessionError::Cancel.to_code(),
-						reason: "dropped".to_string(),
+					last.clone().unwrap_or_else(|| {
+						self.local_close.store(true, std::sync::atomic::Ordering::Relaxed);
+						Close::Abort {
+							code: SessionError::Cancel.to_code(),
+							reason: "dropped".to_string(),
+						}
 					}),
 					true,
 				),
@@ -411,7 +470,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 				}
 				Close::Drain => {
 					if !draining {
-						self.drain = Drain::Waiting(crate::runtime::Deadline::after(&self.runtime, CLOSE_TIMEOUT));
+						self.drain = Drain::Waiting(crate::time::Deadline::after(&self.runtime, CLOSE_TIMEOUT));
 					}
 					// No handle is left to abort.
 					if last {
@@ -443,6 +502,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 			false if deadline.poll(waiter).is_ready() => Err(Error::Timeout),
 			false => return false,
 		};
+		self.local_close.store(true, std::sync::atomic::Ordering::Relaxed);
 		self.session.close(SessionError::Cancel.to_code(), "");
 		self.drain = Drain::Done(res);
 		// The transport is closed, so no later request can change anything.
@@ -465,7 +525,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 		stats.demanded = false;
 		drop(stats);
 		self.mode = SamplerMode::Polling {
-			deadline: crate::runtime::Deadline::after(&self.runtime, Self::POLL_INTERVAL),
+			deadline: crate::time::Deadline::after(&self.runtime, Self::POLL_INTERVAL),
 		};
 	}
 

@@ -36,6 +36,35 @@ struct State<E: CatalogExt> {
 	/// Whether the clock's mapping is settled: set by [`Config::with_clock`] or placed by an
 	/// importer's first timestamp. Until then [`Producer::anchor`] may still place it.
 	anchored: bool,
+
+	/// Holds estimate-driven publishes to one per [`ESTIMATE_WINDOW`].
+	estimates: Throttle,
+}
+
+/// How often a rising `jitter` or `delay` estimate may republish the catalog. Each republish makes
+/// every viewer update every media subscription, and an overloaded publisher's estimate rises a
+/// millisecond at a time.
+const ESTIMATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The window an estimate-driven publish opens (see [`Guard::commit_estimate`]).
+///
+/// No timer: a held estimate goes out on the first observation after the window ends, so the
+/// catalog needs no runtime. If media stops, so does the estimate it would carry.
+#[derive(Default)]
+struct Throttle {
+	/// When the last publish carrying an estimate went out.
+	last: Option<web_async::time::Instant>,
+	/// An estimate is in the catalog but not yet on the wire.
+	pending: bool,
+}
+
+impl Throttle {
+	/// A publish is going out: any held estimate rides it and opens a new window.
+	fn fold(&mut self) {
+		if std::mem::take(&mut self.pending) {
+			self.last = Some(web_async::time::Instant::now());
+		}
+	}
 }
 
 /// Take the shared state, ignoring a poisoned lock.
@@ -71,16 +100,18 @@ struct Reservations {
 	published: bool,
 }
 
-/// The built-in catalog's enrollment in the broadcast timeline.
+/// The built-in catalog's own timeline, enrolled with the first media track.
+#[derive(Default)]
 struct CatalogTimeline {
-	recorder: crate::timeline::Recorder,
+	recorder: Option<crate::timeline::Recorder>,
 	last_sequence: Option<u64>,
 }
 
 impl CatalogTimeline {
-	/// Report a newly published plaintext catalog group once.
+	/// Report a newly published plaintext catalog group once. Each catalog group is one complete
+	/// snapshot, so it finishes as soon as it is reported.
 	fn record(&mut self, track: &moq_net::track::Producer) {
-		let Some(sequence) = track.latest() else {
+		let (Some(recorder), Some(sequence)) = (self.recorder.as_mut(), track.latest()) else {
 			return;
 		};
 		if self.last_sequence == Some(sequence) {
@@ -88,7 +119,12 @@ impl CatalogTimeline {
 		}
 
 		self.last_sequence = Some(sequence);
-		self.recorder.record(sequence, moq_net::Timestamp::now(), true);
+		recorder.frame(
+			hang::timeline::Position::group(sequence),
+			moq_net::Timestamp::now(),
+			true,
+		);
+		recorder.finish_group(sequence);
 	}
 }
 
@@ -171,10 +207,11 @@ pub struct Producer<E: CatalogExt = ()> {
 
 	current: Arc<Mutex<State<E>>>,
 
-	/// The broadcast's timeline: the shared boundary list every enrolled track's groups map
-	/// onto, and the track those segment records are published on. See
-	/// [`timeline`](Self::timeline).
-	timeline: crate::timeline::Producer,
+	/// The broadcast's per-track timelines. See [`timeline`](Self::timeline).
+	timeline: crate::timeline::Timelines,
+	/// How each media track's timeline is cut. The catalog's own uses a zero minimum.
+	/// See [`Config::with_timeline`].
+	cutting: crate::timeline::Config,
 	/// Retention override for the media tracks minted under this catalog, or `None` to keep
 	/// hang's default. Fixed at construction, so every clone and every
 	/// [`Reserved`](super::Reserved) mints tracks under one policy. See
@@ -195,6 +232,7 @@ impl<E: CatalogExt> Clone for Producer<E> {
 			outputs: self.outputs.clone(),
 			current: self.current.clone(),
 			timeline: self.timeline.clone(),
+			cutting: self.cutting.clone(),
 			max_age: self.max_age,
 			bandwidth: self.bandwidth.clone(),
 			baseline: self.baseline.clone(),
@@ -248,8 +286,9 @@ impl<E: CatalogExt> Config<E> {
 	///
 	/// The clock's wall mapping is advertised at the catalog root and fixed for the broadcast.
 	/// Without this, the catalog starts a fresh clock, and a container importer (fMP4, MPEG-TS,
-	/// FLV, MKV) re-anchors it on its first timestamp, before writing any frame, so the stream's own
-	/// timestamps map to the arrival time. Pass one whose PTS zero names the content's real start
+	/// FLV, MKV) anchors it on its first frame's timestamp, so the stream's own timestamps map to
+	/// the arrival time. The importer withholds the catalog until then, so its first snapshot
+	/// already carries the anchored clock. Pass one whose PTS zero names the content's real start
 	/// when importing a recording.
 	pub fn with_clock(mut self, clock: crate::Clock) -> Self {
 		self.clock = Some(clock);
@@ -284,7 +323,7 @@ impl<E: CatalogExt> Config<E> {
 		self
 	}
 
-	/// Pace the broadcast's timeline with `timeline`.
+	/// Cut each media track's timeline with `timeline`; the catalog's own always uses a zero minimum.
 	pub fn with_timeline(mut self, timeline: crate::timeline::Config) -> Self {
 		self.timeline = timeline;
 		self
@@ -313,12 +352,9 @@ impl<E: CatalogExt> Producer<E> {
 		json_config.compression = moq_json::Compression::Deflate;
 		let hangz = moq_json::snapshot::Producer::new(hangz_track, json_config);
 
-		let timeline = crate::timeline::Producer::new(broadcast, config.timeline);
+		let timeline = crate::timeline::Timelines::new(broadcast);
 		#[allow(clippy::arc_with_non_send_sync)]
-		let catalog_timeline = Arc::new(Mutex::new(CatalogTimeline {
-			recorder: timeline.track(hang::Catalog::DEFAULT_NAME),
-			last_sequence: None,
-		}));
+		let catalog_timeline = Arc::new(Mutex::new(CatalogTimeline::default()));
 
 		// The broadcast clock is advertised at the catalog root from the first snapshot,
 		// independently of any archive timeline: a live-only publisher exposes its mapping
@@ -347,8 +383,10 @@ impl<E: CatalogExt> Producer<E> {
 				closed: None,
 				clock,
 				anchored,
+				estimates: Throttle::default(),
 			})),
 			timeline,
+			cutting: config.timeline,
 			max_age: config.max_age,
 			bandwidth: config.bandwidth,
 			baseline: Default::default(),
@@ -440,7 +478,10 @@ impl<E: CatalogExt> Producer<E> {
 	///
 	/// Container importers publish their stream's timestamps verbatim and call this before
 	/// writing each frame: the first call places the wall mapping so `pts` is live on arrival,
-	/// and every later call, from any track or importer sharing this catalog, is a no-op.
+	/// and every later call, from any track or importer sharing this catalog, is a no-op. An
+	/// importer holds its initial reservation until this first call, so a catalog it feeds is
+	/// first published on the anchored clock. One already published by another producer still
+	/// moves here.
 	pub(crate) fn anchor(&mut self, pts: moq_net::Timestamp) -> crate::Result<()> {
 		if take(&self.current).anchored {
 			return Ok(());
@@ -592,6 +633,7 @@ impl<E: CatalogExt> Producer<E> {
 			}
 			r.pending = false;
 			r.published = true;
+			state.estimates.fold();
 			state.catalog.clone()
 		};
 		if let Err(err) = self.outputs.emit(&catalog) {
@@ -602,11 +644,10 @@ impl<E: CatalogExt> Producer<E> {
 	}
 
 	/// Build the media [`container::Producer`](crate::container::Producer) for `track`,
-	/// enrolling it in the broadcast's timeline so its groups are indexed into the aligned
-	/// segments.
+	/// enrolling it in the broadcast's timelines so its groups are indexed.
 	///
-	/// The broadcast's one timeline track is created (and advertised in the catalog's root
-	/// `archive` entry) on first use; see [`timeline`](crate::timeline) for the whole model.
+	/// The track's timeline track is created and advertised in the catalog's root `archive`
+	/// entry; see [`timeline`](crate::timeline) for the whole model.
 	pub(super) fn media<C, R>(
 		&self,
 		track: moq_net::track::Producer,
@@ -657,33 +698,43 @@ impl<E: CatalogExt> Producer<E> {
 		self.bandwidth.clone()
 	}
 
-	/// Enroll `track` in the broadcast's timeline, advertising the timeline in the catalog's
-	/// root section the first time.
+	/// Enroll `track` in the broadcast's timelines, advertising its timeline in the catalog's
+	/// root section with the next catalog change. The first enrollment also enrolls the catalog
+	/// itself.
 	///
 	/// The role-specific track constructors call this for you. fMP4 passthrough calls it directly
 	/// because it writes groups by hand instead of using a [`container::Producer`](crate::container::Producer).
 	pub(crate) fn enroll(&mut self, track: &str) -> crate::Result<crate::timeline::Recorder> {
-		let recorder = self.timeline.pacing_track(track)?;
-
-		let section = self.timeline.section();
-		let mut catalog = self.modify()?;
-		if catalog.archive.is_none() {
-			catalog.archive = Some(section);
+		let recorder = self.timeline.track(track, self.cutting.clone())?;
+		{
+			let mut catalog = self.outputs.catalog_timeline.lock().unwrap();
+			if catalog.recorder.is_none() {
+				// Sparse data: a catalog may not change again, so each group is its own record.
+				let cutting = self.cutting.clone().with_duration_min(std::time::Duration::ZERO);
+				catalog.recorder = Some(self.timeline.track(hang::Catalog::DEFAULT_NAME, cutting)?);
+			}
 		}
-		catalog.commit()?;
+
+		// Staged without publishing: the entry the track belongs to commits it, so no consumer sees a
+		// catalog advertising a timeline before its rendition.
+		let section = self.timeline.section();
+		let mut state = take(&self.current);
+		if let Some(err) = &state.closed {
+			return Err(err.clone());
+		}
+		match &mut state.catalog.archive {
+			Some(archive) => archive.timelines = section.timelines,
+			None => state.catalog.archive = Some(section),
+		}
 
 		Ok(recorder)
 	}
 
-	/// The broadcast's [`timeline::Producer`](crate::timeline::Producer): its segment index.
+	/// The broadcast's [`Timelines`](crate::timeline::Timelines): each enrolled track's index.
 	///
-	/// The MoQ track behind it is created (and advertised in the catalog's root `archive`
-	/// entry) when the first media track enrolls, so reading this costs nothing on a
-	/// broadcast that never segments. Use it to declare boundaries
-	/// ([`cut`](crate::timeline::Producer::cut)) or to hold publishing back while tracks
-	/// enroll ([`reserve`](crate::timeline::Producer::reserve), the timeline's counterpart to
-	/// this producer's own [`reserve`](Self::reserve)).
-	pub fn timeline(&self) -> crate::timeline::Producer {
+	/// A track's timeline is created (and advertised in the catalog's root `archive` entry) when
+	/// it enrolls, so reading this costs nothing on a broadcast that never enrolls one.
+	pub fn timeline(&self) -> crate::timeline::Timelines {
 		self.timeline.clone()
 	}
 
@@ -771,12 +822,14 @@ impl<E: CatalogExt> Producer<E> {
 	}
 
 	/// Finish publishing to this catalog.
+	///
+	/// An estimate rise still held by the once-a-second limit is not published: media has ended.
 	pub fn finish(&mut self) -> crate::Result<()> {
 		take(&self.current).closed = Some(moq_net::Error::Closed.into());
 		self.outputs.hang.finish()?;
 		self.outputs.hangz.finish()?;
 		self.outputs.msf_track.finish()?;
-		self.timeline.finish()?;
+		self.timeline.finish();
 		Ok(())
 	}
 }
@@ -827,7 +880,32 @@ impl<E: CatalogExt> Guard<'_, E> {
 			r.published = true;
 		}
 
-		self.outputs.emit(&self.state.catalog)
+		// Folded only once it is on the wire, so a failed emit leaves the estimate held.
+		self.outputs.emit(&self.state.catalog)?;
+		self.state.estimates.fold();
+		Ok(())
+	}
+
+	/// Publish an estimate-driven edit, at most once per [`ESTIMATE_WINDOW`] when `throttle` is set.
+	///
+	/// The first estimate publishes at once. Later ones inside the window stay in the catalog and go
+	/// out with the first call after the window ends, which an unchanged estimate makes too, or with
+	/// any [`commit`](Self::commit) before then. Without `throttle` it publishes at once, still
+	/// opening a window.
+	pub(super) fn commit_estimate(mut self, throttle: bool) -> crate::Result<()> {
+		if std::mem::take(&mut self.updated) {
+			self.state.estimates.pending = true;
+		}
+		let estimates = &self.state.estimates;
+		if !estimates.pending {
+			return Ok(());
+		}
+		let now = web_async::time::Instant::now();
+		if throttle && estimates.last.is_some_and(|last| now < last + ESTIMATE_WINDOW) {
+			return Ok(());
+		}
+		self.updated = true;
+		self.publish()
 	}
 
 	/// Release a name taken by [`Producer::acquire`], along with the entry it owns.
@@ -971,7 +1049,6 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
 		track.height = config.coded_height;
 		track.framerate = config.framerate;
 		track.bitrate = config.bitrate;
-		track.stalled = config.stalled;
 		track.init_data = init_data;
 		track.render_group = Some(1);
 		track.alt_group = if has_multiple_video { Some(1) } else { None };
@@ -1038,15 +1115,14 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		// Pacing enrollment is what mints the timeline track; a passive one publishes none.
-		catalog.timeline().pacing_track("video").unwrap();
+		let _recorder = catalog.timeline().track("video", Default::default()).unwrap();
 
 		let consumer = broadcast.consume();
 		for name in [
 			hang::Catalog::DEFAULT_NAME,
 			hang::Catalog::COMPRESSED_NAME,
 			moq_msf::DEFAULT_NAME,
-			hang::timeline::DEFAULT_NAME,
+			"video.timeline.z",
 		] {
 			let track = consumer.track(name).expect("track");
 			let info = track.query().await.expect("info");
@@ -1074,11 +1150,11 @@ mod test {
 
 		let info = catalog.track_info(hang::catalog::PRIORITY.video);
 		assert_eq!(info.max_age, Some(std::time::Duration::from_secs(3)));
-		assert_eq!(info.timescale, hang::container::TIMESCALE);
+		assert_eq!(info.timescale, Some(hang::container::TIMESCALE));
 
 		let at = info.with_timescale(moq_net::Timescale::MILLI);
 		assert_eq!(at.max_age, Some(std::time::Duration::from_secs(3)));
-		assert_eq!(at.timescale, moq_net::Timescale::MILLI);
+		assert_eq!(at.timescale, Some(moq_net::Timescale::MILLI));
 
 		// Every handle mints under the same policy, whatever order it was taken in: the codec
 		// paths hold a reservation and the container paths hold a clone.
@@ -1262,7 +1338,7 @@ mod test {
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 
 		// Something else already took the name the timeline track wants.
-		let _taken = broadcast.create_track(hang::timeline::DEFAULT_NAME, None).unwrap();
+		let _taken = broadcast.create_track("video0.timeline.z", None).unwrap();
 		assert!(catalog.enroll("video0").is_err());
 	}
 
@@ -1274,10 +1350,15 @@ mod test {
 		// A broadcast that never segments never advertises an archive.
 		assert_eq!(catalog.snapshot().archive, None);
 		let _recorder = catalog.enroll("video0").unwrap();
+		let archive = catalog
+			.snapshot()
+			.archive
+			.expect("the root archive advertises the timelines");
+		assert_eq!(archive, catalog.timeline().section());
 		assert_eq!(
-			catalog.snapshot().archive,
-			Some(catalog.timeline().section()),
-			"the root archive should advertise the timeline track"
+			archive.timelines.keys().collect::<Vec<_>>(),
+			vec!["catalog.json", "video0"],
+			"the catalog indexes itself alongside its first media track"
 		);
 	}
 
@@ -1490,7 +1571,6 @@ mod test {
 		video_config.coded_width = Some(1280);
 		video_config.coded_height = Some(720);
 		video_config.bitrate = Some(6_000_000);
-		video_config.stalled = Some(true);
 		video_config.framerate = Some(30.0);
 		video_config.container = Container::Legacy;
 
@@ -1521,7 +1601,6 @@ mod test {
 		assert_eq!(video.height, Some(720));
 		assert_eq!(video.framerate, Some(30.0));
 		assert_eq!(video.bitrate, Some(6_000_000));
-		assert_eq!(video.stalled, Some(true));
 		assert!(video.init_data.is_none());
 		// H.264 may carry B-frames, so SAP starting type is 2 (leading pictures allowed).
 		assert_eq!(video.max_grp_sap_starting_type, Some(2));
@@ -1762,5 +1841,184 @@ mod test {
 		let video = &msf.tracks[0];
 		assert_eq!(video.max_grp_sap_starting_type, None);
 		assert_eq!(video.max_obj_sap_starting_type, None);
+	}
+
+	/// A catalog with live video renditions named `names`, each already set.
+	fn estimating(names: &[&str]) -> (moq_net::broadcast::Producer, Producer, Vec<super::super::VideoTrack>) {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let reserved = catalog.reserve();
+		let renditions = names
+			.iter()
+			.map(|name| {
+				let mut rendition = reserved.init::<VideoConfig>(*name).unwrap();
+				rendition.set(VideoConfig::new(hang::catalog::VideoCodec::VP8)).unwrap();
+				rendition
+			})
+			.collect();
+		drop(reserved);
+		(broadcast, catalog, renditions)
+	}
+
+	fn jitter(ms: u64) -> super::super::Estimate {
+		super::super::Estimate::default().with_jitter(std::time::Duration::from_millis(ms))
+	}
+
+	/// How many catalogs have gone out on the wire.
+	fn sent(catalog: &Producer) -> Option<u64> {
+		catalog.outputs.hang_track.latest()
+	}
+
+	/// The catalog a viewer joining now receives.
+	fn wire(catalog: &Producer) -> Catalog<()> {
+		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang.consume());
+		match consumer.poll_next(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(Some(catalog))) => catalog,
+			_ => panic!("a published catalog"),
+		}
+	}
+
+	fn wire_jitter(catalog: &Producer, name: &str) -> Option<std::time::Duration> {
+		wire(catalog).video.renditions[name].jitter
+	}
+
+	/// A rising estimate publishes at once, then coalesces until an observation after the window,
+	/// which carries the latest value. Regression: every rise republished the catalog.
+	#[tokio::test(start_paused = true)]
+	async fn estimate_rises_publish_at_the_leading_edge_and_coalesce() {
+		let (_broadcast, catalog, mut renditions) = estimating(&["v"]);
+		let v = &mut renditions[0];
+		let initial = sent(&catalog);
+
+		v.estimate(jitter(1)).unwrap();
+		let leading = sent(&catalog);
+		assert_ne!(leading, initial, "the first rise publishes at once");
+		assert_eq!(wire_jitter(&catalog, "v"), Some(std::time::Duration::from_millis(1)));
+
+		for ms in 2..=17 {
+			tokio::time::advance(std::time::Duration::from_millis(50)).await;
+			v.estimate(jitter(ms)).unwrap();
+		}
+		assert_eq!(sent(&catalog), leading, "rises inside the window are held");
+		assert_eq!(
+			catalog.snapshot().video.renditions["v"].jitter,
+			Some(std::time::Duration::from_millis(17)),
+			"the held value is already in the catalog"
+		);
+
+		// No timer: the window ending publishes nothing until the next observation.
+		tokio::time::advance(std::time::Duration::from_millis(200)).await;
+		assert_eq!(sent(&catalog), leading);
+		v.estimate(jitter(17)).unwrap();
+		let trailing = sent(&catalog);
+		assert_ne!(trailing, leading, "an unchanged observation releases the held rise");
+		assert_eq!(wire_jitter(&catalog, "v"), Some(std::time::Duration::from_millis(17)));
+
+		// Nothing is held, so later observations publish nothing.
+		tokio::time::advance(std::time::Duration::from_secs(2)).await;
+		v.estimate(jitter(17)).unwrap();
+		assert_eq!(sent(&catalog), trailing);
+
+		// A rise a window after the trailing publish is a new leading edge.
+		v.estimate(jitter(18)).unwrap();
+		assert_ne!(sent(&catalog), trailing);
+		assert_eq!(wire_jitter(&catalog, "v"), Some(std::time::Duration::from_millis(18)));
+	}
+
+	/// A structural edit never waits, carries the held estimate, and opens a new window.
+	#[tokio::test(start_paused = true)]
+	async fn structural_edit_folds_a_held_estimate() {
+		let (_broadcast, mut catalog, mut renditions) = estimating(&["v"]);
+		let v = &mut renditions[0];
+		v.estimate(jitter(1)).unwrap();
+		tokio::time::advance(std::time::Duration::from_millis(100)).await;
+		v.estimate(jitter(2)).unwrap();
+		let held = sent(&catalog);
+
+		catalog
+			.mutate(|catalog| {
+				catalog.video.display = Some(hang::catalog::Display {
+					width: 1280,
+					height: 720,
+				})
+			})
+			.unwrap();
+		let folded = sent(&catalog);
+		assert_ne!(folded, held, "a structural edit publishes at once");
+		assert_eq!(wire_jitter(&catalog, "v"), Some(std::time::Duration::from_millis(2)));
+
+		// The fold opened a window: the next rise inside it is held, and nothing is left to flush.
+		tokio::time::advance(std::time::Duration::from_millis(950)).await;
+		v.estimate(jitter(3)).unwrap();
+		assert_eq!(sent(&catalog), folded);
+		tokio::time::advance(std::time::Duration::from_millis(50)).await;
+		v.estimate(jitter(3)).unwrap();
+		assert_ne!(sent(&catalog), folded);
+		assert_eq!(wire_jitter(&catalog, "v"), Some(std::time::Duration::from_millis(3)));
+	}
+
+	/// The window is the catalog's, so a delay rise on one track waits behind a jitter rise on
+	/// another, and any track's next observation releases it.
+	#[tokio::test(start_paused = true)]
+	async fn estimate_window_is_shared_across_renditions() {
+		let (_broadcast, catalog, mut renditions) = estimating(&["a", "b"]);
+		let [a, b] = renditions.as_mut_slice() else {
+			unreachable!()
+		};
+		a.estimate(jitter(1)).unwrap();
+		let leading = sent(&catalog);
+		b.estimate(super::super::Estimate::default().with_delay(std::time::Duration::from_millis(7)))
+			.unwrap();
+		assert_eq!(sent(&catalog), leading);
+
+		tokio::time::advance(std::time::Duration::from_secs(1)).await;
+		a.estimate(jitter(1)).unwrap();
+		assert_ne!(sent(&catalog), leading);
+		let snapshot = wire(&catalog);
+		assert_eq!(
+			snapshot.video.renditions["b"].delay,
+			Some(std::time::Duration::from_millis(7))
+		);
+	}
+
+	/// Bitrate and framerate are already measured per second, so a new value never waits, but it
+	/// still opens a window for the jitter it carries.
+	#[tokio::test(start_paused = true)]
+	async fn a_bitrate_estimate_publishes_immediately() {
+		let (_broadcast, catalog, mut renditions) = estimating(&["v"]);
+		let v = &mut renditions[0];
+		v.estimate(jitter(1).with_bitrate(1_000_000)).unwrap();
+		let first = sent(&catalog);
+		v.estimate(jitter(2).with_bitrate(1_000_000)).unwrap();
+		assert_eq!(sent(&catalog), first, "the bitrate publish opened a window");
+
+		tokio::time::advance(std::time::Duration::from_millis(10)).await;
+		v.estimate(jitter(3).with_bitrate(2_000_000)).unwrap();
+		assert_ne!(sent(&catalog), first);
+		let snapshot = wire(&catalog);
+		assert_eq!(snapshot.video.renditions["v"].bitrate, Some(2_000_000));
+		assert_eq!(
+			snapshot.video.renditions["v"].jitter,
+			Some(std::time::Duration::from_millis(3))
+		);
+	}
+
+	/// A rise while the initial catalog is reserved is held by the gate, goes out with the first
+	/// snapshot, and that snapshot opens the window.
+	#[tokio::test(start_paused = true)]
+	async fn estimate_rise_waits_for_the_reservation_gate() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let reserved = catalog.reserve();
+		let mut v = reserved.init::<VideoConfig>("v").unwrap();
+		v.set(VideoConfig::new(hang::catalog::VideoCodec::VP8)).unwrap();
+		v.estimate(jitter(1)).unwrap();
+		assert_eq!(sent(&catalog), None, "the gate withholds the rise");
+
+		drop(reserved);
+		assert_eq!(sent(&catalog), Some(0));
+		assert_eq!(wire_jitter(&catalog, "v"), Some(std::time::Duration::from_millis(1)));
+		v.estimate(jitter(2)).unwrap();
+		assert_eq!(sent(&catalog), Some(0), "the gated publish opened a window");
 	}
 }

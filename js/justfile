@@ -18,10 +18,14 @@ default:
 # `common/deps.ts` runs first and cheaply: bundlers resolve an undeclared
 # workspace import through hoisting, so nothing else in `check` notices one.
 # doc/ is in scope, so the binding pages' stats fields are checked here too.
+#
+# No package reads `import.meta.env`, so no app environment variable can reach a
+# bundle through one: a bare reference makes Vite inline every `VITE_*` value.
 
 # Lint, type-check, biome-format, and build all packages.
 check:
     python3 ../sh/rs/stats-docs.py
+    ! grep -rn --include='*.ts' --include='*.tsx' --exclude-dir=node_modules --exclude-dir=dist 'import\.meta\.env' .
     bun install --frozen-lockfile
     bun common/deps.ts
     bun run --filter='*' --elide-lines=0 check
@@ -40,13 +44,28 @@ fix:
 # Run all unit tests.
 test:
     bun install --frozen-lockfile
-    bun test common/declarations.test.ts common/deps.test.ts
+    bun test common/declarations.test.ts common/deps.test.ts common/worklet.test.ts
     bun run --filter='*' --elide-lines=0 test
 
 # Run one net benchmark: broadcasts, forward, reader, frames, track, varint, or lite-varint.
 bench name:
     bun install --frozen-lockfile
     bun net/bench/{{ name }}.ts
+
+# Sweep catalog estimate publishes and subscribe updates over tracks x viewers.
+catalog-bench:
+    bun install --frozen-lockfile
+    bun publish/bench/catalog.ts
+
+# Time Effect create and close, which pays for the creation stack its diagnostics print.
+signals-bench:
+    bun install --frozen-lockfile
+    bun signals/bench/effect.ts
+
+# Bundle the worklets with Vite, webpack, esbuild, and Bun, and load them in Chromium, with and
+# without a strict CSP. Manual only: it installs webpack and launches a browser.
+worklet-matrix:
+    bun common/worklet-matrix.ts
 
 # Build all packages.
 build:

@@ -60,15 +60,43 @@ order PTS 0, 120, 40, 80) loses nothing on a clean path. It must pass before
 the hold is deleted. Rerun the #4613 netem rig (10% loss, 120 s) and
 compare with #4618's numbers.
 
+Decided in the 2026-10-05 audit: TS export rewind folds in here, since
+#4645's jitter generations already keep the clock through a skipped group and
+flag a PCR break only on a declared restart. What it still owes is the
+backwards-time check: timestamps restarting within one broadcast are a
+publisher bug (a name always means the same content), so the export fails
+with an error rather than rewinding. The only input timestamp is the frame's
+PTS, which legally moves backwards in decode order with B-frames (0, 120, 40,
+80 ms), and the authored DTS cannot show a reset since `author_dts` clamps
+every backwards candidate to `prev + 1`. So the check runs on PTS before that
+clamp and is group-aware: a frame whose PTS is below the largest PTS of the
+track's previous group is a reset. Test: a source whose timestamps restart at
+zero after 10 s fails the export, while a B-frame sequence and open-GOP
+leading pictures are still accepted.
+
+#4645 also completes [TS byte schedule](/quest/m1/tstd/byte-schedule.md);
+delete both quests in it. It targets the retiring line branch, so retarget it
+to `main` once the line (#4640) lands, and merge `main` in.
+
 Update `doc/bin/cli.md` and the `moq export ts` examples.
 
+Promote `tstd` in `test/ts/compliance.py` from shape to hard, so `just test
+ts` fails a round-trip the T-STD model rejects; it reports only until then.
+
 Public API: `ts::Export` takes the delay in place of its max age and loses the
-hold; breaking, on `dev`. Wire:
-none.
+hold; breaking. `Export::stats` already returns `ts::stats::Export`, the
+per-stream rows, so the release-clock counters (`dropped`, `drift`,
+`out_of_tolerance`) become fields on it rather than a new `ts::export::Stats`
+(decided in the 2026-10-05 audit). `stats::Log` reads an export through
+`From<Export> for Snapshot`, which drops anything but the rows, so `Log` must
+report the new counters too, or `moq subscribe` never logs them. Wire: none.
+
+## Closes
+
+- [#4767](https://github.com/moq-dev/moq/issues/4767) - TS export rewinds its clock on every generation change
 
 ## Related
 
 - [FLV export delay](/quest/m1/flv-export-delay.md) - adopts the release stage
 - [MKV export delay](/quest/m1/mkv-export-delay.md) - adopts the release stage
 - [TS byte schedule](/quest/m1/tstd/byte-schedule.md) - uses this delay as its mux-ahead buffer delay
-- [Plan: max-delay](/quest/m1/plan-max-delay.md) - whether `max_age` becomes `max_delay` everywhere else

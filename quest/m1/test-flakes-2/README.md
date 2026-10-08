@@ -24,23 +24,15 @@ Rules every child keeps:
   clock, make the timers mockable or move the test off real sockets.
 
 This README's own work, after the children: run `just check --all` several
-times on a loaded machine, as the first round did.
+times on a loaded machine, as the first round did. moq-tokio's
+`a_subscription_cut_by_the_publisher_disconnecting_does_not_end_clean` is a
+known exception, tracked by [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md).
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [moq-cli tests on a paused clock](/quest/m1/test-flakes-2/cli-paused-clock.md) - the fetch timeout and completion tests stop racing wall-clock budgets
-- [Subscription cut by disconnect](/quest/m1/test-flakes-2/subscription-cut.md) - a publisher disconnect never ends a subscription clean
-- [Broadcast race](/quest/m1/test-flakes-2/broadcast-race.md) - the QUIC-wins race test binds no shared port and has a deterministic winner
 - [Media late join](/quest/m1/test-flakes-2/media-late-join.md) - `just test media` late join stays within one GOP, or the regression is fixed
-- [Shaper virtual time](/quest/m1/test-flakes-2/shaper-virtual-time.md) - `moq-shaper` tests judge seeded decisions on paused time, not on wall-clock delivery under load
-- [Scoped WARN capture](/quest/m1/test-flakes-2/warn-capture.md) - the drop-unfinished tests count only their own WARNs
-- [moq-mux debounce clock](/quest/m1/test-flakes-2/mux-debounce-clock.md) - the TS export debounce test advances on the paused clock
-- [js/publish audio clock](/quest/m1/test-flakes-2/publish-audio-clock.md) - the audio encoder delay test runs on mock time
-- [WebSocket paused TLS dial](/quest/m1/test-flakes-2/websocket-paused-tls.md) - the fixed-address WebSocket tests stop pausing the clock over a real dial
-
-## Related
-
-- [Archive enrollment](/quest/m1/archive/enrollment-flake.md) - the same
-  kind of flake on the archive line, where its test lives
+- [Import catalog finish](/quest/m1/test-flakes-2/import-catalog-finish.md) - `moq-cli`'s subprocess EOF catalog-finish test holds up under load with event-based fixture coordination
+- [Relay restart rebind](/quest/m1/test-flakes-2/relay-restart-rebind.md) - the crash drill restarts on its original UDP address under concurrent load
+- [Impaired handshake](/quest/m1/test-flakes-2/impaired-handshake.md) - the impaired cluster drills' clients never time out while connecting

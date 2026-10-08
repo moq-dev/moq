@@ -80,6 +80,12 @@ pub struct Policy {
 	/// What a session presenting a verified certificate is granted, rooted at `/`;
 	/// empty refuses it.
 	pub mtls: Permissions,
+	/// Mark every session presenting a verified certificate as a cluster
+	/// [peer](Grant::peer), for a mesh whose relays dial each other with mTLS.
+	pub mtls_peer: bool,
+	/// Mark every certificate's peer as [upstream](Grant::upstream) too. Requires
+	/// [`mtls_peer`](Self::mtls_peer).
+	pub mtls_upstream: bool,
 	/// The tier stamped on every grant.
 	pub tier: Option<String>,
 	/// How often the relay re-checks each grant; `None` never re-checks. The contract
@@ -87,6 +93,8 @@ pub struct Policy {
 	pub revalidate: Option<Duration>,
 	/// How long a grant with no bound of its own lasts: an anonymous session, a token
 	/// without `exp`, a certificate without one. `None` leaves those unbounded.
+	/// A bound past the system clock's range is refused by [`Server::new`], and by
+	/// [`decide`](Self::decide) for each session it would bound.
 	pub expires: Option<Duration>,
 	/// Live session caps.
 	pub limits: Limits,
@@ -122,6 +130,8 @@ pub enum Refusal {
 	UnsupportedToken(u64),
 	#[error("both a JWT and a client certificate were presented; present one")]
 	TokenAndCertificate,
+	#[error("the policy's grant bound reaches past the system clock's range")]
+	ExpiresOutOfRange,
 }
 
 impl Policy {
@@ -131,7 +141,7 @@ impl Policy {
 		if jwt.is_some() && request.tls.is_some() {
 			return Err(Refusal::TokenAndCertificate);
 		}
-		let (permissions, expires) = if let Some(jwt) = jwt {
+		let (permissions, expires, certificate) = if let Some(jwt) = jwt {
 			let claims = self.verify(jwt).await?;
 			let permissions = claims.authorize(&request.path).map_err(|err| match err {
 				crate::Error::RootMismatch(path) => Refusal::RootMismatch {
@@ -141,23 +151,29 @@ impl Policy {
 				crate::Error::NoAccess(path) => Refusal::NoAccess { path },
 				other => Refusal::InvalidToken(other.to_string()),
 			})?;
-			(permissions, claims.expires)
+			(permissions, claims.expires, false)
 		} else if let Some(peer) = &request.tls {
 			if self.mtls.is_empty() {
 				return Err(Refusal::NoMtlsGrant);
 			}
-			(authorize(&self.mtls, &request.path)?, peer.expires)
+			(authorize(&self.mtls, &request.path)?, peer.expires, true)
 		} else {
 			if self.public.is_empty() {
 				return Err(Refusal::NoPublicGrant);
 			}
-			(authorize(&self.public, &request.path)?, None)
+			(authorize(&self.public, &request.path)?, None, false)
 		};
 
 		let mut grant = Grant::new(permissions.publish, permissions.subscribe);
-		grant.expires = expires.or_else(|| self.expires.map(|bound| SystemTime::now() + bound));
+		grant.expires = match (expires, self.expires) {
+			(Some(expires), _) => Some(expires),
+			(None, Some(bound)) => Some(SystemTime::now().checked_add(bound).ok_or(Refusal::ExpiresOutOfRange)?),
+			(None, None) => None,
+		};
 		grant.revalidate = self.revalidate;
 		grant.tier = self.tier.clone();
+		grant.peer = certificate && self.mtls_peer;
+		grant.upstream = certificate && self.mtls_upstream;
 		Ok(grant)
 	}
 
@@ -256,7 +272,7 @@ impl Sessions {
 	fn sweep(&mut self, cadence: Duration) {
 		let now = Instant::now();
 		self.slots
-			.retain(|_, slot| now.saturating_duration_since(slot.seen) < 2 * cadence);
+			.retain(|_, slot| now.saturating_duration_since(slot.seen) < cadence.saturating_mul(2));
 	}
 
 	/// Admit a `connect`, refusing over the cap. A known id refreshes instead.
@@ -323,10 +339,20 @@ pub struct Server {
 
 impl Server {
 	/// A server answering with `policy`, refusing one that asks for a re-check without
-	/// a bound, or caps sessions without the re-check that ages out a dead relay's.
+	/// a bound, bounds grants past the clock's range, caps sessions without the
+	/// re-check that ages out a dead relay's, or marks an upstream that is not a peer.
 	pub fn new(policy: Policy) -> crate::Result<Self> {
+		if policy.mtls_upstream && !policy.mtls_peer {
+			return Err(crate::Error::UpstreamWithoutPeer);
+		}
 		if policy.revalidate.is_some() && policy.expires.is_none() {
 			return Err(crate::Error::UnboundedRevalidate);
+		}
+		if policy
+			.expires
+			.is_some_and(|bound| SystemTime::now().checked_add(bound).is_none())
+		{
+			return Err(crate::Error::ExpiresOutOfRange);
 		}
 		let limited = policy.limits.token.is_some() || policy.limits.remote.is_some();
 		if limited && policy.revalidate.is_none() {
@@ -809,9 +835,50 @@ mod tests {
 		// A certificate without a bound gets none by default, like 0.14.
 		let grant = policy.decide(&with_peer(request("/"), None)).await.unwrap();
 		assert_eq!(grant.expires, None);
+		// A certificate is a client unless the policy says it is a relay.
+		assert!(!grant.peer);
 
 		// The certificate does not stand in for a public grant.
 		assert_eq!(policy.decide(&request("/")).await.unwrap_err(), Refusal::NoPublicGrant);
+	}
+
+	/// `mtls_peer` and `mtls_upstream` mark a certificate's grant, and only a certificate's.
+	#[tokio::test]
+	async fn mtls_peer_marks_only_certificates() {
+		let (dir, key) = key_dir();
+		let policy = Policy {
+			keys: Some(Keys::Dir(dir.path().into())),
+			public: rules(&["**"], &["**"]),
+			mtls: rules(&["**"], &["**"]),
+			mtls_peer: true,
+			..Default::default()
+		};
+		let grant = policy.decide(&with_peer(request("/"), None)).await.unwrap();
+		assert!(grant.peer && !grant.upstream);
+
+		let policy = Policy {
+			mtls_upstream: true,
+			..policy
+		};
+		let grant = policy.decide(&with_peer(request("/"), None)).await.unwrap();
+		assert!(grant.peer && grant.upstream);
+		grant.validate().unwrap();
+		let grant = policy.decide(&request("/")).await.unwrap();
+		assert!(!grant.peer && !grant.upstream);
+		let jwt = sign(&key, "", &["**"], &[], None);
+		let grant = policy.decide(&with_token(request("/"), &jwt)).await.unwrap();
+		assert!(!grant.peer && !grant.upstream);
+	}
+
+	/// An upstream that is not a peer would answer grants every relay refuses.
+	#[test]
+	fn a_server_refuses_an_upstream_that_is_not_a_peer() {
+		let policy = Policy {
+			mtls: rules(&["**"], &["**"]),
+			mtls_upstream: true,
+			..Default::default()
+		};
+		assert!(matches!(Server::new(policy), Err(Error::UpstreamWithoutPeer)));
 	}
 
 	/// A certificate would override a JWT meant to narrow it, and a JWT would narrow or
@@ -968,6 +1035,41 @@ mod tests {
 			..Default::default()
 		};
 		assert!(matches!(Server::new(unbounded), Err(Error::UnboundedRevalidate)));
+	}
+
+	/// Regression: `--expires` past the system clock's range panicked every answer.
+	/// The server refuses it up front, and the policy alone refuses the session
+	/// rather than grant it no bound.
+	#[tokio::test]
+	async fn a_bound_past_the_clock_is_refused() {
+		let endless = Policy {
+			public: rules(&["**"], &["**"]),
+			expires: Some(Duration::MAX),
+			..Default::default()
+		};
+		assert_eq!(
+			endless.decide(&request("/")).await.unwrap_err(),
+			Refusal::ExpiresOutOfRange
+		);
+		assert!(matches!(Server::new(endless), Err(Error::ExpiresOutOfRange)));
+	}
+
+	/// Regression: `--revalidate` near `Duration::MAX` overflowed the two-cadence
+	/// sweep and panicked every answer once a limit kept a session table.
+	#[tokio::test]
+	async fn a_cadence_past_the_clock_keeps_every_slot() {
+		let server = Server::new(Policy {
+			public: rules(&["**"], &["**"]),
+			limits: Limits {
+				token: None,
+				remote: Some(1),
+			},
+			revalidate: Some(Duration::MAX),
+			..limited()
+		})
+		.unwrap();
+		server.answer(&request("/")).await.unwrap();
+		assert_eq!(server.answer(&request("/")).await.unwrap_err(), Refusal::RemoteLimit);
 	}
 
 	/// With no limit to count against, nothing is kept per session, so a relay that

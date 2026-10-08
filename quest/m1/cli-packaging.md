@@ -33,7 +33,10 @@ then fails to open a device is the same gap one layer down.
 Also enable `v4l2` in the Linux ARM release build, so a released binary on a
 Raspberry Pi 4 publishes from `moq import capture` through the V4L2 M2M
 hardware encoder (`rs/moq-video/src/v4l2.rs`, already run on a Pi 4's
-`bcm2835-codec`) with no GStreamer detour. Verify that once on a Pi 4.
+`bcm2835-codec`) with no GStreamer detour. That Pi 4 run covered only
+640x360 once, so the Pi 4 check also covers `set_bitrate` on a running
+encoder (congestion control retunes through it) and 1080p, which codes as
+1088 rows and relies on the compose rectangle to crop back.
 
 Add a board hardware note to `doc/bin/cli.md` next to the capture build
 instructions: Raspberry Pi 5 has no video encoder and Jetson Orin Nano ships
@@ -41,8 +44,17 @@ without NVENC; Pi 4, CM4, Zero 2 W, and Orin NX and above encode. RK3588
 encodes through rkmpp in a vendor kernel, not V4L2, so it stays on the
 `moq-gst` route.
 
+`pipewire` stays off in shipped builds (decided 2026-10-06): it needs
+libpipewire-0.3 to load, the same load-time requirement
+[ALSA](/quest/m1/capture-alsa-link.md) removes.
+
 Decided in the 2026-09-30 audit: the v4l2 encode quest folded in here, since
 its remaining work was one release feature flag and a doc note.
+
+Decided in the 2026-10-06 audit: this does not wait on
+[Capture by default](/quest/m1/capture-default.md). moq-cli's `capture`
+feature enables `moq-video/capture` and `moq-audio/capture` explicitly, so
+making it default-on does not depend on the library defaults.
 
 ## Required
 

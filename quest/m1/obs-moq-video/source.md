@@ -7,7 +7,7 @@ The MoQ source loads and plays supported video without FFmpeg's video libraries 
 ## Plan
 
 - Replace `cpp/obs/src/moq-source.cpp` video decode and conversion with moq-video through the generated C++ package: the moq-ffi video consumer for the CPU path, including frame ownership and cancellation semantics. Support H.264, HEVC, and available AV1 decoding; report unsupported VP8/VP9 explicitly until their follow-up lands.
-- Decode with `MoqVideoDecoderOutput.surface` set: each `MoqVideoDecodedFrame` retains the decoder's surface, `surface()` borrows it (`MoqVideoSurface::PixelBuffer` on macOS) for as long as the frame lives, and `pixels(format)` is the CPU fallback. A platform with no `MoqVideoSurface` variant refuses the opt-in. Hold the frame until OBS's GPU work reading it completes; held frames hold decoder pool slots. This surface is on `dev` only (#4094, renamed in 97575f002).
+- Decode with `MoqVideoDecoderOutput.surface` set: each `MoqVideoDecodedFrame` retains the decoder's surface, `surface()` borrows it (`MoqVideoSurface::PixelBuffer` on macOS) for as long as the frame lives, and `pixels(format)` is the CPU fallback. A platform with no `MoqVideoSurface` variant refuses the opt-in. Hold the frame until OBS's GPU work reading it completes; held frames hold decoder pool slots. This surface is unreleased (#4094, renamed in 97575f002).
 - Implement the macOS presentation probe immediately: retain VideoToolbox PixelBuffer/IOSurface storage, inspect OBS graphics import and rendering support, and convert to OBS's expected color format on the GPU if necessary. Adapt the source render path to import textures on the graphics thread; preserve source timing instead of simply drawing the newest frame. An asynchronous CPU source API alone does not prove native GPU delivery.
 - Bound decoded frames retained by the render thread. On import failure, switch to the existing I420 delivery path and show the reason in Stats. Keep fallback stable for the stream/device configuration rather than retrying every frame; re-probe on a relevant configuration change or restart. Device loss and resize must retire old surfaces only after rendering completes.
 - Preserve timestamps, range/primaries, stride and plane layout, catalog/rendition changes, reconnect, visibility/deactivation behavior, and existing source settings. Carry frame-generation identity so late callbacks cannot display frames from a replaced source.
@@ -16,10 +16,9 @@ The MoQ source loads and plays supported video without FFmpeg's video libraries 
 
 ## Required
 
-- [OBS migration](/quest/m1/cpp/obs.md) - the plugin is on the generated C++ before decode changes
-- dev's decoded-frame surface (#4094, 97575f002) reaches main
+- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the plugin is on the generated C++ before decode changes
 
 ## Related
 
-- [VP8/VP9 decoding](/quest/m1/obs-moq-video/vpx.md) - restores deferred codec coverage independently
+- [VP8/VP9 in OBS](/quest/m1/obs-moq-video/vpx-obs.md) - restores deferred codec coverage once this lands
 - [Audio playback](/quest/m1/obs-moq-video/audio-playback.md) - removes the audio half of the FFmpeg linkage

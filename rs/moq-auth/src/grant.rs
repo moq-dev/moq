@@ -49,6 +49,12 @@ pub struct Grant {
 	/// the cluster elsewhere, not here.
 	#[serde(skip_serializing_if = "std::ops::Not::not")]
 	pub peer: bool,
+
+	/// The cluster peer is upstream: the relay never offers it a route learned
+	/// from another upstream peer, so it never carries traffic between two.
+	/// Requires `peer`.
+	#[serde(skip_serializing_if = "std::ops::Not::not")]
+	pub upstream: bool,
 }
 
 impl Grant {
@@ -61,18 +67,22 @@ impl Grant {
 		}
 	}
 
-	/// Snapshot the expiry on Tokio's clock; one already past is now.
+	/// Snapshot the expiry on Tokio's clock; one already past is now, and one beyond
+	/// the clock's range is never.
 	#[cfg(feature = "tokio")]
 	pub fn deadline(&self) -> Option<tokio::time::Instant> {
 		let remaining = self.expires?.duration_since(SystemTime::now()).unwrap_or_default();
-		Some(tokio::time::Instant::now() + remaining)
+		tokio::time::Instant::now().checked_add(remaining)
 	}
 
-	/// Refuse a grant that admits nothing, asks to be revalidated without a bound or
-	/// at no interval, or has already expired.
+	/// Refuse a grant that admits nothing, marks a non-peer upstream, asks to be
+	/// revalidated without a bound or at no interval, or has already expired.
 	pub fn validate(&self) -> crate::Result<()> {
 		if self.publish.is_empty() && self.subscribe.is_empty() {
 			return Err(crate::Error::UselessGrant);
+		}
+		if self.upstream && !self.peer {
+			return Err(crate::Error::UpstreamWithoutPeer);
 		}
 		if self.revalidate.is_some() && self.expires.is_none() {
 			return Err(crate::Error::UnboundedRevalidate);
@@ -107,12 +117,14 @@ mod tests {
 			revalidate: Some(Duration::from_secs(60)),
 			tier: Some("websocket".into()),
 			peer: true,
+			upstream: true,
 		};
 		let json = serde_json::to_value(&grant).unwrap();
 		assert_eq!(json["expires"], 4_102_444_800_i64);
 		assert_eq!(json["revalidate"], 60);
 		assert_eq!(json["publish"], serde_json::json!(["alice/**"]));
 		assert_eq!(json["peer"], true);
+		assert_eq!(json["upstream"], true);
 		assert_eq!(serde_json::from_value::<Grant>(json).unwrap(), grant);
 	}
 
@@ -129,10 +141,11 @@ mod tests {
 			revalidate: Some(Duration::from_secs(60)),
 			tier: Some("websocket".into()),
 			peer: true,
+			upstream: true,
 		};
 		assert_eq!(
 			serde_json::to_string(&grant).unwrap(),
-			r#"{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","peer":true}"#
+			r#"{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","peer":true,"upstream":true}"#
 		);
 	}
 
@@ -176,6 +189,15 @@ mod tests {
 		assert!(matches!(grant.validate(), Err(crate::Error::ZeroRevalidate)));
 	}
 
+	#[test]
+	fn validate_refuses_an_upstream_that_is_not_a_peer() {
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
+		grant.upstream = true;
+		assert!(matches!(grant.validate(), Err(crate::Error::UpstreamWithoutPeer)));
+		grant.peer = true;
+		grant.validate().unwrap();
+	}
+
 	#[cfg(feature = "tokio")]
 	#[tokio::test(start_paused = true)]
 	async fn deadline_is_the_exact_expiry() {
@@ -194,5 +216,18 @@ mod tests {
 			Some(start),
 			"a past expiry is now, not a grace window"
 		);
+	}
+
+	/// Regression: the furthest `expires` the wire carries overflowed `Instant` on
+	/// clocks with a narrower range than `SystemTime` (macOS) and panicked. Windows'
+	/// `SystemTime` cannot represent it, so the grant does not parse there.
+	#[cfg(all(feature = "tokio", unix))]
+	#[tokio::test(start_paused = true)]
+	async fn deadline_past_the_clock_is_never() {
+		let start = tokio::time::Instant::now();
+		let grant: Grant = serde_json::from_str(r#"{"publish":["**"],"expires":9223372036854775807}"#).unwrap();
+		// Linux's clock reaches that far; macOS's does not, which reads as no expiry.
+		let deadline = grant.deadline();
+		assert!(deadline.is_none_or(|at| at > start + Duration::from_secs(1 << 40)));
 	}
 }

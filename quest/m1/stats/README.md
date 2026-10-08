@@ -7,9 +7,13 @@ that wants to hear from its viewers can solicit feedback there too. The
 publisher's `stats` track is one snapshot of what it sent, per rendition and
 for its connection. A viewer publishes one `.echo` broadcast per soliciting
 catalog it reads, carrying what it received and played, per rendition, and
-its own connection. A dashboard reads both the same way a publisher does. Stats and
+its own connection. A dashboard reads both the same way a publisher does. One
+shared model turns either report into a health verdict, and a bounded
+preflight run reports which media layer of a broadcast is broken. Stats and
 feedback cost nothing on the network unless someone subscribes. Not here: the
-relay's `moq-stats` layout, which stays as it is; clock synchronization; any
+relay's `moq-stats` layout, which this line does not change (the
+[broadcast epoch](/quest/m0/broadcast-epoch/README.md) line reshapes it);
+clock synchronization; any
 requirement that a client report; and feedback as an input to billing,
 authorization, or route selection.
 
@@ -24,21 +28,22 @@ catalog keyed by rendition, not a stats track per rendition and not a sum per
 kind.
 
 - **Media stats leave moq-stats.** The relay is media-agnostic and keeps
-  `Traffic`, `Presence`, and `.stats/node/<node>` unchanged. Media stats are
+  `Traffic`, `Presence`, and `.stats/node/<node>` as this line found them. Media stats are
   hang tracks, discovered through the catalog, so no `Producer<E>`
   extension, `Merge` wrapper, or flattened generic is needed. One layout for
   relay and clients is given up on purpose.
 - **Publisher: `stats: { track }` in the catalog.** A root section naming one
-  snapshot track: `{ transport, renditions: { <alias>: stats::Track } }`,
+  snapshot track: `{ transport, renditions: { <id>: stats::Track } }`,
   plus container sections flattened in the way `Catalog<E>` flattens
   `ts::Ext`. The stats stay off the catalog track, which would otherwise churn
   for every viewer on each interval.
-- **Keyed by rendition alias** (2026-09-29). Both snapshots key by the
-  catalog's rendition keys, which [catalog track
-  alias](/quest/m1/catalog-track-alias.md) makes aliases unique within a
-  catalog. Nothing repeats the catalog's `video`/`audio` nesting; the kind
+- **Keyed by rendition ID** (2026-09-29). Both snapshots key by the
+  catalog's rendition keys, which [catalog rendition
+  IDs](/quest/m1/catalog-track-id.md) make IDs unique across video and
+  audio within a catalog, refusing a cross-kind duplicate (2026-10-06 audit).
+  Nothing repeats the catalog's `video`/`audio` nesting; the kind
   comes from the catalog entry. A viewer reports a rendition that references
-  another broadcast to the catalog that lists it, under its alias there. The
+  another broadcast to the catalog that lists it, under its ID there. The
   publisher's own snapshot covers only renditions it writes and omits
   referenced ones, whose sender reports them in its own catalog.
   Reason: a track name alone collides once a catalog lists renditions from
@@ -68,7 +73,7 @@ kind.
 - **Trust is the token prefix** (2026-09-29). Whoever the application's
   tokens let publish under the echo path may report, and no report is
   authenticated beyond that.
-- **Feedback track: one snapshot**, `{ transport, renditions: { <alias>:
+- **Feedback track: one snapshot**, `{ transport, renditions: { <id>:
   echo::Track } }`, so the publisher looks up its own renditions directly.
 - **One type per role, shared across kinds.**
   - `stats::Track`: sent frames and bytes, keyframes, skipped frames, target
@@ -85,8 +90,8 @@ kind.
   Gauges are carried but never summed.
 - **On main.** Every change is additive: optional sections on
   `#[non_exhaustive]` catalog types, and new types. The line left the
-  [QoS](/quest/m1/qos/README.md) line, which stays on `dev` for the relay's
-  moq-stats changes.
+  [QoS](/quest/m1/qos/README.md) line, which keeps the relay's moq-stats
+  changes.
 - **No `@moq/stats` package.** Media types live in `@moq/hang`, and the
   demo dashboard's relay-stats reader stays where it is.
 - Docs stay inline: `doc/concept/hang.md` documents both catalog sections,
@@ -94,23 +99,35 @@ kind.
   `drafts/draft-lcurley-moq-hang.md` specs the wire.
 
 Decided in the 2026-09-30 audit: a Rust encoder adapting its bitrate to viewer
-feedback moved to [encoder feedback](/quest/m2/stats-encoder-feedback.md) (m2),
-along with its open questions. This line only publishes and reads the reports.
+feedback moved to [encoder feedback](/quest/m3/stats-encoder-feedback.md) (m3),
+along with its open questions. This line publishes, reads, and classifies the
+reports; no encoder acts on them here.
+
+Decided 2026-10-05 (moq.pro audit): the client health model and preflight
+media checks moq.pro planned against the pre-#4510 `.stats` broadcast are
+generic, so they join this line as [client health](/quest/m1/stats/health.md)
+and [preflight](/quest/m1/stats/preflight.md). moq.pro keeps the per-project
+connection view and the dashboard flow.
 
 ## Required
 
-- [Catalog track alias](/quest/m1/catalog-track-alias.md) - rendition keys
-  become aliases, the key both snapshots use
+- [Catalog rendition IDs](/quest/m1/catalog-track-id.md) - rendition keys
+  become IDs unique across kinds, the key both snapshots use
 - [Schema](/quest/m1/stats/schema.md) - hang defines the `stats` and
   `echo` catalog sections, their snapshot types, and the draft text
 - [Rust reporters](/quest/m1/stats/rust.md) - the CLI, players, encoders, and
   moq-mux remuxes publish stats and feedback
 - [Browser reporters](/quest/m1/stats/js.md) - `<moq-publish>` publishes
   stats and `<moq-watch>` publishes feedback
+- [Client health](/quest/m1/stats/health.md) - two snapshots become a
+  health sample and a verdict that names its observer, in Rust and JS
+- [Preflight](/quest/m1/stats/preflight.md) - a bounded test run over a
+  broadcast reports which media layer is broken and why
 
 ## Related
 
-- [QoS](/quest/m1/qos/README.md) - the relay's delivery counters, the other
-  half of a health verdict
-- [Encoder feedback](/quest/m2/stats-encoder-feedback.md) - a Rust encoder
+- [QoS](/quest/m1/qos/README.md) - the relay's delivery counters; whether a
+  combined per-broadcast verdict reads both is open in
+  [client health](/quest/m1/stats/health.md)
+- [Encoder feedback](/quest/m3/stats-encoder-feedback.md) - a Rust encoder
   adapts its bitrate to what its viewers report

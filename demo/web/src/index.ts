@@ -119,9 +119,6 @@ function createTile(name: string): WatchTile {
 	const watch = document.createElement("moq-watch") as MoqWatch;
 	watch.name = name;
 	watch.muted = true; // unmuted only while active (see below)
-	// Default to a fixed 100ms jitter buffer (instead of adaptive "auto") so
-	// the delay visualization has something to show. Drag it in the panel.
-	watch.setAttribute("delay", "100ms");
 	const canvas = document.createElement("canvas");
 	canvas.style.cssText = "width: 100%; height: auto;";
 	watch.appendChild(canvas);
@@ -190,7 +187,6 @@ discovery.run((effect) => {
 		for (;;) {
 			const entry = await effect.race(announced.next());
 			if (!entry) break;
-			if (entry.kind === "live") continue;
 			const path = entry.prefix;
 			// Only catalog-backed broadcasts are watchable streams; this skips the relay's
 			// `.stats` broadcast (see the stats dashboard demo for that one).

@@ -1,7 +1,9 @@
+import type * as Epoch from "../epoch.ts";
 import { ProtocolViolation } from "../error.ts";
 import { type Cost, type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
 import {
 	hasAnnounceCompression,
@@ -48,8 +50,17 @@ export type AnnounceBroadcast =
 	/** A broadcast is now available, carrying the path suffix, the hop chain, and
 	 * (lite-06+) the route cost. An absent cost encodes as zero; it decodes as
 	 * `undefined` on a wire with no room for one. On lite-07, `suffix` follows the
-	 * segments `pathBase` copies and `hops` precede the ones `hopBase` copies. */
-	| { status: "active"; suffix: Path.Valid; hops: Hop[]; cost?: Cost; pathBase?: Base; hopBase?: Base }
+	 * segments `pathBase` copies and `hops` precede the ones `hopBase` copies. The epoch
+	 * (lite-07+) is fixed for the announcement's lifetime: a new one ends it and starts afresh. */
+	| {
+			status: "active";
+			suffix: Path.Valid;
+			epoch?: Epoch.Valid;
+			hops: Hop[];
+			cost?: Cost;
+			pathBase?: Base;
+			hopBase?: Base;
+	  }
 	/** Pre-lite-06: a broadcast is no longer available, retracted by path. */
 	| { status: "ended"; suffix: Path.Valid }
 	/** Lite06+: a broadcast is no longer available, retracted by announce id.
@@ -199,6 +210,7 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 	switch (msg.status) {
 		case "active":
 			await encodePath(w, version, msg.suffix, msg.pathBase);
+			await encodeEpoch(w, version, msg.epoch);
 			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
 			await encodeRouteCost(w, version, msg.cost);
 			break;
@@ -238,8 +250,9 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 	switch (typ) {
 		case ANNOUNCE_START: {
 			const path = await decodePath(r, version);
+			const epoch = await decodeEpoch(r, version);
 			const hops = await decodeHopsBlock(r, version);
-			return { status: "active", ...path, ...hops, cost: await decodeRouteCost(r, version) };
+			return { status: "active", ...path, epoch, ...hops, cost: await decodeRouteCost(r, version) };
 		}
 		case ANNOUNCE_END:
 			return { status: "endedId", id: await r.u62() };

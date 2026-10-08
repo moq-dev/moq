@@ -18,16 +18,23 @@ means the same content, and MoQ has no ETag-style invalidation.
 Audit publishers in Rust and JS for the properties that change mid-track
 today (codec/config bytes, resolution, audio layout, rendition metadata) and
 make each one either refuse the change or mint a new identity: a new track
-name through a [catalog alias](/quest/m1/catalog-track-alias.md) when the
-catalog can keep both, or a new [broadcast epoch](/quest/m1/broadcast-epoch/README.md)
+name through a [catalog rendition ID](/quest/m1/catalog-track-id.md) when the
+catalog can keep both, or a new [broadcast epoch](/quest/m0/broadcast-epoch/README.md)
 when the whole broadcast restarts. The catalog may still add and remove
 tracks; a removed name is never reused for different content.
 
+Only a track's defining fields are immutable: codec and its config bytes,
+resolution, audio layout, and anything else a decoder needs. Live state that
+describes the track's delivery changes freely under the same name: `enabled`,
+the jitter and delay figures, and `warmup`. Name the split in the catalog
+docs and the hang draft so a catalog update that changes only live state is
+never mistaken for a new identity (split in the 2026-10-08 audit).
+
 Cover codec changes, rendition switches, reconnects, and late joiners in Rust,
-JS, and HLS/watch tests. Target any published API break at `dev`.
+JS, and HLS/watch tests.
 
 ## Related
 
-- [Catalog track alias](/quest/m1/catalog-track-alias.md) - lets a catalog list a new track name for a changed rendition
-- [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - a restart is a new epoch rather than a changed track
+- [Catalog rendition IDs](/quest/m1/catalog-track-id.md) - lets a catalog list a new track name for a changed rendition
+- [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a restart is a new epoch rather than a changed track
 - [Archive](/quest/m1/archive/README.md) - storage and replay consume the identity contract

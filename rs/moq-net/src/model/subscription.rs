@@ -15,7 +15,7 @@ use std::{
 pub struct Subscription {
 	/// Delivery priority. Higher values preempt lower ones when bandwidth is constrained.
 	pub priority: u8,
-	/// How old a group may get before this subscriber gives up on it.
+	/// How far a group may fall behind the live edge before this subscriber gives up on it.
 	///
 	/// [`Duration::ZERO`] (the default) skips immediately: group 8 arriving means group 7
 	/// is abandoned. A larger budget tolerates that much reordering before giving up.
@@ -41,7 +41,7 @@ pub struct Subscription {
 	/// [`track::Consumer::fetch_group`](crate::track::Consumer::fetch_group) is exempt:
 	/// it names one old group explicitly, so there is no live edge to be late against.
 	///
-	/// # How age is measured
+	/// # How delay is measured
 	///
 	/// In presentation time only. A group is measured by its *reach*, where its immediate
 	/// successor begins, against the newest frame of the latest group: it cannot present
@@ -50,19 +50,19 @@ pub struct Subscription {
 	/// stalled group is bounded by its stamped successor the same way. Wall-clock
 	/// reclamation of idle content is the cache's own policy, not this budget's.
 	///
-	/// Protocols whose wire can't carry a timestamp (pre-Lite05 moq-lite, moq-transport
-	/// without the Timestamp property) have their frames stamped on receipt, which makes
-	/// the measure burst-blind on the receiving side: thirty seconds of backlog delivered
-	/// in three reads as three. The publisher's copy is stamped as it produces, so the
-	/// gate there still holds; it is just the coarser of the two.
-	pub max_age: Duration,
+	/// An untimed track (pre-Lite05 moq-lite, or moq-transport without TIMESCALE) has no
+	/// media time, so none of its groups is ever stale, and a new subscriber with no
+	/// [`Self::start`] begins at its latest group instead of replaying the cache.
+	pub max_delay: Duration,
 	/// The lowest [`Position`] the publisher may deliver, or `None` for no floor.
 	///
-	/// A floor, not a request: only [`Self::max_age`] asks for data, and the floor bounds
-	/// how far back it may reach. `None` and a floor of group 0 mean the same thing, since
-	/// nothing sits below group 0. Delivery starts at the oldest group at or above the
-	/// floor that the budget still considers fresh, so a floor above the live edge simply
-	/// waits there (a resumed subscription naming where it left off).
+	/// A floor, not a request: only [`Self::max_delay`] asks for data, and the floor bounds
+	/// how far back it may reach. `None` and a floor of group 0 mean the same thing on a
+	/// timed track, since nothing sits below group 0. On an untimed track, which no budget
+	/// can measure, `None` starts at the latest group and a floor is honored as given.
+	/// Delivery starts at the oldest group at or above the floor that the budget still
+	/// considers fresh, so a floor above the live edge simply waits there (a resumed
+	/// subscription naming where it left off).
 	///
 	/// Aggregated across every live subscriber (the loosest floor wins, and any subscriber
 	/// without one clears it), so it says what the publisher sends, not what any one
@@ -92,7 +92,7 @@ impl Default for Subscription {
 	fn default() -> Self {
 		Self {
 			priority: 0,
-			max_age: Duration::ZERO,
+			max_delay: Duration::ZERO,
 			start: None,
 			end: None,
 		}
@@ -106,16 +106,17 @@ impl Subscription {
 		self
 	}
 
-	/// Set how old a group may get before it is skipped, returning `self` for chaining.
-	pub fn with_max_age(mut self, max_age: Duration) -> Self {
-		self.max_age = max_age;
+	/// Set how far a group may fall behind the live edge before it is skipped, returning
+	/// `self` for chaining.
+	pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
+		self.max_delay = max_delay;
 		self
 	}
 
 	/// Floor delivery at `start`, or leave it unfloored when `None`. Returns `self` for
 	/// chaining.
 	///
-	/// A floor bounds how far back [`Self::max_age`] may reach; it does not request data
+	/// A floor bounds how far back [`Self::max_delay`] may reach; it does not request data
 	/// on its own. [`Position::group`] is the whole-group form.
 	pub fn with_start(mut self, start: impl Into<Option<Position>>) -> Self {
 		self.start = start.into();
@@ -158,7 +159,7 @@ impl Subscription {
 		let merged = Subscription {
 			priority: self.priority.max(combined.priority),
 			// Sequence-first prioritization is enabled only when every subscriber wants it.
-			max_age: self.max_age.max(combined.max_age),
+			max_delay: self.max_delay.max(combined.max_delay),
 			// Bounds fold as whole positions. Two subscribers starting in the same group
 			// are separated only by their frame, so folding group and frame independently
 			// would invent a bound neither asked for.
@@ -306,16 +307,7 @@ pub(super) fn before_end(sequence: u64, end: Option<u64>) -> bool {
 // family silently narrows or widens what the publisher sends, so the suffix, not the
 // `min`/`max`, is the part to read.
 
-/// The lower of two optional bounds, `None` neutral. Pairs with [`max_some`].
-pub(super) fn min_some<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
-	match (a, b) {
-		(Some(a), Some(b)) => Some(a.min(b)),
-		(Some(a), None) | (None, Some(a)) => Some(a),
-		(None, None) => None,
-	}
-}
-
-/// The higher of two optional bounds, `None` neutral. Pairs with [`min_some`].
+/// The higher of two optional bounds, `None` neutral.
 pub(super) fn max_some<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 	match (a, b) {
 		(Some(a), Some(b)) => Some(a.max(b)),

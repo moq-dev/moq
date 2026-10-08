@@ -33,11 +33,11 @@ moq.announcements(
   if (event is AnnounceEventStart) {
     print(event.announce.prefix);
     print(event.announce.captures);
-  } else if (event is AnnounceEventLive) {
-    print('caught up; what follows is live');
   }
 });
 final broadcast = await moq.requestBroadcast('live/camera');
+final catalog = await broadcast.subscribeCatalog();
+print(await catalog.next());
 ```
 
 ```dart
@@ -82,8 +82,7 @@ route is a capability, not an inventory. `announcements(options:)` takes a
 literal prefix plus an optional relative pattern and yields `AnnounceEvent`s:
 `AnnounceEventStart`, `AnnounceEventUpdate`, or `AnnounceEventEnd`
 carrying an `Announce`, whose `prefix` stays origin-relative and whose
-`captures` reports the wildcard matches, or `AnnounceEventLive` once every route
-live at subscribe time has been delivered. Paths with
+`captures` reports the wildcard matches. Paths with
 a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless `hidden: true`.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
@@ -148,5 +147,7 @@ not the same as zero. `rttUs` is microseconds; the `rtt` extension reads it as a
 - Packages: [moq](https://pub.dev/packages/moq), [moq\_ffi](https://pub.dev/packages/moq_ffi)
 
 Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).
+
+A raw `MoqFrame` or `MoqDatagram` has a null `timestampUs` (and `timestamp`) when it was read from an untimed track; see [untimed tracks](/concept/moq-lite#subscriptions). A raw track you publish is always timed.
 
 Await `session.shutdown()` or `moq.close()` to drain finished tracks before disconnecting. These futures fail if delivery has not completed within one second. `session.cancel(code: 0)` remains immediate. Finish or abort live tracks before shutdown. IETF media streams are not drained yet.

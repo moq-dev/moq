@@ -219,6 +219,7 @@ export const PublishDoneStatus = {
 	TRACK_ENDED: 0x2,
 	/** Removed in draft-20, where 0x3 is unassigned. */
 	SUBSCRIPTION_ENDED: 0x3,
+	UPDATE_FAILED: 0x8,
 } as const;
 
 /** Whether a PUBLISH_DONE status ends the track cleanly rather than aborting it. */

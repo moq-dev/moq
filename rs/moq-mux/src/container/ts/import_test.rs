@@ -248,7 +248,7 @@ async fn import_opus_frames() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(
@@ -267,6 +267,36 @@ async fn import_opus_frames() {
 		// The Opus-in-TS control header starts with 0x7f; a stripped packet must not.
 		assert_ne!(frame[0], 0x7f, "control header was not stripped");
 	}
+}
+
+/// An Opus config comes from the PMT, before any PES, yet the catalog is first published at the
+/// first PES, carrying the clock it anchors rather than a provisional one a copy-once reader
+/// would keep.
+#[tokio::test]
+async fn opus_catalog_carries_the_anchored_clock() {
+	// An hour in, so the anchored clock lands far from the provisional one.
+	let data = shift_clock(include_bytes!("test_data/opus.ts"), 3_600 * 90_000);
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let provisional = catalog.clock().wall();
+	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+
+	// Packet by packet, so a snapshot published at the PMT is seen before the PES replaces it.
+	let mut published = Vec::new();
+	for pkt in data.chunks(188) {
+		import.decode(pkt).unwrap();
+		published.extend(clocks.drain());
+	}
+	import.finish().unwrap();
+	published.extend(clocks.drain());
+
+	let anchored = catalog.clock().wall();
+	assert_ne!(anchored, provisional, "the first PES anchors the clock");
+	assert!(!published.is_empty(), "the catalog publishes");
+	assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
 }
 
 /// `eac3.ts` is an ffmpeg-authored audio-only ATSC E-AC-3 program (stream_type
@@ -496,7 +526,7 @@ async fn survives_midstream_join() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(
@@ -550,7 +580,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(
@@ -823,7 +853,7 @@ fn assert_legal(ts: &[u8], stimulus: &[u8]) {
 
 /// Import `ts` with an `mpegts` catalog, snapshotting the stats once the program clock
 /// reaches each of `at`, and once more at the end of the input.
-fn sample(ts: &[u8], at: &[std::time::Duration]) -> Vec<crate::container::ts::Stats> {
+fn sample(ts: &[u8], at: &[std::time::Duration]) -> Vec<crate::container::ts::stats::Snapshot> {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let _catalog = crate::catalog::Producer::new(
 		&mut broadcast,
@@ -933,7 +963,7 @@ fn import_reports_every_elementary_stream() {
 		),
 	] {
 		let stats = sample(data, &[]).pop().unwrap();
-		let tracks: Vec<(u16, &str)> = stats.streams.iter().map(|(&pid, s)| (pid, s.track)).collect();
+		let tracks: Vec<(u16, &str)> = stats.streams.iter().map(|(&pid, s)| (pid, s.track.as_str())).collect();
 		assert_eq!(tracks, rows);
 		for (pid, stream) in &stats.streams {
 			assert!(stream.units > 0, "{pid:#x} delivered nothing: {stream:?}");

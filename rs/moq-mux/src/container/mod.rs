@@ -68,7 +68,7 @@ pub struct Frame {
 	/// muxers receive the later endpoint separately, so media stays immediately available.
 	/// The [`Consumer`] adds it to `timestamp` to learn how far a group has
 	/// presented, so it can advance to a newer group as soon as the gap is
-	/// covered instead of waiting out the max age budget.
+	/// covered instead of waiting out the max delay budget.
 	pub duration: Option<moq_net::Timestamp>,
 
 	/// Encoded codec payload.
@@ -123,8 +123,17 @@ pub struct InvalidEnd;
 
 /// A group starts before the previous group did: the source restarted, which is a new broadcast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("frame timestamp is below the previous group's start")]
-pub struct TimestampRewind;
+#[error(
+	"frame timestamp {} µs is below the previous group's start {} µs",
+	.timestamp.as_micros(),
+	.floor.as_micros()
+)]
+pub struct TimestampRewind {
+	/// The refused frame's timestamp.
+	pub timestamp: moq_net::Timestamp,
+	/// The lowest allowed timestamp: the previous group's start.
+	pub floor: moq_net::Timestamp,
+}
 
 /// Encode and decode media frames over a moq-lite group.
 ///

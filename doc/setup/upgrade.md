@@ -31,12 +31,190 @@ These land with the next breaking release, not the 2026-09-23 train.
   are `publish_flate_snapshot` / `publish_flate_stream`, taking
   `MoqFlateConfig` and returning `MoqFlateSnapshotProducer` /
   `MoqFlateStreamProducer`. The C `moq_publish_binary_*` calls are unchanged.
-- **Track demand is read through `demand()`.** In Rust, `track::Producer`'s
-  `is_used`, `used`, `unused`, and `poll_unused` are `producer.demand().X`.
+- **Demand is read through `demand()`.** In Rust, `track::Producer`'s
+  `is_used`, `used`, `unused`, and `poll_unused` are `producer.demand().X`,
+  and so are `group::Producer`'s `used` and `unused`.
+  `track::Request::poll_unused`, `track::Dynamic::poll_unused`, and
+  `group::Request::poll_unused` are `demand().poll_unused`, which returns
+  `Poll<Result<()>>` instead of `Poll<()>`: an `Err` means the request closed,
+  so treat it as unused too. A `group::Request` no longer needs polling to be
+  withdrawn; the last `fetch_group` caller leaving does it, so a handler that
+  sees it unused just drops it. A fetch arriving after that queues a fresh
+  request instead of joining the abandoned one, so a handler that keeps serving
+  without watching `demand()` may see its `accept` return `Error::Duplicate`.
   The moq-json snapshot and moq-flate `is_used()` is `demand().is_used()`.
   In TypeScript, `Track.Producer`'s `used` and `unused()` are
-  `producer.demand().used` and `.unused()`, and `Allocator.reserve` takes
-  `producer.demand()`, replacing the `Bandwidth.Demand` interface.
+  `producer.demand().used` and `.unused()`, as are `Group.Producer`'s, and
+  `Allocator.reserve` takes `producer.demand()`, replacing the
+  `Bandwidth.Demand` interface.
+- **`request_broadcast` takes an epoch.** In Rust,
+  `origin::Consumer::request_broadcast(path)` is
+  `request_broadcast(path, None)`; pass an `Epoch` instead to refuse any other
+  publisher instance. In TypeScript, `RequestOptions.epoch` does the same. A
+  dynamic route updated to another epoch now refuses the requests its handler
+  still holds with `Unroutable`, so a handler answering them late sees its
+  answer dropped.
+- **`moq --hop` is removed; `--epoch` replaces it.** A redundant pair shares an
+  epoch, a UUIDv7 such as `uuidgen -7` prints, instead of a Hop ID: pass the
+  same `--epoch` (or `MOQ_EPOCH`) to both. Unlike a rename, `--hop` is now an
+  unknown flag and `MOQ_HOP` is silently ignored, so remove it from any
+  deployment: a pair still keyed on `MOQ_HOP` mints an epoch per process, and
+  whenever either member starts or restarts, its new epoch replaces the other's
+  broadcast and restarts its viewers. `--cluster-id` no longer falls
+  back to `--hop`, so a node that pinned its Hop ID with `--hop` passes
+  `--cluster-id`. Relays no longer put a random hop in front of a route that
+  names no publisher; it keeps its 0.
+- **The `"auto"` delay is measured, not derived from RTT** (#4162). It is sized
+  from how late frames arrive (see [audio jitter](/concept/audio-jitter)) in
+  `@moq/watch` and `moq play`, which now defaults `--delay` to `auto` instead of
+  `100ms`. A numeric `@moq/watch` delay is taken literally instead of having
+  the rendition's own delay added on top. `Sync.out.jitter` now always
+  equals `Sync.out.delay`, and `"auto"` with no decoder registered resolves to
+  0 rather than 100 ms.
+- **moq-mux has no clock translators.** `clock::Anchor`, `clock::Lane`, and
+  `SourceMap` (#4667) are gone, along with the importers' `live()`. Publish the
+  source's own timestamps and let the catalog clock map them to wall time;
+  pin that mapping with `Config::with_clock` when the source's zero is known.
+- **moq-net owns its transport traits.** `moq_net::web_transport_trait` is
+  gone, and `transport::poll::{Session, SendStream, RecvStream}` no longer
+  extend `web_transport_trait::poll`. They carry their own `poll_*` methods,
+  `transport::Error`, and `transport::Stats`, and `Error::from_transport` takes
+  a `transport::Error`. moq-tokio's `Client` and `Server` are unchanged. A
+  custom transport handed straight to moq-net implements these traits; a
+  `moq-uring` session is wrapped with `moq_uring::transport::Session::new`.
+- **`--cluster-mesh` and `--cluster-linger` are unknown flags.** moq-relay
+  0.17 refuses them by name; later relays reject them, and TOML `mesh` and
+  `linger`, like any unknown setting. `MOQ_CLUSTER_MESH` and
+  `MOQ_CLUSTER_LINGER` are no longer read, so drop them from the environment.
+  In Rust, `cluster::Config` has no `mesh` or `linger` field.
+- **Settings no listener reads stop startup.** A stream-only relay or `moq`
+  listener (TCP or Unix, no `--listen`) refuses the QUIC-only
+  `--listen-preferred-v4`/`-v6`, `--listen-quic-lb-id`, and pinned `tls.peers`,
+  and a `--listen-tls-cert`, `-key`, or `-generate` unless `--listen-tcp-tls`
+  serves it. `--listen-unix-allow-*` needs `--listen-unix-bind`, and
+  `web.https.cert`, `key`, and `root` need `web.https.listen`. `moq` without a
+  listener refuses `--listen-*` and `--auth-*` flags. Each used to be ignored;
+  drop it, or add the listener it configures.
+- **moq-mux data producers take a broadcast-clock `Timestamp`.** `json` and
+  `binary` `Snapshot::update` and `Stream::append` take `Timed<_, Timestamp>`
+  instead of `Timed<_, Instant>`, and publish it as given. Convert a capture
+  `Instant` with `.at(catalog.clock().capture(instant)?)`, reading
+  `catalog.clock()` at write time, since an importer's first frame re-anchors
+  it. A timestamp ahead of now is published rather than refused.
+- **moq-mux importers publish the catalog at their first frame.** The fMP4,
+  MKV, and MPEG-TS importers used to publish it at their init segment (`moov`,
+  `Tracks`, or the first PMT) on a provisional clock, then re-anchor it on the
+  first frame. They now hold it until that frame, as FLV already did, so the
+  first snapshot carries the final root `clock`. A reader waiting for the
+  catalog now waits for media of a selected track, not just the init segment:
+  a track `with_select` deselects doesn't release it, even if its media
+  arrives first. A `moov` or `Tracks` decoded after `finish()` is refused with
+  `fmp4::Error::MoovAfterFinish` or `mkv::Error::TracksAfterFinish`, since the
+  tracks it declares could never finish.
+- **fMP4 export fixes its track set at the init segment.** moq-mux's
+  `fmp4::Error` drops `MissingVideoTrack`, `MissingAudioTrack`, and
+  `NoCatalogSnapshot`, and adds `TrackAdded`, `TrackChanged`, `TrackRewound`,
+  and `TrackUndescribed`. `fmp4::Export` and `moq export fmp4` now end with one
+  of these where they used to write a track missing from the moov, and a
+  broadcast that ends with media queued behind an undescribed track is an error
+  rather than an empty `Ok(None)`. Restart the export to pick up a new
+  rendition.
+- **Subscriber staleness is max delay.** How far a group may fall behind the
+  live edge before a subscriber skips it is now `max_delay`, so it no longer
+  shares a name with a publisher's retention, which keeps `max_age`. In Rust,
+  `track::Subscription::max_age` and `with_max_age` are `max_delay` and
+  `with_max_delay`; moq-mux's `container::Consumer::set_max_age` and the fMP4,
+  MKV, FLV, H.264, and H.265 exports' `with_max_age` are `set_max_delay` and
+  `with_max_delay`; moq-audio's and moq-video's `decode::Options::max_age` is
+  `max_delay`, as is moq-audio's `decode::Consumer::max_age()`; and moq-rtmp's
+  `Play::with_max_age`, `Client::with_export_max_age`,
+  `listen::Config::export_max_age`, and `DEFAULT_MAX_AGE` are `with_max_delay`,
+  `with_export_max_delay`, `export_max_delay`, and `DEFAULT_MAX_DELAY`. In
+  TypeScript, `Track.Subscription`'s `maxAge` is `maxDelay`, as are
+  `Container.Consumer`'s `maxAge` prop and `@moq/watch`'s `Sync.out.maxAge`;
+  JavaScript refuses a `maxAge` key in subscription options or container consumer
+  props with a `TypeError` naming `maxDelay`, including when both keys are supplied
+  or `maxAge` is `undefined`. Untyped callers must rename it.
+  moq-ffi's `MoqSubscription`, `MoqAudioDecoderOutput`, and
+  `MoqVideoDecoderOutput` take `max_delay_us` (each binding in its own casing),
+  and so do C's `moq_subscription`, `moq_audio_decoder_output`,
+  `moq_video_decoder_output`, `moq_consume_video`, and `moq_consume_audio`.
+  `moq export fmp4`, `mkv`, `flv`, `h264`, `h265`, and `rtmp` take
+  `--max-delay`, and refuse `--max-age`. `track::Info::max_age`,
+  `MoqTrackInfo.max_age_us`, `moq import --max-age`, and `moq export ts --max-age` are unchanged, as is the wire.
+- **moq-relay auth takes the client-CA answer.** `auth::Config::validate` and
+  `init` take `client_ca: bool`, whether any listener verifies client
+  certificates, and `validate_client_ca` is gone. `moq --listen` with an
+  invalid auth config stops at startup instead of refusing every session.
+- **A client CA needs a QUIC listener.** A stream-only relay or `moq` listener
+  (TCP or Unix, no `--listen`) refuses to start with `listen.tls.root`, which
+  nothing verified; moq-tokio returns `Error::MtlsUnsupported` for it.
+- **moq-tokio's `Transport` names WebTransport.** `moq_tokio::server::Transport`
+  is `moq_tokio::Transport`, with no re-export. A WebTransport session reports
+  `Transport::WebTransport` (`"webtransport"` in logs) instead of `Quic`, which
+  now means raw QUIC only, and `Connection::transport()` reports the live
+  transport. The bindings' `MoqTransport` gains a `WebTransport` case, so an
+  exhaustive `switch` or `when` needs one more arm.
+- **moq-net has no `VarInt`.** Varints are plain `u64`s:
+  `VarInt::decode_quic(buf)?.into_inner()` is `moq_net::varint::decode_quic(buf)?`,
+  and `VarInt::try_from(v)?.encode_quic(buf)` is
+  `moq_net::varint::encode_quic(v, buf)`, which fails past
+  `varint::MAX_QUIC` (2^62 - 1).
+- **Opus mapping family lives only on `mapping`.**
+  `moq_mux::codec::opus::Config::mapping_family` is gone. Family 0 is
+  `mapping: None`; any other family is the mapping's own (`mapping.family()`).
+  Set `mapping` alone when building a surround head. The OpusHead bytes are
+  unchanged.
+- **moq-mux TS stats live in `ts::stats`.** `ts::Stats` is
+  `ts::stats::Snapshot` and `ts::StreamStats` is `ts::stats::Stream`, whose
+  `track` is an owned `String`. `ts::Export::stats` returns
+  `ts::stats::Export`, which carries only `streams`; feed it to
+  `stats::Log` with `.into()`. `ts::MultipleProgramsError` is
+  `#[non_exhaustive]`: recover it by downcast and read `programs`.
+- **@moq/publish drops `OpusConfig.usedtx`.** Chromium's DTX output shifts the
+  audio timeline, so Opus DTX is always off (the WebCodecs default). Remove the
+  field; a plain-JS caller still passing it is ignored.
+- **FLV export takes a catalog stream.** `flv::Export::new` is synchronous and
+  takes `(source, catalog)`, like `fmp4::Export` and `mkv::Export`.
+  `with_catalog_format` and `with_select` are gone. Open the catalog yourself
+  (`source.catalog(format)`) and narrow it with `catalog::Stream::select`
+  before constructing the export. `moq export flv` still applies the same
+  rendition flags.
+- **A track is timed or untimed, and nothing fills in a timestamp on
+  receive.** An untimed track (no timescale) arrives untimed, except over
+  moq-lite 05 and later, which can't encode absence yet and carry a send time
+  instead; see [untimed tracks](/concept/moq-lite#subscriptions). A write whose
+  timedness doesn't match its track fails with `TimestampMismatch`.
+  - moq-net: `track::Info.timescale` is `Option<Timescale>`, `None` for an
+    untimed track (`with_timescale` takes `impl Into<Option<_>>`), and
+    `group::{Producer,Consumer}::timescale()` return `Option<Timescale>`.
+    `Frame.timestamp`, `frame::Info.timestamp`, and `Datagram.timestamp` are
+    `Option<Timestamp>`. The `write_frame`, `append_datagram`, and
+    `insert_datagram` calls take `impl Into<Option<Timestamp>>`, so passing a
+    `Timestamp` still compiles.
+  - moq-e2ee: `Frame` and `Datagram` timestamps are optional, and its writers
+    take `impl Into<Option<Timestamp>>`.
+  - moq-archive: recording an untimed track fails with `Error::Untimed`, so
+    `moq export archive` over moq-lite before 05 or moq-transport drafts
+    14–16 now fails instead of recording arrival times.
+  - moq-ffi: `MoqFrame.timestamp_us` and `MoqDatagram.timestamp_us` are
+    optional, null on a frame read from an untimed track, and default to null.
+    A raw track you publish is timed, so a raw write without one now fails
+    with `TimestampMismatch` instead of going out at 0.
+    `MoqMediaProducer::write_frame` without one used to pass a PTS of 0; it
+    now passes none, so the importer derives the time itself (elapsed since
+    its first frame) or refuses a codec that needs one (avc1, hvc1).
+    `MoqTrackInfo.timescale` is null on a received untimed track. In Go,
+    `Frame.TimestampUs` and `Datagram.TimestampUs` are `*uint64`; in Kotlin
+    and Dart, `Frame.timestamp` and `Datagram.timestamp` are nullable.
+  - libmoq: `moq_frame` and `moq_datagram` gain `timestamp_present`, which
+    changes their size, so recompile against the new `moq.h`.
+  - Receivers: tracks from moq-lite before 05, and moq-transport tracks
+    without `TIMESCALE` (every track on drafts 14–16), arrive untimed instead
+    of stamped with their arrival time; an object-scope Timescale is ignored.
+    On a moq-transport track with `TIMESCALE`, an object without a Timestamp
+    is malformed. A new subscriber with no start on an untimed track starts at
+    the latest group.
 
 ## Wire
 
@@ -73,7 +251,7 @@ variables follow the flag (`MOQ_SERVER_BIND` is `MOQ_LISTEN`).
 | `--cluster-linger` | removed; a broadcast closes when its last publisher is lost |
 | `--cluster-connect host:port` | a full URL, `https://host/?jwt=TOKEN` |
 | `--cluster-mesh`, TOML `mesh` | removed; list every peer with `--cluster-connect` or `--cluster-connect-api` |
-| `moq --origin`, `--name`, `--latency-max` | `--hop`, `--broadcast`, `--max-age` |
+| `moq --origin`, `--name`, `--latency-max` | `--hop` (removed for `--epoch` after [Unreleased](#unreleased)), `--broadcast`, `--max-age` |
 | `moq publish`, `moq subscribe` | `moq import`, `moq export` |
 | `moq token`, the `moq-token` binary | `moq auth` |
 
@@ -118,8 +296,8 @@ Other changes to a deployment:
 - **`moq auth serve` never re-checks or expires by default**, as 0.14 never
   did. `--revalidate` needs `--expires`, and `--limit-*` needs `--revalidate`.
 - **mTLS admits nothing on its own.** A verified client certificate is reported
-  to the auth server, which grants it. `moq auth serve --mtls-publish '**' --mtls-subscribe '**'` restores the old full access for every certificate
-  the relay's client CA verifies, so keep that CA to cluster peers.
+  to the auth server, which grants it. `moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-peer` restores the old full access for every certificate
+  the relay's client CA verifies, as a cluster peer, so keep that CA to cluster peers.
 - **`moq --listen` needs auth.** A CLI listener refuses to start without
   `--auth-url` or `--auth-public` instead of accepting everyone.
 - **Gossip discovery is removed.** A relay dials only the peers it lists or
@@ -164,7 +342,7 @@ Other changes to a deployment:
   `origin::Config`.
 - **Announcements are prefix routes** (#3225, #3770). `announce::Update` is
   `{ prefix, route, kind, captures }`: skip `!update.kind.is_active()` and
-  resolve the broadcast with `consumer.request_broadcast(&update.prefix)`.
+  resolve the broadcast with `consumer.request_broadcast(&update.prefix, update.route.epoch)`.
   Serve a subtree on demand with `origin.dynamic(prefix, route)`.
 - **Tracks.** `with_latency_max` / `latency_max` is `with_max_age` / `max_age`.
   `write_datagram(Datagram)` is `insert_datagram(sequence, timestamp, payload)`

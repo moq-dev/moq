@@ -35,6 +35,9 @@ skipping inside the Nix shell.
   tests are the same kind. Those also need
   the Vulkan loader to find the host NVIDIA ICD: point it at the ICD manifest
   and expose the driver libraries it names, or keep them in their own recipe.
+- [One external GPU image](/quest/m2/gpu-surface.md) adds `just rs gpu`,
+  which detects the host's GPU vendors and runs each one's ignored tests.
+  `just rs nvidia` is its NVIDIA branch, not a second detector.
 - Nightly: a job in `.github/workflows/nightly.yml` runs `nix develop
   --command just rs nvidia` on the self-hosted runner, a recipe and not a
   script path, like every other workflow step. A self-hosted runner on a public repository must
@@ -42,17 +45,14 @@ skipping inside the Nix shell.
   job gated to `refs/heads/main`, never `pull_request`; a dedicated label only
   this job selects; read-only `permissions`. Read GitHub's self-hosted runner
   hardening guidance before wiring it.
-- Share the runner with the io_uring one that #4132 plans
-  (`quest/m1/uring-runner.md` on the drain line, which wants a 6.12+ kernel on
-  the same host): one registration and one security posture, a label per
-  capability. Whichever quest lands second reuses the first's job shape.
 
 Public API: none. Wire: none.
 
 ## Required
 
-- A self-hosted runner is registered for moq-dev/moq on the maintainer's host, with the NVIDIA driver
+- [A self-hosted NVIDIA runner is registered](/quest/m1/gpu-runner.md) - the host the nightly job runs on
 
 ## Related
 
 - [Video hardware validation](/quest/m3/video-hardware.md) - hardware paths nothing runs yet
+- [One external GPU image](/quest/m2/gpu-surface.md) - the vendor-detecting `just rs gpu` recipe

@@ -27,15 +27,25 @@ Per-platform, picked at compile time:
   feature), with native X11 monitor/window selection and capture as the X11
   fallback. The Wayland picker dialog chooses the screen, and the portal's
   restore token is reused so demand-driven reopens don't re-prompt.
-- **Windows**: native Media Foundation (camera; `IMFSourceReader`) and DXGI
-  Desktop Duplication (display), plus GDI single-window capture. Both convert
-  BGRA to CPU I420 and use the ids returned by the enumerators.
+- **Windows**: native Media Foundation (camera; `IMFSourceReader`) and
+  Windows.Graphics.Capture (display and window; Windows 10 2004/build 19041
+  or newer). Screen capture honors `Config::cursor` and converts BGRA to an
+  owned NV12 texture on the GPU, shared with the Media Foundation encoder;
+  software encoding downloads that texture. Odd screen edges are cropped to
+  even dimensions. Builds before 19041 return `Error::Unsupported`, with no
+  older capture fallback. The system capture border remains unless borderless
+  access is available (build 20348+) and granted.
 
 `capture::cameras()` lists AVFoundation, V4L2, or Media Foundation cameras with
 identifiers accepted by `capture::Source::Camera`. `capture::displays()` does
 the same for macOS, Windows, and X11 displays. `capture::windows()` lists macOS,
 Windows, and X11 windows. Wayland display selection stays in the desktop portal
 picker, which does not expose a stable display identifier.
+
+Windows `display:N` selectors are enumeration indices, not persistent monitor
+identities. Switching from Desktop Duplication to WGC can change which monitor
+a saved selector names. Run `moq devices` again and reselect the intended display
+after upgrading.
 
 Embedded applications can consume raw capture without creating a MoQ
 broadcast:
@@ -56,6 +66,23 @@ drops rather than latency. `read` ends with `None` when the source stopped for
 a benign reason, such as a window resize, so reopen to follow it. Permission
 denial and a source disappearing are terminal, reported as
 `Error::PermissionDenied` and `Error::SourceUnavailable`.
+On Windows, opening an already minimized window returns `Error::SourceUnavailable`.
+After capture starts, receiving no usable first frame within five seconds also
+returns `Error::SourceUnavailable` and releases the capture session.
+An established capture pauses while the window is minimized. Unchanged Windows
+content repeats the last owned GPU texture at the configured frame rate, with
+advancing presentation timestamps, so a static share remains live.
+
+On a Windows desktop, `just rs test -p moq-video --features capture --run-ignored only -E 'test(wgc_)'` runs the opt-in WGC hardware exercises.
+Set `MOQ_WGC_WINDOW=window:HWND` to a visible, odd-sized window from
+`moq devices` first. These tests capture each monitor and the selected window
+with cursor capture on and off, reopen sessions, verify owned NV12 pixels after
+pool reuse, and check SD/HD conversion and encoder color descriptions. They
+require a GPU video processor and a hardware H.264 encoder; unsupported
+hardware fails rather than silently skipping the exercise. Cursor appearance,
+resize/close/minimize behavior, hybrid-GPU monitors, and border permissions
+still need visual checks. The conversion workload prints submission time and
+batch completion time including one final readback, not end-to-end latency.
 
 ## Encode
 
@@ -112,8 +139,10 @@ a working software H.264 fallback but compiles vendored C++; disable defaults
 and select native features to omit it. `nvidia` is Linux-only, `dlopen`s the
 driver at runtime, and needs no build-time toolkit. `vaapi` is opt-in because
 its bindgen needs libclang on the build host, while `v4l2` is opt-in only by
-convention, since `moq-v4l` checks its bindings in. `render` is also opt-in so
-codec-only consumers do not compile wgpu.
+convention, since `moq-v4l` checks its bindings in. `vpx` is opt-in because
+libvpx comes from the build host through pkg-config (set `VPX_STATIC=1` to link
+the archive, as the Nix dev shell does). `render` is also opt-in so codec-only
+consumers do not compile wgpu.
 
 ### Vulkan producers on NVIDIA
 
@@ -162,7 +191,7 @@ instead of asserting a threshold.
 ## Decode
 
 `decode::Consumer` (the mirror of `moq_audio::decode::Consumer`) subscribes to an
-H.264, H.265, or AV1 track and returns raw `Frame`s. A hardware-decoded frame stays
+H.264, H.265, AV1, VP8, or VP9 track and returns raw `Frame`s. A hardware-decoded frame stays
 on the GPU: feeding it back to a compatible hardware `encode::Encoder` on the
 same device keeps it there (the transcode path), while `into_i420()` downloads
 it. An encoder that can't take that surface (openh264, or a different device)
@@ -190,6 +219,7 @@ Backends are tried hardware-first, like encode:
 | H.264 | OpenH264 (feature `openh264`, default) | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`), VAAPI (feature `vaapi`) | MediaCodec (feature `mediacodec`, API 26+) |
 | H.265 | none | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, API 26+) |
 | AV1 | none | none | none | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, when the device provides it) |
+| VP8, VP9 | libvpx (feature `vpx`) | none | none | none | none |
 
 On macOS and iOS VideoToolbox decodes H.264 and H.265 on hardware, pulling the parameter
 sets (SPS/PPS, plus VPS for H.265) out of each keyframe to build the format
@@ -200,8 +230,10 @@ no software decoder, so it needs the GPU path (on Windows, an HEVC decoder MFT:
 the inbox HEVC Video Extensions or a vendor one). On Linux, NVDEC decodes H.264,
 H.265, and 8-bit 4:2:0 AV1 to CUDA NV12 frames; AV1 is decode-only and is useful
 for AV1 source to H.264/H.265 transcode rungs. VAAPI decodes H.264 to DMA-BUF
-surfaces the renderer imports without a download. A non-H.264/H.265/AV1
-rendition yields `Error::UnsupportedCodec`.
+surfaces the renderer imports without a download. libvpx decodes VP8 and VP9
+profile 0 to CPU I420 on every platform; other VP9 profiles (4:4:4, 10-bit) are
+refused rather than narrowed to 8-bit 4:2:0. Any other rendition yields
+`Error::UnsupportedCodec`.
 
 `decode::Config::output` says where decoded pictures live: `Output::Native`
 (the default) hands back whatever the backend decoded into, a GPU surface or
@@ -210,7 +242,7 @@ decoded straight to system memory where the backend can and downloaded where it
 cannot. `decode::Config::scale_hint` asks a decoder with a hardware scaler
 (NVDEC) to emit that size; it is a hint, so check `Frame::size` and use
 `Frame::resize` for the exact size. `decode::Consumer` takes `decode::Options`,
-which pairs that config with the subscription's `start` and `max_age`.
+which pairs that config with the subscription's `start` and `max_delay`.
 
 Common feature sets:
 

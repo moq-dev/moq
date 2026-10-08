@@ -15,14 +15,31 @@
 //! new snapshot group, so a torn multi-section transition (half old version, half
 //! new) is unrepresentable on the track. [`Snapshot`] is the export half: it
 //! reduces a track's frames back into the current section set.
+//!
+//! An import that selects a program ([`Capture::select`]) carries SI for that
+//! service alone. Other services' EIT actual sub-tables are dropped on arrival, and
+//! each SDT actual snapshot is rebuilt as one section holding only the selected
+//! service's entry, with a fresh CRC. An SDT actual section whose own CRC fails is
+//! dropped, and a revision commits only once every section has arrived, so the last
+//! good snapshot stays in force until then. An SDT that does not list the
+//! service carries no SDT actual, so a revision that drops it retires the earlier
+//! one. Network-wide tables (NIT, BAT, SDT other, EIT other, TDT/TOT) pass through
+//! verbatim, as does everything when no program is selected.
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
+
+use web_async::time::Instant;
 
 use bytes::Bytes;
 use moq_net::Timestamp;
 
 use super::catalog;
+use super::psi::{self, CRC};
+
+const SDT_PID: u16 = 0x0011;
+const SDT_ACTUAL: u8 = 0x42;
+const EIT_PID: u16 = 0x0012;
 
 /// Coalesce snapshot cuts: a junction revises many sub-tables inside a second
 /// (every service's now/next rolls on the hour), and one group carrying all of them
@@ -106,6 +123,37 @@ pub(super) fn split_sections(payload: &Bytes) -> Vec<Bytes> {
 	out
 }
 
+/// Rebuild an SDT sub-table as one section listing only `service`, wherever its
+/// entry sat among `sections`. The header (transport_stream_id, version_number,
+/// original_network_id) is kept, the numbering reset to section 0 of 0, and the
+/// length and CRC recomputed. `None` when no section lists the service.
+fn sdt_service<'a>(sections: impl IntoIterator<Item = &'a Bytes>, service: u16) -> Option<Vec<u8>> {
+	for section in sections {
+		// The service loop runs from the 11-byte header to the CRC.
+		let end = section.len().saturating_sub(4);
+		let mut off = 11;
+		while off + 5 <= end {
+			let len = 5 + ((usize::from(section[off + 3] & 0x0f) << 8) | usize::from(section[off + 4]));
+			if off + len > end {
+				break;
+			}
+			if u16::from_be_bytes([section[off], section[off + 1]]) == service {
+				let mut out = section[..11].to_vec();
+				out.extend_from_slice(&section[off..off + len]);
+				let section_length = out.len() - 3 + 4;
+				out[1] = (out[1] & 0xf0) | (section_length >> 8) as u8;
+				out[2] = section_length as u8;
+				out[6] = 0;
+				out[7] = 0;
+				out.extend_from_slice(&CRC.checksum(&out).to_be_bytes());
+				return Some(out);
+			}
+			off += len;
+		}
+	}
+	None
+}
+
 /// One committed generation of a sub-table: the sections currently in force.
 ///
 /// Keyed by `section_number`, sparse on purpose: DVB EIT schedule segments skip
@@ -151,19 +199,24 @@ impl Pending {
 /// One `(PID, table_id)` entry: its snapshot track and the state of every
 /// sub-table riding it.
 struct Entry {
-	track: moq_net::track::Producer,
-	name: String,
+	/// Created with the first snapshot that carries anything, so a table filtered
+	/// to nothing never gets a track.
+	track: Option<moq_net::track::Producer>,
 	interval: Option<Duration>,
+	/// The selected service an SDT actual snapshot is reduced to.
+	service: Option<u16>,
 	active: BTreeMap<Identity, Generation>,
 	/// In-flight generations, keyed by sub-table and version.
 	pending: HashMap<(Identity, u8), Pending>,
 	/// A commit changed `active` since the last cut.
 	dirty: bool,
-	/// The entry appears in the catalog's `mpegts.si` map (deferred until the first
-	/// snapshot group exists, so a subscriber never finds an empty track).
+	/// The newest snapshot group carries at least one sub-table.
+	populated: bool,
+	/// The entry appears in the catalog's `mpegts.si` map: exactly while it is
+	/// `populated`, so a subscriber never finds an empty track.
 	advertised: bool,
-	/// Host-clock micros of the last cut ([`DEBOUNCE`]); `None` until the first.
-	last_cut: Option<u128>,
+	/// Host-clock instant of the last cut ([`DEBOUNCE`]); `None` until the first.
+	last_cut: Option<Instant>,
 }
 
 impl Entry {
@@ -213,6 +266,12 @@ impl Entry {
 
 		if let Some(prior) = pending.sections.get(&number) {
 			if *prior == section {
+				// A reduced SDT reads a missing service as removal, so a dense SDT
+				// missing a section (dropped for a bad CRC, or lost) must not commit as
+				// complete-as-observed; it waits for the cycle that completes it.
+				if self.service.is_some() {
+					return;
+				}
 				// The same section came round again before the set completed: the
 				// transmission cycle wrapped, so what we hold is the whole sub-table as
 				// this mux transmits it. For EIT schedule this is the *only* commit
@@ -279,19 +338,44 @@ impl Entry {
 		}
 	}
 
-	/// Cut a snapshot group: the complete active set, one frame per sub-table.
+	/// Cut a snapshot group: the complete active set, one frame per sub-table, an
+	/// SDT reduced to the selected service. Nothing is cut until a snapshot carries
+	/// something, and that snapshot creates the entry's track on `broadcast`.
 	/// `pts` stamps the frames; `now` is the host clock for the debounce.
-	fn cut(&mut self, pts: Timestamp, now: u128) -> anyhow::Result<()> {
-		let mut group = self.track.append_group()?;
-		for generation in self.active.values() {
-			let mut payload = Vec::new();
-			for section in generation.sections.values() {
-				payload.extend_from_slice(section);
-			}
+	fn cut(
+		&mut self,
+		broadcast: &moq_net::broadcast::Producer,
+		(pid, table_id): (u16, u8),
+		pts: Timestamp,
+		now: Instant,
+	) -> anyhow::Result<()> {
+		let frames: Vec<Vec<u8>> = self
+			.active
+			.values()
+			.filter_map(|generation| match self.service {
+				Some(service) => sdt_service(generation.sections.values(), service),
+				None => Some(generation.sections.values().flatten().copied().collect()),
+			})
+			.collect();
+		self.dirty = false;
+		self.populated = !frames.is_empty();
+		let track = match &mut self.track {
+			Some(track) => track,
+			None if frames.is_empty() => return Ok(()),
+			// Deterministic, greppable name; fall back to a unique suffix on the
+			// (pathological) collision with an existing track.
+			None => self.track.insert(
+				match broadcast.create_track(format!("{pid:#06x}-{table_id:#04x}.si"), None) {
+					Ok(track) => track,
+					Err(_) => broadcast.unique_track(".si", None)?,
+				},
+			),
+		};
+		let mut group = track.append_group()?;
+		for payload in frames {
 			group.write_frame(pts, payload)?;
 		}
 		group.finish()?;
-		self.dirty = false;
 		self.last_cut = Some(now);
 		Ok(())
 	}
@@ -307,8 +391,9 @@ pub(super) struct Capture<E: catalog::Catalog> {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: crate::catalog::Producer<E>,
 	entries: BTreeMap<(u16, u8), Entry>,
-	/// Host clock driving the cut debounce (see [`DEBOUNCE`]).
-	clock: crate::Clock,
+	/// The selected program_number, which is the service_id of the only service
+	/// carried; `None` captures every service.
+	program: Option<u16>,
 }
 
 impl<E: catalog::Catalog> Capture<E> {
@@ -317,12 +402,19 @@ impl<E: catalog::Catalog> Capture<E> {
 			broadcast,
 			catalog,
 			entries: BTreeMap::new(),
-			clock: crate::Clock::new(),
+			program: None,
 		}
 	}
 
+	/// Carry only the service numbered `program`: its EIT actual, and an SDT actual
+	/// listing it alone. SI keys services by `service_id`, assumed equal to the PAT
+	/// `program_number`.
+	pub fn select(&mut self, program: u16) {
+		self.program = Some(program);
+	}
+
 	/// Fold one completed section from `pid` into its `(pid, table_id)` entry,
-	/// creating the entry (and its track) on first sight of the pair.
+	/// creating the entry on first sight of the pair.
 	pub fn section(&mut self, pid: u16, section: Vec<u8>) -> anyhow::Result<()> {
 		let Some(&table_id) = section.first() else {
 			return Ok(());
@@ -335,73 +427,83 @@ impl<E: catalog::Catalog> Capture<E> {
 		if long_form(&section) && section[5] & 0x01 == 0 {
 			return Ok(());
 		}
-
-		if !self.entries.contains_key(&(pid, table_id)) {
-			// Deterministic, greppable name; fall back to a unique suffix on the
-			// (pathological) collision with an existing track.
-			let name = format!("{pid:#06x}-{table_id:#04x}.si");
-			let track = match self.broadcast.create_track(name, None) {
-				Ok(track) => track,
-				Err(_) => self.broadcast.unique_track(".si", None)?,
-			};
-			self.entries.insert(
-				(pid, table_id),
-				Entry {
-					name: track.name().to_string(),
-					track,
-					interval: catalog::si_interval(table_id),
-					active: BTreeMap::new(),
-					pending: HashMap::new(),
-					dirty: false,
-					advertised: false,
-					last_cut: None,
-				},
-			);
+		// EIT actual (now/next and schedule) is keyed by service_id: another
+		// service's sub-table describes a program this import does not carry.
+		if let Some(program) = self.program
+			&& pid == EIT_PID
+			&& matches!(table_id, 0x4E | 0x50..=0x5F)
+			&& !matches!(identity(&section), Identity::Sub { ext, .. } if ext == program)
+		{
+			return Ok(());
 		}
-		let entry = self.entries.get_mut(&(pid, table_id)).unwrap();
+
+		let service = self.program.filter(|_| (pid, table_id) == (SDT_PID, SDT_ACTUAL));
+		// The rebuilt SDT gets a fresh CRC, which would certify corruption the
+		// source's CRC flags; dropping the section keeps the last good generation.
+		if service.is_some() && !psi::crc_ok(&section) {
+			return Ok(());
+		}
+		let entry = self.entries.entry((pid, table_id)).or_insert_with(|| Entry {
+			track: None,
+			interval: catalog::si_interval(table_id),
+			service,
+			active: BTreeMap::new(),
+			pending: HashMap::new(),
+			dirty: false,
+			populated: false,
+			advertised: false,
+			last_cut: None,
+		});
 		entry.section(section);
 		Ok(())
 	}
 
-	/// Cut snapshot groups for the dirty entries and advertise any entry with its
-	/// first snapshot in the catalog (one lock for the whole batch).
+	/// Cut snapshot groups for the dirty entries, then advertise each entry whose
+	/// snapshot now carries something and retract each whose snapshot went empty
+	/// (one catalog lock for the whole batch).
 	///
 	/// `pts` is the media clock, used to stamp the frames; the cut debounce runs on
 	/// the host clock ([`DEBOUNCE`]), and a first snapshot is never delayed. `force`
 	/// overrides the debounce, for end of stream.
 	pub fn flush(&mut self, pts: Timestamp, force: bool) -> anyhow::Result<()> {
-		let now = self.clock.now().as_micros();
-		for entry in self.entries.values_mut() {
+		let now = Instant::now();
+		for (key, entry) in self.entries.iter_mut() {
 			if !entry.dirty {
 				continue;
 			}
 			if !force
 				&& let Some(last) = entry.last_cut
-				&& now.saturating_sub(last) < DEBOUNCE.as_micros()
+				&& now.saturating_duration_since(last) < DEBOUNCE
 			{
 				continue;
 			}
-			entry.cut(pts, now)?;
+			entry.cut(&self.broadcast, *key, pts, now)?;
 		}
 
-		if self.entries.values().any(|e| !e.advertised && e.last_cut.is_some()) {
+		if self.entries.values().any(|e| e.advertised != e.populated) {
 			let mut guard = self.catalog.modify()?;
 			let Some(mpegts) = guard.ext.mpegts_mut() else {
 				anyhow::bail!("catalog extension no longer carries an mpegts section");
 			};
 			for ((pid, table_id), entry) in self.entries.iter_mut() {
-				if entry.advertised || entry.last_cut.is_none() {
+				// Either flag implies the track exists.
+				let Some(track) = &entry.track else { continue };
+				if entry.advertised == entry.populated {
 					continue;
 				}
-				mpegts.si.entry(*pid).or_default().insert(
-					*table_id,
-					catalog::SiEntry {
-						track: entry.name.clone(),
-						interval: entry.interval,
-						..Default::default()
-					},
-				);
-				entry.advertised = true;
+				if entry.populated {
+					mpegts.si.entry(*pid).or_default().insert(
+						*table_id,
+						catalog::SiEntry {
+							track: track.name().to_string(),
+							interval: entry.interval,
+							..Default::default()
+						},
+					);
+				} else {
+					retract(&mut mpegts.si, *pid, *table_id, track.name());
+				}
+				entry.advertised = entry.populated;
 			}
 		}
 		Ok(())
@@ -410,8 +512,8 @@ impl<E: catalog::Catalog> Capture<E> {
 	/// Flush everything and finish every track.
 	pub fn finish(&mut self, pts: Timestamp) -> anyhow::Result<()> {
 		self.flush(pts, true)?;
-		for entry in self.entries.values_mut() {
-			entry.track.finish()?;
+		for track in self.entries.values_mut().filter_map(|entry| entry.track.as_mut()) {
+			track.finish()?;
 		}
 		Ok(())
 	}
@@ -421,7 +523,9 @@ impl<E: catalog::Catalog> Capture<E> {
 	pub fn abort(mut self, err: moq_net::Error) {
 		self.unadvertise();
 		for (_, entry) in std::mem::take(&mut self.entries) {
-			let _ = entry.track.abort(err.clone());
+			if let Some(track) = entry.track {
+				let _ = track.abort(err.clone());
+			}
 		}
 	}
 
@@ -440,23 +544,31 @@ impl<E: catalog::Catalog> Capture<E> {
 			return;
 		};
 		for ((pid, table_id), entry) in self.entries.iter_mut() {
-			if !entry.advertised {
+			let Some(track) = entry.track.as_ref().filter(|_| entry.advertised) else {
 				continue;
-			}
+			};
 			entry.advertised = false;
-			if let Some(tables) = mpegts.si.get_mut(pid) {
-				// Remove only a mapping this capture still owns: a second capture on
-				// the same broadcast (same key, unique fallback track name) may have
-				// overwritten it, and it will not re-advertise, so blindly removing
-				// here would strip the live capture's table for good.
-				if tables.get(table_id).is_some_and(|e| e.track == entry.name) {
-					tables.remove(table_id);
-				}
-				if tables.is_empty() {
-					mpegts.si.remove(pid);
-				}
-			}
+			retract(&mut mpegts.si, *pid, *table_id, track.name());
 		}
+	}
+}
+
+/// Remove the `(pid, table_id)` mapping from the catalog's `si` map, and the PID
+/// once nothing is left on it.
+///
+/// Only a mapping still naming `track` goes: a second capture on the same broadcast
+/// (same key, unique fallback track name) may have overwritten it, and it will not
+/// re-advertise, so blindly removing here would strip the live capture's table for
+/// good.
+fn retract(si: &mut BTreeMap<u16, BTreeMap<u8, catalog::SiEntry>>, pid: u16, table_id: u8, track: &str) {
+	let Some(tables) = si.get_mut(&pid) else {
+		return;
+	};
+	if tables.get(&table_id).is_some_and(|e| e.track == track) {
+		tables.remove(&table_id);
+	}
+	if tables.is_empty() {
+		si.remove(&pid);
 	}
 }
 

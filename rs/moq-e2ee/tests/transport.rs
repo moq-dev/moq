@@ -4,8 +4,9 @@ mod support;
 
 use std::time::Duration;
 
+use moq_e2ee::Credential;
 use moq_e2ee::credential::Config;
-use moq_e2ee::{Credential, Epoch};
+use moq_net::Epoch;
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
@@ -32,7 +33,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	})
 	.unwrap();
 	let generation = cred.generation(Epoch::mint());
-	let path = cred.path("meeting.hang").unwrap().join(generation.epoch().as_str());
+	let path = cred.path("meeting.hang").unwrap();
 	let name = generation.name(track).unwrap();
 
 	let publisher = produce_origin(1);
@@ -40,24 +41,34 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 
 	let broadcast = publisher.create_broadcast(&path).unwrap();
 	let net = broadcast.create_track(name.as_str(), None).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast
+		.announce(moq_net::origin::Route::default().with_epoch(generation.epoch().clone()))
+		.unwrap();
 
 	let mut options = MockConnectOptions::new(version);
 	options.server_publish = Some(publisher);
 	options.client_subscribe = Some(consumer_origin.clone());
 	let pair = connect_mock(options).await;
 
-	// The subscriber knows the opaque prefix and takes the epoch from the discovered path.
+	// The subscriber knows the opaque path and takes the epoch from the announced route.
+	// A wire without epochs leaves it to the application's own channel.
 	let consumer = consumer_origin.consume();
-	consumer.routed(&path).await.unwrap();
-	let epoch: Epoch = path.parts().last().unwrap().parse().unwrap();
+	let route = consumer.routed(&path).await.unwrap();
+	if version.to_string().starts_with("moq-lite-07") {
+		assert_eq!(
+			route.epoch.as_ref(),
+			Some(generation.epoch()),
+			"lite-07 announces the epoch"
+		);
+	}
+	let epoch = route.epoch.unwrap_or_else(|| generation.epoch().clone());
 	let generation = cred.generation(epoch);
-	let remote = consumer.request_broadcast(&path).await.unwrap();
+	let remote = consumer.request_broadcast(&path, None).await.unwrap();
 	let subscriber = remote
 		.track(name.as_str())
 		.unwrap()
 		.subscribe(Some(
-			moq_net::track::Subscription::default().with_max_age(Duration::from_secs(60)),
+			moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60)),
 		))
 		.await
 		.unwrap();
@@ -73,7 +84,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 #[tokio::test]
 async fn grouped_over_lite() {
 	tokio::time::timeout(TEST_TIMEOUT, async {
-		let mut fixture = connect_protected("moq-lite-05".parse().unwrap(), "video").await;
+		let mut fixture = connect_protected("moq-lite-07-wip".parse().unwrap(), "video").await;
 		let mut group = fixture.producer.append_group().unwrap();
 		group
 			.write_frame(Timestamp::from_millis(1).unwrap(), b"lite-frame")

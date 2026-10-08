@@ -1,17 +1,23 @@
-# [S] web-transport-trait awaits an acknowledged stream offset
+# [S] moq-net's send stream awaits an acknowledged offset
 
 ## Goal
 
-A released `web-transport-trait` lets a sender await acknowledgment of a
-named byte offset on a send stream, `web-transport-moq` implements
-it, and every other backend reports that it cannot rather than returning a
-guess.
+moq-net's own `transport::poll::SendStream` lets a sender await
+acknowledgment of a named byte offset on a send stream, the moq-tokio and
+moq-uring adapters implement it over `moq-quic`, and every other backend
+reports that it cannot rather than returning a guess.
 
 ## Plan
 
-The trait method lives in `moq-dev/web-transport`. The `web-transport-moq`
-adapter is in-tree after [the fork](/quest/m1/quic/fork/README.md). This quest supersedes the design in moq-dev/web-transport#368,
-whose snapshot-counter shape loses the wakeups a latency sample needs.
+Decided in the 2026-10-05 audit: re-planned on moq-net's own transport
+traits. moq-net has no `web-transport-trait` dependency, so it could not
+call a hook that exists only upstream. The method lives on
+`rs/moq-net/src/transport.rs`'s `poll::SendStream`, implemented by the
+moq-tokio and moq-uring adapters (the in-tree web-transport-moq after
+[the fork](/quest/m1/quic/fork/README.md)); no `web-transport-trait` release
+is needed. Rejected: keeping the method upstream. This quest supersedes the
+design in moq-dev/web-transport#368, whose snapshot-counter shape loses the
+wakeups a latency sample needs.
 
 Add one method to `SendStream`, in the trait's poll style:
 
@@ -29,8 +35,8 @@ use. A default body cannot construct a backend's own `Self::Error`, so
 unsupported has to live in the return type rather than the error, and a
 consumer must treat `None` as unknown, never as delivered.
 
-Implement it in `web-transport-moq` over `moq-quic`'s accessor. Leave
-`web-transport-wasm` on the default; the browser's `WebTransportSendStream.getStats()` is
+Implement it in the moq-tokio and moq-uring adapters over `moq-quic`'s
+accessor. Leave the browser transport on the default; the browser's `WebTransportSendStream.getStats()` is
 unimplemented in shipping Chrome and its `bytesAcknowledged` is at risk in the
 W3C draft. qmux over a reliable transport may treat serialization as
 acknowledgment only if the qmux quest decides that is honest; until then it
@@ -41,7 +47,6 @@ the middle of an in-flight frame, several waiters on one stream in offset
 order, a waiter whose offset lies beyond the final size, reset by sender,
 STOP_SENDING by the receiver, and session close.
 
-Cut a `web-transport-trait` release; the adapter lands in-tree against it.
 
 Decided in the 2026-09-30 audit: moved to m2 with its only consumer,
 [frame-granularity starvation](/quest/m2/starvation-frames.md).

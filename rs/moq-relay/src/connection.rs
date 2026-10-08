@@ -1,4 +1,4 @@
-use crate::{auth, cluster};
+use crate::{auth, cluster, refusals::Refusal};
 
 use axum::http;
 use moq_tokio::server::Request;
@@ -9,6 +9,7 @@ use moq_tokio::server::Request;
 /// the right code instead of sprinkling close/return at each failure site.
 struct StatusError {
 	status: http::StatusCode,
+	refusal: Refusal,
 	source: anyhow::Error,
 }
 
@@ -16,6 +17,7 @@ impl From<auth::Error> for StatusError {
 	fn from(err: auth::Error) -> Self {
 		Self {
 			status: (&err).into(),
+			refusal: (&err).into(),
 			source: err.into(),
 		}
 	}
@@ -82,6 +84,7 @@ impl Connection {
 		let (admitted, registration) = match self.admit().await {
 			Ok(admitted) => admitted,
 			Err(err) => {
+				self.cluster.refusals.record(err.refusal);
 				let reject = match err.status {
 					http::StatusCode::UNAUTHORIZED => moq_tokio::server::Reject::Unauthorized,
 					http::StatusCode::FORBIDDEN => moq_tokio::server::Reject::Forbidden,
@@ -150,6 +153,7 @@ impl Connection {
 		let Some(presented) = cluster::Cluster::lan_credential(self.request.path()) else {
 			return Err(StatusError {
 				status: http::StatusCode::FORBIDDEN,
+				refusal: Refusal::Lan,
 				source: anyhow::anyhow!("LAN peer did not present a membership proof"),
 			});
 		};
@@ -162,10 +166,12 @@ impl Connection {
 			}
 			Some(false) => Err(StatusError {
 				status: http::StatusCode::FORBIDDEN,
+				refusal: Refusal::Lan,
 				source: anyhow::anyhow!("LAN peer did not present this listener's membership proof"),
 			}),
 			None => Err(StatusError {
 				status: http::StatusCode::FORBIDDEN,
+				refusal: Refusal::Lan,
 				source: anyhow::anyhow!("/.cluster request refused: LAN discovery is not enabled"),
 			}),
 		}
@@ -184,7 +190,7 @@ impl Connection {
 /// the session ([`auth::Lease::ended`]) the session closes with the reason, and
 /// the session's own close is reported back through the lease as the `end` event.
 /// Either way, a relay shutdown drains the session with a GOAWAY instead of
-/// cutting it off.
+/// cutting it off, and does not exit before this returns or the drain deadline.
 ///
 /// The session handle is `Send + Sync` whatever transport carries it, so this
 /// runs on the shared runtime even for sessions a pinned QUIC worker drives.
@@ -194,6 +200,7 @@ pub async fn supervise(
 	mut shutdown: crate::shutdown::Observer,
 	registration: Option<crate::session::Registration>,
 ) -> anyhow::Result<()> {
+	let _serving = shutdown.serve();
 	loop {
 		let nudged = async {
 			match &registration {

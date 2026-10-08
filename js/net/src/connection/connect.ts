@@ -6,7 +6,7 @@ import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../
 import { Stream } from "../stream.ts";
 import * as Time from "../time.ts";
 import * as Hex from "../util/hex.ts";
-import { dev, redact } from "../util/log.ts";
+import { redact } from "../util/log.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import type { Established } from "./established.ts";
 import { forwardAnnounced } from "./forward.ts";
@@ -213,10 +213,9 @@ async function connectInner(url: URL, props: Omit<ConnectProps, "url">, abort: P
 
 	// Save if WebSocket won the last race, so we won't give QUIC a head start next time.
 	if (session instanceof Session) {
-		// Still a warning, not a debug line: losing the race means we fell back off QUIC.
-		if (dev()) console.warn(redact(url), "connected via WebSocket");
+		console.debug(redact(url), "connected via WebSocket");
 		websocketWon.add(url.toString());
-	} else if (dev()) {
+	} else {
 		console.debug(redact(url), "connected via WebTransport");
 	}
 
@@ -254,10 +253,10 @@ async function connectTransport(url: URL, session: WebTransport, wiring: Session
 // Negotiate the MoQ protocol over an established transport. The caller races this against
 // the session closing so a close code is not lost behind a failed or stalled SETUP stream.
 async function negotiate(url: URL, session: WebTransport, wiring: SessionProps): Promise<Established> {
-	// qmux Session exposes the negotiated protocol directly (as "" when there is none);
-	// native WebTransport doesn't have a standard .protocol property yet.
+	// The DOM lib has no `protocol` property yet. It is "" when none was negotiated, and
+	// undefined in a browser that predates subprotocols (Firefox before 155).
 	const protocol: string | undefined = (session as { protocol?: string }).protocol || undefined;
-	if (dev()) console.debug(redact(url), "negotiated ALPN:", protocol ?? "(none)");
+	console.debug(redact(url), "negotiated ALPN:", protocol ?? "(none)");
 
 	// Choose setup encoding based on negotiated WebTransport protocol (if any).
 	let setupVersion: Ietf.Version;
@@ -362,7 +361,7 @@ async function handshakeAlpn(
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
 ): Promise<Established> {
-	const { control, solicit, hidden, cluster } = await exchangeSetup(session, version, "moq-lite-js");
+	const { control, early, solicit, hidden, cluster } = await exchangeSetup(session, version, "moq-lite-js");
 
 	return new Ietf.Connection({
 		...wiring,
@@ -370,6 +369,7 @@ async function handshakeAlpn(
 		url,
 		quic: session,
 		control,
+		early,
 		solicit,
 		hidden,
 		cluster,
@@ -472,12 +472,7 @@ async function connectWebTransport(
 		// Dev-only path: http:// can't be a real WebTransport origin, so we fetch the
 		// self-signed cert's hash over plain HTTP and pin it. Production uses https://
 		// and never reaches here. Keep this at debug so it doesn't read as a problem.
-		if (dev()) {
-			console.debug(
-				redact(fingerprintUrl),
-				"performing an insecure fingerprint fetch; use https:// in production",
-			);
-		}
+		console.debug(redact(fingerprintUrl), "performing an insecure fingerprint fetch; use https:// in production");
 
 		// Fetch the fingerprint from the server.
 		// TODO cancel the request if the effect is cancelled.

@@ -52,9 +52,10 @@ refuses the grant),
 `expires`
 (optional unix seconds; the session closes then), `revalidate` (optional
 seconds until the relay asks again), `tier` (optional label handed to
-[stats](/bin/relay/config#stats)), and `peer` (optional; `true` marks another
+[stats](/bin/relay/config#stats)), `peer` (optional; `true` marks another
 relay, so what it announces counts as entering the cluster elsewhere, not as
-ingest here). A 2xx with a grant admits. A 401 or 403 refuses.
+ingest here), and `upstream` (optional; `true` marks that peer as an
+[upstream link](/bin/relay/cluster#upstream-links), and requires `peer`). A 2xx with a grant admits. A 401 or 403 refuses.
 Anything else at connect, a timeout, a 5xx, or an unparseable body, refuses and
 logs an error; nothing is admitted because the server was down. A grant that
 names nothing refuses, and one with `revalidate` but no `expires` is refused
@@ -66,7 +67,7 @@ clock, so later polls, outages, and wall-clock adjustments do not restart it.
 **Revalidate and outage.** On the cadence the relay POSTs `revalidate` with the
 same request. A grant applies: a changed `root` or `mounts`, or one that no longer covers
 what the session holds closes it with `Unauthorized` (the live session is not
-resized in place), and so does a flipped `peer`; a changed `tier` keeps the
+resized in place), and so does a flipped `peer` or `upstream`; a changed `tier` keeps the
 session and moves its stats: its presence counts under the new tier from then
 on, as does each group and subscription it starts afterwards, while one already
 in flight finishes where it began. A 401 or 403 closes the session now, as does a 2xx
@@ -242,11 +243,21 @@ decision: the relay reports its facts in the request's `tls` and enforces the
 grant it gets back. `moq auth serve` grants a certificate only what
 `--mtls-publish` and `--mtls-subscribe` name, empty by default. Public rules
 ignore certificates, so a relay or `moq --listen` on `--auth-public` refuses
-to start with `listen.tls.root` or `web.https.root`.
+to start with `listen.tls.root` or `web.https.root`. Only the QUIC listener
+verifies `listen.tls.root`, so a stream-only relay (no `listen.bind`) refuses
+to start with it too.
 
 Cluster peers are admitted the same way, so a mesh runs
-`moq auth serve --mtls-publish '**' --mtls-subscribe '**'` (or a server
-granting its cluster CA everything); see [Clustering](/bin/relay/cluster).
+`moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-peer` (or a
+server granting its cluster CA everything with `peer: true`); see
+[Clustering](/bin/relay/cluster). `--mtls-peer` marks every certificate as
+another relay, whose broadcasts entered the cluster elsewhere; leave it off
+when certificates identify clients. `--mtls-upstream` also marks those relays
+[upstream](/bin/relay/cluster#upstream-links) and needs `--mtls-peer`.
+Adding or removing either flag on a running server ends each live mTLS session
+at its next re-check, from the `--revalidate` cadence or a
+[push](#the-contract) such as `moq auth revalidate`, so the mesh redials once;
+until then, a session keeps its old marks.
 The LAN mesh credential on `/.cluster/<credential>` stays relay-internal: it
 is a secret the relay minted for itself, checked locally, and never a request
 to the server.
@@ -269,7 +280,7 @@ hold, answered over the contract above.
 moq auth serve --listen 127.0.0.1:4440 \
   --key-dir /etc/moq/keys \
   --public-subscribe 'anon/**' --public-publish 'anon/**' \
-  --mtls-publish '**' --mtls-subscribe '**' \
+  --mtls-publish '**' --mtls-subscribe '**' --mtls-peer \
   --tier edge --expires 1d --revalidate 1m --limit-remote 64
 ```
 
@@ -297,7 +308,7 @@ certificate, not both.
 
 `--mtls-*` and `--public-*` are rooted at `/`, like a token with an empty root,
 and a session they reach nothing at is refused. Cluster peers are admitted by
-certificate; a mesh needs `--mtls-publish '**' --mtls-subscribe '**'`.
+certificate; a mesh needs `--mtls-publish '**' --mtls-subscribe '**' --mtls-peer`.
 
 Every grant carries `--tier`. As in 0.14, nothing is re-checked or closed by
 default: a session lives until its token's `exp` or its certificate's notAfter.
@@ -335,7 +346,7 @@ anonymous rules move too.
 | `--auth-public-publish` / `--auth-public-subscribe` | `--public-publish` / `--public-subscribe`, as patterns |
 | `--auth-public-api URL` | your own server answering the contract |
 | `--auth-mtls-tier LABEL` | `--tier LABEL` (one tier per server) |
-| `listen.tls.root` alone admitting a peer unscoped | `--mtls-publish '**' --mtls-subscribe '**'` |
+| `listen.tls.root` alone admitting a peer unscoped | `--mtls-publish '**' --mtls-subscribe '**' --mtls-peer` |
 | `--auth-api` (token or proxy mode), `Cache-Control` | `--auth-url` pointed at any server answering the contract; `revalidate` and `expires` in the grant |
 | `--auth-domain` | your server reads `server_name` and decides |
 
@@ -384,7 +395,12 @@ bind = "/run/moq/internal.sock"
 allow.uid = [1001]
 ```
 
-Bind TCP to loopback or a private interface; it carries no peer identity. The
-Unix socket is created mode `0666`, so gate it with a restrictive parent
-directory or an explicit allowlist.
+Bind plaintext TCP to loopback or a private interface; it carries no peer
+identity. The Unix socket is created mode `0666`, so gate it with a restrictive
+parent directory or an explicit allowlist.
 These are native-only paths for gateways and stats publishers on the same host.
+
+`listen.tcp.tls = true` serves the TCP listener over TLS with the listen
+certificate instead, for `tls://` dials such as [cluster links](/bin/relay/cluster#tls-links)
+that need neither QUIC nor a WebSocket. It still carries no peer identity: it
+asks for no client certificate, so a peer on it presents a token, not mTLS.

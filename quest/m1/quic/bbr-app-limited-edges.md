@@ -10,8 +10,8 @@ pins that policy.
 ## Plan
 
 The app-limited fix notifies `Controller::on_app_limited(in_flight)` only
-when a transmit poll sends nothing. In moq-dev/noq
-`noq-proto/src/connection/mod.rs`:
+when a transmit poll sends nothing. In
+`rs/moq-quic/src/connection/mod.rs`:
 
 - A poll that sends some packets and then runs dry is not marked. Mark it,
   as Linux does when its write queue empties
@@ -34,7 +34,7 @@ change is intended.
 
 ## Required
 
-- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic` on `dev`, not the frozen fork
+- [Switch](/quest/m1/quic/fork/switch.md) - MoQ runs on `moq-quic`, where this lands; the core and its BBR3 are already in `rs/moq-quic`
 
 ## Related
 

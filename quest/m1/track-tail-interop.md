@@ -16,16 +16,19 @@ that the two agree across a relay on real QUIC.
 
 What stood in the way when the Rust half landed:
 
-- `moq import` exits the moment stdin ends, closing its session with the tail
-  still in flight, so a finite CLI publisher cannot end a track cleanly. The
-  fix is a publisher that waits for its subscriptions to drain before it
-  closes; `moq export ts --linger` is the reader-side cousin.
+- `moq import` exiting the moment stdin ends is cleared: since #4430 a
+  graceful close delivers finished tracks at stdin EOF.
 - The native JS subscriber (`test/interop/clients/js-native`) returns on the
   first frame. It needs a mode that reads a track to its end and reports how it
   ended and which groups it saw.
 
 The harness exposed a relay start-floor defect: when a newer group arrives
-first, earlier in-flight groups can be lost. #4387 fixed it (merged 09-28).
+first, earlier in-flight groups can be lost. #4387 (merged 09-28) fixed that
+case, but the tail lanes still fail on this quest's PR #4225 after it: Interop
+run 37139033242 (2026-10-03) failed `tail rust -> rust`, `rust ->
+js-native-node`, and `rust -> js-native-bun`. Merge `main` (after #4741 and
+#4813) into #4225, rerun, and record here whatever defect still fails; the
+cause is untracked until then.
 
 Decided in the 2026-09-30 audit: the lite-07 drop case moved into
 [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md)'s tests, so the basic Rust and
@@ -38,4 +41,3 @@ delivered and clean. The ordering race itself stays in the unit tests.
 
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - owns the lite-07 drop case on top of this harness
 - [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - keeps a reset stream's header, so the reset acts as a one-group drop
-- [Close waits for the tail](/quest/m1/close-tail.md) - the publisher-side fix this test proves across a real relay

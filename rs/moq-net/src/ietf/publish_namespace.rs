@@ -30,13 +30,30 @@ impl PublishNamespace<'_> {
 	/// The negotiation is session state rather than anything in the message, so the
 	/// caller supplies it. A negotiated session that omits HOP_PATH is a protocol
 	/// violation, which surfaces here as [`DecodeError::InvalidValue`].
-	pub fn decode_body<R: bytes::Buf>(r: &mut R, version: Version, negotiated: bool) -> Result<Self, DecodeError> {
+	pub fn decode_body(r: &mut Decoder<'_>, version: Version, negotiated: bool) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		if version == Version::Draft17 {
-			let _required_request_id_delta = u64::decode(r, version)?;
+			let _required_request_id_delta = r.varint()?;
 		}
-		let track_namespace = decode_namespace(r, version)?;
-		let cluster = decode_cluster_params(r, version, negotiated)?;
+		let track_namespace = decode_namespace(r)?;
+
+		// The token is ignored: the session's grant is what authorizes the request.
+		decode_params!(r, version,
+			0x03 => _authorization_token: Vec<super::Opaque>,
+			cluster::HOP_PATH => hops: Option<cluster::HopPath>,
+			cluster::ROUTE_COST => cost: Option<u64>,
+		);
+
+		let cluster = match negotiated {
+			true => Some(cluster::Advert {
+				hops: hops.ok_or(DecodeError::InvalidValue)?,
+				cost: cost.unwrap_or(0),
+			}),
+			// An endpoint must not append these on a session that did not negotiate the
+			// extension, so either is a violation.
+			false if hops.is_some() || cost.is_some() => return Err(DecodeError::InvalidValue),
+			false => None,
+		};
 
 		Ok(Self {
 			request_id,
@@ -49,16 +66,16 @@ impl PublishNamespace<'_> {
 impl Message for PublishNamespace<'_> {
 	const ID: u64 = 0x06;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		if version == Version::Draft17 {
-			0u64.encode(w, version)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
+			w.varint(0)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
 		}
-		encode_namespace(w, &self.track_namespace, version)?;
+		encode_namespace(w, &self.track_namespace)?;
 		encode_cluster_params(w, version, self.cluster.as_ref())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		Self::decode_body(r, version, false)
 	}
 }
@@ -101,12 +118,12 @@ impl PublishNamespaceUpdate {
 impl Message for PublishNamespaceUpdate {
 	const ID: u64 = 0x02;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => return Err(EncodeError::Version),
 			Version::Draft17 => {
 				self.request_id.encode(w, version)?;
-				0u64.encode(w, version)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
+				w.varint(0)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
 			}
 			_ => self.request_id.encode(w, version)?,
 		}
@@ -117,17 +134,19 @@ impl Message for PublishNamespaceUpdate {
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => return Err(DecodeError::Version),
 			Version::Draft17 => {
 				let request_id = RequestId::decode(r, version)?;
-				let _required_request_id_delta = u64::decode(r, version)?;
+				let _required_request_id_delta = r.varint()?;
 				request_id
 			}
 			_ => RequestId::decode(r, version)?,
 		};
+		// The token is ignored: the session's grant is what authorizes the request.
 		decode_params!(r, version,
+			0x03 => _authorization_token: Vec<super::Opaque>,
 			cluster::HOP_PATH => hops: Option<cluster::HopPath>,
 			cluster::ROUTE_COST => cost: Option<u64>,
 		);
@@ -139,8 +158,8 @@ impl Message for PublishNamespaceUpdate {
 ///
 /// On a session that negotiated the MoQ Cluster extension every advertisement carries
 /// HOP_PATH; ROUTE_COST is optional and absent means 0, so a free path sends nothing.
-pub(super) fn encode_cluster_params<W: bytes::BufMut>(
-	w: &mut W,
+pub(super) fn encode_cluster_params(
+	w: &mut Encoder<'_>,
 	version: Version,
 	advert: Option<&cluster::Advert>,
 ) -> Result<(), EncodeError> {
@@ -157,28 +176,18 @@ pub(super) fn encode_cluster_params<W: bytes::BufMut>(
 	Ok(())
 }
 
-/// Read the Parameters field of an advertisement. See [`encode_cluster_params`].
-pub(super) fn decode_cluster_params<R: bytes::Buf>(
-	r: &mut R,
-	version: Version,
-	negotiated: bool,
-) -> Result<Option<cluster::Advert>, DecodeError> {
-	if !negotiated {
-		// An endpoint must not append these on a session that did not negotiate the
-		// extension, and we know no other parameter here, so any is a violation.
-		decode_params!(r, version,);
-		return Ok(None);
-	}
-
+/// Read the Parameters field of a NAMESPACE on a session that negotiated the extension.
+/// See [`encode_cluster_params`].
+pub(super) fn decode_cluster_params(r: &mut Decoder<'_>, version: Version) -> Result<cluster::Advert, DecodeError> {
 	decode_params!(r, version,
 		cluster::HOP_PATH => hops: Option<cluster::HopPath>,
 		cluster::ROUTE_COST => cost: Option<u64>,
 	);
 
-	Ok(Some(cluster::Advert {
+	Ok(cluster::Advert {
 		hops: hops.ok_or(DecodeError::InvalidValue)?,
 		cost: cost.unwrap_or(0),
-	}))
+	})
 }
 
 /// PublishNamespaceOk message (0x07)
@@ -190,12 +199,12 @@ pub struct PublishNamespaceOk {
 impl Message for PublishNamespaceOk {
 	const ID: u64 = 0x07;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		Ok(Self { request_id })
 	}
@@ -212,17 +221,17 @@ pub struct PublishNamespaceError<'a> {
 impl Message for PublishNamespaceError<'_> {
 	const ID: u64 = 0x08;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
-		self.error_code.encode(w, version)?;
-		self.reason_phrase.encode(w, version)?;
+		w.varint(self.error_code)?;
+		w.string(&self.reason_phrase)?;
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
-		let error_code = u64::decode(r, version)?;
-		let reason_phrase = Cow::<str>::decode(r, version)?;
+		let error_code = r.varint()?;
+		let reason_phrase = Cow::Owned(r.string()?);
 
 		Ok(Self {
 			request_id,
@@ -245,10 +254,10 @@ pub struct PublishNamespaceDone<'a> {
 impl Message for PublishNamespaceDone<'_> {
 	const ID: u64 = 0x09;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft14 | Version::Draft15 => {
-				encode_namespace(w, &self.track_namespace, version)?;
+				encode_namespace(w, &self.track_namespace)?;
 			}
 			Version::Draft16 => {
 				self.request_id.encode(w, version)?;
@@ -258,10 +267,10 @@ impl Message for PublishNamespaceDone<'_> {
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Draft14 | Version::Draft15 => {
-				let track_namespace = decode_namespace(r, version)?;
+				let track_namespace = decode_namespace(r)?;
 				Ok(Self {
 					track_namespace,
 					request_id: RequestId(0),
@@ -294,10 +303,10 @@ pub struct PublishNamespaceCancel<'a> {
 impl Message for PublishNamespaceCancel<'_> {
 	const ID: u64 = 0x0c;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft14 | Version::Draft15 => {
-				encode_namespace(w, &self.track_namespace, version)?;
+				encode_namespace(w, &self.track_namespace)?;
 			}
 			Version::Draft16 => {
 				self.request_id.encode(w, version)?;
@@ -306,15 +315,15 @@ impl Message for PublishNamespaceCancel<'_> {
 				return Err(EncodeError::Version);
 			}
 		}
-		self.error_code.encode(w, version)?;
-		self.reason_phrase.encode(w, version)?;
+		w.varint(self.error_code)?;
+		w.string(&self.reason_phrase)?;
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let (track_namespace, request_id) = match version {
 			Version::Draft14 | Version::Draft15 => {
-				let track_namespace = decode_namespace(r, version)?;
+				let track_namespace = decode_namespace(r)?;
 				(track_namespace, RequestId(0))
 			}
 			Version::Draft16 => {
@@ -325,8 +334,8 @@ impl Message for PublishNamespaceCancel<'_> {
 				return Err(DecodeError::Version);
 			}
 		};
-		let error_code = u64::decode(r, version)?;
-		let reason_phrase = Cow::<str>::decode(r, version)?;
+		let error_code = r.varint()?;
+		let reason_phrase = Cow::Owned(r.string()?);
 		Ok(Self {
 			track_namespace,
 			request_id,
@@ -339,17 +348,17 @@ impl Message for PublishNamespaceCancel<'_> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bytes::BytesMut;
 
 	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
-		let mut buf = BytesMut::new();
-		msg.encode_msg(&mut buf, version).unwrap();
+		let mut buf = Vec::new();
+		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
+			.unwrap();
 		buf.to_vec()
 	}
 
 	fn decode_message<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {
 		let mut buf = bytes::Bytes::from(bytes.to_vec());
-		M::decode_msg(&mut buf, version)
+		crate::coding::decode_buf(&mut buf, version, M::decode_msg)
 	}
 
 	#[test]
@@ -478,8 +487,11 @@ mod tests {
 			request_id: RequestId(42),
 		};
 
-		let mut buf = BytesMut::new();
-		assert!(msg.encode_msg(&mut buf, Version::Draft18).is_err());
+		let mut buf = Vec::new();
+		assert!(
+			msg.encode_msg(&mut Encoder::new(&mut buf, Version::Draft18.into()), Version::Draft18)
+				.is_err()
+		);
 	}
 
 	#[test]
@@ -489,8 +501,11 @@ mod tests {
 			request_id: RequestId(42),
 		};
 
-		let mut buf = BytesMut::new();
-		assert!(msg.encode_msg(&mut buf, Version::Draft17).is_err());
+		let mut buf = Vec::new();
+		assert!(
+			msg.encode_msg(&mut Encoder::new(&mut buf, Version::Draft17.into()), Version::Draft17)
+				.is_err()
+		);
 	}
 
 	#[test]
@@ -502,8 +517,11 @@ mod tests {
 			reason_phrase: "Shutdown".into(),
 		};
 
-		let mut buf = BytesMut::new();
-		assert!(msg.encode_msg(&mut buf, Version::Draft17).is_err());
+		let mut buf = Vec::new();
+		assert!(
+			msg.encode_msg(&mut Encoder::new(&mut buf, Version::Draft17.into()), Version::Draft17)
+				.is_err()
+		);
 	}
 
 	fn hop_path(ids: &[u64]) -> cluster::HopPath {
@@ -555,8 +573,11 @@ mod tests {
 			hops: None,
 			cost: Some(0),
 		};
-		let mut buf = BytesMut::new();
-		assert!(msg.encode_msg(&mut buf, Version::Draft16).is_err());
+		let mut buf = Vec::new();
+		assert!(
+			msg.encode_msg(&mut Encoder::new(&mut buf, Version::Draft16.into()), Version::Draft16)
+				.is_err()
+		);
 		assert!(decode_message::<PublishNamespaceUpdate>(&[0x02, 0x00], Version::Draft16).is_err());
 	}
 

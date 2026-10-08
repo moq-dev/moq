@@ -1,25 +1,48 @@
-# [L] Cross-relay delivery under bursts
+# [XS] Cross-relay bursts re-run
 
 ## Goal
 
-Bursty small-group tracks cross two relays without losing groups or stalling.
-On cdn.moq.pro, publishers and a subscriber on different nodes saw groups
-never arrive (FETCH for them unanswered for 2 s while the publisher stayed
-connected), a subscription opened early deliver only a burst's tail, and
-return tracks stall up to 31 s with `Stream(Old)`. The same workload on one
-node, or one self-hosted relay, loses nothing.
+Condition: the [#4349](https://github.com/moq-dev/moq/issues/4349) reporter
+re-runs their A/B/C comparison (different nodes, one node, self-hosted)
+against current cdn.moq.pro, and ideally shares their load harness, as asked
+in the 2026-10-06 maintainer reply.
+
+Check: a new comment on #4349 with the results, noting for each failed FETCH
+whether it ended in an error or a timeout.
+
+Once the condition clears, delete this quest. If the re-run still loses
+groups or stalls cross-node, replace it with a concrete repro quest built on
+their harness and move the `Closes` entry there; if it comes back clean,
+close #4349 in the deletion PR.
 
 ## Plan
 
-Reproduce first, on a local two-relay cluster with the reporter's harness
-(offered in the issue) and the relay build cdn.moq.pro ran. Then fix what the
-repro shows. Suspects: `Old` expiry or newest-first dropping on the relay hop,
-and FETCH not forwarded or answered upstream. A group awaiting its FIN ack
-now expires and follows priority updates, which removed one candidate cause.
-Keep the repro as a regression test in the cluster tests.
+Established by a mock two-relay repro (one-frame groups in bursts of 14, a
+subscription opened 5 s before the burst, fetch-on-gap with a 2 s deadline,
+a flapping peer link), run against the 0.15.6 tree the reporter's clients
+used and against `main`:
 
-The issue's stale and flapping announcements after a clean close are
-cluster-routing evidence, not this quest's scope.
+- **Fixed.** Burst-start misses (one more group lost per relay hop) and
+  route-flap drops (about 70 of 560 groups) reproduce only on 0.15.6 and are
+  gone on moq-net 0.3.8 and later, most likely by #4387.
+- **Not reproduced.** Unanswered FETCHes and the 30 s `Stream(Old)` stalls
+  showed up on no build, nor in the real-QUIC drill
+  `rs/moq-relay/tests/drills.rs::bursts_cross_a_cluster` (bursts of 30
+  across two clustered relays, every hop with 5% loss, delay, a 100 kbit/s
+  bottleneck that each burst overflows, and 16-stream QUIC credit): every
+  group arrives within about 3.5 s, and the occasional live `Old` reset is
+  usually recovered by FETCH. Not always: on `main` at `fe0113ff2`, 1 of 40
+  runs lost group 89 to a live `Old` reset whose FETCH was also refused `old`
+  (seed 11025055814286623932). Several
+  30 s timers of that era have since been removed or shortened (#4606, #4741).
+  That drill uses a lite peer link; over a `moq-transport-19` peer link, a
+  related refusal does reproduce: FETCHes answered `old` for groups the origin
+  still holds ([IETF peer FETCH refused old](/quest/m1/ietf-peer-fetch-old.md)).
+- **Queueing.** FETCHes beyond a session's stream credit wait for it, one
+  cross-relay round trip per slot, so with tight credit a gap's FETCH can
+  outlast a 2 s deadline without being lost.
+- **Expected.** Across relays a burst arrives newest-first, as the lite draft
+  specifies; fetching on every gap at once multiplies FETCHes.
 
 ## Closes
 
@@ -27,4 +50,4 @@ cluster-routing evidence, not this quest's scope.
 
 ## Related
 
-- [Cluster routing](/quest/m1/cluster-routing/README.md) - owns the stale and flapping announcements from the same report
+- [Routes and announces](/quest/m1/cluster-routing/routes.md) - owns the stale and flapping announcements from the same report

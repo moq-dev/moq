@@ -10,8 +10,18 @@ and verb maps to a Rust one. A docs page shows the layers in each language.
 
 ## Plan
 
-Lands after the release, as one binding break in Python, Go, Swift, and
-Kotlin (Dart is unpublished), so its PRs retarget to `dev`.
+Lands after the release, as one binding break in Python, Go, Swift, Kotlin,
+and Dart. Dart is published now (`moq` 0.1.0 and `moq_ffi` 0.4.x on pub.dev),
+so its renames get the same upgrade note as the others.
+
+Decided in the 2026-10-05 audit:
+
+- The m0 [Bindings](/quest/m0/broadcast-epoch/bindings.md) quest lands
+  first. This line rebases onto it and adopts its epoch surface and the
+  `session.epoch()` rename, rather than renaming again.
+- This line lands before [C++ through moq-ffi](/quest/m1/cpp/README.md),
+  which then ports `cpp/moq`, `cpp/obs`, and the C++ interop client onto the
+  reshaped moq-ffi, so the C++ breaks once.
 
 Settled shape:
 
@@ -34,7 +44,8 @@ Settled shape:
   namespaces.
 - `demand()` is the one way to watch subscribers; producers drop their
   `name`/`is_used`/`used`/`unused` duplicates.
-- moq-ffi only. The hand-written moq-c and `cpp/obs` are out of scope: the
+- moq-ffi and its generated consumers. The C++ line ports `cpp/obs` after
+  this lands (above). The hand-written moq-c is out of scope: the
   [generated C](/quest/m1/c/README.md) and [C++](/quest/m1/cpp/README.md)
   bindings inherit this shape from moq-ffi, so reshaping the hand-written C
   ABI would break C users twice.
@@ -47,11 +58,13 @@ work no child does:
   each language's module, linked from every binding page.
 - The bindings section of the following release's upgrade page: old call to
   new call per language.
+- `MoqGroupRequest` gains `demand()` in moq-ffi and every wrapper, matching
+  Rust's `group::Request::demand`, so a group server can see when nobody
+  still wants the group (decided in #4868; the bullet was lost when #4946
+  removed `net.md`).
 - `just test interop --all` green on the finished line.
 
 ## Required
 
-- [JSON](/quest/m1/ffi-shape/json.md) - the pilot: json and flate become their own namespaces wrapping a track in every binding and set the per-language pattern
-- [Net](/quest/m1/ffi-shape/net.md) - client and server take config records, snapshots are records, and the verbs match moq-net
-- [Media](/quest/m1/ffi-shape/media.md) - catalog, import, and container consume move under `media`
+- [Bindings](/quest/m0/broadcast-epoch/bindings.md) - lands first; this line adopts its epoch surface and the `session.epoch()` rename
 - [Codecs](/quest/m1/ffi-shape/codec.md) - audio and video encoders and decoders move under their own namespaces with one constructor shape

@@ -21,7 +21,7 @@ export interface MicrophoneProps extends Inputs<MicrophoneInput> {
 type MicrophoneOutput = {
 	// The live microphone track, or undefined while disabled or denied.
 	source: Signal<Media | undefined>;
-	/** A terminal getUserMedia failure, cleared when a new capture attempt begins. */
+	/** A terminal capture failure, cleared when a new capture attempt begins. */
 	error: Signal<Error | undefined>;
 };
 
@@ -69,6 +69,10 @@ export class Microphone {
 		const constraints = effect.get(this.constraints);
 
 		if (!this.#retry.begin(effect, [device, constraints])) {
+			// `failure` is set only when nothing remains, so a backoff stays quiet.
+			const failure = this.#retry.spent();
+			if (failure) this.#out.error.set(failure);
+
 			// Waiting out a backoff, or out of budget entirely, with the same settings. Either way
 			// a change to what is plugged in is new information worth acting on now, so watch the
 			// device list here and not while healthy, where a rerun would restart a working capture
@@ -110,8 +114,8 @@ export class Microphone {
 				stream = await effect.race(media);
 			} catch (error) {
 				if (effect.abort.aborted) return;
+				if (this.#retry.rejected(error)) return;
 				this.#out.error.set(error instanceof Error ? error : new Error(String(error)));
-				this.#retry.terminal();
 				return;
 			}
 
@@ -125,7 +129,10 @@ export class Microphone {
 			effect.cleanup(this.device.capture(settings?.deviceId));
 
 			// A track that arrives dead already fired "ended", so nothing would ever rerun us.
-			if (!track || track.readyState === "ended") return this.#retry.failed();
+			if (!track || track.readyState === "ended") {
+				this.#retry.ended();
+				return;
+			}
 
 			this.#retry.succeeded(effect, track);
 			effect.set(this.#out.source, { audio: { track, kind: "voice" } });

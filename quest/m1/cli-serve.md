@@ -1,40 +1,37 @@
-# [M] A listening CLI session is admitted like a relay's
+# [S] A listening CLI session is counted and drained like a relay's
 
 ## Goal
 
 A session accepted by `moq import --listen` or `moq export --listen` is
-authenticated (JWT, mTLS, or public prefixes), scoped by its grant, counted in
-stats, and drained on shutdown, the way a relay admits one. Today
-`spawn_server`, `route_server`, and `spawn_serve` (`rs/moq-cli/src/main.rs`)
-accept every request with `request.ok()` and attach the process's single
-origin in whichever directions the stages use, so a listening CLI is an open
-relay. `moq-relay` stays its own minimal binary; this does not make `moq` the
-relay.
+counted in stats and drained on shutdown, the way a relay's is. Admission
+already matches the relay: since #3688 `serve_client`
+(`rs/moq-cli/src/main.rs`) admits each session through a `moq_relay::auth`
+lease, scopes the origin by its grant, and refuses what the grant does not
+allow. What remains is that it then calls `moq_relay::supervise` with
+`shutdown::Observer::disabled()` and no stats. `moq-relay` stays its own
+minimal binary; this does not make `moq` the relay.
 
 ## Plan
 
-- Replace the CLI's three server helpers with the relay's acceptance path,
-  exposing a small library entry point when the CLI needs it. `MoqSide` nests
-  `moq_relay::auth::Config` and `stats::Config`, so `--auth-*` and `--stats-*`
-  read the same on both binaries; `--auth-public '**'` is the open listener,
-  spelled the same on both.
-- The Unix peer-credential gate on `--listen-unix-bind` and the certificate
-  endpoint for an explicit `--listen` survive, rehomed on the relay's web
-  server or kept as the CLI's, whichever leaves one copy.
+Decided in the 2026-10-05 audit: re-scoped to what remains. The `spawn_server`
+auth path now refuses only a LAN-only mesh with no auth source and stops
+startup on any other invalid auth config.
+
 - Drain: on SIGTERM the listener sends GOAWAY and waits `drain_timeout` like
-  the relay, instead of dropping sessions.
+  the relay, through a real `shutdown::Observer` instead of the disabled one.
+  [Drain handshakes](/quest/m1/drain-handshakes.md) moves where the relay
+  takes that count; hand the observer over the way it settles.
+- Stats: `MoqSide` nests `stats::Config` like the relay, so `--stats-*` reads
+  the same on both binaries, and `supervise` gets it instead of `None`.
 - Docs: `doc/bin/cli.md` describes listening in the relay's terms and links
   the relay's auth page rather than restating it.
-- Test: an authenticated viewer with a scoped token sees only its root on a
-  `moq import --listen`; an unscoped one is refused when a key is
-  configured; the unauthenticated import-to-export smoke keeps passing with
-  `--auth-public`.
+- Test: a listening import drains its viewers on SIGTERM within
+  `drain_timeout`, and its sessions show up in stats.
 
 Decided in the 2026-09-30 audit: no longer waits on
-[`moq relay`](/quest/m2/moq-relay-subcommand.md). `moq-cli` already depends
-on `moq-relay`, and the open-relay listener is a security gap that should not
-wait on an m2 subcommand.
+[`moq relay`](/quest/m3/moq-relay-subcommand.md).
 
 ## Related
 
-- [`moq relay`](/quest/m2/moq-relay-subcommand.md) - the CLI later hosts the whole relay
+- [`moq relay`](/quest/m3/moq-relay-subcommand.md) - the CLI later hosts the whole relay
+- [Drain handshakes](/quest/m1/drain-handshakes.md) - moves where the drain count is taken

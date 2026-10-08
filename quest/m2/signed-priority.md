@@ -29,8 +29,7 @@ Decided with the maintainer:
 - A zeroed moq-c `moq_track_info` then means the default, which retires the
   need for a `priority_present` flag.
 
-Changing published `u8` fields to `i8` is an API break in every language, so
-this lands on `dev`. Look for anything that does arithmetic on priority
+Changing published `u8` fields to `i8` is an API break in every language. Look for anything that does arithmetic on priority
 (the lite send queue, JS send-order packing, the bandwidth allocator, the
 relay's max-of-subscribers) and keep its ordering, not just its type.
 
@@ -43,9 +42,15 @@ moq-archive's `Info::priority` follows. Its version-1 `.info` stores the
 Report the wire impact in the PR: none in format, but the default byte moves
 again, from 127 to 128 on moq-lite and from 128 to 127 on IETF.
 
-Decided in the 2026-09-30 audit: moved to m2. It stays deferred unless it
-ships in the same `dev` release as the moxygen default change, so the default
-byte moves once instead of twice.
+Decided in the 2026-09-30 audit: moved to m2.
+
+Decided in the 2026-10-05 audit: the moxygen default change
+(`DEFAULT_PRIORITY = 127`, #4273) already shipped in moq-net v0.3.9 on
+2026-10-03, so the old gate (ship in the same release so the default byte
+moves once) can no longer be met and is dropped. Accept the second default
+move, and add an upgrade note to the release's upgrade page saying the
+default byte moves again and why. Rejected: a mapping that keeps today's
+bytes (lite byte = p + 127), and deleting the quest.
 
 ## Related
 

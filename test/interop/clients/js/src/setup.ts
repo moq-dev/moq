@@ -1,8 +1,10 @@
-// Role logic for the browser client: read ?role= and wire up a publisher or the real
-// <moq-watch-ui> player. The Playwright drivers (driver.ts for the interop matrix, media.ts for the
-// media-output and lifecycle checks) poll the state each role mirrors onto the DOM.
+// Role logic for the browser client: read ?role= and wire up a publisher, the real
+// <moq-watch-ui> player, or a refused session. The Playwright drivers (driver.ts for the interop
+// matrix, media.ts for the media-output and lifecycle checks, close.ts for the close code) poll the
+// state each role mirrors onto the DOM.
 import type MoqPublish from "@moq/publish/element";
 import type MoqWatch from "@moq/watch/element";
+import { refused } from "./close";
 import { type CaptureState, FAULTS, type Fault, publish, SAMPLE_MS } from "./contract";
 import { Fixture } from "./fixture";
 import { attach, watchResources } from "./probe";
@@ -55,6 +57,10 @@ if (role === "publish") {
 	// The driver stops and restarts the publisher in place to exercise a same-path republish, which
 	// has to reuse this page so the audio context keeps its user activation.
 	publish({
+		liveGop: () => {
+			if (!fixture) throw new Error("the fixture is stopped");
+			return fixture.liveGop();
+		},
 		stop: () => {
 			fixture?.close();
 			fixture = undefined;
@@ -63,6 +69,8 @@ if (role === "publish") {
 			fixture?.close();
 			fixture = new Fixture(host, url, broadcast, fault);
 		},
+		disableVideo: () => fixture?.setVideo(false),
+		enableVideo: () => fixture?.setVideo(true),
 	});
 } else if (role === "subscribe") {
 	await customElements.whenDefined("moq-watch");
@@ -119,6 +127,9 @@ if (role === "publish") {
 			stop = attach(el);
 		},
 	});
+} else if (role === "close") {
+	// The relay refuses this session; mirror how it closed for close.ts to check.
+	document.body.dataset.interopClose = JSON.stringify(await refused(url));
 } else {
-	throw new Error("missing ?role=publish|fixture|subscribe");
+	throw new Error("missing ?role=publish|fixture|subscribe|close");
 }

@@ -256,15 +256,18 @@ export async function readFixtureState(page: Page): Promise<FixtureState> {
 }
 
 /** Invoke one of the page's {@link InteropControl} commands. */
-export async function command(page: Page, name: keyof InteropControl): Promise<void> {
-	await page.evaluate(
+export async function command<K extends keyof InteropControl>(
+	page: Page,
+	name: K,
+): Promise<Awaited<ReturnType<InteropControl[K]>>> {
+	return (await page.evaluate(
 		([key, fn]) => {
-			const control = (window as unknown as Record<string, Record<string, () => void> | undefined>)[key];
+			const control = (window as unknown as Record<string, Record<string, () => unknown> | undefined>)[key];
 			if (!control?.[fn]) throw new Error(`the page exposes no ${fn} command`);
-			control[fn]();
+			return control[fn]();
 		},
 		[CONTROL, name] as const,
-	);
+	)) as Awaited<ReturnType<InteropControl[K]>>;
 }
 
 /** Read the page's live resource counts, which outlive the player element. */

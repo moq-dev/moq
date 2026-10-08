@@ -20,9 +20,11 @@
 
 mod adts;
 mod export;
+mod health;
 mod import;
 mod mux_rate;
 mod programs;
+mod psi;
 mod si;
 
 // The `mpegts` catalog section (per-track PID + descriptors plus verbatim carriage

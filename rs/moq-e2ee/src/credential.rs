@@ -7,11 +7,11 @@ use aws_lc_rs::hkdf::{self, HKDF_SHA256};
 use bytes::Bytes;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::epoch::Epoch;
 use crate::error::Result;
 use crate::generation::Generation;
 use crate::limits::{KEY_LEN, NAME_LEN, PATH_LABEL, PROFILE, SECRET_LEN, check_bytes, check_u53};
 use crate::name::encode;
+use moq_net::Epoch;
 
 /// What the application distributes over its own authenticated channel.
 pub struct Config {
@@ -77,7 +77,7 @@ impl Credential {
 		self.0.kid
 	}
 
-	/// The opaque broadcast path for a semantic broadcast name; instances publish at `<path>/<epoch>`.
+	/// The opaque broadcast path for a semantic broadcast name; each instance announces its epoch on the route.
 	///
 	/// # Errors
 	///

@@ -8,6 +8,9 @@ device's codec list opens.
 
 ## Plan
 
+Rust owns capture and codecs on mobile, settled in the 2026-09-30 audit, so this backend is
+the Android audio codec path.
+
 The audio counterpart of `rs/moq-video/src/decode/backend/mediacodec.rs`,
 behind a new optional audio `mediacodec` feature and the decode seam, on `target_os
 = "android"`.
@@ -22,10 +25,6 @@ behind a new optional audio `mediacodec` feature and the decode seam, on `target
   compile lane. Add the audio feature to that lane.
 - The binding ships in the moq-ffi Android slice, which is how Kotlin and Dart
   reach it.
-
-## Required
-
-- [Mobile ownership](/quest/m1/mobile-ownership.md) - if Kotlin owns platform codecs, this backend is moot
 
 ## Related
 

@@ -4,7 +4,7 @@
  * @module
  */
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
-import { FrameTooLarge, GroupTooLarge, TooFarBehind } from "./error.ts";
+import { FrameTooLarge, GroupTooLarge, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { hooks, type ReadGroupFrame } from "./internal.ts";
 import { Timestamp } from "./time.ts";
 
@@ -15,7 +15,7 @@ export const MAX_GROUP_CACHE_BYTES = 32 * 1024 * 1024;
 export const MAX_GROUP_FRAMES = 8192;
 
 /**
- * A frame buffered in a group: its presentation {@link Timestamp} and payload bytes.
+ * A frame buffered in a group: its presentation {@link Timestamp}, if any, and payload bytes.
  *
  * The timestamp carries its own scale, so a track can pick its units; the wire layer
  * converts it into the track's negotiated timescale.
@@ -24,10 +24,11 @@ export interface Frame {
 	/** The frame payload. */
 	payload: Uint8Array;
 	/**
-	 * Presentation timestamp. Required: for a payload with no presentation time of its own
-	 * (a JSON catalog, control state) pass {@link Timestamp.now} explicitly.
+	 * Presentation timestamp, present exactly when the track has a timescale. A frame on a
+	 * track without one is untimed and omits it; a write that disagrees with its track is
+	 * refused with {@link TimestampMismatch}.
 	 */
-	timestamp: Timestamp;
+	timestamp?: Timestamp;
 }
 
 /** Options for a sequence-aware frame read. */
@@ -59,7 +60,11 @@ class GroupState {
 	start = 0;
 
 	cacheBytes = 0;
-	// The first frame's timestamp, retained after reads.
+	// Whether the owning track has a timescale, so every frame must carry a timestamp (true)
+	// or none may (false). Undefined for a group no track has claimed yet, which takes either.
+	timed?: boolean;
+	// The first frame's timestamp, retained after reads. Media time only: an untimed group
+	// never has one, so it says nothing about whether a frame was written.
 	timestamp?: Timestamp;
 	// The newest frame's timestamp: where a reader that has taken every frame sits.
 	latest?: Timestamp;
@@ -67,6 +72,11 @@ class GroupState {
 	constructor(sequence: number) {
 		this.sequence = sequence;
 	}
+}
+
+// Refuse a frame whose timedness disagrees with the track's.
+function checkTimed(timed: boolean | undefined, frame: Frame) {
+	if (timed !== undefined && timed !== (frame.timestamp !== undefined)) throw new TimestampMismatch();
 }
 
 function appendFrame(state: GroupState, frame: Frame) {
@@ -82,6 +92,43 @@ function appendFrame(state: GroupState, frame: Frame) {
 	state.total.update((total) => total + 1);
 }
 
+let makeDemand: (sequence: number, used: Getter<boolean>, state: GroupState) => Demand;
+
+/** A watch-only view of a group's mirror readers, including coalesced fetches. */
+export class Demand {
+	/** The group sequence this handle watches. */
+	readonly sequence: number;
+	#used: Getter<boolean>;
+	#state: GroupState;
+
+	private constructor(sequence: number, used: Getter<boolean>, state: GroupState) {
+		this.sequence = sequence;
+		this.#used = used;
+		this.#state = state;
+	}
+
+	static {
+		makeDemand = (sequence, used, state) => new Demand(sequence, used, state);
+	}
+
+	/** Whether any mirror reader is attached. */
+	get used(): Getter<boolean> {
+		return this.#used;
+	}
+
+	/** Wait until all mirror readers leave or the group closes. */
+	async unused(): Promise<void> {
+		while (this.#used.peek() && this.#state.closed.peek() === undefined) {
+			await Signal.race(this.#used, this.#state.closed);
+		}
+	}
+
+	/** The group's clean close or abort error. */
+	get closed(): GetPromise<Error | null> {
+		return this.#state.closed;
+	}
+}
+
 /**
  * The write side of an ordered stream of frames within a track.
  *
@@ -94,10 +141,11 @@ export class Producer {
 	#state: GroupState;
 	#mirrors?: Set<GroupState>;
 
-	// Whether any mirror reader is attached (see {@link used}). Fetch coalescing watches it to
+	// Whether any mirror reader is attached (see {@link Demand.used}). Fetch coalescing watches it to
 	// cancel an abandoned download; a group can stay open indefinitely (a catalog or JSON stream),
 	// so this is what stops a reader-less fetch instead of the stream ending on its own.
 	#used = new Signal<boolean>(false);
+	#demand: Demand;
 
 	// When the group was created or last written. Retention ages a group from this,
 	// not from its creation, so a group still being filled is never reclaimed.
@@ -106,12 +154,24 @@ export class Producer {
 	constructor(sequence: number) {
 		this.#state = new GroupState(sequence);
 		this.sequence = sequence;
+		this.#demand = makeDemand(sequence, this.#used, this.#state);
+	}
+
+	static {
+		hooks.bindGroupTimed = (group, timed) => {
+			const state = group.#state;
+			if (state.timed === timed) return;
+			// Another track already holds it to the opposite timedness, empty or not.
+			if (state.timed !== undefined) throw new TimestampMismatch();
+			for (const frame of state.frames.peek()) checkTimed(timed, frame);
+			state.timed = timed;
+		};
 	}
 
 	/**
 	 * When the group was created or last written, in `performance.now()` milliseconds.
 	 *
-	 * @internal Track retention only.
+	 * @internal Idle cache eviction only.
 	 */
 	get activity(): number {
 		return this.#activity;
@@ -171,28 +231,9 @@ export class Producer {
 		return makeConsumer(dst);
 	}
 
-	/**
-	 * Whether any mirror reader is currently attached.
-	 *
-	 * Pairs with {@link unused}. Fetch coalescing watches it to cancel a download once every reader
-	 * has gone: a group can stay open indefinitely (a catalog track, a JSON stream), so it can't
-	 * rely on the stream ending on its own.
-	 *
-	 * @internal Track fan-out and fetch coalescing only.
-	 */
-	get used(): Getter<boolean> {
-		return this.#used;
-	}
-
-	/**
-	 * Resolves once no mirror reader remains (or the group closes).
-	 *
-	 * @internal Track fan-out and fetch coalescing only.
-	 */
-	async unused(): Promise<void> {
-		while (this.#used.peek() && this.#state.closed.peek() === undefined) {
-			await Signal.race(this.#used, this.#state.closed);
-		}
+	/** Watch the mirror readers attached to this group. */
+	demand(): Demand {
+		return this.#demand;
 	}
 
 	/** Writes a frame to the group. */
@@ -204,6 +245,7 @@ export class Producer {
 		// accepting it would report success for a write nothing can ever read. Rust rejects
 		// it up front with `Error::FrameTooLarge`; do the same rather than silently dropping it.
 		if (frame.payload.byteLength > MAX_GROUP_CACHE_BYTES) throw new FrameTooLarge();
+		checkTimed(this.#state.timed, frame);
 		if (
 			this.#state.total.peek() >= MAX_GROUP_FRAMES ||
 			this.#state.cacheBytes + frame.payload.byteLength > MAX_GROUP_CACHE_BYTES
@@ -232,17 +274,17 @@ export class Producer {
 		}
 	}
 
-	/** Write a string as a single UTF-8 encoded frame, stamped with {@link Timestamp.now}. */
+	/** Write a string as a single UTF-8 encoded frame, stamped with {@link Timestamp.now}, so the track must be timed. */
 	writeString(str: string) {
 		this.writeFrame({ payload: new TextEncoder().encode(str), timestamp: Timestamp.now() });
 	}
 
-	/** Write a value as a single JSON-encoded frame, stamped with {@link Timestamp.now}. */
+	/** Write a value as a single JSON-encoded frame, stamped with {@link Timestamp.now}, so the track must be timed. */
 	writeJson(json: unknown) {
 		this.writeString(JSON.stringify(json));
 	}
 
-	/** Write a boolean as a single one-byte frame, stamped with {@link Timestamp.now}. */
+	/** Write a boolean as a single one-byte frame, stamped with {@link Timestamp.now}, so the track must be timed. */
 	writeBool(bool: boolean) {
 		this.writeFrame({ payload: new Uint8Array([bool ? 1 : 0]), timestamp: Timestamp.now() });
 	}
@@ -410,7 +452,7 @@ export class Consumer {
 		if (!this.#expiry?.expired()) return false;
 
 		if (unread) {
-			this.#terminal = new Error("group exceeded the subscription max age budget");
+			this.#terminal = new Error("group exceeded the subscription max delay budget");
 		} else {
 			this.#ended = true;
 		}

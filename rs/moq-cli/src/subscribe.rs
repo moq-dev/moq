@@ -82,8 +82,8 @@ impl From<AudioCodecArg> for AudioCodecKind {
 	}
 }
 
-/// Rendition selection flags for stdout container sinks and native playback.
-/// With no flags set, every rendition is kept.
+/// Rendition selection flags for the stdout container sinks that honor them and
+/// native playback. With no flags set, every rendition is kept.
 #[derive(usage::Args, Clone, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct SelectArgs {
@@ -95,6 +95,10 @@ pub struct SelectArgs {
 	#[usage(long, value_enum)]
 	pub video_codec: Option<VideoCodecArg>,
 
+	/// Leave video out (audio only).
+	#[usage(long, conflicts("--video-name", "--video-codec", "--no-audio"))]
+	pub no_video: bool,
+
 	/// Pick the audio rendition with this exact name.
 	#[usage(long)]
 	pub audio_name: Option<String>,
@@ -102,6 +106,10 @@ pub struct SelectArgs {
 	/// Keep only audio renditions whose codec family matches.
 	#[usage(long, value_enum)]
 	pub audio_codec: Option<AudioCodecArg>,
+
+	/// Leave audio out (video only).
+	#[usage(long, conflicts("--audio-name", "--audio-codec"))]
+	pub no_audio: bool,
 }
 
 impl SelectArgs {
@@ -110,23 +118,54 @@ impl SelectArgs {
 	/// `force` takes the place of `--video-codec`, for a sink whose format implies
 	/// one. Pass `None` to use the flag as given.
 	pub(crate) fn selection(&self, force: Option<VideoCodecKind>) -> select::Broadcast {
-		let mut video = select::Video::default();
-		if let Some(name) = &self.video_name {
-			video = video.name(name);
-		}
-		if let Some(codec) = force.or_else(|| self.video_codec.map(Into::into)) {
-			video = video.codec(codec);
+		let mut selection = select::Broadcast::default();
+
+		if !self.no_video {
+			let mut video = select::Video::default();
+			if let Some(name) = &self.video_name {
+				video = video.name(name);
+			}
+			if let Some(codec) = force.or_else(|| self.video_codec.map(Into::into)) {
+				video = video.codec(codec);
+			}
+			selection = selection.video(video);
 		}
 
-		let mut audio = select::Audio::default();
-		if let Some(name) = &self.audio_name {
-			audio = audio.name(name);
-		}
-		if let Some(codec) = self.audio_codec {
-			audio = audio.codec(codec.into());
+		if !self.no_audio {
+			let mut audio = select::Audio::default();
+			if let Some(name) = &self.audio_name {
+				audio = audio.name(name);
+			}
+			if let Some(codec) = self.audio_codec {
+				audio = audio.codec(codec.into());
+			}
+			selection = selection.audio(audio);
 		}
 
-		select::Broadcast::default().video(video).audio(audio)
+		selection
+	}
+
+	/// The first selection flag passed, to name it when a sink can't honor it.
+	pub(crate) fn flag(&self) -> Option<&'static str> {
+		[
+			(self.video_name.is_some(), "--video-name"),
+			(self.video_codec.is_some(), "--video-codec"),
+			(self.no_video, "--no-video"),
+			(self.no_audio, "--no-audio"),
+		]
+		.into_iter()
+		.find_map(|(given, flag)| given.then_some(flag))
+		.or_else(|| self.audio_flag())
+	}
+
+	/// The first flag passed that selects an audio rendition, for a sink with no audio.
+	pub(crate) fn audio_flag(&self) -> Option<&'static str> {
+		[
+			(self.audio_name.is_some(), "--audio-name"),
+			(self.audio_codec.is_some(), "--audio-codec"),
+		]
+		.into_iter()
+		.find_map(|(given, flag)| given.then_some(flag))
 	}
 }
 
@@ -137,7 +176,7 @@ pub struct SubscribeArgs {
 	pub format: SubscribeFormat,
 
 	/// How far playback may drift from the live edge before skipping groups.
-	pub max_age: Duration,
+	pub max_delay: Duration,
 
 	/// How long to wait for the broadcast to come back after it ends (TS only).
 	pub linger: Duration,
@@ -237,7 +276,7 @@ impl Subscribe {
 		// yields moof+mdat fragments in timestamp order across tracks.
 		let stream = self.stream().await?;
 		let mut fmp4 = moq_mux::container::fmp4::Export::new(self.source, stream)
-			.with_max_age(self.args.max_age)
+			.with_max_delay(self.args.max_delay)
 			.with_fragment_duration(self.args.fragment_duration);
 
 		while let Some(chunk) = fmp4.next().await? {
@@ -256,7 +295,7 @@ impl Subscribe {
 		// shape internally (synthesizing avcC/hvcC from inline parameter sets).
 		let stream = self.stream().await?;
 		let mut mkv = moq_mux::container::mkv::Export::new(self.source, stream)
-			.with_max_age(self.args.max_age)
+			.with_max_delay(self.args.max_delay)
 			.with_fragment_duration(self.args.fragment_duration);
 
 		while let Some(chunk) = mkv.next().await? {
@@ -271,7 +310,7 @@ impl Subscribe {
 		let mut stdout = tokio::io::stdout();
 
 		let stream = self.stream().await?;
-		let mut h264 = moq_mux::codec::h264::Export::new(self.source, stream).with_max_age(self.args.max_age);
+		let mut h264 = moq_mux::codec::h264::Export::new(self.source, stream).with_max_delay(self.args.max_delay);
 
 		while let Some(chunk) = h264.next().await? {
 			stdout.write_all(&chunk).await?;
@@ -285,7 +324,7 @@ impl Subscribe {
 		let mut stdout = tokio::io::stdout();
 
 		let stream = self.stream().await?;
-		let mut h265 = moq_mux::codec::h265::Export::new(self.source, stream).with_max_age(self.args.max_age);
+		let mut h265 = moq_mux::codec::h265::Export::new(self.source, stream).with_max_delay(self.args.max_delay);
 
 		while let Some(chunk) = h265.next().await? {
 			stdout.write_all(&chunk).await?;
@@ -307,7 +346,7 @@ impl Subscribe {
 		let mut broadcast = source.broadcast().await?;
 		let mut ts = moq_mux::container::ts::Export::with_ts(self.source, self.catalog)
 			.await?
-			.with_max_age(self.args.max_age);
+			.with_max_age(self.args.max_delay);
 		if let Some(mux_rate) = self.args.mux_rate {
 			ts = ts.with_mux_rate(mux_rate);
 		}
@@ -320,8 +359,12 @@ impl Subscribe {
 		// repair (#2984). See [`Delivery`] for how the pacing stays
 		// bounded; it needs to know whether each frame was waited for, hence the
 		// hand-rolled poll instead of `ts.next()`.
-		let mut delivery = Delivery::new(self.args.max_age);
+		let mut delivery = Delivery::new(self.args.max_delay);
 		let linger = self.args.linger;
+		// Reports a track that stops reaching the output while the rest keeps flowing,
+		// the way `publish` reports one that stops arriving.
+		let mut log = moq_mux::container::ts::stats::Log::default();
+		let mut sampled = tokio::time::Instant::now();
 		loop {
 			let end = loop {
 				let mut waited = false;
@@ -341,6 +384,11 @@ impl Subscribe {
 				};
 				delivery.update(&frame, ts.discontinuity());
 				delivery.deliver(&frame, waited, &mut stdout).await?;
+
+				if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
+					sampled = tokio::time::Instant::now();
+					log.sample(ts.stats().into());
+				}
 			};
 
 			// Any end waits out the linger, and on expiry the last one is the result: a
@@ -368,9 +416,8 @@ impl Subscribe {
 		// frame interleaved by timestamp. Avc3 sources are transcoded to avc1 shape
 		// internally (synthesizing avcC from inline parameter sets). Only H.264 video
 		// and AAC audio are supported; `fragment_duration` does not apply to FLV.
-		let mut flv = moq_mux::container::flv::Export::with_catalog_format(self.source, self.catalog)
-			.await?
-			.with_max_age(self.args.max_age);
+		let stream = self.stream().await?;
+		let mut flv = moq_mux::container::flv::Export::new(self.source, stream).with_max_delay(self.args.max_delay);
 
 		while let Some(chunk) = flv.next().await? {
 			stdout.write_all(&chunk).await?;

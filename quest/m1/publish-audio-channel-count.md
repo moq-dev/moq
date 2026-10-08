@@ -15,10 +15,13 @@ decide.
 
 ## Plan
 
-`js/publish/src/audio/capture.ts:178` sets
+`js/publish/src/audio/capture.ts:245` sets
 `channelCountMode: requestedChannels !== undefined ? "explicit" : "max"`, so
 supplying `channelCount` is what puts the AudioWorklet behind a forced Web
-Audio downmix. The `"max"` path, taken when the field is omitted, does not.
+Audio downmix. Omitting it does not always take the `"max"` path:
+`requestedChannels` (`capture.ts:183`) falls back to `requestedChannelCount`,
+so an applied `getUserMedia` channelCount constraint forces `"explicit"` too.
+Account for that path when isolating the cause.
 
 What was measured, on macOS headless Chromium through `just test media`,
 publishing a `MediaStreamAudioDestinationNode` track into a graph already
@@ -41,7 +44,7 @@ What is not established, and should be first:
   obvious guess and is not evidence.
 - Whether a `getUserMedia` microphone track shows it, or only a
   destination-node track, whose channel count Web Audio reports as 2 by
-  default. `requestedChannelCount` (`capture.ts:141`) exists for the macOS
+  default. `requestedChannelCount` (`capture.ts:318`) exists for the macOS
   mono-mic misreport, so that path has a real caller and cannot simply lose the
   override.
 
@@ -54,3 +57,4 @@ be cheaper than a full media run, if one can be made to fail reliably.
 ## Related
 
 - [Browser benchmarks](/quest/m1/browser-benchmarks.md) - the other place browser-side capture and encode costs get measured
+- [Media audio-tone check](/quest/m1/media-audio-tone.md) - a test that misses tone samples, possibly from the same cause

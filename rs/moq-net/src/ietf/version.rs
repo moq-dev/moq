@@ -53,20 +53,23 @@ mod tests {
 	use super::*;
 	use crate::coding::Encode;
 	use crate::ietf::{
-		Fetch, FetchType, Fill, Filter, GroupFlags, GroupHeader, GroupOrder, Location, Message, Properties, Publish,
-		RequestId, Subscribe, SubscribeOk,
+		EndLocation, Fetch, FetchType, Fill, Filter, GroupFlags, GroupHeader, GroupOrder, Location, Message,
+		Properties, Publish, RequestId, Subscribe, SubscribeOk,
 	};
 	use crate::{Path, Timescale};
 
 	fn message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
 		let mut buf = Vec::new();
-		msg.encode_msg(&mut buf, version).expect("encode");
+		msg.encode_msg(&mut crate::coding::Encoder::new(&mut buf, version.into()), version)
+			.expect("encode");
 		buf
 	}
 
 	fn field<E: Encode<Version>>(value: &E, version: Version) -> Vec<u8> {
 		let mut buf = Vec::new();
-		value.encode(&mut buf, version).expect("encode");
+		value
+			.encode(&mut crate::coding::Encoder::new(&mut buf, version.into()), version)
+			.expect("encode");
 		buf
 	}
 
@@ -95,6 +98,8 @@ mod tests {
 				range_filters: false,
 			}),
 			properties_wanted: false,
+			forward: true,
+			range_filters: false,
 		};
 
 		let subscribe_ok = SubscribeOk {
@@ -119,12 +124,19 @@ mod tests {
 			request_id: RequestId(3),
 			subscriber_priority: 64,
 			group_order: GroupOrder::Ascending,
-			fetch_type: FetchType::Standalone {
+			fetch_type: FetchType::Filtered {
 				namespace: Path::new("broadcast"),
 				track: "video".into(),
-				start: Location { group: 1, object: 0 },
-				end: Location { group: 2, object: 0 },
+				filter: Filter::Absolute {
+					start: Location { group: 1, object: 0 },
+					end: Some(EndLocation {
+						group: 2,
+						object: Some(0),
+					}),
+				},
 			},
+			range_filters: false,
+			fill_timeout: false,
 		};
 
 		let group = GroupHeader {

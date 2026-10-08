@@ -17,28 +17,32 @@ name: Alert
 on:
   workflow_run:
     # Matched by workflow `name:`, not filename. Every workflow that can run
-    # outside a pull request belongs here; the pull-request-only ones (Check,
-    # Android) are omitted so they don't spawn a skipped Alert run on every
+    # outside a pull request belongs here; the pull-request-only ones (Android)
+    # are omitted so they don't spawn a skipped Alert run on every
     # push to every PR. `just gh check` enforces both halves of that.
     #
     # Swift, OBS, and Platform are here despite also running on pull requests:
     # Swift warms its own Rust cache on `main`, and OBS and Platform build every
-    # merge to `main` and `dev`. Those push runs are nobody's check, so a break in them
+    # merge to `main` and `release`. Those push runs are nobody's check, so a break in them
     # would otherwise go unseen. The cost is a skipped Alert run per pull
     # request.
     workflows:
       - apt-repo
+      - Back-merge
       - Cache
       - Cachix
+      - Check
       - Docker
       - Interop
       - moq-c
       - moq-cli
       - moq-gst
       - moq-relay
+      - moq.sh
       - Nightly
       - OBS
       - Platform
+      - Quest
       - release-brew
       - Release Dart
       - Release Dart FFI

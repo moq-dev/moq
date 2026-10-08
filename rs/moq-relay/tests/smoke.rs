@@ -50,7 +50,7 @@ async fn build_web_with(web_config: web::Config) -> web::Web {
 	let mut auth_config = auth::Config::default();
 	auth_config.public = vec![moq_auth::Pattern::all()];
 	let auth = auth_config
-		.init("test", &moq_tokio::tls::Connect::default())
+		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init");
 
 	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
@@ -179,7 +179,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	// Auth root for `/smoke` is "smoke"; the broadcast "test" announces underneath.
 	assert_eq!(path.as_str(), "test");
 	let bc = sub_consumer
-		.request_broadcast(&path)
+		.request_broadcast(&path, None)
 		.await
 		.expect("announced broadcast resolves");
 
@@ -296,7 +296,7 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 			continue;
 		}
 		let bc = consumer
-			.request_broadcast(".x/y")
+			.request_broadcast(".x/y", None)
 			.await
 			.expect("hidden broadcast resolves");
 		let mut sub = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
@@ -472,7 +472,7 @@ async fn relay_websocket_root_path_upgrades() {
 	assert!(active, "expected announce, got retraction");
 	assert_eq!(path.as_str(), "test");
 	let bc = sub_consumer
-		.request_broadcast(&path)
+		.request_broadcast(&path, None)
 		.await
 		.expect("announced broadcast resolves");
 
@@ -596,7 +596,7 @@ async fn spawn_accept_relay(
 	let server = config.init(Default::default()).expect("server init");
 
 	let auth = auth_config
-		.init("test", &moq_tokio::tls::Connect::default())
+		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init");
 
 	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
@@ -691,7 +691,7 @@ async fn internal_tcp_round_trip() {
 	assert!(active, "expected announce, got retraction");
 	assert_eq!(path.as_str(), "test");
 	let bc = sub_consumer
-		.request_broadcast(&path)
+		.request_broadcast(&path, None)
 		.await
 		.expect("announced broadcast resolves");
 
@@ -790,7 +790,7 @@ async fn internal_unix_round_trip() {
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
 		.await
 		.expect("request timeout")
 		.expect("announced broadcast resolves");
@@ -1111,13 +1111,10 @@ async fn connect_once(
 	Ok((client, connection))
 }
 
-/// The next route and whether it is active, skipping the caught-up marker.
+/// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-	loop {
-		return match announced.next().await? {
-			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
-			moq_net::announce::Event::End(route) => Some((route, false)),
-			moq_net::announce::Event::Live => continue,
-		};
+	match announced.next().await? {
+		moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

@@ -1,8 +1,7 @@
 import type * as Catalog from "@moq/hang/catalog";
-import type * as Moq from "@moq/net";
+import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { playbackJitter } from "./config";
 
 export type Target = {
 	// Optional manual override for the selected rendition name.
@@ -33,7 +32,7 @@ type SourceOutput = {
 	track: Signal<string | undefined>;
 	config: Signal<Catalog.AudioConfig | undefined>;
 
-	// The per-rendition jitter (ms) to add to the sync buffer. Wired into Sync by the parent.
+	// The jitter the selected rendition advertises (ms): a floor on the decoder's playout target.
 	jitter: Signal<Moq.Time.Milli | undefined>;
 };
 
@@ -105,7 +104,10 @@ export class Source {
 	}
 
 	#runSelected(effect: Effect): void {
-		const available = effect.get(this.#out.available);
+		// A disabled rendition has no frames coming, so it is never selected, even by name.
+		const available = Object.fromEntries(
+			Object.entries(effect.get(this.#out.available)).filter(([, config]) => config.enabled !== false),
+		);
 		if (Object.keys(available).length === 0) return;
 
 		const target = effect.get(this.in.target);
@@ -124,7 +126,8 @@ export class Source {
 		effect.set(this.#out.track, selected.track);
 		effect.set(this.#out.config, selected.config);
 
-		effect.set(this.#out.jitter, playbackJitter(selected.config));
+		const jitter = selected.config.jitter;
+		effect.set(this.#out.jitter, jitter !== undefined ? Moq.Time.Milli(jitter) : undefined);
 	}
 
 	/**

@@ -11,7 +11,7 @@ The [hang media format](/concept/hang) as TypeScript types and codecs, shared
 by [`@moq/watch`](/lib/js/watch) and [`@moq/publish`](/lib/js/publish).
 
 - **Catalog**: zod schemas for the root, video, audio and text renditions, the JSON and binary data track sections, containers, and the `archive` entry (timeline track plus optional replay, store, and version). The root is a loose object, so `z.extend(Catalog.RootSchema, { yourSection })` adds your own.
-- **Containers**: `Container.Legacy` producer/consumer and `Container.Cmaf` init and data segment helpers.
+- **Containers**: `Container.Legacy` producer/consumer and `Container.Cmaf` init and data segment helpers. Group starts may match or increase, and frames may overlap the previous group's content, but cannot precede its start. An estimated end marker is metadata, not a timestamp floor. A backwards group start requires a new broadcast.
 - **Utilities**: hex, priority and latency math, an Opus polyfill for browsers without a native decoder, and the browser quirks the media packages work around.
 
 ```ts
@@ -24,8 +24,14 @@ import * as Container from "@moq/hang/container";
 `Catalog.EscapingBroadcast` for a `broadcast` reference that walks above the
 handle's `path`. Run the same checks on a catalog from another source with
 `Catalog.checkRenditions(root)` and `Catalog.checkResolvable(root, base)`.
-`Hang.Timeline.Consumer.subscribe(broadcast, root.archive)` reads segment
-`push`, `pop`, and `skip` events when a root advertises an archive.
+
+`Catalog.ranked(renditions)` orders a video rendition map best first: largest
+coded picture, then highest bitrate, then name. A missing width, height, or
+bitrate ranks below a known value. `<moq-watch>` uses that order when nothing
+caps the rendition.
+
+`Hang.Timeline.Consumer.subscribe(broadcast, root.archive, track)` reads one
+track's timeline as record `push`, `pop`, and `skip` events when a root advertises it.
 
 Most apps never import it directly; the elements and `Broadcast` classes in
 the watch and publish packages do. Reach for it when hand-rolling a catalog

@@ -30,14 +30,14 @@ const TAIL: [&[u8]; 2] = [b"tail-a", b"tail-b"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(support::harness::run(driver));
+	support::harness::spawn(driver);
 	producer
 }
 
 /// Let the drivers run until nothing is runnable: under paused time an idle runtime
 /// auto-advances the clock, so this returns once every queued write has been sent.
 async fn settle() {
-	tokio::time::sleep(Duration::from_millis(1)).await;
+	moq_net_sim::sleep(Duration::from_millis(1)).await;
 }
 
 fn expected() -> Vec<Vec<u8>> {
@@ -60,11 +60,11 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	let MockPair { client, server, .. } = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	tokio::time::timeout(TIMEOUT, consumer.routed("bcast"))
+	moq_net_sim::timeout(TIMEOUT, consumer.routed("bcast"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("bcast"))
+	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -72,10 +72,10 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	// The publisher only learns of a subscription once the subscriber polls it, so the
 	// reader runs concurrently. It reports the head group drained, then waits to be told
 	// to read on, so the final group is still unread when the session goes away.
-	let (drained_tx, drained_rx) = tokio::sync::oneshot::channel();
-	let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
+	let (drained_tx, drained_rx) = futures::channel::oneshot::channel();
+	let (go_tx, go_rx) = futures::channel::oneshot::channel::<()>();
 
-	let reader = tokio::spawn(async move {
+	let reader = moq_net_sim::spawn(async move {
 		let subscription = moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0));
 		let mut sub = remote
 			.track("video")
@@ -106,7 +106,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 		}
 	});
 
-	tokio::time::timeout(TIMEOUT, track.demand().used())
+	moq_net_sim::timeout(TIMEOUT, track.demand().used())
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
@@ -116,7 +116,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 		head.write_frame(Timestamp::ZERO, payload).unwrap();
 	}
 	head.finish().unwrap();
-	tokio::time::timeout(TIMEOUT, drained_rx)
+	moq_net_sim::timeout(TIMEOUT, drained_rx)
 		.await
 		.expect("the head group never arrived")
 		.expect("reader gone");
@@ -145,7 +145,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	// merely slower than the network.
 	settle().await;
 	let _ = go_tx.send(());
-	let result = tokio::time::timeout(TIMEOUT, reader)
+	let result = moq_net_sim::timeout(TIMEOUT, reader)
 		.await
 		.expect("the subscription never ended")
 		.expect("reader panicked");
@@ -155,9 +155,8 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 
 /// The session closes with the final group in flight: the subscription ends with an
 /// error, or delivers every frame.
-#[tokio::test]
+#[moq_net_sim::test]
 async fn a_subscription_cut_by_the_session_close_does_not_end_clean() {
-	tokio::time::pause();
 	let (got, err) = round(true).await;
 	assert!(
 		err.is_some() || got == expected(),
@@ -172,9 +171,8 @@ async fn a_subscription_cut_by_the_session_close_does_not_end_clean() {
 }
 
 /// With the session kept alive the same track arrives whole and ends `Ok(None)`.
-#[tokio::test]
+#[moq_net_sim::test]
 async fn a_finished_track_ends_clean_while_its_session_lives() {
-	tokio::time::pause();
 	let (got, err) = round(false).await;
 	assert!(
 		err.is_none() && got == expected(),
@@ -199,7 +197,7 @@ const DEATH: moq_net::SessionError = moq_net::SessionError::App(7);
 
 /// Kill the publisher's session with a group still open, and return the error the
 /// subscriber's `recv_group` ends with once it drains what arrived.
-async fn killed(version: &str) -> Option<moq_net::Error> {
+async fn killed(version: &str, local: bool) -> (Option<moq_net::Error>, Option<moq_net::Error>) {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast.create_track("video", None).unwrap();
@@ -213,10 +211,13 @@ async fn killed(version: &str) -> Option<moq_net::Error> {
 
 	let consumer = subscriber.consume();
 	consumer.routed("bcast").await.expect("routed");
-	let remote = consumer.request_broadcast("bcast").await.expect("broadcast resolves");
+	let remote = consumer
+		.request_broadcast("bcast", None)
+		.await
+		.expect("broadcast resolves");
 	// Subscribing resolves only once the publisher serves the track, which it does
 	// only after seeing the subscription, so the reader runs concurrently.
-	let reader = tokio::spawn(async move {
+	let reader = moq_net_sim::spawn(async move {
 		let subscription = moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0));
 		let mut sub = remote
 			.track("video")
@@ -224,14 +225,23 @@ async fn killed(version: &str) -> Option<moq_net::Error> {
 			.subscribe(subscription)
 			.await
 			.expect("subscribe");
+		let mut group_end = None;
 		loop {
 			let mut group = match sub.recv_group().await {
 				Ok(Some(group)) => group,
-				Ok(None) => return None,
-				Err(err) => return Some(err),
+				Ok(None) => return (None, group_end),
+				Err(err) => return (Some(err), group_end),
 			};
-			// The open group ends however it ends; only the track's end is at stake here.
-			while let Ok(Some(_)) = group.read_frame().await {}
+			loop {
+				match group.read_frame().await {
+					Ok(Some(_)) => {}
+					Ok(None) => break,
+					Err(err) => {
+						group_end = Some(err);
+						break;
+					}
+				}
+			}
 		}
 	});
 
@@ -240,7 +250,11 @@ async fn killed(version: &str) -> Option<moq_net::Error> {
 	group.write_frame(Timestamp::ZERO, HEAD[0]).unwrap();
 	settle().await;
 
-	server.abort(moq_net::Error::Session(DEATH));
+	if local {
+		client.clone().close().await.expect("local close");
+	} else {
+		server.abort(moq_net::Error::Session(DEATH));
+	}
 	let err = reader.await.expect("reader panicked");
 	drop((client, server, group, track, broadcast, publisher, subscriber));
 	err
@@ -248,16 +262,29 @@ async fn killed(version: &str) -> Option<moq_net::Error> {
 
 /// A session dying mid-track ends the subscriber's track with the session's own
 /// error: not a clean end, and not a generic `Dropped` or `Cancel`.
-#[tokio::test]
+#[moq_net_sim::test]
 async fn a_session_death_ends_the_track_with_its_error() {
-	tokio::time::pause();
 	for version in DEATH_VERSIONS {
-		let err = tokio::time::timeout(TIMEOUT, killed(version))
+		let (err, group_end) = moq_net_sim::timeout(TIMEOUT, killed(version, false))
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the track never ended"));
 		assert!(
 			matches!(&err, Some(moq_net::Error::Session(code)) if *code == DEATH),
 			"{version}: the track ended with {err:?}, not the session's error"
 		);
+		assert!(
+			matches!(&group_end, Some(moq_net::Error::Session(code)) if *code == DEATH),
+			"{version}: group ended with {group_end:?}"
+		);
+	}
+}
+
+#[moq_net_sim::test]
+async fn a_local_session_close_ends_the_track_cleanly() {
+	for version in DEATH_VERSIONS {
+		let (err, _) = moq_net_sim::timeout(TIMEOUT, killed(version, true))
+			.await
+			.expect("the track never ended");
+		assert!(err.is_none(), "{version}: local close ended with {err:?}");
 	}
 }

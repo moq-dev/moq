@@ -26,36 +26,36 @@ val Backoff.timeout: Duration
     get() = timeoutUs.toLong().microseconds
 
 /** Upper bound on buffering before a stalled group is skipped. */
-val Subscription.maxAge: Duration
-    get() = maxAgeUs.toLong().microseconds
+val Subscription.maxDelay: Duration
+    get() = maxDelayUs.toLong().microseconds
 
 /** Maximum age of a non-latest group before the publisher evicts it, or null for the default. */
 val TrackInfo.maxAge: Duration?
     get() = maxAgeUs?.toLong()?.microseconds
 
 /** Upper bound on buffering before a stalled group is skipped, or null for the default. */
-val AudioDecoderOutput.maxAge: Duration?
-    get() = maxAgeUs?.toLong()?.microseconds
+val AudioDecoderOutput.maxDelay: Duration?
+    get() = maxDelayUs?.toLong()?.microseconds
 
 /** Upper bound on buffering before a stalled group is skipped, or null for the default. */
-val VideoDecoderOutput.maxAge: Duration?
-    get() = maxAgeUs?.toLong()?.microseconds
+val VideoDecoderOutput.maxDelay: Duration?
+    get() = maxDelayUs?.toLong()?.microseconds
 
 /** Encoded frame duration. */
 val AudioEncoderOutput.frameDuration: Duration
     get() = frameDurationUs.toLong().microseconds
 
-/** Presentation timestamp. */
-val Frame.timestamp: Duration
-    get() = timestampUs.toLong().microseconds
+/** Presentation timestamp, or null for an untimed frame. */
+val Frame.timestamp: Duration?
+    get() = timestampUs?.toLong()?.microseconds
 
 /** Presentation timestamp. */
 val MediaFrame.timestamp: Duration
     get() = timestampUs.toLong().microseconds
 
-/** Presentation timestamp. */
-val Datagram.timestamp: Duration
-    get() = timestampUs.toLong().microseconds
+/** Presentation timestamp, or null for an untimed datagram. */
+val Datagram.timestamp: Duration?
+    get() = timestampUs?.toLong()?.microseconds
 
 /** Presentation timestamp of the first sample. */
 val AudioFrame.timestamp: Duration

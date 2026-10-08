@@ -1,15 +1,17 @@
 //! The publishing half: drain a [`Registry`] on an interval into stats tracks.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use std::task::Poll;
 
 use moq_net::stats::{Presence, Registry, Report, Role, Tier, Traffic};
-use moq_net::{Path, PathOwned, broadcast, kio, origin, track};
+use moq_net::{Epoch, Path, PathOwned, broadcast, kio, origin, track};
 use serde::Serialize;
 use web_async::spawn;
+use web_async::time::Instant;
 
 use crate::{COMPRESSED_SUFFIX, sessions_track, traffic_track};
 
@@ -29,8 +31,9 @@ pub struct Config {
 	pub origin: Option<origin::Producer>,
 	/// Top-level path stats are published under (default `.stats`). The full
 	/// advertised path is `<prefix>/node/<node>` (or `<prefix>/node` when
-	/// `node` is unset). Also the registry's exclude prefix, so serving a
-	/// stats broadcast doesn't generate more stats.
+	/// `node` is unset), announced under a fresh [`Epoch`] each time. Also the
+	/// registry's exclude prefix, so serving a stats broadcast doesn't generate
+	/// more stats.
 	pub prefix: PathOwned,
 	/// Node suffix that disambiguates broadcasts from different relays sharing a
 	/// cluster origin. Set this on every node in multi-relay deployments. May be
@@ -45,9 +48,23 @@ pub struct Config {
 	/// Default `0` publishes one `<prefix>/node/<node>` broadcast carrying every
 	/// path. `1` publishes one broadcast per first segment at
 	/// `<prefix>/<group>/node/<node>`, and larger values include more leading
-	/// segments. Group broadcasts are announced while their group has live traffic;
-	/// at depth `0`, the single broadcast stays announced for the producer's life.
+	/// segments. Group broadcasts are announced while their group has live traffic,
+	/// plus the [`Self::linger`], and a group returning after that announces
+	/// under a new epoch counted from zero. At depth `0`, the single broadcast
+	/// and its epoch last for the producer's life.
 	pub depth: usize,
+	/// How long a group broadcast stays announced after its group's last entry
+	/// leaves. Default 5 minutes.
+	///
+	/// A group that returns within the linger keeps its broadcast, so a viewer
+	/// leaving and another arriving causes no unannounce and re-announce across
+	/// the mesh. While it lingers empty, every track reads `{}`. Zero
+	/// unannounces on the first drain the group is empty. Unused at depth `0`.
+	///
+	/// A return after the linger is a new epoch, which an aggregating reader
+	/// keeps as its own node for its grace, so a short linger on a flapping
+	/// group multiplies that reader's state.
+	pub linger: Duration,
 }
 
 impl Config {
@@ -61,6 +78,7 @@ impl Config {
 			node: None,
 			interval: Duration::from_secs(1),
 			depth: 0,
+			linger: DEFAULT_LINGER,
 		}
 	}
 
@@ -94,7 +112,18 @@ impl Config {
 		self.depth = depth;
 		self
 	}
+
+	/// Set how long an empty group broadcast stays announced (default 5
+	/// minutes). See [`Self::linger`].
+	pub fn with_linger(mut self, linger: Duration) -> Self {
+		self.linger = linger;
+		self
+	}
 }
+
+/// The default [`Config::linger`]. Sized from a live fleet, where an idle
+/// group's viewers returned 46 to 112 seconds after the last one left.
+const DEFAULT_LINGER: Duration = Duration::from_secs(300);
 
 impl Default for Config {
 	fn default() -> Self {
@@ -155,6 +184,7 @@ impl Producer {
 			node,
 			interval,
 			depth,
+			linger,
 		} = config;
 		// An empty path after normalization is indistinguishable from "no node
 		// set"; collapse it so downstream code only sees a single representation.
@@ -179,6 +209,7 @@ impl Producer {
 			prefix,
 			node,
 			depth,
+			linger,
 			interval,
 		};
 		spawn(task.run(Arc::downgrade(&keepalive)));
@@ -204,6 +235,7 @@ struct Task {
 	prefix: PathOwned,
 	node: Option<PathOwned>,
 	depth: usize,
+	linger: Duration,
 	interval: Duration,
 }
 
@@ -228,7 +260,7 @@ impl Task {
 			}
 
 			drain.collect();
-			drain.publish();
+			drain.publish(Instant::now());
 		}
 	}
 	fn node(&self) -> Option<&str> {
@@ -259,7 +291,7 @@ impl Drain {
 	fn new(task: Task) -> Option<Self> {
 		let mut groups = HashMap::new();
 		if task.depth == 0 {
-			let group = GroupPublisher::create(&task.origin, &task.prefix, &Path::empty(), task.node())?;
+			let group = GroupPublisher::create(&task, &Path::empty())?;
 			groups.insert(String::new(), group);
 		}
 		Some(Self {
@@ -313,7 +345,7 @@ impl Drain {
 			if refused.iter().any(|name| name == key) {
 				return None;
 			}
-			match GroupPublisher::create(&task.origin, &task.prefix, &Path::new(key), task.node()) {
+			match GroupPublisher::create(task, &Path::new(key)) {
 				Some(group) => {
 					groups.insert(key.to_string(), group);
 				}
@@ -327,14 +359,14 @@ impl Drain {
 	}
 
 	/// Write every group's pending frames, serve consumer track requests, and
-	/// unpublish groups with nothing left to report.
-	fn publish(&mut self) {
+	/// unpublish groups that have lingered empty.
+	fn publish(&mut self, now: Instant) {
 		// At depth 0 the single broadcast stays for the producer's life; a
-		// group broadcast lives while its group has entries.
-		let depth = self.task.depth;
+		// group broadcast lives while its group has entries, plus the linger.
+		let Task { depth, linger, .. } = self.task;
 		for (_, group) in self
 			.groups
-			.extract_if(|_, group| depth > 0 && group.traffic_rows.is_empty() && group.session_rows.is_empty())
+			.extract_if(|_, group| depth > 0 && group.lingered(now, linger))
 		{
 			// Deliberate unpublish: finish (tracks included) rather than drop,
 			// so there is no dropped-without-finish warning.
@@ -358,7 +390,39 @@ impl Drain {
 			group.finish();
 		}
 	}
+
+	/// Largest publisher-track payload across tiers: the snapshot still held,
+	/// and what this tick actually wrote. Idle paths stay in the snapshot, so
+	/// `held` is the plain frame that nears the cache cap.
+	#[cfg(feature = "bench")]
+	fn publisher_frame_bytes(&self) -> bench::FrameBytes {
+		let mut held = 0;
+		let mut plain = 0;
+		let mut compressed = 0;
+		for group in self.groups.values() {
+			for (name, pair) in &group.traffic.tracks {
+				if !name.ends_with("publisher.json") {
+					continue;
+				}
+				held = held.max(pair.held);
+				plain = plain.max(pair.wrote_plain);
+				compressed = compressed.max(pair.wrote_compressed);
+			}
+		}
+		bench::FrameBytes {
+			held,
+			plain,
+			compressed,
+		}
+	}
 }
+
+/// Drives one producer tick for the benchmark. Not a public API: compiled only
+/// with the `bench` feature, which nothing enables by default.
+#[cfg(feature = "bench")]
+#[doc(hidden)]
+#[path = "produce_bench.rs"]
+pub mod bench;
 
 /// One track's frame, rebuilt every drain in a buffer kept across drains.
 /// Serializes as a JSON object keyed by path, byte-identical to
@@ -379,51 +443,115 @@ impl<V: Serialize> Serialize for Frame<V> {
 	}
 }
 
+/// Writes encoded snapshots with group numbers from its group broadcast's
+/// allocator. The allocator outlives on-demand tracks, so a recreated track
+/// resumes past any group a subscriber has cached, without retaining a
+/// tombstone per requested name. A new group broadcast is a new epoch, so its
+/// allocator starts over.
+struct Snapshot<V> {
+	track: track::Producer,
+	encoder: moq_json::snapshot::Encoder<Frame<V>>,
+	group: Option<moq_net::group::Producer>,
+	sequence: Arc<AtomicU64>,
+	deltas: bool,
+}
+
+impl<V: Serialize> Snapshot<V> {
+	fn new(track: track::Producer, config: moq_json::snapshot::Config, sequence: Arc<AtomicU64>) -> Self {
+		Self {
+			track,
+			deltas: config.delta_ratio != 0,
+			encoder: moq_json::snapshot::Encoder::new(config),
+			group: None,
+			sequence,
+		}
+	}
+
+	fn demand(&self) -> moq_net::track::Demand {
+		self.track.demand()
+	}
+
+	/// Write one frame. `Some(len)` is the payload written; `None` means the
+	/// value was unchanged and the encoder emitted nothing.
+	fn update(&mut self, value: &Frame<V>) -> moq_json::Result<Option<usize>> {
+		let Some(frame) = self.encoder.update(value)? else {
+			return Ok(None);
+		};
+		let len = frame.payload.len();
+		if len as u64 > moq_net::group::MAX_CACHE_BYTES {
+			return Err(moq_net::Error::FrameTooLarge.into());
+		}
+		if frame.keyframe {
+			if let Some(group) = self.group.take() {
+				group.finish()?;
+			}
+			self.group = Some(self.track.create_group(moq_net::group::Info {
+				sequence: self.sequence.fetch_add(1, Ordering::Relaxed),
+			})?);
+		}
+		let group = self.group.as_mut().expect("a delta follows a snapshot");
+		if let Err(err) = group.write_frame(moq_net::Timestamp::now(), frame.payload.clone()) {
+			let _ = self.group.take().unwrap().finish();
+			return Err(err.into());
+		}
+		if !self.deltas {
+			self.group.take().unwrap().finish()?;
+		}
+		frame.commit();
+		Ok(Some(len))
+	}
+
+	fn finish(&mut self) -> moq_json::Result<()> {
+		if let Some(group) = self.group.take() {
+			group.finish()?;
+		}
+		Ok(self.track.finish()?)
+	}
+}
+
 /// A plain track and its `.z` sibling, kept in lockstep. The plain side runs
 /// moq-json with deltas and compression off, which is wire-identical to
 /// writing each frame as its own single-frame group; the compressed side uses
 /// merge-patch deltas inside a shared DEFLATE window.
 struct TrackPair<V> {
-	plain: moq_json::snapshot::Producer<Frame<V>>,
-	compressed: moq_json::snapshot::Producer<Frame<V>>,
+	plain: Snapshot<V>,
+	compressed: Snapshot<V>,
 	/// This drain's entries, published and cleared by [`Self::publish`].
 	frame: Frame<V>,
+	/// Last plain payload written, kept so a later unchanged tick can still
+	/// report the snapshot size. Bench builds only.
+	#[cfg(feature = "bench")]
+	held: usize,
+	/// Plain and compressed bytes this drain actually wrote. Zero when the
+	/// encoder skipped an unchanged value. Bench builds only.
+	#[cfg(feature = "bench")]
+	wrote_plain: usize,
+	#[cfg(feature = "bench")]
+	wrote_compressed: usize,
 }
 
 impl<V: Serialize> TrackPair<V> {
-	fn create(broadcast: &broadcast::Producer, name: &str) -> Result<Self, moq_net::Error> {
+	fn create(broadcast: &broadcast::Producer, name: &str, sequence: Arc<AtomicU64>) -> Result<Self, moq_net::Error> {
 		let plain_track = broadcast.create_track(name, None)?;
 		let compressed_track = broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), None)?;
-		Ok(Self::from_tracks(plain_track, compressed_track))
+		Ok(Self::from_tracks(plain_track, compressed_track, sequence))
 	}
 
-	/// Build a pair from consumer requests, creating whichever flavor was not
-	/// requested. A popped request is no longer queued, so `create_track`'s
-	/// queued-request fulfillment cannot reach it; the caller collects both
-	/// flavors' popped requests and this serves each through its actual
-	/// request where one exists.
-	fn adopt(broadcast: &broadcast::Producer, name: &str, pending: PendingPair) -> Result<Self, moq_net::Error> {
-		let PendingPair { plain, compressed } = pending;
-		let plain_track = match plain {
-			Some(request) => request.accept(None),
-			None => broadcast.create_track(name, None)?,
-		};
-		let compressed_track = match compressed {
-			Some(request) => request.accept(None),
-			None => broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), None)?,
-		};
-		Ok(Self::from_tracks(plain_track, compressed_track))
-	}
-
-	fn from_tracks(plain_track: track::Producer, compressed_track: track::Producer) -> Self {
+	fn from_tracks(plain_track: track::Producer, compressed_track: track::Producer, sequence: Arc<AtomicU64>) -> Self {
 		let plain_config = moq_json::snapshot::Config::default().with_delta_ratio(0);
 		let mut compressed_config = moq_json::snapshot::Config::default();
 		compressed_config.compression = moq_json::Compression::Deflate;
 
 		Self {
-			plain: moq_json::snapshot::Producer::new(plain_track, plain_config),
-			compressed: moq_json::snapshot::Producer::new(compressed_track, compressed_config),
+			plain: Snapshot::new(plain_track, plain_config, sequence.clone()),
+			compressed: Snapshot::new(compressed_track, compressed_config, sequence),
 			frame: Frame::default(),
+			#[cfg(feature = "bench")]
+			held: 0,
+			#[cfg(feature = "bench")]
+			wrote_plain: 0,
+			#[cfg(feature = "bench")]
+			wrote_compressed: 0,
 		}
 	}
 
@@ -436,13 +564,36 @@ impl<V: Serialize> TrackPair<V> {
 	/// and clear them for the next drain; moq-json skips unchanged values.
 	fn publish(&mut self, name: &str) {
 		self.frame.entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-		if let Err(err) = self.plain.update(&self.frame) {
-			tracing::debug!(?err, name, "stats: failed to write frame");
-		}
-		if let Err(err) = self.compressed.update(&self.frame) {
-			tracing::debug!(?err, name, "stats: failed to write compressed frame");
-		}
+		let plain = match self.plain.update(&self.frame) {
+			Ok(len) => len,
+			Err(err) => {
+				tracing::debug!(?err, name, "stats: failed to write frame");
+				None
+			}
+		};
+		let compressed = match self.compressed.update(&self.frame) {
+			Ok(len) => len,
+			Err(err) => {
+				tracing::debug!(?err, name, "stats: failed to write compressed frame");
+				None
+			}
+		};
+		self.record_bench(plain, compressed);
 		self.frame.entries.clear();
+	}
+
+	#[cfg(feature = "bench")]
+	fn record_bench(&mut self, plain: Option<usize>, compressed: Option<usize>) {
+		self.wrote_plain = plain.unwrap_or(0);
+		self.wrote_compressed = compressed.unwrap_or(0);
+		if let Some(len) = plain {
+			self.held = len;
+		}
+	}
+
+	#[cfg(not(feature = "bench"))]
+	fn record_bench(&mut self, plain: Option<usize>, compressed: Option<usize>) {
+		let _ = (plain, compressed);
 	}
 
 	/// Finish both flavors, so dropping the pair is a deliberate end instead of
@@ -463,6 +614,29 @@ struct PendingPair {
 }
 
 impl PendingPair {
+	/// Build a pair from consumer requests, creating whichever flavor was not
+	/// requested. A popped request is no longer queued, so `create_track`'s
+	/// queued-request fulfillment cannot reach it; the caller collects both
+	/// flavors' popped requests and this serves each through its actual
+	/// request where one exists.
+	fn adopt<V: Serialize>(
+		self,
+		broadcast: &broadcast::Producer,
+		name: &str,
+		sequence: Arc<AtomicU64>,
+	) -> Result<TrackPair<V>, moq_net::Error> {
+		let PendingPair { plain, compressed } = self;
+		let plain_track = match plain {
+			Some(request) => request.accept(None),
+			None => broadcast.create_track(name, None)?,
+		};
+		let compressed_track = match compressed {
+			Some(request) => request.accept(None),
+			None => broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), None)?,
+		};
+		Ok(TrackPair::from_tracks(plain_track, compressed_track, sequence))
+	}
+
 	fn reject(self, err: moq_net::Error) {
 		if let Some(request) = self.plain {
 			request.reject(err.clone());
@@ -480,13 +654,14 @@ impl PendingPair {
 		self.plain
 			.iter()
 			.chain(self.compressed.iter())
-			.any(|request| request.poll_unused(waiter).is_pending())
+			.any(|request| request.demand().poll_unused(waiter).is_pending())
 	}
 }
 
 /// One frame type's live pairs and the requests parked for them; the traffic
 /// tracks and the sessions tracks each form one family.
 struct TrackFamily<V> {
+	sequence: Arc<AtomicU64>,
 	tracks: HashMap<String, TrackPair<V>>,
 	/// Valid-shaped requests awaiting quota, keyed by plain name and bounded by
 	/// [`MAX_PARKED_REQUESTS`] across both families. Adopted as the quota
@@ -495,8 +670,9 @@ struct TrackFamily<V> {
 }
 
 impl<V: Serialize> TrackFamily<V> {
-	fn new() -> Self {
+	fn new(sequence: Arc<AtomicU64>) -> Self {
 		Self {
+			sequence,
 			tracks: HashMap::new(),
 			parked: HashMap::new(),
 		}
@@ -521,8 +697,8 @@ impl<V: Serialize> TrackFamily<V> {
 	) {
 		if !self.tracks.contains_key(name) {
 			let result = match self.parked.remove(name) {
-				Some(pending) => TrackPair::adopt(broadcast, name, pending),
-				None => TrackPair::create(broadcast, name),
+				Some(pending) => pending.adopt(broadcast, name, self.sequence.clone()),
+				None => TrackPair::create(broadcast, name, self.sequence.clone()),
 			};
 			match result {
 				Ok(pair) => {
@@ -633,7 +809,7 @@ impl<V: Serialize> TrackFamily<V> {
 			pending.reject(moq_net::Error::NotFound);
 			return;
 		}
-		match TrackPair::adopt(broadcast, &plain, pending) {
+		match pending.adopt(broadcast, &plain, self.sequence.clone()) {
 			Ok(mut pair) => {
 				// Hold the subscription open with zeros until the tier records.
 				pair.publish(&plain);
@@ -673,6 +849,8 @@ struct GroupPublisher {
 	/// This drain's entries for the group, as indices into the report.
 	traffic_rows: Vec<usize>,
 	session_rows: Vec<usize>,
+	/// When the group's last entry left; `None` while it has entries.
+	empty_since: Option<Instant>,
 }
 
 /// The plain track names one tier's entries land on.
@@ -693,9 +871,12 @@ impl TierNames {
 }
 
 impl GroupPublisher {
-	fn create(origin: &origin::Producer, prefix: &Path, group: &Path, node: Option<&str>) -> Option<Self> {
-		let advertised = advertised_path(prefix, group, node);
-		let broadcast = match origin.publish(&advertised, origin::Route::default()) {
+	fn create(task: &Task, group: &Path) -> Option<Self> {
+		let advertised = advertised_path(&task.prefix, group, task.node());
+		// A fresh epoch per announcement: a restart or a return from idle is a new
+		// broadcast, so no relay resumes it from groups cached under the old one.
+		let route = origin::Route::default().with_epoch(Epoch::mint());
+		let broadcast = match task.origin.publish(&advertised, route) {
 			Ok(broadcast) => broadcast,
 			Err(err) => {
 				tracing::warn!(advertised = %advertised, ?err, "stats: origin rejected stats broadcast");
@@ -704,14 +885,15 @@ impl GroupPublisher {
 		};
 		tracing::debug!(advertised = %advertised, "stats: publishing broadcast");
 
-		let mut traffic = TrackFamily::new();
-		let mut sessions = TrackFamily::new();
+		let sequence = Arc::new(AtomicU64::new(0));
+		let mut traffic = TrackFamily::new(sequence.clone());
+		let mut sessions = TrackFamily::new(sequence.clone());
 
 		// The default tier's tracks always exist, even while idle.
 		let tier = Tier::default();
 		for role in [Role::Publisher, Role::Subscriber] {
 			let name = traffic_track(&tier, role, false);
-			match TrackPair::create(&broadcast, &name) {
+			match TrackPair::create(&broadcast, &name, sequence.clone()) {
 				Ok(pair) => {
 					traffic.tracks.insert(name, pair);
 				}
@@ -722,7 +904,7 @@ impl GroupPublisher {
 			}
 		}
 		let name = sessions_track(&tier, false);
-		match TrackPair::create(&broadcast, &name) {
+		match TrackPair::create(&broadcast, &name, sequence) {
 			Ok(pair) => {
 				sessions.tracks.insert(name, pair);
 			}
@@ -745,7 +927,19 @@ impl GroupPublisher {
 			names: HashMap::new(),
 			traffic_rows: Vec::new(),
 			session_rows: Vec::new(),
+			empty_since: None,
 		})
+	}
+
+	/// Whether this drain left the group empty for at least `linger`. An entry
+	/// returning within the linger re-arms it.
+	fn lingered(&mut self, now: Instant, linger: Duration) -> bool {
+		if !self.traffic_rows.is_empty() || !self.session_rows.is_empty() {
+			self.empty_since = None;
+			return false;
+		}
+		let since = *self.empty_since.get_or_insert(now);
+		now.saturating_duration_since(since) >= linger
 	}
 
 	/// Run this drain's rows through change detection into the pending frames.
@@ -991,6 +1185,51 @@ fn advertised_path(prefix: &Path, group: &Path, node: Option<&str>) -> PathOwned
 
 #[cfg(test)]
 mod tests {
+	#[tokio::test(start_paused = true)]
+	async fn reclaimed_requested_tracks_resume_after_the_last_group() {
+		use futures::FutureExt;
+		for name in ["idle/publisher.json", "idle/publisher.json.z"] {
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let _dynamic = broadcast.dynamic();
+			let consumer = broadcast.consume();
+			let mut family = TrackFamily::<Traffic>::new(Arc::new(AtomicU64::new(0)));
+			let mut requested = HashSet::new();
+			let subscribing = consumer.track(name).unwrap().subscribe(None);
+			family.adopt_pair(
+				&broadcast,
+				&mut requested,
+				"idle/publisher.json".into(),
+				PendingPair::default(),
+			);
+			let mut subscriber = subscribing.await.unwrap();
+			let group = subscriber.recv_group().await.unwrap().unwrap();
+			let floor = group.sequence + 1;
+			drop(group);
+			drop(subscriber);
+			family.reclaim(&mut requested);
+			assert!(family.tracks.is_empty());
+
+			let subscribing = consumer
+				.track(name)
+				.unwrap()
+				.subscribe(track::Subscription::default().with_start(track::Position::group(floor)));
+			family.adopt_pair(
+				&broadcast,
+				&mut requested,
+				"idle/publisher.json".into(),
+				PendingPair::default(),
+			);
+			let mut subscriber = subscribing.await.unwrap();
+			let group = subscriber
+				.recv_group()
+				.now_or_never()
+				.expect("a recreated stats track must advance beyond its cached groups")
+				.unwrap()
+				.unwrap();
+			assert!(group.sequence >= floor);
+		}
+	}
+
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
 		let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
@@ -1004,14 +1243,11 @@ mod tests {
 		producer
 	}
 
-	/// The next route and whether it is active, skipping the caught-up marker.
+	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-		loop {
-			return match announced.next().await? {
-				moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
-				moq_net::announce::Event::End(route) => Some((route, false)),
-				moq_net::announce::Event::Live => continue,
-			};
+		match announced.next().await? {
+			moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}
 
@@ -1068,7 +1304,7 @@ mod tests {
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);
-		let consumer = egress.request_broadcast(path).await.expect("resolve");
+		let consumer = egress.request_broadcast(path, None).await.expect("resolve");
 
 		let sub = if subscribe {
 			let mut sub = consumer
@@ -1111,7 +1347,7 @@ mod tests {
 		assert!(active);
 		let broadcast = origin
 			.consume()
-			.request_broadcast(moq_net::Path::new(update.prefix.as_str()))
+			.request_broadcast(moq_net::Path::new(update.prefix.as_str()), None)
 			.await
 			.expect("resolve");
 		(update.prefix.as_str().to_string(), broadcast)
@@ -1153,6 +1389,18 @@ mod tests {
 		serde_json::from_slice(&frame.payload).expect("json parse")
 	}
 
+	async fn read_session_frame_last(
+		broadcast: &moq_net::broadcast::Consumer,
+		name: &str,
+	) -> BTreeMap<String, Presence> {
+		let mut track = subscribe(broadcast, name).await;
+		let mut last = next_frame(&mut track).await;
+		while let Some(frame) = try_next_frame(&mut track) {
+			last = frame;
+		}
+		serde_json::from_slice(&last.payload).expect("json parse")
+	}
+
 	async fn subscribe(broadcast: &moq_net::broadcast::Consumer, name: &str) -> track::Ordered {
 		broadcast
 			.track(name)
@@ -1187,6 +1435,89 @@ mod tests {
 
 		let (_producer, origin) = test_producer(Some("///"));
 		assert_eq!(announced(&origin).await.0, ".stats/node");
+	}
+
+	/// A producer on `origin` publishing as node `sjc` at depth 0.
+	fn node_producer(origin: &origin::Producer) -> Producer {
+		Producer::new(
+			Config::new()
+				.with_origin(origin.clone())
+				.with_node(PathOwned::from("sjc")),
+		)
+	}
+
+	/// A producer restarted on the same origin ends its old epoch and announces
+	/// the same path under a new one.
+	#[tokio::test(start_paused = true)]
+	async fn restarted_producer_announces_a_new_epoch() {
+		let origin = produce_origin();
+		let mut events = origin.consume().with_hidden(true).announced();
+
+		let first = node_producer(&origin);
+		drive_tick().await;
+		let [(path, true, before)] = &take_epochs(&mut events)[..] else {
+			panic!("expected one announce");
+		};
+		assert_eq!(path, ".stats/node/sjc");
+
+		drop(first);
+		drive_tick().await;
+		assert_eq!(take_epochs(&mut events), [(path.clone(), false, before.clone())]);
+
+		let _second = node_producer(&origin);
+		drive_tick().await;
+		let [(after_path, true, after)] = &take_epochs(&mut events)[..] else {
+			panic!("expected one announce");
+		};
+		assert_eq!(after_path, path);
+		assert!(after > before, "a restart mints a newer epoch");
+	}
+
+	/// A restart while the old instance is still announced (a route the mesh
+	/// has not withdrawn yet) takes the path at once: the newer epoch replaces
+	/// the old one and ends its subscriptions, so a reader re-requests the new
+	/// broadcast instead of stalling on the old one.
+	#[tokio::test(start_paused = true)]
+	async fn restart_replaces_a_still_announced_instance() {
+		let origin = produce_origin();
+		let mut events = origin.consume().with_hidden(true).announced();
+
+		let first = node_producer(&origin);
+		let _f1 = feed(first.registry(), Tier::default(), "foo/bar", true, 1, 100).await;
+		drive_tick().await;
+		let [(path, true, before)] = &take_epochs(&mut events)[..] else {
+			panic!("expected one announce");
+		};
+		let stats = origin
+			.consume()
+			.request_broadcast(path.as_str(), None)
+			.await
+			.expect("resolve");
+		let mut old = subscribe(&stats, "publisher.json").await;
+		while try_next_frame(&mut old).is_some() {}
+
+		let second = node_producer(&origin);
+		let _f2 = feed(second.registry(), Tier::default(), "foo/bar", true, 1, 30).await;
+		drive_tick().await;
+		let [(ended, false, ended_epoch), (started, true, after)] = &take_epochs(&mut events)[..] else {
+			panic!("expected the old epoch to end and the new one to start");
+		};
+		assert_eq!((ended, ended_epoch), (path, before));
+		assert_eq!(started, path);
+		assert!(after > before);
+
+		// The old instance keeps publishing, but its subscription ended.
+		drive_tick().await;
+		use futures::FutureExt;
+		let end = old.next_group().now_or_never().expect("the old subscription ended");
+		assert!(!matches!(end, Ok(Some(_))), "still reading the old epoch");
+
+		let stats = origin
+			.consume()
+			.request_broadcast(path.as_str(), None)
+			.await
+			.expect("resolve");
+		assert_eq!(read_last_frame(&stats, "publisher.json").await["foo/bar"].bytes, 30);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1312,7 +1643,7 @@ mod tests {
 			.with_stats(registry.tier(Tier::default()).session("viewer"));
 
 		async fn view(egress: &origin::Consumer, video: &mut track::Producer, size: usize) {
-			let broadcast = egress.request_broadcast("foo/bar").await.expect("resolve");
+			let broadcast = egress.request_broadcast("foo/bar", None).await.expect("resolve");
 			let mut sub = broadcast
 				.track("video")
 				.expect("track")
@@ -1350,6 +1681,149 @@ mod tests {
 			!frame.contains_key("foo/bar"),
 			"dropped with its counters, got {frame:?}"
 		);
+	}
+
+	/// A depth-1 producer with `linger`, its origin, and a hidden announce
+	/// listener started before anything publishes.
+	fn grouped_producer(linger: Duration) -> (Producer, origin::Producer, announce::Consumer) {
+		let origin = produce_origin();
+		let events = origin.consume().with_hidden(true).announced();
+		let producer = Producer::new(
+			Config::new()
+				.with_origin(origin.clone())
+				.with_node(PathOwned::from("sjc"))
+				.with_depth(1)
+				.with_linger(linger),
+		);
+		(producer, origin, events)
+	}
+
+	/// The announce events buffered so far, as `(path, active)`.
+	fn take_events(events: &mut announce::Consumer) -> Vec<(String, bool)> {
+		take_epochs(events)
+			.into_iter()
+			.map(|(path, active, _)| (path, active))
+			.collect()
+	}
+
+	/// The announce events buffered so far in delivery order, as
+	/// `(path, active, epoch)`. Every stats route carries an epoch.
+	fn take_epochs(events: &mut announce::Consumer) -> Vec<(String, bool, Epoch)> {
+		use futures::FutureExt;
+		let mut out = Vec::new();
+		while let Some(Some((update, active))) = next_update(events).now_or_never() {
+			let epoch = update.route.epoch.expect("a stats route carries an epoch");
+			out.push((update.prefix.as_str().to_string(), active, epoch));
+		}
+		out
+	}
+
+	const ACME: &str = ".stats/acme/node/sjc";
+	const FEED: &str = ".stats/feed/node/sjc";
+
+	#[tokio::test(start_paused = true)]
+	async fn empty_group_lingers_then_unannounces() {
+		let (producer, origin, mut events) = grouped_producer(Duration::from_secs(10));
+		let registry = producer.registry();
+
+		// `feed` records traffic on `acme/live` (group `acme`) and holds a
+		// session rooted at `feed` (group `feed`).
+		let first = feed(registry, Tier::default(), "acme/live", true, 1, 100).await;
+		drive_tick().await;
+		let mut started = take_epochs(&mut events);
+		started.sort();
+		let [(acme_path, true, acme_epoch), (feed_path, true, feed_epoch)] = &started[..] else {
+			panic!("expected both groups to announce, got {started:?}");
+		};
+		assert_eq!((acme_path.as_str(), feed_path.as_str()), (ACME, FEED));
+		let acme = origin.consume().request_broadcast(ACME, None).await.expect("resolve");
+		let sessions = origin.consume().request_broadcast(FEED, None).await.expect("resolve");
+		assert_eq!(read_last_frame(&acme, "publisher.json").await["acme/live"].bytes, 100);
+
+		// The viewer leaves: both groups empty but stay announced, reading zero.
+		drop(first);
+		for _ in 0..3 {
+			drive_tick().await;
+		}
+		assert_eq!(take_events(&mut events), [], "an empty group lingers");
+		let frame = read_last_frame(&acme, "publisher.json").await;
+		assert!(frame.is_empty(), "no live counters while lingering, got {frame:?}");
+		let frame = read_session_frame_last(&sessions, "sessions.json").await;
+		assert!(frame.is_empty(), "no presence while lingering, got {frame:?}");
+
+		// Another viewer arrives within the linger: same broadcast, no announce.
+		// The path restarted, so a reader diffing frames counts 100 + 50, the
+		// same as it would across an unannounce and re-announce.
+		let second = feed(registry, Tier::default(), "acme/live", true, 1, 50).await;
+		drive_tick().await;
+		assert_eq!(
+			take_events(&mut events),
+			[],
+			"a return within the linger re-announces nothing"
+		);
+		assert_eq!(read_last_frame(&acme, "publisher.json").await["acme/live"].bytes, 50);
+		let mut track = subscribe(&acme, "publisher.json").await;
+		let old_sequence = track.next_group().await.expect("ok").expect("group").sequence;
+
+		// The return re-armed the linger: it unannounces only once it elapses
+		// again with the group still empty.
+		drop(second);
+		for _ in 0..8 {
+			drive_tick().await;
+		}
+		assert_eq!(take_events(&mut events), [], "the return re-armed the linger");
+		for _ in 0..4 {
+			drive_tick().await;
+		}
+		let mut ended = take_epochs(&mut events);
+		ended.sort();
+		assert_eq!(
+			ended,
+			[
+				(ACME.to_string(), false, acme_epoch.clone()),
+				(FEED.to_string(), false, feed_epoch.clone())
+			]
+		);
+
+		// A return after the linger is a new epoch counted from zero, with group
+		// numbers starting over.
+		let _third = feed(registry, Tier::default(), "acme/live", true, 1, 25).await;
+		drive_tick().await;
+		let mut restarted = take_epochs(&mut events);
+		restarted.sort();
+		let [(acme_again, true, new_acme), (feed_again, true, new_feed)] = &restarted[..] else {
+			panic!("expected both groups to announce again, got {restarted:?}");
+		};
+		assert_eq!((acme_again.as_str(), feed_again.as_str()), (ACME, FEED));
+		assert!(
+			new_acme > acme_epoch && new_feed > feed_epoch,
+			"a returning group mints a new epoch"
+		);
+		let acme = origin.consume().request_broadcast(ACME, None).await.expect("resolve");
+		assert_eq!(read_last_frame(&acme, "publisher.json").await["acme/live"].bytes, 25);
+		let mut track = subscribe(&acme, "publisher.json").await;
+		let group = track.next_group().await.expect("ok").expect("group");
+		assert!(
+			group.sequence < old_sequence,
+			"a new epoch numbers its groups from zero"
+		);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn zero_linger_unannounces_once_empty() {
+		let (producer, _origin, mut events) = grouped_producer(Duration::ZERO);
+		let first = feed(producer.registry(), Tier::default(), "acme/live", true, 1, 100).await;
+		drive_tick().await;
+		assert_eq!(take_events(&mut events).len(), 2);
+
+		// The closing readout drain still carries the entry; the next is empty.
+		drop(first);
+		drive_tick().await;
+		assert_eq!(take_events(&mut events), []);
+		drive_tick().await;
+		let mut ended = take_events(&mut events);
+		ended.sort();
+		assert_eq!(ended, [(ACME.to_string(), false), (FEED.to_string(), false)]);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1752,6 +2226,7 @@ mod tests {
 					prefix: PathOwned::from(".stats"),
 					node: None,
 					depth,
+					linger: DEFAULT_LINGER,
 					interval: Duration::from_secs(1),
 				})
 				.expect("drain");
@@ -1759,13 +2234,13 @@ mod tests {
 				// Warm up: create the groups and tracks and grow every buffer.
 				for _ in 0..3 {
 					drain.collect();
-					drain.publish();
+					drain.publish(Instant::now());
 				}
 
 				let before = counting::allocs();
 				drain.collect();
 				let allocs = counting::allocs() - before;
-				drain.publish();
+				drain.publish(Instant::now());
 
 				let pending: usize = drain
 					.groups

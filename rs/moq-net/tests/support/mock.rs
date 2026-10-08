@@ -13,8 +13,6 @@
 //! its earlier data is read.
 
 use std::{
-	future::Future,
-	pin::Pin,
 	sync::{
 		Arc, Mutex,
 		atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -24,7 +22,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use web_transport_trait::poll;
+use moq_net::transport::poll;
 
 // ── Error ───────────────────────────────────────────────────────────
 
@@ -67,7 +65,7 @@ impl std::fmt::Display for MockError {
 
 impl std::error::Error for MockError {}
 
-impl web_transport_trait::Error for MockError {
+impl moq_net::transport::Error for MockError {
 	fn session_error(&self) -> Option<(u32, String)> {
 		self.session.map(|c| (c, self.reason.clone()))
 	}
@@ -108,7 +106,17 @@ struct ClosedSignal {
 }
 
 impl ClosedSignal {
-	fn set(&self, result: Result<(), MockError>) {
+	/// Signal the sender once `delay` has passed: a STOP_SENDING crosses the link like data.
+	fn set(self: &Arc<Self>, delay: Duration, result: Result<(), MockError>) {
+		if !delay.is_zero() {
+			// Only a test sets a latency, so the stop lands on the simulated clock.
+			let signal = self.clone();
+			drop(moq_net_sim::spawn(async move {
+				moq_net_sim::sleep(delay).await;
+				signal.set(Duration::ZERO, result);
+			}));
+			return;
+		}
 		let mut slot = self.result.lock();
 		if slot.is_none() {
 			*slot = Some(result);
@@ -117,7 +125,7 @@ impl ClosedSignal {
 }
 
 /// A chunk in flight: readable by the peer once the link latency has passed.
-type Flight = (tokio::time::Instant, StreamChunk);
+type Flight = (std::time::Instant, StreamChunk);
 
 /// A mock send stream backed by a queue to the peer's reader.
 pub struct MockSendStream {
@@ -127,6 +135,9 @@ pub struct MockSendStream {
 	/// Acknowledge the FIN as soon as it is sent, for a stream the peer's transport holds
 	/// back from its application (see [`MockSession::hold_unis`]).
 	ack_fin: bool,
+	/// Drop this stream's FIN, as a peer that never completes it (see
+	/// [`MockSession::withhold_bidi_fins`]).
+	withhold_fin: Arc<AtomicBool>,
 	conn: Arc<ConnectionState>,
 }
 
@@ -139,7 +150,7 @@ impl MockSendStream {
 			return Err(err);
 		}
 		let tx = self.tx.as_ref().ok_or_else(MockError::closed)?;
-		let arrival = tokio::time::Instant::now() + self.conn.latency();
+		let arrival = super::harness::now() + self.conn.latency();
 		tx.try_push((arrival, chunk)).map_err(|_| MockError::closed())
 	}
 }
@@ -157,12 +168,15 @@ impl poll::SendStream for MockSendStream {
 	fn set_priority(&mut self, _order: i32) {}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
+		if self.withhold_fin.load(Ordering::Relaxed) {
+			return Ok(());
+		}
 		if self.tx.is_some() {
 			// A FIN that never left must not look acknowledged: poll_closed
 			// trusts this signal ahead of the connection error.
 			let pushed = self.push(StreamChunk::Fin);
-			if pushed.is_ok() && self.ack_fin {
-				self.closed.set(Ok(()));
+			if pushed.is_ok() && (self.ack_fin || self.conn.ack_fins.load(Ordering::Relaxed)) {
+				self.closed.set(Duration::ZERO, Ok(()));
 			}
 			self.tx = None;
 			pushed?;
@@ -207,8 +221,8 @@ pub struct MockRecvStream {
 	rx: kio::Queue<Flight>,
 	/// The next chunk, popped but still crossing the link.
 	flight: Option<Flight>,
-	/// Wakes the reader when `flight` lands.
-	landing: Option<Pin<Box<tokio::time::Sleep>>>,
+	/// The arrival a wake is already scheduled for, so each flight schedules one.
+	landing: Option<std::time::Instant>,
 	/// Buffered bytes from a chunk that was partially consumed.
 	buf: Bytes,
 	/// Whether we hit FIN or reset.
@@ -235,12 +249,18 @@ impl MockRecvStream {
 			}
 		}
 		let (arrival, _) = self.flight.as_ref().expect("flight set above");
-		if *arrival > tokio::time::Instant::now() {
-			let landing = self
-				.landing
-				.get_or_insert_with(|| Box::pin(tokio::time::sleep_until(*arrival)));
-			landing.as_mut().reset(*arrival);
-			std::task::ready!(landing.as_mut().poll(cx));
+		let arrival = *arrival;
+		if arrival > super::harness::now() {
+			// Only a test sets a latency, so the flight lands on the simulated clock.
+			if self.landing != Some(arrival) {
+				self.landing = Some(arrival);
+				let waker = cx.waker().clone();
+				drop(moq_net_sim::spawn(async move {
+					moq_net_sim::sleep_until(arrival).await;
+					waker.wake();
+				}));
+			}
+			return Poll::Pending;
 		}
 		Poll::Ready(self.flight.take().map(|(_, chunk)| chunk))
 	}
@@ -287,7 +307,7 @@ impl poll::RecvStream for MockRecvStream {
 	}
 
 	fn stop(&mut self, _code: u32) {
-		self.closed.set(Ok(()));
+		self.closed.set(self.conn.latency(), Ok(()));
 		self.done = true;
 	}
 
@@ -319,8 +339,9 @@ impl poll::RecvStream for MockRecvStream {
 impl Drop for MockRecvStream {
 	fn drop(&mut self) {
 		// Signal the paired SendStream that the receiver is gone (implicit STOP),
-		// and fail its future writes.
-		self.closed.set(Ok(()));
+		// and fail its future writes. Unlike QUIC, writes fail at once, a link
+		// latency before `poll_closed` reports the stop.
+		self.closed.set(self.conn.latency(), Ok(()));
 		self.rx.close();
 	}
 }
@@ -337,6 +358,7 @@ fn new_stream_pair(conn: &Arc<ConnectionState>) -> (MockSendStream, MockRecvStre
 		closed: closed.clone(),
 		park: kio::Park::default(),
 		ack_fin: false,
+		withhold_fin: Arc::default(),
 		conn: conn.clone(),
 	};
 	let recv = MockRecvStream {
@@ -362,10 +384,12 @@ fn new_stream_pair(conn: &Arc<ConnectionState>) -> (MockSendStream, MockRecvStre
 struct ConnectionState {
 	finishes: AtomicUsize,
 	hold_fins: AtomicBool,
+	/// Acknowledge every FIN as soon as it is sent, before the peer reads it.
+	ack_fins: AtomicBool,
 	/// Set once by whichever side closes first.
 	/// Setting it wakes both sides.
 	close_state: kio::Shared<Option<(u32, String)>>,
-	/// One-way delay for stream data in each direction. Zero by default.
+	/// One-way delay for stream data and STOP_SENDING in each direction. Zero by default.
 	latency: Mutex<Duration>,
 }
 
@@ -407,11 +431,13 @@ struct SessionSide {
 	withheld: Mutex<bool>,
 	/// Whether the datagrams this side sends are lost.
 	lossy: Mutex<bool>,
+	/// Whether this side drops the FIN of the bidi streams it opens.
+	withhold_bidi_fins: Arc<AtomicBool>,
 }
 
 /// An in-memory mock WebTransport session.
 ///
-/// Implements [`web_transport_trait::poll::Session`]. Created in pairs via
+/// Implements [`moq_net::transport::poll::Session`]. Created in pairs via
 /// [`create_mock_session_pair`]. Streams opened on one side are delivered to
 /// the peer's accept methods deterministically via unbounded queues.
 #[derive(Clone)]
@@ -461,7 +487,8 @@ impl poll::Session for MockSession {
 		_cx: &mut Context<'_>,
 	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 		// Create two stream pairs: one for each direction.
-		let (our_send, peer_recv) = new_stream_pair(&self.side.conn);
+		let (mut our_send, peer_recv) = new_stream_pair(&self.side.conn);
+		our_send.withhold_fin = self.side.withhold_bidi_fins.clone();
 		let (peer_send, our_recv) = new_stream_pair(&self.side.conn);
 
 		// Deliver (peer_send, peer_recv) to the peer's accept_bi.
@@ -537,8 +564,8 @@ impl poll::Session for MockSession {
 		Poll::Ready(MockError::session(code, reason))
 	}
 
-	fn stats(&self) -> impl web_transport_trait::Stats {
-		web_transport_trait::StatsUnavailable
+	fn stats(&self) -> impl moq_net::transport::Stats {
+		moq_net::transport::StatsUnavailable
 	}
 }
 
@@ -548,6 +575,16 @@ impl MockSession {
 	/// Streams whose FIN was sent before the connection closed.
 	pub fn finished_streams(&self) -> usize {
 		self.side.conn.finishes.load(Ordering::Relaxed)
+	}
+
+	/// Drop the FIN of the bidi streams this side opens, keeping them open.
+	pub fn withhold_bidi_fins(&self) {
+		self.side.withhold_bidi_fins.store(true, Ordering::Relaxed);
+	}
+
+	/// Acknowledge every FIN as soon as it is sent, before the peer reads it, as QUIC does.
+	pub fn ack_fins(&self) {
+		self.side.conn.ack_fins.store(true, Ordering::Relaxed);
 	}
 
 	/// Withhold FIN acknowledgements while continuing to deliver stream data.
@@ -606,8 +643,8 @@ impl MockSession {
 		*self.side.lossy.lock().unwrap() = true;
 	}
 
-	/// Delay stream data sent from now on by `latency` in each direction, keeping
-	/// each stream in order. Measured on tokio's clock, so paused-time tests advance
+	/// Delay stream data and STOP_SENDING sent from now on by `latency` in each direction,
+	/// keeping each stream in order. Measured on the simulated clock, so tests advance
 	/// through it without sleeping.
 	pub fn set_latency(&self, latency: Duration) {
 		*self.side.conn.latency.lock().unwrap() = latency;
@@ -626,7 +663,7 @@ impl MockSession {
 ///
 /// Streams opened on `client` appear in `server.accept_*()` and vice versa.
 /// Both sides report the given `protocol` from
-/// [`web_transport_trait::poll::Session::protocol`], matching ALPN negotiation
+/// [`moq_net::transport::poll::Session::protocol`], matching ALPN negotiation
 /// behavior.
 pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession, MockSession) {
 	let conn = Arc::new(ConnectionState::default());
@@ -651,6 +688,7 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		held: Mutex::default(),
 		withheld: Mutex::default(),
 		lossy: Mutex::default(),
+		withhold_bidi_fins: Arc::default(),
 	});
 
 	let server_side = Arc::new(SessionSide {
@@ -665,6 +703,7 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		held: Mutex::default(),
 		withheld: Mutex::default(),
 		lossy: Mutex::default(),
+		withhold_bidi_fins: Arc::default(),
 	});
 
 	let new = |side| MockSession {

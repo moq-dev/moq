@@ -166,7 +166,7 @@ impl PublishDecoder {
 
 	/// What each elementary stream has delivered and the audio frame sync lost so far, for
 	/// the formats that report it.
-	fn stats(&self) -> Option<ts::Stats> {
+	fn stats(&self) -> Option<ts::stats::Snapshot> {
 		match self {
 			Self::Ts(d) => Some(d.stats()),
 			Self::TsPrograms(d) => Some(d.stats()),
@@ -394,13 +394,13 @@ impl Publish {
 		})
 	}
 
-	/// Advertise the broadcast's path, now that the catalog tracks are in place.
-	pub fn announce(&self) -> anyhow::Result<()> {
+	/// Advertise the broadcast's path under `epoch`, now that the catalog tracks are in place.
+	pub fn announce(&self, epoch: moq_net::Epoch) -> anyhow::Result<()> {
 		let Some(broadcast) = &self.broadcast else {
 			return Ok(());
 		};
 		broadcast
-			.announce(Default::default())
+			.announce(moq_net::origin::Route::default().with_epoch(epoch))
 			.context("failed to announce broadcast")
 	}
 
@@ -597,7 +597,7 @@ impl CaptureArgs {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 	use std::time::Duration;
 
 	use bytes::BytesMut;
@@ -921,7 +921,7 @@ mod tests {
 
 	/// A PAT listing two programs, then one MP2 PES of each: program 1 on PID `0x61` at 1 s
 	/// with fill bytes `0xAA`/`0xBB`, program 2 on PID `0x71` an hour later with `0xCC`/`0xDD`.
-	fn two_programs() -> Vec<u8> {
+	pub(crate) fn two_programs() -> Vec<u8> {
 		use mpeg2ts::es::StreamType;
 		use mpeg2ts::ts::payload::{Pat, Pmt};
 		use mpeg2ts::ts::{

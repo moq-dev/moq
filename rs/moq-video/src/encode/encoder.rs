@@ -86,6 +86,77 @@ impl Gop {
 	}
 }
 
+/// How an encoder trades latency for compression at the configured bitrate.
+///
+/// Bitrate is set separately, via [`Config::bitrate`]. Presets differ in the
+/// codec effort spent per frame and the buffering the backend allows. Each
+/// backend maps a preset onto the controls it actually has, so two presets can
+/// apply the same controls on one backend, and some backends cannot rule out
+/// frame reordering or queueing: V4L2 leaves both to the driver, and
+/// MediaCodec's no-B-frame setting is only a hint. [`Encoder::applied`] reports
+/// what took effect, and only a reported [`Applied::preset`] confirms it. A
+/// preset describes the encoder alone, not keyframe join time, transport delay,
+/// or viewer playout.
+///
+/// `#[non_exhaustive]` so a later policy can be added without breaking a
+/// `match`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Preset {
+	/// The least per-frame encode time and buffering the backend supports.
+	#[default]
+	LowLatency,
+	/// More codec effort per frame for better compression.
+	Balanced,
+	/// The most codec effort the backend spends without queueing frames.
+	Quality,
+}
+
+/// The latency and compression controls an encoder actually applied, as
+/// reported by [`Encoder::applied`].
+///
+/// A report, not a request: a backend that has no distinct mapping for the
+/// requested [`Preset`] names the one whose controls it did apply, and one that
+/// could not confirm the controls a preset needs names none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Applied {
+	/// The preset whose controls took effect, or `None` when the backend could
+	/// not confirm them (a refused or advisory low-latency setting).
+	pub preset: Option<Preset>,
+	/// The backend controls that took effect, for display, e.g.
+	/// `"p1, low-latency tuning, no B-frames, CBR, 1-frame VBV"`. Not a parse target.
+	pub controls: String,
+}
+
+impl Applied {
+	/// A report that `preset` took effect through `controls`.
+	#[cfg_attr(
+		not(any(feature = "openh264", feature = "nvidia", feature = "vaapi", target_os = "macos")),
+		allow(dead_code)
+	)]
+	pub(crate) fn new(preset: Preset, controls: impl Into<String>) -> Self {
+		Self {
+			preset: Some(preset),
+			controls: controls.into(),
+		}
+	}
+
+	/// A report of `controls` that were requested but that the backend cannot
+	/// confirm, so no preset is claimed.
+	#[cfg(any(
+		target_os = "windows",
+		all(target_os = "android", feature = "mediacodec"),
+		all(target_os = "linux", feature = "v4l2")
+	))]
+	pub(crate) fn unconfirmed(controls: impl Into<String>) -> Self {
+		Self {
+			preset: None,
+			controls: controls.into(),
+		}
+	}
+}
+
 /// Encoder configuration. `width` / `height` / `framerate` are the encoded
 /// output; input frames must already be at this resolution.
 ///
@@ -106,6 +177,9 @@ pub struct Config {
 	/// Output codec. Defaults to [`Codec::H264`].
 	pub codec: Codec,
 	pub kind: Kind,
+	/// How the encoder trades latency for compression. Defaults to
+	/// [`Preset::LowLatency`].
+	pub preset: Preset,
 	/// The color space of the input frames, written into the bitstream's VUI so a
 	/// decoder doesn't have to guess. `None` uses [`Color::infer`], which is both
 	/// what the crate's own RGB conversions produce and what a player falls back
@@ -128,6 +202,7 @@ impl Config {
 			gop: Gop::keyframe_every(std::time::Duration::from_secs(2), framerate),
 			codec: Codec::default(),
 			kind: Kind::Auto,
+			preset: Preset::default(),
 			color: None,
 		}
 	}
@@ -238,6 +313,9 @@ pub struct Encoder {
 	codec: Codec,
 	size: Size,
 	bitrate: moq_net::bandwidth::Rate,
+	/// What the backend reported applying for [`Config::preset`], read once at
+	/// open: the controls are fixed for the session's lifetime.
+	applied: Applied,
 	/// What the backend wrote into the bitstream's VUI, kept so a frame declaring
 	/// a different space is caught rather than silently mislabeled.
 	color: Color,
@@ -259,11 +337,14 @@ impl Encoder {
 		config.gop.validate()?;
 
 		let backend = backend::open(config)?;
+		let applied = backend.applied();
+		tracing::debug!(encoder = backend.name(), requested = ?config.preset, applied = ?applied.preset, controls = %applied.controls, "encoder preset");
 		Ok(Self {
 			backend,
 			codec: config.codec,
 			size,
 			bitrate: config.resolved_bitrate(),
+			applied,
 			color: config.resolved_color(),
 			pending_cut: false,
 			_thread_bound: PhantomData,
@@ -273,6 +354,12 @@ impl Encoder {
 	/// The encoder name in use, e.g. `"videotoolbox"`.
 	pub fn name(&self) -> &str {
 		self.backend.name()
+	}
+
+	/// The latency and compression controls the backend applied for
+	/// [`Config::preset`].
+	pub fn applied(&self) -> &Applied {
+		&self.applied
 	}
 
 	/// The resolution this encoder emits, which every frame fed to it must match.
@@ -1017,6 +1104,7 @@ mod tests {
 			codec: config.codec,
 			size: config.size(),
 			bitrate: config.resolved_bitrate(),
+			applied: Applied::default(),
 			color: config.resolved_color(),
 			pending_cut: false,
 			_thread_bound: PhantomData,
@@ -1435,5 +1523,42 @@ mod tests {
 
 		let keyframe = frames.first().expect("a keyframe");
 		assert_eq!(declared_color(&keyframe.payload), Some(BT709_DESCRIBED));
+	}
+
+	#[cfg(all(target_os = "windows", feature = "capture", feature = "openh264"))]
+	#[test]
+	#[ignore = "requires Windows WGC video processing and a Media Foundation hardware H.264 encoder"]
+	fn wgc_nv12_encodes_with_matching_color_on_gpu_and_software() {
+		use super::backend::test_util::{BT601_DESCRIBED, BT709_DESCRIBED, declared_color};
+		use crate::frame::d3d11;
+
+		let device = d3d11::create_device().expect("D3D11 hardware device");
+		for (size, declared) in [
+			(Size::new(640, 480), BT601_DESCRIBED),
+			(Size::new(1280, 720), BT709_DESCRIBED),
+		] {
+			let pixels = [0, 0, 255, 255].repeat(size.pixels() as usize);
+			let source = d3d11::upload_bgra(&device, size, &pixels);
+			for backend in ["mediafoundation", "openh264"] {
+				let texture = d3d11::Texture::capture(&device, &source, size).expect("BGRA to NV12");
+				let frame = Frame::new(Surface::Texture(texture), moq_net::Timestamp::from_micros(0).unwrap());
+				let config = Config {
+					kind: Kind::Named(backend.into()),
+					color: frame.surface.color(),
+					..Config::new(size.width, size.height, crate::Rate::new(30, 1).unwrap())
+				};
+				let mut encoder = Encoder::new(&config).expect("requested encoder must be available");
+				assert_eq!(encoder.name(), backend);
+				let mut encoded = encoder.encode(&frame).expect("encode WGC texture");
+				encoded.extend(encoder.finish().unwrap());
+				assert!(!encoded.is_empty(), "{backend} must produce a frame");
+				assert!(
+					encoded
+						.iter()
+						.any(|frame| declared_color(&frame.payload).as_ref() == Some(&declared)),
+					"{backend} {size} SPS color"
+				);
+			}
+		}
 	}
 }

@@ -9,7 +9,8 @@ description: The pub/sub layer in TypeScript
 
 The TypeScript twin of [`moq-net`](/lib/rs/moq-net): connections, origins,
 broadcasts, tracks, groups, and frames, negotiating moq-lite or moq-transport
-at setup.
+at setup. `Epoch` provides the shared publisher identity, carried on each
+route as `route.epoch`; see [publisher epochs](/concept/moq-lite#publisher-epochs).
 
 ```ts
 import * as Moq from "@moq/net";
@@ -26,7 +27,7 @@ const connection = await Moq.Connection.connect({
 });
 
 const broadcast = origin.createBroadcast(Moq.Path.from("chat.room"));
-const track = broadcast.createTrack("messages");
+const track = broadcast.createTrack("messages", { timescale: Moq.Time.Timescale.MILLI });
 const group = track.appendGroup();
 group.writeString("hello");           // or writeFrame({ payload, timestamp })
 group.close();
@@ -48,14 +49,16 @@ for (;;) {
 ```
 
 - **Origins** hold the broadcasts, not the connection: closing a session unannounces them but leaves them created for the next one. `origin.request(path)` resolves an announced local broadcast with no round trip, so a page that watches what it publishes reads its own copy, unless a cheaper route announces the same path. A refusal from the most specific route ends the request: `request.closed` settles with the handler's error and no broader route is asked. Create, populate, then `announce()` for an exact path; use `dynamic(prefix, route)` when the set of paths is not known: an exact-path subscribe before the tracks exist is refused, and nobody, local or remote, can see or reach a broadcast until it announces.
-- **Connections** race WebTransport against WebSocket. `new Connection({ url })` pools one connection per relay URL and reconnects with backoff, which the elements use. Supplying WebTransport/WebSocket options, discovery, delay, or a caller-owned origin selects a private loop; explicit `share: true` refuses those options. `closed` settles when the handle is released (`null` on a clean close); the failure that stopped retrying the current URL is `error`, and a new URL recovers the same handle. A connection owns one send-rate sampler and one `Bandwidth.Allocator`; publishers reserve against it so their encoder targets sum to the estimate instead of each matching it.
+- **Epoch pinning**: `consumer.request(path, { epoch })` pins an announced publisher instance. The request stays unresolved and reports `unroutable` when the winning route names a different or missing epoch, including while an asynchronous handler answers. Omit `epoch` for unpinned lookup. The resolved broadcast's `epoch` names the route it actually resolved through, pinned or not.
+- **Connections** race WebTransport against WebSocket. `new Connection({ url })` pools one connection per relay URL and reconnects with backoff, which the elements use. Supplying WebTransport/WebSocket options, discovery, delay, `goaway`, or a caller-owned origin selects a private loop; explicit `share: true` refuses those options. On a relay's GOAWAY the connection dials the replacement at once while the old session keeps serving its groups until it closes or the `goaway.handover` cap (default 10s, lowered to the relay's deadline) passes; the handle and its origin stay the same. An empty GOAWAY redials the same URL through a fresh DNS resolve. A redirect is followed onto the same host by default (`goaway.redirect: "follow"` lets the relay pick the host, `"ignore"` never moves), and moves the pooled entry to the new URL; a malformed or refused one, including a host change under a pinned certificate, ends the connection with `Error.RefusedRedirect` instead of reconnecting. `closed` settles when the handle is released (`null` on a clean close); the failure that stopped retrying the current URL is `error`, and a new URL recovers the same handle. A connection owns one send-rate sampler and one `Bandwidth.Allocator`; publishers reserve against it so their encoder targets sum to the estimate instead of each matching it.
 - **Bandwidth** (`Bandwidth.Allocator`) divides the connection's send-rate estimate by track priority, max-min fair within a tier. An idle track claims nothing. The receive side is untouched.
-- **Discovery** by any pattern scope (`origin.announced(scope)`, such as `room/*/chat`; default everything). A route event's `kind` says whether the route started, updated, or ended; its `prefix` is the covered prefix relative to the origin, and `captures` reports what the scope's wildcards matched when the prefix pins them. One `{ kind: "live" }` marker, with no prefix, follows the routes live at subscribe time. The consumer is an async iterable. `origin.broadcasts(scope)` is a live `Getter<ReadonlyMap<Path.Valid, Route>>` of the same covered prefixes for UIs that need the current set. A borrowed `Connection.origin` also exposes `dynamic(prefix, route)` for serving paths on demand.
-- **Publisher retention** is optional `Track.Info.maxAge`: omission sets no limit, while zero keeps the live edge. No implicit five-second window is applied.
-- **Subscriptions** carry a priority, a `Time.Milli` max age, and optional `groups` bounds. Groups arrive out of order and are read frame by frame, with `Error.TooFarBehind` when a reader asks for a frame the group never held and `Error.GroupTooLarge` when a write exceeds the cache budget and aborts the group.
-- **Track ends**: `close()` ends a track at its live edge, while `finishAt(n)` declares the exclusive end ahead of it and still accepts the groups below. A subscriber reads the end with `final()` or awaits `finished()`. A remote track ends only once every group below its end has arrived or was dropped; one reset before its header arrived is skipped after the subscription's max age on moq-lite (one second without one), or after one second on IETF.
+- **Discovery** by any pattern scope (`origin.announced(scope)`, such as `room/*/chat`; default everything). A route event's `kind` says whether the route started, updated, or ended; its `prefix` is the covered prefix relative to the origin, and `captures` reports what the scope's wildcards matched when the prefix pins them. The consumer is an async iterable. `origin.broadcasts(scope)` is a live `Getter<ReadonlyMap<Path.Valid, Route>>` of the same covered prefixes for UIs that need the current set. A borrowed `Connection.origin` also exposes `dynamic(prefix, route)` for serving paths on demand.
+- **Publisher retention** is optional `Track.Info.maxAge`, measured against media timestamps: omission sets no limit, while zero serves only the live edge. It clamps every subscriber's max delay, and stalled media does not age out merely because wall time passes. Separately, cached groups nobody writes for 30 seconds are reclaimed, except a live track's newest group, which stays replayable until the track closes.
+- **Timing** is per track. A timed track declares `Track.Info.timescale` (such as `Time.Timescale.MILLI`); omitting it (or passing `null`, which means the same) declares an untimed track. There is no default, unlike Rust's millisecond default. A frame or datagram carries a `timestamp` exactly when its track has a timescale, and a write that disagrees throws `Error.TimestampMismatch`. Nothing fills in a time on receive: moq-lite before 05, and moq-transport without TIMESCALE (always so on drafts 14-16), deliver untimed tracks. moq-lite 05 and 06 can't declare an untimed track, so it goes out at milliseconds with each frame's send time. An untimed group is never stale, so a subscription without a `groups.start` begins at the latest group.
+- **Subscriptions** carry a priority, a `Time.Milli` max delay measured against media timestamps, and optional `groups` bounds. Subscription options use `maxDelay`; supplying the obsolete subscriber `maxAge` key throws a `TypeError` naming its replacement, including on `update()`. Groups arrive out of order and are read frame by frame, with `Error.TooFarBehind` when a reader asks for a frame the group never held and `Error.GroupTooLarge` when a write exceeds the cache budget and aborts the group.
+- **Track ends**: `close()` ends a track at its live edge, while `finishAt(n)` declares the exclusive end ahead of it and still accepts the groups below. A finished track stays on its broadcast and serves its cache to late subscribers until `removeTrack`; an aborted one is removed, and subscribing to a track the broadcast does not have rejects with `Error.NotFound` when no on-demand handler is pulling requests, as in Rust. With a pulling handler, an absent track queues an on-demand request. A subscriber reads the end with `final()` or awaits `finished()`. Group and datagram readers end once the live edge reaches the declared boundary, even while missing lower groups wait out the grace. The `closed` signal settles separately once every group below the end has arrived or was dropped; one reset before its header arrived is skipped after the subscription's max delay on moq-lite (one second without one), or after one second on IETF.
 - **Datagrams** on moq-lite 05+ and fetch-by-sequence for history. `track.fetchGroup(sequence)` on moq-lite resolves when the publisher sends the first response byte or finishes an empty group. A missing group rejects the fetch with `StreamCode.NotFound`, including every concurrent caller sharing that fetch. `fetchGroup(sequence, { signal })` abandons a pending fetch with the signal's reason; the shared stream is cancelled only once every caller has left. Once resolved, close the group instead.
-- **Errors** live under one namespace: a stream reset throws `Error.Stream` with a `StreamCode`, while a session close gives `Error.Session` with a `SessionCode`. The registries are disjoint, so the same number means different things in each, and 64+ is yours. Named conditions such as `Error.TooFarBehind`, `Error.FrameTooLarge`, and `Error.GroupTooLarge` subclass `Error.Stream`, so one `code` check handles a condition raised here or reported by the peer. IETF streams use their own mapping: cancellation sends CANCELLED, other local failures send INTERNAL\_ERROR, and received codes remain opaque.
+- **Errors**: deliberately closing a connection ends its received tracks cleanly. A peer close ends received tracks and open group readers with the session error and its close code. Errors live under one namespace: a stream reset throws `Error.Stream` with a `StreamCode`, while a session close gives `Error.Session` with a `SessionCode`. The registries are disjoint, so the same number means different things in each, and 64+ is yours. Named conditions such as `Error.TooFarBehind`, `Error.FrameTooLarge`, and `Error.GroupTooLarge` subclass `Error.Stream`, so one `code` check handles a condition raised here or reported by the peer. IETF streams use their own mapping: cancellation sends CANCELLED, other local failures send INTERNAL\_ERROR, and received codes remain opaque.
 - **Paths** with `Path.relative` for the cross-broadcast catalog references hang uses. A `Broadcast.Consumer` names its broadcast by `path`: the path it was requested at relative to the origin handle's root, or empty for a standalone broadcast. Those references resolve against it. Path patterns (`Path.Pattern`, `Path.Patterns`) are re-exported from [`@moq/pattern`](https://www.npmjs.com/package/@moq/pattern). Literal `Path` stays a coordinate.
 
 The [path pattern](/concept/moq-lite#path-patterns) grammar lives on the
@@ -91,7 +94,11 @@ Three operations, on an origin:
   invisible and unreachable, for local consumers and peers alike, until
   `broadcast.announce()`.
 - `broadcast.announce(route)` / `broadcast.unannounce()` own that
-  advertisement. Announcing again re-prices the standing route.
+  advertisement. Announcing again replaces the standing route as given, epoch
+  included, so re-price from the current one
+  (`broadcast.announce({ ...broadcast.route, cost })`); another epoch, or
+  none, announces a new broadcast. `Origin.Dynamic` has the same `route` and
+  `update(route)`.
 - `origin.dynamic(prefix, route)` claims `prefix` and every path beneath it
   (`""` claims everything). Hold the returned `Origin.Dynamic` while the
   claim should stay advertised; `close()` retracts it. A request beneath it
@@ -104,10 +111,8 @@ A route is a capability, not an inventory. `origin.announced(scope)` yields
 place), or `"end"`, each also carrying an `Announce.Announce`: `prefix`
 is the covered prefix relative to the origin, `captures` is one pattern per
 scope wildcard when the prefix pins a complete match (otherwise `undefined`),
-and `route` carries hops and cost (on a retraction, its last values). A single
-`{ kind: "live" }` follows the routes live at subscribe time, including every
-route a connected peer was still sending, so a caller listing what is live
-stops there. The consumer is an async iterable. A prefix is
+and `route` carries hops and cost (on a retraction, its last values). The
+consumer is an async iterable. A prefix is
 not a broadcast name; the scope filters locally while sessions request its
 literal head on the wire. Paths with a `.`-prefixed segment below that head
 are [hidden](/concept/moq-lite#hidden-broadcasts) unless `announced(scope, { hidden: true })` opts in;
@@ -115,7 +120,12 @@ are [hidden](/concept/moq-lite#hidden-broadcasts) unless `announced(scope, { hid
 
 An established connection's `await connection.close()` withdraws its
 announcements and waits up to one second for delivery before disconnecting.
-It rejects if delivery fails or times out, and closes the transport either way.
+On moq-lite it also waits for the requests it serves: a subscription to a
+finished track delivers its remaining groups, and on moq-lite-07 waits for the
+subscriber's FIN, which says it read the tail. A live track never ends on its
+own, so its subscription holds the close until the deadline.
+It rejects if an announcement withdrawal fails or the deadline passes, and
+closes the transport either way.
 Use `connection.abort()` for immediate shutdown. Reconnecting connection
 handles keep their synchronous `close()` disposal behavior. IETF drafts 14
 through 16 send their withdrawals without waiting.
@@ -124,3 +134,13 @@ Examples in
 [`js/net/examples/`](https://github.com/moq-dev/moq/tree/main/js/net/examples).
 Runs in the browser and, over WebSocket, in Node, Bun, and Deno; see
 [server-side](/lib/js/#server-side).
+
+## Subscriber demand
+
+Call `demand()` on a track producer or pending track request, a group producer,
+or a broadcast producer. The returned `Track.Demand`, `Group.Demand`, or
+`Broadcast.Demand` exposes a read-only `used` signal, `unused()`, and `closed`.
+A broadcast watches subscribers to its tracks; holding a broadcast consumer
+alone is not demand. A group's demand counts its mirror readers, preserving
+fetch coalescing: the shared download becomes unused only after every reader
+leaves. Demand handles cannot write or close the producer.

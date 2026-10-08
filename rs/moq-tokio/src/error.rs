@@ -58,6 +58,11 @@ pub enum Error {
 	#[error("peer redirect refused for a connection with fixed addresses")]
 	PinnedRedirect,
 
+	/// A peer's GOAWAY named a redirect the connection's policy refuses, or one it
+	/// could not parse. Terminal: the peer is leaving, so redialing is ignoring it.
+	#[error("GOAWAY redirect refused: {0}")]
+	RefusedRedirect(String),
+
 	/// Reading or writing a socket, certificate, or key file failed.
 	#[error(transparent)]
 	Io(Arc<std::io::Error>),
@@ -78,7 +83,7 @@ pub enum Error {
 	#[error("failed to initialize Android logcat layer")]
 	Logcat(#[source] Arc<std::io::Error>),
 
-	/// No backend feature is compiled in that can serve this URL. The string names the features to enable.
+	/// No compiled-in backend or configured listener can serve this. The string names what is missing.
 	#[error("{0}")]
 	NoBackend(&'static str),
 
@@ -133,8 +138,10 @@ pub enum Error {
 	#[error("Iroh support is not enabled")]
 	IrohDisabled,
 
-	/// A client certificate was configured, but this QUIC backend can't do mTLS.
-	#[error("tls.root (mTLS) is not supported by the selected QUIC backend")]
+	/// A client CA or pinned peers were configured on a stream-only server, which has no QUIC listener to verify them.
+	#[error(
+		"mTLS (--listen-tls-root or tls.peers) needs a QUIC listener (--listen); the TCP and Unix listeners never ask for a client certificate"
+	)]
 	MtlsUnsupported,
 
 	/// A worker group was asked for more members than the connection ID's one-byte

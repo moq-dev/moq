@@ -11,9 +11,9 @@ timestamp. It is modeled on [WebCodecs](https://www.w3.org/TR/webcodecs/) so a
 browser can decode it directly. The spec is
 [draft-lcurley-moq-hang](/draft/moq-hang). Plaintext broadcast names end in
 `.hang` so a player knows which catalog to expect. End-to-end encrypted
-broadcasts live under `<opaque>/<epoch>`, where `<opaque>` is derived from the
-credential and a semantic name such as `foo.hang`, and one epoch identifies
-each publisher run. The path exposes no format or protection marker; the
+broadcasts live at `<opaque>`, derived from the credential and a semantic name
+such as `foo.hang`, and the [epoch](/concept/moq-lite#publisher-epochs) on
+their route identifies each publisher run. The path exposes no format or protection marker; the
 payloads follow [moq-e2ee](/draft/moq-e2ee).
 
 ## Catalog
@@ -56,9 +56,9 @@ A few things the catalog can express beyond decoder config:
 - **Renditions in another broadcast.** A rendition may point at a relative broadcast path, so a transcoder can publish a ladder that adds low rungs and references the source's original rendition without re-publishing its bytes. The path resolves against where the consumer found the catalog, so a reference that escapes above the root names nothing and the catalog is rejected.
 - **Jitter.** A rendition can say how far its frames fell behind the media clock before the publisher flushed them, in whole milliseconds rounded up. Encoders report the spread of lateness above each rendition's own recent minimum, so a constant encoder delay is not jitter; container imports estimate batch spans without counting ingest delay. It describes the publisher, never the network, only grows over the life of a stream, and a player sizes its buffer to at least this much. A `0` is read as absent.
 - **Delay.** A rendition can also say how far its frames reach the transport behind the broadcast's earliest rendition, measured the same way from each rendition's minimum lateness, so a video encoder running 200 ms behind audio advertises `delay: 200` on video. It follows the same rules as jitter. A player holds the largest `delay + jitter` among the renditions it subscribes to, and never subtracts one rendition's `delay` from another's.
-- **Stalled renditions.** A publisher can flag a rendition as temporarily bad so players prefer another one without the track disappearing. First-party video publishers set this flag after more than three frame intervals of source silence or encoding lag while subscribed, and clear it after three on-time completed frames or when idle. Browser and native capture poll while waiting; FLV and MPEG-TS importers observe video silence as container data arrives. The shared detector is `hang::catalog::stalled::Detector` in Rust and `Catalog.Stalled.Detector` in JavaScript. It is a playback diagnostic, not an authorization or routing signal.
-- **Archive.** A broadcast may advertise an `archive` entry naming its timeline track (a small index of each complete aligned segment) and, if recorded, the replay MoQ path, object-store URL, and format version. The timeline is what lets the [HLS gateway](/bin/hls) build playlists without subscribing to media.
-- **Clock.** The optional root `clock` maps PTS zero to wall time so every media track and the archive index share one fixed epoch after timescale conversion. It is independent of `archive`, so a live-only publisher can expose wall-clock timing without creating a segment index.
+- **Disabled renditions.** An audio or video rendition with `enabled: false` has no frames coming, and a player must not select it. Pausing a rendition in `@moq/publish` keeps it in the catalog this way rather than removing it, so a mute is a one-field update; a disabled video rendition encodes one black keyframe first, so a player that predates the field shows black instead of a frozen picture. The field is written only when false. The older video `stalled` field is no longer written, and readers ignore it.
+- **Archive.** A broadcast may advertise an `archive` entry mapping each track, the catalog included, to its own timeline track (a small index of the track's spans: timing plus group and frame positions) and, if recorded, the replay MoQ path, object-store URL, and format version. Every track is cut by one rule, at group boundaries between 2s and 10s (a zero minimum for sparse data such as the catalog), and tracks commit and expire independently. The timelines are what let the [HLS gateway](/bin/hls) build playlists without subscribing to media.
+- **Clock.** The optional root `clock` maps PTS zero to wall time so every media track and the archive index share one fixed epoch after timescale conversion. It is independent of `archive`, so a live-only publisher can expose wall-clock timing without creating a timeline.
 - **Extensions.** The root is a loose object. Applications add their own sections (`scte35`, for example) next to the ones hang defines, optionally naming a track that carries the data. Every library exposes a way to write your section without clobbering the built-in ones, and readers ignore what they don't know.
 
 ## Text
@@ -120,8 +120,9 @@ or `catalog.binary.tracks`, then pair its name and config with
 subscribe by name, and hand the track to `@moq/json` or `@moq/flate`.
 
 An application with its own per-track fields can list a data track in its own
-root section instead, flattening the JSON or binary entry beside those fields
-so there is one entry per track. Name the section with a namespaced key such as
+root section instead, nesting the JSON or binary config in a `config` field
+beside the application fields so future config fields cannot collide with them.
+Name the section with a namespaced key such as
 `com.example.mavlink`. A generic consumer only finds tracks in `json` and
 `binary`.
 
@@ -157,7 +158,10 @@ independent too and typically hold about a second.
 
 The `description` field carries out-of-band codec setup (an `avcC` box for
 H.264). When it is absent, the parameter sets ride inline before each keyframe,
-which is what `avc3`/`hev1` tracks do. Decoders should handle both.
+which is what `avc3`/`hev1` tracks do. Decoders should handle both. CMAF is the
+exception: its samples are always length-prefixed, so an `avc3`/`hev1` CMAF
+track keeps the configuration record as its `description` for the NAL length
+size, even when the parameter sets ride in the samples.
 
 ## Your own format
 

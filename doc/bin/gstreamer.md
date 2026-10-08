@@ -10,10 +10,10 @@ subscribes to a broadcast and exposes one source pad per rendition.
 
 ```bash
 # Inspect (Nix bundles the plugin with gst-launch)
-nix shell github:moq-dev/moq#moq-gst --command gst-inspect-1.0 moq
+nix shell github:moq-dev/moq/release#moq-gst --command gst-inspect-1.0 moq
 
 # Play the public test broadcast
-nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -e \
+nix shell github:moq-dev/moq/release#moq-gst --command gst-launch-1.0 -e \
   moqsrc name=s url=https://cdn.moq.dev/demo broadcast=bbb.hang \
   s.video_0 ! queue ! decodebin3 ! videoconvert ! autovideosink \
   s.audio_0 ! queue ! decodebin3 ! audioconvert ! autoaudiosink
@@ -41,6 +41,13 @@ anything else.
 | Captions | `text/x-raw` (one WebVTT cue per buffer, PTS is the cue start and the buffer duration its end) |
 | Opaque data | `application/octet-stream` (raw bytes on a named track, one group per buffer) |
 
+`audio/x-opus` is published from the caps' OpusHead. A `streamheader` is that
+head, including pre-skip and gain, and it wins when present. Otherwise mono
+and stereo use a family 0 head, and three to eight channels need
+`channel-mapping-family`, `stream-count`, `coupled-count`, and
+`channel-mapping`. Caps that omit that mapping, or that contradict the header,
+are refused. `opusenc` supplies both, so a 5.1 encode plays as six channels.
+
 A `text/x-raw` pad is how captions get in: ffmpeg cannot mux a subtitle track
 into fragmented MP4, so `moq import fmp4` can't carry one, while a demuxer that
 resolves timed text (`qtdemux` on a 3GPP timed-text track) can feed the pad
@@ -56,6 +63,10 @@ Each `sink_%u` request pad is one track. Pad properties: `track` names it
 `estimated-send-rate`, `estimated-recv-rate`, `connection-stats`, and
 `sessions`. The sink reconnects for as long as the pipeline runs and only
 reports `failed` on an answer redialing can't change, such as a rejected token.
+Each run from `READY` publishes under a fresh
+[publisher epoch](/concept/moq-lite#publisher-epochs), so viewers switch to a
+restarted pipeline at once instead of stalling on the old one; reconnects
+within a run keep it.
 
 `connection-stats` is null while disconnected. While connected it is a
 `GstStructure` named `moq-connection-stats` containing the transport metrics

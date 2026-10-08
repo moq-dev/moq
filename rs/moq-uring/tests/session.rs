@@ -85,7 +85,10 @@ fn lite_session_over_the_worker() {
 			.expect("quic accept");
 		let (session, driver) = moq_net::Server::new()
 			.with_publisher(&pub_origin)
-			.accept_lite(std::time::Instant::now(), quic::web::Session::raw(conn))
+			.accept_lite(
+				std::time::Instant::now(),
+				moq_uring::transport::Session::new(quic::web::Session::raw(conn)),
+			)
 			.await
 			.expect("accept_lite");
 		let _ = server_handle.run(driver).await;
@@ -105,7 +108,10 @@ fn lite_session_over_the_worker() {
 
 			let (session, driver) = moq_net::Client::new()
 				.with_subscriber(sub.clone())
-				.connect_lite(std::time::Instant::now(), quic::web::Session::raw(conn))
+				.connect_lite(
+					std::time::Instant::now(),
+					moq_uring::transport::Session::new(quic::web::Session::raw(conn)),
+				)
 				.await
 				.expect("connect_lite");
 			let task_handle = handle.clone();
@@ -116,7 +122,10 @@ fn lite_session_over_the_worker() {
 			let bc = {
 				let consumer = sub.consume();
 				consumer.routed("test").await.expect("broadcast announced");
-				consumer.request_broadcast("test").await.expect("broadcast resolves")
+				consumer
+					.request_broadcast("test", None)
+					.await
+					.expect("broadcast resolves")
 			};
 			let mut track = bc
 				.track("data")
@@ -204,7 +213,10 @@ fn two_lite_sessions_share_the_server_socket() {
 			server_handle.spawn(async move {
 				let (session, driver) = moq_net::Server::new()
 					.with_publisher(&pub_origin)
-					.accept_lite(std::time::Instant::now(), quic::web::Session::raw(conn))
+					.accept_lite(
+						std::time::Instant::now(),
+						moq_uring::transport::Session::new(quic::web::Session::raw(conn)),
+					)
 					.await
 					.expect("accept_lite");
 				let _ = session_handle.run(driver).await;
@@ -227,7 +239,10 @@ fn two_lite_sessions_share_the_server_socket() {
 				let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
 				let (session, driver) = moq_net::Client::new()
 					.with_subscriber(sub.clone())
-					.connect_lite(std::time::Instant::now(), quic::web::Session::raw(conn))
+					.connect_lite(
+						std::time::Instant::now(),
+						moq_uring::transport::Session::new(quic::web::Session::raw(conn)),
+					)
 					.await
 					.expect("connect_lite");
 				let task_handle = handle.clone();
@@ -238,7 +253,10 @@ fn two_lite_sessions_share_the_server_socket() {
 				let bc = {
 					let consumer = sub.consume();
 					consumer.routed("test").await.expect("broadcast announced");
-					consumer.request_broadcast("test").await.expect("broadcast resolves")
+					consumer
+						.request_broadcast("test", None)
+						.await
+						.expect("broadcast resolves")
 				};
 				let mut track = bc
 					.track("data")

@@ -20,84 +20,134 @@ landed on main; the line may still reshape both.
 ### Compatibility
 
 Decided (2026-09-28): the line may break the hang `archive` catalog entry and
-the recording format in place on `main`, without a version bump or a `dev`
-detour (for example the track-timeline rework in #4280). No archives exist
+the recording format in place on `main`, without a version bump
+(for example the track-timeline rework in #4280). No archives exist
 yet, so nothing recorded or published depends on either shape. This is an
-exception to the main/dev rule for this line only; once a release ships
+exception for this line only; once a release ships
 recordings, later format changes go through the entry's format version.
 
 ### Landed
 
-The segment engine is in `rs/moq-mux/src/timeline.rs`:
+Every track has its own timeline (`rs/moq-mux/src/timeline.rs`):
 
-- `Segmenter` (:477) builds aligned `{ segment, pts, duration, tracks }`
-  records (`rs/hang/src/timeline.rs:105-121`) from pacing and non-pacing
-  tracks, with explicit `cut(pts)` boundaries.
-- `Producer::deferred` (:917) returns a `Deferred` (:619) whose `next` yields
-  a cancellation-safe `Pending` record (:702). Dropping it requeues the record,
-  `Pending::gap()` (:712) turns it into a gap, and `Producer::push` (:948)
-  commits it into the visible timeline in segment order.
-- The timeline track is a `moq_json::window::Producer` (:742).
-  `Producer::pop` (:983) trims the oldest records and `finish` (:1015) closes
-  the track.
-- `moq-hls` renders live playlists from the timeline alone and FETCHes media
-  per HTTP request (`rs/moq-hls/src/export/mod.rs:3-8`). A clean timeline
-  finish ends every window with `EXT-X-ENDLIST` (:325-327).
+- A `Segmenter` builds one track's `{ sequence, pts, duration, start, end }`
+  records (`rs/hang/src/timeline.rs`) from its frame reports: a record ends at
+  the first group start past a minimum, a sparse track (zero minimum) records
+  each group as it finishes, a group open past `durationMax` splits between
+  frames, and `cut(pts)` adds application boundaries.
+- A `Producer` publishes records onto a timeline track, a
+  `moq_json::window::Producer` whose `pop` trims the oldest and `flush` closes
+  the open group. `Timelines` pairs them for live publishing and names each
+  track's timeline in the catalog's root `archive` entry.
+- `moq-hls` renders playlists from the timelines alone and FETCHes media per
+  HTTP request. Segment boundaries come from a reference rendition's records;
+  other renditions resolve each segment against their own timelines
+  (`rs/moq-hls/src/export/spans.rs`). A clean reference timeline finish ends
+  every window with `EXT-X-ENDLIST`.
+- The same exporter serves a recording replayed through `moq_archive::Reader`
+  with no archive-specific code (`rs/moq-hls/src/export/archive_tests.rs`):
+  playlists read only the timelines, and a segment GETs only its rendition's
+  objects. The caller supplies the catalog.
+- A catalog `archive` entry with a `store` and no `replay` path declares its
+  spans durable on that broadcast. The exporter still lists a capped window
+  for it; only the explicit `export::Config::history` mode lists the whole
+  retained timeline and lets only its pops trim it (`durable` in
+  `rs/moq-hls/src/export/mod.rs`). Either way the listing starts at the
+  records the timeline restates on join (at most 256 from `moq-mux`), so a
+  longer recording does not list from its start yet.
 
-`rs/moq-archive` stores the versioned objects on any `object_store::ObjectStore`:
-percent-encoded track names, `.info` JSON, the binary envelope, and put/get/list/delete.
+`rs/moq-archive` stores the versioned objects on any `object_store::ObjectStore`.
+`moq_archive::Writer` (`rs/moq-archive/src/writer.rs`) cuts each enrolled track
+with its own `Segmenter`, streams frames as they arrive, and commits each track
+independently: the record's object, the record, retention pops, then the
+timeline's `segments/<n>`. A failed object PUT drops that record. A DVR prunes
+each timeline's oldest objects no checkpoint recovery reads. On a prefix
+that already holds a recording, it replays each retained timeline through
+`timeline::Producer::resume`, deletes objects past each track's committed tail,
+resumes after the newest record's end (partway through a split group). Each
+track's `.info` keeps the source route's epoch, and a resume under another
+epoch fails to enroll (`Error::EpochMismatch`); the caller starts a new
+prefix. A new group whose first timestamp precedes the recorded end fails the
+recording instead of overlapping media time. A DVR deletes unreferenced objects and unneeded timeline
+objects one grace period after recovery.
+`moq_archive::Reader` (`rs/moq-archive/src/reader/mod.rs`) replays every timeline
+onto a supplied `broadcast::Producer` and serves FETCH through `track::Dynamic`
+with a byte-bounded object LRU, stitching a group split across records and
+growing a group whose records do not reach its end yet. `Reader::refresh`
+follows by listing each timeline's keys after its cursor; `Reader::finish`
+applies out-of-band finality. `rs/moq-archive/src/proof.rs` records one
+multi-rendition broadcast end to end.
+
+### Decisions
+
+Moved from the deleted per-track timelines quest (2026-10-06 audit: its Rust
+work landed in #4034 and its children are this line's own):
+
+- One timeline track per track, live and recorded. `moq-mux` publishes them for
+  every broadcast; an unsubscribed track costs nothing.
+- The catalog's root `archive` entry maps each track to its timeline, including
+  the catalog track itself. `replay`, `store`, and `version` stay beside it.
+- Each track cuts on its own by one rule: at a group boundary between a
+  minimum and maximum duration (a 2s minimum today; 4s and a multiple of the
+  declared duration once
+  [declared duration](/quest/m1/archive/declared-duration.md) lands; a zero
+  minimum only for sparse data such as the catalog), splitting a long-lived
+  group by frame at the maximum. Manual cuts stay as an optimization, such as
+  a video keyframe cutting audio so derived segments need fewer objects.
+- A stored object may hold a frame range of a group, not only whole groups.
+- HLS and DASH segments are derived at the edge from group timestamps, not
+  from storage objects. Fetching extra objects is fine when they land in the
+  reader's cache for the next request.
+- `moq-hls` never retries a failed timeline, because the origin already reconnects
+  transient source failures. A replacement publisher that restarts group
+  numbering is a publisher bug: a broadcast, track, or group name always means
+  the same content, and MoQ has no ETag-style invalidation
+  ([#4556](https://github.com/moq-dev/moq/pull/4556)). A failed timeline
+  fails loud instead: the reference ends every playlist with `EXT-X-ENDLIST`,
+  and another rendition's playlist ends at its last covered segment rather than
+  listing gaps.
+- HLS `EXT-X-TARGETDURATION` is fixed for the run, not the observed maximum
+  #4280 shipped. This reverses that PR's decision 4 (09-28 merged-PR audit).
+  The target comes from each timeline's declared duration, which replaces the
+  broadcast-wide `durationMax` (09-29 planning).
+
+For triage, not blocking: two Codex P2s arrived after #4280 merged and are
+unanswered. A timeline record whose `sequence` differs from its window index
+is passed through unvalidated
+([review](https://github.com/moq-dev/moq/pull/4280#pullrequestreview-5332725290)),
+and `Timelines::track` re-enrolling a name while its old `Recorder` is alive
+leaves two handles on one segmenter
+([r4117516035](https://github.com/moq-dev/moq/pull/4280#discussion_r4117516035)).
 
 ### Format
 
 The format is the draft's
-[Recording section](/drafts/draft-lcurley-moq-hang.md#recording).
+[Recording section](/drafts/draft-lcurley-moq-hang.md#recording), version 2.
 The application chooses the object prefix, selected tracks, retention, and credentials; `moq-archive` owns the
 portable layout and codecs:
 
 ```text
 <prefix>/<encoded-track>/.info
-<prefix>/<encoded-track>/groups/<largest>.<smallest>
-<prefix>/<encoded-timeline-track>/segments/<segment>
+<prefix>/<encoded-track>/segments/<sequence>
 ```
 
-`.info` is versioned JSON with the immutable priority and timescale. A segment
-object is a versioned binary envelope: a group/frame table with timestamps and
-payload offsets, then the original payloads. One GET populates an LRU with the
-adjacent groups, while audio-only or low-rendition playback never downloads
-unrelated tracks.
-
-There is no `.head`, manifest, `.complete`, or `.timeline` object. The archive
-timeline uses the same envelope under `segments/<segment>`, with consecutive
-IDs for incremental GETs. Other tracks use `groups/<largest>.<smallest>` with
-19-digit zero-padded inclusive bounds, strictly increasing nonoverlapping
-ranges, and no segment number or secondary index file. The catalog's `archive` entry names the
-timeline track, plus any replay path, store URL, and format version. Listing
-bootstraps recovery; following the next timeline key updates the cached ranges.
-
-### Writer and reader
-
-The application passes a `broadcast::Consumer` and opts arbitrary track names
-in as pacing or non-pacing, including catalog and JSON tracks; `moq-archive`
-never parses a media catalog. For each closed segment the writer PUTs one
-object per participating track, drops the ranges of any track whose PUT
-failed, then pushes the record. A clean source end flushes the final partial
-segment and finishes the timeline; there is no completion marker.
-
-The reader takes a `broadcast::Producer` and uses `track::Dynamic`
-(`rs/moq-net/src/model/track.rs:1652`) to answer FETCH for the tracks and
-groups the timeline advertises: map the request to the track's group-range key, GET
-once, validate, cache, and replay the original timestamps. Any ingest that
-produces a broadcast (RTMP, SRT, WHIP) is archivable without its own
-implementation.
+A recorded track's `segments/<n>` holds record `n` of its timeline; its
+timeline, named with a `.timeline.z` suffix, stores the window groups committed
+with record `n` under its own `segments/<n>`. `.info` is versioned JSON with
+the immutable priority and timescale. A segment object is a versioned binary
+envelope: a frame start, a group/frame table with timestamps and payload
+offsets, then the original payloads. One GET populates an LRU with the adjacent
+groups, while audio-only or low-rendition playback never downloads unrelated
+tracks. There is no `.head`, manifest, `.complete`, or index object.
 
 ### Retention
 
-An unbounded archive only pushes records. During each new segment commit, a
-DVR pops expired records before closing and storing that segment's timeline
-groups, then waits the configured grace period before deleting expired objects. Timeline
-objects use `segments/<segment>` for the segment being committed. Retention stops after
-the final segment; no existing object is rewritten. HLS is a derived view of
-the archive, never a second stored copy.
+An unbounded archive only pushes records. A DVR pops each track's expired
+records while committing that track's next record, before storing its timeline
+groups, then waits the configured grace period before deleting expired objects.
+Each track keeps its newest record, so a static catalog outlives the video
+recorded with it. HLS is a derived view of the archive, never a second stored
+copy.
 
 ### Managed boundary
 
@@ -112,17 +162,15 @@ owned by that prerequisite, not duplicated in archive storage.
 
 ## Required
 
-- [Recording writer](/quest/m1/archive/writer.md) - feed the segmenter from a `broadcast::Consumer`, store each segment, then commit its record
-- [Recording reader](/quest/m1/archive/reader.md) - serve archived FETCH through a supplied `broadcast::Producer`
-- [Replay provenance](/quest/m1/archive/provenance.md) - a replay's catalog names its timeline, replay path, store URL, and format version
-- [Offline archive HLS](/quest/m1/archive/hls.md) - render playlists from the archive timeline and fetch segment media lazily
+- [Timelines declare their segment duration](/quest/m1/archive/declared-duration.md) - each timeline entry declares its segment duration (reported or estimated by the publisher), replacing the root `durationMax`
+- [JS per-track timelines](/quest/m1/archive/js-timelines.md) - `@moq/hang` publishes the same per-track timelines as Rust (it already reads them)
+- [Fixed HLS target duration](/quest/m1/archive/hls-target.md) - one `EXT-X-TARGETDURATION` for the run, from the reference timeline's declared duration; an overrun is listed with a warning
+- [History from the start](/quest/m1/archive/replay-history.md) - history mode lists a recording from its first segment by reading stored timeline groups, not only the restated tail
+- [Replay catalog](/quest/m1/archive/replay-catalog.md) - `moq_archive::Reader` republishes the recorded catalog live with `store` set, so stock `moq export hls` serves the whole replay of `moq import archive`
+- [Idle flush](/quest/m1/archive/flush.md) - idle tracks are recorded within a bounded wall-clock delay, and `flush()` forces a track's pending record out
 - [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback
-- [Enrollment flake](/quest/m1/archive/enrollment-flake.md) - the opening-snapshot test waits for real enrollment, not the `.info` file
-- [Archive proof](/quest/m1/archive/proof.md) - prove persistence ordering, selective reads, exact FETCH replay, and timeline-only HLS generation
 
 ## Related
 
 - [Catalog track identity](/quest/m2/catalog-tracks.md) - explore immutable definitions or explicit version binding independently of archives
-
-- [wildcard](/quest/m0/wildcard/README.md) - catch-all routing exposes an archive at its stable replay path
 - [e2ee](/quest/m1/e2ee/README.md) - protected broadcasts are excluded initially

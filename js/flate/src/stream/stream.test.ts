@@ -4,7 +4,7 @@ import { DEFAULT_MAX_FRAME_SIZE } from "../codec.ts";
 import { Consumer, Producer, Rolled } from "./index.ts";
 
 // Ask for a replay window, so the superseded first group is delivered rather than skipped by the
-// subscriber's default max-age budget. A rolled log is exactly the case where both groups matter.
+// subscriber's default max delay budget. A rolled log is exactly the case where both groups matter.
 const REPLAY_LATENCY = Time.Milli(30_000);
 
 const payloads = (count: number) => Array.from({ length: count }, (_, n) => new Uint8Array(8).fill(n));
@@ -83,7 +83,7 @@ test("a second group is a rolled log, not a continuation", async () => {
 	}
 	track.close();
 
-	const consumer = new Consumer({ track: track.subscribe({ maxAge: REPLAY_LATENCY }) });
+	const consumer = new Consumer({ track: track.subscribe({ maxDelay: REPLAY_LATENCY }) });
 	expect(await consumer.next()).toBeDefined();
 	expect(await consumer.next()).toBeDefined();
 	await expect(consumer.next()).rejects.toThrow(Rolled);
@@ -115,14 +115,14 @@ test("a second group is reported while the first is still open", async () => {
 	const second = track.appendGroup();
 	second.writeFrame({ payload: payloads(2)[1], timestamp: Time.Timestamp.now() });
 
-	const consumer = new Consumer({ track: track.subscribe({ maxAge: REPLAY_LATENCY }) });
+	const consumer = new Consumer({ track: track.subscribe({ maxDelay: REPLAY_LATENCY }) });
 	expect(await consumer.next()).toEqual(payloads(1)[0]);
 	await expect(consumer.next()).rejects.toThrow(Rolled);
 
 	// Both mirrors are released. The read that lost the race would otherwise stay registered on the
 	// first group, keeping this consumer's subscription reachable after the caller drops it.
-	expect(first.used.peek()).toBe(false);
-	expect(second.used.peek()).toBe(false);
+	expect(first.demand().used.peek()).toBe(false);
+	expect(second.demand().used.peek()).toBe(false);
 
 	// Sticky: a later read must not report the rest of the first group as a whole log.
 	first.writeFrame({ payload: payloads(3)[2], timestamp: Time.Timestamp.now() });
@@ -194,6 +194,6 @@ test("each record keeps its capture timestamp", async () => {
 	producer.finish();
 
 	const group = await track.subscribe().ordered().nextGroup();
-	expect((await group?.readFrame())?.timestamp.as(Time.Timescale.MILLI)).toBe(1_000);
-	expect((await group?.readFrame())?.timestamp.as(Time.Timescale.MILLI)).toBe(2_000);
+	expect((await group?.readFrame())?.timestamp?.as(Time.Timescale.MILLI)).toBe(1_000);
+	expect((await group?.readFrame())?.timestamp?.as(Time.Timescale.MILLI)).toBe(2_000);
 });

@@ -46,7 +46,12 @@ making the whole QUIC connection public.
 
 `RESET_STREAM_AT` is a QUIC extension, not a qmux-specific frame. Once the
 reliable-reset quest lands, make qmux drive that shared send and receive state
-instead of retaining the prototype's local parsing and transitions.
+instead of retaining the prototype's local parsing and transitions. Because
+qmux runs over a reliable ordered transport, serialization acknowledges the
+committed prefix immediately, but the receiver must still delay the reset
+until that prefix is available. Remove the qmux prototype's local
+`RESET_STREAM_AT` state once the shared core owns it (moved here from
+reliable reset in the 2026-10-05 audit).
 
 Carry the hierarchical send groups from the scheduler quest into qmux's
 record writer. Qmux over TCP, TLS, WebSocket, Unix sockets, and in-memory
@@ -61,7 +66,7 @@ bidirectional interoperability against the last web-transport `qmux` release (0.
 the TypeScript qmux/WebSocket peer used by `js/net`. Preserve rejection of
 prohibited QUIC frames, params-first setup, record-size validation, close and
 reset semantics (the first recorded close wins, as close codes #4262
-settled on dev), keep-alive behavior, and bounded flow-control tests.
+settled), keep-alive behavior, and bounded flow-control tests.
 
 There must be one stream state machine in the dependency graph.
 
@@ -82,3 +87,4 @@ the fork plan the same day kept it there.
 ## Related
 
 - [noq#812](https://github.com/n0-computer/noq/issues/812) - the qmux proposal to n0
+- [tls:// peer certificates](/quest/m2/tls-listener-mtls.md) - needs a peer-certificate accessor on qmux's TLS session, upstream or in-tree

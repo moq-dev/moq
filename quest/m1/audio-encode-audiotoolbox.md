@@ -3,7 +3,10 @@
 ## Goal
 
 On macOS and iOS, `Codec::Aac` encodes through AudioToolbox at the input's
-layout, up to 7.1, and the result plays in the browser, `moq play`, and OBS.
+layout, mono through 5.1 and 7.1, and the result plays in the browser,
+`moq play`, and OBS. 6.1 is refused: since #4973 a synthesized ASC names no
+program config element. Carrying the converter's magic cookie verbatim would
+lift that once a caller needs it.
 
 ## Plan
 
@@ -17,7 +20,7 @@ the encode seam as the platform candidate on macOS and iOS.
   converter allows.
 - The seam assumes one packet per frame. If the converter holds output back,
   the backend needs a `flush` and a zero-or-more return, which changes
-  `Encoder::encode` and so targets `dev`.
+  `Encoder::encode`.
 - Gate the seam's "AAC refused without a platform encoder" test to hosts
   without one.
 - Regression: a stereo and a 5.1 encode round-trip through the AudioToolbox
@@ -29,8 +32,7 @@ the encode seam as the platform candidate on macOS and iOS.
   duplicates as holes and resets AAC between them. Shift the whole timeline by
   the deficit instead, including the terminal end (found in #4081 review).
 - Until [FFI frame duration default](/quest/m1/ffi-frame-duration-default.md)
-  lands on `dev`, binding callers pass `frame_duration_us: 0` with `aac()`.
-  Split out on 2026-09-30 so this quest stays on `main`.
+  lands, binding callers pass `frame_duration_us: 0` with `aac()`.
 
 ## Required
 

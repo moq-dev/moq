@@ -27,5 +27,4 @@ libcamera source composes with what already exists, because
 
 ## Required
 
-- Someone with a Raspberry Pi or similar V4L2 M2M device without a usable
-  Vulkan driver validates the EGL import on it
+- [An embedded video device is on hand](/quest/m3/embedded-device.md) - the device to validate on

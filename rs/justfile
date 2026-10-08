@@ -35,7 +35,7 @@ check *args:
 # `check` with clippy replaced by the `test` build, whose clippy-driver reports
 # the same findings. `build.warnings` turns them into errors without entering
 # cargo's fingerprint, so a later plain `test` reuses the artifacts. A
-# selection can hold nothing testable (moq-wasm has no host tests).
+# selection can hold nothing testable.
 
 # Compile, lint, and test in one build, plus everything else `check` verifies.
 [positional-arguments]
@@ -48,6 +48,8 @@ check-test *args:
 _lint *args:
     python3 sh/rs/stats-docs.py
     cargo fmt --all --check
+    # quinn-udp keeps quinn's formatting; cargo fmt skips it (see moq-sock's lib.rs).
+    rustfmt --edition 2024 --check rs/moq-sock/src/udp/mod.rs
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps "$@"
     cargo shear
     cargo sort --workspace --check --no-format
@@ -57,6 +59,7 @@ _lint *args:
 fix *args:
     cargo clippy --locked --fix --allow-staged --allow-dirty --all-targets "$@"
     cargo fmt --all
+    rustfmt --edition 2024 rs/moq-sock/src/udp/mod.rs
     cargo shear --fix
     cargo sort --workspace --no-format
 
@@ -89,6 +92,10 @@ tokio-features:
 windows $BASE="":
     sh/rs/platform.sh "$BASE"
 
+# Test the platform-sensitive crates nightly on Windows, independent of the diff.
+windows-test:
+    just rs test -p moq-auth -p hang -p moq-tokio -p moq-sock
+
 # Compile and test the io_uring relay path, which is off the default feature set.
 # Linux-only, and the tests below the 6.12 kernel floor skip themselves.
 [positional-arguments]
@@ -110,6 +117,11 @@ uring-check *args:
 macos $BASE="":
     sh/rs/platform.sh "$BASE"
 
+# Test the platform-sensitive crates nightly on macOS, independent of the diff.
+macos-test:
+    just rs test -p moq-auth -p hang -p moq-tokio -p moq-sock
+    just rs test -p moq-sock --features fast-apple-datapath
+
 # Compile and lint the capture feature, which the default check skips.
 [positional-arguments]
 capture *args:
@@ -122,15 +134,39 @@ capture *args:
 capture-test *args:
     just rs test -p moq-video -p moq-audio --features moq-video/capture,moq-audio/capture "$@"
 
+# Compare SHM and GetImage through production capture on the current X11 display.
+x11-bench:
+    just rs test --release -p moq-video --no-default-features --features capture -E 'test(x11_capture_workload)' --run-ignored only --no-capture
+
+# Compare RGB conversion allocation separately, without an X server.
+x11-rgb-bench:
+    just rs test --release -p moq-video --no-default-features --features capture -E 'test(x11_rgb_workload)' --run-ignored only --no-capture
+
+# Use an isolated virtual X server and retain paired measurements for comparison.
+x11-bench-ci:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    log="${MOQ_X11_BENCH_LOG:-.scratch/x11-capture-benchmark.log}"
+    mkdir -p "$(dirname "$log")"
+    {
+        git rev-parse HEAD
+        rustc --version
+        xvfb-run -a -s "-screen 0 1920x1080x24 -nolisten tcp" just rs x11-bench
+        just rs x11-rgb-bench
+    } 2>&1 | tee "$log"
+
 # moq-video's MediaCodec code is `#[cfg(target_os = "android")]`. Needs an NDK,
 # which the dev shell lacks, so android.yml runs it outside Nix. `check` rather
 # than a denying clippy: the capture plumbing is dead on a target without a
 # capture backend.
 
-# Compile the Android backends, which the host-target check skips.
+# Compile the Android backends, which the host-target check skips, and assert the
+# moq-ffi library links logcat: `Log::init` is silent on Android without it.
 [positional-arguments]
 android *args:
     cargo ndk -t arm64-v8a --platform 26 check --locked -p moq-video --all-targets "$@"
+    cargo ndk -t arm64-v8a --platform 26 -o target/android-jni build --locked -p moq-ffi "$@"
+    nm -D --undefined-only target/android-jni/arm64-v8a/libmoq_ffi.so | grep -q __android_log_
 
 # moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so only a wasm32
 # build sees the code. Not to be confused with `just js wasm`, which builds the
@@ -302,3 +338,17 @@ package-gst *args:
 [positional-arguments]
 gst-smoke *args:
     rs/moq-gst/smoke.sh "$@"
+
+# Device-free mixer cost, swept over sink count and frames per callback.
+bench-playback:
+    cargo nextest run --locked --release -p moq-audio --features playback --run-ignored only -E 'test(benchmark_mixer_callbacks)' --success-output immediate
+
+# Sweep retained RTMP chunk-stream IDs independently of message and chunk sizes.
+[positional-arguments]
+bench-rtmp *args:
+    cargo bench --locked -p moq-rtmp --bench chunk_interleaving -- "$@"
+
+# One relay's stats tick, plus the decode table. `--test` runs each tick once; decode ignores it and prints its whole table.
+[positional-arguments]
+bench-stats *args:
+    cargo bench --locked -p moq-stats --features bench --bench producer_tick --bench decode -- "$@"

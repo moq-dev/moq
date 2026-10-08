@@ -108,7 +108,7 @@ use std::borrow::Cow;
 
 use crate::{
 	Path,
-	coding::{Decode, DecodeError, Encode, EncodeError},
+	coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
 	ietf::{
 		Filter, GroupOrder, Location, Parameters, Properties, RequestId,
 		namespace::{decode_namespace, encode_namespace},
@@ -128,12 +128,16 @@ pub(crate) enum PublishDoneStatus {
 	Unauthorized,
 	/// The track is no longer being published.
 	TrackEnded,
+	/// A requested subscription update could not be applied.
+	UpdateFailed,
 }
 
 impl PublishDoneStatus {
 	/// Return the registered wire code for every supported draft.
 	pub(crate) const fn code(self, version: Version) -> u64 {
 		match version {
+			// Draft-14 registers no UPDATE_FAILED; its 0x8 is unassigned.
+			Version::Draft14 if matches!(self, Self::UpdateFailed) => 0x0,
 			Version::Draft14
 			| Version::Draft15
 			| Version::Draft16
@@ -148,6 +152,7 @@ impl PublishDoneStatus {
 				Self::InternalError => 0x0,
 				Self::Unauthorized => 0x1,
 				Self::TrackEnded => 0x2,
+				Self::UpdateFailed => 0x8,
 			},
 		}
 	}
@@ -190,7 +195,7 @@ impl PublishDone<'_> {
 impl Message for PublishDone<'_> {
 	const ID: u64 = 0x0b;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			self.request_id
 				.expect("request_id required for draft14-16")
@@ -198,21 +203,21 @@ impl Message for PublishDone<'_> {
 		} else {
 			assert!(self.request_id.is_none(), "request_id must be None for draft17+");
 		}
-		self.status_code.encode(w, version)?;
-		self.stream_count.encode(w, version)?;
-		self.reason_phrase.encode(w, version)?;
+		w.varint(self.status_code)?;
+		w.varint(self.stream_count)?;
+		w.string(&self.reason_phrase)?;
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			Some(RequestId::decode(r, version)?)
 		} else {
 			None
 		};
-		let status_code = u64::decode(r, version)?;
-		let stream_count = u64::decode(r, version)?;
-		let reason_phrase = Cow::<str>::decode(r, version)?;
+		let status_code = r.varint()?;
+		let stream_count = r.varint()?;
+		let reason_phrase = Cow::Owned(r.string()?);
 
 		Ok(Self {
 			request_id,
@@ -240,14 +245,14 @@ pub struct Publish<'a> {
 impl Message for Publish<'_> {
 	const ID: u64 = 0x1D;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		if version == Version::Draft17 {
-			0u64.encode(w, version)?; // required_request_id_delta = 0
+			w.varint(0)?; // required_request_id_delta = 0
 		}
-		encode_namespace(w, &self.track_namespace, version)?;
-		self.track_name.encode(w, version)?;
-		self.track_alias.encode(w, version)?;
+		encode_namespace(w, &self.track_namespace)?;
+		w.string(&self.track_name)?;
+		w.varint(self.track_alias)?;
 
 		match version {
 			Version::Draft14 => {
@@ -256,15 +261,15 @@ impl Message for Publish<'_> {
 					.unwrap_or(GroupOrder::Ascending)
 					.encode(w, version)?;
 				if let Some(location) = &self.largest_location {
-					true.encode(w, version)?;
+					w.bool(true);
 					location.encode(w, version)?;
 				} else {
-					false.encode(w, version)?;
+					w.bool(false);
 				}
 
-				self.forward.encode(w, version)?;
+				w.bool(self.forward);
 				// parameters
-				0u8.encode(w, version)?;
+				w.u8(0);
 			}
 			_ => {
 				// GROUP_ORDER is a legal PUBLISH parameter only through draft-15; a later peer
@@ -290,26 +295,26 @@ impl Message for Publish<'_> {
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		if version == Version::Draft17 {
-			let _required_request_id_delta = u64::decode(r, version)?;
+			let _required_request_id_delta = r.varint()?;
 		}
-		let track_namespace = decode_namespace(r, version)?;
-		let track_name = Cow::<str>::decode(r, version)?;
-		let track_alias = u64::decode(r, version)?;
+		let track_namespace = decode_namespace(r)?;
+		let track_name = Cow::Owned(r.string()?);
+		let track_alias = r.varint()?;
 
 		match version {
 			Version::Draft14 => {
 				let group_order = GroupOrder::decode(r, version)?.any_to_descending();
-				let content_exists = bool::decode(r, version)?;
+				let content_exists = r.bool()?;
 				let largest_location = match content_exists {
 					true => Some(Location::decode(r, version)?),
 					false => None,
 				};
-				let forward = bool::decode(r, version)?;
+				let forward = r.bool()?;
 				// parameters
-				let _params = Parameters::decode(r, version)?;
+				Parameters::skip(r)?;
 
 				Ok(Self {
 					request_id,
@@ -334,6 +339,7 @@ impl Message for Publish<'_> {
 				// letting the request reach its NOT_SUPPORTED response.
 				decode_params!(r, version,
 					0x02 => object_delivery_timeout: Option<u64>,
+					0x03 => _authorization_token: Vec<super::Opaque>,
 					0x06 => subgroup_delivery_timeout: Option<u64>,
 					0x08 => _expires: Option<u64>,
 					0x09 => largest_location: Option<Location>,
@@ -386,7 +392,7 @@ pub struct PublishOk {
 impl Message for PublishOk {
 	const ID: u64 = 0x1E;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			self.request_id
 				.expect("request_id required for draft14-16")
@@ -397,14 +403,14 @@ impl Message for PublishOk {
 
 		match version {
 			Version::Draft14 => {
-				self.forward.encode(w, version)?;
-				self.subscriber_priority.encode(w, version)?;
+				w.bool(self.forward);
+				w.u8(self.subscriber_priority);
 				self.group_order.encode(w, version)?;
 				// Same as SUBSCRIBE: the Location an absolute filter carries is dropped on
 				// decode, so encoding one would truncate the message.
 				self.filter.encode(w, version)?;
 				// no parameters
-				0u8.encode(w, version)?;
+				w.u8(0);
 			}
 			// Draft-20 moved the subscription parameters out of PUBLISH_OK; they belong to
 			// PUBLISH and REQUEST_UPDATE now, so a PUBLISH_OK carries none of them.
@@ -422,7 +428,7 @@ impl Message for PublishOk {
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			Some(RequestId::decode(r, version)?)
 		} else {
@@ -431,13 +437,13 @@ impl Message for PublishOk {
 
 		match version {
 			Version::Draft14 => {
-				let forward = bool::decode(r, version)?;
-				let subscriber_priority = u8::decode(r, version)?;
+				let forward = r.bool()?;
+				let subscriber_priority = r.u8()?;
 				let group_order = GroupOrder::decode(r, version)?;
 				let filter = Filter::decode(r, version)?;
 
 				// no parameters
-				let _params = Parameters::decode(r, version)?;
+				Parameters::skip(r)?;
 
 				Ok(Self {
 					request_id,
@@ -483,17 +489,17 @@ pub struct PublishError<'a> {
 impl Message for PublishError<'_> {
 	const ID: u64 = 0x1F;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
-		self.error_code.encode(w, version)?;
-		self.reason_phrase.encode(w, version)?;
+		w.varint(self.error_code)?;
+		w.string(&self.reason_phrase)?;
 		Ok(())
 	}
 
-	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
-		let error_code = u64::decode(r, version)?;
-		let reason_phrase = Cow::<str>::decode(r, version)?;
+		let error_code = r.varint()?;
+		let reason_phrase = Cow::Owned(r.string()?);
 		Ok(Self {
 			request_id,
 			error_code,
@@ -511,50 +517,53 @@ mod tests {
 	/// decode, which kills the session instead of letting the peer get its refusal.
 	#[test]
 	fn publish_accepts_the_relocated_subscription_parameters() -> Result<(), EncodeError> {
+		let version = Version::Draft20;
 		let mut body = Vec::new();
-		RequestId(1).encode(&mut body, Version::Draft20).unwrap();
-		super::super::namespace::encode_namespace(&mut body, &crate::Path::new("broadcast"), Version::Draft20).unwrap();
-		"video".encode(&mut body, Version::Draft20).unwrap();
-		1u64.encode(&mut body, Version::Draft20).unwrap(); // track alias
+		let w = &mut Encoder::new(&mut body, version.into());
+		RequestId(1).encode(w, version)?;
+		super::super::namespace::encode_namespace(w, &crate::Path::new("broadcast"))?;
+		w.string("video")?;
+		w.varint(1u64)?; // track alias
 
 		// SUBSCRIBER_PRIORITY then LOCATION_FILTER, delta encoded from 0.
-		encode_params!(&mut body, Version::Draft20,
+		encode_params!(w, version,
 			0x20 => 128u8,
 			0x21 => Filter::NextObject,
 		);
-		Properties::default().encode(&mut body, Version::Draft20).unwrap();
+		Properties::default().encode(w, version)?;
 
-		let mut buf = bytes::Bytes::from(body);
-		Publish::decode_msg(&mut buf, Version::Draft20).expect("draft-20 PUBLISH parameters must parse");
+		Publish::decode_msg(&mut Decoder::new(&body, version.into()), version)
+			.expect("draft-20 PUBLISH parameters must parse");
 		Ok(())
 	}
 
 	/// They arrived in draft-20, so an earlier peer sending one is still a violation.
 	#[test]
 	fn older_drafts_reject_the_relocated_parameters() -> Result<(), EncodeError> {
+		let version = Version::Draft19;
 		let mut body = Vec::new();
-		RequestId(1).encode(&mut body, Version::Draft19).unwrap();
-		super::super::namespace::encode_namespace(&mut body, &crate::Path::new("broadcast"), Version::Draft19).unwrap();
-		"video".encode(&mut body, Version::Draft19).unwrap();
-		1u64.encode(&mut body, Version::Draft19).unwrap();
-		encode_params!(&mut body, Version::Draft19, 0x20 => 128u8);
-		Properties::default().encode(&mut body, Version::Draft19).unwrap();
+		let w = &mut Encoder::new(&mut body, version.into());
+		RequestId(1).encode(w, version)?;
+		super::super::namespace::encode_namespace(w, &crate::Path::new("broadcast"))?;
+		w.string("video")?;
+		w.varint(1u64)?;
+		encode_params!(w, version, 0x20 => 128u8);
+		Properties::default().encode(w, version)?;
 
-		let mut buf = bytes::Bytes::from(body);
-		assert!(Publish::decode_msg(&mut buf, Version::Draft19).is_err());
+		assert!(Publish::decode_msg(&mut Decoder::new(&body, version.into()), version).is_err());
 		Ok(())
 	}
-	use bytes::BytesMut;
 
 	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
-		let mut buf = BytesMut::new();
-		msg.encode_msg(&mut buf, version).unwrap();
+		let mut buf = Vec::new();
+		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
+			.unwrap();
 		buf.to_vec()
 	}
 
 	fn decode_message<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {
 		let mut buf = bytes::Bytes::from(bytes.to_vec());
-		M::decode_msg(&mut buf, version)
+		crate::coding::decode_buf(&mut buf, version, M::decode_msg)
 	}
 
 	#[test]

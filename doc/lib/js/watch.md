@@ -30,12 +30,15 @@ in sync at the latency you ask for.
 | --- | --- |
 | `url`, `name` | Relay URL (with `?jwt=` if needed) and broadcast name. |
 | `paused`, `muted`, `volume` | The usual player controls, mirrored as reactive properties. |
-| `delay` | How far playback trails the live edge: `"auto"` (derived from RTT, the default), a duration like `"300ms"`, or `"instant"` to paint frames as they decode with no pacing at all. |
+| `delay` | How far playback trails the live edge: `"auto"` (the default, sized from how late frames actually arrive; see [audio jitter](/concept/audio-jitter)), a duration like `"300ms"`, or `"instant"` to paint frames as they decode with no pacing at all. |
 | `buffer` | Future-dated media held beyond the live edge before playback skips ahead, e.g. `"30s"`. Defaults to none. |
 | `captions` | The caption track to show, or absent for off. `el.text.out.available` lists the renditions for a picker. |
 | `visible` | Only subscribe to video while the element is on screen: a margin (`"20%"` default, `"200px"`), `"always"`, or `"never"`. |
 | `announced` | Wait for the broadcast to be announced before subscribing (default on), so a player can be mounted before the stream exists. |
 | `catalog-format` | `hang` (default, from the `.hang` suffix), `hangz` (compressed), `msf`, or `manual` to supply the catalog yourself. |
+
+A volume change ramps over `el.emitter.fade`, 200ms by default; 0 steps at
+once.
 
 Video holds its last picture while paused, out of view, or waiting for a
 resumed rendition's first frame. Its reported timestamp stays with that picture.
@@ -127,7 +130,8 @@ const dispose = el.signals.run((effect) => {
 
 Call `dispose()` from your framework's unmount cleanup when this subscription
 is no longer needed. Removing the element disables playback but keeps its
-effects open so the same node can reconnect.
+effects open so the same node can reconnect. Its audio graph is released and
+rebuilt on return; pausing or muting keeps the graph warm.
 
 The effect re-runs whenever the catalog or the active broadcast changes, so a
 reconnect resubscribes on its own. A publisher that rewrites its catalog often
@@ -181,3 +185,20 @@ Durations need a unit; a bare number is rejected. Only the delay is held as
 decoded PCM; the buffer stays as encoded frames with backpressure on the
 decoder, so a large one is cheap. `el.reset()` flushes and re-anchors at the
 next frame, which is how a producer interrupts an utterance.
+
+## Strict CSP
+
+The audio worklet loads from a `blob:` URL by default, so it needs no hosted
+files but a CSP must allow `blob:` in `script-src`. For a CSP that refuses
+`blob:`, copy `node_modules/@moq/watch/assets/*` into a directory your origin
+serves, and point the package at it before playback starts:
+
+```ts
+import * as Watch from "@moq/watch";
+
+Watch.assets("/moq/");
+```
+
+The URL must end with `/`. Copy the files again on every upgrade: the worklet
+changes with the package. `@moq/room` and `@moq/boy` play through
+`@moq/watch`, so this one call covers them.

@@ -12,8 +12,10 @@
 //!   are active); each rung resizes and encodes its own copy, group for group,
 //!   stopping when the last subscriber leaves.
 //! - Fetching a specific group fetches that same group from the source and
-//!   transcodes just that group. Output groups mirror source sequence numbers
-//!   1:1, so group N of every rung is the same content as source group N.
+//!   transcodes just that group, unless every caller leaves before the
+//!   request is accepted, in which case nothing is encoded. Output groups
+//!   mirror source sequence numbers 1:1, so group N of every rung is the same
+//!   content as source group N.
 //!
 //! The codec work is `moq-video`: hardware where available (NVDEC + NVENC on
 //! Linux, VideoToolbox on macOS, Media Foundation on Windows), with the default
@@ -1269,6 +1271,211 @@ mod tests {
 		assert!(frames > 0, "the fetch claimed its group but produced no frames");
 
 		transcoder.abort();
+	}
+
+	/// A fetch that starts partway through a group is refused rather than served.
+	/// A fresh encode of that group need not match the bytes of the head a reader
+	/// holds, so its tail cannot continue it. The reader moves on to the next group.
+	#[tokio::test]
+	async fn a_mid_group_fetch_is_refused() {
+		let source = source_catalog(320, 240);
+		// Serve any source group on demand, so a fetch that is not refused has
+		// something to transcode and resolves.
+		let source_fetches = source._track.dynamic();
+		let server = tokio::spawn(async move {
+			while let Ok(request) = source_fetches.requested_group().await {
+				let mut group = request.accept(None).unwrap();
+				write_keyframe(&mut group);
+				group.finish().unwrap();
+			}
+		});
+
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let catalog = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
+		await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
+
+		// The source publishes no live groups, so group 7 is a cache miss that
+		// reaches the rung's fetch handler.
+		let rung = consumer.track("video/120p").unwrap();
+		rung.query().await.unwrap();
+
+		let partial = rung
+			.fetch_group(7, moq_net::group::Fetch::default().with_frame_start(2))
+			.await;
+		match partial {
+			Err(moq_net::Error::NotFound) => {}
+			Err(err) => panic!("expected a NotFound refusal, got {err}"),
+			Ok(_) => panic!("served a fetch that starts mid-group"),
+		}
+
+		// The whole group still serves.
+		let mut whole = rung.fetch_group(7, None).await.unwrap();
+		while whole.read_frame().await.unwrap().is_some() {}
+		assert!(whole.finished().await.unwrap() > 0, "the whole group had no frames");
+
+		server.abort();
+		transcoder.abort();
+	}
+
+	/// A fetch dropped before its group is encoded never opens that encode, and
+	/// the request goes with it. A later fetch of the same group is a new
+	/// request: the abandoned one must not still be encoding into the cache,
+	/// where this accept would come back `Duplicate`.
+	#[tokio::test]
+	async fn an_abandoned_fetch_encodes_nothing() {
+		let source = source_catalog(320, 240);
+		// Held, not served, until the abandoned fetch has let go of it.
+		let source_fetches = source._track.dynamic();
+
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let catalog = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
+		await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
+
+		// No live groups, so group 7 misses and reaches the fetch handler.
+		let rung = consumer.track("video/120p").unwrap();
+		rung.query().await.unwrap();
+
+		let fetching = rung.fetch_group(7, None);
+		let abandoned = tokio::time::timeout(std::time::Duration::from_secs(5), source_fetches.requested_group())
+			.await
+			.expect("the fetch never reached the source")
+			.expect("the source track closed");
+		assert_eq!(abandoned.sequence(), 7);
+
+		// Leave before a single source frame exists. Encoding can only happen
+		// if the handler keeps this fetch.
+		drop(fetching);
+		tokio::time::timeout(std::time::Duration::from_secs(5), abandoned.demand().unused())
+			.await
+			.expect("the abandoned fetch kept its source fetch")
+			.expect("the source fetch closed instead of going unused");
+
+		// The handler dropped the output request with the caller, so this is a
+		// fresh request rather than a join of the one still encoding.
+		let retry = rung.fetch_group(7, None);
+		let fresh = tokio::time::timeout(std::time::Duration::from_secs(5), source_fetches.requested_group())
+			.await
+			.expect("the retry never fetched the source")
+			.expect("the source track closed");
+		assert_eq!(fresh.sequence(), 7);
+		drop(abandoned);
+
+		let mut group = fresh
+			.accept(None)
+			.expect("the fresh request lost to the abandoned encode");
+		write_keyframe(&mut group);
+		group.finish().unwrap();
+
+		let mut fetched = tokio::time::timeout(std::time::Duration::from_secs(5), retry)
+			.await
+			.expect("the retry stalled")
+			.expect("the retry was answered by the abandoned fetch");
+		let mut frames = 0;
+		while fetched.read_frame().await.expect("the retry's group failed").is_some() {
+			frames += 1;
+		}
+		assert!(frames > 0, "the fresh fetch produced no frames");
+
+		transcoder.abort();
+	}
+
+	/// Two transcoders fed the same source publish groups that mirror the
+	/// source's sequences and timestamps rather than anything numbered per
+	/// instance.
+	#[tokio::test]
+	async fn two_instances_mirror_source_groups() {
+		let source = source_broadcast(2, 5);
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+
+		// Mirrored from the source, not numbered by either instance.
+		let expected: Vec<_> = (0..2u64)
+			.map(|sequence| {
+				(
+					sequence,
+					(0..5).map(|i| (sequence * 5 + i) as u128 * 33_333).collect::<Vec<_>>(),
+				)
+			})
+			.collect();
+
+		for _ in 0..2 {
+			let output = moq_net::broadcast::Info::default().produce();
+			let consumer = output.consume();
+			let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config.clone()));
+
+			let track = loop {
+				match consumer.track(hang::Catalog::DEFAULT_NAME) {
+					Ok(track) => break track,
+					Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+					Err(err) => panic!("catalog track: {err}"),
+				}
+			};
+			let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track.subscribe(None).await.unwrap());
+			await_catalog(&mut catalogs, |snapshot| {
+				snapshot.video.renditions.contains_key("video/120p")
+			})
+			.await;
+
+			let rung = consumer.track("video/120p").unwrap();
+			let mut groups = Vec::new();
+			for sequence in 0..2 {
+				let mut fetched = rung.fetch_group(sequence, None).await.unwrap();
+				let mut timestamps = Vec::new();
+				while let Some(payload) = fetched.read_frame().await.unwrap() {
+					let frame = hang::container::Frame::decode(payload.payload).unwrap();
+					timestamps.push(frame.timestamp.as_micros());
+				}
+				groups.push((fetched.sequence, timestamps));
+			}
+
+			assert_eq!(groups, expected);
+			transcoder.abort();
+		}
 	}
 
 	/// A source whose codec description changes rebuilds the shared decode, so

@@ -1,7 +1,8 @@
 # Commits
 
-PRs into `main` are squash-merged, so the PR title becomes the commit subject and the PR description becomes the body in `git log`.
-PRs into any other branch (`dev`, a questline) use a merge commit, so their history survives until they land.
+PRs into `main` are squash-merged through the merge queue, so the PR title becomes the commit subject and the PR description becomes the body in `git log`.
+The one exception is the release back-merge, which lands as a merge commit (see [Merge queue](#merge-queue)).
+PRs into `release` use a merge commit, so their history survives until they land.
 
 - Use conventional-commit subjects (`feat(watch): ...`, `fix: ...`, `chore: ...`, `docs: ...`)
 - AI commit attribution goes in a `Co-Authored-By:` trailer, not the commit body.
@@ -25,6 +26,19 @@ Create a draft PR.
 Switch it to "Ready for review" when you're finished and local `just check` passes.
 Fix any merge conflicts and failing CI checks.
 
+# Merge queue
+
+PRs into `main` land through a merge queue, which re-runs **Check** and **Test** on the PR combined with the latest `main` and the PRs queued ahead of it.
+Enqueue a reviewed PR with `gh pr merge <number>`.
+
+A dequeued PR means the combination failed checks, timed out, or no longer meets the ruleset.
+Read the removal reason in the PR timeline and the merge group run, fix the cause, and enqueue again.
+
+Never bypass the queue with `--admin`, with one exception: the queue only squashes, so Check's `land` job has moq-bot merge the release back-merge with `--admin` as a merge commit once Check and Test pass on its head.
+moq-bot can bypass the queue only when merging a pull request, never on a direct push.
+The `land` job fires only for this repository's `merge/release-into-main` branch, so anyone with write access who pushes to that branch gets a passing head merged past the queue, unreviewed.
+Never enqueue the back-merge, since the queue would squash it; if `land` fails, re-run it from the PR's Check run.
+
 # AI
 
 AI-assisted issues, pull requests, reviews, and comments are welcome.
@@ -38,17 +52,16 @@ Prefer a quest for work needing durable scope or coordination.
 AI agents review every push on their own.
 Never explicitly request a review.
 
-Codex reacts with thumbs up if there are no findings.
-CodeRabbit may be rate-limited, treat it as optional.
-
 For each finding:
 
 - If you don't agree with it, reply to the finding and move on.
 - If it's a relatively easy improvement, fix it and push. Update the summary if needed.
 
-Wait for Codex to review the final head before merging.
-Merge only on its thumbs up, or once every Codex finding on the PR is fixed or replied to.
-Codex skips fork PRs; ask the maintainer to request one.
+Wait for a review of the final head from any reviewer other than Grok.
+Codex (OpenAI) reacts with a thumbs up when it has no findings; that counts as a review.
+Skipped or rate-limited reviews do not count.
+For a fork with no automatic non-Grok review, ask the maintainer to arrange one.
+Merge only when that review has no findings, or every finding is fixed or replied to.
 
 # CI
 
@@ -66,6 +79,14 @@ For non-trivial tasks, file an issue or offer to run `/quest-plan`.
 Its `moq-sync` workflow merges n0-computer/noq weekly as a PR; review it like any other, and `PARENT` names the upstream commit each release includes.
 A carried change lists its upstream PR, or the reason it has none, in the fork PR.
 For an advisory against noq or Quinn, compare the pinned release's `PARENT` with the fixing upstream commit, then sync, release the fork, and bump the pin here.
+
+# Releases
+
+`main` is the trunk; `release` is what ships, and release-plz and every branch-triggered publish run only there.
+
+- A release is cut by hand: a PR merging `main` into `release`, with a merge commit.
+- Consider a backport for any critical bug fix (crash, security, data loss, broken interop): land it on `main` first, then cherry-pick it onto `release` as a separate PR.
+- After every push to `release`, the Back-merge workflow opens a PR merging `release` into `main`, so trunk carries the published versions and CHANGELOGs. It lands as a merge commit, outside the merge queue; never squash it, or the next back-merge conflicts.
 
 # Versions
 

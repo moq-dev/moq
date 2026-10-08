@@ -1,6 +1,6 @@
-import { StreamCode, Stream as StreamError } from "../error.ts";
+import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
 import { asIetf, type Cursor, type Reader, Writer } from "../stream.ts";
-import { Timescale, Timestamp } from "../time.ts";
+import { type Timescale, Timestamp } from "../time.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 // Implementation limit for object extension blocks, independent of the IETF draft.
@@ -9,8 +9,8 @@ const MAX_OBJECT_EXTENSIONS = 64 * 1024;
 const GROUP_END = 0x03;
 const END_OF_TRACK = 0x04;
 
-// MOQ Object Property ids, shared with draft-ietf-moq-loc-04.
-const PROP_TIMESCALE = 0x08n;
+// MOQ Object Property ids, shared with draft-ietf-moq-loc-04. An object-scope Timescale
+// (0x08) is never applied: a track's timeline is its TIMESCALE Track Property alone.
 const PROP_TIMESTAMP = 0x10n;
 
 // The Timestamp id from draft-ietf-moq-loc-03, accepted on decode only. Draft-03's
@@ -20,12 +20,13 @@ const PROP_TIMESTAMP = 0x10n;
 const PROP_TIMESTAMP_DRAFT03 = 0x06n;
 
 // draft-18 adds bit 0x40 (FIRST_OBJECT) to the subgroup header type per spec
-// 11.4.2. Set on emit unless a filter trimmed the group's head; on parse a
-// cleared bit is the peer saying its stream starts partway through a group,
-// which the subscriber drops.
+// 11.4.2. Set on emit unless a filter trimmed the group's head. On parse a
+// cleared bit is the peer's claim that the stream starts partway through;
+// object 0 is still the head, and any other first ID is dropped.
 const FIRST_OBJECT_BIT = 0x40;
 
-function hasFirstObjectBit(version: IetfVersion): boolean {
+/** Whether the subgroup header carries FIRST_OBJECT: draft-18 and later, not drafts 14-17. */
+export function hasFirstObjectBit(version: IetfVersion): boolean {
 	switch (version) {
 		case Version.DRAFT_14:
 		case Version.DRAFT_15:
@@ -67,12 +68,13 @@ async function encodeObjectTime(
 	await w.u62(BigInt(value));
 }
 
+// Without units (`timescale` undefined) there is no Timestamp to write, even if the frame has one.
 async function encodeObjectExtensions(
 	timestamp: Timestamp | undefined,
-	timescale: Timescale,
+	timescale: Timescale | undefined,
 	version: IetfVersion,
 ): Promise<Uint8Array> {
-	if (timestamp === undefined) {
+	if (timestamp === undefined || timescale === undefined) {
 		return new Uint8Array();
 	}
 
@@ -101,7 +103,6 @@ async function encodeObjectExtensions(
 
 function decodeObjectTime(c: Cursor, timescale: Timescale): Timestamp | undefined {
 	let timestamp: bigint | undefined;
-	let overrideScale: bigint | undefined;
 	let prevType = 0n;
 	let first = true;
 
@@ -115,8 +116,6 @@ function decodeObjectTime(c: Cursor, timescale: Timescale): Timestamp | undefine
 			const value = c.u62();
 			if (id === PROP_TIMESTAMP || id === PROP_TIMESTAMP_DRAFT03) {
 				timestamp = value;
-			} else if (id === PROP_TIMESCALE) {
-				overrideScale = value;
 			}
 		} else {
 			c.read(c.u53());
@@ -127,8 +126,7 @@ function decodeObjectTime(c: Cursor, timescale: Timescale): Timestamp | undefine
 		return undefined;
 	}
 
-	// An object-scope Timescale (which LOC permits) overrides the track's for this object.
-	return new Timestamp(Number(timestamp), overrideScale !== undefined ? Timescale(Number(overrideScale)) : timescale);
+	return new Timestamp(Number(timestamp), timescale);
 }
 
 export interface GroupFlags {
@@ -213,8 +211,9 @@ export class Group {
 		}
 	}
 
-	static async decode(r: Reader, version: IetfVersion): Promise<Group> {
-		const raw = await r.u53();
+	/** Decode a SUBGROUP_HEADER. Pass `type` when the caller already read it to classify the stream. */
+	static async decode(r: Reader, version: IetfVersion, type?: number): Promise<Group> {
+		const raw = type ?? (await r.u53());
 		// Strip the draft-18 FIRST_OBJECT bit before the range check, but keep the value:
 		// it is the only signal that a subgroup starts partway through. Drafts that predate
 		// it carry no such signal, so they are taken at their word.
@@ -222,17 +221,16 @@ export class Group {
 		const firstObject = legacy || (raw & FIRST_OBJECT_BIT) !== 0;
 		const id = legacy ? raw : raw & ~FIRST_OBJECT_BIT;
 
-		let hasPriority: boolean;
-		let baseId: number;
-		if (id >= 0x10 && id <= 0x1f) {
-			hasPriority = true;
-			baseId = id;
-		} else if (id >= 0x30 && id <= 0x3f) {
-			hasPriority = false;
-			baseId = id - (0x30 - 0x10);
-		} else {
-			throw new Error(`Unsupported group type: ${id}`);
+		// An invalid type MUST close the session, including the reserved SUBGROUP_ID_MODE
+		// 0b11 (draft-21 section 11.3.1).
+		const known = (id >= 0x10 && id <= 0x1f) || (id >= 0x30 && id <= 0x3f);
+		if (!known || (id & 0x06) === 0x06) {
+			throw new ProtocolViolation(`Unsupported group type: ${raw}`);
 		}
+
+		// 0x30-0x3F omit the priority and inherit it from the control message.
+		const hasPriority = id < 0x30;
+		const baseId = hasPriority ? id : id - (0x30 - 0x10);
 
 		const flags: GroupFlags = {
 			hasExtensions: (baseId & 0x01) !== 0,
@@ -249,6 +247,19 @@ export class Group {
 		const publisherPriority = hasPriority ? await r.u8() : 128; // Default priority when absent
 
 		return new Group({ trackAlias, groupId, subGroupId, publisherPriority, flags });
+	}
+}
+
+/**
+ * An object id that is not the next one in the group.
+ *
+ * moq-lite groups start at object 0 and never skip one, so a non-zero delta is either
+ * a subgroup that starts partway through or a hole later in the stream.
+ */
+export class ObjectIdGap extends Error {
+	constructor(delta: number) {
+		super(`object IDs must start at 0 and increment by 1, got a delta of ${delta}`);
+		this.name = "ObjectIdGap";
 	}
 }
 
@@ -277,10 +288,18 @@ export class Frame {
 	/**
 	 * Encode this frame using the group flags and negotiated IETF version.
 	 *
-	 * `idDelta` is the first object's absolute Object ID and zero for every later one, so a
-	 * group whose head was trimmed by a filter still puts the true numbering on the wire.
+	 * The timestamp goes out in `timescale`, the units the track declared, and not at all when
+	 * it declared none. `idDelta` is the first object's absolute Object ID and zero for every
+	 * later one, so a group whose head was trimmed by a filter still puts the true numbering
+	 * on the wire.
 	 */
-	async encode(w: Writer, flags: GroupFlags, timescale: Timescale, version: IetfVersion, idDelta = 0): Promise<void> {
+	async encode(
+		w: Writer,
+		flags: GroupFlags,
+		timescale: Timescale | undefined,
+		version: IetfVersion,
+		idDelta = 0,
+	): Promise<void> {
 		await w.u53(idDelta);
 
 		if (flags.hasExtensions) {
@@ -314,7 +333,7 @@ export class Frame {
 		// either starts partway through or has a gap that would renumber the frames after it.
 		const delta = c.u53();
 		if (delta !== 0) {
-			throw new Error(`object IDs must start at 0 and increment by 1, got a delta of ${delta}`);
+			throw new ObjectIdGap(delta);
 		}
 
 		let timestamp: Timestamp | undefined;
@@ -323,8 +342,8 @@ export class Frame {
 			if (extensionsLength > MAX_OBJECT_EXTENSIONS) {
 				throw new StreamError(StreamCode.MalformedTrack, { message: "object extensions exceed 64 KiB" });
 			}
-			// A track that declared no timescale opted out of timestamps, so its objects
-			// are stamped on arrival even if one carries a Timestamp we cannot interpret.
+			// A track that declared no timescale is untimed, so its objects stay untimed even
+			// if one carries a Timestamp: there are no units to read it in.
 			if (timescale !== undefined) {
 				timestamp = c.exact(extensionsLength, (e) => decodeObjectTime(e, timescale));
 			} else {
@@ -392,23 +411,32 @@ export class FetchFrame {
 		this.timestamp = timestamp;
 	}
 
-	/** Encode this object at `position`, stamping it in the track's timescale. */
-	async encode(w: Writer, position: FetchPosition, timescale: Timescale, version: IetfVersion): Promise<void> {
+	/**
+	 * Encode this object at `position`, stamping it in the track's timescale, or not at all
+	 * when the track declared none.
+	 */
+	async encode(
+		w: Writer,
+		position: FetchPosition,
+		timescale: Timescale | undefined,
+		version: IetfVersion,
+	): Promise<void> {
+		const stamped = this.timestamp !== undefined && timescale !== undefined;
 		if (position.first) {
 			// Include the priority too: "same as the prior object" has no prior to refer to.
-			const properties = this.timestamp !== undefined ? FETCH_PROPERTIES : 0;
+			const properties = stamped ? FETCH_PROPERTIES : 0;
 			await w.u53(FETCH_GROUP_ID | FETCH_OBJECT_ID | FETCH_PRIORITY | properties);
 			await w.u53(position.group);
 			await w.u53(position.object);
 			await w.u8(0);
 		} else {
 			// Same group and priority; the Object ID is the prior one plus one.
-			await w.u53(this.timestamp !== undefined ? FETCH_PROPERTIES : 0);
+			await w.u53(stamped ? FETCH_PROPERTIES : 0);
 		}
 
 		// Omitted entirely rather than written empty when the object carries no timestamp:
 		// the track declared no units, so there is no property to send.
-		if (this.timestamp !== undefined) {
+		if (stamped) {
 			const extensions = await encodeObjectExtensions(this.timestamp, timescale, version);
 			await w.u53(extensions.byteLength);
 			await w.write(extensions);

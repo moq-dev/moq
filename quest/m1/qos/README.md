@@ -6,9 +6,8 @@ Publishers, relays, and viewers report the telemetry that broadcast health and
 congestion views need: how far behind viewers are according to what the
 network has acknowledged, how timely publishers are against their own media
 clock, and what publishers and viewers report for themselves through
-[media stats](/quest/m1/stats/README.md). Together they can drive an
-unknown/healthy/degraded/unhealthy verdict per broadcast with congestion
-visible for viewers in aggregate, the way CMSD does for HLS.
+[media stats](/quest/m1/stats/README.md), with congestion visible for viewers
+in aggregate.
 
 ## Plan
 
@@ -26,22 +25,36 @@ histograms, which stay monotonic and merge-patch friendly, and which any
 consumer can diff into a distribution. Clients report for themselves through
 hang stats and `.echo` feedback tracks, planned in their own line on `main`.
 
-The counters and channels land here. The moq.pro (downstream) dashboard work,
-including the health badge, connection-health drill-down, and stream
-preflight, consumes them downstream.
+The counters and channels land here. Client health and preflight are
+[client health](/quest/m1/stats/health.md) and
+[preflight](/quest/m1/stats/preflight.md) in the media stats line. The
+moq.pro (downstream) dashboard work, including the health badge and the
+connection-health drill-down, consumes both.
 
-Decided (2026-09-28): the whole line targets `dev`, because its moq-stats
-changes break the published crate. Client stats left the line (2026-09-29)
+Open, for the maintainer (the same question is recorded in
+[client health](/quest/m1/stats/health.md)): whether anything computes a
+per-broadcast verdict combining client reports, the relay's starvation, and
+publisher timeliness, and where it would live. This line only reports the
+counters.
+
+Decided (2026-10-06 audit): [stats totals and prefix
+tracks](/quest/m0/broadcast-epoch/stats-split.md) lands first, since it is m0
+and gates the release; #4133 rebases its histograms onto stats-split's totals
+and prefix tracks rather than the per-path `publisher.json` and
+`subscriber.json` map rows it writes today, which stats-split retires.
+Rejected: #4133 first, which would make stats-split carry the lag histogram
+and dropped counters across.
+
+Decided (2026-09-28): the line's moq-stats changes break the published
+crate. Client stats left the line (2026-09-29)
 when media stats moved out of moq-stats onto hang tracks, which are additive
 on `main`.
 
 ## Required
 
-- [Starvation](/quest/m1/qos/starvation.md) - per broadcast, how far behind
-  the acknowledged frontier of its subscriptions is, in media time, plus the
-  media dropped before it was acknowledged
-- [Final lag sample](/quest/m1/qos/final-lag-sample.md) - a closing
-  subscription records its last partial interval instead of losing it
+- [Lag across a splice](/quest/m1/qos/lag-splice.md) - a route switch
+  neither loses pending lag weight nor keeps weighing a segment replaced
+  before its first frame; the line does not land until it is fixed
 - [Lag dashboard](/quest/m1/qos/lag-dashboard.md) - the demo stats
   dashboard shows viewer lag percentiles and dropped media
 - [Publisher timeliness](/quest/m1/qos/publisher-timeliness.md) - per
@@ -50,5 +63,10 @@ on `main`.
 
 ## Related
 
+- [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) -
+  lands first and replaces the map rows; this line's histograms move onto its
+  totals and prefix tracks
 - [Media stats](/quest/m1/stats/README.md) - publishers and viewers report
   their own media, transport, and playback health, the media half of a verdict
+- [Loss delay](/quest/m3/cut-through/loss-delay.md) - an ingress counter of
+  bytes a loss held back by at least one RTT, on the same rows

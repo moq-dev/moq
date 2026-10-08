@@ -126,18 +126,19 @@ A generation is one credential under one epoch.
 Every derivation and every nonce is scoped to a generation.
 
 **epoch**:
-Opaque nonempty bytes minted by the publisher instance, containing no `/`.
+The lowercase hyphenated text of a UUID version 7 with the RFC variant ({{RFC9562}}), minted by the publisher instance.
+Noncanonical text and other UUID versions or variants MUST be refused (`identity`).
 Each instance of a broadcast MUST mint an epoch that no other instance under the same credential has used or will use.
 Two instances MUST NOT share an epoch: they would derive the same keys and collide on nonces.
-The RECOMMENDED epoch is the lowercase text of a UUID version 7 ({{RFC9562}}): its leading 48-bit timestamp makes epochs sort by creation time and its random bits make collisions negligible.
+Its leading 48-bit timestamp makes epochs sort by creation time and its random bits make collisions negligible.
 
-A protected broadcast is published at `<opaque>/<epoch>`, where `<opaque>` is the 22-character base64url segment derived from the credential and the application's semantic broadcast name according to {{derive}}, and `<epoch>` is the epoch text.
-The opaque derivation does not include the epoch, so every instance of the same semantic broadcast shares a discovery prefix.
+A protected broadcast is published at `<opaque>`, the 22-character base64url segment derived from the credential and the application's semantic broadcast name according to {{derive}}.
+Each instance announces its epoch as the route's moq-lite Epoch; the HKDF `bytes(epoch)` input is the UUID text.
+The opaque derivation does not include the epoch, so every instance of the same semantic broadcast shares one path.
 The path carries no format or protection marker; for example, the semantic name `meeting.hang` appears only as an input to the opaque derivation.
 A plaintext consumer that opens the protected broadcast fails because it cannot find the plaintext catalog it expects, not because of a path naming rule.
-Subscribers discover instances by the `<opaque>/` prefix and select the greatest epoch when epochs are UUID version 7 text, where greatest is newest.
-Opaque epochs carry no creation order, so any other epoch form needs an application rule for which instance is current.
-A subscriber that already knows the full path takes the epoch from its last segment.
+Subscribers resolve `<opaque>` and take the epoch from its route, where relays rank the newest first.
+On a wire that cannot carry the route's epoch, the application supplies it over its own authenticated channel.
 
 The epoch and the path are not secret and are not authenticated.
 A relay that presents a wrong epoch causes authentication failure; a relay that withholds a newer instance denies service.
@@ -145,7 +146,7 @@ Neither can cause a nonce to repeat, because only the publisher instance chooses
 
 A restart or replacement of a publisher is a new instance and mints a new epoch.
 Transport sequence numbers therefore restart freely without any coordination between instances.
-Ended instances remain readable at their own path for as long as relays or archives retain them.
+An ended instance stays readable only for as long as relays or archives retain it under its epoch; once a newer epoch wins the shared path, subscribers resolve the newer one.
 
 
 # Canonical Encoding {#encoding}
@@ -294,7 +295,7 @@ There is no plaintext fallback.
 Typed failures:
 
 - `invalid_secret`: secret is not 32 bytes.
-- `identity`: an integer is outside {{bounds}}, a `bytes` field exceeds 65535, an epoch is empty or contains `/`, a physical name is not 22 base64url characters, or `domain` is not `0x00`/`0x01`.
+- `identity`: an integer is outside {{bounds}}, a `bytes` field exceeds 65535, an epoch is not canonical UUIDv7 text, a physical name is not 22 base64url characters, or `domain` is not `0x00`/`0x01`.
 - `exhausted`: the next AEAD operation would exceed `2^24` uses of that key or `2^36` plaintext bytes under that key.
 - `reuse`: encrypting at an identity this instance already used.
 - `oversize`: plaintext plus tag exceeds the transport payload limit, or a ciphertext is shorter than `Nt` or larger than that limit.
@@ -363,7 +364,8 @@ This document requests no registrations.
 ## draft-lcurley-moq-e2ee-00
 {:numbered="false"}
 
-- Initial `moq-e2ee-00` profile: out-of-band credential, opaque broadcast path with a publisher-minted epoch as its last segment, HKDF physical names and keys, AES-128-GCM payloads, identity bounds, typed failures, and shared primitive vectors.
+- Require canonical UUIDv7 epochs, carried on the route rather than in the path, leaving HKDF UUID inputs unchanged.
+- Initial `moq-e2ee-00` profile: out-of-band credential, opaque broadcast path with a publisher-minted epoch on its route, HKDF physical names and keys, AES-128-GCM payloads, identity bounds, typed failures, and shared primitive vectors.
 
 
 # Acknowledgments

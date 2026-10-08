@@ -764,7 +764,7 @@ impl Pump {
 		// rendition.
 		let subscriber = tokio::select! {
 			_ = cancel.changed() => return,
-			subscriber = track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1))) => match subscriber {
+			subscriber = track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1))) => match subscriber {
 				Ok(subscriber) => subscriber,
 				Err(err) => {
 					gst::warning!(CAT, "track {name} failed to subscribe: {err:?}");
@@ -1278,11 +1278,12 @@ mod session_tests {
 			.block_on(async {
 				tokio::time::timeout(
 					Duration::from_secs(10),
-					moq_net::kio::wait(|waiter| request.poll_unused(waiter)),
+					moq_net::kio::wait(|waiter| request.demand().poll_unused(waiter)),
 				)
 				.await
 			})
-			.expect("the cancelled pump never dropped its subscription");
+			.expect("the cancelled pump never dropped its subscription")
+			.expect("the pending request is still open");
 
 		// Only now answer it. The pump is gone and its state is terminal, so no later scheduling
 		// can produce a pad.

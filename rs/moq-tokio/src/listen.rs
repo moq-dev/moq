@@ -74,11 +74,14 @@ impl<'de> serde::Deserialize<'de> for Bind {
 	}
 }
 
+/// How long an accepted connection has to finish its handshake, unless overridden by `--listen-timeout`.
+pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// The accept side of an endpoint: what to listen on and how to be trusted.
 ///
 /// Derives [`usage::Args`], so flatten it into a binary's own parser with
 /// `#[usage(flatten)]`. The dial side is [`crate::connect::Config`].
-#[derive(usage::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(usage::Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -142,6 +145,29 @@ pub struct Config {
 		)
 	)]
 	pub version: Vec<moq_net::Version>,
+
+	/// Maximum time for one accepted connection to finish its handshake: the
+	/// QUIC, WebTransport, WebSocket, or qmux one, then the MoQ SETUP, through
+	/// [`crate::server::Request::ok`]. Defaults to 10 seconds; set to 0 to wait forever.
+	///
+	/// A peer that connects and then never speaks would otherwise hold its
+	/// connection open indefinitely, since keep-alives count as activity. The
+	/// connection is closed with a timeout code once this passes. See
+	/// [`resolved_timeout`](Self::resolved_timeout) for the value in effect.
+	#[usage(skip)]
+	#[serde(with = "crate::cli::duration::serde_duration")]
+	pub timeout: std::time::Duration,
+
+	#[usage(
+		name = "listen-timeout",
+		long = "listen-timeout",
+		env = "MOQ_LISTEN_TIMEOUT",
+		default_value_t = crate::cli::Duration::fallback(DEFAULT_TIMEOUT),
+		default = "10s",
+		setting = "listen.timeout"
+	)]
+	#[serde(default, rename = "__cli_timeout", skip_serializing_if = "Option::is_none")]
+	pub(crate) timeout_arg: Option<crate::cli::Duration>,
 
 	/// The certificates to serve and the roots that authenticate mTLS clients
 	/// (`--listen-tls-*`).
@@ -220,6 +246,30 @@ pub struct Config {
 	#[usage(skip)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub quic: Option<crate::quic::Config>,
+}
+
+impl Default for Config {
+	fn default() -> Self {
+		Self {
+			bind: None,
+			listen: None,
+			#[cfg(feature = "tcp")]
+			tcp: Default::default(),
+			#[cfg(all(feature = "uds", unix))]
+			unix: Default::default(),
+			version: Vec::new(),
+			timeout: DEFAULT_TIMEOUT,
+			timeout_arg: None,
+			tls: Default::default(),
+			preferred_v4: None,
+			preferred_v6: None,
+			lb_id: None,
+			lb_nonce: None,
+			load_balancer: None,
+			legacy: Default::default(),
+			quic: None,
+		}
+	}
 }
 
 #[cfg(feature = "noq")]
@@ -373,7 +423,72 @@ impl Config {
 
 	#[cfg(feature = "_transport")]
 	pub(crate) fn validate(&self) -> crate::Result<()> {
+		#[cfg(feature = "tcp")]
+		if self.tcp.tls == Some(true) && self.tcp.bind.is_none() {
+			return Err(crate::Error::NoBackend("--listen-tcp-tls requires --listen-tcp-bind"));
+		}
+		#[cfg(all(feature = "uds", unix))]
+		if !self.unix.allow.is_empty() && self.unix.bind.is_none() {
+			return Err(crate::Error::NoBackend(
+				"--listen-unix-allow-* requires --listen-unix-bind",
+			));
+		}
 		Ok(())
+	}
+
+	/// Refuse what only the QUIC listener reads, for a server that has none.
+	#[cfg(feature = "_transport")]
+	pub(crate) fn validate_stream_only(&self) -> crate::Result<()> {
+		#[cfg(feature = "tcp")]
+		let tcp_tls = self.tcp.tls == Some(true);
+		#[cfg(not(feature = "tcp"))]
+		let tcp_tls = false;
+		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+		let identity = self.tls.identity.is_some();
+		#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
+		let identity = false;
+
+		let refused = [
+			(
+				!tcp_tls && !self.tls.cert.is_empty(),
+				"--listen-tls-cert needs a TLS listener (--listen or --listen-tcp-tls)",
+			),
+			(
+				!tcp_tls && !self.tls.key.is_empty(),
+				"--listen-tls-key needs a TLS listener (--listen or --listen-tcp-tls)",
+			),
+			(
+				!tcp_tls && !self.tls.generate.is_empty(),
+				"--listen-tls-generate needs a TLS listener (--listen or --listen-tcp-tls)",
+			),
+			(
+				!tcp_tls && identity,
+				"tls.identity needs a TLS listener (--listen or --listen-tcp-tls)",
+			),
+			(
+				self.preferred_v4.is_some(),
+				"--listen-preferred-v4 needs a QUIC listener (--listen)",
+			),
+			(
+				self.preferred_v6.is_some(),
+				"--listen-preferred-v6 needs a QUIC listener (--listen)",
+			),
+			(
+				self.lb_id.is_some() || self.load_balancer.is_some(),
+				"--listen-quic-lb-id (load_balancer) needs a QUIC listener (--listen)",
+			),
+		];
+		match refused.into_iter().find(|(set, _)| *set) {
+			Some((_, reason)) => Err(crate::Error::NoBackend(reason)),
+			None => Ok(()),
+		}
+	}
+
+	/// How long an accepted connection has to finish its handshake, or `None` to wait
+	/// forever: for zero, and for a timeout too long for the clock to reach.
+	pub fn resolved_timeout(&self) -> Option<std::time::Duration> {
+		let timeout = crate::cli::Duration::resolve(self.timeout_arg, self.timeout);
+		(!timeout.is_zero() && std::time::Instant::now().checked_add(timeout).is_some()).then_some(timeout)
 	}
 
 	#[cfg(feature = "noq")]
@@ -549,6 +664,68 @@ load_balancer = { id = "ab", nonce = 8 }
 		assert!(matches!(server.local_addr(), Err(crate::Error::NoBackend(_))));
 	}
 
+	/// A stream-only server refuses each setting only QUIC reads rather than
+	/// ignoring it, and accepts them once QUIC lives elsewhere.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn stream_only_refuses_quic_settings() {
+		let stream_only = || Config {
+			tcp: crate::tcp::Config {
+				bind: Some("127.0.0.1:0".parse().unwrap()),
+				..Default::default()
+			},
+			..Default::default()
+		};
+		type Set = fn(&mut Config);
+		let cases: [(&str, Set); 7] = [
+			("--listen-tls-cert", |c| c.tls.cert = vec!["cert.pem".into()]),
+			("--listen-tls-key", |c| c.tls.key = vec!["key.pem".into()]),
+			("--listen-tls-generate", |c| c.tls.generate = vec!["localhost".into()]),
+			("--listen-preferred-v4", |c| {
+				c.preferred_v4 = Some("192.0.2.1:443".parse().unwrap())
+			}),
+			("--listen-preferred-v6", |c| {
+				c.preferred_v6 = Some("[2001:db8::1]:443".parse().unwrap())
+			}),
+			("--listen-quic-lb-id", |c| c.lb_id = Some("ab".parse().unwrap())),
+			("--listen-quic-lb-id (load_balancer)", |c| {
+				c.load_balancer = Some(crate::quic::LoadBalancer {
+					id: "ab".parse().unwrap(),
+					nonce: 8,
+				})
+			}),
+		];
+		for (name, set) in cases {
+			let mut config = stream_only();
+			set(&mut config);
+			match config.clone().init(Default::default()) {
+				Err(crate::Error::NoBackend(reason)) => assert!(reason.starts_with(name), "{name}: {reason}"),
+				Err(err) => panic!("{name}: {err}"),
+				Ok(_) => panic!("{name} was ignored"),
+			}
+			config.init_streams().expect("streams beside worker-owned QUIC");
+		}
+
+		// `tls://` serves the certificate.
+		let mut config = stream_only();
+		config.tcp.tls = Some(true);
+		config.tls.generate = vec!["localhost".into()];
+		config.init(Default::default()).expect("a TLS stream listener");
+	}
+
+	/// A Unix allowlist without the Unix listener it gates is refused.
+	#[cfg(all(feature = "uds", unix))]
+	#[test]
+	fn unix_allow_requires_unix_bind() {
+		let mut config = Config::default();
+		config.unix.allow.uid = vec![0];
+		match config.init(Default::default()) {
+			Err(crate::Error::NoBackend(reason)) => assert!(reason.contains("--listen-unix-bind"), "{reason}"),
+			Err(err) => panic!("{err}"),
+			Ok(_) => panic!("the allowlist was ignored"),
+		}
+	}
+
 	/// The default constructor still binds QUIC when nothing else is configured,
 	/// which is the behavior `init_streams` had to be a separate call to avoid
 	/// changing.
@@ -562,6 +739,30 @@ load_balancer = { id = "ab", nonce = 8 }
 
 		let server = config.init(Default::default()).unwrap();
 		assert!(server.local_addr().is_ok());
+	}
+
+	/// The handshake deadline defaults on, from the parser and in code alike, and
+	/// `0s` turns it off.
+	#[test]
+	fn timeout_defaults_and_disables() {
+		let secs = std::time::Duration::from_secs;
+		assert_eq!(Config::default().resolved_timeout(), Some(DEFAULT_TIMEOUT));
+		assert_eq!(config_from(["test"]).resolved_timeout(), Some(DEFAULT_TIMEOUT));
+		assert_eq!(
+			config_from(["test", "--listen-timeout", "3s"]).resolved_timeout(),
+			Some(secs(3))
+		);
+		assert_eq!(config_from(["test", "--listen-timeout", "0s"]).resolved_timeout(), None);
+
+		let config: Config = toml::from_str(r#"timeout = "4s""#).expect("parse");
+		assert_eq!(config.resolved_timeout(), Some(secs(4)));
+
+		// Past the clock's range is forever, not a panic on the first accept.
+		let config = Config {
+			timeout: std::time::Duration::MAX,
+			..Default::default()
+		};
+		assert_eq!(config.resolved_timeout(), None);
 	}
 
 	/// The canonical spellings, which is what `--help` teaches.

@@ -430,7 +430,8 @@ impl ServerSession {
 		Ok(self.serializer.serialize(&payload, false, false)?)
 	}
 
-	fn handle_abort_message(&self, _stream_id: u32) -> Result<Vec<ServerSessionResult>, ServerSessionError> {
+	fn handle_abort_message(&mut self, stream_id: u32) -> Result<Vec<ServerSessionResult>, ServerSessionError> {
+		self.deserializer.abort(stream_id);
 		Ok(Vec::new())
 	}
 

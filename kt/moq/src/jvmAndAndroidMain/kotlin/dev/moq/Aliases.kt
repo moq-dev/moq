@@ -39,7 +39,7 @@ typealias AnnouncedBroadcast = uniffi.moq.MoqAnnouncedBroadcast
 typealias Announce = uniffi.moq.MoqAnnounce
 /**
  * What an [AnnounceConsumer] yields: [AnnounceEventStart], [AnnounceEventUpdate],
- * [AnnounceEventEnd], or [AnnounceEventLive].
+ * or [AnnounceEventEnd].
  */
 typealias AnnounceEvent = uniffi.moq.MoqAnnounceEvent
 // Kotlin cannot reach a sealed class's subtypes through its typealias, so each
@@ -50,8 +50,6 @@ typealias AnnounceEventStart = uniffi.moq.MoqAnnounceEvent.Start
 typealias AnnounceEventUpdate = uniffi.moq.MoqAnnounceEvent.Update
 /** No route covers the prefix any more; carries its last route. */
 typealias AnnounceEventEnd = uniffi.moq.MoqAnnounceEvent.End
-/** Every route live at subscribe time has been delivered; what follows is live changes. */
-typealias AnnounceEventLive = uniffi.moq.MoqAnnounceEvent.Live
 // Broadcast / track / group producers and consumers.
 /** The write side of a broadcast: publish tracks into it. */
 typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer
@@ -117,7 +115,7 @@ typealias Datagram = uniffi.moq.MoqDatagram
 typealias Frame = uniffi.moq.MoqFrame
 /** A media [Frame] whose keyframe flag marks group starts or video keyframes; audio flags only group starts. */
 typealias MediaFrame = uniffi.moq.MoqMediaFrame
-/** The catalog description of a video track, including whether the publisher recommends temporarily avoiding it. */
+/** The catalog description of a video track, including whether it is enabled (a disabled one has no frames coming). */
 typealias Video = uniffi.moq.MoqVideo
 /** Caller-provided catalog fields for a video track. */
 typealias VideoHint = uniffi.moq.MoqVideoHint
@@ -135,7 +133,7 @@ typealias AudioInit = uniffi.moq.MoqAudioInit
 typealias VideoInit = uniffi.moq.MoqVideoInit
 /** A container format and its leading bytes. */
 typealias ContainerInit = uniffi.moq.MoqContainerInit
-/** The catalog description of an audio track: codec, sample rate, channels, and container. */
+/** The catalog description of an audio track: codec, sample rate, channels, whether it is enabled, and container. */
 typealias Audio = uniffi.moq.MoqAudio
 /** A width and height pair, in pixels. */
 typealias Dimensions = uniffi.moq.MoqDimensions
