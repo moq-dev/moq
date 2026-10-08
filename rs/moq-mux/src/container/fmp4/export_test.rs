@@ -1809,6 +1809,27 @@ async fn a_new_parameter_set_stays_in_band() {
 	);
 }
 
+/// An avc3 init lists no parameter sets, so a keyframe that has none to carry would be
+/// undecodable. The export fails instead of writing it.
+#[tokio::test(start_paused = true)]
+async fn an_in_band_keyframe_without_parameter_sets_fails() {
+	let mut live = Live::avc3();
+	live.track.write(annexb_frame(0, &[IDR])).unwrap();
+	live.track.finish().unwrap();
+
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await)
+		.with_max_delay(RECORDING_MAX_DELAY);
+	chunk_now(&mut exporter).await.init().expect("init");
+	let err = error_now(&mut exporter).await;
+	assert!(
+		matches!(
+			&err,
+			crate::Error::Annexb(crate::codec::annexb::Error::MissingParameterSet("SPS"))
+		),
+		"{err:?}"
+	);
+}
+
 /// A returning rendition whose sample entry differs can't reuse its track.
 #[tokio::test(start_paused = true)]
 async fn an_incompatible_return_fails() {

@@ -5,10 +5,10 @@
 //! length-prefixed NAL units for H.264/H.265) and call [`ExportSource::poll_read`]
 //! to pull normalized frames. For Annex-B sources (catalog codec marked
 //! `inline: true` / `in_band: true`, empty `description`) the source attaches
-//! an [`Avc1`] / [`Hvc1`] transform that caches parameter sets and length-prefixes
-//! NALs. MKV, FLV, and MPEG-TS strip those parameter sets and wait until the
-//! transform has built an avcC or hvcC. fMP4 keeps them in the sample when the
-//! catalog codec string and dimensions already determine the record.
+//! an [`Avc1`] / [`Hvc1`] transform that strips parameter sets into an avcC or
+//! hvcC and length-prefixes the rest; frames wait until that record exists. fMP4
+//! instead attaches an [`InBand`] transform, keeping the sets in the samples, when
+//! the catalog codec string and dimensions already determine the record.
 //!
 //! `description()` returns the resolved codec config: the catalog description,
 //! a record derived from the codec string, or an avcC/hvcC synthesized from
@@ -21,6 +21,7 @@ use hang::catalog::{AudioConfig, Container, VideoCodec, VideoConfig};
 
 use super::consumer::Event;
 use crate::catalog::hang::Container as HangContainer;
+use crate::codec::annexb::{InBand, InBandCodec};
 use crate::codec::h264::Avc1;
 use crate::codec::h265::Hvc1;
 use crate::container::{Consumer, Frame};
@@ -29,6 +30,8 @@ use crate::container::{Consumer, Frame};
 pub(crate) enum VideoTransform {
 	Avc1(Avc1),
 	Hvc1(Hvc1),
+	/// Parameter sets stay in the samples, under a record derived from the catalog.
+	InBand(InBand),
 }
 
 impl VideoTransform {
@@ -36,13 +39,15 @@ impl VideoTransform {
 		match self {
 			VideoTransform::Avc1(t) => t.avcc(),
 			VideoTransform::Hvc1(t) => t.hvcc(),
+			VideoTransform::InBand(_) => None,
 		}
 	}
 
 	pub(crate) fn transform(&mut self, payload: Bytes, keyframe: bool) -> crate::Result<Option<Bytes>> {
 		match self {
-			VideoTransform::Avc1(t) => Ok(t.transform_frame(payload, keyframe)?),
-			VideoTransform::Hvc1(t) => Ok(t.transform_frame(payload, keyframe)?),
+			VideoTransform::Avc1(t) => Ok(t.transform(payload)?),
+			VideoTransform::Hvc1(t) => Ok(t.transform(payload)?),
+			VideoTransform::InBand(t) => Ok(t.transform(payload, keyframe)?),
 		}
 	}
 }
@@ -110,8 +115,8 @@ impl ExportSource {
 	) -> Result<Option<Self>, crate::Error> {
 		let record = annexb_catalog_record(config);
 		let transform = match (&config.codec, record.is_some()) {
-			(VideoCodec::H264(_), true) => Some(VideoTransform::Avc1(Avc1::keeping_parameter_sets())),
-			(VideoCodec::H265(_), true) => Some(VideoTransform::Hvc1(Hvc1::keeping_parameter_sets())),
+			(VideoCodec::H264(_), true) => Some(VideoTransform::InBand(InBand::new(InBandCodec::H264))),
+			(VideoCodec::H265(_), true) => Some(VideoTransform::InBand(InBand::new(InBandCodec::H265))),
 			_ => build_video_transform(config),
 		};
 		let mut source = Self::video(source, name, config, max_delay, transform)?;
@@ -236,25 +241,13 @@ impl ExportSource {
 		self.description.as_ref()
 	}
 
-	/// True when the sample entry was derived from the catalog codec string.
-	///
-	/// A transform that has since built its own avcC or hvcC from parameter sets
-	/// is describing the bitstream, not the catalog.
-	pub(crate) fn described_from_catalog(&self) -> bool {
-		self.description.is_some()
-			&& self
-				.transform
-				.as_ref()
-				.is_some_and(|transform| transform.codec_private().is_none())
-	}
-
 	/// Refresh a catalog-derived record after the catalog entry changes.
 	///
 	/// Returns false when this source was described from the catalog and the new
 	/// entry no longer carries everything that record needs. The previous record
 	/// is left in place so the caller can fail the export against it.
 	pub(crate) fn note_catalog(&mut self, config: &VideoConfig) -> bool {
-		if !self.described_from_catalog() {
+		if !matches!(self.transform, Some(VideoTransform::InBand(_))) {
 			return true;
 		}
 		match annexb_catalog_record(config) {

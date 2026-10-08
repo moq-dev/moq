@@ -282,8 +282,6 @@ pub(crate) fn sps_period(sps: &scuffle_h265::SpsRbsp) -> Option<(u64, u64)> {
 /// the superseded ones instead of accumulating them forever.
 pub struct Hvc1 {
 	hvcc: Option<Bytes>,
-	/// Keep VPS, SPS, and PPS in the sample instead of lifting them into an hvcC.
-	in_band: bool,
 	/// The active VPS NALs (from the most recent keyframe that carried them).
 	vps: Vec<Bytes>,
 	/// The active SPS NALs.
@@ -303,20 +301,9 @@ impl Hvc1 {
 	pub fn new() -> Self {
 		Self {
 			hvcc: None,
-			in_band: false,
 			vps: Vec::new(),
 			sps: Vec::new(),
 			pps: Vec::new(),
-		}
-	}
-
-	/// Length-prefix every NAL, parameter sets included, and re-inject a cached
-	/// set on a keyframe that omits one. No hvcC is built: the caller already has
-	/// the record.
-	pub(crate) fn keeping_parameter_sets() -> Self {
-		Self {
-			in_band: true,
-			..Self::new()
 		}
 	}
 
@@ -333,14 +320,6 @@ impl Hvc1 {
 	///   transform is still waiting for slice NALs (hvcC may have been
 	///   built as a side effect).
 	pub fn transform(&mut self, payload: Bytes) -> Result<Option<Bytes>> {
-		self.transform_frame(payload, false)
-	}
-
-	pub(crate) fn transform_frame(&mut self, payload: Bytes, keyframe: bool) -> Result<Option<Bytes>> {
-		if self.in_band {
-			return self.transform_in_band(payload, keyframe);
-		}
-
 		let mut buf = payload.clone();
 		let mut nal_iter = crate::codec::annexb::NalIterator::new(&mut buf);
 
@@ -402,95 +381,6 @@ impl Hvc1 {
 		self.hvcc = Some(build_hvcc(&self.vps, &self.sps, &self.pps)?);
 		Ok(())
 	}
-
-	/// Length-prefix the access unit, parameter sets included. A keyframe that
-	/// omitted VPS, SPS, or PPS gets the cached set of that type immediately
-	/// before its first slice.
-	fn transform_in_band(&mut self, payload: Bytes, keyframe: bool) -> Result<Option<Bytes>> {
-		let nals = crate::codec::annexb::nal_units(&payload)?;
-		let mut frame_vps = Vec::new();
-		let mut frame_sps = Vec::new();
-		let mut frame_pps = Vec::new();
-		let mut vcl_at = None;
-		let mut has_sample = false;
-		for (index, nal) in nals.iter().enumerate() {
-			if nal.is_empty() {
-				continue;
-			}
-			// HEVC NAL header is 2 bytes; type is bits 1..=6 of byte 0. A VCL
-			// NAL is any type below 32.
-			let nal_type = NALUnitType::from((nal[0] >> 1) & 0x3f);
-			match nal_type {
-				NALUnitType::VpsNut => {
-					crate::codec::annexb::push_distinct(&mut frame_vps, nal);
-				}
-				NALUnitType::SpsNut => {
-					crate::codec::annexb::push_distinct(&mut frame_sps, nal);
-				}
-				NALUnitType::PpsNut => {
-					crate::codec::annexb::push_distinct(&mut frame_pps, nal);
-				}
-				_ if u8::from(nal_type) < 32 => {
-					has_sample = true;
-					if vcl_at.is_none() {
-						vcl_at = Some(index);
-					}
-				}
-				_ => has_sample = true,
-			}
-		}
-
-		let had_vps = !frame_vps.is_empty();
-		let had_sps = !frame_sps.is_empty();
-		let had_pps = !frame_pps.is_empty();
-		if had_vps && frame_vps != self.vps {
-			self.vps = frame_vps;
-		}
-		if had_sps && frame_sps != self.sps {
-			self.sps = frame_sps;
-		}
-		if had_pps && frame_pps != self.pps {
-			self.pps = frame_pps;
-		}
-		if !has_sample {
-			return Ok(None);
-		}
-
-		let split = if keyframe { vcl_at.unwrap_or(0) } else { nals.len() };
-		let mut out = BytesMut::new();
-		for nal in &nals[..split] {
-			length_prefix(&mut out, nal)?;
-		}
-		if keyframe && !had_vps {
-			for nal in &self.vps {
-				length_prefix(&mut out, nal)?;
-			}
-		}
-		if keyframe && !had_sps {
-			for nal in &self.sps {
-				length_prefix(&mut out, nal)?;
-			}
-		}
-		if keyframe && !had_pps {
-			for nal in &self.pps {
-				length_prefix(&mut out, nal)?;
-			}
-		}
-		for nal in &nals[split..] {
-			length_prefix(&mut out, nal)?;
-		}
-		Ok(Some(out.freeze()))
-	}
-}
-
-fn length_prefix(out: &mut BytesMut, nal: &Bytes) -> Result<()> {
-	if nal.is_empty() {
-		return Ok(());
-	}
-	let len = u32::try_from(nal.len()).map_err(|_| Error::NalTooLarge)?;
-	out.extend_from_slice(&len.to_be_bytes());
-	out.extend_from_slice(nal);
-	Ok(())
 }
 
 /// Process one NAL: VPS/SPS/PPS are collected (distinctly) into this frame's
@@ -898,15 +788,6 @@ mod tests {
 		mp4_atom::Hvcc::decode_body(&mut std::io::Cursor::new(bytes.as_ref())).unwrap()
 	}
 
-	fn annexb(nals: &[&[u8]]) -> Bytes {
-		let mut buf = BytesMut::new();
-		for nal in nals {
-			buf.extend_from_slice(&[0, 0, 0, 1]);
-			buf.extend_from_slice(nal);
-		}
-		buf.freeze()
-	}
-
 	#[test]
 	fn catalog_hvcc_main_and_still_picture_round_trip() {
 		for profile_idc in [1, 3] {
@@ -932,40 +813,5 @@ mod tests {
 		assert!(catalog_hvcc(&hevc(2, true, 0)).is_none(), "Main 10");
 		assert!(catalog_hvcc(&hevc(1, true, 1)).is_none(), "profile space");
 		assert!(catalog_hvcc(&hevc(1, false, 0)).is_none(), "out of band");
-	}
-
-	#[test]
-	fn in_band_keeps_parameter_sets_and_reinjects_them() {
-		let vps = &[0x40, 0x01, 0x0c][..];
-		let sps = &[0x42, 0x01, 0x01, 0x60][..];
-		let pps = &[0x44, 0x01, 0xc0][..];
-		let idr = &[0x26, 0x01, 0xaa][..];
-		let sei = &[0x4e, 0x01, 0x05][..];
-		let sps2 = &[0x42, 0x01, 0x01, 0x61][..];
-		let delta = &[0x02, 0x01, 0x33][..];
-
-		let mut tx = Hvc1::keeping_parameter_sets();
-		let kept = tx
-			.transform_frame(annexb(&[vps, sps, pps, idr]), true)
-			.unwrap()
-			.unwrap();
-		assert_eq!(kept.as_ref(), length_prefixed(&[vps, sps, pps, idr]));
-		assert!(tx.hvcc().is_none());
-
-		let mut tx = Hvc1::keeping_parameter_sets();
-		assert!(tx.transform_frame(annexb(&[vps, sps, pps]), true).unwrap().is_none());
-		let bare = tx.transform_frame(annexb(&[idr]), true).unwrap().unwrap();
-		assert_eq!(bare.as_ref(), length_prefixed(&[vps, sps, pps, idr]));
-
-		// The SPS this access unit already carried stays ahead of the slice. The
-		// VPS and PPS it omitted are injected there, so the VPS follows that SPS.
-		let replaced = tx.transform_frame(annexb(&[sps2, idr]), true).unwrap().unwrap();
-		assert_eq!(replaced.as_ref(), length_prefixed(&[sps2, vps, pps, idr]));
-
-		let prefixed = tx.transform_frame(annexb(&[sei, idr]), true).unwrap().unwrap();
-		assert_eq!(prefixed.as_ref(), length_prefixed(&[sei, vps, sps2, pps, idr]));
-
-		let delta_out = tx.transform_frame(annexb(&[delta]), false).unwrap().unwrap();
-		assert_eq!(delta_out.as_ref(), length_prefixed(&[delta]));
 	}
 }

@@ -26,7 +26,8 @@ These land with the next breaking release, not the 2026-09-23 train.
   chroma or bit depth the string does not carry), HEVC beyond Main and Main
   Still Picture, and a catalog missing dimensions still wait for the SPS. A
   returning Annex-B rendition is matched on that catalog record, so an encoder
-  that restarts with a new SPS can return.
+  that restarts with a new SPS can return. A keyframe whose parameter sets never
+  appeared in the track ends the export instead of waiting 30 seconds.
 - **moq-binary is moq-flate, and @moq/binary is @moq/flate.** The opaque
   `snapshot` and `stream` tracks moved beside the codec; the wire and the
   catalog's `binary` section are unchanged. In Rust, `moq_binary::X` is

@@ -495,9 +495,11 @@ pub(crate) fn build_avcc(sps_nals: &[Bytes], pps_nals: &[Bytes]) -> Result<Bytes
 /// An avcC whose parameter sets will arrive in the samples, from a catalog codec
 /// string that already fixes the record.
 ///
-/// Baseline, Main, and Extended carry no avcC extension. High is 4:2:0 8-bit, which
-/// the extension must state when the SPS is absent. Every other profile leaves chroma
-/// format or bit depth to the SPS, so the record has to wait for one.
+/// Baseline, Main, and Extended carry no avcC extension. High is 8-bit and declared
+/// 4:2:0, which the extension must state when the SPS is absent; a monochrome High
+/// stream is rare enough to accept that mismatch, and its in-band SPS still governs
+/// decoding. Every other profile leaves chroma format or bit depth to the SPS, so the
+/// record has to wait for one.
 pub(crate) fn catalog_avcc(h264: &hang::catalog::H264) -> Option<Bytes> {
 	if !h264.inline {
 		return None;
@@ -592,8 +594,6 @@ fn read_param_set_array(buf: &[u8], mut pos: usize, count: usize, params: &mut V
 /// superseded SPS/PPS instead of accumulating them forever.
 pub struct Avc1 {
 	avcc: Option<Bytes>,
-	/// Keep SPS and PPS in the sample instead of lifting them into an avcC.
-	in_band: bool,
 	/// The active SPS NALs (from the most recent keyframe that carried them).
 	sps: Vec<Bytes>,
 	/// The active PPS NALs.
@@ -611,19 +611,8 @@ impl Avc1 {
 	pub fn new() -> Self {
 		Self {
 			avcc: None,
-			in_band: false,
 			sps: Vec::new(),
 			pps: Vec::new(),
-		}
-	}
-
-	/// Length-prefix every NAL, parameter sets included, and re-inject a cached
-	/// set on a keyframe that omits one. No avcC is built: the caller already has
-	/// the record.
-	pub(crate) fn keeping_parameter_sets() -> Self {
-		Self {
-			in_band: true,
-			..Self::new()
 		}
 	}
 
@@ -640,14 +629,6 @@ impl Avc1 {
 	///   transform is still waiting for slice NALs (avcC may have been built
 	///   as a side effect).
 	pub fn transform(&mut self, payload: Bytes) -> Result<Option<Bytes>> {
-		self.transform_frame(payload, false)
-	}
-
-	pub(crate) fn transform_frame(&mut self, payload: Bytes, keyframe: bool) -> Result<Option<Bytes>> {
-		if self.in_band {
-			return self.transform_in_band(payload, keyframe);
-		}
-
 		// Parse Annex-B NALs, collect this frame's SPS/PPS, length-prefix the
 		// rest. NalIterator advances the Bytes cursor; the trailing NAL has to be
 		// pulled separately via flush().
@@ -707,82 +688,6 @@ impl Avc1 {
 		self.avcc = Some(build_avcc(&self.sps, &self.pps)?);
 		Ok(())
 	}
-
-	/// Length-prefix the access unit, parameter sets included. A keyframe that
-	/// omitted SPS or PPS gets the cached set of that type immediately before
-	/// its first slice, so a receiver tuning in there still has them.
-	fn transform_in_band(&mut self, payload: Bytes, keyframe: bool) -> Result<Option<Bytes>> {
-		let nals = crate::codec::annexb::nal_units(&payload)?;
-		let mut frame_sps = Vec::new();
-		let mut frame_pps = Vec::new();
-		let mut vcl_at = None;
-		let mut has_sample = false;
-		for (index, nal) in nals.iter().enumerate() {
-			if nal.is_empty() {
-				continue;
-			}
-			match nal[0] & 0x1f {
-				NAL_TYPE_SPS => {
-					crate::codec::annexb::push_distinct(&mut frame_sps, nal);
-				}
-				NAL_TYPE_PPS => {
-					crate::codec::annexb::push_distinct(&mut frame_pps, nal);
-				}
-				1..=5 => {
-					has_sample = true;
-					if vcl_at.is_none() {
-						vcl_at = Some(index);
-					}
-				}
-				_ => has_sample = true,
-			}
-		}
-
-		let had_sps = !frame_sps.is_empty();
-		let had_pps = !frame_pps.is_empty();
-		if had_sps && frame_sps != self.sps {
-			self.sps = frame_sps;
-		}
-		if had_pps && frame_pps != self.pps {
-			self.pps = frame_pps;
-		}
-		if !has_sample {
-			return Ok(None);
-		}
-
-		// A keyframe with no slice (SEI only) is injected at the front. A delta
-		// frame is emitted as it arrived: missing parameter sets are not invented
-		// into the middle of a GOP.
-		let split = if keyframe { vcl_at.unwrap_or(0) } else { nals.len() };
-		let mut out = BytesMut::new();
-		for nal in &nals[..split] {
-			length_prefix(&mut out, nal)?;
-		}
-		if keyframe && !had_sps {
-			for nal in &self.sps {
-				length_prefix(&mut out, nal)?;
-			}
-		}
-		if keyframe && !had_pps {
-			for nal in &self.pps {
-				length_prefix(&mut out, nal)?;
-			}
-		}
-		for nal in &nals[split..] {
-			length_prefix(&mut out, nal)?;
-		}
-		Ok(Some(out.freeze()))
-	}
-}
-
-fn length_prefix(out: &mut BytesMut, nal: &Bytes) -> Result<()> {
-	if nal.is_empty() {
-		return Ok(());
-	}
-	let len = u32::try_from(nal.len()).map_err(|_| Error::NalTooLarge)?;
-	out.extend_from_slice(&len.to_be_bytes());
-	out.extend_from_slice(nal);
-	Ok(())
 }
 
 /// Process one NAL: SPS/PPS are collected (distinctly) into this frame's sets,
@@ -1081,15 +986,6 @@ mod tests {
 		assert_eq!(&p_out[4..], pslice);
 	}
 
-	fn length_prefixed(nals: &[&[u8]]) -> Vec<u8> {
-		let mut out = Vec::new();
-		for nal in nals {
-			out.extend_from_slice(&(nal.len() as u32).to_be_bytes());
-			out.extend_from_slice(nal);
-		}
-		out
-	}
-
 	fn decode_avcc(bytes: &Bytes) -> mp4_atom::Avcc {
 		use mp4_atom::Atom;
 		mp4_atom::Avcc::decode_body(&mut std::io::Cursor::new(bytes.as_ref())).unwrap()
@@ -1153,38 +1049,5 @@ mod tests {
 			inline: false,
 		};
 		assert!(catalog_avcc(&out_of_band).is_none());
-	}
-
-	#[test]
-	fn in_band_keeps_parameter_sets_and_reinjects_them() {
-		let sps = &[0x67, 0x42, 0xc0, 0x1f, 0xde][..];
-		let pps = &[0x68, 0xce, 0x3c, 0x80][..];
-		let idr = &[0x65, 0x88, 0x84, 0x21][..];
-		let sei = &[0x06, 0x05, 0xff][..];
-		let sps2 = &[0x67, 0x42, 0xc0, 0x1f, 0xaa][..];
-		let delta = &[0x61, 0xe0, 0x12][..];
-
-		let mut tx = Avc1::keeping_parameter_sets();
-		let kept = tx
-			.transform_frame(annexb_frame(&[sps, pps, idr]), true)
-			.unwrap()
-			.unwrap();
-		assert_eq!(kept.as_ref(), length_prefixed(&[sps, pps, idr]));
-		assert!(tx.avcc().is_none());
-
-		let mut tx = Avc1::keeping_parameter_sets();
-		assert!(tx.transform_frame(annexb_frame(&[sps, pps]), true).unwrap().is_none());
-		assert!(tx.avcc().is_none());
-		let bare = tx.transform_frame(annexb_frame(&[idr]), true).unwrap().unwrap();
-		assert_eq!(bare.as_ref(), length_prefixed(&[sps, pps, idr]));
-
-		let replaced = tx.transform_frame(annexb_frame(&[sps2, idr]), true).unwrap().unwrap();
-		assert_eq!(replaced.as_ref(), length_prefixed(&[sps2, pps, idr]));
-
-		let prefixed = tx.transform_frame(annexb_frame(&[sei, idr]), true).unwrap().unwrap();
-		assert_eq!(prefixed.as_ref(), length_prefixed(&[sei, sps2, pps, idr]));
-
-		let delta_out = tx.transform_frame(annexb_frame(&[delta]), false).unwrap().unwrap();
-		assert_eq!(delta_out.as_ref(), length_prefixed(&[delta]));
 	}
 }

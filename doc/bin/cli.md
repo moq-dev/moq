@@ -97,6 +97,7 @@ codec configuration ends the export. Restart it to pick up the change.
 Annex-B H.264 and H.265 whose catalog codec string and dimensions fix the sample
 entry are described at once as `avc3` or `hev1`, with SPS, PPS, and VPS kept in
 the samples, so an encoder restarting with a new SPS does not end the export.
+Each keyframe carries them, so a keyframe whose sets never appeared ends it.
 Other video waits for its first keyframe.
 
 MPEG-TS export pads to the source's constant mux rate when the catalog
