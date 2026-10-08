@@ -15,11 +15,14 @@ failover `export ts` sees a timestamp rewind and exits (#4354).
 Decided: every publisher of one path and epoch MUST publish the same
 broadcasts and tracks, since routes with the same epoch resume each other's
 subscriptions. A redundant pair is keyed by a shared explicit epoch (decided
-2026-10-03: `--hop` no longer exists to key it). Make every container importer
-that `moq import --epoch` accepts (ts, fmp4, flv, mkv) meet the contract when
-fed one encoded stream. The SRT, RTMP, and RTC gateways and `ts --program all`
-are out: they mint an epoch per ingest connection (#4962), so two of them
-never share one. Capture is out too: two encoders never align.
+2026-10-03: `--hop` no longer exists to key it). Make every importer that
+`moq import --epoch` accepts for one encoded stream (ts with one program,
+fmp4, flv, avc3, and the HLS pull that reuses them) meet the contract when
+fed one encoded stream. RTMP and SRT imports, the WHIP listener, and
+`ts --program all` are out: they mint an epoch per ingest connection
+(#4962), so two of them never share one. The WHEP pull and archive replay
+are out too (each pull's RTP session and each replay is its own instance),
+and so is capture: two encoders never align.
 
 - A group's sequence derives from its keyframe's media timestamp (PTS in TS),
   not a per-process counter. Decide how both processes agree across a

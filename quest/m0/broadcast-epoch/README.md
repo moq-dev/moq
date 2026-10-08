@@ -8,8 +8,9 @@ the same epoch resume a subscription from the first frame it lacks; a route
 without one keeps its subscriptions until it goes. So epochs are what make
 failover seamless. Routes without an epoch never splice (maintainer,
 2026-10-08): a `Restart` (or an end and start on older versions) tells every
-downstream subscriber, downstream relays included, to drop its copy of the
-old source and resubscribe fresh. A restart is a new epoch at the same
+downstream subscriber to stop using its copy of the old source and
+resubscribe fresh; a downstream relay retires its copy for new requests and
+forwards the `Restart`. A restart is a new epoch at the same
 path: the newest epoch wins new requests and announce consumers see that
 `Restart`, so viewers re-request rather than stall on a replaced
 broadcast. Subscriptions already on the old one stay until the

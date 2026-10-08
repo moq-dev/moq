@@ -43,6 +43,7 @@ connection carries both epochs. Update `doc/bin/cli.md` and `doc/bin/srt.md`.
 
 Public API: breaking in moq-mux, `ts::Import::decode` reports a restart
 and `restart` is new. Wire: none.
+
 ## Closes
 
 - [#4582](https://github.com/moq-dev/moq/issues/4582) - a signalled backward TS discontinuity ends the import

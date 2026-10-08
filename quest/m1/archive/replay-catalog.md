@@ -39,7 +39,9 @@ this by hand-building a catalog.
   `<track>.timeline.z` groups under the live names, and this quest rewrites
   catalog groups, so the same name, epoch, and group number could carry
   different bytes. Revisit only once replayed metadata is byte- and
-  sequence-identical to live.
+  sequence-identical to live. So `moq import archive` refuses `--epoch`
+  (`takes_epoch` false for `Archive`), and any `moq-archive` host mints its
+  own epoch or takes one from its caller, never defaulting to `.info`'s.
 - The recorded catalog's `archive` entry describes the source's live
   timelines, not the recording's, so replace it with the timelines the reader
   replays rather than trusting the recorded ones.

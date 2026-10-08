@@ -61,8 +61,8 @@ replaces both: the rule is timestamp arithmetic on the group start.
 ## Required
 
 - [Catalog warmup](/quest/m1/catalog-warmup.md) - the field this reads
-- [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - trims frames stamped before the keyframe where this trims frames after the start
+- [Rust non-continuous signal](/quest/m1/rust-continuous.md) - the Rust signal this keys on
 
 ## Related
 
-- [Rust non-continuous signal](/quest/m1/rust-continuous.md) - the Rust half of the signal this keys on
+- [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - trims frames stamped before the keyframe where this trims frames after the start

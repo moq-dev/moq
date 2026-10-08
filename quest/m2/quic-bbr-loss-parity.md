@@ -38,7 +38,7 @@ traffic yet.
 
 ## Required
 
-- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
+- [Switch](/quest/m1/quic/fork/switch.md) - MoQ runs on `moq-quic`, where this lands; the core and its BBR3 are already in `rs/moq-quic`
 
 ## Related
 

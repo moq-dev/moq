@@ -17,9 +17,11 @@ or follow the new one. New requests resolve the current winner and never join
 a front pinned to a replaced route.
 
 Routes without an epoch never splice (maintainer, 2026-10-08). A `Restart`
-(or an `End` then `Start` on older wires) tells every downstream subscriber,
-a downstream relay included, to drop its copy of the old source and
-resubscribe fresh. A copy resumes or splices only across routes with an
+(or an `End` then `Start` on older wires) tells every downstream subscriber
+to stop using its copy of the old source and resubscribe fresh. A downstream
+relay retires its copy for new requests and forwards the `Restart`; the
+subscriptions already on that copy follow it as their own applications
+decide. A copy resumes or splices only across routes with an
 identical epoch, so the old copy's cached groups never reach a subscriber of
 the new source.
 
@@ -107,7 +109,9 @@ Decided in planning (2026-10-07, from #4970's review):
   PR, since the enum match is exhaustive: moq-ffi's `MoqAnnounceEvent` gains
   `Restart` (its wrappers follow in
   [Bindings](/quest/m0/broadcast-epoch/bindings.md)), and moq-c, moq-stats,
-  moq-relay, moq-room, moq-boy, moq-cli, moq-rtc, and moq-tokio map it.
+  moq-relay, moq-room, moq-boy, moq-cli, moq-rtc, moq-tokio, and moq-bench
+  map it. `rs/hang/examples/subscribe.rs` compiles through its catch-all arm
+  but must follow a `Restart` rather than bail on it.
 - **Rejected** (in #5013): `@moq/watch` resubscribing on `Internal` or
   `SessionClosed` (#4999), since players recover on announcements, not
   errors; announcing only once the old front dies, since viewers stay blank
