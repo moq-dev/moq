@@ -487,7 +487,9 @@ export class Consumer {
 			// fallback fired because no later group was buffered yet, and the real (large-gap,
 			// non-sequential) next group has since arrived -- promote #active to the first real
 			// group so delivery resumes instead of stalling on a nonexistent sequence.
-			// Promote #active to the first buffered group when it continues the timeline we left off at,
+			// Before any media is delivered there is no timeline hole to wait for. #start survives
+			// playhead events, unlike #deliveredGroup, so this exception only applies at startup.
+			// Otherwise promote #active when the first buffered group continues the timeline we left off at,
 			// when a completed empty group can be walked (empty groups mean nothing), or when the hole
 			// is proven: the head already reaches past where presentation left off by more than the
 			// max delay, so anything still missing in between would arrive too old to play. Proving it
@@ -498,6 +500,7 @@ export class Consumer {
 			if (this.#active !== undefined && this.#groups.length > 0) {
 				const head = this.#groups[0];
 				if (head.consumer.sequence > this.#active) {
+					const startup = this.#start === undefined;
 					const contiguous = ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp);
 					const empty = head.empty && head.consumer.done;
 					const maxDelay = Moq.Time.Micro.fromMilli(this.#maxDelay.peek());
@@ -507,8 +510,9 @@ export class Consumer {
 							(this.#presentedEnd !== undefined &&
 								head.latest !== undefined &&
 								head.latest - this.#presentedEnd > maxDelay));
-					if (empty || contiguous || skipHole || ended !== undefined) {
-						if ((skipHole || ended !== undefined) && !contiguous && !empty) this.#markPlayhead();
+					if (startup || empty || contiguous || skipHole || ended !== undefined) {
+						if (!startup && (skipHole || ended !== undefined) && !contiguous && !empty)
+							this.#markPlayhead();
 						if (!contiguous) this.#gap = true;
 						this.#active = head.consumer.sequence;
 					}
