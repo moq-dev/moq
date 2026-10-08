@@ -21,7 +21,9 @@ start on the first loss or a mismatched RTT.
   seeds `ssthresh`.
 - The store is a bounded, in-process map keyed by remote address plus SNI,
   owned by the endpoint, with an age limit. No persistence across processes.
-- moq-tokio's `Connection` seeds a redial from the session it replaces, and
+- moq-tokio's `Connection` (its reconnect loop and GOAWAY handover in
+  `rs/moq-tokio/src/connection.rs`, dialing through the race in
+  `failover.rs`) seeds a redial from the session it replaces, and
   the relay's cluster peers seed from the previous session to the same peer.
   The transport-upgrade quest's QUIC dial seeds from nothing, since the
   previous session ran over TCP.
@@ -38,6 +40,4 @@ only when the jump never makes the first second worse than slow start.
 
 - [Transport upgrade](/quest/m1/transport-upgrade/README.md) - one of the
   reconnects this speeds up
-- [JS track handover](/quest/m1/js-group-handover.md) - GOAWAY
-  redials are the other
 - [noq#815](https://github.com/n0-computer/noq/issues/815) - the careful-resume proposal to n0

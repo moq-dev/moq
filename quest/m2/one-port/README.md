@@ -4,16 +4,14 @@
 
 A relay, or a binary embedding the gateway crates beside one, speaks
 everything it serves on one UDP port and one TCP port. UDP carries QUIC
-(WebTransport and raw moq), STUN Binding answers, the WebRTC media path
-(STUN, DTLS, SRTP) for WHIP and WHEP, and SRT. TCP carries TLS-terminated
+(WebTransport and raw moq), the WebRTC media path (STUN, DTLS, SRTP) for
+WHIP and WHEP, and SRT. TCP carries TLS-terminated
 HTTP (WebSocket qmux, WHIP and WHEP signaling, HLS, ops), RTMP, and RTMPS.
-Upstream delivers the demux, the responder, and stacks that accept a fed
-socket or stream; `moq-relay` itself serves QUIC, STUN, and HTTP on them,
+Upstream delivers the demux and stacks that accept a fed socket or stream;
+`moq-relay` itself serves QUIC and HTTP on them,
 and an embedder such as moq.pro's edge wires WebRTC, RTMP, and SRT, which the
 relay binary has never spoken. An operator opens 443 twice and is done; a client on
-a network that permits only 443 reaches every protocol; a P2P client names
-the relay as its STUN server and gets the lowest-RTT reflexive candidate
-there is.
+a network that permits only 443 reaches every protocol.
 
 The demux is a `moq-sock` primitive over the tokio backends.
 [`moq-uring`'s workers](/quest/m2/uring-demux.md) host it later; that is not
@@ -68,13 +66,13 @@ decided.
 
 ### STUN
 
-A Binding request is answered with a Binding success carrying
-XOR-MAPPED-ADDRESS, no authentication, no other methods. The response is
-larger than a minimal request (32 or 44 bytes against 20), so a spoofed
-source is a small amplifier; a per-source token bucket and a global responder
-budget bound it, and the drop counter makes it visible. Use str0m's
-`StunMessage`, already a dependency, or a maintained STUN crate; do not
-hand-roll the codec.
+Decided 2026-10-08: the public STUN responder is left to P2P (m3), its
+only consumer. Here, a Binding request carrying USERNAME is an ICE check
+and goes to WebRTC; any other is dropped and counted. Notes for whoever
+plans the responder: answer Binding with XOR-MAPPED-ADDRESS only; the reply
+outsizes the request (32 or 44 bytes against 20), so bound spoofed
+amplification with a per-source token bucket and a global budget; use a
+maintained STUN crate, not a hand-rolled codec.
 
 ### TCP
 
@@ -91,13 +89,13 @@ pre-accepted streams can stand behind.
 ## Required
 
 - [Steer only QUIC by connection ID](/quest/m2/one-port/shard-steering.md) - QUIC-bit greasing goes off and the reuseport filter leaves RTP, SRT, and STUN flows on one shard each
-- [UDP demux](/quest/m2/one-port/udp-demux.md) - one socket carries QUIC and STUN answers, with a WebRTC hook for embedders
+- [UDP demux](/quest/m2/one-port/udp-demux.md) - one socket carries QUIC, with a WebRTC hook for embedders
 - [WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md) - `moq-rtc` serves WHIP and WHEP media from the WebRTC hook and pins ICE tuples
 - [TCP acceptor](/quest/m2/one-port/tcp-demux.md) - one listener carries TLS-terminated HTTP, RTMP, and RTMPS
 - [SRT on the shared socket](/quest/m2/one-port/srt-demux.md) - moq-srt drives `srt-protocol` on demuxed packets and the flow table pins its 4-tuples
 
 ## Related
 
-- [P2P](/quest/m3/p2p/README.md) - the client that names the relay as its STUN server
+- [P2P](/quest/m3/p2p/README.md) - the only consumer of a public STUN responder, which it plans when it needs one
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - the io_uring workers host the UDP demux
 - [Stream sessions](/quest/m2/uring-tcp/README.md) - the io_uring workers that would host the TCP acceptor later

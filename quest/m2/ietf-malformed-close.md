@@ -19,7 +19,6 @@ runner's scenario name, where it has one:
 - A zero-length namespace field, or a namespace or full track name over
   4096 bytes.
 - A Request ID with the wrong parity: INVALID_REQUEST_ID.
-- A GROUP_ORDER outside 1..2.
 - An understood key-value with a bad serialization:
   KEY_VALUE_FORMATTING_ERROR
   (`receive-understood-key-value-invalid-serialization`).
@@ -31,9 +30,6 @@ runner's scenario name, where it has one:
   INVALID_REQUEST_ID, not a redirect.
 - A server SETUP carrying AUTHORITY or PATH: INVALID_AUTHORITY or
   INVALID_PATH.
-- Repeated unknown or GREASE Setup Options are accepted
-  (`setup-unknown-grease-options-and-duplicates`,
-  `d21-grease-setup-options`). Only a repeated known option is a duplicate.
 - A server SETUP AUTHORIZATION TOKEN that is malformed closes with
   KEY_VALUE_FORMATTING_ERROR. A REGISTER that overflows our cache (size 0)
   falls back to USE_VALUE, as draft-21 §9.1.4 requires.
@@ -43,14 +39,11 @@ runner's scenario name, where it has one:
 
 ## Plan
 
-Decided in the 2026-10-06 audit: external draft PR
-[#4927](https://github.com/moq-dev/moq/pull/4927) (mondain) owns two cases in
-Rust and JS, GROUP_ORDER outside 1..2 and repeated unknown or GREASE Setup
-Options. Do not implement them here. When #4927 merges, delete those two
-cases from the Goal and their mapping lines (`group.rs`, the `parameters.rs`
-GREASE entry); this quest keeps the rest. If #4927 stalls, they come back
-here. Rejected: asking the contributor to retarget #4927 at this quest's
-branch.
+Decided 2026-10-08: start after [Parameters per
+draft](/quest/m0/ietf-params-per-draft.md)
+([#5028](https://github.com/moq-dev/moq/pull/5028)) lands. It rewrites the
+same parameter decode and hands this quest one case: a follow-up message on
+a request stream that fails to decode.
 
 Decided with the maintainer on 2026-10-04 and 2026-10-05:
 
@@ -81,43 +74,40 @@ Where each case lives, mapped on 2026-10-04 (paths under
 `rs/moq-net/src/`):
 
 - The SETUP/GOAWAY uni stream runs as a task spawned inline in `run_unis`
-  (`ietf/session.rs`, around lines 751-874). SETUP and SETUP-parameter
-  decode failures there already close the session; only `run_goaway`'s
-  error is just logged. The gated server accept, which reads SETUP early,
-  calls `run_goaway` a second time (`goaway_recv`, around line 375) and
-  does the opposite: any error, even a stream reset, ends the session.
+  (`ietf/session.rs`). SETUP and SETUP-parameter decode failures there
+  already close the session; only `run_goaway`'s error is just logged. The
+  gated server accept, which reads SETUP early, calls `run_goaway` a second
+  time (`goaway_recv`) and does the opposite: any error, even a stream reset, ends the session.
   Make both sites agree, ideally by filtering inside `run_goaway`. Close
   on the errors `is_protocol_violation` (`ietf/subscriber.rs`) marks as
   the peer's fault, not on every error: a reset or transport failure on
   that stream must stay non-fatal, as `died_before_header` keeps it
   elsewhere. That fixes the second GOAWAY,
   the oversize URI, and an unknown type on that stream. On request
-  streams, an error from a follow-up message is only logged at debug in
-  `ietf/publisher.rs` (around line 500); promote decode errors there with
-  the same filter.
+  streams, a follow-up message (such as REQUEST_UPDATE on a SUBSCRIBE) that
+  fails to decode ends only that request with PUBLISH_DONE
+  (INTERNAL_ERROR), and the error is logged at debug in `handle_stream`
+  (`ietf/publisher.rs`). Close the session there instead, with the same
+  filter.
 - `died_before_header` (`ietf/session.rs`) treats a body cut short at FIN as
   the stream dying. A frame whose declared length passes FIN is malformed.
-  Responses decoded at `ietf/publisher.rs` (about lines 1858 and 1937) lack
-  the trailing-bytes check that the first message has.
+  The responses decoded in `advertise_namespace` and `update_namespace`
+  (`ietf/publisher.rs`) lack the trailing-bytes check that the first
+  message has.
 - Namespace bounds: `ietf/namespace.rs` checks only the 32-part limit. The
   track name in `ietf/subscribe.rs` is unbounded.
 - Request ID parity is known only in `Control::new` (`ietf/control.rs`), so
   thread it to where IDs are decoded.
-- `ietf/group.rs` maps an invalid GROUP_ORDER, or 0, to Descending.
 - KV serialization errors must be told apart from other decode errors.
-  `From<&Error> for SessionError` (`error.rs`) maps every `Decode` error to
+  `From<&Error> for SessionError` (`error.rs`) maps `TooManyParameters` to
+  KEY_VALUE_FORMATTING_ERROR but every `Decode` error to
   PROTOCOL_VIOLATION, and `ietf/session.rs` and `ietf/publisher.rs`
   hard-code it in a few places.
-- GREASE: `ietf/parameters.rs` (around line 122) keys every unknown ID as
-  `Unknown(u64)` in a HashMap, so any repeat fails as `Duplicate`. In this
-  tree that includes the plain duplicate-unknown case the report says now
-  passes, so check which build the report ran.
 - Client SETUP: `decode_peer_setup` (`ietf/session.rs`) ignores AUTHORITY
   and PATH and never parses the server's token. Reuse `ietf/token.rs`,
   which already does the server-side fallback.
-- SUBSCRIBE_TRACKS is refused before its prefix is decoded
-  (`ietf/publisher.rs`, about lines 547 and 1609). Decode the prefix first,
-  then refuse.
+- SUBSCRIBE_TRACKS is refused before its prefix is decoded (`handle_stream`
+  in `ietf/publisher.rs`). Decode the prefix first, then refuse.
 
 Test models: `an_unknown_uni_type_closes_the_session` and
 `an_unknown_bidi_type_closes_the_session` in `ietf/session.rs`, which drive
@@ -128,6 +118,10 @@ regressions where it fits.
 Public API: new `SessionError` variants and `SessionCode` entries. Wire:
 new moq-lite session codes, with moq-transport's values; moq-transport
 behaviour moves closer to the drafts.
+
+## Required
+
+- [Parameters per draft](/quest/m0/ietf-params-per-draft.md) - rewrites the parameter decode this builds on
 
 ## Related
 

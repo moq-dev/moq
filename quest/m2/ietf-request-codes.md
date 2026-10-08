@@ -11,7 +11,8 @@ is worth and the fallback is recorded in `doc/concept/standard.md`:
   NOT_SUPPORTED (draft-19 and later). We advertise no MAX_FILTER_RANGES, so
   the default of 0 applies (draft-21 §9.1.6) and every Range Filter is over
   the limit. This covers SUBSCRIBE and FETCH alike: both refuse Range
-  Filters today (`ietf/publisher.rs`, around lines 605 and 1292).
+  Filters today (`run_subscribe_stream` and `run_fetch_stream` in
+  `ietf/publisher.rs`).
 - **Draft-21 reserved namespaces:** draft-21 §2.4.2 and the `.session`
   rules (§6.5) ask for REQUEST_ERROR DOES_NOT_EXIST, without passing the
   request to the application, for:
@@ -28,8 +29,8 @@ is worth and the fallback is recorded in `doc/concept/standard.md`:
   matrix.
 - **OBJECT_DELIVERY_TIMEOUT (0x02) and SUBGROUP_DELIVERY_TIMEOUT (0x06)**
   on REQUEST_UPDATE are accepted and ignored, as SUBSCRIBE already does
-  (`ietf/subscribe.rs`). Today `ietf/request_stream.rs` refuses both as
-  unsupported.
+  (`ietf/subscribe.rs`). Today `ietf/request_stream.rs` decodes both and
+  marks the update unsupported.
 
 ## Plan
 
@@ -47,16 +48,25 @@ Decided with the maintainer on 2026-10-04 and 2026-10-05:
   one costs more than it is worth, the fallback in the Goal applies.
 - **TIMEOUT, not a timer.** The 0 cap means nothing waits, so no request is
   ever parked. The reply depends only on whether the parameter asked for a
-  wait. `ietf/subscribe.rs` parses RENDEZVOUS_TIMEOUT and discards it
-  (around line 140); keep it as far as the publisher's track lookup
-  (`ietf/publisher.rs`, around line 617). `Error::Timeout` already maps to
+  wait. `ietf/subscribe.rs` parses RENDEZVOUS_TIMEOUT and discards it;
+  keep it as far as the publisher's track lookup (`run_subscribe_stream`
+  in `ietf/publisher.rs`). `Error::Timeout` already maps to
   TIMEOUT (`ietf/error.rs`).
+- Decided 2026-10-08: start after [Parameters per
+  draft](/quest/m0/ietf-params-per-draft.md)
+  ([#5028](https://github.com/moq-dev/moq/pull/5028)), which rewrites the
+  same parameter decode and leaves the REQUEST_UPDATE delivery timeouts to
+  this quest.
 - One regression test per case, failing without its fix and asserting the
   draft's code, or the fallback recorded in `doc/concept/standard.md`.
   Mirror in `js/net/src/ietf` in the same PR.
 
 Public API: none expected. Wire: none new; replies move closer to the
 drafts.
+
+## Required
+
+- [Parameters per draft](/quest/m0/ietf-params-per-draft.md) - rewrites the parameter decode this builds on
 
 ## Related
 

@@ -27,7 +27,18 @@ onto its own task with a bounded read timeout; that task peeks, optionally
 terminates TLS, and yields `Accepted`. An idle or slow client stalls only
 its own task, so a peer that connects and sends nothing cannot block later
 accepts. The peek is non-destructive on `TcpStream` and on the rustls
-stream alike.
+stream alike. Reuse the handshake bound `listen.timeout` already sets
+(`moq_tokio::listen::Config::timeout`) rather than a new knob.
+
+The TLS arm also carries `tls://` qmux, served today by its own `listen.tcp`
+listener with TLS. It negotiates a moq ALPN in the TLS handshake, so split
+the decrypted arm on ALPN: a moq ALPN goes to the qmux server, and HTTP
+ALPNs (or none) go to the router.
+
+Keep the accepted `TcpStream`'s handle reachable after it is boxed: the
+relay already captures socket stats at accept for qmux (`SocketStats` in
+`web.rs`), and [WebSocket bitrate caps](/quest/m2/rate-websocket.md) set
+socket buffer sizes on the same socket.
 
 Tests: an HTTP request, a WebSocket upgrade, a raw RTMP C0, and an RTMPS C0
 against one listener each land in the right arm.
@@ -35,3 +46,4 @@ against one listener each land in the right arm.
 ## Related
 
 - [UDP demux](/quest/m2/one-port/udp-demux.md) - the UDP half
+- [WebSocket bitrate caps](/quest/m2/rate-websocket.md) - sizes the kernel buffers of the socket this acceptor boxes

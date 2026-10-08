@@ -1,50 +1,43 @@
-# [S] Keep-alive by deadline
+# [S] Keep-alive derives from the idle timeout
 
 ## Goal
 
-A connection sends a PING only when its idle deadline is near, never on a
-fixed clock. An idle connection with a 10 s idle timeout costs one packet per
-roughly 10 s minus a few PTOs; a busy connection costs none. The
-`keep_alive` setting on `quic::Client` and `quic::Server` becomes an optional
-maximum, default none. Redefining it is a config and CLI break.
+The QUIC keep-alive interval defaults to a value derived from the idle
+timeout, not a fixed 3 s, so changing `quic.idle_timeout` never needs a
+matching hand-tuned `quic.keep_alive`. An explicit `quic.keep_alive`
+(`moq_tokio::quic::Config::keep_alive`) stays an override, for a NAT binding
+that lives shorter than the idle timeout, and `0s` still disables it.
 
 ## Plan
 
-noq-proto arms `Timer::KeepAlive` at `now + keep_alive_interval` on every
-authenticated packet (`connection/mod.rs`, `reset_keep_alive`), so the
-interval is a second, unrelated clock the operator has to keep below the idle
-timeout by hand. Replace it in the fork:
+Decided 2026-10-08: shrunk to deriving the default. Replacing the keep-alive
+timer with a PING fired near the idle deadline was not worth a config and
+CLI break.
 
-- The deadline is the negotiated idle timeout, the minimum of the local
-  setting and the peer's `max_idle_timeout` transport parameter, measured
-  from the last packet sent or received. Fire the PING at
-  `deadline - 3 * pto()`, bounded below at one PTO, so a lost PING and its
-  probe still land before the peer's timer.
-- Keep `keep_alive_interval` as a maximum: `None` means "as late as
-  possible"; a value means "no later than this", for a NAT binding with a
-  shorter life than the idle timeout. That is the only knob.
+Today `moq-quic` arms `Timer::KeepAlive` a fixed interval after each packet
+(`reset_keep_alive`), and moq-tokio's `DEFAULT_KEEP_ALIVE` is a hand-picked
+fraction of `DEFAULT_IDLE_TIMEOUT`. Derive the interval from the negotiated
+idle timeout instead (the smaller of ours and the peer's `max_idle_timeout`,
+which the connection already holds), keeping it under a third so a lost PING
+and its probe land before the peer's timer. Pick how the config expresses
+"derived" (an `Option`, or a sentinel) by what reads clearest in the
+`[quic]` section and CLI; document it in `doc/bin/relay/config.md`.
 
-moq-tokio's `quic.keep_alive` (`rs/moq-tokio/src/quic.rs`) in the `[quic]`
-sections, CLI flags, and env vars becomes that optional maximum, default none,
-documented in `doc/bin/relay/config.md` for NAT-sensitive deployments. The qmux WebSocket keep-alive (`qmux::ws::KeepAlive`,
-5 s ping and 30 s deadline) already has this shape; make its wording match.
+iroh stays on upstream noq. [Listener deadlines](/quest/m1/listener-deadlines.md)
+wires `quic.keep_alive` into iroh's `keep_alive_interval`; with no explicit
+value, iroh gets the same derivation from its idle timeout. The qmux
+WebSocket keep-alive (`qmux::ws::KeepAlive`, a fixed 5 s ping and 30 s
+deadline) is a different mechanism and stays as is.
 
-iroh stays on upstream noq, which the fork does not touch, and
-[Listener deadlines](/quest/m1/listener-deadlines.md) wires `quic.keep_alive`
-into iroh's fixed `keep_alive_interval`. Decided in the 2026-10-05 audit:
-when the maximum is `None`, iroh keeps a fixed interval derived from the idle
-timeout, so an iroh session never loses its keep-alive. Rejected: requiring
-an explicit maximum for iroh.
-
-Tests: an idle connection survives an idle timeout with exactly one PING per
-period; a busy connection sends none; a lost PING is probed before the
-deadline; the maximum knob shortens the period.
+Tests: the derived interval follows a changed idle timeout, including a peer
+that advertises a shorter one; an idle connection survives with the
+default; an explicit value wins; `0s` disables.
 
 ## Required
 
-- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
+- [Hard fork](/quest/m1/quic/fork/README.md) - the derivation lands in `moq-quic`, not the frozen fork
 
 ## Related
 
 - [Listener deadlines](/quest/m1/listener-deadlines.md) - wires the same setting into iroh's fixed interval
-- [noq#810](https://github.com/n0-computer/noq/issues/810) - the proposal to n0; flub and matheus23 asked to keep a cap for NAT bindings, which the optional maximum covers
+- [noq#810](https://github.com/n0-computer/noq/issues/810) - the deadline-driven proposal to n0; flub and matheus23 asked to keep a cap for NAT bindings, which the override covers

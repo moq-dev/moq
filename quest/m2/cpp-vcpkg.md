@@ -23,6 +23,10 @@ CI on Windows, macOS, and Linux.
   built nightly on all three platforms; a mismatch between the port and the
   tarball fails the nightly, not the user.
 - Curated `microsoft/vcpkg` is out of scope; it wants source builds.
+- Decided 2026-10-08: the tarballs this needs are the first C++ package
+  release, which #4079 adds as its own quest (`quest/m1/cpp-release.md`).
+  Once that file is on `main`, it replaces the line README as this quest's
+  Required entry.
 
 ## Required
 
