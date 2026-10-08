@@ -254,9 +254,10 @@ server granting its cluster CA everything with `peer: true`); see
 another relay, whose broadcasts entered the cluster elsewhere; leave it off
 when certificates identify clients. `--mtls-upstream` also marks those relays
 [upstream](/bin/relay/cluster#upstream-links) and needs `--mtls-peer`.
-Adding or removing either flag on a running server ends each live mTLS session at its next
-`--revalidate` re-check, so the mesh redials once; without `--revalidate`, a
-session keeps its old marks until it reconnects.
+Adding or removing either flag on a running server ends each live mTLS session
+at its next re-check, from the `--revalidate` cadence or a
+[push](#the-contract) such as `moq auth revalidate`, so the mesh redials once;
+until then, a session keeps its old marks.
 The LAN mesh credential on `/.cluster/<credential>` stays relay-internal: it
 is a secret the relay minted for itself, checked locally, and never a request
 to the server.
