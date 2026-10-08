@@ -30,8 +30,10 @@ Decided (maintainer, 2026-10-07):
   `Subscriber Max Age` has not expired, when that position sorts below the
   floor. That is the start lite-06 already resolves for `Group Start` 0, so a
   buffering subscriber keeps its backlog, and a max age of 0 still means the
-  latest group. Comparing positions, not groups, means a merged floor of
-  (3, 5) with group 3 as the latest still delivers frames 0-4.
+  latest group. On an untimed track no group expires by max age, so `Live`
+  means the latest group there (as `model/subscription.rs` documents today),
+  not the whole cache. Comparing positions, not groups, means a merged floor
+  of (3, 5) with group 3 as the latest still delivers frames 0-4.
 - The model mirrors the wire: `Subscription { floor: Option<(group, frame)>,
   live }` in Rust and `@moq/net`.
 - Merging across subscribers (`Subscription::poll_combined`, JS
@@ -50,14 +52,22 @@ Decided (maintainer, 2026-10-07):
 - When merged subscriptions need both `live` and a floor that an older
   upstream wire cannot express in one SUBSCRIBE, a moq-transport upstream MAY
   first be asked TRACK_STATUS for the largest group, subscribing from the lower
-  of the two. For an empty track the `live` mapping alone covers both, since
+  of the two. That covers only a `live` reaching the latest group. A buffered
+  `live` (max age > 0) needs the oldest unexpired group, which the relay
+  can't learn upstream: the ordinary join (`subscribe_join`) fetches only the
+  latest group's prefix. So a buffered `live` merged with a floor subscribes
+  from `Absolute Start` at group 0, and the relay filters locally by age and
+  floor. For an empty track the `live` mapping alone covers both, since
   moq-transport starts it at {0, 0}. moq-lite has no
-  TRACK_STATUS, so a lite-06 or pre-06 upstream is subscribed at floor 0 and
-  the relay filters locally. On lite-06 that is `Group Start` 0, exactly the
-  `live` mapping. On pre-06 the floor must go out as an explicit group 0
-  (replay from the beginning): the codec folds a floor of 0 to absent today
-  (`encode_start_group`), which pre-06 reads as the latest group, so a merged
-  `{floor: 2, live}` with groups 2-4 retained would lose 2-3.
+  TRACK_STATUS, so a lite-06 or lite-03 to 05 upstream is subscribed at floor
+  0 and the relay filters locally. On lite-06 that is `Group Start` 0, exactly
+  the `live` mapping. On lite-03 to 05 the floor must go out as an explicit
+  group 0 (replay from the beginning): the codec folds a floor of 0 to absent
+  today (`encode_start_group`), which those versions read as the latest
+  group, so a merged `{floor: 2, live}` with groups 2-4 retained would lose
+  2-3. lite-01 and 02 carry no `Group Start` at all, so a merged floor through
+  them gets what they send from the latest group; that is a limitation of
+  those published versions, not something the codec can fix.
 - Docs stay inline: the lite draft (field, semantics, lite-07 changelog),
   `doc/concept`, and the Rust and JS API docs.
 
@@ -65,8 +75,11 @@ Test with mock time: the starvation case (a floor-4 subscriber and a `live`
 subscriber on a quiet track whose newest group is 3) in-process and through a
 relay on lite-06 and lite-07-wip, a buffering `live` subscriber (max age > 0)
 merged with a floor above the live edge, a frame floor merged with `live`, a
-merged `{floor: 2, live}` through a pre-06 upstream with groups 2-4 retained
-that delivers all three, and the codec mapping of each older wire.
+merged `{floor: 2, live}` through a lite-03 to 05 upstream with groups 2-4
+retained that delivers all three, a buffered `live` merged with a floor-5
+subscriber over a moq-transport upstream with fresh groups 2-4 that still
+delivers 2-4, an untimed `live` merged with a floor that starts at the latest
+group, and the codec mapping of each older wire.
 
 ## Related
 
