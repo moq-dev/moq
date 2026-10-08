@@ -284,25 +284,22 @@ fn origin_config_set_cache_capacity() {
 }
 
 #[test]
-fn route_cold_cost_conversions_are_lossless() {
-	// An explicit cold half survives the round trip in both directions.
-	let route = moq_net::origin::Route::default().with_cost(moq_net::origin::Cost { warm: 0, cold: 9 });
+fn route_cost_conversions_are_lossless() {
+	// A static cost survives conversion in both directions.
+	let route = moq_net::origin::Route::default().with_cost(moq_net::origin::Cost::new(9));
 	let ffi = MoqRoute::from(route.clone());
-	assert_eq!(ffi.cost, 0);
-	assert_eq!(ffi.cold, Some(9));
+	assert_eq!(ffi.cost, 9);
 	let back = moq_net::origin::Route::try_from(ffi).unwrap();
 	assert_eq!(back.cost, route.cost);
 
-	// An omitted cold means the same as the warm cost: a publisher seeding
-	// only its production cost sets one number.
+	// A publisher seeds its production cost with one number.
 	let seeded = moq_net::origin::Route::try_from(MoqRoute {
 		hops: vec![],
 		cost: 5,
-		cold: None,
 		anonymous: false,
 	})
 	.unwrap();
-	assert_eq!(seeded.cost, moq_net::origin::Cost { warm: 5, cold: 5 });
+	assert_eq!(seeded.cost, moq_net::origin::Cost::new(5));
 
 	let anonymous = MoqRoute::from(
 		moq_net::origin::Route::default().with_hops(moq_net::Hops::try_from(vec![moq_net::Hop::UNKNOWN]).unwrap()),
@@ -312,40 +309,35 @@ fn route_cold_cost_conversions_are_lossless() {
 }
 
 #[tokio::test]
-async fn announced_route_keeps_cold_cost_on_reannounce() {
+async fn announced_route_keeps_static_cost_on_reannounce() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let broadcast = origin.create_broadcast("cold-route".into()).unwrap();
+	let broadcast = origin.create_broadcast("priced-route".into()).unwrap();
 	broadcast
 		.announce(MoqRoute {
 			hops: vec![],
-			cost: 0,
-			cold: Some(9),
+			cost: 9,
 			anonymous: false,
 		})
 		.unwrap();
 
-	// The route observed through the announcement stream carries both halves:
-	// a truthful `{warm: 0, cold: 9}` is never rewritten to the publisher's
-	// own `{warm: 0, cold: 0}`.
+	// Reading an advertisement preserves its static production price.
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let route = loop {
 		if let MoqAnnounceEvent::Start { announce } | MoqAnnounceEvent::Update { announce } =
 			next_event(&announced).await
-			&& announce.prefix == "cold-route"
+			&& announce.prefix == "priced-route"
 		{
 			break announce.route;
 		}
 	};
-	assert_eq!(route.cost, 0);
-	assert_eq!(route.cold, Some(9));
+	assert_eq!(route.cost, 9);
 
-	// Announcing the observed route again reproduces it exactly, cold half
-	// included. (An identical re-announce is not redelivered, so this checks
-	// the conversion rather than waiting for a second update.)
+	// Re-announcing the observed route preserves its static price. An identical
+	// advertisement is not redelivered, so check its conversion instead.
 	broadcast.announce(route.clone()).unwrap();
 	let back = moq_net::origin::Route::try_from(route.clone()).unwrap();
-	assert_eq!(back.cost, moq_net::origin::Cost { warm: 0, cold: 9 });
+	assert_eq!(back.cost, moq_net::origin::Cost::new(9));
 	assert_eq!(MoqRoute::from(back), route);
 
 	broadcast.close().unwrap();

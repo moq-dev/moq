@@ -513,14 +513,14 @@ test("a repeated NAMESPACE reprices in place", async () => {
 	expect(await announced.next()).toMatchObject({
 		prefix: Path.from("theirs"),
 		kind: "start",
-		route: { hops: [PEER], cost: { warm: 4n, cold: 4n } },
+		route: { hops: [PEER], cost: 4n },
 	});
 
 	await inlineNamespace(subscription, Path.from("theirs"), { hops: [PEER], cost: 0n });
 	expect(await announced.next()).toMatchObject({
 		prefix: Path.from("theirs"),
 		kind: "update",
-		route: { hops: [PEER], cost: { warm: 0n, cold: 0n } },
+		route: { hops: [PEER], cost: 0n },
 	});
 });
 
@@ -700,7 +700,7 @@ test("a PUBLISH_NAMESPACE repricing is acknowledged in place", async () => {
 	expect(await announced.next()).toMatchObject({
 		prefix: Path.from("theirs"),
 		kind: "start",
-		route: { hops: [PEER], cost: { warm: 4n, cold: 4n } },
+		route: { hops: [PEER], cost: 4n },
 	});
 
 	const peer = await nextStream(pair.client);
@@ -715,7 +715,7 @@ test("a PUBLISH_NAMESPACE repricing is acknowledged in place", async () => {
 	expect(await announced.next()).toMatchObject({
 		prefix: Path.from("theirs"),
 		kind: "update",
-		route: { hops: [PEER], cost: { warm: 0n, cold: 0n } },
+		route: { hops: [PEER], cost: 0n },
 	});
 
 	// Still announced: the stream ending is what retracts it.

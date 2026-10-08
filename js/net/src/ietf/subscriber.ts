@@ -59,7 +59,7 @@ const SUBSCRIBE_OK_TIMEOUT_MS = 10_000;
 // Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
 // candidate outranks it, while the route stays selectable as the last path. Matches Rust
 // Cost::DRAIN: cost is the whole mechanism, not a separate state.
-const DRAIN_COST = { warm: 2n ** 62n - 1n, cold: 2n ** 62n - 1n };
+const DRAIN_COST: Cost = 2n ** 62n - 1n;
 
 // A live subscription, as the track alias its data streams name resolves to.
 type Subscription = {
@@ -215,7 +215,7 @@ export class Subscriber {
 	// What a route costs once the peer has asked us to leave.
 	#priced(route: Route): Route {
 		if (!this.#goingAway()) return route;
-		if (route.cost.warm === DRAIN_COST.warm && route.cost.cold === DRAIN_COST.cold) return route;
+		if (route.cost === DRAIN_COST) return route;
 		return { ...route, cost: DRAIN_COST };
 	}
 
@@ -241,7 +241,7 @@ export class Subscriber {
 	/** The route an advertisement carries; one without a path is anonymous and free. */
 	#route(advert: Cluster.Advert | undefined): Route {
 		if (advert === undefined) return { hops: [UNKNOWN_HOP], cost: Cost.zero };
-		return { hops: advert.hops, cost: { warm: advert.cost, cold: advert.cost } };
+		return { hops: advert.hops, cost: advert.cost };
 	}
 
 	/**

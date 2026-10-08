@@ -152,6 +152,9 @@ how a standby transcoder pool seeds a high cost and drops it once it's working,
 and a relay receiving a GOAWAY re-prices every route learned from that peer to
 the maximum so new subscriptions go elsewhere while existing ones finish.
 
+A route's price is static: the publisher's production cost plus the link costs
+it crosses. A live publisher seeds 0, and caching never changes it.
+
 ## LAN discovery
 
 On a LAN there may be no one to list. `[cluster.lan]` advertises this relay
@@ -195,6 +198,14 @@ changed URLs redialed. A bad fetch keeps the last good list.
 connect_api = "https://api.example.com/cluster/peers"
 node = "https://us-west.example.com/"
 ```
+
+HTTPS peer-list fetches present the same client certificate as cluster dials,
+but authenticate the API with system roots and the hostname in its URL.
+Mesh roots, fingerprints, insecure mode, and the mesh hostname override do not
+apply to the API. For a private API, set `cluster.connect_api_tls_root` to PEM
+paths (or repeat `--cluster-connect-api-tls-root`); these replace system trust
+for API fetches only. Malformed roots fail startup, and files reload for new
+connections when rotated.
 
 ## Identity
 
