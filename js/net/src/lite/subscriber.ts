@@ -4,6 +4,7 @@ import * as broadcast from "../broadcast.ts";
 import type { Drain } from "../connection/goaway.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
+import * as DatagramStream from "../datagram_stream.ts";
 import type * as Epoch from "../epoch.ts";
 import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError, sessionCause } from "../error.ts";
 import * as netGroup from "../group.ts";
@@ -25,7 +26,6 @@ import {
 	decodeAnnounceBroadcastMaybe,
 } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
-import * as DatagramStream from "./datagram_stream.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import { frameDecoder, type Group as GroupMessage, readFrames } from "./group.ts";
 import { sendOrder } from "./priority.ts";
@@ -63,7 +63,7 @@ export const SUBSCRIBE_SETUP_TIMEOUT_MS = 10_000;
 // Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
 // candidate outranks it, while the route stays selectable as the last path. Matches Rust
 // Cost::DRAIN: cost is the whole mechanism, not a separate state.
-const DRAIN_COST = { warm: 2n ** 62n - 1n, cold: 2n ** 62n - 1n };
+const DRAIN_COST: Cost = 2n ** 62n - 1n;
 
 // The TRACK stream and implicit SUBSCRIBE acceptance are lite-05+.
 function supportsTrackStream(version: Version): boolean {

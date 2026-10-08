@@ -50,8 +50,8 @@ Decided 2026-10-01 (see the [line's decisions](/quest/m1/cluster-routing/README.
   `transcode/foobar` at 1 from one node, decided 2026-10-01) and nobody
   changes it in transit; a path's cost through a route is that seed plus the
   route metric. Link changes therefore touch only ROUTE, and feasibility runs
-  on the route metric alone. This is [One route cost](/quest/m1/route-cost.md)'s
-  single cost, which stops accumulating per hop once this lands.
+  on the route metric alone. This is today's single route cost, which stops
+  accumulating per hop once this lands.
 - Each hop adds its link cost plus one to the metric (decided 2026-10-01), so
   the metric strictly increases as Babel requires while operators keep
   configuring cost 0 for a free link.
@@ -138,7 +138,6 @@ release.
 
 ## Required
 
-- [One route cost](/quest/m1/route-cost.md) - the single cost this splits into the announce seed and the route metric
 - [Simulate the split](/quest/m1/cluster-routing/sim.md) - the numbers that confirm the design before the wire is written
 
 ## Related

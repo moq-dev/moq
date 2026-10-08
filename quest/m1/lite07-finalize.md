@@ -79,7 +79,6 @@ is published; older versions are unchanged.
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - lite-07 restores SUBSCRIBE_DROP in place of `Stream Count`
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
 - [Untimed lite-07](/quest/m1/lite-untimed.md) - an untimed track crosses the wire untimed
-- [One route cost](/quest/m1/route-cost.md) - ANNOUNCE carries one cost
 - [Claim-served epochs](/quest/m1/claim-epochs.md) - TRACK_INFO carries the epoch of the instance that answered
 
 ## Related

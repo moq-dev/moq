@@ -43,8 +43,8 @@ pub fn restart_supported(version: Version) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AnnounceBroadcast<'a> {
 	/// ANNOUNCE_START (lite-06) / active (older): a broadcast is now available.
-	/// Carries the path suffix, the hop chain, and (lite-06+) the warm and cold
-	/// route costs, and assigns the next announce id. The epoch (lite-07+) is fixed
+	/// Carries the path suffix, the hop chain, and (lite-06+) the static route
+	/// cost, and assigns the next announce id. The epoch (lite-07+) is fixed
 	/// for the announcement's lifetime: a new one is an end and a fresh start.
 	Active {
 		suffix: PathRef<'a>,
@@ -201,8 +201,12 @@ impl Encode<Version> for Cost {
 		if !version.has_route_cost() {
 			return Ok(());
 		}
-		w.varint(self.warm)?;
-		w.varint(self.cold)
+		w.varint(self.value())?;
+		if version == Version::Lite06 {
+			// lite-06 also carries Cold; write the ceiling so it ranks last on old readers.
+			w.varint(Cost::MAX.value())?;
+		}
+		Ok(())
 	}
 }
 
@@ -213,11 +217,12 @@ impl Decode<Version> for Cost {
 		}
 		// Costs saturate at 2^62-1 on every version, so a larger one (lite-07's varints
 		// reach 2^64-1) reads as the ceiling and still forwards to an older peer.
-		let cost = Cost {
-			warm: buf.varint()?,
-			cold: buf.varint()?,
-		};
-		Ok(cost.clamped())
+		let cost = Cost::new(buf.varint()?);
+		if version == Version::Lite06 {
+			// lite-06's Cold has no selection rule; read and ignore it.
+			buf.varint()?;
+		}
+		Ok(cost)
 	}
 }
 
@@ -675,9 +680,8 @@ mod tests {
 		let mut hops = Hops::new();
 		hops.push(Hop::new(7).unwrap()).unwrap();
 
-		// Asymmetric on purpose: the two magnitudes travel independently, so a
-		// swapped or shared encode would round-trip a symmetric pair unnoticed.
-		let cost = Cost { warm: 12, cold: 30 };
+		// A priced start and update preserve the same static value.
+		let cost = Cost::new(12);
 
 		let active = AnnounceBroadcast::Active {
 			epoch: None,
@@ -703,7 +707,7 @@ mod tests {
 	fn announce_broadcast_round_trip_on_lite07() {
 		let mut hops = Hops::new();
 		hops.push(Hop::new(7).unwrap()).unwrap();
-		let cost = Cost { warm: 12, cold: 30 };
+		let cost = Cost::new(12);
 
 		let active = AnnounceBroadcast::Active {
 			epoch: None,
@@ -801,14 +805,14 @@ mod tests {
 	// Pre-lite-06 has no room for a cost on the wire, so one set locally is simply
 	// not sent and the peer decodes [`Cost::UNKNOWN`]: free to reach, which keeps a
 	// mixed-version mesh ranking those routes on hop count exactly as it did before,
-	// with a cold path that ranks last rather than pretending to be the publisher's.
+	// with only the arriving link price contributing to route selection.
 	#[test]
 	fn route_cost_is_dropped_before_lite06() {
 		let msg = AnnounceBroadcast::Active {
 			epoch: None,
 			suffix: PathRef::literal(Path::new("room/cam")),
 			hops: HopsRef::default(),
-			cost: Cost { warm: 9, cold: 9 },
+			cost: Cost::new(9),
 		};
 		let got = broadcast_round_trip(&msg, Version::Lite05);
 		assert_eq!(
@@ -984,5 +988,33 @@ mod tests {
 		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, AnnounceOk::decode).unwrap();
 		assert_eq!(got.origin.id(), 0);
 		assert_eq!(got.active, 0);
+	}
+
+	#[test]
+	fn wip_cost_has_one_field_and_lite06_keeps_two() {
+		let mut wire = Vec::new();
+		Cost::new(12)
+			.encode(&mut Encoder::new(&mut wire, Version::Lite07.into()), Version::Lite07)
+			.unwrap();
+		assert_eq!(wire, [12]);
+
+		wire.clear();
+		Cost::new(12)
+			.encode(&mut Encoder::new(&mut wire, Version::Lite06.into()), Version::Lite06)
+			.unwrap();
+		let mut input = Decoder::new(&wire, Version::Lite06.into());
+		assert_eq!(input.varint().unwrap(), 12);
+		assert_eq!(input.varint().unwrap(), Cost::MAX.value());
+		assert!(input.is_empty());
+
+		for cold in [0, 3, Cost::MAX.value()] {
+			wire.clear();
+			let mut w = Encoder::new(&mut wire, Version::Lite06.into());
+			w.varint(12).unwrap();
+			w.varint(cold).unwrap();
+			let mut input = Decoder::new(&wire, Version::Lite06.into());
+			assert_eq!(Cost::decode(&mut input, Version::Lite06).unwrap(), Cost::new(12));
+			assert!(input.is_empty());
+		}
 	}
 }

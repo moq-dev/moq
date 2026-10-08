@@ -930,7 +930,7 @@ export class Producer {
 	 * never reuses a number). The payload must fit the negotiated transport datagram size minus
 	 * a small header; an oversize payload is dropped at each hop (there is no group fallback), so
 	 * keep datagram payloads small (e.g. a single audio frame). Datagrams are never delivered
-	 * over IETF moq-transport or stream-only transports (the WebSocket fallback). A payload over
+	 * over stream-only transports (the WebSocket fallback). A payload over
 	 * 65535 bytes (the QUIC datagram frame ceiling) throws. An origin publisher uses this; a
 	 * relay preserving upstream numbering uses {@link insertDatagram}.
 	 *

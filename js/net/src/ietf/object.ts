@@ -68,8 +68,12 @@ async function encodeObjectTime(
 	await w.u62(BigInt(value));
 }
 
-// Without units (`timescale` undefined) there is no Timestamp to write, even if the frame has one.
-async function encodeObjectExtensions(
+/**
+ * Encode an object's Properties block: its Timestamp in `timescale` units, or nothing.
+ *
+ * Without units (`timescale` undefined) there is no Timestamp to write, even if the frame has one.
+ */
+export async function encodeObjectExtensions(
 	timestamp: Timestamp | undefined,
 	timescale: Timescale | undefined,
 	version: IetfVersion,
@@ -101,7 +105,8 @@ async function encodeObjectExtensions(
 	return result;
 }
 
-function decodeObjectTime(c: Cursor, timescale: Timescale): Timestamp | undefined {
+/** Decode the Timestamp an object's Properties block carries, consuming the whole block. */
+export function decodeObjectTime(c: Cursor, timescale: Timescale): Timestamp | undefined {
 	let timestamp: bigint | undefined;
 	let prevType = 0n;
 	let first = true;

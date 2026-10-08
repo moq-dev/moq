@@ -51,7 +51,6 @@ remain and no release waits on them.
 
 - [Draft-22 LOCATION_FILTER](/quest/m0/ietf-location-filter-22.md) - moqt-22 LOCATION_FILTER carries its type instead of a Length in Rust and JS, so a draft-22 peer reads our Next Object correctly
 - [moq-transport parameters per draft](/quest/m0/ietf-params-per-draft.md) - every control message accepts exactly the parameters its draft allows, so moqx's draft-16 SUBSCRIBE_NAMESPACE with FORWARD stops failing
-- [No empty d14 prefix](/quest/m0/ietf-d14-root-prefix.md) - draft-14 never sends SUBSCRIBE_NAMESPACE with an empty prefix, and the docs say to scope a d14 link to moxygen
 - [Capped stream END_OF_GROUP](/quest/m0/ietf-end-of-track-location.md) - a stream capped by the subscription's end Location never claims END_OF_GROUP; moving End of Track's Location is deferred
 - [End of Group status](/quest/m0/ietf-end-of-group-status.md) - an End of Group status on a stream whose header already marks the group's end is accepted, so imquic's last object per group arrives
 - [TRACK stream demand](/quest/m0/track-stream-demand.md) - a lite-05+ subscribe shows the publisher one `used` edge, not a flap between TRACK and SUBSCRIBE

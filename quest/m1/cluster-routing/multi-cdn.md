@@ -52,4 +52,3 @@ none.
 ## Required
 
 - [Restart](/quest/m0/broadcast-epoch/restart.md) - an epochless secondary takes over as a restart, not a resume
-- [One route cost](/quest/m1/route-cost.md) - reshapes the route cost this ranks beside

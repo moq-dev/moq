@@ -33,10 +33,11 @@ harness:
 # client, and the GStreamer moqsrc plugin). Other flags pass through, e.g.
 # `just test interop --publishers rust,python --subscribers rust,c`.
 # Both runs first check js/net's varints against moq-net's encoder at every size boundary,
-# and on lite-06/07 messages (the filter also matches `lite_varint_interop`).
+# and on lite-06/07 messages (the filter also matches `lite_varint_interop`), then
+# moq-transport OBJECT_DATAGRAMs both ways on every draft.
 [positional-arguments]
 interop *args:
-    just rs test -p moq-net --lib varint_interop --run-ignored all
+    just rs test -p moq-net --lib varint_interop ietf_datagram_interop --run-ignored all
     ./interop/interop.sh "$@"
 
 # Negative control: no publisher, every subscriber must time out (proves the
