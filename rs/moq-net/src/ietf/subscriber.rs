@@ -567,7 +567,7 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	session_origin: crate::Hop,
 	// A random Hop ID of this connection's own, written as the first hop of any path
 	// that arrives naming no publisher, so a publisher that reconnects reads downstream
-	// as a new one. Fresh per connection, unlike `session_origin`.
+	// as a new one. Always fresh per connection, unlike a pinned `session_origin`.
 	stamp: crate::Hop,
 	// Our own Hop ID, which an advertisement must not already contain: one that does
 	// looped back through us.
