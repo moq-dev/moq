@@ -51,7 +51,6 @@ issues' 1+1 setup (one relay, two `import ts` sharing one `--epoch`, two
 ## Required
 
 - [Shared import clock](/quest/m1/shared-clock.md) - the `Input`/offset API this supplies an input-derived anchor through
-- [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - the shared `--epoch` this keys a redundant pair on
 
 ## Closes
 

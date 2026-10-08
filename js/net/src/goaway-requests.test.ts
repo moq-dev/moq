@@ -15,6 +15,7 @@ import { createMockTransportPair, type MockTransport } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream, Writer } from "./stream.ts";
+import { Timescale } from "./time.ts";
 import type { Producer as TrackProducer } from "./track.ts";
 import { wireOf } from "./wire.ts";
 
@@ -114,7 +115,7 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		for (;;) {
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
-			const track = req.accept();
+			const track = req.accept({ timescale: Timescale.MILLI });
 			if (req.name === "video" && armVideo) track.writeString("one");
 			if (req.name === "later") track.writeString("from-draining");
 			if (req.name === "audio") track.writeString("from-replacement");
