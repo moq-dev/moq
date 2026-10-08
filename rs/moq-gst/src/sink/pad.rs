@@ -1594,7 +1594,7 @@ mod tests {
 			"the payload goes out untouched"
 		);
 		assert_eq!(
-			std::time::Duration::from(frame.timestamp).as_micros(),
+			std::time::Duration::from(frame.timestamp.expect("timed")).as_micros(),
 			40_000,
 			"the frame carries the PTS mapped through the segment"
 		);
@@ -1606,7 +1606,10 @@ mod tests {
 		let mut group = subscriber.next_group().await.unwrap().expect("a second group");
 		let frame = group.read_frame().await.unwrap().expect("a frame in the second group");
 		assert_eq!(frame.payload.as_ref(), b"second");
-		assert_eq!(std::time::Duration::from(frame.timestamp).as_micros(), 80_000);
+		assert_eq!(
+			std::time::Duration::from(frame.timestamp.expect("timed")).as_micros(),
+			80_000
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1674,7 +1677,7 @@ mod tests {
 			.subscribe(None)
 			.await
 			.expect("subscribe to the opaque track");
-		assert_eq!(subscriber.info().timescale, moq_net::Timescale::MICRO);
+		assert_eq!(subscriber.info().timescale, Some(moq_net::Timescale::MICRO));
 		assert_eq!(
 			subscriber.info().max_age,
 			Some(std::time::Duration::from_secs(5)),
@@ -1716,7 +1719,10 @@ mod tests {
 		let mut group = subscriber.next_group().await.unwrap().expect("a group");
 		let frame = group.read_frame().await.unwrap().expect("a frame");
 		assert_eq!(frame.payload.as_ref(), b"no pts", "the unstamped buffer was published");
-		assert_eq!(std::time::Duration::from(frame.timestamp).as_micros(), 25_000);
+		assert_eq!(
+			std::time::Duration::from(frame.timestamp.expect("timed")).as_micros(),
+			25_000
+		);
 	}
 
 	#[test]

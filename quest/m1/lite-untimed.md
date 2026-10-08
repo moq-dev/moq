@@ -9,8 +9,8 @@ peers. Covers `rs/moq-net`, `js/net` and `drafts/draft-lcurley-moq-lite.md`.
 
 ## Plan
 
-Decided (2026-10-05, maintainer): timedness is per track ([untimed
-model](/quest/m1/untimed-model.md)), and an untimed track sends no
+Decided (2026-10-05, maintainer): timedness is per track (the untimed
+model, [#4822](https://github.com/moq-dev/moq/pull/4822)), and an untimed track sends no
 TIMESCALE and no Timestamp. On lite-07 that likely means an optional
 Timescale in TRACK_INFO and no Timestamp fields on an untimed track. The
 per-frame shift below was planned for an absent timestamp inside a timed
@@ -50,5 +50,4 @@ Public API: none. Wire: lite-07-wip only, which is unpublished.
 
 ## Required
 
-- [moq-net carries untimed frames faithfully](/quest/m1/untimed-model.md) - the Rust model must hold an absent timestamp before the wire can carry one
 - [@moq/net carries untimed frames faithfully](/quest/m1/js-untimed-model.md) - the same for JS

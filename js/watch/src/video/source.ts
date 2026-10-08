@@ -1,4 +1,4 @@
-import type * as Catalog from "@moq/hang/catalog";
+import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
@@ -185,34 +185,6 @@ function byBitrate(target: number): RenditionFilter {
 	};
 }
 
-/**
- * Pick the best rendition when no filters are active.
- * Prefers the largest resolution, falls back to highest bitrate,
- * then falls back to the first entry.
- */
-function bestRendition(entries: [string, Catalog.VideoConfig][]): string {
-	let best = entries[0];
-
-	for (const entry of entries) {
-		const [, config] = entry;
-		const [, bestConfig] = best;
-
-		const size = (config.codedWidth ?? 0) * (config.codedHeight ?? 0);
-		const bestSize = (bestConfig.codedWidth ?? 0) * (bestConfig.codedHeight ?? 0);
-
-		if (size !== bestSize) {
-			if (size > bestSize) best = entry;
-			continue;
-		}
-
-		if ((config.bitrate ?? 0) > (bestConfig.bitrate ?? 0)) {
-			best = entry;
-		}
-	}
-
-	return best[0];
-}
-
 /** Return unstalled renditions, or the lowest bitrate or resolution when every option is stalled. */
 function selectableRenditions(renditions: Record<string, Catalog.VideoConfig>): Record<string, Catalog.VideoConfig> {
 	const active = Object.entries(renditions).filter(([, config]) => !config.stalled);
@@ -395,9 +367,9 @@ export class Source {
 			filters.push(byBitrate(target.bitrate));
 		}
 
-		// With no filters, pick the best rendition by quality.
+		// No cap: the same rank as Rust's single-rendition egresses.
 		if (filters.length === 0) {
-			return bestRendition(entries);
+			return Catalog.ranked(renditions)[0][0];
 		}
 
 		// Run each filter to get ranked preference lists.
