@@ -92,6 +92,21 @@ test.each([
 	announced.close();
 });
 
+/** With no request stream to end it, the unasked reader ends with the session, from either side. */
+test.each([
+	["local", "server"],
+	["remote", "client"],
+] as const)("an unasked draft-14 reader ends on a %s close", async (_name, side) => {
+	const pair = createMockTransportPair(ALPN.DRAFT_14);
+	const session = new NativeSession(pair.server, Version.DRAFT_14, true);
+	const subscriber = new Subscriber({ session, quic: pair.server });
+	const announced = subscriber.announced();
+
+	pair[side].close();
+
+	expect(await announced.next()).toBeUndefined();
+});
+
 /** A peer that declared MoQ Solicit is ours: it only tells when asked, so it still is. */
 test.each([
 	["draft-14", Version.DRAFT_14, ALPN.DRAFT_14],

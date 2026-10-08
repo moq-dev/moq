@@ -328,7 +328,10 @@ export class Subscriber {
 		// could land. A peer that declared Solicit only tells when asked, so it still is.
 		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15;
 		if (legacy && prefix.length === 0 && this.#solicit === undefined) {
-			await announced.closed;
+			// No request stream ends this wait, so the session's end has to.
+			const ends: PromiseLike<unknown>[] = [announced.closed];
+			if (this.#quic) ends.push(this.#quic.closed.catch(() => undefined));
+			await Promise.race(ends);
 			return;
 		}
 
