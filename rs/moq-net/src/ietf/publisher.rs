@@ -1497,12 +1497,16 @@ where
 			Some(Err(err)) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
 			None => return Ok(()),
 		};
-		// Draft-20's inclusive End Location always names an object, so it cannot say the
-		// group holds none at or past the start.
 		let draft20 = Filter::is_draft20(self.version);
-		if draft20 && group.frames.is_empty() {
+		let end_of_track = !joined && group.complete && track.final_sequence() == group.sequence.checked_add(1);
+		// Draft-20 caps the response at Largest Object, which for a finished group we know to
+		// be the latest is its last object.
+		let at_largest = end_of_track || (group.complete && track.latest() == Some(group.sequence));
+		// A start past Largest Object is the one refusal draft-20 defines (section 10.13).
+		// Anything earlier with no objects is answered as an empty stream.
+		if draft20 && group.frames.is_empty() && at_largest {
 			return self
-				.reject_fetch(stream, msg.request_id, &Error::NotFound, "no objects in range")
+				.reject_fetch(stream, msg.request_id, &Error::InvalidRange, "start past Largest Object")
 				.await;
 		}
 
@@ -1525,7 +1529,6 @@ where
 			}
 			(end, false)
 		} else {
-			let end_of_track = group.complete && track.final_sequence() == group.sequence.checked_add(1);
 			// A group that ends the track ends the response at its last object; otherwise
 			// the response ends where it was asked to.
 			match end_of_track {
@@ -1539,12 +1542,17 @@ where
 				false => (end, false),
 			}
 		};
-		// Draft-20's End Location is inclusive, naming the last object. The read stopped at
-		// either the requested end or the group's, so that is the last object read.
+		// Draft-20's End Location is inclusive: the requested end, capped at Largest Object
+		// (section 10.14). Objects missing before it do not exist. A whole-group request has
+		// no End Object to report, so it covers what the finished group holds, and at least
+		// the start an empty answer covered.
 		let end_location = match draft20 {
 			true => Location {
 				group: group.sequence,
-				object: group.end() - 1,
+				object: match (until, at_largest) {
+					(Some(until), false) => until - 1,
+					_ => group.end().saturating_sub(1).max(start.object),
+				},
 			},
 			false => end_location,
 		};
@@ -4980,33 +4988,37 @@ mod serve_tests {
 		}
 	}
 
-	/// A group holding no objects at or past the start is refused on draft 20, whose
-	/// inclusive End Location cannot describe an empty answer. Older drafts answer it empty.
+	/// A group holding no objects at or past the start is answered empty, on draft 20 with
+	/// an End Location covering the range asked for (section 10.13). The whole group covers
+	/// at least its start.
 	#[moq_net_sim::test]
-	async fn a_standalone_fetch_past_the_last_object_is_empty_or_refused() {
+	async fn a_standalone_fetch_past_the_last_object_is_empty() {
 		for version in FETCH_DRAFTS {
-			let mut h = serve(version);
-			publish_pairs(&mut h, 5, None);
-			settle().await;
+			for (end, covered) in [(0, 2), (6, 5)] {
+				let mut h = serve(version);
+				publish_pairs(&mut h, 5, None);
+				settle().await;
 
-			let buf = standalone_fetch(
-				&h,
-				Location { group: 2, object: 2 },
-				Location { group: 2, object: 0 },
-				GroupOrder::Ascending,
-			)
-			.await;
-			match Filter::is_draft20(version) {
-				true => assert_eq!(fetch_refusal(buf, version), does_not_exist(version), "{version}"),
-				false => assert_eq!(fetch_answer(buf, version).1, Vec::new(), "{version}"),
+				let buf = standalone_fetch(
+					&h,
+					Location { group: 2, object: 2 },
+					Location { group: 2, object: end },
+					GroupOrder::Ascending,
+				)
+				.await;
+				let (ok, objects) = fetch_answer(buf, version);
+				assert_eq!(objects, Vec::new(), "{version} end={end}");
+				if Filter::is_draft20(version) {
+					assert_eq!(ok.end_location, Location { group: 2, object: covered }, "{version}");
+				}
 			}
 		}
 	}
 
-	/// On draft 20, an End Object past a finished group's last object reports that last
-	/// object, which is all the response holds.
+	/// On draft 20, a start past Largest Object is refused INVALID_RANGE (section 10.13):
+	/// here past the last object of the latest group.
 	#[moq_net_sim::test]
-	async fn a_draft20_fetch_past_a_group_end_reports_its_last_object() {
+	async fn a_draft20_fetch_past_the_largest_object_is_refused() {
 		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
 			let mut h = serve(version);
 			publish_pairs(&mut h, 5, None);
@@ -5014,15 +5026,37 @@ mod serve_tests {
 
 			let buf = standalone_fetch(
 				&h,
-				Location { group: 2, object: 0 },
-				Location { group: 2, object: 8 },
+				Location { group: 4, object: 2 },
+				Location { group: 4, object: 6 },
 				GroupOrder::Ascending,
 			)
 			.await;
-			let (ok, objects) = fetch_answer(buf, version);
-			assert_eq!(ok.end_location, Location { group: 2, object: 1 }, "{version}");
-			assert!(!ok.end_of_track, "{version}");
-			assert_eq!(objects, pairs([2]), "{version}");
+			assert_eq!(fetch_refusal(buf, version), invalid_range(version), "{version}");
+		}
+	}
+
+	/// On draft 20, an End Object past a finished group's last object is still the End
+	/// Location reported (section 10.14), unless the group holds Largest Object, which caps it.
+	#[moq_net_sim::test]
+	async fn a_draft20_fetch_past_a_group_end_reports_the_requested_end() {
+		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+			for (group, reported) in [(2, 7), (4, 1)] {
+				let mut h = serve(version);
+				publish_pairs(&mut h, 5, None);
+				settle().await;
+
+				let buf = standalone_fetch(
+					&h,
+					Location { group, object: 0 },
+					Location { group, object: 8 },
+					GroupOrder::Ascending,
+				)
+				.await;
+				let (ok, objects) = fetch_answer(buf, version);
+				assert_eq!(ok.end_location, Location { group, object: reported }, "{version}");
+				assert!(!ok.end_of_track, "{version}");
+				assert_eq!(objects, pairs([group]), "{version}");
+			}
 		}
 	}
 

@@ -3703,8 +3703,8 @@ where
 			let _ = stream.writer.close().await;
 			return;
 		}
-		// An exclusive End Location inside the group is its Largest Object plus one, so
-		// the stream owes every object up to it. One past the group covers it whole.
+		// An exclusive End Location inside the group bounds the stream; before draft-20 the
+		// stream also owes every object up to it. One past the group covers it whole.
 		let end = (end.group == sequence).then_some(end.object);
 
 		// Joined fetches still count until they pick the accepted group up from the cache.
@@ -3892,7 +3892,8 @@ where
 	}
 
 	/// Decode one group's objects: all in the producer's group, numbered from `start` with
-	/// no gaps, and through `end` (exclusive) when FETCH_OK named one inside the group.
+	/// no gaps, and never past `end` (exclusive) when FETCH_OK named one inside the group.
+	/// Before draft-20 they must also reach it.
 	async fn recv_group_fetch_objects(
 		&self,
 		stream: &mut Reader<S::RecvStream, Version>,
@@ -3954,8 +3955,9 @@ where
 		}
 
 		// A clean FIN short of the promised end would otherwise cache a truncated group as
-		// a complete one.
-		if end.is_some_and(|end| next < end) {
+		// a complete one. Draft-20's End Location is the range covered, not the last object
+		// sent: objects missing before it do not exist (section 10.13).
+		if !Filter::is_draft20(self.version) && end.is_some_and(|end| next < end) {
 			tracing::warn!(
 				sequence,
 				next,
@@ -8627,37 +8629,42 @@ mod stitch_tests {
 		assert!(matches!(res, Err(Error::MalformedTrack)), "{res:?}");
 	}
 
-	/// FETCH_OK's End Location inside the group promises every object before it. A stream
-	/// that FINs short of it, or runs past it, fails the group instead of caching it.
+	/// FETCH_OK's End Location inside the group bounds the stream: one that runs past it
+	/// fails the group instead of caching it. Before draft-20 the End Location also promises
+	/// every object before it, so a stream that FINs short fails too. From draft-20 it is the
+	/// range covered, and the objects missing before it do not exist (section 10.13).
 	#[moq_net_sim::test]
-	async fn a_group_fetch_must_reach_its_end_location() {
+	async fn a_group_fetch_stays_within_its_end_location() {
 		const END: u64 = 3;
-		for (count, complete) in [(2, false), (3, true), (4, false)] {
-			let payloads: Vec<&[u8]> = [b"a", b"b", b"c", b"d"][..count].iter().map(|p| &p[..]).collect();
-			let mut run = GroupFetchRun::new(VERSION, group_fetch_objects(SEQUENCE, 0, &payloads)).await;
+		for version in [Version::Draft19, VERSION] {
+			let short = Filter::is_draft20(version);
+			for (count, complete) in [(2, short), (3, true), (4, false)] {
+				let payloads: Vec<&[u8]> = [b"a", b"b", b"c", b"d"][..count].iter().map(|p| &p[..]).collect();
+				let mut run = GroupFetchRun::new(version, group_fetch_objects(SEQUENCE, 0, &payloads)).await;
 
-			let group = run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
-			let mut consumer = group.consume();
-			let slot = kio::Producer::new(GroupFetch::Ready {
-				producer: group,
-				timescale: None,
-				start: 0,
-				end: Some(END),
-			});
-			let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
-			assert_eq!(res.is_ok(), complete, "{count} objects: {res:?}");
+				let group = run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
+				let mut consumer = group.consume();
+				let slot = kio::Producer::new(GroupFetch::Ready {
+					producer: group,
+					timescale: None,
+					start: 0,
+					end: Some(END),
+				});
+				let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
+				assert_eq!(res.is_ok(), complete, "{version} {count} objects: {res:?}");
 
-			let mut read = 0;
-			let end = loop {
-				match consumer.read_frame().await {
-					Ok(Some(_)) => read += 1,
-					Ok(None) => break Ok(read),
-					Err(err) => break Err(err),
+				let mut read = 0;
+				let end = loop {
+					match consumer.read_frame().await {
+						Ok(Some(_)) => read += 1,
+						Ok(None) => break Ok(read),
+						Err(err) => break Err(err),
+					}
+				};
+				match complete {
+					true => assert_eq!(end.expect("a complete group"), count as u64, "{version}"),
+					false => assert!(end.is_err(), "{version} {count} objects: the group must fail, not end"),
 				}
-			};
-			match complete {
-				true => assert_eq!(end.expect("a complete group"), END),
-				false => assert!(end.is_err(), "{count} objects: the group must fail, not end"),
 			}
 		}
 	}

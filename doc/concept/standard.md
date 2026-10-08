@@ -56,7 +56,11 @@ on moq-lite.
 The Rust publisher answers a standalone `FETCH` within one group from the
 cache. On draft-20 and later, that is a `FETCH` whose `LOCATION_FILTER` names
 an absolute start and end; one ending at Largest Object (no filter, a relative
-start, or no end) is refused with `NOT_SUPPORTED`. A relay fetches a missing
+start, or no end) is refused with `NOT_SUPPORTED`. There, `FETCH_OK`'s
+inclusive End Location is the requested end, capped at Largest Object or the
+track's last object, and objects missing before it do not exist: a range with
+none is answered with an empty fetch stream, and only a start past Largest
+Object is refused, with `INVALID_RANGE`. A relay fetches a missing
 group upstream with a `FETCH` of that one whole group, and an upstream refusal
 is the refusal the fetcher sees. Once its last reader leaves, the relay cancels
 the upstream fetch, even before `FETCH_OK`, and aborts an incomplete group
