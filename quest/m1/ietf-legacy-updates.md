@@ -18,8 +18,8 @@ subscription with INTERNAL_ERROR. Remaining (maintainer, 2026-10-07, from
   reads the subscribe stream again, so an unread update keeps the stream from
   reporting closed and a later UNSUBSCRIBE is lost. Read framed messages and
   apply updates as Rust now does. Rebase #5011 onto that or fold it in.
-- Draft 16: an update aimed at a namespace or fetch request is skipped with
-  no REQUEST_OK or REQUEST_ERROR; answer it.
+- Drafts 15 and 16: an update aimed at a namespace or fetch request is
+  skipped with no REQUEST_OK or REQUEST_ERROR; answer it.
 - Draft 14: every field is mandatory, so a narrowed start or end group looks
   like a repeat and is ignored; decide whether to apply it.
 

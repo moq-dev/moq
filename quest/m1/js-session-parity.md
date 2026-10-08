@@ -12,9 +12,10 @@ relay behaves like a Rust one.
   10,000 in #4820 today) and close the session with TOO_MANY_REQUESTS (0x7)
   past them, as Rust does. JS's own request-ID window is
   [JS request window](/quest/m1/js-request-window.md).
-- Pending tail (#4225): Rust readers of a received track wait for missing
-  groups below a declared end until the tail settles; JS readers still end at
-  the end with groups missing (`doc/lib/js/net.md`). Mirror the hold.
+- Pending tail (#4225, still open): once Rust readers of a received track
+  wait for missing groups below a declared end until the tail settles, mirror
+  the hold. JS readers still end at the end with groups missing
+  (`doc/lib/js/net.md`).
 - Resolved epoch (#4904, still open, and #4967): once Rust
   `broadcast::Consumer::epoch()` and `broadcast::Info::epoch` carry the epoch
   of the route a request resolved through, check that JS and the bindings

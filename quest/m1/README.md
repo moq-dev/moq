@@ -185,4 +185,4 @@ blocks. The quests that gated m0 lines moved under them.
 - [JS session parity](/quest/m1/js-session-parity.md) - @moq/net gets moq-net's per-session caps, pending-tail hold, and resolved epochs
 - [Headless subgroup in Rust](/quest/m1/ietf-headless-subgroup.md) - a draft 14-17 subgroup starting mid-group is dropped, not fatal, as in JS
 - [In-band CMAF follow-ups](/quest/m1/cmaf-inline-followups.md) - MSF, h264/h265 export, and gst caps handle avc3/hev1 CMAF
-- [Datagram replay bound](/quest/m1/datagram-replay-bound.md) - a new datagram subscriber starts within its max delay of the newest datagram, not at a minutes-old buffer
+- [Datagram replay bound](/quest/m1/datagram-replay-bound.md) - a new Rust datagram subscriber starts within its max delay of the newest datagram, not at a minutes-old buffer
