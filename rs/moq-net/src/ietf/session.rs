@@ -27,6 +27,10 @@ pub struct Config<S: crate::transport::poll::Session> {
 
 	pub request_id_max: Option<RequestId>,
 
+	/// What the peer may make this session hold. On drafts 14 to 16 it also sizes the
+	/// MAX_REQUEST_ID window advertised in our SETUP (see [`ietf::initial_max_request_id`]).
+	pub limits: crate::session::Limits,
+
 	/// Whether we dialed, which sets the request-id parity.
 	pub client: bool,
 
@@ -104,6 +108,7 @@ where
 		mut session,
 		setup,
 		request_id_max,
+		limits,
 		client,
 		publish,
 		subscribe,
@@ -164,6 +169,10 @@ where
 		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
 		let publish = publish.unwrap_or_else(|| origin::Producer::empty(Hop::random()).consume());
 		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()));
+		let subscriptions = crate::session::Slots::new(limits.subscriptions)
+			.with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
+		let announces =
+			crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
 
 		let res = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
@@ -172,7 +181,7 @@ where
 					session.close(SessionError::from(&err).to_code(), "setup stream required");
 					return Err(err);
 				};
-				let control = Control::new(request_id_max, client);
+				let control = Control::new(request_id_max, client).with_window(limits.requests(), client);
 				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version);
 
 				let mut publisher = Publisher::new(
@@ -187,8 +196,9 @@ where
 				let (tasks, mut task_set) = TaskSet::new();
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
+				publisher.subscriptions = subscriptions;
 
-				let subscriber = Subscriber::new(
+				let mut subscriber = Subscriber::new(
 					runtime.clone(),
 					adapter.clone(),
 					subscribe,
@@ -201,6 +211,7 @@ where
 					tasks.clone(),
 					goaway.going_away.clone(),
 				);
+				subscriber.announces = announces;
 
 				// GOAWAY send task: draft-14-16 carry GOAWAY on the shared control
 				// stream. Parked on the drain trigger; races the transport close so
@@ -355,8 +366,9 @@ where
 				let (tasks, mut task_set) = TaskSet::new();
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
+				publisher.subscriptions = subscriptions;
 
-				let subscriber = Subscriber::new(
+				let mut subscriber = Subscriber::new(
 					runtime.clone(),
 					session.clone(),
 					subscribe,
@@ -369,6 +381,7 @@ where
 					tasks,
 					goaway.going_away.clone(),
 				);
+				subscriber.announces = announces;
 
 				let sub_ns_session = session.clone();
 				let sub_ns = subscriber.clone();
@@ -994,6 +1007,21 @@ where
 		};
 
 		match id {
+			// Draft-16 moved SUBSCRIBE_NAMESPACE to its own stream, past the control stream
+			// that admits every other request, but it still takes a request ID from the
+			// MAX_REQUEST_ID window. Held until the request ends, like the rest.
+			ietf::SubscribeNamespaceLegacy::ID if version == Version::Draft16 => {
+				let request_id = RequestId::decode(&mut crate::coding::Decoder::new(&data.0, version.into()), version)?;
+				let permit = publisher.control.accept(request_id)?;
+				let task = publisher.handle_stream(id, data, stream)?;
+				tasks.push(
+					async move {
+						let _permit = permit;
+						task.await
+					}
+					.maybe_boxed(),
+				);
+			}
 			// Publisher handles: Subscribe, Fetch, SubscribeNamespace (0x50 modern /
 			// 0x11 legacy), SubscribeTracks, TrackStatus
 			ietf::Subscribe::ID
@@ -1137,6 +1165,7 @@ mod tests {
 			session,
 			setup: None,
 			request_id_max: None,
+			limits: Default::default(),
 			client: true,
 			publish: None,
 			subscribe: Some(origin),
@@ -1197,6 +1226,7 @@ mod tests {
 			session,
 			setup: None,
 			request_id_max: None,
+			limits: Default::default(),
 			client: true,
 			publish: None,
 			subscribe: Some(scoped),
@@ -1226,6 +1256,109 @@ mod tests {
 		assert_eq!(occurrences(&log, b"rootns"), 0, "asked the peer for our local root");
 	}
 
+	/// The bytes of one legacy SUBSCRIBE_NAMESPACE, as the session writes them.
+	async fn subscribe_namespace_legacy(version: Version, namespace: &str) -> Vec<u8> {
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+		let msg = ietf::SubscribeNamespaceLegacy {
+			request_id: RequestId(0),
+			namespace: crate::Path::new(namespace),
+			subscribe_options: ietf::SubscribeOptions::Namespace,
+			hidden: false,
+		};
+		writer.varint(ietf::SubscribeNamespaceLegacy::ID).await.unwrap();
+		writer.encode(&msg).await.unwrap();
+		log.writes.lock().unwrap().clone()
+	}
+
+	/// How many times a session with this scope writes SUBSCRIBE_NAMESPACE for it.
+	///
+	/// `prefix: None` is an unscoped origin, whose only interest head is empty. `solicit`
+	/// is what the peer's SETUP declared (MoQ Solicit).
+	async fn asked_namespace(version: Version, prefix: Option<&str>, solicit: Option<bool>) -> usize {
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let subscribe = match prefix {
+			Some(name) => {
+				let scope: crate::Patterns = [crate::Pattern::subtree(name).unwrap()].into_iter().collect();
+				origin.scope("rootns", &scope).expect("scope the origin")
+			}
+			None => origin,
+		};
+
+		let gate = kio::Producer::new(true);
+		let mut session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
+		let log = session.log.clone();
+		let setup = Stream::open(&mut session, version)
+			.await
+			.expect("open the control stream");
+
+		let (driver, _goaway, _) = start(Config {
+			runtime: crate::time::Clock::sim(),
+			session,
+			setup: Some(setup),
+			request_id_max: None,
+			limits: Default::default(),
+			client: true,
+			publish: None,
+			subscribe: Some(subscribe),
+			peer_hop: None,
+			cost: None,
+			version,
+			path: None,
+			authority: None,
+			peer_setup_stream: None,
+			peer_declared: Some(peer::Peer {
+				solicit,
+				..Default::default()
+			}),
+			early_unis: Vec::new(),
+		})
+		.expect("start the session");
+		let driver = moq_net_sim::spawn(driver);
+
+		let needle = subscribe_namespace_legacy(version, prefix.unwrap_or("")).await;
+		for _ in 0..ANNOUNCE_TURNS {
+			if occurrences(&log, &needle) > 0 {
+				break;
+			}
+			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+		}
+
+		assert!(!driver.is_finished(), "{version:?} ended the session");
+		assert!(log.closes().is_empty(), "{version:?} closed: {:?}", log.closes());
+		occurrences(&log, &needle)
+	}
+
+	/// Draft-14 and draft-15 reject a zero-field track namespace, so a foreign peer (one
+	/// that declared no MoQ Solicit) is not asked for it, and a real prefix still goes
+	/// out. A peer that declared Solicit is ours: it only tells when asked, so it still
+	/// gets the empty prefix. Draft-16 made the empty prefix legal, so it stays.
+	#[moq_net_sim::test]
+	async fn an_empty_namespace_is_not_asked_of_a_foreign_peer_before_draft_16() {
+		for version in [Version::Draft14, Version::Draft15] {
+			assert_eq!(
+				asked_namespace(version, None, None).await,
+				0,
+				"{version:?} asked a foreign peer for every namespace"
+			);
+			assert_eq!(
+				asked_namespace(version, Some("cam"), None).await,
+				1,
+				"{version:?} skipped a real prefix"
+			);
+			assert_eq!(
+				asked_namespace(version, None, Some(true)).await,
+				1,
+				"{version:?} did not ask a soliciting peer for every namespace"
+			);
+		}
+		assert_eq!(
+			asked_namespace(Version::Draft16, None, None).await,
+			1,
+			"draft-16 dropped the empty prefix"
+		);
+	}
+
 	/// How many scheduling turns an advertisement gets before the count is taken. Time is
 	/// paused in these tests, so each turn costs nothing and only runs the driver until it
 	/// parks again; a busy machine cannot turn a slow announce into a passing silence.
@@ -1250,6 +1383,7 @@ mod tests {
 			session,
 			setup: None,
 			request_id_max: None,
+			limits: Default::default(),
 			client: true,
 			publish: Some(origin.consume()),
 			subscribe: None,
@@ -1358,6 +1492,7 @@ mod tests {
 			session,
 			setup: None,
 			request_id_max: None,
+			limits: Default::default(),
 			client: true,
 			publish: None,
 			subscribe: Some(origin),
@@ -1398,6 +1533,7 @@ mod tests {
 				session,
 				setup: None,
 				request_id_max: None,
+				limits: Default::default(),
 				client: true,
 				publish: None,
 				subscribe: None,
@@ -1686,6 +1822,7 @@ mod tests {
 					session,
 					setup: None,
 					request_id_max: None,
+					limits: Default::default(),
 					client: false,
 					publish: None,
 					subscribe: None,
@@ -1709,6 +1846,67 @@ mod tests {
 					SessionError::ProtocolViolation,
 					"{version:?}: {kind:#x}"
 				);
+				assert_eq!(
+					log.closes(),
+					vec![(SessionError::ProtocolViolation.to_code(), err.to_string())]
+				);
+			}
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn an_invalid_group_order_closes_the_session() {
+		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
+			for (value, nested) in [
+				(0u8, false),
+				(3, false),
+				(255, false),
+				(0, true),
+				(3, true),
+				(255, true),
+			] {
+				// FILL_PARAMETERS starts in draft-20.
+				if nested && version == Version::Draft18 {
+					continue;
+				}
+				let mut body = vec![0, 1, 1, b'a', 1, b'b', 1];
+				if nested {
+					body.extend([0x23, 3, 1, 0x22, value]);
+				} else {
+					body.extend([0x22, value]);
+				}
+				let mut payload = Vec::new();
+				let mut w = crate::coding::Encoder::new(&mut payload, version.into());
+				w.varint(ietf::Subscribe::ID).unwrap();
+				w.u16(body.len() as u16);
+				w.slice(&body);
+				let session =
+					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![payload]);
+				let log = session.log.clone();
+				let (driver, _goaway, _) = start(Config {
+					runtime: crate::time::Clock::sim(),
+					session,
+					setup: None,
+					request_id_max: None,
+					client: false,
+					publish: None,
+					subscribe: None,
+					peer_hop: None,
+					cost: None,
+					version,
+					path: None,
+					authority: None,
+					peer_setup_stream: None,
+					peer_declared: Some(peer::Peer::default()),
+					early_unis: Vec::new(),
+					limits: Default::default(),
+				})
+				.unwrap();
+				let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+					.await
+					.expect("invalid GROUP_ORDER must close the session")
+					.expect_err("invalid GROUP_ORDER must fail");
+				assert_eq!(SessionError::from(&err), SessionError::ProtocolViolation);
 				assert_eq!(
 					log.closes(),
 					vec![(SessionError::ProtocolViolation.to_code(), err.to_string())]
@@ -1789,6 +1987,7 @@ mod tests {
 			session,
 			setup: Some(setup),
 			request_id_max: None,
+			limits: Default::default(),
 			client: true,
 			publish: None,
 			subscribe: Some(origin),

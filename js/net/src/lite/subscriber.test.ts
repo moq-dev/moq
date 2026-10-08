@@ -244,11 +244,7 @@ test("a restart updates the route in place, even from another publisher", async 
 	// A reprice from the same publisher surfaces, which proves the identical restart above
 	// emitted nothing. The same publisher keeps sharing one broadcast.
 	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{ status: "restart", id: 0n, hops: [PUBLISHER_A], cost: { warm: 4n, cold: 4n } },
-			Version.DRAFT_06,
-		),
+		encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_A], cost: 4n }, Version.DRAFT_06),
 	);
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "update" });
 	const same = subscriber.consume(room);
@@ -298,20 +294,16 @@ test("a restart that re-prices the same publisher emits the new route", async ()
 	expect(await announced.next()).toMatchObject({
 		prefix: Path.from("room"),
 		kind: "start",
-		route: { hops: [PUBLISHER_A, PEER], cost: { warm: 0n, cold: 0n } },
+		route: { hops: [PUBLISHER_A, PEER], cost: 0n },
 	});
 
 	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{ status: "restart", id: 0n, hops: [PUBLISHER_A], cost: { warm: 4n, cold: 4n } },
-			Version.DRAFT_06,
-		),
+		encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_A], cost: 4n }, Version.DRAFT_06),
 	);
 	expect(await announced.next()).toMatchObject({
 		prefix: Path.from("room"),
 		kind: "update",
-		route: { hops: [PUBLISHER_A, PEER], cost: { warm: 4n, cold: 4n } },
+		route: { hops: [PUBLISHER_A, PEER], cost: 4n },
 	});
 
 	announced.close();
@@ -353,13 +345,7 @@ test("a restart from an unidentified publisher updates in place", async () => {
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start" });
 	const held = subscriber.consume(room);
 
-	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{ status: "restart", id: 0n, hops: [], cost: { warm: 4n, cold: 4n } },
-			Version.DRAFT_06,
-		),
-	);
+	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [], cost: 4n }, Version.DRAFT_06));
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "update" });
 	expect(subscriber.consume(room).closed).toBe(held.closed);
 

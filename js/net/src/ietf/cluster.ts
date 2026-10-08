@@ -15,7 +15,7 @@
  * only, where SETUP is a Key-Value-Pair block.
  *
  * A broadcast we produce carries a single-entry HOP_PATH and a cost of 0, and a route we
- * forward carries its own hop chain and warm cost with our id appended. What we get out of
+ * forward carries its own hop chain and static cost with our id appended. What we get out of
  * declaring is also the other direction. A relay that knows our Hop ID withholds the advertisements that already flowed
  * through us, so publishing a broadcast no longer announces it back to us, which is what
  * moq-lite has always done with its own hop chain.

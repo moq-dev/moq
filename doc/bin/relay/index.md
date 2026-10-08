@@ -52,11 +52,10 @@ working configs for development, production, and a cluster.
 
 ## Embed
 
-`moq-relay` is also a library. An application that wants extra HTTP routes
-or in-process workers against the cluster origin loads a `Relay` and calls
-`run`. The owner keeps the listeners, QUIC workers, and shutdown joins, so a
-new socket added in a library update cannot be dropped by a `..` pattern that
-still compiles.
+`moq-relay` is also a library, for an application that wants extra HTTP
+routes or in-process workers against the cluster origin. Load a `Relay`, take
+what you need, and call `run`, which keeps the listeners, QUIC workers, and
+shutdown inside the relay.
 
 ```rust
 use axum::routing::get;
@@ -69,33 +68,19 @@ let web = relay.web().routes().route("/hello", get(|| async { "hello" }));
 relay.with_web(web).run().await?;
 ```
 
-`Relay::load` binds every socket, so a taken port fails there. Read the actual
-addresses with `quic_addr()`, `tcp_addr()`, `web_addrs()`, and
-`internal().addr()`, including ports assigned for `:0`. Clone
-`ready()` before spawning `run`, then await `ready.wait()` when startup must
-finish before other workers begin. `config()` returns the resolved settings;
-`cluster().id()` returns the chosen origin ID. `with_listeners()` registers an
-extra TCP listener's accept health at the relay's `/metrics`. The
-`test-support` feature provides `test_relay()` with ephemeral ports, generated
-TLS, and a certificate fingerprint for client pinning.
+- `Relay::load` binds every socket, so a taken port fails there, and the
+  accessors report the bound addresses, including ports assigned for `:0`.
+- `run` consumes the relay, so clone the handles your tasks need first.
+- Build on `web().routes()`: `with_web` replaces the router, so `Router::new()`
+  drops the built-in routes.
+- `run` drains on SIGTERM or SIGINT. To own the signals, for example to leave
+  DNS before draining, call `with_signals(false)` and fire `shutdown_trigger()`
+  yourself. The drain reaches only MoQ sessions, so stop any extra listener
+  (RTMP, SRT, ...) on your own deadline.
+- To decide admissions yourself, leave `[auth]` empty and answer
+  `relay.admissions()`; see [Authentication](/bin/relay/auth#in-process).
 
-The accessors borrow and `run` consumes the relay, so clone `cluster`,
-`auth`, `client`, `stats`, `shutdown`, and `shutdown_trigger` for application
-tasks before calling it. `trigger.start()` drains every session with a GOAWAY,
-including any that connect afterwards, and `run` returns once every session
-has left or the drain window elapses, with the listeners released and the
-workers joined. `run` also starts
-the drain on SIGTERM or SIGINT. An application that owns those signals, for
-example to withdraw the node from DNS and wait out the TTL before draining,
-calls `with_signals(false)` and fires the trigger itself. Build routes from `web().routes()` (or
-`internal().routes()`): `with_web` replaces the router, so `Router::new()`
-drops the built-in routes. Extra listeners (RTMP, SRT, ...) sit beside `run`
-in the application's `select!`. The drain reaches only MoQ sessions: an
-extra listener has no GOAWAY, so the application stops it on its own deadline
-and leaves the encoder to reconnect. `runtime.workers` and `runtime.io_uring` stay
-inside the owner; do not split the worker group yourself. An application that
-decides admissions itself leaves `[auth]` empty and answers
-`relay.admissions()`; see [Authentication](/bin/relay/auth#in-process). See
+See [docs.rs/moq-relay](https://docs.rs/moq-relay) and
 [`rs/moq-relay/examples/embed.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-relay/examples/embed.rs).
 
 ## Operate

@@ -26,18 +26,18 @@ cargo add moq-room
 use moq_net::Path;
 use moq_room::{Kind, Room, claims};
 
-let token = key.sign(&claims("meet/demo", "alice")?, None)?;
+let token = key.sign(&claims("meet/demo", "alice")?)?;
 let origin = moq_tokio::origin::spawn();
 let mut room = Room::new(&origin.consume(), Some(Path::new("alice").to_owned()));
 while let Some(event) = room.next().await {
     if event.kind == Kind::Camera {
-        // subscribe to event.broadcast
+        // event.broadcast is the live broadcast, or None once it goes offline.
     }
 }
 ```
 
-The JSON window `chat` track (using `moq-json::window`) is
-`moq_room::chat`. That is not hang.live's `hang/chat.json` catalog extension.
+Chat is `moq_room::chat`: a JSON window track named `chat` that keeps ten
+seconds of messages. It is not hang.live's `hang/chat.json` catalog extension.
 
-Gossip, tickets, and 1:1 Call stay in iroh-live. API:
+Gossip, tickets, and 1:1 calls stay in iroh-live. API:
 [docs.rs/moq-room](https://docs.rs/moq-room).
