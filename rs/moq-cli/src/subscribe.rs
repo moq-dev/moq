@@ -482,7 +482,7 @@ mod tests {
 		let (origin, driver) = hang::moq_net::origin::Producer::new(Default::default());
 		tokio::spawn(hang::moq_net::time::run(driver));
 		let _live = origin.publish("live", Default::default()).unwrap();
-		let broadcast = origin.consume().request_broadcast("live").await.unwrap();
+		let broadcast = origin.consume().request_broadcast("live", None).await.unwrap();
 
 		let start = tokio::time::Instant::now();
 		assert!(!closes_within(&broadcast, CLOSE_GRACE).await);
@@ -495,7 +495,7 @@ mod tests {
 		let (origin, driver) = hang::moq_net::origin::Producer::new(Default::default());
 		tokio::spawn(hang::moq_net::time::run(driver));
 		let live = origin.publish("live", Default::default()).unwrap();
-		let broadcast = origin.consume().request_broadcast("live").await.unwrap();
+		let broadcast = origin.consume().request_broadcast("live", None).await.unwrap();
 
 		let gap = CLOSE_GRACE / 4;
 		tokio::spawn(async move {
