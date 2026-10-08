@@ -16,10 +16,12 @@ both in m1.
 
 Facts (2026-10):
 
-- HDR canvas output ships only on Chromium desktop:
+- HDR canvas output:
   `configure({ format: "rgba16float", toneMapping: { mode: "extended" } })`
-  since Chrome 129. Safari 26 accepts the configuration on macOS but does not
-  display it extended; Firefox has none. Canvas2D has no HDR output.
+  ships on Chromium desktop since Chrome 129. Safari 26's release notes list
+  HDR for WebGPU canvases without a device or display matrix, and an earlier
+  WebKit build accepted `extended` while displaying SDR (WebKit bug 272702),
+  so Safari is unverified. Firefox has none. Canvas2D has no HDR output.
 - `importExternalTexture` and `copyExternalImageToTexture` carry no HDR
   headroom (gpuweb#5236 is open), so imported video is SDR. HDR needs the
   renderer to convert the frame itself: read the planes, apply the matrix,
@@ -33,8 +35,9 @@ Settle while building: whether the HDR path gives up zero copy (planes via
 `copyTo` and a custom conversion shader), and how the renderer detects
 display headroom.
 
-Tests: an HDR10 rendition renders extended on Chromium desktop, tone-maps to
-SDR elsewhere, and an SDR rendition is unchanged.
+Tests: an HDR10 rendition renders extended on Chromium desktop and on Safari
+26 with an HDR display if it does show extended output, tone-maps to SDR
+where extended output is unavailable, and an SDR rendition is unchanged.
 
 Public API: none beyond the renderer. Wire: none.
 
