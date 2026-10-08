@@ -99,7 +99,7 @@ async fn a_later_wide_group_fails_only_that_subscription() {
 
 	let consumer = client.consume();
 	consumer.routed("bench").await.unwrap();
-	let remote = consumer.request_broadcast("bench").await.unwrap();
+	let remote = consumer.request_broadcast("bench", None).await.unwrap();
 
 	let mut sub = remote.track("wide").unwrap().subscribe(None).await.unwrap();
 	let mut group = sub.recv_group().await.unwrap().unwrap();
