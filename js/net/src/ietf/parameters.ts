@@ -701,11 +701,7 @@ export class Parameters {
 	 * draft-16 on. Draft-14 and draft-15 ignore anything the message does not list.
 	 * Omitting `message` keeps the previous decode, which stores every id.
 	 */
-	static async decode(
-		r: Reader,
-		version: IetfVersion,
-		message?: ControlMessage,
-	): Promise<Parameters> {
+	static async decode(r: Reader, version: IetfVersion, message?: ControlMessage): Promise<Parameters> {
 		const count = await r.u53();
 		const params = new Parameters();
 
