@@ -24,11 +24,20 @@ merge method `SQUASH` and a moq-bot bypass actor with `bypass_mode`
 `pull_request`. Delete this quest once both hold and the Dependabot check
 below is done.
 
+Advance it by backporting #4619's `sh/gh/back-merge.sh` to `release` (a
+backport PR, per `CONTRIBUTING.md`); as of 2026-10-08 `release` still runs
+`gh pr merge --auto`, and the ruleset has no `merge_queue` rule. Then ask the
+maintainer to flip the ruleset.
+
 ## Plan
 
 Decided in #4619 (2026-10-05): a squash queue with a pull_request-only bot
 bypass for the back-merge, landed by the `land` job; the back-merge may land
 against a `main` that moved during its CI run, accepted.
+
+`CONTRIBUTING.md`'s Merge queue section and the `land` job's comment in
+`check.yml` already describe the queue as live. They become true when this
+clears; if the plan changes instead, fix them in the same PR.
 
 Check once both settings are on: `.github/workflows/dependabot.yml` merges
 with the same moq-bot app token through `gh pr merge --auto --squash`, without

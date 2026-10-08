@@ -3,7 +3,7 @@
 ## Goal
 
 Publisher retention (`track::Info::max_age`) and a subscriber's budget
-(`Subscription::max_delay`, renamed from `max_age` in #4917) apply the same
+(`Subscription::max_delay`) apply the same
 staleness rule in Rust and js/net. A group other than the newest is stale once either
 its wall-clock age since its successor arrived at this hop, or its media-time
 age (the live edge minus its reach), reaches the budget. The newest group is
@@ -44,12 +44,15 @@ Decided (2026-10-06, maintainer):
   max(wall, pts), whose worry was a congestion stall (answered by starting the
   clock at the successor), and the retired untimed-failover quest's no-clock
   rule, which this rule replaces.
-- Blocked readers need a deadline wake. `TrackState::poll_stale` re-checks
-  only when the track state changes, and after a failover the successor may
-  be the last change, so a lazily checked wall term never fires for a reader
-  parked in `Recover::poll` or a subscriber waiting on a superseded group.
-  Arm a wake at successor arrival + budget on those reader paths, re-armed
-  when the successor changes.
+- Blocked readers need a deadline wake. `track::Consumer::poll_stale`
+  re-checks only when the track state changes, and after a failover the
+  successor may be the last change, so a lazily checked wall term never fires
+  for a reader parked in `Recover::poll` or a subscriber waiting on a
+  superseded group. Arm a wake at successor arrival + budget on those reader
+  paths, re-armed when the successor changes. Decided 2026-10-08: one wake
+  mechanism. The deadline rides the held group's `expiry::Wakes` entry from
+  [Held group wakes](/quest/m0/held-group-wakes.md), not a wake of its own;
+  whichever lands second adds its trigger to that entry.
 - The swept benchmark measures cost and picks between evaluating the wall
   term on a timer and evaluating it lazily on access, for retention only. It
   no longer decides the semantics.
@@ -119,8 +122,8 @@ encoding change; Max Age semantics in the lite draft change.
 
 ## Related
 
-- [Subscriber max-delay](https://github.com/moq-dev/moq/pull/4917) - renames the subscriber budget to `max_delay`; the rule applies under either name
+- [Held group wakes](/quest/m0/held-group-wakes.md) - the `Wakes` entry this quest's wall-clock deadline rides on
+- [lite-07 Live flag](/quest/m1/lite-live.md) - its untimed `Live` start (the latest group) follows this rule instead: replay what is not stale
 - [JS track handover](/quest/m1/js-group-handover.md) - mirrors the failover rule in JS
 - [Cache expiry growth](/quest/m1/cache-expiry-growth.md) - relay memory past the expiry window, in the same cache
-- [Cache shard](/quest/m2/cache-shard.md) - the pool's shared counters under many workers
 - [Generated @moq/net](/quest/m1/rs2ts/README.md) - retires js/net's hand-written model

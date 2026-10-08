@@ -70,6 +70,8 @@ Decisions (2026-10-07, proposed for the maintainer):
   never hands a returning viewer the old instance's group.
 
 This is a lite-07 wire change, so it lands before the version is cut.
+Decided 2026-10-08: moves to m1. lite-07 is opt-in and these decisions are
+still proposed, so it gates the lite-07 cut, not the m0 release.
 
 Verification: a relay integration test with two claim workers (mocked time).
 A worker restarting an output within the linger delivers the new instance from
@@ -86,9 +88,12 @@ new epoch.
 Public API: Rust and JS, the broadcast's epoch and what `accept` does with
 it. Wire: lite-07 TRACK_INFO gains `Epoch`.
 
-## Related
+## Required
 
 - [Restart](/quest/m0/broadcast-epoch/restart.md) - the join rule and sticky subscriptions this builds on
+
+## Related
+
 - [Idle fronts](/quest/m0/idle-fronts.md) - ends an unread front and its per-path state after the linger on every version
-- [Upstream position regression](/quest/m0/largest-regression.md) - catches a restart on versions without this field
+- [Upstream position regression](/quest/m0/largest-regression.md) - catches the same restart from the answer's largest position on lite-07 and moq-transport; lite-05 and 06 stay uncovered
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - waits on this wire change

@@ -22,7 +22,9 @@ removes every place that fills one in.
 Today `Timed.at: None` means "stamp when written": moq-json and moq-flate
 fill `Timestamp::now()` (moq-net's clock, not the broadcast's), and moq-mux's
 data producers fill the broadcast clock's `now()`. The FFI raw
-`MoqFrame.timestamp_us` and `MoqDatagram.timestamp_us` default to 0.
+`MoqFrame.timestamp_us` and `MoqDatagram.timestamp_us` are optional, but a
+raw track published through moq-ffi is always timed, and the Python and
+Swift wrappers default them to 0.
 
 - `moq_net::Timed` drops its unused clock parameter `T` (decided 2026-10-06:
   here rather than in #4822, which is already large). That's a breaking
@@ -41,13 +43,13 @@ data producers fill the broadcast clock's `now()`. The FFI raw
   chat, examples) pass their clock's now explicitly.
 - moq-ffi: data producers take an optional timestamp in microseconds on the
   broadcast clock, unchecked, as Rust does. moq-ffi exposes the broadcast
-  clock's `now()` so callers have a value to stamp with. The raw frame and
-  datagram records' `timestamp_us` is optional since [#4822](https://github.com/moq-dev/moq/pull/4822), but only
-  on the receive side (decided 2026-10-07 by OneTooMany): a raw track
-  published through moq-ffi is always timed, and a write without a timestamp
-  is refused. Add a way to publish an untimed raw track. `MoqTrackInfo`'s
-  null `timescale` means microseconds when publishing and an untimed track on
-  a received one, so a received info doesn't round-trip yet. The wrappers'
+  clock's `now()` so callers have a value to stamp with.
+  Decided 2026-10-08, replacing the 2026-10-07 rule that a raw track
+  published through moq-ffi is always timed: `MoqTrackInfo`'s null
+  `timescale` means untimed when publishing, as it already does on a
+  received track. A received info then round-trips, and an untimed raw track
+  needs no API of its own. A timed raw track names its timescale, and a
+  write that doesn't match the track's timedness is refused. The wrappers'
   `= 0` defaults go with it.
 - Go (`go/wrapper/moq`) and Python (`py/moq-rs`) wrap only the JSON
   producers; [#4137](https://github.com/moq-dev/moq/pull/4137) added
@@ -60,6 +62,10 @@ data producers fill the broadcast clock's `now()`. The FFI raw
 
 Public API: breaking. Wire: none here; absence on the wire lands
 with the untimed implementation quests.
+
+## Required
+
+- [An undeclared Rust timescale means untimed](/quest/m1/rust-untimed-default.md) - each track declares its timescale first, so a publisher that stops stamping writes onto a track that already says whether it is timed
 
 ## Related
 

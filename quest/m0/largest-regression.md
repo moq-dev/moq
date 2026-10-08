@@ -12,7 +12,8 @@ publisher that restarted at group 0 gets the old instance's cached group and
 then nothing until the new sequence passes it.
 
 Covers lite-07 and moq-transport, whose answers carry the largest position.
-lite-05 and 06 can't tell, and keep waiting on the floor.
+lite-05 and 06 stay uncovered on purpose: their only hint is the first
+group's sequence, and they keep waiting on the floor.
 
 ## Plan
 
@@ -27,6 +28,17 @@ copy of every broadcast nested under it
 (maintainer, 2026-10-08, in [Restart](/quest/m0/broadcast-epoch/restart.md)).
 Only a restart behind an unchanged route reaches a copy unannounced.
 
+Decided 2026-10-08: shrunk to the two answer-carrying wires and moved to m1.
+The heuristic is unproven and risks a false failover, so it builds on the
+front and route shapes Restart and Idle fronts leave rather than ahead of
+them.
+
+Where it lands: since #4914, a rejoining copy goes idle (`set_idle`) and the
+route's answer reaches `set_live`, which holds readers in `Feed::Answered`
+until the cache shows the answered position. An answer below what the cache
+already shows goes straight to `Feed::Live` and keeps the old floor; that is
+the case to end instead, when it qualifies below.
+
 A lower largest group alone doesn't prove a restart: a same-epoch resume onto
 a replica that has fallen behind reports one legitimately, and must keep
 waiting as today. The copy ends only when the answer comes from the route it
@@ -40,6 +52,11 @@ group 0, never the old group. A same-epoch standby behind the cached copy
 keeps the copy and resumes it.
 
 Public API: none. Wire: none.
+
+## Required
+
+- [Restart](/quest/m0/broadcast-epoch/restart.md) - route changes reach a copy as a `Restart`, leaving only same-route restarts for this to catch
+- [Idle fronts](/quest/m0/idle-fronts.md) - reclaims the unread fronts whose lingering copies this judges
 
 ## Related
 

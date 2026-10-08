@@ -49,7 +49,13 @@ about 22 s with skip-aheads on the way down.
   88 to 275 ms/s drift the issue reported stand unconfirmed. If drift survives,
   the suspects are `writeFrame` opening a group per audio frame under
   WebTransport stream credit and the main-thread task queue delivering encoder
-  output. Turn that into its own quest rather than fixing it here.
+  output. The audio encoder's `groupDuration` (#4910, default 0: a group per
+  frame) tests the first: A/B it against a group of 100 ms or so in the same
+  run. Turn that into its own quest rather than fixing it here.
+
+Decided 2026-10-08: moves to m1 with the rest of the line. The estimator
+defaults on and only this manual proof is left, so it no longer gates a
+release.
 
 ## Related
 
