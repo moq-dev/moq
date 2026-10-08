@@ -26,7 +26,8 @@ workers share the `quic` count today):
   `Transport::WebTransport`, which `request_for` in `rs/moq-relay/src/auth.rs`
   collapses to `Quic`. Map it to the new variant there. The uring listener
   (`rs/moq-relay/src/uring.rs`) builds its auth request with a hardcoded
-  `Quic`; set it from the `h3` branch it already takes.
+  `Quic` (and works out the transport from `url` only after auth); hoist that
+  above the auth request.
 - Update `Transport::Quic`'s doc, which says it covers WebTransport, and any JS
   or binding mirror of the enum.
 - Tests: a WebTransport session and a native QUIC session each reach the
