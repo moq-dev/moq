@@ -1809,6 +1809,91 @@ async fn a_new_parameter_set_stays_in_band() {
 	);
 }
 
+/// A group that opens with its parameter sets as their own frame still yields a sync
+/// sample carrying them: the absorbed frame's keyframe flag moves to the picture after it.
+async fn split_parameter_sets_keep_the_sync_point(
+	mut live: Live,
+	aud: &[u8],
+	sets: &[&[u8]],
+	idr: &[u8],
+	delta: &[u8],
+) {
+	let frame = |timestamp_us, nals: &[&[u8]], keyframe| crate::container::Frame {
+		keyframe,
+		..annexb_frame(timestamp_us, nals)
+	};
+	let mut leading = vec![aud];
+	leading.extend_from_slice(sets);
+	live.track.write(frame(0, &leading, true)).unwrap();
+	live.track.write(frame(0, &[idr], false)).unwrap();
+	live.track.write(frame(33_000, &[delta], false)).unwrap();
+	live.track.finish().unwrap();
+
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await)
+		.with_max_delay(RECORDING_MAX_DELAY);
+	chunk_now(&mut exporter).await.init().expect("init");
+	let samples: Vec<(Bytes, bool)> = drain_now(&mut exporter)
+		.await
+		.iter()
+		.flat_map(|fragment| {
+			super::decode(
+				fragment.data.clone(),
+				moq_net::Timescale::new(30_000).unwrap(),
+				super::Kind::Video,
+			)
+			.expect("decode fragment")
+		})
+		.map(|frame| (frame.payload, frame.keyframe))
+		.collect();
+
+	// The delimiter is not a parameter set, so it leaves with the absorbed frame.
+	let mut keyframe = sets.to_vec();
+	keyframe.push(idr);
+	assert_eq!(
+		samples,
+		vec![
+			(Bytes::from(length_prefixed(&keyframe)), true),
+			(Bytes::from(length_prefixed(&[delta])), false),
+		]
+	);
+}
+
+#[tokio::test(start_paused = true)]
+async fn split_h264_parameter_sets_keep_the_sync_point() {
+	const AUD: &[u8] = &[0x09, 0xf0];
+	const DELTA: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
+	split_parameter_sets_keep_the_sync_point(Live::avc3(), AUD, &[SPS, PPS], IDR, DELTA).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn split_h265_parameter_sets_keep_the_sync_point() {
+	use hang::catalog::{Container, H265, VideoConfig};
+
+	const AUD: &[u8] = &[0x46, 0x01];
+	const VPS: &[u8] = &[0x40, 0x01, 0x0c, 0x01];
+	const SPS: &[u8] = &[0x42, 0x01, 0x01, 0x01, 0x60];
+	const PPS: &[u8] = &[0x44, 0x01, 0xc1, 0x72];
+	const IDR: &[u8] = &[0x26, 0x01, 0xaf, 0x08];
+	const DELTA: &[u8] = &[0x02, 0x01, 0xd0, 0x11];
+
+	let live = Live::new(".hevc", |catalog, name| {
+		let mut config = VideoConfig::new(H265 {
+			in_band: true,
+			profile_space: 0,
+			profile_idc: 1,
+			profile_compatibility_flags: [0x60, 0, 0, 0],
+			tier_flag: false,
+			level_idc: 93,
+			constraint_flags: [0x90, 0, 0, 0, 0, 0],
+		});
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		config.container = Container::Legacy;
+		catalog.modify().unwrap().video.renditions.insert(name, config);
+	});
+	split_parameter_sets_keep_the_sync_point(live, AUD, &[VPS, SPS, PPS], IDR, DELTA).await;
+}
+
 /// An avc3 init lists no parameter sets, so a keyframe that has none to carry would be
 /// undecodable. The export fails instead of writing it.
 #[tokio::test(start_paused = true)]

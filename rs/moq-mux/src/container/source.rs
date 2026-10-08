@@ -84,6 +84,9 @@ pub(crate) struct ExportSource {
 	video_codec: Option<VideoCodec>,
 	/// Geometry resolved from the initial catalog or codec data received afterward.
 	video_dimensions: Option<(u32, u32)>,
+	/// The transform absorbed a keyframe that carried no picture (parameter sets sent
+	/// as their own frame), so the next frame it emits is the sync point.
+	absorbed_keyframe: bool,
 }
 
 impl ExportSource {
@@ -163,6 +166,7 @@ impl ExportSource {
 			description,
 			video_codec: Some(config.codec.clone()),
 			video_dimensions: catalog_dimensions(config),
+			absorbed_keyframe: false,
 		};
 		source.resolve_video_dimensions(&[])?;
 		Ok(Some(source))
@@ -193,6 +197,7 @@ impl ExportSource {
 			description,
 			video_codec: None,
 			video_dimensions: None,
+			absorbed_keyframe: false,
 		}))
 	}
 
@@ -216,6 +221,7 @@ impl ExportSource {
 			description: None,
 			video_codec: None,
 			video_dimensions: None,
+			absorbed_keyframe: false,
 		})
 	}
 
@@ -373,11 +379,13 @@ impl ExportSource {
 				return Poll::Ready(Ok(Some(Event::Frame(frame))));
 			};
 
-			match transform.transform(frame.payload.clone(), frame.keyframe)? {
+			let keyframe = frame.keyframe || std::mem::take(&mut self.absorbed_keyframe);
+			match transform.transform(frame.payload.clone(), keyframe)? {
 				None => {
 					// Parameter set absorbed by the transform. Refresh the
 					// resolved description (it may have just become available)
 					// and pull the next frame.
+					self.absorbed_keyframe = keyframe;
 					self.refresh_description();
 					self.resolve_video_dimensions(&frame.payload)?;
 					continue;
@@ -385,7 +393,11 @@ impl ExportSource {
 				Some(payload) => {
 					self.refresh_description();
 					self.resolve_video_dimensions(&payload)?;
-					return Poll::Ready(Ok(Some(Event::Frame(Frame { payload, ..frame }))));
+					return Poll::Ready(Ok(Some(Event::Frame(Frame {
+						payload,
+						keyframe,
+						..frame
+					}))));
 				}
 			}
 		}
