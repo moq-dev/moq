@@ -38,8 +38,8 @@ pub(super) struct SubscriberConfig<S: crate::transport::poll::Session> {
 	/// Local policy for what pulling from this peer costs, overriding whatever it
 	/// declared in its SETUP. `None` charges the peer's declared price.
 	pub cost: Option<u64>,
-	/// Set once the peer sends a GOAWAY; new request streams are then rejected
-	/// with [`Error::GoingAway`] (the peer told us to stop asking).
+	/// Set once the peer sends a GOAWAY; this session's routes then cost
+	/// [`crate::origin::Cost::DRAIN`], so a replacement session outranks it.
 	pub going_away: crate::goaway::GoingAway,
 }
 
@@ -136,15 +136,6 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	/// The recorded session end, or [`Error::Dropped`] when nothing recorded one.
 	fn end_reason(&self) -> Error {
 		self.ended.lock().clone().unwrap_or(Error::Dropped)
-	}
-
-	/// Reject a new request once the peer has sent a GOAWAY: it told us to stop
-	/// opening streams on this session (existing subscriptions keep flowing).
-	fn check_going_away(&self) -> Result<(), Error> {
-		if self.going_away.is_set() {
-			return Err(Error::GoingAway);
-		}
-		Ok(())
 	}
 
 	/// What pulling content across this session's link costs, added to the route cost
@@ -1170,8 +1161,8 @@ impl<S: crate::transport::poll::Session> ProbeStream<S> {
 		loop {
 			match &mut self.state {
 				ProbeState::Open => {
-					// After a GOAWAY the peer must not see new streams. Probe is
-					// best-effort; skip it rather than erroring.
+					// Probe is best-effort telemetry; a session that is going away
+					// has no use for a new estimate, so skip it rather than erroring.
 					if self.subscriber.going_away.is_set() {
 						return Poll::Ready(Ok(()));
 					}
@@ -1262,8 +1253,6 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 		loop {
 			match &mut self.state {
 				PrefixState::Open => {
-					// A peer that sent GOAWAY told us to stop opening streams on this session.
-					self.subscriber.check_going_away()?;
 					let mut stream = ready!(Stream::poll_open(
 						&mut self.subscriber.session,
 						self.subscriber.version,
@@ -3849,8 +3838,6 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 		loop {
 			match &mut self.state {
 				EstablishState::Open => {
-					// A peer that sent GOAWAY told us to stop opening streams.
-					self.serve.subscriber.check_going_away()?;
 					let mut stream = ready!(Stream::poll_open(
 						&mut self.session,
 						self.serve.subscriber.version,
@@ -4095,7 +4082,6 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 		loop {
 			match &mut self.state {
 				TrackInfoState::Open => {
-					serve.subscriber.check_going_away()?;
 					let mut stream = ready!(Stream::poll_open(&mut self.session, serve.subscriber.version, &mut cx))?;
 					stream.writer.buffer(&lite::ControlType::Track)?;
 					stream.writer.buffer(&lite::Track {
@@ -4557,13 +4543,6 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 
 			match &mut self.state {
 				FetchRunState::Open { request } => {
-					// A peer that sent GOAWAY told us to stop opening streams on this session.
-					if self.serve.subscriber.going_away.is_set() {
-						request.take().expect("request pending").reject(Error::GoingAway);
-						self.state = FetchRunState::Done;
-						return Poll::Ready(());
-					}
-
 					let mut stream = match ready!(Stream::poll_open(
 						&mut self.session,
 						self.serve.subscriber.version,

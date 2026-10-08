@@ -524,7 +524,9 @@ Either endpoint can open a Goaway Stream (0x5) to initiate a graceful session sh
 
 The sender sends a GOAWAY message containing an optional new session URI.
 If the URI is non-empty, the peer SHOULD establish a new session at the provided URI and migrate any active subscriptions.
-The peer MUST NOT open new streams on the current session after receiving a GOAWAY.
+After receiving a GOAWAY, the peer MAY keep opening requests on the current session until it has moved to a replacement session.
+The sender SHOULD keep answering them until the session ends, and MAY reset one with GOING_AWAY.
+The recipient SHOULD treat that reset as a route failure and retry the request on the replacement session or another route.
 
 The sender closes the stream (FIN) when it is ready to terminate the session.
 The peer SHOULD close all streams and the session after migrating or when it no longer needs the session.
@@ -1391,6 +1393,7 @@ The `Message Length` describes the payload size on the wire.
 - Assigned 0x3A NOT_FETCHABLE in the stream error table: a FETCH for a group delivered only as a datagram.
 - The subscriber FINs its Subscribe Stream after settling its tail; graceful session close waits for that FIN or reset.
 - A refusal is not retried at another route of the same prefix either.
+- A GOAWAY recipient MAY keep opening requests on the current session until it has moved to a replacement session; previously it MUST NOT open new streams. The sender SHOULD keep answering them and MAY reset one with GOING_AWAY, which the recipient SHOULD retry on another route.
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
 - Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it. Earlier versions carry no such position, so a subscriber takes the first frame instead.
 - Added `Epoch` to ANNOUNCE_START, SUBSCRIBE, TRACK, and FETCH: a UUIDv7 naming the publisher instance, or empty. A path and an Epoch name one Broadcast. A relay MAY move a subscription between routes with the same Epoch, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between routes with different Epochs or none. The newest Epoch wins a path and ends subscriptions to the older one. Replaces the first-hop identity.
