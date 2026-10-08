@@ -22,14 +22,11 @@ re-announce. `js/publish/src/broadcast.ts` mints the epoch once and keeps the
 publisher across unannounce and announce on purpose, which points at
 continuing the sequence.
 
-Open PR #4929 makes Rust's `create_track` continue a name's sequence across
-replacements, but leaves JS `createTrack` starting at 0. If this reproduces,
+#4929 (merged) made an on-demand producer continue a name's sequences
+across replacements in both languages, but JS `createTrack` and
+`insertTrack` still start at 0 (`doc/lib/js/net.md`). If this reproduces,
 consider fixing it there, in `@moq/net`'s `createTrack`, so every JS
-publisher continues the sequence the way Rust does, rather than in
-`@moq/publish` alone. Rebase onto #4929 if it lands first.
+publisher continues the sequence, rather than in `@moq/publish` alone.
 
 Public API: none expected. Wire: none.
 
-## Related
-
-- [Coalesce dynamic tracks](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - #4929, continuous sequences per track name in Rust

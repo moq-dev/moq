@@ -53,9 +53,8 @@ that Draft22 must leave, and `subscribe.rs`; JS `ietf.test.ts`,
 `filter.test.ts`).
 `test/interop` cannot catch this, since every client shares the codec.
 
-Open PR #5028 ([parameters per draft](/quest/m0/ietf-params-per-draft.md))
-reworks the same 0x21 handling in `parameters.ts`, `fetch.rs`, and
-`subscribe.rs`; rebase onto it once it lands.
+#5028 (merged) reworked the same 0x21 handling in `parameters.ts`,
+`fetch.rs`, and `subscribe.rs`; build on its per-draft decode.
 
 Public API: none. Wire: moqt-22 LOCATION_FILTER changes to the draft's form.
 
@@ -63,6 +62,3 @@ Public API: none. Wire: moqt-22 LOCATION_FILTER changes to the draft's form.
 
 - [#4847](https://github.com/moq-dev/moq/issues/4847) - draft-22 LOCATION_FILTER should drop the Length and carry the Location Filter Type
 
-## Related
-
-- [Parameters per draft](/quest/m0/ietf-params-per-draft.md) - #5028, the same parameter decode; this rebases onto it

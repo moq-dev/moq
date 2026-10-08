@@ -9,7 +9,7 @@ utilization. It also reports device health (whether the device is usable,
 lost, or reset) and the GPU model, which moq.pro's admission keys its
 per-model limits on. The same API works on NVIDIA, AMD, and Intel, keyed by
 the device's render node `dev_t`, the identity
-[`Surface::Vulkan`](/quest/m2/gpu-surface.md) carries, so a caller writes no
+`Surface::Vulkan` carries, so a caller writes no
 vendor code. A value a driver cannot provide is absent, never guessed.
 
 Not here: admission policy, thresholds, frame-lateness tracking, or draining.
@@ -18,7 +18,7 @@ Those are the caller's.
 ## Plan
 
 Decided 2026-10-05 in moq.pro's quest audit: vendor-neutral now, not
-NVIDIA-scoped. Reason: [GPU surface](/quest/m2/gpu-surface.md),
+NVIDIA-scoped. Reason: the external GPU surface (#4975),
 [Vulkan encode](/quest/m2/vulkan-encode.md), and
 [VA-API import](/quest/m2/vaapi-vulkan-import.md) make AMD and Intel encode
 first-class, so an NVML-shaped API would be rewritten once they land.
@@ -28,7 +28,7 @@ adopt this instead.
 Decided 2026-10-05: one device identity everywhere, the render node's
 `dev_t`, shared with [VA-API import](/quest/m2/vaapi-vulkan-import.md).
 NVIDIA's device UUID maps to its node through `VK_EXT_physical_device_drm`.
-That is why this Requires [GPU surface](/quest/m2/gpu-surface.md).
+The external GPU surface (#4975) carries that identity.
 
 Guidance, to be settled while building:
 
@@ -59,14 +59,10 @@ Guidance, to be settled while building:
 
 Test: a unit test of each source's parsing against recorded fixtures, and
 ignored hardware tests in `just rs gpu`'s per-vendor branches (the recipe
-[GPU surface](/quest/m2/gpu-surface.md) adds) that open an encoder and see
+#4975 added) that open an encoder and see
 the session and memory counts move.
 
 Public API: a device capacity and health snapshot in moq-video. Wire: none.
-
-## Required
-
-- [One external GPU image for every encoder](/quest/m2/gpu-surface.md) - the render node identity this keys by, and the `just rs gpu` recipe its tests run in
 
 ## Related
 

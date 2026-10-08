@@ -54,7 +54,6 @@ were done or not worth their cost.
 - [Bump web-transport-iroh for the capsule close](/quest/m1/iroh-capsule-bump.md) - condition: moq-dev/web-transport#419 ships in a release, then moq's iroh HTTP/3 client reports a peer's close capsule
 - [Hang changelog](/quest/m1/hang-changelog-04.md) - the hang draft lists under -03 only what -03 published
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
-- [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - one dynamic producer per track name in both languages, with the sequence namespace surviving a replacement
 - [lite-07 Live flag](/quest/m1/lite-live.md) - a separate `Live` field on lite-07 SUBSCRIBE, so merged floors never starve a subscriber; late lower groups build on it
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges in either order and replaces FETCH; relays fill misses by range, including over moq-transport
 - [Cross-relay bursts re-run](/quest/m1/cross-relay-bursts.md) - condition: the #4349 reporter re-runs their A/B/C comparison against current cdn.moq.pro
@@ -82,7 +81,6 @@ were done or not worth their cost.
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [Relay session limits](/quest/m1/relay-session-limits.md) - moq-relay sets per-session request limits, tighter for clients than peers, and the bindings name a refused request
 - [Churn with held subscriptions](/quest/m1/session-churn-held.md) - opening and closing a request costs the same with 1 or 1,024 held subscriptions
-- [Export linger](/quest/m1/export-ts-linger.md) - `moq export ts --linger` fails on an export error while the broadcast is live, and lingers once it closes or is replaced
 - [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; the catalog entry and format may break in place, since no archives exist
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
 - [Claim epochs](/quest/m1/claim-epochs.md) - a lite-07 claim's answer carries its broadcast's epoch, so a worker restarting an output under an unchanged claim route is a new source; moved from m0 on 2026-10-08 since lite-07 is opt-in
@@ -106,6 +104,7 @@ were done or not worth their cost.
 - [Audio rendition pick](/quest/m1/audio-ranked.md) - single-track FLV/RTMP and WHEP serve the best audio rendition, not the first by name
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
 - [QoS](/quest/m1/qos/README.md) - broadcast health: relay starvation and timeliness histograms
+- [Session outcomes](/quest/m1/session-outcomes.md) - the relay's session stats count refusals by reason and ends by kind, per root and tier
 - [Catalog rendition IDs](/quest/m1/catalog-track-id.md) - catalog rendition keys become IDs unique across video and audio, with an optional `track` name, so one catalog lists renditions from several broadcasts
 - [Media stats](/quest/m1/stats/README.md) - publishers announce a stats track in the catalog, viewers answer a soliciting catalog through a per-catalog `.echo` broadcast, and one model turns both into a health verdict and a preflight report
 - [JS track handover](/quest/m1/js-group-handover.md) - a JS track subscription resumes across a route swap from the first frame it lacks, so `test/drain` passes at zero latency budget

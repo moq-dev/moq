@@ -510,8 +510,8 @@ export class Producer {
 	#state = new TrackState();
 	#sequence: TrackSequence = { next: 0 };
 	// One past the highest group or datagram this producer received, like the Rust
-	// `max_sequence`. The shared counter above can run ahead of it: sibling producers of
-	// the same track advance it too.
+	// `max_sequence`. The shared counter above can run ahead of it: earlier producers of
+	// the same broadcast track advanced it too.
 	#received = 0;
 
 	// Recently written source groups, retained for replay to late subscribers and

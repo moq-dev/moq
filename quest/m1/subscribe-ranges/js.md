@@ -31,4 +31,3 @@ IETF FETCH dispatch. Resized from [M] to [L] for it.
 ## Required
 
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the wire this speaks
-- [Dynamic track identity](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - settles shared producer identity before adding on-demand requests

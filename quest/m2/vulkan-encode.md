@@ -2,7 +2,7 @@
 
 ## Goal
 
-moq-video encodes an external [`Surface::Vulkan`](/quest/m2/gpu-surface.md)
+moq-video encodes an external `Surface::Vulkan`
 with Vulkan Video on AMD (RADV), in H.264 and H.265, scaled per rendition on
 the GPU, with no CPU round trip. An ignored hardware test proves it on an
 RX 9070, and `Kind::Auto` picks this backend for a surface on an AMD device
@@ -72,10 +72,6 @@ only if it costs nothing beyond cargo, per the rule in
 `rs/moq-video/Cargo.toml`.
 
 Public API: a new encoder backend and feature. Wire: none.
-
-## Required
-
-- [One external GPU image for every encoder](/quest/m2/gpu-surface.md) - the surface this backend imports
 
 ## Related
 

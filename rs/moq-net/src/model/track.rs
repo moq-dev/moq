@@ -26,7 +26,7 @@ use std::{
 	ops::{Bound, RangeBounds},
 	sync::Arc,
 	sync::OnceLock,
-	sync::atomic::{AtomicBool, Ordering},
+	sync::atomic::{AtomicBool, AtomicU64, Ordering},
 	task::{Poll, ready},
 	time::Duration,
 };
@@ -161,6 +161,28 @@ impl Info {
 	}
 }
 
+/// The sequence namespace a track name keeps within its broadcast, shared by every
+/// producer that serves the name, so a replacement appends after whatever an earlier one
+/// wrote. Holds one past the highest sequence written.
+#[derive(Clone, Default)]
+pub(crate) struct Sequence(Arc<AtomicU64>);
+
+impl Sequence {
+	/// The next sequence an append takes.
+	fn next(&self) -> u64 {
+		self.0.load(Ordering::Relaxed)
+	}
+
+	fn advance(&self, sequence: u64) {
+		self.0.fetch_max(sequence.saturating_add(1), Ordering::Relaxed);
+	}
+
+	/// Whether nothing holds it and nothing was written, so forgetting it changes nothing.
+	pub(crate) fn is_unused(&self) -> bool {
+		Arc::strong_count(&self.0) == 1 && self.next() == 0
+	}
+}
+
 /// Whether a track's cache reflects its live feed; see [`TrackState::set_idle`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Feed {
@@ -240,6 +262,10 @@ pub(crate) struct TrackState {
 	// The highest sequence number successfully appended to the track. Shared with
 	// datagrams, so it can run ahead of any cached group.
 	max_sequence: Option<u64>,
+
+	// The name's sequence namespace within the broadcast, which an append continues
+	// even when an earlier producer of the name wrote past this one's `max_sequence`.
+	sequence: Sequence,
 
 	// The sequence of the newest cached group: the live edge, protected from
 	// eviction by never entering the eviction order until the track is `closed`.
@@ -1034,6 +1060,22 @@ impl TrackState {
 		state
 	}
 
+	/// Record a written sequence, here and in the name's shared namespace.
+	fn advance(&mut self, sequence: u64) {
+		self.max_sequence = Some(self.max_sequence.map_or(sequence, |max| max.max(sequence)));
+		self.sequence.advance(sequence);
+	}
+
+	/// The sequence the next append takes: past this track's own writes and past every
+	/// earlier producer's of the same name.
+	fn next_sequence(&self) -> Result<u64> {
+		let own = match self.max_sequence {
+			Some(max) => max.checked_add(1).ok_or(coding::BoundsExceeded)?,
+			None => 0,
+		};
+		Ok(own.max(self.sequence.next()))
+	}
+
 	/// Reject a sequence that is still cached; a dead (aborted or evicted)
 	/// incarnation is removed so a fresh group can serve the sequence again.
 	///
@@ -1083,7 +1125,7 @@ impl TrackState {
 			self.evict.push_back((sequence, stamp));
 		}
 
-		self.max_sequence = Some(self.max_sequence.map_or(sequence, |max| max.max(sequence)));
+		self.advance(sequence);
 		self.lookup.insert(
 			sequence,
 			Slot {
@@ -1585,6 +1627,13 @@ impl Producer {
 		self
 	}
 
+	/// Continue the name's sequence namespace within its broadcast. Set by the broadcast
+	/// before the track is handed out.
+	pub(crate) fn with_sequence(self, sequence: Sequence) -> Self {
+		set_sequence(&self.state, sequence);
+		self
+	}
+
 	/// The track's name, unique within its broadcast.
 	pub fn name(&self) -> &str {
 		&self.name
@@ -1640,10 +1689,7 @@ impl Producer {
 	/// Create a new group with the next sequence number.
 	pub fn append_group(&self) -> Result<group::Producer> {
 		let mut state = self.modify()?;
-		let sequence = match state.max_sequence {
-			Some(s) => s.checked_add(1).ok_or(coding::BoundsExceeded)?,
-			None => 0,
-		};
+		let sequence = state.next_sequence()?;
 		if let Some(fin) = state.final_sequence
 			&& sequence >= fin
 		{
@@ -1688,16 +1734,13 @@ impl Producer {
 		// Normalize into the track's timescale, like frames (see `group::Producer::create_frame`).
 		let timescale = state.info.as_ref().unwrap().timescale;
 		let timestamp = group::on_track(timestamp.into(), timescale)?;
-		let sequence = match state.max_sequence {
-			Some(s) => s.checked_add(1).ok_or(coding::BoundsExceeded)?,
-			None => 0,
-		};
+		let sequence = state.next_sequence()?;
 		if let Some(fin) = state.final_sequence
 			&& sequence >= fin
 		{
 			return Err(Error::Closed);
 		}
-		state.max_sequence = Some(sequence);
+		state.advance(sequence);
 		meter.datagram(payload.len() as u64);
 		state.push_datagram(Datagram {
 			sequence,
@@ -1736,7 +1779,7 @@ impl Producer {
 		{
 			return Err(Error::Closed);
 		}
-		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(sequence));
+		state.advance(sequence);
 		meter.datagram(payload.len() as u64);
 		state.push_datagram(Datagram {
 			sequence,
@@ -2230,6 +2273,16 @@ impl Drop for Dynamic {
 		if fetch.remove_handler() {
 			fetch.drain_queued();
 		}
+	}
+}
+
+fn set_sequence(state: &kio::Producer<TrackState>, sequence: Sequence) {
+	if let Ok(mut state) = state.write() {
+		debug_assert!(
+			state.max_sequence.is_none(),
+			"a track joins its namespace before writing"
+		);
+		state.sequence = sequence;
 	}
 }
 
@@ -4436,6 +4489,13 @@ impl Request {
 	/// a tagged [`broadcast::Producer::reserve_track`].
 	pub(crate) fn with_stats(mut self, scope: stats::Scope) -> Self {
 		self.stats = scope;
+		self
+	}
+
+	/// Continue the name's sequence namespace within its broadcast. Set by the broadcast
+	/// before the request is visible to anyone.
+	pub(crate) fn with_sequence(self, sequence: Sequence) -> Self {
+		set_sequence(&self.state, sequence);
 		self
 	}
 

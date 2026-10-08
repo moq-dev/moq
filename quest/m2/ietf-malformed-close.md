@@ -39,10 +39,9 @@ runner's scenario name, where it has one:
 
 ## Plan
 
-Decided 2026-10-08: start after [Parameters per
-draft](/quest/m0/ietf-params-per-draft.md)
-([#5028](https://github.com/moq-dev/moq/pull/5028)) lands. It rewrites the
-same parameter decode and hands this quest one case: a follow-up message on
+Decided 2026-10-08: build on
+[#5028](https://github.com/moq-dev/moq/pull/5028) (merged), which rewrote the
+same parameter decode and handed this quest one case: a follow-up message on
 a request stream that fails to decode.
 
 Decided with the maintainer on 2026-10-04 and 2026-10-05:
@@ -118,10 +117,6 @@ regressions where it fits.
 Public API: new `SessionError` variants and `SessionCode` entries. Wire:
 new moq-lite session codes, with moq-transport's values; moq-transport
 behaviour moves closer to the drafts.
-
-## Required
-
-- [Parameters per draft](/quest/m0/ietf-params-per-draft.md) - rewrites the parameter decode this builds on
 
 ## Related
 
