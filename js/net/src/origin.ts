@@ -1713,8 +1713,13 @@ export class Request {
 	 * Accept the request, resolving every awaiting requester with `broadcast`.
 	 *
 	 * The caller keeps producing into `broadcast`; repeat requests for the path share
-	 * it for as long as it stays live. An originated route refuses a broadcast a session
-	 * delivered: serving it would label upstream content with this origin's hop.
+	 * it for as long as it stays live.
+	 *
+	 * A JS app does not proxy: a broadcast a session delivered would go out labeled with
+	 * this origin's hop. To serve upstream content, copy its tracks into a broadcast you
+	 * produce and accept that.
+	 *
+	 * @throws Error when handed a broadcast a session delivered. The request stays open.
 	 */
 	accept(source: broadcast.Producer | broadcast.Consumer): void {
 		if (this.#done) return;
