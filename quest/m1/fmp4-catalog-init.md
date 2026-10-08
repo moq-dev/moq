@@ -30,4 +30,4 @@ catalog-derived record, so an encoder that restarts with a new SPS can return.
 
 ## Required
 
-- [Bump mp4-atom for avc3](/quest/m1/mp4-atom-avc3-bump.md) - mp4-atom can encode an avc3 sample entry
+- [CMAF in-band parameter sets](/quest/m1/cmaf-inline-params.md) - import and decode `avc3`/`hev1` CMAF, so the new export round-trips

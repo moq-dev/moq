@@ -440,8 +440,8 @@ pub struct Handshake<S: crate::transport::poll::Session> {
 	role: Option<Role>,
 	origin: Option<crate::Hop>,
 	token: Option<setup::Token>,
-	/// The identity this session's routes are stamped with when the peer declares none
-	/// on the wire. Fresh per request unless the caller overrides it
+	/// The identity this session's routes are attributed to for split horizon when the
+	/// peer declares none on the wire; it never enters a hop chain. Fresh per request unless the caller overrides it
 	/// ([`Handshake::with_peer_hop`]).
 	assigned_hop: crate::Hop,
 	// Taken by `ok`/`close`; `Drop` rejects the handshake if neither ran.

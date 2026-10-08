@@ -7,8 +7,7 @@ share of the connection's estimate: a grant below the configured bitrate
 lowers the encoder at once, room coming back raises it gradually, and a link
 too small for the configured audio rate sheds audio bits instead of stalling.
 The reservation's ceiling stays the configured bitrate. A grant below the
-codec floor disables the rendition (`enabled: false`,
-[enabled flag](/quest/m1/catalog-enabled.md)) until it recovers. PCM keeps reserve-only
+codec floor disables the rendition (catalog `enabled: false`) until it recovers. PCM keeps reserve-only
 usage: it claims its fixed rate and never reads the grant.
 
 The rate policy has one home shared by every sender, so audio and video back
@@ -64,10 +63,6 @@ one policy step, holds it on a `None` grant, and ramps back when the grant
 returns; a grant below the Opus floor disables the rendition, and recovered
 bandwidth enables it again even after the last viewer unsubscribed; a PCM Producer
 ignores every grant.
-
-## Required
-
-- [Enabled flag](/quest/m1/catalog-enabled.md) - defines the `enabled` field a disabled rendition sets
 
 ## Closes
 

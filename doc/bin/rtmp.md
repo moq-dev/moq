@@ -29,7 +29,11 @@ the [`moq-rtmp`](https://docs.rs/moq-rtmp) library, which hands you each
 publish or play request to accept, map to a path, or reject. The CLI listener
 is unauthenticated; firewall it.
 
-Each push is its own broadcast. Import publishes the encoder's own timestamps
+Each push or pull is its own broadcast, under a fresh
+[epoch](/concept/moq-lite#publisher-epochs): an encoder that reconnects while
+its stale connection is still open replaces it at once. Subscriptions to the
+stale push end with `Unroutable` instead of stalling, and a viewer's next
+subscribe reaches the new push. Import publishes the encoder's own timestamps
 and anchors the catalog clock on the first frame, so it names the wall time the
 push arrived. A group starting before the previous group's start, such as an
 encoder restarting its timestamps mid-push, ends that push with an error.
