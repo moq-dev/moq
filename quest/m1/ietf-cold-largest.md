@@ -58,4 +58,3 @@ Public API: none expected. Wire: none new.
 ## Related
 
 - [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - the same upstream fill path, for multi-group ranges
-- [Fetch without SUBSCRIBE](/quest/m1/ietf-fetch-only.md) - the other FETCH gap at a relay
