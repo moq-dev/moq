@@ -69,7 +69,13 @@ authorization and hidden names work exactly as without one.
 
 - **One instance, one epoch.** A publisher mints an epoch per run. Replicas of
   the same content announce that same epoch. A prefix claim, and any route
-  without an epoch, names no instance.
+  without an epoch, names no instance, so a relay cannot tell that a claim's
+  worker closed a path and serves it again. Such a worker keeps the path's group
+  sequence going, even when its own input starts over at 0. Otherwise a viewer
+  returning within a relay's cache window gets the old output's latest group,
+  then nothing until the new sequence passes it. On moq-lite 07 and
+  moq-transport, the relay next to the worker sees the sequence go back and
+  gives its own viewers an error instead, so they request the path again.
 - **Newest wins.** Among routes at the same prefix, the newest epoch ranks
   first, ahead of cost, and a route without an epoch ranks last. Newest means
   the latest UUIDv7 timestamp, so hosts with skewed clocks can lose a restart

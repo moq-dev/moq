@@ -535,9 +535,8 @@ struct BroadcastState {
 	// active number of PUBLISH_NAMESPACE messages.
 	count: usize,
 
-	// One minted source per requested path under the namespace, each closed
-	// when its guard drops.
-	sources: HashMap<PathOwned, crate::model::broadcast::SourceGuard>,
+	// Closes as the namespace is retracted, which closes every source minted under it.
+	live: kio::Producer<()>,
 
 	// Counts this namespace against the session's announce cap until it is retracted.
 	_slot: crate::session::Slot,
@@ -1558,7 +1557,7 @@ where
 					route,
 					dynamic,
 					count: 1,
-					sources: HashMap::new(),
+					live: Default::default(),
 					_slot: slot,
 				});
 
@@ -1587,7 +1586,7 @@ where
 				if entry.get().count == 0 {
 					tracing::debug!(route = %self.origin.absolute(&path), "unannounced");
 					// Dropping the entry retracts the route (its announcement drops) and
-					// closes its sources (their guards drop).
+					// closes its sources (its token closes).
 					entry.remove();
 				}
 			}
@@ -1660,29 +1659,28 @@ where
 				Some(requested) => requested.to_owned(),
 				None => continue,
 			};
-			let source = self.origin.create_source(&requested);
+			let source = crate::model::broadcast::SourceGuard::new(self.origin.create_source(&requested));
+			// The handler exists before the requester sees the source, so a track it asks
+			// for before `run_broadcast` first polls queues instead of failing `NotFound`.
 			let dynamic = source.dynamic();
-			request.accept(&source);
+			request.accept(&*source);
 
-			// Retain the source so a retraction can close it. If the route was
-			// retracted since the accept, close it here as that retraction would
-			// have, and still serve what it took on: tracks subscribed since carry on.
-			let guard = crate::model::broadcast::SourceGuard::new(source);
-			let retracted = {
-				let mut state = self.state.lock();
-				match state.broadcasts.get_mut(&path) {
-					Some(entry) => {
-						entry.sources.insert(requested.clone(), guard);
-						None
-					}
-					None => Some(guard),
-				}
-			};
-			drop(retracted);
+			// The namespace's token closes the source as it is retracted. If it was
+			// retracted since the accept, close it here as that retraction would have,
+			// and still serve what it took on: tracks subscribed since carry on.
+			let route = self
+				.state
+				.lock()
+				.broadcasts
+				.get(&path)
+				.map(|entry| entry.live.consume());
+			if route.is_none() {
+				source.close();
+			}
 
 			let this = self.clone();
 			broadcasts.push(async move {
-				if let Err(err) = this.run_broadcast(requested.borrow(), dynamic).await {
+				if let Err(err) = this.run_broadcast(requested.borrow(), source, dynamic, route).await {
 					tracing::debug!(%err, "error running broadcast");
 				}
 			});
@@ -1704,7 +1702,16 @@ where
 		let _ = entry.dynamic.update(entry.route.clone());
 	}
 
-	async fn run_broadcast(&self, path: Path<'_>, mut broadcast: broadcast::Dynamic) -> Result<(), Error> {
+	/// Serve one minted source's track requests, taken through its `broadcast` handler,
+	/// until it closes: its namespace is retracted (`route` closes), nothing holds it any
+	/// more, or the session dies.
+	async fn run_broadcast(
+		&self,
+		path: Path<'_>,
+		source: crate::model::broadcast::SourceGuard,
+		mut broadcast: broadcast::Dynamic,
+		route: Option<kio::Consumer<()>>,
+	) -> Result<(), Error> {
 		let mut subscribes = TaskSet::owned();
 		let mut closed_session = self.session.clone();
 		loop {
@@ -1714,7 +1721,22 @@ where
 					if closed_session.poll_closed(&mut cx).is_ready() {
 						return Poll::Ready(None);
 					}
-					broadcast.poll_requested_track(waiter).map(Some)
+					loop {
+						if let Poll::Ready(next) = broadcast.poll_requested_track(waiter) {
+							return Poll::Ready(Some(next));
+						}
+						if route.as_ref().is_some_and(|route| route.poll_closed(waiter).is_ready()) {
+							source.close();
+							continue;
+						}
+						// Nothing holds the source and no track is on its way: retire it, so
+						// what the session keeps for the path goes with the fronts that used
+						// it. Declined when a holder or a track got there first, so look again.
+						if source.poll_unheld(waiter).is_pending() {
+							return Poll::Pending;
+						}
+						source.close_unheld();
+					}
 				})
 				.await;
 
@@ -1733,9 +1755,9 @@ where
 			let mut this = self.clone();
 
 			let path = path.to_owned();
-			let broadcast = broadcast.clone();
+			let source = (*source).clone();
 			subscribes.push(async move {
-				this.run_subscribe(path, broadcast, request).await;
+				this.run_subscribe(path, source, request).await;
 			});
 		}
 
@@ -1745,9 +1767,10 @@ where
 	async fn run_subscribe(
 		&mut self,
 		broadcast_path: Path<'_>,
-		// Held for the subscription's lifetime but never watched: the broadcast ending
-		// is a retraction, which does not disturb a subscription already in flight.
-		_broadcast: broadcast::Dynamic,
+		// The minted source, never watched: its end is a retraction, which does not disturb a
+		// subscription already in flight. Closed once the route shows it serves new content
+		// under the name.
+		source: broadcast::Producer,
 		request: track::Request,
 	) {
 		// Data streams wait on the alias bound by SUBSCRIBE_OK, so leave the model request
@@ -1758,7 +1781,7 @@ where
 		let mut target = Target::Request(request);
 		loop {
 			let Some(idle) = self
-				.subscribe_once(&broadcast_path, &track_name, target, &mut group_fetches)
+				.subscribe_once(&broadcast_path, &track_name, &source, target, &mut group_fetches)
 				.await
 			else {
 				return;
@@ -1780,6 +1803,7 @@ where
 		&mut self,
 		broadcast_path: &Path<'_>,
 		track_name: &str,
+		source: &broadcast::Producer,
 		target: Target,
 		group_fetches: &mut TaskSet,
 	) -> Option<Idle> {
@@ -2010,6 +2034,20 @@ where
 			Some(idle) => {
 				if !self.state.lock().subscribes.contains_key(&request_id) {
 					// Aborted with the session while the answer was in hand.
+					return None;
+				}
+				// moq-transport names no publisher instance, so a Largest below what the copy
+				// cached is a publisher reusing the name for new content. The source closes
+				// first: its front ends before any reader sees the copy fail, so a reader
+				// re-requesting gets a fresh one.
+				if idle.track.regresses(resuming.flatten()) {
+					tracing::warn!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, ?largest, "upstream went back in its group sequence");
+					let mut track = idle.track;
+					track.withhold_cache();
+					source.close();
+					self.remove_subscribe(request_id);
+					let _ = track.abort(Error::Unroutable);
+					self.cancel_subscribe(stream, request_id).await;
 					return None;
 				}
 				(idle.track, idle.dynamic)
@@ -4905,8 +4943,9 @@ mod tests {
 		drop(track);
 		drop(consumer);
 
+		let source = producer.clone();
 		let serving = moq_net_sim::spawn(async move {
-			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+			subscriber.run_subscribe(Path::new("broadcast"), source, request).await;
 		});
 
 		moq_net_sim::timeout(std::time::Duration::from_secs(1), serving)
@@ -4955,8 +4994,9 @@ mod tests {
 
 		let request = dynamic.requested_track().await.expect("no track requested");
 
+		let source = producer.clone();
 		let serving = moq_net_sim::spawn(async move {
-			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+			subscriber.run_subscribe(Path::new("broadcast"), source, request).await;
 		});
 
 		// Let the SUBSCRIBE go out. No SUBSCRIBE_OK is coming, so the subscription never
@@ -5018,8 +5058,9 @@ mod tests {
 
 		let request = dynamic.requested_track().await.expect("no track requested");
 
+		let source = producer.clone();
 		let serving = moq_net_sim::spawn(async move {
-			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+			subscriber.run_subscribe(Path::new("broadcast"), source, request).await;
 		});
 
 		// Let the SUBSCRIBE go out, then retract the broadcast before any response.
@@ -5121,8 +5162,9 @@ mod tests {
 
 		let request = dynamic.requested_track().await.expect("no track requested");
 
+		let source = producer.clone();
 		let serving = moq_net_sim::spawn(async move {
-			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+			subscriber.run_subscribe(Path::new("broadcast"), source, request).await;
 		});
 
 		settle().await;
@@ -5260,8 +5302,9 @@ mod tests {
 		// subscription reached Established rather than assume it.
 		let probe = subscriber.clone();
 
+		let source = producer.clone();
 		let serving = moq_net_sim::spawn(async move {
-			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+			subscriber.run_subscribe(Path::new("broadcast"), source, request).await;
 		});
 
 		// Let the SUBSCRIBE go out and the SUBSCRIBE_OK come back, so the subscription is
@@ -5339,8 +5382,9 @@ mod tests {
 		let request = dynamic.requested_track().await.expect("no track requested");
 
 		let probe = subscriber.clone();
+		let source = producer.clone();
 		let serving = moq_net_sim::spawn(async move {
-			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+			subscriber.run_subscribe(Path::new("broadcast"), source, request).await;
 		});
 
 		settle().await;
@@ -6080,6 +6124,39 @@ mod tests {
 			routed_now(&consumer, "room/host").is_none(),
 			"the last owner out must close the broadcast",
 		);
+	}
+
+	/// A source minted under a namespace goes once nothing holds it, so the session keeps
+	/// nothing for a path its fronts let go of, and goes at once as the namespace is
+	/// retracted, held or not.
+	#[moq_net_sim::test]
+	async fn a_minted_source_closes_unheld_or_retracted() {
+		let (subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
+		let run = |route: &kio::Producer<()>| {
+			let source = crate::model::broadcast::SourceGuard::new(origin.create_source("pool/p"));
+			let (holder, dynamic) = (source.consume(), source.dynamic());
+			let (this, route) = (subscriber.clone(), route.consume());
+			let task = moq_net_sim::spawn(async move {
+				this.run_broadcast(crate::Path::new("pool/p"), source, dynamic, Some(route))
+					.await
+			});
+			(holder, task)
+		};
+
+		let route = kio::Producer::<()>::default();
+		let (holder, task) = run(&route);
+		settle().await;
+		assert!(!task.is_finished(), "retired a source in use");
+		drop(holder);
+		settle().await;
+		assert!(task.is_finished(), "kept a source nothing holds");
+
+		let (holder, task) = run(&route);
+		settle().await;
+		drop(route);
+		settle().await;
+		assert!(task.is_finished(), "kept a source past its namespace");
+		assert!(holder.is_closed());
 	}
 
 	/// An advertisement with no path of its own (a peer that did not negotiate the
@@ -8862,9 +8939,10 @@ mod joining_fetch_tests {
 			let request = dynamic.requested_track().await.expect("no track requested");
 
 			let mut serving_subscriber = subscriber.clone();
+			let source = producer.clone();
 			let serving = moq_net_sim::spawn(async move {
 				serving_subscriber
-					.run_subscribe(Path::new("broadcast"), dynamic, request)
+					.run_subscribe(Path::new("broadcast"), source, request)
 					.await;
 			});
 

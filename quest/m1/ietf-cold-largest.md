@@ -1,4 +1,4 @@
-# [M] A cold relay reports its upstream's Largest
+# [M] A relay reports its upstream's largest
 
 ## Goal
 
@@ -7,6 +7,10 @@ upstream's Largest Location and the largest object it has received for the
 track, including when it has cached nothing yet. A relative joining FETCH
 (start 0) through a cold relay then gets the head of the current group,
 filled upstream if needed, instead of INVALID_RANGE.
+
+On lite-07 a relay's SUBSCRIBE_START reports the same maximum, so a relay
+whose recreated copy holds only older groups never makes a downstream copy
+see a false regression and end with UNROUTABLE (accepted in #5057).
 
 ## Plan
 
@@ -42,6 +46,15 @@ same Largest goes out in every response this relay sends that carries one:
 SUBSCRIBE_OK and the track-update REQUEST_OK. Inbound PUBLISH is refused
 today (`run_publish_stream`), so it is out of scope.
 
+Decided 2026-10-08: moq-lite folds in here, as one model change with two
+publishers. A lite relay's SUBSCRIBE_START takes its largest from `poll_live`,
+which returns `TrackState::largest()`, the newest visible cached group
+(`model/track.rs` ~1422 at time of writing); TRACK_INFO carries none. The
+lite publisher swaps that accessor for the same maximum at its two START
+sites. The high-watermark dies with the copy and its withheld cache:
+otherwise a relay re-reports a restarted publisher's old group and hides the
+regression a downstream copy checks for.
+
 Scrutinize the model change: keep any new track state crate-private unless a
 consumer needs it.
 
@@ -52,6 +65,10 @@ objects are behind the upstream's Largest reports the upstream's, and one
 whose cache is ahead reports its own. Regression for the high-watermark:
 create an empty newer group, expire the older object-bearing group it
 demoted, and SUBSCRIBE_OK still reports that group's received Location.
+
+On lite-07, a relay whose recreated copy holds only groups below its
+upstream's largest reports the upstream's in SUBSCRIBE_START, and a copy
+withheld after a regression reports nothing from the old instance.
 
 Public API: none expected. Wire: none new.
 

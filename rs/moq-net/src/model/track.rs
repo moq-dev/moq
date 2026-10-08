@@ -1375,15 +1375,8 @@ impl TrackState {
 		if self.feed != Feed::Idle {
 			return;
 		}
-		// Judged by what survived: the cancel that idled the copy resets the group in flight,
-		// and an answer past it leaves a gap after the newest group still cached.
-		let cached = self.idle_newest.take().and_then(|newest| {
-			self.lookup
-				.range(..=newest)
-				.rev()
-				.find(|(_, slot)| slot.is_shown())
-				.map(|(sequence, _)| *sequence)
-		});
+		let cached = self.idle_cached();
+		self.idle_newest = None;
 		self.live_floor = match (largest, cached) {
 			(Some(largest), Some(cached)) if largest.group > cached.saturating_add(1) => Some(cached + 1),
 			// The route has nothing, so whatever is cached is not its feed.
@@ -1394,6 +1387,18 @@ impl TrackState {
 			Some(largest) if !self.shows(largest.group) => Feed::Answered { from: largest.group },
 			_ => Feed::Live,
 		};
+	}
+
+	/// While idle, the newest group cached before the track went idle that readers can
+	/// still see. Judged by what survived: the cancel that idled the copy resets the group
+	/// in flight, and an answer past it leaves a gap after the newest group still cached.
+	fn idle_cached(&self) -> Option<u64> {
+		let newest = self.idle_newest.filter(|_| self.feed == Feed::Idle)?;
+		self.lookup
+			.range(..=newest)
+			.rev()
+			.find(|(_, slot)| slot.is_shown())
+			.map(|(sequence, _)| *sequence)
 	}
 
 	/// Whether readers can already see content at or past `sequence`.
@@ -1859,6 +1864,26 @@ impl Producer {
 	pub(crate) fn set_live(&mut self, largest: Option<Position>) {
 		if let Ok(mut state) = self.modify() {
 			state.set_live(largest);
+		}
+	}
+
+	/// While idle, whether the route's answer, its largest position, is below the newest
+	/// group the copy still holds. A route with one publisher instance behind it went back
+	/// in its group sequence; one with replicas may only be serving a lagging one.
+	pub(crate) fn regresses(&self, largest: Option<Position>) -> bool {
+		let state = self.state.read();
+		largest
+			.zip(state.idle_cached())
+			.is_some_and(|(largest, cached)| largest.group < cached)
+	}
+
+	/// Readers get nothing cached so far, however the track ends: it is another publisher
+	/// instance's content. An abort alone would let them drain it first.
+	pub(crate) fn withhold_cache(&mut self) {
+		if let Ok(mut state) = self.modify()
+			&& let Some(max) = state.max_sequence
+		{
+			state.live_floor = Some(max.saturating_add(1));
 		}
 	}
 
@@ -5823,6 +5848,38 @@ mod test {
 
 		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(400)));
 		assert_eq!(drain(&mut subscriber), vec![2]);
+	}
+
+	/// An idle copy judges the route's answer by the groups that survived the leave, and
+	/// once one went back below them, its readers get the copy's error and none of the old
+	/// groups an abort would otherwise let them drain.
+	#[test]
+	fn an_answer_below_the_cache_regresses() {
+		let mut producer = track_producer("test", None);
+		append_at(&mut producer, 0);
+		append_at(&mut producer, 100);
+		let mut open = producer.append_group().unwrap();
+		open.write_frame(Timestamp::from_millis(200).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		assert!(
+			!producer.regresses(Some(Position::group(0))),
+			"a live copy judges nothing"
+		);
+
+		producer.set_idle();
+		open.abort(Error::Cancel).unwrap();
+		// The leave reset group 2, so group 1 is the newest the copy still holds.
+		assert!(!producer.regresses(Some(Position::group(1))));
+		assert!(!producer.regresses(None), "a route with nothing yet");
+		assert!(producer.regresses(Some(Position::group(0))));
+
+		let mut subscriber = producer.subscribe(replay());
+		producer.withhold_cache();
+		producer.clone().abort(Error::Unroutable).unwrap();
+		assert!(matches!(
+			subscriber.recv_group().now_or_never(),
+			Some(Err(Error::Unroutable))
+		));
 	}
 
 	#[test]

@@ -77,9 +77,9 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	peer_setup: super::PeerSetup,
 	/// Local policy overriding the peer's declared egress price. See `poll_link_cost`.
 	cost: Option<u64>,
-	/// Sources created by the announce half, drained by the driver into
+	/// Sources minted by the announce half, drained by the driver into
 	/// [`SourceServe`] machines.
-	sources: kio::Queue<(PathOwned, Option<crate::Epoch>, crate::broadcast::Dynamic)>,
+	sources: kio::Queue<MintedSource>,
 	going_away: crate::goaway::GoingAway,
 	/// What this session may allocate up front for frames still arriving.
 	frames: frame::Budget,
@@ -527,7 +527,7 @@ pub(super) struct SubscriberDriver<S: crate::transport::poll::Session> {
 	bandwidth: Option<RecvBandwidth<S>>,
 	/// Datagram receive; inert on a version or transport without datagrams.
 	datagrams: Option<DatagramRecv<S>>,
-	/// One machine per announced source, serving the origin's track requests.
+	/// One machine per minted source, serving the origin's track requests.
 	sources: kio::Tasks<SourceServe<S>>,
 }
 
@@ -593,11 +593,10 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 			}
 		}
 
-		// Sources created by the announce half; their completion never ends the
+		// Sources minted by the announce half; their completion never ends the
 		// session (the origin delivers the unannounce itself).
-		while let Poll::Ready(Ok((path, epoch, dynamic))) = self.subscriber.sources.poll_pop(waiter) {
-			self.sources
-				.push(SourceServe::new(self.subscriber.clone(), path, epoch, dynamic));
+		while let Poll::Ready(Ok(minted)) = self.subscriber.sources.poll_pop(waiter) {
+			self.sources.push(SourceServe::new(self.subscriber.clone(), minted));
 		}
 		let _ = self.sources.poll(waiter);
 
@@ -1414,17 +1413,30 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 	}
 }
 
-/// Serves the origin's track requests for one announced source until the peer
-/// unannounces it (the source is finished) or the session dies. An unannounce
+/// A source the announce half minted for one requested path, for the driver to serve.
+struct MintedSource {
+	path: PathOwned,
+	/// The publisher instance the route announced, asked for on every request.
+	epoch: Option<crate::Epoch>,
+	source: crate::model::broadcast::SourceGuard,
+	/// The source's track handler, registered before its requester could ask for a track.
+	dynamic: crate::broadcast::Dynamic,
+	/// Closes when the route that minted the source goes.
+	route: kio::Consumer<()>,
+}
+
+/// Serves the origin's track requests for one minted source until it closes: its
+/// route goes, nothing holds it any more, or the session dies. A closed source
 /// takes no new tracks but lets those in flight run to their own end (moq-lite:
 /// retraction does not disturb subscriptions already in flight); the session
 /// dying drops them.
 struct SourceServe<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	path: PathOwned,
-	/// The publisher instance the route announced, asked for on every request.
 	epoch: Option<crate::Epoch>,
+	source: crate::model::broadcast::SourceGuard,
 	dynamic: crate::broadcast::Dynamic,
+	route: kio::Consumer<()>,
 	// A dedicated close-watch handle, since each pending operation needs its own.
 	closed: S,
 	tracks: kio::Tasks<TrackServeRun<S>>,
@@ -1433,18 +1445,15 @@ struct SourceServe<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> SourceServe<S> {
-	fn new(
-		subscriber: Subscriber<S>,
-		path: PathOwned,
-		epoch: Option<crate::Epoch>,
-		dynamic: crate::broadcast::Dynamic,
-	) -> Self {
+	fn new(subscriber: Subscriber<S>, minted: MintedSource) -> Self {
 		let closed = subscriber.session.clone();
 		Self {
 			subscriber,
-			path,
-			epoch,
-			dynamic,
+			path: minted.path,
+			epoch: minted.epoch,
+			source: minted.source,
+			dynamic: minted.dynamic,
+			route: minted.route,
 			closed,
 			tracks: kio::Tasks::new(),
 			ended: false,
@@ -1474,6 +1483,7 @@ impl<S: crate::transport::poll::Session> kio::Task for SourceServe<S> {
 						subscriber: self.subscriber.clone(),
 						path: self.path.clone(),
 						epoch: self.epoch.clone(),
+						source: (*self.source).clone(),
 						name: request.name().to_string(),
 					};
 					// One machine per track serves its lone subscription and any number
@@ -1485,7 +1495,21 @@ impl<S: crate::transport::poll::Session> kio::Task for SourceServe<S> {
 					tracing::debug!(%err, "source closed");
 					self.ended = true;
 				}
-				Poll::Pending => break,
+				Poll::Pending => {
+					// The route that minted the source went: close it now.
+					if self.route.poll_closed(waiter).is_ready() {
+						self.source.close();
+						continue;
+					}
+					// Nothing holds the source and no track is on its way: retire it, so
+					// what the session keeps for the path goes with the fronts that used
+					// it, and a later request asks the route afresh. Declined when a holder
+					// or a track got there first, so look again either way.
+					if self.source.poll_unheld(waiter).is_pending() {
+						break;
+					}
+					self.source.close_unheld();
+				}
 			}
 		}
 
@@ -1725,6 +1749,7 @@ mod tests {
 				subscriber,
 				path: Path::new("room").to_owned(),
 				epoch: None,
+				source: crate::broadcast::Info::new().produce(),
 				name: "video".to_string(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -1778,6 +1803,7 @@ mod tests {
 			subscriber,
 			path: Path::new("room").to_owned(),
 			epoch: None,
+			source: crate::broadcast::Info::new().produce(),
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -1947,6 +1973,7 @@ mod tests {
 				subscriber: subscriber.clone(),
 				path: Path::new("room").to_owned(),
 				epoch: None,
+				source: crate::broadcast::Info::new().produce(),
 				name: "video".to_string(),
 			},
 			request,
@@ -2004,6 +2031,7 @@ mod tests {
 					subscriber,
 					path: Path::new("room").to_owned(),
 					epoch: None,
+					source: crate::broadcast::Info::new().produce(),
 					name: "video".to_string(),
 				},
 				request,
@@ -2053,6 +2081,7 @@ mod tests {
 			subscriber,
 			path: Path::new("room/host").to_owned(),
 			epoch: None,
+			source: crate::broadcast::Info::new().produce(),
 			name: "catalog.json".to_string(),
 		};
 
@@ -2130,6 +2159,7 @@ mod tests {
 					subscriber,
 					path: Path::new("room/host").to_owned(),
 					epoch: None,
+					source: crate::broadcast::Info::new().produce(),
 					name: "catalog.json".to_string(),
 				},
 				session,
@@ -2639,6 +2669,125 @@ mod tests {
 		announced.ready.try_push(ready).unwrap();
 		announced.poll_serve(&subscriber, &kio::Waiter::noop());
 		request.await.unwrap().expect("the requested route serves it");
+	}
+
+	/// A source minted under a claim goes once nothing holds it: the front that read it
+	/// ended, so the session keeps nothing for the path, and a later request asks the
+	/// route afresh. Withdrawing the claim still closes a source in use at once.
+	#[moq_net_sim::test]
+	async fn an_unheld_source_is_retired() {
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let mut subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::sim(),
+			session: SinkSession::new(Default::default()),
+			origin: origin.clone(),
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: Default::default(),
+			cost: None,
+			peer_hop: Some(crate::Hop::new(777).unwrap()),
+			going_away: Default::default(),
+		});
+		let path = Path::new("pool").to_owned();
+		let mut announced = Announced::default();
+		subscriber
+			.start_announce(
+				path.clone(),
+				None,
+				crate::Hops::new(),
+				crate::origin::Cost::default(),
+				0,
+				None,
+				&mut announced,
+			)
+			.unwrap();
+
+		// Serve one request for `pool/p`, returning what the requester resolved and the
+		// machine serving the source minted for it.
+		async fn serve_one(
+			origin: &origin::Producer,
+			subscriber: &Subscriber<SinkSession>,
+			announced: &mut Announced,
+		) -> (crate::broadcast::Consumer, SourceServe<SinkSession>) {
+			let consumer = origin.consume();
+			let request = moq_net_sim::spawn(async move { consumer.request_broadcast("pool/p", None).await });
+			let ready = kio::wait(|waiter| announced.ready.poll_pop(waiter)).await.unwrap();
+			announced.ready.try_push(ready).unwrap();
+			announced.poll_serve(subscriber, &kio::Waiter::noop());
+			let minted = subscriber.sources.try_pop().unwrap().expect("a source was minted");
+			let resolved = request.await.unwrap().expect("resolves");
+			(resolved, SourceServe::new(subscriber.clone(), minted))
+		}
+
+		announced.poll_serve(&subscriber, &kio::Waiter::noop());
+		let (resolved, mut serve) = serve_one(&origin, &subscriber, &mut announced).await;
+		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
+
+		// The requester leaves without reading: its front ends, and the source with it.
+		drop(resolved);
+		moq_net_sim::timeout(
+			std::time::Duration::from_secs(1),
+			kio::wait(|waiter| kio::Task::poll(&mut serve, waiter)),
+		)
+		.await
+		.expect("the unheld source was retired");
+
+		// Nothing cached it for the path: the route is asked again, and withdrawing the
+		// claim closes the new source though its requester still holds it.
+		let (_resolved, mut serve) = serve_one(&origin, &subscriber, &mut announced).await;
+		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
+		announced.withdraw(&path);
+		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_ready());
+	}
+
+	/// A track read before the minted source's serve machine first runs queues for that
+	/// machine, rather than the front finding no handler and ending the track `NotFound`.
+	#[moq_net_sim::test]
+	async fn a_track_read_before_its_source_is_served_queues() {
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let mut subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::sim(),
+			session: SinkSession::new(Default::default()),
+			origin: origin.clone(),
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: Default::default(),
+			cost: None,
+			peer_hop: Some(crate::Hop::new(777).unwrap()),
+			going_away: Default::default(),
+		});
+		let mut announced = Announced::default();
+		subscriber
+			.start_announce(
+				Path::new("pool").to_owned(),
+				None,
+				crate::Hops::new(),
+				crate::origin::Cost::default(),
+				0,
+				None,
+				&mut announced,
+			)
+			.unwrap();
+		announced.poll_serve(&subscriber, &kio::Waiter::noop());
+
+		let consumer = origin.consume();
+		let request = moq_net_sim::spawn(async move { consumer.request_broadcast("pool/p", None).await });
+		let ready = kio::wait(|waiter| announced.ready.poll_pop(waiter)).await.unwrap();
+		announced.ready.try_push(ready).unwrap();
+		announced.poll_serve(&subscriber, &kio::Waiter::noop());
+		let resolved = request.await.unwrap().expect("resolves");
+
+		// The front asks the source for the track while its serve machine is still queued.
+		let track = resolved.track("video").unwrap();
+		let _subscribing = track.subscribe(None);
+		moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+
+		let minted = subscriber.sources.try_pop().unwrap().expect("a source was minted");
+		let mut serve = SourceServe::new(subscriber.clone(), minted);
+		match serve.dynamic.poll_requested_track(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(request)) => assert_eq!(request.name(), "video"),
+			other => panic!("the track never queued for the source: {:?}", other.map(|r| r.err())),
+		}
 	}
 
 	/// Every path out of `start_announce` that declines an announce records it first.
@@ -3427,8 +3576,8 @@ impl Announced {
 	}
 
 	/// Serve queued requests on every ready route: mint a source per requested
-	/// path, hand its dynamic to the driver's serve machines, and answer the
-	/// requester with its consumer.
+	/// path, answer the requester with its consumer, and hand the source to the
+	/// driver's serve machines, which own it from then on.
 	fn poll_serve<S: crate::transport::poll::Session>(&mut self, subscriber: &Subscriber<S>, waiter: &kio::Waiter) {
 		let root = subscriber.origin.root().to_owned();
 		while let Poll::Ready(Ok(path)) = self.ready.poll_pop(waiter) {
@@ -3449,13 +3598,19 @@ impl Announced {
 				};
 				let path = path.to_owned();
 				let source = subscriber.origin.create_source(&path);
-				let _ = subscriber
-					.sources
-					.try_push((path.clone(), entry.route.epoch.clone(), source.dynamic()));
+				// The handler exists before the requester sees the source, so a track it
+				// asks for before the serve machine first runs queues instead of failing
+				// `NotFound`. Accepted before the push, so the requester holds the source
+				// before its serve machine can see it unheld.
+				let dynamic = source.dynamic();
 				request.accept(&source);
-				entry
-					.sources
-					.insert(path, crate::model::broadcast::SourceGuard::new(source));
+				let _ = subscriber.sources.try_push(MintedSource {
+					path,
+					epoch: entry.route.epoch.clone(),
+					source: crate::model::broadcast::SourceGuard::new(source),
+					dynamic,
+					route: entry.live.consume(),
+				});
 			}
 		}
 	}
@@ -3469,16 +3624,16 @@ impl Announced {
 }
 
 /// One received announce: the served route announced into the origin (the
-/// advertisement plus its request queue), and the sources minted to serve
-/// requested paths beneath it.
+/// advertisement plus its request queue), which mints a source per requested path
+/// beneath it.
 struct AnnouncedRoute {
 	/// The route as last announced (post-charge), so a drain can re-price it
 	/// without recomputing the chain.
 	route: crate::origin::Route,
 	/// Dropping it retracts the route and rejects its queued requests.
 	dynamic: crate::origin::Dynamic,
-	/// One minted source per requested path, each closed when its guard drops.
-	sources: HashMap<PathOwned, crate::model::broadcast::SourceGuard>,
+	/// Closes as the route goes, which closes every source it minted.
+	live: kio::Producer<()>,
 	/// Whether the GOAWAY drain already re-priced this route.
 	drained: bool,
 	/// Queues this route on its prefix's ready set when its request queue wakes.
@@ -3493,7 +3648,7 @@ impl AnnouncedRoute {
 		Self {
 			route,
 			dynamic,
-			sources: HashMap::new(),
+			live: Default::default(),
 			drained: false,
 			waker: std::task::Waker::from(wake.clone()),
 			wake,
@@ -3563,6 +3718,9 @@ struct TrackServe<S: crate::transport::poll::Session> {
 	path: PathOwned,
 	/// The publisher instance to ask for; the peer refuses a request for another.
 	epoch: Option<crate::Epoch>,
+	/// The minted source the track belongs to, closed once the route shows it serves new
+	/// content under the name.
+	source: crate::broadcast::Producer,
 	name: String,
 }
 
@@ -4387,6 +4545,16 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 									lite::SubscribeResponse::Start(start) => {
 										// Where the live feed is, on versions whose answer says.
 										if serve.subscriber.version.has_largest() {
+											// A route without an epoch serves one instance, so a feed below what
+											// the copy cached is a publisher reusing the name for new content.
+											// The source closes first: its front ends before any reader sees the
+											// copy fail, so a reader re-requesting gets a fresh one.
+											if serve.epoch.is_none() && self.serving.regresses(start.largest) {
+												tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, largest = ?start.largest, "upstream went back in its group sequence");
+												self.serving.withhold_cache();
+												serve.source.close();
+												return Poll::Ready(ServeEnd::GiveBack(Error::Unroutable));
+											}
 											self.serving.set_live(start.largest);
 										}
 										// A START describes the demand the SUBSCRIBE carried.

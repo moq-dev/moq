@@ -13,7 +13,7 @@
 //! already serves.
 //!
 //! A route swap on one front is swept over its tracks and the copies each track
-//! still holds from earlier routes.
+//! still holds from earlier routes, and a front retiring over the fronts around it.
 //!
 //! Run with `cargo bench -p moq-net --bench origin`.
 
@@ -424,6 +424,36 @@ fn bench_request(c: &mut Criterion) {
 					.now_or_never()
 					.expect("fails synchronously");
 				assert!(matches!(result, Err(moq_net::Error::Unroutable)));
+			});
+		});
+	}
+	group.finish();
+}
+
+/// A front minted, resolved, and retired once its holder leaves, among `fronts`
+/// others held open. A retiring front leaves the table it shares with them, so a
+/// cost that grows with the table rather than with the one path shows up as a slope.
+fn bench_retire(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/retire");
+	for fronts in [100, 1_000, 10_000] {
+		group.bench_function(BenchmarkId::from_parameter(format!("{fronts}f")), |b| {
+			let mut fleet = fanout(fronts + 1, 0);
+			let waiter = kio::Waiter::noop();
+			let held: Vec<_> = (0..fronts)
+				.map(|i| fleet.consumer.request_broadcast(format!("room/{i}"), None))
+				.collect();
+			fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+			let _held: Vec<_> = held
+				.into_iter()
+				.map(|pending| pending.now_or_never().expect("resolved once driven").expect("local"))
+				.collect();
+			let path = format!("room/{fronts}");
+			b.iter(|| {
+				let pending = fleet.consumer.request_broadcast(&path, None);
+				fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+				drop(pending.now_or_never().expect("resolved once driven").expect("local"));
+				// Nothing holds it and a local source keeps no track, so it retires here.
+				fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
 			});
 		});
 	}
@@ -849,6 +879,7 @@ criterion_group!(
 	bench_serve_idle,
 	bench_subscribe,
 	bench_request,
+	bench_retire,
 	bench_pool_churn,
 	bench_handoff,
 	bench_relay,

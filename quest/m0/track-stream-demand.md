@@ -67,5 +67,4 @@ fields.
 
 ## Related
 
-- [Idle fronts](/quest/m0/idle-fronts.md) - found in the same transcode-pool report
 - [#4225](https://github.com/moq-dev/moq/pull/4225) - holds a lite subscription's demand in the same publisher code; expect a conflict

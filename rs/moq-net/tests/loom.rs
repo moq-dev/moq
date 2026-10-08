@@ -26,7 +26,7 @@
 
 use bytes::Bytes;
 use loom::{future::block_on, thread};
-use moq_net::{Error, Timestamp, broadcast, cache};
+use moq_net::{Error, Hop, Timestamp, broadcast, cache, origin};
 
 /// Preemptions per execution unless `LOOM_MAX_PREEMPTIONS` overrides it. Loom's own
 /// guidance is that 2 or 3 catches most bugs, and each extra level multiplies the
@@ -328,5 +328,32 @@ fn a_fetch_never_joins_a_withdrawn_attempt() {
 		};
 		request.accept(None).expect("accept").finish().expect("finish");
 		block_on(retry).expect("the retry resolves");
+	});
+}
+
+/// A request racing the front it joins as that front retires: the last holder lets go
+/// while the origin's driver runs. The request either holds the front in time, which
+/// keeps it, or finds it closed and mints a fresh one. Being handed the broadcast of a
+/// front that is ending is the bug, and shows up here as a closed broadcast.
+#[test]
+fn a_request_never_joins_a_retiring_front() {
+	model(|| {
+		let (producer, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+		let consumer = producer.consume();
+		let _broadcast = producer.publish("room", origin::Route::default()).unwrap();
+		let waiter = kio::Waiter::noop();
+		let now = moq_net::time::Instant::now();
+
+		let pending = consumer.request_broadcast("room", None);
+		driver.poll(now, &waiter).unwrap();
+		let first = block_on(pending).expect("resolves");
+
+		let requester = thread::spawn(move || consumer.request_broadcast("room", None));
+		drop(first);
+		driver.poll(now, &waiter).unwrap();
+		let pending = requester.join().unwrap();
+		driver.poll(now, &waiter).unwrap();
+		let resolved = block_on(pending).expect("resolves");
+		assert!(!resolved.is_closed(), "handed a front that is ending");
 	});
 }
