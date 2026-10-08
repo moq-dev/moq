@@ -44,6 +44,8 @@ pub struct MockConnectOptions {
 	pub server_subscribe: Option<origin::Producer>,
 	/// One-way delay for stream data in each direction.
 	pub latency: std::time::Duration,
+	/// What the client may make the server's session hold, when not the default.
+	pub server_limits: Option<moq_net::session::Limits>,
 }
 
 impl MockConnectOptions {
@@ -56,6 +58,7 @@ impl MockConnectOptions {
 			server_publish: None,
 			server_subscribe: None,
 			latency: std::time::Duration::ZERO,
+			server_limits: None,
 		}
 	}
 }
@@ -100,6 +103,9 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	}
 	if let Some(subscribe) = opts.server_subscribe {
 		server = server.with_subscriber(subscribe);
+	}
+	if let Some(limits) = opts.server_limits {
+		server = server.with_limits(limits);
 	}
 
 	// Run both handshakes concurrently and spawn each side's driver

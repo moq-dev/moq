@@ -13,7 +13,7 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
 
-use super::{Message, Version, cluster, error::request, peer};
+use super::{Message, Version, cluster, error::request, group::ObjectExtensionsLength, peer};
 use crate::tail::{Reading, Settle, Tail};
 
 use kio::Lock;
@@ -538,6 +538,9 @@ struct BroadcastState {
 	// One minted source per requested path under the namespace, each closed
 	// when its guard drops.
 	sources: HashMap<PathOwned, crate::model::broadcast::SourceGuard>,
+
+	// Counts this namespace against the session's announce cap until it is retracted.
+	_slot: crate::session::Slot,
 }
 
 /// What one advertisement said, once its parameters are resolved against the session.
@@ -581,6 +584,8 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	going_away: crate::goaway::GoingAway,
 	// What this session may allocate up front for objects still arriving.
 	frames: frame::Budget,
+	// Namespaces the peer may have announced at once (`session::Limits::announces`).
+	pub(super) announces: crate::session::Slots,
 }
 
 /// The prefixes to issue SUBSCRIBE_NAMESPACE for: `origin`'s permitted scope,
@@ -662,6 +667,7 @@ where
 			version,
 			going_away,
 			frames: Default::default(),
+			announces: Default::default(),
 		}
 	}
 
@@ -871,7 +877,7 @@ where
 				let msg = ietf::SubscribeNamespaceLegacy {
 					request_id,
 					namespace: prefix.clone(),
-					subscribe_options: 0x01, // NAMESPACE only
+					subscribe_options: ietf::SubscribeOptions::Namespace,
 					hidden,
 				};
 				stream.writer.varint(ietf::SubscribeNamespaceLegacy::ID).await?;
@@ -1544,6 +1550,12 @@ where
 				Ok(())
 			}
 			Entry::Vacant(entry) => {
+				// A peer past its limits loses the session, not just this namespace.
+				let slot = self.announces.acquire().inspect_err(|err| {
+					self.session
+						.clone()
+						.close(crate::SessionError::from(err).to_code(), "too many announcements");
+				})?;
 				// Propagates Error::Unauthorized if the namespace is out of scope.
 				let dynamic = self.origin.dynamic(&path, route.clone())?;
 
@@ -1552,6 +1564,7 @@ where
 					dynamic,
 					count: 1,
 					sources: HashMap::new(),
+					_slot: slot,
 				});
 
 				tracing::debug!(route = %self.origin.absolute(&path), "announce");
@@ -2799,25 +2812,6 @@ const END_OF_GROUP: u64 = 0x3;
 /// Object status: no object at or past this location exists (every implemented draft).
 const END_OF_TRACK: u64 = 0x4;
 
-// Implementation limit for object extension blocks, independent of the IETF draft.
-const MAX_OBJECT_EXTENSIONS: usize = 64 * 1024;
-
-#[derive(Debug)]
-struct ObjectExtensionsLength(usize);
-
-impl Decode<Version> for ObjectExtensionsLength {
-	fn decode(buf: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
-		let size = usize::try_from(buf.varint()?).map_err(|_| DecodeError::BoundsExceeded)?;
-		if size > MAX_OBJECT_EXTENSIONS {
-			return Err(DecodeError::MessageTooLarge {
-				size,
-				max: MAX_OBJECT_EXTENSIONS,
-			});
-		}
-		Ok(Self(size))
-	}
-}
-
 /// The start of a subgroup stream's first object, peeked before its group is created.
 #[derive(Debug, Clone, Copy)]
 struct FirstObject {
@@ -3839,8 +3833,7 @@ async fn decode_fetch_object<R: crate::transport::poll::RecvStream>(
 		let subgroup = stream.varint().await?;
 		let object = stream.varint().await?;
 		let _priority = stream.read_exact(1).await?;
-		let size = usize::try_from(stream.varint().await?)
-			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+		let ObjectExtensionsLength(size) = stream.decode().await?;
 		let properties = stream.read_exact(size).await?.to_vec();
 		return Ok(Some(FetchedObject {
 			group: Some(group),
@@ -4137,6 +4130,39 @@ mod tests {
 		} else {
 			assert!(matches!(result, Err(Error::ProtocolViolation)));
 		}
+	}
+
+	/// Draft-14 frames a fetch object's properties with a bare length, which is refused at
+	/// the prefix rather than buffered while the peer trickles the rest in.
+	#[moq_net_sim::test]
+	async fn draft14_fetch_properties_are_capped() {
+		use crate::lite::test_transport::ScriptedSession;
+		use crate::transport::poll::Session as _;
+		use futures::FutureExt as _;
+
+		const VERSION: Version = Version::Draft14;
+		let mut wire = Vec::new();
+		for field in [0u64, 0, 0] {
+			crate::coding::Encoder::new(&mut wire, VERSION.into())
+				.varint(field)
+				.unwrap();
+		}
+		wire.push(0);
+		crate::coding::Encoder::new(&mut wire, VERSION.into())
+			.varint((super::super::group::MAX_OBJECT_EXTENSIONS + 1) as u64)
+			.unwrap();
+
+		let mut session = ScriptedSession::new(wire);
+		let (_, recv) = session.open_bi().await.unwrap();
+		let mut reader = Reader::new(recv, VERSION);
+		let result = decode_fetch_object(&mut reader, VERSION, true)
+			.now_or_never()
+			.expect("refused at the prefix, not parked on the body");
+		assert!(
+			matches!(result, Err(Error::Decode(DecodeError::MessageTooLarge { .. }))),
+			"{:?}",
+			result.err()
+		);
 	}
 
 	fn fin_responses(clean: bool) -> Vec<u8> {
@@ -5394,6 +5420,57 @@ mod tests {
 		assert_eq!(table.retired.len(), RETIRED_ALIAS_CAPACITY);
 		assert_eq!(table.map.len(), RETIRED_ALIAS_CAPACITY);
 		assert!(!table.map.contains_key(&0), "the oldest tombstone is forgotten first");
+	}
+
+	/// A namespace past the session's cap closes the session with TOO_MANY_REQUESTS, a
+	/// repeat of a held namespace costs nothing, and a retraction frees its slot.
+	#[moq_net_sim::test]
+	async fn namespaces_past_the_cap_close_the_session() {
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let log = session.log.clone();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			crate::time::Clock::sim(),
+			session,
+			origin,
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			Version::Draft14,
+			tasks,
+			Default::default(),
+		);
+		subscriber.announces = crate::session::Slots::new(1);
+
+		let advert = |subscriber: &Subscriber<_>| subscriber.route(None, &cluster::Peer::default()).expect("route");
+		let a = crate::Path::new("a").to_owned();
+		let b = crate::Path::new("b").to_owned();
+		let (first, repeat, over, last) = (
+			advert(&subscriber),
+			advert(&subscriber),
+			advert(&subscriber),
+			advert(&subscriber),
+		);
+		subscriber.start_announce(a.clone(), first).unwrap();
+		subscriber.start_announce(a.clone(), repeat).unwrap();
+		assert!(matches!(
+			subscriber.start_announce(b.clone(), over),
+			Err(Error::TooManyRequests)
+		));
+		assert_eq!(
+			log.closes(),
+			vec![(
+				crate::SessionError::TooManyRequests.to_code(),
+				"too many announcements".to_string()
+			)]
+		);
+
+		subscriber.stop_announce(a.clone()).unwrap();
+		subscriber.stop_announce(a).unwrap();
+		subscriber.start_announce(b, last).unwrap();
 	}
 
 	/// moq-transport carries no hop ids, so a peer's broadcasts are marked

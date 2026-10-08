@@ -85,6 +85,25 @@ received tracks cleanly after their delivered groups. A peer close ends
 received tracks and open group readers with the session error, preserving its
 close code.
 
+### Session limits
+
+`Client::with_limits` and `Server::with_limits` take a `session::Limits`, which
+caps what the peer can make one session hold: `announces` (broadcasts, or
+moq-transport namespaces) and `subscriptions`. The defaults (100,000 and
+10,000) suit a relay mesh; lower them for untrusted peers. A peer that goes
+past either cap loses the session, closed with `TOO_MANY_REQUESTS`. Each
+auth root's stats `sessions` row reports `announces_peak` and
+`subscriptions_peak`, the most any one session held, so an operator sees how
+close sessions come. On moq-transport drafts 14 to 16 the limits also size the
+`MAX_REQUEST_ID` window advertised in SETUP, granted back as requests close.
+That window counts every request, FETCH and SUBSCRIBE\_UPDATE included, so very
+low limits can starve it. A request ID past it also closes the session with
+`TOO_MANY_REQUESTS`, as the draft requires.
+
+Every length a peer declares is capped before it is buffered: 65,535 bytes for
+a moq-lite control message (`ANNOUNCE_INIT` on lite 01 and 02 excepted) and
+64 KiB for an object's property block.
+
 `origin::Producer::new` returns a driver with the same `time::Driver`
 interface. It calls `cache::Pool::gc(now)` after each poll and folds the next
 cleanup time into its returned deadline. A standalone pool needs `gc(now)`
