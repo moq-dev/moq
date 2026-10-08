@@ -1260,11 +1260,10 @@ impl Session {
 	/// Count `live` as what this session holds against `cap`, so a tier change carries it.
 	pub(crate) fn track_held(&self, cap: Cap, live: &Arc<AtomicUsize>) {
 		let Some(inner) = &self.inner else { return };
-		inner
-			.held
-			.lock()
-			.expect("stats session poisoned")
-			.push((cap, Arc::downgrade(live)));
+		let mut held = inner.held.lock().expect("stats session poisoned");
+		// A context reused across reconnects registers again each time: drop the gone ones.
+		held.retain(|(_, live)| live.strong_count() > 0);
+		held.push((cap, Arc::downgrade(live)));
 	}
 
 	/// Record that this session holds `held` of what `cap` limits, raising that peak on its

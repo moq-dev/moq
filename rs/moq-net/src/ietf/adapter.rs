@@ -859,11 +859,11 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 					self.shared.open_incoming(request_id, raw, permit)?
 				}
 				Route::Response(request_id) => self.shared.push(request_id, raw),
-				Route::FollowUp(request_id) => {
+				Route::FollowUp { own, target } => {
 					// SUBSCRIBE_UPDATE takes a request ID of its own (draft-14 section 9.1),
 					// done as soon as it is delivered, so it is granted straight back.
-					drop(self.control.accept(request_id)?);
-					self.shared.push(request_id, raw)
+					drop(self.control.accept(own)?);
+					self.shared.push(target, raw)
 				}
 				Route::CloseStream(request_id) => self.shared.close(request_id, raw),
 				Route::MaxRequestId(max) => self.control.max_request_id(max),
@@ -1011,8 +1011,9 @@ fn classify(type_id: u64, body: &Bytes, version: Version, namespaces: &Namespace
 
 		// Follow-up messages: route to the request being updated, not the update's own id.
 		ietf::SubscribeUpdate::ID => {
-			let id = decode_update_target(body, version)?;
-			Ok(Route::FollowUp(id))
+			let own = decode_request_id(body, version)?;
+			let target = decode_update_target(body, version)?;
+			Ok(Route::FollowUp { own, target })
 		}
 
 		// Close stream messages
@@ -1188,7 +1189,11 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 enum Route {
 	NewRequest(RequestId),
 	Response(RequestId),
-	FollowUp(RequestId),
+	/// An update: its own request ID counts against the window, and it goes to `target`.
+	FollowUp {
+		own: RequestId,
+		target: RequestId,
+	},
 	CloseStream(RequestId),
 	MaxRequestId(RequestId),
 	/// Nothing to route: the message named a request that is already gone.
@@ -1336,9 +1341,12 @@ mod tests {
 			};
 			let body = encode_body(&update, version);
 			let raw = encode_raw(ietf::SubscribeUpdate::ID, &body, version);
-			let Route::FollowUp(routed) = classify_msg(version, ietf::SubscribeUpdate::ID, &body).unwrap() else {
+			let Route::FollowUp { own, target: routed } =
+				classify_msg(version, ietf::SubscribeUpdate::ID, &body).unwrap()
+			else {
 				panic!("{version} did not route the update as a follow-up");
 			};
+			assert_eq!(own, update_id, "{version}");
 
 			let shared = Arc::new(Shared::default());
 			shared
@@ -1812,6 +1820,7 @@ mod tests {
 	async fn windowed(
 		window: u64,
 		ids: &[u64],
+		then: &[u8],
 	) -> (
 		ControlStreamAdapter<crate::lite::test_transport::ScriptedSession>,
 		Reader<crate::lite::test_transport::ScriptedRecv, Version>,
@@ -1827,6 +1836,7 @@ mod tests {
 			let body = make_body_with_request_id(*id, VERSION);
 			script.extend_from_slice(&encode_raw(ietf::Subscribe::ID, &body, VERSION));
 		}
+		script.extend_from_slice(then);
 		let mut session = ScriptedSession::new(script);
 		let (_, recv) = session.open_bi().await.unwrap();
 		// We are the server, so the client's request IDs are even.
@@ -1841,7 +1851,30 @@ mod tests {
 	/// draft's TOO_MANY_REQUESTS, before the request is queued.
 	#[moq_net_sim::test]
 	async fn a_request_past_the_window_closes_the_session() {
-		let (adapter, reader, writer, _) = windowed(1, &[0, 2]).await;
+		let (adapter, reader, writer, _) = windowed(1, &[0, 2], &[]).await;
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let err = adapter.run(reader, writer, goaway).await.unwrap_err();
+		assert!(
+			matches!(err, Error::Session(crate::SessionError::TooManyRequests)),
+			"{err:?}"
+		);
+	}
+
+	/// An update's own request ID counts against the window, not the subscription it targets.
+	#[moq_net_sim::test]
+	async fn an_update_past_the_window_closes_the_session() {
+		const VERSION: Version = Version::Draft14;
+		let update = ietf::SubscribeUpdate {
+			request_id: RequestId(4),
+			subscription_request_id: Some(RequestId(0)),
+			start_location: ietf::Location { group: 0, object: 0 },
+			end_group: 0,
+			subscriber_priority: 1,
+			forward: true,
+		};
+		let update = encode_raw(ietf::SubscribeUpdate::ID, &encode_body(&update, VERSION), VERSION);
+		// The target is in the window and the update's own ID is past it.
+		let (adapter, reader, writer, _) = windowed(2, &[0], &update).await;
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let err = adapter.run(reader, writer, goaway).await.unwrap_err();
 		assert!(
@@ -1856,7 +1889,7 @@ mod tests {
 		use crate::transport::poll::Session as _;
 
 		const VERSION: Version = Version::Draft14;
-		let (mut adapter, reader, writer, log) = windowed(2, &[0, 2]).await;
+		let (mut adapter, reader, writer, log) = windowed(2, &[0, 2], &[]).await;
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let runner = adapter.clone();
 		let mut run = std::pin::pin!(runner.run(reader, writer, goaway));
