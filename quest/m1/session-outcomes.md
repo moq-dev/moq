@@ -2,13 +2,13 @@
 
 ## Goal
 
-The relay's `sessions.json` stats track carries, per root and tier, how many
-sessions were refused, by reason, and how many ended abnormally, by kind:
-idle timeout, transport error, application error, or token expired. A
-dashboard computes an error rate from the stats feed alone, with no log
-scraping. An embedder that decides admission (a CDN's auth layer) can count a
-refusal against the root it resolved, since a refused session never gets a
-stats context of its own.
+The relay's session stats carry, per tier in [stats-split](/quest/m0/broadcast-epoch/stats-split.md)'s
+totals and per root in its requested per-root track, how many sessions were
+refused, by reason, and how many ended abnormally, by kind: idle timeout,
+transport error, application error, or token expired. A dashboard computes an
+error rate from the stats feed alone, with no log scraping. An embedder that
+decides admission (a CDN's auth layer) can count a refusal against the root it
+resolved, since a refused session never gets a stats context of its own.
 
 ## Plan
 
@@ -37,21 +37,22 @@ rolling out browser playback wants an error rate it cannot see client-side):
 - **Wire shape:** `Presence` gains `sessions_refused` and `sessions_failed`,
   each a map from reason or kind to a cumulative count. `sessions_ended` stays
   the total, so the live count (`sessions_started - sessions_ended`) is
-  unchanged. Old readers ignore the new fields; the aggregator sums them
-  keyed by reason.
-- **Outcomes survive a node leaving.** `Presence` is not sticky
-  (`rs/moq-stats/src/aggregate.rs`): a departed node's entry drops, so summed
-  outcome maps would fall on a disconnect and jump back on reconnect. Keep a
-  departed node's outcome counts in the merged view, as `Traffic` keeps its
-  cumulative counters, while its live sessions still leave the count. The PR
-  picks the shape: a sticky `Presence` whose retire closes `sessions_ended` up
-  to `sessions_started` (recommended, mirrors `Traffic`), or a separate sticky
-  outcomes value.
+  unchanged. They ride stats-split's totals and per-root track, not
+  `sessions.json`, which stats-split retires (quest audit, 2026-10-08).
+- **Outcomes follow stats-split's counter rules.** A pruned root folds its
+  counts into the group totals, and the aggregator merges with a baseline per
+  upstream (node, epoch), so a node leaving or returning never reads as new
+  errors or a drop.
 - Tests: an expired token, a forbidden path, and an embedder refusal on a
   named tier each count under the right root, tier, and reason; a clean close,
   an idle timeout, and a peer application error each count as their kind; the
-  aggregator sums both maps across nodes and keeps a departed node's counts
-  unchanged through its departure and return while another node stays.
+  aggregator sums both maps across nodes, and a node departing and returning
+  while another stays leaves the merged counts unchanged.
+
+## Required
+
+- [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) -
+  the totals and per-root track these counters ride, replacing `sessions.json`
 
 ## Related
 
