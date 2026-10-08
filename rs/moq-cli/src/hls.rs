@@ -43,8 +43,9 @@ pub struct ExportArgs {
 	pub cors: crate::web::Cors,
 }
 
-/// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `target.name`.
-pub async fn import(target: ImportTarget, playlist: String) -> anyhow::Result<()> {
+/// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `target.name`,
+/// announced under `epoch`.
+pub async fn import(target: ImportTarget, playlist: String, epoch: moq_net::Epoch) -> anyhow::Result<()> {
 	let ImportTarget {
 		origin,
 		name,
@@ -60,7 +61,7 @@ pub async fn import(target: ImportTarget, playlist: String) -> anyhow::Result<()
 		.with_bandwidth(bandwidth);
 	let catalog = moq_mux::catalog::Producer::new(&mut producer, config)?;
 	producer
-		.announce(moq_tokio::moq_net::origin::Route::default().with_epoch(moq_tokio::moq_net::Epoch::mint()))
+		.announce(moq_net::origin::Route::default().with_epoch(epoch))
 		.context("failed to announce broadcast")?;
 
 	let playlist = playlist_url(&playlist)?;

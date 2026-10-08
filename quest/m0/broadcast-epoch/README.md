@@ -22,7 +22,7 @@ their routes carry no epoch, and see a restart as an end and start at the
 same path.
 
 Non-goals: pooling, which needs nothing here; a redundant pair shares an
-explicit epoch through [`--hop` removal](/quest/m0/broadcast-epoch/hop-removal.md).
+explicit epoch through `moq --epoch`.
 Also out of scope: trusting the publisher's clock (a far-future epoch wins
 until its route goes away).
 
@@ -82,9 +82,7 @@ newest epoch falls back to a still-live older one.
 
 - [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web restart into a new epoch and reset on the switch
 - [Restart](/quest/m0/broadcast-epoch/restart.md) - a replaced broadcast reaches announce consumers as an explicit Restart, subscriptions stay sticky, and new requests never join a replaced route's front
-- [Gateways](/quest/m0/broadcast-epoch/gateways.md) - RTMP, SRT, and WHIP ingest mint an epoch per incoming connection, so an encoder reconnect is a clean takeover
 - [TS restart](/quest/m0/broadcast-epoch/ts-restart.md) - a signalled backward TS discontinuity finishes the broadcast and continues the same input under a fresh epoch
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
-- [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - `moq` takes an optional `--epoch` instead of `--hop`, a plain publisher declares a random Hop ID, and the per-session hop stamp is gone
 - [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md) - moq-stats publishes each group announcement under its own epoch, so neither a restarted node nor a returning idle group stalls its viewers
 - [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the same release retires the per-path stats maps for totals and on-demand prefix tracks (decided 2026-10-05)

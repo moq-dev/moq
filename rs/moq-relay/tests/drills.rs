@@ -104,13 +104,18 @@ impl Path {
 	/// [`Self::start`], treating the impaired lane to `profile` both ways with
 	/// the shaper seeded by `seed`.
 	async fn shaped(lane: Lane, relay: &RelayHost, profile: moq_shaper::Profile, seed: u64) -> Self {
-		let Lane::Impaired = lane else {
-			return Self {
+		match lane {
+			Lane::Loopback => Self {
 				url: relay.url(),
 				shaper: None,
-			};
-		};
+			},
+			Lane::Impaired => Self::through(relay, profile, seed).await,
+		}
+	}
 
+	/// A shaper in front of `relay` in any lane, treating the path to `profile`
+	/// both ways, seeded by `seed`.
+	async fn through(relay: &RelayHost, profile: moq_shaper::Profile, seed: u64) -> Self {
 		let shaper = moq_shaper::Shaper::bind(moq_shaper::Config {
 			bind: "127.0.0.1:0".parse().unwrap(),
 			target: format!("127.0.0.1:{}", relay.port).parse().unwrap(),
@@ -120,7 +125,7 @@ impl Path {
 		})
 		.await
 		.expect("start the shaper");
-		println!("impaired: seed {seed}, profile {:?}", shaper.config().up);
+		println!("shaper: seed {seed}, profile {:?}", shaper.config().up);
 
 		Self {
 			url: format!("https://{}/drill", shaper.addr()).parse().unwrap(),
@@ -134,8 +139,8 @@ impl Path {
 	/// loopback run that passes for free.
 	fn verify(mut self) {
 		if let Some(shaper) = self.shaper.take() {
-			let stats = shaper.verify().unwrap_or_else(|err| panic!("impaired: {err:#}"));
-			println!("impaired: {stats}");
+			let stats = shaper.verify().unwrap_or_else(|err| panic!("shaper: {err:#}"));
+			println!("shaper: {stats}");
 		}
 	}
 
@@ -167,7 +172,7 @@ impl Drop for Path {
 	fn drop(&mut self) {
 		// A drill that failed before `verify` still reports what the path did.
 		if let Some(shaper) = &self.shaper {
-			println!("impaired: {}", shaper.stats());
+			println!("shaper: {}", shaper.stats());
 		}
 	}
 }
@@ -285,19 +290,25 @@ fn quic() -> moq_tokio::quic::Config {
 
 /// [`client`], with `quic` as its transport tuning.
 fn client_over(url: &url::Url, quic: moq_tokio::quic::Config) -> moq_tokio::Client {
-	let mut config = moq_tokio::connect::Config::default();
+	let mut config = dial();
 	config.url = Some(url.clone());
+	config.init(quic).expect("client init")
+}
+
+/// How a drill's clients, and a relay dialing a peer, connect: trusting the
+/// generated certificate, over QUIC only, from an ephemeral loopback port.
+fn dial() -> moq_tokio::connect::Config {
+	let mut config = moq_tokio::connect::Config::default();
 	config.bind = Some("127.0.0.1:0".parse().expect("parse client bind"));
 	config.tls.insecure = Some(true);
 	config.websocket.enabled = Some(false);
 
-	// Fast enough to keep a relay bounce inside the drill's budget, paced enough
-	// that the loop is still a backoff.
+	// Fast enough to keep a relay bounce or a link flap inside the drill's
+	// budget, paced enough that the loop is still a backoff.
 	config.backoff.initial = Duration::from_millis(50);
 	config.backoff.max = Duration::from_millis(200);
 	config.backoff.timeout = Duration::from_secs(5);
-
-	config.init(quic).expect("client init")
+	config
 }
 
 /// Append one finished group carrying `payload`.
@@ -800,8 +811,10 @@ enum Outcome {
 enum Step {
 	/// The live subscription's next group.
 	Group(Box<moq_net::Result<Option<moq_net::group::Consumer>>>),
-	/// A group read or FETCH finished.
-	Settled(u64, Outcome),
+	/// A group read or FETCH, made through the numbered subscription, finished.
+	Settled(u64, Outcome, u64),
+	/// A route to this path started (`true`) or ended (`false`).
+	Route(String, bool),
 }
 
 /// Read the one frame of group `sequence`, checking it is the payload written there.
@@ -835,20 +848,92 @@ fn payload(sequence: u64) -> Vec<u8> {
 /// that stalled. The newest group has to come over the live subscription, since
 /// nothing newer can replace it.
 async fn bursts_cross_a_cluster(lane: Lane) {
+	cross_cluster(lane, PeerLink::Steady).await
+}
+
+lanes!(bursts_cross_a_cluster);
+
+/// Drill: [`bursts_cross_a_cluster`], with the peer link flapping mid-recovery.
+///
+/// The link between the relays is cut as the second burst is written, once the
+/// first has started arriving, so the first burst's gap FETCHes are in flight and
+/// the second is stranded at the origin. It stays down until the subscriber sees the edge withdraw the route, then
+/// comes back and the edge redials. That is a route flap: the regression for the
+/// groups 0.15.6 dropped across one (#4349). The subscriber re-subscribes once
+/// the route returns, and every read or FETCH the flap failed is claimed again
+/// through it, the way an app recovering a control channel would.
+///
+/// The grading stays as strict: the publisher keeps every group, so each still
+/// arrives within [`SETTLE`] of being written, or of the route coming back when it
+/// arrives after that, or fails the drill by name. Only a failure the flap caused
+/// is retried; a read or FETCH on the dead route that outlasts the relays' idle
+/// timeout, or a withdrawal while the link was up, still fails it.
+async fn bursts_cross_a_flapping_peer(lane: Lane) {
+	cross_cluster(lane, PeerLink::Flapping).await
+}
+
+lanes!(bursts_cross_a_flapping_peer);
+
+/// Whether the cross-relay drill's peer link stays up or flaps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PeerLink {
+	Steady,
+	Flapping,
+}
+
+/// The burst a flapping peer link is cut just before: after one that started
+/// crossing the link, and before the bursts that prove the restored route carries on.
+const FLAP_BURST: u64 = 1;
+
+/// Where a flapping peer link stands.
+enum Flap {
+	/// Not cut, or never will be.
+	Up,
+	/// Cut at `at`, with the route over it still announced.
+	Cut {
+		outage: moq_shaper::Outage,
+		at: tokio::time::Instant,
+	},
+	/// The edge withdrew the route after the link was down for `cut`. The link
+	/// is back and the edge redials.
+	Withdrawn { cut: Duration },
+	/// The route came back and the subscriber re-subscribed through it.
+	Restored { cut: Duration },
+}
+
+impl Flap {
+	/// Whether the route is down or going, so a read or FETCH through it may fail.
+	fn flapping(&self) -> bool {
+		matches!(self, Flap::Cut { .. } | Flap::Withdrawn { .. })
+	}
+}
+
+async fn cross_cluster(lane: Lane, link: PeerLink) {
+	// The relays keep the default idle timeout. The drills' 2s one would also
+	// bound each relay's side of an impaired handshake, which can sit silent
+	// that long between the client's backed-off retransmits. So a cut peer link
+	// idles out only after `relay_idle`, which the flap's waits allow for.
 	let mut config = relay_config(None);
 	config.quic = credit(lane, config.quic);
+	let relay_idle = config.quic.idle_timeout;
 	let origin = RelayHost::start(config).await;
 	let seed = seed(lane);
-	let peer = Path::shaped(lane, &origin, bursty(), seed).await;
+	let peer = match (link, lane) {
+		(PeerLink::Steady, _) => Path::shaped(lane, &origin, bursty(), seed).await,
+		// Cutting the link takes a shaper on it, so loopback gets one that forwards untouched.
+		(PeerLink::Flapping, Lane::Loopback) => Path::through(&origin, Default::default(), seed).await,
+		(PeerLink::Flapping, Lane::Impaired) => Path::through(&origin, bursty(), seed).await,
+	};
 
 	// The edge relay dials the origin as a cluster peer, through its own path.
 	let mut peer_url = peer.url.clone();
 	peer_url.set_path("/");
 	let mut config = relay_config(None);
 	config.quic = credit(lane, config.quic);
-	config.connect.bind = Some("127.0.0.1:0".parse().unwrap());
-	config.connect.tls.insecure = Some(true);
-	config.connect.websocket.enabled = Some(false);
+	config.connect = dial();
+	// Retry forever: a give-up after a slow impaired handshake would look exactly
+	// like the never-redialed regression, and a stall still fails the drill.
+	config.connect.backoff.timeout = Duration::ZERO;
 	config.cluster.connect = vec![moq_relay::cluster::Peer::new(peer_url.to_string())];
 	let edge = RelayHost::start(config).await;
 
@@ -874,6 +959,7 @@ async fn bursts_cross_a_cluster(lane: Lane) {
 
 	let subscriber = moq_tokio::origin::spawn();
 	let subscribed = subscriber.consume();
+	let mut announced = subscribed.announced();
 	let url = subscribe_path.url.clone();
 	let subscribe_session = tokio::time::timeout(
 		TIMEOUT,
@@ -896,102 +982,175 @@ async fn bursts_cross_a_cluster(lane: Lane) {
 
 	let total = BURSTS * BURST_GROUPS;
 	let mut written = Vec::new();
-	let burst = |track: &mut moq_net::track::Producer, written: &mut Vec<tokio::time::Instant>| {
+	let mut flap = Flap::Up;
+	// Write the next burst, cutting a flapping link just before the flap burst.
+	// A burst is written without yielding, so a cut partway through it would
+	// still land before any of it left the publisher.
+	let burst = |track: &mut moq_net::track::Producer, written: &mut Vec<tokio::time::Instant>, flap: &mut Flap| {
+		if link == PeerLink::Flapping && written.len() as u64 == FLAP_BURST * BURST_GROUPS {
+			let outage = peer.shaper.as_ref().expect("a flapping link has a shaper").cut();
+			*flap = Flap::Cut {
+				outage,
+				at: tokio::time::Instant::now(),
+			};
+		}
 		for _ in 0..BURST_GROUPS {
 			let sequence = written.len() as u64;
 			write_group(track, &payload(sequence));
 			written.push(tokio::time::Instant::now());
 		}
 	};
-	burst(&mut track, &mut written);
+	burst(&mut track, &mut written, &mut flap);
 
 	// Each group is claimed once, by the subscription or by a FETCH, and settles
 	// in `pending`. A live group that fails is a gap like any other, so it is
-	// FETCHed in turn.
+	// FETCHed in turn. Each read and FETCH is tagged with the subscription it went
+	// through, counted from zero, so one the flap took down can be told apart.
 	let mut claimed = std::collections::BTreeSet::new();
 	let mut live = std::collections::BTreeSet::new();
 	let mut outcomes = std::collections::BTreeMap::new();
 	let mut pending = tokio::task::JoinSet::new();
 	let mut resets = Vec::new();
+	let mut flapped = Vec::new();
 	let mut slowest = (Duration::ZERO, 0);
-	let fetch = |pending: &mut tokio::task::JoinSet<_>, track: &moq_net::track::Consumer, sequence: u64| {
-		let fetching = track.fetch_group(sequence, None);
-		pending.spawn(async move {
-			let fetched = tokio::time::timeout(SETTLE, async {
-				let group = fetching.await.map_err(|err| err.to_string())?;
-				read_payload(group, sequence).await
-			});
-			let outcome = match fetched.await {
-				Ok(Ok(())) => Outcome::Fetched,
-				Ok(Err(err)) => Outcome::Failed(err),
-				Err(_) => Outcome::Unanswered,
-			};
-			(sequence, outcome)
-		});
+	let mut generation = 0u64;
+	let mut subscription_up = true;
+	// When the route was restored after a flap. A group that settles after it is
+	// timed from it, since the publisher could not reach the subscriber before.
+	let mut restored_at = None;
+	// How long one read or FETCH may take. A flap leaves those on the dead route
+	// waiting until the edge's peer session idles out, so they get that much more;
+	// one that outlasts even that hung on the dead route and still fails the drill.
+	let wait = match link {
+		PeerLink::Steady => SETTLE,
+		PeerLink::Flapping => SETTLE + relay_idle,
 	};
+	let fetch =
+		|pending: &mut tokio::task::JoinSet<_>, track: &moq_net::track::Consumer, sequence: u64, generation: u64| {
+			let fetching = track.fetch_group(sequence, None);
+			pending.spawn(async move {
+				let fetched = tokio::time::timeout(wait, async {
+					let group = fetching.await.map_err(|err| err.to_string())?;
+					read_payload(group, sequence).await
+				});
+				let outcome = match fetched.await {
+					Ok(Ok(())) => Outcome::Fetched,
+					Ok(Err(err)) => Outcome::Failed(err),
+					Err(_) => Outcome::Unanswered,
+				};
+				(sequence, outcome, generation)
+			});
+		};
 
-	// A margin past each settle task's own [`SETTLE`] timeout, so a group that
-	// times out is reported by name rather than as a generic stall.
-	let step_timeout = SETTLE + Duration::from_secs(1);
+	// A margin past each settle task's own timeout, so a group that times out is
+	// reported by name rather than as a generic stall.
+	let step_timeout = wait + Duration::from_secs(1);
 	while (outcomes.len() as u64) < total {
 		let step = tokio::time::timeout(step_timeout, async {
 			tokio::select! {
-				group = reader.groups.recv_group() => Step::Group(Box::new(group)),
+				group = reader.groups.recv_group(), if subscription_up => Step::Group(Box::new(group)),
 				Some(settled) = pending.join_next() => {
-					let (sequence, outcome) = settled.expect("settle task panicked");
-					Step::Settled(sequence, outcome)
+					let (sequence, outcome, generation) = settled.expect("settle task panicked");
+					Step::Settled(sequence, outcome, generation)
 				}
+				Some((update, active)) = next_update(&mut announced) => Step::Route(update.prefix.to_string(), active),
 			}
 		})
 		.await
 		.unwrap_or_else(|_| {
 			let missing: Vec<u64> = (0..total).filter(|sequence| !outcomes.contains_key(sequence)).collect();
+			let link = match flap {
+				Flap::Cut { .. } => " with the peer link cut",
+				Flap::Withdrawn { .. } => " with the route withdrawn",
+				Flap::Up | Flap::Restored { .. } => "",
+			};
 			panic!(
-				"stalled: nothing arrived within {step_timeout:?}, {} of {total} groups missing: {missing:?}",
+				"stalled{link}: nothing arrived within {step_timeout:?}, {} of {total} groups missing: {missing:?}",
 				missing.len()
 			)
 		});
 
 		match step {
-			Step::Settled(sequence, Outcome::Failed(err)) if live.remove(&sequence) => {
-				resets.push((sequence, err));
-				fetch(&mut pending, &reader.track, sequence);
-			}
-			Step::Settled(sequence, outcome) => {
+			// The flap took this read or FETCH down with the route: claim the group
+			// again through the restored one, now if it is back, or as a gap once it is.
+			Step::Settled(sequence, Outcome::Failed(err), tagged) if tagged < generation || flap.flapping() => {
 				live.remove(&sequence);
-				let late = written[sequence as usize].elapsed();
+				flapped.push((sequence, err));
+				match flap.flapping() {
+					true => {
+						claimed.remove(&sequence);
+					}
+					false => fetch(&mut pending, &reader.track, sequence, generation),
+				}
+			}
+			Step::Settled(sequence, Outcome::Failed(err), _) if live.remove(&sequence) => {
+				resets.push((sequence, err));
+				fetch(&mut pending, &reader.track, sequence, generation);
+			}
+			Step::Settled(sequence, outcome, _) => {
+				live.remove(&sequence);
+				let since = written[sequence as usize].max(restored_at.unwrap_or(written[sequence as usize]));
+				let late = since.elapsed();
 				slowest = slowest.max((late, sequence));
 				outcomes.insert(sequence, outcome);
 			}
+			Step::Route(path, active) => {
+				assert_eq!(path, "live", "announced a broadcast nobody published");
+				flap = match (active, flap) {
+					// The edge noticed the cut and withdrew the route: restore the
+					// link, so the edge's redial gets through.
+					(false, Flap::Cut { outage, at }) => {
+						drop(outage);
+						Flap::Withdrawn { cut: at.elapsed() }
+					}
+					(false, _) => panic!("the route was withdrawn while the peer link was up"),
+					(true, Flap::Withdrawn { cut }) => {
+						restored_at = Some(tokio::time::Instant::now());
+						reader = subscribe(&subscribed, "live").await;
+						generation += 1;
+						subscription_up = true;
+						Flap::Restored { cut }
+					}
+					// The first announcement, or an update to a standing route.
+					(true, flap) => flap,
+				};
+			}
 			Step::Group(group) => {
-				let group = (*group)
-					.unwrap_or_else(|err| panic!("the subscription aborted: {err}"))
-					.unwrap_or_else(|| panic!("the subscription finished"));
+				let group = match *group {
+					Ok(Some(group)) => group,
+					// The route went, and the subscription with it, until it returns.
+					Err(_) if flap.flapping() => {
+						subscription_up = false;
+						continue;
+					}
+					Err(err) => panic!("the subscription aborted: {err}"),
+					Ok(None) => panic!("the subscription finished"),
+				};
 				let sequence = group.sequence;
 
 				// Every unclaimed group below this one is a gap the subscription
 				// skipped: FETCH it now rather than wait.
 				for gap in 0..sequence {
 					if claimed.insert(gap) {
-						fetch(&mut pending, &reader.track, gap);
+						fetch(&mut pending, &reader.track, gap, generation);
 					}
 				}
 				if claimed.insert(sequence) {
 					live.insert(sequence);
 					pending.spawn(async move {
-						let outcome = match tokio::time::timeout(SETTLE, read_payload(group, sequence)).await {
+						let outcome = match tokio::time::timeout(wait, read_payload(group, sequence)).await {
 							Ok(Ok(())) => Outcome::Live,
 							Ok(Err(err)) => Outcome::Failed(err),
 							Err(_) => Outcome::Stalled,
 						};
-						(sequence, outcome)
+						(sequence, outcome, generation)
 					});
 				}
 
 				// The next burst leaves once this one starts arriving, so recovery
 				// overlaps fresh data the way a busy control channel's does.
 				if sequence + BURST_GROUPS >= written.len() as u64 && (written.len() as u64) < total {
-					burst(&mut track, &mut written);
+					burst(&mut track, &mut written, &mut flap);
 				}
 			}
 		}
@@ -1012,6 +1171,16 @@ async fn bursts_cross_a_cluster(lane: Lane) {
 	assert!(gaps > 0, "every group came live, so no FETCH recovery was exercised");
 	if let Lane::Impaired = lane {
 		assert!(overflowed > 0, "no burst overran a bottleneck, so none was exercised");
+	}
+	match (link, flap) {
+		(PeerLink::Steady, Flap::Up) => {}
+		(PeerLink::Flapping, Flap::Restored { cut }) => println!(
+			"fault activated: the peer link was down {cut:?} before the edge withdrew the route, which came back; the flap failed {} reads and FETCHes, each claimed again: {flapped:?}",
+			flapped.len()
+		),
+		(PeerLink::Flapping, Flap::Up) => panic!("the peer link was never cut"),
+		(PeerLink::Flapping, _) => panic!("the route never came back after the peer link flapped"),
+		(PeerLink::Steady, _) => unreachable!("a steady link is never cut"),
 	}
 
 	let lost: Vec<_> = outcomes
@@ -1040,8 +1209,6 @@ async fn bursts_cross_a_cluster(lane: Lane) {
 	publish_path.verify();
 	subscribe_path.verify();
 }
-
-lanes!(bursts_cross_a_cluster);
 
 /// Negative control: with nothing publishing, the drills' delivery assertions
 /// have to fail.

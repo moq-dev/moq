@@ -27,8 +27,20 @@ Check that Rust clients, which treat HTTP 401 as terminal today, treat the
 session close the same way. The 401 in `doc/bin/relay/auth.md` describes the
 auth webhook, not the relay's answer; leave it.
 
+Admitting after SETUP also closes two gaps the 2026-10-07 audit found in the
+current pre-upgrade admit, which has no role and no SETUP token: a session
+whose role its grant cannot serve (a publisher holding a subscribe-only
+grant) is upgraded and its broadcasts silently go nowhere, where QUIC refuses
+it in `Cluster::scope`; and a moqt-over-WebSocket client that authenticates
+only with the SETUP `AUTHORIZATION TOKEN` is treated as anonymous. Neither
+grants extra access, so this stays in m1 (decided 2026-10-07). Serving
+through `Connection::run` already applies `request_for` and `Cluster::scope`,
+so both close with no relay-side admit; the tests below pin them.
+
 Tests: a WebSocket connect with a bad token ends in a JS `SessionError` with
-the unauthorized code and the reload loop stops; a Rust client stops too.
+the unauthorized code and the reload loop stops; a Rust client stops too. A
+publish-role WebSocket session with a subscribe-only grant is refused, and a
+SETUP-token-only client is admitted with that token's grant.
 
 ## Closes
 

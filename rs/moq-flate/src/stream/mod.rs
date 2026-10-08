@@ -114,12 +114,12 @@ mod test {
 		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
 			panic!("expected a frame");
 		};
-		assert_eq!(frame.timestamp.as_micros(), captured.as_micros());
+		assert_eq!(frame.timestamp.unwrap().as_micros(), captured.as_micros());
 		assert_eq!(first, frame.payload.len(), "the size is the compressed frame");
 		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
 			panic!("expected a frame");
 		};
-		assert_ne!(frame.timestamp.as_micros(), captured.as_micros());
+		assert_ne!(frame.timestamp.unwrap().as_micros(), captured.as_micros());
 	}
 
 	#[test]
@@ -190,7 +190,7 @@ mod test {
 	/// allocating 32 MB to provoke it. Borrowed from moq-json's stream tests.
 	fn rejecting_track() -> moq_net::track::Producer {
 		let mut info = moq_net::track::Info::default();
-		info.timescale = moq_net::Timescale::new((1u64 << 62) - 1).unwrap();
+		info.timescale = Some(moq_net::Timescale::new((1u64 << 62) - 1).unwrap());
 
 		moq_net::broadcast::Info::new()
 			.produce()

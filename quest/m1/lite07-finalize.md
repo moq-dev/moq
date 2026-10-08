@@ -68,7 +68,6 @@ is published; older versions are unchanged.
 ## Required
 
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
-- [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - lite-07 loses NO_CAPACITY and stamping
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - lite-07 restores SUBSCRIBE_DROP in place of `Stream Count`
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
 - [Live media time](/quest/m1/subscribe-live-time.md) - SUBSCRIBE_OK carries the publisher's live media time

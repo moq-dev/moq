@@ -13,7 +13,3 @@ Compare every -03 entry against the published
 including its body and changelog; do not rely on an illustrative list of late
 entries. The root `clock` section already shipped in -03 and stays there.
 Run `just drafts check`. This corrects attribution, not the format.
-
-## Required
-
-- [Enabled flag](/quest/m1/catalog-enabled.md) - land after #4915's draft changelog edit to avoid conflicting changes

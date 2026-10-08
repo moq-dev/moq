@@ -4,14 +4,18 @@
 
 With the cluster peer link on moq-transport, a cross-relay FETCH for a group
 the origin still holds is served, not refused as `old`. The burst drill then
-gains a moq-transport peer link as a third case and passes it.
+gains a moq-transport peer link as a third `PeerLink` variant, and its
+impaired lane passes.
 
 ## Plan
 
-Found by #4972: with the edge pinned to `moq-transport-19`, the existing
-steady impaired drill (`bursts_cross_a_cluster`, `rs/moq-relay/tests/drills.rs`)
-fails 5 of 5 runs. Seeds: 11977074354257116273, 6755536760138253279,
-17984197590923068922, 10974424043511566981.
+Found by #4972: in `rs/moq-relay/tests/drills.rs::cross_cluster`, pinning the
+edge's peer link with `config.connect.version = ["moq-transport-19"]` makes
+the steady impaired drill fail 5 of 5 runs with FETCHes refused `old` for
+groups the origin still held, e.g. `groups lost: [(5, Failed("old")),
+(37, Failed("old")), (41, Failed("old"))]`. Seeds: 11977074354257116273,
+6755536760138253279, 17984197590923068922, 10974424043511566981. The
+loopback lane and the flapping drill passed.
 
 Facts (2026-10-07): the IETF FETCH path (`run_fetch_stream`,
 `rs/moq-net/src/ietf/publisher.rs`) has no explicit `Old` check. An `Old` can
@@ -29,5 +33,4 @@ Public API: none expected. Wire: none expected.
 
 ## Related
 
-- [Flapping peer drill](/quest/m1/cross-relay-flap-drill.md) - the drill this extends
-- [Cross-relay bursts re-run](/quest/m1/cross-relay-bursts.md) - the field report of lost cross-relay groups
+- [Cross-relay bursts re-run](/quest/m1/cross-relay-bursts.md) - the #4349 `Stream(Old)` stalls, not reproduced over a lite peer link

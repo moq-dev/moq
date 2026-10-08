@@ -33,10 +33,6 @@ timescale as untimed and `@moq/publish` declares milliseconds):
 Public API: breaking (`Timescale` loses `Default`; an undeclared track is
 untimed). Wire: none.
 
-## Required
-
-- [Untimed model](/quest/m1/untimed-model.md) - `track::Info.timescale` becomes an `Option` there
-
 ## Related
 
 - [Publishing never invents a timestamp](/quest/m1/publish-timestamp.md) - the same publishers stop filling in a timestamp
