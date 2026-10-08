@@ -108,9 +108,11 @@ leaving the session open: a `SUBSCRIBE` with `FORWARD=0`, a `SUBSCRIBE` or
 `FETCH` carrying `FILL_TIMEOUT` (Timed-Out gaps are not written),
 `TRACK_STATUS`, `SUBSCRIBE_TRACKS` (draft-18 and later), and the `FETCH`
 forms above. `NEW_GROUP_REQUEST` is ignored, as
-the draft allows a publisher without dynamic groups to do. A parameter the
-negotiated draft does not define still closes the session with
-`PROTOCOL_VIOLATION`, as the draft requires.
+the draft allows a publisher without dynamic groups to do. Message parameters
+follow the negotiated draft's lists: draft-14 and draft-15 ignore an unknown or
+misplaced parameter, draft-16 ignores one defined only for another message but
+closes the session with `PROTOCOL_VIOLATION` on an unknown one, and draft-17
+and later close it on both.
 
 Several project drafts extend the IETF wire without breaking it, since `SETUP`
 ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
