@@ -68,14 +68,14 @@ test("every peer is asked", async () => {
 });
 
 /**
- * Draft-16 is the first that allows a zero-field track namespace. Asking for one
- * earlier is a protocol violation, and there is no other "every namespace" request,
- * so an unscoped subscriber sends nothing and still takes an unsolicited announcement.
+ * Draft-16 is the first that allows a zero-field track namespace. Asking a foreign peer
+ * (one that declared no MoQ Solicit) for one earlier is a protocol violation, so an
+ * unscoped subscriber sends nothing and still takes an unsolicited announcement.
  */
 test.each([
 	["draft-14", Version.DRAFT_14, ALPN.DRAFT_14],
 	["draft-15", Version.DRAFT_15, ALPN.DRAFT_15],
-] as const)("%s does not ask for the empty namespace", async (_name, version, alpn) => {
+] as const)("%s does not ask a foreign peer for the empty namespace", async (_name, version, alpn) => {
 	const pair = createMockTransportPair(alpn);
 	const session = new NativeSession(pair.server, version, true);
 	const subscriber = new Subscriber({ session });
@@ -90,6 +90,20 @@ test.each([
 	);
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("surprise"), kind: "start" });
 	announced.close();
+});
+
+/** A peer that declared MoQ Solicit is ours: it only tells when asked, so it still is. */
+test.each([
+	["draft-14", Version.DRAFT_14, ALPN.DRAFT_14],
+	["draft-15", Version.DRAFT_15, ALPN.DRAFT_15],
+] as const)("%s still asks a soliciting peer for the empty namespace", async (_name, version, alpn) => {
+	const pair = createMockTransportPair(alpn);
+	const session = new NativeSession(pair.server, version, true);
+	const subscriber = new Subscriber({ session, solicit: true });
+
+	subscriber.announced();
+
+	expect(await nextStream(pair.client)).toBeDefined();
 });
 
 /** A named prefix is still legal on the drafts that reject the empty one. */

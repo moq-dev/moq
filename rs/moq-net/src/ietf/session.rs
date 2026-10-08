@@ -14,16 +14,6 @@ use super::{
 	subscriber::{is_protocol_violation, subscribe_prefixes},
 };
 
-/// Whether `prefix` may be sent in SUBSCRIBE_NAMESPACE on `version`.
-///
-/// Draft-16 is the first that allows a zero-field track namespace. Before that the
-/// minimum was one field, and an empty prefix was a protocol violation. An unscoped
-/// subscriber has nothing legal to ask for on those drafts; the peer can still
-/// advertise with an unsolicited PUBLISH_NAMESPACE.
-fn ask_namespace(version: Version, prefix: &crate::Path<'_>) -> bool {
-	!prefix.is_empty() || !matches!(version, Version::Draft14 | Version::Draft15)
-}
-
 /// Everything one moq-transport session needs to start.
 pub struct Config<S: crate::transport::poll::Session> {
 	/// The runtime that arms the session's timers.
@@ -134,15 +124,8 @@ where
 	let (goaway_handle, goaway) = crate::goaway::Handle::new(!client);
 
 	// One SUBSCRIBE_NAMESPACE per permitted prefix, like `lite::Subscriber`: the
-	// scope is what we may ask for, and it is not the origin's root. An empty
-	// prefix is illegal before draft-16, so those drafts are not asked for it.
-	let namespaces: Vec<_> = subscribe
-		.as_ref()
-		.map(subscribe_prefixes)
-		.unwrap_or_default()
-		.into_iter()
-		.filter(|prefix| ask_namespace(version, prefix))
-		.collect();
+	// scope is what we may ask for, and it is not the origin's root.
+	let namespaces = subscribe.as_ref().map(subscribe_prefixes).unwrap_or_default();
 
 	let withdrawal = crate::session::Withdrawal::default();
 	let withdrawing = withdrawal.clone();
@@ -1260,8 +1243,9 @@ mod tests {
 
 	/// How many times a session with this scope writes SUBSCRIBE_NAMESPACE for it.
 	///
-	/// `prefix: None` is an unscoped origin, whose only interest head is empty.
-	async fn asked_namespace(version: Version, prefix: Option<&str>) -> usize {
+	/// `prefix: None` is an unscoped origin, whose only interest head is empty. `solicit`
+	/// is what the peer's SETUP declared (MoQ Solicit).
+	async fn asked_namespace(version: Version, prefix: Option<&str>, solicit: Option<bool>) -> usize {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let subscribe = match prefix {
 			Some(name) => {
@@ -1292,7 +1276,10 @@ mod tests {
 			path: None,
 			authority: None,
 			peer_setup_stream: None,
-			peer_declared: None,
+			peer_declared: Some(peer::Peer {
+				solicit,
+				..Default::default()
+			}),
 			early_unis: Vec::new(),
 		})
 		.expect("start the session");
@@ -1311,25 +1298,31 @@ mod tests {
 		occurrences(&log, &needle)
 	}
 
-	/// Draft-14 and draft-15 reject a zero-field track namespace. An unscoped
-	/// subscriber must not send one, and a real prefix must still go out. Draft-16
-	/// made the empty prefix the way to ask for every namespace, so it stays.
+	/// Draft-14 and draft-15 reject a zero-field track namespace, so a foreign peer (one
+	/// that declared no MoQ Solicit) is not asked for it, and a real prefix still goes
+	/// out. A peer that declared Solicit is ours: it only tells when asked, so it still
+	/// gets the empty prefix. Draft-16 made the empty prefix legal, so it stays.
 	#[moq_net_sim::test]
-	async fn an_empty_namespace_is_not_asked_before_draft_16() {
+	async fn an_empty_namespace_is_not_asked_of_a_foreign_peer_before_draft_16() {
 		for version in [Version::Draft14, Version::Draft15] {
 			assert_eq!(
-				asked_namespace(version, None).await,
+				asked_namespace(version, None, None).await,
 				0,
-				"{version:?} asked for every namespace"
+				"{version:?} asked a foreign peer for every namespace"
 			);
 			assert_eq!(
-				asked_namespace(version, Some("cam")).await,
+				asked_namespace(version, Some("cam"), None).await,
 				1,
 				"{version:?} skipped a real prefix"
 			);
+			assert_eq!(
+				asked_namespace(version, None, Some(true)).await,
+				1,
+				"{version:?} did not ask a soliciting peer for every namespace"
+			);
 		}
 		assert_eq!(
-			asked_namespace(Version::Draft16, None).await,
+			asked_namespace(Version::Draft16, None, None).await,
 			1,
 			"draft-16 dropped the empty prefix"
 		);

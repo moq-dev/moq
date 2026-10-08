@@ -150,6 +150,10 @@ export class Subscriber {
 	// Whether the peer understands the HIDDEN parameter (MoQ Hidden).
 	#hidden: boolean;
 
+	// What the peer's SETUP declared about being solicited (MoQ Solicit), `undefined`
+	// when it declared nothing.
+	#solicit?: boolean;
+
 	/** Marks this subscriber's deliberate local session close. @internal */
 	close() {
 		this.#localClose = true;
@@ -165,6 +169,7 @@ export class Subscriber {
 		quic,
 		cluster,
 		hidden = false,
+		solicit,
 	}: {
 		/** The session abstraction for bidi streams and request IDs. */
 		session: Session;
@@ -174,11 +179,14 @@ export class Subscriber {
 		cluster?: Cluster.Hops;
 		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
 		hidden?: boolean;
+		/** What the peer's SETUP declared about being solicited (MoQ Solicit). */
+		solicit?: boolean;
 	}) {
 		this.#session = session;
 		this.#quic = quic;
 		this.#cluster = cluster;
 		this.#hidden = hidden;
+		this.#solicit = solicit;
 	}
 
 	/**
@@ -205,8 +213,9 @@ export class Subscriber {
 	 *
 	 * The peer is asked with SUBSCRIBE_NAMESPACE regardless of what it declared, and an
 	 * unsolicited PUBLISH_NAMESPACE lands here too, so a peer that only tells and one
-	 * that only answers are both discovered. Draft-14 and draft-15 cannot be asked for
-	 * the empty prefix, so an unscoped subscriber only hears what the peer tells.
+	 * that only answers are both discovered. A draft-14 or draft-15 peer that declared no
+	 * MoQ Solicit is not asked for the empty prefix, so an unscoped subscriber only hears
+	 * what that peer tells.
 	 *
 	 * Hidden routes (a `.`-prefixed segment below the scope's head) are left out unless
 	 * `options.hidden` opts in. The opt-in rides the SUBSCRIBE_NAMESPACE when the peer
@@ -313,10 +322,12 @@ export class Subscriber {
 		const version = this.#session.version;
 
 		// A zero-field track namespace was a protocol violation until draft-16 allowed
-		// it. There is no other way to ask for every namespace on the older drafts, so
-		// send nothing and stay registered: an unsolicited PUBLISH_NAMESPACE still lands
-		// here. Returning without waiting would drop this consumer before one could.
-		if ((version === Version.DRAFT_14 || version === Version.DRAFT_15) && prefix.length === 0) {
+		// it. A peer that never declared MoQ Solicit is not ours: it may enforce that, and
+		// it tells us unasked anyway, so send nothing and stay registered for its
+		// unsolicited PUBLISH_NAMESPACE. Returning would drop this consumer before one
+		// could land. A peer that declared Solicit only tells when asked, so it still is.
+		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15;
+		if (legacy && prefix.length === 0 && this.#solicit === undefined) {
 			await announced.closed;
 			return;
 		}

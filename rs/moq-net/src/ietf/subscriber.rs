@@ -591,9 +591,9 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 /// our namespace -- a peer outside it has never heard of our root, so a rooted
 /// subscriber asks for its scope and mounts the replies under the root.
 ///
-/// Every prefix is asked: a peer with nothing to advertise answers with an empty set,
-/// which costs one stream. The session leaves out an empty prefix before draft-16,
-/// where that request is illegal.
+/// Asked unconditionally: a peer with nothing to advertise answers with an empty set,
+/// which costs one stream. [`Subscriber::run_subscribe_namespace`] holds back the empty
+/// prefix from a foreign draft-14/15 peer.
 pub(super) fn subscribe_prefixes(origin: &origin::Producer) -> Vec<PathOwned> {
 	crate::model::interest_prefixes(&origin.allowed())
 }
@@ -849,6 +849,18 @@ where
 		// to say whether it does (MoQ Hidden).
 		let declared = self.peer_setup.get().await;
 		let hidden = declared.hidden;
+
+		// Draft-16 is the first to allow a zero-field namespace, so the empty prefix is a
+		// protocol violation on draft-14/15. A peer that never declared MoQ Solicit is not
+		// ours: it may enforce that, and it tells us unasked anyway. One that declared it
+		// accepts the empty prefix and only tells when asked, so it still gets one.
+		if prefix.is_empty()
+			&& declared.solicit.is_none()
+			&& matches!(self.version, Version::Draft14 | Version::Draft15)
+		{
+			tracing::debug!(version = ?self.version, "not asking a foreign peer for the empty namespace");
+			return Ok(());
+		}
 
 		let request_id = self.control.next_request_id(&self.runtime).await?;
 
