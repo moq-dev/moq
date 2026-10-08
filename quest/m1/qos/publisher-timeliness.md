@@ -42,8 +42,8 @@ Sample where the relay completes a frame: the moq-lite subscriber's
 zigzag timestamp delta) and the IETF subscriber's object path. Leave untimed
 tracks out of the histogram rather than report a fiction: today pre-lite-05
 peers without a timescale are stamped with `Timestamp::now()` on arrival,
-which would read as perfectly on time, and after
-[Untimed model](/quest/m1/untimed-model.md) they arrive untimed. Update the stats section of `doc/bin/relay/config.md`.
+which would read as perfectly on time, and after the untimed model
+([#4822](https://github.com/moq-dev/moq/pull/4822)) they arrive untimed. Update the stats section of `doc/bin/relay/config.md`.
 
 Tests: a paced publisher lands in the lowest bucket; publishers whose clocks
 run 100 ppm slow and 100 ppm fast both stay in the lowest bucket over a
@@ -58,6 +58,5 @@ excluded.
 
 ## Related
 
-- [Untimed model](/quest/m1/untimed-model.md) - pre-lite-05 tracks arrive untimed instead of stamped on arrival
 - [Media stats](/quest/m1/stats/schema.md) - the publisher's own view
   of the same uplink, in the transport section of its stats track

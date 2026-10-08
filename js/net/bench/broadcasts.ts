@@ -1,6 +1,7 @@
 /** Sweep observers against routes for one route update, and against tracks for one demand edge. */
 
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
+import * as Epoch from "../src/epoch.ts";
 import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
 
@@ -83,5 +84,39 @@ for (const trackCount of [8, 32, 128]) {
 		for (const dispose of disposes) dispose();
 		for (const track of tracks) track.close();
 		broadcast.close();
+	}
+}
+
+// Resolve one touched path while both the table and that path's readers grow.
+console.log("request,routes,readers,update_and_read_us");
+const epoch = Epoch.parse("01900000-0000-7000-8000-000000000001");
+for (const pinned of [false, true]) {
+	for (const routeCount of routeCounts) {
+		for (const readerCount of observerCounts) {
+			const origin = new Producer();
+			const reader = origin.consume();
+			const options = pinned ? { epoch } : {};
+			const publishers = Array.from({ length: routeCount }, (_, index) => {
+				const source = origin.createBroadcast(Path.from(`room/${index}`));
+				source.announce({ epoch });
+				return source;
+			});
+			const background = publishers.map((_, index) => reader.request(Path.from(`room/${index}`), options));
+			const requests = Array.from({ length: readerCount }, () => reader.request(Path.from("room/0"), options));
+			const start = performance.now();
+			for (let index = 0; index < updates; index++) {
+				publishers[0].announce({ epoch, cost: BigInt(index + 1) });
+				await Promise.resolve();
+				for (const request of requests) {
+					if (!request.active.peek()) throw new Error("same-epoch request lost its front");
+					checksum++;
+				}
+			}
+			console.log(
+				`${pinned ? "pinned" : "unpinned"},${routeCount},${readerCount},${(((performance.now() - start) * 1000) / updates).toFixed(1)}`,
+			);
+			for (const request of [...requests, ...background]) request.close();
+			origin.close();
+		}
 	}
 }

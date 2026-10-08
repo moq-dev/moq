@@ -59,10 +59,11 @@ behavior covered by the existing cache tests plus new ones for the staleness
 bound.
 
 Decided in the 2026-09-30 audit: moved to m2 because the contention is
-unmeasured on noq. [Lock wait](/quest/m1/perf/lock-wait.md) decides it; take
-this up only if that shows more than 1% contention on the pool line.
+unmeasured on noq. Measured since (#5031, 2026-10-07): the lock wait sits on
+kio channel mutexes, not the pool line, so this stays parked until a profile
+shows the pool line hot.
 
 ## Related
 
-- [Lock wait](/quest/m1/perf/lock-wait.md) - measures whether the pool line is contended enough to justify this
+- [kio channel contention](/quest/m1/perf/kio-channel-contention.md) - where the measured cross-worker wait actually is
 - [#3122](/quest/m1/perf/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md) - the remaining clock reads one layer down; a pool epoch driven by its per-turn timestamp is the way to drop the last per-frame read, and the model should drink from that cup rather than grow a second clock
