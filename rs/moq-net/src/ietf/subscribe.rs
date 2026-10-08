@@ -104,7 +104,7 @@ impl Message for Subscribe<'_> {
 					0x26 => object_id_filter: Vec<Opaque> where has_range_filters(version),
 					0x27 => priority_filter: Vec<Opaque> where has_range_filters(version),
 					0x28 => object_property_filter: Vec<Opaque> where has_range_filters(version),
-					0x32 => new_group_request: Option<u64> where has_new_group_request(version),
+					0x32 => _new_group_request: Option<u64> where has_new_group_request(version),
 					0x35 => include_properties: Option<bool> where Filter::is_draft20(version),
 				);
 
@@ -116,16 +116,6 @@ impl Message for Subscribe<'_> {
 				]
 				.iter()
 				.any(|filter| !filter.is_empty());
-
-				// A parameter that arrived in a later draft is unknown from draft-16 on, which
-				// closes the session. The gates above are what reject it. Draft-14 and draft-15
-				// ignore an unrecognized parameter instead, so it never reaches these checks.
-				if ((fill.is_some() || include_properties.is_some()) && !Filter::is_draft20(version))
-					|| (range_filters && !has_range_filters(version))
-					|| (new_group_request.is_some() && !has_new_group_request(version))
-				{
-					return Err(DecodeError::InvalidValue);
-				}
 
 				// Defaults to 1, so an absent parameter means the subscriber wants them.
 				let properties_wanted = include_properties.unwrap_or(true);
@@ -463,13 +453,8 @@ impl Message for SubscribeUpdate {
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => _filter: Option<Filter>,
-					0x32 => new_group_request: Option<u64> where has_new_group_request(version),
+					0x32 => _new_group_request: Option<u64> where has_new_group_request(version),
 				);
-
-				// NEW_GROUP_REQUEST arrived in draft-16.
-				if new_group_request.is_some() && !has_new_group_request(version) {
-					return Err(DecodeError::InvalidValue);
-				}
 
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
 				let forward = forward.unwrap_or(true);
@@ -489,11 +474,8 @@ impl Message for SubscribeUpdate {
 				if matches!(version, Version::Draft17) {
 					let _required_request_id_delta = r.varint()?;
 				}
-				// Nothing reads an update's Range Filters yet; they are consumed so a legal
-				// update does not fail the session. TRACK_PROPERTY_FILTER (0x29) and
-				// TRACK_NAMESPACE_PREFIX (0x34) are legal only on some request types, which
-				// the message alone can't tell, so a legal update is accepted and the value
-				// is not applied.
+				// Nothing reads an update's FILL_PARAMETERS or Range Filters yet; they are
+				// consumed so a legal update does not fail the session.
 				decode_params!(r, version,
 					0x02 => _object_delivery_timeout: Option<u64>,
 					0x03 => _authorization_token: Vec<Opaque>,
@@ -501,31 +483,14 @@ impl Message for SubscribeUpdate {
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => _filter: Option<Filter>,
-					0x23 => fill: Option<Fill> where Filter::is_draft20(version),
-					0x25 => subgroup_filter: Vec<Opaque> where has_range_filters(version),
-					0x26 => object_id_filter: Vec<Opaque> where has_range_filters(version),
-					0x27 => priority_filter: Vec<Opaque> where has_range_filters(version),
-					0x28 => object_property_filter: Vec<Opaque> where has_range_filters(version),
-					0x29 => track_property_filter: Vec<Opaque> where has_range_filters(version),
+					0x23 => _fill: Option<Fill> where Filter::is_draft20(version),
+					0x25 => _subgroup_filter: Vec<Opaque> where has_range_filters(version),
+					0x26 => _object_id_filter: Vec<Opaque> where has_range_filters(version),
+					0x27 => _priority_filter: Vec<Opaque> where has_range_filters(version),
+					0x28 => _object_property_filter: Vec<Opaque> where has_range_filters(version),
+					0x29 => _track_property_filter: Vec<Opaque> where has_range_filters(version),
 					0x32 => _new_group_request: Option<u64>,
-					0x34 => _prefix: Option<super::parameters::TrackNamespace> where !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17),
 				);
-
-				let range_filters = [
-					subgroup_filter,
-					object_id_filter,
-					priority_filter,
-					object_property_filter,
-					track_property_filter,
-				]
-				.iter()
-				.any(|filter| !filter.is_empty());
-
-				// FILL_PARAMETERS and the Range Filters postdate draft-17, so an earlier peer
-				// sending one is still the protocol violation it was.
-				if (fill.is_some() && !Filter::is_draft20(version)) || (range_filters && !has_range_filters(version)) {
-					return Err(DecodeError::InvalidValue);
-				}
 
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
 				let forward = forward.unwrap_or(true);

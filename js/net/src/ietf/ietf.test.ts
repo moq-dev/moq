@@ -1608,6 +1608,16 @@ test("Parameters: a known parameter on the wrong message", async () => {
 	).rejects.toThrow(ProtocolViolation);
 });
 
+// TRACK_NAMESPACE_PREFIX updates a SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS only, so a
+// subscription's REQUEST_UPDATE carrying it closes the session instead of being acked.
+test("Parameters: TRACK_NAMESPACE_PREFIX is not a subscription update parameter", async () => {
+	// One parameter: TRACK_NAMESPACE_PREFIX (0x34), a one-field namespace "a".
+	const block = new Uint8Array([0x01, 0x34, 0x01, 0x01, 0x61]);
+	await expect(
+		Parameters.decode(new Reader(undefined, block, Version.DRAFT_18), Version.DRAFT_18, "request-update"),
+	).rejects.toThrow(ProtocolViolation);
+});
+
 test("Subscribe: SUBGROUP_DELIVERY_TIMEOUT follows its draft", async () => {
 	const body = framed([...TRACK_HEAD, 0x01, 0x06, 0x00]);
 	await expect(decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_16)).rejects.toThrow(

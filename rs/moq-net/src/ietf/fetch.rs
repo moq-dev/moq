@@ -221,12 +221,6 @@ impl Message for Fetch<'_> {
 				.iter()
 				.any(|filter| !filter.is_empty());
 
-				// Range Filters arrived in draft-19. An earlier draft-16+ peer sending one
-				// is an unknown parameter. Draft-15 ignores an unrecognized parameter.
-				if range_filters && !has_range_filters(version) {
-					return Err(DecodeError::InvalidValue);
-				}
-
 				(
 					fetch_type,
 					subscriber_priority,

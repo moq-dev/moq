@@ -1,7 +1,6 @@
 import { ProtocolViolation } from "../error.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
-import * as Namespace from "./namespace.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /// Setup Option key constants (separate namespace from Message Parameters).
@@ -224,8 +223,6 @@ const MSG_PARAM_SUBSCRIPTION_FILTER = 0x21n;
 const MSG_PARAM_FILL_PARAMETERS = 0x23n;
 /// HOP_PATH, from the MoQ Cluster extension. See `cluster.ts`.
 const MSG_PARAM_HOP_PATH = 0x40b57n;
-/// TRACK_NAMESPACE_PREFIX (0x34). A Track Namespace tuple, not a varint.
-const MSG_PARAM_TRACK_NAMESPACE_PREFIX = 0x34n;
 /// ACTIVE_COUNT, from the MoQ Active Count extension.
 const MSG_PARAM_ACTIVE_COUNT = 0x40b66n;
 
@@ -239,10 +236,8 @@ type ControlMessage =
 	| "subscribe-update"
 	| "subscribe-namespace"
 	| "publish"
-	| "publish-ok"
 	| "publish-namespace"
 	| "fetch"
-	| "fetch-ok"
 	| "request-ok"
 	| "request-update"
 	| "namespace";
@@ -256,8 +251,6 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 	const d15 = version === Version.DRAFT_15;
 	const d16 = version === Version.DRAFT_16;
 	const d17 = version === Version.DRAFT_17;
-	const d18 = version === Version.DRAFT_18;
-	const d19 = version === Version.DRAFT_19;
 	const from16 = version >= Version.DRAFT_16;
 	const from17 = version >= Version.DRAFT_17;
 	const from18 = version >= Version.DRAFT_18;
@@ -277,7 +270,6 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 	const fill = id === MSG_PARAM_FILL_PARAMETERS && draft20(version);
 	const include = id === MSG_PARAM_INCLUDE_PROPERTIES && draft20(version);
 	const newGroup = id === MSG_PARAM_NEW_GROUP_REQUEST && from16;
-	const prefix = id === MSG_PARAM_TRACK_NAMESPACE_PREFIX && from18;
 
 	switch (message) {
 		case "subscribe":
@@ -309,8 +301,7 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 				fill ||
 				range ||
 				trackRange ||
-				newGroup ||
-				prefix
+				newGroup
 			);
 		case "subscribe-namespace":
 			return auth || (forward && legacyForward) || id === MSG_PARAM_HIDDEN;
@@ -326,17 +317,6 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 				(filter && draft20(version)) ||
 				(order && (d15 || draft20(version)))
 			);
-		case "publish-ok":
-			return (
-				(objectTimeout && !draft20(version)) ||
-				(id === MSG_PARAM_SUBGROUP_DELIVERY_TIMEOUT && (d18 || d19)) ||
-				expires ||
-				(forward && !draft20(version)) ||
-				(priority && !draft20(version)) ||
-				(filter && !draft20(version)) ||
-				(order && (d15 || d16 || d17 || d18)) ||
-				(id === MSG_PARAM_NEW_GROUP_REQUEST && (d16 || d17 || d18 || d19))
-			);
 		case "publish-namespace":
 			return auth || id === MSG_PARAM_HOP_PATH || id === MSG_PARAM_ROUTE_COST;
 		case "fetch":
@@ -349,8 +329,6 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 				range ||
 				include
 			);
-		case "fetch-ok":
-			return (id === MSG_PARAM_MAX_CACHE_DURATION && d15) || (order && d15);
 		case "request-ok":
 			return expires || largest || id === MSG_PARAM_ACTIVE_COUNT;
 		case "namespace":
@@ -726,19 +704,7 @@ export class Parameters {
 	static async decode(
 		r: Reader,
 		version: IetfVersion,
-		message?:
-			| "subscribe"
-			| "subscribe-ok"
-			| "subscribe-update"
-			| "subscribe-namespace"
-			| "publish"
-			| "publish-ok"
-			| "publish-namespace"
-			| "fetch"
-			| "fetch-ok"
-			| "request-ok"
-			| "request-update"
-			| "namespace",
+		message?: ControlMessage,
 	): Promise<Parameters> {
 		const count = await r.u53();
 		const params = new Parameters();
@@ -766,12 +732,6 @@ export class Parameters {
 					throw new ProtocolViolation(`message parameter ${id} is not defined for ${message}`);
 				}
 				await skipKvp(r, id);
-				continue;
-			}
-
-			// Even id, but the value is a Track Namespace tuple rather than a varint.
-			if (id === MSG_PARAM_TRACK_NAMESPACE_PREFIX && version >= Version.DRAFT_17) {
-				await Namespace.decode(r);
 				continue;
 			}
 

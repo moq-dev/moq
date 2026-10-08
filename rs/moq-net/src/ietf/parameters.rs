@@ -413,26 +413,6 @@ impl Param for Opaque {
 	}
 }
 
-/// TRACK_NAMESPACE_PREFIX (0x34). The value is a Track Namespace tuple, not a varint,
-/// so it has to be consumed or the parameters after it land on the wrong bytes. The
-/// prefix itself is not applied: this message cannot say which request it updates.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TrackNamespace {
-	pub(crate) path: crate::Path<'static>,
-}
-
-impl Param for TrackNamespace {
-	fn param_encode(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
-		super::namespace::encode_namespace(w, &self.path)
-	}
-
-	fn param_decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
-		Ok(Self {
-			path: super::namespace::decode_namespace(r)?,
-		})
-	}
-}
-
 /// Message parameter ids defined in draft-16. Sorted for `binary_search`.
 ///
 /// A known id on a message that does not list it is ignored. An id outside this set
