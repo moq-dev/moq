@@ -12,7 +12,7 @@
 //! so edges that share the choice agree without the publisher cutting for HLS. The first choice
 //! is the first video rendition, or the first audio one when there is no video. A video choice
 //! sticks while that rendition stays in the catalog: a newer rendition that sorts earlier must
-//! not rewind `EXT-X-MEDIA-SEQUENCE`. An audio choice switches once to video. Every other rendition resolves each segment against its own
+//! not rewind `EXT-X-MEDIA-SEQUENCE`. An audio choice switches to video when one appears. Every other rendition resolves each segment against its own
 //! timeline.
 //! An inline-parameter-set codec with no catalog `description` GETs one keyframe
 //! group on the first playlist render to build its init, then caches it.
@@ -400,8 +400,8 @@ async fn watch_catalog(
 /// the broadcast has no video. Renditions are ordered by name, so edges choosing together pick
 /// the same one. A video `current` stays while it is still a rendition with a timeline: a newer
 /// rendition that sorts earlier must not take over, or `EXT-X-MEDIA-SEQUENCE` rewinds. An audio
-/// `current` stays only until a video rendition has a timeline, since video segments cut on
-/// audio records would mostly be gaps; that one switch, like a reference that leaves, rewinds.
+/// `current` stays only while no video rendition has a timeline, since video segments cut on
+/// audio records would mostly be gaps; that switch, like a reference that leaves, rewinds.
 fn reference(catalog: &moq_mux::catalog::hang::Catalog, current: Option<&Reference>) -> Option<Reference> {
 	let archive = catalog.archive.as_ref()?;
 	let indexed = |name: &str| archive.timelines.contains_key(name);
@@ -3217,6 +3217,10 @@ mod tests {
 		let first = reference(&catalog(&[], &["b"]), None);
 		assert_eq!(first, Some(audio("b")));
 		assert_eq!(reference(&catalog(&[], &["a", "b"]), first.as_ref()), Some(audio("b")));
+		// Video listed before its timeline exists doesn't take over yet.
+		let mut pending = catalog(&[], &["b"]);
+		pending.video.renditions.insert("v".to_string(), video_config());
+		assert_eq!(reference(&pending, first.as_ref()), Some(audio("b")));
 		assert_eq!(
 			reference(&catalog(&["v"], &["a", "b"]), first.as_ref()),
 			Some(video("v"))
