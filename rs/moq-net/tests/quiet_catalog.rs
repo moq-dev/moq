@@ -53,7 +53,7 @@ fn publish(origin: &origin::Producer) -> (broadcast::Producer, track::Producer) 
 async fn request(origin: &origin::Producer) -> broadcast::Consumer {
 	let consumer = origin.consume();
 	consumer.routed("live").await.unwrap();
-	consumer.request_broadcast("live").await.unwrap()
+	consumer.request_broadcast("live", None).await.unwrap()
 }
 
 /// Subscribe without a floor and expect the snapshot as group 0.

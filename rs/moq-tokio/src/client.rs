@@ -1703,7 +1703,7 @@ mod tests {
 		};
 		assert_eq!(update.prefix.as_str(), "test");
 		let broadcast = sub_consumer
-			.request_broadcast("test")
+			.request_broadcast("test", None)
 			.await
 			.expect("broadcast resolves");
 		let mut track = broadcast

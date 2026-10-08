@@ -16,7 +16,7 @@ import * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
-import type { Cursor, Reader, Stream } from "../stream.ts";
+import { type Cursor, type Reader, type Stream, UnexpectedEnd } from "../stream.ts";
 import { Tail } from "../tail.ts";
 import { Milli, type Timescale } from "../time.ts";
 import type * as track from "../track.ts";
@@ -1090,20 +1090,28 @@ export class Subscriber {
 		};
 
 		try {
-			// FIRST_OBJECT clear says this stream starts partway through the group, which the
-			// draft lets a publisher do to answer a filter. Nothing above here can use it: the
-			// objects that would arrive are not decodable without the missing head, and a group
-			// is the unit an application resyncs on. Drop it and pick up at the next group, the
-			// same degradation as a publisher that no longer holds the head.
+			// FIRST_OBJECT clear is the publisher's claim that the stream starts partway
+			// through the group. The first Object ID is absolute either way, and IDs start
+			// at 0, so a clear bit on object 0 is still the whole group. Any other first ID,
+			// or a stream with no object, has a hole at the front: drop it and pick up at
+			// the next group.
 			//
 			// Drafts before the bit cannot say this in the header. A non-zero delta on the
 			// first object is the same hole, and the catch below drops that stream too. A
 			// later gap, or a header that claimed the group starts at object 0, still fails
 			// it: `Frame.decode` refuses every non-zero delta.
 			if (!group.flags.firstObject) {
-				console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
-				stream.stop(new Error("a group must start at object 0"));
-				return;
+				let id: bigint | undefined;
+				try {
+					id = await stream.peekU62();
+				} catch (err: unknown) {
+					if (!(err instanceof UnexpectedEnd)) throw err;
+				}
+				if (id !== 0n) {
+					console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
+					stream.stop(new Error("a group must start at object 0"));
+					return;
+				}
 			}
 
 			// The alias binds after SUBSCRIBE_OK commits the track property; an omitted

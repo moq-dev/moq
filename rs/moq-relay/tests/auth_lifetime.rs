@@ -252,7 +252,7 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
 	let bc = sub_consumer
-		.request_broadcast("test")
+		.request_broadcast("test", None)
 		.await
 		.expect("announced broadcast resolves");
 
@@ -307,6 +307,16 @@ async fn spawn_quic_relay(
 	auth: moq_relay::auth::Auth,
 	root: Option<std::path::PathBuf>,
 ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+	spawn_quic_relay_with(auth, root, cluster).await
+}
+
+/// [`spawn_quic_relay`] serving `cluster`.
+async fn spawn_quic_relay_with(
+	auth: moq_relay::auth::Auth,
+	root: Option<std::path::PathBuf>,
+	cluster: cluster::Cluster,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let mut config = moq_tokio::listen::Config::default();
 	config.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -315,7 +325,6 @@ async fn spawn_quic_relay(
 	let server = config.init(Default::default()).expect("server init");
 	let addr = server.local_addr().expect("quic addr");
 	let mut server = server.listen().await.expect("listen");
-	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
 	let handle = tokio::spawn(async move {
 		while let Some(request) = server.accept().await {
 			let conn = Connection::new(request, cluster.clone(), auth.clone());
@@ -484,7 +493,7 @@ async fn a_moved_tier_retags_the_live_session() {
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(announced, "expected announce, got retraction");
 	let bc = sub_consumer
-		.request_broadcast("test")
+		.request_broadcast("test", None)
 		.await
 		.expect("announced broadcast resolves");
 	let mut track_sub = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
@@ -863,6 +872,74 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	assert_refused_with(mtls_client(), &room).await;
 	drop(session);
 	relay.abort();
+}
+
+/// A relay dialing in with a certificate, admitted by `moq auth serve --mtls-peer`,
+/// is a cluster peer: what it announces entered the cluster elsewhere.
+#[tokio::test]
+async fn an_mtls_peer_is_a_cluster_peer() {
+	let source = mtls_route_source(true).await;
+	assert!(
+		matches!(source, moq_net::origin::Source::Peer(_)),
+		"an mTLS peer's route counted as {source:?}"
+	);
+}
+
+/// Without `--mtls-peer`, a certificate identifies a client ingesting here.
+#[tokio::test]
+async fn an_mtls_client_ingests_here() {
+	assert_eq!(mtls_route_source(false).await, moq_net::origin::Source::Local);
+}
+
+/// The source the relay records for a broadcast announced over a certificate
+/// session, admitted by `moq auth serve` with `mtls_peer` set as given.
+async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (root, client_cert, client_key) = signed_client(dir.path());
+
+	let mut policy = moq_auth::serve::Policy::default();
+	policy.mtls = moq_auth::Permissions::new(all(), all());
+	policy.mtls_peer = mtls_peer;
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let auth_url: url::Url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
+	let server = moq_auth::serve::Server::new(policy).unwrap();
+	tokio::spawn(async move { server.serve(listener).await });
+
+	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+	let (addr, relay) = spawn_quic_relay_with(build_auth(auth_url), Some(root), cluster.clone()).await;
+
+	let mut config = moq_tokio::connect::Config::default();
+	config.tls.insecure = Some(true);
+	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
+	config.tls.cert = Some(client_cert);
+	config.tls.key = Some(client_key);
+	let peer = moq_tokio::origin::spawn();
+	let _forwarded = peer.create_broadcast("forwarded").expect("create");
+	_forwarded.announce(Default::default()).expect("announce");
+	let url: url::Url = format!("moql://127.0.0.1:{}/", addr.port()).parse().unwrap();
+	let _session = tokio::time::timeout(
+		TIMEOUT,
+		config
+			.init(Default::default())
+			.expect("client init")
+			.with_publisher(peer.consume())
+			.with_reconnect(false)
+			.connect(url)
+			.established(),
+	)
+	.await
+	.expect("connect timeout")
+	.expect("the peer is admitted");
+
+	let mut announced = cluster.origin.consume().announced();
+	let (update, _) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
+		.await
+		.expect("timed out waiting for forwarded")
+		.expect("origin closed");
+	assert_eq!(update.prefix.as_str(), "forwarded");
+	relay.abort();
+	update.route.source()
 }
 
 fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
