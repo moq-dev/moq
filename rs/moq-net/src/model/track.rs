@@ -7419,8 +7419,9 @@ mod test {
 		assert!(arrival.recv_group().now_or_never().is_none(), "held at the hole");
 		assert!(
 			matches!(producer.finish_at_pending(2), Err(Error::Closed)),
-			"a second end is refused without touching the first"
+			"a second end is refused"
 		);
+		assert_eq!(producer.final_sequence(), Some(3), "the first end stands");
 
 		for sequence in [0, 1] {
 			let _low = producer.create_group(group::Info { sequence }).unwrap();
