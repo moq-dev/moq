@@ -417,6 +417,6 @@ test("a capture timestamp is written on snapshots and deltas alike", async () =>
 	producer.finish();
 
 	const group = await track.subscribe().ordered().nextGroup();
-	expect((await group?.readFrame())?.timestamp.as(Time.Timescale.MILLI)).toBe(1_000);
-	expect((await group?.readFrame())?.timestamp.as(Time.Timescale.MILLI)).toBe(2_000);
+	expect((await group?.readFrame())?.timestamp?.as(Time.Timescale.MILLI)).toBe(1_000);
+	expect((await group?.readFrame())?.timestamp?.as(Time.Timescale.MILLI)).toBe(2_000);
 });

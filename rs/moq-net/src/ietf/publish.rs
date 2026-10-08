@@ -136,6 +136,8 @@ impl PublishDoneStatus {
 	/// Return the registered wire code for every supported draft.
 	pub(crate) const fn code(self, version: Version) -> u64 {
 		match version {
+			// Draft-14 registers no UPDATE_FAILED; its 0x8 is unassigned.
+			Version::Draft14 if matches!(self, Self::UpdateFailed) => 0x0,
 			Version::Draft14
 			| Version::Draft15
 			| Version::Draft16
