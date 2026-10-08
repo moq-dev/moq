@@ -13,10 +13,11 @@ use moq_net::Timestamp;
 /// carries no per-frame timing: [`ts::Export`](crate::container::ts::Export)
 /// slices its output on the PCR grid and stamps each slice at its slot boundary,
 /// and a caller that drains them on arrival collapses the clock into position
-/// clusters no downstream stage can repair. "Deliver" is up to the transport:
-/// a paced sink sleeps until the returned instant before writing, while a
-/// transport with receiver-side buffering (e.g. SRT's TSBPD) stamps the payload
-/// with it and sends immediately.
+/// clusters no downstream stage can repair. (With a delay, the TS export already
+/// hands each slice over at its time, on a clock that follows the source's.)
+/// "Deliver" is up to the transport: a paced sink sleeps until the returned
+/// instant before writing, while a transport with receiver-side buffering (e.g.
+/// SRT's TSBPD) stamps the payload with it and sends immediately.
 ///
 /// `send_at = anchor + (ts - base)` maps the frame's media time onto the wall
 /// clock, where `base`'s media time and `anchor`'s wall instant were pinned to
@@ -261,7 +262,7 @@ mod tests {
 	}
 
 	/// Regression: the lead comparison must not construct `now + lead`, which
-	/// panics on a large but valid `Duration` (`--max-age` is unbounded).
+	/// panics on a large but valid `Duration` (`--delay` is unbounded).
 	#[test]
 	fn huge_lead_does_not_overflow() {
 		let start = Instant::now();

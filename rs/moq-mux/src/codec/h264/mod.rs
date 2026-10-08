@@ -156,6 +156,11 @@ pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
 	})
 }
 
+/// The NAL HRD an SPS NAL unit's VUI declares, when it carries one.
+pub(crate) fn sps_hrd(nal: &[u8]) -> Option<crate::codec::video::Hrd> {
+	sps_vui(nal)?.hrd
+}
+
 /// The frame rate an SPS NAL unit fixes with `fixed_frame_rate_flag`.
 ///
 /// Without the flag the VUI tick only bounds the rate from above, so it is left to measurement.
@@ -178,6 +183,8 @@ struct Vui {
 	period: Option<(u64, u64)>,
 	/// `max_num_reorder_frames`, when the bitstream restriction is present.
 	depth: Option<u32>,
+	/// The NAL HRD, when present.
+	hrd: Option<crate::codec::video::Hrd>,
 }
 
 /// `None` when the SPS carries no VUI or fails to parse.
@@ -293,12 +300,13 @@ fn vui(rbsp: &[u8]) -> h264_parser::Result<Option<Vui>> {
 		}
 	}
 	let nal_hrd = r.read_flag()?;
-	if nal_hrd {
-		skip_hrd(&mut r)?;
-	}
+	let hrd = match nal_hrd {
+		true => Some(read_hrd(&mut r)?),
+		false => None,
+	};
 	let vcl_hrd = r.read_flag()?;
 	if vcl_hrd {
-		skip_hrd(&mut r)?;
+		read_hrd(&mut r)?;
 	}
 	if nal_hrd || vcl_hrd {
 		r.skip_bits(1)?; // low_delay_hrd_flag
@@ -309,6 +317,7 @@ fn vui(rbsp: &[u8]) -> h264_parser::Result<Option<Vui>> {
 			frame_only,
 			period,
 			depth: None,
+			hrd,
 		}));
 	}
 	r.skip_bits(1)?; // motion_vectors_over_pic_boundaries_flag
@@ -320,24 +329,35 @@ fn vui(rbsp: &[u8]) -> h264_parser::Result<Option<Vui>> {
 		frame_only,
 		period,
 		depth: Some(depth),
+		hrd,
 	}))
 }
 
-/// Skip `hrd_parameters()` (ITU-T H.264 E.1.2).
-fn skip_hrd(r: &mut h264_parser::bitreader::BitReader) -> h264_parser::Result<()> {
+/// Read `hrd_parameters()` (ITU-T H.264 E.1.2) down to its last schedule (E.2.2).
+fn read_hrd(r: &mut h264_parser::bitreader::BitReader) -> h264_parser::Result<crate::codec::video::Hrd> {
 	use h264_parser::eg::read_ue;
 
 	let cpb_cnt_minus1 = read_ue(r)?;
 	if cpb_cnt_minus1 > 31 {
 		return Err(h264_parser::Error::MalformedSps("cpb_cnt_minus1 out of range".into()));
 	}
-	r.skip_bits(8)?; // bit_rate_scale, cpb_size_scale
+	let bit_rate_scale = r.read_bits(4)?;
+	let cpb_size_scale = r.read_bits(4)?;
+	let mut hrd = crate::codec::video::Hrd {
+		bit_rate: 0,
+		cpb_size: 0,
+	};
 	for _ in 0..=cpb_cnt_minus1 {
-		read_ue(r)?; // bit_rate_value_minus1
-		read_ue(r)?; // cpb_size_value_minus1
+		let bit_rate = u64::from(read_ue(r)?) + 1;
+		let cpb_size = u64::from(read_ue(r)?) + 1;
 		r.skip_bits(1)?; // cbr_flag
+		hrd = crate::codec::video::Hrd {
+			bit_rate: bit_rate << (6 + bit_rate_scale),
+			cpb_size: cpb_size << (4 + cpb_size_scale),
+		};
 	}
-	r.skip_bits(20) // four delay/offset lengths
+	r.skip_bits(20)?; // four delay/offset lengths
+	Ok(hrd)
 }
 
 /// Parsed AVCDecoderConfigurationRecord (ISO/IEC 14496-15 §5.3.3.1.2).

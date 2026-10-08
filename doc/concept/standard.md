@@ -36,6 +36,12 @@ In Rust, drafts 14 to 16 apply a subscription's `SUBSCRIBE_UPDATE`
 no `UPDATE_FAILED`, so a refused update ends the subscription with
 `INTERNAL_ERROR`. On those drafts an update to any other request is ignored.
 
+Rust and JavaScript accept repeated unknown `SETUP` options, including GREASE,
+while still requiring every value to be well-formed. Repeated known options
+are rejected. On draft-17 and later, a `GROUP_ORDER` message parameter must be
+Ascending (1) or Descending (2); any other value closes the session with
+`PROTOCOL_VIOLATION`.
+
 Rust and JavaScript subscribers accept object extension blocks up to 64 KiB.
 This is an implementation limit, not a limit in the IETF draft. A larger
 declared block stops its subgroup stream with `MALFORMED_TRACK` before reading
