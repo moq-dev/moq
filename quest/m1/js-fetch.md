@@ -19,6 +19,11 @@ codes, cancellation, and clean stream finish. Match the existing Rust response
 contract, including saved object prefixes. Unsupported versions or request
 forms must receive the protocol's explicit refusal rather than hang.
 
+Datagrams are never fetchable (#4982): Rust refuses a FETCH that reaches a
+datagram with `NotFetchable` (0x3a on moq-lite-07, `NotFound` earlier).
+`@moq/net` has no such code yet. Add it and refuse the same way, on lite and
+IETF.
+
 Verify with an in-memory application responder: a browser publisher serves a
 native IETF subscriber after a group is evicted or was never cached. Run the
 supported-draft matrix and `just test interop --all` through CI.

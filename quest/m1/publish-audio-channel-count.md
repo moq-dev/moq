@@ -57,3 +57,4 @@ be cheaper than a full media run, if one can be made to fail reliably.
 ## Related
 
 - [Browser benchmarks](/quest/m1/browser-benchmarks.md) - the other place browser-side capture and encode costs get measured
+- [Media audio-tone check](/quest/m1/media-audio-tone.md) - a test that misses tone samples, possibly from the same cause

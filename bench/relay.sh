@@ -217,6 +217,7 @@ run_workload() {
     local workload=$3
     local runtime=${4:-}
     local workers=${5:-1}
+    local -a overrides=("${@:6}")
     local directory=$RUN/relay/$label/$workload
     local stats=$directory/load.jsonl
     local host=$directory/host.jsonl
@@ -245,7 +246,7 @@ run_workload() {
         --startup 2s \
         --duration 10s \
         --report 500ms \
-        --output "$stats" >"$directory/load.log" 2>&1; then
+        --output "$stats" ${overrides[@]+"${overrides[@]}"} >"$directory/load.log" 2>&1; then
         printf 'load benchmark failed: %s/%s\n' "$label" "$workload" >&2
         cat "$directory/load.log" >&2
         return 1

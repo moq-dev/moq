@@ -4,8 +4,11 @@
 
 The lite session is a state machine fed bytes, stream open and close events,
 and `tick(now)`; it returns bytes to write and events for the model. No
-`web_transport_trait` stream types, no timers of its own, no async outside
-the `async` feature.
+transport stream types, no timers of its own, no async outside the `async`
+feature. The starting point: since #4709 the session already runs over
+moq-net's own poll interface (`transport::poll::Session` in
+`rs/moq-net/src/transport.rs`), not `web_transport_trait`, but it still
+drives that interface from async tasks.
 
 ## Plan
 

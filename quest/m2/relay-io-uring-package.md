@@ -35,5 +35,3 @@ Public API: none. Wire: none.
 
 - [moq-transport on io_uring](/quest/m1/uring-ietf.md) - a packaged relay
   must not drop protocols when the ring is on
-- [Flow-control windows](/quest/m1/uring-flow-control-windows.md) - the
-  `[quic]` section must not be refused at startup on the ring
