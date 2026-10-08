@@ -28,8 +28,9 @@ Decided 2026-10-08:
   land, but don't gate the cut on their result.
 
 This README's own work, after the children merge: bump `@moq/net` on
-`release` (`/bump`), merge the open release-plz PR (#4944, 0.17.2 at
-planning time, or its successor), and send the reporter the branch.
+`release` (`/bump`), merge the release-plz PR it regenerates for the
+backports (0.17.3; 0.17.2 already shipped, and #4944 predates the
+backports), and send the reporter the branch.
 
 ## Required
 
