@@ -1524,21 +1524,22 @@ where
 		let draft20 = Filter::is_draft20(self.version);
 		let end_of_track = !joined && group.complete && track.final_sequence() == group.sequence.checked_add(1);
 		// Draft-20 caps the response at Largest Object, and refuses a start past it (section
-		// 10.13). The cache knows it at the track's end, or while it reflects a live feed. A
-		// relay's copy with no upstream subscription does not, so it neither caps nor refuses:
-		// the read waits out an unfinished group, so echoing the requested end over a finished
-		// one only says objects it never held do not exist.
+		// 10.13). Both only bite when Largest Object is in the fetched group, so this is its
+		// Object ID there, `Some(None)` for a final group with nothing from the start. The
+		// cache knows it at the track's end, or when a live feed's newest object it can name
+		// is in this group. Otherwise (a relay's copy with no upstream subscription, or a
+		// newest group it cannot read) it neither caps nor refuses: the read waits out an
+		// unfinished group, so echoing the requested end over a finished one only says
+		// objects it never held do not exist.
 		let largest = match end_of_track {
-			true => Some(group.end().checked_sub(1).map(|object| Location {
-				group: group.sequence,
-				object,
-			})),
-			false if !joined && track.is_live() => Some(live_edge(&track).largest),
+			true => Some(group.end().checked_sub(1)),
+			false if !joined && track.is_live() => live_edge(&track)
+				.largest
+				.filter(|largest| largest.group == group.sequence)
+				.map(|largest| Some(largest.object)),
 			false => None,
 		};
-		let past_largest = largest.is_some_and(|largest| {
-			largest.is_none_or(|largest| (start.group, start.object) > (largest.group, largest.object))
-		});
+		let past_largest = largest.is_some_and(|largest| largest.is_none_or(|object| start.object > object));
 		if draft20 && past_largest {
 			return self
 				.reject_fetch(stream, msg.request_id, &Error::InvalidRange, "start past Largest Object")
@@ -1588,8 +1589,8 @@ where
 					None => group.end().saturating_sub(1).max(start.object),
 				};
 				let object = match largest.flatten() {
-					Some(largest) if largest.group == group.sequence => requested.min(largest.object),
-					_ => requested,
+					Some(largest) => requested.min(largest),
+					None => requested,
 				};
 				Location {
 					group: group.sequence,
@@ -5217,6 +5218,10 @@ mod serve_tests {
 		Live,
 		/// A relay's copy with no upstream subscription: unknown.
 		Idle,
+		/// An idle copy that learned a later end of track: still unknown.
+		IdleEnded,
+		/// A live feed whose newest group is a datagram the cache cannot read: unknown.
+		Datagram,
 	}
 
 	/// Groups 0 to 4 of two objects each, with Largest Object known as `largest` says.
@@ -5232,15 +5237,30 @@ mod serve_tests {
 				h.track.set_idle();
 				None
 			}
+			Largest::IdleEnded => {
+				h.track.set_idle();
+				h.track.finish_at(10).unwrap();
+				None
+			}
+			Largest::Datagram => {
+				h.track.append_datagram(timestamp(), b"d".as_slice()).unwrap();
+				None
+			}
 		}
 	}
 
 	/// On draft 20, a start past Largest Object is refused INVALID_RANGE (section 10.13),
-	/// wherever the publisher knows it. A relay's idle copy does not, and answers empty.
+	/// wherever the publisher knows it. Where it does not, it answers empty.
 	#[moq_net_sim::test]
 	async fn a_draft20_fetch_past_the_largest_object_is_refused() {
 		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
-			for largest in [Largest::Finished, Largest::Live, Largest::Idle] {
+			for largest in [
+				Largest::Finished,
+				Largest::Live,
+				Largest::Idle,
+				Largest::IdleEnded,
+				Largest::Datagram,
+			] {
 				let mut h = serve(version);
 				let _newer = publish_largest(&mut h, largest);
 				settle().await;
@@ -5253,16 +5273,16 @@ mod serve_tests {
 				)
 				.await;
 				match largest {
-					Largest::Idle => {
-						let (ok, objects) = fetch_answer(buf, version);
-						assert_eq!(ok.end_location, Location { group: 4, object: 5 }, "{version}");
-						assert_eq!(objects, Vec::new(), "{version}");
-					}
-					_ => assert_eq!(
+					Largest::Finished | Largest::Live => assert_eq!(
 						fetch_refusal(buf, version),
 						invalid_range(version),
 						"{version} {largest:?}"
 					),
+					_ => {
+						let (ok, objects) = fetch_answer(buf, version);
+						assert_eq!(ok.end_location, Location { group: 4, object: 5 }, "{version} {largest:?}");
+						assert_eq!(objects, Vec::new(), "{version} {largest:?}");
+					}
 				}
 			}
 		}
@@ -5279,6 +5299,8 @@ mod serve_tests {
 				(4, Largest::Live, 1),
 				(4, Largest::Finished, 1),
 				(4, Largest::Idle, 7),
+				(4, Largest::IdleEnded, 7),
+				(4, Largest::Datagram, 7),
 			] {
 				let mut h = serve(version);
 				let _newer = publish_largest(&mut h, largest);

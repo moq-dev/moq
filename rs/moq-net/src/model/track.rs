@@ -2920,13 +2920,13 @@ impl Consumer {
 		routes.serving()
 	}
 
-	/// Whether the cache reflects the track's live feed (or its end), so the newest object
-	/// it holds is the track's largest. A relay's copy with no upstream subscription is not.
+	/// Whether the cache is fed live, so the newest object it holds is the track's largest.
+	/// A relay's copy with no upstream subscription is not, even once it learns the end.
 	pub(crate) fn is_live(&self) -> bool {
 		if let Some(serving) = self.serving() {
 			return serving.is_live();
 		}
-		self.state.read().readable()
+		self.state.read().feed == Feed::Live
 	}
 
 	/// Fetching a single past group, without holding a live subscription.
