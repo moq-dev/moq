@@ -1,6 +1,7 @@
-import { race, Signal } from "@moq/signals";
+import { type GetPromise, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
+import type { Drain } from "../connection/goaway.ts";
 import { BroadcastCache } from "../consume.ts";
 import {
 	closeError,
@@ -54,6 +55,11 @@ import { Version } from "./version.ts";
 // concurrent QUIC streams (Chrome ~100); past the cap openBi() silently
 // blocks. The timeout turns that into a clear error.
 const SUBSCRIBE_OK_TIMEOUT_MS = 10_000;
+
+// Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
+// candidate outranks it, while the route stays selectable as the last path. Matches Rust
+// Cost::DRAIN: cost is the whole mechanism, not a separate state.
+const DRAIN_COST = { warm: 2n ** 62n - 1n, cold: 2n ** 62n - 1n };
 
 // A live subscription, as the track alias its data streams name resolves to.
 type Subscription = {
@@ -154,6 +160,9 @@ export class Subscriber {
 	// when it declared nothing.
 	#solicit?: boolean;
 
+	// Settles when the peer sends GOAWAY, repricing this session's routes to the drain cost.
+	#goaway?: GetPromise<Drain>;
+
 	/** Marks this subscriber's deliberate local session close. @internal */
 	close() {
 		this.#localClose = true;
@@ -170,6 +179,7 @@ export class Subscriber {
 		cluster,
 		hidden = false,
 		solicit,
+		goaway,
 	}: {
 		/** The session abstraction for bidi streams and request IDs. */
 		session: Session;
@@ -181,12 +191,39 @@ export class Subscriber {
 		hidden?: boolean;
 		/** What the peer's SETUP declared about being solicited (MoQ Solicit). */
 		solicit?: boolean;
+		/** Settles when the peer sends GOAWAY. */
+		goaway?: GetPromise<Drain>;
 	}) {
 		this.#session = session;
 		this.#quic = quic;
 		this.#cluster = cluster;
 		this.#hidden = hidden;
 		this.#solicit = solicit;
+		this.#goaway = goaway;
+		// A draining peer usually stops publishing namespaces, so reprice from the signal
+		// itself. Waiting for another message would leave the route primary until close.
+		if (goaway) void goaway.then(() => this.#drainAnnounced());
+	}
+
+	// Whether the peer has sent GOAWAY. Requests keep opening here until a replacement
+	// session's route outranks this one, deliberately past draft-19 section 10.4's SHOULD
+	// NOT: refusing them would fail requests that land before the replacement is up.
+	#goingAway(): boolean {
+		return this.#goaway?.peek() !== undefined;
+	}
+
+	// What a route costs once the peer has asked us to leave.
+	#priced(route: Route): Route {
+		if (!this.#goingAway()) return route;
+		if (route.cost.warm === DRAIN_COST.warm && route.cost.cold === DRAIN_COST.cold) return route;
+		return { ...route, cost: DRAIN_COST };
+	}
+
+	// Reprice every live advertisement. Idempotent, since the signal stays set.
+	#drainAnnounced(): void {
+		for (const [path, info] of this.#announced) {
+			this.#updateAnnounce(path, info.route);
+		}
 	}
 
 	/**
@@ -251,9 +288,12 @@ export class Subscriber {
 	 * first. A second one is the same namespace said twice, not news.
 	 */
 	#attachAnnounce(path: Path.Valid, route: Route) {
+		route = this.#priced(route);
 		const existing = this.#announced.get(path);
 		if (existing) {
 			existing.count += 1;
+			// A second advertisement after GOAWAY still must not win selection.
+			if (this.#goingAway()) this.#updateAnnounce(path, existing.route);
 			return;
 		}
 		this.#announced.set(path, { count: 1, route });
@@ -273,6 +313,7 @@ export class Subscriber {
 	 * the first hop now says, so the shared consume stays.
 	 */
 	#updateAnnounce(path: Path.Valid, route: Route) {
+		route = this.#priced(route);
 		const existing = this.#announced.get(path);
 		if (existing === undefined || routesEqual(existing.route, route)) return;
 		existing.route = route;

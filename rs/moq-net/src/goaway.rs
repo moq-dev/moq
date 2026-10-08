@@ -175,9 +175,9 @@ impl Consumer {
 /// The receive-side GOAWAY signal handed to a subscriber.
 ///
 /// Carries the flag and the channel together because a subscriber needs both: an
-/// atomic load before opening a request stream (the hot path, which is why the
-/// flag is not merely a read of the channel), and a wakeup for the per-source
-/// tasks, which have to react to a peer that drains and then goes quiet.
+/// atomic load when pricing each received announcement (the hot path, which is
+/// why the flag is not merely a read of the channel), and a wakeup for the
+/// per-source tasks, which have to react to a peer that drains and then goes quiet.
 #[derive(Clone)]
 pub(crate) struct GoingAway {
 	flag: Arc<AtomicBool>,
@@ -239,7 +239,7 @@ pub(crate) struct Protocol {
 	trigger: kio::Consumer<Option<Goaway>>,
 	/// Written by the driver's receive path when a GOAWAY is decoded.
 	received: kio::Producer<Option<Goaway>>,
-	/// Set alongside `received`; checked before opening new request streams.
+	/// Set alongside `received`; reprices this session's routes to the drain cost.
 	pub going_away: GoingAway,
 }
 
