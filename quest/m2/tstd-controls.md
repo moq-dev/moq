@@ -22,7 +22,3 @@ The only positive reference carries MPEG audio, but the export emits AAC.
     shared.
 - Each control fails or passes for the stated reason, and `interop.yml`
   runs them.
-
-## Required
-
-- [Fixed-delay muxing](/quest/m1/tstd/delay.md) - #4645 edits the same `tstd-controls.py`; the harness itself (`just test ts-tstd`) is already on `main` from #4640, so this does not wait on the whole T-STD line (2026-10-06 audit)

@@ -15,7 +15,6 @@
 //! that whoever owns the split drives via [`decode`](Import::decode).
 
 use bytes::Bytes;
-use scuffle_h265::SpsNALUnit;
 
 use super::{Error, split::nal_unit_type};
 use crate::Result;
@@ -238,22 +237,29 @@ pub fn config(buf: &[u8]) -> Result<hang::catalog::VideoConfig> {
 /// The config an inline SPS describes (`in_band: true`, the hev1 shape). No `description`: the
 /// parameter sets ride with every keyframe.
 fn config_from_sps(sps_nal: &[u8]) -> Result<hang::catalog::VideoConfig> {
-	let sps = SpsNALUnit::parse(&mut &sps_nal[..]).map_err(|_| Error::SpsParse)?;
-	let profile = &sps.rbsp.profile_tier_level.general_profile;
-	let vui_data = sps.rbsp.vui_parameters.as_ref().map(VuiData::new).unwrap_or_default();
+	let super::Sps { head, full } = super::Sps::parse(sps_nal)?;
+	// The VUI (frame rate, aspect ratio) only comes with scuffle_h265's full parse.
+	let vui_data = full
+		.as_ref()
+		.and_then(|sps| sps.vui_parameters.as_ref())
+		.map(VuiData::new)
+		.unwrap_or_default();
 
 	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
 		in_band: true, // An inline SPS is the hev1 shape; hvc1 configs come from `config_from_hvcc`.
-		profile_space: profile.profile_space,
-		profile_idc: profile.profile_idc,
-		profile_compatibility_flags: profile.profile_compatibility_flag.bits().to_be_bytes(),
-		tier_flag: profile.tier_flag,
-		level_idc: profile.level_idc.ok_or(Error::MissingLevelIdc)?,
-		constraint_flags: super::pack_constraint_flags(profile),
+		profile_space: head.profile_space,
+		profile_idc: head.profile_idc,
+		profile_compatibility_flags: head.profile_compatibility_flags,
+		tier_flag: head.tier_flag,
+		level_idc: head.level_idc,
+		constraint_flags: head.constraint_flags,
 	});
-	config.coded_width = Some(sps.rbsp.cropped_width() as u32);
-	config.coded_height = Some(sps.rbsp.cropped_height() as u32);
-	config.framerate = super::sps_period(&sps.rbsp).map(|(units, scale)| scale as f64 / units as f64);
+	config.coded_width = Some(head.width);
+	config.coded_height = Some(head.height);
+	config.framerate = full
+		.as_ref()
+		.and_then(super::sps_period)
+		.map(|(units, scale)| scale as f64 / units as f64);
 	config.display_aspect_width = vui_data.display_ratio_width;
 	config.display_aspect_height = vui_data.display_ratio_height;
 	Ok(config)

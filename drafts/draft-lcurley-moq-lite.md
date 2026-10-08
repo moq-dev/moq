@@ -286,6 +286,8 @@ Sent when terminating the session, via the transport's session close.
 | ------- | ------------- | ----------- |
 |  0x6   | KEY_VALUE_FORMATTING_ERROR | A key-value pair was malformed, or repeated more than allowed. |
 | ------- | ------------- | ----------- |
+|  0x7   | TOO_MANY_REQUESTS | The peer held more announcements or subscriptions than the endpoint allows. |
+| ------- | ------------- | ----------- |
 |  0x10  | GOAWAY_TIMEOUT | The peer did not close within the GOAWAY drain deadline. |
 | ------- | ------------- | ----------- |
 |  0x11  | CONTROL_MESSAGE_TIMEOUT | The peer took too long to respond to a control message. |
@@ -522,7 +524,9 @@ Either endpoint can open a Goaway Stream (0x5) to initiate a graceful session sh
 
 The sender sends a GOAWAY message containing an optional new session URI.
 If the URI is non-empty, the peer SHOULD establish a new session at the provided URI and migrate any active subscriptions.
-The peer MUST NOT open new streams on the current session after receiving a GOAWAY.
+After receiving a GOAWAY, the peer MAY keep opening requests on the current session until it has moved to a replacement session.
+The sender SHOULD keep answering them until the session ends, and MAY reset one with GOING_AWAY.
+The recipient SHOULD treat that reset as a route failure and retry the request on the replacement session or another route.
 
 The sender closes the stream (FIN) when it is ready to terminate the session.
 The peer SHOULD close all streams and the session after migrating or when it no longer needs the session.
@@ -707,6 +711,7 @@ Most messages are prefixed with a variable-length integer indicating the number 
 This length field does not include the length of the varint length itself.
 
 An implementation SHOULD close the connection with a PROTOCOL_VIOLATION if it receives a message with an unexpected length.
+Except in FRAME, a Message Length over 65,535 bytes is unexpected: a sender MUST NOT exceed it, and a receiver MAY reject it based on the length prefix alone.
 The version and extensions should be used to support new fields, not the message length.
 
 ## STREAM_TYPE {#stream_type}
@@ -741,7 +746,7 @@ Setup Parameter {
 }
 ~~~
 
-The Message Length MUST NOT exceed 65,536 bytes; a receiver MUST treat a longer SETUP as a protocol violation and MAY reject it based on the length prefix alone.
+SETUP follows the [Message Length](#message-length) cap; a receiver MUST treat a longer SETUP as a protocol violation.
 
 **Parameter Count**:
 The number of Setup Parameters that follow.
@@ -1388,6 +1393,7 @@ The `Message Length` describes the payload size on the wire.
 - Assigned 0x3A NOT_FETCHABLE in the stream error table: a FETCH for a group delivered only as a datagram.
 - The subscriber FINs its Subscribe Stream after settling its tail; graceful session close waits for that FIN or reset.
 - A refusal is not retried at another route of the same prefix either.
+- A GOAWAY recipient MAY keep opening requests on the current session until it has moved to a replacement session; previously it MUST NOT open new streams. The sender SHOULD keep answering them and MAY reset one with GOING_AWAY, which the recipient SHOULD retry on another route.
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
 - Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it. Earlier versions carry no such position, so a subscriber takes the first frame instead.
 - Added `Epoch` to ANNOUNCE_START, SUBSCRIBE, TRACK, and FETCH: a UUIDv7 naming the publisher instance, or empty. A path and an Epoch name one Broadcast. A relay MAY move a subscription between routes with the same Epoch, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between routes with different Epochs or none. The newest Epoch wins a path and ends subscriptions to the older one. Replaces the first-hop identity.
@@ -1401,7 +1407,8 @@ The `Message Length` describes the payload size on the wire.
 - The Subscribe Stream FIN now follows once every counted Group Stream has finished or been reset.
 - Added the Spread Hash tie-break after the shortest path: a hash of the requested path and the route's Hop IDs, so equal-cost advertisers of one prefix share its paths.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
-- Capped the SETUP Message Length at 65,536 bytes.
+- Capped the Message Length of every message except FRAME at 65,535 bytes.
+- Added the TOO_MANY_REQUESTS (0x7) session code, closing a session whose peer goes past the endpoint's bound on subscriptions or announcements.
 
 ## moq-lite-06
 
@@ -1576,7 +1583,7 @@ GOAWAY carries an optional New Session URI that asks the peer to reconnect elsew
 Hop IDs (see [ANNOUNCE_OK](#announce-ok) and [ANNOUNCE_START](#announce-start)) expose the relay path of a broadcast, which may reveal internal topology. A relay that does not wish to disclose its position MAY use the reserved value 0 ("unknown") instead of a stable identifier, at the cost of losing loop detection through itself (see [Routing](#routing)). The Hop ID announcement filter (see [Hop Parameter](#hop-parameter)) exists for loop avoidance, not access control: a subscriber cannot verify that a publisher honored it, so it MUST NOT be relied upon to hide a broadcast from a peer that declared its Hop ID.
 
 ## Resource Exhaustion
-A peer can open many streams (subscriptions, announcements, fetches), request large announce prefixes, or advertise broad routes. Implementations SHOULD bound the number of concurrent subscriptions, announce matches, and cached groups, and SHOULD rely on QUIC flow control and stream limits to backpressure a misbehaving peer (see [ANNOUNCE_REQUEST](#announce-request)). Expiration (see [Expiration](#expiration)) bounds how long stale groups consume memory and flow control. A broad route invites a request for any covered path, each of which may start work: an advertiser SHOULD bound the work it starts, withdrawing its route before it runs out, and every refusal is terminal, so a flood of requests costs the mesh one round trip each rather than a search (see [Resolution](#resolution)).
+A peer can open many streams (subscriptions, announcements, fetches), request large announce prefixes, or advertise broad routes. Implementations SHOULD bound the number of concurrent subscriptions, announce matches, and cached groups; an endpoint whose peer goes past its bound on subscriptions or announcements SHOULD close the session with TOO_MANY_REQUESTS, and SHOULD rely on QUIC flow control and stream limits to backpressure a misbehaving peer (see [ANNOUNCE_REQUEST](#announce-request)). Expiration (see [Expiration](#expiration)) bounds how long stale groups consume memory and flow control. A broad route invites a request for any covered path, each of which may start work: an advertiser SHOULD bound the work it starts, withdrawing its route before it runs out, and every refusal is terminal, so a flood of requests costs the mesh one round trip each rather than a search (see [Resolution](#resolution)).
 
 ## Datagram Injection
 Datagrams are routed to a subscription solely by Subscribe ID and carry no per-group authentication beyond that of the QUIC connection. On an unmodified QUIC/WebTransport connection this is sufficient, since datagrams are protected by the transport. A subscriber MUST silently drop any datagram with an unknown Subscribe ID and MUST deduplicate against groups received on streams (see [Datagrams](#datagrams)).

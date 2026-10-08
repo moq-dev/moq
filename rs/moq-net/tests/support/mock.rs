@@ -227,6 +227,11 @@ pub struct MockRecvStream {
 	buf: Bytes,
 	/// Whether we hit FIN or reset.
 	done: bool,
+	/// Once released, delivers what follows this stream's first write; see
+	/// [`MockSession::split_unis`].
+	split: Option<Arc<kio::Shared<bool>>>,
+	/// Data chunks handed to the reader so far.
+	chunks: usize,
 	/// Shared signal to notify the peer's send-side `poll_closed`.
 	closed: Arc<ClosedSignal>,
 	park: kio::Park,
@@ -237,6 +242,17 @@ impl MockRecvStream {
 	/// Pop the next chunk, mapping queue closure to an implicit FIN. Once everything
 	/// sent before a CONNECTION_CLOSE is read, an unfinished stream fails with it.
 	fn poll_chunk(&mut self, cx: &mut Context<'_>) -> Poll<Option<StreamChunk>> {
+		if let Some(split) = &self.split
+			&& self.chunks > 0
+			&& split
+				.poll(self.park.hold(cx), |released| match **released {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				})
+				.is_pending()
+		{
+			return Poll::Pending;
+		}
 		if self.flight.is_none() {
 			let waiter = self.park.hold(cx);
 			// Register on the close first so one racing the pop still wakes this poll.
@@ -284,6 +300,7 @@ impl poll::RecvStream for MockRecvStream {
 
 		match std::task::ready!(self.poll_chunk(cx)) {
 			Some(StreamChunk::Data(data)) => {
+				self.chunks += 1;
 				let n = dst.len().min(data.len());
 				dst[..n].copy_from_slice(&data[..n]);
 				if n < data.len() {
@@ -367,6 +384,8 @@ fn new_stream_pair(conn: &Arc<ConnectionState>) -> (MockSendStream, MockRecvStre
 		landing: None,
 		buf: Bytes::new(),
 		done: false,
+		split: None,
+		chunks: 0,
 		closed,
 		park: kio::Park::default(),
 		conn: conn.clone(),
@@ -429,6 +448,9 @@ struct SessionSide {
 	held: Mutex<Option<Vec<MockRecvStream>>>,
 	/// Whether the peer has withheld uni stream credit, parking every open.
 	withheld: Mutex<bool>,
+	/// While set, the uni streams this side opens hold back everything after their first
+	/// write until it is released; see [`MockSession::split_unis`].
+	split: Mutex<Option<Arc<kio::Shared<bool>>>>,
 	/// Whether the datagrams this side sends are lost.
 	lossy: Mutex<bool>,
 	/// Whether this side drops the FIN of the bidi streams it opens.
@@ -506,7 +528,8 @@ impl poll::Session for MockSession {
 			return Poll::Ready(Err(self.close_error()));
 		}
 
-		let (mut our_send, peer_recv) = new_stream_pair(&self.side.conn);
+		let (mut our_send, mut peer_recv) = new_stream_pair(&self.side.conn);
+		peer_recv.split = self.side.split.lock().unwrap().clone();
 
 		if let Some(held) = self.side.held.lock().unwrap().as_mut() {
 			our_send.ack_fin = true;
@@ -638,6 +661,21 @@ impl MockSession {
 		*self.side.withheld.lock().unwrap() = true;
 	}
 
+	/// Deliver only the first write of each uni stream this side opens from now on, holding
+	/// the rest until [`Self::release_split`]. A group stream's first write is its header,
+	/// so the header lands before the group's first frame, as QUIC may split them across
+	/// packets.
+	pub fn split_unis(&self) {
+		*self.side.split.lock().unwrap() = Some(Arc::default());
+	}
+
+	/// Deliver what [`Self::split_unis`] held, and stop splitting.
+	pub fn release_split(&self) {
+		if let Some(split) = self.side.split.lock().unwrap().take() {
+			*split.lock() = true;
+		}
+	}
+
 	/// Lose every datagram this side sends from now on.
 	pub fn lose_datagrams(&self) {
 		*self.side.lossy.lock().unwrap() = true;
@@ -687,6 +725,7 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		conn: conn.clone(),
 		held: Mutex::default(),
 		withheld: Mutex::default(),
+		split: Mutex::default(),
 		lossy: Mutex::default(),
 		withhold_bidi_fins: Arc::default(),
 	});
@@ -702,6 +741,7 @@ pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession,
 		conn,
 		held: Mutex::default(),
 		withheld: Mutex::default(),
+		split: Mutex::default(),
 		lossy: Mutex::default(),
 		withhold_bidi_fins: Arc::default(),
 	});

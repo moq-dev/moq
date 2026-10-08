@@ -11,7 +11,7 @@ use crate::{
 };
 
 // SETUP only carries negotiation parameters. Bound it independently of control messages.
-pub(crate) const MAX_SETUP_SIZE: usize = 64 * 1024;
+pub(crate) const MAX_SETUP_SIZE: usize = u16::MAX as usize;
 
 const CLIENT_SETUP: u8 = 0x20;
 const SERVER_SETUP: u8 = 0x21;
