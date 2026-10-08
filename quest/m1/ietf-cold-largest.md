@@ -38,8 +38,9 @@ so the publisher reports the maximum of the two. Serve the joining FETCH
 through the existing one-group upstream fill. Rejected: leaving
 INVALID_RANGE, which is compliant but loses late joiners' first group head.
 This reports state learned from the upstream; nothing waits on a peer. The
-same Largest goes out wherever the draft asks for it (SUBSCRIBE_OK, and on
-d18+ an inbound PUBLISH and REQUEST_UPDATE_OK).
+same Largest goes out in every response this relay sends that carries one:
+SUBSCRIBE_OK and the track-update REQUEST_OK. Inbound PUBLISH is refused
+today (`run_publish_stream`), so it is out of scope.
 
 Scrutinize the model change: keep any new track state crate-private unless a
 consumer needs it.
