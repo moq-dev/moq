@@ -21,6 +21,9 @@ export const SetupOption = {
 	Hidden: 0x40b5cn,
 } as const;
 
+// Unknown SETUP options may repeat, including GREASE (draft-21 section 9.1).
+const KNOWN_SETUP_OPTIONS: readonly bigint[] = Object.values(SetupOption);
+
 /// Setup Options — used in SETUP messages.
 ///
 /// In d14-d16 these are count-prefixed ("Setup Parameters").
@@ -140,13 +143,13 @@ export class SetupOptions {
 				i++;
 
 				if (id % 2n === 0n) {
-					if (params.vars.has(id)) {
+					if (KNOWN_SETUP_OPTIONS.includes(id) && params.vars.has(id)) {
 						throw new Error(`duplicate parameter id: ${id.toString()}`);
 					}
 					const varint = await r.u62();
 					params.setVarint(id, varint);
 				} else {
-					if (params.bytes.has(id)) {
+					if (KNOWN_SETUP_OPTIONS.includes(id) && params.bytes.has(id)) {
 						throw new Error(`duplicate parameter id: ${id.toString()}`);
 					}
 					const size = await r.u53();
@@ -169,13 +172,13 @@ export class SetupOptions {
 				}
 
 				if (id % 2n === 0n) {
-					if (params.vars.has(id)) {
+					if (KNOWN_SETUP_OPTIONS.includes(id) && params.vars.has(id)) {
 						throw new Error(`duplicate parameter id: ${id.toString()}`);
 					}
 					const varint = await r.u62();
 					params.setVarint(id, varint);
 				} else {
-					if (params.bytes.has(id)) {
+					if (KNOWN_SETUP_OPTIONS.includes(id) && params.bytes.has(id)) {
 						throw new Error(`duplicate parameter id: ${id.toString()}`);
 					}
 					const size = await r.u53();
@@ -776,9 +779,14 @@ export class Parameters {
 				case "varint":
 					params.vars.set(id, await r.u62());
 					break;
-				case "uint8":
-					params.vars.set(id, BigInt(await r.u8()));
+				case "uint8": {
+					const value = await r.u8();
+					if (id === MSG_PARAM_GROUP_ORDER && value !== 1 && value !== 2) {
+						throw new ProtocolViolation(`invalid group order: ${value}`);
+					}
+					params.vars.set(id, BigInt(value));
 					break;
+				}
 				case "bool": {
 					const value = await r.u8();
 					if (value !== 0 && value !== 1) {

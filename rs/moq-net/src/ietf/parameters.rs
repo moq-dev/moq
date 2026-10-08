@@ -82,9 +82,11 @@ impl Decode<Version> for Parameters {
 			prev = kind;
 			i += 1;
 
+			// Unknown SETUP options may repeat, including GREASE; their values still
+			// have to be well-formed Key-Value-Pairs (draft-21 section 9.1).
 			if kind % 2 == 0 {
 				let kind = ParameterVarInt::from(kind);
-				if params.get_varint(kind).is_some() {
+				if !matches!(kind, ParameterVarInt::Unknown(_)) && params.get_varint(kind).is_some() {
 					return Err(DecodeError::Duplicate);
 				}
 				params.vars.push((kind, r.varint()?));
@@ -94,7 +96,7 @@ impl Decode<Version> for Parameters {
 				if value.len() > MAX_KVP_VALUE_LEN {
 					return Err(DecodeError::BoundsExceeded);
 				}
-				if params.get_bytes(kind).is_some() {
+				if !matches!(kind, ParameterBytes::Unknown(_)) && params.get_bytes(kind).is_some() {
 					return Err(DecodeError::Duplicate);
 				}
 				params.bytes.push((kind, value.to_vec()));
@@ -585,6 +587,108 @@ macro_rules! decode_params {
 mod tests {
 	use super::super::Filter;
 	use super::*;
+
+	#[test]
+	fn setup_allows_repeated_unknown_options() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			for kind in [0x20, 0x21, 0x9d, 0x11c] {
+				let mut buf = Vec::new();
+				let mut w = Encoder::new(&mut buf, version.into());
+				if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
+					w.varint(2).unwrap();
+				}
+				w.varint(kind).unwrap();
+				for delta in [None, Some(0)] {
+					if let Some(delta) = delta {
+						w.varint(if matches!(version, Version::Draft14 | Version::Draft15) {
+							kind
+						} else {
+							delta
+						})
+						.unwrap();
+					}
+					if kind % 2 == 0 {
+						w.varint(1).unwrap();
+					} else {
+						w.bytes(b"unknown").unwrap();
+					}
+				}
+				Parameters::decode_slice(&buf, version).expect("unknown SETUP options may repeat");
+			}
+		}
+	}
+
+	#[test]
+	fn setup_rejects_repeated_known_options() {
+		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
+			for bytes in [&[4, 1, 0, 2][..], &[7, 1, b'a', 0, 1, b'b'][..]] {
+				assert!(matches!(
+					Parameters::decode_slice(bytes, version),
+					Err(DecodeError::Duplicate)
+				));
+			}
+		}
+	}
+
+	#[test]
+	fn setup_repeated_unknown_options_still_require_complete_values() {
+		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
+			assert!(Parameters::decode_slice(&[0x21, 1, b'a', 0, 2, b'b'], version).is_err());
+		}
+	}
+
+	#[test]
+	fn group_order_parameter_rejects_values_outside_one_and_two() {
+		for version in [
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			for value in [0u8, 3, 255] {
+				let bytes = [value];
+				let mut r = Decoder::new(&bytes, version.into());
+				assert!(matches!(
+					super::super::GroupOrder::param_decode(&mut r, version),
+					Err(DecodeError::InvalidValue)
+				));
+			}
+			for (value, expected) in [
+				(1u8, super::super::GroupOrder::Ascending),
+				(2, super::super::GroupOrder::Descending),
+			] {
+				let bytes = [value];
+				let mut r = Decoder::new(&bytes, version.into());
+				assert_eq!(
+					super::super::GroupOrder::param_decode(&mut r, version).unwrap(),
+					expected
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn legacy_group_order_zero_keeps_the_publisher_preference() {
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let mut r = Decoder::new(&[0], version.into());
+			assert_eq!(
+				super::super::GroupOrder::param_decode(&mut r, version).unwrap(),
+				super::super::GroupOrder::Descending
+			);
+		}
+	}
 
 	// ---- Setup Parameters tests (unchanged) ----
 

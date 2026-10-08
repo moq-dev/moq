@@ -9,10 +9,13 @@ makes such video a first-class hang broadcast on import and playback: streams
 contributed that way import cleanly, and every viewer tunes in without a
 visible glitch.
 
-Decided in the 2026-09-30 audit: the encode side (shared config, NVENC, V4L2,
-bindings) moved to m3 pending the [GOP overhead](/quest/m2/gop-overhead.md)
-verdict. Import and playback stay here because contributed feeds already use
-intra refresh regardless of what our encoders do.
+Measured on 2026-10-06: at fixed quality, a 60s keyframe interval saves
+10-16% against 2s on the 240p-720p rungs and about 10% at 1080p (x264
+veryfast, zerolatency, scene-cut detection off). Almost all of that saving is
+already at 10s. A 60s group costs the joiner a full GOP of catch-up decode,
+about 4s at 1080p on one desktop thread, and a full GOP of bytes. Encoder
+refresh mode does not pay for that. Import and playback stay here because
+contributed feeds already use intra refresh.
 
 The motivations, in the order they settle tradeoffs: a flat bitrate at low
 latency, so a bandwidth grant holds; faster tune-in, since a short refresh cycle
@@ -49,5 +52,3 @@ Decisions the quests share:
 - [Audio warmup](/quest/m1/audio-warmup.md) - Opus convergence after a mid-stream join uses the same `warmup` field
 - [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - frames stamped before the group's keyframe are the other tune-in trim
 - [Catalog warmup](/quest/m1/catalog-warmup.md) - the generic `warmup` field this line reads, kept in m1 for audio and open-GOP tune-in
-- [GOP overhead](/quest/m2/gop-overhead.md) - the verdict that decides whether our encoders emit refresh mode
-- [Encode config](/quest/m3/intra-refresh-encode-config.md) - refresh-mode groups on the `Gop` contract, parked with NVENC, V4L2, and bindings behind it
