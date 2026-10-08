@@ -49,9 +49,9 @@ no linger (the `hls-linger` quest was dropped, because an unannounced
 broadcast can't be FETCHed and a linger would only serve the cache). Test
 the handover: a live HLS session keeps its playlist URIs and media sequence
 numbers when the name moves from the live publisher to the archive, which
-announces under the recorded epoch ([Replay
-catalog](/quest/m1/archive/replay-catalog.md)), so a subscription resumes
-rather than restarts.
+announces a fresh epoch ([Replay
+catalog](/quest/m1/archive/replay-catalog.md)), so viewers follow a
+`Restart` rather than resume.
 
 ## Required
 

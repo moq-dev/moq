@@ -32,12 +32,14 @@ this by hand-building a catalog.
   `moq-cli` only passes the URL and the opt-out. Select the catalog track by
   catalog format as `export archive` does: hang and hang.z are stamped, MSF
   is refused.
-- The replay announces under the epoch the recording's `.info` keeps
-  (decided in the 2026-10-08 audit), not a freshly minted one: it is the
-  same content, so a live-to-archive handover at one path resumes instead of
-  restarting viewers. A recording whose source had no epoch replays without
-  one, and that handover is a `Restart`. Today `moq import archive` mints
-  per run (#4942); change it.
+- The replay keeps minting a fresh epoch per run (#4942), so a
+  live-to-archive handover at one path is a `Restart`, not a resume (decided
+  in the 2026-10-08 audit, after #5043's review). Reusing the recorded
+  `.info` epoch was rejected for now: the archive writes its own
+  `<track>.timeline.z` groups under the live names, and this quest rewrites
+  catalog groups, so the same name, epoch, and group number could carry
+  different bytes. Revisit only once replayed metadata is byte- and
+  sequence-identical to live.
 - The recorded catalog's `archive` entry describes the source's live
   timelines, not the recording's, so replace it with the timelines the reader
   replays rather than trusting the recorded ones.
