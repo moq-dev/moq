@@ -620,7 +620,7 @@ where
 			let broadcast = match self
 				.serving_origin()
 				.await
-				.request_broadcast(&msg.track_namespace)
+				.request_broadcast(&msg.track_namespace, None)
 				.await
 			{
 				Ok(broadcast) => broadcast,
@@ -1373,7 +1373,7 @@ where
 
 				// The peer must have seen the announcement to name this namespace, so this
 				// resolves like a SUBSCRIBE does.
-				let broadcast = match self.serving_origin().await.request_broadcast(&namespace).await {
+				let broadcast = match self.serving_origin().await.request_broadcast(&namespace, None).await {
 					Ok(broadcast) => broadcast,
 					Err(err) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
 				};

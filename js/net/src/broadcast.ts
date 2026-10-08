@@ -4,6 +4,7 @@
  * @module
  */
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import type * as Epoch from "./epoch.ts";
 import { NotFound } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import { Route } from "./hop.ts";
@@ -415,6 +416,7 @@ export class Producer {
 interface Shared {
 	state: BroadcastState;
 	path: Path.Valid;
+	epoch?: Epoch.Valid;
 }
 
 // Constructs a Consumer from within this module without exposing a public constructor
@@ -432,6 +434,7 @@ let makeConsumer: (shared: Shared) => Consumer;
 export class Consumer {
 	#state: BroadcastState;
 	#path: Path.Valid;
+	#epoch?: Epoch.Valid;
 
 	// Guards against a double close() on this handle over-decrementing the consumer count.
 	#closed = false;
@@ -439,6 +442,7 @@ export class Consumer {
 	protected constructor(shared?: never);
 	protected constructor(shared?: Shared) {
 		this.#path = shared?.path ?? Path.empty();
+		this.#epoch = shared?.epoch;
 		if (shared) {
 			this.#state = shared.state;
 		} else {
@@ -461,6 +465,9 @@ export class Consumer {
 			if (target instanceof Consumer) target.#path = path;
 			else stampProducer(target, path);
 		};
+		hooks.stampEpoch = (target, epoch) => {
+			target.#epoch = epoch;
+		};
 	}
 
 	/**
@@ -473,6 +480,17 @@ export class Consumer {
 	 */
 	get path(): Path.Valid {
 		return this.#path;
+	}
+
+	/**
+	 * The publisher epoch of the route an origin resolved this handle through, if it has one.
+	 *
+	 * An origin stamps it with each request's result, so it names the publisher
+	 * instance actually serving this handle even when the request named none. `undefined` for a
+	 * route without an epoch or a handle not handed out by an origin.
+	 */
+	get epoch(): Epoch.Valid | undefined {
+		return this.#epoch;
 	}
 
 	/**
@@ -501,7 +519,7 @@ export class Consumer {
 	// Hand this consumer's backing state and path to a clone. Opaque (`never`) so the state type
 	// stays unexported; a subclass passes it straight back into its own `super(...)`.
 	protected shareState(): never {
-		return { state: this.#state, path: this.#path } satisfies Shared as never;
+		return { state: this.#state, path: this.#path, epoch: this.#epoch } satisfies Shared as never;
 	}
 
 	/** Get a lazy handle for a track on this broadcast. Repeat subscriptions dedupe onto one upstream subscription. */

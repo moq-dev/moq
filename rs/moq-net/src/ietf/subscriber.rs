@@ -2603,29 +2603,10 @@ where
 			group.publisher_priority = super::priority::to_wire(track.publisher_priority());
 		}
 
-		// FIRST_OBJECT clear says this stream starts partway through the group, which the
-		// draft lets a publisher do to answer a filter. Without a head it is unusable: the
-		// objects are not decodable without the ones missing in front, and a group is the
-		// unit an application resyncs on. Drop it and pick up at the next group, the same
-		// degradation as a publisher that no longer holds the head.
+		// Whether a FIRST_OBJECT-clear stream is a group with no head is decided in
+		// [`Self::open_group`], after it peeks the first Object ID. The bit is only the
+		// publisher's claim; [`next_object_id`] holds the sequence after that.
 		//
-		// A fill we asked for is the exception, since its fetch stream is carrying exactly
-		// that head for [`Self::open_group`] to stitch this onto. So is the group a resumed
-		// subscription asked to start partway through: the head came from another route.
-		//
-		// The bit is only the publisher's claim, so what is enforced is the object ids
-		// themselves: [`next_object_id`] holds every object to starting where the head
-		// stopped and incrementing by 1, whatever the header said and on the drafts that
-		// have no such bit to read.
-		if !group.flags.first_object && !fill.read().outstanding() && resume.is_none() {
-			tracing::debug!(
-				track_alias = %group.track_alias,
-				group = %group.group_id,
-				"dropping a group with no head"
-			);
-			return Err(Error::Unsupported);
-		}
-
 		// The peek inside blocks until the publisher produces the group's first object, so
 		// race it against the subscription going away the same way the group read below is.
 		// Otherwise dropping the local subscriber cannot end this handler.
@@ -2900,6 +2881,30 @@ where
 		};
 		if first.is_some_and(|first| first.id == 0 && first.end_of_track) {
 			return Ok(Opened::EndOfTrack);
+		}
+
+		// FIRST_OBJECT clear is the publisher's claim that the stream starts partway
+		// through the group. The first Object ID is absolute either way, and IDs start
+		// at 0, so a clear bit on object 0 is still the head: the publisher is out of
+		// spec, not missing a keyframe. Any other first ID, or a stream with no object,
+		// has a hole at the front. Drop it before a group exists and resume at the next
+		// group, the same as a publisher that no longer holds the head.
+		//
+		// A fill we asked for is the exception: its fetch stream is carrying the head
+		// this tail stitches onto. So is the group a resumed subscription asked to start
+		// partway through, whose head came from another route.
+		if !header.flags.first_object
+			&& !fill.read().outstanding()
+			&& resume.is_none()
+			&& first.is_none_or(|first| first.id != 0)
+		{
+			tracing::debug!(
+				track_alias = %header.track_alias,
+				group = %header.group_id,
+				object = first.map(|first| first.id),
+				"dropping a group with no head"
+			);
+			return Err(Error::Unsupported);
 		}
 
 		if !fill.read().outstanding() {
@@ -7213,6 +7218,68 @@ mod stitch_tests {
 		buf.to_vec()
 	}
 
+	/// A draft-18 subgroup stream whose FIRST_OBJECT bit is independent of the first
+	/// object's absolute ID. A strict publisher sets the bit exactly when `start` is 0;
+	/// one that is out of spec can leave it clear and still start there. Each object
+	/// carries the Timestamp of its Object ID, which the harness's timed track requires.
+	fn draft18_subgroup(sequence: u64, first_object: bool, start: u64, payloads: &[&[u8]]) -> Vec<u8> {
+		let version = Version::Draft18;
+		let mut buf = Vec::new();
+		ietf::GroupHeader {
+			track_alias: ALIAS,
+			group_id: sequence,
+			sub_group_id: 0,
+			publisher_priority: 0,
+			flags: ietf::GroupFlags {
+				first_object,
+				has_extensions: true,
+				..Default::default()
+			},
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut buf, version.into()), version)
+		.unwrap();
+
+		for (index, payload) in payloads.iter().enumerate() {
+			// The first object's delta is its absolute Object ID; every later one counts
+			// the objects skipped, so zero is the next one.
+			let delta = match index {
+				0 => start,
+				_ => 0,
+			};
+			crate::coding::Encoder::new(&mut buf, version.into())
+				.varint(delta)
+				.unwrap();
+			let mut ext = Vec::new();
+			let object = usize::try_from(start).unwrap() + index;
+			ietf::encode_object_time(
+				&mut Encoder::new(&mut ext, version.into()),
+				timestamp(object),
+				Timescale::MICRO,
+				version,
+			)
+			.unwrap();
+			crate::coding::Encoder::new(&mut buf, version.into())
+				.varint(ext.len() as u64)
+				.unwrap();
+			buf.extend_from_slice(&ext);
+			crate::coding::Encoder::new(&mut buf, version.into())
+				.varint(payload.len() as u64)
+				.unwrap();
+			buf.extend_from_slice(payload);
+		}
+
+		buf
+	}
+
+	/// A reader over the next scripted stream, decoded as draft-18.
+	async fn read_draft18(
+		session: &ScriptedSession,
+	) -> Reader<<ScriptedSession as crate::transport::poll::Session>::RecvStream, Version> {
+		let mut session = session.clone();
+		let (_, recv) = session.open_bi().await.unwrap();
+		Reader::new(recv, Version::Draft18)
+	}
+
 	/// A subscriber holding one draft-20 subscription, as its SUBSCRIBE_OK left it: the
 	/// alias bound, the timescale declared, and `fill` waiting on its fetch stream.
 	struct Harness {
@@ -7882,6 +7949,63 @@ mod stitch_tests {
 		})
 		.await;
 		assert!(matches!(delivered, Err(_) | Ok(None)), "no frame is delivered");
+	}
+
+	/// Object IDs are absolute whatever FIRST_OBJECT says, and they start at 0, so a
+	/// draft-18 stream that leaves the bit clear and starts at object 0 is the whole
+	/// group. The publisher is out of spec on the bit, not missing a head.
+	#[moq_net_sim::test]
+	async fn a_clear_first_object_at_zero_delivers_the_group() {
+		let bytes = draft18_subgroup(SEQUENCE, false, 0, &[b"whole", b"next"]);
+		assert_eq!(
+			u64::from(bytes[0]) & ietf::GroupFlags::FIRST_OBJECT_BIT,
+			0,
+			"the bit is clear"
+		);
+
+		let mut h = Harness::new(Fill::Done, vec![bytes]);
+		h.subscriber.version = Version::Draft18;
+		let mut consumer = h.track.subscribe(None);
+		let mut stream = read_draft18(&h.session).await;
+
+		h.subscriber.clone().recv_group(&mut stream).await.expect("the group");
+
+		let (sequence, frames) = read_group(&mut consumer).await;
+		assert_eq!(sequence, SEQUENCE);
+		assert_eq!(frames.len(), 2);
+		assert_eq!(frames[0].1, b"whole");
+		assert_eq!(frames[1].1, b"next");
+	}
+
+	/// A clear FIRST_OBJECT whose first ID is not 0 still has a hole at the front, so
+	/// the stream is dropped and the track resumes at the next group.
+	#[moq_net_sim::test]
+	async fn a_clear_first_object_past_zero_is_dropped() {
+		let partial = draft18_subgroup(SEQUENCE, false, 3, &[b"tail-3"]);
+		let whole = draft18_subgroup(SEQUENCE + 1, true, 0, &[b"next"]);
+		assert_eq!(u64::from(partial[0]) & ietf::GroupFlags::FIRST_OBJECT_BIT, 0);
+
+		let mut h = Harness::new(Fill::Done, vec![partial, whole]);
+		h.subscriber.version = Version::Draft18;
+		let mut consumer = h.track.subscribe(None);
+
+		let mut partial = read_draft18(&h.session).await;
+		assert!(matches!(
+			h.subscriber.clone().recv_group(&mut partial).await,
+			Err(Error::Unsupported)
+		));
+
+		let mut whole = read_draft18(&h.session).await;
+		h.subscriber
+			.clone()
+			.recv_group(&mut whole)
+			.await
+			.expect("the next group");
+
+		let (sequence, frames) = read_group(&mut consumer).await;
+		assert_eq!(sequence, SEQUENCE + 1);
+		assert_eq!(frames[0].1, b"next");
+		assert!(h.session.log.closes().is_empty());
 	}
 
 	/// A head that stops short of where the tail starts would leave a hole in the middle of

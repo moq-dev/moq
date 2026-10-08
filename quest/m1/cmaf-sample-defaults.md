@@ -37,5 +37,5 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [CMAF frame timestamp](/quest/m1/cmaf-frame-timestamp.md) - touches the same `decode` functions; land either first and rebase
+- [CMAF frame timestamp](/quest/m1/cmaf-frame-timestamp.md) - touches the same `decode` functions; #4826, #5037, and #5015 land first and this rebases
 - [Export sync flags](/quest/m2/intra-refresh/export-sync-flags.md) - the export side of the same flags

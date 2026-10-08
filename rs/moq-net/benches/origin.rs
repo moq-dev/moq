@@ -311,7 +311,7 @@ fn bench_announce_fronts(c: &mut Criterion) {
 			// Served but never answered: every request under it parks a front.
 			let _served = producer.dynamic("room", origin::Route::default()).unwrap();
 			let _requests: Vec<_> = (0..fronts)
-				.map(|i| consumer.request_broadcast(format!("room/{i}")))
+				.map(|i| consumer.request_broadcast(format!("room/{i}"), None))
 				.collect();
 			let waiter = kio::Waiter::noop();
 			// Run each front once so it parks on its upstream request.
@@ -405,7 +405,7 @@ fn bench_request(c: &mut Criterion) {
 		let waiter = kio::Waiter::noop();
 		group.bench_function(BenchmarkId::new("local", publishers), |b| {
 			b.iter(|| {
-				let pending = fleet.consumer.request_broadcast("room/0");
+				let pending = fleet.consumer.request_broadcast("room/0", None);
 				// The front's driver resolves the first request; later ones join it.
 				fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
 				pending
@@ -418,7 +418,7 @@ fn bench_request(c: &mut Criterion) {
 			b.iter(|| {
 				let result = fleet
 					.consumer
-					.request_broadcast("room/missing")
+					.request_broadcast("room/missing", None)
 					.now_or_never()
 					.expect("fails synchronously");
 				assert!(matches!(result, Err(moq_net::Error::Unroutable)));
@@ -456,7 +456,7 @@ fn pool(members: usize, paths: usize) -> Pool {
 	let waiter = kio::Waiter::noop();
 
 	let requests: Vec<_> = (0..paths)
-		.map(|i| consumer.request_broadcast(format!("pool/job-{i}")))
+		.map(|i| consumer.request_broadcast(format!("pool/job-{i}"), None))
 		.collect();
 	driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
 	let mut producers = Vec::with_capacity(paths);
@@ -549,7 +549,7 @@ fn bench_handoff(c: &mut Criterion) {
 						first.write_frame(Timestamp::ZERO, b"one".as_ref()).unwrap();
 						first.finish().unwrap();
 
-						let resolved = consumer.request_broadcast("room/live").await.unwrap();
+						let resolved = consumer.request_broadcast("room/live", None).await.unwrap();
 						let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 						subscription.recv_group().await.unwrap().expect("first group");
 
@@ -604,7 +604,7 @@ fn bench_relay(c: &mut Criterion) {
 				.map(|i| broadcast.create_track(format!("{i}"), None).unwrap())
 				.collect();
 			let mut subscriptions = runtime.block_on(async {
-				let resolved = producer.consume().request_broadcast("room/live").await.unwrap();
+				let resolved = producer.consume().request_broadcast("room/live", None).await.unwrap();
 				let mut subscriptions = Vec::new();
 				for i in 0..tracks {
 					let track = resolved.track(&format!("{i}")).unwrap();
@@ -661,7 +661,7 @@ fn bench_parked(c: &mut Criterion) {
 					.collect();
 				let _writers: Vec<_> = sources.iter().map(|source| source.append_group().unwrap()).collect();
 				let (subscriptions, mut groups) = runtime.block_on(async {
-					let resolved = producer.consume().request_broadcast("room/live").await.unwrap();
+					let resolved = producer.consume().request_broadcast("room/live", None).await.unwrap();
 					let mut subscriptions = Vec::new();
 					let mut groups = Vec::new();
 					for i in 0..tracks {
@@ -769,7 +769,7 @@ async fn copy_walk(tracks: usize, copies: usize) -> CopyWalk {
 	let epoch = Epoch::mint();
 	let first = Generation::build(&producer, tracks);
 	first.route(&epoch);
-	let resolved = tokio::time::timeout(COPY_WAIT, producer.consume().request_broadcast(COPY_PATH))
+	let resolved = tokio::time::timeout(COPY_WAIT, producer.consume().request_broadcast(COPY_PATH, None))
 		.await
 		.expect("front did not resolve")
 		.expect("front refused");
