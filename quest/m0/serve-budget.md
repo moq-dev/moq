@@ -2,8 +2,9 @@
 
 ## Goal
 
-No kio task can hold its thread with an unbounded loop while work keeps
-arriving. A serve loop that always has another group ready yields after a
+No kio task can hold its thread with an unbounded loop of async kio
+readiness polls while work keeps arriving. Synchronous `try_*` and peek
+loops, and code outside a `kio::coop::budget`, stay unbounded, as today. A serve loop that always has another group ready yields after a
 fixed budget of progress and resumes on its next poll, so the QUIC driver,
 timers, and the session's other tasks run in between, on every runtime
 (tokio multi-thread and current-thread, wasm, and the io_uring worker).
@@ -42,7 +43,8 @@ added this quest):
     (`waiter.waker().wake_by_ref()`) and returns `Pending`;
   - synchronous `try_*` and peek APIs, and any poll with
     `kio::Waiter::noop()`, spend nothing, since their callers read "nothing
-    now" as empty, not as "come back".
+    now" as empty, not as "come back". `Waiter` carries an explicit noop
+    flag for this, since comparing wakers is not reliable.
 - A budget `Pending` must only postpone, never change a decision or lose
   state. Spend only at state-safe boundaries, and audit every caller that
   reads `Pending` as a value or commits state before a later poll. Known

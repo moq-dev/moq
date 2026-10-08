@@ -32,10 +32,11 @@ added this quest):
   fire on any thread, and callbacks for different handles run at once.
   Document that in `doc/lib/` and audit binding code that assumes serialized
   callbacks.
-- Shutdown keeps its meaning: when `moq_ffi_shutdown` (and moq-c's) returns,
+- Shutdown keeps its meaning: when `moq_ffi_shutdown` returns,
   no task runs and no callback into the host is in flight, so Python's
   `atexit` and JVM exit stay clean. `shutdown_background()` no longer gives
-  that with N workers; the shutdown must wait for them.
+  that with N workers; the shutdown must wait for them. moq-c exports no
+  shutdown and is being [retired](/quest/m1/c/retire.md), so it gets none.
 - Watch [Kotlin/JVM exit](/quest/m2/kt-jvm-exit.md), which depends on how the
   runtime thread stops.
 - Test: the interop go and python publishers on a pinned single CPU and on
