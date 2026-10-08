@@ -16,7 +16,8 @@ added this quest):
 - `moq_audio::encode::Options::group_duration` defaults to 20 ms
   (`rs/moq-audio/src/encode/producer.rs`, documented today as "Defaults to
   zero, a group per packet"). 20 ms frames behave as today; smaller frames
-  share a group up to 20 ms.
+  share a group up to 20 ms, so the 10 ms low-latency Opus preset now pairs
+  packets.
 - Every producer follows it: moq-ffi `encode_audio`, moq-c, moq-boy, and the
   CLI through `Options::default()`; JS publish's `groupDuration`
   (`js/publish/src/audio/encoder.ts`); and the GStreamer sink, which today

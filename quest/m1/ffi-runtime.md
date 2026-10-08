@@ -26,15 +26,24 @@ added this quest):
   still runs via `Task::run` and `detached`. Check the exported async fns that
   await in place (`subscribe_catalog`, `subscribe_track`, `fetch_group`,
   `request_broadcast`, `decode_audio`, `decode_video`) and the sync methods
-  that enter the runtime context (`MoqAudioProducer::write`), and keep
-  `moq_ffi_shutdown` and Python's `atexit` clean.
+  that enter the runtime context (`MoqAudioProducer::write`).
+- Callbacks change contract. Today moq-c status callbacks and uniffi
+  callbacks fire one at a time on the single runtime thread; on workers they
+  fire on any thread, and callbacks for different handles run at once.
+  Document that in `doc/lib/` and audit binding code that assumes serialized
+  callbacks.
+- Shutdown keeps its meaning: when `moq_ffi_shutdown` (and moq-c's) returns,
+  no task runs and no callback into the host is in flight, so Python's
+  `atexit` and JVM exit stay clean. `shutdown_background()` no longer gives
+  that with N workers; the shutdown must wait for them.
 - Watch [Kotlin/JVM exit](/quest/m2/kt-jvm-exit.md), which depends on how the
   runtime thread stops.
 - Test: the interop go and python publishers on a pinned single CPU and on
   many, and every binding's test suite. Benchmark a binding publisher's
   throughput before and after.
 
-Public API: none (threading only). Wire: none.
+Public API: callbacks may fire concurrently on any runtime thread
+(documented); no signature changes. Wire: none.
 
 ## Related
 
