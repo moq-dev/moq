@@ -195,7 +195,8 @@ Each node publishes its traffic and session counters as MoQ tracks, split by a
 relay dials and LAN peers it admits), which is what makes billing per customer or per region possible.
 Each run, and each group returning after its linger, announces under a fresh
 [epoch](/concept/moq-lite#publisher-epochs), so a restart is a new broadcast at
-the same path. [Stats](/concept/stats) describes the paths, tracks, and
+the same path. Session rows report how close sessions come to the per-session
+limits, past which one is closed with `TOO_MANY_REQUESTS`. [Stats](/concept/stats) describes the paths, tracks, and
 encodings; read them with the [`moq-stats`](https://docs.rs/moq-stats) crate.
 
 ## \[iroh]

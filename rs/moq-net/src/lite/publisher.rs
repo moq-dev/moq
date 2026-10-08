@@ -39,6 +39,8 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session> {
 	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
 	/// declare one itself. See `Client::with_peer_hop`.
 	pub peer_hop: Option<Hop>,
+	/// Subscriptions the peer may hold at once (`session::Limits::subscriptions`).
+	pub subscriptions: crate::session::Slots,
 }
 
 /// Context shared by every control-stream child.
@@ -64,6 +66,7 @@ struct Shared<S: crate::transport::poll::Session> {
 	goaway: crate::goaway::Protocol,
 	// Control streams still serving the peer data, which a draining close waits for.
 	owed: AtomicUsize,
+	subscriptions: crate::session::Slots,
 	// The send time an untimed track's frames carry, since no lite version can mark them
 	// untimed yet (see `wire_timestamp`).
 	runtime: crate::time::Clock,
@@ -170,6 +173,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 				version: config.version,
 				goaway: config.goaway,
 				owed: AtomicUsize::new(0),
+				subscriptions: config.subscriptions,
 				runtime: config.runtime.clone(),
 			}),
 			runtime: config.runtime,
@@ -194,6 +198,7 @@ where
 						shared: self.shared.clone(),
 						runtime: self.runtime.clone(),
 						state: ControlState::Start { stream },
+						_slot: None,
 					});
 				}
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
@@ -238,6 +243,8 @@ struct Control<S: crate::transport::poll::Session> {
 	// Handed to the children that arm timers (PROBE, announce linger).
 	runtime: crate::time::Clock,
 	state: ControlState<S>,
+	// A subscription's place under the session's cap, held until the stream ends.
+	_slot: Option<crate::session::Slot>,
 }
 
 // A state machine's enum is its storage: one transient instance per stream, so the
@@ -301,9 +308,20 @@ impl<S: crate::transport::poll::Session> Control<S> {
 						lite::ControlType::Announce => {
 							ControlState::Announce(AnnounceServe::new(self.shared.clone(), stream))
 						}
-						lite::ControlType::Subscribe => {
-							ControlState::Subscribe(RequestServe::new(self.shared.clone(), stream))
-						}
+						lite::ControlType::Subscribe => match self.shared.subscriptions.acquire() {
+							Ok(slot) => {
+								self._slot = Some(slot);
+								ControlState::Subscribe(RequestServe::new(self.shared.clone(), stream))
+							}
+							// A peer past its limits loses the session, not just this request.
+							Err(err) => {
+								self.shared
+									.session
+									.clone()
+									.close(crate::SessionError::from(&err).to_code(), "too many subscriptions");
+								return Poll::Ready(Err(err));
+							}
+						},
 						// The Track Stream and FETCH are lite-05+ only.
 						lite::ControlType::Fetch | lite::ControlType::Track
 							if !self.shared.version.has_track_stream() =>
@@ -3746,6 +3764,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: Some(assigned),
+			subscriptions: Default::default(),
 		});
 
 		let serving = kio::wait(|waiter| publisher.shared.poll_serving_origin(waiter)).await;
@@ -3911,6 +3930,7 @@ mod tests {
 			peer_setup: crate::lite::PeerSetup::default(),
 			goaway,
 			peer_hop: None,
+			subscriptions: Default::default(),
 		});
 		ProbeServe::new(publisher.shared.clone(), publisher.runtime.clone(), stream)
 	}
@@ -4083,6 +4103,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: None,
+			subscriptions: Default::default(),
 		});
 
 		let mut script = Vec::new();
@@ -4206,6 +4227,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: None,
+			subscriptions: Default::default(),
 		});
 
 		let mut script = Vec::new();
@@ -4259,5 +4281,41 @@ mod tests {
 			panic!("the subscription is not running");
 		};
 		assert_eq!(*run.track_priority_tx.read(), 7, "the update was lost");
+	}
+
+	/// A subscription past the session's cap closes the session with TOO_MANY_REQUESTS.
+	#[moq_net_sim::test]
+	async fn subscriptions_past_the_cap_close_the_session() {
+		use crate::coding::Encode as _;
+
+		const VERSION: Version = Version::Lite06;
+		let mut script = Vec::new();
+		lite::ControlType::Subscribe
+			.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
+			.unwrap();
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![script]);
+		let log = session.log.clone();
+
+		let origin = Hop::random().produce();
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let mut publisher = Publisher::new(PublisherConfig {
+			runtime: crate::time::Clock::sim(),
+			session,
+			origin: origin.consume(),
+			version: VERSION,
+			peer_setup: crate::lite::PeerSetup::default(),
+			goaway,
+			peer_hop: None,
+			subscriptions: crate::session::Slots::new(0),
+		});
+
+		let _ = publisher.poll(&kio::Waiter::noop());
+		assert_eq!(
+			log.closes(),
+			vec![(
+				crate::SessionError::TooManyRequests.to_code(),
+				"too many subscriptions".to_string()
+			)]
+		);
 	}
 }
