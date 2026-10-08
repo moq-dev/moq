@@ -114,13 +114,45 @@ export interface ReadGroupFrame {
 	complete(): void;
 }
 
-/** The next group or datagram sequence, shared by every dynamic producer that serves one broadcast track in turn. */
+/** The next group or datagram sequence, shared by every producer that serves one broadcast track in turn. */
 export interface TrackSequence {
 	next: number;
+	/** Open producers writing through this namespace. */
+	holders: number;
 }
 
-/** Per-track sequence namespaces owned by one broadcast generation. */
-export type TrackSequences = Map<string, TrackSequence>;
+/** The most track names one broadcast remembers sequences for. */
+export const MAX_TRACK_SEQUENCES = 1024;
+
+/**
+ * Each name's sequence namespace for one broadcast generation, outliving the producers that
+ * serve it so a replacement continues where the last one stopped. Written namespaces are kept
+ * until the broadcast ends, since forgetting one would let a later producer reuse its sequences.
+ * Namespaces nothing holds or wrote are swept once the map fills, and a new name past that bound
+ * is refused: starting sequences over takes a new broadcast.
+ */
+export class TrackSequences {
+	#map = new Map<string, TrackSequence>();
+
+	/** The namespace for `name`, admitting the name if it is new. Throws once the bound is reached. */
+	admit(name: string): TrackSequence {
+		const existing = this.#map.get(name);
+		if (existing) return existing;
+
+		if (this.#map.size >= MAX_TRACK_SEQUENCES) {
+			for (const [key, sequence] of this.#map) {
+				if (sequence.next === 0 && sequence.holders === 0) this.#map.delete(key);
+			}
+			if (this.#map.size >= MAX_TRACK_SEQUENCES) {
+				throw new Error(`too many track names: ${name} would exceed ${MAX_TRACK_SEQUENCES}`);
+			}
+		}
+
+		const sequence = { next: 0, holders: 0 };
+		this.#map.set(name, sequence);
+		return sequence;
+	}
+}
 
 /** Inputs for creating a package-internal track request. */
 export interface TrackRequestOptions {
@@ -140,6 +172,8 @@ export const hooks: {
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/** Access the existing producer while a request awaits immutable wire metadata. */
 	pendingTrackProducer: (request: Request) => Producer;
+	/** Have a producer write through a broadcast's sequence namespace for its name. */
+	bindSequence: (producer: Producer, sequence: TrackSequence) => void;
 	/**
 	 * Take the next group the subscriber's cursor allows, without waiting; assigned by `track.ts`.
 	 *
@@ -194,6 +228,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	pendingTrackProducer: () => {
+		throw new Error("track.ts not loaded");
+	},
+	bindSequence: () => {
 		throw new Error("track.ts not loaded");
 	},
 	tryRecvGroup: () => {

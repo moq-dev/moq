@@ -3,6 +3,7 @@ import { Signal } from "@moq/signals";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { GroupTooLarge, NotFound } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
+import { MAX_TRACK_SEQUENCES } from "./internal.ts";
 import { Milli, Timescale, Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
 import { Producer as TrackProducer } from "./track.ts";
@@ -90,6 +91,124 @@ test("dynamic track sequences continue across producer replacements", async () =
 	nextSubscriber.close();
 	broadcast.close();
 	nextGeneration.close();
+});
+
+test("createTrack answers a queued request", async () => {
+	const broadcast = new BroadcastProducer();
+	const pulled = wireOf(broadcast).requested();
+	const info = broadcast.track("media").info();
+	const subscriber = broadcast.track("media").subscribe().ordered();
+
+	// The track is created before any handler takes the queued request.
+	const producer = broadcast.createTrack("media", { timescale: Timescale.MILLI, priority: 3 });
+	producer.writeString("hello");
+	expect(await subscriber.readString()).toBe("hello");
+	expect((await info).priority).toBe(3);
+
+	// No handler ever sees the request, and the lookup that opened it leaves the track open.
+	expect(await pendingRequest(broadcast)).toBeUndefined();
+	subscriber.close();
+	await broadcast.demand().unused();
+	expect(producer.closed.peek()).toBeUndefined();
+
+	// Later subscriptions read the created track, and the name stays taken.
+	const again = broadcast.track("media").subscribe().ordered();
+	producer.writeString("again");
+	expect(await again.readString()).toBe("again");
+	expect(() => broadcast.createTrack("media")).toThrow("duplicate track");
+
+	broadcast.close();
+	expect(await pulled).toBeUndefined();
+});
+
+test("a taken request is not answered by insertTrack", async () => {
+	const broadcast = new BroadcastProducer();
+	const pulled = wireOf(broadcast).requested();
+	broadcast.track("media").subscribe();
+	const request = await pulled;
+	if (!request) throw new Error("expected request");
+
+	// The handler holds it, so the name is taken until it answers.
+	expect(() => broadcast.createTrack("media")).toThrow("duplicate track");
+	expect(() => broadcast.insertTrack(new TrackProducer("media"))).toThrow("duplicate track");
+	request.reject();
+	broadcast.close();
+});
+
+test("created and requested tracks share a name's sequences", async () => {
+	const broadcast = new BroadcastProducer();
+	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	expect(first.appendGroup().sequence).toBe(0);
+	first.writeGroup(new GroupProducer(8));
+	first.insertDatagram(12, Timestamp.fromMillis(0), new Uint8Array());
+	first.close();
+
+	// A replacement continues past every explicit write.
+	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	expect(second.appendGroup().sequence).toBe(13);
+	second.close();
+
+	// An on-demand producer continues the same namespace, and so does a later inserted track.
+	broadcast.removeTrack("media");
+	const pulled = wireOf(broadcast).requested();
+	const subscriber = broadcast.track("media").subscribe();
+	const request = await pulled;
+	if (!request) throw new Error("expected request");
+	const requested = request.accept({ timescale: Timescale.MILLI });
+	expect(requested.appendDatagram(Timestamp.fromMillis(0), new Uint8Array())).toBe(14);
+	subscriber.close();
+	requested.close();
+
+	const inserted = new TrackProducer("media").accept({ timescale: Timescale.MILLI });
+	broadcast.insertTrack(inserted);
+	expect(inserted.appendGroup().sequence).toBe(15);
+
+	// Re-inserting the same track keeps its place in the namespace.
+	broadcast.removeTrack("media");
+	broadcast.insertTrack(inserted);
+	expect(inserted.appendGroup().sequence).toBe(16);
+	inserted.close();
+
+	// Only a new broadcast starts over.
+	const next = new BroadcastProducer();
+	expect(next.createTrack("media", { timescale: Timescale.MILLI }).appendGroup().sequence).toBe(0);
+	broadcast.close();
+	next.close();
+});
+
+test("a broadcast bounds the names it remembers sequences for", async () => {
+	const broadcast = new BroadcastProducer();
+
+	// Names that never wrote leave nothing behind once their tracks close.
+	for (let i = 0; i < MAX_TRACK_SEQUENCES * 2; i++) {
+		broadcast.createTrack(`unused-${i}`).close();
+	}
+
+	// Written names are remembered, and so is an open track that has not written yet.
+	const open = broadcast.createTrack("open");
+	for (let i = 1; i < MAX_TRACK_SEQUENCES; i++) {
+		const track = broadcast.createTrack(`written-${i}`);
+		track.appendGroup().close();
+		track.close();
+	}
+	expect(() => broadcast.createTrack("refused")).toThrow("too many track names");
+	expect(() => broadcast.insertTrack(new TrackProducer("refused"))).toThrow("too many track names");
+
+	// A remembered name is still admitted, continuing its sequences.
+	expect(broadcast.createTrack("written-1").appendGroup().sequence).toBe(1);
+
+	// An on-demand request past the bound is refused to its subscribers.
+	const pulled = wireOf(broadcast).requested();
+	const subscriber = broadcast.track("refused").subscribe();
+	const request = await pulled;
+	if (!request) throw new Error("expected request");
+	expect(() => request.accept()).toThrow("too many track names");
+	expect(await subscriber.closed).toBeInstanceOf(Error);
+
+	// Closing the open track without a write frees its slot.
+	open.close();
+	broadcast.createTrack("admitted");
+	broadcast.close();
 });
 
 test("publishing-side subscriptions coalesce onto one request", async () => {

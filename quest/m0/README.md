@@ -70,6 +70,5 @@ remain and no release waits on them.
 - [FFI publisher stall](/quest/m0/ffi-publisher-stall.md) - every Go and Python publisher cell passes reliably once the serve budget lands, and a cell fails when a connection idles out
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on moq-dev/web-transport#412 and #413 to merge and ship, which qmux credit bumps to
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
-- [JS track takeover](/quest/m0/js-track-takeover.md) - JS `createTrack` answers a queued request and continues its sequences, as Rust does, so a re-announced `@moq/publish` catalog never restarts its groups
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
 - [moq-noq 2.0.2 on main](/quest/m0/noq-2.0.2.md) - `main` carries the max datagram size fix `release` gets in 1.3.4

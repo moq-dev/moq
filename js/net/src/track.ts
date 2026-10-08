@@ -242,10 +242,20 @@ export class Request {
 		return this.subscription.priority ?? 0;
 	}
 
-	/** Accept the request, committing the track's immutable {@link Info}. */
+	/**
+	 * Accept the request, committing the track's immutable {@link Info}. Throws, rejecting the
+	 * request, if the broadcast cannot remember another track name's sequences.
+	 */
 	accept(info: Partial<Info> = {}): Producer {
 		this.#pending.delete(this);
-		bindProducer(this.name, this.#producer, this.#sequences);
+		let sequence: TrackSequence;
+		try {
+			sequence = this.#sequences.admit(this.name);
+		} catch (err) {
+			this.#producer.close(err instanceof Error ? err : new Error(String(err)));
+			throw err;
+		}
+		bindProducerSequence(this.#producer, sequence);
 		return this.#producer.accept(info);
 	}
 
@@ -409,15 +419,6 @@ async function resolveInfo(state: TrackState): Promise<Info> {
 // so eviction can drop them together.
 type CachedGroup = { group: GroupProducer; mirrors: Map<TrackState, GroupConsumer> };
 
-function bindProducer(name: string, producer: Producer, sequences: TrackSequences): void {
-	let shared = sequences.get(name);
-	if (!shared) {
-		shared = { next: 0 };
-		sequences.set(name, shared);
-	}
-	bindProducerSequence(producer, shared);
-}
-
 let bindProducerSequence: (producer: Producer, sequence: TrackSequence) => void;
 
 // The sequence-order cursor lives inside `Subscriber` (it shares the group buffer and the
@@ -508,7 +509,8 @@ export class Producer {
 	// The producer's own state is the source of truth (info/closed); subscribers
 	// read mirrored sinks, never this state directly.
 	#state = new TrackState();
-	#sequence: TrackSequence = { next: 0 };
+	// Until a broadcast binds it, a namespace of its own. An open producer holds its namespace.
+	#sequence: TrackSequence = { next: 0, holders: 1 };
 	// One past the highest group or datagram this producer received, like the Rust
 	// `max_sequence`. The shared counter above can run ahead of it: earlier producers of
 	// the same broadcast track advanced it too.
@@ -545,9 +547,17 @@ export class Producer {
 	}
 
 	static {
+		// Anything written before binding still counts, so the namespace never goes backwards.
 		bindProducerSequence = (producer, sequence) => {
+			const own = producer.#sequence;
+			if (own === sequence) return;
+			sequence.next = Math.max(sequence.next, own.next);
 			producer.#sequence = sequence;
+			if (producer.#state.closed.peek() !== undefined) return;
+			own.holders--;
+			sequence.holders++;
 		};
+		hooks.bindSequence = bindProducerSequence;
 	}
 
 	/**
@@ -1015,6 +1025,7 @@ export class Producer {
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
 		const open = abort ? this.#cache.filter((entry) => entry.group.closed.peek() === undefined) : [];
 		closeTrackState(this.#state, abort);
+		this.#sequence.holders--;
 		for (const { group } of this.#cache) group.close(abort);
 		for (const entry of open) {
 			this.#unlink(entry);
