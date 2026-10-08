@@ -192,6 +192,11 @@ enum Timeline {
 }
 
 impl GroupState {
+	/// Whether the first frame opened, or the group ended without one.
+	fn started(&self) -> bool {
+		!matches!(self.timeline, Timeline::Empty) || self.fin.is_some() || self.abort.is_some()
+	}
+
 	/// Content still available to a reader of this group.
 	///
 	/// Counts the in-flight frame at its declared size, like [`Self::content_range`]: a
@@ -895,6 +900,16 @@ impl Producer {
 		(state.committed > state.offset).then_some(state.committed)
 	}
 
+	/// Whether `other` is a handle to this same group.
+	pub(crate) fn is_clone(&self, other: &Self) -> bool {
+		self.state.same_channel(&other.state)
+	}
+
+	/// Whether the group opened its first frame, or ended without one.
+	pub(crate) fn is_started(&self) -> bool {
+		self.state.read().started()
+	}
+
 	/// Where the group starts in presentation time: its first frame's timestamp, or
 	/// `None` while no frame has been opened or when that frame is untimed.
 	///
@@ -998,7 +1013,7 @@ impl Producer {
 	/// none has been opened.
 	pub(crate) fn poll_started(&self, waiter: &kio::Waiter) -> Poll<()> {
 		match self.state.poll(waiter, |state| {
-			if !matches!(state.timeline, Timeline::Empty) || state.fin.is_some() || state.abort.is_some() {
+			if state.started() {
 				Poll::Ready(())
 			} else {
 				Poll::Pending
