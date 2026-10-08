@@ -1533,10 +1533,12 @@ where
 		// objects it never held do not exist.
 		let largest = match end_of_track {
 			true => Some(group.end().checked_sub(1)),
-			false if !joined && track.is_live() => live_edge(&track)
-				.largest
-				.filter(|largest| largest.group == group.sequence)
-				.map(|largest| Some(largest.object)),
+			false if !joined && track.is_live() => match live_edge(&track).largest {
+				Some(largest) if largest.group == group.sequence => Some(Some(largest.object)),
+				// Behind a group that holds nothing: every start in it is past Largest Object.
+				Some(largest) if largest.group < group.sequence && group.frames.is_empty() => Some(None),
+				_ => None,
+			},
 			false => None,
 		};
 		let past_largest = largest.is_some_and(|largest| largest.is_none_or(|object| start.object > object));
@@ -5285,6 +5287,28 @@ mod serve_tests {
 					}
 				}
 			}
+		}
+	}
+
+	/// On a live feed whose newest group finished with no objects, Largest Object sits in the
+	/// group before it, so a draft-20 FETCH of the empty group starts past it.
+	#[moq_net_sim::test]
+	async fn a_draft20_fetch_of_an_empty_newest_group_is_refused() {
+		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+			let mut h = serve(version);
+			publish_pairs(&mut h, 5, None);
+			let empty = h.track.create_group(group::Info { sequence: 5 }).unwrap();
+			empty.finish().unwrap();
+			settle().await;
+
+			let buf = standalone_fetch(
+				&h,
+				Location { group: 5, object: 0 },
+				Location { group: 5, object: 4 },
+				GroupOrder::Ascending,
+			)
+			.await;
+			assert_eq!(fetch_refusal(buf, version), invalid_range(version), "{version}");
 		}
 	}
 
