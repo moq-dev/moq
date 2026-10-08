@@ -741,8 +741,7 @@ where
 		crate::origin::Route::default()
 			.with_hops(hops)
 			.with_via(self.via(peer))
-			// A peer with no Cluster extension advertises no cost at all, so its cold
-			// path is unknown rather than free.
+			// A peer without Cluster contributes only the arriving link price.
 			.with_cost(crate::origin::Cost::UNKNOWN.charged(cluster::link_cost(self.cost, peer)))
 	}
 
@@ -5668,7 +5667,8 @@ mod tests {
 
 		let advertised = subscriber.route(Some(&advert), &peer).expect("route");
 		assert_eq!(
-			advertised.route.cost.warm, 7,
+			advertised.route.cost.value(),
+			7,
 			"the link's price is added to the advertised cost"
 		);
 		assert_eq!(advertised.route.hops, hop_path(&[7, 9]).hops().clone());
@@ -5681,7 +5681,7 @@ mod tests {
 		let route = routed_now(&consumer, "room/host").expect("routed");
 		let hops: Vec<_> = route.hops.iter().map(|h| h.id()).collect();
 		assert_eq!(hops, vec![7, 9]);
-		assert_eq!(route.cost.warm, 7);
+		assert_eq!(route.cost.value(), 7);
 	}
 
 	/// An advertisement whose path already contains our own Hop ID looped back:
@@ -5721,14 +5721,14 @@ mod tests {
 			hops: hop_path(&[7, 9]),
 			cost: 2,
 		};
-		assert_eq!(subscriber.route(Some(&advert), &peer).unwrap().route.cost.warm, 3);
+		assert_eq!(subscriber.route(Some(&advert), &peer).unwrap().route.cost.value(), 3);
 
 		// Zero is meaningful and distinct from absent: a free link adds nothing.
 		let free = cluster::Peer {
 			hop: Some(crate::Hop::new(9).unwrap()),
 			cost: Some(0),
 		};
-		assert_eq!(subscriber.route(Some(&advert), &free).unwrap().route.cost.warm, 2);
+		assert_eq!(subscriber.route(Some(&advert), &free).unwrap().route.cost.value(), 2);
 	}
 
 	/// A namespace stream that ends with advertisements still live detaches them, so
@@ -5853,14 +5853,14 @@ mod tests {
 				futures::poll!(run.as_mut()).is_pending(),
 				"the stream stays open through a repeat"
 			);
-			if routed_now(&consumer, "x.hang").is_some_and(|route| route.cost.warm == 0) {
+			if routed_now(&consumer, "x.hang").is_some_and(|route| route.cost.value() == 0) {
 				break;
 			}
 			settle().await;
 		}
 
 		let route = routed_now(&consumer, "x.hang").expect("still routed");
-		assert_eq!(route.cost.warm, 0, "the repeat repriced the route");
+		assert_eq!(route.cost.value(), 0, "the repeat repriced the route");
 	}
 
 	/// The peer explicitly retracting a namespace ends the broadcast immediately: it
@@ -6092,7 +6092,7 @@ mod tests {
 
 		// Nothing priced this direction, so it ranks by hop count.
 		assert_eq!(
-			unpriced.route(None, &peer).unwrap().route.cost.warm,
+			unpriced.route(None, &peer).unwrap().route.cost.value(),
 			cluster::DEFAULT_COST
 		);
 
@@ -6101,12 +6101,12 @@ mod tests {
 			hop: None,
 			cost: Some(4),
 		};
-		assert_eq!(unpriced.route(None, &priced_peer).unwrap().route.cost.warm, 4);
+		assert_eq!(unpriced.route(None, &priced_peer).unwrap().route.cost.value(), 4);
 
 		// Local policy still wins over what the peer declared.
 		let (mut priced, _origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		priced.cost = Some(6);
-		assert_eq!(priced.route(None, &priced_peer).unwrap().route.cost.warm, 6);
+		assert_eq!(priced.route(None, &priced_peer).unwrap().route.cost.value(), 6);
 	}
 
 	/// An update replaces the advertisement in place: the route moves, the refcount does
@@ -6136,7 +6136,7 @@ mod tests {
 		let route = routed_now(&consumer, "room/host").expect("routed");
 		let hops: Vec<_> = route.hops.iter().map(|h| h.id()).collect();
 		assert_eq!(hops, vec![7, 11]);
-		assert_eq!(route.cost.warm, 2);
+		assert_eq!(route.cost.value(), 2);
 
 		// One advertisement, so one unannounce detaches it. If the update had bumped the
 		// refcount, this would leave the route stranded.
@@ -6185,11 +6185,8 @@ mod tests {
 		let route = routed_now(&consumer, "room/host").expect("still routed");
 		assert_eq!(
 			route.cost,
-			crate::origin::Cost {
-				warm: 1,
-				..crate::origin::Cost::UNKNOWN
-			},
-			"the repriced warm cost arrives; the Cluster extension has nowhere to carry a cold cost, so it stays unknown rather than reading as the publisher's own zero"
+			crate::origin::Cost::new(1),
+			"the repriced static cost arrives"
 		);
 
 		// One advertisement, so one unannounce detaches it.
@@ -6549,7 +6546,7 @@ mod tests {
 		let (mut subscriber, consumer, mut stream, driver) = update_harness(self_origin, &peer, &held, script).await;
 		std::mem::forget(driver);
 		let log = subscriber.session.log.clone();
-		assert_eq!(routed_now(&consumer, "room/host").expect("routed").cost.warm, 4);
+		assert_eq!(routed_now(&consumer, "room/host").expect("routed").cost.value(), 4);
 
 		let path = crate::Path::new("room/host").to_owned();
 		let mut attached = true;
@@ -6568,7 +6565,7 @@ mod tests {
 		}
 
 		let route = routed_now(&consumer, "room/host").expect("still routed");
-		assert_eq!(route.cost.warm, 0, "the explicit 0 replaced the held cost");
+		assert_eq!(route.cost.value(), 0, "the explicit 0 replaced the held cost");
 		let hops: Vec<_> = route.hops.iter().map(|h| h.id()).collect();
 		assert_eq!(hops, vec![7, 9], "the omitted path kept its value");
 		assert!(attached, "a repricing is not a retraction");

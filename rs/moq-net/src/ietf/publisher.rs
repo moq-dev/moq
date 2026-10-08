@@ -467,9 +467,7 @@ where
 			return Advert::Plain;
 		}
 
-		// The Cluster extension has room for the warm cost only; a peer on this
-		// wire learns nothing about the cold path (see `cluster::Advert::route`).
-		let cost = route.cost.clamped().warm;
+		let cost = route.cost.value();
 		// Our own Hop ID is always the last entry, so the peer reconstructs the full
 		// path. A chain with no room left is a loop in all but name.
 		match cluster::Advert::forward(&route.hops, cost, self.self_origin) {

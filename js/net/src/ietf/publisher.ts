@@ -1,6 +1,7 @@
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
+import * as DatagramStream from "../datagram_stream.ts";
 import { controlTimeout, error, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import type { Hop, Route } from "../hop.ts";
@@ -15,6 +16,7 @@ import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
 import * as Cluster from "./cluster.ts";
+import { encodeDatagram } from "./datagram.ts";
 import { type RequestKind, requestReason, toRequestCode } from "./error.ts";
 import { type Fetch, FetchError, FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
@@ -55,17 +57,17 @@ function clusterFor(base: Cluster.Advert | undefined, route: Route): Cluster.Adv
 	const self = base.hops.at(-1);
 	if (self === undefined) return undefined;
 	const hops = route.hops.at(-1) === self ? [...route.hops] : [...route.hops, self];
-	return { hops, cost: route.cost.warm };
+	return { hops, cost: route.cost };
 }
 
 /**
  * What it takes to move the peer from `held` to `next`.
  *
- * - `"same"`: the peer would decode the same advertisement. The cold cost, and the whole
- *   route without Cluster, never reach the wire, so a change there sends nothing.
+ * - `"same"`: the peer would decode the same advertisement. The route without Cluster
+ *   never reaches the wire, so a change there sends nothing.
  * - `"restart"`: nothing is held, nothing is wanted, or a different broadcast, which is
  *   withdrawn and advertised again.
- * - Otherwise the same broadcast at a new hop chain or warm cost: the cluster parameters
+ * - Otherwise the same broadcast at a new hop chain or static cost: the cluster parameters
  *   the peer holds and the ones it should, for the target to update.
  */
 function change(
@@ -232,6 +234,11 @@ export class Publisher {
 	#quic: WebTransport;
 	#session: Session;
 	#requiresSolicitation: boolean;
+
+	// The one writer for the outbound datagram stream, shared by every subscription since a
+	// second getWriter would throw. Undefined when the transport carries no datagrams, which
+	// turns them off: there is no stream fallback. Released in close().
+	#datagramWriter?: WritableStreamDefaultWriter<Uint8Array>;
 	#hidden: boolean;
 
 	// The origin this session serves, borrowed: it outlives the session, and closing the
@@ -281,6 +288,18 @@ export class Publisher {
 		this.#requiresSolicitation = requiresSolicitation;
 		this.#hidden = hidden;
 		this.#advert = Cluster.advertise(cluster);
+		this.#datagramWriter = DatagramStream.datagramWriter(quic);
+	}
+
+	/**
+	 * Release the datagram writer's lock so the transport can be torn down. The broadcasts
+	 * belong to the origin, which outlives this session.
+	 *
+	 * @internal
+	 */
+	close() {
+		this.#datagramWriter?.releaseLock();
+		this.#datagramWriter = undefined;
 	}
 
 	/**
@@ -532,6 +551,10 @@ export class Publisher {
 				}
 			})();
 
+			// Datagrams count toward no stream, so PUBLISH_DONE never waits on them; closing
+			// the track below ends the loop.
+			void this.#runDatagrams({ requestId: msg.requestId, track, timescale, publisherPriority });
+
 			// The fill (when one was requested) runs alongside on its own fetch stream; its
 			// failures reset that stream and never touch the subscription.
 			const filling =
@@ -706,6 +729,48 @@ export class Publisher {
 			}
 		} finally {
 			group.close();
+		}
+	}
+
+	/**
+	 * Send a track's datagrams as OBJECT_DATAGRAMs, best-effort, like moq-lite.
+	 *
+	 * One that does not fit the transport's limit is dropped; there is no stream fallback. A
+	 * send failure stops the loop but never fails the subscription.
+	 */
+	async #runDatagrams(options: {
+		requestId: bigint;
+		track: TrackSubscriber;
+		/** The units datagrams are stamped in, if any; see {@link RunGroup.timescale}. */
+		timescale: Timescale | undefined;
+		publisherPriority: number;
+	}) {
+		const writer = this.#datagramWriter;
+		if (!writer) return;
+		const { requestId, track, timescale, publisherPriority } = options;
+		const version = this.#session.version;
+
+		try {
+			for (;;) {
+				const datagram = await track.recvDatagram();
+				if (!datagram) return;
+
+				const body = await encodeDatagram(
+					datagram,
+					{ trackAlias: requestId, publisherPriority, timescale },
+					version,
+				);
+				const max = DatagramStream.maxDatagramSize(this.#quic);
+				if (body.byteLength > max) {
+					console.debug(`dropping oversize datagram: alias=${requestId} size=${body.byteLength} max=${max}`);
+					continue;
+				}
+
+				await writer.ready;
+				await writer.write(body);
+			}
+		} catch (err: unknown) {
+			console.debug(`datagram send stopped: alias=${requestId} error=${reason(error(err))}`);
 		}
 	}
 

@@ -10,7 +10,7 @@ import type * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
-import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
+import { ControlStreamAdapter, NativeSession, RequestWindowError, type Session } from "./adapter.ts";
 import * as Cluster from "./cluster.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
@@ -107,6 +107,7 @@ export class Connection implements Established {
 		hidden = false,
 		cluster,
 		early = [],
+		requestWindow,
 	}: {
 		url: URL;
 		quic: WebTransport;
@@ -132,6 +133,8 @@ export class Connection implements Established {
 		cluster?: Cluster.Hops;
 		/** Uni streams that arrived before the peer's SETUP, type unread (v17+). */
 		early?: Reader[];
+		/** Requests the peer may hold open on drafts 14 to 16, the window our SETUP advertised (default `REQUEST_WINDOW`). */
+		requestWindow?: bigint;
 	}) {
 		this.url = url;
 		this.discovery = discovery;
@@ -147,12 +150,17 @@ export class Connection implements Established {
 			// v17+: control/setup stream only carries GoAway
 			void this.#runGoAway(control, version);
 		} else {
-			const adapter = new ControlStreamAdapter(quic, control, version, maxRequestId, client);
+			const adapter = new ControlStreamAdapter(quic, control, version, maxRequestId, client, requestWindow);
 			this.#session = adapter;
 			this.#goaway = adapter.goaway;
 			// Start the adapter read loop (routes control messages to virtual streams)
 			void adapter.run().catch((err: unknown) => {
-				if (!this.#closed) console.error("adapter error", err);
+				if (this.#closed) return;
+				if (err instanceof RequestWindowError) {
+					this.#close({ closeCode: err.code, reason: err.message });
+					return;
+				}
+				console.error("adapter error", err);
 				this.#close();
 			});
 		}
@@ -205,6 +213,7 @@ export class Connection implements Established {
 		if (this.#closed) return;
 
 		this.#closed = true;
+		this.#publisher.close();
 
 		// Before the session, whose own close would send a clean code first.
 		try {
@@ -224,11 +233,16 @@ export class Connection implements Established {
 
 	async #run(early: Reader[]): Promise<void> {
 		try {
-			// Both run together. runPublishNamespaces is a no-op when the peer asked to be
+			// All run together. runPublishNamespaces is a no-op when the peer asked to be
 			// solicited; otherwise it pushes PUBLISH_NAMESPACE. On draft-16 and later a
 			// SUBSCRIBE_NAMESPACE stream is filled either way. A NAMESPACE is discovery,
 			// not a second route.
-			await Promise.all([this.#runBidis(), this.#runUnis(early), this.#publisher.runPublishNamespaces()]);
+			await Promise.all([
+				this.#runBidis(),
+				this.#runUnis(early),
+				this.#runDatagrams(),
+				this.#publisher.runPublishNamespaces(),
+			]);
 		} catch (err) {
 			if (!this.#closed) {
 				console.error("fatal error running connection", err);
@@ -256,6 +270,10 @@ export class Connection implements Established {
 			if (!stream) break;
 
 			void this.#runBidi(stream).catch((err: unknown) => {
+				if (err instanceof RequestWindowError) {
+					this.#close({ closeCode: err.code, reason: err.message });
+					return;
+				}
 				console.error("error processing bidi stream", err);
 				stream.abort(new Error("bidi stream error"));
 				if (err instanceof ProtocolViolation) this.#violated(err);
@@ -282,16 +300,28 @@ export class Connection implements Established {
 			}
 			case BigInt(SubscribeNamespaceLegacy.id): {
 				const legacy = await SubscribeNamespaceLegacy.decode(stream.reader, this.#session.version);
-				if (legacy.subscribeOptions === SubscribeOptions.PUBLISH) {
-					await this.#publisher.refuseSubscribeNamespace(legacy.requestId, stream);
-					break;
+				// Draft-16 carries this on its own stream, so the control adapter never sees the ID.
+				// Draft-14 and 15 already admitted it off the control stream. A refused request
+				// still spends its ID, so it is admitted and released like any other.
+				const adapter =
+					this.#session instanceof ControlStreamAdapter && this.#session.version === Version.DRAFT_16
+						? this.#session
+						: undefined;
+				if (adapter) adapter.admitRequest(legacy.requestId);
+				try {
+					if (legacy.subscribeOptions === SubscribeOptions.PUBLISH) {
+						await this.#publisher.refuseSubscribeNamespace(legacy.requestId, stream);
+					} else {
+						const msg = new SubscribeNamespace({
+							requestId: legacy.requestId,
+							namespace: legacy.namespace,
+							hidden: legacy.hidden,
+						});
+						await this.#publisher.runSubscribeNamespace(msg, stream);
+					}
+				} finally {
+					adapter?.releaseRequest(legacy.requestId);
 				}
-				const msg = new SubscribeNamespace({
-					requestId: legacy.requestId,
-					namespace: legacy.namespace,
-					hidden: legacy.hidden,
-				});
-				await this.#publisher.runSubscribeNamespace(msg, stream);
 				break;
 			}
 			case BigInt(SubscribeUpdate.id): {
@@ -362,6 +392,17 @@ export class Connection implements Established {
 
 			default:
 				throw new ProtocolViolation(`unknown bidi stream type: 0x${typeId.toString(16)}`);
+		}
+	}
+
+	// A malformed OBJECT_DATAGRAM is the peer breaking the protocol, like an invalid stream type.
+	async #runDatagrams() {
+		try {
+			await this.#subscriber.runDatagrams();
+		} catch (err: unknown) {
+			if (!(err instanceof ProtocolViolation)) throw err;
+			console.warn("malformed datagram", err);
+			this.#violated(err);
 		}
 	}
 
