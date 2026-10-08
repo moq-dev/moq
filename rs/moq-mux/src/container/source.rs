@@ -379,7 +379,8 @@ impl ExportSource {
 				return Poll::Ready(Ok(Some(Event::Frame(frame))));
 			};
 
-			let keyframe = frame.keyframe || std::mem::take(&mut self.absorbed_keyframe);
+			// Spent on the next emitted frame even when that frame is a keyframe itself.
+			let keyframe = std::mem::take(&mut self.absorbed_keyframe) | frame.keyframe;
 			match transform.transform(frame.payload.clone(), keyframe)? {
 				None => {
 					// Parameter set absorbed by the transform. Refresh the

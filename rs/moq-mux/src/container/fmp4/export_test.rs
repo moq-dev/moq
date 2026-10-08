@@ -1811,8 +1811,23 @@ async fn a_new_parameter_set_stays_in_band() {
 
 /// A group that opens with its parameter sets as their own frame still yields a sync
 /// sample carrying them: the absorbed frame's keyframe flag moves to the picture after it.
+/// When that picture is a keyframe anyway (it opened the next group), the flag is spent
+/// there and the delta after it stays a delta.
 async fn split_parameter_sets_keep_the_sync_point(
+	live: impl Fn() -> Live,
+	aud: &[u8],
+	sets: &[&[u8]],
+	idr: &[u8],
+	delta: &[u8],
+) {
+	for idr_opens_group in [false, true] {
+		split_parameter_sets_case(live(), idr_opens_group, aud, sets, idr, delta).await;
+	}
+}
+
+async fn split_parameter_sets_case(
 	mut live: Live,
+	idr_opens_group: bool,
 	aud: &[u8],
 	sets: &[&[u8]],
 	idr: &[u8],
@@ -1825,7 +1840,7 @@ async fn split_parameter_sets_keep_the_sync_point(
 	let mut leading = vec![aud];
 	leading.extend_from_slice(sets);
 	live.track.write(frame(0, &leading, true)).unwrap();
-	live.track.write(frame(0, &[idr], false)).unwrap();
+	live.track.write(frame(0, &[idr], idr_opens_group)).unwrap();
 	live.track.write(frame(33_000, &[delta], false)).unwrap();
 	live.track.finish().unwrap();
 
@@ -1854,7 +1869,8 @@ async fn split_parameter_sets_keep_the_sync_point(
 		vec![
 			(Bytes::from(length_prefixed(&keyframe)), true),
 			(Bytes::from(length_prefixed(&[delta])), false),
-		]
+		],
+		"idr_opens_group: {idr_opens_group}"
 	);
 }
 
@@ -1862,7 +1878,7 @@ async fn split_parameter_sets_keep_the_sync_point(
 async fn split_h264_parameter_sets_keep_the_sync_point() {
 	const AUD: &[u8] = &[0x09, 0xf0];
 	const DELTA: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
-	split_parameter_sets_keep_the_sync_point(Live::avc3(), AUD, &[SPS, PPS], IDR, DELTA).await;
+	split_parameter_sets_keep_the_sync_point(Live::avc3, AUD, &[SPS, PPS], IDR, DELTA).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -1876,21 +1892,23 @@ async fn split_h265_parameter_sets_keep_the_sync_point() {
 	const IDR: &[u8] = &[0x26, 0x01, 0xaf, 0x08];
 	const DELTA: &[u8] = &[0x02, 0x01, 0xd0, 0x11];
 
-	let live = Live::new(".hevc", |catalog, name| {
-		let mut config = VideoConfig::new(H265 {
-			in_band: true,
-			profile_space: 0,
-			profile_idc: 1,
-			profile_compatibility_flags: [0x60, 0, 0, 0],
-			tier_flag: false,
-			level_idc: 93,
-			constraint_flags: [0x90, 0, 0, 0, 0, 0],
-		});
-		config.coded_width = Some(320);
-		config.coded_height = Some(240);
-		config.container = Container::Legacy;
-		catalog.modify().unwrap().video.renditions.insert(name, config);
-	});
+	let live = || {
+		Live::new(".hevc", |catalog, name| {
+			let mut config = VideoConfig::new(H265 {
+				in_band: true,
+				profile_space: 0,
+				profile_idc: 1,
+				profile_compatibility_flags: [0x60, 0, 0, 0],
+				tier_flag: false,
+				level_idc: 93,
+				constraint_flags: [0x90, 0, 0, 0, 0, 0],
+			});
+			config.coded_width = Some(320);
+			config.coded_height = Some(240);
+			config.container = Container::Legacy;
+			catalog.modify().unwrap().video.renditions.insert(name, config);
+		})
+	};
 	split_parameter_sets_keep_the_sync_point(live, AUD, &[VPS, SPS, PPS], IDR, DELTA).await;
 }
 
