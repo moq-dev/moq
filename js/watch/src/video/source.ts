@@ -1,4 +1,4 @@
-import type * as Catalog from "@moq/hang/catalog";
+import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
@@ -185,44 +185,9 @@ function byBitrate(target: number): RenditionFilter {
 	};
 }
 
-/**
- * Pick the best rendition when no filters are active.
- * Prefers the largest resolution, falls back to highest bitrate,
- * then falls back to the first entry.
- */
-function bestRendition(entries: [string, Catalog.VideoConfig][]): string {
-	let best = entries[0];
-
-	for (const entry of entries) {
-		const [, config] = entry;
-		const [, bestConfig] = best;
-
-		const size = (config.codedWidth ?? 0) * (config.codedHeight ?? 0);
-		const bestSize = (bestConfig.codedWidth ?? 0) * (bestConfig.codedHeight ?? 0);
-
-		if (size !== bestSize) {
-			if (size > bestSize) best = entry;
-			continue;
-		}
-
-		if ((config.bitrate ?? 0) > (bestConfig.bitrate ?? 0)) {
-			best = entry;
-		}
-	}
-
-	return best[0];
-}
-
-/** Return unstalled renditions, or the lowest bitrate or resolution when every option is stalled. */
-function selectableRenditions(renditions: Record<string, Catalog.VideoConfig>): Record<string, Catalog.VideoConfig> {
-	const active = Object.entries(renditions).filter(([, config]) => !config.stalled);
-	if (active.length > 0) return Object.fromEntries(active);
-
-	const entries = Object.entries(renditions);
-	if (entries.length === 0) return {};
-	const byRate = byBitrate(0)(entries);
-	const lowest = byRate.length === 1 ? byRate[0] : byDimensions(0, 0)(entries)[0];
-	return { [lowest]: renditions[lowest] };
+/** Return the renditions that may be selected: a disabled one has no frames coming. */
+function enabledRenditions(renditions: Record<string, Catalog.VideoConfig>): Record<string, Catalog.VideoConfig> {
+	return Object.fromEntries(Object.entries(renditions).filter(([, config]) => config.enabled !== false));
 }
 
 /**
@@ -335,19 +300,16 @@ export class Source {
 	}
 
 	#runSelected(effect: Effect): void {
-		const supported = effect.get(this.#out.available);
+		const available = enabledRenditions(effect.get(this.#out.available));
 		const target = effect.get(this.in.target);
 
-		// A manual choice stays selected while stalled. `stalled` steers automatic adaptation; it
-		// must not silently override an explicit user selection.
-		if (target?.name && target.name in supported) {
-			const config = supported[target.name];
+		if (target?.name && target.name in available) {
+			const config = available[target.name];
 			effect.set(this.#out.track, target.name);
 			effect.set(this.#out.config, config);
 			return;
 		}
 
-		const available = selectableRenditions(supported);
 		if (Object.keys(available).length === 0) return;
 
 		// Auto-select: use recv bandwidth if no explicit bitrate target.
@@ -395,9 +357,9 @@ export class Source {
 			filters.push(byBitrate(target.bitrate));
 		}
 
-		// With no filters, pick the best rendition by quality.
+		// No cap: the same rank as Rust's single-rendition egresses.
 		if (filters.length === 0) {
-			return bestRendition(entries);
+			return Catalog.ranked(renditions)[0][0];
 		}
 
 		// Run each filter to get ranked preference lists.

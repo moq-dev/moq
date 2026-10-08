@@ -31,7 +31,7 @@ test("metadata changes do not change the playback identity", async () => {
 	rendition.set(
 		config({
 			bitrate: 2_000_000,
-			stalled: true,
+			enabled: false,
 			codedWidth: 1280,
 			codedHeight: 720,
 			framerate: 30,

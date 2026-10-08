@@ -39,8 +39,8 @@ Decided (2026-10-06, maintainer):
   group is never evicted.
 - Applies to both retention and subscriber budgets, which share `is_stale`
   in `rs/moq-net/src/model/track.rs` today.
-- Supersedes two earlier decisions: the [untimed
-  model](/quest/m1/untimed-model.md)'s 2026-10-01 rejection of `max_age` on
+- Supersedes two earlier decisions: the untimed model's ([#4822](https://github.com/moq-dev/moq/pull/4822))
+  2026-10-01 rejection of `max_age` on
   max(wall, pts), whose worry was a congestion stall (answered by starting the
   clock at the successor), and the retired untimed-failover quest's no-clock
   rule, which this rule replaces.
@@ -94,8 +94,12 @@ Facts, and work carried over:
   about to fill the group isn't cut short. A FETCH reader has no budget and
   stays as it is.
 - Start resolution: the untimed model starts an untimed track at the latest
-  group. Replace that special case with the normal rule, replaying the
-  cached groups that aren't stale.
+  group (`TrackState::untimed_start`). Replace that special case with the
+  normal rule, replaying the cached groups that aren't stale. Until then a
+  reader rejoining an untimed track starts at a stale cached group and reads
+  on from there, so `rejoin_during_the_cancel_skips_the_cache`
+  (`rs/moq-net/tests/rejoin.rs`) checks only the versions whose tracks arrive
+  timed. Make it check every version again.
 
 Tests, with mocked time:
 
@@ -112,10 +116,6 @@ Tests, with mocked time:
 
 Public API: no signature change; `max_age` behaviour changes. Wire: no
 encoding change; Max Age semantics in the lite draft change.
-
-## Required
-
-- [Untimed model](/quest/m1/untimed-model.md) - introduces untimed groups and the failover stall this fixes
 
 ## Related
 

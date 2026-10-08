@@ -70,7 +70,6 @@ priority where the subscriber's order wins, and a custom ladder order.
 ## Required
 
 - [Scope track priority](/quest/m1/track-priority-scope.md) - settles the priority ranking the controller assigns before the encoder side reads it
-- [Enabled flag](/quest/m1/catalog-enabled.md) - the `enabled` field the controller publishes for rungs
 
 ## Related
 
