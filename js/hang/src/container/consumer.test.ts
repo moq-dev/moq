@@ -842,7 +842,7 @@ test("Consumer skips the duration marker the LOC producer writes", async () => {
 	producer.encode(new Uint8Array([0xca, 0xfe]), 20_000 as Time.Micro, true);
 	producer.close();
 
-	const consumer = new Consumer(replay(track), { format: new LocFormat("video"), maxAge: 500 as Time.Milli });
+	const consumer = new Consumer(replay(track), { format: new LocFormat("video"), maxDelay: 500 as Time.Milli });
 	await settle();
 	const first = await consumer.next();
 	expect(first?.frame?.payload).toEqual(new Uint8Array([0xde, 0xad]));

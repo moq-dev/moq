@@ -152,13 +152,13 @@ test("Format rejects a timestamp past 2^53 - 1 instead of rounding", () => {
 
 /** Each group's (LOC timestamp, payload size, net timestamp) after the producer has closed the track. */
 async function readGroups(track: Track.Producer) {
-	const subscriber = track.subscribe({ maxAge: Time.Milli(30_000) });
+	const subscriber = track.subscribe({ maxDelay: Time.Milli(30_000) });
 	const format = new Format("video");
-	const groups: { timestamp: number; size: number; net: number }[][] = [];
+	const groups: { timestamp: number; size: number; net: number | undefined }[][] = [];
 	for (;;) {
 		const group = await subscriber.recvGroup();
 		if (!group) break;
-		const frames: { timestamp: number; size: number; net: number }[] = [];
+		const frames: { timestamp: number; size: number; net: number | undefined }[] = [];
 		for (;;) {
 			const frame = await group.readFrame();
 			if (!frame) break;
@@ -166,7 +166,7 @@ async function readGroups(track: Track.Producer) {
 			frames.push({
 				timestamp: decoded.timestamp,
 				size: decoded.payload.byteLength,
-				net: frame.timestamp.asMicros(),
+				net: frame.timestamp?.asMicros(),
 			});
 		}
 		groups.push(frames);
