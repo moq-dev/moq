@@ -66,7 +66,9 @@ Decided in planning (2026-10-07, from #4970's review):
   epoch no longer ends subscriptions in flight with `Unroutable`
   (`Pick::Superseded`, `front.rs` `supersede`). The front keeps serving its
   subscribers until its route goes. A relay keeps its upstream subscription
-  on the old route while any downstream still holds it. JS `route()`
+  on the old route while any downstream still holds it, serving only those
+  subscriptions: it forwards the `Restart` so they resubscribe, and no new
+  request joins that copy. JS `route()`
   (`js/net/src/origin.ts`) closes the old front when it swaps to a better
   entry, so it changes too. Update the epoch tests from #4942 and the three
   gateway tests that assert `Unroutable` (`a_reconnect_replaces_the_stale_*`
