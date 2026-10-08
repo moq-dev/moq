@@ -12,8 +12,8 @@
 //! so edges that share the choice agree without the publisher cutting for HLS. The first choice
 //! is the first video rendition, or the first audio one when there is no video. A video choice
 //! sticks while that rendition stays in the catalog: a newer rendition that sorts earlier must
-//! not rewind `EXT-X-MEDIA-SEQUENCE`. An audio choice switches to video when one appears. Every other rendition resolves each segment against its own
-//! timeline.
+//! not rewind `EXT-X-MEDIA-SEQUENCE`. An audio choice switches to video once a video rendition
+//! has a timeline. Every other rendition resolves each segment against its own timeline.
 //! An inline-parameter-set codec with no catalog `description` GETs one keyframe
 //! group on the first playlist render to build its init, then caches it.
 //!

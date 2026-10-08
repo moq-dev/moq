@@ -27,9 +27,9 @@ Segment boundaries come from one reference rendition (the first video
 rendition by name, or the first audio one without video) and are numbered by
 its records. A video choice sticks while the rendition stays in the catalog, so
 a newer rendition that sorts earlier does not rewind `EXT-X-MEDIA-SEQUENCE`; an
-audio choice switches to video when a video rendition appears. Every other
-video rendition snaps each boundary to its nearest keyframe within about a second, and a
-segment with none in range renders as `EXT-X-GAP`; audio takes every frame
+audio choice switches to video once a video rendition has a timeline. Every
+other video rendition snaps each boundary to its nearest keyframe within about a
+second, and a segment with none in range renders as `EXT-X-GAP`; audio takes every frame
 inside the segment's span. A jump in content time renders as
 `EXT-X-DISCONTINUITY`. Gaps are a fallback: a publisher wanting clean HLS
 export should align video GOPs across renditions. A timeline that fails
