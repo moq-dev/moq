@@ -121,6 +121,7 @@ export interface Source {
  * bitstream payload. A keyframe starts a group. The group it closes, and the
  * group still open at {@link close}, ends with an empty frame at the exclusive
  * end of the last sample: the same duration marker `moq-mux` writes.
+ * Use it for video only: a data reader would see the marker as an empty object.
  */
 export class Producer {
 	#track: Moq.Track.Producer;

@@ -24,8 +24,9 @@ const producer = new Loc.Producer(track);
 producer.encode(payload, timestampMicros, keyframe);
 ```
 
-Each group ends with an empty duration frame, at the next keyframe's timestamp or one interval after the last sample when the track closes.
-Readers skip that frame.
+The producer is for video tracks.
+An ordered group ends with an empty duration frame, at the next keyframe's timestamp or one interval after the last sample when the track closes.
+`Format.end()` identifies that frame for audio and video, and the hang consumer skips it.
 
 ## License
 
