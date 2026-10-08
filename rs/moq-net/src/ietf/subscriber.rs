@@ -579,8 +579,10 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	state: Lock<State>,
 	tasks: Tasks,
 	version: Version,
-	// Set once the peer sends a GOAWAY; new SUBSCRIBEs are then rejected with
-	// Error::GoingAway (the peer told us to stop opening streams).
+	// Set once the peer sends a GOAWAY; this session's routes then cost
+	// Cost::DRAIN, so a replacement session outranks it. Requests keep opening,
+	// deliberately past draft-19 section 10.4's SHOULD NOT: refusing them would
+	// fail requests that land before the replacement is up.
 	going_away: crate::goaway::GoingAway,
 	// What this session may allocate up front for objects still arriving.
 	frames: frame::Budget,
@@ -842,12 +844,6 @@ where
 		mut stream: Stream<T, Version>,
 		prefix: PathOwned,
 	) -> Result<(), Error> {
-		// A peer that sent GOAWAY told us to stop opening requests on this session,
-		// announce-interest included (draft-19 sect 10.4).
-		if self.going_away.is_set() {
-			return Err(Error::GoingAway);
-		}
-
 		// Hidden namespaces are requested too, as on moq-lite: the session mirrors the
 		// peer into the origin and each local reader opts in on its own. The parameter
 		// fails decoding at a peer that doesn't know it, so it waits on the peer's SETUP
@@ -1744,11 +1740,6 @@ where
 	) {
 		// Data streams wait on the alias bound by SUBSCRIBE_OK, so leave the model request
 		// pending until its immutable track metadata is known.
-		if self.going_away.is_set() {
-			request.reject(Error::GoingAway);
-			return;
-		}
-
 		let track_name = request.name().to_owned();
 		// Group FETCHes for cache misses: standalone, so they outlive each subscription.
 		let mut group_fetches = TaskSet::owned();
@@ -3421,10 +3412,6 @@ where
 	) {
 		let sequence = request.sequence();
 		let start = request.frame_start();
-		if self.going_away.is_set() {
-			request.reject(Error::GoingAway);
-			return;
-		}
 		// Our FETCH still encodes the Fetch Type field that draft-20 removed.
 		if Filter::is_draft20(self.version) {
 			request.reject(Error::Unsupported);
