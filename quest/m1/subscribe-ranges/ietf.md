@@ -29,7 +29,4 @@ serves it.
 ## Required
 
 - [Model ranges](/quest/m1/subscribe-ranges/model.md) - the range requests this answers
-
-## Related
-
-- [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) - serves draft-20 FETCH through the same group-span path this widens
+- [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) - serves draft-20 FETCH through the same group-span path this widens (#4971)

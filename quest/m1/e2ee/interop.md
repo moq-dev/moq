@@ -10,7 +10,7 @@ Ordinary relays forward, cache, and meter the proof without receiving a content 
 
 - Add automated browser-to-CLI and CLI-to-browser audio/video cases for both transport dialects using the same application credential and public client APIs.
 - Assert successful late subscription and decode, plaintext absence at the relay boundary, opaque physical names, deterministic failure under ciphertext or identity tampering, and that a restarted publisher lands under a new epoch that the old keys cannot open.
-- Exercise grouped frames on both transport dialects and datagrams on moq-lite against the shared known-answer and negative vectors. Include relocation across tracks, groups, frames, epochs, and transport domains, plus replay-window and sequence-exhaustion cases.
+- Exercise grouped frames on both transport dialects and datagrams on moq-lite against the shared known-answer and negative vectors, and exchange datagrams browser-to-CLI and CLI-to-browser, not only vectors. Add MoQ Transport datagrams once [#4979](https://github.com/moq-dev/moq/pull/4979) gives JavaScript that delivery. Include relocation across tracks, groups, frames, epochs, and transport domains, plus replay-window and sequence-exhaustion cases.
 - Verify the documented browser queue and native processing bounds under 20 ms Opus and representative video. Keep the proof deterministic rather than choosing new implementation defaults or adding timing sleeps.
 
 ## Required

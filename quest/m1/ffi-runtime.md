@@ -28,7 +28,7 @@ added this quest):
   `request_broadcast`, `decode_audio`, `decode_video`) and the sync methods
   that enter the runtime context (`MoqAudioProducer::write`), and keep
   `moq_ffi_shutdown` and Python's `atexit` clean.
-- Watch [Kotlin/JVM exit](/quest/m1/kt-jvm-exit.md), which depends on how the
+- Watch [Kotlin/JVM exit](/quest/m2/kt-jvm-exit.md), which depends on how the
   runtime thread stops.
 - Test: the interop go and python publishers on a pinned single CPU and on
   many, and every binding's test suite. Benchmark a binding publisher's
@@ -39,4 +39,4 @@ Public API: none (threading only). Wire: none.
 ## Related
 
 - [Serve budget](/quest/m0/serve-budget.md) - the root fix for a task hogging its thread
-- [Kotlin/JVM exit](/quest/m1/kt-jvm-exit.md) - runtime-thread shutdown
+- [Kotlin/JVM exit](/quest/m2/kt-jvm-exit.md) - runtime-thread shutdown

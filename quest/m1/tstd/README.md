@@ -13,8 +13,7 @@ distribution. Without it, only the passthrough lane can.
 Decided (2026-09-30), from a discussion with t0ms and Gwendal's email: a
 TS export has to be a proper remux, not an interleave of demuxed tracks.
 Padding, pacing, and muxing all assume a fixed delay, so the export gets one
-first. t0ms is testing whether T-STD compliance is feasible at all; record
-the result here. If it isn't, re-plan this line.
+first.
 
 Measured (2026-10-01, #4645): with the fixed-delay jitter buffer, per-PID
 admission against each PID's T-STD buffers, and PCRs at their byte position, a

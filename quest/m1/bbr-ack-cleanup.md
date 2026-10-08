@@ -46,15 +46,15 @@ flights, and explain any remaining logarithmic or amortized cost. Keep the
 regressions in CI and the benchmark matrix at least nightly. Do not
 substitute one hardware-specific millisecond limit for the scaling check.
 
+Decided 2026-10-08: Switch is Related, not Required; BBR3 already lives in
+`rs/moq-quic`, so this local fix lands without waiting for the switch.
+
 Offer the fix upstream to quinn or record why not. Update internal
 packet-lifetime comments inline; no new user guide is needed.
 
-## Required
-
-- [Switch](/quest/m1/quic/fork/switch.md) - MoQ runs on `moq-quic`, where this lands; the core and its BBR3 are already in `rs/moq-quic`
-
 ## Related
 
+- [Switch](/quest/m1/quic/fork/switch.md) - not a blocker: the core and its BBR3 are already in `rs/moq-quic`
 - [BBR starvation edges](/quest/m1/quic/bbr-app-limited-edges.md) - also edits `bbr3/mod.rs`; one owner there at a time
 - [Benchmark comparisons](/quest/m1/performance-comparisons.md) - reusable measurement guidance, not a prerequisite for this fix
 - [Loss sampling](/quest/m2/quic-bbr-loss-parity.md) - preserve packet metadata needed by the separate loss-sample repair; both edit `bbr3/mod.rs`, so sequence them

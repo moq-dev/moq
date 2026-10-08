@@ -11,7 +11,10 @@ shared an 8 MiB `RLIMIT_MEMLOCK`, and `deadline_fires_at_park` and
 
 Fix at the cause, never with a retry or longer timeout:
 
-- Locked memory: measure what each test ring locks and whether tests can share
+- Locked memory: start from the nextest `io-uring` test group
+  (`.config/nextest.toml`), which already holds one run to four ring tests at
+  a time; the failures came from several runs sharing one user's budget.
+  Measure what each test ring locks and whether tests can share
   or shrink rings. If configuration must change, make the supported dev-shell
   and CI setup actually allow the tests to pass under parallel load.
   `Error::ring` already reports `RLIMIT_MEMLOCK` on ENOMEM; check that this

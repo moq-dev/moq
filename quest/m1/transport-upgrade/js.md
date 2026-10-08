@@ -46,6 +46,8 @@ session to close on its own or at the handover cap. See the
   group across the upgrade, the WebSocket session closes within the cap, and
   the next connect to the same URL gives WebTransport the head start again;
   with no delay, WebTransport wins and no WebSocket session is ever opened.
+  The watched broadcast carries an epoch, since a track resumes across a
+  handover only between routes with the same epoch.
 - Public API: the `setup` mirror, if it is exported; `transportOf` already
   reports the live transport. Update `doc/lib/js` where the fallback race is
   described.

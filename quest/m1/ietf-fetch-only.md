@@ -32,7 +32,7 @@ Decided (2026-10-01):
   twice. Before draft 20 there's no opt-out, so it ignores the duplicate.
 - First decouple object timestamps from INCLUDE_PROPERTIES: the publisher
   derives its serving timescale from `properties_wanted`
-  (`publisher.rs:628`), so opting out today strips the Timestamp property
+  (`run_subscribe_stream` in `rs/moq-net/src/ietf/publisher.rs`), so opting out today strips the Timestamp property
   from every object and the subscriber falls back to arrival time. Test
   TRACK_STATUS plus the opt-out with source timestamps that differ from
   arrival.
@@ -44,6 +44,5 @@ Decided (2026-10-01):
 
 ## Related
 
-- [FETCH_OK properties](/quest/m1/fetch-ok-properties.md) - the publisher side of the same properties
-
+- [FETCH_OK properties](/quest/m1/fetch-ok-properties.md) - the publisher side of the same properties, which lands after this
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - the browser publisher answers these fetches

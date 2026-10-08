@@ -3,9 +3,8 @@
 ## Goal
 
 When the source behind a path changes, an announce consumer sees an
-explicit `Restart` event, in Rust (`AnnounceEvent::Restart`) and `@moq/net`:
-always on lite-07, and on older versions and moq-transport when the END and
-START arrive together (otherwise an `End` then a `Start`).
+explicit `Restart` event, in Rust (`AnnounceEvent::Restart`) and `@moq/net`,
+on lite-07. Older versions and moq-transport deliver an `End` then a `Start`.
 The source changes on a newer epoch, or, on a route without an epoch, when a
 different route entry wins. A re-price or a same-source failover stays an
 `Update`. Players start on `Start`, restart on `Restart`, and stop on `End`.
@@ -47,6 +46,14 @@ path kept its worker just resubscribes to the same source.
 
 Decided in planning (2026-10-07, from #4970's review):
 
+- **`Restart` only on lite-07 (2026-10-08).** Older wires send and deliver
+  END then START. Coalescing a pending pair into one `Restart` depends on
+  read timing, so it is dropped rather than tested as either outcome.
+- **Rename the existing message first.** lite-06's `ANNOUNCE_RESTART` (type 2:
+  `AnnounceBroadcast::Restart` in `rs/moq-net/src/lite/announce.rs`, the
+  `"restart"` status in `js/net/src/lite/announce.ts`) is the draft's
+  ANNOUNCE_UPDATE, a metadata update. Rename it to Update in both languages
+  before adding the new message, so `Restart` means one thing.
 - **Supersedes #5013's hard switch.** #5013 decided (2026-10-07) that a
   better route without an epoch takes over with a hard switch, ending
   subscriptions in flight. The maintainer chose sticky subscriptions plus
@@ -110,9 +117,8 @@ Decided in planning (2026-10-07, from #4970's review):
   path. Older lite versions and moq-transport send
   `ANNOUNCE_END` then `ANNOUNCE_START` for a source change, a new rule for a
   relay's winner moving between entries (the draft only says so for a
-  publisher replacing its own epoch), and a receiver delivers an end and
-  start for the same prefix that are both pending before delivery as one
-  `Restart` (no timer). `ANNOUNCE_UPDATE` stays a metadata update with no
+  publisher replacing its own epoch), and a receiver delivers them as an
+  `End` then a `Start`. `ANNOUNCE_UPDATE` stays a metadata update with no
   content claim. Draft edits in `drafts/draft-lcurley-moq-lite.md`: the new
   message; the routing rule that a per-subscriber winner change travels as
   ANNOUNCE_UPDATE (it does only without a source change); the SHOULD that a
@@ -121,9 +127,9 @@ Decided in planning (2026-10-07, from #4970's review):
   subscription between routes without an Epoch "stays on its route and ends
   with it" holds as written.
 - **Players** follow `Restart` in [Apps](/quest/m0/broadcast-epoch/apps.md),
-  and [moqsrc](/quest/m0/broadcast-epoch/moqsrc.md) switches on it too. On lite-06 and
-  moq-transport, a pair not coalesced reaches players as `End` then
-  `Start`: a stop, then a fresh play.
+  and [moqsrc](/quest/m0/broadcast-epoch/moqsrc.md) switches on it too. On
+  older wires the pair reaches players as `End` then `Start`: a stop, then a
+  fresh play.
 - **Every Rust consumer** of announce events handles `Restart` in the same
   PR, since the enum match is exhaustive: moq-ffi's `MoqAnnounceEvent` gains
   `Restart` (its wrappers follow in
@@ -144,9 +150,8 @@ in both languages, including a reconnect with identical route metadata; a
 re-price delivers `Update`; an old subscription keeps receiving after a
 replacement until its route goes; a re-request after `Restart` resolves the
 new route, over a relay on lite-06, lite-07, and moq-transport. On lite-06
-and moq-transport, coalescing depends on read timing, so those tests accept
-`Restart` or `End` then `Start`. Flip `better_route_keeps_the_incumbent`
-(`rs/moq-net/tests/route_change.rs`: the better route wins new requests and
+and moq-transport, those tests expect `End` then `Start`. Flip
+`better_route_keeps_the_incumbent` (`rs/moq-net/tests/route_change.rs`: the better route wins new requests and
 announces, while the incumbent's subscriptions continue) and
 `identical_reannounce_is_invisible` (`origin.rs`) for routes without an
 epoch. `route_dies_without_an_epoch` keeps its expectation, but its
@@ -162,16 +167,16 @@ downstream relay's cached groups from the old instance never reach a new
 subscriber mixed with the new instance's groups. With mocked time, on lite-06
 and lite-07, a prefix pool of epoch-less workers announced as `pool` behind
 two relays, where one path's winner changes under an unchanged prefix winner:
-the downstream relay gets a `Restart` of `pool`, drops its cached copies of
+the downstream relay gets a `Restart` of `pool` (END then START on lite-06), drops its cached copies of
 the nested paths, and the next subscribes reach the right workers, the moved
 path on its new worker and the rest on theirs. Run `just drafts check` and `just test interop --all`.
 
-Docs: update `doc/concept/moq-lite.md` (publisher epochs) and
-`doc/lib/{rs,js}` announce sections inline, plus `doc/bin/rtmp.md`,
-`doc/bin/srt.md`, `doc/bin/rtc.md`, and `doc/bin/relay/cluster.md`, which
-describe the hard switch: a reconnect "replaces it at once", stale
-subscriptions end with `Unroutable` (`rtmp.md`, `srt.md`), and a flapping
-moq-lite 07 link "cuts the viewers" (`cluster.md`).
+Docs: open PR #5033 rewrites the publisher-restart docs to match today's
+hard switch; land it first, then update `doc/concept/moq-lite.md` (publisher
+epochs), the `doc/lib/{rs,js}` announce sections, and the gateway and
+cluster pages under `doc/bin` wherever they still describe the hard switch
+(a reconnect replacing the stale viewer, stale subscriptions ending with
+`Unroutable`, a flapping lite-07 link cutting viewers).
 
 Public API: breaking, a new `AnnounceEvent::Restart` variant (Rust) and
 `"restart"` kind (JS). Wire: a new lite-07 announce message; older versions

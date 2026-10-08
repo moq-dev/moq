@@ -54,13 +54,14 @@ Decided:
   explicit `Restart` announce event tells players to follow, through
   [Restart](/quest/m0/broadcast-epoch/restart.md). When the newest goes and
   an older one is still live, the older one wins again as a new broadcast.
-- On lite-07 a claim's answer will carry the served broadcast's own epoch
-  ([Claim-served epochs](/quest/m0/broadcast-epoch/claim-epochs.md), planned
-  2026-10-07), which adds it to TRACK_INFO.
+- [Claim-served epochs](/quest/m1/claim-epochs.md), where a
+  lite-07 claim's answer carries the served broadcast's own epoch, no longer
+  gates this line (decided 2026-10-08): it is a lite-07 opt-in, so it moved
+  to m1.
 - A catalog `broadcast` reference by name follows the newest epoch, since a
   path cannot name one.
-- Every first-party publisher that can restart mints its own: the apps,
-  moq-boy, and moq-room through [Apps](/quest/m0/broadcast-epoch/apps.md), the
+- Every first-party publisher that can restart mints its own: the apps and
+  moq-boy through [Apps](/quest/m0/broadcast-epoch/apps.md), the
   ingest gateways, moqsink, and the bindings below. moq-stats mints one per
   [group announcement](/doc/concept/stats.md#broadcasts), which also gated
   the release (decided 2026-10-04).
@@ -93,12 +94,10 @@ then. MoQ Pro's VOD `storage.json` moves from the same seed to its own epoch.
 
 ## Required
 
-- [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web restart into a new epoch and reset on the switch
 - [Restart](/quest/m0/broadcast-epoch/restart.md) - a replaced broadcast reaches announce consumers as an explicit Restart, subscriptions stay sticky, and new requests never join a replaced route's front
+- [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web restart into a new epoch and reset on the switch
 - [Publish catalog restart](/quest/m0/broadcast-epoch/publish-catalog-restart.md) - `@moq/publish` never reuses catalog group numbers under one name and epoch after a re-announce
-- [TS restart](/quest/m0/broadcast-epoch/ts-restart.md) - a signalled backward TS discontinuity finishes the broadcast and continues the same input under a fresh epoch
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and let a publisher announce one
 - [moqsrc](/quest/m0/broadcast-epoch/moqsrc.md) - moqsrc switches to the new broadcast on a `Restart`, keeping its pads by rendition name
-- [Claim-served epochs](/quest/m0/broadcast-epoch/claim-epochs.md) - a claim's answer names the instance that served it, so a restarted output is never spliced and a per-output epoch costs no restart
 - [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the same release retires the per-path stats maps for totals and on-demand prefix tracks (decided 2026-10-05)
 - [Dynamic epoch update](/quest/m0/broadcast-epoch/dynamic-epoch.md) - an epoch change through `Dynamic::update` announces a `Restart` downstream, so subscribers drop the old copy and resubscribe, while the origin keeps serving

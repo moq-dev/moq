@@ -30,4 +30,3 @@ Public API: none expected. Wire: none.
 ## Related
 
 - [Serve budget](/quest/m0/serve-budget.md) - likely the same stall
-- [CI runner stalls](/quest/m1/ci-runner-stalls.md) - shorter freezes of both interop tracks on CI runners

@@ -49,9 +49,11 @@ decode, and the JS test should drive the software decoder.
   into a later GOP lacks its references just like a cold join.
   Every continuous group is passed through untouched.
 - The same rule in the Rust decode path (`moq-video` decode consumers), so
-  native playback and the transcoder tune in the same way.
+  native playback and the transcoder tune in the same way, keyed on the
+  non-continuous signal from [Rust non-continuous
+  signal](/quest/m1/rust-continuous.md).
 - The same rule in `moq export ts`. Decided (2026-10-01): the fixed-delay
-  export (#4645) still sends a join's orphaned leading pictures, so 3 of 500
+  export still sends a join's orphaned leading pictures, so 3 of 500
   frames on the open-GOP fixture decode after they present
   (`dts-before-pts`). Trim them at tune-in from the same signal, on the
   export's first group only, and make `just test ts --open-gop` pass under
@@ -62,19 +64,18 @@ decode, and the JS test should drive the software decoder.
   every picture today; rewrite them to expect the first group's orphaned
   leading pictures trimmed and every later group's kept. Rejected: dropping
   this bullet and keeping the grader.
-- This quest owns the Rust non-continuous signal, which audio warmup and
-  consumer warmup reuse rather than each adding one. Today
-  `moq_mux::container::Consumer::poll_read` returns a bare frame, and
-  `discontinuity()` is a counter bumped on a declared marker group, an
-  unproven delivered hole, or a latency skip, but not on the subscribe itself.
-  Add the equivalent of JS `continuous`: false on the first frame after the
-  subscribe and after every bump, true otherwise. It changes the moq-mux
-  consumer API.
 - Tests: a synthetic group with a keyframe followed by two earlier-stamped
   deltas is trimmed on the first group and kept on the second; and a viewer
   that plays continuously, then latency-skips into a later open GOP, has that
   group's leading pictures trimmed too, so an implementation that only trims
   the initial group fails. Both cases in both languages.
+
+Decided 2026-10-08: the Rust non-continuous signal is its own quest, so
+audio warmup and consumer warmup don't wait on this one.
+
+## Required
+
+- [Rust non-continuous signal](/quest/m1/rust-continuous.md) - the Rust decode path keys the trim on it
 
 ## Related
 
