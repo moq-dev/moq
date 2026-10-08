@@ -6,8 +6,10 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream, Writer } from "../stream.ts";
 import { Connection } from "./connection.ts";
+import * as Message from "./message.ts";
+import * as Namespace from "./namespace.ts";
 import { Group } from "./object.ts";
-import { SetupOption, SetupOptions } from "./parameters.ts";
+import { Parameters, SetupOption, SetupOptions } from "./parameters.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { Setup } from "./setup.ts";
 import {
@@ -220,37 +222,45 @@ for (const [version, alpn, options, namespaces] of [
 	});
 }
 
-/** Subscribe Options above 0x02 are malformed and close the session. */
-test("an unknown Subscribe Options value closes the session", async () => {
-	const logged = spyOn(console, "error").mockImplementation(() => void 0);
-	const version = Version.DRAFT_17;
-	const pair = createMockTransportPair(ALPN.DRAFT_17);
-	const control = await Stream.open(pair.server, { version });
-	const connection = new Connection({
-		url: new URL("https://example.com"),
-		quic: pair.server,
-		control,
-		maxRequestId: 100n,
-		version,
-		client: false,
-	});
+/** Subscribe Options above 0x02 are malformed and close the session, even past 2^53. */
+for (const [version, alpn] of [
+	[Version.DRAFT_16, ALPN.DRAFT_16],
+	[Version.DRAFT_17, ALPN.DRAFT_17],
+] as const) {
+	for (const options of [3n, 2n ** 53n]) {
+		test(`${alpn} Subscribe Options ${options} closes the session`, async () => {
+			const logged = spyOn(console, "error").mockImplementation(() => void 0);
+			const pair = createMockTransportPair(alpn);
+			const control = await Stream.open(pair.server, { version });
+			const connection = new Connection({
+				url: new URL("https://example.com"),
+				quic: pair.server,
+				control,
+				maxRequestId: 100n,
+				version,
+				client: false,
+			});
 
-	try {
-		const stream = await Stream.open(pair.client, { version });
-		await stream.writer.u53(SubscribeNamespaceLegacy.id);
-		await new SubscribeNamespaceLegacy({
-			namespace: Path.empty(),
-			requestId: 1n,
-			subscribeOptions: 3 as SubscribeOptions,
-		}).encode(stream.writer, version);
+			try {
+				const stream = await Stream.open(pair.client, { version });
+				await stream.writer.u53(SubscribeNamespaceLegacy.id);
+				await Message.encode(stream.writer, async (w) => {
+					await w.u62(1n); // Request ID
+					if (version === Version.DRAFT_17) await w.u62(0n); // Required Request ID delta
+					await Namespace.encode(w, Path.empty());
+					await w.u62(options);
+					await new Parameters().encode(w, version);
+				});
 
-		const info = await pair.client.closed;
-		expect(info.closeCode).toBe(SessionCode.ProtocolViolation);
-	} finally {
-		logged.mockRestore();
-		connection.abort();
+				const info = await pair.client.closed;
+				expect(info.closeCode).toBe(SessionCode.ProtocolViolation);
+			} finally {
+				logged.mockRestore();
+				connection.abort();
+			}
+		});
 	}
-});
+}
 
 /**
  * Padding and group streams that beat the peer's SETUP are held and classified once it

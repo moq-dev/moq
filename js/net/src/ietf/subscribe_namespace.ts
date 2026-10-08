@@ -161,9 +161,10 @@ export class SubscribeNamespaceLegacy {
 		const namespace = await Namespace.decode(r);
 		let subscribeOptions: SubscribeOptions = SubscribeOptions.NAMESPACE;
 		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
-			const raw = await r.u53();
-			if (raw > SubscribeOptions.BOTH) throw new ProtocolViolation(`invalid Subscribe Options: ${raw}`);
-			subscribeOptions = raw as SubscribeOptions;
+			// Full width, so a value past 2^53 is still a protocol violation.
+			const raw = await r.u62();
+			if (raw > BigInt(SubscribeOptions.BOTH)) throw new ProtocolViolation(`invalid Subscribe Options: ${raw}`);
+			subscribeOptions = Number(raw) as SubscribeOptions;
 		}
 		const params = await Parameters.decode(r, version);
 
