@@ -152,8 +152,8 @@ how a standby transcoder pool seeds a high cost and drops it once it's working,
 and a relay receiving a GOAWAY re-prices every route learned from that peer to
 the maximum so new subscriptions go elsewhere while existing ones finish.
 
-A route's price is static: the publisher's production cost plus the link costs
-it crosses. A live publisher seeds 0, and caching never changes it.
+A route's price is the publisher's production cost plus the link costs it
+crosses. A live publisher seeds 0, and caching never changes it.
 
 ## LAN discovery
 

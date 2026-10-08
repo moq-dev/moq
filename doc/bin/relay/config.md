@@ -174,10 +174,10 @@ headroom = "2GiB"                    # Or: keep this much system memory free and
 duration = "30s"                     # Cap how long a non-latest group is kept, whatever the publisher asked.
 ```
 
-`capacity` bounds memory by bytes, as active publishers write. `duration`
-(30s by default) bounds it by age, and sweeps on a timer, so a publisher that
-stalls but stays connected still has its idle groups reclaimed. The latest
-group of every track is always kept.
+`capacity` is a byte target, repaid as active publishers write. `duration`
+(30s by default) bounds memory by age, and sweeps on a timer, so a publisher
+that stalls but stays connected still has its idle groups reclaimed. The latest
+group of every track is always kept, even past `capacity`.
 
 ## \[stats]
 
