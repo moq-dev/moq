@@ -96,10 +96,9 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
 - **Sessions** (decided 2026-10-05). `sessions.json` is keyed by auth root
   and loses pruned roots the same way, so fold per-tier `Presence` into the
   totals (session counts) and serve per-root detail as a requested track,
-  the same model as prefix tracks. Open PR #5046 (session outcomes) adds to
-  `sessions.json`, which this retires; it is rewritten against these totals
-  and the per-root requested track, and lands after this (decided
-  2026-10-08).
+  the same model as prefix tracks.
+  [Session outcomes](/quest/m1/session-outcomes.md) Requires this and rides
+  these totals and the per-root requested track (decided 2026-10-08).
 - **Retire the map tracks** (`publisher.json`, `subscriber.json`,
   `sessions.json`, and their `.json.z` siblings) in the same release. Decide
   while implementing whether totals and prefix tracks keep `.json.z`
@@ -130,4 +129,5 @@ customer stats feed serves this format summed across nodes.
 
 - [Media stats](/quest/m1/stats/README.md) - publisher and viewer media stats
   stay hang tracks, separate from the relay's stats
+- [Session outcomes](/quest/m1/session-outcomes.md) - adds refusal and end counters to the totals and per-root track this introduces
 - [QoS](/quest/m1/qos/README.md) - stats-split lands first; the egress lag histogram split out of #4133 requires it and rebases onto the totals and prefix tracks

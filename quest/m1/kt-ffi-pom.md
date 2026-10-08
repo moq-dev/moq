@@ -6,7 +6,9 @@ The `dev.moq:moq-jvm` and `dev.moq:moq-android` POMs on Maven Central depend
 on a published `moq-ffi` variant, so a Maven build resolves the wrapper.
 Today 0.5.0 and 0.5.1 depend on `moq-ffi-jvm` and `moq-ffi-android` version
 `0.0.0-dev`, which was never published, so every Maven consumer fails to
-resolve. A PR check refuses a generated POM naming that version.
+resolve. A PR check refuses a generated POM naming that version. moq.pro's
+[Kotlin sample](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/kotlin-sample.md)
+is a consumer: it builds against the published wrapper.
 
 ## Plan
 

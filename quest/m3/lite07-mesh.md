@@ -10,11 +10,9 @@ this quest and every `Required` entry that links it.
 
 ## Plan
 
-As of 2026-09-30 lite-07 ships only as the off-by-default `moq-lite-07-wip`
-ALPN, and moq.pro still has its lite-07 rollout quest open
-(`quest/m1/lite07.md` in moq-dev/moq.pro). That rollout waits on
-[Finalize moq-lite-07](/quest/m1/lite07-finalize.md), so this condition cannot
-clear before a release carries the final version.
+moq.pro's lite-07 rollout is `quest/m2/lite07.md` in moq-dev/moq.pro. It
+waits on [Finalize moq-lite-07](/quest/m1/lite07-finalize.md), so this
+condition cannot clear before a release carries the final version.
 
 Decided 2026-10-05: [Cluster routing](/quest/m1/cluster-routing/README.md)'s
 route layer lands in lite-07, so the final lite-07 carries ROUTE and
