@@ -1147,7 +1147,9 @@ async fn fetch_media_group_decodes_multiple_cmaf_samples() {
 		moq_mux::catalog::hang::Container::new(&catalog_container, moq_mux::container::Kind::Video).unwrap();
 
 	let broadcast = moq_net::broadcast::Info::new().produce();
-	let track = broadcast.create_track("video", None).unwrap();
+	// A CMAF track counts in its init's ticks.
+	let info = moq_net::track::Info::default().with_timescale(muxer.timescale());
+	let track = broadcast.create_track("video", info).unwrap();
 	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
 	// Buffer both samples into one moof+mdat, which is what this decodes.
 	let mut media = moq_mux::container::Producer::new(track, container).with_buffer(Duration::from_secs(1));

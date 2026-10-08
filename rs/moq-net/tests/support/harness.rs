@@ -30,6 +30,13 @@ pub fn spawn<D: moq_net::time::Driver + Send + Unpin + 'static>(mut driver: D) {
 	}
 }
 
+/// Wait for a subscription to reach `track`. Demand alone does not say one has: on
+/// moq-lite 05 and later a TRACK stream is demand before its SUBSCRIBE arrives.
+pub async fn subscribed(track: &moq_net::track::Producer) {
+	let mut track = track.clone();
+	while track.subscription_changed().await.expect("track open").is_none() {}
+}
+
 /// Options for [`connect_mock`].
 pub struct MockConnectOptions {
 	/// The MoQ version to negotiate (determines the ALPN protocol string).

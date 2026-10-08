@@ -65,11 +65,13 @@ impl Retire {
 #[derive(Clone)]
 pub(crate) struct Rung {
 	pub info: Resolved,
-	/// The source media track, for group fetches (not yet subscribed).
-	pub source: moq_net::track::Consumer,
+	/// The source media track's name, looked up per group fetch rather than held:
+	/// a held track handle is interest in the source all the way to its publisher,
+	/// and an idle rung has none.
+	pub source: String,
 	/// The shared live decode of the source, for the live path.
 	pub feed: Feed,
-	/// The source broadcast, to notice it closing while idle.
+	/// The source broadcast, to fetch from and to notice it closing while idle.
 	pub broadcast: moq_net::broadcast::Consumer,
 	/// The source rendition's catalog entry (codec + container).
 	pub config: VideoConfig,
@@ -506,11 +508,18 @@ async fn fetch(rung: Rung, request: moq_net::group::Request) -> Result<(), Error
 	// this handle going unused is them picking the group up, not abandoning it.
 	let demand = request.demand();
 
+	let track = match rung.broadcast.track(&rung.source) {
+		Ok(track) => track,
+		Err(err) => {
+			request.reject(err.clone());
+			return Err(err.into());
+		}
+	};
 	let options = moq_net::group::Fetch::default().with_priority(request.priority());
 	let mut source = tokio::select! {
 		biased;
 		_ = demand.unused() => return abandon(request),
-		source = rung.source.fetch_group(request.sequence(), options) => match source {
+		source = track.fetch_group(request.sequence(), options) => match source {
 			Ok(source) => source,
 			Err(err) => {
 				request.reject(err.clone());

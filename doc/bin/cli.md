@@ -94,6 +94,11 @@ fMP4 writes one fragment per publisher group; `--fragment-duration` caps it.
 The init segment declares every rendition, so it is written only once each can
 be described, and the track set is then fixed: a new rendition or a changed
 codec configuration ends the export. Restart it to pick up the change.
+Annex-B H.264 and H.265 whose catalog codec string and dimensions fix the sample
+entry are described at once as `avc3` or `hev1`, with SPS, PPS, and VPS kept in
+the samples, so an encoder restarting with a new SPS does not end the export.
+Each keyframe carries them, so a keyframe whose sets never appeared ends it.
+Other video waits for its first keyframe.
 
 MPEG-TS export pads to the source's constant mux rate when the catalog
 recorded one, or to `--mux-rate`, on a constant-rate schedule an IRD or groomer

@@ -31,11 +31,10 @@ The counters and channels land here. Client health and preflight are
 moq.pro (downstream) dashboard work, including the health badge and the
 connection-health drill-down, consumes both.
 
-Open, for the maintainer (the same question is recorded in
-[client health](/quest/m1/stats/health.md)): whether anything computes a
-per-broadcast verdict combining client reports, the relay's starvation, and
-publisher timeliness, and where it would live. This line only reports the
-counters.
+The per-broadcast verdict combining client reports, the relay's starvation,
+and publisher timeliness lives in moq.pro's
+[health badge](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/qos/badge.md).
+This line only reports the counters.
 
 Decided (2026-10-06 audit): [stats totals and prefix
 tracks](/quest/m0/broadcast-epoch/stats-split.md) lands first, since it is m0

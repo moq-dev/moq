@@ -165,7 +165,7 @@ impl Transcoder {
 				request = dynamic.requested_track() => {
 					// Err means the broadcast closed; nothing left to serve.
 					let Ok(request) = request else { break };
-					match ladder.rung(request.name())? {
+					match ladder.rung(request.name()) {
 						Some(rung) => { tasks.spawn(rung::serve(rung, request)); }
 						None => request.reject(moq_net::Error::NotFound),
 					}
@@ -1175,6 +1175,58 @@ mod tests {
 		.await
 		.expect("the accepted fetch never finished");
 		assert!(finished.is_ok(), "retirement aborted the accepted group: {finished:?}");
+
+		transcoder.abort();
+	}
+
+	/// A ladder nobody watches holds nothing of its source. A held track handle is
+	/// interest in the track all the way to its publisher, so a transcoder that
+	/// kept one per idle rung would stop an on-demand source from ever idling.
+	#[tokio::test]
+	async fn an_idle_rung_leaves_its_source_unused() {
+		let source = source_catalog(320, 240);
+		let demand = source._track.demand();
+
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let catalog = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
+		await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
+		assert!(!demand.is_used(), "the published ladder holds its source");
+
+		// A rung consumer is demand on its own, so the rung starts encoding and
+		// subscribes to the source.
+		let rung = consumer.track("video/120p").unwrap();
+		rung.query().await.unwrap();
+		tokio::time::timeout(std::time::Duration::from_secs(5), demand.used())
+			.await
+			.expect("the rung never asked for its source")
+			.unwrap();
+
+		// Its task outlives the viewer, idle until the next one.
+		drop(rung);
+		tokio::time::timeout(std::time::Duration::from_secs(5), demand.unused())
+			.await
+			.expect("the idle rung kept its source wanted")
+			.unwrap();
 
 		transcoder.abort();
 	}

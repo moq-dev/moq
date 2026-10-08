@@ -293,7 +293,7 @@ export class Renderer {
 						for (;;) {
 							const frame = await group.readFrame();
 							if (!frame) break;
-							for (const sample of format.decode(frame.payload)) {
+							for (const sample of format.decode(frame.payload, frame.timestamp)) {
 								await this.#ingest(config.format, sample, store);
 							}
 						}

@@ -3,7 +3,6 @@ import { Once } from "@moq/signals";
 import { accept } from "./connection/accept.ts";
 import { connect } from "./connection/connect.ts";
 import type { Drain } from "./connection/goaway.ts";
-import { StreamCode } from "./error.ts";
 import type { Session } from "./ietf/adapter.ts";
 import { GoAway } from "./ietf/goaway.ts";
 import { Subscriber } from "./ietf/subscriber.ts";
@@ -172,9 +171,9 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		const later = front.track("later").subscribe().ordered();
 		expect(await later.readString()).toBe("from-draining");
 
-		// The publisher no longer holds group 0, so its answer proves the FETCH reached the wire.
+		// A fresh consumer caches nothing, so the publisher's answer proves the FETCH reached the wire.
 		const fetched = wireOf(client).consume(Path.from("room")).track("video").fetchGroup(0);
-		if (kind === "lite") await expect(fetched).rejects.toMatchObject({ code: StreamCode.NotFound });
+		if (kind === "lite") expect(await (await fetched).readString()).toBe("one");
 		else await expect(fetched).rejects.toThrow(/not supported/);
 
 		// A new announce-interest opens too, and sees the route at the drain cost.

@@ -188,7 +188,7 @@ export class Consumer {
 				group.empty = false;
 				const arrival = Moq.Time.Milli.now();
 
-				const decoded = this.#format.decode(next.payload);
+				const decoded = this.#format.decode(next.payload, next.timestamp);
 
 				for (const sample of decoded) {
 					const marker = this.#format.end?.(sample) !== undefined;

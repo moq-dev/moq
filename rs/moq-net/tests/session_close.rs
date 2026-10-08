@@ -71,10 +71,9 @@ async fn setup(version: &str) -> Setup {
 		}
 	});
 
-	moq_net_sim::timeout(TIMEOUT, track.demand().used())
+	moq_net_sim::timeout(TIMEOUT, support::harness::subscribed(&track))
 		.await
-		.expect("no subscriber appeared")
-		.unwrap();
+		.expect("no subscriber appeared");
 
 	Setup {
 		pair,

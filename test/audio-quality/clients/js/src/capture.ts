@@ -117,7 +117,7 @@ export async function* arrivals(group: Group.Consumer, decoder: Container.Format
 			const next = await group.readFrame();
 			const at = performance.now();
 			if (!next) return;
-			for (const frame of decoder.decode(next.payload)) {
+			for (const frame of decoder.decode(next.payload, next.timestamp)) {
 				if (decoder.end?.(frame) !== undefined) continue;
 				yield [at, Time.Milli.fromMicro(frame.timestamp), group.sequence];
 			}

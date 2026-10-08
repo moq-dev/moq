@@ -11,19 +11,19 @@ them serially, and lite-03/04 with no track stream, keep working unchanged.
 ## Plan
 
 Decided 2026-10-08 in a `/quest-plan` interview (paper trail in the PR that
-added this quest). It starts after #5053 lands and reverses that PR's "not
+added this quest). It builds on #5053 (merged) and reverses that PR's "not
 pipelining" decision: the draft already allows it
 (`drafts/draft-lcurley-moq-lite.md`, Track Stream: the subscriber "MAY open
 the Track and Subscribe streams concurrently"), and the round trip is not
 worth keeping.
 
-Facts (2026-10-08, `origin/main` 4a79178d2):
+Facts (2026-10-08, `origin/main` 11ee77d5d, after #5053):
 
 - Rust: `TrackServeRun::poll` waits on `info.poll_fetch` before building its
-  `ServeLoop` (`rs/moq-net/src/lite/subscriber.rs:3996`), and only then does
+  `ServeLoop` (`rs/moq-net/src/lite/subscriber.rs:4144`), and only then does
   `begin_subscription` and `Establish` write SUBSCRIBE.
 - JS: `#openSubscribe` awaits `#trackInfo` before `Stream.open` and the
-  SUBSCRIBE write (`js/net/src/lite/subscriber.ts:693`). The receive path
+  SUBSCRIBE write (`js/net/src/lite/subscriber.ts:704`). The receive path
   already waits for the timescale (`runGroup`) and drops datagrams that beat
   TRACK_INFO.
 - No SUBSCRIBE field needs TRACK_INFO, and neither publisher needs a TRACK
@@ -34,9 +34,10 @@ Facts (2026-10-08, `origin/main` 4a79178d2):
 - Both stacks route groups only to an accepted subscription. Rust's
   `ServeLoop::new` accepts the request with the info, and
   `begin_subscription` registers a `TrackEntry` holding that producer and its
-  timescale; a group whose id has no entry is cancelled, not left unread. JS
-  `runGroup` drops a group for an id with no registered subscription, and
-  writes the group before it waits on the timescale.
+  timescale; a group whose id has no entry is cancelled, not left unread
+  (`subscriber.rs:816`). JS `runGroup` (`subscriber.ts:1145`) drops a group
+  for an id with no registered subscription, and writes the group before it
+  waits on the timescale.
 
 Decisions:
 
@@ -82,10 +83,6 @@ relay hops before and after.
 Public API: none. Wire: none (ordering only; the draft already permits it).
 Decided 2026-10-08: pipelining is ordering-only, so it neither waits on nor
 blocks the Related quests below; whichever lands second rebases.
-
-## Required
-
-- [TRACK stream demand](/quest/m0/track-stream-demand.md) - the held TRACK stream this keeps (#5053)
 
 ## Related
 

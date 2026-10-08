@@ -658,7 +658,8 @@ impl Drop for Withdrawing {
 pub struct Limits {
 	/// Broadcasts (moq-lite) or namespaces (moq-transport) the peer may have announced to us.
 	pub announces: usize,
-	/// Subscriptions the peer may hold on our broadcasts.
+	/// Subscriptions the peer may hold on our broadcasts. On moq-lite 05 and later an open
+	/// TRACK stream holds one too, sharing it with a SUBSCRIBE for the same track.
 	pub subscriptions: usize,
 }
 

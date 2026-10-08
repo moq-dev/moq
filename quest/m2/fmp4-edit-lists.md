@@ -25,10 +25,6 @@ Public API: none. Wire: none, but a behavior change: frame timestamps now
 include the edit and the init loses `edts`, so a consumer that offsets AAC
 priming on its own must stop, or it shifts twice. Note it in the changelog.
 
-## Required
-
-- [CMAF frame timestamp](/quest/m1/cmaf-frame-timestamp.md) - decoders time samples from the frame timestamp, which is where the edit lands
-
 ## Related
 
 - [MP4 export](/quest/m2/mp4-export.md) - its open "edit lists" item is the output side

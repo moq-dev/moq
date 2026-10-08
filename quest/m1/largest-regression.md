@@ -17,7 +17,7 @@ group's sequence, and they keep waiting on the floor.
 
 ## Plan
 
-Found while scoping [Idle fronts](/quest/m0/idle-fronts.md) (2026-10-07):
+Found while scoping idle fronts (2026-10-07):
 under a prefix claim the relay never sees the worker close a broadcast, so a
 restart at the same path reaches a lingering copy unannounced. A publisher
 that restarts its group sequence under the same name is buggy, and this makes
@@ -30,7 +30,7 @@ Only a restart behind an unchanged route reaches a copy unannounced.
 
 Decided 2026-10-08: shrunk to the two answer-carrying wires and moved to m1.
 The heuristic is unproven and risks a false failover, so it builds on the
-front and route shapes Restart and Idle fronts leave rather than ahead of
+front and route shapes Restart and idle fronts leave rather than ahead of
 them.
 
 Where it lands: since #4914, a rejoining copy goes idle (`set_idle`) and the
@@ -46,6 +46,13 @@ was last served from without an epoch, where no cross-route resume happens,
 or names a different epoch than the copy holds. Check for any other
 legitimate case before relying on that split.
 
+Whatever ends a front, it leaves the origin's front table before its broadcast
+closes or anything fails, and `request()` treats a front whose broadcast closed
+as gone. So a reader re-requesting after seeing the front's end mints a fresh
+front. The copy's error must reach readers through that end, not an `Abort`
+ahead of it, or a re-request can still join the old front. A request that
+joined before the front decided to end is in flight, like a subscription.
+
 Verification: mocked time, a publisher restarting a path at group 0 within
 the linger. The returning reader gets an error and then the new instance from
 group 0, never the old group. A same-epoch standby behind the cached copy
@@ -56,7 +63,6 @@ Public API: none. Wire: none.
 ## Required
 
 - [Restart](/quest/m0/broadcast-epoch/restart.md) - route changes reach a copy as a `Restart`, leaving only same-route restarts for this to catch
-- [Idle fronts](/quest/m0/idle-fronts.md) - reclaims the unread fronts whose lingering copies this judges
 
 ## Related
 

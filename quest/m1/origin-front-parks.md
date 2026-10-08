@@ -26,9 +26,9 @@ as a real slope; the same benchmark then shows the replacement is cheaper. A
 measured no-win deletes this quest. The `origin/viewer_*` benches do not
 cover the retry loop.
 
-The filtered front a peer session leaves behind, folded in here on
-2026-10-05, moved to [Idle fronts](/quest/m0/idle-fronts.md) on 2026-10-07:
-it ends once unread like any other front.
+A parked front must not retire: a front nobody holds and nobody reads ends,
+but only once it serves from a source with no route request pending
+(`Front::idle` in `rs/moq-net/src/model/front.rs`).
 
 Public API: no signature change expected. `routed_broadcast` and
 `request_broadcast` keep their contracts; only where the waiting happens

@@ -19,6 +19,15 @@ error lists and rerun.
 
 These land with the next breaking release, not the 2026-09-23 train.
 
+- **fMP4 export of Annex-B H.264 and H.265 inits from the catalog.** When the
+  catalog codec string and dimensions are enough, `moq export fmp4` writes an
+  `avc3` or `hev1` init segment before the first keyframe and leaves SPS, PPS,
+  and VPS in the samples. High AVC profiles (110, 122, 244, and the rest whose
+  chroma or bit depth the string does not carry), HEVC beyond Main and Main
+  Still Picture, and a catalog missing dimensions still wait for the SPS. A
+  returning Annex-B rendition is matched on that catalog record, so an encoder
+  that restarts with a new SPS can return. A keyframe whose parameter sets never
+  appeared in the track ends the export instead of waiting 30 seconds.
 - **moq-binary is moq-flate, and @moq/binary is @moq/flate.** The opaque
   `snapshot` and `stream` tracks moved beside the codec; the wire and the
   catalog's `binary` section are unchanged. In Rust, `moq_binary::X` is
@@ -221,6 +230,17 @@ These land with the next breaking release, not the 2026-09-23 train.
     On a moq-transport track with `TIMESCALE`, an object without a Timestamp
     is malformed. A new subscriber with no start on an untimed track starts at
     the latest group.
+- **CMAF decodes at the frame timestamp.** A fragment's earliest sample
+  presents at its moq-net frame timestamp; `tfdt` only orders the samples. In
+  TypeScript, `Container.Format.decode` and `Cmaf.decodeDataSegment` take that
+  timestamp: pass `frame.timestamp` alongside `frame.payload`, or `undefined`
+  for an untimed frame, whose samples present at `tfdt`.
+  `Cmaf.decodeTimestamp` is gone; the frame timestamp is the fragment's time.
+  moq-mux's CMAF `Wire::write` refuses a track whose timescale isn't the init's
+  `mdhd` timescale with `fmp4::Error::TimescaleMismatch`. `import::Track` and
+  `TrackStream` accept a CMAF rendition's track at that timescale; a track you
+  create yourself declares it with `track::Info::with_timescale`. Both decoders refuse a `trun` whose
+  `data_offset` doesn't start at the next sample in the `mdat`.
 
 ## Wire
 
