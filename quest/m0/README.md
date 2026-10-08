@@ -54,7 +54,6 @@ a published `@moq/watch` break.
 - [moq-transport parameters per draft](/quest/m0/ietf-params-per-draft.md) - every control message accepts exactly the parameters its draft allows, so moqx's draft-16 SUBSCRIBE_NAMESPACE with FORWARD stops failing
 - [NAMESPACE on the stream](/quest/m0/ietf-namespace-stream.md) - every draft-16+ SUBSCRIBE_NAMESPACE stream carries NAMESPACE for each match, whatever the peer's SETUP options
 - [Dialed split horizon](/quest/m0/dial-split-horizon.md) - a session moq-net dials gets a per-connection hop, so routes never echo back to the peer they came from
-- [No empty d14 prefix](/quest/m0/ietf-d14-root-prefix.md) - draft-14 never sends SUBSCRIBE_NAMESPACE with an empty prefix, and the docs say to scope a d14 link to moxygen
 - [End of Track Location](/quest/m0/ietf-end-of-track-location.md) - a relay forwards END_OF_TRACK at its upstream's Location, on the last group's stream, instead of re-sending it at the next group's object 0
 - [End of Group status](/quest/m0/ietf-end-of-group-status.md) - an End of Group status on a stream whose header already marks the group's end is accepted, so imquic's last object per group arrives
 - [Subgroup at object 0](/quest/m0/ietf-first-object-zero.md) - a draft-18 subgroup with FIRST_OBJECT clear that starts at object 0 is read whole
