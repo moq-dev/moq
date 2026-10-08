@@ -41,7 +41,7 @@ for event, err := range announced.All(ctx) {
     }
     ann, ok := event.(moq.AnnounceEventStart)
     if !ok {
-        continue // AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventLive
+        continue // AnnounceEventUpdate or AnnounceEventEnd
     }
     // Prefix stays origin-relative; Captures reports what each wildcard matched.
     fmt.Printf("captures: %v\n", ann.Announce.Captures)
@@ -62,7 +62,8 @@ for event, err := range announced.All(ctx) {
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
 broadcast, _ := client.CreateBroadcast("my-stream.hang")
 audio, _ := broadcast.PublishAudio(moq.AudioFormatOpus, opusInit)
-_ = audio.WriteFrame(moq.Frame{Payload: packet, TimestampUs: 20_000})
+pts := uint64(20_000)
+_ = audio.WriteFrame(moq.Frame{Payload: packet, TimestampUs: &pts})
 
 track := "camera"
 video, _ := broadcast.EncodeVideo(
@@ -92,9 +93,7 @@ serve. A route is a capability, not an inventory. `Announced(options)` combines
 a literal prefix with an optional relative pattern and yields an `AnnounceEvent`:
 `AnnounceEventStart`, `AnnounceEventUpdate`, or `AnnounceEventEnd`
 carrying an `Announce`, whose `Prefix` stays relative to the origin and whose
-`Captures` reports the wildcard matches, or `AnnounceEventLive` once every route
-live at subscribe time has been delivered. Break on `AnnounceEventLive` to list
-what is live and stop.
+`Captures` reports the wildcard matches.
 Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless
 `Hidden: true`.
 
@@ -182,5 +181,7 @@ available, which is not the same as zero.
 - Mirrors the vanity path resolves to: [moq-dev/moq-go](https://github.com/moq-dev/moq-go) (wrapper), [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) (raw bindings and static libraries)
 
 Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).
+
+A raw `Frame` or `Datagram` has a nil `TimestampUs` when it was read from an untimed track; see [untimed tracks](/concept/moq-lite#subscriptions). A raw track you publish is always timed.
 
 `session.Shutdown(ctx)` drains finished tracks and returns a delivery error if the one-second deadline expires. Cancelling the context aborts immediately. `client.Close()` waits for shutdown and returns the same error; `session.Cancel(code)` remains immediate. Finish or abort live tracks before shutdown. IETF media streams are not drained yet.

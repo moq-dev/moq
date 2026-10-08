@@ -41,10 +41,11 @@ won so a conflict is diagnosable rather than invisible, and treat an
 unspecified value as absent rather than as a signalled default, so a partial
 container box does not override a complete bitstream.
 
-Static display properties belong here rather than in a timed track, which is
-also where the HDR10 metadata that lives in H.26x SEI should land once it can be
-read. That is the one seam with the SEI line, and it runs in one direction:
-this quest gives display metadata a home, and does not depend on SEI work.
+Static display properties belong here rather than in a timed track. Mastering
+display and content light level stay in the H.26x bitstream; the separation
+study measured those messages and left them inline. This catalog can copy the
+static values for a renderer when one exists. It does not move them out of the
+access unit.
 
 Test each source of truth in isolation, a source that signals nothing, a
 conflict between VUI and container resolving to the bitstream, a container box

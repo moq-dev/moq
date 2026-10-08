@@ -206,9 +206,6 @@ pub enum MoqAnnounceEvent {
 	Update { announce: MoqAnnounce },
 	/// No route covers the prefix any more. Carries its last advertised route.
 	End { announce: MoqAnnounce },
-	/// Every route live at subscribe time has been delivered; what follows is
-	/// live changes. Yielded once.
-	Live,
 }
 
 impl From<moq_net::announce::Event> for MoqAnnounceEvent {
@@ -224,7 +221,6 @@ impl From<moq_net::announce::Event> for MoqAnnounceEvent {
 			Event::End(announce) => Self::End {
 				announce: announce.into(),
 			},
-			Event::Live => Self::Live,
 		}
 	}
 }
@@ -411,7 +407,7 @@ impl MoqOriginConsumer {
 	/// Calling this straight after connecting therefore races the session's announcements
 	/// and can report a live broadcast as unroutable. Await `announced_broadcast` first.
 	pub async fn request_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		let broadcast = self.inner.request_broadcast(path.as_str()).await?;
+		let broadcast = self.inner.request_broadcast(path.as_str(), None).await?;
 		Ok(Arc::new(MoqBroadcastConsumer::routed(broadcast, self.inner.clone())))
 	}
 }

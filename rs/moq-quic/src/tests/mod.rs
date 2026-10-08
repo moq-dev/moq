@@ -1,8 +1,13 @@
 use std::{
+    any::Any,
+    collections::{BTreeMap, BTreeSet},
     convert::TryInto,
     iter, mem,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use assert_matches::assert_matches;
@@ -28,6 +33,7 @@ use super::*;
 use crate::{
     Duration, Instant,
     cid_generator::{ConnectionIdGenerator, RandomConnectionIdGenerator},
+    congestion::{Controller, ControllerFactory, ControllerMetrics},
     crypto::rustls::QuicServerConfig,
     frame::FrameStruct,
     packet::{Header, InitialHeader, PacketNumber},
@@ -221,7 +227,7 @@ fn stats_include_congestion_controller_bandwidth_estimate() {
     #[derive(Clone)]
     struct TestController;
 
-    impl congestion::Controller for TestController {
+    impl Controller for TestController {
         fn on_congestion_event(
             &mut self,
             _now: Instant,
@@ -229,6 +235,8 @@ fn stats_include_congestion_controller_bandwidth_estimate() {
             _is_persistent_congestion: bool,
             _is_ecn: bool,
             _lost_bytes: u64,
+            _largest_lost: u64,
+            _space: SpaceId,
         ) {
         }
 
@@ -238,15 +246,15 @@ fn stats_include_congestion_controller_bandwidth_estimate() {
             WINDOW
         }
 
-        fn metrics(&self) -> congestion::ControllerMetrics {
-            congestion::ControllerMetrics {
+        fn metrics(&self) -> ControllerMetrics {
+            ControllerMetrics {
                 congestion_window: WINDOW,
                 bandwidth_estimate: Some(BANDWIDTH_ESTIMATE),
                 ..Default::default()
             }
         }
 
-        fn clone_box(&self) -> Box<dyn congestion::Controller> {
+        fn clone_box(&self) -> Box<dyn Controller> {
             Box::new(self.clone())
         }
 
@@ -254,24 +262,20 @@ fn stats_include_congestion_controller_bandwidth_estimate() {
             WINDOW
         }
 
-        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        fn into_any(self: Box<Self>) -> Box<dyn Any> {
             self
         }
     }
 
     struct TestControllerFactory;
 
-    impl congestion::ControllerFactory for TestControllerFactory {
-        fn build(
-            self: Arc<Self>,
-            _now: Instant,
-            _current_mtu: u16,
-        ) -> Box<dyn congestion::Controller> {
+    impl ControllerFactory for TestControllerFactory {
+        fn build(self: Arc<Self>, _now: Instant, _current_mtu: u16) -> Box<dyn Controller> {
             Box::new(TestController)
         }
     }
 
-    let mut transport = TransportConfig::default();
+    let mut transport = cubic_transport();
     transport.congestion_controller_factory(Arc::new(TestControllerFactory));
     let mut config = client_config();
     config.transport_config(Arc::new(transport));
@@ -798,7 +802,7 @@ fn full_initial_window() {
 
     // Keep `current_mtu` pinned to `INITIAL_MTU`, which the default initial window of 12000 bytes
     // is an exact multiple of, so that the window can be filled precisely.
-    let mut transport = TransportConfig::default();
+    let mut transport = cubic_transport();
     transport.mtu_discovery_config(None);
     let mut config = client_config();
     config.transport = Arc::new(transport);
@@ -1017,7 +1021,7 @@ fn test_zero_rtt_incoming_limit<F: FnOnce(&mut ServerConfig)>(configure_server: 
 
     let _guard = subscribe();
 
-    let mut transport = TransportConfig::default();
+    let mut transport = cubic_transport();
     // Assume a low-latency connection so pacing doesn't interfere with the test
     transport.initial_rtt(Duration::from_millis(10));
     let transport = Arc::new(transport);
@@ -1373,7 +1377,7 @@ fn stream_id_limit() {
     let server = ServerConfig {
         transport: Arc::new(TransportConfig {
             max_concurrent_uni_streams: 1u32.into(),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -1469,7 +1473,7 @@ fn streams_blocked() {
     let server = ServerConfig {
         transport: Arc::new(TransportConfig {
             max_concurrent_uni_streams: 1u32.into(),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -1532,7 +1536,7 @@ fn data_blocked() {
     let server = ServerConfig {
         transport: Arc::new(TransportConfig {
             receive_window: 10u32.into(),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -1610,7 +1614,7 @@ fn stream_data_blocked() {
     let server = ServerConfig {
         transport: Arc::new(TransportConfig {
             stream_receive_window: 10u32.into(),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -1732,7 +1736,7 @@ fn data_blocked_dropped_when_limit_raised() {
     let server = ServerConfig {
         transport: Arc::new(TransportConfig {
             receive_window: 10u32.into(),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -1772,7 +1776,7 @@ fn stream_data_blocked_not_sent_after_reset() {
     let server = ServerConfig {
         transport: Arc::new(TransportConfig {
             stream_receive_window: 10u32.into(),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -1806,7 +1810,7 @@ fn data_blocked_retransmit() {
     let server = ServerConfig {
         transport: Arc::new(TransportConfig {
             receive_window: 10u32.into(),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -2059,7 +2063,7 @@ fn idle_timeout() {
     let server = ServerConfig {
         transport: Arc::new(TransportConfig {
             max_idle_timeout: Some(VarInt(IDLE_TIMEOUT)),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -2334,7 +2338,7 @@ fn stream_flow_control() {
     test_flow_control(
         TransportConfig {
             stream_receive_window: 2000u32.into(),
-            ..TransportConfig::default()
+            ..cubic_transport()
         },
         2000,
     );
@@ -2345,7 +2349,7 @@ fn conn_flow_control() {
     test_flow_control(
         TransportConfig {
             receive_window: 2000u32.into(),
-            ..TransportConfig::default()
+            ..cubic_transport()
         },
         2000,
     );
@@ -2451,7 +2455,7 @@ fn keep_alive() {
         transport: Arc::new(TransportConfig {
             keep_alive_interval: Some(Duration::from_millis(IDLE_TIMEOUT / 2)),
             max_idle_timeout: Some(VarInt(IDLE_TIMEOUT)),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -2843,7 +2847,7 @@ fn tail_loss_respect_max_datagrams() {
     let _guard = subscribe();
     let client_config = {
         let mut c_config = client_config();
-        let mut t_config = TransportConfig::default();
+        let mut t_config = cubic_transport();
         //Disabling GSO, so only a single segment should be sent per iops
         t_config.enable_segmentation_offload(false);
         c_config.transport_config(t_config.into());
@@ -2913,7 +2917,7 @@ fn datagram_recv_buffer_overflow() {
         transport: Arc::new(TransportConfig {
             // Account for exactly two datagrams of metadata space
             datagram_receive_buffer_size: Some(WINDOW),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -2959,7 +2963,7 @@ fn datagram_larger_than_send_buffer_is_too_large() {
     let _guard = subscribe();
     let mut pair = Pair::default();
     let mut client_config = client_config();
-    let mut transport_config = TransportConfig::default();
+    let mut transport_config = cubic_transport();
     transport_config.datagram_send_buffer_size(1);
     client_config.transport_config(transport_config.into());
     let (client_ch, _) = pair.connect_with(client_config);
@@ -2982,7 +2986,7 @@ fn datagram_unsupported() {
     let server = ServerConfig {
         transport: Arc::new(TransportConfig {
             datagram_receive_buffer_size: None,
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -3148,7 +3152,7 @@ fn repeated_request_response() {
     let server = ServerConfig {
         transport: Arc::new(TransportConfig {
             max_concurrent_bidi_streams: 1u32.into(),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -3226,7 +3230,7 @@ fn handshake_anti_deadlock_probe() {
 #[test]
 fn server_can_send_3_inital_packets() {
     let _guard = subscribe();
-    let mut transport = TransportConfig::default();
+    let mut transport = cubic_transport();
     // Assume a low-latency connection so pacing doesn't interfere with the test
     transport.initial_rtt(Duration::from_millis(10));
     let transport = Arc::new(transport);
@@ -4293,7 +4297,7 @@ fn gso_truncation() {
 fn pad_initial_to_min_mtu() {
     let _guard = subscribe();
     for min_mtu in [INITIAL_MTU, 1280, 1333] {
-        let mut transport = TransportConfig::default();
+        let mut transport = cubic_transport();
         transport
             .initial_mtu(1452)
             .min_mtu(min_mtu)
@@ -4328,7 +4332,7 @@ fn pad_initial_to_min_mtu() {
 fn min_mtu_does_not_pad_application_data() {
     let _guard = subscribe();
     const MTU: u16 = 1333;
-    let mut transport = TransportConfig::default();
+    let mut transport = cubic_transport();
     transport.min_mtu(MTU).mtu_discovery_config(None);
     let mut config = client_config();
     config.transport_config(Arc::new(transport));
@@ -4352,7 +4356,7 @@ fn min_mtu_does_not_pad_zero_rtt_batch_tail() {
     let _guard = subscribe();
     const MTU: u16 = 1333;
     for pad_to_mtu in [false, true] {
-        let mut transport = TransportConfig::default();
+        let mut transport = cubic_transport();
         transport
             // Allow the Initial and 0-RTT data to be sent in one GSO batch without pacing delays.
             .initial_rtt(Duration::from_millis(10))
@@ -4415,7 +4419,7 @@ fn min_mtu_limits_application_loss_probes() {
     let _guard = subscribe();
     const MIN_MTU: u16 = 1280;
     const MTU: u16 = 1452;
-    let mut transport = TransportConfig::default();
+    let mut transport = cubic_transport();
     transport
         .initial_mtu(MTU)
         .min_mtu(MIN_MTU)
@@ -4450,7 +4454,7 @@ fn min_mtu_limits_application_loss_probes() {
 fn pad_server_initial_to_min_mtu() {
     let _guard = subscribe();
     const MIN_MTU: u16 = 1333;
-    let mut transport = TransportConfig::default();
+    let mut transport = cubic_transport();
     transport
         .initial_mtu(1452)
         .min_mtu(MIN_MTU)
@@ -4474,7 +4478,7 @@ fn pad_server_initial_to_min_mtu() {
 fn min_mtu_respects_peer_max_udp_payload_size() {
     let _guard = subscribe();
     const PEER_MAX: u16 = 1280;
-    let mut transport = TransportConfig::default();
+    let mut transport = cubic_transport();
     transport.min_mtu(1452).mtu_discovery_config(None);
     let mut config = server_config();
     config.transport_config(Arc::new(transport));
@@ -4506,7 +4510,7 @@ fn pad_to_mtu() {
             initial_mtu: MTU,
             mtu_discovery_config: None,
             pad_to_mtu: true,
-            ..TransportConfig::default()
+            ..cubic_transport()
         };
         c_config.transport_config(t_config.into());
         c_config
@@ -4743,7 +4747,7 @@ fn oversized_datagrams_trigger_unblock() {
     pair.mtu = INITIAL_MTU;
 
     let mut client_config = client_config();
-    let mut transport_config = TransportConfig::default();
+    let mut transport_config = cubic_transport();
     let send_buffer_size = transport_config.datagram_send_buffer_size;
     transport_config.initial_mtu(INITIAL_MTU as u16);
     client_config.transport_config(transport_config.into());
@@ -5026,7 +5030,7 @@ fn qlog_packet_lost_trigger() {
     let qlog = SharedBuffer::default();
     let mut qlog_config = QlogConfig::default();
     qlog_config.writer(Box::new(qlog.clone()));
-    let mut transport = TransportConfig::default();
+    let mut transport = cubic_transport();
     transport
         .deterministic_packet_numbers(true)
         .qlog_stream(qlog_config.into_stream());
@@ -5076,4 +5080,823 @@ fn qlog_packet_lost_trigger() {
             PacketLostTrigger::ReorderingThreshold
         ]
     );
+}
+
+#[cfg(feature = "qlog")]
+#[test]
+fn qlog_pacing_rate_is_bits_per_second() {
+    use qlog::events::EventData;
+    use qlog::reader::{Event as QlogEvent, QlogSeqReader};
+
+    const BYTES_PER_SECOND: u64 = 125_000;
+    let qlog = SharedBuffer::default();
+    let mut qlog_config = QlogConfig::default();
+    qlog_config.writer(Box::new(qlog.clone()));
+    let mut transport = cubic_transport();
+    transport
+        .congestion_controller_factory(Arc::new(PacketRecorderFactory {
+            pacing_rate: Some(BYTES_PER_SECOND),
+            ..Default::default()
+        }))
+        .qlog_stream(qlog_config.into_stream());
+    let mut config = client_config();
+    config.transport_config(Arc::new(transport));
+    let mut pair = Pair::default();
+    pair.connect_with(config);
+
+    let rates = QlogSeqReader::new(Box::new(&qlog.0.lock().unwrap()[..]))
+        .unwrap()
+        .filter_map(|event| match event {
+            QlogEvent::Qlog(event) => match event.data {
+                EventData::QuicMetricsUpdated(metrics) => metrics.pacing_rate,
+                _ => None,
+            },
+            QlogEvent::Json(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!rates.is_empty(), "no qlog pacing rate emitted");
+    assert!(rates.iter().all(|rate| *rate == BYTES_PER_SECOND * 8));
+}
+
+/// A controller whose window is effectively unbounded but which always reports a low pacing
+/// rate, so the only thing that can ever block a send is the pacer. Counts how many times the
+/// connection reports the spec's `C.is_cwnd_limited` signal.
+#[derive(Debug)]
+struct PacingOnlyController {
+    cwnd_limited_reports: Arc<AtomicU64>,
+}
+
+impl Controller for PacingOnlyController {
+    fn on_cwnd_limited(&mut self) {
+        self.cwnd_limited_reports.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn on_congestion_event(
+        &mut self,
+        _now: Instant,
+        _sent: Instant,
+        _is_persistent_congestion: bool,
+        _is_ecn: bool,
+        _lost_bytes: u64,
+        _largest_lost: u64,
+        _space: SpaceId,
+    ) {
+    }
+
+    fn on_mtu_update(&mut self, _new_mtu: u16) {}
+
+    fn window(&self) -> u64 {
+        u64::MAX / 2
+    }
+
+    fn metrics(&self) -> ControllerMetrics {
+        ControllerMetrics {
+            congestion_window: self.window(),
+            ssthresh: None,
+            // 1 Mbit/s in bytes/sec: low enough that a bulk transfer is pacing-blocked almost
+            // continuously.
+            pacing_rate: Some(125_000),
+            bandwidth_estimate: None,
+            send_quantum: Some(2 * 1200),
+        }
+    }
+
+    fn clone_box(&self) -> Box<dyn Controller> {
+        Box::new(Self {
+            cwnd_limited_reports: self.cwnd_limited_reports.clone(),
+        })
+    }
+
+    fn initial_window(&self) -> u64 {
+        u64::MAX / 2
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+}
+
+struct PacingOnlyConfig {
+    cwnd_limited_reports: Arc<AtomicU64>,
+}
+
+impl ControllerFactory for PacingOnlyConfig {
+    fn build(self: Arc<Self>, _now: Instant, _current_mtu: u16) -> Box<dyn Controller> {
+        Box::new(PacingOnlyController {
+            cwnd_limited_reports: self.cwnd_limited_reports.clone(),
+        })
+    }
+}
+
+/// `C.is_cwnd_limited` means the sender filled the congestion window. A flow held back by
+/// pacing is not cwnd-limited and a paced controller such as BBR3 is pacing-limited by
+/// design, so conflating the two pins the signal true and breaks the decisions built on it.
+#[test]
+fn cwnd_limited_is_not_reported_when_only_pacing_blocks() {
+    let _guard = subscribe();
+    let reports = Arc::new(AtomicU64::new(0));
+
+    let mut transport = cubic_transport();
+    transport.congestion_controller_factory(Arc::new(PacingOnlyConfig {
+        cwnd_limited_reports: reports.clone(),
+    }));
+    let mut client_cfg = client_config();
+    client_cfg.transport = Arc::new(transport);
+
+    let mut pair = Pair::default();
+    let (client_ch, _) = pair.connect_with(client_cfg);
+
+    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    pair.client_send(client_ch, s)
+        .write(&[42; 64 * 1024])
+        .unwrap();
+    pair.drive();
+
+    assert_eq!(
+        reports.load(Ordering::Relaxed),
+        0,
+        "connection reported cwnd-limited while only pacing was holding sends back"
+    );
+}
+
+/// A controller that never limits the window or the rate, but reports a small send quantum, so
+/// the quantum is the only thing that can bound an aggregate handed to the NIC.
+#[derive(Debug, Clone)]
+struct FixedQuantumController {
+    send_quantum: u64,
+}
+
+impl Controller for FixedQuantumController {
+    fn on_congestion_event(
+        &mut self,
+        _now: Instant,
+        _sent: Instant,
+        _is_persistent_congestion: bool,
+        _is_ecn: bool,
+        _lost_bytes: u64,
+        _largest_lost: u64,
+        _space: SpaceId,
+    ) {
+    }
+
+    fn on_mtu_update(&mut self, _new_mtu: u16) {}
+
+    fn window(&self) -> u64 {
+        u64::MAX / 2
+    }
+
+    fn metrics(&self) -> ControllerMetrics {
+        ControllerMetrics {
+            congestion_window: self.window(),
+            ssthresh: None,
+            // 1 GB/s: high enough that the pacer never delays within a single batch.
+            pacing_rate: Some(1_000_000_000),
+            bandwidth_estimate: None,
+            send_quantum: Some(self.send_quantum),
+        }
+    }
+
+    fn clone_box(&self) -> Box<dyn Controller> {
+        Box::new(self.clone())
+    }
+
+    fn initial_window(&self) -> u64 {
+        u64::MAX / 2
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+}
+
+impl ControllerFactory for FixedQuantumController {
+    fn build(self: Arc<Self>, _now: Instant, _current_mtu: u16) -> Box<dyn Controller> {
+        Box::new((*self).clone())
+    }
+}
+
+/// `C.send_quantum` bounds the size of one aggregate scheduled and transmitted together, which
+/// for a GSO batch means the number of datagrams written in a single call.
+#[test]
+fn send_quantum_bounds_the_gso_batch() {
+    /// Datagrams the reported quantum should permit per batch.
+    const QUANTUM_DATAGRAMS: usize = 3;
+    /// Datagrams the caller is willing to accept, well above the quantum.
+    const MAX_DATAGRAMS: usize = 10;
+
+    let _guard = subscribe();
+
+    let mut transport = cubic_transport();
+    transport.congestion_controller_factory(Arc::new(FixedQuantumController {
+        send_quantum: QUANTUM_DATAGRAMS as u64 * DEFAULT_MTU as u64,
+    }));
+    let mut client_cfg = client_config();
+    client_cfg.transport = Arc::new(transport);
+
+    let mut pair = Pair::default();
+    let (client_ch, _) = pair.connect_with(client_cfg);
+
+    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    pair.client_send(client_ch, s)
+        .write(&[42; 64 * 1024])
+        .unwrap();
+
+    let now = pair.time;
+    let mut buf = Vec::new();
+    let transmit = pair
+        .client_conn_mut(client_ch)
+        .poll_transmit(now, MAX_DATAGRAMS, &mut buf)
+        .expect("a stream write must produce a transmit");
+
+    let datagrams = match transmit.segment_size {
+        Some(segment_size) => buf.len().div_ceil(segment_size),
+        None => 1,
+    };
+    assert!(
+        datagrams <= QUANTUM_DATAGRAMS,
+        "batched {datagrams} datagrams, over the {QUANTUM_DATAGRAMS} the send quantum allows"
+    );
+}
+
+/// A packet as a congestion callback names it: packet numbers restart in each space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Packet {
+    space: SpaceId,
+    number: u64,
+}
+
+/// A congestion callback, as the transport reported it.
+#[derive(Debug, Clone, Copy)]
+enum PacketEvent {
+    Sent {
+        at: Instant,
+        packet: Packet,
+    },
+    Acked {
+        sent: Instant,
+        packet: Packet,
+    },
+    Lost {
+        packet: Packet,
+    },
+    Congestion {
+        sent: Instant,
+        largest: Packet,
+        ecn: bool,
+    },
+    AppLimited {
+        in_flight: u64,
+    },
+}
+
+type PacketLog = Arc<Mutex<Vec<PacketEvent>>>;
+
+/// Records the per-packet and starvation callbacks.
+#[derive(Clone)]
+struct PacketRecorder {
+    log: PacketLog,
+    window: u64,
+    pacing_rate: Option<u64>,
+}
+
+impl PacketRecorder {
+    fn push(&self, event: PacketEvent) {
+        self.log.lock().unwrap().push(event);
+    }
+}
+
+impl Controller for PacketRecorder {
+    fn on_packet_sent(&mut self, now: Instant, _bytes: u16, number: u64, space: SpaceId) {
+        let packet = Packet { space, number };
+        self.push(PacketEvent::Sent { at: now, packet });
+    }
+
+    fn on_ack(
+        &mut self,
+        _now: Instant,
+        sent: Instant,
+        _bytes: u64,
+        number: u64,
+        space: SpaceId,
+        _app_limited: bool,
+        _rtt: &RttEstimator,
+    ) {
+        let packet = Packet { space, number };
+        self.push(PacketEvent::Acked { sent, packet });
+    }
+
+    fn on_packet_lost(&mut self, _lost_bytes: u16, number: u64, space: SpaceId, _now: Instant) {
+        let packet = Packet { space, number };
+        self.push(PacketEvent::Lost { packet });
+    }
+
+    fn on_congestion_event(
+        &mut self,
+        _now: Instant,
+        sent: Instant,
+        _is_persistent_congestion: bool,
+        is_ecn: bool,
+        _lost_bytes: u64,
+        largest_lost: u64,
+        space: SpaceId,
+    ) {
+        let largest = Packet {
+            space,
+            number: largest_lost,
+        };
+        self.push(PacketEvent::Congestion {
+            sent,
+            largest,
+            ecn: is_ecn,
+        });
+    }
+
+    fn on_app_limited(&mut self, in_flight: u64) {
+        self.push(PacketEvent::AppLimited { in_flight });
+    }
+
+    fn on_mtu_update(&mut self, _new_mtu: u16) {}
+
+    fn window(&self) -> u64 {
+        self.window
+    }
+
+    fn metrics(&self) -> ControllerMetrics {
+        ControllerMetrics {
+            congestion_window: self.window,
+            pacing_rate: self.pacing_rate,
+            ..Default::default()
+        }
+    }
+
+    fn clone_box(&self) -> Box<dyn Controller> {
+        Box::new(self.clone())
+    }
+
+    fn initial_window(&self) -> u64 {
+        self.window
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+}
+
+/// Gives every controller it builds, one per path per side, a log of its own.
+#[derive(Default)]
+struct PacketRecorderFactory {
+    logs: Mutex<Vec<PacketLog>>,
+    /// The congestion window every controller reports; effectively unlimited if unset
+    window: Option<u64>,
+    /// The pacing rate in bytes/sec every controller reports; derived from the window if unset
+    pacing_rate: Option<u64>,
+}
+
+impl ControllerFactory for PacketRecorderFactory {
+    fn build(self: Arc<Self>, _now: Instant, _current_mtu: u16) -> Box<dyn Controller> {
+        let log = PacketLog::default();
+        self.logs.lock().unwrap().push(log.clone());
+        Box::new(PacketRecorder {
+            log,
+            window: self.window.unwrap_or(u64::MAX / 2),
+            pacing_rate: self.pacing_rate,
+        })
+    }
+}
+
+/// Asserts every ACK, loss, and congestion event in one controller's log names a packet that
+/// controller sent, ACKs and congestion events carry that packet's own send time, a loss-driven
+/// congestion event ends with a packet just reported lost, and no packet is resolved twice.
+/// Returns the log for scenario-specific checks.
+fn check_packet_identity(log: &PacketLog) -> Vec<PacketEvent> {
+    let events = log.lock().unwrap().clone();
+    let mut sent = BTreeMap::new();
+    let mut resolved = BTreeSet::new();
+    let mut lost = BTreeSet::new();
+    for event in &events {
+        match *event {
+            PacketEvent::Sent { at, packet } => {
+                assert!(sent.insert(packet, at).is_none(), "{packet:?} sent twice");
+            }
+            PacketEvent::Acked { sent: at, packet } => {
+                assert_eq!(
+                    sent.get(&packet),
+                    Some(&at),
+                    "{packet:?} acked with another send time"
+                );
+                assert!(resolved.insert(packet), "{packet:?} resolved twice");
+            }
+            PacketEvent::Lost { packet } => {
+                assert!(sent.contains_key(&packet), "{packet:?} lost but never sent");
+                assert!(resolved.insert(packet), "{packet:?} resolved twice");
+                lost.insert(packet);
+            }
+            PacketEvent::Congestion {
+                sent: at,
+                largest,
+                ecn,
+            } => {
+                assert_eq!(
+                    sent.get(&largest),
+                    Some(&at),
+                    "{largest:?} congested with another send time"
+                );
+                assert!(
+                    ecn || lost.contains(&largest),
+                    "{largest:?} congested but not lost"
+                );
+            }
+            PacketEvent::AppLimited { .. } => {}
+        }
+    }
+    events
+}
+
+/// Packet numbers restart in each space, so the handshake reuses Initial 0 and Handshake 0 in
+/// one coalesced datagram. Every callback the transport makes must say which one it means, through
+/// a lost server flight, ECN marks on the handshake, key discard, and application data.
+#[test]
+fn congestion_callbacks_identify_packets_across_spaces() {
+    let _guard = subscribe();
+    let factory = Arc::new(PacketRecorderFactory::default());
+    let mut transport = TransportConfig::default();
+    transport.deterministic_packet_numbers(true);
+    transport.congestion_controller_factory(factory.clone());
+    let transport = Arc::new(transport);
+
+    let mut server_cfg = server_config();
+    server_cfg.transport = transport.clone();
+    let mut pair = Pair::new(Default::default(), server_cfg);
+    let mut client_cfg = client_config();
+    client_cfg.transport = transport;
+
+    let client_ch = pair.begin_connect(client_cfg);
+    // Mark the ClientHello and the server's first flight, then drop that flight so the server
+    // retransmits and declares the originals lost.
+    pair.congestion_experienced = true;
+    pair.drive_client();
+    pair.drive_server();
+    pair.congestion_experienced = false;
+    pair.client.inbound.clear();
+    pair.drive();
+    assert!(!pair.client_conn_mut(client_ch).is_handshaking());
+
+    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    pair.client_send(client_ch, s)
+        .write(&[42; 16 * 1024])
+        .unwrap();
+    pair.drive();
+
+    let logs = factory.logs.lock().unwrap().clone();
+    assert_eq!(logs.len(), 2, "one controller per side");
+    let logs: Vec<_> = logs.iter().map(check_packet_identity).collect();
+
+    // The server coalesces its first Initial and Handshake packets, both numbered 0.
+    let coalesced = |events: &Vec<PacketEvent>| {
+        let sent_at = |space| {
+            events.iter().find_map(|e| match *e {
+                PacketEvent::Sent { at, packet } if packet == Packet { space, number: 0 } => {
+                    Some(at)
+                }
+                _ => None,
+            })
+        };
+        sent_at(SpaceId::Initial).is_some()
+            && sent_at(SpaceId::Initial) == sent_at(SpaceId::Handshake)
+    };
+    assert!(
+        logs.iter().any(coalesced),
+        "no coalesced Initial 0 and Handshake 0"
+    );
+
+    let events: Vec<_> = logs.into_iter().flatten().collect();
+    for space in [SpaceId::Initial, SpaceId::Handshake, SpaceId::Data] {
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PacketEvent::Acked { packet, .. } if packet.space == space)),
+            "no ACK reported in {space:?}"
+        );
+    }
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, PacketEvent::Lost { packet } if packet.space != SpaceId::Data)),
+        "no handshake loss reported"
+    );
+    assert!(
+        events.iter().any(
+            |e| matches!(e, PacketEvent::Congestion { largest, ecn: false, .. } if largest.space != SpaceId::Data)
+        ),
+        "no handshake loss congestion reported"
+    );
+    assert!(
+        events.iter().any(
+            |e| matches!(e, PacketEvent::Congestion { largest, ecn: true, .. } if largest.space != SpaceId::Data)
+        ),
+        "no handshake ECN congestion reported"
+    );
+}
+
+/// Connects a pair whose controllers record their callbacks, returning the client's log.
+fn recorded_pair(factory: PacketRecorderFactory) -> (Pair, ConnectionHandle, PacketLog) {
+    let factory = Arc::new(factory);
+    let mut transport = TransportConfig::default();
+    transport.congestion_controller_factory(factory.clone());
+    let transport = Arc::new(transport);
+
+    let mut server_cfg = server_config();
+    server_cfg.transport = transport.clone();
+    let mut pair = Pair::new(Default::default(), server_cfg);
+    let mut client_cfg = client_config();
+    client_cfg.transport = transport;
+    let (client_ch, _) = pair.connect_with(client_cfg);
+
+    // The client builds its controller before the server hears of it.
+    let log = factory.logs.lock().unwrap()[0].clone();
+    (pair, client_ch, log)
+}
+
+/// Counts the congestion events one controller's log reports for CE marks.
+fn ce_events(log: &PacketLog) -> usize {
+    log.lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e, PacketEvent::Congestion { ecn: true, .. }))
+        .count()
+}
+
+/// ACKs keep carrying the CE count after the marks stop, but only an increase is a congestion
+/// event, so a controller never answers the same marks twice.
+#[test]
+fn old_ce_marks_report_no_new_congestion() {
+    let _guard = subscribe();
+    let (mut pair, client_ch, log) = recorded_pair(Default::default());
+    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    pair.client_send(client_ch, s)
+        .write(&[42; 8 * 1024])
+        .unwrap();
+    pair.congestion_experienced = true;
+    pair.drive_client();
+    pair.congestion_experienced = false;
+    pair.drive();
+    let marked = ce_events(&log);
+    assert!(marked > 0);
+
+    pair.client_send(client_ch, s)
+        .write(&[42; 64 * 1024])
+        .unwrap();
+    pair.drive();
+    assert_eq!(ce_events(&log), marked);
+    assert!(pair.client_conn_mut(client_ch).using_ecn());
+}
+
+/// A path that starts bleaching the ECN field or re-marking it ECT(1) reports no CE, though the
+/// bottleneck marks every packet, and re-marking fails validation, so the sender stops using
+/// ECN. Bleaching is only caught once an ACK's count increase falls short of its ACK ranges,
+/// which may not happen within this transfer.
+#[test]
+fn invalid_ecn_feedback_reports_no_congestion() {
+    let _guard = subscribe();
+    for rewrite in [None, Some(EcnCodepoint::Ect1)] {
+        let (mut pair, client_ch, log) = recorded_pair(Default::default());
+        assert!(pair.client_conn_mut(client_ch).using_ecn());
+        pair.congestion_experienced = true;
+        pair.rewrite_ecn = Some(rewrite);
+        let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+        pair.client_send(client_ch, s)
+            .write(&[42; 16 * 1024])
+            .unwrap();
+        pair.drive();
+        assert_eq!(ce_events(&log), 0, "{rewrite:?}");
+        if rewrite.is_some() {
+            assert!(!pair.client_conn_mut(client_ch).using_ecn());
+        }
+    }
+}
+
+/// Sends with `send`, lets it deliver, then sends again after an idle gap. With nothing in
+/// flight no ACK arrives during the gap, so the empty poll that follows the last ACK must tell
+/// the controller of starvation before the resumed send.
+fn check_starvation_reported_before_resumed_send(send: impl Fn(&mut Pair, ConnectionHandle)) {
+    let _guard = subscribe();
+    let (mut pair, client_ch, log) = recorded_pair(Default::default());
+    send(&mut pair, client_ch);
+    pair.drive();
+
+    pair.time += Duration::from_millis(20);
+    let resumed_at = pair.time;
+    send(&mut pair, client_ch);
+    pair.drive_client();
+
+    let events = check_packet_identity(&log);
+    let resumed = events
+        .iter()
+        .position(|e| matches!(e, PacketEvent::Sent { at, .. } if *at >= resumed_at))
+        .expect("resumed send");
+    let last_signal = events[..resumed].iter().rfind(|e| {
+        matches!(
+            e,
+            PacketEvent::Acked { .. } | PacketEvent::AppLimited { .. }
+        )
+    });
+    assert_matches!(last_signal, Some(PacketEvent::AppLimited { in_flight: 0 }));
+}
+
+#[test]
+fn stream_starvation_reported_before_resumed_send() {
+    check_starvation_reported_before_resumed_send(|pair, ch| {
+        let s = pair.client_streams(ch).open(Dir::Uni).unwrap();
+        pair.client_send(ch, s).write(&[42; 1000]).unwrap();
+    });
+}
+
+#[test]
+fn datagram_starvation_reported_before_resumed_send() {
+    check_starvation_reported_before_resumed_send(|pair, ch| {
+        pair.client_datagrams(ch)
+            .send(Bytes::from_static(&[42; 1000]), true)
+            .unwrap();
+    });
+}
+
+/// Writes a backlog that `factory`'s controllers hold back, and checks it never reports
+/// starvation.
+fn check_blocked_backlog_is_not_app_limited(factory: PacketRecorderFactory) {
+    let _guard = subscribe();
+    let (mut pair, client_ch, log) = recorded_pair(factory);
+    // The handshake can drain the pacer, and how far depends on its random sizes. Refill it so
+    // the backlog always starts sending before it is held back.
+    pair.time += Duration::from_millis(100);
+    pair.drive();
+    let before = log.lock().unwrap().len();
+
+    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    pair.client_send(client_ch, s)
+        .write(&[42; 64 * 1024])
+        .unwrap();
+    pair.drive_client();
+
+    let events = log.lock().unwrap()[before..].to_vec();
+    assert!(events.iter().any(|e| matches!(e, PacketEvent::Sent { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, PacketEvent::AppLimited { .. })),
+        "a blocked backlog reported starvation"
+    );
+}
+
+#[test]
+fn window_blocked_backlog_is_not_app_limited() {
+    check_blocked_backlog_is_not_app_limited(PacketRecorderFactory {
+        window: Some(12_000),
+        ..Default::default()
+    });
+}
+
+#[test]
+fn pacing_blocked_backlog_is_not_app_limited() {
+    // 1 Mbit/s holds the backlog back long before the unlimited window fills.
+    check_blocked_backlog_is_not_app_limited(PacketRecorderFactory {
+        pacing_rate: Some(125_000),
+        ..Default::default()
+    });
+}
+
+/// A Retry acknowledges the client's first Initial packet without an ACK frame. That inferred
+/// ACK must name Initial 0 too, not packet 0 of another space.
+#[test]
+fn congestion_callbacks_identify_the_initial_a_retry_acks() {
+    let _guard = subscribe();
+    let factory = Arc::new(PacketRecorderFactory::default());
+    let mut transport = TransportConfig::default();
+    transport.congestion_controller_factory(factory.clone());
+    let mut client_cfg = client_config();
+    client_cfg.transport = Arc::new(transport);
+
+    let mut pair = Pair::default();
+    pair.server.handle_incoming = Box::new(validate_incoming);
+    pair.connect_with(client_cfg);
+
+    let logs = factory.logs.lock().unwrap().clone();
+    assert_eq!(logs.len(), 1, "only the client records");
+    let initial_0 = Packet {
+        space: SpaceId::Initial,
+        number: 0,
+    };
+    assert!(
+        check_packet_identity(&logs[0])
+            .iter()
+            .any(|e| matches!(e, PacketEvent::Acked { packet, .. } if *packet == initial_0)),
+        "the Retry did not ack Initial 0"
+    );
+}
+
+/// A 1 MB/s bottleneck with a 20ms RTT and a one-BDP buffer carries a BBR upload, once marking
+/// CE at half full and once only tail-dropping when full. BBR answers the marks, so the marking
+/// run holds a shorter queue without drops at the dropping run's goodput.
+#[test]
+fn bbr_marking_versus_dropping() {
+    const TOTAL_BYTES: usize = 4_000_000;
+    const BPS_LIMIT: u64 = 1_000_000;
+
+    let _guard = subscribe();
+    let run = |marks_ce| {
+        let mut transport = TransportConfig::default();
+        transport.congestion_controller_factory(Arc::new(congestion::Bbr3Config::default()));
+        let transport = Arc::new(transport);
+        let mut server_cfg = server_config();
+        server_cfg.transport = transport.clone();
+        let mut pair = Pair::new(Default::default(), server_cfg);
+        pair.latency = Duration::from_millis(10);
+        let mut client_cfg = client_config();
+        client_cfg.transport = transport;
+        let (client_ch, server_ch) = pair.connect_with(client_cfg);
+        pair.bottleneck = Some(Bottleneck::new(BPS_LIMIT, 20_000, marks_ce));
+        let time = upload(&mut pair, client_ch, server_ch, TOTAL_BYTES);
+        let goodput = TOTAL_BYTES as f64 / time.as_secs_f64();
+        let ecn = pair.client_conn_mut(client_ch).using_ecn();
+        let queue = pair.bottleneck.take().unwrap().stats;
+        info!(
+            marks_ce,
+            ecn,
+            goodput,
+            mean_delay = ?queue.mean_delay(),
+            max_delay = ?queue.max_delay,
+            dropped = queue.dropped,
+            marked = queue.marked,
+            congested = ?queue.congested,
+        );
+        assert!(ecn);
+        (goodput, queue)
+    };
+
+    let (marking_goodput, marking) = run(true);
+    let (dropping_goodput, dropping) = run(false);
+    // Measured at 4.0-4.7ms mean delay for marking and 7.7ms for dropping, 0.78-0.97s and 1.67s
+    // past the marking threshold, and about 32 drops when dropping. Without a CE response the
+    // marking run drops about 35 packets, at 7.6ms and 1.64s.
+    assert!(marking.marked > 0);
+    assert_eq!(marking.dropped, 0);
+    assert!(dropping.dropped > 0);
+    assert!(marking.mean_delay() * 4 < dropping.mean_delay() * 3);
+    assert!(marking.congested * 4 < dropping.congested * 3);
+    assert!(marking_goodput > 0.9 * dropping_goodput);
+}
+
+/// Uploads `total` bytes on a fresh stream from client to server, returning how long it took.
+fn upload(
+    pair: &mut Pair,
+    client_ch: ConnectionHandle,
+    server_ch: ConnectionHandle,
+    total: usize,
+) -> Duration {
+    const CHUNK: [u8; 10_000] = [0; 10_000];
+
+    let start = pair.time;
+    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let mut unsent = total;
+    let mut received = 0;
+    let mut server_stream = None;
+    loop {
+        while unsent > 0 {
+            match pair
+                .client_send(client_ch, s)
+                .write(&CHUNK[..unsent.min(CHUNK.len())])
+            {
+                Ok(n) => unsent -= n,
+                Err(WriteError::Blocked) => break,
+                Err(e) => panic!("{e}"),
+            }
+            if unsent == 0 {
+                pair.client_send(client_ch, s).finish().unwrap();
+            }
+        }
+
+        if server_stream.is_none() {
+            server_stream = pair.server_streams(server_ch).accept(Dir::Uni);
+        }
+        if let Some(stream) = server_stream {
+            let mut recv = pair.server_recv(server_ch, stream);
+            let mut chunks = recv.read(false).unwrap();
+            while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
+                received += chunk.bytes.len();
+            }
+            let _ = chunks.finalize();
+        }
+
+        if received == total || !pair.step() {
+            break;
+        }
+    }
+    assert_eq!(received, total);
+    pair.time.saturating_duration_since(start)
+}
+
+#[test]
+fn default_controller_is_bbr3() {
+    let factory = TransportConfig::default().congestion_controller_factory;
+    let controller = factory.build(Instant::now(), INITIAL_MTU);
+    assert!(controller.into_any().downcast::<congestion::Bbr3>().is_ok());
 }

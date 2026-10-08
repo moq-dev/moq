@@ -26,7 +26,7 @@ pub const TIMESCALE: Timescale = Timescale::MICRO;
 /// which is why every media track should start here rather than at `Info::default()`. It is a
 /// retention budget and a CEILING on what a subscriber may ask to wait for, so it never makes
 /// anyone play further behind live: a subscriber's own
-/// [`Subscription::max_age`](moq_net::track::Subscription::max_age) defaults to
+/// [`Subscription::max_delay`](moq_net::track::Subscription::max_delay) defaults to
 /// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) (skip the moment a newer group arrives).
 ///
 /// `priority` is the publisher's tie-break priority, and should come from
@@ -106,7 +106,7 @@ impl Frame {
 		// simply don't put it on the wire.
 		let info = moq_net::frame::Info {
 			size,
-			timestamp: self.timestamp,
+			timestamp: Some(self.timestamp),
 		};
 		let mut chunked = group.create_frame(info)?;
 		chunked.write(header)?;
@@ -172,7 +172,7 @@ mod test {
 
 	#[test]
 	fn track_info_uses_container_timescale() {
-		assert_eq!(track_info(crate::catalog::PRIORITY.video).timescale, TIMESCALE);
+		assert_eq!(track_info(crate::catalog::PRIORITY.video).timescale, Some(TIMESCALE));
 	}
 
 	#[test]
@@ -184,7 +184,7 @@ mod test {
 		// Retimescaling for a container that carries the source's own scale keeps it, since that
 		// is the shape that would otherwise reach for `Info::default()` and lose the retention.
 		let at = track_info(crate::catalog::PRIORITY.video).with_timescale(Timescale::MILLI);
-		assert_eq!(at.timescale, Timescale::MILLI);
+		assert_eq!(at.timescale, Some(Timescale::MILLI));
 		assert_eq!(at.max_age, Some(MAX_AGE));
 	}
 

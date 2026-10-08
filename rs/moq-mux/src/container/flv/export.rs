@@ -1,21 +1,23 @@
 //! FLV muxer.
 //!
-//! [`Export`] subscribes to a MoQ broadcast and produces a single FLV byte
-//! stream: the file header, the video/audio sequence headers, then one tag per
-//! media frame interleaved by timestamp. Legacy H.264 + AAC + MP3 are muxed as
-//! the classic CodecID tags; HEVC, AV1, VP9, Opus, AC-3, and E-AC-3 are muxed as
-//! the enhanced-RTMP (E-RTMP) FourCC payloads. Frames flow through [`ExportSource`],
-//! which normalizes H.264/H.265 to length-prefixed NALU plus a resolved
-//! avcC/hvcC (parsing inline avc3/hev1 parameter sets when needed) and hands the
-//! other codecs through unchanged.
+//! [`Export`] reads a catalog stream and the broadcast it describes, and produces
+//! a single FLV byte stream: the file header, the video/audio sequence headers,
+//! then one tag per media frame interleaved by timestamp. Legacy H.264 + AAC + MP3
+//! are muxed as the classic CodecID tags; HEVC, AV1, VP9, Opus, AC-3, and E-AC-3
+//! are muxed as the enhanced-RTMP (E-RTMP) FourCC payloads. Frames flow through
+//! [`ExportSource`], which normalizes H.264/H.265 to length-prefixed NALU plus a
+//! resolved avcC/hvcC (parsing inline avc3/hev1 parameter sets when needed) and
+//! hands the other codecs through unchanged.
 //!
-//! By default FLV carries a single video and a single audio stream, so only the
-//! best video rendition (see [`Video::ranked`](hang::catalog::Video::ranked)) and
-//! the first audio rendition are muxed and the rest are ignored. The video pick
-//! follows the catalog until the stream header goes out, then stays. With
-//! [`with_multitrack`](Export::with_multitrack) every rendition is muxed instead,
-//! each as an enhanced-RTMP multitrack track addressed by its own track id (use
-//! this only for a player that advertised the `Multitrack` capability).
+//! Narrow renditions with [`Stream::select`](crate::catalog::Stream::select)
+//! before construction. By default FLV carries a single video and a single audio
+//! stream, so only the best video rendition (see [`Video::ranked`](hang::catalog::Video::ranked))
+//! and the first audio rendition the stream yields are muxed and the rest are
+//! ignored. The video pick follows the catalog until the stream header goes out,
+//! then stays. With [`with_multitrack`](Export::with_multitrack) every rendition
+//! the stream yields is muxed instead, each as an enhanced-RTMP multitrack track
+//! addressed by its own track id (use this only for a player that advertised the
+//! `Multitrack` capability).
 
 use std::task::Poll;
 
@@ -29,7 +31,7 @@ use super::{
 	FRAME_TYPE_KEY, MP3_AUDIO_TAG_HEADER, MULTITRACK_ONE_TRACK, TAG_AUDIO, TAG_HEADER_LEN, TAG_VIDEO, VIDEO_CODEC_AVC,
 	VIDEO_EX_HEADER, VIDEO_PACKET_CODED_FRAMES, VIDEO_PACKET_MULTITRACK, VIDEO_PACKET_SEQUENCE_START,
 };
-use crate::catalog::{CatalogFormat, Stream};
+use crate::catalog::Stream;
 use crate::container::{ExportSource, Frame};
 
 /// Which FLV payload shape a bound track is muxed as: a legacy CodecID
@@ -88,11 +90,12 @@ impl Flavor {
 	}
 }
 
-/// Subscribe to a broadcast and produce an FLV byte stream.
+/// Produce an FLV byte stream from a broadcast, following a catalog stream.
 ///
 /// Use [`next`](Self::next) to pull byte chunks. The first chunk is the FLV file
 /// header followed by the AVC/AAC sequence headers; each subsequent chunk is the
-/// tag for one media frame. Returns `None` when the broadcast ends.
+/// tag for one media frame. Returns `None` when the broadcast ends. Narrow the
+/// renditions first with [`Stream::select`](crate::catalog::Stream::select).
 ///
 /// ## Avc3 sources
 ///
@@ -102,15 +105,13 @@ impl Flavor {
 /// header is deferred until that codec config is available (typically the first
 /// keyframe). Only Legacy and LOC container tracks (raw codec payloads) are
 /// supported; CMAF tracks are rejected.
-pub struct Export {
+pub struct Export<S: Stream> {
 	source: crate::Source,
-	catalog: Option<crate::catalog::Consumer>,
-	max_age: std::time::Duration,
+	catalog: Option<S>,
+	max_delay: std::time::Duration,
 	/// Emit every rendition as an enhanced-RTMP multitrack track, rather than only
 	/// the best video + first audio rendition.
 	multitrack: bool,
-	/// Only mux the renditions this selects, or every rendition when unset.
-	select: Option<crate::select::Broadcast>,
 
 	video: Vec<FlvTrack>,
 	audio: Vec<FlvTrack>,
@@ -166,39 +167,32 @@ impl FlvTrack {
 	}
 }
 
-impl Export {
-	/// Subscribe to `source` and produce FLV byte chunks, using the default
-	/// catalog format ([`CatalogFormat::Hang`]).
-	pub async fn new(source: crate::Source) -> Result<Self, crate::Error> {
-		Self::with_catalog_format(source, CatalogFormat::default()).await
-	}
-
-	/// Subscribe to `source` and produce FLV byte chunks, selecting an explicit
-	/// `catalog_format` for track discovery.
-	pub async fn with_catalog_format(
-		source: crate::Source,
-		catalog_format: CatalogFormat,
-	) -> Result<Self, crate::Error> {
-		let catalog = source.catalog(catalog_format).await?;
-		Ok(Self {
+impl<S: Stream> Export<S> {
+	/// Subscribe to `source` and produce FLV byte chunks, driving track
+	/// subscription from `catalog`.
+	///
+	/// `catalog` is any [`Stream`] of catalog snapshots, typically a
+	/// [`catalog::Consumer`](crate::catalog::Consumer) directly, or narrowed to
+	/// one rendition set via [`Stream::select`](crate::catalog::Stream::select).
+	pub fn new(source: crate::Source, catalog: S) -> Self {
+		Self {
 			source,
 			catalog: Some(catalog),
-			max_age: std::time::Duration::ZERO,
+			max_delay: std::time::Duration::ZERO,
 			multitrack: false,
-			select: None,
 			video: Vec::new(),
 			audio: Vec::new(),
 			header_emitted: false,
-		})
+		}
 	}
 
-	/// Set the max age for each per-track source.
+	/// Set the max delay for each per-track source.
 	///
 	/// See [`Consumer`](crate::container::Consumer) for the per-track skip behavior.
 	/// Defaults to
 	/// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) (skip aggressively).
-	pub fn with_max_age(mut self, max_age: std::time::Duration) -> Self {
-		self.max_age = max_age;
+	pub fn with_max_delay(mut self, max_delay: std::time::Duration) -> Self {
+		self.max_delay = max_delay;
 		self
 	}
 
@@ -211,15 +205,6 @@ impl Export {
 	/// parse the multitrack framing. Defaults to off.
 	pub fn with_multitrack(mut self, multitrack: bool) -> Self {
 		self.multitrack = multitrack;
-		self
-	}
-
-	/// Only mux the renditions `select` keeps, such as the codecs a player can decode.
-	///
-	/// A single-track stream then carries the best video rendition among them.
-	/// Defaults to every rendition.
-	pub fn with_select(mut self, select: crate::select::Broadcast) -> Self {
-		self.select = Some(select);
 		self
 	}
 
@@ -318,9 +303,6 @@ impl Export {
 
 	fn update_catalog(&mut self, mut catalog: Catalog) -> anyhow::Result<()> {
 		self.source.retain_valid_media(&mut catalog);
-		if let Some(select) = &self.select {
-			select.retain(&mut catalog);
-		}
 
 		// A single-track FLV stream binds one rendition of each kind; multitrack
 		// binds them all.
@@ -385,7 +367,7 @@ impl Export {
 				(VideoCodec::AV1(av1), None) => Some(Bytes::copy_from_slice(&av1c_bytes(av1))),
 				_ => None,
 			};
-			let Some(source) = ExportSource::for_video(&self.source, name, config, self.max_age)? else {
+			let Some(source) = ExportSource::for_video(&self.source, name, config, self.max_delay)? else {
 				continue;
 			};
 			let track_id = u8::try_from(self.video.len()).context("too many FLV video tracks")?;
@@ -415,7 +397,7 @@ impl Export {
 			}
 			let flavor = audio_flavor(config)?;
 			ensure_legacy(&config.container, "audio", name)?;
-			let Some(source) = ExportSource::for_audio(&self.source, name, config, self.max_age)? else {
+			let Some(source) = ExportSource::for_audio(&self.source, name, config, self.max_delay)? else {
 				continue;
 			};
 			let track_id = u8::try_from(self.audio.len()).context("too many FLV audio tracks")?;

@@ -16,10 +16,17 @@ configure and observe audio playout delay.
 - Update `doc/lib/{py,swift,kt,go,dart}` in the same PR.
 - Test configuration and observed delay in every wrapper that has tests.
 
+Decided in the 2026-10-06 audit: the native decode delay API is on `main`
+(#4162, `rs/moq-audio/src/decode/consumer.rs`), so this no longer waits on
+the m0 jitter-target line, whose remaining Watch proof bindings do not use.
+It waits on Codecs instead, so each wrapper adds delay to the reshaped audio
+decoder rather than to `BroadcastConsumer.decode_audio`, which Codecs removes.
+
 ## Required
 
-- [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - lands the native decode delay API on `main`; #3967 merged into the questline only
+- [Codecs](/quest/m1/ffi-shape/codec.md) - the reshaped audio decoder each wrapper adds delay to
 
 ## Related
 
 - [FFI shape](/quest/m1/ffi-shape/README.md) - reshapes the binding namespaces
+- [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - landed the native decode delay API this exposes

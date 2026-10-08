@@ -43,17 +43,18 @@ Decided in planning (2026-10-03):
   and no receiver invents one.
 - **lite-07 only.** It is still WIP (`moq-lite-07-wip`), so the field is added
   without negotiation. Older versions keep the gap rule.
-- **API: `track::Subscriber::live().await`** resolves once the route answered, to
-  `Live { start, latest: Option<Position>, time: Option<Timestamp> }`: the resolved
-  start, the largest group/frame, and the live media time. Mirrored in js/net.
+- **API: `track::Subscriber::answered().await`** resolves once the route
+  answered, to `LiveEdge { start, latest: Option<Position>, time:
+  Option<Timestamp> }`: the resolved start, the largest group/frame, and the
+  live media time. Mirrored in js/net. Not `live`/`Live`: #5029's lite-07
+  `live` flag already takes that name.
 - **Independent of [Subscribe ranges](/quest/m1/subscribe-ranges/README.md)**,
   which rewrites the same messages: whichever lands second rebases.
 - `js/watch/src/sync.ts` stays as it is: its latency range (from #1620) is
   intended, and only the publisher's estimate uses the least-delayed reference.
-- No new docs page: the lite draft and the max-age paragraph in
+- No new docs page: the lite draft and the max delay paragraph in
   `doc/concept/moq-lite.md` are updated inline.
 
 ## Related
 
-- [Untimed model](/quest/m1/untimed-model.md) - absent timestamps end to end; only real pairs feed the estimate
 - [Shared clock](/quest/m1/shared-clock.md) - the hang catalog's `{wall, timescale}` anchor sits a layer up; this stays media-agnostic

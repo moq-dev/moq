@@ -6,7 +6,7 @@ use anyhow::Context;
 use mpeg2ts::ts::{Pid, TsPacket};
 
 use super::import::{Framer, PatReader};
-use super::{Ext, Import, Stats, psi};
+use super::{Ext, Import, psi, stats};
 use crate::catalog;
 
 /// Imports every program the first PAT lists, each as its own broadcast on `origin`, with its
@@ -75,8 +75,10 @@ impl Programs {
 			// Seeded with the scanner's PAT rather than replaying its packets, so every section
 			// reaches the importer and nothing the scanner counted is counted again.
 			import.handle_pat(&pat)?;
+			// Each program is its own publisher instance for this run, so a restart
+			// replaces it rather than resuming into it.
 			broadcast
-				.announce(Default::default())
+				.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
 				.with_context(|| format!("failed to announce broadcast {name}"))?;
 			self.programs.push(Program {
 				_broadcast: broadcast,
@@ -100,8 +102,8 @@ impl Programs {
 	/// Every importer reads the same PAT, and programs sharing a PMT PID read the same PMT
 	/// sections, so a dropped section counts once however many read it. Every importer also
 	/// grades every packet of the multiplex, so each TR 101 290 error counts once too.
-	pub fn stats(&self) -> Stats {
-		let mut stats = Stats::default();
+	pub fn stats(&self) -> stats::Snapshot {
+		let mut stats = stats::Snapshot::default();
 		let mut crc_errors = BTreeMap::<u16, u64>::new();
 		let mut errors = super::health::Errors::default();
 		for program in &self.programs {
@@ -288,6 +290,24 @@ mod test {
 		assert_eq!(programs.programs.len(), 2);
 		assert_eq!(renditions(&origin, "event/1.hang").await, 1);
 		assert_eq!(renditions(&origin, "event/2.hang").await, 1);
+	}
+
+	/// Each program announces as its own publisher instance for the run, so a restart
+	/// replaces it rather than resuming into it.
+	#[test]
+	fn every_program_mints_its_own_epoch() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		programs.decode(&two_section_pat()).unwrap();
+		programs.finish().unwrap();
+		let epochs: Vec<_> = programs
+			.programs
+			.iter()
+			.map(|program| program._broadcast.route().and_then(|route| route.epoch))
+			.collect();
+		assert_eq!(epochs.len(), 2);
+		assert!(epochs.iter().all(Option::is_some), "every program names its instance");
+		assert_ne!(epochs[0], epochs[1]);
 	}
 
 	/// A partial PAT holds only itself, not the multiplex that follows it.

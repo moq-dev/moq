@@ -31,7 +31,7 @@ each with a deterministic test:
   not the idle snapshot, since the cancel resets the group in flight
   (`an_answer_past_a_reset_group_skips_the_cache`).
 
-What remains (1 of 30 runs after both fixes): the latecomer's max age rises
+What remains (1 of 30 runs after both fixes): the latecomer's max delay rises
 to its playout delay (about 145ms) right after it subscribes. When the
 pre-gap GOP was short, the GOP before it still reaches within that budget of
 the marker, so the relay hands it over by design. The player then presents

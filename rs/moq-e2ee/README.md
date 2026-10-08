@@ -23,13 +23,14 @@ authenticated channel. Every publisher instance mints a shared `moq_net::Epoch` 
 ```rust
 let credential = Credential::new(credential::Config { context, kid, secret })?;
 let generation = credential.generation(moq_net::Epoch::mint());
-let path = credential.path("meeting.hang")?.join_epoch(Some(generation.epoch()));
+let path = credential.path("meeting.hang")?;
 let name = generation.name("video")?;
 let producer = generation.produce(broadcast.create_track(name.as_str(), None)?)?;
+broadcast.announce(Route::default().with_epoch(generation.epoch().clone()))?;
 ```
 
-A subscriber discovers instances under `credential.path(semantic)`, takes the greatest
-epoch from the last `@<uuidv7>` path segment using `Path::split_epoch`, binds the same generation, and calls
+A subscriber discovers the broadcast at `credential.path(semantic)`, takes the epoch from the
+announced `Route::epoch` (or from the application's channel on a wire older than lite-07), binds the same generation, and calls
 `generation.consume(subscriber)` on a track whose name it derived or read from the
 decrypted catalog. Nothing survives a publisher instance: a restart mints a new epoch.
 

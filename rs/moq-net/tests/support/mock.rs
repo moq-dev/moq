@@ -22,7 +22,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use web_transport_trait::poll;
+use moq_net::transport::poll;
 
 // ── Error ───────────────────────────────────────────────────────────
 
@@ -65,7 +65,7 @@ impl std::fmt::Display for MockError {
 
 impl std::error::Error for MockError {}
 
-impl web_transport_trait::Error for MockError {
+impl moq_net::transport::Error for MockError {
 	fn session_error(&self) -> Option<(u32, String)> {
 		self.session.map(|c| (c, self.reason.clone()))
 	}
@@ -459,7 +459,7 @@ struct SessionSide {
 
 /// An in-memory mock WebTransport session.
 ///
-/// Implements [`web_transport_trait::poll::Session`]. Created in pairs via
+/// Implements [`moq_net::transport::poll::Session`]. Created in pairs via
 /// [`create_mock_session_pair`]. Streams opened on one side are delivered to
 /// the peer's accept methods deterministically via unbounded queues.
 #[derive(Clone)]
@@ -587,8 +587,8 @@ impl poll::Session for MockSession {
 		Poll::Ready(MockError::session(code, reason))
 	}
 
-	fn stats(&self) -> impl web_transport_trait::Stats {
-		web_transport_trait::StatsUnavailable
+	fn stats(&self) -> impl moq_net::transport::Stats {
+		moq_net::transport::StatsUnavailable
 	}
 }
 
@@ -701,7 +701,7 @@ impl MockSession {
 ///
 /// Streams opened on `client` appear in `server.accept_*()` and vice versa.
 /// Both sides report the given `protocol` from
-/// [`web_transport_trait::poll::Session::protocol`], matching ALPN negotiation
+/// [`moq_net::transport::poll::Session::protocol`], matching ALPN negotiation
 /// behavior.
 pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession, MockSession) {
 	let conn = Arc::new(ConnectionState::default());

@@ -202,20 +202,26 @@ function configured(): Promise<AudioEncoderConfig> {
 	});
 }
 
-// An Encoder wired to a fake capture feed, recording each written frame as [timestamp, payload bytes].
-async function setup(baseline = new Baseline(), codec?: Codec) {
+// An Encoder wired to a fake capture feed, recording each written frame as [timestamp, payload bytes]
+// and how many frames each group carries.
+async function setup(baseline = new Baseline(), codec?: Codec, groupDuration?: Time.Milli) {
 	const configuring = configured();
 
-	const track = new Moq.Track.Producer("audio").accept();
+	const track = new Moq.Track.Producer("audio").accept({ timescale: Moq.Time.Timescale.MILLI });
 	const written: [number, number][] = [];
+	const groups: number[] = [];
+	const appended: ReturnType<typeof track.appendGroup>[] = [];
 	const writes = { onWrite: undefined as (() => void) | undefined };
 	const appendGroup = track.appendGroup.bind(track);
 	track.appendGroup = () => {
 		const group = appendGroup();
+		appended.push(group);
+		const index = groups.push(0) - 1;
 		const writeFrame = group.writeFrame.bind(group);
 		group.writeFrame = (frame) => {
 			const [timestamp, payload] = Moq.Varint.decode(frame.payload);
 			written.push([timestamp, payload.byteLength]);
+			groups[index]++;
 			writeFrame(frame);
 			writes.onWrite?.();
 		};
@@ -245,6 +251,7 @@ async function setup(baseline = new Baseline(), codec?: Codec) {
 		capture: capture as never,
 		enabled,
 		codec,
+		groupDuration,
 	});
 
 	const config = await configuring;
@@ -253,10 +260,13 @@ async function setup(baseline = new Baseline(), codec?: Codec) {
 		config,
 		encoder,
 		enabled,
+		capture,
 		track,
 		rendition,
 		feed,
 		written,
+		groups,
+		appended,
 		writes,
 		[Symbol.dispose]() {
 			encoder.close();
@@ -342,6 +352,35 @@ test("disabling with a subscriber attached marks where submitted audio ends", as
 	]);
 });
 
+// A muted rendition stays in the catalog, so a viewer deselects it with a one-field delta instead of
+// seeing it removed and re-added.
+test("disabling keeps the rendition in the catalog with enabled: false", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup();
+	const { encoder, enabled, capture, rendition } = env;
+
+	const before = encoder.out.catalog.peek();
+	expect(before).toBeDefined();
+	expect(before?.enabled).toBeUndefined();
+
+	enabled.set(false);
+	await settle();
+	expect(encoder.out.catalog.peek()).toEqual({ ...before, enabled: false } as never);
+	expect(rendition.config.peek()).toEqual({ ...before, enabled: false } as never);
+	expect(encoder.out.active.peek()).toBe(false);
+
+	// Muting released the microphone, so re-enabling waits on its format without dropping the rendition.
+	const format = capture.out.format.peek();
+	capture.out.format.set(undefined as never);
+	enabled.set(true);
+	await settle();
+	expect(encoder.out.catalog.peek()).toEqual({ ...before, enabled: false } as never);
+
+	capture.out.format.set(format);
+	await settle();
+	expect(encoder.out.catalog.peek()).toEqual(before);
+});
+
 // Closing tears down the subscription and the pipeline, which both end the epoch; cleanups run
 // last-in, first-out, so the marker lands once and before the rendition closes the track.
 test("closing with a subscriber attached marks the end once before the track closes", async () => {
@@ -385,10 +424,54 @@ test("a push completing several frames keeps the encoder running", async () => {
 	]);
 });
 
-test("passes an explicit Opus DTX request to the encoder", async () => {
+// The first frame at the minimum opens the next group. A timeline break closes the group early,
+// so the first frame after it opens a fresh one.
+test("a group duration packs frames until the minimum and restarts after a break", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	using env = await setup(new Baseline(), { mime: "opus", usedtx: true });
-	expect(env.config.opus?.usedtx).toBe(true);
+	using env = await setup(new Baseline(), undefined, Time.Milli(100));
+	const { enabled, feed, written, groups, appended, writes } = env;
+
+	let index = 0;
+	const push = async (count: number) => {
+		for (let i = 0; i < count; i++, index++) {
+			await feed.push({ timestamp: Time.Micro(20_000 + index * 20_000), channels: [new Float32Array(960)] });
+		}
+		await feed.drain();
+	};
+
+	await push(7); // five written, two held
+	expect(groups).toEqual([5]);
+	expect(appended[0].closed.peek()).toBeUndefined();
+	await push(2); // the next frame opens a new group and closes the first
+	expect(groups).toEqual([5, 2]);
+	expect(appended[0].closed.peek()).toBeNull();
+
+	const marked = new Promise<void>((resolve) => {
+		writes.onWrite = resolve;
+	});
+	enabled.set(false);
+	await marked;
+	writes.onWrite = undefined;
+
+	const resumed = configured();
+	enabled.set(true);
+	await resumed;
+	await push(4); // a fresh AudioEncoder, so two written and two held
+
+	expect(written.map(([timestamp]) => timestamp)).toEqual([
+		20_000, 40_000, 60_000, 80_000, 100_000, 120_000, 140_000, 200_000, 200_000, 220_000,
+	]);
+	// 120ms opens the next group, closing the five frames at 20-100ms. The break ends the
+	// 120-140ms group early, so resumed frames start a fresh group after the marker.
+	expect(groups).toEqual([5, 2, 1, 2]);
+});
+
+// Chromium stamps Opus output by counting the samples emitted, so every frame DTX suppresses pulls
+// later audio earlier. A plain-JS caller passing the old knob must not reach the encoder.
+test("never enables Opus DTX", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup(new Baseline(), { mime: "opus", usedtx: true } as Codec);
+	expect(env.config.opus?.usedtx).toBeUndefined();
 });
 
 // Another rendition on the same broadcast flushing with far less lateness leaves this one trailing
