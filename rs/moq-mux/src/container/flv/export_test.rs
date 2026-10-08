@@ -964,10 +964,11 @@ async fn export_rebinds_to_a_better_audio_rendition_before_the_header() {
 		catalog: &mut crate::catalog::Producer,
 		name: &str,
 		asc: &'static [u8],
+		sample_rate: u32,
 		bitrate: u64,
 	) -> Producer<crate::catalog::hang::Container> {
 		let track = producer.create_track(name, None).unwrap();
-		let mut config = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		let mut config = AudioConfig::new(AAC { profile: 2 }, sample_rate, 2);
 		config.container = Container::Legacy;
 		config.bitrate = Some(bitrate);
 		config.description = Some(Bytes::from_static(asc));
@@ -984,7 +985,7 @@ async fn export_rebinds_to_a_better_audio_rendition_before_the_header() {
 	}
 
 	// The weak rendition sorts first by name, so only the ranking can pick the strong one.
-	let _weak = audio(&mut producer, &mut catalog, "a", &WEAK_ASC, 64_000);
+	let _weak = audio(&mut producer, &mut catalog, "a", &WEAK_ASC, 48_000, 64_000);
 
 	// Annex-B video (no description) keeps the header pending until its keyframe.
 	let video = producer.create_track(producer.unique_name(".avc3"), None).unwrap();
@@ -1015,7 +1016,7 @@ async fn export_rebinds_to_a_better_audio_rendition_before_the_header() {
 	);
 
 	// The better audio rendition shows up before any header went out, then video resolves.
-	let _strong = audio(&mut producer, &mut catalog, "z", &STRONG_ASC, 128_000);
+	let _strong = audio(&mut producer, &mut catalog, "z", &STRONG_ASC, 44_100, 128_000);
 	let description = avcc_level(0x1e);
 	let large = producer.create_track(producer.unique_name(".avc1"), None).unwrap();
 	let mut config = VideoConfig::new(H264 {
