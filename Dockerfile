@@ -1,17 +1,16 @@
 # The final stage is scratch: the package's nix closure and a symlink to its
-# binary. There is no shell. The nixos/nix final stage used to ship the nix
-# runtime in every image.
+# binary. There is no shell or nix runtime.
 #
 # Building the image with Nix itself is a poor fit here: cross-compiling those
-# images is painful (especially from macOS), and `docker build .` should work
-# without a local Nix install.
+# images is painful (especially from macOS), and
+# `docker build --build-arg package=moq-relay .` should work without a local
+# Nix install.
 FROM docker.io/nixos/nix:latest AS builder
 ENV NIX_CONFIG="experimental-features = nix-command flakes"
 
 WORKDIR /build
 
-# Required. With no package there is nothing to run. The old default was
-# `/bin/sh`, which only made sense when the final stage included a shell.
+# Required: the flake package to publish, such as moq-relay or moq.
 ARG package
 
 RUN test -n "${package}" || { printf '%s\n' "error: the package build-arg is required" >&2; exit 1; }
