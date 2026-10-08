@@ -92,7 +92,7 @@ mod test {
 	/// A track whose timestamp conversion rejects every frame after its group is published.
 	fn rejecting_track() -> moq_net::track::Producer {
 		let mut info = moq_net::track::Info::default();
-		info.timescale = moq_net::Timescale::new((1u64 << 62) - 1).unwrap();
+		info.timescale = Some(moq_net::Timescale::new((1u64 << 62) - 1).unwrap());
 
 		moq_net::broadcast::Info::new()
 			.produce()

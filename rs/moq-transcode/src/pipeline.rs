@@ -18,12 +18,12 @@ use std::collections::HashMap;
 
 use hang::catalog::{Video, VideoConfig};
 
-/// Picture identity for ladder follow: a stall bit flipping is not a source change.
+/// Picture identity for ladder follow: enabling or disabling a rendition is not a source change.
 fn same_picture(a: &VideoConfig, b: &VideoConfig) -> bool {
 	let mut a = a.clone();
 	let mut b = b.clone();
-	a.stalled = None;
-	b.stalled = None;
+	a.enabled = true;
+	b.enabled = true;
 	a == b
 }
 
@@ -135,7 +135,7 @@ impl Pipeline {
 			};
 			published.push(Published { rung, entry });
 		}
-		catalog::inherit_stalled(&mut published, source);
+		catalog::inherit_enabled(&mut published, source);
 		Ok(published)
 	}
 
@@ -179,7 +179,7 @@ impl Pipeline {
 			}
 		};
 		if name == self.name && same_picture(&rendition, &self.rendition) {
-			catalog::inherit_stalled(&mut self.rungs, &rendition);
+			catalog::inherit_enabled(&mut self.rungs, &rendition);
 			self.rendition = rendition;
 			return Ok(());
 		}
